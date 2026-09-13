@@ -1,0 +1,58 @@
+{
+  "date": "2026-09-13T11:21:25.414Z",
+  "cfg": {
+    "bins": 4096,
+    "fps": 30,
+    "dtype": "u8",
+    "persist": "cpu",
+    "secs": 60,
+    "mode": "headed",
+    "w": 1280,
+    "h": 800,
+    "throttle": 1,
+    "finish": "0",
+    "port": 18080,
+    "tag": ""
+  },
+  "url": "http://127.0.0.1:18080/?bins=4096&fps=30&dtype=u8&persist=cpu&finish=0",
+  "wallSecs": 60,
+  "browserCpuPct": 12.8,
+  "serverCpuPct": 0.2,
+  "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Ultra, Unspecified Version)",
+  "maxTex": 16384,
+  "texW": 4096,
+  "floatRT": true,
+  "canvas": [
+    1280,
+    800
+  ],
+  "rafFps": 59.98,
+  "frameMs": {
+    "p50": 16.7,
+    "p99": 18.5,
+    "max": 18.8
+  },
+  "longFrames33": 0,
+  "dataRowsPerSec": 30,
+  "rx": 1803,
+  "rendered": 1802,
+  "seqGaps": 0,
+  "clientDropped": 0,
+  "rxMBps": 0.124,
+  "latTsMs": {
+    "p50": 9,
+    "p99": 17.4
+  },
+  "latRxMs": {
+    "p50": 9,
+    "p99": 17.5
+  },
+  "workMs": {
+    "p50": 0.7,
+    "p99": 3
+  },
+  "ingestMs": {
+    "p50": 0,
+    "p99": 0.1
+  }
+}
