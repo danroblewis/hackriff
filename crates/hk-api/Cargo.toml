@@ -9,3 +9,4 @@ publish.workspace = true
 [dependencies]
 hk-core.workspace = true
 hk-model.workspace = true
+hk-stream.workspace = true

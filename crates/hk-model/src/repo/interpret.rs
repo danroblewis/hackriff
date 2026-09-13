@@ -18,7 +18,7 @@ use crate::ids::{
     AnnotationId, AnomalyId, BitstreamId, DecodeId, DemodulationId, ExplanationId, ExternalEventId,
 };
 use crate::recording::{Annotation, AnnotationTarget};
-use crate::region::Region;
+use crate::region::{Region, TimeRange};
 use crate::time::Timestamp;
 
 /// Region query for anomaly and explanation (same shape). Parameters: f_lo min, query hi,
@@ -304,6 +304,34 @@ impl Repository {
             "SELECT body FROM external_event WHERE event_id = ?1",
             blob(id),
             "external event",
+        )
+    }
+
+    /// Cached external events whose time span overlaps `window` (closed intervals), optionally
+    /// from one `source`, ordered by `(t_start, source, native_id)` so correlation over a frozen
+    /// cache is deterministic (T-020). Geography and frequency extent are not columns (`Geo` is a
+    /// tagged union), so callers filter those on the returned events.
+    ///
+    /// The scan is bounded above by `t_start <= window.end` only; the cache is small and
+    /// time-bounded (docs/07 §2.17). A duration bound like `region_extent` can come later.
+    pub fn external_events_overlapping(
+        &self,
+        window: &TimeRange,
+        source: Option<&str>,
+    ) -> Result<Vec<ExternalEvent>, RepoError> {
+        if window.end < window.start {
+            return Err(RepoError::Invalid("event query window is inverted".into()));
+        }
+        bodies(
+            &self.conn,
+            "SELECT body FROM external_event \
+             WHERE t_start <= ?1 AND t_end >= ?2 AND (?3 IS NULL OR source = ?3) \
+             ORDER BY t_start, source, native_id",
+            params![
+                window.end.as_unix_nanos(),
+                window.start.as_unix_nanos(),
+                source
+            ],
         )
     }
 

@@ -22,6 +22,8 @@ opt-level = 3
 [workspace.dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
+# T-020: H3 cell → boundary for the gpsjam adapter. No default features (drops ahash).
+h3o = { version = "0.11", default-features = false }
 libc = "0.2"
 num-complex = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -40,5 +42,6 @@ hk-estimate = { path = "crates/hk-estimate" }
 hk-demod = { path = "crates/hk-demod" }
 hk-store = { path = "crates/hk-store" }
 hk-context = { path = "crates/hk-context" }
+hk-stream = { path = "crates/hk-stream" }
 hk-api = { path = "crates/hk-api" }
 hk-plugins = { path = "crates/hk-plugins" }
