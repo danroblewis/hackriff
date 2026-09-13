@@ -800,7 +800,7 @@ tasks:
     milestone: M0b
     title: Mock SDR device replaying SigMF behind the device interface (realistic retune/gain/rate/overrun behaviour)
     status: done
-    commit: "f6a47d4 (merge pending after T-050 verification)"
+    commit: "f6a47d4 + merges 8d3bc5b (T-050), e7a5bec (2162fd1); own-target verification: lint, 137 Rust test binaries, py 48, ui, acceptance 16/16 green except known retune_legal (T-063)"
     result: "hk_core::source::conformance::run (20 checks) passed by the mock on synthetic ci8/cf32 and the FM fixture (HackRF case #[ignore], feature hackrf). Mock (source/mock/): HackRF One caps, receive-only; retune shifts/filters/resamples with absolute frequencies preserved (bit-exact at recorded tuning); coverage = recording baseband-filter band, outside -> noise at measured floor flagged in provenance antenna_port (mock:recording / +noise / noise) and MockStats; gain scales from recorded gains with int8 clip + sticky overload; control change skips one block (gap + discard); injectable overruns; late real-time reader drops whole blocks; pausable only unpaced; Stop/Loop; bias tee flag; sweep unsupported; legal class from tuned window keeping stricter declared class. CLI hk serve --device mock:<meta>, hk run/hackriffd --source mock:<meta>. tests/e2e/tests/mock_device.rs: stripped FM fixture through mock -> station detected, FM broadcast in top-k."
     limits: "gain is digital scaling (no NF/compression/IMD); white fill with ~3 dB dip at coverage edge; ~half filter length latency after retune; single-centre recordings only"
     scope_note: "includes the device conformance test from T-048; suite switch of acceptance helpers stays in T-047 (after T-037b)"

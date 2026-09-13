@@ -404,3 +404,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - half-open client slot hold;
     - 503 instead of 410 during re-plumb;
     - free text in refusal reasons.
+- **B0.133 Merge policy while T-063 is open.**
+  - **Rule:** a finished branch merges when its own-target verification adds no failure beyond the known `retune_legal` regression, as T-062 did. This avoids a growing merge backlog and conflict pile-up behind T-063.
+  - **Queue:** T-049 (mock SDR, ready: 137 Rust test binaries, py, ui, acceptance 16/16 green apart from `retune_legal`), T-043 (Listen, review MERGE-OK) and T-058 (detect throughput, bit-identical). They merge in sequence once the running T-062 verification finishes, followed by one combined verification.
+  - **Unblocks after the merges:** T-047 and T-064. T-066 also unblocks, after T-043.
