@@ -102,7 +102,7 @@ tasks:
   - id: T-006
     title: CFAR detection + burst records
     status: in-progress
-    review: "implemented 6891727 (+ merge e816cab), lint/tests green; Opus core-interface review running before merge (threshold equivalence, component state machine, notch false alarms with PerFrame, 915 MHz outside-truth detections, 434 MHz clock-harmonic line)"
+    review: "Opus review FIX-BEFORE-MERGE: a single bridging/impulsive frame permanently fuses separate carriers into one record; unbounded component memory (338 MB per checkerboard frame) and O(L^2-L^3) link cost; integration >15 blocks silently truncated. Verified exact: OS-CFAR equivalence, alpha/T vs scipy, Monte Carlo, FA accounting; 915 MHz extra detections are real unannotated lines. Fixes in progress + branches per profile, floor-step (notch) guard, clock-harmonic spur reason (hk-model additive), >=1 MHz.h CI FA test"
     s4_inputs: "block FCME (256/hop 64, Pfa 1e-3 Gamma(n)) per-frame floor; OS-CFAR N=32 G=4 k=24 OR floor branch; on Pfa 1e-6 / off Pfa 1e-3 (never fixed -3 dB); min 3 frames before gap-merge (2); impulsive-frame gate; emitter confirmation by repeat or >=1 s integration; real-scene FA is a monitored metric, synthetic/terminated FA is the CI gate"
     followups_from_T-002_review: "detection region query is f-bounded only (add R*Tree on f_lo,f_hi,t_start,t_end or time-bucketing); populate detector_version, peak_level_dbfs, clip_count; overload->clipped enforced by repo"
     deps: [T-005]
@@ -390,7 +390,9 @@ tasks:
     note: "split from T-008 acceptance ('GPU + CPU-fallback paths') by the T-008 review, 2026-09-13; blocked until the Jetson arrives (user purchase)"
   - id: T-022a
     title: Web UI part 1 - WebSocket bridge (hk-stream remote egress) + WebGL2 waterfall + region-over-time history view
-    status: in-progress
+    status: done
+    commit: "ab75627 (merged)"
+    followups: "docs/stream-contract.md §10/§11 still say bridge unbuilt / auth open - update; stream header has no units field (serve documents rf32_le dBFS/Hz) - consider v1.1 units; --loop replay reconnects browsers each pass; consumer-slot race can reset instead of clean 503; phone canvas heights; no TLS (bind 127.0.0.1 default)"
     deps: [T-016, T-017]
     after: "stream enforcement-gap fixes merged (locality rule enforced in subscribe; bridge counts as remote)"
     parallel_group: I
