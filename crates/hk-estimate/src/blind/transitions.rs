@@ -78,8 +78,11 @@ pub struct TransitionFit {
     pub symbols: u64,
     /// Segments (runs longer than the gap split the burst).
     pub segments: usize,
-    /// Common run-count factor divided out (1 = none).
+    /// Common lattice factor divided out (1 = none): the fitted clock was `factor` × too fast.
     pub factor: u32,
+    /// A coarser lattice (`k` × the reported period) held most, but not clearly all, kept
+    /// transitions: the period may still be a sub-multiple of the clock, so the fit is not ok.
+    pub ambiguous_factor: Option<u32>,
     /// Fitted period, samples.
     pub period_samples: f64,
     /// Per-segment lattice offset (mean of the rising and falling offsets present), samples.
@@ -104,6 +107,7 @@ impl TransitionFit {
             symbols: 0,
             segments: 0,
             factor: 1,
+            ambiguous_factor: None,
             period_samples: f64::NAN,
             segment_offsets: Vec::new(),
             segment_spans: Vec::new(),
@@ -162,6 +166,67 @@ pub fn runlength_unit(
     (t > 0.0).then(|| fs / t)
 }
 
+/// Largest common lattice factor searched (T-030: rectangular FSK h = 4–6 seeds at 7–9 ×).
+const MAX_FACTOR: u64 = 32;
+/// Share of the kept transitions on a coarser lattice that divides it out.
+const FACTOR_FRACTION: f64 = 0.9;
+/// Share above which a coarser lattice that does not divide out makes the fit ambiguous. Random
+/// data at the true clock puts ~½ (k = 2) or less on any one residue.
+const AMBIGUOUS_FRACTION: f64 = 0.75;
+/// Minimum kept transitions of a (segment, polarity) group for its residue to count.
+const MIN_GROUP: usize = 4;
+
+/// How well the kept transitions sit on the lattice `k` × the fitted period: per (segment,
+/// polarity) group the modal residue of the lattice index mod `k`; the score is the share of the
+/// counted transitions on their group's mode. Rising and falling residues of one segment must be
+/// within a quarter of the coarse period of each other (slicer asymmetry); otherwise the coarse
+/// lattice is not a clock (a 0101 run at k = 2 puts rises and falls half a period apart) and the
+/// score is 0. `None` with fewer than 8 counted transitions. Also returns each group's modal
+/// residue.
+fn lattice_score(
+    n: &[f64],
+    group: &[usize],
+    ng: usize,
+    used: &[bool],
+    k: u64,
+) -> Option<(f64, Vec<u64>)> {
+    let ku = k as usize;
+    let mut hist = vec![0usize; ng * ku];
+    for i in (0..n.len()).filter(|&i| used[i]) {
+        hist[group[i] * ku + (n[i] as u64 % k) as usize] += 1;
+    }
+    let (mut hit, mut total) = (0usize, 0usize);
+    let mut residue = vec![0u64; ng];
+    let mut counted = vec![false; ng];
+    for g in 0..ng {
+        let h = &hist[g * ku..(g + 1) * ku];
+        let c: usize = h.iter().sum();
+        let (r, m) = h
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(&a.0)))
+            .map_or((0, 0), |(r, &m)| (r, m));
+        residue[g] = r as u64;
+        if c >= MIN_GROUP {
+            counted[g] = true;
+            hit += m;
+            total += c;
+        }
+    }
+    if total < 8 {
+        return None;
+    }
+    for s in 0..ng / 2 {
+        if counted[2 * s] && counted[2 * s + 1] {
+            let d = (residue[2 * s] + k - residue[2 * s + 1]) % k;
+            if 4 * d.min(k - d) > k {
+                return Some((0.0, residue));
+            }
+        }
+    }
+    Some((hit as f64 / total as f64, residue))
+}
+
 /// Fixed-effects least squares `τ_i = a_{g(i)} + T·n_i`. Returns `(T, a_g)`.
 fn fit(
     tau: &[f64],
@@ -216,8 +281,10 @@ fn fit(
 /// segment has its own **rising and falling** offsets (slicer and pulse-shape asymmetry would
 /// otherwise let a non-integer sub-multiple of the clock fit) and all share T. Integer run
 /// counts `max(1, round(run/T))`, least squares, transitions beyond 0.3 T dropped, iterated five
-/// times. A common factor k ∈ 5..2 of > 90 % of the run counts is divided out (a seed at k× the
-/// rate lands on the rate). `ok` iff every [`LsGuards`] guard holds.
+/// times. The largest common lattice factor k ∈ 32..2 holding > 90 % of the kept transitions is
+/// divided out (a seed at k× the rate lands on the rate, T-030); a coarser lattice holding > 75 %
+/// that does not divide out sets `ambiguous_factor`. `ok` iff every [`LsGuards`] guard holds and
+/// the factor is unambiguous.
 pub fn rate_transitions_ls(
     v: &[f64],
     fs: f64,
@@ -266,6 +333,7 @@ pub fn rate_transitions_ls(
     let mut offsets = vec![f64::NAN; ng];
     let mut n_kept_for_sigma = 0usize;
     let mut sxx = 0.0;
+    let mut used_last = vec![true; tau.len()];
     for _ in 0..5 {
         for (k, &r) in runs.iter().enumerate() {
             inc[k] = if r > gap {
@@ -313,6 +381,7 @@ pub fn rate_transitions_ls(
             .map(|e| e.2 - e.1 * e.1 / e.0)
             .sum();
         n_kept_for_sigma = res.len();
+        used_last = used;
         t = tt;
         offsets = aa;
         if !t.is_finite() || t <= 0.25 * t0 || n[tau.len() - 1] < 2.0 {
@@ -325,22 +394,49 @@ pub fn rate_transitions_ls(
         .map(|&c| c as u64)
         .collect();
     let mut nsym = n[tau.len() - 1] as u64;
+    // Common lattice factor (T-030). The fit holds on any sub-multiple T/k of the clock, and a
+    // prime k ≥ 7 keeps ~⅔ odd run counts, so every other guard passes. Search k from the largest
+    // plausible (coarse runs ≥ ½ period for > 90 % of runs, k ≤ 32) down and divide out the first
+    // lattice holding > 90 % of the kept transitions; a coarser lattice holding > 75 % that does
+    // not divide out leaves the fit ambiguous (not ok).
     let mut factor = 1u32;
+    let mut ambiguous_factor = None;
+    let mut residue = Vec::new();
     if counted.len() >= 8 {
-        for k in [5u64, 4, 3, 2] {
-            let frac =
-                counted.iter().filter(|&&c| c % k == 0).count() as f64 / counted.len() as f64;
-            if frac > 0.9 {
+        let mut sorted = counted.clone();
+        sorted.sort_unstable();
+        let kmax = (2 * sorted[sorted.len() / 2]).min(MAX_FACTOR);
+        for k in (2..=kmax).rev() {
+            let long = counted.iter().filter(|&&c| 2 * c >= k).count() as f64;
+            if long <= FACTOR_FRACTION * counted.len() as f64 {
+                continue;
+            }
+            let Some((score, r)) = lattice_score(&n, &group, ng, &used_last, k) else {
+                continue;
+            };
+            if score > FACTOR_FRACTION {
                 factor = k as u32;
+                residue = r;
                 break;
+            }
+            if score > AMBIGUOUS_FRACTION && ambiguous_factor.is_none() {
+                ambiguous_factor = Some(k as u32);
             }
         }
     }
     let t_unit = t;
     if factor > 1 {
+        let k = u64::from(factor);
         t *= f64::from(factor);
-        counted.iter_mut().for_each(|c| *c /= u64::from(factor));
-        nsym /= u64::from(factor);
+        // Each group's lattice point moves to its modal residue (rising and falling residues may
+        // differ by up to a quarter coarse period).
+        for (a, &r) in offsets.iter_mut().zip(&residue) {
+            *a += r as f64 * t_unit;
+        }
+        counted
+            .iter_mut()
+            .for_each(|c| *c = ((*c as f64 / k as f64).round() as u64).max(1));
+        nsym = counted.iter().sum();
     }
     let odd = if counted.is_empty() {
         0.0
@@ -363,7 +459,8 @@ pub fn rate_transitions_ls(
         && (t / (t0 * f64::from(factor)) - 1.0).abs() < g.max_seed_error
         && nsym >= g.min_symbols
         && modal <= g.max_modal_fraction
-        && kept_frac >= g.min_kept_fraction;
+        && kept_frac >= g.min_kept_fraction
+        && ambiguous_factor.is_none();
     // Slope standard error (in the pre-factor unit), scaled to the final period.
     let dof = (n_kept_for_sigma as f64 - ng as f64 - 1.0).max(1.0);
     let rss: f64 = res.iter().map(|r| r * r).sum();
@@ -399,6 +496,7 @@ pub fn rate_transitions_ls(
         symbols: nsym,
         segments: nseg,
         factor,
+        ambiguous_factor,
         period_samples: t,
         segment_offsets,
         segment_spans,
@@ -464,6 +562,41 @@ mod tests {
         eprintln!("2.5× seed with the guards: {wrong:?}\nwithout: {hidden:?}");
         let right = rate_transitions_ls(&v, 1000.0, 0.5, sps, None, &g);
         assert!(right.ok, "{right:?}");
+    }
+
+    /// T-030: seeds at prime (7×) and composite (9×) multiples of the rate divide out to the clock.
+    /// Before, only k ∈ 5..2 was tried: a 7× seed stayed at 7× with ~⅔ odd runs (ok), and a 9×
+    /// seed divided by 3 stayed at 3× (ok).
+    #[test]
+    fn t030_high_multiple_seeds_divide_out_to_the_clock() {
+        let sps = 63.7;
+        let v = nrz(&bits(5, 400), sps);
+        let g = LsGuards::default();
+        for k in [6u32, 7, 9, 11] {
+            let f = rate_transitions_ls(&v, 1000.0, 0.5, sps / f64::from(k), None, &g);
+            assert_eq!(f.factor, k, "{k}× seed: {f:?}");
+            assert!(
+                f.ok && (f.period_samples / sps - 1.0).abs() < 2e-3,
+                "{k}× seed: {f:?}"
+            );
+        }
+    }
+
+    /// T-030: slicer asymmetry (rising and falling crossings a sub-period apart at the seed's
+    /// lattice) must not stop the factor dividing out.
+    #[test]
+    fn t030_factor_survives_rise_fall_asymmetry() {
+        let sps = 70.0;
+        let raw: Vec<f64> = bits(9, 400)
+            .iter()
+            .flat_map(|&b| std::iter::repeat_n(f64::from(b), sps as usize))
+            .collect();
+        // A long edge sliced low: rises cross early, falls late (≈ 0.2 T apart).
+        let v = super::super::util::moving_avg(&raw, 20);
+        let g = LsGuards::default();
+        let f = rate_transitions_ls(&v, 1000.0, 0.15, sps / 7.0, None, &g);
+        assert_eq!(f.factor, 7, "{f:?}");
+        assert!(f.ok && (f.period_samples / sps - 1.0).abs() < 2e-3, "{f:?}");
     }
 
     #[test]
