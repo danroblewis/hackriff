@@ -444,3 +444,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-053 HIL unblocked:** needs the HackRF and a slot.
   - Verification running: lint, hk-e2e, acceptance (test-only change).
 - **B0.144 T-047 merge verified** (lint, hk-e2e, acceptance green). T-060 finished: TCP stream server with a token line, bits/symbols openers, discovery, stdlib Python and netcat examples. Mock-SDR tests: FSK over TCP 20/20 payloads, FM audio over WebSocket, slow client dropped without stalling the chain, 2 concurrent streams isolated. Its merge was blocked by uncommitted edits to docs/stream-contract.md on main that the coordinator did not make; investigating.
+- **B0.145 T-060 merged** after the user committed 6c7369d (legal text removal + output-driven tuning principle). The docs/stream-contract.md conflict was resolved by keeping the T-060 additions and dropping the legal lines. T-071 still waits for T-070. Verification running.

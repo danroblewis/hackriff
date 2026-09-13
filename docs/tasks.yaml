@@ -989,7 +989,7 @@ tasks:
     milestone: M0b
     title: Stream demodulated outputs to external programs (bits, symbols, audio over TCP/WebSocket; netcat + Python client example)
     status: done
-    commit: "f7b057e (merge pending: blocked by uncommitted user doc edits to docs/stream-contract.md on main)"
+    commit: "f7b057e (merged after 6c7369d; stream-contract conflict resolved dropping legal lines)"
     result: "hk-api/src/tcp.rs token-checked TCP stream server (one line '<stream_id>?token=' or 'open/<name>?token=&params', framed stream, framed refused object, uniform 401), hk serve binds 127.0.0.1:8788 (HK_STREAM_TCP); WebSocket /ws/<id> and /ws/open/<name> with new bits and symbols openers; /api/streams lists formats, openers (StreamOpener::describe) and TCP address; run-level BurstHub (chains/taps.rs) feeding bits (ru8 hard) and symbols (rf32_le soft) with per-burst status records (sync/payload offsets, bit order, CRC, emitter); FSK is the only symbol source (stream-contract section 13). Examples py/examples hkstream.py, hk_bits.py, hk_audio_wav.py + netcat one-liner; py tests parse a captured TCP stream. Mock-SDR e2e: FSK over TCP 20/20 truth payloads, 8/8 symbol bursts; FM audio over WS; never-reading client 391 counted drops then disconnect with chain unaffected; disconnect frees taps; 2 concurrent streams isolated with own drop counters. acceptance 18/18."
     followups:
       - "bits/fsk-bursts/<emitter> always-on streams finish on publish - external programs should use open/bits?emitter=<id>; consider long-lived per-emitter bits streams (T-071/T-061)"
