@@ -48,7 +48,7 @@ tasks:
     title: source-abstraction + SigMF file-replay source + RAM ring buffer
     status: done
     commit: "8386cbb (merged 76ff126)"
-    review: "post-merge Opus review URGENT-FIX: stale samples pass seqlock validation in release, inexact overrun/gap accounting, false startup overrun, unchecked u64 overflow; plus Source control/stream split needed before T-009. Fix agent running (may adopt S1 Arc-block ring)"
+    review: "post-merge review URGENT-FIX -> fixed 8f21b6f (merged): all atomics SeqCst, copy_out bounded by committed end, exact lost/gap accounting, startup-at-first-block, IndexOverflow, lock-free writer provenance table, exact capacities + mlock, streaming TriggerStream, Source/SourceControl split, replay header/trailing bytes. Release stress test (index-encoded samples, 150 seeds, 180M samples) clean. OPEN: root-cause explanation (Relaxed vs SeqCst) is doubtful - independent verification running"
     deps: [T-001]
     parallel_group: B
     use_cases: [SPACE-050]
@@ -87,7 +87,7 @@ tasks:
   - id: T-005
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
     status: in-progress
-    review: "implemented a40c2eb (branch worktree-agent-a096af43e3d47a50f); Opus core-interface review running before merge"
+    review: "Opus review FIX-BEFORE-MERGE: impulsive gate locks on for sustained 0.5-3 dB steps (slow floor freezes); rise-event storm on wide bursty signals (5-frame confirm, no hold-off); both CFAR branches lose wide-signal interiors (docs wrong). Numerics verified vs scipy. Implementer applying fixes + cheap follow-ups (guard only on OS branch, FCME iteration cap/NaN guard, event episodes with discriminator, GainKey tolerance)"
     deps: [T-004]
     parallel_group: C
     core_interface: true
@@ -129,6 +129,7 @@ tasks:
   - id: T-008
     title: channelizer (2x oversampled PFB) + on-demand DDC
     status: in-progress
+    review: "implemented 3beb92b (branch worktree-agent-abfdabdf828528c1d); Opus core-interface review running before merge (adversarial transitions: retune/gap/rate change, long-run phase, group-delay time mapping)"
     deps: [T-004]
     parallel_group: D
     core_interface: true

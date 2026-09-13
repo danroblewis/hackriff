@@ -5,38 +5,62 @@
 //! # Design
 //!
 //! - **Sample-indexed.** Position `i` in the ring *is* stream sample index `i` (the source's
-//!   monotonic counter), stored at physical slot `i mod capacity` (a power of two). A source gap
-//!   is an index jump: nothing is written for missing samples, and the block metadata records
-//!   the gap, so a pre-trigger window `[t − pre, t + post)` maps straight onto slots and a gap is
-//!   never spliced.
+//!   monotonic counter), stored at physical slot `i mod capacity`. Capacities are used exactly as
+//!   configured (no power-of-two rounding). A source gap is an index jump: nothing is written for
+//!   missing samples and the block metadata records the gap, so a pre-trigger window
+//!   `[t − pre, t + post)` maps straight onto slots and a gap is never spliced.
 //! - **Block metadata ring.** A second, smaller ring holds one record per block: first sample,
-//!   length, host time, discontinuity flags, dropped-before count and a provenance key. A reader
+//!   length, host time, discontinuity flags, the source gap before the block, the cumulative gap
+//!   count since the stream start, and the block's provenance (key and table slot). A reader
 //!   reports metadata changes exactly at block boundaries.
-//! - **Concurrency: a seqlock by sample index, lock-free on the hot path.**
-//!   1. The writer first publishes `write_end = first + n`.
-//!   2. It then stores the samples.
-//!   3. Then it commits the block.
+//! - **Concurrency: a seqlock by sample index.** For each block the writer
+//!   1. announces the record write (`meta_write_end = block + 1`), then publishes provenance and
+//!      stores the record;
+//!   2. announces the sample write (`sample_write_end = first + n`), then stores the samples;
+//!   3. commits (`sample_commit_end`, then `meta_head`).
 //!
-//!   A reader copies `[a, b)` optimistically, then re-reads `write_end`. The copy is valid iff
-//!   `a >= write_end − capacity`, because any overwrite that could have raced the copy must
-//!   first have raised `write_end`. The metadata ring uses the same protocol per record. The
-//!   writer never waits for a reader, never retries, and readers need no registration: attach
-//!   = create a cursor, detach = drop it.
+//!   A reader copies `[a, b)` only if `b <= sample_commit_end` (loaded *before* the copy), then
+//!   re-loads `sample_write_end`: the copy is valid iff `a >= sample_write_end − capacity`, since
+//!   any store that could have overwritten a copied slot was announced first. A record for block
+//!   `k` is read only if `k < meta_head` (loaded first) and is valid iff
+//!   `k >= meta_write_end − block_capacity` afterwards. The writer never waits for a reader, and
+//!   readers need no registration: attach = create a cursor, detach = drop it.
 //!
-//!   Sample cells are atomics (`AtomicU64` holds the two `f32` bit patterns of a `Complex32`),
-//!   so a racing copy is merely stale, never undefined behaviour, and no `unsafe` is needed.
-//!   `load`/`store` compile to plain moves.
-//! - **Overrun.** A reader whose cursor falls behind `write_end − capacity` gets
-//!   [`ReadOutcome::Overrun`] with the exact index distance skipped, then resyncs per
-//!   [`ResyncPolicy`] (default: jump to the newest block, which suits real-time consumers).
-//! - **Allocation.** The rings are allocated once. Per block, the writer does atomic stores and
-//!   a `memcpy`-like loop, and readers copy into a caller-provided slice and take an `Arc`
-//!   clone of the provenance. The only lock is the provenance table, touched when the provenance
-//!   *changes* (a retune or gain step, not per block): the writer holds it for a push, a reader
-//!   for a binary search. Readers cache the handle.
-//! - **Waking readers.** The writer notifies a condvar only if a reader is parked, and uses
-//!   `try_lock`, so it cannot block. The rare missed wake-up is bounded by the reader's
-//!   2 ms wait slice.
+//!   Sample cells are atomics (`AtomicU64` holds the two `f32` bit patterns of a `Complex32`), so
+//!   a racing copy is merely stale, never undefined behaviour, and no `unsafe` is needed.
+//!
+//! # Why every shared operation is `SeqCst`
+//!
+//! The argument above needs *sequential consistency*: a reader that observes a slot store must
+//! also observe every store the writer made before it. Rust promises that only for
+//! `Ordering::SeqCst`. The first version stored samples and records with `Relaxed`, which on
+//! Apple Silicon compiles to plain `ldr`/`str` whose effects other cores may observe out of
+//! program order (the CPU does not provide total store order natively), while `SeqCst` compiles
+//! to ordered instructions. Readers then validated fresh slot contents against a stale
+//! `write_end` and accepted overwritten samples and records of unwritten blocks, in release
+//! builds only. With every operation `SeqCst` the proof rests on the language guarantee alone;
+//! the cost is within noise (`examples/ring_throughput.rs`).
+//!
+//! # Loss accounting
+//!
+//! Every stream index between a reader's start and its position is accounted exactly once as
+//! read, lost (overwritten before it was read: [`ReadOutcome::Overrun`]) or a source gap
+//! (reported as a chunk's `dropped_before` or an overrun's `gap_samples`). The cursor moves only
+//! after a successful copy, so a failed copy never hides loss.
+//!
+//! # Provenance
+//!
+//! Provenance handles live in a fixed table (`2 × block_capacity + 8` slots, allocated and
+//! initialised up front). On a provenance change the writer takes a slot that no retained block
+//! references, using `try_lock` only: a slot a reader happens to hold is skipped, so the writer
+//! never parks and never waits behind a lower-priority reader. A slot is reused only after the
+//! record announce has invalidated every block that referenced it, so a reader that finds a
+//! different key in a slot knows its record is stale. Readers cache the handle they last used.
+//!
+//! # Waking readers
+//!
+//! The writer notifies a condvar only if a reader is parked, and uses `try_lock`, so it cannot
+//! block. The rare missed wake-up is bounded by the reader's 2 ms wait slice.
 //!
 //! Sample types implement [`RingSample`]: `Complex32` (8 bytes/sample; 160 MB/s at 20 Msps) and
 //! `Complex<i8>` (2 bytes/sample; 40 MB/s, the C03 recommendation for long pre-trigger rings on
@@ -45,23 +69,25 @@
 pub mod extract;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use hk_model::{SampleTime, Timestamp};
 use num_complex::{Complex, Complex32};
 
 use crate::block::{BlockHeader, Discontinuity, ProvenanceHandle, SampleBlock};
+use crate::rt::MemoryLock;
 
 pub use extract::{
-    CaptureSegment, CaptureStatus, CapturedWindow, PreTriggerCapture, TriggerWindow,
+    CaptureError, CaptureSegment, CaptureStatus, CapturedWindow, PreTriggerCapture, TriggerRead,
+    TriggerStream, TriggerWindow,
 };
 
-/// Ordering for sample and metadata cells (validated by the seqlock check, not by ordering).
-const DATA: std::sync::atomic::Ordering = std::sync::atomic::Ordering::Relaxed;
-/// Ordering for control positions.
-const CTRL: std::sync::atomic::Ordering = std::sync::atomic::Ordering::SeqCst;
+/// The ordering for every operation on shared ring state (see the module docs).
+const SEQ: Ordering = Ordering::SeqCst;
 /// Longest single condvar wait; bounds the latency of a wake-up missed by the writer's `try_lock`.
 const WAIT_SLICE: Duration = Duration::from_millis(2);
 
@@ -71,9 +97,9 @@ pub trait RingSample: Copy + Default + Send + Sync + 'static {
     type Cell: Send + Sync;
     /// A zeroed cell.
     fn new_cell() -> Self::Cell;
-    /// Reads a sample.
+    /// Reads a sample (sequentially consistent).
     fn load(cell: &Self::Cell) -> Self;
-    /// Writes a sample.
+    /// Writes a sample (sequentially consistent).
     fn store(cell: &Self::Cell, value: Self);
 }
 
@@ -86,7 +112,7 @@ impl RingSample for Complex32 {
 
     #[inline]
     fn load(cell: &AtomicU64) -> Self {
-        let bits = cell.load(DATA);
+        let bits = cell.load(SEQ);
         Complex32::new(
             f32::from_bits((bits >> 32) as u32),
             f32::from_bits(bits as u32),
@@ -97,7 +123,7 @@ impl RingSample for Complex32 {
     fn store(cell: &AtomicU64, value: Self) {
         cell.store(
             (u64::from(value.re.to_bits()) << 32) | u64::from(value.im.to_bits()),
-            DATA,
+            SEQ,
         );
     }
 }
@@ -111,7 +137,7 @@ impl RingSample for Complex<i8> {
 
     #[inline]
     fn load(cell: &AtomicU16) -> Self {
-        let bits = cell.load(DATA);
+        let bits = cell.load(SEQ);
         Complex::new((bits >> 8) as u8 as i8, bits as u8 as i8)
     }
 
@@ -119,12 +145,12 @@ impl RingSample for Complex<i8> {
     fn store(cell: &AtomicU16, value: Self) {
         cell.store(
             (u16::from(value.re as u8) << 8) | u16::from(value.im as u8),
-            DATA,
+            SEQ,
         );
     }
 }
 
-/// Ring sizes. Both are rounded up to a power of two.
+/// Ring sizes, used exactly (a zero is treated as one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingConfig {
     /// Samples retained.
@@ -145,13 +171,15 @@ impl RingConfig {
         }
     }
 
-    /// Bytes of sample storage after rounding.
+    /// Bytes of sample storage.
     pub fn sample_bytes<T: RingSample>(&self) -> usize {
-        self.sample_capacity.max(1).next_power_of_two() * size_of::<T::Cell>()
+        self.sample_capacity
+            .max(1)
+            .saturating_mul(size_of::<T::Cell>())
     }
 }
 
-/// Errors pushing into the ring.
+/// Errors pushing into the ring. A rejected push leaves the ring unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RingError {
     /// A block must hold at least one sample.
@@ -173,6 +201,14 @@ pub enum RingError {
         /// Start of the rejected block.
         got: u64,
     },
+    /// `first_sample + len` does not fit in the 64-bit sample counter.
+    #[error("block of {len} samples at sample {first} overflows the sample counter")]
+    IndexOverflow {
+        /// Start of the rejected block.
+        first: u64,
+        /// Block length.
+        len: usize,
+    },
 }
 
 struct MetaSlot {
@@ -180,8 +216,10 @@ struct MetaSlot {
     len: AtomicU64,
     host_time_ns: AtomicI64,
     dropped_before: AtomicU64,
+    gaps_total: AtomicU64,
     flags: AtomicU32,
     provenance_key: AtomicU64,
+    provenance_slot: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,30 +227,43 @@ struct BlockMeta {
     first_sample: u64,
     len: u64,
     host_time: Timestamp,
-    dropped_before: u64,
     flags: Discontinuity,
+    /// Source-gap indices in the stream before this block's first sample (since stream start).
+    gaps_total: u64,
     provenance_key: u64,
+    provenance_slot: usize,
 }
 
 impl BlockMeta {
     fn end(&self) -> u64 {
+        // `push` rejects blocks whose end overflows.
         self.first_sample + self.len
     }
 }
 
+enum CopyOutcome {
+    Copied,
+    NotCommitted,
+    Overwritten,
+}
+
+type ProvenanceSlot = Mutex<Option<(u64, ProvenanceHandle)>>;
+
 struct Shared<T: RingSample> {
     cells: Box<[T::Cell]>,
-    sample_mask: u64,
     meta: Box<[MetaSlot]>,
-    meta_mask: u64,
-    /// End (exclusive) of the newest sample write, published *before* the samples are stored.
+    /// End (exclusive) of the newest sample write, announced *before* the samples are stored.
     sample_write_end: AtomicU64,
-    /// Blocks whose metadata write has started, published *before* the record is stored.
+    /// End (exclusive) of the newest committed block.
+    sample_commit_end: AtomicU64,
+    /// Blocks whose record write has been announced (published *before* the record is stored).
     meta_write_end: AtomicU64,
     /// Blocks fully committed (samples and metadata).
     meta_head: AtomicU64,
-    /// `(key, handle)` sorted by key; covers every block still in the metadata ring.
-    provenance: Mutex<VecDeque<(u64, ProvenanceHandle)>>,
+    /// First sample of block 0; meaningful once `meta_head > 0`.
+    stream_start: AtomicU64,
+    /// `(key, handle)` per slot; see the module docs.
+    provenance: Box<[ProvenanceSlot]>,
     closed: AtomicBool,
     waiters: AtomicUsize,
     wake_lock: Mutex<()>,
@@ -223,44 +274,62 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Provenance table size for a metadata ring of `block_capacity` records: at most
+/// `block_capacity` keys are referenced by retained blocks, and the slack keeps free slots
+/// available even when readers briefly hold some of them.
+fn provenance_table_len(block_capacity: usize) -> usize {
+    block_capacity.saturating_mul(2).saturating_add(8)
+}
+
 impl<T: RingSample> Shared<T> {
     fn sample_capacity(&self) -> u64 {
-        self.sample_mask + 1
+        self.cells.len() as u64
     }
 
     fn meta_capacity(&self) -> u64 {
-        self.meta_mask + 1
+        self.meta.len() as u64
     }
 
     /// Samples below this index may have been overwritten.
     fn oldest_valid_sample(&self) -> u64 {
         self.sample_write_end
-            .load(CTRL)
+            .load(SEQ)
             .saturating_sub(self.sample_capacity())
     }
 
-    /// Reads a committed block's metadata; `None` if it has been (or is being) overwritten.
+    /// A committed block's metadata; `None` if the block is not committed yet or its record has
+    /// been (or is being) overwritten.
     fn read_meta(&self, block: u64) -> Option<BlockMeta> {
-        let slot = &self.meta[(block & self.meta_mask) as usize];
+        if block >= self.meta_head.load(SEQ) {
+            return None;
+        }
+        let slot = &self.meta[(block % self.meta_capacity()) as usize];
         let meta = BlockMeta {
-            first_sample: slot.first_sample.load(DATA),
-            len: slot.len.load(DATA),
-            host_time: Timestamp::from_unix_nanos(slot.host_time_ns.load(DATA)),
-            dropped_before: slot.dropped_before.load(DATA),
-            flags: Discontinuity::from_bits_truncate(slot.flags.load(DATA) as u8),
-            provenance_key: slot.provenance_key.load(DATA),
+            first_sample: slot.first_sample.load(SEQ),
+            len: slot.len.load(SEQ),
+            host_time: Timestamp::from_unix_nanos(slot.host_time_ns.load(SEQ)),
+            flags: Discontinuity::from_bits_truncate(slot.flags.load(SEQ) as u8),
+            gaps_total: slot.gaps_total.load(SEQ),
+            provenance_key: slot.provenance_key.load(SEQ),
+            provenance_slot: slot.provenance_slot.load(SEQ) as usize,
         };
         let oldest = self
             .meta_write_end
-            .load(CTRL)
+            .load(SEQ)
             .saturating_sub(self.meta_capacity());
         (block >= oldest).then_some(meta)
     }
 
-    /// Copies samples `[first, first + out.len())`; `false` if any may have been overwritten.
-    fn copy_out(&self, first: u64, out: &mut [T]) -> bool {
+    /// Copies samples `[first, first + out.len())`.
+    fn copy_out(&self, first: u64, out: &mut [T]) -> CopyOutcome {
         let n = out.len();
-        let phys = (first & self.sample_mask) as usize;
+        let Some(end) = first.checked_add(n as u64) else {
+            return CopyOutcome::NotCommitted;
+        };
+        if end > self.sample_commit_end.load(SEQ) {
+            return CopyOutcome::NotCommitted;
+        }
+        let phys = (first % self.sample_capacity()) as usize;
         let run = n.min(self.cells.len() - phys);
         let (head, tail) = out.split_at_mut(run);
         for (dst, cell) in head.iter_mut().zip(&self.cells[phys..phys + run]) {
@@ -269,12 +338,16 @@ impl<T: RingSample> Shared<T> {
         for (dst, cell) in tail.iter_mut().zip(&self.cells[..n - run]) {
             *dst = T::load(cell);
         }
-        first >= self.oldest_valid_sample()
+        if first >= self.oldest_valid_sample() {
+            CopyOutcome::Copied
+        } else {
+            CopyOutcome::Overwritten
+        }
     }
 
     fn copy_in(&self, first: u64, samples: &[T]) {
         let n = samples.len();
-        let phys = (first & self.sample_mask) as usize;
+        let phys = (first % self.sample_capacity()) as usize;
         let run = n.min(self.cells.len() - phys);
         let (head, tail) = samples.split_at(run);
         for (src, cell) in head.iter().zip(&self.cells[phys..phys + run]) {
@@ -285,22 +358,23 @@ impl<T: RingSample> Shared<T> {
         }
     }
 
-    fn provenance(&self, key: u64) -> Option<ProvenanceHandle> {
-        let table = lock(&self.provenance);
-        table
-            .binary_search_by_key(&key, |(k, _)| *k)
-            .ok()
-            .map(|i| table[i].1.clone())
+    /// The handle for `key`, if its table slot still holds it.
+    fn provenance(&self, key: u64, slot: usize) -> Option<ProvenanceHandle> {
+        let entry = lock(self.provenance.get(slot)?);
+        match &*entry {
+            Some((k, handle)) if *k == key => Some(handle.clone()),
+            _ => None,
+        }
     }
 
-    /// The smallest committed block whose end is after `sample` (with its metadata), or the
-    /// head block index and `None` if `sample` is at or beyond the newest block's end.
+    /// The smallest committed, retained block whose end is after `sample` (with its metadata),
+    /// or the head block index and `None` if `sample` is at or beyond the newest block's end.
     fn locate(&self, sample: u64) -> (u64, Option<BlockMeta>) {
         'retry: loop {
-            let head = self.meta_head.load(CTRL);
+            let head = self.meta_head.load(SEQ);
             let lo = self
                 .meta_write_end
-                .load(CTRL)
+                .load(SEQ)
                 .saturating_sub(self.meta_capacity())
                 .min(head);
             let (mut left, mut right) = (lo, head);
@@ -333,39 +407,52 @@ impl<T: RingSample> Shared<T> {
 
 /// Creates a ring and returns its only writer and a handle for attaching readers.
 pub fn ring_buffer<T: RingSample>(config: RingConfig) -> (RingWriter<T>, RingHandle<T>) {
-    let sample_capacity = config.sample_capacity.max(1).next_power_of_two();
-    let block_capacity = config.block_capacity.max(1).next_power_of_two();
+    let sample_capacity = config.sample_capacity.max(1);
+    let block_capacity = config.block_capacity.max(1);
+    let table_len = provenance_table_len(block_capacity);
+    let provenance: Box<[ProvenanceSlot]> = (0..table_len).map(|_| Mutex::new(None)).collect();
+    // Some platforms allocate an OS mutex lazily on first use; do it now, not on the writer's
+    // first provenance change.
+    for slot in provenance.iter() {
+        drop(lock(slot));
+    }
     let shared = Arc::new(Shared {
         cells: (0..sample_capacity).map(|_| T::new_cell()).collect(),
-        sample_mask: sample_capacity as u64 - 1,
         meta: (0..block_capacity)
             .map(|_| MetaSlot {
                 first_sample: AtomicU64::new(0),
                 len: AtomicU64::new(0),
                 host_time_ns: AtomicI64::new(0),
                 dropped_before: AtomicU64::new(0),
+                gaps_total: AtomicU64::new(0),
                 flags: AtomicU32::new(0),
                 provenance_key: AtomicU64::new(0),
+                provenance_slot: AtomicU64::new(0),
             })
             .collect(),
-        meta_mask: block_capacity as u64 - 1,
         sample_write_end: AtomicU64::new(0),
+        sample_commit_end: AtomicU64::new(0),
         meta_write_end: AtomicU64::new(0),
         meta_head: AtomicU64::new(0),
-        provenance: Mutex::new(VecDeque::with_capacity(64)),
+        stream_start: AtomicU64::new(0),
+        provenance,
         closed: AtomicBool::new(false),
         waiters: AtomicUsize::new(0),
         wake_lock: Mutex::new(()),
         wake: Condvar::new(),
     });
+    drop(lock(&shared.wake_lock));
     (
         RingWriter {
             shared: Arc::clone(&shared),
             next_block: 0,
             stream_end: None,
+            gaps_total: 0,
             next_provenance_key: 0,
             current_provenance: None,
-            provenance_refs: VecDeque::with_capacity(64),
+            live_provenance: VecDeque::with_capacity(block_capacity + 2),
+            slot_in_use: vec![false; table_len].into_boxed_slice(),
+            slot_cursor: 0,
         },
         RingHandle { shared },
     )
@@ -377,68 +464,88 @@ pub struct RingWriter<T: RingSample> {
     shared: Arc<Shared<T>>,
     next_block: u64,
     stream_end: Option<u64>,
+    gaps_total: u64,
     next_provenance_key: u64,
-    current_provenance: Option<(u64, ProvenanceHandle)>,
-    /// `(provenance key, first block using it)`, oldest first; mirrors the shared table.
-    provenance_refs: VecDeque<(u64, u64)>,
+    /// `(key, table slot, handle)` of the newest block.
+    current_provenance: Option<(u64, usize, ProvenanceHandle)>,
+    /// `(key, first block using it, table slot)`, oldest first. At most `block_capacity + 1`.
+    live_provenance: VecDeque<(u64, u64, usize)>,
+    /// Writer-side mirror: table slots holding a key some retained block may reference.
+    slot_in_use: Box<[bool]>,
+    slot_cursor: usize,
 }
 
 impl<T: RingSample> RingWriter<T> {
-    /// Appends a block. Never blocks on readers.
+    /// Appends a block. Never blocks on readers and allocates nothing.
     ///
     /// `header.first_sample()` must not precede the previous block's end. A later start is a
     /// gap: the stored record gets [`Discontinuity::GAP`] and `dropped_before` from the counter
     /// jump.
     pub fn push(&mut self, header: &BlockHeader, samples: &[T]) -> Result<(), RingError> {
-        let shared = &*self.shared;
-        let n = samples.len() as u64;
+        let n = samples.len();
         if n == 0 {
             return Err(RingError::EmptyBlock);
         }
-        if n > shared.sample_capacity() {
+        if n as u64 > self.shared.sample_capacity() {
             return Err(RingError::BlockTooLarge {
-                len: samples.len(),
-                capacity: shared.sample_capacity() as usize,
+                len: n,
+                capacity: self.shared.cells.len(),
             });
         }
         let first = header.first_sample();
+        let end = first
+            .checked_add(n as u64)
+            .ok_or(RingError::IndexOverflow { first, len: n })?;
         let mut flags = header.discontinuity;
-        let dropped_before = match self.stream_end {
-            Some(end) if first < end => {
+        let (dropped_before, gap) = match self.stream_end {
+            Some(prev_end) if first < prev_end => {
                 return Err(RingError::NonMonotonic {
-                    expected_at_least: end,
+                    expected_at_least: prev_end,
                     got: first,
                 });
             }
-            Some(end) => first - end,
-            None => header.dropped_before,
+            Some(prev_end) => (first - prev_end, first - prev_end),
+            // Samples missing before the stream started are not part of the ring's stream.
+            None => (header.dropped_before, 0),
         };
         if dropped_before > 0 {
             flags |= Discontinuity::GAP;
         }
+        // Gap indices never exceed `first`, so this cannot overflow.
+        let gaps_total = self.gaps_total + gap;
 
         let block = self.next_block;
-        let provenance_key = self.provenance_key_for(&header.provenance, block);
+        // 1. Announce the record write. From here on, every block older than
+        //    `block + 1 − block_capacity` is invalid for every reader.
+        self.shared.meta_write_end.store(block + 1, SEQ);
+        let (provenance_key, provenance_slot) = self.provenance_for(&header.provenance, block);
         let shared = &*self.shared;
-
-        shared.meta_write_end.store(block + 1, CTRL);
-        let slot = &shared.meta[(block & shared.meta_mask) as usize];
-        slot.first_sample.store(first, DATA);
-        slot.len.store(n, DATA);
+        if block == 0 {
+            shared.stream_start.store(first, SEQ);
+        }
+        let slot = &shared.meta[(block % shared.meta_capacity()) as usize];
+        slot.first_sample.store(first, SEQ);
+        slot.len.store(n as u64, SEQ);
         slot.host_time_ns
-            .store(header.time.host_time.as_unix_nanos(), DATA);
-        slot.dropped_before.store(dropped_before, DATA);
-        slot.flags.store(u32::from(flags.bits()), DATA);
-        slot.provenance_key.store(provenance_key, DATA);
+            .store(header.time.host_time.as_unix_nanos(), SEQ);
+        slot.dropped_before.store(dropped_before, SEQ);
+        slot.gaps_total.store(gaps_total, SEQ);
+        slot.flags.store(u32::from(flags.bits()), SEQ);
+        slot.provenance_key.store(provenance_key, SEQ);
+        slot.provenance_slot.store(provenance_slot as u64, SEQ);
 
-        shared.sample_write_end.store(first + n, CTRL);
+        // 2. Announce the sample write, then store.
+        shared.sample_write_end.store(end, SEQ);
         shared.copy_in(first, samples);
 
-        shared.meta_head.store(block + 1, CTRL);
+        // 3. Commit: samples first, so a reader that sees the new head sees their end too.
+        shared.sample_commit_end.store(end, SEQ);
+        shared.meta_head.store(block + 1, SEQ);
         self.next_block = block + 1;
-        self.stream_end = Some(first + n);
+        self.stream_end = Some(end);
+        self.gaps_total = gaps_total;
 
-        if shared.waiters.load(CTRL) > 0 {
+        if shared.waiters.load(SEQ) > 0 {
             if let Ok(_guard) = shared.wake_lock.try_lock() {
                 shared.wake.notify_all();
             }
@@ -458,27 +565,54 @@ impl<T: RingSample> RingWriter<T> {
         }
     }
 
-    fn provenance_key_for(&mut self, handle: &ProvenanceHandle, block: u64) -> u64 {
-        if let Some((key, current)) = &self.current_provenance {
+    /// The provenance key and table slot for `block`. Must run after the record announce for
+    /// `block`, so any slot it reuses is referenced only by invalid blocks.
+    fn provenance_for(&mut self, handle: &ProvenanceHandle, block: u64) -> (u64, usize) {
+        if let Some((key, slot, current)) = &self.current_provenance {
             if current == handle {
-                return *key;
+                return (*key, *slot);
+            }
+        }
+        let oldest_valid_block = (block + 1).saturating_sub(self.shared.meta_capacity());
+        // The front key's last block is the block before the next key's first block.
+        while self.live_provenance.len() >= 2 && self.live_provenance[1].1 <= oldest_valid_block {
+            if let Some((_, _, slot)) = self.live_provenance.pop_front() {
+                self.slot_in_use[slot] = false;
             }
         }
         let key = self.next_provenance_key;
         self.next_provenance_key += 1;
-        // Blocks older than this are gone from the metadata ring once `block` is written.
-        let oldest_block = (block + 1).saturating_sub(self.shared.meta_capacity());
-        {
-            let mut table = lock(&self.shared.provenance);
-            while self.provenance_refs.len() >= 2 && self.provenance_refs[1].1 <= oldest_block {
-                self.provenance_refs.pop_front();
-                table.pop_front();
+        let slot = self.claim_slot(key, handle);
+        self.live_provenance.push_back((key, block, slot));
+        self.current_provenance = Some((key, slot, handle.clone()));
+        (key, slot)
+    }
+
+    /// Stores `(key, handle)` in a free table slot, skipping (never waiting on) slots a reader
+    /// holds. At most `block_capacity + 1` of the `2 × block_capacity + 8` slots are in use, so a
+    /// free, unheld slot exists unless more readers than that are inside a lookup at once.
+    fn claim_slot(&mut self, key: u64, handle: &ProvenanceHandle) -> usize {
+        let table = &self.shared.provenance;
+        loop {
+            for _ in 0..table.len() {
+                let slot = self.slot_cursor;
+                self.slot_cursor = (self.slot_cursor + 1) % table.len();
+                if self.slot_in_use[slot] {
+                    continue;
+                }
+                let mut entry = match table[slot].try_lock() {
+                    Ok(entry) => entry,
+                    Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                    Err(TryLockError::WouldBlock) => continue,
+                };
+                let evicted = entry.replace((key, handle.clone()));
+                drop(entry);
+                drop(evicted);
+                self.slot_in_use[slot] = true;
+                return slot;
             }
-            table.push_back((key, handle.clone()));
+            std::hint::spin_loop();
         }
-        self.provenance_refs.push_back((key, block));
-        self.current_provenance = Some((key, handle.clone()));
-        key
     }
 }
 
@@ -491,7 +625,7 @@ impl RingWriter<Complex32> {
 
 impl<T: RingSample> Drop for RingWriter<T> {
     fn drop(&mut self) {
-        self.shared.closed.store(true, CTRL);
+        self.shared.closed.store(true, SEQ);
         self.shared.notify_all_blocking();
     }
 }
@@ -510,25 +644,30 @@ impl<T: RingSample> Clone for RingHandle<T> {
 }
 
 impl<T: RingSample> RingHandle<T> {
-    /// Samples retained (after rounding to a power of two).
+    /// Samples retained.
     pub fn sample_capacity(&self) -> usize {
-        self.shared.sample_capacity() as usize
+        self.shared.cells.len()
     }
 
-    /// Block metadata records retained (after rounding).
+    /// Block metadata records retained.
     pub fn block_capacity(&self) -> usize {
-        self.shared.meta_capacity() as usize
+        self.shared.meta.len()
     }
 
     /// Blocks committed so far.
     pub fn blocks_written(&self) -> u64 {
-        self.shared.meta_head.load(CTRL)
+        self.shared.meta_head.load(SEQ)
+    }
+
+    /// First sample index of the stream, once a block has been committed.
+    pub fn stream_start(&self) -> Option<u64> {
+        (self.shared.meta_head.load(SEQ) > 0).then(|| self.shared.stream_start.load(SEQ))
     }
 
     /// Stream sample index one past the newest committed block, if any.
     pub fn next_sample(&self) -> Option<u64> {
         loop {
-            let head = self.shared.meta_head.load(CTRL);
+            let head = self.shared.meta_head.load(SEQ);
             if head == 0 {
                 return None;
             }
@@ -547,52 +686,53 @@ impl<T: RingSample> RingHandle<T> {
 
     /// The writer has been dropped.
     pub fn is_closed(&self) -> bool {
-        self.shared.closed.load(CTRL)
+        self.shared.closed.load(SEQ)
     }
 
-    /// A reader starting at the live edge: it sees the next block written.
+    /// Best-effort: pins the sample storage in RAM so capture never waits on paging. Failure
+    /// (usually a memlock limit) leaves the ring fully usable.
+    pub fn lock_memory(&self) -> MemoryLock {
+        crate::rt::lock_memory(&self.shared.cells)
+    }
+
+    /// A reader starting at the live edge: it sees the next block written (on an empty ring, the
+    /// first block of the stream, wherever its sample counter starts).
     pub fn reader(&self) -> RingReader<T> {
         let shared = &*self.shared;
-        let (next_sample, next_block) = loop {
-            let head = shared.meta_head.load(CTRL);
+        let cursor = loop {
+            let head = shared.meta_head.load(SEQ);
             if head == 0 {
-                break (0, 0);
+                break Cursor::Unresolved { from: 0 };
             }
             if let Some(m) = shared.read_meta(head - 1) {
-                break (m.end(), head);
+                break Cursor::At {
+                    sample: m.end(),
+                    block: head,
+                    gaps: m.gaps_total,
+                };
             }
         };
-        RingReader::new(Arc::clone(&self.shared), next_sample, next_block, None)
+        RingReader::new(Arc::clone(&self.shared), cursor)
     }
 
-    /// A reader starting at stream sample `sample` (e.g. a pre-trigger position). If that
-    /// history has already been overwritten, the first read reports [`ReadOutcome::Overrun`].
+    /// A reader starting at stream sample `sample` (e.g. a pre-trigger position), or at the
+    /// stream start if that is later. A sample in the future is waited for. If that history has
+    /// already been overwritten, the first read reports [`ReadOutcome::Overrun`].
     pub fn reader_at(&self, sample: u64) -> RingReader<T> {
-        let shared = &*self.shared;
-        let (block, meta) = shared.locate(sample);
-        let mut pending = None;
-        let mut position = sample;
-        if let Some(m) = meta {
-            if sample < m.first_sample {
-                // `sample` lies before block `block`. That is a known gap (or before the stream
-                // started) only if the previous block's metadata is still retained.
-                let known = block == 0 || shared.read_meta(block - 1).is_some();
-                if !known {
-                    pending = Some(m.first_sample - sample);
-                    position = m.first_sample;
-                }
-            }
-        }
-        if position < shared.oldest_valid_sample() && meta.is_some() {
-            // Samples gone even though metadata survives: report on first read.
-            pending.get_or_insert(0);
-        }
-        RingReader::new(Arc::clone(&self.shared), position, block, pending)
+        RingReader::new(
+            Arc::clone(&self.shared),
+            Cursor::Unresolved { from: sample },
+        )
     }
 
-    /// Starts a pre-trigger capture of `window`; see [`PreTriggerCapture`].
-    pub fn pre_trigger(&self, window: TriggerWindow) -> PreTriggerCapture<T> {
+    /// Starts an allocating pre-trigger capture of `window`; see [`PreTriggerCapture`].
+    pub fn pre_trigger(&self, window: TriggerWindow) -> Result<PreTriggerCapture<T>, CaptureError> {
         PreTriggerCapture::new(self, window)
+    }
+
+    /// Streams `window` chunk by chunk without allocating it; see [`TriggerStream`].
+    pub fn trigger_stream(&self, window: TriggerWindow) -> TriggerStream<T> {
+        TriggerStream::new(self, window)
     }
 }
 
@@ -617,7 +757,9 @@ pub struct ReadChunk {
     pub block_start: bool,
     /// The block's discontinuity flags (only when `block_start`).
     pub discontinuity: Discontinuity,
-    /// Samples the source dropped before the block (only when `block_start`).
+    /// Source-gap indices between this reader's previous position and the chunk (only when
+    /// `block_start`). For a contiguous reader this is the block's recorded gap; after an overrun
+    /// it excludes any part already counted in the overrun's `gap_samples`.
     pub dropped_before: u64,
     /// Provenance in force for every sample of the chunk.
     pub provenance: ProvenanceHandle,
@@ -640,11 +782,16 @@ impl ReadChunk {
 pub enum ReadOutcome {
     /// Samples were copied.
     Data(ReadChunk),
-    /// The reader was lapped: `dropped_samples` stream indices were skipped, and reading
-    /// resumes at `resume_at`.
+    /// The reader was lapped (or its start was no longer retained). Stream indices from the
+    /// previous position to `resume_at` were skipped: `lost_samples + gap_samples` of them.
     Overrun {
-        /// Index distance skipped (includes any source gaps inside the skipped span).
-        dropped_samples: u64,
+        /// Samples the source produced that were overwritten before this reader copied them.
+        /// If the start of a [`RingHandle::reader_at`] was already gone when the reader was
+        /// positioned, block boundaries there are unknown and source gaps in that span are
+        /// counted here too.
+        lost_samples: u64,
+        /// Source-gap indices (never produced) inside the skipped span.
+        gap_samples: u64,
         /// Stream index the next read starts from.
         resume_at: u64,
     },
@@ -654,74 +801,97 @@ pub enum ReadOutcome {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Cursor {
+    /// Not yet positioned: starts at `from`, or at the stream start if later, once a block
+    /// reaching it is committed.
+    Unresolved { from: u64 },
+    /// Next sample `sample`; `block` is the first block that may hold it; `gaps` counts source-gap
+    /// indices in the stream before `sample`.
+    At { sample: u64, block: u64, gaps: u64 },
+}
+
+struct ReaderState {
+    cursor: Cursor,
+    policy: ResyncPolicy,
+    provenance_cache: Option<(u64, ProvenanceHandle)>,
+    samples_read: u64,
+    lost_samples: u64,
+    gap_samples: u64,
+    overruns: u64,
+    /// `meta_head` when the last read found nothing; waits park until it moves.
+    seen_head: u64,
+}
+
 /// An independent cursor over the ring. Attach with [`RingHandle::reader`] or
 /// [`RingHandle::reader_at`]; detach by dropping.
 pub struct RingReader<T: RingSample> {
     shared: Arc<Shared<T>>,
-    next_sample: u64,
-    next_block: u64,
-    policy: ResyncPolicy,
-    pending_overrun: Option<u64>,
-    provenance_cache: Option<(u64, ProvenanceHandle)>,
-    samples_read: u64,
-    dropped_samples: u64,
-    overruns: u64,
+    state: ReaderState,
 }
 
 impl<T: RingSample> RingReader<T> {
-    fn new(
-        shared: Arc<Shared<T>>,
-        next_sample: u64,
-        next_block: u64,
-        pending_overrun: Option<u64>,
-    ) -> Self {
+    fn new(shared: Arc<Shared<T>>, cursor: Cursor) -> Self {
         Self {
             shared,
-            next_sample,
-            next_block,
-            policy: ResyncPolicy::default(),
-            pending_overrun,
-            provenance_cache: None,
-            samples_read: 0,
-            dropped_samples: 0,
-            overruns: 0,
+            state: ReaderState {
+                cursor,
+                policy: ResyncPolicy::default(),
+                provenance_cache: None,
+                samples_read: 0,
+                lost_samples: 0,
+                gap_samples: 0,
+                overruns: 0,
+                seen_head: 0,
+            },
         }
     }
 
     /// Sets the resync policy.
     pub fn with_resync_policy(mut self, policy: ResyncPolicy) -> Self {
-        self.policy = policy;
+        self.state.policy = policy;
         self
     }
 
-    /// Stream index of the next sample this reader will return.
+    /// Stream index of the next sample this reader will account for.
     pub fn position(&self) -> u64 {
-        self.next_sample
+        match self.state.cursor {
+            Cursor::Unresolved { from } => from,
+            Cursor::At { sample, .. } => sample,
+        }
     }
 
     /// Samples returned so far.
     pub fn samples_read(&self) -> u64 {
-        self.samples_read
+        self.state.samples_read
     }
 
-    /// Total index distance skipped by overruns.
-    pub fn dropped_samples(&self) -> u64 {
-        self.dropped_samples
+    /// Samples lost to overruns (overwritten before they were read).
+    pub fn lost_samples(&self) -> u64 {
+        self.state.lost_samples
+    }
+
+    /// Source-gap indices passed so far (chunks' `dropped_before` plus overruns' `gap_samples`).
+    pub fn gap_samples(&self) -> u64 {
+        self.state.gap_samples
     }
 
     /// Number of overruns reported.
     pub fn overruns(&self) -> u64 {
-        self.overruns
+        self.state.overruns
     }
 
     /// Copies the next available samples into `out` without waiting. A chunk never spans a
     /// block boundary.
     pub fn read(&mut self, out: &mut [T]) -> ReadOutcome {
-        self.read_until(out, u64::MAX)
+        self.state.read(&self.shared, out, u64::MAX)
     }
 
-    /// Like [`RingReader::read`], waiting up to `timeout` for data.
+    /// Like [`RingReader::read`], waiting up to `timeout` for data. An empty `out` returns at once.
     pub fn read_timeout(&mut self, out: &mut [T], timeout: Duration) -> ReadOutcome {
+        if out.is_empty() {
+            return self.read(out);
+        }
         let deadline = Instant::now() + timeout;
         loop {
             match self.read(out) {
@@ -736,88 +906,7 @@ impl<T: RingSample> RingReader<T> {
 
     /// Reads samples with stream index below `limit`.
     pub(crate) fn read_until(&mut self, out: &mut [T], limit: u64) -> ReadOutcome {
-        if let Some(dropped) = self.pending_overrun.take() {
-            if dropped > 0 || self.next_sample >= self.shared.oldest_valid_sample() {
-                return self.report_overrun(dropped, self.next_block);
-            }
-            return self.resync();
-        }
-        if out.is_empty() || self.next_sample >= limit {
-            return ReadOutcome::Empty;
-        }
-        let shared = Arc::clone(&self.shared);
-        loop {
-            let closed = shared.closed.load(CTRL);
-            let head = shared.meta_head.load(CTRL);
-            if self.next_block >= head {
-                return if closed {
-                    ReadOutcome::Closed
-                } else {
-                    ReadOutcome::Empty
-                };
-            }
-            if self.next_sample < shared.oldest_valid_sample() {
-                return self.resync();
-            }
-            let Some(meta) = shared.read_meta(self.next_block) else {
-                // Metadata lapped (samples may survive): relocate, or report if unknowable.
-                let (block, m) = shared.locate(self.next_sample);
-                match m {
-                    Some(m) if m.first_sample <= self.next_sample => {
-                        self.next_block = block;
-                        continue;
-                    }
-                    _ => return self.resync(),
-                }
-            };
-            if self.next_sample >= meta.end() {
-                self.next_block += 1;
-                continue;
-            }
-            let block_start = self.next_sample <= meta.first_sample;
-            if block_start {
-                // Skips a source gap (recorded in the block's metadata) or a pre-stream position.
-                self.next_sample = meta.first_sample;
-            }
-            if self.next_sample >= limit {
-                return ReadOutcome::Empty;
-            }
-            let n = (meta.end() - self.next_sample)
-                .min(limit - self.next_sample)
-                .min(out.len() as u64) as usize;
-            let out = &mut out[..n];
-            if !shared.copy_out(self.next_sample, out) {
-                return self.resync();
-            }
-            let Some(provenance) = self.resolve_provenance(meta.provenance_key) else {
-                return self.resync();
-            };
-            let anchor = SampleTime {
-                sample_index: meta.first_sample,
-                host_time: meta.host_time,
-            };
-            let chunk = ReadChunk {
-                time: SampleTime {
-                    sample_index: self.next_sample,
-                    host_time: anchor.time_of(self.next_sample, provenance.tune.sample_rate_hz),
-                },
-                len: n,
-                block_start,
-                discontinuity: if block_start {
-                    meta.flags
-                } else {
-                    Discontinuity::NONE
-                },
-                dropped_before: if block_start { meta.dropped_before } else { 0 },
-                provenance,
-            };
-            self.next_sample += n as u64;
-            if self.next_sample == meta.end() {
-                self.next_block += 1;
-            }
-            self.samples_read += n as u64;
-            return ReadOutcome::Data(chunk);
-        }
+        self.state.read(&self.shared, out, limit)
     }
 
     /// Parks until the ring may have new data or `deadline` passes. `false` once past deadline.
@@ -827,10 +916,10 @@ impl<T: RingSample> RingReader<T> {
             return false;
         }
         let shared = &*self.shared;
-        shared.waiters.fetch_add(1, CTRL);
+        shared.waiters.fetch_add(1, SEQ);
         {
             let guard = lock(&shared.wake_lock);
-            if shared.meta_head.load(CTRL) <= self.next_block && !shared.closed.load(CTRL) {
+            if shared.meta_head.load(SEQ) <= self.state.seen_head && !shared.closed.load(SEQ) {
                 let slice = (deadline - now).min(WAIT_SLICE);
                 drop(
                     shared
@@ -840,55 +929,280 @@ impl<T: RingSample> RingReader<T> {
                 );
             }
         }
-        shared.waiters.fetch_sub(1, CTRL);
+        shared.waiters.fetch_sub(1, SEQ);
         true
     }
+}
 
-    fn resolve_provenance(&mut self, key: u64) -> Option<ProvenanceHandle> {
+impl ReaderState {
+    fn read<T: RingSample>(
+        &mut self,
+        shared: &Shared<T>,
+        out: &mut [T],
+        limit: u64,
+    ) -> ReadOutcome {
+        loop {
+            let step = match self.cursor {
+                Cursor::Unresolved { from } => self.resolve(shared, from),
+                Cursor::At {
+                    sample,
+                    block,
+                    gaps,
+                } => self.step(shared, out, limit, sample, block, gaps),
+            };
+            if let Some(outcome) = step {
+                return outcome;
+            }
+        }
+    }
+
+    /// `Empty`, or `Closed` if the writer was gone before `head` was loaded.
+    fn nothing(&mut self, closed: bool, head: u64) -> Option<ReadOutcome> {
+        self.seen_head = head;
+        Some(if closed {
+            ReadOutcome::Closed
+        } else {
+            ReadOutcome::Empty
+        })
+    }
+
+    /// Positions an unresolved cursor. `None` = retry the read.
+    fn resolve<T: RingSample>(&mut self, shared: &Shared<T>, from: u64) -> Option<ReadOutcome> {
+        let closed = shared.closed.load(SEQ);
+        let head = shared.meta_head.load(SEQ);
+        if head == 0 {
+            return self.nothing(closed, 0);
+        }
+        let stream_start = shared.stream_start.load(SEQ);
+        if from <= stream_start {
+            // Nothing precedes the stream start, so its gap count is 0 even if block 0 is gone:
+            // any loss from here is split exactly.
+            self.cursor = Cursor::At {
+                sample: stream_start,
+                block: 0,
+                gaps: 0,
+            };
+            return None;
+        }
+        let (block, meta) = shared.locate(from);
+        let Some(m) = meta else {
+            // At or beyond the newest block's end: wait for the block that reaches it.
+            self.cursor = Cursor::Unresolved { from };
+            return self.nothing(closed, block);
+        };
+        if m.first_sample <= from {
+            self.cursor = Cursor::At {
+                sample: from,
+                block,
+                gaps: m.gaps_total,
+            };
+            return None;
+        }
+        // `from` lies before block `block`. Its span is a source gap if the previous block is
+        // still known (it ends at or before `from`); otherwise that history is gone.
+        let gap = m.first_sample - from;
+        let previous_known = block
+            .checked_sub(1)
+            .is_some_and(|prev| shared.read_meta(prev).is_some());
+        if previous_known {
+            debug_assert!(gap <= m.gaps_total);
+            self.cursor = Cursor::At {
+                sample: from,
+                block,
+                gaps: m.gaps_total.saturating_sub(gap),
+            };
+            return None;
+        }
+        self.cursor = Cursor::At {
+            sample: m.first_sample,
+            block,
+            gaps: m.gaps_total,
+        };
+        Some(self.report_overrun(gap, 0, m.first_sample))
+    }
+
+    /// One read attempt from a positioned cursor. `None` = retry.
+    fn step<T: RingSample>(
+        &mut self,
+        shared: &Shared<T>,
+        out: &mut [T],
+        limit: u64,
+        pos: u64,
+        block: u64,
+        gaps: u64,
+    ) -> Option<ReadOutcome> {
+        if out.is_empty() || pos >= limit {
+            let head = shared.meta_head.load(SEQ);
+            return self.nothing(false, head);
+        }
+        let closed = shared.closed.load(SEQ);
+        let head = shared.meta_head.load(SEQ);
+        if block >= head {
+            return self.nothing(closed, head);
+        }
+        if pos < shared.oldest_valid_sample() {
+            return self.lapped(shared, pos, gaps);
+        }
+        let Some(m) = shared.read_meta(block) else {
+            return self.lapped(shared, pos, gaps);
+        };
+        if pos >= m.end() {
+            self.cursor = Cursor::At {
+                sample: pos,
+                block: block + 1,
+                gaps,
+            };
+            return None;
+        }
+        let from = pos.max(m.first_sample);
+        if from >= limit {
+            // The limit falls inside the source gap before this block: account the gap up to it.
+            let gap = limit - pos;
+            self.gap_samples += gap;
+            self.cursor = Cursor::At {
+                sample: limit,
+                block,
+                gaps: gaps + gap,
+            };
+            return self.nothing(false, head);
+        }
+        let n = (m.end() - from).min(limit - from).min(out.len() as u64) as usize;
+        let out = &mut out[..n];
+        match shared.copy_out(from, out) {
+            CopyOutcome::Copied => {}
+            CopyOutcome::Overwritten => return self.lapped(shared, pos, gaps),
+            CopyOutcome::NotCommitted => {
+                // Unreachable: `block` is committed, so are its samples.
+                debug_assert!(false, "committed block {block} has uncommitted samples");
+                return self.nothing(false, head);
+            }
+        }
+        let Some(provenance) = self.resolve_provenance(shared, &m) else {
+            // The slot was reused, so the record is stale by now.
+            return self.lapped(shared, pos, gaps);
+        };
+
+        // Success: only now does the cursor move.
+        let block_start = pos <= m.first_sample;
+        let gap = from - pos;
+        debug_assert!(!block_start || gaps + gap == m.gaps_total);
+        let end = from + n as u64;
+        self.cursor = Cursor::At {
+            sample: end,
+            block: if end == m.end() { block + 1 } else { block },
+            gaps: if block_start { m.gaps_total } else { gaps },
+        };
+        self.samples_read += n as u64;
+        self.gap_samples += gap;
+        let anchor = SampleTime {
+            sample_index: m.first_sample,
+            host_time: m.host_time,
+        };
+        Some(ReadOutcome::Data(ReadChunk {
+            time: SampleTime {
+                sample_index: from,
+                host_time: anchor.time_of(from, provenance.tune.sample_rate_hz),
+            },
+            len: n,
+            block_start,
+            discontinuity: if block_start {
+                m.flags
+            } else {
+                Discontinuity::NONE
+            },
+            dropped_before: gap,
+            provenance,
+        }))
+    }
+
+    fn resolve_provenance<T: RingSample>(
+        &mut self,
+        shared: &Shared<T>,
+        m: &BlockMeta,
+    ) -> Option<ProvenanceHandle> {
         if let Some((cached, handle)) = &self.provenance_cache {
-            if *cached == key {
+            if *cached == m.provenance_key {
                 return Some(handle.clone());
             }
         }
-        let handle = self.shared.provenance(key)?;
-        self.provenance_cache = Some((key, handle.clone()));
+        let handle = shared.provenance(m.provenance_key, m.provenance_slot)?;
+        self.provenance_cache = Some((m.provenance_key, handle.clone()));
         Some(handle)
     }
 
-    /// Moves the cursor past lost data according to the policy and reports the overrun.
-    fn resync(&mut self) -> ReadOutcome {
-        let shared = Arc::clone(&self.shared);
-        let (block, target) = match self.policy {
+    /// The data or metadata at `pos` is gone. Continues without loss when the samples survive
+    /// and the blocks between are still known; otherwise resyncs per policy and reports the
+    /// skipped span exactly. `None` = retry.
+    fn lapped<T: RingSample>(
+        &mut self,
+        shared: &Shared<T>,
+        pos: u64,
+        gaps: u64,
+    ) -> Option<ReadOutcome> {
+        if pos >= shared.oldest_valid_sample() {
+            let (block, meta) = shared.locate(pos);
+            let lossless = match meta {
+                None => true,
+                Some(m) => {
+                    m.first_sample <= pos
+                        || m.gaps_total.checked_sub(gaps) == Some(m.first_sample - pos)
+                }
+            };
+            if lossless {
+                self.cursor = Cursor::At {
+                    sample: pos,
+                    block,
+                    gaps,
+                };
+                return None;
+            }
+        }
+        let (block, meta, target) = match self.policy {
             ResyncPolicy::Latest => loop {
-                let head = shared.meta_head.load(CTRL);
+                let head = shared.meta_head.load(SEQ);
                 if head == 0 {
-                    break (0, self.next_sample);
+                    return self.nothing(false, 0);
                 }
                 if let Some(m) = shared.read_meta(head - 1) {
-                    break (head - 1, m.first_sample);
+                    break (head - 1, m, m.first_sample);
                 }
             },
             ResyncPolicy::Oldest => {
-                let oldest = shared.oldest_valid_sample().max(self.next_sample);
+                let oldest = shared.oldest_valid_sample().max(pos);
                 match shared.locate(oldest) {
-                    (block, Some(m)) => (block, m.first_sample.max(oldest)),
-                    (block, None) => (block, oldest),
+                    (block, Some(m)) => (block, m, m.first_sample.max(oldest)),
+                    // Only uncommitted samples lie beyond: nothing readable yet.
+                    (block, None) => return self.nothing(false, block),
                 }
             }
         };
-        let target = target.max(self.next_sample);
-        let dropped = target - self.next_sample;
-        self.next_sample = target;
-        self.report_overrun(dropped, block)
+        if target <= pos {
+            self.cursor = Cursor::At {
+                sample: pos,
+                block,
+                gaps,
+            };
+            return None;
+        }
+        let skipped = target - pos;
+        debug_assert!(meta.gaps_total >= gaps && meta.gaps_total - gaps <= skipped);
+        let gap = meta.gaps_total.saturating_sub(gaps).min(skipped);
+        self.cursor = Cursor::At {
+            sample: target,
+            block,
+            gaps: meta.gaps_total,
+        };
+        Some(self.report_overrun(skipped - gap, gap, target))
     }
 
-    fn report_overrun(&mut self, dropped: u64, block: u64) -> ReadOutcome {
-        self.next_block = block;
-        self.dropped_samples += dropped;
+    fn report_overrun(&mut self, lost: u64, gap: u64, resume_at: u64) -> ReadOutcome {
+        self.lost_samples += lost;
+        self.gap_samples += gap;
         self.overruns += 1;
         ReadOutcome::Overrun {
-            dropped_samples: dropped,
-            resume_at: self.next_sample,
+            lost_samples: lost,
+            gap_samples: gap,
+            resume_at,
         }
     }
 }
@@ -927,7 +1241,7 @@ mod tests {
         BlockHeader {
             time: SampleTime {
                 sample_index: first,
-                host_time: Timestamp::from_unix_nanos(first as i64 * 1000),
+                host_time: Timestamp::from_unix_nanos((first % (1 << 40)) as i64 * 1000),
             },
             provenance: prov.clone(),
             discontinuity: Discontinuity::NONE,
@@ -935,11 +1249,20 @@ mod tests {
         }
     }
 
-    /// Samples whose value encodes their stream index.
+    /// Samples whose bits encode their full 64-bit stream index.
     fn counter(first: u64, n: usize) -> Vec<Complex32> {
-        (0..n as u64)
-            .map(|i| Complex32::new((first + i) as f32, -((first + i) as f32)))
-            .collect()
+        (0..n as u64).map(|i| encode(first + i)).collect()
+    }
+
+    fn encode(index: u64) -> Complex32 {
+        Complex32::new(
+            f32::from_bits((index >> 32) as u32),
+            f32::from_bits(index as u32),
+        )
+    }
+
+    fn decode(s: Complex32) -> u64 {
+        (u64::from(s.re.to_bits()) << 32) | u64::from(s.im.to_bits())
     }
 
     fn push(w: &mut RingWriter<Complex32>, first: u64, n: usize, prov: &ProvenanceHandle) {
@@ -953,12 +1276,27 @@ mod tests {
         }
     }
 
+    fn overrun(outcome: ReadOutcome) -> (u64, u64, u64) {
+        match outcome {
+            ReadOutcome::Overrun {
+                lost_samples,
+                gap_samples,
+                resume_at,
+            } => (lost_samples, gap_samples, resume_at),
+            other => panic!("expected overrun, got {other:?}"),
+        }
+    }
+
+    fn ring(samples: usize, blocks: usize) -> (RingWriter<Complex32>, RingHandle<Complex32>) {
+        ring_buffer::<Complex32>(RingConfig {
+            sample_capacity: samples,
+            block_capacity: blocks,
+        })
+    }
+
     #[test]
     fn readers_see_contiguous_blocks_with_metadata() {
-        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
-            sample_capacity: 1024,
-            block_capacity: 16,
-        });
+        let (mut w, ring) = ring(1024, 16);
         let p = provenance(100e6);
         let mut r = ring.reader();
         assert!(matches!(
@@ -988,11 +1326,14 @@ mod tests {
     }
 
     #[test]
+    fn capacities_are_exact() {
+        let (_, ring) = ring(1000, 7);
+        assert_eq!((ring.sample_capacity(), ring.block_capacity()), (1000, 7));
+    }
+
+    #[test]
     fn gaps_are_index_jumps_and_flagged() {
-        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
-            sample_capacity: 1024,
-            block_capacity: 16,
-        });
+        let (mut w, ring) = ring(1024, 16);
         let p = provenance(100e6);
         let mut r = ring.reader();
         push(&mut w, 0, 10, &p);
@@ -1003,7 +1344,8 @@ mod tests {
         assert_eq!(c.first_sample(), 25);
         assert!(c.discontinuity.contains(Discontinuity::GAP));
         assert_eq!(c.dropped_before, 15);
-        assert_eq!(buf[0], Complex32::new(25.0, -25.0));
+        assert_eq!(decode(buf[0]), 25);
+        assert_eq!(r.gap_samples(), 15);
         assert!(matches!(
             w.push(&header(30, &p), &counter(30, 1)),
             Err(RingError::NonMonotonic { .. })
@@ -1012,36 +1354,24 @@ mod tests {
 
     #[test]
     fn overrun_latest_policy_counts_and_resyncs() {
-        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
-            sample_capacity: 1024,
-            block_capacity: 64,
-        });
+        let (mut w, ring) = ring(1024, 64);
         let p = provenance(100e6);
         let mut r = ring.reader();
         for b in 0..30 {
             push(&mut w, b * 100, 100, &p);
         }
         let mut buf = vec![Complex32::default(); 1000];
-        match r.read(&mut buf) {
-            ReadOutcome::Overrun {
-                dropped_samples,
-                resume_at,
-            } => assert_eq!((dropped_samples, resume_at), (2900, 2900)),
-            other => panic!("expected overrun, got {other:?}"),
-        }
+        assert_eq!(overrun(r.read(&mut buf)), (2900, 0, 2900));
         let c = data(r.read(&mut buf));
         assert_eq!((c.first_sample(), c.len), (2900, 100));
-        assert_eq!(buf[0], Complex32::new(2900.0, -2900.0));
-        assert_eq!(r.samples_read() + r.dropped_samples(), 3000);
+        assert_eq!(decode(buf[0]), 2900);
+        assert_eq!(r.samples_read() + r.lost_samples(), 3000);
         assert_eq!(r.overruns(), 1);
     }
 
     #[test]
     fn overrun_oldest_policy_resumes_at_oldest_retained_sample() {
-        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
-            sample_capacity: 1024,
-            block_capacity: 64,
-        });
+        let (mut w, ring) = ring(1024, 64);
         let p = provenance(100e6);
         let mut r = ring.reader().with_resync_policy(ResyncPolicy::Oldest);
         for b in 0..30 {
@@ -1049,90 +1379,234 @@ mod tests {
         }
         assert_eq!(ring.oldest_sample(), Some(3000 - 1024));
         let mut buf = vec![Complex32::default(); 1000];
-        match r.read(&mut buf) {
-            ReadOutcome::Overrun {
-                dropped_samples,
-                resume_at,
-            } => assert_eq!((dropped_samples, resume_at), (1976, 1976)),
-            other => panic!("expected overrun, got {other:?}"),
-        }
+        assert_eq!(overrun(r.read(&mut buf)), (1976, 0, 1976));
         let mut total = 0;
         let mut expect = 1976;
         while let ReadOutcome::Data(c) = r.read(&mut buf) {
             assert_eq!(c.first_sample(), expect);
-            assert_eq!(buf[0], Complex32::new(expect as f32, -(expect as f32)));
+            assert_eq!(decode(buf[0]), expect);
             expect += c.len as u64;
             total += c.len as u64;
         }
         assert_eq!(total, 1024);
-        assert_eq!(r.samples_read() + r.dropped_samples(), 3000);
+        assert_eq!(r.samples_read() + r.lost_samples(), 3000);
     }
 
     #[test]
-    fn metadata_ring_smaller_than_sample_history_is_accounted() {
-        // 8 metadata records but samples for 1024: history is limited by metadata.
-        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
-            sample_capacity: 1024,
-            block_capacity: 8,
-        });
+    fn overrun_separates_lost_samples_from_source_gaps() {
+        // Blocks of 100 with a 1000-sample source gap before block 5; the reader is lapped
+        // across the gap. Regression: the gap was counted both in the overrun and again in the
+        // resumed chunk's `dropped_before`.
+        let (mut w, ring) = ring(512, 64);
+        let p = provenance(100e6);
+        let mut r = ring.reader().with_resync_policy(ResyncPolicy::Latest);
+        let mut first = 0;
+        for b in 0..10 {
+            if b == 5 {
+                first += 1000;
+            }
+            push(&mut w, first, 100, &p);
+            first += 100;
+        }
+        let mut buf = vec![Complex32::default(); 512];
+        // Span [0, 1900): 900 samples lost, 1000 gap indices.
+        assert_eq!(overrun(r.read(&mut buf)), (900, 1000, 1900));
+        let c = data(r.read(&mut buf));
+        assert_eq!((c.first_sample(), c.dropped_before), (1900, 0));
+        assert!(matches!(r.read(&mut buf), ReadOutcome::Empty));
+        assert_eq!(
+            r.samples_read() + r.lost_samples() + r.gap_samples(),
+            r.position()
+        );
+        assert_eq!((r.lost_samples(), r.gap_samples()), (900, 1000));
+    }
+
+    #[test]
+    fn metadata_ring_lap_is_accounted_exactly() {
+        // 4 metadata records but samples for 1024: history is limited by metadata. Regression:
+        // readers accepted records of unwritten blocks and skipped forward silently.
+        let (mut w, ring) = ring(1024, 4);
         let p = provenance(100e6);
         let mut r = ring.reader().with_resync_policy(ResyncPolicy::Oldest);
         for b in 0..20 {
             push(&mut w, b * 10, 10, &p);
         }
         let mut buf = vec![Complex32::default(); 1000];
-        match r.read(&mut buf) {
-            ReadOutcome::Overrun {
-                dropped_samples, ..
-            } => assert_eq!(dropped_samples, 120),
-            other => panic!("expected overrun, got {other:?}"),
+        assert_eq!(overrun(r.read(&mut buf)), (160, 0, 160));
+        let mut expect = 160;
+        while let ReadOutcome::Data(c) = r.read(&mut buf) {
+            assert_eq!(c.first_sample(), expect);
+            for (k, s) in buf[..c.len].iter().enumerate() {
+                assert_eq!(decode(*s), expect + k as u64);
+            }
+            expect = c.end_sample();
         }
-        while let ReadOutcome::Data(_) = r.read(&mut buf) {}
-        assert_eq!(r.samples_read() + r.dropped_samples(), 200);
+        assert_eq!(expect, 200);
+        assert_eq!(r.samples_read() + r.lost_samples(), 200);
+    }
+
+    #[test]
+    fn metadata_lap_mid_block_counts_unknown_span_as_lost() {
+        // The reader is mid-block when block records are overwritten; samples survive, but the
+        // block boundaries in between are unknown, so the span is reported, never skipped.
+        let (mut w, ring) = ring(1 << 12, 2);
+        let p = provenance(100e6);
+        let mut r = ring.reader();
+        push(&mut w, 0, 100, &p);
+        let mut buf = vec![Complex32::default(); 40];
+        assert_eq!(data(r.read(&mut buf)).len, 40);
+        push(&mut w, 100, 100, &p);
+        push(&mut w, 200, 100, &p);
+        push(&mut w, 300, 100, &p);
+        assert_eq!(overrun(r.read(&mut buf)), (260, 0, 300));
+        assert_eq!(r.samples_read() + r.lost_samples(), r.position());
+    }
+
+    #[test]
+    fn startup_offset_beyond_capacity_is_not_an_overrun() {
+        // Regression: a reader attached to an empty ring started at 0 and reported
+        // Overrun { 5_000_000 } when the stream started at a large core:global_index.
+        let (mut w, ring) = ring(1024, 16);
+        let p = provenance(100e6);
+        let mut live = ring.reader();
+        let mut from_zero = ring.reader_at(0);
+        push(&mut w, 5_000_000, 100, &p);
+        push(&mut w, 5_000_100, 100, &p);
+        let mut buf = vec![Complex32::default(); 1000];
+        for r in [&mut live, &mut from_zero] {
+            let c = data(r.read(&mut buf));
+            assert_eq!((c.first_sample(), c.dropped_before), (5_000_000, 0));
+            assert_eq!(decode(buf[0]), 5_000_000);
+            assert_eq!((r.lost_samples(), r.gap_samples(), r.overruns()), (0, 0, 0));
+        }
+        assert_eq!(ring.stream_start(), Some(5_000_000));
+    }
+
+    #[test]
+    fn startup_offset_below_capacity_is_not_silent_loss() {
+        let (mut w, ring) = ring(1024, 16);
+        let p = provenance(100e6);
+        let mut r = ring.reader();
+        push(&mut w, 300, 10, &p);
+        let mut buf = vec![Complex32::default(); 64];
+        let c = data(r.read(&mut buf));
+        assert_eq!((c.first_sample(), c.dropped_before), (300, 0));
+        assert_eq!(r.gap_samples() + r.lost_samples(), 0);
+    }
+
+    #[test]
+    fn index_overflow_is_an_error_and_does_not_wedge_the_ring() {
+        let (mut w, ring) = ring(1024, 16);
+        let p = provenance(100e6);
+        let mut r = ring.reader();
+        let first = u64::MAX - 10;
+        assert_eq!(
+            w.push(&header(first, &p), &counter(0, 20)),
+            Err(RingError::IndexOverflow { first, len: 20 })
+        );
+        // Ending exactly at u64::MAX is representable.
+        push(&mut w, u64::MAX - 20, 20, &p);
+        let mut buf = vec![Complex32::default(); 64];
+        let c = data(r.read(&mut buf));
+        assert_eq!((c.first_sample(), c.len), (u64::MAX - 20, 20));
+        assert_eq!(decode(buf[19]), u64::MAX - 1);
+        assert_eq!(
+            w.push(&header(u64::MAX, &p), &counter(0, 1)),
+            Err(RingError::IndexOverflow {
+                first: u64::MAX,
+                len: 1
+            })
+        );
     }
 
     #[test]
     fn provenance_changes_are_resolved_per_block() {
-        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
-            sample_capacity: 256,
-            block_capacity: 4,
-        });
+        let (mut w, ring) = ring(256, 4);
         let mut r = ring.reader();
         let mut buf = vec![Complex32::default(); 256];
-        // Many provenance changes: the table must stay bounded and correct.
-        for b in 0..100u64 {
-            let p = provenance(100e6 + b as f64);
-            w.push(&header(b * 10, &p), &counter(b * 10, 10)).unwrap();
+        let handles: Vec<_> = (0..100u64).map(|b| provenance(100e6 + b as f64)).collect();
+        // Every block gets a new provenance, so table slots are reused many times.
+        for (b, p) in handles.iter().enumerate() {
+            let b = b as u64;
+            w.push(&header(b * 10, p), &counter(b * 10, 10)).unwrap();
             let c = data(r.read(&mut buf));
-            assert_eq!(c.provenance, p);
+            assert_eq!(&c.provenance, p);
         }
-        assert!(lock(&ring.shared.provenance).len() <= ring.block_capacity() + 1);
+        assert!(w.live_provenance.len() <= ring.block_capacity() + 1);
+        assert!(w.slot_in_use.iter().filter(|u| **u).count() <= ring.block_capacity() + 1);
+    }
+
+    #[test]
+    fn lagging_reader_never_gets_a_reused_provenance_slot() {
+        let (mut w, ring) = ring(1 << 12, 2);
+        let mut r = ring.reader().with_resync_policy(ResyncPolicy::Oldest);
+        let handles: Vec<_> = (0..40u64).map(|b| provenance(1e6 * b as f64)).collect();
+        for (b, p) in handles.iter().enumerate() {
+            let b = b as u64;
+            w.push(&header(b * 10, p), &counter(b * 10, 10)).unwrap();
+        }
+        let mut buf = vec![Complex32::default(); 64];
+        loop {
+            match r.read(&mut buf) {
+                ReadOutcome::Data(c) => {
+                    let block = (c.first_sample() / 10) as usize;
+                    assert_eq!(c.provenance, handles[block]);
+                }
+                ReadOutcome::Overrun { .. } => {}
+                ReadOutcome::Empty | ReadOutcome::Closed => break,
+            }
+        }
+        assert_eq!(r.position(), 400);
     }
 
     #[test]
     fn reader_at_old_history_reports_overrun_then_reads() {
-        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
-            sample_capacity: 256,
-            block_capacity: 64,
-        });
+        let (mut w, ring) = ring(256, 64);
         let p = provenance(100e6);
         for b in 0..10 {
             push(&mut w, b * 50, 50, &p);
         }
         let mut r = ring.reader_at(0).with_resync_policy(ResyncPolicy::Oldest);
         let mut buf = vec![Complex32::default(); 256];
-        match r.read(&mut buf) {
-            ReadOutcome::Overrun {
-                dropped_samples,
-                resume_at,
-            } => assert_eq!((dropped_samples, resume_at), (500 - 256, 500 - 256)),
-            other => panic!("expected overrun, got {other:?}"),
-        }
+        assert_eq!(overrun(r.read(&mut buf)), (244, 0, 244));
         let c = data(r.read(&mut buf));
         assert_eq!(c.first_sample(), 244);
         let mut r = ring.reader_at(460);
         let c = data(r.read(&mut buf));
         assert_eq!((c.first_sample(), c.len, c.block_start), (460, 40, false));
+    }
+
+    #[test]
+    fn reader_at_inside_a_gap_or_in_the_future() {
+        let (mut w, ring) = ring(1024, 16);
+        let p = provenance(100e6);
+        push(&mut w, 0, 100, &p);
+        push(&mut w, 150, 100, &p);
+        let mut buf = vec![Complex32::default(); 256];
+        // Inside the gap [100, 150): only the rest of the gap is counted.
+        let mut r = ring.reader_at(120);
+        let c = data(r.read(&mut buf));
+        assert_eq!((c.first_sample(), c.dropped_before), (150, 30));
+        // In the future: waits, then starts mid-block.
+        let mut r = ring.reader_at(300);
+        assert!(matches!(r.read(&mut buf), ReadOutcome::Empty));
+        push(&mut w, 250, 100, &p);
+        let c = data(r.read(&mut buf));
+        assert_eq!((c.first_sample(), c.len, c.dropped_before), (300, 50, 0));
+    }
+
+    #[test]
+    fn read_timeout_with_empty_buffer_returns_immediately() {
+        let (mut w, ring) = ring(1024, 16);
+        let p = provenance(100e6);
+        let mut r = ring.reader();
+        push(&mut w, 0, 10, &p);
+        let t = Instant::now();
+        assert!(matches!(
+            r.read_timeout(&mut [], Duration::from_secs(5)),
+            ReadOutcome::Empty
+        ));
+        assert!(t.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -1155,6 +1629,7 @@ mod tests {
         let c = RingConfig::for_duration(20e6, 30.0, 65_536);
         assert_eq!(c.sample_capacity, 600_000_000);
         assert_eq!(c.block_capacity, 9156);
-        assert_eq!(c.sample_bytes::<Complex<i8>>(), (1 << 30) * 2);
+        // Exact sizing: 1.2 GB for 30 s of ci8, not the 2.15 GB of power-of-two rounding.
+        assert_eq!(c.sample_bytes::<Complex<i8>>(), 600_000_000 * 2);
     }
 }
