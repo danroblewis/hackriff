@@ -59,7 +59,6 @@ Edges (docs/06 §5/§2.1): C23 depends on **C11 (channelizer) + C12 (occupancy)*
 - Incident load exceeding CPU: prioritise talkgroups, shed audio, keep records.
 - Late entry without a header: encryption status should default to "unknown", not "clear".
 - Vocoder crashes and recording backpressure.
-- **Legal:** publicly streaming call audio risks 47 USC 605 divulging; state mobile-scanner laws (docs/04 §1.3). Metadata-only indices are the safe sharing default.
 
 ## Testing
 - **Offline fixtures:**
@@ -102,4 +101,3 @@ Regenerated from `use-cases.yaml` (now includes the new proposed SIGNAL-080..086
 3. `docs/04 §8.3 "Encryption status"`
 4. `docs/03 §3.5 "Trunking and digital voice (the "CB/trunk complaint")"`
 5. `docs/04 §8.2 "Why wideband capture helps"`
-6. `docs/04 §1.3 "Legal considerations (US; not legal advice)"`

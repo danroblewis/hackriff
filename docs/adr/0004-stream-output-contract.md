@@ -18,7 +18,7 @@ Workflow step 7: stream bits (and messages, audio, IQ slices) to external progra
 - **Framing:** each stream opens with a **SigMF-style JSON header** (sample type/rate/centre, source emitter id, schema id, `content_class`), then framed records. Bit/symbol streams carry the header once; message streams use newline-delimited JSON records for ease of consumption. IQ slices use SigMF on disk ([docs/07 §2.12](../07-data-model.md)).
 - **Backpressure:** bounded queues per consumer with an explicit **drop policy** — a slow consumer is dropped, never the survey. Capture and detection are never blocked by egress. Consumers can request replay from a Recording for what they missed.
 - **Metadata on every record:** timestamp, frequency/emitter id, provenance ref, `content_class`.
-- **Gating:** stream-output is the enforcement point for restricted content (docs/06 §5). Records with a gated `content_class` (cellular/common-carrier paging content, 47 USC 605) are dropped or reduced to metadata before egress and never written to a Recording. Metadata always flows. **Provisional** pending the Phase 3 legal-guardrail confirmation with the user.
+- **Gating:** stream-output is the enforcement point for restricted content (docs/06 §5). Records with a gated `content_class` are dropped or reduced to metadata before egress and never written to a Recording. Metadata always flows. **Provisional** pending Phase 3 confirmation with the user.
 - **The API is the same surface the UI uses** ([ADR-0002](0002-ui-web-vs-native.md)): a control/query API (state, inventory, history) plus these data streams. Whether the control API and the data streams are one capability or two is the C24 split left open in docs/06 §5 — deferred to implementation; both live in this contract.
 
 ## Consequences
@@ -26,4 +26,4 @@ Workflow step 7: stream bits (and messages, audio, IQ slices) to external progra
 - External programs subscribe to a socket and get framed, self-describing streams — the "pluggable consumers" goal, with no coupling to hackriff internals.
 - One contract serves both internal plugins and external egress, reducing surface area.
 - The drop-not-block rule keeps the real-time path safe under a slow or hostile consumer.
-- Gating in one place makes the legal guardrail auditable.
+- Gating in one place makes it auditable.

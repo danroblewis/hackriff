@@ -72,7 +72,6 @@ Without it, a city inventory fills with ghosts and narrowband rasters are misrea
 - **Clipping:** clipped blocks invalidate power readings and hide IMD.
 - **Clone variability:** per-unit calibration, never shared tables (docs/01 §7.2 "Fundamentally limiting (don't inherit)").
 - **FM pilot:** the pilot is relative to the station carrier. Cross-check against a second reference.
-- **Legal:** cellular signals are used for sync timing only, never content (docs/04 §1.3 "Legal considerations (US; not legal advice)").
 
 ## Testing
 - **Synthetic tones:** known ε (e.g. 15 ppm); assert ε̂ within ±0.1 ppm (estimate target). Also a synthetic FM stereo MPX for the pilot path.

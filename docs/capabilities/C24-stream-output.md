@@ -31,7 +31,7 @@ Streams bits, soft symbols, decoded messages, audio and IQ slices to external pr
 - **Self-describing streams:** SigMF metadata conventions for headers; detections and classifications as annotations (docs/03 §1.6). A consumer should be able to save a stream as a valid SigMF pair.
 - **Timestamps:** carry sample-accurate time indices from C03 end to end, not arrival time (docs/06 C03). This lets consumers join streams.
 - **Backpressure:** bounded ring per subscriber. Never let an external consumer stall C03/C11. Emit explicit gap frames with drop counts. Metrics are exposed to C39.
-- **Content gating (C24 is the enforcement point, docs/06 §5):** C24 is where restricted-content gating (cellular, common-carrier paging content, 47 USC 605) is enforced. Metadata is **always** allowed; content is gated on a **content-class flag set at classification**, with C25 (recording) and C27 (inventory) honoring the same flag. Frames flagged metadata-only or encrypted never carry payload; streaming content is where 47 USC 605 "divulging" risk lies (docs/04 §1.3: "recording is not the risk; publishing or streaming contents can be"). Own-traffic decrypted content (C22 own-key decryption) is allowed. **Provisional** — a Phase 3 legal-guardrail ADR pins the policy.
+- **Content gating (C24 is the enforcement point, docs/06 §5):** Metadata is **always** allowed; content is gated on a **content-class flag set at classification**, with C25 (recording) and C27 (inventory) honoring the same flag. Frames flagged metadata-only or encrypted never carry payload. Own-traffic decrypted content (C22 own-key decryption) is allowed. **Provisional** — a Phase 3 ADR pins the policy.
 - **Control plane:** keep API-first scripting from day one (Mayhem's USB shell lesson, docs/01 §7.1 #4; SDRangel REST automation, docs/03 §2.2), but separate it from the data plane.
 - **Wide IQ:** full-window 20 Msps IQ is 40 MB/s (docs/02 §3.1). Default to channel-rate slices and offer full-rate only locally. VITA-49 packetization is the professional precedent for IQ streams (docs/02 §4 item 5).
 
@@ -46,7 +46,7 @@ Streams bits, soft symbols, decoded messages, audio and IQ slices to external pr
 - **SigDigger/Suscan:** UDP sample/symbol broadcast; ZeroMQ plugin (docs/03 §3.4). Licence: check.
 - **rtl_433:** JSON/MQTT/InfluxDB outputs, the `messages` pattern (docs/04 §7.5). Licence: check.
 - **csdr:** pipe DSP chaining (docs/03 §1.4). **OpenWebRX+:** PSKReporter/APRS-IS/WSPRnet uploads (docs/03 §2.4).
-- **Trunk Recorder:** OpenMHz/Broadcastify uploads, a legal-review case (docs/03 §3.5).
+- **Trunk Recorder:** OpenMHz/Broadcastify uploads (docs/03 §3.5).
 - **DeepSig OmniSIG:** VITA-49 in, JSON/SigMF out (docs/03 §3.9).
 - **GPL isolation:** a socket or pipe boundary keeps GPL producers and consumers in separate processes. The licence decision is deferred.
 
@@ -93,13 +93,12 @@ Regenerated from `use-cases.yaml`:
 - **Transport ADR:** pipes plus Unix/TCP sockets, ZeroMQ, gRPC, MQTT, or VITA-49 for IQ? The docs only survey precedents.
 - **Data-egress vs control-API split (provisional, docs/06 §5):** docs/06 C24 bundles the data-plane streams and "the API surface other tools script against"; whether these are one capability or two is deferred to the **Phase 3 stream-contract ADR**.
 - **Layer D is not a chain (resolved, docs/06 §2.1):** C24 takes input from *all* of Layer D (plus C03/C11); the old linear C19→…→C24 edge is dropped. Whether C22 plugins also consume C24 streams is a stream-contract ADR question.
-- **Restricted-content gating (resolved, docs/06 §5):** C24 is the enforcement point (metadata always allowed, content gated on a content-class flag); a Phase 3 legal-guardrail ADR pins it. Network auth TBD.
+- **Restricted-content gating (resolved, docs/06 §5):** C24 is the enforcement point (metadata always allowed, content gated on a content-class flag); a Phase 3 ADR pins it. Network auth TBD.
 - Frame schema vs docs/07; public uploads (PSKReporter, SondeHub): C24 or C29?
 
 ## Reading list
 1. `docs/03 §1.6 "Metadata: SigMF"`
-2. `docs/04 §1.3 "Legal considerations (US; not legal advice)"`
-3. `docs/03 §2.2 "SDRangel — the most engineering-grade open-source receiver"` (sinks, REST)
-4. `docs/01 §7.1 "Worth keeping from PortaPack/Mayhem"` (API-first control, item 4)
-5. `docs/02 §3.1 "Throughput math"`
+2. `docs/03 §2.2 "SDRangel — the most engineering-grade open-source receiver"` (sinks, REST)
+3. `docs/01 §7.1 "Worth keeping from PortaPack/Mayhem"` (API-first control, item 4)
+4. `docs/02 §3.1 "Throughput math"`
 6. `docs/03 §3.4 "Protocol reverse engineering and signal inspection"` (SigDigger UDP/ZeroMQ)

@@ -49,7 +49,7 @@ This cheaply moves wideband infrastructure out of the "unknown" pile (workflow s
 ## Prior art and reuse
 - **gr-inspector:** OFDM estimator (RESEARCH-005). Stale (GNU Radio 3.8). Licence: check.
 - **LTE-Cell-Scanner:** PSS/SSS with large initial offsets. Licence: check.
-- **srsRAN:** LTE sync reference. Licence: check; legal fence applies.
+- **srsRAN:** LTE sync reference. Licence: check.
 - **GNSS-SDR:** acquisition; share the core with C36. Licence: check.
 - **TorchSig 2.2:** 802.11a/Zigbee/BLE synthetic signals. MIT.
 - **PySDR:** OFDM chapter (RESEARCH-077).
@@ -61,7 +61,7 @@ This cheaply moves wideband infrastructure out of the "unknown" pile (workflow s
 - **ATSC 1.0 is 8-VSB, not OFDM** (docs/04 §1.2); use it as a negative control.
 - **Periodic spurs at the code-period lag** mimic DSSS; apply C05's spur map.
 - **Doppler plus ppm** enlarges the code search.
-- **Legal fence.** Cellular content is off-limits even when decodable (docs/04 §1.3). C16 stops at PHY parameters and broadcast sync/identity. PDCCH/RNTI work (AWARE-018/019, RESEARCH-024/025) needs legal review and is out of this card.
+- **Scope.** C16 stops at PHY parameters and broadcast sync/identity. PDCCH/RNTI work (AWARE-018/019, RESEARCH-024/025) is out of this card.
 
 ## Testing
 - **Synthetic:**
@@ -92,7 +92,7 @@ This cheaply moves wideband infrastructure out of the "unknown" pile (workflow s
 - AWARE-021 — DJI DroneID decoding
 
 ## Open questions
-- **Fenced items in the mapping.** C16 is primary for RESEARCH-022 (ReVoLTE: decrypting others' calls), RESEARCH-024/025 and Wi-Fi CSI sensing (PROP-065–067, out-of-scope). Under the CLAUDE.md guardrails these must not shape C16's scope.
+- **Out-of-scope mapping items.** C16 is primary for RESEARCH-022 (ReVoLTE: decrypting others' calls), RESEARCH-024/025 and Wi-Fi CSI sensing (PROP-065–067); these are out-of-scope and must not shape C16's scope.
 - **Shared acquisition.** Known-code search overlaps C36 (GNSS); PSS search overlaps C05. Share one core?
 - **CSS/LoRa and FHSS** have no parameter estimator in docs/06. Extend C16 to "spread spectrum incl. CSS", or assign to C14.
 - **Missing edge.** §2.1 omits C16 → C15.
@@ -103,7 +103,6 @@ This cheaply moves wideband infrastructure out of the "unknown" pile (workflow s
 ## Reading list
 1. docs/04 §4.8 "OFDM parameter estimation"
 2. docs/04 §4.9 "DSSS detection"
-3. docs/04 §1.3 "Legal considerations (US; not legal advice)"
-4. docs/04 §1.2 "What lives where (HF to ~6 GHz, US focus)"
-5. docs/04 §10.1 "Frequency calibration"
-6. docs/01 §7.3 "HackRF as a front end for Pi 5 / Orin Nano (± FPGA)"
+3. docs/04 §1.2 "What lives where (HF to ~6 GHz, US focus)"
+4. docs/04 §10.1 "Frequency calibration"
+5. docs/01 §7.3 "HackRF as a front end for Pi 5 / Orin Nano (± FPGA)"

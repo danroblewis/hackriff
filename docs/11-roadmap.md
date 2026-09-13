@@ -47,7 +47,7 @@ Each asserts on the data-model objects the use case must produce ([docs/07](07-d
 | E2E through the device interface + blind ground-truth harness (hidden truth lists, top-k explanation asserts, perturbed variants such as the off-raster FM station); existing acceptance tests audited | T-047 |
 | Recommended explanations: ranked top-k with an off-raster flag, which the harness asserts against | T-039 (M0, feeds T-047) |
 | Live HackRF serving: `hk serve`/`hackriffd` run the HackRF source by default through the full pipeline to inventory; no demo seeds | T-042 |
-| Authenticated control API with legal/TX gating: no TX endpoints, content gating kept on retune, audit log (M0's API was GET-only) | T-050 |
+| Authenticated control API with TX gating: no TX endpoints, content gating kept on retune, audit log (M0's API was GET-only) | T-050 |
 | SDR control panel: center entry/step/shift, drag-pan, scroll-zoom, span/rate, named gains, bias-tee, FFT size, averaging, waterfall speed, colour scale auto/manual, peak hold, markers/bookmarks, pause/resume, record. Follows [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus), [SDRangel](https://github.com/f4exb/sdrangel) and [SigDigger](https://github.com/BatchDrake/SigDigger) conventions but exploration-first (control-set survey is part of the task; unverified until then) | T-051 |
 | Hover readout (through the tunnel) and click-to-inspect | T-044 |
 | Multi-region selections as first-class, persisted objects (docs/07 addition), sent to demod/record/inspect | T-052 |
@@ -82,7 +82,7 @@ Ordered by shared-core coverage ([docs/06 §4.2](06-capability-map.md)): widen t
 | **M4** | Trunking | control-channel discovery + P25/DMR/SmartNet following + encryption flags (C23) | most-requested scanner capability; channelizer (C11) exists from M0; **pending user accept of SIGNAL-080..086** | vocoder-IP decision |
 | **M5** | Accessory-gated expansions | GNSS observables cluster (C36 + active antenna); HF/VLF science front ends; radiometry science (C33 + dish); Ku (LNB) | high reach but each gated on an accessory (docs/06 §4.3); sequenced by which accessory the user adds | hardware |
 | **M6** | Localization | RSSI walk-mapping (C31) first; coherent DF / passive radar (C32/C35) only with a second/coherent SDR (the generic device interface from M0b is the seam for it) | RSSI is native; the rest are `needs-other-sdr` | S7 |
-| **M7** | Device hardening + TX | on-device screen/enclosure UI, low-power tuning, TX experiments (C37, opt-in, legal-gated behind M0b's authenticated control API) | polish and the opt-in transmit path last | S6 |
+| **M7** | Device hardening + TX | on-device screen/enclosure UI, low-power tuning, TX experiments (C37, opt-in, gated behind M0b's authenticated control API) | polish and the opt-in transmit path last | S6 |
 
 ## 3. What this ordering optimises
 

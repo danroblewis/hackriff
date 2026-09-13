@@ -21,7 +21,7 @@ Ownership decisions (docs/06 §5): C22 **executes** known decoders while C21 **i
   - `Product`: files, such as SatDump images.
   - `PluginHealth`: up/down, restarts, CPU, backlog.
 - **Pipeline registry** (provisional): `signal type → chain → products`, declarative in the SatDump style. It can enter at IQ, audio, soft symbols or bits (docs/04 §7.5).
-- **Plugin manifest** (provisional): input kinds and rates, command, output parser, licence, legal class (e.g. "paging: metadata only").
+- **Plugin manifest** (provisional): input kinds and rates, command, output parser, licence, content class (e.g. "paging: metadata only").
 
 ## Methods
 - **Contract:** IQEngine-style. IQ in; IQ, audio, bytes or SigMF annotations out. Same for live and recorded input (docs/03 §3.4, §5.2).
@@ -29,9 +29,7 @@ Ownership decisions (docs/06 §5): C22 **executes** known decoders while C21 **i
 - **Routing:** classification plus priors select a registry entry. **Trial decoding** is the final arbiter ("if rtl_433 or DSD locks, that's the ground truth"; docs/03 §7). Ambiguous snippets can run several candidates; keep the CRC-valid result.
 - **Background decoding:** always-on schedules at low priority, pre-empted by interactive use (OpenWebRX+; docs/03 §2.4).
 - **Feedback:** CRC-valid decodes go to C27/C28 as labels and feed C15 fine-tuning (docs/04 §12 #12).
-- **Legal gating:**
-  - Common-carrier paging and cellular contents are off-limits even when decodable (docs/04 §1.3). The host drops content fields that manifests mark metadata-only.
-  - Encrypted payloads are flagged, never decrypted, except the user's own traffic with the user's keys (e.g. SIGNAL-051).
+- **Own-key decryption:** encrypted payloads are flagged, never decrypted, except the user's own traffic with the user's keys (e.g. SIGNAL-051).
 
 ## Platform constraints
 - Typically a few % of a core per decoder (docs/06 §2). Continuous decoders and SatDump pipelines are heaviest; budget against the Orin Nano's 6 A78AE cores (docs/02 §3.3).
@@ -66,7 +64,7 @@ Status from docs/03 §3.3, §3.5 and §3.6. **Licences: check** for all; the doc
 - Output parsing breaks across versions. Pin versions and record them in provenance.
 - Duplicates from overlapping channels or parallel trials: dedupe by CRC and time.
 - Non-CRC-checked "decodes" polluting C28 labels.
-- **Legal leakage:** multimon-ng prints pager text by default. Filter in the host.
+- **Content leakage:** multimon-ng prints pager text by default. Filter in the host.
 
 ## Testing
 - **Contract tests:** replay SigMF fixtures and compare `DecodedMessage` JSON to golden output.
@@ -95,7 +93,7 @@ Regenerated from `use-cases.yaml` (C22 is primary for 82 use cases; a representa
 - **IPC and framing:** pipes, sockets or the C24 transport? If C24, C22 depends on C24. (Phase 3 stream-contract ADR.)
 - Registry and manifest schema: adopt SatDump's pipeline format or our own?
 - **Own-key decryption (resolved, docs/06 §5):** C22 owns it (user keys, provenance-recorded); **provisional** pending the doc 07 provenance/key model.
-- **Restricted-content policy (resolved, docs/06 §5):** C24 is the enforcement point (metadata always allowed, content gated on a content-class flag set at classification); **provisional**, pinned by a Phase 3 legal-guardrail ADR.
+- **Restricted-content policy (resolved, docs/06 §5):** C24 is the enforcement point (metadata always allowed, content gated on a content-class flag set at classification); **provisional**, pinned by a Phase 3 ADR.
 - FEC decoding and deframing: C21 identifies structure, C22 executes decoders (docs/06 §5); shared library TBD.
 - Per-decoder licence ledger; IMBE/AMBE vocoder licensing for dsd-fme (Phase 3 ledger).
 - Start with 3–5 decoders; avoid general plugin infrastructure (one-developer constraint).
@@ -105,5 +103,4 @@ Regenerated from `use-cases.yaml` (C22 is primary for 82 use cases; a representa
 2. `docs/03 §5.2 "Best UX ideas that already exist (steal these)"`
 3. `docs/04 §7.5 "How existing tools approach it"`
 4. `docs/03 §7 "Implications for This Project (short)"`
-5. `docs/04 §1.3 "Legal considerations (US; not legal advice)"`
-6. `docs/01 §3.3 "Apps, external apps (.ppma), and the catalog"`
+5. `docs/01 §3.3 "Apps, external apps (.ppma), and the catalog"`

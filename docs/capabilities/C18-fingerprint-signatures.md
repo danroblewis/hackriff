@@ -19,7 +19,7 @@ Maintains editable signatures built on the docs/04 §7.6 fingerprint. It matches
   - Required/optional fields.
   - Provenance: user, rtl_433 import, or decoder-confirmed.
   - C22 pipeline binding.
-  - Legal tag (`metadata-only: encrypted`, `no-content: common-carrier paging`, docs/04 §1.3).
+  - Content-class tag (`metadata-only: encrypted`, `no-content: common-carrier paging`).
 - **Config:** clustering parameters, normalisation, match thresholds.
 
 ## Methods
@@ -60,7 +60,7 @@ Maintains editable signatures built on the docs/04 §7.6 fingerprint. It matches
 - **Sync-word ambiguity** from polarity and rotation.
 - **DBSCAN** is sensitive to density parameters and scaling.
 - **Receiver dependence.** RF fingerprints depend on receiver and channel (AWARE-048).
-- **Privacy and legal:**
+- **Privacy:**
   - Signatures can enable tracking people (TPMS re-identification, BLE tracking, ID census); keep instance IDs local.
   - Characterise rolling codes without replay.
   - Encrypted traffic gets metadata-only signatures.

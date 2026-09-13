@@ -57,10 +57,9 @@ Answers "what is *supposed* to be here?" and "is this expected?" for a frequency
 - **Regional differences:** 315 vs 433.92 MHz, 8.33 kHz aviation raster, 9 kHz AM raster.
 - **Self-reinforcement.** A history prior repeats early misclassifications; keep provenance and decay.
 - **Overweighted priors** hide the pirates and stuck transmitters the tool exists to find.
-- **Privacy and legal:**
+- **Privacy:**
   - ULS and amateur records name individuals. Show service and licence class by default; gate licensee identity.
   - Honour RadioReference terms.
-  - Labels like "cellular" or "common-carrier paging" never imply a content path (docs/04 §1.3).
 
 ## Testing
 - **Unit tests:**
@@ -107,8 +106,7 @@ Regenerated from `use-cases.yaml`:
 
 ## Reading list
 1. docs/04 §1.1 "Allocation vs. assignment vs. actual use"
-2. docs/04 §1.3 "Legal considerations (US; not legal advice)"
-3. docs/04 §1.2 "What lives where (HF to ~6 GHz, US focus)"
-4. docs/04 §11.2 "Mapping to an exploration device"
-5. docs/03 §3.7 "Signal identification references"
-6. docs/04 §12 "Takeaways: prioritized implementation list" (item 8)
+2. docs/04 §1.2 "What lives where (HF to ~6 GHz, US focus)"
+3. docs/04 §11.2 "Mapping to an exploration device"
+4. docs/03 §3.7 "Signal identification references"
+5. docs/04 §12 "Takeaways: prioritized implementation list" (item 8)

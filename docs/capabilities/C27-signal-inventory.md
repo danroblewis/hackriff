@@ -53,7 +53,7 @@ The persistent emitter database. For each emission cluster the device has seen i
 - **Moving targets vs a moving device:** the same aircraft appears at many sites; a fixed tower looks "new" at every new site.
 - **Multi-channel systems:** hoppers and trunked systems span many channels as one logical system (docs/04 §4.7, §8.4).
 - **Overconfident classifiers** mark unknowns as identified (docs/04 §5.4 #4).
-- **Legal:** encrypted traffic is metadata only. Never store cellular or common-carrier paging contents as "identities" (docs/04 §1.3, §8.3).
+- Encrypted traffic is metadata only. Never store cellular or common-carrier paging contents as "identities".
 - **Unbounded growth** from transient noise-like candidates: expire unconfirmed ones.
 
 ## Testing

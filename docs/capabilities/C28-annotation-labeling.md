@@ -51,7 +51,7 @@ Captures ground truth: user labels and corrections on detections, emitters and r
 - **Coordinate errors** when annotations move between full-rate and decimated recordings.
 - **Class imbalance:** FM broadcast and ISM sensors dominate exports.
 - **Taxonomy drift:** renamed classes orphan old labels.
-- **Legal:** sharing datasets that contain third-party content can be "divulging" (47 USC 605). Cellular and paging contents are off-limits, and encrypted signals are metadata only (docs/04 §1.3). Exports default to permitted content classes and must record the licence of each sample set (CLAUDE.md test strategy).
+- Encrypted signals are metadata only. Exports default to permitted content classes and must record the licence of each sample set (CLAUDE.md test strategy).
 
 ## Testing
 - **Labels on a fixture:** a SigMF fixture with known bursts, scripted user labels, and a mock decoder emitting CRC-valid frames. Assert Annotation rows; SigMF boxes within ±1 sample, including after decimation; decoder labels tagged source=decoder.
@@ -79,7 +79,7 @@ Regenerated from `use-cases.yaml` (primary, then notable secondary):
 - **Boundary with C18:** are user-edited signatures annotations, or signatures?
 - **Tags and bookmarks:** does C28 own free-form tags on emitters and frequency regions? docs/06 doesn't say.
 - **Decoder trust:** thresholds per protocol.
-- **Legal enforcement:** restricted-content gating is now owned by C24 as the enforcement point (docs/06 §5); C28 exports must honor the same content-class flag. The export-licence field owner awaits the Phase 3 legal-guardrail ADR.
+- **Content gating:** restricted-content gating is now owned by C24 as the enforcement point (docs/06 §5); C28 exports must honor the same content-class flag. The export-licence field owner awaits a Phase 3 ADR.
 - **Export format:** depends on the outcome of the C38 on-device fine-tuning spike.
 
 ## Reading list
@@ -88,4 +88,3 @@ Regenerated from `use-cases.yaml` (primary, then notable secondary):
 3. docs/03 §1.6 "Metadata: SigMF"
 4. docs/03 §7 "Implications for This Project (short)" (classification strategy)
 5. docs/03 §4.1 "Datasets and toolkits"
-6. docs/04 §1.3 "Legal considerations (US; not legal advice)"

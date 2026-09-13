@@ -46,7 +46,7 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 - **RTKLIB:** TEC (SPACE-023 ref). Licence: check.
 - **gnssrefl:** GNSS-IR (PROP-039 ref). Licence: check.
 - **Maintenance and licences:** status of all five is not assessed in the docs; doc 03 has no GNSS section, so GNSS-SDR, galmon and the rest have **unchecked licences — flagged for the Phase 3 licence ledger** (docs/06 §5).
-- **Mayhem "GPS Sim"** (`docs/01 §3.3`): **do not inherit.** GNSS transmission is illegal (`docs/04 §1.3`).
+- **Mayhem "GPS Sim"** (`docs/01 §3.3`): **do not inherit.**
 
 ## Pitfalls
 - A handheld indoors or near the body looks like jamming. Require an all-SV drop plus a floor rise.
@@ -92,4 +92,3 @@ Regenerated from `use-cases.yaml`:
 3. `docs/01 §1.2 "Specifications"` — bias-tee, clock, sample-rate limits.
 4. `docs/05 §2 "Satellites & GNSS: ionosphere and troposphere"` — science products.
 5. `docs/02 §1.8 "Clock accuracy (TCXO/OCXO/GPSDO)"`.
-6. `docs/04 §1.3 "Legal considerations (US; not legal advice)"`.

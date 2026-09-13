@@ -25,11 +25,10 @@
 
 - **Zoom/decimated narrowband view.** C07 promises 25 Hz bins, which at 20 Msps would need an ~800k-point FFT. Something must produce a decimated zoom stream: C07 or C11?
 - **Own-key decryption** of the user's own traffic, allowed by CLAUDE.md, has no capability.
-- **Restricted-content gating:** a policy that keeps cellular or common-carrier paging content and 47 USC 605 divulging out of recordings, streams and exports. Candidate owners: C22, C24, C25.
+- **Restricted-content gating:** a policy that keeps cellular or common-carrier paging content out of recordings, streams and exports. Candidate owners: C22, C24, C25.
 - **Conventional (non-trunked) digital voice** (P25/DMR/NXDN without a control channel): C20 + C22, or its own capability?
 - **OFDM demodulation.** C16 estimates OFDM parameters but nothing demodulates.
 - **Storage quota and retention policy** across C25/C26/C27 on a small disk.
-- **Legal export policy** for sharing recordings and inventories.
 - **Anomaly contract:** the shared shape of an "anomaly" that C08, C12 and C27 emit and C30 consumes.
 - **Attack-map view, dashboards and maps.** C39 bundles four products (live view, history browser, signal table, inspector), and nothing owns map/geo views or dashboards.
 - **Satellite-pass computation** (TLE propagation): C29, C34 or C30?
@@ -58,7 +57,7 @@
 ## 5. Scope and hardware_fit
 
 - **C32:** multi-site TDoA with the user's *own* receivers breaks the one-device scope. Only public remote receivers (e.g. KiwiSDR TDoA) fit.
-- **C37:** use cases that involve jamming, e.g. RESEARCH-027 "RollJam-style keyfob capture-and-replay" (jam + record + replay), should be `out-of-scope`, even on your own vehicle, because jamming itself is illegal (47 USC 333). Capture-and-analysis variants without jamming can stay.
+- **C37:** use cases that involve jamming, e.g. RESEARCH-027 "RollJam-style keyfob capture-and-replay" (jam + record + replay), should be `out-of-scope`, even on your own vehicle. Capture-and-analysis variants without jamming can stay.
 - **Trunking coverage gap:** docs/04 calls trunking the most-requested scanner capability, but docs/05 has only about 2 trunking use cases, so C23 lists 3 examples. Consider adding trunking use cases with new IDs.
 
 ## 6. Characterize layer (C13–C18)

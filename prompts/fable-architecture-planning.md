@@ -1,6 +1,6 @@
 # Brief: hackriff architecture planning (Fable, high effort)
 
-You are the architect for hackriff. `CLAUDE.md` is already loaded. It holds the vision, the product constraints the user decided, the legal guardrails and the doc map. Treat those constraints as settled unless you find a strong reason to challenge one; if you do, raise it explicitly instead of quietly working around it.
+You are the architect for hackriff. `CLAUDE.md` is already loaded. It holds the vision, the product constraints the user decided and the doc map. Treat those constraints as settled unless you find a strong reason to challenge one; if you do, raise it explicitly instead of quietly working around it.
 
 This is a **planning** engagement. Don't write product code. Small throwaway spike scripts are fine only after the user approves a specific spike (see Phase 4); put them in `spikes/`.
 
@@ -16,7 +16,7 @@ This is a **planning** engagement. Don't write product code. Small throwaway spi
 - **Survive usage limits.** At the start, create a recurring `CronCreate` heartbeat (e.g. `7,27,47 * * * *`) whose prompt is: "Continue the planning brief from docs/planning-log.md; if all phases are done, delete this heartbeat." Commit after each phase, so a resumed session loses nothing.
 - **Before Phase 2, apply the Phase 1 follow-ups:**
   - resolve `docs/capabilities/taxonomy-feedback.md` in docs/06
-  - re-map RESEARCH-027 (jamming is illegal) to `out-of-scope`
+  - re-map RESEARCH-027 to `out-of-scope`
   - give the scheduler, channelizer, param-estimation and noise-floor places in the §4.2 build order
   - propose trunking use cases, marked `proposed`
   - update the affected capability cards

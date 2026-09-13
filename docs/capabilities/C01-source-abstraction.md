@@ -46,7 +46,6 @@ One driver layer that controls every sample source and delivers timestamped samp
 - Clone "R10C" boards vary (docs/01 §1.1 "Signal chain and major components").
 - Temperature readout and `RADIO_CLOCK_CORRECTION` (USB API 1.13) are on `main`, not in a tagged release (docs/01 §1.6). Treat them as optional.
 - Unmodelled upconverter/LNB offsets corrupt every absolute frequency.
-- TX must be impossible without explicit enablement (docs/04 §1.3 "Legal considerations (US; not legal advice)").
 
 ## Testing
 - **Replay:** the SigMF source is first-class. Assert blocks, indices and metadata round-trip exactly.

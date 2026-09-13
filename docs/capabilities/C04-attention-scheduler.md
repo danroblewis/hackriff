@@ -56,7 +56,6 @@ Decides where the single half-duplex radio points. It alternates discovery sweep
 - **Observation bias:** more dwell yields more "new" detections. Normalise novelty by observation time.
 - **Long periods:** periodic emitters such as TPMS (minutes), weather sensors (30–60 s) and BLE (20 ms–10 s) need dwells longer than the period (docs/04 §2, feature 5).
 - **Thrashing:** frequent sweep↔stream switches waste settling time and trigger first-sweep-low artefacts.
-- **Legal:** TX only through C37 gating; receive-only by default (docs/04 §1.3 "Legal considerations (US; not legal advice)").
 
 ## Testing
 - **Offline discrete-event simulator:**

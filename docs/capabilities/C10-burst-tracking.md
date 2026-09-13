@@ -36,7 +36,6 @@ Links individual Detections over time into **Tracks/Emissions**: one emitter wit
 - **Fragmentation** from CFO drift, Doppler or low-SNR BW jitter; **merging** of co-channel emitters (many 433.92 MHz sensors share f_c; separate them with C18 fingerprints or decoded IDs).
 - **Spurious periodicity** from the processing itself (frame/sweep cadence, scheduler revisit) or from IMD products that inherit a strong signal's cadence. Check suspect flags.
 - **Hop-raster aliasing:** GCD on noisy f_c gives a too-small Δ; quantise to bins first.
-- **Legal:** grant/co-occurrence analysis is metadata; keep content out of C10 (docs/04 §1.3).
 
 ## Testing
 - **Synthetic:** (a) 3 emitters on one f_c with periods 30 s, 47 s, 60 s plus jitter → expect 1 track with 3 periodicities, or 3 tracks once fingerprints exist; (b) hopper with Δ = 1 MHz, 50 channels inside 20 MHz, T_h = 10 ms → hop set, Δ and rate recovered; (c) TDMA bursts at 30 ms slots → frame 60 ms found; (d) repeater pair at ±600 kHz with 50 ms lag → co-occurrence found; (e) scheduler-induced gaps inserted.

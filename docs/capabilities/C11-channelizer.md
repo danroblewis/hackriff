@@ -39,7 +39,6 @@ Splits the ≤20 MHz dwell window into many narrowband streams at once: a 2× ov
 - **Raster offset:** a crystal ppm error shifts every channel. Apply the C05 frequency correction before assigning rasters.
 - **Time alignment:** PFB and DDC group delays differ; compensate timestamps or C25/C10 timing drifts.
 - **Retunes** (C04) invalidate all streams; signal discontinuity. A slow consumer must not stall the window; drop and mark gaps per channel.
-- **Legal:** the channelizer is content-neutral, but routing policy must stop cellular and common-carrier paging *content* and encrypted-traffic decryption from reaching demods/outputs. Metadata only. `docs/04 §1.3 "Legal considerations (US; not legal advice)"`.
 
 ## Testing
 - **Synthetic:** tone comb on a 12.5 kHz raster ± half-channel offsets (ripple, adjacent-channel rejection, edge-straddle recovery); a +60 dB carrier next to a weak one (leakage); a 20 MHz chirp (boundary continuity). PFB vs reference DDC SNR loss < 0.5 dB (proposed).
@@ -67,7 +66,6 @@ Regenerated from `use-cases.yaml`:
 - GPU (CUDA/CuPy) vs CPU (liquid-dsp/VOLK) PFB default; tied to the pipeline-framework ADR and the "no rebuild to change pipelines" requirement (add/remove channels at runtime).
 - PFB prototype parameters and which rasters run by default (energy/power budget in low-power mode).
 - **Zoom-stream ownership (resolved, docs/06 §5):** C11 owns the decimated zoom stream; C07 FFTs it.
-- Where does routing/legal policy live: C22 registry or a channel-request gate? (Restricted-content gating is owned by C24 per docs/06 §5.)
 
 ## Reading list
 1. `docs/04 §3.7 "Channelization: DDC and polyphase filter banks"`
@@ -75,4 +73,3 @@ Regenerated from `use-cases.yaml`:
 3. `docs/02 §3.2 "DSP compute: order-of-magnitude feasibility"`
 4. `docs/02 §4 "FPGA roles in an exploration device"`
 5. `docs/03 §3.5 "Trunking and digital voice (the "CB/trunk complaint")"`
-6. `docs/04 §1.3 "Legal considerations (US; not legal advice)"`

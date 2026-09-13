@@ -46,7 +46,6 @@ Parks the radio on one real-time window of up to ~20 MHz and streams it into a R
 - **Unified memory:** a ring grown for long pre-trigger starves GPU inference. Enforce a hard cap.
 - **Starved survey:** long pinned leases (trunking, passes) starve discovery. C04 must see lease cost.
 - **Gain changes inside an extraction** alter apparent power. Segment on them.
-- **Legal:** buffering is content-neutral. Extraction for recording or streaming must respect cellular/paging content and §605 rules (docs/04 §1.3 "Legal considerations (US; not legal advice)").
 
 ## Testing
 - **Synthetic:** a sample-counter stream. Trigger at a known index and assert exact pre/post lengths with no gap. An injected gap produces a segment split plus flag.

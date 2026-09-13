@@ -88,7 +88,6 @@ Regenerated from `use-cases.yaml` (all C35 use cases are `needs-other-sdr`):
 - **Roadmap:** defer C35 until a multi-channel front end is chosen, or wrap blah2 as an external process (licence boundary)?
 - **Phase 4 spike (docs/06 §5):** can two frequency-locked HackRFs (shared CLKIN, Pro trigger) reach FM-radar phase stability? Same question as for C32 interferometry; the answer can move C35 use cases between `needs-other-sdr` and `needs-accessory`.
 - **ADR:** should C01 expose a `CoherentGroup` (shared timestamps, cal state), shared with C32?
-- **Policy:** Wi-Fi/people-sensing (PROP-060) isn't covered by CLAUDE.md guardrails.
 - **Inputs (resolved, docs/06 §5):** C35 inputs include illuminator location (C17) and ADS-B truth (C22/C29).
 
 ## Reading list

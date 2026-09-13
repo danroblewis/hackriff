@@ -57,8 +57,8 @@ The device is **receive-only by default**. TX needs explicit enablement tied to 
 - **URH simulator** (`docs/03 §3.4`): archived. Own-device test ideas only.
 
 ## Pitfalls
-- **"Replay" creep:** replaying others' keyfob, garage or pager signals is what the guardrails forbid. Provenance must be enforced, not advisory.
-- **Jamming inside research use cases:** RESEARCH-027 (RollJam: jam + record + replay) is now **`out-of-scope`** because jamming a receiver is illegal under 47 USC 333 regardless of target (docs/06 §5, §4.4). Capture-only variants (record and replay without jamming, e.g. SIGNAL-047, RESEARCH-028 RollBack) stay in scope.
+- **"Replay" creep:** replaying others' keyfob, garage or pager signals is out of scope. Provenance must be enforced, not advisory.
+- **Jamming inside research use cases:** RESEARCH-027 (RollJam: jam + record + replay) is now **`out-of-scope`** (docs/06 §5, §4.4). Capture-only variants (record and replay without jamming, e.g. SIGNAL-047, RESEARCH-028 RollBack) stay in scope.
 - **Allowlists vary by country and licence class:** ship none enabled.
 - **Always-denied bands:** hard-deny public safety, aviation, GNSS and cellular regardless of profile (`docs/04 §1.3`).
 - **Killing your own front end:** TX into an unattenuated receiver, or the amp left on in loopback.
@@ -90,7 +90,7 @@ Regenerated from `use-cases.yaml` (RESEARCH-027 jam+replay is excluded — `out-
 - RESEARCH-036 — ZigBee/802.15.4 security (KillerBee), own network only
 
 ## Open questions
-- **Build-time exclusion:** should TX also be a build-time feature flag? This is a legal/product ADR.
+- **Build-time exclusion:** should TX also be a build-time feature flag? This is a product ADR.
 - **Proving own-origin:** is attestation enough, or should captures be tied to a registered own-device fingerprint (C18)?
 - **C06 dependency:** docs/06 C37 omits C06, but sounders and WSPR need accurate time.
 - **Attack-framed use cases (resolved, docs/06 §5):** RESEARCH-027 (jamming) is `out-of-scope`; RESEARCH-028/032/038 stay as capture/replay-only or "study published findings, RX-only".
@@ -98,9 +98,8 @@ Regenerated from `use-cases.yaml` (RESEARCH-027 jam+replay is excluded — `out-
 - **External PA:** is a PA accessory in scope for HF licensed work?
 
 ## Reading list
-1. `docs/04 §1.3 "Legal considerations (US; not legal advice)"` — TX authority, own traffic, jamming.
-2. `docs/01 §1.2 "Specifications"` — TX power, RX limit, half-duplex.
-3. `docs/01 §1.7` (HackRF Pro) — hardware TX-disable, interpolation.
-4. `docs/05 §2 "Active SDR radar & sensing with your own transmitter"`; `docs/05 §5 "Wireless device security research (own devices)"`.
+1. `docs/01 §1.2 "Specifications"` — TX power, RX limit, half-duplex.
+2. `docs/01 §1.7` (HackRF Pro) — hardware TX-disable, interpolation.
+3. `docs/05 §2 "Active SDR radar & sensing with your own transmitter"`; `docs/05 §5 "Wireless device security research (own devices)"`.
 5. `docs/01 §3.3 "Apps, external apps (.ppma), and the catalog"` — what not to inherit.
 6. `docs/06 §3 "Mapping rules for `use-cases.yaml`"` — `needs-tx` versus `out-of-scope`.

@@ -72,7 +72,6 @@ C34 **consumes** the satellite passes that C29 computes from cached TLEs; TLE pr
 - **HF multipath:** O/X modes and multi-hop split carriers; single-peak tracking hides that. Keep spectra.
 - **Model error:** low-elevation refraction; LNB/transponder LO offsets.
 - **Echo false alarms:** direct-signal sidelobes, aircraft/meteor confusion, sporadic-E.
-- **Legal:** carrier-only; any content decode follows C22's rules.
 
 ## Testing
 - **Synthetic:**

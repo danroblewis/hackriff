@@ -213,7 +213,7 @@ A dwell on 902–928 MHz yields repeated Detections. C10 links them into a Track
 ## 6. Open questions (also in planning-log.md)
 
 - **Storage engine** (SQLite vs DuckDB; Parquet vs custom tiles) — Phase 3 storage ADR.
-- **`content_class` gating point** — provisionally C24 enforces; confirm in the legal-guardrail ADR.
+- **`content_class` gating point** — provisionally C24 enforces; confirm in a Phase 3 ADR.
 - **Own-key decryption** modelled as a C22 stage with key-source provenance — confirm.
 - **Retention/quota policy object** ownership across Recording/SpectrumTile/Detection — Phase 3.
 - **Timestamp error budget** for Provenance — Phase 4 spike (no hardware 1PPS on HackRF One).

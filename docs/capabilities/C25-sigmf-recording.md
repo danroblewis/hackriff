@@ -44,13 +44,13 @@ Turns transient IQ into durable SigMF evidence: triggered snippets with pre-trig
 - **Annotation coordinates:** sample indices break after decimation or appended captures. Store time/frequency too.
 - **Clock steps** (GNSS acquisition, NTP) mid-recording corrupt `captures` datetimes. Record clock source and lock state.
 - **IMD-polluted snippets:** clipped or IMD-polluted recordings become false "real signal" fixtures. Carry C05 suspect flags into meta.
-- **Legal:** recording is not the risk; divulging is (47 USC 605). Cellular and common-carrier paging contents are off-limits, and encrypted traffic is metadata only (docs/04 §1.3, §8.3). Tag each dataset with a content class so C24/C28 exports refuse third-party content.
+- Tag each dataset with a content class so C24/C28 exports refuse third-party content.
 ## Testing
 - **Trigger timing:** replay a SigMF fixture via the C01 file source with scripted bursts at known offsets. Assert the pre-trigger sample count, `captures` start time within 1 sample, and annotation boxes overlapping the injected bursts.
 - **Round-trip:** output passes sigmf-python validation and re-replays bit-identically.
 - **Quota:** a small tmpfs quota plus a synthetic trigger storm. Assert eviction order by class, pinned datasets never evicted, a consistent index, and no orphans.
 - **Crash:** kill -9 mid-write, then assert recovery marks the partial dataset.
-- **Legal gating:** export refuses a restricted content class.
+- **Content gating:** export refuses a restricted content class.
 - **Needs hardware:** sustained NVMe write alongside USB ingest and the channelizer on the Jetson; thermal throttling; power draw.
 
 ## Example use cases
@@ -68,7 +68,7 @@ Regenerated from `use-cases.yaml`:
 - **Provenance namespace:** the extension namespace must align with docs/07.
 - **Audio:** it has no SigMF-native home. WAV/Opus plus a SigMF-style sidecar?
 - **Storage budget:** who owns the device-wide budget across C25/C26/C27? docs/06 has no storage-manager capability.
-- **Legal export policy:** content-class policy cuts across C22–C25 and C28, and docs/06 names no owner.
+- **Content-class policy:** content-class policy cuts across C22–C25 and C28, and docs/06 names no owner.
 - **Boundary with C28:** C25 writes machine annotations at record time; C28 owns edits and exports. Confirm.
 
 ## Reading list
@@ -76,5 +76,4 @@ Regenerated from `use-cases.yaml`:
 2. docs/03 §2.2 "SDRangel — the most engineering-grade open-source receiver" (SigMF File Sink)
 3. docs/02 §3.1 "Throughput math"
 4. docs/04 §11.2 "Mapping to an exploration device"
-5. docs/04 §1.3 "Legal considerations (US; not legal advice)"
-6. docs/01 §3.5 "Recording and replay formats"
+5. docs/01 §3.5 "Recording and replay formats"

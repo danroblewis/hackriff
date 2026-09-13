@@ -18,7 +18,7 @@ Planning docs: `06` capability map, `07` data model, `08` architecture + `adr/` 
 | `docs/01-hackrf-and-portapack.md` | What HackRF/Mayhem can and can't do; what to keep from them |
 | `docs/02-sdr-landscape.md` | Front-end physics, hardware comparison, compute throughput math, hardware tiers |
 | `docs/03-sdr-software.md` | Existing tools to reuse or learn from (SDRangel, SigDigger, URH, rtl_433, Trunk Recorder, SatDump, IQEngine, Maia SDR, GNU Radio 4, FutureSDR, TorchSig); gap table |
-| `docs/04-radio-engineering-and-signals-analysis.md` | Algorithms: noise floor, CFAR, spectral kurtosis, parameter estimation, AMC, auto-demod/squelch, protocol ID, trunking, DF, calibration. §12 is a prioritized implementation list. §1.3 covers legality. |
+| `docs/04-radio-engineering-and-signals-analysis.md` | Algorithms: noise floor, CFAR, spectral kurtosis, parameter estimation, AMC, auto-demod/squelch, protocol ID, trunking, DF, calibration. §12 is a prioritized implementation list. |
 | `docs/05-use-cases-and-explorations.md` | **The feature goals.** 391 use cases with permanent IDs (`SPACE-`, `PROP-`, `AWARE-`, `SIGNAL-`, `RESEARCH-`). These become the test suite. |
 | `docs/use-cases.yaml` | Machine-readable copy of docs/05 and the source of truth for IDs. Planning adds `capabilities`, `hardware_fit` and `test_tier`. |
 
@@ -41,6 +41,7 @@ Further goals:
 - **A radio "attack map".** Like internet port-scan and botnet maps: explain *why* your spectrum changed by linking local anomalies to external events such as space weather, GNSS jamming, satellite passes, balloon launches and lightning. See docs/05 §3.
 - **Science is first-class.** Solar flares, noise-floor studies and propagation, down to what a radio engineer knows but rarely watches.
 - **General, not a decoder catalogue.** ADS-B, pagers and radiosondes are the well-known cases, not the point.
+- **Tune from the processed output.** Closed-loop refinement: demodulate and decode, measure output quality (e.g. discriminator offset, pilot/RDS lock, audio SNR, CRC-valid rate), and adjust centre, bandwidth and other parameters from it. Rough selections and detections get refined automatically, not set by hand.
 
 ## Product constraints (decided with the user, 2026-09-13)
 
@@ -78,13 +79,6 @@ Items in `docs/05` and `docs/use-cases.yaml` are acceptance targets:
   - **A mock SDR device** implements the same interface as the real HackRF source: tune, sample rate, gains, bias-tee, sweep, start/stop, timestamps, overruns. It replays recorded SigMF IQ behind that interface, honouring retunes and gain/rate changes realistically.
   - **The same tests can run against the real HackRF** as hardware-in-the-loop tests.
 - **Keep the device interface generic** so other SDRs (e.g. SoapySDR) can be added later. That's not required yet, but don't bake HackRF specifics into the core.
-
-## Legal
-
-The user handles legality themselves and does **not** want legal or licensing requirements driving development (decided 2026-09-13).
-- No legal reviews, no legal regression tests, and no merges blocked or delayed on legal or content-gating concerns.
-- Existing gating code can stay, but don't extend it. Where it gets in the way of a feature, default to permissive.
-- Only standing preferences: no transmit path unless the user asks for one, and no attack tooling against other people's systems.
 
 ## Working conventions
 

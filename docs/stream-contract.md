@@ -1,7 +1,6 @@
 # Stream-output contract (v1.1)
 
 **Status:** Engineering (T-016, T-014, T-022a). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `crates/hk-api/` (WebSocket bridge and read-only HTTP endpoints, §10), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults), and again after T-022a shipped the WebSocket bridge (§10 mapping and auth, §11 residuals).
-**Legal guardrail:** §6 is the single egress enforcement point for restricted content. Changing it is a core-interface change and needs review.
 
 One contract serves two uses:
 - **External consumers** of decoded messages, bits, symbols, IQ, audio and spectra (C24, workflow step 7).
@@ -30,7 +29,7 @@ One contract serves two uses:
 
 Each accepted connection is one consumer of one stream: it gets the header, then records from the moment it joined. Consumers never write back; control belongs to the control API.
 
-**Locality rule (legal guardrail).** Every egress path goes through one subscription point, `PublisherHandle::subscribe` (listeners, bridges, direct subscribers; plugin stdin through `FeedAttacher`). It enforces locality per consumer, not per listener:
+**Locality rule.** Every egress path goes through one subscription point, `PublisherHandle::subscribe` (listeners, bridges, direct subscribers; plugin stdin through `FeedAttacher`). It enforces locality per consumer, not per listener:
 - The writer is an `EgressWriter`, and its `Locality` comes from the type: `UnixStream` is `Local`, `TcpStream` is `Remote`.
 - Any other writer must be wrapped in `Declared::local` or `Declared::remote`. `Declared::local` asserts the bytes never leave the host, so it is reviewed code; a `TcpStream` declared local is still `Remote`.
 - A `Remote` consumer of an `own-key-decrypted` stream is refused before anything is queued (`StreamError::LocalOnly`, counted in `gate_stats().remote_consumers_refused`). `bind_tcp` also refuses such streams up front.
@@ -435,9 +434,8 @@ documents the wire format and security notes from the UI's point of view.
 ## 11. Open issues
 
 - **Authentication.** The plain TCP listener (§2) is still unauthenticated; that matters on a portable device on public Wi-Fi. The WebSocket bridge (§10) now has bearer-token auth, but **TLS and per-user auth do not exist**: the token travels and is compared in cleartext, one token authorizes every client, and there is no revocation short of restarting the server.
-- **Own-key local-only rule** (§6) is the provisional default endorsed at review; confirm with the user's legal-guardrail pass (docs/06 §5).
 - **Gated spectrum cap** of 50 rows/s (burst 2) is a provisional number; revisit with real POCSAG/voice spectrogram fixtures.
-- **Manifest trust boundary: trusted but reviewed** (policy recorded by the coordinator). Manifests and their executables are trusted code (`plugins/README.md`). The host contains *accidental* leaks from well-meaning decoders; it does not contain a malicious executable. A manifest's class, allowlist, `max_len` budgets and `review_note`s are legal-guardrail declarations and are reviewed like code. The defaults (§9.3) make anything beyond a small budget explicit and visible as a load warning.
+- **Manifest trust boundary: trusted but reviewed** (policy recorded by the coordinator). Manifests and their executables are trusted code (`plugins/README.md`). The host contains *accidental* leaks from well-meaning decoders; it does not contain a malicious executable. A manifest's class, allowlist, `max_len` budgets and `review_note`s are guardrail declarations and are reviewed like code. The defaults (§9.3) make anything beyond a small budget explicit and visible as a load warning.
 - **Residual side channels (noted, not fixed).** These remain open to a producer that modulates them deliberately, under every class:
   - **Timing and ordering:** arrival times, inter-record spacing, record order, seq gaps and drop/gated-marker counts.
   - **Time fields:** the `t` of a restricted record carries about log2(input range) bits via an in-range `sample_index`, or host arrival time for lines without one.
@@ -461,7 +459,7 @@ documents the wire format and security notes from the UI's point of view.
 Some streams exist only because a consumer asked for them, e.g. listening to one emitter. `hk_stream::ondemand` defines the transport-agnostic shape; T-060 reuses it for bits and symbols:
 - **`StreamOpener::open(&OpenRequest) -> Result<OpenedStream, OpenRefusal>`.**
   - The request holds the transport's query parameters, with `token` removed before any opener sees them.
-  - An opener **gates before it attaches anything**. A refusal carries an HTTP-style `status`, a `code` token, a `reason` and, for legal refusals, the `content_class`. It never carries content.
+  - An opener **gates before it attaches anything**. A refusal carries an HTTP-style `status`, a `code` token, a `reason` and, for gate refusals, the `content_class`. It never carries content.
 - **`OpenedStream { header, handle, session }`.**
   - The front end subscribes its connection to `handle` exactly as for any stream, so §6 gating, sequence numbers, §5.3 markers and §7 drop-not-block apply unchanged.
   - Dropping `session` stops the producer.
@@ -470,7 +468,7 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
 - **WebSocket front end:** `GET /ws/open/<name>?<params>&token=…` (`crates/hk-api/src/ondemand.rs`).
   - Token first: `401`.
   - Upgrade checks: `426`/`400`. Unknown name: `404`.
-  - A **refusal completes the upgrade**, sends one text message `{"type":"refused","status","code","reason","content_class"}`, then closes with code **4000 + status** (e.g. 4403 legal gate, 4503 at capacity). Browsers cannot read the body of a failed upgrade.
+  - A **refusal completes the upgrade**, sends one text message `{"type":"refused","status","code","reason","content_class"}`, then closes with code **4000 + status** (e.g. 4403 gate refusal, 4503 at capacity). Browsers cannot read the body of a failed upgrade.
   - Otherwise the connection is bridged as a remote consumer (§10). The browser sending anything, or hanging up, drops the session.
 
 ### 12.2 Audio profile
