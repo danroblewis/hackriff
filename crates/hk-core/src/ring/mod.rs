@@ -41,6 +41,13 @@
 //! builds only. With every operation `SeqCst` the proof rests on the language guarantee alone;
 //! the cost is within noise (`examples/ring_throughput.rs`).
 //!
+//! This was verified empirically, not just argued: on the dev Mac (M3 Ultra, rustc 1.93.1 /
+//! LLVM 21) a two-variable probe using the weaker orderings saw about 5 million linearisability
+//! violations and the same probe with `SeqCst` saw none, matching the stale reads the ring
+//! stress test caught. `tests/ring_atomic_ordering.rs` therefore fails the build on any
+//! non-`SeqCst` ordering in `src/ring/` (exemption: an `// ordering-exempt: <reason>` comment
+//! on the same line). Re-verify on the Jetson (aarch64 Linux) before relaxing anything.
+//!
 //! # Loss accounting
 //!
 //! Every stream index between a reader's start and its position is accounted exactly once as
