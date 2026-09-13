@@ -84,6 +84,17 @@ export class Inspector {
     $("inspect-close").addEventListener("click", () => { $("inspect").hidden = true; });
   }
 
+  /** Shows an already-known row directly (T-069: an inventory-table row click), without a fresh
+   * lookup. Fires the same onShown hook as [[show]], so Listen treats it as the last-clicked
+   * target ({emitter: r.id}). */
+  showKnown(r: Row) {
+    this.seq++; // invalidate any in-flight lookup from a previous click
+    $("inspect").hidden = false;
+    $("inspect-at").textContent = `${(r.f_center_hz / 1e6).toFixed(6)} MHz`;
+    $("inspect-body").replaceChildren(details(r, r.f_center_hz));
+    this.onShown?.(r, r.f_center_hz, 0);
+  }
+
   /** Looks up the emitter nearest `hz` (within ±halfWidthHz) and shows it. */
   async show(hz: number, halfWidthHz: number, levelDb: number, t: number) {
     const seq = ++this.seq;

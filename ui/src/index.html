@@ -32,6 +32,13 @@
       <span id="view-info" class="stats"></span>
       <button type="button" id="zoom-reset" hidden>Reset zoom</button>
     </div>
+    <div id="listen-bar" class="listen-bar">
+      <button type="button" id="listen-go" class="listen-go">Listen</button>
+      <span id="player-target" class="listen-target">no signal chosen</span>
+      <span id="player-status" class="stats"></span>
+      <label class="listen-vol">vol <input id="player-volume" type="range" min="0" max="1.5" step="0.01" value="0.8"></label>
+      <span id="listen-hint" class="hint">Click a signal, then Listen.</span>
+    </div>
     <div id="axis" class="axis" title="Drag to pan · scroll or pinch to zoom"></div>
     <div id="wf-wrap" class="wf-wrap">
       <canvas id="wf"></canvas>
@@ -45,11 +52,6 @@
       Left edge marks: <span class="mk drop">dropped</span> <span class="mk gated">gated</span></p>
   </section>
 
-  <section id="player" class="panel" hidden>
-    <h2>Listening <span id="player-target" class="hint"></span> <button type="button" id="player-stop">Stop</button></h2>
-    <p class="player-bar"><label>volume <input id="player-volume" type="range" min="0" max="1.5" step="0.01" value="0.8"></label>
-      <span id="player-status" class="stats"></span></p>
-  </section>
   <section id="controls" class="panel" aria-label="Radio and display controls">
     <h2>Controls <span id="ctl-spinner" class="spinner" hidden aria-label="working"></span></h2>
     <p id="ctl-run" class="stats run-line"></p>
@@ -135,8 +137,8 @@
     <h2>Inspect <span id="inspect-at" class="hint"></span> <button type="button" id="inspect-close">Close</button></h2>
     <div id="inspect-body"></div>
     <p class="listen"><button type="button" id="listen" disabled>Listen</button>
-      <span class="hint">Demodulates this signal to browser audio. Mode, bandwidth, squelch and AGC are estimated from the signal;
-        restricted classes (paging, cellular, unclassified) never stream audio.</span></p>
+      <span class="hint">Demodulates this signal to browser audio. Mode, bandwidth, squelch and AGC are estimated from the
+        signal. If the server refuses, the reason shows in the status line above the waterfall.</span></p>
     <p class="hint">Nearest signal-inventory emitter, from <code>/api/inventory</code> only: identities the server withholds show as
       <span class="withheld">withheld</span>. Detections and tracks are not exposed by the API yet.</p>
   </section>
@@ -190,6 +192,7 @@
           <th data-key="last"><button type="button">last seen</button></th>
           <th data-key="count" class="num"><button type="button">count</button></th>
           <th data-key="tags" class="opt"><button type="button">tags</button></th>
+          <th>listen</th>
         </tr></thead>
         <tbody id="inv-body"></tbody>
       </table>

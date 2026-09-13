@@ -19,6 +19,12 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const val = (id: string) => $<HTMLInputElement>(id).value.trim();
 const STATUS_ORDER = { "unexpected-here": 0, unknown: 1, known: 2 };
 const identityText = (r: Row) => r.identity_value ?? (r.withheld ? "withheld" : "");
+
+/** What a row's Listen affordance (its own button, or the row click's inspect target) points
+ * Listen at: this emitter, by id (T-069). Pure so it's unit-tested without a DOM. */
+export function rowListenTarget(r: Pick<Row, "id" | "f_center_hz">): { emitter: string; label: string } {
+  return { emitter: r.id, label: `${(r.f_center_hz / 1e6).toFixed(4)} MHz` };
+}
 const sortValue: Record<Key, (r: Row) => number | string> = {
   status: (r) => STATUS_ORDER[r.known_status] ?? 3,
   freq: (r) => r.f_center_hz, bw: (r) => r.bandwidth_hz, family: (r) => r.family ?? "",
@@ -33,7 +39,11 @@ export class InventoryTable {
   private sort: { key: Key; dir: 1 | -1 } = { key: "last", dir: -1 };
   private selected: string | null = null;
 
-  constructor(private api: Api, private history: HistoryPanel, private onSelect: (fLoHz: number, fHiHz: number) => void) {
+  constructor(private api: Api, private history: HistoryPanel, private onSelect: (fLoHz: number, fHiHz: number) => void,
+    /** T-069: a row click also opens the inspect panel for that emitter (Listen becomes available there). */
+    private onInspect: (r: Row) => void,
+    /** T-069: the row's own Listen button, by emitter id. */
+    private onListen: (id: string, label: string) => void) {
     $("inv-form").addEventListener("submit", (e) => { e.preventDefault(); void this.load(); });
     $("inv-more").addEventListener("click", () => void this.load(true));
     $("inv-search").addEventListener("input", () => this.render());
@@ -150,6 +160,18 @@ export class InventoryTable {
     td(String(r.count), "num");
     const tags = td("", "opt");
     for (const t of r.tags) { const s = document.createElement("span"); s.className = "tag"; s.textContent = t; tags.append(s); }
+    const actions = td("", "listen-cell");
+    const listenBtn = document.createElement("button");
+    listenBtn.type = "button";
+    listenBtn.className = "inv-listen";
+    listenBtn.textContent = "Listen";
+    listenBtn.title = "Listen to this emitter";
+    listenBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't also trigger the row click below
+      const t = rowListenTarget(r);
+      this.onListen(t.emitter, t.label);
+    });
+    actions.append(listenBtn);
     tr.title = r.id;
     if (r.id === this.selected) tr.className = "sel";
     tr.addEventListener("click", () => {
@@ -159,6 +181,7 @@ export class InventoryTable {
       // Pad narrow emitters so the region view shows some context around them.
       const pad = Math.max(r.bandwidth_hz, 25e3);
       this.onSelect(r.f_lo_hz - pad, r.f_hi_hz + pad);
+      this.onInspect(r); // T-069: also open the inspect panel, enabling Listen for this emitter
     });
     return tr;
   }

@@ -10,7 +10,7 @@ import { ControlPanel } from "./controls/panel";
 import { HistoryPanel } from "./history";
 import { Inspector, inspectHalfWidthHz } from "./inspect";
 import { InventoryTable } from "./inventory";
-import { installListen } from "./listen";
+import { installListen, strongestInView, type Extent, type PeakBox } from "./listen";
 import { SelectionPanel } from "./selection-panel";
 import { SelectionStore, type NewSelection } from "./selections";
 import { MARK_DROP, MARK_GATED, Waterfall } from "./waterfall";
@@ -218,6 +218,18 @@ class Live {
 
   geometry(): ax.Geometry | null { return this.geom; }
   waterfall(): Waterfall | null { return this.wf; }
+
+  /** The current view (Hz), or null before the first stream header (T-069 Listen toolbar). */
+  currentView(): Extent | null { return this.view; }
+
+  /** The strongest signal in the current view, from the latest spectrum row (T-069 Listen toolbar
+   * fallback target); null before the first row, or when nothing is finite in view. */
+  strongestSignal(): PeakBox | null {
+    const g = this.geom, w = this.wf, v = this.view;
+    if (!g || !w || !v) return null;
+    const full = ax.fullView(g);
+    return strongestInView(w.latest, full.loHz, full.hiHz, v.loHz, v.hiHz);
+  }
 
   /** Restores `v` once the next retuned header arrives (null: forget it). */
   expectView(v: ax.View | null) { this.expected = v; }
@@ -447,8 +459,18 @@ function main() {
   };
   const panel = new HistoryPanel(api);
   const selections = new SelectionStore();
-  const listen = installListen(token); // T-043
-  const live = new Live(api, token, panel, selections, new Inspector(api, listen.onShown));
+  // `live` is constructed after `listen` (Inspector needs listen.onShown) but the toolbar's
+  // fallback targets need `live`'s view/spectrum, so it reads through this ref (T-069). The hooks
+  // are only called from a button click, well after `liveRef` is set below.
+  let liveRef: Live | null = null;
+  const listen = installListen(token, { // T-043, T-069
+    selections,
+    view: () => liveRef?.currentView() ?? null,
+    strongest: () => liveRef?.strongestSignal() ?? null,
+  });
+  const inspector = new Inspector(api, listen.onShown);
+  const live = new Live(api, token, panel, selections, inspector);
+  liveRef = live;
   const controls = new ControlPanel(client, {
     geometry: () => live.geometry(),
     waterfall: () => live.waterfall(),
@@ -469,7 +491,7 @@ function main() {
   const inventory = new InventoryTable(api, panel, (lo, hi) => {
     live.highlight(lo, hi);
     panel.selectRegion(lo, hi);
-  });
+  }, (r) => inspector.showKnown(r), listen.rowListen);
   void live.start();
   void inventory.load();
 }
