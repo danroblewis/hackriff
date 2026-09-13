@@ -32,6 +32,7 @@ tasks:
   - id: T-002
     title: Data-model types + SQLite repository (docs/07)
     status: in-progress
+    review: "implemented 3d6ba9f (branch worktree-agent-af2b1979e1fd620ba); Opus core-interface review in progress before merge"
     deps: [T-001]
     parallel_group: B
     core_interface: true
@@ -195,6 +196,7 @@ tasks:
   - id: T-014
     title: plugin host + manifest + IPC (ADR-0003)
     status: todo
+    override: "combined with T-016 into one Opus-high agent: ADR-0004 framing serves both plugin IPC and external egress, so one owner avoids two codecs (coordinator, 2026-09-13)"
     deps: [T-002]
     parallel_group: D
     core_interface: true
