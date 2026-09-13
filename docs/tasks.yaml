@@ -158,7 +158,9 @@ tasks:
     dod: ScanPlan-driven sweep/dwell alternation with POI-sized dwells; golden-file the schedule
   - id: T-010
     title: parameter-estimation (OBW, CFO, SNR, spectral shape)
-    status: in-progress
+    status: done
+    commit: "337d16a (merged)"
+    notes_impl: "OBW99 integrated without zeroing negative bins (S5 zeroing inflated OBW 38 % at 10 dB; S5 truth bandwidths treated as upper bounds); FSK CFO from settled-frequency means (cluster means biased by bit imbalance); bandwidth/centre gated on in-band z >= 50; Nyquist-edge boxes extracted wrapped"
     s5_inputs: "mean-based N0; OBW99 on smoothed noise-subtracted PSD; SNR re-measured over burst extent (unclipped); CFO centroid default, x^2 line for DSB/BPSK; feed pilot-derived clock ppm to C05 (-6.8 ppm measured)"
     deps: [T-008]
     parallel_group: F
@@ -171,7 +173,7 @@ tasks:
     dod: estimates within tolerance; normalises snippets for demod/classify
   - id: T-011
     title: blind symbol-rate + FSK deviation estimation
-    status: todo
+    status: in-progress
     s5_inputs: "gate PASSED (scoped). Port s5lib.classify_and_estimate: 4 whitened cyclic lines in 2 independent groups, guarded transition-LS (jitter<0.12 UI, kept>=85%), harmonic-aware consensus, separate rate/family trust; pitfalls list REPORT §4; acceptance fixtures = 915 bursts + sync truth, RDS windows (pilot/16), negatives; fail on any trusted-and-wrong"
     deps: [T-010]
     parallel_group: F
@@ -185,7 +187,7 @@ tasks:
     dod: estimators pass on synthetic and on an S5 capture; unknown flagged not mislabelled
   - id: T-012
     title: analog auto-mode demod + RDS
-    status: todo
+    status: in-progress
     deps: [T-008, T-010]
     parallel_group: G
     use_cases: [SIGNAL-062]
