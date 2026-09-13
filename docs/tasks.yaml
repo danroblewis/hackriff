@@ -574,6 +574,7 @@ tasks:
   - id: T-037
     title: Pipeline follow-ups (loop restart control, verification persistence, writer thread, WFM fragment tracks, capture names, shutdown, HackRF source)
     status: todo
+    hold: "start after the T-027 fix agent merges (both edit crates/hk-pipeline)"
     deps: [T-027]
     parallel_group: J
     use_cases: [SPACE-050, AWARE-042, AWARE-036, SIGNAL-062, SIGNAL-001]
@@ -586,7 +587,7 @@ tasks:
     note: "follow-ups from T-027 (merged 2026-09-13 under the timebox rule)"
   - id: T-038
     title: Attack-map precision follow-ups (steady OFDM false floor-rise anomaly, partial-band extent, letters-only identity tags)
-    status: todo
+    status: in-progress
     deps: [T-036]
     parallel_group: E
     use_cases: [AWARE-006]
