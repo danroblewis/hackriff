@@ -431,3 +431,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-052: persisted multi-region selections with Inspect/Listen/Demod/Record actions.
   - **Running:** T-065.
   - **Waiting for agent slots:** T-064 hop-set scaling, T-066 Listen robustness, T-067 control API completeness, T-056 compute hookup. T-061 record outputs waits for T-060 and T-052.
+- **B0.137 User UI feedback → T-069 launched now (Sonnet, UI-only):** Listen was hard to find (only in the hidden Inspect panel and per-selection actions). Adds a toolbar Listen above the waterfall, which plays the last click, else the selection, else the strongest signal in view. Also adds Listen per inventory row and a 'click a signal, then Listen' hint, and removes the restricted-class hint text. Merge on completion.

@@ -1116,6 +1116,20 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+  - id: T-069
+    milestone: M0b
+    title: Discoverable Listen (toolbar Listen above waterfall, inventory-row Listen, visible hint; remove restricted-class hint text)
+    status: in-progress
+    deps: [T-043, T-051]
+    parallel_group: N
+    use_cases: [SIGNAL-062]
+    requested_by: user UI feedback 2026-09-13 (could not find Listen)
+    acceptance: "always-visible toolbar Listen/Stop above the waterfall playing the last clicked signal, else the active selection, else the strongest signal in view; Listen button per signal-inventory row (by emitter id); visible hint 'click a signal, then Listen'; restricted-classes hint text removed from index.html (refusal reasons still shown); UI tests for target selection/clamping/peak box/URLs; works at phone width"
+    area: ui/ (index.html toolbar, listen.ts, inventory table, main.ts, style.css)
+    needs: none
+    model: sonnet
+    effort: medium
+    note: "UI-only; avoids ui/src/selections.ts and selection-panel.ts (T-052)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
