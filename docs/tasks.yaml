@@ -250,7 +250,9 @@ tasks:
     dod: contract impl + a sample consumer; backpressure + gating tested
   - id: T-017
     title: spectrum-history pyramid + region/time query
-    status: in-progress
+    status: done
+    commit: "0ea888d (merged)"
+    followups: "zstd tile compression (~180 MB/h L0 at 20 MHz dwell); converter to hk-model 1-D SpectrumTile if needed; p10 reads ~0.5 dB low (averaged-noise spread) - correct in T-021; late frames after tile seal are dropped+counted; merged on green without separate review (not core_interface) - review if T-021/T-022 find issues"
     followups_from_T-002_review: "TileKey carries pyramid scheme/version id; region index time-bounding (shared with T-006)"
     deps: [T-004, T-002]
     parallel_group: E
