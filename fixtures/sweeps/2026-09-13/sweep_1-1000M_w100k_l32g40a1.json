@@ -1,0 +1,23 @@
+{
+  "cmd": [
+    "hackrf_sweep",
+    "-f",
+    "1:1000",
+    "-w",
+    "100000",
+    "-l",
+    "32",
+    "-g",
+    "40",
+    "-a",
+    "1",
+    "-N",
+    "20",
+    "-r",
+    "/Users/daniellewis/hackriff/fixtures/store/2026-09-13/sweep_1-1000M_w100k_l32g40a1.csv"
+  ],
+  "hw": "HackRF One (board rev older than r6), firmware 2026.01.3, libhackrf 0.9.2",
+  "antenna": "unknown (as attached by user; not changed)",
+  "purpose": "wide survey, high gain (S4 overload comparison)",
+  "datetime": "2026-09-13T11:10:03.213069+00:00"
+}

@@ -1,0 +1,29 @@
+f_center_mhz,f_lo_mhz,f_hi_mhz,bw_khz,peak_snr_db,level_dbfs,duty,spread_db,image_irr_db,retune,gain_tests,category,flags
+88.0000,88.0000,88.0049,4.9,4.9,-75.1,1.00,0.2,1.1,,,,edge;marginal
+91.1016,91.0908,91.1152,24.4,6.6,-67.7,1.00,0.7,,stays,98M low->98M mid:inconclusive_weak,unexplained,marginal
+92.6922,92.6582,92.7266,68.4,9.5,-59.9,1.00,0.4,,stays,98M low->98M mid:linear,raster_station,marginal
+93.3017,93.2246,93.3760,151.4,16.2,-51.3,1.00,1.1,,stays,98M low->98M mid:linear,raster_station,
+93.4464,93.4248,93.4883,63.5,4.9,-64.5,1.00,0.8,,stays,98M low->98M mid:inconclusive_weak,station_part,marginal
+93.7498,93.7471,93.7568,9.8,4.9,-70.8,1.00,0.6,,not_reproduced,98M low->98M mid:inconclusive_weak,unexplained,marginal
+94.9012,94.8213,94.9727,151.4,15.5,-51.2,1.00,2.2,,stays,98M low->98M mid:linear,raster_station,
+95.7195,95.6611,95.7881,127.0,14.2,-55.7,1.00,4.7,,stays,98M low->98M mid:linear,raster_station,
+96.4755,96.3984,96.5547,156.2,15.7,-50.9,1.00,14.1,,stays,98M low->98M mid:inconclusive_bursty,raster_station,
+96.5764,96.5645,96.5986,34.2,9.2,-62.8,0.98,8.4,,stays,98M low->98M mid:inconclusive_bursty,station_part,marginal
+97.2933,97.2480,97.3457,97.7,12.1,-56.4,1.00,1.2,,stays,98M low->98M mid:linear,raster_station,
+98.0000,97.9951,98.0098,14.6,42.1,-34.6,1.00,0.1,,moves_with_LO(+d),98M low->98M mid:compressed,,dc;lo_relative;compressed
+98.0985,98.0293,98.1514,122.1,13.6,-55.2,1.00,6.5,,stays,98M low->98M mid:inconclusive_bursty,raster_station,
+98.8972,98.8350,98.9424,107.4,15.1,-54.1,1.00,2.8,,stays,98M low->98M mid:linear,raster_station,
+98.9639,98.9521,98.9814,29.3,5.1,-67.0,0.67,6.0,,stays,98M low->98M mid:inconclusive_bursty,station_part,marginal
+99.6853,99.6211,99.7529,131.8,12.6,-54.5,1.00,3.1,,stays,98M low->98M mid:linear,raster_station,
+100.0000,99.9922,100.0117,19.5,28.5,-47.0,1.00,0.1,,stays,98M low->98M mid:linear,,spur_candidate
+100.4460,100.4365,100.4609,24.4,7.9,-65.2,1.00,0.4,,stays,98M low->98M mid:inconclusive_weak,unexplained,marginal
+101.3005,101.2324,101.3936,161.1,20.1,-45.7,1.00,1.2,,stays,98M low->98M mid:linear,raster_station,
+101.4635,101.4326,101.5010,68.4,4.9,-61.3,1.00,0.3,,not_reproduced,98M low->98M mid:inconclusive_weak,raster_station,marginal
+102.7813,102.7705,102.7949,24.4,5.7,-66.1,1.00,0.9,,stays,98M low->98M mid:inconclusive_weak,unexplained,marginal
+104.4973,104.4453,104.5625,117.2,13.3,-56.1,1.00,2.8,,stays,98M low->98M mid:linear,raster_station,
+105.2933,105.2266,105.3486,122.1,15.3,-52.4,1.00,3.0,,stays,98M low->98M mid:linear,raster_station,
+106.0535,106.0225,106.0957,73.2,10.0,-57.4,0.91,0.8,,,,,edge
+106.1511,106.1250,106.1787,53.7,5.6,-62.6,0.69,3.0,,,,,edge;marginal
+106.8974,106.8477,106.9453,97.7,8.4,-61.4,0.99,3.4,,,,,edge;marginal
+107.7004,107.6729,107.7314,58.6,6.2,-64.0,0.99,4.1,,,,,edge;marginal
+107.9951,107.9951,108.0000,4.9,5.0,-73.9,1.00,0.4,-1.1,,,,edge;marginal

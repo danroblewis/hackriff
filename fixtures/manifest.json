@@ -1,5 +1,655 @@
 {
-  "version": 1,
+  "version": 2,
   "store": "fixtures/store",
-  "entries": []
+  "entries": [
+    {
+      "name": "fm_100p8M_2p4M_l32g30a1_t1p5_5s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "10ecd6ce5a753bde41fb70613ced83ad61e225be188724f4329d7385dc401a99",
+      "kind": "sigmf-data",
+      "lfs": true,
+      "source_sha256": "94f598394e05e92c9f67921096f9e29575ab56611dee174fedcf70e48067accd",
+      "source_start_s": 1.5,
+      "source": "store/2026-09-13/fm_100p8M_2p4M_l32g30a1.sigmf-data",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "PI 1694; PS frames ['Unstoppa', 'ppable -', 'Sia     ', 'Star    ', 'Playing ']; BLER 0.087 (249 groups/30 s), window 44 groups BLER 0.067; pilot 18999.871 Hz; clock -6.77 ppm"
+    },
+    {
+      "name": "fm_100p8M_2p4M_l32g30a1_t1p5_5s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta",
+      "size_bytes": 8300,
+      "sha256": "d84cbfd15a783cdba4c64a338a6431faf2c112f6d847ce259d4a46fd713c9e0a",
+      "kind": "sigmf-meta",
+      "source": "store/2026-09-13/fm_100p8M_2p4M_l32g30a1.sigmf-data",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "PI 1694; PS frames ['Unstoppa', 'ppable -', 'Sia     ', 'Star    ', 'Playing ']; BLER 0.087 (249 groups/30 s), window 44 groups BLER 0.067; pilot 18999.871 Hz; clock -6.77 ppm"
+    },
+    {
+      "name": "ism_915M_10M_l24g30a1_t42p3_1p2s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/ism_915M_10M_l24g30a1_t42p3_1p2s.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "53e5e1bb0f76e13e9229374e3acbfad4f9a12170c0de1b069ba7bdc44616da7f",
+      "kind": "sigmf-data",
+      "lfs": true,
+      "source_sha256": "71b1a2bfabcb561eeebab957a34d46e364b7b6a8ff9543f0919765158b90e54f",
+      "source_start_s": 42.3,
+      "source": "store/2026-09-13/ism_915M_10M_l24g30a1.sigmf-data",
+      "use_cases": [
+        "AWARE-036"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "27 bursts detected, 18 with sync truth (12 @ 100 k, 6 @ 150 k); 3 at >= 20 dB, 9 below 12 dB; 4 +-fs/2 edge alias pairs"
+    },
+    {
+      "name": "ism_915M_10M_l24g30a1_t42p3_1p2s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/ism_915M_10M_l24g30a1_t42p3_1p2s.sigmf-meta",
+      "size_bytes": 46129,
+      "sha256": "cd247beba05eb9362fbafba1abbf7d8c03509cd2f914a329a1232143f8e104d5",
+      "kind": "sigmf-meta",
+      "source": "store/2026-09-13/ism_915M_10M_l24g30a1.sigmf-data",
+      "use_cases": [
+        "AWARE-036"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "27 bursts detected, 18 with sync truth (12 @ 100 k, 6 @ 150 k); 3 at >= 20 dB, 9 below 12 dB; 4 +-fs/2 edge alias pairs"
+    },
+    {
+      "name": "urban_98M_20M_l32g30a1_t1p0_0p6s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/urban_98M_20M_l32g30a1_t1p0_0p6s.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "9841b75e122762e22a1a6e562b051412b7251f6263f27cd11635fd5cbde11ae7",
+      "kind": "sigmf-data",
+      "lfs": true,
+      "source_sha256": "c7a218c54b0e0eb2d0a0ea25af55bf499bcfac3b6ddb2a240ba3a6523171a2c3",
+      "source_start_s": 1.0,
+      "source": "store/2026-09-13/urban_98M_20M_l32g30a1.sigmf-data",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "7/7 known FM + 7 raster; 14 comb lines; spur + DC artefacts; clip 140176 (1.17%)"
+    },
+    {
+      "name": "urban_98M_20M_l32g30a1_t1p0_0p6s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/urban_98M_20M_l32g30a1_t1p0_0p6s.sigmf-meta",
+      "size_bytes": 60953,
+      "sha256": "7b69ef8983f52a243c16ae537fccd54b0a7edbe0810372969a22dc4e58eb5b9f",
+      "kind": "sigmf-meta",
+      "source": "store/2026-09-13/urban_98M_20M_l32g30a1.sigmf-data",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "7/7 known FM + 7 raster; 14 comb lines; spur + DC artefacts; clip 140176 (1.17%)"
+    },
+    {
+      "name": "urban_98M_20M_l24g20a0_t1p0_0p6s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/urban_98M_20M_l24g20a0_t1p0_0p6s.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "ff211f0769b81f8e86cc779cd989cfd895ea5755ceb8217ecf615ef68e561eae",
+      "kind": "sigmf-data",
+      "lfs": true,
+      "source_sha256": "2413134924b562cdba29fbf5f01f32549edc8a352cb0989bad2e17d7ab1eb3c6",
+      "source_start_s": 1.0,
+      "source": "store/2026-09-13/urban_98M_20M_l24g20a0.sigmf-data",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "7/7 known FM + 7 raster; 0 comb lines; spur + DC artefacts; clip 0 (0.00%)"
+    },
+    {
+      "name": "urban_98M_20M_l24g20a0_t1p0_0p6s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/urban_98M_20M_l24g20a0_t1p0_0p6s.sigmf-meta",
+      "size_bytes": 35257,
+      "sha256": "d4401c9e737fdfd859a78e737ede3c04e6762e2ed2fdd299dca1972c5080088f",
+      "kind": "sigmf-meta",
+      "source": "store/2026-09-13/urban_98M_20M_l24g20a0.sigmf-data",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "7/7 known FM + 7 raster; 0 comb lines; spur + DC artefacts; clip 0 (0.00%)"
+    },
+    {
+      "name": "ism_433p62M_2M_l24g30a1_t162p0_6s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/ism_433p62M_2M_l24g30a1_t162p0_6s.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "d0c4aab7047a3a38c72bb07d599a424dff7ba8603a0e77d76d1c430bc4c2fb27",
+      "kind": "sigmf-data",
+      "lfs": true,
+      "source_sha256": "c1ac8cd0ed1b4bef3de21e22cc928ffeb0daa9ca7b54817f34f59ec6645ef13b",
+      "source_start_s": 162.0,
+      "source": "store/2026-09-13/ism_433p62M_2M_l24g30a1.sigmf-data",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "floor -98.98 dBFS/Hz +- 0.05 dB over 1.39 MHz; no device emissions; 28 narrowband lines >= 6 dB (122 Hz RBW), strongest 434.000005 MHz +23.9 dB"
+    },
+    {
+      "name": "ism_433p62M_2M_l24g30a1_t162p0_6s",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/ism_433p62M_2M_l24g30a1_t162p0_6s.sigmf-meta",
+      "size_bytes": 28866,
+      "sha256": "4d96d7b4999b112cb05f643731e365000c64e152a51766aa7ba57e657a4aeef1",
+      "kind": "sigmf-meta",
+      "source": "store/2026-09-13/ism_433p62M_2M_l24g30a1.sigmf-data",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "floor -98.98 dBFS/Hz +- 0.05 dB over 1.39 MHz; no device emissions; 28 narrowband lines >= 6 dB (122 Hz RBW), strongest 434.000005 MHz +23.9 dB"
+    },
+    {
+      "name": "emitters_urban_98M_20M_l24g20a0",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/labels/emitters_urban_98M_20M_l24g20a0.csv",
+      "size_bytes": 2909,
+      "sha256": "47ce7c70ef0444528b52ef30c2963f948a3aef9d2ac53427b945d55812d41568",
+      "kind": "labels",
+      "source": "spikes/s4-detection-overload/results (spike S4)",
+      "license": "project-owned capture"
+    },
+    {
+      "name": "emitters_urban_98M_20M_l32g30a1",
+      "status": "committed",
+      "path": "hackrf/2026-09-13/labels/emitters_urban_98M_20M_l32g30a1.csv",
+      "size_bytes": 5483,
+      "sha256": "10ea364617d8f170014d29c963e7b926f0299bdbb28edfa07d50f7e315a19a86",
+      "kind": "labels",
+      "source": "spikes/s4-detection-overload/results (spike S4)",
+      "license": "project-owned capture"
+    },
+    {
+      "name": "sweep_1-1000M_w100k_l24g20a0",
+      "status": "committed",
+      "path": "sweeps/2026-09-13/sweep_1-1000M_w100k_l24g20a0.csv",
+      "size_bytes": 1891443,
+      "sha256": "1059d27ad221957a9d5beb9587b736bf5b4ca48aa44410664d2e7f2583cdcf15",
+      "kind": "sweep-csv",
+      "source": "store/2026-09-13/sweep_1-1000M_w100k_l24g20a0.csv",
+      "use_cases": [
+        "SPACE-050",
+        "AWARE-042"
+      ],
+      "license": "project-owned capture"
+    },
+    {
+      "name": "sweep_1-1000M_w100k_l24g20a0",
+      "status": "committed",
+      "path": "sweeps/2026-09-13/sweep_1-1000M_w100k_l24g20a0.json",
+      "size_bytes": 525,
+      "sha256": "16f89507f874c0bd2a21ea13f8ab3e60d63701aca6866c7046a01d0fd94a1d48",
+      "kind": "sweep-sidecar",
+      "source": "store/2026-09-13/sweep_1-1000M_w100k_l24g20a0.json",
+      "use_cases": [
+        "SPACE-050",
+        "AWARE-042"
+      ],
+      "license": "project-owned capture"
+    },
+    {
+      "name": "sweep_1-1000M_w100k_l32g40a1",
+      "status": "committed",
+      "path": "sweeps/2026-09-13/sweep_1-1000M_w100k_l32g40a1.csv",
+      "size_bytes": 1891173,
+      "sha256": "8c7a0380b9f56bc54d33ec604d35c58b60b2698efc294bff29fc2865756d8583",
+      "kind": "sweep-csv",
+      "source": "store/2026-09-13/sweep_1-1000M_w100k_l32g40a1.csv",
+      "use_cases": [
+        "SPACE-050",
+        "AWARE-042"
+      ],
+      "license": "project-owned capture"
+    },
+    {
+      "name": "sweep_1-1000M_w100k_l32g40a1",
+      "status": "committed",
+      "path": "sweeps/2026-09-13/sweep_1-1000M_w100k_l32g40a1.json",
+      "size_bytes": 526,
+      "sha256": "1e40325d0d612f9552c06a031dabcae3a8701a0ff2df211e586a5e358d920da3",
+      "kind": "sweep-sidecar",
+      "source": "store/2026-09-13/sweep_1-1000M_w100k_l32g40a1.json",
+      "use_cases": [
+        "SPACE-050",
+        "AWARE-042"
+      ],
+      "license": "project-owned capture"
+    },
+    {
+      "name": "sweep_1000-6000M_w500k_l32g30a1",
+      "status": "committed",
+      "path": "sweeps/2026-09-13/sweep_1000-6000M_w500k_l32g30a1.csv",
+      "size_bytes": 1550004,
+      "sha256": "81040d4e331c41ff7dfc0e676358eb6a8b497a7f4c4ed95d8f62facb1f1a2401",
+      "kind": "sweep-csv",
+      "source": "store/2026-09-13/sweep_1000-6000M_w500k_l32g30a1.csv",
+      "use_cases": [
+        "SPACE-050",
+        "AWARE-042"
+      ],
+      "license": "project-owned capture"
+    },
+    {
+      "name": "sweep_1000-6000M_w500k_l32g30a1",
+      "status": "committed",
+      "path": "sweeps/2026-09-13/sweep_1000-6000M_w500k_l32g30a1.json",
+      "size_bytes": 508,
+      "sha256": "a4251639994537d118de75c7268d22bb68cfb43eb647a90bcfaefe356e6e11a0",
+      "kind": "sweep-sidecar",
+      "source": "store/2026-09-13/sweep_1000-6000M_w500k_l32g30a1.json",
+      "use_cases": [
+        "SPACE-050",
+        "AWARE-042"
+      ],
+      "license": "project-owned capture"
+    },
+    {
+      "name": "adsb_1090M_2p4M_l32g40a1",
+      "status": "external",
+      "path": "store/2026-09-13/adsb_1090M_2p4M_l32g40a1.sigmf-data",
+      "size_bytes": 288000000,
+      "sha256": "2e3ebf9eeb8cb7ef847cd7243fc66defdbacb92cdb335e9fa0081489a4342861",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "SIGNAL-001 ADS-B fixture (T-025)",
+      "use_cases": [
+        "SIGNAL-001"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:04:14.767730+00:00"
+    },
+    {
+      "name": "adsb_1090M_2p4M_l32g40a1",
+      "status": "external",
+      "path": "store/2026-09-13/adsb_1090M_2p4M_l32g40a1.sigmf-meta",
+      "size_bytes": 1361,
+      "sha256": "1dcf7bfa3a7a7ba44ab680fee452067670e325afbd778e4d5117dd56d04e60f9",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "SIGNAL-001"
+      ]
+    },
+    {
+      "name": "adsb_1090M_2p4M_l40g40a1",
+      "status": "external",
+      "path": "store/2026-09-13/adsb_1090M_2p4M_l40g40a1.sigmf-data",
+      "size_bytes": 288000000,
+      "sha256": "5386ded54771fa6f3a122afdd4049403dca4a5d194d2d9e82edc5a53a5caddcc",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "SIGNAL-001 ADS-B fixture (recapture, auto-gain probe)",
+      "use_cases": [
+        "SIGNAL-001"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:10:57.631315+00:00"
+    },
+    {
+      "name": "adsb_1090M_2p4M_l40g40a1",
+      "status": "external",
+      "path": "store/2026-09-13/adsb_1090M_2p4M_l40g40a1.sigmf-meta",
+      "size_bytes": 1382,
+      "sha256": "f85f213f1066e2e263a02fe228ff9b4655d2d790bfaee80220b904bdf6ec31a4",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "SIGNAL-001"
+      ]
+    },
+    {
+      "name": "fm_100p8M_2p4M_l16g20a0",
+      "status": "external",
+      "path": "store/2026-09-13/fm_100p8M_2p4M_l16g20a0.sigmf-data",
+      "size_bytes": 144000000,
+      "sha256": "02b690f2a04535fc3f024af4e1d0854cde6a8afceaf2c7e698c5aa32336f022e",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "SIGNAL-062 FM+RDS fixture; station 101.3 MHz; suspected 10 MHz-harmonic spur at 100.0 MHz in band (T-025, S5 RDS 1187.5 bd truth)",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:05:15.184143+00:00"
+    },
+    {
+      "name": "fm_100p8M_2p4M_l16g20a0",
+      "status": "external",
+      "path": "store/2026-09-13/fm_100p8M_2p4M_l16g20a0.sigmf-meta",
+      "size_bytes": 1457,
+      "sha256": "ffb5291048d0af54b6446111b34315326799c30d23843c0a21aa78af94594e66",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "SIGNAL-062"
+      ]
+    },
+    {
+      "name": "fm_100p8M_2p4M_l32g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/fm_100p8M_2p4M_l32g30a1.sigmf-data",
+      "size_bytes": 144000000,
+      "sha256": "94f598394e05e92c9f67921096f9e29575ab56611dee174fedcf70e48067accd",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "SIGNAL-062 FM+RDS fixture; station 101.3 MHz; suspected 10 MHz-harmonic spur at 100.0 MHz in band (recapture, auto-gain probe)",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:10:20.878252+00:00"
+    },
+    {
+      "name": "fm_100p8M_2p4M_l32g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/fm_100p8M_2p4M_l32g30a1.sigmf-meta",
+      "size_bytes": 1453,
+      "sha256": "997efbcd467883198eb5bbfc93a093d8c9091f7c88b4355332a170591eec865f",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "SIGNAL-062"
+      ]
+    },
+    {
+      "name": "ism_433p62M_2M_l24g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/ism_433p62M_2M_l24g30a1.sigmf-data",
+      "size_bytes": 720000000,
+      "sha256": "c1ac8cd0ed1b4bef3de21e22cc928ffeb0daa9ca7b54817f34f59ec6645ef13b",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "AWARE-036 recorded companion, 433.92 ISM bursts (T-025, S5)",
+      "use_cases": [
+        "AWARE-036",
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:05:45.555140+00:00"
+    },
+    {
+      "name": "ism_433p62M_2M_l24g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/ism_433p62M_2M_l24g30a1.sigmf-meta",
+      "size_bytes": 1386,
+      "sha256": "e94ef4317763305b4d8ddeecdb2c048f384f36467f0ef8620f889638961aaa0b",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "AWARE-036",
+        "AWARE-042",
+        "SPACE-050"
+      ]
+    },
+    {
+      "name": "ism_915M_10M_l24g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/ism_915M_10M_l24g30a1.sigmf-data",
+      "size_bytes": 900000000,
+      "sha256": "71b1a2bfabcb561eeebab957a34d46e364b7b6a8ff9543f0919765158b90e54f",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "902-928 ISM bursts (S5, S4)",
+      "use_cases": [
+        "AWARE-036"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:08:46.357165+00:00"
+    },
+    {
+      "name": "ism_915M_10M_l24g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/ism_915M_10M_l24g30a1.sigmf-meta",
+      "size_bytes": 1356,
+      "sha256": "bfffb5fba9ebb4bcf4d97b10bbb9c1be4d93d542dac9a78f42137aba8010fc02",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "AWARE-036"
+      ]
+    },
+    {
+      "name": "urban_915M_20M_l32g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/urban_915M_20M_l32g30a1.sigmf-data",
+      "size_bytes": 160000000,
+      "sha256": "1c02247c58894bec18bbe7f6fac9e62f8ae4bb6511a4551ef1d99a5eb03e3784",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "S4 gain step high, UHF",
+      "use_cases": [
+        "AWARE-042"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:09:53.908476+00:00"
+    },
+    {
+      "name": "urban_915M_20M_l32g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/urban_915M_20M_l32g30a1.sigmf-meta",
+      "size_bytes": 1351,
+      "sha256": "afce4571a63b473cd01691d4ec41c800b6c50a33f60fbc65ae1c44fd6b7a333d",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "AWARE-042"
+      ]
+    },
+    {
+      "name": "urban_915M_20M_l8g10a0",
+      "status": "external",
+      "path": "store/2026-09-13/urban_915M_20M_l8g10a0.sigmf-data",
+      "size_bytes": 160000000,
+      "sha256": "1c48e63b644d82d6090da7712a9f9d13ab02410a6cdc6358470c72b64c26b680",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "S4 gain step low, UHF ISM/cellular-adjacent (detection only)",
+      "use_cases": [
+        "AWARE-042"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:09:49.563823+00:00"
+    },
+    {
+      "name": "urban_915M_20M_l8g10a0",
+      "status": "external",
+      "path": "store/2026-09-13/urban_915M_20M_l8g10a0.sigmf-meta",
+      "size_bytes": 1389,
+      "sha256": "cda541aa7785bf2caf6e8b9366e4031ab98155adaf69b8fabb3485000f6c7810",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "AWARE-042"
+      ]
+    },
+    {
+      "name": "urban_98M_20M_l24g20a0",
+      "status": "external",
+      "path": "store/2026-09-13/urban_98M_20M_l24g20a0.sigmf-data",
+      "size_bytes": 160000000,
+      "sha256": "2413134924b562cdba29fbf5f01f32549edc8a352cb0989bad2e17d7ab1eb3c6",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "S4 overload gain step mid",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:09:36.630739+00:00"
+    },
+    {
+      "name": "urban_98M_20M_l24g20a0",
+      "status": "external",
+      "path": "store/2026-09-13/urban_98M_20M_l24g20a0.sigmf-meta",
+      "size_bytes": 1353,
+      "sha256": "fa5ef4dedde5db0dd407b0534e39578907179cc9be1846b6b21683c3f7ebb0c2",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ]
+    },
+    {
+      "name": "urban_98M_20M_l32g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/urban_98M_20M_l32g30a1.sigmf-data",
+      "size_bytes": 160000000,
+      "sha256": "c7a218c54b0e0eb2d0a0ea25af55bf499bcfac3b6ddb2a240ba3a6523171a2c3",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "S4 overload gain step high (amp on)",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 939530,
+      "datetime": "2026-09-13T11:09:40.965043+00:00"
+    },
+    {
+      "name": "urban_98M_20M_l32g30a1",
+      "status": "external",
+      "path": "store/2026-09-13/urban_98M_20M_l32g30a1.sigmf-meta",
+      "size_bytes": 1367,
+      "sha256": "1c99b8320a8d6b226a3d4caeab3741ff1ddf309fc517b33f286f5aa017ae9e0e",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ]
+    },
+    {
+      "name": "urban_98M_20M_l8g10a0",
+      "status": "external",
+      "path": "store/2026-09-13/urban_98M_20M_l8g10a0.sigmf-data",
+      "size_bytes": 160000000,
+      "sha256": "2811888170a3f94b9de4fe3e8c148ba9f7eb0b5d54691f567b6b639118cb95b7",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "S4 overload gain step low",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:09:32.277823+00:00"
+    },
+    {
+      "name": "urban_98M_20M_l8g10a0",
+      "status": "external",
+      "path": "store/2026-09-13/urban_98M_20M_l8g10a0.sigmf-meta",
+      "size_bytes": 1352,
+      "sha256": "37ac0cc3f7bb0b393040a3e2c9ac49017781c9fad53c5f65cf94d7452efa0647",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ]
+    },
+    {
+      "name": "urban_99M_20M_l24g20a0",
+      "status": "external",
+      "path": "store/2026-09-13/urban_99M_20M_l24g20a0.sigmf-data",
+      "size_bytes": 160000000,
+      "sha256": "866639bd8a282d2e526460da2c86c50397c5ec6f42e9dc949c7f103258e6e877",
+      "kind": "sigmf-data",
+      "source": "hackrf_transfer capture 2026-09-13 (coordinator, receive-only)",
+      "purpose": "S4 retune test (+1 MHz vs mid step)",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "license": "project-owned capture",
+      "clip_count": 0,
+      "datetime": "2026-09-13T11:09:45.233631+00:00"
+    },
+    {
+      "name": "urban_99M_20M_l24g20a0",
+      "status": "external",
+      "path": "store/2026-09-13/urban_99M_20M_l24g20a0.sigmf-meta",
+      "size_bytes": 1363,
+      "sha256": "9704fe0377ba6b6c0d99f3b91c5fd15a957fbfd3b45cd768ac76ba0111419661",
+      "kind": "sigmf-meta",
+      "license": "project-owned capture",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ]
+    },
+    {
+      "name": "fm_band_sweep_l24g20",
+      "status": "external",
+      "path": "store/2026-09-13/fm_band_sweep_l24g20.csv",
+      "size_bytes": 66365,
+      "sha256": "1719f5ab418a399526f8b75218c3124de2d19615f195d1a32e3411e47359dc57",
+      "kind": "sweep-csv",
+      "license": "project-owned capture",
+      "use_cases": [
+        "SPACE-050",
+        "AWARE-042"
+      ],
+      "source": "hackrf_sweep 2026-09-13 (coordinator, receive-only); no JSON sidecar"
+    },
+    {
+      "name": "adsb_1090M_fixture",
+      "status": "blocked",
+      "reason": "0 CRC-valid Mode S messages in adsb_1090M_2p4M_l32g40a1 and _l40g40a1 (readsb): the attached antenna cannot hear 1090 MHz. Needs a 1090 MHz antenna and a recapture. SIGNAL-001 uses the synthetic adsb_squitter scenario meanwhile.",
+      "use_cases": [
+        "SIGNAL-001"
+      ],
+      "source": [
+        "store/2026-09-13/adsb_1090M_2p4M_l32g40a1.sigmf-data",
+        "store/2026-09-13/adsb_1090M_2p4M_l40g40a1.sigmf-data"
+      ]
+    },
+    {
+      "name": "terminated_input_spur_map",
+      "status": "blocked",
+      "reason": "Needs the user to swap in a 50 ohm terminator and capture per gain state across the tuning range (C05 spur map; S4 recommendation 3). Physical RF change: interactive only.",
+      "use_cases": [
+        "AWARE-042",
+        "SPACE-050"
+      ],
+      "source": []
+    }
+  ]
 }
