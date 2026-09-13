@@ -16,10 +16,18 @@ hk-core.workspace = true
 hk-model.workspace = true
 num-complex.workspace = true
 rustfft.workspace = true
+# T-008: DdcSpec / PfbConfig data specs.
+serde.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# T-008: synthetic scenarios for the SIGNAL-062 / AWARE-036 / SIGNAL-001 channelizer tests.
+hk-e2e = { path = "../../tests/e2e" }
 
 [[bench]]
 name = "spectral_throughput"
+harness = false
+
+[[bench]]
+name = "channelizer_throughput"
 harness = false

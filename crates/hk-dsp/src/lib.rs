@@ -16,8 +16,16 @@
 //! - [`sk`]: the spectral-kurtosis estimator and its variance.
 //! - [`persistence`]: the DPX-style decaying histogram.
 //! - [`synth`]: deterministic synthetic IQ for tests and benchmarks.
+//!
+//! Channelization (T-008):
+//! - [`filter`]: Kaiser low-pass design with measured response, PFB prototype, SIMD kernels.
+//! - [`channelizer`]: the 2× oversampled polyphase filter bank ([`Pfb`], [`PfbBackend`]).
+//! - [`ddc`]: the on-demand DDC ([`Ddc`] from a [`DdcSpec`]).
 
+pub mod channelizer;
+pub mod ddc;
 pub mod fft;
+pub mod filter;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod persistence;
@@ -28,7 +36,13 @@ pub mod synth;
 pub mod welch;
 pub mod window;
 
+pub use channelizer::{
+    ChannelHeader, ChannelSamples, ChannelTime, ChannelizerError, DEFAULT_CHANNEL_RESET_ON, Pfb,
+    PfbBackend, PfbConfig, PfbOutput,
+};
+pub use ddc::{Ddc, DdcBlock, DdcError, DdcPlan, DdcSpec, ResampleKind};
 pub use fft::{CpuFft, FftBackend};
+pub use filter::{DesignError, FirDesign, LowpassSpec, design_lowpass, pfb_prototype};
 pub use persistence::{Persistence, PersistenceConfig};
 pub use spectrum::{Hold, HoldKind, PowerUnit, Resolution, Spectrum};
 pub use stft::{
