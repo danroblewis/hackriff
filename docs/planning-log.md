@@ -378,3 +378,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - mock SDR (T-049, then T-047/T-053)
   - detection quality (T-058 throughput; next: T-038 follow-ups on IQ-level structured-vs-noise evidence, WFM fragment-track merging, live-data false alarms).
   Six agents are running (over the ~4 Rust-build cap), so new detection-quality work launches as slots free up.
+- **B0.129 T-043 Listen done** (58762a5).
+  - **Delivered:** on-demand audio WebSocket (`/ws/open/listen`) over a reusable hk-stream opener registry, which T-060 builds on. Stream contract 1.1 adds PCM and status records. hk-demod gains NBFM/AM/SSB/CW audio.
+  - **Gating:** fail-closed. Restricted bands and restricted sources are refused; unclassified content is refused unless a user rule allows it.
+  - **Results:** blind FM gives audio at 54 ms peak processing latency with 0 drops; the paging sentinel is refused before any attach.
+  - **Merge:** held until T-063 greens main. A timeboxed legal/security review is running.
+  - **Follow-ups (detection quality):** T-012 selector misreads a pure carrier as AM and a 60 % AM tone as unknown; emitter clustering is too coarse (2 MHz cluster).

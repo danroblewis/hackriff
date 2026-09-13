@@ -698,7 +698,13 @@ tasks:
   - id: T-043
     title: Listen - click a signal -> auto analog demod (T-012) -> audio streamed to the browser (Web Audio), legal gating kept
     milestone: M0b
-    status: in-progress
+    status: done
+    commit: "58762a5 (merge held until T-063 greens main; legal review running)"
+    result: "GET /ws/open/listen?emitter=|detection=|f_lo=&f_hi= (+token/Bearer, relative ws/wss); hk-stream ondemand.rs StreamOpener/OpenerRegistry (transport-agnostic, token stripped) reusable for T-060; hk-api thin bridge with drop-not-block; refusal -> refused JSON + close 4000+status. Stream contract 1.1: mono s16 48 kHz 20 ms PCM records with seq + drop markers, header audio profile, status record type 3 (flat numbers/short tokens only). hk-demod audio.rs NBFM/AM/SSB/CW + squelch/AGC. Gating: restricted bands refused regardless of source class; restricted sources refused; unclassified (metadata-only, no user rule) refused; class from the chain's segment, re-plumb ends the chain. Blind FM: WFM auto, pilot 86 dB below audio band, processing latency peak 54 ms, 0 gaps/drops, 3rd listener 503; paging sentinel refused 403 (0 probes/attaches/frames). Tests: listen.rs, listen_retune.rs, UI framing/jitter 23; acceptance 18/18."
+    followups:
+      - "T-012 selector: pure carrier read as AM, 60 % AM tone read as unknown (detection quality)"
+      - "relabelled station sits inside a 2 MHz inventory cluster with no own emitter - emitter clustering too coarse (detection quality)"
+      - "blind.rs gained looping blind_live helper - move/unify in T-047"
     deps: [T-037, T-039, T-044]
     parallel_group: M
     use_cases: [SIGNAL-062]
