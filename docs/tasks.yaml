@@ -32,7 +32,7 @@ tasks:
   - id: T-002
     title: Data-model types + SQLite repository (docs/07)
     status: in-progress
-    review: "implemented 3d6ba9f (branch worktree-agent-af2b1979e1fd620ba); Opus core-interface review in progress before merge"
+    review: "implemented 3d6ba9f; Opus review FIX-BEFORE-MERGE (content gating not enforced; clip_count in Provenance defeats dedup) + cheap pre-breaking fixes; implementer applying fixes"
     deps: [T-001]
     parallel_group: B
     core_interface: true
@@ -97,6 +97,7 @@ tasks:
   - id: T-006
     title: CFAR detection + burst records
     status: todo
+    followups_from_T-002_review: "detection region query is f-bounded only (add R*Tree on f_lo,f_hi,t_start,t_end or time-bucketing); populate detector_version, peak_level_dbfs, clip_count; overload->clipped enforced by repo"
     deps: [T-005]
     parallel_group: C
     core_interface: true
@@ -110,6 +111,7 @@ tasks:
   - id: T-007
     title: burst-tracking (tracks, periodicity, duty cycle, hop set)
     status: todo
+    followups_from_T-002_review: "track region query missing; emitter region query over-matches hoppers/gaps (hop-set or tile-backed history)"
     deps: [T-006]
     parallel_group: C
     use_cases: [AWARE-036, AWARE-042]
@@ -237,6 +239,7 @@ tasks:
   - id: T-017
     title: spectrum-history pyramid + region/time query
     status: todo
+    followups_from_T-002_review: "TileKey carries pyramid scheme/version id; region index time-bounding (shared with T-006)"
     deps: [T-004, T-002]
     parallel_group: E
     use_cases: [AWARE-042, SPACE-050]
@@ -249,6 +252,7 @@ tasks:
   - id: T-018
     title: signal-inventory writes + emitter clustering (read/query)
     status: todo
+    followups_from_T-002_review: "emitter fingerprint lookup/update API, merge state (merged_into), supersedable emitter_link, idempotent count on replay, classification input ref + feature-set version"
     deps: [T-002, T-007]
     parallel_group: E
     use_cases: [AWARE-036, SIGNAL-001, SIGNAL-062, AWARE-053]
@@ -273,6 +277,7 @@ tasks:
   - id: T-020
     title: context-feeds cache + gpsjam adapter + event correlation
     status: todo
+    followups_from_T-002_review: "external-event time-window/geo query; optional frequency extent on events; explanation evidence pins payload hash"
     deps: [T-005, T-002]
     parallel_group: E
     use_cases: [AWARE-006]
@@ -334,6 +339,7 @@ tasks:
     dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
+  - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
   - Core-interface tasks (T-002, T-005, T-006, T-008, T-009, T-014, T-016) are Fable/Opus and reviewed before merge.
   - "Parallel groups can run in separate worktrees; groups sharing a crate (group C on hk-dsp/hk-detect, group E on hk-store/hk-model/hk-core) serialise on that crate or coordinate file ownership."
   - T-011/T-013 gated on spike S5; T-022 gated on S3. If a gate fails, see docs/12 1 for the fallback.
