@@ -6,7 +6,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 ## Current phase
 
-**Phase 1 follow-ups, then Phase 2 (data model).** Phase 1 (capability map) is drafted and its taxonomy was approved by the user (39 capabilities, kept as-is). Mapping of all 391 use cases is merged into `use-cases.yaml`.
+**Phase 3 (architecture + ADRs).** Phase 1 committed (8c2db03). Phase 1 follow-ups applied; capability-card sync delegated to a background agent (its commit lands separately). Phase 2 data model written to `docs/07-data-model.md`. Next: `docs/08-architecture.md` and `docs/adr/`, starting with the runtime and UI ADRs (the two the brief checkpoints first).
 
 ## Decisions from the user (not provisional)
 
@@ -25,6 +25,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **P1.3 Taxonomy stays 39.** All card-feedback items resolved as *ownership/edge* decisions inside the frozen taxonomy, in docs/06 §5, not as new capabilities. Several marked provisional pending doc 07 / Phase 3 ADRs (own-key decryption owner, restricted-content gating, storage/retention policy, anomaly record shape, C24 data-vs-control split).
 - **P1.4 Trunking use cases SIGNAL-080..086 proposed** (`status: proposed`), added to docs/05 and the YAML. Rationale: docs/04 §8 calls trunking the most-requested capability; catalogue had ~2. **Needs user accept/reject** (see questions).
 - **P1.5 §4.2 build order** now names C04/C08/C11/C13 explicitly and stages the C05↔C09 bootstrap.
+### Phase 2 — data model (2026-09-13)
+
+- **P2.1 Measurement/interpretation split.** Frames, Detections and Recordings are immutable measurements with provenance; classifications and decodes are versioned, append-only interpretations re-runnable over stored measurements. This is the backbone; reversing it later is expensive, so flagged for user review.
+- **P2.2 Three storage tiers** (provisional, Phase 3 ADR finalises): SQLite relational state, a tiled spectrum-history pyramid, SigMF files for IQ/audio/bits, all under one data dir.
+- **P2.3 Anomaly object defined** (§2.18) as the shared record C08/C12/C27 emit and C30 consumes, resolving a §5 open item.
+- **P2.4 SpectrumTile pyramid** is the region-over-time engine; fixed rolling byte budget bounds disk.
+
 - **P1.6 Heartbeat caveat.** The `CronCreate` heartbeat (job cf8688aa, `7,27,47 * * * *`) is **session-only** — it does not survive this session exiting (CronCreate has no durable persistence in this build). Per-phase commits are therefore the real resume mechanism; a fresh session resumes from this log + git, not the cron.
 
 ## Open questions for the user (ranked)
