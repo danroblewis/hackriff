@@ -118,7 +118,8 @@ tasks:
     dod: OS-CFAR + hysteresis + min-duration; false-alarm bound met (informed by spike S4); Detection rows written
   - id: T-007
     title: burst-tracking (tracks, periodicity, duty cycle, hop set)
-    status: todo
+    status: in-progress
+    note_start: "launched 2026-09-13 on the T-006 branch (1e5bc99) ahead of its merge to cut critical-path wait (user timebox steer); merges main once T-006 lands"
     followups_from_T-002_review: "track region query missing; emitter region query over-matches hoppers/gaps (hop-set or tile-backed history)"
     deps: [T-006]
     parallel_group: C
@@ -147,7 +148,8 @@ tasks:
     dod: N-channel PFB with tested isolation; DDC to arbitrary center/bw; feeds demods
   - id: T-009
     title: sweep-survey + first (simple) attention scheduler
-    status: todo
+    status: in-progress
+    note_start: "launched 2026-09-13 on the T-006 branch (1e5bc99) ahead of its merge to cut critical-path wait (user timebox steer); merges main once T-006 lands"
     deps: [T-003, T-006]
     parallel_group: E
     core_interface: true
