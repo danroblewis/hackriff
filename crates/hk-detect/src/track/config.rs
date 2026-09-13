@@ -45,8 +45,24 @@ pub struct HopConfig {
     pub min_links_per_channel: u32,
     /// Member channels for a hop set (3).
     pub min_channels: usize,
+    /// A member channel's hop links must number at least this fraction of its bursts (0.5): a
+    /// hopper's dwells almost all link, independent emitters whose bursts abut by chance rarely.
+    pub min_link_fraction: f64,
     /// Hops (links) for a hop set (10).
     pub min_hops: u64,
+    /// Bursty hoppers (packets separated by silence, T-031): a finished burst with no contiguous
+    /// predecessor links to the nearest preceding similar burst on another channel when the
+    /// silence between them is at most this long, s (0.5; 0 disables). The link also needs that
+    /// burst's own nearest similar predecessor on a third channel, the three centres on a common
+    /// raster, no concurrent similar burst, and neither track periodic.
+    pub max_silence_s: f64,
+    /// Burst-length ratio for a bursty link (3: packet lengths vary with payload).
+    pub bursty_length_ratio: f64,
+    /// A track with at least this many bursts on a period lattice is a periodic emitter, not a
+    /// channel of a bursty hopper (5)…
+    pub periodic_veto_bursts: u64,
+    /// …when the fold's confidence is at least this (0.8).
+    pub periodic_veto_confidence: f64,
 }
 
 impl Default for HopConfig {
@@ -59,7 +75,42 @@ impl Default for HopConfig {
             length_ratio: 1.5,
             min_links_per_channel: 2,
             min_channels: 3,
+            min_link_fraction: 0.5,
             min_hops: 10,
+            max_silence_s: 0.5,
+            bursty_length_ratio: 3.0,
+            periodic_veto_bursts: 5,
+            periodic_veto_confidence: 0.8,
+        }
+    }
+}
+
+/// Split trigger: a track whose latest bursts form two stable centre (or bandwidth) clusters,
+/// both active through the window, splits in two (the minority cluster becomes a new track with
+/// `split_from`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitConfig {
+    /// Look for splits.
+    pub enabled: bool,
+    /// Bursts each cluster needs in the 16-burst window (5).
+    pub min_per_cluster: usize,
+    /// Cluster centres at least this many ε apart (0.6; above the merge rule's 0.5 so a split
+    /// never re-merges)…
+    pub min_separation_eps: f64,
+    /// …and at least this many pooled within-cluster standard deviations (4).
+    pub separation_sigma: f64,
+    /// Or: cluster mean bandwidths at least this ratio apart (1.6; above the merge rule's 1.25).
+    pub bandwidth_ratio: f64,
+}
+
+impl Default for SplitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_per_cluster: 5,
+            min_separation_eps: 0.6,
+            separation_sigma: 4.0,
+            bandwidth_ratio: 1.6,
         }
     }
 }
@@ -110,6 +161,13 @@ pub struct TrackerConfig {
     pub coverage_slack_s: f64,
     /// Seconds of stream time between idle-expiry scans (0.1).
     pub maintain_interval_s: f64,
+    /// A new track is tentative (no `Opened`, not persisted, links held) until it has this many
+    /// bursts (2)…
+    pub confirm_bursts: u64,
+    /// …or this much on-time, s (0.1), or a hop link. A track closing tentative is discarded.
+    pub confirm_on_time_s: f64,
+    /// Split trigger.
+    pub split: SplitConfig,
     /// Periodicity fold.
     pub period: PeriodConfig,
     /// Hop sets.
@@ -137,6 +195,9 @@ impl Default for TrackerConfig {
             merge_bandwidth_ratio: 1.25,
             coverage_slack_s: 0.002,
             maintain_interval_s: 0.1,
+            confirm_bursts: 2,
+            confirm_on_time_s: 0.1,
+            split: SplitConfig::default(),
             period: PeriodConfig::default(),
             hop: HopConfig::default(),
         }

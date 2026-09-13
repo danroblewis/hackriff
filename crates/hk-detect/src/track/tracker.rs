@@ -18,10 +18,12 @@ use super::events::{
 use super::persist::TrackBatch;
 use super::stats::{Coverage, LogHistogram, Moments, START_RING, StartRing, fold_period, raster};
 
+const SHAPE_RING: usize = 16;
+
 const PENDING_CAPACITY: usize = 256;
 const MEMBER_RING: usize = 1024;
 const SPLIT_RING: usize = 256;
-const RECENT_BURSTS: usize = 32;
+const RECENT_BURSTS: usize = 128;
 const SEGMENT_STARTS: usize = 16;
 const MAX_FUSED: usize = 8;
 const NS: f64 = 1e9;
@@ -57,6 +59,12 @@ pub struct TrackerStats {
     pub hop_links: u64,
     /// Hop sets formed.
     pub hop_sets_formed: u64,
+    /// Hop links between bursts separated by silence (included in `hop_links`).
+    pub bursty_hop_links: u64,
+    /// Track splits.
+    pub splits: u64,
+    /// Tentative tracks discarded without confirming (fragments).
+    pub tentative_discarded: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -200,6 +208,20 @@ struct Slot {
     hop_links: u32,
     hop_set: Option<usize>,
     dirty: bool,
+    tentative: bool,
+    opened: (i64, f64, f64),
+    split_from: Option<TrackId>,
+    shapes: [Shape; SHAPE_RING],
+    shape_len: usize,
+    shape_head: usize,
+}
+
+/// A finished burst's extent, for the split trigger.
+#[derive(Clone, Copy, Debug, Default)]
+struct Shape {
+    fc: f64,
+    bw: f64,
+    t0: i64,
 }
 
 impl Slot {
@@ -233,6 +255,12 @@ impl Slot {
             hop_links: 0,
             hop_set: None,
             dirty: true,
+            tentative: true,
+            opened: (g.t0, g.fc(), g.bw()),
+            split_from: None,
+            shapes: [Shape::default(); SHAPE_RING],
+            shape_len: 0,
+            shape_head: 0,
         }
     }
 }
@@ -275,6 +303,16 @@ struct HopMember {
     links: u32,
     dwell_s: f64,
     detections: u64,
+    bursts: u64,
+    period_s: Option<f64>,
+}
+
+impl HopMember {
+    /// Counts towards a hop set: enough links, on enough of its bursts.
+    fn qualifies(&self, h: &super::config::HopConfig) -> bool {
+        self.links >= h.min_links_per_channel
+            && f64::from(self.links) >= h.min_link_fraction * self.bursts as f64
+    }
 }
 
 #[derive(Debug)]
@@ -282,6 +320,7 @@ struct HopSet {
     id: TrackId,
     members: Vec<HopMember>,
     links: u64,
+    contiguous: u64,
     th_sum_ns: f64,
     t_first: i64,
     t_last: i64,
@@ -319,6 +358,8 @@ pub struct Tracker {
     hop_free: Vec<usize>,
     staged: Vec<Track>,
     links: Vec<(TrackId, DetectionId)>,
+    tentative_links: Vec<(TrackId, DetectionId)>,
+    repoints: Vec<(TrackId, TrackId)>,
     stats: TrackerStats,
 }
 
@@ -352,6 +393,8 @@ impl Tracker {
             hop_free: Vec::new(),
             staged: Vec::with_capacity(64),
             links: Vec::with_capacity(4096),
+            tentative_links: Vec::with_capacity(256),
+            repoints: Vec::with_capacity(16),
             stats: TrackerStats::default(),
         }
     }
@@ -388,7 +431,9 @@ impl Tracker {
             + self.members.capacity() * size_of::<Option<MemberEntry>>()
             + self.merge_queue.capacity() * size_of::<(usize, TrackId)>()
             + self.staged.capacity() * size_of::<Track>()
-            + self.links.capacity() * size_of::<(TrackId, DetectionId)>()
+            + (self.links.capacity() + self.tentative_links.capacity())
+                * size_of::<(TrackId, DetectionId)>()
+            + self.repoints.capacity() * size_of::<(TrackId, TrackId)>()
             + self
                 .hop_sets
                 .iter()
@@ -565,10 +610,10 @@ impl Tracker {
         }
     }
 
-    /// Summaries of the open tracks.
+    /// Summaries of the open, confirmed tracks.
     pub fn summaries(&self) -> Vec<TrackSummary> {
         (0..self.slots.len())
-            .filter(|&i| self.slots[i].live)
+            .filter(|&i| self.slots[i].live && !self.slots[i].tentative)
             .map(|i| self.summary(i, None))
             .collect()
     }
@@ -583,12 +628,13 @@ impl Tracker {
             .collect()
     }
 
-    /// Moves staged track rows (closed, merged, hop sets) and every changed open track, plus the
-    /// new track↔detection links, into `batch`. Call it regularly; links accumulate until then.
+    /// Moves staged track rows (closed, merged, split, hop sets) and every changed open confirmed
+    /// track, plus the new track↔detection links and merge re-points, into `batch`. Call it
+    /// regularly; links accumulate until then. Tentative tracks and their links stay held.
     pub fn drain_into(&mut self, batch: &mut TrackBatch) {
         batch.upserts.append(&mut self.staged);
         for i in 0..self.slots.len() {
-            if self.slots[i].live && self.slots[i].dirty {
+            if self.slots[i].live && self.slots[i].dirty && !self.slots[i].tentative {
                 let t = self.summary(i, None).track;
                 batch.upserts.push(t);
                 self.slots[i].dirty = false;
@@ -605,6 +651,7 @@ impl Tracker {
             }
         }
         batch.links.append(&mut self.links);
+        batch.repoints.append(&mut self.repoints);
         batch.linked_at = Timestamp::from_unix_nanos(self.now);
     }
 
@@ -914,14 +961,55 @@ impl Tracker {
             }
         };
         self.live += 1;
+        i
+    }
+
+    /// Confirms tentative track `i` if it has enough evidence.
+    fn maybe_confirm<F>(&mut self, i: usize, out: &mut F)
+    where
+        F: FnMut(TrackEvent),
+    {
+        let s = &self.slots[i];
+        if s.tentative
+            && (s.bursts >= self.cfg.confirm_bursts
+                || s.on_ns as f64 >= self.cfg.confirm_on_time_s * NS
+                || s.hop_links > 0)
+        {
+            self.confirm_track(i, out);
+        }
+    }
+
+    /// Confirms track `i`: `Opened` (with its first burst), its held links released.
+    fn confirm_track<F>(&mut self, i: usize, out: &mut F)
+    where
+        F: FnMut(TrackEvent),
+    {
+        let s = &mut self.slots[i];
+        if !s.tentative {
+            return;
+        }
+        s.tentative = false;
+        s.dirty = true;
+        let (id, (at, fc, bw)) = (s.id, s.opened);
         self.stats.tracks_opened += 1;
         out(TrackEvent::Opened {
-            track: slot.id,
-            at: Timestamp::from_unix_nanos(g.t0),
-            f_center_hz: g.fc(),
-            bandwidth_hz: g.bw(),
+            track: id,
+            at: Timestamp::from_unix_nanos(at),
+            f_center_hz: fc,
+            bandwidth_hz: bw,
         });
-        i
+        self.release_links(id);
+    }
+
+    fn release_links(&mut self, id: TrackId) {
+        let mut k = 0;
+        while k < self.tentative_links.len() {
+            if self.tentative_links[k].0 == id {
+                self.links.push(self.tentative_links.remove(k));
+            } else {
+                k += 1;
+            }
+        }
     }
 
     /// Applies a group (the parts in `scratch`) to track `i`.
@@ -953,8 +1041,10 @@ impl Tracker {
             } else {
                 None
             };
-            if let Some(kind) = kind {
+            if kind.is_some() {
                 s.segments += 1;
+            }
+            if let Some(kind) = kind.filter(|_| !s.tentative) {
                 out(TrackEvent::Segment(SegmentBoundary {
                     track: s.id,
                     at: Timestamp::from_unix_nanos(g.t0),
@@ -1078,9 +1168,14 @@ impl Tracker {
         s.dirty = true;
         if link {
             let track = s.id;
+            let tentative = s.tentative;
             for k in 0..self.scratch.len() {
                 let p = self.scratch[k];
-                self.links.push((track, p.id));
+                if tentative {
+                    self.tentative_links.push((track, p.id));
+                } else {
+                    self.links.push((track, p.id));
+                }
                 self.members[self.member_head] = Some(MemberEntry {
                     detection: p.id,
                     slot: i,
@@ -1093,6 +1188,7 @@ impl Tracker {
                 s.confirmed += u64::from(p.confirmed);
             }
         }
+        self.maybe_confirm(i, out);
         let c = self.slots[i].cur.expect("burst applied");
         if c.pending_splits == 0 && c.awaiting_parts == 0 {
             self.finalize(i, out);
@@ -1117,6 +1213,13 @@ impl Tracker {
             None => {
                 s.lengths.push(len);
                 s.hist.add(len);
+                s.shapes[s.shape_head] = Shape {
+                    fc: 0.5 * (c.lo + c.hi),
+                    bw: c.hi - c.lo,
+                    t0: c.t0,
+                };
+                s.shape_head = (s.shape_head + 1) % SHAPE_RING;
+                s.shape_len = (s.shape_len + 1).min(SHAPE_RING);
                 true
             }
         };
@@ -1172,7 +1275,7 @@ impl Tracker {
                 best = Some((*e, gap.abs()));
             }
         }
-        self.recent[self.recent_head] = Some(RecentBurst {
+        let me = RecentBurst {
             slot: i,
             track: s.id,
             t0: c.t0,
@@ -1180,11 +1283,104 @@ impl Tracker {
             fc: s.fc,
             bw: s.bw,
             len_ns: c.on_ns,
-        });
+        };
+        let tol = (h.gap_frames * c.frame_ns as f64) as i64;
+        let bursty = if best.is_none() && h.max_silence_s > 0.0 {
+            self.bursty_predecessor(&me, tol, floor)
+        } else {
+            None
+        };
+        self.recent[self.recent_head] = Some(me);
         self.recent_head = (self.recent_head + 1) % RECENT_BURSTS;
         if let Some((e, _)) = best {
-            self.hop_link(e.slot, i, c.t0 - e.t0, e.t0, c.t1, out);
+            self.hop_link(e.slot, i, c.t0 - e.t0, e.t0, c.t1, true, out);
+        } else if let Some(e) = bursty {
+            self.stats.bursty_hop_links += 1;
+            self.hop_link(e.slot, i, c.t0 - e.t0, e.t0, c.t1, false, out);
         }
+    }
+
+    /// Bursts separated by silence: `x`'s nearest similar predecessor `e` on another channel,
+    /// provided `e`'s own nearest similar predecessor is on a third channel, the three centres
+    /// share a raster, and neither `x`'s nor `e`'s track is periodic. Two channels alone never
+    /// link: two interleaved emitters look exactly like a two-channel hopper.
+    fn bursty_predecessor(&self, x: &RecentBurst, tol: i64, floor: f64) -> Option<RecentBurst> {
+        let distinct =
+            |a: &RecentBurst, b: &RecentBurst| (a.fc - b.fc).abs() >= 0.5 * (a.bw + b.bw);
+        let e = self.nearest_similar(x, tol, floor)?;
+        if e.track == x.track || !distinct(x, &e) {
+            return None;
+        }
+        let p = self.nearest_similar(&e, tol, floor)?;
+        if p.track == e.track || p.track == x.track || !distinct(&p, &e) || !distinct(&p, x) {
+            return None;
+        }
+        let mut fcs = [x.fc, e.fc, p.fc];
+        fcs.sort_unstable_by(f64::total_cmp);
+        raster(
+            &fcs,
+            1.5 * self.slots[x.slot].bin_hz.max(self.slots[e.slot].bin_hz),
+        )?;
+        if self.period(x.slot).is_some() || self.period(e.slot).is_some() {
+            return None;
+        }
+        Some(e)
+    }
+
+    /// The latest-ending recent burst of similar bandwidth and length that ended before `x`
+    /// started (within `tol`) and at most `max_silence_s` earlier, on any live track (`x`'s
+    /// included). `None` when a similar burst on another track overlaps `x` in time: concurrent
+    /// packets are not one hopper.
+    fn nearest_similar(&self, x: &RecentBurst, tol: i64, floor: f64) -> Option<RecentBurst> {
+        let h = self.cfg.hop;
+        let silence = (h.max_silence_s * NS) as i64;
+        let mut best: Option<RecentBurst> = None;
+        for e in self.recent.iter().flatten() {
+            if (e.track == x.track && e.t0 == x.t0)
+                || !self.slots[e.slot].live
+                || self.slots[e.slot].id != e.track
+            {
+                continue;
+            }
+            let (b1, b2) = (x.bw.max(floor), e.bw.max(floor));
+            let (l1, l2) = (x.len_ns.max(1) as f64, e.len_ns.max(1) as f64);
+            if b1.max(b2) / b1.min(b2) > h.bandwidth_ratio
+                || l1.max(l2) / l1.min(l2) > h.bursty_length_ratio
+            {
+                continue;
+            }
+            if e.t0 >= x.t0 || e.t1 > x.t0 + tol {
+                let overlaps = e.t0 < x.t1 && x.t0 < e.t1 - tol;
+                if overlaps && e.track != x.track {
+                    return None;
+                }
+                continue;
+            }
+            if x.t0 - e.t1 > silence {
+                continue;
+            }
+            if best.is_none_or(|b| e.t1 > b.t1) {
+                best = Some(*e);
+            }
+        }
+        best
+    }
+
+    /// Track `slot`'s period when it repeats on a lattice with `periodic_veto_*` evidence.
+    fn period(&self, slot: usize) -> Option<f64> {
+        let h = self.cfg.hop;
+        let s = &self.slots[slot];
+        if s.bursts < h.periodic_veto_bursts {
+            return None;
+        }
+        let mut buf = [0i64; START_RING];
+        let n = s.starts.sorted_into(&mut buf);
+        fold_period(&buf[..n], &self.cfg.period)
+            .filter(|p| {
+                p.bursts as u64 >= h.periodic_veto_bursts
+                    && p.confidence >= h.periodic_veto_confidence
+            })
+            .map(|p| p.period_s)
     }
 
     fn hop_member(&self, slot: usize) -> HopMember {
@@ -1199,6 +1395,8 @@ impl Tracker {
             links: s.hop_links,
             dwell_s: s.lengths.mean().unwrap_or(0.0),
             detections: s.detections,
+            bursts: s.bursts,
+            period_s: self.period(slot),
         }
     }
 
@@ -1217,19 +1415,31 @@ impl Tracker {
         }
     }
 
-    fn hop_link<F>(&mut self, a: usize, b: usize, th_ns: i64, t0: i64, t1: i64, out: &mut F)
-    where
+    #[allow(clippy::too_many_arguments)]
+    fn hop_link<F>(
+        &mut self,
+        a: usize,
+        b: usize,
+        th_ns: i64,
+        t0: i64,
+        t1: i64,
+        contiguous: bool,
+        out: &mut F,
+    ) where
         F: FnMut(TrackEvent),
     {
         self.stats.hop_links += 1;
         self.slots[a].hop_links += 1;
         self.slots[b].hop_links += 1;
+        self.maybe_confirm(a, out);
+        self.maybe_confirm(b, out);
         let set = match (self.slots[a].hop_set, self.slots[b].hop_set) {
             (None, None) => {
                 let set = HopSet {
                     id: TrackId::new(),
                     members: Vec::with_capacity(16),
                     links: 0,
+                    contiguous: 0,
                     th_sum_ns: 0.0,
                     t_first: t0,
                     t_last: t1,
@@ -1263,19 +1473,42 @@ impl Tracker {
         };
         self.refresh_member(set, a);
         self.refresh_member(set, b);
+        if self.hop_sets[set].as_ref().is_some_and(|h| !h.formed) {
+            // Formation is judged on the members' current state, not their last-link snapshots.
+            let n = self.hop_sets[set].as_ref().map_or(0, |h| h.members.len());
+            for k in 0..n {
+                let m = self.hop_sets[set].as_ref().unwrap().members[k];
+                let s = &self.slots[m.slot];
+                if s.live && s.id == m.track {
+                    let fresh = self.hop_member(m.slot);
+                    self.hop_sets[set].as_mut().unwrap().members[k] = fresh;
+                }
+            }
+        }
         let hc = self.cfg.hop;
         let now = self.now;
         let formed_now = {
             let h = self.hop_sets[set].as_mut().expect("hop set");
             h.links += 1;
+            h.contiguous += u64::from(contiguous);
             h.th_sum_ns += th_ns as f64;
             h.t_first = h.t_first.min(t0);
             h.t_last = h.t_last.max(t1);
             h.dirty = true;
+            // Periodic channels are independent emitters, not hop channels, when the links are
+            // mostly bursty or their periods disagree (a cyclic hopper's channels share one).
+            let bursty = 2 * h.contiguous < h.links;
+            let (pmin, pmax) = h
+                .members
+                .iter()
+                .filter(|m| m.qualifies(&hc))
+                .filter_map(|m| m.period_s)
+                .fold((f64::INFINITY, 0.0f64), |(a, b), p| (a.min(p), b.max(p)));
+            let drop_periodic = bursty || pmax > 1.1 * pmin;
             let channels = h
                 .members
                 .iter()
-                .filter(|m| m.links >= hc.min_links_per_channel)
+                .filter(|m| m.qualifies(&hc) && !(drop_periodic && m.period_s.is_some()))
                 .count();
             let qualifies = channels >= hc.min_channels && h.links >= hc.min_hops;
             let formed_now = qualifies && !h.formed;
@@ -1323,6 +1556,7 @@ impl Tracker {
             let h = self.hop_sets[keep].as_mut().unwrap();
             h.members.extend(other.members.iter().copied());
             h.links += other.links;
+            h.contiguous += other.contiguous;
             h.th_sum_ns += other.th_sum_ns;
             h.t_first = h.t_first.min(other.t_first);
             h.t_last = h.t_last.max(other.t_last);
@@ -1352,7 +1586,7 @@ impl Tracker {
             .members
             .iter()
             .copied()
-            .filter(|m| m.links >= self.cfg.hop.min_links_per_channel)
+            .filter(|m| m.qualifies(&self.cfg.hop))
             .collect();
         qual.sort_by(|a, b| a.fc.total_cmp(&b.fc));
         let n = qual.len().max(1) as f64;
@@ -1452,8 +1686,122 @@ impl Tracker {
             }
         }
         while let Some((i, id)) = self.merge_queue.pop() {
-            self.try_merge(i, id, out);
+            if !self.try_split(i, id, out) {
+                self.try_merge(i, id, out);
+            }
         }
+    }
+
+    /// Split trigger: track `i`'s latest `SHAPE_RING` bursts form two clusters in centre (or
+    /// bandwidth), each with `min_per_cluster` bursts and each active in both halves of the
+    /// window. The larger cluster (tie: the one active first) continues; the other opens a new
+    /// track with `split_from`. History and links stay on the parent.
+    fn try_split<F>(&mut self, i: usize, id: TrackId, out: &mut F) -> bool
+    where
+        F: FnMut(TrackEvent),
+    {
+        let sc = self.cfg.split;
+        let s = &self.slots[i];
+        if !sc.enabled
+            || !s.live
+            || s.id != id
+            || s.tentative
+            || s.hop_set.is_some()
+            || s.cur.is_some()
+            || s.shape_len < SHAPE_RING
+        {
+            return false;
+        }
+        let n = SHAPE_RING;
+        let m = sc.min_per_cluster.clamp(1, n / 2);
+        let floor = self.cfg.freq_tolerance_bins * s.bin_hz;
+        let mut sh = s.shapes;
+        let bw_mean = sh.iter().map(|x| x.bw).sum::<f64>() / n as f64;
+        let eps = floor.max(self.cfg.freq_tolerance_fraction * bw_mean.max(floor));
+        sh.sort_unstable_by(|a, b| a.fc.total_cmp(&b.fc));
+        let mut cut = best_cut(&sh.map(|x| x.fc), m)
+            .filter(|&(_, sep, sd)| {
+                sep >= sc.min_separation_eps * eps && sep >= sc.separation_sigma * sd
+            })
+            .map(|(k, _, _)| k);
+        if cut.is_none() {
+            sh.sort_unstable_by(|a, b| a.bw.total_cmp(&b.bw));
+            cut = best_cut(&sh.map(|x| x.bw.max(floor).ln()), m)
+                .filter(|&(_, sep, sd)| {
+                    sep >= sc.bandwidth_ratio.ln() && sep >= sc.separation_sigma * sd
+                })
+                .map(|(k, _, _)| k);
+        }
+        let Some(k) = cut else { return false };
+        let (lo_c, hi_c) = sh.split_at(k);
+        let tmin = sh.iter().map(|x| x.t0).min().unwrap_or(0);
+        let tmax = sh.iter().map(|x| x.t0).max().unwrap_or(0);
+        let mid = tmin + (tmax - tmin) / 2;
+        let sustained = |c: &[Shape]| c.iter().any(|x| x.t0 < mid) && c.iter().any(|x| x.t0 >= mid);
+        if !sustained(lo_c) || !sustained(hi_c) {
+            return false;
+        }
+        let first = |c: &[Shape]| c.iter().map(|x| x.t0).min().unwrap_or(i64::MAX);
+        let lo_stays =
+            lo_c.len() > hi_c.len() || (lo_c.len() == hi_c.len() && first(lo_c) <= first(hi_c));
+        let (stay, go) = if lo_stays { (lo_c, hi_c) } else { (hi_c, lo_c) };
+        let mean =
+            |c: &[Shape], f: fn(&Shape) -> f64| c.iter().map(f).sum::<f64>() / c.len() as f64;
+        let (par_fc, par_bw) = (mean(stay, |x| x.fc), mean(stay, |x| x.bw));
+        let (ch_fc, ch_bw) = (mean(go, |x| x.fc), mean(go, |x| x.bw));
+        let mut go_t0 = [0i64; SHAPE_RING];
+        for (d, x) in go_t0.iter_mut().zip(go) {
+            *d = x.t0;
+        }
+        let go_t0 = &go_t0[..go.len()];
+        let parent = {
+            let s = &mut self.slots[i];
+            s.fc = par_fc;
+            s.bw = par_bw;
+            s.shape_len = 0;
+            s.shape_head = 0;
+            let mut buf = [0i64; START_RING];
+            let k = s.starts.sorted_into(&mut buf);
+            let mut ring = StartRing::default();
+            for &t in &buf[..k] {
+                if !go_t0.contains(&t) {
+                    ring.push(t);
+                }
+            }
+            s.starts = ring;
+            s.dirty = true;
+            *s
+        };
+        // The parent row precedes the child's (split_from references it).
+        let row = self.summary(i, None).track;
+        self.staged.push(row);
+        let g = Group {
+            t0: self.now,
+            t1: self.now,
+            lo: ch_fc - 0.5 * ch_bw,
+            hi: ch_fc + 0.5 * ch_bw,
+            bin_hz: parent.bin_hz,
+            frame_ns: parent.last.map_or(1, |l| l.frame_ns),
+            segment: parent.segment,
+            provenance: parent.provenance,
+            tune: parent.tune,
+            continues: 0,
+            transitions: 0,
+        };
+        let j = self.open(&g, out);
+        {
+            let c = &mut self.slots[j];
+            c.split_from = Some(parent.id);
+            c.shape_n = go.len() as u64;
+        }
+        self.confirm_track(j, out);
+        self.stats.splits += 1;
+        out(TrackEvent::TrackSplit {
+            from: parent.id,
+            into: self.slots[j].id,
+            at: Timestamp::from_unix_nanos(self.now),
+        });
+        true
     }
 
     fn try_merge<F>(&mut self, i: usize, id: TrackId, out: &mut F)
@@ -1467,7 +1815,12 @@ impl Tracker {
         let Some(a_last) = a.last else { return };
         for j in 0..self.slots.len() {
             let b = &self.slots[j];
-            if j == i || !b.live || b.hop_set.is_some() {
+            if j == i
+                || !b.live
+                || b.hop_set.is_some()
+                || a.split_from == Some(b.id)
+                || b.split_from == Some(a.id)
+            {
                 continue;
             }
             let floor = self.cfg.freq_tolerance_bins * a.bin_hz.max(b.bin_hz);
@@ -1522,6 +1875,11 @@ impl Tracker {
             t.dirty = true;
         }
         let into_id = self.slots[into].id;
+        for l in self.tentative_links.iter_mut() {
+            if l.0 == f.id {
+                l.0 = into_id;
+            }
+        }
         for m in self.members.iter_mut().flatten() {
             if m.slot == from && m.track == f.id {
                 m.slot = into;
@@ -1534,20 +1892,33 @@ impl Tracker {
                 r.track = into_id;
             }
         }
-        let target = self.summary(into, None).track;
-        self.staged.push(target);
-        let mut merged = self.summary(from, None).track;
-        merged.state = TrackState::MergedInto(into_id);
-        self.staged.push(merged);
+        // A merge with a confirmed track confirms the survivor; a tentative (never announced)
+        // fragment is absorbed silently.
+        if f.tentative {
+            self.maybe_confirm(into, out);
+        } else {
+            self.confirm_track(into, out);
+        }
+        if !self.slots[into].tentative {
+            self.release_links(into_id);
+        }
+        if !f.tentative {
+            let target = self.summary(into, None).track;
+            self.staged.push(target);
+            let mut merged = self.summary(from, None).track;
+            merged.state = TrackState::MergedInto(into_id);
+            self.staged.push(merged);
+            self.repoints.push((f.id, into_id));
+            self.stats.merges += 1;
+            out(TrackEvent::Merged {
+                from: f.id,
+                into: into_id,
+                at: Timestamp::from_unix_nanos(self.now),
+            });
+        }
         self.slots[from].live = false;
         self.free.push(from);
         self.live -= 1;
-        self.stats.merges += 1;
-        out(TrackEvent::Merged {
-            from: f.id,
-            into: into_id,
-            at: Timestamp::from_unix_nanos(self.now),
-        });
     }
 
     fn close<F>(&mut self, i: usize, cause: CloseCause, out: &mut F)
@@ -1558,6 +1929,16 @@ impl Tracker {
             c.pending_splits = 0;
             c.awaiting_parts = 0;
             self.finalize(i, out);
+        }
+        if self.slots[i].tentative {
+            // Never confirmed (a fragment): no Opened was emitted, nothing is persisted.
+            let id = self.slots[i].id;
+            self.tentative_links.retain(|l| l.0 != id);
+            self.slots[i].live = false;
+            self.free.push(i);
+            self.live -= 1;
+            self.stats.tentative_discarded += 1;
+            return;
         }
         let summary = self.summary(i, Some(cause));
         self.staged.push(summary.track.clone());
@@ -1618,7 +1999,7 @@ impl Tracker {
             } else {
                 TrackState::Open
             },
-            split_from: None,
+            split_from: s.split_from,
             time: TimeRange::new(
                 Timestamp::from_unix_nanos(s.t_first),
                 Timestamp::from_unix_nanos(s.t_last_end),
@@ -1660,4 +2041,22 @@ impl Tracker {
             closed,
         }
     }
+}
+
+/// Best two-cluster cut of `sorted` values (1-D 2-means, each side ≥ `m`): `(cut index, mean
+/// separation, pooled within-cluster standard deviation)`.
+fn best_cut(sorted: &[f64; SHAPE_RING], m: usize) -> Option<(usize, f64, f64)> {
+    let n = SHAPE_RING;
+    let mut best: Option<(usize, f64, f64)> = None;
+    for k in m..=n - m {
+        let (l, r) = sorted.split_at(k);
+        let ml = l.iter().sum::<f64>() / l.len() as f64;
+        let mr = r.iter().sum::<f64>() / r.len() as f64;
+        let ss = l.iter().map(|x| (x - ml).powi(2)).sum::<f64>()
+            + r.iter().map(|x| (x - mr).powi(2)).sum::<f64>();
+        if best.is_none_or(|(_, _, b)| ss < b) {
+            best = Some((k, mr - ml, ss));
+        }
+    }
+    best.map(|(k, sep, ss)| (k, sep, (ss / (n - 2) as f64).sqrt()))
 }
