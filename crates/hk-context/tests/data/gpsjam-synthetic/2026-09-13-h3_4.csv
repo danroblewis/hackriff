@@ -1,0 +1,10 @@
+# SYNTHETIC test extract for hackriff T-020 (AWARE-006). NOT gpsjam.org data.
+# Cell ids are real H3 resolution-4 indexes picked by hand; every count is invented.
+# The row format mirrors https://gpsjam.org/data/<date>-h3_4.csv as observed 2026-09-13.
+# 84194edffffffff contains the synth site 52.2 N 0.12 E (red); 8419453ffffffff is ~150 km away
+# (yellow); 84261b5ffffffff is in Kansas (red); 840d9edffffffff straddles the antimeridian (green).
+hex,count_good_aircraft,count_bad_aircraft
+84194edffffffff,40,12
+8419453ffffffff,30,2
+84261b5ffffffff,50,30
+840d9edffffffff,20,0
