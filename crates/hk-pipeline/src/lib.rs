@@ -68,9 +68,10 @@ pub use recorder::{
     RECORDING_DEFAULT_S, RECORDING_LABEL_MAX, RECORDING_MAX_BYTES, RECORDING_MAX_S, RecordingStatus,
 };
 pub use run::{
-    ControlFailure, ControlStats, ControlStatus, Pipeline, PipelineController, PipelineHandle,
-    REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunSummary, SourceFactory,
-    SourceInfo, Stopper, open_replay, replay_block_len, replay_once,
+    ControlFailure, ControlStats, ControlStatus, DeviceReplay, Pipeline, PipelineController,
+    PipelineHandle, REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunSummary,
+    SourceFactory, SourceInfo, Stopper, open_mock_replay, open_replay, replay_block_len,
+    replay_once,
 };
 pub use stats::Counters;
 

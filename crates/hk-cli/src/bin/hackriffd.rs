@@ -12,7 +12,9 @@ use hk_cli::pipeline::LiveArgs;
 #[command(name = "hackriffd", version, about = "hackriff daemon")]
 struct Args {
     /// Sample source: `hackrf` (the live HackRF One, receive only; needs `--features hackrf`),
-    /// `hackrf:<serial>`, or `sigmf:<file.sigmf-meta>` (replayed in real time).
+    /// `hackrf:<serial>`, `mock:<file.sigmf-meta>` (the mock SDR device: the recording as live air,
+    /// retuned by the scheduler), or `sigmf:<file.sigmf-meta>` (replayed in real time; the
+    /// scheduler's retunes go through the mock device too, so frequencies stay truthful).
     #[arg(long, default_value = "hackrf")]
     source: String,
     #[command(flatten)]

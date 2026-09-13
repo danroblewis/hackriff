@@ -374,6 +374,11 @@ impl<R: Read + Send> SigmfReplaySource<R> {
     /// would. For exercising controllers such as the scheduler offline. Capabilities are
     /// unchanged (`controllable` stays false: the recording itself cannot be retuned). Each
     /// change mints one provenance handle; unchanged blocks allocate nothing.
+    ///
+    /// **Provenance only (T-057):** a virtual retune moves the provenance centre while the IQ stays
+    /// at the recorded centre, so anything placing signals by frequency (detection, inventory,
+    /// history) would misplace them. Only controller tests use it; a pipeline retuning a recording
+    /// uses the mock SDR device ([`super::mock`]), whose retunes shift the IQ.
     pub fn with_virtual_tuning(self) -> Self {
         self.control.virtual_tuning.store(true, Ordering::SeqCst);
         self
