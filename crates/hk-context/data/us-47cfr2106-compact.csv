@@ -8,10 +8,32 @@
 # 18 for the ISM bands; 47 CFR Part 90 Subpart S for the 800 MHz public-safety/SMR band; FCC band
 # plan documents for the 700 MHz commercial/public-safety split
 # (https://www.fcc.gov/sites/default/files/wireless/auctions/data/bandplans/700band.pdf). Band
-# edges were checked against these sources on 2026-09-13 (T-019) where noted `unverified=false`;
-# `unverified=true` rows are widely published values (mostly amateur HF/VHF sub-bands) not
-# individually re-checked against a primary source this session — verify before relying on them
-# for a legal conclusion.
+# edges were checked against these sources on 2026-09-13 (T-019) where noted `unverified=false`.
+#
+# T-019 follow-up (2026-09-13): the amateur sub-band rows were individually re-checked against
+# 47 CFR 97.301 (band edges; via Cornell LII mirror https://www.law.cornell.edu/cfr/text/47/97.301,
+# eCFR blocks automated fetches) and against 47 CFR 2.106's federal/non-federal and primary/
+# secondary columns (via NTIA Spectrum Compendium band sheets and the IARU "Amateur and
+# Amateur-satellite Service Spectrum" summary, https://www.iaru.org/wp-content/uploads/2020/01/
+# Amateur-Services-Spectrum-2020_.pdf, since eCFR/NTIA PDFs render as images/could not be fetched
+# directly this session). Corrections made: `amateur-30m` (10.1-10.15 MHz) is the sole HF amateur
+# allocation that is secondary, not primary — fixed service is primary there (US247/US340);
+# `amateur-70cm` (420-450 MHz) has amateur secondary to primary federal radiolocation (US270), not
+# co-primary; `amateur-23cm` (1240-1300 MHz) has radionavigation-satellite as primary (co-primary
+# with radiolocation), not secondary, with amateur secondary to both; `ism-433-part15`
+# (433.05-434.79 MHz) inherits the same federal/non-federal "shared" status and primary/secondary
+# split as the parent 420-450 MHz allocation it sits inside, rather than "non-federal" — see the
+# `ism-433-part15` row note below for its band-edge caveat. `amateur-20m`/`17m`/`15m`/`12m`/`10m`/
+# `6m`/`1-25m` (222-225 MHz) were re-checked and are unchanged: exclusively non-federal amateur,
+# primary, with no other allocated service.
+#
+# Row note — `ism-433-part15`: 433.05-434.79 MHz is not itself a 47 CFR 2.106 table entry; it is
+# the European ETSI EN 300 220 harmonised SRD band (hence the `ism-eu-band` tag), commonly used by
+# imported Part 15 devices operating in the US under the general 47 CFR 15.231 "periodic
+# operation... above 70 MHz" authority (or, for the narrower 433.5-434.5 MHz sub-range, 47 CFR
+# 15.240's container-ID-tag rule). The row's `federal`/`primary_services`/`secondary_services` are
+# now verified against the *underlying* 420-450 MHz allocation it lies inside; the exact band edges
+# remain a documented Part-15/common-usage convention rather than a distinct CFR allocation.
 #
 # This is a lookup table for priors, not a legal reference: allocation != assignment != actual use
 # (docs/04 §1.1). Coverage is deliberately partial — the bands named in the T-019 task brief plus
@@ -41,19 +63,19 @@ noaa-apt-137,137000000,138000000,us,federal,meteorological-satellite,fixed;mobil
 amateur-160m,1800000,2000000,us,non-federal,amateur,,amateur;hf,false
 amateur-80m,3500000,4000000,us,non-federal,amateur,,amateur;hf,false
 amateur-40m,7000000,7300000,us,non-federal,amateur,,amateur;hf,false
-amateur-30m,10100000,10150000,us,non-federal,amateur,,amateur;hf,true
-amateur-20m,14000000,14350000,us,non-federal,amateur,,amateur;hf,true
-amateur-17m,18068000,18168000,us,non-federal,amateur,,amateur;hf,true
-amateur-15m,21000000,21450000,us,non-federal,amateur,,amateur;hf,true
-amateur-12m,24890000,24990000,us,non-federal,amateur,,amateur;hf,true
-amateur-10m,28000000,29700000,us,non-federal,amateur,,amateur;hf,true
-amateur-6m,50000000,54000000,us,non-federal,amateur,,amateur;vhf,true
+amateur-30m,10100000,10150000,us,non-federal,fixed,amateur,amateur;hf,false
+amateur-20m,14000000,14350000,us,non-federal,amateur,,amateur;hf,false
+amateur-17m,18068000,18168000,us,non-federal,amateur,,amateur;hf,false
+amateur-15m,21000000,21450000,us,non-federal,amateur,,amateur;hf,false
+amateur-12m,24890000,24990000,us,non-federal,amateur,,amateur;hf,false
+amateur-10m,28000000,29700000,us,non-federal,amateur,,amateur;hf,false
+amateur-6m,50000000,54000000,us,non-federal,amateur,,amateur;vhf,false
 amateur-2m,144000000,148000000,us,non-federal,amateur,,amateur;vhf,false
-amateur-1-25m,222000000,225000000,us,non-federal,amateur,,amateur;vhf,true
-amateur-70cm,420000000,450000000,us,shared,radiolocation;amateur,,amateur;uhf,true
-ism-433-part15,433050000,434790000,us,non-federal,amateur;radiolocation,,part15;short-range-device;ism-eu-band,true
+amateur-1-25m,222000000,225000000,us,non-federal,amateur,,amateur;vhf,false
+amateur-70cm,420000000,450000000,us,shared,radiolocation,amateur,amateur;uhf,false
+ism-433-part15,433050000,434790000,us,shared,radiolocation,amateur,part15;short-range-device;ism-eu-band,false
 ism-902,902000000,928000000,us,shared,radiolocation;amateur,,ism;part15;33cm,false
-amateur-23cm,1240000000,1300000000,us,shared,radiolocation,amateur;radionavigation-satellite,amateur;uhf,true
+amateur-23cm,1240000000,1300000000,us,shared,radiolocation;radionavigation-satellite,amateur,amateur;uhf,false
 aero-radionav-960-1215,960000000,1215000000,us,shared,aeronautical-radionavigation,radionavigation-satellite,adsb;dme;tacan,false
 gnss-l5,1164000000,1215000000,us,shared,aeronautical-radionavigation;radionavigation-satellite,,gnss;l5;galileo-e5,false
 gnss-l2,1215000000,1240000000,us,shared,radionavigation-satellite,radiolocation,gnss;l2;l2c,false
