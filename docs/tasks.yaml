@@ -1011,7 +1011,7 @@ tasks:
   - id: T-061
     milestone: M0b
     title: Record outputs to files (bitstreams, symbols, WAV audio, IQ slices) from UI and CLI, per selection
-    status: todo
+    status: in-progress
     deps: [T-060, T-052, T-049]
     parallel_group: P
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1022,7 +1022,6 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    hold: "after T-060, T-052 and T-049 merge"
   - id: T-062
     milestone: M0b
     title: Control API audit-log DoS fix and auth hardening (T-050 review)
