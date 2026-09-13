@@ -102,7 +102,7 @@ fn space_050_noise_floor_fixture_replays_with_known_variance_and_provenance() {
         }
     }
     assert_eq!(count, N);
-    assert_eq!(reader.dropped_samples(), 0);
+    assert_eq!(reader.lost_samples() + reader.gap_samples(), 0);
 
     // Expected E|z|^2 in normalised units: 2 (sigma^2 + 1/12 quantisation) / 128^2.
     let expected = 2.0 * (SIGMA_COUNTS * SIGMA_COUNTS + 1.0 / 12.0) / (128.0 * 128.0);

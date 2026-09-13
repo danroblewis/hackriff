@@ -9,12 +9,20 @@
 //!   provenance). `core:global_index` jumps become [`Discontinuity::GAP`] with an exact
 //!   `dropped_before`, so gaps in a recording stay visible instead of being spliced.
 //! - **Sample counter:** the stream index is `core:global_index` when present, else the data-file
-//!   index.
+//!   index. A counter that would overflow 64 bits is an explicit error.
+//! - **Non-conforming datasets:** a capture's `core:header_bytes` are skipped before its first
+//!   sample; the global `core:trailing_bytes` are excluded from the data (this needs the data
+//!   length, so [`SigmfReplaySource::from_reader`] rejects it).
 //! - **Provenance:** a capture's `hackriff:provenance`, else the global one (centre frequency
 //!   taken from the capture's `core:frequency`), else a synthesised record with
 //!   [`TimestampMethod::Unknown`], device `sigmf:<core:hw>` and unknown (zero) gains.
-//! - **Time:** a capture's `core:datetime` anchors its first sample. Without one, the time is
-//!   extrapolated from the previous segment, and the first segment defaults to the Unix epoch.
+//! - **Time:** a capture's `core:datetime` anchors its first sample; a later capture without one
+//!   is extrapolated from the previous anchor. If no anchor exists yet, times count from the Unix
+//!   epoch and the provenance says so: `timestamp_method` becomes [`TimestampMethod::Unknown`]
+//!   (unless the record is [`TimestampMethod::Synthetic`], whose times are relative by
+//!   construction) and the error budget is cleared.
+//! - **Control:** a recording cannot be retuned. [`Source::control`] only stops it; other
+//!   controls return [`SourceError::Unsupported`].
 //!
 //! Not supported (explicit errors): multi-channel files, real (non-complex) datatypes, a first
 //! capture not at sample 0, data ending mid-sample.
@@ -22,6 +30,8 @@
 use std::fs::File;
 use std::io::{BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hk_model::sigmf::{Capture, Datatype, SigmfMeta, data_path_for};
@@ -29,8 +39,8 @@ use hk_model::{ClockSource, Provenance, SampleTime, Timestamp, TimestampMethod, 
 use num_complex::{Complex, Complex32};
 
 use super::{
-    Duplex, FrequencyRange, Gains, SampleRates, Source, SourceCapabilities, SourceError,
-    SourceKind, format,
+    Duplex, FrequencyRange, Gains, SampleRates, Source, SourceCapabilities, SourceControl,
+    SourceError, SourceKind, format,
 };
 use crate::block::{BlockHeader, Discontinuity, ProvenanceHandle};
 
@@ -75,15 +85,69 @@ struct Segment {
     file_start: u64,
     /// One past the last data-file sample index; `None` means "to end of data".
     file_end: Option<u64>,
+    /// Non-sample bytes preceding the segment's first sample (`core:header_bytes`).
+    header_bytes: u64,
     /// Stream sample counter of `file_start`.
     counter_start: u64,
     /// Host time of `file_start`.
     anchor: Timestamp,
+    /// `anchor` derives from a `core:datetime` (not from the epoch fallback).
+    timed: bool,
     provenance: ProvenanceHandle,
     /// Flags for the segment's first block.
     flags: Discontinuity,
     /// Samples missing before the segment (from `core:global_index`).
     dropped_before: u64,
+}
+
+/// The control handle of a [`SigmfReplaySource`]: it can only stop the replay.
+pub struct ReplayControl {
+    capabilities: SourceCapabilities,
+    stopped: AtomicBool,
+}
+
+impl ReplayControl {
+    fn unsupported(operation: &'static str) -> SourceError {
+        SourceError::Unsupported {
+            source_name: NAME,
+            operation,
+        }
+    }
+}
+
+impl SourceControl for ReplayControl {
+    fn capabilities(&self) -> &SourceCapabilities {
+        &self.capabilities
+    }
+
+    fn tune(&self, _center_hz: f64) -> Result<(), SourceError> {
+        Err(Self::unsupported("tune"))
+    }
+
+    fn set_sample_rate(&self, _sample_rate_hz: f64) -> Result<(), SourceError> {
+        Err(Self::unsupported("set_sample_rate"))
+    }
+
+    fn set_gains(&self, _gains: &Gains) -> Result<(), SourceError> {
+        Err(Self::unsupported("set_gains"))
+    }
+
+    fn set_baseband_filter(&self, _bandwidth_hz: f64) -> Result<(), SourceError> {
+        Err(Self::unsupported("set_baseband_filter"))
+    }
+
+    fn set_bias_tee(&self, _enabled: bool) -> Result<(), SourceError> {
+        Err(Self::unsupported("set_bias_tee"))
+    }
+
+    fn start(&self) -> Result<(), SourceError> {
+        Ok(())
+    }
+
+    fn stop(&self) -> Result<(), SourceError> {
+        self.stopped.store(true, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 /// Replays a SigMF recording. See the [module docs](self).
@@ -94,15 +158,39 @@ pub struct SigmfReplaySource<R = BufReader<File>> {
     datatype: Datatype,
     sample_rate_hz: f64,
     total_samples: Option<u64>,
-    capabilities: SourceCapabilities,
+    control: Arc<ReplayControl>,
     segments: Vec<Segment>,
     segment: usize,
+    header_skipped: bool,
     file_pos: u64,
     byte_buf: Vec<u8>,
     options: ReplayOptions,
     pace_origin: Option<Instant>,
     emitted: u64,
-    stopped: bool,
+}
+
+/// A non-negative integer field from a metadata `extra` map; absent means 0.
+fn u64_field<V: std::fmt::Display>(
+    value: Option<&V>,
+    as_u64: fn(&V) -> Option<u64>,
+    key: &str,
+) -> Result<u64, SourceError> {
+    match value {
+        None => Ok(0),
+        Some(v) => {
+            as_u64(v).ok_or_else(|| SourceError::InvalidRecording(format!("invalid {key} {v}")))
+        }
+    }
+}
+
+fn trailing_bytes(meta: &SigmfMeta) -> Result<u64, SourceError> {
+    let key = "core:trailing_bytes";
+    u64_field(meta.global.extra.get(key), |v| v.as_u64(), key)
+}
+
+fn header_bytes(capture: &Capture) -> Result<u64, SourceError> {
+    let key = "core:header_bytes";
+    u64_field(capture.extra.get(key), |v| v.as_u64(), key)
 }
 
 impl SigmfReplaySource<BufReader<File>> {
@@ -118,14 +206,29 @@ impl SigmfReplaySource<BufReader<File>> {
         let file = File::open(&data_path).map_err(io_err)?;
         let len = file.metadata().map_err(io_err)?.len();
         let bps = meta.global.datatype.bytes_per_sample() as u64;
-        if len % bps != 0 {
+        let mut non_sample = trailing_bytes(&meta)?;
+        for capture in &meta.captures {
+            non_sample = non_sample.saturating_add(header_bytes(capture)?);
+        }
+        let sample_bytes = len.checked_sub(non_sample).ok_or_else(|| {
+            SourceError::InvalidRecording(format!(
+                "{}: {len} bytes cannot hold {non_sample} header and trailing bytes",
+                data_path.display()
+            ))
+        })?;
+        if sample_bytes % bps != 0 {
             return Err(SourceError::InvalidRecording(format!(
-                "{}: {len} bytes is not a whole number of {} samples",
+                "{}: {sample_bytes} sample bytes is not a whole number of {} samples",
                 data_path.display(),
                 meta.global.datatype
             )));
         }
-        let mut source = Self::build(meta, BufReader::new(file), Some(len / bps), options)?;
+        let mut source = Self::build(
+            meta,
+            BufReader::new(file),
+            Some(sample_bytes / bps),
+            options,
+        )?;
         source.data_path = Some(data_path);
         Ok(source)
     }
@@ -133,12 +236,18 @@ impl SigmfReplaySource<BufReader<File>> {
 
 impl<R: Read + Send> SigmfReplaySource<R> {
     /// Replays `meta` over sample bytes from `reader` (e.g. an in-memory buffer). The total
-    /// length is unknown up front; the last segment runs to end of input.
+    /// length is unknown up front; the last segment runs to end of input, so a recording with
+    /// `core:trailing_bytes` is rejected (use [`SigmfReplaySource::open`]).
     pub fn from_reader(
         meta: SigmfMeta,
         reader: R,
         options: ReplayOptions,
     ) -> Result<Self, SourceError> {
+        if trailing_bytes(&meta)? > 0 {
+            return Err(SourceError::InvalidRecording(
+                "core:trailing_bytes needs the data length; open the recording from a file".into(),
+            ));
+        }
         Self::build(meta, reader, None, options)
     }
 
@@ -191,15 +300,18 @@ impl<R: Read + Send> SigmfReplaySource<R> {
             datatype,
             sample_rate_hz,
             total_samples,
-            capabilities,
+            control: Arc::new(ReplayControl {
+                capabilities,
+                stopped: AtomicBool::new(false),
+            }),
             segments,
             segment: 0,
+            header_skipped: false,
             file_pos: 0,
             byte_buf,
             options,
             pace_origin: None,
             emitted: 0,
-            stopped: false,
         })
     }
 
@@ -238,6 +350,20 @@ impl<R: Read + Send> SigmfReplaySource<R> {
         Ok(filled)
     }
 
+    /// Reads and discards `n` non-sample bytes.
+    fn skip_bytes(&mut self, mut n: u64) -> Result<(), SourceError> {
+        while n > 0 {
+            let want = n.min(self.byte_buf.len() as u64) as usize;
+            if self.fill_bytes(want)? < want {
+                return Err(SourceError::InvalidRecording(
+                    "sample data ends inside a core:header_bytes header".into(),
+                ));
+            }
+            n -= want as u64;
+        }
+        Ok(())
+    }
+
     fn pace(&mut self) {
         if let Pacing::RealTime { speed } = self.options.pacing {
             let origin = *self.pace_origin.get_or_insert_with(Instant::now);
@@ -250,37 +376,17 @@ impl<R: Read + Send> SigmfReplaySource<R> {
     }
 
     fn unsupported(operation: &'static str) -> SourceError {
-        SourceError::Unsupported {
-            source_name: NAME,
-            operation,
-        }
+        ReplayControl::unsupported(operation)
     }
 }
 
 impl<R: Read + Send> Source for SigmfReplaySource<R> {
     fn capabilities(&self) -> &SourceCapabilities {
-        &self.capabilities
+        &self.control.capabilities
     }
 
-    fn tune(&mut self, _center_hz: f64) -> Result<(), SourceError> {
-        Err(Self::unsupported("tune"))
-    }
-
-    fn set_sample_rate(&mut self, _sample_rate_hz: f64) -> Result<(), SourceError> {
-        Err(Self::unsupported("set_sample_rate"))
-    }
-
-    fn set_gains(&mut self, _gains: &Gains) -> Result<(), SourceError> {
-        Err(Self::unsupported("set_gains"))
-    }
-
-    fn start(&mut self) -> Result<(), SourceError> {
-        Ok(())
-    }
-
-    fn stop(&mut self) -> Result<(), SourceError> {
-        self.stopped = true;
-        Ok(())
+    fn control(&self) -> Arc<dyn SourceControl> {
+        self.control.clone()
     }
 
     fn read_block(
@@ -324,7 +430,7 @@ impl<R: Read + Send> Source for SigmfReplaySource<R> {
 impl<R: Read + Send> SigmfReplaySource<R> {
     /// Reads the next block's raw bytes into the byte buffer; returns its header and byte count.
     fn next_raw(&mut self) -> Result<Option<(BlockHeader, usize)>, SourceError> {
-        if self.stopped {
+        if self.control.stopped.load(Ordering::SeqCst) {
             return Ok(None);
         }
         let bps = self.datatype.bytes_per_sample();
@@ -332,9 +438,16 @@ impl<R: Read + Send> SigmfReplaySource<R> {
             let Some(seg) = self.segments.get(self.segment) else {
                 return Ok(None);
             };
+            if !self.header_skipped {
+                let header_bytes = seg.header_bytes;
+                self.skip_bytes(header_bytes)?;
+                self.header_skipped = true;
+                continue;
+            }
             let remaining = seg.file_end.map(|end| end - self.file_pos);
             if remaining == Some(0) {
                 self.segment += 1;
+                self.header_skipped = false;
                 continue;
             }
             let file_end = seg.file_end;
@@ -360,7 +473,17 @@ impl<R: Read + Send> SigmfReplaySource<R> {
             }
             let seg = &self.segments[self.segment];
             let at_start = self.file_pos == seg.file_start;
-            let counter = seg.counter_start + (self.file_pos - seg.file_start);
+            let offset = self.file_pos - seg.file_start;
+            let counter = seg
+                .counter_start
+                .checked_add(offset)
+                .filter(|c| c.checked_add(n as u64).is_some())
+                .ok_or_else(|| {
+                    SourceError::InvalidRecording(format!(
+                        "sample counter overflows 64 bits at data sample {}",
+                        self.file_pos
+                    ))
+                })?;
             let anchor = SampleTime {
                 sample_index: seg.counter_start,
                 host_time: seg.anchor,
@@ -428,6 +551,7 @@ fn plan_segments(
                 )));
             }
         }
+        let header_bytes = header_bytes(capture)?;
 
         let global_index = match capture.extra.get("core:global_index") {
             None => None,
@@ -436,7 +560,14 @@ fn plan_segments(
                     .ok_or_else(|| invalid(format!("invalid core:global_index {v}")))?,
             ),
         };
-        let contiguous = prev.map(|p| p.counter_start + (capture.sample_start - p.file_start));
+        let contiguous = match prev {
+            None => None,
+            Some(p) => Some(
+                p.counter_start
+                    .checked_add(capture.sample_start - p.file_start)
+                    .ok_or_else(|| invalid("the sample counter overflows 64 bits".into()))?,
+            ),
+        };
         let counter_start = global_index.or(contiguous).unwrap_or(0);
         let dropped_before = match contiguous {
             Some(expected) if counter_start < expected => {
@@ -446,7 +577,7 @@ fn plan_segments(
             None => 0,
         };
 
-        let provenance = match (&capture.provenance, &meta.global.provenance) {
+        let mut provenance = match (&capture.provenance, &meta.global.provenance) {
             (Some(p), _) => p.clone(),
             (None, Some(global)) => {
                 let mut p = global.clone();
@@ -464,16 +595,27 @@ fn plan_segments(
             )));
         }
 
-        let anchor = match (&capture.datetime, prev) {
-            (Some(dt), _) => parse_sigmf_datetime(dt)
-                .ok_or_else(|| invalid(format!("unparseable core:datetime {dt:?}")))?,
-            (None, Some(p)) => SampleTime {
-                sample_index: p.counter_start,
-                host_time: p.anchor,
-            }
-            .time_of(counter_start, sample_rate_hz),
-            (None, None) => Timestamp::UNIX_EPOCH,
+        let (anchor, timed) = match (&capture.datetime, prev) {
+            (Some(dt), _) => (
+                parse_sigmf_datetime(dt)
+                    .ok_or_else(|| invalid(format!("unparseable core:datetime {dt:?}")))?,
+                true,
+            ),
+            (None, Some(p)) => (
+                SampleTime {
+                    sample_index: p.counter_start,
+                    host_time: p.anchor,
+                }
+                .time_of(counter_start, sample_rate_hz),
+                p.timed,
+            ),
+            (None, None) => (Timestamp::UNIX_EPOCH, false),
         };
+        if !timed && provenance.timestamp_method != TimestampMethod::Synthetic {
+            // Times count from the epoch, not from a clock: say so instead of implying 1970.
+            provenance.timestamp_method = TimestampMethod::Unknown;
+            provenance.timestamp_error_budget_ns = None;
+        }
 
         let (handle, mut flags) = match prev {
             None => (
@@ -498,8 +640,10 @@ fn plan_segments(
         segments.push(Segment {
             file_start: capture.sample_start,
             file_end: None,
+            header_bytes,
             counter_start,
             anchor,
+            timed,
             provenance: handle,
             flags,
             dropped_before,
@@ -507,6 +651,15 @@ fn plan_segments(
     }
     if let Some(last) = segments.last_mut() {
         last.file_end = total_samples;
+        if let Some(total) = total_samples {
+            let end = last.counter_start.checked_add(total - last.file_start);
+            if end.is_none() {
+                return Err(SourceError::InvalidRecording(format!(
+                    "capture {}: the sample counter overflows 64 bits",
+                    segments.len() - 1
+                )));
+            }
+        }
     }
     Ok(segments)
 }
@@ -567,6 +720,7 @@ fn replay_capabilities(
         controllable: false,
         gain_stages: Vec::new(),
         rf_amp: false,
+        baseband_filter: None,
         bias_tee: false,
         external_clock: false,
         hardware_timestamps: false,
