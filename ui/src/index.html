@@ -13,22 +13,26 @@
   <span id="conn" class="badge">connecting…</span>
   <span id="class" class="badge" hidden></span>
   <span id="gated" class="badge warn" hidden title="Content-forbidding class: the contract caps this spectrum at its declared row rate and withholds faster rows">GATED</span>
+  <span id="paused" class="badge warn" hidden title="Only the spectrum stream is paused; capture, detection, history and recording continue">SPECTRUM PAUSED</span>
   <span id="stats" class="stats"></span>
+  <button type="button" id="forget-token" class="small" title="Remove the API token from this tab">Forget token</button>
 </header>
 
 <form id="auth" class="panel" hidden>
   <label>API token <input id="token-input" type="password" autocomplete="off" required></label>
   <button>Connect</button>
-  <span class="hint">Printed by <code>hk serve</code>.</span>
+  <span class="hint">Opened <code>hk serve</code>'s printed link (<code>#token=…</code>)? It connects on its own. Through a tunnel or
+    another device, paste the token from <code>~/.config/hackriff/api-token</code> on the server. It stays in this tab only.</span>
 </form>
 
 <main>
+ <div class="live-grid">
   <section id="live" class="panel">
     <div class="live-bar">
       <span id="view-info" class="stats"></span>
       <button type="button" id="zoom-reset" hidden>Reset zoom</button>
     </div>
-    <div id="axis" class="axis"></div>
+    <div id="axis" class="axis" title="Drag to pan · scroll or pinch to zoom"></div>
     <div id="wf-wrap" class="wf-wrap">
       <canvas id="wf"></canvas>
       <div id="wf-overlays"></div>
@@ -37,8 +41,90 @@
     </div>
     <p class="hint">Top: spectrum + persistence. Bottom: waterfall, newest at top. Hover, or touch, for frequency and level.
       Drag to select a region (drag vertically in the waterfall to bound its time too); click or tap a signal to inspect it.
+      Drag the frequency scale to pan; scroll or pinch to zoom.
       Left edge marks: <span class="mk drop">dropped</span> <span class="mk gated">gated</span></p>
   </section>
+
+  <section id="controls" class="panel" aria-label="Radio and display controls">
+    <h2>Controls <span id="ctl-spinner" class="spinner" hidden aria-label="working"></span></h2>
+    <p id="ctl-run" class="stats run-line"></p>
+    <p id="ctl-notice" class="notice" role="status"></p>
+    <p id="ctl-msg" class="hint" role="status" aria-live="polite"></p>
+    <div id="ctl-offer" class="offer" hidden>
+      <span id="ctl-offer-text"></span>
+      <button type="button" id="ctl-offer-yes">Retune</button>
+      <button type="button" id="ctl-offer-no">Cancel</button>
+    </div>
+
+    <fieldset id="ctl-device" class="ctl-group">
+      <legend>Radio</legend>
+      <form id="ctl-center-form" class="ctl-row">
+        <label class="grow">Centre <input id="ctl-center" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="101.3M"></label>
+        <button>Tune</button>
+      </form>
+      <div class="ctl-row">
+        <button type="button" id="ctl-left" aria-label="Shift down one step">◀</button>
+        <label class="grow">Step <select id="ctl-step"></select></label>
+        <button type="button" id="ctl-right" aria-label="Shift up one step">▶</button>
+        <label class="grow">Span <select id="ctl-rate"></select></label>
+      </div>
+      <div id="ctl-gains" class="ctl-gains"></div>
+      <label id="ctl-bias-wrap" class="check warn-text" hidden><input id="ctl-bias" type="checkbox"> Bias tee (DC on the antenna port)</label>
+      <p id="ctl-device-reason" class="hint"></p>
+    </fieldset>
+
+    <fieldset class="ctl-group">
+      <legend>Display</legend>
+      <fieldset id="ctl-server-display" class="ctl-inner">
+        <div class="ctl-row">
+          <button type="button" id="ctl-pause" title="Pauses only the spectrum stream: capture, detection, history and recording continue">Pause spectrum</button>
+          <label>FFT <select id="ctl-fft"></select></label>
+          <label>Avg <input id="ctl-avg" type="number" step="1" title="Rows in the exponential average (1 = off)"></label>
+          <label>Speed <select id="ctl-speed"></select></label>
+        </div>
+        <p id="ctl-speed-hint" class="hint"></p>
+      </fieldset>
+      <div class="ctl-row">
+        <label class="check"><input id="ctl-auto" type="checkbox" checked> Auto colour</label>
+        <label>Min dB <input id="ctl-lo" type="number" step="1"></label>
+        <label>Max dB <input id="ctl-hi" type="number" step="1"></label>
+      </div>
+      <div class="ctl-row">
+        <label class="check"><input id="ctl-peak" type="checkbox"> Peak hold</label>
+        <button type="button" id="ctl-peak-reset">Reset peak</button>
+      </div>
+    </fieldset>
+
+    <fieldset class="ctl-group">
+      <legend>Record IQ</legend>
+      <div class="ctl-row">
+        <label class="grow">Label <input id="ctl-rec-label" type="text" autocomplete="off" maxlength="120"></label>
+        <label>Max s <input id="ctl-rec-max" type="number" min="0" step="1" placeholder="server"></label>
+      </div>
+      <div class="ctl-row">
+        <button type="button" id="ctl-rec-start">Start</button>
+        <button type="button" id="ctl-rec-stop" disabled>Stop</button>
+        <span id="ctl-rec-status" class="stats"></span>
+      </div>
+    </fieldset>
+
+    <fieldset class="ctl-group">
+      <legend>Markers &amp; bookmarks</legend>
+      <div class="ctl-row">
+        <label class="grow">Name <input id="bm-name" type="text" autocomplete="off" maxlength="120" placeholder="optional"></label>
+        <button type="button" id="bm-add-pick" disabled title="Click or tap the waterfall first">Marker at last click</button>
+      </div>
+      <p id="bm-info" class="hint"></p>
+      <div class="table-wrap">
+        <table id="bm-table" class="grid" hidden>
+          <thead><tr><th>name</th><th class="num">MHz</th><th class="num opt">bw</th><th class="opt">kind</th><th>actions</th></tr></thead>
+          <tbody id="bm-body"></tbody>
+        </table>
+      </div>
+    </fieldset>
+    <p class="hint">Receive only: there is no transmit control. Demodulation parameters are estimated from the signal, never picked here.</p>
+  </section>
+ </div>
 
   <section id="inspect" class="panel" hidden>
     <h2>Inspect <span id="inspect-at" class="hint"></span> <button type="button" id="inspect-close">Close</button></h2>

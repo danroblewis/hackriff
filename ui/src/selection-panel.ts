@@ -9,6 +9,8 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 export interface SelectionActions {
   zoom: (s: Selection) => void;
   history: (s: Selection) => void;
+  /** Saves the selection's band as a server-side bookmark (T-051). */
+  bookmark?: (s: Selection) => void;
 }
 
 export class SelectionPanel {
@@ -66,6 +68,8 @@ export class SelectionPanel {
     };
     button("Zoom", "Zoom the live view to this region", () => this.actions.zoom(s));
     button("History", "Load this region (and its time range) in region over time", () => this.actions.history(s));
+    const bookmark = this.actions.bookmark;
+    if (bookmark) button("Bookmark", "Save this band as a bookmark (server-side)", () => bookmark(s));
     for (const a of SELECTION_ACTIONS) button(a.label, `Not wired yet (${a.task})`);
     button("Delete", "Delete this selection", () => this.store.remove(s.id));
     return tr;

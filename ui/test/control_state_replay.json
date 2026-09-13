@@ -1,0 +1,39 @@
+{
+  "audit": true,
+  "device": null,
+  "live": false,
+  "run": {
+    "center_hz": 100800000.0,
+    "content_class": "unrestricted",
+    "content_permitted": true,
+    "display": {
+      "averaging": 1,
+      "fft_size": 4096,
+      "paused": false,
+      "rows_per_s": 25.0
+    },
+    "finished": false,
+    "live": false,
+    "recording": {
+      "active": false,
+      "center_hz": null,
+      "ended": null,
+      "id": null,
+      "label": null,
+      "lost_samples": 0,
+      "max_s": 0.0,
+      "sample_rate_hz": null,
+      "samples": 0,
+      "stored": false
+    },
+    "replumbing": false,
+    "sample_rate_hz": 2400000.0,
+    "segment": 0
+  },
+  "transmit": {
+    "available": false,
+    "reason": "receive only: the control API has no transmit operation (C37 gated)"
+  },
+  "tuning": null,
+  "_comment": "GET /api/control/state from hk serve --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta (T-051 capture); read by ui/test/controls.test.ts"
+}

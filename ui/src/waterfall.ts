@@ -8,6 +8,10 @@
 // Frequency geometry (T-045, ui/src/axis.ts): texture column j of texW covers [j/texW, (j+1)/texW]
 // of the full band, so a bin's centre is at u = (i + 0.5)/N. The spectrum line puts its vertices
 // there (not at i/(N−1), which skewed the trace by up to a bin towards the edges).
+//
+// T-051: each screen pixel max-pools the texels under its own footprint, centred on the pixel
+// (`axis.poolWindow`, mirrored by POOL below; previously [x0, x0+step), ~1 px biased); colour
+// scale auto or manual; peak (max) hold trace.
 
 const ROWS = 512;
 const LEVELS = 256;
@@ -26,6 +30,13 @@ vec3 cmap(float x){ x = clamp(x,0.0,1.0);
   vec3 c0=vec3(0.0,0.0,0.04), c1=vec3(0.05,0.1,0.55), c2=vec3(0.0,0.7,0.9), c3=vec3(0.95,0.9,0.1), c4=vec3(0.95,0.2,0.05), c5=vec3(1.0);
   if(x<0.2) return mix(c0,c1,x/0.2); if(x<0.45) return mix(c1,c2,(x-0.2)/0.25);
   if(x<0.7) return mix(c2,c3,(x-0.45)/0.25); if(x<0.9) return mix(c3,c4,(x-0.7)/0.2); return mix(c4,c5,(x-0.9)/0.1); }`;
+// Texels [x0, x0+n) under a pixel centred at u that spans pxU of the band (axis.ts poolWindow).
+const POOL = `
+ivec2 poolWin(float u, float pxU, int w){ float fw = float(w); float a = (u-0.5*pxU)*fw, b = (u+0.5*pxU)*fw;
+  if (!(b - a > 1.0)) return ivec2(int(floor(u*fw)), 1);
+  int x0 = int(floor(a)); int n = max(1, int(ceil(b)) - x0);
+  if (n > 64) { x0 = int(floor(0.5*(a+b))) - 32; n = 64; }
+  return ivec2(x0, n); }`;
 
 type Prog = { p: WebGLProgram; u: Record<string, WebGLUniformLocation | null> };
 
@@ -57,6 +68,12 @@ export class Waterfall {
   private scratch: Float32Array;
   private u0 = 0;
   private u1 = 1;
+  /** Colour scale follows the floor/peak estimate (false: `lo`/`hi` set by the user). */
+  private autoScale = true;
+  private peakHold = false;
+  private peak: Float32Array | null = null;
+  private peakDirty = false;
+  private peakTex: WebGLTexture;
 
   constructor(private canvas: HTMLCanvasElement, bins: number, rowRateHz: number) {
     const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
@@ -73,6 +90,7 @@ export class Waterfall {
     // Rows not yet received read as "far below range" (dark), not 0 dB (white).
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.texW, ROWS, gl.RED, gl.FLOAT, new Float32Array(this.texW * ROWS).fill(-1e30));
     this.mk = this.texture(gl.R8, 1, ROWS);
+    this.peakTex = this.texture(gl.R32F, this.texW, 1);
     if (gl.getExtension("EXT_color_buffer_float") || gl.getExtension("EXT_color_buffer_half_float")) {
       for (let i = 0; i < 2; i++) {
         const tex = this.texture(gl.R16F, this.texW, LEVELS);
@@ -97,6 +115,29 @@ export class Waterfall {
   /** Shows the texture window [u0, u1] of the full band (0..1): the zoom. */
   setView(u0: number, u1: number) {
     if (Number.isFinite(u0) && Number.isFinite(u1) && u1 > u0) { this.u0 = u0; this.u1 = u1; }
+  }
+
+  /** Auto colour scale, or a manual [lo, hi] in dB (ignored unless lo < hi). */
+  setScale(auto: boolean, lo?: number, hi?: number) {
+    this.autoScale = auto;
+    if (auto) {
+      if (!Number.isNaN(this.floorEst)) { this.lo = this.floorEst - 8; this.hi = Math.max(this.floorEst + 30, this.peakEst + 3); }
+    } else if (lo !== undefined && hi !== undefined && Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
+      this.lo = lo;
+      this.hi = hi;
+    }
+  }
+
+  /** Peak (max) hold trace over the spectrum; turning it on starts afresh. */
+  setPeakHold(on: boolean) {
+    if (on === this.peakHold) return;
+    this.peakHold = on;
+    this.resetPeak();
+  }
+
+  resetPeak() {
+    this.peak = null;
+    this.peakDirty = false;
   }
 
   /** Marks the next row (a dropped or gated run precedes it). */
@@ -131,6 +172,11 @@ export class Waterfall {
       }
     }
     this.autoRange(row);
+    if (this.peakHold) {
+      if (!this.peak) this.peak = row.slice();
+      else for (let i = 0; i < row.length; i++) if (!(this.peak[i] >= row[i])) this.peak[i] = row[i];
+      this.peakDirty = true;
+    }
     this.pending.push({ row, mark: this.nextMark, t: tS });
     this.nextMark = 0;
     if (this.pending.length > MAX_ROWS_PER_FRAME * 4) {
@@ -155,7 +201,7 @@ export class Waterfall {
     this.floorEst = Number.isNaN(this.floorEst) ? floor : this.floorEst + a * (floor - this.floorEst);
     this.peakEst = Number.isNaN(this.peakEst) ? peak : Math.max(peak, this.peakEst - 0.05);
     const lo = this.floorEst - 8, hi = Math.max(this.floorEst + 30, this.peakEst + 3);
-    if (Math.abs(lo - this.lo) > 3 || Math.abs(hi - this.hi) > 3) { this.lo = lo; this.hi = hi; }
+    if (this.autoScale && (Math.abs(lo - this.lo) > 3 || Math.abs(hi - this.hi) > 3)) { this.lo = lo; this.hi = hi; }
   }
 
   private texture(fmt: number, w: number, h: number): WebGLTexture {
@@ -189,8 +235,8 @@ export class Waterfall {
     // window, marker strip.
     this.progs.wf = prog(VS_FULL, `#version 300 es
 precision highp float; precision highp int;
-uniform highp sampler2D uWf; uniform highp sampler2D uMk; uniform float uHead; uniform int uStep;
-uniform float uLo, uHi, uMkPx, uU0, uU1; in vec2 vUv; out vec4 o; ${CMAP}
+uniform highp sampler2D uWf; uniform highp sampler2D uMk; uniform float uHead; uniform float uPxU;
+uniform float uLo, uHi, uMkPx, uU0, uU1; in vec2 vUv; out vec4 o; ${CMAP} ${POOL}
 void main(){
   ivec2 sz = textureSize(uWf,0);
   int row = int(mod(uHead - (1.0 - vUv.y) * float(sz.y), float(sz.y)));
@@ -198,8 +244,8 @@ void main(){
   if (gl_FragCoord.x < uMkPx && k > 0.0) { o = k > 0.75 ? vec4(0.89,0.63,0.03,1) : vec4(0.85,0.27,0.94,1); return; }
   float u = mix(uU0, uU1, vUv.x);
   if (u < 0.0 || u >= 1.0) { o = vec4(0,0,0,1); return; }
-  int x0 = int(u * float(sz.x)); float m = -1e30;
-  for (int i=0;i<64;i++){ if(i>=uStep) break; m = max(m, texelFetch(uWf, ivec2(min(x0+i, sz.x-1),row),0).r); }
+  ivec2 pw = poolWin(u, uPxU, sz.x); float m = -1e30;
+  for (int i=0;i<64;i++){ if(i>=pw.y) break; m = max(m, texelFetch(uWf, ivec2(clamp(pw.x+i, 0, sz.x-1),row),0).r); }
   o = vec4(cmap((m-uLo)/(uHi-uLo)),1);
 }`);
     // Spectrum line: vertex i at its bin centre (i + 0.5)/N, mapped through the texture window.
@@ -210,7 +256,7 @@ void main(){ float v = texelFetch(uWf, ivec2(gl_VertexID, uRow), 0).r;
   float u = (float(gl_VertexID) + 0.5) / float(uN);
   gl_Position = vec4((u - uU0) / (uU1 - uU0) * 2.0 - 1.0, clamp((v-uLo)/(uHi-uLo),0.0,1.0)*1.9-0.95, 0, 1); }`,
     `#version 300 es
-precision mediump float; out vec4 o; void main(){ o = vec4(1.0,1.0,0.6,1.0); }`);
+precision mediump float; uniform vec3 uColor; out vec4 o; void main(){ o = vec4(uColor,1.0); }`);
     // DPX accumulate: H' = beta*H + hit, hit spanning this bin's and the previous bin's level.
     this.progs.acc = prog(VS_FULL, `#version 300 es
 precision highp float; precision highp int;
@@ -227,13 +273,13 @@ void main(){
 }`);
     this.progs.dpx = prog(VS_FULL, `#version 300 es
 precision highp float; precision highp int;
-uniform highp sampler2D uH; uniform int uStep; uniform float uHmax, uU0, uU1; in vec2 vUv; out vec4 o; ${CMAP}
+uniform highp sampler2D uH; uniform float uPxU; uniform float uHmax, uU0, uU1; in vec2 vUv; out vec4 o; ${CMAP} ${POOL}
 void main(){
   ivec2 sz = textureSize(uH,0); int y = int(clamp(vUv.y, 0.0, 0.9999) * float(sz.y));
   float u = mix(uU0, uU1, vUv.x);
   if (u < 0.0 || u >= 1.0) { o = vec4(0,0,0,1); return; }
-  int x0 = int(u * float(sz.x)); float m = 0.0;
-  for (int i=0;i<64;i++){ if(i>=uStep) break; m = max(m, texelFetch(uH, ivec2(min(x0+i,sz.x-1), y),0).r); }
+  ivec2 pw = poolWin(u, uPxU, sz.x); float m = 0.0;
+  for (int i=0;i<64;i++){ if(i>=pw.y) break; m = max(m, texelFetch(uH, ivec2(clamp(pw.x+i,0,sz.x-1), y),0).r); }
   float v = log(1.0+m)/log(1.0+uHmax);
   o = vec4(v>0.001 ? cmap(0.15+0.85*v) : vec3(0.0), 1);
 }`);
@@ -271,8 +317,7 @@ void main(){
 
     const specH = Math.floor(H * SPEC_FRAC);
     if (H > 0) this.specFrac = specH / H;
-    const visible = Math.max(1e-9, this.u1 - this.u0) * this.texW;
-    const step = Math.max(1, Math.min(64, Math.ceil(visible / Math.max(1, W))));
+    const pxU = Math.max(1e-12, this.u1 - this.u0) / Math.max(1, W); // band fraction per screen pixel
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
     gl.clearColor(0, 0, 0, 1);
@@ -284,7 +329,7 @@ void main(){
     this.bind(0, this.wf, wf.u.uWf);
     this.bind(1, this.mk, wf.u.uMk);
     gl.uniform1f(wf.u.uHead, this.head + 1);
-    gl.uniform1i(wf.u.uStep, step);
+    gl.uniform1f(wf.u.uPxU, pxU);
     gl.uniform1f(wf.u.uLo, this.lo);
     gl.uniform1f(wf.u.uHi, this.hi);
     gl.uniform1f(wf.u.uMkPx, 6 * dpr);
@@ -297,7 +342,7 @@ void main(){
       const d = this.progs.dpx;
       gl.useProgram(d.p);
       this.bind(0, this.hist[0].tex, d.u.uH);
-      gl.uniform1i(d.u.uStep, step);
+      gl.uniform1f(d.u.uPxU, pxU);
       gl.uniform1f(d.u.uHmax, 1 / (1 - this.beta));
       gl.uniform1f(d.u.uU0, this.u0);
       gl.uniform1f(d.u.uU1, this.u1);
@@ -312,7 +357,19 @@ void main(){
     gl.uniform1f(l.u.uHi, this.hi);
     gl.uniform1f(l.u.uU0, this.u0);
     gl.uniform1f(l.u.uU1, this.u1);
+    gl.uniform3f(l.u.uColor, 1.0, 1.0, 0.6);
     gl.drawArrays(gl.LINE_STRIP, 0, this.texW);
+    if (this.peakHold && this.peak) {
+      if (this.peakDirty) {
+        gl.bindTexture(gl.TEXTURE_2D, this.peakTex);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.texW, 1, gl.RED, gl.FLOAT, this.peak);
+        this.peakDirty = false;
+      }
+      this.bind(0, this.peakTex, l.u.uWf);
+      gl.uniform1i(l.u.uRow, 0);
+      gl.uniform3f(l.u.uColor, 1.0, 0.35, 0.35);
+      gl.drawArrays(gl.LINE_STRIP, 0, this.texW);
+    }
   }
 
   private accumulate() {

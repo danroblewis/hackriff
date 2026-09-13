@@ -2,12 +2,12 @@
   "name": "hackriff-ui",
   "private": true,
   "version": "0.1.0",
-  "description": "hackriff web UI (T-022a): WebGL2 waterfall over the stream bridge + region-over-time history",
+  "description": "hackriff web UI (T-022a, T-044, T-051): WebGL2 waterfall over the stream bridge, SDR control panel, region-over-time history",
   "license": "UNLICENSED",
   "scripts": {
     "build": "esbuild src/main.ts --bundle --minify --sourcemap --target=es2020 --outfile=dist/main.js && cp src/index.html src/style.css dist/",
     "typecheck": "tsc --noEmit",
-    "test": "esbuild test/axis.test.ts test/selections.test.ts test/inspect.test.ts --bundle --platform=node --format=esm --outdir=node_modules/hk-ui-test --out-extension:.js=.mjs --log-level=warning && node node_modules/hk-ui-test/axis.test.mjs && node node_modules/hk-ui-test/selections.test.mjs && node node_modules/hk-ui-test/inspect.test.mjs"
+    "test": "esbuild test/axis.test.ts test/selections.test.ts test/inspect.test.ts test/controls.test.ts --bundle --platform=node --format=esm --outdir=node_modules/hk-ui-test --out-extension:.js=.mjs --log-level=warning && node node_modules/hk-ui-test/axis.test.mjs && node node_modules/hk-ui-test/selections.test.mjs && node node_modules/hk-ui-test/inspect.test.mjs && node node_modules/hk-ui-test/controls.test.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
