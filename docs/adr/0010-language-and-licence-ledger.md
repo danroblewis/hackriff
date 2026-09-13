@@ -73,3 +73,5 @@ append-only (`merge=union` in `.gitattributes`).
 | *pytest transitive: iniconfig 2.3.0, pluggy 1.6.0, packaging 26.3, pygments 2.21.0* | per `py/uv.lock` | MIT; MIT; Apache-2.0 OR BSD-2-Clause; BSD-2-Clause | py/ (dev) | Test tooling only |
 | hatchling | 1.32.0 | MIT | py/ build backend | Build tooling only |
 | GitHub Actions: actions/checkout v5, dtolnay/rust-toolchain, Swatinem/rust-cache v2, astral-sh/setup-uv v6 | — | MIT; MIT OR Apache-2.0; LGPL-3.0 (verify); MIT (verify all) | CI | CI infrastructure only; not linked or distributed |
+| uv (executable) | 0.8.3 (dev Mac) | Apache-2.0 OR MIT (Homebrew formula metadata) | tests/e2e (`hk-e2e` runs `uv run … python -m hkpy.synth` to generate scenarios) | Build/test tooling only; invoked as a subprocess, not linked or distributed |
+| readsb (executable, optional) | 3.16.16 | GPL-3.0-or-later (Homebrew formula metadata; github.com/wiedehopf/readsb) | py/tests/test_synth.py reference decoder for the `adsb_squitter` synthetic (skipped when absent) | Test tooling only; subprocess, not linked or distributed. The product use stays the subprocess plugin row above |

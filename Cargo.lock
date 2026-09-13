@@ -217,6 +217,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-e2e"
+version = "0.1.0"
+dependencies = [
+ "hk-model",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "hk-estimate"
 version = "0.1.0"
 dependencies = [
