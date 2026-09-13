@@ -466,9 +466,9 @@ References were link-checked. A few publisher and DOI links block automated chec
 - `SIGNAL-078` **Avalanche beacons** — Receive 457 kHz transceiver pulses and experiment with field-strength direction finding. `457 kHz` · `HF SDR + ferrite loop` · [wiki](https://en.wikipedia.org/wiki/Avalanche_transceiver)
 - `SIGNAL-079` **Hearing-aid induction loops** — Pick up the audio-frequency magnetic field of telecoil loops in venues with a coil into a soundcard, and map loop coverage. `audio-frequency magnetic` · `coil + soundcard` · [wiki](https://en.wikipedia.org/wiki/Audio_induction_loop)
 
-### Trunked Radio Systems (proposed 2026-09-13)
+### Trunked Radio Systems (proposed 2026-09-13; accepted by the user 2026-09-13)
 
-Added during architecture planning: docs/04 §8 identifies trunk following as the most-requested scanner capability, yet the original catalogue had almost none. These are `proposed` (marked `status: proposed` in `use-cases.yaml`) pending the user's accept/reject. Wideband capture of a system's span lets one receiver decode the control channel and every simultaneous voice channel (docs/04 §8.2).
+Added during architecture planning: docs/04 §8 identifies trunk following as the most-requested scanner capability, yet the original catalogue had almost none. They were proposed during planning and **accepted by the user on 2026-09-13** (`status: accepted` in `use-cases.yaml`). Wideband capture of a system's span lets one receiver decode the control channel and every simultaneous voice channel (docs/04 §8.2).
 
 - `SIGNAL-080` **P25 Phase 1 trunk following** — Decode the control channel continuously, follow group voice grants onto channelized voice channels, and log every simultaneous call with talkgroup, radio ID, site and timestamps. `150–174 / 450–470 / 700 / 806–869 MHz` · `RX` · [Trunk Recorder](https://github.com/TrunkRecorder/trunk-recorder)
 - `SIGNAL-081` **P25 Phase 2 TDMA trunk following** — Follow a system with a Phase 1 FDMA control channel and 2-slot H-DQPSK TDMA voice, demodulating both slots per granted channel. `700 / 800 MHz` · `RX`

@@ -12,7 +12,8 @@ spikes:
 tasks:
   - id: T-001
     title: Repo scaffold, Cargo workspace, justfile, CI skeleton (no hardware)
-    status: todo
+    status: in-progress
+    override: "effort medium->high; scope also seeds hk-model ids/Provenance/SigMF types so T-002/T-003/T-023 can run in parallel (coordinator, 2026-09-13)"
     deps: []
     parallel_group: A
     use_cases: []
@@ -321,6 +322,7 @@ tasks:
     effort: medium
     dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
 notes:
+  - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - Core-interface tasks (T-002, T-005, T-006, T-008, T-009, T-014, T-016) are Fable/Opus and reviewed before merge.
   - "Parallel groups can run in separate worktrees; groups sharing a crate (group C on hk-dsp/hk-detect, group E on hk-store/hk-model/hk-core) serialise on that crate or coordinate file ownership."
   - T-011/T-013 gated on spike S5; T-022 gated on S3. If a gate fails, see docs/12 1 for the fallback.

@@ -8549,13 +8549,13 @@ use_cases:
   test_tier: hil
 - id: SIGNAL-080
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
-  subcategory: Trunked Radio Systems (proposed)
+  subcategory: Trunked Radio Systems
   name: P25 Phase 1 trunk following
   summary: Decode the P25 control channel continuously, follow group voice grants onto channelized voice channels, and log every simultaneous call with talkgroup, radio ID, site and timestamps.
   band: 150-174 / 450-470 / 700 / 806-869 MHz
   tx: none
   receiver_hint: null
-  status: proposed
+  status: accepted
   refs:
   - label: Trunk Recorder
     url: https://github.com/TrunkRecorder/trunk-recorder
@@ -8575,13 +8575,13 @@ use_cases:
   test_tier: offline-recorded
 - id: SIGNAL-081
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
-  subcategory: Trunked Radio Systems (proposed)
+  subcategory: Trunked Radio Systems
   name: P25 Phase 2 TDMA trunk following
   summary: Follow a P25 Phase 2 system whose control channel is Phase 1 FDMA and whose voice is 2-slot H-DQPSK TDMA, demodulating both slots per granted channel.
   band: 700 / 800 MHz
   tx: none
   receiver_hint: null
-  status: proposed
+  status: accepted
   refs:
   - label: Trunk Recorder
     url: https://github.com/TrunkRecorder/trunk-recorder
@@ -8601,13 +8601,13 @@ use_cases:
   test_tier: offline-recorded
 - id: SIGNAL-082
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
-  subcategory: Trunked Radio Systems (proposed)
+  subcategory: Trunked Radio Systems
   name: DMR Tier III / Capacity Plus trunk following
   summary: Track trunked DMR (ETSI Tier III and Motorola Capacity Plus/Connect Plus) by decoding control or rest-channel signalling and following grants, with automatic LCN-to-frequency mapping.
   band: VHF / UHF / 800 MHz
   tx: none
   receiver_hint: null
-  status: proposed
+  status: accepted
   refs:
   - label: Trunk Recorder
     url: https://github.com/TrunkRecorder/trunk-recorder
@@ -8626,13 +8626,13 @@ use_cases:
   test_tier: offline-recorded
 - id: SIGNAL-083
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
-  subcategory: Trunked Radio Systems (proposed)
+  subcategory: Trunked Radio Systems
   name: Motorola SmartNet/SmartZone (Type II) following
   summary: Decode the 3600 bps SmartNet control channel and follow analog-FM or P25 voice grants across the system, a very common legacy public-safety configuration.
   band: 806-869 MHz
   tx: none
   receiver_hint: null
-  status: proposed
+  status: accepted
   refs:
   - label: Trunk Recorder
     url: https://github.com/TrunkRecorder/trunk-recorder
@@ -8651,13 +8651,13 @@ use_cases:
   test_tier: offline-recorded
 - id: SIGNAL-084
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
-  subcategory: Trunked Radio Systems (proposed)
+  subcategory: Trunked Radio Systems
   name: NXDN Type-C / EDACS control-channel decode
   summary: Decode NXDN Type-C or EDACS control channels and follow grants, extending trunk coverage to the remaining common LMR trunking families.
   band: VHF / UHF
   tx: none
   receiver_hint: null
-  status: proposed
+  status: accepted
   refs:
   - label: Trunk Recorder
     url: https://github.com/TrunkRecorder/trunk-recorder
@@ -8676,13 +8676,13 @@ use_cases:
   test_tier: offline-recorded
 - id: SIGNAL-085
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
-  subcategory: Trunked Radio Systems (proposed)
+  subcategory: Trunked Radio Systems
   name: Automatic control-channel discovery
   summary: 'Find a trunk control channel with no prior research: flag continuous 100%-duty 4FSK/C4FM emissions on the LMR raster, confirm by frame sync and valid frames, and propose "this looks like P25 Phase 1, follow it?".'
   band: VHF / UHF / 700 / 800 MHz
   tx: none
   receiver_hint: null
-  status: proposed
+  status: accepted
   refs:
   - label: Trunk Recorder
     url: https://github.com/TrunkRecorder/trunk-recorder
@@ -8701,13 +8701,13 @@ use_cases:
   test_tier: offline-recorded
 - id: SIGNAL-086
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
-  subcategory: Trunked Radio Systems (proposed)
+  subcategory: Trunked Radio Systems
   name: Encryption-aware call logging (metadata only)
   summary: Read P25 ALGID/Key ID and DMR privacy indicators to label and skip encrypted calls, recording only metadata (talkgroup, timing, encryption state), never attempting decryption of others traffic.
   band: VHF / UHF / 700 / 800 MHz
   tx: none
   receiver_hint: null
-  status: proposed
+  status: accepted
   refs:
   - label: Trunk Recorder
     url: https://github.com/TrunkRecorder/trunk-recorder

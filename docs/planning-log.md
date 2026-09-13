@@ -6,6 +6,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 ## Current phase
 
+**Building M0 (started 2026-09-13).** Autonomous coordinator session authorised by the user: provisional defaults adopted, trunking use cases SIGNAL-080..086 accepted, parallel worktree agents, commit per task (no push). See "Build log" at the bottom.
+
 **Planning complete (Phases 0–7).** All phases committed. test_tier filled for all 398 use cases (field 143, offline-recorded 92, offline-synth 80, data-only 53, hil 30). Heartbeat deleted. Awaiting user review of docs/planning-log.md open questions; next real work is spikes S4/S5/S1/S3 on the Mac + HackRF and task T-001.
 
 ## Decisions from the user (not provisional)
@@ -49,7 +51,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 ## Open questions for the user (ranked)
 
-1. **Accept the proposed trunking use cases SIGNAL-080..086?** They shape the C23 milestone and the roadmap. If any are unwanted, say which; IDs are permanent so rejected ones would be marked retired, not deleted.
+1. ~~**Accept the proposed trunking use cases SIGNAL-080..086?**~~ **Resolved 2026-09-13: accepted by the user** (build log B0.1). They shape the C23 milestone and the roadmap. If any are unwanted, say which; IDs are permanent so rejected ones would be marked retired, not deleted.
 2. **Restricted-content gating owner (P1.3).** I put enforcement on `stream-output` (C24) with a content-class flag set at classification, provisional pending a Phase 3 legal-guardrail ADR. Confirm that's the right seam, or name another.
 3. **Own-key decryption (P1.3)** modelled as a `decoder-plugins` stage with user-supplied keys and key-source provenance. Confirm this belongs in C22 rather than its own capability.
 4. Anything in docs/06 §5 ownership table you'd overrule before it hardens into the data model (doc 07)?
@@ -71,3 +73,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 ### Phase 5 follow-up — test_tier (2026-09-13)
 - **P5.2** test_tier merged into use-cases.yaml (bulk-filled by a Sonnet agent against the docs/10 §2 rubric, reconciled). 57% (225/398) are CI-testable offline. SPACE/PROP skew to `field` because the science claim is a real-world physical one; their pipeline is still tested offline. Summary table + regen command in docs/10 §6.
+
+## Build log (M0)
+
+### 2026-09-13 — build start
+- **B0.1 User decisions this session:** proceed autonomously on provisional defaults; **SIGNAL-080..086 accepted** (status flip in docs/05 + YAML pending a doc-sync task); no Fable — fable-tier tasks run on Opus high.
+- **B0.2 Wave 0 launched:** T-001 scaffold (Opus high; also seeds hk-model ids/Provenance/SigMF types — override recorded in tasks.yaml), spike S1 (FutureSDR vs owned dataflow), spike S3 (web waterfall fps), all in worktrees.
+- **B0.3 Tooling installed on the dev Mac:** just 1.58, git-lfs 3.8, rtl_433 25.12 (GPLv2+, truth labelling / plugin), readsb 3.16.16 (GPL, T-015 plugin) via Homebrew.
+- **B0.4 Fixture store (PROVISIONAL):** raw captures go to `fixtures/store/<date>/` (gitignored) with a sha256 manifest; only small (≤25 MB) trimmed SigMF snippets are committed via LFS. Reversible.
+- **B0.5 Coordinator-run HackRF capture batch** (receive-only, antenna as attached/unknown): ADS-B 1090, FM 101.3 (+RDS), ISM 433/915, 20 Msps urban gain-step + retune sets at 98/99/915 MHz, hackrf_sweep 1 MHz–6 GHz. Feeds S4, S5, T-025.
+- **B0.6 Observation:** FM-band sweep shows the strongest "station" at 100.002 MHz, not a US FM channel — almost certainly a 10 MHz reference harmonic (internal spur). Useful ground truth for the S4 spur mask.
+- **Blocker (needs user, physical):** terminated-input spur-map capture (docs/12 §4) needs the antenna swapped for a 50 Ω terminator. Deferred; spur-mask work uses the 100 MHz harmonic and gain-step/retune tests meanwhile.
