@@ -1,6 +1,7 @@
 //! Bounded track statistics: running moments, a log-spaced length histogram, a fixed ring of
-//! burst starts, observation coverage, the periodicity fold and the raster estimate. Nothing here
-//! allocates; memory per track is constant however long it lives.
+//! burst starts, observation coverage, the periodicity fold and the raster estimates. Nothing here
+//! allocates except [`robust_raster`], which runs when a hop set is summarised (not per burst);
+//! memory per track is constant however long it lives.
 
 use super::config::PeriodConfig;
 
@@ -484,9 +485,265 @@ pub(crate) fn raster(centres: &[f64], tol_hz: f64) -> Option<f64> {
     None
 }
 
+/// One hop-set channel for [`robust_raster`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RasterChannel {
+    /// Centre estimate, Hz.
+    pub fc: f64,
+    /// Bandwidth estimate, Hz (scales the centre uncertainty).
+    pub bw: f64,
+    /// Bursts seen on the channel.
+    pub bursts: u64,
+    /// Mean burst SNR, dB.
+    pub snr_db: f64,
+}
+
+/// Common channel rasters, Hz: a tiebreak between lattices that explain the centres equally.
+const STANDARD_RASTERS_HZ: [f64; 17] = [
+    5e3, 6.25e3, 8.33e3, 10e3, 12.5e3, 20e3, 25e3, 50e3, 100e3, 125e3, 200e3, 250e3, 400e3, 500e3,
+    1e6, 2e6, 5e6,
+];
+
+/// Lattice fit of the channel centres to a raster `step`.
+#[derive(Clone, Copy, Debug)]
+struct LatticeFit {
+    step: f64,
+    offset: f64,
+    /// Inlier weight / total weight.
+    inlier_weight: f64,
+    /// `inlier_weight` corrected for inliers expected by chance (share of the line within
+    /// tolerance).
+    score: f64,
+    inliers: usize,
+}
+
+/// Burst count and SNR both weigh in, each compressed (square root) so that one strong member
+/// whose centre estimate is off cannot outvote the rest.
+fn channel_weight(c: &RasterChannel) -> f64 {
+    (c.bursts.clamp(1, 16) as f64).sqrt() * (c.snr_db.clamp(3.0, 30.0) / 10.0).sqrt()
+}
+
+/// Steps scoring within this of the best are ties; the largest tie wins (sub-multiples of the
+/// raster always fit).
+const RASTER_TIE: f64 = 0.05;
+/// A common raster within this of the best score is preferred to a larger, incommensurate step.
+const RASTER_PRIOR: f64 = 0.15;
+
+/// Centre tolerance: the centre-estimate uncertainty (a quarter of the bandwidth, at least the
+/// bin tolerance), capped at `step / 8` so a lattice never covers more than a quarter of the line.
+fn channel_tol(c: &RasterChannel, step: f64, base_tol_hz: f64) -> f64 {
+    base_tol_hz.max(0.25 * c.bw).min(step / 8.0)
+}
+
+fn wrap(x: f64, step: f64) -> f64 {
+    x - step * (x / step).round()
+}
+
+fn fit_raster(ch: &[RasterChannel], step: f64, base_tol_hz: f64) -> LatticeFit {
+    let total: f64 = ch.iter().map(channel_weight).sum();
+    let tau = std::f64::consts::TAU;
+    // Offset: weighted circular mean of the centre phases, refitted on inliers.
+    let inlier = |offset: Option<f64>, c: &RasterChannel| match offset {
+        None => true,
+        Some(a) => wrap(c.fc - a, step).abs() <= channel_tol(c, step, base_tol_hz),
+    };
+    let mut offset = None;
+    for _ in 0..3 {
+        let (mut sx, mut sy) = (0.0, 0.0);
+        for c in ch.iter().filter(|c| inlier(offset, c)) {
+            let (w, ph) = (channel_weight(c), tau * c.fc.rem_euclid(step) / step);
+            sx += w * ph.cos();
+            sy += w * ph.sin();
+        }
+        if sx == 0.0 && sy == 0.0 {
+            break;
+        }
+        offset = Some(sy.atan2(sx).rem_euclid(tau) / tau * step);
+    }
+    let a = offset.unwrap_or(0.0);
+    let (mut w_in, mut inliers, mut p) = (0.0, 0, 0.0);
+    for c in ch {
+        let tol = channel_tol(c, step, base_tol_hz);
+        p += 2.0 * tol / step;
+        if wrap(c.fc - a, step).abs() <= tol {
+            w_in += channel_weight(c);
+            inliers += 1;
+        }
+    }
+    let p = p / ch.len() as f64;
+    let f = if total > 0.0 { w_in / total } else { 0.0 };
+    LatticeFit {
+        step,
+        offset: a,
+        inlier_weight: f,
+        score: (f - p) / (1.0 - p),
+        inliers,
+    }
+}
+
+/// Raster step of noisy hop-set channel centres (T-035), or `None` when no lattice explains most
+/// of them.
+///
+/// Each candidate step (pairwise centre differences divided by 1–32, plus the common rasters) is
+/// fitted as a lattice `offset + k·step`; a centre is an inlier within its uncertainty
+/// ([`channel_tol`]), weighted by burst count and SNR ([`channel_weight`]). The score is the
+/// inlier weight corrected for chance hits. Among steps that explain at least 60 % of the weight
+/// with 3+ inliers, the largest scoring within [`RASTER_TIE`] of the best wins (sub-multiples of
+/// the raster always fit). If that step is not itself a common raster, the largest common raster
+/// scoring within [`RASTER_PRIOR`] of the best, of which the step is not a multiple, is preferred
+/// (a larger incommensurate lattice fitting a few noisy centres is a coincidence). The winner is
+/// refined by weighted least squares on its inliers.
+///
+/// With few, noisy channels the data alone can be ambiguous (the real 915 MHz hop set fits both
+/// 200 and 300 kHz with 6 of 7 channels); the common-raster prior decides such cases.
+pub(crate) fn robust_raster(ch: &[RasterChannel], base_tol_hz: f64) -> Option<f64> {
+    if ch.len() < 3 {
+        return None;
+    }
+    let mut fc: Vec<f64> = ch.iter().map(|c| c.fc).collect();
+    fc.sort_unstable_by(f64::total_cmp);
+    let (min_step, max_step) = (4.0 * base_tol_hz.max(1.0), fc[fc.len() - 1] - fc[0]);
+    if max_step < min_step {
+        return None;
+    }
+    let mut cands: Vec<f64> = STANDARD_RASTERS_HZ
+        .iter()
+        .copied()
+        .filter(|s| (min_step..=max_step).contains(s))
+        .collect();
+    for i in 0..fc.len() {
+        for j in i + 1..fc.len().min(i + 6) {
+            let d = fc[j] - fc[i];
+            for k in 1..=32 {
+                let step = d / f64::from(k);
+                if step < min_step {
+                    break;
+                }
+                cands.push(step);
+            }
+        }
+    }
+    let fits: Vec<LatticeFit> = cands
+        .iter()
+        .map(|&s| fit_raster(ch, s, base_tol_hz))
+        .filter(|f| f.inliers >= 3 && f.inlier_weight >= 0.6)
+        .collect();
+    let best = fits
+        .iter()
+        .map(|f| f.score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let largest = fits
+        .iter()
+        .filter(|f| f.score >= best - RASTER_TIE)
+        .max_by(|a, b| a.step.total_cmp(&b.step))?;
+    let is_standard = |s: f64| {
+        STANDARD_RASTERS_HZ
+            .iter()
+            .any(|r| (s / r - 1.0).abs() <= 0.02)
+    };
+    let chosen = if is_standard(largest.step) {
+        largest
+    } else {
+        fits.iter()
+            .filter(|f| STANDARD_RASTERS_HZ.contains(&f.step) && f.score >= best - RASTER_PRIOR)
+            .filter(|f| {
+                let m = largest.step / f.step;
+                (m - m.round()).abs() > 0.05
+            })
+            .max_by(|a, b| a.step.total_cmp(&b.step))
+            .unwrap_or(largest)
+    };
+    Some(refine_step(ch, chosen, base_tol_hz))
+}
+
+/// Weighted least squares `fc ≈ a + k·step` over the inliers of `fit`, with `k` fixed by
+/// rounding. Keeps the fitted step when the regression is degenerate or strays > 10 %.
+fn refine_step(ch: &[RasterChannel], fit: &LatticeFit, base_tol_hz: f64) -> f64 {
+    let (step, a) = (fit.step, fit.offset);
+    let (mut sw, mut sk, mut sy, mut skk, mut sky) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for c in ch {
+        if wrap(c.fc - a, step).abs() > channel_tol(c, step, base_tol_hz) {
+            continue;
+        }
+        let w = channel_weight(c);
+        let k = ((c.fc - a) / step).round();
+        let y = c.fc - a;
+        sw += w;
+        sk += w * k;
+        sy += w * y;
+        skk += w * k * k;
+        sky += w * k * y;
+    }
+    let den = sw * skk - sk * sk;
+    if sw <= 0.0 || den <= f64::EPSILON * sw * skk.max(1.0) {
+        return step;
+    }
+    let refined = (sw * sky - sk * sy) / den;
+    if refined.is_finite() && (refined / step - 1.0).abs() <= 0.1 {
+        refined
+    } else {
+        step
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chan(fc: f64, bw: f64, bursts: u64) -> RasterChannel {
+        RasterChannel {
+            fc,
+            bw,
+            bursts,
+            snr_db: 12.0,
+        }
+    }
+
+    #[test]
+    fn robust_raster_of_precise_channels() {
+        let c: Vec<_> = [915.2e6, 915.6e6, 916.4e6, 917.0e6, 917.2e6]
+            .iter()
+            .map(|&f| chan(f + 1.5e3, 50e3, 20))
+            .collect();
+        let r = robust_raster(&c, 7.5e3).unwrap();
+        assert!((r - 200e3).abs() < 1e3, "{r}");
+        // A non-standard raster is kept, not replaced by a standard sub-multiple.
+        let c: Vec<_> = (0..6)
+            .map(|k| chan(900e6 + [0, 1, 3, 4, 7, 9][k] as f64 * 300e3, 60e3, 10))
+            .collect();
+        let r = robust_raster(&c, 7.5e3).unwrap();
+        assert!((r - 300e3).abs() < 1e3, "{r}");
+    }
+
+    #[test]
+    fn robust_raster_of_noisy_real_915_centres() {
+        // The tracker's hop-set members on fixtures/hackrf/2026-09-13/ism_915M_10M_l24g30a1_t42p3_1p2s
+        // at close (centre, bandwidth, bursts, mean SNR); true raster 200 kHz. `raster` gave
+        // 40.3 kHz. These data alone fit 200 and 300 kHz with 6 of 7 channels each: the result
+        // rests on the common-raster prior, and the end-to-end check is the fixture report test.
+        let real = |fc: f64, bw: f64, bursts: u64, snr_db: f64| RasterChannel {
+            fc,
+            bw,
+            bursts,
+            snr_db,
+        };
+        let c = [
+            real(910_392_446.4, 117_786.9, 6, 10.01),
+            real(918_790_346.3, 117_187.5, 1, 7.86),
+            real(919_964_351.1, 102_539.1, 4, 16.53),
+            real(919_396_955.5, 126_953.1, 1, 13.45),
+            real(919_195_052.7, 175_781.3, 1, 10.17),
+            real(912_498_589.1, 185_546.9, 1, 20.45),
+            real(911_574_426.7, 165_652.8, 1, 16.12),
+        ];
+        let r = robust_raster(&c, 1.5 * 10e6 / 1024.0).unwrap();
+        assert!((r - 200e3).abs() / 200e3 <= 0.05, "{r}");
+    }
+
+    #[test]
+    fn robust_raster_needs_three_channels() {
+        assert!(robust_raster(&[chan(915e6, 50e3, 3), chan(915.2e6, 50e3, 3)], 5e3).is_none());
+    }
 
     fn rng(state: &mut u64) -> f64 {
         *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);

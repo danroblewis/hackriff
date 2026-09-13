@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use rusqlite::types::Type;
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{
     ProvenanceChain, RegionBounds, RepoError, Repository, blob, bodies, body_by_id, bump_extent,
@@ -397,68 +397,7 @@ impl Repository {
             return Ok(());
         }
         let tx = self.write_tx()?;
-        let (mut max_f_span, mut max_t_span) = (0.0_f64, 0_i64);
-        {
-            let mut overloaded: HashMap<ProvenanceId, bool> = HashMap::new();
-            let mut lookup =
-                tx.prepare_cached("SELECT overload FROM provenance WHERE provenance_id = ?1")?;
-            let mut stmt = tx.prepare_cached(concat!(
-                "INSERT INTO detection (",
-                detection_columns!(),
-                ", f_lo, f_hi) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"
-            ))?;
-            for d in detections {
-                finite(d.f_center_hz, "f_center_hz")?;
-                finite(d.obw_hz, "obw_hz")?;
-                finite(f64::from(d.peak_level_dbfs), "peak_level_dbfs")?;
-                if let Some(rule) = d.flags.inconsistency() {
-                    return Err(RepoError::Invalid(format!("detection {}: {rule}", d.id)));
-                }
-                let overload = match overloaded.get(&d.provenance_ref) {
-                    Some(o) => *o,
-                    None => {
-                        // A missing provenance fails on the foreign key below.
-                        let o = lookup
-                            .query_row([blob(d.provenance_ref)], |r| r.get::<_, bool>(0))
-                            .optional()?
-                            .unwrap_or(false);
-                        overloaded.insert(d.provenance_ref, o);
-                        o
-                    }
-                };
-                if (overload || d.clip_count > 0) && !d.flags.clipped {
-                    return Err(RepoError::UnflaggedClipping { detection: d.id });
-                }
-                let freq = d.freq();
-                max_f_span = max_f_span.max(freq.width_hz());
-                max_t_span = max_t_span.max(d.time.duration_ns());
-                stmt.execute(params![
-                    blob(d.id),
-                    blob(d.survey_id),
-                    blob(d.provenance_ref),
-                    d.time.start.as_unix_nanos(),
-                    d.time.end.as_unix_nanos(),
-                    d.f_center_hz,
-                    d.obw_hz,
-                    d.xdb_bandwidth_hz,
-                    d.xdb_level_db,
-                    d.snr_peak_db,
-                    d.snr_mean_db,
-                    d.sk,
-                    d.flags.bits(),
-                    d.peak_level_dbfs,
-                    d.peak_level_dbm,
-                    d.clip_count,
-                    d.detector_version,
-                    d.flags.spur_reason.map(|r| r.kind_str()),
-                    opt_blob(d.flags.spur_reason.and_then(|r| r.mask())),
-                    freq.lo_hz,
-                    freq.hi_hz
-                ])?;
-            }
-        }
-        bump_extent(&tx, "detection", max_f_span, max_t_span)?;
+        insert_detections_on(&tx, detections)?;
         tx.commit()?;
         Ok(())
     }
@@ -556,4 +495,74 @@ impl Repository {
             [blob(id)],
         )
     }
+}
+
+/// [`Repository::insert_detections`] inside an open write transaction.
+pub(super) fn insert_detections_on(
+    conn: &Connection,
+    detections: &[Detection],
+) -> Result<(), RepoError> {
+    let (mut max_f_span, mut max_t_span) = (0.0_f64, 0_i64);
+    {
+        let mut overloaded: HashMap<ProvenanceId, bool> = HashMap::new();
+        let mut lookup =
+            conn.prepare_cached("SELECT overload FROM provenance WHERE provenance_id = ?1")?;
+        let mut stmt = conn.prepare_cached(concat!(
+            "INSERT INTO detection (",
+            detection_columns!(),
+            ", f_lo, f_hi) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
+             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"
+        ))?;
+        for d in detections {
+            finite(d.f_center_hz, "f_center_hz")?;
+            finite(d.obw_hz, "obw_hz")?;
+            finite(f64::from(d.peak_level_dbfs), "peak_level_dbfs")?;
+            if let Some(rule) = d.flags.inconsistency() {
+                return Err(RepoError::Invalid(format!("detection {}: {rule}", d.id)));
+            }
+            let overload = match overloaded.get(&d.provenance_ref) {
+                Some(o) => *o,
+                None => {
+                    // A missing provenance fails on the foreign key below.
+                    let o = lookup
+                        .query_row([blob(d.provenance_ref)], |r| r.get::<_, bool>(0))
+                        .optional()?
+                        .unwrap_or(false);
+                    overloaded.insert(d.provenance_ref, o);
+                    o
+                }
+            };
+            if (overload || d.clip_count > 0) && !d.flags.clipped {
+                return Err(RepoError::UnflaggedClipping { detection: d.id });
+            }
+            let freq = d.freq();
+            max_f_span = max_f_span.max(freq.width_hz());
+            max_t_span = max_t_span.max(d.time.duration_ns());
+            stmt.execute(params![
+                blob(d.id),
+                blob(d.survey_id),
+                blob(d.provenance_ref),
+                d.time.start.as_unix_nanos(),
+                d.time.end.as_unix_nanos(),
+                d.f_center_hz,
+                d.obw_hz,
+                d.xdb_bandwidth_hz,
+                d.xdb_level_db,
+                d.snr_peak_db,
+                d.snr_mean_db,
+                d.sk,
+                d.flags.bits(),
+                d.peak_level_dbfs,
+                d.peak_level_dbm,
+                d.clip_count,
+                d.detector_version,
+                d.flags.spur_reason.map(|r| r.kind_str()),
+                opt_blob(d.flags.spur_reason.and_then(|r| r.mask())),
+                freq.lo_hz,
+                freq.hi_hz
+            ])?;
+        }
+    }
+    bump_extent(conn, "detection", max_f_span, max_t_span)?;
+    Ok(())
 }

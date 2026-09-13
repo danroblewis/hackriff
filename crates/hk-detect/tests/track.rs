@@ -35,11 +35,13 @@ use hk_dsp::window::WindowKind;
 use hk_dsp::{InputInfo, StftConfig, StftProcessor, WelchConfig};
 use hk_e2e::{Fixture, SynthRequest, synth_or_skip};
 use hk_model::{
-    Detection, DetectionFlags, DetectionId, FreqRange, GainTableEntry, PlanRegion, Repository,
-    SampleTime, ScanPlan, ScanPlanId, ScanPolicy, Schedule, Survey, SurveyId, SurveyState,
-    TimeRange, Timestamp, TrackId, TrackState,
+    Detection, DetectionFlags, DetectionId, FreqRange, GainTableEntry, PageRequest, PlanRegion,
+    Region, Repository, SampleTime, ScanPlan, ScanPlanId, ScanPolicy, Schedule, SegmentKind,
+    Survey, SurveyId, SurveyState, TimeRange, Timestamp, TimingFeatures, Track, TrackFilter,
+    TrackId, TrackState,
 };
 use num_complex::Complex;
+use std::time::Instant;
 
 const AWARE_036: &[&str] = &["AWARE-036"];
 const AWARE_042: &[&str] = &["AWARE-042"];
@@ -573,7 +575,10 @@ fn independent_periodic_emitters_on_one_raster_do_not_form_a_hop_set() {
 // ---- two close emitters ----
 
 fn test_repo() -> (Repository, SurveyId) {
-    let mut repo = Repository::open_in_memory().unwrap();
+    seed_repo(Repository::open_in_memory().unwrap())
+}
+
+fn seed_repo(mut repo: Repository) -> (Repository, SurveyId) {
     let plan = ScanPlan {
         id: ScanPlanId::new(),
         version: 1,
@@ -944,6 +949,214 @@ fn converging_fragment_merges_into_the_older_track() {
     );
 }
 
+/// T-035: TrackSummary timing features, segment boundaries and the region query survive
+/// tracker → TrackBatch (one transaction) → repository → read (AWARE-036, AWARE-042).
+#[test]
+fn timing_features_segments_and_region_query_round_trip_through_the_repository() {
+    let (mut repo, survey) = test_repo();
+    let low = provenance(915e6, FS, 24.0);
+    let high = provenance(915e6, FS, 32.0);
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut ev = Vec::new();
+    let mut writer = DetectionWriter::new(64);
+    let mut batch = TrackBatch::new();
+    let f0 = 915.5e6;
+    for k in 0..60u64 {
+        let prov = if k < 30 { &low } else { &high };
+        let mut r = rec(prov, 10 * k, 2, f0, 20e3, CloseReason::Ended, false);
+        r.detection.survey_id = survey;
+        tr.push_detection(&r, &mut |e| ev.push(e));
+        writer.push(&mut repo, &r).unwrap();
+        if k % 16 == 15 {
+            writer.flush(&mut repo).unwrap();
+            tr.drain_into(&mut batch);
+            batch.write(&mut repo).unwrap();
+        }
+    }
+    tr.finish(&mut |e| ev.push(e));
+    writer.flush(&mut repo).unwrap();
+    tr.drain_into(&mut batch);
+    batch.write(&mut repo).unwrap();
+    assert!(batch.is_empty());
+
+    let closed: Vec<&TrackSummary> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Closed(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closed.len(), 1);
+    let s = closed[0];
+    let (p, bl) = (s.period.unwrap(), s.burst_length.unwrap());
+    let stored = repo.track(s.track.id).unwrap();
+    let tm = &stored.timing;
+    let near = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() <= 1e-9 * b.abs().max(1.0);
+    assert!(near(tm.period_s, p.period_s), "{tm:?}");
+    assert!(near(tm.period_confidence, p.confidence) && near(tm.period_jitter_s, p.jitter_s));
+    let l = tm.burst_length.unwrap();
+    assert_eq!(l.count, bl.count);
+    assert!(near(Some(l.p50_s), bl.p50_s) && near(Some(l.p90_s), bl.p90_s));
+    assert!(near(Some(l.min_s), bl.min_s) && near(Some(l.max_s), bl.max_s));
+    assert!(s.segments >= 1);
+    assert_eq!(tm.segment_count, s.segments);
+    assert_eq!((tm.hop_set, tm.hop_raster_hz), (None, None));
+    assert_eq!(stored.detection_count, s.track.detection_count);
+
+    // Boundaries: the Segment events, as rows.
+    let events: Vec<(Timestamp, SegmentKind)> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Segment(b) if b.track == s.track.id => Some((b.at, b.kind.into())),
+            _ => None,
+        })
+        .collect();
+    let rows: Vec<(Timestamp, SegmentKind)> = repo
+        .track_segments(s.track.id)
+        .unwrap()
+        .into_iter()
+        .map(|x| (x.at, x.kind))
+        .collect();
+    assert_eq!(rows, events);
+    assert!(rows.iter().any(|&(_, k)| k == SegmentKind::GainChange));
+
+    // Region query (AWARE-042).
+    let any = TrackFilter::default();
+    let region = Region::new(FreqRange::new(f0 - 1e3, f0 + 1e3), s.track.time);
+    let page = repo
+        .tracks_in_region(&region, &any, PageRequest::default())
+        .unwrap();
+    assert_eq!(
+        page.tracks.iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![s.track.id]
+    );
+    let elsewhere = Region::new(FreqRange::new(f0 + 1e6, f0 + 2e6), s.track.time);
+    assert!(
+        repo.tracks_in_region(&elsewhere, &any, PageRequest::default())
+            .unwrap()
+            .tracks
+            .is_empty()
+    );
+}
+
+/// T-035: `TrackBatch::write` is one transaction: a failed link rolls back the upserts written
+/// before it, and the batch is kept for a retry.
+#[test]
+fn track_batch_write_rolls_back_on_failure_and_keeps_the_batch() {
+    let (mut repo, survey) = test_repo();
+    let prov = provenance(915e6, FS, 24.0);
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut recs = Vec::new();
+    for k in 0..20u64 {
+        let mut r = rec(&prov, 10 * k, 2, 915.5e6, 20e3, CloseReason::Ended, false);
+        r.detection.survey_id = survey;
+        tr.push_detection(&r, &mut |_| {});
+        recs.push(r);
+    }
+    tr.finish(&mut |_| {});
+    let mut batch = TrackBatch::new();
+    tr.drain_into(&mut batch);
+    let id = batch.upserts[0].id;
+    let (tracks, links) = (batch.upserts.len(), batch.links.len());
+    let members = batch.links.iter().filter(|l| l.0 == id).count();
+    assert!(members > 0);
+    // The member detections were never written: the first link fails after the upserts ran.
+    assert!(batch.write(&mut repo).is_err());
+    assert!(repo.track(id).is_err(), "upserts rolled back");
+    assert_eq!((batch.upserts.len(), batch.links.len()), (tracks, links));
+    let mut writer = DetectionWriter::new(64);
+    for r in &recs {
+        writer.push(&mut repo, r).unwrap();
+    }
+    writer.flush(&mut repo).unwrap();
+    assert_eq!(batch.write(&mut repo).unwrap(), (tracks, links));
+    assert!(batch.is_empty());
+    assert_eq!(repo.track_detections(id).unwrap().len(), members);
+}
+
+/// T-035 benchmark: rows/s of the per-call write path (one transaction per upsert and per
+/// track's links, as `TrackBatch::write` did before T-035) against one transaction per batch, on
+/// a WAL file database.
+#[test]
+#[ignore = "benchmark: cargo test -p hk-detect --release --test track bench_ -- --ignored --nocapture"]
+fn bench_track_batch_write_rows_per_second() {
+    const DRAINS: usize = 200;
+    const TRACKS: usize = 16;
+    const LINKS: usize = 8;
+    let dir = std::env::temp_dir().join(format!("hk-detect-bench-{}", TrackId::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (mut repo, survey) = seed_repo(Repository::open(dir.join("bench.db")).unwrap());
+    let prov = provenance(915e6, FS, 24.0);
+    let mut writer = DetectionWriter::new(1024);
+    let mut ids = Vec::new();
+    for k in 0..(TRACKS * LINKS) as u64 {
+        let f = 915e6 + (k % TRACKS as u64) as f64 * 100e3;
+        let mut r = rec(&prov, 3 * k, 2, f, 20e3, CloseReason::Ended, false);
+        r.detection.survey_id = survey;
+        ids.push(r.detection.id);
+        writer.push(&mut repo, &r).unwrap();
+    }
+    writer.flush(&mut repo).unwrap();
+    let make = |drain: usize| {
+        let mut b = TrackBatch::new();
+        let at = Timestamp::from_unix_nanos(drain as i64 * 1_000_000_000);
+        for t in 0..TRACKS {
+            let track = Track {
+                id: TrackId::new(),
+                state: TrackState::Open,
+                split_from: None,
+                time: TimeRange::new(at, at.saturating_add_nanos(500_000_000)),
+                f_center_hz: 915e6 + t as f64 * 100e3,
+                bandwidth_hz: 20e3,
+                detection_count: LINKS as u64,
+                timing: TimingFeatures {
+                    period_s: Some(0.1),
+                    duty_cycle: Some(0.2),
+                    ..TimingFeatures::default()
+                },
+                updated_at: at,
+            };
+            for l in 0..LINKS {
+                b.links.push((track.id, ids[t * LINKS + l]));
+            }
+            b.upserts.push(track);
+        }
+        b.linked_at = at;
+        b
+    };
+    let rows = DRAINS * TRACKS * (1 + LINKS);
+
+    let batches: Vec<TrackBatch> = (0..DRAINS).map(make).collect();
+    let start = Instant::now();
+    for b in &batches {
+        for t in &b.upserts {
+            repo.upsert_track(t).unwrap();
+        }
+        for chunk in b.links.chunks(LINKS) {
+            let members: Vec<DetectionId> = chunk.iter().map(|l| l.1).collect();
+            repo.link_detections_to_track(chunk[0].0, &members, b.linked_at)
+                .unwrap();
+        }
+    }
+    let per_call = rows as f64 / start.elapsed().as_secs_f64();
+
+    let mut batches: Vec<TrackBatch> = (0..DRAINS).map(make).collect();
+    let start = Instant::now();
+    for b in &mut batches {
+        b.write(&mut repo).unwrap();
+    }
+    let batched = rows as f64 / start.elapsed().as_secs_f64();
+    eprintln!(
+        "track batch write: {rows} rows in {DRAINS} drains of {TRACKS} tracks + {} links: \
+         per-call transactions {per_call:.0} rows/s, one transaction per batch {batched:.0} rows/s \
+         ({:.1}x)",
+        TRACKS * LINKS,
+        batched / per_call
+    );
+    drop(repo);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn two_emitters_sharing_a_track_split_into_two() {
     let prov = provenance(915e6, FS, 24.0);
@@ -1192,6 +1405,13 @@ fn report_915_fhss_bursts_hop_set_on_200_khz_raster() {
     }
     for h in &hop_sets {
         eprintln!("915 report: hop set {h:?}");
+        // T-035: the raster estimate is robust to the noisy real centres (T-031 reported 40.3 kHz).
+        let r = h.raster_hz.expect("hop-set raster");
+        assert!(
+            (r - 200e3).abs() / 200e3 <= 0.05,
+            "915 hop raster {:.1} kHz, want 200 kHz ± 5 %",
+            r / 1e3
+        );
     }
     eprintln!(
         "915 report: {on_raster}/{} tracks within 25 kHz of the 200 kHz raster; hop links {}; hop set formed: {}",

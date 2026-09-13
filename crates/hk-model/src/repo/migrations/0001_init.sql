@@ -99,17 +99,35 @@ CREATE INDEX idx_detection_f_center_t_start ON detection (f_center, t_start);
 CREATE INDEX idx_detection_f_lo_f_hi        ON detection (f_lo, f_hi);
 CREATE INDEX idx_detection_survey           ON detection (survey_id);
 
+-- T-035: f_lo/f_hi (= f_center ± bandwidth/2), kind, detection_count and hop_set are
+-- projections for the region query (tracks_in_region).
 CREATE TABLE track (
-    track_id     BLOB    PRIMARY KEY,
-    state        TEXT    NOT NULL,
-    merged_into  BLOB    REFERENCES track (track_id),
-    split_from   BLOB    REFERENCES track (track_id),
-    t_start      INTEGER NOT NULL,
-    t_end        INTEGER NOT NULL,
-    f_center     REAL    NOT NULL,
-    updated_at   INTEGER NOT NULL,
-    body         TEXT    NOT NULL
+    track_id         BLOB    PRIMARY KEY,
+    state            TEXT    NOT NULL,
+    merged_into      BLOB    REFERENCES track (track_id),
+    split_from       BLOB    REFERENCES track (track_id),
+    t_start          INTEGER NOT NULL,
+    t_end            INTEGER NOT NULL,
+    f_center         REAL    NOT NULL,
+    f_lo             REAL    NOT NULL,
+    f_hi             REAL    NOT NULL,
+    kind             TEXT    NOT NULL CHECK (kind IN ('channel', 'hop-set')),
+    detection_count  INTEGER NOT NULL CHECK (detection_count >= 0),
+    hop_set          BLOB,
+    updated_at       INTEGER NOT NULL,
+    body             TEXT    NOT NULL
 );
+CREATE INDEX idx_track_f_lo_f_hi     ON track (f_lo, f_hi);
+CREATE INDEX idx_track_t_start_t_end ON track (t_start, t_end);
+CREATE INDEX idx_track_hop_set       ON track (hop_set) WHERE hop_set IS NOT NULL;
+
+-- T-035: segment boundaries inside a track (append-only; the count is in the body's timing).
+CREATE TABLE track_segment (
+    track_id  BLOB    NOT NULL REFERENCES track (track_id),
+    at        INTEGER NOT NULL,
+    kind      TEXT    NOT NULL CHECK (kind IN ('gain-change', 'retune', 'provenance', 'discontinuity')),
+    PRIMARY KEY (track_id, at, kind)
+) WITHOUT ROWID;
 
 CREATE TABLE track_detection (
     track_id      BLOB    NOT NULL REFERENCES track (track_id),
@@ -390,7 +408,8 @@ CREATE TABLE region_extent (
     max_t_span  INTEGER NOT NULL
 ) WITHOUT ROWID;
 INSERT INTO region_extent (table_name, max_f_span, max_t_span) VALUES
-    ('detection', 0, 0), ('emitter', 0, 0), ('anomaly', 0, 0), ('explanation', 0, 0);
+    ('detection', 0, 0), ('emitter', 0, 0), ('anomaly', 0, 0), ('explanation', 0, 0),
+    ('track', 0, 0);
 
 -- Overload propagation: a detection under an overloaded provenance must be flagged clipped.
 -- (clip_count > 0 without the flag is refused by the detection table's CHECK.)
@@ -414,6 +433,8 @@ CREATE TRIGGER recording_immutable BEFORE UPDATE ON recording
     BEGIN SELECT RAISE(ABORT, 'recording rows are immutable'); END;
 CREATE TRIGGER track_detection_append_only BEFORE UPDATE ON track_detection
     BEGIN SELECT RAISE(ABORT, 'track_detection links are append-only'); END;
+CREATE TRIGGER track_segment_append_only BEFORE UPDATE ON track_segment
+    BEGIN SELECT RAISE(ABORT, 'track_segment rows are append-only'); END;
 CREATE TRIGGER emitter_status_append_only BEFORE UPDATE ON emitter_status
     BEGIN SELECT RAISE(ABORT, 'emitter status history is append-only'); END;
 CREATE TRIGGER emitter_classification_append_only BEFORE UPDATE ON emitter_classification

@@ -75,7 +75,10 @@ pub use decode::{
     Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, Decode, Demodulation,
     EstimatedParams, Framing,
 };
-pub use detection::{Detection, DetectionFlags, TimingFeatures, Track, TrackState};
+pub use detection::{
+    BurstLengths, Detection, DetectionFlags, MAX_TRACK_PAGE, PageRequest, SegmentKind,
+    TimingFeatures, Track, TrackFilter, TrackKind, TrackPage, TrackSegment, TrackState,
+};
 pub use emitter::{
     Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation, Identity,
     IdentityScheme, KnownStatus, KnownStatusChange, LinkTarget, StatusAuthor,
@@ -98,5 +101,5 @@ pub use recording::{
     RecordingSpan, RecordingTrigger, RetentionClass,
 };
 pub use region::{FreqRange, Region, TimeRange};
-pub use repo::{EmitterUpsert, ProvenanceChain, RepoError, Repository};
+pub use repo::{EmitterUpsert, ProvenanceChain, RepoBatch, RepoError, Repository};
 pub use time::{SampleTime, Timestamp, TimestampMethod};

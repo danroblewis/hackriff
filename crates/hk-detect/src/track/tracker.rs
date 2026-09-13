@@ -4,7 +4,8 @@ use std::ops::Range;
 
 use hk_dsp::SpectrumFrame;
 use hk_model::{
-    DetectionId, ProvenanceId, TimeRange, Timestamp, TimingFeatures, Track, TrackId, TrackState,
+    DetectionId, ProvenanceId, TimeRange, Timestamp, TimingFeatures, Track, TrackId, TrackSegment,
+    TrackState,
 };
 
 use crate::detector::Detector;
@@ -16,7 +17,10 @@ use super::events::{
     TrackSummary,
 };
 use super::persist::TrackBatch;
-use super::stats::{Coverage, LogHistogram, Moments, START_RING, StartRing, fold_period, raster};
+use super::stats::{
+    Coverage, LogHistogram, Moments, RasterChannel, START_RING, StartRing, fold_period, raster,
+    robust_raster,
+};
 
 const SHAPE_RING: usize = 16;
 
@@ -94,6 +98,7 @@ struct Part {
     suspect: bool,
     marginal: bool,
     confirmed: bool,
+    snr_db: f64,
 }
 
 impl Part {
@@ -115,6 +120,7 @@ struct Group {
     tune: TuneKey,
     continues: u32,
     transitions: u32,
+    snr_db: f64,
 }
 
 impl Group {
@@ -132,8 +138,10 @@ impl Group {
             tune: p.tune,
             continues: 0,
             transitions: 0,
+            snr_db: p.snr_db,
         };
         for p in parts {
+            g.snr_db = g.snr_db.max(p.snr_db);
             g.t0 = g.t0.min(p.t0);
             g.t1 = g.t1.max(p.t1);
             g.lo = g.lo.min(p.lo);
@@ -214,6 +222,9 @@ struct Slot {
     shapes: [Shape; SHAPE_RING],
     shape_len: usize,
     shape_head: usize,
+    /// Sum and count of linked groups' SNR, dB (hop raster weights).
+    snr_sum: f64,
+    snr_n: u64,
 }
 
 /// A finished burst's extent, for the split trigger.
@@ -261,6 +272,8 @@ impl Slot {
             shapes: [Shape::default(); SHAPE_RING],
             shape_len: 0,
             shape_head: 0,
+            snr_sum: 0.0,
+            snr_n: 0,
         }
     }
 }
@@ -305,6 +318,7 @@ struct HopMember {
     detections: u64,
     bursts: u64,
     period_s: Option<f64>,
+    snr_db: f64,
 }
 
 impl HopMember {
@@ -357,6 +371,7 @@ pub struct Tracker {
     hop_sets: Vec<Option<HopSet>>,
     hop_free: Vec<usize>,
     staged: Vec<Track>,
+    staged_segments: Vec<TrackSegment>,
     links: Vec<(TrackId, DetectionId)>,
     tentative_links: Vec<(TrackId, DetectionId)>,
     repoints: Vec<(TrackId, TrackId)>,
@@ -392,6 +407,7 @@ impl Tracker {
             hop_sets: Vec::new(),
             hop_free: Vec::new(),
             staged: Vec::with_capacity(64),
+            staged_segments: Vec::with_capacity(64),
             links: Vec::with_capacity(4096),
             tentative_links: Vec::with_capacity(256),
             repoints: Vec::with_capacity(16),
@@ -431,6 +447,7 @@ impl Tracker {
             + self.members.capacity() * size_of::<Option<MemberEntry>>()
             + self.merge_queue.capacity() * size_of::<(usize, TrackId)>()
             + self.staged.capacity() * size_of::<Track>()
+            + self.staged_segments.capacity() * size_of::<TrackSegment>()
             + (self.links.capacity() + self.tentative_links.capacity())
                 * size_of::<(TrackId, DetectionId)>()
             + self.repoints.capacity() * size_of::<(TrackId, TrackId)>()
@@ -554,6 +571,7 @@ impl Tracker {
                 || f.compressed,
             marginal: f.marginal,
             confirmed: r.candidate.is_confirmed(),
+            snr_db: d.snr_mean_db,
         };
         self.now = self.now.max(t1);
         if self.pending.len() >= PENDING_CAPACITY {
@@ -652,6 +670,7 @@ impl Tracker {
         }
         batch.links.append(&mut self.links);
         batch.repoints.append(&mut self.repoints);
+        batch.segments.append(&mut self.staged_segments);
         batch.linked_at = Timestamp::from_unix_nanos(self.now);
     }
 
@@ -1023,7 +1042,7 @@ impl Tracker {
         let hold = i64::from(cfg.hold_frames) * g.frame_ns;
 
         // Provenance / segment boundary: the track continues, the boundary is recorded.
-        {
+        let boundary = {
             let s = &mut self.slots[i];
             let kind = if g.provenance != s.provenance {
                 Some(if g.tune.center_hz != s.tune.center_hz {
@@ -1044,18 +1063,25 @@ impl Tracker {
             if kind.is_some() {
                 s.segments += 1;
             }
-            if let Some(kind) = kind.filter(|_| !s.tentative) {
-                out(TrackEvent::Segment(SegmentBoundary {
-                    track: s.id,
-                    at: Timestamp::from_unix_nanos(g.t0),
-                    kind,
-                    from: s.provenance,
-                    to: g.provenance,
-                }));
-            }
+            let boundary = kind.filter(|_| !s.tentative).map(|kind| SegmentBoundary {
+                track: s.id,
+                at: Timestamp::from_unix_nanos(g.t0),
+                kind,
+                from: s.provenance,
+                to: g.provenance,
+            });
             s.provenance = g.provenance;
             s.tune = g.tune;
             s.segment = s.segment.max(g.segment);
+            boundary
+        };
+        if let Some(b) = boundary {
+            self.staged_segments.push(TrackSegment {
+                track: b.track,
+                at: b.at,
+                kind: b.kind.into(),
+            });
+            out(TrackEvent::Segment(b));
         }
 
         // Reopen a finished burst that this part continues or overlaps.
@@ -1155,6 +1181,8 @@ impl Tracker {
             }
             s.shape_n += 1;
             s.bin_hz = s.bin_hz.min(g.bin_hz);
+            s.snr_sum += g.snr_db;
+            s.snr_n += 1;
         }
         let c = s.cur.as_mut().expect("burst applied");
         if g.continues > 0 {
@@ -1397,6 +1425,11 @@ impl Tracker {
             detections: s.detections,
             bursts: s.bursts,
             period_s: self.period(slot),
+            snr_db: if s.snr_n > 0 {
+                s.snr_sum / s.snr_n as f64
+            } else {
+                0.0
+            },
         }
     }
 
@@ -1604,11 +1637,26 @@ impl Tracker {
         )
     }
 
+    /// Raster of the qualifying members' centres, robust to noisy centre estimates (T-035).
+    fn hop_raster(&self, h: &HopSet) -> Option<f64> {
+        let qual = || h.members.iter().filter(|m| m.qualifies(&self.cfg.hop));
+        let bin = qual().map(|m| m.bin_hz).fold(0.0, f64::max);
+        let channels: Vec<RasterChannel> = qual()
+            .map(|m| RasterChannel {
+                fc: m.fc,
+                bw: m.bw,
+                bursts: m.bursts,
+                snr_db: m.snr_db,
+            })
+            .collect();
+        robust_raster(&channels, 1.5 * bin)
+    }
+
     fn hop_summary(&self, h: &HopSet) -> HopSetSummary {
-        let (channels, members, bin, _, _, dwell) = self.hop_channels(h);
+        let (channels, members, _, _, _, dwell) = self.hop_channels(h);
         HopSetSummary {
             id: h.id,
-            raster_hz: raster(&channels, 1.5 * bin),
+            raster_hz: self.hop_raster(h),
             channels_hz: channels,
             members,
             hop_rate_hz: (h.links > 0 && h.th_sum_ns > 0.0)
@@ -1646,6 +1694,7 @@ impl Tracker {
             timing: TimingFeatures {
                 hop_rate_hz: (h.links > 0 && h.th_sum_ns > 0.0)
                     .then(|| 1.0 / (h.th_sum_ns / h.links as f64 / NS)),
+                hop_raster_hz: self.hop_raster(h),
                 hop_set_hz: channels,
                 co_occurring: members,
                 ..TimingFeatures::default()
@@ -1787,12 +1836,21 @@ impl Tracker {
             tune: parent.tune,
             continues: 0,
             transitions: 0,
+            snr_db: if parent.snr_n > 0 {
+                parent.snr_sum / parent.snr_n as f64
+            } else {
+                0.0
+            },
         };
         let j = self.open(&g, out);
         {
             let c = &mut self.slots[j];
             c.split_from = Some(parent.id);
             c.shape_n = go.len() as u64;
+            if parent.snr_n > 0 {
+                c.snr_sum = g.snr_db;
+                c.snr_n = 1;
+            }
         }
         self.confirm_track(j, out);
         self.stats.splits += 1;
@@ -1866,6 +1924,8 @@ impl Tracker {
             t.suspect += f.suspect;
             t.confirmed += f.confirmed;
             t.segments += f.segments;
+            t.snr_sum += f.snr_sum;
+            t.snr_n += f.snr_n;
             if t.cur.is_none() {
                 t.cur = f.cur;
             }
@@ -2013,6 +2073,11 @@ impl Tracker {
                 inter_arrival_mean_s: ia_mean,
                 inter_arrival_std_s: ia_std,
                 co_occurring: hop_set.into_iter().collect(),
+                period_confidence: period.map(|p| p.confidence),
+                period_jitter_s: period.map(|p| p.jitter_s),
+                burst_length: burst_length.map(Into::into),
+                segment_count: s.segments,
+                hop_set,
                 ..TimingFeatures::default()
             },
             updated_at: Timestamp::from_unix_nanos(self.now),

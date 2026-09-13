@@ -74,10 +74,12 @@ use serde_json::Value;
 
 use crate::calibration::{CalibrationState, SpurMask};
 use crate::content::ContentClass;
+use crate::detection::{Detection, Track, TrackSegment};
 use crate::hash::{ContentHash, canonical_json};
-use crate::ids::{DetectionId, EmitterId, ExternalEventId, ProvenanceId};
+use crate::ids::{DetectionId, EmitterId, ExternalEventId, ProvenanceId, TrackId};
 use crate::provenance::Provenance;
 use crate::region::Region;
+use crate::time::Timestamp;
 
 pub use inventory::EmitterUpsert;
 
@@ -228,6 +230,23 @@ impl Repository {
         Ok(())
     }
 
+    /// Runs `f` in **one** `BEGIN IMMEDIATE` write transaction and commits if it returns `Ok`.
+    /// If `f` (or the commit) fails, nothing it wrote is kept: the transaction rolls back and the
+    /// error is returned. [`RepoBatch`] exposes typed writes only (no SQL), with the same rules
+    /// as the corresponding [`Repository`] methods.
+    pub fn batch<T, F>(&mut self, f: F) -> Result<T, RepoError>
+    where
+        F: FnOnce(&mut RepoBatch<'_>) -> Result<T, RepoError>,
+    {
+        let tx = self.write_tx()?;
+        let out = {
+            let mut b = RepoBatch { conn: &tx };
+            f(&mut b)?
+        };
+        tx.commit()?;
+        Ok(out)
+    }
+
     /// A write transaction that holds the write lock from its first statement.
     fn write_tx(&mut self) -> Result<Transaction<'_>, RepoError> {
         Ok(self
@@ -238,6 +257,44 @@ impl Repository {
     /// A read transaction: every read inside it sees one snapshot. Dropping it ends it.
     fn read_tx(&self) -> Result<Transaction<'_>, RepoError> {
         Ok(self.conn.unchecked_transaction()?)
+    }
+}
+
+/// Typed writes inside one [`Repository::batch`] transaction.
+pub struct RepoBatch<'a> {
+    conn: &'a Connection,
+}
+
+impl RepoBatch<'_> {
+    /// [`Repository::insert_detections`] in this transaction.
+    pub fn insert_detections(&mut self, detections: &[Detection]) -> Result<(), RepoError> {
+        measure::insert_detections_on(self.conn, detections)
+    }
+
+    /// [`Repository::upsert_track`] in this transaction.
+    pub fn upsert_track(&mut self, track: &Track) -> Result<(), RepoError> {
+        inventory::upsert_track_on(self.conn, track)
+    }
+
+    /// [`Repository::link_detections_to_track`] in this transaction.
+    pub fn link_detections_to_track(
+        &mut self,
+        track_id: TrackId,
+        detections: &[DetectionId],
+        linked_at: Timestamp,
+    ) -> Result<(), RepoError> {
+        inventory::link_detections_on(self.conn, track_id, detections, linked_at)
+    }
+
+    /// [`Repository::append_track_segments`] in this transaction.
+    pub fn append_track_segments(&mut self, segments: &[TrackSegment]) -> Result<(), RepoError> {
+        inventory::append_track_segments_on(self.conn, segments)
+    }
+
+    /// [`Repository::track_detections`] as seen inside this transaction (its own writes
+    /// included).
+    pub fn track_detections(&self, track_id: TrackId) -> Result<Vec<DetectionId>, RepoError> {
+        inventory::track_detections_on(self.conn, track_id)
     }
 }
 

@@ -66,12 +66,15 @@
 //!
 //! # Persistence
 //!
-//! [`Tracker::drain_into`] fills a [`TrackBatch`] with changed Track aggregates and new
-//! track↔detection links; [`TrackBatch::write`] upserts, links and re-points merged tracks'
-//! links through the repository (one transaction per call: hk-model has no public batch
-//! transaction yet). Write the detections first. docs/07's `TimingFeatures` does not yet store period confidence
-//! and jitter, the burst-length distribution, segment boundaries or the hop-set raster; they are
-//! in [`TrackSummary`] / [`HopSetSummary`] only.
+//! [`Tracker::drain_into`] fills a [`TrackBatch`] with changed Track aggregates, new
+//! track↔detection links and segment boundaries; [`TrackBatch::write`] upserts, links, re-points
+//! merged tracks' links and appends the boundaries in **one** repository transaction
+//! ([`hk_model::Repository::batch`]). Write the detections first. The Track's `TimingFeatures`
+//! carry period confidence and jitter, the burst-length distribution, the segment count, the
+//! hop-set id (members) and the hop raster (hop-set aggregates) (T-035); the boundaries are
+//! `track_segment` rows. The hop raster is the largest lattice step explaining most channel
+//! centres within their uncertainty, weighted by bursts and SNR, preferring a common raster over
+//! an incommensurate larger step (`stats::robust_raster`).
 //!
 //! # Real-time path
 //!

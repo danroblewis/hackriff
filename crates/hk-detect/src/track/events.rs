@@ -1,7 +1,7 @@
 //! What the tracker emits: [`TrackEvent`]s (appended, never overwritten) and the summaries they
 //! carry.
 
-use hk_model::{ProvenanceId, TimeRange, Timestamp, Track, TrackId};
+use hk_model::{BurstLengths, ProvenanceId, SegmentKind, TimeRange, Timestamp, Track, TrackId};
 
 pub use super::stats::Periodicity;
 
@@ -16,6 +16,17 @@ pub enum BoundaryKind {
     Provenance,
     /// A detector transition (gap, floor-segment reset) without a provenance change.
     Discontinuity,
+}
+
+impl From<BoundaryKind> for SegmentKind {
+    fn from(k: BoundaryKind) -> Self {
+        match k {
+            BoundaryKind::GainChange => SegmentKind::GainChange,
+            BoundaryKind::Retune => SegmentKind::Retune,
+            BoundaryKind::Provenance => SegmentKind::Provenance,
+            BoundaryKind::Discontinuity => SegmentKind::Discontinuity,
+        }
+    }
 }
 
 /// A segment boundary inside a track.
@@ -61,6 +72,20 @@ pub struct Distribution {
     pub p50_s: f64,
     /// 90th percentile, s.
     pub p90_s: f64,
+}
+
+impl From<Distribution> for BurstLengths {
+    fn from(d: Distribution) -> Self {
+        BurstLengths {
+            count: d.count,
+            mean_s: d.mean_s,
+            std_s: d.std_s,
+            min_s: d.min_s,
+            p50_s: d.p50_s,
+            p90_s: d.p90_s,
+            max_s: d.max_s,
+        }
+    }
 }
 
 /// A track with every C10 feature, including those docs/07's `Track` does not store yet.
