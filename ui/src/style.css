@@ -1,4 +1,4 @@
-:root { color-scheme: dark; --bg: #0b0d10; --panel: #14181d; --fg: #d8dde3; --dim: #8b949e; --warn: #e3a008; --drop: #d946ef; }
+:root { color-scheme: dark; --bg: #0b0d10; --panel: #14181d; --fg: #d8dde3; --dim: #8b949e; --warn: #e3a008; --drop: #d946ef; --sel: #facc15; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
@@ -11,25 +11,45 @@ header { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; pad
 main { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
 .panel { background: var(--panel); border-radius: 8px; padding: 10px; }
 #auth { margin: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-h2 { margin: 0 0 8px; font-size: 15px; }
+h2 { margin: 0 0 8px; font-size: 15px; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+h2 button { margin-left: auto; font-size: 12px; padding: 1px 8px; }
+.live-bar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; min-height: 22px; margin-bottom: 2px; }
+.live-bar button { font-size: 12px; padding: 1px 8px; }
 .axis { position: relative; height: 16px; font: 11px ui-monospace, Menlo, monospace; color: var(--dim); }
 .axis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
-.wf-wrap { position: relative; }
+.wf-wrap { position: relative; touch-action: none; user-select: none; -webkit-user-select: none; }
 canvas { display: block; width: 100%; background: #000; border-radius: 4px; touch-action: none; }
-#wf { height: min(62vh, 640px); }
+#wf { height: min(62vh, 640px); cursor: crosshair; }
 #heat { height: min(45vh, 420px); margin-top: 8px; }
 #floor { height: 160px; margin-top: 8px; }
-.readout { position: absolute; top: 4px; right: 6px; font: 12px ui-monospace, Menlo, monospace; background: rgba(0,0,0,.6); padding: 2px 6px; pointer-events: none; }
+/* Everything layered over the canvas ignores the pointer, so events always reach the live view. */
+#wf-overlays, #wf-draft, .readout { pointer-events: none; }
+#wf-overlays { position: absolute; inset: 0; overflow: hidden; }
+.readout { position: absolute; top: 4px; right: 6px; font: 12px ui-monospace, Menlo, monospace; background: rgba(0,0,0,.6); padding: 2px 6px; }
+.readout:empty { display: none; }
+.sel-box { position: absolute; background: rgba(250,204,21,.12); border: 1px solid var(--sel); }
+.sel-box.scrolled { border-style: dashed; }
+.sel-box span { position: absolute; left: 2px; bottom: 2px; font: 11px ui-monospace, Menlo, monospace; color: #fde68a; background: rgba(0,0,0,.6); padding: 0 3px; white-space: nowrap; }
+.hl-box { position: absolute; top: 0; bottom: 0; background: rgba(96,165,250,.18); border: 1px solid #60a5fa; border-width: 0 1px; }
+#wf-draft { position: absolute; background: rgba(96,165,250,.2); border: 1px dashed #93c5fd; }
+#wf-draft span { position: absolute; left: 2px; top: 2px; font: 11px ui-monospace, Menlo, monospace; background: rgba(0,0,0,.7); padding: 0 3px; white-space: nowrap; }
 .hint { color: var(--dim); font-size: 12px; margin: 6px 0 0; }
 .mk { padding: 0 6px; border-radius: 3px; color: #111; }
 .mk.drop { background: var(--drop); }
 .mk.gated { background: var(--warn); }
 form#hist-form, form#inv-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
-#wf-sel { position: absolute; top: 0; bottom: 0; background: rgba(96,165,250,.18); border: 1px solid #60a5fa; border-width: 0 1px; pointer-events: none; }
+#inspect-body dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: 13px; }
+#inspect-body dt { color: var(--dim); }
+#inspect-body dd { margin: 0; overflow-wrap: anywhere; }
+.listen { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 0; }
 .table-wrap { overflow-x: auto; margin-top: 8px; }
-#inv-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-#inv-table th, #inv-table td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #222a33; white-space: nowrap; }
-#inv-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+table.grid { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.grid th, table.grid td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #222a33; white-space: nowrap; }
+table.grid .num { text-align: right; font-variant-numeric: tabular-nums; }
+#sel-table th { color: var(--dim); font-size: 12px; font-weight: normal; }
+#sel-table .acts { display: flex; gap: 4px; }
+#sel-table .acts button { font-size: 12px; padding: 1px 6px; }
+.sel-name { width: 11em; }
 #inv-table th button { background: none; border: 0; padding: 0; color: var(--dim); font-size: 12px; }
 #inv-table th[aria-sort] button { color: var(--fg); }
 #inv-table th[aria-sort=ascending] button::after { content: " ▲"; }
@@ -47,11 +67,12 @@ input, select, button { font: inherit; color: var(--fg); background: #0f1318; bo
 input[type=number] { width: 9em; }
 button { cursor: pointer; background: #1f6feb; border-color: #1f6feb; }
 button[type=button] { background: #21262d; border-color: #2d333b; }
+button:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 520px) {
   main { padding: 6px; gap: 8px; }
   #wf { height: 55vh; }
   form#hist-form label, form#inv-form label { flex: 1 1 45%; }
   input[type=number], input[type=datetime-local], input[type=text], input[type=search] { width: 100%; }
-  #inv-table .opt { display: none; }
-  #inv-table th, #inv-table td { padding: 4px 3px; }
+  table.grid .opt { display: none; }
+  table.grid th, table.grid td { padding: 4px 3px; }
 }

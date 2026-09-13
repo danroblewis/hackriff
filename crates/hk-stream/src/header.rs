@@ -127,13 +127,15 @@ pub struct StreamHeader {
     /// Sample (or symbol, or spectrum-row) rate, Hz.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_rate_hz: Option<f64>,
-    /// RF centre frequency, Hz.
+    /// RF centre frequency, Hz. For spectrum streams, the frequency of row element `fft_size/2`
+    /// (DC); see [`StreamHeader::spectrum_bin_hz`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub center_hz: Option<f64>,
-    /// Bandwidth, Hz.
+    /// Bandwidth, Hz. For spectrum streams, the span of a row: `fft_size` bins of
+    /// `bandwidth_hz / fft_size` each.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bandwidth_hz: Option<f64>,
-    /// FFT size, for spectrum streams.
+    /// FFT size (elements per row), for spectrum streams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fft_size: Option<u32>,
     /// Bit/symbol framing (docs/07 §2.16), for bits and symbols streams.
@@ -253,6 +255,25 @@ impl StreamHeader {
         Ok(())
     }
 
+    /// For `spectrum` streams: the centre frequency of row element `bin`, Hz.
+    ///
+    /// Spectrum rows are DC-centred and ascending (hk-dsp `Spectrum` bin order): element `i` of
+    /// `N = fft_size` lies at `center_hz + (i − ⌊N/2⌋) · bandwidth_hz / N` and covers one bin width
+    /// `bandwidth_hz / N` around that frequency, so element `⌊N/2⌋` is the tuned centre (DC) and a
+    /// row spans `[f_0 − df/2, f_{N−1} + df/2]`. The web UI maps its frequency axis the same way
+    /// (`ui/src/axis.ts`, T-045). `None` when the stream is not a spectrum, a geometry field is
+    /// missing, or `bin >= fft_size`.
+    pub fn spectrum_bin_hz(&self, bin: u32) -> Option<f64> {
+        if self.kind != StreamKind::Spectrum {
+            return None;
+        }
+        let (center, bw, n) = (self.center_hz?, self.bandwidth_hz?, self.fft_size?);
+        if n == 0 || bin >= n {
+            return None;
+        }
+        Some(center + (f64::from(bin) - f64::from(n / 2)) * bw / f64::from(n))
+    }
+
     /// Serialises the header frame payload.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, HeaderError> {
         self.validate()?;
@@ -306,6 +327,28 @@ mod tests {
                 "{replacement:?}"
             );
         }
+    }
+
+    #[test]
+    fn spectrum_bins_are_dc_centred_and_ascending() {
+        let mut h = StreamHeader::new("s", StreamKind::Spectrum, ContentClass::Unrestricted, "t");
+        assert_eq!(h.spectrum_bin_hz(0), None, "no geometry");
+        h.center_hz = Some(100.8e6);
+        h.bandwidth_hz = Some(2.4e6);
+        h.fft_size = Some(4096);
+        assert_eq!(h.spectrum_bin_hz(2048), Some(100.8e6), "DC is element N/2");
+        assert_eq!(h.spectrum_bin_hz(0), Some(99.6e6), "element 0 is -fs/2");
+        assert_eq!(h.spectrum_bin_hz(4095), Some(102.0e6 - 585.9375));
+        // A 101.3 MHz station (+500 kHz) is element 2048 + 853.33 -> 2901, within one bin.
+        assert!((h.spectrum_bin_hz(2901).unwrap() - 101.3e6).abs() < 585.9375);
+        assert_eq!(h.spectrum_bin_hz(4096), None);
+        h.fft_size = Some(5);
+        h.center_hz = Some(0.0);
+        h.bandwidth_hz = Some(5.0);
+        let odd: Vec<f64> = (0..5).map(|i| h.spectrum_bin_hz(i).unwrap()).collect();
+        assert_eq!(odd, [-2.0, -1.0, 0.0, 1.0, 2.0]);
+        h.kind = StreamKind::Iq;
+        assert_eq!(h.spectrum_bin_hz(2), None, "only spectrum rows have bins");
     }
 
     #[test]

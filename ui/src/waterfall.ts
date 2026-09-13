@@ -2,12 +2,19 @@
 // (spikes/s3-web-waterfall/client/src/main.ts, measured at 60 fps up to 16384 bins).
 // Differences: rows arrive as f32 dB (hk-stream `rf32_le` spectrum), stored in an R32F texture
 // ring and mapped to colour in the shader, so auto-ranging re-maps history for free; a left-edge
-// strip marks dropped/gated runs.
+// strip marks dropped/gated runs; a texture window [u0, u1] zooms every pass (T-044); row times
+// are kept for time selections.
+//
+// Frequency geometry (T-045, ui/src/axis.ts): texture column j of texW covers [j/texW, (j+1)/texW]
+// of the full band, so a bin's centre is at u = (i + 0.5)/N. The spectrum line puts its vertices
+// there (not at i/(N−1), which skewed the trace by up to a bin towards the edges).
 
 const ROWS = 512;
 const LEVELS = 256;
 const TAU_S = 0.5;
 const MAX_ROWS_PER_FRAME = 16;
+/** Fraction of the canvas height the spectrum takes at the top. */
+const SPEC_FRAC = 0.35;
 export const MARK_DROP = 1;
 export const MARK_GATED = 2;
 
@@ -24,11 +31,14 @@ type Prog = { p: WebGLProgram; u: Record<string, WebGLUniformLocation | null> };
 
 export class Waterfall {
   readonly bins: number;
+  readonly rows = ROWS;
   lo = -120;
   hi = -60;
   fps = 0;
   skipped = 0;
   latest: Float32Array;
+  /** Fraction of the canvas height taken by the spectrum (the rest is the waterfall). */
+  specFrac = SPEC_FRAC;
   private gl: WebGL2RenderingContext;
   private texW: number;
   private wf: WebGLTexture;
@@ -36,7 +46,8 @@ export class Waterfall {
   private hist: { tex: WebGLTexture; fb: WebGLFramebuffer }[] = [];
   private progs: Record<string, Prog> = {};
   private head = 0;
-  private pending: { row: Float32Array; mark: number }[] = [];
+  private pending: { row: Float32Array; mark: number; t: number }[] = [];
+  private times = new Float64Array(ROWS).fill(NaN);
   private nextMark = 0;
   private beta: number;
   private floorEst = NaN;
@@ -44,6 +55,8 @@ export class Waterfall {
   private rafTimes: number[] = [];
   private raf = 0;
   private scratch: Float32Array;
+  private u0 = 0;
+  private u1 = 1;
 
   constructor(private canvas: HTMLCanvasElement, bins: number, rowRateHz: number) {
     const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
@@ -51,7 +64,7 @@ export class Waterfall {
     this.gl = gl;
     this.bins = bins;
     this.texW = Math.min(bins, gl.getParameter(gl.MAX_TEXTURE_SIZE) as number);
-    this.latest = new Float32Array(this.texW);
+    this.latest = new Float32Array(this.texW).fill(NaN);
     this.scratch = new Float32Array(Math.min(this.texW, 512));
     this.beta = Math.exp(-1 / (TAU_S * Math.max(1, rowRateHz)));
     this.buildPrograms();
@@ -81,13 +94,30 @@ export class Waterfall {
     this.gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
 
+  /** Shows the texture window [u0, u1] of the full band (0..1): the zoom. */
+  setView(u0: number, u1: number) {
+    if (Number.isFinite(u0) && Number.isFinite(u1) && u1 > u0) { this.u0 = u0; this.u1 = u1; }
+  }
+
   /** Marks the next row (a dropped or gated run precedes it). */
   mark(kind: number) {
     this.nextMark = Math.max(this.nextMark, kind);
   }
 
-  /** Queues one row of dB values (max-decimated to the texture width if needed). */
-  push(db: Float32Array) {
+  /** Time (Unix s) of the row `rowsBack` rows before the newest drawn row; NaN when none. */
+  timeAt(rowsBack: number): number {
+    if (!(rowsBack >= 0 && rowsBack < ROWS)) return NaN;
+    return this.times[(this.head - Math.floor(rowsBack) + ROWS) % ROWS];
+  }
+
+  /** Level (dB) of the newest row at texture fraction `u` of the full band; NaN outside. */
+  levelAt(u: number): number {
+    if (!(u >= 0 && u < 1)) return NaN;
+    return this.latest[Math.min(this.texW - 1, Math.floor(u * this.texW))];
+  }
+
+  /** Queues one row of dB values (max-decimated to the texture width if needed) with its time. */
+  push(db: Float32Array, tS = NaN) {
     let row: Float32Array;
     if (db.length === this.texW) row = db.slice();
     else {
@@ -95,13 +125,13 @@ export class Waterfall {
       const r = db.length / this.texW;
       for (let i = 0; i < this.texW; i++) {
         let m = -Infinity;
-        const e = Math.min(db.length, Math.floor((i + 1) * r));
-        for (let j = Math.floor(i * r); j < e; j++) if (db[j] > m) m = db[j];
+        const s = Math.floor(i * r), e = Math.min(db.length, Math.max(s + 1, Math.floor((i + 1) * r)));
+        for (let j = s; j < e; j++) if (db[j] > m) m = db[j];
         row[i] = m;
       }
     }
     this.autoRange(row);
-    this.pending.push({ row, mark: this.nextMark });
+    this.pending.push({ row, mark: this.nextMark, t: tS });
     this.nextMark = 0;
     if (this.pending.length > MAX_ROWS_PER_FRAME * 4) {
       this.skipped += this.pending.length - MAX_ROWS_PER_FRAME * 4;
@@ -155,25 +185,30 @@ export class Waterfall {
       for (let i = 0; i < n; i++) { const nm = gl.getActiveUniform(p, i)!.name; u[nm] = gl.getUniformLocation(p, nm); }
       return { p, u };
     };
-    // Waterfall: ring row from head offset, max over the bins behind each pixel, marker strip.
+    // Waterfall: ring row from head offset, max over the bins behind each pixel of the texture
+    // window, marker strip.
     this.progs.wf = prog(VS_FULL, `#version 300 es
 precision highp float; precision highp int;
 uniform highp sampler2D uWf; uniform highp sampler2D uMk; uniform float uHead; uniform int uStep;
-uniform float uLo, uHi, uMkPx; in vec2 vUv; out vec4 o; ${CMAP}
+uniform float uLo, uHi, uMkPx, uU0, uU1; in vec2 vUv; out vec4 o; ${CMAP}
 void main(){
   ivec2 sz = textureSize(uWf,0);
   int row = int(mod(uHead - (1.0 - vUv.y) * float(sz.y), float(sz.y)));
   float k = texelFetch(uMk, ivec2(0,row), 0).r;
   if (gl_FragCoord.x < uMkPx && k > 0.0) { o = k > 0.75 ? vec4(0.89,0.63,0.03,1) : vec4(0.85,0.27,0.94,1); return; }
-  int x0 = int(vUv.x * float(sz.x)); float m = -1e30;
+  float u = mix(uU0, uU1, vUv.x);
+  if (u < 0.0 || u >= 1.0) { o = vec4(0,0,0,1); return; }
+  int x0 = int(u * float(sz.x)); float m = -1e30;
   for (int i=0;i<64;i++){ if(i>=uStep) break; m = max(m, texelFetch(uWf, ivec2(min(x0+i, sz.x-1),row),0).r); }
   o = vec4(cmap((m-uLo)/(uHi-uLo)),1);
 }`);
+    // Spectrum line: vertex i at its bin centre (i + 0.5)/N, mapped through the texture window.
     this.progs.line = prog(`#version 300 es
 precision highp float; precision highp int;
-uniform highp sampler2D uWf; uniform int uRow; uniform int uN; uniform float uLo, uHi;
+uniform highp sampler2D uWf; uniform int uRow; uniform int uN; uniform float uLo, uHi, uU0, uU1;
 void main(){ float v = texelFetch(uWf, ivec2(gl_VertexID, uRow), 0).r;
-  gl_Position = vec4(float(gl_VertexID)/float(uN-1)*2.0-1.0, clamp((v-uLo)/(uHi-uLo),0.0,1.0)*1.9-0.95, 0, 1); }`,
+  float u = (float(gl_VertexID) + 0.5) / float(uN);
+  gl_Position = vec4((u - uU0) / (uU1 - uU0) * 2.0 - 1.0, clamp((v-uLo)/(uHi-uLo),0.0,1.0)*1.9-0.95, 0, 1); }`,
     `#version 300 es
 precision mediump float; out vec4 o; void main(){ o = vec4(1.0,1.0,0.6,1.0); }`);
     // DPX accumulate: H' = beta*H + hit, hit spanning this bin's and the previous bin's level.
@@ -192,10 +227,12 @@ void main(){
 }`);
     this.progs.dpx = prog(VS_FULL, `#version 300 es
 precision highp float; precision highp int;
-uniform highp sampler2D uH; uniform int uStep; uniform float uHmax; in vec2 vUv; out vec4 o; ${CMAP}
+uniform highp sampler2D uH; uniform int uStep; uniform float uHmax, uU0, uU1; in vec2 vUv; out vec4 o; ${CMAP}
 void main(){
   ivec2 sz = textureSize(uH,0); int y = int(clamp(vUv.y, 0.0, 0.9999) * float(sz.y));
-  int x0 = int(vUv.x * float(sz.x)); float m = 0.0;
+  float u = mix(uU0, uU1, vUv.x);
+  if (u < 0.0 || u >= 1.0) { o = vec4(0,0,0,1); return; }
+  int x0 = int(u * float(sz.x)); float m = 0.0;
   for (int i=0;i<64;i++){ if(i>=uStep) break; m = max(m, texelFetch(uH, ivec2(min(x0+i,sz.x-1), y),0).r); }
   float v = log(1.0+m)/log(1.0+uHmax);
   o = vec4(v>0.001 ? cmap(0.15+0.85*v) : vec3(0.0), 1);
@@ -210,8 +247,11 @@ void main(){
     const n = this.rafTimes.length;
     if (n > 1) this.fps = (1000 * (n - 1)) / (this.rafTimes[n - 1] - this.rafTimes[0]);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const W = Math.floor(c.clientWidth * dpr), H = Math.floor(c.clientHeight * dpr);
-    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const cw = Math.floor(c.clientWidth * dpr), ch = Math.floor(c.clientHeight * dpr);
+    if (c.width !== cw || c.height !== ch) { c.width = cw; c.height = ch; }
+    // Draw into the buffer the browser actually allocated (it may clamp a huge canvas); CSS
+    // stretches it over the element, so fractions of the element stay fractions of the view.
+    const W = gl.drawingBufferWidth, H = gl.drawingBufferHeight;
 
     let rows = this.pending;
     this.pending = [];
@@ -224,11 +264,15 @@ void main(){
       mkByte[0] = r.mark === MARK_GATED ? 255 : r.mark === MARK_DROP ? 128 : 0;
       gl.bindTexture(gl.TEXTURE_2D, this.mk);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, 1, 1, gl.RED, gl.UNSIGNED_BYTE, mkByte);
+      this.times[this.head] = r.t;
       this.latest = r.row;
       if (this.hist.length === 2) this.accumulate();
     }
 
-    const specH = Math.floor(H * 0.35), step = Math.max(1, Math.min(64, Math.ceil(this.texW / Math.max(1, W))));
+    const specH = Math.floor(H * SPEC_FRAC);
+    if (H > 0) this.specFrac = specH / H;
+    const visible = Math.max(1e-9, this.u1 - this.u0) * this.texW;
+    const step = Math.max(1, Math.min(64, Math.ceil(visible / Math.max(1, W))));
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
     gl.clearColor(0, 0, 0, 1);
@@ -244,6 +288,8 @@ void main(){
     gl.uniform1f(wf.u.uLo, this.lo);
     gl.uniform1f(wf.u.uHi, this.hi);
     gl.uniform1f(wf.u.uMkPx, 6 * dpr);
+    gl.uniform1f(wf.u.uU0, this.u0);
+    gl.uniform1f(wf.u.uU1, this.u1);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     gl.viewport(0, H - specH, W, specH);
@@ -253,6 +299,8 @@ void main(){
       this.bind(0, this.hist[0].tex, d.u.uH);
       gl.uniform1i(d.u.uStep, step);
       gl.uniform1f(d.u.uHmax, 1 / (1 - this.beta));
+      gl.uniform1f(d.u.uU0, this.u0);
+      gl.uniform1f(d.u.uU1, this.u1);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
     const l = this.progs.line;
@@ -262,6 +310,8 @@ void main(){
     gl.uniform1i(l.u.uN, this.texW);
     gl.uniform1f(l.u.uLo, this.lo);
     gl.uniform1f(l.u.uHi, this.hi);
+    gl.uniform1f(l.u.uU0, this.u0);
+    gl.uniform1f(l.u.uU1, this.u1);
     gl.drawArrays(gl.LINE_STRIP, 0, this.texW);
   }
 
