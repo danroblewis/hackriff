@@ -407,14 +407,25 @@ result size.
 **Consumers never write.** As in §2: any byte a browser sends (a close frame included) or a hang-up
 is read by `watch_peer` as the signal to close that consumer and shut its socket down.
 
-**Read-only control/query endpoints.** The bridge shares its `hk-api` HTTP server with three
+**Read-only control/query endpoints.** The bridge shares its `hk-api` HTTP server with four
 `GET`, token-authenticated JSON endpoints that are **not part of the framed stream contract** above
 — they return plain JSON, not header/record framing — but are worth naming here because they run
 under the same auth and gating:
 - `/api/streams`: the offered streams' header metadata only (id, kind, class, geometry,
   `content_permitted`, `remote_permitted`, open consumer count) — never content;
 - `/api/history?f_lo&f_hi&t0&t1[&max_cells]`: the T-017 region-over-time grid;
-- `/api/floor?f_lo&f_hi&t0&t1[&max_steps]`: the T-021 floor-vs-time series.
+- `/api/floor?f_lo&f_hi&t0&t1[&max_steps]`: the T-021 floor-vs-time series;
+- `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]`: one
+  page (≤ 500 rows, cursor ≤ 10⁶) of the T-018 signal inventory.
+  - **Built only on `Repository::query_inventory`**, always with `IdentityAccess::Standard`. No
+    request parameter grants the own-traffic authorisation over HTTP in M0.
+  - **Identity values:** `identity_value` is present only when the query returned it in clear
+    (class `unrestricted`). Otherwise the row carries `withheld: true`, `identity_scheme` and
+    `identity_class`, and no value.
+  - **Status reasons:** on withheld rows, a status reason from an author that may have seen the
+    identity (decoder, user, system) is withheld too.
+  - **Never included:** decode content, fingerprints and links. A test scans hk-api's sources
+    for the ungated emitter getters.
 
 See `crates/hk-api/src/http.rs` and `crates/hk-api/src/query.rs` for their shapes and caps; `ui/README.md`
 documents the wire format and security notes from the UI's point of view.

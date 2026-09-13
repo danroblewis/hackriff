@@ -7,9 +7,15 @@
 //! - `/api/floor?f_lo&f_hi&t0&t1[&max_steps]`: [`FloorProduct::floor_vs_time`] (T-021) at the
 //!   finest level with at most `max_steps` time steps.
 //!
+//! - `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]`:
+//!   the T-018 signal inventory ([`inventory_json`]).
+//!
 //! `f_lo`/`f_hi` are Hz; `t0`/`t1` are Unix seconds.
 
-use hk_model::{FreqRange, TimeRange, Timestamp};
+use hk_model::{
+    FreqRange, IdentityAccess, IdentityScheme, InventoryIdentity, InventoryQuery, KnownStatus,
+    Repository, StatusAuthor, TimeRange, Timestamp,
+};
 use hk_store::history::Geometry;
 use hk_store::{
     FloorFlags, FloorProduct, FloorVsTime, ProvenanceSummary, Pyramid, RegionHistory, RegionQuery,
@@ -288,6 +294,184 @@ pub fn floor_json(product: &FloorProduct, q: &Params) -> Result<Value, ApiError>
         )
         .map_err(|_| ApiError::new(400, "floor query refused"))?;
     Ok(floor_vs_time_json(&f))
+}
+
+/// Default page size of `/api/inventory`.
+pub const DEFAULT_INVENTORY_LIMIT: usize = 100;
+/// Largest page size `/api/inventory` accepts.
+pub const MAX_API_INVENTORY_LIMIT: usize = 500;
+/// Largest `/api/inventory` cursor (row offset) accepted.
+pub const MAX_INVENTORY_CURSOR: u64 = 1_000_000;
+/// Longest `tag` / `family` filter accepted, bytes.
+const MAX_FILTER_LEN: usize = 128;
+
+fn nonempty<'a>(q: &'a Params, key: &str) -> Option<&'a str> {
+    param(q, key).filter(|v| !v.is_empty())
+}
+
+/// Both of an optional pair of numbers, or neither.
+fn optional_pair(
+    q: &Params,
+    a: &'static str,
+    b: &'static str,
+) -> Result<Option<(f64, f64)>, ApiError> {
+    match (nonempty(q, a), nonempty(q, b)) {
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Ok(Some((num(q, a)?, num(q, b)?))),
+        _ => Err(bad(&format!("{a} and {b} must be given together"))),
+    }
+}
+
+fn short_text(q: &Params, key: &'static str) -> Result<Option<String>, ApiError> {
+    match nonempty(q, key) {
+        Some(v) if v.len() > MAX_FILTER_LEN => Err(bad(&format!("{key} is too long"))),
+        v => Ok(v.map(str::to_owned)),
+    }
+}
+
+/// Parses the `/api/inventory` filters into an [`InventoryQuery`]. Identity access is always
+/// [`IdentityAccess::Standard`]: no request parameter can grant the own-traffic authorisation.
+pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
+    let freq = match optional_pair(q, "f_lo", "f_hi")? {
+        None => None,
+        Some((lo, hi)) if lo >= 0.0 && hi > lo && hi <= 1e12 => Some(FreqRange::new(lo, hi)),
+        Some(_) => return Err(bad("need 0 <= f_lo < f_hi")),
+    };
+    let time = match optional_pair(q, "t0", "t1")? {
+        None => None,
+        Some((t0, t1)) if t1 >= t0 && t0 > -4e9 && t1 < 9e9 => Some(TimeRange::new(
+            Timestamp::from_unix_nanos((t0 * 1e9).round() as i64),
+            Timestamp::from_unix_nanos((t1 * 1e9).round() as i64),
+        )),
+        Some(_) => return Err(bad("need t0 <= t1 (Unix seconds)")),
+    };
+    let mut status = Vec::new();
+    for s in nonempty(q, "status").into_iter().flat_map(|v| v.split(',')) {
+        let parsed: KnownStatus = serde_json::from_value(Value::String(s.trim().to_owned()))
+            .map_err(|_| bad("status must be known, unexpected-here or unknown"))?;
+        if !status.contains(&parsed) {
+            status.push(parsed);
+        }
+    }
+    let identity_scheme = nonempty(q, "scheme")
+        .map(|s| s.parse::<IdentityScheme>())
+        .transpose()
+        .map_err(|_| bad("unknown identity scheme"))?;
+    let limit = count(q, "limit", DEFAULT_INVENTORY_LIMIT, MAX_API_INVENTORY_LIMIT)?;
+    let offset = match nonempty(q, "cursor") {
+        None => 0,
+        Some(c) => c
+            .parse::<u64>()
+            .ok()
+            .filter(|&o| o <= MAX_INVENTORY_CURSOR)
+            .ok_or_else(|| bad("invalid cursor"))?,
+    };
+    Ok(InventoryQuery {
+        freq,
+        time,
+        status,
+        tag: short_text(q, "tag")?,
+        identity_scheme,
+        family: short_text(q, "family")?,
+        limit: limit as u32,
+        offset,
+        access: IdentityAccess::Standard,
+    })
+}
+
+/// Authors whose status reasons are computed without an identity value (priors see family and
+/// frequency; the clusterer's reasons are fixed strings; classifiers see features). Reasons by
+/// any other author (decoder, user, system) are withheld on rows whose identity is withheld.
+fn reason_is_identity_free(author: StatusAuthor) -> bool {
+    matches!(
+        author,
+        StatusAuthor::Prior | StatusAuthor::Clusterer | StatusAuthor::Classifier
+    )
+}
+
+/// `/api/inventory`: one page of [`Repository::query_inventory`] (T-018), most recently seen
+/// first.
+///
+/// Each entry carries id, frequency extent, first/last seen, count, current known status (with
+/// its latest reason, author and prior reference), tags, family and latest classification, and the
+/// identity: `identity_scheme` and `identity_class` always, `identity_value` **only** when the
+/// query returned it in clear, and `withheld: true` when gating withheld it. On withheld rows a
+/// status reason written by an author that may have seen the identity is withheld too
+/// (`status.reason_withheld`). No decode content, fingerprint or link is included.
+pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> {
+    let query = parse_inventory_query(q)?;
+    let failed = |_| ApiError::new(500, "inventory query failed");
+    let page = repo.query_inventory(&query).map_err(failed)?;
+    let mut entries = Vec::with_capacity(page.entries.len());
+    for entry in &page.entries {
+        let e = &entry.emitter;
+        let (scheme, value, class, withheld) = match &entry.identity {
+            InventoryIdentity::None => (None, None, None, false),
+            InventoryIdentity::Clear { identity, class } => (
+                Some(identity.scheme.as_string()),
+                Some(identity.value.as_str()),
+                Some(*class),
+                false,
+            ),
+            InventoryIdentity::Withheld { scheme, class } => {
+                (Some(scheme.as_string()), None, *class, true)
+            }
+        };
+        let status = repo
+            .known_status_history(e.id)
+            .map_err(failed)?
+            .last()
+            .map(|c| {
+                let show = !withheld || reason_is_identity_free(c.author);
+                json!({
+                    "status": c.status,
+                    "author": c.author,
+                    "t_s": ts_s(c.t),
+                    "reason": show.then_some(c.reason.as_str()),
+                    "prior_ref": if show { c.prior_ref.as_deref() } else { None },
+                    "reason_withheld": !show,
+                })
+            });
+        let freq = e.freq();
+        let mut row = json!({
+            "id": e.id.to_string(),
+            "f_center_hz": e.f_center_hz,
+            "bandwidth_hz": e.bandwidth_hz,
+            "f_lo_hz": freq.lo_hz,
+            "f_hi_hz": freq.hi_hz,
+            "first_seen_s": ts_s(e.first_seen),
+            "last_seen_s": ts_s(e.last_seen),
+            "count": e.count,
+            "known_status": e.known_status,
+            "status": status,
+            "tags": e.tags,
+            "family": entry.family,
+            "classification": e.current_classification().map(|c| json!({
+                "family": c.family,
+                "confidence": c.confidence,
+                "open_set_score": c.open_set_score,
+                "model_version": c.model_version,
+                "t_s": ts_s(c.t),
+            })),
+            "classifications": e.classifications.len(),
+            "identity_scheme": scheme,
+            "identity_class": class,
+            "withheld": withheld,
+        });
+        if let Some(v) = value {
+            row["identity_value"] = json!(v);
+        }
+        entries.push(row);
+    }
+    Ok(json!({
+        "entries": entries,
+        "next_cursor": page
+            .next_offset
+            .filter(|&o| o <= MAX_INVENTORY_CURSOR)
+            .map(|o| o.to_string()),
+        "limit": query.limit,
+        "identity_access": "standard",
+    }))
 }
 
 #[cfg(test)]

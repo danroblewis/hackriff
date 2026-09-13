@@ -42,8 +42,8 @@ use hk_core::{Discontinuity, Pacing, ReplayOptions, SigmfReplaySource, Source};
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker};
 use hk_dsp::radiometry::PowerCalibrations;
 use hk_dsp::{InputInfo, PowerUnit, SpectrumFrame, StftConfig, StftProcessor, WelchConfig};
-use hk_model::ContentClass;
 use hk_model::sigmf::SigmfMeta;
+use hk_model::{ContentClass, Repository};
 use hk_store::{FloorProduct, FloorProductConfig};
 use num_complex::Complex32;
 
@@ -61,6 +61,9 @@ pub struct ServeOptions {
     pub replay: PathBuf,
     /// Floor product / history directory.
     pub history_dir: Option<PathBuf>,
+    /// Signal-inventory database (hk-model SQLite) served read-only at `/api/inventory`. The
+    /// replay does not write it yet (pipeline composition is T-027).
+    pub inventory_db: Option<PathBuf>,
     /// Listen address.
     pub bind: SocketAddr,
     /// Built UI directory.
@@ -286,11 +289,18 @@ pub fn run(opts: ServeOptions) -> anyhow::Result<()> {
         ))),
         None => None,
     };
+    let inventory = match &opts.inventory_db {
+        Some(path) => Some(Arc::new(Mutex::new(Repository::open(path).with_context(
+            || format!("opening the inventory database {}", path.display()),
+        )?))),
+        None => None,
+    };
     let registry = StreamRegistry::new();
     let state = ApiState {
         streams: registry.clone(),
         history: None,
         floor: floor.clone(),
+        inventory,
     };
     let mut config = ServerConfig::new(opts.bind, token.clone());
     config.ui_dist = opts.ui_dist.clone();

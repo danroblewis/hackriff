@@ -7,6 +7,7 @@
 //! | `/api/streams` | token | Offered streams: id, kind, class, geometry. Never content. |
 //! | `/api/history?f_lo&f_hi&t0&t1[&max_cells]` | token | T-017 region-over-time grid ([`crate::query`]) |
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | token | T-021 floor vs time ([`crate::query`]) |
+//! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
 //! | `/ws/<stream_id>` | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/`, `/<file>` | none | Static files from the UI build directory (code, no data) |
 //!
@@ -21,6 +22,9 @@
 //!   `127.0.0.1`). `0.0.0.0` exposes the API on every interface, e.g. the LAN or public Wi-Fi: the
 //!   token is then the only protection and travels in cleartext (no TLS in M0).
 //! - **Own-key content is never served**: every bridge consumer is `Locality::Remote`.
+//! - **Inventory identities are gated by the model**: `/api/inventory` reads only
+//!   `Repository::query_inventory` with the default `IdentityAccess::Standard` (no own-traffic
+//!   authorisation over HTTP), never the ungated emitter getters.
 //! - **Bounded resources.** At most `max_connections` connection threads; request heads are
 //!   limited to 16 KiB and must arrive within `request_timeout`; query results are capped.
 
@@ -32,6 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use hk_model::Repository;
 use hk_store::{FloorProduct, Pyramid};
 use hk_stream::StreamError;
 use serde_json::{Value, json};
@@ -84,6 +89,8 @@ pub struct ApiState {
     pub history: Option<Arc<Mutex<Pyramid>>>,
     /// Calibrated floor product for `/api/floor`.
     pub floor: Option<Arc<Mutex<FloorProduct>>>,
+    /// Signal inventory (C27, T-018) for `/api/inventory`. Read through `query_inventory` only.
+    pub inventory: Option<Arc<Mutex<Repository>>>,
 }
 
 struct Shared {
@@ -353,6 +360,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         "/api/streams" => Ok(state.streams.listing()),
         "/api/history" => history(state, &req),
         "/api/floor" => floor(state, &req),
+        "/api/inventory" => inventory(state, &req),
         p if p.starts_with("/api/") => Err(ApiError::new(404, "no such endpoint")),
         _ => return static_file(&mut stream, shared.config.ui_dist.as_deref(), &req.path),
     };
@@ -387,6 +395,17 @@ fn floor(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
         .lock()
         .map_err(|_| ApiError::new(500, "floor store poisoned"))?;
     query::floor_json(&f, &req.query)
+}
+
+fn inventory(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
+    let repo = state
+        .inventory
+        .as_ref()
+        .ok_or_else(|| ApiError::new(404, "no signal inventory on this server"))?;
+    let repo = repo
+        .lock()
+        .map_err(|_| ApiError::new(500, "inventory store poisoned"))?;
+    query::inventory_json(&repo, &req.query)
 }
 
 fn websocket(mut stream: TcpStream, shared: &Shared, req: &Request, stream_id: &str) {
