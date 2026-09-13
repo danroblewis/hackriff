@@ -103,6 +103,8 @@ fn sample_cal() -> CalibrationState {
             f_hz: 1090e6,
             gain_db: 44.0,
             offset_db: -71.5,
+            gain: None,
+            uncertainty_db: None,
         }],
     }
 }

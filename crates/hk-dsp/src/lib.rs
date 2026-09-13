@@ -34,6 +34,7 @@ pub mod floor;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod persistence;
+pub mod radiometry;
 pub mod sk;
 pub mod spectrum;
 pub mod stft;
