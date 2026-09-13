@@ -26,6 +26,7 @@
 //! runtime into its own binary.
 
 pub mod audio;
+pub mod bursts;
 pub mod client;
 pub mod frame;
 pub mod gate;

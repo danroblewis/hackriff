@@ -15,6 +15,8 @@
 //! - [`bridge`]: the WebSocket bridge, mapping one stream 1:1 to one browser WebSocket as a
 //!   `Locality::Remote` consumer (legal-guardrail path).
 //! - [`query`]: `/api/history` (T-017 region-over-time) and `/api/floor` (T-021 floor vs time).
+//! - [`tcp`]: the token-authenticated TCP stream server for external programs (T-060): one
+//!   handshake line, then the framed stream (or a refusal frame).
 //!
 //! # Threads, not tokio
 //! The server uses std threads and synchronous `tungstenite`, like `hk-stream`: the publisher
@@ -29,8 +31,10 @@ pub mod http;
 pub mod live_control;
 pub mod ondemand;
 pub mod query;
+pub mod tcp;
 
 pub use hk_stream as stream;
+pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};
 
 pub use auth::{Token, default_token_path};
 pub use bridge::{StreamInfo, StreamRegistry};

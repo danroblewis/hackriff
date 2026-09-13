@@ -7,7 +7,7 @@
 //!
 //! | Path | Method | Auth | Returns |
 //! |---|---|---|---|
-//! | `/api/streams` | GET | token | Offered streams: id, kind, class, geometry. Never content. |
+//! | `/api/streams` | GET | token | Discovery (T-060): offered streams (id, kind, class, geometry, format), on-demand openers, the TCP stream address. Never content. |
 //! | `/api/history?f_lo&f_hi&t0&t1[&max_cells]` | GET | token | T-017 region-over-time grid ([`crate::query`]) |
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | GET | token | T-021 floor vs time ([`crate::query`]) |
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
@@ -106,10 +106,12 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// Time allowed for a request head (and body) to arrive.
     pub request_timeout: Duration,
+    /// Address of the TCP stream server ([`crate::tcp`], T-060), reported by `/api/streams`.
+    pub stream_tcp: Option<SocketAddr>,
 }
 
 impl ServerConfig {
-    /// Defaults: 64 connections, 10 s request timeout, no static files.
+    /// Defaults: 64 connections, 10 s request timeout, no static files, no TCP stream server.
     pub fn new(bind: SocketAddr, token: Token) -> Self {
         Self {
             bind,
@@ -117,6 +119,7 @@ impl ServerConfig {
             ui_dist: None,
             max_connections: 64,
             request_timeout: Duration::from_secs(10),
+            stream_tcp: None,
         }
     }
 }
@@ -162,6 +165,7 @@ pub struct Server {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    stream_server: Option<crate::tcp::StreamServer>,
 }
 
 impl Server {
@@ -183,12 +187,23 @@ impl Server {
             addr,
             stop,
             thread: Some(thread),
+            stream_server: None,
         })
     }
 
     /// The bound address (useful with port 0).
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Keeps a TCP stream server ([`crate::tcp`]) alive for as long as this server.
+    pub fn attach_stream_server(&mut self, server: crate::tcp::StreamServer) {
+        self.stream_server = Some(server);
+    }
+
+    /// The attached TCP stream server.
+    pub fn stream_server(&self) -> Option<&crate::tcp::StreamServer> {
+        self.stream_server.as_ref()
     }
 
     /// Stops accepting and joins the accept thread.
@@ -387,7 +402,7 @@ fn parse_request(head: &[u8]) -> Result<Request, u16> {
     })
 }
 
-fn parse_query(q: &str) -> Option<Vec<(String, String)>> {
+pub(crate) fn parse_query(q: &str) -> Option<Vec<(String, String)>> {
     q.split('&')
         .filter(|kv| !kv.is_empty())
         .map(|kv| {
@@ -400,7 +415,7 @@ fn parse_query(q: &str) -> Option<Vec<(String, String)>> {
         .collect()
 }
 
-fn percent_decode(s: &str) -> Option<String> {
+pub(crate) fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -596,7 +611,11 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
                 "Allow: GET\r\n",
             );
         }
-        "/api/streams" => Ok(state.streams.listing()),
+        "/api/streams" => Ok(bridge::discovery_json(
+            &state.streams,
+            &state.on_demand,
+            shared.config.stream_tcp,
+        )),
         "/api/history" => history(state, &req),
         "/api/floor" => floor(state, &req),
         "/api/inventory" => inventory(state, &req),

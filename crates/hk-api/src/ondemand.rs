@@ -77,7 +77,7 @@ fn refuse(mut stream: TcpStream, handshake: &[u8], refusal: &OpenRefusal) {
     let _ = ws.get_mut().shutdown(Shutdown::Both);
 }
 
-fn attach_refusal(e: &StreamError) -> OpenRefusal {
+pub(crate) fn attach_refusal(e: &StreamError) -> OpenRefusal {
     match e {
         StreamError::LocalOnly { class } => OpenRefusal::gated(
             *class,

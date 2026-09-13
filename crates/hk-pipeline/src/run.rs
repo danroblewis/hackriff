@@ -475,6 +475,8 @@ pub(crate) struct Shared {
     pub display: Arc<DisplayControl>,
     /// The run continues in a new segment after this one: history is not sealed at its end.
     pub continues: AtomicBool,
+    /// Burst taps of the run (T-060).
+    pub bursts: Arc<crate::chains::taps::BurstHub>,
 }
 
 impl Shared {
@@ -599,6 +601,8 @@ struct Common {
     user_stop: AtomicBool,
     recorder: Mutex<Option<ManualRecorder>>,
     last_recording: Mutex<RecordingStatus>,
+    /// Burst taps (T-060), closed when the run ends.
+    bursts: Arc<crate::chains::taps::BurstHub>,
 }
 
 impl Common {
@@ -716,6 +720,7 @@ impl Pipeline {
             user_stop: AtomicBool::new(false),
             recorder: Mutex::new(None),
             last_recording: Mutex::new(RecordingStatus::default()),
+            bursts: Arc::default(),
         };
         let class = cfg.source_class;
         let window = (info.center_hz, info.sample_rate_hz);
@@ -744,7 +749,12 @@ impl Pipeline {
         let s = Arc::clone(&sup);
         let thread = thread::Builder::new()
             .name("hk-supervisor".into())
-            .spawn(move || supervise(&s, workers))?;
+            .spawn(move || {
+                let finished = supervise(&s, workers);
+                // The run is over: burst taps finish their streams.
+                s.common.bursts.close();
+                finished
+            })?;
         Ok(PipelineHandle {
             sup,
             thread: Some(thread),
@@ -818,6 +828,7 @@ fn start_segment(
         specs,
         display: Arc::clone(&common.display),
         continues: AtomicBool::new(false),
+        bursts: Arc::clone(&common.bursts),
         cfg,
     });
     inc(&common.stats.segments);
@@ -1519,6 +1530,29 @@ impl PipelineHandle {
     pub fn listen_service(&self) -> Arc<crate::chains::listen::ListenManager> {
         let sup = Arc::clone(&self.sup);
         Arc::new(crate::chains::listen::ListenManager::new(
+            Arc::clone(&self.sup.common.counters),
+            Arc::new(move || sup.lock().shared.clone()),
+        ))
+    }
+
+    /// Burst bits taps (T-060): an opener streaming the hard bits of demodulated bursts.
+    pub fn bits_service(&self) -> Arc<crate::chains::taps::BurstTapOpener> {
+        self.tap_service(crate::chains::taps::TapKind::Bits)
+    }
+
+    /// Burst symbols taps (T-060): an opener streaming the soft symbols of demodulated bursts.
+    pub fn symbols_service(&self) -> Arc<crate::chains::taps::BurstTapOpener> {
+        self.tap_service(crate::chains::taps::TapKind::Symbols)
+    }
+
+    fn tap_service(
+        &self,
+        kind: crate::chains::taps::TapKind,
+    ) -> Arc<crate::chains::taps::BurstTapOpener> {
+        let sup = Arc::clone(&self.sup);
+        Arc::new(crate::chains::taps::BurstTapOpener::new(
+            kind,
+            Arc::clone(&self.sup.common.bursts),
             Arc::clone(&self.sup.common.counters),
             Arc::new(move || sup.lock().shared.clone()),
         ))

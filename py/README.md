@@ -13,6 +13,35 @@ uv run pytest       # run the tooling tests (also `just test-py` from the repo r
 - `hkpy/synth/` generates labelled synthetic IQ (below). The Rust harness `tests/e2e` calls it.
 - `py/fixtures/` holds the fixture tooling (`trim.py`, `annotate.py`, `verify.py`, `fetch.py`, `build_2026_09_13.py`, reference decoders `rds_ref.py`/`fsk_ref.py`); recipes `just fixtures-verify [--external]`, `just fixtures-fetch`, `just fixtures-build-2026-09-13` (see `fixtures/README.md`).
 
+## Stream clients (`py/examples/`, T-060)
+
+External programs read demodulated outputs (burst bits, soft symbols, Listen audio, and every
+always-on stream) from `hk serve`'s token-authenticated TCP stream server (loopback port 8788 by
+default, `HK_STREAM_TCP=<addr>` to change it; the address is printed at start and listed by
+`GET /api/streams`). The examples use the standard library only; the wire format is
+`docs/stream-contract.md` §13.
+
+```sh
+# netcat: one handshake line, then the framed stream (here hex-dumped)
+printf 'open/bits?token=%s\n' "$HK_TOKEN" | nc 127.0.0.1 8788 | xxd | head -40
+# socat half-closes on stdin EOF, which ends the stream: keep it open with -t
+printf 'open/bits?token=%s\n' "$HK_TOKEN" | socat -t 86400 - TCP:127.0.0.1:8788 > bursts.hkstream
+
+python3 py/examples/hk_bits.py --port 8788                    # print decoded bursts (HK_TOKEN)
+python3 py/examples/hk_bits.py --symbols --emitter <id>       # soft symbols of one emitter
+python3 py/examples/hk_bits.py --file bursts.hkstream         # parse a netcat dump
+python3 py/examples/hk_audio_wav.py --emitter <id> --seconds 10 --out station.wav
+```
+
+- `hkstream.py` is the reusable parser: frames, header (or a refusal frame), binary records,
+  status records, drop markers, `connect()` and `pack_bits()`.
+- `hk_bits.py` pairs each burst's status record (sync and payload offsets, bit order, CRC,
+  emitter) with its data record and prints the payload bytes.
+- `hk_audio_wav.py` writes 48 kHz mono 16-bit WAV, filling `sample_index` gaps with silence.
+- `tests/test_stream_examples.py` runs the parser on `tests/data/t060_fsk_bits.hkstream`, bytes read
+  over TCP from the mock-SDR e2e test (regenerate with `HK_T060_CAPTURE=<path> cargo test -p
+  hk-e2e --test stream_external`).
+
 ## Synthetic IQ generator (`hkpy.synth`)
 
 ```sh

@@ -55,6 +55,7 @@ pub use chains::listen::{ListenConfig, ListenManager, listen_class};
 pub use chains::spec::{
     ChainShape, ChainSpec, FmRegion, NodeSpec, Trigger, builtin_chains, builtin_chains_for,
 };
+pub use chains::taps::{BurstHub, BurstTapOpener, TapKind};
 pub use class::{ClassRule, classify_emitter, source_class};
 pub use config::{
     DISPLAY_AVERAGING_MAX, DISPLAY_FFT_MAX, DISPLAY_FFT_MIN, DISPLAY_ROWS_MAX, DISPLAY_ROWS_MIN,

@@ -134,6 +134,13 @@ impl std::fmt::Display for OpenRefusal {
 pub trait StreamOpener: Send + Sync {
     /// Opens a stream for `request`.
     fn open(&self, request: &OpenRequest) -> Result<OpenedStream, OpenRefusal>;
+
+    /// What discovery reports about this opener (T-060): a JSON object such as
+    /// `{"kind": "bits", "datatype": "ru8", "params": [...]}`. Metadata only; the default is
+    /// empty.
+    fn describe(&self) -> Value {
+        json!({})
+    }
 }
 
 /// Openers by name (the `<name>` of `/ws/open/<name>`).
