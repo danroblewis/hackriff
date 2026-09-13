@@ -10,12 +10,14 @@
 //!    (N 32 = 16/side, G 4/side, k 24); `α` numeric for `Gamma(n)` order statistics ([`alpha`]);
 //!    `T = Q⁻¹(n, pfa)/n`; 3 dB guard on the OS branch only. The off thresholds come from their
 //!    own Pfa (1e-3), never a fixed −3 dB. `F` is the floor reference
-//!    ([`FloorReference`]: per-frame FCME by default; the wide-signal reference once T-005's fix
-//!    lands). `n` is [`FloorFrame::n_avg_effective`](hk_dsp::floor::FloorFrame). Branches are per
-//!    profile ([`DetectionProfile::branches`]), so a band can run OS-only.
-//! 2. **Floor-step guard** ([`step`]): within a block of a persistent > 6 dB block-floor jump (a
-//!    notch or filter edge, where block FCME is biased) or a configured response edge, the floor
-//!    branch is off and the OS branch alone detects.
+//!    ([`FloorReference`]: per-frame FCME by default; the wide-signal reference optionally). `n` is
+//!    [`FloorFrame::n_avg_effective`](hk_dsp::floor::FloorFrame). Branches are per profile
+//!    ([`DetectionProfile::branches`]), so a band can run OS-only.
+//! 2. **Floor-step guard** ([`step`]): within a block of a persistent > 6 dB block-floor jump that
+//!    bounds no signal-like plateau (a notch, filter edge or staircase, where block FCME is biased)
+//!    or a configured response edge, the floor branch leaves the per-frame reference: it runs on
+//!    the shape-normalised wide reference where the learned shape explains the step, and is off
+//!    (OS branch alone) otherwise.
 //! 3. **Components** ([`components`]): 4-connected time–frequency components of the raw region
 //!    that contain a seed and span ≥ 3 frames are kept; kept components then merge across ≤ 2-frame
 //!    gaps. No frequency merge. Streamed, so a box is emitted `gap + 1` frames after it ends.
@@ -88,7 +90,7 @@ pub use record::{
     ImageEvidence,
 };
 pub use rules::Geometry;
-pub use step::{StepGuard, StepGuardConfig};
+pub use step::{ShapeView, StepGuard, StepGuardConfig};
 pub use trust::{
     CaptureEmitter, CaptureResult, CaptureSide, GainState, GainStepConfig, GainStepResult,
     GainStepRow, GainStepSkip, GainStepVerdict, RetuneConfig, RetuneLabel, RetuneResult, RetuneRow,

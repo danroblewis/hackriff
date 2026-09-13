@@ -22,7 +22,7 @@ use crate::record::{
     ImageEvidence,
 };
 use crate::rules::{Geometry, Pearson, edge_hit, spur_decision};
-use crate::step::StepGuard;
+use crate::step::{ShapeView, StepGuard};
 use crate::trust::{CaptureEmitter, CaptureResult, GainState};
 
 /// Nominal HackRF One RX amp gain used for `total_gain_db` (S4: not verified on this unit).
@@ -78,8 +78,11 @@ pub struct DetectorStats {
     pub dense_frames: u64,
     /// Runs dropped at `max_live_components`.
     pub dropped_runs: u64,
-    /// Frames in which the floor-step guard switched the floor branch off somewhere.
+    /// Frames in which the floor-step guard moved the floor branch off the per-frame reference
+    /// somewhere (to the wide reference or off).
     pub guarded_frames: u64,
+    /// Frames in which some guarded bins ran the floor branch on the wide reference.
+    pub wide_guarded_frames: u64,
     /// Frames whose block floors did not match the step guard's layout (guard inactive).
     pub step_guard_unavailable: u64,
 }
@@ -133,6 +136,11 @@ pub struct Detector {
     codes: Vec<u8>,
     labeler: Labeler,
     step: Option<StepGuard>,
+    /// The last frame's floor reference as the floor branch used it (wide in guarded zones).
+    eff_floor: Vec<f32>,
+    /// The last frame's floor-branch mask (per-frame or wide reference).
+    floor_ok: Vec<bool>,
+    guard_active: bool,
     integrated: IntegratedSpectrum,
     comb: CombFinder,
     seg: Option<SegmentInfo>,
@@ -162,6 +170,9 @@ impl Detector {
             codes: Vec::new(),
             labeler: Labeler::new(0, config.profile.gap_frames),
             step: config.step_guard.map(StepGuard::new),
+            eff_floor: Vec::new(),
+            floor_ok: Vec::new(),
+            guard_active: false,
             integrated: IntegratedSpectrum::new(config.integration, config.rules.comb.max_lines),
             comb: CombFinder::new(config.rules.comb),
             seg: None,
@@ -208,9 +219,22 @@ impl Detector {
         &self.codes
     }
 
-    /// Where the floor branch was allowed in the last frame (`None` without a step guard).
+    /// Where the floor branch ran in the last frame, on either reference (`None` when no step
+    /// guard was active: everywhere).
     pub fn floor_branch_mask(&self) -> Option<&[bool]> {
-        self.step.as_ref().map(StepGuard::mask)
+        self.guard_active.then_some(self.floor_ok.as_slice())
+    }
+
+    /// The floor reference of the last frame as the floor branch and the OS guard used it: the
+    /// configured [`FloorReference`], with the wide reference in guarded zones where the step
+    /// guard allows it.
+    pub fn floor_branch_reference(&self) -> &[f32] {
+        &self.eff_floor
+    }
+
+    /// The floor-step guard (its per-frame and wide masks are those of the last frame).
+    pub fn step_guard(&self) -> Option<&StepGuard> {
+        self.step.as_ref()
     }
 
     /// Classification counts of the last frame.
@@ -329,26 +353,47 @@ impl Detector {
             FloorReference::PerFrame => &floor.floor,
             FloorReference::Wide => &floor.wide_floor,
         };
+        self.eff_floor.copy_from_slice(reference);
+        self.guard_active = false;
         if floor.valid {
-            let mask = match &mut self.step {
-                Some(g) if branches != Branches::OsOnly => {
-                    g.update(
-                        &floor.block_floor,
-                        &geometry,
-                        &self.config.response_edges_hz,
-                    );
-                    self.stats.guarded_frames += u64::from(g.guarded_bins() > 0);
-                    self.stats.step_guard_unavailable += u64::from(!g.available());
-                    Some(g.mask())
+            if let Some(g) = &mut self.step
+                && branches != Branches::OsOnly
+            {
+                // The shape is trusted from the tracker's `wide_min_frames`-th segment frame.
+                let shape =
+                    (floor.frames_in_segment >= g.config().wide_min_frames).then_some(ShapeView {
+                        shape: &floor.shape,
+                        floor: &floor.floor,
+                    });
+                g.update(
+                    &floor.block_floor,
+                    &geometry,
+                    &self.config.response_edges_hz,
+                    shape,
+                );
+                self.stats.guarded_frames += u64::from(g.guarded_bins() > 0);
+                self.stats.wide_guarded_frames += u64::from(g.wide_bins() > 0);
+                self.stats.step_guard_unavailable += u64::from(!g.available());
+                for (((ok, eff), (&m, &w)), &wf) in self
+                    .floor_ok
+                    .iter_mut()
+                    .zip(self.eff_floor.iter_mut())
+                    .zip(g.mask().iter().zip(g.wide_mask()))
+                    .zip(&floor.wide_floor)
+                {
+                    *ok = m || w;
+                    if w {
+                        *eff = wf;
+                    }
                 }
-                _ => None,
-            };
+                self.guard_active = true;
+            }
             self.last_classify = self.cfar.classify(
                 &spec.psd,
-                reference,
+                &self.eff_floor,
                 &thresholds,
                 branches,
-                mask,
+                self.guard_active.then_some(self.floor_ok.as_slice()),
                 &mut self.codes,
             );
             if !floor.impulsive
@@ -376,7 +421,7 @@ impl Detector {
             start,
             end,
             psd: &spec.psd,
-            floor: reference,
+            floor: &self.eff_floor,
             sk: &spec.sk,
             codes: &self.codes,
             bin_width_hz: geometry.bin_width_hz,
@@ -466,6 +511,9 @@ impl Detector {
         if let Some(g) = &mut self.step {
             g.reset(bins);
         }
+        self.eff_floor.resize(bins, 0.0);
+        self.floor_ok.resize(bins, true);
+        self.guard_active = false;
         self.integrated
             .configure(bins, frame_period_s, self.stats.segments);
         self.in_impulsive = false;
