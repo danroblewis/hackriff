@@ -334,9 +334,11 @@ name = "hk-dsp"
 version = "0.1.0"
 dependencies = [
  "hk-core",
+ "hk-e2e",
  "hk-model",
  "num-complex",
  "rustfft",
+ "serde",
  "serde_json",
 ]
 
