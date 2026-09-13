@@ -371,3 +371,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Merges held:** code merges other than T-063 wait until main is green again.
   - **Risk note for the user:** a demo built from main at or after c5f77e3 that is retuned into a restricted band via the control API may expose FSK bitstreams under the wrong class until T-063 lands. Other verification on the rerun was green up to that point (112 test groups).
 - **B0.127 Main at ad4976e (isolated target):** Python 50 passed, UI tests green, acceptance 16/16, and 136 Rust test groups green. The only failure is `retune_legal` (T-063 in progress). T-049's merge waits for T-049 to finish merging main and for T-063.
+- **B0.128 User steer (message start truncated):** keep going autonomously on features, in this priority set:
+  - Listen (T-043)
+  - control panel (T-051, then T-052)
+  - outputs (T-060 streams, T-061 recording)
+  - mock SDR (T-049, then T-047/T-053)
+  - detection quality (T-058 throughput; next: T-038 follow-ups on IQ-level structured-vs-noise evidence, WFM fragment-track merging, live-data false alarms).
+  Six agents are running (over the ~4 Rust-build cap), so new detection-quality work launches as slots free up.
