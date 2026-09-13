@@ -260,10 +260,10 @@ fn aware_036_fsk_synthetic_bits_framing_crc_and_records() {
             d.frame_model
         );
         if d.crc_status == CrcStatus::Valid {
+            // `payload_hex` is lowercase, like the generator's truth (T-037b).
             let hex = d.content.as_ref().expect("content")["payload_hex"]
                 .as_str()
-                .unwrap()
-                .to_lowercase();
+                .unwrap();
             assert_eq!(
                 hex,
                 truths[i].value["frame"]["payload_hex"].as_str().unwrap()

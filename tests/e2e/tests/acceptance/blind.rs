@@ -6,7 +6,9 @@
 //! Test shape:
 //! 1. [`private_truth`] loads the fixture's truth, which only the test holds.
 //! 2. [`blind_replay`] strips the truth (`hk_e2e::blind::strip_truth`), optionally relabels or
-//!    IQ-shifts the recording, runs the pipeline, and serves `/api/inventory`.
+//!    IQ-shifts the recording, runs the pipeline, and serves `/api/inventory`. A test that taps
+//!    streams or sets a plan extra starts from [`blind_config`] instead (T-037b), which does the
+//!    same stripping and returns the configuration before the run starts.
 //! 3. The test matches everything produced against its private truth
 //!    (`hk_e2e::blind::matching`), never looking a frequency up in the database.
 
@@ -15,6 +17,7 @@ use std::path::{Path, PathBuf};
 use hk_e2e::Fixture;
 use hk_e2e::blind::{shift_ci8, strip_truth};
 use hk_model::sigmf::SigmfMeta;
+use hk_pipeline::{PipelineConfig, Replay};
 use serde_json::json;
 
 use crate::common::*;
@@ -48,6 +51,18 @@ fn plan_extra(source: &BlindSource) -> serde_json::Value {
     json!({ "pipeline": { "chains": chains } })
 }
 
+/// Deep-merges `extra` into `base`: objects merge key by key, anything else replaces.
+fn merge_json(base: &mut serde_json::Value, extra: serde_json::Value) {
+    match (base, extra) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(e)) => {
+            for (k, v) in e {
+                merge_json(b.entry(k).or_insert(serde_json::Value::Null), v);
+            }
+        }
+        (b, e) => *b = e,
+    }
+}
+
 /// A finished blind run.
 pub struct BlindRun {
     /// Data directory (SQLite, tiles).
@@ -59,6 +74,18 @@ pub struct BlindRun {
     _src: TempDir,
 }
 
+/// A blind run's configuration before it starts.
+pub struct BlindConfig {
+    /// Data directory (SQLite, tiles).
+    pub dir: TempDir,
+    /// `hk replay`'s configuration over the truth-stripped copy.
+    pub cfg: PipelineConfig,
+    /// The opened truth-stripped replay.
+    pub replay: Replay,
+    /// The stripped copy; keep it until the run has finished.
+    pub src: TempDir,
+}
+
 /// The fixture's meta path and the truth only the test sees; `None` skips.
 pub fn private_truth(name: &str) -> Option<(PathBuf, Fixture)> {
     let meta = real_fixture(name)?;
@@ -66,8 +93,14 @@ pub fn private_truth(name: &str) -> Option<(PathBuf, Fixture)> {
     Some((meta, fixture))
 }
 
-/// Replays `meta` with its truth stripped.
-pub fn blind_replay(meta: &Path, tag: &str, source: BlindSource) -> BlindRun {
+/// Strips `meta`'s truth and configures an unpaced replay of it with `extra` as the plan's
+/// `extra`.
+pub fn blind_config(
+    meta: &Path,
+    tag: &str,
+    source: BlindSource,
+    extra: serde_json::Value,
+) -> BlindConfig {
     let src = TempDir::new(&format!("{tag}src"));
     if source.iq_shift_hz != 0.0 {
         let fs = SigmfMeta::read(meta).unwrap().global.sample_rate.unwrap();
@@ -88,12 +121,25 @@ pub fn blind_replay(meta: &Path, tag: &str, source: BlindSource) -> BlindRun {
         m.write(&blind).unwrap();
     }
     let dir = TempDir::new(tag);
-    let (cfg, replay) = replay_config(
-        &dir.0,
-        &blind,
-        plan_extra(&source),
-        hk_core::Pacing::Unpaced,
-    );
+    let mut plan = plan_extra(&source);
+    merge_json(&mut plan, extra);
+    let (cfg, replay) = replay_config(&dir.0, &blind, plan, hk_core::Pacing::Unpaced);
+    BlindConfig {
+        dir,
+        cfg,
+        replay,
+        src,
+    }
+}
+
+/// Replays `meta` with its truth stripped.
+pub fn blind_replay(meta: &Path, tag: &str, source: BlindSource) -> BlindRun {
+    let BlindConfig {
+        dir,
+        cfg,
+        replay,
+        src,
+    } = blind_config(meta, tag, source, json!({}));
     let handle = start(cfg, replay);
     let counters = handle.counters();
     let summary = finish(handle);

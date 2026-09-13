@@ -70,11 +70,15 @@ pub struct Stored {
     pub content_gated: bool,
 }
 
+/// Emitters [`Ingest::emitters`] remembers.
+const MAX_TRACKED_EMITTERS: usize = 4096;
+
 /// The shared sink for every plugin instance (wrap in `Arc<Mutex<_>>`).
 pub struct Ingest {
     repo: Repository,
     republish: Option<Publisher>,
     stats: IngestStats,
+    emitters: Vec<EmitterId>,
 }
 
 impl Ingest {
@@ -84,7 +88,15 @@ impl Ingest {
             repo,
             republish: None,
             stats: IngestStats::default(),
+            emitters: Vec::new(),
         }
+    }
+
+    /// The emitters the stored decodes' identity sightings resolved to, in first-seen order (at
+    /// most 4096), so a caller can add the plugin's service family to them (T-037b). Ids only:
+    /// identities stay gated by their decodes' class.
+    pub fn emitters(&self) -> &[EmitterId] {
+        &self.emitters
     }
 
     /// Stores into `repo` and republishes each stored row on a messages-stream `publisher`.
@@ -206,6 +218,11 @@ impl Ingest {
         match self.repo.record_sighting(&sighting, None) {
             Ok(r) => {
                 self.stats.emitters_upserted += 1;
+                if !self.emitters.contains(&r.emitter_id)
+                    && self.emitters.len() < MAX_TRACKED_EMITTERS
+                {
+                    self.emitters.push(r.emitter_id);
+                }
                 if r.conflict.is_some() {
                     self.stats.identity_conflicts += 1;
                 }

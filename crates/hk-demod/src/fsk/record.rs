@@ -299,7 +299,10 @@ pub fn write_framed_bursts(
         let content = if class.permits_content() && content_ok {
             result.payload(i, burst.bits()).map(|p| {
                 json!({
-                    "payload_hex": bits::hex(&p.bits[..p.bits.len() / 8 * 8], p.bit_order),
+                    // Lowercase hex (T-037b): the one `payload_hex` convention, as the synthetic
+                    // generators' truth and the other hex identities (ICAO, hashes) are written.
+                    "payload_hex": bits::hex(&p.bits[..p.bits.len() / 8 * 8], p.bit_order)
+                        .map(|h| h.to_ascii_lowercase()),
                     "payload_bits": bits::bit_string(&p.bits),
                     "bit_order": p.bit_order,
                 })

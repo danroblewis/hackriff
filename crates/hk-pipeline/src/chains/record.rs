@@ -44,17 +44,6 @@ pub fn iso8601(t: Timestamp) -> String {
     )
 }
 
-pub(crate) fn run(
-    shared: Arc<Shared>,
-    trigger_sample: u64,
-    pre_s: f64,
-    post_s: f64,
-    trigger: RecordingTrigger,
-    label: String,
-) {
-    run_claimed(shared, None, trigger_sample, pre_s, post_s, trigger, label);
-}
-
 /// Claims the recording window's samples in the flow gate now (before the caller releases its
 /// own claim), for a recording started on another thread with [`run_claimed`].
 pub(crate) fn claim(shared: &Shared, trigger_sample: u64, pre_s: f64) -> GateCursor {
@@ -168,14 +157,16 @@ fn run_inner(
     meta.captures = captures;
     meta.write(&meta_path)
         .map_err(|e| anyhow::anyhow!("writing {}: {e}", meta_path.display()))?;
-    // The trigger detection is written by the detection reader's next batched flush; wait for
-    // its row (the Recording references it).
-    if let RecordingTrigger::Detection(d) = trigger {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while shared.repo().detection(d).is_err() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
+    // The trigger detection is stored by the detection writer thread, possibly later; wait for its
+    // row (the Recording references it). One never stored makes this a scheduler-triggered
+    // recording, counted in `detection_ref_missing`, never a row refused by the foreign key.
+    let trigger = match trigger {
+        RecordingTrigger::Detection(d) => match super::stored_detection(shared, Some(d)) {
+            Some(d) => RecordingTrigger::Detection(d),
+            None => RecordingTrigger::Scheduler,
+        },
+        other => other,
+    };
     let mut repo = shared.repo();
     let provenance_ref = repo.intern_provenance(prov.get())?;
     let rec = Recording {

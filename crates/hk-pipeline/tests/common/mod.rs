@@ -131,6 +131,27 @@ pub fn real_fixture(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// A copy of `meta` with its annotations (the ground truth) removed, next to a link to its data,
+/// in `dir`: the pipeline replays it blind while the test keeps the original's truth.
+pub fn blind_meta(meta: &Path, dir: &Path) -> PathBuf {
+    // The T-039 harness's stripping (annotations and description removed, data linked).
+    hk_e2e::blind::strip_truth(meta, dir, "blind", 0.0).unwrap()
+}
+
+/// The one replay entry point of the tests below: [`replay_config`] over a blind copy of `meta`
+/// (annotations stripped, [`blind_meta`]) kept in the returned [`TempDir`].
+pub fn blind_replay_config(
+    dir: &Path,
+    meta: &Path,
+    extra: serde_json::Value,
+    pacing: Pacing,
+) -> (PipelineConfig, Replay, TempDir) {
+    let input = TempDir::new("blind-input");
+    let blind = blind_meta(meta, &input.0);
+    let (cfg, replay) = replay_config(dir, &blind, extra, pacing);
+    (cfg, replay, input)
+}
+
 /// An unpaced, lossless replay configuration with `extra` as the plan's `extra`.
 pub fn replay_config(
     dir: &Path,

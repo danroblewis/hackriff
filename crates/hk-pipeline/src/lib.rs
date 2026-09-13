@@ -48,8 +48,11 @@ mod detect;
 mod history;
 mod run;
 mod spectrum;
+mod verify;
 
-pub use chains::spec::{ChainShape, ChainSpec, NodeSpec, Trigger, builtin_chains};
+pub use chains::spec::{
+    ChainShape, ChainSpec, FmRegion, NodeSpec, Trigger, builtin_chains, builtin_chains_for,
+};
 pub use class::{ClassRule, classify_emitter, source_class};
 pub use config::{
     PipelineConfig, PipelineSettings, StreamSink, detection_resolution, load_calibrations,

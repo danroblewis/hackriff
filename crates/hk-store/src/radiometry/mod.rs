@@ -68,8 +68,11 @@
 //! version). The state log is not pruned with the pyramid budget. The region should exclude the
 //! baseband roll-off at the span edges.
 
+mod ingest_queue;
 mod product;
 pub mod runs;
+
+pub use ingest_queue::{FloorIngestQueue, IngestQueueStats, QueuedIngest};
 
 pub use hk_dsp::radiometry::FloorFlags;
 pub use product::{

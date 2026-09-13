@@ -12,8 +12,13 @@
 //! - **Format conversion.** The channel carries `ci8` (signed, HackRF-native); readsb's `ifile`
 //!   reader wants `UC8` (offset-binary unsigned). Each byte is XORed with `0x80`
 //!   (`ci8 -> uc8` is exactly a 128-count offset, i.e. sign-bit flip) and forwarded to a writer
-//!   thread that owns readsb's stdin — no full-buffer copy, so capture is never blocked on
-//!   readsb's pace.
+//!   thread that owns readsb's stdin.
+//! - **Backpressure (T-037b).** The hand-off to the writer thread is bounded
+//!   ([`WRITER_BACKLOG_CHUNKS`] records). When readsb falls behind, this wrapper stops reading
+//!   its own stdin, so the plugin host's bounded input queue (the manifest's
+//!   `input_queue_bytes`) fills instead of this process's memory: a live chain then drops and
+//!   counts records at the host, and a lossless replay waits for queue room there (the pipeline's
+//!   plugin chain), so a long unpaced recording no longer overflows the queue.
 //! - **readsb invocation.** `--device-type ifile --ifile - --iformat UC8 --no-interactive --raw
 //!   --no-fix`. **`--no-fix` is the only guard against repaired-but-wrong frames**: with `--fix`
 //!   (readsb's default) it single-bit-corrects a frame and prints it with a CRC that now checks
@@ -28,12 +33,14 @@
 //!   Other downlink formats carry the ICAO folded into the parity field (address/parity XOR) and
 //!   are out of scope for this wrapper.
 //! - **Timestamps.** `sample_index` on every emitted decode line is the index of the *last*
-//!   sample in the most recently written input record — the fallback docs/stream-contract.md
-//!   §9.6 anticipated, since raw AVR output carries no correlatable position in the input stream.
-//!   The latency between a sample being fed and its message being read back is **tens to hundreds
-//!   of milliseconds**, not "about one block": readsb buffers a full `--sdr-buffer-size` block
-//!   (128 KiB default, ~27 ms of samples) before its demodulator even sees it, on top of ordinary
-//!   pipe/FIFO buffering on both sides of this wrapper.
+//!   sample of the most recent input record **written to readsb's stdin** (set by the writer
+//!   thread after the write, T-037b) — the fallback docs/stream-contract.md §9.6 anticipated,
+//!   since raw AVR output carries no correlatable position in the input stream. It is an upper
+//!   bound on the message's true position: stamping at hand-off (as before) also counted the
+//!   unbounded hand-off backlog, which in an unpaced replay could run seconds ahead. What remains
+//!   is readsb's own buffering: a full `--sdr-buffer-size` block (128 KiB default, ~27 ms of
+//!   samples at 2.4 Msps) plus the stdin pipe buffer (64 KiB on macOS/Linux, ~13 ms), so decodes
+//!   stamp at most about 40 ms late (unverified against readsb's internal block alignment).
 //! - **Crash and stall isolation.** readsb runs as an ordinary child (not detached), inside this
 //!   process's own process group, which the plugin host already owns and can SIGKILL as a whole
 //!   (`kill_group` in `host.rs`). Three independent watchers can end this wrapper non-zero so the
@@ -91,6 +98,9 @@ const CPR_PAIR_WINDOW_S: f64 = 10.0;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 /// Keepalive chunk size (`uc8` mid-scale, i.e. `ci8` zero after this wrapper's XOR conversion).
 const KEEPALIVE_CHUNK_BYTES: usize = 16_384;
+/// Converted input records the writer thread may have queued before this wrapper stops reading
+/// its stdin (see the module doc's "Backpressure").
+const WRITER_BACKLOG_CHUNKS: usize = 16;
 
 /// Path to the real `readsb` binary; overridable for tests that pin a specific build.
 fn readsb_path() -> String {
@@ -450,19 +460,26 @@ fn spawn_readsb(extra_args: &[String]) -> io::Result<Child> {
         .spawn()
 }
 
-/// Owns readsb's stdin. Forwards real chunks from `rx` (already `ci8 -> uc8` converted), and
-/// sends a small keepalive chunk instead whenever `rx` has gone `KEEPALIVE_INTERVAL` with
-/// nothing (see the module doc). Exits this process if a write ever fails: readsb's read end is
-/// gone, which means readsb died. Returns normally only on a clean shutdown (`rx` disconnected:
-/// the main thread finished forwarding and dropped its sender), closing readsb's stdin so it can
-/// flush its last partial input block and exit on its own EOF path.
-fn feed_readsb(mut readsb_stdin: impl Write, rx: mpsc::Receiver<Vec<u8>>) {
+/// Owns readsb's stdin. Forwards real chunks from `rx` (already `ci8 -> uc8` converted, each with
+/// the index of its last sample, which is published to `last_sample_index` once the chunk is
+/// written), and sends a small keepalive chunk instead whenever `rx` has gone
+/// `KEEPALIVE_INTERVAL` with nothing (see the module doc). Exits this process if a write ever
+/// fails: readsb's read end is gone, which means readsb died. Returns normally only on a clean
+/// shutdown (`rx` disconnected: the main thread finished forwarding and dropped its sender),
+/// closing readsb's stdin so it can flush its last partial input block and exit on its own EOF
+/// path.
+fn feed_readsb(
+    mut readsb_stdin: impl Write,
+    rx: mpsc::Receiver<(Vec<u8>, u64)>,
+    last_sample_index: &AtomicU64,
+) {
     loop {
         match rx.recv_timeout(KEEPALIVE_INTERVAL) {
-            Ok(chunk) => {
+            Ok((chunk, last_index)) => {
                 if readsb_stdin.write_all(&chunk).is_err() {
                     crash_exit("write to readsb's stdin failed; it likely died");
                 }
+                last_sample_index.store(last_index, Ordering::Relaxed);
             }
             Err(RecvTimeoutError::Timeout) => {
                 let silence = [0x80u8; KEEPALIVE_CHUNK_BYTES];
@@ -515,9 +532,10 @@ fn main() {
 
     let clean_shutdown = Arc::new(AtomicBool::new(false));
     let last_sample_index = Arc::new(AtomicU64::new(0));
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, u64)>(WRITER_BACKLOG_CHUNKS);
 
-    let writer = thread::spawn(move || feed_readsb(readsb_stdin, rx));
+    let idx_for_writer = Arc::clone(&last_sample_index);
+    let writer = thread::spawn(move || feed_readsb(readsb_stdin, rx, &idx_for_writer));
 
     let waiter_clean = Arc::clone(&clean_shutdown);
     let waiter = thread::spawn(move || {
@@ -546,28 +564,27 @@ fn main() {
         thread::spawn(move || pump_stdout(readsb_stdout, &idx_for_out, cpr_window_samples));
 
     // Feed loop: convert ci8 -> uc8 (offset binary) and hand it to the writer thread. Never
-    // blocks capture: this process's own stdin is the bounded `DecoderFeed` ring (host.rs), so a
-    // slow readsb backs up there, not here; handing off to the writer thread keeps this loop from
-    // ever blocking on readsb's pace either.
+    // blocks capture: this process's own stdin is the bounded `DecoderFeed` ring (host.rs). The
+    // hand-off is bounded too, so a slow readsb backs this loop up, then the host's queue, whose
+    // drop-or-wait policy the host side chooses (module doc, "Backpressure").
     let mut dropped_seen = 0u64;
     let mut input_error = false;
     loop {
         match reader.next_record() {
             Ok(Some(Record::Binary(b))) => {
                 let converted: Vec<u8> = b.payload.iter().map(|byte| byte ^ 0x80).collect();
-                if tx.send(converted).is_err() {
+                // The index of the *last* sample in this record: main.rs's INVARIANT-adjacent
+                // range check treats the offered range as inclusive, and one past the end (what
+                // this used to stamp) can read as out of range under a restricted class.
+                let n_samples = b.header.payload_len as u64 / 2; // ci8: 1 I + 1 Q byte/sample
+                let last_index = b.header.sample_index + n_samples.saturating_sub(1);
+                if tx.send((converted, last_index)).is_err() {
                     // The writer thread is gone. It only ever exits via `crash_exit` (which
                     // terminates the whole process) or a clean shutdown it cannot have started
                     // (only this loop starts one) — unreachable in practice, but never spin.
                     input_error = true;
                     break;
                 }
-                // The index of the *last* sample in this record: main.rs's INVARIANT-adjacent
-                // range check treats the offered range as inclusive, and one past the end (what
-                // this used to stamp) can read as out of range under a restricted class.
-                let n_samples = b.header.payload_len as u64 / 2; // ci8: 1 I + 1 Q byte/sample
-                let last_index = b.header.sample_index + n_samples.saturating_sub(1);
-                last_sample_index.store(last_index, Ordering::Relaxed);
             }
             Ok(Some(Record::Dropped(d))) => dropped_seen += d.count,
             Ok(Some(_)) => {}
@@ -837,6 +854,29 @@ mod tests {
         assert_eq!(frame.metadata["ew_velocity_kt"], 100.0);
         assert_eq!(frame.metadata["ns_velocity_kt"], -50.0);
         assert_eq!(frame.metadata["vertical_rate_fpm"], 640.0);
+    }
+
+    /// The decode stamp follows what readsb was actually given: a chunk's last index is published
+    /// only after its bytes are written, and the hand-off is bounded.
+    #[test]
+    fn feed_stamps_after_the_write_and_the_hand_off_is_bounded() {
+        let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, u64)>(WRITER_BACKLOG_CHUNKS);
+        for i in 0..WRITER_BACKLOG_CHUNKS as u64 {
+            tx.try_send((vec![i as u8; 4], 100 + i)).unwrap();
+        }
+        assert!(
+            tx.try_send((vec![0; 4], 0)).is_err(),
+            "a full hand-off makes the reader wait instead of buffering without bound"
+        );
+        drop(tx);
+        let idx = AtomicU64::new(0);
+        let mut out = Vec::new();
+        feed_readsb(&mut out, rx, &idx);
+        assert_eq!(out.len(), 4 * WRITER_BACKLOG_CHUNKS);
+        assert_eq!(
+            idx.load(Ordering::Relaxed),
+            100 + WRITER_BACKLOG_CHUNKS as u64 - 1
+        );
     }
 
     #[test]

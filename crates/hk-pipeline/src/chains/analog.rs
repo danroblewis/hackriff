@@ -23,6 +23,7 @@ use hk_model::RecordingTrigger;
 
 use super::{ChainMsg, ChainReader, Next};
 use crate::events::Candidate;
+use crate::gate::GateCursor;
 use crate::run::Shared;
 use crate::stats::{add, inc};
 
@@ -34,6 +35,10 @@ pub(crate) struct AnalogNode {
     pub probe_s: f64,
     pub accept_modes: Vec<String>,
     pub require_pilot: bool,
+    /// Largest distance of the locked emission from the channel centre, Hz: half the spec's
+    /// raster step (so a neighbour's chain owns a station between two raster channels), or
+    /// unbounded off a raster. Half the bandwidth also applies.
+    pub channel_tolerance_hz: f64,
     /// The spec's record node, run once the probe accepts the channel.
     pub record: Option<RecordAfterProbe>,
 }
@@ -129,13 +134,14 @@ pub(crate) fn run(
     rx: Receiver<ChainMsg>,
     cand: Candidate,
     mut node: AnalogNode,
+    cursor: GateCursor,
 ) {
     let fs = shared.fs;
     let c = &shared.counters.chains;
     let start = cand.first_sample.saturating_sub((node.pre_s * fs) as u64);
     let want = (node.window_s * fs) as usize;
     let probe = ((node.probe_s * fs) as usize).min(want);
-    let mut cr = ChainReader::new(Arc::clone(&shared), start);
+    let mut cr = ChainReader::new(Arc::clone(&shared), start, cursor);
     let mut w = Window {
         iq: Vec::with_capacity(want.min(1 << 27)),
         head: None,
@@ -156,7 +162,8 @@ pub(crate) fn run(
                 // The receiver's CFO estimate can slide onto a strong neighbour: the emission
                 // it locked to must lie in this channel, or the neighbour's own chain owns it.
                 let channel_center = 0.5 * (cand.f_lo_hz + cand.f_hi_hz);
-                let in_channel = (s.rf_center_hz - channel_center).abs() <= 0.5 * node.bandwidth_hz;
+                let in_channel = (s.rf_center_hz - channel_center).abs()
+                    <= (0.5 * node.bandwidth_hz).min(node.channel_tolerance_hz);
                 let accepted = mode_ok && pilot_ok && in_channel;
                 if crate::debug_enabled() {
                     eprintln!(
@@ -255,7 +262,8 @@ fn collect_and_write(
     }
     let ctx = RecordContext {
         recording_ref: None,
-        detection_ref: cand.detection,
+        // Only a stored detection: the writer thread may lag (see `stored_detection`).
+        detection_ref: super::stored_detection(shared, cand.detection),
         emitter_hint: None,
     };
     let mut repo = shared.repo();

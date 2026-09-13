@@ -268,11 +268,8 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
                 .map(str::to_owned)
         })
         .collect();
-    // The decoder writes uppercase hex (`5A3C…`), the generator's truth lowercase.
-    let matched = payloads
-        .iter()
-        .filter(|t| kept.iter().any(|k| k.eq_ignore_ascii_case(t)))
-        .count();
+    // `payload_hex` is lowercase (`5a3c…`, T-037b), as the generator's truth.
+    let matched = payloads.iter().filter(|t| kept.contains(t)).count();
     eprintln!(
         "[{AWARE_036}] classified: {} payloads kept (e.g. {:?} for truth {:?}), {matched} of {n} \
          truth payloads recovered; status {:?} ({})",

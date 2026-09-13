@@ -6,8 +6,15 @@
 //! samples are passed through unchanged). The input channel class is the source class, a ceiling
 //! on the plugin's output. At detach, `tail_pad_samples` zeros flush block-buffered decoders and
 //! the chain waits up to `settle_s` for decodes to settle before stopping the plugin.
+//!
+//! **Backpressure (lossless replay, T-037b).** Plugin input is drop-not-block, which is right for
+//! a live source but lost decodes when an unpaced recording outran the plugin (readsb's 8 MiB
+//! queue filled on long recordings). In lossless mode the chain waits for queue room before each
+//! record ([`wait_for_room`], `plugin_waits`) while its gate cursor holds capture, so nothing is
+//! dropped; live chains still drop and count.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -22,10 +29,57 @@ use hk_plugins::{
 use hk_stream::{BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamHeader, StreamKind};
 use num_complex::Complex;
 
+use hk_model::{EmitterId, TrackId};
+
 use super::{ChainMsg, ChainReader, Next};
 use crate::events::Candidate;
+use crate::family::{Evidence, service_family};
+use crate::gate::GateCursor;
 use crate::run::Shared;
-use crate::stats::{add, inc};
+use crate::stats::{ChainCounters, add, inc};
+
+/// Queue bytes a record needs beyond its payload (length prefix, record header, a drop marker).
+const RECORD_OVERHEAD_BYTES: usize = 128;
+/// A lossless wait gives up after this long without any change in queue room.
+const PLUGIN_WAIT_STALL: Duration = Duration::from_secs(30);
+
+/// Lossless replay: waits until the plugin's input queue has room for a `payload`-byte record
+/// (capped at the queue's `capacity`). Gives up, and the record is offered anyway, on `stop`,
+/// when the plugin has failed, or after [`PLUGIN_WAIT_STALL`] without progress
+/// (`plugin_wait_timeouts`).
+fn wait_for_room(
+    inst: &PluginInstance,
+    payload: usize,
+    capacity: usize,
+    stop: &AtomicBool,
+    c: &ChainCounters,
+) {
+    let need = (payload + RECORD_OVERHEAD_BYTES).min(capacity);
+    let mut waited = false;
+    let mut last = None;
+    let mut since = Instant::now();
+    loop {
+        let free = inst.input_free_bytes();
+        if free.is_some_and(|f| f >= need) {
+            return;
+        }
+        if stop.load(Ordering::SeqCst) || inst.stats().state == PluginState::Failed {
+            return;
+        }
+        if free != last {
+            last = free;
+            since = Instant::now();
+        } else if since.elapsed() >= PLUGIN_WAIT_STALL {
+            inc(&c.plugin_wait_timeouts);
+            return;
+        }
+        if !waited {
+            waited = true;
+            inc(&c.plugin_waits);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
@@ -37,8 +91,18 @@ pub(crate) fn run(
     manifest: &str,
     tail_pad_samples: usize,
     settle_s: f64,
+    cursor: GateCursor,
 ) {
-    if let Err(e) = run_inner(&shared, rx, cand, ddc, manifest, tail_pad_samples, settle_s) {
+    if let Err(e) = run_inner(
+        &shared,
+        rx,
+        cand,
+        ddc,
+        manifest,
+        tail_pad_samples,
+        settle_s,
+        cursor,
+    ) {
         inc(&shared.counters.chains.attach_errors);
         eprintln!("hk-pipeline: chain {spec_id}: {e:#}");
     }
@@ -52,6 +116,7 @@ fn to_ci8_bytes(samples: &[Complex<i8>], out: &mut Vec<u8>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_inner(
     shared: &Arc<Shared>,
     rx: Receiver<ChainMsg>,
@@ -60,6 +125,7 @@ fn run_inner(
     manifest: &str,
     tail_pad_samples: usize,
     settle_s: f64,
+    cursor: GateCursor,
 ) -> anyhow::Result<()> {
     let path = {
         let p = PathBuf::from(manifest);
@@ -83,7 +149,10 @@ fn run_inner(
         }
     }
     let fs = shared.fs;
-    let mut cr = ChainReader::new(Arc::clone(shared), cand.first_sample);
+    let plugin_id = m.id.clone();
+    let queue_bytes = m.limits.input_queue_bytes;
+    let lossless = shared.gate.enabled();
+    let mut cr = ChainReader::new(Arc::clone(shared), cand.first_sample, cursor);
     let first = loop {
         match cr.next() {
             Next::Data(c) => break c,
@@ -117,18 +186,34 @@ fn run_inner(
     );
     header.message_schema = Some("hackriff.decode/1".into());
     header.max_frame_len = 64 * 1024;
-    let publisher = Publisher::new(
-        header.clone(),
-        PublisherConfig {
-            queue_bytes: 4 << 20,
-            ..PublisherConfig::default()
-        },
-    )?;
-    if let Some(sink) = &shared.cfg.stream_sink {
-        sink(&header, publisher.handle());
+    let config = PublisherConfig {
+        queue_bytes: 4 << 20,
+        ..PublisherConfig::default()
+    };
+    // Under a class that forbids content the decode stream republishes only through the
+    // manifest's metadata policy (T-016, schema `output.schema_id`). A manifest without one still
+    // stores its (sanitised) decodes but offers no stream: before T-037b the missing policy
+    // failed the whole chain, so no plugin ran under a restricted or metadata-only class.
+    let publisher = if class.permits_content() {
+        Some(Publisher::new(header.clone(), config)?)
+    } else if let Some(policy) = m.output.metadata_policy.clone() {
+        header.message_schema = Some(m.output.schema_id.clone());
+        Some(Publisher::with_metadata_policy(
+            header.clone(),
+            config,
+            policy,
+        )?)
+    } else {
+        None
+    };
+    if let (Some(sink), Some(p)) = (&shared.cfg.stream_sink, &publisher) {
+        sink(&header, p.handle());
     }
     let repo = Repository::open(&shared.db_path)?;
-    let ingest = Arc::new(Mutex::new(Ingest::with_republish(repo, publisher)));
+    let ingest = Arc::new(Mutex::new(match publisher {
+        Some(p) => Ingest::with_republish(repo, p),
+        None => Ingest::new(repo),
+    }));
     let input = InputStreamDesc {
         datatype: Datatype::Ci8,
         sample_rate_hz: out_rate,
@@ -178,6 +263,9 @@ fn run_inner(
         }
         let n = (bytes.len() / 2) as u64;
         if n > 0 {
+            if lossless {
+                wait_for_room(inst, bytes.len(), queue_bytes, &shared.stop, c);
+            }
             let _ = inst.push(BinaryRecord {
                 t: chunk.time.host_time,
                 sample_index: out_index,
@@ -195,8 +283,15 @@ fn run_inner(
     let mut last_t = push(&mut inst, &mut ddc_node, &first, &cr.buf[..first_len]);
     cr.release_to(first.end_sample());
     let mut next_index = first.end_sample();
+    let mut detached = false;
     loop {
-        if matches!(rx.try_recv(), Ok(ChainMsg::Detach)) {
+        if !detached && matches!(rx.try_recv(), Ok(ChainMsg::Detach)) {
+            detached = true;
+        }
+        // A detach while the stream runs (coverage lost, manual) ends the chain now; at the end
+        // of the stream (ring closed) the chain first feeds what is left in the ring, so a
+        // replay shorter than the plugin's start-up is still decoded.
+        if detached && !shared.ring.is_closed() {
             break;
         }
         match cr.next() {
@@ -221,6 +316,9 @@ fn run_inner(
         };
         while left > 0 {
             let n = left.min(4096);
+            if lossless {
+                wait_for_room(&inst, 2 * n, queue_bytes, &shared.stop, c);
+            }
             let _ = inst.push(BinaryRecord {
                 t: last_t,
                 sample_index: idx,
@@ -257,5 +355,49 @@ fn run_inner(
     if let Some(p) = ing.take_publisher() {
         p.finish();
     }
+    let emitters = ing.emitters().to_vec();
+    drop(ing);
+    classify_plugin_emitters(shared, &plugin_id, cand.track, &emitters, last_t);
     Ok(())
+}
+
+/// The T-039 family step for plugin decodes (T-037b). The plugin's manifest id is decoder
+/// evidence ([`crate::family`]: `readsb` → `adsb`, `rtl_433` → `ism`). Every emitter the plugin's
+/// identity decodes resolved to gets that family as a Classification (only when it maps with
+/// confidence), then `Inventory::chain_emitter` ranks its explanations and sets its known status,
+/// as after the analog and FSK record writers. Legal guardrail: this writes a family label, a
+/// band-plan reference and a metadata-only annotation, never an identity or content; identities
+/// stay gated by their decodes' class.
+fn classify_plugin_emitters(
+    shared: &Shared,
+    plugin_id: &str,
+    track: Option<TrackId>,
+    emitters: &[EmitterId],
+    t: Timestamp,
+) {
+    if emitters.is_empty() {
+        return;
+    }
+    let c = &shared.counters.chains;
+    let call = service_family(&Evidence::Decoder(plugin_id));
+    let mut repo = shared.repo();
+    let mut inv = shared
+        .inventory
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for &e in emitters {
+        let Ok(live) = repo.live_emitter_id(e) else {
+            inc(&c.errors);
+            continue;
+        };
+        if let Some(classification) = call.classification(t) {
+            if repo.append_classification(live, &classification).is_err() {
+                inc(&c.errors);
+                continue;
+            }
+        }
+        if inv.chain_emitter(&mut repo, track, live).is_err() {
+            inc(&c.errors);
+        }
+    }
 }

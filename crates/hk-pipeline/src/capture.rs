@@ -15,18 +15,49 @@
 //!   [`crate::control::VIRTUAL_TUNING_DEVICE_SUFFIX`], so detections and recordings never claim a
 //!   real gain state the recording did not have. (A multi-capture recording whose real gains
 //!   change is over-marked, which is the safe direction.)
+//! - **Coverage hold (lossless, T-037b):** after a block changes the tuned window, the capture
+//!   thread publishes the tune (`tune_seq`) and, when coverage chains exist, waits until the
+//!   chain manager has polled coverage for it (`coverage_seq`). A coverage chain therefore
+//!   attaches and claims its samples in the flow gate before a replay shorter than the ring can
+//!   be written through and closed (a 0.1 s ADS-B scene used to end with no chain). The hold is
+//!   bounded by [`COVERAGE_WAIT`] and by `stop`.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use hk_core::source::SourceKind;
 use hk_core::{Discontinuity, ProvenanceHandle, RingWriter, Source, SourceError};
 use hk_model::ProvenanceId;
 use num_complex::{Complex, Complex32};
 
+use crate::chains::spec::Trigger;
 use crate::control::VIRTUAL_TUNING_DEVICE_SUFFIX;
 use crate::run::{Shared, SourceFactory};
 use crate::stats::{Counters, add, inc, set};
+
+/// Longest coverage hold per tune change.
+pub(crate) const COVERAGE_WAIT: Duration = Duration::from_secs(10);
+
+/// Waits until the chain manager has evaluated coverage for tune `seq` (see the module docs).
+fn wait_for_coverage(shared: &Shared, seq: u64) {
+    let c = &shared.counters;
+    if c.coverage_seq.load(Ordering::SeqCst) >= seq {
+        return;
+    }
+    inc(&c.source.coverage_waits);
+    let deadline = Instant::now() + COVERAGE_WAIT;
+    while c.coverage_seq.load(Ordering::SeqCst) < seq {
+        if shared.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            inc(&c.source.coverage_wait_timeouts);
+            return;
+        }
+        std::thread::sleep(Duration::from_micros(200));
+    }
+}
 
 /// Provenance marks for a scheduler-driven replay (see the module docs).
 #[derive(Default)]
@@ -82,6 +113,9 @@ pub(crate) fn run(
     let mut marks = (shared.cfg.drive_scheduler
         && source.capabilities().kind == SourceKind::Replay)
         .then(VirtualMarks::default);
+    let hold_for_coverage =
+        shared.gate.enabled() && shared.specs.iter().any(|s| s.trigger == Trigger::Coverage);
+    let mut last_tune: Option<(u64, u64)> = None;
     let result = loop {
         if shared.stop.load(Ordering::SeqCst) {
             break Ok(());
@@ -183,6 +217,15 @@ pub(crate) fn run(
         counters
             .tune_rate_bits
             .store(fs.to_bits(), Ordering::Relaxed);
+        // Published after the tune itself, so a poll never acknowledges a tune it did not see.
+        let tune = (h.provenance.tune.center_hz.to_bits(), fs.to_bits());
+        if last_tune != Some(tune) {
+            last_tune = Some(tune);
+            let seq = counters.tune_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            if hold_for_coverage {
+                wait_for_coverage(&shared, seq);
+            }
+        }
     };
     drop(writer);
     result

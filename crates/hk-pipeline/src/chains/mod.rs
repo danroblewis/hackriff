@@ -9,6 +9,17 @@
 //!   confirmation), detaches on track close / merge / coverage loss, and reaps finished threads.
 //! - Chain bodies: [`analog`] (C19 auto mode + RDS), [`fsk`] (C13/C14/C20/C21), [`plugin`]
 //!   (DDC + subprocess decoder), [`record`] (pre-trigger SigMF, C25).
+//!
+//! **Claims at attach (T-037b).** Every chain and recorder registers its gate cursor on the
+//! control thread when it is attached, at the first sample it will read, and hands it to its
+//! thread. Capture cannot run past those samples in lossless replay while the thread starts
+//! (loads a manifest, spawns a plugin). Coverage polls acknowledge the tune they evaluated
+//! (`Counters::coverage_seq`), which the capture thread waits for ([`crate::capture`]).
+//!
+//! **Channel cooldown.** A raster channel whose chain finished is left alone for
+//! [`CHANNEL_COOLDOWN_S`] of stream time (`channel_cooldown`): a WFM station's many fragment
+//! tracks, or noise on an empty channel whose probe was rejected, do not start a new probe (and a
+//! new demodulation) for every fragment.
 
 pub(crate) mod analog;
 pub(crate) mod fsk;
@@ -18,12 +29,13 @@ pub mod spec;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use hk_core::{ReadChunk, ReadOutcome, ResyncPolicy, RingReader};
-use hk_model::{RecordingTrigger, TrackId};
+use hk_model::{DetectionId, RecordingTrigger, TrackId};
 use num_complex::Complex;
 
 use crate::events::{Candidate, MemberBox};
@@ -58,9 +70,9 @@ pub(crate) enum Next {
 }
 
 impl ChainReader {
-    /// Attaches at `start` (clamped to the oldest retained sample).
-    pub fn new(shared: Arc<Shared>, start: u64) -> Self {
-        let cursor = shared.gate.register(start);
+    /// Attaches at `start` (clamped to the oldest retained sample) with the gate `cursor` the
+    /// chain claimed at attach.
+    pub fn new(shared: Arc<Shared>, start: u64, cursor: GateCursor) -> Self {
         let start = start.max(shared.ring.oldest_sample().unwrap_or(0));
         cursor.set(start);
         let reader = shared
@@ -107,6 +119,69 @@ struct Running {
     join: JoinHandle<()>,
 }
 
+/// Longest wait for a chain row's parent detection ([`stored_detection`]).
+pub(crate) const PARENT_WAIT: Duration = Duration::from_secs(5);
+
+/// The triggering detection a chain's rows may reference (T-037b). The detection writer thread
+/// stores detections asynchronously, and under load (a detect reader overrunning at 8–10 Msps,
+/// T-055) or a failing store the row can lag or never arrive; writing a Demodulation, Decode or
+/// Recording that names it then fails the foreign key. Waits up to [`PARENT_WAIT`] for the row;
+/// a detection still missing is dropped from the reference and counted
+/// (`detection_ref_missing`): the chain's rows are neither refused nor orphaned.
+pub(crate) fn stored_detection(
+    shared: &Shared,
+    detection: Option<DetectionId>,
+) -> Option<DetectionId> {
+    let d = detection?;
+    let deadline = std::time::Instant::now() + PARENT_WAIT;
+    loop {
+        if shared.repo().detection(d).is_ok() {
+            return Some(d);
+        }
+        if std::time::Instant::now() >= deadline {
+            inc(&shared.counters.chains.detection_ref_missing);
+            return None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Stream time a raster channel is left alone after its chain finished, s.
+pub(crate) const CHANNEL_COOLDOWN_S: f64 = 30.0;
+
+type ChannelKey = (String, i64);
+
+/// When each raster channel may attach again (stream sample index).
+#[derive(Debug, Default)]
+pub(crate) struct ChannelMemory {
+    until: HashMap<ChannelKey, u64>,
+}
+
+impl ChannelMemory {
+    /// The channel's chain finished less than the cooldown ago.
+    pub fn cooling(&self, key: &ChannelKey, now: u64) -> bool {
+        self.until.get(key).is_some_and(|&u| now < u)
+    }
+
+    /// The channel's chain finished at `now`.
+    pub fn finished(&mut self, key: ChannelKey, now: u64, cooldown: u64) {
+        self.until.insert(key, now.saturating_add(cooldown));
+        if self.until.len() > 4096 {
+            self.until.retain(|_, u| *u > now);
+        }
+    }
+}
+
+/// The first sample a chain of `shape` reads for `cand` (claimed at attach).
+fn chain_start(shape: &ChainShape, cand: &Candidate, fs: f64) -> u64 {
+    let pre_s = match shape {
+        ChainShape::Analog { pre_s, .. } => *pre_s,
+        ChainShape::Fsk { pad_s, .. } => *pad_s,
+        ChainShape::Plugin { .. } => 0.0,
+    };
+    cand.first_sample.saturating_sub((pre_s * fs) as u64)
+}
+
 /// Attaches, feeds, detaches and reaps runtime chains (control thread).
 pub(crate) struct ChainManager {
     shared: Arc<Shared>,
@@ -118,7 +193,8 @@ pub(crate) struct ChainManager {
     backlog: HashMap<TrackId, Vec<MemberBox>>,
     members: HashMap<TrackId, u32>,
     pending: HashMap<TrackId, Candidate>,
-    by_channel: HashMap<(String, i64), u64>,
+    by_channel: HashMap<ChannelKey, u64>,
+    cooldown: ChannelMemory,
 }
 
 const BACKLOG_PER_TRACK: usize = 512;
@@ -136,6 +212,7 @@ impl ChainManager {
             members: HashMap::new(),
             pending: HashMap::new(),
             by_channel: HashMap::new(),
+            cooldown: ChannelMemory::default(),
         }
     }
 
@@ -201,11 +278,23 @@ impl ChainManager {
                 let shared = Arc::clone(&self.shared);
                 let label = spec.id.clone();
                 let at = cand.trigger_sample;
+                let cursor = record::claim(&self.shared, at, pre_s);
                 let id = self.next_id;
                 self.next_id += 1;
-                if let Ok(join) = thread::Builder::new()
-                    .name(format!("hk-rec-{id}"))
-                    .spawn(move || record::run(shared, at, pre_s, post_s, trigger, label))
+                if let Ok(join) =
+                    thread::Builder::new()
+                        .name(format!("hk-rec-{id}"))
+                        .spawn(move || {
+                            record::run_claimed(
+                                shared,
+                                Some(cursor),
+                                at,
+                                pre_s,
+                                post_s,
+                                trigger,
+                                label,
+                            )
+                        })
                 {
                     self.running.push(Running { id, tx: None, join });
                 }
@@ -218,6 +307,12 @@ impl ChainManager {
         let id = self.next_id;
         self.next_id += 1;
         let spec_id = spec.id.clone();
+        let cursor = self
+            .shared
+            .gate
+            .register(chain_start(&shape, &cand, self.shared.fs));
+        // On a raster the receiver must lock inside this channel, not a neighbour's.
+        let channel_tolerance_hz = spec.raster_hz.map_or(f64::INFINITY, |r| 0.5 * r);
         let spawned = thread::Builder::new()
             .name(format!("hk-chain-{}-{id}", spec.id))
             .spawn(move || match shape {
@@ -239,15 +334,19 @@ impl ChainManager {
                         probe_s,
                         accept_modes,
                         require_pilot,
+                        channel_tolerance_hz,
                         record: analog_record,
                     },
+                    cursor,
                 ),
                 ChainShape::Fsk {
                     pad_s,
                     retain_s,
                     min_bursts,
                     max_bursts,
-                } => fsk::run(shared, rx, cand, pad_s, retain_s, min_bursts, max_bursts),
+                } => fsk::run(
+                    shared, rx, cand, pad_s, retain_s, min_bursts, max_bursts, cursor,
+                ),
                 ChainShape::Plugin {
                     ddc,
                     manifest,
@@ -262,6 +361,7 @@ impl ChainManager {
                     &manifest,
                     tail_pad_samples,
                     settle_s,
+                    cursor,
                 ),
             });
         match spawned {
@@ -333,6 +433,11 @@ impl ChainManager {
         }
         let key = spec.raster_hz.map(|_| (spec.id.clone(), fc.round() as i64));
         if let Some(k) = &key {
+            let now = self.shared.ring.next_sample().unwrap_or(0);
+            if self.cooldown.cooling(k, now) {
+                inc(&c.channel_cooldown);
+                return;
+            }
             if let Some(id) = self.by_channel.get(k) {
                 if self.running.iter().any(|r| r.id == *id) {
                     inc(&c.duplicate_channel);
@@ -444,7 +549,16 @@ impl ChainManager {
     }
 
     /// Attaches coverage chains whose band the window covers; detaches those it no longer does.
+    /// Acknowledges the tune it evaluated (`Counters::coverage_seq`).
     pub fn poll_coverage(&mut self) {
+        let counters = Arc::clone(&self.shared.counters);
+        // Read before the tune: the tune evaluated is at least as new as the acknowledged one.
+        let seq = counters.tune_seq.load(Ordering::SeqCst);
+        self.evaluate_coverage();
+        counters.coverage_seq.fetch_max(seq, Ordering::SeqCst);
+    }
+
+    fn evaluate_coverage(&mut self) {
         let (center, rate) = self.shared.counters.tune();
         if rate.is_nan() || rate <= 0.0 || self.shared.ring.is_closed() {
             return;
@@ -506,11 +620,82 @@ impl ChainManager {
                     inc(&self.shared.counters.chains.detached);
                 }
                 self.by_track.retain(|_, v| *v != r.id);
+                let now = self.shared.ring.next_sample().unwrap_or(0);
+                let cooldown = (CHANNEL_COOLDOWN_S * self.shared.fs) as u64;
+                let channels: Vec<ChannelKey> = self
+                    .by_channel
+                    .iter()
+                    .filter(|(_, id)| **id == r.id)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in channels {
+                    self.by_channel.remove(&k);
+                    self.cooldown.finished(k, now, cooldown);
+                }
                 // A finished coverage chain is not re-attached while the window still covers
                 // its band: keep its entry (removed only on coverage loss).
             } else {
                 i += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_raster_channels_cool_down_for_the_stream_time_given() {
+        let mut m = ChannelMemory::default();
+        let key = ("wfm-rds".to_owned(), 101_300_000);
+        let other = ("wfm-rds".to_owned(), 101_500_000);
+        assert!(!m.cooling(&key, 0));
+        m.finished(key.clone(), 1_000, 500);
+        assert!(m.cooling(&key, 1_000) && m.cooling(&key, 1_499));
+        assert!(!m.cooling(&key, 1_500), "cooled down");
+        assert!(!m.cooling(&other, 1_200), "other channels are unaffected");
+        // Stream time advances: each channel's cooldown has expired by the next insert.
+        for i in 0..5000 {
+            m.finished(("x".to_owned(), i), 2_000 + i as u64, 1);
+        }
+        assert!(m.until.len() <= 4097, "expired channels are pruned");
+    }
+
+    #[test]
+    fn chains_claim_their_first_sample_by_shape() {
+        let cand = Candidate {
+            track: None,
+            detection: None,
+            f_lo_hz: 0.0,
+            f_hi_hz: 1.0,
+            first_sample: 1_000_000,
+            trigger_sample: 1_000_000,
+            bursty: None,
+        };
+        let fs = 1e6;
+        let analog = ChainShape::Analog {
+            pre_s: 0.5,
+            window_s: 1.0,
+            bandwidth_hz: 1e5,
+            probe_s: 0.0,
+            accept_modes: Vec::new(),
+            require_pilot: false,
+        };
+        let fsk = ChainShape::Fsk {
+            pad_s: 0.02,
+            retain_s: 1.0,
+            min_bursts: 1,
+            max_bursts: 2,
+        };
+        let plugin = ChainShape::Plugin {
+            ddc: None,
+            manifest: String::new(),
+            tail_pad_samples: 0,
+            settle_s: 0.0,
+        };
+        assert_eq!(chain_start(&analog, &cand, fs), 500_000);
+        assert_eq!(chain_start(&fsk, &cand, fs), 980_000);
+        assert_eq!(chain_start(&plugin, &cand, fs), 1_000_000);
     }
 }

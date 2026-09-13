@@ -17,8 +17,13 @@
 //! **Channel priors.** A spec with `raster_hz` snaps a candidate's centre to the band's channel
 //! raster and widens it to the node's channel bandwidth, and at most one chain runs per channel.
 //! This is how a WFM station the detector covers with several narrow boxes (its noisy 200 kHz
-//! hump) still gets exactly one receiver on the right channel. The built-in FM raster is the US
-//! one (200 kHz on odd tenths of a MHz); a plan overrides it for other regions.
+//! hump) still gets exactly one receiver on the right channel.
+//!
+//! **FM region (T-037b).** The built-in `wfm-rds` band and raster follow [`FmRegion`]:
+//! North America 87.5–108 MHz on a 200 kHz raster at odd tenths; ITU default (Europe, Africa,
+//! Asia, Oceania, South America) 87.5–108 MHz on a 100 kHz raster; Japan 76–95 MHz on a 100 kHz
+//! raster. [`FmRegion::from_site`] picks it from the configured site (no site: North America, the
+//! previous default); a plan's `chains` still overrides the whole registry.
 
 use serde::{Deserialize, Serialize};
 
@@ -388,6 +393,58 @@ pub fn builtin_chains() -> Vec<ChainSpec> {
     serde_json::from_str(BUILTIN_CHAINS).expect("built-in chain registry parses")
 }
 
+/// The FM broadcast channel plan the built-in `wfm-rds` spec uses (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FmRegion {
+    /// US, Canada, Mexico, Central America, Caribbean: 87.5–108 MHz, 200 kHz raster on odd
+    /// tenths of a MHz.
+    NorthAmerica,
+    /// ITU default: 87.5–108 MHz, 100 kHz raster (a superset of the 200 kHz odd-tenth plan).
+    Itu,
+    /// Japan: 76–95 MHz, 100 kHz raster.
+    Japan,
+}
+
+impl FmRegion {
+    /// The region of a site `[lat, lon]`, degrees. Coarse boxes (unverified at borders):
+    /// Japan 24–46° N, 122–154° E; North America 7–75° N, 170–50° W; anywhere else the ITU
+    /// default. No site: North America.
+    pub fn from_site(site: Option<[f64; 2]>) -> Self {
+        let Some([lat, lon]) = site else {
+            return FmRegion::NorthAmerica;
+        };
+        if (24.0..=46.0).contains(&lat) && (122.0..=154.0).contains(&lon) {
+            FmRegion::Japan
+        } else if (7.0..=75.0).contains(&lat) && (-170.0..=-50.0).contains(&lon) {
+            FmRegion::NorthAmerica
+        } else {
+            FmRegion::Itu
+        }
+    }
+
+    /// `(band [lo, hi] Hz, raster Hz, raster offset Hz)`.
+    pub fn plan(self) -> ([f64; 2], f64, f64) {
+        match self {
+            FmRegion::NorthAmerica => ([87.5e6, 108.0e6], 200e3, 100e3),
+            FmRegion::Itu => ([87.5e6, 108.0e6], 100e3, 0.0),
+            FmRegion::Japan => ([76.0e6, 95.0e6], 100e3, 0.0),
+        }
+    }
+}
+
+/// The built-in registry with `wfm-rds` on `region`'s band and raster.
+pub fn builtin_chains_for(region: FmRegion) -> Vec<ChainSpec> {
+    let mut specs = builtin_chains();
+    if let Some(s) = specs.iter_mut().find(|s| s.id == "wfm-rds") {
+        let (band, raster, offset) = region.plan();
+        s.freq_hz = vec![band];
+        s.raster_hz = Some(raster);
+        s.raster_offset_hz = offset;
+    }
+    specs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +471,41 @@ mod tests {
         let adsb = specs.iter().find(|s| s.id == "adsb-readsb").unwrap();
         assert!(adsb.covered_by(1090e6, 2.2e6));
         assert!(!adsb.covered_by(1085e6, 2.2e6));
+    }
+
+    #[test]
+    fn fm_raster_follows_the_region() {
+        assert_eq!(FmRegion::from_site(None), FmRegion::NorthAmerica);
+        assert_eq!(
+            FmRegion::from_site(Some([40.7, -74.0])),
+            FmRegion::NorthAmerica
+        );
+        assert_eq!(FmRegion::from_site(Some([52.2, 0.12])), FmRegion::Itu);
+        assert_eq!(FmRegion::from_site(Some([-23.5, -46.6])), FmRegion::Itu);
+        assert_eq!(FmRegion::from_site(Some([35.7, 139.7])), FmRegion::Japan);
+        assert_eq!(
+            builtin_chains_for(FmRegion::NorthAmerica),
+            builtin_chains(),
+            "North America is the previous built-in plan"
+        );
+        let wfm = |r| {
+            builtin_chains_for(r)
+                .into_iter()
+                .find(|s| s.id == "wfm-rds")
+                .unwrap()
+        };
+        // Europe: 100 kHz raster, so 94.25 MHz fragments snap to 94.2 or 94.3 MHz.
+        let eu = wfm(FmRegion::Itu);
+        eu.validate().unwrap();
+        let (lo, hi) = eu.channel(94.28e6, 94.30e6);
+        assert!((0.5 * (lo + hi) - 94.3e6).abs() < 1.0, "{lo} {hi}");
+        let (lo, hi) = eu.channel(94.21e6, 94.23e6);
+        assert!((0.5 * (lo + hi) - 94.2e6).abs() < 1.0);
+        let (lo, hi) = wfm(FmRegion::NorthAmerica).channel(94.28e6, 94.30e6);
+        assert!((0.5 * (lo + hi) - 94.3e6).abs() < 1.0);
+        let jp = wfm(FmRegion::Japan);
+        assert!(jp.matches(80.0e6, 80.1e6, Some(false)));
+        assert!(!jp.matches(100.0e6, 100.1e6, Some(false)));
     }
 
     #[test]

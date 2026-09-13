@@ -430,6 +430,8 @@ impl Correlator {
     }
 
     /// Ranks cached events for an anomaly and writes its explanations (see the module docs).
+    /// Reads the feed states from `feeds` first ([`Self::feed_states`]); a caller holding a lock
+    /// around `repo` should read them before taking it and use [`Self::correlate_with_states`].
     pub fn correlate(
         &self,
         repo: &mut Repository,
@@ -438,7 +440,15 @@ impl Correlator {
         site: Option<&Site>,
         now: Timestamp,
     ) -> Result<CorrelationOutcome, CorrelateError> {
-        let anomaly = repo.anomaly(anomaly_id)?;
+        let feed_states = self.feed_states(feeds)?;
+        self.correlate_with_states(repo, &feed_states, anomaly_id, site, now)
+    }
+
+    /// The rule sources' feed states from the cache (file I/O, no repository access).
+    pub fn feed_states(
+        &self,
+        feeds: Option<&FeedCache>,
+    ) -> Result<BTreeMap<String, FeedState>, CorrelateError> {
         let mut feed_states = BTreeMap::new();
         if let Some(cache) = feeds {
             for source in &self.config.sources {
@@ -447,6 +457,20 @@ impl Correlator {
                 }
             }
         }
+        Ok(feed_states)
+    }
+
+    /// [`Self::correlate`] with feed states read beforehand ([`Self::feed_states`]): touches only
+    /// `repo`, so no feed-cache I/O runs while the caller holds a repository lock.
+    pub fn correlate_with_states(
+        &self,
+        repo: &mut Repository,
+        feed_states: &BTreeMap<String, FeedState>,
+        anomaly_id: AnomalyId,
+        site: Option<&Site>,
+        now: Timestamp,
+    ) -> Result<CorrelationOutcome, CorrelateError> {
+        let anomaly = repo.anomaly(anomaly_id)?;
         let mut stale_evidence = Vec::new();
         for attempt in 1..=MAX_ATTEMPTS {
             let window = self.query_window(&anomaly);
@@ -477,7 +501,7 @@ impl Correlator {
                     }
                 }
             }
-            let candidates = self.rank(&anomaly, site, &events, &feed_states, now)?;
+            let candidates = self.rank(&anomaly, site, &events, feed_states, now)?;
             match self.write(repo, &anomaly, &candidates, site, now) {
                 Ok((written, unchanged)) => {
                     return Ok(CorrelationOutcome {

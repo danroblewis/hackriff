@@ -19,6 +19,6 @@ pub use history::{
     Resolution, StoreError,
 };
 pub use radiometry::{
-    FloorFlags, FloorIngest, FloorProduct, FloorProductConfig, FloorProductStats, FloorStep,
-    FloorVsTime,
+    FloorFlags, FloorIngest, FloorIngestQueue, FloorProduct, FloorProductConfig, FloorProductStats,
+    FloorStep, FloorVsTime, IngestQueueStats, QueuedIngest,
 };

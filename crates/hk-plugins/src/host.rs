@@ -488,6 +488,12 @@ impl PluginInstance {
         })
     }
 
+    /// Free bytes in the plugin's input queue (`None` while no process is attached). Lets a
+    /// producer that can pause wait for room instead of having `push` drop (T-037b).
+    pub fn input_free_bytes(&self) -> Option<usize> {
+        self.feed.min_free_bytes()
+    }
+
     /// Re-anchors sample time (after a retune or discontinuity).
     pub fn set_anchor(&self, anchor: SampleTime) {
         *lock(&self.shared.anchor) = anchor;
