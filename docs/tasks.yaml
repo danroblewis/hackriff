@@ -406,6 +406,7 @@ tasks:
     effort: high
     dod: CudaPfb implements PfbBackend; parity tests vs CPU; throughput + power measured on the Orin Nano
     note: "split from T-008 acceptance ('GPU + CPU-fallback paths') by the T-008 review, 2026-09-13; blocked until the Jetson arrives (user purchase)"
+    provider_note: "CUDA becomes one provider in the ADR-0007 per-platform provider model from T-041; Mac GPU path via T-041 unblocks GPU work before the Jetson arrives"
   - id: T-022a
     title: Web UI part 1 - WebSocket bridge (hk-stream remote egress) + WebGL2 waterfall + region-over-time history view
     status: done
@@ -640,6 +641,21 @@ tasks:
     effort: medium
     core_interface: true
     dod: "four nits fixed with tests; hk-model + acceptance legal regression green"
+  - id: T-041
+    title: Mac compute providers (CPU multi-threaded baseline, GPU FftBackend/PfbBackend, Accelerate vDSP)
+    status: in-progress
+    deps: [T-008]
+    parallel_group: L
+    use_cases: [SPACE-050, AWARE-042]
+    requested_by: user (2026-09-13, priority; dev Mac is M3 Ultra 28 CPU / 60-core GPU / Metal 3 / 256 GB)
+    acceptance: "CPU path measured multi-threaded at 20 Msps (STFT + PFB real-time factor); GPU provider for FftBackend + PfbBackend (wgpu compute or native Metal, chosen after a timeboxed comparison) with parity tests against the CPU reference; Accelerate vDSP evaluated for CPU FFT; benchmarks for every provider; provider selected at runtime/config (not only cargo feature) with CPU fallback; CI green without GPU"
+    area: crates/hk-dsp (providers, benches, parity tests), docs/adr/0007, ADR-0010 ledger
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    dod: "parity + benches green locally with GPU feature; ADR-0007 updated to a per-platform provider model (CPU ref, CPU MT, Accelerate, GPU, CUDA later via T-026); decision logged; pipeline config hookup described (one-line follow-up)"
+    note: "model per model-selection would be fable (novel compute); run on opus high (no Fable this session). No collision: T-037a/b, T-039, T-040 don't touch hk-dsp. CUDA stays the later Jetson provider (T-026 blocked)."
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

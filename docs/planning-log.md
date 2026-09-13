@@ -211,3 +211,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-037b:** the data path — writer thread, verification persistence, readsb backpressure, WFM fragments, capture names, FSK bits, short-replay attach, pilot frequency, FloorProduct lock, correlator I/O.
   - **T-039:** mapping demod families to band-plan priors.
   T-040 is still running in hk-model.
+- **B0.105 User request: T-041 Mac compute providers, launched immediately.** It doesn't collide with the running T-037a/b, T-039 or T-040, since none of them edit hk-dsp. The dev Mac is an M3 Ultra (28 CPU cores, 60-core GPU, Metal 3, 256 GB).
+  - **Plan:**
+    - Measure the multi-threaded CPU baseline at 20 Msps (STFT + PFB real-time factor).
+    - Add a GPU provider for `FftBackend`/`PfbBackend`, choosing wgpu compute (Metal on Mac, Vulkan on Jetson) or native Metal after a timeboxed comparison.
+    - Evaluate Accelerate vDSP for CPU FFT.
+    - Parity tests against the CPU reference, benchmarks, and runtime/config provider selection with CPU fallback.
+  - **Decisions (user):**
+    - ADR-0007 becomes a per-platform provider model.
+    - CUDA stays a later Jetson provider; T-026 stays blocked.
+    - The GPU path gets exercised on the Mac now rather than waiting for the Jetson.
+  - **Model:** Opus high (Fable excluded this session).
+  - **Caveat:** concurrent agent builds make CPU benchmarks noisy, so the agent records the load average and reports min/median.
