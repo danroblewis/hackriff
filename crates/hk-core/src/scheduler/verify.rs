@@ -2,10 +2,11 @@
 //!
 //! hk-core cannot depend on hk-detect (hk-detect depends on hk-core), so the trust functions are
 //! reached through [`TrustEvaluator`]: the runtime implements it by calling
-//! `hk_detect::trust::{gain_step, retune}` on its `CaptureResult`s (the hk-core scheduler tests
-//! do exactly that). This module owns the scheduling-side rules: which captures pair up, which
-//! is the lower gain state, and **never running gain-step inference when either block
-//! clipped** (S4 rule 6: reduce gain first).
+//! `hk_detect::trust::{gain_step, retune, rate_change}` on its `CaptureResult`s (the hk-core
+//! scheduler tests do exactly that). This module owns the scheduling-side rules: which captures
+//! pair up (only captures of one verification group, [`ScheduleStep::verification_group`]), which
+//! is the lower gain state, and **never running inference on a clipped capture** (S4 rule 6:
+//! reduce gain first).
 
 use super::config::MAX_GAIN_STEP_PAIRS;
 use super::step::{GainSlot, PoiKey, Purpose, ScheduleStep};
@@ -28,24 +29,37 @@ pub trait TrustEvaluator<C> {
     /// Rule 6 on one unclipped gain-step pair, ordered by nominal gain.
     fn gain_step(&mut self, poi: PoiKey, pair: u8, lower: &C, higher: &C);
 
-    /// Rule 7: `moved` was tuned `delta_hz` away from `base`, same gains.
+    /// Rule 7: `moved` was tuned `delta_hz` away from `base`, same gains. Both unclipped.
     fn retune(&mut self, poi: PoiKey, base: &C, moved: &C, delta_hz: f64);
 
-    /// Clock-harmonic test: `changed` ran at `rate_hz` instead of `base_rate_hz`, same centre.
-    /// (No hk-detect function exists yet; follow-up.)
+    /// Clock-harmonic test: `changed` ran at `rate_hz` instead of `base_rate_hz`, same centre
+    /// (`hk_detect::trust::rate_change`). Both unclipped.
     fn rate_change(&mut self, poi: PoiKey, base: &C, changed: &C, base_rate_hz: f64, rate_hz: f64);
 }
 
 /// A capture that does not belong to this verification group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum VerifyError {
-    /// The step is not a trust-test (or baseline) step of this POI.
+    /// The step is not a verification step (trust test or group baseline) of this POI.
     #[error("step {seq} is not a verification step of POI {poi}")]
     NotThisVerification {
         /// Step sequence number.
         seq: u64,
         /// This group's POI.
         poi: PoiKey,
+    },
+    /// The step belongs to an older verification group than the one being collected (a group
+    /// cut by a preemption or plan update and restarted under a new id).
+    #[error(
+        "step {seq} belongs to verification group {group}, older than the collected group {current}"
+    )]
+    StaleGroup {
+        /// Step sequence number.
+        seq: u64,
+        /// The step's group.
+        group: u64,
+        /// The group being collected.
+        current: u64,
     },
 }
 
@@ -60,16 +74,27 @@ pub struct VerificationReport {
     pub gain_pairs_incomplete: u8,
     /// Retune comparisons evaluated.
     pub retunes_run: u8,
-    /// Retune captures with no base capture to compare against.
+    /// Retune captures with no unclipped base capture to compare against.
     pub retunes_without_base: u8,
+    /// Retune captures skipped because they clipped.
+    pub retunes_skipped_clipped: u8,
     /// Rate-change comparisons evaluated.
     pub rate_changes_run: u8,
+    /// Rate-change captures with no unclipped base capture.
+    pub rate_changes_without_base: u8,
+    /// Rate-change captures skipped because they clipped.
+    pub rate_changes_skipped_clipped: u8,
 }
 
 /// Collects the captures of one POI's verification group, then feeds the trust tests.
+///
+/// The collector binds to the group of the first capture recorded. A capture from a newer group
+/// (the scheduler restarted the group) discards what was collected and starts over; one from an
+/// older group is rejected ([`VerifyError::StaleGroup`]). Captures of different groups never pair.
 pub struct Verification<C> {
     poi: PoiKey,
     pairs: u8,
+    group: Option<u64>,
     baseline: Option<C>,
     a: [Option<(Gains, C)>; PAIRS],
     b: [Option<(Gains, C)>; PAIRS],
@@ -87,6 +112,7 @@ impl<C: CaptureTrust> Verification<C> {
         Self {
             poi,
             pairs: pairs.min(MAX_GAIN_STEP_PAIRS),
+            group: None,
             baseline: None,
             a: std::array::from_fn(|_| None),
             b: std::array::from_fn(|_| None),
@@ -95,36 +121,71 @@ impl<C: CaptureTrust> Verification<C> {
         }
     }
 
+    /// The verification group being collected, once a capture was recorded.
+    pub fn group(&self) -> Option<u64> {
+        self.group
+    }
+
+    fn clear(&mut self) {
+        self.baseline = None;
+        self.a = std::array::from_fn(|_| None);
+        self.b = std::array::from_fn(|_| None);
+        self.retunes = [None, None];
+        self.rate = None;
+    }
+
     /// Records the capture made during `step`.
     pub fn record(&mut self, step: &ScheduleStep, capture: C) -> Result<(), VerifyError> {
+        let ours = match step.purpose {
+            Purpose::GainStep { poi, pair, .. } => poi == self.poi && pair < self.pairs,
+            Purpose::Dwell { poi } | Purpose::RateChange { poi, .. } => poi == self.poi,
+            Purpose::Retune { poi, delta_hz } => poi == self.poi && delta_hz != 0.0,
+            _ => false,
+        };
+        let (true, Some(group)) = (ours, step.verification_group) else {
+            return Err(VerifyError::NotThisVerification {
+                seq: step.seq,
+                poi: self.poi,
+            });
+        };
+        match self.group {
+            Some(current) if group < current => {
+                return Err(VerifyError::StaleGroup {
+                    seq: step.seq,
+                    group,
+                    current,
+                });
+            }
+            Some(current) if group == current => {}
+            _ => {
+                self.clear();
+                self.group = Some(group);
+            }
+        }
         match step.purpose {
-            Purpose::GainStep { poi, pair, slot } if poi == self.poi && pair < self.pairs => {
+            Purpose::GainStep { pair, slot, .. } => {
                 let side = match slot {
                     GainSlot::A => &mut self.a,
                     GainSlot::B => &mut self.b,
                 };
                 side[usize::from(pair)] = Some((step.gains, capture));
             }
-            Purpose::Dwell { poi } if poi == self.poi => self.baseline = Some(capture),
-            Purpose::Retune { poi, delta_hz } if poi == self.poi && delta_hz != 0.0 => {
+            Purpose::Dwell { .. } => self.baseline = Some(capture),
+            Purpose::Retune { delta_hz, .. } => {
                 self.retunes[usize::from(delta_hz < 0.0)] = Some((delta_hz, capture));
             }
-            Purpose::RateChange { poi, base_rate_hz } if poi == self.poi => {
+            Purpose::RateChange { base_rate_hz, .. } => {
                 self.rate = Some((base_rate_hz, step.rate_hz, capture));
             }
-            _ => {
-                return Err(VerifyError::NotThisVerification {
-                    seq: step.seq,
-                    poi: self.poi,
-                });
-            }
+            _ => {}
         }
         Ok(())
     }
 
-    /// Feeds every complete comparison to `evaluator`. Gain-step pairs with a clipped block are
-    /// skipped; retune and rate-change comparisons use the first A block (else the baseline
-    /// dwell) as their base.
+    /// Feeds every complete comparison to `evaluator`. Clipped captures never reach a test:
+    /// gain-step pairs with a clipped block are skipped, and retune and rate-change comparisons
+    /// use the first unclipped A block (else the unclipped baseline dwell) as their base and skip
+    /// clipped moved captures.
     pub fn evaluate(&self, evaluator: &mut impl TrustEvaluator<C>) -> VerificationReport {
         let mut report = VerificationReport::default();
         for pair in 0..self.pairs {
@@ -151,10 +212,11 @@ impl<C: CaptureTrust> Verification<C> {
             .iter()
             .flatten()
             .map(|(_, c)| c)
-            .next()
-            .or(self.baseline.as_ref());
+            .find(|c| !c.clipped())
+            .or(self.baseline.as_ref().filter(|c| !c.clipped()));
         for (delta_hz, moved) in self.retunes.iter().flatten() {
             match base {
+                _ if moved.clipped() => report.retunes_skipped_clipped += 1,
                 Some(b) => {
                     evaluator.retune(self.poi, b, moved, *delta_hz);
                     report.retunes_run += 1;
@@ -162,9 +224,15 @@ impl<C: CaptureTrust> Verification<C> {
                 None => report.retunes_without_base += 1,
             }
         }
-        if let (Some((base_rate, rate, changed)), Some(b)) = (&self.rate, base) {
-            evaluator.rate_change(self.poi, b, changed, *base_rate, *rate);
-            report.rate_changes_run += 1;
+        if let Some((base_rate, rate, changed)) = &self.rate {
+            match base {
+                _ if changed.clipped() => report.rate_changes_skipped_clipped += 1,
+                Some(b) => {
+                    evaluator.rate_change(self.poi, b, changed, *base_rate, *rate);
+                    report.rate_changes_run += 1;
+                }
+                None => report.rate_changes_without_base += 1,
+            }
         }
         report
     }

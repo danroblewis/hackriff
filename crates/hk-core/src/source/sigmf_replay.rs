@@ -840,6 +840,7 @@ fn replay_capabilities(
         bias_tee: false,
         external_clock: false,
         hardware_timestamps: false,
+        rf_path_boundaries_hz: Vec::new(),
     }
 }
 

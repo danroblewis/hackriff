@@ -14,6 +14,14 @@
 //!   `stays`; at ±Δ with similar level (±4 dB) and bandwidth (×2) it is LO-relative; at 2Δ an
 //!   image; otherwise `not_reproduced` (→ `marginal`). Reference harmonics and RF IMD stay at
 //!   absolute frequency, so they need rule 1 / the gain step instead.
+//! - [`rate_change`] — same centre, another sample rate: clock-locked lines move, real emitters
+//!   stay ([`rate_change`](mod@rate_change) module).
+
+pub mod rate_change;
+
+pub use rate_change::{
+    RateChangeConfig, RateChangeLabel, RateChangeResult, RateChangeRow, RateChangeSkip, rate_change,
+};
 
 use hk_model::detection::SpurReason;
 use hk_model::{DetectionFlags, Tune};

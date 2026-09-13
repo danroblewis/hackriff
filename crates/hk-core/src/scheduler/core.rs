@@ -12,6 +12,22 @@ use super::step::{GainSlot, PoiKey, Purpose, ScheduleStep};
 use super::survey::SurveyLog;
 use crate::source::{Gains, SourceCapabilities};
 
+/// POI scores (`interestingness × region priority`) are clamped to `[MIN_SCORE, MAX_SCORE]` (NaN
+/// → `MIN_SCORE`), so an overflowing product cannot starve other POIs.
+const MIN_SCORE: f64 = 1e-9;
+const MAX_SCORE: f64 = 1e9;
+
+/// A POI's dwell weight is at least this fraction of the strongest queued POI's score, so a tiny
+/// weight (priority 0, interestingness 0) still gets about one dwell in 20 of the strongest's.
+const MIN_DWELL_SHARE: f64 = 0.05;
+
+/// A retune keeps the emitter at least this far from DC, Hz (beyond its half bandwidth).
+const DC_GUARD_HZ: f64 = 10e3;
+
+/// A shrunk retune must move at least the emitter bandwidth plus this, Hz, so an LO-relative
+/// product separates from the emitter (twice the hk-detect retune frequency tolerance).
+const RETUNE_SEPARATION_HZ: f64 = 20e3;
+
 /// A point of interest to dwell on: a confirmed emitter from detection (T-006/T-007).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Poi {
@@ -52,6 +68,68 @@ pub struct TxSlotRequest {
     pub center_hz: f64,
     /// Duration, ns.
     pub duration_ns: i64,
+}
+
+/// Why a retune test direction of a POI is not scheduled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetuneSkip {
+    /// Retune tests are disabled (`retune_delta_hz` 0).
+    Disabled,
+    /// The moved centre is outside the source's frequency ranges.
+    OutOfRange,
+    /// The moved centre is on another RF path (the floor steps; the comparison is invalid).
+    RfPathSwitch,
+    /// The emitter cannot be both clear of DC and inside the usable span at any centre (it is
+    /// wider than about half the usable span).
+    NoRoom,
+    /// The configured offset puts the emitter across DC and no offset large enough to separate
+    /// LO-relative products (emitter bandwidth + 20 kHz, ≥ Δ/4) avoids it.
+    CrossesDc,
+    /// The configured offset pushes the emitter past the usable edge and no large enough smaller
+    /// offset fits.
+    PastUsableEdge,
+}
+
+/// One retune test direction as planned for a POI.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RetunePlan {
+    /// At the configured offset.
+    Full {
+        /// Offset, Hz.
+        delta_hz: f64,
+    },
+    /// Shrunk so the emitter stays clear of DC and inside the usable span.
+    Shrunk {
+        /// Offset used, Hz.
+        delta_hz: f64,
+        /// Configured offset, Hz.
+        configured_hz: f64,
+    },
+    /// Not scheduled.
+    Skipped(RetuneSkip),
+}
+
+impl RetunePlan {
+    /// The scheduled offset, if any.
+    pub fn delta_hz(&self) -> Option<f64> {
+        match *self {
+            RetunePlan::Full { delta_hz } | RetunePlan::Shrunk { delta_hz, .. } => Some(delta_hz),
+            RetunePlan::Skipped(_) => None,
+        }
+    }
+}
+
+/// How a POI's dwell and verification fit the window, computed when it is offered or the plan
+/// changes ([`Scheduler::poi_notes`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PoiNotes {
+    /// The emitter is wider than the dwell's usable span: its edges fall outside the window.
+    pub wider_than_span: bool,
+    /// The emitter overlaps DC (±10 kHz) in its dwell: it is wider than half the usable span, or
+    /// no off-DC centre fits the source range and RF path.
+    pub on_dc: bool,
+    /// Retune test directions `[+Δ, −Δ]`.
+    pub retunes: [RetunePlan; 2],
 }
 
 /// Scheduler errors.
@@ -124,6 +202,7 @@ struct Template {
     accessory: bool,
     rf_path: u8,
     purpose: Purpose,
+    verification_group: Option<u64>,
 }
 
 impl Template {
@@ -142,6 +221,7 @@ impl Template {
                 HopKind::Sweep => Purpose::Sweep { hop: hop_index },
                 HopKind::RegionDwell => Purpose::RegionDwell { hop: hop_index },
             },
+            verification_group: None,
         }
     }
 }
@@ -187,6 +267,7 @@ struct ActiveIntent {
 struct PoiEntry {
     poi: Poi,
     dwell: Template,
+    notes: PoiNotes,
     score: f64,
     served: u64,
     verified: bool,
@@ -214,6 +295,7 @@ pub struct Scheduler<C: Clock> {
     intent: Option<ActiveIntent>,
     slot: Option<Snapshot>,
     current_end: Timestamp,
+    last_now: Timestamp,
     stats: ScheduleStats,
     survey: Option<OpenSurvey>,
 }
@@ -242,6 +324,7 @@ impl<C: Clock> Scheduler<C> {
             intent: None,
             slot: None,
             current_end: now,
+            last_now: now,
             stats: ScheduleStats::default(),
             survey: None,
         })
@@ -267,7 +350,7 @@ impl<C: Clock> Scheduler<C> {
         self.stats
     }
 
-    /// Complete discovery passes so far.
+    /// Complete discovery passes so far (across plan updates).
     pub fn passes_completed(&self) -> u64 {
         self.cursor.passes
     }
@@ -290,10 +373,23 @@ impl<C: Clock> Scheduler<C> {
             .map(|e| e.verified)
     }
 
+    /// How a queued POI fits its dwell window and which retune tests it gets (and why not).
+    pub fn poi_notes(&self, key: PoiKey) -> Option<PoiNotes> {
+        self.pois.iter().find(|e| e.poi.key == key).map(|e| e.notes)
+    }
+
+    /// The clock reading, never earlier than a previous one (a clock that steps backwards cannot
+    /// reorder step start times; use a monotonic clock so cuts stay correct too).
+    fn now(&mut self) -> Timestamp {
+        let now = self.clock.now().max(self.last_now);
+        self.last_now = now;
+        now
+    }
+
     /// The next step, starting now. Order: user intent, then a running verification group, then
     /// the sweep/dwell cycle.
     pub fn next_step(&mut self) -> ScheduleStep {
-        let now = self.clock.now();
+        let now = self.now();
         if self
             .intent
             .is_some_and(|a| a.until.is_some_and(|until| now >= until))
@@ -321,6 +417,7 @@ impl<C: Clock> Scheduler<C> {
             rf_path: t.rf_path,
             purpose: t.purpose,
             plan_version: self.plan.plan_version,
+            verification_group: t.verification_group,
         };
         self.seq += 1;
         self.current_end = step.t_end();
@@ -341,31 +438,36 @@ impl<C: Clock> Scheduler<C> {
     /// Queues or updates a POI. Its dwell is sized now: rate ≥ `dwell_min_rate_hz` and wide
     /// enough that the emitter fits half the usable span, offset-tuned by a quarter span so the
     /// emitter clears DC, duration from its burst interval (else the default), clamped to the
-    /// plan's dwell cap. A full queue evicts the lowest-scoring POI if the new one scores higher.
+    /// plan's dwell cap. Emitters too wide for that are noted ([`Scheduler::poi_notes`]). A full
+    /// queue evicts the lowest-scoring POI if the new one scores higher.
     pub fn offer_poi(&mut self, poi: Poi) -> Result<(), SchedulerError> {
         self.check_poi(&poi)?;
         let dwell = dwell_template(&self.plan, &self.cfg, &self.caps, &poi);
+        let notes = poi_notes(&self.cfg, &self.caps, &poi, &dwell);
         let score = self.score(&poi);
         if let Some(e) = self.pois.iter_mut().find(|e| e.poi.key == poi.key) {
             e.poi = poi;
             e.dwell = dwell;
+            e.notes = notes;
             e.score = score;
             return Ok(());
         }
         // Start a new POI level with the least-served one, so it does not monopolise dwells.
+        let floor = self.pois.iter().map(|e| e.score).fold(score, f64::max) * MIN_DWELL_SHARE;
         let min_ratio = self
             .pois
             .iter()
-            .map(|e| e.served as f64 / e.score)
+            .map(|e| e.served as f64 / e.score.max(floor))
             .fold(f64::INFINITY, f64::min);
         let served = if min_ratio.is_finite() {
-            (min_ratio * score).floor() as u64
+            (min_ratio * score.max(floor)).floor() as u64
         } else {
             0
         };
         let entry = PoiEntry {
             poi,
             dwell,
+            notes,
             score,
             served,
             verified: false,
@@ -406,7 +508,8 @@ impl<C: Clock> Scheduler<C> {
 
     /// Preempts with explicit user intent, effective from the next [`Scheduler::next_step`]
     /// (the executor should cut the running step). A cut discovery hop or dwell is rolled back
-    /// and re-visited later; a cut verification group restarts from its first stage.
+    /// and re-visited later; a cut verification group restarts from its first stage under a new
+    /// verification group id.
     pub fn preempt(&mut self, intent: UserIntent) -> Result<(), SchedulerError> {
         if !(intent.center_hz.is_finite() && self.caps.supports_frequency(intent.center_hz)) {
             return Err(SchedulerError::OutOfCapability {
@@ -432,7 +535,7 @@ impl<C: Clock> Scheduler<C> {
                 reason,
             })?;
         }
-        let now = self.clock.now();
+        let now = self.now();
         self.cut(now);
         self.intent = Some(ActiveIntent {
             intent,
@@ -445,7 +548,7 @@ impl<C: Clock> Scheduler<C> {
     pub fn release_intent(&mut self) -> bool {
         let had = self.intent.take().is_some();
         if had {
-            let now = self.clock.now();
+            let now = self.now();
             self.current_end = self.current_end.min(now);
         }
         had
@@ -471,7 +574,7 @@ impl<C: Clock> Scheduler<C> {
             plan_version: self.plan.plan_version,
             device_id: device_id.into(),
             state: SurveyState::Open,
-            t_start: self.clock.now(),
+            t_start: self.now(),
             t_end: None,
             summary: None,
         };
@@ -498,16 +601,19 @@ impl<C: Clock> Scheduler<C> {
             .as_ref()
             .ok_or(SchedulerError::SurveyNotOpen)?
             .id;
-        log.close(id, state, self.clock.now(), summary)?;
+        let now = self.now();
+        log.close(id, state, now, summary)?;
         self.survey = None;
         Ok(id)
     }
 
     /// Switches to a new plan version (or another plan). The new plan is compiled first; on
     /// error the running plan is kept. If a Survey is open it is closed with `summary` and a new
-    /// one opens under the new version (returned). The discovery pass restarts; queued POIs are
-    /// kept and re-sized; a running verification group is dropped (it restarts later); a user
-    /// intent stays in force.
+    /// one opens under the new version (returned). The discovery pass resumes at the equivalent
+    /// position of the new plan (the hop covering the next unvisited frequency), so frequent
+    /// updates still reach the tail of the pass; queued POIs are kept and re-sized; a running
+    /// verification group is dropped (it restarts later under a new id); a user intent stays in
+    /// force.
     pub fn update_plan(
         &mut self,
         plan: &ScanPlan,
@@ -529,7 +635,8 @@ impl<C: Clock> Scheduler<C> {
             Some(open) => {
                 let id = open.id;
                 let device = open.device_id.clone();
-                log.close(id, SurveyState::Closed, self.clock.now(), summary)?;
+                let now = self.now();
+                log.close(id, SurveyState::Closed, now, summary)?;
                 self.survey = None;
                 Some(device)
             }
@@ -540,22 +647,47 @@ impl<C: Clock> Scheduler<C> {
                 e.verified = false;
             }
         }
+        let hop = self.resume_hop(&compiled);
         self.cfg = cfg;
         self.plan = compiled;
-        self.cursor = Cursor::default();
+        self.cursor.hop = hop;
         self.slot = None;
         if self.pois.capacity() < self.cfg.max_pois {
             self.pois.reserve(self.cfg.max_pois - self.pois.len());
         }
         for i in 0..self.pois.len() {
             let poi = self.pois[i].poi;
-            self.pois[i].dwell = dwell_template(&self.plan, &self.cfg, &self.caps, &poi);
+            let dwell = dwell_template(&self.plan, &self.cfg, &self.caps, &poi);
+            self.pois[i].notes = poi_notes(&self.cfg, &self.caps, &poi, &dwell);
+            self.pois[i].dwell = dwell;
             self.pois[i].score = self.score(&poi);
         }
         match device {
             Some(device) => Ok(Some(self.open_survey(log, &device)?)),
             None => Ok(None),
         }
+    }
+
+    /// The hop of `new` equivalent to the running pass position: the hop (of the same kind)
+    /// covering the next old hop's lower edge, else the first hop after it in pass order
+    /// (priority descending, then frequency), else the pass start.
+    fn resume_hop(&self, new: &CompiledPlan) -> usize {
+        if self.cursor.hop == 0 {
+            return 0;
+        }
+        let Some(old) = self.plan.hops.get(self.cursor.hop) else {
+            return 0;
+        };
+        let f = old.covers.lo_hz;
+        new.hops
+            .iter()
+            .position(|h| h.kind == old.kind && h.covers.lo_hz <= f && f < h.covers.hi_hz)
+            .or_else(|| {
+                new.hops.iter().position(|h| {
+                    h.priority < old.priority || (h.priority == old.priority && h.covers.lo_hz >= f)
+                })
+            })
+            .unwrap_or(0)
     }
 
     fn check_poi(&self, poi: &Poi) -> Result<(), SchedulerError> {
@@ -583,7 +715,12 @@ impl<C: Clock> Scheduler<C> {
 
     fn score(&self, poi: &Poi) -> f64 {
         let priority = self.plan.region_priority_at(poi.center_hz).unwrap_or(1.0);
-        poi.interestingness.max(1e-6) * priority.max(1e-6)
+        let score = poi.interestingness * priority;
+        if score.is_nan() {
+            MIN_SCORE
+        } else {
+            score.clamp(MIN_SCORE, MAX_SCORE)
+        }
     }
 
     /// Rolls back the running slot if `now` is inside it or a verification group is unfinished.
@@ -623,8 +760,9 @@ impl<C: Clock> Scheduler<C> {
             gains: i.gains.unwrap_or(gains),
             gain_entry,
             accessory,
-            rf_path: rf_path(&self.cfg.rf_path_boundaries_hz, i.center_hz),
+            rf_path: rf_path(self.cfg.rf_path_boundaries(&self.caps), i.center_hz),
             purpose: Purpose::UserIntent { intent: i.id },
+            verification_group: None,
         }
     }
 
@@ -698,20 +836,22 @@ impl<C: Clock> Scheduler<C> {
         t
     }
 
-    /// Weighted round robin: the POI with the lowest `served / score`; ties go to the higher
-    /// score, then the earlier offer.
+    /// Weighted round robin: the POI with the lowest `served / weight`, where the weight is the
+    /// score raised to at least `MIN_DWELL_SHARE` of the strongest score; ties go to the higher
+    /// weight, then the earlier offer.
     fn pick_poi(&self) -> Option<usize> {
+        let floor = self.pois.iter().map(|e| e.score).fold(0.0, f64::max) * MIN_DWELL_SHARE;
+        let weight = |e: &PoiEntry| e.score.max(floor);
         let mut best: Option<usize> = None;
         for (i, e) in self.pois.iter().enumerate() {
             let better = match best {
                 None => true,
                 Some(b) => {
                     let bb = &self.pois[b];
-                    let lhs = e.served as f64 * bb.score;
-                    let rhs = bb.served as f64 * e.score;
-                    lhs < rhs
-                        || (lhs == rhs
-                            && (e.score > bb.score || (e.score == bb.score && e.order < bb.order)))
+                    let (we, wb) = (weight(e), weight(bb));
+                    let lhs = e.served as f64 * wb;
+                    let rhs = bb.served as f64 * we;
+                    lhs < rhs || (lhs == rhs && (we > wb || (we == wb && e.order < bb.order)))
                 }
             };
             if better {
@@ -721,14 +861,20 @@ impl<C: Clock> Scheduler<C> {
         best
     }
 
+    /// The verification stages for POI `i`; every stage carries the group id, the `seq` of the
+    /// group's first step (the step about to be emitted).
     fn verification_for(&self, i: usize) -> VerifyState {
         let e = &self.pois[i];
         let key = e.poi.key;
         let base = e.dwell;
+        let group = Some(self.seq);
         let mut stages = [None; MAX_STAGES];
         let mut n = 0;
         let mut push = |t: Template| {
-            stages[n] = Some(t);
+            stages[n] = Some(Template {
+                verification_group: group,
+                ..t
+            });
             n += 1;
         };
         match self.alt_gains(base.gains) {
@@ -754,20 +900,13 @@ impl<C: Clock> Scheduler<C> {
                 ..base
             }),
         }
-        if self.cfg.retune_delta_hz > 0.0 {
-            for delta_hz in [self.cfg.retune_delta_hz, -self.cfg.retune_delta_hz] {
-                let center_hz = base.center_hz + delta_hz;
-                if self.caps.supports_frequency(center_hz)
-                    && rf_path(&self.cfg.rf_path_boundaries_hz, center_hz) == base.rf_path
-                {
-                    push(Template {
-                        duration_ns: self.cfg.retune_dwell_ns,
-                        center_hz,
-                        purpose: Purpose::Retune { poi: key, delta_hz },
-                        ..base
-                    });
-                }
-            }
+        for delta_hz in e.notes.retunes.iter().filter_map(RetunePlan::delta_hz) {
+            push(Template {
+                duration_ns: self.cfg.retune_dwell_ns,
+                center_hz: base.center_hz + delta_hz,
+                purpose: Purpose::Retune { poi: key, delta_hz },
+                ..base
+            });
         }
         if self.cfg.rate_change {
             if let Some(rate_hz) = self.alt_rate(e) {
@@ -848,7 +987,7 @@ fn dwell_template(
     } else {
         ((usable - bw) / 2.0).max(0.0)
     };
-    let bounds = &cfg.rf_path_boundaries_hz;
+    let bounds = cfg.rf_path_boundaries(caps);
     let path = rf_path(bounds, poi.center_hz);
     let center_hz = [poi.center_hz - offset, poi.center_hz + offset]
         .into_iter()
@@ -874,5 +1013,73 @@ fn dwell_template(
         accessory,
         rf_path: rf_path(bounds, center_hz),
         purpose: Purpose::Dwell { poi: poi.key },
+        verification_group: None,
+    }
+}
+
+/// Dwell fit and retune plan for `poi` in `dwell`. A retune by `x` moves the emitter to `o0 − x`
+/// from the LO (`o0` its dwell offset); it must stay at `|o0 − x|` in `[bw/2 + guard, usable/2 −
+/// bw/2]`. Each direction takes the configured offset if that fits, else the largest fitting
+/// smaller offset that still separates LO-relative products, else it is skipped with the reason.
+fn poi_notes(
+    cfg: &SchedulerConfig,
+    caps: &SourceCapabilities,
+    poi: &Poi,
+    dwell: &Template,
+) -> PoiNotes {
+    let usable_half = (dwell.rate_hz * cfg.usable_fraction).min(cfg.max_span_hz) / 2.0;
+    let half_bw = poi.bandwidth_hz / 2.0;
+    let o0 = poi.center_hz - dwell.center_hz;
+    let (near, far) = (half_bw + DC_GUARD_HZ, usable_half - half_bw);
+    let bounds = cfg.rf_path_boundaries(caps);
+    let delta = cfg.retune_delta_hz;
+    let min_shrunk = (poi.bandwidth_hz + RETUNE_SEPARATION_HZ).max(0.25 * delta);
+    let retune = |d: f64| -> RetunePlan {
+        if d == 0.0 {
+            return RetunePlan::Skipped(RetuneSkip::Disabled);
+        }
+        if near > far {
+            return RetunePlan::Skipped(RetuneSkip::NoRoom);
+        }
+        let (sign, full) = (d.signum(), d.abs());
+        // Allowed x: [o0 − far, o0 − near] ∪ [o0 + near, o0 + far]; in magnitude along `sign`,
+        // clipped to (0, full], the largest.
+        let best = [(o0 - far, o0 - near), (o0 + near, o0 + far)]
+            .into_iter()
+            .filter_map(|(a, b)| {
+                let (lo, hi) = ((sign * a).min(sign * b), (sign * a).max(sign * b));
+                let top = hi.min(full);
+                (top > 0.0 && top >= lo).then_some(top)
+            })
+            .max_by(f64::total_cmp);
+        let magnitude = match best {
+            Some(m) if m == full || m >= min_shrunk => m,
+            _ => {
+                let moved = (o0 - d).abs();
+                return RetunePlan::Skipped(if moved + half_bw > usable_half {
+                    RetuneSkip::PastUsableEdge
+                } else {
+                    RetuneSkip::CrossesDc
+                });
+            }
+        };
+        let center_hz = dwell.center_hz + sign * magnitude;
+        if !caps.supports_frequency(center_hz) {
+            RetunePlan::Skipped(RetuneSkip::OutOfRange)
+        } else if rf_path(bounds, center_hz) != dwell.rf_path {
+            RetunePlan::Skipped(RetuneSkip::RfPathSwitch)
+        } else if magnitude == full {
+            RetunePlan::Full { delta_hz: d }
+        } else {
+            RetunePlan::Shrunk {
+                delta_hz: sign * magnitude,
+                configured_hz: d,
+            }
+        }
+    };
+    PoiNotes {
+        wider_than_span: poi.bandwidth_hz > 2.0 * usable_half,
+        on_dc: o0.abs() < near,
+        retunes: [retune(delta), retune(-delta)],
     }
 }

@@ -317,7 +317,7 @@ impl CompiledPlan {
                 _ => lanes.push(p),
             }
         }
-        let mut cuts: Vec<f64> = cfg.rf_path_boundaries_hz.clone();
+        let mut cuts: Vec<f64> = cfg.rf_path_boundaries(caps).to_vec();
         cuts.extend(
             plan.gain_table
                 .iter()
@@ -416,11 +416,13 @@ impl CompiledPlan {
     ) {
         let usable = self.usable_span_hz;
         let width = hi - lo;
-        let n = ((width / usable) - 1e-9).ceil().max(1.0) as usize;
+        // Slices leave `seam_guard_fraction` of the span as guard, so seams avoid the roll-off.
+        let slice = usable * (1.0 - cfg.seam_guard_fraction);
+        let n = ((width / slice) - 1e-9).ceil().max(1.0) as usize;
         let step = width / n as f64;
         let rate_hz = cfg.sweep_rate_hz;
         let baseband_filter_hz = pick_baseband_filter(caps, rate_hz);
-        let bounds = &cfg.rf_path_boundaries_hz;
+        let bounds = cfg.rf_path_boundaries(caps);
         for i in 0..n {
             let c_lo = lo + step * i as f64;
             let c_hi = if i + 1 == n {

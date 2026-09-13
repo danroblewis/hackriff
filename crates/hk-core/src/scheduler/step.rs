@@ -137,6 +137,10 @@ pub struct ScheduleStep {
     pub purpose: Purpose,
     /// ScanPlan version the step was planned under.
     pub plan_version: u32,
+    /// Verification group of a trust-test or baseline step: the `seq` of the group's first step.
+    /// A cut or plan update restarts a group under a new (larger) id, so captures of different
+    /// groups never pair ([`super::Verification`]). `None` outside verification groups.
+    pub verification_group: Option<u64>,
 }
 
 impl ScheduleStep {

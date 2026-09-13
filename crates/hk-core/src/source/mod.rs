@@ -217,7 +217,23 @@ pub struct SourceCapabilities {
     pub external_clock: bool,
     /// Provides hardware sample timestamps (HackRF One: no).
     pub hardware_timestamps: bool,
+    /// RF-path switch frequencies, ascending, Hz: the front end changes filter/mixer path at each,
+    /// so the noise floor steps there. Empty: a single path (or unknown, e.g. replay).
+    pub rf_path_boundaries_hz: Vec<f64>,
 }
+
+/// HackRF One RF-path switch frequencies, Hz: low-pass mixer path below 2170 MHz, mixer bypass
+/// from 2170 to 2740 MHz inclusive, high-pass mixer path above 2740 MHz.
+///
+/// Verified (T-032) against the upstream firmware: `min_bypass_freq = FP_MHZ(2170)` and
+/// `max_bypass_freq = FP_MHZ(2740)` with `select_img_reject` choosing high-pass for
+/// `f > max_bypass_freq` and bypass for `f >= min_bypass_freq`,
+/// <https://github.com/greatscottgadgets/hackrf/blob/7a6b09962402836745d74e133d46a5d95102a232/firmware/common/tuning.c>
+/// (lines 36–37, 86–95). The same file sets 2320 / 2580 MHz for Praline (HackRF Pro), which needs
+/// its own capabilities. `rf_path` counts a boundary as reached at `f >= b`, so exactly 2740 MHz
+/// is labelled high-pass while the firmware still bypasses there (one frequency point). S4 §3.7
+/// measured the floor step at ~2.74 GHz.
+pub const HACKRF_ONE_RF_PATH_BOUNDARIES_HZ: [f64; 2] = [2170e6, 2740e6];
 
 impl SourceCapabilities {
     /// HackRF One: 1 MHz–6 GHz, 2–20 Msps, 8-bit, half duplex, TX-capable hardware, LNA 0–40 dB
@@ -267,6 +283,7 @@ impl SourceCapabilities {
             bias_tee: true,
             external_clock: true,
             hardware_timestamps: false,
+            rf_path_boundaries_hz: HACKRF_ONE_RF_PATH_BOUNDARIES_HZ.to_vec(),
         }
     }
 
