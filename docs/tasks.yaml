@@ -88,7 +88,7 @@ tasks:
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
     status: done
     commit: "a40c2eb + review fixes 854614c (merged)"
-    review: "Opus review FIX-BEFORE-MERGE -> fixed (gate release + re-seed, 1 s episode rise/end/fall with hold-off and SK noise-like/structured class, wide-signal floor reference, OS-only guard, FCME caps/NaN guard, log-space gamma inverses, GainKey tolerance). Merged on targeted repro tests; focused re-review of the episode state machine running post-merge, fixes forward"
+    review: "Opus review FIX-BEFORE-MERGE -> fixed (gate release + re-seed, 1 s episode rise/end/fall with hold-off and SK noise-like/structured class, wide-signal floor reference, OS-only guard, FCME caps/NaN guard, log-space gamma inverses, GainKey tolerance). Merged on targeted repro tests. Post-merge re-review URGENT-FIX: wide_floor biased low on sloped floors (Pfa 21-7600x on tilt/roll-off/notch/real urban capture); sub-band Falls suppressed; End fires while part of region elevated; silent merges + duplicate Rises; onset ramps misclassed Structured; episodes never end after drift; gate release biases slow floor up to +1.6 dB mean; slow rises missed; reset re-open semantics. Fix agent running (may restructure into block classifier + episode aggregator); T-006 defaults to PerFrame reference, T-020 isolates episode adapter, T-021 flags gate-released periods meanwhile"
     deps: [T-004]
     parallel_group: C
     core_interface: true
