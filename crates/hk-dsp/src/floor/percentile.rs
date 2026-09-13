@@ -103,10 +103,20 @@ impl BlockPercentile {
 
     /// Estimates one block of linear bins.
     pub fn estimate_block(&mut self, values: &[f32]) -> PercentileBlock {
-        let l = values.len();
-        assert!(l > 0, "empty block");
+        assert!(!values.is_empty(), "empty block");
         self.scratch.clear();
         self.scratch.extend_from_slice(values);
+        if !values.iter().all(|x| x.is_finite() && *x > 0.0) {
+            self.scratch.retain(|x| x.is_finite() && *x > 0.0);
+        }
+        let l = self.scratch.len();
+        if l == 0 {
+            return PercentileBlock {
+                floor: f64::NAN,
+                occupancy: 1.0,
+                valid: false,
+            };
+        }
         let pos = self.config.quantile * (l - 1) as f64;
         let lo = pos.floor() as usize;
         let frac = pos - lo as f64;
@@ -119,7 +129,7 @@ impl BlockPercentile {
         };
         let floor = (q / self.factor).max(1e-37);
         let thr = (floor * self.occupancy_threshold) as f32;
-        let above = values.iter().filter(|&&x| x > thr).count();
+        let above = self.scratch.iter().filter(|&&x| x > thr).count();
         let occupancy = occupancy_from_count(above, l, self.config.occupancy_pfa);
         PercentileBlock {
             floor,

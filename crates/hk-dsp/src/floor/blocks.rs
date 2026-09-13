@@ -99,8 +99,20 @@ impl BlockLayout {
         (b * self.hop) as f64 + (self.block as f64 - 1.0) / 2.0
     }
 
+    /// The bins [`interpolate`](Self::interpolate) holds constant: below the first block centre
+    /// and above the last (≈ 128 bins at each end with 256-bin blocks). There the floor is the
+    /// edge block's value, which **overestimates** the floor across the baseband filter
+    /// roll-off (HackRF: outside ±7.5 MHz at 20 Msps) and underestimates a rising edge; treat
+    /// these bins as `edge`.
+    pub fn held_bins(&self) -> (Range<usize>, Range<usize>) {
+        let first_end = (self.centre(0).floor() as usize + 1).min(self.bins);
+        let tail = (self.centre(self.count - 1).floor() as usize + 1).min(self.bins);
+        (0..first_end, tail..self.bins)
+    }
+
     /// Interpolates positive per-block values (linear power) to every bin, linearly in dB between
-    /// block centres and held constant beyond the first and last centre. Allocation-free.
+    /// block centres and held constant beyond the first and last centre
+    /// ([`held_bins`](Self::held_bins)). Allocation-free.
     pub fn interpolate(&self, blocks: &[f32], out: &mut [f32]) {
         assert_eq!(blocks.len(), self.count, "one value per block");
         assert_eq!(out.len(), self.bins, "one output per bin");
@@ -129,9 +141,62 @@ impl BlockLayout {
     }
 }
 
+/// Replaces each block with `valid[b] == false` by the value of the nearest valid block (ties go
+/// to the lower index). Returns the number of valid blocks; with none, `values` is unchanged.
+/// Allocation-free.
+pub fn fill_invalid(values: &mut [f32], valid: &[bool]) -> usize {
+    assert_eq!(values.len(), valid.len(), "one validity flag per block");
+    let n = valid.iter().filter(|&&v| v).count();
+    if n == 0 || n == values.len() {
+        return n;
+    }
+    for b in 0..values.len() {
+        if valid[b] {
+            continue;
+        }
+        let mut d = 1;
+        loop {
+            if b >= d && valid[b - d] {
+                values[b] = values[b - d];
+                break;
+            }
+            if b + d < values.len() && valid[b + d] {
+                values[b] = values[b + d];
+                break;
+            }
+            d += 1;
+        }
+    }
+    n
+}
+
+/// Sliding minimum over `±half_width` entries (allocation-free, `O(len·width)`).
+pub fn sliding_min(values: &[f32], half_width: usize, out: &mut [f32]) {
+    assert_eq!(values.len(), out.len(), "input/output length mismatch");
+    let n = values.len();
+    for (b, o) in out.iter_mut().enumerate() {
+        let lo = b.saturating_sub(half_width);
+        let hi = (b + half_width + 1).min(n);
+        *o = values[lo..hi].iter().copied().fold(f32::INFINITY, f32::min);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_and_sliding_min() {
+        let mut v = [9.0, 1.0, 9.0, 9.0, 2.0, 9.0];
+        let valid = [false, true, false, false, true, false];
+        assert_eq!(fill_invalid(&mut v, &valid), 2);
+        assert_eq!(v, [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
+        let mut out = [0.0; 6];
+        sliding_min(&[5.0, 4.0, 3.0, 6.0, 7.0, 8.0], 1, &mut out);
+        assert_eq!(out, [4.0, 3.0, 3.0, 3.0, 6.0, 7.0]);
+        let l = BlockLayout::new(4096, BlockConfig::default()).unwrap();
+        assert_eq!(l.held_bins(), (0..128, 3968..4096));
+    }
 
     #[test]
     fn layout_counts_and_centres() {

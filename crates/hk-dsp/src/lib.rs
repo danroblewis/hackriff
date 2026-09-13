@@ -35,7 +35,7 @@ pub mod window;
 
 pub use fft::{CpuFft, FftBackend};
 pub use floor::{
-    ChannelFloor, FloorConfig, FloorFrame, FloorKind, FloorRiseEvent, FloorThreshold,
+    ChannelFloor, FloorConfig, FloorEvent, FloorEventKind, FloorFrame, FloorKind, FloorThreshold,
     NoiseFloorTracker,
 };
 pub use persistence::{Persistence, PersistenceConfig};

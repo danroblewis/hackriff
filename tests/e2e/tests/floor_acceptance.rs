@@ -2,13 +2,16 @@
 //! `NoiseFloorTracker`:
 //! - SPACE-050 (`injected_floor`): known per-segment floors at six tunes → recovered floor within
 //!   ±1 dB per segment (target ±0.5 dB), calibrated and uncalibrated.
-//! - AWARE-006 (`noise_floor_rise`): a broadband (and a partial-band) floor step at `t0` → one
-//!   floor-rise event at `t0` ± one frame with the right step, and the slow floor shows the step.
+//! - AWARE-006 (`noise_floor_rise`): a broadband (and a partial-band) floor step at `t0` → exactly
+//!   one noise-like `Rise` episode, onset at `t0` ± one frame, confirmed `confirm_s` (1 s) later,
+//!   with the right step and extent; the slow floor shows the step.
 //!
 //! Tests skip when `uv` is missing (`HK_E2E_REQUIRE_SYNTH=1` makes that a failure).
 
 use hk_core::{BlockHeader, Discontinuity, ProvenanceHandle};
-use hk_dsp::floor::{FloorConfig, FloorKind, FloorRiseEvent, NoiseFloorTracker};
+use hk_dsp::floor::{
+    FloorChangeClass, FloorConfig, FloorEvent, FloorEventKind, FloorKind, NoiseFloorTracker,
+};
 use hk_dsp::{InputInfo, StftConfig, StftProcessor, WelchConfig};
 use hk_e2e::{Fixture, Role, SynthRequest, Tolerance, TruthItem, assert_param, synth_or_skip};
 use hk_model::{SampleTime, Timestamp};
@@ -44,7 +47,7 @@ struct Summary {
 
 struct Replay {
     frames: Vec<Summary>,
-    events: Vec<FloorRiseEvent>,
+    events: Vec<FloorEvent>,
     frame_period_s: f64,
 }
 
@@ -140,7 +143,8 @@ fn space_050_injected_floor_recovered_per_segment() {
     let r = replay(&fx, 1024);
     assert!(
         r.events.is_empty(),
-        "retunes start new segments, not floor rises"
+        "retunes start new segments, not floor changes: {:?}",
+        r.events
     );
     let floors = fx.with_role(Role::Floor);
     assert_eq!(floors.len(), 6);
@@ -204,36 +208,66 @@ fn floor_truth<'a>(fx: &'a Fixture, label: &str) -> &'a TruthItem {
         .unwrap_or_else(|| panic!("no {label} truth"))
 }
 
+const CONFIRM_S: f64 = 1.0;
+
 fn check_rise(fx: &Fixture, r: &Replay, edge_tolerance_hz: f64) {
     let ev = fx.with_role(Role::Event)[0];
     let t0 = ev.expect_f64("t0_s");
     let before = truth_dbfs_per_hz(floor_truth(fx, "noise-floor-before"));
     let after = truth_dbfs_per_hz(floor_truth(fx, "noise-floor-after"));
-    assert_eq!(r.events.len(), 1, "AWARE-006: exactly one floor-rise event");
+    assert_eq!(
+        r.events.len(),
+        1,
+        "AWARE-006: exactly one floor-change event: {:?}",
+        r.events
+    );
     let e = &r.events[0];
-    let t_event = e.t.sample_index as f64 / fx.sample_rate;
+    let fs = fx.sample_rate;
+    let onset = e.onset_t.sample_index as f64 / fs;
+    let confirmed = e.confirmed_t.sample_index as f64 / fs;
     eprintln!(
-        "AWARE-006: t0 {t0:.4} s, event {t_event:.4} s (frame {:.2} ms); step {:+.2} dB vs truth {:+.2}; {:.3}–{:.3} MHz vs {:.3}–{:.3}",
+        "AWARE-006: t0 {t0:.4} s, onset {onset:.4} s, confirmed {confirmed:.4} s (frame {:.2} ms); class {:?}, SK {:?}, excess std {:.2} dB; step {:+.2} ± {:.3} dB vs truth {:+.2}; baseline {:.2} dBFS/Hz (truth {before:.2}); {:.3}–{:.3} MHz vs {:.3}–{:.3} ({:.0} % of span)",
         r.frame_period_s * 1e3,
+        e.class,
+        e.sk,
+        e.excess_std_db,
         e.step_db,
+        e.step_uncertainty_db,
         after - before,
+        e.baseline_dbfs_per_hz,
         e.f_lo_hz / 1e6,
         e.f_hi_hz / 1e6,
         ev.f_lo_hz / 1e6,
-        ev.f_hi_hz / 1e6
+        ev.f_hi_hz / 1e6,
+        e.band_fraction * 100.0
     );
+    assert_eq!(e.kind, FloorEventKind::Rise);
+    assert_eq!(
+        e.class,
+        FloorChangeClass::NoiseLike,
+        "AWARE-006: SK/steadiness discriminator"
+    );
+    let p = r.frame_period_s;
+    assert_param(AWARE_006, "rise onset s", onset, t0, Tolerance::Abs(p));
     assert_param(
         AWARE_006,
-        "rise time s",
-        t_event,
-        t0,
-        Tolerance::Abs(r.frame_period_s),
+        "rise confirmation delay s",
+        confirmed - onset,
+        CONFIRM_S,
+        Tolerance::Abs(p),
     );
     assert_param(
         AWARE_006,
         "rise step dB",
         f64::from(e.step_db),
         after - before,
+        Tolerance::Abs(1.0),
+    );
+    assert_param(
+        AWARE_006,
+        "rise baseline dBFS/Hz",
+        f64::from(e.baseline_dbfs_per_hz),
+        before,
         Tolerance::Abs(1.0),
     );
     assert_param(
@@ -250,35 +284,36 @@ fn check_rise(fx: &Fixture, r: &Replay, edge_tolerance_hz: f64) {
         ev.f_hi_hz,
         Tolerance::Abs(edge_tolerance_hz),
     );
+    assert_eq!(e.baseline_segment, e.segment);
     assert!(!e.quantisation_limited_before);
 }
 
 #[test]
-fn aware_006_broadband_floor_rise_event_and_slow_floor_step() {
+fn aware_006_broadband_floor_rise_episode_and_slow_floor_step() {
     let out = synth_or_skip!(
         SynthRequest::new("noise_floor_rise")
             .seed(3)
-            .param("duration_s", 1.0)
-            .param("t0_s", 0.5)
+            .param("duration_s", 3.0)
+            .param("t0_s", 1.0)
     );
     let fx = out.fixture(0).unwrap();
     let r = replay(&fx, 1024);
     let bin_hz = fx.sample_rate / 1024.0;
     check_rise(&fx, &r, bin_hz);
 
-    let t0 = 0.5;
+    let t0 = 1.0;
     let before = truth_dbfs_per_hz(floor_truth(&fx, "noise-floor-before"));
     let after = truth_dbfs_per_hz(floor_truth(&fx, "noise-floor-after"));
     let mut slow_before: Vec<f64> = r
         .frames
         .iter()
-        .filter(|s| s.t_s >= 0.2 && s.t_s + r.frame_period_s <= t0)
+        .filter(|s| s.t_s >= 0.3 && s.t_s + r.frame_period_s <= t0)
         .map(|s| s.slow_db)
         .collect();
     let mut slow_after: Vec<f64> = r
         .frames
         .iter()
-        .filter(|s| s.t_s >= t0 + 0.1)
+        .filter(|s| s.t_s >= t0 + CONFIRM_S + 0.2)
         .map(|s| s.slow_db)
         .collect();
     let (sb, sa) = (median(&mut slow_before), median(&mut slow_after));
@@ -317,12 +352,12 @@ fn aware_006_broadband_floor_rise_event_and_slow_floor_step() {
 }
 
 #[test]
-fn aware_006_partial_band_floor_rise_event() {
+fn aware_006_partial_band_floor_rise_episode() {
     let out = synth_or_skip!(
         SynthRequest::new("noise_floor_rise")
             .seed(5)
-            .param("duration_s", 1.0)
-            .param("t0_s", 0.5)
+            .param("duration_s", 3.0)
+            .param("t0_s", 1.0)
             .param("rise_bandwidth_hz", 500e3)
             .param("rise_offset_hz", 300e3)
     );

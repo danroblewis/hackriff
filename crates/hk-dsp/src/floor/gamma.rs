@@ -9,17 +9,19 @@
 //! | Function | Meaning |
 //! |---|---|
 //! | [`regularized_lower`] `P(a, x)`, [`regularized_upper`] `Q(a, x)` | `γ(a,x)/Γ(a)`, `Γ(a,x)/Γ(a)` |
+//! | [`ln_regularized_lower`], [`ln_regularized_upper`] | their logarithms, accurate far into the tails (1e-300) |
 //! | [`inverse_lower`], [`inverse_upper`] | `x` with `P(a,x) = p` / `Q(a,x) = q` |
 //! | [`mean_threshold`] `T(n, pfa)` | `Q⁻¹(n, pfa)/n`: `P(X > T·μ) = pfa`. Gamma(10): 1e-3 → 3.55 dB, 1e-6 → 5.15 dB |
 //! | [`mean_quantile`] `(n, p)` | `P⁻¹(n, p)/n`: the `p`-quantile in units of the mean (percentile bias) |
 //! | [`truncated_mean_ratio`] `(n, t)` | `E[X | X < t·μ]/μ = P(n+1, n·t)/P(n, n·t)` (FCME bias) |
 //! | [`exceedance`] `(n, t)` | `P(X > t·μ) = Q(n, n·t)` |
 //!
-//! Implementation: Lanczos `ln Γ` (g = 7, 9 terms, ~1e-15 relative); `P` by its power series
-//! when `x < a + 1` and `Q` by the modified-Lentz continued fraction otherwise (each computed
-//! directly in the tail where it is small, so tail probabilities keep full relative precision);
-//! inverses by Wilson–Hilferty start + safeguarded Newton on whichever tail is smaller. Written
-//! from the standard formulas (Abramowitz & Stegun 6.5.29, 6.5.31; 26.4.17); no dependency.
+//! Implementation: Lanczos `ln Γ` (g = 7, 9 terms, ~1e-15 relative); `ln P` by its power series
+//! when `x < a + 1` and `ln Q` by the modified-Lentz continued fraction otherwise, each summed
+//! before the logarithm so tail probabilities keep full relative precision down to ~1e-300;
+//! inverses by safeguarded Newton on `ln(tail)` in `ln x`, on whichever tail is smaller, to a
+//! relative probability error of 1e-12 (tested at 1e-100 and 1e-300). Written from the standard
+//! formulas (Abramowitz & Stegun 6.5.29, 6.5.31; 26.4.17); no dependency.
 
 use std::f64::consts::PI;
 
@@ -60,8 +62,8 @@ fn ln_prefactor(a: f64, x: f64) -> f64 {
     a * x.ln() - x - ln_gamma(a)
 }
 
-/// Series for `P(a, x)`; converges quickly for `x < a + 1`.
-fn lower_series(a: f64, x: f64) -> f64 {
+/// `ln P(a, x)` by the series; converges quickly for `x < a + 1`.
+fn ln_lower_series(a: f64, x: f64) -> f64 {
     let mut ap = a;
     let mut del = 1.0 / a;
     let mut sum = del;
@@ -73,11 +75,11 @@ fn lower_series(a: f64, x: f64) -> f64 {
             break;
         }
     }
-    (sum.ln() + ln_prefactor(a, x)).exp()
+    sum.ln() + ln_prefactor(a, x)
 }
 
-/// Continued fraction for `Q(a, x)`; converges quickly for `x ≥ a + 1`.
-fn upper_fraction(a: f64, x: f64) -> f64 {
+/// `ln Q(a, x)` by the continued fraction; converges quickly for `x ≥ a + 1`.
+fn ln_upper_fraction(a: f64, x: f64) -> f64 {
     let mut b = x + 1.0 - a;
     let mut c = 1.0 / TINY;
     let mut d = 1.0 / b;
@@ -100,35 +102,49 @@ fn upper_fraction(a: f64, x: f64) -> f64 {
             break;
         }
     }
-    (h.ln() + ln_prefactor(a, x)).exp()
+    h.ln() + ln_prefactor(a, x)
+}
+
+/// `ln P(a, x)`, `a > 0`, `x ≥ 0`.
+pub fn ln_regularized_lower(a: f64, x: f64) -> f64 {
+    assert!(a > 0.0, "gamma shape must be positive");
+    if x.is_nan() {
+        f64::NAN
+    } else if x <= 0.0 {
+        f64::NEG_INFINITY
+    } else if x.is_infinite() {
+        0.0
+    } else if x < a + 1.0 {
+        ln_lower_series(a, x)
+    } else {
+        (-ln_upper_fraction(a, x).exp()).ln_1p()
+    }
+}
+
+/// `ln Q(a, x)`, `a > 0`, `x ≥ 0`.
+pub fn ln_regularized_upper(a: f64, x: f64) -> f64 {
+    assert!(a > 0.0, "gamma shape must be positive");
+    if x.is_nan() {
+        f64::NAN
+    } else if x <= 0.0 {
+        0.0
+    } else if x.is_infinite() {
+        f64::NEG_INFINITY
+    } else if x < a + 1.0 {
+        (-ln_lower_series(a, x).exp()).ln_1p()
+    } else {
+        ln_upper_fraction(a, x)
+    }
 }
 
 /// Regularised lower incomplete gamma `P(a, x) = γ(a, x)/Γ(a)`, `a > 0`, `x ≥ 0`.
 pub fn regularized_lower(a: f64, x: f64) -> f64 {
-    assert!(a > 0.0, "gamma shape must be positive");
-    if x <= 0.0 {
-        0.0
-    } else if x.is_infinite() {
-        1.0
-    } else if x < a + 1.0 {
-        lower_series(a, x)
-    } else {
-        1.0 - upper_fraction(a, x)
-    }
+    ln_regularized_lower(a, x).exp()
 }
 
 /// Regularised upper incomplete gamma `Q(a, x) = 1 − P(a, x)`, accurate in the upper tail.
 pub fn regularized_upper(a: f64, x: f64) -> f64 {
-    assert!(a > 0.0, "gamma shape must be positive");
-    if x <= 0.0 {
-        1.0
-    } else if x.is_infinite() {
-        0.0
-    } else if x < a + 1.0 {
-        1.0 - lower_series(a, x)
-    } else {
-        upper_fraction(a, x)
-    }
+    ln_regularized_upper(a, x).exp()
 }
 
 /// Standard normal quantile (Acklam's rational approximation, ~1e-9; only a starting point).
@@ -182,72 +198,88 @@ fn normal_quantile(p: f64) -> f64 {
 /// Solves `P(a, x) = p` (`lower = true`) or `Q(a, x) = p` (`lower = false`) for `x`.
 fn invert(a: f64, p: f64, lower: bool) -> f64 {
     assert!(a > 0.0, "gamma shape must be positive");
+    if p.is_nan() {
+        return f64::NAN;
+    }
     assert!((0.0..=1.0).contains(&p), "probability must be in [0, 1]");
     // Work on the tail with the smaller target probability for relative precision.
-    let (target, use_lower) = match (lower, p <= 0.5) {
-        (true, true) => (p, true),
-        (true, false) => (1.0 - p, false),
-        (false, true) => (p, false),
-        (false, false) => (1.0 - p, true),
+    let small = p <= 0.5;
+    let use_lower = lower == small;
+    let (target, ln_target) = if small {
+        (p, p.ln())
+    } else {
+        (1.0 - p, (-p).ln_1p())
     };
     if target <= 0.0 {
         return if use_lower { 0.0 } else { f64::INFINITY };
     }
-    let p_lower = if use_lower { target } else { 1.0 - target };
-    // Wilson–Hilferty start.
-    let z = normal_quantile(p_lower);
-    let s = 1.0 / (9.0 * a);
-    let mut x = a * (1.0 - s + z * s.sqrt()).powi(3);
-    if !(x.is_finite() && x > 0.0) {
-        x = if p_lower < 0.5 {
-            (p_lower * (ln_gamma(a + 1.0)).exp())
-                .powf(1.0 / a)
-                .max(1e-300)
-        } else {
-            a + 1.0
-        };
-    }
-    // Bracket: f(x) = tail(x) − target is monotone (lower tail increasing, upper decreasing).
-    let f = |x: f64| {
+    let ln_tail = |x: f64| {
         if use_lower {
-            regularized_lower(a, x) - target
+            ln_regularized_lower(a, x)
         } else {
-            regularized_upper(a, x) - target
+            ln_regularized_upper(a, x)
         }
     };
-    let (mut lo, mut hi) = (0.0f64, f64::INFINITY);
-    for _ in 0..200 {
-        let fx = f(x);
-        let below = if use_lower { fx < 0.0 } else { fx > 0.0 };
-        if below {
-            lo = x;
+    // Starting point: Wilson–Hilferty, or the tail asymptotics far out.
+    let mut x = {
+        let p_lower = if use_lower { target } else { 1.0 - target };
+        let s = 1.0 / (9.0 * a);
+        let wh =
+            a * (1.0 - s + normal_quantile(p_lower.clamp(1e-300, 1.0 - 1e-16)) * s.sqrt()).powi(3);
+        let far = ln_target < -30.0 || wh.is_nan() || wh <= 0.0;
+        if use_lower && far {
+            // P ≈ x^a / Γ(a+1)
+            ((ln_target + ln_gamma(a + 1.0)) / a).exp()
+        } else if !use_lower && far {
+            // Q ≈ x^(a−1) e^(−x) / Γ(a)
+            let y = -ln_target;
+            (y + (a - 1.0) * y.max(1.0).ln() - ln_gamma(a)).max(a)
         } else {
-            hi = x;
+            wh
         }
-        if fx.abs() <= target * 1e-13 {
+    };
+    if !(x.is_finite() && x > 0.0) {
+        x = a;
+    }
+    // Newton on g(u) = ln tail(e^u) − ln target, u = ln x, bracketed.
+    let mut u = x.ln();
+    let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+    for _ in 0..400 {
+        let x = u.exp();
+        let lt = ln_tail(x);
+        let g = lt - ln_target;
+        if g.abs() <= 1e-12 {
             return x;
         }
-        // d tail/dx = ± x^(a−1) e^(−x) / Γ(a)
-        let pdf = ((a - 1.0) * x.ln() - x - ln_gamma(a)).exp();
-        let slope = if use_lower { pdf } else { -pdf };
-        let mut next = if slope != 0.0 {
-            x - fx / slope
+        // Lower tail increases with x; upper tail decreases.
+        let too_small = if use_lower { g < 0.0 } else { g > 0.0 };
+        if too_small {
+            lo = u;
+        } else {
+            hi = u;
+        }
+        // d ln tail / du = ± x·pdf/tail
+        let slope = ((a - 1.0) * x.ln() - x - ln_gamma(a) + u - lt).exp();
+        let slope = if use_lower { slope } else { -slope };
+        let mut next = if slope.is_finite() && slope != 0.0 {
+            u - g / slope
         } else {
             f64::NAN
         };
         if !(next.is_finite() && next > lo && next < hi) {
-            next = if hi.is_finite() {
-                0.5 * (lo + hi)
-            } else {
-                2.0 * x.max(1.0)
+            next = match (lo.is_finite(), hi.is_finite()) {
+                (true, true) => 0.5 * (lo + hi),
+                (true, false) => lo + 1.0,
+                (false, true) => hi - 1.0,
+                (false, false) => u,
             };
         }
-        if (next - x).abs() <= x * 1e-15 {
-            return next;
+        if (next - u).abs() <= 1e-15 * u.abs().max(1.0) {
+            return next.exp();
         }
-        x = next;
+        u = next;
     }
-    x
+    u.exp()
 }
 
 /// `x` with `P(a, x) = p`.
@@ -272,7 +304,7 @@ pub fn mean_quantile(n: f64, p: f64) -> f64 {
 
 /// `E[X | X < t·μ] / μ` for an `n`-average bin: the FCME truncated-mean bias factor.
 pub fn truncated_mean_ratio(n: f64, t: f64) -> f64 {
-    regularized_lower(n + 1.0, n * t) / regularized_lower(n, n * t)
+    (ln_regularized_lower(n + 1.0, n * t) - ln_regularized_lower(n, n * t)).exp()
 }
 
 /// `P(X > t·μ)` for an `n`-average bin.
@@ -307,6 +339,15 @@ mod tests {
         (a - b).abs() <= rel * b.abs().max(1e-300)
     }
 
+    /// `ln Q(n, x)` for integer `n`: `−x + ln Σ_{k<n} x^k/k!` (log-sum-exp).
+    fn ln_q_integer(n: u32, x: f64) -> f64 {
+        let terms: Vec<f64> = (0..n)
+            .map(|k| f64::from(k) * x.ln() - ln_gamma(f64::from(k) + 1.0))
+            .collect();
+        let m = terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        -x + m + terms.iter().map(|t| (t - m).exp()).sum::<f64>().ln()
+    }
+
     #[test]
     fn ln_gamma_matches_factorials_and_half_integers() {
         let mut f = 1.0f64;
@@ -320,26 +361,24 @@ mod tests {
 
     #[test]
     fn incomplete_gamma_reference_values() {
-        // Exponential: P(1, x) = 1 − e^−x.
         for x in [1e-6, 0.1, 1.0, 5.0, 30.0] {
             assert!(close(regularized_lower(1.0, x), -(-x).exp_m1(), 1e-12));
             assert!(close(regularized_upper(1.0, x), (-x).exp(), 1e-12));
         }
-        // Integer shape: Q(n, x) = e^−x Σ_{k<n} x^k/k!
-        for (n, x) in [(10u32, 5.0f64), (10, 22.65), (10, 40.0), (3, 0.2)] {
-            let mut term = 1.0;
-            let mut sum = 1.0;
-            for k in 1..n {
-                term *= x / f64::from(k);
-                sum += term;
-            }
-            let q = (-x).exp() * sum;
+        for (n, x) in [
+            (10u32, 5.0f64),
+            (10, 22.65),
+            (10, 40.0),
+            (3, 0.2),
+            (10, 300.0),
+        ] {
+            let want = ln_q_integer(n, x);
+            let got = ln_regularized_upper(f64::from(n), x);
             assert!(
-                close(regularized_upper(f64::from(n), x), q, 1e-11),
-                "Q({n},{x})"
+                (got - want).abs() < 1e-11 * want.abs().max(1.0),
+                "ln Q({n},{x})"
             );
         }
-        // Chi-square(2·5) median etc. via P + Q = 1.
         for (a, x) in [(0.3, 0.1), (7.7, 7.0), (100.0, 110.0), (2.5, 2.5)] {
             assert!((regularized_lower(a, x) + regularized_upper(a, x) - 1.0).abs() < 1e-13);
         }
@@ -355,18 +394,44 @@ mod tests {
                 assert!(close(regularized_upper(a, x), p, 1e-9), "Q⁻¹({a},{p})");
             }
         }
-        // Exponential closed form.
         assert!(close(inverse_upper(1.0, 1e-6), 1e6f64.ln(), 1e-12));
     }
 
     #[test]
+    fn inverses_far_in_the_tails() {
+        // Independent references: exponential closed forms and integer-shape sums.
+        for q in [1e-15, 1e-50, 1e-100, 1e-300] {
+            let x = inverse_upper(1.0, q);
+            assert!(close(x, -q.ln(), 1e-12), "Q⁻¹(1, {q}) = {x}");
+            let x = inverse_upper(10.0, q);
+            assert!(
+                (ln_q_integer(10, x) - q.ln()).abs() < 1e-9 * q.ln().abs(),
+                "Q⁻¹(10, {q})"
+            );
+            // P(1, x) = 1 − e^−x ≈ x; P(2, x) ≈ x²/2.
+            let x = inverse_lower(1.0, q);
+            assert!(close(x, -(-q).ln_1p(), 1e-9), "P⁻¹(1, {q}) = {x}");
+            let x = inverse_lower(2.0, q);
+            let p2 = x * x / 2.0 - x.powi(3) / 3.0 + x.powi(4) / 8.0;
+            assert!(close(p2, q, 1e-9), "P⁻¹(2, {q}) = {x}");
+            assert!(close(
+                mean_threshold(10.0, q) * 10.0,
+                inverse_upper(10.0, q),
+                1e-15
+            ));
+        }
+        assert!(inverse_upper(10.0, f64::NAN).is_nan());
+        assert_eq!(inverse_upper(10.0, 0.0), f64::INFINITY);
+        assert_eq!(inverse_lower(10.0, 0.0), 0.0);
+    }
+
+    #[test]
     fn s4_floor_branch_thresholds() {
-        // S4 §3.2: Gamma(10) floor branch 1e-3 → 3.55 dB, 1e-6 → 5.15 dB (±0.02 dB).
         let db = |x: f64| 10.0 * x.log10();
         let t3 = db(mean_threshold(10.0, 1e-3));
         let t6 = db(mean_threshold(10.0, 1e-6));
-        assert!((t3 - 3.55).abs() < 0.02, "{t3}");
-        assert!((t6 - 5.15).abs() < 0.02, "{t6}");
+        assert!((t3 - 3.5521).abs() < 1e-3, "{t3}");
+        assert!((t6 - 5.1469).abs() < 1e-3, "{t6}");
         assert!(close(
             exceedance(10.0, mean_threshold(10.0, 1e-6)),
             1e-6,
@@ -376,9 +441,7 @@ mod tests {
 
     #[test]
     fn exponential_special_cases() {
-        // Median of an exponential bin is ln 2 of its mean.
         assert!(close(mean_quantile(1.0, 0.5), 2f64.ln(), 1e-12));
-        // E[X | X < t] for Exp(1) = (1 − (1+t)e^−t)/(1 − e^−t).
         let t: f64 = 2.3;
         let want = (1.0 - (1.0 + t) * (-t).exp()) / (1.0 - (-t).exp());
         assert!(close(truncated_mean_ratio(1.0, t), want, 1e-12));
