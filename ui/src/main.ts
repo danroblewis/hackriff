@@ -3,6 +3,10 @@
 // Stream contract: docs/stream-contract.md §10 (first text message = header JSON, then one message
 // per record; binary records carry the 32-byte little-endian record header).
 import * as ax from "./axis";
+import { type Bookmark, bookmarkFromSelection } from "./controls/bookmarks";
+import { ControlClient, ControlError } from "./controls/client";
+import { attachAxisGestures, attachWheelZoom, type ViewHooks } from "./controls/gestures";
+import { ControlPanel } from "./controls/panel";
 import { HistoryPanel } from "./history";
 import { Inspector, inspectHalfWidthHz } from "./inspect";
 import { InventoryTable } from "./inventory";
@@ -27,8 +31,10 @@ const CONTENT_CLASSES = new Set(["unrestricted", "own-key-decrypted"]);
 const DRAG_PX = 6;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-// Token: `#token=` (never sent to the server) or `?token=`; kept for this tab only, and stripped
-// from the address bar so it does not linger in history or screenshots.
+// Token: `#token=` (never sent to the server) or `?token=`; kept for this tab only (sessionStorage,
+// never localStorage), and stripped from the address bar so it does not linger in history or
+// screenshots. Through the tunnel the user pastes it from the token file. Fetches send it as
+// `Authorization: Bearer` (controls/client.ts); only the WebSocket URL carries `?token=`.
 function takeToken(): string | null {
   const t = new URLSearchParams(location.hash.slice(1)).get("token") ?? new URLSearchParams(location.search).get("token");
   if (t) {
@@ -55,6 +61,13 @@ class Live {
   private statsTimer = 0;
   private drag: { id: number; start: Point; cx: number; cy: number; moved: boolean } | null = null;
   private highlightHz: [number, number] | null = null;
+  private markers: readonly Bookmark[] = [];
+  /** A view to restore when the next (retuned) header arrives. */
+  private expected: ax.View | null = null;
+  /** A click picked this frequency (bin centre). */
+  onPick: (hz: number) => void = () => {};
+  /** A pan let go past the band edge. */
+  onPanOverflow: (centerHz: number, requested: ax.View) => void = () => {};
 
   constructor(private api: Api, private token: string, private historyPanel: HistoryPanel,
     private selections: SelectionStore, private inspector: Inspector) {
@@ -67,6 +80,15 @@ class Live {
     wrap.addEventListener("pointerup", (e) => this.onUp(e));
     wrap.addEventListener("pointercancel", () => this.endDrag());
     $("zoom-reset").addEventListener("click", () => this.setView(null));
+    // Frequency axis: drag to pan, wheel/pinch to zoom (client-side); wheel zoom on the canvas too.
+    const hooks: ViewHooks = {
+      geometry: () => this.geom,
+      view: () => this.view,
+      setView: (v) => this.setView(v),
+      overflow: (c, v) => this.onPanOverflow(c, v),
+    };
+    attachAxisGestures($("axis"), hooks);
+    attachWheelZoom(wrap, hooks);
     selections.subscribe(() => this.drawOverlays());
     window.addEventListener("resize", () => { this.drawAxis(); this.drawOverlays(); });
     // Time-bounded selections scroll with the waterfall.
@@ -144,7 +166,11 @@ class Live {
     const gatedClass = !CONTENT_CLASSES.has(h.content_class);
     $("gated").hidden = !gatedClass;
     if (gatedClass) $("gated").textContent = `GATED ≤ ${(h.sample_rate_hz ?? 0).toFixed(1)} rows/s`;
-    this.setView(same ? this.view : null);
+    if (!same) this.wf.resetPeak(); // a held peak belongs to the old window
+    const want = this.expected;
+    this.expected = null;
+    const full = ax.fullView(g);
+    this.setView(same ? this.view : want && want.loHz < full.hiHz && want.hiHz > full.loHz ? ax.zoomTo(g, want.loHz, want.hiHz) : null);
     clearInterval(this.statsTimer);
     this.statsTimer = window.setInterval(() => this.stats(), 500);
   }
@@ -190,8 +216,20 @@ class Live {
     this.setView(ax.zoomTo(this.geom, fLoHz - pad, fHiHz + pad));
   }
 
+  geometry(): ax.Geometry | null { return this.geom; }
+  waterfall(): Waterfall | null { return this.wf; }
+
+  /** Restores `v` once the next retuned header arrives (null: forget it). */
+  expectView(v: ax.View | null) { this.expected = v; }
+
+  /** Server-side markers and bookmarks drawn over the live view. */
+  setMarkers(list: readonly Bookmark[]) {
+    this.markers = list;
+    this.drawOverlays();
+  }
+
   /** Sets the zoom (null: the whole band) and redraws what depends on it. */
-  private setView(v: ax.View | null) {
+  setView(v: ax.View | null) {
     const g = this.geom;
     if (!g) return;
     const full = ax.fullView(g);
@@ -242,6 +280,17 @@ class Live {
       const el = document.createElement("div");
       el.className = "hl-box";
       if (place(el, ...this.highlightHz)) box.append(el);
+    }
+    for (const b of this.markers) {
+      const f = ax.hzToFrac(v, b.f_center_hz);
+      if (!(f >= 0 && f <= 1)) continue;
+      const el = document.createElement("div");
+      el.className = `bm-line ${b.kind}`;
+      el.style.left = `${f * 100}%`;
+      const label = document.createElement("span");
+      label.textContent = b.name;
+      el.append(label);
+      box.append(el);
     }
     const period = 1 / Math.max(1e-3, this.header?.sample_rate_hz ?? 25);
     for (const s of this.selections.list()) {
@@ -362,6 +411,7 @@ class Live {
 
   private inspect(p: Point) {
     const g = this.geom!, v = this.view!, b = this.binAt(p.hz);
+    this.onPick(b.hz);
     void this.inspector.show(b.hz, inspectHalfWidthHz(v.hiHz - v.loHz, ax.binWidthHz(g)), b.level, p.t);
   }
 }
@@ -376,23 +426,45 @@ function showAuth() {
   };
 }
 
+function forgetToken() {
+  sessionStorage.removeItem("hk-token");
+  badge("conn", "token needed", "bad");
+  showAuth();
+}
+
 function main() {
+  $("forget-token").addEventListener("click", () => { forgetToken(); location.reload(); });
   const token = takeToken();
-  if (!token) { badge("conn", "token needed", "bad"); showAuth(); return; }
+  if (!token) { forgetToken(); return; }
+  const client = new ControlClient(token);
+  // Read-only API for the existing panels: same client (bearer header), errors as "<status> <message>".
   const api: Api = async (path) => {
-    const r = await fetch(path, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(`${r.status} ${(body as { error?: string }).error ?? r.statusText}`);
-    return body;
+    try {
+      return await client.get(path);
+    } catch (e) {
+      throw e instanceof ControlError ? new Error(`${e.status} ${e.message}`) : e;
+    }
   };
   const panel = new HistoryPanel(api);
   const selections = new SelectionStore();
   const listen = installListen(token); // T-043
   const live = new Live(api, token, panel, selections, new Inspector(api, listen.onShown));
+  const controls = new ControlPanel(client, {
+    geometry: () => live.geometry(),
+    waterfall: () => live.waterfall(),
+    zoomTo: (lo, hi) => live.setView(live.geometry() ? ax.zoomTo(live.geometry()!, lo, hi) : null),
+    expectView: (v) => live.expectView(v),
+    setMarkers: (l) => live.setMarkers(l),
+    onReauth: forgetToken,
+  });
+  live.onPick = (hz) => controls.bookmarks.setPick(hz);
+  live.onPanOverflow = (c, v) => controls.offerRetune(c, v);
+  controls.start();
   new SelectionPanel(selections, {
     zoom: (s) => live.zoomTo(s.f_lo, s.f_hi),
     history: (s) => panel.selectWindow(s.f_lo, s.f_hi, s.t_lo, s.t_hi),
     listen: listen.selection,
+    bookmark: (s) => void controls.bookmarks.add(bookmarkFromSelection(s)),
   });
   const inventory = new InventoryTable(api, panel, (lo, hi) => {
     live.highlight(lo, hi);

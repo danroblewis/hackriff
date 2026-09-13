@@ -33,6 +33,31 @@ T-044/T-045 add live-view interaction and a checked frequency axis:
   frequency and shows its status, extent, family, identity (withheld as the server withholds it),
   first/last seen, count and tags. **Listen** is a disabled placeholder for T-043.
 
+T-051 adds the **control panel** (beside the live view on wide screens, below it on phones), over
+the T-050 control API; the SDR++/SDRangel/SigDigger survey and endpoint mapping are in
+[CONTROLS.md](CONTROLS.md).
+
+- **Driven by `GET /api/control/state`** (polled every 2 s and after every action): device
+  capabilities, tuning, `run.content_class` (e.g. "restricted-paging: metadata only"), segment,
+  display settings and recording. A segment change (a legal-class re-plumb) is announced.
+- **Radio:** centre entry with units (`101.3M`, `433.92 MHz`, `+25k`; a bare `101.3` is MHz), step
+  and ◀ ▶ shifts (fixed steps snap to their grid; ½ span / span walk a band), span from
+  `device.sample_rates_hz`, named gain sliders from `device.gain_stages` (LNA/VGA and an amp switch
+  on a HackRF, the device's own names otherwise), bias tee behind a DC-on-antenna warning. One
+  device request at a time with a spinner (a re-plumb can take 30 s). On a replay the whole group
+  is disabled with the `not_live` reason.
+- **View:** drag the frequency scale to pan, scroll or pinch to zoom (client-side, `axis.ts`
+  `panView`/`zoomAt`). Panning past the band edge offers a retune; it never retunes on its own.
+- **Display:** pause/resume (only the spectrum stream pauses), FFT size, averaging and waterfall
+  speed (`/api/control/display`); colour scale auto or manual min/max and peak hold (client-side).
+  The waterfall and persistence shaders max-pool the texels under each pixel's own footprint
+  (`axis.poolWindow`), fixing the T-045 half-window bias.
+- **Record IQ:** start (label, max seconds) and stop, with the state and any refusal reason
+  (recording is refused under content-forbidding classes).
+- **Markers & bookmarks** (`/api/bookmarks`): a marker at the last clicked frequency, a bookmark
+  from a selection (**Bookmark** in the selections table), list, jump (zoom inside the band; retune
+  outside it when live), delete; drawn as lines over the live view.
+
 T-022 adds:
 
 - **Signal inventory.** A table of emitters from `/api/inventory` (the T-018 inventory query).
@@ -133,7 +158,11 @@ See `docs/stream-contract.md` §10.
   - The page reads it from the URL fragment (`#token=`), which is never sent to the server. It
     keeps the token in `sessionStorage` for the tab and strips it from the address bar.
   - Fetches send `Authorization: Bearer`. WebSockets send `?token=`, because browsers cannot set
-    WebSocket headers.
+    WebSocket headers. Control calls (POST/PUT/DELETE) never put the token in the URL
+    (`controls/client.ts` refuses to build one); the server refuses `?token=` for them.
+  - Through the cloudflared tunnel (or from another device), paste the token from
+    `~/.config/hackriff/api-token` into the prompt; **Forget token** clears it from the tab.
+    All URLs are origin-relative, so the page uses https/wss through the tunnel.
   - Comparison is constant time. Static files (the UI code) need no token and contain no data.
 - **Bind address.** The default is loopback. `--bind 0.0.0.0:8787` exposes the API to everyone on
   the LAN or Wi-Fi. There is no TLS in M0, so the token is the only protection and travels in
@@ -145,4 +174,5 @@ See `docs/stream-contract.md` §10.
 - **Backpressure.** A slow browser only fills its own bounded queue. It gets drop markers and is
   disconnected after 5 s; the producer never waits. Streams also cap their consumers (HTTP 503
   beyond the cap).
-- **Read-only.** M0 endpoints are all `GET`; there is no control surface yet.
+- **Control (T-050).** Mutating endpoints are audited server-side and receive-only; the panel has
+  no transmit control.

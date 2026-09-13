@@ -87,6 +87,52 @@ export function zoomTo(g: Geometry, loHz: number, hiHz: number, minBins = 8): Vi
   return { loHz: Math.max(full.loHz, lo), hiHz: Math.min(full.hiHz, hi) };
 }
 
+/** Zooms by `factor` (> 1 zooms in) keeping the frequency under fraction `x` of the view fixed (T-051 wheel/pinch). */
+export function zoomAt(g: Geometry, v: View, x: number, factor: number, minBins = 8): View {
+  if (!(factor > 0) || !Number.isFinite(factor)) return v;
+  const hz = fracToHz(v, x), w = (v.hiHz - v.loHz) / factor;
+  return zoomTo(g, hz - x * w, hz - x * w + w, minBins);
+}
+
+/** Wheel delta → zoom factor (`deltaMode` 0 pixels, 1 lines, 2 pages; scrolling up zooms in). */
+export function wheelFactor(deltaY: number, deltaMode = 0): number {
+  const px = deltaY * (deltaMode === 1 ? 16 : deltaMode === 2 ? 400 : 1);
+  return Math.exp(-Math.max(-400, Math.min(400, px)) * 0.002);
+}
+
+/**
+ * A view panned by `deltaHz` (positive: towards higher frequencies), keeping its width and clamped
+ * to the band. `overflowHz` is how far past the band edge the pan asked to go (negative below,
+ * positive above, 0 inside): the display zoom is client-side, so leaving the band needs an explicit
+ * retune.
+ */
+export function panView(g: Geometry, v: View, deltaHz: number): { view: View; overflowHz: number } {
+  const full = fullView(g), w = Math.min(v.hiHz - v.loHz, full.hiHz - full.loHz);
+  let lo = v.loHz + deltaHz, overflow = 0;
+  if (lo < full.loHz) { overflow = lo - full.loHz; lo = full.loHz; }
+  if (lo + w > full.hiHz) { overflow = lo + w - full.hiHz; lo = full.hiHz - w; }
+  return { view: { loHz: lo, hiHz: lo + w }, overflowHz: overflow };
+}
+
+/** The centre that would show a pan's requested (unclamped) view in the middle of a retuned band. */
+export const panRetuneCenter = (clamped: View, overflowHz: number) => (clamped.loHz + clamped.hiHz) / 2 + overflowHz;
+
+/**
+ * The texels a screen pixel max-pools (T-051 fix of the T-045 review nit): the pixel centred at
+ * texture coordinate `u` covers [u − uPerPx/2, u + uPerPx/2]; returns `[x0, count]` of the texels
+ * overlapping it (at most `maxTaps`, centred), or the single texel under `u` when a pixel is
+ * narrower than a texel. Mirrored by the waterfall and persistence shaders.
+ */
+export function poolWindow(u: number, uPerPx: number, texW: number, maxTaps = 64): [number, number] {
+  const a = (u - uPerPx / 2) * texW, b = (u + uPerPx / 2) * texW;
+  const clampX = (x: number) => Math.min(texW - 1, Math.max(0, x));
+  if (!(b - a > 1)) return [clampX(Math.floor(u * texW)), 1];
+  let x0 = Math.floor(a), n = Math.max(1, Math.ceil(b) - x0);
+  if (n > maxTaps) { x0 = Math.floor((a + b) / 2) - Math.floor(maxTaps / 2); n = maxTaps; }
+  const lo = clampX(x0), hi = clampX(x0 + n - 1);
+  return [lo, hi - lo + 1];
+}
+
 /** A frequency selection between two horizontal fractions of a view. */
 export function selectionHz(v: View, x0: number, x1: number): { loHz: number; hiHz: number; bandwidthHz: number } {
   const a = fracToHz(v, Math.min(x0, x1)), b = fracToHz(v, Math.max(x0, x1));
