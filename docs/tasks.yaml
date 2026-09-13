@@ -656,6 +656,72 @@ tasks:
     core_interface: true
     dod: "parity + benches green locally with GPU feature; ADR-0007 updated to a per-platform provider model (CPU ref, CPU MT, Accelerate, GPU, CUDA later via T-026); decision logged; pipeline config hookup described (one-line follow-up)"
     note: "model per model-selection would be fable (novel compute); run on opus high (no Fable this session). No collision: T-037a/b, T-039, T-040 don't touch hk-dsp. CUDA stays the later Jetson provider (T-026 blocked)."
+  - id: T-042
+    title: Real live HackRF in the UI (hk serve/hackriffd --hackrf default, full pipeline to inventory, no demo seed)
+    status: in-progress
+    deps: [T-037]
+    parallel_group: J
+    use_cases: [SIGNAL-062, AWARE-042]
+    requested_by: user feedback (A), 2026-09-13
+    acceptance: "hk serve / hackriffd run the HackRF source by default (--hackrf center/rate/gains, receive-only) through the full pipeline (spectrum -> detect -> track -> inventory); /api/inventory shows real detections; seed_inventory only behind --demo/tests; replay still selectable; live window gets band-derived restricted classes"
+    area: crates/hk-cli, crates/hk-core/src/source, crates/hk-api/src/live_control.rs
+    needs: [hardware]
+    model: opus
+    effort: high
+    note: "folded into the running T-037a agent (owns hk-cli + HackRF source); exposes hk_api::LiveControl for T-044 controls"
+  - id: T-043
+    title: Listen - click a signal -> auto analog demod (T-012) -> audio streamed to the browser (Web Audio), legal gating kept
+    status: todo
+    deps: [T-037, T-039, T-044]
+    parallel_group: M
+    use_cases: [SIGNAL-062]
+    requested_by: user feedback (B), 2026-09-13
+    acceptance: "clicking a signal attaches an analog demod chain with auto-estimated parameters (no manual mode), audio streams over WebSocket to Web Audio with bounded latency and underrun handling; restricted/metadata-only classes never stream audio (sentinel test); detach on stop"
+    area: crates/hk-pipeline/src/chains (analog), crates/hk-api (audio stream endpoint), crates/hk-stream (audio framing + gating), ui/
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "starts after T-037b (owns chains/), T-039 and T-044 (UI) merge"
+  - id: T-044
+    title: UI interaction (hover readout through tunnel, drag-to-select region, click-to-inspect, center/span/gain controls)
+    status: in-progress
+    deps: [T-016]
+    parallel_group: N
+    use_cases: [AWARE-042]
+    requested_by: user feedback (C), 2026-09-13
+    acceptance: "hover readout works through the cloudflared tunnel (root cause found); drag-select a region on waterfall/spectrum -> region history + zoom; click-to-inspect shows gated inventory data; center/span/gain controls via hk-api endpoints backed by LiveControl, validated server-side, disabled for replay; UI tests"
+    area: ui/, crates/hk-api (HTTP routes)
+    needs: none
+    model: opus
+    effort: medium
+    note: "same agent as T-045; builds on T-042's LiveControl trait"
+  - id: T-045
+    title: Frequency axis offset bug (fm_100p8M replay shows center 100.4324 MHz, 101.3 MHz station at ~101.0 MHz)
+    status: in-progress
+    deps: []
+    parallel_group: N
+    use_cases: [SIGNAL-062, SPACE-050]
+    requested_by: user feedback (D), 2026-09-13
+    acceptance: "test that a tone at a known frequency renders at that frequency through STFT -> stream header -> UI axis mapping (within one bin); real fixture: 101.3 MHz station at 101.3 MHz, center 100.8 MHz; root cause fixed"
+    area: ui/, crates/hk-stream, crates/hk-pipeline/src/spectrum.rs (routed via T-037a if root cause there)
+    needs: none
+    model: opus
+    effort: high
+    note: "~368 kHz constant offset suspected; same agent as T-044"
+  - id: T-046
+    title: Shared compute-provider conformance/parity suite (every FftBackend/PfbBackend provider must pass)
+    status: in-progress
+    deps: [T-008]
+    parallel_group: L
+    use_cases: [SPACE-050]
+    requested_by: user feedback (E), 2026-09-13
+    acceptance: "one generic suite over FftBackend/PfbBackend (tones incl. edge/Nyquist, Parseval scaling, window/overlap, batch vs single, PFB centre/gain/rejection/phase continuity/reset, determinism) with tolerances defined once; CPU providers run in just test; feature providers run when compiled and skip cleanly without device; ADR-0007 requires conformance before a provider (incl. CUDA) is selectable"
+    area: crates/hk-dsp (conformance module), docs/adr/0007
+    needs: none
+    model: opus
+    effort: high
+    note: "folded into the running T-041 agent (owns hk-dsp)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

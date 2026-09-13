@@ -223,3 +223,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - The GPU path gets exercised on the Mac now rather than waiting for the Jetson.
   - **Model:** Opus high (Fable excluded this session).
   - **Caveat:** concurrent agent builds make CPU benchmarks noisy, so the agent records the load average and reports min/median.
+- **B0.106 User feedback (priority) → T-042..T-046, scheduled by file ownership:**
+  - **(A) T-042, real live HackRF in the UI:** default `--hackrf` source for serve/hackriffd, full pipeline to inventory, demo seed only behind `--demo`. Folded into the running T-037a agent, which owns hk-cli and the HackRF source. It also exposes `hk_api::LiveControl` for UI controls.
+  - **(B) T-043, Listen (click → auto analog demod → Web Audio):** held until T-037b (chains/), T-039 and T-044 merge; legal gating kept.
+  - **(C) T-044, UI interaction + (D) T-045, frequency axis bug:** launched now in one agent, since ui/ has no other owner. For D: center showed 100.4324 MHz and the 101.3 MHz station showed at ~101.0 MHz, suggesting a ~368 kHz offset. Root cause first, with a tone-at-known-frequency test through STFT → header → UI mapping. If the root cause is in `hk-pipeline/src/spectrum.rs` (owned by T-037a), the diff is routed to T-037a.
+  - **(E) T-046, shared provider conformance suite:** folded into the running T-041 agent (hk-dsp). Every provider, including a future CUDA one, must pass it before it is selectable.
