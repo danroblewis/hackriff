@@ -78,3 +78,6 @@ append-only (`merge=union` in `.gitattributes`).
 | libc | 0.2.189 | MIT OR Apache-2.0 | hk-core (`rt`: capture-thread priority, macOS QoS / Linux SCHED_FIFO) | In-core, permissive |
 | thiserror (added to hk-core) | 2.0.20 | MIT OR Apache-2.0 | hk-core | In-core, permissive (row above covers hk-model) |
 | libhackrf (NOT linked; T-003 stub only) | — | `host/libhackrf/src/hackrf.c` header is BSD-3-Clause; `hackrf-tools` (`hackrf_transfer.c`) and firmware are GPL-2.0-or-later; repo `COPYING` is GPLv2 (checked on GitHub `master`, 2026-09-13) | hk-core `HackRfSource` (future) | Not a dependency yet. Treated as GPL until this row is confirmed; reach the device through an isolated `hackrf_transfer` process until then |
+| rustfft | 6.4.1 | MIT OR Apache-2.0 | hk-dsp (`fft::CpuFft`: CPU FFT for Welch/STFT/SK) | In-core, permissive |
+| *rustfft transitive: strength_reduce 0.2.4, transpose 0.2.3, primal-check 0.3.4, num-integer 0.1.47 (num-complex/num-traits rows above)* | per `Cargo.lock` | MIT OR Apache-2.0 (all four) | hk-dsp | In-core, permissive; checked with `cargo metadata` at T-004 |
+| num-complex (added to hk-dsp); serde_json (hk-dsp dev-dependency, tests/bench only) | 0.4.6; 1.0.151 | MIT OR Apache-2.0 | hk-dsp | In-core, permissive (rows above cover hk-core / hk-model) |

@@ -14,3 +14,12 @@ gpu = []
 [dependencies]
 hk-core.workspace = true
 hk-model.workspace = true
+num-complex.workspace = true
+rustfft.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[bench]]
+name = "spectral_throughput"
+harness = false
