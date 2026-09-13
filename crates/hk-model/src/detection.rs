@@ -19,6 +19,10 @@ pub enum SpurReason {
     LoRelative,
     /// Part of a regularly spaced comb (switching supplies, USB, digital clocks).
     Comb,
+    /// At a harmonic of the sample clock (`n × fs`), crystal-locked to the receiver (added in the
+    /// T-006 review: the 433 MHz control's 434.000 MHz line is 217 × 2 Msps). A candidate only:
+    /// a real carrier can sit on a clock harmonic too.
+    ClockHarmonic,
     /// Listed in a measured SpurMask version.
     SpurMap {
         /// The SpurMask version that lists it.
@@ -34,6 +38,7 @@ impl SpurReason {
             SpurReason::Dc => "dc",
             SpurReason::LoRelative => "lo-relative",
             SpurReason::Comb => "comb",
+            SpurReason::ClockHarmonic => "clock-harmonic",
             SpurReason::SpurMap { .. } => "spur-map",
         }
     }
@@ -45,6 +50,7 @@ impl SpurReason {
             "dc" => SpurReason::Dc,
             "lo-relative" => SpurReason::LoRelative,
             "comb" => SpurReason::Comb,
+            "clock-harmonic" => SpurReason::ClockHarmonic,
             "spur-map" => SpurReason::SpurMap { mask: mask? },
             _ => return None,
         })
@@ -341,6 +347,7 @@ mod tests {
             SpurReason::Dc,
             SpurReason::LoRelative,
             SpurReason::Comb,
+            SpurReason::ClockHarmonic,
             SpurReason::SpurMap { mask },
         ] {
             assert_eq!(SpurReason::from_parts(r.kind_str(), r.mask()), Some(r));

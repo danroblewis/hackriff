@@ -1851,3 +1851,34 @@ fn attack_map_anomalies_and_explanations_are_region_indexed_and_evidence_is_pinn
         2
     );
 }
+
+/// The `spur_reason` CHECK accepts `clock-harmonic` (T-006 review; pre-release in-place edit of
+/// 0001) and keeps refusing unknown reasons; a clock-harmonic detection round-trips.
+#[test]
+fn clock_harmonic_spur_reason_round_trips() {
+    let mut b = base_in(Repository::open_in_memory().unwrap());
+    assert_eq!(b.repo.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 1);
+    let mut d = det(b.survey.id, b.prov_id, 434.0e6, 1.5e3, tr(10, 11));
+    d.flags.spur_candidate = true;
+    d.flags.spur_reason = Some(SpurReason::ClockHarmonic);
+    b.repo.insert_detection(&d).unwrap();
+    assert_eq!(b.repo.detection(d.id).unwrap(), d);
+    let raw = b.repo.conn.execute(
+        "INSERT INTO detection (detection_id, survey_id, provenance_id, t_start, t_end, f_center, \
+         obw, f_lo, f_hi, snr_peak, snr_mean, flags, peak_dbfs, clip_count, detector_version, \
+         spur_reason) VALUES (?1, ?2, ?3, 0, 1, 1e6, 1e3, 999500, 1000500, 10, 5, 2, -40, 0, 'x', \
+         'not-a-reason')",
+        params![blob(DetectionId::new()), blob(b.survey.id), blob(b.prov_id)],
+    );
+    assert!(raw.is_err(), "unknown spur reasons stay refused");
+    // A fresh file database accepts it too.
+    let dir = TempDir::new();
+    let mut file = base_in(Repository::open(dir.0.join("fresh.sqlite")).unwrap());
+    assert_eq!(file.repo.schema_version().unwrap(), 1);
+    let mut e = det(file.survey.id, file.prov_id, 434.0e6, 1.5e3, tr(12, 13));
+    e.flags.spur_candidate = true;
+    e.flags.spur_reason = Some(SpurReason::ClockHarmonic);
+    file.repo.insert_detection(&e).unwrap();
+    assert_eq!(file.repo.detection(e.id).unwrap(), e);
+}
