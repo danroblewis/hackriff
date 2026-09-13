@@ -370,3 +370,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Coordination:** running agents (T-062, T-043, T-049, T-051) were told it is a known failure and not to fix it.
   - **Merges held:** code merges other than T-063 wait until main is green again.
   - **Risk note for the user:** a demo built from main at or after c5f77e3 that is retuned into a restricted band via the control API may expose FSK bitstreams under the wrong class until T-063 lands. Other verification on the rerun was green up to that point (112 test groups).
+- **B0.127 Main at ad4976e (isolated target):** Python 50 passed, UI tests green, acceptance 16/16, and 136 Rust test groups green. The only failure is `retune_legal` (T-063 in progress). T-049's merge waits for T-049 to finish merging main and for T-063.
