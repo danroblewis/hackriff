@@ -444,6 +444,7 @@ dependencies = [
  "hk-e2e",
  "hk-estimate",
  "hk-model",
+ "hk-stream",
  "num-complex",
  "serde",
  "serde_json",
