@@ -188,7 +188,9 @@ tasks:
     dod: estimators pass on synthetic and on an S5 capture; unknown flagged not mislabelled
   - id: T-012
     title: analog auto-mode demod + RDS
-    status: in-progress
+    status: done
+    commit: "8ae13de (merged)"
+    followups: "hk-model Demodulation has no audio output ref (audio stays in session); stereo L-R, NBFM/AM/SSB/CW audio, squelch/AGC, RadioText not implemented; WFM accepted from 50 kHz OBW when pilot + constant envelope (tone-modulated synth); merged without separate review (not core_interface)"
     deps: [T-008, T-010]
     parallel_group: G
     use_cases: [SIGNAL-062]
