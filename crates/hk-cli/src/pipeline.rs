@@ -285,6 +285,12 @@ pub fn serve_api(
         .with_context(|| format!("opening the control audit log {}", audit_path.display()))?;
     let controller = handle.controller();
     let status_ctl = controller.clone();
+    // On-demand streams (T-043 listen, T-060 burst bits and symbols), over WebSocket and TCP.
+    let openers = hk_api::stream::OpenerRegistry::new()
+        .with("listen", handle.listen_service())
+        .with("bits", handle.bits_service())
+        .with("symbols", handle.symbols_service());
+    let tcp = start_stream_tcp(registry, &openers, &token)?;
     let state = ApiState {
         streams: registry.clone(),
         history: None,
@@ -304,13 +310,20 @@ pub fn serve_api(
         run_control: Some(Arc::new(PipelineRunControl(controller))),
         bookmarks: Some(db),
         audit: Some(Arc::new(audit)),
-        on_demand: hk_api::stream::OpenerRegistry::new().with("listen", handle.listen_service()),
+        on_demand: openers,
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
-    let server = Server::start(config, state).context("starting the HTTP server")?;
+    config.stream_tcp = Some(tcp.local_addr());
+    let mut server = Server::start(config, state).context("starting the HTTP server")?;
     let addr = server.local_addr();
     eprintln!("{tag}: listening on {addr}");
+    eprintln!(
+        "{tag}: streams over TCP on {} (send `<stream_id>?token=<token>` or \
+         `open/bits?token=<token>` and a newline; discovery: GET /api/streams)",
+        tcp.local_addr()
+    );
+    server.attach_stream_server(tcp);
     eprintln!(
         "{tag}: control API audited to {} (token id {})",
         audit_path.display(),
@@ -330,6 +343,35 @@ pub fn serve_api(
     // The token rides in the fragment: never sent to the server or logged, stripped by the page.
     println!("open http://{host}/#token={}", token.expose());
     Ok(server)
+}
+
+/// The TCP stream server (T-060): `HK_STREAM_TCP` (e.g. `0.0.0.0:8788`) if set, else loopback
+/// port 8788, or an ephemeral loopback port when 8788 is taken.
+fn start_stream_tcp(
+    registry: &StreamRegistry,
+    openers: &hk_api::stream::OpenerRegistry,
+    token: &Token,
+) -> anyhow::Result<hk_api::StreamServer> {
+    let start = |bind: SocketAddr| {
+        hk_api::StreamServer::start(
+            hk_api::StreamServerConfig::new(bind, token.clone()),
+            registry.clone(),
+            openers.clone(),
+        )
+    };
+    if let Ok(v) = std::env::var("HK_STREAM_TCP") {
+        let bind: SocketAddr = v
+            .parse()
+            .with_context(|| format!("HK_STREAM_TCP={v:?} is not an address"))?;
+        return start(bind).with_context(|| format!("binding the TCP stream server on {bind}"));
+    }
+    let loopback = std::net::Ipv4Addr::LOCALHOST.into();
+    start(SocketAddr::new(
+        loopback,
+        hk_api::tcp::DEFAULT_STREAM_TCP_PORT,
+    ))
+    .or_else(|_| start(SocketAddr::new(loopback, 0)))
+    .context("binding the TCP stream server")
 }
 
 pub(crate) fn config_for(

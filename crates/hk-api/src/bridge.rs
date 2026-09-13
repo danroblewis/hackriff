@@ -80,6 +80,7 @@ impl StreamInfo {
 
 struct Entry {
     info: StreamInfo,
+    header: StreamHeader,
     handle: PublisherHandle,
 }
 
@@ -100,7 +101,14 @@ impl StreamRegistry {
     pub fn register(&self, header: &StreamHeader, handle: PublisherHandle) {
         let info = StreamInfo::from_header(header);
         let mut map = self.inner.write().unwrap_or_else(|p| p.into_inner());
-        map.insert(info.stream_id.clone(), Entry { info, handle });
+        map.insert(
+            info.stream_id.clone(),
+            Entry {
+                info,
+                header: header.clone(),
+                handle,
+            },
+        );
     }
 
     /// Stops offering `stream_id`.
@@ -136,11 +144,71 @@ impl StreamRegistry {
                     "fft_size": i.fft_size,
                     "open_consumers": e.handle.open_consumers(),
                     "ws_path": format!("/ws/{}", i.stream_id),
+                    "tcp_target": i.stream_id,
+                    "format": format_json(&e.header),
                 })
             })
             .collect();
         json!({ "streams": streams })
     }
+}
+
+/// How a stream's records are shaped (T-060 discovery): header fields a client needs to parse
+/// payloads. Metadata only.
+fn format_json(h: &StreamHeader) -> Value {
+    json!({
+        "framing": "u32-le length-prefixed frames; first frame is the JSON header",
+        "records": if h.kind.is_binary() {
+            "32-byte binary record header + payload (type 1 data, 2 dropped, 3 status)"
+        } else {
+            "NDJSON message records"
+        },
+        "record_header_len": h.record_header_len,
+        "max_frame_len": h.max_frame_len,
+        "emitter_id": h.emitter_id,
+        "bitstream_id": h.bitstream_id,
+        "bit_framing": h.framing,
+        "audio": h.audio,
+        "message_schema": h.message_schema,
+    })
+}
+
+/// The `/api/streams` discovery document (T-060): every offered stream with its format, every
+/// on-demand opener with what it produces, and how to reach both over WebSocket and TCP.
+pub fn discovery_json(
+    streams: &StreamRegistry,
+    openers: &hk_stream::OpenerRegistry,
+    tcp: Option<std::net::SocketAddr>,
+) -> Value {
+    let mut doc = streams.listing();
+    let on_demand: Vec<Value> = openers
+        .names()
+        .into_iter()
+        .filter_map(|name| {
+            let opener = openers.get(&name)?;
+            let mut v = json!({
+                "name": name,
+                "ws_path": format!("/ws/open/{name}"),
+                "tcp_target": format!("open/{name}"),
+            });
+            if let (Some(o), Value::Object(d)) = (v.as_object_mut(), opener.describe()) {
+                for (k, x) in d {
+                    o.entry(k).or_insert(x);
+                }
+            }
+            Some(v)
+        })
+        .collect();
+    doc["on_demand"] = Value::Array(on_demand);
+    doc["tcp"] = match tcp {
+        Some(addr) => json!({
+            "addr": addr.to_string(),
+            "handshake": "<tcp_target>?token=<token>[&param=value...]\\n",
+            "refusal": "one frame {\"type\":\"refused\",\"status\",\"code\",\"reason\"} instead of the header",
+        }),
+        None => Value::Null,
+    };
+    doc
 }
 
 /// The consumer writer for one browser: re-frames the publisher's length-prefixed byte stream

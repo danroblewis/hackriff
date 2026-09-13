@@ -499,6 +499,20 @@ impl StreamOpener for ListenManager {
         }
         result
     }
+
+    fn describe(&self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "audio",
+            "datatype": AUDIO_DATATYPE,
+            "sample_rate_hz": AUDIO_SAMPLE_RATE_HZ,
+            "params": ["emitter", "detection", "f_lo", "f_hi"],
+            "records": format!(
+                "data (type 1, {AUDIO_FRAME_SAMPLES} i16 LE mono samples) and status (type 3: \
+                 level_dbfs, snr_db, squelch_open, agc_gain_db, ...); mode and parameters are \
+                 estimated (header audio profile)"
+            ),
+        })
+    }
 }
 
 struct Session {

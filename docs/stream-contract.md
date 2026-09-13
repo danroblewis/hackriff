@@ -1,6 +1,6 @@
 # Stream-output contract (v1.1)
 
-**Status:** Engineering (T-016, T-014, T-022a). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `crates/hk-api/` (WebSocket bridge and read-only HTTP endpoints, §10), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults), and again after T-022a shipped the WebSocket bridge (§10 mapping and auth, §11 residuals).
+**Status:** Engineering (T-016, T-014, T-022a, T-043, T-060). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `crates/hk-api/` (WebSocket bridge and read-only HTTP endpoints, §10), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults), and again after T-022a shipped the WebSocket bridge (§10 mapping and auth, §11 residuals).
 **Legal guardrail:** §6 is the single egress enforcement point for restricted content. Changing it is a core-interface change and needs review.
 
 One contract serves two uses:
@@ -24,6 +24,7 @@ One contract serves two uses:
 |---|---|---|
 | Unix domain socket | Local consumers (default) | `Listener::bind_uds`. Created **mode 0600** with no window: bound in a fresh 0700 directory, chmodded, renamed into place. A path served by a live listener is refused (probe-connect); a stale socket file is replaced. The only transport for `own-key-decrypted` streams. |
 | TCP | Remote consumers | `Listener::bind_tcp`. **Refused for `own-key-decrypted` streams.** **Unauthenticated**: bind to loopback unless the network is trusted. |
+| TCP, token-authenticated | External programs (netcat, Python, GNU Radio) | `hk_api::StreamServer` (§13, T-060): one handshake line names an offered stream or an on-demand opener and carries the API token; then the §3 framing, or one refusal frame. `hk serve` binds `127.0.0.1:8788`. |
 | Child stdin | Plugin data plane (§9) | `DecoderFeed`. Never a listener. |
 | WebSocket | Browsers | Mapping in §10 (`crates/hk-api/src/bridge.rs`, T-022a). Subscribes as `Locality::Remote`. |
 | WebSocket, on demand | Streams opened per request (Listen) | `/ws/open/<name>` (§12, `crates/hk-api/src/ondemand.rs`, T-043): a `StreamOpener` gates and starts the producer, then the connection is bridged as above. |
@@ -413,8 +414,9 @@ is read by `watch_peer` as the signal to close that consumer and shut its socket
 `GET`, token-authenticated JSON endpoints that are **not part of the framed stream contract** above
 — they return plain JSON, not header/record framing — but are worth naming here because they run
 under the same auth and gating:
-- `/api/streams`: the offered streams' header metadata only (id, kind, class, geometry,
-  `content_permitted`, `remote_permitted`, open consumer count) — never content;
+- `/api/streams`: discovery (§13.2) — the offered streams' header metadata only (id, kind, class,
+  geometry, `content_permitted`, `remote_permitted`, open consumer count, `format`, `tcp_target`),
+  the on-demand openers and the TCP stream server address — never content;
 - `/api/history?f_lo&f_hi&t0&t1[&max_cells]`: the T-017 region-over-time grid;
 - `/api/floor?f_lo&f_hi&t0&t1[&max_steps]`: the T-021 floor-vs-time series;
 - `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]`: one
@@ -434,7 +436,7 @@ documents the wire format and security notes from the UI's point of view.
 
 ## 11. Open issues
 
-- **Authentication.** The plain TCP listener (§2) is still unauthenticated; that matters on a portable device on public Wi-Fi. The WebSocket bridge (§10) now has bearer-token auth, but **TLS and per-user auth do not exist**: the token travels and is compared in cleartext, one token authorizes every client, and there is no revocation short of restarting the server.
+- **Authentication.** The plain TCP listener (§2) is still unauthenticated; that matters on a portable device on public Wi-Fi. The T-060 stream server (§13) checks the API token in its handshake line, in cleartext like the bridge. The WebSocket bridge (§10) now has bearer-token auth, but **TLS and per-user auth do not exist**: the token travels and is compared in cleartext, one token authorizes every client, and there is no revocation short of restarting the server.
 - **Own-key local-only rule** (§6) is the provisional default endorsed at review; confirm with the user's legal-guardrail pass (docs/06 §5).
 - **Gated spectrum cap** of 50 rows/s (burst 2) is a provisional number; revisit with real POCSAG/voice spectrogram fixtures.
 - **Manifest trust boundary: trusted but reviewed** (policy recorded by the coordinator). Manifests and their executables are trusted code (`plugins/README.md`). The host contains *accidental* leaks from well-meaning decoders; it does not contain a malicious executable. A manifest's class, allowlist, `max_len` budgets and `review_note`s are legal-guardrail declarations and are reviewed like code. The defaults (§9.3) make anything beyond a small budget explicit and visible as a load warning.
@@ -495,6 +497,110 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
 - **Gating:**
   - Audio payloads are content: under a class that forbids content the egress gate withholds them (§6), as for any audio stream.
   - The listen opener refuses earlier, before a ring read; see `hk_pipeline::chains::listen` for the rule. Restricted bands are refused whatever the source class. Unclassified content (a fail-closed `metadata-only` source without a user classification rule) is refused.
+
+## 13. External programs: TCP stream server, discovery, burst bits and symbols (T-060)
+
+Workflow steps 6–7: demodulated outputs leave hackriff for pluggable consumers. Nothing in §3–§7
+changes; this section adds a transport, a discovery document and a record profile. The version
+stays **1.1**.
+
+### 13.1 TCP stream server (`crates/hk-api/src/tcp.rs`)
+
+- **Handshake.** After connecting, the client sends one line (≤ 4096 bytes, `\n`-terminated, an
+  optional `\r` stripped) within 10 s:
+  - `<stream_id>?token=<token>`: an always-on stream from the registry (e.g. `spectrum/live`,
+    `bits/fsk-bursts/<emitter>`); no other parameters.
+  - `open/<name>?token=<token>[&k=v...]`: an on-demand opener (§12.1): `open/bits`,
+    `open/symbols`, `open/listen?emitter=<id>`. The token is removed before the opener sees the
+    parameters.
+
+  Values are percent-decoded; a leading `/` is ignored. The token is the API token (`HK_TOKEN` or
+  the token file), compared in constant time.
+- **Response.** The §3 byte stream exactly as on a Unix socket (header frame, then records), or a
+  **refusal frame** instead of the header: one frame whose JSON object is
+  `{"type":"refused","status","code","reason","content_class"}`, after which the connection closes.
+  Statuses: 400 bad handshake (including bytes after the line), 401 token, 403 local-only or legal
+  refusal, 404 unknown stream or opener, 408 handshake timeout, 410 finished, 431 line too long,
+  503 at capacity. **Nothing about streams is revealed before the token verifies**: a wrong token
+  gets the same 401 whether or not the target exists. A reader tells a header from a refusal by
+  `schema` vs `type`.
+- **Consumers never send.** Any byte after the handshake line, or a hang-up (EOF), closes the
+  consumer and drops an on-demand session, which stops its producer. Tools that half-close on
+  stdin EOF end the stream at once: `nc` (BSD and OpenBSD) keeps its sending side open by default;
+  use `socat -t <large>`.
+- **Locality and gating.** The connection subscribes as a `TcpStream` (`Locality::Remote`):
+  `own-key-decrypted` streams get 403; §6 gating applies unchanged.
+- **Backpressure.** The publisher's per-consumer queue is the only queue (§7). A client that stops
+  reading loses records with markers and is disconnected after `disconnect_after`; the producer
+  never waits. `StreamServer::stats()` reports accepted, refused, served, open connections and the
+  records enqueued and dropped for its consumers; `StreamServer::consumers()` gives each open
+  connection's own counters (kept per stream by that stream's publisher).
+- **Many streams at once.** Every connection is one consumer of one stream; a client opens several
+  connections for several streams (e.g. two emitters' bits, or three Listen channels). Stream ids,
+  sessions and drop counters are per stream; the test
+  `concurrent_streams_of_one_kind_are_isolated_with_per_stream_drop_counters` covers isolation.
+- **Bounds.** At most 32 connection threads (a further connection gets a 503 refusal frame).
+- **Binding.** `hk serve` starts it on `HK_STREAM_TCP` if set, else `127.0.0.1:8788`, else an
+  ephemeral loopback port; the address is printed and reported by discovery.
+
+One-liner (hex dump of the bits of every demodulated burst):
+
+```sh
+printf 'open/bits?token=%s\n' "$HK_TOKEN" | nc 127.0.0.1 8788 | xxd | head -40
+```
+
+Python clients (standard library only): `py/examples/` (`hkstream.py` parser, `hk_bits.py`,
+`hk_audio_wav.py`), documented in `py/README.md`.
+
+### 13.2 Discovery (`GET /api/streams`)
+
+Token-authenticated JSON, metadata only:
+- `streams[]`: the §10 listing plus `tcp_target` (the stream id) and `format` (`record_header_len`,
+  `max_frame_len`, `emitter_id`, `bitstream_id`, `bit_framing` (docs/07 `Framing`), `audio`,
+  `message_schema`).
+- `on_demand[]`: `name`, `ws_path` (`/ws/open/<name>`), `tcp_target` (`open/<name>`), plus what the
+  opener describes (`StreamOpener::describe`): `kind`, `datatype`, `params`, `records`.
+- `tcp`: `{addr, handshake, refusal}`, or `null` when no TCP stream server runs.
+
+### 13.3 Burst bits and symbols (`open/bits`, `open/symbols`)
+
+Code: `hk_stream::bursts` (profile), `hk_pipeline::chains::taps` (producer).
+- **Request.** No parameter: every burst the run demodulates. Otherwise `emitter=<id>`,
+  `detection=<id>` or `f_lo=<Hz>&f_hi=<Hz>` (bursts whose centre lies in that extent, padded by
+  25 % or 2 kHz, or bursts stored under that emitter). A mode or parameter is refused (400). Each
+  request is its own tap and stream (`bits/bursts/<n>`), so concurrent taps on different emitters
+  are independent.
+- **Source.** Bursts demodulated by the `fsk-bursts` chains, offered while a chain runs (once
+  `min_bursts` are in, framing inferred over the bursts so far, at most every 500 ms, only while a
+  tap is open) and at chain detach (final framing, emitter id). A tap costs nothing without bursts.
+  At most 8 taps; the end of the run finishes every tap stream.
+- **Header.** `kind` `bits` with `datatype` `ru8` (one byte per bit, 0 or 1), or `kind` `symbols`
+  with `datatype` `rf32_le` (one soft value per symbol, LLR-like, positive = 1). `framing`
+  `{payload: hard-bits | soft-symbols, bits_per_symbol: 1}`; `center_hz`, `bandwidth_hz` and
+  `emitter_id` describe the target when there is one.
+- **Per burst, two records:**
+  1. **Status** (type 3), a flat object: `burst` (per-stream counter), `symbols` (elements in the
+     data record), `symbol_rate_bd`, `f_center_hz`, `bandwidth_hz`, `snr_db`, `framed`, `inverted`,
+     `sync_bit`, `sync_bits`, `payload_bit`, `payload_bits`, `bit_order` (`msb-first`/`lsb-first`),
+     `crc` (`valid`/`invalid`), `emitter_id` (at detach), `content_withheld`. Absent values are
+     omitted.
+  2. **Data** (type 1), flags `BURST_START | BURST_END`, `t` of the first symbol, `sample_index`
+     the source sample of the first symbol centre. Bits and symbols are in the **framing model's
+     polarity** (inverted bursts complemented), so `payload_bit`/`payload_bits` index straight
+     into the payload; pack with `bit_order` to get the payload bytes.
+- **Classes (existing FSK rules, not extended).** A burst's class is the one its Decode rows are
+  stored under (fail closed unless a user classification rule vouches for the emitter). The header
+  class is decided at open: `classify_emitter` on the requested extent (fail closed when nothing
+  vouches); for every burst, the source class, or `unrestricted` when classification rules exist
+  and the source is not restricted. A burst whose class withholds content on a permitting stream
+  sends only its status record, with `content_withheld: true`. Under a header class that forbids
+  content, data records go out header-only (`GATED`, §6).
+- **Symbols gap.** Soft symbols exist only where a chain recovers them: the FSK burst chain today.
+  Analog Listen streams audio, not symbols; plugin decoders (readsb) publish messages; there is no
+  PSK/QAM symbol recovery in the pipeline yet, so no symbols stream exists for those signals.
+- **Always-on per-emitter streams.** `bits/fsk-bursts/<emitter>` (T-037b) is still published once
+  per chain at detach and finished at once, so it is only useful to in-process sinks; external
+  programs use `open/bits` (optionally `emitter=<id>`), which sees the same bursts live.
 
 ## Sources
 

@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hk_core::Discontinuity;
 use hk_core::ProvenanceHandle;
@@ -30,12 +30,14 @@ use hk_stream::{
 };
 use num_complex::Complex;
 
+use super::taps::STREAM_INFER_INTERVAL;
 use super::{ChainMsg, ChainReader, Next};
 use crate::class::classify_emitter;
 use crate::events::{Candidate, MemberBox};
 use crate::gate::GateCursor;
 use crate::run::Shared;
 use crate::stats::{add, inc};
+use hk_demod::fsk::record::effective_content_class;
 
 #[derive(Clone, Debug)]
 struct Group {
@@ -99,6 +101,9 @@ pub(crate) fn run(
         ..Default::default()
     };
     let (mut detach, mut closed) = (false, false);
+    // Bursts already offered to burst taps (T-060) and when framing was last inferred for them.
+    let mut streamed = 0usize;
+    let mut last_stream: Option<Instant> = None;
     loop {
         loop {
             match rx.try_recv() {
@@ -195,6 +200,16 @@ pub(crate) fn run(
             }
         }
         groups.drain(..done);
+        if !detach
+            && streamed < bursts.len()
+            && bursts.len() >= min_bursts.max(1)
+            && shared.bursts.has_taps()
+            && last_stream.is_none_or(|t| t.elapsed() >= STREAM_INFER_INTERVAL)
+        {
+            stream_live(&shared, &bursts, streamed, f_lo, f_hi);
+            streamed = bursts.len();
+            last_stream = Some(Instant::now());
+        }
         if bursts.len() >= max_bursts || (detach && groups.is_empty()) {
             break;
         }
@@ -260,7 +275,38 @@ pub(crate) fn run(
     };
     if let Some(w) = written {
         publish_bits(&shared, &bursts, &w, f_lo, f_hi);
+        // Burst taps get the bursts not offered live, under the stored class and emitter.
+        shared.bursts.offer(
+            &shared.counters,
+            &bursts,
+            streamed,
+            &result,
+            w.content_class,
+            Some(w.emitter_id),
+        );
     }
+}
+
+/// Offers `bursts[from..]` to burst taps while the chain runs (T-060): framing inferred over
+/// every burst so far, class as the chain will store it ([`effective_content_class`]).
+fn stream_live(shared: &Shared, bursts: &[FskBurst], from: usize, f_lo: f64, f_hi: f64) {
+    let bits: Vec<&[u8]> = bursts.iter().map(FskBurst::bits).collect();
+    let result = infer_framing(&bits, &FramingConfig::default());
+    inc(&shared.counters.taps.inferences);
+    let ctx = FramedRecordContext {
+        classification: classify_emitter(
+            &shared.cfg.settings.classify,
+            shared.cfg.source_class,
+            f_lo,
+            f_hi,
+        )
+        .map(|(content_class, by)| EmitterClassification { content_class, by }),
+        ..Default::default()
+    };
+    let class = effective_content_class(&ctx, &result);
+    shared
+        .bursts
+        .offer(&shared.counters, bursts, from, &result, class, None);
 }
 
 /// The FSK bits stream (T-037b): one record per demodulated burst on

@@ -306,6 +306,37 @@ counter_group!(
     }
 );
 
+counter_group!(
+    /// Burst taps (T-060, [`crate::chains::taps`]): bits and symbols streams for external
+    /// programs. Metadata only.
+    TapCounters {
+        /// Tap requests.
+        requests,
+        /// Requests refused (bad request, unknown target, at capacity, run ended).
+        refused,
+        /// Taps opened.
+        attached,
+        /// Taps closed by their consumer going away.
+        detached,
+        /// Taps open now.
+        active,
+        /// Bursts offered to open taps.
+        bursts,
+        /// Burst status records published.
+        status_records,
+        /// Burst data records published with payload.
+        records,
+        /// Data records the egress gate reduced to header-only (`GATED`).
+        gated,
+        /// Bursts whose class withheld content (status record only).
+        withheld,
+        /// Framing inferences run for live tap output.
+        inferences,
+        /// Publish errors.
+        errors,
+    }
+);
+
 /// All counters of one run.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -327,6 +358,8 @@ pub struct Counters {
     pub chains: ChainCounters,
     /// On-demand listening (T-043).
     pub listen: ListenCounters,
+    /// Burst taps (T-060).
+    pub taps: TapCounters,
     /// Scheduler.
     pub scheduler: SchedulerCounters,
     /// Stream time of the newest block end, ns.
@@ -367,6 +400,7 @@ impl Counters {
             "spectrum": self.spectrum.to_json(),
             "chains": self.chains.to_json(),
             "listen": self.listen.to_json(),
+            "taps": self.taps.to_json(),
             "scheduler": self.scheduler.to_json(),
             "stream_time_ns": self.stream_time_ns.load(Ordering::Relaxed),
             "tune": { "center_hz": center, "sample_rate_hz": rate },

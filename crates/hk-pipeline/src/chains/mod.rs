@@ -27,6 +27,7 @@ pub mod listen;
 pub(crate) mod plugin;
 pub(crate) mod record;
 pub mod spec;
+pub mod taps;
 
 use std::collections::HashMap;
 use std::sync::Arc;
