@@ -1132,6 +1132,20 @@ tasks:
     model: sonnet
     effort: medium
     note: "UI-only; avoids ui/src/selections.ts and selection-panel.ts (T-052)"
+  - id: T-070
+    milestone: M0b
+    title: Output-driven demod refinement (RefinementLoop per chain; WFM first) storing refined centre/bandwidth on the Emitter
+    status: in-progress
+    deps: [T-043, T-049, T-039]
+    parallel_group: U
+    use_cases: [SIGNAL-062]
+    requested_by: user feedback 2026-09-13 (start of message truncated)
+    acceptance: "reusable RefinementLoop (objective + parameter space + termination/hysteresis) per demod chain; WFM objective (pilot offset/SNR, MPX/RDS lock, audio SNR); refined centre/bandwidth/mode params stored on the Emitter with provenance 'refined by output analysis' (originals kept), served in /api/inventory; off-raster/explanation checks use the refined centre; blind, never snaps to a band plan; hooks for NBFM/AM (audio SNR, squelch) and FSK (CRC-valid rate, EVM, lock). Tests via mock SDR on fm_100p8M: selections offset +/-50/+/-100 kHz and widths 60/400 kHz refine to +/-2 kHz of the carrier with bandwidth ~150-220 kHz and RDS PI decoded; synthetic station 150 kHz off raster refines to its true centre and is flagged off-raster"
+    area: crates/hk-pipeline (refine.rs, listen/analog wiring, family.rs), crates/hk-demod (WFM objective), crates/hk-model (refined params), tests/e2e
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
