@@ -48,7 +48,7 @@ tasks:
     title: source-abstraction + SigMF file-replay source + RAM ring buffer
     status: done
     commit: "8386cbb (merged 76ff126)"
-    review: "post-merge Opus review URGENT-FIX: stale samples pass seqlock validation in release, inexact overrun/gap accounting, false startup overrun, unchecked u64 overflow; plus Source control/stream split needed before T-009. Fix agent running (may adopt S1 Arc-block ring)"
+    review: "post-merge review URGENT-FIX -> fixed 8f21b6f (merged): all atomics SeqCst, copy_out bounded by committed end, exact lost/gap accounting, startup-at-first-block, IndexOverflow, lock-free writer provenance table, exact capacities + mlock, streaming TriggerStream, Source/SourceControl split, replay header/trailing bytes. Release stress test (index-encoded samples, 150 seeds, 180M samples) clean. OPEN: root-cause explanation (Relaxed vs SeqCst) is doubtful - independent verification running"
     deps: [T-001]
     parallel_group: B
     use_cases: [SPACE-050]
