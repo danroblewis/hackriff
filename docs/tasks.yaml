@@ -128,8 +128,9 @@ tasks:
     dod: Track objects with timing features; links detections to one track
   - id: T-008
     title: channelizer (2x oversampled PFB) + on-demand DDC
-    status: in-progress
-    review: "Opus review FIX-BEFORE-MERGE: failed rate re-plan leaves DDC silently using the old plan on the next block; follow-ups being applied (u64 NCO phase for large indices, forced PFB reset on rate change, even-M rasters, stride-view docs). DSP/timing/alloc/NaN probes otherwise clean"
+    status: done
+    commit: "3beb92b + review fixes 88c13c5 (merged)"
+    review: "Opus review FIX-BEFORE-MERGE -> fixed: re-plan error every block until realisable, exact u64 NCO (-72 dB at index 0/7.2e10/2^50), forced PFB rate-change reset, even-M rasters + raster offset, zero-alloc on transitions except re-plan"
     scope_override: "T-008 delivers the CPU path only; GPU PFB split to T-026 (gated on S2, needs Jetson)"
     deps: [T-004]
     parallel_group: D
@@ -156,7 +157,7 @@ tasks:
     dod: ScanPlan-driven sweep/dwell alternation with POI-sized dwells; golden-file the schedule
   - id: T-010
     title: parameter-estimation (OBW, CFO, SNR, spectral shape)
-    status: todo
+    status: in-progress
     s5_inputs: "mean-based N0; OBW99 on smoothed noise-subtracted PSD; SNR re-measured over burst extent (unclipped); CFO centroid default, x^2 line for DSB/BPSK; feed pilot-derived clock ppm to C05 (-6.8 ppm measured)"
     deps: [T-008]
     parallel_group: F
