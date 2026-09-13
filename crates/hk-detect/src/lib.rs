@@ -10,14 +10,17 @@
 //!    (N 32 = 16/side, G 4/side, k 24); `α` numeric for `Gamma(n)` order statistics ([`alpha`]);
 //!    `T = Q⁻¹(n, pfa)/n`; 3 dB guard on the OS branch only. The off thresholds come from their
 //!    own Pfa (1e-3), never a fixed −3 dB. `F` is the floor reference
-//!    ([`FloorReference`]: per-frame FCME by default; the wide-signal reference optionally). `n` is
-//!    [`FloorFrame::n_avg_effective`](hk_dsp::floor::FloorFrame). Branches are per profile
-//!    ([`DetectionProfile::branches`]), so a band can run OS-only.
-//! 2. **Floor-step guard** ([`step`]): within a block of a persistent > 6 dB block-floor jump that
-//!    bounds no signal-like plateau (a notch, filter edge or staircase, where block FCME is biased)
-//!    or a configured response edge, the floor branch leaves the per-frame reference: it runs on
-//!    the shape-normalised wide reference where the learned shape explains the step, and is off
-//!    (OS branch alone) otherwise.
+//!    ([`FloorReference`]: the wide-signal reference by default since T-033; per-frame FCME
+//!    optionally). `n` is [`FloorFrame::n_avg_effective`](hk_dsp::floor::FloorFrame). Branches are
+//!    per profile ([`DetectionProfile::branches`]), so a band can run OS-only.
+//! 2. **Floor-step guard** ([`step`]): within a block of a persistent > 5 dB block-floor jump that
+//!    bounds no signal-like plateau (a notch, filter edge, filter-bank passband or staircase, where
+//!    block FCME is biased; plateaus are told apart by their power statistics over time) or a
+//!    configured response edge, the floor branch leaves the configured reference: it runs on the
+//!    shape-normalised wide reference where the learned shape explains the step, and is off (OS
+//!    branch alone, guarded against the local upper block floor) otherwise. On the wide
+//!    reference, floor features it reads as signals use the per-frame floor. The integrated
+//!    spectrum averages the reference the floor branch used and includes the bins where it ran.
 //! 3. **Components** ([`components`]): 4-connected time–frequency components of the raw region
 //!    that contain a seed and span ≥ 3 frames are kept; kept components then merge across ≤ 2-frame
 //!    gaps. No frequency merge. Streamed, so a box is emitted `gap + 1` frames after it ends.
@@ -91,7 +94,7 @@ pub use record::{
     ImageEvidence,
 };
 pub use rules::Geometry;
-pub use step::{ShapeView, StepGuard, StepGuardConfig};
+pub use step::{GuardFrame, ShapeView, StepGuard, StepGuardConfig, WideView};
 pub use track::{
     BoundaryKind, CloseCause, TrackBatch, TrackEvent, TrackSummary, Tracker, TrackerConfig,
 };

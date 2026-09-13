@@ -22,7 +22,7 @@ use crate::record::{
     ImageEvidence,
 };
 use crate::rules::{Geometry, Pearson, edge_hit, spur_decision};
-use crate::step::{ShapeView, StepGuard};
+use crate::step::{GuardFrame, ShapeView, StepGuard, WideView};
 use crate::trust::{CaptureEmitter, CaptureResult, GainState};
 
 /// Nominal HackRF One RX amp gain used for `total_gain_db` (S4: not verified on this unit).
@@ -363,27 +363,45 @@ impl Detector {
                 let shape =
                     (floor.frames_in_segment >= g.config().wide_min_frames).then_some(ShapeView {
                         shape: &floor.shape,
+                        norm_block_floor: &floor.norm_block_floor,
+                    });
+                let wide =
+                    (self.config.floor_reference == FloorReference::Wide).then_some(WideView {
                         floor: &floor.floor,
+                        wide_floor: &floor.wide_floor,
                     });
                 g.update(
-                    &floor.block_floor,
+                    GuardFrame {
+                        psd: &spec.psd,
+                        n_avg_effective: floor.n_avg_effective,
+                        impulsive: floor.impulsive,
+                        block_floor: &floor.block_floor,
+                        shape,
+                        wide,
+                    },
                     &geometry,
                     &self.config.response_edges_hz,
-                    shape,
                 );
                 self.stats.guarded_frames += u64::from(g.guarded_bins() > 0);
                 self.stats.wide_guarded_frames += u64::from(g.wide_bins() > 0);
                 self.stats.step_guard_unavailable += u64::from(!g.available());
-                for (((ok, eff), (&m, &w)), &wf) in self
+                let with_frame_ref = g.frame_ref_bins() > 0;
+                for (b, ((ok, eff), (&m, &w))) in self
                     .floor_ok
                     .iter_mut()
                     .zip(self.eff_floor.iter_mut())
                     .zip(g.mask().iter().zip(g.wide_mask()))
-                    .zip(&floor.wide_floor)
+                    .enumerate()
                 {
                     *ok = m || w;
                     if w {
-                        *eff = wf;
+                        *eff = floor.wide_floor[b];
+                    } else if with_frame_ref && g.frame_ref_mask()[b] {
+                        *eff = floor.floor[b];
+                    }
+                    if !m && !w {
+                        // OS-only: the guard's upper block-floor envelope.
+                        *eff = eff.max(g.os_floor()[b]);
                     }
                 }
                 self.guard_active = true;
@@ -396,10 +414,12 @@ impl Detector {
                 self.guard_active.then_some(self.floor_ok.as_slice()),
                 &mut self.codes,
             );
+            // The integrated spectrum averages the reference the floor branch used (T-033: the
+            // wide reference in guarded zones it may use, the per-frame floor over floor features).
             if !floor.impulsive
                 && self
                     .integrated
-                    .push(&spec.psd, reference, start.time, end.time)
+                    .push(&spec.psd, &self.eff_floor, start.time, end.time)
             {
                 self.evaluate_integrated(false, out);
             }
@@ -513,6 +533,7 @@ impl Detector {
         }
         self.eff_floor.resize(bins, 0.0);
         self.floor_ok.resize(bins, true);
+        self.floor_ok.fill(true);
         self.guard_active = false;
         self.integrated
             .configure(bins, frame_period_s, self.stats.segments);
@@ -567,11 +588,9 @@ impl Detector {
         };
         let geometry = seg.geometry;
         let segment = seg.segment;
-        let mask = if seg.branches == Branches::OsOnly {
-            None
-        } else {
-            self.step.as_ref().map(StepGuard::mask)
-        };
+        // Guarded bins take part where the floor branch ran on the wide reference (T-033).
+        let mask = (seg.branches != Branches::OsOnly && self.step.is_some())
+            .then_some(self.floor_ok.as_slice());
         if !self.integrated.evaluate(
             include_partial,
             &self.config.rules,

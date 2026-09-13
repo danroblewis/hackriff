@@ -71,14 +71,18 @@ pub enum Branches {
 pub enum FloorReference {
     /// [`FloorFrame::floor`](hk_dsp::floor::FloorFrame::floor): per-frame block FCME. Unbiased on
     /// sloped floors; reads the signal inside flat signals wider than about one block, where the
-    /// OS branch is the only cover. **Default.** Guarded zones of the floor-step guard use the
-    /// wide reference where the learned shape explains the step ([`crate::step`]).
+    /// OS branch is the only cover. Guarded zones of the floor-step guard use the wide reference
+    /// where the learned shape explains the step ([`crate::step`]). The default until T-033.
     PerFrame,
     /// [`FloorFrame::wide_floor`](hk_dsp::floor::FloorFrame::wide_floor): keeps wide-signal
-    /// interiors and (T-005) is slope-robust on tilts, roll-offs and learned notches. Not the
-    /// default (T-028 evaluation): a floor shelf above the band floor reads as a signal, so
-    /// `-20 dB below bin 1200, -10 dB step at 3200` runs 614× design (4 false boxes) and a
-    /// staircase 74×, where the per-frame reference with the step guard stays at 1.02–1.05×.
+    /// interiors and (T-005) is slope-robust on tilts, roll-offs and learned notches. Where it has
+    /// cut a floor feature above the band floor (a shelf, a filter-bank passband: floor-like power
+    /// statistics), the floor branch uses the per-frame floor instead ([`crate::step`]).
+    /// **Default** (T-033 evaluation): every false-alarm case within 1.07× design where the floor
+    /// branch runs, with 0 false boxes (T-028's `-20 dB below bin 1200, -10 dB step at 3200`: 614×
+    /// → 1.05×; `+6 dB` passbands 100–260× → 1.03–1.07×); flat full chain 1 box in 1.02 MHz·h as
+    /// on the per-frame reference; fixture results unchanged. Limit: a stationary noise-like wide
+    /// emission (OFDM) reads as a floor feature, so its interior is not covered.
     Wide,
 }
 
@@ -467,7 +471,7 @@ impl DetectorConfig {
             survey_id,
             window: CfarWindow::default(),
             guard_db: 3.0,
-            floor_reference: FloorReference::PerFrame,
+            floor_reference: FloorReference::Wide,
             profile: DetectionProfile::standard(),
             band_profiles: Vec::new(),
             rules: Rules::default(),
@@ -551,6 +555,22 @@ impl DetectorConfig {
             check_non_negative("step_guard.plateau_match_db", g.plateau_match_db)?;
             check_non_negative("step_guard.wide_residual_db", g.wide_residual_db)?;
             check_positive("step_guard.wide_step_db", g.wide_step_db)?;
+            check_positive("step_guard.wide_cut_db", g.wide_cut_db)?;
+            check_non_negative("step_guard.release_db", g.release_db)?;
+            check_positive(
+                "step_guard.stat_time_constant_frames",
+                g.stat_time_constant_frames,
+            )?;
+            check_non_negative("step_guard.floor_like_min", g.floor_like_min)?;
+            if g.floor_like_max
+                .partial_cmp(&g.floor_like_min)
+                .is_none_or(|o| o.is_lt())
+            {
+                return Err(ConfigError::Invalid {
+                    name: "step_guard.floor_like_max must not be below floor_like_min",
+                    value: g.floor_like_max,
+                });
+            }
             if g.blocks.block_bins == 0 || g.blocks.hop_bins == 0 {
                 return Err(ConfigError::Invalid {
                     name: "step_guard.blocks",
@@ -752,7 +772,7 @@ mod tests {
         let v = a.detector_version(0);
         assert!(v.starts_with("hk-detect/os-cfar@"), "{v}");
         assert!(
-            v.contains("profile=standard;br=or;pfa=1e-6/1e-3;min=3;gap=2;ref=per-frame;cfg="),
+            v.contains("profile=standard;br=or;pfa=1e-6/1e-3;min=3;gap=2;ref=wide;cfg="),
             "{v}"
         );
         assert!(a.validate().is_ok());
