@@ -432,3 +432,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Running:** T-065.
   - **Waiting for agent slots:** T-064 hop-set scaling, T-066 Listen robustness, T-067 control API completeness, T-056 compute hookup. T-061 record outputs waits for T-060 and T-052.
 - **B0.137 User UI feedback → T-069 launched now (Sonnet, UI-only):** Listen was hard to find (only in the hidden Inspect panel and per-selection actions). Adds a toolbar Listen above the waterfall, which plays the last click, else the selection, else the strongest signal in view. Also adds Listen per inventory row and a 'click a signal, then Listen' hint, and removes the restricted-class hint text. Merge on completion.
+- **B0.138 Main fully green after the batch** (T-062, T-063, T-049, T-058, T-043, T-051; `retune_legal` ignored by user decision). Isolated-target verification passed: lint, 142 Rust test groups (0 failed), Python, UI, acceptance.
