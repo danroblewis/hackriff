@@ -291,7 +291,9 @@ tasks:
     dod: pyramid with rolling byte budget; region-over-time query tested
   - id: T-018
     title: signal-inventory writes + emitter clustering (read/query)
-    status: in-progress
+    status: done
+    commit: "4c68648 (merged)"
+    results: "fingerprint v1 (centre/BW/family/symbol rate/deviation/period/duty/burst length/hop raster) with per-feature tolerances; clustering order: replay ledger -> decoded identity (channel-sharing schemes attach to source emitter) -> emitter context -> fingerprint -> new unknown emitter (priors appended); merges set merged_into + append-only history, no deletes; IdentityConflictReport; query_inventory by freq/time/status/tag/scheme/family with pagination and fail-closed identity gating (clear only for unrestricted or own-key with OwnTrafficAuthorised); hk-plugins ingest hook rewired; AWARE-036/SIGNAL-001/SIGNAL-062/AWARE-053 tests green. Merged under timebox (not core_interface)"
     followups_from_T-002_review: "emitter fingerprint lookup/update API, merge state (merged_into), supersedable emitter_link, idempotent count on replay, classification input ref + feature-set version; from T-015 review: Emitter rows carry no content_class (restricted identity loses its class in inventory -> inventory API/export must re-gate); count not idempotent on replay (DF11 included); ctx.emitter_ref ignored (identity emitter separate from detection emitter); IdentityConflict only counted"
     deps: [T-002, T-007]
     parallel_group: E
@@ -347,7 +349,7 @@ tasks:
     dod: calibration applied (dBFS->dBm); floor-vs-time product from tiles
   - id: T-022
     title: web UI — WebGL2 waterfall + inventory table + region-over-time
-    status: todo
+    status: in-progress
     deps: [T-016, T-017, T-018]
     parallel_group: I
     use_cases: [AWARE-042, SPACE-050, SIGNAL-062]
@@ -513,6 +515,19 @@ tasks:
     effort: medium
     items: "sharp-edged filter-bank passband still exempt as plateau (both sides at band floor) -> 25-28 phantoms (~60x design) PerFrame, 100-260x Wide; floor shelf narrower than 1 MHz next to a learned step reads as signal; integrated-spectrum mask excludes all guarded bins; hk-detect duplicates hk-dsp shape internals (1 dB rule, block-centre sampling) - expose normalised block floors in FloorFrame; default reference still PerFrame (Wide fails stepped notch at 614x)"
     note: "follow-ups from T-028 (merged 2026-09-13 under the timebox rule); must land before filter-bank accessory field use"
+  - id: T-034
+    title: Inventory follow-ups (ungated raw emitter getters, writers to record_sighting, re-demod dedup, clustering v2)
+    status: todo
+    deps: [T-018]
+    parallel_group: E
+    use_cases: [AWARE-036, SIGNAL-001, SIGNAL-062, AWARE-053]
+    acceptance: no API or export path returns restricted identities in clear (raw getters gated or crate-private); RDS/FSK writers record identity class; re-demodulating the same IQ does not double counts
+    area: crates/hk-model, crates/hk-demod, crates/hk-api
+    needs: none
+    model: opus
+    effort: medium
+    items: "raw Repository::emitter()/emitter_by_identity still return identities ungated - make them crate-private or gated, hk-api/exports must use query_inventory (legal); hk-demod RDS + FSK writers still use upsert_emitter_observation (no identity class) - move to record_sighting; re-demodulating same IQ creates new decode/track ids and doubles counts (dedup by content hash / time overlap); clustering v2: DBSCAN, fingerprints from C13-C15 estimates in pipeline, merge undo, suspect-artifact quarantine, multi-level entities, N+1 query reads"
+    note: "follow-ups from T-018 (merged 2026-09-13 under the timebox rule); the first item is a legal-guardrail gap to close before any inventory API/export ships"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
