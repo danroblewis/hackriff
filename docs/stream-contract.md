@@ -1,6 +1,6 @@
 # Stream-output contract (v1.0)
 
-**Status:** Engineering (T-016, T-014). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), and again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults).
+**Status:** Engineering (T-016, T-014, T-022a). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `crates/hk-api/` (WebSocket bridge and read-only HTTP endpoints, §10), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults), and again after T-022a shipped the WebSocket bridge (§10 mapping and auth, §11 residuals).
 **Legal guardrail:** §6 is the single egress enforcement point for restricted content. Changing it is a core-interface change and needs review.
 
 One contract serves two uses:
@@ -25,7 +25,7 @@ One contract serves two uses:
 | Unix domain socket | Local consumers (default) | `Listener::bind_uds`. Created **mode 0600** with no window: bound in a fresh 0700 directory, chmodded, renamed into place. A path served by a live listener is refused (probe-connect); a stale socket file is replaced. The only transport for `own-key-decrypted` streams. |
 | TCP | Remote consumers | `Listener::bind_tcp`. **Refused for `own-key-decrypted` streams.** **Unauthenticated**: bind to loopback unless the network is trusted. |
 | Child stdin | Plugin data plane (§9) | `DecoderFeed`. Never a listener. |
-| WebSocket | Browsers | Mapping in §10. The bridge is not implemented yet; it must subscribe as `Locality::Remote`. |
+| WebSocket | Browsers | Mapping in §10 (`crates/hk-api/src/bridge.rs`, T-022a). Subscribes as `Locality::Remote`. |
 
 Each accepted connection is one consumer of one stream: it gets the header, then records from the moment it joined. Consumers never write back; control belongs to the control API.
 
@@ -351,17 +351,77 @@ readsb is GPL, so it will run as a subprocess against this manifest. Its model:
 
 ## 10. WebSocket mapping (browsers)
 
-Browsers can't open raw TCP or UDS sockets (spike S3). A bridge maps a stream one-to-one:
-- the header is the **first text message** (the JSON object);
-- each record is **one message**: text for `messages` records, binary for binary records;
-- the `u32` length prefix is dropped, because WebSocket already frames messages;
-- queues and drop policy are the same as §7. The S3 spike used the same drop-on-full bounded queue.
+Browsers can't open raw TCP or UDS sockets (spike S3). Built in T-022a: `crates/hk-api/src/bridge.rs`
+(`bridge::attach`, `WsSink`), served at `GET /ws/<stream_id>` by `crates/hk-api/src/http.rs`. It runs
+on **std threads and `tungstenite`**, not an async runtime — one accept thread per `hk-api` server
+(shared with the plain HTTP endpoints) and one writer thread per consumer, matching §2's threading
+rationale.
 
-The bridge isn't built yet. It is a follow-up with the UI work (T-023), and may bring an async runtime into its own binary.
+**Mapping (1:1).** A bridge connection is subscribed through the same `PublisherHandle::subscribe`
+as every other consumer (§2), so it sees only records the gate has already passed:
+- the header is the **first text message** (the JSON object, verbatim);
+- each later record is **one WebSocket message**: text for `messages` streams (the NDJSON line or
+  drop marker, verbatim including its trailing `\n`), binary for every binary kind (the §5.2 32-byte
+  record header + payload, or a §5.3 marker);
+- the `u32` length prefix is dropped, because WebSocket already frames messages;
+- queues and drop policy are unchanged from §7: the publisher's per-consumer writer thread blocks
+  only on that browser's TCP socket, its bounded ring fills, records are dropped with markers, and
+  it is disconnected after `disconnect_after`. There is no second queue in the bridge.
+
+**Locality: always remote.** Every browser connection subscribes wrapped in `Declared::remote`,
+**even from `127.0.0.1`** — a page can forward what it receives, so it is treated as remote-capable
+regardless of where the socket originates. Consequently an `own-key-decrypted` stream is refused
+before anything is queued (`StreamError::LocalOnly`, `gate_stats().remote_consumers_refused`),
+answered as **HTTP 403** with no WebSocket upgrade (the `101` response is written by the sink only
+after `subscribe` succeeds, so a refusal never upgrades the connection). Every other gate (class
+clamping, gated-spectrum rate/size, §6) applies unchanged; the bridge adds no gating of its own.
+
+**Other refusals, also plain HTTP before any upgrade:**
+- **HTTP 503** at `PublisherConfig::max_consumers` (`StreamError::TooManyConsumers`);
+- **HTTP 410** for a stream that has already finished (`StreamError::Finished`);
+- **HTTP 404** for an unknown `stream_id`;
+- **HTTP 426** for a request to `/ws/<id>` that isn't a valid WebSocket upgrade (missing
+  `Upgrade: websocket`/`Connection: Upgrade`, or `Sec-WebSocket-Version` other than `13`).
+
+**Authentication (token).** `/ws/<id>`, like every `/api/*` path, requires the server's bearer
+token (`crates/hk-api/src/auth.rs`): a 256-bit value generated at start from the OS CSPRNG, or taken
+from `HK_TOKEN` (≥16 printable-ASCII characters, no spaces). Sent as `Authorization: Bearer` where a
+header can be set, or `?token=` for browser `WebSocket` connections, which cannot set headers.
+Comparison is constant time over the full length (`Token::verify`). A missing or wrong token is
+**HTTP 401**, returned before the WebSocket handshake and before anything about the stream (even
+whether it exists) is revealed.
+
+**Bind address and transport security.** `hk serve` binds `127.0.0.1` by default. Binding a
+non-loopback address (e.g. `0.0.0.0`) exposes the bridge, and every other `/api/*` endpoint, to
+everyone who can reach that interface — the LAN or, on open Wi-Fi, anyone nearby. **There is no TLS
+in M0**: the token is the only protection and travels, and is compared, in cleartext. `hk serve`
+prints a warning when it binds non-loopback.
+
+**Caps.** In addition to the per-stream `max_consumers` (§2) and per-consumer queue (§7), the HTTP
+server bounds request size and concurrency: request heads are capped at 16 KiB and must complete
+within `request_timeout` (default 10 s), and at most `ServerConfig::max_connections` (default 64)
+connection threads run at once, WebSocket consumers included — a further TCP connection is simply
+not accepted until one frees up. `/api/history` and `/api/floor` (below) additionally cap query
+result size.
+
+**Consumers never write.** As in §2: any byte a browser sends (a close frame included) or a hang-up
+is read by `watch_peer` as the signal to close that consumer and shut its socket down.
+
+**Read-only control/query endpoints.** The bridge shares its `hk-api` HTTP server with three
+`GET`, token-authenticated JSON endpoints that are **not part of the framed stream contract** above
+— they return plain JSON, not header/record framing — but are worth naming here because they run
+under the same auth and gating:
+- `/api/streams`: the offered streams' header metadata only (id, kind, class, geometry,
+  `content_permitted`, `remote_permitted`, open consumer count) — never content;
+- `/api/history?f_lo&f_hi&t0&t1[&max_cells]`: the T-017 region-over-time grid;
+- `/api/floor?f_lo&f_hi&t0&t1[&max_steps]`: the T-021 floor-vs-time series.
+
+See `crates/hk-api/src/http.rs` and `crates/hk-api/src/query.rs` for their shapes and caps; `ui/README.md`
+documents the wire format and security notes from the UI's point of view.
 
 ## 11. Open issues
 
-- **Authentication** for TCP (and later WebSocket) listeners. They are unauthenticated today, which matters on a portable device on public Wi-Fi.
+- **Authentication.** The plain TCP listener (§2) is still unauthenticated; that matters on a portable device on public Wi-Fi. The WebSocket bridge (§10) now has bearer-token auth, but **TLS and per-user auth do not exist**: the token travels and is compared in cleartext, one token authorizes every client, and there is no revocation short of restarting the server.
 - **Own-key local-only rule** (§6) is the provisional default endorsed at review; confirm with the user's legal-guardrail pass (docs/06 §5).
 - **Gated spectrum cap** of 50 rows/s (burst 2) is a provisional number; revisit with real POCSAG/voice spectrogram fixtures.
 - **Manifest trust boundary: trusted but reviewed** (policy recorded by the coordinator). Manifests and their executables are trusted code (`plugins/README.md`). The host contains *accidental* leaks from well-meaning decoders; it does not contain a malicious executable. A manifest's class, allowlist, `max_len` budgets and `review_note`s are legal-guardrail declarations and are reviewed like code. The defaults (§9.3) make anything beyond a small budget explicit and visible as a load warning.
@@ -372,7 +432,12 @@ The bridge isn't built yet. It is a follow-up with the UI work (T-023), and may 
   - **Gated spectrum:** delivered rows' `t` and `sample_index` (up to 128 bits per row at ≤ 50 rows/s), withheld-run counts, and bin values. A spectrum is metadata by rule, but a producer can modulate its bins.
   - **Ids from in-process producers:** `emitter_id`, `provenance_ref`, `decode_id` and `annotation_id` are opaque UUIDs that trusted in-process code chooses.
   - **Locality:** it relies on writer types; `Declared::local` around a network-backed writer is a review error that the type check cannot see, except for a bare `TcpStream`.
-- **Follow-ups recorded by the coordinator:** T-015 datatype conversion stage and raw-framing drop/`sample_index` mapping (a restricted plugin's `sample_index` must be the host's record index to pass the §9.3 bound); T-022 WebSocket bridge (auth, subscribe as `Locality::Remote`, consumer cap); control-API exposure of `log_tail`; decode batching and per-plugin rate caps.
+- **WebSocket bridge residuals (T-022a, noted at merge, not fixed):**
+  - **No TLS.** The token and every byte of every stream travel in cleartext (§10, §11 authentication above).
+  - **`--loop` replay reconnects browsers on every pass.** `hk serve --replay --loop` cannot rewind a gated publisher's `t` in place, so each pass opens a new publisher under the same `stream_id`; existing WebSocket consumers see their stream finish (closing the socket) and the page reconnects to the new one, rather than the bridge presenting one continuous stream across passes.
+  - **A race for the last consumer slot** can reset the TCP connection instead of returning a clean HTTP 503: two upgrade requests arriving as `PublisherConfig::max_consumers` is reached can both pass the check before either subscribes, so the loser's connection drops rather than receiving the 503 body.
+  - **No `units` field on the stream header.** The v1.0 header (§4) doesn't carry physical units for binary payloads; `hk serve`'s spectrum rows are `rf32_le` dBFS/Hz by producer convention (`crates/hk-cli/src/serve.rs`) only, documented in `ui/README.md`, not asserted by the contract. Proposed as a **v1.1** optional header field (`units`, minor version per §1); not implemented.
+- **Follow-ups recorded by the coordinator:** T-015 datatype conversion stage and raw-framing drop/`sample_index` mapping (a restricted plugin's `sample_index` must be the host's record index to pass the §9.3 bound); control-API exposure of `log_tail`; decode batching and per-plugin rate caps.
 - **Replay for missed records** (ADR-0004: "consumers can request replay from a Recording") needs the control API.
 - **Crate dependency direction:** resolved. The contract lives in `hk-stream`; `hk-plugins` depends on it (not on `hk-api`), so `hk-api` can later depend on `hk-plugins` for plugin health without a cycle.
 
@@ -382,3 +447,4 @@ The bridge isn't built yet. It is a follow-up with the UI work (T-023), and may 
 - [C24 stream-output](capabilities/C24-stream-output.md), [C22 decoder-plugins](capabilities/C22-decoder-plugins.md)
 - [docs/07 §2.15–2.16](07-data-model.md)
 - [spike S3 report](../spikes/s3-web-waterfall/REPORT.md), "Notes for the architecture"
+- `crates/hk-api/src/bridge.rs`, `crates/hk-api/src/http.rs`, `crates/hk-api/src/auth.rs` (T-022a), [ui/README.md](../ui/README.md)
