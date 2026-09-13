@@ -617,7 +617,13 @@ tasks:
     note: "follow-ups from T-036 (merged 2026-09-13 under the timebox rule)"
   - id: T-039
     title: Pipeline classification to priors (family -> band-plan prior -> Emitter known/unexpected-here)
-    status: in-progress
+    status: done
+    commit: "f555e10 (merged 7855ec5)"
+    result: "family.rs vocabulary (wfm->fm-broadcast 0.9, rds 0.99, readsb/dump1090->adsb, ais-catcher, rtl_433->ism, aptdec->noaa-apt; nbfm/am/ssb/cw and bare fsk/ook/psk unmapped -> unknown; FSK in ISM stays unknown with allocation-only ISM suggestion); ranked top-5 explanations (label, score, evidence, flags off-raster/off-allocation/no-allocation-data/allocation-only/shape-only/low-confidence) stored metadata-only and served under /api/inventory explanations; status/prior_ref from top candidate when evidence >=0.5. Blind: FM station -> FM broadcast top-1 known; +150 kHz IQ shift -> FM broadcast top-1 flagged off-raster; relabel 120.5 MHz -> unexpected-here aviation-vhf-comm; relabel 930.5 MHz stays restricted-paging. Blind harness: tests/e2e/src/blind.rs (strip_truth, shift_ci8, truth matcher) + acceptance/blind.rs blind_replay (single entry point for T-047 mock-device swap). acceptance 14/14. Post-merge legal review: MERGE-OK (no leak); nits -> T-054."
+    followups:
+      - "plugin decodes (readsb->adsb) mapped but not wired: chains/plugin.rs doesn't call chain_emitter (sent to T-037b, owns chains/)"
+      - "continuous 150-400 kHz shape -> fm-broadcast 0.6 threshold verified only on one fixture"
+      - "under metadata-only classes evidence is track shape only; a mode-selection-only probe would need chain changes"
     scope_addition: "user 2026-09-13: ranked top-k recommended explanations per emission (label, score, evidence, off-raster flag) via gated API; blind tests only (annotations stripped, truth private); first cases FM station -> FM broadcast top-k and +150 kHz shifted variant flagged off-raster"
     note: "runs parallel to T-037a/b: owns hk-pipeline family.rs + hk-context priors mapping + hk-demod family names; minimal hooks in detect.rs/chains/analog.rs"
     deps: [T-027, T-024]
@@ -825,6 +831,18 @@ tasks:
     acceptance: "same acceptance tests run with the device set to hackrf (HK_DEVICE=hackrf) against live air (FM broadcast band as the always-available case), blind truth derived from a survey rather than fixture metadata; results logged (T5 tier, never gates CI); one HackRF user at a time"
     area: tests/e2e
     needs: [hardware]
+    model: opus
+    effort: medium
+  - id: T-054
+    milestone: M0b
+    title: Explanations follow-ups (T-039 review nits - serve-path author check, shape-only status, best-candidate status, region rasters, decoder families, test name)
+    status: in-progress
+    deps: [T-039]
+    parallel_group: Q
+    use_cases: [AWARE-053, SIGNAL-062]
+    acceptance: "query.rs serves explanations only from annotations authored by FAMILY_MAP_VERSION; shape-only evidence never sets known_status (explanations still ranked, flagged shape-only; unknown signals stay unknown per vision step 4); status derives from the best candidate >= MIN_CONFIDENCE so a weak on-allocation candidate can't mask a strong off-allocation one; channel rasters keyed by band-table region; decoder-id evidence path for decoder vocabulary entries (hook for T-037b plugin wiring) and re-rank on reclassification/decoder status; misleading 150 kHz test renamed; tests"
+    area: crates/hk-pipeline/src/family.rs, crates/hk-api/src/query.rs, hk-context band table region
+    needs: none
     model: opus
     effort: medium
 notes:

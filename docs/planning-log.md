@@ -257,3 +257,23 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-044 drops control endpoints and panel (→ T-050/T-051) and designs selection as multi-region client objects.
   - **M0 closes** when T-037a/b and T-039 merge; T-026 moves out with the Jetson. M0b launches in dependency order: T-048 → T-049 → T-047/T-053; T-050 → T-051/T-052; T-043.
 - **B0.110 docs/10 + docs/11 updated for M0b** (23ab917, merged). docs/10: tiers now run through the mock device, with T5 as the same suite on the HackRF; new §1.1 device interface, §3.1 hidden ground truth, §3.2 anti-patterns. docs/11: new §1.2 M0b with contents, task map and definition of done; M1 now gated on M0b. Section numbers unchanged.
+- **B0.111 T-039 merged** (f555e10 → 7855ec5). Pipeline emitters now get families and ranked top-5 explanations; AWARE-053 passes end to end with no manual classify step (acceptance 14/14).
+  - **Blind cases:**
+    - the fm_100p8M station ranks FM broadcast first;
+    - a +150 kHz IQ-shifted copy is detected and flagged off-raster;
+    - relabelled to 120.5 MHz it is unexpected-here (aviation-vhf-comm);
+    - relabelled to 930.5 MHz it stays restricted-paging with no content.
+  - **Design choice:** bare modulation names (fsk/ook/psk) and shared analog modes (nbfm/am/ssb/cw) name no service, so status stays `unknown` with allocation-only suggestions. `known` needs a service-specific decode (rtl_433, readsb, RDS).
+  - **Blind harness helpers** landed for T-047 (`strip_truth`, `shift_ci8`, truth matcher, single `blind_replay` entry point).
+  - **Follow-up:** plugin decodes are not yet wired to families; sent to T-037b.
+  - **Checks:** post-merge legal review and verification running.
+  - **M0 remaining:** T-037a, T-037b.
+- **B0.112 T-039 legal review: MERGE-OK.**
+  - **Checks that passed:** explanation evidence comes only from the fixed vocabulary, the band table and measurements; RDS PI never reaches annotations; known_status doesn't feed class or identity gating; T-040 gating is intact; raster math is correct.
+  - **Nits → T-054, launched now** (it owns family.rs/query.rs; T-037b only touches chains/plugin.rs):
+    - serve-path author check;
+    - shape-only evidence must not set a status (vision step 4: unknowns stay unknown);
+    - status from the best candidate, not the top one;
+    - rasters keyed by region;
+    - decoder-id family path and re-rank on reclassification;
+    - a misleading test name.
