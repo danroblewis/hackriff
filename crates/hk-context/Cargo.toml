@@ -8,3 +8,17 @@ publish.workspace = true
 
 [dependencies]
 hk-model.workspace = true
+# T-020: FloorEvent (C08) → Anomaly lifecycle.
+hk-dsp.workspace = true
+h3o.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# T-020: AWARE-006 end-to-end (synth → STFT → NoiseFloorTracker → Anomaly → Explanation).
+hk-core.workspace = true
+hk-e2e = { path = "../../tests/e2e" }
+num-complex.workspace = true

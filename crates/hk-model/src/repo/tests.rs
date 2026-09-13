@@ -408,6 +408,7 @@ fn graph() -> Graph {
             north_deg: 37.9,
             east_deg: -122.3,
         },
+        freq: vec![FreqRange::new(1559e6, 1610e6)],
         payload: json!({"bad_fraction": 0.23}),
         fetched_at: t(100),
         valid_until: Some(t(172_800)),
