@@ -23,6 +23,7 @@
 
 pub(crate) mod analog;
 pub(crate) mod fsk;
+pub mod listen;
 pub(crate) mod plugin;
 pub(crate) mod record;
 pub mod spec;

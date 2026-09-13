@@ -1515,6 +1515,15 @@ impl PipelineHandle {
         self.send(ControlEvent::DetachManual);
     }
 
+    /// On-demand listening (T-043): an opener attaching audio chains at runtime.
+    pub fn listen_service(&self) -> Arc<crate::chains::listen::ListenManager> {
+        let sup = Arc::clone(&self.sup);
+        Arc::new(crate::chains::listen::ListenManager::new(
+            Arc::clone(&self.sup.common.counters),
+            Arc::new(move || sup.lock().shared.clone()),
+        ))
+    }
+
     /// The newest ring sample index.
     pub fn ring_position(&self) -> u64 {
         self.sup

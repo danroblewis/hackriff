@@ -12,7 +12,8 @@ pub const STREAM_SCHEMA: &str = "hackriff.stream";
 /// Contract major version. A reader refuses a different major version.
 pub const STREAM_VERSION_MAJOR: u32 = 1;
 /// Contract minor version. Minor versions only add optional fields and record types.
-pub const STREAM_VERSION_MINOR: u32 = 0;
+/// 1.1 (T-043): the optional header `audio` profile and the binary `status` record type (3).
+pub const STREAM_VERSION_MINOR: u32 = 1;
 /// Default `max_frame_len` for new streams (1 MiB).
 pub const DEFAULT_MAX_FRAME_LEN: u32 = 1024 * 1024;
 
@@ -144,6 +145,10 @@ pub struct StreamHeader {
     /// Schema id of message records' `metadata`/`content`, for messages streams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_schema: Option<String>,
+    /// Audio profile (contract 1.1, T-043): mode chosen, estimated parameters, squelch and AGC,
+    /// for `audio` streams ([`crate::audio::AudioInfo`]). Metadata only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<crate::audio::AudioInfo>,
     /// Largest record payload on this stream.
     pub max_frame_len: u32,
     /// Fixed binary record header length: 32 for binary kinds, 0 for messages.
@@ -190,6 +195,7 @@ impl StreamHeader {
             fft_size: None,
             framing: None,
             message_schema: None,
+            audio: None,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             record_header_len: if kind.is_binary() {
                 BINARY_RECORD_HEADER_LEN as u32
@@ -249,6 +255,12 @@ impl StreamHeader {
         {
             return Err(HeaderError::Invalid(format!(
                 "{} streams need datatype and sample_rate_hz",
+                self.kind.as_str()
+            )));
+        }
+        if self.audio.is_some() && self.kind != StreamKind::Audio {
+            return Err(HeaderError::Invalid(format!(
+                "an audio profile on a {} stream",
                 self.kind.as_str()
             )));
         }

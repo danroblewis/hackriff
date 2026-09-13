@@ -9,6 +9,8 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 export interface SelectionActions {
   zoom: (s: Selection) => void;
   history: (s: Selection) => void;
+  /** Listen to the region (T-043). */
+  listen?: (s: Selection) => void;
 }
 
 export class SelectionPanel {
@@ -66,6 +68,8 @@ export class SelectionPanel {
     };
     button("Zoom", "Zoom the live view to this region", () => this.actions.zoom(s));
     button("History", "Load this region (and its time range) in region over time", () => this.actions.history(s));
+    const listen = this.actions.listen;
+    if (listen) button("Listen", "Demodulate the strongest signal in this region to audio (mode estimated)", () => listen(s));
     for (const a of SELECTION_ACTIONS) button(a.label, `Not wired yet (${a.task})`);
     button("Delete", "Delete this selection", () => this.store.remove(s.id));
     return tr;

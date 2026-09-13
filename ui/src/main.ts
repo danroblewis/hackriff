@@ -6,6 +6,7 @@ import * as ax from "./axis";
 import { HistoryPanel } from "./history";
 import { Inspector, inspectHalfWidthHz } from "./inspect";
 import { InventoryTable } from "./inventory";
+import { installListen } from "./listen";
 import { SelectionPanel } from "./selection-panel";
 import { SelectionStore, type NewSelection } from "./selections";
 import { MARK_DROP, MARK_GATED, Waterfall } from "./waterfall";
@@ -386,10 +387,12 @@ function main() {
   };
   const panel = new HistoryPanel(api);
   const selections = new SelectionStore();
-  const live = new Live(api, token, panel, selections, new Inspector(api));
+  const listen = installListen(token); // T-043
+  const live = new Live(api, token, panel, selections, new Inspector(api, listen.onShown));
   new SelectionPanel(selections, {
     zoom: (s) => live.zoomTo(s.f_lo, s.f_hi),
     history: (s) => panel.selectWindow(s.f_lo, s.f_hi, s.t_lo, s.t_hi),
+    listen: listen.selection,
   });
   const inventory = new InventoryTable(api, panel, (lo, hi) => {
     live.highlight(lo, hi);

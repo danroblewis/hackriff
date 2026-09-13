@@ -23,6 +23,22 @@ pub enum BinaryRecordType {
     Data = 1,
     /// A "dropped N" marker: `seq` is the first dropped seq, payload is the `u64` LE count.
     Dropped = 2,
+    /// A status record (contract 1.1): the payload is a flat JSON object of numbers, booleans
+    /// and short tokens ([`crate::policy::metadata_is_allowlist_shaped`]), never content, e.g. an
+    /// audio stream's level and squelch state ([`crate::audio::AudioStatus`]). It takes a seq.
+    Status = 3,
+}
+
+/// A status record's header and JSON object, or `None` if `frame` is not a status record.
+/// ([`crate::StreamReader`] returns status records as [`Record::Unknown`] frames, so readers that
+/// predate 1.1 skip them.)
+pub fn parse_status_record(frame: &[u8]) -> Option<(BinaryRecordHeader, Value)> {
+    let header = BinaryRecordHeader::decode(frame)?;
+    if header.record_type != BinaryRecordType::Status as u8 {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&frame[BINARY_RECORD_HEADER_LEN..]).ok()?;
+    value.is_object().then_some((header, value))
 }
 
 /// Binary record flags (a bit set).

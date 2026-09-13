@@ -51,6 +51,7 @@ mod run;
 mod spectrum;
 mod verify;
 
+pub use chains::listen::{ListenConfig, ListenManager, listen_class};
 pub use chains::spec::{
     ChainShape, ChainSpec, FmRegion, NodeSpec, Trigger, builtin_chains, builtin_chains_for,
 };

@@ -304,6 +304,7 @@ pub fn serve_api(
         run_control: Some(Arc::new(PipelineRunControl(controller))),
         bookmarks: Some(db),
         audit: Some(Arc::new(audit)),
+        on_demand: hk_api::stream::OpenerRegistry::new().with("listen", handle.listen_service()),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

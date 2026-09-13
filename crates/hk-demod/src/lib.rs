@@ -29,6 +29,8 @@
 //! closed unless the caller classifies the emitter) and a gated `bits` stream. Framing inference
 //! is [`hk_estimate::framing`].
 
+/// Streaming analog audio with squelch and AGC for Listen (T-043).
+pub mod audio;
 pub(crate) mod dsp;
 /// C20 2-FSK/GFSK demodulation, prior-led trials, framed records and bits streams (T-013).
 pub mod fsk;

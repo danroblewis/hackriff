@@ -132,6 +132,51 @@ pub fn blind_config(
     }
 }
 
+/// A blind run that keeps replaying its truth-stripped copy (as `hk serve --replay --loop` does)
+/// until stopped, for tests that act on the running system (Listen, T-043). T-047 moves it to
+/// the mock device with the other entry points.
+pub struct BlindLive {
+    /// Data directory (SQLite, tiles).
+    pub dir: TempDir,
+    /// The running pipeline; stop it with `handle.stop()` then [`finish`].
+    pub handle: hk_pipeline::PipelineHandle,
+    /// The stripped copy (kept until the run ends).
+    _src: TempDir,
+}
+
+/// Starts a looping blind run of `meta`.
+pub fn blind_live(meta: &Path, tag: &str, source: BlindSource) -> BlindLive {
+    let BlindConfig {
+        dir,
+        cfg,
+        replay,
+        src,
+    } = blind_config(meta, tag, source, json!({}));
+    let copy = std::fs::read_dir(&src.0)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with(".sigmf-meta"))
+        .expect("stripped copy");
+    let reopen: hk_pipeline::SourceFactory = Box::new(move || {
+        hk_pipeline::open_replay(&copy, hk_core::Pacing::Unpaced, false)
+            .map(|r| Box::new(r.source) as Box<dyn hk_core::Source>)
+    });
+    let handle = hk_pipeline::Pipeline::start(
+        cfg,
+        Box::new(replay.source),
+        replay.info,
+        Some(reopen),
+        Box::new(hk_pipeline::TrackInventory::default()),
+    )
+    .unwrap();
+    BlindLive {
+        dir,
+        handle,
+        _src: src,
+    }
+}
+
 /// Replays `meta` with its truth stripped.
 pub fn blind_replay(meta: &Path, tag: &str, source: BlindSource) -> BlindRun {
     let BlindConfig {

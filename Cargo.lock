@@ -675,6 +675,7 @@ dependencies = [
  "num-complex",
  "serde_json",
  "thiserror",
+ "tungstenite",
 ]
 
 [[package]]

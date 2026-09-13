@@ -14,6 +14,7 @@
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
+//! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
@@ -88,6 +89,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/bookmarks/{id}"),
     ("DELETE", "/api/bookmarks/{id}"),
     ("GET", "/ws/{stream_id}"),
+    ("GET", "/ws/open/{name}"),
 ];
 
 /// Server settings.
@@ -142,6 +144,8 @@ pub struct ApiState {
     pub bookmarks: Option<Arc<Mutex<Repository>>>,
     /// Control audit log (T-050). Without one, every mutating endpoint answers 503.
     pub audit: Option<Arc<AuditLog>>,
+    /// On-demand streams served at `/ws/open/<name>` ([`crate::ondemand`]), e.g. `listen` (T-043).
+    pub on_demand: hk_stream::OpenerRegistry,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -543,6 +547,17 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             control::audit_refused(state, &req.method, &req.path, &who, 403, "cross-origin");
             return respond_error(&mut stream, 403, "cross-origin control request refused");
         }
+    }
+    if let Some(name) = req.path.strip_prefix("/ws/open/")
+        && req.method == "GET"
+    {
+        return crate::ondemand::serve(
+            stream,
+            &shared.state.on_demand,
+            name,
+            &req.query,
+            &req.headers,
+        );
     }
     if let Some(id) = req.path.strip_prefix("/ws/") {
         if req.method != "GET" {
