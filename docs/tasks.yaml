@@ -230,8 +230,9 @@ tasks:
     dod: manifest schema + IPC; a dummy plugin round-trips; plugin crash does not drop capture
   - id: T-015
     title: readsb ADS-B plugin wrapper + fixture
-    status: in-progress
-    review: "Opus review FIX-BEFORE-MERGE (legal clean: emitter hook builds from sanitized row; restricted probe created no emitters). Must-fix: readsb crashes/wedge exits counted as clean + no idle death detection; CPR even/odd pairing without time window (wrong positions) + velocity subtype 2 scaling; rebase onto egress enforcement 97a436c (store_decode signature, hook after self.store from &row). Sonnet implementer applying fixes; coordinator checks ingest hunk before merge"
+    status: done
+    commit: "9f8439c + review fixes e0777d1 (merged)"
+    review: "Opus review FIX-BEFORE-MERGE (legal clean) -> fixed: waiter thread + stderr wedge detection + idle keepalive (only clean EOF exits 0), CPR pairing 10 s window, velocity subtype-2 x4, sample_index n-1, --fix refused, HK_READSB honoured, rebased onto egress enforcement. Coordinator (Opus) checked ingest hunk: emitter upsert after self.store, built from &row identity/t, before publish. SIGNAL-001 truth-checked (callsign, lat/lon <0.01 deg, velocity) on synthetic adsb_squitter; recorded fixture still blocked on 1090 MHz antenna"
     deps: [T-014, T-025]
     parallel_group: H
     use_cases: [SIGNAL-001]
