@@ -1,9 +1,9 @@
 //! Shared helpers for the T-024 M0 slice acceptance suite.
 //!
-//! Every test drives the composed pipeline through `hk_pipeline`'s library entry point (the path
-//! `hk replay` runs: [`open_replay`] → [`PipelineConfig`] from [`replay_plan`] → [`Pipeline::start`]
-//! with [`TrackInventory`] → [`PipelineHandle::wait`]) and asserts on docs/07 objects read back
-//! through the Repository's gated getters and `query_inventory`.
+//! Every acceptance test drives the composed pipeline **through the SDR device interface** (the
+//! mock SDR, T-049/T-047) via `blind.rs`, the one place a run is configured and started, and
+//! asserts on docs/07 objects read back through the Repository's gated getters and
+//! `query_inventory`.
 //!
 //! Skips: `synth_or_skip!` (no `uv`) and [`real_fixture`] (LFS data not fetched) print `SKIP` and
 //! return; the CI acceptance job sets `HK_E2E_REQUIRE_SYNTH=1` and `HK_REQUIRE_FIXTURES=1` so both
@@ -19,12 +19,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hk_api::{ApiState, Server, ServerConfig, Token};
-use hk_core::Pacing;
 use hk_model::{InventoryEntry, InventoryQuery, Repository, TimeRange, Timestamp};
-use hk_pipeline::{
-    Counters, Pipeline, PipelineConfig, PipelineHandle, Replay, RunSummary, TrackInventory,
-    open_replay, replay_plan,
-};
+use hk_pipeline::{Counters, PipelineConfig, PipelineHandle, RunSummary};
 use hk_stream::{
     Declared, Listener, PublisherHandle, Record, StreamHeader, StreamKind, StreamReader,
 };
@@ -83,6 +79,9 @@ fn data_fetched(meta: &Path) -> bool {
 /// checkout's (a git worktree often has only LFS pointers). `None` skips the test;
 /// `HK_REQUIRE_FIXTURES=1` (the CI acceptance job) fails instead.
 pub fn real_fixture(name: &str) -> Option<PathBuf> {
+    if hardware_skip(name) {
+        return None;
+    }
     let rel = Path::new("fixtures/hackrf/2026-09-13").join(format!("{name}.sigmf-meta"));
     let mut dir = Some(hk_e2e::paths::repo_root());
     while let Some(d) = dir {
@@ -99,6 +98,20 @@ pub fn real_fixture(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// `HK_DEVICE=hackrf` (T-053): the device-driven tests would run against the real HackRF, with
+/// truth derived from a live survey of an always-occupied band instead of fixture metadata. Not
+/// wired yet: prints the skip and never opens the device.
+pub fn hardware_skip(what: &str) -> bool {
+    if hk_e2e::synth::hardware_device_selected() {
+        eprintln!(
+            "SKIP {what}: HK_DEVICE=hackrf selects the real HackRF (T-053: truth from a live FM \
+             survey, receive-only, one user at a time); not wired yet, the device was not opened"
+        );
+        return true;
+    }
+    false
+}
+
 /// Whether `readsb` is installed (`$HK_READSB` pins a build, as in the wrapper).
 pub fn readsb_available() -> bool {
     if let Ok(path) = std::env::var("HK_READSB") {
@@ -112,39 +125,22 @@ pub fn readsb_available() -> bool {
         .is_ok()
 }
 
-/// `hk replay`'s configuration for `meta`: the replay plan with `extra`, the source class from
-/// the recording, lossless when unpaced. No mode, chain or parameter is chosen by the test.
-pub fn replay_config(
-    dir: &Path,
-    meta: &Path,
-    extra: serde_json::Value,
-    pacing: Pacing,
-) -> (PipelineConfig, Replay) {
-    let replay = open_replay(meta, pacing, false).unwrap();
-    let info = replay.info;
-    let mut plan = replay_plan(info.center_hz, info.sample_rate_hz, info.start_time);
-    plan.extra = extra;
-    let mut cfg = PipelineConfig::new(dir, plan).unwrap();
-    cfg.source_class = replay.class;
-    cfg.lossless = matches!(pacing, Pacing::Unpaced);
-    (cfg, replay)
+/// A run [`finish`] can wait for: a bare [`PipelineHandle`], or the blind harness's handle, which
+/// also runs its truth-isolation checks once the run has ended.
+pub trait Finishable {
+    /// Waits for the run.
+    fn wait_summary(self) -> RunSummary;
 }
 
-/// Starts a run with the default inventory policy (T-018 clustering + band-plan priors).
-pub fn start(cfg: PipelineConfig, replay: Replay) -> PipelineHandle {
-    Pipeline::start(
-        cfg,
-        Box::new(replay.source),
-        replay.info,
-        None,
-        Box::new(TrackInventory::default()),
-    )
-    .unwrap()
+impl Finishable for PipelineHandle {
+    fn wait_summary(self) -> RunSummary {
+        self.wait().unwrap()
+    }
 }
 
 /// Waits for a run, prints its summary and requires no thread errors.
-pub fn finish(handle: PipelineHandle) -> RunSummary {
-    let s = handle.wait().unwrap();
+pub fn finish(handle: impl Finishable) -> RunSummary {
+    let s = handle.wait_summary();
     eprintln!("{}", s.to_text());
     assert!(
         s.errors.is_empty(),

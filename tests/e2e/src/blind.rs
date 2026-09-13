@@ -11,16 +11,120 @@
 //!    and matches *everything* the pipeline produced against it with [`matches_truth`] /
 //!    [`matching`]. The test never looks a frequency up in the database.
 
-use std::fs::File;
+use std::fs::{File, FileTimes};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use hk_model::sigmf::SigmfMeta;
 
-use crate::fixture::TruthItem;
+use crate::fixture::{Fixture, Role, TruthItem};
 
 /// Boxed error for the harness helpers.
 pub type BlindError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The fixture's private truth list (T-047): every emission blind detection must find, as a
+/// frequency extent, a time span and a label. Generated fixtures mark them `role: emission`; hand
+/// labels without a role count when they carry finite frequency edges.
+pub fn truth_emissions(fx: &Fixture) -> Vec<&TruthItem> {
+    fx.truth
+        .iter()
+        .filter(|t| {
+            t.role == Role::Emission
+                || (t.role == Role::Unlabelled && t.f_lo_hz.is_finite() && t.f_hi_hz.is_finite())
+        })
+        .collect()
+}
+
+/// Panics unless `meta_path` is truth-free: no annotations, no description and no
+/// `hackriff:truth` or `core:label` key anywhere in the file.
+pub fn assert_truth_free(meta_path: &Path) {
+    let meta = SigmfMeta::read(meta_path).expect("stripped metadata reads");
+    assert!(
+        meta.annotations.is_empty(),
+        "{}: annotations reach the system",
+        meta_path.display()
+    );
+    assert!(
+        meta.global.description.is_none(),
+        "{}: description reaches the system",
+        meta_path.display()
+    );
+    let text = std::fs::read_to_string(meta_path).expect("stripped metadata is text");
+    for key in ["hackriff:truth", "core:label", "core:description"] {
+        assert!(
+            !text.contains(key),
+            "{}: {key} reaches the system",
+            meta_path.display()
+        );
+    }
+}
+
+/// An access time far older than any file's modification time, so a later read updates it
+/// under `relatime` as well as `strictatime`.
+fn sealed_atime() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+}
+
+fn set_atime(path: &Path, t: SystemTime) -> std::io::Result<()> {
+    File::options()
+        .write(true)
+        .open(path)?
+        .set_times(FileTimes::new().set_accessed(t))
+}
+
+/// Whether reads in `dir` update access times (checked on a canary file).
+fn atime_tracked(dir: &Path) -> std::io::Result<bool> {
+    let canary = dir.join("atime-canary");
+    std::fs::write(&canary, b"canary")?;
+    set_atime(&canary, sealed_atime())?;
+    let _ = std::fs::read(&canary)?;
+    Ok(std::fs::metadata(&canary)?.accessed()? != sealed_atime())
+}
+
+/// A fixture's truth (its full original metadata), sealed in a private directory the system is
+/// never given. [`TruthVault::assert_unopened`] proves nothing read it, wherever the filesystem
+/// records access times (checked on a canary at seal time; otherwise only the path isolation and
+/// the output scans of the harness hold).
+#[derive(Debug)]
+pub struct TruthVault {
+    /// The sealed truth file.
+    pub path: PathBuf,
+    tracked: bool,
+}
+
+impl TruthVault {
+    /// Copies `original_meta` to `<dir>/truth.sigmf-meta` and seals its access time.
+    pub fn seal(original_meta: &Path, dir: &Path) -> Result<Self, BlindError> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("truth.sigmf-meta");
+        std::fs::copy(original_meta, &path)?;
+        let tracked = atime_tracked(dir)?;
+        set_atime(&path, sealed_atime())?;
+        Ok(Self { path, tracked })
+    }
+
+    /// Whether the check is effective here (the filesystem records access times).
+    pub fn tracked(&self) -> bool {
+        self.tracked
+    }
+
+    /// Panics if the sealed truth file was read since [`TruthVault::seal`].
+    pub fn assert_unopened(&self) {
+        if !self.tracked {
+            return;
+        }
+        let at = std::fs::metadata(&self.path)
+            .and_then(|m| m.accessed())
+            .expect("truth file metadata");
+        assert_eq!(
+            at,
+            sealed_atime(),
+            "the truth file {} was opened during the blind run",
+            self.path.display()
+        );
+    }
+}
 
 /// Writes `<out_dir>/<name>.sigmf-meta`: `meta_path`'s metadata without truth. Annotations are
 /// removed and `core:description` cleared. Every capture frequency and provenance tune centre is
@@ -165,6 +269,29 @@ mod tests {
         );
         let items = [(101.3e6, 200e3), (99.0e6, 200e3)];
         assert_eq!(matching(&t, 0.0, &items, |x| *x, 50e3).len(), 1);
+    }
+
+    #[test]
+    fn truth_vault_detects_a_read_where_access_times_are_recorded() {
+        let dir = std::env::temp_dir().join(format!("hk-vault-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("fx.sigmf-meta");
+        std::fs::write(
+            &original,
+            br#"{"global":{},"captures":[],"annotations":[]}"#,
+        )
+        .unwrap();
+        let vault = TruthVault::seal(&original, &dir.join("private")).unwrap();
+        vault.assert_unopened();
+        let _ = std::fs::read(&vault.path).unwrap();
+        let opened = std::panic::catch_unwind(|| vault.assert_unopened()).is_err();
+        assert_eq!(
+            opened,
+            vault.tracked(),
+            "a read of the sealed truth is detected exactly when access times are recorded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

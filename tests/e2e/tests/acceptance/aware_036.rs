@@ -9,13 +9,15 @@
 //! framing recovered on every CRC-valid Decode (sync 2DD4, CRC-16/CCITT-FALSE) plus the decoder's
 //! ground-truth label, the Decoder appends `known`, and the payloads are kept and match truth.
 
+use hk_e2e::blind::matches_truth;
 use hk_e2e::{SynthRequest, synth_or_skip};
 use hk_model::{
     AnnotationKind, AnnotationTarget, CrcStatus, Decode, FreqRange, InventoryQuery, KnownStatus,
-    LinkTarget, PageRequest, Region, Repository, StatusAuthor, TimeRange, TrackFilter,
+    LinkTarget, PageRequest, Region, Repository, StatusAuthor, TrackFilter,
 };
 use serde_json::json;
 
+use crate::blind::{assert_truth_found, center_tol_hz, replay_config, start};
 use crate::common::*;
 
 const AWARE_036: &str = "AWARE-036";
@@ -46,16 +48,17 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
     let emitter_truth = &fx.scenario().unwrap().value["emitter"];
     let rate_bd = emitter_truth["symbol_rate_bd"].as_f64().unwrap();
     let dev_hz = emitter_truth["deviation_hz"].as_f64().unwrap();
-    let rf_hz = emitter_truth["rf_center_hz"].as_f64().unwrap();
     let payloads: Vec<String> = truths
         .iter()
         .map(|t| t.value["frame"]["payload_hex"].as_str().unwrap().to_owned())
         .collect();
-    let t0 = hk_core::source::sigmf_replay::parse_sigmf_datetime(
-        fx.meta.captures[0].datetime.as_deref().unwrap(),
-    )
-    .unwrap();
-    let abs = |s: f64| t0.saturating_add_nanos((s * 1e9) as i64);
+    // Everything the run produced is matched against the private truth bursts' extents (T-047);
+    // no region is queried.
+    let at_sensor = |f: f64, bw: f64| {
+        truths
+            .iter()
+            .any(|t| matches_truth(t, 0.0, f, bw, center_tol_hz(t)))
+    };
 
     // --- Unclassified: metadata flows, content withheld.
     let dir = TempDir::new("a036");
@@ -64,40 +67,16 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
     let s = finish(start(cfg, replay));
     assert_eq!(s.always_on_lost_samples, 0);
     let repo = repo(&dir.0);
-    let band = FreqRange::centered(rf_hz, 60e3);
 
-    // All bursts detected: a Detection overlapping each truth burst in time and frequency.
-    let dets = repo
-        .detections_in_region(&Region::new(band, ever()))
-        .unwrap();
-    let missed: Vec<usize> = truths
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| {
-            let tr = TimeRange::new(abs(t.t_start_s - 2e-3), abs(t.t_end_s + 2e-3));
-            !dets.iter().any(|d| {
-                d.time.start < tr.end
-                    && tr.start < d.time.end
-                    && (d.f_center_hz - t.center_hz()).abs() <= t.bandwidth_hz()
-            })
-        })
-        .map(|(i, _)| i)
-        .collect();
-    eprintln!(
-        "[{AWARE_036}] {} detections in band, {} of {n} truth bursts missed",
-        dets.len(),
-        missed.len()
-    );
-    assert!(
-        missed.is_empty(),
-        "[{AWARE_036}] bursts not detected: {missed:?}"
-    );
+    // All bursts detected blind: every truth burst within frequency/extent/time tolerance.
+    let found = assert_truth_found(AWARE_036, &dir.0, &fx, 0.0, true);
+    assert_eq!(found.len(), n);
 
     // One Track: the sensor's bursts aggregate into one track (single-lobe fragments of a few
     // detections may add short tracks; those are below the fsk-bursts min_detections prior).
-    let tracks = repo
+    let tracks: Vec<_> = repo
         .tracks_in_region(
-            &Region::new(band, ever()),
+            &Region::new(FreqRange::new(0.0, 7.0e9), ever()),
             &TrackFilter {
                 min_detections: 4,
                 ..TrackFilter::default()
@@ -105,7 +84,10 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
             PageRequest::default(),
         )
         .unwrap()
-        .tracks;
+        .tracks
+        .into_iter()
+        .filter(|t| at_sensor(t.f_center_hz, 0.0))
+        .collect();
     eprintln!(
         "[{AWARE_036}] tracks (≥4 detections): {:?}",
         tracks
@@ -116,16 +98,13 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
     assert_eq!(tracks.len(), 1, "[{AWARE_036}] one Track");
 
     // One Emitter, unknown, reached through query_inventory (identity withheld: unclassified).
-    let emitters: Vec<_> = inventory(
-        &repo,
-        InventoryQuery {
-            freq: Some(band),
-            ..InventoryQuery::default()
-        },
-    )
-    .into_iter()
-    .filter(|e| e.family.as_deref() == Some("2fsk"))
-    .collect();
+    let emitters: Vec<_> = inventory(&repo, InventoryQuery::default())
+        .into_iter()
+        .filter(|e| {
+            e.family.as_deref() == Some("2fsk")
+                && at_sensor(e.emitter.f_center_hz, e.emitter.bandwidth_hz)
+        })
+        .collect();
     assert_eq!(
         emitters.len(),
         1,
@@ -194,7 +173,9 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
         "[{AWARE_036}] payload stored without a classification"
     );
 
-    // --- Classified by the user (own test sensor): CRC validates → known, payloads kept.
+    // --- Classified by the user (own test sensor): CRC validates → known, payloads kept. The
+    // classification rule's range is user configuration (the user vouches for their own sensor's
+    // band), not a lookup: the emitter is still found by matching against the private truth.
     let dir2 = TempDir::new("a036c");
     let (cfg, replay) = replay_config(
         &dir2.0,
@@ -208,16 +189,13 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
     );
     finish(start(cfg, replay));
     let repo2 = crate::common::repo(&dir2.0);
-    let known: Vec<_> = inventory(
-        &repo2,
-        InventoryQuery {
-            freq: Some(band),
-            ..InventoryQuery::default()
-        },
-    )
-    .into_iter()
-    .filter(|e| e.family.as_deref() == Some("2fsk"))
-    .collect();
+    let known: Vec<_> = inventory(&repo2, InventoryQuery::default())
+        .into_iter()
+        .filter(|e| {
+            e.family.as_deref() == Some("2fsk")
+                && at_sensor(e.emitter.f_center_hz, e.emitter.bandwidth_hz)
+        })
+        .collect();
     assert_eq!(known.len(), 1, "[{AWARE_036}] one classified emitter");
     let history = repo2.known_status_history(known[0].emitter.id).unwrap();
     assert_eq!(

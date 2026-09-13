@@ -18,6 +18,7 @@ use hk_model::{FreqRange, PowerUnit, TimeRange};
 use hk_store::{RegionQuery, Resolution};
 use serde_json::json;
 
+use crate::blind::{replay_config, start, truth_report};
 use crate::common::*;
 
 const SPACE_050: &str = "SPACE-050";
@@ -45,7 +46,16 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
         fx.meta.captures[0].datetime.as_deref().unwrap(),
     )
     .unwrap();
-    let device_id = fx.meta.captures[0]
+    // The six segments are a survey through the mock SDR (the device retuned to each recorded
+    // centre in turn, `blind::SurveyDevice`); the calibration is the device-under-test's.
+    let (mut cfg, replay) = replay_config(
+        &dir.0.join("run"),
+        &fx.meta_path,
+        json!({}),
+        hk_core::Pacing::Unpaced,
+    );
+    let device_id = replay.device.device_id.clone();
+    let recorded_device = fx.meta.captures[0]
         .provenance
         .as_ref()
         .expect("capture provenance")
@@ -56,7 +66,7 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
         .map(|seg| {
             let cap = fx.capture_at(seg.sample_start).unwrap();
             let prov = cap.provenance.as_ref().expect("capture provenance");
-            assert_eq!(prov.device_id, device_id, "one device");
+            assert_eq!(prov.device_id, recorded_device, "one device");
             SyntheticCalSegment {
                 band: FreqRange::centered(cap.frequency.unwrap(), fs),
                 gain: gain_setting_of(prov),
@@ -67,13 +77,6 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
     let state = synthetic_calibration_state(&device_id, &segments, 0.1, t_start);
     let cal_path = dir.0.join("calibration.json");
     std::fs::write(&cal_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
-
-    let (mut cfg, replay) = replay_config(
-        &dir.0.join("run"),
-        &fx.meta_path,
-        json!({}),
-        hk_core::Pacing::Unpaced,
-    );
     cfg.calibrations = hk_pipeline::load_calibrations(&cal_path).unwrap();
     let handle = start(cfg, replay);
     let product = handle.floor_product();
@@ -83,6 +86,11 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
         s.counter("/history/tiles_written") > 0,
         "[{SPACE_050}] no SpectrumTiles written"
     );
+    // Each segment's reference carrier, matched blind across the survey (T-047) but reported
+    // only: the pipeline detects the six 1 s carriers (`/detect/detections`) yet stores none,
+    // because a single-detection track never confirms (a pre-existing persistence policy, not a
+    // device-path effect).
+    truth_report(SPACE_050, &dir.0.join("run"), &fx, 0.0);
 
     let p = product.lock().unwrap();
     assert!(

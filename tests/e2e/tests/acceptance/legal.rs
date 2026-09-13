@@ -17,10 +17,11 @@
 
 use hk_e2e::{SynthRequest, synth_or_skip};
 use hk_model::sigmf::SigmfMeta;
-use hk_model::{CrcStatus, FreqRange, InventoryIdentity, InventoryQuery, LinkTarget, Repository};
+use hk_model::{CrcStatus, InventoryIdentity, InventoryQuery, LinkTarget, Repository};
 use hk_stream::StreamKind;
 use serde_json::json;
 
+use crate::blind::{assert_truth_found, center_tol_hz, replay_config, start};
 use crate::common::*;
 
 const LEGAL: &str = "legal-guardrail";
@@ -63,6 +64,8 @@ fn run_scene(fx: &hk_e2e::Fixture, class: Option<&str>, rule_hz: [f64; 2], tag: 
     let handle = start(cfg, replay);
     let counters = handle.counters();
     let summary = finish(handle);
+    // The scene's bursts detected blind whatever the class (T-047; metadata flows).
+    assert_truth_found(&format!("{LEGAL} {tag}"), &dir.0, fx, 0.0, false);
     let _ = tap.socket_results();
     let server = serve_api(&dir.0, counters);
     let (api_inventory, api_rows) = api_inventory(server.local_addr());
@@ -79,18 +82,26 @@ fn run_scene(fx: &hk_e2e::Fixture, class: Option<&str>, rule_hz: [f64; 2], tag: 
     }
 }
 
-/// CRC-valid decodes of the sensor at `center_hz`, with how many kept content (gated getter).
-fn sensor_decodes(repo: &Repository, center_hz: f64) -> (usize, usize) {
-    let band = FreqRange::centered(center_hz, 60e3);
+/// CRC-valid decodes of the emitters matching the scene's private truth bursts, with how many
+/// kept content (gated getter). The whole inventory is matched; no region is queried.
+fn sensor_decodes(repo: &Repository, fx: &hk_e2e::Fixture) -> (usize, usize) {
+    let truths = hk_e2e::blind::truth_emissions(fx);
     let mut valid = 0;
     let mut with_content = 0;
-    for e in inventory(
-        repo,
-        InventoryQuery {
-            freq: Some(band),
-            ..InventoryQuery::default()
-        },
-    ) {
+    for e in inventory(repo, InventoryQuery::default())
+        .into_iter()
+        .filter(|e| {
+            truths.iter().any(|t| {
+                hk_e2e::blind::matches_truth(
+                    t,
+                    0.0,
+                    e.emitter.f_center_hz,
+                    e.emitter.bandwidth_hz,
+                    center_tol_hz(t),
+                )
+            })
+        })
+    {
         for l in repo.emitter_links(e.emitter.id).unwrap() {
             if let LinkTarget::Decode(id) = l.target {
                 let d = repo.decode(id).unwrap();
@@ -125,7 +136,7 @@ fn legal_restricted_source_yields_no_content_or_identity_anywhere() {
     let pos = run_scene(&fx, None, [433.8e6, 434.1e6], "legpos");
     assert_eq!(pos.summary.source_class, "metadata-only");
     let pos_repo = repo(&pos.dir.0);
-    let (pos_valid, pos_content) = sensor_decodes(&pos_repo, 433.973e6);
+    let (pos_valid, pos_content) = sensor_decodes(&pos_repo, &fx);
     let pos_found = count_found(&all_bytes(&pos.dir.0), &content);
     // The identity the positive control shows in clear is the identity sentinel.
     let identities: Vec<String> = inventory(&pos_repo, InventoryQuery::default())
@@ -193,7 +204,7 @@ fn legal_restricted_source_yields_no_content_or_identity_anywhere() {
     );
     assert_eq!(s.counter("/chains/recordings"), 0, "[{LEGAL}] no recording");
     let res_repo = repo(&r.dir.0);
-    let (valid, with_content) = sensor_decodes(&res_repo, 433.973e6);
+    let (valid, with_content) = sensor_decodes(&res_repo, &fx);
     assert!(valid > 0, "[{LEGAL}] CRC-valid Decode rows exist");
     assert_eq!(with_content, 0, "[{LEGAL}] a Decode row kept content");
     assert!(
@@ -298,7 +309,7 @@ fn legal_untagged_recording_in_the_paging_band_yields_no_content_or_identity_any
     );
     assert_eq!(s.counter("/chains/recordings"), 0, "[{LEGAL}] no recording");
     let res_repo = repo(&r.dir.0);
-    let (valid, with_content) = sensor_decodes(&res_repo, FC + 53e3);
+    let (valid, with_content) = sensor_decodes(&res_repo, &fx);
     assert!(valid > 0, "[{LEGAL}] CRC-valid Decode rows exist");
     assert_eq!(with_content, 0, "[{LEGAL}] a Decode row kept content");
     assert!(

@@ -40,3 +40,6 @@ mod legal;
 
 #[path = "acceptance/listen.rs"]
 mod listen;
+
+#[path = "acceptance/device_variants.rs"]
+mod device_variants;
