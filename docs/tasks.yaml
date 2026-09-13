@@ -859,7 +859,11 @@ tasks:
   - id: T-052
     milestone: M0b
     title: Multi-region selections as first-class objects (persisted; list/rename/delete; send to demod/record/inspect)
-    status: in-progress
+    status: done
+    commit: "5680e74 (merged)"
+    result: "Selection object (id, name, f_lo/f_hi, t_lo?/t_hi?, notes, tags, links demod/recording/bitstream/inspection newest 256, created/updated) in selection table (0001_init.sql, v1), docs/07 2.20. GET/POST /api/selections, GET/PUT/DELETE /api/selections/{id}, POST /api/selections/{id}/links: Bearer on mutating, audited, validated, 503 without audit, client-chosen id with 409 on repeat; control.rs routing split into a shared dispatcher. UI server-backed store with optimistic changes, pending + sync notice + 15 s retry on network/401/5xx, rollback on 4xx; rename/delete, multi-select bulk Inspect/Delete, links count. Actions: Inspect = region history + emitters inside with top-3 explanations; Listen = listen.selection; Record calls /api/control/record/start when the window covers the selection else 'coming in T-061'; Demod 'coming in T-061'. Hooks inspect/demod/record(s) => Promise<ActionOutcome> (done link saved), listen(s) sync. Tests: hk-model 5, hk-api 3 integration + 2 route, UI 12; acceptance 18/18."
+    followups:
+      - "hk-cli daemon_drives_the_scheduler_and_serves_token_gated_status flaky (exactly 10 steps vs > 10) -> T-072 item 5"
     deps: [T-044, T-050]
     parallel_group: N
     use_cases: [AWARE-042, SIGNAL-062]
