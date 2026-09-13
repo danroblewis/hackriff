@@ -16,8 +16,22 @@
 //! ([`hk_stream::policy::decode_is_allowlist_shaped`]: nested values, free text, untyped
 //! identity) is reduced to the empty allowlist before storage and counted in
 //! [`IngestStats::rows_stripped`].
+//!
+//! **Emitter hook (T-015).** A stored decode's `identity` (already allowlisted and shape-checked
+//! by the time `store` returns it) turns into an inventory sighting: a stored decode with an
+//! identity upserts one [`hk_model::EmitterObservation`] built from the returned row, at the
+//! INVARIANT comment in [`Ingest::store_decode`] — a point-in-time sighting at the row's
+//! timestamp and the plugin's channel frequency/bandwidth (whichever channel it was fed; `None`
+//! folds to 0 Hz). `Repository::upsert_emitter_observation` (docs/07 §2.11) does the merge: same
+//! identity widens the existing emitter's `last_seen`, a new identity creates one. Failures (e.g.
+//! an identity now held by a different emitter than a stale caller expected) are counted, never
+//! propagated: a plugin's decode stream must not stall because inventory merging disagrees with
+//! it.
 
-use hk_model::{Annotation, Decode, EmitterId, ProvenanceId, RepoError, Repository};
+use hk_model::{
+    Annotation, Decode, DecodedIdentity, EmitterId, EmitterObservation, ProvenanceId, RepoError,
+    Repository, TimeRange, Timestamp,
+};
 use hk_stream::policy;
 use hk_stream::{MessageRecord, Publisher};
 
@@ -42,6 +56,10 @@ pub struct IngestStats {
     pub republished: u64,
     /// Republish errors (e.g. oversize message).
     pub republish_errors: u64,
+    /// Emitter observations merged for decodes that carried an identity.
+    pub emitters_upserted: u64,
+    /// Emitter observations that failed to merge (counted, never propagated).
+    pub emitter_errors: u64,
 }
 
 /// Result of storing one row.
@@ -136,13 +154,18 @@ impl Ingest {
         }
     }
 
-    /// Stores a decode (metadata-only if its content is gated) and republishes it. A restricted
-    /// row that is not allowlist-shaped is reduced to the empty allowlist first.
+    /// Stores a decode (metadata-only if its content is gated), upserts an Emitter sighting when
+    /// the row carries an identity, and republishes it. A restricted row that is not
+    /// allowlist-shaped is reduced to the empty allowlist first. `channel_center_hz`/
+    /// `channel_bandwidth_hz` are the plugin's input channel (e.g. the wideband ADS-B window); a
+    /// missing value folds to 0 Hz rather than failing the decode.
     pub fn store_decode(
         &mut self,
         mut decode: Decode,
         emitter: Option<EmitterId>,
         provenance: Option<ProvenanceId>,
+        channel_center_hz: Option<f64>,
+        channel_bandwidth_hz: Option<f64>,
     ) -> Result<Stored, RepoError> {
         if !policy::decode_is_allowlist_shaped(&decode) {
             let fallback = token_or_unsanitized(&decode.frame_model);
@@ -157,8 +180,35 @@ impl Ingest {
         // table or stream that the stored Decode row would not hold.
         let (row, stored) = self.store(decode, |d| &mut d.content, Repository::insert_decode)?;
         self.stats.decodes_stored += 1;
+        if let Some(identity) = &row.identity {
+            self.upsert_emitter(identity, row.t, channel_center_hz, channel_bandwidth_hz);
+        }
         self.publish(MessageRecord::from_decode(&row, emitter, provenance));
         Ok(stored)
+    }
+
+    /// One sighting at `t` for `identity`. A fresh candidate id is minted each call: the upsert
+    /// only uses it when no emitter already holds the identity, so repeated sightings of the same
+    /// identity always merge into one emitter rather than colliding.
+    fn upsert_emitter(
+        &mut self,
+        identity: &DecodedIdentity,
+        t: Timestamp,
+        center_hz: Option<f64>,
+        bandwidth_hz: Option<f64>,
+    ) {
+        let obs = EmitterObservation {
+            emitter_id: EmitterId::new(),
+            seen: TimeRange::instant(t),
+            count: 1,
+            f_center_hz: center_hz.unwrap_or(0.0),
+            bandwidth_hz: bandwidth_hz.unwrap_or(0.0),
+            identity: Some(identity.clone()),
+        };
+        match self.repo.upsert_emitter_observation(&obs) {
+            Ok(_) => self.stats.emitters_upserted += 1,
+            Err(_) => self.stats.emitter_errors += 1,
+        }
     }
 
     /// Stores an annotation (metadata-only if its content is gated) and republishes it. A

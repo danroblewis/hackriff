@@ -360,7 +360,12 @@ version = "0.1.0"
 dependencies = [
  "hk-core",
  "hk-dsp",
+ "hk-e2e",
+ "hk-estimate",
  "hk-model",
+ "num-complex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -429,6 +434,7 @@ dependencies = [
 name = "hk-plugins"
 version = "0.1.0"
 dependencies = [
+ "hk-e2e",
  "hk-model",
  "hk-stream",
  "libc",

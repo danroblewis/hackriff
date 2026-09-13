@@ -102,6 +102,7 @@ tasks:
   - id: T-006
     title: CFAR detection + burst records
     status: in-progress
+    review: "implemented 6891727 (+ merge e816cab), lint/tests green; Opus core-interface review running before merge (threshold equivalence, component state machine, notch false alarms with PerFrame, 915 MHz outside-truth detections, 434 MHz clock-harmonic line)"
     s4_inputs: "block FCME (256/hop 64, Pfa 1e-3 Gamma(n)) per-frame floor; OS-CFAR N=32 G=4 k=24 OR floor branch; on Pfa 1e-6 / off Pfa 1e-3 (never fixed -3 dB); min 3 frames before gap-merge (2); impulsive-frame gate; emitter confirmation by repeat or >=1 s integration; real-scene FA is a monitored metric, synthetic/terminated FA is the CI gate"
     followups_from_T-002_review: "detection region query is f-bounded only (add R*Tree on f_lo,f_hi,t_start,t_end or time-bucketing); populate detector_version, peak_level_dbfs, clip_count; overload->clipped enforced by repo"
     deps: [T-005]
@@ -173,7 +174,10 @@ tasks:
     dod: estimates within tolerance; normalises snippets for demod/classify
   - id: T-011
     title: blind symbol-rate + FSK deviation estimation
-    status: in-progress
+    status: done
+    commit: "b86244e (merged)"
+    results: "0 trusted-and-wrong over 900-run synthetic sweep + 36 negatives + real fixtures; 915 MHz 8 unique trusted bursts all within 1 %, deviation within 10 %; RDS best candidate 2375 Bd within 1 % in every window, trusted 18/19 at 0.25 s (acceptance partial: untrusted window abstains), 9/9 at 0.5 s, 4/4 at 1 s; all 10 S5 pitfalls have regression tests"
+    notes_impl: "S5 channel filter is a -6 dB cutoff at 0.75 OBW (~0.6 OBW passband), reproduced; below T-010 OBW floor prepare() falls back to detection-box width (BandwidthFromBox); callers must extract at >= 6x box bandwidth; merged without separate review (not core_interface)"
     s5_inputs: "gate PASSED (scoped). Port s5lib.classify_and_estimate: 4 whitened cyclic lines in 2 independent groups, guarded transition-LS (jitter<0.12 UI, kept>=85%), harmonic-aware consensus, separate rate/family trust; pitfalls list REPORT §4; acceptance fixtures = 915 bursts + sync truth, RDS windows (pilot/16), negatives; fail on any trusted-and-wrong"
     deps: [T-010]
     parallel_group: F
@@ -187,7 +191,9 @@ tasks:
     dod: estimators pass on synthetic and on an S5 capture; unknown flagged not mislabelled
   - id: T-012
     title: analog auto-mode demod + RDS
-    status: in-progress
+    status: done
+    commit: "8ae13de (merged)"
+    followups: "hk-model Demodulation has no audio output ref (audio stays in session); stereo L-R, NBFM/AM/SSB/CW audio, squelch/AGC, RadioText not implemented; WFM accepted from 50 kHz OBW when pilot + constant envelope (tone-modulated synth); merged without separate review (not core_interface)"
     deps: [T-008, T-010]
     parallel_group: G
     use_cases: [SIGNAL-062]
@@ -199,7 +205,7 @@ tasks:
     dod: replay FM+RDS fixture -> WFM chosen, PI/PS decoded, label written
   - id: T-013
     title: digital demod (FSK) + framing/CRC inference
-    status: todo
+    status: in-progress
     s5_inputs: "gate PASSED (scoped). Cross-burst preamble/sync inference proven (16-bit sync 0000110001011111 in 414/685 915 MHz bursts); next PHR/length/CRC inference; weak bursts (<15 dB) via prior-led trial demod seeded from strong bursts of the same cluster + standard-rate table"
     deps: [T-011]
     parallel_group: G
@@ -229,8 +235,9 @@ tasks:
     dod: manifest schema + IPC; a dummy plugin round-trips; plugin crash does not drop capture
   - id: T-015
     title: readsb ADS-B plugin wrapper + fixture
-    status: in-progress
-    review: "Opus review FIX-BEFORE-MERGE (legal clean: emitter hook builds from sanitized row; restricted probe created no emitters). Must-fix: readsb crashes/wedge exits counted as clean + no idle death detection; CPR even/odd pairing without time window (wrong positions) + velocity subtype 2 scaling; rebase onto egress enforcement 97a436c (store_decode signature, hook after self.store from &row). Sonnet implementer applying fixes; coordinator checks ingest hunk before merge"
+    status: done
+    commit: "9f8439c + review fixes e0777d1 (merged)"
+    review: "Opus review FIX-BEFORE-MERGE (legal clean) -> fixed: waiter thread + stderr wedge detection + idle keepalive (only clean EOF exits 0), CPR pairing 10 s window, velocity subtype-2 x4, sample_index n-1, --fix refused, HK_READSB honoured, rebased onto egress enforcement. Coordinator (Opus) checked ingest hunk: emitter upsert after self.store, built from &row identity/t, before publish. SIGNAL-001 truth-checked (callsign, lat/lon <0.01 deg, velocity) on synthetic adsb_squitter; recorded fixture still blocked on 1090 MHz antenna"
     deps: [T-014, T-025]
     parallel_group: H
     use_cases: [SIGNAL-001]

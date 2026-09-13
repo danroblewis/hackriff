@@ -328,7 +328,7 @@ fn ingest_strips_restricted_rows_that_skipped_the_policy() {
         "free text model",
     );
     let raw_id = raw.id;
-    ingest.store_decode(raw, None, None).unwrap();
+    ingest.store_decode(raw, None, None, None, None).unwrap();
     let stored = ingest.repo().decode(raw_id).unwrap();
     assert_eq!(stored.metadata, json!({}));
     assert_eq!(stored.frame_model, "hackriff.unsanitized/1");
@@ -336,7 +336,7 @@ fn ingest_strips_restricted_rows_that_skipped_the_policy() {
 
     let clean = row(json!({"function": 2, "capcode": "1234567"}), "pocsag");
     let clean_id = clean.id;
-    ingest.store_decode(clean, None, None).unwrap();
+    ingest.store_decode(clean, None, None, None, None).unwrap();
     let stored = ingest.repo().decode(clean_id).unwrap();
     assert_eq!(
         stored.metadata,
@@ -348,7 +348,7 @@ fn ingest_strips_restricted_rows_that_skipped_the_policy() {
     let mut open = row(json!({"text": "hello"}), "free text model");
     open.content_class = ContentClass::Unrestricted;
     let open_id = open.id;
-    ingest.store_decode(open, None, None).unwrap();
+    ingest.store_decode(open, None, None, None, None).unwrap();
     assert_eq!(
         ingest.repo().decode(open_id).unwrap().metadata,
         json!({"text": "hello"})
