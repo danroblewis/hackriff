@@ -769,7 +769,15 @@ tasks:
   - id: T-047
     title: Blind ground-truth acceptance harness (fixture truth lists hidden from the system, top-k explanation asserts) + audit existing tests
     milestone: M0b
-    status: in-progress
+    status: done
+    commit: "348716d (merged)"
+    result: "acceptance/blind.rs is the only run entry point: strips + seals truth, opens the mock (open_mock_replay Stop/Loop), sets device_id/device_hw/source_class, scripts tune()/set_gain(); SPACE-050 six-centre recording runs as a survey of per-centre mocks; replay_config/start moved in, no acceptance test feeds files. Truth isolation checked each run (stripped copies only, no truth text/paths in outputs, sealed truth atime unread with self-test). Coverage k=3: FM station detected + FM broadcast top-k (SIGNAL-062, AWARE-053 x5, device variants); FSK detected + ISM top-k (AWARE-036); NBFM bursts + amateur (AWARE-042); CW (AWARE-006) detected; ADS-B via readsb decode identity+time + ADS-B top-k; SPACE-050 carriers reported only (detected 6, stored none). Audit: signal_062 no longer looks up 101.3 MHz/PI 1694; AWARE-036/legal/006/SIGNAL-001 match run output; AWARE-042 core:global_index gaps; SPACE-050 calibration keyed to mock device id; AWARE-053 vouched-class relaxation kept (user config, documented). Variants: +150 kHz IQ shift via mock; gain step (+6 dB clips, overload flags); retune outside coverage (partial-coverage flag, no phantoms). HK_DEVICE=hackrf skip + ignored HIL test. acceptance 20 passed 1 ignored."
+    followups:
+      - "lossless readers lose ~0.4 s at a device gap -> T-072"
+      - "readsb decode stamps up to ~95 ms late (wrapper documents ~40 ms) -> T-072"
+      - "single-detection tracks not stored (SPACE-050 carriers detected but not in inventory) -> T-072"
+      - "detection cannot resolve 120 us ADS-B squitters -> T-072"
+      - "hk-cli daemon_drives_the_scheduler test flaked once under load"
     switch_recipe: "in blind_config replace replay_config open_replay with hk_pipeline::open_mock_replay(&blind, Pacing::Unpaced, MockEnd::Stop); keep cfg.source_class = replay.class; set cfg.device_id = replay.device.device_id; BlindConfig.replay type Replay -> DeviceReplay; start() boxes replay.source; iq_shift_hz can become a real tune(); mock needs single-centre recordings"
     deps: [T-039, T-037, T-049]
     parallel_group: J
@@ -866,6 +874,7 @@ tasks:
     milestone: M0b
     title: HIL - run the device-interface acceptance suite against the real HackRF (receive-only, manual/nightly)
     status: todo
+    hold: "unblocked (T-047 merged); needs the HackRF (stop demo on :8899) and a slot"
     deps: [T-047, T-049, T-037]
     parallel_group: O
     use_cases: [SIGNAL-062, SPACE-050, AWARE-042]
@@ -1161,6 +1170,21 @@ tasks:
     effort: high
     core_interface: true
     hold: "after T-060 (streams) and T-070 (refinement in listen/analog) merge; front of the slot queue"
+  - id: T-072
+    milestone: M0b
+    title: Pipeline fidelity follow-ups from blind acceptance (device-gap sample loss, readsb stamp latency, single-detection tracks, short-burst resolution)
+    status: todo
+    deps: [T-047]
+    parallel_group: J
+    use_cases: [AWARE-042, SIGNAL-001, SPACE-050]
+    found_by: T-047 agent 2026-09-13
+    acceptance: "lossless readers lose no samples across a device gap (or loss bounded and reported, AWARE-042 tolerance tightened back); readsb decode stamps within the documented ~40 ms; single-detection carriers become tracks/emitters (SPACE-050 carriers stored); a short-burst detection path resolves ~120 us ADS-B squitters or documents the limit with a dedicated burst detector plan; hk-cli daemon scheduler test stabilised under load"
+    area: crates/hk-pipeline, crates/hk-plugins (readsb), crates/hk-detect, crates/hk-cli tests
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "waiting for an agent slot"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
