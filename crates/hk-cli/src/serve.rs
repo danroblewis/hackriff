@@ -1,4 +1,5 @@
-//! `hk serve`: a thin demo composer for the web UI (T-022a). Full pipeline assembly is T-027.
+//! `hk serve`: a thin demo composer for the web UI (T-022a). The full pipeline (detections, chains,
+//! scheduler) runs under `hackriffd` / `hk replay` ([`crate::pipeline`], T-027).
 //!
 //! ```text
 //! SigMF replay (real-time pacing) ─► STFT ─► dB rows ─► spectrum Publisher ─► WebSocket bridge
@@ -14,8 +15,9 @@
 //! - `sample_rate_hz` is the declared row rate, `fft_size` and `datatype` are always declared, and
 //!   rows carry the IQ time and sample index of their first sample.
 //! - **Class** ([`fixture_class`]): the fixture's `hackriff:content_class` when present (parsed
-//!   failing closed); otherwise `unrestricted` only when the whole capture lies inside the FM
-//!   broadcast band (a band prior, positively chosen); otherwise the fail-closed `metadata-only`,
+//!   failing closed); otherwise `unrestricted` only when the whole capture lies inside one
+//!   positively chosen band prior (FM broadcast, 1090 MHz ADS-B); otherwise the fail-closed
+//!   `metadata-only`,
 //!   where the contract gates spectrum at ≤ 50 rows/s. Under a gated class the declared rate is
 //!   the actual row rate plus 10 % margin, capped at 50.
 //! - The replay is not rewound in place (a gated publisher refuses `t` going backwards): with
@@ -34,14 +36,13 @@ use std::thread;
 
 use anyhow::Context as _;
 use hk_api::stream::{
-    BinaryRecord, GATED_SPECTRUM_MAX_ROW_RATE_HZ, Publisher, PublisherConfig, RecordFlags,
-    StreamError, StreamHeader, StreamKind,
+    BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamError, StreamHeader,
 };
 use hk_api::{ApiState, Server, ServerConfig, StreamRegistry, Token};
 use hk_core::{Discontinuity, Pacing, ReplayOptions, SigmfReplaySource, Source};
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker};
 use hk_dsp::radiometry::PowerCalibrations;
-use hk_dsp::{InputInfo, PowerUnit, SpectrumFrame, StftConfig, StftProcessor, WelchConfig};
+use hk_dsp::{InputInfo, PowerUnit, SpectrumFrame, StftProcessor};
 use hk_model::sigmf::SigmfMeta;
 use hk_model::{ContentClass, Repository};
 use hk_store::{FloorProduct, FloorProductConfig};
@@ -49,10 +50,7 @@ use num_complex::Complex32;
 
 /// Stream id of the replayed spectrum.
 pub const STREAM_ID: &str = "spectrum/replay";
-/// Datatype of the spectrum rows.
-pub const SPECTRUM_DATATYPE: &str = "rf32_le";
-/// FM broadcast band used as the `unrestricted` band prior, Hz.
-pub const FM_BROADCAST_HZ: (f64, f64) = (87.5e6, 108.0e6);
+pub use hk_pipeline::class::{FM_BROADCAST_HZ, RowPlan, SPECTRUM_DATATYPE, row_plan};
 
 /// `hk serve` settings.
 #[derive(Clone, Debug)]
@@ -78,62 +76,9 @@ pub struct ServeOptions {
     pub realtime: bool,
 }
 
-/// The stream class for a recording (see the [module docs](self)).
+/// The stream class for a recording (see the [module docs](self); `hk_pipeline::class`).
 pub fn fixture_class(meta: &SigmfMeta) -> ContentClass {
-    if let Some(v) = meta.global.extra.get("hackriff:content_class") {
-        return ContentClass::parse_fail_closed(v.as_str());
-    }
-    let fs = meta.global.sample_rate.unwrap_or(f64::INFINITY);
-    let centres: Vec<f64> = meta
-        .captures
-        .iter()
-        .filter_map(|c| c.frequency)
-        .chain(meta.global.provenance.as_ref().map(|p| p.tune.center_hz))
-        .collect();
-    let inside =
-        |fc: &f64| fc - fs / 2.0 >= FM_BROADCAST_HZ.0 && fc + fs / 2.0 <= FM_BROADCAST_HZ.1;
-    if !centres.is_empty() && centres.iter().all(inside) {
-        ContentClass::Unrestricted
-    } else {
-        ContentClass::FAIL_CLOSED
-    }
-}
-
-/// STFT settings and row rates for a recording rate.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RowPlan {
-    /// STFT settings.
-    pub stft: StftConfig,
-    /// Actual row rate, rows/s.
-    pub row_rate_hz: f64,
-    /// Declared row rate (`sample_rate_hz` of the header).
-    pub declared_hz: f64,
-}
-
-/// Chooses `K` so rows come at most at `rows_per_s` (and within the gated cap when `class`
-/// forbids content).
-pub fn row_plan(fs: f64, fft_len: usize, rows_per_s: f64, class: ContentClass) -> RowPlan {
-    let mut welch = WelchConfig::new(fft_len);
-    welch.spectral_kurtosis = false;
-    let hop = welch.hop() as f64;
-    let gated = !class.permits_content();
-    let target = if gated {
-        rows_per_s.min(GATED_SPECTRUM_MAX_ROW_RATE_HZ / 1.1)
-    } else {
-        rows_per_s
-    };
-    let k = ((fs / (hop * target)).ceil() as usize).max(1);
-    let row_rate_hz = fs / (k as f64 * hop);
-    let declared_hz = if gated {
-        (row_rate_hz * 1.1).min(GATED_SPECTRUM_MAX_ROW_RATE_HZ)
-    } else {
-        row_rate_hz
-    };
-    RowPlan {
-        stft: StftConfig::new(welch, k),
-        row_rate_hz,
-        declared_hz,
-    }
+    hk_pipeline::class::source_class(meta)
 }
 
 /// The spectrum stream header.
@@ -143,15 +88,7 @@ pub fn spectrum_header(
     center_hz: f64,
     fs: f64,
 ) -> StreamHeader {
-    let bins = plan.stft.welch.fft_len;
-    let mut h = StreamHeader::new(STREAM_ID, StreamKind::Spectrum, class, "hk-cli:serve");
-    h.datatype = Some(SPECTRUM_DATATYPE.into());
-    h.fft_size = Some(bins as u32);
-    h.sample_rate_hz = Some(plan.declared_hz);
-    h.center_hz = Some(center_hz);
-    h.bandwidth_hz = Some(fs);
-    h.max_frame_len = (hk_api::stream::BINARY_RECORD_HEADER_LEN + 4 * bins) as u32;
-    h
+    hk_pipeline::class::spectrum_header(STREAM_ID, "hk-cli:serve", class, plan, center_hz, fs)
 }
 
 /// What one replay pass did.
@@ -301,6 +238,7 @@ pub fn run(opts: ServeOptions) -> anyhow::Result<()> {
         history: None,
         floor: floor.clone(),
         inventory,
+        status: None,
     };
     let mut config = ServerConfig::new(opts.bind, token.clone());
     config.ui_dist = opts.ui_dist.clone();
@@ -360,6 +298,7 @@ pub fn run(opts: ServeOptions) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hk_api::stream::GATED_SPECTRUM_MAX_ROW_RATE_HZ;
 
     #[test]
     fn fm_fixture_is_unrestricted_and_others_fail_closed() {

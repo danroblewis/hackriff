@@ -402,6 +402,7 @@ dependencies = [
  "hk-core",
  "hk-dsp",
  "hk-model",
+ "hk-pipeline",
  "hk-store",
  "num-complex",
  "serde_json",
@@ -511,6 +512,27 @@ dependencies = [
  "sha2",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "hk-pipeline"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hk-context",
+ "hk-core",
+ "hk-demod",
+ "hk-detect",
+ "hk-dsp",
+ "hk-e2e",
+ "hk-estimate",
+ "hk-model",
+ "hk-plugins",
+ "hk-store",
+ "hk-stream",
+ "num-complex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

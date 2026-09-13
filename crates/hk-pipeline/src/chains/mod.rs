@@ -1,0 +1,516 @@
+//! Runtime chains (ADR-0001 "Spike S1 outcome"): a chain is a ring reader attached at runtime
+//! with a data-built node list, running on its own thread, detached by dropping it. Attaching or
+//! detaching never touches the capture thread or the always-on readers; in lossless replay the
+//! chain's [`GateCursor`](crate::gate::GateCursor) joins the flow gate for as long as it lives.
+//!
+//! - [`ChainManager`] (control thread): selects a spec for a confirmed track or a covered band
+//!   ([`spec`]), refuses content chains under a class that forbids content, spawns the chain and
+//!   its recorder, forwards member boxes (with a backlog for boxes that arrived before the
+//!   confirmation), detaches on track close / merge / coverage loss, and reaps finished threads.
+//! - Chain bodies: [`analog`] (C19 auto mode + RDS), [`fsk`] (C13/C14/C20/C21), [`plugin`]
+//!   (DDC + subprocess decoder), [`record`] (pre-trigger SigMF, C25).
+
+pub(crate) mod analog;
+pub(crate) mod fsk;
+pub(crate) mod plugin;
+pub(crate) mod record;
+pub mod spec;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+use hk_core::{ReadChunk, ReadOutcome, ResyncPolicy, RingReader};
+use hk_model::{RecordingTrigger, TrackId};
+use num_complex::Complex;
+
+use crate::events::{Candidate, MemberBox};
+use crate::gate::GateCursor;
+use crate::run::Shared;
+use crate::stats::{add, inc};
+use spec::{ChainShape, ChainSpec, Trigger, select_for_track};
+
+/// Messages to a running chain.
+#[derive(Debug)]
+pub(crate) enum ChainMsg {
+    /// A member box of the chain's track.
+    Member(MemberBox),
+    /// Finish: flush what the chain has and exit.
+    Detach,
+}
+
+/// A chain's ring reader.
+pub(crate) struct ChainReader {
+    pub shared: Arc<Shared>,
+    reader: RingReader<Complex<i8>>,
+    cursor: GateCursor,
+    pub buf: Vec<Complex<i8>>,
+}
+
+/// One read.
+pub(crate) enum Next {
+    Data(ReadChunk),
+    Lost,
+    Idle,
+    Closed,
+}
+
+impl ChainReader {
+    /// Attaches at `start` (clamped to the oldest retained sample).
+    pub fn new(shared: Arc<Shared>, start: u64) -> Self {
+        let cursor = shared.gate.register(start);
+        let start = start.max(shared.ring.oldest_sample().unwrap_or(0));
+        cursor.set(start);
+        let reader = shared
+            .ring
+            .reader_at(start)
+            .with_resync_policy(ResyncPolicy::Oldest);
+        Self {
+            shared,
+            reader,
+            cursor,
+            buf: vec![Complex::default(); 1 << 16],
+        }
+    }
+
+    /// Reads the next chunk into `buf` (waits up to 20 ms).
+    pub fn next(&mut self) -> Next {
+        let c = &self.shared.counters.chains;
+        match self
+            .reader
+            .read_timeout(&mut self.buf, Duration::from_millis(20))
+        {
+            ReadOutcome::Data(chunk) => {
+                add(&c.samples, chunk.len as u64);
+                Next::Data(chunk)
+            }
+            ReadOutcome::Overrun { lost_samples, .. } => {
+                add(&c.lost_samples, lost_samples);
+                Next::Lost
+            }
+            ReadOutcome::Empty => Next::Idle,
+            ReadOutcome::Closed => Next::Closed,
+        }
+    }
+
+    /// The chain no longer needs samples before `sample`.
+    pub fn release_to(&self, sample: u64) {
+        self.cursor.set(sample);
+    }
+}
+
+struct Running {
+    id: u64,
+    tx: Option<Sender<ChainMsg>>,
+    join: JoinHandle<()>,
+}
+
+/// Attaches, feeds, detaches and reaps runtime chains (control thread).
+pub(crate) struct ChainManager {
+    shared: Arc<Shared>,
+    running: Vec<Running>,
+    next_id: u64,
+    by_track: HashMap<TrackId, u64>,
+    coverage: HashMap<String, u64>,
+    manual: Vec<u64>,
+    backlog: HashMap<TrackId, Vec<MemberBox>>,
+    members: HashMap<TrackId, u32>,
+    pending: HashMap<TrackId, Candidate>,
+    by_channel: HashMap<(String, i64), u64>,
+}
+
+const BACKLOG_PER_TRACK: usize = 512;
+
+impl ChainManager {
+    pub fn new(shared: Arc<Shared>) -> Self {
+        Self {
+            shared,
+            running: Vec::new(),
+            next_id: 0,
+            by_track: HashMap::new(),
+            coverage: HashMap::new(),
+            manual: Vec::new(),
+            backlog: HashMap::new(),
+            members: HashMap::new(),
+            pending: HashMap::new(),
+            by_channel: HashMap::new(),
+        }
+    }
+
+    /// Running chains and recorders.
+    pub fn running(&self) -> usize {
+        self.running.len()
+    }
+
+    fn send(&self, id: u64, msg: ChainMsg) {
+        if let Some(tx) = self
+            .running
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| r.tx.as_ref())
+        {
+            let _ = tx.send(msg);
+        }
+    }
+
+    /// Spawns `spec` for `cand`; returns the chain id.
+    pub fn attach(&mut self, spec: &ChainSpec, cand: Candidate) -> Option<u64> {
+        let c = &self.shared.counters.chains;
+        let shape = match spec.shape() {
+            Ok(s) => s,
+            Err(e) => {
+                inc(&c.attach_errors);
+                eprintln!("hk-pipeline: chain {}: {e}", spec.id);
+                return None;
+            }
+        };
+        let class = self.shared.cfg.source_class;
+        if crate::debug_enabled() {
+            eprintln!(
+                "hk-pipeline: attach {} for {:.4}..{:.4} MHz (bursty {:?}) from sample {} trigger {}",
+                spec.id,
+                cand.f_lo_hz / 1e6,
+                cand.f_hi_hz / 1e6,
+                cand.bursty,
+                cand.first_sample,
+                cand.trigger_sample
+            );
+        }
+        if spec.requires_content && !class.permits_content() {
+            inc(&c.refused_class);
+            return None;
+        }
+        // An analog chain with a probe records only once mode selection accepted the channel.
+        let deferred = matches!(shape, ChainShape::Analog { probe_s, .. } if probe_s > 0.0);
+        let mut analog_record = None;
+        if let Some((pre_s, post_s)) = spec.record() {
+            let trigger = match cand.detection {
+                Some(d) => RecordingTrigger::Detection(d),
+                None => RecordingTrigger::Scheduler,
+            };
+            if class.permits_content() && deferred {
+                analog_record = Some(analog::RecordAfterProbe {
+                    pre_s,
+                    post_s,
+                    trigger,
+                    label: spec.id.clone(),
+                });
+            } else if class.permits_content() {
+                let shared = Arc::clone(&self.shared);
+                let label = spec.id.clone();
+                let at = cand.trigger_sample;
+                let id = self.next_id;
+                self.next_id += 1;
+                if let Ok(join) = thread::Builder::new()
+                    .name(format!("hk-rec-{id}"))
+                    .spawn(move || record::run(shared, at, pre_s, post_s, trigger, label))
+                {
+                    self.running.push(Running { id, tx: None, join });
+                }
+            } else {
+                inc(&c.recordings_refused_class);
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        let shared = Arc::clone(&self.shared);
+        let id = self.next_id;
+        self.next_id += 1;
+        let spec_id = spec.id.clone();
+        let spawned = thread::Builder::new()
+            .name(format!("hk-chain-{}-{id}", spec.id))
+            .spawn(move || match shape {
+                ChainShape::Analog {
+                    pre_s,
+                    window_s,
+                    bandwidth_hz,
+                    probe_s,
+                    accept_modes,
+                    require_pilot,
+                } => analog::run(
+                    shared,
+                    rx,
+                    cand,
+                    analog::AnalogNode {
+                        pre_s,
+                        window_s,
+                        bandwidth_hz,
+                        probe_s,
+                        accept_modes,
+                        require_pilot,
+                        record: analog_record,
+                    },
+                ),
+                ChainShape::Fsk {
+                    pad_s,
+                    retain_s,
+                    min_bursts,
+                    max_bursts,
+                } => fsk::run(shared, rx, cand, pad_s, retain_s, min_bursts, max_bursts),
+                ChainShape::Plugin {
+                    ddc,
+                    manifest,
+                    tail_pad_samples,
+                    settle_s,
+                } => plugin::run(
+                    shared,
+                    rx,
+                    cand,
+                    &spec_id,
+                    ddc,
+                    &manifest,
+                    tail_pad_samples,
+                    settle_s,
+                ),
+            });
+        match spawned {
+            Ok(join) => {
+                inc(&c.attached);
+                self.running.push(Running {
+                    id,
+                    tx: Some(tx),
+                    join,
+                });
+                Some(id)
+            }
+            Err(_) => {
+                inc(&c.attach_errors);
+                None
+            }
+        }
+    }
+
+    /// A track confirmed: it becomes a candidate. Selection runs now and again whenever a member
+    /// box widens the candidate, until a spec matches with its `min_detections` met; a candidate
+    /// still without a chain when its track closes counts as `unmatched`. (The first confirmation
+    /// often sees a single tone lobe or fragment, narrower than the emission.)
+    pub fn on_confirmed(&mut self, cand: Candidate) {
+        let Some(track) = cand.track else { return };
+        if self.by_track.contains_key(&track) || self.pending.contains_key(&track) {
+            return;
+        }
+        self.pending.insert(track, cand);
+        self.try_attach(track);
+    }
+
+    fn try_attach(&mut self, track: TrackId) {
+        let Some(cand) = self.pending.get(&track) else {
+            return;
+        };
+        let count = self.members.get(&track).copied().unwrap_or(0);
+        let Some(spec) =
+            select_for_track(&self.shared.specs, cand.f_lo_hz, cand.f_hi_hz, cand.bursty).cloned()
+        else {
+            return;
+        };
+        if count < spec.min_detections {
+            return;
+        }
+        let cand = self.pending.remove(&track).expect("pending candidate");
+        if crate::debug_enabled() {
+            eprintln!(
+                "hk-pipeline: {} selected for {:.4}..{:.4} MHz ({count} detections, bursty {:?})",
+                spec.id,
+                cand.f_lo_hz / 1e6,
+                cand.f_hi_hz / 1e6,
+                cand.bursty
+            );
+        }
+        self.attach_track(track, &spec, cand);
+    }
+
+    fn attach_track(&mut self, track: TrackId, spec: &ChainSpec, mut cand: Candidate) {
+        let c = &self.shared.counters.chains;
+        let (lo, hi) = spec.channel(cand.f_lo_hz, cand.f_hi_hz);
+        cand.f_lo_hz = lo;
+        cand.f_hi_hz = hi;
+        let (center, rate) = self.shared.counters.tune();
+        let fc = 0.5 * (lo + hi);
+        if rate > 0.0 && (fc - center).abs() + 0.5 * (hi - lo) > 0.48 * rate {
+            inc(&c.outside_window);
+            return;
+        }
+        let key = spec.raster_hz.map(|_| (spec.id.clone(), fc.round() as i64));
+        if let Some(k) = &key {
+            if let Some(id) = self.by_channel.get(k) {
+                if self.running.iter().any(|r| r.id == *id) {
+                    inc(&c.duplicate_channel);
+                    return;
+                }
+            }
+        }
+        if let Some(id) = self.attach(spec, cand) {
+            self.by_track.insert(track, id);
+            if let Some(k) = key {
+                self.by_channel.insert(k, id);
+            }
+            for m in self.backlog.remove(&track).unwrap_or_default() {
+                self.send(id, ChainMsg::Member(m));
+            }
+        }
+    }
+
+    /// Attaches a spec on request (API / tests).
+    pub fn attach_manual(&mut self, spec: &ChainSpec, cand: Candidate) {
+        if let Some(id) = self.attach(spec, cand) {
+            self.manual.push(id);
+        }
+    }
+
+    /// Detaches every manual chain.
+    pub fn detach_manual(&mut self) {
+        for id in std::mem::take(&mut self.manual) {
+            self.send(id, ChainMsg::Detach);
+        }
+    }
+
+    pub fn on_member(&mut self, track: TrackId, member: MemberBox) {
+        *self.members.entry(track).or_insert(0) += 1;
+        let fs = self.shared.fs;
+        if let Some(c) = self.pending.get_mut(&track) {
+            c.f_lo_hz = c.f_lo_hz.min(member.f_lo_hz);
+            c.f_hi_hz = c.f_hi_hz.max(member.f_hi_hz);
+            c.first_sample = c.first_sample.min(member.samples.start);
+            let dur_s = (member.samples.end - member.samples.start) as f64 / fs;
+            if member.continues {
+                c.bursty = Some(false);
+            } else if c.bursty.is_none() && dur_s < 0.5 {
+                c.bursty = Some(true);
+            }
+        }
+        match self.by_track.get(&track) {
+            Some(&id) => self.send(id, ChainMsg::Member(member)),
+            None => {
+                let b = self.backlog.entry(track).or_default();
+                if b.len() < BACKLOG_PER_TRACK {
+                    b.push(member);
+                }
+            }
+        }
+        if self.pending.contains_key(&track) {
+            self.try_attach(track);
+        }
+    }
+
+    pub fn on_track_closed(&mut self, track: TrackId) {
+        self.backlog.remove(&track);
+        self.members.remove(&track);
+        if let Some(c) = self.pending.remove(&track) {
+            if crate::debug_enabled() {
+                eprintln!(
+                    "hk-pipeline: no chain for {:.4}..{:.4} MHz ({:.1} kHz, bursty {:?})",
+                    c.f_lo_hz / 1e6,
+                    c.f_hi_hz / 1e6,
+                    (c.f_hi_hz - c.f_lo_hz) / 1e3,
+                    c.bursty
+                );
+            }
+            inc(&self.shared.counters.chains.unmatched);
+        }
+        if let Some(id) = self.by_track.remove(&track) {
+            self.send(id, ChainMsg::Detach);
+        }
+    }
+
+    pub fn on_merged(&mut self, from: TrackId, into: TrackId) {
+        let moved = self.members.remove(&from).unwrap_or(0);
+        *self.members.entry(into).or_insert(0) += moved;
+        if let Some(mut b) = self.backlog.remove(&from) {
+            let into_b = self.backlog.entry(into).or_default();
+            into_b.append(&mut b);
+            into_b.truncate(BACKLOG_PER_TRACK);
+        }
+        if let Some(id) = self.by_track.remove(&from) {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.by_track.entry(into) {
+                e.insert(id);
+            } else {
+                self.send(id, ChainMsg::Detach);
+            }
+        }
+        if let Some(mut p) = self.pending.remove(&from) {
+            if let Some(q) = self.pending.get_mut(&into) {
+                q.f_lo_hz = q.f_lo_hz.min(p.f_lo_hz);
+                q.f_hi_hz = q.f_hi_hz.max(p.f_hi_hz);
+                q.first_sample = q.first_sample.min(p.first_sample);
+            } else if !self.by_track.contains_key(&into) {
+                p.track = Some(into);
+                self.pending.insert(into, p);
+            }
+        }
+        if self.pending.contains_key(&into) {
+            self.try_attach(into);
+        }
+    }
+
+    /// Attaches coverage chains whose band the window covers; detaches those it no longer does.
+    pub fn poll_coverage(&mut self) {
+        let (center, rate) = self.shared.counters.tune();
+        if rate.is_nan() || rate <= 0.0 || self.shared.ring.is_closed() {
+            return;
+        }
+        let specs: Vec<ChainSpec> = self
+            .shared
+            .specs
+            .iter()
+            .filter(|s| s.trigger == Trigger::Coverage)
+            .cloned()
+            .collect();
+        for spec in specs {
+            let covered = spec.covered_by(center, rate);
+            match (covered, self.coverage.get(&spec.id).copied()) {
+                (true, None) => {
+                    let band = spec.freq_hz[0];
+                    let at = self.shared.ring.oldest_sample().unwrap_or(0);
+                    let cand = Candidate {
+                        track: None,
+                        detection: None,
+                        f_lo_hz: band[0],
+                        f_hi_hz: band[1],
+                        first_sample: at,
+                        trigger_sample: at,
+                        bursty: None,
+                    };
+                    if let Some(id) = self.attach(&spec, cand) {
+                        self.coverage.insert(spec.id.clone(), id);
+                    }
+                }
+                (false, Some(id)) => {
+                    self.coverage.remove(&spec.id);
+                    self.send(id, ChainMsg::Detach);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Detaches everything.
+    pub fn detach_all(&mut self) {
+        for r in &self.running {
+            if let Some(tx) = &r.tx {
+                let _ = tx.send(ChainMsg::Detach);
+            }
+        }
+        self.by_track.clear();
+        self.manual.clear();
+    }
+
+    /// Joins finished chains.
+    pub fn reap(&mut self) {
+        let mut i = 0;
+        while i < self.running.len() {
+            if self.running[i].join.is_finished() {
+                let r = self.running.swap_remove(i);
+                let _ = r.join.join();
+                if r.tx.is_some() {
+                    inc(&self.shared.counters.chains.detached);
+                }
+                self.by_track.retain(|_, v| *v != r.id);
+                // A finished coverage chain is not re-attached while the window still covers
+                // its band: keep its entry (removed only on coverage loss).
+            } else {
+                i += 1;
+            }
+        }
+    }
+}

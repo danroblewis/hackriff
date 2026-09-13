@@ -8,6 +8,7 @@
 //! | `/api/history?f_lo&f_hi&t0&t1[&max_cells]` | token | T-017 region-over-time grid ([`crate::query`]) |
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | token | T-021 floor vs time ([`crate::query`]) |
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
+//! | `/api/status` | token | T-027 pipeline counters (per-stage samples, frames, drops, detections, tracks, chains, plugins). Never content |
 //! | `/ws/<stream_id>` | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/`, `/<file>` | none | Static files from the UI build directory (code, no data) |
 //!
@@ -91,7 +92,12 @@ pub struct ApiState {
     pub floor: Option<Arc<Mutex<FloorProduct>>>,
     /// Signal inventory (C27, T-018) for `/api/inventory`. Read through `query_inventory` only.
     pub inventory: Option<Arc<Mutex<Repository>>>,
+    /// Pipeline counters for `/api/status` (T-027): a snapshot builder, called per request.
+    pub status: Option<StatusFn>,
 }
+
+/// Builds the `/api/status` JSON (counters only: no content, no identities).
+pub type StatusFn = Arc<dyn Fn() -> Value + Send + Sync>;
 
 struct Shared {
     config: ServerConfig,
@@ -361,6 +367,11 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         "/api/history" => history(state, &req),
         "/api/floor" => floor(state, &req),
         "/api/inventory" => inventory(state, &req),
+        "/api/status" => state
+            .status
+            .as_ref()
+            .map(|f| f())
+            .ok_or_else(|| ApiError::new(404, "no pipeline status")),
         p if p.starts_with("/api/") => Err(ApiError::new(404, "no such endpoint")),
         _ => return static_file(&mut stream, shared.config.ui_dist.as_deref(), &req.path),
     };
