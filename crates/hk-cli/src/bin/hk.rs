@@ -16,10 +16,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Replay a SigMF recording through the pipeline. For now this prints a metadata summary.
+    /// Run a SigMF recording once through the whole pipeline (detections, tracks, runtime
+    /// demod/decode chains, history, streams) and print the run summary.
     Replay {
         /// Path to a `.sigmf-meta` file. The `.sigmf-data` file sits beside it.
         fixture: PathBuf,
+        /// Data directory (database, history tiles, recordings). Default: a fresh temp directory.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// ScanPlan JSON (settings under `extra.pipeline` / `extra.scheduler`).
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        /// Serve the API (streams, history, floor, status) during the run and afterwards.
+        #[arg(long)]
+        serve: Option<SocketAddr>,
+        /// Replay in real time (lossy, like a live source) instead of unpaced and lossless.
+        #[arg(long)]
+        paced: bool,
+        /// Drive the attention scheduler over the replay (virtual tuning).
+        #[arg(long)]
+        schedule: bool,
+        /// Offline feed cache directory for anomaly correlation.
+        #[arg(long)]
+        feeds: Option<PathBuf>,
+        /// Only print the recording's metadata summary.
+        #[arg(long)]
+        info: bool,
+        /// Print the summary as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Built UI directory (with --serve; default: ui/dist).
+        #[arg(long)]
+        ui_dist: Option<PathBuf>,
     },
     /// Connect to a stream-output endpoint and print its header and records
     /// (docs/stream-contract.md).
@@ -66,9 +94,54 @@ enum Command {
     },
 }
 
+fn default_ui_dist(ui_dist: Option<PathBuf>) -> Option<PathBuf> {
+    ui_dist.or_else(|| {
+        [
+            PathBuf::from("ui/dist"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/dist"),
+        ]
+        .into_iter()
+        .find(|p| p.is_dir())
+    })
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Replay { fixture } => print!("{}", hk_cli::replay_summary(&fixture)?),
+        Command::Replay {
+            fixture,
+            data_dir,
+            plan,
+            serve,
+            paced,
+            schedule,
+            feeds,
+            info,
+            json,
+            ui_dist,
+        } => {
+            if info {
+                print!("{}", hk_cli::replay_summary(&fixture)?);
+                return Ok(());
+            }
+            let summary = hk_cli::pipeline::run_replay(&hk_cli::pipeline::ReplayArgs {
+                fixture,
+                data_dir,
+                plan,
+                serve,
+                paced,
+                schedule,
+                feeds,
+                ui_dist: default_ui_dist(ui_dist),
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                print!("{}", summary.to_text());
+            }
+            if !summary.errors.is_empty() {
+                anyhow::bail!("the run reported {} error(s)", summary.errors.len());
+            }
+        }
         Command::Serve {
             replay,
             history_dir,
@@ -79,20 +152,12 @@ fn main() -> anyhow::Result<()> {
             rows_per_s,
             loop_replay,
         } => {
-            let ui_dist = ui_dist.or_else(|| {
-                [
-                    PathBuf::from("ui/dist"),
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/dist"),
-                ]
-                .into_iter()
-                .find(|p| p.is_dir())
-            });
             hk_cli::serve::run(hk_cli::serve::ServeOptions {
                 replay,
                 history_dir,
                 inventory_db,
                 bind,
-                ui_dist,
+                ui_dist: default_ui_dist(ui_dist),
                 fft_len: fft,
                 rows_per_s,
                 loop_replay,

@@ -50,3 +50,4 @@ hk-context = { path = "crates/hk-context" }
 hk-stream = { path = "crates/hk-stream" }
 hk-api = { path = "crates/hk-api" }
 hk-plugins = { path = "crates/hk-plugins" }
+hk-pipeline = { path = "crates/hk-pipeline" }

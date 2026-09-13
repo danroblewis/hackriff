@@ -1,0 +1,245 @@
+//! Pipeline settings: resolution choice, ring size, batching, chains and classification rules.
+//!
+//! A ScanPlan can override any [`PipelineSettings`] field under `extra.pipeline` (unknown keys
+//! are errors). `extra.scheduler` stays the scheduler's own (`SchedulerConfig::from_plan`).
+//!
+//! # Detection resolution (T-006 re-probe follow-up)
+//!
+//! [`detection_resolution`]: bins of about 5 kHz (`fft_len = next_pow2(fs / 5 kHz)` clamped to
+//! 512..4096) and frames of about 2.5 ms (`K = round(fs · 2.5 ms / fft_len)` clamped to 4..10).
+//! That is the S4 geometry T-006 validated (20 Msps → 4096 × 10, 4.88 kHz, 2.05 ms: all 7 known
+//! FM stations on the urban fixture; 2.4 Msps → 512 × 10), where the re-probe's 65536 bins × 2
+//! found only 2/7: the floor tracker's 256-bin blocks (~1.25 MHz at 5 kHz) and the detector's
+//! Gamma(n) thresholds both want moderate bins and n ≥ 4. Narrow sources keep 512 bins
+//! (500 kS/s → 977 Hz bins, K 4; 200 kS/s → 390 Hz, K 4).
+//!
+//! # STFT overlap and n_eff (T-006 review note)
+//!
+//! Detection uses **Hann, 0 % overlap**, so the K averaged segments are independent and the
+//! floor tracker's `n_avg_effective` is exactly K: the detector's `Gamma(n)` thresholds then hold
+//! their design Pfa. With 50 % overlap the moment-matched `Gamma(n_eff)` runs 1.58× the design
+//! Pfa at 1e-6 (T-006 review). The cost of no overlap is ~1.8 dB (Hann ENBW) sensitivity loss to
+//! bursts shorter than one segment, which the S4 profiles already assume. History and spectrum
+//! readers keep their own STFTs (50 % overlap is harmless there: no thresholds).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Context as _;
+use hk_model::{
+    ContentClass, FreqRange, PlanRegion, ScanPlan, ScanPlanId, ScanPolicy, Schedule, Timestamp,
+};
+use hk_stream::{PublisherHandle, StreamHeader};
+use serde::{Deserialize, Serialize};
+
+use crate::chains::spec::{ChainSpec, builtin_chains};
+use crate::class::ClassRule;
+
+/// Target detection bin width, Hz.
+pub const TARGET_BIN_HZ: f64 = 5_000.0;
+/// Target detection frame period, s.
+pub const TARGET_FRAME_S: f64 = 2.5e-3;
+
+/// `(fft_len, averages)` for detection at `fs` (see the module docs).
+pub fn detection_resolution(fs: f64, settings: &PipelineSettings) -> (usize, usize) {
+    let fft = settings.fft_len.unwrap_or_else(|| {
+        ((fs / TARGET_BIN_HZ).ceil().max(1.0) as usize)
+            .next_power_of_two()
+            .clamp(512, 4096)
+    });
+    let k = settings
+        .averages
+        .unwrap_or_else(|| ((fs * TARGET_FRAME_S / fft as f64).round() as usize).clamp(4, 10));
+    (fft, k)
+}
+
+/// Overridable settings (`ScanPlan.extra.pipeline`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PipelineSettings {
+    /// Detection FFT length override.
+    pub fft_len: Option<usize>,
+    /// Detection averages override.
+    pub averages: Option<usize>,
+    /// Ring history, s (4): the pre-trigger reach of chains and recordings.
+    pub ring_s: f64,
+    /// History frames per second into the floor product / pyramid (10).
+    pub history_rows_per_s: f64,
+    /// Spectrum stream rows per second (25; ≤ 50 under a gated class).
+    pub spectrum_rows_per_s: f64,
+    /// Spectrum stream FFT length (1024).
+    pub spectrum_fft_len: usize,
+    /// Detections per repository batch (256).
+    pub detection_batch: usize,
+    /// Stream time between repository flushes of detections and tracks, s (0.5).
+    pub flush_interval_s: f64,
+    /// Bands that use the S4 short-burst detection profile, `[lo, hi]` Hz (902–928 MHz ISM).
+    pub short_burst_bands_hz: Vec<[f64; 2]>,
+    /// Chain registry; `None` uses [`builtin_chains`].
+    pub chains: Option<Vec<ChainSpec>>,
+    /// User emitter classification rules.
+    pub classify: Vec<ClassRule>,
+    /// Site `[lat, lon]` for the correlator.
+    pub site: Option<[f64; 2]>,
+    /// Offer confirmed tracks to the scheduler with a verification group (hackriffd).
+    pub verify_pois: bool,
+}
+
+impl Default for PipelineSettings {
+    fn default() -> Self {
+        Self {
+            fft_len: None,
+            averages: None,
+            ring_s: 4.0,
+            history_rows_per_s: 10.0,
+            spectrum_rows_per_s: 25.0,
+            spectrum_fft_len: 1024,
+            detection_batch: 256,
+            flush_interval_s: 0.5,
+            short_burst_bands_hz: vec![[902e6, 928e6]],
+            chains: None,
+            classify: Vec::new(),
+            site: None,
+            verify_pois: true,
+        }
+    }
+}
+
+impl PipelineSettings {
+    /// Defaults overridden by `plan.extra.pipeline`.
+    pub fn from_plan(plan: &ScanPlan) -> anyhow::Result<Self> {
+        let s = match plan.extra.get("pipeline") {
+            None | Some(serde_json::Value::Null) => Self::default(),
+            Some(v) => serde_json::from_value(v.clone()).context("ScanPlan.extra.pipeline")?,
+        };
+        for c in s.chain_specs() {
+            c.validate()
+                .map_err(|e| anyhow::anyhow!("chain {}: {e}", c.id))?;
+        }
+        Ok(s)
+    }
+
+    /// The chain registry in force.
+    pub fn chain_specs(&self) -> Vec<ChainSpec> {
+        self.chains.clone().unwrap_or_else(builtin_chains)
+    }
+}
+
+/// Where new streams are offered (e.g. the hk-api bridge registry).
+pub type StreamSink = Arc<dyn Fn(&StreamHeader, PublisherHandle) + Send + Sync>;
+
+/// A run's configuration.
+#[derive(Clone)]
+pub struct PipelineConfig {
+    /// Device data directory: `hackriff.db`, `history/`, `recordings/`, `feeds/`.
+    pub data_dir: PathBuf,
+    /// The plan the Survey runs under.
+    pub plan: ScanPlan,
+    /// Settings (normally [`PipelineSettings::from_plan`]).
+    pub settings: PipelineSettings,
+    /// Lossless backpressure (unpaced replay).
+    pub lossless: bool,
+    /// Drive the attention scheduler (hackriffd).
+    pub drive_scheduler: bool,
+    /// Device id for the Survey.
+    pub device_id: String,
+    /// Content class of the source (see [`crate::class::source_class`]).
+    pub source_class: ContentClass,
+    /// Offline feed cache for the correlator; `None` disables correlation.
+    pub feeds_dir: Option<PathBuf>,
+    /// Directories searched for plugin executables named without a path.
+    pub plugin_dirs: Vec<PathBuf>,
+    /// Base for relative plugin manifest paths.
+    pub manifest_root: PathBuf,
+    /// Stream registration hook.
+    pub stream_sink: Option<StreamSink>,
+    /// Spectrum stream id.
+    pub spectrum_stream_id: String,
+}
+
+impl PipelineConfig {
+    /// A configuration with defaults for `data_dir` and `plan`.
+    pub fn new(data_dir: impl Into<PathBuf>, plan: ScanPlan) -> anyhow::Result<Self> {
+        let settings = PipelineSettings::from_plan(&plan)?;
+        let exe_dirs: Vec<PathBuf> = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(PathBuf::from))
+            .map(|d| {
+                let mut v = vec![d.clone()];
+                if let Some(parent) = d.parent() {
+                    v.push(parent.to_path_buf());
+                }
+                v
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            data_dir: data_dir.into(),
+            plan,
+            settings,
+            lossless: true,
+            drive_scheduler: false,
+            device_id: "sigmf-replay".into(),
+            source_class: ContentClass::FAIL_CLOSED,
+            feeds_dir: None,
+            plugin_dirs: exe_dirs,
+            manifest_root: default_manifest_root(),
+            stream_sink: None,
+            spectrum_stream_id: "spectrum/live".into(),
+        })
+    }
+}
+
+/// The repository root when run from the source tree (plugin manifests live in `plugins/`).
+pub fn default_manifest_root() -> PathBuf {
+    let from_build = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if from_build.join("plugins").is_dir() {
+        from_build
+    } else {
+        PathBuf::from(".")
+    }
+}
+
+/// A single-region plan covering `[center ± usable/2]` (for `hk replay` without `--plan`).
+pub fn replay_plan(center_hz: f64, sample_rate_hz: f64, t: Timestamp) -> ScanPlan {
+    let usable = sample_rate_hz * 0.9;
+    ScanPlan {
+        id: ScanPlanId::new(),
+        version: 1,
+        name: "replay".into(),
+        created_at: t,
+        regions: vec![PlanRegion {
+            freq: FreqRange::centered(center_hz, usable),
+            priority: 1.0,
+            revisit_ns: None,
+        }],
+        policy: ScanPolicy::SweepThenDwell,
+        gain_table: Vec::new(),
+        schedule: Schedule::Continuous,
+        extra: serde_json::json!({}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolution_follows_the_s4_geometry() {
+        let s = PipelineSettings::default();
+        assert_eq!(detection_resolution(20e6, &s), (4096, 10));
+        assert_eq!(detection_resolution(2.4e6, &s), (512, 10));
+        assert_eq!(detection_resolution(10e6, &s), (2048, 10));
+        assert_eq!(detection_resolution(500e3, &s), (512, 4));
+        assert_eq!(detection_resolution(200e3, &s), (512, 4));
+    }
+
+    #[test]
+    fn plan_extra_overrides_and_rejects_unknown_keys() {
+        let mut plan = replay_plan(100e6, 2.4e6, Timestamp::UNIX_EPOCH);
+        plan.extra = serde_json::json!({ "pipeline": { "fft_len": 1024, "ring_s": 2.0 } });
+        let s = PipelineSettings::from_plan(&plan).unwrap();
+        assert_eq!((s.fft_len, s.ring_s), (Some(1024), 2.0));
+        plan.extra = serde_json::json!({ "pipeline": { "bogus": 1 } });
+        assert!(PipelineSettings::from_plan(&plan).is_err());
+    }
+}

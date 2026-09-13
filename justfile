@@ -63,9 +63,9 @@ fixtures-fetch *args:
 fixtures-build-2026-09-13 *args:
     uv run --locked --project py python py/fixtures/build_2026_09_13.py {{args}}
 
-# Run a SigMF fixture through the pipeline (for now: parse + summarise the metadata)
-replay fixture:
-    cargo run -p hk-cli --bin hk -- replay "{{fixture}}"
+# Run a SigMF fixture once through the whole pipeline and print the run summary, e.g. `just replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --data-dir /tmp/hk`
+replay fixture *args:
+    cargo run -p hk-cli --bin hk -- replay "{{fixture}}" {{args}}
 
 # Sync the tree to $JETSON_HOST:~/hackriff and build on-device with CUDA kernels
 deploy-jetson:

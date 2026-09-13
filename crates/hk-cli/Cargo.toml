@@ -13,6 +13,8 @@ hk-api.workspace = true
 hk-core.workspace = true
 hk-dsp.workspace = true
 hk-model.workspace = true
+# T-027: `hk replay` and `hackriffd` run the composed pipeline.
+hk-pipeline.workspace = true
 hk-store.workspace = true
 num-complex.workspace = true
 serde_json.workspace = true

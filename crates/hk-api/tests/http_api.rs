@@ -403,6 +403,7 @@ fn unauthenticated_api_calls_are_rejected() {
             history: Some(Arc::new(Mutex::new(pyramid))),
             floor: None,
             inventory: None,
+            status: None,
         },
         Some(dist.0.clone()),
     );
