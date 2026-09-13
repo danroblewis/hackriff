@@ -309,7 +309,9 @@ tasks:
     dod: offline-first cache; Anomaly + Explanation objects; deterministic on frozen cache
   - id: T-021
     title: radiometry calibrated noise-floor product
-    status: in-progress
+    status: done
+    commit: "423945f (merged 84148da)"
+    followups: "strict slow-floor-under-bursts test #[ignore] until the T-005 gate-release fix merges - re-enable then; temperature/antenna-port calibration dependence not modelled; prune runs.tsv with pyramid budget; ITU-R P.372 coefficients unverified; one FloorProduct per STFT geometry"
     deps: [T-005, T-017]
     parallel_group: F
     use_cases: [SPACE-050]
