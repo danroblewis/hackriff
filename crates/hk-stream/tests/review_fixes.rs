@@ -319,22 +319,27 @@ fn p10_tail_drops_before_finish_get_a_marker() {
     assert!(handle.wait_closed(Duration::from_secs(5)));
     let bytes = buf.0.lock().unwrap().clone();
     let mut r = StreamReader::new(&bytes[..]);
-    let (mut next, mut markers) = (0u64, 0);
+    let (mut next, mut markers, mut last_was_marker) = (0u64, 0, false);
     while let Some(rec) = r.next_record().unwrap() {
         match rec {
             Record::Binary(b) => {
                 assert_eq!(b.header.seq, next);
                 next += 1;
+                last_was_marker = false;
             }
             Record::Dropped(d) => {
                 assert_eq!(d.first_seq, next);
                 next += d.count;
                 markers += 1;
+                last_was_marker = true;
             }
             other => panic!("{other:?}"),
         }
     }
-    assert_eq!(markers, 1, "the tail drop run is reported");
+    // The consumer thread may dequeue between an early drop and the final one, so the drops can
+    // split into more than one run; what matters is that the tail run is reported.
+    assert!(markers >= 1, "at least one drop run is reported");
+    assert!(last_was_marker, "the tail drop run is reported");
     assert_eq!(
         next, n,
         "every published seq is delivered or covered by a marker"
