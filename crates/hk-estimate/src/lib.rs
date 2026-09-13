@@ -59,11 +59,20 @@
 //! squares, harmonic-aware consensus), ranked candidates with ×½ / ×2 alternatives, a family
 //! label or [`Family::Unknown`] with [`BlindReason`]s, and the FSK deviation, which also feeds
 //! [`params::cfo_from_fsk_levels`]. Rate trust and family trust are separate gates.
+//!
+//! # C21 bit-framing inference (T-013)
+//!
+//! [`framing::infer_framing`] turns the hard bits of many bursts into a
+//! [`framing::FramingModel`] (preamble, sync word, polarity, bit order, whitening, length
+//! field, CRC id with its validate ratio, payload assessment) and per-burst frame records.
+//! Structure only; payload bits come out solely through `FramingResult::payload`, to be gated
+//! by the caller's content class.
 
 pub mod blind;
 pub mod clock;
 pub(crate) mod dsp;
 pub mod estimate;
+pub mod framing;
 pub mod normalise;
 pub mod params;
 pub mod snippet;
