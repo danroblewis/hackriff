@@ -3,7 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SeqTracker, audioHeaderProblem, parseRecord, parseText, type AudioHeader } from "../src/audio-frames";
 import { JitterBuffer } from "../src/jitter";
-import { listenQuery } from "../src/listen";
+import { clampBox, clickTarget, listenQuery, peakBinIndex, resolveTarget, selectionTarget, strongestInView } from "../src/listen";
+import { rowListenTarget } from "../src/inventory";
 
 function record(type: number, flags: number, seq: number, payload: Uint8Array, sampleIndex = 0): ArrayBuffer {
   const buf = new ArrayBuffer(32 + payload.length);
@@ -81,6 +82,98 @@ test("sequence gaps and drop markers are counted", () => {
 test("listen queries carry a target but never a mode", () => {
   assert.equal(listenQuery({ label: "x", emitter: "abc" }), "emitter=abc");
   assert.equal(listenQuery({ label: "x", f_lo: 101.2e6, f_hi: 101.4e6 }), "f_lo=101200000&f_hi=101400000");
+});
+
+// --- T-069: toolbar target selection and clamping -----------------------------------------------
+
+test("clampBox: inside stays put; off an edge shifts without changing width; wider than the range shrinks", () => {
+  assert.deepEqual(clampBox(10, 20, 0, 100), [10, 20], "already inside");
+  assert.deepEqual(clampBox(-5, 5, 0, 100), [0, 10], "off the left: shifted right, width kept");
+  assert.deepEqual(clampBox(95, 105, 0, 100), [90, 100], "off the right: shifted left, width kept");
+  assert.deepEqual(clampBox(-50, 150, 0, 100), [0, 100], "wider than the range: shrunk to fit");
+});
+
+test("clickTarget: ±25 kHz around the click, clamped to the view", () => {
+  assert.deepEqual(clickTarget(101.3e6, null), { f_lo: 101.275e6, f_hi: 101.325e6 }, "no view: unclamped");
+  assert.deepEqual(clickTarget(101.3e6, { loHz: 101.29e6, hiHz: 102e6 }),
+    { f_lo: 101.29e6, f_hi: 101.34e6 }, "clamped at the view's low edge, width kept");
+  assert.deepEqual(clickTarget(100e6, { loHz: 99e6, hiHz: 100.01e6 }, 25e3),
+    { f_lo: 99.96e6, f_hi: 100.01e6 }, "clamped at the view's high edge, width kept");
+});
+
+test("selectionTarget: kept as-is up to 1 MHz, else clamped around its centre", () => {
+  assert.deepEqual(selectionTarget({ f_lo: 101.2e6, f_hi: 101.4e6 }), { f_lo: 101.2e6, f_hi: 101.4e6 });
+  // Centre (100e6 + 103e6)/2 = 101.5e6; clamped to ±0.5 MHz around it.
+  assert.deepEqual(selectionTarget({ f_lo: 100e6, f_hi: 103e6 }), { f_lo: 101e6, f_hi: 102e6 });
+});
+
+test("peakBinIndex: the strongest finite bin within a range, else null", () => {
+  const row = [-90, -80, -95, -60, -70, -85];
+  assert.equal(peakBinIndex(row, 0, 6e6, 0, 6e6), 3, "whole row: bin 3 (-60)");
+  assert.equal(peakBinIndex(row, 0, 6e6, 0, 2e6), 1, "restricted to bins 0-1");
+  assert.equal(peakBinIndex([NaN, -Infinity], 0, 2e6, 0, 2e6), null, "nothing finite");
+  assert.equal(peakBinIndex([], 0, 1, 0, 1), null, "empty row");
+});
+
+test("strongestInView: boxes the peak by its local -10 dB width, capped at 200 kHz total", () => {
+  // 1000 bins over 10 MHz (10 kHz/bin): a peak at bin 500 with a narrow 1-bin-wide skirt each side.
+  const n = 1000, fullLo = 0, fullHi = 10e6, df = (fullHi - fullLo) / n;
+  const row = new Array(n).fill(-100);
+  row[500] = -50;
+  row[499] = -55; row[501] = -55; // within 10 dB of the peak; bins 498/502 (-100) are not
+  const box = strongestInView(row, fullLo, fullHi, fullLo, fullHi)!;
+  assert.ok(box);
+  assert.equal(box.hz, fullLo + 500.5 * df);
+  assert.deepEqual([box.f_lo, box.f_hi], [fullLo + 499 * df, fullLo + 502 * df], "boxed to the skirt (bins 499-501), not the whole band");
+
+  // A wide skirt (or a flat plateau) is capped at 200 kHz total, not left to grow to the view's edges.
+  const wide = new Array(n).fill(-100);
+  wide[500] = -50;
+  for (let d = 1; d <= 30; d++) { wide[500 - d] = -55; wide[500 + d] = -55; } // a 61-bin (610 kHz) skirt
+  const capped = strongestInView(wide, fullLo, fullHi, fullLo, fullHi)!;
+  assert.equal(capped.f_hi - capped.f_lo, 200e3, "capped at 200 kHz total");
+  assert.ok(capped.f_lo < capped.hz && capped.hz < capped.f_hi);
+
+  assert.equal(strongestInView(new Array(n).fill(NaN), fullLo, fullHi, fullLo, fullHi), null, "nothing finite: no target");
+});
+
+test("resolveTarget: click beats selection beats strongest-in-view; each short-circuits the rest", () => {
+  const noStrongest = () => { throw new Error("must not be called"); };
+
+  // 1. An emitter under the last click wins outright.
+  const clicked = resolveTarget({ click: { emitterId: "e1", hz: 101.2577e6 }, selections: [{ f_lo: 90e6, f_hi: 91e6 }], view: null, strongest: noStrongest });
+  assert.deepEqual(clicked, { source: "clicked", label: "101.2577 MHz (clicked)", emitter: "e1" });
+
+  // A click with no matched emitter falls back to a ±25 kHz box, clamped to the view.
+  const clickedBox = resolveTarget({ click: { emitterId: null, hz: 101.3e6 }, selections: [], view: { loHz: 101.29e6, hiHz: 102e6 }, strongest: noStrongest });
+  assert.deepEqual(clickedBox, { source: "clicked", label: "101.3000 MHz (clicked)", f_lo: 101.29e6, f_hi: 101.34e6 });
+
+  // 2. With no click, the most recent selection wins (clamped to 1 MHz around its centre:
+  // (100e6 + 103e6)/2 = 101.5e6, so ±0.5 MHz around that).
+  const sel = resolveTarget({
+    click: null,
+    selections: [{ f_lo: 88e6, f_hi: 89e6 }, { f_lo: 100e6, f_hi: 103e6 }],
+    view: null, strongest: noStrongest,
+  });
+  assert.deepEqual(sel, { source: "selection", label: "101.5000 MHz (selection)", f_lo: 101e6, f_hi: 102e6 });
+
+  // 3. With neither, the strongest signal in view.
+  const strong = resolveTarget({ click: null, selections: [], view: { loHz: 0, hiHz: 1 }, strongest: () => ({ hz: 5e6, f_lo: 4.9e6, f_hi: 5.1e6 }) });
+  assert.deepEqual(strong, { source: "strongest", label: "5.0000 MHz (strongest)", f_lo: 4.9e6, f_hi: 5.1e6 });
+
+  // Nothing at all: no target.
+  assert.equal(resolveTarget({ click: null, selections: [], view: null, strongest: () => null }), null);
+});
+
+test("an inventory row's Listen affordance (button or row click) targets its emitter id", () => {
+  const row = { id: "e-101p2577", f_center_hz: 101.2577e6 };
+  assert.deepEqual(rowListenTarget(row), { emitter: "e-101p2577", label: "101.2577 MHz" }, "the row's own Listen button");
+
+  // A row click opens the inspect panel for the row (Inspector.showKnown), which reports the same
+  // shape onShown gets from a canvas click-to-inspect: {emitterId: row.id, hz: row.f_center_hz}.
+  // The toolbar resolves that into the emitter target, exactly like the per-row button.
+  const fromClick = resolveTarget({ click: { emitterId: row.id, hz: row.f_center_hz }, selections: [], view: null, strongest: () => null });
+  assert.deepEqual(fromClick, { source: "clicked", label: "101.2577 MHz (clicked)", emitter: row.id });
 });
 
 const ramp = (n: number, start = 0) => Float32Array.from({ length: n }, (_, i) => start + i);

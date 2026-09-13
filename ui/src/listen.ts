@@ -1,11 +1,14 @@
-// Listen (T-043): click a signal → the server estimates mode, bandwidth, squelch and AGC and
-// streams audio over the authenticated `/ws/open/listen` WebSocket → Web Audio. There is no mode
-// control: the page shows what was chosen. Restricted classes are refused server-side; the
-// refusal reason is shown. Relative URLs (ws/wss follows the page), so it works through the
-// tunnel. Text goes in via textContent.
+// Listen (T-043, made discoverable in T-069): a toolbar above the waterfall picks a target (the
+// last click, else the most recent selection, else the strongest signal in view) and the server
+// estimates mode, bandwidth, squelch and AGC and streams audio over the authenticated
+// `/ws/open/listen` WebSocket -> Web Audio. There is no mode control: the page shows what was
+// chosen. Restricted classes are refused server-side; the refusal reason is shown in the status
+// line. Relative URLs (ws/wss follows the page), so it works through the tunnel. Text goes in via
+// textContent.
 import { fmtBandwidth } from "./axis";
 import { type AudioHeader, type AudioStatus, SeqTracker, audioHeaderProblem, parseRecord, parseText } from "./audio-frames";
 import { JitterBuffer, type JitterStats } from "./jitter";
+import type { SelectionStore } from "./selections";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -23,24 +26,102 @@ export function listenQuery(t: ListenTarget): string {
 /** Row shape the inspect panel reports (a subset of the inventory row). */
 export interface ShownEmitter { id: string; f_center_hz: number }
 
-/**
- * Wires Listen into the page: the inspect panel's Listen button (enabled once a click was
- * looked up) and a selection action. Returns the inspect-panel hook and the selection action.
- */
-export function installListen(token: string) {
-  const listener = new Listener(token);
-  let target: ListenTarget | null = null;
-  const button = $<HTMLButtonElement>("listen");
-  button.addEventListener("click", () => { if (target) listener.start(target); });
-  return {
-    onShown: (r: ShownEmitter | null, hz: number, half: number) => {
-      target = r ? { label: `emitter ${(r.f_center_hz / 1e6).toFixed(4)} MHz`, emitter: r.id }
-        : { label: `${(hz / 1e6).toFixed(4)} MHz`, f_lo: hz - half, f_hi: hz + half };
-      button.disabled = false;
-    },
-    selection: (s: { name: string; f_lo: number; f_hi: number }) => listener.start({ label: s.name, f_lo: s.f_lo, f_hi: s.f_hi }),
-  };
+// --- Toolbar target resolution (T-069), pure so it's unit-tested without a DOM -----------------
+
+/** A frequency window, Hz. */
+export interface Extent { loHz: number; hiHz: number }
+
+/** The signal last clicked or tapped (an emitter when the inspect lookup found one). */
+export interface ClickState { emitterId: string | null; hz: number }
+
+/** A peak found in the latest spectrum row. */
+export interface PeakBox { hz: number; f_lo: number; f_hi: number }
+
+/** Clamps [lo, hi] inside [min, max], shrinking it only if it doesn't already fit. */
+export function clampBox(lo: number, hi: number, min: number, max: number): [number, number] {
+  const w = Math.min(hi - lo, Math.max(0, max - min));
+  let l = Math.max(min, lo);
+  if (l + w > max) l = max - w;
+  return [l, l + w];
 }
+
+/** ±25 kHz around a clicked frequency, clamped to the current view. */
+export function clickTarget(hz: number, view: Extent | null, halfWidthHz = 25_000): { f_lo: number; f_hi: number } {
+  let lo = hz - halfWidthHz, hi = hz + halfWidthHz;
+  if (view) [lo, hi] = clampBox(lo, hi, view.loHz, view.hiHz);
+  return { f_lo: lo, f_hi: hi };
+}
+
+/** A selection's band, clamped to `maxSpanHz` around its centre if wider. */
+export function selectionTarget(s: { f_lo: number; f_hi: number }, maxSpanHz = 1_000_000): { f_lo: number; f_hi: number } {
+  if (s.f_hi - s.f_lo <= maxSpanHz) return { f_lo: s.f_lo, f_hi: s.f_hi };
+  const c = (s.f_lo + s.f_hi) / 2;
+  return { f_lo: c - maxSpanHz / 2, f_hi: c + maxSpanHz / 2 };
+}
+
+/** The bin with the highest finite value inside [loHz, hiHz] of a row spanning [fullLoHz, fullHiHz]; null if none. */
+export function peakBinIndex(row: ArrayLike<number>, fullLoHz: number, fullHiHz: number, loHz: number, hiHz: number): number | null {
+  const n = row.length;
+  if (!(n > 0) || !(fullHiHz > fullLoHz)) return null;
+  const toIdx = (hz: number) => ((hz - fullLoHz) / (fullHiHz - fullLoHz)) * n;
+  const i0 = Math.max(0, Math.floor(toIdx(Math.min(loHz, hiHz)))), i1 = Math.min(n - 1, Math.ceil(toIdx(Math.max(loHz, hiHz))));
+  let best = -1, bestV = -Infinity;
+  for (let i = i0; i <= i1; i++) {
+    const v = row[i];
+    if (Number.isFinite(v) && v > bestV) { bestV = v; best = i; }
+  }
+  return best < 0 ? null : best;
+}
+
+/**
+ * The strongest signal in view: the peak bin of the latest spectrum row within [loHz, hiHz] of a
+ * row spanning [fullLoHz, fullHiHz], then a box from its local `dropDb` width, at most
+ * `maxHalfHz` either side of the peak (200 kHz total by default).
+ */
+export function strongestInView(row: ArrayLike<number>, fullLoHz: number, fullHiHz: number, loHz: number, hiHz: number,
+  dropDb = 10, maxHalfHz = 100_000): PeakBox | null {
+  const peak = peakBinIndex(row, fullLoHz, fullHiHz, loHz, hiHz);
+  if (peak === null) return null;
+  const n = row.length, df = (fullHiHz - fullLoHz) / n, peakDb = row[peak];
+  const maxSteps = Math.max(1, Math.ceil(maxHalfHz / df));
+  let lo = peak, hi = peak;
+  while (lo > 0 && peak - lo < maxSteps && Number.isFinite(row[lo - 1]) && row[lo - 1] >= peakDb - dropDb) lo--;
+  while (hi < n - 1 && hi - peak < maxSteps && Number.isFinite(row[hi + 1]) && row[hi + 1] >= peakDb - dropDb) hi++;
+  const hz = fullLoHz + (peak + 0.5) * df;
+  const half = Math.min(maxHalfHz, Math.max(hz - (fullLoHz + lo * df), fullLoHz + (hi + 1) * df - hz, df / 2));
+  return { hz, f_lo: Math.max(fullLoHz, hz - half), f_hi: Math.min(fullHiHz, hz + half) };
+}
+
+export type TargetSource = "clicked" | "selection" | "strongest";
+export type ResolvedTarget = ListenTarget & { source: TargetSource };
+
+const mhz = (hz: number) => (hz / 1e6).toFixed(4);
+
+/** Chooses what the toolbar's Listen button would listen to: the last click, else the most
+ * recent selection (clamped to 1 MHz), else the strongest signal in view. Null with none of those. */
+export function resolveTarget(input: {
+  click: ClickState | null;
+  selections: readonly { f_lo: number; f_hi: number }[];
+  view: Extent | null;
+  strongest: () => PeakBox | null;
+}): ResolvedTarget | null {
+  const c = input.click;
+  if (c) {
+    if (c.emitterId) return { source: "clicked", label: `${mhz(c.hz)} MHz (clicked)`, emitter: c.emitterId };
+    const box = clickTarget(c.hz, input.view);
+    return { source: "clicked", label: `${mhz(c.hz)} MHz (clicked)`, f_lo: box.f_lo, f_hi: box.f_hi };
+  }
+  if (input.selections.length) {
+    const s = input.selections[input.selections.length - 1];
+    const box = selectionTarget(s);
+    return { source: "selection", label: `${mhz((box.f_lo + box.f_hi) / 2)} MHz (selection)`, f_lo: box.f_lo, f_hi: box.f_hi };
+  }
+  const p = input.strongest();
+  if (p) return { source: "strongest", label: `${mhz(p.hz)} MHz (strongest)`, f_lo: p.f_lo, f_hi: p.f_hi };
+  return null;
+}
+
+// --- Playback (unchanged from T-043) ------------------------------------------------------------
 
 type Output = { node: AudioNode; post: (pcm: Float32Array) => void; reset: () => void; stats: () => JitterStats | null };
 
@@ -55,10 +136,21 @@ export class Listener {
   private workletStats: JitterStats | null = null;
   private timer = 0;
   private note = "";
+  private _active = false;
+  /** Called whenever [[active]] changes (T-069: drives the toolbar's Listen/Stop button and hint). */
+  onActiveChange: (active: boolean) => void = () => {};
 
   constructor(private token: string) {
-    $("player-stop").addEventListener("click", () => this.stop("stopped"));
     $<HTMLInputElement>("player-volume").addEventListener("input", () => this.applyVolume());
+  }
+
+  /** Whether a listen session is starting or playing (a socket is open). */
+  get active(): boolean { return this._active; }
+
+  private setActive(a: boolean) {
+    if (a === this._active) return;
+    this._active = a;
+    this.onActiveChange(a);
   }
 
   /** Starts listening. Call from the click/tap handler: the AudioContext is created and resumed
@@ -73,7 +165,7 @@ export class Listener {
     }
     void this.ctx.resume();
     this.applyVolume();
-    $("player").hidden = false;
+    this.setActive(true);
     $("player-target").textContent = target.label;
     this.note = "estimating mode…";
     this.render();
@@ -91,6 +183,7 @@ export class Listener {
     this.header = null;
     this.status = null;
     this.seq = new SeqTracker();
+    this.setActive(false);
     if (note) { this.note = note; this.render(); clearInterval(this.timer); }
   }
 
@@ -155,6 +248,7 @@ export class Listener {
     ws.onclose = (ev) => {
       if (this.ws !== ws) return;
       this.ws = null;
+      this.setActive(false);
       if (ev.code >= 4000 && !this.note.startsWith("refused")) this.note = `refused (${ev.code - 4000}): ${ev.reason}`;
       else if (!this.note.startsWith("refused")) this.note = this.header ? "stream ended" : "could not start";
       this.header = null;
@@ -185,4 +279,77 @@ export class Listener {
     }
     $("player-status").textContent = parts.join(" · ");
   }
+}
+
+// --- Wiring (T-069: toolbar + inspect-panel button + selection/inventory actions) ---------------
+
+export interface ListenHooks {
+  selections: SelectionStore;
+  /** The current view (Hz), or null before the first stream header. */
+  view: () => Extent | null;
+  /** The strongest signal in the current view, from the client-side spectrum row; null if none. */
+  strongest: () => PeakBox | null;
+}
+
+/**
+ * Wires Listen into the page: the always-visible toolbar above the waterfall (target resolution,
+ * Listen/Stop, hint), the inspect panel's own Listen button (the exact clicked/inspected target),
+ * and the selection and inventory-row actions. Returns the inspect-panel hook and those actions.
+ */
+export function installListen(token: string, hooks: ListenHooks) {
+  const listener = new Listener(token);
+  let click: ClickState | null = null;
+
+  // The inspect panel's own button: listens to exactly what's shown there.
+  let inspectTarget: ListenTarget | null = null;
+  const inspectButton = $<HTMLButtonElement>("listen");
+  inspectButton.addEventListener("click", () => { if (inspectTarget) listener.start(inspectTarget); });
+
+  // The toolbar: resolves a target from click > selection > strongest-in-view.
+  const goButton = $<HTMLButtonElement>("listen-go");
+  const targetLabel = $("player-target");
+  const hint = $("listen-hint");
+  const resolve = () => resolveTarget({ click, selections: hooks.selections.list(), view: hooks.view(), strongest: hooks.strongest });
+
+  const refreshLabel = () => {
+    if (listener.active) return; // playing: start() already set the label to the locked-in target
+    const t = resolve();
+    targetLabel.textContent = t ? t.label : "no signal chosen";
+    goButton.textContent = "Listen";
+    goButton.disabled = !t;
+  };
+
+  goButton.addEventListener("click", () => {
+    if (listener.active) { listener.stop(); return; }
+    const t = resolve();
+    if (t) listener.start(t);
+  });
+
+  listener.onActiveChange = (active) => {
+    goButton.textContent = active ? "Stop" : "Listen";
+    goButton.disabled = false;
+    hint.hidden = active;
+    if (!active) refreshLabel();
+  };
+
+  hooks.selections.subscribe(refreshLabel);
+  refreshLabel();
+  window.setInterval(refreshLabel, 1000); // catches the view panning/zooming while idle
+
+  return {
+    /** From the inspect panel (T-044 click-to-inspect, plus T-069 inventory-row inspect): the
+     * emitter shown (null if none) and the clicked frequency. Becomes the toolbar's top-priority
+     * target too. */
+    onShown: (r: ShownEmitter | null, hz: number, half: number) => {
+      click = { emitterId: r ? r.id : null, hz };
+      inspectTarget = r ? { label: `emitter ${(r.f_center_hz / 1e6).toFixed(4)} MHz`, emitter: r.id }
+        : { label: `${(hz / 1e6).toFixed(4)} MHz`, f_lo: hz - half, f_hi: hz + half };
+      inspectButton.disabled = false;
+      refreshLabel();
+    },
+    /** A selection's own Listen action. */
+    selection: (s: { name: string; f_lo: number; f_hi: number }) => listener.start({ label: s.name, f_lo: s.f_lo, f_hi: s.f_hi }),
+    /** An inventory row's own Listen button: listens by emitter id directly. */
+    rowListen: (id: string, label: string) => listener.start({ label, emitter: id }),
+  };
 }
