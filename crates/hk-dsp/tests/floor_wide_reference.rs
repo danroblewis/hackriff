@@ -252,3 +252,56 @@ fn real_urban_capture_wide_reference_matches_the_integrated_floor() {
     );
     assert!(level[level.len() / 20] > -1.0 && low < 0.05);
 }
+
+#[test]
+fn notch_removal_and_insertion_recover_within_one_second() {
+    let flat = vec![1.0f32; BINS];
+    let t3 = FloorThreshold::single(10.0, 1e-3).on as f32;
+    for (k, (name, removed)) in [
+        ("-20 dB notch removed at 5 s", true),
+        ("sharp -20 dB notch inserted at 5 s", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut src = GammaFrames::new(BINS, 10, provenance(100e6, 2e6), 400 + k as u64);
+        let mut tracker = NoiseFloorTracker::new(FloorConfig::default()).unwrap();
+        let n = if removed {
+            notch(1800, 2300, 128)
+        } else {
+            notch(1800, 2300, 1)
+        };
+        let period = src.frame_period_s();
+        let mut frame = src.empty_frame();
+        // [window [5, 6) s, window [6, 9) s] × [notch region, whole band]: (hits, cells).
+        let mut win = [[(0u64, 0u64); 2]; 2];
+        for k in 0..(9.0 / period) as usize {
+            let t = k as f64 * period;
+            let profile = if (t < 5.0) == removed { &n } else { &flat };
+            src.fill(&mut frame, profile, Discontinuity::NONE);
+            let f = tracker.update(&frame, |_| {});
+            if t < 5.0 {
+                continue;
+            }
+            let w = usize::from(t >= 6.0);
+            for (r, range) in [1672..2428usize, 0..BINS].into_iter().enumerate() {
+                for i in range {
+                    win[w][r].0 += u64::from(frame.spectrum.psd[i] > t3 * f.wide_floor[i]);
+                    win[w][r].1 += 1;
+                }
+            }
+        }
+        let ratio = |(h, c): (u64, u64)| h as f64 / c as f64 / 1e-3;
+        eprintln!(
+            "{name}: wide floor-branch Pfa / design at 1e-3: first second notch {:.1}, band {:.1}; 1-4 s later notch {:.2}, band {:.2}",
+            ratio(win[0][0]),
+            ratio(win[0][1]),
+            ratio(win[1][0]),
+            ratio(win[1][1])
+        );
+        assert!(
+            ratio(win[1][0]) <= 1.5 && ratio(win[1][1]) <= 1.5,
+            "{name}: the shape has not caught up within 1 s"
+        );
+    }
+}

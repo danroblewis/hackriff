@@ -31,6 +31,8 @@ pub(crate) struct Timing {
     /// EMA factor of a block's recent level (time constant 0.1 s).
     pub recent: f32,
     pub rebaseline: Option<u64>,
+    /// Hit frames (below −threshold) a fall needs in its last `confirm` frames.
+    pub fall_hits: u64,
 }
 
 impl Default for Timing {
@@ -45,6 +47,7 @@ impl Default for Timing {
             ema: 1.0,
             recent: 1.0,
             rebaseline: None,
+            fall_hits: 1,
         }
     }
 }
@@ -94,6 +97,10 @@ struct Run {
     n_d: u64,
     sum_sk: f64,
     sk_n: u64,
+    /// Fall: hit frames among the last `confirm` frames (the engine's ring holds their excess).
+    win_hits: u64,
+    /// Fall: level set at confirmation (quantile of all window frames).
+    fall_level: f32,
 }
 
 impl Run {
@@ -115,6 +122,8 @@ impl Run {
             n_d: 0,
             sum_sk: 0.0,
             sk_n: 0,
+            win_hits: 0,
+            fall_level: 0.0,
         }
     }
 
@@ -128,32 +137,55 @@ impl Run {
         }
     }
 
-    /// Mean level over the levelled frames (all non-impulsive frames of a rise, hit frames of a
-    /// fall).
+    /// A rise: mean level over its non-impulsive frames. A fall: the level set at confirmation
+    /// (see [`Engine::confirm_falls`]).
     fn level(&self) -> f32 {
-        if self.level_n > 0 {
+        if self.dir < 0 && self.fall_level > 0.0 {
+            self.fall_level
+        } else if self.level_n > 0 {
             (self.level_sum / self.level_n as f64) as f32
         } else {
             self.base
         }
     }
 
-    fn hit_fraction(&self) -> f64 {
-        self.hits as f64 / self.frames.max(1) as f64
+    /// Fall: fraction of hit frames over the last `cap` frames.
+    fn hit_fraction(&self, cap: usize) -> f64 {
+        self.win_hits as f64 / self.frames.min(cap as u64).max(1) as f64
     }
 
-    /// The run's recent excess is beyond the threshold in its direction.
-    fn beyond(&self, thr: f32) -> bool {
-        self.level_n > 0
-            && if self.dir > 0 {
-                self.ema >= thr
-            } else {
-                self.ema <= -thr
-            }
+    /// A rise whose recent excess is beyond the threshold, or a fall with a majority of hit
+    /// frames in its window: it looks like a confirming change (blocks slow-floor adoption).
+    fn beyond(&self, thr: f32, cap: usize) -> bool {
+        if self.dir > 0 {
+            self.level_n > 0 && self.ema >= thr
+        } else {
+            self.dir < 0 && self.frames > 0 && 2 * self.win_hits >= self.frames.min(cap as u64)
+        }
     }
 
-    fn confirmable(&self, confirm: u64, thr: f32) -> bool {
-        self.dir != 0 && self.frames >= confirm && self.beyond(thr)
+    fn confirmable(&self, t: &Timing, thr: f32) -> bool {
+        match self.dir {
+            1 => self.frames >= t.confirm && self.beyond(thr, t.confirm as usize),
+            -1 => self.frames >= t.confirm && self.win_hits >= t.fall_hits,
+            _ => false,
+        }
+    }
+
+    /// Fall: records this frame's excess in the block's ring (`ring.len()` = window).
+    fn record(&mut self, ring: &mut [f32], e: f32, thr: f32) {
+        let cap = ring.len();
+        if cap == 0 || self.frames == 0 {
+            return;
+        }
+        let slot = ((self.frames - 1) % cap as u64) as usize;
+        if self.frames > cap as u64 && ring[slot] < -thr {
+            self.win_hits -= 1;
+        }
+        ring[slot] = e;
+        if e < -thr {
+            self.win_hits += 1;
+        }
     }
 
     /// Variance of the first differences of the excess, dB² (= 2 σ² for white excess noise;
@@ -285,6 +317,10 @@ struct Block {
     ret_used: u64,
     /// Reference carried across a comparable reset.
     carry: f32,
+    /// Member: onset of the run it joined with.
+    onset: Stamp,
+    /// Scratch: a member of the surviving episode before a group joined.
+    mark: bool,
 }
 
 impl Block {
@@ -304,6 +340,8 @@ impl Block {
             ret_sum: 0.0,
             ret_used: 0,
             carry: 1.0,
+            onset: (0, t),
+            mark: false,
         }
     }
 
@@ -422,6 +460,7 @@ impl Episode {
             class: self.class,
             end_reason,
             merged_into,
+            split_from: None,
             interrupted,
             onset_seq: onset.0,
             onset_t: onset.1,
@@ -456,8 +495,6 @@ impl Episode {
 /// Summary of the new blocks of a confirmed group.
 struct Group {
     onset: Stamp,
-    lo: usize,
-    hi: usize,
     baseline_db: f32,
     level_db: f32,
     excess_std_db: f32,
@@ -538,9 +575,29 @@ pub(crate) struct Engine {
     s1: Vec<f32>,
     s2: Vec<f32>,
     prev: Vec<f32>,
+    /// Per block, the excess of a pending fall's last `cap` frames (dB).
+    ring: Vec<f32>,
+    cap: usize,
+    ring_scratch: Vec<f32>,
 }
 
 impl Engine {
+    /// Sizes the fall window to `cap` frames per block (at a segment start; allocates only when
+    /// the window grows).
+    pub(crate) fn set_window(&mut self, cap: usize) {
+        if cap != self.cap {
+            let nb = self.blocks.len();
+            self.cap = cap;
+            self.ring.resize(nb * cap, 0.0);
+            self.ring_scratch.resize(cap, 0.0);
+            for blk in &mut self.blocks {
+                if blk.run.dir < 0 {
+                    blk.run.dir = 0;
+                }
+            }
+        }
+    }
+
     /// Sizes for `nb` blocks, dropping all state.
     pub(crate) fn resize(&mut self, nb: usize, t: SampleTime, gain: GainKey) {
         self.blocks.clear();
@@ -550,6 +607,7 @@ impl Engine {
         self.s1.resize(nb, 0.0);
         self.s2.resize(nb, 0.0);
         self.prev.resize(nb, 0.0);
+        self.cap = 0;
         self.ready = false;
         self.carry_pending = false;
         self.drift = 0.0;
@@ -716,39 +774,7 @@ impl Engine {
                     continue;
                 }
                 self.episodes[i].suspended = false;
-                let before = self.episodes[i].bins.clone();
-                self.summarize(i, fr.layout, fr.spectrum);
-                let ep = &self.episodes[i];
-                if ep.members == 0 {
-                    self.episodes[i].active = false;
-                    stats.episode_ends += 1;
-                    let ep = &self.episodes[i];
-                    if ep.emitted {
-                        let ev = ep.event(
-                            FloorEventKind::End,
-                            reset_at,
-                            &fr.ev,
-                            before,
-                            Some(EndReason::Reset),
-                            None,
-                            false,
-                        );
-                        on_event(&ev);
-                    }
-                } else if ep.leave_n > 0 && ep.emitted {
-                    let change = region_bins(fr.layout, ep.leave_lo, ep.leave_hi);
-                    let ev = ep.event(
-                        FloorEventKind::Update,
-                        reset_at,
-                        &fr.ev,
-                        change,
-                        None,
-                        None,
-                        false,
-                    );
-                    on_event(&ev);
-                    stats.update_events += 1;
-                }
+                self.settle_leaves(i, reset_at, EndReason::Reset, fr, stats, on_event);
             }
             self.carry_pending = false;
             self.reset_at = None;
@@ -774,9 +800,14 @@ impl Engine {
                 let j0 = w - c;
                 let counter = |j: usize| fr.counter.saturating_sub((w - 1 - j) as u64);
                 let mut r = Run::start(dir, s, stamps[j0], counter(j0));
+                let cap = self.cap;
                 for j in j0..w {
                     let v = warm[j * nb + b];
-                    r.push(db_ratio(v, s), v, false, None, counter(j), thr, timing);
+                    let e = db_ratio(v, s);
+                    r.push(e, v, false, None, counter(j), thr, timing);
+                    if dir < 0 {
+                        r.record(&mut self.ring[b * cap..(b + 1) * cap], e, thr);
+                    }
                 }
                 self.blocks[b].run = r;
                 break;
@@ -835,6 +866,8 @@ impl Engine {
         let end_thr = cfg.end_threshold_db as f32;
         let f = fr.floor[b];
         let sk = block_sk(&fr.spectrum.sk, fr.layout.range(b));
+        let cap = self.cap;
+        let ring = &mut self.ring[b * cap..(b + 1) * cap];
         let blk = &mut self.blocks[b];
         let mut r = blk.run;
         if r.dir != 0 {
@@ -846,6 +879,9 @@ impl Engine {
             };
             if keep {
                 r.push(e, f, fr.impulsive, sk, fr.counter, thr, timing);
+                if r.dir < 0 {
+                    r.record(ring, e, thr);
+                }
             } else {
                 r.dir = 0;
             }
@@ -860,9 +896,10 @@ impl Engine {
             } else if ed < -thr {
                 r = Run::start(-1, hi, fr.ev.now, fr.counter);
                 r.push(ed, f, fr.impulsive, sk, fr.counter, thr, timing);
+                r.record(ring, ed, thr);
             }
         }
-        let blocked = r.dir != 0 && r.beyond(thr);
+        let blocked = r.dir != 0 && r.beyond(thr, cap);
         let (frozen, adopted) = settle_step(
             &mut blk.settle,
             f,
@@ -1006,39 +1043,139 @@ impl Engine {
             if !self.episodes[i].active || self.episodes[i].leave_n == 0 {
                 continue;
             }
-            let before = self.episodes[i].bins.clone();
-            self.summarize(i, fr.layout, fr.spectrum);
+            let onset = self.episodes[i].leave_onset;
+            self.settle_leaves(i, onset, EndReason::Returned, fr, stats, on_event);
+        }
+    }
+
+    /// After blocks left episode `i` (returned, or not restored after a comparable reset): `End`
+    /// when no member remains; otherwise split disconnected parts off (each a `Rise` with
+    /// `split_from`) and `Update` the rest to its real extent.
+    fn settle_leaves(
+        &mut self,
+        i: usize,
+        onset: Stamp,
+        reason: EndReason,
+        fr: &Frame,
+        stats: &mut FloorStats,
+        on_event: &mut impl FnMut(&FloorEvent),
+    ) {
+        let before = self.episodes[i].bins.clone();
+        self.summarize(i, fr.layout, fr.spectrum);
+        if self.episodes[i].members == 0 {
+            self.episodes[i].active = false;
+            stats.episode_ends += 1;
             let ep = &self.episodes[i];
-            if ep.members == 0 {
-                stats.episode_ends += 1;
-                if ep.emitted {
-                    let ev = ep.event(
-                        FloorEventKind::End,
-                        ep.leave_onset,
-                        &fr.ev,
-                        before,
-                        Some(EndReason::Returned),
-                        None,
-                        false,
-                    );
-                    on_event(&ev);
-                }
-                self.episodes[i].active = false;
-            } else if ep.emitted {
-                let change = region_bins(fr.layout, ep.leave_lo, ep.leave_hi);
+            if ep.emitted {
                 let ev = ep.event(
-                    FloorEventKind::Update,
-                    ep.leave_onset,
+                    FloorEventKind::End,
+                    onset,
                     &fr.ev,
-                    change,
-                    None,
+                    before,
+                    Some(reason),
                     None,
                     false,
                 );
                 on_event(&ev);
-                stats.update_events += 1;
+            }
+            return;
+        }
+        if self.episodes[i].leave_n == 0 {
+            return;
+        }
+        self.split(i, fr, stats, on_event);
+        let ep = &self.episodes[i];
+        if ep.emitted {
+            let change = region_bins(fr.layout, ep.leave_lo, ep.leave_hi);
+            let ev = ep.event(
+                FloorEventKind::Update,
+                onset,
+                &fr.ev,
+                change,
+                None,
+                None,
+                false,
+            );
+            on_event(&ev);
+            stats.update_events += 1;
+        }
+    }
+
+    /// Splits episode `i` when its members are no longer contiguous: the largest run keeps the
+    /// id, every other run becomes a new episode (same class, onset and rebaseline clock)
+    /// announced by a `Rise` with `split_from`. One physical region, one open episode.
+    fn split(
+        &mut self,
+        i: usize,
+        fr: &Frame,
+        stats: &mut FloorStats,
+        on_event: &mut impl FnMut(&FloorEvent),
+    ) {
+        let nb = self.blocks.len();
+        let (mut runs, mut best) = (0usize, (0usize, 0usize));
+        let mut b = 0;
+        while b < nb {
+            if self.blocks[b].member != Some(i) {
+                b += 1;
+                continue;
+            }
+            let s = b;
+            while b < nb && self.blocks[b].member == Some(i) {
+                b += 1;
+            }
+            runs += 1;
+            if b - s > best.1 - best.0 {
+                best = (s, b);
             }
         }
+        if runs < 2 {
+            return;
+        }
+        let parent = self.episodes[i].id;
+        let mut b = 0;
+        while b < nb {
+            if self.blocks[b].member != Some(i) || (best.0..best.1).contains(&b) {
+                b += 1;
+                continue;
+            }
+            let s = b;
+            while b < nb && self.blocks[b].member == Some(i) {
+                b += 1;
+            }
+            let j = self
+                .episodes
+                .iter()
+                .position(|e| !e.active)
+                .expect("one slot per block");
+            let mut child = self.episodes[i].clone();
+            child.id = self.next_id;
+            self.next_id += 1;
+            child.leave_n = 0;
+            child.leave_lo = usize::MAX;
+            child.leave_hi = 0;
+            self.episodes[j] = child;
+            for blk in &mut self.blocks[s..b] {
+                blk.member = Some(j);
+            }
+            self.summarize(j, fr.layout, fr.spectrum);
+            stats.splits += 1;
+            let ep = &self.episodes[j];
+            if ep.emitted {
+                let mut ev = ep.event(
+                    FloorEventKind::Rise,
+                    ep.onset,
+                    &fr.ev,
+                    ep.bins.clone(),
+                    None,
+                    None,
+                    false,
+                );
+                ev.split_from = Some(parent);
+                on_event(&ev);
+                stats.rise_events += 1;
+            }
+        }
+        self.summarize(i, fr.layout, fr.spectrum);
     }
 
     /// Statistics of the non-member blocks of `range` with a run in direction `dir`.
@@ -1050,7 +1187,7 @@ impl Engine {
         cfg: &FloorChangeConfig,
         timing: &Timing,
     ) -> Group {
-        let (mut k, mut lo, mut hi) = (0usize, usize::MAX, 0usize);
+        let mut k = 0usize;
         let mut onset: Option<Stamp> = None;
         let (mut var, mut n_var, mut used, mut sk_s, mut sk_n) = (0.0f64, 0u32, 0u64, 0.0f64, 0u64);
         for b in range {
@@ -1062,8 +1199,6 @@ impl Engine {
             self.s1[k] = r.base;
             self.s2[k] = r.level();
             k += 1;
-            lo = lo.min(b);
-            hi = b + 1;
             if onset.is_none_or(|o| r.onset.0 < o.0) {
                 onset = Some(r.onset);
             }
@@ -1089,8 +1224,6 @@ impl Engine {
         let baseline_db = db(baseline);
         Group {
             onset: onset.unwrap_or(fr.ev.now),
-            lo,
-            hi,
             baseline_db,
             level_db: db(level),
             excess_std_db: excess_std as f32,
@@ -1117,7 +1250,7 @@ impl Engine {
         let seed = |blk: &Block| {
             blk.member.is_none()
                 && blk.run.dir > 0
-                && blk.run.confirmable(timing.confirm, thr)
+                && blk.run.confirmable(timing, thr)
                 && fr.counter >= blk.holdoff_until
         };
         if !self.blocks.iter().any(seed) {
@@ -1155,18 +1288,27 @@ impl Engine {
     ) {
         let g = self.group(range.clone(), 1, fr, cfg, timing);
         let emittable = g.class != FloorChangeClass::Structured || cfg.emit_structured;
-        // The surviving episode: the oldest emitted one touched, else the oldest touched.
+        // The surviving episode among those touched: a noise-like one before an unverified one
+        // before a structured one (so the episode consumers accept keeps its identity), then an
+        // emitted one, then the oldest.
+        let rank = |e: &Episode| {
+            let class = match e.class {
+                FloorChangeClass::NoiseLike => 2,
+                FloorChangeClass::Unverified => 1,
+                FloorChangeClass::Structured => 0,
+            };
+            (class, e.emitted, std::cmp::Reverse(e.id))
+        };
         let mut survivor: Option<usize> = None;
         for b in range.clone() {
             if let Some(i) = self.blocks[b].member {
-                let better = survivor.is_none_or(|s| {
-                    let (e, c) = (&self.episodes[i], &self.episodes[s]);
-                    (e.emitted, std::cmp::Reverse(e.id)) > (c.emitted, std::cmp::Reverse(c.id))
-                });
-                if better {
+                if survivor.is_none_or(|s| rank(&self.episodes[i]) > rank(&self.episodes[s])) {
                     survivor = Some(i);
                 }
             }
+        }
+        for blk in &mut self.blocks {
+            blk.mark = survivor.is_some() && blk.member == survivor;
         }
         let i = match survivor {
             Some(s) => {
@@ -1244,6 +1386,7 @@ impl Engine {
             }
             let r = blk.run;
             blk.member = Some(i);
+            blk.onset = r.onset;
             blk.base = r.base;
             blk.g0 = self.drift;
             blk.recent = if r.level_n > 0 { r.recent } else { fr.floor[b] };
@@ -1254,11 +1397,43 @@ impl Engine {
             }
         }
         self.summarize(i, fr.layout, fr.spectrum);
-        let change = region_bins(fr.layout, g.lo, g.hi);
+        if survivor.is_some() && self.episodes[i].emitted {
+            // One Extend per contiguous run of added blocks (new and absorbed), so a region
+            // widening on both sides reports only what it added.
+            let nb = self.blocks.len();
+            let mut b = 0;
+            while b < nb {
+                let added = |blk: &Block| blk.member == Some(i) && !blk.mark;
+                if !added(&self.blocks[b]) {
+                    b += 1;
+                    continue;
+                }
+                let s = b;
+                let mut onset = self.blocks[b].onset;
+                while b < nb && added(&self.blocks[b]) {
+                    if self.blocks[b].onset.0 < onset.0 {
+                        onset = self.blocks[b].onset;
+                    }
+                    b += 1;
+                }
+                let ep = &mut self.episodes[i];
+                ep.peak_step_db = ep.peak_step_db.max(ep.step_db);
+                let ev = ep.event(
+                    FloorEventKind::Extend,
+                    onset,
+                    &fr.ev,
+                    region_bins(fr.layout, s, b),
+                    None,
+                    None,
+                    false,
+                );
+                on_event(&ev);
+                stats.extend_events += 1;
+            }
+            return;
+        }
         let ep = &mut self.episodes[i];
-        let kind = if survivor.is_some() && ep.emitted {
-            FloorEventKind::Extend
-        } else if !ep.emitted && emittable {
+        let kind = if !ep.emitted && emittable {
             ep.emitted = true;
             if survivor.is_some() {
                 ep.class = g.class;
@@ -1278,17 +1453,9 @@ impl Engine {
             g.onset
         };
         ep.peak_step_db = ep.peak_step_db.max(ep.step_db);
-        let change = if kind == FloorEventKind::Rise {
-            ep.bins.clone()
-        } else {
-            change
-        };
-        let ev = ep.event(kind, onset, &fr.ev, change, None, None, false);
+        let ev = ep.event(kind, onset, &fr.ev, ep.bins.clone(), None, None, false);
         on_event(&ev);
-        match kind {
-            FloorEventKind::Rise => stats.rise_events += 1,
-            _ => stats.extend_events += 1,
-        }
+        stats.rise_events += 1;
     }
 
     fn confirm_falls(
@@ -1305,9 +1472,10 @@ impl Engine {
         let seed = |blk: &Block| {
             blk.member.is_none()
                 && blk.run.dir < 0
-                && blk.run.confirmable(timing.confirm, thr)
+                && blk.run.confirmable(timing, thr)
                 && fr.counter >= blk.holdoff_until
         };
+        let cap = self.cap;
         if !self.blocks.iter().any(seed) {
             return;
         }
@@ -1328,26 +1496,52 @@ impl Engine {
                 continue;
             }
             let (seg_start, seg_end) = (start, b);
+            // Each block's level: the `hit_fraction/2` quantile of all its window frames (the
+            // median of a clean fall; the middle of the low frames of an interrupted one, never
+            // an average of the low frames alone).
+            for j in seg_start..seg_end {
+                let r = self.blocks[j].run;
+                let n = r.frames.min(cap as u64) as usize;
+                if n == 0 {
+                    continue;
+                }
+                let scratch = &mut self.ring_scratch[..n];
+                scratch.copy_from_slice(&self.ring[j * cap..j * cap + n]);
+                let k = ((n - 1) as f64 * 0.5 * r.hit_fraction(cap)).round() as usize;
+                let (_, &mut e, _) = scratch.select_nth_unstable_by(k, f32::total_cmp);
+                self.blocks[j].run.fall_level = r.base * 10f32.powf(e / 10.0);
+            }
             let mut end = b;
             // Edge blocks with few hit frames relative to the group (partly covered by the
             // change, flickering across the threshold) do not vote on `interrupted` or set the
             // level; they still fall with the group.
             let k = end - start;
             for (j, v) in self.s1[..k].iter_mut().enumerate() {
-                *v = self.blocks[start + j].run.hit_fraction() as f32;
+                *v = self.blocks[start + j].run.hit_fraction(cap) as f32;
             }
             let min_hit = cfg.edge_hit_fraction as f32 * median_in_place(&mut self.s1[..k]);
-            while start + 1 < end && (self.blocks[start].run.hit_fraction() as f32) < min_hit {
+            while start + 1 < end && (self.blocks[start].run.hit_fraction(cap) as f32) < min_hit {
                 start += 1;
             }
-            while end > start + 1 && (self.blocks[end - 1].run.hit_fraction() as f32) < min_hit {
+            while end > start + 1 && (self.blocks[end - 1].run.hit_fraction(cap) as f32) < min_hit {
                 end -= 1;
             }
             let interrupted_blocks = self.blocks[start..end]
                 .iter()
-                .filter(|blk| blk.run.hit_fraction() < cfg.fall_hit_fraction)
+                .filter(|blk| blk.run.hit_fraction(cap) < cfg.fall_hit_fraction)
                 .count();
             let interrupted = 2 * interrupted_blocks > end - start;
+            // An interrupted fall narrower than one block width is a block straddling a sharp
+            // floor edge whose estimate flips between the two sides, not a floor change: drop it
+            // (no event, no re-seed) and hold the blocks off.
+            let min_blocks = fr.layout.block_bins().div_ceil(fr.layout.hop_bins());
+            if interrupted && end - start < min_blocks {
+                for blk in &mut self.blocks[seg_start..seg_end] {
+                    blk.run = Run::idle(fr.ev.now.1);
+                    blk.holdoff_until = fr.counter + timing.holdoff;
+                }
+                continue;
+            }
             let g = self.group(start..end, -1, fr, cfg, timing);
             let (start, end) = (seg_start, seg_end);
             let mut ep = Episode::inactive(g.onset.1, fr.gain);

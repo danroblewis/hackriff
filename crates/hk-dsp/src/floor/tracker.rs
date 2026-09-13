@@ -93,6 +93,9 @@ pub struct FloorChangeConfig {
     /// Long reference time constant, seconds (120): catches rises slower than the slow floor
     /// follows (a 10 s ramp).
     pub long_time_constant_s: f64,
+    /// A fall confirms only when at least this fraction of its last `confirm_s` of frames are
+    /// below −`threshold_db` (0.5): a dropout of a few frames never confirms.
+    pub fall_min_hit_fraction: f64,
     /// A falling block with fewer hit frames than this fraction is interrupted; a fall is
     /// `interrupted` when most of its blocks are (0.9).
     pub fall_hit_fraction: f64,
@@ -120,6 +123,7 @@ impl Default for FloorChangeConfig {
             end_s: 1.0,
             holdoff_s: 2.0,
             long_time_constant_s: 120.0,
+            fall_min_hit_fraction: 0.5,
             fall_hit_fraction: 0.9,
             edge_hit_fraction: 0.5,
             rebaseline_s: Some(600.0),
@@ -152,6 +156,11 @@ pub struct WideReferenceConfig {
     pub shape_min_width_bins: usize,
     /// Shape values within this of the reference level are 1, dB (0.5).
     pub shape_deadband_db: f64,
+    /// Fast release/attack: a bin whose mean deviation from its learned level over a window of
+    /// `shape_snap_s` exceeds this (and six standard errors) jumps to the new level, dB (1.0).
+    pub shape_snap_db: f64,
+    /// The fast release/attack window, seconds (0.4).
+    pub shape_snap_s: f64,
 }
 
 impl Default for WideReferenceConfig {
@@ -165,6 +174,8 @@ impl Default for WideReferenceConfig {
             shape_time_constant_s: 1.0,
             shape_min_width_bins: 65,
             shape_deadband_db: 0.5,
+            shape_snap_db: 1.0,
+            shape_snap_s: 0.4,
         }
     }
 }
@@ -280,6 +291,7 @@ impl FloorConfig {
         check_non_negative("change.holdoff_s", c.holdoff_s)?;
         check_positive("change.long_time_constant_s", c.long_time_constant_s)?;
         check_fraction_closed("change.fall_hit_fraction", c.fall_hit_fraction)?;
+        check_fraction_closed("change.fall_min_hit_fraction", c.fall_min_hit_fraction)?;
         check_fraction_closed("change.edge_hit_fraction", c.edge_hit_fraction)?;
         if let Some(r) = c.rebaseline_s {
             check_positive("change.rebaseline_s", r)?;
@@ -292,6 +304,8 @@ impl FloorConfig {
         check_probability("wide.floor_quantile", w.floor_quantile)?;
         check_positive("wide.shape_time_constant_s", w.shape_time_constant_s)?;
         check_non_negative("wide.shape_deadband_db", w.shape_deadband_db)?;
+        check_positive("wide.shape_snap_db", w.shape_snap_db)?;
+        check_positive("wide.shape_snap_s", w.shape_snap_s)?;
         check_non_negative("tune_tolerance_bins", self.tune_tolerance_bins)?;
         check_positive("uncertainty_db", f64::from(self.uncertainty_db))
     }
@@ -482,6 +496,9 @@ pub struct FloorEvent {
     pub end_reason: Option<EndReason>,
     /// For `End` with [`EndReason::Merged`]: the episode that continues.
     pub merged_into: Option<u64>,
+    /// For a `Rise` that splits an open episode whose members became disconnected: that
+    /// episode's id. The new episode continues part of it (same onset and class).
+    pub split_from: Option<u64>,
     /// For `Fall`: most of its blocks were back near the old floor on some frames (an
     /// intermittent signal the slow floor had followed), so this corrects the floor rather than
     /// reporting a drop of it.
@@ -757,8 +774,10 @@ pub struct FloorStats {
     pub update_events: u64,
     /// Episodes closed for any reason, emitted or not (End, Unknown).
     pub episode_ends: u64,
-    /// Episodes merged into an older one.
+    /// Episodes merged into another.
     pub merges: u64,
+    /// Episodes split off a disconnected episode.
+    pub splits: u64,
     /// Episodes ended by `rebaseline_s`.
     pub rebaselines: u64,
     /// `Unknown` events emitted.
@@ -1011,7 +1030,11 @@ impl NoiseFloorTracker {
                 ema: (3.0 / confirm as f64).min(1.0) as f32,
                 recent: decay(0.1) as f32,
                 rebaseline: c.change.rebaseline_s.map(frames),
+                fall_hits: (c.change.fall_min_hit_fraction * confirm as f64 - 1e-9)
+                    .ceil()
+                    .max(1.0) as u64,
             };
+            self.engine.set_window(confirm as usize);
             self.shape_alpha = decay(c.wide.shape_time_constant_s);
             self.gate_max_frames = frames(c.impulsive.max_duration_s);
             self.quantisation_db = c.quantisation.dbfs_per_hz(fs);

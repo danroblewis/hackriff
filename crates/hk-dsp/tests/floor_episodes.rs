@@ -45,6 +45,8 @@ struct Sim {
     frame: SpectrumFrame,
     profile: Vec<f32>,
     sk: bool,
+    /// Per-bin SK for every frame (overrides `sk`).
+    sk_values: Option<Vec<f32>>,
     events: Vec<FloorEvent>,
     recs: Vec<Rec>,
     low: ProvenanceHandle,
@@ -62,6 +64,7 @@ impl Sim {
             frame: src.empty_frame(),
             profile: vec![1.0; bins],
             sk: false,
+            sk_values: None,
             events: Vec::new(),
             recs: Vec::new(),
             src,
@@ -92,7 +95,9 @@ impl Sim {
             };
             self.src
                 .fill_pooled(&mut self.frame, &self.profile, flags, &mut self.pool);
-            if self.sk {
+            if let Some(v) = &self.sk_values {
+                self.frame.spectrum.sk.clone_from(v);
+            } else if self.sk {
                 self.frame.spectrum.sk.resize(self.profile.len(), 1.0);
             }
             let events = &mut self.events;
@@ -210,6 +215,14 @@ fn check_invariants(sim: &Sim, cfg: &FloorConfig, closed: bool) {
                         ctx()
                     );
                     assert_eq!(e.change_bins, e.bins, "{}", ctx());
+                    if let Some(parent) = e.split_from {
+                        assert!(
+                            state.get(&parent) == Some(&State::Open)
+                                && contains(&open[&parent], &e.bins),
+                            "split outside its open parent: {}",
+                            ctx()
+                        );
+                    }
                     if e.kind == Rise {
                         state.insert(e.episode, State::Open);
                         open.insert(e.episode, e.bins.clone());
@@ -897,4 +910,250 @@ fn randomised_sequences_keep_the_event_model_invariants() {
     }
     eprintln!("randomised totals (rise, extend, update, end, fall, unknown): {totals:?}");
     assert!(totals[0] >= 10 && totals[3] >= 5 && totals[4] >= 3);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Third review against the fix (T-005 fix 2): phantom falls, merges, splits, widening.
+
+/// Worst |slow floor| (dB, truth 0) at `bins` over frames from `t0` on.
+fn slow_error_after(sim: &Sim, t0: f64, bins: &[usize]) -> f64 {
+    let mut worst = 0.0f64;
+    for seq in sim.seq_at(t0)..sim.recs.len() as u64 {
+        for &b in bins {
+            worst = worst.max(sim.slow_db(seq, b).abs());
+        }
+    }
+    worst
+}
+
+fn count(sim: &Sim, pred: impl Fn(&FloorEvent) -> bool) -> usize {
+    sim.events.iter().filter(|e| pred(e)).count()
+}
+
+#[test]
+fn fix2_dropout_frames_open_no_phantom_episode() {
+    let cfg = FloorConfig::default();
+    let cases = [
+        ("1 frame -10 dB", 1u64, -10.0),
+        ("3 frames -6 dB", 3, -6.0),
+        ("1 frame -4 dB", 1, -4.0),
+    ];
+    for (k, (name, frames, level)) in cases.into_iter().enumerate() {
+        let mut sim = Sim::new(4096, 4e6, cfg, 200 + k as u64);
+        let (start, period) = (sim.seq_at(3.0), sim.period());
+        sim.run(12.0, |t, p| {
+            let seq = (t / period).round() as u64;
+            if seq >= start && seq - start < frames {
+                scale(p, 0..2048, level);
+            }
+            quiet()
+        });
+        sim.show(&format!("{name} over bins 0..2048 at 3 s"));
+        check_invariants(&sim, &cfg, true);
+        let worst = slow_error_after(&sim, 1.0, &[500, 1000, 3000]);
+        eprintln!("  worst slow-floor error {worst:.3} dB");
+        assert!(
+            sim.events.is_empty(),
+            "{AWARE_006}: {name} made a phantom episode"
+        );
+        assert!(worst < 0.2, "{name}: slow floor {worst:.3} dB off");
+    }
+}
+
+#[test]
+fn fix2_persistent_sub_threshold_drop_is_adopted_without_falls() {
+    let cfg = FloorConfig::default();
+    let mut sim = Sim::new(4096, 4e6, cfg, 210);
+    sim.run(15.0, |t, p| {
+        if t >= 3.0 {
+            scale(p, 0..2048, -2.8);
+        }
+        quiet()
+    });
+    sim.show("persistent -2.8 dB over bins 0..2048 from 3 s");
+    check_invariants(&sim, &cfg, true);
+    assert!(
+        count(&sim, |e| e.kind == Fall) <= 1,
+        "{AWARE_006}: repeated falls"
+    );
+    let last = sim.recs.len() as u64 - 1;
+    let err = sim.slow_db(last, 1000) + 2.8;
+    eprintln!("  slow floor error under the drop {err:+.3} dB");
+    assert!(err.abs() < 0.2);
+}
+
+#[test]
+fn fix2_static_in_block_step_makes_no_episodes() {
+    let cfg = FloorConfig::default();
+    // A passband +6 dB over 1024 bins with sharp edges, aligned with and between block starts.
+    for (k, lo) in [1536usize, 1500].into_iter().enumerate() {
+        let mut sim = Sim::new(4096, 4e6, cfg, 220 + k as u64);
+        sim.run(20.0, |_, p| {
+            scale(p, lo..lo + 1024, 6.0);
+            quiet()
+        });
+        sim.show(&format!("static +6 dB step over {lo}..{}", lo + 1024));
+        check_invariants(&sim, &cfg, false);
+        let last = sim.recs.len() as u64 - 1;
+        let (inside, outside) = (sim.slow_db(last, lo + 512) - 6.0, sim.slow_db(last, 500));
+        eprintln!("  slow floor inside {inside:+.3} dB, outside {outside:+.3} dB");
+        assert!(sim.events.is_empty(), "{AWARE_006}: spurious episodes");
+        assert!(inside.abs() < 0.2 && outside.abs() < 0.2);
+    }
+}
+
+#[test]
+fn fix2_rebaselined_elevated_region_makes_no_fall_rise_chains() {
+    let mut cfg = FloorConfig::default();
+    cfg.change.rebaseline_s = Some(20.0);
+    let mut sim = Sim::new(4096, 4e6, cfg, 230);
+    sim.run(75.0, |t, p| {
+        if (1.0..60.0).contains(&t) {
+            scale(p, 1000..2000, 6.0);
+        }
+        if (30.0..60.0).contains(&t) {
+            scale(p, 1900..2600, 6.0);
+        }
+        quiet()
+    });
+    sim.show("+6 dB 1000..2000 1-60 s (rebaseline 20 s), adjacent 1900..2600 30-60 s");
+    check_invariants(&sim, &cfg, true);
+    let worst = slow_error_after(&sim, 66.0, &[1500, 2300, 3500]);
+    eprintln!("  worst slow-floor error after 66 s {worst:.3} dB");
+    assert_eq!(
+        count(&sim, |e| e.interrupted),
+        0,
+        "{AWARE_006}: interrupted falls"
+    );
+    assert_eq!(
+        count(&sim, |e| e.kind == Rise),
+        2,
+        "{AWARE_006}: rise chain"
+    );
+    assert!(worst < 0.2);
+    assert_eq!(sim.recs.last().unwrap().active, 0);
+}
+
+#[test]
+fn fix2_bridge_vanishing_splits_the_episode_and_update_shrinks_the_extent() {
+    let cfg = FloorConfig::default();
+    let mut sim = Sim::new(4096, 4e6, cfg, 240);
+    sim.run(20.0, |t, p| {
+        if (1.0..16.0).contains(&t) {
+            scale(p, 500..1200, 6.0);
+            scale(p, 2000..2800, 6.0);
+        }
+        if (3.0..6.0).contains(&t) {
+            scale(p, 1100..2100, 6.0);
+        }
+        if (10.0..16.0).contains(&t) {
+            scale(p, 1450..1750, 6.0);
+        }
+        quiet()
+    });
+    sim.show("A 500..1200 + B 2000..2800, bridge 3-6 s, rise in the gap at 10 s");
+    check_invariants(&sim, &cfg, true);
+    let split = sim
+        .events
+        .iter()
+        .find(|e| e.split_from.is_some())
+        .expect("a split Rise");
+    let parent = split.split_from.unwrap();
+    let update = sim
+        .events
+        .iter()
+        .find(|e| e.kind == Update && e.episode == parent && e.confirmed_seq == split.confirmed_seq)
+        .expect("the parent's Update");
+    let mut parts = [split.bins.clone(), update.bins.clone()];
+    parts.sort_by_key(|r| r.start);
+    eprintln!("  after the bridge returned: {parts:?}");
+    assert!(near(parts[0].start, 500, 128) && near(parts[0].end, 1200, 128));
+    assert!(near(parts[1].start, 2000, 128) && near(parts[1].end, 2800, 128));
+    assert!((sim.secs(split.onset_t) - 1.0).abs() <= 2.0 * sim.period());
+    let hole = sim
+        .events
+        .iter()
+        .find(|e| e.kind == Rise && e.split_from.is_none() && sim.secs(e.onset_t) > 9.0)
+        .expect("the gap rise");
+    assert!(
+        hole.bins.start >= 1200 && hole.bins.end <= 2000,
+        "{:?}",
+        hole.bins
+    );
+}
+
+#[test]
+fn fix2_widening_rise_extends_only_the_added_ranges() {
+    let cfg = FloorConfig::default();
+    let mut sim = Sim::new(4096, 4e6, cfg, 250);
+    sim.run(19.0, |t, p| {
+        if t >= 1.0 {
+            let g = ((t - 1.0).min(15.0) * 100.0) as usize;
+            scale(p, 1800 - g..2300 + g, 6.0);
+        }
+        quiet()
+    });
+    sim.show("1800..2300 widening 100 bins/s per side for 15 s");
+    check_invariants(&sim, &cfg, false);
+    assert_eq!(count(&sim, |e| e.kind == Rise), 1);
+    let extends: Vec<&FloorEvent> = sim.events.iter().filter(|e| e.kind == Extend).collect();
+    assert!(extends.len() >= 4);
+    for e in extends {
+        assert!(
+            !e.change_bins.contains(&2048) && e.change_bins.len() <= 1024,
+            "{AWARE_006}: Extend reports more than it added: {:?}",
+            e.change_bins
+        );
+    }
+    let last = sim.events.last().unwrap();
+    assert!(near(last.bins.start, 300, 192) && near(last.bins.end, 3800, 192));
+}
+
+#[test]
+fn fix2_merge_keeps_the_noise_like_episode() {
+    let cfg = FloorConfig::default();
+    let mut sim = Sim::new(4096, 4e6, cfg, 260);
+    let mut sk = vec![1.0f32; 4096];
+    sk[500..1200].fill(1.6);
+    sim.sk_values = Some(sk);
+    sim.run(9.0, |t, p| {
+        if t >= 1.0 {
+            scale(p, 500..1200, 6.0);
+        }
+        if t >= 2.0 {
+            scale(p, 2000..2800, 6.0);
+        }
+        if t >= 4.0 {
+            scale(p, 1100..2100, 6.0);
+        }
+        quiet()
+    });
+    sim.show("Structured A 500..1200 (older), NoiseLike B 2000..2800, NoiseLike bridge at 4 s");
+    check_invariants(&sim, &cfg, false);
+    let rise = |class| {
+        sim.events
+            .iter()
+            .find(|e| e.kind == Rise && e.class == class)
+            .unwrap_or_else(|| panic!("a {class:?} Rise"))
+    };
+    let (a, b) = (
+        rise(FloorChangeClass::Structured),
+        rise(FloorChangeClass::NoiseLike),
+    );
+    let merged = sim
+        .events
+        .iter()
+        .find(|e| e.end_reason == Some(EndReason::Merged))
+        .expect("a merge");
+    assert_eq!(
+        (merged.episode, merged.merged_into),
+        (a.episode, Some(b.episode))
+    );
+    let ext = sim
+        .events
+        .iter()
+        .find(|e| e.kind == Extend && e.episode == b.episode)
+        .expect("the survivor's Extend");
+    eprintln!("  survivor Extend change {:?}", ext.change_bins);
+    assert!(ext.change_bins.start <= 600 && ext.change_bins.end >= 1900);
 }

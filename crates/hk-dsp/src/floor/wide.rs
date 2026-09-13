@@ -98,6 +98,10 @@ pub(crate) struct ResponseShape {
     q_n: f64,
     /// `ln` of the unit-mean `Gamma(n)` quantile at [`SHAPE_QUANTILE`].
     q_ln: f32,
+    /// Per bin: sum of the frames' deviations from the tracked floor over the snap window (ln).
+    dev_sum: Vec<f32>,
+    /// Frames in the current snap window.
+    dev_frames: u32,
 }
 
 /// Frames between shape recomputations (the level tracker updates every frame).
@@ -127,6 +131,7 @@ impl ResponseShape {
             v.resize(bins, 0.0);
         }
         self.shape.resize(bins, 1.0);
+        self.dev_sum.resize(bins, 0.0);
         self.active.resize(blocks, false);
         self.block_ln.resize(blocks, 0.0);
         self.reset();
@@ -138,6 +143,8 @@ impl ResponseShape {
         self.shape.fill(1.0);
         self.active.fill(false);
         self.block_ln.fill(0.0);
+        self.dev_sum.fill(0.0);
+        self.dev_frames = 0;
         self.any_active = false;
         self.since_recompute = 0;
     }
@@ -172,6 +179,13 @@ impl ResponseShape {
     /// larger of the tracker's model standard error (`5.9/√(frames·n)` dB) and the measured
     /// bin-to-bin spread of the tracked level (MAD of adjacent differences / √2: correlated
     /// frames, fixed ripple), so neither noise nor ripple enters the shape through the erosion.
+    ///
+    /// **Fast release and attack.** The quantile tracker moves about 1 dB/s, too slow when an
+    /// accessory changes the response (a notch inserted or removed). Each bin also sums the
+    /// frames' deviation of `ln psd` from the tracked floor over windows of `shape_snap_s`; at the
+    /// end of a window, a bin whose mean deviation exceeds `shape_snap_db` and six standard errors
+    /// jumps by it and the shape is recomputed. A change is absorbed within two windows. Signals
+    /// present in most of a window lift a learned dip the same way (it re-forms after them).
     pub(crate) fn update(
         &mut self,
         psd: &[f32],
@@ -185,6 +199,10 @@ impl ResponseShape {
         // Density of ln Gamma(n)/n at its quantile ≈ the standard normal density there times √n.
         let z = 0.674_49_f64;
         let density = (-0.5 * z * z).exp() / std::f64::consts::TAU.sqrt() * n_avg.max(0.1).sqrt();
+        if self.q_n != n_avg {
+            self.q_n = n_avg;
+            self.q_ln = gamma::mean_quantile(n_avg.max(0.1), SHAPE_QUANTILE).ln() as f32;
+        }
         if self.updates == 0 {
             for (m, &p) in self.mean.iter_mut().zip(psd) {
                 *m = if p.is_finite() && p > 0.0 {
@@ -193,16 +211,50 @@ impl ResponseShape {
                     f32::MIN_POSITIVE.ln()
                 };
             }
+            self.dev_sum.fill(0.0);
+            self.dev_frames = 0;
         } else {
             let step = (alpha.max(1.0 / (self.updates as f64 + 1.0)) / density) as f32;
             let (up, down) = (step * q, step * (1.0 - q));
-            for (m, &p) in self.mean.iter_mut().zip(psd) {
-                if p.is_finite() && p > 0.0 {
-                    if p.ln() < *m {
-                        *m -= down;
-                    } else {
-                        *m += up;
+            // Snap window in frames, from the frame period implied by the shape's IIR factor.
+            let n = n_avg.max(1.0);
+            let period = -cfg.shape_time_constant_s * (1.0 - alpha.min(0.999_999)).ln();
+            let window = (cfg.shape_snap_s / period.max(1e-12) - 1e-9)
+                .ceil()
+                .max(1.0) as u32;
+            // ln of a unit-mean Gamma(n): mean ψ(n) − ln n, variance ψ′(n) (asymptotic series).
+            let offset = -(0.5 / n + 1.0 / (12.0 * n * n)) as f32 - self.q_ln;
+            for ((m, &p), sum) in self.mean.iter_mut().zip(psd).zip(self.dev_sum.iter_mut()) {
+                if !(p.is_finite() && p > 0.0) {
+                    continue;
+                }
+                let lp = p.ln();
+                // Deviation of this frame's floor estimate from the tracked floor.
+                *sum += lp - offset - *m;
+                if lp < *m {
+                    *m -= down;
+                } else {
+                    *m += up;
+                }
+            }
+            self.dev_frames += 1;
+            if self.dev_frames >= window {
+                let k = f64::from(self.dev_frames);
+                let sigma = ((1.0 / n + 0.5 / (n * n)) / k).sqrt();
+                let band =
+                    (cfg.shape_snap_db * std::f64::consts::LN_10 / 10.0).max(6.0 * sigma) as f32;
+                let mut snapped = false;
+                for (m, sum) in self.mean.iter_mut().zip(self.dev_sum.iter_mut()) {
+                    let dev = *sum / k as f32;
+                    if dev.abs() > band {
+                        *m += dev;
+                        snapped = true;
                     }
+                    *sum = 0.0;
+                }
+                self.dev_frames = 0;
+                if snapped {
+                    self.since_recompute = RECOMPUTE_FRAMES;
                 }
             }
         }
@@ -250,10 +302,6 @@ impl ResponseShape {
         // Reference: the frame's FCME band floor on the tracker's quantile scale. FCME finds the
         // floor between signals up to 80 % occupancy, so a dense band never reads as the level
         // its gaps dip from.
-        if self.q_n != n_avg {
-            self.q_n = n_avg;
-            self.q_ln = gamma::mean_quantile(n_avg.max(0.1), SHAPE_QUANTILE).ln() as f32;
-        }
         let u = band_floor.max(1e-37).ln() + self.q_ln;
         // Soft deadband `d` (ln units): `ln S = r + d·exp((r + d)/d)` below `−d`, 0 above, so the
         // shape is continuous where learning starts (a step there would bias the blocks across
