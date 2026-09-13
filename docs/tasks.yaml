@@ -533,6 +533,7 @@ tasks:
   - id: T-035
     title: Tracking data-model follow-ups (TimingFeatures fields, track region query, batched writes, hop raster estimate)
     status: todo
+    hold: "start after T-034 merges - both change hk-model repository code (T-034: gated getters + class-aware writers); not M0-critical"
     deps: [T-031, T-018]
     parallel_group: E
     use_cases: [AWARE-036, AWARE-042]
