@@ -8,25 +8,44 @@
 //! `output.metadata_keys`: every metadata key the host may keep, with a type that cannot carry
 //! free text (integer, number, boolean, bounded hex or digits string, or an enum). It may also
 //! allowlist `frame_models`, annotation `labels` and an `identity` shape. The host applies the
-//! allowlist whenever a line's effective class forbids content (see [`crate::output`]).
+//! allowlist whenever a line's effective class forbids content (see [`crate::output`]). The
+//! allowlist model itself lives in [`hk_stream::policy`], shared with egress.
+//!
+//! **Trusted-but-reviewed defaults.** A policy only ever applies under a restricted class, so its
+//! typed fields are covert-channel budgets. hex/digits keys and identities default to
+//! `max_len` [`RESTRICTED_DEFAULT_MAX_LEN`] (8); a longer value needs an explicit `max_len` and a
+//! `review_note` string, and is reported in [`PluginManifest::warnings`]. `integer`/`number`
+//! keys (up to 64 bits per record) are also reported. [`PluginManifest::load`] prints the
+//! warnings to stderr and the host copies them into the plugin's log ring.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hk_model::sigmf::Datatype;
-use hk_model::{ContentClass, DecodedIdentity, IdentityScheme};
+use hk_model::{ContentClass, IdentityScheme};
+use hk_stream::policy::is_token;
 use hk_stream::{FeedFraming, StreamKind};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::host::InputStreamDesc;
 
+pub use hk_stream::policy::{
+    Charset, IdentitySpec, MAX_ALLOWLIST_LEN, MetadataPolicy, MetadataType,
+    RESTRICTED_DEFAULT_MAX_LEN,
+};
+
 /// The manifest format version this build reads.
 pub const MANIFEST_VERSION: u32 = 1;
 
-/// Longest allowlisted string (hex/digits values, enum values, labels, frame models).
-pub const MAX_ALLOWLIST_LEN: usize = 64;
+/// The documented example restricted-paging `output` policy (not a plugin):
+/// `crates/hk-plugins/policies/restricted-paging.json`. It allowlists only `capcode` (digits, at
+/// most 8), `function` (enum 0-3), `baud` (enum 512/1200/2400) and `encoding` (enum
+/// numeric/alpha/tone); `t` is host-stamped from `sample_index`. Message bodies, numeric pages
+/// included, are content and are never allowlisted.
+pub const EXAMPLE_RESTRICTED_PAGING_OUTPUT: &str =
+    include_str!("../policies/restricted-paging.json");
 
 /// What a plugin consumes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,97 +124,6 @@ pub struct InputSpec {
     pub bandwidth_hz: Option<HzRange>,
 }
 
-/// Type of an allowlisted metadata value. None can carry free text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MetadataType {
-    /// A JSON integer.
-    Integer,
-    /// A JSON number.
-    Number,
-    /// A JSON boolean.
-    Boolean,
-    /// A non-empty string of hex digits, at most `max_len` long.
-    Hex {
-        /// Longest accepted value.
-        max_len: usize,
-    },
-    /// A non-empty string of decimal digits, at most `max_len` long.
-    Digits {
-        /// Longest accepted value.
-        max_len: usize,
-    },
-    /// One of the listed strings.
-    Enum(Vec<String>),
-}
-
-fn charset_ok(s: &str, charset: Charset, max_len: usize) -> bool {
-    !s.is_empty()
-        && s.len() <= max_len
-        && s.bytes().all(|b| match charset {
-            Charset::Hex => b.is_ascii_hexdigit(),
-            Charset::Digits => b.is_ascii_digit(),
-        })
-}
-
-impl MetadataType {
-    /// Whether `v` has this type (over-long strings are rejected, not truncated: a truncated
-    /// identifier is a wrong identifier).
-    pub fn accepts(&self, v: &Value) -> bool {
-        match self {
-            MetadataType::Integer => v.is_i64() || v.is_u64(),
-            MetadataType::Number => v.is_number(),
-            MetadataType::Boolean => v.is_boolean(),
-            MetadataType::Hex { max_len } => v
-                .as_str()
-                .is_some_and(|s| charset_ok(s, Charset::Hex, *max_len)),
-            MetadataType::Digits { max_len } => v
-                .as_str()
-                .is_some_and(|s| charset_ok(s, Charset::Digits, *max_len)),
-            MetadataType::Enum(values) => v.as_str().is_some_and(|s| values.iter().any(|x| x == s)),
-        }
-    }
-}
-
-/// Character set of an allowlisted identity value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Charset {
-    /// Hex digits.
-    Hex,
-    /// Decimal digits.
-    Digits,
-}
-
-/// The identity a gated-class plugin may name.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IdentitySpec {
-    /// Required scheme.
-    pub scheme: IdentityScheme,
-    /// Value characters.
-    pub charset: Charset,
-    /// Longest value.
-    pub max_len: usize,
-}
-
-impl IdentitySpec {
-    /// Whether an identity matches the spec.
-    pub fn accepts(&self, id: &DecodedIdentity) -> bool {
-        id.scheme == self.scheme && charset_ok(&id.value, self.charset, self.max_len)
-    }
-}
-
-/// What survives from a line whose effective class forbids content.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MetadataPolicy {
-    /// Allowed metadata keys and their types; everything else is dropped.
-    pub keys: BTreeMap<String, MetadataType>,
-    /// Allowed `frame_model` values; others are replaced by `output.schema_id`.
-    pub frame_models: Vec<String>,
-    /// Allowed annotation labels; others are replaced by `output.schema_id`.
-    pub labels: Vec<String>,
-    /// Allowed identity shape; other identities are dropped.
-    pub identity: Option<IdentitySpec>,
-}
-
 /// Output declaration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputSpec {
@@ -267,6 +195,9 @@ pub struct PluginManifest {
     pub limits: ResourceLimits,
     /// Directory the manifest was loaded from.
     pub base_dir: Option<PathBuf>,
+    /// Review warnings found at validation (long reviewed strings, integer/number keys under a
+    /// policy). Never contain plugin output.
+    pub warnings: Vec<String>,
 }
 
 /// Manifest errors.
@@ -358,6 +289,7 @@ struct RawMetaKey {
     kind: String,
     max_len: Option<usize>,
     values: Option<Vec<String>>,
+    review_note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -365,7 +297,8 @@ struct RawMetaKey {
 struct RawIdentity {
     scheme: String,
     charset: String,
-    max_len: usize,
+    max_len: Option<usize>,
+    review_note: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -401,14 +334,6 @@ fn invalid(field: &'static str, reason: impl Into<String>) -> ManifestError {
     }
 }
 
-/// A short token: `[A-Za-z0-9_.:/-]{1,64}`.
-fn is_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= MAX_ALLOWLIST_LEN
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_.:/-".contains(&b))
-}
-
 fn token_list(list: Vec<String>, field: &'static str) -> Result<Vec<String>, ManifestError> {
     if let Some(bad) = list.iter().find(|s| !is_token(s)) {
         return Err(invalid(
@@ -419,17 +344,44 @@ fn token_list(list: Vec<String>, field: &'static str) -> Result<Vec<String>, Man
     Ok(list)
 }
 
-fn bounded_len(max_len: Option<usize>, field: &'static str) -> Result<usize, ManifestError> {
-    match max_len {
-        Some(n) if (1..=MAX_ALLOWLIST_LEN).contains(&n) => Ok(n),
-        other => Err(invalid(
+/// `max_len` of a hex/digits key or identity. Default [`RESTRICTED_DEFAULT_MAX_LEN`]; longer (up
+/// to [`MAX_ALLOWLIST_LEN`]) only with a non-empty `review_note`, recorded as a warning.
+fn string_max_len(
+    what: &str,
+    max_len: Option<usize>,
+    review_note: Option<&str>,
+    field: &'static str,
+    warnings: &mut Vec<String>,
+) -> Result<usize, ManifestError> {
+    let n = max_len.unwrap_or(RESTRICTED_DEFAULT_MAX_LEN);
+    if !(1..=MAX_ALLOWLIST_LEN).contains(&n) {
+        return Err(invalid(
             field,
-            format!("max_len {other:?} must be 1..={MAX_ALLOWLIST_LEN}"),
-        )),
+            format!("{what}: max_len {n} must be 1..={MAX_ALLOWLIST_LEN}"),
+        ));
     }
+    if n > RESTRICTED_DEFAULT_MAX_LEN {
+        match review_note.map(str::trim).filter(|s| !s.is_empty()) {
+            None => {
+                return Err(invalid(
+                    field,
+                    format!(
+                        "{what}: max_len {n} > {RESTRICTED_DEFAULT_MAX_LEN} needs a review_note (restricted-class covert-channel budget)"
+                    ),
+                ));
+            }
+            Some(note) => warnings.push(format!(
+                "{field} {what}: max_len {n} > {RESTRICTED_DEFAULT_MAX_LEN} under a restricted class, reviewed: {note}"
+            )),
+        }
+    }
+    Ok(n)
 }
 
-fn metadata_policy(raw: &mut RawOutput) -> Result<Option<MetadataPolicy>, ManifestError> {
+fn metadata_policy(
+    raw: &mut RawOutput,
+    warnings: &mut Vec<String>,
+) -> Result<Option<MetadataPolicy>, ManifestError> {
     let declared = raw.metadata_keys.is_some()
         || raw.frame_models.is_some()
         || raw.labels.is_some()
@@ -456,11 +408,27 @@ fn metadata_policy(raw: &mut RawOutput) -> Result<Option<MetadataPolicy>, Manife
             }
         };
         let t = match key.kind.as_str() {
-            "integer" => simple(MetadataType::Integer)?,
-            "number" => simple(MetadataType::Number)?,
+            "integer" | "number" => {
+                let t = simple(if key.kind == "integer" {
+                    MetadataType::Integer
+                } else {
+                    MetadataType::Number
+                })?;
+                warnings.push(format!(
+                    "output.metadata_keys {name}: {} values carry up to 64 bits per record under a restricted class; prefer an enum or bounded digits",
+                    key.kind
+                ));
+                t
+            }
             "boolean" => simple(MetadataType::Boolean)?,
             "hex" | "digits" if key.values.is_none() => {
-                let max_len = bounded_len(key.max_len, "output.metadata_keys")?;
+                let max_len = string_max_len(
+                    &name,
+                    key.max_len,
+                    key.review_note.as_deref(),
+                    "output.metadata_keys",
+                    warnings,
+                )?;
                 if key.kind == "hex" {
                     MetadataType::Hex { max_len }
                 } else {
@@ -511,7 +479,13 @@ fn metadata_policy(raw: &mut RawOutput) -> Result<Option<MetadataPolicy>, Manife
             Some(IdentitySpec {
                 scheme,
                 charset,
-                max_len: bounded_len(Some(id.max_len), "output.identity")?,
+                max_len: string_max_len(
+                    "identity",
+                    id.max_len,
+                    id.review_note.as_deref(),
+                    "output.identity",
+                    warnings,
+                )?,
             })
         }
     };
@@ -593,6 +567,9 @@ impl PluginManifest {
         })?;
         let mut m = Self::from_json_str(&text)?;
         m.base_dir = path.parent().map(Path::to_path_buf);
+        for w in &m.warnings {
+            eprintln!("hk-plugins: {}: warning: {w}", path.display());
+        }
         Ok(m)
     }
 
@@ -682,6 +659,14 @@ impl PluginManifest {
             }
         }
         let schema_id = required(raw_output.schema_id.take(), "output.schema_id")?;
+        // The schema id replaces non-allowlisted frame models and labels under restricted
+        // classes, so it must itself be token-shaped.
+        if !is_token(&schema_id) {
+            return Err(invalid(
+                "output.schema_id",
+                format!("{schema_id:?} is not [A-Za-z0-9_.:/-]{{1,64}}"),
+            ));
+        }
         let class_name = required(raw_output.content_class.take(), "output.content_class")?;
         // A manifest class must be spelled correctly: a typo is an error here, not a silent
         // fail-closed downgrade (plugin *messages* still fail closed at run time).
@@ -692,7 +677,8 @@ impl PluginManifest {
                     format!("unknown content class {class_name:?}"),
                 )
             })?;
-        let metadata_policy = metadata_policy(&mut raw_output)?;
+        let mut warnings = Vec::new();
+        let metadata_policy = metadata_policy(&mut raw_output, &mut warnings)?;
         if !content_class.permits_content() && raw_output_lacks_keys(&metadata_policy) {
             return Err(ManifestError::Missing("output.metadata_keys"));
         }
@@ -745,6 +731,7 @@ impl PluginManifest {
             restart,
             limits,
             base_dir: None,
+            warnings,
         };
         for template in &m.args {
             expand(template, |key| m.placeholder(key, None))
@@ -846,7 +833,7 @@ fn raw_output_lacks_keys(policy: &Option<MetadataPolicy>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hk_model::{SampleTime, Timestamp};
+    use hk_model::{DecodedIdentity, SampleTime, Timestamp};
     use serde_json::json;
 
     fn base() -> Value {
@@ -984,6 +971,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn restricted_defaults_review_notes_and_warnings() {
+        let mut v = base();
+        v["output"] = json!({
+            "schema_id": "s/1", "content_class": "restricted-paging",
+            "metadata_keys": {
+                "addr": {"type": "hex"},
+                "long": {"type": "digits", "max_len": 20, "review_note": "IMSI-length id, reviewed 2026-09-13"},
+                "n": {"type": "integer"}
+            },
+            "identity": {"scheme": "adsb-icao", "charset": "hex"}
+        });
+        let m = parse(&v).unwrap();
+        let p = m.output.metadata_policy.as_ref().unwrap();
+        assert_eq!(p.keys["addr"], MetadataType::Hex { max_len: 8 });
+        assert_eq!(p.keys["long"], MetadataType::Digits { max_len: 20 });
+        assert_eq!(p.identity.as_ref().unwrap().max_len, 8);
+        assert_eq!(m.warnings.len(), 2, "{:?}", m.warnings);
+        assert!(m.warnings.iter().any(|w| w.contains("reviewed 2026-09-13")));
+        assert!(m.warnings.iter().any(|w| w.contains("64 bits")));
+
+        // The shipped example paging policy: only the documented keys, no warnings.
+        let mut v = base();
+        v["output"] = serde_json::from_str(EXAMPLE_RESTRICTED_PAGING_OUTPUT).unwrap();
+        let m = parse(&v).unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert_eq!(m.output.content_class, ContentClass::RestrictedPaging);
+        let p = m.output.metadata_policy.unwrap();
+        assert_eq!(
+            p.keys.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["baud", "capcode", "encoding", "function"]
+        );
+        assert_eq!(p.keys["capcode"], MetadataType::Digits { max_len: 8 });
+        assert!(p.frame_models.is_empty() && p.labels.is_empty() && p.identity.is_none());
+        assert!(!p.keys["function"].accepts(&json!(5782981759612573780u64)));
+        assert!(!p.keys["capcode"].accepts(&json!("5551234567")));
+    }
+
     fn expect_err(mutate: impl FnOnce(&mut Value)) -> ManifestError {
         let mut v = base();
         mutate(&mut v);
@@ -1025,8 +1050,10 @@ mod tests {
         }
         for bad_key in [
             json!({"text": {"type": "string", "max_len": 16}}),
-            json!({"text": {"type": "hex"}}),
-            json!({"text": {"type": "digits", "max_len": 65}}),
+            json!({"text": {"type": "hex", "max_len": 16}}),
+            json!({"text": {"type": "hex", "max_len": 16, "review_note": "  "}}),
+            json!({"text": {"type": "digits", "max_len": 65, "review_note": "x"}}),
+            json!({"text": {"type": "digits", "max_len": 0}}),
             json!({"text": {"type": "integer", "max_len": 4}}),
             json!({"text": {"type": "enum", "values": []}}),
             json!({"text": {"type": "enum", "values": ["has space"]}}),
@@ -1066,6 +1093,25 @@ mod tests {
             }),
             ManifestError::Invalid {
                 field: "output.labels",
+                ..
+            }
+        ));
+        assert!(matches!(
+            expect_err(|v| v["output"]["schema_id"] = json!("free text schema")),
+            ManifestError::Invalid {
+                field: "output.schema_id",
+                ..
+            }
+        ));
+        assert!(matches!(
+            expect_err(|v| {
+                v["output"]["content_class"] = json!("restricted-paging");
+                v["output"]["metadata_keys"] = json!({});
+                v["output"]["identity"] =
+                    json!({"scheme": "adsb-icao", "charset": "hex", "max_len": 64});
+            }),
+            ManifestError::Invalid {
+                field: "output.identity",
                 ..
             }
         ));

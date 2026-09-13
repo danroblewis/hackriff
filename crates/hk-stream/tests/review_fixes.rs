@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use hk_model::{ContentClass, Timestamp};
 use hk_stream::{
-    BinaryRecord, CloseReason, ConsumerState, ListenAddr, Listener, MessageRecord, Publisher,
-    PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind, StreamReader,
+    BinaryRecord, CloseReason, ConsumerState, Declared, ListenAddr, Listener, MessageRecord,
+    Publisher, PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind,
+    StreamReader,
 };
 use serde_json::json;
 
@@ -117,7 +118,7 @@ fn p8_own_key_content_needs_an_own_key_stream() {
         let mut p = Publisher::new(messages(stream_class), small()).unwrap();
         let h = p.handle();
         let buf = SharedBuf::default();
-        h.subscribe("mem", Box::new(buf.clone()), Box::new(|_| {}))
+        h.subscribe("mem", Declared::local(buf.clone()), Box::new(|_| {}))
             .unwrap();
         p.publish_message(&record(ContentClass::OwnKeyDecrypted))
             .unwrap();
@@ -295,7 +296,7 @@ fn p10_tail_drops_before_finish_get_a_marker() {
     handle
         .subscribe(
             "valve",
-            Box::new(Valve(Arc::clone(&valve), buf.clone())),
+            Declared::local(Valve(Arc::clone(&valve), buf.clone())),
             Box::new(|_| {}),
         )
         .unwrap();
@@ -362,7 +363,7 @@ fn draining_consumer_is_closed_after_drain_timeout() {
     let id = h
         .subscribe(
             "stuck",
-            Box::new(Valve(Arc::clone(&valve), SharedBuf::default())),
+            Declared::local(Valve(Arc::clone(&valve), SharedBuf::default())),
             Box::new(|_| {}),
         )
         .unwrap();

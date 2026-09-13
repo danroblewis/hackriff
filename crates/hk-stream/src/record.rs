@@ -243,6 +243,11 @@ pub struct DropMarker {
     pub t: Timestamp,
     /// Sample index of the first dropped record (0 for messages).
     pub sample_index: u64,
+    /// The records were **withheld by the egress gate** (gated-spectrum row-rate or payload cap),
+    /// not dropped by a full queue. Binary markers carry it as the `GATED` flag. A gated marker's
+    /// `t` and `sample_index` are those of the next delivered row (or the last delivered row at
+    /// the end of the stream), so withheld rows contribute only their count.
+    pub gated: bool,
 }
 
 /// A message record as a reader sees it.
@@ -290,7 +295,11 @@ pub(crate) fn encode_marker(binary: bool, m: &DropMarker, buf: &mut [u8; MARKER_
     let payload_len = if binary {
         let h = BinaryRecordHeader {
             record_type: BinaryRecordType::Dropped as u8,
-            flags: RecordFlags::DISCONTINUITY,
+            flags: if m.gated {
+                RecordFlags::DISCONTINUITY.with(RecordFlags::GATED)
+            } else {
+                RecordFlags::DISCONTINUITY
+            },
             payload_len: 8,
             seq: m.first_seq,
             t: m.t,
@@ -341,6 +350,7 @@ mod tests {
             count: u64::MAX,
             t: Timestamp::from_unix_nanos(i64::MIN),
             sample_index: u64::MAX,
+            gated: true,
         };
         let mut buf = [0u8; MARKER_MAX_LEN];
         for binary in [false, true] {

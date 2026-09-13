@@ -12,13 +12,21 @@
 //!   the header class does not permit content, the payload is withheld: a header-only record
 //!   with [`RecordFlags::GATED`](super::RecordFlags::GATED) is emitted and the publisher returns
 //!   an error so the misrouted producer notices.
+//! - **Message metadata:** when a message's effective class forbids content, everything outside
+//!   `content` (metadata, frame model/label, identity, decoder) is reduced to the publisher's
+//!   [`MetadataPolicy`](super::MetadataPolicy) ([`super::policy`]). A messages publisher whose
+//!   header class forbids content cannot be created without a policy.
 //! - **Spectrum:** a waterfall whose row rate reaches the symbol rate is a non-coherent
 //!   demodulator (POCSAG, voice spectrograms). Under a class that forbids content a spectrum
 //!   stream is refused at creation unless its row rate is at most
-//!   [`GATED_SPECTRUM_MAX_ROW_RATE_HZ`] ([`spectrum_stream_permitted`]).
-//! - **Transports:** `own-key-decrypted` streams are local-only: they may be served on a Unix
-//!   domain socket (mode 0600) but never on TCP or any remote bridge
-//!   ([`remote_transport_permitted`]).
+//!   [`GATED_SPECTRUM_MAX_ROW_RATE_HZ`] ([`spectrum_stream_permitted`]) and it declares
+//!   `fft_size` and `datatype`. The declared rate is then **enforced per row**: a token bucket
+//!   over wall-clock arrival and one over the rows' `t` spacing (burst
+//!   [`GATED_SPECTRUM_BURST_ROWS`]), plus a payload cap of `fft_size` x element size. Excess rows
+//!   are withheld and reported by a counted `GATED` drop marker.
+//! - **Transports:** `own-key-decrypted` streams are local-only: every consumer is subscribed
+//!   with a [`Locality`](super::Locality) derived from its writer type, and a `Remote` consumer
+//!   (TCP, a WebSocket bridge) is refused ([`remote_transport_permitted`]).
 //! - A missing or unknown class, wherever it is parsed (headers, plugin output, raw JSON), is
 //!   [`ContentClass::FAIL_CLOSED`].
 //!
@@ -34,6 +42,10 @@ use super::header::StreamKind;
 /// whose class forbids content. A ~30 fps survey waterfall fits; a waterfall fast enough to
 /// resolve symbols does not.
 pub const GATED_SPECTRUM_MAX_ROW_RATE_HZ: f64 = 50.0;
+
+/// Token-bucket depth (rows) of the per-row spectrum rate enforcement: absorbs scheduling jitter
+/// of a producer running at its declared rate without letting a burst resolve symbols.
+pub const GATED_SPECTRUM_BURST_ROWS: f64 = 2.0;
 
 /// Restrictiveness rank: `unrestricted` (0) < `own-key-decrypted` (1, the user's own content,
 /// local use) < classes that forbid content (2).
