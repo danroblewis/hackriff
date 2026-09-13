@@ -1,23 +1,24 @@
 //! Noise-floor estimation (C08, T-005): per-frame and slow floors, per bin and per channel,
-//! with uncertainty, occupancy, gain keying, quantisation and impulsive-frame state, and the
-//! floor-referenced threshold helper T-006 builds on. Design input: spike S4 (§3.1, §3.2, §5).
+//! with uncertainty, occupancy, gain keying, quantisation and impulsive-frame state, the
+//! floor-referenced threshold helper T-006 builds on, and floor-change events for T-020. Design
+//! input: spike S4 (§3.1, §3.2, §5); re-review fixes against 854614c.
 //!
 //! # Which floor to use
 //!
 //! | Output | Estimator | Use for | Never for |
 //! |---|---|---|---|
-//! | [`FloorFrame::wide_floor`] ([`FloorKind::Wide`]) | Per-frame FCME floor where it is within 1.5 dB of the sliding minimum of block floors over ±16 blocks; that minimum elsewhere | **The detection reference** (T-006 floor branch and OS guard). Per frame, so it absorbs impulsive frames (a static floor gave 61–4400× the design tail, S4 §3.2); unbiased on noise; keeps wide-signal interiors | Flat signals wider than ≈ 2270 bins at the defaults (raise `half_width_blocks`) |
-//! | [`FloorFrame::floor`] ([`FloorKind::Frame`]) | Block FCME per [`SpectrumFrame`](crate::SpectrumFrame) | Local floor for per-channel SNR and occupancy of narrow signals | **Wide-signal interiors**: a flat signal wider than ≈ 200 of a 256-bin block reads as floor (+10.4/+20.0 dB inside 1024/2048-bin signals at +10/+20 dB; the floor branch then fires on 9–18 % of interior bins and the guard passes 11–21 %) |
-//! | [`FloorFrame::slow_floor`] ([`FloorKind::Slow`]) | IIR (τ = [`FloorConfig::slow_time_constant_s`], 1 s) of block floors, skipping impulsive frames; re-seeded by gate releases and episodes | Science series (SPACE-050, C33), integrated (≥ 1 s) detection, floor-change episodes (AWARE-006) | Per-frame CFAR |
+//! | [`FloorFrame::wide_floor`] ([`FloorKind::Wide`]) | The per-frame floor, except inside **step-like** elevated regions (more than 3.5 dB over a slope-limited lower envelope of the block floors, ±16 blocks, slope 0.15 dB per block), where it reads the surrounding floor | **The detection reference** (T-006 floor branch and OS guard). Per frame, so it absorbs impulsive frames (a static floor gave 61–4400× the design tail, S4 §3.2); keeps wide-signal interiors (≥ 95 % of a 2048-bin +10 dB signal); floor-branch Pfa ≤ 1.5× design on tilts to 12 dB, baseband roll-off, notches and the real urban capture (`tests/floor_wide_reference.rs`) | Flat signals wider than 60 % of the span, or dips wider than 40 % of it (both ambiguous with a floor step); a feature narrower than a block in its first ≈ 50 frames, before the shape learns it |
+//! | [`FloorFrame::floor`] ([`FloorKind::Frame`]) | Block FCME per [`SpectrumFrame`](crate::SpectrumFrame), re-estimated on `psd / S` over blocks where the learned response shape `S` has features, interpolated and multiplied back by `S` | Local floor for per-channel SNR and occupancy of narrow signals | **Wide-signal interiors**: a flat signal wider than ≈ 200 of a 256-bin block reads as floor (+10.4/+20.0 dB inside 1024/2048-bin signals at +10/+20 dB; the floor branch then fires on 9–18 % of interior bins) |
+//! | [`FloorFrame::slow_floor`] ([`FloorKind::Slow`]) | IIR (τ = [`FloorConfig::slow_time_constant_s`], 1 s) of the raw block floors behind a per-block gate (below), re-seeded only by adoptions and floor-change events | Science series (SPACE-050, C33, T-021), integrated (≥ 1 s) detection, floor-change episodes (AWARE-006) | Per-frame CFAR |
 //! | [`FloorFrame::percentile`] | Block p20, Gamma-corrected | A cross-check; valid only at occupancy < 40 % | Dense bands (p50 never) |
 //! | [`MinStatistics`] | Per-bin minimum statistics | Drift tracking; idle floors of intermittent channels | **Any CFAR reference**: continuous carriers read as floor (+4 to +14 dB in S4) |
 //!
 //! Tracker floors are per bin (blocks of 256 bins, hop 64, interpolated linearly in dB between
 //! block centres), linear FS²/Hz like [`Spectrum::psd`](crate::Spectrum); per-channel values
 //! come from [`FloorFrame::channel_floor`]; band scalars are block medians. **Edge bins:** the
-//! outer ≈ 128 bins at each end hold the edge block's value
-//! ([`BlockLayout::held_bins`]), which overestimates the floor across the baseband roll-off;
-//! treat them as `edge`.
+//! outer ≈ 128 bins at each end hold the edge block's value ([`BlockLayout::held_bins`]); across
+//! a roll-off the learned shape corrects them, but before it has learned they overestimate the
+//! floor: treat them as `edge`.
 //!
 //! # Formulas and constants
 //!
@@ -27,6 +28,15 @@
 //!   smallest usable bins, at most 20 iterations, divide by `P(n+1, nT)/P(n, nT)` (0.998578).
 //!   Non-finite and zero bins are excised; blocks with < 50 % usable bins are invalid and take
 //!   the nearest valid block's value ([`FloorFrame::block_valid`]).
+//! - Response shape `S` ([`FloorFrame::shape`], per bin, ≤ 1): the floor's static downward
+//!   features (baseband roll-off, notches, the low side of a tilt). Each bin tracks the 25 %
+//!   quantile of `ln psd` over time (Robbins–Monro, τ = `wide.shape_time_constant_s`, 1 s), so a
+//!   signal present in fewer than 75 % of frames barely moves it. The tracked level is opened
+//!   (erosion then dilation over 65 bins, so bumps narrower than that vanish), referenced to the
+//!   frame's FCME band floor (robust to 80 % occupancy), and mapped to 1 within a soft deadband
+//!   of 0.5 dB plus four standard errors of the tracker (`5.9/√(frames·n)` dB). Signals only add
+//!   power, so wide signals never enter `S`. It applies from a segment's 32nd frame, is kept
+//!   across comparable resets and is forgotten when the receiver state changes.
 //! - Percentile ([`percentile`]): `q_0.2 / (P⁻¹(n, 0.2)/n)`.
 //! - Occupancy: fraction of bins above `Q⁻¹(n, 1e-2)/n · wide_floor`, less the 1 % noise
 //!   exceedance.
@@ -41,42 +51,102 @@
 //!   (Gamma(10): 1e-6 → 5.1469 dB, 1e-3 → 3.5521 dB); OS-branch guard default 3 dB, applied only
 //!   to the OS branch.
 //!
-//! # State machine (per segment)
+//! # Slow floor and gates (per segment)
 //!
 //! 1. **Warm-up** (8 frames): the slow floor is the per-block median of the frames so far, so a
-//!    start-up transient cannot seed it; the gate history fills with band floors.
-//! 2. **Impulsive gate:** a frame is `impulsive` when its band floor (dB) exceeds the running
-//!    median of the last 64 unflagged band floors by more than 0.5 dB. Impulsive frames update
-//!    neither the slow floor nor the gate history; T-006 merges boxes inside them into one
-//!    `impulsive` event. A flagged run lasting 0.1 s is a **level change**: the gate releases
-//!    (`gate_released`), its history is re-seeded from the run, and blocks whose run mean is
-//!    within the 3 dB change threshold adopt it as their slow floor. So any sustained step,
-//!    including 0.5–3 dB steps that never make an episode, ends within 0.1 s.
-//! 3. **Blocks:** within ±3 dB of the slow floor, the slow floor follows by IIR (non-impulsive
-//!    frames). Beyond it, a block starts an up or down run; a run must persist for `confirm_s`
-//!    (1 s) of consecutive frames to confirm, so wide bursty signals (LTE, WiFi, DVB bursts) that
-//!    drop out within a second never confirm.
-//! 4. **Rise → episode:** contiguous confirmed up-run blocks form (or extend an adjacent)
-//!    episode. The discriminator is the run's frame-to-frame excess std (> 1.5 dB → structured)
-//!    and the region's mean spectral kurtosis (within 0.15 of 1 → noise-like, else structured;
-//!    no SK → unverified). Noise-like and unverified episodes re-seed the slow floor at the run
-//!    level and emit [`FloorEvent`] `Rise` with the onset time (the first elevated frame), the
-//!    confirmation time, the baseline (slow floor before, segment), level, step ± statistical
-//!    uncertainty, SK, excess std, band fraction and receiver state. Structured episodes keep the
-//!    slow floor at the baseline and are not emitted by default. Known limit: a continuous,
-//!    steady, Gaussian-like wideband emission (e.g. an OFDM carrier) is indistinguishable from a
-//!    noise rise by these tests.
-//! 5. **End:** when the episode region's median `floor/baseline` stays below 1.5 dB for `end_s`
-//!    (1 s), the slow floor is re-seeded at the returned level, `End` (reason `Returned`) is
-//!    emitted with the episode duration, and the blocks enter a 2 s **hold-off** (no new runs; a
-//!    rise inside the hold-off is reported with onset at its expiry). A segment reset ends every
-//!    episode with reason `Reset`. T-020 opens an Anomaly `noise-floor-rise` on `Rise` and closes
-//!    it on `End`.
-//! 6. **Fall:** a down run outside an episode confirms after `confirm_s` and re-seeds the slow
-//!    floor at the run's level. Because signals only add power, a down run survives frames back
-//!    near the slow floor for up to `confirm_s` (e.g. a wide intermittent signal that was on
-//!    during warm-up, which the IIR would otherwise keep following); such an interrupted fall is
-//!    adopted silently (`FloorStats::floor_corrections`). A continuous fall emits `Fall`.
+//!    start-up transient cannot seed it; the gate history fills.
+//! 2. **Band-wide impulsive gate** (a T-006 input): a frame is `impulsive` when its band floor
+//!    (dB) exceeds the running median of the last 64 unflagged band floors by more than 0.5 dB.
+//!    Impulsive frames update no floor and no run statistic; T-006 merges boxes inside them into
+//!    one `impulsive` event. A flagged run lasting 0.1 s is a level change: the gate releases
+//!    (`gate_released`) and re-seeds **its history only**.
+//! 3. **Per-block slow-floor gate** ([`SlowFloorConfig`]): a block whose per-frame floor is more
+//!    than 0.5 dB from its slow floor does not update it (the excursion continues while beyond
+//!    0.25 dB). An excursion lasting 0.5 s is **adopted**: the slow floor is re-seeded at the
+//!    mean of its frames within ±3 dB (`FloorStats::adoptions`), unless the block has a rise or
+//!    fall run whose recent excess is beyond 3 dB. So band-wide or partial-band bursts shorter
+//!    than 0.5 s never move the slow floor (+1 to +3 dB, 150–300 ms, 5–20 % duty: mean error
+//!    ≤ 0.01 dB), and sub-threshold steps are adopted after 0.5 s.
+//! 4. **Long reference** (per block): an IIR of the slow floor with τ = 120 s (a cumulative mean
+//!    early in a segment), frozen during excursions. It catches changes too slow for the 1 s slow
+//!    floor to report (a 10 s ramp).
+//!
+//! # Floor-change events
+//!
+//! [`FloorEvent`]s describe **episodes**: one physical floor rise is one episode, from `Rise` to
+//! a closing `End` or `Unknown`, with `Extend` and `Update` in between; a `Fall` is a standalone
+//! event with its own id. Events are emitted in frame order; within a frame: at a reset the
+//! `Unknown`s; then `Update`/`End` from returns, merges (`End` with [`EndReason::Merged`] before
+//! the survivor's `Extend`), `Rise`/`Extend`, `Fall`, and rebaseline `End`s. Settings are
+//! [`FloorChangeConfig`] (defaults in brackets).
+//!
+//! **Per-block classifier.** A block outside any episode starts a **rise run** when its
+//! per-frame floor exceeds `min(slow, long)` by `threshold_db` [3 dB]; that reference is its
+//! baseline. The run continues while the excess over the baseline stays ≥ `end_threshold_db`
+//! [1.5 dB], and is *confirmable* once it has lasted `confirm_s` [1 s] with its recent excess
+//! (EMA, τ = `confirm_s`/3, non-impulsive frames) still ≥ 3 dB. A **fall run** starts 3 dB below
+//! `max(slow, long)`, tolerates frames back near the floor for up to `confirm_s` since its last
+//! hit (a frame below −3 dB), and is confirmable after `confirm_s` when its EMA over hit frames is
+//! ≤ −3 dB. The slow floor is frozen while a run is pending. A block in **hold-off**
+//! (`holdoff_s` [2 s] after it returned or fell) still runs but cannot seed a confirmation.
+//!
+//! **Aggregator** (each frame, in order):
+//! 1. *Returns.* A member block has returned when its excess over its baseline, less the
+//!    background drift since it joined (the running median slow-floor change of idle blocks),
+//!    stays below 1.5 dB for `end_s` [1 s]. A completed member waits while another member of the
+//!    same episode is part-way through its return, so blocks crossing a few frames apart leave
+//!    together. Leaving re-seeds the block's slow floor at its return level and starts its
+//!    hold-off; a block that is still elevated never leaves and is never re-seeded. If members
+//!    remain: `Update` (`change_bins` = the returned blocks, `bins` = the remaining extent);
+//!    otherwise `End` with [`EndReason::Returned`] (`onset` = the frame from which all the leaving blocks stayed back).
+//! 2. *Rises.* A maximal run of adjacent blocks, each pending a rise or a member of an open
+//!    episode, that contains a confirmable block not in hold-off forms a group; all its pending
+//!    blocks join, so blocks in hold-off or with shorter runs join a neighbour's confirmation.
+//!    No episode touched: a new episode, `Rise` (`onset` = the group's earliest onset, `level` =
+//!    mean over the run, class of the group). One touched: `Extend` (`onset` = the added blocks'
+//!    onset, `change_bins` = the added blocks). Several touched: the oldest emitted episode
+//!    survives, every other ends with `End` ([`EndReason::Merged`], `merged_into`), and the
+//!    survivor emits `Extend` over the combined extent. A joining block's slow floor is re-seeded
+//!    at its recent level, unless its group is `Structured` (then it stays at the baseline: the
+//!    floor under a wide signal).
+//! 3. *Falls.* A maximal run of adjacent blocks pending a fall, with a confirmable seed, is one
+//!    `Fall`. Edge blocks whose hit fraction is below `edge_hit_fraction` [0.5] of the group
+//!    median do not vote; the fall is `interrupted` when more than half of the voting blocks
+//!    have a hit fraction below `fall_hit_fraction` [0.9] (an intermittent signal the slow floor
+//!    had followed: a correction rather than a drop of the floor). Every block of the run adopts
+//!    its hit-frame level and starts its hold-off.
+//! 4. *Rebaseline.* An episode open for `rebaseline_s` [600 s] ends with
+//!    [`EndReason::Rebaselined`]; its level becomes the floor (a later drop is a `Fall`).
+//!
+//! **Discriminator.** Excess noise = standard deviation of the frame-to-frame first differences
+//! of the excess / √2 (a level trend such as an onset ramp adds nothing): > 1.5 dB →
+//! `Structured`; otherwise mean spectral kurtosis within 0.15 of 1 → `NoiseLike`, away from 1 →
+//! `Structured`, no SK → `Unverified`. All classes are emitted by default (`emit_structured`);
+//! consumers filter by class. Known limit: a continuous, steady, Gaussian-like wideband emission
+//! (e.g. an OFDM carrier) is indistinguishable from a noise rise.
+//!
+//! **Resets.** A *comparable* reset (a gap, stream start or [`NoiseFloorTracker::reset`] with the
+//! same [`GainKey`]) suspends open episodes and carries every block's reference (its baseline if
+//! a member, its slow floor otherwise) to the end of the new segment's warm-up. There, members
+//! still ≥ 1.5 dB above their carried baseline stay (the episode continues with the same id, with
+//! an `Update` if some left); an episode with no member left ends with `End`
+//! ([`EndReason::Reset`], `onset` = the resetting frame). Other blocks more than 3 dB from their
+//! carried reference restart from it, and changes inside the warm-up start runs backdated to
+//! their first beyond-threshold warm-up frame (a rise three frames after a gap is a `Rise` with
+//! that onset). An *incomparable* reset (gain, tune beyond 0.25 bin, rate, bandwidth, antenna port
+//! or resolution) closes each open episode with `Unknown`: the new segment seeds at whatever it
+//! sees, so the physical rise may continue unseen. **Consumers must treat a later bare `Fall`
+//! over an `Unknown` episode's region as a possible close of it.**
+//!
+//! **Invariants** (`tests/floor_episodes.rs`: named repros and randomised sequences): no
+//! `Extend`/`Update`/`End`/`Unknown` without an open `Rise`, nothing after a close, one `Rise`
+//! per episode; every `Rise` closes once the scene is quiet for `rebaseline_s` + `end_s`;
+//! `Extend` adds inside the new extent and `Update` removes from the old; open episodes never
+//! touch; no block's slow floor jumps by the threshold without an event covering it.
+//!
+//! **T-020 mapping:** open an Anomaly `noise-floor-rise` on `Rise` (region `f_lo_hz`–`f_hi_hz`,
+//! onset `episode_onset_t`); update its region on `Extend`/`Update`; close it on `End` (fold it
+//! into `merged_into` for `Merged`) or as indeterminate on `Unknown`.
 //!
 //! # Gain state
 //!
@@ -89,11 +159,12 @@
 //! # Real-time path
 //!
 //! [`NoiseFloorTracker::update`] allocates nothing once the first frame of a given resolution has
-//! been seen (tested under a counting allocator), including resets, gate releases and episodes.
-//! Cost at 4096 bins: see `benches/floor_throughput.rs`.
+//! been seen (tested under a counting allocator), including resets, gate releases, shape updates
+//! and every event kind. Cost at 4096 bins (mean, p99.9, max): `benches/floor_throughput.rs`.
 
 pub mod averaging;
 pub mod blocks;
+mod episodes;
 pub mod fcme;
 pub mod gamma;
 pub mod minstat;
@@ -101,6 +172,7 @@ pub mod percentile;
 pub mod quantisation;
 pub mod threshold;
 pub mod tracker;
+mod wide;
 
 use std::fmt;
 
@@ -114,7 +186,7 @@ pub use threshold::{DEFAULT_GUARD_DB, FloorThreshold, snr_wall_db};
 pub use tracker::{
     ChannelFloor, EndReason, FLOOR_RESET_ON, FloorChangeClass, FloorChangeConfig, FloorConfig,
     FloorEvent, FloorEventKind, FloorFrame, FloorKind, FloorStats, GainKey, ImpulsiveGateConfig,
-    NoiseFloorTracker, PercentileCheck, WideReferenceConfig,
+    NoiseFloorTracker, PercentileCheck, SlowFloorConfig, WideReferenceConfig,
 };
 
 /// Which estimator produced a floor.

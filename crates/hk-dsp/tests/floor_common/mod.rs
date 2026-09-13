@@ -78,6 +78,24 @@ impl GammaFrames {
         for (p, &m) in frame.spectrum.psd.iter_mut().zip(profile) {
             *p = m * gamma::sample_unit_mean(&mut self.rng, self.n_avg) as f32;
         }
+        self.stamp(frame, flags);
+    }
+
+    /// As [`fill`](Self::fill), with pooled variates (cheap; for long event scenarios, not for
+    /// tail statistics).
+    pub fn fill_pooled(
+        &mut self,
+        frame: &mut SpectrumFrame,
+        profile: &[f32],
+        flags: Discontinuity,
+        pool: &mut GammaPool,
+    ) {
+        assert_eq!(profile.len(), self.bins);
+        pool.fill(&mut frame.spectrum.psd, profile);
+        self.stamp(frame, flags);
+    }
+
+    fn stamp(&mut self, frame: &mut SpectrumFrame, flags: Discontinuity) {
         let index = self.seq * u64::from(self.n_avg) * self.bins as u64;
         frame.seq = self.seq;
         frame.t = SampleTime {
@@ -96,6 +114,32 @@ impl GammaFrames {
         let mut f = self.empty_frame();
         self.fill(&mut f, profile, Discontinuity::NONE);
         f
+    }
+}
+
+/// 65 536 pre-drawn unit-mean `Gamma(K)` variates, read at a random offset and odd stride per
+/// frame.
+pub struct GammaPool {
+    values: Vec<f32>,
+    rng: Rng,
+}
+
+impl GammaPool {
+    pub fn new(n_avg: u32, seed: u64) -> Self {
+        let mut rng = Rng::new(seed);
+        let values = (0..1 << 16)
+            .map(|_| gamma::sample_unit_mean(&mut rng, n_avg) as f32)
+            .collect();
+        Self { values, rng }
+    }
+
+    pub fn fill(&mut self, psd: &mut [f32], profile: &[f32]) {
+        let mask = self.values.len() - 1;
+        let start = self.rng.next_u64() as usize & mask;
+        let stride = ((self.rng.next_u64() as usize & 0x3ff) << 1) | 1;
+        for (i, (p, &m)) in psd.iter_mut().zip(profile).enumerate() {
+            *p = m * self.values[(start + i * stride) & mask];
+        }
     }
 }
 
