@@ -4,11 +4,13 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
 use super::{
-    RepoError, Repository, blob, body_by_id, bump_extent, enum_parse, enum_text, finite, int,
-    opt_blob, region_bounds,
+    RepoError, Repository, blob, bodies, body_by_id, bump_extent, enum_parse, enum_text, finite,
+    int, opt_blob, region_bounds,
 };
 use crate::cluster::{IdentityAccess, InventoryEntry, InventoryIdentity};
-use crate::detection::{Track, TrackState};
+use crate::detection::{
+    MAX_TRACK_PAGE, PageRequest, Track, TrackFilter, TrackKind, TrackPage, TrackSegment, TrackState,
+};
 use crate::emitter::{
     Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation, Identity,
     KnownStatus, KnownStatusChange, LinkTarget, StatusAuthor,
@@ -108,6 +110,120 @@ pub(super) fn link_target(kind: &str, id: Uuid) -> Result<LinkTarget, RepoError>
     })
 }
 
+/// The track region query. Parameters: f_lo min, query hi, query lo, t_start min, query t1,
+/// query t0, kind (NULL = any), include merged, min detections, hop set (NULL = any), limit,
+/// offset.
+pub(super) const TRACK_REGION_SQL: &str = "SELECT body FROM track \
+     WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 \
+       AND t_start BETWEEN ?4 AND ?5 AND t_end >= ?6 \
+       AND (?7 IS NULL OR kind = ?7) AND (?8 OR state != 'merged') \
+       AND detection_count >= ?9 AND (?10 IS NULL OR hop_set = ?10) \
+     ORDER BY t_start, track_id LIMIT ?11 OFFSET ?12";
+
+/// [`Repository::upsert_track`] inside an open write transaction.
+pub(super) fn upsert_track_on(conn: &Connection, track: &Track) -> Result<(), RepoError> {
+    let (state, merged_into) = match track.state {
+        TrackState::Open => ("open", None),
+        TrackState::Closed => ("closed", None),
+        TrackState::MergedInto(t) => ("merged", Some(blob(t))),
+    };
+    let fc = finite(track.f_center_hz, "f_center_hz")?;
+    let bw = finite(track.bandwidth_hz, "bandwidth_hz")?;
+    if bw < 0.0 {
+        return Err(RepoError::Invalid(format!(
+            "track {} bandwidth {bw} is negative",
+            track.id
+        )));
+    }
+    let kind = if track.timing.hop_set_hz.is_empty() {
+        "channel"
+    } else {
+        "hop-set"
+    };
+    conn.prepare_cached(
+        "INSERT INTO track (track_id, state, merged_into, split_from, t_start, t_end, \
+         f_center, f_lo, f_hi, kind, detection_count, hop_set, updated_at, body) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+         ON CONFLICT (track_id) DO UPDATE SET state = excluded.state, \
+         merged_into = excluded.merged_into, split_from = excluded.split_from, \
+         t_start = excluded.t_start, t_end = excluded.t_end, f_center = excluded.f_center, \
+         f_lo = excluded.f_lo, f_hi = excluded.f_hi, kind = excluded.kind, \
+         detection_count = excluded.detection_count, hop_set = excluded.hop_set, \
+         updated_at = excluded.updated_at, body = excluded.body",
+    )?
+    .execute(params![
+        blob(track.id),
+        state,
+        merged_into,
+        opt_blob(track.split_from),
+        track.time.start.as_unix_nanos(),
+        track.time.end.as_unix_nanos(),
+        fc,
+        fc - bw / 2.0,
+        fc + bw / 2.0,
+        kind,
+        int(track.detection_count, "detection_count")?,
+        opt_blob(track.timing.hop_set),
+        track.updated_at.as_unix_nanos(),
+        serde_json::to_string(track)?
+    ])?;
+    bump_extent(conn, "track", bw, track.time.duration_ns())?;
+    Ok(())
+}
+
+/// [`Repository::link_detections_to_track`] inside an open write transaction.
+pub(super) fn link_detections_on(
+    conn: &Connection,
+    track_id: TrackId,
+    detections: &[DetectionId],
+    linked_at: Timestamp,
+) -> Result<(), RepoError> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT OR IGNORE INTO track_detection (track_id, detection_id, linked_at) \
+         VALUES (?1, ?2, ?3)",
+    )?;
+    for d in detections {
+        stmt.execute(params![blob(track_id), blob(*d), linked_at.as_unix_nanos()])?;
+    }
+    Ok(())
+}
+
+/// [`Repository::track_detections`] on any connection or transaction.
+pub(super) fn track_detections_on(
+    conn: &Connection,
+    track_id: TrackId,
+) -> Result<Vec<DetectionId>, RepoError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT td.detection_id FROM track_detection td \
+         JOIN detection d ON d.detection_id = td.detection_id \
+         WHERE td.track_id = ?1 ORDER BY d.t_start, td.detection_id",
+    )?;
+    let ids = stmt
+        .query_map([blob(track_id)], |r| r.get::<_, [u8; 16]>(0))?
+        .map(|b| b.map(|b| DetectionId::from_uuid(Uuid::from_bytes(b))))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
+/// [`Repository::append_track_segments`] inside an open write transaction.
+pub(super) fn append_track_segments_on(
+    conn: &Connection,
+    segments: &[TrackSegment],
+) -> Result<(), RepoError> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO track_segment (track_id, at, kind) VALUES (?1, ?2, ?3) \
+         ON CONFLICT DO NOTHING",
+    )?;
+    for s in segments {
+        stmt.execute(params![
+            blob(s.track),
+            s.at.as_unix_nanos(),
+            enum_text(&s.kind)?
+        ])?;
+    }
+    Ok(())
+}
+
 fn emitter_exists(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
     Ok(conn
         .prepare_cached("SELECT 1 FROM emitter WHERE emitter_id = ?1")?
@@ -185,30 +301,9 @@ impl Repository {
 
     /// Inserts or replaces a Track aggregate (it grows as detections arrive).
     pub fn upsert_track(&mut self, track: &Track) -> Result<(), RepoError> {
-        let (state, merged_into) = match track.state {
-            TrackState::Open => ("open", None),
-            TrackState::Closed => ("closed", None),
-            TrackState::MergedInto(t) => ("merged", Some(blob(t))),
-        };
-        self.conn.execute(
-            "INSERT INTO track (track_id, state, merged_into, split_from, t_start, t_end, \
-             f_center, updated_at, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-             ON CONFLICT (track_id) DO UPDATE SET state = excluded.state, \
-             merged_into = excluded.merged_into, split_from = excluded.split_from, \
-             t_start = excluded.t_start, t_end = excluded.t_end, f_center = excluded.f_center, \
-             updated_at = excluded.updated_at, body = excluded.body",
-            params![
-                blob(track.id),
-                state,
-                merged_into,
-                opt_blob(track.split_from),
-                track.time.start.as_unix_nanos(),
-                track.time.end.as_unix_nanos(),
-                track.f_center_hz,
-                track.updated_at.as_unix_nanos(),
-                serde_json::to_string(track)?
-            ],
-        )?;
+        let tx = self.write_tx()?;
+        upsert_track_on(&tx, track)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -230,31 +325,87 @@ impl Repository {
         linked_at: Timestamp,
     ) -> Result<(), RepoError> {
         let tx = self.write_tx()?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT OR IGNORE INTO track_detection (track_id, detection_id, linked_at) \
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for d in detections {
-                stmt.execute(params![blob(track_id), blob(*d), linked_at.as_unix_nanos()])?;
-            }
-        }
+        link_detections_on(&tx, track_id, detections, linked_at)?;
         tx.commit()?;
         Ok(())
     }
 
     /// Member detections of a track, ordered by detection start time (then id).
     pub fn track_detections(&self, track_id: TrackId) -> Result<Vec<DetectionId>, RepoError> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT td.detection_id FROM track_detection td \
-             JOIN detection d ON d.detection_id = td.detection_id \
-             WHERE td.track_id = ?1 ORDER BY d.t_start, td.detection_id",
+        track_detections_on(&self.conn, track_id)
+    }
+
+    /// Appends segment boundaries (idempotent; the tracks must exist).
+    pub fn append_track_segments(&mut self, segments: &[TrackSegment]) -> Result<(), RepoError> {
+        let tx = self.write_tx()?;
+        append_track_segments_on(&tx, segments)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Segment boundaries of a track, in time order.
+    pub fn track_segments(&self, track_id: TrackId) -> Result<Vec<TrackSegment>, RepoError> {
+        let raw = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT at, kind FROM track_segment WHERE track_id = ?1 ORDER BY at, kind",
+            )?;
+            stmt.query_map([blob(track_id)], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        raw.into_iter()
+            .map(|(at, kind)| {
+                Ok(TrackSegment {
+                    track: track_id,
+                    at: Timestamp::from_unix_nanos(at),
+                    kind: enum_parse(kind)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Tracks whose frequency × time box (`f_center ± bandwidth/2` × `time`) overlaps `region`
+    /// (closed intervals) and that pass `filter`, ordered by start time (then id), one page at a
+    /// time. Index-bounded like the other region queries (AWARE-042).
+    pub fn tracks_in_region(
+        &self,
+        region: &Region,
+        filter: &TrackFilter,
+        page: PageRequest,
+    ) -> Result<TrackPage, RepoError> {
+        let limit = page.limit.clamp(1, MAX_TRACK_PAGE);
+        let tx = self.read_tx()?;
+        let b = region_bounds(&tx, "track", region)?;
+        let kind = match filter.kind {
+            TrackKind::Any => None,
+            TrackKind::Channel => Some("channel"),
+            TrackKind::HopSet => Some("hop-set"),
+        };
+        let mut tracks: Vec<Track> = bodies(
+            &tx,
+            TRACK_REGION_SQL,
+            params![
+                b.f_lo_min,
+                b.hi,
+                b.lo,
+                b.t_start_min,
+                b.t1,
+                b.t0,
+                kind,
+                filter.include_merged,
+                int(filter.min_detections, "min_detections")?,
+                opt_blob(filter.hop_set),
+                i64::from(limit) + 1,
+                i64::try_from(page.offset).unwrap_or(i64::MAX)
+            ],
         )?;
-        let ids = stmt
-            .query_map([blob(track_id)], |r| r.get::<_, [u8; 16]>(0))?
-            .map(|b| b.map(|b| DetectionId::from_uuid(Uuid::from_bytes(b))))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ids)
+        let more = tracks.len() > limit as usize;
+        tracks.truncate(limit as usize);
+        Ok(TrackPage {
+            tracks,
+            next_offset: more.then(|| page.offset + u64::from(limit)),
+        })
     }
 
     // ---- Emitter ----

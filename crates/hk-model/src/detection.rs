@@ -257,6 +257,131 @@ pub struct TimingFeatures {
     /// Tracks that repeatedly co-occur with this one (inter-channel co-occurrence).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_occurring: Vec<TrackId>,
+    /// Confidence of `period_s`, 0–1 (share of bursts on the period grid × slot coverage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_confidence: Option<f64>,
+    /// RMS deviation of burst starts from the period grid, s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_jitter_s: Option<f64>,
+    /// Burst-length distribution (finished bursts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_length: Option<BurstLengths>,
+    /// Segment boundaries (gain change, retune, provenance change, discontinuity) crossed. The
+    /// boundaries themselves are [`TrackSegment`] rows.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub segment_count: u32,
+    /// Raster step of `hop_set_hz`, Hz (hop-set aggregates).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hop_raster_hz: Option<f64>,
+    /// Hop set (its aggregate Track) this channel track belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hop_set: Option<TrackId>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Burst-length distribution in compact form: moments plus quantiles (the tracker's log
+/// histogram, ±15 %).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BurstLengths {
+    /// Bursts.
+    pub count: u64,
+    /// Mean, s.
+    pub mean_s: f64,
+    /// Standard deviation, s (0 for one burst).
+    pub std_s: f64,
+    /// Shortest, s.
+    pub min_s: f64,
+    /// Median, s.
+    pub p50_s: f64,
+    /// 90th percentile, s.
+    pub p90_s: f64,
+    /// Longest, s.
+    pub max_s: f64,
+}
+
+/// Why a track crossed a segment boundary. The track continues across it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SegmentKind {
+    /// LNA/VGA/amp changed.
+    GainChange,
+    /// The tuned centre changed.
+    Retune,
+    /// Another provenance change (overload flag, filter, clock…).
+    Provenance,
+    /// A detector transition (gap, floor-segment reset) without a provenance change.
+    Discontinuity,
+}
+
+/// One segment boundary inside a track (append-only). The provenance on either side is that of
+/// the member detections before and after `at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TrackSegment {
+    /// Track.
+    pub track: TrackId,
+    /// Start of the first member after the boundary.
+    pub at: Timestamp,
+    /// Kind.
+    pub kind: SegmentKind,
+}
+
+/// Which tracks a region query returns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrackKind {
+    /// Channel tracks and hop-set aggregates.
+    #[default]
+    Any,
+    /// Channel tracks only.
+    Channel,
+    /// Hop-set aggregates only (`timing.hop_set_hz` non-empty).
+    HopSet,
+}
+
+/// Track region-query filter (all conditions hold).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrackFilter {
+    /// Channel tracks, hop sets or both.
+    pub kind: TrackKind,
+    /// Include tracks merged into another (skipped by default: the survivor carries them).
+    pub include_merged: bool,
+    /// At least this many member detections.
+    pub min_detections: u64,
+    /// Only members of this hop set.
+    pub hop_set: Option<TrackId>,
+}
+
+/// A page request: at most `limit` rows (clamped to 1..=[`MAX_TRACK_PAGE`]) after skipping
+/// `offset`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRequest {
+    /// Page size.
+    pub limit: u32,
+    /// Rows to skip.
+    pub offset: u64,
+}
+
+/// Largest track page.
+pub const MAX_TRACK_PAGE: u32 = 1000;
+
+impl Default for PageRequest {
+    fn default() -> Self {
+        Self {
+            limit: 100,
+            offset: 0,
+        }
+    }
+}
+
+/// A page of tracks ordered by start time (then id).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackPage {
+    /// Rows.
+    pub tracks: Vec<Track>,
+    /// Offset of the next page, if there is one.
+    pub next_offset: Option<u64>,
 }
 
 /// A linked series of detections (docs/07 §2.10). A mutable aggregate: it grows as detections

@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use super::interpret::event_region_sql;
-use super::inventory::EMITTER_REGION_SQL;
+use super::inventory::{EMITTER_REGION_SQL, TRACK_REGION_SQL};
 use super::measure::DETECTION_REGION_SQL;
 use super::{RepoError, Repository, SCHEMA_VERSION, blob, region_bounds};
 use crate::detection::SpurReason;
@@ -508,6 +508,8 @@ fn schema_migrates_in_wal_mode_with_region_and_time_indexes() {
             "idx_anomaly_t_start_t_end",
             "idx_explanation_f_lo_f_hi",
             "idx_explanation_t_start_t_end",
+            "idx_track_f_lo_f_hi",
+            "idx_track_t_start_t_end",
         ] {
             assert!(names.iter().any(|n| n == required), "missing {required}");
         }
@@ -1289,6 +1291,270 @@ fn track_detections_are_ordered_by_detection_time_not_id() {
     );
 }
 
+fn channel_track(f_center_hz: f64, bandwidth_hz: f64, time: TimeRange, count: u64) -> Track {
+    Track {
+        id: TrackId::new(),
+        state: TrackState::Closed,
+        split_from: None,
+        time,
+        f_center_hz,
+        bandwidth_hz,
+        detection_count: count,
+        timing: TimingFeatures::default(),
+        updated_at: time.end,
+    }
+}
+
+/// T-035: every TrackSummary timing feature survives the repository (AWARE-036).
+#[test]
+fn track_timing_features_and_segments_round_trip_aware_036() {
+    let mut b = base();
+    let hop = channel_track(916.0e6, 2.2e6, tr(0, 60), 40);
+    let mut hop = hop;
+    hop.timing.hop_set_hz = vec![915.0e6, 915.2e6, 916.8e6];
+    hop.timing.hop_rate_hz = Some(8.5);
+    hop.timing.hop_raster_hz = Some(200e3);
+    let mut ch = channel_track(915.2e6, 125e3, tr(1, 59), 12);
+    ch.timing = TimingFeatures {
+        period_s: Some(0.25),
+        duty_cycle: Some(0.125),
+        inter_arrival_mean_s: Some(0.5),
+        inter_arrival_std_s: Some(0.0625),
+        co_occurring: vec![hop.id],
+        period_confidence: Some(0.75),
+        period_jitter_s: Some(0.001),
+        burst_length: Some(BurstLengths {
+            count: 12,
+            mean_s: 0.0125,
+            std_s: 0.002,
+            min_s: 0.01,
+            p50_s: 0.0125,
+            p90_s: 0.015,
+            max_s: 0.02,
+        }),
+        segment_count: 2,
+        hop_set: Some(hop.id),
+        ..TimingFeatures::default()
+    };
+    serde_round_trip(&ch);
+    serde_round_trip(&hop);
+    b.repo.upsert_track(&hop).unwrap();
+    b.repo.upsert_track(&ch).unwrap();
+    assert_eq!(b.repo.track(ch.id).unwrap(), ch);
+    assert_eq!(b.repo.track(hop.id).unwrap(), hop);
+    // Absent features stay absent in the JSON body (additive schema).
+    let body: String = b
+        .repo
+        .conn
+        .query_row(
+            "SELECT body FROM track WHERE track_id = ?1",
+            [blob(hop.id)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!body.contains("segment_count") && !body.contains("burst_length"));
+
+    let segs = [
+        TrackSegment {
+            track: ch.id,
+            at: t(30),
+            kind: SegmentKind::GainChange,
+        },
+        TrackSegment {
+            track: ch.id,
+            at: t(10),
+            kind: SegmentKind::Retune,
+        },
+    ];
+    b.repo.append_track_segments(&segs).unwrap();
+    b.repo.append_track_segments(&segs[..1]).unwrap(); // idempotent
+    assert_eq!(
+        b.repo.track_segments(ch.id).unwrap(),
+        vec![segs[1], segs[0]]
+    );
+    assert!(b.repo.track_segments(hop.id).unwrap().is_empty());
+    let orphan = TrackSegment {
+        track: TrackId::new(),
+        ..segs[0]
+    };
+    assert!(b.repo.append_track_segments(&[orphan]).is_err());
+}
+
+/// T-035: the track region query — overlap on the stored edges, filters, pages (AWARE-042).
+#[test]
+fn tracks_in_region_overlap_filters_and_pages_aware_042() {
+    let mut b = base();
+    let hop = {
+        let mut h = channel_track(916.0e6, 2.2e6, tr(0, 100), 30);
+        h.timing.hop_set_hz = vec![915.0e6, 917.0e6];
+        h
+    };
+    let mut a = channel_track(915.0e6, 100e3, tr(10, 20), 10);
+    a.timing.hop_set = Some(hop.id);
+    let mut c = channel_track(917.0e6, 100e3, tr(30, 40), 3);
+    c.timing.hop_set = Some(hop.id);
+    let far = channel_track(433.92e6, 20e3, tr(10, 20), 50);
+    let mut merged = channel_track(915.01e6, 100e3, tr(12, 18), 4);
+    merged.state = TrackState::MergedInto(a.id);
+    // A long, wide track upserted last (it grows): the extent must still bound the query.
+    let mut long = channel_track(920.0e6, 10e3, tr(0, 10), 1);
+    b.repo.upsert_track(&long).unwrap();
+    for x in [&hop, &a, &c, &far, &merged] {
+        b.repo.upsert_track(x).unwrap();
+    }
+    long.time = tr(0, 5_000);
+    long.bandwidth_hz = 12e6;
+    long.detection_count = 200;
+    b.repo.upsert_track(&long).unwrap();
+
+    let ids = |p: TrackPage| p.tracks.iter().map(|t| t.id).collect::<Vec<_>>();
+    let any = TrackFilter::default();
+    let page = PageRequest::default();
+    let q = Region::new(FreqRange::new(914.9e6, 915.05e6), tr(15, 16));
+    // Edges: a spans 914.95–915.05 MHz; hop 914.9–917.1; long 914–926 over 0–5000 s.
+    assert_eq!(
+        ids(b.repo.tracks_in_region(&q, &any, page).unwrap()),
+        vec![hop.id, long.id, a.id]
+    );
+    let with_merged = TrackFilter {
+        include_merged: true,
+        ..any
+    };
+    assert_eq!(
+        ids(b.repo.tracks_in_region(&q, &with_merged, page).unwrap()),
+        vec![hop.id, long.id, a.id, merged.id]
+    );
+    // Closed interval: touching the frequency edge (915.05 MHz) and the end time (t = 20) counts.
+    let edge = Region::new(FreqRange::new(915.05e6, 915.06e6), tr(20, 21));
+    assert!(
+        ids(b.repo.tracks_in_region(&edge, &any, page).unwrap()).contains(&a.id),
+        "closed interval"
+    );
+    let wide = Region::new(FreqRange::new(900e6, 930e6), tr(0, 100));
+    let hops_only = TrackFilter {
+        kind: TrackKind::HopSet,
+        ..any
+    };
+    assert_eq!(
+        ids(b.repo.tracks_in_region(&wide, &hops_only, page).unwrap()),
+        vec![hop.id]
+    );
+    let members = TrackFilter {
+        kind: TrackKind::Channel,
+        hop_set: Some(hop.id),
+        ..any
+    };
+    assert_eq!(
+        ids(b.repo.tracks_in_region(&wide, &members, page).unwrap()),
+        vec![a.id, c.id]
+    );
+    let busy = TrackFilter {
+        min_detections: 10,
+        kind: TrackKind::Channel,
+        ..any
+    };
+    assert_eq!(
+        ids(b.repo.tracks_in_region(&wide, &busy, page).unwrap()),
+        vec![long.id, a.id]
+    );
+    // Pages.
+    let p1 = b
+        .repo
+        .tracks_in_region(
+            &wide,
+            &any,
+            PageRequest {
+                limit: 2,
+                offset: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(p1.next_offset, Some(2));
+    let p2 = b
+        .repo
+        .tracks_in_region(
+            &wide,
+            &any,
+            PageRequest {
+                limit: 2,
+                offset: 2,
+            },
+        )
+        .unwrap();
+    assert_eq!(p2.next_offset, None);
+    assert_eq!(
+        [ids(p1), ids(p2)].concat(),
+        vec![hop.id, long.id, a.id, c.id]
+    );
+    // Outside in time or frequency.
+    let later = Region::new(FreqRange::new(915e6, 917e6), tr(6_000, 7_000));
+    assert!(
+        b.repo
+            .tracks_in_region(&later, &any, page)
+            .unwrap()
+            .tracks
+            .is_empty()
+    );
+}
+
+/// T-035: a failed write inside `batch` rolls back everything written before it.
+#[test]
+fn batch_is_one_transaction_and_rolls_back_on_failure() {
+    let mut b = base();
+    let d = det(b.survey.id, b.prov_id, 915.0e6, 40e3, tr(10, 11));
+    let track = channel_track(915.0e6, 40e3, tr(10, 11), 1);
+    let unknown = DetectionId::new();
+    let err = b
+        .repo
+        .batch(|tx| {
+            tx.insert_detections(std::slice::from_ref(&d))?;
+            tx.upsert_track(&track)?;
+            tx.link_detections_to_track(track.id, &[d.id], t(12))?;
+            assert_eq!(
+                tx.track_detections(track.id)?,
+                vec![d.id],
+                "own writes visible"
+            );
+            // Foreign key: the detection was never written.
+            tx.link_detections_to_track(track.id, &[unknown], t(12))
+        })
+        .unwrap_err();
+    assert!(matches!(err, RepoError::Engine(_)), "{err}");
+    assert!(matches!(
+        b.repo.track(track.id),
+        Err(RepoError::NotFound { .. })
+    ));
+    assert!(matches!(
+        b.repo.detection(d.id),
+        Err(RepoError::NotFound { .. })
+    ));
+    // A closure error rolls back too.
+    let refused = b.repo.batch(|tx| {
+        tx.upsert_track(&track)?;
+        Err::<(), _>(RepoError::Invalid("caller gave up".into()))
+    });
+    assert!(refused.is_err());
+    assert!(b.repo.track(track.id).is_err());
+    // And a successful batch commits everything.
+    let n = b
+        .repo
+        .batch(|tx| {
+            tx.insert_detections(std::slice::from_ref(&d))?;
+            tx.upsert_track(&track)?;
+            tx.link_detections_to_track(track.id, &[d.id], t(12))?;
+            tx.append_track_segments(&[TrackSegment {
+                track: track.id,
+                at: t(10),
+                kind: SegmentKind::Discontinuity,
+            }])?;
+            Ok(7)
+        })
+        .unwrap();
+    assert_eq!(n, 7);
+    assert_eq!(b.repo.track_detections(track.id).unwrap(), vec![d.id]);
+    assert_eq!(b.repo.track_segments(track.id).unwrap().len(), 1);
+}
+
 /// A 0.5 s span starting at `sec`.
 fn half_second_from(sec: i64) -> TimeRange {
     TimeRange::new(t(sec), t(sec).saturating_add_nanos(500_000_000))
@@ -1344,6 +1610,30 @@ fn region_and_time_queries_use_indexes() {
     );
     eprintln!("emitter region plan: {plan:?}");
     assert_uses_index(&plan, "emitter");
+
+    let k = region_bounds(&r.conn, "track", &q).unwrap();
+    let none: Option<&str> = None;
+    let no_hop: Option<[u8; 16]> = None;
+    let plan = query_plan(
+        r,
+        TRACK_REGION_SQL,
+        params![
+            k.f_lo_min,
+            k.hi,
+            k.lo,
+            k.t_start_min,
+            k.t1,
+            k.t0,
+            none,
+            false,
+            0_i64,
+            no_hop,
+            101_i64,
+            0_i64
+        ],
+    );
+    eprintln!("track region plan: {plan:?}");
+    assert_uses_index(&plan, "track");
 
     for table in ["anomaly", "explanation"] {
         let b = region_bounds(&r.conn, table, &q).unwrap();
