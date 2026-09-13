@@ -696,7 +696,7 @@ tasks:
     effort: high
     note: "folded into the running T-037a agent (owns hk-cli + HackRF source); exposes hk_api::LiveControl for T-044 controls"
   - id: T-043
-    title: Listen - click a signal -> auto analog demod (T-012) -> audio streamed to the browser (Web Audio), legal gating kept
+    title: Listen - click a signal -> auto analog demod (T-012) -> audio streamed to the browser (Web Audio)
     milestone: M0b
     status: done
     commit: "58762a5 (merged)"
@@ -769,7 +769,7 @@ tasks:
   - id: T-047
     title: Blind ground-truth acceptance harness (fixture truth lists hidden from the system, top-k explanation asserts) + audit existing tests
     milestone: M0b
-    status: todo
+    status: in-progress
     switch_recipe: "in blind_config replace replay_config open_replay with hk_pipeline::open_mock_replay(&blind, Pacing::Unpaced, MockEnd::Stop); keep cfg.source_class = replay.class; set cfg.device_id = replay.device.device_id; BlindConfig.replay type Replay -> DeviceReplay; start() boxes replay.source; iq_shift_hz can become a real tune(); mock needs single-centre recordings"
     deps: [T-039, T-037, T-049]
     parallel_group: J
@@ -780,7 +780,6 @@ tasks:
     needs: none
     model: opus
     effort: medium
-    hold: "starts after T-049 (mock SDR), T-039 (ranked top-k explanations + off-raster flag + first FM blind cases, in progress) and T-037b (owns signal_001/062 acceptance files) merge"
   - id: T-048
     milestone: M0b
     title: Generic SDR device interface (named gain stages, optional bias-tee/sweep, timestamps, overruns; SoapySDR-ready, no HackRF specifics in core)
@@ -852,8 +851,7 @@ tasks:
   - id: T-052
     milestone: M0b
     title: Multi-region selections as first-class objects (persisted; list/rename/delete; send to demod/record/inspect)
-    status: todo
-    hold: "after T-051 merges (both edit ui/src main.ts and selections)"
+    status: in-progress
     deps: [T-044, T-050]
     parallel_group: N
     use_cases: [AWARE-042, SIGNAL-062]
@@ -924,7 +922,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    hold: "after T-050 (owns config.rs, spectrum.rs) and T-058 (detect path) merge; also swap plugin.rs interim classification for family::record_decoder_evidence"
+    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-057
     milestone: M0b
     title: Scheduler virtual tuning places signals at wrong absolute frequencies (~368 kHz axis offset root cause)
@@ -981,7 +979,7 @@ tasks:
   - id: T-060
     milestone: M0b
     title: Stream demodulated outputs to external programs (bits, symbols, audio over TCP/WebSocket; netcat + Python client example)
-    status: todo
+    status: in-progress
     deps: [T-043, T-049]
     parallel_group: P
     use_cases: [AWARE-036, SIGNAL-062, SIGNAL-001]
@@ -992,7 +990,6 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    hold: "after T-043 (audio WS transport in hk-stream, told to keep it reusable) and T-049 (mock SDR) merge"
   - id: T-061
     milestone: M0b
     title: Record outputs to files (bitstreams, symbols, WAV audio, IQ slices) from UI and CLI, per selection
@@ -1057,7 +1054,7 @@ tasks:
     model: opus
     effort: high
     core_interface: true
-    hold: "after T-058 merges (held behind T-063)"
+    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-065
     milestone: M0b
     title: Analog mode selector quality (pure carrier read as AM, 60 % AM tone read as unknown)
@@ -1088,7 +1085,7 @@ tasks:
     effort: medium
     core_interface: true
     acceptance: "watch_peer read timeout / TCP keepalive so half-open clients release listen slots within a bounded time; 503 replumbing instead of 410 source-ended during re-plumb start; tests"
-    hold: "none (T-043 merged)"
+    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-067
     milestone: M0b
     title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
@@ -1102,7 +1099,7 @@ tasks:
     needs: none
     model: opus
     effort: medium
-    hold: "after T-051 merges"
+    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-068
     milestone: M0b
     title: "Legal: restricted decodes must not drive entity-resolution links to emitters outside their class (identity confirmation side channel)"

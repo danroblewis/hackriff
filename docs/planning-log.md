@@ -423,3 +423,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Per the user, both `retune_legal` tests are now `#[ignore = "user decision 2026-09-13: legal gating not a requirement"]` so main verifies green without them.
   - No legal reviews on T-043, T-051, T-060 or T-061, or anything else.
   - T-049, T-043 and T-058 are merged; T-051 merge is being finished (UI conflicts resolved as unions with T-043 Listen).
+- **B0.136 Batch merged and next features launched.**
+  - Main now has T-062, T-063, T-049, T-058, T-043 and T-051 (UI conflicts with Listen resolved as unions). `retune_legal` is ignored per user decision. Combined verification is running on an isolated target.
+  - **Launched** (user feature priorities):
+    - T-047: blind ground-truth acceptance through the mock SDR, and the audit of lookup-and-tune tests;
+    - T-060: bits/symbols/audio streams to external programs over TCP and WebSocket, with netcat/Python examples;
+    - T-052: persisted multi-region selections with Inspect/Listen/Demod/Record actions.
+  - **Running:** T-065.
+  - **Waiting for agent slots:** T-064 hop-set scaling, T-066 Listen robustness, T-067 control API completeness, T-056 compute hookup. T-061 record outputs waits for T-060 and T-052.
