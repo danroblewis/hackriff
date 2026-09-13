@@ -556,7 +556,9 @@ tasks:
     note: "follow-ups from T-031 (merged 2026-09-13 under the timebox rule)"
   - id: T-036
     title: Remaining identity/content gating gaps (decode getters, tags, reclassification) + steady wide-emission detection limit
-    status: in-progress
+    status: done
+    commit: "b14cc33 (merged)"
+    results: "decode()/decodes_for_identity() gated at Standard access (identity class = most restrictive of all decodes naming it + holder emitter; withheld rows drop metadata/content; labels containing identity read withheld; lookup by withheld identity returns nothing); *_with_access variants, ungated read crate-private; tags gated at read time value-independently (tags_withheld) and identity-bearing tags refused on restricted/unclassified claims; audited reclassify_identity (append-only audit table, OwnTrafficAuthorised only, never opens anything ever restricted-cellular/paging, no HTTP route); AWARE-006: broadband/partial-band noise jammers and OFDM still produce NoiseLike Rise+End (episodes use raw floors) - regression tests added"
     deps: [T-034, T-022, T-033]
     parallel_group: E
     use_cases: [SIGNAL-001, AWARE-036, AWARE-006]
@@ -580,6 +582,19 @@ tasks:
     effort: medium
     items: "after --loop restart the scheduler still controls the old replay (gain steps stop applying); verification verdicts not persisted and hk_detect::rate_change not wired; DB writes under one mutex on the detection reader (separate writer thread) + T-015 readsb batching/keepalive/latency + dense-frame flags on records; many fragment tracks per WFM station and CPU on empty-channel probes, FM raster US-only; inventory sightings don't pass a stable capture name for T-034 replay dedup; FSK bits stream not published; graceful Ctrl-C shutdown; HackRF source still a stub (libhackrf BSD-3 -> in-process option); spectrum header centre not updated on retune; calibration not loaded for SPACE-050 (uncalibrated dBFS/Hz); attach test relies on 4 s ring margin (CI load risk); unpaced plugin feeding can overflow readsb 8 MB queue on long recordings"
     note: "follow-ups from T-027 (merged 2026-09-13 under the timebox rule)"
+  - id: T-038
+    title: Attack-map precision follow-ups (steady OFDM false floor-rise anomaly, partial-band extent, letters-only identity tags)
+    status: todo
+    deps: [T-036]
+    parallel_group: E
+    use_cases: [AWARE-006]
+    acceptance: a steady OFDM-like emission does not open a noise-floor-rise Anomaly (or is labelled as a structured emitter, not jamming); partial-band noise-jammer episode extent within 20 % of true bandwidth; letters-only identity tags cannot bypass tag gating
+    area: crates/hk-dsp (floor episodes), crates/hk-context (anomaly), crates/hk-model (tags)
+    needs: none
+    model: opus
+    effort: medium
+    items: "steady 1 MHz OFDM opens a NoiseLike floor-rise Anomaly (SK 0.89) - attack map would explain a normal emitter as jamming; 800 kHz partial-band jammer episode reports 375 kHz extent; letters-only (non-hex) identity tag added via add_emitter_tag not caught by the value-independent tag rule"
+    note: "follow-ups from T-036 (merged 2026-09-13 under the timebox rule)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
