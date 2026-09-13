@@ -1,7 +1,8 @@
-//! Live front-end control (T-042): a typed, device-generic handle from the running pipeline's
-//! source into [`crate::ApiState::live_control`], for the authenticated control API (T-050) to
-//! change the tuned centre, sample rate, named gains and (optionally) the bias tee. **Receive-only
-//! controls**: there is no transmit operation. This module adds no HTTP endpoint.
+//! Live front-end control (T-042, T-050): a typed, device-generic handle from the running
+//! pipeline's source into [`crate::ApiState::live_control`], for the authenticated control API
+//! ([`crate::control`]) to change the tuned centre, sample rate, named gains and (optionally) the
+//! bias tee. **Receive-only controls**: there is no transmit operation, and none can be added
+//! through this trait (C37 stays gated).
 //!
 //! - [`LiveControl`] is the contract: read the capabilities and current [`LiveTuning`], then
 //!   `set_center` / `set_rate` / `set_gains` (named stages, e.g. `lna`, `vga`, `amp` on a HackRF
@@ -12,18 +13,21 @@
 //!   against the source's `SourceCapabilities` (frequency ranges, sample rates, named gain stages
 //!   quantised by `GainStage::quantise`, bias-tee capability) before the command is posted; the
 //!   source applies it at its next block boundary. Requests are serialised.
-//! - **Policy hooks** set by the server composition:
+//! - **Window changes go through the pipeline** when the composition sets a [`WindowRetuner`]
+//!   ([`SourceLiveControl::with_retuner`], what `hk serve` does since T-050): centre and rate
+//!   changes are handed to the running pipeline, which re-derives the window's content class and
+//!   re-plumbs itself at a block boundary when the class or rate changes (so tuning anywhere is
+//!   allowed and gating always matches the window), or tunes in place otherwise.
+//! - **Older policy hooks** (no retuner):
 //!   - [`SourceLiveControl::with_window_policy`] refuses a `(centre, rate)` window the run may
-//!     not tune to. `hk serve` uses it to keep the run's content class: a window whose
-//!     band-derived class differs (e.g. into a paging allocation) is refused, since spectrum,
-//!     recordings and decodes were gated for the class computed at start.
-//!   - [`SourceLiveControl::with_fixed_rate`] refuses rate changes: the pipeline's detection
-//!     resolution, ring and history geometry are fixed per run, so a new rate needs a restart.
+//!     not tune to.
+//!   - [`SourceLiveControl::with_fixed_rate`] refuses rate changes.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use hk_core::{NamedGain, SourceCapabilities, SourceControl, SourceError};
+use hk_model::ContentClass;
 
 /// The front-end settings in force (as last accepted).
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +58,19 @@ pub enum LiveControlError {
     Refused(String),
     /// The source rejected the command (HTTP 502; 400 for its own range checks).
     Source(SourceError),
+    /// A malformed request value (HTTP 400).
+    Invalid(String),
+    /// Device settings on a run that is not live, e.g. a replayed recording (HTTP 409).
+    NotLive(String),
+    /// Conflicts with the run's state: a re-plumb in progress, a recording already running
+    /// (HTTP 409).
+    Conflict(String),
+    /// Did not finish in time (HTTP 504).
+    Timeout(String),
+    /// The run has finished (HTTP 409).
+    Finished(String),
+    /// Anything else (HTTP 500).
+    Failed(String),
 }
 
 impl LiveControlError {
@@ -61,9 +78,30 @@ impl LiveControlError {
     pub fn http_status(&self) -> u16 {
         match self {
             Self::OutOfRange { .. } | Self::Source(SourceError::OutOfRange { .. }) => 400,
+            Self::Invalid(_) => 400,
             Self::Unsupported(_) | Self::Source(SourceError::Unsupported { .. }) => 501,
-            Self::Refused(_) => 409,
+            Self::Refused(_) | Self::NotLive(_) | Self::Conflict(_) | Self::Finished(_) => 409,
             Self::Source(_) => 502,
+            Self::Timeout(_) => 504,
+            Self::Failed(_) => 500,
+        }
+    }
+
+    /// A stable machine-readable code for clients (the UI switches on it).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::OutOfRange { .. } | Self::Source(SourceError::OutOfRange { .. }) => {
+                "out_of_range"
+            }
+            Self::Invalid(_) => "invalid",
+            Self::Unsupported(_) | Self::Source(SourceError::Unsupported { .. }) => "unsupported",
+            Self::Refused(_) => "refused",
+            Self::NotLive(_) => "not_live",
+            Self::Conflict(_) => "conflict",
+            Self::Timeout(_) => "timeout",
+            Self::Finished(_) => "finished",
+            Self::Source(_) => "device_error",
+            Self::Failed(_) => "failed",
         }
     }
 }
@@ -73,10 +111,25 @@ impl fmt::Display for LiveControlError {
         match self {
             Self::OutOfRange { what, value } => write!(f, "{what} {value} is out of range"),
             Self::Unsupported(what) => write!(f, "the device has no {what}"),
-            Self::Refused(why) => f.write_str(why),
+            Self::Refused(why)
+            | Self::Invalid(why)
+            | Self::NotLive(why)
+            | Self::Conflict(why)
+            | Self::Timeout(why)
+            | Self::Finished(why)
+            | Self::Failed(why) => f.write_str(why),
             Self::Source(e) => write!(f, "{e}"),
         }
     }
+}
+
+/// Moves the running pipeline to a new window (T-050): re-derives the content class and
+/// re-plumbs at a block boundary when the class or rate changes, or tunes in place. Implemented
+/// by the composition over `hk_pipeline::PipelineController`.
+pub trait WindowRetuner: Send + Sync {
+    /// Retunes to `(center_hz, sample_rate_hz)`; returns the content class in force afterwards.
+    fn retune(&self, center_hz: f64, sample_rate_hz: f64)
+    -> Result<ContentClass, LiveControlError>;
 }
 
 impl std::error::Error for LiveControlError {}
@@ -106,6 +159,7 @@ pub struct SourceLiveControl {
     tuning: Mutex<LiveTuning>,
     policy: Option<WindowPolicy>,
     fixed_rate: bool,
+    retuner: Option<Arc<dyn WindowRetuner>>,
 }
 
 impl SourceLiveControl {
@@ -116,7 +170,15 @@ impl SourceLiveControl {
             tuning: Mutex::new(initial),
             policy: None,
             fixed_rate: false,
+            retuner: None,
         }
+    }
+
+    /// Hands centre and rate changes to the pipeline (see the module docs); window policies and
+    /// the fixed rate no longer apply to them.
+    pub fn with_retuner(mut self, retuner: Arc<dyn WindowRetuner>) -> Self {
+        self.retuner = Some(retuner);
+        self
     }
 
     /// Refuses windows `policy` rejects.
@@ -179,10 +241,14 @@ impl LiveControl for SourceLiveControl {
                 value: center_hz,
             });
         }
-        self.check_window(center_hz, t.sample_rate_hz)?;
-        self.control
-            .tune(center_hz)
-            .map_err(LiveControlError::Source)?;
+        if let Some(r) = &self.retuner {
+            r.retune(center_hz, t.sample_rate_hz)?;
+        } else {
+            self.check_window(center_hz, t.sample_rate_hz)?;
+            self.control
+                .tune(center_hz)
+                .map_err(LiveControlError::Source)?;
+        }
         t.center_hz = center_hz;
         Ok(t.clone())
     }
@@ -196,6 +262,11 @@ impl LiveControl for SourceLiveControl {
                 what: "sample rate (Hz)".into(),
                 value: sample_rate_hz,
             });
+        }
+        if let Some(r) = &self.retuner {
+            r.retune(t.center_hz, sample_rate_hz)?;
+            t.sample_rate_hz = sample_rate_hz;
+            return Ok(t.clone());
         }
         if self.fixed_rate && sample_rate_hz != t.sample_rate_hz {
             return Err(LiveControlError::Refused(format!(
@@ -359,6 +430,46 @@ mod tests {
         let (lc, rec) = live(caps);
         assert_eq!(lc.set_bias_tee(true).unwrap_err().http_status(), 501);
         assert!(rec.calls.lock().unwrap().is_empty());
+    }
+
+    struct FakeRetuner(Mutex<Vec<(f64, f64)>>);
+
+    impl WindowRetuner for FakeRetuner {
+        fn retune(&self, center: f64, rate: f64) -> Result<ContentClass, LiveControlError> {
+            if center == 1.0e9 {
+                return Err(LiveControlError::Conflict("busy".into()));
+            }
+            self.0.lock().unwrap().push((center, rate));
+            Ok(ContentClass::RestrictedPaging)
+        }
+    }
+
+    #[test]
+    fn a_retuner_receives_window_changes_and_overrides_the_old_policies() {
+        let (lc, rec) = live(SourceCapabilities::hackrf_one());
+        let retuner = Arc::new(FakeRetuner(Mutex::new(Vec::new())));
+        let lc = lc
+            .with_window_policy(Arc::new(|_, _| Err("never".into())))
+            .with_fixed_rate()
+            .with_retuner(Arc::clone(&retuner) as Arc<dyn WindowRetuner>);
+        assert_eq!(lc.set_center(930.5e6).unwrap().center_hz, 930.5e6);
+        assert_eq!(lc.set_rate(10e6).unwrap().sample_rate_hz, 10e6);
+        assert_eq!(lc.set_center(500e3).unwrap_err().http_status(), 400);
+        let e = lc.set_center(1.0e9).unwrap_err();
+        assert_eq!((e.http_status(), e.code()), (409, "conflict"));
+        assert_eq!(
+            lc.tuning().center_hz,
+            930.5e6,
+            "a failed retune changes nothing"
+        );
+        assert_eq!(
+            *retuner.0.lock().unwrap(),
+            vec![(930.5e6, 2.4e6), (930.5e6, 10e6)]
+        );
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "window changes go through the pipeline, not straight to the device"
+        );
     }
 
     #[test]

@@ -405,6 +405,7 @@ fn unauthenticated_api_calls_are_rejected() {
             inventory: None,
             status: None,
             live_control: None,
+            ..ApiState::default()
         },
         Some(dist.0.clone()),
     );

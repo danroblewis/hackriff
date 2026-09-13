@@ -6,6 +6,7 @@
 //! prints a stream's header and records. `hk serve` ([`serve`]) replays a recording into the web
 //! UI through the hk-api bridge (T-022a demo composer).
 
+pub mod control;
 pub mod pipeline;
 pub mod serve;
 pub mod signal;

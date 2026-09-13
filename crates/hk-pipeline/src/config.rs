@@ -173,6 +173,91 @@ pub struct PipelineConfig {
     pub calibrations: Vec<CalibrationState>,
     /// Capture hardware description for SigMF `core:hw` (e.g. HackRF serial and firmware).
     pub device_hw: Option<String>,
+    /// The source class is the **tuned window's** band class (a live radio under the control
+    /// API, T-050). The run then (a) drops any block whose window has another class before it
+    /// reaches the ring, and (b) re-plumbs itself at a block boundary when a retune or rate change
+    /// moves it into another class ([`crate::PipelineController::retune`]). Off for recordings
+    /// and scheduler-driven runs (their class covers every window they visit).
+    pub live_window_class: bool,
+}
+
+/// Smallest display FFT size.
+pub const DISPLAY_FFT_MIN: usize = 64;
+/// Largest display FFT size.
+pub const DISPLAY_FFT_MAX: usize = 65_536;
+/// Largest display averaging (rows in the exponential average).
+pub const DISPLAY_AVERAGING_MAX: u32 = 100;
+/// Fastest requested spectrum row rate, rows/s (a gated class is still capped at 50).
+pub const DISPLAY_ROWS_MAX: f64 = 200.0;
+/// Slowest requested spectrum row rate, rows/s.
+pub const DISPLAY_ROWS_MIN: f64 = 0.5;
+
+/// Live display settings of the spectrum stream (T-050): applied by the spectrum reader at its
+/// next row without a restart; they never touch detection, history or the device.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct DisplaySettings {
+    /// Bins per spectrum row (a power of two, [`DISPLAY_FFT_MIN`]..=[`DISPLAY_FFT_MAX`]).
+    pub fft_size: usize,
+    /// Rows in the exponential moving average of the published PSD (1 = off).
+    pub averaging: u32,
+    /// Requested rows per second (the waterfall speed); a class that forbids content caps the
+    /// published rate at 50 rows/s.
+    pub rows_per_s: f64,
+    /// Publishing is paused (the waterfall freezes). Capture, detection and history continue.
+    pub paused: bool,
+}
+
+/// A partial display update.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DisplayPatch {
+    /// New FFT size.
+    pub fft_size: Option<usize>,
+    /// New averaging.
+    pub averaging: Option<u32>,
+    /// New row rate.
+    pub rows_per_s: Option<f64>,
+}
+
+impl DisplaySettings {
+    /// The settings from a run's [`PipelineSettings`] (unpaused, no averaging).
+    pub fn from_settings(s: &PipelineSettings) -> Self {
+        Self {
+            fft_size: s.spectrum_fft_len,
+            averaging: 1,
+            rows_per_s: s.spectrum_rows_per_s,
+            paused: false,
+        }
+    }
+
+    /// `self` with `patch` applied, or why the patch is invalid (nothing is applied then).
+    pub fn patched(&self, patch: &DisplayPatch) -> Result<Self, String> {
+        let mut next = *self;
+        if let Some(n) = patch.fft_size {
+            if !(n.is_power_of_two() && (DISPLAY_FFT_MIN..=DISPLAY_FFT_MAX).contains(&n)) {
+                return Err(format!(
+                    "fft_size {n} must be a power of two in {DISPLAY_FFT_MIN}..={DISPLAY_FFT_MAX}"
+                ));
+            }
+            next.fft_size = n;
+        }
+        if let Some(a) = patch.averaging {
+            if !(1..=DISPLAY_AVERAGING_MAX).contains(&a) {
+                return Err(format!(
+                    "averaging {a} must be in 1..={DISPLAY_AVERAGING_MAX} (1 = off)"
+                ));
+            }
+            next.averaging = a;
+        }
+        if let Some(r) = patch.rows_per_s {
+            if !(r.is_finite() && (DISPLAY_ROWS_MIN..=DISPLAY_ROWS_MAX).contains(&r)) {
+                return Err(format!(
+                    "rows_per_s {r} must be in {DISPLAY_ROWS_MIN}..={DISPLAY_ROWS_MAX}"
+                ));
+            }
+            next.rows_per_s = r;
+        }
+        Ok(next)
+    }
 }
 
 /// Reads T-021 `CalibrationState` JSON: a file holding one state or an array of states, or a
@@ -242,6 +327,7 @@ impl PipelineConfig {
             spectrum_stream_id: "spectrum/live".into(),
             calibrations: Vec::new(),
             device_hw: None,
+            live_window_class: false,
         })
     }
 }
@@ -288,6 +374,45 @@ mod tests {
         assert_eq!(detection_resolution(10e6, &s), (2048, 10));
         assert_eq!(detection_resolution(500e3, &s), (512, 4));
         assert_eq!(detection_resolution(200e3, &s), (512, 4));
+    }
+
+    #[test]
+    fn display_patches_are_validated_all_or_nothing() {
+        let d = DisplaySettings::from_settings(&PipelineSettings::default());
+        assert_eq!((d.fft_size, d.averaging, d.paused), (1024, 1, false));
+        let ok = d
+            .patched(&DisplayPatch {
+                fft_size: Some(4096),
+                averaging: Some(8),
+                rows_per_s: Some(10.0),
+            })
+            .unwrap();
+        assert_eq!((ok.fft_size, ok.averaging, ok.rows_per_s), (4096, 8, 10.0));
+        for bad in [
+            DisplayPatch {
+                fft_size: Some(1000),
+                ..DisplayPatch::default()
+            },
+            DisplayPatch {
+                fft_size: Some(1 << 20),
+                ..DisplayPatch::default()
+            },
+            DisplayPatch {
+                averaging: Some(0),
+                ..DisplayPatch::default()
+            },
+            DisplayPatch {
+                fft_size: Some(2048),
+                rows_per_s: Some(f64::NAN),
+                ..DisplayPatch::default()
+            },
+            DisplayPatch {
+                rows_per_s: Some(1e6),
+                ..DisplayPatch::default()
+            },
+        ] {
+            assert!(d.patched(&bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

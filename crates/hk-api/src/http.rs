@@ -1,33 +1,43 @@
-//! The hk-api HTTP server: read-only JSON control/query endpoints, the WebSocket bridge, and the
-//! static web UI (ADR-0002: the UI is the first client of the same API external programs use).
+//! The hk-api HTTP server: JSON query endpoints, the authenticated control API (T-050), the
+//! WebSocket bridge, and the static web UI (ADR-0002: the UI is the first client of the same API
+//! external programs use).
 //!
-//! # Endpoints (all `GET`; M0 is read-only)
-//! | Path | Auth | Returns |
-//! |---|---|---|
-//! | `/api/streams` | token | Offered streams: id, kind, class, geometry. Never content. |
-//! | `/api/history?f_lo&f_hi&t0&t1[&max_cells]` | token | T-017 region-over-time grid ([`crate::query`]) |
-//! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | token | T-021 floor vs time ([`crate::query`]) |
-//! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
-//! | `/api/status` | token | T-027 pipeline counters (per-stage samples, frames, drops, detections, tracks, chains, plugins). Never content |
-//! | `/ws/<stream_id>` | token | WebSocket bridge ([`crate::bridge`]) |
-//! | `/`, `/<file>` | none | Static files from the UI build directory (code, no data) |
+//! # Endpoints
+//! [`ROUTES`] is the complete table; nothing else answers 2xx under `/api/` or `/ws/`.
+//!
+//! | Path | Method | Auth | Returns |
+//! |---|---|---|---|
+//! | `/api/streams` | GET | token | Offered streams: id, kind, class, geometry. Never content. |
+//! | `/api/history?f_lo&f_hi&t0&t1[&max_cells]` | GET | token | T-017 region-over-time grid ([`crate::query`]) |
+//! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | GET | token | T-021 floor vs time ([`crate::query`]) |
+//! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
+//! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
+//! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
+//! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
+//! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
 //!
 //! # Security properties
-//! - **Token.** `Authorization: Bearer <token>` or `?token=` (browser WebSockets cannot set
-//!   headers), compared in constant time ([`Token::verify`]). Missing or wrong token: `401`, before
-//!   anything about streams is revealed. There are no CORS headers, so other origins cannot read
-//!   responses, and they do not know the token.
+//! - **Token.** `Authorization: Bearer <token>`, compared in constant time ([`Token::verify`]);
+//!   read-only requests may use `?token=` instead (browser WebSockets cannot set headers), control
+//!   requests may not. Missing, wrong or expired token: `401`, before anything about streams or
+//!   the device is revealed.
+//! - **CORS.** No `Access-Control-Allow-*` header is ever sent; `OPTIONS` preflights answer `403`;
+//!   a mutating request whose `Origin` host differs from `Host` / `X-Forwarded-Host` answers `403`
+//!   ([`crate::control`] has the details, including the cloudflared tunnel).
+//! - **Methods.** GET, POST, PUT, DELETE and OPTIONS are parsed; anything else is `405`. A known
+//!   path with the wrong method is `405` with `Allow`.
 //! - **Bind address.** Loopback by default (the caller's choice; `hk serve` defaults to
-//!   `127.0.0.1`). `0.0.0.0` exposes the API on every interface, e.g. the LAN or public Wi-Fi: the
-//!   token is then the only protection and travels in cleartext (no TLS in M0).
+//!   `127.0.0.1`). `0.0.0.0` exposes the API on every interface: the token is then the only
+//!   protection and travels in cleartext (no TLS in M0; the cloudflared tunnel adds TLS).
 //! - **Own-key content is never served**: every bridge consumer is `Locality::Remote`.
 //! - **Inventory identities are gated by the model**: `/api/inventory` reads only
-//!   `Repository::query_inventory` with the default `IdentityAccess::Standard` (no own-traffic
-//!   authorisation over HTTP), never the ungated emitter getters.
+//!   `Repository::query_inventory` with the default `IdentityAccess::Standard`.
+//! - **Receive only.** No route reaches a transmit path (C37 gated).
 //! - **Bounded resources.** At most `max_connections` connection threads; request heads are
-//!   limited to 16 KiB and must arrive within `request_timeout`; query results are capped.
+//!   limited to 16 KiB, bodies to 64 KiB, and both must arrive within `request_timeout`; query
+//!   results are capped.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -44,12 +54,41 @@ use serde_json::{Value, json};
 
 use crate::auth::Token;
 use crate::bridge::{self, StreamRegistry};
+use crate::control::{self, AuditLog, Caller, CtlRequest, RunControl};
 use crate::query::{self, ApiError};
 
 /// Largest request head accepted.
 const MAX_HEAD: usize = 16 * 1024;
+/// Largest request body accepted.
+const MAX_BODY: usize = 64 * 1024;
 /// Largest static file served.
 const MAX_STATIC: u64 = 32 * 1024 * 1024;
+
+/// Every route the server answers (method, path; `{…}` is a path parameter). Receive only:
+/// there is no transmit route.
+pub const ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/streams"),
+    ("GET", "/api/history"),
+    ("GET", "/api/floor"),
+    ("GET", "/api/inventory"),
+    ("GET", "/api/status"),
+    ("GET", "/api/control/state"),
+    ("POST", "/api/control/center"),
+    ("POST", "/api/control/rate"),
+    ("POST", "/api/control/gains"),
+    ("POST", "/api/control/bias_tee"),
+    ("POST", "/api/control/display"),
+    ("POST", "/api/control/pause"),
+    ("POST", "/api/control/resume"),
+    ("POST", "/api/control/record/start"),
+    ("POST", "/api/control/record/stop"),
+    ("GET", "/api/bookmarks"),
+    ("POST", "/api/bookmarks"),
+    ("GET", "/api/bookmarks/{id}"),
+    ("PUT", "/api/bookmarks/{id}"),
+    ("DELETE", "/api/bookmarks/{id}"),
+    ("GET", "/ws/{stream_id}"),
+];
 
 /// Server settings.
 #[derive(Clone, Debug)]
@@ -63,7 +102,7 @@ pub struct ServerConfig {
     /// Most connection threads at once (WebSocket consumers included; each stream also caps its
     /// own consumers through `PublisherConfig::max_consumers`).
     pub max_connections: usize,
-    /// Time allowed for a request head to arrive.
+    /// Time allowed for a request head (and body) to arrive.
     pub request_timeout: Duration,
 }
 
@@ -80,7 +119,7 @@ impl ServerConfig {
     }
 }
 
-/// What the endpoints read. History stores are shared with their ingest thread.
+/// What the endpoints read and control. History stores are shared with their ingest thread.
 #[derive(Clone, Default)]
 pub struct ApiState {
     /// Streams offered over the bridge.
@@ -95,8 +134,14 @@ pub struct ApiState {
     /// Pipeline counters for `/api/status` (T-027): a snapshot builder, called per request.
     pub status: Option<StatusFn>,
     /// Live front-end control (T-042, [`crate::live_control`]); `None` for replays and
-    /// scheduler-driven runs.
+    /// scheduler-driven runs (device endpoints then answer 409 `not_live`).
     pub live_control: Option<Arc<dyn crate::live_control::LiveControl>>,
+    /// Display, pause and recording control of the running pipeline (T-050).
+    pub run_control: Option<Arc<dyn RunControl>>,
+    /// Bookmark store (T-050), usually the run's database.
+    pub bookmarks: Option<Arc<Mutex<Repository>>>,
+    /// Control audit log (T-050). Without one, every mutating endpoint answers 503.
+    pub audit: Option<Arc<AuditLog>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -193,11 +238,13 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<AtomicBool>
     }
 }
 
-/// A parsed request head.
+/// A parsed request.
 struct Request {
+    method: String,
     path: String,
     query: Vec<(String, String)>,
     headers: Vec<(String, String)>,
+    body: Vec<u8>,
 }
 
 impl Request {
@@ -215,35 +262,92 @@ impl Request {
             .map(|(_, v)| v.as_str())
     }
 
-    fn authorized(&self, token: &Token) -> bool {
-        let bearer = self.header("authorization").and_then(|v| {
+    fn bearer(&self) -> Option<&str> {
+        self.header("authorization").and_then(|v| {
             v.strip_prefix("Bearer ")
                 .or_else(|| v.strip_prefix("bearer "))
-        });
-        match (bearer, self.param("token")) {
-            (Some(b), _) => token.verify(b.trim()),
+                .map(str::trim)
+        })
+    }
+
+    /// The header token (only) verifies.
+    fn authorized_by_header(&self, token: &Token) -> bool {
+        self.bearer().is_some_and(|b| token.verify(b))
+    }
+
+    /// The header token, or else the query token, verifies.
+    fn authorized(&self, token: &Token) -> bool {
+        match (self.bearer(), self.param("token")) {
+            (Some(b), _) => token.verify(b),
             (None, Some(q)) => token.verify(q),
             (None, None) => false,
         }
     }
+
+    /// Only GET reads; everything else changes state.
+    fn mutating(&self) -> bool {
+        self.method != "GET"
+    }
+
+    /// A browser `Origin` that names another host than the one addressed.
+    fn cross_origin(&self) -> bool {
+        let Some(origin) = self.header("origin") else {
+            return false;
+        };
+        let Some((_, authority)) = origin.trim().split_once("://") else {
+            return true; // `null` or malformed
+        };
+        let authority = authority.trim_end_matches('/');
+        ![self.header("x-forwarded-host"), self.header("host")]
+            .into_iter()
+            .flatten()
+            .filter_map(|h| h.split(',').next())
+            .any(|h| h.trim().eq_ignore_ascii_case(authority))
+    }
 }
 
-fn read_head(stream: &mut TcpStream) -> Result<Vec<u8>, u16> {
+/// Reads the head and body. The error is the status to answer.
+fn read_request(stream: &mut TcpStream) -> Result<Request, u16> {
     let mut buf = Vec::with_capacity(2048);
-    let mut chunk = [0u8; 2048];
-    loop {
+    let mut chunk = [0u8; 4096];
+    let head_len = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        if buf.len() > MAX_HEAD {
+            return Err(431);
+        }
         let n = stream.read(&mut chunk).map_err(|_| 408u16)?;
         if n == 0 {
             return Err(400);
         }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            return Ok(buf);
-        }
-        if buf.len() > MAX_HEAD {
-            return Err(431);
-        }
+    };
+    if head_len > MAX_HEAD {
+        return Err(431);
     }
+    let mut req = parse_request(&buf[..head_len])?;
+    if req.header("transfer-encoding").is_some() {
+        return Err(411);
+    }
+    let len = match req.header("content-length") {
+        None => 0,
+        Some(v) => v.trim().parse::<usize>().map_err(|_| 400u16)?,
+    };
+    if len > MAX_BODY {
+        return Err(413);
+    }
+    let mut body = buf.split_off(head_len);
+    while body.len() < len {
+        let n = stream.read(&mut chunk).map_err(|_| 408u16)?;
+        if n == 0 {
+            return Err(400);
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(len);
+    req.body = body;
+    Ok(req)
 }
 
 fn parse_request(head: &[u8]) -> Result<Request, u16> {
@@ -253,9 +357,10 @@ fn parse_request(head: &[u8]) -> Result<Request, u16> {
         Ok(httparse::Status::Complete(_)) => {}
         _ => return Err(400),
     }
-    if req.method != Some("GET") {
-        return Err(405);
-    }
+    let method = match req.method {
+        Some(m @ ("GET" | "POST" | "PUT" | "DELETE" | "OPTIONS")) => m.to_owned(),
+        _ => return Err(405),
+    };
     let target = req.path.ok_or(400u16)?;
     let (path, raw_query) = target.split_once('?').unwrap_or((target, ""));
     let headers = req
@@ -268,9 +373,11 @@ fn parse_request(head: &[u8]) -> Result<Request, u16> {
         })
         .collect();
     Ok(Request {
+        method,
         path: percent_decode(path).ok_or(400u16)?,
         query: parse_query(raw_query).ok_or(400u16)?,
         headers,
+        body: Vec::new(),
     })
 }
 
@@ -307,16 +414,24 @@ fn percent_decode(s: &str) -> Option<String> {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        201 => "Created",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
+        409 => "Conflict",
         410 => "Gone",
+        411 => "Length Required",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         426 => "Upgrade Required",
         431 => "Request Header Fields Too Large",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Internal Server Error",
     }
 }
@@ -325,7 +440,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, extra: &str,
     let head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
          Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\
-         Referrer-Policy: no-referrer\r\n{extra}\r\n",
+         Referrer-Policy: no-referrer\r\nVary: Origin\r\n{extra}\r\n",
         reason(status),
         body.len()
     );
@@ -334,38 +449,124 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, extra: &str,
     let _ = stream.flush();
 }
 
-fn respond_json(stream: &mut TcpStream, status: u16, body: &Value) {
+fn respond_json_with(stream: &mut TcpStream, status: u16, body: &Value, extra: &str) {
     let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
-    let extra = if status == 401 {
+    let auth = if status == 401 {
         "WWW-Authenticate: Bearer\r\n"
     } else {
         ""
     };
-    respond(stream, status, "application/json", extra, &bytes);
+    respond(
+        stream,
+        status,
+        "application/json",
+        &format!("{auth}{extra}"),
+        &bytes,
+    );
+}
+
+fn respond_json(stream: &mut TcpStream, status: u16, body: &Value) {
+    respond_json_with(stream, status, body, "");
 }
 
 fn respond_error(stream: &mut TcpStream, status: u16, message: &str) {
     respond_json(stream, status, &json!({ "error": message }));
 }
 
+fn caller(stream: &TcpStream, req: &Request, token: &Token) -> Caller {
+    Caller {
+        token_id: req.authorized_by_header(token).then(|| token.id()),
+        peer: stream.peer_addr().ok().map(|a| a.to_string()),
+        forwarded_for: req
+            .header("cf-connecting-ip")
+            .or_else(|| req.header("x-forwarded-for"))
+            .map(|v| v.chars().take(128).collect()),
+        origin: req.header("origin").map(|v| v.chars().take(256).collect()),
+    }
+}
+
 fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     let _ = stream.set_read_timeout(Some(shared.config.request_timeout));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let _ = stream.set_nodelay(true);
-    let req = match read_head(&mut stream).and_then(|h| parse_request(&h)) {
+    let req = match read_request(&mut stream) {
         Ok(r) => r,
         Err(status) => return respond_error(&mut stream, status, reason(status)),
     };
     let token = &shared.config.token;
+    let state = &shared.state;
+    if req.method == "OPTIONS" {
+        // No preflight is ever granted: browsers then refuse cross-origin requests that carry
+        // the token or a JSON body.
+        return respond_error(
+            &mut stream,
+            403,
+            "cross-origin requests are not allowed (no CORS)",
+        );
+    }
     let is_api = req.path.starts_with("/api/") || req.path.starts_with("/ws/");
-    if is_api && !req.authorized(token) {
-        return respond_error(&mut stream, 401, "missing or invalid token");
+    if is_api {
+        let mutating = req.mutating();
+        let authorized = if mutating {
+            req.authorized_by_header(token)
+        } else {
+            req.authorized(token)
+        };
+        if !authorized {
+            if mutating {
+                let who = caller(&stream, &req, token);
+                control::audit_refused(state, &req.method, &req.path, &who, 401, "unauthorized");
+            }
+            let message = if mutating && req.param("token").is_some() {
+                "control requests need the token in the Authorization header"
+            } else {
+                "missing or invalid token"
+            };
+            return respond_error(&mut stream, 401, message);
+        }
+        if mutating && req.cross_origin() {
+            let who = caller(&stream, &req, token);
+            control::audit_refused(state, &req.method, &req.path, &who, 403, "cross-origin");
+            return respond_error(&mut stream, 403, "cross-origin control request refused");
+        }
     }
     if let Some(id) = req.path.strip_prefix("/ws/") {
+        if req.method != "GET" {
+            return respond_json_with(
+                &mut stream,
+                405,
+                &json!({ "error": "use GET" }),
+                "Allow: GET\r\n",
+            );
+        }
         return websocket(stream, shared, &req, id);
     }
-    let state = &shared.state;
+    let ctl = CtlRequest {
+        method: &req.method,
+        path: &req.path,
+        body: &req.body,
+        content_type: req.header("content-type"),
+        caller: caller(&stream, &req, token),
+    };
+    if let Some(r) = control::route(state, &ctl) {
+        let allow = r
+            .allow
+            .map(|a| format!("Allow: {a}\r\n"))
+            .unwrap_or_default();
+        return respond_json_with(&mut stream, r.status, &r.body, &allow);
+    }
+    let get = req.method == "GET";
     let result = match req.path.as_str() {
+        "/api/streams" | "/api/history" | "/api/floor" | "/api/inventory" | "/api/status"
+            if !get =>
+        {
+            return respond_json_with(
+                &mut stream,
+                405,
+                &json!({ "error": "use GET" }),
+                "Allow: GET\r\n",
+            );
+        }
         "/api/streams" => Ok(state.streams.listing()),
         "/api/history" => history(state, &req),
         "/api/floor" => floor(state, &req),
@@ -376,6 +577,14 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             .map(|f| f())
             .ok_or_else(|| ApiError::new(404, "no pipeline status")),
         p if p.starts_with("/api/") => Err(ApiError::new(404, "no such endpoint")),
+        _ if !get => {
+            return respond_json_with(
+                &mut stream,
+                405,
+                &json!({ "error": "use GET" }),
+                "Allow: GET\r\n",
+            );
+        }
         _ => return static_file(&mut stream, shared.config.ui_dist.as_deref(), &req.path),
     };
     match result {
@@ -554,11 +763,73 @@ mod tests {
     }
 
     #[test]
-    fn non_get_is_refused() {
-        assert_eq!(
-            parse_request(b"POST /api/streams HTTP/1.1\r\n\r\n").err(),
-            Some(405)
-        );
+    fn only_known_methods_are_parsed() {
+        for m in ["PATCH", "HEAD", "TRACE", "CONNECT", "TX", "get"] {
+            assert_eq!(
+                parse_request(format!("{m} /api/streams HTTP/1.1\r\n\r\n").as_bytes()).err(),
+                Some(405),
+                "{m}"
+            );
+        }
+        for m in ["GET", "POST", "PUT", "DELETE", "OPTIONS"] {
+            let r =
+                parse_request(format!("{m} /api/streams HTTP/1.1\r\nHost: a\r\n\r\n").as_bytes())
+                    .unwrap();
+            assert_eq!(r.method, m);
+        }
         assert!(parse_request(b"GET /api/streams?token=x HTTP/1.1\r\nHost: a\r\n\r\n").is_ok());
+    }
+
+    fn with_headers(headers: &[(&str, &str)]) -> Request {
+        Request {
+            method: "POST".into(),
+            path: "/api/control/center".into(),
+            query: Vec::new(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn origin_must_match_the_addressed_host() {
+        assert!(
+            !with_headers(&[("Host", "127.0.0.1:8787")]).cross_origin(),
+            "no Origin"
+        );
+        assert!(
+            !with_headers(&[
+                ("Host", "127.0.0.1:8787"),
+                ("Origin", "http://127.0.0.1:8787")
+            ])
+            .cross_origin()
+        );
+        assert!(
+            !with_headers(&[
+                ("Host", "abc.trycloudflare.com"),
+                ("Origin", "https://abc.trycloudflare.com")
+            ])
+            .cross_origin(),
+            "through the tunnel"
+        );
+        assert!(
+            !with_headers(&[
+                ("Host", "localhost:8787"),
+                ("X-Forwarded-Host", "abc.example.org"),
+                ("Origin", "https://abc.example.org")
+            ])
+            .cross_origin(),
+            "a proxy that rewrites Host but forwards it"
+        );
+        assert!(
+            with_headers(&[
+                ("Host", "127.0.0.1:8787"),
+                ("Origin", "https://evil.example")
+            ])
+            .cross_origin()
+        );
+        assert!(with_headers(&[("Host", "127.0.0.1:8787"), ("Origin", "null")]).cross_origin());
     }
 }

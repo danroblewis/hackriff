@@ -1,15 +1,47 @@
-//! Starting, observing and finishing a run.
+//! Starting, observing, re-plumbing and finishing a run.
+//!
+//! # Segments and re-plumbing (T-050)
+//!
+//! A run is one Survey executed as one or more **segments**. A segment is the capture thread,
+//! its ring, the always-on readers, the control thread and its chains, all built for one sample
+//! rate and one content class (`Shared`). Most runs have a single segment. A live run under the
+//! control API ([`PipelineConfig::live_window_class`]) starts a new segment when a retune or rate
+//! change needs a different class or rate ([`PipelineController::retune`]):
+//!
+//! 1. The request is recorded and the old segment's capture thread is stopped between two blocks.
+//!    Everything already in its ring belongs to the old window and is processed to the end under
+//!    the old class: readers drain, chains detach and finish, recordings end, the detector flushes.
+//! 2. The capture thread drops its source wrapper, which hands the **still-open device** back
+//!    ([`Lent`]); the segment's inventory and repository connection are recovered.
+//! 3. The new rate and centre are sent to the device.
+//! 4. A new segment starts with the new window's class ([`crate::class::window_class`]), rate,
+//!    ring, detection resolution and STFTs, and the same Survey, database, history store,
+//!    counters, display settings and stream ids (the spectrum stream is offered again under its
+//!    id with a header for the new window).
+//! 5. Its [`WindowGuard`] drops every block until the device delivers the requested window, and
+//!    afterwards any block whose window has another class. No block of one class ever reaches a
+//!    ring, reader or chain gated for another.
+//!
+//! So class changes are atomic at a block boundary without any gating code reading a mutable
+//! class: every chain, recorder, plugin and stream sees exactly one class for its whole life.
+//! A retune that keeps the class and rate is applied in place (no re-plumb); the spectrum header
+//! follows it row by row ([`crate::spectrum`]).
+//!
+//! Counters are shared across segments; per-reader absolute counters (`lost_samples`, `frames`)
+//! restart with each segment's reader. History is sealed only when the run ends, never between
+//! segments.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use hk_core::{
-    BlockHeader, Pacing, ProvenanceHandle, ReplayOptions, RingConfig, RingHandle,
+    BlockHeader, Discontinuity, Pacing, ProvenanceHandle, ReplayOptions, RingConfig, RingHandle,
     SigmfReplaySource, Source, SourceCapabilities, SourceControl, SourceError, ring_buffer,
 };
 use hk_dsp::radiometry::PowerCalibrations;
@@ -24,9 +56,15 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::chains::spec::ChainSpec;
-use crate::class::{class_name, source_class};
-use crate::config::{PipelineConfig, detection_resolution};
+use crate::class::{class_name, source_class, window_class};
+use crate::config::{DisplayPatch, DisplaySettings, PipelineConfig, detection_resolution};
 use crate::control::{SchedState, SwitchableControl};
+use crate::events::{Candidate, ControlEvent};
+use crate::gate::FlowGate;
+use crate::inventory::Inventory;
+use crate::recorder::{ManualRecorder, RecordingStatus};
+use crate::spectrum::DisplayControl;
+use crate::stats::{Counters, get, inc};
 
 /// `(device_id, calibration)` pins: the newest non-superseded version per device.
 type CalibrationPins = Arc<Vec<(String, CalibrationStateId)>>;
@@ -118,10 +156,164 @@ impl Source for Calibrated {
         Ok(h.map(|h| self.stamp(h)))
     }
 }
-use crate::events::{Candidate, ControlEvent};
-use crate::gate::FlowGate;
-use crate::inventory::Inventory;
-use crate::stats::{Counters, get};
+
+/// Where a segment's capture thread hands its source back (see the module docs).
+type SourceSlot = Arc<Mutex<Option<Box<dyn Source>>>>;
+
+/// A source lent to a capture thread: dropping the wrapper returns the source to the slot, open.
+struct Lent {
+    inner: Option<Box<dyn Source>>,
+    slot: SourceSlot,
+}
+
+impl Lent {
+    fn wrap(inner: Box<dyn Source>, slot: &SourceSlot) -> Box<dyn Source> {
+        Box::new(Self {
+            inner: Some(inner),
+            slot: Arc::clone(slot),
+        })
+    }
+
+    fn get(&self) -> &dyn Source {
+        self.inner.as_deref().expect("lent source present")
+    }
+
+    fn get_mut(&mut self) -> &mut Box<dyn Source> {
+        self.inner.as_mut().expect("lent source present")
+    }
+}
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        if let Some(s) = self.inner.take() {
+            *self.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(s);
+        }
+    }
+}
+
+impl Source for Lent {
+    fn capabilities(&self) -> &SourceCapabilities {
+        self.get().capabilities()
+    }
+
+    fn control(&self) -> Arc<dyn SourceControl> {
+        self.get().control()
+    }
+
+    fn pausable(&self) -> bool {
+        self.get().pausable()
+    }
+
+    fn read_block(
+        &mut self,
+        samples: &mut Vec<Complex32>,
+    ) -> Result<Option<BlockHeader>, SourceError> {
+        self.get_mut().read_block(samples)
+    }
+
+    fn read_block_ci8(
+        &mut self,
+        samples: &mut Vec<Complex<i8>>,
+    ) -> Result<Option<BlockHeader>, SourceError> {
+        self.get_mut().read_block_ci8(samples)
+    }
+}
+
+/// Keeps a segment to its class (legal guardrail; see the module docs): drops blocks until the
+/// requested window arrives, then any block whose window has another class. A dropped block is
+/// returned empty (the capture thread skips empty blocks); the next admitted block carries `GAP`.
+struct WindowGuard {
+    inner: Box<dyn Source>,
+    class: ContentClass,
+    expect: Option<(f64, f64)>,
+    dropped: bool,
+    stats: Arc<ControlStats>,
+}
+
+impl WindowGuard {
+    fn wrap(
+        inner: Box<dyn Source>,
+        class: ContentClass,
+        expect: Option<(f64, f64)>,
+        stats: &Arc<ControlStats>,
+    ) -> Box<dyn Source> {
+        Box::new(Self {
+            inner,
+            class,
+            expect,
+            dropped: false,
+            stats: Arc::clone(stats),
+        })
+    }
+
+    fn admit(&mut self, h: &mut BlockHeader) -> bool {
+        let (center, rate) = (
+            h.provenance.tune.center_hz,
+            h.provenance.tune.sample_rate_hz,
+        );
+        if let Some((c, r)) = self.expect {
+            if (center - c).abs() > 1.0 || (rate - r).abs() > 1.0 {
+                return self.reject();
+            }
+            self.expect = None;
+        }
+        if window_class(center, rate) != self.class {
+            return self.reject();
+        }
+        if std::mem::take(&mut self.dropped) {
+            h.discontinuity = Discontinuity::from_bits_truncate(
+                h.discontinuity.bits() | Discontinuity::GAP.bits(),
+            );
+        }
+        true
+    }
+
+    fn reject(&mut self) -> bool {
+        self.dropped = true;
+        inc(&self.stats.blocks_dropped_window);
+        false
+    }
+}
+
+impl Source for WindowGuard {
+    fn capabilities(&self) -> &SourceCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn control(&self) -> Arc<dyn SourceControl> {
+        self.inner.control()
+    }
+
+    fn pausable(&self) -> bool {
+        self.inner.pausable()
+    }
+
+    fn read_block(
+        &mut self,
+        samples: &mut Vec<Complex32>,
+    ) -> Result<Option<BlockHeader>, SourceError> {
+        let h = self.inner.read_block(samples)?;
+        Ok(h.map(|mut h| {
+            if !samples.is_empty() && !self.admit(&mut h) {
+                samples.clear();
+            }
+            h
+        }))
+    }
+
+    fn read_block_ci8(
+        &mut self,
+        samples: &mut Vec<Complex<i8>>,
+    ) -> Result<Option<BlockHeader>, SourceError> {
+        let h = self.inner.read_block_ci8(samples)?;
+        Ok(h.map(|mut h| {
+            if !samples.is_empty() && !self.admit(&mut h) {
+                samples.clear();
+            }
+            h
+        }))
+    }
+}
 
 /// Reopens the source for `--loop`.
 pub type SourceFactory = Box<dyn FnMut() -> anyhow::Result<Box<dyn Source>> + Send>;
@@ -196,7 +388,7 @@ pub fn open_replay(path: &Path, pacing: Pacing, virtual_tuning: bool) -> anyhow:
     })
 }
 
-/// State shared by the pipeline's threads.
+/// State shared by one segment's threads.
 pub(crate) struct Shared {
     pub cfg: PipelineConfig,
     pub counters: Arc<Counters>,
@@ -211,6 +403,10 @@ pub(crate) struct Shared {
     pub averages: usize,
     pub inventory: Mutex<Box<dyn Inventory>>,
     pub specs: Vec<ChainSpec>,
+    /// Display settings (shared by every segment of the run).
+    pub display: Arc<DisplayControl>,
+    /// The run continues in a new segment after this one: history is not sealed at its end.
+    pub continues: AtomicBool,
 }
 
 impl Shared {
@@ -220,10 +416,177 @@ impl Shared {
     }
 }
 
+/// Control-plane counters of a run (T-050).
+#[derive(Debug, Default)]
+pub struct ControlStats {
+    /// Segments started (1 without a re-plumb).
+    pub segments: AtomicU64,
+    /// Re-plumbs completed.
+    pub replumbs: AtomicU64,
+    /// Retunes applied in place (same class and rate).
+    pub retunes_in_place: AtomicU64,
+    /// Blocks the window guard dropped (not yet the requested window, or another class).
+    pub blocks_dropped_window: AtomicU64,
+    /// Manual recordings started.
+    pub recordings_started: AtomicU64,
+    /// Manual recordings refused by the content class.
+    pub recordings_refused_class: AtomicU64,
+}
+
+/// Why a control request was not applied.
+#[derive(Debug)]
+pub enum ControlFailure {
+    /// A value is malformed or out of range.
+    Invalid(String),
+    /// Device settings need a live, window-classed source (a recording cannot be retuned).
+    NotLive(String),
+    /// Refused by policy (the legal guardrail: a class that forbids content).
+    Refused(String),
+    /// Conflicts with the run's state (a re-plumb in progress, a recording already running).
+    Conflict(String),
+    /// The re-plumb did not finish in time (it continues in the background).
+    Timeout(String),
+    /// The device rejected the command.
+    Source(SourceError),
+    /// The run has finished or is stopping.
+    Finished(String),
+    /// Anything else.
+    Failed(String),
+}
+
+impl fmt::Display for ControlFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(s)
+            | Self::NotLive(s)
+            | Self::Refused(s)
+            | Self::Conflict(s)
+            | Self::Timeout(s)
+            | Self::Finished(s)
+            | Self::Failed(s) => f.write_str(s),
+            Self::Source(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlFailure {}
+
+/// A retune's result.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct RetuneOutcome {
+    /// The run's content class from the retune on.
+    pub content_class: ContentClass,
+    /// The run was re-plumbed (a new segment); `false` for an in-place tune.
+    pub replumbed: bool,
+    /// Segment number now running (0 for the first).
+    pub segment: u64,
+}
+
+/// The control plane's view of a run.
+#[derive(Clone, Debug, Serialize)]
+pub struct ControlStatus {
+    /// Device settings can be changed (a live, window-classed source).
+    pub live: bool,
+    /// Content class of the running segment.
+    pub content_class: ContentClass,
+    /// Requested centre, Hz.
+    pub center_hz: f64,
+    /// Requested sample rate, Hz.
+    pub sample_rate_hz: f64,
+    /// Segment number (0 for the first).
+    pub segment: u64,
+    /// A re-plumb is in progress.
+    pub replumbing: bool,
+    /// The run has finished.
+    pub finished: bool,
+    /// Display settings.
+    pub display: DisplaySettings,
+    /// The current or last manual recording.
+    pub recording: RecordingStatus,
+    /// Control counters.
+    pub stats: Value,
+}
+
+/// How long [`PipelineController::retune`] waits for a re-plumb.
+pub const REPLUMB_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct Replumb {
+    from: (f64, f64),
+    to: (f64, f64),
+    class: ContentClass,
+}
+
+/// Parts of a run that outlive segments.
+struct Common {
+    data_dir: PathBuf,
+    db_path: PathBuf,
+    survey_id: SurveyId,
+    counters: Arc<Counters>,
+    product: Arc<Mutex<FloorProduct>>,
+    display: Arc<DisplayControl>,
+    switch: Arc<SwitchableControl>,
+    slot: SourceSlot,
+    pins: CalibrationPins,
+    stats: Arc<ControlStats>,
+    user_stop: AtomicBool,
+    recorder: Mutex<Option<ManualRecorder>>,
+    last_recording: Mutex<RecordingStatus>,
+}
+
+impl Common {
+    /// Ends the manual recording (if any) and keeps its final status.
+    fn finish_recorder(&self) {
+        let rec = self
+            .recorder
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(r) = rec {
+            *self
+                .last_recording
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = r.finish();
+        }
+    }
+}
+
+struct SupState {
+    /// The running segment (`None` while re-plumbing).
+    shared: Option<Arc<Shared>>,
+    tx: Option<Sender<ControlEvent>>,
+    window: (f64, f64),
+    class: ContentClass,
+    live: bool,
+    segment: u64,
+    request: Option<Replumb>,
+    result: Option<Result<RetuneOutcome, ControlFailure>>,
+    finished: bool,
+    /// Summary inputs of the last segment.
+    resolution: (f64, usize, usize),
+}
+
+struct Supervisor {
+    common: Common,
+    state: Mutex<SupState>,
+    cv: Condvar,
+}
+
+impl Supervisor {
+    fn lock(&self) -> MutexGuard<'_, SupState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Starts pipeline runs.
 pub struct Pipeline;
 
 type Worker = (&'static str, JoinHandle<anyhow::Result<()>>);
+
+struct Started {
+    shared: Arc<Shared>,
+    tx: Sender<ControlEvent>,
+    workers: Vec<Worker>,
+}
 
 impl Pipeline {
     /// Opens the stores, opens the Survey, and starts the threads (capture last).
@@ -261,139 +624,597 @@ impl Pipeline {
             summary: None,
         };
         repo.insert_survey(&survey)?;
-        let fs = info.sample_rate_hz;
-        let (fft_len, averages) = detection_resolution(fs, &cfg.settings);
-        let min_block = replay_block_len(fs).min(1024);
-        let ring_cfg = RingConfig::for_duration(fs, cfg.settings.ring_s.max(0.5), min_block);
-        let (writer, ring) = ring_buffer::<Complex<i8>>(ring_cfg);
-        let gate = Arc::new(FlowGate::new(cfg.lossless, ring.sample_capacity()));
         let product = FloorProduct::open(
             cfg.data_dir.join("history"),
             FloorProductConfig::default(),
             PowerCalibrations::from_states(&cfg.calibrations, None),
         )
         .map_err(|e| anyhow::anyhow!("opening history: {e}"))?;
-        let product = Arc::new(Mutex::new(product));
-        let counters = Arc::new(Counters::default());
-        let stop = Arc::new(AtomicBool::new(false));
-        // The scheduler holds a switchable handle, repointed when `--loop` reopens the source.
-        let switch = Arc::new(SwitchableControl::new(source.control()));
-        let pins = calibration_pins(&cfg.calibrations);
-        let source = Calibrated::wrap(source, &pins);
-        let reopen: Option<SourceFactory> = reopen.map(|mut open| {
-            let switch = Arc::clone(&switch);
-            Box::new(move || -> anyhow::Result<Box<dyn Source>> {
-                let s = open()?;
-                switch.replace(s.control());
-                Ok(Calibrated::wrap(s, &pins))
-            }) as SourceFactory
-        });
-        let sched = if cfg.drive_scheduler {
-            Some(SchedState::new(
-                &cfg.plan,
-                Arc::clone(&switch),
-                fs,
-                info.start_time,
-                Arc::clone(&counters),
-                cfg.settings.verify_pois,
-            )?)
-        } else {
-            None
-        };
-        let specs = cfg.settings.chain_specs();
-        let shared = Arc::new(Shared {
-            counters: Arc::clone(&counters),
-            ring,
-            gate,
-            repo: Mutex::new(repo),
+        let live = cfg.live_window_class && source.capabilities().controllable;
+        let common = Common {
+            data_dir: cfg.data_dir.clone(),
             db_path,
-            stop: Arc::clone(&stop),
             survey_id: survey.id,
-            fs,
-            fft_len,
-            averages,
-            inventory: Mutex::new(inventory),
-            specs,
-            cfg,
-        });
-
-        let (tx, rx) = mpsc::channel::<ControlEvent>();
-        let mut workers: Vec<Worker> = Vec::new();
-        let spawn = |name: &'static str,
-                     f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>|
-         -> anyhow::Result<Worker> {
-            Ok((name, thread::Builder::new().name(name.into()).spawn(f)?))
+            counters: Arc::new(Counters::default()),
+            product: Arc::new(Mutex::new(product)),
+            display: Arc::new(DisplayControl::new(DisplaySettings::from_settings(
+                &cfg.settings,
+            ))),
+            // The scheduler holds a switchable handle, repointed when `--loop` reopens the source.
+            switch: Arc::new(SwitchableControl::new(source.control())),
+            slot: Arc::new(Mutex::new(None)),
+            pins: calibration_pins(&cfg.calibrations),
+            stats: Arc::new(ControlStats::default()),
+            user_stop: AtomicBool::new(false),
+            recorder: Mutex::new(None),
+            last_recording: Mutex::new(RecordingStatus::default()),
         };
-        {
-            let (s, t) = (Arc::clone(&shared), tx.clone());
-            workers.push(spawn(
-                "hk-detect",
-                Box::new(move || crate::detect::run(s, t)),
-            )?);
-        }
-        {
-            let (s, p) = (Arc::clone(&shared), Arc::clone(&product));
-            workers.push(spawn(
-                "hk-history",
-                Box::new(move || crate::history::run(s, p)),
-            )?);
-        }
-        {
-            let s = Arc::clone(&shared);
-            workers.push(spawn(
-                "hk-spectrum",
-                Box::new(move || crate::spectrum::run(s)),
-            )?);
-        }
-        {
-            let s = Arc::clone(&shared);
-            workers.push(spawn(
-                "hk-control",
-                Box::new(move || crate::control::run(s, rx, sched)),
-            )?);
-        }
-        let s = Arc::clone(&shared);
-        let capture = hk_core::rt::spawn_capture_thread("hk-capture", move |_priority| {
-            let (writer, s) = (writer, s);
-            let r = crate::capture::run(source, reopen, writer, Arc::clone(&s));
-            if r.is_err() {
-                s.stop.store(true, Ordering::SeqCst);
-            }
-            r
-        })?;
-        workers.insert(0, ("hk-capture", capture));
-        Ok(PipelineHandle {
+        let class = cfg.source_class;
+        let window = (info.center_hz, info.sample_rate_hz);
+        let Started {
             shared,
-            product,
-            workers,
             tx,
+            workers,
+        } = start_segment(&common, cfg, repo, info, source, reopen, inventory, None)?;
+        let resolution = (shared.fs, shared.fft_len, shared.averages);
+        let sup = Arc::new(Supervisor {
+            common,
+            state: Mutex::new(SupState {
+                shared: Some(shared),
+                tx: Some(tx),
+                window,
+                class,
+                live,
+                segment: 0,
+                request: None,
+                result: None,
+                finished: false,
+                resolution,
+            }),
+            cv: Condvar::new(),
+        });
+        let s = Arc::clone(&sup);
+        let thread = thread::Builder::new()
+            .name("hk-supervisor".into())
+            .spawn(move || supervise(&s, workers))?;
+        Ok(PipelineHandle {
+            sup,
+            thread: Some(thread),
             started: Instant::now(),
         })
     }
 }
 
+/// Starts one segment's threads (see the module docs). The source is lent first, so it returns
+/// to the slot if anything below fails.
+#[allow(clippy::too_many_arguments)]
+fn start_segment(
+    common: &Common,
+    cfg: PipelineConfig,
+    repo: Repository,
+    info: SourceInfo,
+    source: Box<dyn Source>,
+    reopen: Option<SourceFactory>,
+    inventory: Box<dyn Inventory>,
+    expect: Option<(f64, f64)>,
+) -> anyhow::Result<Started> {
+    let mut source = Lent::wrap(source, &common.slot);
+    if cfg.live_window_class {
+        source = WindowGuard::wrap(source, cfg.source_class, expect, &common.stats);
+    }
+    let source = Calibrated::wrap(source, &common.pins);
+    let fs = info.sample_rate_hz;
+    let (fft_len, averages) = detection_resolution(fs, &cfg.settings);
+    let min_block = replay_block_len(fs).min(1024);
+    let ring_cfg = RingConfig::for_duration(fs, cfg.settings.ring_s.max(0.5), min_block);
+    let (writer, ring) = ring_buffer::<Complex<i8>>(ring_cfg);
+    let gate = Arc::new(FlowGate::new(cfg.lossless, ring.sample_capacity()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let reopen: Option<SourceFactory> = reopen.map(|mut open| {
+        let (switch, pins, slot) = (
+            Arc::clone(&common.switch),
+            Arc::clone(&common.pins),
+            Arc::clone(&common.slot),
+        );
+        Box::new(move || -> anyhow::Result<Box<dyn Source>> {
+            let s = open()?;
+            switch.replace(s.control());
+            Ok(Calibrated::wrap(Lent::wrap(s, &slot), &pins))
+        }) as SourceFactory
+    });
+    let sched = if cfg.drive_scheduler {
+        Some(SchedState::new(
+            &cfg.plan,
+            Arc::clone(&common.switch),
+            fs,
+            info.start_time,
+            Arc::clone(&common.counters),
+            cfg.settings.verify_pois,
+        )?)
+    } else {
+        None
+    };
+    let specs = cfg.settings.chain_specs();
+    let shared = Arc::new(Shared {
+        counters: Arc::clone(&common.counters),
+        ring,
+        gate,
+        repo: Mutex::new(repo),
+        db_path: common.db_path.clone(),
+        stop,
+        survey_id: common.survey_id,
+        fs,
+        fft_len,
+        averages,
+        inventory: Mutex::new(inventory),
+        specs,
+        display: Arc::clone(&common.display),
+        continues: AtomicBool::new(false),
+        cfg,
+    });
+    inc(&common.stats.segments);
+
+    let (tx, rx) = mpsc::channel::<ControlEvent>();
+    let mut workers: Vec<Worker> = Vec::new();
+    let spawn = |name: &'static str,
+                 f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>|
+     -> anyhow::Result<Worker> {
+        Ok((name, thread::Builder::new().name(name.into()).spawn(f)?))
+    };
+    {
+        let (s, t) = (Arc::clone(&shared), tx.clone());
+        workers.push(spawn(
+            "hk-detect",
+            Box::new(move || crate::detect::run(s, t)),
+        )?);
+    }
+    {
+        let (s, p) = (Arc::clone(&shared), Arc::clone(&common.product));
+        workers.push(spawn(
+            "hk-history",
+            Box::new(move || crate::history::run(s, p)),
+        )?);
+    }
+    {
+        let s = Arc::clone(&shared);
+        workers.push(spawn(
+            "hk-spectrum",
+            Box::new(move || crate::spectrum::run(s)),
+        )?);
+    }
+    {
+        let s = Arc::clone(&shared);
+        workers.push(spawn(
+            "hk-control",
+            Box::new(move || crate::control::run(s, rx, sched)),
+        )?);
+    }
+    let s = Arc::clone(&shared);
+    let capture = hk_core::rt::spawn_capture_thread("hk-capture", move |_priority| {
+        let (writer, s) = (writer, s);
+        let r = crate::capture::run(source, reopen, writer, Arc::clone(&s));
+        if r.is_err() {
+            s.stop.store(true, Ordering::SeqCst);
+        }
+        r
+    })?;
+    workers.insert(0, ("hk-capture", capture));
+    Ok(Started {
+        shared,
+        tx,
+        workers,
+    })
+}
+
+/// What the supervisor leaves for [`PipelineHandle::wait`].
+struct Finished {
+    errors: Vec<String>,
+}
+
+fn join_workers(workers: &mut Vec<Worker>, errors: &mut Vec<String>) {
+    for (name, join) in workers.drain(..) {
+        match join.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errors.push(format!("{name}: {e:#}")),
+            Err(_) => errors.push(format!("{name}: panicked")),
+        }
+    }
+}
+
+/// Runs segments until one ends without a re-plumb request (see the module docs).
+fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
+    let mut errors = Vec::new();
+    loop {
+        join_workers(&mut workers, &mut errors);
+        let mut st = sup.lock();
+        let Some(req) = st.request.take() else {
+            st.finished = true;
+            sup.cv.notify_all();
+            return Finished { errors };
+        };
+        if sup.common.user_stop.load(Ordering::SeqCst) {
+            st.result = Some(Err(ControlFailure::Finished("the run is stopping".into())));
+            st.finished = true;
+            sup.cv.notify_all();
+            return Finished { errors };
+        }
+        let old = st.shared.take().expect("a running segment");
+        st.tx = None;
+        drop(st);
+        match replumb(&sup.common, old, &req) {
+            Ok((started, outcome, window, class)) => {
+                let mut st = sup.lock();
+                if sup.common.user_stop.load(Ordering::SeqCst) {
+                    started.shared.stop.store(true, Ordering::SeqCst);
+                }
+                st.resolution = (
+                    started.shared.fs,
+                    started.shared.fft_len,
+                    started.shared.averages,
+                );
+                st.shared = Some(started.shared);
+                st.tx = Some(started.tx);
+                st.window = window;
+                st.class = class;
+                st.segment += 1;
+                st.result = Some(outcome.map(|mut o| {
+                    o.segment = st.segment;
+                    o
+                }));
+                inc(&sup.common.stats.replumbs);
+                sup.cv.notify_all();
+                workers = started.workers;
+            }
+            Err(e) => {
+                errors.push(format!("re-plumb: {e}"));
+                let mut st = sup.lock();
+                st.result = Some(Err(ControlFailure::Failed(format!(
+                    "the re-plumb failed and the run ended: {e}"
+                ))));
+                st.finished = true;
+                sup.cv.notify_all();
+                return Finished { errors };
+            }
+        }
+    }
+}
+
+fn unwrap_shared(mut arc: Arc<Shared>) -> Result<Shared, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Arc::try_unwrap(arc) {
+            Ok(s) => return Ok(s),
+            Err(a) if Instant::now() < deadline => {
+                arc = a;
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(_) => return Err("a thread of the previous segment still holds its state".into()),
+        }
+    }
+}
+
+fn apply_window(
+    control: &dyn SourceControl,
+    to: (f64, f64),
+    from: (f64, f64),
+) -> Result<(), SourceError> {
+    if to.1 != from.1 {
+        control.set_sample_rate(to.1)?;
+    }
+    if to.0 != from.0 {
+        control.tune(to.0)?;
+    }
+    Ok(())
+}
+
+type Replumbed = (
+    Started,
+    Result<RetuneOutcome, ControlFailure>,
+    (f64, f64),
+    ContentClass,
+);
+
+/// Steps 2–5 of the module docs, after the old segment's threads have all ended.
+fn replumb(common: &Common, old: Arc<Shared>, req: &Replumb) -> Result<Replumbed, String> {
+    common.finish_recorder();
+    let Shared {
+        mut cfg,
+        repo,
+        inventory,
+        ..
+    } = unwrap_shared(old)?;
+    let repo = repo.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let inventory = inventory
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    let source = common
+        .slot
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .ok_or("the capture thread did not hand the source back")?;
+    let old_class = cfg.source_class;
+    let (window, class, outcome) = match apply_window(common.switch.as_ref(), req.to, req.from) {
+        Ok(()) => (
+            req.to,
+            req.class,
+            Ok(RetuneOutcome {
+                content_class: req.class,
+                replumbed: true,
+                segment: 0,
+            }),
+        ),
+        Err(e) => {
+            // Back to the window the old segment had (its class still holds there).
+            let _ = apply_window(common.switch.as_ref(), req.from, req.to);
+            (req.from, old_class, Err(ControlFailure::Source(e)))
+        }
+    };
+    cfg.source_class = class;
+    let info = SourceInfo {
+        center_hz: window.0,
+        sample_rate_hz: window.1,
+        start_time: Timestamp::from_unix_nanos(
+            common.counters.stream_time_ns.load(Ordering::Relaxed),
+        ),
+    };
+    let started = start_segment(
+        common,
+        cfg,
+        repo,
+        info,
+        source,
+        None,
+        inventory,
+        Some(window),
+    )
+    .map_err(|e| format!("starting the new segment: {e:#}"))?;
+    Ok((started, outcome, window, class))
+}
+
 /// Stops a running pipeline ([`PipelineHandle::stopper`]).
-#[derive(Clone, Debug)]
-pub struct Stopper(Arc<AtomicBool>);
+#[derive(Clone)]
+pub struct Stopper {
+    sup: Arc<Supervisor>,
+}
+
+impl fmt::Debug for Stopper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stopper")
+            .field("stopped", &self.is_stopped())
+            .finish()
+    }
+}
 
 impl Stopper {
     /// Stops capture, like [`PipelineHandle::stop`].
     pub fn stop(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.sup.common.user_stop.store(true, Ordering::SeqCst);
+        let st = self.sup.lock();
+        if let Some(s) = &st.shared {
+            s.stop.store(true, Ordering::SeqCst);
+        }
+        self.sup.cv.notify_all();
     }
 
-    /// `stop` has been called (by anyone).
+    /// `stop` has been called (by anyone), or the run has finished.
     pub fn is_stopped(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.sup.common.user_stop.load(Ordering::SeqCst) || self.sup.lock().finished
+    }
+}
+
+/// The control plane of a running pipeline (T-050): device window changes with legal
+/// re-classification, display settings, pause/resume and manual recording. Cheap to clone; every
+/// method is safe from any thread.
+#[derive(Clone)]
+pub struct PipelineController {
+    sup: Arc<Supervisor>,
+}
+
+impl fmt::Debug for PipelineController {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PipelineController").finish_non_exhaustive()
+    }
+}
+
+impl PipelineController {
+    /// The control plane's view of the run.
+    pub fn status(&self) -> ControlStatus {
+        let st = self.sup.lock();
+        let c = &self.sup.common;
+        let stats = &c.stats;
+        ControlStatus {
+            live: st.live,
+            content_class: st.class,
+            center_hz: st.window.0,
+            sample_rate_hz: st.window.1,
+            segment: st.segment,
+            replumbing: st.request.is_some() || (st.shared.is_none() && !st.finished),
+            finished: st.finished,
+            display: c.display.get(),
+            recording: self.recording(),
+            stats: serde_json::json!({
+                "segments": get(&stats.segments),
+                "replumbs": get(&stats.replumbs),
+                "retunes_in_place": get(&stats.retunes_in_place),
+                "blocks_dropped_window": get(&stats.blocks_dropped_window),
+                "recordings_started": get(&stats.recordings_started),
+                "recordings_refused_class": get(&stats.recordings_refused_class),
+            }),
+        }
+    }
+
+    /// Moves a live run to `(center_hz, sample_rate_hz)`. A window with the run's class and rate
+    /// is tuned in place; any other re-plumbs the run with the window's class at a block boundary
+    /// and returns once the new segment runs (see the module docs), or [`ControlFailure::Timeout`]
+    /// after [`REPLUMB_TIMEOUT`].
+    pub fn retune(
+        &self,
+        center_hz: f64,
+        sample_rate_hz: f64,
+    ) -> Result<RetuneOutcome, ControlFailure> {
+        let caps = self.sup.common.switch.capabilities();
+        let mut st = self.sup.lock();
+        if st.finished || self.sup.common.user_stop.load(Ordering::SeqCst) {
+            return Err(ControlFailure::Finished("the run has finished".into()));
+        }
+        if !st.live {
+            return Err(ControlFailure::NotLive(
+                "device settings apply to a live source; this run's window is fixed (a recording \
+                 or a scheduler-driven run)"
+                    .into(),
+            ));
+        }
+        if !(center_hz.is_finite() && caps.supports_frequency(center_hz)) {
+            return Err(ControlFailure::Invalid(format!(
+                "centre frequency {center_hz} Hz is outside the device's ranges"
+            )));
+        }
+        if !(sample_rate_hz.is_finite() && caps.sample_rates.supports(sample_rate_hz)) {
+            return Err(ControlFailure::Invalid(format!(
+                "sample rate {sample_rate_hz} Hz is not supported by the device"
+            )));
+        }
+        let Some(shared) = st.shared.clone().filter(|_| st.request.is_none()) else {
+            return Err(ControlFailure::Conflict("a re-plumb is in progress".into()));
+        };
+        let class = window_class(center_hz, sample_rate_hz);
+        if class == st.class && sample_rate_hz == st.window.1 {
+            self.sup
+                .common
+                .switch
+                .tune(center_hz)
+                .map_err(ControlFailure::Source)?;
+            st.window.0 = center_hz;
+            inc(&self.sup.common.stats.retunes_in_place);
+            return Ok(RetuneOutcome {
+                content_class: class,
+                replumbed: false,
+                segment: st.segment,
+            });
+        }
+        st.request = Some(Replumb {
+            from: st.window,
+            to: (center_hz, sample_rate_hz),
+            class,
+        });
+        st.result = None;
+        shared.continues.store(true, Ordering::SeqCst);
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(shared);
+        let (mut st, timeout) = self
+            .sup
+            .cv
+            .wait_timeout_while(st, REPLUMB_TIMEOUT, |s| s.result.is_none())
+            .unwrap_or_else(PoisonError::into_inner);
+        match st.result.take() {
+            Some(r) => r,
+            None if timeout.timed_out() => Err(ControlFailure::Timeout(format!(
+                "the re-plumb did not finish within {} s; it continues",
+                REPLUMB_TIMEOUT.as_secs()
+            ))),
+            None => Err(ControlFailure::Failed("no re-plumb result".into())),
+        }
+    }
+
+    /// The display settings in force.
+    pub fn display(&self) -> DisplaySettings {
+        self.sup.common.display.get()
+    }
+
+    /// Changes display settings (all or nothing); the spectrum reader applies them at its next
+    /// chunk. Works for recordings and live runs alike.
+    pub fn set_display(&self, patch: &DisplayPatch) -> Result<DisplaySettings, ControlFailure> {
+        self.sup
+            .common
+            .display
+            .patch(patch)
+            .map_err(ControlFailure::Invalid)
+    }
+
+    /// Pauses or resumes spectrum publishing (capture, detection and history continue).
+    pub fn set_paused(&self, paused: bool) -> DisplaySettings {
+        self.sup.common.display.set_paused(paused)
+    }
+
+    /// Starts recording the tuned window's IQ (see [`crate::recorder`]): refused under a class
+    /// that forbids content, or while another manual recording runs.
+    pub fn start_recording(
+        &self,
+        label: Option<&str>,
+        max_s: Option<f64>,
+    ) -> Result<RecordingStatus, ControlFailure> {
+        let c = &self.sup.common;
+        let shared = {
+            let st = self.sup.lock();
+            if st.finished || c.user_stop.load(Ordering::SeqCst) {
+                return Err(ControlFailure::Finished("the run has finished".into()));
+            }
+            st.shared
+                .clone()
+                .filter(|_| st.request.is_none())
+                .ok_or_else(|| ControlFailure::Conflict("a re-plumb is in progress".into()))?
+        };
+        let mut rec = c.recorder.lock().unwrap_or_else(PoisonError::into_inner);
+        if rec.as_ref().is_some_and(|r| !r.is_finished()) {
+            return Err(ControlFailure::Conflict(
+                "a manual recording is already running".into(),
+            ));
+        }
+        if let Some(done) = rec.take() {
+            *c.last_recording
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = done.finish();
+        }
+        if !shared.cfg.source_class.permits_content() {
+            inc(&c.stats.recordings_refused_class);
+        }
+        let r = ManualRecorder::start(shared, label, max_s)?;
+        inc(&c.stats.recordings_started);
+        let status = r.status();
+        *rec = Some(r);
+        Ok(status)
+    }
+
+    /// Stops the manual recording and returns its final state (the Recording row is stored).
+    pub fn stop_recording(&self) -> Result<RecordingStatus, ControlFailure> {
+        let c = &self.sup.common;
+        let r = c
+            .recorder
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .ok_or_else(|| ControlFailure::Conflict("no manual recording is running".into()))?;
+        let status = r.finish();
+        *c.last_recording
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = status.clone();
+        Ok(status)
+    }
+
+    /// The current manual recording, else the last one.
+    pub fn recording(&self) -> RecordingStatus {
+        let c = &self.sup.common;
+        match c
+            .recorder
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            Some(r) => r.status(),
+            None => c
+                .last_recording
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        }
     }
 }
 
 /// A running pipeline.
 pub struct PipelineHandle {
-    shared: Arc<Shared>,
-    product: Arc<Mutex<FloorProduct>>,
-    workers: Vec<Worker>,
-    tx: Sender<ControlEvent>,
+    sup: Arc<Supervisor>,
+    thread: Option<JoinHandle<Finished>>,
     started: Instant,
 }
 
@@ -423,9 +1244,9 @@ pub struct RunSummary {
     pub survey_id: SurveyId,
     /// Wall-clock run time, s.
     pub elapsed_s: f64,
-    /// Source class.
+    /// Source class (of the last segment).
     pub source_class: String,
-    /// Detection resolution.
+    /// Detection resolution (of the last segment).
     pub resolution: ResolutionSummary,
     /// Detection rows in the database.
     pub detections_stored: u64,
@@ -567,40 +1388,55 @@ impl RunSummary {
 }
 
 impl PipelineHandle {
-    /// Live counters.
+    /// Live counters (shared by every segment of the run).
     pub fn counters(&self) -> Arc<Counters> {
-        Arc::clone(&self.shared.counters)
+        Arc::clone(&self.sup.common.counters)
     }
 
     /// The floor product (history), shared with `/api/history` and `/api/floor`.
     pub fn floor_product(&self) -> Arc<Mutex<FloorProduct>> {
-        Arc::clone(&self.product)
+        Arc::clone(&self.sup.common.product)
     }
 
     /// The data directory (`hackriff.db`, `history/`, `recordings/`).
     pub fn data_dir(&self) -> &Path {
-        &self.shared.cfg.data_dir
+        &self.sup.common.data_dir
     }
 
-    /// The run's Survey.
+    /// The run's Survey (the same across re-plumbs).
     pub fn survey_id(&self) -> SurveyId {
-        self.shared.survey_id
+        self.sup.common.survey_id
     }
 
     /// Stops capture; the readers and chains then drain and finish.
     pub fn stop(&self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
+        self.stopper().stop();
     }
 
     /// A handle that stops this run from another thread (a watchdog, a signal handler) while
     /// [`Self::wait`] owns the handle.
     pub fn stopper(&self) -> Stopper {
-        Stopper(Arc::clone(&self.shared.stop))
+        Stopper {
+            sup: Arc::clone(&self.sup),
+        }
+    }
+
+    /// The control plane (T-050).
+    pub fn controller(&self) -> PipelineController {
+        PipelineController {
+            sup: Arc::clone(&self.sup),
+        }
+    }
+
+    fn send(&self, ev: ControlEvent) {
+        if let Some(tx) = &self.sup.lock().tx {
+            let _ = tx.send(ev);
+        }
     }
 
     /// Attaches `spec` for `candidate` at runtime (no restart).
     pub fn attach_chain(&self, spec: ChainSpec, candidate: Candidate) {
-        let _ = self.tx.send(ControlEvent::Manual {
+        self.send(ControlEvent::Manual {
             spec: Box::new(spec),
             candidate,
         });
@@ -608,29 +1444,33 @@ impl PipelineHandle {
 
     /// Detaches every chain attached with [`Self::attach_chain`].
     pub fn detach_manual_chains(&self) {
-        let _ = self.tx.send(ControlEvent::DetachManual);
+        self.send(ControlEvent::DetachManual);
     }
 
     /// The newest ring sample index.
     pub fn ring_position(&self) -> u64 {
-        self.shared.ring.next_sample().unwrap_or(0)
+        self.sup
+            .lock()
+            .shared
+            .as_ref()
+            .and_then(|s| s.ring.next_sample())
+            .unwrap_or(0)
     }
 
-    /// Waits for every thread, closes the Survey and summarises.
-    pub fn wait(self) -> anyhow::Result<RunSummary> {
-        let mut errors = Vec::new();
-        for (name, join) in self.workers {
-            match join.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => errors.push(format!("{name}: {e:#}")),
-                Err(_) => errors.push(format!("{name}: panicked")),
-            }
-        }
-        drop(self.tx);
-        let shared = self.shared;
-        let counters = &shared.counters;
+    /// Waits for every segment, closes the Survey and summarises.
+    pub fn wait(mut self) -> anyhow::Result<RunSummary> {
+        let thread = self.thread.take().expect("the supervisor thread");
+        let Finished { mut errors } = thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("the pipeline supervisor panicked"))?;
+        let common = &self.sup.common;
+        common.finish_recorder();
+        let (class, (fs, fft_len, averages)) = {
+            let st = self.sup.lock();
+            (st.class, st.resolution)
+        };
+        let counters = &common.counters;
         let lost = counters.always_on_lost();
-        let mut repo = shared.repo();
         let t_end = Timestamp::from_unix_nanos(counters.stream_time_ns.load(Ordering::Relaxed));
         let summary = SurveySummary {
             sweep_frames: 0,
@@ -639,38 +1479,44 @@ impl PipelineHandle {
             recordings: get(&counters.chains.recordings),
             dropped_samples: lost + get(&counters.source.source_dropped),
         };
-        if let Err(e) = repo.finish_survey(shared.survey_id, SurveyState::Closed, t_end, &summary) {
-            errors.push(format!("closing the survey: {e}"));
-        }
-        let detections_stored = repo.detection_count().unwrap_or(0);
+        let mut detections_stored = 0;
         let mut emitters = 0u64;
-        let mut q = InventoryQuery {
-            limit: 100,
-            ..InventoryQuery::default()
-        };
-        while let Ok(page) = repo.query_inventory(&q) {
-            emitters += page.entries.len() as u64;
-            match page.next_offset {
-                Some(o) => q.offset = o,
-                None => break,
+        match Repository::open(&common.db_path) {
+            Ok(mut repo) => {
+                if let Err(e) =
+                    repo.finish_survey(common.survey_id, SurveyState::Closed, t_end, &summary)
+                {
+                    errors.push(format!("closing the survey: {e}"));
+                }
+                detections_stored = repo.detection_count().unwrap_or(0);
+                let mut q = InventoryQuery {
+                    limit: 100,
+                    ..InventoryQuery::default()
+                };
+                while let Ok(page) = repo.query_inventory(&q) {
+                    emitters += page.entries.len() as u64;
+                    match page.next_offset {
+                        Some(o) => q.offset = o,
+                        None => break,
+                    }
+                }
+                let _ = repo.checkpoint();
             }
+            Err(e) => errors.push(format!("opening the database to close the survey: {e}")),
         }
-        let _ = repo.checkpoint();
-        drop(repo);
-        let fs = shared.fs;
         let resolution = ResolutionSummary {
-            fft_len: shared.fft_len,
-            averages: shared.averages,
+            fft_len,
+            averages,
             overlap: 0,
-            n_eff: shared.averages as f64,
-            bin_hz: fs / shared.fft_len as f64,
-            frame_s: (shared.fft_len * shared.averages) as f64 / fs,
+            n_eff: averages as f64,
+            bin_hz: fs / fft_len as f64,
+            frame_s: (fft_len * averages) as f64 / fs,
         };
         Ok(RunSummary {
-            data_dir: shared.cfg.data_dir.clone(),
-            survey_id: shared.survey_id,
+            data_dir: common.data_dir.clone(),
+            survey_id: common.survey_id,
             elapsed_s: self.started.elapsed().as_secs_f64(),
-            source_class: class_name(shared.cfg.source_class),
+            source_class: class_name(class),
             resolution,
             detections_stored,
             emitters,

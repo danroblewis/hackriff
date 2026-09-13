@@ -89,7 +89,7 @@ pub use frames::{
 };
 pub use hash::{ContentHash, canonical_json};
 pub use ids::{
-    AnnotationId, AnomalyId, BitstreamId, CalibrationStateId, DecodeId, DemodulationId,
+    AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, DecodeId, DemodulationId,
     DetectionId, EmitterId, ExplanationId, ExternalEventId, ProvenanceId, RecordingId, ScanPlanId,
     SpurMaskId, SurveyId, TrackId,
 };
@@ -103,6 +103,7 @@ pub use recording::{
 };
 pub use region::{FreqRange, Region, TimeRange};
 pub use repo::{
-    EmitterUpsert, ProvenanceChain, RepoBatch, RepoError, Repository, TrustTest, TrustVerdict,
+    BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterUpsert,
+    ProvenanceChain, RepoBatch, RepoError, Repository, TrustTest, TrustVerdict,
 };
 pub use time::{SampleTime, Timestamp, TimestampMethod};

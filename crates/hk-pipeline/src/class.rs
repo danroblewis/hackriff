@@ -227,6 +227,12 @@ pub fn band_class(centres: &[f64], fs: f64) -> ContentClass {
     }
 }
 
+/// The class of one tuned window `[centre ± rate/2]` ([`band_class`] of a single window): what a
+/// live run under the control API carries while tuned there (T-050).
+pub fn window_class(center_hz: f64, sample_rate_hz: f64) -> ContentClass {
+    band_class(&[center_hz], sample_rate_hz)
+}
+
 /// The source class of a recording (see the module docs).
 pub fn source_class(meta: &SigmfMeta) -> ContentClass {
     if let Some(v) = meta.global.extra.get("hackriff:content_class") {
