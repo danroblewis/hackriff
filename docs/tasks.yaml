@@ -12,7 +12,8 @@ spikes:
 tasks:
   - id: T-001
     title: Repo scaffold, Cargo workspace, justfile, CI skeleton (no hardware)
-    status: in-progress
+    status: done
+    commit: 4c16e27 (merged to main)
     override: "effort medium->high; scope also seeds hk-model ids/Provenance/SigMF types so T-002/T-003/T-023 can run in parallel (coordinator, 2026-09-13)"
     deps: []
     parallel_group: A
@@ -25,7 +26,7 @@ tasks:
     dod: workspace builds on macOS (CPU path); CI runs cargo test + python tooling test; README build/run commands work
   - id: T-002
     title: Data-model types + SQLite repository (docs/07)
-    status: todo
+    status: in-progress
     deps: [T-001]
     parallel_group: B
     core_interface: true
@@ -38,7 +39,7 @@ tasks:
     dod: schema + repository with tests for Emitter upsert, Detection insert, region/time query; provenance chain resolvable
   - id: T-003
     title: source-abstraction + SigMF file-replay source + RAM ring buffer
-    status: todo
+    status: in-progress
     deps: [T-001]
     parallel_group: B
     use_cases: [SPACE-050]
@@ -50,7 +51,7 @@ tasks:
     dod: file-replay source feeds frames with provenance; ring buffer with pre-trigger read; HackRF source stubbed behind same trait
   - id: T-023
     title: Synthetic IQ generator + end-to-end replay harness
-    status: todo
+    status: in-progress
     deps: [T-001]
     parallel_group: B
     use_cases: [AWARE-036, AWARE-006, SPACE-050, AWARE-042]
