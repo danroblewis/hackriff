@@ -340,7 +340,7 @@ tasks:
   - id: T-024
     title: Wire the 7 slice acceptance tests (docs/11 1.1) in CI
     status: todo
-    deps: [T-015, T-013, T-012, T-020, T-021, T-018, T-019, T-017]
+    deps: [T-015, T-013, T-012, T-020, T-021, T-018, T-019, T-017, T-027]
     parallel_group: J
     use_cases: [SIGNAL-001, AWARE-036, SIGNAL-062, AWARE-006, SPACE-050, AWARE-053, AWARE-042]
     acceptance: all seven acceptance tests pass offline in CI
@@ -378,6 +378,32 @@ tasks:
     effort: high
     dod: CudaPfb implements PfbBackend; parity tests vs CPU; throughput + power measured on the Orin Nano
     note: "split from T-008 acceptance ('GPU + CPU-fallback paths') by the T-008 review, 2026-09-13; blocked until the Jetson arrives (user purchase)"
+  - id: T-022a
+    title: Web UI part 1 - WebSocket bridge (hk-stream remote egress) + WebGL2 waterfall + region-over-time history view
+    status: todo
+    deps: [T-016, T-017]
+    after: "stream enforcement-gap fixes merged (locality rule enforced in subscribe; bridge counts as remote)"
+    parallel_group: I
+    use_cases: [AWARE-042, SPACE-050]
+    acceptance: browser waterfall from a live/replayed spectrum stream via the bridge; region-over-time view from the T-017 query; bridge refuses own-key streams, caps consumers, authenticates remote clients (token)
+    area: ui/, crates/hk-api (bridge)
+    needs: none
+    model: opus
+    effort: medium
+    note: "split from T-022 (coordinator, 2026-09-13): only the inventory table needs T-018; the bridge is a remote egress on the legal-guardrail path, so Opus not Sonnet; reuse spikes/s3-web-waterfall client"
+  - id: T-027
+    title: Pipeline assembly - hackriffd composes source, ring, STFT, floor, detection, history, stream output and plugins under a ScanPlan
+    status: todo
+    deps: [T-006, T-009, T-016, T-017]
+    parallel_group: J
+    core_interface: true
+    use_cases: [SPACE-050, AWARE-042, AWARE-036]
+    acceptance: `hk replay <fixture>` and `hackriffd --source sigmf:<file>` run the always-on chain end to end and write Detections, tiles and stream records; runtime chain attach/detach per ADR-0001 S1 outcome
+    area: crates/hk-cli, crates/hk-core (runtime glue)
+    needs: none
+    model: opus
+    effort: high
+    note: "added by coordinator 2026-09-13: M0 DoD needs a runnable survey on the device and T-024's e2e tests need a composed pipeline; no existing task owned the composition"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
