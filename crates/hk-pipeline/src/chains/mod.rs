@@ -35,7 +35,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use hk_core::{ReadChunk, ReadOutcome, ResyncPolicy, RingReader};
-use hk_model::{RecordingTrigger, TrackId};
+use hk_model::{DetectionId, RecordingTrigger, TrackId};
 use num_complex::Complex;
 
 use crate::events::{Candidate, MemberBox};
@@ -117,6 +117,33 @@ struct Running {
     id: u64,
     tx: Option<Sender<ChainMsg>>,
     join: JoinHandle<()>,
+}
+
+/// Longest wait for a chain row's parent detection ([`stored_detection`]).
+pub(crate) const PARENT_WAIT: Duration = Duration::from_secs(5);
+
+/// The triggering detection a chain's rows may reference (T-037b). The detection writer thread
+/// stores detections asynchronously, and under load (a detect reader overrunning at 8–10 Msps,
+/// T-055) or a failing store the row can lag or never arrive; writing a Demodulation, Decode or
+/// Recording that names it then fails the foreign key. Waits up to [`PARENT_WAIT`] for the row;
+/// a detection still missing is dropped from the reference and counted
+/// (`detection_ref_missing`): the chain's rows are neither refused nor orphaned.
+pub(crate) fn stored_detection(
+    shared: &Shared,
+    detection: Option<DetectionId>,
+) -> Option<DetectionId> {
+    let d = detection?;
+    let deadline = std::time::Instant::now() + PARENT_WAIT;
+    loop {
+        if shared.repo().detection(d).is_ok() {
+            return Some(d);
+        }
+        if std::time::Instant::now() >= deadline {
+            inc(&shared.counters.chains.detection_ref_missing);
+            return None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Stream time a raster channel is left alone after its chain finished, s.

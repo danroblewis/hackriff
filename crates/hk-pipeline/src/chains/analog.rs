@@ -262,7 +262,8 @@ fn collect_and_write(
     }
     let ctx = RecordContext {
         recording_ref: None,
-        detection_ref: cand.detection,
+        // Only a stored detection: the writer thread may lag (see `stored_detection`).
+        detection_ref: super::stored_detection(shared, cand.detection),
         emitter_hint: None,
     };
     let mut repo = shared.repo();

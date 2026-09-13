@@ -215,6 +215,9 @@ counter_group!(
         bits_gated,
         /// Raster-channel attaches skipped while the channel cools down after a finished chain.
         channel_cooldown,
+        /// Chain rows written without their triggering detection, which was never stored within
+        /// the wait (detect reader overrun, failed store).
+        detection_ref_missing,
         /// Chain errors (demod, repository).
         errors,
     }

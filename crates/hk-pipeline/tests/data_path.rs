@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use common::*;
 use hk_core::Pacing;
 use hk_e2e::{SynthRequest, synth_or_skip};
-use hk_model::{IdentityScheme, InventoryIdentity, InventoryQuery, Timestamp};
-use hk_pipeline::{PipelineConfig, replay_plan};
+use hk_model::{DetectionId, IdentityScheme, InventoryIdentity, InventoryQuery, Timestamp};
+use hk_pipeline::{Candidate, ChainSpec, PipelineConfig, replay_plan};
 use hk_stream::{Declared, Record, RecordFlags, StreamHeader, StreamKind, StreamReader};
 use serde_json::json;
 
@@ -360,6 +360,76 @@ fn plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated() 
         }
     }
     assert!(explained > 0, "the plugin's emitters were explained");
+}
+
+/// T-055 HIL: `analog chain write: FOREIGN KEY constraint failed` when the detect reader overran
+/// at 8–10 Msps, because chain rows named a triggering detection that was not (yet) stored.
+/// Deterministic here: a runtime analog chain names a detection that is never stored. After the
+/// bounded wait the reference is dropped and counted; the Demodulation is still written, no write
+/// is refused by the foreign key, and no row names a missing detection.
+#[test]
+fn chain_rows_whose_trigger_detection_never_arrives_are_written_without_it_and_counted() {
+    let src = TempDir::new("parent-src");
+    let meta = tone_recording(&src.0, "fm-tone", 250e3, 4.0, 100.1e6, None);
+    let dir = TempDir::new("parent");
+    let (cfg, replay, _input) = blind_replay_config(
+        &dir.0,
+        &meta,
+        json!({ "pipeline": { "chains": [] } }),
+        Pacing::RealTime { speed: 1.0 },
+    );
+    assert!(cfg.source_class.permits_content(), "FM band prior");
+    let center = replay.info.center_hz;
+    let handle = start(cfg, replay);
+    std::thread::sleep(Duration::from_millis(300));
+    let at = handle.ring_position().saturating_sub(4096);
+    let spec: ChainSpec = serde_json::from_value(json!({
+        "id": "analog-missing-parent",
+        "requires_content": true,
+        "nodes": [{ "node": "analog-auto", "pre_s": 0.0, "window_s": 1.0,
+                    "bandwidth_hz": 40e3, "probe_s": 0.0 }]
+    }))
+    .unwrap();
+    let never_stored = DetectionId::new();
+    handle.attach_chain(
+        spec,
+        Candidate {
+            track: None,
+            detection: Some(never_stored),
+            f_lo_hz: center + 30e3,
+            f_hi_hz: center + 70e3,
+            first_sample: at,
+            trigger_sample: at,
+            bursty: Some(false),
+        },
+    );
+    let (s, fired) = wait_guarded(handle, Duration::from_secs(120));
+    eprintln!("{}", s.to_text());
+    assert!(!fired, "the run did not finish; the watchdog stopped it");
+    assert!(s.errors.is_empty(), "{:?}", s.errors);
+    assert_eq!(s.counter("/chains/attached"), 1);
+    assert_eq!(s.counter("/chains/detection_ref_missing"), 1);
+    assert_eq!(
+        s.counter("/chains/errors"),
+        0,
+        "no chain write refused by the foreign key"
+    );
+    assert_eq!(
+        s.counter("/chains/demodulations"),
+        1,
+        "the rows are written without the missing parent"
+    );
+    let conn = rusqlite::Connection::open(dir.0.join("hackriff.db")).unwrap();
+    let orphans: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM demodulation m LEFT JOIN detection d \
+             ON d.detection_id = m.detection_id \
+             WHERE m.detection_id IS NOT NULL AND d.detection_id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0, "no demodulation names a missing detection");
 }
 
 /// `(flags, payload)` of every binary record in a captured stream, with its header.

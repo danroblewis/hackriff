@@ -226,7 +226,8 @@ pub(crate) fn run(
     )
     .map(|(content_class, by)| EmitterClassification { content_class, by });
     let ctx = FramedRecordContext {
-        detection_ref: first_det,
+        // Only a stored detection: the writer thread may lag (see `stored_detection`).
+        detection_ref: super::stored_detection(&shared, first_det),
         classification,
         ..Default::default()
     };
