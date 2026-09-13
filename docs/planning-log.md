@@ -443,3 +443,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Follow-ups → T-072:** ~0.4 s sample loss at device gaps, readsb stamps up to 95 ms late, single-detection tracks not stored, 120 µs squitter resolution.
   - **T-053 HIL unblocked:** needs the HackRF and a slot.
   - Verification running: lint, hk-e2e, acceptance (test-only change).
+- **B0.144 T-047 merge verified** (lint, hk-e2e, acceptance green). T-060 finished: TCP stream server with a token line, bits/symbols openers, discovery, stdlib Python and netcat examples. Mock-SDR tests: FSK over TCP 20/20 payloads, FM audio over WebSocket, slow client dropped without stalling the chain, 2 concurrent streams isolated. Its merge was blocked by uncommitted edits to docs/stream-contract.md on main that the coordinator did not make; investigating.
