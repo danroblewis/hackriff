@@ -11,6 +11,8 @@
 //! - [`ring`]: the single-writer, multi-reader RAM ring ([`ring_buffer`]) with exact loss
 //!   accounting and streaming or in-memory pre-trigger capture.
 //! - [`rt`]: best-effort priority and memory-lock hooks for the capture/writer thread.
+//! - [`scheduler`]: the v1 attention scheduler (C02 sweep hops + C03 POI dwells, C04 policy):
+//!   ScanPlan → deterministic [`ScheduleStep`]s applied through [`SourceControl`].
 //!
 //! The substrate is plain Rust with no dataflow-framework dependency (ADR-0001; spike S1 chose
 //! an owned dataflow whose chains are reader cursors over this ring).
@@ -18,6 +20,7 @@
 pub mod block;
 pub mod ring;
 pub mod rt;
+pub mod scheduler;
 pub mod source;
 
 pub use block::{BlockHeader, Discontinuity, ProvenanceHandle, SampleBlock};
@@ -27,6 +30,7 @@ pub use ring::{
     RingWriter, TriggerRead, TriggerStream, TriggerWindow, ring_buffer,
 };
 pub use rt::MemoryLock;
+pub use scheduler::{ScheduleStep, Scheduler, SchedulerConfig};
 pub use source::{
     BasebandFilters, ControlMailbox, Gains, HackRfSource, Pacing, PendingControl, ReplayOptions,
     SigmfReplaySource, Source, SourceCapabilities, SourceControl, SourceError,

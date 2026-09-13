@@ -428,6 +428,7 @@ dependencies = [
 name = "hk-core"
 version = "0.1.0"
 dependencies = [
+ "hk-detect",
  "hk-model",
  "libc",
  "num-complex",

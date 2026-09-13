@@ -22,7 +22,10 @@
 //!   (unless the record is [`TimestampMethod::Synthetic`], whose times are relative by
 //!   construction) and the error budget is cleared.
 //! - **Control:** a recording cannot be retuned. [`Source::control`] only stops it; other
-//!   controls return [`SourceError::Unsupported`].
+//!   controls return [`SourceError::Unsupported`]. Opt-in
+//!   [`SigmfReplaySource::with_virtual_tuning`] (T-009) accepts tune, gain and baseband-filter
+//!   changes as provenance-only changes applied at the next block boundary, so a controller such
+//!   as the scheduler can be exercised offline; the samples are unchanged.
 //!
 //! Not supported (explicit errors): multi-channel files, real (non-complex) datatypes, a first
 //! capture not at sample 0, data ending mid-sample.
@@ -39,8 +42,8 @@ use hk_model::{ClockSource, Provenance, SampleTime, Timestamp, TimestampMethod, 
 use num_complex::{Complex, Complex32};
 
 use super::{
-    Duplex, FrequencyRange, Gains, SampleRates, Source, SourceCapabilities, SourceControl,
-    SourceError, SourceKind, format,
+    ControlMailbox, Duplex, FrequencyRange, Gains, PendingControl, SampleRates, Source,
+    SourceCapabilities, SourceControl, SourceError, SourceKind, format,
 };
 use crate::block::{BlockHeader, Discontinuity, ProvenanceHandle};
 
@@ -100,10 +103,14 @@ struct Segment {
     dropped_before: u64,
 }
 
-/// The control handle of a [`SigmfReplaySource`]: it can only stop the replay.
+/// The control handle of a [`SigmfReplaySource`]: it can only stop the replay, unless
+/// [`SigmfReplaySource::with_virtual_tuning`] enabled provenance-only tune/gain/filter changes.
 pub struct ReplayControl {
     capabilities: SourceCapabilities,
     stopped: AtomicBool,
+    sample_rate_hz: f64,
+    virtual_tuning: AtomicBool,
+    mailbox: ControlMailbox,
 }
 
 impl ReplayControl {
@@ -113,6 +120,18 @@ impl ReplayControl {
             operation,
         }
     }
+
+    fn virtual_post(
+        &self,
+        operation: &'static str,
+        change: impl FnOnce(&mut PendingControl),
+    ) -> Result<(), SourceError> {
+        if !self.virtual_tuning.load(Ordering::SeqCst) {
+            return Err(Self::unsupported(operation));
+        }
+        self.mailbox.post(change);
+        Ok(())
+    }
 }
 
 impl SourceControl for ReplayControl {
@@ -120,20 +139,27 @@ impl SourceControl for ReplayControl {
         &self.capabilities
     }
 
-    fn tune(&self, _center_hz: f64) -> Result<(), SourceError> {
-        Err(Self::unsupported("tune"))
+    fn tune(&self, center_hz: f64) -> Result<(), SourceError> {
+        self.virtual_post("tune", |p| p.center_hz = Some(center_hz))
     }
 
-    fn set_sample_rate(&self, _sample_rate_hz: f64) -> Result<(), SourceError> {
+    fn set_sample_rate(&self, sample_rate_hz: f64) -> Result<(), SourceError> {
+        // Virtual tuning cannot change the recorded rate; re-setting it is a no-op.
+        if self.virtual_tuning.load(Ordering::SeqCst) && sample_rate_hz == self.sample_rate_hz {
+            return Ok(());
+        }
         Err(Self::unsupported("set_sample_rate"))
     }
 
-    fn set_gains(&self, _gains: &Gains) -> Result<(), SourceError> {
-        Err(Self::unsupported("set_gains"))
+    fn set_gains(&self, gains: &Gains) -> Result<(), SourceError> {
+        let gains = *gains;
+        self.virtual_post("set_gains", |p| p.gains = Some(gains))
     }
 
-    fn set_baseband_filter(&self, _bandwidth_hz: f64) -> Result<(), SourceError> {
-        Err(Self::unsupported("set_baseband_filter"))
+    fn set_baseband_filter(&self, bandwidth_hz: f64) -> Result<(), SourceError> {
+        self.virtual_post("set_baseband_filter", |p| {
+            p.baseband_filter_hz = Some(bandwidth_hz)
+        })
     }
 
     fn set_bias_tee(&self, _enabled: bool) -> Result<(), SourceError> {
@@ -167,6 +193,25 @@ pub struct SigmfReplaySource<R = BufReader<File>> {
     options: ReplayOptions,
     pace_origin: Option<Instant>,
     emitted: u64,
+    /// Virtual tuning: mailbox generation seen, accumulated changes, the provenance minted for
+    /// them (with its segment), and the last block's provenance.
+    mailbox_seen: u64,
+    overrides: PendingControl,
+    virtual_provenance: Option<(usize, ProvenanceHandle)>,
+    last_provenance: Option<ProvenanceHandle>,
+}
+
+/// Merges a posted change into the accumulated virtual-tuning overrides.
+fn merge_pending(into: &mut PendingControl, change: &PendingControl) {
+    if change.center_hz.is_some() {
+        into.center_hz = change.center_hz;
+    }
+    if change.gains.is_some() {
+        into.gains = change.gains;
+    }
+    if change.baseband_filter_hz.is_some() {
+        into.baseband_filter_hz = change.baseband_filter_hz;
+    }
 }
 
 /// A non-negative integer field from a metadata `extra` map; absent means 0.
@@ -303,6 +348,9 @@ impl<R: Read + Send> SigmfReplaySource<R> {
             control: Arc::new(ReplayControl {
                 capabilities,
                 stopped: AtomicBool::new(false),
+                sample_rate_hz,
+                virtual_tuning: AtomicBool::new(false),
+                mailbox: ControlMailbox::new(),
             }),
             segments,
             segment: 0,
@@ -312,7 +360,23 @@ impl<R: Read + Send> SigmfReplaySource<R> {
             options,
             pace_origin: None,
             emitted: 0,
+            mailbox_seen: 0,
+            overrides: PendingControl::default(),
+            virtual_provenance: None,
+            last_provenance: None,
         })
+    }
+
+    /// Enables virtual tuning (enable it before reading): the control handle then accepts
+    /// `tune`, `set_gains` and `set_baseband_filter` (and `set_sample_rate` at the recording's
+    /// own rate, a no-op). The samples are unchanged, but from the next block boundary blocks
+    /// carry the changed provenance and the matching [`Discontinuity`] flags, as a live source's
+    /// would. For exercising controllers such as the scheduler offline. Capabilities are
+    /// unchanged (`controllable` stays false: the recording itself cannot be retuned). Each
+    /// change mints one provenance handle; unchanged blocks allocate nothing.
+    pub fn with_virtual_tuning(self) -> Self {
+        self.control.virtual_tuning.store(true, Ordering::SeqCst);
+        self
     }
 
     /// The recording's metadata.
@@ -488,24 +552,76 @@ impl<R: Read + Send> SigmfReplaySource<R> {
                 sample_index: seg.counter_start,
                 host_time: seg.anchor,
             };
+            let dropped_before = if at_start { seg.dropped_before } else { 0 };
+            let (provenance, discontinuity) = self.block_provenance(at_start);
             let header = BlockHeader {
                 time: SampleTime {
                     sample_index: counter,
                     host_time: anchor.time_of(counter, self.sample_rate_hz),
                 },
-                provenance: seg.provenance.clone(),
-                discontinuity: if at_start {
-                    seg.flags
-                } else {
-                    Discontinuity::NONE
-                },
-                dropped_before: if at_start { seg.dropped_before } else { 0 },
+                provenance,
+                discontinuity,
+                dropped_before,
             };
             self.file_pos += n as u64;
             self.emitted += n as u64;
             self.pace();
             return Ok(Some((header, got)));
         }
+    }
+
+    /// Provenance and flags of the next block. Without virtual tuning both come from the
+    /// segment. With it, changes posted since the last block apply at this boundary: the block
+    /// carries the changed provenance and flags for the difference from the previous block.
+    fn block_provenance(&mut self, at_start: bool) -> (ProvenanceHandle, Discontinuity) {
+        let seg = &self.segments[self.segment];
+        let (base, seg_flags) = (seg.provenance.clone(), seg.flags);
+        if !self.control.virtual_tuning.load(Ordering::SeqCst) {
+            let flags = if at_start {
+                seg_flags
+            } else {
+                Discontinuity::NONE
+            };
+            return (base, flags);
+        }
+        let posted = self.control.mailbox.take(&mut self.mailbox_seen);
+        if let Some(change) = &posted {
+            merge_pending(&mut self.overrides, change);
+        }
+        let handle = if self.overrides.is_empty() {
+            base
+        } else {
+            match &self.virtual_provenance {
+                Some((segment, h)) if posted.is_none() && *segment == self.segment => h.clone(),
+                _ => {
+                    let mut record = base.get().clone();
+                    self.overrides.apply_to(&mut record.tune);
+                    let h = ProvenanceHandle::new(record);
+                    self.virtual_provenance = Some((self.segment, h.clone()));
+                    h
+                }
+            }
+        };
+        let flags = match &self.last_provenance {
+            None if at_start => seg_flags,
+            None => Discontinuity::NONE,
+            Some(prev) => {
+                let mut flags = Discontinuity::NONE;
+                if at_start {
+                    for kept in [Discontinuity::STREAM_START, Discontinuity::GAP] {
+                        if seg_flags.contains(kept) {
+                            flags |= kept;
+                        }
+                    }
+                }
+                if at_start || posted.is_some() {
+                    flags |= Discontinuity::between(prev.get(), handle.get());
+                }
+                flags
+            }
+        };
+        self.last_provenance = Some(handle.clone());
+        (handle, flags)
     }
 }
 
