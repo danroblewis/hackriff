@@ -289,8 +289,9 @@ impl Request {
         self.method != "GET"
     }
 
-    /// A browser `Origin` that names another host than the one addressed.
-    fn cross_origin(&self) -> bool {
+    /// A browser `Origin` that names another host than the one addressed. `X-Forwarded-Host`
+    /// counts only from a loopback peer (the local cloudflared tunnel or proxy).
+    fn cross_origin(&self, loopback_peer: bool) -> bool {
         let Some(origin) = self.header("origin") else {
             return false;
         };
@@ -298,7 +299,8 @@ impl Request {
             return true; // `null` or malformed
         };
         let authority = authority.trim_end_matches('/');
-        ![self.header("x-forwarded-host"), self.header("host")]
+        let forwarded = self.header("x-forwarded-host").filter(|_| loopback_peer);
+        ![forwarded, self.header("host")]
             .into_iter()
             .flatten()
             .filter_map(|h| h.split(',').next())
@@ -474,15 +476,27 @@ fn respond_error(stream: &mut TcpStream, status: u16, message: &str) {
 }
 
 fn caller(stream: &TcpStream, req: &Request, token: &Token) -> Caller {
+    caller_from(stream.peer_addr().ok(), req, token)
+}
+
+/// Forwarding headers (`CF-Connecting-IP`, `X-Forwarded-For`) are trusted only from a loopback
+/// peer (cloudflared connects locally); from anyone else they are ignored.
+fn caller_from(peer: Option<SocketAddr>, req: &Request, token: &Token) -> Caller {
+    let loopback = peer.is_some_and(|a| a.ip().is_loopback());
     Caller {
         token_id: req.authorized_by_header(token).then(|| token.id()),
-        peer: stream.peer_addr().ok().map(|a| a.to_string()),
+        peer: peer.map(|a| a.to_string()),
         forwarded_for: req
             .header("cf-connecting-ip")
             .or_else(|| req.header("x-forwarded-for"))
+            .filter(|_| loopback)
             .map(|v| v.chars().take(128).collect()),
         origin: req.header("origin").map(|v| v.chars().take(256).collect()),
     }
+}
+
+fn loopback_peer(stream: &TcpStream) -> bool {
+    stream.peer_addr().is_ok_and(|a| a.ip().is_loopback())
 }
 
 fn handle_connection(mut stream: TcpStream, shared: &Shared) {
@@ -524,7 +538,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             };
             return respond_error(&mut stream, 401, message);
         }
-        if mutating && req.cross_origin() {
+        if mutating && req.cross_origin(loopback_peer(&stream)) {
             let who = caller(&stream, &req, token);
             control::audit_refused(state, &req.method, &req.path, &who, 403, "cross-origin");
             return respond_error(&mut stream, 403, "cross-origin control request refused");
@@ -796,7 +810,7 @@ mod tests {
     #[test]
     fn origin_must_match_the_addressed_host() {
         assert!(
-            !with_headers(&[("Host", "127.0.0.1:8787")]).cross_origin(),
+            !with_headers(&[("Host", "127.0.0.1:8787")]).cross_origin(true),
             "no Origin"
         );
         assert!(
@@ -804,32 +818,58 @@ mod tests {
                 ("Host", "127.0.0.1:8787"),
                 ("Origin", "http://127.0.0.1:8787")
             ])
-            .cross_origin()
+            .cross_origin(false)
         );
         assert!(
             !with_headers(&[
                 ("Host", "abc.trycloudflare.com"),
                 ("Origin", "https://abc.trycloudflare.com")
             ])
-            .cross_origin(),
+            .cross_origin(true),
             "through the tunnel"
         );
+        let proxied = with_headers(&[
+            ("Host", "localhost:8787"),
+            ("X-Forwarded-Host", "abc.example.org"),
+            ("Origin", "https://abc.example.org"),
+        ]);
         assert!(
-            !with_headers(&[
-                ("Host", "localhost:8787"),
-                ("X-Forwarded-Host", "abc.example.org"),
-                ("Origin", "https://abc.example.org")
-            ])
-            .cross_origin(),
-            "a proxy that rewrites Host but forwards it"
+            !proxied.cross_origin(true),
+            "a loopback proxy that rewrites Host but forwards it"
+        );
+        assert!(
+            proxied.cross_origin(false),
+            "X-Forwarded-Host from a non-loopback peer is ignored"
         );
         assert!(
             with_headers(&[
                 ("Host", "127.0.0.1:8787"),
                 ("Origin", "https://evil.example")
             ])
-            .cross_origin()
+            .cross_origin(true)
         );
-        assert!(with_headers(&[("Host", "127.0.0.1:8787"), ("Origin", "null")]).cross_origin());
+        assert!(with_headers(&[("Host", "127.0.0.1:8787"), ("Origin", "null")]).cross_origin(true));
+    }
+
+    #[test]
+    fn forwarding_headers_are_trusted_only_from_loopback_peers() {
+        let token = Token::from_config("0123456789abcdef").unwrap();
+        let req = with_headers(&[
+            ("Host", "127.0.0.1:8787"),
+            ("X-Forwarded-For", "203.0.113.9"),
+            ("CF-Connecting-IP", "198.51.100.7"),
+        ]);
+        let local = caller_from(Some("127.0.0.1:50000".parse().unwrap()), &req, &token);
+        assert_eq!(local.forwarded_for.as_deref(), Some("198.51.100.7"));
+        assert_eq!(local.client_key(), "198.51.100.7");
+        let v6 = caller_from(Some("[::1]:50000".parse().unwrap()), &req, &token);
+        assert_eq!(v6.forwarded_for.as_deref(), Some("198.51.100.7"));
+        let remote = caller_from(Some("192.0.2.44:50000".parse().unwrap()), &req, &token);
+        assert_eq!(
+            remote.forwarded_for, None,
+            "a remote peer cannot claim a client"
+        );
+        assert_eq!(remote.client_key(), "192.0.2.44");
+        assert_eq!(remote.token_id, None);
     }
 }

@@ -295,5 +295,4 @@ fn tuning_from_fm_into_930_5_mhz_paging_keeps_content_and_identity_out_after_the
         s.counter("/spectrum/rows") > 0,
         "the gated spectrum stream kept flowing"
     );
-    let _ = Instant::now();
 }

@@ -75,11 +75,14 @@ impl Token {
                 fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
             }
         }
+        check_parent(path)?;
         let token = Self::generate()?;
+        // `create_new` (O_EXCL) never follows a symlink; O_NOFOLLOW states it explicitly.
         match OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(path)
         {
             Ok(mut f) => {
@@ -95,25 +98,35 @@ impl Token {
         }
     }
 
+    /// Opens without following a symlink (and without blocking on a FIFO), then checks the
+    /// opened descriptor: a regular file, owned by the effective user, not accessible by group or
+    /// others; and the parent directory is not group- or world-writable.
     fn load(path: &Path) -> io::Result<Self> {
-        let meta = fs::symlink_metadata(path)?;
-        if !meta.file_type().is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("token file {} is not a regular file", path.display()),
-            ));
-        }
-        if meta.mode() & 0o077 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "token file {} is accessible by group or others (mode {:o}); run chmod 600 on it",
-                    path.display(),
-                    meta.mode() & 0o777
-                ),
-            ));
-        }
-        let text = fs::read_to_string(path)?;
+        check_parent(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|e| {
+                if e.raw_os_error() == Some(libc::ELOOP) {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("token file {} is a symlink", path.display()),
+                    )
+                } else {
+                    e
+                }
+            })?;
+        let meta = file.metadata()?;
+        check_file(
+            path,
+            meta.file_type().is_file(),
+            meta.uid(),
+            meta.mode(),
+            euid(),
+        )?;
+        let mut text = String::new();
+        file.take(4096).read_to_string(&mut text)?;
         Self::from_config(text.trim()).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -160,6 +173,62 @@ impl Token {
             diff |= u64::from(x ^ y);
         }
         diff == 0 && !self.is_expired()
+    }
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// The token file's own checks, on the opened descriptor's metadata.
+fn check_file(path: &Path, regular: bool, uid: u32, mode: u32, euid: u32) -> io::Result<()> {
+    if !regular {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("token file {} is not a regular file", path.display()),
+        ));
+    }
+    if uid != euid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "token file {} is owned by uid {uid}, not the current user (uid {euid})",
+                path.display()
+            ),
+        ));
+    }
+    if mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "token file {} is accessible by group or others (mode {:o}); run chmod 600 on it",
+                path.display(),
+                mode & 0o777
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses a token file whose directory is group- or world-writable (someone else could swap
+/// the file). A missing directory passes (the open then reports `NotFound`).
+fn check_parent(path: &Path) -> io::Result<()> {
+    let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    match fs::metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+        Ok(m) if m.mode() & 0o022 != 0 => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "token directory {} is writable by group or others (mode {:o}); run chmod 700 on it",
+                dir.display(),
+                m.mode() & 0o777
+            ),
+        )),
+        Ok(_) => Ok(()),
     }
 }
 
@@ -274,6 +343,54 @@ mod tests {
         assert_eq!(
             Token::load_or_create(&link).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
+        );
+        // A dangling symlink is not followed to create a file elsewhere.
+        let dangling = dir.join("cfg").join("dangling");
+        let target = dir.join("elsewhere");
+        std::os::unix::fs::symlink(&target, &dangling).unwrap();
+        assert!(Token::load_or_create(&dangling).is_err());
+        assert!(!target.exists(), "nothing was created through the symlink");
+        // A FIFO is refused without blocking.
+        let fifo = dir.join("cfg").join("fifo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            Token::load_or_create(&fifo).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_writable_token_directory_or_foreign_owner_is_refused() {
+        let dir = scratch("dir");
+        let path = dir.join("cfg").join("api-token");
+        Token::load_or_create(&path).unwrap();
+        let cfg = path.parent().unwrap();
+        for mode in [0o770, 0o707, 0o722] {
+            fs::set_permissions(cfg, fs::Permissions::from_mode(mode)).unwrap();
+            let e = Token::load_or_create(&path).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{mode:o}: {e}");
+        }
+        fs::set_permissions(cfg, fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(
+            Token::load_or_create(&path).is_ok(),
+            "read-only group access is fine"
+        );
+        // Owner and mode checks (a file owned by another uid cannot be made without root).
+        let p = Path::new("t");
+        assert!(check_file(p, true, 501, 0o100600, 501).is_ok());
+        let e = check_file(p, true, 0, 0o100600, 501).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        assert!(e.to_string().contains("owned by uid 0"));
+        assert_eq!(
+            check_file(p, false, 501, 0o100600, 501).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            check_file(p, true, 501, 0o100640, 501).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
         );
         let _ = fs::remove_dir_all(dir);
     }

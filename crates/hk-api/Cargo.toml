@@ -12,6 +12,7 @@ hk-model.workspace = true
 hk-store.workspace = true
 hk-stream.workspace = true
 httparse.workspace = true
+libc.workspace = true
 serde_json.workspace = true
 tungstenite.workspace = true
 

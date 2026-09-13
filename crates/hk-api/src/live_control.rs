@@ -24,6 +24,7 @@
 //!   - [`SourceLiveControl::with_fixed_rate`] refuses rate changes.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use hk_core::{NamedGain, SourceCapabilities, SourceControl, SourceError};
@@ -128,8 +129,26 @@ impl fmt::Display for LiveControlError {
 /// by the composition over `hk_pipeline::PipelineController`.
 pub trait WindowRetuner: Send + Sync {
     /// Retunes to `(center_hz, sample_rate_hz)`; returns the content class in force afterwards.
+    /// [`LiveControlError::Timeout`] means the change continues in the background.
     fn retune(&self, center_hz: f64, sample_rate_hz: f64)
     -> Result<ContentClass, LiveControlError>;
+
+    /// The window the pipeline runs (or is moving to), read back after a timed-out retune;
+    /// `None` when the retuner cannot tell.
+    fn applied_window(&self) -> Option<AppliedWindow> {
+        None
+    }
+}
+
+/// A window as the pipeline reports it ([`WindowRetuner::applied_window`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AppliedWindow {
+    /// Centre, Hz.
+    pub center_hz: f64,
+    /// Sample rate, Hz.
+    pub sample_rate_hz: f64,
+    /// A re-plumb is still in progress (the values may still change).
+    pub settling: bool,
 }
 
 impl std::error::Error for LiveControlError {}
@@ -154,9 +173,16 @@ pub trait LiveControl: Send + Sync {
 pub type WindowPolicy = Arc<dyn Fn(f64, f64) -> Result<(), String> + Send + Sync>;
 
 /// [`LiveControl`] over an `hk_core::SourceControl`.
+///
+/// With a retuner, window changes are serialised on their own lock and the tuning lock is held
+/// only briefly, so reads ([`LiveControl::tuning`]) and gain changes never wait out a slow
+/// re-plumb. After a timed-out retune the stored window is the requested one, marked pending,
+/// and is refreshed from [`WindowRetuner::applied_window`] once the re-plumb settles.
 pub struct SourceLiveControl {
     control: Arc<dyn SourceControl>,
     tuning: Mutex<LiveTuning>,
+    window_op: Mutex<()>,
+    pending: AtomicBool,
     policy: Option<WindowPolicy>,
     fixed_rate: bool,
     retuner: Option<Arc<dyn WindowRetuner>>,
@@ -168,10 +194,62 @@ impl SourceLiveControl {
         Self {
             control,
             tuning: Mutex::new(initial),
+            window_op: Mutex::new(()),
+            pending: AtomicBool::new(false),
             policy: None,
             fixed_rate: false,
             retuner: None,
         }
+    }
+
+    /// After a timed-out retune: takes the pipeline's window once its re-plumb has settled.
+    fn refresh(&self) {
+        if !self.pending.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(r) = &self.retuner else { return };
+        match r.applied_window() {
+            Some(w) if w.settling => {}
+            Some(w) => {
+                let mut t = self.lock();
+                t.center_hz = w.center_hz;
+                t.sample_rate_hz = w.sample_rate_hz;
+                self.pending.store(false, Ordering::SeqCst);
+            }
+            None => self.pending.store(false, Ordering::SeqCst),
+        }
+    }
+
+    /// A window change through the retuner (one at a time; the tuning lock is not held while
+    /// the pipeline re-plumbs).
+    fn retune_window(
+        &self,
+        r: &dyn WindowRetuner,
+        center_hz: Option<f64>,
+        sample_rate_hz: Option<f64>,
+    ) -> Result<LiveTuning, LiveControlError> {
+        let _op = self
+            .window_op
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.refresh();
+        let (c, s) = {
+            let t = self.lock();
+            (
+                center_hz.unwrap_or(t.center_hz),
+                sample_rate_hz.unwrap_or(t.sample_rate_hz),
+            )
+        };
+        let result = r.retune(c, s);
+        if matches!(result, Ok(_) | Err(LiveControlError::Timeout(_))) {
+            let mut t = self.lock();
+            t.center_hz = c;
+            t.sample_rate_hz = s;
+            // A timeout leaves the re-plumb running towards `(c, s)`: refresh once it settles.
+            self.pending.store(result.is_err(), Ordering::SeqCst);
+            return result.map(|_| t.clone());
+        }
+        result.map(|_| self.lock().clone())
     }
 
     /// Hands centre and rate changes to the pipeline (see the module docs); window policies and
@@ -230,11 +308,11 @@ impl LiveControl for SourceLiveControl {
     }
 
     fn tuning(&self) -> LiveTuning {
+        self.refresh();
         self.lock().clone()
     }
 
     fn set_center(&self, center_hz: f64) -> Result<LiveTuning, LiveControlError> {
-        let mut t = self.lock();
         if !(center_hz.is_finite() && self.capabilities().supports_frequency(center_hz)) {
             return Err(LiveControlError::OutOfRange {
                 what: "centre frequency (Hz)".into(),
@@ -242,19 +320,18 @@ impl LiveControl for SourceLiveControl {
             });
         }
         if let Some(r) = &self.retuner {
-            r.retune(center_hz, t.sample_rate_hz)?;
-        } else {
-            self.check_window(center_hz, t.sample_rate_hz)?;
-            self.control
-                .tune(center_hz)
-                .map_err(LiveControlError::Source)?;
+            return self.retune_window(r.as_ref(), Some(center_hz), None);
         }
+        let mut t = self.lock();
+        self.check_window(center_hz, t.sample_rate_hz)?;
+        self.control
+            .tune(center_hz)
+            .map_err(LiveControlError::Source)?;
         t.center_hz = center_hz;
         Ok(t.clone())
     }
 
     fn set_rate(&self, sample_rate_hz: f64) -> Result<LiveTuning, LiveControlError> {
-        let mut t = self.lock();
         if !(sample_rate_hz.is_finite()
             && self.capabilities().sample_rates.supports(sample_rate_hz))
         {
@@ -264,10 +341,9 @@ impl LiveControl for SourceLiveControl {
             });
         }
         if let Some(r) = &self.retuner {
-            r.retune(t.center_hz, sample_rate_hz)?;
-            t.sample_rate_hz = sample_rate_hz;
-            return Ok(t.clone());
+            return self.retune_window(r.as_ref(), None, Some(sample_rate_hz));
         }
+        let mut t = self.lock();
         if self.fixed_rate && sample_rate_hz != t.sample_rate_hz {
             return Err(LiveControlError::Refused(format!(
                 "the sample rate is fixed at {} Hz for this run (detection resolution, ring and \
@@ -470,6 +546,107 @@ mod tests {
             rec.calls.lock().unwrap().is_empty(),
             "window changes go through the pipeline, not straight to the device"
         );
+    }
+
+    /// Blocks its first retune until released, then times out; reports a settable window.
+    struct SlowRetuner {
+        calls: Mutex<Vec<(f64, f64)>>,
+        entered: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        block: AtomicBool,
+        applied: Mutex<Option<AppliedWindow>>,
+    }
+
+    impl WindowRetuner for SlowRetuner {
+        fn retune(&self, center: f64, rate: f64) -> Result<ContentClass, LiveControlError> {
+            self.calls.lock().unwrap().push((center, rate));
+            if self.block.swap(false, Ordering::SeqCst) {
+                self.entered.lock().unwrap().send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                return Err(LiveControlError::Timeout("it continues".into()));
+            }
+            Ok(ContentClass::Unrestricted)
+        }
+        fn applied_window(&self) -> Option<AppliedWindow> {
+            *self.applied.lock().unwrap()
+        }
+    }
+
+    #[test]
+    fn a_timed_out_retune_keeps_the_window_consistent_without_blocking_reads() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let retuner = Arc::new(SlowRetuner {
+            calls: Mutex::new(Vec::new()),
+            entered: Mutex::new(entered_tx),
+            release: Mutex::new(release_rx),
+            block: AtomicBool::new(true),
+            applied: Mutex::new(Some(AppliedWindow {
+                center_hz: 100.8e6,
+                sample_rate_hz: 2.4e6,
+                settling: true,
+            })),
+        });
+        let (lc, _rec) = live(SourceCapabilities::hackrf_one());
+        let lc = Arc::new(lc.with_retuner(Arc::clone(&retuner) as Arc<dyn WindowRetuner>));
+
+        let worker = {
+            let lc = Arc::clone(&lc);
+            std::thread::spawn(move || lc.set_center(930.5e6))
+        };
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // While the retune waits, reads and gain changes do not block.
+        let (tx, rx) = channel();
+        {
+            let lc = Arc::clone(&lc);
+            std::thread::spawn(move || {
+                let t = lc.tuning();
+                let g = lc.set_gains(&[NamedGain::new("vga", 10.0)]).is_ok();
+                tx.send((t, g)).unwrap();
+            });
+        }
+        let (during, gains_ok) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("tuning() and set_gains() must not wait for the retune");
+        assert_eq!(
+            during.center_hz, 100.8e6,
+            "unchanged until the retune answers"
+        );
+        assert!(gains_ok);
+
+        release_tx.send(()).unwrap();
+        let e = worker.join().unwrap().unwrap_err();
+        assert_eq!((e.http_status(), e.code()), (504, "timeout"));
+        let t = lc.tuning();
+        assert_eq!(
+            (t.center_hz, t.sample_rate_hz),
+            (930.5e6, 2.4e6),
+            "the re-plumb continues towards the requested window"
+        );
+
+        // It settles elsewhere (e.g. the re-plumb failed): the stored window follows the pipeline.
+        *retuner.applied.lock().unwrap() = Some(AppliedWindow {
+            center_hz: 100.8e6,
+            sample_rate_hz: 2.4e6,
+            settling: false,
+        });
+        assert_eq!(lc.tuning().center_hz, 100.8e6);
+        // The next window change starts from the refreshed window.
+        assert_eq!(lc.set_rate(10e6).unwrap().center_hz, 100.8e6);
+        assert_eq!(
+            *retuner.calls.lock().unwrap(),
+            vec![(930.5e6, 2.4e6), (100.8e6, 10e6)]
+        );
+        // Once settled, later pipeline reports are not re-read (nothing pending).
+        *retuner.applied.lock().unwrap() = Some(AppliedWindow {
+            center_hz: 1.0,
+            sample_rate_hz: 1.0,
+            settling: false,
+        });
+        assert_eq!(lc.tuning().sample_rate_hz, 10e6);
     }
 
     #[test]
