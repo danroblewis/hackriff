@@ -129,6 +129,7 @@ tasks:
   - id: T-008
     title: channelizer (2x oversampled PFB) + on-demand DDC
     status: in-progress
+    review: "implemented 3beb92b (branch worktree-agent-abfdabdf828528c1d); Opus core-interface review running before merge (adversarial transitions: retune/gap/rate change, long-run phase, group-delay time mapping)"
     deps: [T-004]
     parallel_group: D
     core_interface: true
