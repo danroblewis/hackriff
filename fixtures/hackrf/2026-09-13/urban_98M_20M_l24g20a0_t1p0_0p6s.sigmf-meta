@@ -1,0 +1,1078 @@
+{
+  "global": {
+    "core:datatype": "ci8",
+    "core:sample_rate": 20000000.0,
+    "core:version": "1.2.0",
+    "core:hw": "HackRF One (board rev older than r6), firmware 2026.01.3, libhackrf 0.9.2",
+    "core:recorder": "hackrf_transfer 2026.01.3; trimmed by py/fixtures/build_2026_09_13.py",
+    "core:author": "hackriff coordinator (receive-only)",
+    "core:description": "hackriff fixture urban_98M_20M_l24g20a0_t1p0_0p6s: FM band at mid gain, same time offset as the clipped window (S4 gain-step pair). Serves AWARE-042, SPACE-050 (spike S4). Window 1.0 s + 0.6 s of store capture urban_98M_20M_l24g20a0 (HackRF One, 98 MHz, 20 Msps, LNA 24 / VGA 20 / amp off, antenna unknown (as attached by user; not changed)). Receive-only; truth is PHY metadata only.",
+    "core:license": "project-owned capture",
+    "hackriff:provenance": {
+      "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+      "tune": {
+        "center_hz": 98000000.0,
+        "sample_rate_hz": 20000000.0,
+        "lna_db": 24.0,
+        "vga_db": 20.0,
+        "amp_on": false,
+        "bandwidth_hz": 15000000.0
+      },
+      "overload": false,
+      "quantisation_limited": false,
+      "clock_source": "internal",
+      "clock_locked": true,
+      "timestamp_method": "host-arrival",
+      "timestamp_error_budget_ns": 500000000
+    },
+    "hackriff:antenna": "unknown (as attached by user; not changed)",
+    "core:extensions": [
+      {
+        "name": "hackriff",
+        "version": "0.1.0",
+        "optional": true
+      }
+    ]
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 98000000.0,
+      "core:datetime": "2026-09-13T11:09:37.630739Z",
+      "core:global_index": 20000000,
+      "hackriff:clip_count": 0
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:label": "capture",
+      "hackriff:truth": {
+        "role": "scenario",
+        "kind": "capture",
+        "recording": "urban_98M_20M_l24g20a0_t1p0_0p6s",
+        "use_cases": [
+          "AWARE-042",
+          "SPACE-050"
+        ],
+        "generator": "py/fixtures/build_2026_09_13.py",
+        "source": {
+          "capture": "urban_98M_20M_l24g20a0",
+          "path": "store/2026-09-13/urban_98M_20M_l24g20a0.sigmf-data",
+          "sha256": "2413134924b562cdba29fbf5f01f32549edc8a352cb0989bad2e17d7ab1eb3c6",
+          "sample_start": 20000000,
+          "sample_count": 12000000,
+          "start_s": 1.0,
+          "datetime": "2026-09-13T11:09:36.630739+00:00"
+        },
+        "datatype": "ci8",
+        "sample_rate_hz": 20000000.0,
+        "n_samples": 12000000,
+        "duration_s": 0.6,
+        "dbfs_reference": "full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
+        "calibration": "uncalibrated (no dBm): antenna unknown, as attached by the user",
+        "clip_count": 0,
+        "clip_fraction": 0.0,
+        "overload": false,
+        "overload_rule": "clip_fraction > 0.0001 (component at -128 or 127)",
+        "quantisation_limited": false,
+        "quantisation_noise_dbfs_per_hz": -122.86788687959537,
+        "clock": {
+          "source": "internal",
+          "ppm_measured": -6.8,
+          "method": "19 kHz FM pilot, fm_100p8M_2p4M_l32g30a1 (spike S5)",
+          "lo_offset_at_tuner_hz": -666.4
+        },
+        "legal": "Receive-only capture. Truth is PHY/metadata only; no third-party payload content is decoded or stored (CLAUDE.md legal guardrails).",
+        "annotation_completeness": "all S4 emitters of the source capture (edge ones included)",
+        "spike": "S4",
+        "s4_labels": "hackrf/2026-09-13/labels/emitters_urban_98M_20M_l24g20a0.csv",
+        "truth_summary": "7/7 known FM + 7 raster; 0 comb lines; spur + DC artefacts; clip 0 (0.00%)",
+        "t_start_s": 0.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 88000000.0,
+      "core:freq_upper_edge": 88004900.0,
+      "core:label": "band edge",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "band-edge",
+        "reason": "fft_edge_bin",
+        "note": "S4 row at +-fs/2 (FFT edge bin, outside the 15 MHz baseband filter)",
+        "center_hz": 88000000.0,
+        "offset_hz": -10000000.0,
+        "bandwidth_hz": 4900.0,
+        "window_peak_snr_db": 5.371790614265182,
+        "window_power_dbfs": -71.50291180375271,
+        "s4": {
+          "category": null,
+          "flags": [
+            "edge",
+            "marginal"
+          ],
+          "peak_snr_db_4s": 4.9,
+          "level_dbfs_4s": -75.1,
+          "bw_khz": 4.9,
+          "duty": 1.0,
+          "retune": null,
+          "gain_tests": null
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 91090800.0,
+      "core:freq_upper_edge": 91115200.0,
+      "core:label": "unexplained",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "unverified-line",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 91101600.0,
+        "offset_hz": -6898400.0,
+        "bandwidth_hz": 24400.0,
+        "window_peak_snr_db": 6.280557678369916,
+        "window_power_dbfs": -67.30885481522193,
+        "s4": {
+          "category": "unexplained",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 6.6,
+          "level_dbfs_4s": -67.7,
+          "bw_khz": 24.4,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:inconclusive_weak"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 92658200.0,
+      "core:freq_upper_edge": 92726600.0,
+      "core:label": "FM raster emitter",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": false,
+        "channel_hz": 92700000.0,
+        "snr_db": 9.6332659051107,
+        "note": "on the FM raster, not one of the 7 strong reference stations",
+        "center_hz": 92692200.0,
+        "offset_hz": -5307800.0,
+        "bandwidth_hz": 68400.0,
+        "window_peak_snr_db": 9.6332659051107,
+        "window_power_dbfs": -58.848609414988644,
+        "s4": {
+          "category": "raster_station",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 9.5,
+          "level_dbfs_4s": -59.9,
+          "bw_khz": 68.4,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 93224600.0,
+      "core:freq_upper_edge": 93376000.0,
+      "core:label": "FM 93.3 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": true,
+        "rf_center_hz": 93300000.0,
+        "channel_hz": 93300000.0,
+        "snr_db": 15.934989534793111,
+        "identity": {
+          "type": "fm-channel",
+          "value": "93.3 MHz"
+        },
+        "center_hz": 93301700.0,
+        "offset_hz": -4698300.0,
+        "bandwidth_hz": 151400.0,
+        "window_peak_snr_db": 15.934989534793111,
+        "window_power_dbfs": -50.98614916439034,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 16.2,
+          "level_dbfs_4s": -51.3,
+          "bw_khz": 151.4,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 93424800.0,
+      "core:freq_upper_edge": 93488300.0,
+      "core:label": "station_part",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "station-part",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 93446400.0,
+        "offset_hz": -4553600.0,
+        "bandwidth_hz": 63500.0,
+        "window_peak_snr_db": 5.409432848499649,
+        "window_power_dbfs": -62.49321264319707,
+        "s4": {
+          "category": "station_part",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 4.9,
+          "level_dbfs_4s": -64.5,
+          "bw_khz": 63.5,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:inconclusive_weak"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 93747100.0,
+      "core:freq_upper_edge": 93756800.0,
+      "core:label": "unexplained",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "unverified-line",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 93749800.0,
+        "offset_hz": -4250200.0,
+        "bandwidth_hz": 9700.0,
+        "window_peak_snr_db": 4.225428344143635,
+        "window_power_dbfs": -70.49430354179322,
+        "s4": {
+          "category": "unexplained",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 4.9,
+          "level_dbfs_4s": -70.8,
+          "bw_khz": 9.8,
+          "duty": 1.0,
+          "retune": "not_reproduced",
+          "gain_tests": "98M low->98M mid:inconclusive_weak"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 94821300.0,
+      "core:freq_upper_edge": 94972700.0,
+      "core:label": "FM 94.9 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": true,
+        "rf_center_hz": 94900000.0,
+        "channel_hz": 94900000.0,
+        "snr_db": 15.230945634626945,
+        "identity": {
+          "type": "fm-channel",
+          "value": "94.9 MHz"
+        },
+        "center_hz": 94901200.0,
+        "offset_hz": -3098800.0,
+        "bandwidth_hz": 151400.0,
+        "window_peak_snr_db": 15.230945634626945,
+        "window_power_dbfs": -50.76398489544178,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 15.5,
+          "level_dbfs_4s": -51.2,
+          "bw_khz": 151.4,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 95661100.0,
+      "core:freq_upper_edge": 95788100.0,
+      "core:label": "FM raster emitter",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": false,
+        "channel_hz": 95700000.0,
+        "snr_db": 13.000759970268208,
+        "note": "on the FM raster, not one of the 7 strong reference stations",
+        "center_hz": 95719500.0,
+        "offset_hz": -2280500.0,
+        "bandwidth_hz": 127000.0,
+        "window_peak_snr_db": 13.000759970268208,
+        "window_power_dbfs": -55.0099983012921,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 14.2,
+          "level_dbfs_4s": -55.7,
+          "bw_khz": 127.0,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 96398400.0,
+      "core:freq_upper_edge": 96554700.0,
+      "core:label": "FM 96.5 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": true,
+        "rf_center_hz": 96500000.0,
+        "channel_hz": 96500000.0,
+        "snr_db": 16.58591125927864,
+        "identity": {
+          "type": "fm-channel",
+          "value": "96.5 MHz"
+        },
+        "center_hz": 96475500.0,
+        "offset_hz": -1524500.0,
+        "bandwidth_hz": 156300.0,
+        "window_peak_snr_db": 16.58591125927864,
+        "window_power_dbfs": -50.61213760588038,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 15.7,
+          "level_dbfs_4s": -50.9,
+          "bw_khz": 156.2,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:inconclusive_bursty"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 96564500.0,
+      "core:freq_upper_edge": 96598600.0,
+      "core:label": "station_part",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "station-part",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 96576400.0,
+        "offset_hz": -1423600.0,
+        "bandwidth_hz": 34100.0,
+        "window_peak_snr_db": 7.263414485330646,
+        "window_power_dbfs": -64.44766963369567,
+        "s4": {
+          "category": "station_part",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 9.2,
+          "level_dbfs_4s": -62.8,
+          "bw_khz": 34.2,
+          "duty": 0.98,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:inconclusive_bursty"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 97248000.0,
+      "core:freq_upper_edge": 97345700.0,
+      "core:label": "FM raster emitter",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": false,
+        "channel_hz": 97300000.0,
+        "snr_db": 11.98377481816185,
+        "note": "on the FM raster, not one of the 7 strong reference stations",
+        "center_hz": 97293300.0,
+        "offset_hz": -706700.0,
+        "bandwidth_hz": 97700.0,
+        "window_peak_snr_db": 11.98377481816185,
+        "window_power_dbfs": -56.08263806275062,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 12.1,
+          "level_dbfs_4s": -56.4,
+          "bw_khz": 97.7,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 97995000.0,
+      "core:freq_upper_edge": 98005000.0,
+      "core:label": "DC",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "dc-offset",
+        "reason": "dc",
+        "center_hz": 98000000.0,
+        "offset_hz": 0.0,
+        "i_offset": 0.004630948614886427,
+        "q_offset": -0.018049232603058102,
+        "i_offset_codes": 0.5881304740905762,
+        "q_offset_codes": -2.292252540588379,
+        "power_dbfs": -34.593946635873834,
+        "s4": {
+          "category": null,
+          "flags": [
+            "dc",
+            "lo_relative",
+            "compressed"
+          ],
+          "peak_snr_db_4s": 42.1,
+          "level_dbfs_4s": -34.6,
+          "bw_khz": 14.6,
+          "duty": 1.0,
+          "retune": "moves_with_LO(+d)",
+          "gain_tests": "98M low->98M mid:compressed"
+        },
+        "window_peak_snr_db": 39.179494397263056,
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 98029300.0,
+      "core:freq_upper_edge": 98151400.0,
+      "core:label": "FM raster emitter",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": false,
+        "channel_hz": 98100000.0,
+        "snr_db": 12.585392033989585,
+        "note": "on the FM raster, not one of the 7 strong reference stations",
+        "center_hz": 98098500.0,
+        "offset_hz": 98500.0,
+        "bandwidth_hz": 122100.0,
+        "window_peak_snr_db": 12.585392033989585,
+        "window_power_dbfs": -54.73025171572832,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 13.6,
+          "level_dbfs_4s": -55.2,
+          "bw_khz": 122.1,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:inconclusive_bursty"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 98835000.0,
+      "core:freq_upper_edge": 98942400.0,
+      "core:label": "FM 98.9 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": true,
+        "rf_center_hz": 98900000.0,
+        "channel_hz": 98900000.0,
+        "snr_db": 16.667265962538654,
+        "identity": {
+          "type": "fm-channel",
+          "value": "98.9 MHz"
+        },
+        "center_hz": 98897200.0,
+        "offset_hz": 897200.0,
+        "bandwidth_hz": 107400.0,
+        "window_peak_snr_db": 16.667265962538654,
+        "window_power_dbfs": -52.877702200144526,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 15.1,
+          "level_dbfs_4s": -54.1,
+          "bw_khz": 107.4,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 98952100.0,
+      "core:freq_upper_edge": 98981400.0,
+      "core:label": "station_part",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "station-part",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 98963900.0,
+        "offset_hz": 963900.0,
+        "bandwidth_hz": 29300.0,
+        "window_peak_snr_db": 3.329246675496384,
+        "window_power_dbfs": -67.74271730545915,
+        "s4": {
+          "category": "station_part",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 5.1,
+          "level_dbfs_4s": -67.0,
+          "bw_khz": 29.3,
+          "duty": 0.67,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:inconclusive_bursty"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 99621100.0,
+      "core:freq_upper_edge": 99752900.0,
+      "core:label": "FM raster emitter",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": false,
+        "channel_hz": 99700000.0,
+        "snr_db": 12.930591855036157,
+        "note": "on the FM raster, not one of the 7 strong reference stations",
+        "center_hz": 99685300.0,
+        "offset_hz": 1685300.0,
+        "bandwidth_hz": 131800.0,
+        "window_peak_snr_db": 12.930591855036157,
+        "window_power_dbfs": -54.05300295049719,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 12.6,
+          "level_dbfs_4s": -54.5,
+          "bw_khz": 131.8,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 99992200.0,
+      "core:freq_upper_edge": 100011700.0,
+      "core:label": "spur 100.000 MHz",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "spur",
+        "reason": "ref_harmonic",
+        "harmonic_n": 10,
+        "spur_step_hz": 10000000.0,
+        "tuner_center_hz": 98000000.0,
+        "center_hz": 100000000.0,
+        "offset_hz": 2000000.0,
+        "bandwidth_hz": 19500.0,
+        "window_peak_snr_db": 25.76036772880396,
+        "window_power_dbfs": -48.95968191417217,
+        "s4": {
+          "category": null,
+          "flags": [
+            "spur_candidate"
+          ],
+          "peak_snr_db_4s": 28.5,
+          "level_dbfs_4s": -47.0,
+          "bw_khz": 19.5,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 100436500.0,
+      "core:freq_upper_edge": 100460900.0,
+      "core:label": "unexplained",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "unverified-line",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 100446000.0,
+        "offset_hz": 2446000.0,
+        "bandwidth_hz": 24400.0,
+        "window_peak_snr_db": 7.2549786210561775,
+        "window_power_dbfs": -64.93432192644096,
+        "s4": {
+          "category": "unexplained",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 7.9,
+          "level_dbfs_4s": -65.2,
+          "bw_khz": 24.4,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:inconclusive_weak"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 101232400.0,
+      "core:freq_upper_edge": 101393600.0,
+      "core:label": "FM 101.3 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": true,
+        "rf_center_hz": 101300000.0,
+        "channel_hz": 101300000.0,
+        "snr_db": 19.906221673741452,
+        "identity": {
+          "type": "fm-channel",
+          "value": "101.3 MHz"
+        },
+        "center_hz": 101300500.0,
+        "offset_hz": 3300500.0,
+        "bandwidth_hz": 161200.0,
+        "window_peak_snr_db": 19.906221673741452,
+        "window_power_dbfs": -45.53596747265192,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 20.1,
+          "level_dbfs_4s": -45.7,
+          "bw_khz": 161.1,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 101432600.0,
+      "core:freq_upper_edge": 101501000.0,
+      "core:label": "FM raster emitter",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": false,
+        "channel_hz": 101500000.0,
+        "snr_db": 6.0893799514202644,
+        "note": "on the FM raster, not one of the 7 strong reference stations",
+        "center_hz": 101463500.0,
+        "offset_hz": 3463500.0,
+        "bandwidth_hz": 68400.0,
+        "window_peak_snr_db": 6.0893799514202644,
+        "window_power_dbfs": -59.96808465897558,
+        "s4": {
+          "category": "raster_station",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 4.9,
+          "level_dbfs_4s": -61.3,
+          "bw_khz": 68.4,
+          "duty": 1.0,
+          "retune": "not_reproduced",
+          "gain_tests": "98M low->98M mid:inconclusive_weak"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 102770500.0,
+      "core:freq_upper_edge": 102794900.0,
+      "core:label": "unexplained",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "unverified-line",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 102781300.0,
+        "offset_hz": 4781300.0,
+        "bandwidth_hz": 24400.0,
+        "window_peak_snr_db": 6.222757310948729,
+        "window_power_dbfs": -65.56810163808984,
+        "s4": {
+          "category": "unexplained",
+          "flags": [
+            "marginal"
+          ],
+          "peak_snr_db_4s": 5.7,
+          "level_dbfs_4s": -66.1,
+          "bw_khz": 24.4,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:inconclusive_weak"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 104445300.0,
+      "core:freq_upper_edge": 104562500.0,
+      "core:label": "FM 104.5 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": true,
+        "rf_center_hz": 104500000.0,
+        "channel_hz": 104500000.0,
+        "snr_db": 11.721056737373823,
+        "identity": {
+          "type": "fm-channel",
+          "value": "104.5 MHz"
+        },
+        "center_hz": 104497300.0,
+        "offset_hz": 6497300.0,
+        "bandwidth_hz": 117200.0,
+        "window_peak_snr_db": 11.721056737373823,
+        "window_power_dbfs": -55.13161382554295,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 13.3,
+          "level_dbfs_4s": -56.1,
+          "bw_khz": 117.2,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 105226600.0,
+      "core:freq_upper_edge": 105348600.0,
+      "core:label": "FM raster emitter",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": false,
+        "channel_hz": 105300000.0,
+        "snr_db": 13.86891816595329,
+        "note": "on the FM raster, not one of the 7 strong reference stations",
+        "center_hz": 105293300.0,
+        "offset_hz": 7293300.0,
+        "bandwidth_hz": 122000.0,
+        "window_peak_snr_db": 13.86891816595329,
+        "window_power_dbfs": -52.04956083515172,
+        "s4": {
+          "category": "raster_station",
+          "flags": [],
+          "peak_snr_db_4s": 15.3,
+          "level_dbfs_4s": -52.4,
+          "bw_khz": 122.1,
+          "duty": 1.0,
+          "retune": "stays",
+          "gain_tests": "98M low->98M mid:linear"
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 106022500.0,
+      "core:freq_upper_edge": 106095700.0,
+      "core:label": "unverified",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "unverified-line",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 106053500.0,
+        "offset_hz": 8053500.0,
+        "bandwidth_hz": 73200.0,
+        "window_peak_snr_db": 10.089279081453665,
+        "window_power_dbfs": -56.75274401562831,
+        "s4": {
+          "category": null,
+          "flags": [
+            "edge"
+          ],
+          "peak_snr_db_4s": 10.0,
+          "level_dbfs_4s": -57.4,
+          "bw_khz": 73.2,
+          "duty": 0.91,
+          "retune": null,
+          "gain_tests": null
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 106125000.0,
+      "core:freq_upper_edge": 106178700.0,
+      "core:label": "unverified",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "unverified-line",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 106151100.0,
+        "offset_hz": 8151100.0,
+        "bandwidth_hz": 53700.0,
+        "window_peak_snr_db": 6.542907875327458,
+        "window_power_dbfs": -60.92817528882401,
+        "s4": {
+          "category": null,
+          "flags": [
+            "edge",
+            "marginal"
+          ],
+          "peak_snr_db_4s": 5.6,
+          "level_dbfs_4s": -62.6,
+          "bw_khz": 53.7,
+          "duty": 0.69,
+          "retune": null,
+          "gain_tests": null
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 106847700.0,
+      "core:freq_upper_edge": 106945300.0,
+      "core:label": "FM 106.9 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "known": true,
+        "rf_center_hz": 106900000.0,
+        "channel_hz": 106900000.0,
+        "snr_db": 7.70873285412195,
+        "identity": {
+          "type": "fm-channel",
+          "value": "106.9 MHz"
+        },
+        "center_hz": 106897400.0,
+        "offset_hz": 8897400.0,
+        "bandwidth_hz": 97600.0,
+        "window_peak_snr_db": 7.70873285412195,
+        "window_power_dbfs": -60.14315820502682,
+        "s4": {
+          "category": null,
+          "flags": [
+            "edge",
+            "marginal"
+          ],
+          "peak_snr_db_4s": 8.4,
+          "level_dbfs_4s": -61.4,
+          "bw_khz": 97.7,
+          "duty": 0.99,
+          "retune": null,
+          "gain_tests": null
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 107672900.0,
+      "core:freq_upper_edge": 107731400.0,
+      "core:label": "unverified",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "unverified-line",
+        "verified": false,
+        "note": "persistent emitter S4 could not attribute (antenna-off capture needed)",
+        "center_hz": 107700400.0,
+        "offset_hz": 9700400.0,
+        "bandwidth_hz": 58500.0,
+        "window_peak_snr_db": 5.778466706016196,
+        "window_power_dbfs": -63.04905384218549,
+        "s4": {
+          "category": null,
+          "flags": [
+            "edge",
+            "marginal"
+          ],
+          "peak_snr_db_4s": 6.2,
+          "level_dbfs_4s": -64.0,
+          "bw_khz": 58.6,
+          "duty": 0.99,
+          "retune": null,
+          "gain_tests": null
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 107995100.0,
+      "core:freq_upper_edge": 108000000.0,
+      "core:label": "band edge",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "band-edge",
+        "reason": "fft_edge_bin",
+        "note": "S4 row at +-fs/2 (FFT edge bin, outside the 15 MHz baseband filter)",
+        "center_hz": 107995100.0,
+        "offset_hz": 9995100.0,
+        "bandwidth_hz": 4900.0,
+        "window_peak_snr_db": 3.363854256575998,
+        "window_power_dbfs": -72.53428537253507,
+        "s4": {
+          "category": null,
+          "flags": [
+            "edge",
+            "marginal"
+          ],
+          "peak_snr_db_4s": 5.0,
+          "level_dbfs_4s": -73.9,
+          "bw_khz": 4.9,
+          "duty": 1.0,
+          "retune": null,
+          "gain_tests": null
+        },
+        "truth_source": "spike S4 emitter table (full 4 s capture), re-measured on this window",
+        "t_start_s": 0.0,
+        "duration_s": 0.6
+      }
+    }
+  ]
+}

@@ -30,6 +30,18 @@ lint:
 synth *args:
     uv run --locked --project py python -m hkpy.synth {{args}}
 
+# Verify committed fixtures against fixtures/manifest.json (`--external` also checks the store)
+fixtures-verify *args:
+    uv run --locked --project py python py/fixtures/verify.py {{args}}
+
+# Copy/verify external originals from $HACKRIFF_FIXTURE_STORE (or --from DIR) into fixtures/store
+fixtures-fetch *args:
+    uv run --locked --project py python py/fixtures/fetch.py {{args}}
+
+# Regenerate the 2026-09-13 HackRF fixture set from the external store
+fixtures-build-2026-09-13 *args:
+    uv run --locked --project py python py/fixtures/build_2026_09_13.py {{args}}
+
 # Run a SigMF fixture through the pipeline (for now: parse + summarise the metadata)
 replay fixture:
     cargo run -p hk-cli --bin hk -- replay "{{fixture}}"
