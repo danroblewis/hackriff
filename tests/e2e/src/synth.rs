@@ -65,18 +65,38 @@ pub enum SynthError {
     /// A generated recording failed to load.
     #[error(transparent)]
     Fixture(#[from] FixtureError),
+    /// `HK_DEVICE=hackrf` selects the real radio; a synthetic scene cannot be served on air.
+    #[error(
+        "HK_DEVICE=hackrf: synthetic scenes are not on the air; this test runs on the mock SDR only"
+    )]
+    HardwareDevice,
 }
 
 impl SynthError {
     /// True when generation is impossible on this machine (as opposed to a generator bug).
     pub fn is_unavailable(&self) -> bool {
-        matches!(self, SynthError::UvMissing)
+        matches!(self, SynthError::UvMissing | SynthError::HardwareDevice)
     }
 }
 
-/// Whether a missing generator must fail tests (`HK_E2E_REQUIRE_SYNTH=1`).
+/// Device selection for device-driven tests (docs/10 §1.1): unset or `mock` drives the mock SDR,
+/// `hackrf` the real HackRF (hardware-in-the-loop, T-053).
+pub const DEVICE_ENV: &str = "HK_DEVICE";
+
+/// `HK_DEVICE=hackrf`: tests run against live air, where no synthetic scene or fixture truth
+/// exists.
+pub fn hardware_device_selected() -> bool {
+    match std::env::var(DEVICE_ENV).as_deref() {
+        Ok("hackrf") => true,
+        Ok("mock") | Ok("") | Err(_) => false,
+        Ok(other) => panic!("{DEVICE_ENV}={other}: expected `mock` or `hackrf`"),
+    }
+}
+
+/// Whether a missing generator must fail tests (`HK_E2E_REQUIRE_SYNTH=1`). Never under
+/// `HK_DEVICE=hackrf`: a synthetic scene cannot be put on the air, so those tests skip.
 pub fn require_synth() -> bool {
-    std::env::var(REQUIRE_SYNTH_ENV).is_ok_and(|v| v == "1")
+    !hardware_device_selected() && std::env::var(REQUIRE_SYNTH_ENV).is_ok_and(|v| v == "1")
 }
 
 /// Generates a scenario or, when `uv` is unavailable, prints a skip message and returns from the
@@ -166,6 +186,9 @@ impl SynthRequest {
 
     /// Generates the scenario (or reuses the cached output) and opens it.
     pub fn generate(&self) -> Result<SynthOutput, SynthError> {
+        if hardware_device_selected() {
+            return Err(SynthError::HardwareDevice);
+        }
         let dir = self.cache_dir()?;
         if dir.join("manifest.json").is_file() {
             return SynthOutput::open(dir);

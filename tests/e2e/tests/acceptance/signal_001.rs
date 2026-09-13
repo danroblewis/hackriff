@@ -33,15 +33,17 @@ use std::path::Path;
 
 use hk_e2e::{Fixture, SynthRequest};
 use hk_model::{
-    ContentClass, CrcStatus, Decode, DecodeId, DecodedIdentity, FreqRange, IdentityScheme,
-    InventoryIdentity, InventoryQuery, Region, Timestamp,
+    ContentClass, CrcStatus, Decode, DecodeId, DecodedIdentity, IdentityScheme, InventoryIdentity,
+    InventoryQuery, Timestamp,
 };
 use hk_pipeline::builtin_chains;
 use hk_plugins::Ingest;
 use hk_stream::{Publisher, PublisherConfig, Record, StreamHeader, StreamKind};
 use serde_json::json;
 
-use crate::blind::{BlindConfig, BlindSource, blind_config};
+use crate::blind::{
+    BlindConfig, BlindSource, assert_truth_decoded, blind_config, start, truth_report,
+};
 use crate::common::*;
 
 const SIGNAL_001: &str = "SIGNAL-001";
@@ -227,7 +229,6 @@ fn signal_001_adsb_pipeline_and_plugin_output_plumbing() {
         dir,
         mut cfg,
         replay,
-        src: _src,
     } = blind_config(&fx.meta_path, "s001", BlindSource::default(), json!({}));
     assert_eq!(
         replay.class,
@@ -252,13 +253,10 @@ fn signal_001_adsb_pipeline_and_plugin_output_plumbing() {
     assert_eq!(s.source_class, "unrestricted");
     assert_eq!(s.always_on_lost_samples, 0);
     assert!(s.counter("/readers/detect/frames") > 0);
-    let dets = repo(&dir.0)
-        .detections_in_region(&Region::new(FreqRange::centered(1090e6, 2.4e6), ever()))
-        .unwrap();
-    eprintln!(
-        "[{SIGNAL_001}] {} detections in the 1090 MHz window",
-        dets.len()
-    );
+    // The private truth list, matched blind (T-047) but reported only: the detect reader's
+    // frames (~2 ms) cannot resolve a 120 µs squitter, and this run has no decoder chain. The
+    // readsb test proves every squitter through the system's decodes.
+    truth_report(SIGNAL_001, &dir.0, &fx, 0.0);
 
     // Plugin-output half of the chain: Ingest + republish, as chains::plugin wires it.
     let class = hk_stream::gate::clamp(ContentClass::Unrestricted, ContentClass::Unrestricted);
@@ -334,7 +332,6 @@ fn signal_001_adsb_readsb_plugin_chain() {
         dir,
         mut cfg,
         replay,
-        src: _src,
     } = blind_config(&fx.meta_path, "s001r", BlindSource::default(), json!({}));
     if !cfg
         .plugin_dirs
@@ -370,6 +367,19 @@ fn signal_001_adsb_readsb_plugin_chain() {
         "[{SIGNAL_001}] readsb decodes {decodes} of {PLUGIN_DECODES}"
     );
     assert_adsb_outputs(&dir.0, &tap.socket_results(), &icaos, PLUGIN_DECODES);
+    // Blind truth (T-047): every squitter of the private truth list decoded (identity and time,
+    // one decode per squitter in time order) and an ADS-B explanation in the top-k at its extent.
+    // Decode stamps were observed up to ~95 ms after the squitter (T-047 run; the wrapper
+    // documents ≤ ~40 ms), hence 120 ms; in-order pairing keeps a late stamp from counting twice.
+    assert_truth_decoded(SIGNAL_001, &dir.0, &fx, 0.12);
+    for t in truth_report(SIGNAL_001, &dir.0, &fx, 0.0) {
+        assert!(
+            t.emitters
+                .iter()
+                .any(|(_, top)| top.iter().any(|s| s == "adsb")),
+            "[{SIGNAL_001}] no emitter with adsb in its top-k at a squitter: {t:?}"
+        );
+    }
 
     // T-039 family step for plugin decodes (T-037b): the readsb chain classifies the emitters its
     // decodes resolved to, so each aircraft's top ranked explanation is ADS-B.

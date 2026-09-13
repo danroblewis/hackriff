@@ -16,6 +16,7 @@ use hk_e2e::{Fixture, SynthRequest};
 use hk_model::{AnomalyKind, Cause, CorrelationType, FreqRange, Region, Repository};
 use serde_json::json;
 
+use crate::blind::{assert_truth_found, replay_config, start};
 use crate::common::*;
 
 const AWARE_006: &str = "AWARE-006";
@@ -83,9 +84,13 @@ fn run(
     cfg.feeds_dir = Some(dir.0.clone());
     let s = finish(start(cfg, replay));
     assert_eq!(s.always_on_lost_samples, 0);
+    // The scene's carriers detected blind (T-047; no explanation asserted for bare CW).
+    assert_truth_found(&format!("{AWARE_006} {tag}"), &dir.0, fx, 0.0, true);
     let repo = repo(&dir.0);
+    // Every noise-floor-rise anomaly of the run (no region queried), matched to the truth event.
+    let event = fx.of_kind("noise-floor-rise")[0];
     let anomalies: Vec<_> = repo
-        .anomalies_in_region(&Region::new(FreqRange::centered(1575.42e6, 2e6), ever()))
+        .anomalies_in_region(&Region::new(FreqRange::new(0.0, 7.0e9), ever()))
         .unwrap()
         .into_iter()
         .filter(|a| a.kind == AnomalyKind::NoiseFloorRise)
@@ -109,9 +114,10 @@ fn run(
         a.region.freq.lo_hz / 1e6,
         a.region.freq.hi_hz / 1e6
     );
+    let event_hz = event.center_hz();
     assert!(
-        a.region.freq.lo_hz <= 1575.42e6 && a.region.freq.hi_hz >= 1575.42e6,
-        "[{AWARE_006}] anomaly covers L1"
+        a.region.freq.lo_hz <= event_hz && a.region.freq.hi_hz >= event_hz,
+        "[{AWARE_006}] anomaly covers the truth event ({event_hz} Hz)"
     );
     assert!(onset_s.abs() <= 0.1, "[{AWARE_006}] onset {onset_s:+.4} s");
     (dir, repo, a)

@@ -20,6 +20,7 @@ use hk_store::history::burst_histogram;
 use hk_store::{RegionQuery, Resolution};
 use serde_json::{Value, json};
 
+use crate::blind::{assert_truth_found, replay_config, start};
 use crate::common::*;
 
 const AWARE_042: &str = "AWARE-042";
@@ -64,12 +65,20 @@ fn aware_042_occupancy_burst_lengths_and_hour_profile_via_region_over_time_query
     assert_eq!(meta.global.datatype, Datatype::Ci8);
     meta.captures.clear();
     meta.annotations.clear();
+    // The device's clock is its sample counter (T-049), so each window's `core:global_index`
+    // places it in the 3 h span: the hour between windows is a recording gap the mock serves as
+    // an overrun of that duration, exactly as a radio whose stream was interrupted.
+    let fs = fixtures[0].sample_rate;
     let mut data = Vec::new();
-    for fx in &fixtures {
+    for (fx, window_s) in fixtures.iter().zip(WINDOW_STARTS_S) {
         let bytes = std::fs::read(fx.data_path()).unwrap();
         let offset = (data.len() / 2) as u64;
         for cap in &fx.meta.captures {
             let mut c = cap.clone();
+            c.extra.insert(
+                "core:global_index".into(),
+                json!(((window_s - WINDOW_STARTS_S[0]) * fs).round() as u64 + cap.sample_start),
+            );
             c.sample_start += offset;
             meta.captures.push(c);
         }
@@ -84,8 +93,20 @@ fn aware_042_occupancy_burst_lengths_and_hour_profile_via_region_over_time_query
     let handle = start(cfg, replay);
     let product = handle.floor_product();
     let s = finish(handle);
-    assert_eq!(s.always_on_lost_samples, 0);
+    // The hour-long recording gaps reach the pipeline as device overruns (GAP). Lossless readers
+    // still lose a fraction of a second where the stream jumps (T-047 finding, reported); anything
+    // beyond that edge loss fails.
+    let gaps = (WINDOW_STARTS_S.len() - 1) as f64;
+    assert!(
+        (s.always_on_lost_samples as f64) <= 2.0 * gaps * fs,
+        "[{AWARE_042}] readers lost {} samples beyond the recording-gap edges",
+        s.always_on_lost_samples
+    );
     assert!(s.counter("/history/tiles_written") > 0);
+    // Every rendered burst of every window detected blind (T-047).
+    for fx in &fixtures {
+        assert_truth_found(AWARE_042, &dir.0, fx, 0.0, true);
+    }
 
     // Truth restricted to the rendered windows.
     let span_s = f(&schedule, "span_s");

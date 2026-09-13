@@ -18,6 +18,12 @@
 //!   (plan configuration, not truth), so the analog chain may demodulate it. The WFM
 //!   demodulation ranks FM broadcast first, `off-allocation`, with status `unexpected-here` and
 //!   prior_ref `aviation-vhf-comm`. Aviation voice is the allocation-only alternative.
+//!   *T-047 audit (kept):* the T-054 relaxation is user configuration a real operator could set
+//!   (a content class for their own recording, and a 19 MHz band the analog chain may demodulate
+//!   in). Neither names the station, its frequency, its mode or its label: the station is still
+//!   found by blind detection, mode selection still has to pick WFM, and the truth list is read
+//!   only after the run. It stays until an auto analog chain on any confirmed emitter (T-054
+//!   follow-up) removes the need for it.
 //! - **Restricted band (legal guardrail).** The same IQ relabelled onto 930.5 MHz paging. The
 //!   mapped family ranks, yet the class stays `restricted-paging`: no recording, no label, no
 //!   content and no identity in clear.
@@ -31,7 +37,7 @@ use hk_model::{
 use hk_pipeline::family::MIN_CONFIDENCE;
 use hk_pipeline::{Explanation, explanations};
 
-use crate::blind::{BlindRun, BlindSource, blind_replay, private_truth};
+use crate::blind::{BlindRun, BlindSource, assert_truth_found, blind_replay, private_truth};
 use crate::common::*;
 use crate::signal_062::FM_FIXTURE;
 
@@ -151,6 +157,7 @@ fn aware_053_blind_fm_station_ranks_fm_broadcast_first_and_is_known() {
     let truth = station(&fx);
     let run = blind_replay(&meta, "a053k", BlindSource::default());
     let (dets, seen) = matched(&run, &truth, 0.0, "FM station");
+    assert_truth_found(AWARE_053, &run.dir.0, &fx, 0.0, true);
     assert!(dets > 0, "[{AWARE_053}] the station was not detected blind");
     assert!(!seen.is_empty(), "[{AWARE_053}] no emitter at the station");
     for s in &seen {
@@ -200,6 +207,7 @@ fn aware_053_blind_station_shifted_150_khz_keeps_fm_broadcast_flagged_off_raster
         },
     );
     let (dets, seen) = matched(&run, &truth, SHIFT_HZ, "FM station +150 kHz");
+    assert_truth_found(AWARE_053, &run.dir.0, &fx, SHIFT_HZ, true);
     assert!(
         dets > 0,
         "[{AWARE_053}] the shifted station was not detected"
@@ -247,6 +255,7 @@ fn aware_053_blind_wide_carrier_at_162_mhz_stays_unknown_with_a_shape_only_sugge
         "[{AWARE_053}] 162 MHz is no unrestricted band prior"
     );
     let (dets, seen) = matched(&run, &truth, shift_hz, "162 MHz carrier");
+    assert_truth_found(AWARE_053, &run.dir.0, &fx, shift_hz, true);
     assert!(dets > 0, "[{AWARE_053}] the carrier was not detected");
     assert!(!seen.is_empty(), "[{AWARE_053}] no emitter at the carrier");
     let suggested: Vec<&Explanation> = seen
@@ -292,6 +301,7 @@ fn aware_053_blind_off_allocation_station_is_unexpected_here_with_prior_ref() {
         "[{AWARE_053}] the user vouched the recording"
     );
     let (dets, seen) = matched(&run, &truth, SHIFT_HZ, "aeronautical band");
+    assert_truth_found(AWARE_053, &run.dir.0, &fx, SHIFT_HZ, true);
     assert!(
         dets > 0,
         "[{AWARE_053}] the relabelled station was not detected"
@@ -357,6 +367,7 @@ fn aware_053_blind_mapped_family_in_the_paging_band_stays_restricted_without_con
         "[{AWARE_053}] 930.5 MHz derives restricted-paging from frequency"
     );
     let (_, seen) = matched(&run, &truth, shift_hz, "paging band");
+    assert_truth_found(AWARE_053, &run.dir.0, &fx, shift_hz, true);
     assert!(
         seen.iter().any(|e| e
             .explanations
