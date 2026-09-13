@@ -1,0 +1,18 @@
+[package]
+name = "s1-owned"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone spike: never join the repo's root workspace.
+[workspace]
+
+[dependencies]
+rustfft = "6.4"
+num-complex = "0.4"
+libc = "0.2"
+
+[profile.release]
+debug = 1
+codegen-units = 1
+lto = "thin"

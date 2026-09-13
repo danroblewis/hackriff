@@ -1,0 +1,5 @@
+generating synthetic table (4194304 samples)...
+bench ring publish (memcpy)       :  35496.0 Msps  (1774.8x real time @20 Msps)
+bench always-on: conv+FFT4096+PSD :    528.5 Msps  (26.4x real time @20 Msps)
+bench chain nbfm@-1.5MHz/50kSps   :    460.8 Msps  (23.0x real time @20 Msps)
+bench chain wbfm@+2.5MHz/250kSps  :    493.0 Msps  (24.6x real time @20 Msps)

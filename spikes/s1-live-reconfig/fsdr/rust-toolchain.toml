@@ -1,0 +1,4 @@
+[toolchain]
+# futuresdr 0.8.0 uses #![feature(return_type_notation, associated_type_defaults,
+# specialization, where_clause_attrs)] and pins channel = "nightly" upstream.
+channel = "nightly"

@@ -1,0 +1,30 @@
+generating synthetic table (4194304 samples)...
+=== S1 owned mini-dataflow ===
+mode                     : paced 20 Msps, default thread QoS
+block / buffer period    : 65536 samples / 3.277 ms
+ring                     : 256 blocks (0.84 s history)
+cycles x parallel        : 200 x 1 = 200 attach/detach
+dwell per chain          : 50 ms, preroll 0 blocks
+measured window          : 11.64 s, 3551 blocks published
+source samples published : 242941952
+source dropped in window : 0 samples
+source dropped total     : 0 samples, 0 events, log (t s, samples, lag ms) []
+source late blocks >1ms  : 2645, max lag 1.99 ms
+source block allocations : 257 (steady state reuses blocks)
+always-on consumed       : 242941952 samples (3707 blocks, 59312 FFT frames)
+always-on lost blocks    : 0
+always-on counter gaps   : 0 (0 samples)
+consumed == published    : true
+FFT peaks (Hz, dB)       : [(-5996094.0, 42.5), (-1503906.0, 45.0), (2431641.0, 38.0), (2568359.0, 38.0), (6992188.0, 39.4), (7011719.0, 39.5)]
+attach latency ms        : p50 0.0452 p99 0.1641 max 0.4512
+attach->first output ms  : p50 2.415 p99 4.408 max 5.044
+detach latency ms        : p50 0.1395 p99 0.6429 max 0.8952
+chains bad/lost/gaps     : 0 / 0 / 0
+demod nbfm@-1.5MHz/50kSps   : |rms/expected-1| p50 0.0021 max 0.0078; |mean| p50 8.4 Hz max 38.0 Hz (n=100)
+demod wbfm@+2.5MHz/250kSps  : |rms/expected-1| p50 0.0005 max 0.0010; |mean| p50 94.8 Hz max 228.1 Hz (n=100)
+process CPU              : 24.3 % of one core (0.24 cores)
+source thread CPU        : 1.4 %
+fft thread CPU           : 10.9 %
+chain threads CPU        : 11.3 % (avg while attached: 13.1 %)
+restart/recompile needed : no
+RESULT                   : PASS
