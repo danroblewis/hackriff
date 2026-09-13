@@ -1009,7 +1009,9 @@ tasks:
   - id: T-062
     milestone: M0b
     title: Control API audit-log DoS fix and auth hardening (T-050 review)
-    status: in-progress
+    status: done
+    commit: "dd3d9bd (merged ahead of T-063: security fix, adds no failures)"
+    result: "audit strings capped 256 B (1 KiB in request/old/new), lines 16 KiB; unauthenticated refusals coalesced 1 line/peer/s with count, <=120 lines/min, overflow in refused_summary (every refusal counted once); rotation 16 MiB x 4; <=1024 tracked peers; write errors drop with rate-limited stderr, never fail control. Test: 10k ~15 KB-path requests from 16 threads keep log <1 MiB with counts summing to 10000. X-Forwarded-Host/For and CF-Connecting-IP trusted only from loopback. Token file O_NOFOLLOW|O_NONBLOCK with fd-based type/owner/mode checks, group/world-writable parent refused, O_NOFOLLOW create; AuditLog::open refuses symlinks/non-regular. Centre/rate serialised on own lock; timed-out retune marked pending and refreshed via WindowRetuner::applied_window. libc ledger row. retune_legal leftover removed."
     deps: [T-050]
     parallel_group: P
     use_cases: [AWARE-042]
@@ -1049,6 +1051,20 @@ tasks:
     effort: high
     core_interface: true
     hold: "after T-058 merges (held behind T-063)"
+  - id: T-065
+    milestone: M0b
+    title: Analog mode selector quality (pure carrier read as AM, 60 % AM tone read as unknown)
+    status: in-progress
+    deps: [T-012]
+    parallel_group: T
+    use_cases: [SIGNAL-062]
+    found_by: T-043 agent 2026-09-13
+    acceptance: "blind synthetic sweep (carrier, AM at 10-100 % depth, NBFM/WFM at several deviations, SSB, CW, noise, at 3-30 dB SNR): confusion matrix reported before/after; pure unmodulated carrier classified as carrier/CW (not AM); AM >= 30 % depth at >= 10 dB SNR classified AM; unknown kept for genuinely ambiguous cases (open-set, no forced guess); FM fixture stays WFM; no threshold regressions in existing T-012/SIGNAL-062 tests"
+    area: crates/hk-demod (mode selection features/thresholds)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

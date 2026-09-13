@@ -389,3 +389,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Result:** whole-pipeline dense urban replay at 20 Msps went from 0.074× to 0.68× real time (~10×). Synthetic and ISM data run at ≥ 5–9× real time.
   - **Merge:** held until T-063 greens main.
   - **Next lever:** behaviour change → T-064 (prune members, recompute raster only on channel-set change; core interface), held behind the T-058 merge. The floor FCME comes after that, then T-056 GPU STFT.
+- **B0.131 T-062 merged** (dd3d9bd → 190a8b1), ahead of T-063: it is a security fix that closes the audit-log disk-fill risk on main and adds no failures.
+  - **Audit log:** bounded fields, coalesced unauthenticated refusals, 64 MiB rotation.
+  - **Headers and token:** forwarded headers trusted only from loopback; token and audit files opened no-follow with fd-based checks.
+  - **Retune:** timeout state refreshed from the applied window.
+  - **Launched T-065:** analog mode selector quality (detection-quality steer); a blind synthetic confusion-matrix sweep.
+  - **Still held behind T-063:** merges of T-049 (mock SDR), T-043 (Listen, review running) and T-058 (detect throughput).
+  - Verification running; only the known `retune_legal` failure is expected.
