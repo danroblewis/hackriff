@@ -1119,7 +1119,9 @@ tasks:
   - id: T-069
     milestone: M0b
     title: Discoverable Listen (toolbar Listen above waterfall, inventory-row Listen, visible hint; remove restricted-class hint text)
-    status: in-progress
+    status: done
+    commit: "56d5c8b (merged)"
+    result: "always-visible Listen toolbar above waterfall (target label, Listen/Stop, volume, status, hint hidden while playing); listen.ts pure target resolution: clicked signal (inspected emitter else +/-25 kHz box) -> latest selection (clamped 1 MHz) -> strongest in view (peak bin, -10 dB width, cap 200 kHz); inventory row Listen button by emitter id and row click opens Inspect (Inspector.showKnown) and becomes the last-clicked target; restricted-class hint text removed, refusals still shown; 11 new UI tests, 40 total green"
     deps: [T-043, T-051]
     parallel_group: N
     use_cases: [SIGNAL-062]
