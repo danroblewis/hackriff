@@ -119,7 +119,9 @@ tasks:
     dod: OS-CFAR + hysteresis + min-duration; false-alarm bound met (informed by spike S4); Detection rows written
   - id: T-007
     title: burst-tracking (tracks, periodicity, duty cycle, hop set)
-    status: in-progress
+    status: done
+    commit: "a0cbd95 (merged)"
+    results: "AWARE-036 one track 25/25 bursts, period 0.1 % error, duty 0.21 vs 0.19, lobes merged; AWARE-042 per-channel tracks within 3 frames / duty 0.05; synthetic hopper -> one hop set 10 channels, 50.003 hops/s; close emitters separate; gain change keeps track with segment; 6 h carrier bounded memory, zero alloc; real 915 MHz: 28 tracks, no hop set (bursts separated by silence) -> T-031. Merged without separate review (not core_interface)"
     followups_from_T-006_reprobe: "side runs kept at a split skip min-duration (1-frame 3-pixel records possible); a bridge on the split frame fuses two 1 s boxes - tracking must tolerate"
     note_start: "launched 2026-09-13 on the T-006 branch (1e5bc99) ahead of its merge to cut critical-path wait (user timebox steer); merges main once T-006 lands"
     followups_from_T-002_review: "track region query missing; emitter region query over-matches hoppers/gaps (hop-set or tile-backed history)"
@@ -287,7 +289,7 @@ tasks:
     dod: pyramid with rolling byte budget; region-over-time query tested
   - id: T-018
     title: signal-inventory writes + emitter clustering (read/query)
-    status: todo
+    status: in-progress
     followups_from_T-002_review: "emitter fingerprint lookup/update API, merge state (merged_into), supersedable emitter_link, idempotent count on replay, classification input ref + feature-set version; from T-015 review: Emitter rows carry no content_class (restricted identity loses its class in inventory -> inventory API/export must re-gate); count not idempotent on replay (DF11 included); ctx.emitter_ref ignored (identity emitter separate from detection emitter); IdentityConflict only counted"
     deps: [T-002, T-007]
     parallel_group: E
@@ -463,6 +465,19 @@ tasks:
     model: opus
     effort: high
     note: "found by T-013 (2026-09-13): T-011 trusted 33.6 kBd (7x) on 13/20 bursts of rectangular FSK h=4; T-013 demod checks run lengths and divides (harmonic_divisor) as a workaround. Correctness bug in the 'trusted is never wrong' contract"
+  - id: T-031
+    title: Burst-tracking follow-ups (model fields, track region query, merged links, split trigger, bursty hop sets, TDMA)
+    status: todo
+    deps: [T-007]
+    parallel_group: C
+    use_cases: [AWARE-036, AWARE-042]
+    acceptance: each item fixed or deferred with rationale; bursty FHSS (packets separated by silence) forms a hop set on the real 915 MHz fixture
+    area: crates/hk-detect (track), crates/hk-model (additive fields/query)
+    needs: none
+    model: opus
+    effort: medium
+    items: "hk-model TimingFeatures lacks period confidence/jitter, burst-length distribution, segment boundaries, hop raster, hop-set id (only in TrackSummary); track region query missing; merged track keeps its own detection links (not re-pointed to survivor); no split trigger (only merges); bursty hopper needs looser hop rule; stream-start tone lobes and low-SNR single-lobe fragments create short extra tracks; TDMA frame + co-occurrence features not implemented; track upserts one transaction each (batch)"
+    note: "follow-ups from T-007 (merged 2026-09-13 under the timebox rule)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
