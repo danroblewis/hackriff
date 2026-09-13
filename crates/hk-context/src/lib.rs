@@ -34,7 +34,7 @@ pub use feeds::{
     ingest_snapshot, refresh,
 };
 pub use geo::Site;
-pub use known_status::{PriorMatch, match_known_status};
+pub use known_status::{PART15_FAMILIES, PriorMatch, is_service_family, match_known_status};
 
 #[cfg(test)]
 mod tests {

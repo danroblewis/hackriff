@@ -54,7 +54,20 @@ pub enum AnalogMode {
 }
 
 impl AnalogMode {
-    /// Data-model mode string (`Demodulation.mode`).
+    /// Every mode, in declaration order.
+    pub const ALL: [AnalogMode; 6] = [
+        AnalogMode::Wfm,
+        AnalogMode::Nbfm,
+        AnalogMode::Am,
+        AnalogMode::Ssb,
+        AnalogMode::Cw,
+        AnalogMode::Unknown,
+    ];
+
+    /// Data-model mode string (`Demodulation.mode`), also the emitter Classification family
+    /// `write_session` records. These are modulation names, not services: the pipeline's family
+    /// vocabulary (`hk_pipeline::family`, T-039) maps `wfm` to the `fm-broadcast` service and
+    /// leaves the shared-use modes (`nbfm`, `am`, `ssb`, `cw`) unmapped.
     pub const fn as_str(self) -> &'static str {
         match self {
             AnalogMode::Wfm => "wfm",

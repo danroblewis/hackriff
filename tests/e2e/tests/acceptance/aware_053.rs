@@ -1,262 +1,342 @@
-//! AWARE-053 (T4): known-signal priors separate known from unexpected.
+//! AWARE-053 (T4): known-signal priors separate known from unexpected. The tests are **blind** (T-039):
+//! each replay goes through `blind::blind_replay` with the fixture's truth stripped. The test
+//! then matches everything the pipeline produced (all detections, all inventory emitters) against
+//! the truth only it holds. No test classifies an emitter or looks a frequency up.
 //!
-//! - **Known allocation.** The FM fixture's pipeline run (shared with SIGNAL-062): a detection of
-//!   the 101.3 MHz station → the bundled 47 CFR 2.106 band table returns the FM broadcast row and
-//!   `match_known_status` says `known` with that row's `prior_ref`.
-//! - **Off allocation.** The same IQ relabelled 19.2 MHz up (stations at 118.8–121.2 MHz, inside
-//!   the aeronautical allocation) through the pipeline: detections → tracks → `TrackInventory`
-//!   emitters. A broadcast-FM classification of such an emitter appends `unexpected-here` with a
-//!   `prior_ref`, visible through `query_inventory`'s status filter.
-//!
-//! **Classifier stand-in.** The composed pipeline has no C15 family classifier for tracks yet
-//! (closed-track sightings carry no classification, so the prior can only say `unknown`; the WFM
-//! chain's family `wfm` has no service mapping and its writer passes no prior). The test records
-//! the classification a C15 stage would emit, with the exact prior closure `TrackInventory` uses,
-//! onto the pipeline-created emitter. The pipeline's own statuses are printed for the report.
+//! - **Known allocation.** The FM fixture's strong station is detected, and its emitters rank "FM
+//!   broadcast" first in their explanations. The status is `known`, with the 47 CFR 2.106 FM row
+//!   as `prior_ref`.
+//! - **Off raster.** A synthesised copy (the IQ shifted +150 kHz, onto 101.45 MHz) is still
+//!   detected, with FM broadcast in the top-k flagged `off-raster`.
+//! - **Off allocation.** The same IQ relabelled 19.2 MHz up (aeronautical VHF comm) is
+//!   `metadata-only`, so no content chain runs. The track's occupancy family still ranks FM
+//!   broadcast first, `off-allocation`, with status `unexpected-here` and prior_ref
+//!   `aviation-vhf-comm`. Aviation voice is the allocation-only alternative.
+//! - **Restricted band (legal guardrail).** The same IQ relabelled onto 930.5 MHz paging. The
+//!   mapped family ranks, yet the class stays `restricted-paging`: no recording, no label, no
+//!   content and no identity in clear.
 
-use hk_context::{BandTable, Region as BandRegion, match_known_status};
-use hk_model::sigmf::SigmfMeta;
+use hk_e2e::TruthItem;
+use hk_e2e::blind::matching;
 use hk_model::{
-    Classification, EmitterId, Fingerprint, FreqRange, InventoryQuery, KnownStatus, LinkTarget,
-    PriorVerdict, Region, Repository, Sighting, StatusAuthor, TimeRange, TrackId,
+    ContentClass, EmitterId, FreqRange, InventoryIdentity, InventoryQuery, KnownStatus,
+    KnownStatusChange, Region, StatusAuthor,
 };
-use serde_json::json;
+use hk_pipeline::family::MIN_CONFIDENCE;
+use hk_pipeline::{Explanation, explanations};
 
+use crate::blind::{BlindRun, BlindSource, blind_replay, private_truth};
 use crate::common::*;
-use crate::signal_062::{FM_FIXTURE, STATION_HZ, fm_run};
+use crate::signal_062::FM_FIXTURE;
 
 const AWARE_053: &str = "AWARE-053";
-const SHIFT_HZ: f64 = 19.2e6;
+const FM_ROW: &str = "us-47cfr2106-compact:fm-broadcast";
+const AIRBAND_ROW: &str = "us-47cfr2106-compact:aviation-vhf-comm";
+/// A produced extent matches the truth when its centre is this close and the extents overlap.
+const CENTER_TOL_HZ: f64 = 100e3;
 
-fn table() -> BandTable {
-    BandTable::bundled(BandRegion::Us).unwrap()
+/// The broadcast station in the fixture's private truth.
+fn station(fx: &hk_e2e::Fixture) -> TruthItem {
+    fx.of_kind("wfm-broadcast")
+        .first()
+        .map(|t| (*t).clone())
+        .unwrap_or_else(|| panic!("[{AWARE_053}] fixture truth has no wfm-broadcast station"))
 }
 
-/// A C15-style classified sighting of an emitter at `f`/`bw`, through the band-plan prior exactly
-/// as `hk_pipeline::TrackInventory` wires it.
-fn classify(
-    repo: &mut Repository,
-    f: f64,
-    bw: f64,
-    family: &str,
-    seen: TimeRange,
-) -> hk_model::Resolution {
-    let table = table();
-    let prior = |family: &str, f: f64, bw: f64| {
-        let m = match_known_status(&table, family, f, bw);
-        PriorVerdict {
-            status: m.status,
-            prior_ref: m.prior_ref,
-            reason: m.reason,
-        }
-    };
-    let sighting = Sighting {
-        source: LinkTarget::Track(TrackId::new()),
-        seen,
-        count: 1,
-        f_center_hz: f,
-        bandwidth_hz: bw,
-        fingerprint: Some(Fingerprint::new(f, bw)),
-        identity: None,
-        context: None,
-        classification: Some(Classification {
-            t: seen.end,
-            family: family.into(),
-            confidence: 0.9,
-            open_set_score: 0.1,
-            model_version: "acceptance-c15-stand-in@1".into(),
-        }),
-        tags: Vec::new(),
-    };
-    repo.record_sighting(&sighting, Some(&prior)).unwrap()
+#[derive(Debug)]
+struct Seen {
+    id: EmitterId,
+    f_center_hz: f64,
+    bandwidth_hz: f64,
+    family: Option<String>,
+    status: KnownStatus,
+    last: KnownStatusChange,
+    explanations: Vec<Explanation>,
 }
 
-fn print_statuses(
-    repo: &Repository,
-    band: FreqRange,
-    tag: &str,
-) -> Vec<(EmitterId, f64, f64, TimeRange)> {
-    let mut out = Vec::new();
-    for e in inventory(
-        repo,
-        InventoryQuery {
-            freq: Some(band),
-            ..InventoryQuery::default()
-        },
-    ) {
-        let h = repo.known_status_history(e.emitter.id).unwrap();
-        eprintln!(
-            "[{AWARE_053}] {tag}: pipeline emitter {:.4} MHz bw {:.0} Hz family {:?} statuses {:?}",
-            e.emitter.f_center_hz / 1e6,
-            e.emitter.bandwidth_hz,
-            e.family,
-            h.iter()
-                .map(|c| (c.status, c.author, c.prior_ref.clone(), c.reason.clone()))
-                .collect::<Vec<_>>()
-        );
-        out.push((
-            e.emitter.id,
-            e.emitter.f_center_hz,
-            e.emitter.bandwidth_hz,
-            TimeRange::new(e.emitter.first_seen, e.emitter.last_seen),
-        ));
-    }
-    out
-}
-
-fn copy_db(from: &std::path::Path, to: &std::path::Path) {
-    for name in ["hackriff.db", "hackriff.db-wal", "hackriff.db-shm"] {
-        let src = from.join(name);
-        if src.is_file() {
-            std::fs::copy(&src, to.join(name)).unwrap();
-        }
-    }
-}
-
-#[test]
-fn aware_053_detection_at_known_frequency_matches_the_fm_broadcast_allocation() {
-    let Some(run) = fm_run() else { return };
-    let table = table();
-    let dets = repo(&run.dir.0)
-        .detections_in_region(&Region::new(FreqRange::centered(STATION_HZ, 150e3), ever()))
+/// Matched detections and emitters of a blind run against `truth` moved by `shift_hz`.
+fn matched(run: &BlindRun, truth: &TruthItem, shift_hz: f64, tag: &str) -> (usize, Vec<Seen>) {
+    let repo = repo(&run.dir.0);
+    let detections = repo
+        .detections_in_region(&Region::new(FreqRange::new(0.0, 7.0e9), ever()))
         .unwrap();
-    let d = dets
-        .iter()
-        .max_by(|a, b| a.snr_peak_db.total_cmp(&b.snr_peak_db))
-        .unwrap_or_else(|| panic!("[{AWARE_053}] no detection at 101.3 MHz"));
-    let rows = table.overlapping_center(d.f_center_hz, d.obw_hz);
-    let fm = rows
-        .iter()
-        .find(|r| r.has_tag("fm-broadcast"))
-        .unwrap_or_else(|| panic!("[{AWARE_053}] no FM broadcast row at {} Hz", d.f_center_hz));
-    let m = match_known_status(&table, "fm-broadcast", d.f_center_hz, d.obw_hz);
+    let dets = matching(
+        truth,
+        shift_hz,
+        &detections,
+        |d| (d.f_center_hz, d.obw_hz),
+        CENTER_TOL_HZ,
+    )
+    .len();
+    let all = inventory(&repo, InventoryQuery::default());
+    let hits = matching(
+        truth,
+        shift_hz,
+        &all,
+        |e| (e.emitter.f_center_hz, e.emitter.bandwidth_hz),
+        CENTER_TOL_HZ,
+    );
     eprintln!(
-        "[{AWARE_053}] detection {:.4} MHz obw {:.0} Hz → row {} ({:?}): {:?}",
-        d.f_center_hz / 1e6,
-        d.obw_hz,
-        fm.id,
-        fm.primary_services,
-        m
+        "[{AWARE_053}] {tag}: {dets} of {} detections and {} of {} emitters match the private truth",
+        detections.len(),
+        hits.len(),
+        all.len()
     );
-    assert_eq!(m.status, KnownStatus::Known, "[{AWARE_053}]");
-    assert_eq!(m.prior_ref, Some(fm.prior_ref()), "[{AWARE_053}]");
+    let seen = hits
+        .into_iter()
+        .map(|e| {
+            let x = explanations(&repo, e.emitter.id).unwrap();
+            let last = repo
+                .known_status_history(e.emitter.id)
+                .unwrap()
+                .pop()
+                .unwrap();
+            eprintln!(
+                "[{AWARE_053}] {tag}: emitter {:.4} MHz bw {:.0} Hz family {:?} status {:?} ({:?}: {}) top-k {:?}",
+                e.emitter.f_center_hz / 1e6,
+                e.emitter.bandwidth_hz,
+                e.family,
+                e.emitter.known_status,
+                last.author,
+                last.reason,
+                x.iter()
+                    .map(|x| (x.label.as_str(), (x.score * 100.0).round() / 100.0, &x.flags))
+                    .collect::<Vec<_>>()
+            );
+            Seen {
+                id: e.emitter.id,
+                f_center_hz: e.emitter.f_center_hz,
+                bandwidth_hz: e.emitter.bandwidth_hz,
+                family: e.family.clone(),
+                status: e.emitter.known_status,
+                last,
+                explanations: x,
+            }
+        })
+        .collect();
+    (dets, seen)
+}
 
-    // On a copy of the run's database (the SIGNAL-062 test reads the original).
-    let scratch = TempDir::new("a053k");
-    copy_db(&run.dir.0, &scratch.0);
-    let mut repo = repo(&scratch.0);
-    let pipeline = print_statuses(&repo, FreqRange::centered(STATION_HZ, 200e3), "FM band");
-    assert!(
-        !pipeline.is_empty(),
-        "[{AWARE_053}] no pipeline emitter at 101.3 MHz"
-    );
-    let (_, f, bw, seen) = pipeline[0];
-    let r = classify(&mut repo, f, bw, "fm-broadcast", seen);
-    assert_eq!(
-        r.status_appended,
-        Some(KnownStatus::Known),
-        "[{AWARE_053}] {r:?}"
-    );
-    let last = repo
-        .known_status_history(r.emitter_id)
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert_eq!(last.author, StatusAuthor::Prior);
-    assert_eq!(last.prior_ref, Some(fm.prior_ref()));
+fn has_fm(s: &Seen) -> bool {
+    s.explanations.iter().any(|x| x.service == "fm-broadcast")
+}
+
+fn evidence_backed(x: &Explanation) -> bool {
+    x.evidence_confidence >= MIN_CONFIDENCE
 }
 
 #[test]
-fn aware_053_off_allocation_emitter_gets_unexpected_here_with_prior_ref() {
-    let Some(meta_path) = real_fixture(FM_FIXTURE) else {
+fn aware_053_blind_fm_station_ranks_fm_broadcast_first_and_is_known() {
+    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
         return;
     };
-    // The FM IQ, relabelled 19.2 MHz up: identical samples, aeronautical-band frequencies.
-    let src = TempDir::new("a053src");
-    let mut meta = SigmfMeta::read(&meta_path).unwrap();
-    for cap in &mut meta.captures {
-        cap.frequency = cap.frequency.map(|f| f + SHIFT_HZ);
-        if let Some(p) = &mut cap.provenance {
-            p.tune.center_hz += SHIFT_HZ;
-        }
+    let truth = station(&fx);
+    let run = blind_replay(&meta, "a053k", BlindSource::default());
+    let (dets, seen) = matched(&run, &truth, 0.0, "FM station");
+    assert!(dets > 0, "[{AWARE_053}] the station was not detected blind");
+    assert!(!seen.is_empty(), "[{AWARE_053}] no emitter at the station");
+    for s in &seen {
+        assert!(
+            has_fm(s),
+            "[{AWARE_053}] FM broadcast not in the top-k: {s:?}"
+        );
     }
-    if let Some(p) = &mut meta.global.provenance {
-        p.tune.center_hz += SHIFT_HZ;
-    }
-    meta.annotations.clear();
-    let retuned = src.0.join("retuned.sigmf-meta");
-    meta.write(&retuned).unwrap();
-    std::os::unix::fs::symlink(
-        meta_path.with_extension("sigmf-data"),
-        src.0.join("retuned.sigmf-data"),
-    )
-    .unwrap();
-
-    let dir = TempDir::new("a053u");
-    let (cfg, replay) = replay_config(&dir.0, &retuned, json!({}), hk_core::Pacing::Unpaced);
-    let s = finish(start(cfg, replay));
+    let best = seen
+        .iter()
+        .find(|s| {
+            s.explanations.first().is_some_and(|x| {
+                x.service == "fm-broadcast" && evidence_backed(x) && !x.has_flag("off-raster")
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!("[{AWARE_053}] no emitter ranks evidence-backed, on-raster FM broadcast first")
+        });
+    assert_eq!(best.status, KnownStatus::Known, "[{AWARE_053}] {best:?}");
+    assert_eq!(best.last.author, StatusAuthor::Prior);
+    assert_eq!(best.last.prior_ref.as_deref(), Some(FM_ROW));
+    assert_eq!(best.explanations[0].label, "FM broadcast");
+    let row = run
+        .api_rows
+        .iter()
+        .find(|r| r["id"] == best.id.to_string())
+        .unwrap_or_else(|| panic!("[{AWARE_053}] emitter missing from /api/inventory"));
     assert_eq!(
-        s.source_class, "metadata-only",
+        row["explanations"][0]["service"], "fm-broadcast",
+        "[{AWARE_053}] /api/inventory serves the ranked explanations"
+    );
+}
+
+#[test]
+fn aware_053_blind_station_shifted_150_khz_keeps_fm_broadcast_flagged_off_raster() {
+    const SHIFT_HZ: f64 = 150e3;
+    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
+        return;
+    };
+    let truth = station(&fx);
+    let run = blind_replay(
+        &meta,
+        "a053o",
+        BlindSource {
+            iq_shift_hz: SHIFT_HZ,
+            ..BlindSource::default()
+        },
+    );
+    let (dets, seen) = matched(&run, &truth, SHIFT_HZ, "FM station +150 kHz");
+    assert!(
+        dets > 0,
+        "[{AWARE_053}] the shifted station was not detected"
+    );
+    assert!(
+        !seen.is_empty(),
+        "[{AWARE_053}] no emitter at the shifted station"
+    );
+    for s in &seen {
+        assert!(
+            has_fm(s),
+            "[{AWARE_053}] FM broadcast not in the top-k: {s:?}"
+        );
+    }
+    let off: Vec<&Explanation> = seen
+        .iter()
+        .flat_map(|s| &s.explanations)
+        .filter(|x| x.service == "fm-broadcast" && x.has_flag("off-raster"))
+        .collect();
+    assert!(
+        off.iter().any(|x| evidence_backed(x)),
+        "[{AWARE_053}] no evidence-backed FM broadcast explanation flagged off-raster: {off:?}"
+    );
+}
+
+#[test]
+fn aware_053_blind_off_allocation_station_is_unexpected_here_with_prior_ref() {
+    const SHIFT_HZ: f64 = 19.2e6;
+    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
+        return;
+    };
+    let truth = station(&fx);
+    let run = blind_replay(
+        &meta,
+        "a053u",
+        BlindSource {
+            relabel_hz: SHIFT_HZ,
+            ..BlindSource::default()
+        },
+    );
+    assert_eq!(
+        run.summary.source_class, "metadata-only",
         "[{AWARE_053}] 120 MHz is no unrestricted band prior"
     );
-    let station = STATION_HZ + SHIFT_HZ;
-    let mut repo = repo(&dir.0);
-    let band = FreqRange::centered(station, 200e3);
-    let dets = repo
-        .detections_in_region(&Region::new(band, ever()))
-        .unwrap();
+    let (dets, seen) = matched(&run, &truth, SHIFT_HZ, "aeronautical band");
     assert!(
-        !dets.is_empty(),
-        "[{AWARE_053}] no detection at {station} Hz"
+        dets > 0,
+        "[{AWARE_053}] the relabelled station was not detected"
     );
-    let table = table();
+    let flagged: Vec<&Seen> = seen
+        .iter()
+        .filter(|s| s.status == KnownStatus::UnexpectedHere)
+        .collect();
     assert!(
-        table
-            .overlapping_center(station, 150e3)
-            .iter()
-            .all(|r| !r.has_tag("fm-broadcast")),
-        "[{AWARE_053}] 121.1 MHz must not be an FM broadcast allocation"
+        !flagged.is_empty(),
+        "[{AWARE_053}] no emitter at the relabelled station reached `unexpected-here`"
     );
-    let pipeline = print_statuses(&repo, band, "aeronautical band");
-    assert!(
-        !pipeline.is_empty(),
-        "[{AWARE_053}] the pipeline created no emitter at {station} Hz"
-    );
-    let (eid, f, bw, seen) = pipeline[0];
-    let r = classify(&mut repo, f, bw, "fm-broadcast", seen);
-    eprintln!("[{AWARE_053}] classified sighting → {r:?}");
-    assert!(
-        pipeline.iter().any(|p| p.0 == r.emitter_id) && !r.created,
-        "[{AWARE_053}] the classification lands on the pipeline-created emitter {eid}"
-    );
-    assert_eq!(
-        r.status_appended,
-        Some(KnownStatus::UnexpectedHere),
-        "[{AWARE_053}] off-allocation broadcast FM"
-    );
-    let last = repo
-        .known_status_history(r.emitter_id)
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert_eq!(last.author, StatusAuthor::Prior);
-    let prior_ref = last
-        .prior_ref
-        .clone()
-        .unwrap_or_else(|| panic!("[{AWARE_053}] unexpected-here without a prior_ref"));
-    eprintln!(
-        "[{AWARE_053}] unexpected-here: {prior_ref} ({})",
-        last.reason
-    );
+    for s in &flagged {
+        assert_eq!(s.last.author, StatusAuthor::Prior, "[{AWARE_053}]");
+        assert_eq!(
+            s.last.prior_ref.as_deref(),
+            Some(AIRBAND_ROW),
+            "[{AWARE_053}]"
+        );
+        let top = &s.explanations[0];
+        assert_eq!(top.service, "fm-broadcast", "[{AWARE_053}] {s:?}");
+        assert!(top.has_flag("off-allocation") && evidence_backed(top));
+        assert!(
+            s.explanations.iter().any(|x| x.service == "aviation-voice"),
+            "[{AWARE_053}] the aviation allocation is a ranked alternative"
+        );
+        assert_eq!(s.family.as_deref(), Some("fm-broadcast"));
+    }
     let listed = inventory(
-        &repo,
+        &repo(&run.dir.0),
         InventoryQuery {
             status: vec![KnownStatus::UnexpectedHere],
             ..InventoryQuery::default()
         },
     );
     assert!(
-        listed.iter().any(|e| e.emitter.id == r.emitter_id),
+        flagged
+            .iter()
+            .all(|f| listed.iter().any(|e| e.emitter.id == f.id)),
         "[{AWARE_053}] query_inventory status filter"
     );
+}
+
+/// Legal guardrail (T-039): a mapped family and its explanations in the paging band set a
+/// status only.
+#[test]
+fn aware_053_blind_mapped_family_in_the_paging_band_stays_restricted_without_content() {
+    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
+        return;
+    };
+    let truth = station(&fx);
+    let shift_hz = 930.5e6 - 101.3e6;
+    let run = blind_replay(
+        &meta,
+        "a053p",
+        BlindSource {
+            relabel_hz: shift_hz,
+            ..BlindSource::default()
+        },
+    );
+    let s = &run.summary;
+    assert_eq!(
+        s.source_class, "restricted-paging",
+        "[{AWARE_053}] 930.5 MHz derives restricted-paging from frequency"
+    );
+    let (_, seen) = matched(&run, &truth, shift_hz, "paging band");
+    assert!(
+        seen.iter().any(|e| e
+            .explanations
+            .first()
+            .is_some_and(|x| x.service == "fm-broadcast" && evidence_backed(x))),
+        "[{AWARE_053}] the paging-band station must rank a mapped family for this to test anything"
+    );
+    for e in &seen {
+        assert_ne!(e.status, KnownStatus::Known, "[{AWARE_053}]");
+        let (class, why) = hk_pipeline::classify_emitter(
+            &[],
+            ContentClass::RestrictedPaging,
+            e.f_center_hz - e.bandwidth_hz / 2.0,
+            e.f_center_hz + e.bandwidth_hz / 2.0,
+        )
+        .unwrap();
+        assert_eq!(class, ContentClass::RestrictedPaging, "[{AWARE_053}] {why}");
+    }
+    assert_eq!(
+        s.counter("/chains/recordings"),
+        0,
+        "[{AWARE_053}] recording"
+    );
+    assert_eq!(s.counter("/chains/labels"), 0, "[{AWARE_053}] label");
+    assert_eq!(
+        s.counter("/chains/content_withheld"),
+        s.counter("/chains/decodes"),
+        "[{AWARE_053}] every decode withheld"
+    );
+    assert!(
+        files_with_suffix(&run.dir.0, ".sigmf-data").is_empty(),
+        "[{AWARE_053}] a SigMF recording was written"
+    );
+    for e in inventory(&repo(&run.dir.0), InventoryQuery::default()) {
+        assert!(
+            !matches!(e.identity, InventoryIdentity::Clear { .. }),
+            "[{AWARE_053}] identity in clear: {:?}",
+            e.identity
+        );
+    }
+    for row in &run.api_rows {
+        assert!(
+            row["identity_value"].is_null(),
+            "[{AWARE_053}] /api/inventory identity in clear: {row}"
+        );
+    }
 }

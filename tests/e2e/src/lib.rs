@@ -27,6 +27,7 @@
 //!   parameter tolerances, with use-case IDs in every failure message.
 
 pub mod assertions;
+pub mod blind;
 pub mod fixture;
 pub mod paths;
 pub mod pipeline;

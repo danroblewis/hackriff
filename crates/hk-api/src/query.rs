@@ -13,8 +13,8 @@
 //! `f_lo`/`f_hi` are Hz; `t0`/`t1` are Unix seconds.
 
 use hk_model::{
-    FreqRange, IdentityAccess, IdentityScheme, InventoryIdentity, InventoryQuery, KnownStatus,
-    Repository, StatusAuthor, TimeRange, Timestamp,
+    AnnotationAuthor, AnnotationTarget, FreqRange, IdentityAccess, IdentityScheme,
+    InventoryIdentity, InventoryQuery, KnownStatus, Repository, StatusAuthor, TimeRange, Timestamp,
 };
 use hk_store::history::Geometry;
 use hk_store::{
@@ -400,6 +400,7 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// (`status.reason_withheld`). Tags are gated with the identity (T-036/T-038): a withheld row
 /// lists only controlled-vocabulary labels (`hk_model::TAG_VOCABULARY`), `tags_withheld: true` when
 /// others were removed, and a `tag` filter outside the vocabulary never matches it. No decode content, fingerprint or link is included.
+/// `explanations` lists the emitter's ranked T-039 explanations (`hk_pipeline::family`), best first, or `[]`.
 pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> {
     let query = parse_inventory_query(q)?;
     let failed = |_| ApiError::new(500, "inventory query failed");
@@ -434,8 +435,21 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
                     "reason_withheld": !show,
                 })
             });
+        // T-039 ranked explanations: metadata only (service labels, scores, band-plan and raster
+        // evidence, flags; no identity or content), so withheld rows show them too.
+        let explanations = repo
+            .annotations_for(&AnnotationTarget::Emitter(e.id))
+            .map_err(failed)?
+            .into_iter()
+            .rfind(|a| {
+                a.author == AnnotationAuthor::Classifier
+                    && a.content.is_none()
+                    && a.metadata.get("explanations").is_some()
+            })
+            .map_or_else(|| json!([]), |a| a.metadata["explanations"].clone());
         let freq = e.freq();
         let mut row = json!({
+            "explanations": explanations,
             "id": e.id.to_string(),
             "f_center_hz": e.f_center_hz,
             "bandwidth_hz": e.bandwidth_hz,
