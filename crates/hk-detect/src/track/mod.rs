@@ -1,0 +1,77 @@
+//! Burst tracking (C10, T-007): links [`DetectionRecord`](crate::DetectionRecord)s into docs/07
+//! §2.10 [`Track`](hk_model::Track)s with timing features: inter-arrival statistics,
+//! periodicity (period, confidence, jitter), duty cycle, burst-length distribution, and hop sets.
+//!
+//! # Pipeline (online, in stream order)
+//!
+//! 1. **Hold.** Records are held `hold_frames` past their end, then routed in end order, so
+//!    co-timed boxes emitted a few frames apart are seen together. Impulsive records and records
+//!    shorter than `min_part_frames` (split side runs) are skipped.
+//! 2. **Continuations.** A box that starts on the frame after a max-duration split box it
+//!    overlaps in frequency (same segment) continues *that detection's* track: the burst is
+//!    extended, not restarted, so a continuous line over hours is one burst. A box at a detector
+//!    segment start continues a burst closed by the transition (`close = Transition`) when it
+//!    overlaps it in frequency and starts within `max_transition_gap_s`: a transition is a segment
+//!    boundary, not the end of the emitter. A box that continues several tracks' splits (a gap
+//!    bridge fused on the split frame) is spread back onto them by frequency overlap and linked
+//!    to the largest overlap ([`TrackEvent::Split`]).
+//! 3. **Tone-lobe aggregation.** Natural-start boxes (not at a segment start, not a split
+//!    continuation) whose starts and ends coincide within `coincidence_frames` and whose
+//!    occupied extents are within `lobe_gap_factor ×` the wider one's width merge into one burst
+//!    (2-FSK tones); a `marginal` box inside another's span merges the same way (sidelobes). Boxes at a segment start never merge: coincidence there is the
+//!    observation edge, not the emitter.
+//! 4. **Association.** Gated nearest neighbour over open tracks: centre within
+//!    `ε = max(2 bins, 10 % BW)` (or mutual containment), bandwidth ratio ≤ 2, observed idle time
+//!    ≤ the track's timeout; cost `Δf/ε + ln(ratio)/ln 2`. A burst overlapping the track's
+//!    current burst in time extends it. Otherwise a new track opens.
+//! 5. **Provenance.** Association ignores gain state; a member under a different provenance
+//!    records a [`SegmentBoundary`] (gain change, retune, other) and the track continues.
+//! 6. **Features** on each finished burst, all bounded per track: inter-arrival and burst-length
+//!    moments, a log-spaced length histogram, the latest 64 starts for the periodicity fold
+//!    ([`Periodicity`]), union on-time and observed time for the duty cycle.
+//! 7. **Hop sets.** A finished dwell whose start is within `max(2 frames, 25 % dwell)` of the end
+//!    of a dwell on another, non-overlapping channel with similar BW and dwell links the two
+//!    channel tracks; linked channels form a hop set once ≥ 3 channels have ≥ 2 links and there
+//!    are ≥ 10 hops. The hop set is an aggregate Track (its id is the hop-set id) with
+//!    `hop_set_hz`, `hop_rate_hz` and `co_occurring` = member channel tracks; members carry the
+//!    hop-set id in `co_occurring`.
+//! 8. **Lifecycle.** Tracks close after their idle timeout in *observed* time (`idle_timeout_s`,
+//!    stretched to 4 inter-arrivals, ≤ 1 h), at the live-track cap, or at [`Tracker::finish`].
+//!    Two open tracks that converge (centres within ε/2, BW ratio ≤ 1.25, no simultaneous bursts)
+//!    merge into the older one; the younger keeps its member links and becomes `MergedInto`
+//!    ([`TrackEvent::Merged`]). Events are appended; nothing is overwritten.
+//!
+//! # Duty cycle
+//!
+//! `on-time / observed time` from the first burst start to a horizon: `last start + period`
+//! for a periodic track (so a train of n bursts spans n periods), `now` for an open or
+//! end-of-stream aperiodic track (silence counts), or the last burst end for an idle-closed one.
+//! Observation gaps passed to [`Tracker::observe`] are excluded.
+//!
+//! # Persistence
+//!
+//! [`Tracker::drain_into`] fills a [`TrackBatch`] with changed Track aggregates and new
+//! track↔detection links; [`TrackBatch::write`] upserts and links through the repository.
+//! Write the detections first. docs/07's `TimingFeatures` does not yet store period confidence
+//! and jitter, the burst-length distribution, segment boundaries or the hop-set raster; they are
+//! in [`TrackSummary`] / [`HopSetSummary`] only.
+//!
+//! # Real-time path
+//!
+//! No allocation in steady state except when a track or hop set is created or closed: the
+//! per-track state is fixed-size, and the hold buffer, member ring, split ring and link buffer are
+//! preallocated (links grow only if [`Tracker::drain_into`] is not called).
+
+mod config;
+mod events;
+mod persist;
+mod stats;
+mod tracker;
+
+pub use config::{HopConfig, PeriodConfig, TrackerConfig};
+pub use events::{
+    BoundaryKind, CloseCause, Distribution, HopSetSummary, Periodicity, SegmentBoundary,
+    TrackEvent, TrackSummary,
+};
+pub use persist::TrackBatch;
+pub use tracker::{Tracker, TrackerStats};

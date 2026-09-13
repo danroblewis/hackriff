@@ -1,7 +1,7 @@
 //! hackriff detection (C09, T-006): OS-CFAR plus floor-branch detection over spectrum frames,
 //! hysteresis and minimum duration, time–frequency components, spur/ghost/image/clip flags, and
 //! immutable docs/07 §2.9 [`Detection`](hk_model::Detection) records. Design input: spike S4
-//! (REPORT §3.2–3.5, §5). Burst tracking (C10) is T-007 and consumes the event stream.
+//! (REPORT §3.2–3.5, §5). Burst tracking (C10, T-007) consumes the event stream in [`track`].
 //!
 //! # Pipeline (one [`Detector::process`] call per frame)
 //!
@@ -69,6 +69,7 @@ pub mod integrated;
 pub mod record;
 pub mod rules;
 pub mod step;
+pub mod track;
 pub mod trust;
 pub mod writer;
 
@@ -89,6 +90,9 @@ pub use record::{
 };
 pub use rules::Geometry;
 pub use step::{StepGuard, StepGuardConfig};
+pub use track::{
+    BoundaryKind, CloseCause, TrackBatch, TrackEvent, TrackSummary, Tracker, TrackerConfig,
+};
 pub use trust::{
     CaptureEmitter, CaptureResult, CaptureSide, GainState, GainStepConfig, GainStepResult,
     GainStepRow, GainStepSkip, GainStepVerdict, RetuneConfig, RetuneLabel, RetuneResult, RetuneRow,

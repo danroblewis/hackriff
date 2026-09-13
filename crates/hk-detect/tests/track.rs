@@ -1,0 +1,948 @@
+//! Burst tracking (C10, T-007) acceptance:
+//! - AWARE-036 (`fsk_burst_train`, replayed as ci8 through STFT → floor → detector → tracker):
+//!   one Track; period within 2 %, duty cycle within 0.02, burst length within 1.5 frames; tone
+//!   lobes merged.
+//! - AWARE-042 (`occupancy_multi_hour` render windows): one track per active channel whose
+//!   on-time, burst length and duty cycle match the schedule.
+//! - Hopper (10 channels on a 200 kHz raster, 50 hops/s): one hop set with those channels, the
+//!   raster and the hop rate.
+//! - Two close emitters interleaved: separate tracks. Tracks and links round-trip through the
+//!   repository.
+//! - Gain change mid-track: same tracks, a `GainChange` segment recorded, the carrier stays one
+//!   burst across the transition and its max-duration splits.
+//! - Record-level: a converging fragment merges (recorded, not overwritten); a split-frame fused
+//!   box is spread back onto its two tracks.
+//! - Real 915 MHz FHSS fixture: whether the bursts form a hop set on the 200 kHz raster (report).
+//!
+//! The continuous-carrier-over-hours bounded-memory test lives in `track_no_alloc.rs`.
+
+mod common;
+
+use common::*;
+use hk_core::{BlockHeader, Discontinuity, ProvenanceHandle};
+use hk_detect::track::HopSetSummary;
+use hk_detect::{
+    BandProfile, BoundaryKind, Candidate, ClipCount, CloseReason, DetectionProfile,
+    DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, TrackBatch,
+    TrackEvent, TrackSummary, Tracker, TrackerConfig, count_clipped_ci8,
+};
+use hk_dsp::floor::NoiseFloorTracker;
+use hk_dsp::window::WindowKind;
+use hk_dsp::{InputInfo, StftConfig, StftProcessor, WelchConfig};
+use hk_e2e::{Fixture, SynthRequest, synth_or_skip};
+use hk_model::{
+    Detection, DetectionFlags, DetectionId, FreqRange, GainTableEntry, PlanRegion, Repository,
+    SampleTime, ScanPlan, ScanPlanId, ScanPolicy, Schedule, Survey, SurveyId, SurveyState,
+    TimeRange, Timestamp, TrackState,
+};
+use num_complex::Complex;
+
+const AWARE_036: &[&str] = &["AWARE-036"];
+const AWARE_042: &[&str] = &["AWARE-042"];
+
+// ---- drivers ----
+
+#[derive(Default)]
+struct Out {
+    records: Vec<DetectionRecord>,
+    events: Vec<TrackEvent>,
+}
+
+impl Out {
+    fn closed(&self) -> Vec<&TrackSummary> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                TrackEvent::Closed(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn hop_sets_closed(&self) -> Vec<&HopSetSummary> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                TrackEvent::HopSetClosed(h) => Some(h),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn describe(&self, s: &TrackSummary) -> String {
+        format!(
+            "track {:.4} MHz bw {:.1} kHz dets {} bursts {} on {:.3} s obs {:.3} s duty {:?} period {:?} len {:?} segs {} hop {:?}",
+            s.track.f_center_hz / 1e6,
+            s.track.bandwidth_hz / 1e3,
+            s.track.detection_count,
+            s.burst_count,
+            s.on_time_s,
+            s.observed_s,
+            s.track.timing.duty_cycle,
+            s.period,
+            s.burst_length.map(|d| (d.mean_s, d.min_s, d.max_s)),
+            s.segments,
+            s.hop_set,
+        )
+    }
+}
+
+/// One Gamma-frame step: detector, then the tracker takes the frame's events and observes it.
+fn step(s: &mut Scene, tr: &mut Tracker, out: &mut Out, profile: &[f32], flags: Discontinuity) {
+    s.step_with(profile, flags, ClipCount::NONE, false);
+    forward(s, tr, out);
+    tr.observe_frame(&s.det, &s.frame, &mut |e| out.events.push(e));
+}
+
+fn forward(s: &mut Scene, tr: &mut Tracker, out: &mut Out) {
+    for r in s.out.detections.drain(..) {
+        tr.push_detection(&r, &mut |e| out.events.push(e));
+        out.records.push(r);
+    }
+    for c in s.out.confirmations.drain(..) {
+        tr.confirm(&c);
+    }
+    s.out.evaluations.clear();
+}
+
+fn finish(s: &mut Scene, tr: &mut Tracker, out: &mut Out) {
+    s.finish();
+    forward(s, tr, out);
+    tr.finish(&mut |e| out.events.push(e));
+}
+
+/// ci8 IQ → STFT → floor tracker → detector → tracker (one capture).
+fn replay_tracked(
+    samples: &[Complex<i8>],
+    fs: f64,
+    prov: ProvenanceHandle,
+    chain: &ChainConfig,
+    det: &mut Detector,
+    tr: &mut Tracker,
+) -> Out {
+    let welch = WelchConfig {
+        fft_len: chain.fft_len,
+        overlap: 0,
+        window: WindowKind::Hann,
+        holds: false,
+        spectral_kurtosis: true,
+    };
+    let mut stft = StftProcessor::new(StftConfig::new(welch, chain.averages)).expect("stft");
+    let mut floor = NoiseFloorTracker::new(chain.floor).expect("floor");
+    let mut out = Out::default();
+    let n = samples.len() as u64;
+    let mut s = 0u64;
+    while s < n {
+        let e = (s + 65_536).min(n);
+        let header = BlockHeader {
+            time: SampleTime {
+                sample_index: s,
+                host_time: Timestamp::from_unix_nanos((s as f64 * 1e9 / fs).round() as i64),
+            },
+            provenance: prov.clone(),
+            discontinuity: if s == 0 {
+                Discontinuity::STREAM_START
+            } else {
+                Discontinuity::NONE
+            },
+            dropped_before: 0,
+        };
+        stft.push(
+            InputInfo::from(&header),
+            &samples[s as usize..e as usize],
+            |frame| {
+                let f = floor.update(frame, |_| {});
+                let a = frame.t.sample_index as usize;
+                let b = (a + frame.sample_count as usize).min(samples.len());
+                let clip = ClipCount::new(count_clipped_ci8(&samples[a..b]), (b - a) as u64);
+                det.process(frame, f, clip, &mut |ev| {
+                    tr.push(&ev, &mut |te| out.events.push(te));
+                    if let DetectorEvent::Detection(r) = ev {
+                        out.records.push(r);
+                    }
+                });
+                tr.observe_frame(det, frame, &mut |te| out.events.push(te));
+            },
+        );
+        s = e;
+    }
+    det.finish(&mut |ev| {
+        tr.push(&ev, &mut |te| out.events.push(te));
+        if let DetectorEvent::Detection(r) = ev {
+            out.records.push(r);
+        }
+    });
+    tr.finish(&mut |te| out.events.push(te));
+    out
+}
+
+// ---- AWARE-036 ----
+
+#[test]
+fn aware_036_fsk_burst_train_one_track_with_period_duty_and_burst_length() {
+    let synth = synth_or_skip!(
+        SynthRequest::new("fsk_burst_train")
+            .seed(1)
+            .param("snr_db", 20.0)
+            .param("duration_s", 3.0)
+    );
+    let fx = synth.fixture(0).unwrap();
+    let iq = to_ci8(&fx.samples().unwrap());
+    // 256×4 (2 ms frames) for the duty/length tolerances; 512×5 (1 kHz bins) resolves the two
+    // tones and sidelobes as separate boxes, which must merge into one burst each.
+    for (fft_len, averages, lobes) in [(256, 4, false), (512, 5, true)] {
+        aware_036_run(&fx, &iq, ChainConfig::new(fft_len, averages), lobes);
+    }
+}
+
+fn aware_036_run(fx: &Fixture, iq: &[Complex<i8>], chain: ChainConfig, lobes: bool) {
+    let fs = fx.sample_rate;
+    let frame_s = chain.frame_period_s(fs);
+    let mut det = Detector::new(DetectorConfig::new(SurveyId::new())).unwrap();
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let out = replay_tracked(iq, fs, fixture_provenance(fx), &chain, &mut det, &mut tr);
+    let bursts = fx.of_kind("fsk-burst");
+    let t0 = bursts[0];
+    let (f_lo, f_hi) = (t0.f_lo_hz, t0.f_hi_hz);
+    let truth_len =
+        bursts.iter().map(|b| b.t_end_s - b.t_start_s).sum::<f64>() / bursts.len() as f64;
+    let truth_period = 0.12;
+    let closed = out.closed();
+    for s in &closed {
+        eprintln!("AWARE-036 {}", out.describe(s));
+    }
+    eprintln!(
+        "AWARE-036 {}x{}: {} bursts, {} records, stats {:?}",
+        chain.fft_len,
+        chain.averages,
+        bursts.len(),
+        out.records.len(),
+        tr.stats()
+    );
+    let near: Vec<_> = closed
+        .iter()
+        .filter(|s| s.track.f_center_hz >= f_lo - 20e3 && s.track.f_center_hz <= f_hi + 20e3)
+        .collect();
+    assert_eq!(near.len(), 1, "{AWARE_036:?} tracks near the emitter");
+    let t = near[0];
+    assert_eq!(
+        closed.len(),
+        1,
+        "{AWARE_036:?} no other tracks (no false alarms)"
+    );
+    assert_eq!(t.burst_count as usize, bursts.len(), "{AWARE_036:?} bursts");
+    if lobes {
+        assert!(
+            tr.stats().lobe_parts > 0 && t.track.detection_count > t.burst_count,
+            "{AWARE_036:?} tone-lobe boxes merged into bursts"
+        );
+    }
+    assert_eq!(
+        t.track.detection_count as usize,
+        out.records
+            .iter()
+            .filter(|r| r.f_hi_hz >= f_lo - 20e3 && r.f_lo_hz <= f_hi + 20e3)
+            .count(),
+        "{AWARE_036:?} every emitter detection links to the one track"
+    );
+    let p = t.period.expect("period");
+    assert!(
+        (p.period_s - truth_period).abs() / truth_period <= 0.02,
+        "{AWARE_036:?} period {p:?}"
+    );
+    assert_eq!(t.track.timing.period_s, Some(p.period_s));
+    let duty = t.track.timing.duty_cycle.unwrap();
+    let truth_duty = truth_len / truth_period;
+    let len = t.burst_length.unwrap();
+    eprintln!(
+        "AWARE-036 {}x{}: duty {duty:.4} vs {truth_duty:.4}; length {:.4} vs {truth_len:.4} s",
+        chain.fft_len, chain.averages, len.mean_s
+    );
+    // Duty and length are frame-quantised: asserted at the 2 ms geometry.
+    if !lobes {
+        assert!(
+            (duty - truth_duty).abs() <= 0.02,
+            "{AWARE_036:?} duty {duty:.4} vs {truth_duty:.4}"
+        );
+    }
+    assert!(
+        (len.mean_s - truth_len).abs() <= 1.5 * frame_s,
+        "{AWARE_036:?} burst length {len:?} vs {truth_len:.4} s (frame {frame_s:.4} s)"
+    );
+    assert!(t.next_burst_eta.is_some() && t.hop_set.is_none());
+}
+
+// ---- AWARE-042 ----
+
+#[test]
+fn aware_042_occupancy_windows_per_channel_tracks_match_the_schedule() {
+    let synth = synth_or_skip!(
+        SynthRequest::new("occupancy_multi_hour")
+            .seed(5)
+            .param("windows", 6)
+    );
+    let schedule = synth.file_json("schedule.json").unwrap();
+    let channels: Vec<f64> = schedule["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["center_hz"].as_f64().unwrap())
+        .collect();
+    let spacing = channels[1] - channels[0];
+    let chain = ChainConfig::new(128, 10);
+    let mut checked = 0;
+    for fx in synth.fixtures().unwrap() {
+        let fs = fx.sample_rate;
+        let frame_s = chain.frame_period_s(fs);
+        let iq = to_ci8(&fx.samples().unwrap());
+        let window_s = iq.len() as f64 / fs;
+        let mut det = Detector::new(DetectorConfig::new(SurveyId::new())).unwrap();
+        let mut tr = Tracker::new(TrackerConfig::default());
+        let out = replay_tracked(&iq, fs, fixture_provenance(&fx), &chain, &mut det, &mut tr);
+        let truth = fx.of_kind("nbfm-burst");
+        let name = fx
+            .meta_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let closed = out.closed();
+        for (c, &ch) in channels.iter().enumerate() {
+            let visible: Vec<_> = truth
+                .iter()
+                .filter(|t| t.f64("channel").map(|x| x as usize) == Some(c))
+                .filter(|t| t.t_end_s.min(window_s) - t.t_start_s.max(0.0) >= 4.0 * frame_s)
+                .collect();
+            let tracks: Vec<_> = closed
+                .iter()
+                .filter(|s| (s.track.f_center_hz - ch).abs() <= spacing / 2.0)
+                .collect();
+            for s in &tracks {
+                eprintln!("AWARE-042 {name} ch{c}: {}", out.describe(s));
+            }
+            if visible.is_empty() {
+                assert!(
+                    tracks.len() <= 1,
+                    "{AWARE_042:?} {name} ch{c}: stray tracks"
+                );
+                continue;
+            }
+            assert_eq!(tracks.len(), 1, "{AWARE_042:?} {name} ch{c}: one track");
+            let t = tracks[0];
+            let on: f64 = visible
+                .iter()
+                .map(|v| v.t_end_s.min(window_s) - v.t_start_s.max(0.0))
+                .sum();
+            let first = visible
+                .iter()
+                .map(|v| v.t_start_s.max(0.0))
+                .fold(f64::INFINITY, f64::min);
+            let longest = visible
+                .iter()
+                .map(|v| v.t_end_s.min(window_s) - v.t_start_s.max(0.0))
+                .fold(0.0, f64::max);
+            assert!(
+                (t.on_time_s - on).abs() <= 3.0 * frame_s,
+                "{AWARE_042:?} {name} ch{c}: on-time {:.4} vs {on:.4}",
+                t.on_time_s
+            );
+            let len = t.burst_length.unwrap();
+            assert!(
+                (len.max_s - longest).abs() <= 3.0 * frame_s,
+                "{AWARE_042:?} {name} ch{c}: burst length {len:?} vs {longest:.4}"
+            );
+            let span = window_s - first;
+            if span >= 20.0 * frame_s {
+                let truth_duty = on / span;
+                let duty = t.track.timing.duty_cycle.unwrap();
+                assert!(
+                    (duty - truth_duty).abs() <= 0.05,
+                    "{AWARE_042:?} {name} ch{c}: duty {duty:.3} vs {truth_duty:.3}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no active channels in the rendered windows");
+}
+
+// ---- hopper ----
+
+#[test]
+fn hopper_ten_channels_fifty_hops_per_second_forms_one_hop_set() {
+    let fc = 915e6;
+    let mut s = Scene::new(
+        DetectorConfig::new(SurveyId::new()),
+        GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 24.0), 7),
+    );
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut out = Out::default();
+    let raster = 200e3;
+    let chans: Vec<f64> = (0..10).map(|k| fc - 1.0e6 + k as f64 * raster).collect();
+    let profiles: Vec<Vec<f32>> = chans
+        .iter()
+        .map(|&f| {
+            let mut p = flat(BINS);
+            add_line(&mut p, s.bin_of(f).round() as usize, 10, 15.0);
+            p
+        })
+        .collect();
+    let frame_s = s.src.frame_period_s();
+    let dwell = 0.02;
+    let mut rng = Rng(11);
+    let mut seq = vec![0usize];
+    let frames = (3.0 / frame_s) as usize;
+    for i in 0..frames {
+        let hop = ((i as f64 + 0.5) * frame_s / dwell) as usize;
+        while seq.len() <= hop {
+            let prev = *seq.last().unwrap();
+            seq.push((prev + 1 + (rng.next_u64() % 9) as usize) % 10);
+        }
+        step(
+            &mut s,
+            &mut tr,
+            &mut out,
+            &profiles[seq[hop]],
+            Discontinuity::NONE,
+        );
+    }
+    finish(&mut s, &mut tr, &mut out);
+    let sets = out.hop_sets_closed();
+    eprintln!("hopper: stats {:?}", tr.stats());
+    for h in &sets {
+        eprintln!("hopper: {h:?}");
+    }
+    assert_eq!(sets.len(), 1, "one hop set");
+    let h = sets[0];
+    assert_eq!(h.channels_hz.len(), 10, "channels {:?}", h.channels_hz);
+    let bin = FS / BINS as f64;
+    for (got, want) in h.channels_hz.iter().zip(&chans) {
+        assert!((got - want).abs() <= 1.5 * bin, "{got} vs {want}");
+    }
+    let rate = h.hop_rate_hz.unwrap();
+    assert!((rate - 50.0).abs() / 50.0 <= 0.05, "hop rate {rate}");
+    let r = h.raster_hz.unwrap();
+    assert!((r - raster).abs() / raster <= 0.01, "raster {r}");
+    let dw = h.dwell_s.unwrap();
+    assert!((dw - dwell).abs() <= 2.0 * frame_s, "dwell {dw}");
+    let closed = out.closed();
+    assert_eq!(closed.len(), 10, "one track per channel");
+    assert!(
+        closed
+            .iter()
+            .all(|t| t.hop_set == Some(h.id) && t.track.timing.co_occurring == vec![h.id])
+    );
+    let mut members = h.members.clone();
+    members.sort();
+    let mut ids: Vec<_> = closed.iter().map(|t| t.track.id).collect();
+    ids.sort();
+    assert_eq!(members, ids);
+    let linked: u64 = closed.iter().map(|t| t.track.detection_count).sum();
+    assert_eq!(
+        linked as usize,
+        out.records.len(),
+        "every dwell linked once"
+    );
+}
+
+// ---- two close emitters ----
+
+fn test_repo() -> (Repository, SurveyId) {
+    let mut repo = Repository::open_in_memory().unwrap();
+    let plan = ScanPlan {
+        id: ScanPlanId::new(),
+        version: 1,
+        name: "t-007".into(),
+        created_at: Timestamp::UNIX_EPOCH,
+        regions: vec![PlanRegion {
+            freq: FreqRange::new(900e6, 930e6),
+            priority: 1.0,
+            revisit_ns: None,
+        }],
+        policy: ScanPolicy::SweepThenDwell,
+        gain_table: vec![GainTableEntry {
+            freq: FreqRange::new(1e6, 6e9),
+            lna_db: 24.0,
+            vga_db: 20.0,
+            amp_on: false,
+            antenna_port: None,
+        }],
+        schedule: Schedule::Cron {
+            expr: "0 * * * *".into(),
+        },
+        extra: serde_json::json!({}),
+    };
+    let survey = Survey {
+        id: SurveyId::new(),
+        plan_id: plan.id,
+        plan_version: 1,
+        device_id: "synthetic:hk-detect-test".into(),
+        state: SurveyState::Open,
+        t_start: Timestamp::UNIX_EPOCH,
+        t_end: None,
+        summary: None,
+    };
+    repo.insert_scan_plan(&plan).unwrap();
+    repo.insert_survey(&survey).unwrap();
+    (repo, survey.id)
+}
+
+#[test]
+fn two_close_interleaved_emitters_stay_separate_and_persist() {
+    let (mut repo, survey) = test_repo();
+    let fc = 915e6;
+    let mut s = Scene::new(
+        DetectorConfig::new(survey),
+        GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 24.0), 21),
+    );
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut out = Out::default();
+    let (f1, f2) = (fc + 1.0e6, fc + 1.025e6);
+    let mut p1 = flat(BINS);
+    add_line(&mut p1, s.bin_of(f1).round() as usize, 3, 15.0);
+    let mut p2 = flat(BINS);
+    add_line(&mut p2, s.bin_of(f2).round() as usize, 3, 15.0);
+    let quiet = flat(BINS);
+    let frame_s = s.src.frame_period_s();
+    let mut writer = DetectionWriter::new(64);
+    let mut batch = TrackBatch::new();
+    for i in 0..(3.0 / frame_s) as usize {
+        let t = (i as f64 + 0.5) * frame_s;
+        let ph = t % 0.1;
+        let prof = if ph < 0.02 {
+            &p1
+        } else if (0.05..0.07).contains(&ph) {
+            &p2
+        } else {
+            &quiet
+        };
+        let before = out.records.len();
+        step(&mut s, &mut tr, &mut out, prof, Discontinuity::NONE);
+        for r in &out.records[before..] {
+            writer.push(&mut repo, r).unwrap();
+        }
+        if i % 200 == 0 {
+            writer.flush(&mut repo).unwrap();
+            tr.drain_into(&mut batch);
+            batch.write(&mut repo).unwrap();
+        }
+    }
+    let before = out.records.len();
+    finish(&mut s, &mut tr, &mut out);
+    for r in &out.records[before..] {
+        writer.push(&mut repo, r).unwrap();
+    }
+    writer.flush(&mut repo).unwrap();
+    tr.drain_into(&mut batch);
+    batch.write(&mut repo).unwrap();
+
+    let closed = out.closed();
+    for t in &closed {
+        eprintln!("two emitters: {}", out.describe(t));
+    }
+    assert_eq!(closed.len(), 2, "two tracks");
+    for (f, t) in [f1, f2].iter().zip({
+        let mut c = closed.clone();
+        c.sort_by(|a, b| a.track.f_center_hz.total_cmp(&b.track.f_center_hz));
+        c
+    }) {
+        assert!((t.track.f_center_hz - f).abs() <= FS / BINS as f64);
+        assert!((28..=31).contains(&t.burst_count), "{}", t.burst_count);
+        let p = t.period.unwrap();
+        assert!((p.period_s - 0.1).abs() / 0.1 <= 0.02, "{p:?}");
+        assert!(t.hop_set.is_none());
+        // Repository: the aggregate and its ordered member links.
+        let stored = repo.track(t.track.id).unwrap();
+        assert_eq!(
+            (stored.id, stored.state, stored.time, stored.detection_count),
+            (
+                t.track.id,
+                TrackState::Closed,
+                t.track.time,
+                t.track.detection_count
+            )
+        );
+        assert!((stored.f_center_hz - t.track.f_center_hz).abs() < 1e-3);
+        let (ps, pt) = (
+            stored.timing.period_s.unwrap(),
+            t.track.timing.period_s.unwrap(),
+        );
+        assert!((ps - pt).abs() < 1e-12);
+        assert!(
+            (stored.timing.duty_cycle.unwrap() - t.track.timing.duty_cycle.unwrap()).abs() < 1e-12
+        );
+        let members = repo.track_detections(t.track.id).unwrap();
+        assert_eq!(members.len() as u64, t.track.detection_count);
+        let starts: Vec<Timestamp> = members
+            .iter()
+            .map(|d| repo.detection(*d).unwrap().time.start)
+            .collect();
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]));
+        for d in &members {
+            let r = out.records.iter().find(|r| r.detection.id == *d).unwrap();
+            assert!((r.detection.f_center_hz - f).abs() <= 2.0 * FS / BINS as f64);
+        }
+    }
+    assert_eq!(tr.stats().hop_links, 0);
+}
+
+// ---- gain change ----
+
+#[test]
+fn gain_change_mid_track_keeps_the_track_and_records_a_segment() {
+    let fc = 433.92e6;
+    let mut cfg = DetectorConfig::new(SurveyId::new());
+    cfg.max_duration_s = 0.5;
+    let mut s = Scene::new(
+        cfg,
+        GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 16.0), 5),
+    );
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut out = Out::default();
+    let (fb, fcar) = (fc + 2.0e6, fc - 1.0e6);
+    let mut carrier = flat(BINS);
+    add_line(&mut carrier, s.bin_of(fcar).round() as usize, 3, 20.0);
+    let mut burst = carrier.clone();
+    add_line(&mut burst, s.bin_of(fb).round() as usize, 6, 15.0);
+    let frame_s = s.src.frame_period_s();
+    let n = (4.0 / frame_s) as usize;
+    for i in 0..n {
+        let flags = if i == n / 2 {
+            s.switch(provenance(fc, FS, 32.0));
+            Discontinuity::GAIN_CHANGE
+        } else {
+            Discontinuity::NONE
+        };
+        let t = (i as f64 + 0.5) * frame_s;
+        // The switch lands mid-burst (t ≈ 2.0 s is inside [2.0, 2.02)).
+        let prof = if (t + 0.09) % 0.1 < 0.02 {
+            &burst
+        } else {
+            &carrier
+        };
+        step(&mut s, &mut tr, &mut out, prof, flags);
+    }
+    finish(&mut s, &mut tr, &mut out);
+    let closed = out.closed();
+    for t in &closed {
+        eprintln!("gain change: {}", out.describe(t));
+    }
+    eprintln!("gain change: stats {:?}", tr.stats());
+    assert_eq!(closed.len(), 2, "same two tracks across the gain change");
+    let car = closed
+        .iter()
+        .find(|t| (t.track.f_center_hz - fcar).abs() < 20e3)
+        .unwrap();
+    let bur = closed
+        .iter()
+        .find(|t| (t.track.f_center_hz - fb).abs() < 20e3)
+        .unwrap();
+    assert_eq!(
+        car.burst_count, 1,
+        "carrier: one burst across splits and the transition"
+    );
+    assert!(car.on_time_s >= 4.0 - 6.0 * frame_s, "{}", car.on_time_s);
+    assert!(car.segments >= 1 && bur.segments >= 1);
+    assert!((39..=41).contains(&bur.burst_count), "{}", bur.burst_count);
+    let p = bur.period.unwrap();
+    assert!((p.period_s - 0.1).abs() / 0.1 <= 0.02, "{p:?}");
+    let seg_events: Vec<_> = out
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Segment(b) => Some(b),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        seg_events
+            .iter()
+            .any(|b| b.track == car.track.id && b.kind == BoundaryKind::GainChange)
+    );
+    assert!(
+        seg_events
+            .iter()
+            .any(|b| b.track == bur.track.id && b.kind == BoundaryKind::GainChange)
+    );
+    assert!(tr.stats().split_continuations >= 6 && tr.stats().transition_continuations >= 1);
+    assert!(
+        out.records
+            .iter()
+            .any(|r| r.close == CloseReason::Transition),
+        "the gain change closed boxes"
+    );
+}
+
+// ---- record-level: merge and fused split ----
+
+fn rec(
+    prov: &ProvenanceHandle,
+    frame0: u64,
+    frames: u64,
+    fc: f64,
+    obw: f64,
+    close: CloseReason,
+    continues: bool,
+) -> DetectionRecord {
+    const FRAME_NS: i64 = 10_000_000;
+    const SPF: u64 = 1000;
+    let bin = 5e3;
+    let nb = (obw / bin).ceil().max(1.0) as usize;
+    let lo = fc - nb as f64 * bin / 2.0;
+    let t0 = frame0 as i64 * FRAME_NS;
+    let t1 = (frame0 + frames) as i64 * FRAME_NS;
+    DetectionRecord {
+        detection: Detection {
+            id: DetectionId::new(),
+            survey_id: SurveyId::new(),
+            time: TimeRange::new(
+                Timestamp::from_unix_nanos(t0),
+                Timestamp::from_unix_nanos(t1),
+            ),
+            f_center_hz: fc,
+            obw_hz: obw,
+            xdb_bandwidth_hz: None,
+            xdb_level_db: None,
+            snr_peak_db: 20.0,
+            snr_mean_db: 15.0,
+            peak_level_dbfs: -40.0,
+            peak_level_dbm: None,
+            sk: None,
+            clip_count: 0,
+            detector_version: "test".into(),
+            provenance_ref: prov.id(),
+            flags: DetectionFlags::default(),
+        },
+        provenance: prov.clone(),
+        segment: 1,
+        bins: 1000..1000 + nb,
+        f_lo_hz: lo,
+        f_hi_hz: lo + nb as f64 * bin,
+        frames: frame0..frame0 + frames,
+        samples: frame0 * SPF..(frame0 + frames) * SPF,
+        pixels: nb as u64 * frames,
+        close,
+        continues,
+        candidate: Candidate::Unconfirmed,
+        image: None,
+        spur_harmonic_hz: None,
+        merged_boxes: 1,
+        inconclusive: false,
+    }
+}
+
+#[test]
+fn converging_fragment_merges_into_the_older_track() {
+    let prov = provenance(915e6, FS, 24.0);
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut ev = Vec::new();
+    let f0 = 915.5e6;
+    for k in 0..80u64 {
+        // A: steady at f0, bursts at 0, 100, 200 ms …
+        tr.push_detection(
+            &rec(&prov, 10 * k, 2, f0, 20e3, CloseReason::Ended, false),
+            &mut |e| ev.push(e),
+        );
+        // B: opens 12 kHz away (outside ε = 10 kHz) and drifts slowly onto f0 (0.25 kHz per
+        // burst, slow enough for its centre estimate to follow), interleaved at +50 ms.
+        let fb = f0 + (12e3 - 0.25e3 * k as f64).max(0.0);
+        tr.push_detection(
+            &rec(&prov, 10 * k + 5, 2, fb, 20e3, CloseReason::Ended, false),
+            &mut |e| ev.push(e),
+        );
+    }
+    let mut batch = TrackBatch::new();
+    tr.drain_into(&mut batch);
+    tr.finish(&mut |e| ev.push(e));
+    let merged: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Merged { from, into, .. } => Some((*from, *into)),
+            _ => None,
+        })
+        .collect();
+    let opened: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Opened { track, .. } => Some(*track),
+            _ => None,
+        })
+        .collect();
+    eprintln!(
+        "merge: opened {} merged {merged:?} stats {:?}",
+        opened.len(),
+        tr.stats()
+    );
+    assert_eq!(opened.len(), 2);
+    assert_eq!(
+        merged,
+        vec![(opened[1], opened[0])],
+        "younger merges into older"
+    );
+    assert!(
+        batch
+            .upserts
+            .iter()
+            .any(|t| t.id == opened[1] && t.state == TrackState::MergedInto(opened[0])),
+        "the merge is recorded on the absorbed track"
+    );
+    let closed: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Closed(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].track.id, opened[0]);
+    assert_eq!(closed[0].burst_count, 160);
+}
+
+#[test]
+fn fused_split_box_is_spread_back_onto_both_tracks() {
+    let prov = provenance(915e6, FS, 24.0);
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut ev = Vec::new();
+    let (f1, f2) = (915.2e6, 915.23e6);
+    let push = |tr: &mut Tracker, ev: &mut Vec<TrackEvent>, r: DetectionRecord| {
+        tr.push_detection(&r, &mut |e| ev.push(e));
+    };
+    let md = CloseReason::MaxDuration;
+    push(&mut tr, &mut ev, rec(&prov, 0, 100, f1, 10e3, md, true));
+    // (Staggered key-up: boxes starting in the same frame would be tone lobes of one burst.)
+    push(&mut tr, &mut ev, rec(&prov, 10, 90, f2, 10e3, md, true));
+    // A bridge on the split frame fuses the two continuations into one wide box.
+    push(
+        &mut tr,
+        &mut ev,
+        rec(&prov, 100, 100, 0.5 * (f1 + f2), 45e3, md, true),
+    );
+    push(
+        &mut tr,
+        &mut ev,
+        rec(&prov, 200, 100, f1, 10e3, CloseReason::Ended, false),
+    );
+    push(
+        &mut tr,
+        &mut ev,
+        rec(&prov, 200, 100, f2, 10e3, CloseReason::Ended, false),
+    );
+    // A 1-frame side run at the split skips min duration: dropped.
+    push(
+        &mut tr,
+        &mut ev,
+        rec(&prov, 150, 1, 915.6e6, 5e3, CloseReason::Ended, false),
+    );
+    tr.finish(&mut |e| ev.push(e));
+    let closed: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Closed(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    eprintln!("fused: stats {:?}", tr.stats());
+    assert_eq!(closed.len(), 2);
+    assert!(ev.iter().any(|e| matches!(e, TrackEvent::Split { .. })));
+    assert_eq!(tr.stats().fused_spread, 1);
+    assert_eq!(tr.stats().short_skipped, 1);
+    let dets: u64 = closed.iter().map(|s| s.track.detection_count).sum();
+    assert_eq!(dets, 5, "each detection links to one track");
+    for s in &closed {
+        assert_eq!(s.burst_count, 1, "{s:?}");
+        let want = if (s.track.f_center_hz - f1).abs() < 5e3 {
+            3.0
+        } else {
+            2.9
+        };
+        assert!((s.on_time_s - want).abs() < 1e-6, "{}", s.on_time_s);
+    }
+}
+
+// ---- real 915 MHz fixture (report only) ----
+
+fn load_main_checkout_fixture(name: &str) -> Option<(Fixture, Vec<Complex<i8>>)> {
+    let local = hackrf_fixture(name);
+    let data = local.with_extension("sigmf-data");
+    let is_pointer = std::fs::read(&data)
+        .map(|b| b.starts_with(b"version https://git-lfs"))
+        .unwrap_or(true);
+    let meta = if is_pointer {
+        // A worktree without LFS data: read the main checkout's copy.
+        let root = hk_e2e::paths::repo_root();
+        let git = std::fs::read_to_string(root.join(".git")).ok()?;
+        let gitdir = git.strip_prefix("gitdir:")?.trim();
+        let main = std::path::Path::new(gitdir)
+            .ancestors()
+            .nth(3)?
+            .to_path_buf();
+        main.join(local.strip_prefix(&root).ok()?)
+    } else {
+        local
+    };
+    let fx = Fixture::load(&meta).ok()?;
+    let bytes = std::fs::read(fx.data_path()).ok()?;
+    if bytes.starts_with(b"version https://git-lfs") {
+        eprintln!("SKIP {name}: fixture data is not fetched");
+        return None;
+    }
+    let iq = bytes
+        .chunks_exact(2)
+        .map(|c| Complex::new(c[0] as i8, c[1] as i8))
+        .collect();
+    Some((fx, iq))
+}
+
+#[test]
+fn report_915_fhss_bursts_hop_set_on_200_khz_raster() {
+    let name = "ism_915M_10M_l24g30a1_t42p3_1p2s";
+    let Some((fx, iq)) = load_main_checkout_fixture(name) else {
+        eprintln!("SKIP {name}");
+        return;
+    };
+    let mut cfg = DetectorConfig::new(SurveyId::new());
+    cfg.band_profiles.push(BandProfile {
+        freq: FreqRange::new(902e6, 928e6),
+        profile: DetectionProfile::short_burst(),
+    });
+    let mut det = Detector::new(cfg).unwrap();
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let chain = ChainConfig::new(1024, 4);
+    let out = replay_tracked(
+        &iq,
+        fx.sample_rate,
+        fixture_provenance(&fx),
+        &chain,
+        &mut det,
+        &mut tr,
+    );
+    let closed = out.closed();
+    let hop_sets = out.hop_sets_closed();
+    eprintln!(
+        "915 report: {} records, {} tracks, {} hop sets, stats {:?}",
+        out.records.len(),
+        closed.len(),
+        hop_sets.len(),
+        tr.stats()
+    );
+    let mut on_raster = 0;
+    for s in &closed {
+        let off = (s.track.f_center_hz - 915e6).rem_euclid(200e3);
+        let resid = off.min(200e3 - off);
+        on_raster += usize::from(resid <= 25e3);
+        eprintln!(
+            "915 report: {} raster residual {:.1} kHz",
+            out.describe(s),
+            resid / 1e3
+        );
+    }
+    for h in &hop_sets {
+        eprintln!("915 report: hop set {h:?}");
+    }
+    eprintln!(
+        "915 report: {on_raster}/{} tracks within 25 kHz of the 200 kHz raster; hop links {}; hop set formed: {}",
+        closed.len(),
+        tr.stats().hop_links,
+        !hop_sets.is_empty()
+    );
+}
