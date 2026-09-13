@@ -273,7 +273,7 @@ tasks:
     title: known-signal-priors — band-plan table + lookup
     status: done
     commit: "1b10130 (merged)"
-    followup: "15 of 40 band-plan rows marked unverified (amateur sub-bands, 23 cm, 70 cm, 433 Part 15) - verify against FCC table before relying on them for unexpected-here alarms"
+    followup: "done 1ca400e: all 11 unverified rows checked vs 47 CFR 97.301/2.106 footnotes; 4 primary/secondary corrections (30 m, 70 cm, 23 cm, 433 Part 15 slice now shared federal, radiolocation primary)"
     deps: [T-002]
     parallel_group: H
     use_cases: [AWARE-053]
