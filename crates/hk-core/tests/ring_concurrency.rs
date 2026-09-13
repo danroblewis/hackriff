@@ -98,11 +98,13 @@ fn readers_attach_and_detach_while_writer_runs_without_stall() {
                 assert_eq!(reader.samples_read(), got);
                 if cycle % 10 == 0 {
                     if let Some(next) = ring.next_sample().filter(|&n| n >= 20_000) {
-                        let mut cap = ring.pre_trigger(TriggerWindow {
-                            trigger_sample: next,
-                            pre_samples: 20_000,
-                            post_samples: 8192,
-                        });
+                        let mut cap = ring
+                            .pre_trigger(TriggerWindow {
+                                trigger_sample: next,
+                                pre_samples: 20_000,
+                                post_samples: 8192,
+                            })
+                            .unwrap();
                         cap.wait(Duration::from_secs(2));
                         let got = cap.finish();
                         assert!(
@@ -178,10 +180,12 @@ fn lapped_reader_accounting_is_exact_under_a_running_writer() {
                 thread::sleep(Duration::from_micros(50));
             }
             ReadOutcome::Overrun {
-                dropped_samples,
+                lost_samples,
+                gap_samples,
                 resume_at,
             } => {
-                assert_eq!(resume_at - dropped_samples, expect);
+                assert_eq!(gap_samples, 0, "the writer made no gaps");
+                assert_eq!(resume_at - lost_samples, expect);
                 expect = resume_at;
             }
             ReadOutcome::Closed => break,
@@ -190,10 +194,7 @@ fn lapped_reader_accounting_is_exact_under_a_running_writer() {
     }
     writer_thread.join().unwrap();
     assert_eq!(expect, 2000 * 1024);
-    assert_eq!(
-        reader.samples_read() + reader.dropped_samples(),
-        2000 * 1024
-    );
+    assert_eq!(reader.samples_read() + reader.lost_samples(), 2000 * 1024);
     assert!(
         reader.overruns() > 0,
         "the slow reader should have been lapped"

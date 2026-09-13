@@ -1,19 +1,26 @@
-//! Pre-trigger extraction: copy `[trigger − pre, trigger + post)` out of the ring by stream
-//! sample index. The pre-trigger part is copied at once. The post-trigger part is filled as the
-//! writer delivers it ([`PreTriggerCapture::poll`] / [`PreTriggerCapture::wait`]).
+//! Pre-trigger extraction: `[trigger − pre, trigger + post)` out of the ring by stream sample
+//! index.
 //!
-//! The destination buffer is allocated once when the capture starts (the window size is known),
-//! never per block. The result lists [`CaptureSegment`]s: one per contiguous run with unchanged
-//! provenance. A gap, retune or gain change starts a new segment, so an extraction never
-//! silently spans two states (C03) and maps directly onto SigMF captures (C25). Samples that
-//! could not be delivered are counted, never interpolated.
+//! - [`TriggerStream`] hands the window over chunk by chunk, into a caller buffer, as the writer
+//!   delivers it. Nothing is allocated, so a SigMF writer can stream a window of any length to
+//!   disk.
+//! - [`PreTriggerCapture`] collects the window in memory. The buffer is reserved up front (an
+//!   oversized window is an error, not a panic), filled lazily and copied only when polled.
+//!
+//! A [`CaptureSegment`] is a contiguous run with unchanged provenance. A gap, retune or gain
+//! change starts a new segment, so an extraction never silently spans two states (C03) and maps
+//! directly onto SigMF captures (C25). Samples that could not be delivered are counted, never
+//! interpolated.
 
 use std::time::{Duration, Instant};
 
 use hk_model::SampleTime;
 
-use super::{ReadOutcome, ResyncPolicy, RingHandle, RingReader, RingSample};
+use super::{ReadChunk, ReadOutcome, ResyncPolicy, RingHandle, RingReader, RingSample};
 use crate::block::{Discontinuity, ProvenanceHandle};
+
+/// Largest chunk a [`PreTriggerCapture`] copies per read.
+const CAPTURE_CHUNK: usize = 1 << 16;
 
 /// A trigger window by stream sample index: `[trigger − pre, trigger + post)`. The trigger
 /// sample is the first post-trigger sample.
@@ -49,6 +56,148 @@ impl TriggerWindow {
     }
 }
 
+/// Errors starting an allocating capture.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CaptureError {
+    /// The window cannot be held in memory; stream it with [`TriggerStream`] instead.
+    #[error("a trigger window of {samples} samples does not fit in memory; stream it instead")]
+    WindowTooLarge {
+        /// Window length.
+        samples: u64,
+    },
+}
+
+/// One step of a [`TriggerStream`].
+#[derive(Clone, Debug)]
+pub enum TriggerRead {
+    /// `chunk.len` window samples were copied to the front of the buffer.
+    Data(ReadChunk),
+    /// Window indices were skipped because the ring no longer held them.
+    Missing {
+        /// Window indices skipped (lost samples plus any source gaps inside the span).
+        samples: u64,
+        /// No window sample had been delivered yet: pre-trigger history was already gone.
+        before_first_sample: bool,
+        /// Stream index the window resumes from.
+        resume_at: u64,
+    },
+    /// Waiting for samples from `next_sample` on (or `buf` was empty).
+    Pending {
+        /// Next stream index expected.
+        next_sample: u64,
+    },
+    /// The window is done.
+    Complete {
+        /// The ring closed before the window end.
+        truncated: bool,
+    },
+}
+
+/// A trigger window streamed chunk by chunk. Create with [`RingHandle::trigger_stream`].
+pub struct TriggerStream<T: RingSample> {
+    reader: RingReader<T>,
+    window: TriggerWindow,
+    delivered: u64,
+    missing: u64,
+    truncated: bool,
+    complete: bool,
+}
+
+impl<T: RingSample> TriggerStream<T> {
+    pub(crate) fn new(ring: &RingHandle<T>, window: TriggerWindow) -> Self {
+        Self {
+            reader: ring
+                .reader_at(window.start())
+                .with_resync_policy(ResyncPolicy::Oldest),
+            window,
+            delivered: 0,
+            missing: 0,
+            truncated: false,
+            complete: window.is_empty(),
+        }
+    }
+
+    /// The window being streamed.
+    pub fn window(&self) -> TriggerWindow {
+        self.window
+    }
+
+    /// Window samples delivered so far.
+    pub fn delivered(&self) -> u64 {
+        self.delivered
+    }
+
+    /// Window indices skipped so far because the ring no longer held them.
+    pub fn missing(&self) -> u64 {
+        self.missing
+    }
+
+    /// Copies the next window chunk into `buf` without waiting.
+    pub fn read(&mut self, buf: &mut [T]) -> TriggerRead {
+        let (start, end) = (self.window.start(), self.window.end());
+        loop {
+            if self.complete {
+                return TriggerRead::Complete {
+                    truncated: self.truncated,
+                };
+            }
+            if self.reader.position() >= end {
+                self.complete = true;
+                continue;
+            }
+            match self.reader.read_until(buf, end) {
+                ReadOutcome::Data(chunk) => {
+                    self.delivered += chunk.len as u64;
+                    return TriggerRead::Data(chunk);
+                }
+                ReadOutcome::Overrun {
+                    lost_samples,
+                    gap_samples,
+                    resume_at,
+                } => {
+                    let from = resume_at - (lost_samples + gap_samples);
+                    let samples = resume_at.min(end).saturating_sub(from.max(start));
+                    if samples > 0 {
+                        self.missing += samples;
+                        return TriggerRead::Missing {
+                            samples,
+                            before_first_sample: self.delivered == 0,
+                            resume_at,
+                        };
+                    }
+                }
+                ReadOutcome::Empty => {
+                    if self.reader.position() >= end {
+                        self.complete = true;
+                        continue;
+                    }
+                    return TriggerRead::Pending {
+                        next_sample: self.reader.position(),
+                    };
+                }
+                ReadOutcome::Closed => {
+                    self.truncated = true;
+                    self.complete = true;
+                }
+            }
+        }
+    }
+
+    /// Like [`TriggerStream::read`], waiting up to `timeout` for post-trigger samples.
+    pub fn wait(&mut self, buf: &mut [T], timeout: Duration) -> TriggerRead {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let read = self.read(buf);
+            if !matches!(read, TriggerRead::Pending { .. })
+                || buf.is_empty()
+                || !self.reader.wait_for_data(deadline)
+            {
+                return read;
+            }
+        }
+    }
+}
+
 /// A contiguous run of captured samples under one provenance.
 #[derive(Clone, Debug)]
 pub struct CaptureSegment {
@@ -64,7 +213,7 @@ pub struct CaptureSegment {
     pub provenance: ProvenanceHandle,
     /// Discontinuity flags at the start of the run (set if the run starts a block after a change).
     pub discontinuity: Discontinuity,
-    /// Samples dropped by the source before the run's first block.
+    /// Source-gap samples immediately before the run.
     pub dropped_before: u64,
 }
 
@@ -80,114 +229,75 @@ pub enum CaptureStatus {
     Complete,
 }
 
-/// An in-progress pre-trigger capture. Create with [`RingHandle::pre_trigger`].
+/// An in-progress, in-memory pre-trigger capture. Create with [`RingHandle::pre_trigger`].
 pub struct PreTriggerCapture<T: RingSample> {
-    reader: RingReader<T>,
-    window: TriggerWindow,
+    stream: TriggerStream<T>,
     samples: Vec<T>,
-    filled: usize,
     segments: Vec<CaptureSegment>,
     missing_pre: u64,
     lost_samples: u64,
-    truncated: bool,
-    complete: bool,
 }
 
 impl<T: RingSample> PreTriggerCapture<T> {
-    pub(crate) fn new(ring: &RingHandle<T>, window: TriggerWindow) -> Self {
-        let len = usize::try_from(window.len()).expect("trigger window fits in memory");
-        let mut capture = Self {
-            reader: ring
-                .reader_at(window.start())
-                .with_resync_policy(ResyncPolicy::Oldest),
-            window,
-            samples: vec![T::default(); len],
-            filled: 0,
+    /// Reserves the window buffer; copies nothing until polled.
+    pub(crate) fn new(ring: &RingHandle<T>, window: TriggerWindow) -> Result<Self, CaptureError> {
+        let too_large = CaptureError::WindowTooLarge {
+            samples: window.len(),
+        };
+        let len = usize::try_from(window.len()).map_err(|_| too_large.clone())?;
+        let mut samples = Vec::new();
+        samples.try_reserve_exact(len).map_err(|_| too_large)?;
+        Ok(Self {
+            stream: TriggerStream::new(ring, window),
+            samples,
             segments: Vec::with_capacity(4),
             missing_pre: 0,
             lost_samples: 0,
-            truncated: false,
-            complete: window.is_empty(),
-        };
-        capture.poll();
-        capture
+        })
     }
 
     /// The window being captured.
     pub fn window(&self) -> TriggerWindow {
-        self.window
+        self.stream.window()
     }
 
     /// Samples captured so far.
     pub fn filled(&self) -> usize {
-        self.filled
+        self.samples.len()
     }
 
     /// Copies whatever has arrived since the last call, without waiting.
     pub fn poll(&mut self) -> CaptureStatus {
-        let (start, end) = (self.window.start(), self.window.end());
-        while !self.complete {
-            if self.reader.position() >= end {
-                self.complete = true;
-                break;
-            }
-            match self
-                .reader
-                .read_until(&mut self.samples[self.filled..], end)
-            {
-                ReadOutcome::Data(chunk) => {
-                    let offset = self.filled;
-                    self.filled += chunk.len;
-                    let merge = self.segments.last().is_some_and(|last| {
-                        last.first_sample + last.len as u64 == chunk.first_sample()
-                            && chunk.discontinuity.is_empty()
-                            && chunk.dropped_before == 0
-                            && last.provenance == chunk.provenance
-                    });
-                    if merge {
-                        if let Some(last) = self.segments.last_mut() {
-                            last.len += chunk.len;
-                        }
-                    } else {
-                        self.segments.push(CaptureSegment {
-                            first_sample: chunk.first_sample(),
-                            offset,
-                            len: chunk.len,
-                            time: chunk.time,
-                            provenance: chunk.provenance,
-                            discontinuity: chunk.discontinuity,
-                            dropped_before: chunk.dropped_before,
-                        });
-                    }
-                }
-                ReadOutcome::Overrun {
-                    dropped_samples,
-                    resume_at,
+        loop {
+            let filled = self.samples.len();
+            let want = (self.samples.capacity() - filled).min(CAPTURE_CHUNK);
+            // Within the reserved capacity: never reallocates.
+            self.samples.resize(filled + want, T::default());
+            let read = self.stream.read(&mut self.samples[filled..]);
+            let got = match &read {
+                TriggerRead::Data(chunk) => chunk.len,
+                _ => 0,
+            };
+            self.samples.truncate(filled + got);
+            match read {
+                TriggerRead::Data(chunk) => self.add_segment(filled, chunk),
+                TriggerRead::Missing {
+                    samples,
+                    before_first_sample,
+                    ..
                 } => {
-                    let lost_from = (resume_at - dropped_samples).max(start);
-                    let lost = resume_at.min(end).saturating_sub(lost_from);
-                    if self.filled == 0 {
-                        self.missing_pre += lost;
+                    if before_first_sample {
+                        self.missing_pre += samples;
                     } else {
-                        self.lost_samples += lost;
+                        self.lost_samples += samples;
                     }
                 }
-                ReadOutcome::Empty => {
-                    if self.reader.position() >= end {
-                        self.complete = true;
-                    } else {
-                        return CaptureStatus::Pending {
-                            next_sample: self.reader.position(),
-                        };
-                    }
+                TriggerRead::Pending { next_sample } => {
+                    return CaptureStatus::Pending { next_sample };
                 }
-                ReadOutcome::Closed => {
-                    self.truncated = true;
-                    self.complete = true;
-                }
+                TriggerRead::Complete { .. } => return CaptureStatus::Complete,
             }
         }
-        CaptureStatus::Complete
     }
 
     /// Polls until complete or `timeout` elapses.
@@ -195,22 +305,45 @@ impl<T: RingSample> PreTriggerCapture<T> {
         let deadline = Instant::now() + timeout;
         loop {
             let status = self.poll();
-            if status == CaptureStatus::Complete || !self.reader.wait_for_data(deadline) {
+            if status == CaptureStatus::Complete || !self.stream.reader.wait_for_data(deadline) {
                 return status;
             }
         }
     }
 
     /// Ends the capture (complete or not) and returns what was captured.
-    pub fn finish(mut self) -> CapturedWindow<T> {
-        self.samples.truncate(self.filled);
+    pub fn finish(self) -> CapturedWindow<T> {
         CapturedWindow {
-            window: self.window,
+            window: self.stream.window,
             samples: self.samples,
             segments: self.segments,
             missing_pre: self.missing_pre,
             lost_samples: self.lost_samples,
-            truncated: self.truncated || !self.complete,
+            truncated: self.stream.truncated || !self.stream.complete,
+        }
+    }
+
+    fn add_segment(&mut self, offset: usize, chunk: ReadChunk) {
+        let merge = self.segments.last().is_some_and(|last| {
+            last.first_sample + last.len as u64 == chunk.first_sample()
+                && chunk.discontinuity.is_empty()
+                && chunk.dropped_before == 0
+                && last.provenance == chunk.provenance
+        });
+        if merge {
+            if let Some(last) = self.segments.last_mut() {
+                last.len += chunk.len;
+            }
+        } else {
+            self.segments.push(CaptureSegment {
+                first_sample: chunk.first_sample(),
+                offset,
+                len: chunk.len,
+                time: chunk.time,
+                provenance: chunk.provenance,
+                discontinuity: chunk.discontinuity,
+                dropped_before: chunk.dropped_before,
+            });
         }
     }
 }
@@ -224,16 +357,16 @@ pub struct CapturedWindow<T> {
     pub samples: Vec<T>,
     /// Contiguous same-provenance runs covering `samples`.
     pub segments: Vec<CaptureSegment>,
-    /// Pre-trigger samples already overwritten when the capture started.
+    /// Window indices before the first captured sample that were already gone.
     pub missing_pre: u64,
-    /// Samples lost to an overrun after capture began.
+    /// Window indices lost to an overrun after capture began.
     pub lost_samples: u64,
     /// The ring closed (or the capture was finished) before the window end.
     pub truncated: bool,
 }
 
 impl<T> CapturedWindow<T> {
-    /// Every sample of the window was captured, in one contiguous run with no state change.
+    /// Every sample of the window was captured, in one contiguous run with no gap.
     pub fn is_gapless(&self) -> bool {
         self.missing_pre == 0
             && self.lost_samples == 0
@@ -322,7 +455,12 @@ mod tests {
             pre_samples: 1200,
             post_samples: 800,
         };
-        let mut capture = ring.pre_trigger(window);
+        let mut capture = ring.pre_trigger(window).unwrap();
+        assert_eq!(
+            capture.filled(),
+            0,
+            "nothing is copied before the first poll"
+        );
         assert_eq!(capture.poll(), CaptureStatus::Pending { next_sample: 6000 });
         assert_eq!(capture.filled(), 1700);
         push(&mut w, 6000, 1000, &p, Discontinuity::NONE);
@@ -349,13 +487,15 @@ mod tests {
             push(&mut w, b * 500, 500, &p, Discontinuity::NONE);
         }
         // Retained: [976, 2000). Window [500, 1500).
-        let got = ring
+        let mut capture = ring
             .pre_trigger(TriggerWindow {
                 trigger_sample: 1000,
                 pre_samples: 500,
                 post_samples: 500,
             })
-            .finish();
+            .unwrap();
+        assert_eq!(capture.poll(), CaptureStatus::Complete);
+        let got = capture.finish();
         assert_eq!(got.missing_pre, 476);
         assert_eq!(indices(&got), (976..1500).collect::<Vec<_>>());
         assert!(!got.is_gapless());
@@ -378,11 +518,13 @@ mod tests {
             &b,
             Discontinuity::RETUNE | Discontinuity::PROVENANCE_CHANGE,
         );
-        let mut capture = ring.pre_trigger(TriggerWindow {
-            trigger_sample: 200,
-            pre_samples: 150,
-            post_samples: 200,
-        });
+        let mut capture = ring
+            .pre_trigger(TriggerWindow {
+                trigger_sample: 200,
+                pre_samples: 150,
+                post_samples: 200,
+            })
+            .unwrap();
         assert_eq!(
             capture.wait(Duration::from_millis(10)),
             CaptureStatus::Complete
@@ -408,6 +550,29 @@ mod tests {
     }
 
     #[test]
+    fn window_ending_inside_a_gap_completes() {
+        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
+            sample_capacity: 1024,
+            block_capacity: 16,
+        });
+        let p = prov(1e6);
+        push(&mut w, 0, 100, &p, Discontinuity::NONE);
+        let mut capture = ring
+            .pre_trigger(TriggerWindow {
+                trigger_sample: 100,
+                pre_samples: 50,
+                post_samples: 50,
+            })
+            .unwrap();
+        assert_eq!(capture.poll(), CaptureStatus::Pending { next_sample: 100 });
+        push(&mut w, 300, 100, &p, Discontinuity::NONE);
+        assert_eq!(capture.poll(), CaptureStatus::Complete);
+        let got = capture.finish();
+        assert_eq!(indices(&got), (50..100).collect::<Vec<_>>());
+        assert!(!got.truncated);
+    }
+
+    #[test]
     fn closed_ring_truncates() {
         let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
             sample_capacity: 1024,
@@ -415,15 +580,76 @@ mod tests {
         });
         let p = prov(1e6);
         push(&mut w, 0, 100, &p, Discontinuity::NONE);
-        let mut capture = ring.pre_trigger(TriggerWindow {
-            trigger_sample: 50,
-            pre_samples: 50,
-            post_samples: 500,
-        });
+        let mut capture = ring
+            .pre_trigger(TriggerWindow {
+                trigger_sample: 50,
+                pre_samples: 50,
+                post_samples: 500,
+            })
+            .unwrap();
         drop(w);
         assert_eq!(capture.poll(), CaptureStatus::Complete);
         let got = capture.finish();
         assert!(got.truncated);
         assert_eq!(got.samples.len(), 100);
+    }
+
+    #[test]
+    fn oversized_window_is_an_error_not_a_panic() {
+        let (_w, ring) = ring_buffer::<Complex32>(RingConfig {
+            sample_capacity: 16,
+            block_capacity: 4,
+        });
+        let window = TriggerWindow {
+            trigger_sample: u64::MAX / 2,
+            pre_samples: u64::MAX / 4,
+            post_samples: u64::MAX / 4,
+        };
+        assert!(matches!(
+            ring.pre_trigger(window),
+            Err(CaptureError::WindowTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn streamed_window_is_delivered_through_a_small_buffer() {
+        // A window far longer than the buffer (and than the ring) streams without allocating it.
+        let (mut w, ring) = ring_buffer::<Complex32>(RingConfig {
+            sample_capacity: 2048,
+            block_capacity: 64,
+        });
+        let p = prov(1e6);
+        push(&mut w, 0, 1000, &p, Discontinuity::NONE);
+        let mut stream = ring.trigger_stream(TriggerWindow {
+            trigger_sample: 1000,
+            pre_samples: 900,
+            post_samples: 9000,
+        });
+        let mut buf = vec![Complex32::default(); 256];
+        let mut expect = 100u64;
+        let mut first = 1000u64;
+        loop {
+            match stream.read(&mut buf) {
+                TriggerRead::Data(chunk) => {
+                    assert_eq!(chunk.first_sample(), expect);
+                    for (k, s) in buf[..chunk.len].iter().enumerate() {
+                        assert_eq!(s.re as u64, expect + k as u64);
+                    }
+                    expect = chunk.end_sample();
+                }
+                TriggerRead::Pending { next_sample } => {
+                    assert_eq!(next_sample, first);
+                    push(&mut w, first, 1000, &p, Discontinuity::NONE);
+                    first += 1000;
+                }
+                TriggerRead::Missing { .. } => panic!("the reader keeps up"),
+                TriggerRead::Complete { truncated } => {
+                    assert!(!truncated);
+                    break;
+                }
+            }
+        }
+        assert_eq!(expect, 10_000);
+        assert_eq!((stream.delivered(), stream.missing()), (9900, 0));
     }
 }

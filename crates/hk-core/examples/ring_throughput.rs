@@ -121,7 +121,7 @@ fn spawn_reader<T: RingSample>(ring: &RingHandle<T>) -> JoinHandle<ReaderStats> 
         ) {}
         ReaderStats {
             read: reader.samples_read(),
-            dropped: reader.dropped_samples(),
+            dropped: reader.lost_samples(),
             overruns: reader.overruns(),
         }
     })
@@ -218,7 +218,7 @@ fn attach_detach(secs_hint: f64) {
                     }
                     std::hint::black_box(power);
                     stats.read += reader.samples_read();
-                    stats.dropped += reader.dropped_samples();
+                    stats.dropped += reader.lost_samples();
                     stats.overruns += reader.overruns();
                 }
                 (worst, stats)

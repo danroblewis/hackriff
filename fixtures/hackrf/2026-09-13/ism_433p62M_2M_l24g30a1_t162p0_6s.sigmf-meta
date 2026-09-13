@@ -1,0 +1,745 @@
+{
+  "global": {
+    "core:datatype": "ci8",
+    "core:sample_rate": 2000000.0,
+    "core:version": "1.2.0",
+    "core:hw": "HackRF One (board rev older than r6), firmware 2026.01.3, libhackrf 0.9.2",
+    "core:recorder": "hackrf_transfer 2026.01.3; trimmed by py/fixtures/build_2026_09_13.py",
+    "core:author": "hackriff coordinator (receive-only)",
+    "core:description": "hackriff fixture ism_433p62M_2M_l24g30a1_t162p0_6s: noise-only negative control at 433.62 MHz: measured floor, no emissions. Serves AWARE-042, SPACE-050. Window 162.0 s + 6.0 s of store capture ism_433p62M_2M_l24g30a1 (HackRF One, 433.62 MHz, 2 Msps, LNA 24 / VGA 30 / amp on, antenna unknown (as attached by user; not changed)). Receive-only; truth is PHY metadata only.",
+    "core:license": "project-owned capture",
+    "hackriff:provenance": {
+      "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+      "tune": {
+        "center_hz": 433620000.0,
+        "sample_rate_hz": 2000000.0,
+        "lna_db": 24.0,
+        "vga_db": 30.0,
+        "amp_on": true,
+        "bandwidth_hz": 1750000.0
+      },
+      "overload": false,
+      "quantisation_limited": false,
+      "clock_source": "internal",
+      "clock_locked": true,
+      "timestamp_method": "host-arrival",
+      "timestamp_error_budget_ns": 500000000
+    },
+    "hackriff:antenna": "unknown (as attached by user; not changed)",
+    "core:extensions": [
+      {
+        "name": "hackriff",
+        "version": "0.1.0",
+        "optional": true
+      }
+    ]
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 433620000.0,
+      "core:datetime": "2026-09-13T11:08:27.555140Z",
+      "core:global_index": 324000000,
+      "hackriff:clip_count": 0
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:label": "capture",
+      "hackriff:truth": {
+        "role": "scenario",
+        "kind": "capture",
+        "recording": "ism_433p62M_2M_l24g30a1_t162p0_6s",
+        "use_cases": [
+          "AWARE-042",
+          "SPACE-050"
+        ],
+        "generator": "py/fixtures/build_2026_09_13.py",
+        "source": {
+          "capture": "ism_433p62M_2M_l24g30a1",
+          "path": "store/2026-09-13/ism_433p62M_2M_l24g30a1.sigmf-data",
+          "sha256": "c1ac8cd0ed1b4bef3de21e22cc928ffeb0daa9ca7b54817f34f59ec6645ef13b",
+          "sample_start": 324000000,
+          "sample_count": 12000000,
+          "start_s": 162.0,
+          "datetime": "2026-09-13T11:05:45.555140+00:00"
+        },
+        "datatype": "ci8",
+        "sample_rate_hz": 2000000.0,
+        "n_samples": 12000000,
+        "duration_s": 6.0,
+        "dbfs_reference": "full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
+        "calibration": "uncalibrated (no dBm): antenna unknown, as attached by the user",
+        "clip_count": 0,
+        "clip_fraction": 0.0,
+        "overload": false,
+        "overload_rule": "clip_fraction > 0.0001 (component at -128 or 127)",
+        "quantisation_limited": false,
+        "quantisation_noise_dbfs_per_hz": -112.86788687959537,
+        "clock": {
+          "source": "internal",
+          "ppm_measured": -6.8,
+          "method": "19 kHz FM pilot, fm_100p8M_2p4M_l32g30a1 (spike S5)",
+          "lo_offset_at_tuner_hz": -2948.6159999999995
+        },
+        "legal": "Receive-only capture. Truth is PHY/metadata only; no third-party payload content is decoded or stored (CLAUDE.md legal guardrails).",
+        "emissions": [],
+        "negative_control": true,
+        "annotation_completeness": "no device emissions (rtl_433 decoded nothing in 180 s; S5 detector: 0 events at 8 dB in this window); persistent narrowband lines >= 6 dB over the median at 122 Hz RBW annotated as unverified artefacts",
+        "truth_summary": "floor -98.98 dBFS/Hz +- 0.05 dB over 1.39 MHz; no device emissions; 28 narrowband lines >= 6 dB (122 Hz RBW), strongest 434.000005 MHz +23.9 dB",
+        "t_start_s": 0.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 432920000.0,
+      "core:freq_upper_edge": 434320000.0,
+      "core:label": "noise floor",
+      "hackriff:truth": {
+        "role": "floor",
+        "kind": "noise-floor",
+        "floor_dbfs_per_hz": -98.98484858302785,
+        "floor_dbfs": -37.564964705595415,
+        "bandwidth_hz": 1386718.75,
+        "uncertainty_db": 0.05,
+        "block_floor_dbfs_per_hz": [
+          -98.89234300589685,
+          -98.94637443698056,
+          -98.95430503992355,
+          -98.92799807081451,
+          -98.9626322191382,
+          -98.9610839897292,
+          -98.99699565658207,
+          -98.97258670394969,
+          -98.99891241501109,
+          -98.97009214686082,
+          -98.95626484885285,
+          -98.94920146996604
+        ],
+        "block_s": 0.499712,
+        "ripple_db_p10": -0.24426059593737864,
+        "ripple_db_p90": 0.47781572013760376,
+        "max_bin_excess_db": 11.08784996803056,
+        "quantisation_noise_dbfs_per_hz": -112.86788687959537,
+        "expected_floor_dbfs_per_hz": -98.98484858302785,
+        "method": "median over |f| <= 0.7 MHz (DC +-3 bins excluded) of the mean Hann periodogram, 1024 bins, all frames; uncertainty = 1 sigma of 0.5 s block floors",
+        "calibration": "uncalibrated: no floor_dbm (antenna and gain chain not calibrated)",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433615000.0,
+      "core:freq_upper_edge": 433625000.0,
+      "core:label": "DC",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "dc-offset",
+        "reason": "dc",
+        "center_hz": 433620000.0,
+        "offset_hz": 0.0,
+        "i_offset": 0.004503708655439962,
+        "q_offset": -0.018699980157566822,
+        "i_offset_codes": 0.5719709992408752,
+        "q_offset_codes": -2.3748974800109863,
+        "power_dbfs": -34.318303802305216,
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 432947026.3671875,
+      "core:freq_upper_edge": 432947514.6484375,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 432947270.5078125,
+        "offset_hz": -672729.4921875,
+        "excess_db": 9.49619335731241,
+        "power_dbfs": -67.25579912652111,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 432952702.63671875,
+      "core:freq_upper_edge": 432953068.84765625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 432952885.7421875,
+        "offset_hz": -667114.2578125,
+        "excess_db": 7.062715844889697,
+        "power_dbfs": -70.07750824708438,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 432956425.78125,
+      "core:freq_upper_edge": 432956914.0625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 432956669.921875,
+        "offset_hz": -663330.078125,
+        "excess_db": 10.1383498303658,
+        "power_dbfs": -66.51713332032107,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 432978276.3671875,
+      "core:freq_upper_edge": 432978764.6484375,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 432978520.5078125,
+        "offset_hz": -641479.4921875,
+        "excess_db": 10.00651427232282,
+        "power_dbfs": -66.7227378831021,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 432983952.63671875,
+      "core:freq_upper_edge": 432984318.84765625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 432984135.7421875,
+        "offset_hz": -635864.2578125,
+        "excess_db": 7.538862968107586,
+        "power_dbfs": -69.47541795154449,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433009587.40234375,
+      "core:freq_upper_edge": 433009953.61328125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433009770.5078125,
+        "offset_hz": -610229.4921875,
+        "excess_db": 6.692178215278953,
+        "power_dbfs": -70.63868511104583,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433103337.40234375,
+      "core:freq_upper_edge": 433103703.61328125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433103520.5078125,
+        "offset_hz": -516479.4921875,
+        "excess_db": 7.338752321339539,
+        "power_dbfs": -69.80695922989992,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433134587.40234375,
+      "core:freq_upper_edge": 433134953.61328125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433134770.5078125,
+        "offset_hz": -485229.4921875,
+        "excess_db": 8.938463747626548,
+        "power_dbfs": -67.89915557358205,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433140202.63671875,
+      "core:freq_upper_edge": 433140568.84765625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433140385.7421875,
+        "offset_hz": -479614.2578125,
+        "excess_db": 6.68175263329527,
+        "power_dbfs": -70.660019843984,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433148381.34765625,
+      "core:freq_upper_edge": 433148747.55859375,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433148564.453125,
+        "offset_hz": -471435.546875,
+        "excess_db": 7.09106502573372,
+        "power_dbfs": -70.01448550304383,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433165776.3671875,
+      "core:freq_upper_edge": 433166264.6484375,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433166020.5078125,
+        "offset_hz": -453979.4921875,
+        "excess_db": 9.166312897406923,
+        "power_dbfs": -67.61132255932922,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433166752.9296875,
+      "core:freq_upper_edge": 433167241.2109375,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433166997.0703125,
+        "offset_hz": -453002.9296875,
+        "excess_db": 10.276241265593953,
+        "power_dbfs": -66.30045087253559,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433171452.63671875,
+      "core:freq_upper_edge": 433171818.84765625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433171635.7421875,
+        "offset_hz": -448364.2578125,
+        "excess_db": 6.934657319253812,
+        "power_dbfs": -70.39800732232484,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433197087.40234375,
+      "core:freq_upper_edge": 433197453.61328125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433197270.5078125,
+        "offset_hz": -422729.4921875,
+        "excess_db": 8.396540143615654,
+        "power_dbfs": -68.5028071343372,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433202702.63671875,
+      "core:freq_upper_edge": 433203068.84765625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433202885.7421875,
+        "offset_hz": -417114.2578125,
+        "excess_db": 6.518642174559222,
+        "power_dbfs": -70.8716859128076,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433212285.15625,
+      "core:freq_upper_edge": 433212773.4375,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433212529.296875,
+        "offset_hz": -407470.703125,
+        "excess_db": 8.045351407266221,
+        "power_dbfs": -68.45458025812772,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433228337.40234375,
+      "core:freq_upper_edge": 433228703.61328125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433228520.5078125,
+        "offset_hz": -391479.4921875,
+        "excess_db": 7.447832919427388,
+        "power_dbfs": -69.67265366007113,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433468327.63671875,
+      "core:freq_upper_edge": 433468693.84765625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433468510.7421875,
+        "offset_hz": -151489.2578125,
+        "excess_db": 7.762841548577728,
+        "power_dbfs": -69.33581499009986,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433532292.48046875,
+      "core:freq_upper_edge": 433532658.69140625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433532475.5859375,
+        "offset_hz": -87524.4140625,
+        "excess_db": 6.41299695893211,
+        "power_dbfs": -71.09946990892634,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433932805.17578125,
+      "core:freq_upper_edge": 433933171.38671875,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433932988.28125,
+        "offset_hz": 312988.28125,
+        "excess_db": 8.193520530727113,
+        "power_dbfs": -68.56957537850406,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433976140.13671875,
+      "core:freq_upper_edge": 433976506.34765625,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433976323.2421875,
+        "offset_hz": 356323.2421875,
+        "excess_db": 6.3129208590266686,
+        "power_dbfs": -70.9121001525343,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433996770.01953125,
+      "core:freq_upper_edge": 433997136.23046875,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 433996953.125,
+        "offset_hz": 376953.125,
+        "excess_db": 7.219835312208339,
+        "power_dbfs": -69.49711709950988,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 433999699.70703125,
+      "core:freq_upper_edge": 434000310.05859375,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "sample_clock_harmonic",
+        "verified": false,
+        "center_hz": 434000004.8828125,
+        "offset_hz": 380004.8828125,
+        "excess_db": 23.927741718124036,
+        "power_dbfs": -52.44585541903716,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it. Sits within 5 Hz of 217 x fs; an external carrier on 434.0 MHz would read -2949 Hz off.",
+        "harmonic_n": 217,
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 434013493.65234375,
+      "core:freq_upper_edge": 434013859.86328125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 434013676.7578125,
+        "offset_hz": 393676.7578125,
+        "excess_db": 7.284293671600729,
+        "power_dbfs": -69.79485745035836,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 434034794.921875,
+      "core:freq_upper_edge": 434035283.203125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 434035039.0625,
+        "offset_hz": 415039.0625,
+        "excess_db": 13.935609999269671,
+        "power_dbfs": -61.52402941243927,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 434060612.79296875,
+      "core:freq_upper_edge": 434061223.14453125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 434060917.96875,
+        "offset_hz": 440917.96875,
+        "excess_db": 12.245141704607647,
+        "power_dbfs": -64.34079724385049,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 434124638.671875,
+      "core:freq_upper_edge": 434125126.953125,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 434124882.8125,
+        "offset_hz": 504882.8125,
+        "excess_db": 11.738453721678336,
+        "power_dbfs": -64.7191687176473,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 434188603.515625,
+      "core:freq_upper_edge": 434189091.796875,
+      "core:label": "narrowband line",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "narrowband-line",
+        "reason": "unknown",
+        "verified": false,
+        "center_hz": 434188847.65625,
+        "offset_hz": 568847.65625,
+        "excess_db": 8.451987055056799,
+        "power_dbfs": -67.93633587532713,
+        "resolution_bw_hz": 122.0703125,
+        "note": "persistent narrowband line in the noise-only control; origin unverified (internal spur or weak unmodulated carrier). A 50 ohm terminated-input capture would settle it.",
+        "t_start_s": 0.0,
+        "duration_s": 6.0
+      }
+    }
+  ]
+}
