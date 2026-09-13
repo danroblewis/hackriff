@@ -10,3 +10,13 @@ publish.workspace = true
 hk-core.workspace = true
 hk-dsp.workspace = true
 hk-model.workspace = true
+# T-012: C13 ParameterSet / snippets feed auto-mode selection; Complex32 samples; serialisable
+# reports (serde) and Decode metadata (serde_json). All already in the ADR-0010 ledger.
+hk-estimate.workspace = true
+num-complex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# T-012: synthetic scenarios and fixture truth for the SIGNAL-062 acceptance tests.
+hk-e2e = { path = "../../tests/e2e" }
