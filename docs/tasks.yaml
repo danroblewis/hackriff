@@ -764,6 +764,7 @@ tasks:
     title: Blind ground-truth acceptance harness (fixture truth lists hidden from the system, top-k explanation asserts) + audit existing tests
     milestone: M0b
     status: todo
+    switch_recipe: "in blind_config replace replay_config open_replay with hk_pipeline::open_mock_replay(&blind, Pacing::Unpaced, MockEnd::Stop); keep cfg.source_class = replay.class; set cfg.device_id = replay.device.device_id; BlindConfig.replay type Replay -> DeviceReplay; start() boxes replay.source; iq_shift_hz can become a real tune(); mock needs single-centre recordings"
     deps: [T-039, T-037, T-049]
     parallel_group: J
     use_cases: [SIGNAL-062, AWARE-053, AWARE-036, SIGNAL-001, AWARE-042]
@@ -792,7 +793,10 @@ tasks:
   - id: T-049
     milestone: M0b
     title: Mock SDR device replaying SigMF behind the device interface (realistic retune/gain/rate/overrun behaviour)
-    status: in-progress
+    status: done
+    commit: "f6a47d4 (merge pending after T-050 verification)"
+    result: "hk_core::source::conformance::run (20 checks) passed by the mock on synthetic ci8/cf32 and the FM fixture (HackRF case #[ignore], feature hackrf). Mock (source/mock/): HackRF One caps, receive-only; retune shifts/filters/resamples with absolute frequencies preserved (bit-exact at recorded tuning); coverage = recording baseband-filter band, outside -> noise at measured floor flagged in provenance antenna_port (mock:recording / +noise / noise) and MockStats; gain scales from recorded gains with int8 clip + sticky overload; control change skips one block (gap + discard); injectable overruns; late real-time reader drops whole blocks; pausable only unpaced; Stop/Loop; bias tee flag; sweep unsupported; legal class from tuned window keeping stricter declared class. CLI hk serve --device mock:<meta>, hk run/hackriffd --source mock:<meta>. tests/e2e/tests/mock_device.rs: stripped FM fixture through mock -> station detected, FM broadcast in top-k."
+    limits: "gain is digital scaling (no NF/compression/IMD); white fill with ~3 dB dip at coverage edge; ~half filter length latency after retune; single-centre recordings only"
     scope_note: "includes the device conformance test from T-048; suite switch of acceptance helpers stays in T-047 (after T-037b)"
     deps: [T-048]
     parallel_group: O
@@ -807,7 +811,13 @@ tasks:
   - id: T-050
     milestone: M0b
     title: Authenticated control API with legal/TX gating (live radio + display controls)
-    status: in-progress
+    status: done
+    commit: "6c4612a (merged c5f77e3; conflicts with T-037b in hk-model lib.rs exports and hk-pipeline history.rs resolved by coordinator)"
+    result: "256-bit token in 0600 file (HK_TOKEN_FILE or ~/.config/hackriff/api-token; lax perms refused); Bearer required for POST/PUT/DELETE, ?token= only for GET/WebSocket; no cookies, no CORS, OPTIONS 403, mutating requests with Origin not matching Host/X-Forwarded-Host 403 (tunnel-compatible). Audit <data>/control-audit.jsonl (0600, token hashed, refused requests logged; control 503 without audit). Endpoints GET /api/control/state; POST /api/control/{center,rate,gains,bias_tee,display,pause,resume,record/start,record/stop}; /api/bookmarks CRUD (bookmark table, schema v1). Replay: device endpoints 409 not_live. No TX route, transmit.available false, TX sweep test >500 combos. Retune into another legal class RE-DERIVED (not refused): capture stops between blocks, old segment chains/recordings finish under old class, device handed to a new segment with the new class keeping DB/Survey/history/stream ids and dropping blocks from other windows; same-class retune in place; rate change via the same re-plumb. Sentinel retune_legal.rs FM -> 930.5 MHz paging: no content/identity/recording after retune. Post-merge legal/security review: FIX-NEEDED (audit-log disk-fill DoS via unauthenticated requests over the tunnel) -> T-062; no class leak either direction, no TX route, auth sound."
+    followups:
+      - "pause freezes only the spectrum stream (capture, detection, history continue) - decide whether a full pause is wanted (T-051 UI labels it accordingly)"
+      - "per-reader counters restart per segment; aggregate across segments in /api/status"
+      - "a class-changing re-plumb blocks the HTTP request up to 30 s; make it async with a state poll"
     deps: [T-037, T-048]
     parallel_group: P
     use_cases: [AWARE-042]
@@ -821,7 +831,7 @@ tasks:
   - id: T-051
     milestone: M0b
     title: SDR control panel UI around waterfall/spectrum (SDR++/SDRangel/SigDigger standard control set, exploration-first)
-    status: todo
+    status: in-progress
     deps: [T-050, T-044]
     parallel_group: N
     use_cases: [AWARE-042, SIGNAL-062]
@@ -835,6 +845,7 @@ tasks:
     milestone: M0b
     title: Multi-region selections as first-class objects (persisted; list/rename/delete; send to demod/record/inspect)
     status: todo
+    hold: "after T-051 merges (both edit ui/src main.ts and selections)"
     deps: [T-044, T-050]
     parallel_group: N
     use_cases: [AWARE-042, SIGNAL-062]
@@ -909,7 +920,10 @@ tasks:
   - id: T-057
     milestone: M0b
     title: Scheduler virtual tuning places signals at wrong absolute frequencies (~368 kHz axis offset root cause)
-    status: in-progress
+    status: done
+    commit: "spectrum half 6c4612a (T-050, merged c5f77e3); source half f6a47d4 (T-049)"
+    result: "scheduled replay (hk replay --schedule, hackriffd sigmf:) goes through the mock via open_mock_replay; open_replay refuses virtual tuning; e2e: scheduler retuned 18 times, IQ energy matched each header centre over 64 blocks, emitter at 101.30 MHz, no FM-wide detection outside the recording. History placement not asserted (follow-up)."
+    progress: "spectrum half done in T-050 (6c4612a): header re-offered keyed on each row window before any row of a new window; spectrum_header_follows_tune.rs. Source half (truthful virtual tuning) pending in T-049."
     deps: [T-037]
     parallel_group: O
     use_cases: [SIGNAL-062, SPACE-050, AWARE-042]
@@ -980,6 +994,35 @@ tasks:
     effort: medium
     core_interface: true
     hold: "after T-060, T-052 and T-049 merge"
+  - id: T-062
+    milestone: M0b
+    title: Control API audit-log DoS fix and auth hardening (T-050 review)
+    status: in-progress
+    deps: [T-050]
+    parallel_group: P
+    use_cases: [AWARE-042]
+    found_by: T-050 post-merge legal/security review 2026-09-13
+    acceptance: "audit entries bound client strings (path/origin/forwarded_for); refused/unauthenticated entries coalesced per peer per second with global cap; audit file size-capped with rotation; 10k oversized unauthenticated requests keep audit dir under cap; X-Forwarded-* trusted only from loopback peers; token file opened no-follow with fd-based perms/owner check and parent dir check, AuditLog refuses symlinks; SourceLiveControl state consistent after retune timeout without holding the tuning lock 30 s; retune_legal.rs leftover removed"
+    area: crates/hk-api (http.rs, control.rs, auth.rs), crates/hk-cli/src/control.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    note: "window overlapping paging and cellular reports only restricted-paging - fine while both gate identically (review nit 4, no action)"
+  - id: T-063
+    milestone: M0b
+    title: "Legal regression: FSK bits stream offered Unrestricted after a legal-class retune into paging (T-037b x T-050)"
+    status: in-progress
+    deps: [T-050, T-037]
+    parallel_group: J
+    use_cases: [AWARE-036]
+    found_by: coordinator verification of main after T-050 merge, 2026-09-13 (5/5 deterministic)
+    acceptance: "cargo test -p hk-pipeline --test retune_legal green; verdict with evidence whether the Unrestricted bits/fsk-bursts stream is an old-segment lazy offer (test attributes streams by segment provenance) or a new-segment class leak (class derivation fixed + publisher invariant: stream class never less restrictive than the class of the segment feeding it); no payload bytes from paging-window decodes reach any stream; stream-level regression test"
+    area: crates/hk-pipeline (chains/fsk.rs, segments), crates/hk-stream (publisher gating), crates/hk-pipeline/tests/retune_legal.rs
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

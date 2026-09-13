@@ -340,3 +340,33 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Tests go through the mock SDR: FSK bits over TCP checked against truth, FM audio over WebSocket.
   - **Added:** T-060 (streams to external programs; held behind T-043 and T-049) and T-061 (record outputs; held behind T-060, T-052, T-049).
   - **Running agents:** T-043 was told to build its audio WebSocket as a reusable hk-stream transport with drop-not-block backpressure.
+- **B0.122 T-050 merged** (6c4612a → c5f77e3). The coordinator resolved two conflicts with T-037b: hk-model exports and a history.rs seal check.
+  - **Auth:** token file with Bearer header on mutating requests, Origin check, audit JSONL.
+  - **Endpoints:** control endpoints and bookmarks; there is no TX route.
+  - **Legal design change:** retuning into another legal class now re-plumbs the pipeline into a new segment with the new class, instead of refusing. Chains and recordings from the old segment finish under the old class; blocks from other windows are dropped. The sentinel paging test passes. A timeboxed post-merge legal/security review is running.
+  - **Other changes:** rate change works through the same re-plumb. The spectrum half of T-057 is done (header re-offered per window).
+  - **Follow-ups:** pause freezes only the spectrum; counters are per segment; a re-plumb blocks HTTP for up to 30 s.
+  - **Next:** T-051 SDR control panel launched. T-052 held behind T-051 (shared UI files). T-049 and T-043 asked to merge main. Verification running.
+- **B0.123 T-049 mock SDR done** (f6a47d4, merge waits for the T-050 verification run).
+  - **Conformance:** suite of 20 checks; the mock passes. Realistic retune/coverage/gain/overrun model with provenance flags. CLI `--device/--source mock:<meta>`. Blind FM e2e through the mock passes; acceptance 16/16.
+  - **T-057 done:** scheduled replay now goes through the mock. `open_replay` refuses virtual tuning. The emitter lands at 101.30 MHz across 18 scheduler retunes.
+  - **Build-infra correction:** the shared `CARGO_TARGET_DIR` (B0.113 rule) cross-contaminates worktree builds. Branches reuse each other's workspace-crate artifacts, causing stale builds and spurious unresolved-import failures. New rule: each worktree uses its own target with `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=line-tables-only`, and at most ~4 Rust-building agents run at once. Worktrees are removed right after merge. T-043, T-051 and T-058 were told to switch and re-run their results.
+  - **Unblocked:** T-047 once T-049 merges (switch recipe recorded in tasks.yaml).
+- **B0.124 T-050 post-merge legal/security review: FIX-NEEDED (security, not legal).**
+  - **Bug:** unauthenticated POST/PUT/DELETE requests each write an unbounded (~15 KB) audit JSONL line, with no rate limit, cap or rotation. Through the public cloudflared tunnel this can fill the disk: a real unbounded-resource bug.
+  - **Clean:** the legal side. The WindowGuard checks each block's own window before the ring, so there is no class leak in either direction; HackRF in-flight transfers are discarded after a change; recording is re-checked per chunk; auth uses constant-time comparison; no TX route.
+  - **Fix launched as T-062:** bounded fields, coalesced refused entries, size cap with rotation, plus hardening nits (X-Forwarded-* trusted only from loopback, token file no-follow with fd-based perms/owner checks, retune-timeout state consistency). The T-062 agent uses its own target (new build rule).
+  - **Risk note for the user:** until T-062 merges, a demo built from main at or after c5f77e3 and exposed through the tunnel is open to that audit-log fill.
+- **B0.125 Verification of the T-050 merge failed on one test: flaky, not a regression.**
+  - `hk-core source::hackrf::tests::a_slow_reader_gets_counted_drops_and_an_exact_gap` (from T-037a) failed 1 of 3 runs in an isolated target. The dropped-sample counter kept growing after its single snapshot (67584 gaps vs 65536 counted).
+  - Coordinator fixed the test: read until gaps equal the live counter, asserting gaps never exceed it. It then passed 15/15.
+  - The first run may also have been contaminated by the T-049 agent building into main's shared target. T-049 was told to stop.
+  - **Rule:** coordinator verification now uses an isolated target (`scratchpad/target-verify`, with `CARGO_INCREMENTAL=0` and line-tables-only debuginfo). Main's `target/` is no longer shared with agents.
+  - Full verification is re-running.
+- **B0.126 Legal regression on main: retune_legal fails deterministically (5/5, isolated target).**
+  - **Symptom:** after the T-050 FM → 930.5 MHz paging re-plumb, a `bits/fsk-bursts/*` stream (the T-037b FSK bits stream) is offered with `content_class: Unrestricted`. The two tasks passed separately and fail merged.
+  - **Open question:** unknown whether this is an old-segment lazy offer (test too strict) or a new-segment class leak.
+  - **Fix:** dedicated agent T-063 launched (Opus high) to decide with evidence, fix, and add a publisher invariant: stream class never less restrictive than its feeding segment.
+  - **Coordination:** running agents (T-062, T-043, T-049, T-051) were told it is a known failure and not to fix it.
+  - **Merges held:** code merges other than T-063 wait until main is green again.
+  - **Risk note for the user:** a demo built from main at or after c5f77e3 that is retuned into a restricted band via the control API may expose FSK bitstreams under the wrong class until T-063 lands. Other verification on the rerun was green up to that point (112 test groups).
