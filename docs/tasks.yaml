@@ -174,7 +174,10 @@ tasks:
     dod: estimates within tolerance; normalises snippets for demod/classify
   - id: T-011
     title: blind symbol-rate + FSK deviation estimation
-    status: in-progress
+    status: done
+    commit: "b86244e (merged)"
+    results: "0 trusted-and-wrong over 900-run synthetic sweep + 36 negatives + real fixtures; 915 MHz 8 unique trusted bursts all within 1 %, deviation within 10 %; RDS best candidate 2375 Bd within 1 % in every window, trusted 18/19 at 0.25 s (acceptance partial: untrusted window abstains), 9/9 at 0.5 s, 4/4 at 1 s; all 10 S5 pitfalls have regression tests"
+    notes_impl: "S5 channel filter is a -6 dB cutoff at 0.75 OBW (~0.6 OBW passband), reproduced; below T-010 OBW floor prepare() falls back to detection-box width (BandwidthFromBox); callers must extract at >= 6x box bandwidth; merged without separate review (not core_interface)"
     s5_inputs: "gate PASSED (scoped). Port s5lib.classify_and_estimate: 4 whitened cyclic lines in 2 independent groups, guarded transition-LS (jitter<0.12 UI, kept>=85%), harmonic-aware consensus, separate rate/family trust; pitfalls list REPORT §4; acceptance fixtures = 915 bursts + sync truth, RDS windows (pilot/16), negatives; fail on any trusted-and-wrong"
     deps: [T-010]
     parallel_group: F
@@ -202,7 +205,7 @@ tasks:
     dod: replay FM+RDS fixture -> WFM chosen, PI/PS decoded, label written
   - id: T-013
     title: digital demod (FSK) + framing/CRC inference
-    status: todo
+    status: in-progress
     s5_inputs: "gate PASSED (scoped). Cross-burst preamble/sync inference proven (16-bit sync 0000110001011111 in 414/685 915 MHz bursts); next PHR/length/CRC inference; weak bursts (<15 dB) via prior-led trial demod seeded from strong bursts of the same cluster + standard-rate table"
     deps: [T-011]
     parallel_group: G
