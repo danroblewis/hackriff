@@ -418,3 +418,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-058 (f14a273)
     - T-043 (6f33776)
   - **T-051:** conflicts with T-043 in 4 UI files, being resolved. Combined verification follows.
+- **B0.135 User clarification: close T-063 without further legal work.**
+  - T-063 had already merged as a test-only change (f80a462).
+  - Per the user, both `retune_legal` tests are now `#[ignore = "user decision 2026-09-13: legal gating not a requirement"]` so main verifies green without them.
+  - No legal reviews on T-043, T-051, T-060 or T-061, or anything else.
+  - T-049, T-043 and T-058 are merged; T-051 merge is being finished (UI conflicts resolved as unions with T-043 Listen).

@@ -1029,6 +1029,7 @@ tasks:
     milestone: M0b
     title: "Legal regression: FSK bits stream offered Unrestricted after a legal-class retune into paging (T-037b x T-050)"
     status: done
+    user_decision: "2026-09-13: close without further legal work; retune_legal tests marked #[ignore] (legal gating not a requirement); the merged 080ac83 change was test-only"
     commit: "080ac83 (merged)"
     result: "verdict (a) test too strict, no leak: the only Unrestricted streams were the FM segment's bits/fsk-bursts offered during the re-plumb (FSK chain flushes at detach; old segment finishes before new starts); their bursts at 100.836/100.853 MHz and records 98-1167 ms before t_retune; all paging-window bits streams RestrictedPaging, every record GATED, 0 payload bytes; class from segment source_class, nothing cached across segments. Test now attributes streams by provenance (RF centre + burst times; spectrum by header centre; unattributable = paging, fail-closed; anything offered after retune() returns must be paging); count_found also searches bits-stream encoding; new regression test with positive control; mutation check (forcing bits class Unrestricted fails both tests). 5/5 stable."
     followups:
