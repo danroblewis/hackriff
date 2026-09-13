@@ -1852,13 +1852,13 @@ fn attack_map_anomalies_and_explanations_are_region_indexed_and_evidence_is_pinn
     );
 }
 
-/// Migration 0002 widens the `spur_reason` CHECK for `clock-harmonic` (T-006 review) and keeps
-/// refusing unknown reasons; a clock-harmonic detection round-trips.
+/// The `spur_reason` CHECK accepts `clock-harmonic` (T-006 review; pre-release in-place edit of
+/// 0001) and keeps refusing unknown reasons; a clock-harmonic detection round-trips.
 #[test]
-fn clock_harmonic_spur_reason_round_trips_after_migration_0002() {
+fn clock_harmonic_spur_reason_round_trips() {
     let mut b = base_in(Repository::open_in_memory().unwrap());
     assert_eq!(b.repo.schema_version().unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 2);
+    assert_eq!(SCHEMA_VERSION, 1);
     let mut d = det(b.survey.id, b.prov_id, 434.0e6, 1.5e3, tr(10, 11));
     d.flags.spur_candidate = true;
     d.flags.spur_reason = Some(SpurReason::ClockHarmonic);
@@ -1872,27 +1872,13 @@ fn clock_harmonic_spur_reason_round_trips_after_migration_0002() {
         params![blob(DetectionId::new()), blob(b.survey.id), blob(b.prov_id)],
     );
     assert!(raw.is_err(), "unknown spur reasons stay refused");
-    // A file database migrated in a second connection sees the widened constraint too.
+    // A fresh file database accepts it too.
     let dir = TempDir::new();
-    let path = dir.0.join("m.sqlite");
-    let first = base_in(Repository::open(&path).unwrap());
-    drop(first);
-    let mut again = Repository::open(&path).unwrap();
-    assert_eq!(again.schema_version().unwrap(), 2);
-    let survey: Vec<u8> = again
-        .conn
-        .query_row("SELECT survey_id FROM survey LIMIT 1", [], |r| r.get(0))
-        .unwrap();
-    let prov: Vec<u8> = again
-        .conn
-        .query_row("SELECT provenance_id FROM provenance LIMIT 1", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let mut e = det(b.survey.id, b.prov_id, 434.0e6, 1.5e3, tr(12, 13));
-    e.survey_id = SurveyId::from_uuid(uuid::Uuid::from_slice(&survey).unwrap());
-    e.provenance_ref = ProvenanceId::from_uuid(uuid::Uuid::from_slice(&prov).unwrap());
+    let mut file = base_in(Repository::open(dir.0.join("fresh.sqlite")).unwrap());
+    assert_eq!(file.repo.schema_version().unwrap(), 1);
+    let mut e = det(file.survey.id, file.prov_id, 434.0e6, 1.5e3, tr(12, 13));
     e.flags.spur_candidate = true;
     e.flags.spur_reason = Some(SpurReason::ClockHarmonic);
-    again.insert_detection(&e).unwrap();
+    file.repo.insert_detection(&e).unwrap();
+    assert_eq!(file.repo.detection(e.id).unwrap(), e);
 }

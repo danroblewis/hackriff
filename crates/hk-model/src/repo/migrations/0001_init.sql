@@ -1,3 +1,4 @@
+-- Pre-release: this migration is edited in place until the first release; after that, schema changes are new migrations using table rebuilds, never writable_schema.
 -- hackriff relational schema v1 (T-002; docs/07 §2, ADR-0006).
 --
 -- Conventions:
@@ -87,7 +88,7 @@ CREATE TABLE detection (
     peak_dbm          REAL,
     clip_count        INTEGER NOT NULL CHECK (clip_count >= 0),
     detector_version  TEXT    NOT NULL,
-    spur_reason       TEXT    CHECK (spur_reason IN ('ref-harmonic', 'dc', 'lo-relative', 'comb', 'spur-map')),
+    spur_reason       TEXT    CHECK (spur_reason IN ('ref-harmonic', 'dc', 'lo-relative', 'comb', 'spur-map', 'clock-harmonic')),
     spur_mask_id      BLOB    REFERENCES spur_mask (spur_id),
     CHECK (spur_reason IS NULL OR (flags & 2) != 0),
     CHECK ((spur_reason IS 'spur-map') = (spur_mask_id IS NOT NULL)),

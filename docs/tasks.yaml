@@ -101,9 +101,10 @@ tasks:
     dod: floor within +/-1 dB on synthetic; per-bin and per-channel estimates; feeds thresholds
   - id: T-006
     title: CFAR detection + burst records
-    status: in-progress
+    status: done
+    commit: "6891727 + review fixes 1e5bc99 + in-place schema edit 855ce9f (merged)"
     wide_reference_limits: "from T-005 re-review #3: wide-signal interior coverage degrades beyond ~2000 bins (16k FFT: 3072-bin 70 %, 6144-bin 33.5 %); signals >55 % of span and soft edges get 0 %; band-pass accessory/external LNA passband needs response calibration (935x Pfa otherwise)"
-    review: "Opus review FIX-BEFORE-MERGE -> fixed 1e5bc99: per-split component ownership (no permanent fusion; impulsive runs never merge), bounded components (dense-frame skip >1024 runs, cap 2048, redirects, per-component links, early-stopping comb MC), integration slots sized from config, branches per DetectionProfile, floor-step guard (notch test now 0 false boxes), clock-harmonic spur rule (434.000 MHz line flagged), full-chain FA 0 in 1.02 MHz.h. Pending before merge: replace writable_schema migration with pre-release in-place edit of 0001_init.sql; focused re-probe by the original reviewer"
+    review: "Opus review FIX-BEFORE-MERGE -> fixed; timeboxed re-probe MERGE (fusion bounded to one box; dense skip never triggers on real fixtures at 4k-65k bins; memory flat over 150k churning frames). Follow-ups split to T-028/T-029 and T-007/T-027 notes"
     s4_inputs: "block FCME (256/hop 64, Pfa 1e-3 Gamma(n)) per-frame floor; OS-CFAR N=32 G=4 k=24 OR floor branch; on Pfa 1e-6 / off Pfa 1e-3 (never fixed -3 dB); min 3 frames before gap-merge (2); impulsive-frame gate; emitter confirmation by repeat or >=1 s integration; real-scene FA is a monitored metric, synthetic/terminated FA is the CI gate"
     followups_from_T-002_review: "detection region query is f-bounded only (add R*Tree on f_lo,f_hi,t_start,t_end or time-bucketing); populate detector_version, peak_level_dbfs, clip_count; overload->clipped enforced by repo"
     deps: [T-005]
@@ -118,7 +119,9 @@ tasks:
     dod: OS-CFAR + hysteresis + min-duration; false-alarm bound met (informed by spike S4); Detection rows written
   - id: T-007
     title: burst-tracking (tracks, periodicity, duty cycle, hop set)
-    status: todo
+    status: in-progress
+    followups_from_T-006_reprobe: "side runs kept at a split skip min-duration (1-frame 3-pixel records possible); a bridge on the split frame fuses two 1 s boxes - tracking must tolerate"
+    note_start: "launched 2026-09-13 on the T-006 branch (1e5bc99) ahead of its merge to cut critical-path wait (user timebox steer); merges main once T-006 lands"
     followups_from_T-002_review: "track region query missing; emitter region query over-matches hoppers/gaps (hop-set or tile-backed history)"
     deps: [T-006]
     parallel_group: C
@@ -147,7 +150,8 @@ tasks:
     dod: N-channel PFB with tested isolation; DDC to arbitrary center/bw; feeds demods
   - id: T-009
     title: sweep-survey + first (simple) attention scheduler
-    status: todo
+    status: in-progress
+    note_start: "launched 2026-09-13 on the T-006 branch (1e5bc99) ahead of its merge to cut critical-path wait (user timebox steer); merges main once T-006 lands"
     deps: [T-003, T-006]
     parallel_group: E
     core_interface: true
@@ -407,6 +411,7 @@ tasks:
   - id: T-027
     title: Pipeline assembly - hackriffd composes source, ring, STFT, floor, detection, history, stream output and plugins under a ScanPlan
     status: todo
+    followups_from_T-006_reprobe: "records spanning dense-skipped frames or dropped runs carry no flag (only DetectorStats counters); at 65536 bins avg 2 only 2/7 known FM stations detected - choose a resolution/floor-block combination"
     deps: [T-006, T-009, T-016, T-017]
     parallel_group: J
     core_interface: true
@@ -418,6 +423,30 @@ tasks:
     effort: high
     followups_from_T-015_review: "two SQLite write txns per decode under the ingest lock can back up readsb to a stall kill at busy sites (batch); readsb idle keepalive; plugin decode sample_index late by ~readsb block + pipe buffering (~40 ms)"
     note: "added by coordinator 2026-09-13: M0 DoD needs a runnable survey on the device and T-024's e2e tests need a composed pipeline; no existing task owned the composition"
+  - id: T-028
+    title: Detection floor-step guard hardening for notch / filter-bank accessories (plateau exemption bypass, OS-only blind spot)
+    status: todo
+    deps: [T-006, T-005]
+    parallel_group: C
+    use_cases: [AWARE-036, AWARE-042]
+    acceptance: notch below bin N plus a second down-step is guarded (0 phantoms on flat noise); wide flat signals next to a notch edge keep >=80 % interior coverage (shape-aware wide reference inside guarded zones once the T-005 wide floor is merged)
+    area: crates/hk-detect
+    needs: none
+    model: opus
+    effort: medium
+    note: "follow-up from T-006 re-probe (2026-09-13): a notch below bin 1200 with a second down-step at 3200 read as a plateau -> 23 phantoms (21 confirmed); OS-only in guarded zone misses flat signals wider than ~16 bins (41-bin +15 dB: 0 records; 300-bin: 84.5 % -> 0.2 %). Must land before FM notch / filter-bank field use"
+  - id: T-029
+    title: Floor-tracker follow-ups after T-005 merge (items listed in the T-005 final-round report)
+    status: todo
+    deps: [T-005]
+    parallel_group: C
+    use_cases: [AWARE-006, SPACE-050]
+    acceptance: each listed follow-up fixed or explicitly deferred with rationale
+    area: crates/hk-dsp/src/floor, crates/hk-context (adapter)
+    needs: none
+    model: opus
+    effort: medium
+    note: "placeholder populated when T-005 merges (user timebox steer 2026-09-13)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

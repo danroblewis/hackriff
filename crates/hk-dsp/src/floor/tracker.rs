@@ -1,18 +1,19 @@
 //! The streaming noise-floor tracker: one [`FloorFrame`] per [`SpectrumFrame`], plus
-//! [`FloorEvent`] episodes. See the [module docs](super) for the state machine.
+//! [`FloorEvent`]s. See the [module docs](super) for the floors and the event model.
 
 use std::ops::Range;
 
 use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_model::SampleTime;
 
-use super::blocks::{fill_invalid, sliding_min};
+use super::blocks::fill_invalid;
+use super::episodes::{Engine, EventCtx, Frame, Stamp, Timing};
+use super::wide::{ResponseShape, normalised_blocks, wide_blocks};
 use super::{
     AveragingModel, BlockConfig, BlockFcme, BlockLayout, BlockPercentile, FcmeConfig,
     FloorConfigError, FloorMethod, PercentileConfig, QuantisationFloor, check_positive,
     check_probability, db_ratio, gamma, median_in_place, occupancy_from_count,
 };
-use crate::spectrum::Spectrum;
 use crate::stft::SpectrumFrame;
 use crate::window::WindowKind;
 
@@ -25,7 +26,8 @@ pub const FLOOR_RESET_ON: Discontinuity = Discontinuity::from_bits_truncate(
         | Discontinuity::GAP.bits(),
 );
 
-/// Impulsive-frame gate settings (S4 §5).
+/// Band-wide impulsive-frame gate settings (S4 §5). The gate only flags frames; it never
+/// re-seeds the slow floor (that is [`SlowFloorConfig`]'s per-block gate).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImpulsiveGateConfig {
     /// Flag a frame when its band floor rises this far above the running median, dB (0.5).
@@ -34,8 +36,8 @@ pub struct ImpulsiveGateConfig {
     pub history_frames: usize,
     /// Frames of history before flagging; also the warm-up that seeds the slow floor (8).
     pub min_history: usize,
-    /// A flagged run lasting this long is a level change, not a burst: the gate releases and
-    /// re-seeds (0.1 s).
+    /// A flagged run lasting this long is a level change: the gate releases and re-seeds its
+    /// history from the run (0.1 s).
     pub max_duration_s: f64,
 }
 
@@ -50,26 +52,65 @@ impl Default for ImpulsiveGateConfig {
     }
 }
 
+/// Per-block slow-floor gate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SlowFloorConfig {
+    /// A block whose per-frame floor is more than this from its slow floor does not update it,
+    /// dB (0.5). The excursion continues while it stays beyond half of this.
+    pub settle_db: f64,
+    /// A sub-threshold excursion lasting this long is adopted: the slow floor is re-seeded at the
+    /// mean of its within-threshold frames, seconds (0.5). Rises and falls that look like
+    /// confirming floor changes are never adopted.
+    pub settle_s: f64,
+}
+
+impl Default for SlowFloorConfig {
+    fn default() -> Self {
+        Self {
+            settle_db: 0.5,
+            settle_s: 0.5,
+        }
+    }
+}
+
 /// Floor-change episode settings (AWARE-006).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FloorChangeConfig {
-    /// A block is elevated (or depressed) when its per-frame floor is this far from its slow
-    /// floor, dB (3).
+    /// A block starts a rise (fall) when its per-frame floor is this far above (below) its
+    /// reference, dB (3). A run confirms when its recent excess (EMA, τ = `confirm_s`/3) is
+    /// still beyond this.
     pub threshold_db: f64,
-    /// An episode ends when its region is back within this of the baseline, dB (1.5).
+    /// Hysteresis: a rise run continues, and a member block counts as returned, relative to this
+    /// excess over the baseline, dB (1.5).
     pub end_threshold_db: f64,
-    /// Continuous elevation needed to confirm a rise or fall, seconds (1.0).
+    /// Run length that confirms a rise or fall, seconds (1.0).
     pub confirm_s: f64,
-    /// Continuous return needed to end an episode, seconds (1.0).
+    /// Continuous return that takes a block out of its episode, seconds (1.0).
     pub end_s: f64,
-    /// After an episode ends or a fall is adopted, its blocks start no new run for this long,
-    /// seconds (2.0).
+    /// After a block returns or falls, it cannot seed a new confirmation for this long (it can
+    /// still join a neighbour's), seconds (2.0).
     pub holdoff_s: f64,
+    /// Long reference time constant, seconds (120): catches rises slower than the slow floor
+    /// follows (a 10 s ramp).
+    pub long_time_constant_s: f64,
+    /// A fall confirms only when at least this fraction of its last `confirm_s` of frames are
+    /// below −`threshold_db` (0.5): a dropout of a few frames never confirms.
+    pub fall_min_hit_fraction: f64,
+    /// A falling block with fewer hit frames than this fraction is interrupted; a fall is
+    /// `interrupted` when most of its blocks are (0.9).
+    pub fall_hit_fraction: f64,
+    /// Edge blocks of a fall with a hit fraction below this times the group median are dropped
+    /// (0.5).
+    pub edge_hit_fraction: f64,
+    /// An episode open this long since confirmation ends with [`EndReason::Rebaselined`] and its
+    /// level becomes the floor (`Some(600 s)`; `None` never).
+    pub rebaseline_s: Option<f64>,
     /// Noise-like when the region's mean spectral kurtosis is within this of 1 (0.15).
     pub sk_tolerance: f64,
-    /// Structured when the frame-to-frame standard deviation of the excess exceeds this, dB (1.5).
+    /// Structured when the excess noise (std of first differences / √2) exceeds this, dB (1.5).
     pub max_excess_std_db: f64,
-    /// Also emit events for [`FloorChangeClass::Structured`] episodes (false).
+    /// Emit events for [`FloorChangeClass::Structured`] episodes (true; consumers filter by
+    /// class).
     pub emit_structured: bool,
 }
 
@@ -81,27 +122,60 @@ impl Default for FloorChangeConfig {
             confirm_s: 1.0,
             end_s: 1.0,
             holdoff_s: 2.0,
+            long_time_constant_s: 120.0,
+            fall_min_hit_fraction: 0.5,
+            fall_hit_fraction: 0.9,
+            edge_hit_fraction: 0.5,
+            rebaseline_s: Some(600.0),
             sk_tolerance: 0.15,
             max_excess_std_db: 1.5,
-            emit_structured: false,
+            emit_structured: true,
         }
     }
 }
 
-/// The wide-signal detection reference ([`FloorKind::Wide`]).
+/// The wide-signal detection reference and the learned response shape (see
+/// [`FloorKind::Wide`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WideReferenceConfig {
-    /// Sliding minimum over `±half_width_blocks` block floors (16: ±1024 bins with hop 64).
+    /// Window of the lower envelope, `±` blocks (16: ±1024 bins with hop 64).
     pub half_width_blocks: usize,
-    /// Use the per-frame floor where it is within this of the sliding minimum, dB (1.5).
-    pub switch_db: f64,
+    /// A block is step-like when it exceeds the slope-limited envelope by more than this, dB
+    /// (3.5).
+    pub step_db: f64,
+    /// Slope allowed in the envelope, dB per block hop (0.15).
+    pub slope_db_per_block: f64,
+    /// Quantile of the block floors below which the floor is never read as a signal edge, and
+    /// the shape's reference level (0.4).
+    pub floor_quantile: f64,
+    /// Learn the per-bin response shape (true).
+    pub learn_shape: bool,
+    /// Shape IIR time constant, seconds (1.0; a cumulative mean at segment start).
+    pub shape_time_constant_s: f64,
+    /// Features narrower than this are not part of the shape, bins (65).
+    pub shape_min_width_bins: usize,
+    /// Shape values within this of the reference level are 1, dB (0.5).
+    pub shape_deadband_db: f64,
+    /// Fast release/attack: a bin whose mean deviation from its learned level over a window of
+    /// `shape_snap_s` exceeds this (and six standard errors) jumps to the new level, dB (1.0).
+    pub shape_snap_db: f64,
+    /// The fast release/attack window, seconds (0.4).
+    pub shape_snap_s: f64,
 }
 
 impl Default for WideReferenceConfig {
     fn default() -> Self {
         Self {
             half_width_blocks: 16,
-            switch_db: 1.5,
+            step_db: 3.5,
+            slope_db_per_block: 0.15,
+            floor_quantile: 0.4,
+            learn_shape: true,
+            shape_time_constant_s: 1.0,
+            shape_min_width_bins: 65,
+            shape_deadband_db: 0.5,
+            shape_snap_db: 1.0,
+            shape_snap_s: 0.4,
         }
     }
 }
@@ -121,11 +195,13 @@ pub struct FloorConfig {
     pub occupancy_pfa: f64,
     /// Slow floor IIR time constant, seconds (1.0).
     pub slow_time_constant_s: f64,
-    /// Impulsive-frame gate.
+    /// Per-block slow-floor gate.
+    pub slow: SlowFloorConfig,
+    /// Band-wide impulsive-frame gate.
     pub impulsive: ImpulsiveGateConfig,
     /// Floor-change episodes.
     pub change: FloorChangeConfig,
-    /// Wide-signal reference.
+    /// Wide-signal reference and response shape.
     pub wide: WideReferenceConfig,
     /// Reported model uncertainty, dB (±0.5).
     pub uncertainty_db: f32,
@@ -148,6 +224,7 @@ impl Default for FloorConfig {
             averaging: AveragingModel::Effective,
             occupancy_pfa: 1e-2,
             slow_time_constant_s: 1.0,
+            slow: SlowFloorConfig::default(),
             impulsive: ImpulsiveGateConfig::default(),
             change: FloorChangeConfig::default(),
             wide: WideReferenceConfig::default(),
@@ -157,6 +234,22 @@ impl Default for FloorConfig {
             tune_tolerance_bins: 0.25,
             reset_on: FLOOR_RESET_ON,
         }
+    }
+}
+
+fn check_fraction_closed(name: &'static str, value: f64) -> Result<(), FloorConfigError> {
+    if value > 0.0 && value <= 1.0 {
+        Ok(())
+    } else {
+        Err(FloorConfigError::Fraction { name, value })
+    }
+}
+
+fn check_non_negative(name: &'static str, value: f64) -> Result<(), FloorConfigError> {
+    if value >= 0.0 && value.is_finite() {
+        Ok(())
+    } else {
+        Err(FloorConfigError::NonPositive { name, value })
     }
 }
 
@@ -173,6 +266,8 @@ impl FloorConfig {
         }
         check_probability("occupancy_pfa", self.occupancy_pfa)?;
         check_positive("slow_time_constant_s", self.slow_time_constant_s)?;
+        check_positive("slow.settle_db", self.slow.settle_db)?;
+        check_positive("slow.settle_s", self.slow.settle_s)?;
         let g = &self.impulsive;
         check_positive("impulsive.rise_db", g.rise_db)?;
         check_positive("impulsive.max_duration_s", g.max_duration_s)?;
@@ -193,20 +288,25 @@ impl FloorConfig {
         }
         check_positive("change.confirm_s", c.confirm_s)?;
         check_positive("change.end_s", c.end_s)?;
+        check_non_negative("change.holdoff_s", c.holdoff_s)?;
+        check_positive("change.long_time_constant_s", c.long_time_constant_s)?;
+        check_fraction_closed("change.fall_hit_fraction", c.fall_hit_fraction)?;
+        check_fraction_closed("change.fall_min_hit_fraction", c.fall_min_hit_fraction)?;
+        check_fraction_closed("change.edge_hit_fraction", c.edge_hit_fraction)?;
+        if let Some(r) = c.rebaseline_s {
+            check_positive("change.rebaseline_s", r)?;
+        }
         check_positive("change.sk_tolerance", c.sk_tolerance)?;
         check_positive("change.max_excess_std_db", c.max_excess_std_db)?;
-        if !(c.holdoff_s >= 0.0 && c.holdoff_s.is_finite()) {
-            return Err(FloorConfigError::NonPositive {
-                name: "change.holdoff_s",
-                value: c.holdoff_s,
-            });
-        }
-        if !(self.wide.switch_db >= 0.0 && self.tune_tolerance_bins >= 0.0) {
-            return Err(FloorConfigError::NonPositive {
-                name: "wide.switch_db / tune_tolerance_bins",
-                value: self.wide.switch_db.min(self.tune_tolerance_bins),
-            });
-        }
+        let w = &self.wide;
+        check_positive("wide.step_db", w.step_db)?;
+        check_non_negative("wide.slope_db_per_block", w.slope_db_per_block)?;
+        check_probability("wide.floor_quantile", w.floor_quantile)?;
+        check_positive("wide.shape_time_constant_s", w.shape_time_constant_s)?;
+        check_non_negative("wide.shape_deadband_db", w.shape_deadband_db)?;
+        check_positive("wide.shape_snap_db", w.shape_snap_db)?;
+        check_positive("wide.shape_snap_s", w.shape_snap_s)?;
+        check_non_negative("tune_tolerance_bins", self.tune_tolerance_bins)?;
         check_positive("uncertainty_db", f64::from(self.uncertainty_db))
     }
 }
@@ -294,7 +394,7 @@ impl GainKey {
 /// Which tracker floor to read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FloorKind {
-    /// Per-frame FCME floor. Reads a flat signal wider than ~a block as floor.
+    /// Per-frame floor (block FCME, shaped). Reads a flat signal wider than ~a block as floor.
     Frame,
     /// Wide-signal reference: the detection reference for the floor branch and the OS guard.
     Wide,
@@ -334,26 +434,35 @@ pub struct ChannelFloor {
     pub quantisation_limited: bool,
 }
 
-/// What a [`FloorEvent`] reports.
+/// What a [`FloorEvent`] reports. See the [event model](super#floor-change-events).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FloorEventKind {
-    /// A confirmed floor rise: opens an episode (T-020: open an Anomaly `noise-floor-rise`).
+    /// A confirmed floor rise opens an episode (T-020: open an Anomaly `noise-floor-rise`).
     Rise,
-    /// The episode's region returned to its baseline, or the segment reset: closes the episode.
+    /// Blocks joined an open episode (a wider or overlapping rise); `change_bins` is the added
+    /// extent and `onset_*` its onset.
+    Extend,
+    /// Blocks of an open episode returned while others are still elevated; `change_bins` is the
+    /// returned extent.
+    Update,
+    /// The episode closed: see [`EndReason`].
     End,
-    /// A confirmed floor drop below the slow floor outside any episode (adopted as the new
-    /// floor; informational).
+    /// A confirmed drop below the floor outside any episode (standalone; its own id). The slow
+    /// floor adopts it. A bare Fall may close a floor rise the tracker lost track of.
     Fall,
+    /// The receiver state changed (gain, tune, rate, resolution): the episode's state can no
+    /// longer be judged and it is closed. The physical rise may continue.
+    Unknown,
 }
 
 /// How a floor change was judged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FloorChangeClass {
-    /// Steady (excess std within limit) and Gaussian within the frame (mean SK within tolerance
+    /// Steady (excess noise within limit) and Gaussian within the frame (mean SK within tolerance
     /// of 1): a noise-floor change.
     NoiseLike,
-    /// Bursty or modulated within frames (SK away from 1) or unsteady across frames: a wide
-    /// structured emission, not a floor rise. Not emitted unless configured.
+    /// Bursty or modulated within frames (SK away from 1) or noisy across frames: a wide
+    /// structured emission rather than a floor rise.
     Structured,
     /// Steady, but the spectrum carried no SK to check.
     Unverified,
@@ -362,70 +471,96 @@ pub enum FloorChangeClass {
 /// Why an episode ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EndReason {
-    /// The region stayed within `end_threshold_db` of the baseline for `end_s`.
+    /// Every member block stayed within `end_threshold_db` of its baseline (after background
+    /// drift) for `end_s`.
     Returned,
-    /// The segment reset (gain/tune/rate change, gap, resolution change).
+    /// Across a comparable reset (a gap or forced reset with the same receiver state), the new
+    /// segment's warm-up level was back at the baseline. `onset_*` is the resetting frame.
     Reset,
+    /// A rise bridged it to an older episode, which continues (`merged_into`).
+    Merged,
+    /// Open for `rebaseline_s`: its level is now the floor.
+    Rebaselined,
 }
 
-/// A floor-change event. A `Rise` and its `End` share `episode`.
+/// A floor-change event. All events of one episode share `episode`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FloorEvent {
-    /// Rise, End or Fall.
+    /// What happened.
     pub kind: FloorEventKind,
-    /// Episode id (unique per tracker).
+    /// Episode id (unique per tracker; a Fall has its own).
     pub episode: u64,
-    /// Discriminator verdict.
+    /// Discriminator verdict of the confirmation group that opened the episode.
     pub class: FloorChangeClass,
     /// For `End`.
     pub end_reason: Option<EndReason>,
-    /// Frame counter of the first frame of this change (Rise/Fall: first elevated or depressed
-    /// frame; End: first returned frame, or the resetting frame).
+    /// For `End` with [`EndReason::Merged`]: the episode that continues.
+    pub merged_into: Option<u64>,
+    /// For a `Rise` that splits an open episode whose members became disconnected: that
+    /// episode's id. The new episode continues part of it (same onset and class).
+    pub split_from: Option<u64>,
+    /// For `Fall`: most of its blocks were back near the old floor on some frames (an
+    /// intermittent signal the slow floor had followed), so this corrects the floor rather than
+    /// reporting a drop of it.
+    pub interrupted: bool,
+    /// Frame counter of the first frame of this change: Rise/Fall/Extend: the first elevated or
+    /// depressed frame of the (added) blocks; Update/End: the frame from which the leaving blocks stayed back (a comparable
+    /// reset's frame for End(Reset)); Unknown/End(Merged/Rebaselined): the frame that produced it.
     pub onset_seq: u64,
-    /// Time of that frame (the change happened within it).
+    /// Time of that frame.
     pub onset_t: SampleTime,
-    /// Frame that confirmed the change.
+    /// Frame that produced the event.
     pub confirmed_seq: u64,
-    /// Its time (`onset_t + confirm_s` for rises and falls).
+    /// Its time.
     pub confirmed_t: SampleTime,
     /// Onset of the episode's rise (equal to `onset_t` for Rise and Fall).
     pub episode_onset_t: SampleTime,
-    /// Rise/Fall: onset to confirmation. End: rise onset to return onset (the episode length).
+    /// Rise/Extend/Fall: onset to confirmation. End: episode onset to return onset. Update and
+    /// Unknown: episode onset to this frame.
     pub duration_s: f64,
-    /// Affected bins.
+    /// The episode's extent after this event (hull of its member blocks; at close for End and
+    /// Unknown).
     pub bins: Range<usize>,
-    /// Lower edge, Hz.
+    /// The bins this event is about: Rise/Fall/End/Unknown: `bins`; Extend: the added blocks;
+    /// Update: the returned blocks.
+    pub change_bins: Range<usize>,
+    /// Lower edge of `change_bins`, Hz.
+    pub change_f_lo_hz: f64,
+    /// Upper edge of `change_bins`, Hz.
+    pub change_f_hi_hz: f64,
+    /// Lower edge of `bins`, Hz.
     pub f_lo_hz: f64,
-    /// Upper edge, Hz.
+    /// Upper edge of `bins`, Hz.
     pub f_hi_hz: f64,
-    /// Fraction of the span covered.
+    /// Fraction of the span covered by member blocks (≤ `bins.len()` / span).
     pub band_fraction: f32,
-    /// Slow floor before the change (median over the region's blocks), dBFS/Hz.
+    /// Floor before the change (median of the members' baselines), dBFS/Hz.
     pub baseline_dbfs_per_hz: f32,
     /// Segment the baseline belongs to.
     pub baseline_segment: u64,
-    /// Mean level over the confirmation run (median over blocks), dBFS/Hz.
+    /// Rise/Fall: mean level over the confirmation run (median over blocks); later events: the
+    /// members' recent level; dBFS/Hz.
     pub level_dbfs_per_hz: f32,
     /// `level − baseline`, dB.
     pub step_db: f32,
-    /// Largest region excess over the baseline seen during the episode, dB.
+    /// Largest median member excess over the baseline seen during the episode, dB.
     pub peak_step_db: f32,
-    /// Statistical uncertainty of `step_db` (run standard error ⊕ slow-floor noise), dB. The
-    /// model uncertainty largely cancels in a same-gain difference.
+    /// Statistical uncertainty of the Rise's `step_db` (run standard error ⊕ slow-floor noise),
+    /// dB. The model uncertainty largely cancels in a same-gain difference.
     pub step_uncertainty_db: f32,
     /// Model uncertainty of each absolute level, dB.
     pub uncertainty_db: f32,
-    /// Region mean spectral kurtosis over the run (`None` without SK).
+    /// Mean spectral kurtosis over the Rise's confirmation run (`None` without SK).
     pub sk: Option<f32>,
-    /// Frame-to-frame standard deviation of the block excess over the run, dB.
+    /// Excess noise over the Rise's confirmation run (std of first differences / √2), dB.
     pub excess_std_db: f32,
     /// The baseline was quantisation-limited (a rise is then overstated relative to RF).
     pub quantisation_limited_before: bool,
-    /// Receiver state.
+    /// Receiver state when the episode opened.
     pub gain: GainKey,
-    /// Segment of the episode.
+    /// Segment of the frame that produced the event.
     pub segment: u64,
-    /// Provenance of the frame that produced this event.
+    /// Provenance of that frame.
     pub provenance: ProvenanceHandle,
 }
 
@@ -458,14 +593,16 @@ pub struct FloorFrame {
     pub bin_width_hz: f64,
     /// At least one block was valid. When false, `floor` repeats the slow floor.
     pub valid: bool,
-    /// Per-frame per-bin FCME floor, linear FS²/Hz.
+    /// Per-frame per-bin floor ([`FloorKind::Frame`]), linear FS²/Hz.
     pub floor: Vec<f32>,
     /// Wide-signal reference, linear FS²/Hz: the detection reference (see [`FloorKind::Wide`]).
     pub wide_floor: Vec<f32>,
+    /// Learned per-bin response shape `S` (≤ 1; 1 where the floor has no downward feature).
+    pub shape: Vec<f32>,
     /// Median of the per-frame block floors, linear FS²/Hz.
     pub band_floor: f32,
-    /// Per-frame block floors (see [`NoiseFloorTracker::layout`]); invalid blocks hold the
-    /// nearest valid block's value.
+    /// Per-frame block floors (raw block FCME, see [`NoiseFloorTracker::layout`]); invalid
+    /// blocks hold the nearest valid block's value.
     pub block_floor: Vec<f32>,
     /// Per-block FCME validity.
     pub block_valid: Vec<bool>,
@@ -498,13 +635,13 @@ pub struct FloorFrame {
     pub quantisation_margin_db: f32,
     /// Band floor within the margin of the quantisation floor.
     pub quantisation_limited: bool,
-    /// Broadband impulsive frame: does not update the slow floor.
+    /// Broadband impulsive frame (band-wide gate).
     pub impulsive: bool,
-    /// This frame ended a sustained flagged run: the gate released and re-seeded.
+    /// This frame ended a sustained flagged run: the gate released and re-seeded its history.
     pub gate_released: bool,
     /// Band floor over its running median, dB (the gate statistic).
     pub impulsive_excess_db: f32,
-    /// Active floor-change episodes (all classes).
+    /// Open floor-change episodes (all classes, including ones suspended across a reset).
     pub active_episodes: u32,
 }
 
@@ -528,6 +665,7 @@ impl FloorFrame {
             valid: false,
             floor: vec![0.0; bins],
             wide_floor: vec![0.0; bins],
+            shape: vec![1.0; bins],
             band_floor: 0.0,
             block_floor: vec![0.0; blocks],
             block_valid: vec![false; blocks],
@@ -626,279 +764,33 @@ pub struct FloorStats {
     pub impulsive_frames: u64,
     /// Sustained flagged runs released as level changes.
     pub gate_releases: u64,
+    /// Sub-threshold excursions adopted into the slow floor (per block).
+    pub adoptions: u64,
     /// `Rise` events emitted.
     pub rise_events: u64,
-    /// Episodes ended (all classes, returned or reset).
+    /// `Extend` events emitted.
+    pub extend_events: u64,
+    /// `Update` events emitted.
+    pub update_events: u64,
+    /// Episodes closed for any reason, emitted or not (End, Unknown).
     pub episode_ends: u64,
+    /// Episodes merged into another.
+    pub merges: u64,
+    /// Episodes split off a disconnected episode.
+    pub splits: u64,
+    /// Episodes ended by `rebaseline_s`.
+    pub rebaselines: u64,
+    /// `Unknown` events emitted.
+    pub unknown_events: u64,
     /// `Fall` events emitted.
     pub level_falls: u64,
-    /// Interrupted falls adopted silently (the slow floor had followed an intermittent signal).
+    /// Falls flagged `interrupted`.
     pub floor_corrections: u64,
-    /// Episodes judged structured.
+    /// Episodes whose opening group was judged structured.
     pub structured_episodes: u64,
 }
 
 type ResolutionKey = (usize, usize, u32, WindowKind);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BlockState {
-    Idle,
-    Holdoff(u64),
-    Up,
-    Down,
-    Episode(usize),
-}
-
-#[derive(Clone, Copy, Debug)]
-struct RunAcc {
-    onset_seq: u64,
-    onset_t: SampleTime,
-    frames: u64,
-    used: u64,
-    sum_floor: f64,
-    sum_ex: f64,
-    sum_ex2: f64,
-    sum_sk: f64,
-    sk_n: u64,
-    /// Frame counter of the last frame beyond the threshold in the run's direction.
-    last_hit: u64,
-    /// A fall run survived frames back within the threshold.
-    interrupted: bool,
-}
-
-impl RunAcc {
-    fn start(seq: u64, t: SampleTime, frames: u64, counter: u64) -> Self {
-        Self {
-            onset_seq: seq,
-            onset_t: t,
-            frames,
-            used: 0,
-            sum_floor: 0.0,
-            sum_ex: 0.0,
-            sum_ex2: 0.0,
-            sum_sk: 0.0,
-            sk_n: 0,
-            last_hit: counter,
-            interrupted: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct Episode {
-    active: bool,
-    id: u64,
-    class: FloorChangeClass,
-    emitted: bool,
-    b0: usize,
-    b1: usize,
-    bins: Range<usize>,
-    f_lo_hz: f64,
-    f_hi_hz: f64,
-    band_fraction: f32,
-    fs: f64,
-    onset_t: SampleTime,
-    baseline_db: f32,
-    level_db: f32,
-    step_db: f32,
-    peak_step_db: f32,
-    step_unc_db: f32,
-    sk: Option<f32>,
-    excess_std_db: f32,
-    q_limited_before: bool,
-    segment: u64,
-    gain: GainKey,
-    end_frames: u64,
-    end_onset: (u64, SampleTime),
-}
-
-impl Episode {
-    fn inactive(t: SampleTime, gain: GainKey) -> Self {
-        Self {
-            active: false,
-            id: 0,
-            class: FloorChangeClass::Unverified,
-            emitted: false,
-            b0: 0,
-            b1: 0,
-            bins: 0..0,
-            f_lo_hz: 0.0,
-            f_hi_hz: 0.0,
-            band_fraction: 0.0,
-            fs: 1.0,
-            onset_t: t,
-            baseline_db: 0.0,
-            level_db: 0.0,
-            step_db: 0.0,
-            peak_step_db: 0.0,
-            step_unc_db: 0.0,
-            sk: None,
-            excess_std_db: 0.0,
-            q_limited_before: false,
-            segment: 0,
-            gain,
-            end_frames: 0,
-            end_onset: (0, t),
-        }
-    }
-
-    fn event(
-        &self,
-        kind: FloorEventKind,
-        end_reason: Option<EndReason>,
-        onset: (u64, SampleTime),
-        confirmed: (u64, SampleTime),
-        uncertainty_db: f32,
-        provenance: &ProvenanceHandle,
-    ) -> FloorEvent {
-        let secs = |a: SampleTime, b: SampleTime| {
-            b.sample_index.saturating_sub(a.sample_index) as f64 / self.fs
-        };
-        let duration_s = match kind {
-            FloorEventKind::End => secs(self.onset_t, onset.1),
-            _ => secs(onset.1, confirmed.1),
-        };
-        FloorEvent {
-            kind,
-            episode: self.id,
-            class: self.class,
-            end_reason,
-            onset_seq: onset.0,
-            onset_t: onset.1,
-            confirmed_seq: confirmed.0,
-            confirmed_t: confirmed.1,
-            episode_onset_t: self.onset_t,
-            duration_s,
-            bins: self.bins.clone(),
-            f_lo_hz: self.f_lo_hz,
-            f_hi_hz: self.f_hi_hz,
-            band_fraction: self.band_fraction,
-            baseline_dbfs_per_hz: self.baseline_db,
-            baseline_segment: self.segment,
-            level_dbfs_per_hz: self.level_db,
-            step_db: self.step_db,
-            peak_step_db: self.peak_step_db,
-            step_uncertainty_db: self.step_unc_db,
-            uncertainty_db,
-            sk: self.sk,
-            excess_std_db: self.excess_std_db,
-            quantisation_limited_before: self.q_limited_before,
-            gain: self.gain,
-            segment: self.segment,
-            provenance: provenance.clone(),
-        }
-    }
-}
-
-struct GroupStats {
-    onset: (u64, SampleTime),
-    baseline_db: f32,
-    level_db: f32,
-    step_db: f32,
-    excess_std_db: f32,
-    step_stat_db: f32,
-    sk: Option<f32>,
-}
-
-fn db(x: f32) -> f32 {
-    10.0 * x.max(1e-37).log10()
-}
-
-/// Summary of a confirmed run group (`a`, `b` are scratch of at least `run.len()`).
-fn group_stats(
-    run: &[RunAcc],
-    slow: &[f32],
-    floor: &[f32],
-    a: &mut [f32],
-    b: &mut [f32],
-) -> GroupStats {
-    let k = run.len();
-    let mut onset = (run[0].onset_seq, run[0].onset_t);
-    let (mut var, mut used, mut sk_s, mut sk_n) = (0.0f64, 0.0f64, 0.0f64, 0u64);
-    for j in 0..k {
-        let r = &run[j];
-        a[j] = if r.used > 0 {
-            (r.sum_floor / r.used as f64) as f32
-        } else {
-            floor[j]
-        };
-        b[j] = slow[j];
-        if r.used > 0 {
-            let n = r.used as f64;
-            let m = r.sum_ex / n;
-            var += (r.sum_ex2 / n - m * m).max(0.0);
-            used += n;
-        }
-        sk_s += r.sum_sk;
-        sk_n += r.sk_n;
-        if r.onset_seq < onset.0 {
-            onset = (r.onset_seq, r.onset_t);
-        }
-    }
-    let level = median_in_place(&mut a[..k]);
-    let base = median_in_place(&mut b[..k]);
-    let excess_std = (var / k as f64).sqrt();
-    GroupStats {
-        onset,
-        baseline_db: db(base),
-        level_db: db(level),
-        step_db: db_ratio(level, base),
-        excess_std_db: excess_std as f32,
-        step_stat_db: (excess_std / (used / k as f64).max(1.0).sqrt()) as f32,
-        sk: (sk_n > 0).then(|| (sk_s / sk_n as f64) as f32),
-    }
-}
-
-fn classify(sk: Option<f32>, excess_std_db: f32, cfg: &FloorChangeConfig) -> FloorChangeClass {
-    if f64::from(excess_std_db) > cfg.max_excess_std_db {
-        return FloorChangeClass::Structured;
-    }
-    match sk {
-        None => FloorChangeClass::Unverified,
-        Some(s) if (f64::from(s) - 1.0).abs() <= cfg.sk_tolerance => FloorChangeClass::NoiseLike,
-        Some(_) => FloorChangeClass::Structured,
-    }
-}
-
-/// Mean SK over a block's bins, when the spectrum carries SK.
-fn block_sk(sk: &[f32], range: Range<usize>) -> Option<f64> {
-    if sk.len() < range.end {
-        return None;
-    }
-    let (mut s, mut n) = (0.0f64, 0u32);
-    for &v in &sk[range] {
-        if v.is_finite() {
-            s += f64::from(v);
-            n += 1;
-        }
-    }
-    (n > 0).then(|| s / f64::from(n))
-}
-
-/// Bins covered by blocks `b0..b1`: from half a hop below the first centre to half a hop above
-/// the last, extended to the span edges for the outermost blocks.
-fn region_bins(layout: &BlockLayout, b0: usize, b1: usize, bins: usize) -> Range<usize> {
-    let half_hop = layout.hop_bins() as f64 / 2.0;
-    let lo = if b0 == 0 {
-        0
-    } else {
-        (layout.centre(b0) - half_hop).round() as usize
-    };
-    let hi = if b1 == layout.count() {
-        bins
-    } else {
-        ((layout.centre(b1 - 1) + half_hop).round() as usize).min(bins)
-    };
-    lo..hi.max(lo + 1)
-}
-
-fn edges(spectrum: &Spectrum, bins: &Range<usize>) -> (f64, f64) {
-    let bw = spectrum.bin_width_hz();
-    (
-        spectrum.bin_frequency_hz(bins.start) - bw / 2.0,
-        spectrum.bin_frequency_hz(bins.end - 1) + bw / 2.0,
-    )
-}
 
 fn push_ring(buf: &mut [f32], len: &mut usize, pos: &mut usize, v: f32) {
     let cap = buf.len();
@@ -919,19 +811,15 @@ pub struct NoiseFloorTracker {
     key: Option<GainKey>,
     force_reset: bool,
     next_segment: u64,
-    next_episode: u64,
-    alpha: f64,
-    confirm_frames: u64,
-    end_frames: u64,
-    holdoff_frames: u64,
+    timing: Timing,
     gate_max_frames: u64,
+    shape_alpha: f64,
     quantisation_db: Option<f64>,
     out: Option<FloorFrame>,
-    state: Vec<BlockState>,
-    run: Vec<RunAcc>,
-    baseline: Vec<f32>,
-    flag_sum: Vec<f64>,
+    shape: ResponseShape,
+    engine: Engine,
     warm: Vec<f32>,
+    warm_stamps: Vec<Stamp>,
     warm_count: usize,
     hist: Vec<f32>,
     hist_len: usize,
@@ -941,10 +829,12 @@ pub struct NoiseFloorTracker {
     flag_len: usize,
     flag_pos: usize,
     flag_run: u64,
-    episodes: Vec<Episode>,
     scratch: Vec<f32>,
     scratch2: Vec<f32>,
-    slow_updates: u64,
+    norm_block: Vec<f32>,
+    wide_block: Vec<f32>,
+    scaled: Vec<f32>,
+    updates: u64,
     frame_counter: u64,
     stats: FloorStats,
 }
@@ -954,6 +844,11 @@ impl NoiseFloorTracker {
     pub fn new(config: FloorConfig) -> Result<Self, FloorConfigError> {
         config.validate()?;
         let h = config.impulsive.history_frames;
+        let w = config.impulsive.min_history;
+        let t0 = SampleTime {
+            sample_index: 0,
+            host_time: hk_model::Timestamp::UNIX_EPOCH,
+        };
         Ok(Self {
             fcme: BlockFcme::new(config.fcme, 1.0)?,
             percentile: config
@@ -968,19 +863,15 @@ impl NoiseFloorTracker {
             key: None,
             force_reset: true,
             next_segment: 0,
-            next_episode: 0,
-            alpha: 1.0,
-            confirm_frames: 1,
-            end_frames: 1,
-            holdoff_frames: 0,
+            timing: Timing::default(),
             gate_max_frames: 1,
+            shape_alpha: 1.0,
             quantisation_db: None,
             out: None,
-            state: Vec::new(),
-            run: Vec::new(),
-            baseline: Vec::new(),
-            flag_sum: Vec::new(),
+            shape: ResponseShape::default(),
+            engine: Engine::default(),
             warm: Vec::new(),
+            warm_stamps: vec![(0, t0); w],
             warm_count: 0,
             hist: vec![0.0; h],
             hist_len: 0,
@@ -990,10 +881,12 @@ impl NoiseFloorTracker {
             flag_len: 0,
             flag_pos: 0,
             flag_run: 0,
-            episodes: Vec::new(),
             scratch: Vec::new(),
             scratch2: Vec::new(),
-            slow_updates: 0,
+            norm_block: Vec::new(),
+            wide_block: Vec::new(),
+            scaled: Vec::new(),
+            updates: 0,
             frame_counter: 0,
             stats: FloorStats::default(),
         })
@@ -1019,7 +912,8 @@ impl NoiseFloorTracker {
         self.out.as_ref()
     }
 
-    /// Forces the next frame to start a new segment.
+    /// Forces the next frame to start a new segment. The receiver state is unchanged, so open
+    /// episodes are carried across it (a comparable reset).
     pub fn reset(&mut self) {
         self.force_reset = true;
     }
@@ -1042,6 +936,7 @@ impl NoiseFloorTracker {
             Some(out) => {
                 out.floor.resize(bins, 0.0);
                 out.wide_floor.resize(bins, 0.0);
+                out.shape.resize(bins, 1.0);
                 out.slow_floor.resize(bins, 0.0);
                 out.block_floor.resize(nb, 0.0);
                 out.block_valid.resize(nb, false);
@@ -1051,37 +946,16 @@ impl NoiseFloorTracker {
             None => self.out = Some(FloorFrame::new(bins, nb, frame.provenance.clone(), key)),
         }
         let w = self.config.impulsive.min_history;
-        self.state.resize(nb, BlockState::Idle);
-        self.run.resize(nb, RunAcc::start(0, frame.t, 0, 0));
-        self.baseline.resize(nb, 0.0);
-        self.flag_sum.resize(nb, 0.0);
         self.warm.resize(nb * w, 0.0);
-        self.episodes.clear();
-        self.episodes.resize(nb, Episode::inactive(frame.t, key));
+        self.engine.resize(nb, frame.t, key);
+        self.shape.resize(bins, nb);
         self.scratch.resize(nb, 0.0);
         self.scratch2.resize(nb.max(w), 0.0);
+        self.norm_block.resize(nb, 0.0);
+        self.wide_block.resize(nb, 0.0);
+        self.scaled.resize(bins, 0.0);
         self.layout = Some(layout);
         self.force_reset = true;
-    }
-
-    fn close_episodes(&mut self, frame: &SpectrumFrame, on_event: &mut impl FnMut(&FloorEvent)) {
-        let unc = self.config.uncertainty_db;
-        for ep in self.episodes.iter_mut().filter(|e| e.active) {
-            ep.active = false;
-            self.stats.episode_ends += 1;
-            if ep.emitted {
-                let now = (frame.seq, frame.t);
-                let ev = ep.event(
-                    FloorEventKind::End,
-                    Some(EndReason::Reset),
-                    now,
-                    now,
-                    unc,
-                    &frame.provenance,
-                );
-                on_event(&ev);
-            }
-        }
     }
 
     /// Folds in one spectrum frame; calls `on_event` for each floor-change event and returns the
@@ -1096,27 +970,72 @@ impl NoiseFloorTracker {
         assert!(bins > 0, "empty spectrum");
         let r = &spectrum.resolution;
         let res_key = (r.fft_len, r.overlap, r.n_avg, r.window);
-        if self.resolution != Some(res_key)
-            || self.layout.as_ref().map(BlockLayout::bins) != Some(bins)
-        {
-            self.close_episodes(frame, &mut on_event);
+        let fs = spectrum.sample_rate_hz;
+        let now = (frame.seq, frame.t);
+        let reconfigure = self.resolution != Some(res_key)
+            || self.layout.as_ref().map(BlockLayout::bins) != Some(bins);
+        if reconfigure {
+            if let Some(out) = &self.out {
+                // A new block layout: nothing carries over.
+                let ctx = EventCtx {
+                    now,
+                    provenance: &frame.provenance,
+                    segment: out.segment,
+                    fs,
+                    uncertainty_db: self.config.uncertainty_db,
+                };
+                self.engine
+                    .on_reset(false, &ctx, &[], &mut self.stats, &mut on_event);
+            }
             self.configure(frame);
         }
         let key = GainKey::of(frame);
-        let fs = spectrum.sample_rate_hz;
         let tol_hz = self.config.tune_tolerance_bins * spectrum.bin_width_hz();
+        let key_changed = !self.key.is_some_and(|k| k.matches(&key, tol_hz));
         let reset = self.force_reset
-            || !self.key.is_some_and(|k| k.matches(&key, tol_hz))
+            || key_changed
             || frame.discontinuity.bits() & self.config.reset_on.bits() != 0;
         if reset {
-            self.close_episodes(frame, &mut on_event);
+            let out = self.out.as_ref().expect("configured");
+            let comparable = !reconfigure && !key_changed;
+            let ctx = EventCtx {
+                now,
+                provenance: &frame.provenance,
+                segment: out.segment,
+                fs,
+                uncertainty_db: self.config.uncertainty_db,
+            };
+            self.engine.on_reset(
+                comparable,
+                &ctx,
+                &out.block_slow,
+                &mut self.stats,
+                &mut on_event,
+            );
+            if !comparable {
+                self.shape.reset();
+            }
             let period = f64::from(r.n_avg) * r.hop() as f64 / fs;
             let frames = |s: f64| (s / period - 1e-9).ceil().max(1.0) as u64;
+            let decay = |tau: f64| -(-period / tau).exp_m1();
             let c = &self.config;
-            self.alpha = -(-period / c.slow_time_constant_s).exp_m1();
-            self.confirm_frames = frames(c.change.confirm_s);
-            self.end_frames = frames(c.change.end_s);
-            self.holdoff_frames = (c.change.holdoff_s / period - 1e-9).ceil().max(0.0) as u64;
+            let confirm = frames(c.change.confirm_s);
+            self.timing = Timing {
+                confirm,
+                end: frames(c.change.end_s),
+                holdoff: (c.change.holdoff_s / period - 1e-9).ceil().max(0.0) as u64,
+                settle: frames(c.slow.settle_s),
+                alpha: decay(c.slow_time_constant_s),
+                alpha_long: decay(c.change.long_time_constant_s),
+                ema: (3.0 / confirm as f64).min(1.0) as f32,
+                recent: decay(0.1) as f32,
+                rebaseline: c.change.rebaseline_s.map(frames),
+                fall_hits: (c.change.fall_min_hit_fraction * confirm as f64 - 1e-9)
+                    .ceil()
+                    .max(1.0) as u64,
+            };
+            self.engine.set_window(confirm as usize);
+            self.shape_alpha = decay(c.wide.shape_time_constant_s);
             self.gate_max_frames = frames(c.impulsive.max_duration_s);
             self.quantisation_db = c.quantisation.dbfs_per_hz(fs);
         }
@@ -1131,19 +1050,15 @@ impl NoiseFloorTracker {
             key: seg_key,
             force_reset,
             next_segment,
-            next_episode,
-            alpha,
-            confirm_frames,
-            end_frames,
-            holdoff_frames,
+            timing,
             gate_max_frames,
+            shape_alpha,
             quantisation_db,
             out,
-            state,
-            run,
-            baseline,
-            flag_sum,
+            shape,
+            engine,
             warm,
+            warm_stamps,
             warm_count,
             hist,
             hist_len,
@@ -1153,10 +1068,12 @@ impl NoiseFloorTracker {
             flag_len,
             flag_pos,
             flag_run,
-            episodes,
             scratch,
             scratch2,
-            slow_updates,
+            norm_block,
+            wide_block,
+            scaled,
+            updates,
             frame_counter,
             stats,
             ..
@@ -1166,7 +1083,7 @@ impl NoiseFloorTracker {
         let nb = layout.count();
         let psd = &spectrum.psd;
 
-        // 1. Per-frame block FCME (invalid blocks filled from neighbours) → per-bin floor.
+        // 1. Per-frame block FCME (invalid blocks filled from neighbours).
         let (mut clean_total, mut valid_blocks, mut unconverged) = (0usize, 0usize, 0u32);
         for b in 0..nb {
             let est = fcme.estimate_block(&psd[layout.range(b)]);
@@ -1189,7 +1106,6 @@ impl NoiseFloorTracker {
         } else if valid_blocks < nb {
             fill_invalid(&mut out.block_floor, &out.block_valid);
         }
-        layout.interpolate(&out.block_floor, &mut out.floor);
         scratch.copy_from_slice(&out.block_floor);
         let band_floor = median_in_place(scratch);
         let stat_block_db = if valid_blocks > 0 {
@@ -1200,16 +1116,45 @@ impl NoiseFloorTracker {
             0.0
         };
 
-        // 2. Wide-signal reference: the per-frame floor where it is near the local minimum of
-        //    block floors, the minimum elsewhere.
-        sliding_min(&out.block_floor, cfg.wide.half_width_blocks, scratch);
-        layout.interpolate(scratch, &mut out.wide_floor);
-        let switch = 10f32.powf(cfg.wide.switch_db as f32 / 10.0);
-        for (w, &f) in out.wide_floor.iter_mut().zip(&out.floor) {
-            if f <= switch * *w {
-                *w = f;
+        // 2. Shaped per-frame floor and the wide-signal reference.
+        if frame_valid {
+            if cfg.wide.learn_shape {
+                shape.update(psd, *shape_alpha, *n_eff, band_floor, &cfg.wide, layout);
             }
+            normalised_blocks(
+                shape,
+                psd,
+                layout,
+                fcme,
+                &out.block_floor,
+                scaled,
+                norm_block,
+            );
+            layout.interpolate(norm_block, &mut out.floor);
+            wide_blocks(
+                norm_block,
+                &cfg.wide,
+                scratch,
+                &mut scratch2[..nb],
+                wide_block,
+            );
+            layout.interpolate(wide_block, &mut out.wide_floor);
+            if shape.any_active() {
+                for ((f, w), &s) in out
+                    .floor
+                    .iter_mut()
+                    .zip(out.wide_floor.iter_mut())
+                    .zip(shape.shape())
+                {
+                    *f *= s;
+                    *w *= s;
+                }
+            }
+        } else {
+            layout.interpolate(&out.block_floor, &mut out.floor);
+            out.wide_floor.copy_from_slice(&out.floor);
         }
+        out.shape.copy_from_slice(shape.shape());
         let occupancy = {
             let m = *occupancy_multiplier as f32;
             let above = psd
@@ -1256,9 +1201,7 @@ impl NoiseFloorTracker {
             *flag_run = 0;
             *flag_len = 0;
             *flag_pos = 0;
-            flag_sum.fill(0.0);
-            state.fill(BlockState::Idle);
-            *slow_updates = 0;
+            *updates = 0;
             *seg_key = Some(key);
             *force_reset = false;
             stats.resets += 1;
@@ -1266,9 +1209,9 @@ impl NoiseFloorTracker {
         out.frames_in_segment += 1;
 
         let w = cfg.impulsive.min_history;
-        let band_db = db(band_floor);
-        let thr = cfg.change.threshold_db as f32;
+        let band_db = 10.0 * band_floor.max(1e-37).log10();
         let (mut impulsive, mut gate_excess, mut released) = (false, 0.0f32, false);
+        let gain = seg_key.unwrap_or(key);
         if !frame_valid {
             stats.invalid_frames += 1;
         } else if *warm_count < w {
@@ -1276,6 +1219,7 @@ impl NoiseFloorTracker {
             //     transient frame at start-up cannot seed it; the gate history fills.
             let k = *warm_count;
             warm[k * nb..(k + 1) * nb].copy_from_slice(&out.block_floor);
+            warm_stamps[k] = now;
             for b in 0..nb {
                 for j in 0..=k {
                     scratch2[j] = warm[j * nb + b];
@@ -1284,9 +1228,40 @@ impl NoiseFloorTracker {
             }
             push_ring(hist, hist_len, hist_pos, band_db);
             *warm_count += 1;
-            *slow_updates = *warm_count as u64;
+            *updates = *warm_count as u64;
+            if *warm_count == w {
+                let fr = Frame {
+                    ev: EventCtx {
+                        now,
+                        provenance: &frame.provenance,
+                        segment: out.segment,
+                        fs,
+                        uncertainty_db: cfg.uncertainty_db,
+                    },
+                    counter: *frame_counter,
+                    impulsive: false,
+                    floor: &out.block_floor,
+                    spectrum,
+                    layout,
+                    gain,
+                    stat_block_db,
+                    quantisation_db: *quantisation_db,
+                    quantisation_margin_db: cfg.quantisation_margin_db,
+                    updates: *updates,
+                };
+                engine.start_segment(
+                    &fr,
+                    &mut out.block_slow,
+                    warm,
+                    warm_stamps,
+                    &cfg.change,
+                    timing,
+                    stats,
+                    &mut on_event,
+                );
+            }
         } else {
-            // 5b. Impulsive gate on the band floor against its running median.
+            // 5b. Band-wide impulsive gate on the band floor against its running median.
             if *hist_len >= w {
                 let h = &mut hist_scratch[..*hist_len];
                 h.copy_from_slice(&hist[..*hist_len]);
@@ -1295,30 +1270,15 @@ impl NoiseFloorTracker {
             impulsive = *hist_len >= w && f64::from(gate_excess) > cfg.impulsive.rise_db;
             if impulsive {
                 *flag_run += 1;
-                for (s, &f) in flag_sum.iter_mut().zip(&out.block_floor) {
-                    *s += f64::from(f);
-                }
                 push_ring(flag_vals, flag_len, flag_pos, band_db);
                 if *flag_run >= *gate_max_frames {
-                    // Sustained: a level change. Release the gate, re-seed its history and the
-                    // slow floor of blocks within the change threshold (larger changes go
-                    // through the episode machinery).
+                    // Sustained: a level change. Release and re-seed the gate history only; the
+                    // slow floor follows through its own per-block gate.
                     let n = *flag_len;
                     hist[..n].copy_from_slice(&flag_vals[..n]);
                     *hist_len = n;
                     *hist_pos = n % hist.len();
-                    for b in 0..nb {
-                        let mean = (flag_sum[b] / *flag_run as f64) as f32;
-                        let adoptable = matches!(
-                            state[b],
-                            BlockState::Idle | BlockState::Holdoff(_) | BlockState::Episode(_)
-                        );
-                        if adoptable && db_ratio(mean, out.block_slow[b]).abs() <= thr {
-                            out.block_slow[b] = mean;
-                        }
-                    }
                     *flag_run = 0;
-                    flag_sum.fill(0.0);
                     *flag_len = 0;
                     *flag_pos = 0;
                     impulsive = false;
@@ -1328,284 +1288,43 @@ impl NoiseFloorTracker {
             } else {
                 if *flag_run > 0 {
                     *flag_run = 0;
-                    flag_sum.fill(0.0);
                     *flag_len = 0;
                     *flag_pos = 0;
                 }
                 push_ring(hist, hist_len, hist_pos, band_db);
             }
 
-            // 5c. Per block: slow-floor IIR within the threshold; runs beyond it.
-            let a = alpha.max(1.0 / (*slow_updates as f64 + 1.0)) as f32;
-            let mut any_confirm = false;
-            for b in 0..nb {
-                let f = out.block_floor[b];
-                let e = db_ratio(f, out.block_slow[b]);
-                let mut st = state[b];
-                if let BlockState::Holdoff(until) = st {
-                    if *frame_counter >= until {
-                        st = BlockState::Idle;
-                    }
-                }
-                if matches!(st, BlockState::Up | BlockState::Down) {
-                    let up = st == BlockState::Up;
-                    if (up && e > thr) || (!up && e < -thr) {
-                        let acc = &mut run[b];
-                        acc.frames += 1;
-                        acc.last_hit = *frame_counter;
-                        if !impulsive {
-                            acc.used += 1;
-                            acc.sum_floor += f64::from(f);
-                            acc.sum_ex += f64::from(e);
-                            acc.sum_ex2 += f64::from(e) * f64::from(e);
-                            if let Some(s) = block_sk(&spectrum.sk, layout.range(b)) {
-                                acc.sum_sk += s;
-                                acc.sk_n += 1;
-                            }
-                        }
-                        any_confirm |= acc.frames >= *confirm_frames && acc.used > 0;
-                        continue;
-                    }
-                    // Signals only add power: a fall survives frames back near the slow floor
-                    // (an intermittent signal the slow floor was seeded on, or is following)
-                    // for up to `confirm_s`, without updating the slow floor. A rise must be
-                    // continuous, so bursty signals never confirm.
-                    if !up && *frame_counter - run[b].last_hit <= *confirm_frames {
-                        run[b].frames += 1;
-                        run[b].interrupted = true;
-                        continue;
-                    }
-                    st = BlockState::Idle;
-                }
-                if e.abs() <= thr {
-                    if !impulsive {
-                        let s = &mut out.block_slow[b];
-                        *s += a * (f - *s);
-                    }
-                } else if st == BlockState::Idle {
-                    st = if e > 0.0 {
-                        BlockState::Up
-                    } else {
-                        BlockState::Down
-                    };
-                    run[b] = RunAcc::start(frame.seq, frame.t, 1, *frame_counter);
-                }
-                state[b] = st;
-            }
+            // 5c. Per-block classifier and episode aggregator.
+            let fr = Frame {
+                ev: EventCtx {
+                    now,
+                    provenance: &frame.provenance,
+                    segment: out.segment,
+                    fs,
+                    uncertainty_db: cfg.uncertainty_db,
+                },
+                counter: *frame_counter,
+                impulsive,
+                floor: &out.block_floor,
+                spectrum,
+                layout,
+                gain,
+                stat_block_db,
+                quantisation_db: *quantisation_db,
+                quantisation_margin_db: cfg.quantisation_margin_db,
+                updates: *updates,
+            };
+            engine.step(
+                &fr,
+                &mut out.block_slow,
+                &cfg.change,
+                &cfg.slow,
+                timing,
+                stats,
+                &mut on_event,
+            );
             if !impulsive {
-                *slow_updates += 1;
-            }
-
-            // 5d. Confirmed runs: contiguous groups of same-direction blocks.
-            if any_confirm {
-                let mut b = 0;
-                while b < nb {
-                    let st = state[b];
-                    if !matches!(st, BlockState::Up | BlockState::Down) {
-                        b += 1;
-                        continue;
-                    }
-                    let start = b;
-                    let mut confirmed = false;
-                    while b < nb && state[b] == st {
-                        confirmed |= run[b].frames >= *confirm_frames && run[b].used > 0;
-                        b += 1;
-                    }
-                    if !confirmed {
-                        continue;
-                    }
-                    let end = b;
-                    let g = group_stats(
-                        &run[start..end],
-                        &out.block_slow[start..end],
-                        &out.block_floor[start..end],
-                        scratch,
-                        scratch2,
-                    );
-                    let class = classify(g.sk, g.excess_std_db, &cfg.change);
-                    let step_unc_db = f64::from(g.step_stat_db)
-                        .hypot(f64::from(stat_block_db) * (*alpha / (2.0 - *alpha)).sqrt())
-                        as f32;
-                    let q_before = quantisation_db
-                        .is_some_and(|q| f64::from(g.baseline_db) < q + cfg.quantisation_margin_db);
-                    let level = |acc: &RunAcc, f: f32| {
-                        if acc.used > 0 {
-                            (acc.sum_floor / acc.used as f64) as f32
-                        } else {
-                            f
-                        }
-                    };
-                    let bins_r = region_bins(layout, start, end, bins);
-                    let (f_lo_hz, f_hi_hz) = edges(spectrum, &bins_r);
-                    if st == BlockState::Up {
-                        for j in start..end {
-                            baseline[j] = out.block_slow[j];
-                            if class != FloorChangeClass::Structured {
-                                out.block_slow[j] = level(&run[j], out.block_floor[j]);
-                            }
-                        }
-                        let adjacent = |j: usize| match state[j] {
-                            BlockState::Episode(i) if episodes[i].class == class => Some(i),
-                            _ => None,
-                        };
-                        let merge = start
-                            .checked_sub(1)
-                            .and_then(adjacent)
-                            .or_else(|| (end < nb).then(|| adjacent(end)).flatten());
-                        let idx = if let Some(i) = merge {
-                            let ep = &mut episodes[i];
-                            ep.b0 = ep.b0.min(start);
-                            ep.b1 = ep.b1.max(end);
-                            ep.bins = region_bins(layout, ep.b0, ep.b1, bins);
-                            (ep.f_lo_hz, ep.f_hi_hz) = edges(spectrum, &ep.bins);
-                            ep.band_fraction = ep.bins.len() as f32 / bins as f32;
-                            i
-                        } else {
-                            let i = episodes
-                                .iter()
-                                .position(|e| !e.active)
-                                .expect("one slot per block");
-                            let emitted =
-                                class != FloorChangeClass::Structured || cfg.change.emit_structured;
-                            let ep = &mut episodes[i];
-                            *ep = Episode {
-                                active: true,
-                                id: *next_episode,
-                                class,
-                                emitted,
-                                b0: start,
-                                b1: end,
-                                band_fraction: bins_r.len() as f32 / bins as f32,
-                                bins: bins_r,
-                                f_lo_hz,
-                                f_hi_hz,
-                                fs,
-                                onset_t: g.onset.1,
-                                baseline_db: g.baseline_db,
-                                level_db: g.level_db,
-                                step_db: g.step_db,
-                                peak_step_db: g.step_db,
-                                step_unc_db,
-                                sk: g.sk,
-                                excess_std_db: g.excess_std_db,
-                                q_limited_before: q_before,
-                                segment: out.segment,
-                                gain: seg_key.unwrap_or(key),
-                                end_frames: 0,
-                                end_onset: (frame.seq, frame.t),
-                            };
-                            *next_episode += 1;
-                            if class == FloorChangeClass::Structured {
-                                stats.structured_episodes += 1;
-                            }
-                            if emitted {
-                                let ev = ep.event(
-                                    FloorEventKind::Rise,
-                                    None,
-                                    g.onset,
-                                    (frame.seq, frame.t),
-                                    cfg.uncertainty_db,
-                                    &frame.provenance,
-                                );
-                                on_event(&ev);
-                                stats.rise_events += 1;
-                            }
-                            i
-                        };
-                        for s in &mut state[start..end] {
-                            *s = BlockState::Episode(idx);
-                        }
-                    } else {
-                        let mut interrupted = false;
-                        for j in start..end {
-                            out.block_slow[j] = level(&run[j], out.block_floor[j]);
-                            state[j] = BlockState::Holdoff(*frame_counter + *holdoff_frames);
-                            interrupted |= run[j].interrupted;
-                        }
-                        if interrupted {
-                            // The slow floor was above the floor seen between signal bursts:
-                            // a correction, not a change of the floor.
-                            stats.floor_corrections += 1;
-                            continue;
-                        }
-                        let mut ep = Episode::inactive(g.onset.1, seg_key.unwrap_or(key));
-                        ep.id = *next_episode;
-                        ep.class = class;
-                        ep.band_fraction = bins_r.len() as f32 / bins as f32;
-                        ep.bins = bins_r;
-                        (ep.f_lo_hz, ep.f_hi_hz) = (f_lo_hz, f_hi_hz);
-                        ep.fs = fs;
-                        ep.baseline_db = g.baseline_db;
-                        ep.level_db = g.level_db;
-                        ep.step_db = g.step_db;
-                        ep.peak_step_db = g.step_db;
-                        ep.step_unc_db = step_unc_db;
-                        ep.sk = g.sk;
-                        ep.excess_std_db = g.excess_std_db;
-                        ep.q_limited_before = q_before;
-                        ep.segment = out.segment;
-                        *next_episode += 1;
-                        let ev = ep.event(
-                            FloorEventKind::Fall,
-                            None,
-                            g.onset,
-                            (frame.seq, frame.t),
-                            cfg.uncertainty_db,
-                            &frame.provenance,
-                        );
-                        on_event(&ev);
-                        stats.level_falls += 1;
-                    }
-                }
-            }
-
-            // 5e. Episode ends: the region median of floor/baseline back within the end threshold.
-            let end_thr = cfg.change.end_threshold_db as f32;
-            for ep in episodes.iter_mut().filter(|e| e.active) {
-                let (b0, b1) = (ep.b0, ep.b1);
-                for (k, j) in (b0..b1).enumerate() {
-                    scratch[k] = db_ratio(out.block_floor[j], baseline[j]);
-                }
-                let ex = median_in_place(&mut scratch[..b1 - b0]);
-                if !impulsive {
-                    ep.peak_step_db = ep.peak_step_db.max(ex);
-                }
-                if ex >= end_thr {
-                    ep.end_frames = 0;
-                    continue;
-                }
-                if ep.end_frames == 0 {
-                    ep.end_onset = (frame.seq, frame.t);
-                    for acc in &mut run[b0..b1] {
-                        *acc = RunAcc::start(frame.seq, frame.t, 0, *frame_counter);
-                    }
-                }
-                ep.end_frames += 1;
-                if !impulsive {
-                    for (acc, &f) in run[b0..b1].iter_mut().zip(&out.block_floor[b0..b1]) {
-                        acc.used += 1;
-                        acc.sum_floor += f64::from(f);
-                    }
-                }
-                if ep.end_frames >= *end_frames && run[b0].used > 0 {
-                    for j in b0..b1 {
-                        out.block_slow[j] = (run[j].sum_floor / run[j].used as f64) as f32;
-                        state[j] = BlockState::Holdoff(*frame_counter + *holdoff_frames);
-                    }
-                    ep.active = false;
-                    stats.episode_ends += 1;
-                    if ep.emitted {
-                        let ev = ep.event(
-                            FloorEventKind::End,
-                            Some(EndReason::Returned),
-                            ep.end_onset,
-                            (frame.seq, frame.t),
-                            cfg.uncertainty_db,
-                            &frame.provenance,
-                        );
-                        on_event(&ev);
-                    }
-                }
+                *updates += 1;
             }
         }
 
@@ -1618,7 +1337,7 @@ impl NoiseFloorTracker {
         if out.provenance != frame.provenance {
             out.provenance = frame.provenance.clone();
         }
-        out.gain = seg_key.unwrap_or(key);
+        out.gain = gain;
         out.reset = reset;
         out.n_avg_effective = *n_eff;
         out.f_center_hz = spectrum.f_center_hz;
@@ -1638,7 +1357,7 @@ impl NoiseFloorTracker {
         out.impulsive = impulsive;
         out.gate_released = released;
         out.impulsive_excess_db = gate_excess;
-        out.active_episodes = episodes.iter().filter(|e| e.active).count() as u32;
+        out.active_episodes = engine.active_count();
         *frame_counter += 1;
         stats.frames += 1;
         if impulsive {

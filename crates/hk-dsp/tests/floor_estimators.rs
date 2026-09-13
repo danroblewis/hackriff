@@ -55,7 +55,15 @@ fn space_050_estimator_bias_vs_occupancy_matches_s4() {
             fe.abs() <= 0.1,
             "{SPACE_050}: FCME bias {fe:.3} dB at {occ} occupancy"
         );
-        if occ >= 0.4 {
+        // p20 is valid below 40 % occupancy (S4). At 41 % the occupancy estimate sits on that
+        // boundary frame to frame (0.41 ± noise), so p20 must be invalid in at least half the
+        // frames there, and in all of them further above.
+        if (0.40..0.45).contains(&occ) {
+            assert!(
+                valid <= FRAMES / 2,
+                "{SPACE_050}: p20 mostly invalid at {occ} occupancy ({valid}/{FRAMES} valid)"
+            );
+        } else if occ >= 0.45 {
             assert_eq!(
                 valid, 0,
                 "{SPACE_050}: p20 must be invalid at {occ} occupancy"
@@ -306,6 +314,8 @@ fn impulsive_frames_are_gated_and_do_not_move_the_slow_floor() {
                 ..ImpulsiveGateConfig::default()
             };
             config.change.threshold_db = 1e9;
+            config.change.end_threshold_db = 1e9;
+            config.slow.settle_db = 1e9;
         }
         let mut tracker = NoiseFloorTracker::new(config).unwrap();
         let flat = vec![1.0f32; bins];
@@ -484,12 +494,23 @@ fn aware_006_bursty_wide_signal_makes_no_floor_rise_episodes() {
         let mut inside: Vec<f64> = f.slow_floor[900..1200].iter().map(|&x| db32(x)).collect();
         let inside = median(&mut inside);
         eprintln!(
-            "bursty {on}/{off} frames ({:.2}/{:.2} s): {} events, max active episodes {max_active}, slow floor under the signal {inside:+.2} dB",
+            "bursty {on}/{off} frames ({:.2}/{:.2} s): {} events ({} interrupted falls), max active episodes {max_active}, slow floor under the signal {inside:+.2} dB",
             on as f64 * src.frame_period_s(),
             off as f64 * src.frame_period_s(),
-            events.len()
+            events.len(),
+            events
+                .iter()
+                .filter(|e| e.kind == FloorEventKind::Fall && e.interrupted)
+                .count()
         );
-        assert!(events.is_empty(), "{AWARE_006}: {events:?}");
+        // The signal was on during warm-up, so the slow floor starts on it; the correction is
+        // reported as an interrupted Fall. Nothing else.
+        assert!(
+            events
+                .iter()
+                .all(|e| e.kind == FloorEventKind::Fall && e.interrupted),
+            "{AWARE_006}: {events:?}"
+        );
         assert_eq!(max_active, 0);
         assert!(
             inside.abs() < 0.5,
@@ -526,8 +547,8 @@ fn aware_006_spectral_kurtosis_separates_noise_rises_from_structured_signals() {
         },
         ..FloorConfig::default()
     };
-    let mut emit_all = cfg;
-    emit_all.change.emit_structured = true;
+    let mut quiet = cfg;
+    quiet.change.emit_structured = false;
     let h = header(0, &prov, Discontinuity::STREAM_START);
     let run = |iq: &[num_complex::Complex32], cfg: FloorConfig| {
         let mut stft = StftProcessor::new(StftConfig::new(WelchConfig::new(1024), 10)).unwrap();
@@ -559,21 +580,26 @@ fn aware_006_spectral_kurtosis_separates_noise_rises_from_structured_signals() {
     assert!((onset - 0.30016).abs() <= 5120.0 / fs);
     assert!((confirm - onset - 0.5).abs() <= 5120.0 / fs);
 
-    // Same average power, but bursty within each frame (SK ≫ 1): structured.
+    // Same average power, but bursty within each frame (SK ≫ 1): structured, emitted with that
+    // class by default and suppressed with `emit_structured = false`.
     let bursty = floor_change_iq(20e-3, true, 51);
-    let (events, stats) = run(&bursty, cfg);
+    let (events, stats) = run(&bursty, quiet);
     assert!(
         events.is_empty(),
-        "structured signal reported as a floor rise: {events:?}"
+        "structured signal reported with emit_structured off: {events:?}"
     );
     assert_eq!(stats.structured_episodes, 1);
-    let (events, _) = run(&bursty, emit_all);
+    let (events, _) = run(&bursty, cfg);
+    assert_eq!(events.len(), 1, "{events:?}");
     let e = &events[0];
     eprintln!(
-        "{AWARE_006} bursty wide signal: class {:?}, SK {:?}, step {:+.2} dB (not emitted by default)",
+        "{AWARE_006} bursty wide signal: class {:?}, SK {:?}, step {:+.2} dB",
         e.class, e.sk, e.step_db
     );
-    assert_eq!(e.class, FloorChangeClass::Structured);
+    assert_eq!(
+        (e.kind, e.class),
+        (FloorEventKind::Rise, FloorChangeClass::Structured)
+    );
     assert!(e.sk.unwrap() > 1.5);
 }
 
@@ -635,9 +661,9 @@ fn aware_006_episode_rise_end_and_holdoff() {
     assert_eq!(r2.kind, FloorEventKind::Rise);
     assert_ne!(r2.episode, r1.episode);
     assert_eq!(
-        r2.onset_seq,
-        end.confirmed_seq + holdoff,
-        "held off, then a fresh run"
+        (r2.onset_seq, r2.confirmed_seq),
+        (520, end.confirmed_seq + holdoff),
+        "a rise inside the hold-off keeps its onset and confirms when the hold-off expires"
     );
     assert!(
         (during - 6.02).abs() < 0.3 && after.abs() < 0.3,
@@ -705,8 +731,15 @@ fn gain_key_tolerance_resets_and_reset_closes_episodes() {
     assert_eq!(tracker.stats().resets, 5);
     let kinds: Vec<_> = events.iter().map(|e| (e.kind, e.end_reason)).collect();
     eprintln!("events across resets: {kinds:?}");
-    assert_eq!(kinds[0], (FloorEventKind::Rise, None));
-    assert_eq!(kinds[1], (FloorEventKind::End, Some(EndReason::Reset)));
+    // A gain change makes the floor incomparable: the episode closes as Unknown at the reset;
+    // the next segment warms up at the elevated level, so nothing more is reported.
+    assert_eq!(
+        kinds,
+        [
+            (FloorEventKind::Rise, None),
+            (FloorEventKind::Unknown, None)
+        ]
+    );
     assert_eq!(events[1].episode, events[0].episode);
     assert_eq!(events[1].onset_seq, 60);
 }
