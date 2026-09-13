@@ -473,7 +473,8 @@ tasks:
     note: "found by T-013 (2026-09-13): T-011 trusted 33.6 kBd (7x) on 13/20 bursts of rectangular FSK h=4; T-013 demod checks run lengths and divides (harmonic_divisor) as a workaround. Correctness bug in the 'trusted is never wrong' contract"
   - id: T-031
     title: Burst-tracking follow-ups (model fields, track region query, merged links, split trigger, bursty hop sets, TDMA)
-    status: todo
+    status: in-progress
+    scope_now: "track-module items only (bursty hop sets, split trigger, fragment suppression, merged-track link re-pointing, batching); hk-model TimingFeatures fields, track region query and TDMA/co-occurrence deferred until T-018 merges"
     deps: [T-007]
     parallel_group: C
     use_cases: [AWARE-036, AWARE-042]
@@ -487,6 +488,7 @@ tasks:
   - id: T-032
     title: Scheduler follow-ups (bandit revisit, per-region revisit, gain-down re-verification, rate-change trust, RF path constants)
     status: todo
+    hold: "wait for the timeboxed T-009 post-merge review (may produce fixes in the same module) and avoid churning the scheduler under T-027"
     deps: [T-009]
     parallel_group: E
     use_cases: [SPACE-050, AWARE-042]
