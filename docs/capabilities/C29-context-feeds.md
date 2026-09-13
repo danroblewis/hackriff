@@ -1,8 +1,10 @@
 # C29 · context-feeds
-> Layer F — Explain · Status: draft (taxonomy draft 2026-09-13) · Depends on: C06 · Used by: C30, C34, C39
+> Layer F — Explain · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C06 · Used by: C04, C30, C34, C39
 
 ## Purpose
 Keeps a local, typed, time-stamped store of external events that can explain local spectrum changes (feeds listed below). It syncs whenever connectivity exists, and everything downstream must work from a stale cache (CLAUDE.md offline-first rule). It is the external half of the attack map (docs/05 §3, AWARE-044).
+
+C29 also **computes satellite passes from cached TLEs**: TLE propagation is a feed-side computation, not its own capability (docs/06 §5). C34 (doppler-tracking) consumes those passes, C30 (event-correlation) uses the pass windows, and C04 (attention-scheduler) can dwell on predicted passes/launches (docs/06 §2.1). FMLIST and the SatNOGS DB appear in both C29 and C17: C29 fetches and caches them, while C17 is the query/prior interface over the cache — same data, two roles (docs/06 §5).
 
 ## Interface
 - **`ExternalEvent`** (provisional):
@@ -76,24 +78,25 @@ Only RadioReference has documented terms (SOAP API; each end user needs RR Premi
 - **Needs network:** scheduled adapter smoke tests outside CI; a terms review per feed.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
-- AWARE-044 — "Why did my spectrum change?" event feed
-- SPACE-015 — "Space weather now" local dashboard
-- AWARE-032 — Lightning sferics explainer
-- AWARE-062 — Radiosonde launch correlation
-- AWARE-064 — Satellite pass vs. noise-floor attribution
+Regenerated from `use-cases.yaml`:
+- SPACE-005 — (context-feeds primary)
+- SPACE-020 — (context-feeds primary)
+- SPACE-021 — (context-feeds primary)
+- SPACE-022 — (context-feeds primary)
+- SPACE-030 — (context-feeds primary)
+- SPACE-033 — (context-feeds primary)
+- PROP-001 — Beacon-network propagation baselines
+- PROP-004 — WSPR/PSKReporter band-opening spots
 - AWARE-006 — GNSS jamming timeline vs. geopolitical events
-- SIGNAL-068 — FM/TV DX cross-reference
-- SPACE-079 — Deep-space tracking with DSN Now
-- AWARE-059 — Beacon-network propagation baselines
+- AWARE-039 — (context-feeds primary)
 
 ## Open questions
 - **Unverified access:** endpoints, cadence, history and terms for every feed need a spike (not web-verified).
-- **Overlap with C17:** docs/06 lists FMLIST (and SatNOGS DB) under C17 and FMLIST under C29. Proposal: C17 is static "what should be here"; C29 is time-stamped events and snapshot freshness.
-- **Ephemerides owner:** C29 as an offline feed, C34, or C30? docs/06 is silent.
-- **Missing edge:** C04 could use feeds to dwell on predicted passes and launches; docs/06 doesn't show this.
+- **Overlap with C17 (resolved, docs/06 §5):** FMLIST/SatNOGS DB are the same data in two roles — C29 fetches and caches; C17 is the query/prior interface over the cache.
+- **Ephemerides owner (resolved, docs/06 §5):** C29 computes passes from cached TLEs; C34 consumes them; C30 uses pass windows.
+- **Missing edge (resolved, docs/06 §2.1):** C29 → C04 (dwell on predicted passes/launches) is now an edge.
 - **Connectivity:** is Wi-Fi or phone tethering acceptable? CLAUDE.md only excludes device-to-device cellular links.
-- **Uploads:** do PSKReporter/SondeHub contributions belong to C24 or C29?
+- **Uploads:** do PSKReporter/SondeHub contributions belong to C24 or C29? (Provisional; see the Phase 3 stream-contract ADR for C24's egress role.)
 
 ## Reading list
 1. docs/05 §3 "Spectrum Situational Awareness, Interference & Anomalies" (subsections "Space Weather, Propagation & Natural Explainers", "Satellite & Space-Segment Interference")

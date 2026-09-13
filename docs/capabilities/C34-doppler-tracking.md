@@ -1,5 +1,5 @@
 # C34 · doppler-tracking
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C04, C05, C06, C09, C11, C29 · Used by: C22, C27, C30, C33, C39
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C04, C05, C06, C09, C11, C29 · Used by: C22, C27, C30, C33, C39
 
 ## Purpose
 Measures and exploits frequency shifts of known carriers:
@@ -9,6 +9,8 @@ Measures and exploits frequency shifts of known carriers:
 - single-channel echo detection (meteors, aircraft) on known illuminators.
 
 It serves space-weather science and satellite-pass attribution in the attack map (C30). It also gives satellite decoders Doppler-corrected streams (workflow steps 5–6).
+
+C34 **consumes** the satellite passes that C29 computes from cached TLEs; TLE propagation is a C29 feed-side computation, not C34's (docs/06 §5). C34 does the carrier tracking, curve fitting and pre-correction retune on top of those pass windows.
 
 ## Interface
 - **Inputs:**
@@ -34,7 +36,7 @@ It serves space-weather science and satellite-pass attribution in the attack map
   - Remove `δf = ε_ppm·10⁻⁶·f_c` using a GPSDO or a simultaneously measured in-window reference (FM 19 kHz pilot ±2 Hz, WWV, LTE PSS).
   - Differencing against a reference cancels common drift (spike).
 - **Satellite pre-correction:**
-  - Propagate TLEs (SGP4-class; library not named in docs).
+  - Use pass predictions from C29 (which propagates the cached TLEs, SGP4-class; library not named in docs) — C34 does not re-propagate TLEs itself.
   - Retune the DDC continuously and load presets at AOS, following the SDRangel Satellite Tracker model (`docs/03 §2.2`).
   - Hand corrected streams to C22.
 - **Curve identification** (SIGNAL-035): fit measured `f(t)` against each catalogue object's range-rate curve, jointly solving `f0` and ppm; rank by residual; TCA at the maximum slope.
@@ -86,21 +88,21 @@ It serves space-weather science and satellite-pass attribution in the attack map
 - **Live:** real-time pre-correction during passes; long HF logs (GPSDO, HF antenna).
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- SPACE-016 — Grape HF Doppler on WWV/CHU
+Regenerated from `use-cases.yaml`:
 - SPACE-013 — Sudden frequency deviation
-- SPACE-019 — Traveling ionospheric disturbance tracking
-- PROP-017 — AM broadcast Doppler for TIDs
-- SIGNAL-035 — Doppler-based orbit identification
-- SIGNAL-024 — Orbcomm
+- SPACE-016 — Grape HF Doppler on WWV/CHU
+- SPACE-017 — HamSCI PSWS Doppler
+- SPACE-018 — Traveling ionospheric disturbance tracking
+- SPACE-034 — (doppler-tracking primary)
 - SPACE-051 — GRAVES meteor echoes
-- SPACE-053 — Shower activity profiles (RMOB)
-- SPACE-073 — SETI narrowband drift search
-- PROP-074 — Starlink Doppler positioning
+- SPACE-052 — Meteor echo Doppler profiles
+- PROP-013 — (doppler-tracking primary)
+- PROP-017 — AM broadcast Doppler for TIDs
+- PROP-077 — Time-station propagation delay
 
 ## Open questions
 - **Boundary with C35:** single-channel echo detection stays in C34, range–Doppler in C35. Confirm meteor counting (SPACE-053) maps here.
-- **TLE propagation library** and its licence (not in docs).
+- **TLE propagation (resolved owner, docs/06 §5):** C29 propagates cached TLEs and computes passes; C34 consumes them. The SGP4-class library and its licence (not in docs) sit with C29 / the Phase 3 licence ledger.
 - **Pre-correction path:** retune the DDC (C11) or the HackRF LO (C01)? LO retunes restart streams. ADR.
 - **Kinematics:** share with C33 H I correction?
 - **GPSDO:** base kit or optional? It decides `hardware_fit` for every HF Doppler use case.

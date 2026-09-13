@@ -1,5 +1,5 @@
 # C13 · param-estimation
-> Layer C — Characterize · Status: draft (taxonomy draft 2026-09-13) · Depends on: C11, C08, C05, C09 · Used by: C14, C15, C16, C18, C19, C20, C27
+> Layer C — Characterize · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C11, C08, C05, C09 · Used by: C14, C15, C16, C18, C19, C20, C27
 
 ## Purpose
 Measures one detected emission from a channelized snippet: occupied bandwidth, carrier offset, SNR, spectral shape, and whether it looks analog or digital. These normalise the input for every classifier and demodulator, and supply fingerprint and inventory fields. Serves workflow step 5 (parameters estimated, never picked), step 4 (bandwidth and raster offset against emission designators) and step 6.
@@ -82,7 +82,7 @@ Measures one detected emission from a channelized snippet: occupied bandwidth, c
 - **Live only:** gain-step/IMD behaviour, ppm drift with temperature.
 
 ## Example use cases
-*Provisional until docs/06 §3 mapping (cross-checked against use-cases.yaml, 2026-09-13).*
+*Regenerated from `use-cases.yaml`.*
 - AWARE-036 — Unknown burst reverse-engineering triage
 - AWARE-051 — Oscillator-offset fingerprint for low-cost sensors
 - AWARE-055 — Over-the-horizon radar signature catalogue

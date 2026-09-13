@@ -1,8 +1,8 @@
 # C12 · occupancy-baseline
-> Layer B — Sense · Status: draft (taxonomy draft 2026-09-13) · Depends on: C09, C10, C08, C26 (C02 sweep rows; C06 position/time; C38 optional anomaly models) · Used by: C04, C27, C30, C39
+> Layer B — Sense · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C09, C10, C08, C26 (C02 sweep rows; C06 position/time; C38 optional anomaly models) · Used by: C04, C27, C30, C39
 
 ## Purpose
-Computes ITU-style occupancy statistics (FCO/FBO/SRO) per channel and band, learns hour-of-week baselines, and scores novelty and anomaly against them. It also produces an "interestingness" ranking of channels. It is the engine behind "what changed?" (workflow step 3, review history), behind scheduler priorities (step 2), and the local-anomaly input to the attack map (C30). Alarms only mean something against a learned local baseline.
+Computes ITU-style occupancy statistics (FCO/FBO/SRO) per channel and band, learns hour-of-week baselines, and scores novelty and anomaly against them. **C12 computes the "interestingness"/novelty score and ranking** (it holds the baselines and novelty); **C04 consumes it** and does not recompute it (docs/06 §5). It is the engine behind "what changed?" (workflow step 3, review history), behind scheduler priorities (step 2), and the local-anomaly input to the attack map (C30). Baselines need history (C26→C12) and, for a portable device, must be keyed per location (C06→C12) (docs/06 §2.1). Alarms only mean something against a learned local baseline.
 
 ## Interface
 - **In:** Detections (C09), Tracks (C10), noise-floor thresholds (C08), sweep/dwell history (C26), revisit log (when each channel was actually observed; from C04/C02/C03), position/time (C06).
@@ -51,19 +51,22 @@ Computes ITU-style occupancy statistics (FCO/FBO/SRO) per channel and band, lear
 - **Live only:** multi-day parked runs, site switching, and cal-version transitions.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml`:
+- PROP-023 — (occupancy baseline)
 - AWARE-042 — Duty-cycle and occupancy statistics
+- AWARE-002 — Local GNSS C/N0 watchdog
+- AWARE-011 — (occupancy/anomaly)
+- AWARE-012 — (occupancy/anomaly)
+- AWARE-019 — (occupancy/anomaly)
+- AWARE-026 — (occupancy/anomaly)
+- AWARE-027 — (occupancy/anomaly)
 - AWARE-044 — "Why did my spectrum change?" event feed
-- AWARE-040 — Unsupervised spectrum anomaly detector
-- AWARE-031 — Long-term noise-floor trend logger
-- AWARE-062 — Radiosonde launch correlation
-- AWARE-015 — City-wide wardriving cell anomaly map
-- RESEARCH-050 — SDR as spectrum analyzer / power survey
+- AWARE-060 — (anomaly baseline)
 
 ## Open questions
-- **Site keying:** docs/06 C12 doesn't mention position (C06), yet baselines for a portable device must be per location. Add the dependency?
-- **§2.1 shows C26 with no edges**, but C12 needs spectrum history as input.
-- **Interestingness score location:** it uses classifier entropy (C15) and decoder availability (C22), which are outside Layer B. Is the full score C12 or C04?
+- **Site keying (resolved, docs/06 §2.1):** C06→C12 — baselines for a portable device are keyed per location.
+- **History input (resolved, docs/06 §2.1):** C26→C12 — baselines need spectrum history.
+- **Interestingness score location (resolved, docs/06 §5):** C12 computes the full score (using classifier entropy from C15 and decoder demand from C22); C04 consumes it.
 - Channel plans per band: from C17 band plans or learned from detections?
 - Baseline adaptation policy (frozen vs rolling) and retention on limited disk.
 

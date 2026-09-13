@@ -1,5 +1,5 @@
 # C25 · sigmf-recording
-> Layer E — Remember · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C03, C06, C09, C11, C19 · Used by: C21, C22, C23, C24, C27, C28, C38, C39
+> Layer E — Remember · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C03, C06, C09, C11, C19 · Used by: C21, C22, C23, C24, C27, C28, C38, C39
 
 ## Purpose
 Turns transient IQ into durable SigMF evidence: triggered snippets with pre-trigger history, per-channel decimated streams and audio, with provenance and machine annotations, under a disk quota. Serves workflow step 5, and feeds steps 3 and 6 (bits recovered from recordings). Also the offline test-fixture format (CLAUDE.md).
@@ -54,7 +54,7 @@ Turns transient IQ into durable SigMF evidence: triggered snippets with pre-trig
 - **Needs hardware:** sustained NVMe write alongside USB ingest and the channelizer on the Jetson; thermal throttling; power draw.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
+Regenerated from `use-cases.yaml`:
 - RESEARCH-075 — Reproducible IQ archives with SigMF
 - RESEARCH-070 — Build labeled RF datasets from your own captures
 - AWARE-036 — Unknown burst reverse-engineering triage

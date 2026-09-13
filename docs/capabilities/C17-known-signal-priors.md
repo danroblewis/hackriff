@@ -1,8 +1,8 @@
 # C17 · known-signal-priors
-> Layer C — Characterize · Status: draft (taxonomy draft 2026-09-13) · Depends on: C06, C29, C27, C12 · Used by: C15, C19, C13, C27, C30, C04, C23
+> Layer C — Characterize · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C06, C29, C27, C12 · Used by: C15, C19, C13, C27, C30, C04, C23
 
 ## Purpose
-Answers "what is *supposed* to be here?" and "is this expected?" for a frequency, bandwidth, location and time. It uses cached allocation tables, band plans, licence extracts, signal databases and the device's own history. It exists to separate known from unknown (workflow step 4), not as the goal, so it always leaves non-zero probability for unknown or non-compliant emitters. It reasons only about frequencies, licences and emission metadata; no content interception is implied.
+Answers "what is *supposed* to be here?" and "is this expected?" for a frequency, bandwidth, location and time. It uses cached allocation tables, band plans, licence extracts, signal databases and the device's own history. It exists to separate known from unknown (workflow step 4), not as the goal, so it always leaves non-zero probability for unknown or non-compliant emitters. It reasons only about frequencies, licences and emission metadata; no content interception is implied. C17 only *supplies* priors — C15 fuses them with likelihoods and does the classifying (docs/06 §5). It sits in a Layer E loop: C17↔C27 and C17↔C30 read and write each other (inventory and correlation both consume priors and write status back; docs/06 §2.1).
 
 ## Interface
 - **Query inputs** (provisional names):
@@ -47,7 +47,7 @@ Answers "what is *supposed* to be here?" and "is this expected?" for a frequency
 - **RadioReference SOAP API:** best trunking metadata, but **each end user needs RR Premium**. No bundled data; per-user import only.
 - **Artemis** v4.2.0 (2026-07), active; offline frequency/bandwidth/mode/modulation/ACF DB. Licence: check.
 - **sigidwiki:** human-oriented, no feature vectors (docs/03 §3.7). Licence: check.
-- **FMLIST, SatNOGS DB:** licence: check.
+- **FMLIST, SatNOGS DB:** licence: check. These appear in both C17 and C29 — C29 fetches and caches them, C17 is the query/prior interface over the cache (same data, two roles; docs/06 §5).
 - **RTL-ML:** service-level classification with location context is cheap and useful (docs/03 §4.2).
 
 ## Pitfalls
@@ -86,22 +86,24 @@ Answers "what is *supposed* to be here?" and "is this expected?" for a frequency
 - **Offline:** stale-cache and no-GNSS tests.
 
 ## Example use cases
-*Provisional until docs/06 §3 mapping (cross-checked against use-cases.yaml, 2026-09-13).*
-- AWARE-053 — Allocation lookup for unknown signals
-- AWARE-052 — Pirate / unlicensed broadcaster hunting
-- AWARE-054 — Amateur-band intruder logging
+Regenerated from `use-cases.yaml`:
 - AWARE-017 — Tower inventory cross-reference
-- SIGNAL-068 — FM/TV DX cross-reference
+- AWARE-052 — Pirate / unlicensed broadcaster hunting
+- AWARE-053 — Allocation lookup for unknown signals
+- AWARE-054 — Amateur-band intruder logging
 - SIGNAL-071 — Numbers stations & UVB-76
-- PROP-071 — Weather radar pulses + NEXRAD cross-reference
 - RESEARCH-007 — Catalog unknowns against Sig ID Wiki
+- RESEARCH-014 — (priors primary)
+- RESEARCH-015 — (priors primary)
+- AWARE-013 — (cellular/tower cross-reference)
+- AWARE-016 — (licence cross-reference)
 
 ## Open questions
-- **Fusion owner.** docs/06 places Bayesian fusion in both C17 and C15; pick one.
+- **Fusion owner (resolved, docs/06 §5).** C17 supplies priors; C15 fuses them. C17 does not classify.
 - **λ weights.** Fixed, user-tuned, or learned from decoder labels?
-- **Overlap with C29.** FMLIST/SatNOGS appear in both. Proposal: C29 syncs, C17 indexes.
-- **Data packs.** Format, cadence, size budget, non-US packs. Licensee-display policy.
-- **Missing edges.** §2.1 shows C17 feeding only C15; C19, C04, C27 and C30 also consume it.
+- **Overlap with C29 (resolved, docs/06 §5).** FMLIST/SatNOGS: C29 fetches/caches, C17 is the query/prior interface — same data, two roles.
+- **Data packs.** Format, cadence, size budget, non-US packs. Licensee-display policy (doc 07 / a Phase 3 ADR).
+- **Missing edges (resolved, docs/06 §2.1).** C17 feeds C15, C19, C04, C27 and C30, and sits in C17↔C27 / C17↔C30 loops.
 
 ## Reading list
 1. docs/04 §1.1 "Allocation vs. assignment vs. actual use"

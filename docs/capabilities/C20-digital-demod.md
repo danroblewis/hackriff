@@ -1,8 +1,8 @@
 # C20 · digital-demod
-> Layer D — Demodulate & decode · Status: draft (taxonomy draft 2026-09-13) · Depends on: C11, C13, C14, C15 · Used by: C21, C22, C23, C24, C18, C19, C39
+> Layer D — Demodulate & decode · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C11, C13, C14, C15 · Used by: C21, C22, C23, C24, C18, C19, C39
 
 ## Purpose
-Blindly converts a channelized digital emission into soft symbols and hard bits, using parameters estimated upstream (family, symbol rate, deviation, CFO) instead of per-protocol configuration. It is the gateway from "we know what shape it is" to "we have bits". Serves workflow step 6 (blind symbol and bit recovery, including unknown signals) and supplies step 7 via C22/C24.
+Blindly converts a channelized digital emission into soft symbols and hard bits, using parameters estimated upstream (family, symbol rate, deviation, CFO) instead of per-protocol configuration. It is the gateway from "we know what shape it is" to "we have bits". **C20 owns demodulation of OFDM, CSS and radar-pulse waveforms; C13/C14/C16 only *estimate* their parameters — the split is estimate (C13/C14/C16) vs recover (C19/C20)** (docs/06 §5). Conventional (non-trunked) digital voice (P25/DMR/NXDN) is C20 + C22; C23 is only the trunking control/grant logic (docs/06 §5). Serves workflow step 6 (blind symbol and bit recovery, including unknown signals) and supplies step 7 via C22/C24. Layer D is not a chain — C22 does not require C21 (docs/06 §2.1).
 
 ## Interface
 - **In:**
@@ -71,23 +71,23 @@ Blindly converts a channelized digital emission into soft symbols and hard bits,
 - **Live hardware:** long-duration drift, strong-neighbour desense, P25 simulcast.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml`:
 - RESEARCH-001 — Blind ISM device RE with URH
-- AWARE-036 — Unknown burst reverse-engineering triage
-- SIGNAL-053 — LoRa / LoRaWAN
-- SIGNAL-055 — Z-Wave
-- SIGNAL-027 — Meteor-M LRPT
-- SIGNAL-069 — STANAG 4285 modems
-- SIGNAL-044 — MPT1327 trunked fleets
-- SIGNAL-023 — Iridium bursts & ring alerts
-- RESEARCH-003 — Bit-level dissection in inspectrum
+- RESEARCH-017 — (digital demod primary)
+- RESEARCH-043 — (digital demod primary)
+- RESEARCH-044 — (digital demod primary)
+- RESEARCH-046 — (digital demod primary)
+- RESEARCH-064 — (digital demod primary)
+- SIGNAL-016 — (digital bit recovery)
+- SIGNAL-024 — (digital bit recovery)
+- SIGNAL-054 — (digital bit recovery)
+- SIGNAL-060 — (digital bit recovery)
 
 ## Open questions
 - Where does the rtl_433-style pulse abstraction live: C20 (demod), C21 (line-code inference) or only inside the rtl_433 plugin (C22)?
-- Soft-symbol format and scaling (float32, int8, LLRs) shared with C22/SatDump.
+- Soft-symbol format and scaling (float32, int8, LLRs) shared with C22/SatDump (doc 07).
 - Burst API vs streaming API; whether snippet demod can batch on the GPU.
-- Who owns the CQPSK/LSM equalizer: C20 or C23?
-- OFDM demodulation is not in any capability. C16 only estimates parameters, so DAB/DRM/HD/ATSC presumably fall to C22 plugins. Confirm in docs/06.
+- **CQPSK/LSM equalizer and OFDM demod (resolved, docs/06 §5).** C20 owns OFDM/CSS/pulse demodulation (C16 only estimates parameters); conventional digital voice is C20+C22. C23 is only trunking control/grant logic. The CQPSK/LSM equalizer belongs to C20.
 - Library choice (liquid-dsp vs Suscan vs a framework's blocks) and licences: Phase 3 ledger.
 
 ## Reading list

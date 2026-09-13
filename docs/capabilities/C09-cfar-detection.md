@@ -1,5 +1,5 @@
 # C09 · cfar-detection
-> Layer B — Sense · Status: draft (taxonomy draft 2026-09-13) · Depends on: C07, C08, C05 (spur mask), C01 (provenance); C02 for sweep rows · Used by: C10, C12, C13, C25, C31, C39
+> Layer B — Sense · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C07, C08, C05 (spur mask), C01 (provenance); C02 for sweep rows · Used by: C10, C12, C13, C25, C31, C39
 
 ## Purpose
 Turns spectra into emissions. OS-CFAR across frequency plus 2-D CFAR on spectrograms, hysteresis and minimum-duration filters, and connected components produce time×frequency boxes emitted as **Detection** (burst) records with SNR, extent, SK and trust flags. It is the step that makes the device *find* signals instead of making you tune (workflow steps 1–2), and it triggers recording (C25) and characterization.
@@ -34,6 +34,7 @@ Turns spectra into emissions. OS-CFAR across frequency plus 2-D CFAR on spectrog
 
 ## Pitfalls
 - DC spike, band-edge bins, spurs and IQ images produce false emissions without masks and flags.
+- **C05↔C09 bootstrap loop (docs/06 §5 / §2.1):** C05's spur/IMD trust tests need C09 detections, while C09 needs C05's spur mask. This is resolved by seeding a factory/terminated-input spur map first and refining it at runtime — not a design conflict. Learned detectors from C38 are an additional Detection source (docs/06 §2.1).
 - **SNR wall:** 1 dB floor uncertainty caps energy detection near −3.3 dB SNR; don't promise below it.
 - **CA-CFAR masking** in adjacent-channel rasters (LMR, cellular); **box splitting** of OFDM/FSK with spectral nulls; **box merging** of adjacent channels. Tune the connected-component dilation per band.
 - Hysteresis too tight: one PTT becomes many bursts; too loose: TDMA slots merge.
@@ -46,21 +47,22 @@ Turns spectra into emissions. OS-CFAR across frequency plus 2-D CFAR on spectrog
 - **Live only:** retune/gain-step trust tests and POI against a burst generator.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- AWARE-036 — Unknown burst reverse-engineering triage
+Regenerated from `use-cases.yaml`:
+- SPACE-035 — (burst detection)
+- SPACE-037 — (burst detection)
+- SPACE-040 — (burst detection)
+- SPACE-047 — (burst detection)
+- SPACE-071 — (burst detection)
+- SPACE-073 — SETI narrowband drift search
+- AWARE-005 — "Personal privacy device" hunter
 - AWARE-034 — Wi-Fi DFS radar event logging
 - AWARE-045 — CBRS/shared-band incumbent activity sensing
-- AWARE-005 — "Personal privacy device" hunter
-- AWARE-035 — Smart-meter mesh as noise contributor
-- SIGNAL-052 — rtl_433 long tail
-- SIGNAL-076 — VHF collar / radio-tracking
-- SPACE-064 — Jupiter S-burst microstructure
-- PROP-071 — Weather radar pulses + NEXRAD cross-reference
+- RESEARCH-005 — (unknown-burst detection)
 
 ## Open questions
 - Who cuts and holds IQ snippets (±20% padding): C09, C03 or C25?
-- Is the §2.1 edge C05 → C09 explicit? The spur mask is a hard input; the diagram is ambiguous.
-- Ownership of learned detectors (C38) and feature-based detection (C14/C16) as alternative Detection sources; one record type for all?
+- **C05 → C09 edge (resolved, docs/06 §5 / §2.1):** the spur mask is a hard input and C05↔C09 is a bootstrap loop (factory spur map first, runtime refinement). Now explicit in §2.1.
+- Ownership of learned detectors (C38, an explicit §2.1 edge into C09) and feature-based detection (C14/C16) as alternative Detection sources; one record type for all?
 - Separate profiles for sweep rows (few averages, per-slice gain) and dwell spectrograms? Per-band defaults need a spike.
 
 ## Reading list

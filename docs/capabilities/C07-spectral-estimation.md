@@ -1,8 +1,8 @@
 # C07 · spectral-estimation
-> Layer B — Sense · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C03 (C05 for dBm/spur context) · Used by: C08, C09, C26, C33, C38, C39
+> Layer B — Sense · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C03 (C05 for dBm/spur context) · Used by: C08, C09, C26, C33, C38, C39
 
 ## Purpose
-Turns the live dwell IQ window into power spectra that everything downstream shares: Welch PSD rows, multi-resolution STFT, a DPX-style persistence histogram and per-bin spectral-kurtosis (SK) accumulators. It is substrate for workflow step 1 (peruse: waterfall/persistence), and the input to automatic detection (steps 2–3) and science radiometry. Averaging hides bursts; persistence and SK surface them.
+Turns the live dwell IQ window into power spectra that everything downstream shares: Welch PSD rows, multi-resolution STFT, a DPX-style persistence histogram and per-bin spectral-kurtosis (SK) accumulators. It is substrate for workflow step 1 (peruse: waterfall/persistence), and the input to automatic detection (steps 2–3) and science radiometry. Averaging hides bursts; persistence and SK surface them. The decimated narrowband **"zoom" stream (the ~25 Hz-bin / ~800k-point case) is owned by C11** (channelizer); C07 FFTs the decimated stream C11 delivers and does not itself decimate to 800k-point FFTs (docs/06 §5).
 
 ## Interface
 - **In:** timestamped IQ blocks + provenance (gain, clip count, filter, centre, rate) from C03; typically 20 Msps, 8-bit, ~15–18 MHz usable.
@@ -45,17 +45,12 @@ Turns the live dwell IQ window into power spectra that everything downstream sha
 - **Live only:** thermal/power-mode throughput, USB drops, dBm accuracy vs a signal generator.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping (C07 is substrate, so it is only listed when a use case is *about* spectra):
-- SPACE-003 — e-CALLISTO solar burst spectrograms
-- SPACE-057 — Hydrogen line with an SDR
-- SPACE-072 — Satellite RFI in radio astronomy
+C07 is substrate; docs/06 §3 lists it only where a use case is specifically about spectra. Regenerated from `use-cases.yaml`:
 - SPACE-073 — SETI narrowband drift search
-- AWARE-030 — Switching-supply / LED / inverter RFI signatures
-- AWARE-033 — Radio-quiet-zone style site survey
 - RESEARCH-050 — SDR as spectrum analyzer / power survey
 
 ## Open questions
-- **Resolution example is inconsistent with the full-rate IQ window:** docs/06 cites a "4096-point FFT" for compute but "1 kHz and 25 Hz bins". At 20 Msps, 25 Hz bins need an 800k-point FFT (40 ms frames); 1 kHz needs ~16–32k points. The narrow tier probably needs a decimated zoom stream (a C11 DDC). Decide which capability owns zoom STFT.
+- **Zoom-stream ownership (resolved, docs/06 §5):** the decimated narrowband "zoom" stream (25 Hz-bin / ~800k-point case) is owned by C11; C07 FFTs the stream C11 delivers. The full-rate STFT still needs ~16–32k points for 1 kHz bins.
 - **Sweep rows:** doc 04 §3.8 has the discovery sweep update max-hold, mean and SK per bin. Is that C02 or C07? docs/06 leaves it ambiguous.
 - CPU (VOLK/liquid) vs GPU (cuFFT) default; does the pipeline-framework ADR decide it?
 - Persistence on-device vs in the UI client (C39 UI ADR); who decimates rows for C26.

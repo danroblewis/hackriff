@@ -1,8 +1,10 @@
 # C31 · rssi-localization
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C05, C06, C09, C10, C18 · Used by: C27, C30, C39 (C32 bearings fuse into its posterior)
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C05, C06, C09, C10, C18 · Used by: C27, C30, C39 (C32 bearings fuse into its posterior)
 
 ## Purpose
 Answers "where is it?" with the single HackRF. It logs burst power for one target while the user walks, fits an emitter location, and gives "hot/cold" homing guidance. It is the only localization method that needs no second SDR. It serves RFI, pirate and interferer hunts and link-budget mapping. It also gives inventory entries a location for review and the attack map (workflow steps 3–4).
+
+C31 **owns amplitude bearings** — directional-antenna (Yagi/LPDA) rotate-to-peak and body-null sweeps (docs/06 §5). Coherent/phase/interferometry/TDoA bearings belong to C32; they fuse into C31's posterior as wedge likelihoods but are not C31's to produce.
 
 ## Interface
 - **Inputs:**
@@ -76,18 +78,22 @@ Answers "where is it?" with the single HackRF. It logs burst power for one targe
 - **Live/field:** homing UX, attenuator switching, body-null bearings. Needs GNSS, a directional antenna and outdoor space.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- AWARE-052 — Pirate / unlicensed broadcaster hunting
-- AWARE-029 — Power-line arcing locator
+Regenerated from `use-cases.yaml`:
+- PROP-068 — (rssi-localization primary)
+- PROP-069 — (rssi-localization primary)
 - PROP-078 — LoRa terrain link-budget mapping
-- AWARE-005 — "Personal privacy device" hunter
-- SIGNAL-076 — VHF collar / radio-tracking
+- SIGNAL-079 — (rssi-localization primary)
+- PROP-081 — Directional emitter hunt
+- PROP-082 — Path-loss / link-budget survey
+- AWARE-008 — RSSI-based interferer hunt
 - AWARE-009 — ADS-B RSSI-vs-distance plausibility check
+- AWARE-052 — Pirate / unlicensed broadcaster hunting
+- SIGNAL-076 — VHF collar / radio-tracking
 
 ## Open questions
 - **Data model:** locations as fields on C27 emitters, or separate `LocationEstimate` history records? This waits on docs/07.
-- **Policy** on localizing third-party personal devices: CLAUDE.md is silent. Needs an ADR.
-- **Boundary with C32:** docs/06 puts directional-antenna nulls in C31, but C32 covers "bearing methods". Proposed split: amplitude bearings in C31, phase/time bearings in C32.
+- **Policy** on localizing third-party personal devices: CLAUDE.md is silent. Needs a Phase 3 ADR.
+- **Boundary with C32 (resolved, docs/06 §5):** amplitude bearings (Yagi max, body-null) are C31; coherent/phase/interferometry/TDoA bearings are C32.
 - **`hardware_fit`:** is C06's GNSS base hardware (`native`) or an accessory? docs/06 §3 doesn't say.
 
 ## Reading list

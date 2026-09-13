@@ -1,5 +1,5 @@
 # C36 · gnss-observables
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C03, C04, C05, C08, C22, C25 · Used by: C06, C12, C27, C30
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C03, C04, C05, C08, C22, C25 · Used by: C06, C12, C27, C30
 
 ## Purpose
 Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per-satellite C/N0, nav data, pseudorange/phase and integrity flags. This serves science (TEC, scintillation, GNSS-IR) and the attack map: local jamming and spoofing **detection**, joined with gpsjam-style context. Workflow steps: 2 (scheduled L-band dwells), 3 (C/N0 history), 4 (known constellations). Spoofing *generation* is out of scope.
@@ -18,7 +18,7 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 - **Acquisition:** FFT parallel code-phase search over the 1 ms C/A period. GNSS is below the noise floor, so energy detection fails and C09 won't "see" L1 (`docs/04 §4.9`).
 - **Jamming** (AWARE-002):
   - A uniform C/N0 drop across all SVs plus a rise in the C08 L1 floor means jamming; a single-SV drop means blockage.
-  - HackRF has no AGC readout, so use in-band power versus the calibrated floor as the "AGC" proxy.
+  - The HackRF has **no GNSS-style front-end AGC to report** (docs/06 §5) — the docs/06 C36 "front-end AGC" claim is dropped — so use in-band power versus the calibrated C08 floor as the only available "AGC" proxy.
   - Swept-tone jammers (AWARE-005) are spectral: C07/C09.
 - **Spoofing tell-tales** (AWARE-003):
   - Equal power across SVs.
@@ -45,7 +45,7 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 - **OSNMAlib:** OSNMA verification. Licence: check.
 - **RTKLIB:** TEC (SPACE-023 ref). Licence: check.
 - **gnssrefl:** GNSS-IR (PROP-039 ref). Licence: check.
-- **Maintenance:** status of all five is not assessed in the docs. Doc 03 has no GNSS section.
+- **Maintenance and licences:** status of all five is not assessed in the docs; doc 03 has no GNSS section, so GNSS-SDR, galmon and the rest have **unchecked licences — flagged for the Phase 3 licence ledger** (docs/06 §5).
 - **Mayhem "GPS Sim"** (`docs/01 §3.3`): **do not inherit.** GNSS transmission is illegal (`docs/04 §1.3`).
 
 ## Pitfalls
@@ -65,8 +65,8 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 - **Live hardware:** antenna/bias-tee compatibility, TTFF, CPU and thermals per power mode.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- AWARE-002 — Local GNSS C/N0 and AGC watchdog
+Regenerated from `use-cases.yaml`:
+- AWARE-002 — Local GNSS C/N0 watchdog (in-band-power proxy, no true AGC)
 - AWARE-003 — Spoofing tell-tales detector
 - SIGNAL-030 — GPS L1 C/A + SBAS/WAAS raw processing
 - SIGNAL-031 — Galileo OSNMA authentication
@@ -79,8 +79,9 @@ Provisional until docs/06 §3 mapping:
 
 ## Open questions
 - **C06 source:** should it use a dedicated GNSS module so C36 runs only on scheduled dwells? This is an attention-budget ADR.
-- **"Front-end AGC" in docs/06 C36:** HackRF has none. Reword as "in-band power / noise-floor proxy"?
-- **Dual-frequency products:** mark `needs-other-sdr` in §3?
+- **"Front-end AGC" (resolved, docs/06 §5):** the HackRF has none; C36 reports an in-band-power / noise-floor proxy instead.
+- **Dual-frequency products (resolved, docs/06 §5):** dual-frequency TEC cannot fit one 20 MHz window on a single HackRF, so it is `needs-other-sdr`.
+- **Licences (resolved, docs/06 §5):** GNSS-SDR/galmon/etc. licences are unchecked and go to the Phase 3 licence ledger.
 - **AWARE-005:** confirm it maps to C09/C10 first, with C36 secondary.
 - **GNSS-IR:** docs/06 C36 omits it (SNR versus elevation, no nav solution).
 - **GNSS-SDR:** process boundary, licence isolation, and CPU fit alongside C07/C11.

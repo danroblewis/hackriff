@@ -1,8 +1,8 @@
 # C18 · fingerprint-signatures
-> Layer C — Characterize · Status: draft (taxonomy draft 2026-09-13) · Depends on: C13, C14, C15, C16, C10, C21 · Used by: C27, C22, C10, C21, C12, C30, C28
+> Layer C — Characterize · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C13, C14, C15, C16, C10, C21 · Used by: C27, C22, C10, C21, C12, C30, C28
 
 ## Purpose
-Maintains editable signatures built on the docs/04 §7.6 fingerprint. It matches emission clusters against them and groups unknown emissions into "the same thing I saw before". It generalises rtl_433 flex specs beyond OOK and grounds emitter identity in the inventory (C27). It serves workflow step 4 (known vs unknown) and steps 6–7 (a matched signature routes to a decoder pipeline). RF-hardware fingerprinting of individual transmitters is a later hook.
+Maintains editable signatures built on the docs/04 §7.6 fingerprint. It matches emission clusters against them and groups unknown emissions into "the same thing I saw before". **C18 owns cross-time emission clustering**; C10 links short-time tracks and C21 aligns messages within a cluster — three scales, one owner each (docs/06 §5). It generalises rtl_433 flex specs beyond OOK and grounds emitter identity in the inventory (C27). It serves workflow step 4 (known vs unknown) and steps 6–7 (a matched signature routes to a decoder pipeline). RF-hardware fingerprinting of individual transmitters is a later hook.
 
 ## Interface
 - **Input: `EmissionFeatures`** (provisional), aggregated per track or cluster, each with uncertainty:
@@ -81,18 +81,20 @@ Maintains editable signatures built on the docs/04 §7.6 fingerprint. It matches
 - **Live:** multi-day cluster stability; mobile use.
 
 ## Example use cases
-*Provisional until docs/06 §3 mapping (cross-checked against use-cases.yaml, 2026-09-13).*
-- AWARE-030 — Switching-supply / LED / inverter RFI signatures
+Regenerated from `use-cases.yaml`:
 - AWARE-029 — Power-line arcing locator
+- AWARE-030 — Switching-supply / LED / inverter RFI signatures
 - AWARE-047 — RF fingerprinting of same-model transmitters
-- AWARE-051 — Oscillator-offset fingerprint for low-cost sensors
+- AWARE-048 — RF fingerprinting robustness across channels
 - AWARE-056 — Woodpecker history replay
-- SIGNAL-046 — TPMS
 - RESEARCH-016 — Iridium transmitter fingerprinting (SatIQ)
+- RESEARCH-029 — BLE tracking despite MAC randomization
 - RESEARCH-062 — RF fingerprinting / physical-layer auth (ORACLE)
+- AWARE-035 — (emission clustering)
+- RESEARCH-018 — (signature/fingerprint)
 
 ## Open questions
-- **Clustering owner.** docs/06 has C10 "clusters emissions by fingerprint", C18 "clustering of unknown emissions" and C21 "emits a draft signature". Pick one owner.
+- **Clustering owner (resolved, docs/06 §5).** C18 owns cross-time emission clustering; C10 links short-time tracks; C21 aligns messages within a cluster. Three scales, one owner each.
 - **Signature format.** rtl_433 flex compatibility, versioning, sharing (ADR). Batch or online clustering?
 - **Schema gaps.** §7.6 has no fields for RFI combs or radar PRI/scan, yet most C18-primary use cases are non-protocol (AWARE-029/030/056).
 - **Type vs instance.** Signature (type) vs C27 emitter (instance).

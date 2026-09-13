@@ -1,6 +1,8 @@
 # Feedback on the draft taxonomy (docs/06) from writing the capability cards
 
-*2026-09-13. Written by the card-writing agents while condensing docs 01–05 into the 39 cards, and collected here for the architect's Phase 1 checkpoint. Each point is also recorded in the Open questions section of the relevant card. Nothing here has been applied to docs/06; the architect and the user decide.*
+> **Resolved (2026-09-13).** Every point below is now decided in [docs/06 §5](../06-capability-map.md#5-resolved-taxonomy-questions-from-capability-card-review) (with edges folded into §2.1), and the capability cards have been reconciled to those decisions. This file is kept as the record of what was raised; §5 is the source of truth for the resolutions.
+
+*2026-09-13. Written by the card-writing agents while condensing docs 01–05 into the 39 cards, and collected here for the architect's Phase 1 checkpoint. Each point is also recorded in the Open questions section of the relevant card.*
 
 ## 1. Missing or wrong edges in §2.1 (dependency sketch)
 

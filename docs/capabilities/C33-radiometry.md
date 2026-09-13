@@ -1,5 +1,5 @@
 # C33 · radiometry
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C02, C03, C05, C06, C07, C08 · Used by: C26, C30, C39
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C02, C03, C05, C06, C07, C08 · Used by: C26, C30, C39
 
 ## Purpose
 Turns the receiver into a science instrument that measures **noise power**, not signals. It provides:
@@ -9,7 +9,7 @@ Turns the receiver into a science instrument that measures **noise power**, not 
 - sidereal tagging and spectral-kurtosis RFI flagging;
 - dynamic spectra.
 
-It serves riometer, H I, solar and noise-survey science, and supplies local evidence for C30's space-weather explanations.
+It serves riometer, H I, solar and noise-survey science, and supplies local evidence for C30's space-weather explanations. Per docs/06 §5, the noise-floor-vs-time *measurement* is owned by `noise-floor` (C08); C33 leads only when the deliverable is a calibrated, long-integration radiometric product, using C08's estimate underneath.
 
 ## Interface
 - **Inputs:**
@@ -80,7 +80,7 @@ It serves riometer, H I, solar and noise-survey science, and supplies local evid
 - **Live/field:** multi-day riometer QDC; H I chain; Y-factor. Needs accessories and long unattended runs.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml`:
 - SPACE-031 — Riometer
 - SPACE-057 — Hydrogen line with an SDR
 - SPACE-068 — Drift-scan radio transits

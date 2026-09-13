@@ -1,8 +1,10 @@
 # C22 · decoder-plugins
-> Layer D — Demodulate & decode · Status: draft (taxonomy draft 2026-09-13) · Depends on: C11, C15, C17, C19, C20, C21 · Used by: C23, C24, C27, C28, C15, C30, C35
+> Layer D — Demodulate & decode · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C11, C15, C17, C19, C20 (C21 is an optional routing input, not required — Layer D is not a chain, docs/06 §2.1) · Used by: C23, C24, C27, C28, C15, C30, C35
 
 ## Purpose
 Hosts proven third-party decoders (rtl_433, readsb, AIS-catcher, multimon-ng, SatDump, …) as isolated plugins behind one contract, and routes the right channel to the right decoder from classification. CRC-valid decodes become ground-truth labels for the inventory and classifier. This delivers "decoders are pluggable consumers" (step 7) and verifiable decode (step 6) without rewriting decoders.
+
+Ownership decisions (docs/06 §5): C22 **executes** known decoders while C21 **identifies** FEC/frame structure (inference vs execution). C22 **owns own-key decryption** of the user's *own* traffic — a decoder stage with user-supplied keys, key source recorded in provenance, never applied to others' traffic (**provisional** pending the doc 07 provenance/key model). Conventional (non-trunked) digital voice P25/DMR/NXDN is owned by C20 + C22; C23 is only the trunking control/grant logic.
 
 ## Interface
 - **In:** one of
@@ -77,24 +79,25 @@ Status from docs/03 §3.3, §3.5 and §3.6. **Licences: check** for all; the doc
 - **Load (Jetson bench):** N concurrent plugins; CPU, latency, drops.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml` (C22 is primary for 82 use cases; a representative sample):
+- PROP-002 — Multi-band WSPR/FT8 skimmer
+- PROP-024 — (decoder-plugins primary)
+- PROP-027 — (decoder-plugins primary)
+- AWARE-001 — (decoder-plugins primary)
+- AWARE-007 — (decoder-plugins primary)
+- AWARE-009 — ADS-B RSSI-vs-distance plausibility check
 - SIGNAL-001 — ADS-B / Mode S (baseline)
-- SIGNAL-015 — AIS (baseline)
-- SIGNAL-052 — rtl_433 long tail
-- SIGNAL-074 — Radiosondes (baseline)
-- SIGNAL-003 — VHF ACARS
-- SIGNAL-008 — All-datalink aggregation
-- SIGNAL-067 — NOAA Weather Radio SAME/EAS
-- AWARE-070 — IoT sensor population census
-- AWARE-062 — Radiosonde launch correlation
+- SIGNAL-016 — (decoder-plugins primary)
+- SIGNAL-024 — (decoder-plugins primary)
+- SIGNAL-050 — (decoder-plugins primary)
 
 ## Open questions
-- **IPC and framing:** pipes, sockets or the C24 transport? If C24, C22 depends on C24.
+- **IPC and framing:** pipes, sockets or the C24 transport? If C24, C22 depends on C24. (Phase 3 stream-contract ADR.)
 - Registry and manifest schema: adopt SatDump's pipeline format or our own?
-- **Own-key decryption** (SIGNAL-051; own links per CLAUDE.md) has no owner in docs/06.
-- **Restricted-content policy** (paging, cellular, 47 USC 605): C22, C24 or a cross-cutting layer? docs/06 names none.
-- FEC decoding and deframing: a C22 stage or a library shared with C21?
-- Per-decoder licence ledger; IMBE/AMBE vocoder licensing for dsd-fme.
+- **Own-key decryption (resolved, docs/06 §5):** C22 owns it (user keys, provenance-recorded); **provisional** pending the doc 07 provenance/key model.
+- **Restricted-content policy (resolved, docs/06 §5):** C24 is the enforcement point (metadata always allowed, content gated on a content-class flag set at classification); **provisional**, pinned by a Phase 3 legal-guardrail ADR.
+- FEC decoding and deframing: C21 identifies structure, C22 executes decoders (docs/06 §5); shared library TBD.
+- Per-decoder licence ledger; IMBE/AMBE vocoder licensing for dsd-fme (Phase 3 ledger).
 - Start with 3–5 decoders; avoid general plugin infrastructure (one-developer constraint).
 
 ## Reading list

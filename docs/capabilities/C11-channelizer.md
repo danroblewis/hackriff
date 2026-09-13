@@ -1,8 +1,8 @@
 # C11 · channelizer
-> Layer B — Sense · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C03 (requests from C04, C09, C22, C23) · Used by: C13, C14, C16, C19, C20, C22, C23, C25, C34
+> Layer B — Sense · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C03 (requests from C04, C09, C22, C23) · Used by: C13, C14, C16, C19, C20, C22, C23, C25, C34
 
 ## Purpose
-Splits the ≤20 MHz dwell window into many narrowband streams at once: a 2× oversampled polyphase filter bank (PFB) on fixed rasters (12.5/25/100 kHz) plus on-demand DDCs. It lets one half-duplex radio demodulate, decode and record every active signal in the window in parallel (trunking, dense ISM). It serves workflow steps 5–7.
+Splits the ≤20 MHz dwell window into many narrowband streams at once: a 2× oversampled polyphase filter bank (PFB) on fixed rasters (12.5/25/100 kHz) plus on-demand DDCs. It lets one half-duplex radio demodulate, decode and record every active signal in the window in parallel (trunking, dense ISM). It serves workflow steps 5–7. **C11 owns the decimated narrowband "zoom" stream** (the 25 Hz-bin / ~800k-point case), which C07 then FFTs (docs/06 §5). **C23 trunking-follow depends on C11 + C12** — control-channel hunting uses the channelizer and occupancy (docs/06 §5 / §2.1).
 
 ## Interface
 - **In:** continuous IQ window + ring buffer from C03 (20 Msps complex, sample-indexed timestamps, provenance).
@@ -49,20 +49,25 @@ Splits the ≤20 MHz dwell window into many narrowband streams at once: a 2× ov
 - **Live only:** sustained multi-decoder load under thermal limits.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- AWARE-067 — Public-safety trunking load index (metadata only)
+Regenerated from `use-cases.yaml`:
+- SIGNAL-003 — (parallel narrowband decode)
+- SIGNAL-004 — (parallel narrowband decode)
+- SIGNAL-006 — (parallel narrowband decode)
+- SIGNAL-007 — (parallel narrowband decode)
+- SIGNAL-023 — Iridium bursts & ring alerts
+- SIGNAL-041 — (dense-band channelization)
+- SIGNAL-042 — (dense-band channelization)
 - SIGNAL-044 — MPT1327 trunked fleets
+- SIGNAL-049 — (parallel narrowband decode)
 - SIGNAL-052 — rtl_433 long tail
-- AWARE-069 — Meshtastic/LoRa mesh growth map
-- AWARE-070 — IoT sensor population census
-- PROP-002 — Run a multi-band WSPR/FT8 skimmer
+- Also feeds trunking (SIGNAL-080..084, via C23).
 
 ## Open questions
-- **§2.1 shows no upstream for C11**; it should depend on C03 (and receive requests from C09/C04/C22/C23).
+- **C11 upstream (resolved, docs/06 §2.1):** C11 depends on C03 and receives requests from C04/C09/C22/C23.
 - GPU (CUDA/CuPy) vs CPU (liquid-dsp/VOLK) PFB default; tied to the pipeline-framework ADR and the "no rebuild to change pipelines" requirement (add/remove channels at runtime).
 - PFB prototype parameters and which rasters run by default (energy/power budget in low-power mode).
-- Does C11 own zoom/decimated streams for C07's narrow-resolution STFT?
-- Where does routing/legal policy live: C22 registry or a channel-request gate?
+- **Zoom-stream ownership (resolved, docs/06 §5):** C11 owns the decimated zoom stream; C07 FFTs it.
+- Where does routing/legal policy live: C22 registry or a channel-request gate? (Restricted-content gating is owned by C24 per docs/06 §5.)
 
 ## Reading list
 1. `docs/04 §3.7 "Channelization: DDC and polyphase filter banks"`

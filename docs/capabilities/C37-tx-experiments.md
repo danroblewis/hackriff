@@ -1,5 +1,5 @@
 # C37 · tx-experiments
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C04, C06, C25, C28 · Used by: none directly (paired RX via C13, C20, C33, C34)
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C04, C06, C25, C28 · Used by: none directly (paired RX via C13, C20, C33, C34)
 
 ## Purpose
 The **authorised-only** transmit path:
@@ -58,7 +58,7 @@ The device is **receive-only by default**. TX needs explicit enablement tied to 
 
 ## Pitfalls
 - **"Replay" creep:** replaying others' keyfob, garage or pager signals is what the guardrails forbid. Provenance must be enforced, not advisory.
-- **Jamming inside research use cases:** RESEARCH-027 (RollJam) includes jamming. The jam step is excluded over the air even on own devices; at most, conducted in a shielded box.
+- **Jamming inside research use cases:** RESEARCH-027 (RollJam: jam + record + replay) is now **`out-of-scope`** because jamming a receiver is illegal under 47 USC 333 regardless of target (docs/06 §5, §4.4). Capture-only variants (record and replay without jamming, e.g. SIGNAL-047, RESEARCH-028 RollBack) stay in scope.
 - **Allowlists vary by country and licence class:** ship none enabled.
 - **Always-denied bands:** hard-deny public safety, aviation, GNSS and cellular regardless of profile (`docs/04 §1.3`).
 - **Killing your own front end:** TX into an unattenuated receiver, or the amp left on in loopback.
@@ -77,7 +77,7 @@ The device is **receive-only by default**. TX needs explicit enablement tied to 
 - **Live hardware:** conducted loopback via ≥40 dB attenuation or dummy load in a shielded box; switch latency; harmonics measured on an analyzer.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml` (RESEARCH-027 jam+replay is excluded — `out-of-scope`, docs/06 §5):
 - PROP-003 — Own WSPR beacon reach test
 - PROP-014 — Build your own coded ionosonde
 - PROP-015 — Oblique sounding between two of your own stations
@@ -93,7 +93,7 @@ Provisional until docs/06 §3 mapping:
 - **Build-time exclusion:** should TX also be a build-time feature flag? This is a legal/product ADR.
 - **Proving own-origin:** is attestation enough, or should captures be tied to a registered own-device fingerprint (C18)?
 - **C06 dependency:** docs/06 C37 omits C06, but sounders and WSPR need accurate time.
-- **Attack-framed use cases:** RESEARCH-027/028/032/038 should map `out-of-scope` or "study published findings, RX-only".
+- **Attack-framed use cases (resolved, docs/06 §5):** RESEARCH-027 (jamming) is `out-of-scope`; RESEARCH-028/032/038 stay as capture/replay-only or "study published findings, RX-only".
 - **Full duplex or other SDRs:** many `tx: required` items (PROP-061–069, RESEARCH-020–026) need them or a testbed. Confirm `needs-other-sdr`.
 - **External PA:** is a PA accessory in scope for HF licensed work?
 

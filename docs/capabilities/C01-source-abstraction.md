@@ -1,5 +1,5 @@
 # C01 · source-abstraction
-> Layer A — Acquire · Status: draft (taxonomy draft 2026-09-13) · Depends on: — (root; reads C05 correction state, C06 time) · Used by: C02, C03, C04, C05, C37 (and every offline test via file replay)
+> Layer A — Acquire · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: — (root; reads C05 correction state, C06 time) · Used by: C02, C03, C04, C05, C37 (and every offline test via file replay)
 
 ## Purpose
 One driver layer that controls every sample source and delivers timestamped sample blocks. Each block carries a **provenance** record. Sources: HackRF One (later Pro), SoapySDR devices, a soundcard for VLF/ELF, and SigMF file replay. It is the substrate under workflow steps 1–2. Provenance lets later stages say "suspect IMD" instead of logging ghosts, and replay is the basis of offline tests.
@@ -58,14 +58,14 @@ One driver layer that controls every sample source and delivers timestamped samp
   - Clock-source switching.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
-- SPACE-001 — SID flare monitor (SuperSID)
-- SPACE-037 — Whistlers, chorus & tweeks (INSPIRE)
-- SIGNAL-079 — Hearing-aid induction loops
+C01 is substrate; docs/06 §3 lists it only where a use case is specifically about the source layer. Per `use-cases.yaml`:
+- SPACE-041 — (source/replay use case)
+- PROP-012 — (source use case)
 - AWARE-028 — Wi-Fi + BLE + drone combined sweep
-- AWARE-038 — Standards-based sensor node
 - AWARE-056 — Woodpecker history replay
-- RESEARCH-003 — Bit-level dissection in inspectrum
+- SIGNAL-022 — (source use case)
+- SIGNAL-059 — (source use case)
+- SIGNAL-079 — Hearing-aid induction loops
 
 ## Open questions
 - In-process real-time source, or a capture process with shared memory? Tied to "change pipelines without stopping capture" (CLAUDE.md).

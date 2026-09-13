@@ -1,8 +1,10 @@
 # C30 · event-correlation
-> Layer F — Explain · Status: draft (taxonomy draft 2026-09-13) · Depends on: C06, C08, C12, C26, C27, C29 (optional C05, C34, C38) · Used by: C27, C39
+> Layer F — Explain · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C06, C08, C12, C17, C26, C27, C29 (optional C05, C34, C38) · Used by: C17, C27, C28, C39
 
 ## Purpose
 Answers "why did my spectrum change?" by joining local anomalies with external events and the device's own history by time, frequency and geometry, producing ranked Explanations with confidence and evidence. It is the radio "attack map" (docs/05 §3; AWARE-044), serving science (flares, propagation) as much as awareness (jamming, satellites). Time coincidence first, geometry second (docs/06).
+
+C30 sits in the **Layer E loops** (docs/06 §5, §2.1): it and C27 (signal-inventory) and C17 (known-signal-priors) read and write each other — the inventory and priors feed correlation, and correlation writes explanation/status back to them. C30 also feeds C28 (a user confirms or corrects explanations) and uses C29's satellite-pass windows (computed by C29 from cached TLEs, not by C30).
 
 ## Interface
 - **Input `LocalAnomaly`** (provisional), from C08, C12, C26 and C27:
@@ -65,22 +67,24 @@ Answers "why did my spectrum change?" by joining local anomalies with external e
 - **Needs live data:** real flares (unpredictable), real feed latency.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
-- AWARE-044 — "Why did my spectrum change?" event feed
-- AWARE-032 — Lightning sferics explainer
-- AWARE-062 — Radiosonde launch correlation
-- AWARE-064 — Satellite pass vs. noise-floor attribution
-- AWARE-060 — Sporadic-E / tropo "why am I hearing distant stations"
-- SPACE-012 — Shortwave fadeout detector
+Regenerated from `use-cases.yaml`:
+- SPACE-002 — (event-correlation primary)
+- SPACE-015 — "Space weather now" local dashboard
+- SPACE-026 — (event-correlation primary)
 - SPACE-032 — Polar cap absorption events
-- AWARE-006 — GNSS jamming timeline vs. geopolitical events
+- AWARE-004 — (event-correlation primary)
+- AWARE-043 — Multi-site coincidence via public networks
+- AWARE-044 — "Why did my spectrum change?" event feed
+- AWARE-060 — Sporadic-E / tropo "why am I hearing distant stations"
+- AWARE-062 — Radiosonde launch correlation
+- AWARE-068 — (event-correlation primary)
 
 ## Open questions
-- **Anomaly contract:** docs/06 names three anomaly sources (C08, C12, C27) but no common LocalAnomaly contract and no owner for change detection.
+- **Anomaly contract (resolved owner, docs/06 §5):** the shared LocalAnomaly record emitted by C08/C12/C27 and consumed by C30 is a **doc 07 domain object** — defined in the data model.
 - **Hand rules vs learned correlation:** start with rules plus the base-rate check?
-- **Orbit geometry:** SGP4 passes need C34 or a shared ephemeris utility; docs/06 lists neither as a dependency.
-- **Attack-map view:** no capability owns it; C39 is generic.
-- **Missing edges:** C30 → C04 (dwell to confirm) and C30 → C28 (user confirms explanations)?
+- **Orbit geometry (resolved, docs/06 §5):** C29 computes SGP4 passes from cached TLEs; C30 consumes the pass windows.
+- **Attack-map view (resolved, docs/06 §5):** C39 explicitly owns the attack-map dashboard and map/geo views.
+- **Missing edges (resolved, docs/06 §2.1):** C30 → C28 (user confirms explanations); C30 → C04 (dwell to confirm) is also carried.
 
 ## Reading list
 1. docs/05 §3 "Spectrum Situational Awareness, Interference & Anomalies" (AWARE-043/044; "Space Weather, Propagation & Natural Explainers"; "Satellite & Space-Segment Interference")

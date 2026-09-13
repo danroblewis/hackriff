@@ -1,5 +1,5 @@
 # C28 · annotation-labeling
-> Layer E — Remember · Status: draft (taxonomy draft 2026-09-13) · Depends on: C09, C22, C25, C27, C39 · Used by: C15, C18, C27, C38
+> Layer E — Remember · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C09, C22, C25, C27, C39 (C30 explanations can attach to annotations — edge C30→C28, docs/06 §2.1) · Used by: C15, C18, C27, C38
 
 ## Purpose
 Captures ground truth: user labels and corrections on detections, emitters and recordings, plus "confirmed by decoder" labels from CRC-valid frames. It exports them as labelled SigMF datasets. This closes the fine-tuning loop that makes classifiers work on this device's own front end (docs/04 §5.4 #1) and supports separating known from unknown (workflow step 4). It also produces the annotated fixtures the test strategy asks for.
@@ -62,22 +62,24 @@ Captures ground truth: user labels and corrections on detections, emitters and r
 - **Needs hardware:** on-device labelling UX; real decoder label quality.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
+Regenerated from `use-cases.yaml` (primary, then notable secondary):
 - RESEARCH-070 — Build labeled RF datasets from your own captures
-- RESEARCH-073 — Open-set / unknown-signal detection
-- RESEARCH-076 — Browser-based IQ exploration
+- RESEARCH-071 — (annotation-labeling primary)
+- RESEARCH-072 — (annotation-labeling primary)
 - AWARE-022 — ML drone RF classifier
-- AWARE-041 — PSD-based technology classifier
 - AWARE-030 — Switching-supply / LED / inverter RFI signatures
-- RESEARCH-007 — Catalog unknowns against Sig ID Wiki
-- AWARE-036 — Unknown burst reverse-engineering triage
+- AWARE-040 — (annotation-labeling secondary)
+- AWARE-047 — (annotation-labeling secondary)
+- AWARE-048 — (annotation-labeling secondary)
+- RESEARCH-067 — (annotation-labeling secondary)
+- RESEARCH-076 — Browser-based IQ exploration
 
 ## Open questions
 - **Taxonomy source and versioning:** TorchSig classes, sigidwiki names, or our own?
 - **Boundary with C18:** are user-edited signatures annotations, or signatures?
 - **Tags and bookmarks:** does C28 own free-form tags on emitters and frequency regions? docs/06 doesn't say.
 - **Decoder trust:** thresholds per protocol.
-- **Legal enforcement:** export legality and the licence field have no owner in docs/06.
+- **Legal enforcement:** restricted-content gating is now owned by C24 as the enforcement point (docs/06 §5); C28 exports must honor the same content-class flag. The export-licence field owner awaits the Phase 3 legal-guardrail ADR.
 - **Export format:** depends on the outcome of the C38 on-device fine-tuning spike.
 
 ## Reading list

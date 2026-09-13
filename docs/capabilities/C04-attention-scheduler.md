@@ -1,8 +1,8 @@
 # C04 · attention-scheduler
-> Layer A — Acquire · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C02, C03, C10, C12, C22, C23, C29 · Used by: C02, C03, C23, C34, C37, C39
+> Layer A — Acquire · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C02, C03, C10, C12, C22, C23, C29 · Used by: C02, C03, C23, C34, C37, C39
 
 ## Purpose
-Decides where the single half-duplex radio points. It alternates discovery sweeps (C02) with dwells (C03), weighted by user intent, novelty, expected burst timing and decoder demand. docs/06 calls it the single hardest design problem for a one-radio device. It turns workflow step 2 (automate) into efficient use of a 20 MHz window across 6 GHz.
+Decides where the single half-duplex radio points. It alternates discovery sweeps (C02) with dwells (C03), weighted by user intent, novelty, expected burst timing and decoder demand. The **interestingness score it prioritises on is computed by C12** (occupancy-baseline, which holds the baselines and novelty); C04 only *consumes* it and does not recompute it (docs/06 §5). docs/06 calls it the single hardest design problem for a one-radio device. It turns workflow step 2 (automate) into efficient use of a 20 MHz window across 6 GHz.
 
 ## Interface
 - **Inputs:**
@@ -26,7 +26,7 @@ Decides where the single half-duplex radio points. It alternates discovery sweep
   4. Record qualifying bursts; classify and decode on the recording.
 - **Score** (docs/04 §2 "What makes a frequency "interesting": a feature taxonomy):
   - S = w1·clip(SNR/20) + w2·novelty + w3·H(p_class) + w4·1[decoder] + w5·periodicity − w6·boring_prior
-  - User-tunable weights.
+  - This score is **computed by C12** and consumed here (docs/06 §5); C04 does not recompute it. User-tunable weights live with C12.
 - **Revisit:** multi-armed bandit, UCB on interestingness (docs/04 §3.8). Arms are candidate windows; reward is detections, novelty and decodes per dwell-second.
 - **POI accounting** per region: P_POI ≈ min(1, (τ + T_d)/T_R) and P_≥1 = 1 − (1 − P_POI)^(r·T_obs).
 - **Coverage rules:** maximum revisit ≤ ½ the minimum on/off time for complete capture, otherwise statistical reporting. Baselines ≥24 h when patterns are unknown (docs/04 §3.9 "Occupancy statistics methodology (ITU-R SM.1880 / SM.2256)").
@@ -69,18 +69,20 @@ Decides where the single half-duplex radio points. It alternates discovery sweep
 - **Live:** mode-switch latency; discovery rate in a city vs a quiet site.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
-- AWARE-042 — Duty-cycle and occupancy statistics
-- AWARE-036 — Unknown burst reverse-engineering triage
+Regenerated from `use-cases.yaml`:
 - SIGNAL-033 — SatNOGS ground station
-- AWARE-062 — Radiosonde launch correlation
-- AWARE-038 — Standards-based sensor node
-- AWARE-069 — Meshtastic/LoRa mesh growth map
-- AWARE-044 — "Why did my spectrum change?" event feed
-- AWARE-005 — "Personal privacy device" hunter
+- SIGNAL-072 — NCDXF/IARU beacon chain
+- AWARE-027 — (scheduler-driven survey)
+- AWARE-034 — Wi-Fi DFS radar event logging
+- AWARE-045 — CBRS/shared-band incumbent activity sensing
+- AWARE-057 — (scheduled dwell/track)
+- SIGNAL-008 — (scan-plan automation)
+- SIGNAL-018 — (scan-plan automation)
+- SIGNAL-027 — (scheduled revisit)
+- SIGNAL-028 — (scheduled revisit)
 
 ## Open questions
-- docs/06 C04 inputs omit C29 time-anchored events and C37 TX arbitration. docs/06 §2.1 shows only C12 → C04; C02, C10 and C22/C23 demand are also inputs.
+- **Scheduler inputs (resolved, docs/06 §5 / §2.1):** C04 takes C02, C10, C22, C23, C29 (incl. satellite-pass/launch events) and C37 (TX arbitration); the interestingness score comes from C12. The earlier "docs/06 omits these" note is superseded.
 - Bandit reward and weights: spike with the simulator before an ADR.
 - Is a second receiver (survey + dwell) compatible with "one self-contained device"? It removes most conflicts.
 - Plan format (cron-like vs SCOS-like actions), and how reports express POI and coverage to users.

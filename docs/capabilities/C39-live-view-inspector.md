@@ -1,5 +1,5 @@
 # C39 · live-view-inspector
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C02, C07, C09, C10, C13, C14, C20, C21, C25, C26, C27, C28 ("reads everything", docs/06 §2.1) · Used by: user; sends commands to C04, C25, C28
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C02, C07, C09, C10, C13, C14, C20, C21, C25, C26, C27, C28 ("reads everything", docs/06 §2.1) · Used by: user; sends commands to C04, C25, C28
 
 ## Purpose
 The interactive surface:
@@ -9,6 +9,8 @@ The interactive surface:
 - a per-signal **inspector** (constellation, IF histogram, symbols, bits, cyclic spectrum) bound to an emitter's records.
 
 It replaces the tuning-first VFO model with an object model: signals you list, tag and revisit (`docs/03 §5.1`). It serves workflow steps 1, 3 and 5–6. Web versus native is a Phase 3 ADR; this card lists considerations only.
+
+C39 **explicitly owns map/geo views and the attack-map dashboard** alongside its four listed products (live view, history browser, signal table, per-signal inspector) — docs/06 §5. The UI ADR (Phase 3) decides how they are built.
 
 ## Interface
 - **Inputs (provisional objects):**
@@ -76,21 +78,20 @@ It replaces the tuning-first VFO model with an object model: signals you list, t
 - **Live hardware:** outdoor readability, touch, display battery draw.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping. C39 is substrate and rarely listed:
-- AWARE-031 — Long-term noise-floor trend logger
-- RESEARCH-076 — Browser-based IQ exploration
-- RESEARCH-005 — Blind signal detection with gr-inspector
-- RESEARCH-007 — Catalog unknowns against Sig ID Wiki
-- RESEARCH-050 — SDR as spectrum analyzer / power survey
+Regenerated from `use-cases.yaml`. C39 is substrate; docs/06 §3 lists it only where a use case is specifically about the interactive surface:
+- RESEARCH-076 — Browser-based IQ exploration (primary)
 - SPACE-015 — "Space weather now" local dashboard
-- PROP-052 — Real-time passive radar with KrakenSDR/blah2
+- RESEARCH-003 — Bit-level dissection in inspectrum
+- RESEARCH-039 — (live-view/inspector use case)
+- RESEARCH-040 — (live-view/inspector use case)
+- RESEARCH-041 — (live-view/inspector use case)
 
 ## Open questions
 - **Web versus native versus hybrid:** a spike should measure Chromium/WebGL2 against ImGui frame time and latency on Orin Nano with the same 20 Msps replay.
 - **Remote viewing:** is it a first-release requirement? It shifts the ADR weighting.
 - **Where persistence and decimation run:** server-side GPU (fixed client bandwidth) or client-side?
-- **Scope:** docs/06 C39 bundles live view, history browser, signal table and inspector. Split the inspector out? "Reads everything" hides dependency order.
-- **Dashboards and maps:** no docs/06 capability covers them (SPACE-015, C31 heat maps, C30 explanations). C39, or a new one?
+- **Scope:** docs/06 C39 bundles live view, history browser, signal table and inspector. Split the inspector out? "Reads everything" hides dependency order. (Decided in the Phase 3 UI ADR.)
+- **Dashboards and maps (resolved, docs/06 §5):** C39 explicitly owns map/geo views and the attack-map dashboard (SPACE-015, C31 heat maps, C30 explanations); the Phase 3 UI ADR decides how.
 
 ## Reading list
 1. `docs/03 §5.2 "Best UX ideas that already exist (steal these)"`.

@@ -1,8 +1,8 @@
 # C08 · noise-floor
-> Layer B — Sense · Status: draft (taxonomy draft 2026-09-13) · Depends on: C07 (C05 for dBm and spur mask; C09/C12 for idle-time) · Used by: C09, C13, C19, C30, C33, C39
+> Layer B — Sense · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C07 (C05 for dBm and spur mask; C09/C12 for idle-time) · Used by: C09, C13, C19, C30, C33, C39
 
 ## Purpose
-Robust noise-floor estimates per bin, per channel and over time, with uncertainty. Every threshold depends on it: CFAR guard, squelch, spectral SNR, occupancy. It is also a science product (noise vs frequency and time: space weather, man-made noise, RFI trends). It serves workflow steps 2–3 and feeds the attack map (C30).
+Robust noise-floor estimates per bin, per channel and over time, with uncertainty. Every threshold depends on it: CFAR guard, squelch, spectral SNR, occupancy. It is also a science product (noise vs frequency and time: space weather, man-made noise, RFI trends). Per docs/06 §5, C08 OWNS the noise-floor-vs-time measurement (e.g. SPACE-050, AWARE-031); when the deliverable is a calibrated, long-integration radiometric product, `radiometry` (C33) leads and C08 supplies the underlying estimate. It serves workflow steps 2–3 and feeds the attack map (C30).
 
 ## Interface
 - **In:** `SpectrumFrame`s from C07 (linear PSD, `n_avg`, RBW, provenance, DC/edge masks); optional sweep rows from C02; spur mask and dBFS→dBm table from C05; per-channel idle intervals from C09/C12.
@@ -49,14 +49,14 @@ Recommended chain (`docs/04 §3.4 "CFAR detection across frequency (and time)"`,
 - **Live only:** −174 dBm/Hz sanity against a known-ENR noise source (C05); long diurnal runs.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml`:
 - SPACE-050 — Natural radio noise floor survey
 - AWARE-031 — Long-term noise-floor trend logger
 - SPACE-031 — Riometer
 - SPACE-012 — Shortwave fadeout detector
 - AWARE-027 — ISM car-key jammer detection
 - AWARE-064 — Satellite pass vs. noise-floor attribution
-- SPACE-072 — Satellite RFI in radio astronomy
+- AWARE-032 — (noise-floor anomaly use case)
 
 ## Open questions
 - **Circular dependency:** idle-time estimation needs detections (C09/C12), while C09 needs the floor. Define the bootstrap order (FCME first, idle-time refinement later). docs/06 §2.1 doesn't show it.

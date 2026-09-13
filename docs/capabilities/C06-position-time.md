@@ -1,8 +1,8 @@
 # C06 · position-time
-> Layer A — Acquire · Status: draft (taxonomy draft 2026-09-13) · Depends on: — (GNSS receiver, optional IMU/compass, optional GPSDO; C36 if the SDR is the GNSS source) · Used by: C01, C03, C05, C17, C25, C26, C30, C31, C32, C34
+> Layer A — Acquire · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: — (GNSS receiver, optional IMU/compass, optional GPSDO; C36 if the SDR is the GNSS source) · Used by: C01, C03, C05, C17, C25, C26, C30, C31, C32, C34
 
 ## Purpose
-Provides position, altitude, heading and trustworthy UTC so every record is geotagged and time-aligned. It can also supply a clock reference for the HackRF. It enables RSSI mapping, satellite geometry, licence lookup by location, and joining local anomalies to external feeds (the "attack map"). It serves workflow steps 3–4 and must work offline.
+Provides position, altitude, heading and trustworthy UTC so every record is geotagged and time-aligned. It can also help discipline the HackRF clock — but the HackRF One has **no hardware 1PPS input**, so the only options are a 10 MHz GPSDO into CLKIN or software ppm/time correction from GNSS, never PPS discipline of the HackRF itself (docs/06 §5). It enables RSSI mapping, satellite geometry, licence lookup by location, and joining local anomalies to external feeds (the "attack map"). It serves workflow steps 3–4 and must work offline.
 
 ## Interface
 - **Outputs (provisional):**
@@ -68,20 +68,20 @@ Provides position, altitude, heading and trustworthy UTC so every record is geot
   - Heading accuracy on a walked loop.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
+Regenerated from `use-cases.yaml` (primary, then notable secondary):
+- SPACE-044 — (position-time primary)
+- PROP-076 — (position-time primary)
 - PROP-078 — LoRa terrain link-budget mapping
-- AWARE-029 — Power-line arcing locator
-- AWARE-015 — City-wide wardriving cell anomaly map
 - PROP-077 — Time-station propagation delay
-- PROP-080 — Antenna patterns from satellite passes
+- AWARE-015 — City-wide wardriving cell anomaly map
 - AWARE-009 — ADS-B RSSI-vs-distance plausibility check
 - AWARE-003 — Spoofing tell-tales detector
-- AWARE-050 — HF TDoA via public GPS-timed receivers
+- SIGNAL-079 — (RSSI/position use case)
 
 ## Open questions
-- docs/06 says "optional 1PPS discipline of the HackRF clock", but the HackRF One has no PPS input. Discipline needs a 10 MHz GPSDO or software ppm correction. Suggest rewording.
-- GPSDO in base BOM or accessory? This affects `hardware_fit` for PROP-077 and AWARE-050.
-- docs/06 §2.1 lists only C06 → C30, C31, C34. C01/C03 (timestamps), C05 (reference), C17 (location priors) and C25/C26 (geotags) also depend on it.
+- The "1PPS discipline of the HackRF clock" wording is corrected in docs/06 §5: no PPS input on HackRF One; discipline is via a 10 MHz GPSDO into CLKIN or software ppm correction.
+- GPSDO in base BOM or accessory? This affects `hardware_fit` for PROP-077 and AWARE-050. (A Phase 3 hardware ADR.)
+- docs/06 §2.1 now shows C06 → C12, C30, C31, C34, C37; C01/C03 (timestamps), C05 (reference), C17 (location priors) and C25/C26 (geotags) also depend on it.
 - GNSS module, IMU and clock daemon are unresearched in docs 01–05; short spike.
 - Which SigMF fields carry position/time: decide with docs/07.
 

@@ -1,8 +1,8 @@
 # C15 · modulation-classifier
-> Layer C — Characterize · Status: draft (taxonomy draft 2026-09-13) · Depends on: C13, C14, C16, C17, C38 · Used by: C19, C20, C22, C27, C12, C04, C25
+> Layer C — Characterize · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C13, C14, C16, C17, C38 · Used by: C19, C20, C22, C27, C12, C04, C25
 
 ## Purpose
-Assigns each emission a modulation family and class, with calibrated probabilities that always include `unknown`. It routes emissions to demodulators and decoders (workflow steps 5–7) and fuses with priors to separate known from unknown (step 4). "Unknown" is first-class: it triggers recording and review (docs/04 §5.4 #4). Classify at modulation level; C18 fingerprints and C22 decoders resolve protocols (docs/04 §5.4 #6).
+Assigns each emission a modulation family and class, with calibrated probabilities that always include `unknown`. It routes emissions to demodulators and decoders (workflow steps 5–7) and separates known from unknown (step 4). C17 (known-signal-priors) *supplies* the priors; C15 *fuses* them with its likelihoods — C17 does not classify (docs/06 §5). "Unknown" is first-class: it triggers recording and review (docs/04 §5.4 #4). Classify at modulation level; C18 fingerprints and C22 decoders resolve protocols (docs/04 §5.4 #6).
 
 ## Interface
 - **Inputs** (provisional names):
@@ -89,20 +89,22 @@ Cascade per docs/04 §5.5: features → per-family DL → open-set score → pri
 - **Live:** false-class rate in urban overload, with and without a filter.
 
 ## Example use cases
-*Provisional until docs/06 §3 mapping (cross-checked against use-cases.yaml, 2026-09-13).*
-- RESEARCH-073 — Open-set / unknown-signal detection
+Regenerated from `use-cases.yaml`:
 - AWARE-036 — Unknown burst reverse-engineering triage
 - AWARE-041 — PSD-based technology classifier
-- AWARE-022 — ML drone RF classifier
-- AWARE-054 — Amateur-band intruder logging
 - SIGNAL-069 — STANAG 4285 modems
+- RESEARCH-004 — (classifier primary)
 - RESEARCH-069 — RadioML AMC baseline (and its critiques)
-- RESEARCH-071 — HF modulation dataset (Panoradio)
+- RESEARCH-073 — Open-set / unknown-signal detection
+- AWARE-005 — "Personal privacy device" hunter
+- AWARE-054 — Amateur-band intruder logging
+- SIGNAL-047 — Key-fob capture and analysis
+- RESEARCH-007 — Catalog unknowns against Sig ID Wiki
 
 ## Open questions
-- **Missing edges.** docs/06 §2.1 omits C15 ← C38 and C15 ← C16.
-- **Fusion owner.** Bayesian fusion is described in both C15 and C17; pick one.
-- **Unknown semantics.** Family-level vs global unknown; taxonomy versioning (docs/07).
+- **Missing edges (resolved, docs/06 §2.1/§5).** C38→C15 (DL stage) and C16→C15 (OFDM/DSSS features) are now in §2.1.
+- **Fusion owner (resolved, docs/06 §5).** C17 supplies priors; C15 fuses them. C17 does not classify.
+- **Unknown semantics.** Family-level vs global unknown; taxonomy versioning (doc 07).
 - **Shared code.** The analog branch is duplicated with C19. Spectrogram object detection: C09, C15 or C38?
 - **Fine-tuning governance.** Dataset licences, label provenance, rollback.
 

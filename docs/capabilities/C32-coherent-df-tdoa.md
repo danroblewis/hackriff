@@ -1,5 +1,5 @@
 # C32 · coherent-df-tdoa
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C05, C06, C09, C11, C29 · Used by: C31, C27, C30, C39
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C05, C06, C09, C11, C29 · Used by: C31, C27, C30, C39
 
 ## Purpose
 Gives bearings and position fixes from phase or time differences, which one amplitude-only channel can't. Three modes:
@@ -8,6 +8,8 @@ Gives bearings and position fixes from phase or time differences, which one ampl
 - TDoA using public GPS-timed receivers.
 
 It serves interferer and pirate hunting and emitter geolocation in the attack map (workflow step 4).
+
+C32 **owns coherent/phase/interferometry/TDoA** bearings and fixes (docs/06 §5); amplitude bearings (Yagi max, body-null) belong to C31, into whose posterior C32's wedge likelihoods fuse. Multi-site TDoA works only with **public** remote receivers (e.g. KiwiSDR); a network of the user's own receivers is out of scope per CLAUDE.md.
 
 ## Interface
 - **Inputs:**
@@ -97,20 +99,20 @@ It serves interferer and pirate hunting and emitter geolocation in the attack ma
 - **Live:** Opera Cake time-mode timing spike; array calibration; drive-by triangulation. Needs the accessory, GNSS/compass and a known transmitter.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml` (all `needs-other-sdr`/`needs-accessory`):
+- SPACE-045 — (coherent-df primary)
+- PROP-028 — (coherent-df primary)
 - AWARE-049 — Coherent 5-channel direction finding
 - AWARE-050 — HF TDoA via public GPS-timed receivers
-- AWARE-052 — Pirate / unlicensed broadcaster hunting
-- SIGNAL-076 — VHF collar / radio-tracking
 - PROP-010 — Long-path vs short-path detection
-- AWARE-008 — ADS-B ghost aircraft detection
+- SIGNAL-076 — VHF collar / radio-tracking
 
 ## Open questions
 - **External arrays:** does C01 model KrakenSDR as a multi-channel source (a `CoherentGroup` shared with C35), or does C32 ingest bearings from KrakenSDR's software over IPC? Licence/process-boundary question.
 - **Spike:** Opera Cake time-mode switch-timing observability and achievable pseudo-Doppler accuracy on HackRF One.
-- **Spike:** two HackRFs on shared CLKIN — enough phase stability for 2-element interferometry or C35?
-- **docs/06 wording:** C32 says "timestamped remote receivers or reference transmitters". It should say *public* remote receivers; own multi-site TDoA conflicts with single-device scope.
-- **Boundary with C31:** amplitude bearings (Yagi, Watson-Watt).
+- **Spike:** two HackRFs on shared CLKIN — enough phase stability for 2-element interferometry or C35? (Same Phase 4 spike as C35, docs/06 §5.)
+- **Scope (resolved, docs/06 §5):** TDoA uses *public* remote receivers only; own multi-site TDoA is out of scope.
+- **Boundary with C31 (resolved, docs/06 §5):** amplitude bearings (Yagi max, body-null) are C31; coherent/phase/TDoA are C32.
 
 ## Reading list
 1. `docs/04 §9.1 "Techniques"`

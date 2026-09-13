@@ -1,8 +1,8 @@
 # C27 · signal-inventory
-> Layer E — Remember · Status: draft (taxonomy draft 2026-09-13) · Depends on: C05, C06, C10, C15, C17, C18, C22, C25, C28 · Used by: C17, C24, C30, C39
+> Layer E — Remember · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C05, C06, C10, C15, C17, C18, C22, C25, C28 · Used by: C17, C24, C30, C39
 
 ## Purpose
-The persistent emitter database. For each emission cluster the device has seen it records when and where, what it looks like, what it is believed to be and how sure, with links to recordings, tracks and explanations. It turns waterfall pixels into objects the user can list, name, tag and revisit (docs/03 §5.1 #1, #4). Serves workflow steps 3–4 and feeds "new emitter" anomalies to the attack map. It fills a gap no open-source tool covers (docs/03 §6, gap 2).
+The persistent emitter database. For each emission cluster the device has seen it records when and where, what it looks like, what it is believed to be and how sure, with links to recordings, tracks and explanations. It turns waterfall pixels into objects the user can list, name, tag and revisit (docs/03 §5.1 #1, #4). Serves workflow steps 3–4 and feeds "new emitter" anomalies to the attack map. It fills a gap no open-source tool covers (docs/03 §6, gap 2). Layer E is loops, not a line (docs/06 §2.1/§5): C27↔C30 (the inventory feeds correlation; correlation writes explanations back) and C27↔C17 (own history is a prior; priors write expected/unexpected status back).
 
 ## Interface
 - **Inputs:**
@@ -69,22 +69,23 @@ The persistent emitter database. For each emission cluster the device has seen i
 - **Needs hardware:** real urban IMD population, multi-day growth.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
-- AWARE-070 — IoT sensor population census
-- AWARE-036 — Unknown burst reverse-engineering triage
-- AWARE-016 — GSM broadcast channel inventory
-- AWARE-017 — Tower inventory cross-reference
-- AWARE-052 — Pirate / unlicensed broadcaster hunting
-- AWARE-055 — Over-the-horizon radar signature catalogue
-- AWARE-033 — Radio-quiet-zone style site survey
-- AWARE-014 — SDR fake-eNodeB hunter
+Regenerated from `use-cases.yaml` (primary, then notable secondary):
 - AWARE-066 — Legacy network sunset tracker
+- SIGNAL-021 — (signal-inventory primary)
+- SIGNAL-037 — (signal-inventory primary)
+- AWARE-007 — (signal-inventory secondary)
+- AWARE-013 — (signal-inventory secondary)
+- AWARE-016 — GSM broadcast channel inventory
+- AWARE-024 — (signal-inventory secondary)
+- AWARE-053 — (signal-inventory secondary)
+- SIGNAL-035 — (signal-inventory secondary)
+- SIGNAL-046 — (signal-inventory secondary)
 
 ## Open questions
 - **Entity levels:** docs/06 says "one entry per emission cluster". Decoded identities (ICAO, MMSI, sensor ID) and logical systems (trunk site, hop set) may need their own levels.
 - **Global or per-site emitters** for a handheld?
 - **Suspect artifacts:** store them in the inventory, or in a quarantine table?
-- **Dependency sketch:** C27↔C30 (explanation links) and C27↔C17 (own history as a prior) are runtime data links, not build dependencies. docs/06 §2.1 draws no Layer E arrows.
+- **Dependency sketch (resolved, docs/06 §2.1/§5):** Layer E is loops — C27↔C30 (explanation links) and C27↔C17 (own history as a prior) — now shown in §2.1. These are runtime data links, not build dependencies.
 - **Retention:** raw Detections vs aggregates only.
 
 ## Reading list

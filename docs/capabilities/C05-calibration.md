@@ -1,5 +1,5 @@
 # C05 · calibration
-> Layer A — Acquire · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C02, C03, C06, C07, C09 · Used by: C01, C02, C04, C08, C09, C13, C27, C31, C33, C34
+> Layer A — Acquire · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C02, C03, C06, C07, C09 · Used by: C01, C02, C04, C08, C09, C13, C27, C31, C33, C34
 
 ## Purpose
 Makes measurements trustworthy on an 8-bit, unpreselected, crystal-referenced front end:
@@ -53,7 +53,7 @@ Without it, a city inventory fills with ghosts and narrowband rasters are misrea
 
 ## Platform constraints
 - HackRF One: plain crystal, no TCXO; "±20 ppm" unverified (docs/01 §1.2 "Specifications"). 20 ppm would be 48 kHz at 2.4 GHz (derived). Uncompensated crystals are 10–50 ppm and drift with temperature (docs/04 §10.1).
-- Pro: 0.5 ppm TCXO. CLKIN takes a 10 MHz GPSDO, ~1e-12 long-term (docs/02 §1.8 "Clock accuracy (TCXO/OCXO/GPSDO)").
+- Pro: 0.5 ppm TCXO. CLKIN takes a 10 MHz GPSDO, ~1e-12 long-term (docs/02 §1.8 "Clock accuracy (TCXO/OCXO/GPSDO)"). The HackRF One has **no hardware 1PPS input**, so clock/time discipline is either a 10 MHz GPSDO into CLKIN or software ppm/time correction from GNSS (C06) — never a PPS-disciplined clock (docs/06 §5).
 - 8-bit: ~50 dB ideal, "closer to 6 bits" in practice; no published NF (docs/01 §1.3 "Noise figure, dynamic range, and overload").
 - No preselector; 3×/5×LO harmonic responses. A filter bank switched by Opera Cake is the likely add-on (docs/02 §1.6 "Preselection filters: why they matter for wideband surveys").
 - Jetson heat in a sealed handheld drives crystal drift (docs/02 §7.3 "Bottlenecks and design recommendations").
@@ -88,20 +88,21 @@ Without it, a city inventory fills with ghosts and narrowband rasters are misrea
 - **Live:** signal-generator power table; temperature soak; GPSDO CLKIN comparison.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
-- SIGNAL-048 — Cellular broadcast metadata & calibration
+Regenerated from `use-cases.yaml` (primary, then notable secondary):
+- SPACE-066 — (calibration primary)
+- SPACE-067 — (calibration primary)
 - AWARE-051 — Oscillator-offset fingerprint for low-cost sensors
+- SIGNAL-048 — Cellular broadcast metadata & calibration
+- RESEARCH-056 — (calibration primary)
 - RESEARCH-054 — Noise-figure by Y-factor
 - SPACE-009 — Sun-noise antenna calibration
 - SPACE-050 — Natural radio noise floor survey
-- RESEARCH-050 — SDR as spectrum analyzer / power survey
 - RESEARCH-057 — EMC pre-compliance scanning
-- AWARE-054 — Amateur-band intruder logging
 
 ## Open questions
-- docs/06 §2.1 draws C05 as a peer of C02/C03, but its artefact tests need C07/C09 detections and C04 scheduling, which makes a C05 ↔ C09 loop. Split into calibration state (Layer A) and artefact tests (Layer B)?
+- The C05 ↔ C09 relationship is resolved in docs/06 §5 as a **bootstrap loop**: seed a factory/terminated-input spur map first, then refine with C09 detections at runtime. C05's calibration state is Layer A; its artefact tests need C07/C09 and C04 scheduling.
 - A one-person setup likely has no signal generator. Is a known-ENR noise source or Sun/sky (C33) the default power reference?
-- Firmware clock correction vs host resampling: ADR.
+- Firmware clock correction vs host resampling: ADR (Phase 3).
 - Is a switched filter bank/FM notch in the base BOM? That changes which tests run by default.
 
 ## Reading list

@@ -1,5 +1,5 @@
 # C26 · spectrum-history
-> Layer E — Remember · Status: draft (taxonomy draft 2026-09-13) · Depends on: C02, C05, C06, C07 · Used by: C12, C17, C30, C33, C39
+> Layer E — Remember · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C02, C05, C06, C07 · Used by: C12, C17, C30, C33, C39
 
 ## Purpose
 Keeps a compressed, multi-resolution record of power spectra over months, from sweep rows and dwell spectrograms, so the user can pick a region and time span and see what was active. Serves workflow step 1 (open reports of past surveys) and step 3 (review history). It is the raw material for occupancy baselines (C12) and for the attack map's "what changed" (C30). No open-source receiver keeps persistent survey history (docs/03 §5.1 #5).
@@ -62,7 +62,7 @@ Keeps a compressed, multi-resolution record of power spectra over months, from s
 - **Needs hardware:** multi-day storage rate and wear on the target disk.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
+Regenerated from `use-cases.yaml`:
 - AWARE-031 — Long-term noise-floor trend logger
 - AWARE-042 — Duty-cycle and occupancy statistics
 - SPACE-050 — Natural radio noise floor survey

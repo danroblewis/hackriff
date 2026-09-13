@@ -1,8 +1,10 @@
 # C23 · trunking-follow
-> Layer D — Demodulate & decode · Status: draft (taxonomy draft 2026-09-13) · Depends on: C11, C20, C19, C22, C12, C17, C04 · Used by: C24, C25, C27, C30, C12
+> Layer D — Demodulate & decode · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C11, C20, C19, C22, C12, C17, C04 · Used by: C24, C25, C27, C30, C12
 
 ## Purpose
 Finds trunked land-mobile systems automatically, decodes control channels continuously, and follows voice grants onto channelizer outputs inside the dwell window. It produces a system model, call records, and audio for **unencrypted** calls only; encryption is flagged as metadata. It removes the manual control-channel hunt even Trunk Recorder requires (docs/03 §3.5). Serves workflow steps 5–7 for LMR.
+
+Edges (docs/06 §5/§2.1): C23 depends on **C11 (channelizer) + C12 (occupancy)** — continuous-duty control-channel detection uses the occupancy/FCO baseline — not on C21; docs/06 §2.1 no longer draws a linear C22→C23 chain. Conventional (non-trunked) digital voice is owned by C20 + C22; C23 is only the trunking control/grant logic.
 
 ## Interface
 - **In:**
@@ -75,19 +77,24 @@ Finds trunked land-mobile systems automatically, decodes control channels contin
 - **Live hardware:** simulcast sites, systems wider than the window, long following under C04 pre-emption, Jetson CPU under many calls.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping (the catalogue has few trunking entries):
+Regenerated from `use-cases.yaml` (now includes the new proposed SIGNAL-080..086 trunking IDs):
 - AWARE-067 — Public-safety trunking load index (metadata only)
 - SIGNAL-044 — MPT1327 trunked fleets
-- RESEARCH-019 — TETRA:BURST (encryption awareness only; no implementation)
+- SIGNAL-080 — (trunking-follow primary)
+- SIGNAL-081 — (trunking-follow primary)
+- SIGNAL-082 — (trunking-follow primary)
+- SIGNAL-083 — (trunking-follow primary)
+- SIGNAL-084 — (trunking-follow primary)
+- SIGNAL-085 — (trunking-follow primary)
+- SIGNAL-086 — (trunking-follow primary)
 
 ## Open questions
 - Vocoder licensing: mbelib vs hardware AMBE vs metadata-only default (Phase 3 ledger).
 - Build vs wrap: native CC decoders on C11 outputs, or Trunk Recorder/OP25/SDRTrunk subprocesses fed channel IQ?
-- The catalogue has ~2 trunking cases, although docs/04 §12 #13 calls trunking "most-requested". Add P25/DMR/NXDN discovery cases?
-- **Conventional digital voice** (DMR/P25/NXDN via dsd-fme) has no owner in docs/06.
+- **Conventional digital voice (resolved, docs/06 §5):** owned by C20 + C22 (via dsd-fme); C23 is only trunking control/grant.
 - CQPSK equalizer owner (C20 vs C23); C04 pre-emption policy.
-- Call-audio streaming/upload policy (C24); own-system key handling (no owner).
-- docs/06 §2.1 draws C22→C23 linearly. C23 really depends on C11/C12, not C21.
+- Call-audio streaming/upload policy (C24 gating, docs/06 §5); **own-system key handling is owned by C22** (own-key decryption, provisional — docs/06 §5).
+- **Dependency (resolved, docs/06 §2.1/§5):** C23 depends on C11 + C12, not on C21; the old linear C22→C23 edge is dropped.
 
 ## Reading list
 1. `docs/04 §8.4 "Architecture for trunking support"`

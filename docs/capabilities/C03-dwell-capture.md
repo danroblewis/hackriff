@@ -1,5 +1,5 @@
 # C03 · dwell-capture
-> Layer A — Acquire · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C04, C05, C06 · Used by: C05, C07, C11, C25, C33, C34, C36, C39
+> Layer A — Acquire · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C04, C05, C06 · Used by: C05, C07, C11, C25, C33, C34, C36, C39
 
 ## Purpose
 Parks the radio on one real-time window of up to ~20 MHz and streams it into a RAM ring buffer with a sample-accurate time index. A detection can then pull **pre-trigger** history into a recording. It finds *what* a signal is, with near-100% intercept inside the window versus under 1% in a sweep. It is part of the substrate every live use case needs, and serves workflow steps 1, 5 and 6.
@@ -17,7 +17,7 @@ Parks the radio on one real-time window of up to ~20 MHz and streams it into a R
 - **Control:** retune (segments buffer), extend lease, pre/post-trigger lengths, pin (C23 trunking, C34 passes).
 
 ## Methods
-- **Ring:** circular buffer of raw C01 blocks with a monotonic sample-index → UTC map. Segment on retune, gain change or discontinuity, so an extraction never silently spans two states.
+- **Ring:** circular buffer of raw C01 blocks with a monotonic sample-index → UTC map. The map is built from **host arrival time of the first block plus a running sample count** (optionally GNSS-tagged via C06) — the HackRF One has no hardware sample timestamps — and its error budget (USB-latency residual) is **TBD in the doc 07 provenance section**. Segment on retune, gain change or discontinuity, so an extraction never silently spans two states.
 - **Offset tuning:** tune ¼ IBW away and DDC back, plus a DC-blocking IIR. Discard ≥10% band edges (docs/04 §10.3 "Spur identification and removal"). The usable window is ~15–18 MHz of 20 (docs/01 §7.3).
 - **Burst snippets:** ±20% padding around burst records (docs/04 §3.6 "Burst detection and segmentation").
 - **Dwell length:** proportional to expected burst intervals, seconds to minutes (docs/04 §3.8 "Sweep-based survey vs. real-time IBW"). Complete capture needs revisit ≤ ½ the minimum on/off time (docs/04 §3.9).
@@ -60,20 +60,14 @@ Parks the radio on one real-time window of up to ~20 MHz and streams it into a R
 - **Live:** sustained 20 Msps ring with GPU load; memory and thermals in the 15 W mode.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
-- AWARE-036 — Unknown burst reverse-engineering triage
-- SIGNAL-023 — Iridium bursts & ring alerts
-- AWARE-034 — Wi-Fi DFS radar event logging
-- AWARE-005 — "Personal privacy device" hunter
+C03 is substrate; docs/06 §3 lists it only where a use case is specifically about dwell capture. Per `use-cases.yaml`:
 - SPACE-064 — Jupiter S-burst microstructure
-- SPACE-069 — Fast radio burst hunting
-- PROP-029 — Meteor-burst link experiment
-- RESEARCH-003 — Bit-level dissection in inspectrum
+- SPACE-071 — (dwell-capture use case)
 
 ## Open questions
 - Ring depth default and NVMe spill. 1.2 GB / 30 s is a docs/06 example, not a decision. ADR with C25.
 - Ring ownership vs "extend pipelines without stopping capture". A capture process owning shared memory is a candidate.
-- docs/06 promises "sample-accurate timestamps" but names no method: HackRF One has no documented hardware timestamps, so this needs C06 host discipline plus a USB-latency spike.
+- Timestamp method resolved in docs/06 §5 (host arrival time + running sample count, optionally GNSS-tagged); the index→UTC error budget awaits the doc 07 provenance section, and a USB-latency spike quantifies it.
 - SPACE-069 spans 250 MHz and cannot fit one window. Should C04 support hopping dwells, with the gap recorded in `fit_note`?
 
 ## Reading list

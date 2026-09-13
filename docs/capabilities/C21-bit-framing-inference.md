@@ -1,8 +1,8 @@
 # C21 · bit-framing-inference
-> Layer D — Demodulate & decode · Status: draft (taxonomy draft 2026-09-13) · Depends on: C20, C10, C18 · Used by: C18, C22, C24, C28, C39
+> Layer D — Demodulate & decode · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C20, C10, C18 · Used by: C18, C22, C24, C28, C39
 
 ## Purpose
-Takes many bitstreams from one emitter cluster and infers the frame structure. It finds the line code, preamble, sync word, whitening, length and framing, CRC/checksum parameters, FEC family and field map, then emits a draft decoder spec that can be verified on held-out bursts. This is what makes "decode unknown signals" real rather than a decoder catalogue. Serves workflow step 6 (bitstreams from unknown signals) and hands decoders to step 7.
+Takes many bitstreams from one emitter cluster and infers the frame structure. It finds the line code, preamble, sync word, whitening, length and framing, CRC/checksum parameters, FEC family and field map, then emits a draft decoder spec that can be verified on held-out bursts. This is what makes "decode unknown signals" real rather than a decoder catalogue. **C21 *identifies* FEC structure and aligns messages within a cluster; C22 *executes* known decoders — inference vs execution** (docs/06 §5). Layer D is not a chain: C22 does not require C21 (docs/06 §2.1). Serves workflow step 6 (bitstreams from unknown signals) and hands decoders to step 7.
 
 ## Interface
 - **In:** a `BitCorpus` (provisional): N `BitStream`s or `PulseList`s from C20 sharing a C10/C18 cluster id, with per-burst timestamps, RSSI, SNR, soft-bit confidence and polarity/rotation flags. Optional side information: time, user-entered sensor readings, printed device IDs (docs/04 §7.7 step 4).
@@ -71,9 +71,9 @@ Takes many bitstreams from one emitter cluster and infers the frame structure. I
 - **Live hardware:** none required beyond gathering corpora.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- RESEARCH-001 — Blind ISM device RE with URH
-- RESEARCH-002 — rtl_433 flex decoder
+Regenerated from `use-cases.yaml` (all C21-primary):
+- SIGNAL-047 — Key-fob capture and analysis
+- RESEARCH-003 — Bit-level dissection in inspectrum
 - RESEARCH-006 — Protocol inference with Netzob
 - RESEARCH-008 — Identify line coding
 - RESEARCH-009 — CRC reverse engineering (differential technique)
@@ -81,11 +81,10 @@ Provisional until docs/06 §3 mapping:
 - RESEARCH-011 — delsum checksum toolbox
 - RESEARCH-012 — Whitening/scrambler identification
 - RESEARCH-013 — FEC identification
-- AWARE-036 — Unknown burst reverse-engineering triage
 
 ## Open questions
-- **Draft spec format:** an rtl_433 flex superset, or a new signature schema shared with C18 and runnable by C22?
-- **FEC decoding ownership:** docs/04 §7.1 lists FEC decoding (Viterbi/RS/BCH) in the pipeline, but docs/06 gives C21 only "FEC structure detection". C22 pipelines, or a shared library?
+- **Draft spec format:** an rtl_433 flex superset, or a new signature schema shared with C18 and runnable by C22 (doc 07 / a Phase 3 ADR)?
+- **FEC ownership (resolved, docs/06 §5).** C21 *identifies* FEC code structure; C22 *executes* known FEC decoders (Viterbi/RS/BCH). Inference vs execution.
 - Line-code identification is listed in C21, but slicing happens in C20. Where is the boundary?
 - Auto-trigger at N bursts vs inspector-only; how C21 asks C04 for more dwell.
 - Port URH inference (GPLv3, archived) or reimplement from the WOOT papers?

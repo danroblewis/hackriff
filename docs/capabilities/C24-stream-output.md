@@ -1,5 +1,5 @@
 # C24 · stream-output
-> Layer D — Demodulate & decode · Status: draft (taxonomy draft 2026-09-13) · Depends on: C19, C20, C21, C22, C23, C11, C03, C25 · Used by: C22 (proposed), C39 (remote clients), external programs
+> Layer D — Demodulate & decode · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C19, C20, C21, C22, C23, C11, C03, C25 · Used by: C22 (proposed), C39 (remote clients), external programs
 
 ## Purpose
 Streams bits, soft symbols, decoded messages, audio and IQ slices to external programs over sockets or pipes, with framing, self-describing metadata and backpressure, so that other tools can turn them into something useful. It is workflow step 7 ("decoders are pluggable consumers") and the scriptable surface other tools drive. It keeps hackriff from becoming a closed decoder catalogue.
@@ -31,7 +31,7 @@ Streams bits, soft symbols, decoded messages, audio and IQ slices to external pr
 - **Self-describing streams:** SigMF metadata conventions for headers; detections and classifications as annotations (docs/03 §1.6). A consumer should be able to save a stream as a valid SigMF pair.
 - **Timestamps:** carry sample-accurate time indices from C03 end to end, not arrival time (docs/06 C03). This lets consumers join streams.
 - **Backpressure:** bounded ring per subscriber. Never let an external consumer stall C03/C11. Emit explicit gap frames with drop counts. Metrics are exposed to C39.
-- **Content gating:** frames flagged metadata-only or encrypted never carry payload. Paging/cellular contents are excluded, and streaming content is where 47 USC 605 "divulging" risk lies (docs/04 §1.3: "recording is not the risk; publishing or streaming contents can be"). Own-traffic decrypted content is allowed.
+- **Content gating (C24 is the enforcement point, docs/06 §5):** C24 is where restricted-content gating (cellular, common-carrier paging content, 47 USC 605) is enforced. Metadata is **always** allowed; content is gated on a **content-class flag set at classification**, with C25 (recording) and C27 (inventory) honoring the same flag. Frames flagged metadata-only or encrypted never carry payload; streaming content is where 47 USC 605 "divulging" risk lies (docs/04 §1.3: "recording is not the risk; publishing or streaming contents can be"). Own-traffic decrypted content (C22 own-key decryption) is allowed. **Provisional** — a Phase 3 legal-guardrail ADR pins the policy.
 - **Control plane:** keep API-first scripting from day one (Mayhem's USB shell lesson, docs/01 §7.1 #4; SDRangel REST automation, docs/03 §2.2), but separate it from the data plane.
 - **Wide IQ:** full-window 20 Msps IQ is 40 MB/s (docs/02 §3.1). Default to channel-rate slices and offer full-rate only locally. VITA-49 packetization is the professional precedent for IQ streams (docs/02 §4 item 5).
 
@@ -77,22 +77,23 @@ Streams bits, soft symbols, decoded messages, audio and IQ slices to external pr
 - **Live hardware:** only for end-to-end latency and throughput benchmarks on the Jetson.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- SIGNAL-051 — Wireless M-Bus (EU meters)
-- SIGNAL-062 — RDS/RBDS & TMC
-- SIGNAL-067 — NOAA Weather Radio SAME/EAS
-- PROP-002 — Run a multi-band WSPR/FT8 skimmer
-- PROP-004 — PSKReporter live band-opening map
+Regenerated from `use-cases.yaml`:
+- AWARE-037 — (stream-output primary)
 - AWARE-038 — Standards-based sensor node
-- SIGNAL-008 — All-datalink aggregation
-- RESEARCH-008 — Identify line coding
-- SPACE-015 — "Space weather now" local dashboard
+- SPACE-044 — (stream-output secondary)
+- SPACE-052 — (stream-output secondary)
+- PROP-002 — Multi-band WSPR/FT8 skimmer
+- PROP-028 — (stream-output secondary)
+- SIGNAL-001 — ADS-B / Mode S (baseline)
+- SIGNAL-005 — (stream-output secondary)
+- SIGNAL-050 — (stream-output secondary)
+- SIGNAL-066 — (stream-output secondary)
 
 ## Open questions
 - **Transport ADR:** pipes plus Unix/TCP sockets, ZeroMQ, gRPC, MQTT, or VITA-49 for IQ? The docs only survey precedents.
-- **Scope:** docs/06 C24 bundles the data-plane streams and "the API surface other tools script against". The control API arguably belongs with C39 remote clients or a separate capability.
-- Do C22 plugins consume C24 streams? §2.1 draws a linear C19→…→C24 chain that hides this, and C24 actually consumes all of Layer D plus C03/C11.
-- **Where 47 USC 605 / restricted-content gating lives** (C22, C24, cross-cutting); network auth.
+- **Data-egress vs control-API split (provisional, docs/06 §5):** docs/06 C24 bundles the data-plane streams and "the API surface other tools script against"; whether these are one capability or two is deferred to the **Phase 3 stream-contract ADR**.
+- **Layer D is not a chain (resolved, docs/06 §2.1):** C24 takes input from *all* of Layer D (plus C03/C11); the old linear C19→…→C24 edge is dropped. Whether C22 plugins also consume C24 streams is a stream-contract ADR question.
+- **Restricted-content gating (resolved, docs/06 §5):** C24 is the enforcement point (metadata always allowed, content gated on a content-class flag); a Phase 3 legal-guardrail ADR pins it. Network auth TBD.
 - Frame schema vs docs/07; public uploads (PSKReporter, SondeHub): C24 or C29?
 
 ## Reading list

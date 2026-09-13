@@ -1,8 +1,8 @@
 # C10 · burst-tracking
-> Layer B — Sense · Status: draft (taxonomy draft 2026-09-13) · Depends on: C09 (C06 time; C05 flags via Detections) · Used by: C04, C12, C15, C18, C23, C27
+> Layer B — Sense · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C09 (C06 time; C05 flags via Detections) · Used by: C04, C12, C15, C18, C23, C27
 
 ## Purpose
-Links individual Detections over time into **Tracks/Emissions**: one emitter with a timing signature. It computes periodicity, duty cycle, inter-arrival statistics, hop sets and rates, TDMA frame periods and inter-channel co-occurrence (repeater pairs, trunk grants). Timing is often the cheapest identifier: beacons, TPMS, TDMA and hoppers. It feeds the inventory (workflow step 3), classification (step 5) and the scheduler's "expected next burst".
+Links individual Detections over time into **Tracks/Emissions**: one emitter with a timing signature. It computes periodicity, duty cycle, inter-arrival statistics, hop sets and rates, TDMA frame periods and inter-channel co-occurrence (repeater pairs, trunk grants). Timing is often the cheapest identifier: beacons, TPMS, TDMA and hoppers. It feeds the inventory (workflow step 3), classification (step 5) and the scheduler's "expected next burst". **C10 owns only the short-time linking of bursts into tracks; the three clustering scales are one owner each (docs/06 §5): C10 links short-time tracks, C18 clusters emissions across time by fingerprint, and C21 aligns messages within a cluster.**
 
 ## Interface
 - **In:** `Detection` stream (t_start/t_end, f_c, BW, SNR, SK, flags, source sweep|dwell), plus the observation windows actually covered (needed to tell "absent" from "not looked at").
@@ -45,21 +45,23 @@ Links individual Detections over time into **Tracks/Emissions**: one emitter wit
 - **Live only:** multi-hour tracking with scheduler gaps; GNSS time alignment.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- AWARE-042 — Duty-cycle and occupancy statistics
-- AWARE-070 — IoT sensor population census
-- AWARE-055 — Over-the-horizon radar signature catalogue
-- AWARE-062 — Radiosonde launch correlation
-- AWARE-067 — Public-safety trunking load index (metadata only)
-- SIGNAL-046 — TPMS
-- SIGNAL-072 — NCDXF/IARU beacon chain
+Regenerated from `use-cases.yaml`:
+- SPACE-038 — (burst-track emitter)
+- PROP-020 — (burst timing/track)
+- PROP-070 — (burst timing/track)
+- PROP-073 — (burst timing/track)
 - AWARE-035 — Smart-meter mesh as noise contributor
+- AWARE-055 — Over-the-horizon radar signature catalogue
+- AWARE-057 — (scheduled track)
+- SIGNAL-020 — (emitter timing)
+- SIGNAL-043 — (periodic emitter)
+- SIGNAL-077 — (emitter tracking)
 
 ## Open questions
-- **Boundary with C18:** docs/06 says C10 "clusters emissions by fingerprint" and C18 clusters unknowns into "same thing I saw before". Who owns clustering?
+- **Clustering boundary (resolved, docs/06 §5):** C10 links short-time tracks; C18 clusters emissions across time by fingerprint; C21 aligns messages within a cluster. C10 no longer "clusters emissions by fingerprint".
 - Track state in memory (C10) vs persisted in C27; restart behaviour.
 - Does inter-channel correlation need C11 per-channel power series? §2.1 shows only C09 upstream.
-- The C10 → C04 `next_burst_eta` edge is in the C10 definition, but §2.1 routes it only via C12.
+- The C10 → C04 `next_burst_eta` edge feeds the scheduler; §2.1 routes scheduler priority via C12's score (docs/06 §5).
 
 ## Reading list
 1. `docs/04 §4.7 "Hop detection and burst timing"`

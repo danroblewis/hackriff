@@ -1,5 +1,5 @@
 # C02 · sweep-survey
-> Layer A — Acquire · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C04, C05 · Used by: C04, C08, C09, C12, C26, C33, C39
+> Layer A — Acquire · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C04, C05 · Used by: C04, C08, C09, C12, C26, C33, C39
 
 ## Purpose
 Wideband power-spectrum survey over 1 MHz–6 GHz using firmware-driven retuning. It answers *where*: persistent emitters, occupancy, change. It does not find short bursts. It is the discovery half of sweep/dwell and serves workflow steps 1–2, plus step 3 via C26.
@@ -63,10 +63,10 @@ Wideband power-spectrum survey over 1 MHz–6 GHz using firmware-driven retuning
 - **Live:** full-range rate on the Jetson vs ~0.75 s; Opera Cake switching; preempt/resume latency.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping.
+Regenerated from `use-cases.yaml`:
 - RESEARCH-050 — SDR as spectrum analyzer / power survey
 - AWARE-031 — Long-term noise-floor trend logger
-- AWARE-042 — Duty-cycle and occupancy statistics
+- AWARE-011 — (occupancy/survey use case)
 - AWARE-033 — Radio-quiet-zone style site survey
 - SPACE-003 — e-CALLISTO solar burst spectrograms
 - SPACE-050 — Natural radio noise floor survey

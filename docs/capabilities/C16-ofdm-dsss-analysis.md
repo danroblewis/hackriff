@@ -1,5 +1,5 @@
 # C16 · ofdm-dsss-analysis
-> Layer C — Characterize · Status: draft (taxonomy draft 2026-09-13) · Depends on: C11, C13, C05 · Used by: C15, C22, C27, C18, C36, C35
+> Layer C — Characterize · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C11, C13, C05 · Used by: C15, C22, C27, C18, C36, C35
 
 ## Purpose
 Handles the two families generic estimators treat badly:
@@ -81,7 +81,7 @@ This cheaply moves wideband infrastructure out of the "unknown" pile (workflow s
 - **Live:** bias-tee GNSS; dense cellular IMD.
 
 ## Example use cases
-*Provisional until docs/06 §3 mapping (cross-checked against use-cases.yaml, 2026-09-13).*
+*Regenerated from `use-cases.yaml`.*
 - SIGNAL-066 — ATSC 3.0 bootstrap & wake-up bits
 - PROP-075 — LTE navigation
 - RESEARCH-005 — Blind signal detection with gr-inspector

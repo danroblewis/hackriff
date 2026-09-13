@@ -1,5 +1,5 @@
 # C38 · ml-runtime
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C07, C09, C13, C14, C25, C28 · Used by: C15, C12, C30, C18, C09 (optional dense-band detector)
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C07, C09, C13, C14, C25, C28 · Used by: C15, C12, C30, C18, C09 (optional dense-band detector)
 
 ## Purpose
 GPU inference infrastructure on the Jetson:
@@ -79,13 +79,13 @@ It is the "ML after normalisation, with explicit unknown" stage, not a replaceme
 - **Live hardware:** throttling, power, on-device fine-tune timing.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml`:
 - AWARE-040 — Unsupervised spectrum anomaly detector
 - AWARE-041 — PSD-based technology classifier
 - AWARE-022 — ML drone RF classifier
 - AWARE-047 — RF fingerprinting of same-model transmitters
 - RESEARCH-073 — Open-set / unknown-signal detection
-- RESEARCH-070 — Build labeled RF datasets from your own captures
+- RESEARCH-067 — (labelled-dataset / fine-tuning use case)
 - RESEARCH-068 — TorchSig + Sig53
 - RESEARCH-069 — RadioML AMC baseline (and its critiques)
 - RESEARCH-062 — RF fingerprinting / physical-layer auth (ORACLE)

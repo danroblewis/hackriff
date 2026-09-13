@@ -1,5 +1,5 @@
 # C35 · passive-radar
-> Layer G — Specialised · Status: draft (taxonomy draft 2026-09-13) · Depends on: C01, C05, C06, C09, C17, C22, C29 · Used by: C30, C39
+> Layer G — Specialised · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C05, C06, C09, C17, C22, C29 · Used by: C30, C39
 
 ## Purpose
 Passive coherent location. It cross-correlates a **reference** channel (direct illuminator) with a **surveillance** channel (echoes) into range–Doppler maps. Illuminators are broadcast signals (FM, DAB, DVB-T, cellular). The result is aircraft, drone, meteor or plasma detections with ADS-B truth overlay: receive-only RF-sensing science (docs/05 §2). A single HackRF One cannot do it, so this capability waits for a multi-channel front end.
@@ -39,7 +39,7 @@ Standard passive coherent location practice. Docs 01–05 don't describe the alg
   - **RSPduo:** 2 channels at 2 MHz.
   - **AD9361 2×2** (bladeRF/B210): wider, but the phase ambiguity must be calibrated after each retune.
 - **Two HackRFs on shared CLKIN/CLKOUT:**
-  - Frequency-locked, but relative phase and start time are not established ("Partial" sync, `docs/01 §7.3`). Pro trigger in/out may help (`docs/01 §1.7`).
+  - Frequency-locked, but relative phase and start time are not established ("Partial" sync, `docs/01 §7.3`). Pro trigger in/out may help (`docs/01 §1.7`). **Whether two HackRFs on a shared 10 MHz clock stay phase-coherent enough for passive radar is UNVERIFIED and is a Phase 4 spike (docs/06 §5); its result can move some C35 use cases between `needs-other-sdr` and `needs-accessory`.**
   - Two 20 Msps streams need 2 × 40 MB/s, beyond one USB 2.0 bus (derived from `docs/01 §1.4 "USB 2.0 throughput ceiling"`). Use lower rates or separate host controllers (check on the Jetson).
 - **8-bit dynamic range** (~48 dB theoretical, "closer to 6 bits", `docs/01 §1.3`) limits the direct-path/echo ratio. The surveillance antenna must be directional with a null toward the illuminator: `needs-accessory`.
 - **ADS-B truth** needs a second simultaneous 1090 MHz receiver or connectivity (C29).
@@ -73,22 +73,23 @@ Standard passive coherent location practice. Docs 01–05 don't describe the alg
 - **Live:** real-time map rate on the Jetson; hours-long coherence stability. Needs a coherent SDR, directional antennas and an airport nearby.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
+Regenerated from `use-cases.yaml` (all C35 use cases are `needs-other-sdr`):
 - PROP-051 — FM passive radar for aircraft
 - PROP-052 — Real-time passive radar with KrakenSDR/blah2
 - PROP-053 — DVB-T passive radar with synced RTL-SDRs
 - PROP-054 — DAB drone detection
 - PROP-055 — LTE and 5G NR passive radar
-- PROP-059 — Passive radar space surveillance
-- PROP-022 — Passive radar of E-region irregularities
 - PROP-058 — GNSS-based passive radar
+- PROP-059 — Passive radar space surveillance
+- PROP-060 — Wi-Fi / indoor passive sensing
+- PROP-022 — Passive radar of E-region irregularities
 
 ## Open questions
 - **Roadmap:** defer C35 until a multi-channel front end is chosen, or wrap blah2 as an external process (licence boundary)?
-- **Spike:** can two frequency-locked HackRFs (shared CLKIN, Pro trigger) reach FM-radar phase stability? Same question as for C32 interferometry.
+- **Phase 4 spike (docs/06 §5):** can two frequency-locked HackRFs (shared CLKIN, Pro trigger) reach FM-radar phase stability? Same question as for C32 interferometry; the answer can move C35 use cases between `needs-other-sdr` and `needs-accessory`.
 - **ADR:** should C01 expose a `CoherentGroup` (shared timestamps, cal state), shared with C32?
 - **Policy:** Wi-Fi/people-sensing (PROP-060) isn't covered by CLAUDE.md guardrails.
-- **docs/06 gap:** C35 inputs should list illuminator location (C17) and ADS-B truth (C22/C29).
+- **Inputs (resolved, docs/06 §5):** C35 inputs include illuminator location (C17) and ADS-B truth (C22/C29).
 
 ## Reading list
 1. `docs/05 §2 "Passive radar"`

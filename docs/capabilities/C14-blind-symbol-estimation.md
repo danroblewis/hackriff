@@ -1,5 +1,5 @@
 # C14 · blind-symbol-estimation
-> Layer C — Characterize · Status: draft (taxonomy draft 2026-09-13) · Depends on: C11, C13 (optional family hint from C15) · Used by: C15, C18, C20, C21, C23
+> Layer C — Characterize · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C11, C13 (optional family hint from C15) · Used by: C15, C18, C20, C21, C23
 
 ## Purpose
 Estimates symbol-level structure blind: symbol rate, FSK deviation and index, modulation order, roll-off, GFSK BT and cycle frequencies. These drive blind demodulation (workflow step 6) and are the strongest fingerprint fields: symbol rate to ±1% plus deviation plus sync word identifies most LMR and ISM protocols (docs/04 §7.6). docs/06 names this a Phase 4 spike.
@@ -82,7 +82,7 @@ Estimates symbol-level structure blind: symbol rate, FSK deviation and index, mo
 - **Live only:** short-burst intercept; temperature drift.
 
 ## Example use cases
-*Provisional until docs/06 §3 mapping (cross-checked against use-cases.yaml, 2026-09-13).*
+*Regenerated from `use-cases.yaml`. C14 is never a primary capability but gates every unknown-digital case (docs/06 §5).*
 - AWARE-036 — Unknown burst reverse-engineering triage
 - RESEARCH-001 — Blind ISM device RE with URH
 - RESEARCH-002 — rtl_433 flex decoder

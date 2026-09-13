@@ -1,8 +1,8 @@
 # C19 · analog-demod
-> Layer D — Demodulate & decode · Status: draft (taxonomy draft 2026-09-13) · Depends on: C11, C13, C08, C15, C17 · Used by: C22, C23, C24, C25, C27, C18, C05
+> Layer D — Demodulate & decode · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C11, C13, C08, C15, C17 · Used by: C22, C23, C24, C25, C27, C18, C05
 
 ## Purpose
-Turns a channelized analog emission into audio with **no manual mode, squelch or AGC choice**: it infers AM/NBFM/WFM/SSB/CW (and DSB-SC), opens squelch from the measured noise floor, and extracts channel attributes (CTCSS/DCS, RDS PI/PS, stereo pilot) that label and group emitters. Serves workflow step 5, and step 7 via C24.
+Turns a channelized analog emission into audio with **no manual mode, squelch or AGC choice**: it infers AM/NBFM/WFM/SSB/CW (and DSB-SC), opens squelch from the measured noise floor, and extracts channel attributes (CTCSS/DCS, RDS PI/PS, stereo pilot) that label and group emitters. **C19 owns RDS/RBDS decode** — it rides the FM MPX, so it is not a C22 decoder-plugins external tool (docs/06 §5). Serves workflow step 5, and step 7 via C24.
 
 ## Interface
 - **In:**
@@ -58,7 +58,7 @@ Turns a channelized analog emission into audio with **no manual mode, squelch or
 - **SDRangel:** AM/NFM/WFM/BFM (with RDS)/SSB/WDSP plugins. A DSP reference and a headless REST stop-gap (docs/03 §2.2). Licence: check.
 - **Suscan/SigDigger:** AM/FM/USB/LSB demodulators in a library layer (docs/03 §3.4). Licence: check.
 - **liquid-dsp:** AGC, PLL, filters; portable C (docs/03 §1.4). Licence: check.
-- **redsea** (RDS) is listed under C22 in docs/06.
+- **redsea** (RDS) is a reference for RDS logic, but RDS/RBDS is owned by C19, not hosted as a C22 plugin (docs/06 §5).
 - **Mayhem Audio app:** the baseline mode set (docs/01 §3.3). GPL.
 
 ## Pitfalls
@@ -84,18 +84,20 @@ Turns a channelized analog emission into audio with **no manual mode, squelch or
 - **Live hardware:** overload, real fading for AGC, clarifier usability.
 
 ## Example use cases
-Provisional until docs/06 §3 mapping:
-- SIGNAL-062 — RDS/RBDS & TMC
-- SIGNAL-067 — NOAA Weather Radio SAME/EAS
-- SIGNAL-045 — Highway advisory radio / TIS
-- SIGNAL-010 — VOLMET
-- SIGNAL-071 — Numbers stations & UVB-76
+Regenerated from `use-cases.yaml`:
 - SIGNAL-009 — SELCAL
+- SIGNAL-010 — VOLMET
+- SIGNAL-011 — (analog voice/attribute demod)
+- SIGNAL-012 — (analog voice/attribute demod)
 - SIGNAL-013 — NDB DXing
-- AWARE-052 — Pirate / unlicensed broadcaster hunting
+- SIGNAL-045 — Highway advisory radio / TIS
+- SIGNAL-062 — RDS/RBDS & TMC
+- RESEARCH-045 — (analog demod primary)
+- SIGNAL-036 — (analog demod)
+- SIGNAL-037 — (analog demod)
 
 ## Open questions
-- RDS appears in both C19 and C22 (redsea). Pick one owner.
+- **RDS owner (resolved, docs/06 §5).** RDS/RBDS is owned by C19 (rides the FM MPX), not a C22 plugin.
 - DCS needs a slicer and clock recovery: reuse C20 blocks?
 - HD Radio detection: C19 flag or C16?
 - Audio format, resampler, loudness target; stereo always or on demand.
