@@ -635,7 +635,9 @@ dependencies = [
  "hk-dsp",
  "hk-e2e",
  "hk-model",
+ "libc",
  "num-complex",
+ "rayon",
  "serde_json",
 ]
 

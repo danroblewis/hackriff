@@ -6,18 +6,35 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# T-058: hop-set raster fits fan out over hk-dsp's shared compute pool (results identical to the
+# sequential path). On by default, like hk-dsp's `cpu-mt`.
+default = ["cpu-mt"]
+cpu-mt = ["hk-dsp/cpu-mt", "dep:rayon"]
+# T-058: re-run every hop-set raster with the pre-T-058 reference and assert bit equality (slow;
+# for parity runs of the benches and the acceptance suite).
+parity-check = []
+
 [dependencies]
 hk-core.workspace = true
 hk-dsp.workspace = true
 hk-model.workspace = true
 # T-006: ci8 clip counting (`clip`).
 num-complex.workspace = true
+# T-058: feature `cpu-mt` (ADR-0010 ledger row: rayon).
+rayon = { version = "1.12", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
 # T-006: synthetic scenarios and SigMF fixtures for the AWARE-036 / AWARE-042 / SIGNAL-062 tests.
 hk-e2e = { path = "../../tests/e2e" }
+# T-058: load average in the detect-path bench.
+libc.workspace = true
 
 [[bench]]
 name = "detect_throughput"
+harness = false
+
+[[bench]]
+name = "detect_path"
 harness = false

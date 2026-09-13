@@ -539,39 +539,161 @@ fn wrap(x: f64, step: f64) -> f64 {
     x - step * (x / step).round()
 }
 
-fn fit_raster(ch: &[RasterChannel], step: f64, base_tol_hz: f64) -> LatticeFit {
-    let total: f64 = ch.iter().map(channel_weight).sum();
+/// `x.rem_euclid(y)`, bit for bit, without `fmod` for the dividends a raster fit sees (channel
+/// centres ≥ the step; T-058: `fmod` was about half of the tracker's time in dense bands).
+///
+/// With `q = trunc(x / y)` (an exact integer below 2^52; `q ∈ {Q, Q+1}` for the true `Q = ⌊x/y⌋`
+/// because rounding is monotone and both are representable), `q·y = p + e` exactly (fused
+/// multiply-add), `x − p` is exact (Sterbenz: `p/2 ≤ x ≤ 2p`), and `x − q·y` is a multiple of
+/// `ulp(y)` smaller than `y` in magnitude, hence representable, so `(x − p) − e` rounds to it
+/// exactly. When `q = Q+1` that remainder is negative and adding `y` gives the true one, again
+/// representable. Everything else (negative, tiny, huge or non-finite operands) takes
+/// `rem_euclid`.
+#[inline]
+fn rem_euclid_exact(x: f64, y: f64) -> f64 {
+    if !(x >= y && x < 1e300 && y >= 1e-290) {
+        return x.rem_euclid(y);
+    }
+    // `qf` is finite here (both operands are in range), so `>=` is the negated `<`.
+    let qf = x / y;
+    if qf >= 4_503_599_627_370_496.0 {
+        return x.rem_euclid(y);
+    }
+    let q = qf.trunc();
+    let p = q * y;
+    let e = q.mul_add(y, -p);
+    let r = (x - p) - e;
+    if r < 0.0 {
+        r + y
+    } else if r < y {
+        r
+    } else {
+        x.rem_euclid(y)
+    }
+}
+
+/// `(w·cos φ, w·sin φ)`, defined once out of line for [`fit_raster`] and its reference: on Apple
+/// targets LLVM may fuse `sin` and `cos` of one argument into `__sincos_stret`, whose last bit can
+/// differ from separate calls, so the fused-or-not choice must not depend on the caller (T-058).
+#[inline(never)]
+fn weighted_phasor(w: f64, ph: f64) -> (f64, f64) {
+    (w * ph.cos(), w * ph.sin())
+}
+
+/// What every candidate step of one [`robust_raster`] call shares, computed once with the same
+/// expressions as [`channel_weight`] and [`channel_tol`] (T-058).
+struct Prepared {
+    fc: Vec<f64>,
+    weight: Vec<f64>,
+    /// `base_tol_hz.max(0.25·bw)`: [`channel_tol`] at a step is this `.min(step / 8)`.
+    tol_base: Vec<f64>,
+    total: f64,
+}
+
+impl Prepared {
+    fn new(ch: &[RasterChannel], base_tol_hz: f64) -> Self {
+        Self {
+            fc: ch.iter().map(|c| c.fc).collect(),
+            weight: ch.iter().map(channel_weight).collect(),
+            tol_base: ch.iter().map(|c| base_tol_hz.max(0.25 * c.bw)).collect(),
+            total: ch.iter().map(channel_weight).sum(),
+        }
+    }
+}
+
+/// Buffers of one [`fit_raster`] worker.
+#[derive(Default)]
+struct FitScratch {
+    /// `weight·cos(phase)` and `weight·sin(phase)` per channel.
+    x: Vec<f64>,
+    y: Vec<f64>,
+    tol: Vec<f64>,
+    /// The inlier set of the latest offset iteration.
+    mask: Vec<bool>,
+    next: Vec<bool>,
+}
+
+/// Lattice fit of the channel centres to a raster `step`: the offset is the weighted circular mean
+/// of the centre phases, refitted on its inliers (up to three iterations), then scored.
+///
+/// Bit-identical to the direct form (kept as `reference::fit_raster` in the tests), which
+/// recomputed each channel's weight, phase, sine and cosine in every iteration: here they are
+/// computed once per channel, and the iteration stops as soon as an inlier set repeats (its sums,
+/// hence the offset and every later set, would repeat exactly).
+fn fit_raster(pre: &Prepared, step: f64, s: &mut FitScratch) -> LatticeFit {
+    let n = pre.fc.len();
     let tau = std::f64::consts::TAU;
-    // Offset: weighted circular mean of the centre phases, refitted on inliers.
-    let inlier = |offset: Option<f64>, c: &RasterChannel| match offset {
-        None => true,
-        Some(a) => wrap(c.fc - a, step).abs() <= channel_tol(c, step, base_tol_hz),
-    };
-    let mut offset = None;
-    for _ in 0..3 {
+    s.x.clear();
+    s.y.clear();
+    s.tol.clear();
+    let cap = step / 8.0;
+    for i in 0..n {
+        let (w, ph) = (
+            pre.weight[i],
+            tau * rem_euclid_exact(pre.fc[i], step) / step,
+        );
+        let (x, y) = weighted_phasor(w, ph);
+        s.x.push(x);
+        s.y.push(y);
+        s.tol.push(pre.tol_base[i].min(cap));
+    }
+    s.mask.clear();
+    s.mask.resize(n, true);
+    s.next.clear();
+    s.next.resize(n, false);
+    let mut offset: Option<f64> = None;
+    // `mask` is the inlier set of the final offset (so the scoring pass can reuse it).
+    let mut known = false;
+    let mut iterations = 0;
+    while iterations < 3 {
+        iterations += 1;
+        if let Some(a) = offset {
+            let mut same = true;
+            for i in 0..n {
+                let inlier = wrap(pre.fc[i] - a, step).abs() <= s.tol[i];
+                same &= inlier == s.mask[i];
+                s.next[i] = inlier;
+            }
+            std::mem::swap(&mut s.mask, &mut s.next);
+            if same {
+                known = true;
+                break;
+            }
+        }
         let (mut sx, mut sy) = (0.0, 0.0);
-        for c in ch.iter().filter(|c| inlier(offset, c)) {
-            let (w, ph) = (channel_weight(c), tau * c.fc.rem_euclid(step) / step);
-            sx += w * ph.cos();
-            sy += w * ph.sin();
+        for i in 0..n {
+            if s.mask[i] {
+                sx += s.x[i];
+                sy += s.y[i];
+            }
         }
         if sx == 0.0 && sy == 0.0 {
+            known = offset.is_some();
             break;
         }
         offset = Some(sy.atan2(sx).rem_euclid(tau) / tau * step);
     }
     let a = offset.unwrap_or(0.0);
     let (mut w_in, mut inliers, mut p) = (0.0, 0, 0.0);
-    for c in ch {
-        let tol = channel_tol(c, step, base_tol_hz);
+    for i in 0..n {
+        let tol = s.tol[i];
         p += 2.0 * tol / step;
-        if wrap(c.fc - a, step).abs() <= tol {
-            w_in += channel_weight(c);
+        let inlier = if known {
+            s.mask[i]
+        } else {
+            wrap(pre.fc[i] - a, step).abs() <= tol
+        };
+        if inlier {
+            w_in += pre.weight[i];
             inliers += 1;
         }
     }
-    let p = p / ch.len() as f64;
-    let f = if total > 0.0 { w_in / total } else { 0.0 };
+    let p = p / n as f64;
+    let f = if pre.total > 0.0 {
+        w_in / pre.total
+    } else {
+        0.0
+    };
     LatticeFit {
         step,
         offset: a,
@@ -579,6 +701,41 @@ fn fit_raster(ch: &[RasterChannel], step: f64, base_tol_hz: f64) -> LatticeFit {
         score: (f - p) / (1.0 - p),
         inliers,
     }
+}
+
+/// Candidates × channels from which [`fit_all`] fans out over the shared compute pool (about
+/// 0.3 ms of sequential work; smaller calls are not worth the hand-off).
+#[cfg(feature = "cpu-mt")]
+const PARALLEL_MIN_WORK: usize = 16_384;
+
+/// Fits every candidate step, in candidate order. The fits are independent, so the multi-threaded
+/// path (feature `cpu-mt`, large calls, over [`hk_dsp::compute::pool`]) returns exactly the
+/// sequential result.
+fn fit_all(pre: &Prepared, cands: &[f64]) -> Vec<LatticeFit> {
+    #[cfg(feature = "cpu-mt")]
+    if cands.len() * pre.fc.len() >= PARALLEL_MIN_WORK
+        && let Ok(pool) = hk_dsp::compute::pool::shared(None)
+    {
+        return fit_all_parallel(&pool, pre, cands);
+    }
+    fit_all_sequential(pre, cands)
+}
+
+fn fit_all_sequential(pre: &Prepared, cands: &[f64]) -> Vec<LatticeFit> {
+    let mut s = FitScratch::default();
+    cands.iter().map(|&c| fit_raster(pre, c, &mut s)).collect()
+}
+
+#[cfg(feature = "cpu-mt")]
+fn fit_all_parallel(pool: &rayon::ThreadPool, pre: &Prepared, cands: &[f64]) -> Vec<LatticeFit> {
+    use rayon::prelude::*;
+    pool.install(|| {
+        cands
+            .par_iter()
+            .with_min_len(64)
+            .map_init(FitScratch::default, |s, &c| fit_raster(pre, c, s))
+            .collect()
+    })
 }
 
 /// Raster step of noisy hop-set channel centres (T-035), or `None` when no lattice explains most
@@ -596,7 +753,20 @@ fn fit_raster(ch: &[RasterChannel], step: f64, base_tol_hz: f64) -> LatticeFit {
 ///
 /// With few, noisy channels the data alone can be ambiguous (the real 915 MHz hop set fits both
 /// 200 and 300 kHz with 6 of 7 channels); the common-raster prior decides such cases.
+///
+/// **Cost (T-058).** Every candidate is fitted: `O(candidates · channels)`, about `125·n²` channel
+/// fits for `n` channels, called once per drain of a changed hop set. Each fit computes one exact
+/// remainder, sine and cosine per channel ([`fit_raster`]), and large calls fan out over the
+/// shared compute pool (feature `cpu-mt`). The result is bit-identical to the direct form, which
+/// feature `parity-check` (and every test build) re-runs and compares on each call.
 pub(crate) fn robust_raster(ch: &[RasterChannel], base_tol_hz: f64) -> Option<f64> {
+    let r = robust_raster_fast(ch, base_tol_hz);
+    #[cfg(any(test, feature = "parity-check"))]
+    reference::cross_check(ch, base_tol_hz, r);
+    r
+}
+
+fn robust_raster_fast(ch: &[RasterChannel], base_tol_hz: f64) -> Option<f64> {
     if ch.len() < 3 {
         return None;
     }
@@ -623,11 +793,8 @@ pub(crate) fn robust_raster(ch: &[RasterChannel], base_tol_hz: f64) -> Option<f6
             }
         }
     }
-    let fits: Vec<LatticeFit> = cands
-        .iter()
-        .map(|&s| fit_raster(ch, s, base_tol_hz))
-        .filter(|f| f.inliers >= 3 && f.inlier_weight >= 0.6)
-        .collect();
+    let mut fits = fit_all(&Prepared::new(ch, base_tol_hz), &cands);
+    fits.retain(|f| f.inliers >= 3 && f.inlier_weight >= 0.6);
     let best = fits
         .iter()
         .map(|f| f.score)
@@ -686,9 +853,278 @@ fn refine_step(ch: &[RasterChannel], fit: &LatticeFit, base_tol_hz: f64) -> f64 
     }
 }
 
+/// The direct raster fit as it was before T-058: the parity reference of [`fit_raster`] and
+/// [`robust_raster`] (tests, and feature `parity-check`). It evaluates the phasors through
+/// [`weighted_phasor`] like the fast path, so both make the same libm choice in any build.
+#[cfg(any(test, feature = "parity-check"))]
+mod reference {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{
+        LatticeFit, RASTER_PRIOR, RASTER_TIE, RasterChannel, STANDARD_RASTERS_HZ, channel_tol,
+        channel_weight, refine_step, weighted_phasor, wrap,
+    };
+
+    static CHECKED: AtomicU64 = AtomicU64::new(0);
+
+    /// Asserts that the fast result equals the reference one bit for bit.
+    pub(super) fn cross_check(ch: &[RasterChannel], base_tol_hz: f64, got: Option<f64>) {
+        let want = robust_raster(ch, base_tol_hz);
+        assert_eq!(
+            got.map(f64::to_bits),
+            want.map(f64::to_bits),
+            "robust_raster {got:?} differs from the reference {want:?} on {ch:?} (tolerance {base_tol_hz})"
+        );
+        let n = CHECKED.fetch_add(1, Ordering::Relaxed) + 1;
+        if cfg!(feature = "parity-check") && n.is_power_of_two() {
+            eprintln!("hk-detect parity-check: {n} hop-set rasters identical to the reference");
+        }
+    }
+
+    pub(super) fn fit_raster(ch: &[RasterChannel], step: f64, base_tol_hz: f64) -> LatticeFit {
+        let total: f64 = ch.iter().map(channel_weight).sum();
+        let tau = std::f64::consts::TAU;
+        // Offset: weighted circular mean of the centre phases, refitted on inliers.
+        let inlier = |offset: Option<f64>, c: &RasterChannel| match offset {
+            None => true,
+            Some(a) => wrap(c.fc - a, step).abs() <= channel_tol(c, step, base_tol_hz),
+        };
+        let mut offset = None;
+        for _ in 0..3 {
+            let (mut sx, mut sy) = (0.0, 0.0);
+            for c in ch.iter().filter(|c| inlier(offset, c)) {
+                let (w, ph) = (channel_weight(c), tau * c.fc.rem_euclid(step) / step);
+                let (x, y) = weighted_phasor(w, ph);
+                sx += x;
+                sy += y;
+            }
+            if sx == 0.0 && sy == 0.0 {
+                break;
+            }
+            offset = Some(sy.atan2(sx).rem_euclid(tau) / tau * step);
+        }
+        let a = offset.unwrap_or(0.0);
+        let (mut w_in, mut inliers, mut p) = (0.0, 0, 0.0);
+        for c in ch {
+            let tol = channel_tol(c, step, base_tol_hz);
+            p += 2.0 * tol / step;
+            if wrap(c.fc - a, step).abs() <= tol {
+                w_in += channel_weight(c);
+                inliers += 1;
+            }
+        }
+        let p = p / ch.len() as f64;
+        let f = if total > 0.0 { w_in / total } else { 0.0 };
+        LatticeFit {
+            step,
+            offset: a,
+            inlier_weight: f,
+            score: (f - p) / (1.0 - p),
+            inliers,
+        }
+    }
+
+    pub(super) fn robust_raster(ch: &[RasterChannel], base_tol_hz: f64) -> Option<f64> {
+        if ch.len() < 3 {
+            return None;
+        }
+        let mut fc: Vec<f64> = ch.iter().map(|c| c.fc).collect();
+        fc.sort_unstable_by(f64::total_cmp);
+        let (min_step, max_step) = (4.0 * base_tol_hz.max(1.0), fc[fc.len() - 1] - fc[0]);
+        if max_step < min_step {
+            return None;
+        }
+        let mut cands: Vec<f64> = STANDARD_RASTERS_HZ
+            .iter()
+            .copied()
+            .filter(|s| (min_step..=max_step).contains(s))
+            .collect();
+        for i in 0..fc.len() {
+            for j in i + 1..fc.len().min(i + 6) {
+                let d = fc[j] - fc[i];
+                for k in 1..=32 {
+                    let step = d / f64::from(k);
+                    if step < min_step {
+                        break;
+                    }
+                    cands.push(step);
+                }
+            }
+        }
+        let fits: Vec<LatticeFit> = cands
+            .iter()
+            .map(|&s| fit_raster(ch, s, base_tol_hz))
+            .filter(|f| f.inliers >= 3 && f.inlier_weight >= 0.6)
+            .collect();
+        let best = fits
+            .iter()
+            .map(|f| f.score)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let largest = fits
+            .iter()
+            .filter(|f| f.score >= best - RASTER_TIE)
+            .max_by(|a, b| a.step.total_cmp(&b.step))?;
+        let is_standard = |s: f64| {
+            STANDARD_RASTERS_HZ
+                .iter()
+                .any(|r| (s / r - 1.0).abs() <= 0.02)
+        };
+        let chosen = if is_standard(largest.step) {
+            largest
+        } else {
+            fits.iter()
+                .filter(|f| STANDARD_RASTERS_HZ.contains(&f.step) && f.score >= best - RASTER_PRIOR)
+                .filter(|f| {
+                    let m = largest.step / f.step;
+                    (m - m.round()).abs() > 0.05
+                })
+                .max_by(|a, b| a.step.total_cmp(&b.step))
+                .unwrap_or(largest)
+        };
+        Some(refine_step(ch, chosen, base_tol_hz))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bits(r: Option<f64>) -> Option<u64> {
+        r.map(f64::to_bits)
+    }
+
+    fn same_fit(a: &LatticeFit, b: &LatticeFit) -> bool {
+        a.step.to_bits() == b.step.to_bits()
+            && a.offset.to_bits() == b.offset.to_bits()
+            && a.inlier_weight.to_bits() == b.inlier_weight.to_bits()
+            && a.score.to_bits() == b.score.to_bits()
+            && a.inliers == b.inliers
+    }
+
+    #[test]
+    fn rem_euclid_exact_matches_rem_euclid() {
+        let mut st = 58u64;
+        let check = |x: f64, y: f64| {
+            let (got, want) = (rem_euclid_exact(x, y), x.rem_euclid(y));
+            assert!(
+                got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                "{x:e} rem {y:e}: {got:e} != {want:e}"
+            );
+        };
+        for _ in 0..300_000 {
+            let x = 10f64.powf(1.0 + 9.0 * rng(&mut st));
+            let y = 10f64.powf(9.0 * rng(&mut st) - 2.0);
+            check(x, y);
+            // Around multiples, where the quotient rounds across an integer.
+            let m = (x / y).round().max(1.0) * y;
+            for d in -3i64..=3 {
+                check(f64::from_bits((m.to_bits() as i64 + d) as u64), y);
+            }
+        }
+        for e in -30..60 {
+            for f in -30..60 {
+                check(2f64.powi(e) * 3.0, 2f64.powi(f));
+                check(2f64.powi(e), 2f64.powi(f) * 1.5);
+                check(2f64.powi(e), 2f64.powi(f));
+            }
+        }
+        for (x, y) in [
+            (0.0, 1.0),
+            (-0.0, 3.0),
+            (-5.0, 3.0),
+            (2.0, 3.0),
+            (f64::MAX, 3.0),
+            (1e20, 1e-5),
+            (7.0, f64::INFINITY),
+            (f64::INFINITY, 7.0),
+            (f64::NAN, 2.0),
+            (2.0, f64::NAN),
+            (9.0, 0.0),
+            (4_503_599_627_370_497.0, 1.0),
+            (9_007_199_254_740_993.0, 2.0),
+            (1.0, 2f64.powi(-1000)),
+            (915_200_000.0, 199_999.999_999_999_97),
+        ] {
+            check(x, y);
+        }
+    }
+
+    /// Channel sets: noisy lattices, duplicated channels (re-opened tracks), no lattice, exact
+    /// lattices.
+    fn channels(st: &mut u64, n: usize, kind: u32) -> Vec<RasterChannel> {
+        let base = 80e6 + 900e6 * rng(st);
+        let raster = [12.5e3, 25e3, 100e3, 200e3, 300e3, 1e6][(rng(st) * 6.0) as usize];
+        (0..n)
+            .map(|i| {
+                let fc = match kind {
+                    0 => base + (rng(st) * 60.0).floor() * raster + (rng(st) - 0.5) * 0.1 * raster,
+                    1 => base + (i / 3) as f64 * raster + (rng(st) - 0.5) * 2e3,
+                    2 => base + rng(st) * 20e6,
+                    _ => base + (rng(st) * 40.0).floor() * raster,
+                };
+                RasterChannel {
+                    fc,
+                    bw: 5e3 + rng(st) * 2.0 * raster,
+                    bursts: (rng(st) * 40.0) as u64,
+                    snr_db: rng(st) * 40.0,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fast_raster_fits_are_bit_identical_to_the_reference() {
+        let mut st = 1u64;
+        let mut s = FitScratch::default();
+        for case in 0..240u32 {
+            let span = if case % 4 == 0 { 90.0 } else { 20.0 };
+            let n = 3 + (rng(&mut st) * span) as usize;
+            let ch = channels(&mut st, n, case % 4);
+            let tol = [2.4e3, 7.5e3, 14.6e3][case as usize % 3];
+            assert_eq!(
+                bits(robust_raster_fast(&ch, tol)),
+                bits(reference::robust_raster(&ch, tol)),
+                "case {case} n {n}"
+            );
+            let pre = Prepared::new(&ch, tol);
+            for _ in 0..40 {
+                let step = 10f64.powf(3.0 + 4.0 * rng(&mut st));
+                let (a, b) = (
+                    fit_raster(&pre, step, &mut s),
+                    reference::fit_raster(&ch, step, tol),
+                );
+                assert!(same_fit(&a, &b), "case {case} step {step}: {a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_raster_fits_equal_the_sequential_ones() {
+        let mut st = 5u64;
+        for case in 0..12u32 {
+            let ch = channels(&mut st, 60, case % 4);
+            let pre = Prepared::new(&ch, 7.5e3);
+            let cands: Vec<f64> = (0..3000)
+                .map(|_| 10f64.powf(3.5 + 3.0 * rng(&mut st)))
+                .collect();
+            let seq = fit_all_sequential(&pre, &cands);
+            let all = fit_all(&pre, &cands);
+            assert_eq!(seq.len(), all.len());
+            assert!(
+                seq.iter().zip(&all).all(|(a, b)| same_fit(a, b)),
+                "case {case}"
+            );
+            #[cfg(feature = "cpu-mt")]
+            {
+                let pool = hk_dsp::compute::pool::shared(None).unwrap();
+                let par = fit_all_parallel(&pool, &pre, &cands);
+                assert!(
+                    seq.iter().zip(&par).all(|(a, b)| same_fit(a, b)),
+                    "case {case}"
+                );
+            }
+        }
+    }
 
     fn chan(fc: f64, bw: f64, bursts: u64) -> RasterChannel {
         RasterChannel {
