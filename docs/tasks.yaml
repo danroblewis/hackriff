@@ -699,7 +699,7 @@ tasks:
     title: Listen - click a signal -> auto analog demod (T-012) -> audio streamed to the browser (Web Audio), legal gating kept
     milestone: M0b
     status: done
-    commit: "58762a5 (merge held until T-063 greens main; legal review MERGE-OK)"
+    commit: "58762a5 (merged)"
     result: "GET /ws/open/listen?emitter=|detection=|f_lo=&f_hi= (+token/Bearer, relative ws/wss); hk-stream ondemand.rs StreamOpener/OpenerRegistry (transport-agnostic, token stripped) reusable for T-060; hk-api thin bridge with drop-not-block; refusal -> refused JSON + close 4000+status. Stream contract 1.1: mono s16 48 kHz 20 ms PCM records with seq + drop markers, header audio profile, status record type 3 (flat numbers/short tokens only). hk-demod audio.rs NBFM/AM/SSB/CW + squelch/AGC. Gating: restricted bands refused regardless of source class; restricted sources refused; unclassified (metadata-only, no user rule) refused; class from the chain's segment, re-plumb ends the chain. Blind FM: WFM auto, pilot 86 dB below audio band, processing latency peak 54 ms, 0 gaps/drops, 3rd listener 503; paging sentinel refused 403 (0 probes/attaches/frames). Tests: listen.rs, listen_retune.rs, UI framing/jitter 23; acceptance 18/18."
     followups:
       - "T-012 selector: pure carrier read as AM, 60 % AM tone read as unknown (detection quality)"
@@ -800,7 +800,7 @@ tasks:
     milestone: M0b
     title: Mock SDR device replaying SigMF behind the device interface (realistic retune/gain/rate/overrun behaviour)
     status: done
-    commit: "f6a47d4 + merges 8d3bc5b (T-050), e7a5bec (2162fd1); own-target verification: lint, 137 Rust test binaries, py 48, ui, acceptance 16/16 green except known retune_legal (T-063)"
+    commit: "f6a47d4 (merged)"
     result: "hk_core::source::conformance::run (20 checks) passed by the mock on synthetic ci8/cf32 and the FM fixture (HackRF case #[ignore], feature hackrf). Mock (source/mock/): HackRF One caps, receive-only; retune shifts/filters/resamples with absolute frequencies preserved (bit-exact at recorded tuning); coverage = recording baseband-filter band, outside -> noise at measured floor flagged in provenance antenna_port (mock:recording / +noise / noise) and MockStats; gain scales from recorded gains with int8 clip + sticky overload; control change skips one block (gap + discard); injectable overruns; late real-time reader drops whole blocks; pausable only unpaced; Stop/Loop; bias tee flag; sweep unsupported; legal class from tuned window keeping stricter declared class. CLI hk serve --device mock:<meta>, hk run/hackriffd --source mock:<meta>. tests/e2e/tests/mock_device.rs: stripped FM fixture through mock -> station detected, FM broadcast in top-k."
     limits: "gain is digital scaling (no NF/compression/IMD); white fill with ~3 dB dip at coverage edge; ~half filter length latency after retune; single-centre recordings only"
     scope_note: "includes the device conformance test from T-048; suite switch of acceptance helpers stays in T-047 (after T-037b)"
@@ -837,7 +837,9 @@ tasks:
   - id: T-051
     milestone: M0b
     title: SDR control panel UI around waterfall/spectrum (SDR++/SDRangel/SigDigger standard control set, exploration-first)
-    status: in-progress
+    status: done
+    commit: "3ce6abf (merge queued; own-target verification green except known retune_legal)"
+    result: "ui/CONTROLS.md survey (SDR++/SDRangel/SigDigger -> our endpoints; skipped TX, manual demod mode/bandwidth/squelch, PPM/IQ correction, FFT window/colour map, antenna/device pickers). ui/src/controls/*: centre entry with units + step/shift, span from device rates, capability-named gain sliders (HackRF LNA/VGA + amp), bias tee with warning, single in-flight device request with spinner (<=30 s re-plumb), segment/class change notice; axis drag-pan and scroll/pinch zoom (edge pan offers retune, never automatic); FFT size/averaging/speed, honest 'Pause spectrum', colour scale auto/manual, peak hold; record start/stop with refusal reasons; bookmarks add/list/jump/delete drawn on waterfall; replay disables Radio group (not_live). Shader pooling pixel-centred. Headless Chromium 400 px + 1440 px, 40 px targets. Token flow: #token= -> sessionStorage, stripped from URL, paste prompt on 401, Forget token; WebSocket URL only carries ?token=. UI tests 25."
     deps: [T-050, T-044]
     parallel_group: N
     use_cases: [AWARE-042, SIGNAL-062]
@@ -945,7 +947,7 @@ tasks:
     milestone: M0b
     title: Detect-reader throughput (single-threaded STFT+CFAR path overruns the ring at >=8 Msps)
     status: done
-    commit: "33ee78e (merge held until T-063 greens main)"
+    commit: "33ee78e (merged)"
     result: "HIL loss cause: 98 % of detect thread in tracker drain_into -> hop_track -> robust_raster/fit_raster (fmod 47 %, sin/cos 40 %), hop-set members never pruned (51-111 channels, 5-7k candidate steps, 15-23 ms/call); STFT+floor+CFAR ~2 %. Fix in hk-detect/src/track/stats.rs: one exact remainder + one sin/cos per channel per candidate, weights/tolerances hoisted, early-exit on repeated inlier set, large calls on hk-dsp rayon pool (ordered; new default feature cpu-mt). Bit-identical: fast vs reference raster on 240 random sets, remainder vs rem_euclid ~2M cases, parallel vs sequential, parity-check feature on real urban fixture, old vs new replay DBs (4217 detections, 182 tracks, hop raster 34915.757 Hz/111 ch). RTF: whole-pipeline 20 Msps urban replay 0.074 -> 0.68; bench urban 0.09 -> 0.86 (1.6 at load 3); synthetic 8/10/20 Msps 8.7/6.7/4.9 and ISM 10 Msps 9.1 unchanged. Load 20-42 during measurement."
     followups:
       - "hop-set pruning/raster recompute -> T-064"
@@ -1026,7 +1028,11 @@ tasks:
   - id: T-063
     milestone: M0b
     title: "Legal regression: FSK bits stream offered Unrestricted after a legal-class retune into paging (T-037b x T-050)"
-    status: in-progress
+    status: done
+    commit: "080ac83 (merged)"
+    result: "verdict (a) test too strict, no leak: the only Unrestricted streams were the FM segment's bits/fsk-bursts offered during the re-plumb (FSK chain flushes at detach; old segment finishes before new starts); their bursts at 100.836/100.853 MHz and records 98-1167 ms before t_retune; all paging-window bits streams RestrictedPaging, every record GATED, 0 payload bytes; class from segment source_class, nothing cached across segments. Test now attributes streams by provenance (RF centre + burst times; spectrum by header centre; unattributable = paging, fail-closed; anything offered after retune() returns must be paging); count_found also searches bits-stream encoding; new regression test with positive control; mutation check (forcing bits class Unrestricted fails both tests). 5/5 stable."
+    followups:
+      - "paging segment emitter reuses the FM emitter id (and bits stream id) via identity-based entity resolution on a restricted decode -> T-068"
     deps: [T-050, T-037]
     parallel_group: J
     use_cases: [AWARE-036]
@@ -1067,19 +1073,51 @@ tasks:
     core_interface: true
   - id: T-066
     milestone: M0b
-    title: Listen hardening (T-043 review nits)
+    title: Listen robustness (half-open client slot release, 503 replumbing)
     status: todo
     deps: [T-043]
     parallel_group: P
     use_cases: [SIGNAL-062]
     found_by: T-043 legal review (MERGE-OK) 2026-09-13
-    acceptance: "listen gate covers the DDC passband (channel centre +/- output rate/2, WFM +/-120 kHz) not only nominal width - test: CW at 928.99 MHz next to paging 929.0125 MHz in a replay tagged unrestricted is refused; listen_retune adds a window partly over paging with the selection outside it (catches wrong segment class, not just the frequency check); watch_peer read timeout / TCP keepalive so half-open clients release listen slots; 503 replumbing instead of 410 source-ended during re-plumb start; refusal reasons omit free-text rule 'by' strings"
+    scope_change: "2026-09-13 user policy: legal/gating items (passband gate, wrong-class retune test, free-text reasons) dropped; robustness items kept"
+    acceptance_original: "listen gate covers the DDC passband (channel centre +/- output rate/2, WFM +/-120 kHz) not only nominal width - test: CW at 928.99 MHz next to paging 929.0125 MHz in a replay tagged unrestricted is refused; listen_retune adds a window partly over paging with the selection outside it (catches wrong segment class, not just the frequency check); watch_peer read timeout / TCP keepalive so half-open clients release listen slots; 503 replumbing instead of 410 source-ended during re-plumb start; refusal reasons omit free-text rule 'by' strings"
     area: crates/hk-pipeline/src/chains/listen.rs, crates/hk-api/src/ondemand.rs, tests
     needs: none
     model: opus
     effort: medium
     core_interface: true
-    hold: "after T-043 merges (held behind T-063)"
+    acceptance: "watch_peer read timeout / TCP keepalive so half-open clients release listen slots within a bounded time; 503 replumbing instead of 410 source-ended during re-plumb start; tests"
+    hold: "none (T-043 merged)"
+  - id: T-067
+    milestone: M0b
+    title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
+    status: todo
+    deps: [T-051, T-062]
+    parallel_group: P
+    use_cases: [AWARE-042]
+    found_by: T-051 agent 2026-09-13
+    acceptance: "/api/control/state reports display limits (FFT size range, averaging max, rows/s range) so the UI stops hard-coding them; endpoints for FFT window, baseband filter (validated against device capabilities) and bookmark rename; UI consumes them; auth/audit/TX rules unchanged; tests"
+    area: crates/hk-api (control), crates/hk-cli/src/control.rs, ui/src/controls
+    needs: none
+    model: opus
+    effort: medium
+    hold: "after T-051 merges"
+  - id: T-068
+    milestone: M0b
+    title: "Legal: restricted decodes must not drive entity-resolution links to emitters outside their class (identity confirmation side channel)"
+    status: cancelled
+    cancelled: "2026-09-13 user policy (CLAUDE.md Legal): no legal work, don't extend gating; not a development concern"
+    deps: [T-063, T-036]
+    parallel_group: J
+    use_cases: [AWARE-036]
+    found_by: T-063 agent 2026-09-13
+    decision: "coordinator (fail-closed, consistent with T-036 'withheld identities can't be confirmed by lookup'; user may override): identities decoded under restricted-cellular/restricted-paging/metadata-only classes never merge or link an emitter to one outside that class; restricted rows get fresh ids per class context; stream ids derived from restricted emitters don't reveal links"
+    acceptance: "FM -> paging retune scene: paging-segment emitter id and bits stream id differ from the FM emitter's; no repository link, merge, or shared identity row across the class boundary; inventory/API/streams sentinel scan shows no way to tell the paging sensor is the FM sensor; unrestricted same-identity merging unchanged; regression tests"
+    area: crates/hk-model (entity resolution/cluster), crates/hk-pipeline (inventory, stream ids)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

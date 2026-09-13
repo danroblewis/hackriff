@@ -408,3 +408,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Rule:** a finished branch merges when its own-target verification adds no failure beyond the known `retune_legal` regression, as T-062 did. This avoids a growing merge backlog and conflict pile-up behind T-063.
   - **Queue:** T-049 (mock SDR, ready: 137 Rust test binaries, py, ui, acceptance 16/16 green apart from `retune_legal`), T-043 (Listen, review MERGE-OK) and T-058 (detect throughput, bit-identical). They merge in sequence once the running T-062 verification finishes, followed by one combined verification.
   - **Unblocks after the merges:** T-047 and T-064. T-066 also unblocks, after T-043.
+- **B0.134 User policy change (CLAUDE.md Legal, and licence stance, 2026-09-13).**
+  - **New policy:** the user handles legality. No legal reviews, no legal regression tests, and no merges blocked on legal or content-gating concerns. Existing gating code stays but is not extended, and defaults to permissive where it obstructs a feature. The licence ledger is optional bookkeeping, not a gate. Standing preferences: no TX path unless asked, and no attack tooling.
+  - **Committed:** the user's uncommitted CLAUDE.md and prompts/model-selection.md edits, so agent worktrees follow them.
+  - **Task changes:** T-068 cancelled. T-066 trimmed to its robustness items (now unblocked). Later briefs omit legal-review steps.
+  - **Merged in order:**
+    - T-063 (f80a462; coordinator resolved the retune_legal.rs conflict with T-062)
+    - T-049 (bedacff)
+    - T-058 (f14a273)
+    - T-043 (6f33776)
+  - **T-051:** conflicts with T-043 in 4 UI files, being resolved. Combined verification follows.
