@@ -10,9 +10,10 @@
 //!   non-restricted (fail-closed) source: there the sentinels **are** found in the data
 //!   directory and the identity reads in clear to prove the scans can see what they look for.
 //!
-//! The source is tagged `hackriff:content_class: restricted-paging` explicitly, and the rule tries
-//! to open it. Band-derived restriction (paging 929–932 MHz, cellular 824–894 MHz on untagged
-//! recordings) is being added by a separate fix; add a band-derived case here once it merges.
+//! The first case tags the source `hackriff:content_class: restricted-paging` explicitly, and the
+//! rule tries to open it. The second is band-derived (T-027 fix): the same paging scene rendered
+//! **untagged** at 930.5 MHz (47 CFR 22.531 / 24.129 / 90.494 paging, 929–932 MHz) takes
+//! `restricted-paging` from frequency, and a rule over the band cannot open it.
 
 use hk_e2e::{SynthRequest, synth_or_skip};
 use hk_model::sigmf::SigmfMeta;
@@ -33,7 +34,7 @@ struct Outcome {
     api_status: Vec<u8>,
 }
 
-fn run_scene(fx: &hk_e2e::Fixture, class: Option<&str>, tag: &str) -> Outcome {
+fn run_scene(fx: &hk_e2e::Fixture, class: Option<&str>, rule_hz: [f64; 2], tag: &str) -> Outcome {
     let src = TempDir::new(&format!("{tag}src"));
     let meta_path = src.0.join("scene.sigmf-meta");
     let mut meta = SigmfMeta::read(&fx.meta_path).unwrap();
@@ -51,7 +52,7 @@ fn run_scene(fx: &hk_e2e::Fixture, class: Option<&str>, tag: &str) -> Outcome {
         &dir.0,
         &meta_path,
         json!({ "pipeline": { "classify": [{
-            "freq_hz": [433.8e6, 434.1e6],
+            "freq_hz": rule_hz,
             "content_class": "unrestricted",
             "by": "test: an attempt to open the source's content"
         }] } }),
@@ -78,9 +79,9 @@ fn run_scene(fx: &hk_e2e::Fixture, class: Option<&str>, tag: &str) -> Outcome {
     }
 }
 
-/// CRC-valid decodes of the sensor, with how many kept content (gated getter).
-fn sensor_decodes(repo: &Repository) -> (usize, usize) {
-    let band = FreqRange::centered(433.973e6, 60e3);
+/// CRC-valid decodes of the sensor at `center_hz`, with how many kept content (gated getter).
+fn sensor_decodes(repo: &Repository, center_hz: f64) -> (usize, usize) {
+    let band = FreqRange::centered(center_hz, 60e3);
     let mut valid = 0;
     let mut with_content = 0;
     for e in inventory(
@@ -121,10 +122,10 @@ fn legal_restricted_source_yields_no_content_or_identity_anywhere() {
     let n = truths.len();
 
     // --- Positive control: same scene and rule, fail-closed (not restricted) source.
-    let pos = run_scene(&fx, None, "legpos");
+    let pos = run_scene(&fx, None, [433.8e6, 434.1e6], "legpos");
     assert_eq!(pos.summary.source_class, "metadata-only");
     let pos_repo = repo(&pos.dir.0);
-    let (pos_valid, pos_content) = sensor_decodes(&pos_repo);
+    let (pos_valid, pos_content) = sensor_decodes(&pos_repo, 433.973e6);
     let pos_found = count_found(&all_bytes(&pos.dir.0), &content);
     // The identity the positive control shows in clear is the identity sentinel.
     let identities: Vec<String> = inventory(&pos_repo, InventoryQuery::default())
@@ -161,7 +162,7 @@ fn legal_restricted_source_yields_no_content_or_identity_anywhere() {
     );
 
     // --- Restricted: paging-class source, same rule.
-    let r = run_scene(&fx, Some("restricted-paging"), "legres");
+    let r = run_scene(&fx, Some("restricted-paging"), [433.8e6, 434.1e6], "legres");
     let s = &r.summary;
     assert_eq!(s.source_class, "restricted-paging");
     assert!(
@@ -192,7 +193,7 @@ fn legal_restricted_source_yields_no_content_or_identity_anywhere() {
     );
     assert_eq!(s.counter("/chains/recordings"), 0, "[{LEGAL}] no recording");
     let res_repo = repo(&r.dir.0);
-    let (valid, with_content) = sensor_decodes(&res_repo);
+    let (valid, with_content) = sensor_decodes(&res_repo, 433.973e6);
     assert!(valid > 0, "[{LEGAL}] CRC-valid Decode rows exist");
     assert_eq!(with_content, 0, "[{LEGAL}] a Decode row kept content");
     assert!(
@@ -233,6 +234,102 @@ fn legal_restricted_source_yields_no_content_or_identity_anywhere() {
             bytes.len()
         );
         assert_eq!(c, 0, "[{LEGAL}] payload content in {name}");
+    }
+    for (name, bytes) in &outputs[1..] {
+        assert_eq!(
+            count_found(bytes, &identity_sentinels),
+            0,
+            "[{LEGAL}] identity in clear in {name}"
+        );
+    }
+}
+
+/// Band-derived restriction (T-027 fix): the paging scene rendered **untagged** at 930.5 MHz, with
+/// a rule over the whole paging band trying to open it. The scans' sensitivity is proven by the
+/// positive control of the tagged case above (same scene, same scanners).
+#[test]
+fn legal_untagged_recording_in_the_paging_band_yields_no_content_or_identity_anywhere() {
+    const FC: f64 = 930.5e6;
+    let out = synth_or_skip!(
+        SynthRequest::new("fsk_burst_train")
+            .seed(36)
+            .param("snr_db", 20.0)
+            .param("duration_s", 1.2)
+            .param("center_hz", FC)
+    );
+    let fx = out.fixture(0).unwrap();
+    let truths = fx.of_kind("fsk-burst");
+    let payloads: Vec<String> = truths
+        .iter()
+        .map(|t| t.value["frame"]["payload_hex"].as_str().unwrap().to_owned())
+        .collect();
+    let content = sentinels(&payloads);
+    let identity_sentinels: Vec<Vec<u8>> = truths
+        .iter()
+        .filter_map(|t| t.identity().map(|(_, v)| v.to_owned()))
+        .flat_map(|v| [v.to_lowercase().into_bytes(), v.to_uppercase().into_bytes()])
+        .collect();
+    assert!(!identity_sentinels.is_empty(), "[{LEGAL}] scene identity");
+    let n = truths.len();
+
+    let r = run_scene(&fx, None, [929.0e6, 932.0e6], "legband");
+    let s = &r.summary;
+    assert_eq!(
+        s.source_class, "restricted-paging",
+        "[{LEGAL}] untagged 930.5 MHz derives restricted-paging from frequency"
+    );
+    let decodes = s.counter("/chains/decodes");
+    let crc = s.counter("/chains/crc_valid");
+    eprintln!(
+        "[{LEGAL}] band-derived: {decodes} decodes ({crc} CRC-valid of {n} bursts), {} withheld, \
+         {} recordings, streams {:?}",
+        s.counter("/chains/content_withheld"),
+        s.counter("/chains/recordings"),
+        r.tap.stream_ids()
+    );
+    assert!(
+        decodes > 0 && crc * 10 >= (n as u64) * 8,
+        "[{LEGAL}] the band-derived run must decode and frame bursts to be a real test"
+    );
+    assert_eq!(
+        s.counter("/chains/content_withheld"),
+        decodes,
+        "[{LEGAL}] every decode withheld"
+    );
+    assert_eq!(s.counter("/chains/recordings"), 0, "[{LEGAL}] no recording");
+    let res_repo = repo(&r.dir.0);
+    let (valid, with_content) = sensor_decodes(&res_repo, FC + 53e3);
+    assert!(valid > 0, "[{LEGAL}] CRC-valid Decode rows exist");
+    assert_eq!(with_content, 0, "[{LEGAL}] a Decode row kept content");
+    assert!(
+        files_with_suffix(&r.dir.0, ".sigmf-data").is_empty(),
+        "[{LEGAL}] a SigMF recording was written"
+    );
+    for e in inventory(&res_repo, InventoryQuery::default()) {
+        assert!(
+            !matches!(e.identity, InventoryIdentity::Clear { .. }),
+            "[{LEGAL}] identity in clear via query_inventory: {:?}",
+            e.identity
+        );
+    }
+    for row in &r.api_rows {
+        assert!(
+            row["identity_value"].is_null(),
+            "[{LEGAL}] /api/inventory identity in clear: {row}"
+        );
+    }
+    let outputs: [(&str, Vec<u8>); 4] = [
+        ("data directory", all_bytes(&r.dir.0)),
+        ("streams", r.tap.all_raw()),
+        ("/api/inventory", r.api_inventory.clone()),
+        ("/api/status", r.api_status.clone()),
+    ];
+    for (name, bytes) in &outputs {
+        assert_eq!(
+            count_found(bytes, &content),
+            0,
+            "[{LEGAL}] payload content in {name}"
+        );
     }
     for (name, bytes) in &outputs[1..] {
         assert_eq!(

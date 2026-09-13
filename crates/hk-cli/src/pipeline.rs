@@ -177,6 +177,8 @@ pub fn run_replay(args: &ReplayArgs) -> anyhow::Result<RunSummary> {
     let registry = StreamRegistry::new();
     let mut cfg = config_for(data_dir, plan, &registry, args.feeds.clone())?;
     cfg.source_class = replay.class;
+    // Explicit opt-in: `PipelineConfig` defaults to lossless off (live-source semantics), and a
+    // recording can pause, so unpaced replay waits for slow readers instead of dropping.
     cfg.lossless = !args.paced;
     cfg.drive_scheduler = args.schedule;
     if let Some(hw) = &replay.meta.global.hw {
@@ -239,6 +241,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     let registry = StreamRegistry::new();
     let mut cfg = config_for(args.data_dir.clone(), plan, &registry, args.feeds.clone())?;
     cfg.source_class = replay.class;
+    // Explicit opt-in, as for `hk replay` (a future live source must leave this off).
     cfg.lossless = args.unpaced;
     cfg.drive_scheduler = true;
     cfg.device_id = replay
@@ -329,6 +332,75 @@ mod tests {
         let path = dir.join("tiny.sigmf-meta");
         meta.write(&path).unwrap();
         path
+    }
+
+    /// A real HackRF fixture whose LFS data is fetched, searched from this crate up through the
+    /// ancestor checkouts (a git worktree may hold only pointers). `None` skips
+    /// (`HK_REQUIRE_FIXTURES=1` fails instead).
+    fn lfs_fixture(name: &str) -> Option<PathBuf> {
+        let rel = Path::new("fixtures/hackrf/2026-09-13").join(format!("{name}.sigmf-meta"));
+        for dir in Path::new(env!("CARGO_MANIFEST_DIR")).ancestors() {
+            let meta = dir.join(&rel);
+            let fetched = std::fs::read(meta.with_extension("sigmf-data"))
+                .is_ok_and(|b| b.len() > 4096 && !b.starts_with(b"version https://git-lfs"));
+            if fetched {
+                return Some(meta);
+            }
+        }
+        if std::env::var("HK_REQUIRE_FIXTURES").is_ok_and(|v| v == "1") {
+            panic!("{name}: fixture data not fetched (git lfs pull)");
+        }
+        eprintln!("SKIP {name}: fixture data is not fetched (git lfs pull)");
+        None
+    }
+
+    /// T-027 review fix: the HackRF fixtures start at `core:global_index` 423 000 000 (915 MHz)
+    /// and 324 000 000 (433 MHz), far beyond the lossless gate's slack from the always-on
+    /// readers' initial cursors. Unpaced `hk replay` must finish with every sample read.
+    #[test]
+    fn unpaced_replay_completes_on_large_global_index_fixtures() {
+        const LIMIT: Duration = Duration::from_secs(1200);
+        let runs: Vec<_> = [
+            "ism_915M_10M_l24g30a1_t42p3_1p2s",
+            "ism_433p62M_2M_l24g30a1_t162p0_6s",
+        ]
+        .into_iter()
+        .filter_map(|name| lfs_fixture(name).map(|f| (name, f)))
+        .map(|(name, fixture)| {
+            let dir = temp_data_dir();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let args = ReplayArgs {
+                fixture,
+                data_dir: Some(dir.clone()),
+                ..ReplayArgs::default()
+            };
+            // A deadlocked run leaks its thread; the timeout fails the test instead of hanging.
+            std::thread::spawn(move || {
+                let _ = tx.send(run_replay(&args).map_err(|e| format!("{e:#}")));
+            });
+            (name, dir, rx)
+        })
+        .collect();
+        for (name, dir, rx) in runs {
+            let summary = rx
+                .recv_timeout(LIMIT)
+                .unwrap_or_else(|_| panic!("{name}: hk replay did not finish (gate deadlock)"))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            eprintln!("{name}\n{}", summary.to_text());
+            assert!(summary.errors.is_empty(), "{name}: {:?}", summary.errors);
+            let samples = summary.counter("/source/samples");
+            assert_eq!(samples, 12_000_000, "{name}: every recorded sample");
+            assert_eq!(summary.counter("/source/ring_errors"), 0, "{name}");
+            assert_eq!(summary.always_on_lost_samples, 0, "{name}: no drops");
+            for r in ["detect", "history", "spectrum"] {
+                assert_eq!(
+                    summary.counter(&format!("/readers/{r}/samples")),
+                    samples,
+                    "{name}: {r} read every sample"
+                );
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     fn get(addr: SocketAddr, path: &str, token: Option<&str>) -> (u16, String) {

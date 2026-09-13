@@ -137,7 +137,10 @@ pub struct PipelineConfig {
     pub plan: ScanPlan,
     /// Settings (normally [`PipelineSettings::from_plan`]).
     pub settings: PipelineSettings,
-    /// Lossless backpressure (unpaced replay).
+    /// Lossless backpressure: the capture thread waits for slow readers instead of letting the
+    /// ring lap them. Off by default (live-source semantics); opt in for unpaced replay. Only a
+    /// source that can pause ([`hk_core::Source::pausable`]) may run lossless: `Pipeline::start`
+    /// refuses any other.
     pub lossless: bool,
     /// Drive the attention scheduler (hackriffd).
     pub drive_scheduler: bool,
@@ -176,7 +179,7 @@ impl PipelineConfig {
             data_dir: data_dir.into(),
             plan,
             settings,
-            lossless: true,
+            lossless: false,
             drive_scheduler: false,
             device_id: "sigmf-replay".into(),
             source_class: ContentClass::FAIL_CLOSED,

@@ -26,3 +26,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 hk-e2e = { path = "../../tests/e2e" }
+# Test-only: injects repository write failures (already a workspace dependency via hk-model).
+rusqlite.workspace = true

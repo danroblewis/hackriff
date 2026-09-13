@@ -25,7 +25,7 @@ use num_complex::Complex;
 use super::{ChainMsg, ChainReader, Next};
 use crate::events::Candidate;
 use crate::run::Shared;
-use crate::stats::{add, inc, set};
+use crate::stats::{add, inc};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
@@ -253,7 +253,7 @@ fn run_inner(
         &c.plugin_dropped,
         stats.records_dropped_full + stats.records_dropped_detached,
     );
-    set(&c.plugin_restarts, stats.restarts);
+    add(&c.plugin_restarts, stats.restarts);
     if let Some(p) = ing.take_publisher() {
         p.finish();
     }
