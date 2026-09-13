@@ -543,7 +543,9 @@ tasks:
     note: "follow-ups from T-018 (merged 2026-09-13 under the timebox rule); the first item is a legal-guardrail gap to close before any inventory API/export ships"
   - id: T-035
     title: Tracking data-model follow-ups (TimingFeatures fields, track region query, batched writes, hop raster estimate)
-    status: in-progress
+    status: done
+    commit: "288ad04 (merged)"
+    results: "TimingFeatures + track table fields (f_lo/f_hi/kind/detection_count/hop_set, period confidence/jitter, burst quantiles, segment count, hop raster/set) + append-only track_segment table; tracks_in_region index-bounded (EXPLAIN verified); Repository::batch typed IMMEDIATE transaction API used by TrackBatch::write (rollback tested; 1.1x rows/s, gain is atomicity); robust_raster: real 915 MHz 199.8 kHz (-0.1 %) but borderline (200 vs 300 kHz tie broken by common-raster prior, thresholds tuned on one fixture; 161/200 jitter runs within 5 %). Deferred: TDMA/co-occurrence features, docs/07 update"
     deps: [T-031, T-018]
     parallel_group: E
     use_cases: [AWARE-036, AWARE-042]
