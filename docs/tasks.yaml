@@ -210,7 +210,10 @@ tasks:
     dod: replay FM+RDS fixture -> WFM chosen, PI/PS decoded, label written
   - id: T-013
     title: digital demod (FSK) + framing/CRC inference
-    status: in-progress
+    status: done
+    commit: "ca718d8 (merged)"
+    results: "synthetic fsk_burst_train BER 0/2240 at 20 and 12 dB, sync 2DD4 + CRC-16/CCITT-FALSE validated 20/20, payloads match truth, ground-truth annotation + known status (classified sensor); weak bursts (4 dB) sync found 18/20 via cluster prior; real 915 MHz: learned sync in 18/18 truth bursts (9 via priors), no CRC claimed (best candidate FA bound 0.69 > 1e-3), payload labelled encrypted-or-scrambled; 0 payload leaks in SQLite/stream scan (content fail-closed unless EmitterClassification)"
+    followups: "T-011 harmonic trust bug -> T-030; sync start one-bit ambiguous without CRC (S5 convention); no identified status in model (known appended only with CRC ground truth + classified emitter); merged without separate review (not core_interface)"
     s5_inputs: "gate PASSED (scoped). Cross-burst preamble/sync inference proven (16-bit sync 0000110001011111 in 414/685 915 MHz bursts); next PHR/length/CRC inference; weak bursts (<15 dB) via prior-led trial demod seeded from strong bursts of the same cluster + standard-rate table"
     deps: [T-011]
     parallel_group: G
