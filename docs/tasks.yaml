@@ -517,7 +517,7 @@ tasks:
     note: "follow-ups from T-028 (merged 2026-09-13 under the timebox rule); must land before filter-bank accessory field use"
   - id: T-034
     title: Inventory follow-ups (ungated raw emitter getters, writers to record_sighting, re-demod dedup, clustering v2)
-    status: todo
+    status: in-progress
     deps: [T-018]
     parallel_group: E
     use_cases: [AWARE-036, SIGNAL-001, SIGNAL-062, AWARE-053]
