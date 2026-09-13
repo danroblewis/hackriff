@@ -3,6 +3,10 @@
 //! [`SegmentEngine`] is the per-segment kernel shared by the one-shot [`welch`] and the
 //! streaming [`StftProcessor`](crate::stft::StftProcessor): window → FFT → DC-centred `|X|²` →
 //! linear accumulators (`ΣP`, `ΣP²`, max, min). Nothing allocates after construction.
+//!
+//! The accumulators are split out as [`Accumulators`] so a batched
+//! [`SpectralBackend`](crate::compute::SpectralBackend) (multi-threaded CPU, GPU) can compute the
+//! `|X|²` rows elsewhere and fold them in here, in segment order, with the same arithmetic.
 
 use std::fmt;
 
@@ -126,14 +130,47 @@ impl WelchConfig {
     }
 }
 
-/// The per-segment kernel. See the [module docs](self).
-pub struct SegmentEngine {
+/// Windowed, DC-centred `|X|²` of one raw segment into `power` (`power.len() == N`), using
+/// `buf` (`N`) as FFT scratch. The single definition of the per-segment power row: the CPU
+/// reference [`SegmentEngine`] and the batched CPU spectral backends call it, so their rows are
+/// bit-identical.
+#[inline]
+pub fn power_row(
+    fft: &mut dyn FftBackend,
+    window: &[f32],
+    raw: &[Complex32],
+    buf: &mut [Complex32],
+    power: &mut [f32],
+) {
+    let n = window.len();
+    assert_eq!(raw.len(), n, "segment length != fft_len");
+    for ((o, &x), &w) in buf.iter_mut().zip(raw).zip(window) {
+        *o = x.scale(w);
+    }
+    fft.forward(buf);
+    fftshift_power(buf, power);
+}
+
+/// DC-centred `|X|²` of an FFT-order spectrum: bin `i` ↔ FFT index `(i + ceil(N/2)) mod N`, so
+/// bin `N/2` is DC.
+#[inline]
+pub fn fftshift_power(spectrum: &[Complex32], power: &mut [f32]) {
+    let n = spectrum.len();
+    let split = n - n / 2;
+    let (neg_out, pos_out) = power.split_at_mut(n / 2);
+    for (p, x) in neg_out.iter_mut().zip(&spectrum[split..]) {
+        *p = x.norm_sqr();
+    }
+    for (p, x) in pos_out.iter_mut().zip(&spectrum[..split]) {
+        *p = x.norm_sqr();
+    }
+}
+
+/// Linear per-bin accumulators over segments (`ΣP`, `ΣP²`, max- and min-hold) and the finish
+/// into a [`Spectrum`]. Nothing allocates after construction.
+pub struct Accumulators {
     config: WelchConfig,
     window: Window,
-    fft: Box<dyn FftBackend>,
-    buf: Vec<Complex32>,
-    /// DC-centred `|X|²` of the last segment.
-    power: Vec<f32>,
     sum: Vec<f64>,
     sum_sq: Vec<f64>,
     max: Hold,
@@ -141,33 +178,15 @@ pub struct SegmentEngine {
     count: u32,
 }
 
-impl SegmentEngine {
-    /// A CPU engine.
+impl Accumulators {
+    /// Accumulators for `config` (validated).
     pub fn new(config: WelchConfig) -> Result<Self, ConfigError> {
         config.validate()?;
-        Self::with_backend(config, Box::new(CpuFft::new(config.fft_len)))
-    }
-
-    /// An engine over a given FFT backend (length must equal `fft_len`).
-    pub fn with_backend(
-        config: WelchConfig,
-        fft: Box<dyn FftBackend>,
-    ) -> Result<Self, ConfigError> {
-        config.validate()?;
         let n = config.fft_len;
-        if fft.len() != n {
-            return Err(ConfigError::BackendLength {
-                backend: fft.len(),
-                fft_len: n,
-            });
-        }
         let holds = if config.holds { n } else { 0 };
         Ok(Self {
             config,
             window: Window::new(config.window, n),
-            fft,
-            buf: vec![Complex32::default(); n],
-            power: vec![0.0; n],
             sum: vec![0.0; n],
             sum_sq: if config.spectral_kurtosis {
                 vec![0.0; n]
@@ -190,20 +209,9 @@ impl SegmentEngine {
         &self.window
     }
 
-    /// FFT backend name.
-    pub fn backend_name(&self) -> &'static str {
-        self.fft.name()
-    }
-
     /// Segments accumulated since the last reset.
     pub fn count(&self) -> u32 {
         self.count
-    }
-
-    /// DC-centred raw `|X|²` of the most recent segment (multiply by `1/(Σw)²` for power per
-    /// RBW, by `1/(fs·Σw²)` for density).
-    pub fn last_power(&self) -> &[f32] {
-        &self.power
     }
 
     /// dB offset turning `10·log10(|X|²)` into dBFS per RBW: `−20·log10(Σw)`.
@@ -220,38 +228,22 @@ impl SegmentEngine {
         self.count = 0;
     }
 
-    /// Processes one raw segment (`raw.len() == fft_len`, unwindowed, full scale 1).
+    /// Folds in one DC-centred `|X|²` row (`power.len() == fft_len`).
     #[inline]
-    pub fn process(&mut self, raw: &[Complex32]) {
-        let n = self.config.fft_len;
-        assert_eq!(raw.len(), n, "segment length != fft_len");
-        for ((o, &x), &w) in self.buf.iter_mut().zip(raw).zip(self.window.coefficients()) {
-            *o = x.scale(w);
-        }
-        self.fft.forward(&mut self.buf);
-
-        // fftshift: bin i ↔ FFT index (i + ceil(N/2)) mod N, so bin N/2 is DC.
-        let split = n - n / 2;
-        let (neg_out, pos_out) = self.power.split_at_mut(n / 2);
-        for (p, x) in neg_out.iter_mut().zip(&self.buf[split..]) {
-            *p = x.norm_sqr();
-        }
-        for (p, x) in pos_out.iter_mut().zip(&self.buf[..split]) {
-            *p = x.norm_sqr();
-        }
-
-        for (s, &p) in self.sum.iter_mut().zip(&self.power) {
+    pub fn add(&mut self, power: &[f32]) {
+        assert_eq!(power.len(), self.config.fft_len, "power row length");
+        for (s, &p) in self.sum.iter_mut().zip(power) {
             *s += f64::from(p);
         }
         if self.config.spectral_kurtosis {
-            for (s, &p) in self.sum_sq.iter_mut().zip(&self.power) {
+            for (s, &p) in self.sum_sq.iter_mut().zip(power) {
                 let p = f64::from(p);
                 *s += p * p;
             }
         }
         if self.config.holds {
-            self.max.update(&self.power);
-            self.min.update(&self.power);
+            self.max.update(power);
+            self.min.update(power);
         }
         self.count += 1;
     }
@@ -272,7 +264,7 @@ impl SegmentEngine {
         }
     }
 
-    /// An empty [`Spectrum`] sized for this engine.
+    /// An empty [`Spectrum`] sized for these accumulators.
     pub fn empty_spectrum(&self) -> Spectrum {
         Spectrum::empty(
             self.resolution(1.0),
@@ -281,7 +273,7 @@ impl SegmentEngine {
         )
     }
 
-    /// Writes the accumulated result into `out` (sized by [`SegmentEngine::empty_spectrum`]).
+    /// Writes the accumulated result into `out` (sized by [`Accumulators::empty_spectrum`]).
     /// Allocation-free. Requires `count() >= 1`.
     pub fn finish_into(&self, sample_rate_hz: f64, f_center_hz: f64, out: &mut Spectrum) {
         assert!(self.count > 0, "no segments accumulated");
@@ -306,6 +298,109 @@ impl SegmentEngine {
                 *o = sk::estimate(self.count, s1, s2);
             }
         }
+    }
+}
+
+/// The per-segment kernel. See the [module docs](self).
+pub struct SegmentEngine {
+    acc: Accumulators,
+    fft: Box<dyn FftBackend>,
+    buf: Vec<Complex32>,
+    /// DC-centred `|X|²` of the last segment.
+    power: Vec<f32>,
+}
+
+impl SegmentEngine {
+    /// A CPU engine.
+    pub fn new(config: WelchConfig) -> Result<Self, ConfigError> {
+        config.validate()?;
+        Self::with_backend(config, Box::new(CpuFft::new(config.fft_len)))
+    }
+
+    /// An engine over a given FFT backend (length must equal `fft_len`).
+    pub fn with_backend(
+        config: WelchConfig,
+        fft: Box<dyn FftBackend>,
+    ) -> Result<Self, ConfigError> {
+        config.validate()?;
+        let n = config.fft_len;
+        if fft.len() != n {
+            return Err(ConfigError::BackendLength {
+                backend: fft.len(),
+                fft_len: n,
+            });
+        }
+        Ok(Self {
+            acc: Accumulators::new(config)?,
+            fft,
+            buf: vec![Complex32::default(); n],
+            power: vec![0.0; n],
+        })
+    }
+
+    /// Settings.
+    pub fn config(&self) -> &WelchConfig {
+        self.acc.config()
+    }
+
+    /// The window.
+    pub fn window(&self) -> &Window {
+        self.acc.window()
+    }
+
+    /// FFT backend name.
+    pub fn backend_name(&self) -> &'static str {
+        self.fft.name()
+    }
+
+    /// Segments accumulated since the last reset.
+    pub fn count(&self) -> u32 {
+        self.acc.count()
+    }
+
+    /// DC-centred raw `|X|²` of the most recent segment (multiply by `1/(Σw)²` for power per
+    /// RBW, by `1/(fs·Σw²)` for density).
+    pub fn last_power(&self) -> &[f32] {
+        &self.power
+    }
+
+    /// dB offset turning `10·log10(|X|²)` into dBFS per RBW: `−20·log10(Σw)`.
+    pub fn per_rbw_offset_db(&self) -> f32 {
+        self.acc.per_rbw_offset_db()
+    }
+
+    /// Clears the accumulators.
+    pub fn reset(&mut self) {
+        self.acc.reset();
+    }
+
+    /// Processes one raw segment (`raw.len() == fft_len`, unwindowed, full scale 1).
+    #[inline]
+    pub fn process(&mut self, raw: &[Complex32]) {
+        power_row(
+            self.fft.as_mut(),
+            self.acc.window.coefficients(),
+            raw,
+            &mut self.buf,
+            &mut self.power,
+        );
+        self.acc.add(&self.power);
+    }
+
+    /// The resolution descriptor at `sample_rate_hz` for the current count.
+    pub fn resolution(&self, sample_rate_hz: f64) -> Resolution {
+        self.acc.resolution(sample_rate_hz)
+    }
+
+    /// An empty [`Spectrum`] sized for this engine.
+    pub fn empty_spectrum(&self) -> Spectrum {
+        self.acc.empty_spectrum()
+    }
+
+    /// Writes the accumulated result into `out` (sized by [`SegmentEngine::empty_spectrum`]).
+    /// Allocation-free. Requires `count() >= 1`.
+    pub fn finish_into(&self, sample_rate_hz: f64, f_center_hz: f64, out: &mut Spectrum) {
+        self.acc.finish_into(sample_rate_hz, f_center_hz, out);
     }
 }
 
