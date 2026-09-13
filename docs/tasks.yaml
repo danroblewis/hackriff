@@ -245,7 +245,7 @@ tasks:
     dod: contract impl + a sample consumer; backpressure + gating tested
   - id: T-017
     title: spectrum-history pyramid + region/time query
-    status: todo
+    status: in-progress
     followups_from_T-002_review: "TileKey carries pyramid scheme/version id; region index time-bounding (shared with T-006)"
     deps: [T-004, T-002]
     parallel_group: E
