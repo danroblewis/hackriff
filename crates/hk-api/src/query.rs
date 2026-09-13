@@ -14,7 +14,8 @@
 
 use hk_model::{
     AnnotationAuthor, AnnotationTarget, FreqRange, IdentityAccess, IdentityScheme,
-    InventoryIdentity, InventoryQuery, KnownStatus, Repository, StatusAuthor, TimeRange, Timestamp,
+    InventoryIdentity, InventoryQuery, KnownStatus, RepoError, Repository, StatusAuthor, TimeRange,
+    Timestamp,
 };
 use hk_store::history::Geometry;
 use hk_store::{
@@ -379,6 +380,26 @@ pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
     })
 }
 
+/// `author_ref` of the Classifier annotations holding ranked explanations: must equal
+/// `hk_pipeline::family::FAMILY_MAP_VERSION` (hk-api does not depend on hk-pipeline; the e2e
+/// acceptance suite checks the two agree). Only these are served.
+pub const EXPLANATIONS_AUTHOR_REF: &str = "hk-pipeline/family-map@1";
+
+/// The latest ranked explanations stored on emitter `id`, or `[]`. Served only from Classifier
+/// annotations by the family map ([`EXPLANATIONS_AUTHOR_REF`]) with no content.
+fn explanations_json(repo: &Repository, id: hk_model::EmitterId) -> Result<Value, RepoError> {
+    Ok(repo
+        .annotations_for(&AnnotationTarget::Emitter(id))?
+        .into_iter()
+        .rfind(|a| {
+            a.author == AnnotationAuthor::Classifier
+                && a.author_ref == EXPLANATIONS_AUTHOR_REF
+                && a.content.is_none()
+                && a.metadata.get("explanations").is_some()
+        })
+        .map_or_else(|| json!([]), |a| a.metadata["explanations"].clone()))
+}
+
 /// Authors whose status reasons are computed without an identity value (priors see family and
 /// frequency; the clusterer's reasons are fixed strings; classifiers see features). Reasons by
 /// any other author (decoder, user, system) are withheld on rows whose identity is withheld.
@@ -437,16 +458,7 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
             });
         // T-039 ranked explanations: metadata only (service labels, scores, band-plan and raster
         // evidence, flags; no identity or content), so withheld rows show them too.
-        let explanations = repo
-            .annotations_for(&AnnotationTarget::Emitter(e.id))
-            .map_err(failed)?
-            .into_iter()
-            .rfind(|a| {
-                a.author == AnnotationAuthor::Classifier
-                    && a.content.is_none()
-                    && a.metadata.get("explanations").is_some()
-            })
-            .map_or_else(|| json!([]), |a| a.metadata["explanations"].clone());
+        let explanations = explanations_json(repo, e.id).map_err(failed)?;
         let freq = e.freq();
         let mut row = json!({
             "explanations": explanations,
