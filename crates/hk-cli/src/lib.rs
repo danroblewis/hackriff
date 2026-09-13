@@ -2,7 +2,10 @@
 //! `hk`, the control CLI. `hk replay <path.sigmf-meta>` runs a SigMF fixture through the
 //! pipeline. Until the replay source (T-003) and harness (T-023) land, it parses the metadata
 //! and prints a summary. `hk stream-tail` is the sample stream-output consumer (T-016): it
-//! prints a stream's header and records.
+//! prints a stream's header and records. `hk serve` ([`serve`]) replays a recording into the web
+//! UI through the hk-api bridge (T-022a demo composer).
+
+pub mod serve;
 
 use std::fmt::Write as _;
 use std::fs::File;

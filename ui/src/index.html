@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hackriff</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <strong>hackriff</strong>
+  <span id="conn" class="badge">connecting…</span>
+  <span id="class" class="badge" hidden></span>
+  <span id="gated" class="badge warn" hidden title="Content-forbidding class: the contract caps this spectrum at its declared row rate and withholds faster rows">GATED</span>
+  <span id="stats" class="stats"></span>
+</header>
+
+<form id="auth" class="panel" hidden>
+  <label>API token <input id="token-input" type="password" autocomplete="off" required></label>
+  <button>Connect</button>
+  <span class="hint">Printed by <code>hk serve</code>.</span>
+</form>
+
+<main>
+  <section id="live" class="panel">
+    <div id="axis" class="axis"></div>
+    <div class="wf-wrap">
+      <canvas id="wf"></canvas>
+      <div id="readout" class="readout"></div>
+    </div>
+    <p class="hint">Top: spectrum + persistence. Bottom: waterfall, newest at top. Left edge marks:
+      <span class="mk drop">dropped</span> <span class="mk gated">gated</span></p>
+  </section>
+
+  <section id="history" class="panel">
+    <h2>Region over time</h2>
+    <form id="hist-form">
+      <label>f lo (MHz) <input id="f-lo" type="number" step="any" required></label>
+      <label>f hi (MHz) <input id="f-hi" type="number" step="any" required></label>
+      <label>from (UTC) <input id="t0" type="datetime-local" step="1" required></label>
+      <label>to (UTC) <input id="t1" type="datetime-local" step="1" required></label>
+      <label>show
+        <select id="stat">
+          <option value="max_db">max</option>
+          <option value="mean_db">mean</option>
+          <option value="p_low_db">low percentile</option>
+          <option value="occupancy">occupancy</option>
+        </select>
+      </label>
+      <button type="button" id="use-live">Live span</button>
+      <button>Load</button>
+    </form>
+    <p id="hist-info" class="hint"></p>
+    <canvas id="heat"></canvas>
+    <canvas id="floor"></canvas>
+  </section>
+</main>
+<script src="main.js"></script>
+</body>
+</html>
