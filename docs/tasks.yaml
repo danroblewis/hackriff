@@ -699,7 +699,7 @@ tasks:
     title: Listen - click a signal -> auto analog demod (T-012) -> audio streamed to the browser (Web Audio), legal gating kept
     milestone: M0b
     status: done
-    commit: "58762a5 (merge held until T-063 greens main; legal review running)"
+    commit: "58762a5 (merge held until T-063 greens main; legal review MERGE-OK)"
     result: "GET /ws/open/listen?emitter=|detection=|f_lo=&f_hi= (+token/Bearer, relative ws/wss); hk-stream ondemand.rs StreamOpener/OpenerRegistry (transport-agnostic, token stripped) reusable for T-060; hk-api thin bridge with drop-not-block; refusal -> refused JSON + close 4000+status. Stream contract 1.1: mono s16 48 kHz 20 ms PCM records with seq + drop markers, header audio profile, status record type 3 (flat numbers/short tokens only). hk-demod audio.rs NBFM/AM/SSB/CW + squelch/AGC. Gating: restricted bands refused regardless of source class; restricted sources refused; unclassified (metadata-only, no user rule) refused; class from the chain's segment, re-plumb ends the chain. Blind FM: WFM auto, pilot 86 dB below audio band, processing latency peak 54 ms, 0 gaps/drops, 3rd listener 503; paging sentinel refused 403 (0 probes/attaches/frames). Tests: listen.rs, listen_retune.rs, UI framing/jitter 23; acceptance 18/18."
     followups:
       - "T-012 selector: pure carrier read as AM, 60 % AM tone read as unknown (detection quality)"
@@ -1065,6 +1065,21 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-066
+    milestone: M0b
+    title: Listen hardening (T-043 review nits)
+    status: todo
+    deps: [T-043]
+    parallel_group: P
+    use_cases: [SIGNAL-062]
+    found_by: T-043 legal review (MERGE-OK) 2026-09-13
+    acceptance: "listen gate covers the DDC passband (channel centre +/- output rate/2, WFM +/-120 kHz) not only nominal width - test: CW at 928.99 MHz next to paging 929.0125 MHz in a replay tagged unrestricted is refused; listen_retune adds a window partly over paging with the selection outside it (catches wrong segment class, not just the frequency check); watch_peer read timeout / TCP keepalive so half-open clients release listen slots; 503 replumbing instead of 410 source-ended during re-plumb start; refusal reasons omit free-text rule 'by' strings"
+    area: crates/hk-pipeline/src/chains/listen.rs, crates/hk-api/src/ondemand.rs, tests
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "after T-043 merges (held behind T-063)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

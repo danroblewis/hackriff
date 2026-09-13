@@ -396,3 +396,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Launched T-065:** analog mode selector quality (detection-quality steer); a blind synthetic confusion-matrix sweep.
   - **Still held behind T-063:** merges of T-049 (mock SDR), T-043 (Listen, review running) and T-058 (detect throughput).
   - Verification running; only the known `retune_legal` failure is expected.
+- **B0.132 T-043 legal review: MERGE-OK.**
+  - **Clean:** no gate bypass; partial overlap with a restricted band is always refused; the live window class comes from tuning; no auth hole (token checked before open, stripped, never logged); no segment-change leak. Listen doesn't share the T-063 failure mode: the header class is fixed at open, the chain ends when its segment ring closes, and it is never offered via /api/streams.
+  - **Nits → T-066** (held behind the T-043 merge):
+    - gate the DDC passband, not just nominal width (reachable only via a replay tagged unrestricted whose window covers paging);
+    - a stronger retune test;
+    - half-open client slot hold;
+    - 503 instead of 410 during re-plumb;
+    - free text in refusal reasons.
