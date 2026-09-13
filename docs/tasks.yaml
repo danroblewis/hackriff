@@ -1192,6 +1192,20 @@ tasks:
     effort: medium
     core_interface: true
     hold: "waiting for an agent slot"
+  - id: T-073
+    milestone: M0b
+    title: "Regression: intermittent Listen refusal no-analog-mode after mode selector 0.2.0 (listen_retune 1/3 flaky)"
+    status: in-progress
+    deps: [T-065]
+    parallel_group: T
+    use_cases: [SIGNAL-062]
+    found_by: coordinator verification of the T-065 merge, 2026-09-13
+    acceptance: "root cause found (probe snippet/box vs selector confidence; OBW99 85 Hz suggests carrier/pilot-only measurement); Listen never refuses a demod-able broadcast FM signal (best-evidence fallback reported as low-confidence if needed); listen_retune passes 20/20; regression test for short/unlucky probe; T-065 blind sweep kept (>=10 dB 111/114 or better, carrier not AM, FM fixtures WFM)"
+    area: crates/hk-demod (mode selection), crates/hk-pipeline/src/chains/listen.rs (probe call site), tests
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
