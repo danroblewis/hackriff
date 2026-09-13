@@ -235,3 +235,24 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Test philosophy:** each fixture carries a ground-truth list of interesting emissions that the system must not be given. Tests run blind detection, assert every truth emission is detected, and assert a reasonable explanation among the top-k recommendations. No lookup-a-frequency-and-tune tests.
   - **T-039 scope:** ranked top-k explanations with an off-raster flag, plus the first blind cases: the fm_100p8M station → FM broadcast, and a +150 kHz shifted synthetic → detected and off-raster. Sent to the running agent.
   - **New T-047:** general blind ground-truth harness plus an audit and rewrite of existing acceptance tests; held behind T-039 and T-037b.
+- **B0.109 User feedback 2 → new milestone M0b "Live device + exploration UI".** It sits after M0 and before decoder breadth; docs/10 and docs/11 are being updated by an agent.
+  - **Principles (user):**
+    - **Device interface:** E2E/acceptance tests drive the system through the SDR device interface via a mock SDR that replays SigMF realistically: retune inside the recording serves that band, outside it gives noise plus a flag, gain scales and clips at 8-bit, and it reports timestamps and overruns. No direct file feeding; the same tests later run against the real HackRF (HIL).
+    - **Generic interface:** SoapySDR-ready, with HackRF specifics kept out of the core.
+    - **UI is a major gap:** hover/click, multi-region selections as first-class objects, a full SDR control panel through an authenticated control API with legal/TX gating (M0 was GET-only).
+  - **M0b tasks:**
+    - T-042 live HackRF serving (in T-037a)
+    - T-043 Listen
+    - T-044 hover/click/multi-select (running)
+    - T-045 axis bug (running)
+    - T-047 blind truth harness, now through the mock device
+    - T-048 generic device interface
+    - T-049 mock SDR device
+    - T-050 authenticated control API
+    - T-051 SDR control panel
+    - T-052 persisted multi-region selections plus actions
+    - T-053 HIL acceptance run
+  - **Running agents redirected:**
+    - T-037a keeps the device interface generic (named gain stages, optional bias-tee/sweep) and adds no unauthenticated POSTs.
+    - T-044 drops control endpoints and panel (→ T-050/T-051) and designs selection as multi-region client objects.
+  - **M0 closes** when T-037a/b and T-039 merge; T-026 moves out with the Jetson. M0b launches in dependency order: T-048 → T-049 → T-047/T-053; T-050 → T-051/T-052; T-043.

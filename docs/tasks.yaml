@@ -5,6 +5,7 @@
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
 version: 1
 milestone: M0 (first vertical slice)
+# M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
 spikes:
   run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
   need_jetson: [S2, S6]
@@ -661,6 +662,7 @@ tasks:
     note: "model per model-selection would be fable (novel compute); run on opus high (no Fable this session). No collision: T-037a/b, T-039, T-040 don't touch hk-dsp. CUDA stays the later Jetson provider (T-026 blocked)."
   - id: T-042
     title: Real live HackRF in the UI (hk serve/hackriffd --hackrf default, full pipeline to inventory, no demo seed)
+    milestone: M0b
     status: in-progress
     deps: [T-037]
     parallel_group: J
@@ -674,6 +676,7 @@ tasks:
     note: "folded into the running T-037a agent (owns hk-cli + HackRF source); exposes hk_api::LiveControl for T-044 controls"
   - id: T-043
     title: Listen - click a signal -> auto analog demod (T-012) -> audio streamed to the browser (Web Audio), legal gating kept
+    milestone: M0b
     status: todo
     deps: [T-037, T-039, T-044]
     parallel_group: M
@@ -687,7 +690,8 @@ tasks:
     core_interface: true
     hold: "starts after T-037b (owns chains/), T-039 and T-044 (UI) merge"
   - id: T-044
-    title: UI interaction (hover readout through tunnel, drag-to-select region, click-to-inspect, center/span/gain controls)
+    title: UI interaction (hover readout through tunnel, click-to-inspect, drag-select as multi-region client-side selections)
+    milestone: M0b
     status: in-progress
     deps: [T-016]
     parallel_group: N
@@ -698,9 +702,10 @@ tasks:
     needs: none
     model: opus
     effort: medium
-    note: "same agent as T-045; builds on T-042's LiveControl trait"
+    note: "same agent as T-045. Scope narrowed 2026-09-13 (user feedback 2): control endpoints -> T-050, control panel -> T-051, server-side selections + actions -> T-052"
   - id: T-045
     title: Frequency axis offset bug (fm_100p8M replay shows center 100.4324 MHz, 101.3 MHz station at ~101.0 MHz)
+    milestone: M0b
     status: in-progress
     deps: []
     parallel_group: N
@@ -727,17 +732,101 @@ tasks:
     note: "folded into the running T-041 agent (owns hk-dsp)"
   - id: T-047
     title: Blind ground-truth acceptance harness (fixture truth lists hidden from the system, top-k explanation asserts) + audit existing tests
+    milestone: M0b
     status: todo
-    deps: [T-039, T-037]
+    deps: [T-039, T-037, T-049]
     parallel_group: J
     use_cases: [SIGNAL-062, AWARE-053, AWARE-036, SIGNAL-001, AWARE-042]
     requested_by: user feedback, 2026-09-13
-    acceptance: "every fixture (real + synthetic) carries a ground-truth list of known-interesting emissions (frequency/extent/time/label) kept out of what the pipeline reads (annotations stripped before replay; harness asserts the truth file is never opened by the system); tests run blind detection, assert each truth emission detected (frequency/extent/time tolerance) and a reasonable explanation among the top-k recommendations; no test looks up a frequency in the DB and tunes/asserts there; FM fm_100p8M station -> 'FM broadcast' top-k; +150 kHz shifted synthetic variant -> detected, FM broadcast top-k, flagged off-raster; existing acceptance tests audited and rewritten where they use lookup-and-tune"
+    acceptance: "all e2e/acceptance tests drive the system through the SDR device interface (mock SDR, T-049) - no direct file feeding - and are HIL-ready; every fixture (real + synthetic) carries a ground-truth list of known-interesting emissions (frequency/extent/time/label) kept out of what the pipeline reads (annotations stripped before replay; harness asserts the truth file is never opened by the system); tests run blind detection, assert each truth emission detected (frequency/extent/time tolerance) and a reasonable explanation among the top-k recommendations; no test looks up a frequency in the DB and tunes/asserts there; FM fm_100p8M station -> 'FM broadcast' top-k; +150 kHz shifted synthetic variant -> detected, FM broadcast top-k, flagged off-raster; existing acceptance tests audited and rewritten where they use lookup-and-tune"
     area: tests/e2e (harness + acceptance), fixtures truth files, py/fixtures (truth export)
     needs: none
     model: opus
     effort: medium
-    hold: "starts after T-039 (ranked top-k explanations + off-raster flag + first FM blind cases, in progress) and T-037b (owns signal_001/062 acceptance files) merge"
+    hold: "starts after T-049 (mock SDR), T-039 (ranked top-k explanations + off-raster flag + first FM blind cases, in progress) and T-037b (owns signal_001/062 acceptance files) merge"
+  - id: T-048
+    milestone: M0b
+    title: Generic SDR device interface (named gain stages, optional bias-tee/sweep, timestamps, overruns; SoapySDR-ready, no HackRF specifics in core)
+    status: todo
+    deps: [T-037]
+    parallel_group: O
+    use_cases: [SIGNAL-062, SPACE-050]
+    requested_by: user feedback 2, 2026-09-13
+    acceptance: "device/control traits in hk-core express open, capabilities, tune, sample rate, baseband filter, named gain stages, optional bias-tee, optional sweep mode, start/stop RX, sample timestamps, overrun/drop reporting; HackRF source implements them with specifics confined to its module; contract documented with a trait-level conformance test any device (HackRF, mock, future SoapySDR) must pass"
+    area: crates/hk-core/src/source, docs/08 (architecture note)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    hold: "after T-037a merges (it builds the HackRF source on this interface and was told to keep it generic)"
+  - id: T-049
+    milestone: M0b
+    title: Mock SDR device replaying SigMF behind the device interface (realistic retune/gain/rate/overrun behaviour)
+    status: todo
+    deps: [T-048]
+    parallel_group: O
+    use_cases: [SIGNAL-062, AWARE-036, SIGNAL-001, SPACE-050, AWARE-042, AWARE-006, AWARE-053]
+    requested_by: user feedback 2, 2026-09-13
+    acceptance: "mock device passes the T-048 device conformance test; replays SigMF IQ (real + synthetic) with sample timestamps; retune inside the recording serves that band (shift + filter/decimate), outside it serves calibrated noise plus an out-of-coverage flag; rate changes resample; gain changes scale samples and clip at 8-bit with overload flags; bias-tee/sweep modelled; pacing real-time or accelerated; injectable overruns; selectable in hk serve/hackriffd/tests like any device"
+    area: crates/hk-core/src/source (mock device), tests/e2e
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-050
+    milestone: M0b
+    title: Authenticated control API with legal/TX gating (live radio + display controls)
+    status: todo
+    deps: [T-037, T-048]
+    parallel_group: P
+    use_cases: [AWARE-042]
+    requested_by: user feedback 2, 2026-09-13
+    acceptance: "authenticated (local token/session) control endpoints for center, span/rate, named gains, bias-tee, FFT size, averaging, waterfall speed, pause/resume, record start/stop, markers/bookmarks; validated against device capabilities; TX unreachable (no TX endpoints; C37 gated); restricted-band retune keeps content gating; audit log; unauthenticated requests refused; GET APIs unchanged; tests incl. auth bypass and TX refusal"
+    area: crates/hk-api, crates/hk-api/src/live_control.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-051
+    milestone: M0b
+    title: SDR control panel UI around waterfall/spectrum (SDR++/SDRangel/SigDigger standard control set, exploration-first)
+    status: todo
+    deps: [T-050, T-044]
+    parallel_group: N
+    use_cases: [AWARE-042, SIGNAL-062]
+    requested_by: user feedback 2, 2026-09-13
+    acceptance: "center frequency entry + step and shift left/right; drag-to-pan and scroll-to-zoom on the frequency axis; span/sample rate; named gain sliders (LNA/VGA/amp on HackRF); bias-tee; FFT size; averaging; waterfall speed; colour scale min/max auto+manual; peak hold; markers/bookmarks; pause/resume; record; all driving the live radio (or mock device) through T-050; short survey note of SDR++/SDRangel/SigDigger control sets; UI tests; works through the tunnel and at phone width"
+    area: ui/
+    needs: none
+    model: opus
+    effort: medium
+  - id: T-052
+    milestone: M0b
+    title: Multi-region selections as first-class objects (persisted; list/rename/delete; send to demod/record/inspect)
+    status: todo
+    deps: [T-044, T-050]
+    parallel_group: N
+    use_cases: [AWARE-042, SIGNAL-062]
+    requested_by: user feedback 2, 2026-09-13
+    acceptance: "Selection data-model object (docs/07 addition; schema edited in place) with gated API; several concurrent selections; list/rename/delete; actions send a selection to demod (T-043), record, or inspect (region history + top-k explanations); legal gating on every action; UI + API tests"
+    area: crates/hk-model, crates/hk-api, ui/, docs/07
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-053
+    milestone: M0b
+    title: HIL - run the device-interface acceptance suite against the real HackRF (receive-only, manual/nightly)
+    status: todo
+    deps: [T-047, T-049, T-037]
+    parallel_group: O
+    use_cases: [SIGNAL-062, SPACE-050, AWARE-042]
+    requested_by: user feedback 2, 2026-09-13
+    acceptance: "same acceptance tests run with the device set to hackrf (HK_DEVICE=hackrf) against live air (FM broadcast band as the always-available case), blind truth derived from a survey rather than fixture metadata; results logged (T5 tier, never gates CI); one HackRF user at a time"
+    area: tests/e2e
+    needs: [hardware]
+    model: opus
+    effort: medium
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
