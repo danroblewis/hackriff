@@ -328,3 +328,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-059: FOREIGN KEY failure in the analog chain writer at 8–10 Msps, sent to the T-037b agent.
   - **HackRF:** free; the demo was stopped for T-055 and the supervisor restarted it on replay.
 - **B0.119 T-054 + T-044/T-045 merge verified:** lint, Rust workspace, Python, UI tests and acceptance all green.
+- **B0.120 T-037b merged; M0 COMPLETE locally.**
+  - **T-037b** (b648511 → 667b84b): writer thread with backpressure; trust verdicts persisted; readsb backpressure; short-replay attach with the ring workaround removed; pilot_hz stored; FloorIngestQueue; correlator I/O moved outside the repo lock; plugin decodes feed explanations; T-059 FK fix. The merge conflicted in `tests/e2e/tests/acceptance/blind.rs`; the coordinator resolved it by deep-merging T-037b's `extra` config over T-054's `plan_extra`.
+  - **M0 status:** every M0 task is done except T-026 (GPU PFB, blocked on the Jetson; it moves out with S2). The acceptance suite is green locally. **CI has never run: nothing has been pushed**, so "green in CI" from the M0 definition of done is unverified until the user pushes. CLAUDE.md status now reads M0 complete locally, M0b in progress.
+  - **Launched T-043 Listen.** Held: T-056 (after T-050 and T-058), T-047 (after T-049), T-051/T-052 (after T-050), T-053 (after T-047).
+  - Verification of the merge passed: lint, Rust workspace, Python, UI and acceptance all green.
+- **B0.121 User feedback 3 (start of message truncated: item 1 and the start of item 2 were lost; asked the user to resend).**
+  - **Visible parts:**
+    - (2) External programs connect to demodulated bitstreams, with a netcat/Python example, keeping the stream contract, gating and drop-not-block backpressure.
+    - (3) Record outputs (bits, symbols, WAV, IQ slices) from UI and CLI with SigMF-style sidecars, linked to Bitstream/Recording rows, start/stop per selection, T-052 buttons wired.
+    - Tests go through the mock SDR: FSK bits over TCP checked against truth, FM audio over WebSocket.
+  - **Added:** T-060 (streams to external programs; held behind T-043 and T-049) and T-061 (record outputs; held behind T-060, T-052, T-049).
+  - **Running agents:** T-043 was told to build its audio WebSocket as a reusable hk-stream transport with drop-not-block backpressure.
