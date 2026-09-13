@@ -54,7 +54,9 @@ pub mod repo;
 pub mod sigmf;
 pub mod time;
 
-pub use calibration::{CalibrationMethod, CalibrationState, PowerCalPoint, SpurMask, SpurRule};
+pub use calibration::{
+    CalibrationMethod, CalibrationState, GainSetting, PowerCalPoint, SpurMask, SpurRule,
+};
 pub use content::ContentClass;
 pub use context::{
     Anomaly, AnomalyKind, AnomalyStatus, AnomalyStatusChange, AnomalySubject, Cause,

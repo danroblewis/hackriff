@@ -8,7 +8,9 @@
 //!   a plugin.
 //! - **Message plane:** a reader thread splits stdout into lines (bounded length), parses them
 //!   ([`crate::output`]) under the **ceiling** `clamp(manifest class, input channel class)`,
-//!   applies the metadata allowlist, and stores them through [`Ingest`].
+//!   applies the metadata allowlist, and stores them through [`Ingest`]. Under a restricted class
+//!   a line whose `sample_index` lies outside the input offered to this instance is dropped and
+//!   counted (`sample_index_out_of_range`).
 //! - **Log ring:** host events, plus plugin `log` lines and stderr **only when the ceiling
 //!   permits content**. Under a content-forbidding ceiling those are counted, never stored. The
 //!   ring is tagged with the ceiling ([`LogTail::content_class`]).
@@ -45,7 +47,7 @@ use hk_stream::{
 
 use crate::ingest::Ingest;
 use crate::manifest::{ManifestError, PluginManifest};
-use crate::output::{PluginOutput, parse_line};
+use crate::output::{PluginOutput, SAMPLE_INDEX_OUT_OF_RANGE, parse_line};
 
 /// How long the host waits for a plugin's output readers after killing its process group.
 const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -170,6 +172,8 @@ pub struct PluginStats {
     pub content_gated: u64,
     /// Metadata keys, frame models, labels and identities removed by the allowlist.
     pub metadata_sanitized: u64,
+    /// Restricted lines dropped because their `sample_index` was outside the input offered.
+    pub sample_index_out_of_range: u64,
     /// Plugin `log` lines not stored because the ceiling forbids content.
     pub log_lines_withheld: u64,
     /// stderr lines not stored because the ceiling forbids content.
@@ -213,6 +217,7 @@ struct Counters {
     class_unknown: AtomicU64,
     content_gated: AtomicU64,
     metadata_sanitized: AtomicU64,
+    sample_index_out_of_range: AtomicU64,
     log_lines_withheld: AtomicU64,
     stderr_lines_withheld: AtomicU64,
     readers_abandoned: AtomicU64,
@@ -252,6 +257,11 @@ struct Shared {
     /// ([`crate::ingest::Ingest::store_decode`]).
     center_hz: Option<f64>,
     bandwidth_hz: Option<f64>,
+    /// Bytes per input element (for the sample-index range).
+    element_bytes: usize,
+    /// Inclusive sample-index range of the input offered (`lo > hi`: none yet).
+    input_lo: AtomicU64,
+    input_hi: AtomicU64,
     anchor: Mutex<SampleTime>,
     proc: Mutex<Proc>,
     wake: Condvar,
@@ -321,6 +331,7 @@ impl Shared {
             class_unknown: get(&c.class_unknown),
             content_gated: get(&c.content_gated),
             metadata_sanitized: get(&c.metadata_sanitized),
+            sample_index_out_of_range: get(&c.sample_index_out_of_range),
             log_lines_withheld: get(&c.log_lines_withheld),
             stderr_lines_withheld: get(&c.stderr_lines_withheld),
             readers_abandoned: get(&c.readers_abandoned),
@@ -416,6 +427,9 @@ impl PluginInstance {
             sample_rate_hz: input.sample_rate_hz,
             center_hz: input.center_hz,
             bandwidth_hz: input.bandwidth_hz,
+            element_bytes: input.datatype.bytes_per_sample(),
+            input_lo: AtomicU64::new(u64::MAX),
+            input_hi: AtomicU64::new(0),
             anchor: Mutex::new(input.anchor),
             manifest,
             ceiling,
@@ -431,6 +445,9 @@ impl PluginInstance {
             log: Mutex::new(VecDeque::new()),
             ingest,
         });
+        for warning in &shared.manifest.warnings {
+            shared.log(format!("host: manifest warning: {warning}"));
+        }
         let attacher = feed.attacher();
         let for_thread = Arc::clone(&shared);
         let supervisor = thread::Builder::new()
@@ -446,6 +463,16 @@ impl PluginInstance {
     /// Offers one input record. Never waits. Errors only for a record larger than the input
     /// stream's `max_frame_len` (not counted).
     pub fn push(&mut self, record: BinaryRecord<'_>) -> Result<PushOutcome, StreamError> {
+        // The restricted-class output bound covers every record offered. It is widened before the
+        // record can reach the plugin, so a prompt reply is never refused. Two atomics, no wait.
+        let elements = (record.payload.len() / self.shared.element_bytes.max(1)) as u64;
+        self.shared.input_hi.fetch_max(
+            record.sample_index.saturating_add(elements),
+            Ordering::Relaxed,
+        );
+        self.shared
+            .input_lo
+            .fetch_min(record.sample_index, Ordering::Relaxed);
         let outcome = self.feed.push(record)?;
         let c = &self.shared.counters;
         bump(&c.offered);
@@ -760,14 +787,24 @@ fn read_stdout(shared: &Arc<Shared>, stdout: impl Read, abandon: &AtomicBool) {
                 return;
             }
             let timing = Some((*lock(&shared.anchor), shared.sample_rate_hz));
+            let (lo, hi) = (
+                shared.input_lo.load(Ordering::Relaxed),
+                shared.input_hi.load(Ordering::Relaxed),
+            );
+            let input_range = (lo <= hi).then_some((lo, hi));
             let parsed = match parse_line(
                 &shared.manifest,
                 shared.ceiling,
                 &shared.context,
                 timing,
+                input_range,
                 line,
             ) {
                 Ok(p) => p,
+                Err(reason) if reason == SAMPLE_INDEX_OUT_OF_RANGE => {
+                    bump(&c.sample_index_out_of_range);
+                    return;
+                }
                 Err(reason) => {
                     // `reason` never contains values from the line (output.rs contract).
                     bump(&c.malformed);

@@ -16,11 +16,17 @@
 //! cannot upgrade itself. An unknown class string fails closed to `metadata-only`.
 //!
 //! **Metadata allowlist (legal guardrail).** When a line's effective class forbids content,
-//! everything outside `content` is reduced to what the manifest's
-//! [`MetadataPolicy`] allows: unlisted or mistyped metadata keys are dropped,
-//! `frame_model` and annotation labels not on the allowlist become `output.schema_id`, and an
-//! identity that does not match the allowlisted shape is dropped. No policy means an empty
-//! allowlist. `content` itself is refused by the repository and the stream gate.
+//! everything outside `content` is reduced to what the manifest's [`MetadataPolicy`] allows
+//! ([`hk_stream::policy::sanitize_decode`] / [`hk_stream::policy::sanitize_annotation`], shared
+//! with in-process producers and egress): unlisted or mistyped metadata keys are dropped,
+//! `frame_model` and annotation labels not on the allowlist become `output.schema_id`, an
+//! identity that does not match the allowlisted shape is dropped, and annotation `confidence` is
+//! rounded to 0.01. No policy means an empty allowlist. `content` itself is refused by the
+//! repository and the stream gate.
+//!
+//! **Sample-index bound (legal guardrail).** Under a content-forbidding class, a line's
+//! `sample_index` (which becomes the row's time) must lie within the input offered to the plugin;
+//! otherwise the line is refused with [`SAMPLE_INDEX_OUT_OF_RANGE`] and the host counts it.
 //!
 //! **Errors never echo values.** Error strings name the field, never the offending text, so they
 //! can go to the log ring whatever the class.
@@ -33,11 +39,18 @@ use hk_model::{
     Annotation, AnnotationAuthor, AnnotationId, AnnotationKind, AnnotationTarget, ContentClass,
     CrcStatus, Decode, DecodeId, DecodedIdentity, RecordingSpan, SampleTime, Timestamp,
 };
-use hk_stream::gate;
+use hk_stream::{gate, policy};
 use serde_json::{Map, Value};
 
 use crate::host::PluginContext;
 use crate::manifest::{MetadataPolicy, PluginManifest};
+
+pub use hk_stream::policy::sanitize_metadata;
+
+/// The error [`parse_line`] returns for a restricted line whose `sample_index` is outside the
+/// input offered to the plugin (the host counts these separately from malformed lines).
+pub const SAMPLE_INDEX_OUT_OF_RANGE: &str =
+    "`sample_index` outside the input offered to the plugin";
 
 /// One parsed stdout line.
 #[derive(Clone, Debug, PartialEq)]
@@ -79,33 +92,6 @@ pub fn resolve_class(ceiling: ContentClass, claimed: Option<&Value>) -> (Content
     }
 }
 
-/// Keeps only allowlisted, correctly typed metadata keys. Returns the kept object and how many
-/// keys (or a non-object value) were dropped.
-pub fn sanitize_metadata(policy: Option<&MetadataPolicy>, metadata: Value) -> (Value, u64) {
-    let Value::Object(map) = metadata else {
-        return (Value::Object(Map::new()), 1);
-    };
-    let mut kept = Map::new();
-    let mut dropped = 0;
-    for (key, value) in map {
-        match policy.and_then(|p| p.keys.get(&key)) {
-            Some(t) if t.accepts(&value) => {
-                kept.insert(key, value);
-            }
-            _ => dropped += 1,
-        }
-    }
-    (Value::Object(kept), dropped)
-}
-
-fn allowlisted_or(allowed: Option<&[String]>, value: String, fallback: &str) -> (String, u64) {
-    if allowed.is_some_and(|list| list.contains(&value)) || value == fallback {
-        (value, 0)
-    } else {
-        (fallback.to_owned(), 1)
-    }
-}
-
 fn host_time(obj: &Map<String, Value>, timing: Option<(SampleTime, f64)>) -> Timestamp {
     match (obj.get("sample_index").and_then(Value::as_u64), timing) {
         (Some(index), Some((anchor, rate))) => anchor.time_of(index, rate),
@@ -127,11 +113,17 @@ fn field<T: serde::de::DeserializeOwned>(
 }
 
 /// Parses one stdout line under `ceiling` (manifest class clamped to the input class).
+///
+/// `input_range` is the inclusive sample-index range of the input offered to the plugin so far
+/// (`None`: nothing offered). Under a content-forbidding class a present `sample_index` outside
+/// it (or not an unsigned integer) refuses the line with [`SAMPLE_INDEX_OUT_OF_RANGE`]; under a
+/// permitting class it is not checked.
 pub fn parse_line(
     manifest: &PluginManifest,
     ceiling: ContentClass,
     context: &PluginContext,
     timing: Option<(SampleTime, f64)>,
+    input_range: Option<(u64, u64)>,
     line: &[u8],
 ) -> Result<Parsed, String> {
     let value: Value = serde_json::from_slice(line)
@@ -156,61 +148,49 @@ pub fn parse_line(
         return Err("unknown `type`".into());
     }
     let (content_class, clamped, unknown_class) = resolve_class(ceiling, obj.get("content_class"));
-    let gated = !content_class.permits_content();
-    let policy = manifest.output.metadata_policy.as_ref();
+    if !content_class.permits_content() {
+        match obj.get("sample_index") {
+            None | Some(Value::Null) => {}
+            Some(v) => {
+                let inside = v
+                    .as_u64()
+                    .zip(input_range)
+                    .is_some_and(|(i, (lo, hi))| (lo..=hi).contains(&i));
+                if !inside {
+                    return Err(SAMPLE_INDEX_OUT_OF_RANGE.into());
+                }
+            }
+        }
+    }
+    let policy: Option<&MetadataPolicy> = manifest.output.metadata_policy.as_ref();
     let schema_id = manifest.output.schema_id.as_str();
-    let mut sanitized = 0;
-    let raw_metadata = match obj.get("metadata") {
+    let metadata = match obj.get("metadata") {
         None | Some(Value::Null) => Value::Object(Map::new()),
         Some(v) => v.clone(),
     };
-    let metadata = if gated {
-        let (kept, dropped) = sanitize_metadata(policy, raw_metadata);
-        sanitized += dropped;
-        kept
-    } else {
-        raw_metadata
-    };
     let content = obj.get("content").filter(|v| !v.is_null()).cloned();
     let t = host_time(&obj, timing);
-    let output = if kind == "decode" {
-        let mut frame_model = obj
-            .get("frame_model")
-            .and_then(Value::as_str)
-            .unwrap_or(schema_id)
-            .to_owned();
-        let mut identity = field::<DecodedIdentity>(&obj, "identity")?;
-        if gated {
-            let (fm, n) = allowlisted_or(
-                policy.map(|p| p.frame_models.as_slice()),
-                frame_model,
-                schema_id,
-            );
-            frame_model = fm;
-            sanitized += n;
-            if identity.as_ref().is_some_and(|id| {
-                !policy
-                    .and_then(|p| p.identity.as_ref())
-                    .is_some_and(|spec| spec.accepts(id))
-            }) {
-                identity = None;
-                sanitized += 1;
-            }
-        }
-        PluginOutput::Decode(Decode {
+    let (output, sanitized) = if kind == "decode" {
+        let mut decode = Decode {
             id: DecodeId::new(),
             demodulation_ref: context.demodulation_ref,
             recording_ref: context.recording_ref,
             decoder_id: manifest.id.clone(),
             decoder_version: manifest.version.clone(),
-            frame_model,
+            frame_model: obj
+                .get("frame_model")
+                .and_then(Value::as_str)
+                .unwrap_or(schema_id)
+                .to_owned(),
             metadata,
             content,
             crc_status: field::<CrcStatus>(&obj, "crc_status")?.unwrap_or(CrcStatus::Unknown),
-            identity,
+            identity: field::<DecodedIdentity>(&obj, "identity")?,
             content_class,
             t,
-        })
+        };
+        let n = policy::sanitize_decode(policy, schema_id, &mut decode);
+        (PluginOutput::Decode(decode), n)
     } else {
         let target = if let Some(d) = context.detection_ref {
             AnnotationTarget::Detection(d)
@@ -235,18 +215,13 @@ pub fn parse_line(
         let confidence = confidence
             .filter(|c| c.is_finite() && (0.0..=1.0).contains(c))
             .ok_or("`confidence` must be a number in 0..=1")?;
-        let mut value = obj
+        let value = obj
             .get("value")
             .and_then(Value::as_str)
             .filter(|v| !v.is_empty())
             .ok_or("annotation needs a non-empty `value` label")?
             .to_owned();
-        if gated {
-            let (label, n) = allowlisted_or(policy.map(|p| p.labels.as_slice()), value, schema_id);
-            value = label;
-            sanitized += n;
-        }
-        PluginOutput::Annotation(Annotation {
+        let mut annotation = Annotation {
             id: AnnotationId::new(),
             target,
             author: AnnotationAuthor::Decoder,
@@ -260,7 +235,9 @@ pub fn parse_line(
             content_class,
             t,
             exported: false,
-        })
+        };
+        let n = policy::sanitize_annotation(policy, schema_id, &mut annotation);
+        (PluginOutput::Annotation(annotation), n)
     };
     Ok(Parsed {
         output,
@@ -339,6 +316,7 @@ mod tests {
             ContentClass::Unrestricted,
             &PluginContext::default(),
             Some((anchor, 2.4e6)),
+            None,
             line,
         )
         .unwrap();
@@ -369,6 +347,7 @@ mod tests {
             ContentClass::RestrictedPaging,
             &PluginContext::default(),
             None,
+            None,
             line,
         )
         .unwrap();
@@ -392,7 +371,7 @@ mod tests {
         };
         let line = br#"{"type":"decode","frame_model":"SMUG-FM","identity":{"scheme":"other:pocsag-capcode","value":"SMUG"},
             "metadata":{"text":"SMUG","capcode":"1234567","function":"SMUG","nested":{"a":"SMUG"}},"content":{"text":"SMUG"}}"#;
-        let p = parse_line(&m, ceiling, &ctx, None, line).unwrap();
+        let p = parse_line(&m, ceiling, &ctx, None, None, line).unwrap();
         let PluginOutput::Decode(d) = &p.output else {
             panic!()
         };
@@ -403,7 +382,9 @@ mod tests {
         assert!(!text.contains("SMUG"), "{text}");
 
         let ok = br#"{"type":"decode","frame_model":"pocsag","identity":{"scheme":"other:pocsag-capcode","value":"1234567"},"metadata":{"function":2}}"#;
-        let PluginOutput::Decode(d) = parse_line(&m, ceiling, &ctx, None, ok).unwrap().output
+        let PluginOutput::Decode(d) = parse_line(&m, ceiling, &ctx, None, None, ok)
+            .unwrap()
+            .output
         else {
             panic!()
         };
@@ -412,7 +393,9 @@ mod tests {
         assert_eq!(d.metadata, json!({"function": 2}));
 
         let ann = br#"{"type":"annotation","value":"SMUG-LABEL","metadata":{"text":"SMUG"}}"#;
-        let PluginOutput::Annotation(a) = parse_line(&m, ceiling, &ctx, None, ann).unwrap().output
+        let PluginOutput::Annotation(a) = parse_line(&m, ceiling, &ctx, None, None, ann)
+            .unwrap()
+            .output
         else {
             panic!()
         };
@@ -421,13 +404,78 @@ mod tests {
 
         // Under a permitting class nothing is sanitised.
         let PluginOutput::Annotation(a) =
-            parse_line(&open(), ContentClass::Unrestricted, &ctx, None, ann)
+            parse_line(&open(), ContentClass::Unrestricted, &ctx, None, None, ann)
                 .unwrap()
                 .output
         else {
             panic!()
         };
         assert_eq!(a.value, "SMUG-LABEL");
+    }
+
+    /// N1 (unit level): a restricted line's `sample_index` must lie within the input offered, and
+    /// its annotation confidence is rounded to 0.01; neither applies under a permitting class.
+    #[test]
+    fn restricted_sample_index_is_bounded_and_confidence_quantised() {
+        let m = pager();
+        let ceiling = ContentClass::RestrictedPaging;
+        let ctx = PluginContext {
+            detection_ref: Some(DetectionId::new()),
+            ..PluginContext::default()
+        };
+        let at = |index: Value| {
+            json!({"type": "decode", "sample_index": index})
+                .to_string()
+                .into_bytes()
+        };
+        let range = Some((1000, 2000));
+        assert!(parse_line(&m, ceiling, &ctx, None, range, &at(json!(1000))).is_ok());
+        assert!(parse_line(&m, ceiling, &ctx, None, range, &at(json!(2000))).is_ok());
+        for bad in [
+            json!(999),
+            json!(2001),
+            json!(u32::from_be_bytes(*b"PAGE")),
+            json!("1500"),
+            json!(-1),
+        ] {
+            assert_eq!(
+                parse_line(&m, ceiling, &ctx, None, range, &at(bad.clone())),
+                Err(SAMPLE_INDEX_OUT_OF_RANGE.to_owned()),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            parse_line(&m, ceiling, &ctx, None, None, &at(json!(0))),
+            Err(SAMPLE_INDEX_OUT_OF_RANGE.to_owned()),
+            "nothing offered yet"
+        );
+        assert!(
+            parse_line(&m, ceiling, &ctx, None, None, br#"{"type":"decode"}"#).is_ok(),
+            "no sample_index: host arrival time"
+        );
+        assert!(
+            parse_line(
+                &open(),
+                ContentClass::Unrestricted,
+                &ctx,
+                None,
+                None,
+                &at(json!(u32::from_be_bytes(*b"PAGE")))
+            )
+            .is_ok(),
+            "permitting classes are not bounded"
+        );
+
+        let ann = br#"{"type":"annotation","value":"pocsag","confidence":0.80657169}"#;
+        let conf = |m: &PluginManifest, class| match parse_line(m, class, &ctx, None, None, ann)
+            .unwrap()
+            .output
+        {
+            PluginOutput::Annotation(a) => a.confidence,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(conf(&m, ceiling), 0.81);
+        assert_eq!(conf(&open(), ContentClass::Unrestricted), 0.80657169);
     }
 
     #[test]
@@ -445,7 +493,7 @@ mod tests {
             br#"{"type":"annotation","value":"x","kind":"SMUG"}"#,
             br#"{"type":"annotation","value":"x"}"#,
         ] {
-            let err = parse_line(&m, ContentClass::Unrestricted, &ctx, None, bad)
+            let err = parse_line(&m, ContentClass::Unrestricted, &ctx, None, None, bad)
                 .expect_err(&String::from_utf8_lossy(bad));
             assert!(!err.contains("SMUG"), "{err}");
         }
@@ -459,6 +507,7 @@ mod tests {
                 ContentClass::Unrestricted,
                 &ctx,
                 None,
+                None,
                 br#"{"type":"annotation","value":"x","confidence":2}"#
             )
             .is_err()
@@ -467,6 +516,7 @@ mod tests {
             &m,
             ContentClass::Unrestricted,
             &ctx,
+            None,
             None,
             br#"{"type":"annotation","value":"adsb","kind":"ground-truth"}"#,
         )

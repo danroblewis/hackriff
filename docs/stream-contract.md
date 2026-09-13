@@ -1,6 +1,6 @@
 # Stream-output contract (v1.0)
 
-**Status:** Engineering (T-016, T-014). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap).
+**Status:** Engineering (T-016, T-014). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), and again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults).
 **Legal guardrail:** §6 is the single egress enforcement point for restricted content. Changing it is a core-interface change and needs review.
 
 One contract serves two uses:
@@ -25,9 +25,14 @@ One contract serves two uses:
 | Unix domain socket | Local consumers (default) | `Listener::bind_uds`. Created **mode 0600** with no window: bound in a fresh 0700 directory, chmodded, renamed into place. A path served by a live listener is refused (probe-connect); a stale socket file is replaced. The only transport for `own-key-decrypted` streams. |
 | TCP | Remote consumers | `Listener::bind_tcp`. **Refused for `own-key-decrypted` streams.** **Unauthenticated**: bind to loopback unless the network is trusted. |
 | Child stdin | Plugin data plane (§9) | `DecoderFeed`. Never a listener. |
-| WebSocket | Browsers | Mapping in §10. The bridge is not implemented yet. |
+| WebSocket | Browsers | Mapping in §10. The bridge is not implemented yet; it must subscribe as `Locality::Remote`. |
 
 Each accepted connection is one consumer of one stream: it gets the header, then records from the moment it joined. Consumers never write back; control belongs to the control API.
+
+**Locality rule (legal guardrail).** Every egress path goes through one subscription point, `PublisherHandle::subscribe` (listeners, bridges, direct subscribers; plugin stdin through `FeedAttacher`). It enforces locality per consumer, not per listener:
+- The writer is an `EgressWriter`, and its `Locality` comes from the type: `UnixStream` is `Local`, `TcpStream` is `Remote`.
+- Any other writer must be wrapped in `Declared::local` or `Declared::remote`. `Declared::local` asserts the bytes never leave the host, so it is reviewed code; a `TcpStream` declared local is still `Remote`.
+- A `Remote` consumer of an `own-key-decrypted` stream is refused before anything is queued (`StreamError::LocalOnly`, counted in `gate_stats().remote_consumers_refused`). `bind_tcp` also refuses such streams up front.
 - **Consumer cap:** at most `PublisherConfig::max_consumers` (default 16) are open; further connections are closed.
 - **Hang-ups are reaped while idle:** the accept thread polls every connection it accepted. Because consumers never send, readability (EOF or unexpected bytes) closes the consumer, even when nothing is being published.
 
@@ -121,6 +126,7 @@ The payload holds whole elements of `datatype`. Producers cannot set `GATED`; on
 When a consumer's queue was full, the next record that fits is preceded by a marker naming exactly the seqs that consumer missed: `first_seq` through `first_seq + count − 1`.
 - **Messages:** `{"type":"dropped","first_seq":N,"count":M,"t":<ns of first dropped>}`
 - **Binary:** record type 2 with `seq = first_seq`, flag `DISCONTINUITY`, and the timestamp and sample index of the first dropped record. The payload is `count` as a u64 LE.
+- **Gated (binary, gated spectrum only):** the same record with flags `GATED | DISCONTINUITY`. It reports rows **withheld by the egress gate** (§6, spectrum enforcement), not queue drops. Its timestamp and sample index are those of the next delivered row (the last delivered row at end of stream), so withheld rows contribute only their count. The reference reader returns `Record::Dropped(DropMarker { gated: true, .. })`.
 
 A consumer that is disconnected (§7) sees no final marker: the connection just closes.
 
@@ -136,14 +142,40 @@ The enforcement code is `hk_api::stream::gate`, called by `Publisher` before any
 
 Content is serialised only if the effective class permits content **and**, when the effective class is `own-key-decrypted`, the header class is also `own-key-decrypted` (`gate::message_content_permitted`). Otherwise `content` is not serialised and `gated: true` is set.
 
-**Own-key content is local-only.** It leaves only on an `own-key-decrypted` stream, and such streams are refused on TCP (and on any future remote bridge); they are served on a mode-0600 Unix socket (`gate::remote_transport_permitted`).
+**Message metadata policy.** When a message's effective class forbids content, `publish_message` reduces every field outside `content` to the publisher's `MetadataPolicy`, whoever produced the record (plugin republish or in-process producer). `hk_stream::policy` holds the same typed allowlist model as plugin manifests (§9.3):
+- metadata keys that are not allowlisted, or have the wrong type, are dropped;
+- `frame_model` must be in `frame_models` (for annotations, `labels`) or equal the header's `message_schema`; otherwise it becomes `message_schema`, or is omitted if there is none;
+- `identity` must match the policy's identity shape; `decoder` must be a token (`[A-Za-z0-9_.:/@+-]{1,64}`);
+- removed fields are counted (`gate_stats().metadata_fields_sanitized`).
+
+A messages publisher whose header class forbids content **cannot be created without a policy**: `Publisher::new` returns `MetadataPolicyRequired`; use `Publisher::with_metadata_policy`. On a permitting stream without a policy, restricted records fall back to the empty allowlist. A plugin republisher carries the manifest's policy, with `message_schema` set to `output.schema_id`.
+
+**Persistence path.** The repository refuses restricted *content* but stores whatever metadata it is given. Restricted `Decode`/`Annotation` rows must therefore pass through `hk_stream::policy::sanitize_decode` / `sanitize_annotation` before `Repository::insert_*`. Plugin ingest does this (§9.3); in-process producers must. As a fail-closed check, `hk_plugins::Ingest` tests each restricted row's shape (`decode_is_allowlist_shaped`: flat typed metadata, token frame model, hex/digits identity). A non-conforming row is reduced to the empty allowlist before storage and counted (`IngestStats::rows_stripped`).
+
+**Own-key content is local-only.** It leaves only on an `own-key-decrypted` stream. Such streams are served on a mode-0600 Unix socket and refused to every remote consumer, per consumer, by the locality rule (§2; `gate::remote_transport_permitted`).
 
 **Binary records.** Payloads of `bits`, `symbols`, `iq` and `audio` are content. On a stream whose header class forbids content:
 - the payload is withheld;
 - a header-only `GATED` record still goes out, so timing, seq and length metadata flow;
 - `publish_binary` returns `StreamError::ContentGated`, so the misrouted producer notices.
 
-**Spectrum.** A waterfall whose row rate reaches the symbol rate is effectively a non-coherent demodulator (POCSAG, voice spectrograms). Under a class that permits content, spectrum streams are ungated. Under a class that forbids content, `Publisher::new` refuses a spectrum stream unless its `sample_rate_hz` (the row rate) is declared and at most **50 rows/s** (`gate::GATED_SPECTRUM_MAX_ROW_RATE_HZ`). The ~30 fps survey waterfall therefore still works under every class, including fail-closed.
+**Spectrum.** A waterfall whose row rate reaches the symbol rate is effectively a non-coherent demodulator (POCSAG, voice spectrograms). Under a class that permits content, spectrum streams are ungated.
+
+Under a class that forbids content, `Publisher::new` refuses a spectrum stream unless it declares all three of:
+- `sample_rate_hz` (the row rate), at most **50 rows/s** (`gate::GATED_SPECTRUM_MAX_ROW_RATE_HZ`; otherwise `SpectrumRowRate`);
+- `fft_size`;
+- a known `datatype` (otherwise `SpectrumGeometry`).
+
+The declaration is then **enforced on every row** in `publish_binary`:
+- **Rate.** A row needs a token from two buckets, each refilled at the declared rate with depth `GATED_SPECTRUM_BURST_ROWS` (2): one over wall-clock arrival, one over the spacing of the rows' `t`. A `t` that goes backwards is refused. `sample_index` is not used, because for spectrum its unit is the underlying IQ sample, which the header does not describe.
+- **Size.** The payload is at most `fft_size` × the element size of `datatype`.
+
+A row over either cap is withheld entirely:
+- No header-only record is sent, because per-row `t`/`sample_index` at the offered rate would itself be a channel.
+- It consumes a seq, is counted (`gate_stats().spectrum_rows_gated`), and `publish_binary` returns `SpectrumGated`.
+- Consumers get one counted `GATED` marker (§5.3) for the withheld run, before the next delivered row or at end of stream.
+
+The ~30 fps survey waterfall therefore still works under every class, including fail-closed. A producer should declare its rate with some margin. A replay faster than real time on a gated stream is throttled; after rewinding `t`, open a new publisher.
 
 **Fail closed.** A missing or unknown class is treated as `metadata-only` wherever it is parsed: headers, plugin output, and records read back by the reference reader.
 
@@ -151,11 +183,13 @@ Content is serialised only if the effective class permits content **and**, when 
 
 | Header class \ kind | messages | bits | symbols | iq | audio | spectrum |
 |---|---|---|---|---|---|---|
-| `unrestricted` | content (clamped per record; own-key records gated) | payload | payload | payload | payload | payload |
-| `own-key-decrypted` (UDS only) | content (clamped per record) | payload | payload | payload | payload | payload |
-| `metadata-only` | metadata only | GATED | GATED | GATED | GATED | payload if ≤ 50 rows/s, else refused |
-| `restricted-cellular` | metadata only | GATED | GATED | GATED | GATED | payload if ≤ 50 rows/s, else refused |
-| `restricted-paging` | metadata only | GATED | GATED | GATED | GATED | payload if ≤ 50 rows/s, else refused |
+| `unrestricted` | content (clamped per record; own-key records gated; restricted records policy-reduced) | payload | payload | payload | payload | payload |
+| `own-key-decrypted` (local consumers only) | content (clamped per record; restricted records policy-reduced) | payload | payload | payload | payload | payload |
+| `metadata-only` | policy-reduced metadata (policy required) | GATED | GATED | GATED | GATED | payload if declared ≤ 50 rows/s with geometry; rate and size enforced per row |
+| `restricted-cellular` | policy-reduced metadata (policy required) | GATED | GATED | GATED | GATED | payload if declared ≤ 50 rows/s with geometry; rate and size enforced per row |
+| `restricted-paging` | policy-reduced metadata (policy required) | GATED | GATED | GATED | GATED | payload if declared ≤ 50 rows/s with geometry; rate and size enforced per row |
+
+The re-probe regressions (locality per consumer, in-process metadata policy, per-row spectrum enforcement) are `crates/hk-stream/tests/egress_gaps.rs`.
 
 Gating also covers persistence: the repository refuses content under a forbidding class (`RepoError::GatedContent`, T-002). The plugin host stores the metadata-only form instead (§9.4).
 
@@ -258,12 +292,22 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 - Clamped and unknown lines are counted.
 
 **Metadata allowlist (when a line's effective class forbids content):**
-- A manifest whose class forbids content **must** declare `output.metadata_keys` (an empty object is a valid declaration). Each key has a type that cannot carry free text: `integer`, `number`, `boolean`, `hex` or `digits` (with `max_len` ≤ 64), or `enum` (with `values`).
+- A manifest whose class forbids content **must** declare `output.metadata_keys` (an empty object is a valid declaration). Each key has a type that cannot carry free text: `integer`, `number`, `boolean`, `hex` or `digits`, or `enum` (with `values`).
 - The host keeps only allowlisted keys with the right type; nested objects, unlisted keys and over-long values are dropped (not truncated: a truncated identifier is a wrong one).
-- `frame_model` must be in `output.frame_models`, and an annotation `value` in `output.labels`; otherwise it becomes `output.schema_id`.
+- `frame_model` must be in `output.frame_models`, and an annotation `value` in `output.labels`; otherwise it becomes `output.schema_id`, which must itself be a token (`[A-Za-z0-9_.:/-]{1,64}`).
 - `identity` must match `output.identity` (`scheme`, `charset` hex/digits, `max_len`); otherwise it is dropped.
 - With no allowlist (e.g. an `unrestricted` manifest on a restricted channel), nothing survives: metadata `{}`, frame model `schema_id`, no identity.
 - Removed fields are counted (`metadata_sanitized`).
+- The model and the sanitising functions are shared with egress (`hk_stream::policy`, §6).
+
+**Allowlist defaults (covert-channel budgets).** A policy only ever applies under a restricted class, so every typed field is a budget. Manifests are trusted but reviewed (§11):
+- `hex`/`digits` keys and `identity` have a default `max_len` of **8**. A longer value (up to 64) needs an explicit `max_len` **and** a non-empty `review_note` string on that key or identity; without the note the manifest is refused.
+- Reviewed long strings and every `integer`/`number` key (up to 64 bits per record) are reported as warnings in `PluginManifest::warnings`. `PluginManifest::load` prints them to stderr, and the host copies them into the plugin's log ring.
+- **`sample_index` bound.** A restricted line's `sample_index` becomes the row's time, so it must lie within the inclusive range of input offered to that plugin instance: from the lowest record `sample_index` to the highest `sample_index + elements`. A line with an index outside that range, a non-integer index, or an index before any input is offered is dropped and counted (`sample_index_out_of_range`). Lines without `sample_index` get host arrival time.
+- **Confidence.** A restricted annotation's `confidence` is rounded to 0.01.
+- **Example paging policy (not a plugin):** `crates/hk-plugins/policies/restricted-paging.json` (`hk_plugins::EXAMPLE_RESTRICTED_PAGING_OUTPUT`). It allowlists only `capcode` (digits, at most 8), `function` (enum `0`–`3`), `baud` (enum `512`/`1200`/`2400`) and `encoding` (enum `numeric`/`alpha`/`tone`). `t` is host-stamped from `sample_index`. Message bodies, numeric pages included, are content and are never allowlisted.
+
+The N1 covert-channel regressions (hex text, packed integer, numeric page in capcode, `sample_index` offset, confidence digits) are `crates/hk-plugins/tests/egress_gaps.rs`.
 
 **Logs:** plugin `log` lines and stderr are stored in the log ring only when the ceiling permits content; otherwise they are counted (`log_lines_withheld`, `stderr_lines_withheld`). Host errors about malformed lines name the field, never the offending value. `PluginMonitor::log_tail()` returns the lines tagged with the ceiling, so a control API can gate them.
 
@@ -274,7 +318,8 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 `hk_plugins::Ingest` (shared as `Arc<Mutex<Ingest>>`) writes rows through `hk_model::Repository`:
 - if the repository refuses content under the row's class (`RepoError::GatedContent`), the row is stored **metadata-only** and counted;
 - gated content is never persisted;
-- each stored row can be republished on a §5.1 messages stream, where §6 gates it again.
+- a restricted row that is not allowlist-shaped (it skipped the policy) is reduced to the empty allowlist first and counted (`rows_stripped`);
+- each stored row can be republished on a §5.1 messages stream, where §6 gates it again. The republisher applies its own metadata policy to restricted rows, so a republisher for restricted plugins is created with `Publisher::with_metadata_policy` (the manifest's policy, `message_schema` = `output.schema_id`). Without one, restricted rows go out with metadata `{}`.
 
 ### 9.5 Supervision
 
@@ -318,9 +363,16 @@ The bridge isn't built yet. It is a follow-up with the UI work (T-023), and may 
 
 - **Authentication** for TCP (and later WebSocket) listeners. They are unauthenticated today, which matters on a portable device on public Wi-Fi.
 - **Own-key local-only rule** (§6) is the provisional default endorsed at review; confirm with the user's legal-guardrail pass (docs/06 §5).
-- **Gated spectrum cap** of 50 rows/s is a provisional number; revisit with real POCSAG/voice spectrogram fixtures.
-- **Manifest trust boundary:** manifests and their executables are trusted code (`plugins/README.md`).
-- **Follow-ups recorded by the coordinator:** T-015 datatype conversion stage and raw-framing drop/`sample_index` mapping; T-022 WebSocket bridge (auth, remote rule, consumer cap); control-API exposure of `log_tail`; decode batching and per-plugin rate caps.
+- **Gated spectrum cap** of 50 rows/s (burst 2) is a provisional number; revisit with real POCSAG/voice spectrogram fixtures.
+- **Manifest trust boundary: trusted but reviewed** (policy recorded by the coordinator). Manifests and their executables are trusted code (`plugins/README.md`). The host contains *accidental* leaks from well-meaning decoders; it does not contain a malicious executable. A manifest's class, allowlist, `max_len` budgets and `review_note`s are legal-guardrail declarations and are reviewed like code. The defaults (§9.3) make anything beyond a small budget explicit and visible as a load warning.
+- **Residual side channels (noted, not fixed).** These remain open to a producer that modulates them deliberately, under every class:
+  - **Timing and ordering:** arrival times, inter-record spacing, record order, seq gaps and drop/gated-marker counts.
+  - **Time fields:** the `t` of a restricted record carries about log2(input range) bits via an in-range `sample_index`, or host arrival time for lines without one.
+  - **Typed values within their bounds:** an 8-digit capcode (~26.6 bits), an enum choice, `integer`/`number` keys (64 bits, warned at load), confidence (~7 bits), `crc_status`, record and payload lengths (including the withheld length of `GATED` records).
+  - **Gated spectrum:** delivered rows' `t` and `sample_index` (up to 128 bits per row at ≤ 50 rows/s), withheld-run counts, and bin values. A spectrum is metadata by rule, but a producer can modulate its bins.
+  - **Ids from in-process producers:** `emitter_id`, `provenance_ref`, `decode_id` and `annotation_id` are opaque UUIDs that trusted in-process code chooses.
+  - **Locality:** it relies on writer types; `Declared::local` around a network-backed writer is a review error that the type check cannot see, except for a bare `TcpStream`.
+- **Follow-ups recorded by the coordinator:** T-015 datatype conversion stage and raw-framing drop/`sample_index` mapping (a restricted plugin's `sample_index` must be the host's record index to pass the §9.3 bound); T-022 WebSocket bridge (auth, subscribe as `Locality::Remote`, consumer cap); control-API exposure of `log_tail`; decode batching and per-plugin rate caps.
 - **Replay for missed records** (ADR-0004: "consumers can request replay from a Recording") needs the control API.
 - **Crate dependency direction:** resolved. The contract lives in `hk-stream`; `hk-plugins` depends on it (not on `hk-api`), so `hk-api` can later depend on `hk-plugins` for plugin health without a cycle.
 

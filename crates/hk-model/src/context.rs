@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::hash::ContentHash;
 use crate::ids::{AnomalyId, DetectionId, EmitterId, ExplanationId, ExternalEventId, RecordingId};
-use crate::region::{Region, TimeRange};
+use crate::region::{FreqRange, Region, TimeRange};
 use crate::time::Timestamp;
 
 /// Where an external event applies.
@@ -72,6 +72,11 @@ pub struct ExternalEvent {
     pub time: TimeRange,
     /// Where it applies.
     pub geo: Geo,
+    /// Frequency extents the event is relevant to (T-020), e.g. the GNSS L1/L2/L5 bands for a
+    /// gpsjam cell. Empty when the source implies no frequency extent; correlation rules then
+    /// decide band relevance themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub freq: Vec<FreqRange>,
     /// Feed payload as fetched.
     pub payload: Value,
     /// When it was fetched.

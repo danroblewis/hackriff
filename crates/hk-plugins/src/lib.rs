@@ -10,9 +10,11 @@
 //!   backoff, crash-loop cap, hang watchdog) and kills one plugin process.
 //! - [`output`]: the stdout NDJSON message plane, parsed into `Decode`/`Annotation` under the
 //!   ceiling `clamp(manifest class, input channel class)`, with the manifest's metadata allowlist
-//!   applied whenever a line's class forbids content.
+//!   (the shared [`hk_stream::policy`] model), the `sample_index` input bound and confidence
+//!   rounding applied whenever a line's class forbids content.
 //! - [`ingest`]: [`Ingest`], which stores through the `Repository` (gated content is stored
-//!   metadata-only) and republishes on a T-016 messages stream.
+//!   metadata-only; restricted rows that skipped the policy are stripped) and republishes on a
+//!   T-016 messages stream.
 //!
 //! The test plugin is the `hk-dummy-plugin` binary (`plugins/dummy/manifest.json`).
 
@@ -27,10 +29,13 @@ pub use host::{
 };
 pub use ingest::{Ingest, IngestStats, Stored};
 pub use manifest::{
-    Charset, HzRange, IdentitySpec, InputKind, InputSpec, MANIFEST_VERSION, ManifestError,
-    MetadataPolicy, MetadataType, OutputSpec, PluginManifest, ResourceLimits, RestartPolicy,
+    Charset, EXAMPLE_RESTRICTED_PAGING_OUTPUT, HzRange, IdentitySpec, InputKind, InputSpec,
+    MANIFEST_VERSION, MAX_ALLOWLIST_LEN, ManifestError, MetadataPolicy, MetadataType, OutputSpec,
+    PluginManifest, RESTRICTED_DEFAULT_MAX_LEN, ResourceLimits, RestartPolicy,
 };
-pub use output::{Parsed, PluginOutput, parse_line, resolve_class, sanitize_metadata};
+pub use output::{
+    Parsed, PluginOutput, SAMPLE_INDEX_OUT_OF_RANGE, parse_line, resolve_class, sanitize_metadata,
+};
 
 #[cfg(test)]
 mod tests {

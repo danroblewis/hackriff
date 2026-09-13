@@ -18,8 +18,9 @@ use hk_model::{
     Timestamp,
 };
 use hk_stream::{
-    BinaryRecord, CloseReason, ConsumerState, ListenAddr, Listener, MessageRecord, Publisher,
-    PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind, StreamReader,
+    BinaryRecord, Charset, CloseReason, ConsumerState, Declared, IdentitySpec, ListenAddr,
+    Listener, MessageRecord, MetadataPolicy, MetadataType, Publisher, PublisherConfig, Record,
+    RecordFlags, StreamError, StreamHeader, StreamKind, StreamReader,
 };
 use serde_json::json;
 
@@ -68,8 +69,9 @@ fn header_for(kind: StreamKind, class: ContentClass) -> StreamHeader {
         StreamKind::Spectrum => {
             h.datatype = Some("rf32_le".into());
             // A survey waterfall: within the gated row-rate cap, so it exists under every class.
+            // 46 rf32 bins = the 184-byte test payload (the gated payload cap).
             h.sample_rate_hz = Some(30.0);
-            h.fft_size = Some(4);
+            h.fft_size = Some(46);
         }
         StreamKind::Messages => h.message_schema = Some("hackriff.decode/1".into()),
     }
@@ -110,6 +112,37 @@ fn small_config() -> PublisherConfig {
     }
 }
 
+/// What survives of the ADS-B-like test messages under a content-forbidding class.
+fn test_policy() -> MetadataPolicy {
+    MetadataPolicy {
+        keys: [
+            ("icao", MetadataType::Hex { max_len: 6 }),
+            ("df", MetadataType::Integer),
+            ("crc", MetadataType::Enum(vec!["ok".into()])),
+        ]
+        .into_iter()
+        .map(|(k, t)| (k.to_owned(), t))
+        .collect(),
+        frame_models: vec!["adsb-df17".into()],
+        labels: vec![],
+        identity: Some(IdentitySpec {
+            scheme: IdentityScheme::AdsbIcao,
+            charset: Charset::Hex,
+            max_len: 6,
+        }),
+    }
+}
+
+/// Messages publishers carry the test policy (required under content-forbidding classes).
+fn publisher_for(kind: StreamKind, class: ContentClass) -> Publisher {
+    let header = header_for(kind, class);
+    if kind == StreamKind::Messages {
+        Publisher::with_metadata_policy(header, small_config(), test_policy()).unwrap()
+    } else {
+        Publisher::new(header, small_config()).unwrap()
+    }
+}
+
 /// Unit-tests the ADR-0004 gate over every ContentClass x StreamKind, reading back through the
 /// reference reader and scanning the raw bytes for the content sentinel.
 #[test]
@@ -117,11 +150,11 @@ fn gating_matrix_every_class_by_every_kind() {
     let mut matrix = Vec::new();
     for &class in ContentClass::ALL {
         for &kind in StreamKind::ALL {
-            let mut publisher = Publisher::new(header_for(kind, class), small_config()).unwrap();
+            let mut publisher = publisher_for(kind, class);
             let buf = SharedBuf::default();
             let handle = publisher.handle();
             handle
-                .subscribe("mem", Box::new(buf.clone()), Box::new(|_| {}))
+                .subscribe("mem", Declared::local(buf.clone()), Box::new(|_| {}))
                 .unwrap();
 
             let payload_expected;
@@ -227,7 +260,7 @@ fn gated_classes_never_emit_content_bytes_on_the_socket() {
     for &class in ContentClass::ALL {
         let mut raw = Vec::new();
         for kind in [StreamKind::Messages, StreamKind::Iq, StreamKind::Audio] {
-            let mut publisher = Publisher::new(header_for(kind, class), small_config()).unwrap();
+            let mut publisher = publisher_for(kind, class);
             let handle = publisher.handle();
             let own_key = class == ContentClass::OwnKeyDecrypted;
             let listener = if own_key {
@@ -317,7 +350,7 @@ fn slow_consumer_is_dropped_not_blocking() {
     handle
         .subscribe_with_queue(
             "fast",
-            Box::new(ours),
+            ours,
             Box::new(move |_| {
                 let _ = closer.shutdown(std::net::Shutdown::Both);
             }),
@@ -434,7 +467,7 @@ fn recovering_consumer_sees_exact_drop_markers() {
     let id = handle
         .subscribe(
             "gated-writer",
-            Box::new(Gate(Arc::clone(&gate), buf.clone())),
+            Declared::local(Gate(Arc::clone(&gate), buf.clone())),
             Box::new(|_| {}),
         )
         .unwrap();

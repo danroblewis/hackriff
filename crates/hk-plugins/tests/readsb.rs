@@ -33,14 +33,28 @@ use hk_stream::{
     StreamKind, StreamReader,
 };
 
+/// Serialises every test in this file that spawns a `PluginInstance` (i.e. calls
+/// `Command::spawn` for the wrapper) against the two tests that temporarily override the
+/// `HK_READSB`/`FAKE_READSB_*` process environment: `std::env::set_var` (`unsafe` since Rust
+/// 2024, precisely because concurrent reads/spawns can observe a torn value) must not race a
+/// spawn that expects the unmodified environment.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
 const WRAPPER: &str = env!("CARGO_BIN_EXE_hk-plugin-readsb");
+/// A stand-in for readsb (see its module doc), used only by the crash/idle-handling tests below
+/// so they don't need a real 9s readsb watchdog wait or shell-timing tricks.
+const FAKE_READSB: &str = env!("CARGO_BIN_EXE_hk-fake-readsb");
 const CENTER_HZ: f64 = 1_090_000_000.0;
 const RATE: f64 = 2_400_000.0;
 const CHUNK_SAMPLES: usize = 4096;
 const SIGNAL_001: &str = "SIGNAL-001";
 
-/// Whether `readsb` is installed on this machine.
+/// Whether `readsb` is installed on this machine. Honours `HK_READSB`, the same override the
+/// wrapper itself reads, so a caller pinning a specific build doesn't get skipped.
 fn readsb_available() -> bool {
+    if let Ok(path) = std::env::var("HK_READSB") {
+        return Path::new(&path).is_file();
+    }
     Command::new("readsb")
         .arg("--help")
         .stdout(Stdio::null())
@@ -190,6 +204,7 @@ fn readsb_pid(mon: &PluginMonitor) -> i32 {
 #[test]
 fn signal_001_readsb_decodes_land_as_emitters_and_republish() {
     readsb_or_skip!();
+    let _guard = ENV_MUTEX.lock().unwrap();
     let out = synth_or_skip!(adsb_request(7));
     let fx = out.fixture(0).unwrap();
     assert_eq!(fx.sample_rate, RATE);
@@ -297,6 +312,76 @@ fn signal_001_readsb_decodes_land_as_emitters_and_republish() {
             "[{SIGNAL_001}] {icao}: last_seen tracks the latest decode"
         );
         assert_eq!(emitter.count, decodes.len() as u64);
+
+        // Truth-checked fields, not just presence: callsign, resolved CPR position and velocity.
+        let truth_for_icao = truth
+            .iter()
+            .filter(|t| t.identity() == Some(("icao", icao.as_str())))
+            .collect::<Vec<_>>();
+        let expected_callsign = truth_for_icao
+            .iter()
+            .find(|t| t.str("message_kind") == Some("identification"))
+            .and_then(|t| t.str("/metadata/callsign"))
+            .unwrap_or_else(|| panic!("[{SIGNAL_001}] {icao}: no identification truth"));
+        let decoded_callsign = decodes
+            .iter()
+            .find_map(|d| d.metadata.get("callsign").and_then(|v| v.as_str()));
+        assert_eq!(
+            decoded_callsign,
+            Some(expected_callsign),
+            "[{SIGNAL_001}] {icao} callsign"
+        );
+
+        if let Some(tp) = truth_for_icao
+            .iter()
+            .find(|t| t.str("message_kind") == Some("position-even"))
+        {
+            let (exp_lat, exp_lon) = (
+                tp.f64("/metadata/lat").unwrap(),
+                tp.f64("/metadata/lon").unwrap(),
+            );
+            let (lat, lon) = decodes
+                .iter()
+                .find_map(|d| {
+                    Some((
+                        d.metadata.get("lat")?.as_f64()?,
+                        d.metadata.get("lon")?.as_f64()?,
+                    ))
+                })
+                .unwrap_or_else(|| panic!("[{SIGNAL_001}] {icao}: no decoded position"));
+            assert!(
+                (lat - exp_lat).abs() < 0.01,
+                "[{SIGNAL_001}] {icao} lat {lat} vs truth {exp_lat}"
+            );
+            assert!(
+                (lon - exp_lon).abs() < 0.01,
+                "[{SIGNAL_001}] {icao} lon {lon} vs truth {exp_lon}"
+            );
+        }
+
+        if let Some(tv) = truth_for_icao
+            .iter()
+            .find(|t| t.str("message_kind") == Some("velocity"))
+        {
+            let (exp_ew, exp_ns, exp_vr) = (
+                tv.f64("/metadata/ew_velocity_kt").unwrap(),
+                tv.f64("/metadata/ns_velocity_kt").unwrap(),
+                tv.f64("/metadata/vertical_rate_fpm").unwrap(),
+            );
+            let (ew, ns, vr) = decodes
+                .iter()
+                .find_map(|d| {
+                    Some((
+                        d.metadata.get("ew_velocity_kt")?.as_f64()?,
+                        d.metadata.get("ns_velocity_kt")?.as_f64()?,
+                        d.metadata.get("vertical_rate_fpm")?.as_f64()?,
+                    ))
+                })
+                .unwrap_or_else(|| panic!("[{SIGNAL_001}] {icao}: no decoded velocity"));
+            assert_eq!(ew, exp_ew, "[{SIGNAL_001}] {icao} ew_velocity_kt");
+            assert_eq!(ns, exp_ns, "[{SIGNAL_001}] {icao} ns_velocity_kt");
+            assert_eq!(vr, exp_vr, "[{SIGNAL_001}] {icao} vertical_rate_fpm");
+        }
     }
     let total_decodes: usize = icaos
         .iter()
@@ -336,6 +421,7 @@ fn signal_001_readsb_decodes_land_as_emitters_and_republish() {
 #[test]
 fn readsb_child_crash_mid_stream_is_isolated_and_recovers() {
     readsb_or_skip!();
+    let _guard = ENV_MUTEX.lock().unwrap();
     let out = synth_or_skip!(adsb_request(3));
     let fx = out.fixture(0).unwrap();
     let bytes = std::fs::read(fx.data_path()).unwrap();
@@ -430,6 +516,97 @@ fn readsb_child_crash_mid_stream_is_isolated_and_recovers() {
             .unwrap()
             .is_some()
     );
+}
+
+/// The wrapper reacts to readsb's own "SDR wedged" self-destruct message the instant the stderr
+/// pump sees it, without waiting for the (possibly slow-to-actually-exit) child. Uses
+/// [`FAKE_READSB`] in `wedge_immediately` mode (module doc), which prints the line and then
+/// sleeps far longer than this test's timeout — so a fast crash here proves the stderr-detection
+/// path fired, not the waiter thread blocked on the child's own exit. Does not need readsb
+/// installed.
+#[test]
+fn readsb_wedge_message_ends_the_wrapper_without_waiting_for_the_child() {
+    let _guard = ENV_MUTEX.lock().unwrap();
+    // SAFETY: serialised by ENV_MUTEX against every other test in this file that spawns a
+    // `PluginInstance` or touches these variables.
+    unsafe {
+        std::env::set_var("HK_READSB", FAKE_READSB);
+        std::env::set_var("FAKE_READSB_MODE", "wedge_immediately");
+    }
+    let mut m = manifest();
+    m.restart = RestartPolicy {
+        backoff_initial: Duration::from_millis(20),
+        backoff_max: Duration::from_millis(200),
+        max_restarts: 5,
+        window: Duration::from_secs(60),
+    };
+    let sink = Arc::new(Mutex::new(Ingest::new(
+        Repository::open_in_memory().unwrap(),
+    )));
+    let t0 = Instant::now();
+    let inst = PluginInstance::spawn(
+        m,
+        input(anchor()),
+        PluginContext::default(),
+        Arc::clone(&sink),
+    )
+    .unwrap();
+    let mon = inst.monitor();
+    wait(&mon, "a crash from the wedge message", |s| s.crashes >= 1);
+    let elapsed = t0.elapsed();
+    drop(mon);
+    let stats = inst.shutdown();
+    // SAFETY: same as above.
+    unsafe {
+        std::env::remove_var("HK_READSB");
+        std::env::remove_var("FAKE_READSB_MODE");
+    }
+    assert!(stats.crashes >= 1, "{stats:?}");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "took {elapsed:?}: looks like the wrapper waited for the child (60s sleep) \
+         instead of reacting to the wedge line in its stderr"
+    );
+}
+
+/// The wrapper's keepalive (a small silence chunk whenever it goes `KEEPALIVE_INTERVAL` without
+/// real data to forward) keeps readsb from ever seeing enough idle time to hit its own stall
+/// watchdog. Verified against [`FAKE_READSB`] in `idle_wedge` mode with a test-friendly 5s
+/// threshold (real readsb's is ~9s): an 8s gap with no pushes must not cross it. Does not need
+/// readsb installed.
+#[test]
+fn keepalive_prevents_a_false_wedge_during_an_idle_gap() {
+    let _guard = ENV_MUTEX.lock().unwrap();
+    // SAFETY: serialised by ENV_MUTEX against every other test in this file.
+    unsafe {
+        std::env::set_var("HK_READSB", FAKE_READSB);
+        std::env::set_var("FAKE_READSB_MODE", "idle_wedge");
+        std::env::set_var("FAKE_READSB_IDLE_MS", "5000");
+    }
+    let sink = Arc::new(Mutex::new(Ingest::new(
+        Repository::open_in_memory().unwrap(),
+    )));
+    let mut inst = PluginInstance::spawn(
+        manifest(),
+        input(anchor()),
+        PluginContext::default(),
+        Arc::clone(&sink),
+    )
+    .unwrap();
+    wait_running(&inst);
+    push_all(&mut inst, &[0x00; 4096], 0); // a little real data, then nothing for a while
+
+    thread::sleep(Duration::from_secs(8)); // longer than the fake's 5s idle threshold
+
+    let stats = inst.shutdown();
+    // SAFETY: same as above.
+    unsafe {
+        std::env::remove_var("HK_READSB");
+        std::env::remove_var("FAKE_READSB_MODE");
+        std::env::remove_var("FAKE_READSB_IDLE_MS");
+    }
+    assert_eq!(stats.crashes, 0, "{stats:?}");
+    assert_eq!(stats.state, PluginState::Stopped);
 }
 
 /// Inputs the manifest does not accept (wrong sample rate, wrong datatype) are refused before any

@@ -2,7 +2,10 @@
 //! becomes a consumer of one publisher.
 //!
 //! - **Local-only classes.** `own-key-decrypted` streams are refused on TCP
-//!   ([`crate::gate::remote_transport_permitted`]); serve them on a Unix socket.
+//!   ([`crate::gate::remote_transport_permitted`]); serve them on a Unix socket. `bind_tcp`
+//!   refuses up front, and every accepted connection is subscribed as its concrete socket type
+//!   (`UnixStream` is [`Locality::Local`](crate::Locality), `TcpStream` is `Remote`), so
+//!   the publisher enforces the rule again per consumer.
 //! - **Unix sockets are created mode 0600** without a window: the socket is bound inside a fresh
 //!   0700 directory, chmodded, then renamed into place. A path held by a *live* listener is
 //!   refused (probe-connect); a stale socket file is replaced.
@@ -251,7 +254,7 @@ fn attach_uds(
     let id = handle
         .subscribe(
             label,
-            Box::new(s),
+            s,
             Box::new(move |_| {
                 let _ = closer.shutdown(Shutdown::Both);
             }),
@@ -268,10 +271,12 @@ fn attach_tcp(handle: &PublisherHandle, s: TcpStream) -> Option<(ConsumerId, Own
         .map_or_else(|_| "tcp".to_owned(), |a| format!("tcp:{a}"));
     let closer = s.try_clone().ok()?;
     let watch = s.try_clone().ok()?;
+    // A TcpStream is `Locality::Remote`: refused for own-key streams even if `bind_tcp` was
+    // bypassed.
     let id = handle
         .subscribe(
             label,
-            Box::new(s),
+            s,
             Box::new(move |_| {
                 let _ = closer.shutdown(Shutdown::Both);
             }),

@@ -352,6 +352,27 @@ fn clamped_class_and_gated_content_are_never_persisted_or_streamed() {
         let dir = temp_dir(if gated { "g" } else { "u" });
         let db = dir.join("hk.sqlite");
 
+        // What a restricted-class manifest must declare: typed metadata, frame model, label and
+        // identity shape that survive the gate (docs/stream-contract.md §9.3). The republisher
+        // carries the same policy, since egress reduces restricted rows again.
+        let policy = MetadataPolicy {
+            keys: [
+                ("icao", MetadataType::Hex { max_len: 6 }),
+                ("df", MetadataType::Integer),
+                ("crc", MetadataType::Enum(vec!["ok".into()])),
+                ("records", MetadataType::Integer),
+            ]
+            .into_iter()
+            .map(|(k, t)| (k.to_owned(), t))
+            .collect(),
+            frame_models: vec!["adsb-df17".into()],
+            labels: vec!["adsb".into()],
+            identity: Some(IdentitySpec {
+                scheme: IdentityScheme::AdsbIcao,
+                charset: Charset::Hex,
+                max_len: 6,
+            }),
+        };
         let mut header = StreamHeader::new(
             "decodes/dummy",
             StreamKind::Messages,
@@ -359,12 +380,14 @@ fn clamped_class_and_gated_content_are_never_persisted_or_streamed() {
             "hk-plugins-test",
         );
         header.max_frame_len = 64 * 1024;
-        let publisher = Publisher::new(
+        header.message_schema = Some("hackriff.dummy/1".into());
+        let publisher = Publisher::with_metadata_policy(
             header,
             PublisherConfig {
                 queue_bytes: 1024 * 1024,
                 ..PublisherConfig::default()
             },
+            policy.clone(),
         )
         .unwrap();
         let handle = publisher.handle();
@@ -390,26 +413,7 @@ fn clamped_class_and_gated_content_are_never_persisted_or_streamed() {
         )));
         let mut m = repo_manifest();
         m.output.content_class = manifest_class;
-        // What a restricted-class manifest must declare: typed metadata, frame model, label and
-        // identity shape that survive the gate (docs/stream-contract.md §9.3).
-        m.output.metadata_policy = Some(MetadataPolicy {
-            keys: [
-                ("icao", MetadataType::Hex { max_len: 6 }),
-                ("df", MetadataType::Integer),
-                ("crc", MetadataType::Enum(vec!["ok".into()])),
-                ("records", MetadataType::Integer),
-            ]
-            .into_iter()
-            .map(|(k, t)| (k.to_owned(), t))
-            .collect(),
-            frame_models: vec!["adsb-df17".into()],
-            labels: vec!["adsb".into()],
-            identity: Some(IdentitySpec {
-                scheme: IdentityScheme::AdsbIcao,
-                charset: Charset::Hex,
-                max_len: 6,
-            }),
-        });
+        m.output.metadata_policy = Some(policy);
         m.params.insert("every".into(), "5".into());
         add_args(
             &mut m,

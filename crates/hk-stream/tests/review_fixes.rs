@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use hk_model::{ContentClass, Timestamp};
 use hk_stream::{
-    BinaryRecord, CloseReason, ConsumerState, ListenAddr, Listener, MessageRecord, Publisher,
-    PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind, StreamReader,
+    BinaryRecord, CloseReason, ConsumerState, Declared, ListenAddr, Listener, MessageRecord,
+    Publisher, PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind,
+    StreamReader,
 };
 use serde_json::json;
 
@@ -117,7 +118,7 @@ fn p8_own_key_content_needs_an_own_key_stream() {
         let mut p = Publisher::new(messages(stream_class), small()).unwrap();
         let h = p.handle();
         let buf = SharedBuf::default();
-        h.subscribe("mem", Box::new(buf.clone()), Box::new(|_| {}))
+        h.subscribe("mem", Declared::local(buf.clone()), Box::new(|_| {}))
             .unwrap();
         p.publish_message(&record(ContentClass::OwnKeyDecrypted))
             .unwrap();
@@ -295,7 +296,7 @@ fn p10_tail_drops_before_finish_get_a_marker() {
     handle
         .subscribe(
             "valve",
-            Box::new(Valve(Arc::clone(&valve), buf.clone())),
+            Declared::local(Valve(Arc::clone(&valve), buf.clone())),
             Box::new(|_| {}),
         )
         .unwrap();
@@ -319,22 +320,27 @@ fn p10_tail_drops_before_finish_get_a_marker() {
     assert!(handle.wait_closed(Duration::from_secs(5)));
     let bytes = buf.0.lock().unwrap().clone();
     let mut r = StreamReader::new(&bytes[..]);
-    let (mut next, mut markers) = (0u64, 0);
+    let (mut next, mut markers, mut last_was_marker) = (0u64, 0, false);
     while let Some(rec) = r.next_record().unwrap() {
         match rec {
             Record::Binary(b) => {
                 assert_eq!(b.header.seq, next);
                 next += 1;
+                last_was_marker = false;
             }
             Record::Dropped(d) => {
                 assert_eq!(d.first_seq, next);
                 next += d.count;
                 markers += 1;
+                last_was_marker = true;
             }
             other => panic!("{other:?}"),
         }
     }
-    assert_eq!(markers, 1, "the tail drop run is reported");
+    // The consumer thread may dequeue between an early drop and the final one, so the drops can
+    // split into more than one run; what matters is that the tail run is reported.
+    assert!(markers >= 1, "at least one drop run is reported");
+    assert!(last_was_marker, "the tail drop run is reported");
     assert_eq!(
         next, n,
         "every published seq is delivered or covered by a marker"
@@ -357,7 +363,7 @@ fn draining_consumer_is_closed_after_drain_timeout() {
     let id = h
         .subscribe(
             "stuck",
-            Box::new(Valve(Arc::clone(&valve), SharedBuf::default())),
+            Declared::local(Valve(Arc::clone(&valve), SharedBuf::default())),
             Box::new(|_| {}),
         )
         .unwrap();
