@@ -484,7 +484,8 @@ fn letters_only_identity_tags_never_leave_a_restricted_emitter() {
         IdentityAccess::OwnTrafficAuthorised,
     ] {
         let entry = r.emitter_with_access(e, access).unwrap();
-        assert!(entry.tags_withheld);
+        // T-040: the alias tags stored before the restriction were purged, so none are hidden.
+        assert!(!entry.tags_withheld);
         assert_eq!(
             entry
                 .emitter
@@ -737,4 +738,294 @@ fn reclassify_identity_is_authorised_audited_and_never_opens_restricted() {
             .unwrap_err(),
     );
     assert_eq!(reclass_count(&r), 2);
+}
+
+/// Every stored `emitter_tag` row, raw (`hex(emitter_id):tag`), newline-separated.
+fn raw_tags(r: &Repository) -> String {
+    let mut stmt = r
+        .conn
+        .prepare("SELECT hex(emitter_id) || ':' || tag FROM emitter_tag ORDER BY 1")
+        .unwrap();
+    let rows: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    rows.join("\n")
+}
+
+/// Stored tags of one emitter row, raw.
+fn raw_tags_of(r: &Repository, e: EmitterId) -> Vec<String> {
+    let mut stmt = r
+        .conn
+        .prepare("SELECT tag FROM emitter_tag WHERE emitter_id = ?1 ORDER BY tag")
+        .unwrap();
+    stmt.query_map([super::blob(e)], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// An anonymous track emitter at `f` carrying `tags`.
+fn track_emitter(r: &mut Repository, f: f64, tags: &[&str]) -> EmitterId {
+    let s = Sighting {
+        source: LinkTarget::Track(TrackId::new()),
+        seen: TimeRange::instant(t(0)),
+        count: 1,
+        f_center_hz: f,
+        bandwidth_hz: 12.5e3,
+        fingerprint: Some(Fingerprint::new(f, 12.5e3)),
+        identity: None,
+        context: None,
+        classification: None,
+        tags: tags.iter().map(|&t| t.to_owned()).collect(),
+    };
+    r.record_sighting(&s, None).unwrap().emitter_id
+}
+
+/// T-040 item 1: `remove_emitter_tag` on a withheld row answers the same whether or not the
+/// guessed hidden tag is stored (class-only refusal); vocabulary labels still remove normally.
+#[test]
+fn remove_emitter_tag_on_a_withheld_row_is_no_oracle() {
+    use ContentClass::*;
+    const HIDDEN: &str = "sentinel-remove-7391";
+    let mut r = repo();
+    let with = store(
+        &mut r,
+        &decode(
+            Some(&identity("pocsag-capcode", "1111111")),
+            "a",
+            RestrictedPaging,
+            1,
+        ),
+        929.6e6,
+    )
+    .unwrap();
+    let without = store(
+        &mut r,
+        &decode(
+            Some(&identity("pocsag-capcode", "2222222")),
+            "b",
+            RestrictedPaging,
+            2,
+        ),
+        931.9e6,
+    )
+    .unwrap();
+    // A hidden tag stored before T-040 (raw insert: every product path now refuses or purges it).
+    r.conn
+        .execute(
+            "INSERT INTO emitter_tag (emitter_id, tag) VALUES (?1, ?2)",
+            params![super::blob(with), HIDDEN],
+        )
+        .unwrap();
+    let a = r.remove_emitter_tag(with, HIDDEN);
+    let b = r.remove_emitter_tag(without, HIDDEN);
+    assert!(matches!(a, Err(RepoError::Invalid(_))), "{a:?}");
+    assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    let (a, b) = (a.unwrap_err(), b.unwrap_err());
+    assert_eq!(format!("{a}"), format!("{b}"));
+    assert!(!format!("{a} {a:?}").contains(HIDDEN));
+    // Vocabulary labels are shown on the row anyway, so their removal answers normally.
+    r.add_emitter_tag(with, "pager").unwrap();
+    assert!(r.remove_emitter_tag(with, "pager").unwrap());
+    assert!(!r.remove_emitter_tag(without, "pager").unwrap());
+    // A row without an identity keeps the plain answer for free text.
+    let open = track_emitter(&mut r, 146e6, &[HIDDEN]);
+    assert!(r.remove_emitter_tag(open, HIDDEN).unwrap());
+    assert!(!r.remove_emitter_tag(open, HIDDEN).unwrap());
+}
+
+/// T-040 item 2: merging into a restricted emitter stores no free-text tag on the survivor or on
+/// the absorbed row; vocabulary labels are carried over.
+#[test]
+fn merge_into_a_restricted_emitter_stores_no_free_text_tag() {
+    use ContentClass::*;
+    const INTO: &str = "sentinel-merge-into-4402";
+    const MOVED: &str = "sentinel-merge-moved-2208";
+    let mut r = repo();
+    // Survivor already restricted; the absorbed anonymous row carries free text.
+    let pager = store(
+        &mut r,
+        &decode(
+            Some(&identity("pocsag-capcode", "3333333")),
+            "p",
+            RestrictedPaging,
+            1,
+        ),
+        929.6e6,
+    )
+    .unwrap();
+    let anon = track_emitter(&mut r, 146e6, &[INTO, "watch"]);
+    assert!(raw_tags(&r).contains(INTO), "positive control");
+    r.merge_emitters(anon, pager, t(10), "same transmitter")
+        .unwrap();
+    assert_eq!(raw_tags_of(&r, pager), vec!["watch"]);
+    // The identity moves in: the anonymous survivor becomes restricted and loses its free text.
+    let survivor = track_emitter(&mut r, 433.9e6, &[MOVED, "interesting"]);
+    let cell = store(
+        &mut r,
+        &decode(
+            Some(&identity("imsi", "310150123456789")),
+            "c",
+            RestrictedCellular,
+            2,
+        ),
+        1900e6,
+    )
+    .unwrap();
+    assert!(raw_tags(&r).contains(MOVED), "positive control");
+    let m = r
+        .merge_emitters(cell, survivor, t(11), "same transmitter")
+        .unwrap();
+    assert!(m.identity_moved);
+    assert_eq!(raw_tags_of(&r, survivor), vec!["interesting"]);
+    let raw = raw_tags(&r);
+    assert!(!raw.contains(INTO) && !raw.contains(MOVED), "{raw}");
+}
+
+/// T-040 item 3: a tag added (or removed) through a merged-away id acts on the live survivor.
+#[test]
+fn a_tag_added_through_a_merged_away_id_lands_on_the_live_row() {
+    const TAG: &str = "sentinel-live-5510";
+    let mut r = repo();
+    let gone = track_emitter(&mut r, 146e6, &[]);
+    let live = track_emitter(&mut r, 433.9e6, &[]);
+    r.merge_emitters(gone, live, t(5), "same").unwrap();
+    r.add_emitter_tag(gone, TAG).unwrap();
+    assert_eq!(raw_tags_of(&r, live), vec![TAG]);
+    assert!(raw_tags_of(&r, gone).is_empty());
+    assert!(r.emitter(live).unwrap().tags.contains(TAG));
+    assert!(r.remove_emitter_tag(gone, TAG).unwrap());
+    assert!(raw_tags_of(&r, live).is_empty());
+    // A merged-away id of a restricted survivor is refused by the survivor's class.
+    let anon = track_emitter(&mut r, 162e6, &[]);
+    let pager = store(
+        &mut r,
+        &decode(
+            Some(&identity("pocsag-capcode", "4444444")),
+            "p",
+            ContentClass::RestrictedPaging,
+            1,
+        ),
+        929.6e6,
+    )
+    .unwrap();
+    r.merge_emitters(anon, pager, t(6), "same").unwrap();
+    assert!(matches!(
+        r.add_emitter_tag(anon, TAG),
+        Err(RepoError::Invalid(_))
+    ));
+    r.add_emitter_tag(anon, "pager").unwrap();
+    assert_eq!(raw_tags_of(&r, pager), vec!["pager"]);
+    assert!(!raw_tags(&r).contains(TAG));
+}
+
+/// T-040 item 4: free-text tags stored before a class tightens are deleted in the tightening
+/// write, on every path (identity arriving by sighting, a more restrictive source, a restrictive
+/// source after an audited reclassification, the legacy observation upsert, a linked restricted
+/// decode); a raw scan finds no sentinel afterwards.
+#[test]
+fn tags_are_purged_when_the_class_tightens() {
+    use ContentClass::*;
+    const SIGHTED: &str = "sentinel-sighted-8120";
+    const ADDED: &str = "sentinel-added-6630";
+    const OPENED: &str = "sentinel-opened-1000";
+    const RECLASSED: &str = "sentinel-reclassed-7391";
+    const LEGACY: &str = "sentinel-legacy-4402";
+    const LINKED: &str = "sentinel-linked-2208";
+    let all = [SIGHTED, ADDED, OPENED, RECLASSED, LEGACY, LINKED];
+    let auth = IdentityAccess::OwnTrafficAuthorised;
+    let mut r = repo();
+
+    // (a) An anonymous emitter gets a restricted identity through a context sighting.
+    let a = track_emitter(&mut r, 929.6e6, &[SIGHTED, "pager"]);
+    r.add_emitter_tag(a, ADDED).unwrap();
+    let alias = DecodedIdentity {
+        scheme: IdentityScheme::RdsPi,
+        value: "quokka".into(),
+    };
+    let d = decode(Some(&alias), "alias", RestrictedPaging, 1);
+    r.insert_decode(&d).unwrap();
+    let s = Sighting::decode(&d, 929.6e6, 25e3, Some(a)).unwrap();
+
+    // (b) An unrestricted identity with free text, later closed by a restricted-paging source.
+    let rds = identity("rds-like", "C0DE");
+    let b = store(&mut r, &decode(Some(&rds), "rds", Unrestricted, 2), 98.1e6).unwrap();
+    r.add_emitter_tag(b, OPENED).unwrap();
+
+    // (c) A metadata-only identity opened by audited reclassification, tagged, then closed.
+    let mine = identity("hk-framing", "0badc0de");
+    let c = store(&mut r, &decode(Some(&mine), "m", MetadataOnly, 3), 915e6).unwrap();
+    r.reclassify_identity(c, OwnKeyDecrypted, auth, "my sensor", "dan")
+        .unwrap();
+    r.add_emitter_tag(c, RECLASSED).unwrap();
+
+    // (d) A legacy anonymous row later given an (unclassified) identity by the observation upsert.
+    let obs = |identity: Option<DecodedIdentity>, id: EmitterId, f: f64| EmitterObservation {
+        emitter_id: id,
+        seen: TimeRange::new(t(0), t(1)),
+        count: 1,
+        f_center_hz: f,
+        bandwidth_hz: 12.5e3,
+        identity,
+    };
+    let dd = r
+        .upsert_emitter_observation(&obs(None, EmitterId::new(), 851e6))
+        .unwrap()
+        .emitter_id;
+    r.add_emitter_tag(dd, LEGACY).unwrap();
+
+    // (e) A legacy identity row classed only by linked decodes: unrestricted, then restricted.
+    let trunk = identity("talkgroup-x", "sys9:4242");
+    let e = r
+        .upsert_emitter_observation(&obs(Some(trunk.clone()), EmitterId::new(), 852e6))
+        .unwrap()
+        .emitter_id;
+    let link = |r: &mut Repository, d: &Decode| {
+        r.insert_decode(d).unwrap();
+        r.link_emitter(&EmitterLink {
+            emitter_id: e,
+            target: LinkTarget::Decode(d.id),
+            linked_at: d.t,
+        })
+        .unwrap();
+    };
+    link(&mut r, &decode(Some(&trunk), "open", Unrestricted, 4));
+    r.add_emitter_tag(e, LINKED).unwrap();
+
+    let before = raw_tags(&r);
+    for sentinel in all {
+        assert!(before.contains(sentinel), "positive control {sentinel}");
+    }
+
+    // Tighten every row.
+    assert_eq!(r.record_sighting(&s, None).unwrap().emitter_id, a);
+    store(
+        &mut r,
+        &decode(Some(&rds), "rds2", RestrictedPaging, 5),
+        98.1e6,
+    );
+    store(
+        &mut r,
+        &decode(Some(&mine), "m2", RestrictedPaging, 6),
+        915e6,
+    );
+    r.upsert_emitter_observation(&obs(Some(identity("talkgroup-y", "sys9:1")), dd, 851e6))
+        .unwrap();
+    link(&mut r, &decode(Some(&trunk), "closed", RestrictedPaging, 7));
+
+    let after = raw_tags(&r);
+    for sentinel in all {
+        assert!(!after.contains(sentinel), "{sentinel} survived: {after}");
+    }
+    assert_eq!(raw_tags_of(&r, a), vec!["pager"], "vocabulary kept");
+    for id in [a, b, c, dd, e] {
+        let entry = r.emitter_with_access(id, auth).unwrap();
+        assert!(
+            matches!(entry.identity, InventoryIdentity::Withheld { .. }),
+            "{id}"
+        );
+        assert!(!entry.tags_withheld, "nothing left to hide on {id}");
+    }
 }
