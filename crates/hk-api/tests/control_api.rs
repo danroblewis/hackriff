@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use hk_api::control::AuditLimits;
 use hk_api::{
     ApiState, AuditLog, DisplayState, DisplayUpdate, LiveControl, LiveControlError, LiveTuning,
     ROUTES, RecordingState, RunControl, RunState, Server, ServerConfig, SourceLiveControl, Token,
@@ -196,6 +197,7 @@ struct Rig {
     server: Server,
     device: Arc<Device>,
     audit: PathBuf,
+    audit_log: Arc<AuditLog>,
     _dir: TempDir,
 }
 
@@ -203,11 +205,12 @@ fn rig(tag: &str, token: Token, device: Arc<Device>, live_device: bool) -> Rig {
     let dir = TempDir::new(tag);
     let audit = dir.0.join("control-audit.jsonl");
     let repo = Repository::open(dir.0.join("hackriff.db")).unwrap();
+    let audit_log = Arc::new(AuditLog::open(&audit).unwrap());
     let state = ApiState {
         live_control: live_device.then(|| live(&device)),
         run_control: Some(FakeRun::new(ContentClass::Unrestricted) as Arc<dyn RunControl>),
         bookmarks: Some(Arc::new(Mutex::new(repo))),
-        audit: Some(Arc::new(AuditLog::open(&audit).unwrap())),
+        audit: Some(Arc::clone(&audit_log)),
         ..ApiState::default()
     };
     let server = Server::start(
@@ -219,6 +222,7 @@ fn rig(tag: &str, token: Token, device: Arc<Device>, live_device: bool) -> Rig {
         server,
         device,
         audit,
+        audit_log,
         _dir: dir,
     }
 }
@@ -377,13 +381,21 @@ fn control_requests_need_a_valid_bearer_token_in_the_header() {
         401
     );
     assert!(r.device.calls().is_empty(), "nothing reached the device");
+    // Unauthenticated refusals are coalesced per client; every one is counted.
+    r.audit_log.flush_refused();
     let refused = audit_entries(&r.audit);
-    assert!(refused.len() >= 8, "{refused:?}");
-    assert!(
+    assert!(!refused.is_empty());
+    assert_eq!(
         refused
             .iter()
-            .all(|e| e["result"] == "refused" && e["status"] == 401)
+            .map(|e| e["count"].as_u64().unwrap())
+            .sum::<u64>(),
+        8,
+        "{refused:?}"
     );
+    assert!(refused.iter().all(|e| {
+        (e["result"] == "refused" && e["status"] == 401) || e["result"] == "refused_summary"
+    }));
     assert!(refused.iter().all(|e| e["token_id"].is_null()));
 
     let rep = authed(addr, "POST", "/api/control/center", Some(body));
@@ -725,6 +737,224 @@ fn every_control_action_is_audited_with_old_and_new_values() {
     assert!(!text.contains(TOKEN), "the token itself is never logged");
     let mode = std::fs::metadata(&r.audit).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
+}
+
+/// Sizes of the audit log and its rotated files.
+fn audit_files(audit: &Path) -> Vec<(PathBuf, u64)> {
+    let name = audit.file_name().unwrap().to_str().unwrap().to_owned();
+    let mut files: Vec<(PathBuf, u64)> = std::fs::read_dir(audit.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(&name)))
+        .map(|e| (e.path(), e.metadata().unwrap().len()))
+        .collect();
+    files.sort();
+    files
+}
+
+fn all_audit_entries(audit: &Path) -> Vec<Value> {
+    audit_files(audit)
+        .iter()
+        .flat_map(|(p, _)| audit_entries(p))
+        .collect()
+}
+
+#[test]
+fn unauthenticated_oversized_floods_cannot_fill_the_audit_directory() {
+    const REQUESTS: usize = 10_000;
+    const THREADS: usize = 16;
+    let r = rig(
+        "flood",
+        Token::from_config(TOKEN).unwrap(),
+        Device::new(true),
+        true,
+    );
+    let addr = r.server.local_addr();
+    let long_path = "a".repeat(15_000);
+    let long_origin = format!("https://{}", "o".repeat(1_000));
+    let started = std::time::Instant::now();
+    std::thread::scope(|s| {
+        for t in 0..THREADS {
+            let (long_path, long_origin) = (&long_path, &long_origin);
+            s.spawn(move || {
+                for i in 0..REQUESTS / THREADS {
+                    // Half the threads claim a new client address per request (through a
+                    // loopback proxy), the rest are one client.
+                    let forwarded = if t % 2 == 0 {
+                        format!("X-Forwarded-For: 10.{t}.{}.{}\r\n", i / 256, i % 256)
+                    } else {
+                        String::new()
+                    };
+                    let head = format!(
+                        "POST /api/{long_path} HTTP/1.1\r\nHost: {addr}\r\nOrigin: {long_origin}\r\n\
+                         {forwarded}Connection: close\r\n\r\n"
+                    );
+                    assert_eq!(raw(addr, &head, b"").status, 401);
+                }
+            });
+        }
+    });
+    let elapsed = started.elapsed();
+    r.audit_log.flush_refused();
+
+    let limits = *r.audit_log.limits();
+    let files = audit_files(&r.audit);
+    let total: u64 = files.iter().map(|(_, n)| n).sum();
+    assert!(files.len() <= limits.files, "{files:?}");
+    assert!(
+        total <= limits.files as u64 * limits.max_file_bytes,
+        "audit dir {total} bytes"
+    );
+    assert!(
+        total < 1024 * 1024,
+        "coalesced: {REQUESTS} requests of ~16 KiB logged in {total} bytes"
+    );
+    let entries = all_audit_entries(&r.audit);
+    let lines = entries.iter().filter(|e| e["result"] == "refused").count();
+    let windows = elapsed.as_secs() / 60 + 1;
+    assert!(
+        lines as u64 <= u64::from(limits.refused_lines_per_window) * windows,
+        "{lines} refused lines in {elapsed:?}"
+    );
+    let summaries = entries
+        .iter()
+        .filter(|e| e["result"] == "refused_summary")
+        .count();
+    assert!(summaries >= 1, "the suppressed refusals are summarised");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| e["count"].as_u64().unwrap())
+            .sum::<u64>(),
+        REQUESTS as u64,
+        "every refusal is counted exactly once"
+    );
+    for e in entries.iter().filter(|e| e["result"] == "refused") {
+        let path = e["path"].as_str().unwrap();
+        assert!(path.len() < 300 && path.contains("truncated"), "{path}");
+        assert!(e["origin"].as_str().unwrap().len() < 300);
+        assert!(e["count"].as_u64().unwrap() >= 1);
+    }
+    // Control still works, and is logged in full.
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(r#"{"center_hz": 99.1e6}"#),
+    );
+    assert_eq!(rep.status, 200, "{}", rep.body);
+    let entries = all_audit_entries(&r.audit);
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["action"] == "center" && e["new"]["center_hz"] == json!(99.1e6))
+    );
+}
+
+#[test]
+fn the_audit_log_rotates_at_its_cap_and_bounds_fields() {
+    let dir = TempDir::new("rotate");
+    let path = dir.0.join("control-audit.jsonl");
+    let limits = AuditLimits {
+        max_file_bytes: 8 * 1024,
+        files: 3,
+        max_line_bytes: 4 * 1024,
+        ..AuditLimits::default()
+    };
+    let log = AuditLog::open_with_limits(&path, limits).unwrap();
+    for i in 0..2_000 {
+        log.append(&json!({
+            "t_s": i,
+            "token_id": "tok-000000000000",
+            "path": "p".repeat(5_000),
+            "action": "bookmark_create",
+            "request": { "note": "n".repeat(600), ("k".repeat(2_000)): 1 },
+            "old": null,
+            "new": { "i": i },
+            "result": "ok",
+        }))
+        .unwrap();
+    }
+    let big = json!({
+        "action": "gains",
+        "request": (0..500).map(|i| (format!("s{i}"), json!("x".repeat(100)))).collect::<serde_json::Map<_, _>>(),
+    });
+    log.append(&big).unwrap();
+    let files = audit_files(&path);
+    assert_eq!(files.len(), 3, "{files:?}");
+    assert!(
+        files.iter().all(|(_, n)| *n <= limits.max_file_bytes),
+        "{files:?}"
+    );
+    let entries = all_audit_entries(&path);
+    assert!(!entries.is_empty());
+    for e in &entries {
+        let line = serde_json::to_string(e).unwrap();
+        assert!(line.len() < limits.max_line_bytes, "{} bytes", line.len());
+        if let Some(p) = e["path"].as_str() {
+            assert!(p.starts_with("ppp") && p.contains("truncated"));
+        }
+    }
+    let last = entries.iter().find(|e| e["action"] == "gains").unwrap();
+    assert_eq!(last["request"]["truncated"], json!(true), "{last}");
+    assert!(
+        entries.iter().any(|e| e["new"]["i"] == json!(1_999)),
+        "the newest entries are kept"
+    );
+    assert!(!std::fs::exists(format!("{}.3", path.display())).unwrap());
+}
+
+#[test]
+fn refusals_are_coalesced_per_client_under_a_global_budget() {
+    let dir = TempDir::new("coalesce");
+    let path = dir.0.join("audit.jsonl");
+    let log = AuditLog::open_with_limits(
+        &path,
+        AuditLimits {
+            refused_interval: Duration::from_secs(3600),
+            refused_window: Duration::from_secs(3600),
+            refused_lines_per_window: 2,
+            ..AuditLimits::default()
+        },
+    )
+    .unwrap();
+    let entry = |client: &str| json!({ "result": "refused", "status": 401, "peer": client });
+    for client in ["a", "a", "b", "b", "c", "c", "a"] {
+        log.append_refused(client, &entry(client));
+    }
+    let lines = audit_entries(&path);
+    assert_eq!(
+        lines
+            .iter()
+            .map(|e| (e["peer"].as_str().unwrap(), e["count"].as_u64().unwrap()))
+            .collect::<Vec<_>>(),
+        vec![("a", 1), ("b", 1)],
+        "one line per client per interval, two lines per window"
+    );
+    drop(log); // flushes pending counts
+    let lines = audit_entries(&path);
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[2]["result"], "refused_summary");
+    assert_eq!(
+        lines[2]["count"],
+        json!(5),
+        "a x2, b x1, c x2 not on a line"
+    );
+}
+
+#[test]
+fn the_audit_log_refuses_symlinks() {
+    let dir = TempDir::new("audit-link");
+    let target = dir.0.join("target.jsonl");
+    std::fs::write(&target, "").unwrap();
+    let link = dir.0.join("control-audit.jsonl");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let e = AuditLog::open(&link).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
+    let dangling = dir.0.join("dangling.jsonl");
+    std::os::unix::fs::symlink(dir.0.join("nowhere"), &dangling).unwrap();
+    assert!(AuditLog::open(&dangling).is_err());
+    assert!(!dir.0.join("nowhere").exists());
 }
 
 #[test]

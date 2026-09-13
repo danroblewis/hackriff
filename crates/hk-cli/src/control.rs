@@ -2,6 +2,7 @@
 //! API's traits (`hk_api::RunControl`, `hk_api::WindowRetuner`), T-050. hk-api does not depend on
 //! hk-pipeline; the binaries' composition joins them here.
 
+use hk_api::live_control::AppliedWindow;
 use hk_api::{
     DisplayState, DisplayUpdate, LiveControlError, RecordingState, RunControl, RunState,
     WindowRetuner,
@@ -112,5 +113,14 @@ impl WindowRetuner for PipelineRetuner {
             .retune(center_hz, sample_rate_hz)
             .map(|o| o.content_class)
             .map_err(api_error)
+    }
+
+    fn applied_window(&self) -> Option<AppliedWindow> {
+        let s = self.0.status();
+        Some(AppliedWindow {
+            center_hz: s.center_hz,
+            sample_rate_hz: s.sample_rate_hz,
+            settling: s.replumbing,
+        })
     }
 }

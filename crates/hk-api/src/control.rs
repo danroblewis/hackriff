@@ -35,10 +35,13 @@
 //!   mutating request whose `Origin` names another host than `Host` / `X-Forwarded-Host` is
 //!   refused (403). Same-origin use (the UI served by this server, directly or through the
 //!   cloudflared tunnel, whose `Host` is the public hostname) is unaffected.
-//! - **Audit log** ([`AuditLog`], JSON lines, mode `0600`): one entry per control request,
-//!   including refused and unauthenticated ones: time, token id ([`crate::Token::id`], never the
-//!   token), peer, forwarded-for, method, path, action, request body, old and new values, status
-//!   and result. Without an audit log every mutating endpoint answers 503.
+//! - **Audit log** ([`AuditLog`], JSON lines, mode `0600`): one entry per authenticated control
+//!   request: time, token id ([`crate::Token::id`], never the token), peer, forwarded-for,
+//!   method, path, action, request body, old and new values, status and result. Unauthenticated
+//!   refusals are coalesced (one line per client per second with a `count`, at most 120 lines a
+//!   minute, the rest in `refused_summary` counts); every string is bounded and the files rotate
+//!   (4 x 16 MiB, [`AuditLimits`]), so unauthenticated traffic cannot fill the disk. Without an
+//!   audit log every mutating endpoint answers 503.
 //! - **Legal gating** lives in the pipeline and the repository, not here: a retune re-derives the
 //!   window's class, recordings are refused under content-forbidding classes, and the API never
 //!   opens content (bookmarks are user metadata only).
@@ -51,11 +54,13 @@
 //! `https://<tunnel-host>/#token=<token>`). It must send `Authorization: Bearer <token>` on every
 //! `fetch` (control calls included) and `?token=` only on the `wss://` WebSocket URL.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use hk_core::source::{SampleRates, SourceKind};
 use hk_core::{NamedGain, SourceCapabilities};
@@ -158,47 +163,412 @@ pub trait RunControl: Send + Sync {
     fn stop_recording(&self) -> Result<RecordingState, LiveControlError>;
 }
 
-/// Append-only JSON-lines audit log of control requests (mode `0600`).
+/// Bounds of an [`AuditLog`] (T-062): the log is reachable by unauthenticated clients (every
+/// refused control request is recorded), so its disk use, line size and refused-line rate are
+/// capped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AuditLimits {
+    /// Largest file before it rotates, bytes.
+    pub max_file_bytes: u64,
+    /// Files kept, the live one included (`<path>`, `<path>.1`, ... `<path>.<files-1>`). Disk use
+    /// never exceeds `files * max_file_bytes`.
+    pub files: usize,
+    /// Longest line, bytes (clamped to `max_file_bytes`). A longer entry keeps its identifying
+    /// fields and replaces `request`, `old` and `new` with a truncation note.
+    pub max_line_bytes: usize,
+    /// Longest top-level string field (path, origin, forwarded-for, ...), bytes.
+    pub max_field_bytes: usize,
+    /// Longest string nested in `request`, `old` or `new`, bytes.
+    pub max_value_bytes: usize,
+    /// Unauthenticated refusals: at most one line per client per this interval; the ones in
+    /// between are counted into the client's next line (`count`).
+    pub refused_interval: Duration,
+    /// Unauthenticated refusal lines written per `refused_window` at most; the rest are counted
+    /// into one `refused_summary` line when the window rolls over.
+    pub refused_lines_per_window: u32,
+    /// See `refused_lines_per_window`.
+    pub refused_window: Duration,
+}
+
+impl Default for AuditLimits {
+    /// 4 files of 16 MiB (64 MiB in all), 16 KiB lines, 256-byte fields (1 KiB nested), one
+    /// refused line per client per second and at most 120 per minute.
+    fn default() -> Self {
+        Self {
+            max_file_bytes: 16 * 1024 * 1024,
+            files: 4,
+            max_line_bytes: 16 * 1024,
+            max_field_bytes: 256,
+            max_value_bytes: 1024,
+            refused_interval: Duration::from_secs(1),
+            refused_lines_per_window: 120,
+            refused_window: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Most clients tracked for refusal coalescing at once.
+const MAX_REFUSED_CLIENTS: usize = 1024;
+
+/// Append-only JSON-lines audit log of control requests (mode `0600`, rotated, bounded; see
+/// [`AuditLimits`]).
+///
+/// - [`AuditLog::append`] writes one full entry (authenticated control actions), with every
+///   string bounded.
+/// - [`AuditLog::append_refused`] coalesces unauthenticated refusals per client: a written
+///   refusal line carries `count`, the refusals it stands for (itself plus the ones suppressed
+///   from that client since its previous line). Refusals over the global line budget, and counts
+///   still pending when the window rolls over or the log is flushed or dropped, go into
+///   `{"result": "refused_summary", "count": n}` lines. Every refusal is counted exactly once.
+/// - Audit volume never blocks or fails a control request: write errors are reported (at most
+///   every 10 s) on stderr and the entry is dropped.
 #[derive(Debug)]
 pub struct AuditLog {
     path: PathBuf,
-    file: Mutex<File>,
+    limits: AuditLimits,
+    inner: Mutex<AuditInner>,
+}
+
+#[derive(Debug)]
+struct AuditInner {
+    file: Option<File>,
+    size: u64,
+    window_start: Instant,
+    window_lines: u32,
+    /// Refusals not yet on any line (over budget, or flushed from stale clients).
+    unwritten: u64,
+    clients: HashMap<String, ClientRefusals>,
+    last_error: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct ClientRefusals {
+    last_line: Instant,
+    suppressed: u64,
+}
+
+/// Opens `path` for appending without following a symlink; refuses anything but a regular file.
+fn open_audit_file(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("audit log {} is a symlink", path.display()),
+                )
+            } else {
+                e
+            }
+        })?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("audit log {} is not a regular file", path.display()),
+        ));
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// `s` cut to at most `max` bytes (on a character boundary) with a truncation marker.
+fn bound_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…[truncated {} bytes]", &s[..cut], s.len() - cut)
+}
+
+fn bound_value(v: &Value, max: usize) -> Value {
+    match v {
+        Value::String(s) => Value::String(bound_str(s, max)),
+        Value::Array(a) => Value::Array(a.iter().map(|x| bound_value(x, max)).collect()),
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .map(|(k, x)| (bound_str(k, max), bound_value(x, max)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 impl AuditLog {
-    /// Opens (creating) `path` for appending, with mode `0600`.
+    /// Opens (creating) `path` for appending, with mode `0600` and [`AuditLimits::default`].
+    /// Refuses a symlink or any other non-regular file.
     pub fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_limits(path, AuditLimits::default())
+    }
+
+    /// [`AuditLog::open`] with explicit limits.
+    pub fn open_with_limits(path: &Path, mut limits: AuditLimits) -> io::Result<Self> {
+        limits.files = limits.files.max(1);
+        limits.max_file_bytes = limits.max_file_bytes.max(1024);
+        limits.max_line_bytes = limits.max_line_bytes.clamp(
+            512,
+            usize::try_from(limits.max_file_bytes).unwrap_or(usize::MAX),
+        );
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             fs::create_dir_all(dir)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let file = open_audit_file(path)?;
+        let size = file.metadata()?.len();
         Ok(Self {
             path: path.to_owned(),
-            file: Mutex::new(file),
+            limits,
+            inner: Mutex::new(AuditInner {
+                file: Some(file),
+                size,
+                window_start: Instant::now(),
+                window_lines: 0,
+                unwritten: 0,
+                clients: HashMap::new(),
+                last_error: None,
+            }),
         })
     }
 
-    /// The log file.
+    /// The live log file (rotated files are `<path>.1`, `<path>.2`, ...).
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Appends one entry as a line.
+    /// The limits in force.
+    pub fn limits(&self) -> &AuditLimits {
+        &self.limits
+    }
+
+    fn rotated(&self, n: usize) -> PathBuf {
+        let mut p = self.path.clone().into_os_string();
+        p.push(format!(".{n}"));
+        PathBuf::from(p)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, AuditInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Appends one entry as a line, every string bounded. Rotates at the size cap.
     pub fn append(&self, entry: &Value) -> io::Result<()> {
-        let mut line = serde_json::to_vec(entry).map_err(io::Error::other)?;
+        let line = self.encode(entry);
+        let mut inner = self.lock();
+        self.roll_window(&mut inner, Instant::now());
+        self.write_line(&mut inner, &line)
+    }
+
+    /// Records an unauthenticated refusal from `client` (an address), coalesced (see the type
+    /// docs). Never fails: write errors are reported on stderr.
+    pub fn append_refused(&self, client: &str, entry: &Value) {
+        let now = Instant::now();
+        let client = bound_str(client, 64);
+        let mut inner = self.lock();
+        self.roll_window(&mut inner, now);
+        if !inner.clients.contains_key(&client) && inner.clients.len() >= MAX_REFUSED_CLIENTS {
+            self.flush_stale_clients(&mut inner, now);
+            if inner.clients.len() >= MAX_REFUSED_CLIENTS {
+                inner.unwritten += 1;
+                return;
+            }
+        }
+        let interval = self.limits.refused_interval;
+        let over_budget = inner.window_lines >= self.limits.refused_lines_per_window;
+        let bucket = inner
+            .clients
+            .entry(client)
+            .or_insert_with(|| ClientRefusals {
+                last_line: now.checked_sub(interval).unwrap_or(now),
+                suppressed: 0,
+            });
+        if now.duration_since(bucket.last_line) < interval && bucket.suppressed < u64::MAX {
+            bucket.suppressed += 1;
+            return;
+        }
+        let count = bucket.suppressed + 1;
+        bucket.suppressed = 0;
+        bucket.last_line = now;
+        if over_budget {
+            inner.unwritten += count;
+            return;
+        }
+        let mut entry = entry.clone();
+        if let Some(m) = entry.as_object_mut() {
+            m.insert("count".into(), json!(count));
+        }
+        let line = self.encode(&entry);
+        inner.window_lines += 1;
+        if self.write_line(&mut inner, &line).is_err() {
+            inner.unwritten += count;
+        }
+    }
+
+    /// Writes any refusal counts not yet on a line as one `refused_summary` line.
+    pub fn flush_refused(&self) {
+        let mut inner = self.lock();
+        let pending: u64 = inner.clients.values().map(|c| c.suppressed).sum();
+        inner.clients.clear();
+        inner.unwritten += pending;
+        self.write_summary(&mut inner);
+    }
+
+    /// Moves suppressed counts of clients silent for an interval into `unwritten` and forgets them.
+    fn flush_stale_clients(&self, inner: &mut AuditInner, now: Instant) {
+        let interval = self.limits.refused_interval;
+        let mut moved = 0;
+        inner.clients.retain(|_, c| {
+            let stale = now.duration_since(c.last_line) >= interval;
+            if stale {
+                moved += c.suppressed;
+            }
+            !stale
+        });
+        inner.unwritten += moved;
+    }
+
+    fn roll_window(&self, inner: &mut AuditInner, now: Instant) {
+        if now.duration_since(inner.window_start) < self.limits.refused_window {
+            return;
+        }
+        self.flush_stale_clients(inner, now);
+        self.write_summary(inner);
+        inner.window_start = now;
+        inner.window_lines = 0;
+    }
+
+    fn write_summary(&self, inner: &mut AuditInner) {
+        if inner.unwritten == 0 {
+            return;
+        }
+        let line = self.encode(&json!({
+            "t_s": now_s(),
+            "result": "refused_summary",
+            "count": inner.unwritten,
+            "error": "unauthenticated refusals not logged individually (rate limit)",
+        }));
+        if self.write_line(inner, &line).is_ok() {
+            inner.unwritten = 0;
+        }
+    }
+
+    /// The entry as a bounded line (with its newline).
+    fn encode(&self, entry: &Value) -> Vec<u8> {
+        let l = &self.limits;
+        let mut bounded = match entry {
+            Value::Object(m) => Value::Object(
+                m.iter()
+                    .map(|(k, v)| {
+                        let max = if matches!(k.as_str(), "request" | "old" | "new") {
+                            l.max_value_bytes
+                        } else {
+                            l.max_field_bytes
+                        };
+                        (bound_str(k, l.max_field_bytes), bound_value(v, max))
+                    })
+                    .collect(),
+            ),
+            other => bound_value(other, l.max_field_bytes),
+        };
+        let mut line = serde_json::to_vec(&bounded).unwrap_or_default();
+        if line.len() >= l.max_line_bytes {
+            let bytes = line.len();
+            if let Some(m) = bounded.as_object_mut() {
+                for k in ["request", "old", "new"] {
+                    if m.contains_key(k) {
+                        m.insert(k.into(), json!({ "truncated": true, "entry_bytes": bytes }));
+                    }
+                }
+            }
+            line = serde_json::to_vec(&bounded).unwrap_or_default();
+            if line.len() >= l.max_line_bytes {
+                line = serde_json::to_vec(&json!({
+                    "t_s": now_s(),
+                    "result": "truncated",
+                    "entry_bytes": bytes,
+                }))
+                .unwrap_or_default();
+            }
+        }
         line.push(b'\n');
-        let mut f = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-        f.write_all(&line)?;
-        f.flush()
+        line
+    }
+
+    fn write_line(&self, inner: &mut AuditInner, line: &[u8]) -> io::Result<()> {
+        let result = self.try_write(inner, line);
+        if let Err(e) = &result {
+            let now = Instant::now();
+            if inner
+                .last_error
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(10))
+            {
+                inner.last_error = Some(now);
+                eprintln!("hk-api: audit log {}: {e}", self.path.display());
+            }
+        }
+        result
+    }
+
+    fn try_write(&self, inner: &mut AuditInner, line: &[u8]) -> io::Result<()> {
+        let len = line.len() as u64;
+        if inner.file.is_none() || inner.size + len > self.limits.max_file_bytes {
+            self.rotate(inner)?;
+        }
+        let file = inner
+            .file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("audit log not open"))?;
+        file.write_all(line)?;
+        file.flush()?;
+        inner.size += len;
+        Ok(())
+    }
+
+    /// Shifts `<path>` to `<path>.1` (dropping the oldest) and starts a new file. Leaves no file
+    /// open on failure, so nothing grows past the cap; the next write retries.
+    fn rotate(&self, inner: &mut AuditInner) -> io::Result<()> {
+        inner.file = None;
+        let files = self.limits.files;
+        if files == 1 {
+            match fs::remove_file(&self.path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        } else {
+            match fs::remove_file(self.rotated(files - 1)) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            for n in (1..files - 1).rev() {
+                match fs::rename(self.rotated(n), self.rotated(n + 1)) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
+            }
+            match fs::rename(&self.path, self.rotated(1)) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        let file = open_audit_file(&self.path)?;
+        inner.size = file.metadata()?.len();
+        inner.file = Some(file);
+        Ok(())
     }
 }
 
-/// Who sent a request (audit log fields; `forwarded_for` and `origin` are as claimed).
+impl Drop for AuditLog {
+    fn drop(&mut self) {
+        self.flush_refused();
+    }
+}
+
+/// Who sent a request (audit log fields; `forwarded_for` is as claimed by a loopback proxy, and
+/// `origin` as claimed by the client).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Caller {
     pub token_id: Option<String>,
@@ -374,7 +744,9 @@ fn now_s() -> f64 {
     Timestamp::now().as_unix_nanos() as f64 / 1e9
 }
 
-/// Records a control request refused before routing (no or wrong token, cross-origin).
+/// Records a refused control request (no or wrong token, cross-origin, unknown endpoint).
+/// Unauthenticated ones are coalesced per client ([`AuditLog::append_refused`]); authenticated
+/// ones are logged in full.
 pub(crate) fn audit_refused(
     state: &ApiState,
     method: &str,
@@ -397,8 +769,28 @@ pub(crate) fn audit_refused(
             "status": status,
             "error": reason,
         });
-        if let Err(e) = audit.append(&entry) {
-            eprintln!("hk-api: audit log {}: {e}", audit.path().display());
+        if caller.token_id.is_some() {
+            let _ = audit.append(&entry);
+        } else {
+            audit.append_refused(&caller.client_key(), &entry);
+        }
+    }
+}
+
+impl Caller {
+    /// The client address refusals are coalesced by: the first forwarded-for address (only set
+    /// for a loopback proxy), else the peer's IP without its port.
+    pub(crate) fn client_key(&self) -> String {
+        if let Some(f) = self.forwarded_for.as_deref() {
+            if let Some(first) = f.split(',').next().map(str::trim).filter(|s| !s.is_empty()) {
+                return first.to_owned();
+            }
+        }
+        match self.peer.as_deref() {
+            Some(p) => p
+                .parse::<std::net::SocketAddr>()
+                .map_or_else(|_| p.to_owned(), |a| a.ip().to_string()),
+            None => "unknown".to_owned(),
         }
     }
 }
@@ -486,9 +878,8 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         "status": status,
         "error": error,
     });
-    if let Err(e) = audit.append(&entry) {
-        eprintln!("hk-api: audit log {}: {e}", audit.path().display());
-    }
+    // Errors are reported (rate-limited) by the log; they never fail the request.
+    let _ = audit.append(&entry);
     Some(CtlResponse {
         status,
         body: response,
