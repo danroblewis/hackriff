@@ -32,6 +32,13 @@ So the recompile/restart pain is **inherent to GRC's static-flowgraph model, and
 4. **Runtime engine: prefer FutureSDR** (Rust, dynamic, WASM, GPU/Burn hooks) as the dataflow substrate **if spike S1 confirms** runtime reconfiguration and throughput; otherwise fall back to a small owned Rust dataflow around liquid-dsp/cuFFT. **GR4 is tracked, borrowed from, and reachable via a plugin, but not the core dependency yet** — its ecosystem is 1–2 years behind and its governance is unsettled.
 5. **GPU** does the wideband FFT, the polyphase channelizer, persistence, and ML inference ([ADR-0007](0007-compute-placement.md)).
 
+## Spike S1 outcome (2026-09-13)
+
+S1 resolved decision point 4 in favour of the **owned Rust dataflow** (the ADR's stated fallback); see [spikes/s1-live-reconfig/REPORT.md](../../spikes/s1-live-reconfig/REPORT.md).
+- **Owned: PASS.** Single-writer/multi-reader block ring; chains are reader cursors plus a runtime-built node list. Worst-case attach 0.03–0.81 ms against a 3.28 ms buffer period, zero ring loss over 800 attach/detach cycles, pre-trigger history for free, 8 permissive crates, stable Rust. Condition: the capture thread must run at raised priority (default-priority runs lost samples to thread oversleep).
+- **FutureSDR 0.8.0: FAIL.** No in-graph add/remove (a flowgraph per chain instead), worst-case attach up to 13 ms, flowgraph churn stalled the always-on source (64–137 k samples dropped in 4 of 11 runs), and it requires a nightly compiler. It stays reachable as a plugin process or a source of kernels.
+- **Still PROVISIONAL:** status remains gated on S2 (sustained 20 Msps + GPU FFT on the Jetson). Headroom was measured on an M3 Ultra only.
+
 ## Consequences
 
 - The recompile problem is designed out: chains are data and plugins, and the core runtime (FutureSDR or owned) supports dynamic graphs.
