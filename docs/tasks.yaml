@@ -872,7 +872,12 @@ tasks:
   - id: T-055
     milestone: M0b
     title: HIL release-build live ingest throughput (ring overruns seen in debug at 2.4 Msps)
-    status: in-progress
+    status: done
+    result: "release build, HackRF @100.8 MHz, 30 s each (load 8-20 from other agents): USB drops 0 at every rate. 2.4 Msps real-time with zero loss anywhere (hk run 8-9 % CPU, hk serve 7-14 %). 8/10/20 Msps: detect reader (STFT+CFAR, one thread ~100 %) loses 160.6M/200.4M/483.0M samples (67-80 %), history and spectrum readers lossless; process CPU 108-133 %. Debug 2.4 Msps used 3-4x release CPU (0 loss when quiet; earlier 9.6 M loss under load). FOREIGN KEY constraint failed in analog chain writer at 8 and 10 Msps -> T-059. Demo on :8899 stopped for the run; supervisor restarted it on replay."
+    followups:
+      - "detect reader bottleneck -> T-058"
+      - "pin the real-time ceiling between 2.4 and 8 Msps after T-058/T-056"
+      - "clean debug-vs-release baseline on a quiet machine"
     deps: [T-037]
     parallel_group: R
     use_cases: [SIGNAL-062, SPACE-050]
@@ -910,6 +915,33 @@ tasks:
     effort: high
     core_interface: true
     detail: "sigmf_replay.rs block_provenance (~596-605) rewrites provenance.tune.center_hz to scheduler hop/dwell centres (dwell offsets usable/4 = 450 kHz, scheduler/core.rs:985-993) while recorded IQ stays at 100.8 MHz; spectrum.rs:46 builds the header once from the first chunk. Plain hk serve has no scheduler, which is why T-045 could not reproduce it. Affects detections/inventory/history too, not just the UI."
+  - id: T-058
+    milestone: M0b
+    title: Detect-reader throughput (single-threaded STFT+CFAR path overruns the ring at >=8 Msps)
+    status: in-progress
+    deps: [T-055, T-041]
+    parallel_group: S
+    use_cases: [SPACE-050, AWARE-042, AWARE-036]
+    acceptance: "profile (release, paced synthetic replay at 8/10/20 Msps) identifies the hot spots in the detect path (STFT, floor, OS-CFAR sort/select, step guard, tracking, allocation); optimisations in hk-detect/hk-dsp (e.g. O(N) sliding order statistic instead of per-cell sort, parallel CFAR over frequency spans with rayon, batch floor, zero-alloc steady state) with bit-identical or tolerance-bounded detection output vs the current reference on the acceptance fixtures; benchmark shows the CPU detect path real-time at >=10 Msps on the M3 Ultra (report 20 Msps), with T-056 GPU STFT noted as the next lever; no change to detection thresholds or defaults"
+    area: crates/hk-detect, crates/hk-dsp (floor/STFT hot paths), benches
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-059
+    milestone: M0b
+    title: FOREIGN KEY constraint failure in analog chain writer under detect-reader overruns
+    status: in-progress
+    deps: [T-037]
+    parallel_group: J
+    use_cases: [SIGNAL-062]
+    found_by: T-055 HIL 2026-09-13 (hk run --hackrf --rate 8000000/10000000, 100.8 MHz)
+    acceptance: "chain writes never reference a missing parent (defer until parent stored or drop with an accounted counter, never silent, never orphaned); deterministic no-hardware test injecting detect overruns or delayed parent writes"
+    area: crates/hk-pipeline/src/chains (T-037b agent)
+    needs: none
+    model: opus
+    effort: medium
+    note: "sent to the running T-037b agent (writer-thread rework)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

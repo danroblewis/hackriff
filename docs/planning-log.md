@@ -319,3 +319,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Axis-formula review: MERGE-OK, root cause found.** Scheduler virtual tuning (hackriffd, `hk replay --schedule`) rewrites the provenance centre to hop/dwell centres while the IQ stays at the recorded centre. Every signal then lands at the wrong absolute frequency in the header, detections, inventory and history. This is the user's ~368 kHz offset, and it is a correctness bug affecting data, not only the UI.
   - **T-057 opened and split:** the source side goes to the T-049 agent (truthful virtual tunes via an IQ shift, or refusal); header re-offer on any provenance change goes to the T-050 agent.
   - **Follow-up:** a shader pooling nit goes to T-051.
+- **B0.118 T-037a/T-041 merge verified** (lint, 131 Rust test groups, Python, acceptance 14/14). T-054 and T-044/T-045 merged (b455c63, ff7f9d9); their worktrees are removed and verification is running with UI tests.
+  - **T-055 HIL (release, real HackRF):**
+    - USB never drops; 2.4 Msps is real-time with zero loss at ~8–14 % CPU.
+    - At 8/10/20 Msps the single-threaded detect reader (STFT+CFAR) loses 67–80 % of samples. History and spectrum readers stay lossless.
+  - **New tasks:**
+    - T-058: detect-path profiling and optimisation, launched now (hk-detect/hk-dsp, no hardware, detection output must match the reference).
+    - T-059: FOREIGN KEY failure in the analog chain writer at 8–10 Msps, sent to the T-037b agent.
+  - **HackRF:** free; the demo was stopped for T-055 and the supervisor restarted it on replay.
+- **B0.119 T-054 + T-044/T-045 merge verified:** lint, Rust workspace, Python, UI tests and acceptance all green.
