@@ -349,7 +349,9 @@ tasks:
     dod: calibration applied (dBFS->dBm); floor-vs-time product from tiles
   - id: T-022
     title: web UI — WebGL2 waterfall + inventory table + region-over-time
-    status: in-progress
+    status: done
+    commit: "T-022a ab75627 + inventory table 98e4247 (merged 7011ffd)"
+    results: "GET /api/inventory built only on query_inventory with IdentityAccess::Standard (no HTTP own-traffic grant), <=500-row pages, withheld identities have no value key and decoder/user/system status reasons also withheld; raw-byte sentinel scan clean; SIGNAL-062 RDS row visible, AWARE-042 filters/pagination tested; UI table with status badges, filters, sort, region linking to waterfall/history, phone width; hk serve --inventory-db + seed example. Follow-ups: pipeline writes inventory during replay (T-027), server-side text search/sort, tag gating review, per-emitter detail view, headed smoke run"
     deps: [T-016, T-017, T-018]
     parallel_group: I
     use_cases: [AWARE-042, SPACE-050, SIGNAL-062]
@@ -508,7 +510,9 @@ tasks:
     note: "follow-ups from T-009 (merged 2026-09-13 under the timebox rule)"
   - id: T-033
     title: Filter-bank passband phantoms and remaining guard gaps (before filter-bank field use)
-    status: in-progress
+    status: done
+    commit: "1a354cc (merged 7e346e8)"
+    results: "passband vs signal by frame-to-frame variance (floor-like 0.5-2); passbands / 3-passband filter bank 0 boxes at 1.03-1.07x on PerFrame and Wide; floor shelves 0 boxes; guarded bins join integrated confirmation; OS-only zones check local upper block floor; jump_db 5 with 3 dB release. DEFAULT REFERENCE FLIPPED TO Wide (stepped notch 614x -> 1.05x; full chain 1 box in 1.02 MHz.h; fixtures identical). Known limit: steady noise-like wide emissions (OFDM, noise jammers) read as floor features (edges OS-only, interior not covered on Wide)"
     deps: [T-028]
     parallel_group: C
     use_cases: [AWARE-036, AWARE-042]
@@ -521,7 +525,9 @@ tasks:
     note: "follow-ups from T-028 (merged 2026-09-13 under the timebox rule); must land before filter-bank accessory field use"
   - id: T-034
     title: Inventory follow-ups (ungated raw emitter getters, writers to record_sighting, re-demod dedup, clustering v2)
-    status: in-progress
+    status: done
+    commit: "f891cbd (merged 02200e5)"
+    results: "public emitter getters return gated identities by default (IdentityAccess::Standard; withheld -> Unknown, lookup by withheld value -> None) with explicit *_with_access variants; only crate-private emitter_ungated; IdentityConflict message names scheme only; RDS/FSK writers use record_sighting_measured with identity class (RDS unrestricted, FSK fail-closed unless classified; most restrictive class wins); re-measurement dedup by producer + capture key with >=50 % span overlap; SIGNAL-062 PI 1694 count stays 1 on re-demod; sentinel scan over all public getters clean. Deferred: DBSCAN, pipeline C13-C15 fingerprints, merge undo, quarantine, multi-level entities, N+1 reads"
     deps: [T-018]
     parallel_group: E
     use_cases: [AWARE-036, SIGNAL-001, SIGNAL-062, AWARE-053]
@@ -534,8 +540,7 @@ tasks:
     note: "follow-ups from T-018 (merged 2026-09-13 under the timebox rule); the first item is a legal-guardrail gap to close before any inventory API/export ships"
   - id: T-035
     title: Tracking data-model follow-ups (TimingFeatures fields, track region query, batched writes, hop raster estimate)
-    status: todo
-    hold: "start after T-034 merges - both change hk-model repository code (T-034: gated getters + class-aware writers); not M0-critical"
+    status: in-progress
     deps: [T-031, T-018]
     parallel_group: E
     use_cases: [AWARE-036, AWARE-042]
@@ -546,6 +551,19 @@ tasks:
     effort: medium
     items: "TimingFeatures lacks period confidence/jitter, burst-length distribution, segment boundaries, hop raster, hop-set id; track region query missing; TrackBatch upserts one transaction each (needs a public hk-model transaction/batch API); hop raster estimate wrong on noisy real centres (40.3 kHz vs 200 kHz); TDMA frame + co-occurrence features"
     note: "follow-ups from T-031 (merged 2026-09-13 under the timebox rule)"
+  - id: T-036
+    title: Remaining identity/content gating gaps (decode getters, tags, reclassification) + steady wide-emission detection limit
+    status: todo
+    deps: [T-034, T-022, T-033]
+    parallel_group: E
+    use_cases: [SIGNAL-001, AWARE-036, AWARE-006]
+    acceptance: decode() / decodes_for_identity() gated like emitter getters; tags reviewed so no identity can leak via tags; user reclassify API can open a previously MetadataOnly identity only with explicit own-traffic authorisation (audited); steady noise-like wide emissions characterised against AWARE-006 jamming detection with a documented decision
+    area: crates/hk-model, crates/hk-api, crates/hk-detect (analysis only)
+    needs: none
+    model: opus
+    effort: medium
+    items: "decode() and decodes_for_identity() still return decode identities ungated (restricted rows rely on pre-storage sanitize allowlist) - gate them (legal); tags are not gated - review/forbid identity-bearing tags; most-restrictive-class-wins means a later EmitterClassification cannot open a MetadataOnly identity - needs an audited reclassify API; T-033 limit: steady noise-like wide emissions (OFDM, noise jammers) read as floor features - check impact on AWARE-006 GNSS noise-jammer detection (floor tracker episodes should still catch it) and document"
+    note: "follow-ups from T-034 / T-022 / T-033 (2026-09-13); first item is a legal-guardrail gap"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
