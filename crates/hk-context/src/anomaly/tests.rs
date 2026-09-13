@@ -4,7 +4,7 @@
 use hk_core::ProvenanceHandle;
 use hk_dsp::WindowKind;
 use hk_dsp::floor::{EndReason, FloorChangeClass, FloorEvent, FloorEventKind, GainKey};
-use hk_model::{AnomalyStatus, SampleTime};
+use hk_model::{AnomalyStatus, Cause, CorrelationType, SampleTime};
 
 use super::*;
 
@@ -33,6 +33,7 @@ fn opened(e: EpisodeExtent) -> EpisodeSignal {
     EpisodeSignal::Opened {
         extent: e,
         continued: false,
+        split_from: None,
     }
 }
 
@@ -42,6 +43,7 @@ fn closed(episode: u64, at: f64, reason: CloseReason) -> EpisodeSignal {
         t: t(at),
         reason,
         duration_s: at,
+        merged_into: None,
     }
 }
 
@@ -205,6 +207,7 @@ fn aware_006_reset_then_continued_reopens_the_same_anomaly() {
             &EpisodeSignal::Opened {
                 extent: cont.clone(),
                 continued: true,
+                split_from: None,
             },
         )
         .unwrap();
@@ -215,6 +218,7 @@ fn aware_006_reset_then_continued_reopens_the_same_anomaly() {
     let replay = EpisodeSignal::Opened {
         extent: cont,
         continued: true,
+        split_from: None,
     };
     let again = life.apply(&mut repo, &replay).unwrap();
     assert_eq!(again.ignored, Some("duplicate episode continuation"));
@@ -275,59 +279,76 @@ fn aware_006_unknown_closes_the_named_episode_or_the_run() {
 }
 
 #[test]
-fn aware_006_extend_opens_a_part_update_and_end_close_parts() {
+fn aware_006_extend_grows_the_primary_update_clips_and_end_closes() {
     let mut repo = Repository::open_in_memory().unwrap();
     let mut life = lifecycle("dev:1");
     let first = life
         .apply(&mut repo, &opened(extent(1, 0.5, 1574.0, 1575.0)))
         .unwrap()
         .opened[0];
-    // Extend reports only the added extent, with its own (later) onset.
+    explain(&mut repo, first);
+    // Extend reports only the added extent; the primary grows by supersession.
     let ext = EpisodeSignal::Extended(extent(1, 2.0, 1575.0, 1576.5));
-    let second = life.apply(&mut repo, &ext).unwrap().opened[0];
-    assert_ne!(first, second);
-    assert_eq!(repo.anomaly(second).unwrap().region.time.start, t(2.0));
+    let r = life.apply(&mut repo, &ext).unwrap();
+    let second = r.opened[0];
+    assert_eq!(r.superseded, [(first, second)]);
+    assert!(r.closed.is_empty());
+    let a = repo.anomaly(second).unwrap();
+    assert_eq!(a.region.freq, FreqRange::new(1574.0e6, 1576.5e6));
+    assert_eq!(a.region.time.start, t(0.5), "onset kept");
+    assert_eq!(
+        statuses(&repo, first),
+        [AnomalyStatus::Open, AnomalyStatus::Resolved]
+    );
+    assert_eq!(life.open_anomalies(), [second]);
+    let copied = repo.explanations_for_anomaly(second).unwrap();
+    assert_eq!(copied.len(), 1, "explanation copied to the successor");
+    assert_eq!(
+        copied[0].supersedes,
+        Some(repo.explanations_for_anomaly(first).unwrap()[0].id)
+    );
     assert!(
         life.apply(&mut repo, &ext).unwrap().ignored.is_some(),
         "replayed Extend"
     );
-    assert_eq!(life.episode_parts(1).len(), 2);
+    assert_eq!(life.episode_parts(1).len(), 1);
 
-    // Extent shrank back to the first part (touching at 1575 MHz still overlaps, so use an
-    // extent that excludes the second part).
+    // The extent shrank: the part is clipped (superseded again).
     let r = life
         .apply(
             &mut repo,
             &EpisodeSignal::Updated {
                 episode: 1,
                 t: t(4.0),
-                f_lo_hz: 1574.0e6,
-                f_hi_hz: 1574.9e6,
+                f_lo_hz: 1574.2e6,
+                f_hi_hz: 1574.8e6,
             },
         )
         .unwrap();
-    assert_eq!(r.closed, [second]);
-    assert_eq!(life.open_anomalies(), [first]);
-    // An Update that still overlaps closes nothing.
+    let third = r.opened[0];
+    assert_eq!(r.superseded, [(second, third)]);
+    assert_eq!(
+        repo.anomaly(third).unwrap().region.freq,
+        FreqRange::new(1574.2e6, 1574.8e6)
+    );
+    // An Update elsewhere (no overlap) resolves it.
     let r = life
         .apply(
             &mut repo,
             &EpisodeSignal::Updated {
                 episode: 1,
                 t: t(4.5),
-                f_lo_hz: 1574.2e6,
-                f_hi_hz: 1574.8e6,
+                f_lo_hz: 1580e6,
+                f_hi_hz: 1581e6,
             },
         )
         .unwrap();
-    assert!(r.closed.is_empty());
-    let r = life
-        .apply(&mut repo, &closed(1, 6.0, CloseReason::Returned))
-        .unwrap();
-    assert_eq!(r.closed, [first], "End closes the remaining part only once");
-    assert_eq!(
-        statuses(&repo, second),
-        [AnomalyStatus::Open, AnomalyStatus::Resolved]
+    assert_eq!(r.closed, [third]);
+    assert!(
+        life.apply(&mut repo, &closed(1, 6.0, CloseReason::Returned))
+            .unwrap()
+            .ignored
+            .is_some()
     );
 
     // An Extend for an episode whose Rise was never seen still opens a part.
@@ -338,6 +359,118 @@ fn aware_006_extend_opens_a_part_update_and_end_close_parts() {
         )
         .unwrap();
     assert_eq!(orphan.opened.len(), 1);
+}
+
+fn explain(repo: &mut Repository, anomaly: AnomalyId) -> ExplanationId {
+    let e = Explanation {
+        id: ExplanationId::new(),
+        anomaly_ref: anomaly,
+        cause: Cause::Unexplained,
+        correlation_type: CorrelationType::TimeCoincidence,
+        score: 0.5,
+        evidence: vec![],
+        supersedes: None,
+        provisional: false,
+        rule_version: "test@1".into(),
+        t: t(2.0),
+    };
+    repo.insert_explanation(&e).unwrap();
+    e.id
+}
+
+#[test]
+fn aware_006_merge_reparents_and_split_moves_parts_with_their_explanations() {
+    let mut repo = Repository::open_in_memory().unwrap();
+    let mut life = lifecycle("dev:1");
+    let a = life
+        .apply(&mut repo, &opened(extent(1, 0.5, 1574.0, 1575.0)))
+        .unwrap()
+        .opened[0];
+    let b = life
+        .apply(&mut repo, &opened(extent(2, 0.6, 1576.0, 1577.0)))
+        .unwrap()
+        .opened[0];
+    let b_expl = explain(&mut repo, b);
+    // B merges into A: B's anomaly stays open, re-parented; A grows over bridge + B.
+    let r = life
+        .apply(
+            &mut repo,
+            &EpisodeSignal::Closed {
+                episode: 2,
+                t: t(3.0),
+                reason: CloseReason::Merged,
+                duration_s: 2.4,
+                merged_into: Some(1),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (r.reparented.as_slice(), r.closed.len()),
+        ([b].as_slice(), 0)
+    );
+    let a2 = life
+        .apply(
+            &mut repo,
+            &EpisodeSignal::Extended(extent(1, 2.5, 1575.0, 1577.0)),
+        )
+        .unwrap()
+        .opened[0];
+    let mut open = life.open_anomalies();
+    open.sort();
+    let mut want = vec![a2, b];
+    want.sort();
+    assert_eq!(open, want);
+    assert!(life.episode_parts(2).is_empty());
+    assert_eq!(repo.explanations_for_anomaly(b).unwrap()[0].id, b_expl);
+
+    // Restart: membership survives.
+    let mut life = FloorAnomalies::resume(FloorAnomalyConfig::new("dev:1"), &repo).unwrap();
+    assert_eq!(life.episode_parts(1).iter().filter(|p| p.open).count(), 2);
+
+    // The bridge returned: the tracker splits B's region off as episode 3 and updates A.
+    let r = life
+        .apply(
+            &mut repo,
+            &EpisodeSignal::Opened {
+                extent: extent(3, 0.5, 1576.0, 1577.0),
+                continued: false,
+                split_from: Some(1),
+            },
+        )
+        .unwrap();
+    assert_eq!(r.reparented, [b]);
+    assert!(r.opened.is_empty());
+    let r = life
+        .apply(
+            &mut repo,
+            &EpisodeSignal::Updated {
+                episode: 1,
+                t: t(6.0),
+                f_lo_hz: 1574.0e6,
+                f_hi_hz: 1575.0e6,
+            },
+        )
+        .unwrap();
+    let a3 = r.opened[0];
+    assert_eq!(
+        repo.anomaly(a3).unwrap().region.freq,
+        FreqRange::new(1574.0e6, 1575.0e6)
+    );
+    assert_eq!(life.episode_parts(3)[0].anomaly, b);
+    let life2 = FloorAnomalies::resume(FloorAnomalyConfig::new("dev:1"), &repo).unwrap();
+    assert_eq!(
+        life2.episode_parts(3)[0].anomaly,
+        b,
+        "split membership resumes"
+    );
+    assert_eq!(
+        life.apply(&mut repo, &closed(3, 8.0, CloseReason::Returned))
+            .unwrap()
+            .closed,
+        [b]
+    );
+    assert_eq!(life.open_anomalies(), [a3]);
+    assert_ne!(a, a3);
 }
 
 #[test]
@@ -503,6 +636,9 @@ fn floor_event(
         episode: 4,
         class,
         end_reason: end,
+        merged_into: None,
+        split_from: None,
+        interrupted: false,
         onset_seq: 10,
         onset_t: st(1.0),
         confirmed_seq: 20,
@@ -510,6 +646,9 @@ fn floor_event(
         episode_onset_t: st(1.0),
         duration_s: 1.0,
         bins: 0..1024,
+        change_bins: 512..1024,
+        change_f_lo_hz: 1575.42e6,
+        change_f_hi_hz: 1576.42e6,
         f_lo_hz: 1574.42e6,
         f_hi_hz: 1576.42e6,
         band_fraction: 1.0,
@@ -549,10 +688,15 @@ fn floor_events_map_through_the_single_adapter() {
         None,
     ))
     .unwrap();
-    let EpisodeSignal::Opened { extent, continued } = rise else {
+    let EpisodeSignal::Opened {
+        extent,
+        continued,
+        split_from,
+    } = rise
+    else {
         panic!("{rise:?}")
     };
-    assert!(!continued);
+    assert!(!continued && split_from.is_none());
     assert_eq!(
         (extent.episode, extent.class, extent.onset, extent.confirmed),
         (4, EpisodeClass::NoiseLike, t(1.0), t(2.0))
@@ -587,6 +731,63 @@ fn floor_events_map_through_the_single_adapter() {
             interrupted: false,
             ..
         }
+    ));
+    // The T-005 re-review event kinds.
+    let extend = floor_event(FloorEventKind::Extend, FloorChangeClass::NoiseLike, None);
+    let Some(EpisodeSignal::Extended(added)) = signal_from_floor_event(&extend) else {
+        panic!("extend")
+    };
+    assert_eq!((added.f_lo_hz, added.f_hi_hz), (1575.42e6, 1576.42e6));
+    assert!(matches!(
+        signal_from_floor_event(&floor_event(
+            FloorEventKind::Update,
+            FloorChangeClass::NoiseLike,
+            None
+        )),
+        Some(EpisodeSignal::Updated { episode: 4, .. })
+    ));
+    let mut merged = floor_event(
+        FloorEventKind::End,
+        FloorChangeClass::NoiseLike,
+        Some(EndReason::Merged),
+    );
+    merged.merged_into = Some(9);
+    assert!(matches!(
+        signal_from_floor_event(&merged),
+        Some(EpisodeSignal::Closed {
+            reason: CloseReason::Merged,
+            merged_into: Some(9),
+            ..
+        })
+    ));
+    let mut split = floor_event(FloorEventKind::Rise, FloorChangeClass::NoiseLike, None);
+    split.split_from = Some(2);
+    assert!(matches!(
+        signal_from_floor_event(&split),
+        Some(EpisodeSignal::Opened {
+            split_from: Some(2),
+            ..
+        })
+    ));
+    assert!(matches!(
+        signal_from_floor_event(&floor_event(
+            FloorEventKind::Unknown,
+            FloorChangeClass::NoiseLike,
+            None
+        )),
+        Some(EpisodeSignal::Unknown {
+            episode: Some(4),
+            ..
+        })
+    ));
+    let mut interrupted = floor_event(FloorEventKind::Fall, FloorChangeClass::NoiseLike, None);
+    interrupted.interrupted = true;
+    assert!(matches!(
+        signal_from_floor_event(&interrupted),
+        Some(EpisodeSignal::Fell {
+            interrupted: true,
+            ..
+        })
     ));
     let structured = signal_from_floor_event(&floor_event(
         FloorEventKind::Rise,

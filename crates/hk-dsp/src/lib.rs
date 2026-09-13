@@ -22,8 +22,9 @@
 //! - [`channelizer`]: the 2× oversampled polyphase filter bank ([`Pfb`], [`PfbBackend`]).
 //! - [`ddc`]: the on-demand DDC ([`Ddc`] from a [`DdcSpec`]).
 //!
-//! Noise floor (T-005): [`floor`] — [`NoiseFloorTracker`] (per-frame block-FCME floor, slow
-//! floor, impulsive gate, floor-rise events, per-channel floors), percentile and
+//! Noise floor (T-005): [`floor`] — [`NoiseFloorTracker`] (per-frame block-FCME floor, learned
+//! response shape, wide-signal reference, slow floor, impulsive gates, floor-change episodes,
+//! per-channel floors), percentile and
 //! minimum-statistics estimators, Gamma utilities and [`FloorThreshold`] for CFAR.
 
 pub mod channelizer;
