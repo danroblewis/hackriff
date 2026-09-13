@@ -1,6 +1,6 @@
 # Stream-output contract (v1.0)
 
-**Status:** Engineering (T-016, T-014). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-api/src/stream/` (contract), `crates/hk-plugins/` (plugin host), `hk stream-tail` (sample consumer).
+**Status:** Engineering (T-016, T-014). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap).
 **Legal guardrail:** §6 is the single egress enforcement point for restricted content. Changing it is a core-interface change and needs review.
 
 One contract serves two uses:
@@ -22,12 +22,14 @@ One contract serves two uses:
 
 | Transport | Use | Notes |
 |---|---|---|
-| Unix domain socket | Local consumers (default) | `Listener::bind_uds`. A stale socket file is replaced. |
-| TCP | Remote consumers | `Listener::bind_tcp`. **Unauthenticated**: bind to loopback unless the network is trusted. |
+| Unix domain socket | Local consumers (default) | `Listener::bind_uds`. Created **mode 0600** with no window: bound in a fresh 0700 directory, chmodded, renamed into place. A path served by a live listener is refused (probe-connect); a stale socket file is replaced. The only transport for `own-key-decrypted` streams. |
+| TCP | Remote consumers | `Listener::bind_tcp`. **Refused for `own-key-decrypted` streams.** **Unauthenticated**: bind to loopback unless the network is trusted. |
 | Child stdin | Plugin data plane (§9) | `DecoderFeed`. Never a listener. |
 | WebSocket | Browsers | Mapping in §10. The bridge is not implemented yet. |
 
 Each accepted connection is one consumer of one stream: it gets the header, then records from the moment it joined. Consumers never write back; control belongs to the control API.
+- **Consumer cap:** at most `PublisherConfig::max_consumers` (default 16) are open; further connections are closed.
+- **Hang-ups are reaped while idle:** the accept thread polls every connection it accepted. Because consumers never send, readability (EOF or unexpected bytes) closes the consumer, even when nothing is being published.
 
 **Threading.** Each consumer has one writer thread and each listener has one accept thread. This uses std threads, not an async runtime:
 - consumer counts on a handheld are in single digits;
@@ -132,14 +134,16 @@ The enforcement code is `hk_api::stream::gate`, called by `Publisher` before any
 - a claim less restrictive than the header is raised to the header class;
 - an equal or more restrictive claim is kept.
 
-If the effective class forbids content, `content` is not serialised and `gated: true` is set.
+Content is serialised only if the effective class permits content **and**, when the effective class is `own-key-decrypted`, the header class is also `own-key-decrypted` (`gate::message_content_permitted`). Otherwise `content` is not serialised and `gated: true` is set.
+
+**Own-key content is local-only.** It leaves only on an `own-key-decrypted` stream, and such streams are refused on TCP (and on any future remote bridge); they are served on a mode-0600 Unix socket (`gate::remote_transport_permitted`).
 
 **Binary records.** Payloads of `bits`, `symbols`, `iq` and `audio` are content. On a stream whose header class forbids content:
 - the payload is withheld;
 - a header-only `GATED` record still goes out, so timing, seq and length metadata flow;
 - `publish_binary` returns `StreamError::ContentGated`, so the misrouted producer notices.
 
-`spectrum` payloads are metadata: energy against frequency. The survey waterfall must work under every class, including fail-closed.
+**Spectrum.** A waterfall whose row rate reaches the symbol rate is effectively a non-coherent demodulator (POCSAG, voice spectrograms). Under a class that permits content, spectrum streams are ungated. Under a class that forbids content, `Publisher::new` refuses a spectrum stream unless its `sample_rate_hz` (the row rate) is declared and at most **50 rows/s** (`gate::GATED_SPECTRUM_MAX_ROW_RATE_HZ`). The ~30 fps survey waterfall therefore still works under every class, including fail-closed.
 
 **Fail closed.** A missing or unknown class is treated as `metadata-only` wherever it is parsed: headers, plugin output, and records read back by the reference reader.
 
@@ -147,11 +151,11 @@ If the effective class forbids content, `content` is not serialised and `gated: 
 
 | Header class \ kind | messages | bits | symbols | iq | audio | spectrum |
 |---|---|---|---|---|---|---|
-| `unrestricted` | content (clamped per record) | payload | payload | payload | payload | payload |
-| `own-key-decrypted` | content (clamped per record) | payload | payload | payload | payload | payload |
-| `metadata-only` | metadata only | GATED | GATED | GATED | GATED | payload |
-| `restricted-cellular` | metadata only | GATED | GATED | GATED | GATED | payload |
-| `restricted-paging` | metadata only | GATED | GATED | GATED | GATED | payload |
+| `unrestricted` | content (clamped per record; own-key records gated) | payload | payload | payload | payload | payload |
+| `own-key-decrypted` (UDS only) | content (clamped per record) | payload | payload | payload | payload | payload |
+| `metadata-only` | metadata only | GATED | GATED | GATED | GATED | payload if ≤ 50 rows/s, else refused |
+| `restricted-cellular` | metadata only | GATED | GATED | GATED | GATED | payload if ≤ 50 rows/s, else refused |
+| `restricted-paging` | metadata only | GATED | GATED | GATED | GATED | payload if ≤ 50 rows/s, else refused |
 
 Gating also covers persistence: the repository refuses content under a forbidding class (`RepoError::GatedContent`, T-002). The plugin host stores the metadata-only form instead (§9.4).
 
@@ -161,6 +165,7 @@ Gating also covers persistence: the repository refuses content under a forbiddin
   - A record that doesn't fit is dropped for that consumer only.
   - The drop is counted, and a marker (§5.3) follows.
   - The producer never waits for socket I/O.
+- **End of stream.** When the publisher finishes, consumers drain their queues; drops just before the end still get their marker. A consumer still draining after `drain_timeout` (default 5 s) is closed (`CloseReason::DrainTimeout`).
 - **Slow consumers.** A consumer is disconnected, and its transport shut down, when either:
   - its ring stays full for `disconnect_after` (default 5 s); or
   - it drops `disconnect_after_drops` consecutive records (default: never by count).
@@ -246,10 +251,21 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 | `log` | `msg` | Log ring |
 
 **Class rule:**
-- A line without `content_class` gets the manifest class.
-- A line with one is clamped to the manifest class (§6 ranking), so a plugin can restrict itself further but never upgrade.
+- The **ceiling** is `clamp(manifest output.content_class, input channel content_class)`: a restricted channel fed to an `unrestricted` decoder still yields restricted output.
+- A line without `content_class` gets the ceiling.
+- A line with one is clamped to the ceiling (§6 ranking), so a plugin can restrict itself further but never upgrade.
 - An unknown class string fails closed to `metadata-only`.
 - Clamped and unknown lines are counted.
+
+**Metadata allowlist (when a line's effective class forbids content):**
+- A manifest whose class forbids content **must** declare `output.metadata_keys` (an empty object is a valid declaration). Each key has a type that cannot carry free text: `integer`, `number`, `boolean`, `hex` or `digits` (with `max_len` ≤ 64), or `enum` (with `values`).
+- The host keeps only allowlisted keys with the right type; nested objects, unlisted keys and over-long values are dropped (not truncated: a truncated identifier is a wrong one).
+- `frame_model` must be in `output.frame_models`, and an annotation `value` in `output.labels`; otherwise it becomes `output.schema_id`.
+- `identity` must match `output.identity` (`scheme`, `charset` hex/digits, `max_len`); otherwise it is dropped.
+- With no allowlist (e.g. an `unrestricted` manifest on a restricted channel), nothing survives: metadata `{}`, frame model `schema_id`, no identity.
+- Removed fields are counted (`metadata_sanitized`).
+
+**Logs:** plugin `log` lines and stderr are stored in the log ring only when the ceiling permits content; otherwise they are counted (`log_lines_withheld`, `stderr_lines_withheld`). Host errors about malformed lines name the field, never the offending value. `PluginMonitor::log_tail()` returns the lines tagged with the ceiling, so a control API can gate them.
 
 **Time:** the host stamps rows from the line's `sample_index`, using the input anchor and rate (`PluginInstance::set_anchor` after a retune). Plugin wall-clock times are ignored.
 
@@ -265,7 +281,10 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 - **Restart:** an exit is followed by a restart with exponential backoff from `backoff_initial_ms`, doubling up to `backoff_max_ms`. A run longer than `backoff_max_ms` resets the backoff.
 - **Crash loop:** more than `max_restarts` exits within `window_s` stops restarts (`PluginState::Failed`), and pushed records then count as `dropped_detached`.
 - **Crash isolation:** a crash never touches the producer. `push` has no blocking path.
-- **Shutdown** SIGKILLs the process. A pid is only killed while it is unreaped, which rules out pid reuse.
+- **Process groups:** each plugin runs in its own process group. When the leader exits, the host SIGKILLs the whole group *before* reaping the leader, so descendants holding the pipes die and the pgid cannot be reused. Stall kills and shutdown also kill the group.
+- **Unblockable input:** the stdin pipe is non-blocking, and the writer polls it together with a wake socket; detaching a plugin (exit, stall, shutdown) abandons a blocked write.
+- **Bounded reader join:** output readers are joined for at most 2 s after the group kill. A descendant that escaped the group (e.g. `setsid`) cannot block restart or shutdown; its readers are abandoned (no further ingest) and counted (`readers_abandoned`).
+- **Shutdown** SIGKILLs the process group. A pgid is only killed while its leader is unreaped, which rules out reuse.
 - **Limits:** only `nice` (via `setpriority`), the queue size, message size and log ring are enforced. Memory and CPU caps are future work.
 
 ### 9.6 Fit for readsb (T-015)
@@ -298,10 +317,12 @@ The bridge isn't built yet. It is a follow-up with the UI work (T-023), and may 
 ## 11. Open issues
 
 - **Authentication** for TCP (and later WebSocket) listeners. They are unauthenticated today, which matters on a portable device on public Wi-Fi.
-- **`own-key-decrypted` content** is permitted on every transport. Whether remote TCP egress should be local-only is a legal-guardrail follow-up (docs/06 §5).
-- **Spectrum as metadata** is a design decision recorded here for review.
+- **Own-key local-only rule** (§6) is the provisional default endorsed at review; confirm with the user's legal-guardrail pass (docs/06 §5).
+- **Gated spectrum cap** of 50 rows/s is a provisional number; revisit with real POCSAG/voice spectrogram fixtures.
+- **Manifest trust boundary:** manifests and their executables are trusted code (`plugins/README.md`).
+- **Follow-ups recorded by the coordinator:** T-015 datatype conversion stage and raw-framing drop/`sample_index` mapping; T-022 WebSocket bridge (auth, remote rule, consumer cap); control-API exposure of `log_tail`; decode batching and per-plugin rate caps.
 - **Replay for missed records** (ADR-0004: "consumers can request replay from a Recording") needs the control API.
-- **Crate dependency direction.** `hk-plugins` depends on `hk-api` for the codec. If the control API in `hk-api` later needs plugin health, move the stream contract into its own crate to avoid a cycle.
+- **Crate dependency direction:** resolved. The contract lives in `hk-stream`; `hk-plugins` depends on it (not on `hk-api`), so `hk-api` can later depend on `hk-plugins` for plugin health without a cycle.
 
 ## Sources
 

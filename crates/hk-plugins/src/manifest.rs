@@ -1,20 +1,32 @@
 //! Plugin manifest (ADR-0003; docs/stream-contract.md §9): one JSON file per plugin,
 //! `plugins/<id>/manifest.json`. Unknown fields are errors (typos such as `license` must not pass
 //! silently). `licence` and `output.content_class` are required; the host enforces the class.
+//!
+//! **Metadata allowlist (legal guardrail).** Under a class that forbids content, text placed in
+//! `metadata`, `frame_model`, `identity` or an annotation label would leak content past the
+//! `content` gate. A manifest whose `output.content_class` forbids content must therefore declare
+//! `output.metadata_keys`: every metadata key the host may keep, with a type that cannot carry
+//! free text (integer, number, boolean, bounded hex or digits string, or an enum). It may also
+//! allowlist `frame_models`, annotation `labels` and an `identity` shape. The host applies the
+//! allowlist whenever a line's effective class forbids content (see [`crate::output`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hk_api::stream::{FeedFraming, StreamKind};
-use hk_model::ContentClass;
 use hk_model::sigmf::Datatype;
+use hk_model::{ContentClass, DecodedIdentity, IdentityScheme};
+use hk_stream::{FeedFraming, StreamKind};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::host::InputStreamDesc;
 
 /// The manifest format version this build reads.
 pub const MANIFEST_VERSION: u32 = 1;
+
+/// Longest allowlisted string (hex/digits values, enum values, labels, frame models).
+pub const MAX_ALLOWLIST_LEN: usize = 64;
 
 /// What a plugin consumes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,13 +105,108 @@ pub struct InputSpec {
     pub bandwidth_hz: Option<HzRange>,
 }
 
+/// Type of an allowlisted metadata value. None can carry free text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetadataType {
+    /// A JSON integer.
+    Integer,
+    /// A JSON number.
+    Number,
+    /// A JSON boolean.
+    Boolean,
+    /// A non-empty string of hex digits, at most `max_len` long.
+    Hex {
+        /// Longest accepted value.
+        max_len: usize,
+    },
+    /// A non-empty string of decimal digits, at most `max_len` long.
+    Digits {
+        /// Longest accepted value.
+        max_len: usize,
+    },
+    /// One of the listed strings.
+    Enum(Vec<String>),
+}
+
+fn charset_ok(s: &str, charset: Charset, max_len: usize) -> bool {
+    !s.is_empty()
+        && s.len() <= max_len
+        && s.bytes().all(|b| match charset {
+            Charset::Hex => b.is_ascii_hexdigit(),
+            Charset::Digits => b.is_ascii_digit(),
+        })
+}
+
+impl MetadataType {
+    /// Whether `v` has this type (over-long strings are rejected, not truncated: a truncated
+    /// identifier is a wrong identifier).
+    pub fn accepts(&self, v: &Value) -> bool {
+        match self {
+            MetadataType::Integer => v.is_i64() || v.is_u64(),
+            MetadataType::Number => v.is_number(),
+            MetadataType::Boolean => v.is_boolean(),
+            MetadataType::Hex { max_len } => v
+                .as_str()
+                .is_some_and(|s| charset_ok(s, Charset::Hex, *max_len)),
+            MetadataType::Digits { max_len } => v
+                .as_str()
+                .is_some_and(|s| charset_ok(s, Charset::Digits, *max_len)),
+            MetadataType::Enum(values) => v.as_str().is_some_and(|s| values.iter().any(|x| x == s)),
+        }
+    }
+}
+
+/// Character set of an allowlisted identity value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Charset {
+    /// Hex digits.
+    Hex,
+    /// Decimal digits.
+    Digits,
+}
+
+/// The identity a gated-class plugin may name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentitySpec {
+    /// Required scheme.
+    pub scheme: IdentityScheme,
+    /// Value characters.
+    pub charset: Charset,
+    /// Longest value.
+    pub max_len: usize,
+}
+
+impl IdentitySpec {
+    /// Whether an identity matches the spec.
+    pub fn accepts(&self, id: &DecodedIdentity) -> bool {
+        id.scheme == self.scheme && charset_ok(&id.value, self.charset, self.max_len)
+    }
+}
+
+/// What survives from a line whose effective class forbids content.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MetadataPolicy {
+    /// Allowed metadata keys and their types; everything else is dropped.
+    pub keys: BTreeMap<String, MetadataType>,
+    /// Allowed `frame_model` values; others are replaced by `output.schema_id`.
+    pub frame_models: Vec<String>,
+    /// Allowed annotation labels; others are replaced by `output.schema_id`.
+    pub labels: Vec<String>,
+    /// Allowed identity shape; other identities are dropped.
+    pub identity: Option<IdentitySpec>,
+}
+
 /// Output declaration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputSpec {
     /// Schema id of the messages' `metadata`/`content`.
     pub schema_id: String,
-    /// Ceiling class: messages claiming less restrictive classes are clamped to it.
+    /// Ceiling class: messages claiming less restrictive classes are clamped to it (and to the
+    /// input channel's class).
     pub content_class: ContentClass,
+    /// Allowlist applied under content-forbidding classes. Required when `content_class` forbids
+    /// content; `None` means an empty allowlist (fail closed).
+    pub metadata_policy: Option<MetadataPolicy>,
 }
 
 /// Restart policy.
@@ -124,7 +231,7 @@ pub struct ResourceLimits {
     pub stall_timeout: Duration,
     /// Longest accepted stdout line; longer lines are discarded and counted malformed.
     pub max_message_bytes: usize,
-    /// stderr lines kept in the log ring.
+    /// Lines kept in the log ring.
     pub stderr_lines: usize,
     /// Scheduling niceness applied after spawn (Unix `setpriority`), if set.
     pub nice: Option<i32>,
@@ -143,6 +250,7 @@ pub struct PluginManifest {
     /// Description.
     pub description: Option<String>,
     /// Executable: a bare name is looked up on `PATH`; a path is relative to the manifest dir.
+    /// Trusted code: see `plugins/README.md` (manifests are the trust boundary).
     pub executable: String,
     /// Argument templates (`{input.sample_rate_hz}`, `{input.center_hz}`,
     /// `{input.bandwidth_hz}`, `{input.datatype}`, `{plugin.dir}`, `{param.<name>}`).
@@ -237,6 +345,27 @@ struct RawOutput {
     format: Option<String>,
     schema_id: Option<String>,
     content_class: Option<String>,
+    metadata_keys: Option<BTreeMap<String, RawMetaKey>>,
+    frame_models: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
+    identity: Option<RawIdentity>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMetaKey {
+    #[serde(rename = "type")]
+    kind: String,
+    max_len: Option<usize>,
+    values: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIdentity {
+    scheme: String,
+    charset: String,
+    max_len: usize,
 }
 
 #[derive(Default, Deserialize)]
@@ -270,6 +399,131 @@ fn invalid(field: &'static str, reason: impl Into<String>) -> ManifestError {
         field,
         reason: reason.into(),
     }
+}
+
+/// A short token: `[A-Za-z0-9_.:/-]{1,64}`.
+fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_ALLOWLIST_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:/-".contains(&b))
+}
+
+fn token_list(list: Vec<String>, field: &'static str) -> Result<Vec<String>, ManifestError> {
+    if let Some(bad) = list.iter().find(|s| !is_token(s)) {
+        return Err(invalid(
+            field,
+            format!("{bad:?} is not [A-Za-z0-9_.:/-]{{1,64}}"),
+        ));
+    }
+    Ok(list)
+}
+
+fn bounded_len(max_len: Option<usize>, field: &'static str) -> Result<usize, ManifestError> {
+    match max_len {
+        Some(n) if (1..=MAX_ALLOWLIST_LEN).contains(&n) => Ok(n),
+        other => Err(invalid(
+            field,
+            format!("max_len {other:?} must be 1..={MAX_ALLOWLIST_LEN}"),
+        )),
+    }
+}
+
+fn metadata_policy(raw: &mut RawOutput) -> Result<Option<MetadataPolicy>, ManifestError> {
+    let declared = raw.metadata_keys.is_some()
+        || raw.frame_models.is_some()
+        || raw.labels.is_some()
+        || raw.identity.is_some();
+    if !declared {
+        return Ok(None);
+    }
+    let mut keys = BTreeMap::new();
+    for (name, key) in raw.metadata_keys.take().unwrap_or_default() {
+        if !is_token(&name) {
+            return Err(invalid(
+                "output.metadata_keys",
+                format!("key {name:?} is not [A-Za-z0-9_.:/-]{{1,64}}"),
+            ));
+        }
+        let simple = |t: MetadataType| {
+            if key.max_len.is_some() || key.values.is_some() {
+                Err(invalid(
+                    "output.metadata_keys",
+                    format!("{name}: {} takes no max_len/values", key.kind),
+                ))
+            } else {
+                Ok(t)
+            }
+        };
+        let t = match key.kind.as_str() {
+            "integer" => simple(MetadataType::Integer)?,
+            "number" => simple(MetadataType::Number)?,
+            "boolean" => simple(MetadataType::Boolean)?,
+            "hex" | "digits" if key.values.is_none() => {
+                let max_len = bounded_len(key.max_len, "output.metadata_keys")?;
+                if key.kind == "hex" {
+                    MetadataType::Hex { max_len }
+                } else {
+                    MetadataType::Digits { max_len }
+                }
+            }
+            "enum" if key.max_len.is_none() => {
+                let values = token_list(
+                    key.values.clone().unwrap_or_default(),
+                    "output.metadata_keys",
+                )?;
+                if values.is_empty() {
+                    return Err(invalid(
+                        "output.metadata_keys",
+                        format!("{name}: enum needs values"),
+                    ));
+                }
+                MetadataType::Enum(values)
+            }
+            other => {
+                return Err(invalid(
+                    "output.metadata_keys",
+                    format!(
+                        "{name}: type {other:?} (with these options) is not integer, number, boolean, hex, digits or enum; free-text strings cannot be allowlisted"
+                    ),
+                ));
+            }
+        };
+        keys.insert(name, t);
+    }
+    let identity = match raw.identity.take() {
+        None => None,
+        Some(id) => {
+            let scheme: IdentityScheme = id
+                .scheme
+                .parse()
+                .map_err(|e: String| invalid("output.identity", e))?;
+            let charset = match id.charset.as_str() {
+                "hex" => Charset::Hex,
+                "digits" => Charset::Digits,
+                other => {
+                    return Err(invalid(
+                        "output.identity",
+                        format!("charset {other:?} is not hex or digits"),
+                    ));
+                }
+            };
+            Some(IdentitySpec {
+                scheme,
+                charset,
+                max_len: bounded_len(Some(id.max_len), "output.identity")?,
+            })
+        }
+    };
+    Ok(Some(MetadataPolicy {
+        keys,
+        frame_models: token_list(
+            raw.frame_models.take().unwrap_or_default(),
+            "output.frame_models",
+        )?,
+        labels: token_list(raw.labels.take().unwrap_or_default(), "output.labels")?,
+        identity,
+    }))
 }
 
 fn range(raw: Option<RawRange>, field: &'static str) -> Result<Option<HzRange>, ManifestError> {
@@ -373,15 +627,13 @@ impl PluginManifest {
             )
         })?;
         let datatype_name = required(raw_input.datatype, "input.datatype")?;
-        let datatype: Datatype = serde_json::from_value(serde_json::Value::String(
-            datatype_name.clone(),
-        ))
-        .map_err(|_| {
-            invalid(
-                "input.datatype",
-                format!("unknown datatype {datatype_name:?}"),
-            )
-        })?;
+        let datatype: Datatype = serde_json::from_value(Value::String(datatype_name.clone()))
+            .map_err(|_| {
+                invalid(
+                    "input.datatype",
+                    format!("unknown datatype {datatype_name:?}"),
+                )
+            })?;
         let datatype_ok = match kind {
             InputKind::Iq | InputKind::Channel => datatype.is_complex(),
             InputKind::Audio => !datatype.is_complex(),
@@ -422,26 +674,28 @@ impl PluginManifest {
             bandwidth_hz: range(raw_input.bandwidth_hz, "input.bandwidth_hz")?,
         };
 
-        let raw_output = raw.output.ok_or(ManifestError::Missing("output"))?;
+        let mut raw_output = raw.output.ok_or(ManifestError::Missing("output"))?;
         match raw_output.format.as_deref() {
             None | Some("ndjson") => {}
             Some(other) => {
                 return Err(invalid("output.format", format!("{other:?} is not ndjson")));
             }
         }
-        let schema_id = required(raw_output.schema_id, "output.schema_id")?;
-        let class_name = required(raw_output.content_class, "output.content_class")?;
+        let schema_id = required(raw_output.schema_id.take(), "output.schema_id")?;
+        let class_name = required(raw_output.content_class.take(), "output.content_class")?;
         // A manifest class must be spelled correctly: a typo is an error here, not a silent
         // fail-closed downgrade (plugin *messages* still fail closed at run time).
-        let content_class: ContentClass = serde_json::from_value(serde_json::Value::String(
-            class_name.clone(),
-        ))
-        .map_err(|_| {
-            invalid(
-                "output.content_class",
-                format!("unknown content class {class_name:?}"),
-            )
-        })?;
+        let content_class: ContentClass = serde_json::from_value(Value::String(class_name.clone()))
+            .map_err(|_| {
+                invalid(
+                    "output.content_class",
+                    format!("unknown content class {class_name:?}"),
+                )
+            })?;
+        let metadata_policy = metadata_policy(&mut raw_output)?;
+        if !content_class.permits_content() && raw_output_lacks_keys(&metadata_policy) {
+            return Err(ManifestError::Missing("output.metadata_keys"));
+        }
 
         let restart = RestartPolicy {
             backoff_initial: Duration::from_millis(raw.restart.backoff_initial_ms.unwrap_or(200)),
@@ -486,6 +740,7 @@ impl PluginManifest {
             output: OutputSpec {
                 schema_id,
                 content_class,
+                metadata_policy,
             },
             restart,
             limits,
@@ -582,11 +837,17 @@ impl PluginManifest {
     }
 }
 
+/// A content-forbidding manifest must declare `metadata_keys` explicitly (an empty object is an
+/// explicit declaration); allowlisting only labels or identity does not count.
+fn raw_output_lacks_keys(policy: &Option<MetadataPolicy>) -> bool {
+    policy.is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use hk_model::{SampleTime, Timestamp};
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     fn base() -> Value {
         json!({
@@ -601,6 +862,26 @@ mod tests {
                       "center_hz": {"min": 1089e6, "max": 1091e6}},
             "output": {"format": "ndjson", "schema_id": "hackriff.adsb/1", "content_class": "unrestricted"}
         })
+    }
+
+    fn pager() -> Value {
+        let mut v = base();
+        v["output"] = json!({
+            "schema_id": "hackriff.pocsag/1",
+            "content_class": "restricted-paging",
+            "metadata_keys": {
+                "capcode": {"type": "digits", "max_len": 7},
+                "function": {"type": "integer"},
+                "baud": {"type": "number"},
+                "numeric": {"type": "boolean"},
+                "addr": {"type": "hex", "max_len": 6},
+                "encoding": {"type": "enum", "values": ["alpha", "numeric", "tone"]}
+            },
+            "frame_models": ["pocsag"],
+            "labels": ["pocsag"],
+            "identity": {"scheme": "other:pocsag-capcode", "charset": "digits", "max_len": 7}
+        });
+        v
     }
 
     fn parse(v: &Value) -> Result<PluginManifest, ManifestError> {
@@ -628,6 +909,7 @@ mod tests {
         let m = parse(&base()).unwrap();
         assert_eq!(m.input.framing, FeedFraming::Raw);
         assert_eq!(m.output.content_class, ContentClass::Unrestricted);
+        assert_eq!(m.output.metadata_policy, None);
         assert_eq!(m.restart.max_restarts, 5);
         assert_eq!(m.limits.stall_timeout, Duration::from_secs(10));
         let args = m.render_args(&input(2.4e6, Some(1090e6))).unwrap();
@@ -661,6 +943,47 @@ mod tests {
         assert!(m.base_dir.is_some());
     }
 
+    #[test]
+    fn gated_manifest_allowlist_parses_and_types_check() {
+        let m = parse(&pager()).unwrap();
+        let p = m.output.metadata_policy.unwrap();
+        assert_eq!(p.keys["capcode"], MetadataType::Digits { max_len: 7 });
+        let t = &p.keys["capcode"];
+        assert!(t.accepts(&json!("1234567")));
+        assert!(!t.accepts(&json!("12345678")), "over-long is rejected");
+        assert!(!t.accepts(&json!("12a4567")));
+        assert!(!t.accepts(&json!(1234567)));
+        assert!(p.keys["addr"].accepts(&json!("a1B2c3")));
+        assert!(!p.keys["addr"].accepts(&json!("SMUGGL")));
+        assert!(p.keys["encoding"].accepts(&json!("alpha")));
+        assert!(!p.keys["encoding"].accepts(&json!("hello pager text")));
+        assert!(p.keys["function"].accepts(&json!(3)));
+        assert!(!p.keys["function"].accepts(&json!(3.5)));
+        assert!(!p.keys["function"].accepts(&json!("3")));
+        let id = p.identity.unwrap();
+        assert!(id.accepts(&DecodedIdentity {
+            scheme: IdentityScheme::Other("pocsag-capcode".into()),
+            value: "1234567".into()
+        }));
+        assert!(!id.accepts(&DecodedIdentity {
+            scheme: IdentityScheme::AdsbIcao,
+            value: "1234567".into()
+        }));
+        // An explicit empty allowlist is a valid declaration.
+        let mut empty = pager();
+        empty["output"] =
+            json!({"schema_id": "s/1", "content_class": "metadata-only", "metadata_keys": {}});
+        assert!(
+            parse(&empty)
+                .unwrap()
+                .output
+                .metadata_policy
+                .unwrap()
+                .keys
+                .is_empty()
+        );
+    }
+
     fn expect_err(mutate: impl FnOnce(&mut Value)) -> ManifestError {
         let mut v = base();
         mutate(&mut v);
@@ -689,6 +1012,60 @@ mod tests {
             expect_err(|v| v["output"]["content_class"] = json!("public")),
             ManifestError::Invalid {
                 field: "output.content_class",
+                ..
+            }
+        ));
+        // Every content-forbidding class requires an explicit metadata allowlist.
+        for class in ["metadata-only", "restricted-cellular", "restricted-paging"] {
+            assert_eq!(
+                expect_err(|v| v["output"]["content_class"] = json!(class)),
+                ManifestError::Missing("output.metadata_keys"),
+                "{class}"
+            );
+        }
+        for bad_key in [
+            json!({"text": {"type": "string", "max_len": 16}}),
+            json!({"text": {"type": "hex"}}),
+            json!({"text": {"type": "digits", "max_len": 65}}),
+            json!({"text": {"type": "integer", "max_len": 4}}),
+            json!({"text": {"type": "enum", "values": []}}),
+            json!({"text": {"type": "enum", "values": ["has space"]}}),
+            json!({"bad key": {"type": "integer"}}),
+        ] {
+            let err = expect_err(|v| {
+                v["output"]["content_class"] = json!("restricted-paging");
+                v["output"]["metadata_keys"] = bad_key.clone();
+            });
+            assert!(
+                matches!(
+                    err,
+                    ManifestError::Invalid {
+                        field: "output.metadata_keys",
+                        ..
+                    }
+                ),
+                "{bad_key}: {err:?}"
+            );
+        }
+        assert!(matches!(
+            expect_err(|v| {
+                v["output"]["content_class"] = json!("restricted-paging");
+                v["output"]["metadata_keys"] = json!({});
+                v["output"]["identity"] =
+                    json!({"scheme": "adsb-icao", "charset": "alnum", "max_len": 6});
+            }),
+            ManifestError::Invalid {
+                field: "output.identity",
+                ..
+            }
+        ));
+        assert!(matches!(
+            expect_err(|v| {
+                v["output"]["metadata_keys"] = json!({});
+                v["output"]["labels"] = json!(["free text label"]);
+            }),
+            ManifestError::Invalid {
+                field: "output.labels",
                 ..
             }
         ));

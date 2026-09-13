@@ -10,12 +10,17 @@
 //! - `--claim-class C` / `--content TEXT`: claim a class and attach content (clamping, gating).
 //! - `--annotate`: also emit an `annotation` line per message.
 //! - `--datatype D`: exit with code 4 unless the header's datatype is D.
+//! - `--smuggle TOKEN`: at start, emit lines that try to leak `TOKEN` outside `content` (metadata,
+//!   frame model, identity, label, log, error echoes, stderr) for the gating tests.
+//! - `--orphan`: start a `sleep 30` grandchild that inherits the pipes, then exit 1.
+//! - `--stall-child`: start a `sleep 30` grandchild that inherits stdin and never reads it, and
+//!   wait for it (a wrapper around a hung decoder).
 
 use std::io::{self, BufWriter, Read, Write};
 use std::process::exit;
 use std::time::Duration;
 
-use hk_api::stream::{Record, StreamReader};
+use hk_stream::{Record, StreamReader};
 use serde_json::json;
 
 #[derive(PartialEq)]
@@ -34,6 +39,9 @@ struct Args {
     annotate: bool,
     datatype: Option<String>,
     raw_record_bytes: Option<usize>,
+    smuggle: Option<String>,
+    orphan: bool,
+    stall_child: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -47,6 +55,9 @@ fn parse_args() -> Result<Args, String> {
         annotate: false,
         datatype: None,
         raw_record_bytes: None,
+        smuggle: None,
+        orphan: false,
+        stall_child: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -84,6 +95,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--stall" => args.stall = true,
             "--annotate" => args.annotate = true,
+            "--smuggle" => args.smuggle = Some(value()?),
+            "--orphan" => args.orphan = true,
+            "--stall-child" => args.stall_child = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -224,6 +238,36 @@ fn run(args: &Args) -> io::Result<u64> {
     Ok(state.records)
 }
 
+/// Lines that try to carry `t` outside `content`.
+fn smuggle(t: &str) {
+    let lines = [
+        json!({"type": "decode", "frame_model": format!("{t}-FM"),
+               "identity": {"scheme": "adsb-icao", "value": format!("{t}-ID")},
+               "metadata": {"text": format!("{t}-META"), "capcode": "1234567",
+                            "nested": {"text": format!("{t}-NEST")}},
+               "content": {"text": format!("{t}-CONTENT")}})
+        .to_string(),
+        json!({"type": "decode", "frame_model": "pocsag", "crc_status": "valid",
+               "identity": {"scheme": "other:pocsag-capcode", "value": "1234567"},
+               "metadata": {"capcode": t, "function": 2}})
+        .to_string(),
+        json!({"type": "annotation", "value": format!("{t}-LABEL"),
+               "metadata": {"text": format!("{t}-AMETA")},
+               "content": {"text": format!("{t}-ACONTENT")}})
+        .to_string(),
+        json!({"type": "log", "msg": format!("{t}-LOG")}).to_string(),
+        json!({"type": "decode", "crc_status": format!("{t}-ERR")}).to_string(),
+        json!({"type": format!("{t}-TYPE")}).to_string(),
+        format!("not json {t}-JUNK"),
+    ];
+    let mut out = io::stdout().lock();
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = out.flush();
+    eprintln!("{t}-STDERR");
+}
+
 fn main() {
     let args = match parse_args() {
         Ok(a) => a,
@@ -233,6 +277,24 @@ fn main() {
         }
     };
     eprintln!("hk-dummy-plugin: started (every {})", args.every);
+    if let Some(token) = &args.smuggle {
+        smuggle(token);
+    }
+    if args.orphan || args.stall_child {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap_or_else(|e| {
+                eprintln!("hk-dummy-plugin: spawning sleep failed: {e}");
+                exit(7)
+            });
+        eprintln!("hk-dummy-plugin: grandchild pid {}", child.id());
+        if args.orphan {
+            exit(1);
+        }
+        let _ = child.wait();
+        exit(0);
+    }
     if args.stall {
         loop {
             std::thread::sleep(Duration::from_secs(3600));

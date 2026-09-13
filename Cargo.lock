@@ -280,10 +280,7 @@ version = "0.1.0"
 dependencies = [
  "hk-core",
  "hk-model",
- "libc",
- "serde",
- "serde_json",
- "thiserror",
+ "hk-stream",
 ]
 
 [[package]]
@@ -379,8 +376,8 @@ dependencies = [
 name = "hk-plugins"
 version = "0.1.0"
 dependencies = [
- "hk-api",
  "hk-model",
+ "hk-stream",
  "libc",
  "serde",
  "serde_json",
@@ -396,6 +393,17 @@ dependencies = [
  "hk-e2e",
  "hk-model",
  "num-complex",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "hk-stream"
+version = "0.1.0"
+dependencies = [
+ "hk-model",
+ "libc",
+ "serde",
  "serde_json",
  "thiserror",
 ]

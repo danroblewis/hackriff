@@ -9,7 +9,4 @@ publish.workspace = true
 [dependencies]
 hk-core.workspace = true
 hk-model.workspace = true
-libc.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
+hk-stream.workspace = true

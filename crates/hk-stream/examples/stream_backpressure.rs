@@ -1,15 +1,15 @@
 //! Producer throughput with one stuck consumer (never reads) and one fast consumer, over Unix
-//! domain sockets. `cargo run --release -p hk-api --example stream_backpressure`.
+//! domain sockets. `cargo run --release -p hk-stream --example stream_backpressure`.
 
 use std::os::unix::net::UnixStream;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use hk_api::stream::{
+use hk_model::{ContentClass, CrcStatus, Timestamp};
+use hk_stream::{
     BinaryRecord, Listener, MessageRecord, Publisher, PublisherConfig, Record, RecordFlags,
     StreamHeader, StreamKind, StreamReader,
 };
-use hk_model::{ContentClass, CrcStatus, Timestamp};
 
 fn run(kind: StreamKind, records: u64, payload_len: usize) {
     let dir = std::env::temp_dir().join(format!("hk-bp-example-{}", std::process::id()));
@@ -23,6 +23,7 @@ fn run(kind: StreamKind, records: u64, payload_len: usize) {
         queue_bytes: 4 * 1024 * 1024,
         disconnect_after_drops: u64::MAX,
         disconnect_after: Duration::from_secs(3600),
+        ..PublisherConfig::default()
     };
     let mut publisher = Publisher::new(header, config).unwrap();
     let handle = publisher.handle();

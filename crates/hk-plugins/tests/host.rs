@@ -8,18 +8,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use hk_api::stream::{
-    BinaryRecord, ListenAddr, Listener, Publisher, PublisherConfig, Record, RecordFlags,
-    StreamHeader, StreamKind, StreamReader,
-};
 use hk_model::sigmf::Datatype;
 use hk_model::{
     AnnotationTarget, ContentClass, CrcStatus, Decode, DecodedIdentity, EmitterId, FreqRange,
     IdentityScheme, Region, Repository, SampleTime, TimeRange, Timestamp,
 };
 use hk_plugins::{
-    HostError, Ingest, InputStreamDesc, ManifestError, PluginContext, PluginInstance,
-    PluginManifest, PluginState, PushOutcome, RestartPolicy,
+    Charset, HostError, IdentitySpec, Ingest, InputStreamDesc, ManifestError, MetadataPolicy,
+    MetadataType, PluginContext, PluginInstance, PluginManifest, PluginState, PushOutcome,
+    RestartPolicy,
+};
+use hk_stream::{
+    BinaryRecord, ListenAddr, Listener, Publisher, PublisherConfig, Record, RecordFlags,
+    StreamHeader, StreamKind, StreamReader,
 };
 use serde_json::json;
 
@@ -174,6 +175,7 @@ fn dummy_round_trip_into_repository() {
     assert_eq!(stats.state, PluginState::Stopped);
     assert!(
         mon.log_tail()
+            .lines
             .iter()
             .any(|l| l.contains("hk-dummy-plugin: started")),
         "stderr captured: {:?}",
@@ -329,7 +331,10 @@ fn stalled_plugin_is_dropped_counted_and_killed() {
         "push blocked: {worst:?}"
     );
     assert!(
-        mon.log_tail().iter().any(|l| l.contains("stall_timeout")),
+        mon.log_tail()
+            .lines
+            .iter()
+            .any(|l| l.contains("stall_timeout")),
         "{:?}",
         mon.log_tail()
     );
@@ -385,6 +390,26 @@ fn clamped_class_and_gated_content_are_never_persisted_or_streamed() {
         )));
         let mut m = repo_manifest();
         m.output.content_class = manifest_class;
+        // What a restricted-class manifest must declare: typed metadata, frame model, label and
+        // identity shape that survive the gate (docs/stream-contract.md §9.3).
+        m.output.metadata_policy = Some(MetadataPolicy {
+            keys: [
+                ("icao", MetadataType::Hex { max_len: 6 }),
+                ("df", MetadataType::Integer),
+                ("crc", MetadataType::Enum(vec!["ok".into()])),
+                ("records", MetadataType::Integer),
+            ]
+            .into_iter()
+            .map(|(k, t)| (k.to_owned(), t))
+            .collect(),
+            frame_models: vec!["adsb-df17".into()],
+            labels: vec!["adsb".into()],
+            identity: Some(IdentitySpec {
+                scheme: IdentityScheme::AdsbIcao,
+                charset: Charset::Hex,
+                max_len: 6,
+            }),
+        });
         m.params.insert("every".into(), "5".into());
         add_args(
             &mut m,

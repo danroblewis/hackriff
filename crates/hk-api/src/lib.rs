@@ -3,12 +3,11 @@
 //! external programs with framing, backpressure and `content_class` gating (C24, ADR-0004).
 //! Core interface: changes are reviewed before merge.
 //!
-//! - [`stream`]: the versioned stream-output contract (`docs/stream-contract.md`): framing codec,
-//!   stream header, records, egress gating, the drop-not-block [`stream::Publisher`], UDS/TCP
-//!   listeners, a reference reader, and the [`stream::DecoderFeed`] data plane used by the plugin
-//!   host (T-014).
+//! - [`stream`]: re-export of the `hk-stream` crate, the versioned stream-output contract
+//!   (`docs/stream-contract.md`). It lives in its own crate so `hk-plugins` can use it without
+//!   depending on `hk-api`.
 
-pub mod stream;
+pub use hk_stream as stream;
 
 #[cfg(test)]
 mod tests {

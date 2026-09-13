@@ -8,10 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use hk_api::stream::{
-    BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamHeader, StreamKind,
-};
 use hk_model::{ContentClass, Timestamp};
+use hk_stream::{BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamHeader, StreamKind};
 
 struct Counting;
 
@@ -73,6 +71,7 @@ fn binary_publish_allocates_nothing_in_steady_state() {
         queue_bytes: 64 * 1024,
         disconnect_after_drops: u64::MAX,
         disconnect_after: Duration::from_secs(3600),
+        ..PublisherConfig::default()
     };
     let mut publisher = Publisher::new(header, config).unwrap();
     let handle = publisher.handle();

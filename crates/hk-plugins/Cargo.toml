@@ -10,7 +10,7 @@ publish.workspace = true
 # example so integration tests can locate it through `CARGO_BIN_EXE_hk-dummy-plugin`.
 
 [dependencies]
-hk-api.workspace = true
+hk-stream.workspace = true
 hk-model.workspace = true
 libc.workspace = true
 serde.workspace = true

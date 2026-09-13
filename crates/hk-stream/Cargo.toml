@@ -1,0 +1,17 @@
+[package]
+name = "hk-stream"
+description = "hackriff stream-output contract (ADR-0004): framing, headers, egress gating, drop-not-block publisher, UDS/TCP transports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Its own crate (split out of hk-api at the T-016/T-014 review) so hk-plugins can use the codec
+# without depending on hk-api (which may later need plugin health: no cycle) or hk-core.
+
+[dependencies]
+hk-model.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

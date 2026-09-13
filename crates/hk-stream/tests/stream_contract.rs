@@ -13,13 +13,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use hk_api::stream::{
-    BinaryRecord, CloseReason, ConsumerState, ListenAddr, Listener, MessageRecord, Publisher,
-    PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind, StreamReader,
-};
 use hk_model::{
     ContentClass, CrcStatus, Decode, DecodeId, DecodedIdentity, EmitterId, IdentityScheme,
     Timestamp,
+};
+use hk_stream::{
+    BinaryRecord, CloseReason, ConsumerState, ListenAddr, Listener, MessageRecord, Publisher,
+    PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind, StreamReader,
 };
 use serde_json::json;
 
@@ -64,7 +64,13 @@ fn header_for(kind: StreamKind, class: ContentClass) -> StreamHeader {
             h.sample_rate_hz = Some(48e3);
         }
         StreamKind::Bits => h.datatype = Some("ru8".into()),
-        StreamKind::Symbols | StreamKind::Spectrum => h.datatype = Some("rf32_le".into()),
+        StreamKind::Symbols => h.datatype = Some("rf32_le".into()),
+        StreamKind::Spectrum => {
+            h.datatype = Some("rf32_le".into());
+            // A survey waterfall: within the gated row-rate cap, so it exists under every class.
+            h.sample_rate_hz = Some(30.0);
+            h.fft_size = Some(4);
+        }
         StreamKind::Messages => h.message_schema = Some("hackriff.decode/1".into()),
     }
     h.max_frame_len = 64 * 1024;
@@ -212,23 +218,34 @@ fn gating_matrix_every_class_by_every_kind() {
     assert_eq!(matrix.len(), 30);
 }
 
-/// Gated classes never put content bytes on a real TCP socket; unrestricted does (positive
-/// control proves the scan can see the sentinel).
+/// Gated classes never put content bytes on a real socket; unrestricted and own-key do
+/// (positive controls prove the scan can see the sentinel). Own-key streams are local-only, so
+/// they are served on a Unix socket; everything else on TCP.
 #[test]
 fn gated_classes_never_emit_content_bytes_on_the_socket() {
+    let dir = temp_dir("gs");
     for &class in ContentClass::ALL {
         let mut raw = Vec::new();
         for kind in [StreamKind::Messages, StreamKind::Iq, StreamKind::Audio] {
             let mut publisher = Publisher::new(header_for(kind, class), small_config()).unwrap();
             let handle = publisher.handle();
-            let listener = Listener::bind_tcp("127.0.0.1:0", handle.clone()).unwrap();
-            let ListenAddr::Tcp(addr) = listener.addr().clone() else {
-                unreachable!()
+            let own_key = class == ContentClass::OwnKeyDecrypted;
+            let listener = if own_key {
+                Listener::bind_uds(dir.join(format!("{}.sock", kind.as_str())), handle.clone())
+                    .unwrap()
+            } else {
+                Listener::bind_tcp("127.0.0.1:0", handle.clone()).unwrap()
             };
+            let addr = listener.addr().clone();
             let client = thread::spawn(move || {
-                let mut s = TcpStream::connect(addr).unwrap();
                 let mut bytes = Vec::new();
-                s.read_to_end(&mut bytes).unwrap();
+                match addr {
+                    ListenAddr::Tcp(a) => TcpStream::connect(a).unwrap().read_to_end(&mut bytes),
+                    ListenAddr::Unix(p) => std::os::unix::net::UnixStream::connect(p)
+                        .unwrap()
+                        .read_to_end(&mut bytes),
+                }
+                .unwrap();
                 bytes
             });
             wait_for(|| handle.open_consumers() == 1);
@@ -283,6 +300,7 @@ fn slow_consumer_is_dropped_not_blocking() {
         queue_bytes: 64 * 1024,
         disconnect_after_drops: DISCONNECT_AFTER_DROPS,
         disconnect_after: Duration::from_secs(3600),
+        ..PublisherConfig::default()
     };
     let mut publisher = Publisher::new(header, config).unwrap();
     let handle = publisher.handle();
@@ -409,6 +427,7 @@ fn recovering_consumer_sees_exact_drop_markers() {
         queue_bytes: 32 * 1024,
         disconnect_after_drops: u64::MAX,
         disconnect_after: Duration::from_secs(3600),
+        ..PublisherConfig::default()
     };
     let mut publisher = Publisher::new(header, config).unwrap();
     let handle = publisher.handle();
@@ -553,7 +572,7 @@ fn reader_fails_closed_on_missing_or_unknown_record_class() {
         r#"{"type":"message","seq":2,"content_class":"public","metadata":{}}"#,
     ] {
         let Record::Message(m) =
-            hk_api::stream::client::parse_record(StreamKind::Messages, line.as_bytes()).unwrap()
+            hk_stream::client::parse_record(StreamKind::Messages, line.as_bytes()).unwrap()
         else {
             panic!()
         };

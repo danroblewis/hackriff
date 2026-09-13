@@ -8,8 +8,9 @@
 //! - [`manifest`]: the JSON [`PluginManifest`] (licence and content class required).
 //! - [`host`]: [`PluginInstance`], which spawns, feeds (drop-not-block), supervises (restart with
 //!   backoff, crash-loop cap, hang watchdog) and kills one plugin process.
-//! - [`output`]: the stdout NDJSON message plane, parsed into `Decode`/`Annotation` with the
-//!   manifest class as a ceiling.
+//! - [`output`]: the stdout NDJSON message plane, parsed into `Decode`/`Annotation` under the
+//!   ceiling `clamp(manifest class, input channel class)`, with the manifest's metadata allowlist
+//!   applied whenever a line's class forbids content.
 //! - [`ingest`]: [`Ingest`], which stores through the `Repository` (gated content is stored
 //!   metadata-only) and republishes on a T-016 messages stream.
 //!
@@ -21,15 +22,15 @@ pub mod manifest;
 pub mod output;
 
 pub use host::{
-    HostError, InputStreamDesc, PluginContext, PluginInstance, PluginMonitor, PluginState,
+    HostError, InputStreamDesc, LogTail, PluginContext, PluginInstance, PluginMonitor, PluginState,
     PluginStats, PushOutcome,
 };
 pub use ingest::{Ingest, IngestStats, Stored};
 pub use manifest::{
-    HzRange, InputKind, InputSpec, MANIFEST_VERSION, ManifestError, OutputSpec, PluginManifest,
-    ResourceLimits, RestartPolicy,
+    Charset, HzRange, IdentitySpec, InputKind, InputSpec, MANIFEST_VERSION, ManifestError,
+    MetadataPolicy, MetadataType, OutputSpec, PluginManifest, ResourceLimits, RestartPolicy,
 };
-pub use output::{Parsed, PluginOutput, parse_line, resolve_class};
+pub use output::{Parsed, PluginOutput, parse_line, resolve_class, sanitize_metadata};
 
 #[cfg(test)]
 mod tests {

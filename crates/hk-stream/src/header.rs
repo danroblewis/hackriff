@@ -235,6 +235,13 @@ impl StreamHeader {
                 "max_frame_len too small for a binary record".into(),
             ));
         }
+        if !self.kind.is_binary() && (self.max_frame_len as usize) < super::record::MARKER_MAX_LEN {
+            return Err(HeaderError::Invalid(format!(
+                "max_frame_len {} too small for a messages drop marker ({} bytes)",
+                self.max_frame_len,
+                super::record::MARKER_MAX_LEN
+            )));
+        }
         if matches!(self.kind, StreamKind::Iq | StreamKind::Audio)
             && (self.datatype.is_none() || self.sample_rate_hz.is_none())
         {

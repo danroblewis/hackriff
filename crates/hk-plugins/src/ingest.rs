@@ -6,8 +6,8 @@
 //! kept, the content is never written. Republishing sends the stored (possibly metadata-only)
 //! row through the egress gate of the publisher.
 
-use hk_api::stream::{MessageRecord, Publisher};
 use hk_model::{Annotation, Decode, EmitterId, ProvenanceId, RepoError, Repository};
+use hk_stream::{MessageRecord, Publisher};
 
 /// Ingest counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

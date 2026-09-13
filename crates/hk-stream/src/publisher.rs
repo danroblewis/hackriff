@@ -4,14 +4,16 @@
 //! - One [`Publisher`] per stream, owned by the producer thread (`&mut self` publish calls).
 //! - One bounded **byte ring** per consumer, allocated once at subscribe time, holding whole
 //!   frames. A frame that does not fit is **dropped for that consumer only**; the producer never
-//!   waits for space. Drops are counted per consumer, and the next frame that fits is preceded
-//!   by a "dropped N" marker frame naming the missing seq range.
+//!   waits for space. Drops are counted per consumer, and the next frame that fits (or the end
+//!   of the stream) is preceded by a "dropped N" marker frame naming the missing seq range.
 //! - One writer thread per consumer blocks on a condvar while its ring is empty (no polling),
 //!   copies at most 16 KiB out under the lock, and writes it to the socket with the lock
 //!   released. A slow or stuck consumer therefore only ever blocks its own writer thread.
 //! - A consumer that stays full for [`PublisherConfig::disconnect_after`], or drops
 //!   [`PublisherConfig::disconnect_after_drops`] consecutive records, is disconnected: its
 //!   transport is shut down (which unblocks its writer) and its ring is freed.
+//! - At most [`PublisherConfig::max_consumers`] consumers are open at once; after the publisher
+//!   finishes, a consumer still draining after [`PublisherConfig::drain_timeout`] is closed.
 //!
 //! # Producer cost
 //! Per record: build the frame (binary: a 36-byte prefix+header on the stack, payload borrowed;
@@ -29,6 +31,8 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::process::ChildStdin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -52,7 +56,7 @@ const FINISHED_KEPT: usize = 64;
 /// Writer thread stack size.
 const WRITER_STACK: usize = 256 * 1024;
 
-/// Per-consumer queue and disconnect policy.
+/// Per-consumer queue, consumer cap and disconnect policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PublisherConfig {
     /// Ring size per consumer, bytes. Must hold the header frame plus one maximum-size record
@@ -62,6 +66,10 @@ pub struct PublisherConfig {
     pub disconnect_after_drops: u64,
     /// Disconnect after the ring has stayed full (every offer dropped) for this long.
     pub disconnect_after: Duration,
+    /// Most consumers open at once; further subscriptions are refused.
+    pub max_consumers: usize,
+    /// After the publisher finishes, a consumer that has not drained within this long is closed.
+    pub drain_timeout: Duration,
 }
 
 impl Default for PublisherConfig {
@@ -70,6 +78,8 @@ impl Default for PublisherConfig {
             queue_bytes: 8 * 1024 * 1024,
             disconnect_after_drops: u64::MAX,
             disconnect_after: Duration::from_secs(5),
+            max_consumers: 16,
+            drain_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -105,6 +115,24 @@ pub enum StreamError {
         class: ContentClass,
         /// Delivery of the metadata-only record.
         outcome: PublishOutcome,
+    },
+    /// ADR-0004: a spectrum stream under a content-forbidding class must declare a row rate of at
+    /// most [`gate::GATED_SPECTRUM_MAX_ROW_RATE_HZ`] in `sample_rate_hz`.
+    #[error(
+        "spectrum row rate {row_rate_hz:?} Hz refused under content class {class:?} (max {} rows/s)",
+        gate::GATED_SPECTRUM_MAX_ROW_RATE_HZ
+    )]
+    SpectrumRowRate {
+        /// Header class.
+        class: ContentClass,
+        /// Declared row rate.
+        row_rate_hz: Option<f64>,
+    },
+    /// The consumer cap is reached.
+    #[error("consumer limit {max} reached")]
+    TooManyConsumers {
+        /// The cap.
+        max: usize,
     },
     /// Bad configuration.
     #[error("invalid publisher config: {0}")]
@@ -142,6 +170,8 @@ pub enum CloseReason {
     PeerGone,
     /// The publisher finished and the ring was drained.
     PublisherFinished,
+    /// The publisher finished and the consumer did not drain within `drain_timeout`.
+    DrainTimeout,
     /// Detached by the owner.
     Detached,
 }
@@ -314,8 +344,9 @@ impl Consumer {
     }
 }
 
-fn writer_loop(c: Arc<Consumer>, mut w: Box<dyn Write + Send>) {
+fn writer_loop(c: Arc<Consumer>, mut w: Box<dyn Write + Send>, binary: bool, markers: bool) {
     let mut chunk = vec![0u8; WRITE_CHUNK];
+    let mut marker = [0u8; MARKER_MAX_LEN];
     let mut just_written = 0u64;
     loop {
         let n = {
@@ -330,6 +361,15 @@ fn writer_loop(c: Arc<Consumer>, mut w: Box<dyn Write + Send>) {
                         g = c.cv.wait(g).unwrap_or_else(PoisonError::into_inner);
                     }
                     ConsumerState::Draining => {
+                        // Drops just before the end still get their marker (the ring is empty,
+                        // so a marker always fits).
+                        if markers && let Some(m) = g.pending_drop.take() {
+                            let len = encode_marker(binary, &m, &mut marker);
+                            g.ring.push(&marker[..len]);
+                            g.counters.drop_markers += 1;
+                            g.counters.bytes_enqueued += len as u64;
+                            continue;
+                        }
                         drop(g);
                         let _ = w.flush();
                         c.close(CloseReason::PublisherFinished);
@@ -366,6 +406,7 @@ struct List {
 struct Shared {
     mode: Mode,
     kind: StreamKind,
+    class: ContentClass,
     header_frame: Vec<u8>,
     config: PublisherConfig,
     min_queue_bytes: usize,
@@ -388,8 +429,16 @@ impl Shared {
                 self.min_queue_bytes
             )));
         }
-        if lock(&self.list).closed_for_new {
-            return Err(StreamError::Finished);
+        {
+            let list = lock(&self.list);
+            if list.closed_for_new {
+                return Err(StreamError::Finished);
+            }
+            if Self::open_count(&list) >= self.config.max_consumers {
+                return Err(StreamError::TooManyConsumers {
+                    max: self.config.max_consumers,
+                });
+            }
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut ring = Ring::new(queue_bytes);
@@ -417,19 +466,36 @@ impl Shared {
             closer: Mutex::new(Some(closer)),
         });
         let for_thread = Arc::clone(&consumer);
+        let (binary, markers) = (self.kind.is_binary(), self.mode != Mode::FeedRaw);
         thread::Builder::new()
             .name(format!("hk-stream-tx-{id}"))
             .stack_size(WRITER_STACK)
-            .spawn(move || writer_loop(for_thread, writer))?;
+            .spawn(move || writer_loop(for_thread, writer, binary, markers))?;
         let mut list = lock(&self.list);
-        if list.closed_for_new {
+        let refusal = if list.closed_for_new {
+            Some(StreamError::Finished)
+        } else if Self::open_count(&list) >= self.config.max_consumers {
+            Some(StreamError::TooManyConsumers {
+                max: self.config.max_consumers,
+            })
+        } else {
+            None
+        };
+        if let Some(e) = refusal {
             drop(list);
-            consumer.close(CloseReason::PublisherFinished);
-            return Err(StreamError::Finished);
+            consumer.close(CloseReason::Detached);
+            return Err(e);
         }
         list.active.push(consumer);
         self.generation.fetch_add(1, Ordering::Release);
         Ok(id)
+    }
+
+    fn open_count(list: &List) -> usize {
+        list.active
+            .iter()
+            .filter(|c| !c.closed.load(Ordering::Acquire))
+            .count()
     }
 
     fn all(&self) -> Vec<Arc<Consumer>> {
@@ -465,20 +531,52 @@ impl Shared {
         }
     }
 
-    fn finish(&self) {
+    fn close(&self, id: ConsumerId, reason: CloseReason) -> bool {
+        let closed = self.find(id).is_some_and(|c| c.close(reason));
+        self.prune();
+        closed
+    }
+
+    /// Stops new subscriptions, lets open consumers drain, and closes any consumer still
+    /// draining after `drain_timeout`.
+    fn finish(self: &Arc<Self>) {
         let consumers = {
             let mut list = lock(&self.list);
             list.closed_for_new = true;
             list.active.clone()
         };
+        let mut draining = Vec::new();
         for c in consumers {
             let mut g = lock(&c.inner);
             if g.state == ConsumerState::Open {
                 g.state = ConsumerState::Draining;
+                draining.push(Arc::clone(&c));
             }
             drop(g);
             c.cv.notify_all();
         }
+        if draining.is_empty() {
+            return;
+        }
+        let timeout = self.config.drain_timeout;
+        let shared = Arc::clone(self);
+        // One short-lived watchdog per finished stream; it exits as soon as all have drained.
+        let _ = thread::Builder::new()
+            .name("hk-stream-drain".into())
+            .stack_size(WRITER_STACK)
+            .spawn(move || {
+                let deadline = Instant::now() + timeout;
+                while Instant::now() < deadline {
+                    if draining.iter().all(|c| c.closed.load(Ordering::Acquire)) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                for c in &draining {
+                    c.close(CloseReason::DrainTimeout);
+                }
+                shared.prune();
+            });
     }
 }
 
@@ -491,7 +589,7 @@ pub struct PublisherHandle {
 impl PublisherHandle {
     /// Adds a consumer. The header frame is queued first. `closer` must unblock a write in
     /// progress on `writer` (for sockets: `shutdown(Both)` on a clone); it runs once, when the
-    /// consumer closes for any reason.
+    /// consumer closes for any reason. Refused beyond `max_consumers`.
     pub fn subscribe(
         &self,
         label: impl Into<String>,
@@ -520,6 +618,16 @@ impl PublisherHandle {
             .subscribe(label.into(), writer, closer, queue_bytes)
     }
 
+    /// The stream header's content class (transports use it: own-key streams are local-only).
+    pub fn content_class(&self) -> ContentClass {
+        self.shared.class
+    }
+
+    /// The stream kind.
+    pub fn kind(&self) -> StreamKind {
+        self.shared.kind
+    }
+
     /// Stats for open consumers and up to 64 recently closed ones.
     pub fn consumer_stats(&self) -> Vec<ConsumerStats> {
         self.shared.all().iter().map(|c| c.stats()).collect()
@@ -532,21 +640,17 @@ impl PublisherHandle {
 
     /// Open (not closed) consumers.
     pub fn open_consumers(&self) -> usize {
-        lock(&self.shared.list)
-            .active
-            .iter()
-            .filter(|c| !c.closed.load(Ordering::Acquire))
-            .count()
+        Shared::open_count(&lock(&self.shared.list))
     }
 
     /// Force-closes one consumer (queued bytes are discarded).
     pub fn close(&self, id: ConsumerId) -> bool {
-        let closed = self
-            .shared
-            .find(id)
-            .is_some_and(|c| c.close(CloseReason::Detached));
-        self.shared.prune();
-        closed
+        self.shared.close(id, CloseReason::Detached)
+    }
+
+    /// Closes a consumer whose peer hung up (used by listeners).
+    pub(crate) fn peer_gone(&self, id: ConsumerId) -> bool {
+        self.shared.close(id, CloseReason::PeerGone)
     }
 
     /// Waits until every consumer has closed (e.g. drained after the publisher finished).
@@ -593,6 +697,14 @@ impl Publisher {
         mode: Mode,
     ) -> Result<Self, StreamError> {
         let json = header.to_json_bytes()?;
+        if header.kind == StreamKind::Spectrum
+            && !gate::spectrum_stream_permitted(header.content_class, header.sample_rate_hz)
+        {
+            return Err(StreamError::SpectrumRowRate {
+                class: header.content_class,
+                row_rate_hz: header.sample_rate_hz,
+            });
+        }
         let header_frame = if mode == Mode::FeedRaw {
             Vec::new()
         } else {
@@ -608,15 +720,16 @@ impl Publisher {
                 config.queue_bytes
             )));
         }
-        if config.disconnect_after_drops == 0 {
+        if config.disconnect_after_drops == 0 || config.max_consumers == 0 {
             return Err(StreamError::Config(
-                "disconnect_after_drops must be > 0".into(),
+                "disconnect_after_drops and max_consumers must be > 0".into(),
             ));
         }
         Ok(Self {
             shared: Arc::new(Shared {
                 mode,
                 kind: header.kind,
+                class: header.content_class,
                 header_frame,
                 config,
                 min_queue_bytes: needed,
@@ -654,7 +767,7 @@ impl Publisher {
     }
 
     /// Publishes a message record (messages streams). The record's class is clamped to the
-    /// header class; content is only serialised when the effective class permits it.
+    /// header class; content is only serialised when [`gate::message_content_permitted`].
     pub fn publish_message(&mut self, rec: &MessageRecord) -> Result<PublishOutcome, StreamError> {
         if self.header.kind != StreamKind::Messages {
             return Err(StreamError::WrongKind {
@@ -663,7 +776,7 @@ impl Publisher {
             });
         }
         let class = gate::clamp(self.header.content_class, rec.content_class);
-        let permitted = class.permits_content();
+        let permitted = gate::message_content_permitted(self.header.content_class, class);
         let wire = MessageWire {
             kind: "message",
             seq: self.next_seq,
@@ -924,6 +1037,67 @@ impl DecoderFeed {
     }
 }
 
+/// A child's stdin pipe made non-blocking, whose writes can be abandoned from another thread:
+/// closing the wake socket's peer makes a blocked write return `BrokenPipe`. A plain blocking
+/// write to a pipe held open by a descendant that never reads could otherwise never be woken.
+struct WakeablePipe {
+    pipe: ChildStdin,
+    wake: UnixStream,
+}
+
+fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
+    // SAFETY: plain fcntl calls on an fd we own for the duration of the call.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+impl Write for WakeablePipe {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            match self.pipe.write(buf) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    let mut fds = [
+                        libc::pollfd {
+                            fd: self.pipe.as_raw_fd(),
+                            events: libc::POLLOUT,
+                            revents: 0,
+                        },
+                        libc::pollfd {
+                            fd: self.wake.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        },
+                    ];
+                    // SAFETY: `fds` is a valid array of two initialised pollfd structs.
+                    let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+                    if rc < 0 {
+                        let e = io::Error::last_os_error();
+                        if e.kind() != io::ErrorKind::Interrupted {
+                            return Err(e);
+                        }
+                    } else if fds[1].revents != 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "plugin input detached",
+                        ));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                other => return other,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Attaches plugin stdin pipes to a [`DecoderFeed`].
 #[derive(Clone)]
 pub struct FeedAttacher {
@@ -932,26 +1106,34 @@ pub struct FeedAttacher {
 
 impl FeedAttacher {
     /// Attaches a child's stdin. `on_stall` runs if the plugin stays full past the policy (it
-    /// should kill the child, which unblocks the writer).
+    /// should kill the child's process group). Any close (stall, detach, finish) also wakes a
+    /// write blocked on the pipe.
     pub fn attach_child_stdin(
         &self,
         label: impl Into<String>,
         stdin: ChildStdin,
         on_stall: Box<dyn FnOnce() + Send>,
     ) -> Result<ConsumerId, StreamError> {
+        set_nonblocking(stdin.as_raw_fd())?;
+        let (wake_tx, wake_rx) = UnixStream::pair()?;
         self.shared.subscribe(
             label.into(),
-            Box::new(stdin),
+            Box::new(WakeablePipe {
+                pipe: stdin,
+                wake: wake_rx,
+            }),
             Box::new(move |reason| {
                 if reason == CloseReason::SlowConsumer {
                     on_stall();
                 }
+                let _ = wake_tx.shutdown(std::net::Shutdown::Both);
             }),
             self.shared.config.queue_bytes,
         )
     }
 
-    /// Detaches a consumer (queued bytes are discarded) and returns its final stats.
+    /// Detaches a consumer (queued bytes are discarded, a blocked write is abandoned) and
+    /// returns its final stats.
     pub fn detach(&self, id: ConsumerId) -> Option<ConsumerStats> {
         let c = self.shared.find(id)?;
         c.close(CloseReason::Detached);
@@ -996,6 +1178,14 @@ mod tests {
         };
         assert!(matches!(
             Publisher::new(h.clone(), small),
+            Err(StreamError::Config(_))
+        ));
+        let no_consumers = PublisherConfig {
+            max_consumers: 0,
+            ..PublisherConfig::default()
+        };
+        assert!(matches!(
+            Publisher::new(h.clone(), no_consumers),
             Err(StreamError::Config(_))
         ));
         assert!(Publisher::new(h.clone(), PublisherConfig::default()).is_ok());

@@ -34,5 +34,6 @@ hk-estimate = { path = "crates/hk-estimate" }
 hk-demod = { path = "crates/hk-demod" }
 hk-store = { path = "crates/hk-store" }
 hk-context = { path = "crates/hk-context" }
+hk-stream = { path = "crates/hk-stream" }
 hk-api = { path = "crates/hk-api" }
 hk-plugins = { path = "crates/hk-plugins" }

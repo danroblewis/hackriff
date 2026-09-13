@@ -7,37 +7,48 @@
 //!   full queue or a missing process drops the record and counts it. Capture never blocks on
 //!   a plugin.
 //! - **Message plane:** a reader thread splits stdout into lines (bounded length), parses them
-//!   ([`crate::output`]), clamps the class to the manifest, and stores them through
-//!   [`Ingest`]. stderr goes to a bounded log ring.
-//! - **Supervision:** when the plugin exits it is restarted with exponential backoff. A run
-//!   longer than `backoff_max` resets the backoff. More than `max_restarts` exits within
-//!   `window` is a crash loop, and the instance goes `Failed`. A plugin whose input stays full
-//!   for `stall_timeout` is killed as hung, then restarted. Shutdown kills the process.
+//!   ([`crate::output`]) under the **ceiling** `clamp(manifest class, input channel class)`,
+//!   applies the metadata allowlist, and stores them through [`Ingest`].
+//! - **Log ring:** host events, plus plugin `log` lines and stderr **only when the ceiling
+//!   permits content**. Under a content-forbidding ceiling those are counted, never stored. The
+//!   ring is tagged with the ceiling ([`LogTail::content_class`]).
+//! - **Supervision:** each plugin runs in its own process group. When the leader exits, the whole
+//!   group is SIGKILLed before the leader is reaped (no pid/pgid reuse window), so descendants
+//!   holding the pipes cannot hang the host. The plugin is restarted with exponential backoff; a
+//!   run longer than `backoff_max` resets the backoff; more than `max_restarts` exits within
+//!   `window` is a crash loop (`Failed`). A plugin whose input stays full for `stall_timeout`
+//!   has its group killed as hung. Output readers are joined with a timeout: a descendant that
+//!   escaped the group (setsid) cannot block restart or shutdown. Shutdown kills the group.
 //!
 //! Records queued for a process that exits are discarded with its queue.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use hk_api::stream::{
-    BinaryRecord, DEFAULT_MAX_FRAME_LEN, DecoderFeed, FeedAttacher, PublisherConfig, StreamError,
-    StreamHeader,
-};
 use hk_model::sigmf::Datatype;
 use hk_model::{
     ContentClass, DemodulationId, DetectionId, EmitterId, ProvenanceId, RecordingId, Region,
     SampleTime,
 };
+use hk_stream::{
+    BinaryRecord, DEFAULT_MAX_FRAME_LEN, DecoderFeed, FeedAttacher, PublisherConfig, StreamError,
+    StreamHeader, gate,
+};
 
 use crate::ingest::Ingest;
 use crate::manifest::{ManifestError, PluginManifest};
 use crate::output::{PluginOutput, parse_line};
+
+/// How long the host waits for a plugin's output readers after killing its process group.
+const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The input stream a plugin instance is fed.
 #[derive(Clone, Debug, PartialEq)]
@@ -50,8 +61,9 @@ pub struct InputStreamDesc {
     pub center_hz: Option<f64>,
     /// Bandwidth, Hz.
     pub bandwidth_hz: Option<f64>,
-    /// Class of the channel, as classified (informational for the plugin; the data plane is
-    /// not gated, its output is).
+    /// Class of the channel, as classified. The data plane is not gated (decoders need the
+    /// samples), but this class is a **ceiling on the plugin's output**: the effective ceiling
+    /// is `clamp(manifest.output.content_class, content_class)`.
     pub content_class: ContentClass,
     /// Timing anchor for converting sample indices to time.
     pub anchor: SampleTime,
@@ -124,6 +136,8 @@ pub enum PushOutcome {
 pub struct PluginStats {
     /// Supervisor state.
     pub state: PluginState,
+    /// Effective output ceiling (manifest class clamped to the input class).
+    pub content_ceiling: ContentClass,
     /// Records pushed.
     pub records_offered: u64,
     /// Records queued for a process.
@@ -148,18 +162,37 @@ pub struct PluginStats {
     pub decodes: u64,
     /// Annotation lines stored.
     pub annotations: u64,
-    /// Lines whose class was clamped to the manifest ceiling.
+    /// Lines whose class was clamped to the ceiling.
     pub class_clamped: u64,
     /// Lines with an unknown class string (failed closed).
     pub class_unknown: u64,
     /// Lines whose content was refused by the repository and stored metadata-only.
     pub content_gated: u64,
+    /// Metadata keys, frame models, labels and identities removed by the allowlist.
+    pub metadata_sanitized: u64,
+    /// Plugin `log` lines not stored because the ceiling forbids content.
+    pub log_lines_withheld: u64,
+    /// stderr lines not stored because the ceiling forbids content.
+    pub stderr_lines_withheld: u64,
+    /// Runs whose output readers were abandoned (a descendant escaped the process group).
+    pub readers_abandoned: u64,
     /// Unparseable or overlong lines.
     pub malformed: u64,
     /// Parsed lines that could not be stored.
     pub store_errors: u64,
     /// Last exit description.
     pub last_exit: Option<String>,
+}
+
+/// The log ring, tagged with the plugin's output ceiling. Under a content-forbidding ceiling it
+/// holds only host-generated lines (no plugin text); a control API exposing it must still apply
+/// the class.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogTail {
+    /// The effective output ceiling of the plugin that produced the lines.
+    pub content_class: ContentClass,
+    /// Lines, oldest first.
+    pub lines: Vec<String>,
 }
 
 #[derive(Default)]
@@ -179,6 +212,10 @@ struct Counters {
     class_clamped: AtomicU64,
     class_unknown: AtomicU64,
     content_gated: AtomicU64,
+    metadata_sanitized: AtomicU64,
+    log_lines_withheld: AtomicU64,
+    stderr_lines_withheld: AtomicU64,
+    readers_abandoned: AtomicU64,
     malformed: AtomicU64,
     store_errors: AtomicU64,
 }
@@ -191,6 +228,15 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// SIGKILLs process group `pid` (the plugin leader's pid is its pgid).
+fn kill_group(pid: u32) {
+    // SAFETY: plain syscall. The caller holds the pid registration: the leader is not reaped, so
+    // the pid, and therefore the pgid, cannot have been reused.
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
 struct Proc {
     pid: Option<u32>,
     state: PluginState,
@@ -199,6 +245,7 @@ struct Proc {
 
 struct Shared {
     manifest: PluginManifest,
+    ceiling: ContentClass,
     context: PluginContext,
     sample_rate_hz: f64,
     anchor: Mutex<SampleTime>,
@@ -211,6 +258,7 @@ struct Shared {
 }
 
 impl Shared {
+    /// Stores a host-generated line (never plugin text).
     fn log(&self, line: String) {
         let cap = self.manifest.limits.stderr_lines;
         if cap == 0 {
@@ -223,19 +271,26 @@ impl Shared {
         log.push_back(line);
     }
 
+    /// Stores plugin-originated text only when the ceiling permits content; otherwise counts it.
+    fn plugin_text(&self, text: String, withheld: &AtomicU64) {
+        if self.ceiling.permits_content() {
+            self.log(text);
+        } else {
+            bump(withheld);
+        }
+    }
+
     fn set_state(&self, state: PluginState) {
         lock(&self.proc).state = state;
     }
 
-    /// Kills the running process, if any. The pid stays registered until the supervisor has
-    /// observed the exit (the process is not reaped yet), so it cannot name a reused pid.
+    /// Kills the running plugin's process group, if any. The pid stays registered until the
+    /// supervisor has killed the group after the leader's exit, and the leader is reaped only
+    /// after that, so the pgid cannot name a reused process.
     fn kill(&self) {
         let g = lock(&self.proc);
         if let Some(pid) = g.pid {
-            // SAFETY: plain syscall on a pid we spawned and have not reaped.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
+            kill_group(pid);
         }
     }
 
@@ -245,6 +300,7 @@ impl Shared {
         let proc = lock(&self.proc);
         PluginStats {
             state: proc.state,
+            content_ceiling: self.ceiling,
             records_offered: get(&c.offered),
             records_enqueued: get(&c.enqueued),
             records_dropped_full: get(&c.dropped_full),
@@ -260,6 +316,10 @@ impl Shared {
             class_clamped: get(&c.class_clamped),
             class_unknown: get(&c.class_unknown),
             content_gated: get(&c.content_gated),
+            metadata_sanitized: get(&c.metadata_sanitized),
+            log_lines_withheld: get(&c.log_lines_withheld),
+            stderr_lines_withheld: get(&c.stderr_lines_withheld),
+            readers_abandoned: get(&c.readers_abandoned),
             malformed: get(&c.malformed),
             store_errors: get(&c.store_errors),
             last_exit: proc.last_exit.clone(),
@@ -279,9 +339,12 @@ impl PluginMonitor {
         self.shared.stats()
     }
 
-    /// The stderr/log ring, oldest first.
-    pub fn log_tail(&self) -> Vec<String> {
-        lock(&self.shared.log).iter().cloned().collect()
+    /// The log ring, tagged with the output ceiling.
+    pub fn log_tail(&self) -> LogTail {
+        LogTail {
+            content_class: self.shared.ceiling,
+            lines: lock(&self.shared.log).iter().cloned().collect(),
+        }
     }
 
     /// Polls (every 2 ms) until `pred` holds or `timeout` passes. For tests and shutdown paths.
@@ -317,6 +380,7 @@ impl PluginInstance {
         manifest.check_input(&input)?;
         let args = manifest.render_args(&input)?;
         let program = manifest.resolve_executable();
+        let ceiling = gate::clamp(manifest.output.content_class, input.content_class);
 
         let mut header = StreamHeader::new(
             format!("plugin-input/{}", manifest.id),
@@ -339,6 +403,8 @@ impl PluginInstance {
                 queue_bytes: manifest.limits.input_queue_bytes,
                 disconnect_after_drops: u64::MAX,
                 disconnect_after: manifest.limits.stall_timeout,
+                max_consumers: 2,
+                drain_timeout: Duration::from_secs(1),
             },
         )?;
 
@@ -346,6 +412,7 @@ impl PluginInstance {
             sample_rate_hz: input.sample_rate_hz,
             anchor: Mutex::new(input.anchor),
             manifest,
+            ceiling,
             context,
             proc: Mutex::new(Proc {
                 pid: None,
@@ -492,7 +559,7 @@ fn describe(status: &ExitStatus) -> String {
     }
 }
 
-/// Runs one process to completion.
+/// Runs one process (group) to completion.
 fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, args: &[String]) {
     let c = &shared.counters;
     let spawned = Command::new(program)
@@ -500,6 +567,8 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Own process group (pgid = pid): the whole plugin tree can be killed at once.
+        .process_group(0)
         .spawn();
     let mut child: Child = match spawned {
         Ok(child) => child,
@@ -515,17 +584,14 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
         let mut g = lock(&shared.proc);
         g.pid = Some(pid);
         if shared.shutdown.load(Ordering::Acquire) {
-            // SAFETY: plain syscall on the pid just spawned.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
+            kill_group(pid);
         }
     }
     bump(&c.starts);
     if let Some(nice) = shared.manifest.limits.nice {
         // SAFETY: plain syscall; failure (e.g. permission) is ignored, limits are best-effort.
         unsafe {
-            libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, nice);
+            libc::setpriority(libc::PRIO_PGRP, pid as libc::id_t, nice);
         }
     }
 
@@ -539,7 +605,7 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
         Box::new(move || {
             if let Some(s) = weak.upgrade() {
                 bump(&s.counters.stall_kills);
-                s.log("host: input stayed full past stall_timeout; killing plugin".into());
+                s.log("host: input stayed full past stall_timeout; killing plugin group".into());
                 s.kill();
             }
         }),
@@ -549,23 +615,53 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
         Ok(_) => shared.set_state(PluginState::Running),
         Err(_) => shared.kill(),
     }
-    let out_shared = Arc::clone(shared);
-    let out_reader = thread::Builder::new()
-        .name(format!("hk-plugin-{}-out", shared.manifest.id))
-        .spawn(move || read_stdout(&out_shared, stdout));
-    let err_shared = Arc::clone(shared);
-    let err_reader = thread::Builder::new()
-        .name(format!("hk-plugin-{}-err", shared.manifest.id))
-        .spawn(move || read_stderr(&err_shared, stderr));
+
+    // Readers signal completion by dropping their sender; `abandon` stops a reader that outlives
+    // the join timeout from ingesting anything more.
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let abandon = Arc::new(AtomicBool::new(false));
+    let spawn_reader = |name: &str, body: Box<dyn FnOnce() + Send>| {
+        let tx = done_tx.clone();
+        thread::Builder::new()
+            .name(format!("hk-plugin-{}-{name}", shared.manifest.id))
+            .spawn(move || {
+                body();
+                drop(tx);
+            })
+    };
+    let (out_shared, out_abandon) = (Arc::clone(shared), Arc::clone(&abandon));
+    let _ = spawn_reader(
+        "out",
+        Box::new(move || read_stdout(&out_shared, stdout, &out_abandon)),
+    );
+    let (err_shared, err_abandon) = (Arc::clone(shared), Arc::clone(&abandon));
+    let _ = spawn_reader(
+        "err",
+        Box::new(move || read_stderr(&err_shared, stderr, &err_abandon)),
+    );
+    drop(done_tx);
 
     wait_exit_unreaped(pid);
-    lock(&shared.proc).pid = None;
+    {
+        // Kill the rest of the group while the leader is still a zombie, then reap.
+        let mut g = lock(&shared.proc);
+        kill_group(pid);
+        g.pid = None;
+    }
     let status = child.wait();
     if let Ok(id) = consumer {
         attacher.detach(id);
     }
-    for reader in [out_reader, err_reader].into_iter().flatten() {
-        let _ = reader.join();
+    match done_rx.recv_timeout(READER_JOIN_TIMEOUT) {
+        Err(RecvTimeoutError::Disconnected) | Ok(()) => {}
+        Err(RecvTimeoutError::Timeout) => {
+            abandon.store(true, Ordering::Release);
+            bump(&c.readers_abandoned);
+            shared.log(
+                "host: plugin output pipes still held by a descendant outside the process group; readers abandoned"
+                    .into(),
+            );
+        }
     }
     let desc = match &status {
         // Killed by `shutdown`: not a crash.
@@ -648,19 +744,26 @@ fn for_each_line(r: impl Read, max: usize, mut f: impl FnMut(&[u8]), mut overlon
     }
 }
 
-fn read_stdout(shared: &Arc<Shared>, stdout: impl Read) {
+fn read_stdout(shared: &Arc<Shared>, stdout: impl Read, abandon: &AtomicBool) {
     let c = &shared.counters;
     for_each_line(
         stdout,
         shared.manifest.limits.max_message_bytes,
         |line| {
-            if line.iter().all(u8::is_ascii_whitespace) {
+            if abandon.load(Ordering::Acquire) || line.iter().all(u8::is_ascii_whitespace) {
                 return;
             }
             let timing = Some((*lock(&shared.anchor), shared.sample_rate_hz));
-            let parsed = match parse_line(&shared.manifest, &shared.context, timing, line) {
+            let parsed = match parse_line(
+                &shared.manifest,
+                shared.ceiling,
+                &shared.context,
+                timing,
+                line,
+            ) {
                 Ok(p) => p,
                 Err(reason) => {
+                    // `reason` never contains values from the line (output.rs contract).
                     bump(&c.malformed);
                     shared.log(format!("host: malformed plugin output: {reason}"));
                     return;
@@ -672,10 +775,18 @@ fn read_stdout(shared: &Arc<Shared>, stdout: impl Read) {
             if parsed.unknown_class {
                 bump(&c.class_unknown);
             }
+            c.metadata_sanitized
+                .fetch_add(parsed.sanitized, Ordering::Relaxed);
             let ctx = &shared.context;
             let result = match parsed.output {
                 PluginOutput::Log(msg) => {
-                    shared.log(format!("plugin: {msg}"));
+                    let mut msg = msg;
+                    let mut end = msg.len().min(4096);
+                    while !msg.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    msg.truncate(end);
+                    shared.plugin_text(format!("plugin: {msg}"), &c.log_lines_withheld);
                     return;
                 }
                 PluginOutput::Decode(d) => lock(&shared.ingest)
@@ -694,7 +805,11 @@ fn read_stdout(shared: &Arc<Shared>, stdout: impl Read) {
                 }
                 Err(e) => {
                     bump(&c.store_errors);
-                    shared.log(format!("host: storing plugin output failed: {e}"));
+                    if shared.ceiling.permits_content() {
+                        shared.log(format!("host: storing plugin output failed: {e}"));
+                    } else {
+                        shared.log("host: storing plugin output failed".into());
+                    }
                 }
             }
         },
@@ -705,12 +820,17 @@ fn read_stdout(shared: &Arc<Shared>, stdout: impl Read) {
     );
 }
 
-fn read_stderr(shared: &Arc<Shared>, stderr: impl Read) {
+fn read_stderr(shared: &Arc<Shared>, stderr: impl Read, abandon: &AtomicBool) {
+    let withheld = &shared.counters.stderr_lines_withheld;
     for_each_line(
         stderr,
         4096,
-        |line| shared.log(String::from_utf8_lossy(line).into_owned()),
-        || shared.log("(stderr line over 4096 bytes omitted)".into()),
+        |line| {
+            if !abandon.load(Ordering::Acquire) {
+                shared.plugin_text(String::from_utf8_lossy(line).into_owned(), withheld);
+            }
+        },
+        || shared.plugin_text("(stderr line over 4096 bytes omitted)".into(), withheld),
     );
 }
 
