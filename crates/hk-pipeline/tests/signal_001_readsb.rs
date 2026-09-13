@@ -89,6 +89,15 @@ fn signal_001_adsb_squitters_decoded_by_the_readsb_plugin_chain() {
         },
     );
     assert_eq!(aircraft.len(), 4, "[{SIGNAL_001}] one emitter per ICAO");
+    // T-039 family step for plugin decodes (T-037b): readsb → ADS-B is each top explanation.
+    for e in &aircraft {
+        let ranked = hk_pipeline::explanations(&repo, e.emitter.id).unwrap();
+        assert_eq!(
+            ranked.first().map(|x| x.service.as_str()),
+            Some("adsb"),
+            "[{SIGNAL_001}] {ranked:?}"
+        );
+    }
 }
 
 #[test]

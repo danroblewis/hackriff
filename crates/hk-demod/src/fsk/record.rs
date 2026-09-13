@@ -28,6 +28,11 @@
 //!   positive classification: a third-party emitter keeps its status.
 
 use hk_estimate::framing::{FramingResult, PayloadClass, bits};
+
+/// Classification / fingerprint family and Demodulation mode of this writer's emitters. A
+/// modulation, not a service: `hk_pipeline::family` maps it to no band-plan service family, so
+/// on its own it leaves an emitter's known status `unknown` (T-039).
+pub const FSK_FAMILY: &str = "2fsk";
 use hk_model::{
     Annotation, AnnotationAuthor, AnnotationId, AnnotationKind, AnnotationTarget, Bitstream,
     BitstreamId, BitstreamPayload, BitstreamTransport, Classification, ContentClass, CrcStatus,
@@ -227,7 +232,7 @@ pub fn write_framed_bursts(
         f_center_hz: f_center,
         bandwidth_hz: bandwidth,
         fingerprint: Some(Fingerprint {
-            family: Some("2fsk".into()),
+            family: Some(FSK_FAMILY.into()),
             symbol_rate_hz: median(
                 bursts
                     .iter()
@@ -249,7 +254,7 @@ pub fn write_framed_bursts(
         context: ctx.emitter_hint,
         classification: Some(Classification {
             t: now,
-            family: "2fsk".into(),
+            family: FSK_FAMILY.into(),
             confidence: model.confidence,
             open_set_score: 1.0 - model.confidence,
             model_version: FSK_DEMOD_VERSION.into(),
@@ -272,7 +277,7 @@ pub fn write_framed_bursts(
             emitter_ref: Some(eid),
             detection_ref: ctx.detection_ref,
             recording_ref: ctx.recording_ref,
-            mode: "2fsk".into(),
+            mode: FSK_FAMILY.into(),
             params: burst.estimated_params(),
             lock_quality: Some(sy.lock.lock_quality),
             evm_db: None,

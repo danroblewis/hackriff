@@ -3,24 +3,32 @@
 //! The pipeline persists Tracks (hk-detect `TrackBatch`) and the rows the chains' record writers
 //! create (`hk_demod::write_session`, `write_framed_bursts`, plugin `Ingest`, which resolve
 //! decoded identities through the repository). Clustering tracks into emitters is T-018's
-//! `record_track_event` → `Repository::record_sighting`; [`TrackInventory`] (the default) calls
-//! it for closed tracks and hop sets, with the bundled 47 CFR 2.106 band table as the
-//! known-status prior. Another policy plugs in through [`Inventory`] without touching the
-//! composition. Reads go through `Repository::query_inventory` only (identities gated).
+//! `Repository::record_sighting`. [`TrackInventory`] (the default) calls it for closed tracks
+//! and hop sets.
 //!
-//! **Capture name (T-034 replay dedup).** The detection writer passes the run's stable capture
-//! name ([`Inventory::capture_name`]) before the first event. [`TrackInventory`] then offers
-//! track and hop-set sightings as re-measurements (`record_sighting_measured` with producer
-//! [`TRACK_PRODUCER`] and that capture), so replaying the same IQ again does not count its
-//! tracks twice, while two different captures with the same timestamps (synthetic scenes all
-//! start at the same instant) stay separate.
+//! T-039 ([`crate::family`]) adds the family step:
+//! - A closed track whose occupancy maps to a service family carries that family as a
+//!   Classification.
+//! - Every emitter a sighting or a chain ([`Inventory::chain_emitter`]) touches gets its ranked
+//!   explanations and its known status from the top one ([`explain_emitter`], bundled
+//!   47 CFR 2.106 band table).
+//!
+//! **Capture name (T-034 replay dedup, T-037b).** The detection writer passes the run's stable
+//! capture name ([`Inventory::capture_name`]) before the first event. [`TrackInventory`] then
+//! offers track and hop-set sightings as re-measurements (`record_sighting_measured` with producer
+//! [`TRACK_PRODUCER`] and that capture), so replaying the same IQ again does not count its tracks
+//! twice, while two different captures with the same timestamps (synthetic scenes all start at
+//! the same instant) stay separate.
+//!
+//! Another policy plugs in through [`Inventory`] without touching the composition. Reads go
+//! through `Repository::query_inventory` only (identities gated).
 
-use hk_context::{BandTable, Region as BandRegion, match_known_status};
+use hk_context::{BandTable, Region as BandRegion};
 use hk_detect::TrackEvent;
-use hk_detect::track::inventory::{hop_set_sighting, record_track_event, track_sighting};
-use hk_model::{
-    EmitterId, KnownStatusPrior, MeasurementKey, PriorVerdict, RepoError, Repository, TrackId,
-};
+use hk_detect::track::inventory::{hop_set_sighting, track_sighting};
+use hk_model::{EmitterId, MeasurementKey, RepoError, Repository, TrackId};
+
+use crate::family::{explain_emitter, track_family};
 
 /// Producer name of track and hop-set sightings in a [`MeasurementKey`].
 pub const TRACK_PRODUCER: &str = "hk-track";
@@ -57,7 +65,7 @@ pub struct NullInventory;
 
 impl Inventory for NullInventory {}
 
-/// T-018 clustering for closed tracks and hop sets, with band-plan priors.
+/// T-018 clustering for closed tracks and hop sets, with T-039 family explanations and priors.
 pub struct TrackInventory {
     table: Option<BandTable>,
     capture: Option<String>,
@@ -78,56 +86,49 @@ impl Default for TrackInventory {
     }
 }
 
-impl TrackInventory {
-    /// One sighting: a re-measurement keyed by the capture name when one was given, else the
-    /// plain T-018 path.
-    fn record(
-        &self,
-        repo: &mut Repository,
-        event: &TrackEvent,
-        priors: Option<&dyn KnownStatusPrior>,
-    ) -> Result<Option<hk_model::Resolution>, RepoError> {
-        let Some(capture) = &self.capture else {
-            return record_track_event(repo, event, priors);
-        };
-        let sighting = match event {
-            TrackEvent::Closed(summary) => track_sighting(summary),
-            TrackEvent::HopSetFormed(h) | TrackEvent::HopSetClosed(h) => Some(hop_set_sighting(h)),
-            _ => None,
-        };
-        let key = MeasurementKey {
-            producer: TRACK_PRODUCER.into(),
-            capture: Some(capture.clone()),
-        };
-        sighting
-            .map(|s| repo.record_sighting_measured(&s, &key, priors))
-            .transpose()
-    }
-}
-
 impl Inventory for TrackInventory {
     fn capture_name(&mut self, name: &str) {
         self.capture = Some(name.to_owned());
     }
 
     fn track_event(&mut self, repo: &mut Repository, event: &TrackEvent) -> Result<(), RepoError> {
-        let resolution = match &self.table {
-            Some(table) => {
-                let prior = |family: &str, f: f64, bw: f64| {
-                    let m = match_known_status(table, family, f, bw);
-                    PriorVerdict {
-                        status: m.status,
-                        prior_ref: m.prior_ref,
-                        reason: m.reason,
-                    }
-                };
-                self.record(repo, event, Some(&prior))?
-            }
-            None => self.record(repo, event, None)?,
+        let sighting = match event {
+            TrackEvent::Closed(summary) => track_sighting(summary).map(|mut s| {
+                s.classification = track_family(summary).classification(s.seen.end);
+                s
+            }),
+            TrackEvent::HopSetFormed(h) | TrackEvent::HopSetClosed(h) => Some(hop_set_sighting(h)),
+            _ => None,
         };
-        if let Some(r) = resolution {
-            self.sightings += 1;
-            self.created += u64::from(r.created);
+        let Some(sighting) = sighting else {
+            return Ok(());
+        };
+        let r = match &self.capture {
+            Some(capture) => {
+                let key = MeasurementKey {
+                    producer: TRACK_PRODUCER.into(),
+                    capture: Some(capture.clone()),
+                };
+                repo.record_sighting_measured(&sighting, &key, None)?
+            }
+            None => repo.record_sighting(&sighting, None)?,
+        };
+        self.sightings += 1;
+        self.created += u64::from(r.created);
+        if let Some(table) = &self.table {
+            explain_emitter(repo, table, r.emitter_id)?;
+        }
+        Ok(())
+    }
+
+    fn chain_emitter(
+        &mut self,
+        repo: &mut Repository,
+        _track: Option<TrackId>,
+        emitter: EmitterId,
+    ) -> Result<(), RepoError> {
+        if let Some(table) = &self.table {
+            explain_emitter(repo, table, emitter)?;
         }
         Ok(())
     }

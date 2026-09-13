@@ -13,6 +13,7 @@ use hk_model::{
 };
 use serde_json::json;
 
+use crate::blind::{BlindRun, BlindSource, blind_replay};
 use crate::common::*;
 
 const SIGNAL_062: &str = "SIGNAL-062";
@@ -30,20 +31,13 @@ pub fn fm_run() -> Option<&'static FmRun> {
     static RUN: OnceLock<Option<FmRun>> = OnceLock::new();
     RUN.get_or_init(|| {
         let meta = real_fixture(FM_FIXTURE)?;
-        let dir = TempDir::new("fm");
-        // Blind: the fixture's annotations (station, spur, DC labels) are stripped.
-        let (cfg, replay, _input) =
-            blind_replay_config(&dir.0, &meta, json!({}), hk_core::Pacing::Unpaced);
+        // Blind (T-037b): the fixture's truth (annotations, description) is stripped, and the
+        // built-in registry runs with no plan extra, chain or mode chosen by the test.
+        let BlindRun { dir, summary, .. } = blind_replay(&meta, "fm", BlindSource::default());
         assert_eq!(
-            replay.class,
-            ContentClass::Unrestricted,
+            summary.source_class, "unrestricted",
             "[{SIGNAL_062}] FM band prior makes the source unrestricted"
         );
-        assert!(
-            cfg.settings.chains.is_none(),
-            "[{SIGNAL_062}] built-in registry, no manual chain or mode"
-        );
-        let summary = finish(start(cfg, replay));
         Some(FmRun { dir, summary })
     })
     .as_ref()

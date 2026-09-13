@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use hk_core::Pacing;
 use hk_e2e::{SynthRequest, synth_or_skip};
-use hk_model::{InventoryQuery, Timestamp};
+use hk_model::{IdentityScheme, InventoryIdentity, InventoryQuery, Timestamp};
 use hk_pipeline::{PipelineConfig, replay_plan};
 use hk_stream::{Declared, Record, RecordFlags, StreamHeader, StreamKind, StreamReader};
 use serde_json::json;
@@ -271,6 +271,91 @@ fn replaying_the_same_iq_again_does_not_count_its_tracks_twice() {
         third.1 > first.1,
         "another capture with the same timestamps still counts: {first:?} → {third:?}"
     );
+}
+
+/// Plugin decodes reach the T-039 family step: the chain classifies the emitters its identity
+/// decodes resolved to by the plugin's id (`readsb` → ADS-B). `hk-dummy-plugin --profile
+/// adsb-like` stands in for readsb under a manifest named `readsb` (CI has no readsb; the real
+/// chain is checked in `signal_001_readsb.rs`). Legal: under a metadata-only source the same
+/// plugin output adds a family explanation and nothing else: identities stay withheld and the
+/// explanations name no aircraft.
+#[test]
+fn plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated() {
+    let src = TempDir::new("family-src");
+    let dir = TempDir::new("family");
+    let Some(exe) = dummy_plugin(&dir.0) else {
+        return;
+    };
+    let manifest = dummy_manifest(
+        &src.0,
+        &exe,
+        &["--every", "1", "--profile", "adsb-like"],
+        8 << 20,
+    );
+    let mut m: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    m["id"] = json!("readsb");
+    std::fs::write(&manifest, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    let icaos = ["a1b2c0", "a1b2c1", "a1b2c2", "a1b2c3"];
+    let run_at = |center: f64, dir: &Path| {
+        let meta = tone_recording(&src.0, &format!("t{center}"), 2.4e6, 0.5, center, None);
+        let (cfg, replay, _input) = blind_replay_config(
+            dir,
+            &meta,
+            coverage_plan(center, &manifest),
+            Pacing::Unpaced,
+        );
+        let class = cfg.source_class;
+        let (s, fired) = wait_guarded(start(cfg, replay), Duration::from_secs(120));
+        eprintln!("{}", s.to_text());
+        assert!(!fired && s.errors.is_empty(), "{:?}", s.errors);
+        assert!(s.counter("/chains/plugin_decodes") > 0);
+        class
+    };
+
+    // 1090 MHz (unrestricted, ADS-B allocation): every aircraft's top explanation is ADS-B.
+    assert!(run_at(1090e6, &dir.0).permits_content());
+    let repo1 = repo(&dir.0);
+    let aircraft = inventory(
+        &repo1,
+        InventoryQuery {
+            identity_scheme: Some(IdentityScheme::AdsbIcao),
+            ..InventoryQuery::default()
+        },
+    );
+    assert_eq!(aircraft.len(), icaos.len(), "one emitter per aircraft");
+    for e in &aircraft {
+        let ranked = hk_pipeline::explanations(&repo1, e.emitter.id).unwrap();
+        assert_eq!(
+            ranked.first().map(|x| x.service.as_str()),
+            Some("adsb"),
+            "{ranked:?}"
+        );
+    }
+
+    // 433.5 MHz (no band prior: metadata-only): explained, identities withheld, no aircraft named.
+    let gated = TempDir::new("family-gated");
+    assert!(!run_at(433.5e6, &gated.0).permits_content());
+    let repo2 = repo(&gated.0);
+    let entries = inventory(&repo2, InventoryQuery::default());
+    let mut explained = 0;
+    for e in &entries {
+        assert!(
+            !matches!(e.identity, InventoryIdentity::Clear { .. }),
+            "identity withheld under metadata-only: {:?}",
+            e.identity
+        );
+        let ranked = hk_pipeline::explanations(&repo2, e.emitter.id).unwrap();
+        explained += usize::from(!ranked.is_empty());
+        let text = serde_json::to_string(&ranked).unwrap();
+        for icao in icaos {
+            assert!(
+                !text.to_ascii_lowercase().contains(icao),
+                "an explanation names an aircraft: {text}"
+            );
+        }
+    }
+    assert!(explained > 0, "the plugin's emitters were explained");
 }
 
 /// `(flags, payload)` of every binary record in a captured stream, with its header.

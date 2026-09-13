@@ -28,11 +28,15 @@ use crate::band_table::{AllocationRow, BandTable};
 /// (AWARE-053): the allocation there is amateur/radiolocation, but Part 15 devices may share it
 /// under separate rules (47 CFR 15.231/15.235), so the *use* is expected even though the *family*
 /// doesn't match the *allocation*.
-const PART15_FAMILIES: &[&str] = &["fsk-ism", "ism", "lora", "ook-ism"];
+pub const PART15_FAMILIES: &[&str] = &["fsk-ism", "ism", "lora", "ook-ism"];
 
 /// Family → allocation tags it is expected to appear under. A family matches a row when the row
 /// carries any of its listed tags. Extend this table (and the CSV's `tags` column) together when
 /// a new decoder/classifier family is added.
+///
+/// These are *service* families. Evidence-level names (demodulator modes such as hk-demod's
+/// `wfm`, modulation labels such as `2fsk`, decoder ids such as `readsb`) are mapped onto them
+/// by the pipeline's family vocabulary (`hk_pipeline::family`, T-039) before this matcher runs.
 fn expected_tags(family: &str) -> Option<&'static [&'static str]> {
     match family {
         "fm-broadcast" => Some(&["fm-broadcast"]),
@@ -41,12 +45,19 @@ fn expected_tags(family: &str) -> Option<&'static [&'static str]> {
         "noaa-apt" => Some(&["noaa-apt"]),
         "noaa-wx" | "noaa-weather" => Some(&["noaa-wx"]),
         "amateur" | "ham" => Some(&["amateur"]),
-        "aviation-voice" | "aviation-am" => Some(&["aviation"]),
+        "aviation-voice" | "aviation-am" | "aviation-vhf-comm" => Some(&["aviation"]),
         "gnss" => Some(&["gnss"]),
         "cellular" | "lte" => Some(&["cellular"]),
         "public-safety" | "p25" | "dmr" => Some(&["public-safety"]),
         _ => None,
     }
+}
+
+/// `family` is a service family this matcher can place: it has expected allocation tags or is a
+/// Part 15 family. Any other family (including evidence-level names like `wfm`) yields
+/// `unknown` ("no service mapping").
+pub fn is_service_family(family: &str) -> bool {
+    expected_tags(family).is_some() || PART15_FAMILIES.contains(&family)
 }
 
 /// The result of matching an emitter's family and band against the [`BandTable`]: what its
@@ -179,6 +190,26 @@ mod tests {
             m.prior_ref.as_deref(),
             Some("us-47cfr2106-compact:aviation-vhf-comm")
         );
+    }
+
+    /// T-039: the service vocabulary accepts service families only; evidence-level names are
+    /// the pipeline's to map.
+    #[test]
+    fn service_families_are_recognised_and_evidence_names_are_not() {
+        for f in [
+            "fm-broadcast",
+            "adsb",
+            "ism",
+            "fsk-ism",
+            "aviation-vhf-comm",
+        ] {
+            assert!(is_service_family(f), "{f}");
+        }
+        for f in ["wfm", "2fsk", "readsb", "unknown", ""] {
+            assert!(!is_service_family(f), "{f}");
+        }
+        let m = match_known_status(&table(), "aviation-vhf-comm", 120.5e6, 25e3);
+        assert_eq!(m.status, KnownStatus::Known);
     }
 
     /// AWARE-053: an unclassified ("unknown") emitter is `unknown`, even inside a well-covered

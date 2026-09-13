@@ -134,21 +134,8 @@ pub fn real_fixture(name: &str) -> Option<PathBuf> {
 /// A copy of `meta` with its annotations (the ground truth) removed, next to a link to its data,
 /// in `dir`: the pipeline replays it blind while the test keeps the original's truth.
 pub fn blind_meta(meta: &Path, dir: &Path) -> PathBuf {
-    let mut v: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(meta).unwrap()).unwrap();
-    v["annotations"] = serde_json::json!([]);
-    std::fs::create_dir_all(dir).unwrap();
-    let stem = meta.file_stem().unwrap().to_string_lossy().into_owned();
-    let out = dir.join(format!("{stem}.sigmf-meta"));
-    std::fs::write(&out, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
-    let data = dir.join(format!("{stem}.sigmf-data"));
-    let _ = std::fs::remove_file(&data);
-    std::os::unix::fs::symlink(
-        std::fs::canonicalize(meta.with_extension("sigmf-data")).unwrap(),
-        &data,
-    )
-    .unwrap();
-    out
+    // The T-039 harness's stripping (annotations and description removed, data linked).
+    hk_e2e::blind::strip_truth(meta, dir, "blind", 0.0).unwrap()
 }
 
 /// The one replay entry point of the tests below: [`replay_config`] over a blind copy of `meta`

@@ -206,3 +206,54 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Acceptance:** new untagged 930.5 MHz paging case; 12/12 pass.
   - **Follow-ups:** per-channel restriction instead of whole-window; ESMR/FirstNet/CBRS edges unverified.
   - **Next:** T-037 and T-039 holds released; they launch after the merge.
+- **B0.104 T-027 fix merged** (69563f5); verification run in progress. Launched three agents in parallel with file ownership split within hk-pipeline:
+  - **T-037a:** HackRF live source (libhackrf BSD-3, feature-gated so CI needs no library; receive-only with no TX bound in the FFI). It has exclusive HackRF use for an ignored HIL smoke test. Also Ctrl-C shutdown, `--loop` restart, retune header, calibration loading, attach-test margin.
+  - **T-037b:** the data path — writer thread, verification persistence, readsb backpressure, WFM fragments, capture names, FSK bits, short-replay attach, pilot frequency, FloorProduct lock, correlator I/O.
+  - **T-039:** mapping demod families to band-plan priors.
+  T-040 is still running in hk-model.
+- **B0.105 User request: T-041 Mac compute providers, launched immediately.** It doesn't collide with the running T-037a/b, T-039 or T-040, since none of them edit hk-dsp. The dev Mac is an M3 Ultra (28 CPU cores, 60-core GPU, Metal 3, 256 GB).
+  - **Plan:**
+    - Measure the multi-threaded CPU baseline at 20 Msps (STFT + PFB real-time factor).
+    - Add a GPU provider for `FftBackend`/`PfbBackend`, choosing wgpu compute (Metal on Mac, Vulkan on Jetson) or native Metal after a timeboxed comparison.
+    - Evaluate Accelerate vDSP for CPU FFT.
+    - Parity tests against the CPU reference, benchmarks, and runtime/config provider selection with CPU fallback.
+  - **Decisions (user):**
+    - ADR-0007 becomes a per-platform provider model.
+    - CUDA stays a later Jetson provider; T-026 stays blocked.
+    - The GPU path gets exercised on the Mac now rather than waiting for the Jetson.
+  - **Model:** Opus high (Fable excluded this session).
+  - **Caveat:** concurrent agent builds make CPU benchmarks noisy, so the agent records the load average and reports min/median.
+- **B0.106 User feedback (priority) → T-042..T-046, scheduled by file ownership:**
+  - **(A) T-042, real live HackRF in the UI:** default `--hackrf` source for serve/hackriffd, full pipeline to inventory, demo seed only behind `--demo`. Folded into the running T-037a agent, which owns hk-cli and the HackRF source. It also exposes `hk_api::LiveControl` for UI controls.
+  - **(B) T-043, Listen (click → auto analog demod → Web Audio):** held until T-037b (chains/), T-039 and T-044 merge; legal gating kept.
+  - **(C) T-044, UI interaction + (D) T-045, frequency axis bug:** launched now in one agent, since ui/ has no other owner. For D: center showed 100.4324 MHz and the 101.3 MHz station showed at ~101.0 MHz, suggesting a ~368 kHz offset. Root cause first, with a tone-at-known-frequency test through STFT → header → UI mapping. If the root cause is in `hk-pipeline/src/spectrum.rs` (owned by T-037a), the diff is routed to T-037a.
+  - **(E) T-046, shared provider conformance suite:** folded into the running T-041 agent (hk-dsp). Every provider, including a future CUDA one, must pass it before it is selectable.
+- **B0.107 T-027 fix verified on main:** lint, 121 Rust test groups, Python tests and acceptance 12/12 all green.
+- **T-040 merged** (7014e55 → a12848a). The four tag-hardening nits are fixed with raw-SQLite sentinel tests. Tags outside the vocabulary are now purged whenever an emitter becomes withheld. Two older "tags_withheld" assertions changed to match. Verified: lint, workspace, Python and acceptance green.
+- **B0.108 User feedback on serving and tests.** The start of the message was truncated; acted on the visible part.
+  - **Serving:** `seed_inventory` is removed from normal serving entirely, not just put behind `--demo`. Demo seeds only inside unit tests. Sent to T-037a.
+  - **Test philosophy:** each fixture carries a ground-truth list of interesting emissions that the system must not be given. Tests run blind detection, assert every truth emission is detected, and assert a reasonable explanation among the top-k recommendations. No lookup-a-frequency-and-tune tests.
+  - **T-039 scope:** ranked top-k explanations with an off-raster flag, plus the first blind cases: the fm_100p8M station → FM broadcast, and a +150 kHz shifted synthetic → detected and off-raster. Sent to the running agent.
+  - **New T-047:** general blind ground-truth harness plus an audit and rewrite of existing acceptance tests; held behind T-039 and T-037b.
+- **B0.109 User feedback 2 → new milestone M0b "Live device + exploration UI".** It sits after M0 and before decoder breadth; docs/10 and docs/11 are being updated by an agent.
+  - **Principles (user):**
+    - **Device interface:** E2E/acceptance tests drive the system through the SDR device interface via a mock SDR that replays SigMF realistically: retune inside the recording serves that band, outside it gives noise plus a flag, gain scales and clips at 8-bit, and it reports timestamps and overruns. No direct file feeding; the same tests later run against the real HackRF (HIL).
+    - **Generic interface:** SoapySDR-ready, with HackRF specifics kept out of the core.
+    - **UI is a major gap:** hover/click, multi-region selections as first-class objects, a full SDR control panel through an authenticated control API with legal/TX gating (M0 was GET-only).
+  - **M0b tasks:**
+    - T-042 live HackRF serving (in T-037a)
+    - T-043 Listen
+    - T-044 hover/click/multi-select (running)
+    - T-045 axis bug (running)
+    - T-047 blind truth harness, now through the mock device
+    - T-048 generic device interface
+    - T-049 mock SDR device
+    - T-050 authenticated control API
+    - T-051 SDR control panel
+    - T-052 persisted multi-region selections plus actions
+    - T-053 HIL acceptance run
+  - **Running agents redirected:**
+    - T-037a keeps the device interface generic (named gain stages, optional bias-tee/sweep) and adds no unauthenticated POSTs.
+    - T-044 drops control endpoints and panel (→ T-050/T-051) and designs selection as multi-region client objects.
+  - **M0 closes** when T-037a/b and T-039 merge; T-026 moves out with the Jetson. M0b launches in dependency order: T-048 → T-049 → T-047/T-053; T-050 → T-051/T-052; T-043.
+- **B0.110 docs/10 + docs/11 updated for M0b** (23ab917, merged). docs/10: tiers now run through the mock device, with T5 as the same suite on the HackRF; new §1.1 device interface, §3.1 hidden ground truth, §3.2 anti-patterns. docs/11: new §1.2 M0b with contents, task map and definition of done; M1 now gated on M0b. Section numbers unchanged.

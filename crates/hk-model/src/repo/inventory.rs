@@ -590,6 +590,8 @@ impl Repository {
             )?;
             true
         };
+        // T-040: an identity filled in here is unclassified, so earlier free-text tags go.
+        super::gating::purge_withheld_tags(&tx, target)?;
         bump_extent(&tx, "emitter", freq.width_hz(), 0)?;
         tx.commit()?;
         Ok(EmitterUpsert {
@@ -796,51 +798,58 @@ impl Repository {
     /// identity no access level reveals (restricted, metadata-only or unclassified), a tag
     /// outside [`crate::TAG_VOCABULARY`] is refused with [`RepoError::Invalid`]; the refusal
     /// depends only on that class, never on the tag's relation to the value.
+    /// A merged emitter id tags its survivor (T-040).
     pub fn add_emitter_tag(&mut self, emitter_id: EmitterId, tag: &str) -> Result<(), RepoError> {
         let tx = self.write_tx()?;
-        if !crate::cluster::tag_in_vocabulary(tag)
-            && let Some(live) = super::cluster::live_id(&tx, emitter_id)?
-            && let Some(class) = super::gating::emitter_identity_class(&tx, live)?
-            && super::gating::vocabulary_only(class)
-        {
-            return Err(super::gating::vocabulary_refusal());
-        }
+        let target = super::gating::tag_write_target(&tx, emitter_id, tag)?;
         tx.execute(
             "INSERT OR IGNORE INTO emitter_tag (emitter_id, tag) VALUES (?1, ?2)",
-            params![blob(emitter_id), tag],
+            params![blob(target), tag],
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Removes a tag; returns whether it was present.
+    /// Removes a tag; returns whether it was present. A merged emitter id stands for its
+    /// survivor. T-040: gated like [`Self::add_emitter_tag`], so on an emitter whose identity no
+    /// access level reveals a tag outside [`crate::TAG_VOCABULARY`] is refused whether or not it
+    /// is stored (the answer cannot confirm a guessed hidden tag).
     pub fn remove_emitter_tag(
         &mut self,
         emitter_id: EmitterId,
         tag: &str,
     ) -> Result<bool, RepoError> {
-        Ok(self.conn.execute(
+        let tx = self.write_tx()?;
+        let target = super::gating::tag_write_target(&tx, emitter_id, tag)?;
+        let removed = tx.execute(
             "DELETE FROM emitter_tag WHERE emitter_id = ?1 AND tag = ?2",
-            params![blob(emitter_id), tag],
-        )? > 0)
+            params![blob(target), tag],
+        )? > 0;
+        tx.commit()?;
+        Ok(removed)
     }
 
     /// Appends a link from an emitter (idempotent: the first `linked_at` is kept). A merged
     /// emitter id links to its survivor.
     pub fn link_emitter(&mut self, link: &EmitterLink) -> Result<(), RepoError> {
         let (kind, id) = link_kind(&link.target);
-        let emitter =
-            super::cluster::live_id(&self.conn, link.emitter_id)?.unwrap_or(link.emitter_id);
-        self.conn.execute(
+        let tx = self.write_tx()?;
+        let live = super::cluster::live_id(&tx, link.emitter_id)?;
+        tx.execute(
             "INSERT OR IGNORE INTO emitter_link (emitter_id, target_kind, target_id, linked_at) \
              VALUES (?1, ?2, ?3, ?4)",
             params![
-                blob(emitter),
+                blob(live.unwrap_or(link.emitter_id)),
                 kind,
                 id.into_bytes(),
                 link.linked_at.as_unix_nanos()
             ],
         )?;
+        // T-040: a linked decode can tighten an unclassified-row identity's derived class.
+        if let Some(live) = live {
+            super::gating::purge_withheld_tags(&tx, live)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

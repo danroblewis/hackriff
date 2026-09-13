@@ -114,6 +114,12 @@
 //!   stored values, so neither the output nor the filter can test a guessed identity. This is the
 //!   guarantee: it also covers tags written before the identity arrived or was restricted, and
 //!   tags carried over by a merge. Rows with a shown identity or none keep every tag.
+//! - **Storage (T-040):** when a write makes an identity one no access level reveals (an identity
+//!   arriving, a more restrictive source or linked decode, a merge), the emitter's tags outside
+//!   the vocabulary (and those of rows merged into it) are deleted in the same transaction, and a
+//!   merge copies only vocabulary tags onto such a survivor. Fail closed: the deletion is not
+//!   undone if the class later opens. `remove_emitter_tag` is gated like `add_emitter_tag`, so
+//!   its answer cannot confirm a guessed hidden tag; both act on a merged id's survivor.
 //! - **Write:** when the identity is one no access level reveals (unclassified, `metadata-only`,
 //!   `restricted-paging`, `restricted-cellular`), `record_sighting`, `insert_emitter` (whose
 //!   identity has no class) and `add_emitter_tag` refuse a tag outside the vocabulary. The refusal

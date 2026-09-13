@@ -38,6 +38,7 @@ pub mod class;
 pub mod config;
 pub mod control;
 pub mod events;
+pub mod family;
 pub mod gate;
 pub mod inventory;
 pub mod stats;
@@ -55,6 +56,7 @@ pub use chains::spec::{
 pub use class::{ClassRule, classify_emitter, source_class};
 pub use config::{PipelineConfig, PipelineSettings, StreamSink, detection_resolution, replay_plan};
 pub use events::Candidate;
+pub use family::{Explanation, FamilyPrior, explain_emitter, explanations};
 pub use inventory::{Inventory, TrackInventory};
 pub use run::{
     Pipeline, PipelineHandle, Replay, ResolutionSummary, RunSummary, SourceFactory, SourceInfo,

@@ -17,14 +17,16 @@
 //!   squitters must decode and no plugin input may drop: lossless replay waits for the plugin's
 //!   queue (T-037b).
 //!
-//! **Short scene, default ring (T-037b).** Both tests replay the 0.1 s T-015 scene with the
-//! default 4 s ring. The capture thread holds each tune change until the chain manager has polled
+//! **Short scenes, default ring (T-037b).** The plumbing test replays the 0.1 s T-015 scene and
+//! the readsb test a 1 s scene (so an aircraft's squitters are further apart than the plugin's
+//! decode-stamp precision), both with the default 4 s ring. The capture thread holds each tune change until the chain manager has polled
 //! coverage, and chains claim their samples in the flow gate when they attach, so the coverage
 //! chain attaches although the replay is shorter than the ring (before T-037b: 0 chains, 0
 //! decodes, worked around here with a 2 s scene and `ring_s: 0.5`).
 //!
 //! **Blind replay.** The pipeline replays a copy of the scene without its SigMF annotations
-//! (`blind_replay_config`); the aircraft truth stays in the test.
+//! (`blind::blind_config`); the aircraft truth stays in the test. The readsb test also checks the
+//! T-039 family step for plugin decodes: every aircraft emitter's top explanation is ADS-B.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -39,6 +41,7 @@ use hk_plugins::Ingest;
 use hk_stream::{Publisher, PublisherConfig, Record, StreamHeader, StreamKind};
 use serde_json::json;
 
+use crate::blind::{BlindConfig, BlindSource, blind_config};
 use crate::common::*;
 
 const SIGNAL_001: &str = "SIGNAL-001";
@@ -46,10 +49,11 @@ const SIGNAL_001: &str = "SIGNAL-001";
 const PLUGIN_DECODES: usize = 16;
 const DECODE_STREAM: &str = "decodes/readsb";
 
-fn scenario() -> Option<Fixture> {
+/// The scene: 4 aircraft × 4 squitters over `duration_s`.
+fn scenario(duration_s: f64) -> Option<Fixture> {
     match SynthRequest::new("adsb_squitter")
         .seed(7)
-        .param("duration_s", 0.1)
+        .param("duration_s", duration_s)
         .param("messages_per_aircraft", 4)
         .generate()
     {
@@ -209,7 +213,7 @@ fn assert_adsb_outputs(
 
 #[test]
 fn signal_001_adsb_pipeline_and_plugin_output_plumbing() {
-    let Some(fx) = scenario() else { return };
+    let Some(fx) = scenario(0.1) else { return };
     let icaos = truth_icaos(&fx);
     let msgs = fx.of_kind("adsb-df17");
     assert_eq!(msgs.len(), 16);
@@ -219,9 +223,12 @@ fn signal_001_adsb_pipeline_and_plugin_output_plumbing() {
     .unwrap();
 
     // Composed pipeline over the scene, without the plugin chain (no subprocess here).
-    let dir = TempDir::new("s001");
-    let (mut cfg, replay, _input) =
-        blind_replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
+    let BlindConfig {
+        dir,
+        mut cfg,
+        replay,
+        src: _src,
+    } = blind_config(&fx.meta_path, "s001", BlindSource::default(), json!({}));
     assert_eq!(
         replay.class,
         ContentClass::Unrestricted,
@@ -318,11 +325,17 @@ fn signal_001_adsb_readsb_plugin_chain() {
         );
         return;
     }
-    let Some(fx) = scenario() else { return };
+    // 1 s: an aircraft's squitters ~250 ms apart, well beyond the plugin decode stamp precision
+    // (≤ ~40 ms, hk-plugin-readsb "Timestamps"), so `last_seen` visibly moves; still far shorter
+    // than the default 4 s ring (the 0.1 s attach case is `hk-pipeline/tests/signal_001_readsb.rs`).
+    let Some(fx) = scenario(1.0) else { return };
     let icaos = truth_icaos(&fx);
-    let dir = TempDir::new("s001r");
-    let (mut cfg, replay, _input) =
-        blind_replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
+    let BlindConfig {
+        dir,
+        mut cfg,
+        replay,
+        src: _src,
+    } = blind_config(&fx.meta_path, "s001r", BlindSource::default(), json!({}));
     if !cfg
         .plugin_dirs
         .iter()
@@ -357,4 +370,25 @@ fn signal_001_adsb_readsb_plugin_chain() {
         "[{SIGNAL_001}] readsb decodes {decodes} of {PLUGIN_DECODES}"
     );
     assert_adsb_outputs(&dir.0, &tap.socket_results(), &icaos, PLUGIN_DECODES);
+
+    // T-039 family step for plugin decodes (T-037b): the readsb chain classifies the emitters its
+    // decodes resolved to, so each aircraft's top ranked explanation is ADS-B.
+    let repo = repo(&dir.0);
+    let aircraft = inventory(
+        &repo,
+        InventoryQuery {
+            identity_scheme: Some(IdentityScheme::AdsbIcao),
+            ..InventoryQuery::default()
+        },
+    );
+    assert_eq!(aircraft.len(), icaos.len());
+    for e in &aircraft {
+        let ranked = hk_pipeline::explanations(&repo, e.emitter.id).unwrap();
+        assert_eq!(
+            ranked.first().map(|x| x.service.as_str()),
+            Some("adsb"),
+            "[{SIGNAL_001}] top explanation of {:?}: {ranked:?}",
+            e.identity
+        );
+    }
 }

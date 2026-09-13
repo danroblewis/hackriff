@@ -29,8 +29,11 @@ use hk_plugins::{
 use hk_stream::{BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamHeader, StreamKind};
 use num_complex::Complex;
 
+use hk_model::{EmitterId, TrackId};
+
 use super::{ChainMsg, ChainReader, Next};
 use crate::events::Candidate;
+use crate::family::{Evidence, service_family};
 use crate::gate::GateCursor;
 use crate::run::Shared;
 use crate::stats::{ChainCounters, add, inc};
@@ -146,6 +149,7 @@ fn run_inner(
         }
     }
     let fs = shared.fs;
+    let plugin_id = m.id.clone();
     let queue_bytes = m.limits.input_queue_bytes;
     let lossless = shared.gate.enabled();
     let mut cr = ChainReader::new(Arc::clone(shared), cand.first_sample, cursor);
@@ -335,5 +339,49 @@ fn run_inner(
     if let Some(p) = ing.take_publisher() {
         p.finish();
     }
+    let emitters = ing.emitters().to_vec();
+    drop(ing);
+    classify_plugin_emitters(shared, &plugin_id, cand.track, &emitters, last_t);
     Ok(())
+}
+
+/// The T-039 family step for plugin decodes (T-037b). The plugin's manifest id is decoder
+/// evidence ([`crate::family`]: `readsb` → `adsb`, `rtl_433` → `ism`). Every emitter the plugin's
+/// identity decodes resolved to gets that family as a Classification (only when it maps with
+/// confidence), then `Inventory::chain_emitter` ranks its explanations and sets its known status,
+/// as after the analog and FSK record writers. Legal guardrail: this writes a family label, a
+/// band-plan reference and a metadata-only annotation, never an identity or content; identities
+/// stay gated by their decodes' class.
+fn classify_plugin_emitters(
+    shared: &Shared,
+    plugin_id: &str,
+    track: Option<TrackId>,
+    emitters: &[EmitterId],
+    t: Timestamp,
+) {
+    if emitters.is_empty() {
+        return;
+    }
+    let c = &shared.counters.chains;
+    let call = service_family(&Evidence::Decoder(plugin_id));
+    let mut repo = shared.repo();
+    let mut inv = shared
+        .inventory
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for &e in emitters {
+        let Ok(live) = repo.live_emitter_id(e) else {
+            inc(&c.errors);
+            continue;
+        };
+        if let Some(classification) = call.classification(t) {
+            if repo.append_classification(live, &classification).is_err() {
+                inc(&c.errors);
+                continue;
+            }
+        }
+        if inv.chain_emitter(&mut repo, track, live).is_err() {
+            inc(&c.errors);
+        }
+    }
 }
