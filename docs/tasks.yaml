@@ -87,6 +87,7 @@ tasks:
   - id: T-005
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
     status: in-progress
+    review: "implemented a40c2eb (branch worktree-agent-a096af43e3d47a50f); Opus core-interface review running before merge"
     deps: [T-004]
     parallel_group: C
     core_interface: true
@@ -271,7 +272,9 @@ tasks:
     dod: clustering by fingerprint; inventory query by region/time/status/tag
   - id: T-019
     title: known-signal-priors — band-plan table + lookup
-    status: in-progress
+    status: done
+    commit: "1b10130 (merged)"
+    followup: "done 1ca400e: all 11 unverified rows checked vs 47 CFR 97.301/2.106 footnotes; 4 primary/secondary corrections (30 m, 70 cm, 23 cm, 433 Part 15 slice now shared federal, radiolocation primary)"
     deps: [T-002]
     parallel_group: H
     use_cases: [AWARE-053]
@@ -334,8 +337,9 @@ tasks:
     dod: seven e2e tests green in CI; each names its use-case id(s)
   - id: T-025
     title: Fixture capture with the HackRF One (ADS-B, FM+RDS, ISM, sweep, terminated-input)
-    status: in-progress
-    note: "captures done by coordinator (B0.5-B0.10); offline formalisation agent running; ADS-B and terminated-input items blocked on user (antenna / 50 ohm terminator)"
+    status: done
+    commit: "f9d71b0 (merged)"
+    note: "5 LFS fixtures (24 MB each): FM+RDS (PI 1694; PS scrolls - assert PI), 915 FSK (27 bursts, 18 sync truth, 4 edge-alias pairs flagged), urban 98 MHz clipped + mid-gain pair, 433 noise negative control; sweeps plain git; manifest v2 (18 committed / 25 external / 2 blocked). BLOCKED sub-items (user): ADS-B fixture (1090 MHz antenna), terminated-input spur map (50 ohm terminator)"
     deps: [T-003]
     parallel_group: A
     use_cases: [SIGNAL-001, SIGNAL-062, AWARE-036, SPACE-050]
