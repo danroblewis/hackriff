@@ -1,0 +1,14 @@
+{
+ "or_on1e-6_off1e-3_min3": {
+  "false_boxes": 0,
+  "mhz_hours": 3.3066666666666666,
+  "rate_per_mhz_h": 0.0,
+  "upper95_per_mhz_h": 0.9059674214376986
+ },
+ "os_only_on1e-6_off1e-3_min3": {
+  "false_boxes": 0,
+  "mhz_hours": 3.3066666666666666,
+  "rate_per_mhz_h": 0.0,
+  "upper95_per_mhz_h": 0.9059674214376986
+ }
+}

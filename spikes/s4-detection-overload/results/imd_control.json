@@ -1,0 +1,157 @@
+[
+ {
+  "a": 0.0,
+  "G_lin": 10.0,
+  "dfloor": 10.0,
+  "bound": 0.0,
+  "emitters_drive0": 30,
+  "emitters_drive10": 30,
+  "verdicts": {
+   "linear": 20,
+   "compressed": 0,
+   "suspect_imd": 0,
+   "inconclusive_weak": 0,
+   "inconclusive_bursty": 4
+  },
+  "ghosts": [],
+  "strong": [
+   97.7,
+   95.1
+  ],
+  "im3_expected_mhz": [
+   92.5,
+   100.3
+  ],
+  "im3_found_at_drive10": 0,
+  "im3_flagged": 0,
+  "ghosts_on_predicted_im3": 0,
+  "chance_fraction": 0.007568359375,
+  "known_fm_flagged": [],
+  "raster_real_stations": 11,
+  "raster_real_flagged": 0
+ },
+ {
+  "a": 0.9,
+  "G_lin": 6.2887725830078125,
+  "dfloor": 8.634997367858887,
+  "bound": 0.0,
+  "emitters_drive0": 30,
+  "emitters_drive10": 30,
+  "verdicts": {
+   "linear": 17,
+   "compressed": 0,
+   "suspect_imd": 8,
+   "inconclusive_weak": 0,
+   "inconclusive_bursty": 3
+  },
+  "ghosts": [
+   {
+    "f_mhz": 92.2049,
+    "snr_lo": 2.5,
+    "snr_hi": 10.6,
+    "dsnr": 8.1
+   },
+   {
+    "f_mhz": 92.5,
+    "snr_lo": 4.2,
+    "snr_hi": 25.2,
+    "dsnr": 21.0
+   },
+   {
+    "f_mhz": 95.4001,
+    "snr_lo": -1.6,
+    "snr_hi": 18.7,
+    "dsnr": 20.4
+   },
+   {
+    "f_mhz": 98.6995,
+    "snr_lo": -6.0,
+    "snr_hi": 5.7,
+    "dsnr": 11.7
+   },
+   {
+    "f_mhz": 100.3,
+    "snr_lo": 3.8,
+    "snr_hi": 25.3,
+    "dsnr": 21.6
+   },
+   {
+    "f_mhz": 100.6,
+    "snr_lo": -4.1,
+    "snr_hi": 18.9,
+    "dsnr": 23.0
+   },
+   {
+    "f_mhz": 102.6033,
+    "snr_lo": -0.3,
+    "snr_hi": 5.7,
+    "dsnr": 6.0
+   },
+   {
+    "f_mhz": 103.8988,
+    "snr_lo": -0.2,
+    "snr_hi": 6.3,
+    "dsnr": 6.5
+   }
+  ],
+  "strong": [
+   97.7,
+   95.1
+  ],
+  "im3_expected_mhz": [
+   92.5,
+   100.3
+  ],
+  "im3_found_at_drive10": 2,
+  "im3_flagged": 2,
+  "ghosts_on_predicted_im3": 2,
+  "chance_fraction": 0.007568359375,
+  "known_fm_flagged": [],
+  "raster_real_stations": 11,
+  "raster_real_flagged": 0
+ },
+ {
+  "a": 3.0,
+  "G_lin": 23.847118377685547,
+  "dfloor": 14.729782104492188,
+  "bound": 9.11733627319336,
+  "emitters_drive0": 29,
+  "emitters_drive10": 21,
+  "verdicts": {
+   "linear": 13,
+   "compressed": 4,
+   "suspect_imd": 2,
+   "inconclusive_weak": 0,
+   "inconclusive_bursty": 1
+  },
+  "ghosts": [
+   {
+    "f_mhz": 92.5,
+    "snr_lo": 14.8,
+    "snr_hi": 30.7,
+    "dsnr": 15.9
+   },
+   {
+    "f_mhz": 100.6,
+    "snr_lo": 8.4,
+    "snr_hi": 23.8,
+    "dsnr": 15.3
+   }
+  ],
+  "strong": [
+   97.7,
+   95.1
+  ],
+  "im3_expected_mhz": [
+   92.5,
+   100.3
+  ],
+  "im3_found_at_drive10": 2,
+  "im3_flagged": 1,
+  "ghosts_on_predicted_im3": 1,
+  "chance_fraction": 0.007568359375,
+  "known_fm_flagged": [],
+  "raster_real_stations": 11,
+  "raster_real_flagged": 0
+ }
+]

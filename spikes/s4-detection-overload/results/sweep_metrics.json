@@ -1,0 +1,126 @@
+{
+ "low": {
+  "detections": 138,
+  "spur_flagged": 37,
+  "persistent_ge_0p8": 39,
+  "floor_median_db": -72.15705871582031,
+  "by_band": {
+   "1-30 MHz": 7,
+   "30-88 MHz": 8,
+   "88-108 MHz": 17,
+   "108-174 MHz": 20,
+   "174-216 MHz": 5,
+   "216-470 MHz": 20,
+   "470-698 MHz": 22,
+   "698-1001 MHz": 39
+  }
+ },
+ "high": {
+  "detections": 208,
+  "spur_flagged": 29,
+  "persistent_ge_0p8": 63,
+  "floor_median_db": -38.56886291503906,
+  "by_band": {
+   "1-30 MHz": 4,
+   "30-88 MHz": 24,
+   "88-108 MHz": 19,
+   "108-174 MHz": 21,
+   "174-216 MHz": 12,
+   "216-470 MHz": 31,
+   "470-698 MHz": 50,
+   "698-1001 MHz": 47
+  }
+ },
+ "uhf_6g": {
+  "detections": 227,
+  "spur_flagged": 40,
+  "persistent_ge_0p8": 86,
+  "floor_median_db": -56.70276641845703,
+  "by_band": {
+   "1000-2000 MHz": 59,
+   "2000-3000 MHz": 57,
+   "3000-4000 MHz": 39,
+   "4000-5000 MHz": 41,
+   "5000-6001 MHz": 31
+  }
+ },
+ "spur_mask_chance_fraction": {
+  "sweep_1g": 0.019607844,
+  "sweep_6g": 0.09090909
+ },
+ "gain_step": {
+  "G_nominal": 39.0,
+  "G_lin": 38.14591648468404,
+  "n_anchors": 12,
+  "dfloor": 32.87639617919922,
+  "dsnr_real_bound": 5.269520305484818,
+  "verdicts": {
+   "linear": 89,
+   "compressed": 8,
+   "suspect_imd": 10,
+   "inconclusive_weak": 0,
+   "inconclusive_bursty": 101
+  },
+  "suspect_imd_by_band": {
+   "1-30 MHz": 2,
+   "30-88 MHz": 1,
+   "88-108 MHz": 0,
+   "108-174 MHz": 0,
+   "174-216 MHz": 0,
+   "216-470 MHz": 1,
+   "470-698 MHz": 5,
+   "698-1001 MHz": 1
+  },
+  "new_at_high_gain": 99,
+  "new_at_high_gain_flagged": 8,
+  "new_by_band": {
+   "1-30 MHz": 3,
+   "30-88 MHz": 12,
+   "88-108 MHz": 2,
+   "108-174 MHz": 5,
+   "174-216 MHz": 8,
+   "216-470 MHz": 16,
+   "470-698 MHz": 35,
+   "698-1001 MHz": 18
+  }
+ },
+ "im_products": {
+  "strong_mhz": [
+   20.0,
+   45.05,
+   737.77,
+   26.2,
+   378.38,
+   147.07,
+   480.0,
+   501.63,
+   101.31,
+   99.97
+  ],
+  "n_products": 136,
+  "ghosts": 10,
+  "ghosts_on_products": 0,
+  "chance_fraction": 0.026535
+ },
+ "known_fm": {
+  "low": {
+   "93.3": true,
+   "94.9": true,
+   "96.5": true,
+   "98.9": true,
+   "101.3": true,
+   "104.5": true,
+   "106.9": true
+  },
+  "high": {
+   "93.3": true,
+   "94.9": true,
+   "96.5": true,
+   "98.9": true,
+   "101.3": true,
+   "104.5": true,
+   "106.9": true
+  }
+ },
+ "known_fm_flagged_high": []
+}

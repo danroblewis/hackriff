@@ -1,0 +1,4 @@
+f_center_mhz,f_lo_mhz,f_hi_mhz,bw_khz,peak_snr_db,level_dbfs,duty,spread_db,image_irr_db,retune,gain_tests,category,flags
+96.0002,95.9980,96.0078,9.8,7.0,-74.4,1.00,0.8,6.4,,,unexplained,marginal
+98.0000,97.9951,98.0098,14.6,46.9,-35.5,1.00,0.1,,,,,dc
+100.0001,99.9971,100.0117,14.6,13.5,-67.8,1.00,0.4,-6.4,,,,spur_candidate

@@ -1,0 +1,2 @@
+f_center_mhz,f_lo_mhz,f_hi_mhz,bw_khz,peak_snr_db,level_dbfs,duty,spread_db,image_irr_db,retune,gain_tests,category,flags
+915.0000,914.9951,915.0098,14.6,47.0,-35.6,1.00,0.1,,,,,dc
