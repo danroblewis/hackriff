@@ -113,6 +113,18 @@ See `docs/stream-contract.md` §10.
   ascending frequency over `center_hz ± bandwidth_hz/2`.
 - **Record type 2** is a drop marker. With the `GATED` flag, the rows were withheld by the egress
   gate. Without it, they were dropped by the queue.
+- **Listen (T-043)** opens `ws(s)://<host>/ws/open/listen?emitter=<id>` (or `f_lo=&f_hi=` in Hz)
+  `&token=`, relative to the page so it works through the tunnel (`docs/stream-contract.md` §12).
+  - **First text message:** the audio header (`ri16_le` mono at 48 kS/s, plus the `audio` profile:
+    mode chosen by the server, estimated parameters, squelch and AGC), or a refusal
+    `{"type":"refused","status","reason",...}` followed by a close with code 4000 + status.
+  - **Binary records:** type 1 is 20 ms of PCM, type 2 is a drop marker, and type 3 is status
+    JSON (level, SNR, squelch, AGC gain, latency).
+  - **Playback:** Web Audio through an AudioWorklet (`dist/audio-worklet.js`, same origin), or a
+    ScriptProcessor on insecure origins. Both use the jitter buffer in `src/jitter.ts`: 150 ms
+    prebuffer, oldest audio dropped above 600 ms, underruns counted.
+  - The AudioContext is created in the click handler, which unlocks audio on mobile.
+  - Closing the player closes the socket, which detaches the server's chain.
 
 ## Security notes
 

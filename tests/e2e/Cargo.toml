@@ -25,3 +25,5 @@ hk-pipeline.workspace = true
 hk-plugins.workspace = true
 hk-store.workspace = true
 hk-stream.workspace = true
+# T-043 Listen acceptance: a WebSocket client for `/ws/open/listen` (already the hk-api dependency).
+tungstenite.workspace = true

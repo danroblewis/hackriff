@@ -37,3 +37,6 @@ mod aware_042;
 
 #[path = "acceptance/legal.rs"]
 mod legal;
+
+#[path = "acceptance/listen.rs"]
+mod listen;

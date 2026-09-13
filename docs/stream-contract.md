@@ -1,4 +1,4 @@
-# Stream-output contract (v1.0)
+# Stream-output contract (v1.1)
 
 **Status:** Engineering (T-016, T-014, T-022a). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `crates/hk-api/` (WebSocket bridge and read-only HTTP endpoints, §10), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults), and again after T-022a shipped the WebSocket bridge (§10 mapping and auth, §11 residuals).
 **Legal guardrail:** §6 is the single egress enforcement point for restricted content. Changing it is a core-interface change and needs review.
@@ -9,7 +9,7 @@ One contract serves two uses:
 
 ## 1. Versioning
 
-- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.0**.
+- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.1**: 1.0 plus the optional header `audio` profile and the binary `status` record type (T-043, §12).
 - **Minor versions** may only add:
   - optional header fields;
   - optional message-record fields;
@@ -26,6 +26,7 @@ One contract serves two uses:
 | TCP | Remote consumers | `Listener::bind_tcp`. **Refused for `own-key-decrypted` streams.** **Unauthenticated**: bind to loopback unless the network is trusted. |
 | Child stdin | Plugin data plane (§9) | `DecoderFeed`. Never a listener. |
 | WebSocket | Browsers | Mapping in §10 (`crates/hk-api/src/bridge.rs`, T-022a). Subscribes as `Locality::Remote`. |
+| WebSocket, on demand | Streams opened per request (Listen) | `/ws/open/<name>` (§12, `crates/hk-api/src/ondemand.rs`, T-043): a `StreamOpener` gates and starts the producer, then the connection is bridged as above. |
 
 Each accepted connection is one consumer of one stream: it gets the header, then records from the moment it joined. Consumers never write back; control belongs to the control API.
 
@@ -59,7 +60,7 @@ frame := u32 length (little-endian) || payload[length]
 | Field | Type | Req | Meaning |
 |---|---|---|---|
 | `schema` | string | yes | `"hackriff.stream"` |
-| `version` | string | yes | `"1.0"` |
+| `version` | string | yes | `"1.1"` (readers accept any `1.x`) |
 | `stream_id` | string | yes | Producer-chosen name, e.g. `decodes/adsb` |
 | `kind` | string | yes | `messages`, `bits`, `symbols`, `iq`, `audio` or `spectrum` |
 | `content_class` | string | yes | Ceiling class for every record (§6). A reader treats a missing or unknown value as `metadata-only`. |
@@ -73,6 +74,7 @@ frame := u32 length (little-endian) || payload[length]
 | `fft_size` | integer | no | For spectrum streams |
 | `framing` | object | no | docs/07 `Framing` (`payload`, `bits_per_symbol`, `symbol_rate_hz`, `schema_id`, `sync_word_hex`), for bits and symbols streams |
 | `message_schema` | string | no | Schema id of message `metadata`/`content`, e.g. `hackriff.decode/1` |
+| `audio` | object | no (1.1) | Audio profile for `audio` streams: mode chosen automatically, estimated parameters, squelch, AGC (§12). Metadata only; invalid on other kinds. |
 | `max_frame_len` | integer | yes | Largest record payload on this stream |
 | `record_header_len` | integer | yes | 32 for binary kinds, 0 for `messages` |
 | `t_start` | integer | yes | Stream open time, ns since the Unix epoch (UTC) |
@@ -111,7 +113,7 @@ Each record is a 32-byte little-endian header followed by the payload:
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | u8 | record type: 1 = data, 2 = dropped marker |
+| 0 | u8 | record type: 1 = data, 2 = dropped marker, 3 = status (1.1, §12) |
 | 1 | u8 | flags: bit 0 `GATED`, bit 1 `DISCONTINUITY`, bit 2 `OVERLOAD`, bit 3 `BURST_START`, bit 4 `BURST_END` |
 | 2 | u16 | reserved, 0 |
 | 4 | u32 | payload length. For `GATED` records this is the withheld length: lengths are metadata, and no payload bytes follow. |
@@ -451,6 +453,48 @@ documents the wire format and security notes from the UI's point of view.
 - **Follow-ups recorded by the coordinator:** T-015 datatype conversion stage and raw-framing drop/`sample_index` mapping (a restricted plugin's `sample_index` must be the host's record index to pass the §9.3 bound); control-API exposure of `log_tail`; decode batching and per-plugin rate caps.
 - **Replay for missed records** (ADR-0004: "consumers can request replay from a Recording") needs the control API.
 - **Crate dependency direction:** resolved. The contract lives in `hk-stream`; `hk-plugins` depends on it (not on `hk-api`), so `hk-api` can later depend on `hk-plugins` for plugin health without a cycle.
+
+## 12. Audio streams and on-demand streams (1.1, T-043)
+
+### 12.1 On-demand streams
+
+Some streams exist only because a consumer asked for them, e.g. listening to one emitter. `hk_stream::ondemand` defines the transport-agnostic shape; T-060 reuses it for bits and symbols:
+- **`StreamOpener::open(&OpenRequest) -> Result<OpenedStream, OpenRefusal>`.**
+  - The request holds the transport's query parameters, with `token` removed before any opener sees them.
+  - An opener **gates before it attaches anything**. A refusal carries an HTTP-style `status`, a `code` token, a `reason` and, for legal refusals, the `content_class`. It never carries content.
+- **`OpenedStream { header, handle, session }`.**
+  - The front end subscribes its connection to `handle` exactly as for any stream, so §6 gating, sequence numbers, §5.3 markers and §7 drop-not-block apply unchanged.
+  - Dropping `session` stops the producer.
+  - A producer that stops on its own (idle, source gone) finishes its publisher, which closes the connection.
+- **`OpenerRegistry`** maps names to openers.
+- **WebSocket front end:** `GET /ws/open/<name>?<params>&token=…` (`crates/hk-api/src/ondemand.rs`).
+  - Token first: `401`.
+  - Upgrade checks: `426`/`400`. Unknown name: `404`.
+  - A **refusal completes the upgrade**, sends one text message `{"type":"refused","status","code","reason","content_class"}`, then closes with code **4000 + status** (e.g. 4403 legal gate, 4503 at capacity). Browsers cannot read the body of a failed upgrade.
+  - Otherwise the connection is bridged as a remote consumer (§10). The browser sending anything, or hanging up, drops the session.
+
+### 12.2 Audio profile
+
+- **Header:**
+  - `kind: "audio"`, `datatype: "ri16_le"` (mono), `sample_rate_hz: 48000`;
+  - `center_hz`/`bandwidth_hz`: the demodulated RF channel;
+  - `emitter_id` when an emitter was requested;
+  - `audio`: `{channels, frame_samples, mode, mode_confidence, mode_rules, params, snr_db, squelch, agc, deemphasis_s, demod}`.
+    - `mode` is chosen by auto-mode selection (`wfm`, `nbfm`, `am`, `usb`, `lsb`, `cw`); there is no manual mode.
+    - `params` is docs/07 `EstimatedParams`.
+    - `squelch` is `{open_snr_db, hysteresis_db, noise_dbfs}`; `agc` is `{enabled, target_dbfs, max_gain_db}`.
+- **Data records** (type 1):
+  - payload: `frame_samples` (960, i.e. 20 ms) `i16` LE samples;
+  - `sample_index`: audio samples since the stream start;
+  - `t`: time of the first sample.
+  - A jump in `sample_index` is a gap (squelch closed, or samples skipped to stay live), and the next record is flagged `DISCONTINUITY`. A `seq` gap is loss.
+- **Status records** (type 3):
+  - 32-byte header; the payload is a flat JSON object of numbers, booleans and short tokens (`policy::metadata_is_allowlist_shaped`, enforced by `Publisher::publish_status`), so no free text rides on it.
+  - Audio fields: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `squelched_frames`, `lost_samples`, `latency_ms`, `backlog_s`, sent about every 250 ms.
+  - They take a `seq`. The reference `StreamReader` returns them as `Record::Unknown`; `record::parse_status_record` decodes them.
+- **Gating:**
+  - Audio payloads are content: under a class that forbids content the egress gate withholds them (§6), as for any audio stream.
+  - The listen opener refuses earlier, before a ring read; see `hk_pipeline::chains::listen` for the rule. Restricted bands are refused whatever the source class. Unclassified content (a fail-closed `metadata-only` source without a user classification rule) is refused.
 
 ## Sources
 

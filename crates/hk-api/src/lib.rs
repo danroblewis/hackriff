@@ -27,6 +27,7 @@ pub mod bridge;
 pub mod control;
 pub mod http;
 pub mod live_control;
+pub mod ondemand;
 pub mod query;
 
 pub use hk_stream as stream;

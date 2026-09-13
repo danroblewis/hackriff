@@ -25,14 +25,18 @@
 //! dependency. A WebSocket bridge for browsers (spike S3) is a follow-up and may bring an async
 //! runtime into its own binary.
 
+pub mod audio;
 pub mod client;
 pub mod frame;
 pub mod gate;
 pub mod header;
+pub mod ondemand;
 pub mod policy;
 pub mod publisher;
 pub mod record;
 pub mod transport;
+
+pub use ondemand::{OpenRefusal, OpenRequest, OpenedStream, OpenerRegistry, StreamOpener};
 
 pub use client::{ClientError, StreamReader};
 pub use frame::{FrameDecoder, FrameError, HEADER_MAX_LEN, LEN_PREFIX, MAX_FRAME_LEN};

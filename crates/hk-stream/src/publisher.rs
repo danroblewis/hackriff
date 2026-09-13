@@ -186,6 +186,9 @@ pub enum StreamError {
     /// The publisher has finished; no new consumers.
     #[error("stream finished")]
     Finished,
+    /// A status record was not a flat metadata object (contract 1.1); nothing was published.
+    #[error("status record is not a flat metadata object")]
+    NotMetadata,
     /// Thread spawn or socket error.
     #[error("io: {0}")]
     Io(#[from] io::Error),
@@ -1256,6 +1259,46 @@ impl Publisher {
                 outcome,
             })
         }
+    }
+
+    /// Publishes a status record (contract 1.1, record type 3) on a binary egress stream, e.g. an
+    /// audio stream's level and squelch state. The payload is metadata by construction: `status`
+    /// must be a flat object of numbers, booleans and short tokens
+    /// ([`policy::metadata_is_allowlist_shaped`]), otherwise nothing is published and
+    /// [`StreamError::NotMetadata`] is returned, so no free text can ride on it under any class.
+    pub fn publish_status(
+        &mut self,
+        t: Timestamp,
+        sample_index: u64,
+        status: &serde_json::Value,
+    ) -> Result<PublishOutcome, StreamError> {
+        if !self.header.kind.is_binary() || self.shared.mode != Mode::Egress {
+            return Err(StreamError::WrongKind {
+                kind: self.header.kind,
+                operation: "publish_status",
+            });
+        }
+        if !policy::metadata_is_allowlist_shaped(status) {
+            return Err(StreamError::NotMetadata);
+        }
+        let payload = serde_json::to_vec(status)?;
+        let max = self.header.max_frame_len;
+        let full_len = BINARY_RECORD_HEADER_LEN + payload.len();
+        let prefix = frame_prefix(full_len, max)?;
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let header = BinaryRecordHeader {
+            record_type: BinaryRecordType::Status as u8,
+            flags: RecordFlags::empty(),
+            payload_len: payload.len() as u32,
+            seq,
+            t,
+            sample_index,
+        };
+        let mut head = [0u8; LEN_PREFIX + BINARY_RECORD_HEADER_LEN];
+        head[..LEN_PREFIX].copy_from_slice(&prefix);
+        head[LEN_PREFIX..].copy_from_slice(&header.encode());
+        Ok(self.offer(&[&head, &payload], seq, t, sample_index, 1))
     }
 
     /// Frames and offers one binary record. `lead` is an encoded gated marker (with the run's

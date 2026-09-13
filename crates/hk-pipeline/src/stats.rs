@@ -264,6 +264,48 @@ counter_group!(
     }
 );
 
+counter_group!(
+    /// On-demand listening (T-043, [`crate::chains::listen`]). Metadata only.
+    ListenCounters {
+        /// Listen requests.
+        requests,
+        /// Refused by the legal gate (restricted, metadata-only or unclassified class).
+        refused_class,
+        /// Refused at the listener cap.
+        refused_busy,
+        /// Refused otherwise (bad request, unknown target, outside the window, no analog mode).
+        refused_other,
+        /// Probes run (ring reads for mode estimation; only after the class gate passed).
+        probes,
+        /// Audio chains attached.
+        attached,
+        /// Audio chains detached.
+        detached,
+        /// Audio chains running now.
+        active,
+        /// Audio data records published.
+        frames,
+        /// Status records published.
+        status_records,
+        /// Frames withheld while the squelch was closed.
+        squelched_frames,
+        /// Source samples skipped to stay live (live sources only).
+        skipped_samples,
+        /// Records dropped for slow consumers (drop-not-block).
+        consumer_dropped,
+        /// Newest processing latency (chunk read to record published), µs.
+        latency_us_last,
+        /// Largest processing latency, µs.
+        latency_us_max,
+        /// Sessions ended because the window moved off the channel.
+        retune_ends,
+        /// Sessions ended with no consumer for the idle timeout.
+        idle_ends,
+        /// Demodulation or publish errors.
+        errors,
+    }
+);
+
 /// All counters of one run.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -283,6 +325,8 @@ pub struct Counters {
     pub spectrum: SpectrumCounters,
     /// Runtime chains.
     pub chains: ChainCounters,
+    /// On-demand listening (T-043).
+    pub listen: ListenCounters,
     /// Scheduler.
     pub scheduler: SchedulerCounters,
     /// Stream time of the newest block end, ns.
@@ -322,6 +366,7 @@ impl Counters {
             "history": self.history.to_json(),
             "spectrum": self.spectrum.to_json(),
             "chains": self.chains.to_json(),
+            "listen": self.listen.to_json(),
             "scheduler": self.scheduler.to_json(),
             "stream_time_ns": self.stream_time_ns.load(Ordering::Relaxed),
             "tune": { "center_hz": center, "sample_rate_hz": rate },

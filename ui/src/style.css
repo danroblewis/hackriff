@@ -42,6 +42,8 @@ form#hist-form, form#inv-form { display: flex; flex-wrap: wrap; gap: 8px; align-
 #inspect-body dt { color: var(--dim); }
 #inspect-body dd { margin: 0; overflow-wrap: anywhere; }
 .listen { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 0; }
+.player-bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 0; }
+.player-bar label { flex-direction: row; align-items: center; gap: 6px; }
 .table-wrap { overflow-x: auto; margin-top: 8px; }
 table.grid { border-collapse: collapse; width: 100%; font-size: 13px; }
 table.grid th, table.grid td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #222a33; white-space: nowrap; }

@@ -79,7 +79,8 @@ function details(r: Row, hz: number): HTMLElement {
 export class Inspector {
   private seq = 0;
 
-  constructor(private api: Api) {
+  /** `onShown(row, hz, halfWidthHz)`: the emitter shown (null if none) after each lookup (T-043 Listen). */
+  constructor(private api: Api, private onShown?: (r: Row | null, hz: number, halfWidthHz: number) => void) {
     $("inspect-close").addEventListener("click", () => { $("inspect").hidden = true; });
   }
 
@@ -98,9 +99,11 @@ export class Inspector {
       if (seq !== this.seq) return;
       const r = nearestEntry(page.entries, hz, halfWidthHz);
       body.replaceChildren(r ? details(r, hz) : note(`No inventory emitter within ±${fmtBandwidth(halfWidthHz)} of this frequency.`));
+      this.onShown?.(r, hz, halfWidthHz);
     } catch (e) {
       if (seq !== this.seq) return;
       body.replaceChildren(note(`inventory: ${(e as Error).message}`));
+      this.onShown?.(null, hz, halfWidthHz);
     }
   }
 }
