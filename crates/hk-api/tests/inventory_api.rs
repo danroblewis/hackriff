@@ -238,7 +238,7 @@ fn restricted_identity_written_as_a_tag_never_appears_in_api_output() {
         repo.add_emitter_tag(s.own, tag).unwrap();
     }
     // An anonymous emitter tagged with the alias before a restricted decode names that alias on
-    // it (a non-channel-sharing scheme resolves to its context emitter): the stored tag stays.
+    // it (a non-channel-sharing scheme resolves to its context emitter): the stored tag is purged.
     let seen =
         hk_model::TimeRange::instant(hk_model::Timestamp::from_unix_nanos(T0 * 1_000_000_000));
     let alias_emitter = repo
@@ -342,10 +342,11 @@ fn restricted_identity_written_as_a_tag_never_appears_in_api_output() {
         assert!(ids(&v).is_empty(), "tag filter matched a withheld row");
     }
     let v = page(addr, "/api/inventory");
-    for (id, label) in [(s.own, "mine"), (alias_emitter, "watch")] {
+    // The own-key row still holds hidden free text; the alias row's was purged (T-040).
+    for (id, label, withheld) in [(s.own, "mine", true), (alias_emitter, "watch", false)] {
         let r = row(&v, id);
         assert_eq!(r["tags"], json!([label]));
-        assert_eq!(r["tags_withheld"], json!(true));
+        assert_eq!(r["tags_withheld"], json!(withheld));
     }
     assert_eq!(row(&v, s.pager)["tags"], json!(["pager"]));
     assert_eq!(

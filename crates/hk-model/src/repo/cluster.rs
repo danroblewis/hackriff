@@ -392,6 +392,9 @@ fn merge_rows(
          WHERE emitter_id = ?2 AND superseded_by IS NULL",
     )?
     .execute(params![blob(into), blob(from), t.as_unix_nanos()])?;
+    // T-040: callers purge `into` (and the rows merged into it) with `purge_withheld_tags` before
+    // committing, once the survivor's final class is known (entity resolution may still set the
+    // identity class after this merge), so no free-text tag is committed onto a withheld survivor.
     conn.prepare_cached(
         "INSERT OR IGNORE INTO emitter_tag (emitter_id, tag) \
          SELECT ?1, tag FROM emitter_tag WHERE emitter_id = ?2",
@@ -869,6 +872,9 @@ fn resolve(
         conn.prepare_cached("INSERT OR IGNORE INTO emitter_tag (emitter_id, tag) VALUES (?1, ?2)")?
             .execute(params![blob(id), tag])?;
     }
+    // T-040: an identity applied or re-classed above (or linked restricted decode) may have
+    // tightened the class; free-text tags stored before then are purged in this transaction.
+    super::gating::purge_withheld_tags(conn, id)?;
     if let Some(c) = &s.classification {
         insert_classification_from(conn, id, c, Some((kind, source_id)), s.fingerprint.as_ref())?;
     }
@@ -1016,6 +1022,8 @@ impl Repository {
     ) -> Result<EmitterMerge, RepoError> {
         let tx = self.write_tx()?;
         let m = merge_rows(&tx, from, into, t, reason)?;
+        // T-040: onto a survivor whose identity no access level reveals, only vocabulary tags stay.
+        super::gating::purge_withheld_tags(&tx, into)?;
         tx.commit()?;
         Ok(m)
     }

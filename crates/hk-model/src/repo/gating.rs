@@ -230,6 +230,53 @@ pub(super) fn vocabulary_refusal() -> RepoError {
     )
 }
 
+/// T-040: when `id`'s identity is one no access level reveals, deletes every stored tag outside the
+/// vocabulary. Called in the transaction of each write that can tighten an emitter's class (an
+/// identity arriving, a more restrictive source, a restricted decode linked, a merge), so tags
+/// written before the tightening do not stay in the database hidden only on read. Fail closed and
+/// not reversible: a later audited reclassification does not bring them back. Rows merged into
+/// `id` (whose tags were copied onto it) are purged too. `id` must exist.
+pub(super) fn purge_withheld_tags(conn: &Connection, id: EmitterId) -> Result<(), RepoError> {
+    let Some(class) = emitter_identity_class(conn, id)? else {
+        return Ok(());
+    };
+    if !vocabulary_only(class) {
+        return Ok(());
+    }
+    let tags: Vec<([u8; 16], String)> = conn
+        .prepare_cached(
+            "SELECT emitter_id, tag FROM emitter_tag WHERE emitter_id = ?1 \
+             OR emitter_id IN (SELECT emitter_id FROM emitter WHERE merged_into = ?1)",
+        )?
+        .query_map([blob(id)], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    for (owner, tag) in tags.iter().filter(|(_, t)| !tag_in_vocabulary(t)) {
+        conn.prepare_cached("DELETE FROM emitter_tag WHERE emitter_id = ?1 AND tag = ?2")?
+            .execute(params![owner, tag])?;
+    }
+    Ok(())
+}
+
+/// The emitter a user tag write on `emitter_id` applies to (its live survivor, else the id as
+/// given), refusing a tag outside the vocabulary when that emitter's identity is one no access
+/// level reveals (T-038/T-040). The refusal depends only on the class, never on stored tags.
+pub(super) fn tag_write_target(
+    conn: &Connection,
+    emitter_id: EmitterId,
+    tag: &str,
+) -> Result<EmitterId, RepoError> {
+    let Some(live) = live_id(conn, emitter_id)? else {
+        return Ok(emitter_id);
+    };
+    if !tag_in_vocabulary(tag)
+        && let Some(class) = emitter_identity_class(conn, live)?
+        && vocabulary_only(class)
+    {
+        return Err(vocabulary_refusal());
+    }
+    Ok(live)
+}
+
 /// Write-time tag rule (T-036/T-038, [`crate::cluster`]): with an identity no access level reveals
 /// (`None` = unclassified), every tag must be in the vocabulary; with an `own-key-decrypted` one,
 /// identity-free and not containing the value.
@@ -437,6 +484,8 @@ impl Repository {
         ])?;
         tx.prepare_cached("UPDATE emitter SET identity_class = ?1 WHERE emitter_id = ?2")?
             .execute(params![enum_text(&new_class)?, blob(live)])?;
+        // Opening never tightens today; kept so any class this write lands on is purged (T-040).
+        purge_withheld_tags(&tx, live)?;
         tx.commit()?;
         Ok(IdentityReclassification {
             emitter_id: live,
