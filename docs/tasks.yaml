@@ -48,7 +48,7 @@ tasks:
     title: source-abstraction + SigMF file-replay source + RAM ring buffer
     status: done
     commit: "8386cbb (merged 76ff126)"
-    review: "post-merge review URGENT-FIX -> fixed 8f21b6f (merged): all atomics SeqCst, copy_out bounded by committed end, exact lost/gap accounting, startup-at-first-block, IndexOverflow, lock-free writer provenance table, exact capacities + mlock, streaming TriggerStream, Source/SourceControl split, replay header/trailing bytes. Release stress test (index-encoded samples, 150 seeds, 180M samples) clean. Root cause VERIFIED independently: on this toolchain (rustc 1.93.1/LLVM 21, M3 Ultra) Relaxed atomics compile to plain ldr/str and are empirically NOT linearisable (~5M ordering violations/3 s vs 0 with SeqCst); seqlock correct by argument + loom model; 0/4000+ stress seeds with SeqCst. Load flakes were a ring_stress harness attach race (fix + SeqCst guard test in progress). Follow-ups: re-run ordering probe on Jetson (aarch64 Linux); watch SeqCst write throughput there"
+    review: "post-merge review URGENT-FIX -> fixed 8f21b6f (merged): all atomics SeqCst, copy_out bounded by committed end, exact lost/gap accounting, startup-at-first-block, IndexOverflow, lock-free writer provenance table, exact capacities + mlock, streaming TriggerStream, Source/SourceControl split, replay header/trailing bytes. Release stress test (index-encoded samples, 150 seeds, 180M samples) clean. Root cause VERIFIED independently: on this toolchain (rustc 1.93.1/LLVM 21, M3 Ultra) Relaxed atomics compile to plain ldr/str and are empirically NOT linearisable (~5M ordering violations/3 s vs 0 with SeqCst); seqlock correct by argument + loom model; 0/4000+ stress seeds with SeqCst. Load flakes were a ring_stress harness attach race (fixed 1985b09, SeqCst-only guard test added). Harness-fix agent then found a real torn two-counter read in Shared::locate (writer lapping meta ring between loads -> cursor jump, samples reported as gap); fixed 5a044ea with consistent counter snapshot + deterministic hook test; stress 0/50 idle, 0/200 under load (merged). Follow-ups: re-run ordering probe on Jetson (aarch64 Linux); watch SeqCst write throughput there"
     deps: [T-001]
     parallel_group: B
     use_cases: [SPACE-050]
@@ -88,7 +88,7 @@ tasks:
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
     status: done
     commit: "a40c2eb + review fixes 854614c (merged)"
-    review: "Opus review FIX-BEFORE-MERGE -> fixed (gate release + re-seed, 1 s episode rise/end/fall with hold-off and SK noise-like/structured class, wide-signal floor reference, OS-only guard, FCME caps/NaN guard, log-space gamma inverses, GainKey tolerance). Merged on targeted repro tests; focused re-review of the episode state machine running post-merge, fixes forward"
+    review: "Opus review FIX-BEFORE-MERGE -> fixed (gate release + re-seed, 1 s episode rise/end/fall with hold-off and SK noise-like/structured class, wide-signal floor reference, OS-only guard, FCME caps/NaN guard, log-space gamma inverses, GainKey tolerance). Merged on targeted repro tests. Post-merge re-review URGENT-FIX: wide_floor biased low on sloped floors (Pfa 21-7600x on tilt/roll-off/notch/real urban capture); sub-band Falls suppressed; End fires while part of region elevated; silent merges + duplicate Rises; onset ramps misclassed Structured; episodes never end after drift; gate release biases slow floor up to +1.6 dB mean; slow rises missed; reset re-open semantics. Fix agent running (may restructure into block classifier + episode aggregator); T-006 defaults to PerFrame reference, T-020 isolates episode adapter, T-021 flags gate-released periods meanwhile"
     deps: [T-004]
     parallel_group: C
     core_interface: true
@@ -102,6 +102,7 @@ tasks:
   - id: T-006
     title: CFAR detection + burst records
     status: in-progress
+    review: "implemented 6891727 (+ merge e816cab), lint/tests green; Opus core-interface review running before merge (threshold equivalence, component state machine, notch false alarms with PerFrame, 915 MHz outside-truth detections, 434 MHz clock-harmonic line)"
     s4_inputs: "block FCME (256/hop 64, Pfa 1e-3 Gamma(n)) per-frame floor; OS-CFAR N=32 G=4 k=24 OR floor branch; on Pfa 1e-6 / off Pfa 1e-3 (never fixed -3 dB); min 3 frames before gap-merge (2); impulsive-frame gate; emitter confirmation by repeat or >=1 s integration; real-scene FA is a monitored metric, synthetic/terminated FA is the CI gate"
     followups_from_T-002_review: "detection region query is f-bounded only (add R*Tree on f_lo,f_hi,t_start,t_end or time-bucketing); populate detector_version, peak_level_dbfs, clip_count; overload->clipped enforced by repo"
     deps: [T-005]
@@ -158,7 +159,9 @@ tasks:
     dod: ScanPlan-driven sweep/dwell alternation with POI-sized dwells; golden-file the schedule
   - id: T-010
     title: parameter-estimation (OBW, CFO, SNR, spectral shape)
-    status: in-progress
+    status: done
+    commit: "337d16a (merged)"
+    notes_impl: "OBW99 integrated without zeroing negative bins (S5 zeroing inflated OBW 38 % at 10 dB; S5 truth bandwidths treated as upper bounds); FSK CFO from settled-frequency means (cluster means biased by bit imbalance); bandwidth/centre gated on in-band z >= 50; Nyquist-edge boxes extracted wrapped"
     s5_inputs: "mean-based N0; OBW99 on smoothed noise-subtracted PSD; SNR re-measured over burst extent (unclipped); CFO centroid default, x^2 line for DSB/BPSK; feed pilot-derived clock ppm to C05 (-6.8 ppm measured)"
     deps: [T-008]
     parallel_group: F
@@ -171,7 +174,7 @@ tasks:
     dod: estimates within tolerance; normalises snippets for demod/classify
   - id: T-011
     title: blind symbol-rate + FSK deviation estimation
-    status: todo
+    status: in-progress
     s5_inputs: "gate PASSED (scoped). Port s5lib.classify_and_estimate: 4 whitened cyclic lines in 2 independent groups, guarded transition-LS (jitter<0.12 UI, kept>=85%), harmonic-aware consensus, separate rate/family trust; pitfalls list REPORT §4; acceptance fixtures = 915 bursts + sync truth, RDS windows (pilot/16), negatives; fail on any trusted-and-wrong"
     deps: [T-010]
     parallel_group: F
@@ -185,7 +188,9 @@ tasks:
     dod: estimators pass on synthetic and on an S5 capture; unknown flagged not mislabelled
   - id: T-012
     title: analog auto-mode demod + RDS
-    status: todo
+    status: done
+    commit: "8ae13de (merged)"
+    followups: "hk-model Demodulation has no audio output ref (audio stays in session); stereo L-R, NBFM/AM/SSB/CW audio, squelch/AGC, RadioText not implemented; WFM accepted from 50 kHz OBW when pilot + constant envelope (tone-modulated synth); merged without separate review (not core_interface)"
     deps: [T-008, T-010]
     parallel_group: G
     use_cases: [SIGNAL-062]
@@ -211,8 +216,9 @@ tasks:
     dod: bits recovered; framing model + CRC id; ground-truth annotation on valid decode
   - id: T-014
     title: plugin host + manifest + IPC (ADR-0003)
-    status: in-progress
-    review: "implemented 457f11f; Opus review FIX-BEFORE-MERGE with LEGAL leaks found by probes (plugin input class ignored -> restricted content to SQLite/TCP; content smuggled via metadata/identity/frame_model/annotation/log; own-key content over TCP) + process-group hang + unbounded consumers. Fixes in progress incl. required metadata-key allowlist for gated manifests and hk-stream crate split"
+    status: done
+    commit: "457f11f + review fixes 993612d (merged)"
+    review: "Opus review FIX-BEFORE-MERGE (legal leaks: input class ignored, content smuggling via metadata/identity/logs, own-key over TCP; process-group hang; unbounded consumers) -> fixed: clamp(manifest, input) ceiling, typed metadata allowlists required for restricted classes, restricted logs counted not stored, own-key refused on TCP + UDS 0600, spectrum 50 rows/s cap under non-content classes, process-group SIGKILL, max_consumers; stream moved to crates/hk-stream. Probes P1-P10 re-run clean; independent re-probe by the reviewer running post-merge. Independent re-probe FOLLOW-UP -> closed 97a436c (merged): locality enforced in subscribe (UnixStream local / TcpStream remote / Declared), MetadataPolicy required for restricted message publishers, spectrum rows rate+size enforced, allowlist defaults tightened (hex/digits max 8 unless review_note, bounded sample_index, quantised confidence); residual side channels documented in stream-contract §11"
     override: "combined with T-016 into one Opus-high agent: ADR-0004 framing serves both plugin IPC and external egress, so one owner avoids two codecs (coordinator, 2026-09-13)"
     deps: [T-002]
     parallel_group: D
@@ -226,7 +232,9 @@ tasks:
     dod: manifest schema + IPC; a dummy plugin round-trips; plugin crash does not drop capture
   - id: T-015
     title: readsb ADS-B plugin wrapper + fixture
-    status: todo
+    status: done
+    commit: "9f8439c + review fixes e0777d1 (merged)"
+    review: "Opus review FIX-BEFORE-MERGE (legal clean) -> fixed: waiter thread + stderr wedge detection + idle keepalive (only clean EOF exits 0), CPR pairing 10 s window, velocity subtype-2 x4, sample_index n-1, --fix refused, HK_READSB honoured, rebased onto egress enforcement. Coordinator (Opus) checked ingest hunk: emitter upsert after self.store, built from &row identity/t, before publish. SIGNAL-001 truth-checked (callsign, lat/lon <0.01 deg, velocity) on synthetic adsb_squitter; recorded fixture still blocked on 1090 MHz antenna"
     deps: [T-014, T-025]
     parallel_group: H
     use_cases: [SIGNAL-001]
@@ -238,8 +246,9 @@ tasks:
     dod: readsb wrapped per manifest; e2e replay assertion passes
   - id: T-016
     title: stream-output contract (framed UDS/TCP, SigMF headers, drop-not-block, gating)
-    status: in-progress
-    review: "implemented 526dbfd; Opus review FIX-BEFORE-MERGE with LEGAL leaks found by probes (plugin input class ignored -> restricted content to SQLite/TCP; content smuggled via metadata/identity/frame_model/annotation/log; own-key content over TCP) + process-group hang + unbounded consumers. Fixes in progress incl. required metadata-key allowlist for gated manifests and hk-stream crate split"
+    status: done
+    commit: "526dbfd + review fixes 993612d (merged)"
+    review: "Opus review FIX-BEFORE-MERGE (legal leaks: input class ignored, content smuggling via metadata/identity/logs, own-key over TCP; process-group hang; unbounded consumers) -> fixed: clamp(manifest, input) ceiling, typed metadata allowlists required for restricted classes, restricted logs counted not stored, own-key refused on TCP + UDS 0600, spectrum 50 rows/s cap under non-content classes, process-group SIGKILL, max_consumers; stream moved to crates/hk-stream. Probes P1-P10 re-run clean; independent re-probe by the reviewer running post-merge. Independent re-probe FOLLOW-UP -> closed 97a436c (merged): locality enforced in subscribe (UnixStream local / TcpStream remote / Declared), MetadataPolicy required for restricted message publishers, spectrum rows rate+size enforced, allowlist defaults tightened (hex/digits max 8 unless review_note, bounded sample_index, quantised confidence); residual side channels documented in stream-contract §11"
     deps: [T-002]
     parallel_group: D
     core_interface: true
@@ -268,7 +277,7 @@ tasks:
   - id: T-018
     title: signal-inventory writes + emitter clustering (read/query)
     status: todo
-    followups_from_T-002_review: "emitter fingerprint lookup/update API, merge state (merged_into), supersedable emitter_link, idempotent count on replay, classification input ref + feature-set version"
+    followups_from_T-002_review: "emitter fingerprint lookup/update API, merge state (merged_into), supersedable emitter_link, idempotent count on replay, classification input ref + feature-set version; from T-015 review: Emitter rows carry no content_class (restricted identity loses its class in inventory -> inventory API/export must re-gate); count not idempotent on replay (DF11 included); ctx.emitter_ref ignored (identity emitter separate from detection emitter); IdentityConflict only counted"
     deps: [T-002, T-007]
     parallel_group: E
     use_cases: [AWARE-036, SIGNAL-001, SIGNAL-062, AWARE-053]
@@ -294,7 +303,9 @@ tasks:
     dod: compact 47 CFR 2.106 table parsed + lookup; known/unexpected status set on emitters
   - id: T-020
     title: context-feeds cache + gpsjam adapter + event correlation
-    status: in-progress
+    status: done
+    commit: "4192c7c (merged)"
+    followups: "gpsjam licence/ToS unverified (no real extracts redistributed; synthetic test extract only); base-rate correction for correlation scores not implemented; Anomaly has no site field (device location passed as evidence); swept-chirp jammers invisible to the floor tracker (needs C09 chirp/comb detector); steady OFDM reads NoiseLike; re-check episode adapter mapping after the T-005 rework merges"
     followups_from_T-002_review: "external-event time-window/geo query; optional frequency extent on events; explanation evidence pins payload hash"
     deps: [T-005, T-002]
     parallel_group: E
@@ -307,7 +318,9 @@ tasks:
     dod: offline-first cache; Anomaly + Explanation objects; deterministic on frozen cache
   - id: T-021
     title: radiometry calibrated noise-floor product
-    status: in-progress
+    status: done
+    commit: "423945f (merged 84148da)"
+    followups: "strict slow-floor-under-bursts test #[ignore] until the T-005 gate-release fix merges - re-enable then; temperature/antenna-port calibration dependence not modelled; prune runs.tsv with pyramid budget; ITU-R P.372 coefficients unverified; one FloorProduct per STFT geometry"
     deps: [T-005, T-017]
     parallel_group: F
     use_cases: [SPACE-050]
@@ -334,7 +347,7 @@ tasks:
   - id: T-024
     title: Wire the 7 slice acceptance tests (docs/11 1.1) in CI
     status: todo
-    deps: [T-015, T-013, T-012, T-020, T-021, T-018, T-019, T-017]
+    deps: [T-015, T-013, T-012, T-020, T-021, T-018, T-019, T-017, T-027]
     parallel_group: J
     use_cases: [SIGNAL-001, AWARE-036, SIGNAL-062, AWARE-006, SPACE-050, AWARE-053, AWARE-042]
     acceptance: all seven acceptance tests pass offline in CI
@@ -372,6 +385,33 @@ tasks:
     effort: high
     dod: CudaPfb implements PfbBackend; parity tests vs CPU; throughput + power measured on the Orin Nano
     note: "split from T-008 acceptance ('GPU + CPU-fallback paths') by the T-008 review, 2026-09-13; blocked until the Jetson arrives (user purchase)"
+  - id: T-022a
+    title: Web UI part 1 - WebSocket bridge (hk-stream remote egress) + WebGL2 waterfall + region-over-time history view
+    status: in-progress
+    deps: [T-016, T-017]
+    after: "stream enforcement-gap fixes merged (locality rule enforced in subscribe; bridge counts as remote)"
+    parallel_group: I
+    use_cases: [AWARE-042, SPACE-050]
+    acceptance: browser waterfall from a live/replayed spectrum stream via the bridge; region-over-time view from the T-017 query; bridge refuses own-key streams, caps consumers, authenticates remote clients (token)
+    area: ui/, crates/hk-api (bridge)
+    needs: none
+    model: opus
+    effort: medium
+    note: "split from T-022 (coordinator, 2026-09-13): only the inventory table needs T-018; the bridge is a remote egress on the legal-guardrail path, so Opus not Sonnet; reuse spikes/s3-web-waterfall client"
+  - id: T-027
+    title: Pipeline assembly - hackriffd composes source, ring, STFT, floor, detection, history, stream output and plugins under a ScanPlan
+    status: todo
+    deps: [T-006, T-009, T-016, T-017]
+    parallel_group: J
+    core_interface: true
+    use_cases: [SPACE-050, AWARE-042, AWARE-036]
+    acceptance: "`hk replay <fixture>` and `hackriffd --source sigmf:<file>` run the always-on chain end to end and write Detections, tiles and stream records; runtime chain attach/detach per ADR-0001 S1 outcome"
+    area: crates/hk-cli, crates/hk-core (runtime glue)
+    needs: none
+    model: opus
+    effort: high
+    followups_from_T-015_review: "two SQLite write txns per decode under the ingest lock can back up readsb to a stall kill at busy sites (batch); readsb idle keepalive; plugin decode sample_index late by ~readsb block + pipe buffering (~40 ms)"
+    note: "added by coordinator 2026-09-13: M0 DoD needs a runnable survey on the device and T-024's e2e tests need a composed pipeline; no existing task owned the composition"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

@@ -1,0 +1,11 @@
+{
+  "format": "ndjson",
+  "schema_id": "hackriff.pocsag/1",
+  "content_class": "restricted-paging",
+  "metadata_keys": {
+    "capcode": { "type": "digits", "max_len": 8 },
+    "function": { "type": "enum", "values": ["0", "1", "2", "3"] },
+    "baud": { "type": "enum", "values": ["512", "1200", "2400"] },
+    "encoding": { "type": "enum", "values": ["numeric", "alpha", "tone"] }
+  }
+}

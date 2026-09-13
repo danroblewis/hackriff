@@ -1,0 +1,28 @@
+{
+  "manifest_version": 1,
+  "id": "readsb",
+  "version": "0.1.0",
+  "licence": "GPL-3.0-or-later",
+  "description": "ADS-B / Mode S (T-015): readsb exec'd as a subprocess behind hk-plugin-readsb, which converts ci8 -> UC8 and parses --raw output into NDJSON decode lines. See docs/stream-contract.md §9.6.",
+  "executable": "hk-plugin-readsb",
+  "args": ["--freq", "{input.center_hz}"],
+  "input": {
+    "kind": "iq",
+    "datatype": "ci8",
+    "sample_rates_hz": [2400000],
+    "center_hz": { "min": 1088000000, "max": 1092000000 }
+  },
+  "output": {
+    "format": "ndjson",
+    "schema_id": "hackriff.adsb/1",
+    "content_class": "unrestricted"
+  },
+  "restart": { "backoff_initial_ms": 200, "backoff_max_ms": 30000, "max_restarts": 5, "window_s": 300 },
+  "limits": {
+    "input_queue_bytes": 8388608,
+    "stall_timeout_ms": 10000,
+    "max_message_bytes": 1048576,
+    "stderr_lines": 200,
+    "nice": 10
+  }
+}

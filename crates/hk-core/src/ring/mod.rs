@@ -26,6 +26,12 @@
 //!   `k >= meta_write_end − block_capacity` afterwards. The writer never waits for a reader, and
 //!   readers need no registration: attach = create a cursor, detach = drop it.
 //!
+//!   Two counters loaded one after the other are never a snapshot. The seqlock checks above are
+//!   safe anyway because each counter is used only in its conservative direction (commit bound
+//!   loaded before the copy, invalidation bound after). A decision that needs both at once, as
+//!   when `locate` bounds its search by `meta_head` and `meta_write_end`, takes a consistent pair
+//!   from `Shared::meta_counters` (load both, reload both, accept only if unchanged).
+//!
 //!   Sample cells are atomics (`AtomicU64` holds the two `f32` bit patterns of a `Complex32`), so
 //!   a racing copy is merely stale, never undefined behaviour, and no `unsafe` is needed.
 //!
@@ -40,6 +46,13 @@
 //! `write_end` and accepted overwritten samples and records of unwritten blocks, in release
 //! builds only. With every operation `SeqCst` the proof rests on the language guarantee alone;
 //! the cost is within noise (`examples/ring_throughput.rs`).
+//!
+//! This was verified empirically, not just argued: on the dev Mac (M3 Ultra, rustc 1.93.1 /
+//! LLVM 21) a two-variable probe using the weaker orderings saw about 5 million linearisability
+//! violations and the same probe with `SeqCst` saw none, matching the stale reads the ring
+//! stress test caught. `tests/ring_atomic_ordering.rs` therefore fails the build on any
+//! non-`SeqCst` ordering in `src/ring/` (exemption: an `// ordering-exempt: <reason>` comment
+//! on the same line). Re-verify on the Jetson (aarch64 Linux) before relaxing anything.
 //!
 //! # Loss accounting
 //!
@@ -270,6 +283,39 @@ struct Shared<T: RingSample> {
     wake: Condvar,
 }
 
+/// Test-only injection point between the reader's counter loads: a test can advance the writer
+/// at exactly this instant, deterministically reproducing a torn counter read.
+#[cfg(test)]
+mod race_hook {
+    use std::cell::Cell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static HOOK: Cell<Option<Hook>> = const { Cell::new(None) };
+    }
+
+    /// Runs `f` once, on this thread, at the next race point.
+    pub(super) fn set(f: impl FnOnce() + 'static) {
+        HOOK.with(|h| h.set(Some(Box::new(f))));
+    }
+
+    pub(super) fn fire() {
+        if let Some(f) = HOOK.with(Cell::take) {
+            f();
+        }
+    }
+}
+
+#[cfg(test)]
+fn counter_race_point() {
+    race_hook::fire();
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn counter_race_point() {}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -367,16 +413,44 @@ impl<T: RingSample> Shared<T> {
         }
     }
 
+    /// `(meta_head, meta_write_end)` as they were at one instant.
+    ///
+    /// Both counters only grow. Loads in the order head, write_end, head, write_end that agree
+    /// pairwise mean `meta_head` held its value from its first load to its second and
+    /// `meta_write_end` from its first load to its second; the second head load lies inside both
+    /// spans, so both values held then. Hence `head <= write_end <= head + 1`.
+    fn meta_counters(&self) -> (u64, u64) {
+        loop {
+            let head = self.meta_head.load(SEQ);
+            counter_race_point();
+            let write_end = self.meta_write_end.load(SEQ);
+            if self.meta_head.load(SEQ) == head && self.meta_write_end.load(SEQ) == write_end {
+                return (head, write_end);
+            }
+            std::hint::spin_loop();
+        }
+    }
+
     /// The smallest committed, retained block whose end is after `sample` (with its metadata),
     /// or the head block index and `None` if `sample` is at or beyond the newest block's end.
+    ///
+    /// `None` is only returned after block `head − 1` was validated to end at or before
+    /// `sample`: callers treat it as "nothing lost".
     fn locate(&self, sample: u64) -> (u64, Option<BlockMeta>) {
         'retry: loop {
-            let head = self.meta_head.load(SEQ);
-            let lo = self
-                .meta_write_end
-                .load(SEQ)
-                .saturating_sub(self.meta_capacity())
-                .min(head);
+            // A torn pair (the writer lapping the metadata ring between the two loads) once made
+            // the search range empty, returning `None` for a sample inside retained blocks.
+            let (head, write_end) = self.meta_counters();
+            if head == 0 {
+                return (0, None);
+            }
+            let lo = write_end.saturating_sub(self.meta_capacity());
+            if lo >= head {
+                // No committed record is retained (only possible with `block_capacity` 1, while
+                // the writer replaces the sole record): where `sample` lies is unknown.
+                std::hint::spin_loop();
+                continue 'retry;
+            }
             let (mut left, mut right) = (lo, head);
             while left < right {
                 let mid = left + (right - left) / 2;
@@ -1323,6 +1397,120 @@ mod tests {
         drop(w);
         let _ = data(r.read(&mut buf));
         assert!(matches!(r.read(&mut buf), ReadOutcome::Closed));
+    }
+
+    /// Regression (T-003 follow-up): the writer laps the whole metadata ring between the reader's
+    /// loads of `meta_head` and `meta_write_end` inside `locate`. The torn pair once gave an empty
+    /// search range that `lapped` took as lossless, jumping the cursor past produced samples and
+    /// reporting them as a source gap (`dropped_before`).
+    #[test]
+    fn locate_survives_writer_lapping_meta_ring_between_counter_loads() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        const LEN: u64 = 10;
+        // Six contiguous blocks; four more written at the race point (one after a 7-sample gap);
+        // one more after an 8-sample gap once the race is over.
+        let before: Vec<u64> = (0..6).map(|b| b * LEN).collect();
+        let during = [60, 70, 87, 97];
+        let after = 115;
+        let blocks: Vec<u64> = before
+            .iter()
+            .copied()
+            .chain(during)
+            .chain([after])
+            .collect();
+        let end = after + LEN;
+        let produced_below =
+            |x: u64| -> u64 { blocks.iter().map(|&f| x.clamp(f, f + LEN) - f).sum() };
+        let true_gaps = |a: u64, b: u64| (b - a) - (produced_below(b) - produced_below(a));
+
+        // Sample storage retains everything; the metadata ring keeps only 4 records.
+        let (w, ring) = ring(4096, 4);
+        let w = Rc::new(RefCell::new(Some(w)));
+        let p = provenance(100e6);
+        for &f in &before {
+            push(w.borrow_mut().as_mut().unwrap(), f, LEN as usize, &p);
+        }
+        // Positioned at 0 in block 0, whose record is gone while its samples are still stored.
+        let mut r = ring.reader_at(0).with_resync_policy(ResyncPolicy::Oldest);
+
+        let fired = Rc::new(Cell::new(false));
+        {
+            let (w, p, fired) = (Rc::clone(&w), p.clone(), Rc::clone(&fired));
+            race_hook::set(move || {
+                let mut w = w.borrow_mut();
+                for f in during {
+                    push(w.as_mut().unwrap(), f, LEN as usize, &p);
+                }
+                fired.set(true);
+            });
+        }
+
+        let mut buf = vec![Complex32::default(); 64];
+        let (mut pos, mut read, mut lost, mut gaps) = (0u64, 0u64, 0u64, 0u64);
+        // Phase 1 drains what was written (the race fires inside the first read); phase 2 adds
+        // the post-race block, closes the ring and drains to `Closed`.
+        for phase in 1..=2 {
+            if phase == 2 {
+                assert!(fired.get(), "the race point was never reached");
+                push(w.borrow_mut().as_mut().unwrap(), after, LEN as usize, &p);
+                drop(w.borrow_mut().take());
+            }
+            loop {
+                match r.read(&mut buf) {
+                    ReadOutcome::Data(c) => {
+                        let first = c.first_sample();
+                        assert_eq!(first, pos + c.dropped_before, "chunk start vs position");
+                        assert_eq!(
+                            c.dropped_before,
+                            true_gaps(pos, first),
+                            "dropped_before must be exactly the source gap in [{pos}, {first})"
+                        );
+                        for (j, s) in buf[..c.len].iter().enumerate() {
+                            assert_eq!(decode(*s), first + j as u64, "sample value");
+                        }
+                        read += c.len as u64;
+                        gaps += c.dropped_before;
+                        pos = c.end_sample();
+                    }
+                    ReadOutcome::Overrun {
+                        lost_samples,
+                        gap_samples,
+                        resume_at,
+                    } => {
+                        assert_eq!(resume_at, pos + lost_samples + gap_samples, "overrun span");
+                        assert_eq!(gap_samples, true_gaps(pos, resume_at), "overrun gap split");
+                        lost += lost_samples;
+                        gaps += gap_samples;
+                        pos = resume_at;
+                    }
+                    ReadOutcome::Empty => break,
+                    ReadOutcome::Closed => {
+                        assert_eq!(phase, 2, "closed before the writer was dropped");
+                        break;
+                    }
+                }
+                // The cursor never runs ahead of what has been accounted.
+                assert_eq!(
+                    r.position(),
+                    pos,
+                    "cursor moved past the accounted position"
+                );
+            }
+        }
+        assert_eq!(pos, end, "drained to the stream end");
+        assert_eq!(
+            read + lost + gaps,
+            end,
+            "every index accounted exactly once"
+        );
+        assert_eq!(
+            (r.samples_read(), r.lost_samples(), r.gap_samples()),
+            (read, lost, gaps)
+        );
+        // Samples 0..60 were still stored but their records were not: lost, never gaps.
+        assert_eq!((read, lost, gaps), (50, 60, 15));
     }
 
     #[test]

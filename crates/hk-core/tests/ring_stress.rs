@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use hk_core::{
     BlockHeader, Discontinuity, ProvenanceHandle, ReadOutcome, ResyncPolicy, RingConfig,
-    RingHandle, ring_buffer,
+    RingHandle, RingReader, ring_buffer,
 };
 use hk_model::{SampleTime, Timestamp};
 use num_complex::Complex32;
@@ -145,20 +145,47 @@ enum Attach {
     At(u64),
 }
 
+/// A reader created on the calling thread, ready to move into its reader thread.
+///
+/// Readers must be created before they are moved: `RingHandle::reader` starts at the current
+/// write position, so a `Live` reader created inside its own thread races the writer (if the
+/// writer has already committed block 0, the reader starts after it while the test assumes
+/// `plan.start()`).
+struct Attached {
+    reader: RingReader<Complex32>,
+    start: u64,
+    exact_first: bool,
+}
+
+fn attach(ring: &RingHandle<Complex32>, plan: &Plan, attach: Attach) -> Attached {
+    match attach {
+        Attach::Live => Attached {
+            reader: ring.reader(),
+            start: plan.start(),
+            exact_first: true,
+        },
+        // Where history is already gone at attach, block boundaries are unknown: that first
+        // overrun may count gap indices as lost.
+        Attach::At(s) => Attached {
+            reader: ring.reader_at(s),
+            start: s.max(plan.start()),
+            exact_first: false,
+        },
+    }
+}
+
 fn run_reader(
-    ring: RingHandle<Complex32>,
+    attached: Attached,
     plan: Arc<Plan>,
     policy: ResyncPolicy,
     buf_len: usize,
-    attach: Attach,
     label: String,
 ) -> Tally {
-    let (reader, start, exact_first) = match attach {
-        Attach::Live => (ring.reader(), plan.start(), true),
-        // Where history is already gone at attach, block boundaries are unknown: that first
-        // overrun may count gap indices as lost.
-        Attach::At(s) => (ring.reader_at(s), s.max(plan.start()), false),
-    };
+    let Attached {
+        reader,
+        start,
+        exact_first,
+    } = attached;
     let mut reader = reader.with_resync_policy(policy);
     let mut buf = vec![Complex32::default(); buf_len];
     let mut pos = start;
@@ -286,10 +313,12 @@ fn run_seed(seed: u64) -> Tally {
     .into_iter()
     .enumerate()
     {
-        let (ring, plan) = (ring.clone(), Arc::clone(&plan));
+        // Created here, before the writer thread exists, then moved into the reader thread.
+        let attached = attach(&ring, &plan, Attach::Live);
+        let plan = Arc::clone(&plan);
         let label = format!("seed {seed} live reader {i} ({policy:?}, buf {buf_len})");
         readers.push(thread::spawn(move || {
-            run_reader(ring, plan, policy, buf_len, Attach::Live, label)
+            run_reader(attached, plan, policy, buf_len, label)
         }));
     }
 
@@ -326,7 +355,8 @@ fn run_seed(seed: u64) -> Tally {
             Some(next) => next.saturating_sub(back),
             None => 0,
         };
-        let (ring, plan) = (ring.clone(), Arc::clone(&plan));
+        let attached = attach(&ring, &plan, Attach::At(from));
+        let plan = Arc::clone(&plan);
         let policy = if i == 1 {
             ResyncPolicy::Latest
         } else {
@@ -334,7 +364,7 @@ fn run_seed(seed: u64) -> Tally {
         };
         let label = format!("seed {seed} reader_at({from}) {i} ({policy:?})");
         readers.push(thread::spawn(move || {
-            run_reader(ring, plan, policy, 50, Attach::At(from), label)
+            run_reader(attached, plan, policy, 50, label)
         }));
     }
 

@@ -1,15 +1,77 @@
 //! hackriff binaries: `hackriffd`, the headless daemon that owns the device and pipeline, and
 //! `hk`, the control CLI. `hk replay <path.sigmf-meta>` runs a SigMF fixture through the
 //! pipeline. Until the replay source (T-003) and harness (T-023) land, it parses the metadata
-//! and prints a summary.
+//! and prints a summary. `hk stream-tail` is the sample stream-output consumer (T-016): it
+//! prints a stream's header and records.
 
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::Read as _;
+use std::io::{self, Read};
 use std::path::Path;
 
 use anyhow::Context as _;
+use hk_api::stream::{Record, RecordFlags, StreamReader};
 use hk_model::sigmf::{SigmfMeta, data_path_for};
+
+/// Prints a stream's header (pretty JSON), then one line per record, stopping after `limit`
+/// records if given. Message records print as their NDJSON line; binary records as a summary
+/// with the first payload bytes in hex; drop markers as `# dropped`. Returns records printed.
+pub fn stream_tail<R: Read, W: io::Write>(
+    reader: &mut StreamReader<R>,
+    out: &mut W,
+    limit: Option<u64>,
+) -> anyhow::Result<u64> {
+    let header = reader.read_header().context("reading stream header")?;
+    writeln!(out, "{}", serde_json::to_string_pretty(header)?)?;
+    let mut printed = 0u64;
+    while limit.is_none_or(|l| printed < l) {
+        let Some(record) = reader.next_record().context("reading record")? else {
+            break;
+        };
+        match record {
+            Record::Message(m) => writeln!(out, "{}", m.value)?,
+            Record::Binary(b) => {
+                let h = b.header;
+                let names = [
+                    (RecordFlags::GATED, "gated"),
+                    (RecordFlags::DISCONTINUITY, "discontinuity"),
+                    (RecordFlags::OVERLOAD, "overload"),
+                    (RecordFlags::BURST_START, "burst-start"),
+                    (RecordFlags::BURST_END, "burst-end"),
+                ];
+                let flags: Vec<&str> = names
+                    .iter()
+                    .filter(|(f, _)| h.flags.contains(*f))
+                    .map(|(_, n)| *n)
+                    .collect();
+                let head: String = b
+                    .payload
+                    .iter()
+                    .take(16)
+                    .map(|x| format!("{x:02x}"))
+                    .collect();
+                writeln!(
+                    out,
+                    "#{} t={} sample_index={} len={} flags=[{}] {}",
+                    h.seq,
+                    h.t.as_unix_nanos(),
+                    h.sample_index,
+                    h.payload_len,
+                    flags.join(","),
+                    head
+                )?;
+            }
+            Record::Dropped(d) => writeln!(
+                out,
+                "# dropped {} records from seq {}",
+                d.count, d.first_seq
+            )?,
+            Record::Unknown(bytes) => writeln!(out, "# unknown record ({} bytes)", bytes.len())?,
+        }
+        printed += 1;
+    }
+    Ok(printed)
+}
 
 const LFS_POINTER_PREFIX: &[u8] = b"version https://git-lfs.github.com/spec/v1";
 
@@ -167,5 +229,69 @@ mod tests {
     #[test]
     fn missing_file_is_an_error() {
         assert!(replay_summary(Path::new("does/not/exist.sigmf-meta")).is_err());
+    }
+
+    #[test]
+    fn stream_tail_prints_header_and_records_from_tcp() {
+        use hk_api::stream::{
+            BinaryRecord, ListenAddr, Listener, Publisher, PublisherConfig, StreamHeader,
+            StreamKind,
+        };
+        use hk_model::{ContentClass, Timestamp};
+
+        let mut header = StreamHeader::new(
+            "iq/test",
+            StreamKind::Iq,
+            ContentClass::RestrictedPaging,
+            "hk-cli-test",
+        );
+        header.datatype = Some("ci8".into());
+        header.sample_rate_hz = Some(2e6);
+        header.max_frame_len = 4096;
+        let mut publisher = Publisher::new(
+            header,
+            PublisherConfig {
+                queue_bytes: 64 * 1024,
+                ..PublisherConfig::default()
+            },
+        )
+        .unwrap();
+        let handle = publisher.handle();
+        let listener = Listener::bind_tcp("127.0.0.1:0", handle.clone()).unwrap();
+        let ListenAddr::Tcp(addr) = listener.addr().clone() else {
+            unreachable!()
+        };
+        let tail = std::thread::spawn(move || {
+            let mut reader = StreamReader::connect_tcp(addr).unwrap();
+            let mut out = Vec::new();
+            let n = stream_tail(&mut reader, &mut out, Some(2)).unwrap();
+            (n, String::from_utf8(out).unwrap())
+        });
+        while handle.open_consumers() == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        for i in 0..3u64 {
+            // Restricted class: payload is withheld at egress, the metadata record still flows.
+            let _ = publisher.publish_binary(BinaryRecord {
+                t: Timestamp::from_unix_nanos(10 + i as i64),
+                sample_index: i * 8,
+                flags: hk_api::stream::RecordFlags::empty(),
+                payload: &[0xab; 8],
+            });
+        }
+        drop(publisher);
+        let (n, text) = tail.join().unwrap();
+        assert_eq!(n, 2);
+        assert!(text.contains("\"kind\": \"iq\""), "{text}");
+        assert!(
+            text.contains("\"content_class\": \"restricted-paging\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("#0 t=10 sample_index=0 len=8 flags=[gated] \n"),
+            "{text}"
+        );
+        assert!(text.contains("#1 t=11 sample_index=8"), "{text}");
+        assert!(!text.contains("abab"), "{text}");
     }
 }
