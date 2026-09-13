@@ -1,0 +1,44 @@
+# hackriff — Research
+
+Background research for an exploration-first signals-analysis device and software stack: something that could replace a HackRF PortaPack. The goal is to find interesting signals automatically instead of making you know the frequency and pick the mode first.
+
+_Research completed 2026-09-13. Items the agents could not confirm are marked **(verify)** or "unverified" in each document._
+
+## Documents
+
+| # | Document | Words | Scope |
+|---|----------|------:|-------|
+| 01 | [HackRF & PortaPack](01-hackrf-and-portapack.md) | ~7.3k | HackRF One and Pro hardware, PortaPack models, Mayhem firmware, why the chip limits it, user pain points, how active the projects really are |
+| 02 | [SDR Landscape](02-sdr-landscape.md) | ~8.7k | SDR architectures and specs, a ~50-row hardware table, Pi 5 / Jetson / RK3588 / RFSoC data-rate math, FPGA roles, front-ends, candidate device tiers |
+| 03 | [SDR Software](03-sdr-software.md) | ~9.0k | Frameworks (GNU Radio 3.10/4.0, Rust, liquid-dsp), receiver apps, survey and analysis tools, trunking, automatic modulation classification in practice, UX critique, gap table |
+| 04 | [Radio Engineering & Signals Analysis](04-radio-engineering-and-signals-analysis.md) | ~13.8k | Spectrum use, what makes a signal interesting, detection (CFAR, spectral kurtosis), parameter estimation, AMC, auto-demod and squelch, protocol ID, trunking, DF, calibration, professional monitoring workflow. Includes the legal notes on decrypting your own traffic. |
+| 05 | [Use-Cases & Explorations](05-use-cases-and-explorations.md) | ~12.3k | A 391-item, one-line-each catalogue across five themes: space weather and natural radio, propagation and RF sensing, spectrum awareness and anomalies (the radio "attack map"), the long tail of receivable signals, and unknown signals / security / lab / ML. **These are the feature goals and future test suite.** Each item has a permanent ID. |
+| — | [use-cases.yaml](use-cases.yaml) | — | Machine-readable copy of 05 and the source of truth for use-case IDs (`SPACE-`, `PROP-`, `AWARE-`, `SIGNAL-`, `RESEARCH-`). Architecture planning fills in `capabilities`, `hardware_fit` and `test_tier`. |
+
+## Findings across the four documents
+
+1. **The HackRF ecosystem isn't dead, but the handheld can't grow.** 2026 is the busiest HackRF firmware year since at least 2022, HackRF Pro shipped in January 2026 (it adds an FPGA and TCXO), and Mayhem still ships regular releases. But the PortaPack runs all its DSP on an LPC4320 microcontroller with about 200 kB of RAM. Scanning, classifying and trunking are out of reach, and the maintainers have closed every DMR/P25 request as impossible. → [01](01-hackrf-and-portapack.md)
+2. **No open-source tool covers the whole exploration chain.** The chain is survey → detect → classify → estimate parameters → decode → inventory → record. The pieces are spread across SDRangel, SigDigger/Suscan, URH (archived 2026), rtl_433, Trunk Recorder, OpenWebRX+, SatDump, IQEngine and Maia SDR. Every mainstream GUI is built around tuning first. Only commercial suites (DeepSig OmniSIG, CRFS, R&S, Aaronia) put ML detection into a live receiver. → [03](03-sdr-software.md)
+3. **Sweep to find *where*, dwell to find *what*.** A HackRF sweeps 0–6 GHz in under a second, yet catches a 5 ms burst less than 1% of the time per sweep. Short bursts need a real-time window. The scheduler that trades these off is a core design problem. → [02](02-sdr-landscape.md), [04](04-radio-engineering-and-signals-analysis.md)
+4. **The big wins are mostly classical DSP, not deep learning.** Priorities:
+   - noise-floor estimation
+   - CFAR plus spectral kurtosis for detection
+   - calibration and spur rejection
+   - blind estimation of symbol rate, frequency offset and bandwidth
+   - licence and band-plan data as priors
+
+   Deep-learning classifiers reach about 95% on synthetic data but drop to the 59–87% range over the air, and softmax confidence doesn't flag unknown signals. The better design uses ML as a stage after normalization, with an "unknown" output. → [04](04-radio-engineering-and-signals-analysis.md)
+5. **Filtering and linearity decide what automation can trust.** In urban RF, 8-bit samples without a preselector mostly show your own intermodulation. A filter bank that switches in step with the sweep is the best-value hardware upgrade. → [02](02-sdr-landscape.md)
+6. **The hardware architecture has commercial precedent.** Epiq's Matchstiq and Deepwave's AIR-T both pair an FPGA and RF chip with a Jetson Orin. The report sketches three tiers:
+
+   | Tier | Hardware | Cost |
+   |---|---|---|
+   | A | HackRF Pro + Pi 5 + filter bank | ~$700–1.1k |
+   | B | Orin + PCIe SDR + GPSDO | ~$1.5–4k |
+   | C | RFSoC + Orin | ~$5–20k |
+
+   The Pi 5 has an unresolved USB 3 throughput problem with some SDRs. → [02](02-sdr-landscape.md)
+
+## Next
+
+Ideation and requirements for the hackriff software and device.
