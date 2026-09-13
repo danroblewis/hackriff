@@ -26,7 +26,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: Phase tracking of the VLF carrier is the Grape-style carrier tracking in doppler-tracking.
-  test_tier: null
+  test_tier: field
 - id: SPACE-002
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -50,7 +50,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-003
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -74,7 +74,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: An LPDA + LNA is the usual CALLISTO antenna but not required; 8-bit dynamic range in FM/TV-rich sites is marginal.
-  test_tier: null
+  test_tier: field
 - id: SPACE-004
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -96,7 +96,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Drift rate is a track feature over the dynamic spectrum; same antenna caveat as SPACE-003.
-  test_tier: null
+  test_tier: field
 - id: SPACE-005
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -119,7 +119,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Mostly data (RSTN/CALLISTO archives) joined to own spectrum-history events.
-  test_tier: null
+  test_tier: offline-synth
 - id: SPACE-006
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -143,7 +143,7 @@ use_cases:
   accessory: small dish + LNA (2.8 GHz)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-007
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -164,7 +164,7 @@ use_cases:
   accessory: active GNSS antenna via bias-tee
   fit_flags: null
   fit_note: The single receive window cannot watch the burst and L-band at once; burst timing comes from feeds or the scheduler.
-  test_tier: null
+  test_tier: field
 - id: SPACE-008
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -186,7 +186,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-009
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -206,7 +206,7 @@ use_cases:
   accessory: dish or Yagi (directional antenna) + LNA
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-010
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -224,7 +224,7 @@ use_cases:
   accessory: Ku-band LNB + dish (IF 950-2150 MHz)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-011
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -247,7 +247,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: Rare events; mostly a retrospective join of VLF history against GRB/magnetar alerts.
-  test_tier: null
+  test_tier: field
 - id: SPACE-012
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -272,7 +272,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: HF is in range but HackRF sensitivity below 30 MHz is poor; an active loop or LNA is recommended.
-  test_tier: null
+  test_tier: field
 - id: SPACE-013
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -293,7 +293,7 @@ use_cases:
   accessory: GPSDO / 10 MHz external reference
   fit_flags: null
   fit_note: The Hz-scale flare deviation is comparable to TCXO drift, so the reference is required rather than optional.
-  test_tier: null
+  test_tier: field
 - id: SPACE-014
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -312,7 +312,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Needs a large-aperture array at 327 MHz that no portable accessory provides; published IPS products could still be used via context-feeds.
-  test_tier: null
+  test_tier: field
 - id: SPACE-015
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Solar Activity & Space Weather
@@ -338,7 +338,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: The dashboard itself is native; its SID/riometer inputs come from accessory-dependent use cases.
-  test_tier: null
+  test_tier: offline-synth
 - id: SPACE-016
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -363,7 +363,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: 1 Hz Doppler over hours needs a disciplined clock; HF sensitivity caveat applies but WWV/CHU are strong.
-  test_tier: null
+  test_tier: field
 - id: SPACE-017
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -389,7 +389,7 @@ use_cases:
   accessory: GPSDO + HF upconverter/active loop (for the 0.1-1 MHz end)
   fit_flags: null
   fit_note: The magnetometer is a non-radio side instrument; a fixed home station is against the portable brief but the capabilities are the same.
-  test_tier: null
+  test_tier: field
 - id: SPACE-018
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -413,7 +413,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard; GPSDO for the HF Doppler part
   fit_flags: null
   fit_note: HF-only version is native with a GPSDO; VLF phase needs the VLF front end.
-  test_tier: null
+  test_tier: field
 - id: SPACE-019
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -436,7 +436,7 @@ use_cases:
   accessory: GPSDO / 10 MHz external reference
   fit_flags: null
   fit_note: TID Doppler oscillations are sub-Hz over tens of minutes, below TCXO stability.
-  test_tier: null
+  test_tier: field
 - id: SPACE-020
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -456,7 +456,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only (archived Grape/PSWS Doppler); own recordings could substitute via doppler-tracking.
-  test_tier: null
+  test_tier: data-only
 - id: SPACE-021
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -479,7 +479,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Mostly data; own propagation logs are HF occupancy history.
-  test_tier: null
+  test_tier: field
 - id: SPACE-022
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -502,7 +502,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Mostly data (WSPR/RBN archives); own WSPR/beacon logs need HF reception with the usual sensitivity caveat.
-  test_tier: null
+  test_tier: field
 - id: SPACE-023
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -528,7 +528,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Dual-frequency TEC needs L1 and L5 simultaneously, 400 MHz apart; a dual-band GNSS module with raw output is the practical accessory, and single-frequency proxies are needs-accessory (active GNSS antenna).
-  test_tier: null
+  test_tier: field
 - id: SPACE-024
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -547,7 +547,7 @@ use_cases:
   accessory: active GNSS antenna via bias-tee
   fit_flags: null
   fit_note: Mostly a reading/learning item; the "apply it" half is single-frequency C/N0 and phase from the device.
-  test_tier: null
+  test_tier: field
 - id: SPACE-025
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -566,7 +566,7 @@ use_cases:
   accessory: crossed-polarization antenna pair + Opera Cake/antenna switch
   fit_flags: null
   fit_note: Fast switching gives polarization ratio; a coherent dual-channel SDR would do it properly (needs-other-sdr).
-  test_tier: null
+  test_tier: field
 - id: SPACE-026
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -588,7 +588,7 @@ use_cases:
   accessory: active GNSS antenna via bias-tee
   fit_flags: null
   fit_note: The HF-anomaly half is native; GNSS half is single-frequency proxies only.
-  test_tier: null
+  test_tier: field
 - id: SPACE-027
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -609,7 +609,7 @@ use_cases:
   accessory: VLF E-field receiver + GPS-timed soundcard (phase needs timing)
   fit_flags: null
   fit_note: LWPC-style model fitting is external analysis on the exported amplitude/phase series.
-  test_tier: null
+  test_tier: field
 - id: SPACE-028
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -631,7 +631,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-029
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -655,7 +655,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Listening for LDEs of other stations' transmissions is native (HF caveat).
-  test_tier: null
+  test_tier: field
 - id: SPACE-030
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Ionosphere & HF Propagation Science
@@ -682,7 +682,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: The HF heater signal itself is native (HF caveat); campaign schedules are a feed.
-  test_tier: null
+  test_tier: field
 - id: SPACE-031
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Aurora & High-Latitude Physics
@@ -707,7 +707,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: Galactic noise at 30-40 MHz is strong enough for a dipole; 8-bit dynamic range in RFI-dense sites is the limit.
-  test_tier: null
+  test_tier: field
 - id: SPACE-032
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Aurora & High-Latitude Physics
@@ -730,7 +730,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Needs a high-latitude site; HF caveat.
-  test_tier: null
+  test_tier: field
 - id: SPACE-033
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Aurora & High-Latitude Physics
@@ -756,7 +756,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Half data (SuperDARN products), half live HF listening (HF caveat).
-  test_tier: null
+  test_tier: field
 - id: SPACE-034
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Aurora & High-Latitude Physics
@@ -778,7 +778,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: A VHF Yagi is customary but not required.
-  test_tier: null
+  test_tier: field
 - id: SPACE-035
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Aurora & High-Latitude Physics
@@ -801,7 +801,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: High-latitude site; HF caveat (weak natural emission near 3 MHz).
-  test_tier: null
+  test_tier: field
 - id: SPACE-036
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Aurora & High-Latitude Physics
@@ -822,7 +822,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only spacecraft archive; could be browsed via SigMF replay, but no ground radio receives AKR.
-  test_tier: null
+  test_tier: data-only
 - id: SPACE-037
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -843,7 +843,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-038
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -866,7 +866,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: Dispersion-curve fitting is a use-case-specific analysis on top of the detected trace.
-  test_tier: null
+  test_tier: field
 - id: SPACE-039
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -888,7 +888,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: High-latitude site.
-  test_tier: null
+  test_tier: field
 - id: SPACE-040
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -911,7 +911,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-041
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -933,7 +933,7 @@ use_cases:
   accessory: VLF E-field/loop receiver + GPS-timed soundcard (AWESOME-class)
   fit_flags: null
   fit_note: Specifically about the front end, so the substrate slug is listed.
-  test_tier: null
+  test_tier: field
 - id: SPACE-042
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -956,7 +956,7 @@ use_cases:
   accessory: induction coil + soundcard/low-frequency ADC
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-043
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -980,7 +980,7 @@ use_cases:
   accessory: VLF E-field receiver + induction coil + soundcard
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-044
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -1005,7 +1005,7 @@ use_cases:
   accessory: Blitzortung System Blue board (their own GPS-timed VLF receiver)
   fit_flags: null
   fit_note: The network only accepts its own hardware; the device acts as host/uploader, which is native by the public-network rule.
-  test_tier: null
+  test_tier: field
 - id: SPACE-045
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -1025,7 +1025,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Multi-site TOA network of the user's own receivers.
-  test_tier: null
+  test_tier: field
 - id: SPACE-046
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -1047,7 +1047,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Correlation needs a TGF catalogue feed; 20 MHz bandwidth limits pulse time resolution.
-  test_tier: null
+  test_tier: field
 - id: SPACE-047
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -1070,7 +1070,7 @@ use_cases:
   accessory: VLF E-field/loop receiver + soundcard
   fit_flags: null
   fit_note: Separating local mains pickup from magnetospheric lines is a calibration/spur-map problem.
-  test_tier: null
+  test_tier: field
 - id: SPACE-048
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -1090,7 +1090,7 @@ use_cases:
   accessory: induction coil magnetometer + low-frequency ADC
   fit_flags: null
   fit_note: 0.5-10 Hz is below soundcard response; borderline non-radio instrument.
-  test_tier: null
+  test_tier: field
 - id: SPACE-049
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -1113,7 +1113,7 @@ use_cases:
   accessory: VLF E-field receiver + soundcard
   fit_flags: null
   fit_note: Fireball reports come from public camera networks.
-  test_tier: null
+  test_tier: field
 - id: SPACE-050
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Natural VLF/ELF Radio
@@ -1135,7 +1135,7 @@ use_cases:
   accessory: VLF/LF front end + soundcard for 10 kHz-1 MHz
   fit_flags: null
   fit_note: The 1 MHz-1 GHz portion is native; P.372 curves are built-in reference data.
-  test_tier: null
+  test_tier: field
 - id: SPACE-051
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Meteors
@@ -1157,7 +1157,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Only in/near Europe; a Yagi helps.
-  test_tier: null
+  test_tier: field
 - id: SPACE-052
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Meteors
@@ -1184,7 +1184,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: The Radio Meteor Zoo half is data-only and native; the station half needs Belgian-region reception of the Dourbes beacon.
-  test_tier: null
+  test_tier: data-only
 - id: SPACE-053
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Meteors
@@ -1208,7 +1208,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-054
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Meteors
@@ -1230,7 +1230,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Wind retrieval also usually needs a phase-coherent interferometer for echo positions (needs-other-sdr).
-  test_tier: null
+  test_tier: field
 - id: SPACE-055
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Meteors
@@ -1250,7 +1250,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Needs HPLA-class radar power; effectively out of reach at 15 dBm.
-  test_tier: null
+  test_tier: field
 - id: SPACE-056
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Meteors
@@ -1271,7 +1271,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Camera trajectories come from public networks (GMN) or a non-radio side instrument.
-  test_tier: null
+  test_tier: field
 - id: SPACE-057
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1293,7 +1293,7 @@ use_cases:
   accessory: horn or small dish + LNA + 1420 MHz filter
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-058
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1315,7 +1315,7 @@ use_cases:
   accessory: horn or small dish + LNA + 1420 MHz filter
   fit_flags: null
   fit_note: position-time supplies galactic coordinates and LSR correction.
-  test_tier: null
+  test_tier: field
 - id: SPACE-059
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1337,7 +1337,7 @@ use_cases:
   accessory: horn or small dish + LNA + 1420 MHz filter
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: SPACE-060
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1358,7 +1358,7 @@ use_cases:
   accessory: horn or small dish + LNA + 1420 MHz filter
   fit_flags: null
   fit_note: TCXO drift (~28 kHz at 1.4 GHz) is a fifth of the effect; frequency calibration matters.
-  test_tier: null
+  test_tier: field
 - id: SPACE-061
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1382,7 +1382,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: Marginal on 8-bit and 20 MHz bandwidth; folding and dedispersion are analysis on the recorded dynamic spectrum.
-  test_tier: null
+  test_tier: field
 - id: SPACE-062
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1398,7 +1398,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Explicitly needs a large dish.
-  test_tier: null
+  test_tier: field
 - id: SPACE-063
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1425,7 +1425,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: HF caveat; Io-storm predictions are a feed.
-  test_tier: null
+  test_tier: field
 - id: SPACE-064
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1446,7 +1446,7 @@ use_cases:
   accessory: dual-dipole array + HF preamp
   fit_flags: null
   fit_note: Specifically about full-bandwidth capture, so dwell-capture is listed; 18-30 MHz fits one window.
-  test_tier: null
+  test_tier: field
 - id: SPACE-065
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1468,7 +1468,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: 1 %/yr needs gain stability beyond an 8-bit HackRF; marginal.
-  test_tier: null
+  test_tier: field
 - id: SPACE-066
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1492,7 +1492,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: A dipole drift scan suffices; the sky model is built-in reference data.
-  test_tier: null
+  test_tier: field
 - id: SPACE-067
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1515,7 +1515,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Learning/data-only item; the mK-level measurement itself is far beyond this hardware.
-  test_tier: null
+  test_tier: data-only
 - id: SPACE-068
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1538,7 +1538,7 @@ use_cases:
   accessory: Yagi or dish + LNA (for Cyg A / Cas A)
   fit_flags: null
   fit_note: Sun transits work natively with a modest antenna.
-  test_tier: null
+  test_tier: field
 - id: SPACE-069
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1560,7 +1560,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: STARE2-style search needs ~250 MHz gap-free bandwidth for dedispersion sensitivity.
-  test_tier: null
+  test_tier: field
 - id: SPACE-070
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1581,7 +1581,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Needs LOFAR-class aperture; exploring published data is native data-only.
-  test_tier: null
+  test_tier: data-only
 - id: SPACE-071
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1605,7 +1605,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: 'Marginal: single antenna, 20 MHz slice of 30-80 MHz; real experiments use arrays and particle-detector triggers.'
-  test_tier: null
+  test_tier: field
 - id: SPACE-072
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1629,7 +1629,7 @@ use_cases:
   accessory: directional antenna (Yagi) + LNA
   fit_flags: null
   fit_note: Marginal sensitivity versus LOFAR-scale detections.
-  test_tier: null
+  test_tier: field
 - id: SPACE-073
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1657,7 +1657,7 @@ use_cases:
   accessory: dish + LNA (GPSDO for Hz stability)
   fit_flags: null
   fit_note: The pipeline test with injected synthetic signals is native; Hz-resolution spectrograms make spectral-estimation the point.
-  test_tier: null
+  test_tier: offline-synth
 - id: SPACE-074
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Radio Astronomy
@@ -1679,7 +1679,7 @@ use_cases:
   accessory: horn or small dish + LNA
   fit_flags: null
   fit_note: Umbrella item for SPACE-057/006/009.
-  test_tier: null
+  test_tier: field
 - id: SPACE-075
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Moon, Planets & Deep Space
@@ -1700,7 +1700,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: 15 dBm is far from EME power; receive-only EME of others with a large antenna is needs-accessory; 10 GHz is outside range.
-  test_tier: null
+  test_tier: field
 - id: SPACE-076
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Moon, Planets & Deep Space
@@ -1720,7 +1720,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: 'Large-station radar experiment; also tx: required.'
-  test_tier: null
+  test_tier: field
 - id: SPACE-077
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Moon, Planets & Deep Space
@@ -1742,7 +1742,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: 8.4 GHz needs an X-band downconverter, but the 20 m-class dish is the real blocker.
-  test_tier: null
+  test_tier: field
 - id: SPACE-078
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Moon, Planets & Deep Space
@@ -1767,7 +1767,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: A directional antenna is strongly recommended for weak high-orbit downlinks.
-  test_tier: null
+  test_tier: field
 - id: SPACE-079
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Moon, Planets & Deep Space
@@ -1790,7 +1790,7 @@ use_cases:
   accessory: dish + LNA; X-band downconverter for 8.4 GHz
   fit_flags: null
   fit_note: S-band lunar missions are marginal; true deep-space targets need a large dish (out-of-scope).
-  test_tier: null
+  test_tier: field
 - id: SPACE-080
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Moon, Planets & Deep Space
@@ -1813,7 +1813,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Data fusion; the local side comes from other SPACE use cases, some accessory-dependent.
-  test_tier: null
+  test_tier: offline-synth
 - id: SPACE-081
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
   subcategory: Moon, Planets & Deep Space
@@ -1834,7 +1834,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Either receive directly (a Yagi helps) or pull SatNOGS DB frames as a feed.
-  test_tier: null
+  test_tier: field
 - id: PROP-001
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -1855,7 +1855,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: data-only; mines the public WSPR spot archive
-  test_tier: null
+  test_tier: data-only
 - id: PROP-002
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -1884,7 +1884,7 @@ use_cases:
   - marginal-8bit
   - exceeds-window
   fit_note: all HF bands span 28 MHz, so one 20 MHz window covers 160-15 m at once and time-shares 12/10 m; marginal on 8-bit HF without a preselector
-  test_tier: null
+  test_tier: field
 - id: PROP-003
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -1905,7 +1905,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: reach map comes from the public WSPRnet feed
-  test_tier: null
+  test_tier: field
 - id: PROP-004
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -1926,7 +1926,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: mostly the public PSKReporter feed; own decodes and recordings are archived beside it
-  test_tier: null
+  test_tier: field
 - id: PROP-005
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -1947,7 +1947,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: data-only; analysis of public RBN spots
-  test_tier: null
+  test_tier: data-only
 - id: PROP-006
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -1968,7 +1968,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: data-only; analysis of aggregated public spots
-  test_tier: null
+  test_tier: data-only
 - id: PROP-007
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -1993,7 +1993,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: catalogue says tx required (flying one); tracking balloons via own WSPR decodes and public telemetry is native
-  test_tier: null
+  test_tier: field
 - id: PROP-008
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -2015,7 +2015,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: VOACAP/MUF predictions are a context feed scored against own decoded spots
-  test_tier: null
+  test_tier: field
 - id: PROP-009
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -2038,7 +2038,7 @@ use_cases:
   - marginal-hf
   - marginal-8bit
   fit_note: 160-40 m is marginal on an 8-bit front end without preselection; an active loop or HF preselector would help
-  test_tier: null
+  test_tier: field
 - id: PROP-010
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -2058,7 +2058,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: the 0.13 s echo-delay and daylight-geometry methods are native; the DF method needs coherent-df-tdoa (needs-other-sdr) or a directional antenna
-  test_tier: null
+  test_tier: field
 - id: PROP-011
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -2080,7 +2080,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: works from public spots and own decodes
-  test_tier: null
+  test_tier: field
 - id: PROP-012
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Crowd-sourced propagation networks (HF)
@@ -2103,7 +2103,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: public KiwiSDR/WebSDR receivers as remote sources; an own multi-site network would be out of scope
-  test_tier: null
+  test_tier: field
 - id: PROP-013
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Ionospheric sounding & HF channel measurement
@@ -2129,7 +2129,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: 2-30 MHz exceeds one 20 MHz window, so the receiver retunes to follow the slow chirp; absolute delay needs GNSS time (GPSDO helps)
-  test_tier: null
+  test_tier: field
 - id: PROP-014
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Ionospheric sounding & HF channel measurement
@@ -2151,7 +2151,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: pulsed/coded waveforms fit half-duplex T/R switching; a continuous chirp needs full duplex (needs-other-sdr)
-  test_tier: null
+  test_tier: field
 - id: PROP-015
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Ionospheric sounding & HF channel measurement
@@ -2171,7 +2171,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: two of the user's own GPSDO-synced stations; also needs-tx
-  test_tier: null
+  test_tier: field
 - id: PROP-016
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Ionospheric sounding & HF channel measurement
@@ -2195,7 +2195,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: vertical incidence at the own site needs T/R switching or a second receiver
-  test_tier: null
+  test_tier: field
 - id: PROP-017
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Ionospheric sounding & HF channel measurement
@@ -2216,7 +2216,7 @@ use_cases:
   accessory: GPSDO clock; HF upconverter or active loop for 530 kHz-1 MHz
   fit_flags: null
   fit_note: MW carriers above 1 MHz are native but sub-Hz Doppler needs a disciplined clock
-  test_tier: null
+  test_tier: field
 - id: PROP-018
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Ionospheric sounding & HF channel measurement
@@ -2236,7 +2236,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: tx optional; the broadcast-pilot variant is native, the own-sounder variant needs-tx
-  test_tier: null
+  test_tier: field
 - id: PROP-019
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Space weather & geophysical signatures
@@ -2260,7 +2260,7 @@ use_cases:
   accessory: VLF/LF receiver + soundcard; GPSDO/1PPS
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-020
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Space weather & geophysical signatures
@@ -2280,7 +2280,7 @@ use_cases:
   accessory: VLF/LF receiver + soundcard (or HF upconverter)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-021
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Space weather & geophysical signatures
@@ -2304,7 +2304,7 @@ use_cases:
   - marginal-8bit
   - data-only
   fit_note: L1-only TEC from an 8-bit front end is marginal; public GNSS-network TEC products are a data-only alternative
-  test_tier: null
+  test_tier: data-only
 - id: PROP-022
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Space weather & geophysical signatures
@@ -2328,7 +2328,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: phase-coherent reference and surveillance channels
-  test_tier: null
+  test_tier: field
 - id: PROP-023
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2355,7 +2355,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: RDS PI plus FMLIST identifies the distant station; FT8 spots come from decodes or PSKReporter
-  test_tier: null
+  test_tier: field
 - id: PROP-024
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2383,7 +2383,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: 162 and 1090 MHz cannot share one window, so the scheduler alternates them
-  test_tier: null
+  test_tier: field
 - id: PROP-025
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2406,7 +2406,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: needs calibrated per-message RSSI (dBFS to dBm)
-  test_tier: null
+  test_tier: field
 - id: PROP-026
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2427,7 +2427,7 @@ use_cases:
   accessory: downconverter/LNB for X band; directional antenna
   fit_flags: null
   fit_note: the UHF part is native
-  test_tier: null
+  test_tier: field
 - id: PROP-027
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2451,7 +2451,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-028
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2474,7 +2474,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: multi-station own network; contributing timestamped echoes to a public network is native via stream-output
-  test_tier: null
+  test_tier: field
 - id: PROP-029
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2497,7 +2497,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: the other end is a second licensed station, not an own sensor network
-  test_tier: null
+  test_tier: field
 - id: PROP-030
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2519,7 +2519,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-031
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: VHF/UHF anomalous propagation
@@ -2542,7 +2542,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: beacons below 6 GHz are native; multi-band logging is time-shared by the scheduler
-  test_tier: null
+  test_tier: field
 - id: PROP-032
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Satellites & GNSS: ionosphere and troposphere'
@@ -2565,7 +2565,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: 150 and 400 MHz must be received coherently at once, 250 MHz apart
-  test_tier: null
+  test_tier: field
 - id: PROP-033
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Satellites & GNSS: ionosphere and troposphere'
@@ -2590,7 +2590,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: one GNSS band at a time in the 20 MHz window; L1 alone gives S4
-  test_tier: null
+  test_tier: field
 - id: PROP-034
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Satellites & GNSS: ionosphere and troposphere'
@@ -2613,7 +2613,7 @@ use_cases:
   - marginal-8bit
   - data-only
   fit_note: geodetic dual-frequency carrier phase is marginal on 8-bit single-window; public GNSS-network ZWD products are a data-only alternative
-  test_tier: null
+  test_tier: data-only
 - id: PROP-035
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Satellites & GNSS: ionosphere and troposphere'
@@ -2635,7 +2635,7 @@ use_cases:
   accessory: active GNSS antenna + LNA; GPSDO
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-036
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Satellites & GNSS: ionosphere and troposphere'
@@ -2654,7 +2654,7 @@ use_cases:
   accessory: Ku LNB + dish
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-037
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Satellites & GNSS: ionosphere and troposphere'
@@ -2676,7 +2676,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: PROP-038
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Satellites & GNSS: ionosphere and troposphere'
@@ -2700,7 +2700,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: 8-bit HackRF is a weak 1090 receiver; an LNA + filter accessory improves yield
-  test_tier: null
+  test_tier: offline-recorded
 - id: PROP-039
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: GNSS reflectometry & surface sensing
@@ -2723,7 +2723,7 @@ use_cases:
   accessory: active GNSS antenna (bias-tee)
   fit_flags: null
   fit_note: needs only C/N0 vs elevation, L1-only is fine
-  test_tier: null
+  test_tier: field
 - id: PROP-040
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: GNSS reflectometry & surface sensing
@@ -2742,7 +2742,7 @@ use_cases:
   accessory: active GNSS antenna (bias-tee)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-041
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: GNSS reflectometry & surface sensing
@@ -2765,7 +2765,7 @@ use_cases:
   accessory: active GNSS antenna (bias-tee)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-042
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: GNSS reflectometry & surface sensing
@@ -2786,7 +2786,7 @@ use_cases:
   accessory: active GNSS antenna (bias-tee)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-043
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: GNSS reflectometry & surface sensing
@@ -2805,7 +2805,7 @@ use_cases:
   accessory: active GNSS antenna (bias-tee); antenna switch for above/below canopy
   fit_flags: null
   fit_note: above/below comparison is sequential on one receiver
-  test_tier: null
+  test_tier: field
 - id: PROP-044
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: GNSS reflectometry & surface sensing
@@ -2825,7 +2825,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: direct and reflected antennas must be recorded coherently at once
-  test_tier: null
+  test_tier: field
 - id: PROP-045
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Opportunistic weather & hydrology from links
@@ -2852,7 +2852,7 @@ use_cases:
   accessory: LNB/downconverter for 10-40 GHz; directional antenna
   fit_flags: null
   fit_note: receive-signal-level only, no content
-  test_tier: null
+  test_tier: field
 - id: PROP-046
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Opportunistic weather & hydrology from links
@@ -2875,7 +2875,7 @@ use_cases:
   accessory: LNB/downconverter for 10-40 GHz; directional antenna
   fit_flags: null
   fit_note: rain gauge readings are an external context feed
-  test_tier: null
+  test_tier: field
 - id: PROP-047
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Opportunistic weather & hydrology from links
@@ -2900,7 +2900,7 @@ use_cases:
   accessory: Ku LNB + dish
   fit_flags: null
   fit_note: full DVB-S2 transponders exceed 20 MHz; C/N from spectrum or a narrow transponder
-  test_tier: null
+  test_tier: field
 - id: PROP-048
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Opportunistic weather & hydrology from links
@@ -2919,7 +2919,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: the Starlink terminal's own telemetry is the sensor; an SDR variant logging Ku downlink power would be needs-accessory (LNB)
-  test_tier: null
+  test_tier: field
 - id: PROP-049
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Opportunistic weather & hydrology from links
@@ -2941,7 +2941,7 @@ use_cases:
   accessory: mmWave downconverter for 38-80 GHz
   fit_flags: null
   fit_note: marginal; E-band downconverters are exotic
-  test_tier: null
+  test_tier: field
 - id: PROP-050
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Opportunistic weather & hydrology from links
@@ -2964,7 +2964,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: HackRF 5.8 GHz TX is weak; the far end can be a commodity ISM module
-  test_tier: null
+  test_tier: field
 - id: PROP-051
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -2985,7 +2985,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-052
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3010,7 +3010,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-053
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3031,7 +3031,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-054
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3051,7 +3051,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-055
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3072,7 +3072,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-056
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3092,7 +3092,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: also needs a Ku LNB
-  test_tier: null
+  test_tier: field
 - id: PROP-057
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3110,7 +3110,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: also needs a Ku LNB + dish
-  test_tier: null
+  test_tier: field
 - id: PROP-058
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3129,7 +3129,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: also needs an active GNSS antenna
-  test_tier: null
+  test_tier: field
 - id: PROP-059
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3147,7 +3147,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: MWA-class array; well beyond any handheld accessory
-  test_tier: null
+  test_tier: field
 - id: PROP-060
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Passive radar
@@ -3167,7 +3167,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: a 20 MHz Wi-Fi channel fits the window but two coherent channels are needed
-  test_tier: null
+  test_tier: field
 - id: PROP-061
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Active SDR radar & sensing with your own transmitter
@@ -3190,7 +3190,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: also needs-tx; FMCW is full duplex and the hardware is a Pluto + 10 GHz array
-  test_tier: null
+  test_tier: hil
 - id: PROP-062
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Active SDR radar & sensing with your own transmitter
@@ -3209,7 +3209,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: also needs-tx; CW/FMCW radar is full duplex
-  test_tier: null
+  test_tier: hil
 - id: PROP-063
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Active SDR radar & sensing with your own transmitter
@@ -3232,7 +3232,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: also needs-tx; simultaneous wideband TX and RX
-  test_tier: null
+  test_tier: hil
 - id: PROP-064
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Active SDR radar & sensing with your own transmitter
@@ -3252,7 +3252,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: also needs-tx; full-duplex radar above 6 GHz
-  test_tier: null
+  test_tier: hil
 - id: PROP-065
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Wi-Fi & RSS sensing
@@ -3277,7 +3277,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: CSI from commodity Wi-Fi chips; an SDR-based equivalent would use the listed capabilities
-  test_tier: null
+  test_tier: field
 - id: PROP-066
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Wi-Fi & RSS sensing
@@ -3298,7 +3298,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: CSI from commodity Wi-Fi chips; identifying people also raises privacy questions
-  test_tier: null
+  test_tier: field
 - id: PROP-067
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Wi-Fi & RSS sensing
@@ -3316,7 +3316,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: a feature of commodity Wi-Fi chipsets, not an SDR receive task; also needs-tx
-  test_tier: null
+  test_tier: field
 - id: PROP-068
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Wi-Fi & RSS sensing
@@ -3336,7 +3336,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: mesh of the user's own nodes
-  test_tier: null
+  test_tier: field
 - id: PROP-069
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Wi-Fi & RSS sensing
@@ -3357,7 +3357,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: own sensor network
-  test_tier: null
+  test_tier: field
 - id: PROP-070
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Observing professional radars & remote-sensing transmitters
@@ -3382,7 +3382,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-071
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Observing professional radars & remote-sensing transmitters
@@ -3406,7 +3406,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: NEXRAD Level II archive is a context feed; a horn antenna helps but is not required
-  test_tier: null
+  test_tier: offline-recorded
 - id: PROP-072
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Observing professional radars & remote-sensing transmitters
@@ -3425,7 +3425,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: data-only; analysis of archived weather-radar products
-  test_tier: null
+  test_tier: data-only
 - id: PROP-073
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Observing professional radars & remote-sensing transmitters
@@ -3448,7 +3448,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: PROP-074
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Signals of opportunity: positioning & timing'
@@ -3472,7 +3472,7 @@ use_cases:
   accessory: Ku LNB; GPSDO
   fit_flags: null
   fit_note: Doppler positioning needs a disciplined clock
-  test_tier: null
+  test_tier: field
 - id: PROP-075
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Signals of opportunity: positioning & timing'
@@ -3496,7 +3496,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: cells in different bands are time-shared; a GPSDO improves pseudorange stability
-  test_tier: null
+  test_tier: field
 - id: PROP-076
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Signals of opportunity: positioning & timing'
@@ -3518,7 +3518,7 @@ use_cases:
   accessory: VLF/LF receiver + soundcard; GPSDO/1PPS reference
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: field
 - id: PROP-077
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: 'Signals of opportunity: positioning & timing'
@@ -3541,7 +3541,7 @@ use_cases:
   accessory: VLF/LF receiver + soundcard for 60 kHz; GPSDO/1PPS
   fit_flags: null
   fit_note: the WWV (HF) half is native
-  test_tier: null
+  test_tier: field
 - id: PROP-078
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Link budgets, terrain, antennas & ground
@@ -3566,7 +3566,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: the TX is a commodity LoRa module, so the SDR side is receive-only and native
-  test_tier: null
+  test_tier: field
 - id: PROP-079
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Link budgets, terrain, antennas & ground
@@ -3587,7 +3587,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: the airborne source can be a separate small TX; the receive side is native
-  test_tier: null
+  test_tier: field
 - id: PROP-080
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Link budgets, terrain, antennas & ground
@@ -3611,7 +3611,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: the GNSS part is marginal without an LNA; amateur/weather satellites suffice
-  test_tier: null
+  test_tier: field
 - id: PROP-081
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Link budgets, terrain, antennas & ground
@@ -3632,7 +3632,7 @@ use_cases:
   accessory: VLF/LF receiver or HF upconverter/active loop for 150 kHz-1 MHz; calibrated antenna
   fit_flags: null
   fit_note: MW above 1 MHz is native, but absolute field strength needs a known antenna factor
-  test_tier: null
+  test_tier: field
 - id: PROP-082
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Link budgets, terrain, antennas & ground
@@ -3657,7 +3657,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: absolute field strength needs a calibrated antenna factor; relative coverage works without
-  test_tier: null
+  test_tier: field
 - id: PROP-083
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
   subcategory: Link budgets, terrain, antennas & ground
@@ -3680,7 +3680,7 @@ use_cases:
   accessory: GPSDO; downconverter for X band
   fit_flags: null
   fit_note: tx optional; the passive variant tracks phase of others' fixed links (UHF native)
-  test_tier: null
+  test_tier: field
 - id: AWARE-001
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: GNSS Jamming, Spoofing & Navigation Integrity
@@ -3704,7 +3704,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-002
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: GNSS Jamming, Spoofing & Navigation Integrity
@@ -3725,7 +3725,7 @@ use_cases:
   accessory: active GNSS antenna via bias-tee
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-003
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: GNSS Jamming, Spoofing & Navigation Integrity
@@ -3749,7 +3749,7 @@ use_cases:
   accessory: active GNSS antenna via bias-tee
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-004
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: GNSS Jamming, Spoofing & Navigation Integrity
@@ -3770,7 +3770,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Local anomalies can come from the on-board GNSS receiver; using the SDR as the GNSS source needs an active GNSS antenna (needs-accessory).
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-005
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: GNSS Jamming, Spoofing & Navigation Integrity
@@ -3791,7 +3791,7 @@ use_cases:
   accessory: directional antenna for bearings
   fit_flags: null
   fit_note: Detection and RSSI/time logging of the strong swept-tone bursts is native; only the bearing needs a directional antenna.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-006
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: GNSS Jamming, Spoofing & Navigation Integrity
@@ -3812,7 +3812,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Mostly data-only (public jamming indices and news timelines); the local input is fix loss from the on-board GNSS.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-007
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: GNSS Jamming, Spoofing & Navigation Integrity
@@ -3835,7 +3835,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-008
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Aviation & Maritime Integrity
@@ -3859,7 +3859,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Kinematics and RSSI-vs-range checks are native; the multilateration-timing check needs several receivers and is out of scope on one device.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-009
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Aviation & Maritime Integrity
@@ -3879,7 +3879,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-010
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Aviation & Maritime Integrity
@@ -3898,7 +3898,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-011
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Aviation & Maritime Integrity
@@ -3920,7 +3920,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: HackRF sensitivity above 3 GHz is poor; an LNA helps but is not required to see the carriers.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-012
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Aviation & Maritime Integrity
@@ -3941,7 +3941,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-013
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Cellular Integrity & Fake Base Stations
@@ -3965,7 +3965,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Rayhunter itself reads a hotspot modem's diagnostics, not an SDR; the SDR version watches downlink broadcast/RRC-redirect metadata only, and 20 MHz LTE carriers sit at the HackRF bandwidth limit.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-014
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Cellular Integrity & Fake Base Stations
@@ -3990,7 +3990,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: MIB/SIB decode needs only the central 1.4 MHz; full 20 MHz LTE carriers are at the HackRF bandwidth limit. Metadata only.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-015
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Cellular Integrity & Fake Base Stations
@@ -4012,7 +4012,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: A fleet of the user's own vehicle-mounted scanners is out of scope; a single-device wardrive of the same data is native.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-016
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Cellular Integrity & Fake Base Stations
@@ -4035,7 +4035,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Broadcast-channel metadata only.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-017
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Cellular Integrity & Fake Base Stations
@@ -4061,7 +4061,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-018
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Cellular Integrity & Fake Base Stations
@@ -4087,7 +4087,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: 20 MHz LTE carriers are at the HackRF bandwidth limit and blind PDCCH decode is marginal at 8-bit; control-plane metadata only.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-019
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Cellular Integrity & Fake Base Stations
@@ -4110,7 +4110,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: n77/n78 carriers are up to 100 MHz wide, beyond the 20 MHz window; SSB-based cell discovery alone is native.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-020
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4132,7 +4132,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: The Bluetooth Remote ID path is SDR-decodable; Wi-Fi beacon/NAN Remote ID at 20 MHz OFDM is marginal on 8-bit, so a Wi-Fi chipset is the practical sensor for that half.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-021
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4157,7 +4157,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: The ~10 MHz DroneID OFDM burst fits the window; 8-bit dynamic range is marginal for the 5.8 GHz variant.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-022
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4179,7 +4179,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-023
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4202,7 +4202,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: Decoding 20 MHz Wi-Fi OFDM management frames at 8-bit is marginal; a Wi-Fi chipset in monitor mode is the practical sensor.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-024
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4226,7 +4226,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: Wi-Fi OFDM decode at 8-bit is marginal and 6 GHz (Wi-Fi 6E) is mostly above the HackRF range; a Wi-Fi chipset is the practical sensor.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-025
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4250,7 +4250,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-026
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4271,7 +4271,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-027
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4293,7 +4293,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: The three bands cannot share one window, so the scheduler rotates between them.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-028
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Drones, Trackers & Short-Range Wireless Threats
@@ -4315,7 +4315,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Wi-Fi and BT scans come from the Jetson's own chipset as extra sources alongside the SDR sweep.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-029
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: RFI Hunting & Noise-Floor Forensics
@@ -4337,7 +4337,7 @@ use_cases:
   accessory: directional antenna
   fit_flags: null
   fit_note: Recognising the 100/120 Hz buzz signature is native; walking it down needs the directional antenna.
-  test_tier: null
+  test_tier: field
 - id: AWARE-030
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: RFI Hunting & Noise-Floor Forensics
@@ -4359,7 +4359,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: The LF portion (<1 MHz) needs a VLF/LF front end; most comb-spectrum signatures are visible at HF-VHF natively.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-031
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: RFI Hunting & Noise-Floor Forensics
@@ -4381,7 +4381,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-032
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: RFI Hunting & Noise-Floor Forensics
@@ -4403,7 +4403,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: HF static crashes are native; VLF sferics proper need a VLF front end (needs-accessory).
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-033
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: RFI Hunting & Noise-Floor Forensics
@@ -4426,7 +4426,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-034
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: RFI Hunting & Noise-Floor Forensics
@@ -4448,7 +4448,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Microsecond radar pulses need dwells, and the 475 MHz DFS range needs the scheduler to rotate windows.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-035
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: RFI Hunting & Noise-Floor Forensics
@@ -4471,7 +4471,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: The 26 MHz band slightly exceeds one 20 MHz window.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-036
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: RFI Hunting & Noise-Floor Forensics
@@ -4496,7 +4496,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-037
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4519,7 +4519,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Building a many-node network and backend is out of scope; acting as one node uploading sweeps to a public backend such as Electrosense is native.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-038
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4540,7 +4540,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-039
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4564,7 +4564,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Largely data-only (reusing campaign data); contributing requires SCOS-style calibrated metadata.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-040
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4587,7 +4587,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-041
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4610,7 +4610,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-042
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4629,7 +4629,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-043
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4647,7 +4647,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: A network of the user's own sensors is out of scope; comparing this device's anomalies against public network data is the native attack-map path.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-044
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4672,7 +4672,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-045
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4696,7 +4696,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: The 150 MHz band exceeds one window and sensitivity at 3.5 GHz is limited; an LNA helps.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-046
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Crowdsourced Monitoring, Occupancy & Anomaly Detection
@@ -4719,7 +4719,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-047
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Emitter Identification, DF & Geolocation
@@ -4742,7 +4742,7 @@ use_cases:
   fit_flags:
   - marginal-8bit
   fit_note: 8-bit sampling limits the fidelity of IQ-imbalance and transient features; marginal but not a stated bit-depth requirement.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-048
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Emitter Identification, DF & Geolocation
@@ -4763,7 +4763,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only (public Wi-Fi capture dataset); no radio needed.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-049
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Emitter Identification, DF & Geolocation
@@ -4783,7 +4783,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Phase-coherent 5-channel array (KrakenSDR class).
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-050
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Emitter Identification, DF & Geolocation
@@ -4803,7 +4803,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Uses GPS-timestamped IQ from public KiwiSDRs, not local RF; receiving the VLF end locally would need an accessory.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-051
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Emitter Identification, DF & Geolocation
@@ -4823,7 +4823,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-052
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Emitter Identification, DF & Geolocation
@@ -4846,7 +4846,7 @@ use_cases:
   accessory: directional antenna for bearings
   fit_flags: null
   fit_note: Licence cross-check, RDS identification and RSSI-based localization are native; only bearings need the directional antenna.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-053
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Emitter Identification, DF & Geolocation
@@ -4865,7 +4865,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-054
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: HF, Military & Intruder Monitoring
@@ -4889,7 +4889,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: HackRF HF sensitivity is poor; an active loop or upconverter helps but is not required.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-055
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: HF, Military & Intruder Monitoring
@@ -4912,7 +4912,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-056
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: HF, Military & Intruder Monitoring
@@ -4934,7 +4934,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Partly data-only; the historic Duga side is file replay of archived recordings.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-057
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: HF, Military & Intruder Monitoring
@@ -4959,7 +4959,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Metadata only; HF sensitivity is poor without an active antenna.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-058
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: HF, Military & Intruder Monitoring
@@ -4981,7 +4981,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Data comes from public remote receivers, not local RF.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-059
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Space Weather, Propagation & Natural Explainers
@@ -5007,7 +5007,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Mostly data-only via WSPR/FT8 spot databases; own decodes are optional.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-060
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Space Weather, Propagation & Natural Explainers
@@ -5032,7 +5032,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-061
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Space Weather, Propagation & Natural Explainers
@@ -5054,7 +5054,7 @@ use_cases:
   accessory: VLF/LF front end or soundcard input for 60 kHz
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-062
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Space Weather, Propagation & Natural Explainers
@@ -5076,7 +5076,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-063
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Satellite & Space-Segment Interference
@@ -5099,7 +5099,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Starlink 240 MHz channels far exceed the 20 MHz window; only partial-band detection and sync-sequence identification are feasible.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-064
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Satellite & Space-Segment Interference
@@ -5123,7 +5123,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-065
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Satellite & Space-Segment Interference
@@ -5144,7 +5144,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Uses public SatNOGS-style network data; this device is one contributing station.
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-066
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Infrastructure Change Tracking & Activity Proxies
@@ -5169,7 +5169,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-067
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Infrastructure Change Tracking & Activity Proxies
@@ -5192,7 +5192,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Control-channel metadata only; no audio recorded.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-068
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Infrastructure Change Tracking & Activity Proxies
@@ -5214,7 +5214,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: AWARE-069
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Infrastructure Change Tracking & Activity Proxies
@@ -5242,7 +5242,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Node counting from packet headers; private mesh channels stay metadata only.
-  test_tier: null
+  test_tier: data-only
 - id: AWARE-070
   theme: Spectrum Situational Awareness, Interference & Anomalies
   subcategory: Infrastructure Change Tracking & Activity Proxies
@@ -5265,7 +5265,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: SIGNAL-001
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5285,7 +5285,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-002
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5307,7 +5307,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-003
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5328,7 +5328,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: All ACARS channels in 129-137 MHz fit one window, so the channelizer feeds one decoder per channel.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-004
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5348,7 +5348,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-005
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5369,7 +5369,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Payload parsing on top of whichever datalink is received; VHF path is native, HF is marginal on HackRF HF and the L-band path needs the Inmarsat accessory.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-006
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5393,7 +5393,7 @@ use_cases:
   - marginal-hf
   - exceeds-window
   fit_note: Marginal on HackRF HF; the 2.9-22 MHz span is covered by time-sharing windows.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-007
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5413,7 +5413,7 @@ use_cases:
   accessory: L-band patch antenna + LNA (bias-tee)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-008
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5437,7 +5437,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Simultaneous VHF, HF, L-band and Iridium reception needs several receivers; a single HackRF can only time-share via the scheduler, and the L-band legs also need the patch/LNA accessory.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-009
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5459,7 +5459,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Marginal on HackRF HF.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-010
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5481,7 +5481,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Marginal on HackRF HF; speech-to-text is an external consumer fed over stream-output.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-011
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5502,7 +5502,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: The 30 Hz reference/variable phase comparison is a custom measurement on the demodulated AM channel.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-012
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5520,7 +5520,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Custom 90/150 Hz modulation-depth measurement on the AM channel.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-013
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5543,7 +5543,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: The 1-1.75 MHz part is native but marginal on HackRF HF.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-014
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Aviation Data Links & Aircraft-as-Sensors
@@ -5565,7 +5565,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: 121.5 MHz swept-tone detection is a burst detection task; 406 MHz hex IDs come from a decoder plugin.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-015
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Maritime, GMDSS & Legacy Navigation
@@ -5585,7 +5585,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-016
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Maritime, GMDSS & Legacy Navigation
@@ -5606,7 +5606,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: The 4209.5 kHz channel is native but marginal on HackRF HF.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-017
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Maritime, GMDSS & Legacy Navigation
@@ -5626,7 +5626,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Ch 70 VHF is native; 2187.5 kHz is marginal on HackRF HF.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-018
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Maritime, GMDSS & Legacy Navigation
@@ -5648,7 +5648,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Marginal on HackRF HF; station schedules drive the scheduler.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-019
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Maritime, GMDSS & Legacy Navigation
@@ -5669,7 +5669,7 @@ use_cases:
   accessory: L-band patch antenna (+ LNA)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-020
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Maritime, GMDSS & Legacy Navigation
@@ -5690,7 +5690,7 @@ use_cases:
   accessory: LF antenna with HF upconverter or soundcard front end for 100 kHz
   fit_flags: null
   fit_note: Pulse-timing measurement needs GNSS-disciplined time from position-time.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-021
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Maritime, GMDSS & Legacy Navigation
@@ -5711,7 +5711,7 @@ use_cases:
   accessory: LF loop/active antenna with HF upconverter (285-325 kHz)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-022
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Maritime, GMDSS & Legacy Navigation
@@ -5733,7 +5733,7 @@ use_cases:
   accessory: VLF antenna + soundcard
   fit_flags: null
   fit_note: 11.9-14.9 kHz is a soundcard source; source-abstraction is listed because the use case depends on that input path.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-023
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5759,7 +5759,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Metadata only (ring alerts, beam positions); the 10.5 MHz Iridium band fits one window.
-  test_tier: null
+  test_tier: data-only
 - id: SIGNAL-024
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5780,7 +5780,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: QFH is an ordinary omni antenna, treated as native.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-025
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5800,7 +5800,7 @@ use_cases:
   accessory: 1.7 GHz grid dish + LNA (bias-tee)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-026
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5820,7 +5820,7 @@ use_cases:
   accessory: 1.7 GHz dish + LNA (bias-tee)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-027
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5842,7 +5842,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: QFH/V-dipole are ordinary antennas; TLE-driven pass scheduling from context-feeds.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-028
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5863,7 +5863,7 @@ use_cases:
   accessory: Tracked dish (rotator) + LNA at 1.7 GHz
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-029
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5886,7 +5886,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Partly data-only (old APT recordings replayed as reference), plus live occupancy watch of 137 MHz.
-  test_tier: null
+  test_tier: data-only
 - id: SIGNAL-030
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5906,7 +5906,7 @@ use_cases:
   accessory: Active GNSS antenna via bias-tee
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-031
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5928,7 +5928,7 @@ use_cases:
   accessory: Active GNSS antenna via bias-tee
   fit_flags: null
   fit_note: OSNMA needs loosely synchronised time and public-key material, hence context-feeds.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-032
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5949,7 +5949,7 @@ use_cases:
   accessory: Active GNSS antenna via bias-tee
   fit_flags: null
   fit_note: Precise orbits come from context-feeds; a u-blox module would be a cheaper source than the SDR path.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-033
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5971,7 +5971,7 @@ use_cases:
   accessory: Antenna rotator + Yagi (dish for S-band)
   fit_flags: null
   fit_note: VHF/UHF observations with an omni antenna are native; uploading to SatNOGS is stream-output, not out of scope.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-034
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -5992,7 +5992,7 @@ use_cases:
   accessory: Yagi (directional antenna)
   fit_flags: null
   fit_note: Strong beacons are receivable with an omni, so this is close to native.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-035
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -6015,7 +6015,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-036
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -6036,7 +6036,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-037
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -6058,7 +6058,7 @@ use_cases:
   accessory: Ku-band LNB + dish (10.5 GHz downconversion)
   fit_flags: null
   fit_note: Both the narrowband transponder and the 8 MHz DATV segment fit one window after the LNB.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-038
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -6078,7 +6078,7 @@ use_cases:
   accessory: Large dish + S-band LNA
   fit_flags: null
   fit_note: S-band is within HackRF range, but the L2 distance needs a multi-metre dish.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-039
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -6100,7 +6100,7 @@ use_cases:
   accessory: Large dish + X-band downconverter/LNB
   fit_flags: null
   fit_note: Deep-space link margin needs a multi-metre dish; the decoder side is SatDump-class.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-040
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: 'Satellites: Comms, Weather & Navigation'
@@ -6121,7 +6121,7 @@ use_cases:
   accessory: Dish + X-band downconverter/LNB
   fit_flags: null
   fit_note: The 2023 flyby is past; mostly a replay-of-recordings case now.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-041
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Rail, Road & Fleet Infrastructure
@@ -6141,7 +6141,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: EOT and HOT channels are 5 MHz apart, so one window covers both.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-042
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Rail, Road & Fleet Infrastructure
@@ -6161,7 +6161,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Base and mobile halves are 40 MHz apart, so the scheduler alternates two windows.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-043
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Rail, Road & Fleet Infrastructure
@@ -6183,7 +6183,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Characterization rather than decoding; no public decoder is assumed.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-044
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Rail, Road & Fleet Infrastructure
@@ -6206,7 +6206,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Metadata only.
-  test_tier: null
+  test_tier: data-only
 - id: SIGNAL-045
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Rail, Road & Fleet Infrastructure
@@ -6229,7 +6229,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: 1610-1700 kHz is native but marginal on HackRF HF; the 530 kHz allocation needs an LF accessory.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-046
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Rail, Road & Fleet Infrastructure
@@ -6252,7 +6252,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-047
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Rail, Road & Fleet Infrastructure
@@ -6275,7 +6275,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Receive-only characterization; no replay.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-048
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Rail, Road & Fleet Infrastructure
@@ -6300,7 +6300,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Metadata only (cell IDs, broadcast channels); LTE carriers up to 20 MHz fit the window.
-  test_tier: null
+  test_tier: data-only
 - id: SIGNAL-049
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6322,7 +6322,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Own meter; the 902-928 MHz hop set is mostly covered by one 20 MHz window.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-050
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6341,7 +6341,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-051
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6363,7 +6363,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Decrypt only with the user's own keys; MQTT publishing is stream-output.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-052
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6386,7 +6386,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Five ISM bands need time-sharing by the scheduler.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-053
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6409,7 +6409,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: CSS dechirp lives in digital-demod; LoRaWAN header parsing via a plugin.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-054
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6431,7 +6431,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Wireshark feed is stream-output; the 16 channels span 80 MHz so only several fit per window.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-055
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6451,7 +6451,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-056
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6475,7 +6475,7 @@ use_cases:
   - metadata-only
   - data-only
   fit_note: Metadata only (RFPI, channel usage, encryption flag); the 20 MHz DECT band fits one window.
-  test_tier: null
+  test_tier: data-only
 - id: SIGNAL-057
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6497,7 +6497,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Correlating burst timing with storms uses event-correlation and lightning context.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-058
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6516,7 +6516,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only/historical; the system ended in 2023 and no radio is needed.
-  test_tier: null
+  test_tier: data-only
 - id: SIGNAL-059
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Utilities, Industrial Telemetry & IoT
@@ -6538,7 +6538,7 @@ use_cases:
   accessory: Soundcard with mains probe or pickup loop
   fit_flags: null
   fit_note: Hz-resolution frequency tracking is the doppler-tracking machinery applied to 50/60 Hz; grid logs come from context-feeds.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-060
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Time, Frequency & Ionospheric Sounding
@@ -6558,7 +6558,7 @@ use_cases:
   accessory: Ferrite antenna + HF upconverter or soundcard front end (77.5 kHz)
   fit_flags: null
   fit_note: Propagation-delay measurement needs GNSS time.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-061
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Time, Frequency & Ionospheric Sounding
@@ -6578,7 +6578,7 @@ use_cases:
   accessory: LF loop + HF upconverter or soundcard front end (40-60 kHz)
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-062
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Broadcast Metadata & Public Alerting
@@ -6601,7 +6601,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: The 20 MHz window covers the whole FM band, so all stations are decoded at once.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-063
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Broadcast Metadata & Public Alerting
@@ -6620,7 +6620,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-064
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Broadcast Metadata & Public Alerting
@@ -6641,7 +6641,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-065
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Broadcast Metadata & Public Alerting
@@ -6664,7 +6664,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Marginal on HackRF HF; the MW portion below 1 MHz needs an LF accessory.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-066
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Broadcast Metadata & Public Alerting
@@ -6685,7 +6685,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Bootstrap detection is known-sequence correlation, not a full ATSC 3.0 decoder.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-067
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Broadcast Metadata & Public Alerting
@@ -6707,7 +6707,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-068
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Broadcast Metadata & Public Alerting
@@ -6731,7 +6731,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: RDS PI from analog-demod confirms the FMLIST match.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-069
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: HF Utility, Military & Amateur Long Tail
@@ -6754,7 +6754,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Marginal on HackRF HF.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-070
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: HF Utility, Military & Amateur Long Tail
@@ -6776,7 +6776,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Marginal on HackRF HF; ALE tones ride on SSB audio.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-071
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: HF Utility, Military & Amateur Long Tail
@@ -6802,7 +6802,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Marginal on HackRF HF; the Priyom schedule database is an offline prior.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-072
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: HF Utility, Military & Amateur Long Tail
@@ -6826,7 +6826,7 @@ use_cases:
   - marginal-hf
   - exceeds-window
   fit_note: Marginal on HackRF HF; five bands over 14 MHz need scheduled retunes to the beacon timetable.
-  test_tier: null
+  test_tier: field
 - id: SIGNAL-073
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: HF Utility, Military & Amateur Long Tail
@@ -6848,7 +6848,7 @@ use_cases:
   fit_flags:
   - marginal-hf
   fit_note: Marginal on HackRF HF.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-074
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: HF Utility, Military & Amateur Long Tail
@@ -6872,7 +6872,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: SondeHub upload is stream-output; chasing uses device position.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-075
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Nature, Space Weather & Wildlife
@@ -6894,7 +6894,7 @@ use_cases:
   accessory: Yagi (directional antenna)
   fit_flags: null
   fit_note: Motus tag database cross-reference is a context feed.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-076
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Nature, Space Weather & Wildlife
@@ -6916,7 +6916,7 @@ use_cases:
   accessory: Opera Cake antenna switcher or directional antenna for multi-antenna DF
   fit_flags: null
   fit_note: Pulse logging and RSSI hot/cold DF are native; multi-antenna pseudo-Doppler needs the Opera Cake.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-077
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Nature, Space Weather & Wildlife
@@ -6940,7 +6940,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-078
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Nature, Space Weather & Wildlife
@@ -6960,7 +6960,7 @@ use_cases:
   accessory: Ferrite loop + HF upconverter (457 kHz)
   fit_flags: null
   fit_note: Experiments with the user's own beacon.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-079
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Nature, Space Weather & Wildlife
@@ -6981,7 +6981,7 @@ use_cases:
   accessory: Pickup coil + soundcard
   fit_flags: null
   fit_note: Audio-frequency magnetic field, not RF; coverage mapping is RSSI-with-position over a soundcard source.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-001
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Blind protocol & signal reverse engineering
@@ -7003,7 +7003,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-002
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Blind protocol & signal reverse engineering
@@ -7024,7 +7024,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-003
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Blind protocol & signal reverse engineering
@@ -7045,7 +7045,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: About the inspector workspace, so live-view-inspector is listed deliberately.
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-004
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Blind protocol & signal reverse engineering
@@ -7067,7 +7067,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Packet crafting requires TX against own devices.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-005
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Blind protocol & signal reverse engineering
@@ -7088,7 +7088,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-006
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Blind protocol & signal reverse engineering
@@ -7107,7 +7107,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-007
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Blind protocol & signal reverse engineering
@@ -7127,7 +7127,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: VLF portion of the range would need a VLF front end; matching itself is native.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-008
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Line coding, checksums, FEC & scrambler identification
@@ -7143,7 +7143,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-009
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Line coding, checksums, FEC & scrambler identification
@@ -7163,7 +7163,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-010
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Line coding, checksums, FEC & scrambler identification
@@ -7181,7 +7181,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-011
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Line coding, checksums, FEC & scrambler identification
@@ -7199,7 +7199,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-012
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Line coding, checksums, FEC & scrambler identification
@@ -7215,7 +7215,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-013
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Line coding, checksums, FEC & scrambler identification
@@ -7232,7 +7232,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-014
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Satellite & aerospace signal research
@@ -7255,7 +7255,7 @@ use_cases:
   - data-only
   - knowledge-item
   fit_note: Knowledge item; receive-only, metadata-only for others' traffic, not content.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-015
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Satellite & aerospace signal research
@@ -7278,7 +7278,7 @@ use_cases:
   - data-only
   - knowledge-item
   fit_note: Knowledge item; receive-only, metadata-only for others' traffic.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-016
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Satellite & aerospace signal research
@@ -7299,7 +7299,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: RF hardware fingerprinting, receive-only.
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-017
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Satellite & aerospace signal research
@@ -7318,7 +7318,7 @@ use_cases:
   accessory: Ku-band LNB + dish
   fit_flags: null
   fit_note: Runs on a capture (then native); live reception needs the downconverter.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-018
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Satellite & aerospace signal research
@@ -7338,7 +7338,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; ADS-B observed receive-only via dump1090.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-019
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Cellular security & privacy research (own testbed)
@@ -7358,7 +7358,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; receive-only metadata, not decryption of others' traffic.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-020
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Cellular security & privacy research (own testbed)
@@ -7379,7 +7379,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: LTE stack needs full-duplex >20 MHz SDR; also TX; own testbed.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-021
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Cellular security & privacy research (own testbed)
@@ -7400,7 +7400,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: LTE relay needs full-duplex >20 MHz SDR; also TX.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-022
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Cellular security & privacy research (own testbed)
@@ -7420,7 +7420,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: LTE decode needs >20 MHz-capable SDR; own-traffic decryption allowed on own testbed.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-023
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Cellular security & privacy research (own testbed)
@@ -7440,7 +7440,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: LTE impersonation needs full-duplex >20 MHz SDR; also TX.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-024
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Cellular security & privacy research (own testbed)
@@ -7460,7 +7460,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: 5G NR bandwidth exceeds 20 MHz gap-free capture.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-025
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Cellular security & privacy research (own testbed)
@@ -7480,7 +7480,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: LTE control-channel decode needs >20 MHz-capable SDR; receive-only, no decryption.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-026
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Cellular security & privacy research (own testbed)
@@ -7502,7 +7502,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Full RAN needs full-duplex >20 MHz SDR; TX; own testbed.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-027
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7522,7 +7522,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Jamming is illegal (47 USC 333), so the jam+record+replay method is out of scope even on the user's own vehicle; capture-and-analysis without jamming (see SIGNAL-047) stays in scope.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-028
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7542,7 +7542,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Replay of own keyfob is fundamentally TX despite catalogue tx:none.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-029
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7562,7 +7562,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Single-channel BLE advertising capture works; full coverage of all adv channels wants wideband.
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-030
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7583,7 +7583,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: 802.11 decode needs >20 MHz gap-free / a dedicated NIC.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-031
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7604,7 +7604,7 @@ use_cases:
   - knowledge-item
   - exceeds-window
   fit_note: Knowledge item; BT classic hopping spans ~80 MHz, needs wideband/other SDR.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-032
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7623,7 +7623,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: BT impersonation needs full BT stack/wideband SDR; also TX.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-033
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7643,7 +7643,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: BLE link-layer fuzzing of own devices; TX.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-034
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7663,7 +7663,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: 5G testbed needs full-duplex >20 MHz SDR; also TX; own testbed.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-035
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7683,7 +7683,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Following BLE connections across PHYs needs wideband/dedicated sniffer.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-036
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7703,7 +7703,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Capture/replay of own ZigBee network; replay is TX.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-037
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7723,7 +7723,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; Touchlink exploitation of own devices needs TX.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-038
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Wireless device security research (own devices)
@@ -7743,7 +7743,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Keystroke injection to own devices; TX.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-039
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7762,7 +7762,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Receive-only emanation capture; high-res/HDMI screens may exceed 20 MHz.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-040
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7785,7 +7785,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; HDMI emanation bandwidth exceeds 20 MHz gap-free.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-041
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7805,7 +7805,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; receive-only emanation observation.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-042
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7826,7 +7826,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; SDR captures leakage on the chip's own carrier for correlation, receive-only.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-043
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7847,7 +7847,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; SDR receives the emanated waveforms, receive-only.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-044
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7868,7 +7868,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; receive-only detection of exfil emanations.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-045
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7888,7 +7888,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; receive-only FM emanation detection.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-046
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7907,7 +7907,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; conducted power-line signal, not RF; HackRF (1 MHz floor) plays no role.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-047
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7927,7 +7927,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; LF EM probe below HackRF's 1 MHz floor, needs oscilloscope/soundcard.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-048
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7946,7 +7946,7 @@ use_cases:
   fit_flags:
   - knowledge-item
   fit_note: Knowledge item; RF/EM emanation reception is receive-only; acoustic variant is non-radio.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-049
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: TEMPEST, EM side channels & air-gap exfiltration
@@ -7965,7 +7965,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Bench uses ChipWhisperer capture hardware; the SDR plays no role.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-050
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -7986,7 +7986,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Specifically about the survey substrate, so those slugs are listed deliberately.
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-051
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -8005,7 +8005,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: SDR-based VNA needs TX plus a directional coupler; own devices.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-052
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -8024,7 +8024,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: TDR needs TX plus a directional coupler.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-053
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -8043,7 +8043,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only, software post-processing of Touchstone files.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-054
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -8060,7 +8060,7 @@ use_cases:
   accessory: calibrated noise source
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-055
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -8077,7 +8077,7 @@ use_cases:
   accessory: low-phase-noise reference (GPSDO)
   fit_flags: null
   fit_note: HackRF's own oscillator is too noisy; needs a cleaner reference.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-056
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -8096,7 +8096,7 @@ use_cases:
   accessory: GPSDO reference
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-057
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -8117,7 +8117,7 @@ use_cases:
   accessory: near-field probe set / calibrated antenna + LNA
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-058
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: RF test & measurement / lab engineering
@@ -8137,7 +8137,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Wi-Fi CSI needs >20 MHz gap-free / a dedicated NIC.
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-059
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: SDR fuzzing, IDS & physical-layer authentication
@@ -8157,7 +8157,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: Full 802.11 stack needs full-duplex >20 MHz SDR; also TX.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-060
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: SDR fuzzing, IDS & physical-layer authentication
@@ -8176,7 +8176,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Needs an FPGA SDR running a full 802.11 stack; also TX.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-061
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: SDR fuzzing, IDS & physical-layer authentication
@@ -8199,7 +8199,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Wi-Fi/BLE frame-level monitoring needs wideband/other SDR.
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-062
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: SDR fuzzing, IDS & physical-layer authentication
@@ -8219,7 +8219,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: RF hardware fingerprinting from captured IQ, receive-only.
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-063
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Digital modes, modems & waveform exploration
@@ -8239,7 +8239,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Full transceiver includes TX; own link.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-064
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Digital modes, modems & waveform exploration
@@ -8259,7 +8259,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-065
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Digital modes, modems & waveform exploration
@@ -8281,7 +8281,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Own link includes TX; HF reception is weak on HackRF without an upconverter.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-066
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Digital modes, modems & waveform exploration
@@ -8300,7 +8300,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Link-level chains; TX for over-air (NR over-air would need wider SDR), otherwise simulation.
-  test_tier: null
+  test_tier: hil
 - id: RESEARCH-067
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: Digital modes, modems & waveform exploration
@@ -8320,7 +8320,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only ML model.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-068
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8343,7 +8343,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only toolkit and dataset.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-069
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8366,7 +8366,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only benchmark/dataset.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-070
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8385,7 +8385,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: RESEARCH-071
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8406,7 +8406,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only dataset.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-072
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8427,7 +8427,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only dataset.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-073
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8444,7 +8444,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-synth
 - id: RESEARCH-074
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8465,7 +8465,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only competition on real captures.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-075
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8485,7 +8485,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only standard.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-076
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8506,7 +8506,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only; about the inspection/visualization surface.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-077
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8526,7 +8526,7 @@ use_cases:
   fit_flags:
   - data-only
   fit_note: Data-only educational textbook.
-  test_tier: null
+  test_tier: data-only
 - id: RESEARCH-078
   theme: Unknown Signals, Security Research, Lab Engineering & ML
   subcategory: ML, datasets & education
@@ -8546,7 +8546,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Educational course; TX exercises.
-  test_tier: null
+  test_tier: hil
 - id: SIGNAL-080
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems (proposed)
@@ -8572,7 +8572,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: An 800 MHz system can span ~18 MHz, near the 20 MHz window; wider systems need the scheduler or a second receiver.
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-081
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems (proposed)
@@ -8598,7 +8598,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-082
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems (proposed)
@@ -8623,7 +8623,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-083
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems (proposed)
@@ -8648,7 +8648,7 @@ use_cases:
   fit_flags:
   - exceeds-window
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-084
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems (proposed)
@@ -8673,7 +8673,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: null
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-085
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems (proposed)
@@ -8698,7 +8698,7 @@ use_cases:
   accessory: null
   fit_flags: null
   fit_note: Closes the discovery gap that SDRTrunk/Trunk Recorder leave to manual RadioReference lookup (docs/03 §5.1).
-  test_tier: null
+  test_tier: offline-recorded
 - id: SIGNAL-086
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems (proposed)
@@ -8723,4 +8723,4 @@ use_cases:
   fit_flags:
   - metadata-only
   fit_note: 'Legal-guardrail item: detects that a call is encrypted, never decrypts it.'
-  test_tier: null
+  test_tier: offline-recorded

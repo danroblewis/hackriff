@@ -6,7 +6,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 ## Current phase
 
-**Phases 5–7 drafted; commits pending test_tier merge.** Phases 1–4 committed. docs/10 (test strategy), docs/11 (roadmap+slice), docs/12 (implementation plan) + docs/tasks.yaml written; CLAUDE.md Engineering+Coordination+Status added. Waiting on the test_tier bulk-fill subagent to merge into use-cases.yaml, then committing Phases 5, 6, 7 in order and deleting the heartbeat.
+**Planning complete (Phases 0–7).** All phases committed. test_tier filled for all 398 use cases (field 143, offline-recorded 92, offline-synth 80, data-only 53, hil 30). Heartbeat deleted. Awaiting user review of docs/planning-log.md open questions; next real work is spikes S4/S5/S1/S3 on the Mac + HackRF and task T-001.
 
 ## Decisions from the user (not provisional)
 
@@ -68,3 +68,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **P7.1** 25 M0 tasks in docs/tasks.yaml with deps/use-cases/acceptance/files/needs/model/effort/parallel-group/DoD; core-interface tasks flagged Fable/Opus + review. Repo scaffold, macOS-dev→Jetson-deploy, CI (no hardware), fixture capture plan, hardware shopping list with timing all in docs/12.
 - **P7.2** CLAUDE.md gained Engineering + Coordination sections and a refreshed Status (kept concise).
 - **Needs user:** confirm the M0 slice IDs, pick spikes to run, and the open questions above before build starts.
+
+### Phase 5 follow-up — test_tier (2026-09-13)
+- **P5.2** test_tier merged into use-cases.yaml (bulk-filled by a Sonnet agent against the docs/10 §2 rubric, reconciled). 57% (225/398) are CI-testable offline. SPACE/PROP skew to `field` because the science claim is a real-world physical one; their pipeline is still tested offline. Summary table + regen command in docs/10 §6.

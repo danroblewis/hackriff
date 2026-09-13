@@ -62,5 +62,17 @@ Each acceptance test names its use-case ID(s) so coverage is traceable both ways
 
 ## 6. Coverage bookkeeping
 
-- `test_tier` in `use-cases.yaml` gives the offline-vs-hardware split at a glance; a summary table is regenerated as the counts change.
-- The first vertical slice ([docs/11](11-roadmap.md)) picks use cases that are mostly `offline-synth`/`offline-recorded` so the whole chain is provable in CI before any field work.
+`test_tier` is filled for all 398 use cases in `use-cases.yaml`. Distribution:
+
+| test_tier | Count | In CI (no hardware)? |
+|---|---:|---|
+| `field` | 143 | No — opportunistic, logged; pipeline portion still tested offline |
+| `offline-recorded` | 92 | Yes (T3) |
+| `offline-synth` | 80 | Yes (T4) |
+| `data-only` | 53 | Yes (frozen-cache / archive) |
+| `hil` | 30 | No — bench rig |
+
+**225 of 398 (57%) are CI-testable with no hardware** (`offline-synth` + `offline-recorded` + `data-only`); 173 need hardware or the field (`hil` + `field`). The `field` count is high because SPACE/PROP science use cases anchor on their real-world physical claim (the SPACE-050 rule in §4) even when the underlying algorithm is separately synth-testable — for those, the *pipeline* is still covered offline and only the science claim is field-confirmed.
+
+- The first vertical slice ([docs/11](11-roadmap.md)) deliberately picks use cases that are `offline-synth`/`offline-recorded` (six of seven) so the whole chain is provable in CI before any field work.
+- Regenerate this table when `test_tier` values change: `python3 -c "import yaml,collections; print(collections.Counter(u['test_tier'] for u in yaml.safe_load(open('docs/use-cases.yaml'))['use_cases']))"`.
