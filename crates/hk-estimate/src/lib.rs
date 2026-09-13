@@ -49,7 +49,18 @@
 //! **Cost.** Allocation is per snippet (buffers sized to the snippet), never per sample; Welch
 //! engines and FFT plans are cached in the estimator. Each [`ParameterSet`] reports its own
 //! estimation time.
+//!
+//! # C14 blind symbol estimation (T-011)
+//!
+//! [`blind`] ports S5's `classify_and_estimate`: [`BlindEstimator::estimate_snippet`] (or
+//! [`BlindEstimator::prepare`] + [`BlindEstimator::estimate`] on windows) turns a snippet and its
+//! [`ParameterSet`] into [`SymbolParameters`]: a symbol rate that is measured **only when
+//! trusted** (four whitened cyclic lines in two independent groups, guarded transition least
+//! squares, harmonic-aware consensus), ranked candidates with ×½ / ×2 alternatives, a family
+//! label or [`Family::Unknown`] with [`BlindReason`]s, and the FSK deviation, which also feeds
+//! [`params::cfo_from_fsk_levels`]. Rate trust and family trust are separate gates.
 
+pub mod blind;
 pub mod clock;
 pub(crate) mod dsp;
 pub mod estimate;
@@ -57,6 +68,7 @@ pub mod normalise;
 pub mod params;
 pub mod snippet;
 
+pub use blind::{BlindConfig, BlindEstimator, BlindInput, BlindReason, Family, SymbolParameters};
 pub use estimate::{Estimate, Evidence, Method, Reason};
 pub use normalise::{NormaliseConfig, NormaliseFlags, NormalisedSnippet, normalise};
 pub use params::{
