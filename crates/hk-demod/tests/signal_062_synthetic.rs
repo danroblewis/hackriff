@@ -133,6 +133,8 @@ fn signal_062_synthetic_wfm_pilot_pi_ps_audio_and_emitter() {
     let w2 = write_session(&mut repo, &s, &RecordContext::default()).unwrap();
     assert_eq!(w2.emitter_id, w.emitter_id);
     assert!(!w2.emitter_created);
+    // ... and, being the same IQ, does not count again (T-034).
+    assert_eq!(repo.emitter(e.id).unwrap().count, 1);
 }
 
 #[test]

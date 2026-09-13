@@ -63,7 +63,7 @@ pub use calibration::{
 pub use cluster::{
     Assignment, ConflictReason, EmitterMerge, FEATURE_SET_VERSION, FeatureMatch, Fingerprint,
     IdentityAccess, IdentityClaim, IdentityConflictReport, InventoryEntry, InventoryIdentity,
-    InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord, PriorVerdict,
+    InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord, MeasurementKey, PriorVerdict,
     RecordedClassification, Resolution, Sighting, Tolerances,
 };
 pub use content::ContentClass;

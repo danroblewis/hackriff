@@ -209,9 +209,17 @@ CREATE TABLE emitter_observation (
     count        INTEGER NOT NULL CHECK (count >= 0),
     t_start      INTEGER NOT NULL,
     t_end        INTEGER NOT NULL CHECK (t_end >= t_start),
+    -- T-034: what was measured, independent of the row ids a re-run mints (producer + capture,
+    -- canonical JSON; NULL = not keyed) and the observed centre. A new source with the same key,
+    -- an overlapping span and a centre within tolerance is a re-measurement and adds nothing.
+    measurement  TEXT,
+    f_center     REAL,
+    CHECK ((measurement IS NULL) = (f_center IS NULL)),
     PRIMARY KEY (source_kind, source_id)
 ) WITHOUT ROWID;
 CREATE INDEX idx_emitter_observation_emitter ON emitter_observation (emitter_id);
+CREATE INDEX idx_emitter_observation_measurement ON emitter_observation (measurement, t_start)
+    WHERE measurement IS NOT NULL;
 
 -- T-018: append-only merge history (undo input). The absorbed emitter keeps its row, its
 -- classification/status history and superseded links.
