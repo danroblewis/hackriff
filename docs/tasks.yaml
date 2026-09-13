@@ -617,6 +617,7 @@ tasks:
   - id: T-039
     title: Pipeline classification to priors (family -> band-plan prior -> Emitter known/unexpected-here)
     status: in-progress
+    scope_addition: "user 2026-09-13: ranked top-k recommended explanations per emission (label, score, evidence, off-raster flag) via gated API; blind tests only (annotations stripped, truth private); first cases FM station -> FM broadcast top-k and +150 kHz shifted variant flagged off-raster"
     note: "runs parallel to T-037a/b: owns hk-pipeline family.rs + hk-context priors mapping + hk-demod family names; minimal hooks in detect.rs/chains/analog.rs"
     deps: [T-027, T-024]
     parallel_group: J
@@ -630,7 +631,9 @@ tasks:
     dod: "AWARE-053 passes end-to-end through the pipeline; family vocabulary mapping documented; restricted-class rules unaffected (legal regression green)"
   - id: T-040
     title: Emitter tag storage hardening (T-038 review nits)
-    status: in-progress
+    status: done
+    commit: "7014e55 (merged a12848a)"
+    note: "shared tag_write_target refusal for add/remove (identical Invalid on withheld rows whether stored or not); merge purges non-vocabulary tags in-transaction; add/remove act on live row; purge_withheld_tags on every tightening path (record_sighting, merge_emitters, upsert_emitter_observation, link_emitter, reclassify_identity); raw SQLite sentinel scans; no schema/signature change"
     deps: [T-038]
     parallel_group: K
     use_cases: [AWARE-053]
@@ -663,7 +666,7 @@ tasks:
     parallel_group: J
     use_cases: [SIGNAL-062, AWARE-042]
     requested_by: user feedback (A), 2026-09-13
-    acceptance: "hk serve / hackriffd run the HackRF source by default (--hackrf center/rate/gains, receive-only) through the full pipeline (spectrum -> detect -> track -> inventory); /api/inventory shows real detections; seed_inventory only behind --demo/tests; replay still selectable; live window gets band-derived restricted classes"
+    acceptance: "hk serve / hackriffd run the HackRF source by default (--hackrf center/rate/gains, receive-only) through the full pipeline (spectrum -> detect -> track -> inventory); /api/inventory shows real detections; seed_inventory removed from normal serving entirely (demo seeds only inside unit tests); fresh server with no input has empty inventory; replay still selectable; live window gets band-derived restricted classes"
     area: crates/hk-cli, crates/hk-core/src/source, crates/hk-api/src/live_control.rs
     needs: [hardware]
     model: opus
@@ -722,6 +725,19 @@ tasks:
     model: opus
     effort: high
     note: "folded into the running T-041 agent (owns hk-dsp)"
+  - id: T-047
+    title: Blind ground-truth acceptance harness (fixture truth lists hidden from the system, top-k explanation asserts) + audit existing tests
+    status: todo
+    deps: [T-039, T-037]
+    parallel_group: J
+    use_cases: [SIGNAL-062, AWARE-053, AWARE-036, SIGNAL-001, AWARE-042]
+    requested_by: user feedback, 2026-09-13
+    acceptance: "every fixture (real + synthetic) carries a ground-truth list of known-interesting emissions (frequency/extent/time/label) kept out of what the pipeline reads (annotations stripped before replay; harness asserts the truth file is never opened by the system); tests run blind detection, assert each truth emission detected (frequency/extent/time tolerance) and a reasonable explanation among the top-k recommendations; no test looks up a frequency in the DB and tunes/asserts there; FM fm_100p8M station -> 'FM broadcast' top-k; +150 kHz shifted synthetic variant -> detected, FM broadcast top-k, flagged off-raster; existing acceptance tests audited and rewritten where they use lookup-and-tune"
+    area: tests/e2e (harness + acceptance), fixtures truth files, py/fixtures (truth export)
+    needs: none
+    model: opus
+    effort: medium
+    hold: "starts after T-039 (ranked top-k explanations + off-raster flag + first FM blind cases, in progress) and T-037b (owns signal_001/062 acceptance files) merge"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
