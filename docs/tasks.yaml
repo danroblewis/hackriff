@@ -12,7 +12,7 @@ spikes:
   status:
     S1: "done 2026-09-13 (merged 9c68a17): owned Rust dataflow PASS (attach <=0.81 ms, zero ring loss, raised-priority capture thread required); FutureSDR 0.8.0 FAIL (no in-graph mutation, attach up to 13 ms, source stalls, nightly-only). ADR-0001 -> owned dataflow; S2 still gates on Jetson"
     S3: "mac-pass 2026-09-13 (60 fps @16384 bins, GPU persistence, 5-8x headroom; merged aa09a9e); Jetson kiosk + phone checks pending (needs user/hardware)"
-    S4: in-progress
+    S4: "INCONCLUSIVE 2026-09-13 (branch 81b0143, report pending save): chain works where testable (7/7 FM stations kept, 100 MHz ref spur + DC always flagged, IM3 ghosts flagged on semi-synthetic control), but no real ghosts in this scene and 4 s captures cannot bound false-alarm rate; defaults for T-005/T-006 in REPORT §5; re-run as S4b (outdoor/better antenna, 60 s, interleaved gain steps, terminated input, FM notch A/B) before freezing T-006 thresholds"
     S5: in-progress
 tasks:
   - id: T-001
@@ -59,7 +59,8 @@ tasks:
     dod: file-replay source feeds frames with provenance; ring buffer with pre-trigger read; HackRF source stubbed behind same trait
   - id: T-023
     title: Synthetic IQ generator + end-to-end replay harness
-    status: in-progress
+    status: done
+    commit: "1bf8bce (merged)"
     deps: [T-001]
     parallel_group: B
     use_cases: [AWARE-036, AWARE-006, SPACE-050, AWARE-042]
@@ -97,6 +98,7 @@ tasks:
   - id: T-006
     title: CFAR detection + burst records
     status: todo
+    s4_inputs: "block FCME (256/hop 64, Pfa 1e-3 Gamma(n)) per-frame floor; OS-CFAR N=32 G=4 k=24 OR floor branch; on Pfa 1e-6 / off Pfa 1e-3 (never fixed -3 dB); min 3 frames before gap-merge (2); impulsive-frame gate; emitter confirmation by repeat or >=1 s integration; real-scene FA is a monitored metric, synthetic/terminated FA is the CI gate"
     followups_from_T-002_review: "detection region query is f-bounded only (add R*Tree on f_lo,f_hi,t_start,t_end or time-bucketing); populate detector_version, peak_level_dbfs, clip_count; overload->clipped enforced by repo"
     deps: [T-005]
     parallel_group: C

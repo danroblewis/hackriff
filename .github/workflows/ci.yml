@@ -28,10 +28,13 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test
-        run: cargo test --workspace
-
+      # uv must exist before cargo test: the hk-e2e harness generates synthetic IQ via py/.
       - uses: astral-sh/setup-uv@v6
+
+      - name: cargo test
+        env:
+          HK_E2E_REQUIRE_SYNTH: "1"
+        run: cargo test --workspace
 
       - name: python tooling tests
         working-directory: py
