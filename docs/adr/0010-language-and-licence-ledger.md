@@ -73,3 +73,8 @@ append-only (`merge=union` in `.gitattributes`).
 | *pytest transitive: iniconfig 2.3.0, pluggy 1.6.0, packaging 26.3, pygments 2.21.0* | per `py/uv.lock` | MIT; MIT; Apache-2.0 OR BSD-2-Clause; BSD-2-Clause | py/ (dev) | Test tooling only |
 | hatchling | 1.32.0 | MIT | py/ build backend | Build tooling only |
 | GitHub Actions: actions/checkout v5, dtolnay/rust-toolchain, Swatinem/rust-cache v2, astral-sh/setup-uv v6 | — | MIT; MIT OR Apache-2.0; LGPL-3.0 (verify); MIT (verify all) | CI | CI infrastructure only; not linked or distributed |
+| num-complex | 0.4.6 | MIT OR Apache-2.0 | hk-core (`Complex32` samples) | In-core, permissive |
+| *num-complex transitive: num-traits 0.2.19; autocfg 1.5.1 (build)* | per `Cargo.lock` | MIT OR Apache-2.0; Apache-2.0 OR MIT | hk-core | In-core, permissive; checked with `cargo metadata` at T-003 |
+| libc | 0.2.189 | MIT OR Apache-2.0 | hk-core (`rt`: capture-thread priority, macOS QoS / Linux SCHED_FIFO) | In-core, permissive |
+| thiserror (added to hk-core) | 2.0.20 | MIT OR Apache-2.0 | hk-core | In-core, permissive (row above covers hk-model) |
+| libhackrf (NOT linked; T-003 stub only) | — | `host/libhackrf/src/hackrf.c` header is BSD-3-Clause; `hackrf-tools` (`hackrf_transfer.c`) and firmware are GPL-2.0-or-later; repo `COPYING` is GPLv2 (checked on GitHub `master`, 2026-09-13) | hk-core `HackRfSource` (future) | Not a dependency yet. Treated as GPL until this row is confirmed; reach the device through an isolated `hackrf_transfer` process until then |
