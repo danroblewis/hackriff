@@ -6,13 +6,10 @@ use hk_model::{ScanPlan, ScanPolicy};
 use super::plan::{PlanError, check_gains};
 use crate::source::{Gains, SourceCapabilities};
 
+pub use crate::source::HACKRF_ONE_RF_PATH_BOUNDARIES_HZ;
+
 /// Most interleaved gain-step pairs in one verification group.
 pub const MAX_GAIN_STEP_PAIRS: u8 = 4;
-
-/// HackRF One RF-path switch frequencies, Hz: low-pass mixer path below 2170 MHz, bypass to
-/// 2740 MHz, high-pass mixer path above (hackrf firmware `tuning.c` constants, not re-verified
-/// here; S4 §3.7 measured the floor step at ~2.74 GHz).
-pub const HACKRF_ONE_RF_PATH_BOUNDARIES_HZ: [f64; 2] = [2170e6, 2740e6];
 
 const NS_PER_S: f64 = 1e9;
 
@@ -70,9 +67,18 @@ pub struct SchedulerConfig {
     pub rate_change: bool,
     /// Rate-change candidates: rate × factor first, then rate ÷ factor (0.8).
     pub rate_change_factor: f64,
-    /// RF-path switch frequencies, ascending, Hz (HackRF One defaults). Sweep hops never
+    /// RF-path switch frequencies, ascending, Hz. Empty (the default) takes the source's
+    /// [`SourceCapabilities::rf_path_boundaries_hz`]; non-empty overrides them. Sweep hops never
     /// straddle one and every step carries its path.
     pub rf_path_boundaries_hz: Vec<f64>,
+    /// Guard at hop seams, as a fraction of the usable span, in `[0, 0.5)` (0). Discovery slices
+    /// are at most `usable × (1 − seam_guard_fraction)` wide, so adjacent windows overlap and each
+    /// seam sits `usable × fraction / 2` inside the passband. With 0 every seam lies at
+    /// ±usable/2 (±7.5 MHz at 20 Msps, as in `hackrf_sweep`), in the 15 MHz baseband filter's
+    /// roll-off, so an emitter on a seam is seen at reduced SNR (roll-off depth not measured
+    /// here). Raising it (e.g. 0.2: 12 MHz slices) trades more hops per pass (≈ 1/(1 − f)), so a
+    /// longer pass and a tighter dwell cap under revisit targets, for seam sensitivity.
+    pub seam_guard_fraction: f64,
     /// POI queue capacity, preallocated (64).
     pub max_pois: usize,
     /// Per-region policy overrides by region index (`None` = the plan's policy).
@@ -108,7 +114,8 @@ impl Default for SchedulerConfig {
             retune_dwell_ns: 500_000_000,
             rate_change: false,
             rate_change_factor: 0.8,
-            rf_path_boundaries_hz: HACKRF_ONE_RF_PATH_BOUNDARIES_HZ.to_vec(),
+            rf_path_boundaries_hz: Vec::new(),
+            seam_guard_fraction: 0.0,
             max_pois: 64,
             region_policy: Vec::new(),
         }
@@ -120,7 +127,7 @@ impl SchedulerConfig {
     /// `usable_fraction`, `sweep_step_s`, `region_dwell_s`, `sweeps_per_cycle`,
     /// `dwells_per_cycle`, `dwell_min_rate_hz`, `dwell_default_s`, `dwell_min_s`,
     /// `dwell_max_s`, `gain_step_pairs`, `gain_step_block_s`, `gain_step_lna_db`,
-    /// `retune_delta_hz`, `retune_dwell_s`, `rate_change`, `region_policy` (array of
+    /// `retune_delta_hz`, `retune_dwell_s`, `rate_change`, `seam_guard_fraction`, `region_policy` (array of
     /// `null` / `"sweep-only"` / `"dwell-only"` / `"sweep-then-dwell"`). Unknown keys are errors.
     pub fn from_plan(plan: &ScanPlan) -> Result<Self, PlanError> {
         let mut cfg = Self::default();
@@ -161,6 +168,7 @@ impl SchedulerConfig {
                 "retune_delta_hz" => cfg.retune_delta_hz = num()?,
                 "retune_dwell_s" => cfg.retune_dwell_ns = secs()?,
                 "rate_change" => cfg.rate_change = value.as_bool().ok_or_else(bad)?,
+                "seam_guard_fraction" => cfg.seam_guard_fraction = num()?,
                 "region_policy" => {
                     cfg.region_policy = serde_json::from_value(value.clone()).map_err(|_| bad())?;
                 }
@@ -172,6 +180,15 @@ impl SchedulerConfig {
             }
         }
         Ok(cfg)
+    }
+
+    /// The RF-path boundaries in force: the override if set, else the source's.
+    pub fn rf_path_boundaries<'a>(&'a self, caps: &'a SourceCapabilities) -> &'a [f64] {
+        if self.rf_path_boundaries_hz.is_empty() {
+            &caps.rf_path_boundaries_hz
+        } else {
+            &self.rf_path_boundaries_hz
+        }
     }
 
     /// Checks the settings against the source's capabilities.
@@ -229,7 +246,11 @@ impl SchedulerConfig {
         if !(self.rate_change_factor > 0.0 && self.rate_change_factor < 1.0) {
             return fail("rate_change_factor must be in (0, 1)".into());
         }
-        let b = &self.rf_path_boundaries_hz;
+        if !(self.seam_guard_fraction.is_finite() && (0.0..0.5).contains(&self.seam_guard_fraction))
+        {
+            return fail("seam_guard_fraction must be in [0, 0.5)".into());
+        }
+        let b = self.rf_path_boundaries(caps);
         if b.len() > usize::from(u8::MAX)
             || b.iter().any(|f| !f.is_finite())
             || b.windows(2).any(|w| w[0] >= w[1])

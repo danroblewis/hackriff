@@ -6,15 +6,18 @@ mod sched_common;
 
 use hk_core::SourceCapabilities;
 use hk_core::scheduler::{
-    CaptureTrust, GainSlot, MemorySurveyLog, PlanError, PlanWarning, Poi, Purpose, ScheduleStep,
-    Scheduler, SchedulerConfig, SchedulerError, TrustEvaluator, TxSlotRequest, UserIntent,
-    Verification, rf_path,
+    AnchoredClock, CaptureTrust, GainSlot, MemorySurveyLog, PlanError, PlanWarning, Poi, Purpose,
+    RetunePlan, RetuneSkip, ScheduleStep, Scheduler, SchedulerConfig, SchedulerError,
+    SyntheticClock, TrustEvaluator, TxSlotRequest, UserIntent, Verification, VerifyError, rf_path,
 };
 use hk_detect::{
     CaptureEmitter, CaptureResult, EdgeRule, GainState, GainStepConfig, GainStepResult,
-    GainStepVerdict, Geometry, IntegratedSnapshot, RetuneConfig, RetuneLabel, RetuneResult,
+    GainStepVerdict, Geometry, IntegratedSnapshot, RateChangeConfig, RateChangeLabel,
+    RateChangeResult, RetuneConfig, RetuneLabel, RetuneResult,
 };
-use hk_model::{FreqRange, Repository, ScanPolicy, Schedule, SurveyState, SurveySummary};
+use hk_model::{
+    FreqRange, Repository, ScanPolicy, Schedule, SurveyState, SurveySummary, Timestamp,
+};
 use sched_common::*;
 use serde_json::{Value, json};
 
@@ -242,7 +245,8 @@ fn aware_042_poi_dwells_interleave_with_discovery_at_the_configured_ratio() {
 
 const BINS: usize = 4096;
 
-struct Cap(CaptureResult);
+/// A capture and the `seq` of the step it was made in.
+struct Cap(CaptureResult, u64);
 
 impl CaptureTrust for Cap {
     fn clipped(&self) -> bool {
@@ -285,31 +289,36 @@ fn capture(step: &ScheduleStep, clipped: bool) -> Cap {
             edge: false,
         });
     }
-    Cap(CaptureResult {
-        center_hz: step.center_hz,
-        gain: GainState {
-            lna_db: step.gains.lna_db,
-            vga_db: step.gains.vga_db,
-            amp_on: step.gains.amp_on,
+    Cap(
+        CaptureResult {
+            center_hz: step.center_hz,
+            gain: GainState {
+                lna_db: step.gains.lna_db,
+                vga_db: step.gains.vga_db,
+                amp_on: step.gains.amp_on,
+            },
+            quantisation_limited: false,
+            clipped,
+            spectrum: IntegratedSnapshot {
+                geometry,
+                span_s: step.duration_ns as f64 / 1e9,
+                mean_psd: psd.clone(),
+                mean_floor: vec![floor; BINS],
+                block_psd: vec![psd; 4],
+            },
+            emitters,
         },
-        quantisation_limited: false,
-        clipped,
-        spectrum: IntegratedSnapshot {
-            geometry,
-            span_s: step.duration_ns as f64 / 1e9,
-            mean_psd: psd.clone(),
-            mean_floor: vec![floor; BINS],
-            block_psd: vec![psd; 4],
-        },
-        emitters,
-    })
+        step.seq,
+    )
 }
 
 #[derive(Default)]
 struct Evaluator {
     gain_steps: Vec<(u8, GainStepResult)>,
     retunes: Vec<(f64, RetuneResult)>,
-    rate_changes: Vec<(f64, f64)>,
+    rate_changes: Vec<RateChangeResult>,
+    /// `seq` of the base capture of every retune and rate-change comparison.
+    bases: Vec<u64>,
 }
 
 impl TrustEvaluator<Cap> for Evaluator {
@@ -321,11 +330,33 @@ impl TrustEvaluator<Cap> for Evaluator {
     fn retune(&mut self, _poi: u64, base: &Cap, moved: &Cap, delta_hz: f64) {
         let r = hk_detect::retune(&base.0, &moved.0, &RetuneConfig::default());
         self.retunes.push((delta_hz, r));
+        self.bases.push(base.1);
     }
 
-    fn rate_change(&mut self, _poi: u64, _base: &Cap, _changed: &Cap, base_rate: f64, rate: f64) {
-        self.rate_changes.push((base_rate, rate));
+    fn rate_change(&mut self, _poi: u64, base: &Cap, changed: &Cap, base_rate: f64, rate: f64) {
+        let r = hk_detect::rate_change(
+            &base.0,
+            &changed.0,
+            base_rate,
+            rate,
+            &RateChangeConfig::default(),
+        );
+        self.rate_changes.push(r);
+        self.bases.push(base.1);
     }
+}
+
+/// The verification group of POI `key`: its first contiguous run of trust-test steps.
+fn group_of(steps: &[ScheduleStep], key: u64) -> Vec<ScheduleStep> {
+    let start = steps
+        .iter()
+        .position(|st| st.purpose.poi() == Some(key))
+        .expect("the POI is served");
+    steps[start..]
+        .iter()
+        .take_while(|st| st.purpose.is_trust_test())
+        .copied()
+        .collect()
 }
 
 #[test]
@@ -444,6 +475,20 @@ fn poi_verification_interleaves_gain_steps_and_retunes_and_skips_clipped_pairs()
             "{r:?}"
         );
     }
+    // The real scene stays at absolute frequency across the rate change (hk_detect rate_change).
+    let r = &eval.rate_changes[0];
+    assert!(
+        r.skipped.is_none()
+            && !r.rows.is_empty()
+            && r.rows.iter().all(|row| row.label == RateChangeLabel::Stays),
+        "{r:?}"
+    );
+    assert!(
+        group
+            .iter()
+            .all(|st| st.verification_group == Some(group[0].seq))
+    );
+    assert_eq!(dwell.verification_group, None);
 
     // A clipped block: that pair never reaches gain-step inference.
     let mut clipped = Verification::new(7, 3);
@@ -648,7 +693,10 @@ fn steps_respect_source_capabilities() {
             .warnings
             .contains(&PlanWarning::ClippedToCapabilities { region: 1 })
     );
-    let bounds = s.config().rf_path_boundaries_hz.clone();
+    // RF-path boundaries come from the source (firmware tuning.c values), not the config.
+    assert!(s.config().rf_path_boundaries_hz.is_empty());
+    assert_eq!(caps.rf_path_boundaries_hz, vec![2170e6, 2740e6]);
+    let bounds = caps.rf_path_boundaries_hz.clone();
     for h in &compiled.hops {
         assert!(
             h.covers.width_hz() <= 20e6 + 1.0
@@ -809,7 +857,11 @@ fn plan_version_change_mid_survey_closes_and_reopens_the_survey() {
 
     let after = run(&mut s, 5);
     assert!(after.iter().all(|st| st.plan_version == 2));
-    assert_eq!(after[0].purpose, Purpose::Sweep { hop: 0 });
+    // v1 had visited 88–98 MHz and was due at 98–108 MHz: the pass resumes at the equivalent
+    // hop of v2, then wraps to the new priority-2 region that leads the pass.
+    assert_eq!(after[0].purpose, Purpose::Sweep { hop: 2 });
+    assert!((s.plan().hops[2].covers.lo_hz - 98e6).abs() < 1.0);
+    assert_eq!(after[1].purpose, Purpose::Sweep { hop: 0 });
     assert!(
         s.plan().hops[0].covers.lo_hz >= 144e6,
         "the new priority-2 region leads the pass"
@@ -1051,4 +1103,481 @@ fn tx_slots_are_gated_and_accessory_bands_are_flagged() {
         duration_ns: S,
     });
     assert!(matches!(r, Err(SchedulerError::TxGated)));
+}
+
+// ---- T-032 follow-ups ----
+
+fn verify_plan(extra: Value) -> hk_model::ScanPlan {
+    plan(
+        "T-032 verify",
+        1,
+        vec![region(902.0, 928.0, 1.0, None)],
+        ScanPolicy::SweepThenDwell,
+        vec![],
+        json!({ "scheduler": extra }),
+    )
+}
+
+#[test]
+fn a_clipped_a_block_is_never_the_retune_or_rate_change_base() {
+    let mut s = hackrf(&verify_plan(
+        json!({ "sweeps_per_cycle": 1, "rate_change": true }),
+    ));
+    s.offer_poi(Poi {
+        verify: true,
+        ..poi(7, 915.2e6, 200e3, 1.0)
+    })
+    .unwrap();
+    let group = group_of(&run(&mut s, 20), 7);
+    assert_eq!(group.len(), 9);
+    let a_seq = |pair: u8| {
+        group
+            .iter()
+            .find(|st| {
+                st.purpose
+                    == Purpose::GainStep {
+                        poi: 7,
+                        pair,
+                        slot: GainSlot::A,
+                    }
+            })
+            .unwrap()
+            .seq
+    };
+    let evaluate = |clip: &dyn Fn(&Purpose) -> bool| {
+        let mut v = Verification::new(7, 3);
+        for st in &group {
+            v.record(st, capture(st, clip(&st.purpose))).unwrap();
+        }
+        let mut eval = Evaluator::default();
+        let report = v.evaluate(&mut eval);
+        (report, eval)
+    };
+
+    // A0 clipped: pair 0 is skipped and A1 is the base of every retune and the rate change.
+    let (report, eval) = evaluate(&|p| {
+        *p == Purpose::GainStep {
+            poi: 7,
+            pair: 0,
+            slot: GainSlot::A,
+        }
+    });
+    assert_eq!(
+        (report.gain_pairs_run, report.gain_pairs_skipped_clipped),
+        (2, 1)
+    );
+    assert_eq!((report.retunes_run, report.rate_changes_run), (2, 1));
+    assert_eq!(eval.bases, vec![a_seq(1); 3], "{report:?}");
+
+    // Every A clipped (no baseline in a gain-step group): nothing has a base.
+    let (report, eval) = evaluate(&|p| {
+        matches!(
+            p,
+            Purpose::GainStep {
+                slot: GainSlot::A,
+                ..
+            }
+        )
+    });
+    assert_eq!(
+        (
+            report.retunes_run,
+            report.retunes_without_base,
+            report.rate_changes_run,
+            report.rate_changes_without_base
+        ),
+        (0, 2, 0, 1)
+    );
+    assert!(eval.bases.is_empty());
+
+    // A clipped moved capture is skipped, never compared.
+    let (report, eval) = evaluate(&|p| {
+        matches!(p, Purpose::Retune { delta_hz, .. } if *delta_hz > 0.0)
+            || matches!(p, Purpose::RateChange { .. })
+    });
+    assert_eq!(
+        (
+            report.retunes_run,
+            report.retunes_skipped_clipped,
+            report.rate_changes_skipped_clipped
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(eval.retunes[0].0, -1e6);
+    assert_eq!(eval.bases, vec![a_seq(0)]);
+}
+
+#[test]
+fn captures_of_a_restarted_verification_group_never_mix_with_the_old_group() {
+    let v1 = verify_plan(json!({ "sweeps_per_cycle": 1, "gain_step_pairs": 1 }));
+    let mut s = hackrf(&v1);
+    s.offer_poi(Poi {
+        verify: true,
+        ..poi(7, 915.2e6, 200e3, 1.0)
+    })
+    .unwrap();
+    let old = run(&mut s, 4);
+    assert_eq!(old[0].verification_group, None);
+    assert_eq!(
+        old[3].purpose,
+        Purpose::Retune {
+            poi: 7,
+            delta_hz: 1e6
+        }
+    );
+    let old_group = old[1].seq;
+    assert!(
+        old[1..]
+            .iter()
+            .all(|st| st.verification_group == Some(old_group))
+    );
+    let mut collector = Verification::new(7, 1);
+    for st in &old[1..] {
+        collector.record(st, capture(st, false)).unwrap();
+    }
+
+    // Plan update mid-group: v2 drops the retunes, and the group restarts under a new id.
+    let mut v2 = v1.clone();
+    v2.version = 2;
+    v2.extra = json!({ "scheduler": { "sweeps_per_cycle": 1, "gain_step_pairs": 1, "retune_delta_hz": 0.0 } });
+    s.update_plan(
+        &v2,
+        SchedulerConfig::from_plan(&v2).unwrap(),
+        &mut MemorySurveyLog::default(),
+        &SurveySummary::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        s.poi_notes(7).unwrap().retunes,
+        [RetunePlan::Skipped(RetuneSkip::Disabled); 2]
+    );
+    let new: Vec<ScheduleStep> = run(&mut s, 6)
+        .into_iter()
+        .filter(|st| st.verification_group.is_some())
+        .collect();
+    assert_eq!(new.len(), 2, "A0 and B0 only: {new:#?}");
+    let new_group = new[0].verification_group.unwrap();
+    assert!(new_group > old_group);
+    for st in &new {
+        collector.record(st, capture(st, false)).unwrap();
+    }
+    assert_eq!(collector.group(), Some(new_group));
+    assert!(matches!(
+        collector.record(&old[3], capture(&old[3], false)),
+        Err(VerifyError::StaleGroup { current, .. }) if current == new_group
+    ));
+    let mut eval = Evaluator::default();
+    let report = collector.evaluate(&mut eval);
+    assert_eq!(
+        (
+            report.gain_pairs_run,
+            report.retunes_run,
+            report.retunes_without_base
+        ),
+        (1, 0, 0),
+        "the old retune never meets the new A0"
+    );
+
+    // Same after a preemption cut: the restarted group has a new id.
+    let mut s = hackrf(&v1);
+    s.offer_poi(Poi {
+        verify: true,
+        ..poi(7, 915.2e6, 200e3, 1.0)
+    })
+    .unwrap();
+    let first = run(&mut s, 3);
+    s.preempt(UserIntent {
+        id: 1,
+        center_hz: 915e6,
+        rate_hz: 10e6,
+        gains: None,
+        duration_ns: Some(S),
+    })
+    .unwrap();
+    let again = run(&mut s, 3);
+    assert_eq!(again[1].purpose, first[1].purpose);
+    assert!(again[1].verification_group.unwrap() > first[1].verification_group.unwrap());
+    let mut collector = Verification::new(7, 1);
+    collector
+        .record(&again[1], capture(&again[1], false))
+        .unwrap();
+    assert!(matches!(
+        collector.record(&first[2], capture(&first[2], false)),
+        Err(VerifyError::StaleGroup { .. })
+    ));
+    // A discovery step is not part of any group.
+    assert!(matches!(
+        collector.record(&first[0], capture(&first[0], false)),
+        Err(VerifyError::NotThisVerification { .. })
+    ));
+}
+
+#[test]
+fn a_backwards_wall_clock_step_neither_reorders_steps_nor_rolls_back_a_finished_step() {
+    let p = plan(
+        "clock",
+        1,
+        vec![region(88.0, 148.0, 1.0, None)],
+        ScanPolicy::SweepOnly,
+        vec![],
+        Value::Null,
+    );
+    let caps = SourceCapabilities::hackrf_one();
+    let cfg = SchedulerConfig::from_plan(&p).unwrap();
+    let back = |wall: &SyntheticClock, secs: i64| {
+        wall.set(Timestamp::from_unix_nanos(T0_NS - secs * S));
+    };
+
+    // Monotonic clock anchored to wall time at start (what WallClock does with Instant).
+    let wall = clock();
+    let mono = SyntheticClock::new(Timestamp::from_unix_nanos(0));
+    let mut s = Scheduler::new(
+        &p,
+        cfg.clone(),
+        &caps,
+        AnchoredClock::new(&wall, mono.clone()),
+    )
+    .unwrap();
+    let a = s.next_step();
+    assert_eq!(a.t_start.as_unix_nanos(), T0_NS);
+    mono.advance_ns(a.duration_ns);
+    back(&wall, 3600);
+    let b = s.next_step();
+    assert_eq!(b.t_start, a.t_end(), "ordering survives the wall step");
+    mono.advance_ns(b.duration_ns);
+    back(&wall, 7200);
+    s.preempt(UserIntent {
+        id: 1,
+        center_hz: 100e6,
+        rate_hz: 10e6,
+        gains: None,
+        duration_ns: Some(S),
+    })
+    .unwrap();
+    assert_eq!(
+        s.stats().truncated_slots,
+        0,
+        "the finished step is not rolled back"
+    );
+    let c = s.next_step();
+    assert_eq!(c.purpose, Purpose::UserIntent { intent: 1 });
+    assert_eq!(c.t_start, b.t_end());
+
+    // Even a raw clock stepping backwards cannot reorder step start times.
+    let wall = clock();
+    let mut raw = Scheduler::new(&p, cfg, &caps, wall.clone()).unwrap();
+    let first = raw.next_step();
+    back(&wall, 3600);
+    assert!(raw.next_step().t_start >= first.t_start);
+
+    // The live clock is monotonic.
+    use hk_core::scheduler::{Clock, WallClock};
+    let (x, y) = (WallClock.now(), WallClock.now());
+    assert!(y >= x);
+}
+
+#[test]
+fn an_overflowing_score_or_a_zero_weight_does_not_starve_a_poi() {
+    let p = plan(
+        "weights",
+        1,
+        vec![region(902.0, 928.0, 2.0, None)],
+        ScanPolicy::SweepThenDwell,
+        vec![],
+        Value::Null,
+    );
+    for (strong, weak) in [(f64::MAX, 1.0), (1.0, 0.0)] {
+        let mut s = hackrf(&p);
+        s.offer_poi(poi(1, 915e6, 100e3, strong)).unwrap();
+        s.offer_poi(poi(2, 906e6, 100e3, weak)).unwrap();
+        let steps = run(&mut s, 400);
+        let n = |key| {
+            steps
+                .iter()
+                .filter(|st| st.purpose == Purpose::Dwell { poi: key })
+                .count()
+        };
+        let (n1, n2) = (n(1), n(2));
+        assert_eq!(n1 + n2, 80);
+        assert!(n2 >= 3 && n1 > 10 * n2, "{strong} vs {weak}: {n1}:{n2}");
+    }
+}
+
+#[test]
+fn retunes_keep_wide_pois_clear_of_dc_and_inside_the_span_or_are_skipped_with_a_reason() {
+    let mut s = hackrf(&verify_plan(
+        json!({ "sweeps_per_cycle": 1, "retune_delta_hz": 1.5e6, "gain_step_pairs": 1 }),
+    ));
+    let pois = [
+        poi(1, 915e6, 400e3, 1.0),
+        poi(2, 921e6, 3.5e6, 1.0),
+        poi(3, 910e6, 8e6, 1.0),
+        poi(4, 915e6, 18e6, 1.0),
+    ];
+    for p in pois {
+        s.offer_poi(Poi { verify: true, ..p }).unwrap();
+    }
+    let notes = |k| s.poi_notes(k).unwrap();
+
+    // 400 kHz at 8 Msps, 1.5 MHz off DC: +1.5 MHz would centre it on DC, −1.5 MHz would push it
+    // past the 3 MHz half span; both shrink.
+    let n1 = notes(1);
+    assert!(!n1.on_dc && !n1.wider_than_span);
+    match n1.retunes {
+        [
+            RetunePlan::Shrunk {
+                delta_hz: up,
+                configured_hz: cu,
+            },
+            RetunePlan::Shrunk {
+                delta_hz: down,
+                configured_hz: cd,
+            },
+        ] => {
+            assert_eq!((cu, cd), (1.5e6, -1.5e6));
+            assert!(
+                (up - 1.29e6).abs() < 1.0 && (down + 1.3e6).abs() < 1.0,
+                "{n1:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // 3.5 MHz at 10 Msps: no offset large enough to separate products fits either way.
+    assert_eq!(
+        notes(2).retunes,
+        [
+            RetunePlan::Skipped(RetuneSkip::CrossesDc),
+            RetunePlan::Skipped(RetuneSkip::PastUsableEdge)
+        ]
+    );
+    // 8 MHz in a 15 MHz span straddles DC; 18 MHz exceeds the span: both noted, no retunes.
+    for (key, wider) in [(3, false), (4, true)] {
+        let n = notes(key);
+        assert!(n.on_dc && n.wider_than_span == wider, "{key}: {n:?}");
+        assert_eq!(n.retunes, [RetunePlan::Skipped(RetuneSkip::NoRoom); 2]);
+    }
+
+    let steps = run(&mut s, 80);
+    for p in pois {
+        let group = group_of(&steps, p.key);
+        assert!(!group.is_empty(), "POI {} verified", p.key);
+        let retunes: Vec<_> = group
+            .iter()
+            .filter(|st| matches!(st.purpose, Purpose::Retune { .. }))
+            .collect();
+        assert_eq!(
+            retunes.len(),
+            if p.key == 1 { 2 } else { 0 },
+            "POI {}",
+            p.key
+        );
+        for st in retunes {
+            let usable_half = st.rate_hz * 0.75 / 2.0;
+            let offset = (p.center_hz - st.center_hz).abs();
+            assert!(offset - p.bandwidth_hz / 2.0 > 0.0, "clear of DC: {st:?}");
+            assert!(
+                offset + p.bandwidth_hz / 2.0 <= usable_half + 1.0,
+                "inside the span: {st:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn frequent_plan_updates_still_reach_the_tail_of_the_pass() {
+    let mut p = plan(
+        "resume",
+        1,
+        vec![region(100.0, 190.0, 1.0, None)],
+        ScanPolicy::SweepOnly,
+        vec![],
+        Value::Null,
+    );
+    let mut s = hackrf(&p);
+    let hops = s.plan().hops.len();
+    assert_eq!(hops, 6);
+    let mut visited = vec![false; hops];
+    let mut log = MemorySurveyLog::default();
+    for _ in 0..hops {
+        for st in run(&mut s, 2) {
+            let Purpose::Sweep { hop } = st.purpose else {
+                panic!("{st:?}")
+            };
+            visited[hop as usize] = true;
+        }
+        p.version += 1;
+        s.update_plan(
+            &p,
+            SchedulerConfig::from_plan(&p).unwrap(),
+            &mut log,
+            &SurveySummary::default(),
+        )
+        .unwrap();
+    }
+    assert!(visited.iter().all(|&v| v), "{visited:?}");
+    assert_eq!(s.passes_completed(), 2);
+}
+
+#[test]
+fn a_seam_guard_keeps_hop_seams_inside_the_passband() {
+    let region_plan = |guard: f64| {
+        plan(
+            "seams",
+            1,
+            vec![region(100.0, 190.0, 1.0, None)],
+            ScanPolicy::SweepOnly,
+            vec![],
+            json!({ "scheduler": { "seam_guard_fraction": guard } }),
+        )
+    };
+    let plain = hackrf(&region_plan(0.0)).plan().clone();
+    let guarded = hackrf(&region_plan(0.2)).plan().clone();
+    assert_eq!((plain.hops.len(), guarded.hops.len()), (6, 8));
+    let usable = guarded.usable_span_hz;
+    for h in &guarded.hops {
+        let half = 0.8 * usable / 2.0 + 1.0;
+        assert!(h.covers.hi_hz - h.center_hz <= half && h.center_hz - h.covers.lo_hz <= half);
+    }
+    let mut covers: Vec<FreqRange> = guarded.hops.iter().map(|h| h.covers).collect();
+    covers.sort_by(|a, b| a.lo_hz.total_cmp(&b.lo_hz));
+    for w in covers.windows(2) {
+        assert!((w[0].hi_hz - w[1].lo_hz).abs() < 1.0, "gap-free tiling");
+    }
+    assert!(matches!(
+        SchedulerConfig::from_plan(&region_plan(0.5))
+            .unwrap()
+            .validate(&SourceCapabilities::hackrf_one()),
+        Err(PlanError::InvalidConfig(_))
+    ));
+}
+
+#[test]
+fn rf_path_boundaries_come_from_the_source_unless_overridden() {
+    let p = plan(
+        "paths",
+        1,
+        vec![region(2100.0, 2800.0, 1.0, None)],
+        ScanPolicy::SweepOnly,
+        vec![],
+        Value::Null,
+    );
+    let paths = |caps: &SourceCapabilities, cfg: SchedulerConfig| {
+        let s = Scheduler::new(&p, cfg, caps, clock()).unwrap();
+        let mut v: Vec<u8> = s.plan().hops.iter().map(|h| h.rf_path).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let hackrf = SourceCapabilities::hackrf_one();
+    assert_eq!(paths(&hackrf, SchedulerConfig::default()), vec![0, 1, 2]);
+    let single = SourceCapabilities {
+        rf_path_boundaries_hz: Vec::new(),
+        ..hackrf.clone()
+    };
+    assert_eq!(paths(&single, SchedulerConfig::default()), vec![0]);
+    let overridden = SchedulerConfig {
+        rf_path_boundaries_hz: vec![2500e6],
+        ..SchedulerConfig::default()
+    };
+    assert_eq!(paths(&hackrf, overridden), vec![0, 1]);
 }

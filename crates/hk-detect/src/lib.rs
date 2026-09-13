@@ -97,7 +97,8 @@ pub use track::{
 };
 pub use trust::{
     CaptureEmitter, CaptureResult, CaptureSide, GainState, GainStepConfig, GainStepResult,
-    GainStepRow, GainStepSkip, GainStepVerdict, RetuneConfig, RetuneLabel, RetuneResult, RetuneRow,
-    gain_step, retune,
+    GainStepRow, GainStepSkip, GainStepVerdict, RateChangeConfig, RateChangeLabel,
+    RateChangeResult, RateChangeRow, RateChangeSkip, RetuneConfig, RetuneLabel, RetuneResult,
+    RetuneRow, gain_step, rate_change, retune,
 };
 pub use writer::DetectionWriter;
