@@ -363,6 +363,7 @@ impl DetectNode {
     fn flush(&mut self) {
         self.last_flush_ns = Some(self.now_ns);
         if self.pending.is_empty()
+            && self.writer.pending() == 0
             && self.batch.is_empty()
             && self.closed.is_empty()
             && self.pending_floor.is_empty()
@@ -373,24 +374,41 @@ impl DetectNode {
         let dc = &shared.counters.detect;
         let mut repo = shared.repo();
         inc(&dc.db_batches);
-        for r in self.pending.drain(..) {
+        let mut retry = Vec::new();
+        for r in std::mem::take(&mut self.pending) {
+            let buffered = self.writer.pending();
             if self.writer.push(&mut repo, &r).is_err() {
                 inc(&dc.db_errors);
+                // Not buffered (its provenance could not be interned): keep it for the next
+                // flush. A buffered record whose batch write failed stays in the writer.
+                if self.writer.pending() == buffered {
+                    retry.push(r);
+                }
             }
         }
         if self.writer.flush(&mut repo).is_err() {
             inc(&dc.db_errors);
         }
         set(&dc.detections_written, self.writer.written());
-        match self.batch.write(&mut repo) {
-            Ok((tracks, links)) => {
-                add(&dc.track_rows, tracks as u64);
-                add(&dc.track_links, links as u64);
-            }
-            Err(_) => inc(&dc.db_errors),
-        }
-        self.links_seen = 0;
-        {
+        self.pending = retry;
+        // Track links (and the closes that summarise them) name detections: write them only
+        // once every detection is stored, otherwise keep the whole batch for the next flush.
+        let detections_stored = self.pending.is_empty() && self.writer.pending() == 0;
+        let tracks_stored = detections_stored
+            && match self.batch.write(&mut repo) {
+                Ok((tracks, links)) => {
+                    add(&dc.track_rows, tracks as u64);
+                    add(&dc.track_links, links as u64);
+                    true
+                }
+                Err(_) => {
+                    inc(&dc.db_errors);
+                    false
+                }
+            };
+        // Links still in the batch were already forwarded to the control thread.
+        self.links_seen = self.batch.links.len();
+        if tracks_stored {
             let mut inv = shared
                 .inventory
                 .lock()

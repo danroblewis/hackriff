@@ -16,6 +16,7 @@ use hk_model::{
 };
 use num_complex::Complex;
 
+use crate::gate::GateCursor;
 use crate::run::Shared;
 use crate::stats::inc;
 
@@ -51,7 +52,35 @@ pub(crate) fn run(
     trigger: RecordingTrigger,
     label: String,
 ) {
-    if let Err(e) = run_inner(&shared, trigger_sample, pre_s, post_s, trigger, &label) {
+    run_claimed(shared, None, trigger_sample, pre_s, post_s, trigger, label);
+}
+
+/// Claims the recording window's samples in the flow gate now (before the caller releases its
+/// own claim), for a recording started on another thread with [`run_claimed`].
+pub(crate) fn claim(shared: &Shared, trigger_sample: u64, pre_s: f64) -> GateCursor {
+    let pre = (pre_s * shared.fs) as u64;
+    shared.gate.register(trigger_sample.saturating_sub(pre))
+}
+
+/// [`run`] with a gate cursor already registered by [`claim`] (`None` registers one here).
+pub(crate) fn run_claimed(
+    shared: Arc<Shared>,
+    cursor: Option<GateCursor>,
+    trigger_sample: u64,
+    pre_s: f64,
+    post_s: f64,
+    trigger: RecordingTrigger,
+    label: String,
+) {
+    if let Err(e) = run_inner(
+        &shared,
+        cursor,
+        trigger_sample,
+        pre_s,
+        post_s,
+        trigger,
+        &label,
+    ) {
         inc(&shared.counters.chains.errors);
         eprintln!("hk-pipeline: recording ({label}): {e:#}");
     }
@@ -59,6 +88,7 @@ pub(crate) fn run(
 
 fn run_inner(
     shared: &Arc<Shared>,
+    cursor: Option<GateCursor>,
     trigger_sample: u64,
     pre_s: f64,
     post_s: f64,
@@ -71,7 +101,7 @@ fn run_inner(
         pre_samples: (pre_s * fs) as u64,
         post_samples: (post_s * fs) as u64,
     };
-    let cursor = shared.gate.register(window.start());
+    let cursor = cursor.unwrap_or_else(|| shared.gate.register(window.start()));
     let mut stream = shared.ring.trigger_stream(window);
     let id = RecordingId::new();
     let dir = shared.cfg.data_dir.join("recordings");

@@ -12,7 +12,9 @@
 //! - **Replay guard:** a recording cannot be retuned. [`ReplayGuard`] passes gain and filter
 //!   changes to the replay's virtual tuning (provenance-only changes, as T-009 designed) but
 //!   ignores `tune`, so detections keep the recording's true frequencies; retune trust tests on a
-//!   replay are skipped and counted.
+//!   replay are skipped and counted. The capture thread marks every provenance a virtual gain or
+//!   filter change produced ([`VIRTUAL_TUNING_DEVICE_SUFFIX`] on its `device_id`), so stored
+//!   detections and recordings never pass a virtual gain off as the recording's real one.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -32,6 +34,10 @@ use crate::chains::ChainManager;
 use crate::events::{Candidate, ControlEvent};
 use crate::run::Shared;
 use crate::stats::{Counters, SchedulerCounters, add, inc};
+
+/// Appended to a provenance's `device_id` when its gain or filter state is virtual: the
+/// scheduler changed it on a replay, and the recorded samples never had it.
+pub const VIRTUAL_TUNING_DEVICE_SUFFIX: &str = "+virtual-tuning";
 
 /// Passes a scheduler's controls to a replay, except retunes (see the module docs).
 pub struct ReplayGuard {

@@ -142,6 +142,14 @@ impl Pipeline {
         reopen: Option<crate::run::SourceFactory>,
         inventory: Box<dyn Inventory>,
     ) -> anyhow::Result<PipelineHandle> {
+        if cfg.lossless && !source.pausable() {
+            anyhow::bail!(
+                "lossless mode needs a source that can pause (a recording), and {} cannot: a \
+                 held-back capture thread would drop live samples; set PipelineConfig::lossless \
+                 = false",
+                source.capabilities().driver
+            );
+        }
         std::fs::create_dir_all(&cfg.data_dir)
             .with_context(|| format!("creating {}", cfg.data_dir.display()))?;
         let db_path = cfg.data_dir.join("hackriff.db");
@@ -257,6 +265,22 @@ impl Pipeline {
             tx,
             started: Instant::now(),
         })
+    }
+}
+
+/// Stops a running pipeline ([`PipelineHandle::stopper`]).
+#[derive(Clone, Debug)]
+pub struct Stopper(Arc<AtomicBool>);
+
+impl Stopper {
+    /// Stops capture, like [`PipelineHandle::stop`].
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// `stop` has been called (by anyone).
+    pub fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -462,6 +486,12 @@ impl PipelineHandle {
     /// Stops capture; the readers and chains then drain and finish.
     pub fn stop(&self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// A handle that stops this run from another thread (a watchdog, a signal handler) while
+    /// [`Self::wait`] owns the handle.
+    pub fn stopper(&self) -> Stopper {
+        Stopper(Arc::clone(&self.shared.stop))
     }
 
     /// Attaches `spec` for `candidate` at runtime (no restart).

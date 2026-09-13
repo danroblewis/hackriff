@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::thread;
 
 use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::{AnalogReceiver, AnalogSession, RecordContext, write_session};
@@ -49,13 +50,23 @@ struct Window {
     iq: Vec<Complex<i8>>,
     head: Option<(SampleTime, ProvenanceHandle)>,
     ended: bool,
+    /// A `Detach` arrived; it ends collection as soon as the window holds samples (kept pending
+    /// while it is still empty, never dropped).
+    detached: bool,
 }
 
 /// Collects until `iq` holds `target` samples, the stream ends, a discontinuity arrives, or the
 /// chain is detached.
 fn collect(cr: &mut ChainReader, rx: &Receiver<ChainMsg>, w: &mut Window, target: usize) {
     while w.iq.len() < target && !w.ended {
-        if matches!(rx.try_recv(), Ok(ChainMsg::Detach)) && !w.iq.is_empty() {
+        while !w.detached {
+            match rx.try_recv() {
+                Ok(ChainMsg::Detach) => w.detached = true,
+                Ok(ChainMsg::Member(_)) => {}
+                Err(_) => break,
+            }
+        }
+        if w.detached && !w.iq.is_empty() {
             w.ended = true;
             break;
         }
@@ -129,6 +140,7 @@ pub(crate) fn run(
         iq: Vec::with_capacity(want.min(1 << 27)),
         head: None,
         ended: false,
+        detached: false,
     };
     if probe > 0 && probe < want {
         collect(&mut cr, &rx, &mut w, probe);
@@ -166,22 +178,59 @@ pub(crate) fn run(
             return;
         }
     }
-    if let Some(r) = node.record.take() {
-        super::record::run(
-            Arc::clone(&shared),
-            cand.trigger_sample,
-            r.pre_s,
-            r.post_s,
-            r.trigger,
-            r.label,
-        );
+    // The recording runs beside the window collection, never inline: in lossless replay this
+    // chain's gate cursor would otherwise stay parked at the probe end while the recorder waits
+    // for samples up to trigger + post, and the capture thread could not advance past the slack.
+    // Its cursor is claimed here, before this chain releases more history.
+    let recorder = node.record.take().and_then(|r| {
+        let cursor = super::record::claim(&shared, cand.trigger_sample, r.pre_s);
+        let s = Arc::clone(&shared);
+        let at = cand.trigger_sample;
+        let spawned = thread::Builder::new()
+            .name("hk-rec-analog".into())
+            .spawn(move || {
+                super::record::run_claimed(
+                    s,
+                    Some(cursor),
+                    at,
+                    r.pre_s,
+                    r.post_s,
+                    r.trigger,
+                    r.label,
+                )
+            });
+        match spawned {
+            Ok(join) => Some(join),
+            Err(_) => {
+                inc(&c.errors);
+                None
+            }
+        }
+    });
+    collect_and_write(&shared, &rx, cr, w, &cand, &node, want);
+    if let Some(join) = recorder {
+        let _ = join.join();
     }
-    collect(&mut cr, &rx, &mut w, want);
+}
+
+/// Collects the rest of the window, demodulates and writes the session.
+fn collect_and_write(
+    shared: &Arc<Shared>,
+    rx: &Receiver<ChainMsg>,
+    mut cr: ChainReader,
+    mut w: Window,
+    cand: &Candidate,
+    node: &AnalogNode,
+    want: usize,
+) {
+    let fs = shared.fs;
+    let c = &shared.counters.chains;
+    collect(&mut cr, rx, &mut w, want);
     drop(cr);
     if (w.iq.len() as f64) < 0.25 * fs {
         return;
     }
-    let session = match demodulate(&w, w.iq.len(), &cand, node.bandwidth_hz) {
+    let session = match demodulate(&w, w.iq.len(), cand, node.bandwidth_hz) {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
             inc(&c.errors);

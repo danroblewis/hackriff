@@ -343,6 +343,14 @@ pub trait Source: Send {
     /// The control handle, shareable across threads.
     fn control(&self) -> Arc<dyn SourceControl>;
 
+    /// The stream can be paused: the next read may be delayed indefinitely without losing or
+    /// shifting samples (a recording read on demand). Consumers may then apply backpressure (the
+    /// pipeline's lossless replay mode). Live radios keep streaming whether or not they are read,
+    /// so the default is `false` (fail safe).
+    fn pausable(&self) -> bool {
+        false
+    }
+
     /// Reads the next block into `samples` (cleared first; no allocation once its capacity covers
     /// the block length) and returns its header, or `Ok(None)` at end of stream.
     ///

@@ -2,13 +2,81 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use hk_core::Pacing;
+use hk_model::sigmf::{Capture, Datatype, SigmfMeta};
 use hk_model::{InventoryEntry, InventoryQuery, Repository, Timestamp};
 use hk_pipeline::{
     Pipeline, PipelineConfig, PipelineHandle, Replay, RunSummary, TrackInventory, open_replay,
     replay_plan,
 };
+
+/// Writes `secs` of a ci8 tone (+50 kHz, amplitude 40) in noise at `fs` and `center_hz` as
+/// `<name>.sigmf-meta/-data` in `dir`, starting at stream index `global_index` when given.
+pub fn tone_recording(
+    dir: &Path,
+    name: &str,
+    fs: f64,
+    secs: f64,
+    center_hz: f64,
+    global_index: Option<u64>,
+) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let n = (secs * fs) as usize;
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut noise = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        ((state >> 40) as f64 / (1u64 << 24) as f64 - 0.5) * 12.0
+    };
+    let mut data = Vec::with_capacity(2 * n);
+    for i in 0..n {
+        let ph = 2.0 * std::f64::consts::PI * 50e3 * i as f64 / fs;
+        let re = (40.0 * ph.cos() + noise()).round().clamp(-128.0, 127.0) as i8;
+        let im = (40.0 * ph.sin() + noise()).round().clamp(-128.0, 127.0) as i8;
+        data.push(re as u8);
+        data.push(im as u8);
+    }
+    std::fs::write(dir.join(format!("{name}.sigmf-data")), data).unwrap();
+    let mut meta = SigmfMeta::new(Datatype::Ci8);
+    meta.global.sample_rate = Some(fs);
+    let mut extra = serde_json::Map::new();
+    if let Some(g) = global_index {
+        extra.insert("core:global_index".into(), serde_json::json!(g));
+    }
+    meta.captures.push(Capture {
+        sample_start: 0,
+        frequency: Some(center_hz),
+        datetime: Some("2026-09-13T12:00:00Z".into()),
+        provenance: None,
+        clip_count: None,
+        extra,
+    });
+    let path = dir.join(format!("{name}.sigmf-meta"));
+    meta.write(&path).unwrap();
+    path
+}
+
+/// Waits for a run with a deadlock guard: a watchdog stops the run if it has not finished
+/// within `limit`. Returns the summary and whether the watchdog had to stop it.
+pub fn wait_guarded(handle: PipelineHandle, limit: Duration) -> (RunSummary, bool) {
+    let stopper = handle.stopper();
+    let (tx, rx) = mpsc::channel::<()>();
+    let dog = std::thread::spawn(move || match rx.recv_timeout(limit) {
+        Err(RecvTimeoutError::Timeout) => {
+            stopper.stop();
+            true
+        }
+        _ => false,
+    });
+    let summary = handle.wait().unwrap();
+    drop(tx);
+    let fired = dog.join().unwrap();
+    (summary, fired)
+}
 
 /// A scratch data directory, removed on drop (kept with `HK_KEEP_DIRS=1`).
 pub struct TempDir(pub PathBuf);

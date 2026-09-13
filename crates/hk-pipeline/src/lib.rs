@@ -55,7 +55,7 @@ pub use events::Candidate;
 pub use inventory::{Inventory, TrackInventory};
 pub use run::{
     Pipeline, PipelineHandle, Replay, ResolutionSummary, RunSummary, SourceFactory, SourceInfo,
-    open_replay, replay_block_len, replay_once,
+    Stopper, open_replay, replay_block_len, replay_once,
 };
 pub use stats::Counters;
 

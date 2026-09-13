@@ -453,6 +453,11 @@ impl<R: Read + Send> Source for SigmfReplaySource<R> {
         self.control.clone()
     }
 
+    /// A recording is read on demand, paced or not: waiting before a read loses nothing.
+    fn pausable(&self) -> bool {
+        true
+    }
+
     fn read_block(
         &mut self,
         samples: &mut Vec<Complex32>,

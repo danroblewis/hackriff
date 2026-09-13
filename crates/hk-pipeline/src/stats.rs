@@ -213,6 +213,9 @@ counter_group!(
         apply_errors,
         /// Tune commands the replay guard did not apply (a recording cannot be retuned).
         virtual_tunes_ignored,
+        /// Provenances marked as virtual tuning (replay gain/filter changes the samples never
+        /// had).
+        virtual_provenances,
         /// Verification captures recorded.
         verification_captures,
         /// Verification groups evaluated.
