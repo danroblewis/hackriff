@@ -129,7 +129,8 @@ tasks:
   - id: T-008
     title: channelizer (2x oversampled PFB) + on-demand DDC
     status: in-progress
-    review: "implemented 3beb92b (branch worktree-agent-abfdabdf828528c1d); Opus core-interface review running before merge (adversarial transitions: retune/gap/rate change, long-run phase, group-delay time mapping)"
+    review: "Opus review FIX-BEFORE-MERGE: failed rate re-plan leaves DDC silently using the old plan on the next block; follow-ups being applied (u64 NCO phase for large indices, forced PFB reset on rate change, even-M rasters, stride-view docs). DSP/timing/alloc/NaN probes otherwise clean"
+    scope_override: "T-008 delivers the CPU path only; GPU PFB split to T-026 (gated on S2, needs Jetson)"
     deps: [T-004]
     parallel_group: D
     core_interface: true
@@ -209,6 +210,7 @@ tasks:
   - id: T-014
     title: plugin host + manifest + IPC (ADR-0003)
     status: in-progress
+    review: "implemented 457f11f (branch worktree-agent-a037e75d6f11a8b6e); Opus core-interface + legal-guardrail review running before merge"
     override: "combined with T-016 into one Opus-high agent: ADR-0004 framing serves both plugin IPC and external egress, so one owner avoids two codecs (coordinator, 2026-09-13)"
     deps: [T-002]
     parallel_group: D
@@ -235,6 +237,7 @@ tasks:
   - id: T-016
     title: stream-output contract (framed UDS/TCP, SigMF headers, drop-not-block, gating)
     status: in-progress
+    review: "implemented 526dbfd (branch worktree-agent-a037e75d6f11a8b6e); Opus core-interface + legal-guardrail review running before merge"
     deps: [T-002]
     parallel_group: D
     core_interface: true
@@ -247,7 +250,9 @@ tasks:
     dod: contract impl + a sample consumer; backpressure + gating tested
   - id: T-017
     title: spectrum-history pyramid + region/time query
-    status: in-progress
+    status: done
+    commit: "0ea888d (merged)"
+    followups: "zstd tile compression (~180 MB/h L0 at 20 MHz dwell); converter to hk-model 1-D SpectrumTile if needed; p10 reads ~0.5 dB low (averaged-noise spread) - correct in T-021; late frames after tile seal are dropped+counted; merged on green without separate review (not core_interface) - review if T-021/T-022 find issues"
     followups_from_T-002_review: "TileKey carries pyramid scheme/version id; region index time-bounding (shared with T-006)"
     deps: [T-004, T-002]
     parallel_group: E
@@ -350,6 +355,21 @@ tasks:
     model: opus
     effort: medium
     dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
+  - id: T-026
+    title: GPU polyphase channelizer (CUDA PfbBackend) on the Jetson
+    status: blocked
+    deps: [T-008]
+    gated_on: S2
+    parallel_group: D
+    core_interface: true
+    use_cases: [SIGNAL-062, AWARE-036, SIGNAL-001]
+    acceptance: CUDA PfbBackend output matches the CPU PFB within numerical tolerance; sustained 20 Msps with headroom inside the S2 power envelope
+    area: crates/hk-dsp (gpu feature)
+    needs: hardware
+    model: opus
+    effort: high
+    dod: CudaPfb implements PfbBackend; parity tests vs CPU; throughput + power measured on the Orin Nano
+    note: "split from T-008 acceptance ('GPU + CPU-fallback paths') by the T-008 review, 2026-09-13; blocked until the Jetson arrives (user purchase)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

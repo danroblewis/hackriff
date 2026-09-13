@@ -2,11 +2,16 @@
 //! pyramid of SpectrumTiles that answers "what has this region looked like over time" (C26),
 //! SigMF recording with pre-trigger IQ and embedded annotations (C25), and the disk quota and
 //! retention policy (ADR-0006).
+//!
+//! - [`history`]: the spectrum-history pyramid (T-017): frames fold into tiles, tiles roll up into
+//!   coarser levels as they age, a rolling byte budget bounds the disk, and
+//!   [`Pyramid::query`](history::Pyramid::query) answers the region-over-time question
+//!   (docs/07 §4).
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn links_against_the_model() {
-        let _ = hk_model::RecordingId::new();
-    }
-}
+pub mod history;
+
+pub use history::{
+    CellStats, ChannelSummary, FrameInput, GainState, HistogramConfig, IngestOutcome, LevelConfig,
+    ProvenanceSummary, Pyramid, PyramidConfig, PyramidStats, RegionHistory, RegionQuery,
+    Resolution, StoreError,
+};
