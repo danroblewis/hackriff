@@ -56,7 +56,8 @@ enum Command {
     /// Run the whole pipeline over the live HackRF One (receive only) until --duration or Ctrl-C,
     /// then print the run summary. Needs a build with `--features hackrf`.
     Run {
-        /// Live source: `hackrf` (first device) or `hackrf:<serial>`.
+        /// Live source: `hackrf` (first device), `hackrf:<serial>`, or `mock:<file.sigmf-meta>`
+        /// (the mock SDR device replaying a recording as live air).
         #[arg(long, default_value = "hackrf")]
         source: String,
         #[command(flatten)]
@@ -110,6 +111,12 @@ enum Command {
         /// Live HackRF One (the default source); `--hackrf SERIAL` picks a device.
         #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with = "replay")]
         hackrf: Option<String>,
+        /// Device spec instead of `--hackrf`: `hackrf`, `hackrf:<serial>`, or
+        /// `mock:<file.sigmf-meta>` (the mock SDR: the recording as live air, in real time and
+        /// looping, retunable through the live controls). Tuning and gains not given explicitly
+        /// take the recording's own.
+        #[arg(long, conflicts_with_all = ["replay", "hackrf"])]
+        device: Option<String>,
         #[command(flatten)]
         live: LiveArgs,
         /// Replay this `.sigmf-meta` recording in real time instead of the live radio.
@@ -225,6 +232,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Serve {
             hackrf,
+            device,
             live,
             replay,
             loop_replay,
@@ -236,13 +244,14 @@ fn main() -> anyhow::Result<()> {
             rows_per_s,
         } => {
             hk_cli::signal::install()?;
-            let source = match replay {
-                Some(path) => hk_cli::serve::ServeSource::Replay {
+            let source = match (replay, device) {
+                (Some(path), _) => hk_cli::serve::ServeSource::Replay {
                     path,
                     loop_replay,
                     realtime: true,
                 },
-                None => hk_cli::serve::ServeSource::HackRf {
+                (None, Some(spec)) => hk_cli::serve::ServeSource::HackRf { spec, live },
+                (None, None) => hk_cli::serve::ServeSource::HackRf {
                     spec: match hackrf.as_deref() {
                         None | Some("") => "hackrf".into(),
                         Some(serial) => format!("hackrf:{serial}"),

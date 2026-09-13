@@ -63,8 +63,8 @@ pub use events::Candidate;
 pub use family::{Explanation, FamilyPrior, explain_emitter, explanations};
 pub use inventory::{Inventory, TrackInventory};
 pub use run::{
-    Pipeline, PipelineHandle, Replay, ResolutionSummary, RunSummary, SourceFactory, SourceInfo,
-    Stopper, open_replay, replay_block_len, replay_once,
+    DeviceReplay, Pipeline, PipelineHandle, Replay, ResolutionSummary, RunSummary, SourceFactory,
+    SourceInfo, Stopper, open_mock_replay, open_replay, replay_block_len, replay_once,
 };
 pub use stats::Counters;
 

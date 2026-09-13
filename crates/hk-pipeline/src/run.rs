@@ -154,14 +154,25 @@ pub fn replay_block_len(fs: f64) -> usize {
     ((fs / 200.0) as usize).clamp(1024, 65_536)
 }
 
-/// Opens a `.sigmf-meta` recording for the pipeline.
+/// Opens a `.sigmf-meta` recording for the pipeline, played back as recorded.
+///
+/// `virtual_tuning` is refused (T-057): a virtual tune moved the provenance centre while the IQ
+/// stayed at the recorded centre, so every signal landed at the wrong absolute frequency. Anything
+/// that retunes a recording (the scheduler) uses [`open_mock_replay`], whose retunes really shift
+/// and filter the IQ.
 pub fn open_replay(path: &Path, pacing: Pacing, virtual_tuning: bool) -> anyhow::Result<Replay> {
+    if virtual_tuning {
+        anyhow::bail!(
+            "virtual tuning of a replay misplaces signals (T-057); open a scheduler-driven \
+             replay with open_mock_replay (the mock SDR device) instead"
+        );
+    }
     let meta = SigmfMeta::read(path).with_context(|| format!("reading {}", path.display()))?;
     let fs = meta
         .global
         .sample_rate
         .context("the recording has no core:sample_rate")?;
-    let mut source = SigmfReplaySource::open(
+    let source = SigmfReplaySource::open(
         path,
         ReplayOptions {
             block_len: replay_block_len(fs),
@@ -169,9 +180,6 @@ pub fn open_replay(path: &Path, pacing: Pacing, virtual_tuning: bool) -> anyhow:
         },
     )
     .with_context(|| format!("opening {}", path.display()))?;
-    if virtual_tuning {
-        source = source.with_virtual_tuning();
-    }
     let center_hz = meta
         .captures
         .first()
@@ -192,6 +200,66 @@ pub fn open_replay(path: &Path, pacing: Pacing, virtual_tuning: bool) -> anyhow:
             start_time,
         },
         meta,
+        source,
+    })
+}
+
+/// A recording served by the mock SDR device (T-049).
+pub struct DeviceReplay {
+    /// The mock device's stream.
+    pub source: hk_core::MockSdrSource,
+    /// Rate, centre, start (the recording's).
+    pub info: SourceInfo,
+    /// Source class ([`crate::class::source_class`]: band-derived from the recorded window as for
+    /// a live radio there, or the stricter class the recording declares).
+    pub class: ContentClass,
+    /// Metadata.
+    pub meta: SigmfMeta,
+    /// Device identity (`mock:<recorded device>`).
+    pub device: hk_core::DeviceInfo,
+}
+
+/// Opens a `.sigmf-meta` recording behind the mock SDR device, tuned to the recording, with the
+/// recording's clock. Its retunes shift, filter and resample the IQ (noise and a coverage flag
+/// outside the recorded band), so a scheduler driving it sees truthful frequencies (T-057).
+/// `Pacing::Unpaced` is pausable (lossless); real time is not.
+pub fn open_mock_replay(
+    path: &Path,
+    pacing: Pacing,
+    end: hk_core::MockEnd,
+) -> anyhow::Result<DeviceReplay> {
+    let fs = SigmfMeta::read(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .global
+        .sample_rate
+        .context("the recording has no core:sample_rate")?;
+    let driver = hk_core::MockSdrDriver::new(
+        path,
+        hk_core::MockOptions {
+            block_len: replay_block_len(fs),
+            pacing,
+            end,
+            ..hk_core::MockOptions::default()
+        },
+    )
+    .with_context(|| format!("opening the mock device over {}", path.display()))?;
+    let source = driver.open_mock(&driver.default_request())?;
+    let rec = source.recording();
+    let info = SourceInfo {
+        sample_rate_hz: rec.sample_rate_hz,
+        center_hz: rec.center_hz,
+        start_time: source.start_time(),
+    };
+    let meta = rec.meta.clone();
+    let device = source
+        .control()
+        .device_info()
+        .context("the mock device reports its identity")?;
+    Ok(DeviceReplay {
+        class: source_class(&meta),
+        info,
+        meta,
+        device,
         source,
     })
 }
@@ -688,9 +756,18 @@ pub fn replay_once(
     pacing: Pacing,
     inventory: Box<dyn Inventory>,
 ) -> anyhow::Result<RunSummary> {
-    let replay = open_replay(path, pacing, cfg.drive_scheduler)?;
-    cfg.source_class = replay.class;
     cfg.lossless = matches!(pacing, Pacing::Unpaced);
+    if cfg.drive_scheduler {
+        // The scheduler retunes: serve the recording through the mock device (T-057).
+        let replay = open_mock_replay(path, pacing, hk_core::MockEnd::Stop)?;
+        cfg.source_class = replay.class;
+        cfg.device_id = replay.device.device_id.clone();
+        cfg.device_hw = Some(replay.device.hw.clone());
+        let handle = Pipeline::start(cfg, Box::new(replay.source), replay.info, None, inventory)?;
+        return handle.wait();
+    }
+    let replay = open_replay(path, pacing, false)?;
+    cfg.source_class = replay.class;
     if let Some(hw) = &replay.meta.global.hw {
         cfg.device_id = format!("sigmf:{hw}");
     }

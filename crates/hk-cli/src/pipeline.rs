@@ -29,14 +29,16 @@ use hk_api::{
     Token, WindowPolicy,
 };
 use hk_core::{
-    DeviceInfo, HackRfDriver, NamedGain, OpenRequest, Pacing, Source, SourceCapabilities,
-    SourceControl, SourceDriver,
+    DeviceInfo, HackRfDriver, MockClock, MockEnd, MockOptions, MockSdrDriver, NamedGain,
+    OpenRequest, Pacing, Source, SourceCapabilities, SourceControl, SourceDriver,
 };
+use hk_model::cluster::most_restrictive;
+use hk_model::sigmf::SigmfMeta;
 use hk_model::{ContentClass, Repository, ScanPlan, Timestamp};
-use hk_pipeline::class::band_class;
+use hk_pipeline::class::{band_class, source_class};
 use hk_pipeline::{
     PipelineConfig, PipelineHandle, RunSummary, SourceFactory, SourceInfo, TrackInventory,
-    load_calibrations, open_replay, replay_plan,
+    load_calibrations, open_mock_replay, open_replay, replay_plan,
 };
 
 use crate::signal;
@@ -330,10 +332,128 @@ pub fn plan_class(plan: &ScanPlan, fs: f64) -> ContentClass {
     band_class(&centres, fs)
 }
 
-/// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One). Later drivers
-/// (the T-049 mock, SoapySDR) plug in here behind the same `SourceDriver` contract.
+/// `mock:<file.sigmf-meta>` → the recording behind the mock SDR device (T-049).
+pub fn mock_path(spec: &str) -> Option<PathBuf> {
+    spec.strip_prefix("mock:")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+}
+
+/// `spec` names a device (the live HackRF One or the mock SDR), not a recording played back.
+pub fn is_device_spec(spec: &str) -> bool {
+    hackrf_serial(spec).is_some() || mock_path(spec).is_some()
+}
+
+/// The mock device as the binaries run it: like the radio, in real time from the wall clock,
+/// never ending (the recording loops).
+pub fn cli_mock_options() -> MockOptions {
+    MockOptions {
+        block_len: 16_384,
+        pacing: Pacing::RealTime { speed: 1.0 },
+        end: MockEnd::Loop,
+        clock: MockClock::Wall,
+        ..MockOptions::default()
+    }
+}
+
+/// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One) or
+/// `mock:<file.sigmf-meta>` (the mock SDR, `None` if the recording cannot be opened; [`open_live`]
+/// reports why). SoapySDR plugs in here later behind the same `SourceDriver` contract.
 pub fn driver_for(spec: &str) -> Option<(Box<dyn SourceDriver>, Option<String>)> {
+    if let Some(path) = mock_path(spec) {
+        let driver = MockSdrDriver::new(path, cli_mock_options()).ok()?;
+        return Some((Box::new(driver), None));
+    }
     hackrf_serial(spec).map(|serial| (Box::new(HackRfDriver) as Box<dyn SourceDriver>, serial))
+}
+
+/// The mock's open request: the recording's own centre, rate and gains, with every `live` setting
+/// given explicitly (different from its default) applied on top.
+fn mock_request(live: &LiveArgs, driver: &MockSdrDriver) -> anyhow::Result<OpenRequest> {
+    let d = LiveArgs::default();
+    let mut request = driver.default_request();
+    if live.center_hz != d.center_hz {
+        request.center_hz = live.center_hz;
+    }
+    if live.sample_rate_hz != d.sample_rate_hz {
+        request.sample_rate_hz = live.sample_rate_hz;
+    }
+    request.baseband_filter_hz = live.baseband_filter_hz;
+    let named: Vec<&str> = live
+        .gains
+        .iter()
+        .filter_map(|g| g.split_once('=').map(|(s, _)| s.trim()))
+        .collect();
+    for g in live.named_gains(&driver.capabilities())? {
+        let explicit = named.contains(&g.stage.as_str())
+            || match g.stage.as_str() {
+                "lna" => live.lna_db != d.lna_db,
+                "vga" => live.vga_db != d.vga_db,
+                "amp" => live.amp != d.amp,
+                _ => false,
+            };
+        if explicit {
+            request.gains.retain(|r| r.stage != g.stage);
+            request.gains.push(g);
+        }
+    }
+    Ok(request)
+}
+
+/// The class a mock device's recording declares (`hackriff:content_class`), if any.
+fn declared_class(path: &Path) -> Option<ContentClass> {
+    let meta = SigmfMeta::read(path).ok()?;
+    meta.global
+        .extra
+        .contains_key("hackriff:content_class")
+        .then(|| source_class(&meta))
+}
+
+/// A recording opened for a pipeline run.
+pub struct OpenedRecording {
+    /// The stream.
+    pub source: Box<dyn Source>,
+    /// Rate, centre, start.
+    pub info: SourceInfo,
+    /// The recording's class.
+    pub class: ContentClass,
+    /// Provenance device id, when known.
+    pub device_id: Option<String>,
+    /// SigMF `core:hw`, when known.
+    pub device_hw: Option<String>,
+    /// The device's control handle (mock only).
+    pub control: Option<Arc<dyn SourceControl>>,
+}
+
+/// Opens a recording: played back as recorded, or — when the scheduler retunes it — behind the
+/// mock SDR device, whose retunes really shift the IQ (T-057).
+pub fn open_recording(
+    path: &Path,
+    pacing: Pacing,
+    retuned: bool,
+) -> anyhow::Result<OpenedRecording> {
+    if retuned {
+        let r = open_mock_replay(path, pacing, MockEnd::Stop)?;
+        let control = r.source.control();
+        return Ok(OpenedRecording {
+            source: Box::new(r.source),
+            info: r.info,
+            class: r.class,
+            device_id: Some(r.device.device_id),
+            device_hw: Some(r.device.hw),
+            control: Some(control),
+        });
+    }
+    let r = open_replay(path, pacing, false)?;
+    let hw = r.meta.global.hw.clone();
+    Ok(OpenedRecording {
+        source: Box::new(r.source),
+        info: r.info,
+        class: r.class,
+        device_id: hw.as_ref().map(|hw| format!("sigmf:{hw}")),
+        device_hw: hw,
+        control: None,
+    })
 }
 
 /// An opened live source.
@@ -352,19 +472,31 @@ pub struct LiveSource {
 
 /// Opens a live source (receive only) through its driver with `live`'s settings.
 pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
-    let Some((driver, device)) = driver_for(spec) else {
-        anyhow::bail!("unsupported live source {spec:?}: use hackrf or hackrf:<serial>");
-    };
+    let (driver, request): (Box<dyn SourceDriver>, OpenRequest) =
+        if let Some(path) = mock_path(spec) {
+            let driver = MockSdrDriver::new(&path, cli_mock_options())
+                .with_context(|| format!("opening the mock device over {}", path.display()))?;
+            let request = mock_request(live, &driver)?;
+            (Box::new(driver), request)
+        } else if let Some((driver, device)) = driver_for(spec) {
+            let gains = live.named_gains(&driver.capabilities())?;
+            let request = OpenRequest {
+                device,
+                center_hz: live.center_hz,
+                sample_rate_hz: live.sample_rate_hz,
+                gains,
+                baseband_filter_hz: live.baseband_filter_hz,
+                bias_tee: false,
+            };
+            (driver, request)
+        } else {
+            anyhow::bail!(
+                "unsupported live source {spec:?}: use hackrf, hackrf:<serial> or \
+             mock:<file.sigmf-meta>"
+            );
+        };
     let caps = driver.capabilities();
-    let gains = live.named_gains(&caps)?;
-    let request = OpenRequest {
-        device,
-        center_hz: live.center_hz,
-        sample_rate_hz: live.sample_rate_hz,
-        gains: gains.clone(),
-        baseband_filter_hz: live.baseband_filter_hz,
-        bias_tee: false,
-    };
+    let gains = request.gains.clone();
     let source = driver
         .open(&request)
         .with_context(|| format!("opening the {} source", driver.name()))?;
@@ -386,8 +518,8 @@ pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
         source,
         control,
         info: SourceInfo {
-            sample_rate_hz: live.sample_rate_hz,
-            center_hz: live.center_hz.round(),
+            sample_rate_hz: request.sample_rate_hz,
+            center_hz: request.center_hz.round(),
             start_time: Timestamp::now(),
         },
         gains,
@@ -440,6 +572,10 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
     } else {
         band_class(&[live.info.center_hz], fs)
     };
+    // The mock device's class is band-derived exactly as the radio's; a stricter class its
+    // recording declares is kept (fail closed).
+    let declared = mock_path(&opts.source).and_then(|p| declared_class(&p));
+    let class = declared.map_or(class, |d| most_restrictive(class, d));
     let mut cfg = config_for(
         opts.data_dir.clone(),
         plan,
@@ -462,6 +598,7 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
     let live_control = (!opts.schedule).then(|| {
         let policy: WindowPolicy = Arc::new(move |center, rate| {
             let c = band_class(&[center], rate);
+            let c = declared.map_or(c, |d| most_restrictive(c, d));
             if c == class {
                 Ok(())
             } else {
@@ -506,8 +643,14 @@ pub fn run_replay(args: &ReplayArgs) -> anyhow::Result<RunSummary> {
     } else {
         Pacing::Unpaced
     };
-    let replay = open_replay(&args.fixture, pacing, args.schedule)?;
-    let plan = load_plan(args.plan.as_deref(), &replay.info)?;
+    // A scheduled replay is retuned: the mock device serves it (T-057).
+    let rec = open_recording(&args.fixture, pacing, args.schedule)?;
+    let plan = load_plan(args.plan.as_deref(), &rec.info)?;
+    let class = if args.schedule {
+        most_restrictive(rec.class, plan_class(&plan, rec.info.sample_rate_hz))
+    } else {
+        rec.class
+    };
     let data_dir = args.data_dir.clone().unwrap_or_else(temp_data_dir);
     let registry = StreamRegistry::new();
     let mut cfg = config_for(
@@ -517,19 +660,19 @@ pub fn run_replay(args: &ReplayArgs) -> anyhow::Result<RunSummary> {
         args.feeds.clone(),
         args.calibration.as_deref(),
     )?;
-    cfg.source_class = replay.class;
+    cfg.source_class = class;
     // Explicit opt-in: `PipelineConfig` defaults to lossless off (live-source semantics), and a
     // recording can pause, so unpaced replay waits for slow readers instead of dropping.
     cfg.lossless = !args.paced;
     cfg.drive_scheduler = args.schedule;
-    if let Some(hw) = &replay.meta.global.hw {
-        cfg.device_id = format!("sigmf:{hw}");
+    if let Some(id) = rec.device_id {
+        cfg.device_id = id;
     }
-    cfg.device_hw = replay.meta.global.hw.clone();
+    cfg.device_hw = rec.device_hw;
     let handle = hk_pipeline::Pipeline::start(
         cfg,
-        Box::new(replay.source),
-        replay.info,
+        rec.source,
+        rec.info,
         None,
         Box::new(TrackInventory::default()),
     )?;
@@ -620,11 +763,12 @@ pub struct Daemon {
 /// Starts `hackriffd`'s pipeline (scheduler driven) and API server.
 pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     let registry = StreamRegistry::new();
-    if hackrf_serial(&args.source).is_some() {
+    if is_device_spec(&args.source) {
         if args.unpaced || args.loop_replay {
             anyhow::bail!(
-                "--unpaced and --loop apply to sigmf: recordings; a live HackRF can neither pause \
-                 nor loop"
+                "--unpaced and --loop apply to sigmf: recordings; a device (the live HackRF, or \
+                 the mock, which streams in real time and loops by itself) can neither pause nor \
+                 loop on request"
             );
         }
         let token = token(args.token.as_deref())?;
@@ -659,7 +803,8 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     }
     let Some(path) = args.source.strip_prefix("sigmf:").map(PathBuf::from) else {
         anyhow::bail!(
-            "unsupported --source {:?}: use hackrf, hackrf:<serial> or sigmf:<file.sigmf-meta>",
+            "unsupported --source {:?}: use hackrf, hackrf:<serial>, mock:<file.sigmf-meta> or \
+             sigmf:<file.sigmf-meta>",
             args.source
         );
     };
@@ -668,8 +813,10 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     } else {
         Pacing::RealTime { speed: 1.0 }
     };
-    let replay = open_replay(&path, pacing, true)?;
-    let plan = load_plan(args.plan.as_deref(), &replay.info)?;
+    // The scheduler retunes the recording: the mock device serves it truthfully (T-057).
+    let rec = open_recording(&path, pacing, true)?;
+    let plan = load_plan(args.plan.as_deref(), &rec.info)?;
+    let class = most_restrictive(rec.class, plan_class(&plan, rec.info.sample_rate_hz));
     let mut cfg = config_for(
         args.data_dir.clone(),
         plan,
@@ -677,21 +824,16 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
         args.feeds.clone(),
         args.calibration.as_deref(),
     )?;
-    cfg.source_class = replay.class;
+    cfg.source_class = class;
     // Explicit opt-in, as for `hk replay` (a live source leaves this off).
     cfg.lossless = args.unpaced;
     cfg.drive_scheduler = true;
-    cfg.device_id = replay
-        .meta
-        .global
-        .hw
-        .as_ref()
-        .map_or_else(|| "sigmf-replay".into(), |hw| format!("sigmf:{hw}"));
-    cfg.device_hw = replay.meta.global.hw.clone();
+    cfg.device_id = rec.device_id.unwrap_or_else(|| "sigmf-replay".into());
+    cfg.device_hw = rec.device_hw;
     let reopen: Option<SourceFactory> = if args.loop_replay {
         let p = path.clone();
         Some(Box::new(move || -> anyhow::Result<Box<dyn Source>> {
-            Ok(Box::new(open_replay(&p, pacing, true)?.source))
+            Ok(open_recording(&p, pacing, true)?.source)
         }))
     } else {
         None
@@ -699,8 +841,8 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     let token = token(args.token.as_deref())?;
     let handle = hk_pipeline::Pipeline::start(
         cfg,
-        Box::new(replay.source),
-        replay.info,
+        rec.source,
+        rec.info,
         reopen,
         Box::new(TrackInventory::default()),
     )?;
@@ -716,7 +858,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     Ok(Daemon {
         server,
         handle,
-        source_control: None,
+        source_control: rec.control,
     })
 }
 
@@ -929,8 +1071,17 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.pointer("/readers/detect/lost_samples").is_some(), "{v}");
         assert!(v.pointer("/chains/attached").is_some(), "{v}");
-        let (_, streams) = get(addr, "/api/streams", Some(TOKEN));
-        assert!(streams.contains("spectrum/live"), "{streams}");
+        // The scheduler really retunes the device (T-057), and the spectrum stream is re-offered
+        // under the same id at each new centre: poll until it is listed.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let (_, streams) = get(addr, "/api/streams", Some(TOKEN));
+            if streams.contains("spectrum/live") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{streams}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let summary = handle.wait().unwrap();
         eprintln!("{}", summary.to_text());
         assert!(summary.errors.is_empty(), "{:?}", summary.errors);
@@ -1062,5 +1213,120 @@ mod tests {
             "{class:?}"
         );
         assert!(!class.permits_content());
+    }
+
+    /// Waits (bounded) until the pipeline has taken samples.
+    fn wait_for_samples(handle: &PipelineHandle) {
+        let counters = handle.counters();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while counters
+            .source
+            .samples
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            assert!(std::time::Instant::now() < deadline, "no samples");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// T-049: `mock:<file>` opens like a device, with the recording's own tuning unless given, and
+    /// carries the band-derived class a live radio at that frequency would.
+    #[test]
+    fn mock_device_specs_open_like_a_radio_with_the_band_class() {
+        let dir = temp_data_dir();
+        let fixture = tiny_recording(&dir.join("src"), 1.0);
+        let spec = format!("mock:{}", fixture.display());
+        assert!(is_device_spec(&spec) && is_device_spec("hackrf") && !is_device_spec("sigmf:x"));
+        assert_eq!(mock_path("mock:"), None);
+
+        let live = open_live(&spec, &LiveArgs::default()).unwrap();
+        assert_eq!(
+            (live.info.center_hz, live.info.sample_rate_hz),
+            (433.5e6, 250e3),
+            "defaults take the recording's tuning"
+        );
+        assert!(
+            live.device.device_id.starts_with("mock:"),
+            "{:?}",
+            live.device
+        );
+        assert!(!live.source.pausable(), "real time, like the radio");
+        let moved = open_live(
+            &spec,
+            &LiveArgs {
+                center_hz: 433.6e6,
+                ..LiveArgs::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(moved.info.center_hz, 433.6e6, "explicit tuning applies");
+        assert!(open_live("mock:/does/not/exist.sigmf-meta", &LiveArgs::default()).is_err());
+
+        // The same recording at a paging frequency: restricted, and a retune to another class is
+        // refused, exactly as for the HackRF.
+        let mut meta = hk_model::sigmf::SigmfMeta::read(&fixture).unwrap();
+        meta.captures[0].frequency = Some(930.5e6);
+        meta.write(&fixture).unwrap();
+        let lp = start_live(
+            &LiveOptions {
+                source: spec.clone(),
+                live: LiveArgs::default(),
+                data_dir: dir.join("live"),
+                plan: None,
+                schedule: false,
+                feeds: None,
+                calibration: None,
+                spectrum_fft_len: Some(1024),
+                spectrum_rows_per_s: None,
+            },
+            &StreamRegistry::new(),
+        )
+        .unwrap();
+        assert_eq!(lp.class, ContentClass::RestrictedPaging);
+        let lc = lp.live_control.clone().expect("live control over the mock");
+        assert_eq!(lc.set_center(100.8e6).unwrap_err().http_status(), 409);
+        wait_for_samples(&lp.handle);
+        lp.handle.stop();
+        let s = lp.handle.wait().unwrap();
+        assert!(s.errors.is_empty(), "{:?}", s.errors);
+        assert!(s.counter("/source/samples") > 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn daemon_runs_over_a_mock_device_spec() {
+        let dir = temp_data_dir();
+        let fixture = tiny_recording(&dir.join("src"), 0.5);
+        let mut args = daemon_args(
+            format!("mock:{}", fixture.display()),
+            dir.join("data"),
+            Some("t049-daemon-mock-token-0123456789"),
+        );
+        assert!(
+            start_daemon(&args).is_err(),
+            "--unpaced is refused for a device"
+        );
+        args.unpaced = false;
+        let Daemon {
+            server,
+            handle,
+            source_control,
+        } = start_daemon(&args).unwrap();
+        let control = source_control.expect("device control");
+        assert!(
+            control
+                .device_info()
+                .unwrap()
+                .device_id
+                .starts_with("mock:")
+        );
+        wait_for_samples(&handle);
+        handle.stop();
+        let s = handle.wait().unwrap();
+        assert!(s.errors.is_empty(), "{:?}", s.errors);
+        assert!(control.stats().unwrap().samples > 0);
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

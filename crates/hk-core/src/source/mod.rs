@@ -15,8 +15,10 @@
 //!   what the base device cannot do, and HackRF Pro or other SDRs fit later without changing the
 //!   traits.
 //!
-//! Implementations: [`SigmfReplaySource`] (deterministic file replay, the basis of offline tests)
-//! and [`HackRfSource`] (libhackrf receive, cargo feature `hackrf`; T-037a).
+//! Implementations: [`SigmfReplaySource`] (deterministic file replay, the basis of offline tests),
+//! [`HackRfSource`] (libhackrf receive, cargo feature `hackrf`; T-037a) and the [`mock`] SDR device
+//! (a SigMF recording behind the device contract, retuned realistically; T-049). Every device
+//! passes the [`conformance`] suite.
 //!
 //! TX is not part of these traits. It stays gated (C37).
 //!
@@ -57,8 +59,10 @@
 //! - **Backpressure:** [`Source::pausable`] is `false` for anything that streams in real time
 //!   (a radio, or a mock emulating one); lossless pipelines refuse such sources.
 
+pub mod conformance;
 pub mod format;
 pub mod hackrf;
+pub mod mock;
 pub mod sigmf_replay;
 
 use std::path::PathBuf;
@@ -76,6 +80,10 @@ use crate::block::Discontinuity;
 
 pub use hackrf::{
     HackRfConfig, HackRfControl, HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats,
+};
+pub use mock::{
+    Coverage, MockClock, MockEnd, MockOptions, MockSdrControl, MockSdrDriver, MockSdrSource,
+    MockStats, Recording,
 };
 pub use sigmf_replay::{Pacing, ReplayOptions, SigmfReplaySource};
 
