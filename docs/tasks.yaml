@@ -152,7 +152,9 @@ tasks:
     dod: N-channel PFB with tested isolation; DDC to arbitrary center/bw; feeds demods
   - id: T-009
     title: sweep-survey + first (simple) attention scheduler
-    status: in-progress
+    status: done
+    commit: "85b06be (merged 86ae931)"
+    review: "merged under user timebox to unblock T-027; single timeboxed post-merge Opus review running (blocks only on correctness bugs, fixes forward)"
     note_start: "launched 2026-09-13 on the T-006 branch (1e5bc99) ahead of its merge to cut critical-path wait (user timebox steer); merges main once T-006 lands"
     deps: [T-003, T-006]
     parallel_group: E
@@ -415,7 +417,7 @@ tasks:
     note: "split from T-022 (coordinator, 2026-09-13): only the inventory table needs T-018; the bridge is a remote egress on the legal-guardrail path, so Opus not Sonnet; reuse spikes/s3-web-waterfall client"
   - id: T-027
     title: Pipeline assembly - hackriffd composes source, ring, STFT, floor, detection, history, stream output and plugins under a ScanPlan
-    status: todo
+    status: in-progress
     followups_from_T-006_reprobe: "records spanning dense-skipped frames or dropped runs carry no flag (only DetectorStats counters); at 65536 bins avg 2 only 2/7 known FM stations detected - choose a resolution/floor-block combination"
     deps: [T-006, T-009, T-016, T-017]
     parallel_group: J
@@ -455,7 +457,9 @@ tasks:
     note: "follow-ups from the T-005 final round (merged ab9148b under the user timebox steer, 2026-09-13)"
   - id: T-030
     title: Fix T-011 harmonic rate trust on rectangular high-index FSK (trusted 7x true rate)
-    status: in-progress
+    status: done
+    commit: "25d1ddb (merged b6645eb)"
+    results: "root cause: transition LS only divided clock factors 5..2 (7x/9x harmonics trusted); now searches k=32..2 with rise/fall-separate lattice check; rectangular FSK 720-run sweep 0 trusted-and-wrong (trusted fraction 75-99 % by h); S5 900-run sweep 479 trusted 0 wrong (no floor regression); fixtures pass. Follow-ups: h=6 trust 75 % (count fitted-factor line), T-013 harmonic_divisor could be dropped, thresholds as LsGuards fields, card/S5 text still says k=5..2"
     deps: [T-011]
     parallel_group: F
     use_cases: [AWARE-036]
@@ -478,6 +482,19 @@ tasks:
     effort: medium
     items: "hk-model TimingFeatures lacks period confidence/jitter, burst-length distribution, segment boundaries, hop raster, hop-set id (only in TrackSummary); track region query missing; merged track keeps its own detection links (not re-pointed to survivor); no split trigger (only merges); bursty hopper needs looser hop rule; stream-start tone lobes and low-SNR single-lobe fragments create short extra tracks; TDMA frame + co-occurrence features not implemented; track upserts one transaction each (batch)"
     note: "follow-ups from T-007 (merged 2026-09-13 under the timebox rule)"
+  - id: T-032
+    title: Scheduler follow-ups (bandit revisit, per-region revisit, gain-down re-verification, rate-change trust, RF path constants)
+    status: todo
+    deps: [T-009]
+    parallel_group: E
+    use_cases: [SPACE-050, AWARE-042]
+    acceptance: each item fixed or deferred with rationale
+    area: crates/hk-core (scheduler), crates/hk-detect (rate-change trust)
+    needs: none
+    model: opus
+    effort: medium
+    items: "ADR-0005 bandit revisit + C12 interestingness score; per-region revisit rates (one pass serves all today); automatic gain-down re-verification after a clipped gain-step pair; hk_detect rate-change trust function (dwell scheduled, not evaluated); cron schedules + hackrf_sweep firmware mode; offset sweep slices to avoid DC; move RF path boundaries into SourceCapabilities; verify HackRF 2170/2740 MHz path constants against firmware tuning.c (recalled, unverified); hk-core <-> hk-detect dev-dependency cycle"
+    note: "follow-ups from T-009 (merged 2026-09-13 under the timebox rule)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
