@@ -1,0 +1,76 @@
+# Compact US allocation table (T-019, C17 known-signal priors; docs/07 §2.11, ADR-0008).
+#
+# Hand-compiled extract, not the full table. Primary sources: the FCC Table of Frequency
+# Allocations, 47 CFR 2.106 (US Government work, public domain) as summarised by the FCC Online
+# Table of Frequency Allocations chart (https://transition.fcc.gov/oet/spectrum/table/fcctable.pdf)
+# and eCFR Title 47 (https://www.ecfr.gov/current/title-47); NTIA Spectrum Compendium band sheets
+# (https://www.ntia.gov/page/spectrum-compendium) for the RNSS/GNSS bands; 47 CFR 15.247 and Part
+# 18 for the ISM bands; 47 CFR Part 90 Subpart S for the 800 MHz public-safety/SMR band; FCC band
+# plan documents for the 700 MHz commercial/public-safety split
+# (https://www.fcc.gov/sites/default/files/wireless/auctions/data/bandplans/700band.pdf). Band
+# edges were checked against these sources on 2026-09-13 (T-019) where noted `unverified=false`;
+# `unverified=true` rows are widely published values (mostly amateur HF/VHF sub-bands) not
+# individually re-checked against a primary source this session — verify before relying on them
+# for a legal conclusion.
+#
+# This is a lookup table for priors, not a legal reference: allocation != assignment != actual use
+# (docs/04 §1.1). Coverage is deliberately partial — the bands named in the T-019 task brief plus
+# enough neighbouring context for sane interval lookups, not the whole CFR table.
+#
+# Columns:
+#   id                 stable slug; used to build an emitter's prior_ref as
+#                      "us-47cfr2106-compact:<id>"
+#   f_lo_hz, f_hi_hz   band edges in Hz, closed interval [lo, hi] (same convention as
+#                      hk_model::FreqRange)
+#   region             allocation-table region; only "us" is loaded today (Region::Us)
+#   federal            "federal" | "non-federal" | "shared" — simplified from the CFR
+#                      government/non-government columns
+#   primary_services   semicolon-separated kebab-case ITU/CFR service slugs allocated primary
+#                      (may be empty)
+#   secondary_services semicolon-separated kebab-case service slugs allocated secondary (may be
+#                      empty)
+#   tags               semicolon-separated free-form use tags consumed by the family matcher
+#                      (known_status.rs), e.g. fm-broadcast, adsb, part15, ism, amateur
+#   unverified         "true" if the row was not individually re-checked against a primary source
+#                      during T-019; "false" otherwise
+id,f_lo_hz,f_hi_hz,region,federal,primary_services,secondary_services,tags,unverified
+fm-broadcast,88000000,108000000,us,non-federal,broadcasting,,fm-broadcast,false
+aviation-vor-ils,108000000,117975000,us,shared,aeronautical-radionavigation,,aviation;vor;ils,false
+aviation-vhf-comm,117975000,137000000,us,non-federal,aeronautical-mobile-r,,aviation;vhf-am,false
+noaa-apt-137,137000000,138000000,us,federal,meteorological-satellite,fixed;mobile,noaa-apt;weather-satellite,false
+amateur-160m,1800000,2000000,us,non-federal,amateur,,amateur;hf,false
+amateur-80m,3500000,4000000,us,non-federal,amateur,,amateur;hf,false
+amateur-40m,7000000,7300000,us,non-federal,amateur,,amateur;hf,false
+amateur-30m,10100000,10150000,us,non-federal,amateur,,amateur;hf,true
+amateur-20m,14000000,14350000,us,non-federal,amateur,,amateur;hf,true
+amateur-17m,18068000,18168000,us,non-federal,amateur,,amateur;hf,true
+amateur-15m,21000000,21450000,us,non-federal,amateur,,amateur;hf,true
+amateur-12m,24890000,24990000,us,non-federal,amateur,,amateur;hf,true
+amateur-10m,28000000,29700000,us,non-federal,amateur,,amateur;hf,true
+amateur-6m,50000000,54000000,us,non-federal,amateur,,amateur;vhf,true
+amateur-2m,144000000,148000000,us,non-federal,amateur,,amateur;vhf,false
+amateur-1-25m,222000000,225000000,us,non-federal,amateur,,amateur;vhf,true
+amateur-70cm,420000000,450000000,us,shared,radiolocation;amateur,,amateur;uhf,true
+ism-433-part15,433050000,434790000,us,non-federal,amateur;radiolocation,,part15;short-range-device;ism-eu-band,true
+ism-902,902000000,928000000,us,shared,radiolocation;amateur,,ism;part15;33cm,false
+amateur-23cm,1240000000,1300000000,us,shared,radiolocation,amateur;radionavigation-satellite,amateur;uhf,true
+aero-radionav-960-1215,960000000,1215000000,us,shared,aeronautical-radionavigation,radionavigation-satellite,adsb;dme;tacan,false
+gnss-l5,1164000000,1215000000,us,shared,aeronautical-radionavigation;radionavigation-satellite,,gnss;l5;galileo-e5,false
+gnss-l2,1215000000,1240000000,us,shared,radionavigation-satellite,radiolocation,gnss;l2;l2c,false
+gnss-l1,1559000000,1610000000,us,shared,aeronautical-radionavigation;radionavigation-satellite,,gnss;l1;galileo-e1;glonass-g1,false
+maritime-vhf,156000000,162025000,us,non-federal,maritime-mobile,,maritime;vhf;ais,false
+noaa-wx,162400000,162550000,us,federal,fixed;mobile,,noaa-wx;weather,false
+ism-2400,2400000000,2483500000,us,shared,fixed;mobile;radiolocation,amateur,ism;part15;wifi;bluetooth,false
+ism-5800,5725000000,5875000000,us,shared,radiolocation,amateur,ism;part15;wifi-5g8,false
+cellular-700-ul,698000000,722000000,us,non-federal,mobile,,cellular;lte-700,false
+cellular-700-dl,728000000,746000000,us,non-federal,mobile,,cellular;lte-700,false
+public-safety-700-a,758000000,775000000,us,non-federal,mobile,,public-safety;700mhz;p25;firstnet,false
+public-safety-700-b,788000000,805000000,us,non-federal,mobile,,public-safety;700mhz;p25;firstnet,false
+public-safety-800-a,806000000,824000000,us,non-federal,mobile,,public-safety;800mhz;smr,false
+public-safety-800-b,851000000,869000000,us,non-federal,mobile,,public-safety;800mhz;smr,false
+cellular-850-ul,824000000,849000000,us,non-federal,mobile,,cellular;lte-band5,false
+cellular-850-dl,869000000,894000000,us,non-federal,mobile,,cellular;lte-band5,false
+aws-ul,1710000000,1755000000,us,non-federal,fixed;mobile,,cellular;aws;lte-band4,false
+aws-dl,2110000000,2155000000,us,non-federal,fixed;mobile,,cellular;aws;lte-band4,false
+pcs-ul,1850000000,1910000000,us,non-federal,fixed;mobile,,cellular;pcs;lte-band2,false
+pcs-dl,1930000000,1990000000,us,non-federal,fixed;mobile,,cellular;pcs;lte-band2,false
