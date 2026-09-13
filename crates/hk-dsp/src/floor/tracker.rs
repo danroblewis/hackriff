@@ -507,6 +507,10 @@ pub struct FloorEvent {
     /// The bins this event is about: Rise/Fall/End/Unknown: `bins`; Extend: the added blocks;
     /// Update: the returned blocks.
     pub change_bins: Range<usize>,
+    /// Lower edge of `change_bins`, Hz.
+    pub change_f_lo_hz: f64,
+    /// Upper edge of `change_bins`, Hz.
+    pub change_f_hi_hz: f64,
     /// Lower edge of `bins`, Hz.
     pub f_lo_hz: f64,
     /// Upper edge of `bins`, Hz.

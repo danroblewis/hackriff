@@ -89,6 +89,10 @@ pub enum CloseReason {
     Returned,
     /// The tracker segment reset.
     Reset,
+    /// Bridged into an older episode, which continues (its later events cover this region).
+    Merged,
+    /// Open for the tracker's `rebaseline_s`: the elevated level became the floor.
+    Rebaselined,
 }
 
 /// The lifecycle's view of floor-tracker output.
@@ -168,20 +172,44 @@ pub fn signal_from_floor_event(e: &FloorEvent) -> Option<EpisodeSignal> {
             },
             continued: false,
         },
+        FloorEventKind::Extend => EpisodeSignal::Extended(EpisodeExtent {
+            episode: e.episode,
+            segment: e.segment,
+            class,
+            onset: e.onset_t.host_time,
+            confirmed: e.confirmed_t.host_time,
+            f_lo_hz: e.change_f_lo_hz,
+            f_hi_hz: e.change_f_hi_hz,
+            step_db: f64::from(e.step_db),
+            step_uncertainty_db: f64::from(e.step_uncertainty_db),
+            baseline_dbfs_per_hz: f64::from(e.baseline_dbfs_per_hz),
+        }),
+        FloorEventKind::Update => EpisodeSignal::Updated {
+            episode: e.episode,
+            t: e.onset_t.host_time,
+            f_lo_hz: e.f_lo_hz,
+            f_hi_hz: e.f_hi_hz,
+        },
         FloorEventKind::End => EpisodeSignal::Closed {
             episode: e.episode,
             t: e.onset_t.host_time,
             reason: match e.end_reason {
                 Some(EndReason::Reset) => CloseReason::Reset,
+                Some(EndReason::Merged) => CloseReason::Merged,
+                Some(EndReason::Rebaselined) => CloseReason::Rebaselined,
                 Some(EndReason::Returned) | None => CloseReason::Returned,
             },
             duration_s: e.duration_s,
+        },
+        FloorEventKind::Unknown => EpisodeSignal::Unknown {
+            episode: Some(e.episode),
+            t: e.onset_t.host_time,
         },
         FloorEventKind::Fall => EpisodeSignal::Fell {
             t: e.confirmed_t.host_time,
             f_lo_hz: e.f_lo_hz,
             f_hi_hz: e.f_hi_hz,
-            interrupted: false,
+            interrupted: e.interrupted,
         },
     })
 }
@@ -503,6 +531,8 @@ impl FloorAnomalies {
                     match reason {
                         CloseReason::Returned => "returned",
                         CloseReason::Reset => "reset",
+                        CloseReason::Merged => "merged",
+                        CloseReason::Rebaselined => "rebaselined",
                     }
                 );
                 self.close_where(repo, *t, &note, |k, _| k.0 == *episode)

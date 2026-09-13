@@ -412,6 +412,10 @@ impl Episode {
             FloorEventKind::End => secs(self.onset.1, onset.1),
             FloorEventKind::Update | FloorEventKind::Unknown => secs(self.onset.1, ctx.now.1),
         };
+        // Bins are uniform, so the change edges follow from the extent's edges.
+        let bw = (self.f_hi_hz - self.f_lo_hz) / self.bins.len().max(1) as f64;
+        let at = |bin: usize| self.f_lo_hz + (bin as f64 - self.bins.start as f64) * bw;
+        let (change_f_lo_hz, change_f_hi_hz) = (at(change_bins.start), at(change_bins.end));
         FloorEvent {
             kind,
             episode: self.id,
@@ -427,6 +431,8 @@ impl Episode {
             duration_s,
             bins: self.bins.clone(),
             change_bins,
+            change_f_lo_hz,
+            change_f_hi_hz,
             f_lo_hz: self.f_lo_hz,
             f_hi_hz: self.f_hi_hz,
             band_fraction: self.band_fraction,

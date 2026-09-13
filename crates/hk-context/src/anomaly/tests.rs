@@ -503,6 +503,8 @@ fn floor_event(
         episode: 4,
         class,
         end_reason: end,
+        merged_into: None,
+        interrupted: false,
         onset_seq: 10,
         onset_t: st(1.0),
         confirmed_seq: 20,
@@ -510,6 +512,9 @@ fn floor_event(
         episode_onset_t: st(1.0),
         duration_s: 1.0,
         bins: 0..1024,
+        change_bins: 512..1024,
+        change_f_lo_hz: 1575.42e6,
+        change_f_hi_hz: 1576.42e6,
         f_lo_hz: 1574.42e6,
         f_hi_hz: 1576.42e6,
         band_fraction: 1.0,
@@ -587,6 +592,51 @@ fn floor_events_map_through_the_single_adapter() {
             interrupted: false,
             ..
         }
+    ));
+    // The T-005 re-review event kinds.
+    let extend = floor_event(FloorEventKind::Extend, FloorChangeClass::NoiseLike, None);
+    let Some(EpisodeSignal::Extended(added)) = signal_from_floor_event(&extend) else {
+        panic!("extend")
+    };
+    assert_eq!((added.f_lo_hz, added.f_hi_hz), (1575.42e6, 1576.42e6));
+    assert!(matches!(
+        signal_from_floor_event(&floor_event(
+            FloorEventKind::Update,
+            FloorChangeClass::NoiseLike,
+            None
+        )),
+        Some(EpisodeSignal::Updated { episode: 4, .. })
+    ));
+    assert!(matches!(
+        signal_from_floor_event(&floor_event(
+            FloorEventKind::End,
+            FloorChangeClass::NoiseLike,
+            Some(EndReason::Merged)
+        )),
+        Some(EpisodeSignal::Closed {
+            reason: CloseReason::Merged,
+            ..
+        })
+    ));
+    assert!(matches!(
+        signal_from_floor_event(&floor_event(
+            FloorEventKind::Unknown,
+            FloorChangeClass::NoiseLike,
+            None
+        )),
+        Some(EpisodeSignal::Unknown {
+            episode: Some(4),
+            ..
+        })
+    ));
+    let mut interrupted = floor_event(FloorEventKind::Fall, FloorChangeClass::NoiseLike, None);
+    interrupted.interrupted = true;
+    assert!(matches!(
+        signal_from_floor_event(&interrupted),
+        Some(EpisodeSignal::Fell {
+            interrupted: true,
+            ..
+        })
     ));
     let structured = signal_from_floor_event(&floor_event(
         FloorEventKind::Rise,
