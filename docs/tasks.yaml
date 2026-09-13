@@ -365,7 +365,9 @@ tasks:
     dod: browser app consumes the API; waterfall + table + history view; fps target met or native-shell fallback invoked
   - id: T-024
     title: Wire the 7 slice acceptance tests (docs/11 1.1) in CI
-    status: in-progress
+    status: done
+    commit: "0749296 (merged 522cf77)"
+    note: "7 acceptance tests + legal regression 11/11 in 15 s (3x stable); CI job `acceptance` (LFS, HK_REQUIRE_FIXTURES=1, HK_E2E_REQUIRE_SYNTH=1; only real-readsb half of SIGNAL-001 skips). Model override: opus medium (legal + core pipeline assertions). Gaps found -> T-037 (short-replay coverage attach, calibration load, pilot freq) and T-039 (pipeline family -> priors)"
     deps: [T-015, T-013, T-012, T-020, T-021, T-018, T-019, T-017, T-027]
     parallel_group: J
     use_cases: [SIGNAL-001, AWARE-036, SIGNAL-062, AWARE-006, SPACE-050, AWARE-053, AWARE-042]
@@ -424,7 +426,7 @@ tasks:
     status: done
     commit: "a75f781 (merged)"
     results: "new crate hk-pipeline; capture thread -> ci8 ring (lossless mode for unpaced hk replay); reader 1 STFT (Hann, 0 % overlap so n_eff=K) -> floor -> Detector (exact clip counts) -> Tracker -> batched SQLite flush + inventory (record_track_event + priors) + anomalies; reader 2 FloorProduct/history; reader 3 spectrum stream (restricted rate-gated); control thread runs Scheduler on stream time; data-driven runtime chains (wfm-rds, fsk-bursts, adsb-readsb) attached/detached as ring readers; SigMF recording on trigger; hk replay + hackriffd + /api/status + /api/inventory served. Results: SIGNAL-062 real FM PI 1694 + label + recording + tiles; AWARE-036 20/20 CRC-valid, content withheld unless classified; AWARE-042 per-channel tracks/history; SPACE-050 floor within 0.10 dB; SIGNAL-001 16/16 readsb decodes 4 emitters; 20 attach/detach cycles 0 overruns; restricted-paging source leaves no content/recording (sentinel scan clean)"
-    review: "merged under user timebox to unblock T-024; single timeboxed post-merge Opus review running (blocks only on correctness/legal bugs, fixes forward)"
+    review: "merged under user timebox; timeboxed post-merge review FIX-NEEDED: lossless replay deadlock on recordings with large core:global_index (915/433 MHz fixtures hang; FM passes only because it starts at 3.6M); legal gap: no restricted-band derivation (classify rule over 930 MHz paging on untagged recording could store content). Fix agent running (deadlock, restricted bands from 47 CFR, lossless default false + refuse for non-pausable sources, no links after failed detection write)"
     followups_from_T-006_reprobe: "records spanning dense-skipped frames or dropped runs carry no flag (only DetectorStats counters); at 65536 bins avg 2 only 2/7 known FM stations detected - choose a resolution/floor-block combination"
     deps: [T-006, T-009, T-016, T-017]
     parallel_group: J
@@ -574,19 +576,24 @@ tasks:
   - id: T-037
     title: Pipeline follow-ups (loop restart control, verification persistence, writer thread, WFM fragment tracks, capture names, shutdown, HackRF source)
     status: todo
+    hold: "start after the T-027 fix agent merges (both edit crates/hk-pipeline)"
     deps: [T-027]
     parallel_group: J
     use_cases: [SPACE-050, AWARE-042, AWARE-036, SIGNAL-062, SIGNAL-001]
+    followups_t024:
+      - "coverage chains miss short lossless replays: attach poll stops at ring close and nothing holds capture for pending chains (0.1 s ADS-B replay -> 0 chains, 0 decodes); acceptance works around with a 2 s scene + ring_s 0.5"
+      - "store the 19 kHz pilot frequency (only lock quality stored today)"
+      - "FSK payload_hex case: stored uppercase vs lowercase truth; pick one and document"
     acceptance: each item fixed or deferred with rationale
     area: crates/hk-pipeline, crates/hk-cli
     needs: none
     model: opus
     effort: medium
-    items: "after --loop restart the scheduler still controls the old replay (gain steps stop applying); verification verdicts not persisted and hk_detect::rate_change not wired; DB writes under one mutex on the detection reader (separate writer thread) + T-015 readsb batching/keepalive/latency + dense-frame flags on records; many fragment tracks per WFM station and CPU on empty-channel probes, FM raster US-only; inventory sightings don't pass a stable capture name for T-034 replay dedup; FSK bits stream not published; graceful Ctrl-C shutdown; HackRF source still a stub (libhackrf BSD-3 -> in-process option); spectrum header centre not updated on retune; calibration not loaded for SPACE-050 (uncalibrated dBFS/Hz); attach test relies on 4 s ring margin (CI load risk); unpaced plugin feeding can overflow readsb 8 MB queue on long recordings"
+    items: "after --loop restart the scheduler still controls the old replay (gain steps stop applying); verification verdicts not persisted and hk_detect::rate_change not wired; DB writes under one mutex on the detection reader (separate writer thread) + T-015 readsb batching/keepalive/latency + dense-frame flags on records; many fragment tracks per WFM station and CPU on empty-channel probes, FM raster US-only; inventory sightings don't pass a stable capture name for T-034 replay dedup; FSK bits stream not published; graceful Ctrl-C shutdown; HackRF source still a stub (libhackrf BSD-3 -> in-process option); spectrum header centre not updated on retune; calibration not loaded for SPACE-050 (uncalibrated dBFS/Hz); attach test relies on 4 s ring margin (CI load risk); unpaced plugin feeding can overflow readsb 8 MB queue on long recordings | from T-027 review (not in fix agent): live-mode FloorProduct lock held by slow /api/history|floor queries stalls reader 2; correlator feed-cache I/O under repo lock in detect flush"
     note: "follow-ups from T-027 (merged 2026-09-13 under the timebox rule)"
   - id: T-038
     title: Attack-map precision follow-ups (steady OFDM false floor-rise anomaly, partial-band extent, letters-only identity tags)
-    status: todo
+    status: in-progress
     deps: [T-036]
     parallel_group: E
     use_cases: [AWARE-006]
@@ -597,6 +604,20 @@ tasks:
     effort: medium
     items: "steady 1 MHz OFDM opens a NoiseLike floor-rise Anomaly (SK 0.89) - attack map would explain a normal emitter as jamming; 800 kHz partial-band jammer episode reports 375 kHz extent; letters-only (non-hex) identity tag added via add_emitter_tag not caught by the value-independent tag rule"
     note: "follow-ups from T-036 (merged 2026-09-13 under the timebox rule)"
+  - id: T-039
+    title: Pipeline classification to priors (family -> band-plan prior -> Emitter known/unexpected-here)
+    status: todo
+    deps: [T-027, T-024]
+    parallel_group: J
+    use_cases: [AWARE-053, SIGNAL-062]
+    acceptance: "pipeline-produced Emitters get a family from track/demod evidence (e.g. hk-demod wfm -> fm-broadcast) and the priors lookup sets known or unexpected-here with prior_ref, without the test classifying the Emitter itself; AWARE-053 acceptance test drops its manual classify step"
+    area: crates/hk-pipeline, crates/hk-context (priors mapping), crates/hk-demod (family names)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    dod: "AWARE-053 passes end-to-end through the pipeline; family vocabulary mapping documented; restricted-class rules unaffected (legal regression green)"
+    hold: "start after the T-027 fix agent merges (edits crates/hk-pipeline)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

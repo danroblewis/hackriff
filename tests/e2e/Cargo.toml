@@ -16,3 +16,12 @@ thiserror.workspace = true
 hk-core.workspace = true
 hk-dsp.workspace = true
 num-complex.workspace = true
+# T-024 M0 slice acceptance suite (tests/acceptance_m0.rs): the composed pipeline (`hk replay`'s
+# library path) plus the stores, priors, API and stream readers it asserts through. Project
+# crates only; no new third-party dependency.
+hk-api.workspace = true
+hk-context.workspace = true
+hk-pipeline.workspace = true
+hk-plugins.workspace = true
+hk-store.workspace = true
+hk-stream.workspace = true
