@@ -28,7 +28,11 @@ The core workflow, in order:
 1. **Peruse.** Browse live airwaves casually, or open reports of past scan surveys.
 2. **Automate.** Run configurable, thorough scans across frequency regions on a schedule.
 3. **Review history.** Choose a region and see what activity was seen there over time.
-4. **Cross-reference known signals.** Band plans, licences, signal databases. This exists *to separate known from unknown*; it is not the goal.
+4. **Recommend explanations for what was detected.** Signals are always found by **blind detection** from RF data first, then characterized. Only then does the known-signal database (band plans, licences, catalogues) offer **ranked, reasoned suggestions**, e.g. "looks like FM; FM broadcast allocation nearby; 150 kHz off raster".
+   - **Never a source of truth.** The database is never the starting point, never pre-populates the inventory, and never overrides what was measured.
+   - **Mismatches are interesting.** An emission that doesn't match its expected frequency (e.g. a shifted FM station) is flagged, not snapped to the database.
+   - **Unknown signals are the priority** to surface and catalogue.
+   - **Tests:** fixtures carry a hidden ground-truth list of interesting emissions. A test runs blind detection, checks each one is found, and checks that a sensible explanation is among the top recommendations. Never look a frequency up in the database and tune there.
 5. **Record and stream demodulations.** Parameters (modulation, bandwidth, squelch, AGC) are estimated from the signal, never picked manually.
 6. **Decode to bitstreams.** Blind symbol and bit recovery, including for unknown signals.
 7. **Stream bits to other programs**, which turn them into something useful. Decoders are pluggable consumers, not hard-coded apps.
@@ -70,6 +74,10 @@ Items in `docs/05` and `docs/use-cases.yaml` are acceptance targets:
 - Map each ID to the capabilities it exercises. Tag whether it can be tested **offline with recorded or synthetic IQ** or needs live hardware.
 - Prefer **SigMF** recordings plus annotations as fixtures. Candidate sources: your own captures, IQEngine/SigMF archives, sigidwiki samples, and synthetic data (TorchSig / generated). Check the licence of each sample set before committing it.
 - Build end-to-end tests that replay IQ through the full pipeline and assert on detections, estimated parameters, decoded bits and inventory entries. Keep unit tests for the DSP blocks.
+- **End-to-end tests drive the system through the SDR device interface.** They never feed files straight into the pipeline.
+  - **A mock SDR device** implements the same interface as the real HackRF source: tune, sample rate, gains, bias-tee, sweep, start/stop, timestamps, overruns. It replays recorded SigMF IQ behind that interface, honouring retunes and gain/rate changes realistically.
+  - **The same tests can run against the real HackRF** as hardware-in-the-loop tests.
+- **Keep the device interface generic** so other SDRs (e.g. SoapySDR) can be added later. That's not required yet, but don't bake HackRF specifics into the core.
 
 ## Legal guardrails
 
