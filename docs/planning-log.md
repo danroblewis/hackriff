@@ -6,7 +6,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 ## Current phase
 
-**Phase 3 (architecture + ADRs).** Phase 1 committed (8c2db03). Phase 1 follow-ups applied; capability-card sync delegated to a background agent (its commit lands separately). Phase 2 data model written to `docs/07-data-model.md`. Next: `docs/08-architecture.md` and `docs/adr/`, starting with the runtime and UI ADRs (the two the brief checkpoints first).
+**Phase 4 (risks & spikes).** Phases 1–3 committed; card sync committed (b5a90fc). Architecture + 10 ADRs written (docs/08 + docs/adr/). Next: `docs/09-risks-and-spikes.md`, then Phase 5 (test strategy + test_tier), Phase 6 (roadmap), Phase 7 (implementation plan + CLAUDE.md sections).
 
 ## Decisions from the user (not provisional)
 
@@ -34,9 +34,25 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 - **P1.6 Heartbeat caveat.** The `CronCreate` heartbeat (job cf8688aa, `7,27,47 * * * *`) is **session-only** — it does not survive this session exiting (CronCreate has no durable persistence in this build). Per-phase commits are therefore the real resume mechanism; a fresh session resumes from this log + git, not the cron.
 
+### Phase 3 — architecture + ADRs (2026-09-13). All ADRs PROVISIONAL.
+
+- **P3.1 (ADR-0001, runtime).** Rust core with a **dynamic dataflow**; always-on capture/survey/detect/channelize separated from demod/decode chains that are added at runtime as data-driven nodes + plugins — so "change pipelines without stopping capture or rebuilding" is an architecture property, not a framework feature. **Prefer FutureSDR** as the substrate if spike S1 passes, else an owned Rust dataflow on liquid-dsp/cuFFT. GR3 rejected as core (static flowgraph + GPLv3 in sample path); GR4 tracked but pre-ecosystem. Verified on web: GR4 RC1 runtime graph reconfiguration is real; GR3 needs lock/unlock or restart.
+- **P3.2 (ADR-0002, UI).** Headless core + **web UI (WASM/WebGL2) served by the device**, one app for on-device kiosk and remote phone/laptop (Maia SDR pattern). Fallback: a thin native shell for the on-device waterfall only if spike S3 fails. Flagged as the user's most important decision — most reversible option chosen.
+- **P3.3 (ADR-0003).** Existing decoders and all GPLv3 code = **subprocess plugins** (crash + licence isolation); own demods in-process. Small manifest + one IPC contract; not a plugin marketplace.
+- **P3.4 (ADR-0004).** Stream contract = length-prefixed framed messages over UDS/TCP (+ optional ZeroMQ), SigMF-style headers, **drop-not-block** backpressure, `content_class` gating enforced here.
+- **P3.5 (ADR-0005).** Scheduler = interleaved discovery sweep + POI-sized dwells, bandit revisit on interestingness (computed by C12), user intent preempts, TX gets exclusive slots. First version a simple alternation.
+- **P3.6 (ADR-0006).** Storage = SQLite state + tiled spectrum pyramid + SigMF files + RAM pre-trigger ring, one data dir. Engine reversible behind a repository layer.
+- **P3.7 (ADR-0007).** CPU/NEON for control+detection+decode, **GPU for FFT/channelizer/persistence/ML** (unified memory, no copy tax), **no usable FPGA** on HackRF. Low-power survey mode vs full mode.
+- **P3.8 (ADR-0008).** Offline-first cache of feeds+reference data; passes computed locally from cached TLEs; seed cache shipped; sync opportunistically.
+- **P3.9 (ADR-0009).** Jetson Orin Nano Super 8 GB (verified $249/JetPack 6.2/67 TOPS/7-25W+MAXN) + HackRF One + NVMe; phone-as-display first, on-device screen later; preselector/notch bank is the highest-value accessory.
+- **P3.10 (ADR-0010).** Rust core / Python orchestration-only / TS+WASM UI. Licence ledger: **liquid-dsp (MIT) in-core, VOLK/GNU Radio (GPLv3) plugin-only** → the project licence stays open. Several rows marked (verify) before adoption; vocoder IP and feed ToS tracked separately.
+
 ## Open questions for the user (ranked)
 
 1. **Accept the proposed trunking use cases SIGNAL-080..086?** They shape the C23 milestone and the roadmap. If any are unwanted, say which; IDs are permanent so rejected ones would be marked retired, not deleted.
 2. **Restricted-content gating owner (P1.3).** I put enforcement on `stream-output` (C24) with a content-class flag set at classification, provisional pending a Phase 3 legal-guardrail ADR. Confirm that's the right seam, or name another.
 3. **Own-key decryption (P1.3)** modelled as a `decoder-plugins` stage with user-supplied keys and key-source provenance. Confirm this belongs in C22 rather than its own capability.
 4. Anything in docs/06 §5 ownership table you'd overrule before it hardens into the data model (doc 07)?
+5. **UI direction (ADR-0002)** — you called this one of the most important decisions. I chose headless-core + web thin clients (reversible). Confirm, or say if you want a native on-device UI as the primary target.
+6. **Runtime substrate (ADR-0001)** — FutureSDR-if-it-holds vs an owned Rust dataflow. Both meet the hard requirement; the spike S1 result decides. Any preference to force one now?
+7. **Project licence (ADR-0010)** — still deliberately undecided; the architecture keeps it open. No action needed unless you want to pick early (it would let GPL code into the core and simplify some choices).
