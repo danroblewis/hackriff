@@ -31,11 +31,35 @@ jobs:
       # uv must exist before cargo test: the hk-e2e harness generates synthetic IQ via py/.
       - uses: astral-sh/setup-uv@v6
 
+      # hk-e2e (harness smoke tests + the M0 acceptance suite) runs in the `acceptance` job.
       - name: cargo test
         env:
           HK_E2E_REQUIRE_SYNTH: "1"
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude hk-e2e
 
       - name: python tooling tests
         working-directory: py
         run: uv run --locked pytest
+
+  # T-024: the M0 vertical-slice acceptance suite (docs/11 §1.1) plus the hk-e2e harness tests.
+  # LFS checkout supplies the real FM fixture; uv generates the synthetic scenarios. Both are
+  # required here (a missing one fails instead of skipping). readsb is not installed, so only the
+  # real-plugin half of SIGNAL-001 skips (logged); its pipeline + plugin-output plumbing still runs.
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: hk-e2e and M0 acceptance suite
+        env:
+          HK_E2E_REQUIRE_SYNTH: "1"
+          HK_REQUIRE_FIXTURES: "1"
+        run: cargo test -p hk-e2e -- --nocapture

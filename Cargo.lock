@@ -481,9 +481,15 @@ dependencies = [
 name = "hk-e2e"
 version = "0.1.0"
 dependencies = [
+ "hk-api",
+ "hk-context",
  "hk-core",
  "hk-dsp",
  "hk-model",
+ "hk-pipeline",
+ "hk-plugins",
+ "hk-store",
+ "hk-stream",
  "num-complex",
  "serde_json",
  "thiserror",
