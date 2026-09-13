@@ -24,7 +24,24 @@ canvas { display: block; width: 100%; background: #000; border-radius: 4px; touc
 .mk { padding: 0 6px; border-radius: 3px; color: #111; }
 .mk.drop { background: var(--drop); }
 .mk.gated { background: var(--warn); }
-form#hist-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+form#hist-form, form#inv-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+#wf-sel { position: absolute; top: 0; bottom: 0; background: rgba(96,165,250,.18); border: 1px solid #60a5fa; border-width: 0 1px; pointer-events: none; }
+.table-wrap { overflow-x: auto; margin-top: 8px; }
+#inv-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+#inv-table th, #inv-table td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #222a33; white-space: nowrap; }
+#inv-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+#inv-table th button { background: none; border: 0; padding: 0; color: var(--dim); font-size: 12px; }
+#inv-table th[aria-sort] button { color: var(--fg); }
+#inv-table th[aria-sort=ascending] button::after { content: " ▲"; }
+#inv-table th[aria-sort=descending] button::after { content: " ▼"; }
+#inv-table tbody tr { cursor: pointer; }
+#inv-table tbody tr:hover, #inv-table tbody tr.sel { background: #1c2430; }
+.badge.st-known { background: #14532d; }
+.badge.st-unexpected-here { background: var(--warn); color: #111; }
+.badge.st-unknown { background: #1e3a5f; }
+.withheld { color: var(--warn); }
+.tag { display: inline-block; padding: 0 5px; margin-right: 3px; border-radius: 3px; background: #222a33; font-size: 11px; }
+#inv-more { margin-top: 8px; }
 label { display: flex; flex-direction: column; font-size: 12px; color: var(--dim); gap: 2px; }
 input, select, button { font: inherit; color: var(--fg); background: #0f1318; border: 1px solid #2d333b; border-radius: 4px; padding: 4px 6px; min-width: 0; }
 input[type=number] { width: 9em; }
@@ -33,6 +50,8 @@ button[type=button] { background: #21262d; border-color: #2d333b; }
 @media (max-width: 520px) {
   main { padding: 6px; gap: 8px; }
   #wf { height: 55vh; }
-  form#hist-form label { flex: 1 1 45%; }
-  input[type=number], input[type=datetime-local] { width: 100%; }
+  form#hist-form label, form#inv-form label { flex: 1 1 45%; }
+  input[type=number], input[type=datetime-local], input[type=text], input[type=search] { width: 100%; }
+  #inv-table .opt { display: none; }
+  #inv-table th, #inv-table td { padding: 4px 3px; }
 }

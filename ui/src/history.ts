@@ -25,9 +25,9 @@ const LUT = (() => {
 })();
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const utcInput = (s: number) => new Date(s * 1000).toISOString().slice(0, 19);
-const fromUtcInput = (v: string) => Date.parse(v.length === 16 ? `${v}:00Z` : `${v}Z`) / 1000;
-const fmtT = (s: number) => new Date(s * 1000).toISOString().replace("T", " ").slice(0, 19);
+export const utcInput = (s: number) => new Date(s * 1000).toISOString().slice(0, 19);
+export const fromUtcInput = (v: string) => Date.parse(v.length === 16 ? `${v}:00Z` : `${v}Z`) / 1000;
+export const fmtT =(s: number) => new Date(s * 1000).toISOString().replace("T", " ").slice(0, 19);
 
 export class HistoryPanel {
   private form = $<HTMLFormElement>("hist-form");
@@ -53,6 +53,21 @@ export class HistoryPanel {
   setLive(fLoHz: number, fHiHz: number, t0s: number, t1s: number) {
     this.liveSpan = [fLoHz, fHiHz, t0s, t1s];
     this.applyLive(false);
+  }
+
+  /** The form's region and time window (MHz inputs → Hz; NaN when empty). */
+  region(): { fLoHz: number; fHiHz: number; t0: number; t1: number } {
+    const v = (id: string) => $<HTMLInputElement>(id).value;
+    const mhz = (id: string) => (v(id) === "" ? NaN : +v(id) * 1e6);
+    return { fLoHz: mhz("f-lo"), fHiHz: mhz("f-hi"), t0: fromUtcInput(v("t0")), t1: fromUtcInput(v("t1")) };
+  }
+
+  /** Selects a frequency region (e.g. an inventory row); loads it when a time window is set. */
+  selectRegion(fLoHz: number, fHiHz: number) {
+    $<HTMLInputElement>("f-lo").value = (fLoHz / 1e6).toFixed(6);
+    $<HTMLInputElement>("f-hi").value = (fHiHz / 1e6).toFixed(6);
+    if (this.form.checkValidity()) void this.load();
+    else this.info.textContent = "region selected; set a time window and Load";
   }
 
   private applyLive(force: boolean) {

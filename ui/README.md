@@ -14,6 +14,23 @@ Rust. T-022a covers:
   in grey ("not observed" is not "quiet"). `/api/floor` (T-021) is drawn as a floor-vs-time line
   with its uncertainty band. **Live span** fills the live stream's band and time.
 
+T-022 adds:
+
+- **Signal inventory.** A table of emitters from `/api/inventory` (the T-018 inventory query).
+  - **Columns:** status badge (known / unexpected here / unknown; hover shows the prior's
+    reason), MHz, bandwidth, family, identity, first/last seen (UTC), count, tags.
+  - **Server-side filters:** region (f lo/f hi), time window, status, tag. **History region**
+    copies the region-over-time band and window into the filters.
+  - **Search** filters the loaded rows by id, identity, scheme, family or tag.
+  - Column headers sort the loaded rows. **Load more** follows the server cursor, 200 rows a
+    page.
+  - **Clicking a row** shades its band on the waterfall (when it is inside the live span) and
+    loads it, padded, in region over time.
+  - On phones, bandwidth, first seen and tags are hidden, and the table scrolls sideways.
+  - **Identity gating is server-side.** An identity from a restricted, own-key or unclassified
+    source arrives as `withheld: true` with its scheme and no value, and shows as
+    `<scheme>: withheld`. The page never receives the value.
+
 ## Build
 
 Needs Node ≥ 20. Dev dependencies are esbuild (MIT) and TypeScript (Apache-2.0); `dist/main.js`
@@ -37,6 +54,21 @@ cargo run -p hk-cli --bin hk -- serve \
 `hk serve` options:
 - `--bind ADDR` (default `127.0.0.1:8787`)
 - `--history-dir DIR` enables `/api/history` and `/api/floor`
+- `--inventory-db FILE` serves an hk-model SQLite inventory at `/api/inventory` (read-only)
+
+**Inventory demo.** The replay does not yet run detection → tracking → inventory; that
+composition is T-027. Until then, seed a demo database and serve it next to the FM fixture:
+
+```sh
+cargo run -p hk-api --example seed_inventory -- /tmp/hk-inventory.db   # 7 emitters around 11:10 UTC
+cargo run -p hk-cli --bin hk -- serve \
+  --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta \
+  --history-dir /tmp/hk-history --inventory-db /tmp/hk-inventory.db --loop
+```
+
+Any database written by the T-018 inventory adapter (`hk_detect::track::inventory`) also works.
+The seed includes a withheld pager capcode, a withheld own-key sensor and a withheld unclassified
+talkgroup, so the gating is visible. The hk-api tests use the same seed.
 - `--ui-dist DIR` (default `ui/dist`)
 - `--fft N` (default 4096)
 - `--rows-per-s R` (default 25)

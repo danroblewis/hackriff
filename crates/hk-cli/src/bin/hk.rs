@@ -44,6 +44,10 @@ enum Command {
         /// Directory for the spectrum history / floor product (enables /api/history, /api/floor).
         #[arg(long)]
         history_dir: Option<PathBuf>,
+        /// Signal-inventory SQLite database to serve read-only at /api/inventory (not written by
+        /// the replay yet; seed a demo with `cargo run -p hk-api --example seed_inventory`).
+        #[arg(long)]
+        inventory_db: Option<PathBuf>,
         /// Listen address. 0.0.0.0 exposes the API to the whole network (token only, no TLS).
         #[arg(long, default_value = "127.0.0.1:8787")]
         bind: SocketAddr,
@@ -68,6 +72,7 @@ fn main() -> anyhow::Result<()> {
         Command::Serve {
             replay,
             history_dir,
+            inventory_db,
             bind,
             ui_dist,
             fft,
@@ -85,6 +90,7 @@ fn main() -> anyhow::Result<()> {
             hk_cli::serve::run(hk_cli::serve::ServeOptions {
                 replay,
                 history_dir,
+                inventory_db,
                 bind,
                 ui_dist,
                 fft_len: fft,

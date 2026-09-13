@@ -3,6 +3,7 @@
 // per record; binary records carry the 32-byte little-endian record header).
 import { MARK_DROP, MARK_GATED, Waterfall } from "./waterfall";
 import { HistoryPanel } from "./history";
+import { InventoryTable } from "./inventory";
 
 export type Api = (path: string) => Promise<unknown>;
 
@@ -91,6 +92,7 @@ class Live {
     $("gated").hidden = !gatedClass;
     if (gatedClass) $("gated").textContent = `GATED ≤ ${(h.sample_rate_hz ?? 0).toFixed(1)} rows/s`;
     this.axis(h);
+    if (this.sel) this.highlight(...this.sel);
     clearInterval(this.statsTimer);
     this.statsTimer = window.setInterval(() => this.stats(), 500);
   }
@@ -121,6 +123,20 @@ class Live {
       this.historyPanel.setLive(fc - bw / 2, fc + bw / 2, tS, tS + 10);
     }
     this.lastT = tS;
+  }
+
+  private sel: [number, number] | null = null;
+
+  /** Shades a frequency region on the waterfall (hidden when outside the live band). */
+  highlight(fLoHz: number, fHiHz: number) {
+    this.sel = [fLoHz, fHiHz];
+    const el = $("wf-sel"), h = this.header;
+    const bw = h?.bandwidth_hz ?? 0, lo = (h?.center_hz ?? 0) - bw / 2;
+    const a = Math.max(0, (fLoHz - lo) / bw), b = Math.min(1, (fHiHz - lo) / bw);
+    el.hidden = !h || !(bw > 0) || b <= a;
+    if (el.hidden) return;
+    el.style.left = `${a * 100}%`;
+    el.style.width = `max(2px, ${(b - a) * 100}%)`;
   }
 
   private stats() {
@@ -173,7 +189,13 @@ function main() {
     return body;
   };
   const panel = new HistoryPanel(api);
-  void new Live(api, token, panel).start();
+  const live = new Live(api, token, panel);
+  const inventory = new InventoryTable(api, panel, (lo, hi) => {
+    live.highlight(lo, hi);
+    panel.selectRegion(lo, hi);
+  });
+  void live.start();
+  void inventory.load();
 }
 
 main();
