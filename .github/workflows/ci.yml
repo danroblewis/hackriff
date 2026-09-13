@@ -62,4 +62,6 @@ jobs:
         env:
           HK_E2E_REQUIRE_SYNTH: "1"
           HK_REQUIRE_FIXTURES: "1"
-        run: cargo test -p hk-e2e -- --nocapture
+        run: |
+          cargo build -p hk-plugins --bins
+          cargo test -p hk-e2e -- --nocapture

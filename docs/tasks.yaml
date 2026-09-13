@@ -365,7 +365,9 @@ tasks:
     dod: browser app consumes the API; waterfall + table + history view; fps target met or native-shell fallback invoked
   - id: T-024
     title: Wire the 7 slice acceptance tests (docs/11 1.1) in CI
-    status: in-progress
+    status: done
+    commit: "0749296 (merged 522cf77)"
+    note: "7 acceptance tests + legal regression 11/11 in 15 s (3x stable); CI job `acceptance` (LFS, HK_REQUIRE_FIXTURES=1, HK_E2E_REQUIRE_SYNTH=1; only real-readsb half of SIGNAL-001 skips). Model override: opus medium (legal + core pipeline assertions). Gaps found -> T-037 (short-replay coverage attach, calibration load, pilot freq) and T-039 (pipeline family -> priors)"
     deps: [T-015, T-013, T-012, T-020, T-021, T-018, T-019, T-017, T-027]
     parallel_group: J
     use_cases: [SIGNAL-001, AWARE-036, SIGNAL-062, AWARE-006, SPACE-050, AWARE-053, AWARE-042]
@@ -578,6 +580,10 @@ tasks:
     deps: [T-027]
     parallel_group: J
     use_cases: [SPACE-050, AWARE-042, AWARE-036, SIGNAL-062, SIGNAL-001]
+    followups_t024:
+      - "coverage chains miss short lossless replays: attach poll stops at ring close and nothing holds capture for pending chains (0.1 s ADS-B replay -> 0 chains, 0 decodes); acceptance works around with a 2 s scene + ring_s 0.5"
+      - "store the 19 kHz pilot frequency (only lock quality stored today)"
+      - "FSK payload_hex case: stored uppercase vs lowercase truth; pick one and document"
     acceptance: each item fixed or deferred with rationale
     area: crates/hk-pipeline, crates/hk-cli
     needs: none
@@ -598,6 +604,20 @@ tasks:
     effort: medium
     items: "steady 1 MHz OFDM opens a NoiseLike floor-rise Anomaly (SK 0.89) - attack map would explain a normal emitter as jamming; 800 kHz partial-band jammer episode reports 375 kHz extent; letters-only (non-hex) identity tag added via add_emitter_tag not caught by the value-independent tag rule"
     note: "follow-ups from T-036 (merged 2026-09-13 under the timebox rule)"
+  - id: T-039
+    title: Pipeline classification to priors (family -> band-plan prior -> Emitter known/unexpected-here)
+    status: todo
+    deps: [T-027, T-024]
+    parallel_group: J
+    use_cases: [AWARE-053, SIGNAL-062]
+    acceptance: "pipeline-produced Emitters get a family from track/demod evidence (e.g. hk-demod wfm -> fm-broadcast) and the priors lookup sets known or unexpected-here with prior_ref, without the test classifying the Emitter itself; AWARE-053 acceptance test drops its manual classify step"
+    area: crates/hk-pipeline, crates/hk-context (priors mapping), crates/hk-demod (family names)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    dod: "AWARE-053 passes end-to-end through the pipeline; family vocabulary mapping documented; restricted-class rules unaffected (legal regression green)"
+    hold: "start after the T-027 fix agent merges (edits crates/hk-pipeline)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
