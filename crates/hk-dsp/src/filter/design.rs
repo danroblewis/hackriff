@@ -363,9 +363,9 @@ pub fn design_lowpass_with(
 /// The length is about `(A − 8)/(14.357/(2M))`, i.e. ≈ `7.25·M` taps at 60 dB and ≈ `10·M`
 /// at 80 dB.
 pub fn pfb_prototype(channels: usize, stopband_db: f64) -> Result<FirDesign, DesignError> {
-    if channels < 2 || !channels.is_power_of_two() {
+    if channels < 2 || channels % 2 != 0 {
         return Err(DesignError::InvalidSpec(format!(
-            "channel count {channels} must be a power of two >= 2"
+            "channel count {channels} must be even and >= 2"
         )));
     }
     let m = channels as f64;
@@ -420,6 +420,7 @@ mod tests {
     fn rejects_bad_specs() {
         assert!(design_lowpass(LowpassSpec::new(1.0, 0.3, 0.2, 60.0)).is_err());
         assert!(design_lowpass(LowpassSpec::new(1.0, 0.1, 0.6, 60.0)).is_err());
-        assert!(pfb_prototype(12, 60.0).is_err());
+        assert!(pfb_prototype(13, 60.0).is_err());
+        assert!(pfb_prototype(12, 60.0).is_ok());
     }
 }

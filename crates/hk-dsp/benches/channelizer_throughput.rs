@@ -116,7 +116,8 @@ fn main() {
             b / 20.0
         );
     };
-    for m in [64usize, 512] {
+    // 512: power of two; 800: the 25 kHz raster at 20 Msps (any even M is supported).
+    for m in [64usize, 512, 800] {
         let taps = Pfb::new(PfbConfig::new(m)).unwrap().taps();
         let a = pfb_rate(m, &f32_data, &prov);
         let b = pfb_rate(m, &i8_data, &prov);

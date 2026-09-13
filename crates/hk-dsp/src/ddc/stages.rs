@@ -5,9 +5,9 @@ use std::f64::consts::PI;
 use num_complex::Complex32;
 
 use super::plan::{ResampleKind, ResamplePlan};
-use crate::filter::FirDesign;
 use crate::filter::history::History;
 use crate::filter::kernels::{dot_complex, dot_real};
+use crate::filter::{FirDesign, Nco};
 use crate::stft::IqSample;
 
 /// Stage 1: complex band-pass taps at the channel centre, integer decimation, and an NCO
@@ -16,12 +16,13 @@ use crate::stft::IqSample;
 /// With `s` the newest `L` samples (`s[L−1] = x[n]`) and `ω = 2π·f0/fs`:
 /// `y = e^{−jωn} · Σ_i h[i]·e^{jω(L−1−i)}·s[i]`, which equals the input mixed down by `f0`
 /// (phase referenced to sample index 0 of the stream), low-passed by `h` and sampled at `n`;
-/// it represents source index `n − (L−1)/2`.
+/// it represents source index `n − (L−1)/2`. The `e^{−jωn}` term comes from an exact `u64`
+/// [`Nco`], so it is exact at any stream index; the taps use the same quantised frequency.
 pub(crate) struct Xlating {
     taps: Vec<Complex32>,
     len: usize,
     decimation: usize,
-    cycles_per_sample: f64,
+    nco: Nco,
     history: History,
     countdown: usize,
     start: u64,
@@ -36,7 +37,8 @@ impl Xlating {
         fs: f64,
     ) -> Self {
         let len = design.len();
-        let r = center_offset_hz / fs;
+        let nco = Nco::new(center_offset_hz / fs);
+        let r = nco.cycles_per_sample();
         let taps = design
             .taps
             .iter()
@@ -53,7 +55,7 @@ impl Xlating {
             taps,
             len,
             decimation,
-            cycles_per_sample: r,
+            nco,
             history: History::new(len, len.max(decimation)),
             countdown: len,
             start: 0,
@@ -89,9 +91,7 @@ impl Xlating {
             if self.countdown == 0 {
                 let n = self.start + (self.len - 1) as u64 + self.count * self.decimation as u64;
                 let y = dot_complex(&self.taps, self.history.window());
-                let cycles = (self.cycles_per_sample * n as f64).rem_euclid(1.0);
-                let (s, c) = (-2.0 * PI * cycles).sin_cos();
-                let rot = Complex32::new(c as f32, s as f32);
+                let rot = self.nco.rotator(n);
                 self.count += 1;
                 self.countdown = self.decimation;
                 emit(y * rot);
@@ -107,6 +107,12 @@ impl Xlating {
 /// `Σ_j h[φ + (T−1−j)·P] · s[j]` over the newest `T` inputs (`s[T−1] = x[n]`). It represents
 /// input position `n + φ/P − (P·T − 1)/(2P)`. Fractional mode interpolates linearly between
 /// branch tables `⌊μP⌋` and `⌊μP⌋+1` for a real `μ ∈ [0, 1)`.
+///
+/// The extra branch table `P` (used only as the upper interpolation neighbour in fractional
+/// mode) should be branch 0 advanced by one input sample; it is built from `h[P + (T−1−j)·P]`,
+/// so its last coefficient `h[P·T]` (beyond the prototype) is 0 and the `h[0]` term that the
+/// shifted branch 0 would carry is dropped. `h[0]` is the outermost Kaiser-windowed tap
+/// (≈ 1e−4 of the peak or less at 60 dB), so the effect is negligible.
 pub(crate) struct Polyphase {
     kind: ResampleKind,
     phases: usize,

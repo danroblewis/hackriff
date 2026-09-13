@@ -113,6 +113,15 @@ impl StreamTracker {
         }
     }
 
+    /// Records that the latest input's `len` samples were not processed (e.g. the DDC could
+    /// not plan for its rate): the next non-empty block reports them as a gap.
+    pub(crate) fn mark_lost(&mut self, len: u64) {
+        if len > 0 {
+            self.pending_flags |= Discontinuity::GAP;
+            self.pending_dropped += len;
+        }
+    }
+
     /// Flags and losses owed to the next non-empty output block; clears them.
     pub(crate) fn take_pending(&mut self) -> (Discontinuity, u64) {
         let out = (self.pending_flags, self.pending_dropped);

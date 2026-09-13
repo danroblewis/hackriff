@@ -135,8 +135,13 @@ impl Ddc {
         }
     }
 
-    /// Down-converts contiguous samples. Errors only when a sample-rate change makes the spec
-    /// unrealisable (the DDC then stays on its previous plan).
+    /// Down-converts contiguous samples.
+    ///
+    /// Errors when the input's sample rate makes the spec unrealisable. The check runs on every
+    /// call, so every block at such a rate errors, and its samples are counted as lost. The
+    /// first block at a realisable rate re-plans (if needed), restarts, and reports
+    /// `RATE_CHANGE | GAP` with the lost samples. Re-planning allocates; it happens only at a
+    /// rate change.
     pub fn process<T: IqSample>(
         &mut self,
         info: InputInfo<'_>,
@@ -144,16 +149,22 @@ impl Ddc {
     ) -> Result<DdcBlock<'_>, DdcError> {
         let begin = self.tracker.begin(&info, samples.len());
         let fs = info.provenance.tune.sample_rate_hz;
-        if begin.rate_changed && fs != self.plan.input_rate_hz {
-            // A discontinuity event, not steady state: re-planning may allocate.
-            let plan = DdcPlan::new(&self.spec, fs)?;
+        let replan = fs != self.plan.input_rate_hz;
+        if replan {
+            let plan = match DdcPlan::new(&self.spec, fs) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    self.tracker.mark_lost(samples.len() as u64);
+                    return Err(e);
+                }
+            };
             let tracker = std::mem::replace(
                 &mut self.tracker,
                 StreamTracker::new(DEFAULT_CHANNEL_RESET_ON),
             );
             *self = Self::from_plan(self.spec.clone(), plan, tracker, self.out_index);
         }
-        if begin.reset || begin.rate_changed {
+        if begin.reset || begin.rate_changed || replan {
             self.restart(info.time.sample_index);
         }
         let first_source = self.next_source_index();

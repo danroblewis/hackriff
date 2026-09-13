@@ -92,6 +92,35 @@ pub fn fold(acc: &mut [Complex32], taps: &[f32], x: &[Complex32], start: usize) 
     accumulate(&mut acc[..n - i], &taps[i..n], &x[i..n]);
 }
 
+#[inline(always)]
+#[allow(clippy::needless_range_loop)]
+fn accumulate_complex(acc: &mut [Complex32], taps: &[Complex32], x: &[Complex32]) {
+    let k = acc.len();
+    let (taps, x) = (&taps[..k], &x[..k]);
+    for j in 0..k {
+        acc[j].re += taps[j].re * x[j].re - taps[j].im * x[j].im;
+        acc[j].im += taps[j].re * x[j].im + taps[j].im * x[j].re;
+    }
+}
+
+/// [`fold`] with complex taps (a frequency-shifted prototype):
+/// `acc[(start + i) mod M] = Σ taps[i]·x[i]`.
+#[inline]
+pub fn fold_complex(acc: &mut [Complex32], taps: &[Complex32], x: &[Complex32], start: usize) {
+    acc.fill(Complex32::default());
+    let m = acc.len();
+    let n = taps.len().min(x.len());
+    let s = start % m;
+    let head = (m - s).min(n);
+    accumulate_complex(&mut acc[s..s + head], &taps[..head], &x[..head]);
+    let mut i = head;
+    while i + m <= n {
+        accumulate_complex(&mut acc[..m], &taps[i..i + m], &x[i..i + m]);
+        i += m;
+    }
+    accumulate_complex(&mut acc[..n - i], &taps[i..n], &x[i..n]);
+}
+
 /// Converts `src` into `dst` (same length) with full scale 1.
 #[inline]
 pub fn convert_into<T: IqSample>(dst: &mut [Complex32], src: &[T]) {

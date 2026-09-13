@@ -1,9 +1,12 @@
 //! Channelizer (C11): a 2× oversampled polyphase filter bank (PFB) over a dwell window.
 //!
-//! **Geometry.** `M` channels (a power of two) split the input rate `fs` into channels spaced
-//! `Δ = fs/M`, DC-centred like [`crate::spectrum::Spectrum`] bins: channel `c` (0..M) is
-//! centred at `(c − M/2)·Δ`, so channel `M/2` is DC and channel 0 straddles `±fs/2`. Each
-//! channel is output at `2Δ = 2·fs/M` (decimation `M/2`).
+//! **Geometry.** `M` channels (any even count) split the input rate `fs` into channels spaced
+//! `Δ = fs/M`, DC-centred like [`crate::spectrum::Spectrum`] bins and shifted by an optional
+//! raster offset `f_r`: channel `c` (0..M) is centred at `f_r + (c − M/2)·Δ`, so channel `M/2`
+//! is at `f_r` and channel 0 straddles `f_r ± fs/2`. Each channel is output at `2Δ = 2·fs/M`
+//! (decimation `M/2`). Even (not only power-of-two) `M` gives the usual rasters at HackRF
+//! rates, e.g. 12.5/25/100 kHz at 20 Msps with `M` = 1600/800/200; the raster offset aligns the
+//! raster with absolute channel frequencies when the tuner centre is not on the raster.
 //!
 //! **Prototype** ([`pfb_prototype`]): Kaiser low-pass, passband `Δ/2`, stopband `Δ`, default
 //! 60 dB. Every frequency within `±Δ/2` of a channel centre passes flat (edge-straddling
@@ -23,26 +26,33 @@
 //! to the channel centre. The taps carry an extra `(−1)^i` (equivalently `(−1)^slot`, `M`
 //! even), which shifts the FFT by `M/2` bins so bin `c` *is* DC-centred channel `c`: with all
 //! channels active the fold lands directly in the output frame and is transformed in place
-//! (no fftshift, no copy).
+//! (no fftshift, no copy). A raster offset multiplies the taps by `e^{−j2π f_r i/fs}` (window
+//! index `i`) and each frame by `e^{−j2π f_r a₀/fs}` (`a₀` the window's first absolute index),
+//! the latter from an exact `u64` [`Nco`]; the complex fold costs about twice the real one.
 //!
 //! **Output layout.** Frame-major: `samples()[f·A + j]` is frame `f` of the `j`-th active
 //! channel (`A` active channels). [`PfbOutput::frame`] gives a frame as a slice;
-//! [`PfbOutput::channel`] gives one channel as a [`ChannelSamples`] stride view (iterate or copy
-//! out). Frame-major storage is what keeps the bank fast: writing each frame across `M`
+//! [`PfbOutput::channel`] gives one channel as a [`ChannelSamples`] *stride view* (not a
+//! slice). Frame-major storage is what keeps the bank fast: writing each frame across `M`
 //! separate per-channel rows cost more than the fold and FFT together at `M = 512`.
+//! Consumers: a single-channel consumer sets `active = [c]`, so `samples()` is that channel,
+//! contiguous; a multi-channel consumer copies each channel it needs into its own preallocated
+//! buffer with [`ChannelSamples::copy_into`].
 //!
 //! **Time map.** Output sample `t` represents source index `n_t − (L−1)/2` (group delay
 //! removed); [`ChannelTime`] carries the first sample's source index, `M/2` source samples per
 //! output, and a [`SampleTime`] from the input's anchor.
 //!
 //! **Continuity.** Filter state resets (history cleared, no output until `L` new samples) on
-//! the flags in [`DEFAULT_CHANNEL_RESET_ON`] and on any gap. Flags and dropped-sample counts
+//! the flags in [`DEFAULT_CHANNEL_RESET_ON`], on any gap, and on any sample-rate change
+//! (whatever the flags: a window must never mix two rates). Flags and dropped-sample counts
 //! from inputs are delivered on the next *non-empty* output block's [`ChannelHeader`].
 //!
-//! **Placement (ADR-0007).** On the Jetson the PFB runs on the GPU (`channelizer::gpu::CudaPfb`
-//! behind the `gpu` feature; a stub for now). [`Pfb`] is the CPU implementation and fallback:
-//! no per-block allocation in steady state, `Complex32` or `Complex<i8>` input converted as it
-//! enters the filter window.
+//! **Placement (ADR-0007).** On the Jetson the PFB is planned for the GPU (a separate task,
+//! gated on spike S2; `channelizer::gpu::CudaPfb` behind the `gpu` feature is a stub). [`Pfb`]
+//! is the CPU implementation and fallback: no per-block allocation in steady state (a raster
+//! offset's taps are rebuilt, allocating, only on a rate change), `Complex32` or `Complex<i8>`
+//! input converted as it enters the filter window.
 
 mod stream;
 
@@ -52,6 +62,7 @@ pub mod gpu;
 pub use stream::DEFAULT_CHANNEL_RESET_ON;
 pub(crate) use stream::StreamTracker;
 
+use std::f64::consts::PI;
 use std::fmt;
 
 use hk_core::{Discontinuity, ProvenanceHandle};
@@ -61,8 +72,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::fft::{CpuFft, FftBackend};
 use crate::filter::history::History;
-use crate::filter::kernels::fold;
-use crate::filter::{DEFAULT_STOPBAND_DB, DesignError, FirDesign, pfb_prototype};
+use crate::filter::kernels::{fold, fold_complex};
+use crate::filter::{DEFAULT_STOPBAND_DB, DesignError, FirDesign, Nco, pfb_prototype};
 use crate::stft::{InputInfo, IqSample};
 
 /// Maps output samples of a channel stream back to the source stream.
@@ -157,26 +168,36 @@ fn default_stopband_db() -> f64 {
     DEFAULT_STOPBAND_DB
 }
 
-/// PFB settings; also a serde data spec (`{"channels": 64, "stopband_db": 60, "active": [..]}`).
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+/// PFB settings; also a serde data spec
+/// (`{"channels": 800, "stopband_db": 60, "raster_offset_hz": 6250, "active": [..]}`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PfbConfig {
-    /// Channel count `M`: a power of two, 2..=65536.
+    /// Channel count `M`: even, 2..=65536.
     pub channels: usize,
     /// Prototype stopband attenuation, dB (default 60).
     #[serde(default = "default_stopband_db")]
     pub stopband_db: f64,
+    /// Offset of the raster from the input centre, Hz (default 0): channel `M/2` is centred
+    /// here. Normally within `±Δ/2`; larger values just relabel channels.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub raster_offset_hz: f64,
     /// DC-centred channel indices to materialise (in this order); `None` = all `M`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<Vec<usize>>,
 }
 
 impl PfbConfig {
-    /// All `channels` channels, 60 dB stopband.
+    /// All `channels` channels, 60 dB stopband, no raster offset.
     pub fn new(channels: usize) -> Self {
         Self {
             channels,
             stopband_db: DEFAULT_STOPBAND_DB,
+            raster_offset_hz: 0.0,
             active: None,
         }
     }
@@ -184,9 +205,15 @@ impl PfbConfig {
     /// Checks the settings.
     pub fn validate(&self) -> Result<(), ChannelizerError> {
         let m = self.channels;
-        if !(2..=65_536).contains(&m) || !m.is_power_of_two() {
+        if !(2..=65_536).contains(&m) || m % 2 != 0 {
             return Err(ChannelizerError::InvalidConfig(format!(
-                "channels = {m}: need a power of two in 2..=65536"
+                "channels = {m}: need an even count in 2..=65536"
+            )));
+        }
+        if !self.raster_offset_hz.is_finite() {
+            return Err(ChannelizerError::InvalidConfig(format!(
+                "raster offset {} is not finite",
+                self.raster_offset_hz
             )));
         }
         if let Some(active) = &self.active {
@@ -225,20 +252,27 @@ impl PfbConfig {
         2.0 * input_rate_hz / self.channels as f64
     }
 
-    /// Centre offset of DC-centred channel `c`, Hz.
+    /// Centre offset of DC-centred channel `c` from the input centre, Hz.
     pub fn channel_offset_hz(&self, c: usize, input_rate_hz: f64) -> f64 {
-        (c as f64 - (self.channels / 2) as f64) * self.channel_spacing_hz(input_rate_hz)
+        self.raster_offset_hz
+            + (c as f64 - (self.channels / 2) as f64) * self.channel_spacing_hz(input_rate_hz)
     }
 
-    /// The channel whose centre is nearest `offset_hz`.
+    /// The channel whose centre is nearest `offset_hz` (from the input centre).
     pub fn channel_for_offset_hz(&self, offset_hz: f64, input_rate_hz: f64) -> usize {
         let m = self.channels as i64;
-        let k = (offset_hz / self.channel_spacing_hz(input_rate_hz)).round() as i64;
+        let rel = offset_hz - self.raster_offset_hz;
+        let k = (rel / self.channel_spacing_hz(input_rate_hz)).round() as i64;
         (k + m / 2).rem_euclid(m) as usize
     }
 }
 
-/// One channel's samples in a frame-major [`PfbOutput`]: a stride view, no copy.
+/// One channel's samples in a frame-major [`PfbOutput`].
+///
+/// This is a **stride view, not a slice**: sample `t` lives at `t·A + slot` of the frame-major
+/// buffer, so there is no `&[Complex32]` for it. Iterate it, [`get`](Self::get) samples, or
+/// [`copy_into`](Self::copy_into) a preallocated buffer. For a contiguous slice of one channel,
+/// configure the bank with `active = [c]` and use [`PfbOutput::samples`].
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelSamples<'a> {
     data: &'a [Complex32],
@@ -269,7 +303,7 @@ impl<'a> ChannelSamples<'a> {
         (0..self.frames).map(move |t| data[t * width + slot])
     }
 
-    /// Copies the samples into `out[..len]`.
+    /// Copies the samples into `out[..len]` (no allocation).
     pub fn copy_into(&self, out: &mut [Complex32]) {
         for (o, s) in out[..self.frames].iter_mut().zip(self.iter()) {
             *o = s;
@@ -293,6 +327,8 @@ pub struct PfbOutput<'a> {
     pub channels: usize,
     /// Channel spacing, Hz.
     pub channel_spacing_hz: f64,
+    /// Raster offset from the input centre, Hz.
+    pub raster_offset_hz: f64,
     active: &'a [usize],
     slot_of: &'a [u32],
     data: &'a [Complex32],
@@ -309,7 +345,8 @@ impl<'a> PfbOutput<'a> {
         self.frames == 0
     }
 
-    /// All samples, frame-major: `[f · active.len() + slot]`.
+    /// All samples, frame-major: `[f · active.len() + slot]`. With a single active channel
+    /// this is that channel's samples, contiguous.
     pub fn samples(&self) -> &'a [Complex32] {
         self.data
     }
@@ -320,13 +357,13 @@ impl<'a> PfbOutput<'a> {
         &self.data[f * a..(f + 1) * a]
     }
 
-    /// Samples of DC-centred channel `c`, if materialised.
+    /// Stride view of DC-centred channel `c`, if materialised.
     pub fn channel(&self, c: usize) -> Option<ChannelSamples<'a>> {
         let slot = *self.slot_of.get(c)?;
         (slot != u32::MAX).then(|| self.slot(slot as usize))
     }
 
-    /// Samples of the `j`-th materialised channel.
+    /// Stride view of the `j`-th materialised channel.
     pub fn slot(&self, j: usize) -> ChannelSamples<'a> {
         assert!(j < self.active.len(), "slot {j} out of range");
         ChannelSamples {
@@ -339,7 +376,7 @@ impl<'a> PfbOutput<'a> {
 
     /// Centre offset of channel `c` from the input centre, Hz.
     pub fn channel_offset_hz(&self, c: usize) -> f64 {
-        (c as f64 - (self.channels / 2) as f64) * self.channel_spacing_hz
+        self.raster_offset_hz + (c as f64 - (self.channels / 2) as f64) * self.channel_spacing_hz
     }
 }
 
@@ -355,7 +392,7 @@ pub trait PfbBackend: Send {
     /// The analysis prototype.
     fn prototype(&self) -> &FirDesign;
 
-    /// Filter-state reset flags (a gap always resets).
+    /// Filter-state reset flags (a gap or rate change always resets).
     fn set_reset_on(&mut self, flags: Discontinuity);
 
     /// Channelises contiguous `Complex32` samples.
@@ -368,12 +405,21 @@ pub trait PfbBackend: Send {
     fn reset(&mut self);
 }
 
+/// Frequency-shifted prototype for a raster offset at one input rate.
+struct Raster {
+    rate_hz: f64,
+    nco: Nco,
+    /// Taps `h[i]·(−1)^i·e^{−j2π f_r i/fs}` and their negation.
+    taps: [Vec<Complex32>; 2],
+}
+
 /// CPU polyphase filter bank. See the [module docs](self).
 pub struct Pfb {
     config: PfbConfig,
     design: FirDesign,
     /// Prototype taps times `(−1)^i`: shifts FFT bins so bin `c` is channel `c`.
     shifted_taps: [Vec<f32>; 2],
+    raster: Option<Raster>,
     m: usize,
     d: usize,
     len: usize,
@@ -419,6 +465,7 @@ impl Pfb {
             acc: vec![Complex32::default(); m],
             fft: CpuFft::new(m),
             shifted_taps: [even, odd],
+            raster: None,
             config,
             design,
             m,
@@ -454,6 +501,38 @@ impl Pfb {
         self.frames_since_reset = 0;
     }
 
+    /// Builds the shifted prototype for a raster offset at `fs` (allocates; first input and
+    /// rate changes only).
+    fn prepare_raster(&mut self, fs: f64) {
+        if self.config.raster_offset_hz == 0.0 {
+            self.raster = None;
+            return;
+        }
+        if self.raster.as_ref().is_some_and(|r| r.rate_hz == fs) {
+            return;
+        }
+        let nco = Nco::new(self.config.raster_offset_hz / fs);
+        let r = nco.cycles_per_sample();
+        let even: Vec<Complex32> = self
+            .design
+            .taps
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| {
+                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                let ph = -2.0 * PI * r * i as f64;
+                let a = sign * f64::from(h);
+                Complex32::new((a * ph.cos()) as f32, (a * ph.sin()) as f32)
+            })
+            .collect();
+        let odd = even.iter().map(|&t| -t).collect();
+        self.raster = Some(Raster {
+            rate_hz: fs,
+            nco,
+            taps: [even, odd],
+        });
+    }
+
     fn window_end(&self, frame: u64) -> u64 {
         self.start + (self.len - 1) as u64 + frame * self.d as u64
     }
@@ -461,23 +540,26 @@ impl Pfb {
     /// Channelises contiguous samples of either type. See [`PfbBackend::process_c32`].
     pub fn process<T: IqSample>(&mut self, info: InputInfo<'_>, samples: &[T]) -> PfbOutput<'_> {
         let begin = self.tracker.begin(&info, samples.len());
-        if begin.reset {
+        let fs = info.provenance.tune.sample_rate_hz;
+        if begin.rate_changed {
+            self.prepare_raster(fs);
+        }
+        if begin.reset || begin.rate_changed {
             self.restart(info.time.sample_index);
         }
-        let fs = info.provenance.tune.sample_rate_hz;
         let first_end = self.window_end(self.frames_since_reset);
         let first_out = self.out_index;
 
-        let upcoming = if samples.len() >= self.countdown {
-            1 + (samples.len() - self.countdown) / self.d
-        } else {
+        // Worst case for this block length, so a given length never re-grows the buffer.
+        let worst = if samples.is_empty() {
             0
+        } else {
+            1 + (samples.len() - 1) / self.d
         };
-        if upcoming > self.frame_cap {
-            // Grows only when a block is larger than any before (not in steady state).
-            self.frame_cap = upcoming;
+        if worst > self.frame_cap {
+            self.frame_cap = worst;
             self.out
-                .resize(self.active.len() * upcoming, Complex32::default());
+                .resize(self.active.len() * worst, Complex32::default());
         }
 
         let mut frames = 0;
@@ -518,6 +600,7 @@ impl Pfb {
             frames,
             channels: self.m,
             channel_spacing_hz: self.config.channel_spacing_hz(fs),
+            raster_offset_hz: self.config.raster_offset_hz,
             active: &self.active,
             slot_of: &self.slot_of,
             data: &self.out[..frames * self.active.len()],
@@ -527,20 +610,42 @@ impl Pfb {
     #[inline]
     fn frame(&mut self, f: usize) {
         let n = self.window_end(self.frames_since_reset);
-        // Fold each window sample into slot (absolute index) mod M; see the module docs.
-        let mask = self.m - 1;
-        let first = ((n + 1 - self.len as u64) & mask as u64) as usize;
-        let taps = &self.shifted_taps[first & 1];
-        if self.all_active {
-            let dst = &mut self.out[f * self.m..(f + 1) * self.m];
-            fold(dst, taps, self.history.window(), first);
-            self.fft.forward(dst);
-        } else {
-            fold(&mut self.acc, taps, self.history.window(), first);
-            self.fft.forward(&mut self.acc);
-            let a = self.active.len();
-            for (o, &c) in self.out[f * a..(f + 1) * a].iter_mut().zip(&self.active) {
-                *o = self.acc[c];
+        // The window's first absolute index; each sample folds into slot (index mod M).
+        let a0 = n + 1 - self.len as u64;
+        let first = (a0 % self.m as u64) as usize;
+        let a = self.active.len();
+        match &self.raster {
+            None => {
+                let taps = &self.shifted_taps[first & 1];
+                if self.all_active {
+                    let dst = &mut self.out[f * a..(f + 1) * a];
+                    fold(dst, taps, self.history.window(), first);
+                    self.fft.forward(dst);
+                } else {
+                    fold(&mut self.acc, taps, self.history.window(), first);
+                    self.fft.forward(&mut self.acc);
+                    for (o, &c) in self.out[f * a..(f + 1) * a].iter_mut().zip(&self.active) {
+                        *o = self.acc[c];
+                    }
+                }
+            }
+            Some(raster) => {
+                let taps = &raster.taps[first & 1];
+                let rot = raster.nco.rotator(a0);
+                if self.all_active {
+                    let dst = &mut self.out[f * a..(f + 1) * a];
+                    fold_complex(dst, taps, self.history.window(), first);
+                    self.fft.forward(dst);
+                    for v in dst.iter_mut() {
+                        *v *= rot;
+                    }
+                } else {
+                    fold_complex(&mut self.acc, taps, self.history.window(), first);
+                    self.fft.forward(&mut self.acc);
+                    for (o, &c) in self.out[f * a..(f + 1) * a].iter_mut().zip(&self.active) {
+                        *o = self.acc[c] * rot;
+                    }
+                }
             }
         }
         self.frames_since_reset += 1;
@@ -592,19 +697,30 @@ mod tests {
         assert_eq!(c.channel_for_offset_hz(-1e3, 8e3), 3);
         assert_eq!(c.channel_for_offset_hz(4e3, 8e3), 0);
         assert_eq!(c.output_rate_hz(8e3), 2e3);
+        let r = PfbConfig {
+            raster_offset_hz: 300.0,
+            ..PfbConfig::new(12)
+        };
+        assert_eq!(r.channel_offset_hz(6, 12e3), 300.0);
+        assert_eq!(r.channel_for_offset_hz(1_300.0, 12e3), 7);
     }
 
     #[test]
     fn config_serde_and_validation() {
         let c: PfbConfig = serde_json::from_str(r#"{"channels": 64, "active": [1, 2]}"#).unwrap();
         assert_eq!(c.stopband_db, 60.0);
+        assert_eq!(c.raster_offset_hz, 0.0);
         assert!(c.validate().is_ok());
-        assert!(PfbConfig::new(48).validate().is_err());
+        assert!(PfbConfig::new(800).validate().is_ok());
+        assert!(PfbConfig::new(49).validate().is_err());
         let dup = PfbConfig {
             active: Some(vec![3, 3]),
             ..PfbConfig::new(8)
         };
         assert!(dup.validate().is_err());
         assert!(serde_json::from_str::<PfbConfig>(r#"{"channels": 8, "bogus": 1}"#).is_err());
+        let r: PfbConfig =
+            serde_json::from_str(r#"{"channels": 1600, "raster_offset_hz": 6250}"#).unwrap();
+        assert_eq!(r.raster_offset_hz, 6250.0);
     }
 }
