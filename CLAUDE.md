@@ -4,7 +4,7 @@ An exploration-first signals-analysis tool for software defined radio. It's mean
 
 ## Status
 
-**Phase: architecture planning.** There is no product code yet. Research is finished and lives in `docs/`. The next deliverables are a capability map, a data model, architecture decisions, risks and spikes, a test strategy, and a first vertical slice. The planning brief is `prompts/fable-architecture-planning.md`. Read the docs before proposing designs; don't re-research what they already cover.
+**Phase: architecture planning.** There is no product code yet. Research is finished and lives in `docs/`. The next deliverables are a capability map, a data model, architecture decisions, risks and spikes, a test strategy, a first vertical slice, and an executable implementation plan for that slice (task state file, Engineering and Coordination sections added here). The planning brief is `prompts/fable-architecture-planning.md`. Read the docs before proposing designs; don't re-research what they already cover.
 
 `tools/` holds the user's quick HackRF experiments, not product code:
 - `sweep_plot.py` plots `hackrf_sweep` CSV output and lists peaks.
@@ -81,6 +81,14 @@ Items in `docs/05` and `docs/use-cases.yaml` are acceptance targets:
 
 - Docs are numbered markdown files in `docs/` with inline source links and a Sources section. Mark anything unverified. Keep `docs/README.md` indexed. Architecture decisions go in `docs/adr/NNNN-title.md`.
 - Use-case IDs are permanent. Never renumber; append new ones. Keep docs/05 and `use-cases.yaml` in sync.
+- **Per-capability context:** `docs/capabilities/Cnn-slug.md` cards (index: `docs/capabilities/README.md`) condense docs 01–05 for each capability in docs/06. Agents read the relevant cards and their reading lists, not the full research docs. Keep cards in sync when the taxonomy or ADRs change.
+- **Model and effort choice:** follow `prompts/model-selection.md` when starting sessions, briefing subagents, or writing task entries.
+  - Fable: architecture, core contracts, novel DSP, hard debugging.
+  - Opus: coordinator, core real-time implementation, reviews.
+  - Sonnet: well-specified tasks with tests.
+  - Haiku: mechanical work.
+
+  Changes to core interfaces, the real-time path, or legal-guardrail areas never go to Sonnet or Haiku alone.
 - Don't recommend SDR#/GQRX-style tune-and-listen tools as answers; the user wants exploration and analysis tooling.
 - The user runs the `md` doc viewer and cloudflared tunnel themselves. Don't start, restart or kill those processes.
 - Ask before committing.

@@ -13,6 +13,7 @@ _Research completed 2026-09-13. Items the agents could not confirm are marked **
 | 03 | [SDR Software](03-sdr-software.md) | ~9.0k | Frameworks (GNU Radio 3.10/4.0, Rust, liquid-dsp), receiver apps, survey and analysis tools, trunking, automatic modulation classification in practice, UX critique, gap table |
 | 04 | [Radio Engineering & Signals Analysis](04-radio-engineering-and-signals-analysis.md) | ~13.8k | Spectrum use, what makes a signal interesting, detection (CFAR, spectral kurtosis), parameter estimation, AMC, auto-demod and squelch, protocol ID, trunking, DF, calibration, professional monitoring workflow. Includes the legal notes on decrypting your own traffic. |
 | 05 | [Use-Cases & Explorations](05-use-cases-and-explorations.md) | ~12.3k | A 391-item, one-line-each catalogue across five themes: space weather and natural radio, propagation and RF sensing, spectrum awareness and anomalies (the radio "attack map"), the long tail of receivable signals, and unknown signals / security / lab / ML. **These are the feature goals and future test suite.** Each item has a permanent ID. |
+| 06 | [Capability map](06-capability-map.md) | — | **Planning (Phase 1).** 39 engineering capabilities in seven layers, mapping rules for `use-cases.yaml`, and (after mapping) coverage analysis: the shared core, native-fit counts, and costly capabilities to defer. |
 | — | [use-cases.yaml](use-cases.yaml) | — | Machine-readable copy of 05 and the source of truth for use-case IDs (`SPACE-`, `PROP-`, `AWARE-`, `SIGNAL-`, `RESEARCH-`). Architecture planning fills in `capabilities`, `hardware_fit` and `test_tier`. |
 
 ## Findings across the four documents
@@ -41,4 +42,4 @@ _Research completed 2026-09-13. Items the agents could not confirm are marked **
 
 ## Next
 
-Ideation and requirements for the hackriff software and device.
+Architecture planning is under way (brief: `prompts/fable-architecture-planning.md`). Planning documents are numbered from 06 onward; decisions go in `adr/`.

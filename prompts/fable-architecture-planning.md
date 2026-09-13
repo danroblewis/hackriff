@@ -6,7 +6,20 @@ This is a **planning** engagement. Don't write product code. Small throwaway spi
 
 ## How to work
 
-- **Run the phases in order. At each ⏸ checkpoint, stop,** summarize in about 15 lines what you produced and the decisions you need, and wait for the user. The user is a single developer who wants to be involved in trade-offs, not handed a finished tome.
+- **Run the phases in order, autonomously. Don't stop at ⏸ checkpoints.** At each checkpoint:
+  - make the decision yourself, choosing the option that is cheapest to reverse, and mark it **PROVISIONAL**
+  - log it in `docs/planning-log.md`, a short running file with the current phase, provisional decisions, and ranked questions for the user
+  - continue
+
+  The user reviews the log afterwards.
+- **Conserve Fable usage.** Make judgment calls yourself: taxonomy, the data model's core, and the runtime and UI ADRs. Delegate drafting, mapping, card updates and reviews to subagents per `prompts/model-selection.md`.
+- **Survive usage limits.** At the start, create a recurring `CronCreate` heartbeat (e.g. `7,27,47 * * * *`) whose prompt is: "Continue the planning brief from docs/planning-log.md; if all phases are done, delete this heartbeat." Commit after each phase, so a resumed session loses nothing.
+- **Before Phase 2, apply the Phase 1 follow-ups:**
+  - resolve `docs/capabilities/taxonomy-feedback.md` in docs/06
+  - re-map RESEARCH-027 (jamming is illegal) to `out-of-scope`
+  - give the scheduler, channelizer, param-estimation and noise-floor places in the §4.2 build order
+  - propose trunking use cases, marked `proposed`
+  - update the affected capability cards
 - **Read first.** Before Phase 1, read `CLAUDE.md`, all of `docs/01`–`05`, and `docs/use-cases.yaml`. Don't redo research the docs already cover.
   - When a decision depends on facts the docs don't settle (current Jetson modules, GNU Radio 4 runtime reconfiguration, FutureSDR maturity), verify against primary sources on the web and cite them.
   - Mark anything unverified.
@@ -140,4 +153,53 @@ For each risk, define a spike: hypothesis, setup, pass/fail criterion, estimated
 - Define its acceptance tests.
 - Lay out milestones after the slice, ordered by shared-core coverage from Phase 1.
 
-**⏸ Final checkpoint:** a summary of all decisions, open questions, and the recommended next implementation step.
+**⏸ Checkpoint:** a summary of all decisions and open questions so far, before turning the roadmap into an executable plan.
+
+## Phase 7: Implementation plan for slice 1 → `docs/12-implementation-plan.md`
+
+Turn the roadmap into something a **coordinator session** can execute. The user plans to run development from one long-lived session that delegates to subagents and workflows. The files, not the conversation, must carry all plan state.
+
+1. **Spike execution order.**
+   - Which approved spikes run first.
+   - Which can run on the user's Mac with the HackRF One now, and which need the Jetson.
+   - Which ADRs stay **provisional** until a spike passes, and what changes if it fails.
+2. **Repo scaffold.**
+   - Directory layout.
+   - Language and toolchain per component.
+   - Build system and dependency management.
+   - How to develop on macOS and build, deploy and run on the Jetson (cross-build, remote build, or on-device).
+   - Where fixtures live (Git LFS or external).
+3. **Dev environment and CI.**
+   - HackRF on macOS.
+   - JetPack setup.
+   - CI that runs DSP unit tests and end-to-end IQ-replay tests with no hardware.
+   - How hardware-in-the-loop and field tests are triggered and recorded.
+4. **Fixture capture plan.** What to record with the HackRF One for slice 1's acceptance tests: frequencies, durations, gain settings, SigMF annotations. Include which public sample sets to fetch, with licences checked.
+5. **Ordered task list** for slice 1. Each task:
+   - is sized for one subagent or one short session
+   - has a stable task ID
+   - lists dependencies
+   - names the use case IDs and acceptance tests it serves
+   - gives files and areas touched, so parallel work in worktrees doesn't collide
+   - says whether it needs the user or hardware (these stay with the coordinator, not background agents)
+   - has a clear definition of done
+   - carries recommended `model` and `effort` values chosen with `prompts/model-selection.md`, plus any review step required before merge
+   - has a **reading list**: at most 5 pointers, drawn from `docs/capabilities/` cards, ADRs and data-model sections
+
+   Mark which tasks can run in parallel.
+6. **Task state file.** Make `docs/12-implementation-plan.md` (or a companion `docs/tasks.yaml` if clearer) the single source of truth for status: todo, in-progress, blocked, done, plus links to commits and PRs. A fresh coordinator session must be able to resume from it alone.
+7. **Hardware shopping list with timing:**
+   - Jetson module and carrier
+   - storage
+   - display and input
+   - battery and power
+   - filter bank, LNA/bias-tee, antennas, GPSDO (if needed)
+
+   For each part, give why it's needed, which spike or milestone needs it by when, and rough cost (mark prices unverified).
+8. **Update `CLAUDE.md`** with two new sections, kept concise because every session loads the file:
+   - **Engineering:** repo layout, build/test/run commands (including IQ-replay tests), coding conventions, dependency and licence ledger rule, and how to add a use case or fixture.
+   - **Coordination:** how the coordinator briefs subagents, which files and ADRs to read, use case IDs as the definition of done, short summaries back with results in files. It should also cover worktree isolation and merge/review rules for parallel code changes, where task state lives and how to update it, what must stay interactive with the user (hardware, trade-offs), and "ask before committing".
+
+   Also refresh the Status section.
+
+**⏸ Final checkpoint:** a summary of all decisions, which ADRs are still provisional, the first three things to do (e.g. "run spike S1 on the Mac, order the Jetson, start task T-001"), and anything the user must decide or buy before development can start.

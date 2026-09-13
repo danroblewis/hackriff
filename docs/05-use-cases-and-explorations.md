@@ -466,6 +466,18 @@ References were link-checked. A few publisher and DOI links block automated chec
 - `SIGNAL-078` **Avalanche beacons** — Receive 457 kHz transceiver pulses and experiment with field-strength direction finding. `457 kHz` · `HF SDR + ferrite loop` · [wiki](https://en.wikipedia.org/wiki/Avalanche_transceiver)
 - `SIGNAL-079` **Hearing-aid induction loops** — Pick up the audio-frequency magnetic field of telecoil loops in venues with a coil into a soundcard, and map loop coverage. `audio-frequency magnetic` · `coil + soundcard` · [wiki](https://en.wikipedia.org/wiki/Audio_induction_loop)
 
+### Trunked Radio Systems (proposed 2026-09-13)
+
+Added during architecture planning: docs/04 §8 identifies trunk following as the most-requested scanner capability, yet the original catalogue had almost none. These are `proposed` (marked `status: proposed` in `use-cases.yaml`) pending the user's accept/reject. Wideband capture of a system's span lets one receiver decode the control channel and every simultaneous voice channel (docs/04 §8.2).
+
+- `SIGNAL-080` **P25 Phase 1 trunk following** — Decode the control channel continuously, follow group voice grants onto channelized voice channels, and log every simultaneous call with talkgroup, radio ID, site and timestamps. `150–174 / 450–470 / 700 / 806–869 MHz` · `RX` · [Trunk Recorder](https://github.com/TrunkRecorder/trunk-recorder)
+- `SIGNAL-081` **P25 Phase 2 TDMA trunk following** — Follow a system with a Phase 1 FDMA control channel and 2-slot H-DQPSK TDMA voice, demodulating both slots per granted channel. `700 / 800 MHz` · `RX`
+- `SIGNAL-082` **DMR Tier III / Capacity Plus trunk following** — Track trunked DMR (ETSI Tier III, Motorola Capacity Plus/Connect Plus) via control or rest-channel signalling with automatic LCN-to-frequency mapping. `VHF / UHF / 800 MHz` · `RX`
+- `SIGNAL-083` **Motorola SmartNet/SmartZone (Type II) following** — Decode the 3600 bps control channel and follow analog-FM or P25 voice grants, a common legacy public-safety configuration. `806–869 MHz` · `RX`
+- `SIGNAL-084` **NXDN Type-C / EDACS control-channel decode** — Decode NXDN Type-C or EDACS control channels and follow grants, covering the remaining common LMR trunking families. `VHF / UHF` · `RX`
+- `SIGNAL-085` **Automatic control-channel discovery** — Find a control channel with no prior research: flag continuous 100%-duty 4FSK/C4FM on the LMR raster, confirm by frame sync, and propose "this looks like P25 Phase 1, follow it?". `VHF / UHF / 700 / 800 MHz` · `RX`
+- `SIGNAL-086` **Encryption-aware call logging (metadata only)** — Read P25 ALGID/Key ID and DMR privacy indicators to label and skip encrypted calls, recording only metadata, never decrypting others' traffic. `VHF / UHF / 700 / 800 MHz` · `RX`
+
 ## 5. Unknown Signals, Security Research, Lab Engineering & ML
 
 ### Blind protocol & signal reverse engineering
