@@ -8,6 +8,7 @@
 
 pub mod pipeline;
 pub mod serve;
+pub mod signal;
 
 use std::fmt::Write as _;
 use std::fs::File;

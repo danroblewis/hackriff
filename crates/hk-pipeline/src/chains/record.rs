@@ -163,6 +163,7 @@ fn run_inner(
     meta.global.sample_rate = Some(fs);
     meta.global.description = Some(format!("hk-pipeline pre-trigger recording ({label})"));
     meta.global.recorder = Some("hk-pipeline".into());
+    meta.global.hw = shared.cfg.device_hw.clone();
     meta.global.provenance = Some(prov.get().clone());
     meta.captures = captures;
     meta.write(&meta_path)

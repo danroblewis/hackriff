@@ -21,13 +21,22 @@
 //! Pfa at 1e-6 (T-006 review). The cost of no overlap is ~1.8 dB (Hann ENBW) sensitivity loss to
 //! bursts shorter than one segment, which the S4 profiles already assume. History and spectrum
 //! readers keep their own STFTs (50 % overlap is harmless there: no thresholds).
+//!
+//! # Calibration (T-037a)
+//!
+//! [`PipelineConfig::calibrations`] holds T-021 `CalibrationState` versions (JSON as
+//! hk-model serialises them; [`load_calibrations`] reads a file with one state or an array, or a
+//! directory of `*.json`). The run loads them into its `FloorProduct` and pins, on every block
+//! whose provenance names no calibration, the newest non-superseded version for that block's
+//! `device_id`. Floors are then calibrated (dBm/Hz) in the pipeline, not after the run.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use hk_model::{
-    ContentClass, FreqRange, PlanRegion, ScanPlan, ScanPlanId, ScanPolicy, Schedule, Timestamp,
+    CalibrationState, ContentClass, FreqRange, PlanRegion, ScanPlan, ScanPlanId, ScanPolicy,
+    Schedule, Timestamp,
 };
 use hk_stream::{PublisherHandle, StreamHeader};
 use serde::{Deserialize, Serialize};
@@ -158,6 +167,47 @@ pub struct PipelineConfig {
     pub stream_sink: Option<StreamSink>,
     /// Spectrum stream id.
     pub spectrum_stream_id: String,
+    /// Calibration versions for in-pipeline calibrated floors (see the module docs).
+    pub calibrations: Vec<CalibrationState>,
+    /// Capture hardware description for SigMF `core:hw` (e.g. HackRF serial and firmware).
+    pub device_hw: Option<String>,
+}
+
+/// Reads T-021 `CalibrationState` JSON: a file holding one state or an array of states, or a
+/// directory of such `*.json` files (read in name order).
+pub fn load_calibrations(path: &Path) -> anyhow::Result<Vec<CalibrationState>> {
+    let files: Vec<PathBuf> = if path.is_dir() {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        v.sort();
+        v
+    } else {
+        vec![path.to_path_buf()]
+    };
+    let mut out = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("reading {}", file.display()))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+        let items = match value {
+            serde_json::Value::Array(items) => items,
+            one => vec![one],
+        };
+        for item in items {
+            out.push(
+                serde_json::from_value(item)
+                    .with_context(|| format!("{}: not a CalibrationState", file.display()))?,
+            );
+        }
+    }
+    if out.is_empty() {
+        anyhow::bail!("no CalibrationState in {}", path.display());
+    }
+    Ok(out)
 }
 
 impl PipelineConfig {
@@ -188,6 +238,8 @@ impl PipelineConfig {
             manifest_root: default_manifest_root(),
             stream_sink: None,
             spectrum_stream_id: "spectrum/live".into(),
+            calibrations: Vec::new(),
+            device_hw: None,
         })
     }
 }
@@ -244,5 +296,39 @@ mod tests {
         assert_eq!((s.fft_len, s.ring_s), (Some(1024), 2.0));
         plan.extra = serde_json::json!({ "pipeline": { "bogus": 1 } });
         assert!(PipelineSettings::from_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn calibrations_load_from_a_state_an_array_or_a_directory() {
+        use hk_dsp::radiometry::{SyntheticCalSegment, synthetic_calibration_state};
+        use hk_model::GainSetting;
+        let dir = std::env::temp_dir().join(format!(
+            "hk-pipeline-cal-{}-{}",
+            std::process::id(),
+            Timestamp::now().as_unix_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let seg = SyntheticCalSegment {
+            band: FreqRange::centered(100e6, 2e6),
+            gain: GainSetting {
+                lna_db: 32.0,
+                vga_db: 30.0,
+                amp_on: true,
+            },
+            k_db: -70.0,
+        };
+        let a = synthetic_calibration_state("hackrf:a", &[seg], 0.2, Timestamp::UNIX_EPOCH);
+        let b = synthetic_calibration_state("hackrf:b", &[seg], 0.2, Timestamp::UNIX_EPOCH);
+        std::fs::write(dir.join("a.json"), serde_json::to_vec(&a).unwrap()).unwrap();
+        std::fs::write(dir.join("b.json"), serde_json::to_vec(&vec![&b]).unwrap()).unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        assert_eq!(
+            load_calibrations(&dir.join("a.json")).unwrap(),
+            vec![a.clone()]
+        );
+        assert_eq!(load_calibrations(&dir).unwrap(), vec![a, b]);
+        std::fs::write(dir.join("c.json"), "{\"not\": \"a state\"}").unwrap();
+        assert!(load_calibrations(&dir).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

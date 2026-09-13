@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Parser, Subcommand};
 use hk_api::stream::StreamReader;
+use hk_cli::pipeline::LiveArgs;
 
 #[derive(Parser)]
 #[command(name = "hk", version, about = "hackriff control CLI")]
@@ -39,9 +40,48 @@ enum Command {
         /// Offline feed cache directory for anomaly correlation.
         #[arg(long)]
         feeds: Option<PathBuf>,
+        /// T-021 CalibrationState JSON (a file or a directory) for calibrated floors.
+        #[arg(long)]
+        calibration: Option<PathBuf>,
         /// Only print the recording's metadata summary.
         #[arg(long)]
         info: bool,
+        /// Print the summary as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Built UI directory (with --serve; default: ui/dist).
+        #[arg(long)]
+        ui_dist: Option<PathBuf>,
+    },
+    /// Run the whole pipeline over the live HackRF One (receive only) until --duration or Ctrl-C,
+    /// then print the run summary. Needs a build with `--features hackrf`.
+    Run {
+        /// Live source: `hackrf` (first device) or `hackrf:<serial>`.
+        #[arg(long, default_value = "hackrf")]
+        source: String,
+        #[command(flatten)]
+        live: LiveArgs,
+        /// Stop after this many seconds (default: until Ctrl-C).
+        #[arg(long)]
+        duration: Option<f64>,
+        /// Data directory. Default: a fresh temp directory.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// ScanPlan JSON.
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        /// Serve the API during the run and afterwards.
+        #[arg(long)]
+        serve: Option<SocketAddr>,
+        /// Drive the attention scheduler (it retunes the radio over the plan).
+        #[arg(long)]
+        schedule: bool,
+        /// Offline feed cache directory for anomaly correlation.
+        #[arg(long)]
+        feeds: Option<PathBuf>,
+        /// T-021 CalibrationState JSON (a file or a directory).
+        #[arg(long)]
+        calibration: Option<PathBuf>,
         /// Print the summary as JSON.
         #[arg(long)]
         json: bool,
@@ -63,34 +103,39 @@ enum Command {
         #[arg(long)]
         count: Option<u64>,
     },
-    /// Serve the web UI: replay a recording as a live spectrum stream over the WebSocket bridge,
-    /// with optional spectrum history. Prints the URL with the API token (set HK_TOKEN to fix it).
+    /// Serve the web UI over the whole pipeline: the live HackRF One by default (receive only;
+    /// needs `--features hackrf`), or `--replay` a recording. The inventory, history and status
+    /// show only what this run detected. Prints the URL with the API token (HK_TOKEN fixes it).
     Serve {
-        /// Path to a `.sigmf-meta` file to replay in real time.
+        /// Live HackRF One (the default source); `--hackrf SERIAL` picks a device.
+        #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with = "replay")]
+        hackrf: Option<String>,
+        #[command(flatten)]
+        live: LiveArgs,
+        /// Replay this `.sigmf-meta` recording in real time instead of the live radio.
         #[arg(long)]
-        replay: PathBuf,
-        /// Directory for the spectrum history / floor product (enables /api/history, /api/floor).
+        replay: Option<PathBuf>,
+        /// Replay again when the recording ends (the stream continues).
+        #[arg(long = "loop", requires = "replay")]
+        loop_replay: bool,
+        /// Data directory (database, history, recordings). Default: a fresh temp directory.
         #[arg(long)]
-        history_dir: Option<PathBuf>,
-        /// Signal-inventory SQLite database to serve read-only at /api/inventory (not written by
-        /// the replay yet; seed a demo with `cargo run -p hk-api --example seed_inventory`).
+        data_dir: Option<PathBuf>,
+        /// T-021 CalibrationState JSON (a file or a directory).
         #[arg(long)]
-        inventory_db: Option<PathBuf>,
+        calibration: Option<PathBuf>,
         /// Listen address. 0.0.0.0 exposes the API to the whole network (token only, no TLS).
         #[arg(long, default_value = "127.0.0.1:8787")]
         bind: SocketAddr,
         /// Built UI directory (default: ui/dist).
         #[arg(long)]
         ui_dist: Option<PathBuf>,
-        /// FFT length (bins per row).
+        /// Spectrum FFT length (bins per row).
         #[arg(long, default_value_t = 4096)]
         fft: usize,
         /// Target spectrum rows per second.
         #[arg(long, default_value_t = 25.0)]
         rows_per_s: f64,
-        /// Replay again when the recording ends (each pass is a new stream).
-        #[arg(long = "loop")]
-        loop_replay: bool,
     },
 }
 
@@ -105,6 +150,18 @@ fn default_ui_dist(ui_dist: Option<PathBuf>) -> Option<PathBuf> {
     })
 }
 
+fn print_summary(summary: &hk_pipeline::RunSummary, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(summary)?);
+    } else {
+        print!("{}", summary.to_text());
+    }
+    if !summary.errors.is_empty() {
+        anyhow::bail!("the run reported {} error(s)", summary.errors.len());
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Replay {
@@ -115,6 +172,7 @@ fn main() -> anyhow::Result<()> {
             paced,
             schedule,
             feeds,
+            calibration,
             info,
             json,
             ui_dist,
@@ -123,6 +181,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{}", hk_cli::replay_summary(&fixture)?);
                 return Ok(());
             }
+            hk_cli::signal::install()?;
             let summary = hk_cli::pipeline::run_replay(&hk_cli::pipeline::ReplayArgs {
                 fixture,
                 data_dir,
@@ -132,36 +191,74 @@ fn main() -> anyhow::Result<()> {
                 schedule,
                 feeds,
                 ui_dist: default_ui_dist(ui_dist),
+                calibration,
             })?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&summary)?);
-            } else {
-                print!("{}", summary.to_text());
-            }
-            if !summary.errors.is_empty() {
-                anyhow::bail!("the run reported {} error(s)", summary.errors.len());
-            }
+            print_summary(&summary, json)?;
+        }
+        Command::Run {
+            source,
+            live,
+            duration,
+            data_dir,
+            plan,
+            serve,
+            schedule,
+            feeds,
+            calibration,
+            json,
+            ui_dist,
+        } => {
+            hk_cli::signal::install()?;
+            let summary = hk_cli::pipeline::run_live(&hk_cli::pipeline::RunArgs {
+                source,
+                live,
+                duration_s: duration,
+                data_dir,
+                plan,
+                serve,
+                schedule,
+                feeds,
+                ui_dist: default_ui_dist(ui_dist),
+                calibration,
+            })?;
+            print_summary(&summary, json)?;
         }
         Command::Serve {
+            hackrf,
+            live,
             replay,
-            history_dir,
-            inventory_db,
+            loop_replay,
+            data_dir,
+            calibration,
             bind,
             ui_dist,
             fft,
             rows_per_s,
-            loop_replay,
         } => {
+            hk_cli::signal::install()?;
+            let source = match replay {
+                Some(path) => hk_cli::serve::ServeSource::Replay {
+                    path,
+                    loop_replay,
+                    realtime: true,
+                },
+                None => hk_cli::serve::ServeSource::HackRf {
+                    spec: match hackrf.as_deref() {
+                        None | Some("") => "hackrf".into(),
+                        Some(serial) => format!("hackrf:{serial}"),
+                    },
+                    live,
+                },
+            };
             hk_cli::serve::run(hk_cli::serve::ServeOptions {
-                replay,
-                history_dir,
-                inventory_db,
+                source,
+                data_dir,
                 bind,
                 ui_dist: default_ui_dist(ui_dist),
                 fft_len: fft,
                 rows_per_s,
-                loop_replay,
-                realtime: true,
+                calibration,
+                token: None,
             })?;
         }
         Command::StreamTail { uds, tcp, count } => {

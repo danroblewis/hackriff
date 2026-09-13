@@ -15,18 +15,28 @@
 //!   replay are skipped and counted. The capture thread marks every provenance a virtual gain or
 //!   filter change produced ([`VIRTUAL_TUNING_DEVICE_SUFFIX`] on its `device_id`), so stored
 //!   detections and recordings never pass a virtual gain off as the recording's real one.
+//! - **One sample rate per run** (T-037a): detection resolution, ring sizing and history geometry
+//!   are fixed at start, so every scheduler step (sweep and dwell) uses the pipeline's rate, for a
+//!   live radio as for a replay.
+//! - **Source restarts** (`--loop`, T-037a): the scheduler controls the source through a
+//!   [`SwitchableControl`]; when the capture thread reopens the source the pipeline points it at
+//!   the new source's control, and the next tick resends the current step in full, so gain and
+//!   filter steps keep applying after every restart.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use hk_core::scheduler::{
     CaptureTrust, Poi, PoiKey, ScheduleStep, Scheduler, SchedulerConfig, StepApplier,
     SyntheticClock, TrustEvaluator, Verification,
 };
-use hk_core::{Gains, SourceCapabilities, SourceControl, SourceError};
+use hk_core::{
+    DeviceInfo, Gains, SourceCapabilities, SourceControl, SourceError, SourceStats,
+    SweepCapability, SweepPlan,
+};
 use hk_detect::{CaptureResult, GainStepConfig, RetuneConfig};
 use hk_model::{ScanPlan, Timestamp, TrackId};
 
@@ -85,6 +95,110 @@ impl SourceControl for ReplayGuard {
     fn stop(&self) -> Result<(), SourceError> {
         Ok(())
     }
+
+    fn set_gain(&self, stage: &str, db: f64) -> Result<(), SourceError> {
+        self.inner.set_gain(stage, db)
+    }
+
+    fn stats(&self) -> Option<SourceStats> {
+        self.inner.stats()
+    }
+
+    fn device_info(&self) -> Option<DeviceInfo> {
+        self.inner.device_info()
+    }
+}
+
+/// A control handle whose target can be replaced while a scheduler holds it (T-037a): the
+/// pipeline repoints it when `--loop` reopens the source.
+pub struct SwitchableControl {
+    capabilities: SourceCapabilities,
+    inner: RwLock<Arc<dyn SourceControl>>,
+    generation: AtomicU64,
+}
+
+impl SwitchableControl {
+    /// Controls `inner`; capabilities are the first source's (a reopened source is the same kind).
+    pub fn new(inner: Arc<dyn SourceControl>) -> Self {
+        Self {
+            capabilities: inner.capabilities().clone(),
+            inner: RwLock::new(inner),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    /// Points every later command at `inner`.
+    pub fn replace(&self, inner: Arc<dyn SourceControl>) {
+        *self.inner.write().unwrap_or_else(PoisonError::into_inner) = inner;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Replacements so far.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn current(&self) -> Arc<dyn SourceControl> {
+        Arc::clone(&self.inner.read().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+impl SourceControl for SwitchableControl {
+    fn capabilities(&self) -> &SourceCapabilities {
+        &self.capabilities
+    }
+
+    fn tune(&self, center_hz: f64) -> Result<(), SourceError> {
+        self.current().tune(center_hz)
+    }
+
+    fn set_sample_rate(&self, sample_rate_hz: f64) -> Result<(), SourceError> {
+        self.current().set_sample_rate(sample_rate_hz)
+    }
+
+    fn set_gains(&self, gains: &Gains) -> Result<(), SourceError> {
+        self.current().set_gains(gains)
+    }
+
+    fn set_baseband_filter(&self, bandwidth_hz: f64) -> Result<(), SourceError> {
+        self.current().set_baseband_filter(bandwidth_hz)
+    }
+
+    fn set_bias_tee(&self, enabled: bool) -> Result<(), SourceError> {
+        self.current().set_bias_tee(enabled)
+    }
+
+    fn start(&self) -> Result<(), SourceError> {
+        self.current().start()
+    }
+
+    fn stop(&self) -> Result<(), SourceError> {
+        self.current().stop()
+    }
+
+    fn set_gain(&self, stage: &str, db: f64) -> Result<(), SourceError> {
+        self.current().set_gain(stage, db)
+    }
+
+    fn stats(&self) -> Option<SourceStats> {
+        self.current().stats()
+    }
+
+    fn device_info(&self) -> Option<DeviceInfo> {
+        self.current().device_info()
+    }
+
+    fn sweep_capability(&self) -> Option<SweepCapability> {
+        self.current().sweep_capability()
+    }
+
+    fn start_sweep(&self, plan: &SweepPlan) -> Result<(), SourceError> {
+        self.current().start_sweep(plan)
+    }
+
+    fn stop_sweep(&self) -> Result<(), SourceError> {
+        self.current().stop_sweep()
+    }
 }
 
 /// A verification capture.
@@ -120,6 +234,8 @@ impl TrustEvaluator<Cap> for Eval<'_> {
 pub(crate) struct SchedState {
     scheduler: Scheduler<SyntheticClock>,
     applier: StepApplier,
+    switch: Arc<SwitchableControl>,
+    generation: u64,
     counters: Arc<Counters>,
     step_end_ns: Option<i64>,
     recent: VecDeque<ScheduleStep>,
@@ -131,31 +247,37 @@ pub(crate) struct SchedState {
 }
 
 impl SchedState {
-    /// Compiles `plan` for the source behind `control`. A non-controllable source (a replay) runs
-    /// every step at its own rate and behind the [`ReplayGuard`].
+    /// Compiles `plan` for the source behind `switch`. Every step runs at the pipeline's rate `fs`
+    /// (see the module docs); a non-controllable source (a replay) runs behind the
+    /// [`ReplayGuard`].
     pub fn new(
         plan: &ScanPlan,
-        control: Arc<dyn SourceControl>,
+        switch: Arc<SwitchableControl>,
         fs: f64,
         t0: Timestamp,
         counters: Arc<Counters>,
         verify: bool,
     ) -> anyhow::Result<Self> {
-        let caps = control.capabilities().clone();
+        let caps = switch.capabilities().clone();
         let mut cfg = SchedulerConfig::from_plan(plan)?;
+        cfg.sweep_rate_hz = fs;
+        cfg.dwell_min_rate_hz = fs;
+        cfg.max_span_hz = fs;
         let control: Arc<dyn SourceControl> = if caps.controllable {
-            control
+            Arc::clone(&switch) as Arc<dyn SourceControl>
         } else {
-            cfg.sweep_rate_hz = fs;
-            cfg.dwell_min_rate_hz = fs;
-            cfg.max_span_hz = fs;
-            Arc::new(ReplayGuard::new(control, Arc::clone(&counters)))
+            Arc::new(ReplayGuard::new(
+                Arc::clone(&switch) as Arc<dyn SourceControl>,
+                Arc::clone(&counters),
+            ))
         };
         let pairs = cfg.gain_step_pairs;
         let scheduler = Scheduler::new(plan, cfg, &caps, SyntheticClock::new(t0))?;
         Ok(Self {
             scheduler,
             applier: StepApplier::new(control),
+            generation: switch.generation(),
+            switch,
             counters,
             step_end_ns: None,
             recent: VecDeque::with_capacity(64),
@@ -222,6 +344,18 @@ impl SchedState {
         self.scheduler
             .clock()
             .set(Timestamp::from_unix_nanos(now_ns));
+        let generation = self.switch.generation();
+        if generation != self.generation {
+            // The source was reopened: it has none of the applied settings. Resend the current
+            // step in full now, not only what the next step changes.
+            self.generation = generation;
+            self.applier.invalidate();
+            if let Some(step) = self.recent.back().copied() {
+                if self.applier.apply(&step).is_err() {
+                    inc(&self.counters.scheduler.apply_errors);
+                }
+            }
+        }
         if self.step_end_ns.is_some_and(|end| now_ns < end) {
             return;
         }
@@ -329,4 +463,128 @@ pub(crate) fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use hk_core::source::{Duplex, FrequencyRange, SampleRates, SourceKind};
+    use hk_model::sigmf::Datatype;
+
+    use super::*;
+    use crate::config::replay_plan;
+
+    /// A source control that records the commands it receives (replay-like capabilities).
+    struct Recorder {
+        caps: SourceCapabilities,
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl Recorder {
+        fn new(center: f64, fs: f64) -> Arc<Self> {
+            Arc::new(Self {
+                caps: SourceCapabilities {
+                    driver: "recorder".into(),
+                    kind: SourceKind::Replay,
+                    frequency_ranges: vec![FrequencyRange {
+                        min_hz: center - fs / 2.0,
+                        max_hz: center + fs / 2.0,
+                    }],
+                    sample_rates: SampleRates::Discrete(vec![fs]),
+                    adc_bits: 8,
+                    native_format: Datatype::Ci8,
+                    duplex: Duplex::ReceiveOnly,
+                    tx_capable: false,
+                    controllable: false,
+                    gain_stages: Vec::new(),
+                    rf_amp: false,
+                    baseband_filter: None,
+                    bias_tee: false,
+                    external_clock: false,
+                    hardware_timestamps: false,
+                    rf_path_boundaries_hz: Vec::new(),
+                },
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn log(&self, call: &'static str) -> Result<(), SourceError> {
+            self.calls.lock().unwrap().push(call);
+            Ok(())
+        }
+    }
+
+    impl SourceControl for Recorder {
+        fn capabilities(&self) -> &SourceCapabilities {
+            &self.caps
+        }
+        fn tune(&self, _: f64) -> Result<(), SourceError> {
+            self.log("tune")
+        }
+        fn set_sample_rate(&self, _: f64) -> Result<(), SourceError> {
+            self.log("set_sample_rate")
+        }
+        fn set_gains(&self, _: &Gains) -> Result<(), SourceError> {
+            self.log("set_gains")
+        }
+        fn set_baseband_filter(&self, _: f64) -> Result<(), SourceError> {
+            self.log("set_baseband_filter")
+        }
+        fn set_bias_tee(&self, _: bool) -> Result<(), SourceError> {
+            self.log("set_bias_tee")
+        }
+        fn start(&self) -> Result<(), SourceError> {
+            self.log("start")
+        }
+        fn stop(&self) -> Result<(), SourceError> {
+            self.log("stop")
+        }
+    }
+
+    /// T-037a item 3: after `--loop` reopens the source, the scheduler's commands reach the new
+    /// source, and the current step (with its gains) is resent at once.
+    #[test]
+    fn a_reopened_source_gets_the_current_step_resent() {
+        let (center, fs) = (433.5e6, 250e3);
+        let t0 = Timestamp::from_unix_nanos(1_789_297_800_000_000_000);
+        let first = Recorder::new(center, fs);
+        let switch = Arc::new(SwitchableControl::new(
+            Arc::clone(&first) as Arc<dyn SourceControl>
+        ));
+        let counters = Arc::new(Counters::default());
+        let plan = replay_plan(center, fs, t0);
+        let mut sched = SchedState::new(
+            &plan,
+            Arc::clone(&switch),
+            fs,
+            t0,
+            Arc::clone(&counters),
+            false,
+        )
+        .unwrap();
+        let t = t0.as_unix_nanos();
+        sched.tick(t + 1);
+        assert!(first.calls().contains(&"set_gains"), "{:?}", first.calls());
+        let before = first.calls().len();
+
+        let second = Recorder::new(center, fs);
+        switch.replace(Arc::clone(&second) as Arc<dyn SourceControl>);
+        sched.tick(t + 2);
+        assert!(
+            second.calls().contains(&"set_gains"),
+            "the reopened source gets the step's gains: {:?}",
+            second.calls()
+        );
+        assert_eq!(
+            first.calls().len(),
+            before,
+            "the old source gets nothing more"
+        );
+        assert_eq!(counters.scheduler.apply_errors.load(Ordering::Relaxed), 0);
+    }
 }

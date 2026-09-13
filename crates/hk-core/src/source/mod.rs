@@ -16,9 +16,46 @@
 //!   traits.
 //!
 //! Implementations: [`SigmfReplaySource`] (deterministic file replay, the basis of offline tests)
-//! and [`HackRfSource`] (a stub until the driver lands).
+//! and [`HackRfSource`] (libhackrf receive, cargo feature `hackrf`; T-037a).
 //!
 //! TX is not part of these traits. It stays gated (C37).
+//!
+//! # Device contract (T-037a; for drivers and the T-049 mock SDR)
+//!
+//! Every receiver (HackRF One, later SoapySDR devices, a mock replaying SigMF) implements the same
+//! generic contract; device specifics stay in its own module.
+//!
+//! - **Open:** a [`SourceDriver`] (`name`, `available`, `capabilities`) opens a [`Source`] from an
+//!   [`OpenRequest`]: device selector, centre, rate, named gains, baseband filter, bias tee.
+//!   Values are validated against the driver's [`SourceCapabilities`]; the source starts
+//!   streaming on the first read (or [`SourceControl::start`]).
+//! - **Capabilities:** frequency ranges, sample rates, ADC bits, native format, duplex, named
+//!   [`GainStage`]s (an on/off amplifier is a stage whose one step spans its range, see
+//!   [`GainStage::quantise`]), optional baseband filters, optional bias tee, external clock,
+//!   `hardware_timestamps`, RF-path boundaries. Optional sweep mode:
+//!   [`SourceControl::sweep_capability`].
+//! - **Control** ([`SourceControl`], `Send + Sync`): `tune`, `set_sample_rate`,
+//!   [`SourceControl::set_gain`] (one named stage, quantised by its [`GainStage`]),
+//!   `set_baseband_filter`, `set_bias_tee` (optional: [`SourceError::Unsupported`] without the
+//!   capability), `start_sweep`/`stop_sweep` (optional), `start`, `stop`. Out-of-range values
+//!   return [`SourceError::OutOfRange`] at the call. Accepted changes apply at the next block
+//!   boundary: that block carries the new provenance and [`Discontinuity`] flags; samples taken
+//!   before the change settles are dropped and reported as `GAP` + `dropped_before`, never
+//!   delivered under the new provenance. [`SourceControl::set_gains`] is the legacy
+//!   LNA/VGA/amp convenience of the v1 scheduler.
+//! - **Stream** ([`Source`]): blocks of contiguous samples ([`Source::read_block_ci8`] native,
+//!   [`Source::read_block`] normalised). The first block carries `STREAM_START`; the sample counter
+//!   is monotonic and counts lost samples, so every overrun or discard is a `GAP` with an exact
+//!   `dropped_before`. `Ok(None)` after `stop` or at the end of a finite source.
+//! - **Timestamps:** each block's `host_time` and its provenance `timestamp_method`
+//!   (`host-arrival` for USB radios, `synthetic` for generated data, `external-reference` with a
+//!   disciplined clock); `SourceCapabilities::hardware_timestamps` says whether the device stamps.
+//! - **Overruns and drops:** [`SourceControl::stats`] ([`SourceStats`]: blocks, samples, overrun
+//!   events, dropped and discarded samples), consistent with the stream's gaps.
+//! - **Identity:** [`SourceControl::device_info`] ([`DeviceInfo`]: provenance `device_id`, SigMF
+//!   `core:hw` description).
+//! - **Backpressure:** [`Source::pausable`] is `false` for anything that streams in real time
+//!   (a radio, or a mock emulating one); lossless pipelines refuse such sources.
 
 pub mod format;
 pub mod hackrf;
@@ -37,7 +74,9 @@ use crate::block::{BlockHeader, SampleBlock};
 #[cfg(doc)]
 use crate::block::Discontinuity;
 
-pub use hackrf::HackRfSource;
+pub use hackrf::{
+    HackRfConfig, HackRfControl, HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats,
+};
 pub use sigmf_replay::{Pacing, ReplayOptions, SigmfReplaySource};
 
 /// Errors from a source.
@@ -85,6 +124,16 @@ pub enum SourceError {
     /// The sample datatype cannot be normalised to complex float.
     #[error("unsupported sample datatype {0}")]
     UnsupportedDatatype(Datatype),
+    /// The device driver reported an error.
+    #[error("{source_name}: {operation} failed: {message}")]
+    Device {
+        /// Which source.
+        source_name: &'static str,
+        /// The driver call that failed.
+        operation: &'static str,
+        /// The driver's error.
+        message: String,
+    },
 }
 
 /// Where a source's samples come from.
@@ -184,6 +233,131 @@ pub struct GainStage {
     pub step_db: f64,
 }
 
+impl GainStage {
+    /// `db` snapped to this stage, or `None` outside `min_db..=max_db` (or not finite). A stepped
+    /// stage rounds down to a step; an on/off stage (one step spanning the range, e.g. an RF
+    /// amplifier) takes `max_db` from the midpoint up, else `min_db`; `step_db` 0 is continuous.
+    pub fn quantise(&self, db: f64) -> Option<f64> {
+        if !db.is_finite() || db < self.min_db - 1e-9 || db > self.max_db + 1e-9 {
+            return None;
+        }
+        let span = self.max_db - self.min_db;
+        let q = if self.step_db <= 0.0 {
+            db
+        } else if self.step_db >= span {
+            if db >= self.min_db + span / 2.0 {
+                self.max_db
+            } else {
+                self.min_db
+            }
+        } else {
+            self.min_db + ((db - self.min_db) / self.step_db + 1e-9).floor() * self.step_db
+        };
+        Some(q.clamp(self.min_db, self.max_db))
+    }
+}
+
+/// One named gain value (a [`GainStage`] name and dB).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedGain {
+    /// Stage name, from [`SourceCapabilities::gain_stages`].
+    pub stage: String,
+    /// Gain, dB.
+    pub db: f64,
+}
+
+impl NamedGain {
+    /// `stage` at `db`.
+    pub fn new(stage: impl Into<String>, db: f64) -> Self {
+        Self {
+            stage: stage.into(),
+            db,
+        }
+    }
+}
+
+/// Stream counters for overrun and drop reporting (see the module's device contract).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SourceStats {
+    /// Blocks delivered.
+    pub blocks: u64,
+    /// Samples delivered.
+    pub samples: u64,
+    /// Overrun events: device or driver buffers lost before the stream read them.
+    pub overruns: u64,
+    /// Samples lost to overruns (each run is a `GAP` in the stream).
+    pub dropped_samples: u64,
+    /// Samples discarded on purpose while a control change settled (also `GAP`s).
+    pub discarded_samples: u64,
+}
+
+/// A source's identity for provenance and SigMF.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// Driver name, e.g. `hackrf-one`.
+    pub driver: String,
+    /// Provenance `device_id`, e.g. `hackrf:<serial>`.
+    pub device_id: String,
+    /// SigMF `core:hw`: model, serial, firmware, antenna.
+    pub hw: String,
+}
+
+/// What an optional hardware sweep mode can do.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SweepCapability {
+    /// Sweepable range.
+    pub frequency_range: FrequencyRange,
+    /// Sample rates a sweep can use.
+    pub sample_rates: SampleRates,
+    /// Fastest retune rate, hops per second, if known.
+    pub max_hops_per_s: Option<f64>,
+}
+
+/// A sweep request: hop from `lo_hz` to `hi_hz` in `step_hz` steps, `samples_per_hop` each.
+/// Each hop's first block carries `RETUNE`; settle samples are discarded as for `tune`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SweepPlan {
+    /// Lowest hop centre, Hz.
+    pub lo_hz: f64,
+    /// Highest hop centre, Hz.
+    pub hi_hz: f64,
+    /// Hop step, Hz.
+    pub step_hz: f64,
+    /// Sample rate during the sweep, Hz.
+    pub sample_rate_hz: f64,
+    /// Samples delivered per hop.
+    pub samples_per_hop: usize,
+}
+
+/// A generic open request (see [`SourceDriver`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpenRequest {
+    /// Device selector (serial number, index or URI); `None` opens the first device.
+    pub device: Option<String>,
+    /// Centre frequency, Hz.
+    pub center_hz: f64,
+    /// Sample rate, Hz.
+    pub sample_rate_hz: f64,
+    /// Named gains; stages not listed keep the driver's defaults.
+    pub gains: Vec<NamedGain>,
+    /// Baseband filter bandwidth, Hz; `None` lets the driver choose.
+    pub baseband_filter_hz: Option<f64>,
+    /// Antenna-port bias tee (only when the capability exists).
+    pub bias_tee: bool,
+}
+
+/// Opens sources of one kind of device (HackRF One, the T-049 mock, SoapySDR later).
+pub trait SourceDriver: Send + Sync {
+    /// Driver name, e.g. `hackrf`.
+    fn name(&self) -> &'static str;
+    /// The driver is usable in this build (e.g. its library is linked).
+    fn available(&self) -> bool;
+    /// What sources of this driver can do.
+    fn capabilities(&self) -> SourceCapabilities;
+    /// Opens a source configured by `request`.
+    fn open(&self, request: &OpenRequest) -> Result<Box<dyn Source>, SourceError>;
+}
+
 /// What a source can do. The planner uses it to mark what the base device cannot do.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceCapabilities {
@@ -269,6 +443,14 @@ impl SourceCapabilities {
                     max_db: 62.0,
                     step_db: 2.0,
                 },
+                // The RF amplifier as an on/off stage (nominal ~11 dB; S4 measured ~15 dB at
+                // 98 MHz, so calibration never assumes the nominal value).
+                GainStage {
+                    name: "amp".into(),
+                    min_db: 0.0,
+                    max_db: 11.0,
+                    step_db: 11.0,
+                },
             ],
             rf_amp: true,
             baseband_filter: Some(BasebandFilters::Discrete(
@@ -290,6 +472,11 @@ impl SourceCapabilities {
     /// `hz` lies in one of the frequency ranges.
     pub fn supports_frequency(&self, hz: f64) -> bool {
         self.frequency_ranges.iter().any(|r| r.contains(hz))
+    }
+
+    /// The gain stage named `name`.
+    pub fn gain_stage(&self, name: &str) -> Option<&GainStage> {
+        self.gain_stages.iter().find(|s| s.name == name)
     }
 }
 
@@ -332,6 +519,48 @@ pub trait SourceControl: Send + Sync {
 
     /// Stops streaming; the stream's later reads return `Ok(None)`.
     fn stop(&self) -> Result<(), SourceError>;
+
+    /// Sets one named gain stage ([`SourceCapabilities::gain_stages`]; the value is quantised by
+    /// [`GainStage::quantise`]). The next block carries [`Discontinuity::GAIN_CHANGE`].
+    fn set_gain(&self, stage: &str, db: f64) -> Result<(), SourceError> {
+        let _ = (stage, db);
+        Err(SourceError::Unsupported {
+            source_name: "source",
+            operation: "set_gain",
+        })
+    }
+
+    /// Stream counters (overruns, drops, discards), when the source keeps them.
+    fn stats(&self) -> Option<SourceStats> {
+        None
+    }
+
+    /// The device identity, when known.
+    fn device_info(&self) -> Option<DeviceInfo> {
+        None
+    }
+
+    /// The optional hardware sweep mode; `None` without it.
+    fn sweep_capability(&self) -> Option<SweepCapability> {
+        None
+    }
+
+    /// Starts a hardware sweep (optional capability).
+    fn start_sweep(&self, plan: &SweepPlan) -> Result<(), SourceError> {
+        let _ = plan;
+        Err(SourceError::Unsupported {
+            source_name: "source",
+            operation: "start_sweep",
+        })
+    }
+
+    /// Stops a hardware sweep (optional capability).
+    fn stop_sweep(&self) -> Result<(), SourceError> {
+        Err(SourceError::Unsupported {
+            source_name: "source",
+            operation: "stop_sweep",
+        })
+    }
 }
 
 /// A sample stream, owned by the capture thread. Its [`SourceControl`] comes from
@@ -500,6 +729,33 @@ mod tests {
         let filters = caps.baseband_filter.as_ref().unwrap();
         assert!(filters.supports(1.75e6) && filters.supports(28e6));
         assert!(!filters.supports(4e6));
+    }
+
+    #[test]
+    fn named_gain_stages_quantise_generically() {
+        let caps = SourceCapabilities::hackrf_one();
+        let lna = caps.gain_stage("lna").unwrap();
+        assert_eq!(lna.quantise(30.0), Some(24.0));
+        assert_eq!(lna.quantise(40.0), Some(40.0));
+        assert_eq!(lna.quantise(48.0), None);
+        assert_eq!(lna.quantise(f64::NAN), None);
+        let amp = caps.gain_stage("amp").unwrap();
+        assert_eq!(
+            (amp.quantise(0.0), amp.quantise(11.0)),
+            (Some(0.0), Some(11.0))
+        );
+        assert_eq!(
+            (amp.quantise(4.0), amp.quantise(6.0)),
+            (Some(0.0), Some(11.0))
+        );
+        assert!(caps.gain_stage("mixer").is_none());
+        let continuous = GainStage {
+            name: "if".into(),
+            min_db: -10.0,
+            max_db: 20.0,
+            step_db: 0.0,
+        };
+        assert_eq!(continuous.quantise(3.3), Some(3.3));
     }
 
     #[test]

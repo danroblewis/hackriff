@@ -1,15 +1,10 @@
-//! Seeds a small demo signal inventory for the web UI's inventory table (T-022), until `hk serve`
-//! composes detection → tracking → inventory itself (T-027).
-//!
-//! ```sh
-//! cargo run -p hk-api --example seed_inventory -- /tmp/hk-inventory.db [T0_UNIX_S]
-//! cargo run -p hk-cli --bin hk -- serve --replay <fixture.sigmf-meta> --inventory-db /tmp/hk-inventory.db
-//! ```
+//! Test-only inventory seed (T-022 fixtures for the hk-api inventory tests). Not a demo and not
+//! reachable from any binary: `hk serve` and `hackriffd` show only what their running pipeline
+//! detected (T-042).
 //!
 //! Every row goes through `Repository::record_sighting` (entity resolution + known-status
 //! priors), like the hk-detect track adapter, except one legacy unclassified identity. `T0` defaults
-//! to 2026-09-13T11:10:00Z, the FM fixture's capture time. The hk-api inventory tests reuse
-//! [`seed`], so the demo rows are also the test rows.
+//! to 2026-09-13T11:10:00Z, the FM fixture's capture time.
 
 use hk_model::{
     Classification, ContentClass, DecodeId, DecodedIdentity, EmitterId, EmitterObservation,
@@ -247,23 +242,4 @@ pub fn seed(repo: &mut Repository, t0_s: i64) -> Result<Seeded, RepoError> {
         carrier,
         legacy,
     })
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    let path = args
-        .next()
-        .ok_or("usage: seed_inventory <db path> [t0 unix seconds]")?;
-    let t0 = args
-        .next()
-        .map(|s| s.parse())
-        .transpose()?
-        .unwrap_or(DEFAULT_T0_S);
-    let mut repo = Repository::open(&path)?;
-    let seeded = seed(&mut repo, t0)?;
-    println!(
-        "seeded {} demo emitters into {path} around t0 = {t0}",
-        seeded.all().len()
-    );
-    Ok(())
 }

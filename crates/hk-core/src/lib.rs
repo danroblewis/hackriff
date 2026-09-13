@@ -32,8 +32,10 @@ pub use ring::{
 pub use rt::MemoryLock;
 pub use scheduler::{ScheduleStep, Scheduler, SchedulerConfig};
 pub use source::{
-    BasebandFilters, ControlMailbox, Gains, HackRfSource, Pacing, PendingControl, ReplayOptions,
-    SigmfReplaySource, Source, SourceCapabilities, SourceControl, SourceError,
+    BasebandFilters, ControlMailbox, DeviceInfo, GainStage, Gains, HackRfConfig, HackRfDeviceInfo,
+    HackRfDriver, HackRfSource, HackRfStats, NamedGain, OpenRequest, Pacing, PendingControl,
+    ReplayOptions, SigmfReplaySource, Source, SourceCapabilities, SourceControl, SourceDriver,
+    SourceError, SourceStats, SweepCapability, SweepPlan,
 };
 
 #[cfg(test)]
