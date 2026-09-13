@@ -344,7 +344,10 @@ dependencies = [
 name = "hk-e2e"
 version = "0.1.0"
 dependencies = [
+ "hk-core",
+ "hk-dsp",
  "hk-model",
+ "num-complex",
  "serde_json",
  "thiserror",
 ]

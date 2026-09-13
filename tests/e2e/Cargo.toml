@@ -10,3 +10,9 @@ publish.workspace = true
 hk-model.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Capability-stage acceptance tests (T-005 floor: tests/floor_acceptance.rs).
+hk-core.workspace = true
+hk-dsp.workspace = true
+num-complex.workspace = true

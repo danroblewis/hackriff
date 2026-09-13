@@ -23,3 +23,7 @@ serde_json.workspace = true
 [[bench]]
 name = "spectral_throughput"
 harness = false
+
+[[bench]]
+name = "floor_throughput"
+harness = false

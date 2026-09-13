@@ -16,8 +16,13 @@
 //! - [`sk`]: the spectral-kurtosis estimator and its variance.
 //! - [`persistence`]: the DPX-style decaying histogram.
 //! - [`synth`]: deterministic synthetic IQ for tests and benchmarks.
+//!
+//! Noise floor (T-005): [`floor`] — [`NoiseFloorTracker`] (per-frame block-FCME floor, slow
+//! floor, impulsive gate, floor-rise events, per-channel floors), percentile and
+//! minimum-statistics estimators, Gamma utilities and [`FloorThreshold`] for CFAR.
 
 pub mod fft;
+pub mod floor;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod persistence;
@@ -29,6 +34,10 @@ pub mod welch;
 pub mod window;
 
 pub use fft::{CpuFft, FftBackend};
+pub use floor::{
+    ChannelFloor, FloorConfig, FloorFrame, FloorKind, FloorRiseEvent, FloorThreshold,
+    NoiseFloorTracker,
+};
 pub use persistence::{Persistence, PersistenceConfig};
 pub use spectrum::{Hold, HoldKind, PowerUnit, Resolution, Spectrum};
 pub use stft::{
