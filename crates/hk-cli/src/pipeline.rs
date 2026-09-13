@@ -16,7 +16,11 @@
 //! - **Content class of a live run:** band-derived from the tuned window (`band_class` over
 //!   `centre ± rate/2`, the T-027 restricted paging/cellular bands), or, when the scheduler
 //!   drives the radio, over every window that tiles the plan's regions. A [`LiveControl`] retune
-//!   to a window of another class is refused.
+//!   or rate change goes through the pipeline (T-050): a window of another class or rate
+//!   re-plumbs the run with that window's class at a block boundary.
+//! - **Control API** (T-050, [`serve_api`]): display, pause, recording and bookmarks for every
+//!   served run; device settings for live runs without the scheduler. Every control request is
+//!   audited to `<data dir>/control-audit.jsonl`.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -25,22 +29,22 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use hk_api::{
-    ApiState, LiveControl, LiveTuning, Server, ServerConfig, SourceLiveControl, StreamRegistry,
-    Token, WindowPolicy,
+    ApiState, AuditLog, LiveControl, LiveTuning, Server, ServerConfig, SourceLiveControl,
+    StreamRegistry, Token, default_token_path,
 };
 use hk_core::{
     DeviceInfo, HackRfDriver, MockClock, MockEnd, MockOptions, MockSdrDriver, NamedGain,
     OpenRequest, Pacing, Source, SourceCapabilities, SourceControl, SourceDriver,
 };
 use hk_model::cluster::most_restrictive;
-use hk_model::sigmf::SigmfMeta;
 use hk_model::{ContentClass, Repository, ScanPlan, Timestamp};
-use hk_pipeline::class::{band_class, source_class};
+use hk_pipeline::class::band_class;
 use hk_pipeline::{
     PipelineConfig, PipelineHandle, RunSummary, SourceFactory, SourceInfo, TrackInventory,
     load_calibrations, open_mock_replay, open_replay, replay_plan,
 };
 
+use crate::control::{PipelineRetuner, PipelineRunControl};
 use crate::signal;
 
 /// Live HackRF One settings (shared by `hk run`, `hk serve` and `hackriffd`).
@@ -229,19 +233,36 @@ pub fn temp_data_dir() -> PathBuf {
     ))
 }
 
-/// The API token: `configured`, else `HK_TOKEN`, else a generated one.
+/// The API token: `configured`, else `HK_TOKEN`, else the token file
+/// ([`hk_api::default_token_path`]: created with mode 0600 on first run and reused after, so the
+/// UI and tunnel URLs survive restarts), else a generated one for this run.
 pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     match configured
         .map(str::to_owned)
         .or_else(|| std::env::var("HK_TOKEN").ok())
     {
         Some(t) => Token::from_config(&t).map_err(|e| anyhow::anyhow!("API token: {e}")),
-        None => Token::generate().context("generating the API token"),
+        None => match default_token_path() {
+            Some(path) => {
+                let (t, created) = Token::load_or_create(&path)
+                    .with_context(|| format!("API token file {}", path.display()))?;
+                if created {
+                    eprintln!(
+                        "hk: created the API token file {} (mode 0600)",
+                        path.display()
+                    );
+                }
+                Ok(t)
+            }
+            None => Token::generate().context("generating the API token"),
+        },
     }
 }
 
 /// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
-/// the pipeline writes, and (live runs without the scheduler) the live control handle.
+/// the pipeline writes, the control API (display, pause, recording and bookmarks, audited to
+/// `<data dir>/control-audit.jsonl`), and (live runs without the scheduler) the live control
+/// handle for device settings.
 pub fn serve_api(
     bind: SocketAddr,
     ui_dist: Option<PathBuf>,
@@ -253,22 +274,47 @@ pub fn serve_api(
 ) -> anyhow::Result<Server> {
     let counters = handle.counters();
     // The pipeline writes the inventory (TrackInventory, chain record writers, plugin Ingest)
-    // into this database; the API reads it through `query_inventory` only.
-    let inventory = Repository::open(handle.data_dir().join("hackriff.db"))
-        .context("opening the inventory database for the API")?;
+    // into this database; the API reads it through `query_inventory` only. Bookmarks live in the
+    // same database.
+    let db = Arc::new(Mutex::new(
+        Repository::open(handle.data_dir().join("hackriff.db"))
+            .context("opening the inventory database for the API")?,
+    ));
+    let audit_path = handle.data_dir().join("control-audit.jsonl");
+    let audit = AuditLog::open(&audit_path)
+        .with_context(|| format!("opening the control audit log {}", audit_path.display()))?;
+    let controller = handle.controller();
+    let status_ctl = controller.clone();
     let state = ApiState {
         streams: registry.clone(),
         history: None,
         floor: Some(handle.floor_product()),
-        inventory: Some(Arc::new(Mutex::new(inventory))),
-        status: Some(Arc::new(move || counters.to_json())),
+        inventory: Some(Arc::clone(&db)),
+        status: Some(Arc::new(move || {
+            let mut v = counters.to_json();
+            if let Some(o) = v.as_object_mut() {
+                o.insert(
+                    "control".into(),
+                    serde_json::to_value(status_ctl.status()).unwrap_or_default(),
+                );
+            }
+            v
+        })),
         live_control,
+        run_control: Some(Arc::new(PipelineRunControl(controller))),
+        bookmarks: Some(db),
+        audit: Some(Arc::new(audit)),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
     let server = Server::start(config, state).context("starting the HTTP server")?;
     let addr = server.local_addr();
     eprintln!("{tag}: listening on {addr}");
+    eprintln!(
+        "{tag}: control API audited to {} (token id {})",
+        audit_path.display(),
+        token.id()
+    );
     if !addr.ip().is_loopback() {
         eprintln!(
             "{tag}: WARNING: bound to a non-loopback address; anyone on the network who learns \
@@ -398,15 +444,6 @@ fn mock_request(live: &LiveArgs, driver: &MockSdrDriver) -> anyhow::Result<OpenR
         }
     }
     Ok(request)
-}
-
-/// The class a mock device's recording declares (`hackriff:content_class`), if any.
-fn declared_class(path: &Path) -> Option<ContentClass> {
-    let meta = SigmfMeta::read(path).ok()?;
-    meta.global
-        .extra
-        .contains_key("hackriff:content_class")
-        .then(|| source_class(&meta))
 }
 
 /// A recording opened for a pipeline run.
@@ -572,10 +609,8 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
     } else {
         band_class(&[live.info.center_hz], fs)
     };
-    // The mock device's class is band-derived exactly as the radio's; a stricter class its
-    // recording declares is kept (fail closed).
-    let declared = mock_path(&opts.source).and_then(|p| declared_class(&p));
-    let class = declared.map_or(class, |d| most_restrictive(class, d));
+    // The mock device's class is band-derived from the tuned window exactly as the radio's, so the
+    // control API's retunes re-derive and re-plumb it the same way (T-050).
     let mut cfg = config_for(
         opts.data_dir.clone(),
         plan,
@@ -593,33 +628,17 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
     // A radio cannot pause: never lossless (Pipeline::start would refuse it anyway).
     cfg.lossless = false;
     cfg.drive_scheduler = opts.schedule;
+    // Without the scheduler the class follows the tuned window: retunes re-plumb into the
+    // window's class, and blocks of any other class are dropped before the ring (T-050).
+    cfg.live_window_class = !opts.schedule;
     cfg.device_id = live.device.device_id.clone();
     cfg.device_hw = Some(live.device.hw.clone());
-    let live_control = (!opts.schedule).then(|| {
-        let policy: WindowPolicy = Arc::new(move |center, rate| {
-            let c = band_class(&[center], rate);
-            let c = declared.map_or(c, |d| most_restrictive(c, d));
-            if c == class {
-                Ok(())
-            } else {
-                Err(format!(
-                    "a window at {center} Hz / {rate} Hz has content class {c:?} but this run is \
-                     {class:?}; restart the run to change class"
-                ))
-            }
-        });
-        let initial = LiveTuning {
-            center_hz: live.info.center_hz,
-            sample_rate_hz: fs,
-            gains: live.gains.clone(),
-            bias_tee: live.control.capabilities().bias_tee.then_some(false),
-        };
-        Arc::new(
-            SourceLiveControl::new(Arc::clone(&live.control), initial)
-                .with_window_policy(policy)
-                .with_fixed_rate(),
-        ) as Arc<dyn LiveControl>
-    });
+    let initial = LiveTuning {
+        center_hz: live.info.center_hz,
+        sample_rate_hz: fs,
+        gains: live.gains.clone(),
+        bias_tee: live.control.capabilities().bias_tee.then_some(false),
+    };
     let control = Arc::clone(&live.control);
     let handle = hk_pipeline::Pipeline::start(
         cfg,
@@ -628,6 +647,12 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
         None,
         Box::new(TrackInventory::default()),
     )?;
+    let live_control = (!opts.schedule).then(|| {
+        Arc::new(
+            SourceLiveControl::new(Arc::clone(&control), initial)
+                .with_retuner(Arc::new(PipelineRetuner(handle.controller()))),
+        ) as Arc<dyn LiveControl>
+    });
     Ok(LivePipeline {
         handle,
         control,
@@ -771,7 +796,6 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
                  loop on request"
             );
         }
-        let token = token(args.token.as_deref())?;
         let lp = start_live(
             &LiveOptions {
                 source: args.source.clone(),
@@ -786,6 +810,15 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
             },
             &registry,
         )?;
+        // After the source is open (a missing driver fails first, before any token file is
+        // touched); a token error stops the run it started.
+        let token = match token(args.token.as_deref()) {
+            Ok(t) => t,
+            Err(e) => {
+                lp.handle.stop();
+                return Err(e);
+            }
+        };
         let server = serve_api(
             args.bind,
             args.ui_dist.clone(),
@@ -1285,8 +1318,14 @@ mod tests {
         .unwrap();
         assert_eq!(lp.class, ContentClass::RestrictedPaging);
         let lc = lp.live_control.clone().expect("live control over the mock");
-        assert_eq!(lc.set_center(100.8e6).unwrap_err().http_status(), 409);
         wait_for_samples(&lp.handle);
+        // A retune into another class re-plumbs the run into the window's class (T-050), exactly
+        // as for the HackRF.
+        lc.set_center(100.8e6).expect("the retune re-plumbs");
+        let status = lp.handle.controller().status();
+        assert_eq!(status.content_class, ContentClass::Unrestricted);
+        assert_eq!(status.center_hz, 100.8e6);
+        assert!(status.segment > 0, "a new segment");
         lp.handle.stop();
         let s = lp.handle.wait().unwrap();
         assert!(s.errors.is_empty(), "{:?}", s.errors);

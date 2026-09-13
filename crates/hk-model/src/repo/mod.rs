@@ -59,6 +59,7 @@
 //! is more than one max-span below the query cannot overlap it. Exact overlap is then checked on
 //! the stored edges, with the same closed-interval rule as [`crate::region`].
 
+mod bookmarks;
 mod cluster;
 #[cfg(test)]
 mod cluster_tests;
@@ -89,6 +90,7 @@ use crate::provenance::Provenance;
 use crate::region::Region;
 use crate::time::Timestamp;
 
+pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind};
 pub use inventory::EmitterUpsert;
 pub use verification::{TrustTest, TrustVerdict};
 

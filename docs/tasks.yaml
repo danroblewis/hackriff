@@ -4,7 +4,7 @@
 # needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
 version: 1
-milestone: M0 (first vertical slice)
+milestone: "M0 (first vertical slice) - COMPLETE locally 2026-09-13 (all M0 tasks done except T-026, blocked on Jetson; CI unverified, never pushed); current milestone M0b"
 # M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
 spikes:
   run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
@@ -581,7 +581,14 @@ tasks:
     note: "follow-ups from T-034 / T-022 / T-033 (2026-09-13); first item is a legal-guardrail gap"
   - id: T-037
     title: Pipeline follow-ups (loop restart control, verification persistence, writer thread, WFM fragment tracks, capture names, shutdown, HackRF source)
-    status: in-progress
+    status: done
+    commit: "T-037a 96f9b48 (34da3e8); T-037b b648511 (merged, blind.rs conflict resolved)"
+    result_b: "writer thread with bounded queue + backpressure accounting (slow-DB test, no loss); trust_verdict table + rate_change wired; readsb bounded hand-off + lossless plugin backpressure (10 s scene 0 drops) + dense_skipped flag; FM raster by site region + 30 s channel cooldown; capture name hashed from first samples (replay dedup); FSK bits stream gated (header-only for gated classes); short replays attach (0.1 s) and ring_s workaround removed; pilot_hz stored/asserted; lowercase payload_hex; FloorIngestQueue try-lock; correlator feed I/O outside repo lock; plugin decodes rank adsb top explanation, plugin chains under gated classes use manifest policy or store without republishing. Deferred: readsb decode batching (needs hk-model batch write API), WFM fragment-track merging (hk-detect tracker)."
+    followups_b:
+      - "swap plugin.rs's interim classification step for T-054 family::record_decoder_evidence (now on main)"
+      - "readsb decode batching via a hk-model batch-write API"
+      - "WFM fragment-track merging in the hk-detect tracker"
+      - "signal_062 acceptance still selects by 101.3 MHz region + PI 1694 -> T-047 audit"
     progress: "T-037a done 96f9b48 (merged 34da3e8): HackRF source (feature hackrf, pkg-config libhackrf, no TX symbol in FFI, HIL 1.95 Msps 0 USB drops, retune ok), Ctrl-C graceful exit 0, --loop switchable scheduler handle, retune re-offers spectrum stream, calibration loaded in-pipeline (--calibration; space_050 post-run step removed), attach test deterministic. T-037b in progress."
     split: "T-037a (HackRF live source feature-gated, Ctrl-C, --loop scheduler restart, retune header, calibration loading, attach-test margin; owns hk-core source, hk-cli, hk-pipeline run/control/config/spectrum; exclusive HackRF receive-only HIL) and T-037b (writer thread, verification persistence + rate_change, readsb backpressure/batching, WFM fragments, capture names, FSK bits stream, short-replay coverage attach, pilot freq, hex case, FloorProduct lock, correlator I/O; owns hk-pipeline detect/capture/stats/chains)"
     deps: [T-027]
@@ -691,7 +698,7 @@ tasks:
   - id: T-043
     title: Listen - click a signal -> auto analog demod (T-012) -> audio streamed to the browser (Web Audio), legal gating kept
     milestone: M0b
-    status: todo
+    status: in-progress
     deps: [T-037, T-039, T-044]
     parallel_group: M
     use_cases: [SIGNAL-062]
@@ -702,7 +709,6 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    hold: "starts after T-037b (owns chains/), T-039 and T-044 (UI) merge"
   - id: T-044
     title: UI interaction (hover readout through tunnel, click-to-inspect, drag-select as multi-region client-side selections)
     milestone: M0b
@@ -899,7 +905,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    hold: "after T-037b merges (owns detect.rs)"
+    hold: "after T-050 (owns config.rs, spectrum.rs) and T-058 (detect path) merge; also swap plugin.rs interim classification for family::record_decoder_evidence"
   - id: T-057
     milestone: M0b
     title: Scheduler virtual tuning places signals at wrong absolute frequencies (~368 kHz axis offset root cause)
@@ -931,7 +937,9 @@ tasks:
   - id: T-059
     milestone: M0b
     title: FOREIGN KEY constraint failure in analog chain writer under detect-reader overruns
-    status: in-progress
+    status: done
+    commit: "in T-037b b648511"
+    result: "chain rows wait up to 5 s for their detection then drop the reference with detection_ref_missing counter; deterministic test"
     deps: [T-037]
     parallel_group: J
     use_cases: [SIGNAL-062]
@@ -942,6 +950,36 @@ tasks:
     model: opus
     effort: medium
     note: "sent to the running T-037b agent (writer-thread rework)"
+  - id: T-060
+    milestone: M0b
+    title: Stream demodulated outputs to external programs (bits, symbols, audio over TCP/WebSocket; netcat + Python client example)
+    status: todo
+    deps: [T-043, T-049]
+    parallel_group: P
+    use_cases: [AWARE-036, SIGNAL-062, SIGNAL-001]
+    requested_by: user feedback 3, 2026-09-13 (item 2; start of message truncated)
+    acceptance: "external programs connect to demodulated bitstreams/symbols/audio over TCP and authenticated WebSocket using the existing hk-stream contract (framing, headers, sequence numbers), class gating (gated classes get header-only or refusal) and drop-not-block backpressure (slow client never blocks chains or ring readers; drops counted); documented netcat/socat and Python client examples; tests through the mock SDR: an FSK burst fixture yields a bits stream over TCP that a test client reads and checks against truth, and the FM fixture yields audio frames over WebSocket"
+    area: crates/hk-stream, crates/hk-api (stream endpoints), docs/examples or py/examples
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "after T-043 (audio WS transport in hk-stream, told to keep it reusable) and T-049 (mock SDR) merge"
+  - id: T-061
+    milestone: M0b
+    title: Record outputs to files (bitstreams, symbols, WAV audio, IQ slices) from UI and CLI, per selection
+    status: todo
+    deps: [T-060, T-052, T-049]
+    parallel_group: P
+    use_cases: [SIGNAL-062, AWARE-036]
+    requested_by: user feedback 3, 2026-09-13 (item 3)
+    acceptance: "start/stop recording per selection from the UI (T-052 Demod/Record buttons wired) and CLI; outputs: demodulated bitstreams, symbols, audio (WAV) and IQ slices with a SigMF-style metadata sidecar (capture settings, estimated params, class, provenance), linked to Bitstream/Recording rows; legal gating (no content files for gated classes, IQ slices follow recording rules); bounded disk use with clear errors; tests through the mock SDR (FSK bits file matches truth, FM WAV has audio content, sidecar fields present)"
+    area: crates/hk-pipeline (record chains), crates/hk-store, crates/hk-api, crates/hk-cli, ui/
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "after T-060, T-052 and T-049 merge"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
