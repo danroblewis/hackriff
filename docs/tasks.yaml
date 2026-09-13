@@ -12,7 +12,7 @@ spikes:
   status:
     S1: "done 2026-09-13 (merged 9c68a17): owned Rust dataflow PASS (attach <=0.81 ms, zero ring loss, raised-priority capture thread required); FutureSDR 0.8.0 FAIL (no in-graph mutation, attach up to 13 ms, source stalls, nightly-only). ADR-0001 -> owned dataflow; S2 still gates on Jetson"
     S3: "mac-pass 2026-09-13 (60 fps @16384 bins, GPU persistence, 5-8x headroom; merged aa09a9e); Jetson kiosk + phone checks pending (needs user/hardware)"
-    S4: "INCONCLUSIVE 2026-09-13 (branch 81b0143, report pending save): chain works where testable (7/7 FM stations kept, 100 MHz ref spur + DC always flagged, IM3 ghosts flagged on semi-synthetic control), but no real ghosts in this scene and 4 s captures cannot bound false-alarm rate; defaults for T-005/T-006 in REPORT §5; re-run as S4b (outdoor/better antenna, 60 s, interleaved gain steps, terminated input, FM notch A/B) before freezing T-006 thresholds"
+    S4: "INCONCLUSIVE 2026-09-13 (merged 2f38325; REPORT.md saved by coordinator): chain works where testable (7/7 FM stations kept, 100 MHz ref spur + DC always flagged, IM3 ghosts flagged on semi-synthetic control), but no real ghosts in this scene and 4 s captures cannot bound false-alarm rate; defaults for T-005/T-006 in REPORT §5; re-run as S4b (outdoor/better antenna, 60 s, interleaved gain steps, terminated input, FM notch A/B) before freezing T-006 thresholds"
     S5: in-progress
 tasks:
   - id: T-001
