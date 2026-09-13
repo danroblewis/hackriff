@@ -13,19 +13,18 @@
 //!   CRC-valid Decodes, one aircraft Emitter per hex ICAO visible via `query_inventory` with
 //!   `last_seen` updated, and the messages on a hk-stream Unix socket with correct framing.
 //! - [`signal_001_adsb_readsb_plugin_chain`] runs the real readsb subprocess through the pipeline
-//!   when `readsb` and the `hk-plugin-readsb` wrapper exist, else logs an explicit SKIP. Its decode
-//!   count is a lower bound (≥ 12 of 16): the plugin input push drops rather than blocks, even in
-//!   lossless replay (T-027 review note).
+//!   when `readsb` and the `hk-plugin-readsb` wrapper exist, else logs an explicit SKIP. All 16
+//!   squitters must decode and no plugin input may drop: lossless replay waits for the plugin's
+//!   queue (T-037b).
 //!
-//! **Scene length and ring (product race, reported in T-024).** Coverage chains attach from the
-//! control thread's 2 ms `poll_coverage`, which does nothing once the ring is closed, and nothing
-//! gates the capture thread on a pending coverage attach. With the default 4 s ring an unpaced
-//! replay shorter than the ring is written without backpressure and can close the ring before the
-//! first poll (observed on the 0.1 s T-015 scene: a 0.21 s run with 0 chains attached and 0
-//! decodes; the same scene in a 2.25 s run attached and decoded 16/16). The readsb test therefore
-//! replays a 2 s scene (4.8M samples) under a plan with `ring_s: 0.5` (1.2M samples): the scene
-//! exceeds the ring, so the lossless gate holds capture behind the always-on readers, the ring
-//! stays open past the first polls, and the chain still attaches at sample 0.
+//! **Short scene, default ring (T-037b).** Both tests replay the 0.1 s T-015 scene with the
+//! default 4 s ring. The capture thread holds each tune change until the chain manager has polled
+//! coverage, and chains claim their samples in the flow gate when they attach, so the coverage
+//! chain attaches although the replay is shorter than the ring (before T-037b: 0 chains, 0
+//! decodes, worked around here with a 2 s scene and `ring_s: 0.5`).
+//!
+//! **Blind replay.** The pipeline replays a copy of the scene without its SigMF annotations
+//! (`blind_replay_config`); the aircraft truth stays in the test.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -43,14 +42,14 @@ use serde_json::json;
 use crate::common::*;
 
 const SIGNAL_001: &str = "SIGNAL-001";
-/// Lower bound on plugin decodes of the 16 squitters (drop-not-block plugin input).
-const MIN_PLUGIN_DECODES: usize = 12;
+/// Plugin decodes of the 16 squitters (lossless replay drops no plugin input).
+const PLUGIN_DECODES: usize = 16;
 const DECODE_STREAM: &str = "decodes/readsb";
 
 fn scenario() -> Option<Fixture> {
     match SynthRequest::new("adsb_squitter")
         .seed(7)
-        .param("duration_s", 2.0)
+        .param("duration_s", 0.1)
         .param("messages_per_aircraft", 4)
         .generate()
     {
@@ -221,8 +220,8 @@ fn signal_001_adsb_pipeline_and_plugin_output_plumbing() {
 
     // Composed pipeline over the scene, without the plugin chain (no subprocess here).
     let dir = TempDir::new("s001");
-    let (mut cfg, replay) =
-        replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
+    let (mut cfg, replay, _input) =
+        blind_replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
     assert_eq!(
         replay.class,
         ContentClass::Unrestricted,
@@ -322,13 +321,8 @@ fn signal_001_adsb_readsb_plugin_chain() {
     let Some(fx) = scenario() else { return };
     let icaos = truth_icaos(&fx);
     let dir = TempDir::new("s001r");
-    // `ring_s: 0.5`: see the module docs (coverage-attach race on replays shorter than the ring).
-    let (mut cfg, replay) = replay_config(
-        &dir.0,
-        &fx.meta_path,
-        json!({ "pipeline": { "ring_s": 0.5 } }),
-        hk_core::Pacing::Unpaced,
-    );
+    let (mut cfg, replay, _input) =
+        blind_replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
     if !cfg
         .plugin_dirs
         .iter()
@@ -353,9 +347,14 @@ fn signal_001_adsb_readsb_plugin_chain() {
         "[{SIGNAL_001}] readsb: {decodes} of 16 squitters decoded, {} plugin records dropped",
         s.counter("/chains/plugin_dropped")
     );
-    assert!(
-        decodes >= MIN_PLUGIN_DECODES,
-        "[{SIGNAL_001}] readsb decodes {decodes} < {MIN_PLUGIN_DECODES}"
+    assert_eq!(
+        s.counter("/chains/plugin_dropped"),
+        0,
+        "[{SIGNAL_001}] lossless replay drops no plugin input"
     );
-    assert_adsb_outputs(&dir.0, &tap.socket_results(), &icaos, MIN_PLUGIN_DECODES);
+    assert_eq!(
+        decodes, PLUGIN_DECODES,
+        "[{SIGNAL_001}] readsb decodes {decodes} of {PLUGIN_DECODES}"
+    );
+    assert_adsb_outputs(&dir.0, &tap.socket_results(), &icaos, PLUGIN_DECODES);
 }

@@ -5,6 +5,12 @@
 //! each frame into the dBFS/Hz pyramid (or the dBm/Hz one when a calibration applies). The
 //! product's uncalibrated pyramid is the history `/api/history` answers from. At the end of the run
 //! tiles are sealed through the last frame plus an hour.
+//!
+//! **Readers never stall this reader (T-037b).** `/api/history` and `/api/floor` hold the
+//! product's lock for a whole query. Frames go through a [`FloorIngestQueue`], which only tries
+//! the lock: while a query holds it, frames are queued (up to [`HISTORY_QUEUE_FRAMES`], then the
+//! oldest are dropped and counted) and folded in order by the next frame that gets the lock
+//! (`frames_deferred`, `frames_dropped`).
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -14,11 +20,14 @@ use hk_core::ReadOutcome;
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker};
 use hk_dsp::{InputInfo, StftConfig, StftProcessor, WelchConfig};
 use hk_model::Timestamp;
-use hk_store::{FloorProduct, IngestOutcome};
+use hk_store::{FloorIngest, FloorIngestQueue, FloorProduct, IngestOutcome, StoreError};
 use num_complex::Complex;
 
 use crate::run::Shared;
-use crate::stats::{add, inc, set};
+use crate::stats::{HistoryCounters, add, inc, set};
+
+/// Frames queued while a query holds the product (about a minute at 10 rows/s).
+pub(crate) const HISTORY_QUEUE_FRAMES: usize = 600;
 
 /// Updates the tile counters from the product.
 pub(crate) fn update_tiles(shared: &Shared, product: &FloorProduct) {
@@ -29,6 +38,16 @@ pub(crate) fn update_tiles(shared: &Shared, product: &FloorProduct) {
     );
     set(&h.tiles_written, c.tiles_written + u.tiles_written);
     set(&h.bytes_written, c.bytes_written + u.bytes_written);
+}
+
+fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
+    for r in folded {
+        match r {
+            Ok(i) if i.outcome == IngestOutcome::Late => inc(&h.frames_late),
+            Ok(_) => inc(&h.frames_ingested),
+            Err(_) => inc(&h.frames_rejected),
+        }
+    }
 }
 
 /// Runs reader 2 until the ring closes.
@@ -42,6 +61,7 @@ pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> any
         .map_err(|e| anyhow::anyhow!("history STFT: {e:?}"))?;
     let mut tracker = NoiseFloorTracker::new(FloorConfig::default())
         .map_err(|e| anyhow::anyhow!("history floor tracker: {e:?}"))?;
+    let mut queue = FloorIngestQueue::new(HISTORY_QUEUE_FRAMES);
     let mut reader = shared.ring.reader_at(0);
     let cursor = shared.gate.register(0);
     let mut buf = vec![Complex::<i8>::default(); 1 << 16];
@@ -54,19 +74,21 @@ pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> any
             ReadOutcome::Data(chunk) => {
                 stft.push(InputInfo::from(&chunk), &buf[..chunk.len], |frame| {
                     let floor = tracker.update(frame, |_| {});
-                    let mut p = product.lock().unwrap_or_else(PoisonError::into_inner);
-                    match p.ingest(frame, floor) {
-                        Ok(i) if i.outcome == IngestOutcome::Late => inc(&h.frames_late),
-                        Ok(_) => inc(&h.frames_ingested),
-                        Err(_) => inc(&h.frames_rejected),
+                    let r = queue.ingest(&product, frame, floor);
+                    if r.deferred {
+                        inc(&h.frames_deferred);
                     }
+                    add(&h.frames_dropped, r.dropped);
+                    tally(h, &r.folded);
                     let dur =
                         (frame.sample_count as f64 * 1e9 / frame.spectrum.sample_rate_hz) as i64;
                     last_end = frame.t.host_time.saturating_add_nanos(dur);
                     frames_since_update += 1;
                     if frames_since_update >= 50 {
-                        frames_since_update = 0;
-                        update_tiles(&shared, &p);
+                        if let Ok(p) = product.try_lock() {
+                            frames_since_update = 0;
+                            update_tiles(&shared, &p);
+                        }
                     }
                 });
                 cursor.set(chunk.end_sample());
@@ -84,6 +106,7 @@ pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> any
     }
     drop(cursor);
     let mut p = product.lock().unwrap_or_else(PoisonError::into_inner);
+    tally(h, &queue.drain(&mut p));
     if last_end.as_unix_nanos() > 0
         || shared
             .counters

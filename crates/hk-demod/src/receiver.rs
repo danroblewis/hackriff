@@ -213,6 +213,7 @@ impl AnalogSession {
         let mut p = self.params.estimated_params();
         if let Some(w) = &self.wfm {
             p.deviation_hz = w.peak_deviation_hz;
+            p.pilot_hz = w.pilot.frequency_hz;
             p.cfo_hz =
                 Some(self.channel_offset_hz - self.request.center_offset_hz + w.carrier_offset_hz);
         }

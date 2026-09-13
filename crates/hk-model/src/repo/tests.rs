@@ -251,6 +251,7 @@ fn graph() -> Graph {
         compressed: true,
         impulsive: true,
         edge: true,
+        dense_skipped: true,
     };
     let detections = vec![det(survey_id, prov_id, 915.0e6, 40e3, tr(10, 11)), flagged];
     b.repo.insert_detections(&detections).unwrap();
@@ -330,6 +331,7 @@ fn graph() -> Graph {
             mod_order: Some(2),
             roll_off: None,
             bandwidth_hz: Some(40e3),
+            pilot_hz: None,
         },
         lock_quality: Some(0.93),
         evm_db: Some(-17.5),

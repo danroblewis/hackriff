@@ -352,6 +352,7 @@ impl FskBurst {
             mod_order: Some(2),
             roll_off: None,
             bandwidth_hz: self.params.obw99_hz.value(),
+            pilot_hz: None,
         }
     }
 }

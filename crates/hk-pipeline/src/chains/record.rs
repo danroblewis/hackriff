@@ -44,17 +44,6 @@ pub fn iso8601(t: Timestamp) -> String {
     )
 }
 
-pub(crate) fn run(
-    shared: Arc<Shared>,
-    trigger_sample: u64,
-    pre_s: f64,
-    post_s: f64,
-    trigger: RecordingTrigger,
-    label: String,
-) {
-    run_claimed(shared, None, trigger_sample, pre_s, post_s, trigger, label);
-}
-
 /// Claims the recording window's samples in the flow gate now (before the caller releases its
 /// own claim), for a recording started on another thread with [`run_claimed`].
 pub(crate) fn claim(shared: &Shared, trigger_sample: u64, pre_s: f64) -> GateCursor {

@@ -1501,6 +1501,21 @@ impl DecoderFeed {
     pub fn push(&mut self, rec: BinaryRecord<'_>) -> Result<PublishOutcome, StreamError> {
         self.publisher.binary(rec, true, None)
     }
+
+    /// Free bytes in the fullest open plugin queue, `None` with no consumer attached. A producer
+    /// that can pause (a lossless replay) waits on it instead of letting `push` drop; `push`
+    /// itself still never waits.
+    pub fn min_free_bytes(&self) -> Option<usize> {
+        let active: Vec<Arc<Consumer>> = lock(&self.publisher.shared.list).active.clone();
+        active
+            .iter()
+            .filter(|c| !c.closed.load(Ordering::Acquire))
+            .filter_map(|c| {
+                let g = lock(&c.inner);
+                (g.state == ConsumerState::Open).then(|| g.ring.free())
+            })
+            .min()
+    }
 }
 
 /// A child's stdin pipe made non-blocking, whose writes can be abandoned from another thread:

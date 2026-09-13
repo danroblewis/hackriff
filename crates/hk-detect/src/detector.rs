@@ -967,6 +967,7 @@ fn build_record(
         compressed: false,
         impulsive: false,
         edge,
+        dense_skipped: false,
     };
     let start = s.start.time;
     let end = s.end.time.max(start);

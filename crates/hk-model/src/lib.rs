@@ -102,5 +102,7 @@ pub use recording::{
     RecordingSpan, RecordingTrigger, RetentionClass,
 };
 pub use region::{FreqRange, Region, TimeRange};
-pub use repo::{EmitterUpsert, ProvenanceChain, RepoBatch, RepoError, Repository};
+pub use repo::{
+    EmitterUpsert, ProvenanceChain, RepoBatch, RepoError, Repository, TrustTest, TrustVerdict,
+};
 pub use time::{SampleTime, Timestamp, TimestampMethod};

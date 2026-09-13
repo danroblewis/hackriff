@@ -8,7 +8,8 @@
 //! end) framing is inferred across the bursts and `write_framed_bursts` stores Emitter,
 //! Demodulations, Decodes and the Bitstream descriptor. **Content fails closed**: a Decode keeps
 //! its payload only when a user classification rule covers the emitter and the source class is
-//! not restricted ([`crate::class::classify_emitter`]).
+//! not restricted ([`crate::class::classify_emitter`]). The bursts' hard bits are then published
+//! on a gated bits stream ([`publish_bits`]).
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
@@ -18,17 +19,21 @@ use hk_core::Discontinuity;
 use hk_core::ProvenanceHandle;
 use hk_demod::fsk::{
     DemodPriors, EmitterClassification, FramedRecordContext, FskBurst, FskReceiver,
-    FskReceiverConfig, write_framed_bursts,
+    FskReceiverConfig, WrittenFraming, write_framed_bursts,
 };
 use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
 use hk_estimate::framing::{FramingConfig, infer_framing};
 use hk_model::{DetectionId, SampleTime, Timestamp};
+use hk_stream::{
+    BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamError, StreamHeader, StreamKind,
+};
 use num_complex::Complex;
 
 use super::{ChainMsg, ChainReader, Next};
 use crate::class::classify_emitter;
 use crate::events::{Candidate, MemberBox};
+use crate::gate::GateCursor;
 use crate::run::Shared;
 use crate::stats::{add, inc};
 
@@ -69,12 +74,17 @@ pub(crate) fn run(
     retain_s: f64,
     min_bursts: usize,
     max_bursts: usize,
+    cursor: GateCursor,
 ) {
     let fs = shared.fs;
     let c = &shared.counters.chains;
     let pad = (pad_s * fs) as u64;
     let retain = ((retain_s * fs) as usize).max(1);
-    let mut cr = ChainReader::new(Arc::clone(&shared), cand.first_sample.saturating_sub(pad));
+    let mut cr = ChainReader::new(
+        Arc::clone(&shared),
+        cand.first_sample.saturating_sub(pad),
+        cursor,
+    );
     let mut buf: Vec<Complex<i8>> = Vec::new();
     let mut base = 0u64;
     let mut base_time = Timestamp::UNIX_EPOCH;
@@ -220,27 +230,93 @@ pub(crate) fn run(
         classification,
         ..Default::default()
     };
-    let mut repo = shared.repo();
-    match write_framed_bursts(&mut repo, &bursts, &result, &ctx) {
-        Ok(w) => {
-            add(&c.demodulations, w.demodulation_ids.len() as u64);
-            add(&c.decodes, w.decode_ids.len() as u64);
-            add(&c.content_withheld, w.content_withheld as u64);
-            add(&c.emitters_created, u64::from(w.emitter_created));
-            let mut inv = shared
-                .inventory
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if inv
-                .chain_emitter(&mut repo, cand.track, w.emitter_id)
-                .is_err()
-            {
+    let written = {
+        let mut repo = shared.repo();
+        match write_framed_bursts(&mut repo, &bursts, &result, &ctx) {
+            Ok(w) => {
+                add(&c.demodulations, w.demodulation_ids.len() as u64);
+                add(&c.decodes, w.decode_ids.len() as u64);
+                add(&c.content_withheld, w.content_withheld as u64);
+                add(&c.emitters_created, u64::from(w.emitter_created));
+                let mut inv = shared
+                    .inventory
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if inv
+                    .chain_emitter(&mut repo, cand.track, w.emitter_id)
+                    .is_err()
+                {
+                    inc(&c.errors);
+                }
+                Some(w)
+            }
+            Err(e) => {
                 inc(&c.errors);
+                eprintln!("hk-pipeline: fsk chain write: {e}");
+                None
             }
         }
+    };
+    if let Some(w) = written {
+        publish_bits(&shared, &bursts, &w, f_lo, f_hi);
+    }
+}
+
+/// The FSK bits stream (T-037b): one record per demodulated burst on
+/// `bits/fsk-bursts/<emitter>`, hard bits as one `u8` (0 or 1) per bit (`datatype` `ru8`), timed
+/// at the burst's first sample, with the Bitstream descriptor's framing. The header class is the
+/// class the Decode rows were stored under (`classify_emitter` already applied the source class:
+/// a restricted source stays restricted, and only a user rule lifts `metadata-only`), so the
+/// stream never carries more than the repository kept. The publisher gates like every other
+/// content stream (T-016): under a class that forbids content each record goes out header-only
+/// (`GATED`: timing, seq and length only) and is counted in `bits_gated`. Written after the rows
+/// are stored and outside the repository lock.
+fn publish_bits(shared: &Shared, bursts: &[FskBurst], w: &WrittenFraming, f_lo: f64, f_hi: f64) {
+    let c = &shared.counters.chains;
+    let class = w.content_class;
+    let mut header = StreamHeader::new(
+        format!("bits/fsk-bursts/{}", w.emitter_id),
+        StreamKind::Bits,
+        class,
+        "hk-pipeline:fsk-bursts",
+    );
+    header.datatype = Some("ru8".into());
+    header.center_hz = Some(0.5 * (f_lo + f_hi));
+    header.bandwidth_hz = Some((f_hi - f_lo).max(0.0));
+    header.emitter_id = Some(w.emitter_id);
+    if let Some(b) = &w.bitstream {
+        header.bitstream_id = Some(b.id);
+        header.framing = Some(b.framing.clone());
+    }
+    let longest = bursts.iter().map(|b| b.bits().len()).max().unwrap_or(0);
+    header.max_frame_len = header.max_frame_len.max((longest + 256) as u32);
+    let mut publisher = match Publisher::new(header.clone(), PublisherConfig::default()) {
+        Ok(p) => p,
         Err(e) => {
             inc(&c.errors);
-            eprintln!("hk-pipeline: fsk chain write: {e}");
+            eprintln!("hk-pipeline: fsk bits stream: {e}");
+            return;
+        }
+    };
+    if let Some(sink) = &shared.cfg.stream_sink {
+        sink(&header, publisher.handle());
+    }
+    for b in bursts {
+        let bits = b.bits();
+        if bits.is_empty() {
+            continue;
+        }
+        let record = BinaryRecord {
+            t: b.timestamp_of_source(b.request.start_index as f64),
+            sample_index: b.request.start_index,
+            flags: RecordFlags::empty(),
+            payload: bits,
+        };
+        match publisher.publish_binary(record) {
+            Ok(_) => inc(&c.bits_records),
+            Err(StreamError::ContentGated { .. }) => inc(&c.bits_gated),
+            Err(_) => inc(&c.errors),
         }
     }
+    publisher.finish();
 }

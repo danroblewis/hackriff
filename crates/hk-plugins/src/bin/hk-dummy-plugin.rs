@@ -7,6 +7,8 @@
 //! - `--profile adsb-like`: decodes name ICAO addresses `a1b2c0`..`a1b2c3` (ADS-B-like, SIGNAL-001).
 //! - `--crash-after K`: exit with code 101 after K records (crash isolation).
 //! - `--stall`: never read stdin (hang watchdog, backpressure).
+//! - `--read-delay-us N`: sleep N µs after reading each record (a slow decoder that still makes
+//!   progress, for lossless backpressure tests).
 //! - `--claim-class C` / `--content TEXT`: claim a class and attach content (clamping, gating).
 //! - `--annotate`: also emit an `annotation` line per message.
 //! - `--datatype D`: exit with code 4 unless the header's datatype is D.
@@ -42,6 +44,7 @@ struct Args {
     smuggle: Option<String>,
     orphan: bool,
     stall_child: bool,
+    read_delay_us: u64,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -58,6 +61,7 @@ fn parse_args() -> Result<Args, String> {
         smuggle: None,
         orphan: false,
         stall_child: false,
+        read_delay_us: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -98,6 +102,11 @@ fn parse_args() -> Result<Args, String> {
             "--smuggle" => args.smuggle = Some(value()?),
             "--orphan" => args.orphan = true,
             "--stall-child" => args.stall_child = true,
+            "--read-delay-us" => {
+                args.read_delay_us = value()?
+                    .parse()
+                    .map_err(|e| format!("--read-delay-us: {e}"))?
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -219,13 +228,18 @@ fn run(args: &Args) -> io::Result<u64> {
     }
     loop {
         match reader.next_record() {
-            Ok(Some(Record::Binary(b))) => on_record(
-                args,
-                &mut state,
-                &mut out,
-                b.header.sample_index,
-                b.payload.len(),
-            )?,
+            Ok(Some(Record::Binary(b))) => {
+                if args.read_delay_us > 0 {
+                    std::thread::sleep(Duration::from_micros(args.read_delay_us));
+                }
+                on_record(
+                    args,
+                    &mut state,
+                    &mut out,
+                    b.header.sample_index,
+                    b.payload.len(),
+                )?
+            }
             Ok(Some(Record::Dropped(d))) => state.dropped_seen += d.count,
             Ok(Some(_)) => {}
             Ok(None) => break,

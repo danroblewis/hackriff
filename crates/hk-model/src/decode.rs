@@ -41,6 +41,10 @@ pub struct EstimatedParams {
     /// Bandwidth used for the channel filter, Hz.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bandwidth_hz: Option<f64>,
+    /// Measured stereo pilot frequency, Hz (WFM: nominally 19 kHz, on the receiver clock), when
+    /// the pilot locked (T-037b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pilot_hz: Option<f64>,
 }
 
 /// A demodulation session on a channel (docs/07 §2.14).

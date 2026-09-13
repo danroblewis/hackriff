@@ -32,7 +32,7 @@ use hk_model::{
 use hk_stream::{PublisherHandle, StreamHeader};
 use serde::{Deserialize, Serialize};
 
-use crate::chains::spec::{ChainSpec, builtin_chains};
+use crate::chains::spec::{ChainSpec, FmRegion, builtin_chains_for};
 use crate::class::ClassRule;
 
 /// Target detection bin width, Hz.
@@ -121,7 +121,9 @@ impl PipelineSettings {
 
     /// The chain registry in force.
     pub fn chain_specs(&self) -> Vec<ChainSpec> {
-        self.chains.clone().unwrap_or_else(builtin_chains)
+        self.chains
+            .clone()
+            .unwrap_or_else(|| builtin_chains_for(FmRegion::from_site(self.site)))
     }
 }
 

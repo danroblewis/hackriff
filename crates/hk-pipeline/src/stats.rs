@@ -43,6 +43,10 @@ counter_group!(
         read_errors,
         /// cf32/ci16 blocks quantised to ci8 for the ring.
         quantised_blocks,
+        /// Tune changes the capture thread held for the coverage-chain poll (lossless replay).
+        coverage_waits,
+        /// Coverage holds released by their 10 s bound instead of the poll.
+        coverage_wait_timeouts,
     }
 );
 
@@ -105,6 +109,14 @@ counter_group!(
         db_errors,
         /// Verification captures handed to the scheduler.
         captures,
+        /// Flushes kept on the detection reader because the writer queue was full (live).
+        writer_queue_full,
+        /// Flushes that waited for the writer thread (lossless replay, or the carry-over cap).
+        writer_blocked,
+        /// Detection records flagged `dense_skipped` (spanning dense frames or dropped runs).
+        dense_flagged,
+        /// Trust verdict rows written.
+        verdicts_written,
     }
 );
 
@@ -121,6 +133,10 @@ counter_group!(
         tiles_written,
         /// Bytes written.
         bytes_written,
+        /// Frames queued because a query held the floor product (folded by a later frame).
+        frames_deferred,
+        /// Queued frames dropped because a query held the product past the queue's capacity.
+        frames_dropped,
     }
 );
 
@@ -189,6 +205,16 @@ counter_group!(
         plugin_dropped,
         /// Plugin restarts.
         plugin_restarts,
+        /// Plugin records held back until the plugin's input queue had room (lossless replay).
+        plugin_waits,
+        /// Plugin backpressure waits abandoned (plugin failed or made no progress for 30 s).
+        plugin_wait_timeouts,
+        /// FSK bits records published (payload delivered).
+        bits_records,
+        /// FSK bits records published header-only because the class forbids content.
+        bits_gated,
+        /// Raster-channel attaches skipped while the channel cools down after a finished chain.
+        channel_cooldown,
         /// Chain errors (demod, repository).
         errors,
     }
@@ -228,6 +254,10 @@ counter_group!(
         retunes_run,
         /// Retune comparisons skipped (the replay could not move).
         retunes_skipped_virtual,
+        /// Rate-change comparisons evaluated (`hk_detect::rate_change`).
+        rate_changes_run,
+        /// Rate-change comparisons skipped (centre mismatch or same rate).
+        rate_changes_skipped,
     }
 );
 
@@ -258,6 +288,12 @@ pub struct Counters {
     pub tune_center_bits: AtomicU64,
     /// Newest sample rate, Hz (f64 bits).
     pub tune_rate_bits: AtomicU64,
+    /// Tune changes published by the capture thread (bumped after `tune_*_bits` are stored).
+    pub tune_seq: AtomicU64,
+    /// The newest `tune_seq` whose coverage the chain manager has evaluated.
+    pub coverage_seq: AtomicU64,
+    /// Trust verdicts from the control thread, awaiting the detection writer thread.
+    pub verdicts: crate::verify::VerdictOutbox,
 }
 
 impl Counters {

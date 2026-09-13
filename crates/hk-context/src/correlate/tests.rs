@@ -312,6 +312,65 @@ fn aware_006_failed_refresh_marks_feed_stale_and_correlation_provisional() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// The pipeline reads feed states before taking its repository lock (T-037b): the split call
+/// must correlate exactly as `correlate` reading the cache itself.
+#[test]
+fn feed_states_read_ahead_correlate_like_the_cache_read_inline() {
+    let dir = temp_dir("states-ahead");
+    let cache = FeedCache::open(&dir).unwrap();
+    let mut repo = Repository::open_in_memory().unwrap();
+    ingest_snapshot(
+        &cache,
+        &mut repo,
+        &GpsjamAdapter::default(),
+        "2026-09-13",
+        BODY,
+        fetched(),
+    )
+    .unwrap();
+    let _ = refresh(
+        &cache,
+        &mut repo,
+        &mut OfflineFetcher,
+        &GpsjamAdapter::default(),
+        "2026-09-14",
+        now(),
+    );
+    let c = Correlator::default();
+    assert!(c.feed_states(None).unwrap().is_empty());
+    let states = c.feed_states(Some(&cache)).unwrap();
+    assert!(
+        states[SOURCE].stale,
+        "the failed refresh marked the feed stale"
+    );
+    let a = l1(&mut repo);
+    let ahead = c
+        .correlate_with_states(&mut repo, &states, a.id, Some(&site()), now())
+        .unwrap();
+    let b = l1(&mut repo);
+    let inline = c
+        .correlate(&mut repo, Some(&cache), b.id, Some(&site()), now())
+        .unwrap();
+    assert_eq!(ahead.written.len(), 1);
+    assert!(
+        ahead.written[0].provisional,
+        "stale state from the read-ahead map"
+    );
+    assert_eq!(
+        (
+            inline.written.len(),
+            inline.written[0].score.to_bits(),
+            inline.written[0].provisional
+        ),
+        (
+            ahead.written.len(),
+            ahead.written[0].score.to_bits(),
+            ahead.written[0].provisional
+        )
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
 #[test]
 fn aware_006_revised_payload_surfaces_stale_evidence_and_recorrelates() {
     let mut repo = Repository::open_in_memory().unwrap();

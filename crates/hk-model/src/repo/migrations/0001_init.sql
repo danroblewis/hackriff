@@ -493,3 +493,22 @@ CREATE TRIGGER annotation_append_only BEFORE UPDATE ON annotation
       OR NEW.content_class IS NOT OLD.content_class OR NEW.has_content IS NOT OLD.has_content
       OR NEW.t IS NOT OLD.t OR NEW.body IS NOT OLD.body
     BEGIN SELECT RAISE(ABORT, 'annotations are append-only (only exported may change)'); END;
+
+-- Trust-test verdicts (T-037b): one row per emitter the scheduler's cross-capture trust tests
+-- classified (gain step, retune, rate change), or per skipped comparison. Insert-only.
+-- track_id is a soft reference (no foreign key): a verdict can precede its batched Track row.
+CREATE TABLE trust_verdict (
+    verdict_seq  INTEGER PRIMARY KEY,
+    survey_id    BLOB    NOT NULL REFERENCES survey (survey_id),
+    track_id     BLOB,
+    test         TEXT    NOT NULL CHECK (test IN ('gain-step', 'retune', 'rate-change')),
+    label        TEXT    NOT NULL,
+    f_lo         REAL    NOT NULL,
+    f_hi         REAL    NOT NULL,
+    t            INTEGER NOT NULL,
+    body         TEXT    NOT NULL
+);
+CREATE INDEX idx_trust_verdict_survey  ON trust_verdict (survey_id, t);
+CREATE INDEX idx_trust_verdict_f_lo_f_hi ON trust_verdict (f_lo, f_hi);
+CREATE TRIGGER trust_verdict_append_only BEFORE UPDATE ON trust_verdict
+    BEGIN SELECT RAISE(ABORT, 'trust verdicts are append-only'); END;

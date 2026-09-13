@@ -23,17 +23,18 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use hk_core::scheduler::{
-    CaptureTrust, Poi, PoiKey, ScheduleStep, Scheduler, SchedulerConfig, StepApplier,
-    SyntheticClock, TrustEvaluator, Verification,
+    Poi, PoiKey, ScheduleStep, Scheduler, SchedulerConfig, StepApplier, SyntheticClock,
+    Verification,
 };
 use hk_core::{Gains, SourceCapabilities, SourceControl, SourceError};
-use hk_detect::{CaptureResult, GainStepConfig, RetuneConfig};
+use hk_detect::CaptureResult;
 use hk_model::{ScanPlan, Timestamp, TrackId};
 
 use crate::chains::ChainManager;
 use crate::events::{Candidate, ControlEvent};
 use crate::run::Shared;
-use crate::stats::{Counters, SchedulerCounters, add, inc};
+use crate::stats::{Counters, add, inc};
+use crate::verify::{Cap, TrustEval};
 
 /// Appended to a provenance's `device_id` when its gain or filter state is virtual: the
 /// scheduler changed it on a replay, and the recorded samples never had it.
@@ -85,35 +86,6 @@ impl SourceControl for ReplayGuard {
     fn stop(&self) -> Result<(), SourceError> {
         Ok(())
     }
-}
-
-/// A verification capture.
-pub(crate) struct Cap(CaptureResult);
-
-impl CaptureTrust for Cap {
-    fn clipped(&self) -> bool {
-        self.0.clipped
-    }
-}
-
-struct Eval<'a>(&'a SchedulerCounters);
-
-impl TrustEvaluator<Cap> for Eval<'_> {
-    fn gain_step(&mut self, _poi: PoiKey, _pair: u8, lower: &Cap, higher: &Cap) {
-        let _ = hk_detect::gain_step(&lower.0, &higher.0, &GainStepConfig::default());
-        inc(&self.0.gain_pairs_run);
-    }
-
-    fn retune(&mut self, _poi: PoiKey, base: &Cap, moved: &Cap, _delta_hz: f64) {
-        if (moved.0.center_hz - base.0.center_hz).abs() < 1.0 {
-            inc(&self.0.retunes_skipped_virtual);
-        } else {
-            let _ = hk_detect::retune(&base.0, &moved.0, &RetuneConfig::default());
-            inc(&self.0.retunes_run);
-        }
-    }
-
-    fn rate_change(&mut self, _: PoiKey, _: &Cap, _: &Cap, _: f64, _: f64) {}
 }
 
 /// Scheduler state owned by the control thread.
@@ -237,7 +209,13 @@ impl SchedState {
             .collect();
         for k in finished {
             if let Some(v) = self.verifs.remove(&k) {
-                let report = v.evaluate(&mut Eval(c));
+                let track = self
+                    .keys
+                    .iter()
+                    .find(|(_, key)| **key == k)
+                    .map(|(t, _)| *t);
+                let t = Timestamp::from_unix_nanos(now_ns);
+                let report = v.evaluate(&mut TrustEval::new(c, &counters.verdicts, track, t));
                 add(
                     &c.gain_pairs_skipped_clipped,
                     u64::from(report.gain_pairs_skipped_clipped),

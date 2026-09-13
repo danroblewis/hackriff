@@ -97,6 +97,11 @@ pub struct DetectionFlags {
     /// Touches the edge of the analysed span (dwell-window or sweep-slice edge, filter roll-off),
     /// so its bandwidth and level may be truncated.
     pub edge: bool,
+    /// Spans a frame the detector could not label completely (a dense frame with more runs than
+    /// its cap, or one whose runs were dropped at the live-component cap), so the box's extent
+    /// and member cells may be incomplete (T-037b).
+    #[serde(default)]
+    pub dense_skipped: bool,
 }
 
 impl DetectionFlags {
@@ -109,6 +114,7 @@ impl DetectionFlags {
     const IMPULSIVE: u32 = 1 << 6;
     const EDGE: u32 = 1 << 7;
     const IMAGE_RETUNE_CONFIRMED: u32 = 1 << 8;
+    const DENSE_SKIPPED: u32 = 1 << 9;
 
     /// Bitmask of the boolean flags, as stored. `spur_reason` is not part of it.
     pub const fn bits(self) -> u32 {
@@ -121,6 +127,7 @@ impl DetectionFlags {
             | (self.impulsive as u32 * Self::IMPULSIVE)
             | (self.edge as u32 * Self::EDGE)
             | (self.image_retune_confirmed as u32 * Self::IMAGE_RETUNE_CONFIRMED)
+            | (self.dense_skipped as u32 * Self::DENSE_SKIPPED)
     }
 
     /// Parses the bitmask. Unknown bits are ignored; `spur_reason` comes back `None`.
@@ -136,6 +143,7 @@ impl DetectionFlags {
             compressed: bits & Self::COMPRESSED != 0,
             impulsive: bits & Self::IMPULSIVE != 0,
             edge: bits & Self::EDGE != 0,
+            dense_skipped: bits & Self::DENSE_SKIPPED != 0,
         }
     }
 
@@ -450,6 +458,10 @@ mod tests {
             },
             DetectionFlags {
                 edge: true,
+                ..Default::default()
+            },
+            DetectionFlags {
+                dense_skipped: true,
                 ..Default::default()
             },
         ];

@@ -70,6 +70,7 @@ mod inventory;
 mod measure;
 #[cfg(test)]
 mod tests;
+mod verification;
 
 use std::path::Path;
 use std::time::Duration;
@@ -89,6 +90,7 @@ use crate::region::Region;
 use crate::time::Timestamp;
 
 pub use inventory::EmitterUpsert;
+pub use verification::{TrustTest, TrustVerdict};
 
 /// Embedded migrations, applied in order.
 const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];

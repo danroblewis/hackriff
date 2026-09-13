@@ -31,7 +31,9 @@ pub fn fm_run() -> Option<&'static FmRun> {
     RUN.get_or_init(|| {
         let meta = real_fixture(FM_FIXTURE)?;
         let dir = TempDir::new("fm");
-        let (cfg, replay) = replay_config(&dir.0, &meta, json!({}), hk_core::Pacing::Unpaced);
+        // Blind: the fixture's annotations (station, spur, DC labels) are stripped.
+        let (cfg, replay, _input) =
+            blind_replay_config(&dir.0, &meta, json!({}), hk_core::Pacing::Unpaced);
         assert_eq!(
             replay.class,
             ContentClass::Unrestricted,
@@ -120,10 +122,37 @@ fn signal_062_fm_rds_auto_wfm_pilot_pi_label() {
         );
         assert_eq!(d.mode, "wfm", "[{SIGNAL_062}] auto mode must select WFM");
     }
-    // 19 kHz pilot: hk-demod persists the pilot PLL's lock quality on the WFM Demodulation
-    // (`Demodulation.lock_quality`, `None` without a pilot); the pilot frequency itself is not
-    // stored (EstimatedParams has no pilot field). RDS decoding also needs the 57 kHz subcarrier
-    // locked to 3 × pilot.
+    // 19 kHz pilot, found blind (T-037b): every WFM Demodulation in the whole inventory (no
+    // frequency or identity filter) with a stored pilot frequency (`EstimatedParams::pilot_hz`).
+    // Only then are they matched against the truth station the test holds.
+    let mut piloted = Vec::new();
+    for e in inventory(&repo, InventoryQuery::default()) {
+        for l in repo.emitter_links(e.emitter.id).unwrap() {
+            if let LinkTarget::Demodulation(id) = l.target {
+                let d = repo.demodulation(id).unwrap();
+                if let (true, Some(p)) = (d.mode == "wfm", d.params.pilot_hz) {
+                    piloted.push((e.emitter.f_center_hz, p));
+                }
+            }
+        }
+    }
+    eprintln!("[{SIGNAL_062}] WFM demodulations with a pilot (emitter Hz, pilot Hz): {piloted:?}");
+    assert!(
+        !piloted.is_empty(),
+        "[{SIGNAL_062}] no WFM demodulation stored its pilot frequency"
+    );
+    for (f, p) in &piloted {
+        assert!(
+            (p - 19_000.0).abs() <= 10.0,
+            "[{SIGNAL_062}] pilot at {p} Hz on the WFM emitter at {f} Hz"
+        );
+    }
+    assert!(
+        piloted.iter().any(|(f, _)| (f - STATION_HZ).abs() < 50e3),
+        "[{SIGNAL_062}] the piloted WFM emitter found blind is the truth station"
+    );
+    // The pilot PLL's lock quality is stored too (`Demodulation.lock_quality`, `None` without a
+    // pilot). RDS decoding also needs the 57 kHz subcarrier locked to 3 × pilot.
     let pilot_lock = demods
         .iter()
         .filter_map(|d| d.lock_quality)
