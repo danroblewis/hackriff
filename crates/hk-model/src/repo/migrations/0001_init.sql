@@ -436,6 +436,24 @@ CREATE TABLE bookmark (
 ) WITHOUT ROWID;
 CREATE INDEX idx_bookmark_f_center ON bookmark (f_center);
 
+-- Region selections (T-052): a named frequency extent, optionally bounded in time, with notes,
+-- tags and links to the actions taken on it (demodulations, recordings, inspections). User
+-- metadata, never signal content; mutable like bookmarks. `repo/selections.rs` repeats this DDL
+-- with IF NOT EXISTS for databases created before T-052. Times are Unix nanoseconds.
+CREATE TABLE selection (
+    selection_id BLOB    PRIMARY KEY CHECK (length(selection_id) = 16),
+    name         TEXT    NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+    f_lo         REAL    NOT NULL CHECK (f_lo >= 0),
+    f_hi         REAL    NOT NULL CHECK (f_hi > f_lo),
+    t_lo         INTEGER,
+    t_hi         INTEGER,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    body         TEXT    NOT NULL,
+    CHECK ((t_lo IS NULL) = (t_hi IS NULL) AND (t_lo IS NULL OR t_hi >= t_lo))
+) WITHOUT ROWID;
+CREATE INDEX idx_selection_created ON selection (created_at);
+
 -- Largest frequency span and duration ever written per region-indexed table. Region queries
 -- use them to bound index range scans: a row whose lower edge is more than one max-span below
 -- the query cannot overlap it. The values only grow, so they stay correct after deletes.

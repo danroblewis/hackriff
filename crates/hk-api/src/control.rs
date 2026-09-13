@@ -593,14 +593,15 @@ pub(crate) struct CtlResponse {
     pub allow: Option<&'static str>,
 }
 
-struct Fail {
+/// A refused or failed action: status, stable code, message.
+pub(crate) struct Fail {
     status: u16,
     code: &'static str,
     message: String,
 }
 
 impl Fail {
-    fn new(status: u16, code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: u16, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
             code,
@@ -608,7 +609,7 @@ impl Fail {
         }
     }
 
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new(400, "invalid", message)
     }
 
@@ -799,62 +800,77 @@ impl Caller {
 pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlResponse> {
     let action = match resolve(req.method, req.path)? {
         Ok(a) => a,
-        Err(Some(allow)) => {
-            if req.method != "GET" {
-                audit_refused(
-                    state,
-                    req.method,
-                    req.path,
-                    &req.caller,
-                    405,
-                    "method not allowed",
-                );
-            }
-            return Some(CtlResponse {
-                status: 405,
-                body: json!({ "error": format!("use {allow}"), "code": "method_not_allowed" }),
-                allow: Some(allow),
-            });
-        }
-        Err(None) => {
-            if req.method != "GET" {
-                audit_refused(
-                    state,
-                    req.method,
-                    req.path,
-                    &req.caller,
-                    404,
-                    "no such endpoint",
-                );
-            }
-            return Some(Fail::new(404, "not_found", "no such endpoint").response());
-        }
+        Err(allow) => return Some(refuse_route(state, req, allow)),
     };
-    if !action.mutating() {
-        return Some(match read(state, action) {
+    Some(dispatch(
+        state,
+        req,
+        action.name(),
+        action.mutating(),
+        |s| read(s, action),
+        |s, body| apply(s, action, body),
+    ))
+}
+
+/// The answer for a known path with another method (`Some(allow)`: 405 with `Allow`) or an
+/// unknown endpoint (`None`: 404). Mutating methods are audited as refused.
+pub(crate) fn refuse_route(
+    state: &ApiState,
+    req: &CtlRequest<'_>,
+    allow: Option<&'static str>,
+) -> CtlResponse {
+    let (status, reason) = if allow.is_some() {
+        (405, "method not allowed")
+    } else {
+        (404, "no such endpoint")
+    };
+    if req.method != "GET" {
+        audit_refused(state, req.method, req.path, &req.caller, status, reason);
+    }
+    match allow {
+        Some(allow) => CtlResponse {
+            status: 405,
+            body: json!({ "error": format!("use {allow}"), "code": "method_not_allowed" }),
+            allow: Some(allow),
+        },
+        None => Fail::new(404, "not_found", "no such endpoint").response(),
+    }
+}
+
+/// Runs one resolved action (control, bookmark or selection, T-052). Reads answer directly.
+/// Mutating actions need the audit log (503 without one), take a JSON object body, and are
+/// audited with the action `name`, the request, old and new values, and the result.
+pub(crate) fn dispatch(
+    state: &ApiState,
+    req: &CtlRequest<'_>,
+    name: &'static str,
+    mutating: bool,
+    read: impl FnOnce(&ApiState) -> Result<Value, Fail>,
+    apply: impl FnOnce(&ApiState, &Map<String, Value>) -> Result<Applied, Fail>,
+) -> CtlResponse {
+    if !mutating {
+        return match read(state) {
             Ok(v) => CtlResponse {
                 status: 200,
                 body: v,
                 allow: None,
             },
             Err(f) => f.response(),
-        });
+        };
     }
     let Some(audit) = &state.audit else {
-        return Some(
-            Fail::new(
-                503,
-                "unavailable",
-                "control is disabled: this server has no audit log",
-            )
-            .response(),
-        );
+        return Fail::new(
+            503,
+            "unavailable",
+            "control is disabled: this server has no audit log",
+        )
+        .response();
     };
     let parsed = parse_body(req);
     let request = parsed
         .as_ref()
         .map_or(Value::Null, |m| Value::Object(m.clone()));
-    let result = parsed.and_then(|body| apply(state, action, &body));
+    let result = parsed.and_then(|body| apply(state, &body));
     let (status, response, old, new, error) = match result {
         Ok(a) => (a.status, a.body, a.old, a.new, None),
         Err(f) => {
@@ -870,7 +886,7 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         "origin": req.caller.origin,
         "method": req.method,
         "path": req.path,
-        "action": action.name(),
+        "action": name,
         "request": request,
         "old": old,
         "new": new,
@@ -880,11 +896,11 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
     });
     // Errors are reported (rate-limited) by the log; they never fail the request.
     let _ = audit.append(&entry);
-    Some(CtlResponse {
+    CtlResponse {
         status,
         body: response,
         allow: None,
-    })
+    }
 }
 
 fn parse_body(req: &CtlRequest<'_>) -> Result<Map<String, Value>, Fail> {
@@ -910,7 +926,7 @@ fn parse_body(req: &CtlRequest<'_>) -> Result<Map<String, Value>, Fail> {
     }
 }
 
-fn only(body: &Map<String, Value>, allowed: &[&str]) -> Result<(), Fail> {
+pub(crate) fn only(body: &Map<String, Value>, allowed: &[&str]) -> Result<(), Fail> {
     match body.keys().find(|k| !allowed.contains(&k.as_str())) {
         Some(k) => Err(Fail::invalid(format!(
             "unknown field {k:?} (allowed: {})",
@@ -924,7 +940,7 @@ fn only(body: &Map<String, Value>, allowed: &[&str]) -> Result<(), Fail> {
     }
 }
 
-fn number(body: &Map<String, Value>, key: &str) -> Result<Option<f64>, Fail> {
+pub(crate) fn number(body: &Map<String, Value>, key: &str) -> Result<Option<f64>, Fail> {
     match body.get(key) {
         None => Ok(None),
         Some(v) => v
@@ -935,7 +951,7 @@ fn number(body: &Map<String, Value>, key: &str) -> Result<Option<f64>, Fail> {
     }
 }
 
-fn required(body: &Map<String, Value>, key: &str) -> Result<f64, Fail> {
+pub(crate) fn required(body: &Map<String, Value>, key: &str) -> Result<f64, Fail> {
     number(body, key)?.ok_or_else(|| Fail::invalid(format!("{key} is required")))
 }
 
@@ -950,7 +966,10 @@ fn integer(body: &Map<String, Value>, key: &str, max: u64) -> Result<Option<u64>
     }
 }
 
-fn text<'a>(body: &'a Map<String, Value>, key: &str) -> Result<Option<Option<&'a str>>, Fail> {
+pub(crate) fn text<'a>(
+    body: &'a Map<String, Value>,
+    key: &str,
+) -> Result<Option<Option<&'a str>>, Fail> {
     match body.get(key) {
         None => Ok(None),
         Some(Value::Null) => Ok(Some(None)),
@@ -959,7 +978,10 @@ fn text<'a>(body: &'a Map<String, Value>, key: &str) -> Result<Option<Option<&'a
     }
 }
 
-fn nullable_number(body: &Map<String, Value>, key: &str) -> Result<Option<Option<f64>>, Fail> {
+pub(crate) fn nullable_number(
+    body: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<Option<f64>>, Fail> {
     match body.get(key) {
         None => Ok(None),
         Some(Value::Null) => Ok(Some(None)),
@@ -967,7 +989,7 @@ fn nullable_number(body: &Map<String, Value>, key: &str) -> Result<Option<Option
     }
 }
 
-fn no_fields(body: &Map<String, Value>) -> Result<(), Fail> {
+pub(crate) fn no_fields(body: &Map<String, Value>) -> Result<(), Fail> {
     only(body, &[])
 }
 
@@ -1126,14 +1148,15 @@ fn read(state: &ApiState, action: Action) -> Result<Value, Fail> {
     }
 }
 
-struct Applied {
-    status: u16,
-    body: Value,
-    old: Value,
-    new: Value,
+/// A successful mutating action: status, response body, and the old/new values audited.
+pub(crate) struct Applied {
+    pub(crate) status: u16,
+    pub(crate) body: Value,
+    pub(crate) old: Value,
+    pub(crate) new: Value,
 }
 
-fn ok(body: Value, old: Value, new: Value) -> Applied {
+pub(crate) fn ok(body: Value, old: Value, new: Value) -> Applied {
     Applied {
         status: 200,
         body,

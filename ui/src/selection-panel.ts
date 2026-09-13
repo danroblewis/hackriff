@@ -1,16 +1,20 @@
-// Selections list (T-044): rename, delete, zoom the live view, load region history. The demod,
-// record and inspect actions are rendered disabled until T-052 wires them. Text via textContent.
+// Selections list (T-044, T-052): server-backed store with a sync notice, rename, delete, tick
+// several for bulk actions, zoom the live view, region history, and the per-selection actions
+// (Inspect, Listen, Demod, Record; hooks in selections.ts). Text via textContent.
 import { fmtBandwidth } from "./axis";
 import { fmtT } from "./history";
-import { MAX_NAME_LEN, SELECTION_ACTIONS, type Selection, type SelectionStore } from "./selections";
+import {
+  type ActionId, type ActionOutcome, type InspectReport, MAX_NAME_LEN, SELECTION_ACTIONS, type Selection,
+  type SelectionActionHooks, type SelectionStore, runSelectionAction, syncText,
+} from "./selections";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
 export interface SelectionActions {
   zoom: (s: Selection) => void;
   history: (s: Selection) => void;
-  /** Listen to the region (T-043). */
-  listen?: (s: Selection) => void;
+  /** Action hooks (Inspect also loads region history through `history`). */
+  hooks: SelectionActionHooks;
   /** Saves the selection's band as a server-side bookmark (T-051). */
   bookmark?: (s: Selection) => void;
 }
@@ -19,20 +23,76 @@ export class SelectionPanel {
   constructor(private store: SelectionStore, private actions: SelectionActions) {
     store.subscribe((list) => this.render(list));
     $("sel-clear").addEventListener("click", () => store.clear());
+    $<HTMLInputElement>("sel-all").addEventListener("change", (e) => store.pickAll((e.target as HTMLInputElement).checked));
+    $("sel-inspect-picked").addEventListener("click", () => void this.run("inspect", store.pickedList()));
+    $("sel-delete-picked").addEventListener("click", () => { for (const s of store.pickedList()) store.remove(s.id); });
     this.render(store.list());
   }
 
+  /** Shows an inspection report (emitters inside + top explanations). */
+  showReport(r: InspectReport) {
+    const box = document.createElement("div");
+    box.className = "sel-report";
+    const h = document.createElement("h3");
+    h.textContent = `${r.selection.name}: ${r.emitters.length}${r.more ? "+" : ""} emitter${r.emitters.length === 1 ? "" : "s"} inside`;
+    box.append(h);
+    if (!r.emitters.length) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.textContent = "No inventory emitter overlaps this region (region history is loaded below).";
+      box.append(p);
+    }
+    const ul = document.createElement("ul");
+    for (const e of r.emitters) {
+      const li = document.createElement("li");
+      const head = document.createElement("span");
+      head.textContent = `${(e.f_center_hz / 1e6).toFixed(4)} MHz · ${fmtBandwidth(e.bandwidth_hz)} · ${e.known_status} · ×${e.count}`;
+      li.append(head);
+      const ex = document.createElement("span");
+      ex.className = "hint";
+      ex.textContent = e.top.length
+        ? ` — ${e.top.map((x) => `${x.rank}. ${x.label} (${Math.round(100 * x.score)} %${x.flags.length ? `, ${x.flags.join(", ")}` : ""})`).join("; ")}`
+        : " — no explanation yet";
+      li.append(ex);
+      ul.append(li);
+    }
+    box.append(ul);
+    $("sel-report").replaceChildren(box);
+  }
+
+  private async run(action: ActionId, targets: readonly Selection[]) {
+    if (!targets.length) return;
+    if (action === "inspect") for (const s of targets.slice(0, 1)) this.actions.history(s);
+    const results = await runSelectionAction(action, targets, this.store, this.actions.hooks);
+    this.status(results);
+  }
+
+  private status(results: ActionOutcome[]) {
+    const el = $("sel-status");
+    el.textContent = results.map((r) => r.message).join(" · ");
+    el.classList.toggle("bad", results.some((r) => r.status === "failed"));
+  }
+
   private render(list: readonly Selection[]) {
+    const picked = this.store.pickedList().length;
     $("sel-body").replaceChildren(...list.map((s) => this.tr(s)));
     $("sel-table").hidden = !list.length;
     $("sel-clear").hidden = !list.length;
-    $("sel-info").textContent = list.length
-      ? `${list.length} region${list.length > 1 ? "s" : ""} (this page only)`
+    $("sel-bulk").hidden = !picked;
+    $("sel-bulk-count").textContent = `${picked} ticked`;
+    const all = $<HTMLInputElement>("sel-all");
+    all.checked = !!list.length && picked === list.length;
+    all.indeterminate = picked > 0 && picked < list.length;
+    const st = this.store.sync();
+    $("sel-info").textContent = list.length || st.mode !== "local"
+      ? syncText(st, list.length)
       : "Drag across the spectrum or waterfall to add a region; drag vertically in the waterfall to bound its time as well.";
+    $("sel-info").classList.toggle("bad", st.mode === "offline");
   }
 
   private tr(s: Selection): HTMLTableRowElement {
     const tr = document.createElement("tr");
+    if (this.store.isPicked(s.id)) tr.className = "picked";
     const td = (text = "", cls = "") => {
       const c = document.createElement("td");
       c.textContent = text;
@@ -40,6 +100,12 @@ export class SelectionPanel {
       tr.append(c);
       return c;
     };
+    const tick = document.createElement("input");
+    tick.type = "checkbox";
+    tick.checked = this.store.isPicked(s.id);
+    tick.setAttribute("aria-label", `Tick ${s.name}`);
+    tick.addEventListener("change", () => this.store.pick(s.id, tick.checked));
+    td().append(tick);
     const name = document.createElement("input");
     name.type = "text";
     name.value = s.name;
@@ -56,25 +122,24 @@ export class SelectionPanel {
     td((s.f_hi / 1e6).toFixed(6), "num");
     td(fmtBandwidth(s.f_hi - s.f_lo), "num opt");
     td(s.t_lo !== undefined && s.t_hi !== undefined ? `${fmtT(s.t_lo)} +${(s.t_hi - s.t_lo).toFixed(2)} s` : "any", "opt");
+    const links = td(s.links.length ? String(s.links.length) : "—", "num opt");
+    links.title = s.links.slice(-10).map((l) => `${fmtT(l.t)} ${l.kind} ${l.target}${l.note ? ` (${l.note})` : ""}`).join("\n");
     const acts = document.createElement("div"); // flex inside the cell (a flex <td> breaks the table)
     acts.className = "acts";
     td().append(acts);
-    const button = (label: string, title: string, onClick?: () => void) => {
+    const button = (label: string, title: string, onClick: () => void) => {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = label;
       b.title = title;
-      if (onClick) b.addEventListener("click", onClick);
-      else b.disabled = true;
+      b.addEventListener("click", onClick);
       acts.append(b);
     };
     button("Zoom", "Zoom the live view to this region", () => this.actions.zoom(s));
     button("History", "Load this region (and its time range) in region over time", () => this.actions.history(s));
-    const listen = this.actions.listen;
-    if (listen) button("Listen", "Demodulate the strongest signal in this region to audio (mode estimated)", () => listen(s));
+    for (const a of SELECTION_ACTIONS) button(a.label, a.title, () => void this.run(a.id, [s]));
     const bookmark = this.actions.bookmark;
     if (bookmark) button("Bookmark", "Save this band as a bookmark (server-side)", () => bookmark(s));
-    for (const a of SELECTION_ACTIONS) button(a.label, `Not wired yet (${a.task})`);
     button("Delete", "Delete this selection", () => this.store.remove(s.id));
     return tr;
   }

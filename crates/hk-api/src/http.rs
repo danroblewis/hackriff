@@ -13,6 +13,7 @@
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
+//! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
@@ -88,6 +89,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/bookmarks/{id}"),
     ("PUT", "/api/bookmarks/{id}"),
     ("DELETE", "/api/bookmarks/{id}"),
+    ("GET", "/api/selections"),
+    ("POST", "/api/selections"),
+    ("GET", "/api/selections/{id}"),
+    ("PUT", "/api/selections/{id}"),
+    ("DELETE", "/api/selections/{id}"),
+    ("POST", "/api/selections/{id}/links"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
 ];
@@ -592,7 +599,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         content_type: req.header("content-type"),
         caller: caller(&stream, &req, token),
     };
-    if let Some(r) = control::route(state, &ctl) {
+    if let Some(r) = control::route(state, &ctl).or_else(|| crate::selections::route(state, &ctl)) {
         let allow = r
             .allow
             .map(|a| format!("Allow: {a}\r\n"))
