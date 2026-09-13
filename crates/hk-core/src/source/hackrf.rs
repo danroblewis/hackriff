@@ -1311,9 +1311,11 @@ mod tests {
         let stats = src.stats();
         let dropped = stats.transfers.dropped_samples.load(Ordering::Relaxed);
         assert!(dropped > 0, "the pool overflowed");
+        // The fake keeps producing while this loop catches up, so drops can still be counted
+        // after the first snapshot: read until the gaps match the counter as it stands now.
         let mut gaps = 0;
         let start = Instant::now();
-        while gaps < dropped {
+        loop {
             assert!(start.elapsed() < DEADLINE, "watchdog");
             let h = src.read_block_ci8(&mut buf).unwrap().unwrap();
             if h.dropped_before > 0 {
@@ -1322,8 +1324,12 @@ mod tests {
             assert_eq!(h.first_sample(), next + h.dropped_before);
             gaps += h.dropped_before;
             next = h.first_sample() + buf.len() as u64;
+            let counted = stats.transfers.dropped_samples.load(Ordering::Relaxed);
+            assert!(gaps <= counted, "a gap never exceeds the counted drops");
+            if gaps >= dropped && gaps == counted {
+                break;
+            }
         }
-        assert_eq!(gaps, dropped, "every dropped sample is an exact gap");
     }
 
     #[test]
