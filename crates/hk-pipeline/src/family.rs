@@ -3,7 +3,8 @@
 //!   hk-context's priors understand;
 //! - ranks the **top-k explanations** of each emitter;
 //! - sets the emitter's `known_status` (`known` / `unexpected-here` / `unknown`), with a `prior_ref`
-//!   and a status-history entry authored `prior`, from the top explanation.
+//!   and a status-history entry authored `prior`, from the best explanation backed by demodulator,
+//!   decoder or classifier evidence (never by shape alone).
 //!
 //! # Evidence → service family
 //!
@@ -12,7 +13,8 @@
 //!   [`FSK_FAMILY`](hk_demod::fsk::FSK_FAMILY)) and modulation labels (hk-estimate blind families:
 //!   `fsk`, `ook`, `bpsk`, `qpsk`). These are the families the chains' record writers store on an
 //!   emitter.
-//! - **Decoders.** Built-in decoder ids and plugin manifest ids (e.g. `readsb`, `hk-rds`).
+//! - **Decoders.** Built-in decoder ids and plugin manifest ids (e.g. `readsb`, `hk-rds`). A
+//!   chain stores them with [`record_decoder_evidence`] (see "Where it is wired").
 //! - **Occupancy.** Bandwidth, duty cycle and symbol rate, from a closed Track.
 //!
 //! Every mapping carries a confidence. Evidence that is unmapped, or below [`MIN_CONFIDENCE`],
@@ -46,18 +48,24 @@
 //! - **Score.**
 //!   `score = base × allocation fit × raster fit`. The base is the evidence confidence, or
 //!   [`ALLOCATION_ONLY_SCORE`]. Allocation fit is 1 for `known`, 0.8 with no allocation data and
-//!   0.7 for `unexpected-here`. Raster fit is 0.8 for an off-raster centre ([`CHANNEL_RASTERS`])
-//!   and 1 otherwise. Candidates are ranked by score, and the top [`TOP_K`] are kept.
+//!   0.7 for `unexpected-here`. Raster fit is 0.8 for an off-raster centre and 1 otherwise. Rasters
+//!   ([`CHANNEL_RASTERS`]) are keyed by region and apply only when the band table is wholly that
+//!   region ([`BandTable::region`]). Candidates are ranked by score, and the top [`TOP_K`] are
+//!   kept.
 //! - **Evidence and flags.** Each candidate lists its evidence: the families, the band-plan
 //!   verdict with its `prior_ref`, and the raster fit. Its flags are `off-raster`,
 //!   `off-allocation`, `no-allocation-data`, `allocation-only`, `shape-only` (occupancy evidence
-//!   only) and `low-confidence`.
+//!   only), `low-confidence`, and `contradicts-user-status` / `contradicts-decoder-status` (its
+//!   band-plan verdict differs from a status a user or decoder set).
 //!
-//! **Status from the top candidate.** When the top candidate's evidence confidence is at least
-//! [`MIN_CONFIDENCE`], its band-plan verdict becomes the status and `prior_ref`. Otherwise the
-//! status is `unknown`. An evidence candidate at or above [`MIN_CONFIDENCE`] always outranks an
-//! allocation-only one: 0.5 × 0.7 × 0.8 = 0.28, which is above 0.2. As in the repository, a status
-//! authored by a user or decoder is never overridden, and an unchanged verdict is not repeated.
+//! **Status from the best status-backed candidate.** Occupancy (shape) evidence ranks and
+//! suggests, but never sets a status: a continuous 150–400 kHz carrier anywhere is not "FM
+//! broadcast" until a demodulator, decoder or classifier says so. Each candidate carries
+//! `status_evidence_confidence`, the noisy OR of its non-shape evidence only. The best-scoring
+//! candidate whose `status_evidence_confidence` is at least [`MIN_CONFIDENCE`] sets the status
+//! and `prior_ref` from its band-plan verdict, even when a weaker candidate scores above it.
+//! With none, the status is `unknown`. As in the repository, a status authored by a user or
+//! decoder is never overridden, and an unchanged verdict is not repeated.
 //!
 //! **Where explanations are kept.** They are stored as an Emitter Annotation (author
 //! `classifier`, `author_ref` [`FAMILY_MAP_VERSION`], `metadata.explanations`, no content,
@@ -78,6 +86,17 @@
 //!   when the track's occupancy maps, records the sighting, then runs [`explain_emitter`].
 //! - **Chain writers.** After the analog (WFM) and FSK record writers write an emitter,
 //!   `Inventory::chain_emitter` runs [`explain_emitter`].
+//! - **Decoder chains (plugin decoders, T-037b).** When a decoder produced a valid decode for an
+//!   emitter, the chain calls
+//!   `family::record_decoder_evidence(&mut repo, emitter, decoder_id, confidence, t)` with the
+//!   decoder's manifest id (e.g. `readsb`, `rtl_433`), then `Inventory::chain_emitter` as the other
+//!   chains do. The first call stores a Classification (family = the decoder id, `model_version`
+//!   `decoder:<id>`) when the id maps to a service; the second re-ranks. Decoder ids that map to
+//!   nothing store nothing.
+//! - **Status or classification changes.** A user reclassification ([`reclassify`]) or a
+//!   user/decoder status change ([`set_status`]) re-ranks at once instead of waiting for the next
+//!   sighting. A decoder-set status written inside a chain (the FSK framed-burst writer) is
+//!   re-ranked by the `chain_emitter` call that follows it.
 //!
 //! # Legal guardrail
 //!
@@ -89,7 +108,7 @@
 
 use std::collections::BTreeMap;
 
-use hk_context::{BandTable, match_known_status};
+use hk_context::{BandTable, Region, match_known_status};
 use hk_detect::TrackSummary;
 use hk_detect::track::inventory::SUSPECT_FRACTION;
 use hk_model::{
@@ -129,6 +148,8 @@ pub const CONTINUOUS_DUTY: f64 = 0.9;
 /// A service's channel raster inside a frequency range.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChannelRaster {
+    /// Allocation-table region the raster belongs to.
+    pub region: Region,
     /// Service family.
     pub service: &'static str,
     /// Range the raster applies to, Hz.
@@ -145,8 +166,10 @@ pub struct ChannelRaster {
 
 /// Channel rasters. US FM broadcast: 200 kHz channels on odd tenths of a MHz, 87.9–107.9 MHz (47 CFR
 /// 73.201, channels 200–300; unverified this session). The 20 kHz tolerance is 10 % of the
-/// raster; the detector's centre error on the fixture station is about 3 kHz.
+/// raster; the detector's centre error on the fixture station is about 3 kHz. Every entry is keyed
+/// by its region; other regions' rasters (e.g. 100 kHz FM steps in ITU Region 1) are future work.
 pub const CHANNEL_RASTERS: &[ChannelRaster] = &[ChannelRaster {
+    region: Region::Us,
     service: "fm-broadcast",
     range_hz: [87.8e6, 108.0e6],
     raster_hz: 200e3,
@@ -542,6 +565,10 @@ pub struct Explanation {
     pub score: f64,
     /// Combined signal evidence for the service, 0–1 (0 = allocation-only).
     pub evidence_confidence: f64,
+    /// Combined non-shape (demodulator, decoder, classifier) evidence, 0–1. Only this can set a
+    /// status; 0 for a shape-only or allocation-only candidate.
+    #[serde(default)]
+    pub status_evidence_confidence: f64,
     /// Band-plan verdict for the service here.
     pub status: KnownStatus,
     /// Band-plan row, when one decided the verdict.
@@ -560,10 +587,19 @@ impl Explanation {
     }
 }
 
-/// The raster fit of `service` at `f_center_hz`, when a raster applies there.
-pub fn raster_fit(service: &str, f_center_hz: f64) -> Option<ExplanationEvidence> {
+/// The raster fit of `service` at `f_center_hz` in `region`, when a raster of that region applies
+/// there. `None` region (no single-region band table) applies no raster.
+pub fn raster_fit(
+    region: Option<Region>,
+    service: &str,
+    f_center_hz: f64,
+) -> Option<ExplanationEvidence> {
+    let region = region?;
     let r = CHANNEL_RASTERS.iter().find(|r| {
-        r.service == service && f_center_hz >= r.range_hz[0] && f_center_hz <= r.range_hz[1]
+        r.region == region
+            && r.service == service
+            && f_center_hz >= r.range_hz[0]
+            && f_center_hz <= r.range_hz[1]
     })?;
     let k = ((f_center_hz - r.offset_hz) / r.raster_hz).round();
     let nearest = k * r.raster_hz + r.offset_hz;
@@ -586,19 +622,55 @@ pub fn rank_explanations(
     f_center_hz: f64,
     bandwidth_hz: f64,
 ) -> Vec<Explanation> {
-    // service → (probability no evidence supports it, evidence rows, every row is occupancy-only)
-    let mut by_service: BTreeMap<&'static str, (f64, Vec<ExplanationEvidence>, bool)> =
-        BTreeMap::new();
+    let mut out = rank_all(table, evidence, f_center_hz, bandwidth_hz);
+    out.truncate(TOP_K);
+    out
+}
+
+/// Evidence written by this module's occupancy mapping: shape, never status.
+fn is_shape_evidence(model_version: &str) -> bool {
+    model_version == FAMILY_MAP_VERSION
+}
+
+#[derive(Default)]
+struct Slot {
+    /// Probability no evidence supports the service.
+    miss: f64,
+    /// Probability no non-shape evidence supports it.
+    status_miss: f64,
+    rows: Vec<ExplanationEvidence>,
+    any_evidence: bool,
+    shape_only: bool,
+}
+
+/// Every candidate, ranked, 1-based ranks, untruncated.
+fn rank_all(
+    table: &BandTable,
+    evidence: &[FamilyEvidence],
+    f_center_hz: f64,
+    bandwidth_hz: f64,
+) -> Vec<Explanation> {
+    let new_slot = || Slot {
+        miss: 1.0,
+        status_miss: 1.0,
+        shape_only: true,
+        ..Slot::default()
+    };
+    let mut by_service: BTreeMap<&'static str, Slot> = BTreeMap::new();
     for ev in evidence {
         let call = map_name(&ev.family);
         let Some(service) = call.service else {
             continue;
         };
         let c = (call.confidence * ev.confidence).clamp(0.0, 1.0);
-        let slot = by_service.entry(service).or_insert((1.0, Vec::new(), true));
-        slot.0 *= 1.0 - c;
-        slot.2 &= ev.model_version == FAMILY_MAP_VERSION;
-        slot.1.push(ExplanationEvidence::Family {
+        let slot = by_service.entry(service).or_insert_with(new_slot);
+        slot.any_evidence = true;
+        slot.miss *= 1.0 - c;
+        if !is_shape_evidence(&ev.model_version) {
+            slot.status_miss *= 1.0 - c;
+            slot.shape_only = false;
+        }
+        slot.rows.push(ExplanationEvidence::Family {
             family: ev.family.clone(),
             model_version: ev.model_version.clone(),
             confidence: ev.confidence,
@@ -609,22 +681,23 @@ pub fn rank_explanations(
         if match_known_status(table, service, f_center_hz, bandwidth_hz).status
             == KnownStatus::Known
         {
-            by_service
-                .entry(service)
-                .or_insert((1.0, Vec::new(), false));
+            by_service.entry(service).or_insert_with(new_slot);
         }
     }
     let no_rows = table
         .overlapping_center(f_center_hz, bandwidth_hz)
         .is_empty();
+    let region = table.region();
     let mut out: Vec<Explanation> = by_service
         .into_iter()
-        .map(|(service, (miss, mut ev, shape_only))| {
-            let evidence_confidence = 1.0 - miss;
+        .map(|(service, slot)| {
+            let evidence_confidence = 1.0 - slot.miss;
+            let status_evidence_confidence = 1.0 - slot.status_miss;
+            let mut ev = slot.rows;
             let m = match_known_status(table, service, f_center_hz, bandwidth_hz);
             let mut flags = Vec::new();
-            let base = if evidence_confidence > 0.0 {
-                if shape_only {
+            let base = if slot.any_evidence && evidence_confidence > 0.0 {
+                if slot.shape_only {
                     flags.push("shape-only".to_owned());
                 }
                 if evidence_confidence < MIN_CONFIDENCE {
@@ -654,7 +727,7 @@ pub fn rank_explanations(
                 reason: m.reason,
             });
             let mut raster = 1.0;
-            if let Some(fit) = raster_fit(service, f_center_hz) {
+            if let Some(fit) = raster_fit(region, service, f_center_hz) {
                 if let ExplanationEvidence::Raster {
                     on_raster: false, ..
                 } = fit
@@ -670,6 +743,7 @@ pub fn rank_explanations(
                 label: service_label(service).to_owned(),
                 score: base * alloc * raster,
                 evidence_confidence,
+                status_evidence_confidence,
                 status: m.status,
                 prior_ref: m.prior_ref,
                 flags,
@@ -682,11 +756,129 @@ pub fn rank_explanations(
             .total_cmp(&a.score)
             .then_with(|| a.service.cmp(&b.service))
     });
-    out.truncate(TOP_K);
     for (i, e) in out.iter_mut().enumerate() {
         e.rank = i as u32 + 1;
     }
     out
+}
+
+/// The status, `prior_ref` and reason `ranked` (best first, untruncated) supports: the verdict of
+/// the best candidate with `status_evidence_confidence >= MIN_CONFIDENCE`, else `unknown`.
+fn status_from(ranked: &[Explanation]) -> (KnownStatus, Option<String>, String) {
+    match ranked
+        .iter()
+        .find(|x| x.status_evidence_confidence >= MIN_CONFIDENCE)
+    {
+        Some(best) => {
+            let why = best
+                .evidence
+                .iter()
+                .find_map(|ev| match ev {
+                    ExplanationEvidence::BandPlan { reason, .. } => Some(reason.as_str()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            (
+                best.status,
+                best.prior_ref.clone(),
+                format!(
+                    "best evidence-backed explanation {} (rank {}, score {:.2}, evidence {:.2}): {why}",
+                    best.label, best.rank, best.score, best.status_evidence_confidence
+                ),
+            )
+        }
+        None => (
+            KnownStatus::Unknown,
+            None,
+            format!(
+                "no explanation backed by demodulator, decoder or classifier evidence >= \
+                 {MIN_CONFIDENCE:.2} (shape evidence only suggests)"
+            ),
+        ),
+    }
+}
+
+/// Flags candidates whose band-plan verdict differs from a status a user or decoder set.
+fn flag_status_conflicts(ranked: &mut [Explanation], current: Option<&KnownStatusChange>) {
+    let Some(cur) = current else {
+        return;
+    };
+    let flag = match cur.author {
+        StatusAuthor::User => "contradicts-user-status",
+        StatusAuthor::Decoder => "contradicts-decoder-status",
+        _ => return,
+    };
+    for x in ranked.iter_mut().filter(|x| x.status != cur.status) {
+        x.flags.push(flag.to_owned());
+    }
+}
+
+/// `model_version` prefix of decoder evidence.
+pub const DECODER_EVIDENCE_PREFIX: &str = "decoder:";
+
+/// The Classification recording that decoder `decoder_id` (a built-in decoder id or plugin
+/// manifest id) produced a valid decode at `t` with `confidence` (0–1): family = the id (lower
+/// case), `model_version` = `decoder:<id>`. `None` when the id maps to no service (see the module
+/// table), so unmapped decoders never become family evidence.
+pub fn decoder_evidence(decoder_id: &str, confidence: f64, t: Timestamp) -> Option<Classification> {
+    let id = decoder_id.trim().to_ascii_lowercase();
+    let call = service_family(&Evidence::Decoder(&id));
+    call.confident_service()?;
+    let confidence = confidence.clamp(0.0, 1.0);
+    Some(Classification {
+        t,
+        family: id.clone(),
+        confidence,
+        open_set_score: 1.0 - confidence,
+        model_version: format!("{DECODER_EVIDENCE_PREFIX}{id}"),
+    })
+}
+
+/// Stores [`decoder_evidence`] on `emitter` (its live id) and returns it; `Ok(None)` stores
+/// nothing. **Call contract (decoder chains, T-037b `chains/plugin.rs`):** after a valid decode for
+/// `emitter`, call this, then `Inventory::chain_emitter(repo, track, emitter)`, which re-ranks the
+/// explanations and may set the status. This writes no content, identity or class.
+pub fn record_decoder_evidence(
+    repo: &mut Repository,
+    emitter: EmitterId,
+    decoder_id: &str,
+    confidence: f64,
+    t: Timestamp,
+) -> Result<Option<Classification>, RepoError> {
+    let Some(c) = decoder_evidence(decoder_id, confidence, t) else {
+        return Ok(None);
+    };
+    let id = repo.live_emitter_id(emitter)?;
+    repo.append_classification(id, &c)?;
+    Ok(Some(c))
+}
+
+/// A user (or classifier) reclassification: appends `classification` to `emitter` and re-ranks at
+/// once.
+pub fn reclassify(
+    repo: &mut Repository,
+    table: &BandTable,
+    emitter: EmitterId,
+    classification: &Classification,
+) -> Result<Explained, RepoError> {
+    let id = repo.live_emitter_id(emitter)?;
+    repo.append_classification(id, classification)?;
+    explain_emitter(repo, table, id)
+}
+
+/// Appends a known-status change (typically authored by a user or decoder) and re-ranks at once,
+/// so explanations contradicting it are flagged without waiting for the next sighting.
+pub fn set_status(
+    repo: &mut Repository,
+    table: &BandTable,
+    change: &KnownStatusChange,
+) -> Result<Explained, RepoError> {
+    let id = repo.live_emitter_id(change.emitter_id)?;
+    repo.append_known_status(&KnownStatusChange {
+        emitter_id: id,
+        ..change.clone()
+    })?;
+    explain_emitter(repo, table, id)
 }
 
 /// The outcome of [`explain_emitter`].
@@ -719,8 +911,8 @@ pub fn explanations(repo: &Repository, emitter: EmitterId) -> Result<Vec<Explana
 }
 
 /// Ranks `emitter`'s explanations from its stored families (every classification, else its
-/// fingerprint family), stores them when they changed, and sets the status from the top
-/// explanation (see the module docs).
+/// fingerprint family), stores them when they changed, and sets the status from the best
+/// status-backed explanation (see the module docs).
 pub fn explain_emitter(
     repo: &mut Repository,
     table: &BandTable,
@@ -729,23 +921,24 @@ pub fn explain_emitter(
     let id = repo.live_emitter_id(emitter)?;
     let e = repo.emitter(id)?;
     let known = |f: &str| !f.trim().is_empty() && !f.eq_ignore_ascii_case("unknown");
-    let mut best: BTreeMap<String, FamilyEvidence> = BTreeMap::new();
+    // Best confidence per (family, classifier): shape and non-shape evidence for one family stay
+    // separate pieces.
+    let mut best: BTreeMap<(String, String), FamilyEvidence> = BTreeMap::new();
     for c in e.classifications.iter().filter(|c| known(&c.family)) {
-        let slot = best.entry(c.family.clone()).or_insert(FamilyEvidence {
-            family: c.family.clone(),
-            confidence: 0.0,
-            model_version: c.model_version.clone(),
-        });
-        if c.confidence >= slot.confidence {
-            slot.confidence = c.confidence.clamp(0.0, 1.0);
-            slot.model_version = c.model_version.clone();
-        }
+        let slot = best
+            .entry((c.family.clone(), c.model_version.clone()))
+            .or_insert(FamilyEvidence {
+                family: c.family.clone(),
+                confidence: 0.0,
+                model_version: c.model_version.clone(),
+            });
+        slot.confidence = slot.confidence.max(c.confidence.clamp(0.0, 1.0));
     }
     if best.is_empty() {
         if let Some(f) = e.fingerprint.get("family").and_then(|v| v.as_str()) {
             if known(f) {
                 best.insert(
-                    f.to_owned(),
+                    (f.to_owned(), "fingerprint".into()),
                     FamilyEvidence {
                         family: f.to_owned(),
                         confidence: 1.0,
@@ -756,7 +949,12 @@ pub fn explain_emitter(
         }
     }
     let evidence: Vec<FamilyEvidence> = best.into_values().collect();
-    let ranked = rank_explanations(table, &evidence, e.f_center_hz, e.bandwidth_hz);
+    let all = rank_all(table, &evidence, e.f_center_hz, e.bandwidth_hz);
+    let verdict = status_from(&all);
+    let cur = repo.known_status_history(id)?.pop();
+    let mut ranked = all;
+    ranked.truncate(TOP_K);
+    flag_status_conflicts(&mut ranked, cur.as_ref());
 
     let prev = latest_explanations(repo, id)?;
     let value = serde_json::to_value(&ranked)?;
@@ -791,32 +989,7 @@ pub fn explain_emitter(
 
     let mut status_appended = None;
     if !evidence.is_empty() {
-        let (status, prior_ref, reason) = match ranked.first() {
-            Some(top) if top.evidence_confidence >= MIN_CONFIDENCE => {
-                let why = top
-                    .evidence
-                    .iter()
-                    .find_map(|ev| match ev {
-                        ExplanationEvidence::BandPlan { reason, .. } => Some(reason.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                (
-                    top.status,
-                    top.prior_ref.clone(),
-                    format!(
-                        "top explanation {} (score {:.2}, evidence {:.2}): {why}",
-                        top.label, top.score, top.evidence_confidence
-                    ),
-                )
-            }
-            _ => (
-                KnownStatus::Unknown,
-                None,
-                format!("no explanation backed by family evidence >= {MIN_CONFIDENCE:.2}"),
-            ),
-        };
-        let cur = repo.known_status_history(id)?.pop();
+        let (status, prior_ref, reason) = verdict;
         let skip = cur.is_some_and(|cur| {
             let overridable = matches!(
                 cur.author,
@@ -985,9 +1158,10 @@ mod tests {
         )));
     }
 
-    /// The same station 150 kHz off its channel keeps FM broadcast, flagged off-raster.
+    /// A station 47 kHz off its nearest channel (101.453 MHz; 150 kHz above the 101.3 MHz channel
+    /// lands 47 kHz below 101.5 MHz) keeps FM broadcast, flagged off-raster and shape-only.
     #[test]
-    fn a_station_150_khz_off_its_channel_is_flagged_off_raster() {
+    fn a_station_47_khz_off_its_nearest_channel_is_flagged_off_raster() {
         let r = rank_explanations(
             &table(),
             &[ev("fm-broadcast", 0.6, FAMILY_MAP_VERSION)],
@@ -1034,6 +1208,183 @@ mod tests {
         assert_eq!(av.rank, 2);
         assert!(av.has_flag("allocation-only"));
         assert_eq!(av.status, KnownStatus::Known);
+    }
+
+    /// T-054 item 2: shape evidence alone ranks and suggests, never sets a status. A wide
+    /// continuous carrier at 162 MHz stays `unknown`, with FM broadcast a `shape-only` suggestion.
+    #[test]
+    fn shape_only_evidence_ranks_but_never_sets_a_status() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let table = table();
+        let mut s = sighting(162.0e6, 333e3, "fm-broadcast");
+        s.classification.as_mut().unwrap().model_version = FAMILY_MAP_VERSION.into();
+        s.classification.as_mut().unwrap().confidence = 0.6;
+        let r = repo.record_sighting(&s, None).unwrap();
+        let x = explain_emitter(&mut repo, &table, r.emitter_id).unwrap();
+        let fm = x
+            .explanations
+            .iter()
+            .find(|e| e.service == "fm-broadcast")
+            .unwrap();
+        assert!(
+            fm.has_flag("shape-only") && fm.has_flag("off-allocation"),
+            "{fm:?}"
+        );
+        assert!(fm.evidence_confidence >= MIN_CONFIDENCE);
+        assert_eq!(fm.status_evidence_confidence, 0.0);
+        assert_eq!(x.status_appended, None);
+        let e = repo.emitter(r.emitter_id).unwrap();
+        assert_eq!(e.known_status, KnownStatus::Unknown);
+        let last = repo
+            .known_status_history(r.emitter_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(last.prior_ref, None);
+
+        // A WFM demodulation on the same emitter is status evidence.
+        let wfm = Classification {
+            t: t(2),
+            family: "wfm".into(),
+            confidence: 0.8,
+            open_set_score: 0.2,
+            model_version: "mode-rules@1".into(),
+        };
+        let x = reclassify(&mut repo, &table, r.emitter_id, &wfm).unwrap();
+        assert_eq!(x.status_appended, Some(KnownStatus::UnexpectedHere));
+        let fm = &x.explanations[0];
+        assert_eq!(fm.service, "fm-broadcast");
+        assert!(!fm.has_flag("shape-only"));
+        assert!((fm.status_evidence_confidence - 0.72).abs() < 1e-9);
+        assert_eq!(
+            repo.emitter(r.emitter_id).unwrap().known_status,
+            KnownStatus::UnexpectedHere
+        );
+    }
+
+    /// T-054 item 3: the status comes from the best candidate backed by enough evidence, not from
+    /// a weak top candidate. At 120.5 MHz a 0.45 aviation-voice classification (on allocation,
+    /// score 0.45) outscores 0.6 WFM evidence (off allocation, 0.6 × 0.7 = 0.42), yet the WFM
+    /// candidate decides: `unexpected-here`.
+    #[test]
+    fn status_comes_from_the_best_candidate_above_min_confidence() {
+        let wfm_conf = 0.6 / 0.9;
+        let r = rank_all(
+            &table(),
+            &[
+                ev("aviation-voice", 0.45, "clf@1"),
+                ev("wfm", wfm_conf, "mode@1"),
+            ],
+            120.5e6,
+            230e3,
+        );
+        assert_eq!(r[0].service, "aviation-voice");
+        assert_eq!(r[0].status, KnownStatus::Known);
+        assert!(r[0].has_flag("low-confidence"));
+        assert_eq!(r[1].service, "fm-broadcast");
+        assert!(r[1].status_evidence_confidence >= MIN_CONFIDENCE);
+        let (status, prior_ref, reason) = status_from(&r);
+        assert_eq!(status, KnownStatus::UnexpectedHere, "{reason}");
+        assert_eq!(prior_ref.as_deref(), Some(AIRBAND_ROW));
+
+        let none = rank_all(
+            &table(),
+            &[ev("aviation-voice", 0.45, "clf@1")],
+            120.5e6,
+            230e3,
+        );
+        assert_eq!(status_from(&none).0, KnownStatus::Unknown);
+    }
+
+    /// T-054 item 4: rasters are keyed by region. A band table that is not a US table (here one
+    /// with no region) applies no US raster, even to a station 47 kHz off the US FM raster.
+    #[test]
+    fn a_non_us_table_applies_no_us_raster() {
+        let us = rank_explanations(&table(), &[ev("wfm", 0.8, "mode@1")], 101.453e6, 230e3);
+        assert!(us[0].has_flag("off-raster"));
+        assert_eq!(raster_fit(None, "fm-broadcast", 101.453e6), None);
+        assert!(raster_fit(Some(Region::Us), "fm-broadcast", 101.453e6).is_some());
+        let other = BandTable::default();
+        assert_eq!(other.region(), None);
+        let r = rank_explanations(&other, &[ev("wfm", 0.8, "mode@1")], 101.453e6, 230e3);
+        let fm = r.iter().find(|e| e.service == "fm-broadcast").unwrap();
+        assert!(!fm.has_flag("off-raster"), "{fm:?}");
+        assert!(
+            !fm.evidence
+                .iter()
+                .any(|e| matches!(e, ExplanationEvidence::Raster { .. }))
+        );
+    }
+
+    /// T-054 item 5: a decoder id reaches the mapping through `record_decoder_evidence`; unmapped
+    /// ids store nothing.
+    #[test]
+    fn decoder_evidence_reaches_the_mapping_and_sets_status_after_chain_emitter() {
+        use crate::{Inventory, TrackInventory};
+        assert_eq!(decoder_evidence("some-unknown-plugin", 1.0, t(1)), None);
+        let c = decoder_evidence("ReadSB", 0.95, t(1)).unwrap();
+        assert_eq!(
+            (c.family.as_str(), c.model_version.as_str()),
+            ("readsb", "decoder:readsb")
+        );
+
+        let mut repo = Repository::open_in_memory().unwrap();
+        let r = repo
+            .record_sighting(&sighting(1090e6, 50e3, "unknown"), None)
+            .unwrap();
+        assert_eq!(
+            record_decoder_evidence(&mut repo, r.emitter_id, "nope", 1.0, t(2)).unwrap(),
+            None
+        );
+        let stored = record_decoder_evidence(&mut repo, r.emitter_id, "readsb", 0.95, t(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.family, "readsb");
+        let mut inv = TrackInventory::default();
+        inv.chain_emitter(&mut repo, None, r.emitter_id).unwrap();
+        let x = explanations(&repo, r.emitter_id).unwrap();
+        assert_eq!(x[0].service, "adsb", "{x:?}");
+        assert!(x[0].status_evidence_confidence >= MIN_CONFIDENCE);
+        let e = repo.emitter(r.emitter_id).unwrap();
+        assert_eq!(e.known_status, KnownStatus::Known);
+    }
+
+    /// T-054 item 5: a user status change re-ranks at once, flagging contradicting explanations.
+    #[test]
+    fn a_user_status_change_re_ranks_at_once() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let table = table();
+        let r = repo
+            .record_sighting(&sighting(120.5e6, 230e3, "wfm"), None)
+            .unwrap();
+        explain_emitter(&mut repo, &table, r.emitter_id).unwrap();
+        let x = set_status(
+            &mut repo,
+            &table,
+            &KnownStatusChange {
+                emitter_id: r.emitter_id,
+                status: KnownStatus::Known,
+                prior_ref: None,
+                reason: "user: my own transmitter".into(),
+                t: t(2),
+                author: StatusAuthor::User,
+            },
+        )
+        .unwrap();
+        assert!(x.written.is_some(), "re-ranked and stored at once");
+        assert_eq!(x.status_appended, None);
+        let stored = explanations(&repo, r.emitter_id).unwrap();
+        let fm = stored.iter().find(|e| e.service == "fm-broadcast").unwrap();
+        assert!(fm.has_flag("contradicts-user-status"), "{fm:?}");
+        let av = stored
+            .iter()
+            .find(|e| e.service == "aviation-voice")
+            .unwrap();
+        assert!(!av.has_flag("contradicts-user-status"));
+        assert_eq!(
+            repo.emitter(r.emitter_id).unwrap().known_status,
+            KnownStatus::Known
+        );
     }
 
     /// Decision (module docs): unmapped FSK in an ISM band keeps `unknown`, with ISM / Part 15 as

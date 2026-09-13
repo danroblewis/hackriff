@@ -284,6 +284,14 @@ impl BandTable {
         &self.rows
     }
 
+    /// The region every row belongs to, or `None` for an empty table or one mixing regions.
+    /// Region-specific lookups outside the allocation rows (e.g. channel rasters) key on it, so a
+    /// table that is not wholly one region applies none of them.
+    pub fn region(&self) -> Option<Region> {
+        let first = self.rows.first()?.region;
+        self.rows.iter().all(|r| r.region == first).then_some(first)
+    }
+
     /// Rows whose band overlaps the closed interval `[f_lo_hz, f_hi_hz]`.
     pub fn overlapping(&self, f_lo_hz: f64, f_hi_hz: f64) -> Vec<&AllocationRow> {
         let query = FreqRange::new(f_lo_hz, f_hi_hz);
@@ -316,6 +324,12 @@ mod tests {
 
     fn us() -> BandTable {
         BandTable::bundled(Region::Us).expect("bundled table parses")
+    }
+
+    #[test]
+    fn table_region_is_the_common_row_region() {
+        assert_eq!(us().region(), Some(Region::Us));
+        assert_eq!(BandTable::default().region(), None, "empty table");
     }
 
     /// AWARE-053: 98.1 MHz (a typical FM broadcast carrier) resolves to the FM broadcast

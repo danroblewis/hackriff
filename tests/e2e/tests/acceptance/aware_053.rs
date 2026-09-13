@@ -8,10 +8,16 @@
 //!   as `prior_ref`.
 //! - **Off raster.** A synthesised copy (the IQ shifted +150 kHz, onto 101.45 MHz) is still
 //!   detected, with FM broadcast in the top-k flagged `off-raster`.
-//! - **Off allocation.** The same IQ relabelled 19.2 MHz up (aeronautical VHF comm) is
-//!   `metadata-only`, so no content chain runs. The track's occupancy family still ranks FM
-//!   broadcast first, `off-allocation`, with status `unexpected-here` and prior_ref
-//!   `aviation-vhf-comm`. Aviation voice is the allocation-only alternative.
+//! - **Shape only (T-054).** The same IQ relabelled onto 162 MHz (maritime VHF) is
+//!   `metadata-only`, so no content chain runs and only the track's occupancy (shape) evidence
+//!   exists. FM broadcast is ranked as a `shape-only`, `off-allocation` suggestion, and the status
+//!   stays `unknown` with no prior_ref: a wide carrier is not "FM broadcast, unexpected here" on
+//!   shape alone.
+//! - **Off allocation.** The same IQ relabelled 19.2 MHz up (aeronautical VHF comm), with the user
+//!   vouching the recording `unrestricted` and adding the airband to the analog chain's range
+//!   (plan configuration, not truth), so the analog chain may demodulate it. The WFM
+//!   demodulation ranks FM broadcast first, `off-allocation`, with status `unexpected-here` and
+//!   prior_ref `aviation-vhf-comm`. Aviation voice is the allocation-only alternative.
 //! - **Restricted band (legal guardrail).** The same IQ relabelled onto 930.5 MHz paging. The
 //!   mapped family ranks, yet the class stays `restricted-paging`: no recording, no label, no
 //!   content and no identity in clear.
@@ -48,7 +54,6 @@ struct Seen {
     id: EmitterId,
     f_center_hz: f64,
     bandwidth_hz: f64,
-    family: Option<String>,
     status: KnownStatus,
     last: KnownStatusChange,
     explanations: Vec<Explanation>,
@@ -107,7 +112,6 @@ fn matched(run: &BlindRun, truth: &TruthItem, shift_hz: f64, tag: &str) -> (usiz
                 id: e.emitter.id,
                 f_center_hz: e.emitter.f_center_hz,
                 bandwidth_hz: e.emitter.bandwidth_hz,
-                family: e.family.clone(),
                 status: e.emitter.known_status,
                 last,
                 explanations: x,
@@ -123,6 +127,20 @@ fn has_fm(s: &Seen) -> bool {
 
 fn evidence_backed(x: &Explanation) -> bool {
     x.evidence_confidence >= MIN_CONFIDENCE
+}
+
+/// Backed by demodulator/decoder/classifier evidence, not shape alone: may set a status.
+fn status_backed(x: &Explanation) -> bool {
+    x.status_evidence_confidence >= MIN_CONFIDENCE
+}
+
+#[test]
+fn aware_053_api_serves_the_family_map_author() {
+    assert_eq!(
+        hk_api::query::EXPLANATIONS_AUTHOR_REF,
+        hk_pipeline::family::FAMILY_MAP_VERSION,
+        "[{AWARE_053}] /api/inventory must serve the family map's explanations"
+    );
 }
 
 #[test]
@@ -145,7 +163,7 @@ fn aware_053_blind_fm_station_ranks_fm_broadcast_first_and_is_known() {
         .iter()
         .find(|s| {
             s.explanations.first().is_some_and(|x| {
-                x.service == "fm-broadcast" && evidence_backed(x) && !x.has_flag("off-raster")
+                x.service == "fm-broadcast" && status_backed(x) && !x.has_flag("off-raster")
             })
         })
         .unwrap_or_else(|| {
@@ -207,6 +225,51 @@ fn aware_053_blind_station_shifted_150_khz_keeps_fm_broadcast_flagged_off_raster
     );
 }
 
+/// T-054: a wideband FM-like carrier at 162 MHz with shape evidence only stays `unknown`; FM
+/// broadcast is only a shape-only suggestion.
+#[test]
+fn aware_053_blind_wide_carrier_at_162_mhz_stays_unknown_with_a_shape_only_suggestion() {
+    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
+        return;
+    };
+    let truth = station(&fx);
+    let shift_hz = 162.0e6 - 101.3e6;
+    let run = blind_replay(
+        &meta,
+        "a053s",
+        BlindSource {
+            relabel_hz: shift_hz,
+            ..BlindSource::default()
+        },
+    );
+    assert_eq!(
+        run.summary.source_class, "metadata-only",
+        "[{AWARE_053}] 162 MHz is no unrestricted band prior"
+    );
+    let (dets, seen) = matched(&run, &truth, shift_hz, "162 MHz carrier");
+    assert!(dets > 0, "[{AWARE_053}] the carrier was not detected");
+    assert!(!seen.is_empty(), "[{AWARE_053}] no emitter at the carrier");
+    let suggested: Vec<&Explanation> = seen
+        .iter()
+        .flat_map(|s| &s.explanations)
+        .filter(|x| x.service == "fm-broadcast")
+        .collect();
+    assert!(
+        !suggested.is_empty(),
+        "[{AWARE_053}] FM broadcast should still be suggested from the shape"
+    );
+    for x in &suggested {
+        assert!(
+            x.has_flag("shape-only") && !status_backed(x),
+            "[{AWARE_053}] {x:?}"
+        );
+    }
+    for s in &seen {
+        assert_eq!(s.status, KnownStatus::Unknown, "[{AWARE_053}] {s:?}");
+        assert_eq!(s.last.prior_ref, None, "[{AWARE_053}] {s:?}");
+    }
+}
+
 #[test]
 fn aware_053_blind_off_allocation_station_is_unexpected_here_with_prior_ref() {
     const SHIFT_HZ: f64 = 19.2e6;
@@ -219,12 +282,14 @@ fn aware_053_blind_off_allocation_station_is_unexpected_here_with_prior_ref() {
         "a053u",
         BlindSource {
             relabel_hz: SHIFT_HZ,
+            vouched_class: Some("unrestricted"),
+            demod_freq_hz: Some([118.0e6, 137.0e6]),
             ..BlindSource::default()
         },
     );
     assert_eq!(
-        run.summary.source_class, "metadata-only",
-        "[{AWARE_053}] 120 MHz is no unrestricted band prior"
+        run.summary.source_class, "unrestricted",
+        "[{AWARE_053}] the user vouched the recording"
     );
     let (dets, seen) = matched(&run, &truth, SHIFT_HZ, "aeronautical band");
     assert!(
@@ -248,12 +313,11 @@ fn aware_053_blind_off_allocation_station_is_unexpected_here_with_prior_ref() {
         );
         let top = &s.explanations[0];
         assert_eq!(top.service, "fm-broadcast", "[{AWARE_053}] {s:?}");
-        assert!(top.has_flag("off-allocation") && evidence_backed(top));
+        assert!(top.has_flag("off-allocation") && status_backed(top));
         assert!(
             s.explanations.iter().any(|x| x.service == "aviation-voice"),
             "[{AWARE_053}] the aviation allocation is a ranked alternative"
         );
-        assert_eq!(s.family.as_deref(), Some("fm-broadcast"));
     }
     let listed = inventory(
         &repo(&run.dir.0),

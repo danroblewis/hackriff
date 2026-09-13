@@ -490,3 +490,74 @@ fn hk_api_never_calls_the_ungated_emitter_getters() {
     assert!(query.contains("access: IdentityAccess::Standard"));
     assert!(!query.contains("OwnTrafficAuthorised"));
 }
+
+/// T-054: `/api/inventory` serves explanations only from the family map's Classifier annotations
+/// (`author_ref == EXPLANATIONS_AUTHOR_REF`); a later Classifier annotation by another author
+/// carrying an `explanations` key is not served.
+#[test]
+fn explanations_are_served_only_from_the_family_map_author() {
+    use hk_model::{
+        Annotation, AnnotationAuthor, AnnotationId, AnnotationKind, AnnotationTarget, ContentClass,
+        Fingerprint, LinkTarget, Sighting, TimeRange, Timestamp, TrackId,
+    };
+    let t = |s: i64| Timestamp::from_unix_nanos(s * 1_000_000_000);
+    let mut repo = Repository::open_in_memory().unwrap();
+    let r = repo
+        .record_sighting(
+            &Sighting {
+                source: LinkTarget::Track(TrackId::new()),
+                seen: TimeRange::new(t(T0), t(T0 + 1)),
+                count: 1,
+                f_center_hz: 101.3e6,
+                bandwidth_hz: 230e3,
+                fingerprint: Some(Fingerprint::new(101.3e6, 230e3)),
+                identity: None,
+                context: None,
+                classification: None,
+                tags: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+    let id = r.emitter_id;
+    let note = |author_ref: &str, service: &str, at: i64| Annotation {
+        id: AnnotationId::new(),
+        target: AnnotationTarget::Emitter(id),
+        author: AnnotationAuthor::Classifier,
+        author_ref: author_ref.into(),
+        kind: AnnotationKind::Label,
+        value: format!("explanations/{service}"),
+        metadata: json!({ "explanations": [{ "service": service }] }),
+        content: None,
+        confidence: 0.5,
+        supersedes: None,
+        content_class: ContentClass::MetadataOnly,
+        t: t(at),
+        exported: false,
+    };
+    repo.insert_annotation(&note(
+        hk_api::query::EXPLANATIONS_AUTHOR_REF,
+        "fm-broadcast",
+        T0 + 2,
+    ))
+    .unwrap();
+    repo.insert_annotation(&note("some-future-classifier@1", "adsb", T0 + 3))
+        .unwrap();
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        Token::from_config(TOKEN).unwrap(),
+    );
+    let state = ApiState {
+        inventory: Some(Arc::new(Mutex::new(repo))),
+        ..ApiState::default()
+    };
+    let server = Server::start(config, state).unwrap();
+    let body = page(server.local_addr(), "/api/inventory");
+    let row = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id.to_string())
+        .expect("emitter row");
+    assert_eq!(row["explanations"][0]["service"], "fm-broadcast", "{row}");
+}

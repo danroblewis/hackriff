@@ -26,6 +26,26 @@ pub struct BlindSource {
     pub relabel_hz: f64,
     /// IQ frequency shift, Hz: every emission moves at an unchanged tuned centre (synthesised).
     pub iq_shift_hz: f64,
+    /// A content class the user vouches for on the recording (`hackriff:content_class`), e.g.
+    /// `unrestricted` so content chains may run outside the frequency-derived band priors. This is
+    /// user configuration, not truth.
+    pub vouched_class: Option<&'static str>,
+    /// An extra RF range, Hz, the user adds to the built-in `wfm-rds` chain
+    /// (`ScanPlan.extra.pipeline.chains`), so the analog chain may demodulate there. User
+    /// configuration, not truth: mode selection still decides whether it is WFM.
+    pub demod_freq_hz: Option<[f64; 2]>,
+}
+
+/// `ScanPlan.extra` for `source`.
+fn plan_extra(source: &BlindSource) -> serde_json::Value {
+    let Some(range) = source.demod_freq_hz else {
+        return json!({});
+    };
+    let mut chains = hk_pipeline::builtin_chains();
+    for c in chains.iter_mut().filter(|c| c.id == "wfm-rds") {
+        c.freq_hz.push(range);
+    }
+    json!({ "pipeline": { "chains": chains } })
 }
 
 /// A finished blind run.
@@ -60,8 +80,20 @@ pub fn blind_replay(meta: &Path, tag: &str, source: BlindSource) -> BlindRun {
         .unwrap();
     }
     let blind = strip_truth(meta, &src.0, "blind", source.relabel_hz).unwrap();
+    if let Some(class) = source.vouched_class {
+        let mut m = SigmfMeta::read(&blind).unwrap();
+        m.global
+            .extra
+            .insert("hackriff:content_class".into(), json!(class));
+        m.write(&blind).unwrap();
+    }
     let dir = TempDir::new(tag);
-    let (cfg, replay) = replay_config(&dir.0, &blind, json!({}), hk_core::Pacing::Unpaced);
+    let (cfg, replay) = replay_config(
+        &dir.0,
+        &blind,
+        plan_extra(&source),
+        hk_core::Pacing::Unpaced,
+    );
     let handle = start(cfg, replay);
     let counters = handle.counters();
     let summary = finish(handle);
