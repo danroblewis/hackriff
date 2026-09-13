@@ -28,9 +28,20 @@
 //! # Ungated feed
 //! [`DecoderFeed`] reuses this machinery for the plugin data plane (ADR-0003) without the egress
 //! gate, and only attaches to a child process's stdin. See [`super::gate`] for why.
+//!
+//! # Egress enforcement (legal guardrail)
+//! - **Locality.** Every consumer is subscribed through [`Shared::subscribe`] with a
+//!   [`Locality`] derived from its writer type ([`EgressWriter`]); a `Remote` consumer of an
+//!   `own-key-decrypted` stream is refused. Listeners, bridges and direct subscribers all pass
+//!   through it.
+//! - **Metadata policy.** Messages whose effective class forbids content are reduced to the
+//!   publisher's [`MetadataPolicy`] in [`Publisher::publish_message`].
+//! - **Gated spectrum.** Rows are rate- and size-enforced in [`Publisher::publish_binary`].
 
+use std::any::Any;
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::process::ChildStdin;
@@ -39,11 +50,14 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use hk_model::{ContentClass, Timestamp};
+use hk_model::sigmf::Datatype;
+use hk_model::{ContentClass, DecodedIdentity, Timestamp};
+use serde_json::Value;
 
 use super::frame::{FrameError, LEN_PREFIX, frame_prefix};
 use super::gate;
 use super::header::{HeaderError, StreamHeader, StreamKind};
+use super::policy::{self, MetadataPolicy};
 use super::record::{
     BINARY_RECORD_HEADER_LEN, BinaryRecord, BinaryRecordHeader, BinaryRecordType, DropMarker,
     MARKER_MAX_LEN, MessageRecord, MessageWire, RecordFlags, encode_marker,
@@ -128,6 +142,38 @@ pub enum StreamError {
         /// Declared row rate.
         row_rate_hz: Option<f64>,
     },
+    /// ADR-0004: a spectrum stream under a content-forbidding class must declare `fft_size` and a
+    /// known `datatype`, which bound each row's payload.
+    #[error("spectrum stream under content class {class:?} must declare {missing}")]
+    SpectrumGeometry {
+        /// Header class.
+        class: ContentClass,
+        /// The missing header field.
+        missing: &'static str,
+    },
+    /// ADR-0004: a row on a gated spectrum stream exceeded the declared row rate or the
+    /// `fft_size` payload cap. It was withheld (it still consumed a seq) and is reported to
+    /// consumers by a counted `GATED` drop marker before the next delivered row.
+    #[error("spectrum row withheld under content class {class:?}: {reason:?}")]
+    SpectrumGated {
+        /// Header class.
+        class: ContentClass,
+        /// Which cap.
+        reason: SpectrumGateReason,
+    },
+    /// ADR-0004: a messages stream whose header class forbids content needs a
+    /// [`MetadataPolicy`] (fail closed); use [`Publisher::with_metadata_policy`].
+    #[error("messages stream under content class {class:?} needs a metadata policy")]
+    MetadataPolicyRequired {
+        /// Header class.
+        class: ContentClass,
+    },
+    /// `own-key-decrypted` streams are local-only: a [`Locality::Remote`] consumer was refused.
+    #[error("{class:?} streams are local-only: remote consumer refused (serve on a Unix socket)")]
+    LocalOnly {
+        /// Header class.
+        class: ContentClass,
+    },
     /// The consumer cap is reached.
     #[error("consumer limit {max} reached")]
     TooManyConsumers {
@@ -156,6 +202,106 @@ pub struct PublishOutcome {
     pub dropped: u32,
     /// Consumers disconnected by this call (slow-consumer policy).
     pub disconnected: u32,
+}
+
+/// Which gated-spectrum cap withheld a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpectrumGateReason {
+    /// Faster than the declared row rate (wall-clock arrival or `t` spacing), or `t` went
+    /// backwards.
+    RowRate,
+    /// Payload longer than `fft_size` x element size.
+    PayloadLen,
+}
+
+/// Egress-gate counters of one publisher.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GateStats {
+    /// Message fields (metadata keys, frame models/labels, identities, decoders) removed or
+    /// replaced by the metadata policy.
+    pub metadata_fields_sanitized: u64,
+    /// Spectrum rows withheld by the gated-spectrum rate or payload cap.
+    pub spectrum_rows_gated: u64,
+    /// Remote consumers refused because the stream is local-only.
+    pub remote_consumers_refused: u64,
+}
+
+/// Where a consumer's bytes go (docs/stream-contract.md §2, locality rule).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Locality {
+    /// Stays on this host: a Unix-domain socket, a child's stdin, an in-process sink.
+    Local,
+    /// Leaves (or may leave) this host: TCP, a WebSocket bridge, anything network-backed.
+    Remote,
+}
+
+/// A consumer transport that knows its [`Locality`]. Implemented for [`UnixStream`] (`Local`)
+/// and [`TcpStream`] (`Remote`); wrap anything else in [`Declared`]. A bridge (WebSocket, relay)
+/// must subscribe as `Remote`.
+pub trait EgressWriter: Write + Send + 'static {
+    /// The transport's locality.
+    fn locality(&self) -> Locality;
+}
+
+impl EgressWriter for UnixStream {
+    fn locality(&self) -> Locality {
+        Locality::Local
+    }
+}
+
+impl EgressWriter for TcpStream {
+    fn locality(&self) -> Locality {
+        Locality::Remote
+    }
+}
+
+/// A writer with a declared [`Locality`], for transports the type system cannot classify
+/// (in-process buffers, bridges). `Declared::local` is an assertion that the bytes never leave the
+/// host: it is reviewed code. A `TcpStream` declared local is still `Remote`.
+pub struct Declared<W> {
+    writer: W,
+    locality: Locality,
+}
+
+impl<W: Write + Send + 'static> Declared<W> {
+    /// Declares `writer` local (a `TcpStream` stays `Remote`).
+    pub fn local(writer: W) -> Self {
+        let any: &dyn Any = &writer;
+        let locality = if any.is::<TcpStream>() {
+            Locality::Remote
+        } else {
+            Locality::Local
+        };
+        Self { writer, locality }
+    }
+
+    /// Declares `writer` remote (bridges, relays, anything network-backed).
+    pub fn remote(writer: W) -> Self {
+        Self {
+            writer,
+            locality: Locality::Remote,
+        }
+    }
+}
+
+impl<W: Write> Write for Declared<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writer.write(buf)
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.writer.write_all(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+impl<W: Write + Send + 'static> EgressWriter for Declared<W> {
+    fn locality(&self) -> Locality {
+        self.locality
+    }
 }
 
 /// Consumer id, unique within a publisher.
@@ -413,16 +559,27 @@ struct Shared {
     list: Mutex<List>,
     generation: AtomicU64,
     next_id: AtomicU64,
+    metadata_sanitized: AtomicU64,
+    spectrum_rows_gated: AtomicU64,
+    remote_refused: AtomicU64,
 }
 
 impl Shared {
+    /// The single subscription path for every consumer (listeners, bridges, direct subscribers,
+    /// plugin stdin). Refuses a `Remote` consumer of a local-only stream before anything is
+    /// allocated or queued.
     fn subscribe(
         self: &Arc<Self>,
         label: String,
         writer: Box<dyn Write + Send>,
+        locality: Locality,
         closer: Closer,
         queue_bytes: usize,
     ) -> Result<ConsumerId, StreamError> {
+        if locality == Locality::Remote && !gate::remote_transport_permitted(self.class) {
+            self.remote_refused.fetch_add(1, Ordering::Relaxed);
+            return Err(StreamError::LocalOnly { class: self.class });
+        }
         if queue_bytes < self.min_queue_bytes {
             return Err(StreamError::Config(format!(
                 "queue_bytes {queue_bytes} < {} (header + one max_frame_len record + marker)",
@@ -589,11 +746,14 @@ pub struct PublisherHandle {
 impl PublisherHandle {
     /// Adds a consumer. The header frame is queued first. `closer` must unblock a write in
     /// progress on `writer` (for sockets: `shutdown(Both)` on a clone); it runs once, when the
-    /// consumer closes for any reason. Refused beyond `max_consumers`.
-    pub fn subscribe(
+    /// consumer closes for any reason. Refused beyond `max_consumers`, and refused
+    /// ([`StreamError::LocalOnly`]) when `writer` is [`Locality::Remote`] and the stream is
+    /// `own-key-decrypted`. Pass sockets as their concrete type (`UnixStream`, `TcpStream`);
+    /// anything else through [`Declared`].
+    pub fn subscribe<W: EgressWriter>(
         &self,
         label: impl Into<String>,
-        writer: Box<dyn Write + Send>,
+        writer: W,
         closer: Box<dyn FnOnce(CloseReason) + Send>,
     ) -> Result<ConsumerId, StreamError> {
         let queue_bytes = self.shared.config.queue_bytes;
@@ -602,10 +762,10 @@ impl PublisherHandle {
 
     /// [`PublisherHandle::subscribe`] with a per-consumer queue size (e.g. a recording-like local
     /// consumer that wants more slack than the stream default).
-    pub fn subscribe_with_queue(
+    pub fn subscribe_with_queue<W: EgressWriter>(
         &self,
         label: impl Into<String>,
-        writer: Box<dyn Write + Send>,
+        writer: W,
         closer: Box<dyn FnOnce(CloseReason) + Send>,
         queue_bytes: usize,
     ) -> Result<ConsumerId, StreamError> {
@@ -614,8 +774,23 @@ impl PublisherHandle {
                 "decoder feeds attach through FeedAttacher".into(),
             ));
         }
-        self.shared
-            .subscribe(label.into(), writer, closer, queue_bytes)
+        let locality = writer.locality();
+        self.shared.subscribe(
+            label.into(),
+            Box::new(writer),
+            locality,
+            closer,
+            queue_bytes,
+        )
+    }
+
+    /// Egress-gate counters.
+    pub fn gate_stats(&self) -> GateStats {
+        GateStats {
+            metadata_fields_sanitized: self.shared.metadata_sanitized.load(Ordering::Relaxed),
+            spectrum_rows_gated: self.shared.spectrum_rows_gated.load(Ordering::Relaxed),
+            remote_consumers_refused: self.shared.remote_refused.load(Ordering::Relaxed),
+        }
     }
 
     /// The stream header's content class (transports use it: own-key streams are local-only).
@@ -679,32 +854,143 @@ impl PublisherHandle {
 pub struct Publisher {
     shared: Arc<Shared>,
     header: StreamHeader,
+    policy: Option<MetadataPolicy>,
+    spectrum_gate: Option<SpectrumGate>,
     snapshot: Vec<Arc<Consumer>>,
     seen_generation: u64,
     next_seq: u64,
     scratch: Vec<u8>,
 }
 
+/// Per-row enforcement of a gated spectrum stream's declared row rate and payload size.
+struct SpectrumGate {
+    rate_hz: f64,
+    max_payload: usize,
+    wall_tokens: f64,
+    wall_last: Option<Instant>,
+    time_tokens: f64,
+    time_last_ns: Option<i64>,
+    /// Withheld run not yet reported: (first seq, count).
+    pending: Option<(u64, u64)>,
+    /// `t` and sample index of the last delivered row.
+    last_delivered: (Timestamp, u64),
+}
+
+impl SpectrumGate {
+    /// Token buckets over wall-clock arrival and over `t` spacing; a row needs a token from both.
+    fn admit(&mut self, t: Timestamp) -> bool {
+        let burst = gate::GATED_SPECTRUM_BURST_ROWS;
+        let now = Instant::now();
+        if let Some(last) = self.wall_last {
+            self.wall_tokens = (self.wall_tokens
+                + now.duration_since(last).as_secs_f64() * self.rate_hz)
+                .min(burst);
+        }
+        self.wall_last = Some(now);
+        let t_ns = t.as_unix_nanos();
+        match self.time_last_ns {
+            // `t` going backwards is refused and does not move the bucket.
+            Some(last) if t_ns < last => return false,
+            Some(last) => {
+                self.time_tokens = (self.time_tokens
+                    + t_ns.saturating_sub(last) as f64 / 1e9 * self.rate_hz)
+                    .min(burst);
+            }
+            None => {}
+        }
+        self.time_last_ns = Some(t_ns);
+        if self.wall_tokens >= 1.0 && self.time_tokens >= 1.0 {
+            self.wall_tokens -= 1.0;
+            self.time_tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// A message's non-content fields reduced to the publisher's policy.
+struct Reduced {
+    metadata: Value,
+    frame_model: Option<String>,
+    identity: Option<DecodedIdentity>,
+    decoder: Option<String>,
+    removed: u64,
+}
+
 impl Publisher {
-    /// A gated egress publisher for `header`.
+    /// A gated egress publisher for `header`. A messages stream whose header class forbids
+    /// content is refused ([`StreamError::MetadataPolicyRequired`]); use
+    /// [`Publisher::with_metadata_policy`]. Without a policy, restricted records on a permitting
+    /// stream are reduced to the empty allowlist.
     pub fn new(header: StreamHeader, config: PublisherConfig) -> Result<Self, StreamError> {
-        Self::with_mode(header, config, Mode::Egress)
+        Self::with_mode(header, config, Mode::Egress, None)
+    }
+
+    /// A gated egress publisher whose messages are reduced to `policy` whenever their effective
+    /// class forbids content (docs/stream-contract.md §6). For a plugin republisher this is the
+    /// manifest's `output` policy, with `header.message_schema` set to its `schema_id`.
+    pub fn with_metadata_policy(
+        header: StreamHeader,
+        config: PublisherConfig,
+        policy: MetadataPolicy,
+    ) -> Result<Self, StreamError> {
+        Self::with_mode(header, config, Mode::Egress, Some(policy))
     }
 
     fn with_mode(
         header: StreamHeader,
         config: PublisherConfig,
         mode: Mode,
+        policy: Option<MetadataPolicy>,
     ) -> Result<Self, StreamError> {
         let json = header.to_json_bytes()?;
+        let class = header.content_class;
         if header.kind == StreamKind::Spectrum
-            && !gate::spectrum_stream_permitted(header.content_class, header.sample_rate_hz)
+            && !gate::spectrum_stream_permitted(class, header.sample_rate_hz)
         {
             return Err(StreamError::SpectrumRowRate {
-                class: header.content_class,
+                class,
                 row_rate_hz: header.sample_rate_hz,
             });
         }
+        if header.kind == StreamKind::Messages && !class.permits_content() && policy.is_none() {
+            return Err(StreamError::MetadataPolicyRequired { class });
+        }
+        let spectrum_gate = if mode == Mode::Egress
+            && header.kind == StreamKind::Spectrum
+            && !class.permits_content()
+        {
+            let fft_size =
+                header
+                    .fft_size
+                    .filter(|n| *n > 0)
+                    .ok_or(StreamError::SpectrumGeometry {
+                        class,
+                        missing: "fft_size",
+                    })?;
+            let datatype: Datatype = header
+                .datatype
+                .as_deref()
+                .and_then(|d| serde_json::from_value(Value::String(d.to_owned())).ok())
+                .ok_or(StreamError::SpectrumGeometry {
+                    class,
+                    missing: "datatype",
+                })?;
+            let burst = gate::GATED_SPECTRUM_BURST_ROWS;
+            Some(SpectrumGate {
+                rate_hz: header.sample_rate_hz.unwrap_or(0.0),
+                max_payload: fft_size as usize * datatype.bytes_per_sample(),
+                wall_tokens: burst,
+                wall_last: None,
+                time_tokens: burst,
+                time_last_ns: None,
+                pending: None,
+                last_delivered: (Timestamp::from_unix_nanos(0), 0),
+            })
+        } else {
+            None
+        };
         let header_frame = if mode == Mode::FeedRaw {
             Vec::new()
         } else {
@@ -712,8 +998,12 @@ impl Publisher {
             super::frame::encode_frame(&mut f, &json, super::frame::HEADER_MAX_LEN)?;
             f
         };
-        let needed =
-            header_frame.len() + LEN_PREFIX + header.max_frame_len as usize + MARKER_MAX_LEN;
+        // A gated spectrum row may be preceded by both a queue-drop and a gated marker.
+        let markers = if spectrum_gate.is_some() { 2 } else { 1 };
+        let needed = header_frame.len()
+            + LEN_PREFIX
+            + header.max_frame_len as usize
+            + markers * MARKER_MAX_LEN;
         if config.queue_bytes < needed {
             return Err(StreamError::Config(format!(
                 "queue_bytes {} < {needed} (header + one max_frame_len record + marker)",
@@ -740,8 +1030,13 @@ impl Publisher {
                 }),
                 generation: AtomicU64::new(0),
                 next_id: AtomicU64::new(0),
+                metadata_sanitized: AtomicU64::new(0),
+                spectrum_rows_gated: AtomicU64::new(0),
+                remote_refused: AtomicU64::new(0),
             }),
             header,
+            policy,
+            spectrum_gate,
             snapshot: Vec::new(),
             seen_generation: u64::MAX,
             next_seq: 0,
@@ -766,8 +1061,63 @@ impl Publisher {
         self.next_seq
     }
 
+    /// The metadata policy applied to restricted messages, if any.
+    pub fn metadata_policy(&self) -> Option<&MetadataPolicy> {
+        self.policy.as_ref()
+    }
+
+    /// Reduces a message's non-content fields to the policy (the empty allowlist without one):
+    /// metadata keys, frame model (decodes: `frame_models`; annotations: `labels`; otherwise the
+    /// header's `message_schema` or omitted), identity shape, and a token-shaped decoder id.
+    fn reduce(&self, rec: &MessageRecord) -> Reduced {
+        let policy = self.policy.as_ref();
+        let (metadata, mut removed) = policy::sanitize_metadata_ref(policy, &rec.metadata);
+        let fallback = self
+            .header
+            .message_schema
+            .as_deref()
+            .filter(|s| policy::is_token(s));
+        let frame_model = match rec.frame_model.as_deref() {
+            None => None,
+            Some(fm) => {
+                let allowed = policy.map_or(&[][..], |p| {
+                    if rec.annotation_id.is_some() {
+                        p.labels.as_slice()
+                    } else {
+                        p.frame_models.as_slice()
+                    }
+                });
+                if fallback == Some(fm) || allowed.iter().any(|a| a == fm) {
+                    Some(fm.to_owned())
+                } else {
+                    removed += 1;
+                    fallback.map(str::to_owned)
+                }
+            }
+        };
+        let (identity, n) = policy::sanitize_identity(policy, rec.identity.clone());
+        removed += n;
+        let decoder = match rec.decoder.as_deref() {
+            Some(d) if policy::is_producer_token(d) => Some(d.to_owned()),
+            Some(_) => {
+                removed += 1;
+                None
+            }
+            None => None,
+        };
+        Reduced {
+            metadata,
+            frame_model,
+            identity,
+            decoder,
+            removed,
+        }
+    }
+
     /// Publishes a message record (messages streams). The record's class is clamped to the
-    /// header class; content is only serialised when [`gate::message_content_permitted`].
+    /// header class; content is only serialised when [`gate::message_content_permitted`]; and
+    /// when the effective class forbids content, every other field is reduced to the metadata
+    /// policy ([`Publisher::with_metadata_policy`]), whoever produced the record.
     pub fn publish_message(&mut self, rec: &MessageRecord) -> Result<PublishOutcome, StreamError> {
         if self.header.kind != StreamKind::Messages {
             return Err(StreamError::WrongKind {
@@ -777,6 +1127,14 @@ impl Publisher {
         }
         let class = gate::clamp(self.header.content_class, rec.content_class);
         let permitted = gate::message_content_permitted(self.header.content_class, class);
+        let reduced = (!class.permits_content()).then(|| self.reduce(rec));
+        if let Some(r) = &reduced
+            && r.removed > 0
+        {
+            self.shared
+                .metadata_sanitized
+                .fetch_add(r.removed, Ordering::Relaxed);
+        }
         let wire = MessageWire {
             kind: "message",
             seq: self.next_seq,
@@ -787,11 +1145,20 @@ impl Publisher {
             gated: !permitted,
             decode_id: rec.decode_id,
             annotation_id: rec.annotation_id,
-            decoder: rec.decoder.as_deref(),
-            frame_model: rec.frame_model.as_deref(),
+            decoder: match &reduced {
+                Some(r) => r.decoder.as_deref(),
+                None => rec.decoder.as_deref(),
+            },
+            frame_model: match &reduced {
+                Some(r) => r.frame_model.as_deref(),
+                None => rec.frame_model.as_deref(),
+            },
             crc_status: rec.crc_status,
-            identity: rec.identity.as_ref(),
-            metadata: &rec.metadata,
+            identity: match &reduced {
+                Some(r) => r.identity.as_ref(),
+                None => rec.identity.as_ref(),
+            },
+            metadata: reduced.as_ref().map_or(&rec.metadata, |r| &r.metadata),
             content: if permitted {
                 rec.content.as_ref()
             } else {
@@ -814,7 +1181,7 @@ impl Publisher {
             scratch[..LEN_PREFIX].copy_from_slice(&prefix);
             let seq = self.next_seq;
             self.next_seq += 1;
-            self.offer(&[&scratch], seq, rec.t, 0)
+            self.offer(&[&scratch], seq, rec.t, 0, 1)
         });
         self.scratch = scratch;
         result
@@ -823,9 +1190,63 @@ impl Publisher {
     /// Publishes a binary record (bits, symbols, iq, audio, spectrum). On a stream whose class
     /// forbids content for this kind, the payload is withheld, a header-only `GATED` record is
     /// published instead, and [`StreamError::ContentGated`] is returned.
+    ///
+    /// On a spectrum stream whose class forbids content, a row faster than the declared row rate
+    /// (wall-clock arrival or `t` spacing) or longer than `fft_size` x element size is withheld
+    /// entirely and [`StreamError::SpectrumGated`] is returned; consumers get one counted `GATED`
+    /// drop marker for the withheld run before the next delivered row.
     pub fn publish_binary(&mut self, rec: BinaryRecord<'_>) -> Result<PublishOutcome, StreamError> {
+        if !self.header.kind.is_binary() {
+            return Err(StreamError::WrongKind {
+                kind: self.header.kind,
+                operation: "publish_binary",
+            });
+        }
+        frame_prefix(
+            BINARY_RECORD_HEADER_LEN + rec.payload.len(),
+            self.header.max_frame_len,
+        )?;
+        let mut lead_buf = [0u8; MARKER_MAX_LEN];
+        let mut lead = None;
+        if let Some(g) = &mut self.spectrum_gate {
+            let reason = if rec.payload.len() > g.max_payload {
+                Some(SpectrumGateReason::PayloadLen)
+            } else if !g.admit(rec.t) {
+                Some(SpectrumGateReason::RowRate)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                let seq = self.next_seq;
+                self.next_seq += 1;
+                match &mut g.pending {
+                    Some((_, count)) => *count += 1,
+                    None => g.pending = Some((seq, 1)),
+                }
+                self.shared
+                    .spectrum_rows_gated
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(StreamError::SpectrumGated {
+                    class: self.header.content_class,
+                    reason,
+                });
+            }
+            g.last_delivered = (rec.t, rec.sample_index);
+            if let Some((first_seq, count)) = g.pending.take() {
+                let marker = DropMarker {
+                    first_seq,
+                    count,
+                    t: rec.t,
+                    sample_index: rec.sample_index,
+                    gated: true,
+                };
+                let len = encode_marker(true, &marker, &mut lead_buf);
+                lead = Some((len, first_seq, count));
+            }
+        }
         let permitted = gate::binary_payload_permitted(self.header.kind, self.header.content_class);
-        let outcome = self.binary(rec, permitted)?;
+        let lead = lead.map(|(len, first_seq, count)| (&lead_buf[..len], first_seq, count));
+        let outcome = self.binary(rec, permitted, lead)?;
         if permitted {
             Ok(outcome)
         } else {
@@ -837,10 +1258,13 @@ impl Publisher {
         }
     }
 
+    /// Frames and offers one binary record. `lead` is an encoded gated marker (with the run's
+    /// first seq and count) to deliver atomically in front of the record.
     fn binary(
         &mut self,
         rec: BinaryRecord<'_>,
         payload_permitted: bool,
+        lead: Option<(&[u8], u64, u64)>,
     ) -> Result<PublishOutcome, StreamError> {
         if !self.header.kind.is_binary() {
             return Err(StreamError::WrongKind {
@@ -858,8 +1282,12 @@ impl Publisher {
         let seq = self.next_seq;
         self.next_seq += 1;
         if self.shared.mode == Mode::FeedRaw {
-            return Ok(self.offer(&[rec.payload], seq, rec.t, rec.sample_index));
+            return Ok(self.offer(&[rec.payload], seq, rec.t, rec.sample_index, 1));
         }
+        let (lead_bytes, first_seq, covers) = match lead {
+            Some((bytes, first, count)) => (bytes, first, count + 1),
+            None => (&[][..], seq, 1),
+        };
         let header = BinaryRecordHeader {
             record_type: BinaryRecordType::Data as u8,
             flags,
@@ -877,19 +1305,55 @@ impl Publisher {
         head[..LEN_PREFIX].copy_from_slice(&frame_prefix(frame_len, max)?);
         head[LEN_PREFIX..].copy_from_slice(&header.encode());
         Ok(if payload_permitted {
-            self.offer(&[&head, rec.payload], seq, rec.t, rec.sample_index)
+            self.offer(
+                &[lead_bytes, &head, rec.payload],
+                first_seq,
+                rec.t,
+                rec.sample_index,
+                covers,
+            )
         } else {
-            self.offer(&[&head], seq, rec.t, rec.sample_index)
+            self.offer(
+                &[lead_bytes, &head],
+                first_seq,
+                rec.t,
+                rec.sample_index,
+                covers,
+            )
         })
     }
 
-    /// Offers one frame (given as parts) to every open consumer.
+    /// Reports a withheld gated-spectrum run that no delivered row followed (end of stream).
+    fn flush_gated_run(&mut self) {
+        let Some(g) = &mut self.spectrum_gate else {
+            return;
+        };
+        let Some((first_seq, count)) = g.pending.take() else {
+            return;
+        };
+        let (t, sample_index) = g.last_delivered;
+        let marker = DropMarker {
+            first_seq,
+            count,
+            t,
+            sample_index,
+            gated: true,
+        };
+        let mut buf = [0u8; MARKER_MAX_LEN];
+        let len = encode_marker(true, &marker, &mut buf);
+        self.offer(&[&buf[..len]], first_seq, t, sample_index, count);
+    }
+
+    /// Offers one frame (given as parts) to every open consumer. The frame accounts for `covers`
+    /// seqs starting at `seq` (more than one when a gated marker leads the record), so a
+    /// consumer that drops it gets a marker naming all of them.
     fn offer(
         &mut self,
         parts: &[&[u8]],
         seq: u64,
         t: Timestamp,
         sample_index: u64,
+        covers: u64,
     ) -> PublishOutcome {
         let generation = self.shared.generation.load(Ordering::Acquire);
         if generation != self.seen_generation {
@@ -943,13 +1407,14 @@ impl Publisher {
                 g.counters.records_dropped += 1;
                 g.consecutive_drops += 1;
                 match &mut g.pending_drop {
-                    Some(m) => m.count += 1,
+                    Some(m) => m.count += covers,
                     None => {
                         g.pending_drop = Some(DropMarker {
                             first_seq: seq,
-                            count: 1,
+                            count: covers,
                             t,
                             sample_index,
+                            gated: false,
                         })
                     }
                 }
@@ -975,6 +1440,7 @@ impl Publisher {
 
 impl Drop for Publisher {
     fn drop(&mut self) {
+        self.flush_gated_run();
         self.shared.finish();
     }
 }
@@ -1015,7 +1481,7 @@ impl DecoderFeed {
             FeedFraming::Raw => Mode::FeedRaw,
         };
         Ok(Self {
-            publisher: Publisher::with_mode(header, config, mode)?,
+            publisher: Publisher::with_mode(header, config, mode, None)?,
         })
     }
 
@@ -1033,7 +1499,7 @@ impl DecoderFeed {
 
     /// Offers one record; never waits. Errors only for an oversize record.
     pub fn push(&mut self, rec: BinaryRecord<'_>) -> Result<PublishOutcome, StreamError> {
-        self.publisher.binary(rec, true)
+        self.publisher.binary(rec, true, None)
     }
 }
 
@@ -1122,6 +1588,8 @@ impl FeedAttacher {
                 pipe: stdin,
                 wake: wake_rx,
             }),
+            // A child's stdin pipe stays on this host.
+            Locality::Local,
             Box::new(move |reason| {
                 if reason == CloseReason::SlowConsumer {
                     on_stall();

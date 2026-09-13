@@ -147,6 +147,7 @@ fn parse_message(frame: &[u8]) -> Result<Record, ClientError> {
             count: u64_field("count")?,
             t: Timestamp::from_unix_nanos(value["t"].as_i64().unwrap_or(0)),
             sample_index: 0,
+            gated: false,
         })),
         _ => Ok(Record::Unknown(frame.to_vec())),
     }
@@ -184,6 +185,7 @@ fn parse_binary(frame: &[u8]) -> Result<Record, ClientError> {
             count,
             t: header.t,
             sample_index: header.sample_index,
+            gated: header.flags.contains(RecordFlags::GATED),
         }))
     } else {
         Ok(Record::Unknown(frame.to_vec()))

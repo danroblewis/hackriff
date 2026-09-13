@@ -9,8 +9,11 @@
 //! - [`header`]: the JSON [`StreamHeader`] (first frame) and [`StreamKind`].
 //! - [`record`]: NDJSON message records, 32-byte binary record headers, "dropped N" markers.
 //! - [`gate`]: egress gating, the single enforcement point for restricted content (class
-//!   clamping, own-key streams local-only, gated spectrum row-rate cap).
+//!   clamping, own-key streams local-only, gated spectrum row-rate and payload enforcement).
+//! - [`policy`]: the typed metadata allowlist ([`MetadataPolicy`]) shared by plugin ingest,
+//!   in-process producers and the publisher.
 //! - [`publisher`]: the drop-not-block fan-out [`Publisher`] and the ungated [`DecoderFeed`].
+//!   Every consumer is subscribed with a [`Locality`] derived from its writer ([`EgressWriter`]).
 //! - [`transport`]: Unix-domain-socket (0600) and TCP [`Listener`]s.
 //! - [`client`]: the reference [`StreamReader`] (used by `hk stream-tail` and the dummy plugin).
 //!
@@ -26,20 +29,23 @@ pub mod client;
 pub mod frame;
 pub mod gate;
 pub mod header;
+pub mod policy;
 pub mod publisher;
 pub mod record;
 pub mod transport;
 
 pub use client::{ClientError, StreamReader};
 pub use frame::{FrameDecoder, FrameError, HEADER_MAX_LEN, LEN_PREFIX, MAX_FRAME_LEN};
-pub use gate::GATED_SPECTRUM_MAX_ROW_RATE_HZ;
+pub use gate::{GATED_SPECTRUM_BURST_ROWS, GATED_SPECTRUM_MAX_ROW_RATE_HZ};
 pub use header::{
     DEFAULT_MAX_FRAME_LEN, HeaderError, STREAM_SCHEMA, STREAM_VERSION_MAJOR, STREAM_VERSION_MINOR,
     StreamHeader, StreamKind,
 };
+pub use policy::{Charset, IdentitySpec, MetadataPolicy, MetadataType};
 pub use publisher::{
-    CloseReason, ConsumerId, ConsumerState, ConsumerStats, DecoderFeed, FeedAttacher, FeedFraming,
-    PublishOutcome, Publisher, PublisherConfig, PublisherHandle, StreamError,
+    CloseReason, ConsumerId, ConsumerState, ConsumerStats, Declared, DecoderFeed, EgressWriter,
+    FeedAttacher, FeedFraming, GateStats, Locality, PublishOutcome, Publisher, PublisherConfig,
+    PublisherHandle, SpectrumGateReason, StreamError,
 };
 pub use record::{
     BINARY_RECORD_HEADER_LEN, BinaryData, BinaryRecord, BinaryRecordHeader, BinaryRecordType,

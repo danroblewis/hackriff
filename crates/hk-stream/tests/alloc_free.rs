@@ -9,7 +9,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use hk_model::{ContentClass, Timestamp};
-use hk_stream::{BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamHeader, StreamKind};
+use hk_stream::{
+    BinaryRecord, Declared, Publisher, PublisherConfig, RecordFlags, StreamHeader, StreamKind,
+};
 
 struct Counting;
 
@@ -76,13 +78,13 @@ fn binary_publish_allocates_nothing_in_steady_state() {
     let mut publisher = Publisher::new(header, config).unwrap();
     let handle = publisher.handle();
     handle
-        .subscribe("sink", Box::new(std::io::sink()), Box::new(|_| {}))
+        .subscribe("sink", Declared::local(std::io::sink()), Box::new(|_| {}))
         .unwrap();
     let valve = Arc::new((Mutex::new(false), Condvar::new()));
     let slow = handle
         .subscribe(
             "valve",
-            Box::new(Valve(Arc::clone(&valve))),
+            Declared::local(Valve(Arc::clone(&valve))),
             Box::new(|_| {}),
         )
         .unwrap();
