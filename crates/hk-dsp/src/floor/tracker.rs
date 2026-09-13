@@ -105,8 +105,18 @@ pub struct FloorChangeConfig {
     /// An episode open this long since confirmation ends with [`EndReason::Rebaselined`] and its
     /// level becomes the floor (`Some(600 s)`; `None` never).
     pub rebaseline_s: Option<f64>,
-    /// Noise-like when the region's mean spectral kurtosis is within this of 1 (0.15).
+    /// Noise-like needs the region's mean spectral kurtosis at least `1 − sk_tolerance` (0.15).
     pub sk_tolerance: f64,
+    /// … and at most `1 + sk_high_tolerance` (0.35, T-038). Wider above 1: FM-by-noise jammers
+    /// (constant envelope, wandering frequency) read SK 1.04–1.31, while OFDM and other
+    /// energy-conserving modulations read below 1.
+    pub sk_high_tolerance: f64,
+    /// Structured when the mean correlation of frame-to-frame bin power fluctuations at lags
+    /// beyond the window's own bin correlation is below `−max_bin_anticorrelation` (0.01, T-038).
+    /// Gaussian noise gives 0 (bins are independent), FM-by-noise positive, and multicarrier
+    /// signals with constant per-symbol energy (OFDM) negative: each subcarrier's windowed
+    /// energy is conserved across its lobe. See [the discriminator](super#floor-change-events).
+    pub max_bin_anticorrelation: f64,
     /// Structured when the excess noise (std of first differences / √2) exceeds this, dB (1.5).
     pub max_excess_std_db: f64,
     /// Emit events for [`FloorChangeClass::Structured`] episodes (true; consumers filter by
@@ -128,6 +138,8 @@ impl Default for FloorChangeConfig {
             edge_hit_fraction: 0.5,
             rebaseline_s: Some(600.0),
             sk_tolerance: 0.15,
+            sk_high_tolerance: 0.35,
+            max_bin_anticorrelation: 0.01,
             max_excess_std_db: 1.5,
             emit_structured: true,
         }
@@ -297,6 +309,8 @@ impl FloorConfig {
             check_positive("change.rebaseline_s", r)?;
         }
         check_positive("change.sk_tolerance", c.sk_tolerance)?;
+        check_positive("change.sk_high_tolerance", c.sk_high_tolerance)?;
+        check_positive("change.max_bin_anticorrelation", c.max_bin_anticorrelation)?;
         check_positive("change.max_excess_std_db", c.max_excess_std_db)?;
         let w = &self.wide;
         check_positive("wide.step_db", w.step_db)?;
@@ -527,13 +541,18 @@ pub struct FloorEvent {
     /// The bins this event is about: Rise/Fall/End/Unknown: `bins`; Extend: the added blocks;
     /// Update: the returned blocks.
     pub change_bins: Range<usize>,
-    /// Lower edge of `change_bins`, Hz.
+    /// Lower edge of `change_bins`, Hz; where `change_bins` starts at `bins.start`, the refined
+    /// `f_lo_hz`.
     pub change_f_lo_hz: f64,
-    /// Upper edge of `change_bins`, Hz.
+    /// Upper edge of `change_bins`, Hz; where it ends at `bins.end`, the refined `f_hi_hz`.
     pub change_f_hi_hz: f64,
-    /// Lower edge of `bins`, Hz.
+    /// Lower edge of the emission, Hz (T-038). Rise episodes: refined per bin from the block hull
+    /// `bins` (a 15-bin median of the recent PSD against the geometric mid-point of the edge
+    /// block's baseline and level, walked at most one block width outward or half a hop inward),
+    /// so a partial-band emission reports its own width rather than whole blocks. Falls: the
+    /// hull edge.
     pub f_lo_hz: f64,
-    /// Upper edge of `bins`, Hz.
+    /// Upper edge of the emission, Hz (as `f_lo_hz`).
     pub f_hi_hz: f64,
     /// Fraction of the span covered by member blocks (≤ `bins.len()` / span).
     pub band_fraction: f32,
@@ -958,7 +977,7 @@ impl NoiseFloorTracker {
         }
         let w = self.config.impulsive.min_history;
         self.warm.resize(nb * w, 0.0);
-        self.engine.resize(nb, frame.t, key);
+        self.engine.resize(nb, bins, frame.t, key);
         self.shape.resize(bins, nb);
         self.scratch.resize(nb, 0.0);
         self.scratch2.resize(nb.max(w), 0.0);

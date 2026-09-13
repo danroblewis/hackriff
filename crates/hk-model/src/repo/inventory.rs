@@ -792,12 +792,24 @@ impl Repository {
             .collect()
     }
 
-    /// Adds a tag (no-op if present).
+    /// Adds a tag (no-op if present). T-038 ([`crate::cluster`] tag rules): on an emitter whose
+    /// identity no access level reveals (restricted, metadata-only or unclassified), a tag
+    /// outside [`crate::TAG_VOCABULARY`] is refused with [`RepoError::Invalid`]; the refusal
+    /// depends only on that class, never on the tag's relation to the value.
     pub fn add_emitter_tag(&mut self, emitter_id: EmitterId, tag: &str) -> Result<(), RepoError> {
-        self.conn.execute(
+        let tx = self.write_tx()?;
+        if !crate::cluster::tag_in_vocabulary(tag)
+            && let Some(live) = super::cluster::live_id(&tx, emitter_id)?
+            && let Some(class) = super::gating::emitter_identity_class(&tx, live)?
+            && super::gating::vocabulary_only(class)
+        {
+            return Err(super::gating::vocabulary_refusal());
+        }
+        tx.execute(
             "INSERT OR IGNORE INTO emitter_tag (emitter_id, tag) VALUES (?1, ?2)",
             params![blob(emitter_id), tag],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

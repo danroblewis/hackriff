@@ -141,16 +141,57 @@
 //!    Every block of the run adopts the `hit_fraction/2` quantile of all its window frames (the
 //!    median of a clean fall, the middle of the low frames of an interrupted one) and starts its
 //!    hold-off.
-//! 4. *Rebaseline.* An episode open for `rebaseline_s` [600 s] ends with
+//! 4. *Extent* (T-038). An episode's `bins` stay the hull of its member blocks (the invariants
+//!    below are on `bins`), but a block floor only rises once nearly all its 256 bins are
+//!    elevated, so the hull under-reports a partial-band emission by up to a block per side (an
+//!    800 kHz jammer read 375 kHz). `f_lo_hz`/`f_hi_hz` (and a change edge on the extent's edge)
+//!    are therefore refined per bin at every summary: from each hull edge, walk outward (at most
+//!    one block width, never past the midpoint of the gap to another episode's member block)
+//!    while a 15-bin median of the recent PSD (EMA, 0.1 s) is at or above the geometric
+//!    mid-point of the edge block's baseline and level, or inward (at most half a hop) while it is
+//!    below. Partial-band noise jammers 600 kHz–1.2 MHz at several positions, including
+//!    block-straddling edges, land within 20 % of the true bandwidth
+//!    (`tests/aware_006_structured_vs_noise.rs`; typically within 2 kHz).
+//! 5. *Rebaseline.* An episode open for `rebaseline_s` [600 s] ends with
 //!    [`EndReason::Rebaselined`]; its level becomes the floor (a later drop is a `Fall`).
 //!
-//! **Discriminator.** Excess noise = standard deviation of the frame-to-frame first differences
-//! of the excess / √2 (a level trend such as an onset ramp adds nothing): > 1.5 dB →
-//! `Structured`; otherwise mean spectral kurtosis within 0.15 of 1 → `NoiseLike`, away from 1 →
-//! `Structured`, no SK → `Unverified`. All classes are emitted by default (`emit_structured`);
-//! consumers filter by class. Known limits: a continuous, steady, Gaussian-like wideband emission
-//! (e.g. an OFDM carrier with SK ≈ 1) is indistinguishable from a noise rise and its blocks'
-//! slow floor follows it. A steady wide signal that is not `NoiseLike` (SK away from 1, or no SK)
+//! **Discriminator.** In order:
+//! 1. Excess noise = standard deviation of the frame-to-frame first differences of the excess / √2
+//!    (a level trend such as an onset ramp adds nothing), median over the group's blocks: > 1.5 dB
+//!    → `Structured`.
+//! 2. **Bin-fluctuation correlation** (T-038): per frame and block pending a rise,
+//!    `d_i = (P_i − P'_i)/(P_i + P'_i)` against the previous frame (static shape, edges, CP ripple
+//!    and pilots cancel; scale-free per bin), and `Σ d_i d_{i+lag} / (lags · Σ d_i²)` over lags
+//!    3–8 (Hann; Blackman-Harris 7–12, flat-top 9–14: beyond the window's own bin correlation),
+//!    averaged over the run's frames (never the onset or impulsive frames) and the group's
+//!    blocks. Periodogram bins of stationary Gaussian noise that far apart are independent, so a
+//!    noise jammer reads 0 (measured −0.008…+0.002); FM-by-noise reads positive (a wandering
+//!    carrier lights neighbouring bins together, +0.005…+0.4); OFDM with constant per-symbol
+//!    energy reads negative (each subcarrier's windowed energy is conserved across its lobe,
+//!    −0.02…−0.08 for 16–96 subcarriers at 6–15 dB, with or without CP). Below
+//!    `−max(max_bin_anticorrelation (0.01), 4σ)` → `Structured`, where σ is the statistic's
+//!    standard error under noise (so a run of a few frames, e.g. a ramp mostly flagged impulsive,
+//!    is not evidence).
+//! 3. Mean spectral kurtosis in `[1 − 0.15, 1 + 0.35]` → `NoiseLike` (the upper side is wider:
+//!    FM-by-noise reads 1.04–1.31, OFDM below 1; long-symbol OFDM, 256 of 512 subcarriers, reads
+//!    0.65–0.82), outside → `Structured`, no SK → `Unverified`.
+//!
+//! All classes are emitted by default (`emit_structured`); consumers filter by class.
+//! `tests/aware_006_structured_vs_noise.rs` replays synthetic 8-bit IQ (1024-bin Hann × 10): 18/18
+//! OFDM runs `Structured`, 12/12 noise-jammer runs (broadband, 800 kHz partial-band, FM-by-noise
+//! with 100/250 kHz modulating noise; 6–15 dB) `NoiseLike`. Known limits:
+//! - A wideband single-carrier PSK/QAM whose symbol is much shorter than the FFT window, or OFDM
+//!   whose per-subcarrier energy varies a lot (dense QAM), is Gaussian enough at this resolution
+//!   to read `NoiseLike`; cyclostationary estimates from IQ (C12) must separate those.
+//! - The anti-correlation shrinks as the FFT window grows relative to the OFDM symbol (≈ 1/(window
+//!   /symbol) per lag): OFDM with a 32-sample symbol at 1024 bins is near the threshold, and at
+//!   16k bins most OFDM relies on SK. Tuned on Hann (the default).
+//! - Slow FM-by-noise (modulating bandwidth ≲ 2 % of the deviation at this resolution) is a
+//!   wandering carrier: SK ≥ 1.35 or excess noise makes it `Structured` (1 MHz/20 kHz reads
+//!   `Structured` from 10 dB), so it opens no floor-rise Anomaly.
+//!
+//! A continuous, steady, Gaussian-like wideband emission that reads `NoiseLike` has its blocks'
+//! slow floor follow it. A steady wide signal that is not `NoiseLike` (SK away from 1, or no SK)
 //! holds the slow floor at the baseline (a +6 dB one moves it ≤ 0.5 dB,
 //! `t029_steady_wide_signal_does_not_lift_the_slow_floor`). A **sub-threshold** (< 3 dB) steady
 //! wide signal is still adopted after `settle_s` regardless of SK (T-021: read

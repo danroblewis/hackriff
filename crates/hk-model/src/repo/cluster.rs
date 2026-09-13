@@ -14,7 +14,7 @@ use crate::cluster::{
     Assignment, ConflictReason, EmitterMerge, Fingerprint, IdentityAccess, IdentityClaim,
     IdentityConflictReport, InventoryEntry, InventoryIdentity, InventoryPage, InventoryQuery,
     KnownStatusPrior, LinkRecord, MAX_INVENTORY_PAGE, MeasurementKey, RecordedClassification,
-    Resolution, Sighting, Tolerances, known_family, most_restrictive, tag_is_identity_free,
+    Resolution, Sighting, Tolerances, known_family, most_restrictive, tag_in_vocabulary,
 };
 use crate::content::ContentClass;
 use crate::emitter::{
@@ -228,9 +228,9 @@ pub(super) fn gate_entry(
     };
     let mut tags_withheld = false;
     if matches!(identity, InventoryIdentity::Withheld { .. }) {
-        // T-036: a withheld row shows identity-free labels only (value-independent rule).
+        // T-036/T-038: a withheld row shows vocabulary labels only (value-independent rule).
         let before = emitter.tags.len();
-        emitter.tags.retain(|tag| tag_is_identity_free(tag));
+        emitter.tags.retain(|tag| tag_in_vocabulary(tag));
         tags_withheld = emitter.tags.len() != before;
     }
     if !matches!(identity, InventoryIdentity::Clear { .. }) {
@@ -856,6 +856,15 @@ fn resolve(
         source_id.into_bytes(),
         s.seen.end.as_unix_nanos()
     ])?;
+    // T-038: the sighting's own claim was checked up front; the target's identity (reached by
+    // context or fingerprint) gets the same class-only rule, so no producer tag outside the
+    // vocabulary lands on an identity no access level reveals. The transaction is not committed.
+    if s.tags.iter().any(|t| !tag_in_vocabulary(t))
+        && let Some(class) = super::gating::emitter_identity_class(conn, id)?
+        && super::gating::vocabulary_only(class)
+    {
+        return Err(super::gating::vocabulary_refusal());
+    }
     for tag in &s.tags {
         conn.prepare_cached("INSERT OR IGNORE INTO emitter_tag (emitter_id, tag) VALUES (?1, ?2)")?
             .execute(params![blob(id), tag])?;
@@ -1210,9 +1219,9 @@ impl Repository {
             p.push(SqlValue::Text(family.clone()));
         }
         sql.push_str(" ORDER BY last_seen DESC, emitter_id");
-        // T-036: a tag that is not identity-free never matches a row whose identity is withheld
-        // (its non-label tags are hidden), so such a filter is paged after gating.
-        let tag_needs_gate = q.tag.as_deref().is_some_and(|t| !tag_is_identity_free(t));
+        // T-036/T-038: a tag outside the vocabulary never matches a row whose identity is
+        // withheld (such tags are hidden there), so such a filter is paged after gating.
+        let tag_needs_gate = q.tag.as_deref().is_some_and(|t| !tag_in_vocabulary(t));
         if !tag_needs_gate {
             sql.push_str(" LIMIT ? OFFSET ?");
             p.push(SqlValue::Integer(i64::from(limit) + 1));

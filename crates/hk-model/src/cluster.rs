@@ -103,21 +103,30 @@
 //!
 //! # Tags
 //!
-//! Tags are labels, not identities, and the least lossy fail-closed rule keeps them that way:
+//! Tags are labels, not identities. A shape rule cannot tell a label from an alphabetic identity
+//! (an alias `zulu` looks like any word), so rows whose identity is withheld use a **controlled
+//! vocabulary** ([`TAG_VOCABULARY`], T-038): fixed, public labels (band-plan/allocation tags,
+//! service and workflow words) that no traffic can choose.
 //!
-//! - **Read:** on a row whose identity is withheld, only identity-free tags
-//!   ([`tag_is_identity_free`]: no digits, no hex runs) are shown (`InventoryEntry::tags_withheld`
-//!   says others were removed), and a `tag` filter that is not identity-free never matches such a
-//!   row. The rule does not look at stored values, so neither the output nor the filter can be
-//!   used to test a guessed identity. Unrestricted rows keep every tag.
-//! - **Write:** `record_sighting` and `insert_emitter` refuse a tag that is not identity-free, or
-//!   that contains the identity value, when the sighting's identity claim is not `unrestricted`
-//!   (an `insert_emitter` identity has no class, so it counts as withheld). This stops producers
-//!   deriving tags from restricted decodes. `add_emitter_tag` (a user naming their own label)
-//!   is not value-checked, so it cannot be used as an oracle; the read rule covers it.
-//! - **Residual:** a tag made only of non-hex letters that spells an alphabetic identity value
-//!   and was added by `add_emitter_tag`, or a tag on an emitter with no decoded identity, is
-//!   shown. Producers attach identities as claims, never as tags.
+//! - **Read:** on a row whose identity is withheld for the caller, only vocabulary tags
+//!   ([`tag_in_vocabulary`]) are shown (`InventoryEntry::tags_withheld` says others were removed),
+//!   and a `tag` filter outside the vocabulary never matches such a row. The rule does not look at
+//!   stored values, so neither the output nor the filter can test a guessed identity. This is the
+//!   guarantee: it also covers tags written before the identity arrived or was restricted, and
+//!   tags carried over by a merge. Rows with a shown identity or none keep every tag.
+//! - **Write:** when the identity is one no access level reveals (unclassified, `metadata-only`,
+//!   `restricted-paging`, `restricted-cellular`), `record_sighting`, `insert_emitter` (whose
+//!   identity has no class) and `add_emitter_tag` refuse a tag outside the vocabulary. The refusal
+//!   depends only on the class the inventory already shows, never on the value, so it is no
+//!   oracle; it tells the user at once instead of storing a tag that would never show. An
+//!   `own-key-decrypted` claim keeps the T-036 producer rule ([`tag_is_identity_free`], no claim
+//!   value); a user's free-text tag on such a row is accepted and shows only where the identity
+//!   does (own-traffic authorisation).
+//! - **Cost (why this is the least lossy fail-closed rule):** free-text labels on restricted or
+//!   unclassified rows are lost; vocabulary labels (including digit-bearing band tags such as
+//!   `l1` or `lte-band2`, which the T-036 shape rule hid) remain. Refusing all tags there would
+//!   lose more; value checks would be an oracle; a label namespace prefix cannot stop
+//!   `label:zulu`.
 //!
 //! # Audited reclassification (T-036)
 //!
@@ -721,9 +730,10 @@ pub fn never_openable(c: ContentClass) -> bool {
 /// digits (`a`–`f`). The rule does not depend on stored data, so applying it reveals nothing.
 ///
 /// Identifiers (capcodes, IMSIs, MMSIs, ICAO/PI hex, talkgroups, sensor ids) almost always
-/// contain a digit or a hex run, so a label-shaped tag cannot carry one. The residual is an
-/// identity value made only of non-hex letters (e.g. an alphabetic alias); see
-/// [the gating rules](self#tags).
+/// contain a digit or a hex run, so a label-shaped tag rarely carries one; an identity made only
+/// of non-hex letters (an alphabetic alias) passes it. Since T-038 it gates only producer tags on
+/// `own-key-decrypted` claims; withheld rows use [`tag_in_vocabulary`] ([the gating
+/// rules](self#tags)).
 pub fn tag_is_identity_free(tag: &str) -> bool {
     if tag.is_empty() || tag.len() > 64 {
         return false;
@@ -746,6 +756,100 @@ pub fn tag_is_identity_free(tag: &str) -> bool {
         }
     }
     true
+}
+
+/// The controlled tag vocabulary (T-038, [the tag rules](self#tags)): the only tags shown or
+/// matched on a row whose identity is withheld, and the only tags accepted on an identity no
+/// access level reveals. Sorted; exact, case-sensitive match. It holds the band-plan allocation
+/// tags (`hk-context` band table), the service families the known-status priors use and a few
+/// workflow words. Extend it deliberately: an entry must never be derivable from traffic.
+pub const TAG_VOCABULARY: &[&str] = &[
+    "33cm",
+    "700mhz",
+    "800mhz",
+    "adsb",
+    "aircraft",
+    "ais",
+    "amateur",
+    "artifact",
+    "aviation",
+    "aws",
+    "beacon",
+    "bluetooth",
+    "broadcast",
+    "burst",
+    "cellular",
+    "continuous",
+    "control-channel",
+    "data",
+    "dme",
+    "firstnet",
+    "fm-broadcast",
+    "galileo-e1",
+    "galileo-e5",
+    "glonass-g1",
+    "gnss",
+    "harmonic",
+    "hf",
+    "ignore",
+    "ils",
+    "interesting",
+    "interference",
+    "intermittent",
+    "intermod",
+    "ism",
+    "ism-eu-band",
+    "jammer",
+    "known",
+    "l1",
+    "l2",
+    "l2c",
+    "l5",
+    "lte-700",
+    "lte-band2",
+    "lte-band4",
+    "lte-band5",
+    "maritime",
+    "mine",
+    "new",
+    "noaa-apt",
+    "noaa-wx",
+    "noise",
+    "out-of-allocation",
+    "p25",
+    "pager",
+    "part15",
+    "pcs",
+    "public-safety",
+    "radiosonde",
+    "review",
+    "reviewed",
+    "satellite",
+    "sensor",
+    "short-range-device",
+    "smr",
+    "spur",
+    "suspect-artifact",
+    "tacan",
+    "telemetry",
+    "trunk",
+    "uhf",
+    "unknown",
+    "vessel",
+    "vhf",
+    "vhf-am",
+    "voice",
+    "vor",
+    "watch",
+    "weather",
+    "weather-satellite",
+    "wifi",
+    "wifi-5g8",
+];
+
+/// Whether a tag is in the controlled vocabulary ([`TAG_VOCABULARY`], T-038).
+pub fn tag_in_vocabulary(tag: &str) -> bool {
+    TAG_VOCABULARY.binary_search(&tag).is_ok()
 }
 
 /// Who may see identity values in inventory output.
@@ -831,7 +935,7 @@ pub enum InventoryIdentity {
 }
 
 /// One inventory row. When the identity is withheld, `emitter.identity` is `Unknown` and
-/// `emitter.tags` keeps only identity-free labels ([`tag_is_identity_free`]).
+/// `emitter.tags` keeps only vocabulary labels ([`tag_in_vocabulary`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct InventoryEntry {
     /// The emitter (live; identity cleared and tags filtered when withheld).
@@ -840,8 +944,8 @@ pub struct InventoryEntry {
     pub identity: InventoryIdentity,
     /// Current family.
     pub family: Option<String>,
-    /// Tags that were not identity-free were removed from `emitter.tags` because the identity is
-    /// withheld (T-036).
+    /// Tags outside the controlled vocabulary were removed from `emitter.tags` because the
+    /// identity is withheld (T-036, T-038).
     pub tags_withheld: bool,
 }
 

@@ -13,6 +13,36 @@ use super::tracker::{
 };
 use super::{BlockLayout, db_ratio, median_in_place};
 use crate::spectrum::Spectrum;
+use crate::window::WindowKind;
+
+/// Lags averaged by the bin-fluctuation correlation (T-038).
+const XC_LAGS: usize = 6;
+/// Half width of the median that smooths the recent PSD for edge refinement, bins (T-038).
+const EDGE_HALF_WIDTH: usize = 7;
+/// Edge refinement needs the edge block's level at least this far above its baseline, dB.
+const EDGE_MIN_STEP_DB: f32 = 1.5;
+
+/// First lag at which two bins of stationary Gaussian noise are uncorrelated under `window`: the
+/// window's squared taper has cosine terms up to `2K` (`K` its highest term), so bins `2K + 1`
+/// apart are independent (Hann 3, Blackman-Harris 7, flat-top 9).
+fn first_clean_lag(window: WindowKind) -> usize {
+    match window {
+        WindowKind::Hann => 3,
+        WindowKind::BlackmanHarris => 7,
+        WindowKind::FlatTop => 9,
+    }
+}
+
+/// Median of `v` over `i ± EDGE_HALF_WIDTH` (clamped to the span). Allocation-free.
+fn smoothed(v: &[f32], i: usize) -> f32 {
+    let lo = i.saturating_sub(EDGE_HALF_WIDTH);
+    let hi = (i + EDGE_HALF_WIDTH + 1).min(v.len());
+    let mut buf = [0f32; 2 * EDGE_HALF_WIDTH + 1];
+    let w = &mut buf[..hi - lo];
+    w.copy_from_slice(&v[lo..hi]);
+    let k = w.len() / 2;
+    *w.select_nth_unstable_by(k, f32::total_cmp).1
+}
 
 /// A frame's `(seq, t)`.
 pub(crate) type Stamp = (u64, SampleTime);
@@ -97,6 +127,9 @@ struct Run {
     n_d: u64,
     sum_sk: f64,
     sk_n: u64,
+    /// Rise: sum and count of the per-frame bin-fluctuation correlation (T-038).
+    sum_xc: f64,
+    xc_n: u64,
     /// Fall: hit frames among the last `confirm` frames (the engine's ring holds their excess).
     win_hits: u64,
     /// Fall: level set at confirmation (quantile of all window frames).
@@ -122,6 +155,8 @@ impl Run {
             n_d: 0,
             sum_sk: 0.0,
             sk_n: 0,
+            sum_xc: 0.0,
+            xc_n: 0,
             win_hits: 0,
             fall_level: 0.0,
         }
@@ -370,6 +405,9 @@ struct Episode {
     bins: Range<usize>,
     f_lo_hz: f64,
     f_hi_hz: f64,
+    /// Lower edge of bin 0 and the bin width, Hz (maps change bins to frequencies).
+    f0_hz: f64,
+    bin_hz: f64,
     band_fraction: f32,
     baseline_db: f32,
     level_db: f32,
@@ -403,6 +441,8 @@ impl Episode {
             bins: 0..0,
             f_lo_hz: 0.0,
             f_hi_hz: 0.0,
+            f0_hz: 0.0,
+            bin_hz: 0.0,
             band_fraction: 0.0,
             baseline_db: 0.0,
             level_db: 0.0,
@@ -420,6 +460,14 @@ impl Episode {
             leave_hi: 0,
             returning: false,
         }
+    }
+
+    /// Sets the block hull `bins` and its (unrefined) frequency edges.
+    fn set_extent(&mut self, bins: Range<usize>, spectrum: &Spectrum) {
+        (self.f_lo_hz, self.f_hi_hz) = edges(spectrum, &bins);
+        self.bin_hz = spectrum.bin_width_hz();
+        self.f0_hz = self.f_lo_hz - bins.start as f64 * self.bin_hz;
+        self.bins = bins;
     }
 
     /// Records a leaving block. The onset reported is the latest return onset among the blocks
@@ -454,10 +502,18 @@ impl Episode {
             FloorEventKind::End => secs(self.onset.1, onset.1),
             FloorEventKind::Update | FloorEventKind::Unknown => secs(self.onset.1, ctx.now.1),
         };
-        // Bins are uniform, so the change edges follow from the extent's edges.
-        let bw = (self.f_hi_hz - self.f_lo_hz) / self.bins.len().max(1) as f64;
-        let at = |bin: usize| self.f_lo_hz + (bin as f64 - self.bins.start as f64) * bw;
-        let (change_f_lo_hz, change_f_hi_hz) = (at(change_bins.start), at(change_bins.end));
+        // A change edge on the extent's edge is the refined edge; others are block edges.
+        let at = |bin: usize| self.f0_hz + bin as f64 * self.bin_hz;
+        let change_f_lo_hz = if change_bins.start == self.bins.start {
+            self.f_lo_hz
+        } else {
+            at(change_bins.start)
+        };
+        let change_f_hi_hz = if change_bins.end == self.bins.end {
+            self.f_hi_hz
+        } else {
+            at(change_bins.end)
+        };
         FloorEvent {
             kind,
             episode: self.id,
@@ -512,13 +568,24 @@ fn db(x: f32) -> f32 {
     10.0 * x.max(1e-37).log10()
 }
 
-fn classify(sk: Option<f32>, excess_std_db: f32, cfg: &FloorChangeConfig) -> FloorChangeClass {
-    if f64::from(excess_std_db) > cfg.max_excess_std_db {
+/// `anticorrelated`: the group's bin-fluctuation correlation is significantly below
+/// `−max_bin_anticorrelation` (see [`Engine::group`]).
+fn classify(
+    sk: Option<f32>,
+    excess_std_db: f32,
+    anticorrelated: bool,
+    cfg: &FloorChangeConfig,
+) -> FloorChangeClass {
+    if f64::from(excess_std_db) > cfg.max_excess_std_db || anticorrelated {
         return FloorChangeClass::Structured;
     }
     match sk {
         None => FloorChangeClass::Unverified,
-        Some(s) if (f64::from(s) - 1.0).abs() <= cfg.sk_tolerance => FloorChangeClass::NoiseLike,
+        Some(s)
+            if (1.0 - cfg.sk_tolerance..=1.0 + cfg.sk_high_tolerance).contains(&f64::from(s)) =>
+        {
+            FloorChangeClass::NoiseLike
+        }
         Some(_) => FloorChangeClass::Structured,
     }
 }
@@ -578,11 +645,24 @@ pub(crate) struct Engine {
     reset_at: Option<Stamp>,
     s1: Vec<f32>,
     s2: Vec<f32>,
+    s3: Vec<f32>,
     prev: Vec<f32>,
     /// Per block, the excess of a pending fall's last `cap` frames (dB).
     ring: Vec<f32>,
     cap: usize,
     ring_scratch: Vec<f32>,
+    /// Per bin: the previous frame's PSD, and whether it may be differenced (T-038).
+    prev_psd: Vec<f32>,
+    prev_ok: bool,
+    /// Per bin: normalised frame-to-frame PSD difference `(P − P')/(P + P')`.
+    diff: Vec<f32>,
+    /// Prefix sums over bins of `Σ_lags d_i·d_{i+lag}` and of `d_i²`.
+    pref_p: Vec<f64>,
+    pref_q: Vec<f64>,
+    /// Per block: this frame's bin-fluctuation correlation (NaN when not computed).
+    blk_xc: Vec<f32>,
+    /// Per bin: recent PSD (EMA with the block `recent` factor) for edge refinement (T-038).
+    bin_recent: Vec<f32>,
 }
 
 impl Engine {
@@ -602,14 +682,22 @@ impl Engine {
         }
     }
 
-    /// Sizes for `nb` blocks, dropping all state.
-    pub(crate) fn resize(&mut self, nb: usize, t: SampleTime, gain: GainKey) {
+    /// Sizes for `nb` blocks over `bins` bins, dropping all state.
+    pub(crate) fn resize(&mut self, nb: usize, bins: usize, t: SampleTime, gain: GainKey) {
+        self.prev_psd.resize(bins, 0.0);
+        self.diff.resize(bins, 0.0);
+        self.pref_p.resize(bins + 1, 0.0);
+        self.pref_q.resize(bins + 1, 0.0);
+        self.bin_recent.resize(bins, 0.0);
+        self.blk_xc.resize(nb, f32::NAN);
+        self.prev_ok = false;
         self.blocks.clear();
         self.blocks.resize(nb, Block::new(t));
         self.episodes.clear();
         self.episodes.resize(nb, Episode::inactive(t, gain));
         self.s1.resize(nb, 0.0);
         self.s2.resize(nb, 0.0);
+        self.s3.resize(nb, 0.0);
         self.prev.resize(nb, 0.0);
         self.cap = 0;
         self.ready = false;
@@ -670,10 +758,132 @@ impl Engine {
             self.reset_at = None;
         }
         self.ready = false;
+        self.prev_ok = false;
         for blk in &mut self.blocks {
             blk.clear_excursions(ctx.now.1);
             blk.holdoff_until = 0;
         }
+    }
+
+    /// Per-frame spectral features (T-038): each block's bin-fluctuation correlation (blocks
+    /// pending a rise only, when the previous frame is usable) and the per-bin recent PSD.
+    ///
+    /// For a block, `d_i = (P_i − P'_i)/(P_i + P'_i)` over consecutive frames (static spectral
+    /// shape, edges, CP ripple and pilots cancel; each bin is scale-free so a strong narrow signal
+    /// cannot dominate), and the coefficient is `Σ_{i, lag} d_i d_{i+lag} / (lags · Σ_i d_i²)`
+    /// over pairs inside the block, lags `first_clean_lag … +5`. Gaussian noise: 0. Onset and
+    /// impulsive frames are not differenced.
+    fn spectral_features(&mut self, fr: &Frame, timing: &Timing) {
+        let psd = &fr.spectrum.psd;
+        let n = psd.len();
+        self.blk_xc.fill(f32::NAN);
+        if n != self.prev_psd.len() {
+            return;
+        }
+        let pending = |blk: &Block| blk.member.is_none() && blk.run.dir > 0;
+        if !fr.impulsive && self.prev_ok && self.blocks.iter().any(pending) {
+            let l0 = first_clean_lag(fr.spectrum.resolution.window);
+            let l1 = l0 + XC_LAGS;
+            for ((d, &a), &b) in self.diff.iter_mut().zip(psd).zip(&self.prev_psd) {
+                let s = a + b;
+                *d = if s > 0.0 && s.is_finite() {
+                    (a - b) / s
+                } else {
+                    0.0
+                };
+            }
+            for i in 0..n {
+                let d = f64::from(self.diff[i]);
+                let mut p = 0.0;
+                for &e in &self.diff[(i + l0).min(n)..(i + l1).min(n)] {
+                    p += d * f64::from(e);
+                }
+                self.pref_p[i + 1] = self.pref_p[i] + p;
+                self.pref_q[i + 1] = self.pref_q[i] + d * d;
+            }
+            for (b, blk) in self.blocks.iter().enumerate() {
+                let r = fr.layout.range(b);
+                if !pending(blk) || r.len() < l1 {
+                    continue;
+                }
+                // Pairs (i, i + lag) with both bins inside the block.
+                let hi = r.end + 1 - l1;
+                let den = self.pref_q[hi] - self.pref_q[r.start];
+                if den > 0.0 {
+                    let num = self.pref_p[hi] - self.pref_p[r.start];
+                    self.blk_xc[b] = (num / (XC_LAGS as f64 * den)) as f32;
+                }
+            }
+        }
+        if !fr.impulsive {
+            for (r, &p) in self.bin_recent.iter_mut().zip(psd) {
+                if p.is_finite() {
+                    *r += timing.recent * (p - *r);
+                }
+            }
+        }
+        self.prev_psd.copy_from_slice(psd);
+        self.prev_ok = !fr.impulsive;
+    }
+
+    /// Refines episode `i`'s frequency edges from its block hull (`bins`, members `b0..b1`): each
+    /// edge walks outward (at most one block width, and never past the midpoint of the gap to
+    /// another episode's member block) while the smoothed recent PSD stays at or above the
+    /// geometric mid-point of the edge block's baseline and level, or inward (at most half a hop)
+    /// while it is below. Edges stay at the hull when the edge block's step is under 1.5 dB.
+    fn refine_edges(&mut self, i: usize, b0: usize, b1: usize, layout: &BlockLayout) {
+        let bins = self.episodes[i].bins.clone();
+        let rec = &self.bin_recent;
+        let n = rec.len();
+        if n != layout.bins() || bins.is_empty() {
+            return;
+        }
+        let nb = self.blocks.len();
+        let reach = layout.block_bins();
+        let half_hop = layout.hop_bins() / 2;
+        let mid = |blk: &Block| {
+            (db(blk.recent) - db(blk.base) >= EDGE_MIN_STEP_DB)
+                .then(|| (blk.base * blk.recent).sqrt())
+        };
+        let other = |b: usize| self.blocks[b].member.is_some_and(|m| m != i);
+        let mut limit_lo = bins.start.saturating_sub(reach);
+        if let Some(bo) = (0..b0).rev().find(|&b| other(b)) {
+            let e = region_bins(layout, bo, bo + 1).end;
+            limit_lo = limit_lo.max((e + bins.start) / 2 + 1);
+        }
+        let mut limit_hi = (bins.end + reach).min(n);
+        if let Some(bo) = (b1..nb).find(|&b| other(b)) {
+            let s = region_bins(layout, bo, bo + 1).start;
+            limit_hi = limit_hi.min((bins.end + s) / 2);
+        }
+        let (mut lo, mut hi) = (bins.start, bins.end);
+        if let Some(t) = mid(&self.blocks[b0]) {
+            if smoothed(rec, lo) >= t {
+                while lo > limit_lo && smoothed(rec, lo - 1) >= t {
+                    lo -= 1;
+                }
+            } else {
+                let stop = (bins.start + half_hop).min(bins.end - 1);
+                while lo < stop && smoothed(rec, lo) < t {
+                    lo += 1;
+                }
+            }
+        }
+        if let Some(t) = mid(&self.blocks[b1 - 1]) {
+            if smoothed(rec, hi - 1) >= t {
+                while hi < limit_hi && smoothed(rec, hi) >= t {
+                    hi += 1;
+                }
+            } else {
+                let stop = bins.end.saturating_sub(half_hop).max(lo + 1);
+                while hi > stop && smoothed(rec, hi - 1) < t {
+                    hi -= 1;
+                }
+            }
+        }
+        let ep = &mut self.episodes[i];
+        ep.f_lo_hz = ep.f0_hz + lo as f64 * ep.bin_hz;
+        ep.f_hi_hz = ep.f0_hz + hi as f64 * ep.bin_hz;
     }
 
     /// Fills `s1`/`s2` with the members' baselines and recent levels; returns
@@ -717,12 +927,12 @@ impl Engine {
         let level = median_in_place(&mut self.s2[..n]);
         let bins = region_bins(layout, b0, b1);
         let ep = &mut self.episodes[i];
-        (ep.f_lo_hz, ep.f_hi_hz) = edges(spectrum, &bins);
-        ep.bins = bins;
+        ep.set_extent(bins, spectrum);
         ep.band_fraction = covered as f32 / layout.bins() as f32;
         ep.baseline_db = db(baseline);
         ep.level_db = db(level);
         ep.step_db = ep.level_db - ep.baseline_db;
+        self.refine_edges(i, b0, b1, layout);
     }
 
     /// End of a segment's warm-up: restores or closes suspended episodes, re-seeds carried
@@ -744,6 +954,10 @@ impl Engine {
         let thr = cfg.threshold_db as f32;
         let end_thr = cfg.end_threshold_db as f32;
         self.drift = 0.0;
+        self.prev_ok = false;
+        if self.bin_recent.len() == fr.spectrum.psd.len() {
+            self.bin_recent.copy_from_slice(&fr.spectrum.psd);
+        }
         for blk in &mut self.blocks {
             blk.clear_excursions(fr.ev.now.1);
             blk.holdoff_until = 0;
@@ -833,6 +1047,7 @@ impl Engine {
         on_event: &mut impl FnMut(&FloorEvent),
     ) {
         let nb = self.blocks.len();
+        self.spectral_features(fr, timing);
         self.prev.copy_from_slice(slow);
         let a = timing.alpha.max(1.0 / (fr.updates as f64 + 1.0)) as f32;
         let a_long = timing.alpha_long.max(1.0 / (fr.updates as f64 + 1.0)) as f32;
@@ -870,6 +1085,7 @@ impl Engine {
         let end_thr = cfg.end_threshold_db as f32;
         let f = fr.floor[b];
         let sk = block_sk(&fr.spectrum.sk, fr.layout.range(b));
+        let xc = self.blk_xc[b];
         let cap = self.cap;
         let ring = &mut self.ring[b * cap..(b + 1) * cap];
         let blk = &mut self.blocks[b];
@@ -882,6 +1098,12 @@ impl Engine {
                 e <= -end_thr || fr.counter - r.last_hit <= timing.confirm
             };
             if keep {
+                // The fluctuation correlation counts only frames differenced against a frame of
+                // the same run (never the onset step).
+                if r.dir > 0 && r.last_e.is_finite() && !fr.impulsive && xc.is_finite() {
+                    r.sum_xc += f64::from(xc);
+                    r.xc_n += 1;
+                }
                 r.push(e, f, fr.impulsive, sk, fr.counter, thr, timing);
                 if r.dir < 0 {
                     r.record(ring, e, thr);
@@ -1202,7 +1424,8 @@ impl Engine {
     ) -> Group {
         let mut k = 0usize;
         let mut onset: Option<Stamp> = None;
-        let (mut var, mut n_var, mut used, mut sk_s, mut sk_n) = (0.0f64, 0u32, 0u64, 0.0f64, 0u64);
+        let (mut n_var, mut used, mut sk_s, mut sk_n) = (0u32, 0u64, 0.0f64, 0u64);
+        let (mut xc_s, mut xc_n, mut xc_blocks) = (0.0f64, 0u64, 0usize);
         for b in range {
             let blk = &self.blocks[b];
             if blk.member.is_some() || blk.run.dir != dir {
@@ -1216,17 +1439,36 @@ impl Engine {
                 onset = Some(r.onset);
             }
             if let Some(v) = r.var_d() {
-                var += v / 2.0;
+                self.s3[n_var as usize] = (v / 2.0) as f32;
                 n_var += 1;
             }
             used += r.level_n;
             sk_s += r.sum_sk;
             sk_n += r.sk_n;
+            xc_s += r.sum_xc;
+            xc_n += r.xc_n;
+            xc_blocks += usize::from(r.xc_n > 0);
         }
+        // Anti-correlated fluctuations are evidence only when significant against Gaussian noise:
+        // per (block, frame) the coefficient has σ ≈ √(1.5/(lags·pairs)) under noise (1.5: the
+        // window's adjacent-bin correlation), and overlapping blocks are not independent.
+        let anticorrelated = xc_n > 0 && {
+            let mean = xc_s / xc_n as f64;
+            let l1 = first_clean_lag(fr.spectrum.resolution.window) + XC_LAGS;
+            let pairs = (fr.layout.block_bins() + 1).saturating_sub(l1).max(1);
+            let per_block = xc_n as f64 / xc_blocks.max(1) as f64;
+            let independent = 1.0
+                + xc_blocks.saturating_sub(1) as f64 * fr.layout.hop_bins() as f64
+                    / fr.layout.block_bins() as f64;
+            let se = (1.5 / (XC_LAGS * pairs) as f64 / (per_block * independent)).sqrt();
+            mean < -cfg.max_bin_anticorrelation.max(4.0 * se)
+        };
         let baseline = median_in_place(&mut self.s1[..k]);
         let level = median_in_place(&mut self.s2[..k]);
+        // Median over blocks (T-038): one edge block whose floor flips between the two sides of a
+        // partial-band edge must not make a steady emission look structured.
         let excess_std = if n_var > 0 {
-            (var / f64::from(n_var)).sqrt()
+            f64::from(median_in_place(&mut self.s3[..n_var as usize])).sqrt()
         } else {
             0.0
         };
@@ -1242,7 +1484,7 @@ impl Engine {
             excess_std_db: excess_std as f32,
             step_unc_db: step_unc as f32,
             sk,
-            class: classify(sk, excess_std as f32, cfg),
+            class: classify(sk, excess_std as f32, anticorrelated, cfg),
             q_before: fr
                 .quantisation_db
                 .is_some_and(|q| f64::from(baseline_db) < q + fr.quantisation_margin_db),
@@ -1575,8 +1817,7 @@ impl Engine {
             self.next_id += 1;
             ep.class = g.class;
             ep.onset = g.onset;
-            ep.bins = region_bins(fr.layout, start, end);
-            (ep.f_lo_hz, ep.f_hi_hz) = edges(fr.spectrum, &ep.bins);
+            ep.set_extent(region_bins(fr.layout, start, end), fr.spectrum);
             ep.band_fraction = ep.bins.len() as f32 / fr.layout.bins() as f32;
             ep.baseline_db = g.baseline_db;
             ep.level_db = g.level_db;

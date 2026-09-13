@@ -64,8 +64,8 @@ pub use cluster::{
     Assignment, ConflictReason, EmitterMerge, FEATURE_SET_VERSION, FeatureMatch, Fingerprint,
     IdentityAccess, IdentityClaim, IdentityConflictReport, IdentityReclassification,
     InventoryEntry, InventoryIdentity, InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord,
-    MeasurementKey, PriorVerdict, RecordedClassification, Resolution, Sighting, Tolerances,
-    never_openable, tag_is_identity_free,
+    MeasurementKey, PriorVerdict, RecordedClassification, Resolution, Sighting, TAG_VOCABULARY,
+    Tolerances, never_openable, tag_in_vocabulary, tag_is_identity_free,
 };
 pub use content::ContentClass;
 pub use context::{

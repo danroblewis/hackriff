@@ -420,9 +420,9 @@ fn aware_006_partial_band_noise_jammer_characterisation() {
         (c - 400e3, c + 400e3),
     );
     r.report();
-    // The episode is built from whole 256-bin blocks, so its extent (375 kHz) under-reports an
-    // 800 kHz emission; it stays inside it (checked).
-    r.assert_noise_like_episode(0.4);
+    // T-038: the episode's block hull (375 kHz of whole 256-bin blocks) is refined per bin, so its
+    // frequency extent covers the 800 kHz emission (T-036 measured 0.47 of it).
+    r.assert_noise_like_episode(0.8);
     r.assert_absorbed_into_the_reference(true);
 }
 
@@ -513,9 +513,25 @@ fn aware_006_steady_ofdm_characterisation() {
         (c - half, c + half),
     );
     r.report();
-    // Limit, not a goal: a steady OFDM signal's bins are Gaussian enough (SK 0.89, inside the 0.15
-    // tolerance) that the tracker calls it NoiseLike, so it would open an AWARE-006 floor-rise
-    // Anomaly like a jammer; correlation and priors must explain it. Pinned so a change shows.
-    r.assert_noise_like_episode(0.5);
+    // T-038 (was a T-036 limit: SK 0.89 alone read NoiseLike): the OFDM's bin power fluctuations
+    // are anti-correlated (constant per-symbol energy), so every Rise/Extend is Structured and
+    // `FloorAnomalies` opens no AWARE-006 floor-rise Anomaly for a normal emitter.
+    let opened: Vec<_> = r
+        .events
+        .iter()
+        .filter(|e| matches!(e.kind, FloorEventKind::Rise | FloorEventKind::Extend))
+        .collect();
+    assert!(
+        !opened.is_empty(),
+        "{AWARE_006} OFDM: an episode: {:?}",
+        r.events
+    );
+    assert!(
+        opened
+            .iter()
+            .all(|e| e.class == FloorChangeClass::Structured),
+        "{AWARE_006} OFDM: structured, not a noise-like floor rise: {:?}",
+        r.events
+    );
     r.assert_absorbed_into_the_reference(true);
 }
