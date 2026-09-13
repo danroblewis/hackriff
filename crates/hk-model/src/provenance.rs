@@ -5,9 +5,11 @@
 //! A measurement is only interpretable together with its gain state, overload flags,
 //! calibration and spur mask.
 //!
-//! The struct holds the value only. Whether `provenance_id` is a field or only a repository key
-//! (rows are deduplicated) is decided by T-002. Its JSON form is also the `hackriff:provenance`
-//! SigMF extension value (docs/sigmf-extension.md).
+//! Provenance describes **state**, not per-span measurements, so that the repository can
+//! deduplicate it by value (many frames and detections share one row while nothing changes).
+//! Per-span clipped-sample counts therefore live on `Detection::clip_count` and on the SigMF
+//! capture key `hackriff:clip_count`, not here. Its JSON form is the `hackriff:provenance` SigMF
+//! extension value (docs/sigmf-extension.md).
 
 use serde::{Deserialize, Serialize};
 
@@ -43,17 +45,22 @@ pub enum ClockSource {
     Gpsdo,
 }
 
-/// The trust record for a measurement (docs/07 §2.6). Immutable once written.
+/// The trust record for a measurement (docs/07 §2.6). Immutable once written; deduplicated by
+/// value in storage.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Provenance {
     /// Source device identity, e.g. `hackrf:<serial>` or `synthetic:<generator>`.
     pub device_id: String,
     /// Tuning and gain state.
     pub tune: Tune,
-    /// Clipped samples observed over the span this record covers.
-    pub clip_count: u64,
-    /// The front end was judged overloaded. Downstream detections become `suspect-IMD`.
+    /// Sticky tune-state flag: the front end was judged overloaded under this tune/gain state.
+    /// It changes only by minting a new Provenance (e.g. after a gain step). Every Detection under
+    /// an overloaded provenance must set `flags.clipped` (suspect IMD); the repository enforces it.
     pub overload: bool,
+    /// The noise floor under this gain state is within 3 dB of the ADC quantisation floor, so weak
+    /// signals are limited by the 8-bit ADC rather than by thermal noise (spike S4). Stable per
+    /// gain state, so it does not defeat deduplication.
+    pub quantisation_limited: bool,
     /// Board temperature, °C, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature_c: Option<f64>,
@@ -92,8 +99,8 @@ mod tests {
                 amp_on: false,
                 bandwidth_hz: 1.75e6,
             },
-            clip_count: 3,
             overload: false,
+            quantisation_limited: false,
             temperature_c: None,
             antenna_port: Some("A1".into()),
             clock_source: ClockSource::Internal,
@@ -110,8 +117,17 @@ mod tests {
         let p = sample();
         let json = serde_json::to_value(&p).unwrap();
         assert!(json.get("temperature_c").is_none());
+        assert!(json.get("clip_count").is_none());
         assert_eq!(json["clock_source"], "internal");
         assert_eq!(json["timestamp_method"], "host-arrival");
+        assert_eq!(serde_json::from_value::<Provenance>(json).unwrap(), p);
+    }
+
+    #[test]
+    fn legacy_clip_count_key_is_ignored_on_read() {
+        let p = sample();
+        let mut json = serde_json::to_value(&p).unwrap();
+        json["clip_count"] = serde_json::json!(12);
         assert_eq!(serde_json::from_value::<Provenance>(json).unwrap(), p);
     }
 }

@@ -8,6 +8,8 @@
 //!   (that segment, overriding global).
 //! - `hackriff:truth`: a free-form ground-truth object on an annotation (synthetic generator,
 //!   valid decodes, hand labels).
+//! - `hackriff:clip_count`: clipped ADC samples within a capture segment. Per segment, not in
+//!   provenance, because provenance is deduplicated by value.
 //!
 //! This module handles metadata only. Sample I/O belongs to the replay source (T-003).
 
@@ -29,6 +31,8 @@ pub const HACKRIFF_EXTENSION_VERSION: &str = "0.1.0";
 pub const PROVENANCE_KEY: &str = "hackriff:provenance";
 /// Key for the ground-truth object on an annotation.
 pub const TRUTH_KEY: &str = "hackriff:truth";
+/// Key for the clipped-sample count of a capture segment.
+pub const CLIP_COUNT_KEY: &str = "hackriff:clip_count";
 
 /// Errors reading or writing SigMF metadata.
 #[derive(Debug, thiserror::Error)]
@@ -230,6 +234,13 @@ pub struct Capture {
         skip_serializing_if = "Option::is_none"
     )]
     pub provenance: Option<Provenance>,
+    /// `hackriff:clip_count`: clipped ADC samples within this segment, if measured.
+    #[serde(
+        rename = "hackriff:clip_count",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub clip_count: Option<u64>,
     /// All other keys, preserved verbatim.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -398,8 +409,8 @@ mod tests {
                 amp_on: true,
                 bandwidth_hz: 7e6,
             },
-            clip_count: 0,
             overload: false,
+            quantisation_limited: false,
             temperature_c: Some(41.5),
             antenna_port: None,
             clock_source: ClockSource::Internal,
@@ -473,6 +484,7 @@ mod tests {
             frequency: Some(1090e6),
             datetime: Some("2026-09-13T12:00:00.000000Z".into()),
             provenance: Some(provenance()),
+            clip_count: Some(7),
             extra: Map::new(),
         });
         meta.annotations.push(Annotation {
@@ -504,6 +516,7 @@ mod tests {
             raw["captures"][0][PROVENANCE_KEY]["timestamp_method"],
             "host-arrival"
         );
+        assert_eq!(raw["captures"][0][CLIP_COUNT_KEY], 7);
         assert_eq!(raw["annotations"][0][TRUTH_KEY]["icao"], "a1b2c3");
     }
 

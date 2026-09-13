@@ -399,6 +399,7 @@ fn plan_segments(
             frequency: None,
             datetime: None,
             provenance: None,
+            clip_count: None,
             extra: Default::default(),
         }];
         &implicit
@@ -525,7 +526,7 @@ fn synthesised_provenance(
             amp_on: false,
             bandwidth_hz: sample_rate_hz,
         },
-        clip_count: 0,
+        quantisation_limited: false,
         overload: false,
         temperature_c: None,
         antenna_port: None,

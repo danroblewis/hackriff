@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use rusqlite::params;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -12,6 +13,7 @@ use super::interpret::event_region_sql;
 use super::inventory::EMITTER_REGION_SQL;
 use super::measure::DETECTION_REGION_SQL;
 use super::{RepoError, Repository, SCHEMA_VERSION, blob, region_bounds};
+use crate::detection::SpurReason;
 use crate::*;
 
 // ---- fixtures ----
@@ -134,8 +136,8 @@ fn sample_provenance(cal: CalibrationStateId, spur: SpurMaskId) -> Provenance {
             amp_on: true,
             bandwidth_hz: 7e6,
         },
-        clip_count: 0,
         overload: false,
+        quantisation_limited: false,
         temperature_c: Some(41.0),
         antenna_port: None,
         clock_source: ClockSource::Internal,
@@ -164,7 +166,11 @@ fn det(
         xdb_level_db: Some(26.0),
         snr_peak_db: 18.5,
         snr_mean_db: 12.0,
+        peak_level_dbfs: -42.5,
+        peak_level_dbm: Some(-95.25),
         sk: Some(3.2),
+        clip_count: 0,
+        detector_version: "hk-detect/cfar@0.1.0;pfa=1e-6".into(),
         provenance_ref: prov,
         flags: DetectionFlags {
             marginal: true,
@@ -230,10 +236,21 @@ struct Graph {
 fn graph() -> Graph {
     let mut b = base();
     let (survey_id, prov_id) = (b.survey.id, b.prov_id);
-    let detections = vec![
-        det(survey_id, prov_id, 915.0e6, 40e3, tr(10, 11)),
-        det(survey_id, prov_id, 915.0e6, 40e3, tr(40, 41)),
-    ];
+    let mut flagged = det(survey_id, prov_id, 915.0e6, 40e3, tr(40, 41));
+    flagged.clip_count = 3;
+    flagged.flags = DetectionFlags {
+        clipped: true,
+        spur_candidate: true,
+        spur_reason: Some(SpurReason::SpurMap { mask: b.spur.id }),
+        image_candidate: true,
+        image_retune_confirmed: true,
+        marginal: false,
+        suspect_imd: true,
+        compressed: true,
+        impulsive: true,
+        edge: true,
+    };
+    let detections = vec![det(survey_id, prov_id, 915.0e6, 40e3, tr(10, 11)), flagged];
     b.repo.insert_detections(&detections).unwrap();
 
     let track = Track {
@@ -326,7 +343,8 @@ fn graph() -> Graph {
         decoder_id: "hk-infer".into(),
         decoder_version: "0.1.0".into(),
         frame_model: "inferred:preamble-aaaa-sync-2dd4".into(),
-        fields: json!({"payload_hex": "2dd4a1b2"}),
+        metadata: json!({"frame_len_bits": 32, "sync": "2dd4"}),
+        content: Some(json!({"payload_hex": "2dd4a1b2"})),
         crc_status: CrcStatus::Unknown,
         identity: None,
         content_class: ContentClass::Unrestricted,
@@ -345,8 +363,8 @@ fn graph() -> Graph {
             schema_id: None,
             sync_word_hex: Some("2dd4".into()),
         },
-        transport: BitstreamTransport::Live {
-            endpoint: "unix:///run/hackriff/bits.sock".into(),
+        transport: BitstreamTransport::Stored {
+            uri: "bits/2026/09/13/burst.bits".into(),
         },
         time: tr(9, 12),
         provenance_ref: Some(prov_id),
@@ -366,7 +384,8 @@ fn graph() -> Graph {
         author_ref: "daniel".into(),
         kind: AnnotationKind::Label,
         value: "unknown/2fsk".into(),
-        detail: serde_json::Value::Null,
+        metadata: serde_json::Value::Null,
+        content: None,
         confidence: 0.7,
         supersedes: None,
         content_class: ContentClass::Unrestricted,
@@ -391,7 +410,7 @@ fn graph() -> Graph {
         fetched_at: t(100),
         valid_until: Some(t(172_800)),
     };
-    b.repo.upsert_external_event(&event).unwrap();
+    let (_, event_hash) = b.repo.upsert_external_event(&event).unwrap();
 
     // docs/07 §5.2: GNSS L1 noise-floor rise explained by a cached gpsjam cell.
     let anomaly = Anomaly {
@@ -413,7 +432,10 @@ fn graph() -> Graph {
         correlation_type: CorrelationType::TimeCoincidence,
         score: 0.82,
         evidence: vec![
-            Evidence::ExternalEvent { id: event.id },
+            Evidence::ExternalEvent {
+                id: event.id,
+                payload_hash: event_hash,
+            },
             Evidence::Value {
                 name: "lag_s".into(),
                 value: 0.0,
@@ -478,6 +500,7 @@ fn schema_migrates_in_wal_mode_with_region_and_time_indexes() {
             "idx_detection_f_lo_f_hi",
             "idx_emitter_f_lo_f_hi",
             "idx_emitter_last_seen",
+            "idx_emitter_status_emitter",
             "idx_anomaly_f_lo_f_hi",
             "idx_anomaly_t_start_t_end",
             "idx_explanation_f_lo_f_hi",
@@ -511,7 +534,9 @@ fn serde_round_trips_every_docs07_object() {
     serde_round_trip(&b.cal);
     serde_round_trip(&b.spur);
     serde_round_trip(&b.prov);
-    serde_round_trip(&g.detections[0]);
+    for d in &g.detections {
+        serde_round_trip(d);
+    }
     serde_round_trip(&g.track);
     serde_round_trip(&g.emitter);
     serde_round_trip(&g.recording);
@@ -538,6 +563,14 @@ fn serde_round_trips_every_docs07_object() {
         target: LinkTarget::Track(g.track.id),
         linked_at: t(1),
     });
+    serde_round_trip(&KnownStatusChange {
+        emitter_id: g.emitter.id,
+        status: KnownStatus::UnexpectedHere,
+        prior_ref: Some("bandplan:us-fcc-2026#118-137MHz".into()),
+        reason: "wfm in the aeronautical band".into(),
+        t: t(5),
+        author: StatusAuthor::Prior,
+    });
     serde_round_trip(&AnomalyStatusChange {
         anomaly_id: g.anomaly.id,
         status: AnomalyStatus::Dismissed,
@@ -557,7 +590,7 @@ fn serde_round_trips_every_docs07_object() {
         freq: FreqRange::new(88e6, 108e6),
         bin_width_hz: 100e3,
         unit: PowerUnit::Dbfs,
-        power: (0..200).map(|i| -90.0 + (i % 7) as f64).collect(),
+        power: (0..200).map(|i| -90.5 + (i % 7) as f32).collect(),
         provenance_ref: b.prov_id,
     });
     serde_round_trip(&SpectrumFrame {
@@ -579,6 +612,7 @@ fn serde_round_trips_every_docs07_object() {
     });
     serde_round_trip(&SpectrumTile {
         key: TileKey {
+            scheme: 1,
             level: 2,
             f_block: 1090,
             t_block: 29_816,
@@ -609,7 +643,7 @@ fn db_round_trips_every_persisted_object() {
     assert_eq!(r.spur_mask(g.base.spur.id).unwrap(), g.base.spur);
     assert_eq!(r.provenance(g.base.prov_id).unwrap(), g.base.prov);
     for d in &g.detections {
-        assert_eq!(&r.detection(d.id).unwrap(), d);
+        assert_eq!(&r.detection(d.id).unwrap(), d, "all flags and spur reason");
     }
     assert_eq!(r.track(g.track.id).unwrap(), g.track);
     assert_eq!(
@@ -617,6 +651,12 @@ fn db_round_trips_every_persisted_object() {
         g.detections.iter().map(|d| d.id).collect::<Vec<_>>()
     );
     assert_eq!(r.emitter(g.emitter.id).unwrap(), g.emitter);
+    let history = r.known_status_history(g.emitter.id).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        (history[0].status, history[0].author),
+        (KnownStatus::Unknown, StatusAuthor::System)
+    );
     assert_eq!(r.recording(g.recording.id).unwrap(), g.recording);
     assert_eq!(
         r.recordings_for_detection(g.detections[0].id).unwrap(),
@@ -688,24 +728,39 @@ fn scan_plan_edits_are_new_versions_and_surveys_close_once() {
 // ---- provenance ----
 
 #[test]
-fn identical_provenance_values_share_one_row() {
+fn identical_provenance_values_share_one_row_by_content_hash() {
     let mut b = base();
-    let again = b.repo.intern_provenance(&b.prov.clone()).unwrap();
-    assert_eq!(again, b.prov_id);
+    assert_eq!(
+        b.repo.intern_provenance(&b.prov.clone()).unwrap(),
+        b.prov_id
+    );
 
-    let mut clipped = b.prov.clone();
-    clipped.clip_count = 17;
-    clipped.overload = true;
-    let other = b.repo.intern_provenance(&clipped).unwrap();
+    let mut hot = b.prov.clone();
+    hot.overload = true;
+    let other = b.repo.intern_provenance(&hot).unwrap();
     assert_ne!(other, b.prov_id);
-    assert_eq!(b.repo.intern_provenance(&clipped).unwrap(), other);
+    assert_eq!(b.repo.intern_provenance(&hot).unwrap(), other);
 
-    let rows: i64 = b
+    // -0.0 and 0.0 are the same value, so they share a row.
+    let mut pos = b.prov.clone();
+    pos.temperature_c = Some(0.0);
+    let mut neg = b.prov.clone();
+    neg.temperature_c = Some(-0.0);
+    assert_eq!(
+        b.repo.intern_provenance(&pos).unwrap(),
+        b.repo.intern_provenance(&neg).unwrap()
+    );
+
+    let (rows, hash_len): (i64, i64) = b
         .repo
         .conn
-        .query_row("SELECT count(*) FROM provenance", [], |r| r.get(0))
+        .query_row(
+            "SELECT count(*), min(length(content_hash)) FROM provenance",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .unwrap();
-    assert_eq!(rows, 2);
+    assert_eq!((rows, hash_len), (3, 32));
 
     let mut nan = b.prov.clone();
     nan.temperature_c = Some(f64::NAN);
@@ -726,6 +781,10 @@ fn provenance_chain_resolves_from_detection_to_calibration_and_spur_mask() {
     assert_eq!(chain.provenance, g.base.prov);
     assert_eq!(chain.calibration, Some(g.base.cal.clone()));
     assert_eq!(chain.spur_mask, Some(g.base.spur.clone()));
+    assert_eq!(
+        d.flags.spur_reason.and_then(|s| s.mask()),
+        Some(g.base.spur.id)
+    );
 
     // The schema refuses a dangling reference, so the chain cannot break.
     let mut b = base();
@@ -775,6 +834,10 @@ fn measurements_are_immutable_and_interpretations_append_only() {
             blob(g.emitter.id),
         ),
         (
+            "UPDATE emitter_status SET status = 'known' WHERE emitter_id = ?1",
+            blob(g.emitter.id),
+        ),
+        (
             "UPDATE annotation SET body = '{}' WHERE annotation_id = ?1",
             blob(g.annotation.id),
         ),
@@ -790,6 +853,160 @@ fn measurements_are_immutable_and_interpretations_append_only() {
     let mut repo = g.base.repo;
     repo.mark_annotations_exported(&[g.annotation.id]).unwrap();
     assert!(repo.annotation(g.annotation.id).unwrap().exported);
+}
+
+// ---- content gating (ADR-0004, legal guardrail) ----
+
+fn expect_gated(result: Result<(), RepoError>, object: &str, class: ContentClass) {
+    match result {
+        Err(RepoError::GatedContent {
+            object: o,
+            class: c,
+        }) => {
+            assert_eq!((o, c), (object, class));
+        }
+        other => panic!("{object} under {class:?}: expected GatedContent, got {other:?}"),
+    }
+}
+
+/// Tries every content-carrying insert path under a gated `class`: content is refused,
+/// metadata-only forms are accepted, and the schema refuses content from raw SQL too.
+fn assert_every_insert_path_gates(class: ContentClass) {
+    assert!(!class.permits_content());
+    let mut g = graph();
+    let class_text = serde_json::to_value(class).unwrap();
+    let class_text = class_text.as_str().unwrap();
+    let repo = &mut g.base.repo;
+
+    // Decode: content refused; metadata still recorded.
+    let mut decode = g.decode.clone();
+    decode.id = DecodeId::new();
+    decode.content_class = class;
+    decode.content = Some(json!({"message": "call me at 555-0100"}));
+    expect_gated(repo.insert_decode(&decode), "decode", class);
+    decode.content = None;
+    repo.insert_decode(&decode).unwrap();
+    let stored = repo.decode(decode.id).unwrap();
+    assert_eq!(
+        (stored.content, stored.metadata),
+        (None, g.decode.metadata.clone())
+    );
+
+    // Annotation: content refused; the label itself is metadata.
+    let mut ann = g.annotation.clone();
+    ann.id = AnnotationId::new();
+    ann.content_class = class;
+    ann.content = Some(json!({"message": "call me at 555-0100"}));
+    expect_gated(repo.insert_annotation(&ann), "annotation", class);
+    ann.content = None;
+    ann.metadata = json!({"address": 1234567, "frames": 3});
+    repo.insert_annotation(&ann).unwrap();
+
+    // Recording: IQ is content, so a gated class is refused outright.
+    let mut rec = g.recording.clone();
+    rec.id = RecordingId::new();
+    rec.content_class = class;
+    expect_gated(repo.insert_recording(&rec), "recording", class);
+
+    // Bitstream: stored bits refused; a live descriptor is metadata.
+    let mut bits = g.bitstream.clone();
+    bits.id = BitstreamId::new();
+    bits.content_class = class;
+    bits.transport = BitstreamTransport::Stored {
+        uri: "bits/gated.bits".into(),
+    };
+    expect_gated(repo.insert_bitstream(&bits), "bitstream", class);
+    bits.transport = BitstreamTransport::Live {
+        endpoint: "unix:///run/hackriff/meta.sock".into(),
+    };
+    repo.insert_bitstream(&bits).unwrap();
+
+    // The schema repeats the rule for writers that bypass the repository.
+    for sql in [
+        "INSERT INTO decode (decode_id, decoder_id, crc_status, content_class, has_content, t, body) \
+         VALUES (?1, 'raw', 'valid', ?2, 1, 0, '{}')",
+        "INSERT INTO annotation (annotation_id, target_kind, author, kind, content_class, \
+         has_content, t, exported, body) VALUES (?1, 'region', 'user', 'label', ?2, 1, 0, 0, '{}')",
+        "INSERT INTO bitstream (bitstream_id, transport, content_class, t_start, body) \
+         VALUES (?1, 'stored', ?2, 0, '{}')",
+    ] {
+        let err = repo
+            .conn
+            .execute(sql, params![blob(DecodeId::new()), class_text])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("CHECK"), "{sql}: {err}");
+    }
+    let err = repo
+        .conn
+        .execute(
+            "INSERT INTO recording (recording_id, kind, t_start, t_end, f_center, trigger_kind, \
+             size_bytes, retention_class, content_class, provenance_id, body) \
+             VALUES (?1, 'iq-snippet', 0, 1, 1e6, 'manual', 1, 'routine', ?2, ?3, '{}')",
+            params![blob(RecordingId::new()), class_text, blob(g.base.prov_id)],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("CHECK"), "raw recording: {err}");
+}
+
+#[test]
+fn gating_metadata_only_refuses_content_on_every_insert_path() {
+    assert_every_insert_path_gates(ContentClass::MetadataOnly);
+}
+
+#[test]
+fn gating_restricted_cellular_refuses_content_on_every_insert_path() {
+    assert_every_insert_path_gates(ContentClass::RestrictedCellular);
+}
+
+#[test]
+fn gating_restricted_paging_refuses_content_on_every_insert_path() {
+    assert_every_insert_path_gates(ContentClass::RestrictedPaging);
+}
+
+/// A new gated ContentClass variant must get its own gating test above.
+#[test]
+fn gating_tests_cover_every_gated_variant() {
+    let gated: Vec<_> = ContentClass::ALL
+        .iter()
+        .copied()
+        .filter(|c| !c.permits_content())
+        .collect();
+    assert_eq!(
+        gated,
+        [
+            ContentClass::MetadataOnly,
+            ContentClass::RestrictedCellular,
+            ContentClass::RestrictedPaging
+        ]
+    );
+    assert!(gated.contains(&ContentClass::FAIL_CLOSED));
+}
+
+#[test]
+fn permitted_classes_carry_content_on_every_insert_path() {
+    let mut g = graph();
+    for class in [ContentClass::Unrestricted, ContentClass::OwnKeyDecrypted] {
+        let repo = &mut g.base.repo;
+        let mut decode = g.decode.clone();
+        decode.id = DecodeId::new();
+        decode.content_class = class;
+        repo.insert_decode(&decode).unwrap();
+        let mut ann = g.annotation.clone();
+        ann.id = AnnotationId::new();
+        ann.content_class = class;
+        ann.content = Some(json!({"text": "own traffic"}));
+        repo.insert_annotation(&ann).unwrap();
+        let mut rec = g.recording.clone();
+        rec.id = RecordingId::new();
+        rec.content_class = class;
+        repo.insert_recording(&rec).unwrap();
+        let mut bits = g.bitstream.clone();
+        bits.id = BitstreamId::new();
+        bits.content_class = class;
+        repo.insert_bitstream(&bits).unwrap();
+    }
 }
 
 // ---- detections ----
@@ -818,6 +1035,75 @@ fn detection_batch_insert_is_one_transaction() {
     bad[5].provenance_ref = ProvenanceId::new();
     assert!(b.repo.insert_detections(&bad).is_err());
     assert_eq!(b.repo.detection_count().unwrap(), 1_000);
+}
+
+/// Overload is sticky tune-state: it (and any clipped samples) must propagate to
+/// `flags.clipped` on every detection.
+#[test]
+fn overload_and_clipping_propagate_to_detection_flags() {
+    let mut b = base();
+    let mut hot = b.prov.clone();
+    hot.overload = true;
+    let hot_id = b.repo.intern_provenance(&hot).unwrap();
+
+    let mut under_overload = det(b.survey.id, hot_id, 433.92e6, 10e3, tr(0, 1));
+    let id = under_overload.id;
+    assert!(matches!(
+        b.repo.insert_detection(&under_overload),
+        Err(RepoError::UnflaggedClipping { detection }) if detection == id
+    ));
+    under_overload.flags.clipped = true;
+    under_overload.flags.suspect_imd = true;
+    b.repo.insert_detection(&under_overload).unwrap();
+
+    let mut clipped = det(b.survey.id, b.prov_id, 433.92e6, 10e3, tr(2, 3));
+    clipped.clip_count = 5;
+    assert!(matches!(
+        b.repo.insert_detection(&clipped),
+        Err(RepoError::UnflaggedClipping { .. })
+    ));
+    clipped.flags.clipped = true;
+    b.repo.insert_detection(&clipped).unwrap();
+    assert_eq!(b.repo.detection(clipped.id).unwrap().clip_count, 5);
+
+    // Dependent flags must be consistent.
+    let mut orphan_reason = det(b.survey.id, b.prov_id, 433.92e6, 10e3, tr(4, 5));
+    orphan_reason.flags.spur_reason = Some(SpurReason::Dc);
+    assert!(matches!(
+        b.repo.insert_detection(&orphan_reason),
+        Err(RepoError::Invalid(_))
+    ));
+
+    // The trigger and CHECKs enforce the same rules for raw SQL.
+    let raw = "INSERT INTO detection (detection_id, survey_id, provenance_id, t_start, t_end, \
+               f_center, obw, f_lo, f_hi, snr_peak, snr_mean, flags, peak_dbfs, clip_count, \
+               detector_version) VALUES (?1, ?2, ?3, 0, 1, 1e6, 1e3, 999500, 1000500, 10, 5, \
+               0, -40, ?4, 'raw')";
+    let err = b
+        .repo
+        .conn
+        .execute(
+            raw,
+            params![blob(DetectionId::new()), blob(b.survey.id), blob(hot_id), 0],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("flags.clipped"), "{err}");
+    let err = b
+        .repo
+        .conn
+        .execute(
+            raw,
+            params![
+                blob(DetectionId::new()),
+                blob(b.survey.id),
+                blob(b.prov_id),
+                9
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("CHECK"), "{err}");
 }
 
 /// AWARE-042 (region over time; docs/07 §4 step 2): the region query returns exactly the
@@ -878,6 +1164,119 @@ fn aware_042_region_over_time_query_returns_only_overlapping_detections() {
     );
 }
 
+/// A row wider and longer than anything before it, committed by another connection after a
+/// query, is found by the next query (extent bounds are read in the query's snapshot).
+#[test]
+fn a_wide_row_inserted_after_a_query_is_found_by_the_next_query() {
+    let dir = TempDir::new();
+    let path = dir.0.join("wide.db");
+    let mut writer = base_in(Repository::open(&path).unwrap());
+    let reader = Repository::open(&path).unwrap();
+    let (s, p) = (writer.survey.id, writer.prov_id);
+    let query = Region::new(FreqRange::new(400e6, 401e6), tr(50, 60));
+
+    writer
+        .repo
+        .insert_detection(&det(s, p, 400.5e6, 10e3, tr(55, 56)))
+        .unwrap();
+    assert_eq!(reader.detections_in_region(&query).unwrap().len(), 1);
+
+    let wide = det(s, p, 300e6, 250e6, tr(-10_000, 51)); // 175–425 MHz, ends inside the window
+    writer.repo.insert_detection(&wide).unwrap();
+    let got = reader.detections_in_region(&query).unwrap();
+    assert_eq!(got.len(), 2);
+    assert!(got.iter().any(|d| d.id == wide.id));
+}
+
+/// Two WAL connections doing read-then-write transactions concurrently: with `BEGIN IMMEDIATE`
+/// they queue on the busy timeout instead of failing with `SQLITE_BUSY_SNAPSHOT`, and provenance
+/// interning converges on one row per value.
+#[test]
+fn concurrent_wal_connections_read_then_write_without_busy_snapshot() {
+    let dir = TempDir::new();
+    let path = dir.0.join("concurrent.db");
+    let b = base_in(Repository::open(&path).unwrap());
+    let emitter_id = EmitterId::new();
+    const N: u64 = 100;
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            let prov = b.prov.clone();
+            std::thread::spawn(move || -> Result<ProvenanceId, RepoError> {
+                let mut repo = Repository::open(&path)?;
+                let q = Region::new(FreqRange::new(433e6, 435e6), tr(0, 1_000_000));
+                let mut last = None;
+                for i in 0..N {
+                    // A read on this connection, then read-then-write transactions that race the
+                    // other connection's writes.
+                    repo.emitters_in_region(&q)?;
+                    repo.upsert_emitter_observation(&EmitterObservation {
+                        emitter_id,
+                        seen: tr(i as i64, i as i64 + 1),
+                        count: 1,
+                        f_center_hz: 433.92e6,
+                        bandwidth_hz: 20e3,
+                        identity: None,
+                    })?;
+                    let mut p = prov.clone();
+                    p.antenna_port = Some(format!("port-{}", i % 3));
+                    last = Some(repo.intern_provenance(&p)?);
+                }
+                Ok(last.expect("N > 0"))
+            })
+        })
+        .collect();
+    let ids: Vec<ProvenanceId> = workers
+        .into_iter()
+        .map(|h| h.join().unwrap().unwrap())
+        .collect();
+    assert_eq!(
+        ids[0], ids[1],
+        "same value, same row, from both connections"
+    );
+    let e = b.repo.emitter(emitter_id).unwrap();
+    assert_eq!(e.count, 2 * N);
+    let rows: i64 = b
+        .repo
+        .conn
+        .query_row("SELECT count(*) FROM provenance", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1 + 3, "base provenance plus one row per antenna port");
+}
+
+#[test]
+fn track_detections_are_ordered_by_detection_time_not_id() {
+    let mut b = base();
+    let (a, c) = (DetectionId::new(), DetectionId::new());
+    let (low_id, high_id) = if a < c { (a, c) } else { (c, a) };
+    let mut late = det(b.survey.id, b.prov_id, 433.92e6, 10e3, tr(100, 101));
+    late.id = low_id;
+    let mut early = det(b.survey.id, b.prov_id, 433.92e6, 10e3, tr(10, 11));
+    early.id = high_id;
+    b.repo
+        .insert_detections(&[late.clone(), early.clone()])
+        .unwrap();
+    let track = Track {
+        id: TrackId::new(),
+        state: TrackState::Open,
+        split_from: None,
+        time: tr(10, 101),
+        f_center_hz: 433.92e6,
+        bandwidth_hz: 10e3,
+        detection_count: 2,
+        timing: TimingFeatures::default(),
+        updated_at: t(102),
+    };
+    b.repo.upsert_track(&track).unwrap();
+    b.repo
+        .link_detections_to_track(track.id, &[late.id, early.id], t(102))
+        .unwrap();
+    assert_eq!(
+        b.repo.track_detections(track.id).unwrap(),
+        vec![early.id, late.id]
+    );
+}
+
 /// A 0.5 s span starting at `sec`.
 fn half_second_from(sec: i64) -> TimeRange {
     TimeRange::new(t(sec), t(sec).saturating_add_nanos(500_000_000))
@@ -920,7 +1319,7 @@ fn region_and_time_queries_use_indexes() {
     let plan = query_plan(
         r,
         DETECTION_REGION_SQL,
-        rusqlite::params![d.0, d.1, d.2, d.3, d.4, d.5, d.6],
+        params![d.0, d.1, d.2, d.3, d.4, d.5, d.6],
     );
     eprintln!("detection region plan: {plan:?}");
     assert_uses_index(&plan, "detection");
@@ -929,7 +1328,7 @@ fn region_and_time_queries_use_indexes() {
     let plan = query_plan(
         r,
         EMITTER_REGION_SQL,
-        rusqlite::params![e.f_lo_min, e.hi, e.lo, e.t0, e.t1],
+        params![e.f_lo_min, e.hi, e.lo, e.t0, e.t1],
     );
     eprintln!("emitter region plan: {plan:?}");
     assert_uses_index(&plan, "emitter");
@@ -939,7 +1338,7 @@ fn region_and_time_queries_use_indexes() {
         let plan = query_plan(
             r,
             &event_region_sql(table),
-            rusqlite::params![b.f_lo_min, b.hi, b.lo, b.t_start_min, b.t1, b.t0],
+            params![b.f_lo_min, b.hi, b.lo, b.t_start_min, b.t1, b.t0],
         );
         eprintln!("{table} region plan: {plan:?}");
         assert_uses_index(&plan, table);
@@ -1216,7 +1615,14 @@ fn signal_062_rds_pi_identity_and_ps_label() {
         .unwrap()
         .emitter_id;
     b.repo
-        .set_known_status(station, KnownStatus::Known)
+        .append_known_status(&KnownStatusChange {
+            emitter_id: station,
+            status: KnownStatus::Known,
+            prior_ref: Some("fmlist:pi/C0DE".into()),
+            reason: "RDS PI matches a licensed station on this frequency".into(),
+            t: t(121),
+            author: StatusAuthor::Prior,
+        })
         .unwrap();
     let decode = Decode {
         id: DecodeId::new(),
@@ -1225,7 +1631,8 @@ fn signal_062_rds_pi_identity_and_ps_label() {
         decoder_id: "hk-rds".into(),
         decoder_version: "0.1.0".into(),
         frame_model: "rds-group-0a".into(),
-        fields: json!({"pi": "C0DE", "ps": "KQED    ", "pty": 3}),
+        metadata: json!({"pi": "C0DE", "pty": 3, "group": "0A"}),
+        content: Some(json!({"ps": "KQED    "})),
         crc_status: CrcStatus::Valid,
         identity: Some(pi.clone()),
         content_class: ContentClass::Unrestricted,
@@ -1238,8 +1645,9 @@ fn signal_062_rds_pi_identity_and_ps_label() {
         author: AnnotationAuthor::Decoder,
         author_ref: "hk-rds@0.1.0".into(),
         kind: AnnotationKind::GroundTruth,
-        value: "fm/rds/ps=KQED".into(),
-        detail: json!({"pi": "C0DE", "ps": "KQED", "crc_valid_groups": 12}),
+        value: "fm/rds".into(),
+        metadata: json!({"pi": "C0DE", "crc_valid_groups": 12}),
+        content: Some(json!({"ps": "KQED"})),
         confidence: 1.0,
         supersedes: None,
         content_class: ContentClass::Unrestricted,
@@ -1261,24 +1669,25 @@ fn signal_062_rds_pi_identity_and_ps_label() {
     let decodes = b.repo.decodes_for_identity(&pi).unwrap();
     assert_eq!(decodes, vec![decode.clone()]);
     assert_eq!(decodes[0].crc_status, CrcStatus::Valid);
-    assert_eq!(decodes[0].fields["ps"], "KQED    ");
+    assert_eq!(decodes[0].content.as_ref().unwrap()["ps"], "KQED    ");
     let labels = b
         .repo
         .annotations_for(&AnnotationTarget::Emitter(station))
         .unwrap();
     assert_eq!(labels, vec![label]);
     assert_eq!(labels[0].kind, AnnotationKind::GroundTruth);
-    assert!(labels[0].value.ends_with("ps=KQED"));
+    assert_eq!(labels[0].content.as_ref().unwrap()["ps"], "KQED");
     assert_eq!(
         b.repo.emitter_links(station).unwrap()[0].target,
         LinkTarget::Decode(decode.id)
     );
 }
 
-/// AWARE-053: an emitter that matches priors but is not expected here keeps
-/// `known_status: unexpected-here`, and the inventory region query surfaces it.
+/// AWARE-053: an emitter that matches priors but is not expected here gets
+/// `known_status: unexpected-here` as an appended status entry, the inventory region query
+/// surfaces it, and later changes keep the earlier entries.
 #[test]
-fn aware_053_unexpected_here_status_is_stored_and_queryable() {
+fn aware_053_unexpected_here_status_is_an_append_only_history() {
     let mut b = base();
     let id = b
         .repo
@@ -1304,9 +1713,15 @@ fn aware_053_unexpected_here_status_is_stored_and_queryable() {
             },
         )
         .unwrap();
-    b.repo
-        .set_known_status(id, KnownStatus::UnexpectedHere)
-        .unwrap();
+    let unexpected = KnownStatusChange {
+        emitter_id: id,
+        status: KnownStatus::UnexpectedHere,
+        prior_ref: Some("bandplan:us-fcc-2026#118-137MHz:aeronautical-mobile".into()),
+        reason: "broadcast-style WFM carrier inside the aeronautical band".into(),
+        t: t(302),
+        author: StatusAuthor::Prior,
+    };
+    b.repo.append_known_status(&unexpected).unwrap();
     b.repo.add_emitter_tag(id, "out-of-allocation").unwrap();
     b.repo.add_emitter_tag(id, "out-of-allocation").unwrap();
 
@@ -1322,10 +1737,39 @@ fn aware_053_unexpected_here_status_is_stored_and_queryable() {
             .is_empty(),
         "not seen after 300 s"
     );
+
+    // A user later identifies it (e.g. an authorised event transmitter): appended, not overwritten.
+    b.repo
+        .append_known_status(&KnownStatusChange {
+            emitter_id: id,
+            status: KnownStatus::Known,
+            prior_ref: None,
+            reason: "authorised temporary airshow commentary transmitter".into(),
+            t: t(400),
+            author: StatusAuthor::User,
+        })
+        .unwrap();
+    assert_eq!(b.repo.emitter(id).unwrap().known_status, KnownStatus::Known);
+    let history = b.repo.known_status_history(id).unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|h| (h.status, h.author))
+            .collect::<Vec<_>>(),
+        [
+            (KnownStatus::Unknown, StatusAuthor::System),
+            (KnownStatus::UnexpectedHere, StatusAuthor::Prior),
+            (KnownStatus::Known, StatusAuthor::User),
+        ]
+    );
+    assert_eq!(history[1], unexpected);
+
     assert!(b.repo.remove_emitter_tag(id, "out-of-allocation").unwrap());
     assert!(matches!(
-        b.repo
-            .set_known_status(EmitterId::new(), KnownStatus::Known),
+        b.repo.append_known_status(&KnownStatusChange {
+            emitter_id: EmitterId::new(),
+            ..unexpected
+        }),
         Err(RepoError::NotFound { .. })
     ));
 }
@@ -1333,19 +1777,9 @@ fn aware_053_unexpected_here_status_is_stored_and_queryable() {
 // ---- attack map (docs/07 §5.2) ----
 
 #[test]
-fn attack_map_anomalies_and_explanations_are_region_indexed_and_events_refresh_in_place() {
+fn attack_map_anomalies_and_explanations_are_region_indexed_and_evidence_is_pinned() {
     let g = graph();
     let mut repo = g.base.repo;
-
-    // A refreshed feed fact keeps its id, so the explanation's reference stays valid.
-    let mut refreshed = g.event.clone();
-    refreshed.id = ExternalEventId::new();
-    refreshed.payload = json!({"bad_fraction": 0.31});
-    refreshed.fetched_at = t(7_000);
-    assert_eq!(repo.upsert_external_event(&refreshed).unwrap(), g.event.id);
-    let cached = repo.external_event(g.event.id).unwrap();
-    assert_eq!(cached.payload["bad_fraction"], 0.31);
-    assert_eq!(cached.id, g.event.id);
 
     let l1 = Region::new(FreqRange::new(1575.0e6, 1575.9e6), tr(5_000, 5_001));
     assert_eq!(
@@ -1371,5 +1805,46 @@ fn attack_map_anomalies_and_explanations_are_region_indexed_and_events_refresh_i
     assert_eq!(
         history.iter().map(|h| h.status).collect::<Vec<_>>(),
         [AnomalyStatus::Open, AnomalyStatus::Resolved]
+    );
+
+    // A refreshed feed fact keeps its id but changes its payload hash, so the stored evidence is
+    // visibly stale rather than silently pointing at different data.
+    let Evidence::ExternalEvent {
+        payload_hash: pinned,
+        ..
+    } = g.explanation.evidence[0]
+    else {
+        panic!("first evidence is the external event");
+    };
+    let mut refreshed = g.event.clone();
+    refreshed.id = ExternalEventId::new();
+    refreshed.payload = json!({"bad_fraction": 0.31});
+    refreshed.fetched_at = t(7_000);
+    let (id, current) = repo.upsert_external_event(&refreshed).unwrap();
+    assert_eq!(id, g.event.id);
+    assert_ne!(current, pinned);
+    let cached = repo.external_event(g.event.id).unwrap();
+    assert_eq!(cached.payload_hash().unwrap(), current);
+    assert_eq!(repo.explanation(g.explanation.id).unwrap(), g.explanation);
+
+    // New evidence must pin the current payload.
+    let stale = Explanation {
+        id: ExplanationId::new(),
+        ..g.explanation.clone()
+    };
+    assert!(matches!(
+        repo.insert_explanation(&stale),
+        Err(RepoError::StaleEvidence { event, .. }) if event == g.event.id
+    ));
+    let mut fresh = stale.clone();
+    fresh.evidence[0] = Evidence::ExternalEvent {
+        id: g.event.id,
+        payload_hash: current,
+    };
+    fresh.supersedes = Some(g.explanation.id);
+    repo.insert_explanation(&fresh).unwrap();
+    assert_eq!(
+        repo.explanations_for_anomaly(g.anomaly.id).unwrap().len(),
+        2
     );
 }

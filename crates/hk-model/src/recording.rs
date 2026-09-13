@@ -83,8 +83,9 @@ pub struct Recording {
     pub size_bytes: u64,
     /// Eviction class.
     pub retention_class: RetentionClass,
-    /// Content gating class (ADR-0004). A class that does not permit content must never reach a
-    /// Recording; C25 enforces that before writing.
+    /// Content gating class (ADR-0004). IQ and audio are content, so the repository refuses a
+    /// Recording whose class does not permit content (`RepoError::GatedContent`); C25 must not
+    /// write the files in the first place.
     pub content_class: ContentClass,
     /// Trust record.
     pub provenance_ref: ProvenanceId,
@@ -163,17 +164,22 @@ pub struct Annotation {
     pub author_ref: String,
     /// Kind.
     pub kind: AnnotationKind,
-    /// Label path or value, e.g. `fm/rds/ps=KQED`, `adsb`, `unknown`.
+    /// Label path, e.g. `fm/rds`, `adsb`, `unknown/2fsk`. A label is **metadata**: decoded message
+    /// text never goes here, it goes in `content`.
     pub value: String,
-    /// Structured detail (evidence such as CRC passes and frame count, decoded fields).
+    /// Metadata detail: evidence such as CRC passes and frame count, identifiers. Always stored.
     #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub detail: Value,
+    pub metadata: Value,
+    /// Content detail: decoded message text or payload used as ground truth. The repository
+    /// refuses `Some` unless `content_class` permits content (`RepoError::GatedContent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Value>,
     /// Confidence, 0–1.
     pub confidence: f64,
     /// Earlier annotation this one corrects or replaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<AnnotationId>,
-    /// Content class of `value`/`detail` (a decoded message as a label is content).
+    /// Content class of `content`, chosen explicitly (fail closed when unknown).
     pub content_class: ContentClass,
     /// When it was written.
     pub t: Timestamp,

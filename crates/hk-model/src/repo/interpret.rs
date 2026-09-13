@@ -4,14 +4,16 @@
 use rusqlite::{OptionalExtension, params};
 
 use super::{
-    RepoError, Repository, blob, bodies, body_by_id, bump_extent, enum_text, finite, opt_blob,
-    region_bounds,
+    RepoError, Repository, blob, bodies, body_by_id, bump_extent, enum_text, finite, gate,
+    opt_blob, region_bounds,
 };
 use crate::context::{
-    Anomaly, AnomalyStatus, AnomalyStatusChange, AnomalySubject, Cause, Explanation, ExternalEvent,
+    Anomaly, AnomalyStatus, AnomalyStatusChange, AnomalySubject, Cause, Evidence, Explanation,
+    ExternalEvent,
 };
-use crate::decode::{Bitstream, Decode, Demodulation};
+use crate::decode::{Bitstream, BitstreamTransport, Decode, Demodulation};
 use crate::emitter::DecodedIdentity;
+use crate::hash::ContentHash;
 use crate::ids::{
     AnnotationId, AnomalyId, BitstreamId, DecodeId, DemodulationId, ExplanationId, ExternalEventId,
 };
@@ -44,14 +46,16 @@ fn annotation_target_columns(target: &AnnotationTarget) -> (&'static str, Option
 impl Repository {
     // ---- Annotation ----
 
-    /// Appends an annotation.
+    /// Appends an annotation. Refuses `content: Some` under a class that does not permit content
+    /// ([`RepoError::GatedContent`]); the metadata-only annotation is accepted.
     pub fn insert_annotation(&mut self, a: &Annotation) -> Result<(), RepoError> {
+        gate("annotation", a.content_class, a.content.is_some())?;
         finite(a.confidence, "confidence")?;
         let (kind, id) = annotation_target_columns(&a.target);
         self.conn.execute(
             "INSERT INTO annotation (annotation_id, target_kind, target_id, author, kind, \
-             supersedes, content_class, t, exported, body) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             supersedes, content_class, has_content, t, exported, body) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 blob(a.id),
                 kind,
@@ -60,6 +64,7 @@ impl Repository {
                 enum_text(&a.kind)?,
                 opt_blob(a.supersedes),
                 enum_text(&a.content_class)?,
+                a.content.is_some(),
                 a.t.as_unix_nanos(),
                 a.exported,
                 serde_json::to_string(a)?
@@ -108,7 +113,7 @@ impl Repository {
 
     /// Marks annotations as included in a labelled export (the only annotation update).
     pub fn mark_annotations_exported(&mut self, ids: &[AnnotationId]) -> Result<(), RepoError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         {
             let mut stmt =
                 tx.prepare_cached("UPDATE annotation SET exported = 1 WHERE annotation_id = ?1")?;
@@ -152,16 +157,18 @@ impl Repository {
         )
     }
 
-    /// Appends a decode.
+    /// Appends a decode. Refuses `content: Some` under a class that does not permit content
+    /// ([`RepoError::GatedContent`]); the metadata-only decode is accepted.
     pub fn insert_decode(&mut self, d: &Decode) -> Result<(), RepoError> {
+        gate("decode", d.content_class, d.content.is_some())?;
         let (scheme, value) = match &d.identity {
             Some(i) => (Some(i.scheme.as_string()), Some(i.value.as_str())),
             None => (None, None),
         };
         self.conn.execute(
             "INSERT INTO decode (decode_id, demod_id, recording_id, decoder_id, crc_status, \
-             identity_scheme, identity_value, content_class, t, body) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             identity_scheme, identity_value, content_class, has_content, t, body) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 blob(d.id),
                 opt_blob(d.demodulation_ref),
@@ -171,6 +178,7 @@ impl Repository {
                 scheme,
                 value,
                 enum_text(&d.content_class)?,
+                d.content.is_some(),
                 d.t.as_unix_nanos(),
                 serde_json::to_string(d)?
             ],
@@ -201,16 +209,21 @@ impl Repository {
         )
     }
 
-    /// Appends a bitstream descriptor.
+    /// Appends a bitstream descriptor. A `Stored` bitstream is content and is refused under a
+    /// class that does not permit content ([`RepoError::GatedContent`]); a `Live` descriptor is
+    /// metadata and is accepted (C24 gates the stream).
     pub fn insert_bitstream(&mut self, b: &Bitstream) -> Result<(), RepoError> {
+        let stored = matches!(b.transport, BitstreamTransport::Stored { .. });
+        gate("bitstream", b.content_class, stored)?;
         self.conn.execute(
             "INSERT INTO bitstream (bitstream_id, emitter_id, demod_id, provenance_id, \
-             content_class, t_start, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             transport, content_class, t_start, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 blob(b.id),
                 opt_blob(b.emitter_ref),
                 opt_blob(b.demodulation_ref),
                 opt_blob(b.provenance_ref),
+                if stored { "stored" } else { "live" },
                 enum_text(&b.content_class)?,
                 b.time.start.as_unix_nanos(),
                 serde_json::to_string(b)?
@@ -232,12 +245,14 @@ impl Repository {
     // ---- ExternalEvent ----
 
     /// Stores or refreshes a cached external event by `(source, native_id)`. Returns the stored
-    /// id: the first id ever stored for that key, whatever `event.id` says.
+    /// id (the first id ever stored for that key, whatever `event.id` says) and the payload hash
+    /// now on the row, which Explanation evidence should pin.
     pub fn upsert_external_event(
         &mut self,
         event: &ExternalEvent,
-    ) -> Result<ExternalEventId, RepoError> {
-        let tx = self.conn.transaction()?;
+    ) -> Result<(ExternalEventId, ContentHash), RepoError> {
+        let payload_hash = event.payload_hash()?;
+        let tx = self.write_tx()?;
         let existing: Option<[u8; 16]> = tx
             .query_row(
                 "SELECT event_id FROM external_event WHERE source = ?1 AND native_id = ?2",
@@ -260,24 +275,26 @@ impl Repository {
             event.time.end.as_unix_nanos(),
             event.fetched_at.as_unix_nanos(),
             event.valid_until.map(Timestamp::as_unix_nanos),
+            payload_hash.as_bytes(),
             body
         ];
         if existing.is_some() {
             tx.execute(
                 "UPDATE external_event SET source = ?2, native_id = ?3, event_type = ?4, \
-                 t_start = ?5, t_end = ?6, fetched_at = ?7, valid_until = ?8, body = ?9 \
-                 WHERE event_id = ?1",
+                 t_start = ?5, t_end = ?6, fetched_at = ?7, valid_until = ?8, \
+                 payload_hash = ?9, body = ?10 WHERE event_id = ?1",
                 args,
             )?;
         } else {
             tx.execute(
                 "INSERT INTO external_event (event_id, source, native_id, event_type, t_start, \
-                 t_end, fetched_at, valid_until, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 t_end, fetched_at, valid_until, payload_hash, body) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 args,
             )?;
         }
         tx.commit()?;
-        Ok(id)
+        Ok((id, payload_hash))
     }
 
     /// One cached external event.
@@ -302,7 +319,7 @@ impl Repository {
             AnomalySubject::Emitter(id) => ("emitter", Some(blob(id))),
             AnomalySubject::Region => ("region", None),
         };
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "INSERT INTO anomaly (anomaly_id, kind, subject_kind, subject_id, f_lo, f_hi, \
              t_start, t_end, score, t, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -385,9 +402,10 @@ impl Repository {
 
     /// Anomalies whose region overlaps `region` (docs/07 §4 step 4).
     pub fn anomalies_in_region(&self, region: &Region) -> Result<Vec<Anomaly>, RepoError> {
-        let b = region_bounds(&self.conn, "anomaly", region)?;
+        let tx = self.read_tx()?;
+        let b = region_bounds(&tx, "anomaly", region)?;
         bodies(
-            &self.conn,
+            &tx,
             &event_region_sql("anomaly"),
             params![b.f_lo_min, b.hi, b.lo, b.t_start_min, b.t1, b.t0],
         )
@@ -395,10 +413,13 @@ impl Repository {
 
     // ---- Explanation ----
 
-    /// Appends an explanation. Its region/time columns are copied from the anomaly.
+    /// Appends an explanation. Its region/time columns are copied from the anomaly. Every
+    /// [`Evidence::ExternalEvent`] must pin the payload hash currently cached for that event
+    /// ([`RepoError::StaleEvidence`] otherwise), so evidence never silently refers to a revised
+    /// payload.
     pub fn insert_explanation(&mut self, e: &Explanation) -> Result<(), RepoError> {
         finite(e.score, "score")?;
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         let extent: Option<(f64, f64, i64, i64)> = tx
             .query_row(
                 "SELECT f_lo, f_hi, t_start, t_end FROM anomaly WHERE anomaly_id = ?1",
@@ -410,6 +431,28 @@ impl Repository {
             kind: "anomaly",
             id: e.anomaly_ref.to_string(),
         })?;
+        for evidence in &e.evidence {
+            if let Evidence::ExternalEvent { id, payload_hash } = evidence {
+                let current: Option<[u8; 32]> = tx
+                    .prepare_cached("SELECT payload_hash FROM external_event WHERE event_id = ?1")?
+                    .query_row([blob(*id)], |r| r.get(0))
+                    .optional()?;
+                let current =
+                    current
+                        .map(ContentHash::from_bytes)
+                        .ok_or_else(|| RepoError::NotFound {
+                            kind: "external event",
+                            id: id.to_string(),
+                        })?;
+                if current != *payload_hash {
+                    return Err(RepoError::StaleEvidence {
+                        event: *id,
+                        pinned: *payload_hash,
+                        current,
+                    });
+                }
+            }
+        }
         let (cause_kind, event_id, emitter_id) = match &e.cause {
             Cause::ExternalEvent { id } => ("external-event", Some(blob(*id)), None),
             Cause::Emitter { id } => ("emitter", None, Some(blob(*id))),
@@ -464,9 +507,10 @@ impl Repository {
 
     /// Explanations whose anomaly region overlaps `region` (the attack-map view).
     pub fn explanations_in_region(&self, region: &Region) -> Result<Vec<Explanation>, RepoError> {
-        let b = region_bounds(&self.conn, "explanation", region)?;
+        let tx = self.read_tx()?;
+        let b = region_bounds(&tx, "explanation", region)?;
         bodies(
-            &self.conn,
+            &tx,
             &event_region_sql("explanation"),
             params![b.f_lo_min, b.hi, b.lo, b.t_start_min, b.t1, b.t0],
         )

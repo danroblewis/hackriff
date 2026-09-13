@@ -18,7 +18,8 @@
 //! - [`recording`]: [`Recording`] and [`Annotation`] (§2.12–2.13).
 //! - [`decode`]: [`Demodulation`], [`Decode`], [`Bitstream`] (§2.14–2.16).
 //! - [`context`]: [`ExternalEvent`], [`Anomaly`], [`Explanation`] (§2.17–2.19).
-//! - [`content`]: [`ContentClass`] for ADR-0004 restricted-content gating.
+//! - [`content`]: [`ContentClass`] for ADR-0004 restricted-content gating (fail closed).
+//! - [`hash`]: canonical JSON and [`ContentHash`] (provenance dedup, evidence pinning).
 //! - [`repo`]: the SQLite [`Repository`] (ADR-0006).
 //! - [`sigmf`]: SigMF `.sigmf-meta` types with the `hackriff:` extension namespace
 //!   (docs/sigmf-extension.md).
@@ -31,8 +32,8 @@
 //! | Category | Objects | Allowed writes |
 //! |---|---|---|
 //! | **Measurement** (immutable) | Provenance, Detection, Recording, CalibrationState, SpurMask, ScanPlan versions (and frames, not stored) | insert only; `UPDATE` aborts |
-//! | **Interpretation** (append-only, versioned) | Classification, Demodulation, Decode, Bitstream, Annotation, Anomaly (+ status history), Explanation, emitter and track links | insert only; a new version is a new row (`supersedes` / version strings) |
-//! | **Aggregate** (mutable summary) | Survey lifecycle, Track, Emitter counters/identity/status/tags, ExternalEvent cache | upsert through named repository calls |
+//! | **Interpretation** (append-only, versioned) | Classification, known-status history, Demodulation, Decode, Bitstream, Annotation, Anomaly (+ status history), Explanation, emitter and track links | insert only; a new version is a new row (`supersedes` / version strings) |
+//! | **Aggregate** (mutable summary) | Survey lifecycle, Track, Emitter counters/identity/tags, ExternalEvent cache | upsert through named repository calls |
 //!
 //! Aggregates are summaries that can be rebuilt from the measurements and interpretations.
 
@@ -43,6 +44,7 @@ pub mod decode;
 pub mod detection;
 pub mod emitter;
 pub mod frames;
+pub mod hash;
 pub mod ids;
 pub mod plan;
 pub mod provenance;
@@ -65,11 +67,12 @@ pub use decode::{
 pub use detection::{Detection, DetectionFlags, TimingFeatures, Track, TrackState};
 pub use emitter::{
     Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation, Identity,
-    IdentityScheme, KnownStatus, LinkTarget,
+    IdentityScheme, KnownStatus, KnownStatusChange, LinkTarget, StatusAuthor,
 };
 pub use frames::{
     FrameKey, Persistence, PowerUnit, SpectrumFrame, SpectrumTile, SweepFrame, TileKey, TileStats,
 };
+pub use hash::{ContentHash, canonical_json};
 pub use ids::{
     AnnotationId, AnomalyId, BitstreamId, CalibrationStateId, DecodeId, DemodulationId,
     DetectionId, EmitterId, ExplanationId, ExternalEventId, ProvenanceId, RecordingId, ScanPlanId,

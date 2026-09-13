@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::hash::ContentHash;
 use crate::ids::{AnomalyId, DetectionId, EmitterId, ExplanationId, ExternalEventId, RecordingId};
 use crate::region::{Region, TimeRange};
 use crate::time::Timestamp;
@@ -53,7 +54,9 @@ pub enum Geo {
 ///
 /// Identity is the natural key `(source, native_id)`; `id` is a local UUID for references from
 /// Explanations. Upserting the same natural key keeps `id` and refreshes the payload: a feed can
-/// revise a fact (SWPC updates flare classes), and the cache holds the latest revision.
+/// revise a fact (SWPC updates flare classes), and the cache holds the latest revision. The row
+/// also stores [`ExternalEvent::payload_hash`], and Explanation evidence pins the hash it used,
+/// so a revision after the fact is detectable.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExternalEvent {
     /// Local id, stable across refreshes of the same natural key.
@@ -76,6 +79,13 @@ pub struct ExternalEvent {
     /// Cache validity end, if the source defines one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_until: Option<Timestamp>,
+}
+
+impl ExternalEvent {
+    /// SHA-256 of the canonical payload JSON (key order and `-0.0` do not matter).
+    pub fn payload_hash(&self) -> Result<ContentHash, serde_json::Error> {
+        ContentHash::of(&self.payload)
+    }
 }
 
 /// Anomaly kinds (docs/07 §2.18).
@@ -207,10 +217,13 @@ pub enum Evidence {
         /// Detection.
         id: DetectionId,
     },
-    /// An external event.
+    /// An external event, pinned to the payload revision the correlation used.
     ExternalEvent {
         /// Event.
         id: ExternalEventId,
+        /// [`ExternalEvent::payload_hash`] at correlation time. The repository refuses evidence
+        /// whose hash no longer matches the cache; later readers compare it to detect revisions.
+        payload_hash: ContentHash,
     },
     /// A history region (tiles).
     History {

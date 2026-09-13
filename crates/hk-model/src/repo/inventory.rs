@@ -10,7 +10,7 @@ use super::{
 use crate::detection::{Track, TrackState};
 use crate::emitter::{
     Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation, Identity,
-    KnownStatus, LinkTarget,
+    KnownStatus, KnownStatusChange, LinkTarget, StatusAuthor,
 };
 use crate::ids::{
     AnnotationId, AnomalyId, DecodeId, DemodulationId, DetectionId, EmitterId, ExplanationId,
@@ -29,15 +29,27 @@ pub struct EmitterUpsert {
     pub created: bool,
 }
 
-const EMITTER_COLUMNS: &str = "emitter_id, f_center, bandwidth, first_seen, last_seen, count, \
-     fingerprint, identity_scheme, identity_value, known_status";
+/// Columns read for an Emitter; the last is the current status from the append-only history.
+macro_rules! emitter_select {
+    () => {
+        "emitter_id, f_center, bandwidth, first_seen, last_seen, count, fingerprint, \
+         identity_scheme, identity_value, \
+         (SELECT s.status FROM emitter_status s WHERE s.emitter_id = emitter.emitter_id \
+          ORDER BY s.status_id DESC LIMIT 1)"
+    };
+}
+
+const EMITTER_INSERT_COLUMNS: &str = "emitter_id, f_center, bandwidth, first_seen, last_seen, \
+     count, fingerprint, identity_scheme, identity_value, f_lo, f_hi";
 
 /// The emitter region query. Parameters: f_lo min, query hi, query lo, query t0, query t1.
-pub(super) const EMITTER_REGION_SQL: &str = "SELECT emitter_id, f_center, bandwidth, first_seen, \
-     last_seen, count, fingerprint, identity_scheme, identity_value, known_status \
-     FROM emitter \
+pub(super) const EMITTER_REGION_SQL: &str = concat!(
+    "SELECT ",
+    emitter_select!(),
+    " FROM emitter \
      WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND last_seen >= ?4 AND first_seen <= ?5 \
-     ORDER BY last_seen DESC, emitter_id";
+     ORDER BY last_seen DESC, emitter_id"
+);
 
 type EmitterRaw = (
     [u8; 16],
@@ -49,7 +61,7 @@ type EmitterRaw = (
     Option<String>,
     Option<String>,
     Option<String>,
-    String,
+    Option<String>,
 );
 
 fn emitter_raw(r: &Row<'_>) -> rusqlite::Result<EmitterRaw> {
@@ -94,6 +106,14 @@ fn link_target(kind: &str, id: Uuid) -> Result<LinkTarget, RepoError> {
     })
 }
 
+fn emitter_exists(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
+    Ok(conn
+        .prepare_cached("SELECT 1 FROM emitter WHERE emitter_id = ?1")?
+        .query_row([blob(id)], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
 fn emitter_id_by_identity(
     conn: &Connection,
     identity: &DecodedIdentity,
@@ -136,6 +156,22 @@ fn insert_classification(
         finite(c.confidence, "confidence")?,
         finite(c.open_set_score, "open_set_score")?,
         c.model_version
+    ])?;
+    Ok(())
+}
+
+fn insert_status(conn: &Connection, c: &KnownStatusChange) -> Result<(), RepoError> {
+    conn.prepare_cached(
+        "INSERT INTO emitter_status (emitter_id, status, prior_ref, reason, t, author) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?
+    .execute(params![
+        blob(c.emitter_id),
+        enum_text(&c.status)?,
+        c.prior_ref,
+        c.reason,
+        c.t.as_unix_nanos(),
+        enum_text(&c.author)?
     ])?;
     Ok(())
 }
@@ -189,7 +225,7 @@ impl Repository {
         detections: &[DetectionId],
         linked_at: Timestamp,
     ) -> Result<(), RepoError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO track_detection (track_id, detection_id, linked_at) \
@@ -203,10 +239,12 @@ impl Repository {
         Ok(())
     }
 
-    /// Member detections of a track, in time order (UUIDv7 order).
+    /// Member detections of a track, ordered by detection start time (then id).
     pub fn track_detections(&self, track_id: TrackId) -> Result<Vec<DetectionId>, RepoError> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT detection_id FROM track_detection WHERE track_id = ?1 ORDER BY detection_id",
+            "SELECT td.detection_id FROM track_detection td \
+             JOIN detection d ON d.detection_id = td.detection_id \
+             WHERE td.track_id = ?1 ORDER BY d.t_start, td.detection_id",
         )?;
         let ids = stmt
             .query_map([blob(track_id)], |r| r.get::<_, [u8; 16]>(0))?
@@ -217,9 +255,10 @@ impl Repository {
 
     // ---- Emitter ----
 
-    /// Inserts a new Emitter with its classification history and tags.
+    /// Inserts a new Emitter with its classification history and tags. `e.known_status` becomes
+    /// the first status-history entry (author `system`, at `first_seen`).
     pub fn insert_emitter(&mut self, e: &Emitter) -> Result<(), RepoError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         if let Identity::Decoded(d) = &e.identity
             && let Some(existing) = emitter_id_by_identity(&tx, d)?
         {
@@ -231,8 +270,8 @@ impl Repository {
         let freq = e.freq();
         let (scheme, value) = identity_columns(&e.identity);
         tx.prepare_cached(&format!(
-            "INSERT INTO emitter ({EMITTER_COLUMNS}, f_lo, f_hi) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+            "INSERT INTO emitter ({EMITTER_INSERT_COLUMNS}) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
         ))?
         .execute(params![
             blob(e.id),
@@ -246,10 +285,20 @@ impl Repository {
                 .transpose()?,
             scheme,
             value,
-            enum_text(&e.known_status)?,
             freq.lo_hz,
             freq.hi_hz
         ])?;
+        insert_status(
+            &tx,
+            &KnownStatusChange {
+                emitter_id: e.id,
+                status: e.known_status,
+                prior_ref: None,
+                reason: "initial status at insert".into(),
+                t: e.first_seen,
+                author: StatusAuthor::System,
+            },
+        )?;
         for c in &e.classifications {
             insert_classification(&tx, e.id, c)?;
         }
@@ -268,8 +317,8 @@ impl Repository {
     /// identity, else `obs.emitter_id`. If the target exists, `count` is summed, `first_seen` /
     /// `last_seen` widen to span both, the current frequency/bandwidth follow the most recent
     /// sighting, and an unknown identity is filled in. Otherwise a new emitter is created with
-    /// `known_status: unknown`. Replaying an out-of-order older session keeps the newer
-    /// frequency.
+    /// an initial `known_status: unknown` history entry. Replaying an out-of-order older session
+    /// keeps the newer frequency.
     ///
     /// Fails with [`RepoError::IdentityConflict`] if the identity belongs to a different emitter
     /// than an existing `obs.emitter_id`, or the target already has a different identity; the
@@ -285,20 +334,13 @@ impl Repository {
         }
         finite(obs.f_center_hz, "f_center_hz")?;
         finite(obs.bandwidth_hz, "bandwidth_hz")?;
-        let tx = self.conn.transaction()?;
-        let exists = |conn: &Connection, id: EmitterId| -> Result<bool, RepoError> {
-            Ok(conn
-                .prepare_cached("SELECT 1 FROM emitter WHERE emitter_id = ?1")?
-                .query_row([blob(id)], |_| Ok(()))
-                .optional()?
-                .is_some())
-        };
+        let tx = self.write_tx()?;
         let by_identity = match &obs.identity {
             Some(identity) => emitter_id_by_identity(&tx, identity)?,
             None => None,
         };
         let target = match by_identity {
-            Some(holder) if holder != obs.emitter_id && exists(&tx, obs.emitter_id)? => {
+            Some(holder) if holder != obs.emitter_id && emitter_exists(&tx, obs.emitter_id)? => {
                 return Err(RepoError::IdentityConflict {
                     identity: identity_label(obs.identity.as_ref().expect("matched by identity")),
                     existing: holder,
@@ -312,7 +354,7 @@ impl Repository {
             Some(d) => (Some(d.scheme.as_string()), Some(d.value.clone())),
             None => (None, None),
         };
-        let created = if exists(&tx, target)? {
+        let created = if emitter_exists(&tx, target)? {
             if let Some(d) = &obs.identity {
                 let current: (Option<String>, Option<String>) = tx.query_row(
                     "SELECT identity_scheme, identity_value FROM emitter WHERE emitter_id = ?1",
@@ -355,8 +397,8 @@ impl Repository {
             false
         } else {
             tx.prepare_cached(&format!(
-                "INSERT INTO emitter ({EMITTER_COLUMNS}, f_lo, f_hi) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, 'unknown', ?9, ?10)"
+                "INSERT INTO emitter ({EMITTER_INSERT_COLUMNS}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10)"
             ))?
             .execute(params![
                 blob(target),
@@ -370,6 +412,17 @@ impl Repository {
                 freq.lo_hz,
                 freq.hi_hz
             ])?;
+            insert_status(
+                &tx,
+                &KnownStatusChange {
+                    emitter_id: target,
+                    status: KnownStatus::Unknown,
+                    prior_ref: None,
+                    reason: "created from observation".into(),
+                    t: obs.seen.start,
+                    author: StatusAuthor::System,
+                },
+            )?;
             true
         };
         bump_extent(&tx, "emitter", freq.width_hz(), 0)?;
@@ -389,6 +442,12 @@ impl Repository {
             }),
             _ => Identity::Unknown,
         };
+        let status = status.ok_or_else(|| {
+            RepoError::Invalid(format!(
+                "emitter {} has no status history",
+                Uuid::from_bytes(id)
+            ))
+        })?;
         let classifications = {
             let mut stmt = self.conn.prepare_cached(
                 "SELECT t, family, confidence, open_set_score, model_version \
@@ -430,12 +489,14 @@ impl Repository {
         })
     }
 
-    /// One Emitter with its classification history and tags.
+    /// One Emitter with its classification history, current status and tags.
     pub fn emitter(&self, id: EmitterId) -> Result<Emitter, RepoError> {
         let raw = self
             .conn
-            .prepare_cached(&format!(
-                "SELECT {EMITTER_COLUMNS} FROM emitter WHERE emitter_id = ?1"
+            .prepare_cached(concat!(
+                "SELECT ",
+                emitter_select!(),
+                " FROM emitter WHERE emitter_id = ?1"
             ))?
             .query_row([blob(id)], emitter_raw)
             .optional()?
@@ -459,9 +520,10 @@ impl Repository {
     /// Emitters overlapping `region` in frequency whose first–last-seen span overlaps its time
     /// (docs/07 §4 step 3), most recently seen first.
     pub fn emitters_in_region(&self, region: &Region) -> Result<Vec<Emitter>, RepoError> {
-        let b = region_bounds(&self.conn, "emitter", region)?;
+        let tx = self.read_tx()?;
+        let b = region_bounds(&tx, "emitter", region)?;
         let raws = {
-            let mut stmt = self.conn.prepare_cached(EMITTER_REGION_SQL)?;
+            let mut stmt = tx.prepare_cached(EMITTER_REGION_SQL)?;
             stmt.query_map(params![b.f_lo_min, b.hi, b.lo, b.t0, b.t1], emitter_raw)?
                 .collect::<Result<Vec<_>, _>>()?
         };
@@ -479,23 +541,49 @@ impl Repository {
         insert_classification(&self.conn, emitter_id, classification)
     }
 
-    /// Sets the emitter's status against priors (C17 writes it back).
-    pub fn set_known_status(
-        &mut self,
-        emitter_id: EmitterId,
-        status: KnownStatus,
-    ) -> Result<(), RepoError> {
-        let changed = self.conn.execute(
-            "UPDATE emitter SET known_status = ?1 WHERE emitter_id = ?2",
-            params![enum_text(&status)?, blob(emitter_id)],
-        )?;
-        if changed == 0 {
+    /// Appends a known-status change (C17 priors, decoders, users). The emitter's current
+    /// `known_status` becomes this entry; earlier entries are kept.
+    pub fn append_known_status(&mut self, change: &KnownStatusChange) -> Result<(), RepoError> {
+        let tx = self.write_tx()?;
+        if !emitter_exists(&tx, change.emitter_id)? {
             return Err(RepoError::NotFound {
                 kind: "emitter",
-                id: emitter_id.to_string(),
+                id: change.emitter_id.to_string(),
             });
         }
+        insert_status(&tx, change)?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// An emitter's known-status history, oldest first.
+    pub fn known_status_history(
+        &self,
+        emitter_id: EmitterId,
+    ) -> Result<Vec<KnownStatusChange>, RepoError> {
+        type Raw = (String, Option<String>, String, i64, String);
+        let rows: Vec<Raw> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT status, prior_ref, reason, t, author FROM emitter_status \
+                 WHERE emitter_id = ?1 ORDER BY status_id",
+            )?;
+            stmt.query_map([blob(emitter_id)], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<Result<_, _>>()?
+        };
+        rows.into_iter()
+            .map(|(status, prior_ref, reason, t, author)| {
+                Ok(KnownStatusChange {
+                    emitter_id,
+                    status: enum_parse(status)?,
+                    prior_ref,
+                    reason,
+                    t: Timestamp::from_unix_nanos(t),
+                    author: enum_parse(author)?,
+                })
+            })
+            .collect()
     }
 
     /// Adds a tag (no-op if present).

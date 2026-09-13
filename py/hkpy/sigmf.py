@@ -6,6 +6,8 @@ The hackriff extension (``docs/sigmf-extension.md``) adds:
 - ``hackriff:provenance`` on ``global`` or a capture. It uses the Rust ``Provenance`` field names
   and enum spellings; build it with :func:`provenance`.
 - ``hackriff:truth`` on an annotation: a free-form ground-truth object.
+- ``hackriff:clip_count`` on a capture: clipped ADC samples in that segment (non-negative int).
+  Per segment, not in provenance, because provenance is deduplicated by value.
 
 Metadata only. Sample I/O belongs to the synthetic generator and replay tooling.
 """
@@ -22,6 +24,7 @@ HACKRIFF_EXTENSION = "hackriff"
 HACKRIFF_EXTENSION_VERSION = "0.1.0"
 PROVENANCE_KEY = "hackriff:provenance"
 TRUTH_KEY = "hackriff:truth"
+CLIP_COUNT_KEY = "hackriff:clip_count"
 
 #: SigMF datatype -> (numpy dtype of one scalar component, is_complex). Mirrors Rust ``Datatype``.
 DATATYPES: dict[str, tuple[str, bool]] = {
@@ -49,8 +52,8 @@ _TUNE_FIELDS = ("center_hz", "sample_rate_hz", "lna_db", "vga_db", "amp_on", "ba
 _PROVENANCE_REQUIRED = (
     "device_id",
     "tune",
-    "clip_count",
     "overload",
+    "quantisation_limited",
     "clock_source",
     "clock_locked",
     "timestamp_method",
@@ -78,8 +81,8 @@ def provenance(
     vga_db: float,
     amp_on: bool,
     bandwidth_hz: float,
-    clip_count: int = 0,
     overload: bool = False,
+    quantisation_limited: bool = False,
     clock_source: str = "internal",
     clock_locked: bool = True,
     timestamp_method: str = "host-arrival",
@@ -100,8 +103,8 @@ def provenance(
             "amp_on": bool(amp_on),
             "bandwidth_hz": float(bandwidth_hz),
         },
-        "clip_count": int(clip_count),
         "overload": bool(overload),
+        "quantisation_limited": bool(quantisation_limited),
         "clock_source": clock_source,
         "clock_locked": bool(clock_locked),
         "timestamp_method": timestamp_method,
@@ -156,6 +159,7 @@ def add_capture(
     frequency: float | None = None,
     datetime: str | None = None,
     provenance: dict[str, Any] | None = None,
+    clip_count: int | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Appends a capture segment and returns it."""
@@ -166,6 +170,8 @@ def add_capture(
         cap["core:datetime"] = datetime
     if provenance is not None:
         cap[PROVENANCE_KEY] = provenance
+    if clip_count is not None:
+        cap[CLIP_COUNT_KEY] = int(clip_count)
     cap.update(extra or {})
     meta["captures"].append(cap)
     return cap
@@ -217,6 +223,10 @@ def validate(meta: dict[str, Any]) -> None:
                 raise SigmfError(f"{section}[{i}]: core:sample_start must be a non-negative int")
             if PROVENANCE_KEY in item:
                 _validate_provenance(item[PROVENANCE_KEY], f"{section}[{i}].{PROVENANCE_KEY}")
+            if CLIP_COUNT_KEY in item:
+                n = item[CLIP_COUNT_KEY]
+                if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+                    raise SigmfError(f"{section}[{i}]: {CLIP_COUNT_KEY} must be a non-negative int")
 
 
 def read_meta(path: str | Path) -> dict[str, Any]:

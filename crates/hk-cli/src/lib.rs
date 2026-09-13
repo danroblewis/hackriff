@@ -58,15 +58,15 @@ pub fn replay_summary(meta_path: &Path) -> anyhow::Result<String> {
     if let Some(p) = &g.provenance {
         writeln!(
             out,
-            "provenance:  device {}, {} Hz @ {} Hz, LNA {} dB, VGA {} dB, amp {}, clips {}, overload {}, time {:?}",
+            "provenance:  device {}, {} Hz @ {} Hz, LNA {} dB, VGA {} dB, amp {}, overload {}, quantisation-limited {}, time {:?}",
             p.device_id,
             p.tune.center_hz,
             p.tune.sample_rate_hz,
             p.tune.lna_db,
             p.tune.vga_db,
             if p.tune.amp_on { "on" } else { "off" },
-            p.clip_count,
             p.overload,
+            p.quantisation_limited,
             p.timestamp_method,
         )?;
     }
@@ -82,6 +82,9 @@ pub fn replay_summary(meta_path: &Path) -> anyhow::Result<String> {
         }
         if c.provenance.is_some() {
             write!(out, ", provenance")?;
+        }
+        if let Some(n) = c.clip_count {
+            write!(out, ", clips {n}")?;
         }
         writeln!(out)?;
     }

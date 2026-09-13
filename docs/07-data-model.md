@@ -75,7 +75,7 @@ The persisted, compressed, multi-resolution history derived from Sweep/SpectrumF
 - **Tests:** write frames, roll the pyramid, assert a region/time query returns the expected max-hold and that downsampling preserves peak occupancy within tolerance.
 
 ### 2.6 Provenance  [C01, referenced everywhere]
-The trust record attached to every SweepFrame, SpectrumFrame, Detection and Recording: source `device_id`, tune (`f`, `fs`, LNA/VGA/amp gains), `clip_count` + `overload` flag, temperature, active filter/antenna port (Opera Cake), clock source + lock, `calibration_state_ref`, `spur_mask_ref`, and the timestamp method + error budget.
+The trust record attached to every SweepFrame, SpectrumFrame, Detection and Recording: source `device_id`, tune (`f`, `fs`, LNA/VGA/amp gains), sticky `overload` flag, `quantisation_limited` (noise floor within 3 dB of the ADC quantisation floor; added from spike S4, 2026-09-13), temperature, active filter/antenna port (Opera Cake), clock source + lock, `calibration_state_ref`, `spur_mask_ref`, and the timestamp method + error budget.
 - **Identity & lifecycle:** `provenance_id`; immutable; deduplicated (many frames share one provenance row when nothing changed).
 - **Relationships:** references CalibrationState and SpurMask; referenced by frames, detections, recordings.
 - **Retention & size:** small, deduplicated; kept as long as anything referencing it.
@@ -97,7 +97,7 @@ Versioned set of internal spur/image frequencies measured with a terminated inpu
 - **Tests:** inject a known internal spur; assert detections at masked frequencies are flagged, real signals are not.
 
 ### 2.9 Detection  [C09]
-The atomic measurement: `detection_id`, `survey_id`, `t_start`, `t_end`, `f_center`, `bandwidth` (OBW + x-dB), `snr_peak`, `snr_mean`, `sk`, `provenance_ref`, flags (`clipped`, `spur_candidate`, `image_candidate`, `marginal`), optional `recording_ref` (IQ snippet), optional `track_ref`.
+The atomic measurement: `detection_id`, `survey_id`, `t_start`, `t_end`, `f_center`, `bandwidth` (OBW + x-dB), `snr_peak`, `snr_mean`, `peak_level_dbfs` (+ optional dBm), `sk`, `clip_count` (per span; not in Provenance, which is deduplicated), `detector_version`, `provenance_ref`, flags: `clipped` (required when `clip_count > 0` or the provenance is overloaded), `spur_candidate` with optional `spur_reason` ∈ {`ref-harmonic`, `dc`, `lo-relative`, `comb`, `spur-map` + SpurMask ref}, `image_candidate` with `image_retune_confirmed`, `marginal`, `suspect_imd`, `compressed`, `impulsive`, `edge` (*`spur_reason`, `image_retune_confirmed`, `suspect_imd`, `compressed`, `impulsive` and `edge` added from spike S4, 2026-09-13*). The IQ snippet and track membership link to the detection from Recording (`trigger`) and the track↔detection link table, so the row never changes.
 - **Identity & lifecycle:** `detection_id` (UUIDv7); **immutable** once written. Interpretation lives elsewhere.
 - **Relationships:** child of Survey; links to Track, Recording; the raw material for everything downstream.
 - **Retention & size:** ~a few hundred bytes/row; millions over months = hundreds of MB; indexed by `(f_center, t_start)` and `(f_lo, f_hi)` for region queries. Aged by quota, oldest/least-interesting first, but summarised into Emitter/Track before deletion.

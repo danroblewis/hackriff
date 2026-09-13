@@ -21,6 +21,7 @@ num-complex = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11"
 thiserror = "2.0"
 uuid = { version = "1.26", features = ["v7", "serde"] }
 

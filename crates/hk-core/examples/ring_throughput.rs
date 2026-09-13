@@ -39,7 +39,7 @@ fn provenance(fs: f64) -> ProvenanceHandle {
             amp_on: false,
             bandwidth_hz: fs,
         },
-        clip_count: 0,
+        quantisation_limited: false,
         overload: false,
         temperature_c: None,
         antenna_port: None,

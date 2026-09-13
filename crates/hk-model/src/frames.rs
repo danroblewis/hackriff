@@ -2,11 +2,11 @@
 //!
 //! Frames are **not stored in SQLite**: they are ephemeral, consumed by detection and folded into
 //! tiles. They have no UUID; identity is [`FrameKey`] `(survey_id, seq)`. SpectrumTiles are
-//! persisted by hk-store's pyramid (T-017), keyed by [`TileKey`] `(level, f_block, t_block)`;
-//! this module only defines the key and the stats shape.
+//! persisted by hk-store's pyramid (T-017), keyed by [`TileKey`]
+//! `(scheme, level, f_block, t_block)`; this module only defines the key and the stats shape.
 //!
-//! Power arrays are `f64` per the project rule. hk-dsp may keep `f32` internally and widen at
-//! this boundary; revisit if frame copies show up in profiles.
+//! Per-bin arrays are `f32`: they dominate hot-path memory (a 60 000-bin sweep row is 240 kB
+//! instead of 480 kB) and dB values need nowhere near f64 precision. Scalars stay `f64`.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +50,7 @@ pub struct SweepFrame {
     /// Unit of `power`.
     pub unit: PowerUnit,
     /// Power per bin, ascending frequency.
-    pub power: Vec<f64>,
+    pub power: Vec<f32>,
     /// Trust record.
     pub provenance_ref: ProvenanceId,
 }
@@ -84,13 +84,13 @@ pub struct SpectrumFrame {
     /// Unit of `psd`.
     pub unit: PowerUnit,
     /// Power spectral density per bin, ascending frequency.
-    pub psd: Vec<f64>,
+    pub psd: Vec<f32>,
     /// Persistence histogram, if computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence: Option<Persistence>,
     /// Spectral kurtosis per bin, if computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sk: Option<Vec<f64>>,
+    pub sk: Option<Vec<f32>>,
     /// Trust record.
     pub provenance_ref: ProvenanceId,
 }
@@ -98,10 +98,13 @@ pub struct SpectrumFrame {
 /// Address of a SpectrumTile in the history pyramid (docs/07 §2.5).
 ///
 /// `f_block` and `t_block` are block indices at `level`: `floor(f_hz / block_width_hz(level))`
-/// and `floor(t_ns / block_duration_ns(level))`. The block sizes per level belong to the pyramid
-/// configuration (T-017), not to the key.
+/// and `floor(t_ns / block_duration_ns(level))`. The block sizes and level ladder are defined by
+/// the pyramid scheme `scheme` (T-017), so a reconfigured pyramid gets a new scheme id and old
+/// tiles are never read with the wrong block sizes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TileKey {
+    /// Pyramid scheme/version id (block sizes, level ladder, regrid rules).
+    pub scheme: u16,
     /// Pyramid level, 0 = finest.
     pub level: u8,
     /// Frequency block index at this level.
@@ -114,11 +117,11 @@ pub struct TileKey {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TileStats {
     /// Max-hold (bursts and persistent emitters).
-    pub max: Vec<f64>,
+    pub max: Vec<f32>,
     /// Mean.
-    pub mean: Vec<f64>,
+    pub mean: Vec<f32>,
     /// Low percentile (noise floor).
-    pub low_percentile: Vec<f64>,
+    pub low_percentile: Vec<f32>,
     /// Which percentile `low_percentile` is, e.g. 10.0.
     pub percentile: f64,
     /// Bin was actually observed during the tile; "not observed" is not "quiet" (C26).

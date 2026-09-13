@@ -1,32 +1,42 @@
 //! Measurements and their context: ScanPlan, Survey, CalibrationState, SpurMask, Provenance,
 //! Detection, Recording. Measurement rows have insert and read methods only.
 
+use std::collections::HashMap;
+
+use rusqlite::types::Type;
 use rusqlite::{OptionalExtension, Row, params};
 
 use super::{
     ProvenanceChain, RegionBounds, RepoError, Repository, blob, bodies, body_by_id, bump_extent,
-    enum_parse, enum_text, finite, int, opt_blob, region_bounds,
+    canonical_with_hash, enum_parse, enum_text, finite, gate, int, opt_blob, region_bounds,
 };
 use crate::calibration::{CalibrationState, SpurMask};
-use crate::detection::{Detection, DetectionFlags};
-use crate::ids::{DetectionId, ProvenanceId, ScanPlanId, SurveyId};
+use crate::detection::{Detection, DetectionFlags, SpurReason};
+use crate::ids::{DetectionId, ProvenanceId, ScanPlanId, SpurMaskId, SurveyId};
 use crate::plan::{ScanPlan, Survey, SurveyState, SurveySummary};
 use crate::provenance::Provenance;
 use crate::recording::{Recording, RecordingTrigger};
 use crate::region::{Region, TimeRange};
 use crate::time::Timestamp;
 
-const DETECTION_COLUMNS: &str = "detection_id, survey_id, provenance_id, t_start, t_end, \
-     f_center, obw, xdb_bw, xdb_level, snr_peak, snr_mean, sk, flags";
+macro_rules! detection_columns {
+    () => {
+        "detection_id, survey_id, provenance_id, t_start, t_end, f_center, obw, xdb_bw, \
+         xdb_level, snr_peak, snr_mean, sk, flags, peak_dbfs, peak_dbm, clip_count, \
+         detector_version, spur_reason, spur_mask_id"
+    };
+}
 
 /// The detection region query. Parameters: f_center min, f_center max, t_start min, t_end of
 /// query, query hi, query lo, query t0.
-pub(super) const DETECTION_REGION_SQL: &str = "SELECT detection_id, survey_id, provenance_id, \
-     t_start, t_end, f_center, obw, xdb_bw, xdb_level, snr_peak, snr_mean, sk, flags \
-     FROM detection \
+pub(super) const DETECTION_REGION_SQL: &str = concat!(
+    "SELECT ",
+    detection_columns!(),
+    " FROM detection \
      WHERE f_center BETWEEN ?1 AND ?2 AND t_start BETWEEN ?3 AND ?4 \
        AND f_lo <= ?5 AND f_hi >= ?6 AND t_end >= ?7 \
-     ORDER BY t_start, detection_id";
+     ORDER BY t_start, detection_id"
+);
 
 impl RegionBounds {
     /// Parameters for [`DETECTION_REGION_SQL`]. A matching detection's centre is within half a
@@ -46,6 +56,22 @@ impl RegionBounds {
 }
 
 fn detection_from_row(row: &Row<'_>) -> rusqlite::Result<Detection> {
+    let mut flags = DetectionFlags::from_bits(row.get(12)?);
+    let reason: Option<String> = row.get(17)?;
+    let mask: Option<[u8; 16]> = row.get(18)?;
+    flags.spur_reason = match reason {
+        None => None,
+        Some(kind) => {
+            let mask = mask.map(|m| SpurMaskId::from_uuid(uuid::Uuid::from_bytes(m)));
+            Some(SpurReason::from_parts(&kind, mask).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    17,
+                    Type::Text,
+                    format!("invalid spur reason {kind:?}").into(),
+                )
+            })?)
+        }
+    };
     Ok(Detection {
         id: DetectionId::from_uuid(uuid::Uuid::from_bytes(row.get(0)?)),
         survey_id: SurveyId::from_uuid(uuid::Uuid::from_bytes(row.get(1)?)),
@@ -61,7 +87,11 @@ fn detection_from_row(row: &Row<'_>) -> rusqlite::Result<Detection> {
         snr_peak_db: row.get(9)?,
         snr_mean_db: row.get(10)?,
         sk: row.get(11)?,
-        flags: DetectionFlags::from_bits(row.get(12)?),
+        flags,
+        peak_level_dbfs: row.get(13)?,
+        peak_level_dbm: row.get(14)?,
+        clip_count: row.get(15)?,
+        detector_version: row.get(16)?,
     })
 }
 
@@ -71,7 +101,7 @@ impl Repository {
     /// Inserts a ScanPlan version. `plan.version` must be 1 for a new plan, or the latest
     /// stored version + 1 (editing a plan = inserting its next version).
     pub fn insert_scan_plan(&mut self, plan: &ScanPlan) -> Result<(), RepoError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         let latest: Option<u32> = tx.query_row(
             "SELECT max(version) FROM scan_plan WHERE plan_id = ?1",
             [blob(plan.id)],
@@ -275,7 +305,7 @@ impl Repository {
     }
 
     /// One SpurMask version.
-    pub fn spur_mask(&self, id: crate::ids::SpurMaskId) -> Result<SpurMask, RepoError> {
+    pub fn spur_mask(&self, id: SpurMaskId) -> Result<SpurMask, RepoError> {
         body_by_id(
             &self.conn,
             "SELECT body FROM spur_mask WHERE spur_id = ?1",
@@ -287,42 +317,39 @@ impl Repository {
     // ---- Provenance ----
 
     /// Stores a Provenance value, or finds the identical one already stored, and returns its
-    /// id. Identical values always map to the same row. The calibration and spur-mask versions
-    /// it names must already be stored.
+    /// id. Identical values (after canonicalisation: key order, `-0.0`) always map to the same
+    /// row, also across concurrent connections. The calibration and spur-mask versions it names
+    /// must already be stored.
     pub fn intern_provenance(&mut self, p: &Provenance) -> Result<ProvenanceId, RepoError> {
-        let canonical = serde_json::to_string(p)?;
-        // Round-trip check: a value that does not read back (e.g. NaN stored as null) must not
-        // become a trust record.
-        if serde_json::from_str::<Provenance>(&canonical)? != *p {
-            return Err(RepoError::Invalid(
-                "provenance does not round-trip (non-finite float?)".into(),
-            ));
-        }
-        let lookup = "SELECT provenance_id FROM provenance WHERE canonical = ?1";
-        if let Some(id) = self
-            .conn
-            .prepare_cached(lookup)?
-            .query_row([&canonical], |r| r.get::<_, [u8; 16]>(0))
-            .optional()?
-        {
-            return Ok(ProvenanceId::from_uuid(uuid::Uuid::from_bytes(id)));
-        }
-        let id = ProvenanceId::new();
-        self.conn
+        let (canonical, hash) = canonical_with_hash(p, "provenance")?;
+        let tx = self.write_tx()?;
+        tx.prepare_cached(
+            "INSERT INTO provenance (provenance_id, content_hash, canonical, device_id, overload, \
+             quantisation_limited, cal_id, spur_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT (content_hash) DO NOTHING",
+        )?
+        .execute(params![
+            blob(ProvenanceId::new()),
+            hash.as_bytes(),
+            canonical,
+            p.device_id,
+            p.overload,
+            p.quantisation_limited,
+            opt_blob(p.calibration_state_ref),
+            opt_blob(p.spur_mask_ref)
+        ])?;
+        let (id, stored): ([u8; 16], String) = tx
             .prepare_cached(
-                "INSERT INTO provenance (provenance_id, canonical, device_id, overload, \
-                 clip_count, cal_id, spur_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "SELECT provenance_id, canonical FROM provenance WHERE content_hash = ?1",
             )?
-            .execute(params![
-                blob(id),
-                canonical,
-                p.device_id,
-                p.overload,
-                int(p.clip_count, "clip_count")?,
-                opt_blob(p.calibration_state_ref),
-                opt_blob(p.spur_mask_ref)
-            ])?;
-        Ok(id)
+            .query_row([hash.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if stored != canonical {
+            return Err(RepoError::Invalid(format!(
+                "provenance content hash collision on {hash}"
+            )));
+        }
+        tx.commit()?;
+        Ok(ProvenanceId::from_uuid(uuid::Uuid::from_bytes(id)))
     }
 
     /// One Provenance value.
@@ -362,20 +389,47 @@ impl Repository {
     }
 
     /// Inserts a batch of detections in **one transaction**: all or none are written.
+    ///
+    /// Refuses (whole batch) a detection with `clip_count > 0` or an overloaded provenance but no
+    /// `flags.clipped` ([`RepoError::UnflaggedClipping`]), or with inconsistent dependent flags.
     pub fn insert_detections(&mut self, detections: &[Detection]) -> Result<(), RepoError> {
         if detections.is_empty() {
             return Ok(());
         }
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         let (mut max_f_span, mut max_t_span) = (0.0_f64, 0_i64);
         {
-            let mut stmt = tx.prepare_cached(&format!(
-                "INSERT INTO detection ({DETECTION_COLUMNS}, f_lo, f_hi) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+            let mut overloaded: HashMap<ProvenanceId, bool> = HashMap::new();
+            let mut lookup =
+                tx.prepare_cached("SELECT overload FROM provenance WHERE provenance_id = ?1")?;
+            let mut stmt = tx.prepare_cached(concat!(
+                "INSERT INTO detection (",
+                detection_columns!(),
+                ", f_lo, f_hi) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"
             ))?;
             for d in detections {
                 finite(d.f_center_hz, "f_center_hz")?;
                 finite(d.obw_hz, "obw_hz")?;
+                finite(f64::from(d.peak_level_dbfs), "peak_level_dbfs")?;
+                if let Some(rule) = d.flags.inconsistency() {
+                    return Err(RepoError::Invalid(format!("detection {}: {rule}", d.id)));
+                }
+                let overload = match overloaded.get(&d.provenance_ref) {
+                    Some(o) => *o,
+                    None => {
+                        // A missing provenance fails on the foreign key below.
+                        let o = lookup
+                            .query_row([blob(d.provenance_ref)], |r| r.get::<_, bool>(0))
+                            .optional()?
+                            .unwrap_or(false);
+                        overloaded.insert(d.provenance_ref, o);
+                        o
+                    }
+                };
+                if (overload || d.clip_count > 0) && !d.flags.clipped {
+                    return Err(RepoError::UnflaggedClipping { detection: d.id });
+                }
                 let freq = d.freq();
                 max_f_span = max_f_span.max(freq.width_hz());
                 max_t_span = max_t_span.max(d.time.duration_ns());
@@ -393,6 +447,12 @@ impl Repository {
                     d.snr_mean_db,
                     d.sk,
                     d.flags.bits(),
+                    d.peak_level_dbfs,
+                    d.peak_level_dbm,
+                    d.clip_count,
+                    d.detector_version,
+                    d.flags.spur_reason.map(|r| r.kind_str()),
+                    opt_blob(d.flags.spur_reason.and_then(|r| r.mask())),
                     freq.lo_hz,
                     freq.hi_hz
                 ])?;
@@ -406,8 +466,10 @@ impl Repository {
     /// One detection.
     pub fn detection(&self, id: DetectionId) -> Result<Detection, RepoError> {
         self.conn
-            .prepare_cached(&format!(
-                "SELECT {DETECTION_COLUMNS} FROM detection WHERE detection_id = ?1"
+            .prepare_cached(concat!(
+                "SELECT ",
+                detection_columns!(),
+                " FROM detection WHERE detection_id = ?1"
             ))?
             .query_row([blob(id)], detection_from_row)
             .optional()?
@@ -420,8 +482,9 @@ impl Repository {
     /// Detections whose frequency × time box overlaps `region` (closed intervals), ordered by
     /// start time. The region-over-time query (docs/07 §4 step 2; AWARE-042).
     pub fn detections_in_region(&self, region: &Region) -> Result<Vec<Detection>, RepoError> {
-        let p = region_bounds(&self.conn, "detection", region)?.detection_params();
-        let mut stmt = self.conn.prepare_cached(DETECTION_REGION_SQL)?;
+        let tx = self.read_tx()?;
+        let p = region_bounds(&tx, "detection", region)?.detection_params();
+        let mut stmt = tx.prepare_cached(DETECTION_REGION_SQL)?;
         let rows = stmt
             .query_map(
                 params![p.0, p.1, p.2, p.3, p.4, p.5, p.6],
@@ -441,8 +504,10 @@ impl Repository {
 
     // ---- Recording ----
 
-    /// Inserts a Recording row (the SigMF files are written by C25 first).
+    /// Inserts a Recording row (the SigMF files are written by C25 first). IQ and audio are
+    /// content: a class that does not permit content is refused ([`RepoError::GatedContent`]).
     pub fn insert_recording(&mut self, rec: &Recording) -> Result<(), RepoError> {
+        gate("recording", rec.content_class, true)?;
         let (trigger_kind, det, demod) = match rec.trigger {
             RecordingTrigger::Detection(d) => ("detection", Some(blob(d)), None),
             RecordingTrigger::Demodulation(m) => ("demodulation", None, Some(blob(m))),

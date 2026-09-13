@@ -9,20 +9,35 @@
 //! - WAL journal (file databases), `synchronous = NORMAL`, foreign keys on, 5 s busy timeout.
 //!   WAL keeps readers unblocked by the writer; [`Repository::checkpoint`] is for low-battery
 //!   shutdown (C27).
-//! - One writer: write methods take `&mut self`.
+//! - Write methods take `&mut self`; several connections (threads, processes) may share a file.
+//!
+//! # Transactions
+//! - Every write transaction is `BEGIN IMMEDIATE`: it takes the write lock *before* its first
+//!   read. A read-then-write on one connection therefore waits (busy timeout) for a writer on
+//!   another connection, instead of failing with `SQLITE_BUSY_SNAPSHOT` when a deferred
+//!   transaction tries to upgrade a stale snapshot.
+//! - Region queries read `region_extent` and the rows inside one read transaction, i.e. one WAL
+//!   snapshot, so a wide row committed between the two reads cannot be missed.
 //!
 //! # Migrations
 //! Plain SQL files in `migrations/`, embedded at build time and applied in order inside a
 //! transaction each. `PRAGMA user_version` records how many have run. A database newer than this
 //! build is refused.
 //!
+//! # Content gating (ADR-0004, legal guardrail)
+//! Metadata always flows; content is refused unless its [`ContentClass`] permits it (see
+//! [`crate::content`]). [`RepoError::GatedContent`] comes from `insert_decode` and
+//! `insert_annotation` (content present), `insert_recording` (always content), and
+//! `insert_bitstream` (stored bits). The schema repeats the rule as CHECK constraints.
+//!
 //! # Identity and dedup decisions
 //! - Ids are 16-byte UUIDv7 BLOBs.
-//! - **Provenance** is deduplicated by value: its canonical `serde_json` form is a UNIQUE column,
-//!   and [`Repository::intern_provenance`] returns the existing [`ProvenanceId`] for an identical
-//!   value. Exact text comparison, so no hash-collision risk. Field order is fixed by the struct
-//!   and float formatting by serde_json, so equal values give equal text.
-//! - **ExternalEvent** is keyed by `(source, native_id)`; upserts keep the first local id.
+//! - **Provenance** is deduplicated by value: SHA-256 of its [`canonical_json`] is a UNIQUE
+//!   column. [`Repository::intern_provenance`] does `INSERT … ON CONFLICT DO NOTHING` then reads
+//!   the winning row, so concurrent connections converge on one [`ProvenanceId`]; the stored
+//!   canonical text is compared too, so a hash collision is an error, never a silent merge.
+//! - **ExternalEvent** is keyed by `(source, native_id)`; upserts keep the first local id and
+//!   store the payload hash that Explanation evidence pins.
 //! - **Emitter** has at most one row per decoded identity (partial unique index).
 //!
 //! # Region queries
@@ -40,13 +55,15 @@ mod tests;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::calibration::{CalibrationState, SpurMask};
-use crate::ids::{EmitterId, ProvenanceId};
+use crate::content::ContentClass;
+use crate::hash::{ContentHash, canonical_json};
+use crate::ids::{DetectionId, EmitterId, ExternalEventId, ProvenanceId};
 use crate::provenance::Provenance;
 use crate::region::Region;
 
@@ -78,6 +95,32 @@ pub enum RepoError {
     /// The request breaks a model rule (bad version number, lifecycle transition, extent...).
     #[error("invalid: {0}")]
     Invalid(String),
+    /// Content was offered under a class that does not permit it (ADR-0004 gating). The
+    /// metadata-only form of the object is accepted.
+    #[error("{object} cannot carry content under content class {class:?} (ADR-0004 gating)")]
+    GatedContent {
+        /// Object kind: `decode`, `annotation`, `recording` or `bitstream`.
+        object: &'static str,
+        /// The gated class.
+        class: ContentClass,
+    },
+    /// A detection with clipped samples, or under an overloaded provenance, lacks
+    /// `flags.clipped`.
+    #[error("detection {detection} has clipping or overload but flags.clipped is not set")]
+    UnflaggedClipping {
+        /// The detection.
+        detection: DetectionId,
+    },
+    /// Explanation evidence pins an ExternalEvent payload hash that no longer matches the cache.
+    #[error("evidence pins external event {event} payload {pinned}, cache holds {current}")]
+    StaleEvidence {
+        /// The event.
+        event: ExternalEventId,
+        /// Hash in the evidence.
+        pinned: ContentHash,
+        /// Hash of the cached payload.
+        current: ContentHash,
+    },
     /// A decoded identity already names a different emitter. Entity resolution (T-018) must
     /// merge the two before the observation can be recorded.
     #[error("identity {identity} already belongs to emitter {existing}")]
@@ -126,6 +169,7 @@ impl Repository {
     /// Opens (creating if needed) a database file in WAL mode and applies pending migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RepoError> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         let mode: String =
             conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
@@ -170,10 +214,23 @@ impl Repository {
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
         Ok(())
     }
+
+    /// A write transaction that holds the write lock from its first statement.
+    fn write_tx(&mut self) -> Result<Transaction<'_>, RepoError> {
+        Ok(self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?)
+    }
+
+    /// A read transaction: every read inside it sees one snapshot. Dropping it ends it.
+    fn read_tx(&self) -> Result<Transaction<'_>, RepoError> {
+        Ok(self.conn.unchecked_transaction()?)
+    }
 }
 
 fn migrate(conn: &mut Connection) -> Result<(), RepoError> {
-    let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if current > SCHEMA_VERSION {
         return Err(RepoError::SchemaTooNew {
             found: current,
@@ -181,15 +238,14 @@ fn migrate(conn: &mut Connection) -> Result<(), RepoError> {
         });
     }
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
-        let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", index as i64 + 1)?;
-        tx.commit()?;
     }
+    tx.commit()?;
     Ok(())
 }
 
-// ---- codec helpers shared by the submodules ----
+// ---- codec and rule helpers shared by the submodules ----
 
 /// Id → 16-byte BLOB.
 fn blob<I: Into<uuid::Uuid>>(id: I) -> [u8; 16] {
@@ -230,6 +286,33 @@ fn finite(value: f64, what: &str) -> Result<f64, RepoError> {
             "{what} must be finite, got {value}"
         )))
     }
+}
+
+/// ADR-0004 gate: refuses content under a class that does not permit it.
+fn gate(object: &'static str, class: ContentClass, carries_content: bool) -> Result<(), RepoError> {
+    if carries_content && !class.permits_content() {
+        Err(RepoError::GatedContent { object, class })
+    } else {
+        Ok(())
+    }
+}
+
+/// Canonical JSON and its hash, refusing values that do not round-trip (e.g. NaN stored as null).
+fn canonical_with_hash<T>(value: &T, what: &str) -> Result<(String, ContentHash), RepoError>
+where
+    T: Serialize + DeserializeOwned + PartialEq,
+{
+    let canonical = canonical_json(value)?;
+    let round_trips = serde_json::from_str::<T>(&canonical)
+        .map(|back| back == *value)
+        .unwrap_or(false);
+    if !round_trips {
+        return Err(RepoError::Invalid(format!(
+            "{what} does not round-trip through JSON (non-finite float?)"
+        )));
+    }
+    let hash = ContentHash::of_text(&canonical);
+    Ok((canonical, hash))
 }
 
 /// Reads a JSON `body` column by primary key.
@@ -295,6 +378,7 @@ struct RegionBounds {
     f_span: f64,
 }
 
+/// Reads the extent bounds. Call inside the same read transaction as the query that uses them.
 fn region_bounds(
     conn: &Connection,
     table: &str,

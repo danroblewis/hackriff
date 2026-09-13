@@ -3,9 +3,9 @@
 //! Split between the parts that change and the parts that must keep history:
 //!
 //! - **Aggregate** (mutable, updated by upsert): current frequency and bandwidth, first/last
-//!   seen, count, displayed identity and `known_status`.
-//! - **Append-only interpretation:** [`Classification`] history. A re-run classifier appends a
-//!   row; nothing is overwritten. The latest row is the current classification.
+//!   seen, count, displayed identity, tags.
+//! - **Append-only interpretation:** the [`Classification`] history and the known-status history
+//!   ([`KnownStatusChange`]). Nothing is overwritten; the latest row of each is current.
 //! - **Links** ([`EmitterLink`]) to tracks, detections, recordings, demodulations, decodes,
 //!   anomalies, explanations and annotations are append-only rows, loaded separately because
 //!   they can be numerous.
@@ -127,6 +127,42 @@ pub enum KnownStatus {
     Unknown,
 }
 
+/// Who decided a known-status change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusAuthor {
+    /// Known-signal priors (C17): band plan, licence extract, reference database, own history.
+    Prior,
+    /// A decoder identity (C22).
+    Decoder,
+    /// A classifier (C15).
+    Classifier,
+    /// A person.
+    User,
+    /// The repository itself: the initial status written when an emitter is created.
+    System,
+}
+
+/// One entry of an emitter's append-only known-status history. The latest entry is the emitter's
+/// current [`Emitter::known_status`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KnownStatusChange {
+    /// Emitter.
+    pub emitter_id: EmitterId,
+    /// New status.
+    pub status: KnownStatus,
+    /// The prior record that decided it, e.g. `bandplan:us-fcc-2026#118-137MHz` or
+    /// `fmlist:station/12345`, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_ref: Option<String>,
+    /// Why, in words.
+    pub reason: String,
+    /// When.
+    pub t: Timestamp,
+    /// Who decided.
+    pub author: StatusAuthor,
+}
+
 /// One classifier result, appended to an emitter's history (never overwritten).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Classification {
@@ -195,7 +231,8 @@ pub struct Emitter {
     pub fingerprint: Value,
     /// Displayed identity, derived from decoder/user claims (C27 precedence).
     pub identity: Identity,
-    /// Status against priors.
+    /// Current status against priors: the latest [`KnownStatusChange`]. When inserting a new
+    /// emitter it becomes the first history entry; afterwards change it only by appending.
     pub known_status: KnownStatus,
     /// Classification history, oldest first. Append-only.
     #[serde(default)]

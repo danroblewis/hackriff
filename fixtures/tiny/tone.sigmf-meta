@@ -23,8 +23,8 @@
         "amp_on": false,
         "bandwidth_hz": 100000.0
       },
-      "clip_count": 0,
       "overload": false,
+      "quantisation_limited": false,
       "clock_source": "internal",
       "clock_locked": true,
       "timestamp_method": "synthetic",

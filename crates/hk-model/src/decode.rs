@@ -4,6 +4,9 @@
 //! new row with its own version, and the measurement it ran on is unchanged. Outputs point back
 //! at what produced them (`Decode.demodulation_ref`, `Bitstream.demodulation_ref`,
 //! `Recording.trigger`), so producer rows never need updating.
+//!
+//! Content gating (ADR-0004): see [`crate::content`]. A Decode keeps metadata and content in
+//! separate fields so that a gated class can still record the metadata.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -100,15 +103,21 @@ pub struct Decode {
     pub decoder_version: String,
     /// Frame model name, e.g. `adsb-df17`, `rds-group-0a`, or an inferred-framing id.
     pub frame_model: String,
-    /// Decoded fields. Content, so subject to `content_class`: C22/C24 must not populate
-    /// gated content here.
-    pub fields: Value,
+    /// Metadata fields: frame type, addresses and other non-content identifiers, lengths, timing,
+    /// CRC detail. Always stored and streamed, whatever `content_class` says.
+    pub metadata: Value,
+    /// Content fields: payload, message text, voice/audio references. `None` when the frame has
+    /// no content or it was withheld. The repository refuses `Some` unless `content_class`
+    /// permits content (`RepoError::GatedContent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Value>,
     /// Frame check.
     pub crc_status: CrcStatus,
-    /// Identity named by the frame, if any.
+    /// Identity named by the frame, if any (metadata).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<DecodedIdentity>,
-    /// Content gating class.
+    /// Content gating class, chosen explicitly by the decoder (fail closed to
+    /// [`ContentClass::FAIL_CLOSED`] when unknown).
     pub content_class: ContentClass,
     /// Frame time.
     pub t: Timestamp,
@@ -149,12 +158,12 @@ pub struct Framing {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum BitstreamTransport {
-    /// A stored file (Recording-like, under quota).
+    /// A stored file (Recording-like, under quota). Stored bits are content.
     Stored {
         /// Path relative to the device data directory.
         uri: String,
     },
-    /// A live stream on stream-output (C24); the row is its descriptor.
+    /// A live stream on stream-output (C24); the row is its descriptor (metadata).
     Live {
         /// Endpoint, e.g. `unix:///run/hackriff/bits-<id>.sock`.
         endpoint: String,
@@ -181,6 +190,7 @@ pub struct Bitstream {
     /// Source trust record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance_ref: Option<ProvenanceId>,
-    /// Content gating class; C24 enforces it before egress.
+    /// Content gating class. The repository refuses a `Stored` bitstream whose class does not
+    /// permit content; a `Live` descriptor is accepted and C24 gates the stream itself.
     pub content_class: ContentClass,
 }
