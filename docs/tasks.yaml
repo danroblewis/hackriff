@@ -398,7 +398,7 @@ tasks:
     parallel_group: J
     core_interface: true
     use_cases: [SPACE-050, AWARE-042, AWARE-036]
-    acceptance: `hk replay <fixture>` and `hackriffd --source sigmf:<file>` run the always-on chain end to end and write Detections, tiles and stream records; runtime chain attach/detach per ADR-0001 S1 outcome
+    acceptance: "`hk replay <fixture>` and `hackriffd --source sigmf:<file>` run the always-on chain end to end and write Detections, tiles and stream records; runtime chain attach/detach per ADR-0001 S1 outcome"
     area: crates/hk-cli, crates/hk-core (runtime glue)
     needs: none
     model: opus
