@@ -54,6 +54,7 @@
 //! offset's taps are rebuilt, allocating, only on a rate change), `Complex32` or `Complex<i8>`
 //! input converted as it enters the filter window.
 
+pub mod batch;
 mod stream;
 
 #[cfg(feature = "gpu")]
@@ -403,14 +404,58 @@ pub trait PfbBackend: Send {
 
     /// Clears all state; the next input is a stream start.
     fn reset(&mut self);
+
+    /// Returns the next block still held by an asynchronous provider (blocking), or `None`
+    /// when nothing is held. Call repeatedly at the end of a stream. Synchronous providers
+    /// (the CPU ones) never hold blocks.
+    fn flush(&mut self) -> Option<PfbOutput<'_>> {
+        None
+    }
 }
 
 /// Frequency-shifted prototype for a raster offset at one input rate.
-struct Raster {
-    rate_hz: f64,
-    nco: Nco,
+pub(crate) struct Raster {
+    pub(crate) rate_hz: f64,
+    pub(crate) nco: Nco,
     /// Taps `h[i]·(−1)^i·e^{−j2π f_r i/fs}` and their negation.
-    taps: [Vec<Complex32>; 2],
+    pub(crate) taps: [Vec<Complex32>; 2],
+}
+
+impl Raster {
+    /// The shifted prototype for `offset_hz` at `fs` (allocates).
+    pub(crate) fn new(design: &FirDesign, offset_hz: f64, fs: f64) -> Self {
+        let nco = Nco::new(offset_hz / fs);
+        let r = nco.cycles_per_sample();
+        let even: Vec<Complex32> = design
+            .taps
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| {
+                let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                let ph = -2.0 * PI * r * i as f64;
+                let a = sign * f64::from(h);
+                Complex32::new((a * ph.cos()) as f32, (a * ph.sin()) as f32)
+            })
+            .collect();
+        let odd = even.iter().map(|&t| -t).collect();
+        Self {
+            rate_hz: fs,
+            nco,
+            taps: [even, odd],
+        }
+    }
+}
+
+/// Prototype taps times `(−1)^i`, and their negation (index = window start slot parity).
+pub(crate) fn shifted_taps(design: &FirDesign) -> [Vec<f32>; 2] {
+    let even: Vec<f32> = design
+        .taps
+        .iter()
+        .enumerate()
+        .map(|(i, &h)| if i % 2 == 0 { h } else { -h })
+        .collect();
+    let odd = even.iter().map(|&h| -h).collect();
+    [even, odd]
 }
 
 /// CPU polyphase filter bank. See the [module docs](self).

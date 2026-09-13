@@ -19,7 +19,7 @@ fn provenance() -> ProvenanceHandle {
         "device_id": "synthetic:bench",
         "tune": {"center_hz": 100e6, "sample_rate_hz": FS, "lna_db": 16.0, "vga_db": 20.0,
                  "amp_on": false, "bandwidth_hz": 15e6},
-        "clip_count": 0, "overload": false, "clock_source": "internal", "clock_locked": true,
+        "overload": false, "quantisation_limited": false, "clock_source": "internal", "clock_locked": true,
         "timestamp_method": "synthetic",
     });
     ProvenanceHandle::new(serde_json::from_value::<Provenance>(json).unwrap())

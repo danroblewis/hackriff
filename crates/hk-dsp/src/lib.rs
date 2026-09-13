@@ -27,13 +27,19 @@
 //! per-channel floors), percentile and
 //! minimum-statistics estimators, Gamma utilities and [`FloorThreshold`] for CFAR.
 
+#[cfg(all(feature = "accelerate", target_os = "macos"))]
+pub mod accelerate;
 pub mod channelizer;
+pub mod compute;
+pub mod conformance;
 pub mod ddc;
 pub mod fft;
 pub mod filter;
 pub mod floor;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(feature = "gpu-wgpu")]
+pub mod gpu_wgpu;
 pub mod persistence;
 pub mod radiometry;
 pub mod sk;
@@ -60,7 +66,7 @@ pub use stft::{
     DEFAULT_RESET_ON, DualResolution, InputInfo, IqSample, SpectrumFrame, StftConfig,
     StftProcessor, StftStats, Tier,
 };
-pub use welch::{ConfigError, SegmentEngine, WelchConfig, welch};
+pub use welch::{Accumulators, ConfigError, SegmentEngine, WelchConfig, welch};
 pub use window::{Window, WindowKind, WindowMetrics};
 
 #[cfg(test)]
