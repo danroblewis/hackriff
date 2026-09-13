@@ -9,14 +9,35 @@ default:
 build:
     cargo build --workspace
 
-# All offline tests: Rust (T1-T4, no hardware, `gpu` off) + Python tooling
-test: test-rust test-py
+# All offline tests: Rust (T1-T4, no hardware, `gpu` off) + Python tooling + UI build check (skipped without node)
+test: test-rust test-py test-ui
 
 test-rust:
     cargo test --workspace
 
 test-py:
     cd py && uv run --locked pytest
+
+# Build the web UI into ui/dist (needs Node >= 20)
+ui-build:
+    cd ui && npm ci --no-audit --no-fund && npm run build
+
+# UI build + type-check; skipped cleanly when node/npm are absent
+test-ui:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        echo "test-ui: node/npm not found; skipping the UI build check"
+        exit 0
+    fi
+    cd ui
+    npm ci --no-audit --no-fund --prefer-offline
+    npm run build
+    npm run typecheck
+
+# Serve the web UI over a replayed recording, e.g. `just serve fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop`
+serve fixture *args:
+    cargo run -p hk-cli --bin hk -- serve --replay "{{fixture}}" {{args}}
 
 fmt:
     cargo fmt --all

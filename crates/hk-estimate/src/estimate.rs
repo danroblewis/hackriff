@@ -44,6 +44,14 @@ pub enum Method {
     ToneFrequency,
     /// Clock error from a measured line against its nominal frequency.
     ClockPpm,
+    /// T-011: symbol rate from the guarded transition least squares (with line support).
+    SymbolRateTransitions,
+    /// T-011: symbol rate from independent whitened cyclic lines.
+    SymbolRateLines,
+    /// T-011: FSK deviation, median |IF − mid| at symbol centres with same-decision neighbours.
+    FskDeviation,
+    /// T-011: modulation index h = 2·deviation / symbol rate.
+    ModulationIndex,
 }
 
 /// Why an estimator abstained (C13 `null` reasons plus the ones this implementation needs).
@@ -80,6 +88,10 @@ pub enum Reason {
     Upstream,
     /// Invalid input (non-finite or inconsistent arguments).
     InvalidInput,
+    /// T-011: candidates exist but the trust rule failed (they are reported, not asserted).
+    Untrusted,
+    /// T-011: the estimator does not apply to this signal (e.g. deviation of a non-FSK signal).
+    NotApplicable,
 }
 
 /// Evidence behind a value. Fields are filled by the methods that have them.

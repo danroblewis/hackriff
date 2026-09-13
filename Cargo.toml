@@ -18,6 +18,8 @@ anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 # T-020: H3 cell → boundary for the gpsjam adapter. No default features (drops ahash).
 h3o = { version = "0.11", default-features = false }
+# T-022a: HTTP request-head parsing for the hk-api server (already a tungstenite dependency).
+httparse = "1.10"
 libc = "0.2"
 num-complex = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -26,6 +28,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
 thiserror = "2.0"
+# T-022a: synchronous WebSocket framing + handshake key for the hk-api browser bridge (no async
+# runtime; the bridge plugs into hk-stream's per-consumer writer threads).
+tungstenite = "0.29"
 uuid = { version = "1.26", features = ["v7", "serde"] }
 
 hk-model = { path = "crates/hk-model" }

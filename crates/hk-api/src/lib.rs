@@ -6,8 +6,28 @@
 //! - [`stream`]: re-export of the `hk-stream` crate, the versioned stream-output contract
 //!   (`docs/stream-contract.md`). It lives in its own crate so `hk-plugins` can use it without
 //!   depending on `hk-api`.
+//! - [`http`]: the HTTP server (T-022a): read-only JSON endpoints, static UI, and the WebSocket
+//!   route, all behind one bearer token ([`auth`]).
+//! - [`bridge`]: the WebSocket bridge, mapping one stream 1:1 to one browser WebSocket as a
+//!   `Locality::Remote` consumer (legal-guardrail path).
+//! - [`query`]: `/api/history` (T-017 region-over-time) and `/api/floor` (T-021 floor vs time).
+//!
+//! # Threads, not tokio
+//! The server uses std threads and synchronous `tungstenite`, like `hk-stream`: the publisher
+//! already owns one blocking writer thread per consumer, so a WebSocket sink plugs in as that
+//! thread's writer with no second queue and no runtime; consumer counts are single digits on a
+//! handheld; idle connections cost no CPU.
+
+pub mod auth;
+pub mod bridge;
+pub mod http;
+pub mod query;
 
 pub use hk_stream as stream;
+
+pub use auth::Token;
+pub use bridge::{StreamInfo, StreamRegistry};
+pub use http::{ApiState, Server, ServerConfig};
 
 #[cfg(test)]
 mod tests {

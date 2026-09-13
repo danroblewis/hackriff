@@ -1,0 +1,15 @@
+{
+  "name": "hackriff-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "hackriff web UI (T-022a): WebGL2 waterfall over the stream bridge + region-over-time history",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --minify --sourcemap --target=es2020 --outfile=dist/main.js && cp src/index.html src/style.css dist/",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}
