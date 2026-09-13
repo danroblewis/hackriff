@@ -26,6 +26,17 @@ pub enum CalibrationMethod {
     Manual,
 }
 
+/// The front-end gain setting a power-calibration point was measured at.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GainSetting {
+    /// LNA gain, dB.
+    pub lna_db: f64,
+    /// VGA gain, dB.
+    pub vga_db: f64,
+    /// RF amp on.
+    pub amp_on: bool,
+}
+
 /// A frequency × gain point of the dBFS→dBm power calibration table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PowerCalPoint {
@@ -35,6 +46,14 @@ pub struct PowerCalPoint {
     pub gain_db: f64,
     /// Add to dBFS to get dBm.
     pub offset_db: f64,
+    /// The exact LNA/VGA/amp setting (T-021). A total gain cannot identify a HackRF state (24/20
+    /// and 16/28 both total 44 dB, and the amp's real gain is not its nominal 11 dB), so the
+    /// radiometry product applies only points that carry this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain: Option<GainSetting>,
+    /// Standard uncertainty of `offset_db`, dB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertainty_db: Option<f64>,
 }
 
 /// One calibration version (docs/07 §2.7).
