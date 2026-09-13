@@ -154,7 +154,7 @@ tasks:
     title: sweep-survey + first (simple) attention scheduler
     status: done
     commit: "85b06be (merged 86ae931)"
-    review: "merged under user timebox to unblock T-027; single timeboxed post-merge Opus review running (blocks only on correctness bugs, fixes forward)"
+    review: "merged under user timebox to unblock T-027; timeboxed post-merge review OK (4933 random plans gap-free coverage, 6131 verification groups correctly paired, 16 simulated days no drift, TX unconditionally gated, golden files deterministic); follow-ups folded into T-032"
     note_start: "launched 2026-09-13 on the T-006 branch (1e5bc99) ahead of its merge to cut critical-path wait (user timebox steer); merges main once T-006 lands"
     deps: [T-003, T-006]
     parallel_group: E
@@ -489,8 +489,7 @@ tasks:
     note: "follow-ups from T-007 (merged 2026-09-13 under the timebox rule)"
   - id: T-032
     title: Scheduler follow-ups (bandit revisit, per-region revisit, gain-down re-verification, rate-change trust, RF path constants)
-    status: todo
-    hold: "wait for the timeboxed T-009 post-merge review (may produce fixes in the same module) and avoid churning the scheduler under T-027"
+    status: in-progress
     deps: [T-009]
     parallel_group: E
     use_cases: [SPACE-050, AWARE-042]
@@ -499,7 +498,7 @@ tasks:
     needs: none
     model: opus
     effort: medium
-    items: "ADR-0005 bandit revisit + C12 interestingness score; per-region revisit rates (one pass serves all today); automatic gain-down re-verification after a clipped gain-step pair; hk_detect rate-change trust function (dwell scheduled, not evaluated); cron schedules + hackrf_sweep firmware mode; offset sweep slices to avoid DC; move RF path boundaries into SourceCapabilities; verify HackRF 2170/2740 MHz path constants against firmware tuning.c (recalled, unverified); hk-core <-> hk-detect dev-dependency cycle"
+    items: "ADR-0005 bandit revisit + C12 interestingness score; per-region revisit rates (one pass serves all today); automatic gain-down re-verification after a clipped gain-step pair; hk_detect rate-change trust function (dwell scheduled, not evaluated); cron schedules + hackrf_sweep firmware mode; offset sweep slices to avoid DC; move RF path boundaries into SourceCapabilities; verify HackRF 2170/2740 MHz path constants against firmware tuning.c (recalled, unverified); hk-core <-> hk-detect dev-dependency cycle | from T-009 review: verify.rs retune/rate-change comparisons run on clipped captures and use a clipped A0 as base (skip clipped, use first unclipped A); steps carry no verification-group id (stale captures can mix after a cut/plan update); WallClock not monotonic (backwards clock breaks t_start ordering and cut rollback); interestingness x priority can overflow to inf and starve other POIs (clamp); tiny weights starve POIs (minimum share/aging); update_plan restarts pass at hop 0 (frequent updates never reach tail hops); +-1 MHz retune can push wide POIs over DC/usable edge; hop seams at exact +-7.5 MHz sit in 15 MHz filter rolloff (overlap or narrower slices); wide POIs (BW > usable) get offset 0 on DC with no warning"
     note: "follow-ups from T-009 (merged 2026-09-13 under the timebox rule)"
   - id: T-033
     title: Filter-bank passband phantoms and remaining guard gaps (before filter-bank field use)
