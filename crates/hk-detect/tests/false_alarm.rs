@@ -182,13 +182,16 @@ fn min_duration_is_tested_before_gap_merge_regression() {
 struct Tracked {
     /// Interior false boxes.
     boxes: u64,
-    /// Floor-branch `T_off` exceedance ÷ design (1e-3) over the usable span, per-frame reference,
-    /// counted only where the detector let the floor branch run (the step guard).
+    /// Floor-branch `T_off` exceedance ÷ design (1e-3) over the usable span, counted only where
+    /// the detector let the floor branch run, against the reference it used there (the configured
+    /// reference; the wide reference in guarded zones the step guard allows).
     ratio_frame: f64,
     /// The same for the wide reference, everywhere (informational).
     ratio_wide: f64,
-    /// Fraction of usable-span cells where the floor branch was off.
+    /// Fraction of usable-span cells where the floor branch was off (OS-only).
     guarded: f64,
+    /// Fraction of usable-span cells in guarded zones on the wide reference.
+    wide_zone: f64,
     frames: u64,
 }
 
@@ -200,6 +203,7 @@ impl Tracked {
         self.ratio_frame = w(self.ratio_frame, self.frames, o.ratio_frame, o.frames);
         self.ratio_wide = w(self.ratio_wide, self.frames, o.ratio_wide, o.frames);
         self.guarded = w(self.guarded, self.frames, o.guarded, o.frames);
+        self.wide_zone = w(self.wide_zone, self.frames, o.wide_zone, o.frames);
         self.boxes += o.boxes;
         self.frames += o.frames;
     }
@@ -220,8 +224,8 @@ fn tracked_noise_with(profile: &[f32], frames: u64, seed: u64, config: DetectorC
     let t_off = gamma::mean_threshold(10.0, 1e-3) as f32;
     let usable = (8e6 / (FS / BINS as f64)) as usize;
     let (lo, hi) = (BINS / 2 - usable, BINS / 2 + usable);
-    let (mut exc_frame, mut exc_wide, mut cells, mut open, mut all) =
-        (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut exc_frame, mut exc_wide, mut cells, mut open, mut all, mut wide_cells) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let count = |e: hk_detect::DetectorEvent<'_>, boxes: &mut u64| {
         if let hk_detect::DetectorEvent::Detection(d) = e
             && d.bins.start >= EDGE_EXCLUDE
@@ -241,13 +245,19 @@ fn tracked_noise_with(profile: &[f32], frames: u64, seed: u64, config: DetectorC
         det.process(&frame, f, ClipCount::NONE, &mut |e| count(e, &mut boxes));
         if i >= 16 {
             let mask = det.floor_branch_mask();
+            let reference = det.floor_branch_reference();
             for b in lo..hi {
                 let p = frame.spectrum.psd[b];
                 exc_wide += u64::from(p > t_off * f.wide_floor[b]);
                 if mask.is_none_or(|m| m[b]) {
-                    exc_frame += u64::from(p > t_off * f.floor[b]);
+                    exc_frame += u64::from(p > t_off * reference[b]);
                     open += 1;
                 }
+            }
+            if mask.is_some()
+                && let Some(g) = det.step_guard()
+            {
+                wide_cells += g.wide_mask()[lo..hi].iter().filter(|&&w| w).count() as u64;
             }
             cells += (hi - lo) as u64;
             all += (hi - lo) as u64;
@@ -259,6 +269,7 @@ fn tracked_noise_with(profile: &[f32], frames: u64, seed: u64, config: DetectorC
         ratio_frame: exc_frame as f64 / open.max(1) as f64 / 1e-3,
         ratio_wide: exc_wide as f64 / cells as f64 / 1e-3,
         guarded: 1.0 - open as f64 / all.max(1) as f64,
+        wide_zone: wide_cells as f64 / all.max(1) as f64,
         frames,
     }
 }
@@ -367,6 +378,40 @@ fn floor_steps_keep_the_false_alarm_bound_with_the_per_frame_reference() {
     check_floor_cases(&step_cases(), DetectorConfig::new(SurveyId::new()), true);
 }
 
+/// A floor from `(start bin, level dB)` breakpoints.
+fn piecewise(levels: &[(usize, f64)]) -> Vec<f32> {
+    let mut p = flat(BINS);
+    for (k, &(start, level)) in levels.iter().enumerate() {
+        let end = levels.get(k + 1).map_or(BINS, |x| x.0);
+        for v in &mut p[start..end] {
+            *v = undb(level) as f32;
+        }
+    }
+    p
+}
+
+#[test]
+fn a_notch_plus_a_second_down_step_is_guarded() {
+    // T-006 re-probe: a notch below bin 1200 with a second down-step at 3200 read as a plateau
+    // (up … down) and was exempt: 23 phantoms (21 confirmed). A plateau now needs floor-level
+    // sides; a notch side or a staircase stays guarded.
+    let cases: Vec<(String, Vec<f32>)> = vec![
+        (
+            "-20 dB notch 800–1200, -10 dB step at 3200".into(),
+            piecewise(&[(0, 0.0), (800, -20.0), (1200, 0.0), (3200, -10.0)]),
+        ),
+        (
+            "-20 dB below 1200, -10 dB step at 3200".into(),
+            piecewise(&[(0, -20.0), (1200, 0.0), (3200, -10.0)]),
+        ),
+        (
+            "monotone descent 0 / -10 @1200 / -20 @3200".into(),
+            piecewise(&[(0, 0.0), (1200, -10.0), (3200, -20.0)]),
+        ),
+    ];
+    check_floor_cases(&cases, DetectorConfig::new(SurveyId::new()), true);
+}
+
 #[test]
 fn floor_steps_without_the_step_guard_break_the_bound() {
     // Regression: without the guard the per-frame floor branch runs far above design at a notch.
@@ -397,10 +442,12 @@ fn check_floor_cases(cases: &[(String, Vec<f32>)], config: DetectorConfig, floor
         let t = tracked_noise_with(profile, 1500, 0x51_0e + i as u64, config.clone());
         eprintln!(
             "{name}: {} false boxes in {:.3} MHz·h; floor-branch T_off exceedance ÷ design where it runs: \
-             per-frame {:.2}× (floor branch off on {:.1} % of the usable span); wide reference {:.1}×",
+             {:.2}× (wide reference in guarded zones on {:.1} %, floor branch off on {:.1} % of the usable span); \
+             wide reference everywhere {:.1}×",
             t.boxes,
             t.exposure(),
             t.ratio_frame,
+            t.wide_zone * 100.0,
             t.guarded * 100.0,
             t.ratio_wide
         );

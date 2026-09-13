@@ -71,11 +71,14 @@ pub enum Branches {
 pub enum FloorReference {
     /// [`FloorFrame::floor`](hk_dsp::floor::FloorFrame::floor): per-frame block FCME. Unbiased on
     /// sloped floors; reads the signal inside flat signals wider than about one block, where the
-    /// OS branch is the only cover. **Default** until the T-005 wide-reference fix lands.
+    /// OS branch is the only cover. **Default.** Guarded zones of the floor-step guard use the
+    /// wide reference where the learned shape explains the step ([`crate::step`]).
     PerFrame,
     /// [`FloorFrame::wide_floor`](hk_dsp::floor::FloorFrame::wide_floor): keeps wide-signal
-    /// interiors, but (T-005 re-review, 2026-09-13) its sliding minimum biases low on sloped
-    /// floors (floor-branch Pfa 21× design at a 6 dB tilt, 650× on a baseband roll-off).
+    /// interiors and (T-005) is slope-robust on tilts, roll-offs and learned notches. Not the
+    /// default (T-028 evaluation): a floor shelf above the band floor reads as a signal, so
+    /// `-20 dB below bin 1200, -10 dB step at 3200` runs 614× design (4 false boxes) and a
+    /// staircase 74×, where the per-frame reference with the step guard stays at 1.02–1.05×.
     Wide,
 }
 
@@ -545,6 +548,9 @@ impl DetectorConfig {
         if let Some(g) = &self.step_guard {
             check_positive("step_guard.jump_db", g.jump_db)?;
             check_non_negative("step_guard.margin_blocks", g.margin_blocks)?;
+            check_non_negative("step_guard.plateau_match_db", g.plateau_match_db)?;
+            check_non_negative("step_guard.wide_residual_db", g.wide_residual_db)?;
+            check_positive("step_guard.wide_step_db", g.wide_step_db)?;
             if g.blocks.block_bins == 0 || g.blocks.hop_bins == 0 {
                 return Err(ConfigError::Invalid {
                     name: "step_guard.blocks",

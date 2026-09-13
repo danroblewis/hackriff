@@ -1,6 +1,7 @@
 //! State-machine transitions (T-006 adversarial tests): gain change and retune mid-detection,
 //! gaps, no gap merge across a transition, max-duration splits, stream-start warm-up with the
-//! real floor tracker, impulsive burst runs, and the wide-signal coverage that depends on T-005.
+//! real floor tracker, impulsive burst runs, wide-signal coverage (T-005 wide reference) and flat
+//! signals next to a notch edge (T-028).
 
 mod common;
 
@@ -518,10 +519,94 @@ fn wide_flat_signal_edges_are_detected_with_the_per_frame_reference() {
     assert!(coverage >= 0.005, "interior coverage {coverage}");
 }
 
+/// A flat `width`-bin signal `snr_db` above the floor starting `gap` bins above a −20 dB notch
+/// (bins 1600..2000, or none): interior coverage (cells detected, 10 % trimmed each side) over
+/// frames 64..600 through the real tracker, and records overlapping the signal.
+fn notch_neighbour_coverage(
+    width: usize,
+    snr_db: f64,
+    with_notch: bool,
+    reference: FloorReference,
+) -> (f64, usize) {
+    let prov = provenance(98e6, FS, 24.0);
+    let mut src = GammaFrames::new(BINS, N_AVG, prov, 29);
+    let mut cfg = config();
+    cfg.floor_reference = reference;
+    let mut det = Detector::new(cfg).unwrap();
+    let mut tracker = NoiseFloorTracker::new(FloorConfig::default()).unwrap();
+    let mut out = Collected::default();
+    let mut p = flat(BINS);
+    let (n_lo, n_hi, gap) = (1600, 2000, 60);
+    if with_notch {
+        for v in &mut p[n_lo..n_hi] {
+            *v = undb(-20.0) as f32;
+        }
+    }
+    let (lo, hi) = (n_hi + gap, n_hi + gap + width);
+    for v in &mut p[lo..hi] {
+        *v += undb(snr_db) as f32;
+    }
+    let trim = width / 10;
+    let mut frame = src.empty_frame();
+    let (mut covered, mut total) = (0u64, 0u64);
+    for i in 0..600 {
+        let flags = if i == 0 {
+            Discontinuity::STREAM_START
+        } else {
+            Discontinuity::NONE
+        };
+        src.fill(&mut frame, &p, flags);
+        let f = tracker.update(&frame, |_| {});
+        det.process(&frame, f, ClipCount::NONE, &mut out.sink());
+        if i >= 64 {
+            let codes = det.codes();
+            covered += codes[lo + trim..hi - trim]
+                .iter()
+                .filter(|&&c| c != 0)
+                .count() as u64;
+            total += (hi - lo - 2 * trim) as u64;
+        }
+    }
+    det.finish(&mut out.sink());
+    let records = out
+        .detections
+        .iter()
+        .filter(|d| d.bins.start < hi && lo < d.bins.end)
+        .count();
+    (covered as f64 / total as f64, records)
+}
+
 #[test]
-#[ignore = "depends on the T-005 wide-reference fix (FloorFrame::wide_floor biases low on sloped floors); \
-            flip FloorReference::Wide to the default and un-ignore when it lands"]
+fn flat_signals_next_to_a_notch_edge_keep_interior_coverage() {
+    // T-006 re-probe: OS-only inside the guarded zone missed flat signals wider than ~16 bins
+    // (41-bin +15 dB: 0 records; 300-bin: 84.5 % → 0.2 %). Guarded bins now run the floor branch
+    // against the shape-normalised wide reference once the shape explains the step.
+    let mut failures = Vec::new();
+    for (width, snr) in [(41, 15.0), (300, 10.0)] {
+        for reference in [FloorReference::PerFrame, FloorReference::Wide] {
+            let (open, open_records) = notch_neighbour_coverage(width, snr, false, reference);
+            let (near, records) = notch_neighbour_coverage(width, snr, true, reference);
+            eprintln!(
+                "{width}-bin +{snr} dB, {reference:?}: interior coverage {:.1} % next to a -20 dB notch \
+                 ({records} records), {:.1} % without ({open_records} records)",
+                near * 100.0,
+                open * 100.0
+            );
+            if near < 0.8 || records == 0 {
+                failures.push(format!(
+                    "{width}-bin {reference:?}: {:.1} %, {records} records",
+                    near * 100.0
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
 fn wide_flat_signal_interior_coverage_via_the_wide_floor_branch() {
+    // T-005's slope-robust wide reference (re-enabled in T-028; not the default, see
+    // `FloorReference::Wide`).
     let (coverage, _) = wide_signal_coverage(FloorReference::Wide);
     eprintln!(
         "2048-bin +10 dB signal, wide reference: interior coverage {:.1} %",

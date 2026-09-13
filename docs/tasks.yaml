@@ -432,7 +432,9 @@ tasks:
     note: "added by coordinator 2026-09-13: M0 DoD needs a runnable survey on the device and T-024's e2e tests need a composed pipeline; no existing task owned the composition"
   - id: T-028
     title: Detection floor-step guard hardening for notch / filter-bank accessories (plateau exemption bypass, OS-only blind spot)
-    status: in-progress
+    status: done
+    commit: "370bab3 (merged)"
+    results: "plateau exemption requires both outer sides within 3 dB of median block floor (re-probe layouts 4/91 phantoms -> 0; monotone descent 0); guarded zones run floor branch on shape-normalised wide floor from frame 32 with OS-only fallback (signals 60 bins above a -20 dB notch: 0.1-0.4 % -> 100 % coverage); notch FA 1.02-1.07x design; tilts/roll-off 1.00-1.05x; fixtures unchanged; default reference stays PerFrame (Wide fails -20/-10 dB stepped notch at 614x); wide-coverage test un-ignored (explicit Wide, 100 %)"
     deps: [T-006, T-005]
     parallel_group: C
     use_cases: [AWARE-036, AWARE-042]
@@ -499,6 +501,19 @@ tasks:
     effort: medium
     items: "ADR-0005 bandit revisit + C12 interestingness score; per-region revisit rates (one pass serves all today); automatic gain-down re-verification after a clipped gain-step pair; hk_detect rate-change trust function (dwell scheduled, not evaluated); cron schedules + hackrf_sweep firmware mode; offset sweep slices to avoid DC; move RF path boundaries into SourceCapabilities; verify HackRF 2170/2740 MHz path constants against firmware tuning.c (recalled, unverified); hk-core <-> hk-detect dev-dependency cycle"
     note: "follow-ups from T-009 (merged 2026-09-13 under the timebox rule)"
+  - id: T-033
+    title: Filter-bank passband phantoms and remaining guard gaps (before filter-bank field use)
+    status: todo
+    deps: [T-028]
+    parallel_group: C
+    use_cases: [AWARE-036, AWARE-042]
+    acceptance: sharp-edged filter-bank passband gives floor-branch Pfa <= 1.5x design on PerFrame and Wide; narrow floor shelves next to learned steps not read as signals; guarded bins participate in integrated-spectrum confirmation where valid
+    area: crates/hk-detect, crates/hk-dsp (expose shape-normalised block floors in FloorFrame)
+    needs: none
+    model: opus
+    effort: medium
+    items: "sharp-edged filter-bank passband still exempt as plateau (both sides at band floor) -> 25-28 phantoms (~60x design) PerFrame, 100-260x Wide; floor shelf narrower than 1 MHz next to a learned step reads as signal; integrated-spectrum mask excludes all guarded bins; hk-detect duplicates hk-dsp shape internals (1 dB rule, block-centre sampling) - expose normalised block floors in FloorFrame; default reference still PerFrame (Wide fails stepped notch at 614x)"
+    note: "follow-ups from T-028 (merged 2026-09-13 under the timebox rule); must land before filter-bank accessory field use"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
