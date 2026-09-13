@@ -1,20 +1,23 @@
 //! `hackriffd`: the hackriff daemon. It owns the source, the pipeline and the stores, drives the
-//! attention scheduler, and serves the control API and streams (T-027; see
-//! `hk_cli::pipeline`).
+//! attention scheduler, and serves the control API and streams (T-027, T-037a; see
+//! `hk_cli::pipeline`). Ctrl-C (or SIGTERM) stops it gracefully.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
+use hk_cli::pipeline::LiveArgs;
 
 #[derive(Parser)]
 #[command(name = "hackriffd", version, about = "hackriff daemon")]
 struct Args {
-    /// Sample source: `sigmf:<file.sigmf-meta>` (replayed in real time). A live HackRF source is
-    /// not implemented yet.
-    #[arg(long)]
+    /// Sample source: `hackrf` (the live HackRF One, receive only; needs `--features hackrf`),
+    /// `hackrf:<serial>`, or `sigmf:<file.sigmf-meta>` (replayed in real time).
+    #[arg(long, default_value = "hackrf")]
     source: String,
-    /// Replay the recording again when it ends; the stream continues.
+    #[command(flatten)]
+    live: LiveArgs,
+    /// Replay the recording again when it ends; the stream continues (recordings only).
     #[arg(long = "loop")]
     loop_replay: bool,
     /// Data directory (database, history tiles, recordings).
@@ -29,16 +32,20 @@ struct Args {
     /// Built UI directory (default: ui/dist when present).
     #[arg(long)]
     ui_dist: Option<PathBuf>,
-    /// Replay unpaced and lossless instead of in real time.
+    /// Replay unpaced and lossless instead of in real time (recordings only).
     #[arg(long)]
     unpaced: bool,
     /// Offline feed cache directory for anomaly correlation.
     #[arg(long)]
     feeds: Option<PathBuf>,
+    /// T-021 CalibrationState JSON (a file or a directory) for calibrated floors.
+    #[arg(long)]
+    calibration: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
     let a = Args::parse();
+    hk_cli::signal::install()?;
     let ui_dist = a.ui_dist.or_else(|| {
         [
             PathBuf::from("ui/dist"),
@@ -49,6 +56,7 @@ fn main() -> anyhow::Result<()> {
     });
     hk_cli::pipeline::run_daemon(&hk_cli::pipeline::DaemonArgs {
         source: a.source,
+        live: a.live,
         loop_replay: a.loop_replay,
         data_dir: a.data_dir,
         plan: a.plan,
@@ -57,5 +65,6 @@ fn main() -> anyhow::Result<()> {
         unpaced: a.unpaced,
         feeds: a.feeds,
         token: None,
+        calibration: a.calibration,
     })
 }

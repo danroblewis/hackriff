@@ -1,87 +1,91 @@
-//! `hk serve`: a thin demo composer for the web UI (T-022a). The full pipeline (detections, chains,
-//! scheduler) runs under `hackriffd` / `hk replay` ([`crate::pipeline`], T-027).
+//! `hk serve`: the web UI over the **whole pipeline** (T-042). The source is the live HackRF One
+//! (the default, receive only) or an explicit `--replay` recording; spectrum, detection, tracking,
+//! inventory and history all come from that run ([`crate::pipeline`]).
 //!
 //! ```text
-//! SigMF replay (real-time pacing) ─► STFT ─► dB rows ─► spectrum Publisher ─► WebSocket bridge
-//!                                       └─► (bounded, drop on full) NoiseFloorTracker ─► FloorProduct
-//!                                            (T-017 pyramids + T-021 floor) ─► /api/history, /api/floor
+//! HackRF One (or --replay) ─► hk-pipeline (detect → track → inventory, history, spectrum)
+//!                                   └─► hk-api: /ws/spectrum/live, /api/inventory, /api/history,
+//!                                               /api/floor, /api/status, live control (T-044)
 //! ```
 //!
-//! # The spectrum stream
-//! - `stream_id` [`STREAM_ID`], kind `spectrum`, `datatype` `rf32_le`: each row is `fft_size`
-//!   little-endian f32 values of PSD in **dBFS/Hz** (hk-dsp `PowerUnit::DbfsPerHz`), ascending
-//!   frequency over `center_hz ± bandwidth_hz/2`. The v1.0 header has no units field; this is
-//!   the convention of this producer.
-//! - `sample_rate_hz` is the declared row rate, `fft_size` and `datatype` are always declared, and
-//!   rows carry the IQ time and sample index of their first sample.
-//! - **Class** ([`fixture_class`]): the fixture's `hackriff:content_class` when present (parsed
-//!   failing closed); otherwise `unrestricted` only when the whole capture lies inside one
-//!   positively chosen band prior (FM broadcast, 1090 MHz ADS-B); otherwise the fail-closed
-//!   `metadata-only`,
-//!   where the contract gates spectrum at ≤ 50 rows/s. Under a gated class the declared rate is
-//!   the actual row rate plus 10 % margin, capped at 50.
-//! - The replay is not rewound in place (a gated publisher refuses `t` going backwards): with
-//!   `--loop` each pass opens a new publisher under the same id, and browsers reconnect.
-//!
-//! # History
-//! With `--history-dir`, the first pass's frames go to a [`FloorProduct`] through a bounded
-//! channel that drops on full, so a slow history query never stalls the stream. Looped passes are
-//! not ingested (their times repeat).
+//! - **No demo data.** `/api/inventory` reads the run's own database only; a fresh data directory
+//!   starts empty. There is no seed and no external inventory database.
+//! - **Spectrum stream** `spectrum/live`, kind `spectrum`, `rf32_le` PSD rows in dBFS/Hz over
+//!   `center_hz ± bandwidth_hz/2` (`hk_pipeline::spectrum`); a retune re-offers the stream with
+//!   the new header.
+//! - **Class** ([`fixture_class`] for recordings; band-derived from the window for the live
+//!   radio): a class that forbids content gates spectrum at ≤ 50 rows/s. A live retune into a
+//!   window of another class is refused.
+//! - Ctrl-C stops the run gracefully ([`crate::signal`]).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 
-use anyhow::Context as _;
-use hk_api::stream::{
-    BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamError, StreamHeader,
-};
-use hk_api::{ApiState, Server, ServerConfig, StreamRegistry, Token};
-use hk_core::{Discontinuity, Pacing, ReplayOptions, SigmfReplaySource, Source};
-use hk_dsp::floor::{FloorConfig, NoiseFloorTracker};
-use hk_dsp::radiometry::PowerCalibrations;
-use hk_dsp::{InputInfo, PowerUnit, SpectrumFrame, StftProcessor};
+use hk_api::stream::StreamHeader;
+use hk_api::{LiveControl, Server, StreamRegistry};
+use hk_core::{Pacing, Source, SourceControl};
+use hk_model::ContentClass;
 use hk_model::sigmf::SigmfMeta;
-use hk_model::{ContentClass, Repository};
-use hk_store::{FloorProduct, FloorProductConfig};
-use num_complex::Complex32;
+use hk_pipeline::{PipelineHandle, SourceFactory, TrackInventory, open_replay};
 
-/// Stream id of the replayed spectrum.
-pub const STREAM_ID: &str = "spectrum/replay";
+use crate::pipeline::{
+    LiveArgs, LiveOptions, config_for, load_plan, serve_api, start_live, temp_data_dir, token,
+};
+use crate::signal;
+
+/// Stream id of the spectrum.
+pub const STREAM_ID: &str = "spectrum/live";
 pub use hk_pipeline::class::{FM_BROADCAST_HZ, RowPlan, SPECTRUM_DATATYPE, row_plan};
+
+/// Where `hk serve` gets samples.
+#[derive(Clone, Debug)]
+pub enum ServeSource {
+    /// The live HackRF One: `hackrf` or `hackrf:<serial>`.
+    HackRf {
+        /// Source spec.
+        spec: String,
+        /// Tuning and gains.
+        live: LiveArgs,
+    },
+    /// A SigMF recording.
+    Replay {
+        /// `.sigmf-meta` path.
+        path: PathBuf,
+        /// Replay again at the end (the stream continues).
+        loop_replay: bool,
+        /// Real-time pacing (tests may replay unpaced, which is then lossless).
+        realtime: bool,
+    },
+}
 
 /// `hk serve` settings.
 #[derive(Clone, Debug)]
 pub struct ServeOptions {
-    /// SigMF recording to replay.
-    pub replay: PathBuf,
-    /// Floor product / history directory.
-    pub history_dir: Option<PathBuf>,
-    /// Signal-inventory database (hk-model SQLite) served read-only at `/api/inventory`. The
-    /// replay does not write it yet (pipeline composition is T-027).
-    pub inventory_db: Option<PathBuf>,
+    /// Source.
+    pub source: ServeSource,
+    /// Data directory (default: a fresh temp directory).
+    pub data_dir: Option<PathBuf>,
     /// Listen address.
     pub bind: SocketAddr,
     /// Built UI directory.
     pub ui_dist: Option<PathBuf>,
-    /// FFT length (bins per row).
+    /// Spectrum FFT length (bins per row).
     pub fft_len: usize,
-    /// Target row rate, rows/s.
+    /// Target spectrum row rate, rows/s.
     pub rows_per_s: f64,
-    /// Replay again after the end.
-    pub loop_replay: bool,
-    /// Real-time pacing (tests may replay unpaced).
-    pub realtime: bool,
+    /// T-021 calibration JSON (file or directory).
+    pub calibration: Option<PathBuf>,
+    /// API token (default: `HK_TOKEN`, else generated).
+    pub token: Option<String>,
 }
 
-/// The stream class for a recording (see the [module docs](self); `hk_pipeline::class`).
+/// The stream class for a recording (`hk_pipeline::class`).
 pub fn fixture_class(meta: &SigmfMeta) -> ContentClass {
     hk_pipeline::class::source_class(meta)
 }
 
-/// The spectrum stream header.
+/// A spectrum stream header for this producer.
 pub fn spectrum_header(
     class: ContentClass,
     plan: &RowPlan,
@@ -91,214 +95,153 @@ pub fn spectrum_header(
     hk_pipeline::class::spectrum_header(STREAM_ID, "hk-cli:serve", class, plan, center_hz, fs)
 }
 
-/// What one replay pass did.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PassStats {
-    /// Rows published (delivered or gated).
-    pub rows: u64,
-    /// Rows withheld by the gated-spectrum cap.
-    pub rows_gated: u64,
-    /// Frames not handed to history (channel full).
-    pub history_dropped: u64,
+/// A running `hk serve`.
+pub struct Serving {
+    /// The API server.
+    pub server: Server,
+    /// The pipeline.
+    pub handle: PipelineHandle,
+    /// Live control (live source only).
+    pub live_control: Option<Arc<dyn LiveControl>>,
+    /// The live source's control handle (stats, identity); `None` for recordings.
+    pub source_control: Option<Arc<dyn SourceControl>>,
+    /// The run's data directory.
+    pub data_dir: PathBuf,
 }
 
-/// Replays the recording once into a new publisher registered in `registry`.
-pub fn replay_pass(
-    opts: &ServeOptions,
-    registry: &StreamRegistry,
-    history: Option<&SyncSender<SpectrumFrame>>,
-) -> anyhow::Result<PassStats> {
-    let pacing = if opts.realtime {
-        Pacing::RealTime { speed: 1.0 }
-    } else {
-        Pacing::Unpaced
-    };
-    let mut src = SigmfReplaySource::open(
-        &opts.replay,
-        ReplayOptions {
-            block_len: 16_384,
-            pacing,
-        },
-    )
-    .with_context(|| format!("opening {}", opts.replay.display()))?;
-    let class = fixture_class(src.meta());
-    let fs = src.sample_rate_hz();
-    let mut samples: Vec<Complex32> = Vec::new();
-    let Some(mut block) = src.read_block(&mut samples)? else {
-        return Ok(PassStats::default());
-    };
-    let plan = row_plan(fs, opts.fft_len, opts.rows_per_s, class);
-    let header = spectrum_header(class, &plan, block.center_hz(), fs);
-    let bins = plan.stft.welch.fft_len;
-    let config = PublisherConfig {
-        queue_bytes: (1 << 20).max(64 * (32 + 4 * bins)),
-        ..PublisherConfig::default()
-    };
-    let mut publisher = Publisher::new(header.clone(), config)?;
-    registry.register(&header, publisher.handle());
-    let mut stft = StftProcessor::new(plan.stft).map_err(|e| anyhow::anyhow!("STFT: {e:?}"))?;
-    let mut db = vec![0f32; bins];
-    let mut bytes = vec![0u8; 4 * bins];
-    let mut stats = PassStats::default();
-    let mut failure: Option<StreamError> = None;
-    loop {
-        stft.push(InputInfo::from(&block), &samples, |frame| {
-            let s = &frame.spectrum;
-            if s.bins() != bins {
-                return;
-            }
-            s.write_db(&s.psd, PowerUnit::DbfsPerHz, &mut db);
-            for (chunk, v) in bytes.chunks_exact_mut(4).zip(&db) {
-                chunk.copy_from_slice(&v.to_le_bytes());
-            }
-            let mut flags = RecordFlags::empty();
-            if frame.provenance.get().overload {
-                flags = flags.with(RecordFlags::OVERLOAD);
-            }
-            if frame.discontinuity.bits() & !Discontinuity::STREAM_START.bits() != 0 {
-                flags = flags.with(RecordFlags::DISCONTINUITY);
-            }
-            stats.rows += 1;
-            match publisher.publish_binary(BinaryRecord {
-                t: frame.t.host_time,
-                sample_index: frame.t.sample_index,
-                flags,
-                payload: &bytes,
-            }) {
-                Ok(_) => {}
-                Err(StreamError::SpectrumGated { .. }) => stats.rows_gated += 1,
-                Err(e) => failure = Some(e),
-            }
-            if let Some(tx) = history {
-                if let Err(TrySendError::Full(_)) = tx.try_send(frame.clone()) {
-                    stats.history_dropped += 1;
-                }
-            }
-        });
-        if let Some(e) = failure.take() {
-            return Err(e.into());
-        }
-        match src.read_block(&mut samples)? {
-            Some(next) => block = next,
-            None => break,
-        }
-    }
-    publisher.finish();
-    Ok(stats)
-}
-
-/// Folds frames into the floor product until the channel closes.
-pub fn history_worker(rx: Receiver<SpectrumFrame>, product: Arc<Mutex<FloorProduct>>) {
-    let Ok(mut tracker) = NoiseFloorTracker::new(FloorConfig::default()) else {
-        eprintln!("hk serve: noise-floor tracker config refused; history disabled");
-        return;
-    };
-    let mut errors = 0u64;
-    for frame in rx {
-        let floor = tracker.update(&frame, |_| {});
-        let mut p = product.lock().unwrap_or_else(|e| e.into_inner());
-        if p.ingest(&frame, floor).is_err() {
-            errors += 1;
-            if errors == 1 {
-                eprintln!("hk serve: history ingest refused a frame (further refusals counted)");
-            }
-        }
-    }
-    let mut p = product.lock().unwrap_or_else(|e| e.into_inner());
-    if let Err(e) = p.checkpoint() {
-        eprintln!("hk serve: history checkpoint failed: {e}");
-    }
-    if errors > 0 {
-        eprintln!("hk serve: {errors} frames refused by history ingest");
-    }
-}
-
-/// Runs the server until the process is stopped.
-pub fn run(opts: ServeOptions) -> anyhow::Result<()> {
-    let token = match std::env::var("HK_TOKEN") {
-        Ok(t) => Token::from_config(&t).map_err(|e| anyhow::anyhow!("HK_TOKEN: {e}"))?,
-        Err(_) => Token::generate().context("generating the API token")?,
-    };
-    let floor = match &opts.history_dir {
-        Some(dir) => Some(Arc::new(Mutex::new(
-            FloorProduct::open(dir, FloorProductConfig::default(), PowerCalibrations::new())
-                .with_context(|| format!("opening history in {}", dir.display()))?,
-        ))),
-        None => None,
-    };
-    let inventory = match &opts.inventory_db {
-        Some(path) => Some(Arc::new(Mutex::new(Repository::open(path).with_context(
-            || format!("opening the inventory database {}", path.display()),
-        )?))),
-        None => None,
-    };
+/// Starts the pipeline over the source and the API server.
+pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
+    let data_dir = opts.data_dir.clone().unwrap_or_else(temp_data_dir);
     let registry = StreamRegistry::new();
-    let state = ApiState {
-        streams: registry.clone(),
-        history: None,
-        floor: floor.clone(),
-        inventory,
-        status: None,
-    };
-    let mut config = ServerConfig::new(opts.bind, token.clone());
-    config.ui_dist = opts.ui_dist.clone();
-    let server = Server::start(config, state).context("starting the HTTP server")?;
-    let addr = server.local_addr();
-    eprintln!("hk serve: listening on {addr}");
-    if !addr.ip().is_loopback() {
-        eprintln!(
-            "hk serve: WARNING: bound to a non-loopback address; anyone on the network who \
-             learns the token (sent in cleartext, no TLS) can read the API"
-        );
+    let token = token(opts.token.as_deref())?;
+    match &opts.source {
+        ServeSource::HackRf { spec, live } => {
+            let lp = start_live(
+                &LiveOptions {
+                    source: spec.clone(),
+                    live: live.clone(),
+                    data_dir: data_dir.clone(),
+                    plan: None,
+                    schedule: false,
+                    feeds: None,
+                    calibration: opts.calibration.clone(),
+                    spectrum_fft_len: Some(opts.fft_len),
+                    spectrum_rows_per_s: Some(opts.rows_per_s),
+                },
+                &registry,
+            )?;
+            let server = serve_api(
+                opts.bind,
+                opts.ui_dist.clone(),
+                &registry,
+                &lp.handle,
+                token,
+                "hk serve",
+                lp.live_control.clone(),
+            )?;
+            Ok(Serving {
+                server,
+                handle: lp.handle,
+                live_control: lp.live_control,
+                source_control: Some(lp.control),
+                data_dir,
+            })
+        }
+        ServeSource::Replay {
+            path,
+            loop_replay,
+            realtime,
+        } => {
+            let pacing = if *realtime {
+                Pacing::RealTime { speed: 1.0 }
+            } else {
+                Pacing::Unpaced
+            };
+            let replay = open_replay(path, pacing, false)?;
+            let plan = load_plan(None, &replay.info)?;
+            let mut cfg = config_for(
+                data_dir.clone(),
+                plan,
+                &registry,
+                None,
+                opts.calibration.as_deref(),
+            )?;
+            cfg.settings.spectrum_fft_len = opts.fft_len;
+            cfg.settings.spectrum_rows_per_s = opts.rows_per_s;
+            cfg.source_class = replay.class;
+            cfg.lossless = !*realtime;
+            if let Some(hw) = &replay.meta.global.hw {
+                cfg.device_id = format!("sigmf:{hw}");
+            }
+            cfg.device_hw = replay.meta.global.hw.clone();
+            let reopen: Option<SourceFactory> = loop_replay.then(|| {
+                let p = path.clone();
+                Box::new(move || -> anyhow::Result<Box<dyn Source>> {
+                    Ok(Box::new(open_replay(&p, pacing, false)?.source))
+                }) as SourceFactory
+            });
+            let handle = hk_pipeline::Pipeline::start(
+                cfg,
+                Box::new(replay.source),
+                replay.info,
+                reopen,
+                Box::new(TrackInventory::default()),
+            )?;
+            let server = serve_api(
+                opts.bind,
+                opts.ui_dist.clone(),
+                &registry,
+                &handle,
+                token,
+                "hk serve",
+                None,
+            )?;
+            Ok(Serving {
+                server,
+                handle,
+                live_control: None,
+                source_control: None,
+                data_dir,
+            })
+        }
     }
-    let host = if addr.ip().is_unspecified() {
-        SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), addr.port())
-    } else {
-        addr
-    };
-    // The token rides in the fragment: never sent to the server or logged, stripped by the page.
-    println!("open http://{host}/#token={}", token.expose());
+}
 
-    let (tx, worker) = match &floor {
-        Some(product) => {
-            let (tx, rx) = sync_channel::<SpectrumFrame>(256);
-            let product = Arc::clone(product);
-            let worker = thread::Builder::new()
-                .name("hk-serve-history".into())
-                .spawn(move || history_worker(rx, product))?;
-            (Some(tx), Some(worker))
-        }
-        None => (None, None),
-    };
-    let mut pass = 0u64;
-    let mut tx = tx;
-    loop {
-        let stats = replay_pass(&opts, &registry, tx.as_ref())?;
-        pass += 1;
-        eprintln!(
-            "hk serve: pass {pass}: {} rows ({} gated), {} history frames dropped",
-            stats.rows, stats.rows_gated, stats.history_dropped
-        );
-        tx = None; // only the first pass goes to history
-        if !opts.loop_replay {
-            break;
-        }
+/// Runs the server until Ctrl-C (it keeps serving after a recording ends).
+pub fn run(opts: ServeOptions) -> anyhow::Result<()> {
+    let Serving {
+        server,
+        handle,
+        source_control,
+        ..
+    } = start(&opts)?;
+    let watch = signal::stop_on_signal(handle.stopper());
+    let summary = handle.wait()?;
+    drop(watch);
+    print!("{}", summary.to_text());
+    if let Some(stats) = source_control.and_then(|c| c.stats()) {
+        eprintln!("source: {stats:?}");
     }
-    drop(tx);
-    if let Some(w) = worker {
-        let _ = w.join();
+    if !signal::requested() {
+        eprintln!("hk serve: source finished; still serving the API and history (Ctrl-C to stop)");
+        signal::wait_for_signal();
     }
-    eprintln!("hk serve: replay finished; still serving the API and history (Ctrl-C to stop)");
-    let _server = server; // runs until the process is stopped
-    loop {
-        thread::park();
-    }
+    drop(server);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::path::Path;
+    use std::time::Duration;
+
     use super::*;
-    use hk_api::stream::GATED_SPECTRUM_MAX_ROW_RATE_HZ;
+    use hk_api::stream::{GATED_SPECTRUM_MAX_ROW_RATE_HZ, Publisher, PublisherConfig};
+    use hk_core::{HackRfDriver, SourceDriver};
+
+    const TOKEN: &str = "t042-serve-empty-inventory-token-0123";
 
     #[test]
     fn fm_fixture_is_unrestricted_and_others_fail_closed() {
@@ -342,5 +285,115 @@ mod tests {
             let header = spectrum_header(class, &plan, 100e6, 2.4e6);
             Publisher::new(header, PublisherConfig::default()).expect("contract accepts header");
         }
+    }
+
+    fn get(addr: SocketAddr, path: &str) -> (u16, String) {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        write!(
+            s,
+            "GET {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut raw = String::new();
+        s.read_to_string(&mut raw).unwrap();
+        let status = raw[9..12].parse().unwrap();
+        let body = raw.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_owned();
+        (status, body)
+    }
+
+    /// A recording with no samples (no source input) at 100.8 MHz.
+    fn empty_recording(dir: &Path) -> PathBuf {
+        use hk_model::sigmf::{Capture, Datatype};
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("empty.sigmf-data"), []).unwrap();
+        let mut meta = SigmfMeta::new(Datatype::Ci8);
+        meta.global.sample_rate = Some(2.4e6);
+        meta.captures.push(Capture {
+            sample_start: 0,
+            frequency: Some(100.8e6),
+            datetime: Some("2026-09-13T12:00:00Z".into()),
+            provenance: None,
+            clip_count: None,
+            extra: serde_json::Map::new(),
+        });
+        let path = dir.join("empty.sigmf-meta");
+        meta.write(&path).unwrap();
+        path
+    }
+
+    /// T-042: `hk serve` shows only what its pipeline detected. A freshly started server with no
+    /// source input answers an empty inventory (no demo seed anywhere in serving).
+    #[test]
+    fn a_fresh_server_with_no_source_input_has_an_empty_inventory() {
+        let dir = temp_data_dir();
+        let path = empty_recording(&dir.join("src"));
+        let Serving {
+            server,
+            handle,
+            live_control,
+            data_dir,
+            ..
+        } = start(&ServeOptions {
+            source: ServeSource::Replay {
+                path,
+                loop_replay: false,
+                realtime: false,
+            },
+            data_dir: Some(dir.join("data")),
+            bind: "127.0.0.1:0".parse().unwrap(),
+            ui_dist: None,
+            fft_len: 1024,
+            rows_per_s: 25.0,
+            calibration: None,
+            token: Some(TOKEN.into()),
+        })
+        .unwrap();
+        assert!(live_control.is_none(), "no live control over a recording");
+        assert_eq!(data_dir, dir.join("data"));
+        let addr = server.local_addr();
+        let check_empty = || {
+            let (status, body) = get(addr, "/api/inventory");
+            assert_eq!(status, 200, "{body}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["entries"], serde_json::json!([]), "{v}");
+        };
+        check_empty();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(handle.wait().map_err(|e| format!("{e:#}")));
+        });
+        let summary = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the run over an empty recording finishes")
+            .unwrap();
+        assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+        assert_eq!(summary.counter("/source/samples"), 0);
+        check_empty();
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_live_source_without_the_driver_is_reported() {
+        if HackRfDriver.available() {
+            return;
+        }
+        let err = start(&ServeOptions {
+            source: ServeSource::HackRf {
+                spec: "hackrf".into(),
+                live: LiveArgs::default(),
+            },
+            data_dir: Some(temp_data_dir()),
+            bind: "127.0.0.1:0".parse().unwrap(),
+            ui_dist: None,
+            fft_len: 1024,
+            rows_per_s: 25.0,
+            calibration: None,
+            token: Some(TOKEN.into()),
+        })
+        .err()
+        .expect("no driver in this build");
+        assert!(format!("{err:#}").contains("hackrf"), "{err:#}");
     }
 }

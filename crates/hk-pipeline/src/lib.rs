@@ -51,7 +51,11 @@ mod spectrum;
 
 pub use chains::spec::{ChainShape, ChainSpec, NodeSpec, Trigger, builtin_chains};
 pub use class::{ClassRule, classify_emitter, source_class};
-pub use config::{PipelineConfig, PipelineSettings, StreamSink, detection_resolution, replay_plan};
+pub use config::{
+    PipelineConfig, PipelineSettings, StreamSink, detection_resolution, load_calibrations,
+    replay_plan,
+};
+pub use control::SwitchableControl;
 pub use events::Candidate;
 pub use family::{Explanation, FamilyPrior, explain_emitter, explanations};
 pub use inventory::{Inventory, TrackInventory};

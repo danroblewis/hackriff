@@ -404,6 +404,7 @@ dependencies = [
  "hk-model",
  "hk-pipeline",
  "hk-store",
+ "libc",
  "num-complex",
  "serde_json",
 ]
@@ -433,6 +434,7 @@ dependencies = [
  "hk-model",
  "libc",
  "num-complex",
+ "pkg-config",
  "serde_json",
  "thiserror",
 ]

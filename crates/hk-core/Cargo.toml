@@ -14,6 +14,15 @@ num-complex.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[features]
+# T-037a: the live HackRF One source links the system libhackrf (BSD-3-Clause; ADR-0010). Off by
+# default so CI builds and tests need no libhackrf.
+hackrf = ["dep:pkg-config"]
+
+[build-dependencies]
+# T-037a: finds libhackrf for the `hackrf` feature (ADR-0010 ledger).
+pkg-config = { version = "0.3", optional = true }
+
 [dev-dependencies]
 # T-009: scheduler tests feed verification captures to `hk_detect::trust` (a dev-only cycle:
 # hk-detect depends on hk-core; the integration tests link one hk-core).

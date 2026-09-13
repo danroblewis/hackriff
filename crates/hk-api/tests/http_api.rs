@@ -404,6 +404,7 @@ fn unauthenticated_api_calls_are_rejected() {
             floor: None,
             inventory: None,
             status: None,
+            live_control: None,
         },
         Some(dist.0.clone()),
     );

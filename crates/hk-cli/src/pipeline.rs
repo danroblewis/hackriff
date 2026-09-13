@@ -1,28 +1,124 @@
-//! `hk replay` and `hackriffd`: the binaries' pipeline composition (T-027). The pipeline itself
-//! is `hk_pipeline`; this module picks the source, plan, data directory and API server.
+//! `hk replay`, `hk run`, `hk serve` and `hackriffd`: the binaries' pipeline composition (T-027,
+//! T-037a, T-042). The pipeline itself is `hk_pipeline`; this module picks the source, plan, data
+//! directory, calibration and API server.
 //!
-//! - `hk replay <fixture> [--data-dir D] [--plan P] [--serve ADDR] [--paced] [--schedule]` runs
-//!   the recording once, unpaced and lossless by default, and prints the run summary. Without
-//!   `--data-dir` a fresh directory under the system temp dir is used (printed). With `--serve`
-//!   the API (streams, history, floor, status) is up during the run and stays up afterwards
-//!   until the process is stopped.
-//! - `hackriffd --source sigmf:<file> [--loop] --data-dir D [--plan P] [--bind ADDR]` paces the
-//!   recording in real time (lossy like a live source: ring overruns are counted, never waited
-//!   for), drives the attention scheduler with the plan, publishes streams over the bridge and
-//!   serves `/api/status`. A live HackRF source is not implemented yet (the source stub).
+//! - `hk replay <fixture> [--data-dir D] [--plan P] [--serve ADDR] [--paced] [--schedule]
+//!   [--calibration C]` runs the recording once, unpaced and lossless by default, and prints the
+//!   run summary. Without `--data-dir` a fresh directory under the system temp dir is used.
+//! - `hk run [--source hackrf[:SERIAL]] [--center-hz F --rate R --lna L --vga V --amp]
+//!   [--duration S] [--serve ADDR] [--schedule]` runs the whole pipeline over the **live HackRF
+//!   One** (receive only) until `--duration` or Ctrl-C. Lossless mode is never used (a radio
+//!   cannot pause; `Pipeline::start` refuses it).
+//! - `hackriffd [--source hackrf[:SERIAL] | sigmf:<file> [--loop]] --data-dir D [--plan P]
+//!   [--bind ADDR]` drives the attention scheduler (at the pipeline's one sample rate), publishes
+//!   streams over the bridge and serves `/api/status`. The live HackRF is the default source.
+//! - Ctrl-C (or SIGTERM) stops every run gracefully ([`crate::signal`]).
+//! - **Content class of a live run:** band-derived from the tuned window (`band_class` over
+//!   `centre ± rate/2`, the T-027 restricted paging/cellular bands), or, when the scheduler
+//!   drives the radio, over every window that tiles the plan's regions. A [`LiveControl`] retune
+//!   to a window of another class is refused.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context as _;
-use hk_api::{ApiState, Server, ServerConfig, StreamRegistry, Token};
-use hk_core::{Pacing, Source};
-use hk_model::{Repository, ScanPlan, Timestamp};
+use hk_api::{
+    ApiState, LiveControl, LiveTuning, Server, ServerConfig, SourceLiveControl, StreamRegistry,
+    Token, WindowPolicy,
+};
+use hk_core::{
+    DeviceInfo, HackRfDriver, NamedGain, OpenRequest, Pacing, Source, SourceCapabilities,
+    SourceControl, SourceDriver,
+};
+use hk_model::{ContentClass, Repository, ScanPlan, Timestamp};
+use hk_pipeline::class::band_class;
 use hk_pipeline::{
     PipelineConfig, PipelineHandle, RunSummary, SourceFactory, SourceInfo, TrackInventory,
-    open_replay, replay_plan,
+    load_calibrations, open_replay, replay_plan,
 };
+
+use crate::signal;
+
+/// Live HackRF One settings (shared by `hk run`, `hk serve` and `hackriffd`).
+#[derive(clap::Args, Clone, Debug, PartialEq)]
+pub struct LiveArgs {
+    /// Live centre frequency, Hz.
+    #[arg(long = "center-hz", default_value_t = 100.8e6)]
+    pub center_hz: f64,
+    /// Live sample rate (span), Hz: 2–20 Msps.
+    #[arg(long = "rate", default_value_t = 2.4e6)]
+    pub sample_rate_hz: f64,
+    /// LNA (IF) gain, dB: 0–40 in 8 dB steps.
+    #[arg(long = "lna", default_value_t = 16.0)]
+    pub lna_db: f64,
+    /// VGA (baseband) gain, dB: 0–62 in 2 dB steps.
+    #[arg(long = "vga", default_value_t = 20.0)]
+    pub vga_db: f64,
+    /// RF amplifier on (the `amp` stage at its maximum).
+    #[arg(long)]
+    pub amp: bool,
+    /// Baseband filter bandwidth, Hz (default: 0.75 x rate).
+    #[arg(long = "baseband-filter-hz")]
+    pub baseband_filter_hz: Option<f64>,
+    /// Named gain `STAGE=DB` (repeatable; stage names from the device's capabilities). Overrides
+    /// --lna, --vga and --amp.
+    #[arg(long = "gain", value_name = "STAGE=DB")]
+    pub gains: Vec<String>,
+}
+
+impl LiveArgs {
+    /// The requested gains as named stages of `caps` (`--lna`, `--vga`, `--amp`, then `--gain`).
+    pub fn named_gains(&self, caps: &SourceCapabilities) -> anyhow::Result<Vec<NamedGain>> {
+        let mut gains: Vec<NamedGain> = Vec::new();
+        let mut set = |stage: &str, db: f64| match gains.iter_mut().find(|g| g.stage == stage) {
+            Some(g) => g.db = db,
+            None => gains.push(NamedGain::new(stage, db)),
+        };
+        for (stage, db) in [("lna", self.lna_db), ("vga", self.vga_db)] {
+            if caps.gain_stage(stage).is_some() {
+                set(stage, db);
+            }
+        }
+        if let Some(amp) = caps.gain_stage("amp") {
+            set("amp", if self.amp { amp.max_db } else { amp.min_db });
+        }
+        for spec in &self.gains {
+            let (stage, db) = spec
+                .split_once('=')
+                .and_then(|(s, v)| v.trim().parse::<f64>().ok().map(|v| (s.trim(), v)))
+                .with_context(|| format!("--gain {spec:?}: expected STAGE=DB"))?;
+            if caps.gain_stage(stage).is_none() {
+                anyhow::bail!(
+                    "--gain {spec:?}: {} has no gain stage {stage:?} (stages: {})",
+                    caps.driver,
+                    caps.gain_stages
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            set(stage, db);
+        }
+        Ok(gains)
+    }
+}
+
+impl Default for LiveArgs {
+    fn default() -> Self {
+        Self {
+            center_hz: 100.8e6,
+            sample_rate_hz: 2.4e6,
+            lna_db: 16.0,
+            vga_db: 20.0,
+            amp: false,
+            baseband_filter_hz: None,
+            gains: Vec::new(),
+        }
+    }
+}
 
 /// `hk replay` options.
 #[derive(Clone, Debug, Default)]
@@ -43,14 +139,43 @@ pub struct ReplayArgs {
     pub feeds: Option<PathBuf>,
     /// Built UI directory.
     pub ui_dist: Option<PathBuf>,
+    /// T-021 calibration JSON (file or directory).
+    pub calibration: Option<PathBuf>,
+}
+
+/// `hk run` options (live HackRF One).
+#[derive(Clone, Debug, Default)]
+pub struct RunArgs {
+    /// `hackrf` or `hackrf:<serial>`.
+    pub source: String,
+    /// Tuning and gains.
+    pub live: LiveArgs,
+    /// Stop after this long (default: until Ctrl-C).
+    pub duration_s: Option<f64>,
+    /// Data directory (default: a fresh temp directory).
+    pub data_dir: Option<PathBuf>,
+    /// ScanPlan JSON.
+    pub plan: Option<PathBuf>,
+    /// Serve the API while (and after) running.
+    pub serve: Option<SocketAddr>,
+    /// Drive the attention scheduler (it retunes the radio).
+    pub schedule: bool,
+    /// Offline feed cache for the correlator.
+    pub feeds: Option<PathBuf>,
+    /// Built UI directory.
+    pub ui_dist: Option<PathBuf>,
+    /// T-021 calibration JSON (file or directory).
+    pub calibration: Option<PathBuf>,
 }
 
 /// `hackriffd` options.
 #[derive(Clone, Debug)]
 pub struct DaemonArgs {
-    /// `sigmf:<path>` (or `hackrf`, not implemented yet).
+    /// `hackrf`, `hackrf:<serial>` (live, the default) or `sigmf:<path>`.
     pub source: String,
-    /// Replay again at the end, continuing the stream.
+    /// Live tuning (initial window; the scheduler then follows the plan).
+    pub live: LiveArgs,
+    /// Replay again at the end, continuing the stream (recordings only).
     pub loop_replay: bool,
     /// Data directory.
     pub data_dir: PathBuf,
@@ -60,15 +185,17 @@ pub struct DaemonArgs {
     pub bind: SocketAddr,
     /// Built UI directory.
     pub ui_dist: Option<PathBuf>,
-    /// Replay unpaced and lossless instead of in real time.
+    /// Replay unpaced and lossless instead of in real time (recordings only).
     pub unpaced: bool,
     /// Offline feed cache for the correlator.
     pub feeds: Option<PathBuf>,
     /// API token (default: `HK_TOKEN`, else generated).
     pub token: Option<String>,
+    /// T-021 calibration JSON (file or directory).
+    pub calibration: Option<PathBuf>,
 }
 
-/// Loads a ScanPlan JSON, or a single-region plan over the recording.
+/// Loads a ScanPlan JSON, or a single-region plan over the source window.
 pub fn load_plan(path: Option<&Path>, info: &SourceInfo) -> anyhow::Result<ScanPlan> {
     match path {
         Some(p) => {
@@ -100,7 +227,8 @@ pub fn temp_data_dir() -> PathBuf {
     ))
 }
 
-fn token(configured: Option<&str>) -> anyhow::Result<Token> {
+/// The API token: `configured`, else `HK_TOKEN`, else a generated one.
+pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     match configured
         .map(str::to_owned)
         .or_else(|| std::env::var("HK_TOKEN").ok())
@@ -110,14 +238,16 @@ fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     }
 }
 
-/// Starts the API server over a running pipeline.
-fn serve(
+/// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
+/// the pipeline writes, and (live runs without the scheduler) the live control handle.
+pub fn serve_api(
     bind: SocketAddr,
     ui_dist: Option<PathBuf>,
     registry: &StreamRegistry,
     handle: &PipelineHandle,
     token: Token,
     tag: &str,
+    live_control: Option<Arc<dyn LiveControl>>,
 ) -> anyhow::Result<Server> {
     let counters = handle.counters();
     // The pipeline writes the inventory (TrackInventory, chain record writers, plugin Ingest)
@@ -130,6 +260,7 @@ fn serve(
         floor: Some(handle.floor_product()),
         inventory: Some(Arc::new(Mutex::new(inventory))),
         status: Some(Arc::new(move || counters.to_json())),
+        live_control,
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
@@ -147,21 +278,225 @@ fn serve(
     } else {
         addr
     };
+    // The token rides in the fragment: never sent to the server or logged, stripped by the page.
     println!("open http://{host}/#token={}", token.expose());
     Ok(server)
 }
 
-fn config_for(
+pub(crate) fn config_for(
     data_dir: PathBuf,
     plan: ScanPlan,
     registry: &StreamRegistry,
     feeds: Option<PathBuf>,
+    calibration: Option<&Path>,
 ) -> anyhow::Result<PipelineConfig> {
     let mut cfg = PipelineConfig::new(data_dir, plan)?;
     let reg = registry.clone();
     cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
     cfg.feeds_dir = feeds;
+    if let Some(path) = calibration {
+        cfg.calibrations = load_calibrations(path)?;
+    }
     Ok(cfg)
+}
+
+/// `hackrf` → the first device, `hackrf:<serial>` → that one; anything else is not a HackRF
+/// source.
+pub fn hackrf_serial(spec: &str) -> Option<Option<String>> {
+    match spec {
+        "hackrf" => Some(None),
+        s => s
+            .strip_prefix("hackrf:")
+            .filter(|serial| !serial.is_empty())
+            .map(|serial| Some(serial.to_owned())),
+    }
+}
+
+/// The content class of every window tiling `plan`'s regions at rate `fs`.
+pub fn plan_class(plan: &ScanPlan, fs: f64) -> ContentClass {
+    let mut centres = Vec::new();
+    for r in &plan.regions {
+        let (lo, hi) = (r.freq.lo_hz, r.freq.hi_hz);
+        if hi - lo <= fs {
+            centres.push(0.5 * (lo + hi));
+        } else {
+            let mut c = lo + fs / 2.0;
+            while c - fs / 2.0 < hi {
+                centres.push(c);
+                c += fs;
+            }
+        }
+    }
+    band_class(&centres, fs)
+}
+
+/// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One). Later drivers
+/// (the T-049 mock, SoapySDR) plug in here behind the same `SourceDriver` contract.
+pub fn driver_for(spec: &str) -> Option<(Box<dyn SourceDriver>, Option<String>)> {
+    hackrf_serial(spec).map(|serial| (Box::new(HackRfDriver) as Box<dyn SourceDriver>, serial))
+}
+
+/// An opened live source.
+pub struct LiveSource {
+    /// The stream (moved into the pipeline).
+    pub source: Box<dyn Source>,
+    /// Its control handle (tuning, named gains, stats, identity).
+    pub control: Arc<dyn SourceControl>,
+    /// Rate, centre, start time.
+    pub info: SourceInfo,
+    /// Named gains in force (quantised by the capabilities).
+    pub gains: Vec<NamedGain>,
+    /// Identity (provenance `device_id`, SigMF `core:hw`).
+    pub device: DeviceInfo,
+}
+
+/// Opens a live source (receive only) through its driver with `live`'s settings.
+pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
+    let Some((driver, device)) = driver_for(spec) else {
+        anyhow::bail!("unsupported live source {spec:?}: use hackrf or hackrf:<serial>");
+    };
+    let caps = driver.capabilities();
+    let gains = live.named_gains(&caps)?;
+    let request = OpenRequest {
+        device,
+        center_hz: live.center_hz,
+        sample_rate_hz: live.sample_rate_hz,
+        gains: gains.clone(),
+        baseband_filter_hz: live.baseband_filter_hz,
+        bias_tee: false,
+    };
+    let source = driver
+        .open(&request)
+        .with_context(|| format!("opening the {} source", driver.name()))?;
+    let control = source.control();
+    let device = control.device_info().unwrap_or_else(|| DeviceInfo {
+        driver: driver.name().into(),
+        device_id: driver.name().into(),
+        hw: driver.name().into(),
+    });
+    eprintln!("{}: {}", driver.name(), device.hw);
+    let gains = gains
+        .into_iter()
+        .filter_map(|g| {
+            let db = caps.gain_stage(&g.stage)?.quantise(g.db)?;
+            Some(NamedGain::new(g.stage, db))
+        })
+        .collect();
+    Ok(LiveSource {
+        source,
+        control,
+        info: SourceInfo {
+            sample_rate_hz: live.sample_rate_hz,
+            center_hz: live.center_hz.round(),
+            start_time: Timestamp::now(),
+        },
+        gains,
+        device,
+    })
+}
+
+/// A live pipeline start request.
+#[derive(Clone, Debug)]
+pub struct LiveOptions {
+    /// `hackrf` or `hackrf:<serial>`.
+    pub source: String,
+    /// Tuning and gains.
+    pub live: LiveArgs,
+    /// Data directory.
+    pub data_dir: PathBuf,
+    /// ScanPlan JSON.
+    pub plan: Option<PathBuf>,
+    /// Drive the attention scheduler (then no live control handle is offered).
+    pub schedule: bool,
+    /// Offline feed cache for the correlator.
+    pub feeds: Option<PathBuf>,
+    /// T-021 calibration JSON.
+    pub calibration: Option<PathBuf>,
+    /// Spectrum stream FFT length override.
+    pub spectrum_fft_len: Option<usize>,
+    /// Spectrum stream row rate override.
+    pub spectrum_rows_per_s: Option<f64>,
+}
+
+/// A running live pipeline.
+pub struct LivePipeline {
+    /// The pipeline.
+    pub handle: PipelineHandle,
+    /// The source's control handle (stats, identity).
+    pub control: Arc<dyn SourceControl>,
+    /// The API control handle (`None` when the scheduler drives the radio).
+    pub live_control: Option<Arc<dyn LiveControl>>,
+    /// The run's content class.
+    pub class: ContentClass,
+}
+
+/// Starts the whole pipeline over the live HackRF One (see the module docs).
+pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Result<LivePipeline> {
+    let live = open_live(&opts.source, &opts.live)?;
+    let plan = load_plan(opts.plan.as_deref(), &live.info)?;
+    let fs = live.info.sample_rate_hz;
+    let class = if opts.schedule {
+        plan_class(&plan, fs)
+    } else {
+        band_class(&[live.info.center_hz], fs)
+    };
+    let mut cfg = config_for(
+        opts.data_dir.clone(),
+        plan,
+        registry,
+        opts.feeds.clone(),
+        opts.calibration.as_deref(),
+    )?;
+    if let Some(n) = opts.spectrum_fft_len {
+        cfg.settings.spectrum_fft_len = n;
+    }
+    if let Some(r) = opts.spectrum_rows_per_s {
+        cfg.settings.spectrum_rows_per_s = r;
+    }
+    cfg.source_class = class;
+    // A radio cannot pause: never lossless (Pipeline::start would refuse it anyway).
+    cfg.lossless = false;
+    cfg.drive_scheduler = opts.schedule;
+    cfg.device_id = live.device.device_id.clone();
+    cfg.device_hw = Some(live.device.hw.clone());
+    let live_control = (!opts.schedule).then(|| {
+        let policy: WindowPolicy = Arc::new(move |center, rate| {
+            let c = band_class(&[center], rate);
+            if c == class {
+                Ok(())
+            } else {
+                Err(format!(
+                    "a window at {center} Hz / {rate} Hz has content class {c:?} but this run is \
+                     {class:?}; restart the run to change class"
+                ))
+            }
+        });
+        let initial = LiveTuning {
+            center_hz: live.info.center_hz,
+            sample_rate_hz: fs,
+            gains: live.gains.clone(),
+            bias_tee: live.control.capabilities().bias_tee.then_some(false),
+        };
+        Arc::new(
+            SourceLiveControl::new(Arc::clone(&live.control), initial)
+                .with_window_policy(policy)
+                .with_fixed_rate(),
+        ) as Arc<dyn LiveControl>
+    });
+    let control = Arc::clone(&live.control);
+    let handle = hk_pipeline::Pipeline::start(
+        cfg,
+        live.source,
+        live.info,
+        None,
+        Box::new(TrackInventory::default()),
+    )?;
+    Ok(LivePipeline {
+        handle,
+        control,
+        live_control,
+        class,
+    })
 }
 
 /// Runs `hk replay`.
@@ -175,7 +510,13 @@ pub fn run_replay(args: &ReplayArgs) -> anyhow::Result<RunSummary> {
     let plan = load_plan(args.plan.as_deref(), &replay.info)?;
     let data_dir = args.data_dir.clone().unwrap_or_else(temp_data_dir);
     let registry = StreamRegistry::new();
-    let mut cfg = config_for(data_dir, plan, &registry, args.feeds.clone())?;
+    let mut cfg = config_for(
+        data_dir,
+        plan,
+        &registry,
+        args.feeds.clone(),
+        args.calibration.as_deref(),
+    )?;
     cfg.source_class = replay.class;
     // Explicit opt-in: `PipelineConfig` defaults to lossless off (live-source semantics), and a
     // recording can pause, so unpaced replay waits for slow readers instead of dropping.
@@ -184,6 +525,7 @@ pub fn run_replay(args: &ReplayArgs) -> anyhow::Result<RunSummary> {
     if let Some(hw) = &replay.meta.global.hw {
         cfg.device_id = format!("sigmf:{hw}");
     }
+    cfg.device_hw = replay.meta.global.hw.clone();
     let handle = hk_pipeline::Pipeline::start(
         cfg,
         Box::new(replay.source),
@@ -192,25 +534,76 @@ pub fn run_replay(args: &ReplayArgs) -> anyhow::Result<RunSummary> {
         Box::new(TrackInventory::default()),
     )?;
     let server = match args.serve {
-        Some(bind) => Some(serve(
+        Some(bind) => Some(serve_api(
             bind,
             args.ui_dist.clone(),
             &registry,
             &handle,
             token(None)?,
             "hk replay",
+            None,
         )?),
         None => None,
     };
+    let watch = signal::stop_on_signal(handle.stopper());
     let summary = handle.wait()?;
-    if server.is_some() {
+    drop(watch);
+    if server.is_some() && !signal::requested() {
         print!("{}", summary.to_text());
         eprintln!("hk replay: finished; still serving the API (Ctrl-C to stop)");
-        let _server = server;
-        loop {
-            std::thread::park();
-        }
+        signal::wait_for_signal();
     }
+    drop(server);
+    Ok(summary)
+}
+
+/// Runs `hk run` (live HackRF One) until `--duration` or Ctrl-C.
+pub fn run_live(args: &RunArgs) -> anyhow::Result<RunSummary> {
+    let registry = StreamRegistry::new();
+    let lp = start_live(
+        &LiveOptions {
+            source: args.source.clone(),
+            live: args.live.clone(),
+            data_dir: args.data_dir.clone().unwrap_or_else(temp_data_dir),
+            plan: args.plan.clone(),
+            schedule: args.schedule,
+            feeds: args.feeds.clone(),
+            calibration: args.calibration.clone(),
+            spectrum_fft_len: None,
+            spectrum_rows_per_s: None,
+        },
+        &registry,
+    )?;
+    let server = match args.serve {
+        Some(bind) => Some(serve_api(
+            bind,
+            args.ui_dist.clone(),
+            &registry,
+            &lp.handle,
+            token(None)?,
+            "hk run",
+            lp.live_control.clone(),
+        )?),
+        None => None,
+    };
+    let watch = match args.duration_s {
+        Some(s) => signal::stop_on_signal_or_after(
+            lp.handle.stopper(),
+            Duration::from_secs_f64(s.max(0.0)),
+        ),
+        None => signal::stop_on_signal(lp.handle.stopper()),
+    };
+    let summary = lp.handle.wait()?;
+    drop(watch);
+    if let Some(stats) = lp.control.stats() {
+        eprintln!("source: {stats:?}");
+    }
+    if server.is_some() && !signal::requested() {
+        print!("{}", summary.to_text());
+        eprintln!("hk run: finished; still serving the API (Ctrl-C to stop)");
+        signal::wait_for_signal();
+    }
+    drop(server);
     Ok(summary)
 }
 
@@ -220,14 +613,53 @@ pub struct Daemon {
     pub server: Server,
     /// The pipeline.
     pub handle: PipelineHandle,
+    /// The live source's control handle (stats, identity); `None` for recordings.
+    pub source_control: Option<Arc<dyn SourceControl>>,
 }
 
 /// Starts `hackriffd`'s pipeline (scheduler driven) and API server.
 pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
+    let registry = StreamRegistry::new();
+    if hackrf_serial(&args.source).is_some() {
+        if args.unpaced || args.loop_replay {
+            anyhow::bail!(
+                "--unpaced and --loop apply to sigmf: recordings; a live HackRF can neither pause \
+                 nor loop"
+            );
+        }
+        let token = token(args.token.as_deref())?;
+        let lp = start_live(
+            &LiveOptions {
+                source: args.source.clone(),
+                live: args.live.clone(),
+                data_dir: args.data_dir.clone(),
+                plan: args.plan.clone(),
+                schedule: true,
+                feeds: args.feeds.clone(),
+                calibration: args.calibration.clone(),
+                spectrum_fft_len: None,
+                spectrum_rows_per_s: None,
+            },
+            &registry,
+        )?;
+        let server = serve_api(
+            args.bind,
+            args.ui_dist.clone(),
+            &registry,
+            &lp.handle,
+            token,
+            "hackriffd",
+            None,
+        )?;
+        return Ok(Daemon {
+            server,
+            handle: lp.handle,
+            source_control: Some(lp.control),
+        });
+    }
     let Some(path) = args.source.strip_prefix("sigmf:").map(PathBuf::from) else {
         anyhow::bail!(
-            "unsupported --source {:?}: use sigmf:<file.sigmf-meta> (the live HackRF source is \
-             not implemented yet)",
+            "unsupported --source {:?}: use hackrf, hackrf:<serial> or sigmf:<file.sigmf-meta>",
             args.source
         );
     };
@@ -238,10 +670,15 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     };
     let replay = open_replay(&path, pacing, true)?;
     let plan = load_plan(args.plan.as_deref(), &replay.info)?;
-    let registry = StreamRegistry::new();
-    let mut cfg = config_for(args.data_dir.clone(), plan, &registry, args.feeds.clone())?;
+    let mut cfg = config_for(
+        args.data_dir.clone(),
+        plan,
+        &registry,
+        args.feeds.clone(),
+        args.calibration.as_deref(),
+    )?;
     cfg.source_class = replay.class;
-    // Explicit opt-in, as for `hk replay` (a future live source must leave this off).
+    // Explicit opt-in, as for `hk replay` (a live source leaves this off).
     cfg.lossless = args.unpaced;
     cfg.drive_scheduler = true;
     cfg.device_id = replay
@@ -250,6 +687,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
         .hw
         .as_ref()
         .map_or_else(|| "sigmf-replay".into(), |hw| format!("sigmf:{hw}"));
+    cfg.device_hw = replay.meta.global.hw.clone();
     let reopen: Option<SourceFactory> = if args.loop_replay {
         let p = path.clone();
         Some(Box::new(move || -> anyhow::Result<Box<dyn Source>> {
@@ -266,34 +704,51 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
         reopen,
         Box::new(TrackInventory::default()),
     )?;
-    let server = serve(
+    let server = serve_api(
         args.bind,
         args.ui_dist.clone(),
         &registry,
         &handle,
         token,
         "hackriffd",
+        None,
     )?;
-    Ok(Daemon { server, handle })
+    Ok(Daemon {
+        server,
+        handle,
+        source_control: None,
+    })
 }
 
-/// Runs `hackriffd` until the process is stopped.
+/// Runs `hackriffd` until the source ends and a shutdown signal arrives, or until Ctrl-C.
 pub fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
-    let Daemon { server, handle } = start_daemon(args)?;
+    let Daemon {
+        server,
+        handle,
+        source_control,
+    } = start_daemon(args)?;
+    let watch = signal::stop_on_signal(handle.stopper());
     let summary = handle.wait()?;
+    drop(watch);
     print!("{}", summary.to_text());
-    eprintln!("hackriffd: source finished; still serving the API (Ctrl-C to stop)");
-    let _server = server;
-    loop {
-        std::thread::park();
+    if let Some(stats) = source_control.and_then(|c| c.stats()) {
+        eprintln!("source: {stats:?}");
     }
+    if !signal::requested() {
+        eprintln!("hackriffd: source finished; still serving the API (Ctrl-C to stop)");
+        signal::wait_for_signal();
+    }
+    drop(server);
+    if !summary.errors.is_empty() {
+        anyhow::bail!("the run reported {} error(s)", summary.errors.len());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    use std::time::Duration;
 
     use super::*;
 
@@ -352,6 +807,22 @@ mod tests {
         }
         eprintln!("SKIP {name}: fixture data is not fetched (git lfs pull)");
         None
+    }
+
+    fn daemon_args(source: String, data_dir: PathBuf, token: Option<&str>) -> DaemonArgs {
+        DaemonArgs {
+            source,
+            live: LiveArgs::default(),
+            loop_replay: false,
+            data_dir,
+            plan: None,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            ui_dist: None,
+            unpaced: true,
+            feeds: None,
+            token: token.map(str::to_owned),
+            calibration: None,
+        }
     }
 
     /// T-027 review fix: the HackRF fixtures start at `core:global_index` 423 000 000 (915 MHz)
@@ -444,17 +915,11 @@ mod tests {
         const TOKEN: &str = "t027-daemon-status-token-0123456789";
         let dir = temp_data_dir();
         let fixture = tiny_recording(&dir.join("src"), 3.0);
-        let Daemon { server, handle } = start_daemon(&DaemonArgs {
-            source: format!("sigmf:{}", fixture.display()),
-            loop_replay: false,
-            data_dir: dir.clone(),
-            plan: None,
-            bind: "127.0.0.1:0".parse().unwrap(),
-            ui_dist: None,
-            unpaced: true,
-            feeds: None,
-            token: Some(TOKEN.into()),
-        })
+        let Daemon { server, handle, .. } = start_daemon(&daemon_args(
+            format!("sigmf:{}", fixture.display()),
+            dir.clone(),
+            Some(TOKEN),
+        ))
         .unwrap();
         let addr = server.local_addr();
         let (unauth, _) = get(addr, "/api/status", None);
@@ -487,18 +952,13 @@ mod tests {
     fn daemon_loop_continues_the_stream_across_passes() {
         let dir = temp_data_dir();
         let fixture = tiny_recording(&dir.join("src"), 0.25);
-        let Daemon { server, handle } = start_daemon(&DaemonArgs {
-            source: format!("sigmf:{}", fixture.display()),
-            loop_replay: true,
-            data_dir: dir.clone(),
-            plan: None,
-            bind: "127.0.0.1:0".parse().unwrap(),
-            ui_dist: None,
-            unpaced: true,
-            feeds: None,
-            token: Some("t027-daemon-loop-token-0123456789".into()),
-        })
-        .unwrap();
+        let mut args = daemon_args(
+            format!("sigmf:{}", fixture.display()),
+            dir.clone(),
+            Some("t027-daemon-loop-token-0123456789"),
+        );
+        args.loop_replay = true;
+        let Daemon { server, handle, .. } = start_daemon(&args).unwrap();
         let counters = handle.counters();
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while counters
@@ -536,20 +996,71 @@ mod tests {
     }
 
     #[test]
-    fn daemon_rejects_unsupported_sources() {
-        let err = start_daemon(&DaemonArgs {
-            source: "hackrf".into(),
-            loop_replay: false,
-            data_dir: temp_data_dir(),
-            plan: None,
-            bind: "127.0.0.1:0".parse().unwrap(),
-            ui_dist: None,
-            unpaced: true,
-            feeds: None,
-            token: None,
-        })
-        .err()
-        .expect("rejected");
+    fn daemon_rejects_unsupported_sources_and_live_loop_options() {
+        let err = start_daemon(&daemon_args("bogus".into(), temp_data_dir(), None))
+            .err()
+            .expect("rejected");
         assert!(err.to_string().contains("sigmf:"), "{err}");
+        let mut live = daemon_args("hackrf".into(), temp_data_dir(), None);
+        live.loop_replay = true;
+        let err = start_daemon(&live).err().expect("a radio cannot loop");
+        assert!(err.to_string().contains("--loop"), "{err}");
+        if !HackRfDriver.available() {
+            live.loop_replay = false;
+            live.unpaced = false;
+            let err = start_daemon(&live).err().expect("no driver in this build");
+            assert!(format!("{err:#}").contains("hackrf"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn live_gains_are_named_stages_of_the_device() {
+        let caps = HackRfDriver.capabilities();
+        let mut live = LiveArgs {
+            lna_db: 32.0,
+            vga_db: 30.0,
+            amp: true,
+            ..LiveArgs::default()
+        };
+        assert_eq!(
+            live.named_gains(&caps).unwrap(),
+            vec![
+                NamedGain::new("lna", 32.0),
+                NamedGain::new("vga", 30.0),
+                NamedGain::new("amp", 11.0)
+            ]
+        );
+        live.gains = vec!["vga=40".into()];
+        assert_eq!(
+            live.named_gains(&caps).unwrap()[1],
+            NamedGain::new("vga", 40.0)
+        );
+        live.gains = vec!["mixer=3".into()];
+        assert!(live.named_gains(&caps).is_err());
+        live.gains = vec!["vga".into()];
+        assert!(live.named_gains(&caps).is_err());
+    }
+
+    #[test]
+    fn live_source_specs_and_window_classes() {
+        assert_eq!(hackrf_serial("hackrf"), Some(None));
+        assert_eq!(hackrf_serial("hackrf:abc"), Some(Some("abc".into())));
+        assert_eq!(hackrf_serial("hackrf:"), None);
+        assert_eq!(hackrf_serial("sigmf:x"), None);
+        let fm = replay_plan(100.8e6, 2.4e6, Timestamp::UNIX_EPOCH);
+        assert_eq!(plan_class(&fm, 2.4e6), ContentClass::Unrestricted);
+        let mut wide = replay_plan(915e6, 2e6, Timestamp::UNIX_EPOCH);
+        wide.regions[0].freq = hk_model::FreqRange::new(900e6, 940e6);
+        // 900-940 MHz reaches restricted allocations (the cellular band below 902 MHz comes
+        // first, then 929-932 MHz paging): the whole plan is restricted.
+        let class = plan_class(&wide, 2e6);
+        assert!(
+            matches!(
+                class,
+                ContentClass::RestrictedPaging | ContentClass::RestrictedCellular
+            ),
+            "{class:?}"
+        );
+        assert!(!class.permits_content());
     }
 }

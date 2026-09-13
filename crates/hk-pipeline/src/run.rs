@@ -9,23 +9,115 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use hk_core::{
-    Pacing, ReplayOptions, RingConfig, RingHandle, SigmfReplaySource, Source, ring_buffer,
+    BlockHeader, Pacing, ProvenanceHandle, ReplayOptions, RingConfig, RingHandle,
+    SigmfReplaySource, Source, SourceCapabilities, SourceControl, SourceError, ring_buffer,
 };
 use hk_dsp::radiometry::PowerCalibrations;
 use hk_model::sigmf::SigmfMeta;
 use hk_model::{
-    ContentClass, InventoryQuery, Repository, Survey, SurveyId, SurveyState, SurveySummary,
-    Timestamp,
+    CalibrationState, CalibrationStateId, ContentClass, InventoryQuery, ProvenanceId, Repository,
+    Survey, SurveyId, SurveyState, SurveySummary, Timestamp,
 };
 use hk_store::{FloorProduct, FloorProductConfig};
-use num_complex::Complex;
+use num_complex::{Complex, Complex32};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::chains::spec::ChainSpec;
 use crate::class::{class_name, source_class};
 use crate::config::{PipelineConfig, detection_resolution};
-use crate::control::SchedState;
+use crate::control::{SchedState, SwitchableControl};
+
+/// `(device_id, calibration)` pins: the newest non-superseded version per device.
+type CalibrationPins = Arc<Vec<(String, CalibrationStateId)>>;
+
+fn calibration_pins(states: &[CalibrationState]) -> CalibrationPins {
+    let superseded: Vec<CalibrationStateId> = states.iter().filter_map(|s| s.supersedes).collect();
+    let mut newest: Vec<(String, CalibrationStateId, Timestamp)> = Vec::new();
+    for s in states.iter().filter(|s| !superseded.contains(&s.id)) {
+        match newest.iter_mut().find(|(d, _, _)| *d == s.device_id) {
+            Some(e) if e.2 < s.measured_at => (e.1, e.2) = (s.id, s.measured_at),
+            Some(_) => {}
+            None => newest.push((s.device_id.clone(), s.id, s.measured_at)),
+        }
+    }
+    Arc::new(newest.into_iter().map(|(d, id, _)| (d, id)).collect())
+}
+
+/// Pins the loaded calibration on blocks of its device (T-037a; see [`crate::config`]).
+/// Provenance handles are re-minted only when the source's handle changes.
+struct Calibrated {
+    inner: Box<dyn Source>,
+    pins: CalibrationPins,
+    cache: Vec<(ProvenanceId, ProvenanceHandle)>,
+}
+
+impl Calibrated {
+    fn wrap(inner: Box<dyn Source>, pins: &CalibrationPins) -> Box<dyn Source> {
+        if pins.is_empty() {
+            return inner;
+        }
+        Box::new(Self {
+            inner,
+            pins: Arc::clone(pins),
+            cache: Vec::new(),
+        })
+    }
+
+    fn stamp(&mut self, mut h: BlockHeader) -> BlockHeader {
+        let p = h.provenance.get();
+        if p.calibration_state_ref.is_some() {
+            return h;
+        }
+        let Some(&(_, cal)) = self.pins.iter().find(|(d, _)| *d == p.device_id) else {
+            return h;
+        };
+        let id = h.provenance.id();
+        if let Some((_, pinned)) = self.cache.iter().find(|(i, _)| *i == id) {
+            h.provenance = pinned.clone();
+            return h;
+        }
+        let mut record = p.clone();
+        record.calibration_state_ref = Some(cal);
+        let pinned = ProvenanceHandle::new(record);
+        if self.cache.len() >= 256 {
+            self.cache.clear();
+        }
+        self.cache.push((id, pinned.clone()));
+        h.provenance = pinned;
+        h
+    }
+}
+
+impl Source for Calibrated {
+    fn capabilities(&self) -> &SourceCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn control(&self) -> Arc<dyn SourceControl> {
+        self.inner.control()
+    }
+
+    fn pausable(&self) -> bool {
+        self.inner.pausable()
+    }
+
+    fn read_block(
+        &mut self,
+        samples: &mut Vec<Complex32>,
+    ) -> Result<Option<BlockHeader>, SourceError> {
+        let h = self.inner.read_block(samples)?;
+        Ok(h.map(|h| self.stamp(h)))
+    }
+
+    fn read_block_ci8(
+        &mut self,
+        samples: &mut Vec<Complex<i8>>,
+    ) -> Result<Option<BlockHeader>, SourceError> {
+        let h = self.inner.read_block_ci8(samples)?;
+        Ok(h.map(|h| self.stamp(h)))
+    }
+}
 use crate::events::{Candidate, ControlEvent};
 use crate::gate::FlowGate;
 use crate::inventory::Inventory;
@@ -178,16 +270,28 @@ impl Pipeline {
         let product = FloorProduct::open(
             cfg.data_dir.join("history"),
             FloorProductConfig::default(),
-            PowerCalibrations::new(),
+            PowerCalibrations::from_states(&cfg.calibrations, None),
         )
         .map_err(|e| anyhow::anyhow!("opening history: {e}"))?;
         let product = Arc::new(Mutex::new(product));
         let counters = Arc::new(Counters::default());
         let stop = Arc::new(AtomicBool::new(false));
+        // The scheduler holds a switchable handle, repointed when `--loop` reopens the source.
+        let switch = Arc::new(SwitchableControl::new(source.control()));
+        let pins = calibration_pins(&cfg.calibrations);
+        let source = Calibrated::wrap(source, &pins);
+        let reopen: Option<SourceFactory> = reopen.map(|mut open| {
+            let switch = Arc::clone(&switch);
+            Box::new(move || -> anyhow::Result<Box<dyn Source>> {
+                let s = open()?;
+                switch.replace(s.control());
+                Ok(Calibrated::wrap(s, &pins))
+            }) as SourceFactory
+        });
         let sched = if cfg.drive_scheduler {
             Some(SchedState::new(
                 &cfg.plan,
-                source.control(),
+                Arc::clone(&switch),
                 fs,
                 info.start_time,
                 Arc::clone(&counters),
@@ -590,6 +694,7 @@ pub fn replay_once(
     if let Some(hw) = &replay.meta.global.hw {
         cfg.device_id = format!("sigmf:{hw}");
     }
+    cfg.device_hw = replay.meta.global.hw.clone();
     let handle = Pipeline::start(cfg, Box::new(replay.source), replay.info, None, inventory)?;
     handle.wait()
 }

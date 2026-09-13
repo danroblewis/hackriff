@@ -45,34 +45,30 @@ just test-ui         # build + tsc --noEmit; `just test` runs it, and skips it w
 
 ```sh
 just ui-build
+# Live HackRF One (receive only; the `hackrf` feature links the system libhackrf):
+cargo run -p hk-cli --features hackrf --bin hk -- serve --hackrf \
+  --center-hz 100.8e6 --rate 2.4e6 --lna 32 --vga 30 --amp
+# Or an explicit recording:
 cargo run -p hk-cli --bin hk -- serve \
-  --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta \
-  --history-dir /tmp/hk-history --loop
+  --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop
 # prints: open http://127.0.0.1:8787/#token=<64 hex>
 ```
 
+`hk serve` runs the whole pipeline (spectrum, detection, tracking, inventory, history) over its
+source, so `/api/inventory`, `/api/history`, `/api/floor` and `/api/status` show only what that
+run detected. There is no demo data: a fresh data directory starts with an empty inventory.
+
 `hk serve` options:
+- `--hackrf[=SERIAL]` (the default source) with `--center-hz`, `--rate`, `--lna`, `--vga`,
+  `--amp`; or `--replay FILE [--loop]`
+- `--data-dir DIR` (default: a fresh temp directory)
+- `--calibration FILE` (T-021 CalibrationState JSON) for calibrated floors
 - `--bind ADDR` (default `127.0.0.1:8787`)
-- `--history-dir DIR` enables `/api/history` and `/api/floor`
-- `--inventory-db FILE` serves an hk-model SQLite inventory at `/api/inventory` (read-only)
-
-**Inventory demo.** The replay does not yet run detection → tracking → inventory; that
-composition is T-027. Until then, seed a demo database and serve it next to the FM fixture:
-
-```sh
-cargo run -p hk-api --example seed_inventory -- /tmp/hk-inventory.db   # 7 emitters around 11:10 UTC
-cargo run -p hk-cli --bin hk -- serve \
-  --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta \
-  --history-dir /tmp/hk-history --inventory-db /tmp/hk-inventory.db --loop
-```
-
-Any database written by the T-018 inventory adapter (`hk_detect::track::inventory`) also works.
-The seed includes a withheld pager capcode, a withheld own-key sensor and a withheld unclassified
-talkgroup, so the gating is visible. The hk-api tests use the same seed.
 - `--ui-dist DIR` (default `ui/dist`)
-- `--fft N` (default 4096)
 - `--rows-per-s R` (default 25)
-- `--loop`
+
+The live source's content class comes from its window (band-derived restricted classes); a UI
+retune to a window of another class is refused (`hk_api::LiveControl`).
 
 `HK_TOKEN` sets a fixed token of at least 16 characters.
 
