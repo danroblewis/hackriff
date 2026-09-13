@@ -26,6 +26,10 @@ lint:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Generate a synthetic IQ scenario, e.g. `just synth fsk_burst_train --seed 1 --out /tmp/fsk --param snr_db=12`
+synth *args:
+    uv run --locked --project py python -m hkpy.synth {{args}}
+
 # Run a SigMF fixture through the pipeline (for now: parse + summarise the metadata)
 replay fixture:
     cargo run -p hk-cli --bin hk -- replay "{{fixture}}"
