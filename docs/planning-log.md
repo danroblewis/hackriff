@@ -256,3 +256,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-037a keeps the device interface generic (named gain stages, optional bias-tee/sweep) and adds no unauthenticated POSTs.
     - T-044 drops control endpoints and panel (→ T-050/T-051) and designs selection as multi-region client objects.
   - **M0 closes** when T-037a/b and T-039 merge; T-026 moves out with the Jetson. M0b launches in dependency order: T-048 → T-049 → T-047/T-053; T-050 → T-051/T-052; T-043.
+- **B0.110 docs/10 + docs/11 updated for M0b** (23ab917, merged). docs/10: tiers now run through the mock device, with T5 as the same suite on the HackRF; new §1.1 device interface, §3.1 hidden ground truth, §3.2 anti-patterns. docs/11: new §1.2 M0b with contents, task map and definition of done; M1 now gated on M0b. Section numbers unchanged.
