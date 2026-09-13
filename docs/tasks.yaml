@@ -493,7 +493,9 @@ tasks:
     note: "follow-ups from T-007 (merged 2026-09-13 under the timebox rule)"
   - id: T-032
     title: Scheduler follow-ups (bandit revisit, per-region revisit, gain-down re-verification, rate-change trust, RF path constants)
-    status: in-progress
+    status: done
+    commit: "1fbe932 (merged)"
+    results: "A1-A5 fixed (clipped base skipped, verification group id + stale-group rejection, monotonic WallClock/AnchoredClock, score clamp 1e-9..1e9 + NaN guard, wide-POI retune shrink/skip + DC/over-span notes); B6 min 5 % POI share; B7 update_plan resumes equivalent hop; B8 partial (seam_guard_fraction added, default 0 - provisional decision B0.92); B9 hk_detect::rate_change trust; B10 RF path boundaries in SourceCapabilities, 2170/2740 MHz verified against firmware tuning.c @7a6b099 (HackRF Pro uses 2320/2580). Deferred: bandit + C12 score, per-region revisit, gain-down re-verify, cron/firmware sweep, DC-offset slices, dev-dep cycle"
     deps: [T-009]
     parallel_group: E
     use_cases: [SPACE-050, AWARE-042]
