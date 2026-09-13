@@ -329,10 +329,22 @@ fn identity_bearing_tags_never_leave_with_a_withheld_identity() {
     so2.fingerprint = Some(Fingerprint::new(146e6, 12.5e3));
     let anon = r.record_sighting(&so2, None).unwrap().emitter_id;
 
-    // A user tag naming the withheld capcode is accepted (no oracle) but never shown or matched.
-    r.add_emitter_tag(pager_emitter, CAPCODE).unwrap();
-    r.add_emitter_tag(pager_emitter, "t-1").unwrap();
-    r.add_emitter_tag(pager_emitter, "cafe").unwrap();
+    // T-038: a free-text user tag on the restricted row is refused whatever it says (the refusal
+    // depends on the class only, so it is no oracle). Tags already stored there (written before
+    // the identity was restricted, or merged in) are never shown or matched.
+    for tag in [CAPCODE, "t-1", "cafe", "zulu"] {
+        let err = r.add_emitter_tag(pager_emitter, tag).unwrap_err();
+        assert!(matches!(err, RepoError::Invalid(_)), "{err:?}");
+        assert!(!format!("{err} {err:?}").contains(CAPCODE));
+    }
+    for tag in [CAPCODE, "t-1", "cafe"] {
+        r.conn
+            .execute(
+                "INSERT INTO emitter_tag (emitter_id, tag) VALUES (?1, ?2)",
+                params![super::blob(pager_emitter), tag],
+            )
+            .unwrap();
+    }
 
     let mut out = String::new();
     for access in [
@@ -410,6 +422,104 @@ fn identity_bearing_tags_never_leave_with_a_withheld_identity() {
     let mut want = vec![open_emitter, anon];
     want.sort();
     assert_eq!(seen, want);
+}
+
+/// T-038 item 3: a letters-only identity (no digits, no hex run: it passes the T-036 shape rule)
+/// written as a tag never leaves a restricted emitter. `add_emitter_tag` and a producer sighting
+/// landing on the row refuse it; a copy stored while the emitter had no identity is never shown
+/// or matched by `query_inventory` or the emitter getters (sentinel scan).
+#[test]
+fn letters_only_identity_tags_never_leave_a_restricted_emitter() {
+    const ALIAS: &str = "quokka";
+    assert!(tag_is_identity_free(ALIAS) && !tag_in_vocabulary(ALIAS));
+    assert!(TAG_VOCABULARY.windows(2).all(|w| w[0] < w[1]), "sorted");
+    assert!(TAG_VOCABULARY.iter().all(|t| tag_in_vocabulary(t)));
+    let mut r = repo();
+    // An anonymous track emitter, tagged with free text while it has no identity.
+    let track = Sighting {
+        source: LinkTarget::Track(TrackId::new()),
+        seen: TimeRange::instant(t(0)),
+        count: 1,
+        f_center_hz: 929.6e6,
+        bandwidth_hz: 25e3,
+        fingerprint: Some(Fingerprint::new(929.6e6, 25e3)),
+        identity: None,
+        context: None,
+        classification: None,
+        tags: vec![ALIAS.into(), "pager".into()],
+    };
+    let e = r.record_sighting(&track, None).unwrap().emitter_id;
+    r.add_emitter_tag(e, &format!("{ALIAS}-mine")).unwrap();
+    // A restricted decode puts the alias identity on it (a non-channel-sharing scheme names its
+    // context emitter).
+    let alias = DecodedIdentity {
+        scheme: IdentityScheme::RdsPi,
+        value: ALIAS.into(),
+    };
+    let d = decode(Some(&alias), "alias", ContentClass::RestrictedPaging, 5);
+    r.insert_decode(&d).unwrap();
+    let s = Sighting::decode(&d, 929.6e6, 25e3, Some(e)).unwrap();
+    assert_eq!(r.record_sighting(&s, None).unwrap().emitter_id, e);
+
+    // Writes: every free-text tag is refused on the restricted row, whatever it says.
+    for tag in [ALIAS, "Quokka", "zulu", "call-sign", "t-1"] {
+        let err = r.add_emitter_tag(e, tag).unwrap_err();
+        assert!(matches!(err, RepoError::Invalid(_)), "{tag}: {err:?}");
+    }
+    let mut onto = track.clone();
+    onto.source = LinkTarget::Track(TrackId::new());
+    onto.fingerprint = None;
+    onto.context = Some(e);
+    onto.tags = vec![ALIAS.into()];
+    let err = r.record_sighting(&onto, None).unwrap_err();
+    assert!(matches!(err, RepoError::Invalid(_)), "{err:?}");
+    onto.tags = vec!["watch".into()];
+    assert_eq!(r.record_sighting(&onto, None).unwrap().emitter_id, e);
+    r.add_emitter_tag(e, "interesting").unwrap();
+
+    // Reads: vocabulary labels only, at every access level; filters by the alias never match.
+    let mut out = String::new();
+    for access in [
+        IdentityAccess::Standard,
+        IdentityAccess::OwnTrafficAuthorised,
+    ] {
+        let entry = r.emitter_with_access(e, access).unwrap();
+        assert!(entry.tags_withheld);
+        assert_eq!(
+            entry
+                .emitter
+                .tags
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["interesting", "pager", "watch"],
+            "{access:?}"
+        );
+        out += &format!("{entry:?}\n");
+        for tag in [
+            None,
+            Some(ALIAS.to_owned()),
+            Some(format!("{ALIAS}-mine")),
+            Some("pager".to_owned()),
+        ] {
+            let page = r
+                .query_inventory(&InventoryQuery {
+                    tag: tag.clone(),
+                    access,
+                    ..Default::default()
+                })
+                .unwrap();
+            let hit = page.entries.iter().any(|x| x.emitter.id == e);
+            assert_eq!(
+                hit,
+                !tag.as_deref().is_some_and(|t| t.contains(ALIAS)),
+                "{tag:?}"
+            );
+            out += &format!("{page:?}\n");
+        }
+    }
+    out += &format!("{:?}\n", r.emitter(e).unwrap());
+    assert!(!out.to_lowercase().contains(ALIAS), "{out}");
 }
 
 fn reclass_count(r: &Repository) -> i64 {

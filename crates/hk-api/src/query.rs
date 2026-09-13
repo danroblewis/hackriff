@@ -397,9 +397,9 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// identity: `identity_scheme` and `identity_class` always, `identity_value` **only** when the
 /// query returned it in clear, and `withheld: true` when gating withheld it. On withheld rows a
 /// status reason written by an author that may have seen the identity is withheld too
-/// (`status.reason_withheld`). Tags are gated with the identity (T-036): a withheld row lists only
-/// identity-free labels, `tags_withheld: true` when others were removed, and a `tag` filter that
-/// is not identity-free never matches it. No decode content, fingerprint or link is included.
+/// (`status.reason_withheld`). Tags are gated with the identity (T-036/T-038): a withheld row
+/// lists only controlled-vocabulary labels (`hk_model::TAG_VOCABULARY`), `tags_withheld: true` when
+/// others were removed, and a `tag` filter outside the vocabulary never matches it. No decode content, fingerprint or link is included.
 pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> {
     let query = parse_inventory_query(q)?;
     let failed = |_| ApiError::new(500, "inventory query failed");

@@ -75,18 +75,17 @@
 //! | Emission | Floor episode | CFAR (Wide reference) | Steady reference bias |
 //! |---|---|---|---|
 //! | Broadband noise jammer (whole span) | one `NoiseLike` Rise, step 9.6 dB, SK 1.00, onset −1.6 ms, Returned End | no wide detection (as before T-033: every reference reads a span-wide rise as floor) | +9.6 dB |
-//! | Partial-band noise jammer (800 kHz) | one `NoiseLike` Rise, step 9.6 dB, SK 1.00, onset −1.6 ms, Returned End; extent 375 kHz, inside the emission (whole 256-bin blocks only) | one edge-to-edge detection from t0 to t0 + 0.75 s, then nothing | +9.7 dB (wide floor +0.05, per-frame +6.8) |
-//! | Steady OFDM (1 MHz, 64 QPSK subcarriers) | one `NoiseLike` Rise, step 9.5 dB, SK 0.89, onset −1.6 ms, Returned End; extent 625 kHz | one or two detections (seed-dependent split) reaching both edges from t0 + 0.1 s to t0 + 0.83 s, then nothing | +9.6 dB |
+//! | Partial-band noise jammer (800 kHz) | one `NoiseLike` Rise, step 9.6 dB, SK 1.00, onset −1.6 ms, Returned End; extent 375 kHz of whole 256-bin blocks at T-036, refined per bin to the emission's edges since T-038 | one edge-to-edge detection from t0 to t0 + 0.75 s, then nothing | +9.7 dB (wide floor +0.05, per-frame +6.8) |
+//! | Steady OFDM (1 MHz, 64 QPSK subcarriers) | T-036: one `NoiseLike` Rise (SK 0.89); since T-038 `Structured` (anti-correlated bin power fluctuations), so no floor-rise Anomaly | one or two detections (seed-dependent split) reaching both edges from t0 + 0.1 s to t0 + 0.83 s, then nothing | +9.6 dB |
 //!
 //! **Decision: accepted, no change.** AWARE-006 does not run on the detection reference: the
 //! floor tracker's episodes come from the raw block floors, and every noise jammer still yields
 //! the `NoiseLike` Rise on which `hk_context::FloorAnomalies` opens the Anomaly (end to end:
 //! `hk-context/tests/aware_006_e2e.rs`). The CFAR sees such an emission's edges only until the
 //! guard classifies it floor-like (≈ 0.75 s); afterwards it is covered by the episode, not by
-//! detections. Two consequences stay open: a steady OFDM transmitter (SK within the 0.15
-//! tolerance) is also a `NoiseLike` Rise, so it opens a floor-rise Anomaly that only correlation or
-//! priors can explain away; and a partial-band episode's extent under-reports the emission by up to
-//! a block at each side.
+//! detections. The two consequences T-036 left open were closed by T-038 (`hk_dsp::floor`
+//! discriminator and episode extent): a steady OFDM transmitter is a `Structured` episode, and a
+//! partial-band episode's frequency extent is refined per bin (within 20 % of the bandwidth).
 //!
 //! **What does not trigger it.** A narrowband emitter (an FM station is ~40 of 256 bins) does not
 //! move a block floor.

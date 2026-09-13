@@ -212,17 +212,75 @@ fn restricted_identities_are_withheld_from_the_raw_response() {
 
 /// T-036: a restricted identity written as a tag (on the withheld pager row, and inside a longer
 /// tag) never appears in `/api/inventory` output, and a tag filter by it never matches the row;
-/// identity-free labels still show and filter, and producer tags naming a restricted claim are
-/// refused at write time.
+/// vocabulary labels still show and filter, and producer tags naming a restricted claim are
+/// refused at write time. T-038: a letters-only identity (`quokka`) is refused on the restricted
+/// row, and a copy stored before a restricted decode named it never appears (sentinel scan).
 #[test]
 fn restricted_identity_written_as_a_tag_never_appears_in_api_output() {
     let mut repo = Repository::open_in_memory().unwrap();
     let s = seed::seed(&mut repo, T0).unwrap();
     let smuggled = format!("capcode-{}", seed::PAGER_CAPCODE);
-    for tag in [seed::PAGER_CAPCODE, smuggled.as_str(), seed::OWN_SENSOR_ID] {
-        repo.add_emitter_tag(s.pager, tag).unwrap();
+    // T-038: a letters-only identity passes the T-036 shape rule, so only the vocabulary rule
+    // keeps it off withheld rows.
+    const ALIAS: &str = "quokka";
+    for tag in [
+        seed::PAGER_CAPCODE,
+        smuggled.as_str(),
+        seed::OWN_SENSOR_ID,
+        ALIAS,
+    ] {
+        // Free text on the restricted pager is refused outright (class-only rule, no oracle).
+        assert!(matches!(
+            repo.add_emitter_tag(s.pager, tag),
+            Err(hk_model::RepoError::Invalid(_))
+        ));
+        // The own-key-decrypted row accepts it; it shows only with own-traffic authorisation.
         repo.add_emitter_tag(s.own, tag).unwrap();
     }
+    // An anonymous emitter tagged with the alias before a restricted decode names that alias on
+    // it (a non-channel-sharing scheme resolves to its context emitter): the stored tag stays.
+    let seen =
+        hk_model::TimeRange::instant(hk_model::Timestamp::from_unix_nanos(T0 * 1_000_000_000));
+    let alias_emitter = repo
+        .record_sighting(
+            &hk_model::Sighting {
+                source: hk_model::LinkTarget::Track(hk_model::TrackId::new()),
+                seen,
+                count: 1,
+                f_center_hz: 462.5625e6,
+                bandwidth_hz: 12.5e3,
+                fingerprint: Some(hk_model::Fingerprint::new(462.5625e6, 12.5e3)),
+                identity: None,
+                context: None,
+                classification: None,
+                tags: vec![ALIAS.into(), "watch".into()],
+            },
+            None,
+        )
+        .unwrap()
+        .emitter_id;
+    let restricted = hk_model::Sighting {
+        source: hk_model::LinkTarget::Decode(hk_model::DecodeId::new()),
+        seen,
+        count: 1,
+        f_center_hz: 462.5625e6,
+        bandwidth_hz: 12.5e3,
+        fingerprint: None,
+        identity: Some(hk_model::IdentityClaim {
+            identity: hk_model::DecodedIdentity {
+                scheme: hk_model::IdentityScheme::RdsPi,
+                value: ALIAS.into(),
+            },
+            content_class: hk_model::ContentClass::RestrictedPaging,
+        }),
+        context: Some(alias_emitter),
+        classification: None,
+        tags: Vec::new(),
+    };
+    assert_eq!(
+        repo.record_sighting(&restricted, None).unwrap().emitter_id,
+        alias_emitter
+    );
     // A producer deriving a tag from a restricted decode is refused outright.
     let refused = hk_model::Sighting {
         source: hk_model::LinkTarget::Decode(hk_model::DecodeId::new()),
@@ -261,13 +319,16 @@ fn restricted_identity_written_as_a_tag_never_appears_in_api_output() {
         format!("/api/inventory?tag={}", seed::PAGER_CAPCODE),
         format!("/api/inventory?tag={smuggled}"),
         format!("/api/inventory?tag={}", seed::OWN_SENSOR_ID),
+        format!("/api/inventory?tag={ALIAS}"),
         "/api/inventory?tag=pager".into(),
+        "/api/inventory?tag=watch".into(),
         "/api/inventory?scheme=other:pocsag-capcode".into(),
+        "/api/inventory?scheme=rds-pi".into(),
     ];
     for path in &paths {
         let (status, body) = authed(addr, path);
         assert_eq!(status, 200, "{path}");
-        for sentinel in [seed::PAGER_CAPCODE, seed::OWN_SENSOR_ID] {
+        for sentinel in [seed::PAGER_CAPCODE, seed::OWN_SENSOR_ID, ALIAS] {
             assert!(
                 !body
                     .windows(sentinel.len())
@@ -276,16 +337,21 @@ fn restricted_identity_written_as_a_tag_never_appears_in_api_output() {
             );
         }
     }
-    for tag in [seed::PAGER_CAPCODE, &smuggled, seed::OWN_SENSOR_ID] {
+    for tag in [seed::PAGER_CAPCODE, &smuggled, seed::OWN_SENSOR_ID, ALIAS] {
         let v = page(addr, &format!("/api/inventory?tag={tag}"));
         assert!(ids(&v).is_empty(), "tag filter matched a withheld row");
     }
     let v = page(addr, "/api/inventory");
-    for (id, label) in [(s.pager, "pager"), (s.own, "mine")] {
+    for (id, label) in [(s.own, "mine"), (alias_emitter, "watch")] {
         let r = row(&v, id);
         assert_eq!(r["tags"], json!([label]));
         assert_eq!(r["tags_withheld"], json!(true));
     }
+    assert_eq!(row(&v, s.pager)["tags"], json!(["pager"]));
+    assert_eq!(
+        ids(&page(addr, "/api/inventory?tag=watch")),
+        vec![alias_emitter.to_string()]
+    );
     assert_eq!(row(&v, s.rds)["tags_withheld"], json!(false));
     assert_eq!(
         ids(&page(addr, "/api/inventory?tag=pager")),

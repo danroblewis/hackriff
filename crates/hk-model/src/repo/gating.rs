@@ -10,7 +10,7 @@ use super::inventory::emitter_id_by_identity;
 use super::{RepoError, Repository, blob, bodies, body_by_id, enum_parse, enum_text};
 use crate::cluster::{
     IdentityAccess, IdentityReclassification, InventoryIdentity, class_rank, most_restrictive,
-    never_openable, tag_is_identity_free,
+    never_openable, tag_in_vocabulary, tag_is_identity_free,
 };
 use crate::content::ContentClass;
 use crate::decode::{Decode, DecodeView, WITHHELD_LABEL};
@@ -199,8 +199,40 @@ fn gate_decode(
     })
 }
 
-/// Write-time tag rule (T-036, [`crate::cluster`]): with an identity that is not `unrestricted`
-/// (`None` = unclassified), every tag must be identity-free and must not contain the value.
+/// An emitter's decoded identity class as the inventory gate sees it: `None` without a decoded
+/// identity, `Some(None)` for an unclassified one.
+pub(super) fn emitter_identity_class(
+    conn: &Connection,
+    id: EmitterId,
+) -> Result<Option<Option<ContentClass>>, RepoError> {
+    let row = load_row(conn, id)?;
+    let Some(identity) = row.identity else {
+        return Ok(None);
+    };
+    Ok(Some(match row.class {
+        Some(c) => Some(c),
+        None => derived_identity_class(conn, id, &identity)?,
+    }))
+}
+
+/// Whether no access level reveals an identity of this class (`None` = unclassified): its tags
+/// must come from the controlled vocabulary (T-038).
+pub(super) fn vocabulary_only(class: Option<ContentClass>) -> bool {
+    !IdentityAccess::OwnTrafficAuthorised.reveals(class)
+}
+
+/// The refusal for a tag outside the vocabulary on such an identity (names neither tag nor value).
+pub(super) fn vocabulary_refusal() -> RepoError {
+    RepoError::Invalid(
+        "a tag on an emitter whose identity is restricted, metadata-only or unclassified must \
+         come from the controlled tag vocabulary (hk_model::TAG_VOCABULARY; T-038)"
+            .into(),
+    )
+}
+
+/// Write-time tag rule (T-036/T-038, [`crate::cluster`]): with an identity no access level reveals
+/// (`None` = unclassified), every tag must be in the vocabulary; with an `own-key-decrypted` one,
+/// identity-free and not containing the value.
 pub(super) fn check_tags(
     tags: &mut dyn Iterator<Item = &String>,
     identity: Option<(&DecodedIdentity, Option<ContentClass>)>,
@@ -209,6 +241,14 @@ pub(super) fn check_tags(
         return Ok(());
     };
     if class == Some(ContentClass::Unrestricted) {
+        return Ok(());
+    }
+    if vocabulary_only(class) {
+        for tag in tags {
+            if !tag_in_vocabulary(tag) {
+                return Err(vocabulary_refusal());
+            }
+        }
         return Ok(());
     }
     let value = identity.value.to_lowercase();

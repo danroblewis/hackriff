@@ -50,7 +50,7 @@
 //!   crate-private.
 //! - **Decodes and tags** are gated the same way (T-036, `gating.rs`): decode identities,
 //!   metadata and identifier-bearing labels leave only when the class permits; tags on withheld
-//!   rows are limited to identity-free labels. `reclassify_identity` is the audited, authorised
+//!   rows are limited to controlled-vocabulary labels (T-038). `reclassify_identity` is the audited, authorised
 //!   way to open a user's own identity.
 //!
 //! # Region queries
