@@ -4,8 +4,11 @@
 //! `DetectionId` being passed where an `EmitterId` is expected.
 //!
 //! Objects without a UUID of their own are deliberately absent. SweepFrame and SpectrumFrame are
-//! keyed by `(survey_id, seq)`, SpectrumTile by `(level, f-block, t-block)`, and ExternalEvent by
-//! `(source, native id)`. T-002 defines those keys.
+//! keyed by [`crate::frames::FrameKey`] `(survey_id, seq)` and SpectrumTile by
+//! [`crate::frames::TileKey`] `(level, f_block, t_block)`; neither is stored in SQLite.
+//! ExternalEvent's identity is its natural key `(source, native_id)`, but it also gets an
+//! [`ExternalEventId`] so Explanations can reference it compactly. Provenance rows are
+//! deduplicated by content and addressed by [`ProvenanceId`] (see `repo`).
 
 use std::fmt;
 use std::str::FromStr;
@@ -99,6 +102,9 @@ define_ids! {
     AnomalyId;
     /// Explanation / Correlation (§2.19).
     ExplanationId;
+    /// ExternalEvent (§2.17): a local id for references from Explanations. The event's identity
+    /// is its natural key `(source, native_id)`; upserting that key keeps this id stable.
+    ExternalEventId;
 }
 
 #[cfg(test)]

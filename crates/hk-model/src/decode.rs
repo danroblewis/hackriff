@@ -1,0 +1,186 @@
+//! Demodulation (docs/07 §2.14), Decode / Message (§2.15) and Bitstream (§2.16).
+//!
+//! All three are **append-only interpretations**: re-running a demodulator or decoder writes a
+//! new row with its own version, and the measurement it ran on is unchanged. Outputs point back
+//! at what produced them (`Decode.demodulation_ref`, `Bitstream.demodulation_ref`,
+//! `Recording.trigger`), so producer rows never need updating.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::content::ContentClass;
+use crate::emitter::DecodedIdentity;
+use crate::ids::{
+    BitstreamId, DecodeId, DemodulationId, DetectionId, EmitterId, ProvenanceId, RecordingId,
+};
+use crate::region::TimeRange;
+use crate::time::Timestamp;
+
+/// Parameters estimated from the signal (C13/C14); never picked by hand.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EstimatedParams {
+    /// Symbol rate, Bd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_rate_hz: Option<f64>,
+    /// Frequency deviation, Hz (FM/FSK).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deviation_hz: Option<f64>,
+    /// Carrier frequency offset, Hz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfo_hz: Option<f64>,
+    /// Modulation order (2 for BPSK/2FSK, 4 for QPSK/4FSK...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_order: Option<u32>,
+    /// Pulse-shaping roll-off, 0–1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roll_off: Option<f64>,
+    /// Bandwidth used for the channel filter, Hz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_hz: Option<f64>,
+}
+
+/// A demodulation session on a channel (docs/07 §2.14).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Demodulation {
+    /// Id.
+    pub id: DemodulationId,
+    /// Emitter demodulated, if resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emitter_ref: Option<EmitterId>,
+    /// Detection the channel was derived from, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detection_ref: Option<DetectionId>,
+    /// Recording replayed (offline demodulation), if any. `None` for live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_ref: Option<RecordingId>,
+    /// Mode or family, e.g. `wfm`, `2fsk`, `ook`.
+    pub mode: String,
+    /// Estimated parameters.
+    pub params: EstimatedParams,
+    /// Lock quality, 0–1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_quality: Option<f64>,
+    /// Error vector magnitude, dB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evm_db: Option<f64>,
+    /// Session time span.
+    pub time: TimeRange,
+    /// Demodulator id and version, e.g. `hk-demod/fsk@0.1.0`.
+    pub demod_version: String,
+}
+
+/// Frame check result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CrcStatus {
+    /// Check passed: the frame is ground truth.
+    Valid,
+    /// Check failed.
+    Invalid,
+    /// The frame format has no check.
+    NoCrc,
+    /// Check not yet known (inferred framing, C21).
+    Unknown,
+}
+
+/// Structured output from a decoder plugin or bit-framing inference (docs/07 §2.15).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Decode {
+    /// Id.
+    pub id: DecodeId,
+    /// Demodulation decoded, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demodulation_ref: Option<DemodulationId>,
+    /// Recording decoded (replay), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_ref: Option<RecordingId>,
+    /// Decoder id, e.g. `readsb`, `hk-rds`, `hk-infer`.
+    pub decoder_id: String,
+    /// Decoder version.
+    pub decoder_version: String,
+    /// Frame model name, e.g. `adsb-df17`, `rds-group-0a`, or an inferred-framing id.
+    pub frame_model: String,
+    /// Decoded fields. Content, so subject to `content_class`: C22/C24 must not populate
+    /// gated content here.
+    pub fields: Value,
+    /// Frame check.
+    pub crc_status: CrcStatus,
+    /// Identity named by the frame, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<DecodedIdentity>,
+    /// Content gating class.
+    pub content_class: ContentClass,
+    /// Frame time.
+    pub t: Timestamp,
+}
+
+/// What a bitstream carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BitstreamPayload {
+    /// Hard bits.
+    HardBits,
+    /// Soft symbols.
+    SoftSymbols,
+    /// Framed messages (newline-delimited JSON on stream-output, ADR-0004).
+    Messages,
+}
+
+/// Framing metadata. The ADR-0004 stream header carries the same information.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Framing {
+    /// Payload kind.
+    pub payload: BitstreamPayload,
+    /// Bits per symbol, for symbol payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bits_per_symbol: Option<u32>,
+    /// Symbol rate, Bd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_rate_hz: Option<f64>,
+    /// Message schema id, for message payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<String>,
+    /// Sync word / preamble, hex, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_word_hex: Option<String>,
+}
+
+/// Where the bits are.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum BitstreamTransport {
+    /// A stored file (Recording-like, under quota).
+    Stored {
+        /// Path relative to the device data directory.
+        uri: String,
+    },
+    /// A live stream on stream-output (C24); the row is its descriptor.
+    Live {
+        /// Endpoint, e.g. `unix:///run/hackriff/bits-<id>.sock`.
+        endpoint: String,
+    },
+}
+
+/// A bit/soft-symbol artifact or live stream descriptor (docs/07 §2.16).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bitstream {
+    /// Id.
+    pub id: BitstreamId,
+    /// Emitter, if resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emitter_ref: Option<EmitterId>,
+    /// Producing demodulation, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demodulation_ref: Option<DemodulationId>,
+    /// Framing.
+    pub framing: Framing,
+    /// Stored or live.
+    pub transport: BitstreamTransport,
+    /// Time span; `end` equals `start` while a live stream is open.
+    pub time: TimeRange,
+    /// Source trust record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_ref: Option<ProvenanceId>,
+    /// Content gating class; C24 enforces it before egress.
+    pub content_class: ContentClass,
+}

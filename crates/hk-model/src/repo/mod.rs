@@ -1,0 +1,318 @@
+//! SQLite repository for the relational state (ADR-0006; docs/07 §3.1).
+//!
+//! [`Repository`] is the only way the rest of hackriff reads and writes row-shaped objects. Its
+//! signatures use model types only, never engine types, so replacing SQLite (DuckDB was the
+//! considered fallback) means reimplementing this module, not its callers. A trait is deferred
+//! until a second engine exists.
+//!
+//! # Engine settings
+//! - WAL journal (file databases), `synchronous = NORMAL`, foreign keys on, 5 s busy timeout.
+//!   WAL keeps readers unblocked by the writer; [`Repository::checkpoint`] is for low-battery
+//!   shutdown (C27).
+//! - One writer: write methods take `&mut self`.
+//!
+//! # Migrations
+//! Plain SQL files in `migrations/`, embedded at build time and applied in order inside a
+//! transaction each. `PRAGMA user_version` records how many have run. A database newer than this
+//! build is refused.
+//!
+//! # Identity and dedup decisions
+//! - Ids are 16-byte UUIDv7 BLOBs.
+//! - **Provenance** is deduplicated by value: its canonical `serde_json` form is a UNIQUE column,
+//!   and [`Repository::intern_provenance`] returns the existing [`ProvenanceId`] for an identical
+//!   value. Exact text comparison, so no hash-collision risk. Field order is fixed by the struct
+//!   and float formatting by serde_json, so equal values give equal text.
+//! - **ExternalEvent** is keyed by `(source, native_id)`; upserts keep the first local id.
+//! - **Emitter** has at most one row per decoded identity (partial unique index).
+//!
+//! # Region queries
+//! Region-indexed tables keep the largest frequency span and duration ever written
+//! (`region_extent`). An overlap query turns into a *bounded* index range: a row whose lower edge
+//! is more than one max-span below the query cannot overlap it. Exact overlap is then checked on
+//! the stored edges, with the same closed-interval rule as [`crate::region`].
+
+mod interpret;
+mod inventory;
+mod measure;
+#[cfg(test)]
+mod tests;
+
+use std::path::Path;
+use std::time::Duration;
+
+use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+
+use crate::calibration::{CalibrationState, SpurMask};
+use crate::ids::{EmitterId, ProvenanceId};
+use crate::provenance::Provenance;
+use crate::region::Region;
+
+pub use inventory::EmitterUpsert;
+
+/// Embedded migrations, applied in order.
+const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+
+/// Schema version this build creates and understands.
+pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
+
+/// Repository errors. Engine errors are boxed so no engine type appears in the API.
+#[derive(Debug, thiserror::Error)]
+pub enum RepoError {
+    /// The storage engine failed, including constraint and immutability-trigger violations.
+    #[error("storage engine: {0}")]
+    Engine(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// A stored JSON body could not be read or written.
+    #[error("serialisation: {0}")]
+    Json(#[from] serde_json::Error),
+    /// No row with that id.
+    #[error("{kind} {id} not found")]
+    NotFound {
+        /// Object kind.
+        kind: &'static str,
+        /// Id or key looked up.
+        id: String,
+    },
+    /// The request breaks a model rule (bad version number, lifecycle transition, extent...).
+    #[error("invalid: {0}")]
+    Invalid(String),
+    /// A decoded identity already names a different emitter. Entity resolution (T-018) must
+    /// merge the two before the observation can be recorded.
+    #[error("identity {identity} already belongs to emitter {existing}")]
+    IdentityConflict {
+        /// The identity, `scheme:value`.
+        identity: String,
+        /// Emitter that holds it.
+        existing: EmitterId,
+    },
+    /// The database was written by a newer build.
+    #[error("database schema version {found} is newer than this build supports ({supported})")]
+    SchemaTooNew {
+        /// Version found.
+        found: i64,
+        /// Newest version this build knows.
+        supported: i64,
+    },
+}
+
+impl From<rusqlite::Error> for RepoError {
+    fn from(e: rusqlite::Error) -> Self {
+        RepoError::Engine(Box::new(e))
+    }
+}
+
+/// A resolved provenance chain: Detection/Recording → Provenance → CalibrationState / SpurMask
+/// (docs/07 §2.6).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProvenanceChain {
+    /// Provenance row id.
+    pub id: ProvenanceId,
+    /// The trust record.
+    pub provenance: Provenance,
+    /// Calibration version it names, if any.
+    pub calibration: Option<CalibrationState>,
+    /// Spur-mask version it names, if any.
+    pub spur_mask: Option<SpurMask>,
+}
+
+/// The relational store.
+pub struct Repository {
+    conn: Connection,
+}
+
+impl Repository {
+    /// Opens (creating if needed) a database file in WAL mode and applies pending migrations.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, RepoError> {
+        let conn = Connection::open(path)?;
+        let mode: String =
+            conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(RepoError::Invalid(format!(
+                "could not enable WAL journal (got {mode})"
+            )));
+        }
+        Self::init(conn)
+    }
+
+    /// Opens a private in-memory database (tests, replay scratch).
+    pub fn open_in_memory() -> Result<Self, RepoError> {
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(mut conn: Connection) -> Result<Self, RepoError> {
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        migrate(&mut conn)?;
+        Ok(Self { conn })
+    }
+
+    /// Schema version of the open database.
+    pub fn schema_version(&self) -> Result<i64, RepoError> {
+        Ok(self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
+    /// Journal mode (`wal` for file databases, `memory` in memory).
+    pub fn journal_mode(&self) -> Result<String, RepoError> {
+        Ok(self
+            .conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))?)
+    }
+
+    /// Checkpoints the WAL into the main file and truncates it (call before a low-battery
+    /// shutdown, C27).
+    pub fn checkpoint(&mut self) -> Result<(), RepoError> {
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
+    }
+}
+
+fn migrate(conn: &mut Connection) -> Result<(), RepoError> {
+    let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if current > SCHEMA_VERSION {
+        return Err(RepoError::SchemaTooNew {
+            found: current,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    for (index, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", index as i64 + 1)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+// ---- codec helpers shared by the submodules ----
+
+/// Id → 16-byte BLOB.
+fn blob<I: Into<uuid::Uuid>>(id: I) -> [u8; 16] {
+    id.into().into_bytes()
+}
+
+/// Optional id → optional BLOB.
+fn opt_blob<I: Into<uuid::Uuid>>(id: Option<I>) -> Option<[u8; 16]> {
+    id.map(blob)
+}
+
+/// Unit-variant enum → its serde string (the TEXT column form).
+fn enum_text<T: Serialize>(value: &T) -> Result<String, RepoError> {
+    match serde_json::to_value(value)? {
+        Value::String(s) => Ok(s),
+        other => Err(RepoError::Invalid(format!(
+            "expected a unit enum variant, got {other}"
+        ))),
+    }
+}
+
+/// TEXT column → unit-variant enum.
+fn enum_parse<T: DeserializeOwned>(text: String) -> Result<T, RepoError> {
+    Ok(serde_json::from_value(Value::String(text))?)
+}
+
+/// u64 → INTEGER, refusing values SQLite cannot hold.
+fn int(value: u64, what: &str) -> Result<i64, RepoError> {
+    i64::try_from(value).map_err(|_| RepoError::Invalid(format!("{what} {value} exceeds i64")))
+}
+
+/// Rejects a non-finite float (serde_json would store NaN/∞ as null and fail to read it back).
+fn finite(value: f64, what: &str) -> Result<f64, RepoError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(RepoError::Invalid(format!(
+            "{what} must be finite, got {value}"
+        )))
+    }
+}
+
+/// Reads a JSON `body` column by primary key.
+fn body_by_id<T: DeserializeOwned>(
+    conn: &Connection,
+    sql: &str,
+    id: [u8; 16],
+    kind: &'static str,
+) -> Result<T, RepoError> {
+    let body: Option<String> = conn
+        .prepare_cached(sql)?
+        .query_row([id], |r| r.get(0))
+        .optional()?;
+    match body {
+        Some(b) => Ok(serde_json::from_str(&b)?),
+        None => Err(RepoError::NotFound {
+            kind,
+            id: uuid::Uuid::from_bytes(id).to_string(),
+        }),
+    }
+}
+
+/// Reads every JSON `body` a query returns.
+fn bodies<T: DeserializeOwned, P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Vec<T>, RepoError> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    let texts = stmt
+        .query_map(params, |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    texts
+        .iter()
+        .map(|t| serde_json::from_str(t).map_err(RepoError::from))
+        .collect()
+}
+
+/// Raises a table's recorded maximum frequency span and duration.
+fn bump_extent(conn: &Connection, table: &str, f_span: f64, t_span: i64) -> Result<(), RepoError> {
+    conn.prepare_cached(
+        "UPDATE region_extent SET max_f_span = max(max_f_span, ?1), \
+         max_t_span = max(max_t_span, ?2) WHERE table_name = ?3",
+    )?
+    .execute(rusqlite::params![f_span, t_span, table])?;
+    Ok(())
+}
+
+/// Index range bounds for an overlap query on `table`.
+#[derive(Clone, Copy, Debug)]
+struct RegionBounds {
+    /// Query frequency edges.
+    lo: f64,
+    hi: f64,
+    /// Smallest lower edge a matching row can have (`lo` − max span − slack).
+    f_lo_min: f64,
+    /// Smallest start time a matching row can have (`t0` − max duration).
+    t_start_min: i64,
+    /// Query time ends.
+    t0: i64,
+    t1: i64,
+    /// Largest recorded frequency span (with slack), for centre-frequency bounds.
+    f_span: f64,
+}
+
+fn region_bounds(
+    conn: &Connection,
+    table: &str,
+    region: &Region,
+) -> Result<RegionBounds, RepoError> {
+    let (max_f_span, max_t_span): (f64, i64) = conn
+        .prepare_cached("SELECT max_f_span, max_t_span FROM region_extent WHERE table_name = ?1")?
+        .query_row([table], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    // Slack absorbs float rounding between stored centre and edges.
+    let f_span = max_f_span * (1.0 + 1e-9) + 1.0;
+    let t0 = region.time.start.as_unix_nanos();
+    Ok(RegionBounds {
+        lo: region.freq.lo_hz,
+        hi: region.freq.hi_hz,
+        f_lo_min: region.freq.lo_hz - f_span,
+        t_start_min: t0.saturating_sub(max_t_span),
+        t0,
+        t1: region.time.end.as_unix_nanos(),
+        f_span,
+    })
+}
