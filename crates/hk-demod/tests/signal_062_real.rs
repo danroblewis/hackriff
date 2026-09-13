@@ -12,7 +12,10 @@ use common::*;
 use hk_demod::{AnalogMode, AnalogReceiver, RecordContext, write_session};
 use hk_e2e::Fixture;
 use hk_estimate::SnippetRequest;
-use hk_model::{AnnotationTarget, DecodedIdentity, IdentityScheme, Repository};
+use hk_model::{
+    AnnotationTarget, ContentClass, DecodedIdentity, IdentityScheme, InventoryIdentity,
+    InventoryQuery, Repository,
+};
 
 const NAME: &str = "fm_100p8M_2p4M_l32g30a1_t1p5_5s";
 
@@ -147,4 +150,43 @@ fn signal_062_real_fm_auto_wfm_pilot_pi_ps_and_emitter() {
         emitter.id,
         decodes.len()
     );
+
+    // T-034: the PI 1694 emitter is in the inventory in clear (broadcast, unrestricted).
+    let inventory = |repo: &Repository| {
+        repo.query_inventory(&InventoryQuery::default())
+            .unwrap()
+            .entries
+    };
+    let entries = inventory(&repo);
+    assert_eq!(entries.len(), 1, "[{SIGNAL_062}] {entries:?}");
+    assert!(
+        matches!(
+            &entries[0].identity,
+            InventoryIdentity::Clear { identity: i, class: ContentClass::Unrestricted } if *i == identity
+        ),
+        "[{SIGNAL_062}] {:?}",
+        entries[0].identity
+    );
+    assert_eq!(entries[0].emitter.count, 1);
+    // Re-demodulating the same IQ writes new rows but is the same measurement.
+    let again = write_session(&mut repo, &session, &RecordContext::default()).unwrap();
+    assert_eq!(again.emitter_id, written.emitter_id);
+    assert!(!again.emitter_created);
+    assert_ne!(again.demodulation_id, written.demodulation_id);
+    let entries = inventory(&repo);
+    assert_eq!(
+        (entries.len(), entries[0].emitter.count),
+        (1, 1),
+        "[{SIGNAL_062}] re-demodulation doubled the count"
+    );
+    // The same station in a second capture an hour later is a new observation.
+    let mut later = session.clone();
+    later.anchor.host_time = later
+        .anchor
+        .host_time
+        .saturating_add_nanos(3_600_000_000_000);
+    let second = write_session(&mut repo, &later, &RecordContext::default()).unwrap();
+    assert_eq!(second.emitter_id, written.emitter_id);
+    let entries = inventory(&repo);
+    assert_eq!((entries.len(), entries[0].emitter.count), (1, 2));
 }

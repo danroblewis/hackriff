@@ -10,17 +10,21 @@
 //!     block/group error rates;
 //!   - one `rds-group-0-ps-frame` row per complete PS frame sent under the accepted PI, with
 //!     `pi`, `ps`, `pty`, `tp`.
-//! - **Emitter:** an observation with identity `rds-pi:<hex>` (merged by identity), the mode
-//!   classification appended, links to the demodulation and decodes, and a **label**
-//!   annotation (author decoder) from the most frequent PS frame.
+//! - **Emitter:** a sighting through entity resolution (`Repository::record_sighting_measured`,
+//!   T-018/T-034) keyed by the demodulation, with identity `rds-pi:<hex>` of class
+//!   **unrestricted** (broadcast), the WFM fingerprint, the caller's emitter hint as context and
+//!   the mode classification; links to the decodes; a **label** annotation (author decoder)
+//!   from the most frequent PS frame.
+//! - **Re-demodulation** of the same IQ is a re-measurement (producer `hk-rds`, same span and
+//!   channel): new rows are written and linked, the emitter's count does not grow.
 //!
 //! Nothing identity-bearing is written without an accepted PI.
 
 use hk_model::{
     Annotation, AnnotationAuthor, AnnotationId, AnnotationKind, AnnotationTarget, Classification,
     ContentClass, CrcStatus, Decode, DecodeId, DecodedIdentity, Demodulation, DemodulationId,
-    DetectionId, EmitterId, EmitterLink, EmitterObservation, IdentityScheme, LinkTarget,
-    RecordingId, RepoError, Repository,
+    DetectionId, EmitterId, EmitterLink, Fingerprint, IdentityClaim, IdentityScheme, LinkTarget,
+    MeasurementKey, RecordingId, RepoError, Repository, Sighting,
 };
 use serde_json::json;
 
@@ -141,25 +145,48 @@ pub fn write_session(
 ) -> Result<WrittenSession, RepoError> {
     let time = session.time_range();
     let pi = session.rds().and_then(|r| r.pi);
+    let demod_id = DemodulationId::new();
+    let family = session.mode.mode.as_str();
+    let classification = Classification {
+        t: time.end,
+        family: family.into(),
+        confidence: session.mode.confidence,
+        open_set_score: 1.0 - session.mode.confidence,
+        model_version: session.mode.rules_version.clone(),
+    };
     let mut emitter_id = ctx.emitter_hint;
     let mut emitter_created = false;
     if let Some(pi) = pi {
-        let up = repo.upsert_emitter_observation(&EmitterObservation {
-            emitter_id: ctx.emitter_hint.unwrap_or_else(EmitterId::new),
+        let bandwidth = session.params.obw99_hz.value().unwrap_or(200e3);
+        let sighting = Sighting {
+            source: LinkTarget::Demodulation(demod_id),
             seen: time,
             count: 1,
             f_center_hz: session.rf_center_hz,
-            bandwidth_hz: session.params.obw99_hz.value().unwrap_or(200e3),
-            identity: Some(DecodedIdentity {
-                scheme: IdentityScheme::RdsPi,
-                value: pi.hex(),
+            bandwidth_hz: bandwidth,
+            fingerprint: Some(Fingerprint {
+                family: Some(family.into()),
+                ..Fingerprint::new(session.rf_center_hz, bandwidth)
             }),
-        })?;
-        emitter_id = Some(up.emitter_id);
-        emitter_created = up.created;
+            identity: Some(IdentityClaim {
+                identity: DecodedIdentity {
+                    scheme: IdentityScheme::RdsPi,
+                    value: pi.hex(),
+                },
+                // RDS is public broadcast.
+                content_class: ContentClass::Unrestricted,
+            }),
+            context: ctx.emitter_hint,
+            classification: Some(classification.clone()),
+            tags: Vec::new(),
+        };
+        let r =
+            repo.record_sighting_measured(&sighting, &MeasurementKey::new(RDS_DECODER_ID), None)?;
+        emitter_id = Some(r.emitter_id);
+        emitter_created = r.created;
     }
     let demod = Demodulation {
-        id: DemodulationId::new(),
+        id: demod_id,
         emitter_ref: emitter_id,
         detection_ref: ctx.detection_ref,
         recording_ref: ctx.recording_ref,
@@ -180,16 +207,10 @@ pub fn write_session(
     let label = rds_label(session);
     if let Some(eid) = emitter_id {
         let now = time.end;
-        repo.append_classification(
-            eid,
-            &Classification {
-                t: now,
-                family: session.mode.mode.as_str().into(),
-                confidence: session.mode.confidence,
-                open_set_score: 1.0 - session.mode.confidence,
-                model_version: session.mode.rules_version.clone(),
-            },
-        )?;
+        if pi.is_none() {
+            // With a PI the sighting carried it (input: the demodulation).
+            repo.append_classification(eid, &classification)?;
+        }
         let links = std::iter::once(LinkTarget::Demodulation(demod.id))
             .chain(decodes.iter().map(|d| LinkTarget::Decode(d.id)));
         for target in links {

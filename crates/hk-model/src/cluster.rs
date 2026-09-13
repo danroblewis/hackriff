@@ -10,6 +10,16 @@
 //! 1. **Replay.** A source (track, detection, decode) already in the observation ledger resolves
 //!    to the emitter it was counted into (following merges) and adds only the growth of its
 //!    count, so `count` means distinct observations and replaying never double-counts.
+//!
+//!    **Re-measurement** (T-034). Re-demodulating the same IQ mints new demodulation/decode ids,
+//!    so the source id alone cannot catch it. A sighting offered with a [`MeasurementKey`]
+//!    (`Repository::record_sighting_measured`) whose source is new resolves like a replay when
+//!    the ledger holds a sighting with the same key whose span overlaps it by at least half the
+//!    shorter span (an instant counts if it lies inside) and whose centre is within the
+//!    fingerprint centre tolerance, unless the sighting's identity differs from that emitter's.
+//!    It adds only its count beyond the largest count already recorded there. Spans that merely
+//!    touch, a later session, another producer or another channel do not match, so a genuinely
+//!    new observation of the same emitter still counts.
 //! 2. **Identity.** A decoded identity always wins: the emitter holding it is the target. If the
 //!    sighting names an emitter context (the detection/track emitter it was decoded from) and the
 //!    identity's scheme does not share channels ([`IdentityScheme::shares_channel`]):
@@ -55,13 +65,20 @@
 //!
 //! # Content gating of identities (legal guardrail)
 //!
-//! Inventory queries return an identity in clear only when its content class positively permits
-//! it ([`IdentityAccess::reveals`]): `unrestricted`, or `own-key-decrypted` with an explicit
-//! [`IdentityAccess::OwnTrafficAuthorised`]. Anything else, including an identity whose class is
-//! unknown (legacy writers), is [`InventoryIdentity::Withheld`]: the scheme (metadata) is shown,
-//! the value is not. The class is the most restrictive class of the identity's sources
+//! Every public emitter read returns an identity in clear only when its content class positively
+//! permits it ([`IdentityAccess::reveals`]): `unrestricted`, or `own-key-decrypted` with an
+//! explicit [`IdentityAccess::OwnTrafficAuthorised`]. Anything else, including an identity whose
+//! class is unknown (legacy writers), is [`InventoryIdentity::Withheld`]: the scheme (metadata)
+//! is shown, the value is not. The class is the most restrictive class of the identity's sources
 //! ([`most_restrictive`]); when none was recorded it is derived from the linked decodes carrying
 //! that identity, and missing means withheld.
+//!
+//! The rule covers `query_inventory`, `emitter` / `emitters_in_region` / `emitter_by_identity`
+//! (gated at [`IdentityAccess::Standard`]; a withheld identity reads as `Identity::Unknown`) and
+//! their explicit-access forms `emitter_with_access` / `emitter_by_identity_with_access`. A
+//! lookup by identity value finds nothing unless that identity would be shown, so it cannot
+//! confirm a withheld identity is held. `RepoError::IdentityConflict` names the scheme only.
+//! No public API returns identities ungated.
 
 use serde::{Deserialize, Serialize};
 
@@ -493,10 +510,39 @@ impl Sighting {
     }
 }
 
+/// What a sighting measured, independent of the row ids a (re-)run mints (rule 1,
+/// re-measurement). Offered with `Repository::record_sighting_measured`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MeasurementKey {
+    /// Producer, without its version (re-running a newer decoder on the same IQ is still the
+    /// same measurement), e.g. `hk-rds`, `hk-infer`. Different producers count separately.
+    pub producer: String,
+    /// Stable name of the capture, e.g. a SigMF `core:sha512` or data path. Never a freshly
+    /// minted row id, which differs on every replay. `None` = unnamed: sample times are
+    /// absolute, so overlapping spans on one channel are the same emission.
+    pub capture: Option<String>,
+}
+
+impl MeasurementKey {
+    /// A key with no capture name.
+    pub fn new(producer: impl Into<String>) -> Self {
+        Self {
+            producer: producer.into(),
+            capture: None,
+        }
+    }
+
+    /// Canonical stored text.
+    pub(crate) fn text(&self) -> String {
+        serde_json::json!([self.producer, self.capture]).to_string()
+    }
+}
+
 /// How a sighting was assigned.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Assignment {
-    /// The source was already counted; only its growth was added.
+    /// The source (or, with a [`MeasurementKey`], the same measurement under new ids) was
+    /// already counted; only its growth was added.
     Replay,
     /// The emitter holding the decoded identity.
     Identity,

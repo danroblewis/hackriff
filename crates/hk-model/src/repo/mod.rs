@@ -40,10 +40,14 @@
 //!   store the payload hash that Explanation evidence pins.
 //! - **Emitter** has at most one row per decoded identity (partial unique index). Entity
 //!   resolution (`record_sighting`, T-018, rules in [`crate::cluster`]) counts each source
-//!   observation once (the `emitter_observation` ledger) and records merges as `merged_into`
-//!   plus superseded `emitter_link` rows; nothing is deleted. Merged emitters are skipped by
-//!   region/inventory queries, and `upsert_emitter_observation` / `link_emitter` follow a merged
-//!   id to its survivor.
+//!   observation once (the `emitter_observation` ledger; `record_sighting_measured` also
+//!   catches re-measurements of the same IQ under new row ids, T-034) and records merges as
+//!   `merged_into` plus superseded `emitter_link` rows; nothing is deleted. Merged emitters are
+//!   skipped by region/inventory queries, and `upsert_emitter_observation` / `link_emitter`
+//!   follow a merged id to its survivor.
+//! - **Emitter identities** leave the repository only gated by content class (T-034; rules in
+//!   [`crate::cluster`]): every public emitter read applies it, and the ungated read is
+//!   crate-private.
 //!
 //! # Region queries
 //! Region-indexed tables keep the largest frequency span and duration ever written
@@ -133,7 +137,8 @@ pub enum RepoError {
     /// merge the two before the observation can be recorded.
     #[error("identity {identity} already belongs to emitter {existing}")]
     IdentityConflict {
-        /// The identity, `scheme:value`.
+        /// The identity's scheme, `scheme:<withheld>`. Never the value: errors leave the process
+        /// ungated (legal guardrail, [`crate::cluster`]).
         identity: String,
         /// Emitter that holds it.
         existing: EmitterId,

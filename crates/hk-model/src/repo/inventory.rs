@@ -7,6 +7,7 @@ use super::{
     RepoError, Repository, blob, body_by_id, bump_extent, enum_parse, enum_text, finite, int,
     opt_blob, region_bounds,
 };
+use crate::cluster::{IdentityAccess, InventoryEntry, InventoryIdentity};
 use crate::detection::{Track, TrackState};
 use crate::emitter::{
     Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation, Identity,
@@ -137,8 +138,10 @@ fn identity_columns(identity: &Identity) -> (Option<String>, Option<String>) {
     }
 }
 
+/// Error label for an identity: the scheme only. Errors can leave the process (API responses,
+/// logs) and the class is not known here, so the value is always withheld.
 pub(super) fn identity_label(identity: &DecodedIdentity) -> String {
-    format!("{}:{}", identity.scheme, identity.value)
+    format!("{}:<withheld>", identity.scheme)
 }
 
 fn insert_classification(
@@ -313,6 +316,10 @@ impl Repository {
     }
 
     /// Merges sightings into the inventory (docs/07 §2.11; groundwork for T-018).
+    ///
+    /// **Legacy.** It records no identity class, so an identity written here stays withheld on
+    /// every read unless linked decodes supply the class, and it does not deduplicate. New
+    /// writers use `record_sighting` / `record_sighting_measured`.
     ///
     /// The target emitter is, in order: the emitter already holding the observation's decoded
     /// identity, else `obs.emitter_id`. If the target exists, `count` is summed, `first_seen` /
@@ -492,8 +499,29 @@ impl Repository {
         })
     }
 
-    /// One Emitter with its classification history, current status and tags.
+    /// One Emitter with its classification history, current status and tags. The identity is
+    /// gated at [`IdentityAccess::Standard`] (legal guardrail, [`crate::cluster`]): a withheld
+    /// identity reads as `Identity::Unknown`. See [`Self::emitter_with_access`].
     pub fn emitter(&self, id: EmitterId) -> Result<Emitter, RepoError> {
+        Ok(self
+            .emitter_with_access(id, IdentityAccess::Standard)?
+            .emitter)
+    }
+
+    /// One emitter as an inventory row, its identity gated for `access` (fail closed).
+    pub fn emitter_with_access(
+        &self,
+        id: EmitterId,
+        access: IdentityAccess,
+    ) -> Result<InventoryEntry, RepoError> {
+        let tx = self.read_tx()?;
+        let emitter = self.emitter_ungated(id)?;
+        super::cluster::gate_entry(&tx, emitter, access)
+    }
+
+    /// One Emitter with its identity in clear whatever its class. Crate-private: every path out
+    /// of the process goes through a gated read.
+    pub(crate) fn emitter_ungated(&self, id: EmitterId) -> Result<Emitter, RepoError> {
         let raw = self
             .conn
             .prepare_cached(concat!(
@@ -510,18 +538,35 @@ impl Repository {
         self.emitter_from_raw(raw)
     }
 
-    /// The emitter holding a decoded identity, if any.
+    /// The emitter holding a decoded identity, gated at [`IdentityAccess::Standard`]: `None`
+    /// unless that identity would be shown in clear (a lookup must not confirm a withheld
+    /// identity is held).
     pub fn emitter_by_identity(
         &self,
         identity: &DecodedIdentity,
     ) -> Result<Option<Emitter>, RepoError> {
-        emitter_id_by_identity(&self.conn, identity)?
-            .map(|id| self.emitter(id))
-            .transpose()
+        Ok(self
+            .emitter_by_identity_with_access(identity, IdentityAccess::Standard)?
+            .map(|e| e.emitter))
+    }
+
+    /// The emitter holding a decoded identity as an inventory row, if `access` reveals it.
+    pub fn emitter_by_identity_with_access(
+        &self,
+        identity: &DecodedIdentity,
+        access: IdentityAccess,
+    ) -> Result<Option<InventoryEntry>, RepoError> {
+        let tx = self.read_tx()?;
+        let Some(id) = emitter_id_by_identity(&tx, identity)? else {
+            return Ok(None);
+        };
+        let entry = super::cluster::gate_entry(&tx, self.emitter_ungated(id)?, access)?;
+        Ok(matches!(entry.identity, InventoryIdentity::Clear { .. }).then_some(entry))
     }
 
     /// Emitters overlapping `region` in frequency whose first–last-seen span overlaps its time
-    /// (docs/07 §4 step 3), most recently seen first.
+    /// (docs/07 §4 step 3), most recently seen first. Identities gated at
+    /// [`IdentityAccess::Standard`].
     pub fn emitters_in_region(&self, region: &Region) -> Result<Vec<Emitter>, RepoError> {
         let tx = self.read_tx()?;
         let b = region_bounds(&tx, "emitter", region)?;
@@ -531,7 +576,10 @@ impl Repository {
                 .collect::<Result<Vec<_>, _>>()?
         };
         raws.into_iter()
-            .map(|raw| self.emitter_from_raw(raw))
+            .map(|raw| {
+                let e = self.emitter_from_raw(raw)?;
+                Ok(super::cluster::gate_entry(&tx, e, IdentityAccess::Standard)?.emitter)
+            })
             .collect()
     }
 

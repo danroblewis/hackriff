@@ -10,7 +10,13 @@
 //! position and word, CRC algorithm and result, frame and payload **lengths**.
 //!
 //! # Rows
-//! - **Emitter** observation, identity `other:hk-framing` = the framing signature (structure).
+//! - **Emitter** sighting through entity resolution (`Repository::record_sighting_measured`,
+//!   T-018/T-034), keyed by the first demodulation, identity `other:hk-framing` = the framing
+//!   signature (structure) under the **effective content class** (fail closed: metadata-only,
+//!   so the identity is withheld from inventory output, unless the caller classifies the
+//!   emitter), a 2-FSK fingerprint (centre, bandwidth, symbol rate, deviation), the emitter hint
+//!   as context and the `2fsk` classification. Re-demodulating the same bursts is a
+//!   re-measurement (producer `hk-infer`, same span and channel): the count does not grow.
 //! - **Demodulation** per demodulated burst (mode `2fsk`).
 //! - **Decode** per burst with a located sync (decoder `hk-infer`): `frame_model`
 //!   `inferred:2fsk:<signature>`, structure metadata, `crc_status`, content (payload hex/bits)
@@ -26,8 +32,9 @@ use hk_model::{
     Annotation, AnnotationAuthor, AnnotationId, AnnotationKind, AnnotationTarget, Bitstream,
     BitstreamId, BitstreamPayload, BitstreamTransport, Classification, ContentClass, CrcStatus,
     Decode, DecodeId, DecodedIdentity, Demodulation, DemodulationId, DetectionId, EmitterId,
-    EmitterLink, EmitterObservation, Framing, IdentityScheme, KnownStatus, KnownStatusChange,
-    LinkTarget, RecordingId, RepoError, Repository, StatusAuthor, TimeRange,
+    EmitterLink, Fingerprint, Framing, IdentityClaim, IdentityScheme, KnownStatus,
+    KnownStatusChange, LinkTarget, MeasurementKey, RecordingId, RepoError, Repository, Sighting,
+    StatusAuthor, TimeRange,
 };
 use serde_json::{Value, json};
 
@@ -200,26 +207,68 @@ pub fn write_framed_bursts(
     .or_else(|| median(bursts.iter().map(|b| b.request.bandwidth_hz).collect()))
     .unwrap_or(0.0);
     let identity = framing_identity(result);
-    let up = repo.upsert_emitter_observation(&EmitterObservation {
-        emitter_id: ctx.emitter_hint.unwrap_or_else(EmitterId::new),
+    let now = seen.end;
+    // Ids up front: the sighting is keyed by the first demodulation (a fresh id when no burst
+    // demodulated), and the rows reference the emitter it resolves to.
+    let demod_ids: Vec<Option<DemodulationId>> = bursts
+        .iter()
+        .map(|b| b.symbols.as_ref().map(|_| DemodulationId::new()))
+        .collect();
+    let source = demod_ids
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .unwrap_or_else(DemodulationId::new);
+    let sighting = Sighting {
+        source: LinkTarget::Demodulation(source),
         seen,
         count: bursts.len() as u64,
         f_center_hz: f_center,
         bandwidth_hz: bandwidth,
-        identity: identity.clone(),
-    })?;
-    let eid = up.emitter_id;
-    let now = seen.end;
+        fingerprint: Some(Fingerprint {
+            family: Some("2fsk".into()),
+            symbol_rate_hz: median(
+                bursts
+                    .iter()
+                    .filter_map(|b| b.symbols.as_ref().map(|s| s.rate_bd))
+                    .collect(),
+            ),
+            deviation_hz: median(
+                bursts
+                    .iter()
+                    .filter_map(|b| b.symbols.as_ref().and_then(|s| s.deviation_hz))
+                    .collect(),
+            ),
+            ..Fingerprint::new(f_center, bandwidth)
+        }),
+        identity: identity.clone().map(|identity| IdentityClaim {
+            identity,
+            content_class: class,
+        }),
+        context: ctx.emitter_hint,
+        classification: Some(Classification {
+            t: now,
+            family: "2fsk".into(),
+            confidence: model.confidence,
+            open_set_score: 1.0 - model.confidence,
+            model_version: FSK_DEMOD_VERSION.into(),
+        }),
+        tags: Vec::new(),
+    };
+    let resolution =
+        repo.record_sighting_measured(&sighting, &MeasurementKey::new(INFER_DECODER_ID), None)?;
+    let eid = resolution.emitter_id;
 
     let mut demodulation_ids = Vec::new();
     let mut decode_ids = Vec::new();
     let mut content_withheld = 0;
     for (i, burst) in bursts.iter().enumerate() {
-        let Some(sy) = &burst.symbols else {
+        let (Some(sy), Some(demod_id)) = (&burst.symbols, demod_ids[i]) else {
             continue;
         };
         let demod = Demodulation {
-            id: DemodulationId::new(),
+            id: demod_id,
             emitter_ref: Some(eid),
             detection_ref: ctx.detection_ref,
             recording_ref: ctx.recording_ref,
@@ -304,17 +353,6 @@ pub fn write_framed_bursts(
         repo.insert_bitstream(b)?;
     }
 
-    repo.append_classification(
-        eid,
-        &Classification {
-            t: now,
-            family: "2fsk".into(),
-            confidence: model.confidence,
-            open_set_score: 1.0 - model.confidence,
-            model_version: FSK_DEMOD_VERSION.into(),
-        },
-    )?;
-
     let valid: Vec<DecodeId> = decode_ids
         .iter()
         .filter(|(i, _)| result.frames[*i].crc_valid == Some(true))
@@ -393,7 +431,7 @@ pub fn write_framed_bursts(
     }
     Ok(WrittenFraming {
         emitter_id: eid,
-        emitter_created: up.created,
+        emitter_created: resolution.created,
         demodulation_ids,
         decode_ids,
         bitstream,

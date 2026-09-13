@@ -1437,7 +1437,14 @@ fn signal_001_adsb_icao_sessions_merge_into_one_emitter() {
     assert_eq!(day2.emitter_id, day1.emitter_id);
     assert!(!day2.created);
 
-    let e = b.repo.emitter(day1.emitter_id).unwrap();
+    // The legacy writer records no identity class: gated reads withhold the ICAO (T-034), so the
+    // aggregate is checked on the crate-private ungated read.
+    assert_eq!(
+        b.repo.emitter(day1.emitter_id).unwrap().identity,
+        Identity::Unknown
+    );
+    assert!(b.repo.emitter_by_identity(&icao).unwrap().is_none());
+    let e = b.repo.emitter_ungated(day1.emitter_id).unwrap();
     assert_eq!(e.count, 165);
     assert_eq!(e.seen(), tr(1_000, 90_300));
     assert_eq!(e.identity, Identity::Decoded(icao.clone()));
@@ -1457,7 +1464,7 @@ fn signal_001_adsb_icao_sessions_merge_into_one_emitter() {
             identity: None,
         })
         .unwrap();
-    let e = b.repo.emitter_by_identity(&icao).unwrap().unwrap();
+    let e = b.repo.emitter_ungated(day1.emitter_id).unwrap();
     assert_eq!((e.count, e.seen()), (170, tr(10, 90_300)));
     assert_eq!(e.f_center_hz, 1090.001e6);
 

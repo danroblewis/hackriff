@@ -851,6 +851,330 @@ fn restricted_identities_are_withheld_in_inventory_output() {
     ));
 }
 
+/// T-034 legal guardrail: restricted, metadata-only and unclassified identities never appear in
+/// any public emitter read, its serialized (export) form, a resolution or an error without
+/// authorisation (sentinel scan); an unrestricted RDS PI stays visible; own-traffic identities
+/// need the explicit authorisation.
+#[test]
+fn identities_are_gated_on_every_public_read_path() {
+    const PAGER: &str = "SENTINEL-PAGER-7391";
+    const CELL: &str = "SENTINEL-CELL-4402";
+    const META: &str = "SENTINEL-META-2208";
+    const LEGACY: &str = "SENTINEL-LEGACY-9913";
+    const OWN: &str = "SENTINEL-OWN-5510";
+    let other = |s: &str| IdentityScheme::Other(s.into());
+    let mut r = repo();
+    let mut out = String::new();
+    let record = |r: &mut Repository, s: Sighting, out: &mut String| -> EmitterId {
+        let res = r.record_sighting(&s, None).unwrap();
+        out.push_str(&format!("{res:?}\n"));
+        res.emitter_id
+    };
+    let classify = |mut s: Sighting| {
+        s.classification = Some(Classification {
+            t: s.seen.end,
+            family: "fsk".into(),
+            confidence: 0.9,
+            open_set_score: 0.1,
+            model_version: "test@1".into(),
+        });
+        s.tags.push("watch".into());
+        s
+    };
+    use ContentClass::*;
+    let pager_claim = claim(other("pocsag-capcode"), PAGER, RestrictedPaging);
+    let pager_ctx = record(
+        &mut r,
+        track_sighting(Fingerprint::new(929.6e6, 20e3), tr(0, 10), 3),
+        &mut out,
+    );
+    let pager = record(
+        &mut r,
+        classify(decode_sighting(
+            pager_claim.clone(),
+            5,
+            929.6e6,
+            20e3,
+            Some(pager_ctx),
+        )),
+        &mut out,
+    );
+    let cell_claim = claim(other("imsi"), CELL, RestrictedCellular);
+    let cell = record(
+        &mut r,
+        classify(decode_sighting(cell_claim.clone(), 1, 1900e6, 200e3, None)),
+        &mut out,
+    );
+    let meta_claim = claim(other("hk-framing"), META, MetadataOnly);
+    let meta = record(
+        &mut r,
+        classify(decode_sighting(meta_claim.clone(), 2, 915e6, 36e3, None)),
+        &mut out,
+    );
+    let own_claim = claim(other("own-sensor"), OWN, OwnKeyDecrypted);
+    let own = record(
+        &mut r,
+        decode_sighting(own_claim.clone(), 3, 868.3e6, 50e3, None),
+        &mut out,
+    );
+    let legacy_identity = DecodedIdentity {
+        scheme: IdentityScheme::Talkgroup,
+        value: LEGACY.into(),
+    };
+    let legacy = r
+        .upsert_emitter_observation(&EmitterObservation {
+            emitter_id: EmitterId::new(),
+            seen: tr(0, 1),
+            count: 1,
+            f_center_hz: 851e6,
+            bandwidth_hz: 12.5e3,
+            identity: Some(legacy_identity.clone()),
+        })
+        .unwrap()
+        .emitter_id;
+    let pi = claim(IdentityScheme::RdsPi, "1694", Unrestricted);
+    let rds = record(
+        &mut r,
+        decode_sighting(pi.clone(), 4, 98.1e6, 200e3, None),
+        &mut out,
+    );
+    // A user merge moves the pager identity onto an anonymous emitter.
+    let anon = record(
+        &mut r,
+        track_sighting(Fingerprint::new(152e6, 12.5e3), tr(0, 10), 1),
+        &mut out,
+    );
+    out.push_str(&format!(
+        "{:?}\n",
+        r.merge_emitters(pager, anon, t(20), "user")
+    ));
+    // Errors naming identities: merging two identified emitters, inserting a held identity,
+    // an observation whose identity belongs elsewhere.
+    for err in [
+        r.merge_emitters(cell, meta, t(21), "user").unwrap_err(),
+        r.insert_emitter(&Emitter {
+            id: EmitterId::new(),
+            f_center_hz: 929.6e6,
+            bandwidth_hz: 20e3,
+            first_seen: t(0),
+            last_seen: t(1),
+            count: 1,
+            fingerprint: serde_json::Value::Null,
+            identity: Identity::Decoded(pager_claim.identity.clone()),
+            known_status: KnownStatus::Unknown,
+            classifications: Vec::new(),
+            tags: Default::default(),
+        })
+        .unwrap_err(),
+        r.upsert_emitter_observation(&EmitterObservation {
+            emitter_id: meta,
+            seen: tr(30, 31),
+            count: 1,
+            f_center_hz: 1900e6,
+            bandwidth_hz: 200e3,
+            identity: Some(cell_claim.identity.clone()),
+        })
+        .unwrap_err(),
+    ] {
+        assert!(matches!(err, RepoError::IdentityConflict { .. }), "{err:?}");
+        out.push_str(&format!("{err} {err:?}\n"));
+    }
+
+    let all = [pager_ctx, pager, cell, meta, own, legacy, rds, anon];
+    let everywhere = Region::new(FreqRange::new(1e6, 6e9), tr(-DAY, DAY));
+    let restricted = [
+        &pager_claim.identity,
+        &cell_claim.identity,
+        &meta_claim.identity,
+        &legacy_identity,
+    ];
+    let scan = |r: &Repository, access: IdentityAccess| -> String {
+        let mut s = String::new();
+        let mut push = |v: String| {
+            s.push_str(&v);
+            s.push('\n');
+        };
+        for &id in &all {
+            let e = r.emitter(id).unwrap();
+            push(format!("{e:?}"));
+            push(serde_json::to_string(&e).unwrap());
+            push(format!("{:?}", r.emitter_with_access(id, access).unwrap()));
+            push(format!("{:?}", r.emitter_links(id).unwrap()));
+            push(format!("{:?}", r.emitter_link_history(id).unwrap()));
+            push(format!("{:?}", r.emitter_merges(id).unwrap()));
+            push(format!("{:?}", r.classification_history(id).unwrap()));
+            push(format!("{:?}", r.known_status_history(id).unwrap()));
+            push(format!("{:?}", r.emitter_fingerprint(id).unwrap()));
+            push(format!("{:?}", r.live_emitter_id(id).unwrap()));
+            push(format!(
+                "{:?}",
+                r.annotations_for(&AnnotationTarget::Emitter(id)).unwrap()
+            ));
+            let e = r.emitter_ungated(id).unwrap();
+            let fp = Fingerprint::new(e.f_center_hz, e.bandwidth_hz);
+            push(format!(
+                "{:?}",
+                r.emitters_matching_fingerprint(&fp, &Tolerances::default())
+                    .unwrap()
+            ));
+        }
+        push(serde_json::to_string(&r.emitters_in_region(&everywhere).unwrap()).unwrap());
+        push(format!(
+            "{:?}",
+            r.query_inventory(&InventoryQuery {
+                access,
+                ..Default::default()
+            })
+            .unwrap()
+        ));
+        for identity in restricted {
+            let q = InventoryQuery {
+                identity_scheme: Some(identity.scheme.clone()),
+                access,
+                ..Default::default()
+            };
+            push(format!("{:?}", r.query_inventory(&q).unwrap()));
+            assert!(r.emitter_by_identity(identity).unwrap().is_none());
+            assert!(
+                r.emitter_by_identity_with_access(identity, access)
+                    .unwrap()
+                    .is_none(),
+                "a lookup confirms a withheld identity: {identity:?}"
+            );
+        }
+        s
+    };
+
+    // The scan can see a sentinel: the crate-private ungated read holds them.
+    let raw = format!("{:?}", r.emitter_ungated(anon).unwrap());
+    assert!(raw.contains(PAGER), "{raw}");
+
+    let standard = scan(&r, IdentityAccess::Standard) + &out;
+    for sentinel in [PAGER, CELL, META, LEGACY, OWN] {
+        assert!(
+            !standard.contains(sentinel),
+            "{sentinel} leaked without authorisation"
+        );
+    }
+    assert!(
+        r.emitter_by_identity(&own_claim.identity)
+            .unwrap()
+            .is_none()
+    );
+
+    // Unrestricted: the RDS PI stays visible on every read.
+    assert_eq!(
+        r.emitter(rds).unwrap().identity,
+        Identity::Decoded(pi.identity.clone())
+    );
+    assert_eq!(
+        r.emitter_by_identity(&pi.identity).unwrap().map(|e| e.id),
+        Some(rds)
+    );
+    assert!(standard.contains("1694"));
+
+    // Own traffic: only with the explicit authorisation; restricted classes stay withheld.
+    let authorised = scan(&r, IdentityAccess::OwnTrafficAuthorised);
+    for sentinel in [PAGER, CELL, META, LEGACY] {
+        assert!(!authorised.contains(sentinel), "{sentinel} leaked");
+    }
+    assert!(authorised.contains(OWN));
+    let entry = r
+        .emitter_by_identity_with_access(&own_claim.identity, IdentityAccess::OwnTrafficAuthorised)
+        .unwrap()
+        .expect("own identity with authorisation");
+    assert_eq!(entry.emitter.id, own);
+    assert!(matches!(
+        entry.identity,
+        InventoryIdentity::Clear {
+            class: OwnKeyDecrypted,
+            ..
+        }
+    ));
+    assert_eq!(r.emitter(own).unwrap().identity, Identity::Unknown);
+}
+
+/// T-034: re-demodulating the same IQ mints new source ids but is the same measurement, so it
+/// adds nothing; a later capture, a touching span, another producer or channel, an unkeyed
+/// sighting and a different identity all still count.
+#[test]
+fn remeasurement_of_the_same_iq_is_not_counted_again() {
+    let mut r = repo();
+    let key = MeasurementKey::new("hk-rds");
+    let pi = claim(IdentityScheme::RdsPi, "1694", ContentClass::Unrestricted);
+    let session = |seen: TimeRange, f: f64, identity: &IdentityClaim| Sighting {
+        source: LinkTarget::Demodulation(DemodulationId::new()),
+        seen,
+        count: 1,
+        f_center_hz: f,
+        bandwidth_hz: 180e3,
+        fingerprint: Some(wfm(f)),
+        identity: Some(identity.clone()),
+        context: None,
+        classification: None,
+        tags: Vec::new(),
+    };
+    let first = r
+        .record_sighting_measured(&session(tr(0, 5), 101.3e6, &pi), &key, None)
+        .unwrap();
+    assert!(first.created);
+    let id = first.emitter_id;
+    let count = |r: &Repository| r.emitter(id).unwrap().count;
+
+    // Re-demodulation: new demodulation id, edges a few ms off, centre 40 Hz off.
+    let jittered = TimeRange::new(
+        Timestamp::from_unix_nanos(t(0).as_unix_nanos() + 2_000_000),
+        Timestamp::from_unix_nanos(t(5).as_unix_nanos() + 3_000_000),
+    );
+    for _ in 0..2 {
+        let again = r
+            .record_sighting_measured(&session(jittered, 101.30004e6, &pi), &key, None)
+            .unwrap();
+        assert_eq!(
+            (again.emitter_id, again.assignment, again.count_added),
+            (id, Assignment::Replay, 0)
+        );
+    }
+    assert_eq!(count(&r), 1);
+
+    // A second capture an hour later is a new observation, and its own re-run is not.
+    let later = r
+        .record_sighting_measured(&session(tr(3600, 3605), 101.3e6, &pi), &key, None)
+        .unwrap();
+    assert_eq!((later.emitter_id, later.count_added), (id, 1));
+    r.record_sighting_measured(&session(tr(3600, 3605), 101.3e6, &pi), &key, None)
+        .unwrap();
+    assert_eq!(count(&r), 2);
+    // Back-to-back windows only touch: counted.
+    r.record_sighting_measured(&session(tr(5, 10), 101.3e6, &pi), &key, None)
+        .unwrap();
+    assert_eq!(count(&r), 3);
+    // Another producer on the same IQ counts separately.
+    r.record_sighting_measured(
+        &session(tr(0, 5), 101.3e6, &pi),
+        &MeasurementKey::new("hk-other"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(count(&r), 4);
+    // Without a key only the source id deduplicates.
+    r.record_sighting(&session(tr(0, 5), 101.3e6, &pi), None)
+        .unwrap();
+    assert_eq!(count(&r), 5);
+    // Another channel, or another station's identity on this one, is not this measurement.
+    let beef = claim(IdentityScheme::RdsPi, "BEEF", ContentClass::Unrestricted);
+    let other_channel = r
+        .record_sighting_measured(&session(tr(0, 5), 101.7e6, &beef), &key, None)
+        .unwrap();
+    assert!(other_channel.created);
+    let clash = r
+        .record_sighting_measured(&session(tr(0, 5), 101.3e6, &beef), &key, None)
+        .unwrap();
+    assert_eq!(clash.emitter_id, other_channel.emitter_id);
+    assert_ne!(clash.assignment, Assignment::Replay);
+    assert_eq!(count(&r), 5);
+}
+
 #[test]
 fn emitter_links_only_allow_recording_supersession() {
     let mut r = repo();

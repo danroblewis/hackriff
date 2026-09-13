@@ -11,15 +11,15 @@ use super::{
     RepoError, Repository, blob, bump_extent, enum_parse, enum_text, finite, int, region_bounds,
 };
 use crate::cluster::{
-    Assignment, ConflictReason, EmitterMerge, Fingerprint, IdentityClaim, IdentityConflictReport,
-    InventoryEntry, InventoryIdentity, InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord,
-    MAX_INVENTORY_PAGE, RecordedClassification, Resolution, Sighting, Tolerances, known_family,
-    most_restrictive,
+    Assignment, ConflictReason, EmitterMerge, Fingerprint, IdentityAccess, IdentityClaim,
+    IdentityConflictReport, InventoryEntry, InventoryIdentity, InventoryPage, InventoryQuery,
+    KnownStatusPrior, LinkRecord, MAX_INVENTORY_PAGE, MeasurementKey, RecordedClassification,
+    Resolution, Sighting, Tolerances, known_family, most_restrictive,
 };
 use crate::content::ContentClass;
 use crate::emitter::{
-    Classification, DecodedIdentity, EmitterLink, Identity, KnownStatus, KnownStatusChange,
-    StatusAuthor,
+    Classification, DecodedIdentity, Emitter, EmitterLink, Identity, KnownStatus,
+    KnownStatusChange, StatusAuthor,
 };
 use crate::ids::EmitterId;
 use crate::region::{FreqRange, Region, TimeRange};
@@ -196,6 +196,93 @@ fn derived_identity_class(
         .iter()
         .map(|c| ContentClass::parse_fail_closed(Some(c)))
         .reduce(most_restrictive))
+}
+
+/// The output view of an emitter: its identity gated by class for `access` (rules:
+/// [`crate::cluster`], fail closed). A withheld identity is cleared from `emitter`.
+pub(super) fn gate_entry(
+    conn: &Connection,
+    mut emitter: Emitter,
+    access: IdentityAccess,
+) -> Result<InventoryEntry, RepoError> {
+    let id = emitter.id;
+    let family = current_family(conn, id)?;
+    let identity = match &emitter.identity {
+        Identity::Unknown => InventoryIdentity::None,
+        Identity::Decoded(d) => {
+            let class = match load_row(conn, id)?.class {
+                Some(c) => Some(c),
+                None => derived_identity_class(conn, id, d)?,
+            };
+            match (access.reveals(class), class) {
+                (true, Some(class)) => InventoryIdentity::Clear {
+                    identity: d.clone(),
+                    class,
+                },
+                _ => InventoryIdentity::Withheld {
+                    scheme: d.scheme.clone(),
+                    class,
+                },
+            }
+        }
+    };
+    if !matches!(identity, InventoryIdentity::Clear { .. }) {
+        emitter.identity = Identity::Unknown;
+    }
+    Ok(InventoryEntry {
+        emitter,
+        identity,
+        family,
+    })
+}
+
+/// Rule 1 re-measurement: the live emitter and largest counted count of an earlier sighting of
+/// the same measurement (key, overlapping span, centre within tolerance, no identity clash).
+fn remeasured(
+    conn: &Connection,
+    s: &Sighting,
+    key: &MeasurementKey,
+    tol: &Tolerances,
+) -> Result<Option<(EmitterId, u64)>, RepoError> {
+    let (start, end) = (s.seen.start.as_unix_nanos(), s.seen.end.as_unix_nanos());
+    let rows: Vec<([u8; 16], i64, i64, i64, f64)> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT emitter_id, count, t_start, t_end, f_center FROM emitter_observation \
+             WHERE measurement = ?1 AND t_start <= ?2 AND t_end >= ?3",
+        )?;
+        stmt.query_map(params![key.text(), end, start], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<Result<_, _>>()?
+    };
+    let ours = Fingerprint::new(s.f_center_hz, s.bandwidth_hz);
+    let mut best: Option<(EmitterId, u64)> = None;
+    for (e, count, t0, t1, f) in rows {
+        let overlap = i128::from(end.min(t1)) - i128::from(start.max(t0));
+        let shorter = (i128::from(end) - i128::from(start)).min(i128::from(t1) - i128::from(t0));
+        if overlap < 0 || 2 * overlap < shorter {
+            continue;
+        }
+        let theirs = Fingerprint::new(f, 0.0);
+        if (f - s.f_center_hz).abs() > ours.center_tolerance_hz(&theirs, tol) {
+            continue;
+        }
+        let Some(live) = live_id(conn, eid(e))? else {
+            continue;
+        };
+        if let Some(claim) = &s.identity
+            && load_row(conn, live)?
+                .identity
+                .is_some_and(|held| held != claim.identity)
+        {
+            continue;
+        }
+        let count = count.max(0) as u64;
+        if best.is_none_or(|(_, c)| count > c) {
+            best = Some((live, count));
+        }
+    }
+    Ok(best)
 }
 
 fn conflict(emitters: Vec<EmitterId>, reason: ConflictReason) -> Option<IdentityConflictReport> {
@@ -664,6 +751,7 @@ fn apply_prior(
 fn resolve(
     conn: &Connection,
     s: &Sighting,
+    key: Option<&MeasurementKey>,
     tol: &Tolerances,
     priors: Option<&dyn KnownStatusPrior>,
 ) -> Result<Resolution, RepoError> {
@@ -693,10 +781,21 @@ fn resolve(
                 s.count.saturating_sub(counted as u64),
             )
         }
-        None => {
-            let (t, a) = decide(conn, s, tol, &mut report, &mut merge)?;
-            (t, a, s.count)
-        }
+        None => match key
+            .map(|k| remeasured(conn, s, k, tol))
+            .transpose()?
+            .flatten()
+        {
+            Some((live, counted)) => (
+                Some(live),
+                Assignment::Replay,
+                s.count.saturating_sub(counted),
+            ),
+            None => {
+                let (t, a) = decide(conn, s, tol, &mut report, &mut merge)?;
+                (t, a, s.count)
+            }
+        },
     };
     let (id, created, family_before) = match target {
         Some(id) => {
@@ -721,10 +820,12 @@ fn resolve(
     };
     conn.prepare_cached(
         "INSERT INTO emitter_observation (source_kind, source_id, emitter_id, count, t_start, \
-         t_end) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         t_end, measurement, f_center) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
          ON CONFLICT (source_kind, source_id) DO UPDATE SET emitter_id = excluded.emitter_id, \
          count = max(count, excluded.count), t_start = min(t_start, excluded.t_start), \
-         t_end = max(t_end, excluded.t_end)",
+         t_end = max(t_end, excluded.t_end), \
+         measurement = coalesce(measurement, excluded.measurement), \
+         f_center = coalesce(f_center, excluded.f_center)",
     )?
     .execute(params![
         kind,
@@ -732,7 +833,9 @@ fn resolve(
         blob(id),
         int(s.count, "count")?,
         s.seen.start.as_unix_nanos(),
-        s.seen.end.as_unix_nanos()
+        s.seen.end.as_unix_nanos(),
+        key.map(MeasurementKey::text),
+        key.map(|_| s.f_center_hz)
     ])?;
     conn.prepare_cached(
         "INSERT OR IGNORE INTO emitter_link (emitter_id, target_kind, target_id, linked_at) \
@@ -831,10 +934,32 @@ impl Repository {
         self.record_sighting_with(sighting, &Tolerances::default(), priors)
     }
 
+    /// [`Self::record_sighting`] for producers that mint new row ids when re-run on the same IQ
+    /// (demodulators, decoders): a sighting of the same [`MeasurementKey`], overlapping span and
+    /// channel resolves as a replay instead of counting again (rule 1, [`crate::cluster`]).
+    pub fn record_sighting_measured(
+        &mut self,
+        sighting: &Sighting,
+        key: &MeasurementKey,
+        priors: Option<&dyn KnownStatusPrior>,
+    ) -> Result<Resolution, RepoError> {
+        self.record(sighting, Some(key), &Tolerances::default(), priors)
+    }
+
     /// [`Self::record_sighting`] with explicit tolerances.
     pub fn record_sighting_with(
         &mut self,
         s: &Sighting,
+        tol: &Tolerances,
+        priors: Option<&dyn KnownStatusPrior>,
+    ) -> Result<Resolution, RepoError> {
+        self.record(s, None, tol, priors)
+    }
+
+    fn record(
+        &mut self,
+        s: &Sighting,
+        key: Option<&MeasurementKey>,
         tol: &Tolerances,
         priors: Option<&dyn KnownStatusPrior>,
     ) -> Result<Resolution, RepoError> {
@@ -848,7 +973,7 @@ impl Repository {
         }
         int(s.count, "count")?;
         let tx = self.write_tx()?;
-        let r = resolve(&tx, s, tol, priors)?;
+        let r = resolve(&tx, s, key, tol, priors)?;
         tx.commit()?;
         Ok(r)
     }
@@ -1083,37 +1208,8 @@ impl Repository {
         ids.truncate(limit as usize);
         let mut entries = Vec::with_capacity(ids.len());
         for raw in ids {
-            let id = eid(raw);
-            let mut emitter = self.emitter(id)?;
-            let row = load_row(&tx, id)?;
-            let family = current_family(&tx, id)?;
-            let identity = match &emitter.identity {
-                Identity::Unknown => InventoryIdentity::None,
-                Identity::Decoded(d) => {
-                    let class = match row.class {
-                        Some(c) => Some(c),
-                        None => derived_identity_class(&tx, id, d)?,
-                    };
-                    match (q.access.reveals(class), class) {
-                        (true, Some(class)) => InventoryIdentity::Clear {
-                            identity: d.clone(),
-                            class,
-                        },
-                        _ => InventoryIdentity::Withheld {
-                            scheme: d.scheme.clone(),
-                            class,
-                        },
-                    }
-                }
-            };
-            if matches!(identity, InventoryIdentity::Withheld { .. }) {
-                emitter.identity = Identity::Unknown;
-            }
-            entries.push(InventoryEntry {
-                emitter,
-                identity,
-                family,
-            });
+            let emitter = self.emitter_ungated(eid(raw))?;
+            entries.push(gate_entry(&tx, emitter, q.access)?);
         }
         Ok(InventoryPage {
             entries,
