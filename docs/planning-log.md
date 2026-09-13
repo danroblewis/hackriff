@@ -289,3 +289,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Every future agent brief sets `CARGO_TARGET_DIR=/Users/daniellewis/hackriff/target` and `CARGO_INCREMENTAL=0`.
     - Once the current worktrees are gone, add an uncommitted `.claude/worktrees/.cargo/config.toml` (`build.target-dir` shared, `incremental = false`) so new worktrees share one target automatically. It isn't added now, because running agents would each start a full rebuild into the shared dir while their old targets still exist.
     - Coordinator verification runs use `CARGO_INCREMENTAL=0`, and main `target/debug/incremental` is cleared when idle.
+- **B0.114 Disk recovered:** 34 GiB free after agents dropped their incremental caches, above the 20 GB bar, so normal operation resumes. T-041's incremental cache (3.9 GB) is still pending. The shared-target and `CARGO_INCREMENTAL=0` rules from B0.113 still apply.
