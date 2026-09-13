@@ -1,33 +1,36 @@
-//! HackRF One source: a **stub** behind the [`Source`] trait. Every operation returns
-//! [`SourceError::NotAvailable`].
+//! HackRF One source: a **stub** behind the [`Source`] / [`SourceControl`] split. Every
+//! operation returns [`SourceError::NotAvailable`].
 //!
-//! # Why a stub: licensing (ADR-0010)
+//! # Licensing (ADR-0010)
 //!
-//! ADR-0010 lists libhackrf / hackrf tools as GPL, to verify before in-core use. Checked
-//! 2026-09-13 against `greatscottgadgets/hackrf` `master`:
+//! Verified upstream (`greatscottgadgets/hackrf` `master`) and recorded in the ADR-0010 ledger:
 //!
-//! - `host/hackrf-tools/src/hackrf_transfer.c` (and the other tools) and the firmware are
-//!   **GPL-2.0-or-later**. The repository's top-level `COPYING` is GPLv2.
-//! - `host/libhackrf/src/hackrf.c` carries a **BSD-3-Clause** header.
+//! - `host/libhackrf/src/hackrf.c` and `hackrf.h` are **BSD-3-Clause**.
+//! - libusb, libhackrf's dependency, is **LGPL-2.1**, used by dynamic linking.
+//! - `host/hackrf-tools` (e.g. `hackrf_transfer.c`) and the firmware are GPL-2.0-or-later. They
+//!   are not linked.
 //!
-//! So the library itself may be linkable from a non-GPL core. That is not yet recorded as a
-//! confirmed ADR-0010 ledger row, and the brief for this task treats libhackrf as GPL. Until the
-//! ledger confirms it, this crate **does not link libhackrf**. The live source will reach the
-//! device through an isolated process: `hackrf_transfer -r -` piping ci8 bytes, decoded with
-//! [`super::format::decode_into`], or a small driver process. Linking in-process needs a
-//! confirmed licence row first.
-//!
-//! The capability descriptor ([`SourceCapabilities::hackrf_one`]) is real, so the planner can
-//! reason about the device before the driver exists.
+//! Linking libhackrf in-process therefore looks permissible for a non-GPL core. The driver itself
+//! is later work: its capture thread will own the stream and apply [`super::ControlMailbox`]
+//! changes at block boundaries. Until then this stub keeps the API shape, and the capability
+//! descriptor ([`SourceCapabilities::hackrf_one`]) is real, so the planner can reason about the
+//! device before the driver exists.
+
+use std::sync::Arc;
 
 use num_complex::{Complex, Complex32};
 
-use super::{Gains, Source, SourceCapabilities, SourceError};
+use super::{Gains, Source, SourceCapabilities, SourceControl, SourceError};
 use crate::block::BlockHeader;
 
-/// The HackRF One source (stub). [`HackRfSource::open`] always fails with
+/// The HackRF One stream (stub). [`HackRfSource::open`] always fails with
 /// [`SourceError::NotAvailable`].
 pub struct HackRfSource {
+    control: Arc<HackRfControl>,
+}
+
+/// The HackRF One control handle (stub).
+pub struct HackRfControl {
     capabilities: SourceCapabilities,
 }
 
@@ -37,62 +40,79 @@ impl HackRfSource {
 
     /// Opens a HackRF One by serial (or the first found). Not available yet.
     pub fn open(_serial: Option<&str>) -> Result<Self, SourceError> {
-        Err(Self::not_available())
+        Err(not_available())
     }
 
     /// The capability descriptor this source will report.
     pub fn capabilities_descriptor() -> SourceCapabilities {
         SourceCapabilities::hackrf_one()
     }
+}
 
-    fn not_available() -> SourceError {
-        SourceError::NotAvailable {
-            source_name: Self::NAME,
-            reason: "the HackRF driver is not integrated yet (T-003 stub). libhackrf is not \
-                     linked (ADR-0010); live capture will run through an isolated process such \
-                     as `hackrf_transfer -r -`. Use SigmfReplaySource for offline work."
-                .into(),
-        }
+fn not_available() -> SourceError {
+    SourceError::NotAvailable {
+        source_name: HackRfSource::NAME,
+        reason: "the HackRF driver is not integrated yet (T-003 stub). Use SigmfReplaySource for \
+                 offline work."
+            .into(),
     }
 }
 
 impl Source for HackRfSource {
     fn capabilities(&self) -> &SourceCapabilities {
-        &self.capabilities
+        &self.control.capabilities
     }
 
-    fn tune(&mut self, _center_hz: f64) -> Result<(), SourceError> {
-        Err(Self::not_available())
-    }
-
-    fn set_sample_rate(&mut self, _sample_rate_hz: f64) -> Result<(), SourceError> {
-        Err(Self::not_available())
-    }
-
-    fn set_gains(&mut self, _gains: &Gains) -> Result<(), SourceError> {
-        Err(Self::not_available())
-    }
-
-    fn start(&mut self) -> Result<(), SourceError> {
-        Err(Self::not_available())
-    }
-
-    fn stop(&mut self) -> Result<(), SourceError> {
-        Err(Self::not_available())
+    fn control(&self) -> Arc<dyn SourceControl> {
+        self.control.clone()
     }
 
     fn read_block(
         &mut self,
         _samples: &mut Vec<Complex32>,
     ) -> Result<Option<BlockHeader>, SourceError> {
-        Err(Self::not_available())
+        Err(not_available())
     }
 
     fn read_block_ci8(
         &mut self,
         _samples: &mut Vec<Complex<i8>>,
     ) -> Result<Option<BlockHeader>, SourceError> {
-        Err(Self::not_available())
+        Err(not_available())
+    }
+}
+
+impl SourceControl for HackRfControl {
+    fn capabilities(&self) -> &SourceCapabilities {
+        &self.capabilities
+    }
+
+    fn tune(&self, _center_hz: f64) -> Result<(), SourceError> {
+        Err(not_available())
+    }
+
+    fn set_sample_rate(&self, _sample_rate_hz: f64) -> Result<(), SourceError> {
+        Err(not_available())
+    }
+
+    fn set_gains(&self, _gains: &Gains) -> Result<(), SourceError> {
+        Err(not_available())
+    }
+
+    fn set_baseband_filter(&self, _bandwidth_hz: f64) -> Result<(), SourceError> {
+        Err(not_available())
+    }
+
+    fn set_bias_tee(&self, _enabled: bool) -> Result<(), SourceError> {
+        Err(not_available())
+    }
+
+    fn start(&self) -> Result<(), SourceError> {
+        Err(not_available())
+    }
+
+    fn stop(&self) -> Result<(), SourceError> {
+        Err(not_available())
     }
 }
 
@@ -112,5 +132,12 @@ mod tests {
         ));
         assert!(err.to_string().contains("not available"));
         assert_eq!(HackRfSource::capabilities_descriptor().adc_bits, 8);
+        let control = HackRfControl {
+            capabilities: HackRfSource::capabilities_descriptor(),
+        };
+        assert!(matches!(
+            control.set_bias_tee(true),
+            Err(SourceError::NotAvailable { .. })
+        ));
     }
 }

@@ -13,7 +13,7 @@ use hk_core::{
     SourceError, ring_buffer,
 };
 use hk_model::sigmf::{Datatype, SigmfMeta};
-use hk_model::{TimestampMethod, sigmf::PROVENANCE_KEY};
+use hk_model::{Timestamp, TimestampMethod, sigmf::PROVENANCE_KEY};
 use num_complex::{Complex, Complex32};
 
 fn opts(block_len: usize) -> ReplayOptions {
@@ -328,12 +328,20 @@ fn replay_is_not_controllable_and_stops() {
     .unwrap();
     assert!(!src.capabilities().controllable);
     assert!(!src.capabilities().tx_capable);
+    let control = src.control();
     assert!(matches!(
-        src.tune(1e6),
+        control.tune(1e6),
+        Err(SourceError::Unsupported { .. })
+    ));
+    assert!(matches!(
+        control.set_bias_tee(true),
         Err(SourceError::Unsupported { .. })
     ));
     assert!(src.next_block().unwrap().is_some());
-    src.stop().unwrap();
+    // The control handle stops the stream from another thread, without touching the stream.
+    std::thread::spawn(move || control.stop().unwrap())
+        .join()
+        .unwrap();
     assert!(src.next_block().unwrap().is_none());
 }
 
@@ -432,4 +440,104 @@ fn tiny_tone_fixture_replays_with_its_provenance() {
     for s in &block.samples {
         assert!((s.norm() - 100.0 / 128.0).abs() < 0.01);
     }
+}
+
+#[test]
+fn header_and_trailing_bytes_are_skipped() {
+    let dir = TempDir::new("ncd");
+    let mut meta = meta(Datatype::Ci8, 1e3);
+    let mut c0 = capture(0, 1e6);
+    c0.extra
+        .insert("core:header_bytes".into(), serde_json::json!(6));
+    let mut c1 = capture(100, 1e6);
+    c1.extra
+        .insert("core:header_bytes".into(), serde_json::json!(4));
+    meta.captures = vec![c0, c1];
+    meta.global
+        .extra
+        .insert("core:trailing_bytes".into(), serde_json::json!(3));
+    let ramp = ramp_ci8(150);
+    let mut data = vec![0xaa; 6];
+    data.extend_from_slice(&ramp[..200]);
+    data.extend_from_slice(&[0xbb; 4]);
+    data.extend_from_slice(&ramp[200..]);
+    data.extend_from_slice(&[0xcc; 3]);
+    let path = write_recording(dir.path(), "ncd", &meta, &data);
+
+    let mut src = SigmfReplaySource::open(&path, opts(64)).unwrap();
+    assert_eq!(src.total_samples(), Some(150));
+    let mut all = Vec::new();
+    let mut buf = Vec::new();
+    while src.read_block(&mut buf).unwrap().is_some() {
+        all.extend_from_slice(&buf);
+    }
+    let mut expected = Vec::new();
+    format::decode_into(Datatype::Ci8, &ramp, &mut expected).unwrap();
+    assert_eq!(
+        all, expected,
+        "header and trailing bytes never become samples"
+    );
+
+    // A reader of unknown length cannot tell where the trailing bytes start.
+    assert!(matches!(
+        SigmfReplaySource::from_reader(meta, Cursor::new(data), opts(64)),
+        Err(SourceError::InvalidRecording(_))
+    ));
+}
+
+#[test]
+fn recordings_without_datetime_are_marked_untimed() {
+    let mut m = meta(Datatype::Ci8, 1e3);
+    let mut p = provenance("hackrf:test", 1e6, 1e3);
+    p.timestamp_method = TimestampMethod::HostArrival;
+    p.timestamp_error_budget_ns = Some(1000);
+    m.global.provenance = Some(p);
+    m.captures.push(capture(0, 1e6));
+    let mut c1 = capture(50, 1e6);
+    c1.datetime = Some("2026-09-13T00:00:00Z".into());
+    m.captures.push(c1);
+    let mut src = SigmfReplaySource::from_reader(m, Cursor::new(ramp_ci8(100)), opts(50)).unwrap();
+
+    // No anchor yet: epoch-relative times, and the provenance says the method is unknown.
+    let b0 = src.next_block().unwrap().unwrap();
+    assert_eq!(b0.header.time.host_time, Timestamp::UNIX_EPOCH);
+    assert_eq!(
+        b0.header.provenance.timestamp_method,
+        TimestampMethod::Unknown
+    );
+    assert_eq!(b0.header.provenance.timestamp_error_budget_ns, None);
+
+    // Anchored by core:datetime: the recorded method applies again.
+    let b1 = src.next_block().unwrap().unwrap();
+    assert_eq!(
+        b1.header.provenance.timestamp_method,
+        TimestampMethod::HostArrival
+    );
+    assert!(
+        b1.header
+            .discontinuity
+            .contains(Discontinuity::PROVENANCE_CHANGE)
+    );
+}
+
+#[test]
+fn sample_counter_overflow_is_an_error() {
+    let mut m = meta(Datatype::Ci8, 1e3);
+    let mut c = capture(0, 1e6);
+    c.extra
+        .insert("core:global_index".into(), serde_json::json!(u64::MAX - 5));
+    m.captures.push(c);
+    let mut src =
+        SigmfReplaySource::from_reader(m.clone(), Cursor::new(ramp_ci8(10)), opts(16)).unwrap();
+    assert!(matches!(
+        src.next_block(),
+        Err(SourceError::InvalidRecording(_))
+    ));
+
+    let dir = TempDir::new("overflow");
+    let path = write_recording(dir.path(), "overflow", &m, &ramp_ci8(10));
+    assert!(matches!(
+        SigmfReplaySource::open(&path, opts(16)),
+        Err(SourceError::InvalidRecording(_))
+    ));
 }
