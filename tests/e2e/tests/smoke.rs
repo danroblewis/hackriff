@@ -58,7 +58,7 @@ fn check_common(fx: &Fixture, scenario: &str, use_cases: &[&str]) {
     assert_eq!(prov.timestamp_method, TimestampMethod::Synthetic);
     for cap in &fx.meta.captures {
         assert!(
-            cap.extra["hackriff:clip_count"].is_u64(),
+            cap.clip_count.is_some(),
             "{scenario}: capture without hackriff:clip_count"
         );
     }

@@ -31,7 +31,8 @@ def test_round_trip_with_extension_and_unknown_keys(tmp_path):
         0,
         frequency=433.92e6,
         datetime="2026-09-13T12:00:00Z",
-        provenance=_prov(overload=True, clip_count=12),
+        provenance=_prov(overload=True, quantisation_limited=True),
+        clip_count=12,
         extra={"core:global_index": 3},
     )
     sigmf.add_annotation(
@@ -54,6 +55,9 @@ def test_round_trip_with_extension_and_unknown_keys(tmp_path):
     assert back["global"][sigmf.PROVENANCE_KEY]["tune"]["lna_db"] == 32.0
     assert back["captures"][0]["core:global_index"] == 3
     assert back["captures"][0][sigmf.PROVENANCE_KEY]["overload"] is True
+    assert back["captures"][0][sigmf.PROVENANCE_KEY]["quantisation_limited"] is True
+    assert back["captures"][0][sigmf.CLIP_COUNT_KEY] == 12
+    assert "clip_count" not in back["captures"][0][sigmf.PROVENANCE_KEY]
     # Written sorted by sample_start; the caller's dict is not reordered.
     assert [a["core:label"] for a in back["annotations"]] == ["earlier", "fsk-burst"]
     assert meta["annotations"][0]["core:label"] == "fsk-burst"
@@ -67,6 +71,8 @@ def test_round_trip_with_extension_and_unknown_keys(tmp_path):
         (lambda m: m["global"].update({"core:datatype": "i8"}), "datatype"),
         (lambda m: m["global"].pop("core:version"), "core:version"),
         (lambda m: m["captures"].append({"core:frequency": 1.0}), "sample_start"),
+        (lambda m: sigmf.add_capture(m, 0, clip_count=-1), "clip_count"),
+        (lambda m: m["global"][sigmf.PROVENANCE_KEY].pop("quantisation_limited"), "quantisation_limited"),
         (lambda m: m["global"][sigmf.PROVENANCE_KEY].pop("tune"), "tune"),
         (lambda m: m["global"][sigmf.PROVENANCE_KEY].update({"clock_source": "tcxo"}), "clock_source"),
         (

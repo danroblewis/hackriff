@@ -80,7 +80,7 @@ pub fn provenance(device_id: &str, center_hz: f64, sample_rate_hz: f64) -> Prove
             amp_on: false,
             bandwidth_hz: sample_rate_hz * 0.75,
         },
-        clip_count: 0,
+        quantisation_limited: false,
         overload: false,
         temperature_c: None,
         antenna_port: None,
@@ -99,6 +99,7 @@ pub fn capture(sample_start: u64, frequency: f64) -> Capture {
         frequency: Some(frequency),
         datetime: None,
         provenance: None,
+        clip_count: None,
         extra: Default::default(),
     }
 }

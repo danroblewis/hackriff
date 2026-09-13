@@ -31,8 +31,9 @@ tasks:
     dod: workspace builds on macOS (CPU path); CI runs cargo test + python tooling test; README build/run commands work
   - id: T-002
     title: Data-model types + SQLite repository (docs/07)
-    status: in-progress
-    review: "implemented 3d6ba9f; Opus review FIX-BEFORE-MERGE (content gating not enforced; clip_count in Provenance defeats dedup) + cheap pre-breaking fixes; implementer applying fixes"
+    status: done
+    commit: "3d6ba9f + review fixes b6d4902 (merged)"
+    review: "Opus review FIX-BEFORE-MERGE -> fixed (content gating fail-closed on all insert paths, sha256 provenance dedup, clip_count moved to Detection/SigMF capture, S4 flags, append-only known_status, f32 frames, TileKey scheme, payload-hash evidence, IMMEDIATE txns); coordinator verified gating tests + green lint/test on merge"
     deps: [T-001]
     parallel_group: B
     core_interface: true
@@ -205,7 +206,7 @@ tasks:
     dod: bits recovered; framing model + CRC id; ground-truth annotation on valid decode
   - id: T-014
     title: plugin host + manifest + IPC (ADR-0003)
-    status: todo
+    status: in-progress
     override: "combined with T-016 into one Opus-high agent: ADR-0004 framing serves both plugin IPC and external egress, so one owner avoids two codecs (coordinator, 2026-09-13)"
     deps: [T-002]
     parallel_group: D
@@ -231,7 +232,7 @@ tasks:
     dod: readsb wrapped per manifest; e2e replay assertion passes
   - id: T-016
     title: stream-output contract (framed UDS/TCP, SigMF headers, drop-not-block, gating)
-    status: todo
+    status: in-progress
     deps: [T-002]
     parallel_group: D
     core_interface: true
@@ -270,7 +271,7 @@ tasks:
     dod: clustering by fingerprint; inventory query by region/time/status/tag
   - id: T-019
     title: known-signal-priors — band-plan table + lookup
-    status: todo
+    status: in-progress
     deps: [T-002]
     parallel_group: H
     use_cases: [AWARE-053]

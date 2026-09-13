@@ -10,6 +10,7 @@ that don't know it can ignore it.
 | Key | Where | Value |
 |---|---|---|
 | `hackriff:provenance` | `global` (whole recording) or a `captures` entry (that segment; overrides global) | A Provenance object (docs/07 §2.6), the JSON form of `hk_model::Provenance`. |
+| `hackriff:clip_count` | `captures` entry | Non-negative integer: ADC samples clipped within that segment. Optional; omit when not measured. |
 | `hackriff:truth` | `annotations` entry | A free-form ground-truth object, e.g. `{"kind": "cw", "frequency_hz": 1.0001e8}` or decoded fields from a CRC-valid decode. The synthetic generator (T-023) and valid decodes write it; tests assert against it. |
 
 ## `hackriff:provenance` fields
@@ -19,8 +20,8 @@ that don't know it can ignore it.
   "device_id": "hackrf:<serial>",
   "tune": {"center_hz": 433920000.0, "sample_rate_hz": 2000000.0, "lna_db": 32.0,
            "vga_db": 20.0, "amp_on": false, "bandwidth_hz": 1750000.0},
-  "clip_count": 0,
   "overload": false,
+  "quantisation_limited": false,
   "temperature_c": 41.5,
   "antenna_port": "A1",
   "clock_source": "internal",
@@ -32,14 +33,27 @@ that don't know it can ignore it.
 }
 ```
 
-- **Required:** `device_id`, `tune` (all six fields), `clip_count`, `overload`, `clock_source`,
-  `clock_locked`, `timestamp_method`.
+- **Required:** `device_id`, `tune` (all six fields), `overload`, `quantisation_limited`,
+  `clock_source`, `clock_locked`, `timestamp_method`.
 - **Optional:** `temperature_c`, `antenna_port`, `calibration_state_ref`, `spur_mask_ref`, and
   `timestamp_error_budget_ns`. Omit a field when it is unknown; do not write `null`.
+- `overload` is sticky tune-state: the front end was judged overloaded under this tune/gain state.
+  A change of state is a new provenance object. Every detection under an overloaded provenance is
+  flagged `clipped`.
+- `quantisation_limited` is true when the noise floor under this gain state is within 3 dB of the
+  ADC quantisation floor (added from spike S4, 2026-09-13). It is stable per gain state.
 - `clock_source` is one of `internal`, `external` (10 MHz into CLKIN) or `gpsdo`.
 - `timestamp_method` is one of `host-arrival`, `gnss-tagged`, `external-reference`, `synthetic` or
   `unknown`. HackRF One has no hardware 1PPS, so live captures are `host-arrival` unless
   disciplined.
+
+### Why `clip_count` is not in provenance
+
+Provenance describes *state* and is deduplicated by value: many frames, detections and segments
+share one stored row while nothing changes. A clipped-sample count differs from span to span, so
+inside provenance it would make nearly every record unique and defeat the deduplication (T-002
+review). Counts live per capture segment (`hackriff:clip_count`) and per detection
+(`Detection::clip_count`). Readers ignore a legacy `clip_count` key inside `hackriff:provenance`.
 
 ## Conventions
 

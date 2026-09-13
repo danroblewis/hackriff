@@ -267,7 +267,7 @@ mod tests {
                 amp_on: false,
                 bandwidth_hz: 1000.0,
             },
-            clip_count: 0,
+            quantisation_limited: false,
             overload: false,
             temperature_c: None,
             antenna_port: None,
