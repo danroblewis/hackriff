@@ -48,6 +48,7 @@ pub(super) const EMITTER_REGION_SQL: &str = concat!(
     emitter_select!(),
     " FROM emitter \
      WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND last_seen >= ?4 AND first_seen <= ?5 \
+     AND merged_into IS NULL \
      ORDER BY last_seen DESC, emitter_id"
 );
 
@@ -79,7 +80,7 @@ fn emitter_raw(r: &Row<'_>) -> rusqlite::Result<EmitterRaw> {
     ))
 }
 
-fn link_kind(target: &LinkTarget) -> (&'static str, Uuid) {
+pub(super) fn link_kind(target: &LinkTarget) -> (&'static str, Uuid) {
     match *target {
         LinkTarget::Track(id) => ("track", id.into()),
         LinkTarget::Detection(id) => ("detection", id.into()),
@@ -92,7 +93,7 @@ fn link_kind(target: &LinkTarget) -> (&'static str, Uuid) {
     }
 }
 
-fn link_target(kind: &str, id: Uuid) -> Result<LinkTarget, RepoError> {
+pub(super) fn link_target(kind: &str, id: Uuid) -> Result<LinkTarget, RepoError> {
     Ok(match kind {
         "track" => LinkTarget::Track(TrackId::from_uuid(id)),
         "detection" => LinkTarget::Detection(DetectionId::from_uuid(id)),
@@ -114,7 +115,7 @@ fn emitter_exists(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
         .is_some())
 }
 
-fn emitter_id_by_identity(
+pub(super) fn emitter_id_by_identity(
     conn: &Connection,
     identity: &DecodedIdentity,
 ) -> Result<Option<EmitterId>, RepoError> {
@@ -136,7 +137,7 @@ fn identity_columns(identity: &Identity) -> (Option<String>, Option<String>) {
     }
 }
 
-fn identity_label(identity: &DecodedIdentity) -> String {
+pub(super) fn identity_label(identity: &DecodedIdentity) -> String {
     format!("{}:{}", identity.scheme, identity.value)
 }
 
@@ -160,7 +161,7 @@ fn insert_classification(
     Ok(())
 }
 
-fn insert_status(conn: &Connection, c: &KnownStatusChange) -> Result<(), RepoError> {
+pub(super) fn insert_status(conn: &Connection, c: &KnownStatusChange) -> Result<(), RepoError> {
     conn.prepare_cached(
         "INSERT INTO emitter_status (emitter_id, status, prior_ref, reason, t, author) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -335,19 +336,21 @@ impl Repository {
         finite(obs.f_center_hz, "f_center_hz")?;
         finite(obs.bandwidth_hz, "bandwidth_hz")?;
         let tx = self.write_tx()?;
+        // A merged emitter id (T-018) stands for its survivor.
+        let requested = super::cluster::live_id(&tx, obs.emitter_id)?.unwrap_or(obs.emitter_id);
         let by_identity = match &obs.identity {
             Some(identity) => emitter_id_by_identity(&tx, identity)?,
             None => None,
         };
         let target = match by_identity {
-            Some(holder) if holder != obs.emitter_id && emitter_exists(&tx, obs.emitter_id)? => {
+            Some(holder) if holder != requested && emitter_exists(&tx, requested)? => {
                 return Err(RepoError::IdentityConflict {
                     identity: identity_label(obs.identity.as_ref().expect("matched by identity")),
                     existing: holder,
                 });
             }
             Some(holder) => holder,
-            None => obs.emitter_id,
+            None => requested,
         };
         let freq = FreqRange::centered(obs.f_center_hz, obs.bandwidth_hz);
         let (scheme, value) = match &obs.identity {
@@ -607,14 +610,17 @@ impl Repository {
         )? > 0)
     }
 
-    /// Appends a link from an emitter (idempotent: the first `linked_at` is kept).
+    /// Appends a link from an emitter (idempotent: the first `linked_at` is kept). A merged
+    /// emitter id links to its survivor.
     pub fn link_emitter(&mut self, link: &EmitterLink) -> Result<(), RepoError> {
         let (kind, id) = link_kind(&link.target);
+        let emitter =
+            super::cluster::live_id(&self.conn, link.emitter_id)?.unwrap_or(link.emitter_id);
         self.conn.execute(
             "INSERT OR IGNORE INTO emitter_link (emitter_id, target_kind, target_id, linked_at) \
              VALUES (?1, ?2, ?3, ?4)",
             params![
-                blob(link.emitter_id),
+                blob(emitter),
                 kind,
                 id.into_bytes(),
                 link.linked_at.as_unix_nanos()
@@ -623,12 +629,14 @@ impl Repository {
         Ok(())
     }
 
-    /// All links from an emitter, oldest first.
+    /// Current links from an emitter, oldest first. Links a merge re-pointed elsewhere are
+    /// superseded and omitted (see `emitter_link_history`).
     pub fn emitter_links(&self, emitter_id: EmitterId) -> Result<Vec<EmitterLink>, RepoError> {
         let rows = {
             let mut stmt = self.conn.prepare_cached(
                 "SELECT target_kind, target_id, linked_at FROM emitter_link \
-                 WHERE emitter_id = ?1 ORDER BY linked_at, target_kind, target_id",
+                 WHERE emitter_id = ?1 AND superseded_by IS NULL \
+                 ORDER BY linked_at, target_kind, target_id",
             )?;
             stmt.query_map([blob(emitter_id)], |r| {
                 Ok((

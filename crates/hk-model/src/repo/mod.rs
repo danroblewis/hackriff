@@ -38,7 +38,12 @@
 //!   canonical text is compared too, so a hash collision is an error, never a silent merge.
 //! - **ExternalEvent** is keyed by `(source, native_id)`; upserts keep the first local id and
 //!   store the payload hash that Explanation evidence pins.
-//! - **Emitter** has at most one row per decoded identity (partial unique index).
+//! - **Emitter** has at most one row per decoded identity (partial unique index). Entity
+//!   resolution (`record_sighting`, T-018, rules in [`crate::cluster`]) counts each source
+//!   observation once (the `emitter_observation` ledger) and records merges as `merged_into`
+//!   plus superseded `emitter_link` rows; nothing is deleted. Merged emitters are skipped by
+//!   region/inventory queries, and `upsert_emitter_observation` / `link_emitter` follow a merged
+//!   id to its survivor.
 //!
 //! # Region queries
 //! Region-indexed tables keep the largest frequency span and duration ever written
@@ -46,6 +51,9 @@
 //! is more than one max-span below the query cannot overlap it. Exact overlap is then checked on
 //! the stored edges, with the same closed-interval rule as [`crate::region`].
 
+mod cluster;
+#[cfg(test)]
+mod cluster_tests;
 mod interpret;
 mod inventory;
 mod measure;

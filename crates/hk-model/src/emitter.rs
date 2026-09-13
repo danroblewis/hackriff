@@ -56,6 +56,15 @@ impl IdentityScheme {
             IdentityScheme::Other(name) => format!("other:{name}"),
         }
     }
+
+    /// Whether many instances of this scheme normally share one channel (aircraft on 1090 MHz,
+    /// ships on AIS, sensors on 433.92 MHz, talkgroups on a trunk). Entity resolution (T-018)
+    /// never folds an anonymous fingerprint match or a channel-level emitter context into an
+    /// emitter identified by such a scheme: the fingerprint cannot tell the instances apart.
+    /// Unknown schemes are treated as shared (the conservative choice, avoiding over-merging).
+    pub fn shares_channel(&self) -> bool {
+        !matches!(self, IdentityScheme::RdsPi)
+    }
 }
 
 impl fmt::Display for IdentityScheme {
@@ -141,6 +150,8 @@ pub enum StatusAuthor {
     User,
     /// The repository itself: the initial status written when an emitter is created.
     System,
+    /// Emitter clustering (C18, T-018): the initial status of an emitter it created.
+    Clusterer,
 }
 
 /// One entry of an emitter's append-only known-status history. The latest entry is the emitter's
