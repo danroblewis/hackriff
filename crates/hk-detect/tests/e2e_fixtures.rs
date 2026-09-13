@@ -8,7 +8,7 @@
 //!   100 %, comb flagged, repository accepts) and at mid gain (not clipped); the gain-step test
 //!   refuses the clipped pair.
 //! - Negative control (433.62 MHz): no confirmed emitter candidate off the annotated artefacts;
-//!   what the 434.000 MHz line looks like is printed.
+//!   the 434.000 MHz line (217 × fs) is flagged `clock-harmonic`.
 //!
 //! Tests skip when the LFS data is not fetched (`HK_REQUIRE_FIXTURES=1` makes that a failure).
 
@@ -444,8 +444,17 @@ fn negative_control_433_has_no_confirmed_non_artefact_emitter_candidates() {
         .got
         .detections
         .iter()
-        .filter(|d| (d.detection.f_center_hz - 434.0e6).abs() <= 5e3)
+        .filter(|d| (d.detection.f_center_hz - 434.0e6).abs() <= 2e3)
         .collect();
+    // A weaker line 3.1 kHz below (433.9969 MHz, ~6 dB) is outside the rule's ±2 kHz and stays
+    // unflagged; it is reported, not asserted.
+    let neighbour = r
+        .got
+        .detections
+        .iter()
+        .filter(|d| (d.detection.f_center_hz - 433.9969e6).abs() <= 1e3)
+        .count();
+    eprintln!("433.9969 MHz neighbour line: {neighbour} detections (not a clock harmonic)");
     eprintln!(
         "434.000 MHz line: {} detections, {} confirmed",
         line.len(),
@@ -455,6 +464,17 @@ fn negative_control_433_has_no_confirmed_non_artefact_emitter_candidates() {
     );
     for d in &line {
         eprintln!("  {}", describe(d, r.fs));
+    }
+    // 434.000 MHz = 217 × 2 Msps: a crystal-locked clock harmonic, flagged (not suppressed).
+    assert!(!line.is_empty(), "the 434.000 MHz line is detected");
+    for d in &line {
+        assert_eq!(
+            d.detection.flags.spur_reason,
+            Some(SpurReason::ClockHarmonic),
+            "{}",
+            describe(d, r.fs)
+        );
+        assert_eq!(d.spur_harmonic_hz, Some(434.0e6));
     }
     if let Some(e) = r.got.evaluations.iter().rev().find(|e| e.confirming) {
         for em in e

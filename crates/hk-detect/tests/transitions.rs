@@ -354,7 +354,115 @@ fn impulsive_burst_runs_become_one_impulsive_event_each() {
     }
 }
 
-fn wide_signal_coverage(reference: FloorReference) -> f64 {
+/// Two 20 dB carriers at bins 1000 and 1400 for `seconds`, with bridge frames (+12 dB over bins
+/// 990–1410) at `bridges` (frame indices), optionally flagged impulsive. Returns the records.
+fn two_carriers(
+    seconds: f64,
+    bridges: &[u64],
+    impulsive: bool,
+) -> (Vec<hk_detect::DetectionRecord>, f64) {
+    let mut s = Scene::new(
+        config(),
+        GammaFrames::new(BINS, N_AVG, provenance(98e6, FS, 24.0), 29),
+    );
+    let mut base = flat(BINS);
+    add_line(&mut base, 1000, 3, 20.0);
+    add_line(&mut base, 1400, 3, 20.0);
+    let mut bridge = base.clone();
+    for v in &mut bridge[990..1411] {
+        *v += undb(12.0) as f32;
+    }
+    let frames = (seconds / s.src.frame_period_s()).round() as u64;
+    for t in 0..frames {
+        let b = bridges.contains(&t);
+        s.step_with(
+            if b { &bridge } else { &base },
+            Discontinuity::NONE,
+            ClipCount::NONE,
+            b && impulsive,
+        );
+    }
+    s.finish();
+    let per_box = (1.0 / s.src.frame_period_s()).ceil();
+    (s.out.detections, per_box)
+}
+
+fn describe_all(d: &[hk_detect::DetectionRecord]) -> Vec<String> {
+    d.iter().map(|x| describe(x, FS)).collect()
+}
+
+#[test]
+fn a_bridging_frame_fuses_carriers_for_at_most_one_box() {
+    let narrow = |d: &hk_detect::DetectionRecord| d.f_hi_hz - d.f_lo_hz < 50e3;
+    let (plain, _) = two_carriers(3.0, &[], false);
+    assert_eq!(plain.len(), 6, "{:#?}", describe_all(&plain));
+    assert!(plain.iter().all(narrow));
+    // One non-impulsive bridge at frame 100: the first 1 s box is fused, the rest are not.
+    let (bridged, _) = two_carriers(3.0, &[100], false);
+    let wide: Vec<_> = bridged.iter().filter(|d| !narrow(d)).collect();
+    eprintln!("bridged: {:#?}", describe_all(&bridged));
+    assert_eq!(wide.len(), 1, "{:#?}", describe_all(&bridged));
+    assert!(wide[0].frames.contains(&101));
+    let after: Vec<_> = bridged
+        .iter()
+        .filter(|d| d.frames.start >= wide[0].frames.end)
+        .collect();
+    assert_eq!(after.len(), 4, "{:#?}", describe_all(&bridged));
+    assert!(after.iter().all(|d| narrow(d)));
+    for bin in [1000, 1400] {
+        assert_eq!(after.iter().filter(|d| d.bins.contains(&bin)).count(), 2);
+    }
+}
+
+#[test]
+fn an_impulsive_frame_touching_two_carriers_never_fuses_them() {
+    let (records, _) = two_carriers(3.0, &[100], true);
+    eprintln!("impulsive bridge: {:#?}", describe_all(&records));
+    let normal: Vec<_> = records
+        .iter()
+        .filter(|d| !d.detection.flags.impulsive)
+        .collect();
+    assert_eq!(normal.len(), 6, "{:#?}", describe_all(&records));
+    assert!(normal.iter().all(|d| d.f_hi_hz - d.f_lo_hz < 50e3));
+}
+
+#[test]
+fn occasional_bridging_frames_never_fuse_records_permanently() {
+    // 10 s, bridges at 1.25, 3.75, 6.25 and 8.75 s: only the four 1 s boxes that contain a bridge
+    // are fused; every other box holds the two carriers separately.
+    let period = 2.048e-3;
+    let bridges: Vec<u64> = [1.25, 3.75, 6.25, 8.75]
+        .iter()
+        .map(|s| (s / period) as u64)
+        .collect();
+    let (records, per_box) = two_carriers(10.0, &bridges, false);
+    let wide: Vec<_> = records
+        .iter()
+        .filter(|d| d.f_hi_hz - d.f_lo_hz >= 50e3)
+        .collect();
+    let narrow = records.len() - wide.len();
+    eprintln!(
+        "10 s with 4 bridges: {} records, {} fused, {narrow} separate ({per_box} frames per box)",
+        records.len(),
+        wide.len()
+    );
+    assert_eq!(wide.len(), 4, "{:#?}", describe_all(&records));
+    for w in &wide {
+        assert!(
+            bridges.iter().any(|&b| w.frames.contains(&(b + 1))),
+            "{}",
+            describe(w, FS)
+        );
+    }
+    assert_eq!(narrow, 12, "{:#?}", describe_all(&records));
+    let last = records.iter().max_by_key(|d| d.frames.end).unwrap();
+    assert!(
+        last.f_hi_hz - last.f_lo_hz < 50e3,
+        "the stream ends unfused"
+    );
+}
+
+fn wide_signal_coverage(reference: FloorReference) -> (f64, f64) {
     let bins = BINS;
     let prov = provenance(98e6, FS, 24.0);
     let mut src = GammaFrames::new(bins, N_AVG, prov, 28);
@@ -369,7 +477,7 @@ fn wide_signal_coverage(reference: FloorReference) -> f64 {
         *v += undb(10.0) as f32;
     }
     let mut frame = src.empty_frame();
-    let (mut covered, mut total) = (0u64, 0u64);
+    let (mut covered, mut total, mut edge_frames, mut frames) = (0u64, 0u64, 0u64, 0u64);
     for i in 0..60 {
         let flags = if i == 0 {
             Discontinuity::STREAM_START
@@ -383,25 +491,38 @@ fn wide_signal_coverage(reference: FloorReference) -> f64 {
             let codes = det.codes();
             covered += codes[lo + 64..hi - 64].iter().filter(|&&c| c != 0).count() as u64;
             total += (hi - lo - 128) as u64;
+            // Both signal edges (±8 bins) have a detected cell in this frame.
+            let edge = |c: usize| codes[c - 8..c + 8].iter().any(|&x| x != 0);
+            edge_frames += u64::from(edge(lo) && edge(hi));
+            frames += 1;
         }
     }
-    covered as f64 / total as f64
+    (
+        covered as f64 / total as f64,
+        edge_frames as f64 / frames as f64,
+    )
 }
 
 #[test]
 fn wide_flat_signal_edges_are_detected_with_the_per_frame_reference() {
-    let coverage = wide_signal_coverage(FloorReference::PerFrame);
+    // The per-frame floor reads the signal inside a flat signal wider than a block, and the
+    // floor-step guard switches the floor branch off near its edges, so the OS branch finds the
+    // edges and little of the interior (T-005's wide reference is the fix for the interior).
+    let (coverage, edges) = wide_signal_coverage(FloorReference::PerFrame);
     eprintln!(
-        "2048-bin +10 dB signal, per-frame reference: interior coverage {:.1} %",
-        coverage * 100.0
+        "2048-bin +10 dB signal, per-frame reference: interior coverage {:.1} %, both edges detected in {:.0} % of frames",
+        coverage * 100.0,
+        edges * 100.0
     );
+    assert!(edges >= 0.9, "edges detected in {edges} of frames");
+    assert!(coverage >= 0.005, "interior coverage {coverage}");
 }
 
 #[test]
 #[ignore = "depends on the T-005 wide-reference fix (FloorFrame::wide_floor biases low on sloped floors); \
             flip FloorReference::Wide to the default and un-ignore when it lands"]
 fn wide_flat_signal_interior_coverage_via_the_wide_floor_branch() {
-    let coverage = wide_signal_coverage(FloorReference::Wide);
+    let (coverage, _) = wide_signal_coverage(FloorReference::Wide);
     eprintln!(
         "2048-bin +10 dB signal, wide reference: interior coverage {:.1} %",
         coverage * 100.0

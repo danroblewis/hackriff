@@ -178,16 +178,18 @@ pub struct IntegratedSpectrum {
     mean_psd: Vec<f64>,
     mean_floor: Vec<f64>,
     lines: Vec<f64>,
+    order: Vec<usize>,
     eval: IntegratedEvaluation,
     evaluated: bool,
     dirty: bool,
 }
 
 impl IntegratedSpectrum {
-    /// An empty integrator.
+    /// An empty integrator (slots for `cfg.blocks` completed blocks plus the partial one).
     pub fn new(cfg: IntegrationConfig, comb_lines: usize) -> Self {
         let slots = cfg.blocks + 1;
         Self {
+            order: Vec::with_capacity(slots),
             cfg,
             bins: 0,
             slots,
@@ -308,12 +310,14 @@ impl IntegratedSpectrum {
     }
 
     /// Evaluates the window (completed blocks, plus the partial block when `include_partial`).
+    /// Bins where `floor_ok` is `false` (the floor-step guard) hold no integrated emitter.
     /// Returns `false` when nothing is integrated.
     pub fn evaluate(
         &mut self,
         include_partial: bool,
         rules: &Rules,
         geometry: &Geometry,
+        floor_ok: Option<&[bool]>,
         comb: &mut CombFinder,
     ) -> bool {
         let n = self.bins;
@@ -322,14 +326,10 @@ impl IntegratedSpectrum {
         self.mean_floor.fill(0.0);
         let mut first = true;
         let (mut t0, mut t1) = (Timestamp::UNIX_EPOCH, Timestamp::UNIX_EPOCH);
-        let slots: [usize; 16] = {
-            let mut a = [usize::MAX; 16];
-            for (i, s) in self.slots_in_eval(include_partial).take(16).enumerate() {
-                a[i] = s;
-            }
-            a
-        };
-        for &s in slots.iter().take_while(|&&s| s != usize::MAX) {
+        let mut order = std::mem::take(&mut self.order);
+        order.clear();
+        order.extend(self.slots_in_eval(include_partial));
+        for &s in &order {
             if self.frames[s] == 0 {
                 continue;
             }
@@ -345,6 +345,7 @@ impl IntegratedSpectrum {
                 self.mean_floor[b] += self.floor[base + b];
             }
         }
+        self.order = order;
         if frames == 0 {
             return false;
         }
@@ -368,7 +369,13 @@ impl IntegratedSpectrum {
         let df = geometry.bin_width_hz;
         let mut b = 0;
         while b < n {
-            let ratio = |i: usize| self.mean_psd[i] / self.mean_floor[i].max(1e-300);
+            let ratio = |i: usize| {
+                if floor_ok.is_none_or(|m| m[i]) {
+                    self.mean_psd[i] / self.mean_floor[i].max(1e-300)
+                } else {
+                    0.0
+                }
+            };
             let r = ratio(b);
             if r.is_nan() || r <= extend {
                 b += 1;

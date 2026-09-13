@@ -54,7 +54,11 @@ struct Handles {
 }
 
 /// One pass of the scenario; returns (allocations inside `process`, detections emitted).
-fn pass(det: &mut Detector, h: &Handles, bins: usize, count: bool) -> (usize, usize) {
+/// `(frame, allocations, detections)` for frames that allocated more than they emitted.
+type Offenders = Vec<(u64, usize, usize)>;
+
+fn pass(det: &mut Detector, h: &Handles, bins: usize, count: bool) -> (usize, usize, Offenders) {
+    let mut offenders = Offenders::with_capacity(64);
     let mut src = GammaFrames::new(bins, N_AVG, h.a.clone(), 99);
     let mut frame = src.empty_frame();
     let mut floor = floor_frame(&frame, &flat(bins), 0);
@@ -113,6 +117,7 @@ fn pass(det: &mut Detector, h: &Handles, bins: usize, count: bool) -> (usize, us
         };
         src.fill(&mut frame, profile, flags);
         refresh_floor(&mut floor, &frame, segment, impulsive);
+        let emitted_before = detections;
         let mut sink = |e: DetectorEvent<'_>| {
             let was = COUNTING.with(|c| c.replace(false));
             if let DetectorEvent::Detection(d) = e {
@@ -126,9 +131,14 @@ fn pass(det: &mut Detector, h: &Handles, bins: usize, count: bool) -> (usize, us
         COUNTING.with(|c| c.set(count));
         det.process(&frame, &floor, clip, &mut sink);
         COUNTING.with(|c| c.set(false));
-        allocs += ALLOCATIONS.load(Ordering::Relaxed) - before;
+        let a = ALLOCATIONS.load(Ordering::Relaxed) - before;
+        allocs += a;
+        let emitted = detections - emitted_before;
+        if count && a > emitted && offenders.len() < offenders.capacity() {
+            offenders.push((i, a, emitted));
+        }
     }
-    (allocs, detections)
+    (allocs, detections, offenders)
 }
 
 #[test]
@@ -145,9 +155,21 @@ fn detector_hot_path_allocates_only_emitted_detections() {
     config.integration.block_s = 0.05;
     config.rules.comb.trials = 50;
     let mut det = Detector::new(config).unwrap();
-    // Warm-up pass reaches every high-water mark (pools, extents, comb chance cache).
-    let (_, warm) = pass(&mut det, &h, bins, false);
-    let (allocs, detections) = pass(&mut det, &h, bins, true);
+    // Warm-up passes reach every high-water mark (pools, extents, link lists, comb chance cache).
+    // Slot capacities only grow (below the 1024-bin shrink threshold), but which slot a component
+    // lands in depends on the free list, so they converge over a few passes (the third here).
+    let mut warm = 0;
+    for k in 0..4 {
+        warm = pass(&mut det, &h, bins, false).1;
+        eprintln!(
+            "warm-up pass {k}: labeller memory {} bytes",
+            det.labeler_memory_bytes()
+        );
+    }
+    let (allocs, detections, offenders) = pass(&mut det, &h, bins, true);
+    eprintln!(
+        "frames allocating beyond their detections (frame, allocations, detections): {offenders:?}"
+    );
     let s = det.stats();
     eprintln!(
         "second pass: {allocs} allocations for {detections} detections (warm-up {warm}); segments {}, impulsive events {}, confirmations {}, evaluations {}",

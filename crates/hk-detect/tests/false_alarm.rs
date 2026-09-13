@@ -177,19 +177,40 @@ fn min_duration_is_tested_before_gap_merge_regression() {
     assert_eq!(d[0].frames.end - d[0].frames.start, 8);
 }
 
-/// Gamma frames with per-bin mean `profile` through the real tracker and the detector (per-frame
-/// reference): interior false boxes, and the per-cell floor-branch exceedance of `T_off` over the
-/// usable span for the per-frame and the wide references.
-fn tracked_noise(profile: &[f32], frames: u64, seed: u64) -> (u64, f64, f64, f64) {
-    tracked_noise_with(profile, frames, seed, DetectorConfig::new(SurveyId::new()))
+/// Result of [`tracked_noise_with`].
+#[derive(Clone, Copy, Default)]
+struct Tracked {
+    /// Interior false boxes.
+    boxes: u64,
+    /// Floor-branch `T_off` exceedance ÷ design (1e-3) over the usable span, per-frame reference,
+    /// counted only where the detector let the floor branch run (the step guard).
+    ratio_frame: f64,
+    /// The same for the wide reference, everywhere (informational).
+    ratio_wide: f64,
+    /// Fraction of usable-span cells where the floor branch was off.
+    guarded: f64,
+    frames: u64,
 }
 
-fn tracked_noise_with(
-    profile: &[f32],
-    frames: u64,
-    seed: u64,
-    config: DetectorConfig,
-) -> (u64, f64, f64, f64) {
+impl Tracked {
+    fn add(&mut self, o: &Tracked) {
+        let w = |a: f64, fa: u64, b: f64, fb: u64| {
+            (a * fa as f64 + b * fb as f64) / (fa + fb).max(1) as f64
+        };
+        self.ratio_frame = w(self.ratio_frame, self.frames, o.ratio_frame, o.frames);
+        self.ratio_wide = w(self.ratio_wide, self.frames, o.ratio_wide, o.frames);
+        self.guarded = w(self.guarded, self.frames, o.guarded, o.frames);
+        self.boxes += o.boxes;
+        self.frames += o.frames;
+    }
+
+    fn exposure(&self) -> f64 {
+        exposure_mhz_h(BINS, FS, self.frames, (BINS * N_AVG as usize) as f64 / FS)
+    }
+}
+
+/// Gamma frames with per-bin mean `profile` through the real floor tracker and the detector.
+fn tracked_noise_with(profile: &[f32], frames: u64, seed: u64, config: DetectorConfig) -> Tracked {
     let prov = provenance(98e6, FS, 24.0);
     let mut src = GammaFrames::new(BINS, N_AVG, prov, seed);
     let mut det = Detector::new(config).unwrap();
@@ -199,7 +220,8 @@ fn tracked_noise_with(
     let t_off = gamma::mean_threshold(10.0, 1e-3) as f32;
     let usable = (8e6 / (FS / BINS as f64)) as usize;
     let (lo, hi) = (BINS / 2 - usable, BINS / 2 + usable);
-    let (mut exc_frame, mut exc_wide, mut cells) = (0u64, 0u64, 0u64);
+    let (mut exc_frame, mut exc_wide, mut cells, mut open, mut all) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
     let count = |e: hk_detect::DetectorEvent<'_>, boxes: &mut u64| {
         if let hk_detect::DetectorEvent::Detection(d) = e
             && d.bins.start >= EDGE_EXCLUDE
@@ -216,36 +238,73 @@ fn tracked_noise_with(
         };
         src.fill(&mut frame, profile, flags);
         let f = tracker.update(&frame, |_| {});
+        det.process(&frame, f, ClipCount::NONE, &mut |e| count(e, &mut boxes));
         if i >= 16 {
+            let mask = det.floor_branch_mask();
             for b in lo..hi {
                 let p = frame.spectrum.psd[b];
-                exc_frame += u64::from(p > t_off * f.floor[b]);
                 exc_wide += u64::from(p > t_off * f.wide_floor[b]);
+                if mask.is_none_or(|m| m[b]) {
+                    exc_frame += u64::from(p > t_off * f.floor[b]);
+                    open += 1;
+                }
             }
             cells += (hi - lo) as u64;
+            all += (hi - lo) as u64;
         }
-        det.process(&frame, f, ClipCount::NONE, &mut |e| count(e, &mut boxes));
     }
     det.finish(&mut |e| count(e, &mut boxes));
-    let frame_s = (BINS * N_AVG as usize) as f64 / FS;
-    (
+    Tracked {
         boxes,
-        exc_frame as f64 / cells as f64 / 1e-3,
-        exc_wide as f64 / cells as f64 / 1e-3,
-        exposure_mhz_h(BINS, FS, frames, frame_s),
-    )
+        ratio_frame: exc_frame as f64 / open.max(1) as f64 / 1e-3,
+        ratio_wide: exc_wide as f64 / cells as f64 / 1e-3,
+        guarded: 1.0 - open as f64 / all.max(1) as f64,
+        frames,
+    }
 }
 
 #[test]
-fn full_chain_with_the_floor_tracker_has_no_false_boxes_on_flat_noise() {
-    let (boxes, ratio_frame, ratio_wide, exposure) = tracked_noise(&flat(BINS), 3000, 0xc4a1);
+fn full_chain_with_the_floor_tracker_has_no_false_boxes_over_1_mhz_hour() {
+    let frame_s = (BINS * N_AVG as usize) as f64 / FS;
+    let target = (1.02 / exposure_mhz_h(BINS, FS, 1, frame_s)).ceil() as u64;
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(2, 8) as u64;
+    let per = target.div_ceil(threads);
+    let start = std::time::Instant::now();
+    let mut sum = Tracked::default();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                scope.spawn(move || {
+                    tracked_noise_with(
+                        &flat(BINS),
+                        per,
+                        0xc4a1 + 7919 * t,
+                        DetectorConfig::new(SurveyId::new()),
+                    )
+                })
+            })
+            .collect();
+        for h in handles {
+            sum.add(&h.join().unwrap());
+        }
+    });
+    let exposure = sum.exposure();
     eprintln!(
-        "tracker + detector, flat Gamma(10): {boxes} false boxes in {exposure:.3} MHz·h (95 % bound {:.1} /MHz/h); \
-         floor-branch T_off exceedance ÷ design: per-frame {ratio_frame:.2}×, wide {ratio_wide:.2}×",
-        upper95(boxes) / exposure
+        "tracker + detector, flat Gamma(10): {} false boxes in {exposure:.3} MHz·h ({} frames, {threads} threads, {:.1} s); \
+         95 % bound {:.2} /MHz/h; floor-branch T_off exceedance ÷ design: per-frame {:.2}×, wide {:.2}×; guarded {:.2} %",
+        sum.boxes,
+        sum.frames,
+        start.elapsed().as_secs_f64(),
+        upper95(sum.boxes) / exposure,
+        sum.ratio_frame,
+        sum.ratio_wide,
+        sum.guarded * 100.0
     );
-    assert_eq!(boxes, 0);
-    assert!(ratio_frame < 2.0, "{ratio_frame}");
+    assert!(exposure >= 1.0);
+    assert_eq!(sum.boxes, 0);
+    assert!(sum.ratio_frame < 2.0, "{}", sum.ratio_frame);
 }
 
 fn tilt(db_span: f64) -> Vec<f32> {
@@ -297,36 +356,53 @@ fn sloped_floors_keep_the_false_alarm_bound_with_the_per_frame_reference() {
 }
 
 #[test]
-#[ignore = "fails today: block FCME (256/64) reads the low side of a sharp floor step for about one block \
-            past each edge, so the per-frame floor branch runs 64–91× design Pfa at notch edges of any width; \
-            needs a T-005 step-aware floor. Un-ignore with that fix"]
 fn floor_steps_keep_the_false_alarm_bound_with_the_per_frame_reference() {
+    // The floor-step guard switches the floor branch off around the notch edges (block FCME is
+    // biased there); where the floor branch still runs, exceedance is at design.
     check_floor_cases(&step_cases(), DetectorConfig::new(SurveyId::new()), true);
+}
+
+#[test]
+fn floor_steps_without_the_step_guard_break_the_bound() {
+    // Regression: without the guard the per-frame floor branch runs far above design at a notch.
+    let mut config = DetectorConfig::new(SurveyId::new());
+    config.step_guard = None;
+    let t = tracked_noise_with(&notch(64, -20.0), 400, 0x51_0e, config);
+    eprintln!(
+        "-20 dB notch 64 bins, no step guard: {} false boxes, per-frame exceedance {:.1}×",
+        t.boxes, t.ratio_frame
+    );
+    assert!(t.ratio_frame > 10.0, "{}", t.ratio_frame);
 }
 
 #[test]
 fn floor_steps_with_the_os_only_branch() {
     // The OS branch adapts within its 32 reference cells, so a band with known floor steps (a
-    // notch filter, a path switch) can select `Branches::OsOnly` until the floor is step-aware.
+    // notch filter, a path switch) can also select `Branches::OsOnly` per profile.
     let mut config = DetectorConfig::new(SurveyId::new());
-    config.branches = hk_detect::Branches::OsOnly;
+    config.profile.branches = hk_detect::Branches::OsOnly;
     check_floor_cases(&step_cases(), config, false);
 }
 
 /// Asserts 0 false boxes, and (when the floor branch is in use) a floor-branch `T_off`
-/// exceedance within 3× design over the usable span.
+/// exceedance within 3× design where the floor branch runs over the usable span.
 fn check_floor_cases(cases: &[(String, Vec<f32>)], config: DetectorConfig, floor_branch: bool) {
     let mut failures = Vec::new();
     for (i, (name, profile)) in cases.iter().enumerate() {
-        let (boxes, ratio_frame, ratio_wide, exposure) =
-            tracked_noise_with(profile, 1500, 0x51_0e + i as u64, config.clone());
+        let t = tracked_noise_with(profile, 1500, 0x51_0e + i as u64, config.clone());
         eprintln!(
-            "{name}: {boxes} false boxes in {exposure:.3} MHz·h; floor-branch T_off exceedance ÷ design (usable span): \
-             per-frame {ratio_frame:.2}×, wide {ratio_wide:.1}×"
+            "{name}: {} false boxes in {:.3} MHz·h; floor-branch T_off exceedance ÷ design where it runs: \
+             per-frame {:.2}× (floor branch off on {:.1} % of the usable span); wide reference {:.1}×",
+            t.boxes,
+            t.exposure(),
+            t.ratio_frame,
+            t.guarded * 100.0,
+            t.ratio_wide
         );
-        if boxes > 0 || (floor_branch && ratio_frame > 3.0) {
+        if t.boxes > 0 || (floor_branch && t.ratio_frame > 3.0) {
             failures.push(format!(
-                "{name}: {boxes} boxes, per-frame exceedance {ratio_frame:.2}×"
+                "{name}: {} boxes, per-frame exceedance {:.2}×",
+                t.boxes, t.ratio_frame
             ));
         }
     }

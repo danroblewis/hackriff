@@ -1,9 +1,12 @@
 //! The detector: one call per [`SpectrumFrame`] + [`FloorFrame`], emitting [`DetectorEvent`]s.
 //! See the [crate docs](crate) for the pipeline.
 
+use std::sync::Arc;
+
 use hk_core::ProvenanceHandle;
 use hk_dsp::SpectrumFrame;
 use hk_dsp::floor::FloorFrame;
+use hk_dsp::window::WindowKind;
 use hk_model::detection::SpurReason;
 use hk_model::{Detection, DetectionFlags, DetectionId, TimeRange};
 
@@ -12,13 +15,14 @@ use crate::cfar::{CELL_NONE, CfarEngine, ClassifyStats, Thresholds};
 use crate::clip::ClipCount;
 use crate::comb::CombFinder;
 use crate::components::{Component, Cumulative, FrameView, LabelParams, Labeler, Mark, Ready};
-use crate::config::{ConfigError, DetectorConfig, FloorReference};
+use crate::config::{Branches, ConfigError, DetectorConfig, FloorReference, RunContext};
 use crate::integrated::{IntegratedEvaluation, IntegratedSnapshot, IntegratedSpectrum};
 use crate::record::{
     Candidate, CloseReason, ConfirmReason, Confirmation, DetectionRecord, DetectorEvent,
     ImageEvidence,
 };
 use crate::rules::{Geometry, Pearson, edge_hit, spur_decision};
+use crate::step::StepGuard;
 use crate::trust::{CaptureEmitter, CaptureResult, GainState};
 
 /// Nominal HackRF One RX amp gain used for `total_gain_db` (S4: not verified on this unit).
@@ -39,12 +43,16 @@ pub struct SegmentInfo {
     pub thresholds: Thresholds,
     /// Profile index ([`DetectorConfig::profile_at`]).
     pub profile_index: usize,
+    /// Branches of the profile.
+    pub branches: Branches,
     /// Seconds between frames.
     pub frame_period_s: f64,
     /// Frames before a split.
     pub max_frames: u64,
     /// LNA + VGA + nominal amp, dB (for gain-specific spur-map rules).
     pub total_gain_db: f64,
+    /// `Detection::detector_version` of the segment (interned per configuration and resolution).
+    pub detector_version: Arc<str>,
     n_avg_bits: u64,
     cum_at_start: Cumulative,
 }
@@ -66,6 +74,14 @@ pub struct DetectorStats {
     pub evaluations: u64,
     /// Frames with no valid floor (nothing detected).
     pub invalid_floor_frames: u64,
+    /// Frames with more runs than `max_runs_per_frame` (not labelled).
+    pub dense_frames: u64,
+    /// Runs dropped at `max_live_components`.
+    pub dropped_runs: u64,
+    /// Frames in which the floor-step guard switched the floor branch off somewhere.
+    pub guarded_frames: u64,
+    /// Frames whose block floors did not match the step guard's layout (guard inactive).
+    pub step_guard_unavailable: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -97,16 +113,26 @@ struct ImpulsiveEntry {
     record: DetectionRecord,
     sums: Sums,
     last_merge: u64,
-    version: usize,
+    version: Arc<str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VersionKey {
+    profile: usize,
+    n_bits: u64,
+    fft_len: usize,
+    overlap: usize,
+    window: WindowKind,
 }
 
 /// The CFAR detector (C09). See the [crate docs](crate).
 pub struct Detector {
     config: DetectorConfig,
-    versions: Vec<String>,
+    versions: Vec<(VersionKey, Arc<str>)>,
     cfar: CfarEngine,
     codes: Vec<u8>,
     labeler: Labeler,
+    step: Option<StepGuard>,
     integrated: IntegratedSpectrum,
     comb: CombFinder,
     seg: Option<SegmentInfo>,
@@ -129,14 +155,13 @@ impl Detector {
     /// A detector with `config`.
     pub fn new(config: DetectorConfig) -> Result<Self, ConfigError> {
         config.validate()?;
-        let versions = (0..=config.band_profiles.len())
-            .map(|i| config.detector_version(i))
-            .collect();
         let cap = config.confirm.recent_capacity;
         Ok(Self {
+            versions: Vec::with_capacity(8),
             cfar: CfarEngine::new(config.window, 0),
             codes: Vec::new(),
             labeler: Labeler::new(0, config.profile.gap_frames),
+            step: config.step_guard.map(StepGuard::new),
             integrated: IntegratedSpectrum::new(config.integration, config.rules.comb.max_lines),
             comb: CombFinder::new(config.rules.comb),
             seg: None,
@@ -153,7 +178,6 @@ impl Detector {
             last_classify: ClassifyStats::default(),
             last_capture: None,
             retain_capture: false,
-            versions,
             config,
         })
     }
@@ -184,6 +208,11 @@ impl Detector {
         &self.codes
     }
 
+    /// Where the floor branch was allowed in the last frame (`None` without a step guard).
+    pub fn floor_branch_mask(&self) -> Option<&[bool]> {
+        self.step.as_ref().map(StepGuard::mask)
+    }
+
     /// Classification counts of the last frame.
     pub fn last_classify(&self) -> ClassifyStats {
         self.last_classify
@@ -194,14 +223,14 @@ impl Detector {
         self.labeler.live_count()
     }
 
+    /// Heap bytes held by the component labeller.
+    pub fn labeler_memory_bytes(&self) -> usize {
+        self.labeler.memory_bytes()
+    }
+
     /// The latest integrated evaluation in the current segment.
     pub fn integrated_evaluation(&self) -> Option<&IntegratedEvaluation> {
         self.integrated.evaluation()
-    }
-
-    /// `detector_version` of profile `index`.
-    pub fn detector_version(&self, index: usize) -> &str {
-        &self.versions[index]
     }
 
     /// Integrated spectra + emitters of the current segment's latest evaluation, for the
@@ -251,9 +280,15 @@ impl Detector {
         self.frame_index += 1;
         let t = self.frame_index;
         self.stats.frames += 1;
-        let (thresholds, geometry, profile_index, max_frames) = {
+        let (thresholds, geometry, profile_index, max_frames, branches) = {
             let s = self.seg.as_ref().expect("segment started");
-            (s.thresholds, s.geometry, s.profile_index, s.max_frames)
+            (
+                s.thresholds,
+                s.geometry,
+                s.profile_index,
+                s.max_frames,
+                s.branches,
+            )
         };
         let fs = spec.sample_rate_hz;
         let dur_ns = (frame.sample_count as f64 * 1e9 / fs).round() as i64;
@@ -295,11 +330,25 @@ impl Detector {
             FloorReference::Wide => &floor.wide_floor,
         };
         if floor.valid {
+            let mask = match &mut self.step {
+                Some(g) if branches != Branches::OsOnly => {
+                    g.update(
+                        &floor.block_floor,
+                        &geometry,
+                        &self.config.response_edges_hz,
+                    );
+                    self.stats.guarded_frames += u64::from(g.guarded_bins() > 0);
+                    self.stats.step_guard_unavailable += u64::from(!g.available());
+                    Some(g.mask())
+                }
+                _ => None,
+            };
             self.last_classify = self.cfar.classify(
                 &spec.psd,
                 reference,
                 &thresholds,
-                self.config.branches,
+                branches,
+                mask,
                 &mut self.codes,
             );
             if !floor.impulsive
@@ -319,6 +368,8 @@ impl Detector {
             gap_frames: profile.gap_frames,
             max_frames,
             max_hold_frames: self.config.max_hold_frames,
+            max_runs: self.config.max_runs_per_frame,
+            max_live: self.config.max_live_components,
         };
         let view = FrameView {
             index: t,
@@ -333,7 +384,9 @@ impl Detector {
             cum_before: before,
             cum_after: after,
         };
-        self.labeler.process_frame(&view, &params);
+        let outcome = self.labeler.process_frame(&view, &params);
+        self.stats.dense_frames += u64::from(outcome.dense);
+        self.stats.dropped_runs += outcome.dropped_runs as u64;
         self.drain_ready(out);
         self.poll_aggregator(false, out);
     }
@@ -361,6 +414,21 @@ impl Detector {
             || floor.n_avg_effective.to_bits() != s.n_avg_bits
     }
 
+    fn version_for(&mut self, key: VersionKey) -> Arc<str> {
+        if let Some((_, v)) = self.versions.iter().find(|(k, _)| *k == key) {
+            return v.clone();
+        }
+        let run = RunContext {
+            n_eff: f64::from_bits(key.n_bits),
+            fft_len: key.fft_len,
+            overlap: key.overlap,
+            window: key.window,
+        };
+        let v: Arc<str> = self.config.detector_version_for(key.profile, &run).into();
+        self.versions.push((key, v.clone()));
+        v
+    }
+
     fn begin_segment(&mut self, frame: &SpectrumFrame, floor: &FloorFrame) {
         self.stats.segments += 1;
         let spec = &frame.spectrum;
@@ -379,13 +447,25 @@ impl Detector {
         let profile = self.config.profile_at(profile_index);
         let n = floor.n_avg_effective;
         let thresholds = Thresholds::new(n, &self.config.window, profile, self.config.guard_db);
-        let res = &spec.resolution;
+        let branches = profile.branches;
+        let gap_frames = profile.gap_frames;
+        let res = spec.resolution;
         let frame_period_s = f64::from(res.n_avg) * res.hop() as f64 / fs;
         let max_frames = ((self.config.max_duration_s / frame_period_s).ceil() as u64).max(1);
-        self.gap_frames = profile.gap_frames;
+        let detector_version = self.version_for(VersionKey {
+            profile: profile_index,
+            n_bits: n.to_bits(),
+            fft_len: res.fft_len,
+            overlap: res.overlap,
+            window: res.window,
+        });
+        self.gap_frames = gap_frames;
         self.cfar.resize(bins);
         self.codes.resize(bins, CELL_NONE);
-        self.labeler.reset(bins, profile.gap_frames);
+        self.labeler.reset(bins, gap_frames);
+        if let Some(g) = &mut self.step {
+            g.reset(bins);
+        }
         self.integrated
             .configure(bins, frame_period_s, self.stats.segments);
         self.in_impulsive = false;
@@ -398,9 +478,11 @@ impl Detector {
             geometry,
             thresholds,
             profile_index,
+            branches,
             frame_period_s,
             max_frames,
             total_gain_db,
+            detector_version,
             n_avg_bits: n.to_bits(),
             cum_at_start: self.cum,
         });
@@ -437,10 +519,16 @@ impl Detector {
         };
         let geometry = seg.geometry;
         let segment = seg.segment;
+        let mask = if seg.branches == Branches::OsOnly {
+            None
+        } else {
+            self.step.as_ref().map(StepGuard::mask)
+        };
         if !self.integrated.evaluate(
             include_partial,
             &self.config.rules,
             &geometry,
+            mask.filter(|m| m.len() == geometry.bins),
             &mut self.comb,
         ) {
             return;
@@ -489,35 +577,30 @@ impl Detector {
                         > self.config.rules.impulsive_fraction * s.pixels as f64,
                 )
             };
-            if pixels > 0 {
+            let built = (pixels > 0).then(|| {
+                let seg = self.seg.as_ref().expect("segment");
                 let close = match kind {
                     Ready::Final => self.final_reason,
                     Ready::Split => CloseReason::MaxDuration,
                 };
-                let (record, sums) = {
-                    let seg = self.seg.as_ref().expect("segment");
-                    build_record(
-                        self.labeler.component(id),
-                        seg,
-                        &self.config,
-                        close,
-                        kind == Ready::Split,
-                        self.integrated.evaluation(),
-                    )
-                };
-                match kind {
-                    Ready::Final => self.labeler.release(id),
-                    Ready::Split => self.labeler.restart(id),
-                }
+                build_record(
+                    self.labeler.component(id),
+                    seg,
+                    &self.config,
+                    close,
+                    kind == Ready::Split,
+                    self.integrated.evaluation(),
+                )
+            });
+            match kind {
+                Ready::Final => self.labeler.release(id),
+                Ready::Split => self.labeler.split(id),
+            }
+            if let Some((record, sums)) = built {
                 if impulsive {
                     self.aggregate(record, sums);
                 } else {
                     self.emit(record, out);
-                }
-            } else {
-                match kind {
-                    Ready::Final => self.labeler.release(id),
-                    Ready::Split => self.labeler.restart(id),
                 }
             }
         }
@@ -590,8 +673,9 @@ impl Detector {
         });
         self.recent_head = (self.recent_head + 1) % cap;
         self.stats.detections += 1;
-        let version = self.seg.as_ref().map_or(0, |s| s.profile_index);
-        rec.detection.detector_version = self.versions[version].clone();
+        if let Some(seg) = &self.seg {
+            rec.detection.detector_version = String::from(&*seg.detector_version);
+        }
         out(DetectorEvent::Detection(rec));
     }
 
@@ -631,13 +715,14 @@ impl Detector {
             }
             e.last_merge = t;
             finish_impulsive(&mut e.record, &e.sums);
-        } else {
+        } else if let Some(seg) = &self.seg {
             finish_impulsive(&mut record, &sums);
+            let version = seg.detector_version.clone();
             self.aggregator.push(ImpulsiveEntry {
                 record,
                 sums,
                 last_merge: t,
-                version: self.seg.as_ref().map_or(0, |s| s.profile_index),
+                version,
             });
         }
     }
@@ -656,7 +741,7 @@ impl Detector {
                 let mut e = self.aggregator.swap_remove(i);
                 self.stats.impulsive_events += 1;
                 self.stats.detections += 1;
-                e.record.detection.detector_version = self.versions[e.version].clone();
+                e.record.detection.detector_version = String::from(&*e.version);
                 out(DetectorEvent::Detection(e.record));
             } else {
                 i += 1;
@@ -833,7 +918,8 @@ fn build_record(
             peak_level_dbm: None,
             sk,
             clip_count,
-            // Filled at emission, so boxes merged into an impulsive event allocate nothing.
+            // Filled from the segment's interned version at emission, so boxes merged into an
+            // impulsive event allocate nothing.
             detector_version: String::new(),
             provenance_ref: prov.id(),
             flags,

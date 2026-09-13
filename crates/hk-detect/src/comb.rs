@@ -6,9 +6,12 @@
 //! `f_i + k·d` wins (first maximum in `(i, j, m)` order, like `np.argmax`). With ≥ 3 members the
 //! spacing is refined by least squares on the members and the members recounted.
 //!
-//! **Chance.** The same search on `n` uniform random lines over the usable span, `trials` times:
-//! the fraction whose best comb has at least as many members. It depends only on `(n, members,
-//! span)`, so it is cached; trials stop early once the fraction cannot fall below `max_chance`.
+//! **Chance.** On `n` uniform random lines over the usable span, up to `trials` times: the fraction
+//! that holds a grid of at least as many members. It depends only on `(n, members, span)`, so it
+//! is cached. Trials use a pruned threshold search (forward from each anchor, abandoning anchors and
+//! scans that cannot reach the count) and stop early once the decision is settled: at
+//! `⌊max_chance·trials⌋ + 1` hits (not a comb), or after `⌈ln 0.05 / ln(1 − max_chance)⌉` (59)
+//! trials with no hit, when the 95 % upper bound on the chance is already below `max_chance`.
 //! Buffers are sized once (`max_lines`), so evaluation allocates nothing.
 
 use crate::config::CombRule;
@@ -159,6 +162,13 @@ impl CombFinder {
         };
         let trials = self.rule.trials.max(1);
         let stop = (self.rule.max_chance * trials as f64).floor() as usize + 1;
+        // With no hit in `quiet` trials the 95 % upper bound on the chance is below `max_chance`
+        // (1 − 0.05^(1/quiet) < max_chance), so the decision cannot change: stop there.
+        let quiet = if self.rule.max_chance > 0.0 && self.rule.max_chance < 1.0 {
+            ((0.05f64).ln() / (1.0 - self.rule.max_chance).ln()).ceil() as usize
+        } else {
+            trials
+        };
         let mut hits = 0usize;
         let mut done = 0usize;
         for _ in 0..trials {
@@ -167,23 +177,62 @@ impl CombFinder {
                 self.trial.push(lo_hz + span * next());
             }
             self.trial.sort_unstable_by(f64::total_cmp);
-            let (c, _) = Self::find_sorted(&self.rule, &self.trial, &mut self.mask);
             done += 1;
-            if c >= members {
+            if Self::reaches(&self.rule, &self.trial, members) {
                 hits += 1;
                 if hits >= stop {
                     break;
                 }
+            } else if hits == 0 && done >= quiet {
+                break;
             }
         }
-        let p = hits as f64 / if hits >= stop { done } else { trials } as f64;
         let p = if hits >= stop {
-            p.max(self.rule.max_chance)
+            (hits as f64 / done as f64).max(self.rule.max_chance)
         } else {
-            p
+            hits as f64 / done as f64
         };
         self.cache[idx] = p as f32;
         p
+    }
+
+    /// Whether some grid holds at least `need` of the sorted lines `fs` (the Monte-Carlo trial
+    /// test). Counts forward from each anchor (the grid's first member) and prunes anchors,
+    /// partners and scans that can no longer reach `need`.
+    fn reaches(rule: &CombRule, fs: &[f64], need: usize) -> bool {
+        let n = fs.len();
+        if need < 2 || n < need {
+            return need <= 1 && n > 0;
+        }
+        let tol = rule.tolerance_hz;
+        for i in 0..=n - need {
+            for j in i + 1..=n - need + 1 {
+                let dist = fs[j] - fs[i];
+                for m in 1..=rule.max_harmonic {
+                    let d = dist / m as f64;
+                    if d > rule.max_spacing_hz {
+                        continue;
+                    }
+                    if d < rule.min_spacing_hz {
+                        break;
+                    }
+                    let mut count = 2;
+                    for (l, &f) in fs.iter().enumerate().skip(j + 1) {
+                        if count + (n - l) < need {
+                            break;
+                        }
+                        let k = (f - fs[i]) / d;
+                        if (k - k.round()).abs() * d <= tol {
+                            count += 1;
+                            if count >= need {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Evaluates lines `freqs_hz` (any order, at most `max_lines` used) over the span

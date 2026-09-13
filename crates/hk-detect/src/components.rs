@@ -10,24 +10,39 @@
 //! closed component is discarded at once (it can never become kept).
 //!
 //! **Kept** is monotone: a component with a seed whose frame extent reaches `min_frames` is kept
-//! from then on, so the decision never waits for the component to end (S4 tests the extent of the
-//! raw component, `last − first + 1`).
+//! from then on (S4 tests the extent of the raw component, `last − first + 1`).
 //!
 //! **Gap merge** is S4's per-bin closing in time: a cell in frame `t` and a cell of another
 //! component in the same bin at `t − 2 … t − (gap + 1)` (nothing between) link the two
-//! components. A per-bin history of the last `gap + 2` frames' component ids finds the links; a
-//! link becomes a merge when both components are kept, and is dropped when either is discarded.
-//! (S4's closing also connects a filled gap cell to a horizontally adjacent third component; that
-//! corner case, which can only split a box, is not reproduced.)
+//! components. A per-bin history of the last `gap + 2` frames' component ids finds the links
+//! (per-component link lists); a link becomes a merge when both components are kept and is dropped
+//! when either is discarded. (S4's closing also connects a filled gap cell to a horizontally
+//! adjacent third component; that corner case, which can only split a box, is not reproduced.)
 //!
 //! **Emission.** A kept, closed component is final once no later frame can link to it
 //! (`t ≥ last + gap + 1`) and it has no link to an undecided component (waiting at most
-//! `max_hold_frames` more). A kept component still open after `max_frames` is emitted as a split
-//! and continues with fresh statistics.
+//! `max_hold_frames` more). A kept component still open after `max_frames` is emitted as a
+//! **split** ([`Labeler::split`]).
 //!
-//! Components are merged eagerly (the smaller extent is relabelled in the run lists, the history
-//! and the links), so every live id is a root. Per-bin accumulators cover only a component's bin
-//! extent; the pool, extents and lists keep their capacity, so steady state allocates nothing.
+//! # Bounded connectivity (T-006 review)
+//!
+//! - **Splits cut connectivity.** At a split every current-frame run of the component becomes its
+//!   own component, and the component's older history and links are dropped. One frame that
+//!   bridges two carriers therefore fuses them for at most the one `max_duration` box that
+//!   contains it; the boxes after the split are separate again (unless the carriers keep touching).
+//! - **Impulsive frames never merge.** In a frame flagged impulsive, a run is cut at the edges of
+//!   the previous frame's runs: each overlap continues its own component, and the rest becomes new
+//!   components. A broadband transient cannot join two emitters.
+//! - **Caps.** A frame with more than `max_runs` runs is **dense**: none of its cells are labelled
+//!   (open components see a one-frame gap, which gap merge can bridge), and the frame is counted.
+//!   At most `max_live` components exist; a run that would exceed it is dropped and counted.
+//!   Memory is therefore bounded, and per-frame work is O(runs + bins): union-find redirects
+//!   resolve merged ids (no rescan of the run lists), dedup marks replace list searches, and link
+//!   lists are per component.
+//! - **Extents** are sized to the component's width with amortised growth; a freed slot whose
+//!   extent grew beyond 1024 bins is shrunk to 256, so a wide transient does not pin memory in the
+//!   pool (at most `max_live` × 1024 bins × 20 bytes), while ordinary widths reach a steady state
+//!   with no allocation.
 
 use std::ops::Range;
 
@@ -37,6 +52,10 @@ use crate::cfar::{CELL_NONE, CELL_SEED};
 
 const NO_COMP: u32 = u32::MAX;
 const NO_STAMP: u64 = u64::MAX;
+const SHRINK_ABOVE: usize = 1024;
+const SHRINK_TO: usize = 256;
+const LINKS_SHRINK_ABOVE: usize = 64;
+const LINKS_SHRINK_TO: usize = 8;
 
 /// Per-bin sums over a component's cells.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -129,6 +148,14 @@ impl Extent {
             t.excess += a.excess;
             t.mirror_ratio += a.mirror_ratio;
             t.mirror_excess += a.mirror_excess;
+        }
+    }
+
+    /// Clears and, when the extent grew large, returns its memory.
+    fn recycle(&mut self) {
+        self.clear();
+        if self.data.capacity() > SHRINK_ABOVE {
+            self.data.shrink_to(SHRINK_TO);
         }
     }
 }
@@ -247,13 +274,28 @@ impl Stats {
             boxes: 1,
         }
     }
+
+    /// The statistics a component continues with after a split.
+    fn continuing(old: &Stats) -> Self {
+        Self {
+            kept: old.kept,
+            seed: old.seed,
+            last_frame: old.last_frame,
+            end: old.end,
+            impulsive_run: old.impulsive_run,
+            ..Stats::fresh()
+        }
+    }
 }
 
-/// A live component.
+/// A component slot.
 #[derive(Clone, Debug)]
 pub struct Component {
     alive: bool,
     live_pos: usize,
+    parent: u32,
+    mark: u64,
+    links: Vec<u32>,
     /// Scalars.
     pub s: Stats,
     /// Per-bin sums.
@@ -265,6 +307,9 @@ impl Default for Component {
         Self {
             alive: false,
             live_pos: 0,
+            parent: NO_COMP,
+            mark: 0,
+            links: Vec::new(),
             s: Stats::fresh(),
             acc: Extent::default(),
         }
@@ -298,7 +343,7 @@ pub struct FrameView<'a> {
     pub cum_after: Cumulative,
 }
 
-/// Duration rules.
+/// Duration rules and caps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LabelParams {
     /// Minimum raw-component frames.
@@ -309,6 +354,10 @@ pub struct LabelParams {
     pub max_frames: u64,
     /// Extra frames a final component waits for undecided linked components.
     pub max_hold_frames: u32,
+    /// A frame with more runs than this is dense and not labelled.
+    pub max_runs: usize,
+    /// At most this many live components.
+    pub max_live: usize,
 }
 
 /// Why a component is ready.
@@ -316,8 +365,19 @@ pub struct LabelParams {
 pub enum Ready {
     /// Finished: build a record, then [`Labeler::release`].
     Final,
-    /// Too long: build a record, then [`Labeler::restart`].
+    /// Too long: build a record, then [`Labeler::split`].
     Split,
+}
+
+/// What happened in one frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameOutcome {
+    /// Runs in the frame (counting stops just past `max_runs`).
+    pub runs: usize,
+    /// More than `max_runs` runs: nothing labelled.
+    pub dense: bool,
+    /// Runs (or impulsive pieces) dropped at the `max_live` cap.
+    pub dropped_runs: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -336,12 +396,17 @@ pub struct Labeler {
     live: Vec<u32>,
     prev: Vec<Run>,
     cur: Vec<Run>,
+    raw: Vec<Run>,
     hist: Vec<u32>,
     rows: usize,
     bins: usize,
-    links: Vec<(u32, u32)>,
-    others: Vec<u32>,
     closed: Vec<u32>,
+    work: Vec<u32>,
+    victims: Vec<u32>,
+    others: Vec<u32>,
+    epoch: u64,
+    t: u64,
+    max_live: usize,
     /// Components ready after the last [`Labeler::process_frame`] / [`Labeler::close_all`].
     pub ready: Vec<(u32, Ready)>,
 }
@@ -353,10 +418,12 @@ impl Labeler {
             pool: Vec::with_capacity(64),
             free: Vec::with_capacity(64),
             live: Vec::with_capacity(64),
-            links: Vec::with_capacity(64),
             others: Vec::with_capacity(64),
             closed: Vec::with_capacity(64),
+            work: Vec::with_capacity(64),
+            victims: Vec::with_capacity(64),
             ready: Vec::with_capacity(64),
+            max_live: usize::MAX,
             ..Self::default()
         };
         l.reset(bins, gap_frames);
@@ -368,22 +435,17 @@ impl Labeler {
         while let Some(&id) = self.live.last() {
             self.free_comp(id);
         }
-        if bins > self.bins {
-            for c in &mut self.pool {
-                c.acc.data.reserve_exact(bins);
-            }
-        }
         self.bins = bins;
         self.rows = gap_frames as usize + 2;
         self.hist.resize(self.rows * bins, NO_COMP);
         self.hist.fill(NO_COMP);
         let runs = bins / 2 + 1;
-        self.prev.clear();
-        self.cur.clear();
-        self.prev.reserve(runs);
-        self.cur.reserve(runs);
-        self.links.clear();
+        for v in [&mut self.prev, &mut self.cur, &mut self.raw] {
+            v.clear();
+            v.reserve(runs);
+        }
         self.ready.clear();
+        self.t = 0;
     }
 
     /// Live components.
@@ -391,59 +453,123 @@ impl Labeler {
         self.live.len()
     }
 
+    /// Component slots ever allocated.
+    pub fn pool_len(&self) -> usize {
+        self.pool.len()
+    }
+
+    /// Heap bytes held by the labeller (pool, extents, link lists, history, run lists).
+    pub fn memory_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let slots: usize = self
+            .pool
+            .iter()
+            .map(|c| c.acc.data.capacity() * size_of::<BinAcc>() + c.links.capacity() * 4)
+            .sum();
+        slots
+            + self.pool.capacity() * size_of::<Component>()
+            + self.hist.capacity() * 4
+            + (self.prev.capacity() + self.cur.capacity() + self.raw.capacity()) * size_of::<Run>()
+            + (self.free.capacity()
+                + self.live.capacity()
+                + self.closed.capacity()
+                + self.work.capacity()
+                + self.victims.capacity()
+                + self.others.capacity())
+                * 4
+    }
+
     /// A component by id.
     pub fn component(&self, id: u32) -> &Component {
         &self.pool[id as usize]
     }
 
+    fn find(&self, mut id: u32) -> u32 {
+        while self.pool[id as usize].parent != id {
+            id = self.pool[id as usize].parent;
+        }
+        id
+    }
+
+    /// A new component, or `NO_COMP` at the live cap.
     fn alloc(&mut self) -> u32 {
+        if self.live.len() >= self.max_live {
+            return NO_COMP;
+        }
         let id = match self.free.pop() {
             Some(id) => id,
             None => {
-                // A new slot (a high-water event) reserves a full-band extent once, so reusing
-                // slots for components of any width never reallocates.
-                let mut c = Component::default();
-                c.acc.data.reserve_exact(self.bins);
-                self.pool.push(c);
+                self.pool.push(Component::default());
                 (self.pool.len() - 1) as u32
             }
         };
+        let pos = self.live.len();
         let c = &mut self.pool[id as usize];
         c.alive = true;
-        c.live_pos = self.live.len();
+        c.parent = id;
+        c.live_pos = pos;
+        c.mark = 0;
+        c.links.clear();
         c.s = Stats::fresh();
         c.acc.clear();
         self.live.push(id);
         id
     }
 
-    fn free_comp(&mut self, id: u32) {
-        let (lo, hi, alive, pos) = {
-            let c = &self.pool[id as usize];
-            (c.s.hist_lo, c.s.hist_hi, c.alive, c.live_pos)
-        };
-        if !alive {
-            return;
-        }
-        if lo < hi && self.bins > 0 {
-            for row in 0..self.rows {
-                let base = row * self.bins;
-                for h in &mut self.hist[base + lo..base + hi] {
-                    if *h == id {
-                        *h = NO_COMP;
-                    }
-                }
-            }
-        }
-        self.links.retain(|&(a, b)| a != id && b != id);
-        let c = &mut self.pool[id as usize];
-        c.alive = false;
-        c.acc.clear();
+    fn remove_live(&mut self, id: u32) {
+        let pos = self.pool[id as usize].live_pos;
+        self.pool[id as usize].alive = false;
         self.live.swap_remove(pos);
         if pos < self.live.len() {
             let moved = self.live[pos];
             self.pool[moved as usize].live_pos = pos;
         }
+    }
+
+    fn unlink_all(&mut self, id: u32) {
+        let mut links = std::mem::take(&mut self.pool[id as usize].links);
+        for &p in &links {
+            let pl = &mut self.pool[p as usize].links;
+            if let Some(k) = pl.iter().position(|&x| x == id) {
+                pl.swap_remove(k);
+            }
+        }
+        links.clear();
+        if links.capacity() > LINKS_SHRINK_ABOVE {
+            links.shrink_to(LINKS_SHRINK_TO);
+        }
+        self.pool[id as usize].links = links;
+    }
+
+    fn clear_hist(&mut self, id: u32, keep_row: Option<usize>) {
+        let (lo, hi) = {
+            let s = &self.pool[id as usize].s;
+            (s.hist_lo, s.hist_hi)
+        };
+        if lo >= hi || self.bins == 0 {
+            return;
+        }
+        for row in 0..self.rows {
+            if Some(row) == keep_row {
+                continue;
+            }
+            let base = row * self.bins;
+            for h in &mut self.hist[base + lo..base + hi] {
+                if *h == id {
+                    *h = NO_COMP;
+                }
+            }
+        }
+    }
+
+    fn free_comp(&mut self, id: u32) {
+        if !self.pool[id as usize].alive {
+            return;
+        }
+        self.clear_hist(id, None);
+        self.unlink_all(id);
+        self.remove_live(id);
+        self.pool[id as usize].acc.recycle();
         self.free.push(id);
     }
 
@@ -452,31 +578,65 @@ impl Labeler {
         self.free_comp(id);
     }
 
-    /// Resets a [`Ready::Split`] component's statistics; it stays kept and continues.
-    pub fn restart(&mut self, id: u32) {
-        let c = &mut self.pool[id as usize];
-        let old = c.s;
-        c.s = Stats {
-            kept: old.kept,
-            seed: old.seed,
-            last_frame: old.last_frame,
-            end: old.end,
-            hist_lo: old.hist_lo,
-            hist_hi: old.hist_hi,
-            impulsive_run: old.impulsive_run,
-            ..Stats::fresh()
-        };
-        c.acc.clear();
-    }
-
-    fn add_link(&mut self, a: u32, b: u32) {
-        let key = (a.min(b), a.max(b));
-        if a != b && !self.links.contains(&key) {
-            self.links.push(key);
+    /// Handles a [`Ready::Split`] component after its record is built: every run of it in the
+    /// current frame becomes its own (kept, fresh) component, and its older history and links are
+    /// dropped, so connectivity never reaches back past one `max_duration` box.
+    pub fn split(&mut self, id: u32) {
+        let old = self.pool[id as usize].s;
+        self.unlink_all(id);
+        let row = (self.t % self.rows as u64) as usize;
+        self.clear_hist(id, Some(row));
+        let cont = Stats::continuing(&old);
+        self.pool[id as usize].s = cont;
+        self.pool[id as usize].acc.clear();
+        let n = self.bins;
+        let mut first = true;
+        for k in 0..self.prev.len() {
+            if self.prev[k].comp != id {
+                continue;
+            }
+            let (lo, hi) = (self.prev[k].lo, self.prev[k].hi);
+            let target = if first {
+                first = false;
+                id
+            } else {
+                match self.alloc() {
+                    NO_COMP => id,
+                    c => c,
+                }
+            };
+            if target != id {
+                self.pool[target as usize].s = cont;
+                self.prev[k].comp = target;
+                for h in &mut self.hist[row * n + lo..row * n + hi] {
+                    if *h == id {
+                        *h = target;
+                    }
+                }
+            }
+            let s = &mut self.pool[target as usize].s;
+            s.hist_lo = s.hist_lo.min(lo);
+            s.hist_hi = s.hist_hi.max(hi);
         }
     }
 
-    /// Merges two live components; returns the survivor.
+    fn link(&mut self, a: u32, b: u32) {
+        if a == b {
+            return;
+        }
+        let (x, y) = if self.pool[a as usize].links.len() <= self.pool[b as usize].links.len() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        if !self.pool[x as usize].links.contains(&y) {
+            self.pool[x as usize].links.push(y);
+            self.pool[y as usize].links.push(x);
+        }
+    }
+
+    /// Merges two live components; returns the survivor. The victim is redirected to it and freed
+    /// at the end of the frame.
     fn merge(&mut self, a: u32, b: u32, t: u64, gap: bool) -> u32 {
         let (s, v) = if self.pool[a as usize].acc.len() >= self.pool[b as usize].acc.len() {
             (a, b)
@@ -529,11 +689,6 @@ impl Labeler {
                 ss.boxes.max(vs.boxes)
             };
         }
-        for r in self.prev.iter_mut().chain(self.cur.iter_mut()) {
-            if r.comp == v {
-                r.comp = s;
-            }
-        }
         if vs.hist_lo < vs.hist_hi {
             for row in 0..self.rows {
                 let base = row * self.bins;
@@ -544,44 +699,60 @@ impl Labeler {
                 }
             }
         }
-        let mut i = 0;
-        while i < self.links.len() {
-            let (mut x, mut y) = self.links[i];
-            if x == v {
-                x = s;
+        // Move the victim's links to the survivor.
+        let mut vl = std::mem::take(&mut self.pool[v as usize].links);
+        for &p in &vl {
+            let pl = &mut self.pool[p as usize].links;
+            if let Some(k) = pl.iter().position(|&x| x == v) {
+                pl.swap_remove(k);
             }
-            if y == v {
-                y = s;
-            }
-            let key = (x.min(y), x.max(y));
-            if x == y || self.links[..i].contains(&key) {
-                self.links.swap_remove(i);
-            } else {
-                self.links[i] = key;
-                i += 1;
+            if p != s {
+                self.link(s, p);
             }
         }
-        // Free the victim without touching history (already relabelled).
-        let pos = self.pool[v as usize].live_pos;
-        self.pool[v as usize].alive = false;
-        self.live.swap_remove(pos);
-        if pos < self.live.len() {
-            let moved = self.live[pos];
-            self.pool[moved as usize].live_pos = pos;
-        }
-        self.free.push(v);
+        vl.clear();
+        self.pool[v as usize].links = vl;
+        self.remove_live(v);
+        self.pool[v as usize].parent = s;
+        self.victims.push(v);
         s
     }
 
-    fn add_run(&mut self, id: u32, ri: usize, v: &FrameView<'_>, gap: u32) {
-        let Run { lo, hi, seed, .. } = self.cur[ri];
+    fn add_run(&mut self, id: u32, ci: usize, v: &FrameView<'_>, gap: u32) {
+        let Run { lo, hi, seed, .. } = self.cur[ci];
         let t = v.index;
         let n = self.bins;
         let rows = self.rows as u64;
         let row = (t % rows) as usize;
-        let Labeler {
-            pool, hist, others, ..
-        } = self;
+        // Gap partners: distinct components in the same bins 2 … gap + 1 frames back that are
+        // not linked already.
+        self.others.clear();
+        if gap > 0 {
+            let linked = self.epoch + 1;
+            let seen = self.epoch + 2;
+            self.epoch += 2;
+            for k in 0..self.pool[id as usize].links.len() {
+                let p = self.pool[id as usize].links[k];
+                self.pool[p as usize].mark = linked;
+            }
+            for b in lo..hi {
+                for back in 2..=(u64::from(gap) + 1) {
+                    if back > t {
+                        break;
+                    }
+                    let r = ((t - back) % rows) as usize;
+                    let o = self.hist[r * n + b];
+                    if o != NO_COMP && o != id {
+                        let m = &mut self.pool[o as usize].mark;
+                        if *m != linked && *m != seen {
+                            *m = seen;
+                            self.others.push(o);
+                        }
+                    }
+                }
+            }
+        }
+        let Labeler { pool, hist, .. } = self;
         let c = &mut pool[id as usize];
         let s = &mut c.s;
         if s.fresh {
@@ -607,7 +778,6 @@ impl Labeler {
             s.impulsive_pixels += (hi - lo) as u64;
         }
         c.acc.ensure(lo, hi);
-        others.clear();
         let have_sk = v.sk.len() == n;
         let df = v.bin_width_hz;
         let s = &mut c.s;
@@ -638,36 +808,52 @@ impl Labeler {
             }
             s.frame_power += f64::from(excess) * df;
             hist[row * n + b] = id;
-            for back in 2..=(u64::from(gap) + 1) {
-                if back > t {
-                    break;
-                }
-                let r = ((t - back) % rows) as usize;
-                let o = hist[r * n + b];
-                if o != NO_COMP && o != id && !others.contains(&o) {
-                    others.push(o);
-                }
-            }
         }
         for k in 0..self.others.len() {
             let o = self.others[k];
-            self.add_link(id, o);
+            if self.pool[o as usize].alive {
+                self.link(id, o);
+            }
         }
     }
 
+    fn push_run(
+        &mut self,
+        lo: usize,
+        hi: usize,
+        comp: u32,
+        v: &FrameView<'_>,
+        gap: u32,
+        out: &mut FrameOutcome,
+    ) {
+        let comp = if comp == NO_COMP { self.alloc() } else { comp };
+        if comp == NO_COMP {
+            out.dropped_runs += 1;
+            return;
+        }
+        let seed = v.codes[lo..hi].contains(&CELL_SEED);
+        self.cur.push(Run { lo, hi, seed, comp });
+        let ci = self.cur.len() - 1;
+        self.add_run(comp, ci, v, gap);
+    }
+
     /// Labels one frame; afterwards [`Labeler::ready`] lists components to emit.
-    pub fn process_frame(&mut self, v: &FrameView<'_>, p: &LabelParams) {
+    pub fn process_frame(&mut self, v: &FrameView<'_>, p: &LabelParams) -> FrameOutcome {
         assert_eq!(
             v.codes.len(),
             self.bins,
             "frame does not match the labeller"
         );
         let t = v.index;
+        self.t = t;
+        self.max_live = p.max_live;
         let n = self.bins;
         let row = (t % self.rows as u64) as usize;
         self.hist[row * n..(row + 1) * n].fill(NO_COMP);
         self.ready.clear();
         self.cur.clear();
+        self.raw.clear();
+        let mut out = FrameOutcome::default();
         let mut b = 0;
         while b < n {
             if v.codes[b] == CELL_NONE {
@@ -675,63 +861,115 @@ impl Labeler {
                 continue;
             }
             let lo = b;
-            let mut seed = false;
             while b < n && v.codes[b] != CELL_NONE {
-                seed |= v.codes[b] == CELL_SEED;
                 b += 1;
             }
-            self.cur.push(Run {
+            out.runs += 1;
+            if out.runs > p.max_runs {
+                out.dense = true;
+                break;
+            }
+            self.raw.push(Run {
                 lo,
                 hi: b,
-                seed,
+                seed: false,
                 comp: NO_COMP,
             });
         }
+        if out.dense {
+            self.raw.clear();
+        }
         let mut j = 0;
-        for ri in 0..self.cur.len() {
-            let (lo, hi) = (self.cur[ri].lo, self.cur[ri].hi);
-            while j < self.prev.len() && self.prev[j].hi <= lo {
+        for ri in 0..self.raw.len() {
+            let r = self.raw[ri];
+            while j < self.prev.len() && self.prev[j].hi <= r.lo {
                 j += 1;
             }
-            let mut comp = NO_COMP;
-            let mut m = j;
-            while m < self.prev.len() && self.prev[m].lo < hi {
-                let c = self.prev[m].comp;
-                if comp == NO_COMP {
-                    comp = c;
-                } else if c != comp {
-                    comp = self.merge(comp, c, t, false);
+            if v.impulsive_run.is_some() {
+                // Cut at the previous runs' edges: overlaps continue their own components, the
+                // rest start new ones. Nothing merges.
+                let mut pos = r.lo;
+                let mut m = j;
+                while m < self.prev.len() && self.prev[m].lo < r.hi {
+                    let (olo, ohi) = (self.prev[m].lo.max(r.lo), self.prev[m].hi.min(r.hi));
+                    let c = self.find(self.prev[m].comp);
+                    if olo > pos {
+                        self.push_run(pos, olo, NO_COMP, v, p.gap_frames, &mut out);
+                    }
+                    self.push_run(olo, ohi, c, v, p.gap_frames, &mut out);
+                    pos = ohi;
+                    m += 1;
                 }
-                m += 1;
+                if pos < r.hi {
+                    self.push_run(pos, r.hi, NO_COMP, v, p.gap_frames, &mut out);
+                }
+            } else {
+                let mut comp = NO_COMP;
+                let mut m = j;
+                while m < self.prev.len() && self.prev[m].lo < r.hi {
+                    let c = self.find(self.prev[m].comp);
+                    if comp == NO_COMP {
+                        comp = c;
+                    } else if c != comp {
+                        comp = self.merge(comp, c, t, false);
+                    }
+                    m += 1;
+                }
+                self.push_run(r.lo, r.hi, comp, v, p.gap_frames, &mut out);
             }
-            if comp == NO_COMP {
-                comp = self.alloc();
-            }
-            self.cur[ri].comp = comp;
-            self.add_run(comp, ri, v, p.gap_frames);
         }
         self.end_frame(t, p);
+        for k in 0..self.cur.len() {
+            let c = self.find(self.cur[k].comp);
+            self.cur[k].comp = c;
+        }
+        let pool = &self.pool;
+        self.cur.retain(|r| pool[r.comp as usize].alive);
+        for k in 0..self.victims.len() {
+            let v = self.victims[k];
+            let c = &mut self.pool[v as usize];
+            c.parent = NO_COMP;
+            c.acc.recycle();
+            self.free.push(v);
+        }
+        self.victims.clear();
         std::mem::swap(&mut self.prev, &mut self.cur);
+        out
     }
 
     fn end_frame(&mut self, t: u64, p: &LabelParams) {
+        self.work.clear();
         for k in 0..self.live.len() {
             let id = self.live[k];
-            let s = &mut self.pool[id as usize].s;
+            let c = &mut self.pool[id as usize];
+            let s = &mut c.s;
             if s.stamp == t {
                 s.peak_power = s.peak_power.max(s.frame_power);
                 if !s.kept && s.seed && t + 1 - s.first_frame >= u64::from(p.min_frames) {
                     s.kept = true;
                 }
+                if !c.links.is_empty() {
+                    self.work.push(id);
+                }
             }
         }
-        while let Some(i) = self
-            .links
-            .iter()
-            .position(|&(a, b)| self.pool[a as usize].s.kept && self.pool[b as usize].s.kept)
-        {
-            let (a, b) = self.links.swap_remove(i);
-            self.merge(a, b, t, true);
+        while let Some(w) = self.work.pop() {
+            let mut id = self.find(w);
+            if !self.pool[id as usize].alive || !self.pool[id as usize].s.kept {
+                continue;
+            }
+            loop {
+                let pool = &self.pool;
+                let partner = pool[id as usize]
+                    .links
+                    .iter()
+                    .copied()
+                    .find(|&q| pool[q as usize].s.kept);
+                match partner {
+                    Some(q) => id = self.merge(id, q, t, true),
+                    None => break,
+                }
+            }
         }
         self.closed.clear();
         for &id in &self.live {
@@ -747,11 +985,12 @@ impl Labeler {
                 self.free_comp(id);
             } else if t > s.last_frame + gap {
                 let pool = &self.pool;
-                let pending = self.links.iter().any(|&(a, b)| {
-                    (a == id && !pool[b as usize].s.kept) || (b == id && !pool[a as usize].s.kept)
-                });
+                let pending = pool[id as usize]
+                    .links
+                    .iter()
+                    .any(|&q| !pool[q as usize].s.kept);
                 if !pending || t >= s.last_frame + gap + 1 + u64::from(p.max_hold_frames) {
-                    self.links.retain(|&(a, b)| a != id && b != id);
+                    self.unlink_all(id);
                     self.ready.push((id, Ready::Final));
                 }
             }
@@ -781,9 +1020,13 @@ impl Labeler {
             let id = self.closed[k];
             self.free_comp(id);
         }
+        for k in 0..self.ready.len() {
+            let id = self.ready[k].0;
+            self.unlink_all(id);
+        }
         self.prev.clear();
         self.cur.clear();
-        self.links.clear();
+        self.raw.clear();
         self.hist.fill(NO_COMP);
     }
 }
@@ -796,6 +1039,7 @@ mod tests {
     struct Grid {
         bins: usize,
         frames: Vec<Vec<u8>>,
+        impulsive: Vec<bool>,
     }
 
     /// Runs a code grid through a labeller; returns `(first, last, lo, hi, boxes)` per emission.
@@ -813,7 +1057,7 @@ mod tests {
                 }
                 match kind {
                     Ready::Final => l.release(id),
-                    Ready::Split => l.restart(id),
+                    Ready::Split => l.split(id),
                 }
             }
         };
@@ -827,7 +1071,7 @@ mod tests {
                 sk: &[],
                 codes,
                 bin_width_hz: 1.0,
-                impulsive_run: None,
+                impulsive_run: g.impulsive.get(i).copied().unwrap_or(false).then_some(1),
                 cum_before: Cumulative::default(),
                 cum_after: Cumulative::default(),
             };
@@ -836,6 +1080,7 @@ mod tests {
         }
         l.close_all();
         collect(&mut l, &mut out);
+        out.sort_unstable();
         out
     }
 
@@ -857,6 +1102,7 @@ mod tests {
                     v
                 })
                 .collect(),
+            impulsive: Vec::new(),
         }
     }
 
@@ -865,6 +1111,8 @@ mod tests {
         gap_frames: 2,
         max_frames: 1000,
         max_hold_frames: 64,
+        max_runs: 1024,
+        max_live: 4096,
     };
 
     #[test]
@@ -921,6 +1169,94 @@ mod tests {
             label(&g, p),
             vec![(1, 4, 1, 3, 1), (5, 8, 1, 3, 1), (9, 10, 1, 3, 1)]
         );
+    }
+
+    #[test]
+    fn a_bridging_frame_fuses_only_the_box_that_contains_it() {
+        // Two columns 6 bins apart; frame 3 bridges them. Boxes split every 4 frames.
+        let mut rows = vec!["SS....SS"; 12];
+        rows[2] = "rrrrrrrr";
+        rows.extend(["........"; 4]);
+        let g = grid(8, &rows);
+        let p = LabelParams { max_frames: 4, ..P };
+        assert_eq!(
+            label(&g, p),
+            vec![
+                (1, 4, 0, 8, 1),
+                (5, 8, 0, 2, 1),
+                (5, 8, 6, 8, 1),
+                (9, 12, 0, 2, 1),
+                (9, 12, 6, 8, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_impulsive_bridging_frame_never_fuses() {
+        let mut rows = vec!["SS....SS"; 12];
+        rows[2] = "rrrrrrrr";
+        rows.extend(["........"; 4]);
+        let mut g = grid(8, &rows);
+        g.impulsive = (0..16).map(|i| i == 2).collect();
+        let p = LabelParams { max_frames: 4, ..P };
+        assert_eq!(
+            label(&g, p),
+            vec![
+                (1, 4, 0, 2, 1),
+                (1, 4, 6, 8, 1),
+                (5, 8, 0, 2, 1),
+                (5, 8, 6, 8, 1),
+                (9, 12, 0, 2, 1),
+                (9, 12, 6, 8, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn dense_frames_and_the_live_cap_are_bounded() {
+        let dense = "S.S.S.S.S.S.S.S.";
+        let g = grid(16, &[dense, dense, dense, "................"]);
+        let p = LabelParams { max_runs: 4, ..P };
+        let mut l = Labeler::new(16, 2);
+        let psd = vec![10.0f32; 16];
+        let floor = vec![1.0f32; 16];
+        for (i, codes) in g.frames.iter().enumerate() {
+            let v = FrameView {
+                index: i as u64 + 1,
+                start: Mark::default(),
+                end: Mark::default(),
+                psd: &psd,
+                floor: &floor,
+                sk: &[],
+                codes,
+                bin_width_hz: 1.0,
+                impulsive_run: None,
+                cum_before: Cumulative::default(),
+                cum_after: Cumulative::default(),
+            };
+            let o = l.process_frame(&v, &p);
+            if i < 3 {
+                assert!(o.dense && o.runs == 5, "{o:?}");
+            }
+            assert_eq!(l.live_count(), 0);
+        }
+        let p = LabelParams { max_live: 3, ..P };
+        let mut l = Labeler::new(16, 2);
+        let v = FrameView {
+            index: 1,
+            start: Mark::default(),
+            end: Mark::default(),
+            psd: &psd,
+            floor: &floor,
+            sk: &[],
+            codes: &g.frames[0],
+            bin_width_hz: 1.0,
+            impulsive_run: None,
+            cum_before: Cumulative::default(),
+            cum_after: Cumulative::default(),
+        };
+        let o = l.process_frame(&v, &p);
+        assert_eq!((o.dropped_runs, l.live_count()), (5, 3));
     }
 
     #[test]

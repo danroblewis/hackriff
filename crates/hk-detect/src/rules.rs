@@ -4,7 +4,7 @@
 use hk_model::detection::SpurReason;
 use hk_model::{FreqRange, SpurMask, SpurRule};
 
-use crate::config::{DcRule, EdgeRule, RefHarmonicRule, Rules};
+use crate::config::{ClockHarmonicRule, DcRule, EdgeRule, RefHarmonicRule, Rules};
 
 /// Bin geometry of a segment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,6 +93,27 @@ pub fn ref_harmonic(
     ((f_center_hz - h).abs() <= tol).then_some(h)
 }
 
+/// The sample-clock harmonic `n × fs` a narrow detection sits on, if any.
+pub fn clock_harmonic(
+    f_center_hz: f64,
+    width_hz: f64,
+    geometry: &Geometry,
+    rule: &ClockHarmonicRule,
+) -> Option<f64> {
+    let df = geometry.bin_width_hz;
+    let fs = geometry.sample_rate_hz;
+    if !rule.enabled || df >= rule.max_bin_width_hz || width_hz > rule.max_width_hz || fs <= 0.0 {
+        return None;
+    }
+    let n = (f_center_hz / fs).round();
+    if n < 1.0 {
+        return None;
+    }
+    let h = n * fs;
+    let tol = (rule.tolerance_bins * df).max(rule.min_tolerance_hz);
+    ((f_center_hz - h).abs() <= tol).then_some(h)
+}
+
 /// Rule 2: a narrow extent within `tolerance` of the tuned centre.
 pub fn dc_hit(f_lo_hz: f64, f_hi_hz: f64, width_hz: f64, center_hz: f64, rule: &DcRule) -> bool {
     width_hz <= rule.max_width_hz
@@ -118,7 +139,8 @@ pub fn spur_map_hit(f_lo_hz: f64, f_hi_hz: f64, total_gain_db: f64, mask: &SpurM
     })
 }
 
-/// The spur reason a box gets from rules 1–3, in precedence order ref-harmonic, DC, spur map.
+/// The spur reason a box gets from rules 1–3 and the clock-harmonic rule, in precedence order
+/// ref-harmonic, DC, clock-harmonic, spur map.
 /// (Comb, rule 4, needs the integrated line set and is applied by the caller.)
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SpurDecision {
@@ -156,6 +178,13 @@ pub fn spur_decision(
         return SpurDecision {
             reason: Some(SpurReason::Dc),
             harmonic_hz: None,
+        };
+    }
+    // After DC: a centre on a clock harmonic (e.g. 100.8 MHz = 42 × 2.4 Msps) is DC first.
+    if let Some(h) = clock_harmonic(f_center_hz, width_hz, geometry, &rules.clock_harmonic) {
+        return SpurDecision {
+            reason: Some(SpurReason::ClockHarmonic),
+            harmonic_hz: Some(h),
         };
     }
     if let Some(m) = mask.filter(|m| spur_map_hit(f_lo_hz, f_hi_hz, total_gain_db, m)) {
@@ -221,6 +250,30 @@ mod tests {
         assert_eq!(ref_harmonic(100.3e6, 19.5e3, 4.88e3, &r), None);
         assert_eq!(ref_harmonic(100.0e6, 150e3, 4.88e3, &r), None, "wide");
         assert_eq!(ref_harmonic(100.0e6, 10e3, 455e3, &r), None, "sweep bins");
+    }
+
+    #[test]
+    fn clock_harmonic_rule() {
+        let r = ClockHarmonicRule::default();
+        let g = Geometry::new(433.62e6, 2e6, 4096, 1.75e6, &EdgeRule::default());
+        // 434.000 MHz = 217 × 2 Msps; 2 bins (976 Hz) < 2 kHz minimum tolerance.
+        assert_eq!(clock_harmonic(434.000_5e6, 1.5e3, &g, &r), Some(434e6));
+        assert_eq!(clock_harmonic(434.003e6, 1.5e3, &g, &r), None);
+        assert_eq!(clock_harmonic(434.0e6, 60e3, &g, &r), None, "wide");
+        // Ref harmonic first, then DC, then clock harmonic.
+        let rules = Rules::default();
+        let fm = Geometry::new(100.8e6, 2.4e6, 512, 1.75e6, &EdgeRule::default());
+        let dc = spur_decision(100.799e6, 100.801e6, 100.8e6, 2e3, &fm, &rules, None, 0.0);
+        assert_eq!(dc.reason, Some(SpurReason::Dc));
+        let clock = spur_decision(433.9995e6, 434.0005e6, 434e6, 1e3, &g, &rules, None, 0.0);
+        assert_eq!(clock.reason, Some(SpurReason::ClockHarmonic));
+        assert_eq!(clock.harmonic_hz, Some(434e6));
+        let mut off = rules;
+        off.clock_harmonic.enabled = false;
+        assert_eq!(
+            spur_decision(433.9995e6, 434.0005e6, 434e6, 1e3, &g, &off, None, 0.0).reason,
+            None
+        );
     }
 
     #[test]

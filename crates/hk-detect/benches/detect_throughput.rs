@@ -203,7 +203,14 @@ fn classify_only(name: &str, frames: &[SpectrumFrame]) {
     let start = Instant::now();
     for _ in 0..reps {
         for f in frames {
-            black_box(engine.classify(&f.spectrum.psd, &floor, &th, Branches::Or, &mut codes));
+            black_box(engine.classify(
+                &f.spectrum.psd,
+                &floor,
+                &th,
+                Branches::Or,
+                None,
+                &mut codes,
+            ));
         }
     }
     let per = start.elapsed().as_secs_f64() / (reps * frames.len()) as f64;

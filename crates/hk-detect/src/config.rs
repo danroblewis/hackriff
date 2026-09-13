@@ -5,7 +5,11 @@
 use std::fmt;
 
 use hk_core::Discontinuity;
+use hk_dsp::floor::FloorConfig;
+use hk_dsp::window::WindowKind;
 use hk_model::{FreqRange, SpurMask, SurveyId};
+
+use crate::step::StepGuardConfig;
 
 /// OS-CFAR reference window across frequency.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -88,6 +92,9 @@ pub struct DetectionProfile {
     pub min_frames: u32,
     /// Survivors are merged across gaps of at most this many frames, **after** the duration test.
     pub gap_frames: u32,
+    /// Branch combination for the band (e.g. `OsOnly` where an accessory filter edge sits in the
+    /// span).
+    pub branches: Branches,
 }
 
 impl DetectionProfile {
@@ -99,6 +106,7 @@ impl DetectionProfile {
             hysteresis: Hysteresis::Pfa(1e-3),
             min_frames: 3,
             gap_frames: 2,
+            branches: Branches::Or,
         }
     }
 
@@ -111,6 +119,7 @@ impl DetectionProfile {
             hysteresis: Hysteresis::Pfa(1e-3),
             min_frames: 2,
             gap_frames: 2,
+            branches: Branches::Or,
         }
     }
 }
@@ -145,6 +154,36 @@ impl Default for RefHarmonicRule {
             step_hz: 10e6,
             ppm: 25.0,
             min_tolerance_hz: 10e3,
+            max_width_hz: 25e3,
+            max_bin_width_hz: 250e3,
+        }
+    }
+}
+
+/// Sample-clock harmonic: a narrow detection within `max(tolerance_bins · bin, min_tolerance_hz)`
+/// of `n × fs` (the receiver's sample clock and LO share one crystal, so its harmonics are
+/// crystal-locked lines; T-006 review: 434.000 MHz = 217 × 2 Msps). **Flags, never suppresses**
+/// (434.000 MHz is also LPD433 channel 38).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClockHarmonicRule {
+    /// Apply the rule (true).
+    pub enabled: bool,
+    /// Tolerance in bins (2).
+    pub tolerance_bins: f64,
+    /// Minimum tolerance, Hz (2 kHz).
+    pub min_tolerance_hz: f64,
+    /// Only narrow detections, Hz (25 kHz, the x-dB bandwidth).
+    pub max_width_hz: f64,
+    /// Disabled when bins are at least this wide, Hz (250 kHz).
+    pub max_bin_width_hz: f64,
+}
+
+impl Default for ClockHarmonicRule {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tolerance_bins: 2.0,
+            min_tolerance_hz: 2e3,
             max_width_hz: 25e3,
             max_bin_width_hz: 250e3,
         }
@@ -188,7 +227,8 @@ pub struct CombRule {
     pub trials: usize,
     /// Flag only when the chance probability is below this (5 %).
     pub max_chance: f64,
-    /// Lines considered at most (the strongest), bounding the search cost (64).
+    /// Lines considered at most (the strongest), bounding the search cost (32; the S4 comb had 14
+    /// members among ~25 narrow lines).
     pub max_lines: usize,
     /// Monte-Carlo seed (deterministic).
     pub seed: u64,
@@ -205,7 +245,7 @@ impl Default for CombRule {
             max_line_width_hz: 20e3,
             trials: 200,
             max_chance: 0.05,
-            max_lines: 64,
+            max_lines: 32,
             seed: 0x5eed_c0b5,
         }
     }
@@ -258,6 +298,8 @@ impl Default for EdgeRule {
 pub struct Rules {
     /// Rule 1.
     pub ref_harmonic: RefHarmonicRule,
+    /// Sample-clock harmonics.
+    pub clock_harmonic: ClockHarmonicRule,
     /// Rule 2.
     pub dc: DcRule,
     /// Rule 4.
@@ -279,6 +321,7 @@ impl Default for Rules {
     fn default() -> Self {
         Self {
             ref_harmonic: RefHarmonicRule::default(),
+            clock_harmonic: ClockHarmonicRule::default(),
             dc: DcRule::default(),
             comb: CombRule::default(),
             image: ImageRule::default(),
@@ -362,8 +405,6 @@ pub struct DetectorConfig {
     pub window: CfarWindow,
     /// OS-branch guard above the floor reference, dB (3). Not applied to the floor branch.
     pub guard_db: f64,
-    /// Branch combination.
-    pub branches: Branches,
     /// Floor trace for the floor branch and the guard.
     pub floor_reference: FloorReference,
     /// Profile used outside every `band_profiles` entry.
@@ -389,6 +430,31 @@ pub struct DetectorConfig {
     pub spur_mask: Option<SpurMask>,
     /// Discontinuities that close open boxes ([`DETECT_RESET_ON`]).
     pub reset_on: Discontinuity,
+    /// Floor-step guard ([`crate::step`]); `None` disables it.
+    pub step_guard: Option<StepGuardConfig>,
+    /// Known receiver response edges (accessory filter edges, path switches), absolute Hz: the
+    /// floor branch is off within the step guard's margin of each.
+    pub response_edges_hz: Vec<f64>,
+    /// A frame with more region runs than this is dense: it is not labelled, only counted (1024).
+    pub max_runs_per_frame: usize,
+    /// At most this many live components; runs beyond it are dropped and counted (2048).
+    pub max_live_components: usize,
+    /// Identifies the floor tracker's method and settings in `detector_version`
+    /// ([`Self::with_floor_config`]).
+    pub floor_tag: String,
+}
+
+/// The spectral context of a segment, part of `detector_version`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunContext {
+    /// Effective averages (the Gamma shape the thresholds use).
+    pub n_eff: f64,
+    /// FFT length.
+    pub fft_len: usize,
+    /// Segment overlap, samples.
+    pub overlap: usize,
+    /// Window.
+    pub window: WindowKind,
 }
 
 impl DetectorConfig {
@@ -398,7 +464,6 @@ impl DetectorConfig {
             survey_id,
             window: CfarWindow::default(),
             guard_db: 3.0,
-            branches: Branches::Or,
             floor_reference: FloorReference::PerFrame,
             profile: DetectionProfile::standard(),
             band_profiles: Vec::new(),
@@ -411,7 +476,27 @@ impl DetectorConfig {
             obw_fraction: 0.99,
             spur_mask: None,
             reset_on: DETECT_RESET_ON,
+            step_guard: Some(StepGuardConfig::default()),
+            response_edges_hz: Vec::new(),
+            max_runs_per_frame: 1024,
+            max_live_components: 2048,
+            floor_tag: "unspecified".into(),
         }
+    }
+
+    /// Records the floor tracker's method and settings (`block-fcme-256/64;h=<hash>`) in
+    /// `detector_version`, and aligns the step guard's block layout with it.
+    pub fn with_floor_config(mut self, floor: &FloorConfig) -> Self {
+        self.floor_tag = format!(
+            "block-fcme-{}/{};h={:016x}",
+            floor.blocks.block_bins,
+            floor.blocks.hop_bins,
+            fnv1a64(format!("{floor:?}").as_bytes())
+        );
+        if let Some(g) = &mut self.step_guard {
+            g.blocks = floor.blocks;
+        }
+        self
     }
 
     /// Checks the settings.
@@ -445,11 +530,27 @@ impl DetectorConfig {
         check_non_negative("guard_db", self.guard_db)?;
         check_positive("max_duration_s", self.max_duration_s)?;
         check_positive("integration.block_s", self.integration.block_s)?;
-        if self.integration.blocks == 0 {
+        if self.integration.blocks == 0 || self.integration.blocks > 4096 {
             return Err(ConfigError::Invalid {
-                name: "integration.blocks",
+                name: "integration.blocks must be in 1..=4096",
+                value: self.integration.blocks as f64,
+            });
+        }
+        if self.max_runs_per_frame == 0 || self.max_live_components == 0 {
+            return Err(ConfigError::Invalid {
+                name: "max_runs_per_frame and max_live_components must be positive",
                 value: 0.0,
             });
+        }
+        if let Some(g) = &self.step_guard {
+            check_positive("step_guard.jump_db", g.jump_db)?;
+            check_non_negative("step_guard.margin_blocks", g.margin_blocks)?;
+            if g.blocks.block_bins == 0 || g.blocks.hop_bins == 0 {
+                return Err(ConfigError::Invalid {
+                    name: "step_guard.blocks",
+                    value: 0.0,
+                });
+            }
         }
         if !(self.obw_fraction > 0.0 && self.obw_fraction < 1.0) {
             return Err(ConfigError::Invalid {
@@ -492,7 +593,13 @@ impl DetectorConfig {
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             self.window,
             self.guard_db,
-            self.branches,
+            (
+                &self.step_guard,
+                &self.response_edges_hz,
+                self.max_runs_per_frame,
+                self.max_live_components,
+                &self.floor_tag
+            ),
             self.floor_reference,
             self.profile,
             self.band_profiles,
@@ -508,8 +615,8 @@ impl DetectorConfig {
         fnv1a64(text.as_bytes())
     }
 
-    /// `Detection::detector_version` for profile `index`, e.g.
-    /// `hk-detect/os-cfar@0.1.0;profile=standard;pfa=1e-6/1e-3;min=3;gap=2;ref=per-frame;cfg=…`.
+    /// The configuration part of `detector_version` for profile `index`, e.g.
+    /// `hk-detect/os-cfar@0.1.0;profile=standard;br=or;pfa=1e-6/1e-3;min=3;gap=2;ref=per-frame;cfg=…`.
     pub fn detector_version(&self, index: usize) -> String {
         let p = self.profile_at(index);
         let off = match p.hysteresis {
@@ -520,14 +627,33 @@ impl DetectorConfig {
             FloorReference::PerFrame => "per-frame",
             FloorReference::Wide => "wide",
         };
+        let branches = match p.branches {
+            Branches::Or => "or",
+            Branches::OsOnly => "os",
+            Branches::FloorOnly => "floor",
+        };
         format!(
-            "hk-detect/os-cfar@{};profile={};pfa={:e}/{off};min={};gap={};ref={reference};cfg={:016x}",
+            "hk-detect/os-cfar@{};profile={};br={branches};pfa={:e}/{off};min={};gap={};ref={reference};cfg={:016x}",
             env!("CARGO_PKG_VERSION"),
             p.name,
             p.pfa_on,
             p.min_frames,
             p.gap_frames,
             self.settings_hash()
+        )
+    }
+
+    /// The full `Detection::detector_version` of a segment: the configuration part plus the
+    /// spectral context and the floor tracker, e.g. `…;n=10.000;fft=4096/0;win=Hann;floor=…`.
+    pub fn detector_version_for(&self, index: usize, run: &RunContext) -> String {
+        format!(
+            "{};n={:.3};fft={}/{};win={:?};floor={}",
+            self.detector_version(index),
+            run.n_eff,
+            run.fft_len,
+            run.overlap,
+            run.window,
+            self.floor_tag
         )
     }
 }
@@ -620,10 +746,32 @@ mod tests {
         let v = a.detector_version(0);
         assert!(v.starts_with("hk-detect/os-cfar@"), "{v}");
         assert!(
-            v.contains("profile=standard;pfa=1e-6/1e-3;min=3;gap=2;ref=per-frame;cfg="),
+            v.contains("profile=standard;br=or;pfa=1e-6/1e-3;min=3;gap=2;ref=per-frame;cfg="),
             "{v}"
         );
         assert!(a.validate().is_ok());
+        let run = RunContext {
+            n_eff: 10.0,
+            fft_len: 4096,
+            overlap: 0,
+            window: WindowKind::Hann,
+        };
+        let full = a
+            .clone()
+            .with_floor_config(&FloorConfig::default())
+            .detector_version_for(0, &run);
+        assert!(
+            full.contains(";n=10.000;fft=4096/0;win=Hann;floor=block-fcme-256/64;h="),
+            "{full}"
+        );
+        let mut c = a.clone();
+        c.integration.blocks = 20;
+        assert!(
+            c.validate().is_ok(),
+            "more than 16 integration blocks is valid"
+        );
+        c.integration.blocks = 5000;
+        assert!(c.validate().is_err());
     }
 
     #[test]

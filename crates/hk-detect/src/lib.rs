@@ -11,31 +11,46 @@
 //!    `T = Q⁻¹(n, pfa)/n`; 3 dB guard on the OS branch only. The off thresholds come from their
 //!    own Pfa (1e-3), never a fixed −3 dB. `F` is the floor reference
 //!    ([`FloorReference`]: per-frame FCME by default; the wide-signal reference once T-005's fix
-//!    lands). `n` is [`FloorFrame::n_avg_effective`](hk_dsp::floor::FloorFrame).
-//! 2. **Components** ([`components`]): 4-connected time–frequency components of the raw region
+//!    lands). `n` is [`FloorFrame::n_avg_effective`](hk_dsp::floor::FloorFrame). Branches are per
+//!    profile ([`DetectionProfile::branches`]), so a band can run OS-only.
+//! 2. **Floor-step guard** ([`step`]): within a block of a persistent > 6 dB block-floor jump (a
+//!    notch or filter edge, where block FCME is biased) or a configured response edge, the floor
+//!    branch is off and the OS branch alone detects.
+//! 3. **Components** ([`components`]): 4-connected time–frequency components of the raw region
 //!    that contain a seed and span ≥ 3 frames are kept; kept components then merge across ≤ 2-frame
 //!    gaps. No frequency merge. Streamed, so a box is emitted `gap + 1` frames after it ends.
-//! 3. **Impulsive frames** ([`FloorFrame::impulsive`](hk_dsp::floor::FloorFrame)): boxes with most
+//!    Connectivity is bounded: a split at `max_duration_s` cuts it, impulsive frames never merge
+//!    components, and dense frames (> `max_runs_per_frame` runs) and the live-component cap bound
+//!    memory and time.
+//! 4. **Impulsive frames** ([`FloorFrame::impulsive`](hk_dsp::floor::FloorFrame)): boxes with most
 //!    cells in impulsive frames merge per impulsive run into one broadband `impulsive` Detection.
-//! 4. **Flags** ([`rules`], [`comb`]): ref-harmonic (n × 10 MHz, ≤ 25 kHz, max(10 kHz, 25 ppm)),
-//!    DC (≤ 40 kHz within 15 kHz of fc), spur map, comb (judged on the integrated spectrum), IQ
+//! 5. **Flags** ([`rules`], [`comb`]): ref-harmonic (n × 10 MHz, ≤ 25 kHz, max(10 kHz, 25 ppm)),
+//!    DC (≤ 40 kHz within 15 kHz of fc), clock-harmonic (n × fs within max(2 bins, 2 kHz); flags
+//!    only), spur map, comb (judged on the integrated spectrum), IQ
 //!    image (≥ 20 dB stronger mirror, shape correlation > 0.5), clip (frame clip fraction > 1e-4;
 //!    overloaded provenance), edge zone, and `marginal` (peak SNR < 10 dB, quantisation-limited,
 //!    edge, or an inconclusive test). Gain-step and retune (rules 6–7) are pure functions in
 //!    [`trust`].
-//! 5. **Emitter candidates** (S4 "emitter confirmation"): a detection is confirmed by a repeat at
+//! 6. **Emitter candidates** (S4 "emitter confirmation"): a detection is confirmed by a repeat at
 //!    a consistent frequency or by the ≥ 1 s integrated spectrum ([`integrated`]). The status is
 //!    on the record ([`Candidate`]) and later confirmations are [`DetectorEvent::Confirmed`]
 //!    events; nothing is filtered.
-//! 6. **Records** ([`record`]): t/f box, OBW (99 %) and x-dB bandwidth from the burst-gated
+//! 7. **Records** ([`record`]): t/f box, OBW (99 %) and x-dB bandwidth from the burst-gated
 //!    spectrum, peak/mean SNR, SK, peak level (dBFS), clip count, provenance, and a
-//!    `detector_version` with a settings hash. [`DetectionWriter`] batches repository writes.
+//!    `detector_version` (settings hash, profile, n_eff, FFT size/overlap/window and the floor
+//!    tracker tag, interned per segment configuration). [`DetectionWriter`] batches repository
+//!    writes.
 //!
 //! # Transitions
 //!
 //! A new floor segment, a provenance change (gain, retune), a frame discontinuity in
 //! [`DetectorConfig::reset_on`], or a resolution change closes every open box at its last frame
 //! (no merge across the change) and restarts thresholds, components and integration.
+//!
+//! **By design**, a component that has a seed but has not yet reached `min_frames` when a
+//! transition arrives (a seed only in the last 1–2 frames before a gain change) is dropped, not
+//! emitted: it never passed the duration test, and the frames after the change belong to a
+//! different provenance.
 //!
 //! # Real-time path
 //!
@@ -53,16 +68,18 @@ pub mod detector;
 pub mod integrated;
 pub mod record;
 pub mod rules;
+pub mod step;
 pub mod trust;
 pub mod writer;
 
 pub use cfar::{CELL_NONE, CELL_REGION, CELL_SEED, CfarEngine, ClassifyStats, Thresholds};
 pub use clip::{ClipCount, count_clipped_ci8};
 pub use comb::{Comb, CombFinder};
+pub use components::FrameOutcome;
 pub use config::{
-    BandProfile, Branches, CfarWindow, CombRule, ConfigError, ConfirmConfig, DETECT_RESET_ON,
-    DcRule, DetectionProfile, DetectorConfig, EdgeRule, FloorReference, Hysteresis, ImageRule,
-    IntegrationConfig, RefHarmonicRule, Rules,
+    BandProfile, Branches, CfarWindow, ClockHarmonicRule, CombRule, ConfigError, ConfirmConfig,
+    DETECT_RESET_ON, DcRule, DetectionProfile, DetectorConfig, EdgeRule, FloorReference,
+    Hysteresis, ImageRule, IntegrationConfig, RefHarmonicRule, Rules, RunContext,
 };
 pub use detector::{Detector, DetectorStats, SegmentInfo};
 pub use integrated::{IntegratedEmitter, IntegratedEvaluation, IntegratedSnapshot, SpanMeasure};
@@ -71,6 +88,7 @@ pub use record::{
     ImageEvidence,
 };
 pub use rules::Geometry;
+pub use step::{StepGuard, StepGuardConfig};
 pub use trust::{
     CaptureEmitter, CaptureResult, CaptureSide, GainState, GainStepConfig, GainStepResult,
     GainStepRow, GainStepSkip, GainStepVerdict, RetuneConfig, RetuneLabel, RetuneResult, RetuneRow,

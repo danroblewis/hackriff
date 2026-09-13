@@ -246,8 +246,12 @@ impl CfarEngine {
         floor: &[f32],
         th: &Thresholds,
         branches: Branches,
+        floor_ok: Option<&[bool]>,
         codes: &mut [u8],
     ) -> ClassifyStats {
+        if let Some(m) = floor_ok {
+            assert_eq!(m.len(), psd.len(), "psd/floor-branch mask length mismatch");
+        }
         let n = psd.len();
         assert_eq!(floor.len(), n, "psd/floor length mismatch");
         assert_eq!(codes.len(), n, "psd/codes length mismatch");
@@ -266,7 +270,7 @@ impl CfarEngine {
             let mut code = CELL_NONE;
             if p.is_finite() && f > 0.0 && f.is_finite() {
                 let (mut seed, mut region) = (false, false);
-                if use_floor {
+                if use_floor && floor_ok.is_none_or(|m| m[i]) {
                     seed = p > t_on * f;
                     region = p > t_off * f;
                 }
@@ -333,7 +337,7 @@ mod tests {
                 })
                 .collect();
             for branches in [Branches::Or, Branches::OsOnly] {
-                e.classify(&psd, &floor, &th, branches, &mut codes);
+                e.classify(&psd, &floor, &th, branches, None, &mut codes);
                 for i in 0..n {
                     let p = psd[i];
                     let floor_seed = branches == Branches::Or && p > th.t_on as f32;
