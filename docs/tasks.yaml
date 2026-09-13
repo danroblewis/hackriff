@@ -1,0 +1,327 @@
+# hackriff task state — single source of truth for slice-1 (M0) execution.
+# A fresh coordinator session resumes from this file + docs/planning-log.md + git.
+# status: todo | in-progress | blocked | done. Update status + commit/pr as work proceeds.
+# needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
+# model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
+version: 1
+milestone: M0 (first vertical slice)
+spikes:
+  run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
+  need_jetson: [S2, S6]
+  optional: [S7]
+tasks:
+  - id: T-001
+    title: Repo scaffold, Cargo workspace, justfile, CI skeleton (no hardware)
+    status: todo
+    deps: []
+    parallel_group: A
+    use_cases: []
+    acceptance: cargo test runs across empty crates; CI green with no hardware; gpu feature flag gates CUDA
+    area: root, crates/*, .github, justfile
+    needs: none
+    model: opus
+    effort: medium
+    dod: workspace builds on macOS (CPU path); CI runs cargo test + python tooling test; README build/run commands work
+  - id: T-002
+    title: Data-model types + SQLite repository (docs/07)
+    status: todo
+    deps: [T-001]
+    parallel_group: B
+    core_interface: true
+    use_cases: [SIGNAL-001, AWARE-036, SIGNAL-062, AWARE-042, AWARE-053]
+    acceptance: round-trip every object in docs/07; inventory upsert/query; region+time indexes present
+    area: crates/hk-model
+    needs: none
+    model: fable
+    effort: high
+    dod: schema + repository with tests for Emitter upsert, Detection insert, region/time query; provenance chain resolvable
+  - id: T-003
+    title: source-abstraction + SigMF file-replay source + RAM ring buffer
+    status: todo
+    deps: [T-001]
+    parallel_group: B
+    use_cases: [SPACE-050]
+    acceptance: replay a SigMF file deterministically through the source API with provenance attached
+    area: crates/hk-core
+    needs: none
+    model: opus
+    effort: medium
+    dod: file-replay source feeds frames with provenance; ring buffer with pre-trigger read; HackRF source stubbed behind same trait
+  - id: T-023
+    title: Synthetic IQ generator + end-to-end replay harness
+    status: todo
+    deps: [T-001]
+    parallel_group: B
+    use_cases: [AWARE-036, AWARE-006, SPACE-050, AWARE-042]
+    acceptance: generate labelled IQ (emitters, noise, overload, impairments) and replay through the pipeline in tests
+    area: py/, tests/
+    needs: none
+    model: opus
+    effort: high
+    dod: generator produces SigMF with ground-truth annotations; harness replays and exposes pipeline outputs to assertions
+  - id: T-004
+    title: spectral-estimation (Welch PSD, STFT, persistence, spectral kurtosis)
+    status: todo
+    deps: [T-003]
+    parallel_group: C
+    use_cases: [SPACE-050, AWARE-042]
+    acceptance: PSD/SK correct on synthetic tones/noise; CPU fallback + optional cuFFT behind gpu feature
+    area: crates/hk-dsp
+    needs: none
+    model: opus
+    effort: medium
+    dod: T1 unit tests pass; SK ~1 for noise, >1 for bursts; CPU path builds on macOS
+  - id: T-005
+    title: noise-floor estimation (FCME / percentile / minimum-statistics)
+    status: todo
+    deps: [T-004]
+    parallel_group: C
+    core_interface: true
+    use_cases: [SPACE-050, AWARE-006]
+    acceptance: recover a known floor within tolerance on drifting-floor fixtures; 3-5 dB guard margin
+    area: crates/hk-dsp
+    needs: none
+    model: fable
+    effort: high
+    dod: floor within +/-1 dB on synthetic; per-bin and per-channel estimates; feeds thresholds
+  - id: T-006
+    title: CFAR detection + burst records
+    status: todo
+    deps: [T-005]
+    parallel_group: C
+    core_interface: true
+    use_cases: [AWARE-036, AWARE-042, SIGNAL-062]
+    acceptance: false-alarm rate under bound on noise-only; detections on synthetic emitters; spur/clip flags propagate
+    area: crates/hk-detect
+    needs: none
+    model: fable
+    effort: high
+    dod: OS-CFAR + hysteresis + min-duration; false-alarm bound met (informed by spike S4); Detection rows written
+  - id: T-007
+    title: burst-tracking (tracks, periodicity, duty cycle, hop set)
+    status: todo
+    deps: [T-006]
+    parallel_group: C
+    use_cases: [AWARE-036, AWARE-042]
+    acceptance: recover period/hop/duty of a synthetic emitter within tolerance
+    area: crates/hk-detect
+    needs: none
+    model: opus
+    effort: medium
+    dod: Track objects with timing features; links detections to one track
+  - id: T-008
+    title: channelizer (2x oversampled PFB) + on-demand DDC
+    status: todo
+    deps: [T-004]
+    parallel_group: D
+    core_interface: true
+    use_cases: [SIGNAL-062, AWARE-036, SIGNAL-001]
+    acceptance: channel isolation/stopband on synthetic multi-signal input; GPU + CPU-fallback paths
+    area: crates/hk-dsp
+    needs: none
+    model: fable
+    effort: high
+    dod: N-channel PFB with tested isolation; DDC to arbitrary center/bw; feeds demods
+  - id: T-009
+    title: sweep-survey + first (simple) attention scheduler
+    status: todo
+    deps: [T-003, T-006]
+    parallel_group: E
+    core_interface: true
+    use_cases: [SPACE-050, AWARE-042]
+    acceptance: emits expected tune sequence for a ScanPlan; interleaves sweep and dwell on a synthetic clock
+    area: crates/hk-core
+    needs: none
+    model: fable
+    effort: high
+    dod: ScanPlan-driven sweep/dwell alternation with POI-sized dwells; golden-file the schedule
+  - id: T-010
+    title: parameter-estimation (OBW, CFO, SNR, spectral shape)
+    status: todo
+    deps: [T-008]
+    parallel_group: F
+    use_cases: [AWARE-036, SIGNAL-062]
+    acceptance: OBW/CFO/SNR within tolerance on synthetic + recorded snippets
+    area: crates/hk-estimate
+    needs: none
+    model: fable
+    effort: high
+    dod: estimates within tolerance; normalises snippets for demod/classify
+  - id: T-011
+    title: blind symbol-rate + FSK deviation estimation
+    status: todo
+    deps: [T-010]
+    parallel_group: F
+    use_cases: [AWARE-036]
+    acceptance: symbol rate +/-1%, deviation within tolerance on real 8-bit captures (gated by spike S5)
+    area: crates/hk-estimate
+    needs: none
+    model: fable
+    effort: high
+    gated_on: S5
+    dod: estimators pass on synthetic and on an S5 capture; unknown flagged not mislabelled
+  - id: T-012
+    title: analog auto-mode demod + RDS
+    status: todo
+    deps: [T-008, T-010]
+    parallel_group: G
+    use_cases: [SIGNAL-062]
+    acceptance: auto-selects WFM (no manual mode), detects 19 kHz pilot, decodes RDS PI/PS to an Emitter label
+    area: crates/hk-demod
+    needs: none
+    model: opus
+    effort: medium
+    dod: replay FM+RDS fixture -> WFM chosen, PI/PS decoded, label written
+  - id: T-013
+    title: digital demod (FSK) + framing/CRC inference
+    status: todo
+    deps: [T-011]
+    parallel_group: G
+    use_cases: [AWARE-036]
+    acceptance: FSK to bits; preamble/sync/CRC inference across bursts; seeded CRC validates
+    area: crates/hk-demod, crates/hk-estimate
+    needs: none
+    model: fable
+    effort: high
+    gated_on: S5
+    dod: bits recovered; framing model + CRC id; ground-truth annotation on valid decode
+  - id: T-014
+    title: plugin host + manifest + IPC (ADR-0003)
+    status: todo
+    deps: [T-002]
+    parallel_group: D
+    core_interface: true
+    use_cases: [SIGNAL-001]
+    acceptance: launch a subprocess plugin, feed it a channel stream, ingest messages/annotations; crash isolation
+    area: crates/hk-plugins
+    needs: none
+    model: fable
+    effort: high
+    dod: manifest schema + IPC; a dummy plugin round-trips; plugin crash does not drop capture
+  - id: T-015
+    title: readsb ADS-B plugin wrapper + fixture
+    status: todo
+    deps: [T-014, T-025]
+    parallel_group: H
+    use_cases: [SIGNAL-001]
+    acceptance: replay 1090 MHz fixture -> CRC-valid messages, aircraft Emitter with hex id, last_seen updated
+    area: plugins/, crates/hk-plugins
+    needs: none
+    model: sonnet
+    effort: medium
+    dod: readsb wrapped per manifest; e2e replay assertion passes
+  - id: T-016
+    title: stream-output contract (framed UDS/TCP, SigMF headers, drop-not-block, gating)
+    status: todo
+    deps: [T-002]
+    parallel_group: D
+    core_interface: true
+    use_cases: [SIGNAL-001]
+    acceptance: external consumer receives framed self-describing stream; slow consumer dropped not blocking; content_class gated
+    area: crates/hk-api
+    needs: none
+    model: fable
+    effort: high
+    dod: contract impl + a sample consumer; backpressure + gating tested
+  - id: T-017
+    title: spectrum-history pyramid + region/time query
+    status: todo
+    deps: [T-004, T-002]
+    parallel_group: E
+    use_cases: [AWARE-042, SPACE-050]
+    acceptance: frames folded into tiles; region+time query returns max/mean/pXX; downsampling preserves peak occupancy
+    area: crates/hk-store
+    needs: none
+    model: opus
+    effort: high
+    dod: pyramid with rolling byte budget; region-over-time query tested
+  - id: T-018
+    title: signal-inventory writes + emitter clustering (read/query)
+    status: todo
+    deps: [T-002, T-007]
+    parallel_group: E
+    use_cases: [AWARE-036, SIGNAL-001, SIGNAL-062, AWARE-053]
+    acceptance: two sessions of one emitter -> one Emitter, count summed, first/last_seen spanning; unknown status set
+    area: crates/hk-model
+    needs: none
+    model: opus
+    effort: medium
+    dod: clustering by fingerprint; inventory query by region/time/status/tag
+  - id: T-019
+    title: known-signal-priors — band-plan table + lookup
+    status: todo
+    deps: [T-002]
+    parallel_group: H
+    use_cases: [AWARE-053]
+    acceptance: detection frequency -> expected service; off-allocation emitter flagged unexpected-here
+    area: crates/hk-context
+    needs: none
+    model: sonnet
+    effort: medium
+    dod: compact 47 CFR 2.106 table parsed + lookup; known/unexpected status set on emitters
+  - id: T-020
+    title: context-feeds cache + gpsjam adapter + event correlation
+    status: todo
+    deps: [T-005, T-002]
+    parallel_group: E
+    use_cases: [AWARE-006]
+    acceptance: synthetic L1 floor-rise + frozen gpsjam event -> Anomaly + top Explanation (time-coincidence); none when cache lacks a match
+    area: crates/hk-context
+    needs: none
+    model: opus
+    effort: high
+    dod: offline-first cache; Anomaly + Explanation objects; deterministic on frozen cache
+  - id: T-021
+    title: radiometry calibrated noise-floor product
+    status: todo
+    deps: [T-005, T-017]
+    parallel_group: F
+    use_cases: [SPACE-050]
+    acceptance: calibrated floor recovered within +/-1 dB on synthetic capture; queryable as floor-vs-time
+    area: crates/hk-dsp, crates/hk-store
+    needs: none
+    model: opus
+    effort: medium
+    dod: calibration applied (dBFS->dBm); floor-vs-time product from tiles
+  - id: T-022
+    title: web UI — WebGL2 waterfall + inventory table + region-over-time
+    status: todo
+    deps: [T-016, T-017, T-018]
+    parallel_group: I
+    use_cases: [AWARE-042, SPACE-050, SIGNAL-062]
+    acceptance: waterfall >=30 fps on-device from the spectrum stream; inventory table; region/time browse (gated by spike S3)
+    area: ui/
+    needs: none
+    model: sonnet
+    effort: medium
+    gated_on: S3
+    dod: browser app consumes the API; waterfall + table + history view; fps target met or native-shell fallback invoked
+  - id: T-024
+    title: Wire the 7 slice acceptance tests (docs/11 1.1) in CI
+    status: todo
+    deps: [T-015, T-013, T-012, T-020, T-021, T-018, T-019, T-017]
+    parallel_group: J
+    use_cases: [SIGNAL-001, AWARE-036, SIGNAL-062, AWARE-006, SPACE-050, AWARE-053, AWARE-042]
+    acceptance: all seven acceptance tests pass offline in CI
+    area: tests/
+    needs: none
+    model: sonnet
+    effort: medium
+    dod: seven e2e tests green in CI; each names its use-case id(s)
+  - id: T-025
+    title: Fixture capture with the HackRF One (ADS-B, FM+RDS, ISM, sweep, terminated-input)
+    status: todo
+    deps: [T-003]
+    parallel_group: A
+    use_cases: [SIGNAL-001, SIGNAL-062, AWARE-036, SPACE-050]
+    acceptance: SigMF fixtures with ground-truth annotations committed (LFS) or in the external store per docs/12 4
+    area: fixtures/, py/fixtures
+    needs: [hardware, user]
+    model: opus
+    effort: medium
+    dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
+notes:
+  - Core-interface tasks (T-002, T-005, T-006, T-008, T-009, T-014, T-016) are Fable/Opus and reviewed before merge.
+  - "Parallel groups can run in separate worktrees; groups sharing a crate (group C on hk-dsp/hk-detect, group E on hk-store/hk-model/hk-core) serialise on that crate or coordinate file ownership."
+  - T-011/T-013 gated on spike S5; T-022 gated on S3. If a gate fails, see docs/12 1 for the fallback.
+  - T-025 needs the HackRF + the user; keep it with the coordinator, not a background agent.

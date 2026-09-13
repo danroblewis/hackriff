@@ -4,7 +4,9 @@ An exploration-first signals-analysis tool for software defined radio. It's mean
 
 ## Status
 
-**Phase: architecture planning.** There is no product code yet. Research is finished and lives in `docs/`. The next deliverables are a capability map, a data model, architecture decisions, risks and spikes, a test strategy, a first vertical slice, and an executable implementation plan for that slice (task state file, Engineering and Coordination sections added here). The planning brief is `prompts/fable-architecture-planning.md`. Read the docs before proposing designs; don't re-research what they already cover.
+**Phase: architecture planning complete; ready to build slice 1 (M0).** No product code yet. Research is in `docs/01`–`05`; planning is in `docs/06`–`12` + `docs/adr/` (all decisions **PROVISIONAL** pending user review and spikes). Provisional decisions and ranked open questions for the user are in `docs/planning-log.md`. The first vertical slice and milestones are `docs/11`; the executable task state is `docs/tasks.yaml` (single source of truth for status). Next actions: run the Mac + HackRF spikes S4/S5/S1/S3 (`docs/09`), order the Jetson dev kit (`docs/12 §6`), then start task T-001. The planning brief is `prompts/fable-architecture-planning.md`.
+
+Planning docs: `06` capability map, `07` data model, `08` architecture + `adr/` (10 ADRs), `09` risks & spikes, `10` test strategy, `11` roadmap/slice, `12` implementation plan. Read the relevant capability cards (`docs/capabilities/`) and the ADRs a task names before building; don't re-read `01`–`05` end to end.
 
 `tools/` holds the user's quick HackRF experiments, not product code:
 - `sweep_plot.py` plots `hackrf_sweep` CSV output and lists peaks.
@@ -92,3 +94,22 @@ Items in `docs/05` and `docs/use-cases.yaml` are acceptance targets:
 - Don't recommend SDR#/GQRX-style tune-and-listen tools as answers; the user wants exploration and analysis tooling.
 - The user runs the `md` doc viewer and cloudflared tunnel themselves. Don't start, restart or kill those processes.
 - Ask before committing.
+
+## Engineering
+
+Repo layout and build come from `docs/12` and the ADRs. Do not treat this as built yet; it is the target once T-001 lands.
+
+- **Layout:** Cargo workspace in `crates/` (`hk-model` data model + SQLite; `hk-core` source/ring/scheduler; `hk-dsp` spectral/noise/channelizer; `hk-detect`; `hk-estimate`; `hk-demod`; `hk-store` history+SigMF; `hk-context` feeds+priors+correlation; `hk-api` control+stream-output; `hk-plugins` plugin host; `hk-cli`). `plugins/` decoder manifests+wrappers; `ui/` TS+WASM web client; `py/` synthetic-gen/fixtures/research (orchestration/research only, never the real-time path); `spikes/` throwaway; `fixtures/` SigMF (Git LFS / external store); `tests/` e2e IQ-replay.
+- **Languages/licence rule:** Rust core, C-via-FFI liquid-dsp (MIT), CUDA (Jetson-only, behind the `gpu` cargo feature), TS+WASM UI, Python tooling. **GPLv3 code (VOLK, GNU Radio, most decoders) stays behind the plugin process boundary** so the core licence stays open (ADR-0010). Add every new dependency to the ADR-0010 ledger with its licence before use.
+- **Build/test/run:** `just build`, `just test` (T1 unit + T2 component + T3 replay + T4 synthetic; no hardware; `gpu` off), `just replay <fixture.sigmf-meta>` (run a SigMF fixture through the pipeline), `just deploy-jetson` (rsync + on-device build). CI runs `just test` + Python tooling tests with no hardware and must stay green. HIL (T5) runs on a bench rig nightly/manually; field (T6) is logged, never gates CI.
+- **Adding a use case:** append an ID in `docs/05` and `use-cases.yaml` (never renumber), set `capabilities`/`hardware_fit`/`accessory`/`fit_flags`/`fit_note`/`test_tier` per `docs/06 §3` and `docs/10 §2`. **Adding a fixture:** capture/annotate as SigMF, put small ones in `fixtures/` (LFS) or the external store, reference it from the acceptance test by use-case ID.
+
+## Coordination
+
+Development runs from one long-lived coordinator session (Opus) that delegates to subagents/workflows. Files, not the conversation, carry state.
+
+- **Task state lives in `docs/tasks.yaml`.** Update `status` (todo/in-progress/blocked/done) + commit/PR links there as work proceeds; a fresh session resumes from it + `docs/planning-log.md` + git. It is the single source of truth.
+- **Briefing a subagent:** give it its task entry, the capability cards it touches (`docs/capabilities/`), and the ADRs + data-model sections the task names — not the full research docs. The **use-case IDs in the task are its definition of done**; the agent asserts on the data-model objects (`docs/07`) and reports back a short summary with results written to files.
+- **Model/effort** per `prompts/model-selection.md`. Core-interface tasks (schema, plugin/stream contracts, detection thresholds, scheduler — marked `core_interface` in `tasks.yaml`) and anything touching the real-time path or legal guardrails go to Fable/Opus and are reviewed before merge; never Sonnet/Haiku alone.
+- **Parallel work uses git worktrees**, one per `parallel_group`; tasks sharing a crate serialise on it or split file ownership (see `tasks.yaml` notes). A cheaper model's output touching core interfaces is reviewed by Opus before merge. Changing an ACCEPTED ADR goes to Fable + the user.
+- **Stays interactive with the user (not background agents):** anything needing the HackRF or the Jetson (fixture capture T-025, HIL, spikes on hardware), trade-off/decision calls, and the open questions in `docs/planning-log.md`. **Ask before committing.**

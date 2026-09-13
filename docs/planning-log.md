@@ -6,7 +6,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 ## Current phase
 
-**Phase 5 (test strategy).** Phases 1–4 committed. docs/09 risks & spikes written (S1–S7). Next: docs/10-test-strategy.md + fill test_tier in use-cases.yaml, then Phase 6 roadmap, Phase 7 plan.
+**Phases 5–7 drafted; commits pending test_tier merge.** Phases 1–4 committed. docs/10 (test strategy), docs/11 (roadmap+slice), docs/12 (implementation plan) + docs/tasks.yaml written; CLAUDE.md Engineering+Coordination+Status added. Waiting on the test_tier bulk-fill subagent to merge into use-cases.yaml, then committing Phases 5, 6, 7 in order and deleting the heartbeat.
 
 ## Decisions from the user (not provisional)
 
@@ -60,3 +60,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 ### Phase 4 — risks & spikes (2026-09-13)
 - **P4.1** Seven spikes S1–S7 defined, each tied to the ADR/capability it unblocks. Recommended order **provisional**: S4 (detection in overload) + S5 (blind estimation) first — they run on the user's Mac+HackRF now and de-risk the two highest-impact unknowns and produce the first fixtures; then S1 (reconfig), S3 (web waterfall) on Mac; then S2, S6 on the Jetson; S7 optional.
 - **Needs user:** pick which spikes to run (brief checkpoint). Default = the S4/S5/S1/S3 Mac-runnable set now, Jetson spikes when hardware arrives.
+
+### Phases 5–7 (2026-09-13)
+- **P5.1** Test tiers T1–T6; `test_tier` rubric = {offline-synth, offline-recorded, hil, field, data-only}; SigMF fixtures, licence checks, CI-without-hardware. Bulk test_tier fill delegated to a Sonnet agent (merge pending).
+- **P6.1** Slice M0 = SIGNAL-001 (ADS-B, known decoder), AWARE-036 (unknown signal), SIGNAL-062 (FM/RDS auto-demod), AWARE-006 (attack map), SPACE-050 (science), AWARE-053 (priors), AWARE-042 (occupancy/region-over-time). Six of seven CI-provable offline. **Provisional** — depends on user accept of trunking (for M4) and spike results (S1/S3/S4/S5).
+- **P6.2** Milestones M1–M7 ordered by docs/06 §4.2 shared-core: decoder breadth → attention+memory → classification/ML → trunking → accessory clusters → localization → device+TX.
+- **P7.1** 25 M0 tasks in docs/tasks.yaml with deps/use-cases/acceptance/files/needs/model/effort/parallel-group/DoD; core-interface tasks flagged Fable/Opus + review. Repo scaffold, macOS-dev→Jetson-deploy, CI (no hardware), fixture capture plan, hardware shopping list with timing all in docs/12.
+- **P7.2** CLAUDE.md gained Engineering + Coordination sections and a refreshed Status (kept concise).
+- **Needs user:** confirm the M0 slice IDs, pick spikes to run, and the open questions above before build starts.
