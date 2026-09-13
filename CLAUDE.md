@@ -57,7 +57,7 @@ Further goals:
   - GNU Radio 3.10, GNU Radio 4 and FutureSDR (Rust) are all candidates, and nobody is attached to any of them.
   - **Hard requirement:** change and extend signal-processing pipelines **without stopping capture or rebuilding**. The user's past GNU Radio experience involved lots of recompiling. Find out whether that's inherent or avoidable.
 - **UI: open question.** Web UI versus native (SDL/ImGui-style). The user considers this one of the most important decisions.
-- **Licence: undecided.** Don't commit yet. Track the licence of every dependency: GPL components such as GNU Radio constrain later choices, and process boundaries can isolate them.
+- **Licence: undecided, and not a development concern for now.** Don't let licences gate work.
 - **Team: one developer**, with one likely friend-user. Favour low operational complexity, and don't over-build plugin infrastructure for hypothetical contributors.
 
 ## Key findings that constrain the design
@@ -72,20 +72,19 @@ Further goals:
 
 Items in `docs/05` and `docs/use-cases.yaml` are acceptance targets:
 - Map each ID to the capabilities it exercises. Tag whether it can be tested **offline with recorded or synthetic IQ** or needs live hardware.
-- Prefer **SigMF** recordings plus annotations as fixtures. Candidate sources: your own captures, IQEngine/SigMF archives, sigidwiki samples, and synthetic data (TorchSig / generated). Check the licence of each sample set before committing it.
+- Prefer **SigMF** recordings plus annotations as fixtures. Candidate sources: your own captures, IQEngine/SigMF archives, sigidwiki samples, and synthetic data (TorchSig / generated).
 - Build end-to-end tests that replay IQ through the full pipeline and assert on detections, estimated parameters, decoded bits and inventory entries. Keep unit tests for the DSP blocks.
 - **End-to-end tests drive the system through the SDR device interface.** They never feed files straight into the pipeline.
   - **A mock SDR device** implements the same interface as the real HackRF source: tune, sample rate, gains, bias-tee, sweep, start/stop, timestamps, overruns. It replays recorded SigMF IQ behind that interface, honouring retunes and gain/rate changes realistically.
   - **The same tests can run against the real HackRF** as hardware-in-the-loop tests.
 - **Keep the device interface generic** so other SDRs (e.g. SoapySDR) can be added later. That's not required yet, but don't bake HackRF specifics into the core.
 
-## Legal guardrails
+## Legal
 
-- Receive-only by default. TX features must be explicit and assume a licence or rule authority, or your own devices.
-- Users may record and **decrypt their own traffic** for any research purpose.
-- **Never** build features that circumvent the security of other people's traffic. For others' encrypted signals, detect and label metadata only.
-- US law also restricts some *unencrypted* content: cellular, common-carrier paging, and divulging content under 47 USC 605. See docs/04 §1.3.
-- Security-research features cover finding issues and testing your own devices, not attack tooling.
+The user handles legality themselves and does **not** want legal or licensing requirements driving development (decided 2026-09-13).
+- No legal reviews, no legal regression tests, and no merges blocked or delayed on legal or content-gating concerns.
+- Existing gating code can stay, but don't extend it. Where it gets in the way of a feature, default to permissive.
+- Only standing preferences: no transmit path unless the user asks for one, and no attack tooling against other people's systems.
 
 ## Working conventions
 
@@ -98,7 +97,7 @@ Items in `docs/05` and `docs/use-cases.yaml` are acceptance targets:
   - Sonnet: well-specified tasks with tests.
   - Haiku: mechanical work.
 
-  Changes to core interfaces, the real-time path, or legal-guardrail areas never go to Sonnet or Haiku alone.
+  Changes to core interfaces or the real-time path never go to Sonnet or Haiku alone.
 - Don't recommend SDR#/GQRX-style tune-and-listen tools as answers; the user wants exploration and analysis tooling.
 - The user runs the `md` doc viewer and cloudflared tunnel themselves. Don't start, restart or kill those processes.
 - Ask before committing.
@@ -108,7 +107,7 @@ Items in `docs/05` and `docs/use-cases.yaml` are acceptance targets:
 Repo layout and build come from `docs/12` and the ADRs; the workspace below exists (T-001 landed). Crates fill in as M0 tasks merge.
 
 - **Layout:** Cargo workspace in `crates/` (`hk-model` data model + SQLite; `hk-core` source/ring/scheduler; `hk-dsp` spectral/noise/channelizer; `hk-detect`; `hk-estimate`; `hk-demod`; `hk-store` history+SigMF; `hk-context` feeds+priors+correlation; `hk-api` control API (re-exports `hk-stream`); `hk-stream` stream-output contract (framing, gating, publisher); `hk-plugins` plugin host; `hk-cli`). `plugins/` decoder manifests+wrappers; `ui/` TS+WASM web client; `py/` synthetic-gen/fixtures/research (orchestration/research only, never the real-time path); `spikes/` throwaway; `fixtures/` SigMF (Git LFS / external store); `tests/` e2e IQ-replay.
-- **Languages/licence rule:** Rust core, C-via-FFI liquid-dsp (MIT), CUDA (Jetson-only, behind the `gpu` cargo feature), TS+WASM UI, Python tooling. **GPLv3 code (VOLK, GNU Radio, most decoders) stays behind the plugin process boundary** so the core licence stays open (ADR-0010). Add every new dependency to the ADR-0010 ledger with its licence before use.
+- **Languages/licence rule:** Rust core, C-via-FFI liquid-dsp (MIT), CUDA (Jetson-only, behind the `gpu` cargo feature), TS+WASM UI, Python tooling. **GPLv3 code (VOLK, GNU Radio, most decoders) stays behind the plugin process boundary** (ADR-0010). The dependency licence ledger is optional bookkeeping, not a gate.
 - **Build/test/run:** `just build`, `just test` (T1 unit + T2 component + T3 replay + T4 synthetic; no hardware; `gpu` off), `just replay <fixture.sigmf-meta>` (run a SigMF fixture through the pipeline), `just deploy-jetson` (rsync + on-device build). CI runs `just test` + Python tooling tests with no hardware and must stay green. HIL (T5) runs on a bench rig nightly/manually; field (T6) is logged, never gates CI.
 - **Adding a use case:** append an ID in `docs/05` and `use-cases.yaml` (never renumber), set `capabilities`/`hardware_fit`/`accessory`/`fit_flags`/`fit_note`/`test_tier` per `docs/06 §3` and `docs/10 §2`. **Adding a fixture:** capture/annotate as SigMF, put small ones in `fixtures/` (LFS) or the external store, reference it from the acceptance test by use-case ID.
 
@@ -118,7 +117,7 @@ Development runs from one long-lived coordinator session (Opus) that delegates t
 
 - **Task state lives in `docs/tasks.yaml`.** Update `status` (todo/in-progress/blocked/done) + commit/PR links there as work proceeds; a fresh session resumes from it + `docs/planning-log.md` + git. It is the single source of truth.
 - **Briefing a subagent:** give it its task entry, the capability cards it touches (`docs/capabilities/`), and the ADRs + data-model sections the task names — not the full research docs. The **use-case IDs in the task are its definition of done**; the agent asserts on the data-model objects (`docs/07`) and reports back a short summary with results written to files.
-- **Model/effort** per `prompts/model-selection.md`. Core-interface tasks (schema, plugin/stream contracts, detection thresholds, scheduler — marked `core_interface` in `tasks.yaml`) and anything touching the real-time path or legal guardrails go to Fable/Opus and are reviewed before merge; never Sonnet/Haiku alone.
+- **Model/effort** per `prompts/model-selection.md`. Core-interface tasks (schema, plugin/stream contracts, detection thresholds, scheduler — marked `core_interface` in `tasks.yaml`) and anything touching the real-time path go to Fable/Opus and are reviewed before merge; never Sonnet/Haiku alone.
 - **Parallel work uses git worktrees**, one per `parallel_group`; tasks sharing a crate serialise on it or split file ownership (see `tasks.yaml` notes). A cheaper model's output touching core interfaces is reviewed by Opus before merge. Changing an ACCEPTED ADR goes to Fable + the user.
 - **A real HackRF One is attached to the dev Mac** and verified with `hackrf_info`: firmware 2026.01.3, board revision older than r6, on its own USB bus. Development may use it for receive-side work: spikes S4/S5/S1, fixture capture (T-025), HIL tests. Rules:
   - **One agent at a time.** Only one process can open the device, so the coordinator hands out access explicitly, and any agent using it runs without parallel hardware users.

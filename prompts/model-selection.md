@@ -27,7 +27,6 @@ Use for decisions that are costly to reverse, and problems where subtle errors p
 - Novel signal-analysis design: blind symbol-rate/modulation estimation, open-set "unknown" classification, CFAR tuning strategy, the attention scheduler, event correlation for the attack map.
 - Hard debugging: dropped samples, timing/ring-buffer races, GPU/USB throughput, numerical bugs that only show on real captures.
 - Reviewing the Phase 7 implementation plan, and milestone-end reviews of the core pipeline.
-- Design review of legally sensitive features: trunking and encryption flags (C23), TX (C37), anything touching decryption or content storage.
 
 ### Opus 5 — high or medium effort
 Use for judgment across many files, or work that needs long context:
@@ -63,13 +62,12 @@ Use for mechanical, easily checked work:
   - the real-time sample path (ring buffer, USB ingest, channelizer, timing)
   - the attention scheduler
   - calibration/detection thresholds that tests can't fully verify
-  - anything covered by the legal guardrails in CLAUDE.md
 - **Changing a decision recorded in an ADR** goes to Fable plus the user, never a silent change in code.
 - **A cheaper model's output that touches core interfaces gets reviewed** by Opus before merge.
 
 ## Effort
 
-- **High:** architecture, novel DSP, hard debugging, security/legal review.
+- **High:** architecture, novel DSP, hard debugging.
 - **Medium:** default for implementation and review.
 - **Low:** mechanical tasks.
 
