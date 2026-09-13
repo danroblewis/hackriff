@@ -384,3 +384,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Results:** blind FM gives audio at 54 ms peak processing latency with 0 drops; the paging sentinel is refused before any attach.
   - **Merge:** held until T-063 greens main. A timeboxed legal/security review is running.
   - **Follow-ups (detection quality):** T-012 selector misreads a pure carrier as AM and a 60 % AM tone as unknown; emitter clustering is too coarse (2 MHz cluster).
+- **B0.130 T-058 detect throughput done** (33ee78e); output is bit-identical.
+  - **Root cause of the T-055 HIL loss:** the hop-set raster fit in the tracker, not STFT or CFAR. Hop-set members are never pruned, so the fit is O(n²) and recomputed every frame.
+  - **Result:** whole-pipeline dense urban replay at 20 Msps went from 0.074× to 0.68× real time (~10×). Synthetic and ISM data run at ≥ 5–9× real time.
+  - **Merge:** held until T-063 greens main.
+  - **Next lever:** behaviour change → T-064 (prune members, recompute raster only on channel-set change; core interface), held behind the T-058 merge. The floor FCME comes after that, then T-056 GPU STFT.

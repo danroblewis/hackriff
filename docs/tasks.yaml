@@ -944,7 +944,13 @@ tasks:
   - id: T-058
     milestone: M0b
     title: Detect-reader throughput (single-threaded STFT+CFAR path overruns the ring at >=8 Msps)
-    status: in-progress
+    status: done
+    commit: "33ee78e (merge held until T-063 greens main)"
+    result: "HIL loss cause: 98 % of detect thread in tracker drain_into -> hop_track -> robust_raster/fit_raster (fmod 47 %, sin/cos 40 %), hop-set members never pruned (51-111 channels, 5-7k candidate steps, 15-23 ms/call); STFT+floor+CFAR ~2 %. Fix in hk-detect/src/track/stats.rs: one exact remainder + one sin/cos per channel per candidate, weights/tolerances hoisted, early-exit on repeated inlier set, large calls on hk-dsp rayon pool (ordered; new default feature cpu-mt). Bit-identical: fast vs reference raster on 240 random sets, remainder vs rem_euclid ~2M cases, parallel vs sequential, parity-check feature on real urban fixture, old vs new replay DBs (4217 detections, 182 tracks, hop raster 34915.757 Hz/111 ch). RTF: whole-pipeline 20 Msps urban replay 0.074 -> 0.68; bench urban 0.09 -> 0.86 (1.6 at load 3); synthetic 8/10/20 Msps 8.7/6.7/4.9 and ISM 10 Msps 9.1 unchanged. Load 20-42 during measurement."
+    followups:
+      - "hop-set pruning/raster recompute -> T-064"
+      - "floor FCME is the next hot spot after the tracker (51-62 % without hop sets)"
+      - "one hk-stream test failed once under load (passed 3x alone) - watch for flakiness"
     deps: [T-055, T-041]
     parallel_group: S
     use_cases: [SPACE-050, AWARE-042, AWARE-036]
@@ -1029,6 +1035,20 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+  - id: T-064
+    milestone: M0b
+    title: Hop-set tracker scaling (prune/dedupe closed members; recompute raster only when the channel set changes)
+    status: todo
+    deps: [T-058]
+    parallel_group: S
+    use_cases: [AWARE-036, AWARE-042]
+    acceptance: "hop-set membership bounded (closed/stale members pruned or deduplicated by channel) and raster fit recomputed only on channel-set change; dense urban 20 Msps whole-pipeline replay real-time (RTF >= 1.2 at moderate load); hop-set outputs on the 915 FHSS fixture and synthetic hopper unchanged within documented tolerance (same raster, channel set, hop rate); AWARE-036/042 acceptance green; behaviour change documented (core interface)"
+    area: crates/hk-detect/src/track
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    hold: "after T-058 merges (held behind T-063)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
