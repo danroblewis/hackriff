@@ -9,6 +9,11 @@ spikes:
   run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
   need_jetson: [S2, S6]
   optional: [S7]
+  status:
+    S1: in-progress
+    S3: "mac-pass 2026-09-13 (60 fps @16384 bins, GPU persistence, 5-8x headroom; merged aa09a9e); Jetson kiosk + phone checks pending (needs user/hardware)"
+    S4: in-progress
+    S5: in-progress
 tasks:
   - id: T-001
     title: Repo scaffold, Cargo workspace, justfile, CI skeleton (no hardware)
@@ -297,6 +302,7 @@ tasks:
     model: sonnet
     effort: medium
     gated_on: S3
+    gate_note: "S3 passed on Mac; proceed on web UI; confirm fps on Jetson/phone when hardware is available"
     dod: browser app consumes the API; waterfall + table + history view; fps target met or native-shell fallback invoked
   - id: T-024
     title: Wire the 7 slice acceptance tests (docs/11 1.1) in CI
