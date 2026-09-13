@@ -432,6 +432,10 @@ tasks:
     parallel_group: J
     core_interface: true
     use_cases: [SPACE-050, AWARE-042, AWARE-036]
+    fix_round: "c995517 + 67f8843 (merged after review FIX-NEEDED): gate clamps claims to ring oldest sample (no deadlock on large core:global_index; 12M-sample unpaced replays 0 drops; idx 5e9 test); restricted paging/cellular classes derived from frequency per 47 CFR 22.531/90.494/24.129/22.905/24.229/27.5 override classify rules (window overlapping a band restricted whole); lossless default off, refused unless Source::pausable(); failed detection writes retried, links deferred; analog recorder threaded; plugin_restarts accumulates; virtual gain provenance. Acceptance untagged 930.5 MHz paging case 12/12."
+    fix_followups:
+      - "window-level restriction is coarse: a 20 Msps window at 920 MHz is restricted whole because it reaches paging; per-channel class (channelizer bins outside restricted bands) could restore unrestricted content"
+      - "ESMR, FirstNet and CBRS band edges unverified: metadata-only, openable by rule; verify against eCFR and add if restricted"
     acceptance: "`hk replay <fixture>` and `hackriffd --source sigmf:<file>` run the always-on chain end to end and write Detections, tiles and stream records; runtime chain attach/detach per ADR-0001 S1 outcome"
     area: crates/hk-cli, crates/hk-core (runtime glue)
     needs: none
@@ -576,7 +580,6 @@ tasks:
   - id: T-037
     title: Pipeline follow-ups (loop restart control, verification persistence, writer thread, WFM fragment tracks, capture names, shutdown, HackRF source)
     status: todo
-    hold: "start after the T-027 fix agent merges (both edit crates/hk-pipeline)"
     deps: [T-027]
     parallel_group: J
     use_cases: [SPACE-050, AWARE-042, AWARE-036, SIGNAL-062, SIGNAL-001]
@@ -593,7 +596,12 @@ tasks:
     note: "follow-ups from T-027 (merged 2026-09-13 under the timebox rule)"
   - id: T-038
     title: Attack-map precision follow-ups (steady OFDM false floor-rise anomaly, partial-band extent, letters-only identity tags)
-    status: in-progress
+    status: done
+    commit: "51c23f1 (merged 86b39a5)"
+    note: "Structured vs NoiseLike via inter-bin power-change anticorrelation (bins 3-8 apart), SK upper tol 1.35, median excess; confusion matrix noise jammers 12/12 NoiseLike, OFDM 18/18 Structured (6/10/15 dB). Per-bin extent refinement: worst 0.3 % of bandwidth (800 kHz jammer was 375 kHz). Withheld emitters accept/show only TAG_VOCABULARY tags (class-dependent refusal, no oracle). Post-merge legal review: MERGE-OK (no leak); hardening nits -> T-040."
+    followups:
+      - "wideband single-carrier PSK/QAM and dense-QAM OFDM can still read NoiseLike; slow noise-FM (20 kHz mod) reads Structured at >=10 dB; needs IQ-level (cyclostationary/CP) evidence on the dwell path"
+      - "anticorrelation feature tuned on Hann window at default FFT size; weakens when FFT >> symbol length (16k bins)"
     deps: [T-036]
     parallel_group: E
     use_cases: [AWARE-006]
@@ -617,7 +625,19 @@ tasks:
     effort: medium
     core_interface: true
     dod: "AWARE-053 passes end-to-end through the pipeline; family vocabulary mapping documented; restricted-class rules unaffected (legal regression green)"
-    hold: "start after the T-027 fix agent merges (edits crates/hk-pipeline)"
+  - id: T-040
+    title: Emitter tag storage hardening (T-038 review nits)
+    status: in-progress
+    deps: [T-038]
+    parallel_group: K
+    use_cases: [AWARE-053]
+    acceptance: "remove_emitter_tag gives no signal on withheld rows; merge_emitters drops non-vocabulary tags into withheld targets; add_emitter_tag inserts on the live (merged-into) id; tags stored before a class tightens are purged (or provably unreachable by every read/export path), with sentinel tests"
+    area: crates/hk-model/src/repo (inventory.rs, cluster.rs, gating.rs)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    dod: "four nits fixed with tests; hk-model + acceptance legal regression green"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

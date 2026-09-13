@@ -187,3 +187,22 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Key numbers: 16/16 ADS-B CRC decodes; FSK symbol-rate error 0.000 %; RDS PI 1694; floor error 0.03 dB calibrated; occupancy error ≤ 0.007; restricted paging 10/10 decoded, all withheld, 0 leaks (control run shows content).
   - Gaps found: short lossless replays miss coverage chains, pilot frequency not stored, payload hex case → T-037. Pipeline emitters never get a family, so priors can't classify them (AWARE-053 classifies manually) → new T-039, held behind the T-027 fix.
   - SPACE-050 applies calibration after the run until the pipeline loads calibration (T-037).
+- **B0.101 T-038 merged** (51c23f1 → 86b39a5).
+  - **Attack map, jammer vs structured emitter:** a noise-floor rise is now classed Structured rather than NoiseLike when power changes in bins 3–8 apart are anticorrelated from frame to frame. Test results: noise jammers 12/12 NoiseLike (broadband, 800 kHz partial, noise-FM), OFDM 18/18 Structured, at 6/10/15 dB. A normal OFDM emitter therefore no longer opens a jamming Anomaly.
+  - **Episode extent:** refined per bin; worst error 0.3 % of bandwidth.
+  - **Legal:** emitters with withheld identity accept and show only `TAG_VOCABULARY` tags. The refusal depends on the class, not the value.
+  - **Known limits → T-038 followups:** wideband single-carrier, dense QAM, and FFT sizes much longer than the symbol need IQ-level evidence.
+  - **Review:** a timeboxed post-merge legal review of the tag gating is running.
+- **B0.102 T-038 legal review: MERGE-OK.** No leak found; checked case/Unicode tags, batch and plugin ingest, context sightings, class tightening, tag-filter oracle, vocabulary. Four hardening nits become T-040, launched now (hk-model only; no collision with the T-027 fix):
+  - `remove_emitter_tag` answers existence ungated;
+  - `merge_emitters` copies free-text tags into withheld targets;
+  - `add_emitter_tag` inserts on the pre-merge id;
+  - stale tags persist after a class tightens.
+- **B0.103 T-027 fix round complete.** Commits c995517 + 67f8843, previewed with no conflicts against main; merging after the B0.101 verification run.
+  - **Deadlock fixed:** gate claims are clamped to the ring's oldest sample.
+  - **Restricted bands:** paging and cellular classes are derived from frequency under 47 CFR 22.531/90.494/24.129/22.905/24.229/27.5 (edges checked on Cornell LII eCFR) and override classify rules. Fail-closed: a window overlapping a band is restricted as a whole.
+  - **Lossless replay:** off by default, and refused for non-pausable sources.
+  - **Detection writes:** retried, with links deferred until the detections are stored.
+  - **Acceptance:** new untagged 930.5 MHz paging case; 12/12 pass.
+  - **Follow-ups:** per-channel restriction instead of whole-window; ESMR/FirstNet/CBRS edges unverified.
+  - **Next:** T-037 and T-039 holds released; they launch after the merge.
