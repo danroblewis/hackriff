@@ -2,6 +2,12 @@
 //! inspector, C39) and the stream-output contract that delivers bits, symbols and decodes to
 //! external programs with framing, backpressure and `content_class` gating (C24, ADR-0004).
 //! Core interface: changes are reviewed before merge.
+//!
+//! - [`stream`]: re-export of the `hk-stream` crate, the versioned stream-output contract
+//!   (`docs/stream-contract.md`). It lives in its own crate so `hk-plugins` can use it without
+//!   depending on `hk-api`.
+
+pub use hk_stream as stream;
 
 #[cfg(test)]
 mod tests {
