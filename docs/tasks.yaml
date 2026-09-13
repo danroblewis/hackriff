@@ -230,7 +230,7 @@ tasks:
   - id: T-015
     title: readsb ADS-B plugin wrapper + fixture
     status: in-progress
-    review: "implemented 9f8439c (Sonnet; branch worktree-agent-abb02cd778b5d1e7f): hk-plugin-readsb adapter bin (hackriff-v1 framing, ci8->uc8, readsb --raw --no-fix, CRC-24 recheck, DF17/DF11 parse) + emitter-upsert hook in hk-plugins ingest. Touches core plugin contract -> Opus review running before merge (legal: hook must run on sanitized decode)"
+    review: "Opus review FIX-BEFORE-MERGE (legal clean: emitter hook builds from sanitized row; restricted probe created no emitters). Must-fix: readsb crashes/wedge exits counted as clean + no idle death detection; CPR even/odd pairing without time window (wrong positions) + velocity subtype 2 scaling; rebase onto egress enforcement 97a436c (store_decode signature, hook after self.store from &row). Sonnet implementer applying fixes; coordinator checks ingest hunk before merge"
     deps: [T-014, T-025]
     parallel_group: H
     use_cases: [SIGNAL-001]
@@ -273,7 +273,7 @@ tasks:
   - id: T-018
     title: signal-inventory writes + emitter clustering (read/query)
     status: todo
-    followups_from_T-002_review: "emitter fingerprint lookup/update API, merge state (merged_into), supersedable emitter_link, idempotent count on replay, classification input ref + feature-set version"
+    followups_from_T-002_review: "emitter fingerprint lookup/update API, merge state (merged_into), supersedable emitter_link, idempotent count on replay, classification input ref + feature-set version; from T-015 review: Emitter rows carry no content_class (restricted identity loses its class in inventory -> inventory API/export must re-gate); count not idempotent on replay (DF11 included); ctx.emitter_ref ignored (identity emitter separate from detection emitter); IdentityConflict only counted"
     deps: [T-002, T-007]
     parallel_group: E
     use_cases: [AWARE-036, SIGNAL-001, SIGNAL-062, AWARE-053]
@@ -406,6 +406,7 @@ tasks:
     needs: none
     model: opus
     effort: high
+    followups_from_T-015_review: "two SQLite write txns per decode under the ingest lock can back up readsb to a stall kill at busy sites (batch); readsb idle keepalive; plugin decode sample_index late by ~readsb block + pipe buffering (~40 ms)"
     note: "added by coordinator 2026-09-13: M0 DoD needs a runnable survey on the device and T-024's e2e tests need a composed pipeline; no existing task owned the composition"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
