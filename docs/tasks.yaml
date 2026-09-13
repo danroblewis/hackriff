@@ -9,10 +9,16 @@ spikes:
   run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
   need_jetson: [S2, S6]
   optional: [S7]
+  status:
+    S1: "done 2026-09-13 (merged 9c68a17): owned Rust dataflow PASS (attach <=0.81 ms, zero ring loss, raised-priority capture thread required); FutureSDR 0.8.0 FAIL (no in-graph mutation, attach up to 13 ms, source stalls, nightly-only). ADR-0001 -> owned dataflow; S2 still gates on Jetson"
+    S3: "mac-pass 2026-09-13 (60 fps @16384 bins, GPU persistence, 5-8x headroom; merged aa09a9e); Jetson kiosk + phone checks pending (needs user/hardware)"
+    S4: in-progress
+    S5: in-progress
 tasks:
   - id: T-001
     title: Repo scaffold, Cargo workspace, justfile, CI skeleton (no hardware)
-    status: in-progress
+    status: done
+    commit: 4c16e27 (merged to main)
     override: "effort medium->high; scope also seeds hk-model ids/Provenance/SigMF types so T-002/T-003/T-023 can run in parallel (coordinator, 2026-09-13)"
     deps: []
     parallel_group: A
@@ -25,7 +31,8 @@ tasks:
     dod: workspace builds on macOS (CPU path); CI runs cargo test + python tooling test; README build/run commands work
   - id: T-002
     title: Data-model types + SQLite repository (docs/07)
-    status: todo
+    status: in-progress
+    review: "implemented 3d6ba9f (branch worktree-agent-af2b1979e1fd620ba); Opus core-interface review in progress before merge"
     deps: [T-001]
     parallel_group: B
     core_interface: true
@@ -38,7 +45,9 @@ tasks:
     dod: schema + repository with tests for Emitter upsert, Detection insert, region/time query; provenance chain resolvable
   - id: T-003
     title: source-abstraction + SigMF file-replay source + RAM ring buffer
-    status: todo
+    status: done
+    commit: "8386cbb (merged 76ff126)"
+    review: "merged on green tests to unblock T-004; Opus concurrency review of the seqlock ring running post-merge, fixes go forward"
     deps: [T-001]
     parallel_group: B
     use_cases: [SPACE-050]
@@ -50,7 +59,7 @@ tasks:
     dod: file-replay source feeds frames with provenance; ring buffer with pre-trigger read; HackRF source stubbed behind same trait
   - id: T-023
     title: Synthetic IQ generator + end-to-end replay harness
-    status: todo
+    status: in-progress
     deps: [T-001]
     parallel_group: B
     use_cases: [AWARE-036, AWARE-006, SPACE-050, AWARE-042]
@@ -62,7 +71,7 @@ tasks:
     dod: generator produces SigMF with ground-truth annotations; harness replays and exposes pipeline outputs to assertions
   - id: T-004
     title: spectral-estimation (Welch PSD, STFT, persistence, spectral kurtosis)
-    status: todo
+    status: in-progress
     deps: [T-003]
     parallel_group: C
     use_cases: [SPACE-050, AWARE-042]
@@ -189,6 +198,7 @@ tasks:
   - id: T-014
     title: plugin host + manifest + IPC (ADR-0003)
     status: todo
+    override: "combined with T-016 into one Opus-high agent: ADR-0004 framing serves both plugin IPC and external egress, so one owner avoids two codecs (coordinator, 2026-09-13)"
     deps: [T-002]
     parallel_group: D
     core_interface: true
@@ -296,6 +306,7 @@ tasks:
     model: sonnet
     effort: medium
     gated_on: S3
+    gate_note: "S3 passed on Mac; proceed on web UI; confirm fps on Jetson/phone when hardware is available"
     dod: browser app consumes the API; waterfall + table + history view; fps target met or native-shell fallback invoked
   - id: T-024
     title: Wire the 7 slice acceptance tests (docs/11 1.1) in CI

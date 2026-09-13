@@ -1,0 +1,19 @@
+[package]
+name = "s3-frame-server"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Spike S3: synthetic SpectrumFrame generator served over WebSocket (throwaway)"
+
+# Empty workspace table: never join the root hackriff workspace.
+[workspace]
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+debug = false
