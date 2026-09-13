@@ -1,0 +1,6 @@
+# SigMF sample data goes through Git LFS (policy: fixtures/README.md).
+fixtures/**/*.sigmf-data filter=lfs diff=lfs merge=lfs -text
+
+# Append-only tables: parallel branches that each add rows merge without conflicts.
+docs/adr/0010-language-and-licence-ledger.md merge=union
+docs/planning-log.md merge=union

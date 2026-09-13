@@ -1,0 +1,12 @@
+[package]
+name = "hk-estimate"
+description = "hackriff signal parameter estimation and blind symbol estimation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hk-core.workspace = true
+hk-dsp.workspace = true
+hk-model.workspace = true

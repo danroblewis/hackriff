@@ -1,0 +1,10 @@
+[package]
+name = "hk-store"
+description = "hackriff spectrum-history pyramid, SigMF recording and retention policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hk-model.workspace = true

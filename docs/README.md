@@ -20,6 +20,7 @@ _Research completed 2026-09-13. Items the agents could not confirm are marked **
 | 10 | [Test strategy](10-test-strategy.md) | — | **Planning (Phase 5).** Six test tiers (unit→field), the `test_tier` rubric filled into the YAML, SigMF fixtures and sources with licence checks, use-case-ID→test mapping, and CI-without-hardware vs field-only. |
 | 11 | [Roadmap & first slice](11-roadmap.md) | — | **Planning (Phase 6).** The first vertical slice M0 (7 use case IDs across science/attack-map/unknown/known-decoder) with acceptance tests, and milestones M1–M7 ordered by shared-core coverage. |
 | 12 | [Implementation plan](12-implementation-plan.md) + [tasks.yaml](tasks.yaml) | — | **Planning (Phase 7).** Spike order, repo scaffold, dev env + CI, fixture capture plan, the 25-task M0 breakdown (state in `tasks.yaml`), and the hardware shopping list with timing. |
+| — | [SigMF extension](sigmf-extension.md) | — | **Engineering (T-001).** The `hackriff` SigMF namespace: `hackriff:provenance` on global/captures and `hackriff:truth` on annotations, used by recordings and test fixtures. |
 | — | [use-cases.yaml](use-cases.yaml) | — | Machine-readable copy of 05 and the source of truth for use-case IDs (`SPACE-`, `PROP-`, `AWARE-`, `SIGNAL-`, `RESEARCH-`). Architecture planning fills in `capabilities`, `hardware_fit` and `test_tier`. |
 
 ## Findings across the four documents

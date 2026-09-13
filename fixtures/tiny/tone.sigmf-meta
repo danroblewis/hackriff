@@ -1,0 +1,55 @@
+{
+  "global": {
+    "core:datatype": "ci8",
+    "core:version": "1.2.0",
+    "core:sample_rate": 100000.0,
+    "core:description": "hackriff tiny fixture: noiseless CW tone at +10 kHz (T-001 smoke test)",
+    "core:author": "hackriff",
+    "core:recorder": "hkpy fixtures/tiny/make_tone.py",
+    "core:extensions": [
+      {
+        "name": "hackriff",
+        "version": "0.1.0",
+        "optional": true
+      }
+    ],
+    "hackriff:provenance": {
+      "device_id": "synthetic:hkpy",
+      "tune": {
+        "center_hz": 100000000.0,
+        "sample_rate_hz": 100000.0,
+        "lna_db": 0.0,
+        "vga_db": 0.0,
+        "amp_on": false,
+        "bandwidth_hz": 100000.0
+      },
+      "clip_count": 0,
+      "overload": false,
+      "clock_source": "internal",
+      "clock_locked": true,
+      "timestamp_method": "synthetic",
+      "timestamp_error_budget_ns": 0
+    }
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 100000000.0,
+      "core:datetime": "2026-09-13T00:00:00Z"
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 4096,
+      "core:freq_lower_edge": 100010000.0,
+      "core:freq_upper_edge": 100010000.0,
+      "core:label": "tone",
+      "hackriff:truth": {
+        "kind": "cw",
+        "frequency_hz": 100010000.0,
+        "amplitude_counts": 100
+      }
+    }
+  ]
+}

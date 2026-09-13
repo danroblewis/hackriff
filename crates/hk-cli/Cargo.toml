@@ -1,0 +1,14 @@
+[package]
+name = "hk-cli"
+description = "hackriff binaries: hackriffd (daemon) and hk (control CLI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+hk-api.workspace = true
+hk-core.workspace = true
+hk-model.workspace = true

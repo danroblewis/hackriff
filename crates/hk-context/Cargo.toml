@@ -1,0 +1,10 @@
+[package]
+name = "hk-context"
+description = "hackriff external-feed cache, priors lookup and event correlation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hk-model.workspace = true
