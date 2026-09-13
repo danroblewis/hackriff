@@ -102,6 +102,7 @@ tasks:
   - id: T-006
     title: CFAR detection + burst records
     status: in-progress
+    review: "implemented 6891727 (+ merge e816cab), lint/tests green; Opus core-interface review running before merge (threshold equivalence, component state machine, notch false alarms with PerFrame, 915 MHz outside-truth detections, 434 MHz clock-harmonic line)"
     s4_inputs: "block FCME (256/hop 64, Pfa 1e-3 Gamma(n)) per-frame floor; OS-CFAR N=32 G=4 k=24 OR floor branch; on Pfa 1e-6 / off Pfa 1e-3 (never fixed -3 dB); min 3 frames before gap-merge (2); impulsive-frame gate; emitter confirmation by repeat or >=1 s integration; real-scene FA is a monitored metric, synthetic/terminated FA is the CI gate"
     followups_from_T-002_review: "detection region query is f-bounded only (add R*Tree on f_lo,f_hi,t_start,t_end or time-bucketing); populate detector_version, peak_level_dbfs, clip_count; overload->clipped enforced by repo"
     deps: [T-005]
