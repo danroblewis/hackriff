@@ -1,0 +1,231 @@
+{
+  "global": {
+    "core:datatype": "ci8",
+    "core:sample_rate": 2400000.0,
+    "core:version": "1.2.0",
+    "core:hw": "HackRF One (board rev older than r6), firmware 2026.01.3, libhackrf 0.9.2",
+    "core:recorder": "hackrf_transfer 2026.01.3; trimmed by py/fixtures/build_2026_09_13.py",
+    "core:author": "hackriff coordinator (receive-only)",
+    "core:description": "hackriff fixture fm_100p8M_2p4M_l32g30a1_t1p5_5s: FM 101.3 MHz (+500 kHz) with 19 kHz pilot and RDS; 100.000 MHz reference-harmonic spur. Serves SIGNAL-062. Window 1.5 s + 5.0 s of store capture fm_100p8M_2p4M_l32g30a1 (HackRF One, 100.8 MHz, 2.4 Msps, LNA 32 / VGA 30 / amp on, antenna unknown (as attached by user; not changed)). Receive-only; truth is PHY metadata only.",
+    "core:license": "project-owned capture",
+    "hackriff:provenance": {
+      "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+      "tune": {
+        "center_hz": 100800000.0,
+        "sample_rate_hz": 2400000.0,
+        "lna_db": 32.0,
+        "vga_db": 30.0,
+        "amp_on": true,
+        "bandwidth_hz": 1750000.0
+      },
+      "overload": false,
+      "quantisation_limited": false,
+      "clock_source": "internal",
+      "clock_locked": true,
+      "timestamp_method": "host-arrival",
+      "timestamp_error_budget_ns": 500000000
+    },
+    "hackriff:antenna": "unknown (as attached by user; not changed)",
+    "core:extensions": [
+      {
+        "name": "hackriff",
+        "version": "0.1.0",
+        "optional": true
+      }
+    ]
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 100800000.0,
+      "core:datetime": "2026-09-13T11:10:22.378252Z",
+      "core:global_index": 3600000,
+      "hackriff:clip_count": 0
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:label": "capture",
+      "hackriff:truth": {
+        "role": "scenario",
+        "kind": "capture",
+        "recording": "fm_100p8M_2p4M_l32g30a1_t1p5_5s",
+        "use_cases": [
+          "SIGNAL-062"
+        ],
+        "generator": "py/fixtures/build_2026_09_13.py",
+        "source": {
+          "capture": "fm_100p8M_2p4M_l32g30a1",
+          "path": "store/2026-09-13/fm_100p8M_2p4M_l32g30a1.sigmf-data",
+          "sha256": "94f598394e05e92c9f67921096f9e29575ab56611dee174fedcf70e48067accd",
+          "sample_start": 3600000,
+          "sample_count": 12000000,
+          "start_s": 1.5,
+          "datetime": "2026-09-13T11:10:20.878252+00:00"
+        },
+        "datatype": "ci8",
+        "sample_rate_hz": 2400000.0,
+        "n_samples": 12000000,
+        "duration_s": 5.0,
+        "dbfs_reference": "full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
+        "calibration": "uncalibrated (no dBm): antenna unknown, as attached by the user",
+        "clip_count": 0,
+        "clip_fraction": 0.0,
+        "overload": false,
+        "overload_rule": "clip_fraction > 0.0001 (component at -128 or 127)",
+        "quantisation_limited": false,
+        "quantisation_noise_dbfs_per_hz": -113.65969934007163,
+        "clock": {
+          "source": "internal",
+          "ppm_measured": -6.8,
+          "method": "19 kHz FM pilot, fm_100p8M_2p4M_l32g30a1 (spike S5)",
+          "lo_offset_at_tuner_hz": -685.4399999999999
+        },
+        "legal": "Receive-only capture. Truth is PHY/metadata only; no third-party payload content is decoded or stored (CLAUDE.md legal guardrails).",
+        "clock_ppm_this_capture": -6.768012609126295,
+        "annotation_completeness": "partial: the 101.3 MHz station, the 100.000 MHz spur and DC only",
+        "truth_summary": "PI 1694; PS frames ['Unstoppa', 'ppable -', 'Sia     ', 'Star    ', 'Playing ']; BLER 0.087 (249 groups/30 s), window 44 groups BLER 0.067; pilot 18999.871 Hz; clock -6.77 ppm",
+        "t_start_s": 0.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 101199465.51268378,
+      "core:freq_upper_edge": 101399465.51268378,
+      "core:label": "FM 101.3 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "center_hz": 101299465.51268378,
+        "rf_center_hz": 101300147.72835478,
+        "channel_hz": 101300000.0,
+        "offset_hz": 499465.512683779,
+        "lo_offset_hz": -682.2156709999306,
+        "bandwidth_hz": 200000.0,
+        "snr_db": 18.35574640615372,
+        "snr_definition": "(P in +-100 kHz - N0*B)/(N0*B), N0 = median PSD bin of the window",
+        "carrier_offset_from_channel_hz": -534.4873162209988,
+        "stereo": true,
+        "pilot": {
+          "present": true,
+          "frequency_hz": 18999.87113273698,
+          "deviation_hz": 7352.905160288946
+        },
+        "rds": {
+          "pi_hex": "1694",
+          "pi": 5780,
+          "ps": "Unstoppa",
+          "ps_dynamic": true,
+          "ps_frames": {
+            "Unstoppa": 2,
+            "ppable -": 1,
+            "Sia     ": 1,
+            "Star    ": 1,
+            "Playing ": 1
+          },
+          "ps_frames_window": {
+            "Unstoppa": 2
+          },
+          "ps_frame_log_window": [
+            {
+              "t_s": 0.3258706312661237,
+              "ps": "Unstoppa"
+            },
+            {
+              "t_s": 3.1284159552843023,
+              "ps": "Unstoppa"
+            }
+          ],
+          "pty": 7,
+          "tp": false,
+          "group_types": {
+            "0A": 62,
+            "12A": 14,
+            "2A": 170,
+            "3A": 3
+          },
+          "group_types_window": {
+            "0A": 11,
+            "12A": 2,
+            "2A": 31
+          },
+          "bitrate_bd": 1187.5,
+          "bitrate_bd_in_sample_clock": 1187.4919629850267,
+          "subcarrier_hz": 57000.0,
+          "decode_full_capture": {
+            "groups_decoded": 249,
+            "groups_on_lattice": 341,
+            "blocks_on_lattice": 1364,
+            "blocks_ok": 1246,
+            "block_error_rate": 0.0865102639296188,
+            "duration_s": 30.0
+          },
+          "decode_window": {
+            "groups_decoded": 44,
+            "groups_on_lattice": 56,
+            "blocks_on_lattice": 224,
+            "blocks_ok": 209,
+            "block_error_rate": 0.0669642857142857,
+            "first_valid_group_s": 0.06315867380608609
+          },
+          "block_error_rate_definition": "fraction of 26-bit blocks with a wrong offset-word syndrome on the group lattice between the first and last CRC-valid group, re-anchored on each valid group",
+          "decoder": "py/fixtures/rds_ref.py (promoted T-023 reference decoder)",
+          "note": "PS scrolls (dynamic PS, song/artist text): assert PI; PS frames are a set, not one string"
+        },
+        "identity": {
+          "type": "rds_pi",
+          "value": "1694"
+        },
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 99995000.0,
+      "core:freq_upper_edge": 100005000.0,
+      "core:label": "spur 100.000 MHz",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "spur",
+        "reason": "ref_harmonic",
+        "center_hz": 99999609.375,
+        "offset_hz": -800390.625,
+        "harmonic_n": 10,
+        "spur_step_hz": 10000000.0,
+        "tuner_center_hz": 100800000.0,
+        "power_dbfs": -42.612137435127025,
+        "peak_over_floor_db": 14.688888983817709,
+        "note": "internal 10 MHz reference harmonic; stays at absolute frequency on retune (S4)",
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 12000000,
+      "core:freq_lower_edge": 100795000.0,
+      "core:freq_upper_edge": 100805000.0,
+      "core:label": "DC",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "dc-offset",
+        "reason": "dc",
+        "center_hz": 100800000.0,
+        "offset_hz": 0.0,
+        "i_offset": 0.004327767946588712,
+        "q_offset": -0.01827245246706985,
+        "i_offset_codes": 0.5496265292167664,
+        "q_offset_codes": -2.320601463317871,
+        "power_dbfs": -34.52702795522362,
+        "t_start_s": 0.0,
+        "duration_s": 5.0
+      }
+    }
+  ]
+}
