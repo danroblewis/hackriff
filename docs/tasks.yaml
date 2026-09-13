@@ -444,7 +444,9 @@ tasks:
     note: "follow-up from T-006 re-probe (2026-09-13): a notch below bin 1200 with a second down-step at 3200 read as a plateau -> 23 phantoms (21 confirmed); OS-only in guarded zone misses flat signals wider than ~16 bins (41-bin +15 dB: 0 records; 300-bin: 84.5 % -> 0.2 %). Must land before FM notch / filter-bank field use"
   - id: T-029
     title: Floor-tracker follow-ups after T-005 merge (items listed in the T-005 final-round report)
-    status: in-progress
+    status: done
+    commit: "5641167 (merged)"
+    results: "1 fixed (Structured blocks in NoiseLike episode reported as own Extend; 0 wrongly covered bins); 2 fixed (overlapping open anomalies absorbed with Explanations copied); 3 deferred (in-place anomaly region needs mutable schema; re-insert keeps Explanations); 4 fixed (only NoiseLike rises move the slow floor; steady +6 dB wide signal within 0.5 dB); 5 documented (FM fixture startup Fall is a real recording artefact); 6 wide-reference limits documented"
     deps: [T-005]
     parallel_group: C
     use_cases: [AWARE-006, SPACE-050]
