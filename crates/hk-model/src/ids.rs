@@ -105,6 +105,8 @@ define_ids! {
     /// ExternalEvent (§2.17): a local id for references from Explanations. The event's identity
     /// is its natural key `(source, native_id)`; upserting that key keeps this id stable.
     ExternalEventId;
+    /// A user marker or bookmark (T-050): a frequency the user named. User metadata, mutable.
+    BookmarkId;
 }
 
 #[cfg(test)]

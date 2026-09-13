@@ -77,18 +77,27 @@ fn live_serve_inventory_shows_real_fm_detections() {
         first["entries"].as_array().map_or(0, Vec::len)
     );
 
-    // Live control is offered, validated, and keeps the run's content class.
+    // Live control is offered and validated; window changes re-plumb the run (T-050): into the
+    // paging band (restricted class) and back, and a rate change and back.
     let lc = live_control.expect("live control for the live radio");
+    assert_eq!(lc.set_center(500e3).unwrap_err().http_status(), 400);
     assert_eq!(
-        lc.set_center(930.5e6).unwrap_err().http_status(),
-        409,
-        "paging window refused"
+        lc.set_center(930.5e6)
+            .expect("retune into paging")
+            .center_hz,
+        930.5e6
+    );
+    let (_, state) = get(addr, "/api/status");
+    assert_eq!(
+        state["control"]["content_class"], "restricted-paging",
+        "the class follows the window"
     );
     assert_eq!(
-        lc.set_rate(10e6).unwrap_err().http_status(),
-        409,
-        "rate fixed for the run"
+        lc.set_center(100.8e6).expect("back to FM").center_hz,
+        100.8e6
     );
+    assert_eq!(lc.set_rate(10e6).expect("rate change").sample_rate_hz, 10e6);
+    assert_eq!(lc.set_rate(2.4e6).expect("rate back").sample_rate_hz, 2.4e6);
     let t = lc
         .set_gains(&[NamedGain::new("lna", 32.0), NamedGain::new("vga", 30.0)])
         .expect("named gains");

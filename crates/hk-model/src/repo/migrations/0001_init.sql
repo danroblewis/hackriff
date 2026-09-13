@@ -422,6 +422,20 @@ CREATE TABLE annotation (
 );
 CREATE INDEX idx_annotation_target ON annotation (target_kind, target_id);
 
+-- User markers and bookmarks (T-050): a named frequency (optionally a band) with a note. User
+-- metadata, never signal content; the only user-editable table (update and delete allowed).
+-- `repo/bookmarks.rs` repeats this DDL with IF NOT EXISTS for databases created before T-050.
+CREATE TABLE bookmark (
+    bookmark_id  BLOB    PRIMARY KEY CHECK (length(bookmark_id) = 16),
+    kind         TEXT    NOT NULL CHECK (kind IN ('marker', 'bookmark')),
+    name         TEXT    NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+    f_center     REAL    NOT NULL CHECK (f_center > 0),
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    body         TEXT    NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX idx_bookmark_f_center ON bookmark (f_center);
+
 -- Largest frequency span and duration ever written per region-indexed table. Region queries
 -- use them to bound index range scans: a row whose lower edge is more than one max-span below
 -- the query cannot overlap it. The values only grow, so they stay correct after deletes.

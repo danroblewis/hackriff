@@ -46,22 +46,28 @@ pub mod stats;
 mod capture;
 mod detect;
 mod history;
+mod recorder;
 mod run;
 mod spectrum;
 
 pub use chains::spec::{ChainShape, ChainSpec, NodeSpec, Trigger, builtin_chains};
 pub use class::{ClassRule, classify_emitter, source_class};
 pub use config::{
-    PipelineConfig, PipelineSettings, StreamSink, detection_resolution, load_calibrations,
-    replay_plan,
+    DISPLAY_AVERAGING_MAX, DISPLAY_FFT_MAX, DISPLAY_FFT_MIN, DISPLAY_ROWS_MAX, DISPLAY_ROWS_MIN,
+    DisplayPatch, DisplaySettings, PipelineConfig, PipelineSettings, StreamSink,
+    detection_resolution, load_calibrations, replay_plan,
 };
 pub use control::SwitchableControl;
 pub use events::Candidate;
 pub use family::{Explanation, FamilyPrior, explain_emitter, explanations};
 pub use inventory::{Inventory, TrackInventory};
+pub use recorder::{
+    RECORDING_DEFAULT_S, RECORDING_LABEL_MAX, RECORDING_MAX_BYTES, RECORDING_MAX_S, RecordingStatus,
+};
 pub use run::{
-    Pipeline, PipelineHandle, Replay, ResolutionSummary, RunSummary, SourceFactory, SourceInfo,
-    Stopper, open_replay, replay_block_len, replay_once,
+    ControlFailure, ControlStats, ControlStatus, Pipeline, PipelineController, PipelineHandle,
+    REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunSummary, SourceFactory,
+    SourceInfo, Stopper, open_replay, replay_block_len, replay_once,
 };
 pub use stats::Counters;
 

@@ -6,8 +6,12 @@
 //! - [`stream`]: re-export of the `hk-stream` crate, the versioned stream-output contract
 //!   (`docs/stream-contract.md`). It lives in its own crate so `hk-plugins` can use it without
 //!   depending on `hk-api`.
-//! - [`http`]: the HTTP server (T-022a): read-only JSON endpoints, static UI, and the WebSocket
-//!   route, all behind one bearer token ([`auth`]).
+//! - [`http`]: the HTTP server (T-022a): JSON endpoints, static UI, and the WebSocket route, all
+//!   behind one bearer token ([`auth`]).
+//! - [`control`]: the authenticated, audited, receive-only control API (T-050): centre, rate,
+//!   named gains, bias tee, display (FFT size, averaging, row rate), pause/resume, manual
+//!   recording, bookmarks.
+//! - [`live_control`]: the device-generic live control handle behind the device endpoints.
 //! - [`bridge`]: the WebSocket bridge, mapping one stream 1:1 to one browser WebSocket as a
 //!   `Locality::Remote` consumer (legal-guardrail path).
 //! - [`query`]: `/api/history` (T-017 region-over-time) and `/api/floor` (T-021 floor vs time).
@@ -20,17 +24,20 @@
 
 pub mod auth;
 pub mod bridge;
+pub mod control;
 pub mod http;
 pub mod live_control;
 pub mod query;
 
 pub use hk_stream as stream;
 
-pub use auth::Token;
+pub use auth::{Token, default_token_path};
 pub use bridge::{StreamInfo, StreamRegistry};
-pub use http::{ApiState, Server, ServerConfig};
+pub use control::{AuditLog, DisplayState, DisplayUpdate, RecordingState, RunControl, RunState};
+pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use live_control::{
-    LiveControl, LiveControlError, LiveTuning, SourceLiveControl, WindowPolicy, validate_gains,
+    LiveControl, LiveControlError, LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner,
+    validate_gains,
 };
 
 #[cfg(test)]

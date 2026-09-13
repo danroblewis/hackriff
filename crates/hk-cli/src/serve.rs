@@ -5,7 +5,8 @@
 //! ```text
 //! HackRF One (or --replay) ─► hk-pipeline (detect → track → inventory, history, spectrum)
 //!                                   └─► hk-api: /ws/spectrum/live, /api/inventory, /api/history,
-//!                                               /api/floor, /api/status, live control (T-044)
+//!                                               /api/floor, /api/status, /api/control/*,
+//!                                               /api/bookmarks (T-050)
 //! ```
 //!
 //! - **No demo data.** `/api/inventory` reads the run's own database only; a fresh data directory
@@ -14,8 +15,11 @@
 //!   `center_hz ± bandwidth_hz/2` (`hk_pipeline::spectrum`); a retune re-offers the stream with
 //!   the new header.
 //! - **Class** ([`fixture_class`] for recordings; band-derived from the window for the live
-//!   radio): a class that forbids content gates spectrum at ≤ 50 rows/s. A live retune into a
-//!   window of another class is refused.
+//!   radio): a class that forbids content gates spectrum at ≤ 50 rows/s. A live retune or rate
+//!   change into a window of another class re-plumbs the run with that class (T-050); a replayed
+//!   recording refuses device settings (409 `not_live`) and accepts display settings.
+//! - **Token** (T-050): `HK_TOKEN`, else the 0600 token file (`hk_api::default_token_path`),
+//!   printed as `http://<addr>/#token=…` at start.
 //! - Ctrl-C stops the run gracefully ([`crate::signal`]).
 
 use std::net::SocketAddr;

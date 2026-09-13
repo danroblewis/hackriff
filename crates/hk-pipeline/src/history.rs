@@ -84,7 +84,9 @@ pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> any
     }
     drop(cursor);
     let mut p = product.lock().unwrap_or_else(PoisonError::into_inner);
-    if last_end.as_unix_nanos() > 0
+    // A re-plumbed run (T-050) continues in a new segment: sealing now would make its frames late.
+    let continues = shared.continues.load(Ordering::SeqCst);
+    if !continues && last_end.as_unix_nanos() > 0
         || shared
             .counters
             .history
