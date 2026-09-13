@@ -295,6 +295,10 @@ fn plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated() 
     let mut m: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
     m["id"] = json!("readsb");
+    // A metadata policy (T-016): under a gated class the typed ICAO identity is kept (withheld from
+    // inventory output) and the decode stream republishes through this allowlist only.
+    m["output"]["identity"] = json!({ "scheme": "adsb-icao", "charset": "hex", "max_len": 6 });
+    m["output"]["frame_models"] = json!(["adsb-df17"]);
     std::fs::write(&manifest, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
     let icaos = ["a1b2c0", "a1b2c1", "a1b2c2", "a1b2c3"];
     let run_at = |center: f64, dir: &Path| {

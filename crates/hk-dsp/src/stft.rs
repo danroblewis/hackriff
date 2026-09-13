@@ -18,17 +18,32 @@
 //! [`SpectrumFrame::discontinuity`] carries the reasons and [`SpectrumFrame::dropped_samples`]
 //! the loss.
 //!
-//! **Real-time path:** `push` allocates nothing once the first frame exists (tested under a
-//! counting allocator); per-segment work is window + FFT + O(bins) accumulation.
+//! **Compute providers (T-041).** The per-segment rows (window → FFT → `|X|²`) come from a
+//! [`SpectralBackend`]: the CPU reference by default, or a multi-threaded CPU, Accelerate or GPU
+//! provider chosen through [`crate::compute::Compute`]. `push` stages samples, submits every
+//! complete segment as one batch, and queues an *input event* (flags, drops, provenance, reset)
+//! and a *segments event*. Rows are folded into the averages by replaying those events in order
+//! as rows arrive, so frames, timestamps and flags do not depend on the provider or on when an
+//! asynchronous provider delivers. With an asynchronous provider a frame can be emitted by a
+//! later `push` than the one that completed it; call [`StftProcessor::flush`] at the end of a
+//! stream to receive the rest.
+//!
+//! **Real-time path:** `push` allocates nothing once the first frame exists and the largest
+//! block has been seen (tested under a counting allocator, CPU reference); per-segment work is
+//! window + FFT + O(bins) accumulation.
+
+use std::collections::VecDeque;
 
 use hk_core::{BlockHeader, Discontinuity, ProvenanceHandle, ReadChunk, SampleBlock};
 use hk_model::SampleTime;
 use num_complex::{Complex, Complex32};
 
+use crate::compute::spectral::{CpuSpectral, SpectralBackend};
 use crate::fft::FftBackend;
 use crate::persistence::{Persistence, PersistenceConfig};
 use crate::spectrum::Spectrum;
-use crate::welch::{ConfigError, SegmentEngine, WelchConfig};
+use crate::welch::{Accumulators, ConfigError, WelchConfig};
+use crate::window::Window;
 
 /// A complex sample type the STFT accepts, normalised to full scale 1 on conversion.
 pub trait IqSample: Copy + Send + Sync + 'static {
@@ -202,14 +217,26 @@ pub struct StftStats {
     pub samples_dropped: u64,
 }
 
-/// The streaming STFT. See the [module docs](self).
-pub struct StftProcessor {
+/// What happened to the stream, in order; replayed as rows arrive.
+enum Event {
+    /// The start of one `push`.
+    Input {
+        time: SampleTime,
+        flags: Discontinuity,
+        dropped: u64,
+        provenance: ProvenanceHandle,
+        reset: bool,
+        rate_changed: bool,
+    },
+    /// `count` consecutive segments, the first starting at stream index `first_start`.
+    Segments { first_start: u64, count: usize },
+}
+
+/// Accumulation side: averages, frame metadata, persistence and counters, driven by events.
+struct Replay {
     config: StftConfig,
-    engine: SegmentEngine,
-    seg: Vec<Complex32>,
-    fill: usize,
-    seg_start: u64,
-    next_index: Option<u64>,
+    acc: Accumulators,
+    events: VecDeque<Event>,
     anchor: SampleTime,
     provenance: Option<ProvenanceHandle>,
     frame: Option<SpectrumFrame>,
@@ -219,149 +246,137 @@ pub struct StftProcessor {
     pending_dropped: u64,
     persistence: Option<Persistence>,
     stats: StftStats,
+    emitted: usize,
 }
 
-impl StftProcessor {
-    /// A CPU processor.
-    pub fn new(config: StftConfig) -> Result<Self, ConfigError> {
-        config.validate()?;
-        Self::build(config, SegmentEngine::new(config.welch)?)
+impl Replay {
+    fn restart_averaging(&mut self) {
+        if self.acc.count() > 0 {
+            self.stats.segments_discarded += u64::from(self.acc.count());
+        }
+        self.acc.reset();
+        self.frame_provenance_changed = false;
     }
 
-    /// A processor over a given FFT backend.
-    pub fn with_backend(config: StftConfig, fft: Box<dyn FftBackend>) -> Result<Self, ConfigError> {
-        config.validate()?;
-        Self::build(config, SegmentEngine::with_backend(config.welch, fft)?)
-    }
-
-    fn build(config: StftConfig, engine: SegmentEngine) -> Result<Self, ConfigError> {
-        let n = config.welch.fft_len;
-        Ok(Self {
-            config,
-            engine,
-            seg: vec![Complex32::default(); n],
-            fill: 0,
-            seg_start: 0,
-            next_index: None,
-            anchor: SampleTime {
-                sample_index: 0,
-                host_time: hk_model::Timestamp::UNIX_EPOCH,
-            },
-            provenance: None,
-            frame: None,
-            frame_start: 0,
-            frame_provenance_changed: false,
-            pending_flags: Discontinuity::NONE,
-            pending_dropped: 0,
-            // Real period set on the first input.
-            persistence: config.persistence.map(|p| Persistence::new(n, p, 0.0)),
-            stats: StftStats::default(),
-        })
-    }
-
-    /// Settings.
-    pub fn config(&self) -> &StftConfig {
-        &self.config
-    }
-
-    /// Counters.
-    pub fn stats(&self) -> StftStats {
-        self.stats
-    }
-
-    /// The persistence image, if configured.
-    pub fn persistence(&self) -> Option<&Persistence> {
-        self.persistence.as_ref()
-    }
-
-    /// The most recent frame, if any.
-    pub fn last_frame(&self) -> Option<&SpectrumFrame> {
-        self.frame.as_ref().filter(|_| self.stats.frames > 0)
-    }
-
-    /// Stream index of the next expected sample.
-    pub fn next_sample(&self) -> Option<u64> {
-        self.next_index
-    }
-
-    /// Feeds contiguous samples; calls `emit` for each completed frame and returns how many.
-    pub fn push<T: IqSample>(
-        &mut self,
-        info: InputInfo<'_>,
-        samples: &[T],
-        mut emit: impl FnMut(&SpectrumFrame),
-    ) -> usize {
-        self.begin_input(&info);
-        let n = self.config.welch.fft_len;
-        let overlap = self.config.welch.overlap;
-        let hop = n - overlap;
-        let first = info.time.sample_index;
-        let mut emitted = 0;
-        let mut pos = 0;
-        while pos < samples.len() {
-            if self.fill == 0 {
-                self.seg_start = first + pos as u64;
-            }
-            let take = (n - self.fill).min(samples.len() - pos);
-            for (d, &s) in self.seg[self.fill..self.fill + take]
-                .iter_mut()
-                .zip(&samples[pos..pos + take])
+    /// Applies input events at the head of the queue (no rows are owed before them).
+    fn drain_inputs(&mut self) {
+        while matches!(self.events.front(), Some(Event::Input { .. })) {
+            if let Some(Event::Input {
+                time,
+                flags,
+                dropped,
+                provenance,
+                reset,
+                rate_changed,
+            }) = self.events.pop_front()
             {
-                *d = s.to_complex32();
-            }
-            self.fill += take;
-            pos += take;
-            if self.fill == n {
-                self.process_segment(&mut emit, &mut emitted);
-                self.seg.copy_within(hop.., 0);
-                self.fill = overlap;
-                self.seg_start += hop as u64;
+                self.apply_input(time, flags, dropped, provenance, reset, rate_changed);
             }
         }
-        self.next_index = Some(first + samples.len() as u64);
-        emitted
     }
 
-    /// Convenience for owned blocks.
-    pub fn push_block(&mut self, block: &SampleBlock, emit: impl FnMut(&SpectrumFrame)) -> usize {
-        self.push(InputInfo::from(block), &block.samples, emit)
-    }
+    fn apply_input(
+        &mut self,
+        time: SampleTime,
+        flags: Discontinuity,
+        dropped: u64,
+        prov: ProvenanceHandle,
+        reset: bool,
+        rate_changed: bool,
+    ) {
+        match &self.provenance {
+            Some(old) if *old != prov => {
+                if self.acc.count() > 0 {
+                    self.frame_provenance_changed = true;
+                }
+                self.provenance = Some(prov.clone());
+            }
+            Some(_) => {}
+            None => self.provenance = Some(prov.clone()),
+        }
+        if self.frame.is_none() {
+            self.frame = Some(SpectrumFrame {
+                seq: 0,
+                t: time,
+                sample_count: 0,
+                provenance: prov.clone(),
+                provenance_changed: false,
+                discontinuity: Discontinuity::NONE,
+                dropped_samples: 0,
+                spectrum: self.acc.empty_spectrum(),
+            });
+        }
+        self.anchor = time;
+        self.pending_flags |= flags;
+        self.pending_dropped += dropped;
+        self.stats.samples_dropped += dropped;
 
-    /// Clears all state (as at creation), keeping the settings and counters.
-    pub fn reset(&mut self) {
-        self.restart_averaging();
-        self.next_index = None;
-        self.provenance = None;
-        if let Some(p) = &mut self.persistence {
-            p.clear();
+        if reset {
+            self.stats.resets += 1;
+            self.restart_averaging();
+            let only_gap = flags.bits() & !Discontinuity::GAP.bits() == 0;
+            if !only_gap {
+                if let Some(p) = &mut self.persistence {
+                    p.clear();
+                }
+            }
+        }
+        if rate_changed {
+            let fs = prov.tune.sample_rate_hz;
+            if let Some(p) = &mut self.persistence {
+                p.set_frame_period(self.config.welch.hop() as f64 / fs);
+            }
         }
     }
 
-    fn process_segment(&mut self, emit: &mut impl FnMut(&SpectrumFrame), emitted: &mut usize) {
-        if self.engine.count() == 0 {
-            self.frame_start = self.seg_start;
+    /// Folds in whole rows, replaying queued events in order.
+    fn consume_rows(&mut self, rows: &[f32], emit: &mut dyn FnMut(&SpectrumFrame)) {
+        let n = self.config.welch.fft_len;
+        let hop = self.config.welch.hop() as u64;
+        debug_assert_eq!(rows.len() % n, 0, "rows are not whole segments");
+        for row in rows.chunks_exact(n) {
+            self.drain_inputs();
+            let start = match self.events.front_mut() {
+                Some(Event::Segments { first_start, count }) => {
+                    let start = *first_start;
+                    *first_start += hop;
+                    *count -= 1;
+                    if *count == 0 {
+                        self.events.pop_front();
+                    }
+                    start
+                }
+                _ => panic!("spectral backend delivered a row with no pending segment"),
+            };
+            self.on_segment(start, row, emit);
+        }
+    }
+
+    fn on_segment(&mut self, start: u64, row: &[f32], emit: &mut dyn FnMut(&SpectrumFrame)) {
+        if self.acc.count() == 0 {
+            self.frame_start = start;
             let prov = self.provenance.as_ref().expect("input seen");
             let frame = self.frame.as_mut().expect("frame created on first input");
             if frame.provenance != *prov {
                 frame.provenance = prov.clone();
             }
         }
-        self.engine.process(&self.seg);
+        self.acc.add(row);
         self.stats.segments += 1;
         if let Some(p) = &mut self.persistence {
-            p.update(self.engine.last_power(), self.engine.per_rbw_offset_db());
+            p.update(row, self.acc.per_rbw_offset_db());
         }
-        if self.engine.count() as usize == self.config.averages {
+        if self.acc.count() as usize == self.config.averages {
             self.emit_frame(emit);
-            *emitted += 1;
+            self.emitted += 1;
         }
     }
 
-    fn emit_frame(&mut self, emit: &mut impl FnMut(&SpectrumFrame)) {
+    fn emit_frame(&mut self, emit: &mut dyn FnMut(&SpectrumFrame)) {
         let frame = self.frame.as_mut().expect("frame created on first input");
         let fs = frame.provenance.tune.sample_rate_hz;
         let fc = frame.provenance.tune.center_hz;
-        self.engine.finish_into(fs, fc, &mut frame.spectrum);
+        self.acc.finish_into(fs, fc, &mut frame.spectrum);
         frame.seq = self.stats.frames;
         frame.t = SampleTime {
             sample_index: self.frame_start,
@@ -376,19 +391,207 @@ impl StftProcessor {
         self.pending_flags = Discontinuity::NONE;
         self.pending_dropped = 0;
         self.frame_provenance_changed = false;
-        self.engine.reset();
+        self.acc.reset();
+    }
+}
+
+/// The streaming STFT. See the [module docs](self).
+pub struct StftProcessor {
+    config: StftConfig,
+    backend: Box<dyn SpectralBackend>,
+    /// Samples not yet consumed by a submitted segment, starting at stream index `staged_start`.
+    staged: Vec<Complex32>,
+    staged_start: u64,
+    next_index: Option<u64>,
+    /// Provenance as seen by the staging side (compared per input).
+    seg_provenance: Option<ProvenanceHandle>,
+    replay: Replay,
+}
+
+impl StftProcessor {
+    /// A CPU reference processor.
+    pub fn new(config: StftConfig) -> Result<Self, ConfigError> {
+        config.validate()?;
+        let window = Window::new(config.welch.window, config.welch.fft_len);
+        Self::build(config, Box::new(CpuSpectral::new(&window)))
     }
 
-    fn restart_averaging(&mut self) {
-        if self.engine.count() > 0 {
-            self.stats.segments_discarded += u64::from(self.engine.count());
+    /// A processor over a given FFT backend (rows computed one segment at a time).
+    pub fn with_backend(config: StftConfig, fft: Box<dyn FftBackend>) -> Result<Self, ConfigError> {
+        config.validate()?;
+        if fft.len() != config.welch.fft_len {
+            return Err(ConfigError::BackendLength {
+                backend: fft.len(),
+                fft_len: config.welch.fft_len,
+            });
         }
-        self.engine.reset();
-        self.fill = 0;
-        self.frame_provenance_changed = false;
+        let window = Window::new(config.welch.window, config.welch.fft_len);
+        Self::build(config, Box::new(CpuSpectral::with_fft(&window, fft)))
     }
 
-    fn begin_input(&mut self, info: &InputInfo<'_>) {
+    /// A processor over a batched spectral provider (see [`crate::compute`]). The backend
+    /// must have been built for this config's window and FFT length.
+    pub fn with_spectral(
+        config: StftConfig,
+        backend: Box<dyn SpectralBackend>,
+    ) -> Result<Self, ConfigError> {
+        config.validate()?;
+        if backend.fft_len() != config.welch.fft_len {
+            return Err(ConfigError::BackendLength {
+                backend: backend.fft_len(),
+                fft_len: config.welch.fft_len,
+            });
+        }
+        Self::build(config, backend)
+    }
+
+    fn build(config: StftConfig, backend: Box<dyn SpectralBackend>) -> Result<Self, ConfigError> {
+        let n = config.welch.fft_len;
+        let acc = Accumulators::new(config.welch)?;
+        Ok(Self {
+            config,
+            backend,
+            staged: Vec::with_capacity(2 * n),
+            staged_start: 0,
+            next_index: None,
+            seg_provenance: None,
+            replay: Replay {
+                config,
+                acc,
+                events: VecDeque::with_capacity(64),
+                anchor: SampleTime {
+                    sample_index: 0,
+                    host_time: hk_model::Timestamp::UNIX_EPOCH,
+                },
+                provenance: None,
+                frame: None,
+                frame_start: 0,
+                frame_provenance_changed: false,
+                pending_flags: Discontinuity::NONE,
+                pending_dropped: 0,
+                // Real period set on the first input.
+                persistence: config.persistence.map(|p| Persistence::new(n, p, 0.0)),
+                stats: StftStats::default(),
+                emitted: 0,
+            },
+        })
+    }
+
+    /// Settings.
+    pub fn config(&self) -> &StftConfig {
+        &self.config
+    }
+
+    /// The spectral provider's name (e.g. `cpu-rustfft`, `cpu-mt-rustfft`, `gpu-wgpu`).
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
+    }
+
+    /// Counters.
+    pub fn stats(&self) -> StftStats {
+        self.replay.stats
+    }
+
+    /// The persistence image, if configured.
+    pub fn persistence(&self) -> Option<&Persistence> {
+        self.replay.persistence.as_ref()
+    }
+
+    /// The most recent frame, if any.
+    pub fn last_frame(&self) -> Option<&SpectrumFrame> {
+        self.replay
+            .frame
+            .as_ref()
+            .filter(|_| self.replay.stats.frames > 0)
+    }
+
+    /// Stream index of the next expected sample.
+    pub fn next_sample(&self) -> Option<u64> {
+        self.next_index
+    }
+
+    /// Batches submitted to an asynchronous provider whose rows have not arrived yet.
+    pub fn in_flight(&self) -> usize {
+        self.backend.in_flight()
+    }
+
+    /// Feeds contiguous samples; calls `emit` for each completed frame and returns how many.
+    pub fn push<T: IqSample>(
+        &mut self,
+        info: InputInfo<'_>,
+        samples: &[T],
+        mut emit: impl FnMut(&SpectrumFrame),
+    ) -> usize {
+        let emit: &mut dyn FnMut(&SpectrumFrame) = &mut emit;
+        self.replay.emitted = 0;
+        let first = info.time.sample_index;
+        let event = self.begin_input(&info);
+        self.replay.events.push_back(event);
+        if self.staged.is_empty() {
+            self.staged_start = first;
+        }
+        self.staged.extend(samples.iter().map(|s| s.to_complex32()));
+        self.run_segments(emit);
+        self.replay.drain_inputs();
+        self.next_index = Some(first + samples.len() as u64);
+        self.replay.emitted
+    }
+
+    /// Convenience for owned blocks.
+    pub fn push_block(&mut self, block: &SampleBlock, emit: impl FnMut(&SpectrumFrame)) -> usize {
+        self.push(InputInfo::from(block), &block.samples, emit)
+    }
+
+    /// Waits for an asynchronous provider's in-flight rows and emits the frames they
+    /// complete. A no-op for synchronous providers. Returns frames emitted.
+    pub fn flush(&mut self, mut emit: impl FnMut(&SpectrumFrame)) -> usize {
+        let emit: &mut dyn FnMut(&SpectrumFrame) = &mut emit;
+        self.replay.emitted = 0;
+        let replay = &mut self.replay;
+        self.backend
+            .flush(&mut |rows| replay.consume_rows(rows, emit));
+        self.replay.drain_inputs();
+        self.replay.emitted
+    }
+
+    /// Clears all state (as at creation), keeping the settings and counters. Rows still in
+    /// flight on an asynchronous provider are discarded.
+    pub fn reset(&mut self) {
+        self.backend.flush(&mut |_| {});
+        self.replay.events.clear();
+        self.replay.restart_averaging();
+        self.staged.clear();
+        self.next_index = None;
+        self.seg_provenance = None;
+        self.replay.provenance = None;
+        if let Some(p) = &mut self.replay.persistence {
+            p.clear();
+        }
+    }
+
+    fn run_segments(&mut self, emit: &mut dyn FnMut(&SpectrumFrame)) {
+        let n = self.config.welch.fft_len;
+        let hop = self.config.welch.hop();
+        while self.staged.len() >= n {
+            let available = (self.staged.len() - n) / hop + 1;
+            let batch = available.min(self.backend.max_batch().max(1));
+            self.replay.events.push_back(Event::Segments {
+                first_start: self.staged_start,
+                count: batch,
+            });
+            let span = &self.staged[..(batch - 1) * hop + n];
+            let replay = &mut self.replay;
+            self.backend.submit(span, hop, batch, &mut |rows| {
+                replay.consume_rows(rows, emit)
+            });
+            self.staged.drain(..batch * hop);
+            self.staged_start += (batch * hop) as u64;
+        }
+    }
+
+    /// Staging-side view of an input: flags, losses and whether it resets. The replay side
+    /// applies the same decision when the event is reached.
+    fn begin_input(&mut self, info: &InputInfo<'_>) -> Event {
         let mut flags = info.discontinuity;
         let mut dropped = 0;
         match self.next_index {
@@ -411,55 +614,30 @@ impl StftProcessor {
         }
 
         let prov = info.provenance;
-        let rate_changed = match &self.provenance {
+        let rate_changed = match &self.seg_provenance {
             None => true,
             Some(old) if old != prov => {
                 let d = Discontinuity::between(old, prov);
                 flags |= d;
-                let rate = d.contains(Discontinuity::RATE_CHANGE);
-                self.provenance = Some(prov.clone());
-                if self.engine.count() > 0 {
-                    self.frame_provenance_changed = true;
-                }
-                rate
+                self.seg_provenance = Some(prov.clone());
+                d.contains(Discontinuity::RATE_CHANGE)
             }
             Some(_) => false,
         };
-        if self.provenance.is_none() {
-            self.provenance = Some(prov.clone());
+        if self.seg_provenance.is_none() {
+            self.seg_provenance = Some(prov.clone());
         }
-        if self.frame.is_none() {
-            self.frame = Some(SpectrumFrame {
-                seq: 0,
-                t: info.time,
-                sample_count: 0,
-                provenance: prov.clone(),
-                provenance_changed: false,
-                discontinuity: Discontinuity::NONE,
-                dropped_samples: 0,
-                spectrum: self.engine.empty_spectrum(),
-            });
+        let reset = flags.bits() & self.config.reset_on.bits() != 0;
+        if reset {
+            self.staged.clear();
         }
-        self.anchor = info.time;
-        self.pending_flags |= flags;
-        self.pending_dropped += dropped;
-        self.stats.samples_dropped += dropped;
-
-        if flags.bits() & self.config.reset_on.bits() != 0 {
-            self.stats.resets += 1;
-            self.restart_averaging();
-            let only_gap = flags.bits() & !Discontinuity::GAP.bits() == 0;
-            if !only_gap {
-                if let Some(p) = &mut self.persistence {
-                    p.clear();
-                }
-            }
-        }
-        if rate_changed {
-            let fs = prov.tune.sample_rate_hz;
-            if let Some(p) = &mut self.persistence {
-                p.set_frame_period(self.config.welch.hop() as f64 / fs);
-            }
+        Event::Input {
+            time: info.time,
+            flags,
+            dropped,
+            provenance: prov.clone(),
+            reset,
+            rate_changed,
         }
     }
 }

@@ -16,5 +16,11 @@ hk-model.workspace = true
 # T-027: `hk replay` and `hackriffd` run the composed pipeline.
 hk-pipeline.workspace = true
 hk-store.workspace = true
+# T-037a: SIGINT/SIGTERM handling for graceful shutdown (ADR-0010 ledger).
+libc.workspace = true
 num-complex.workspace = true
 serde_json.workspace = true
+
+[features]
+# T-037a: the live HackRF One source (links the system libhackrf through hk-core). Off by default.
+hackrf = ["hk-core/hackrf"]

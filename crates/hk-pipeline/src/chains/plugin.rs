@@ -186,18 +186,34 @@ fn run_inner(
     );
     header.message_schema = Some("hackriff.decode/1".into());
     header.max_frame_len = 64 * 1024;
-    let publisher = Publisher::new(
-        header.clone(),
-        PublisherConfig {
-            queue_bytes: 4 << 20,
-            ..PublisherConfig::default()
-        },
-    )?;
-    if let Some(sink) = &shared.cfg.stream_sink {
-        sink(&header, publisher.handle());
+    let config = PublisherConfig {
+        queue_bytes: 4 << 20,
+        ..PublisherConfig::default()
+    };
+    // Under a class that forbids content the decode stream republishes only through the
+    // manifest's metadata policy (T-016, schema `output.schema_id`). A manifest without one still
+    // stores its (sanitised) decodes but offers no stream: before T-037b the missing policy
+    // failed the whole chain, so no plugin ran under a restricted or metadata-only class.
+    let publisher = if class.permits_content() {
+        Some(Publisher::new(header.clone(), config)?)
+    } else if let Some(policy) = m.output.metadata_policy.clone() {
+        header.message_schema = Some(m.output.schema_id.clone());
+        Some(Publisher::with_metadata_policy(
+            header.clone(),
+            config,
+            policy,
+        )?)
+    } else {
+        None
+    };
+    if let (Some(sink), Some(p)) = (&shared.cfg.stream_sink, &publisher) {
+        sink(&header, p.handle());
     }
     let repo = Repository::open(&shared.db_path)?;
-    let ingest = Arc::new(Mutex::new(Ingest::with_republish(repo, publisher)));
+    let ingest = Arc::new(Mutex::new(match publisher {
+        Some(p) => Ingest::with_republish(repo, p),
+        None => Ingest::new(repo),
+    }));
     let input = InputStreamDesc {
         datatype: Datatype::Ci8,
         sample_rate_hz: out_rate,

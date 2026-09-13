@@ -94,6 +94,9 @@ pub struct ApiState {
     pub inventory: Option<Arc<Mutex<Repository>>>,
     /// Pipeline counters for `/api/status` (T-027): a snapshot builder, called per request.
     pub status: Option<StatusFn>,
+    /// Live front-end control (T-042, [`crate::live_control`]); `None` for replays and
+    /// scheduler-driven runs.
+    pub live_control: Option<Arc<dyn crate::live_control::LiveControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

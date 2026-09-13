@@ -1,6 +1,6 @@
 //! T-022 `/api/inventory`: the T-018 inventory query over HTTP, with identity gating intact.
 //! AWARE-042 (what was seen in a region, filtered) and SIGNAL-062 (the RDS emitter row) on the
-//! demo repository of `examples/seed_inventory.rs`.
+//! test-only repository of `tests/support/seed_inventory.rs`.
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -13,7 +13,7 @@ use hk_model::Repository;
 use serde_json::{Value, json};
 
 #[allow(dead_code)]
-#[path = "../examples/seed_inventory.rs"]
+#[path = "support/seed_inventory.rs"]
 mod seed;
 
 const AWARE_042: &str = "AWARE-042";

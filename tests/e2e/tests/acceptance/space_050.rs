@@ -4,18 +4,15 @@
 //! composed pipeline. The history reader folds every frame into the SpectrumTile pyramid and the
 //! `FloorProduct`, which answers floor-vs-time per segment.
 //!
-//! **Calibration path (T-037 not merged).** The pipeline opens its `FloorProduct` with no
-//! calibration table, so its floor is uncalibrated dBFS/Hz. The calibrated floor is therefore
-//! derived the way the T-021 tests build calibration (`hk_dsp::radiometry::
-//! synthetic_calibration_state` from the scenario's `calibration_k_db`, looked up through
-//! `PowerCalibrations::band` for the capture's gain) and applied to the pipeline's floor-vs-time
-//! steps. Both the uncalibrated (dBFS/Hz) and calibrated (dBm/Hz) floors must land within ±1 dB.
-//! When T-037 loads calibration into the pipeline, assert on the product's calibrated steps
-//! directly and drop the post-hoc lookup.
+//! **Calibrated in the pipeline (T-037a).** The scenario's calibration (`calibration_k_db` per
+//! segment and gain, as the T-021 tests build it with `hk_dsp::radiometry::
+//! synthetic_calibration_state`) is written as T-021 `CalibrationState` JSON, loaded with
+//! `hk_pipeline::load_calibrations` into `PipelineConfig::calibrations`, and pinned by the
+//! pipeline on the capture provenance of its device. The product's floor-vs-time steps are then
+//! dBm/Hz straight from the run: no post-run lookup. Calibrated floors must land within ±1 dB
+//! of truth, and so must the dBFS/Hz floor they imply.
 
-use hk_dsp::radiometry::{
-    PowerCalibrations, SyntheticCalSegment, gain_setting_of, synthetic_calibration_state,
-};
+use hk_dsp::radiometry::{SyntheticCalSegment, gain_setting_of, synthetic_calibration_state};
 use hk_e2e::{Role, SynthRequest, synth_or_skip};
 use hk_model::{FreqRange, PowerUnit, TimeRange};
 use hk_store::{RegionQuery, Resolution};
@@ -25,7 +22,8 @@ use crate::common::*;
 
 const SPACE_050: &str = "SPACE-050";
 /// hk-core normalises ci8 by 1/128, the generator's dBFS by 1/127 (see
-/// `synthetic_calibration_state`): the pipeline reads 20·log10(127/128) dB low.
+/// `synthetic_calibration_state`): the pipeline reads 20·log10(127/128) dB low, so the pipeline's
+/// calibration constant is the scenario's plus this.
 fn ci8_scale_db() -> f64 {
     20.0 * (128.0f64 / 127.0).log10()
 }
@@ -40,7 +38,43 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
     let fx = out.fixture(0).unwrap();
     let fs = fx.sample_rate;
     let dir = TempDir::new("s050");
-    let (cfg, replay) = replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
+
+    let floors = fx.with_role(Role::Floor);
+    assert_eq!(floors.len(), 6);
+    let t_start = hk_core::source::sigmf_replay::parse_sigmf_datetime(
+        fx.meta.captures[0].datetime.as_deref().unwrap(),
+    )
+    .unwrap();
+    let device_id = fx.meta.captures[0]
+        .provenance
+        .as_ref()
+        .expect("capture provenance")
+        .device_id
+        .clone();
+    let segments: Vec<SyntheticCalSegment> = floors
+        .iter()
+        .map(|seg| {
+            let cap = fx.capture_at(seg.sample_start).unwrap();
+            let prov = cap.provenance.as_ref().expect("capture provenance");
+            assert_eq!(prov.device_id, device_id, "one device");
+            SyntheticCalSegment {
+                band: FreqRange::centered(cap.frequency.unwrap(), fs),
+                gain: gain_setting_of(prov),
+                k_db: seg.expect_f64("calibration_k_db") + ci8_scale_db(),
+            }
+        })
+        .collect();
+    let state = synthetic_calibration_state(&device_id, &segments, 0.1, t_start);
+    let cal_path = dir.0.join("calibration.json");
+    std::fs::write(&cal_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+
+    let (mut cfg, replay) = replay_config(
+        &dir.0.join("run"),
+        &fx.meta_path,
+        json!({}),
+        hk_core::Pacing::Unpaced,
+    );
+    cfg.calibrations = hk_pipeline::load_calibrations(&cal_path).unwrap();
     let handle = start(cfg, replay);
     let product = handle.floor_product();
     let s = finish(handle);
@@ -50,27 +84,12 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
         "[{SPACE_050}] no SpectrumTiles written"
     );
 
-    let floors = fx.with_role(Role::Floor);
-    assert_eq!(floors.len(), 6);
-    let t_start = hk_core::source::sigmf_replay::parse_sigmf_datetime(
-        fx.meta.captures[0].datetime.as_deref().unwrap(),
-    )
-    .unwrap();
-    let segments: Vec<SyntheticCalSegment> = floors
-        .iter()
-        .map(|seg| {
-            let cap = fx.capture_at(seg.sample_start).unwrap();
-            SyntheticCalSegment {
-                band: FreqRange::centered(cap.frequency.unwrap(), fs),
-                gain: gain_setting_of(cap.provenance.as_ref().expect("capture provenance")),
-                k_db: seg.expect_f64("calibration_k_db"),
-            }
-        })
-        .collect();
-    let state = synthetic_calibration_state("synthetic:t-024", &segments, 0.1, t_start);
-    let cals = PowerCalibrations::from_states([&state], None);
-
     let p = product.lock().unwrap();
+    assert!(
+        p.stats().calibrated_frames > 0 && p.stats().uncalibrated_frames == 0,
+        "[{SPACE_050}] every frame calibrated in the pipeline: {:?}",
+        p.stats()
+    );
     let (mut worst_fs, mut worst_m) = (0.0f64, 0.0f64);
     for (i, seg) in floors.iter().enumerate() {
         let cap = fx.capture_at(seg.sample_start).unwrap();
@@ -84,9 +103,9 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
         let want_fs = seg.expect_f64("expected_floor_dbfs") - 10.0 * seg.bandwidth_hz().log10();
         let want_dbm = want_fs + k;
 
-        // Folded into SpectrumTiles: the pyramid has observed cells over the segment.
+        // Folded into calibrated SpectrumTiles: the dBm pyramid has observed cells.
         let tiles = p
-            .uncalibrated_pyramid()
+            .calibrated_pyramid()
             .query(&RegionQuery {
                 freq: region,
                 time: TimeRange::new(t0, t1),
@@ -96,10 +115,10 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
         let observed_cells = tiles.cells.iter().filter(|c| c.observed()).count();
         assert!(
             observed_cells > 0,
-            "[{SPACE_050}] segment {i}: no observed tile cells"
+            "[{SPACE_050}] segment {i}: no observed calibrated tile cells"
         );
 
-        // Floor vs time.
+        // Floor vs time, calibrated by the pipeline.
         let fvt = p
             .floor_vs_time(region, t0, t1, Resolution::Level(0))
             .unwrap();
@@ -108,27 +127,23 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
             !steps.is_empty(),
             "[{SPACE_050}] segment {i}: no floor step"
         );
-        let gain = gain_setting_of(cap.provenance.as_ref().unwrap());
         for st in steps {
             assert_eq!(
                 st.unit,
-                Some(PowerUnit::Dbfs),
-                "[{SPACE_050}] the pipeline product is uncalibrated until T-037"
+                Some(PowerUnit::Dbm),
+                "[{SPACE_050}] segment {i}: the pipeline calibrates the floor"
             );
-            let got_fs = st.value_db_per_hz.expect("floor value");
-            let bc = cals
-                .band(Some(state.id), &gain, region, st.t)
-                .unwrap_or_else(|e| panic!("[{SPACE_050}] segment {i}: uncalibrated {e:?}"));
-            let got_dbm = got_fs + ci8_scale_db() + bc.k_center_db;
+            let got_dbm = st.dbm_per_hz().expect("calibrated floor value");
+            let got_fs = got_dbm - k - ci8_scale_db();
             worst_fs = worst_fs.max((got_fs - want_fs).abs());
             worst_m = worst_m.max((got_dbm - want_dbm).abs());
             assert!(
-                (got_fs - want_fs).abs() <= 1.0,
-                "[{SPACE_050}] segment {i}: {got_fs:.2} vs {want_fs:.2} dBFS/Hz"
-            );
-            assert!(
                 (got_dbm - want_dbm).abs() <= 1.0,
                 "[{SPACE_050}] segment {i}: calibrated {got_dbm:.2} vs {want_dbm:.2} dBm/Hz"
+            );
+            assert!(
+                (got_fs - want_fs).abs() <= 1.0,
+                "[{SPACE_050}] segment {i}: {got_fs:.2} vs {want_fs:.2} dBFS/Hz"
             );
         }
         eprintln!(

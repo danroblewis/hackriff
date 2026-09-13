@@ -5,6 +5,11 @@
 //! source class ([`crate::class`]): a class that forbids content gates spectrum at ≤ 50 rows/s
 //! (the publisher enforces it; withheld rows are counted). The publisher is offered to
 //! [`crate::config::StreamSink`] (the hk-api bridge registry).
+//!
+//! **Retunes** (T-037a): a stream header is sent once per connection and its `center_hz` must
+//! describe every row, so when the tuned centre changes the stream is finished and a new
+//! publisher with the new centre is offered under the same id (the registry replaces the entry;
+//! consumers reconnect and read the new header).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,18 +37,25 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
     let rc = &shared.counters.spectrum_reader;
     let sc = &shared.counters.spectrum;
     let mut publisher: Option<Publisher> = None;
+    let mut header_center: Option<f64> = None;
     let mut db = vec![0f32; bins];
     let mut bytes = vec![0u8; 4 * bins];
     loop {
         match reader.read_timeout(&mut buf, Duration::from_millis(50)) {
             ReadOutcome::Data(chunk) => {
-                if publisher.is_none() {
+                let center = chunk.provenance.tune.center_hz;
+                if header_center != Some(center) {
+                    // A retune: the old header's centre no longer describes the rows.
+                    if let Some(old) = publisher.take() {
+                        old.finish();
+                    }
+                    header_center = Some(center);
                     let header = spectrum_header(
                         &shared.cfg.spectrum_stream_id,
                         "hk-pipeline:spectrum",
                         class,
                         &plan,
-                        chunk.provenance.tune.center_hz,
+                        center,
                         shared.fs,
                     );
                     let p = Publisher::new(

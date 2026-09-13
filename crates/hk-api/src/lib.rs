@@ -21,6 +21,7 @@
 pub mod auth;
 pub mod bridge;
 pub mod http;
+pub mod live_control;
 pub mod query;
 
 pub use hk_stream as stream;
@@ -28,6 +29,9 @@ pub use hk_stream as stream;
 pub use auth::Token;
 pub use bridge::{StreamInfo, StreamRegistry};
 pub use http::{ApiState, Server, ServerConfig};
+pub use live_control::{
+    LiveControl, LiveControlError, LiveTuning, SourceLiveControl, WindowPolicy, validate_gains,
+};
 
 #[cfg(test)]
 mod tests {
