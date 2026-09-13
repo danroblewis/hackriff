@@ -271,7 +271,9 @@ tasks:
     dod: clustering by fingerprint; inventory query by region/time/status/tag
   - id: T-019
     title: known-signal-priors — band-plan table + lookup
-    status: in-progress
+    status: done
+    commit: "1b10130 (merged)"
+    followup: "15 of 40 band-plan rows marked unverified (amateur sub-bands, 23 cm, 70 cm, 433 Part 15) - verify against FCC table before relying on them for unexpected-here alarms"
     deps: [T-002]
     parallel_group: H
     use_cases: [AWARE-053]
