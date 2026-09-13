@@ -1,0 +1,38 @@
+{
+ "or_on1e-6_off1e-3_min3": {
+  "false_boxes": 0,
+  "mhz_hours": 1.3226666666666664,
+  "rate_per_mhz_h": 0.0,
+  "upper95_per_mhz_h": 2.2649185535942467
+ },
+ "or_on1e-6_off1e-3_min2": {
+  "false_boxes": 1,
+  "mhz_hours": 1.3226666666666664,
+  "rate_per_mhz_h": 0.7560483870967744,
+  "upper95_per_mhz_h": 3.586591117734812
+ },
+ "or_on1e-7_off1e-3_min2": {
+  "false_boxes": 0,
+  "mhz_hours": 1.3226666666666664,
+  "rate_per_mhz_h": 0.0,
+  "upper95_per_mhz_h": 2.2649185535942467
+ },
+ "os_only_on1e-6_off1e-3_min3": {
+  "false_boxes": 0,
+  "mhz_hours": 1.3226666666666664,
+  "rate_per_mhz_h": 0.0,
+  "upper95_per_mhz_h": 2.2649185535942467
+ },
+ "or_on1e-6_hyst3dB_min2": {
+  "false_boxes": 47,
+  "mhz_hours": 1.3226666666666664,
+  "rate_per_mhz_h": 35.53427419354839,
+  "upper95_per_mhz_h": 45.31411515822851
+ },
+ "or_on1e-4_off1e-3_min3": {
+  "false_boxes": 0,
+  "mhz_hours": 1.3226666666666664,
+  "rate_per_mhz_h": 0.0,
+  "upper95_per_mhz_h": 2.2649185535942467
+ }
+}
