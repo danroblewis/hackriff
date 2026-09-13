@@ -1073,7 +1073,7 @@ tasks:
     milestone: M0b
     title: Analog mode selector quality (pure carrier read as AM, 60 % AM tone read as unknown)
     status: done
-    commit: "4b52b1c (merge pending until the T-060 verification run finishes)"
+    commit: "4b52b1c (merged)"
     result: "rules 0.2.0 (mode.rs + mode/measure.rs): carrier line SNR and power share; envelope variation over >= +/-3.5 kHz (old filter collapsed on narrow signals so carriers read AM); in-phase vs quadrature sideband test against the carrier phase (AM detection, tone-equivalent depth, sideband/carrier ratio, minimum detectable depth reported); on/off keying for CW vs steady carrier; SSB (no carrier, varying envelope, no squared-signal line); unknown kept. Blind sweep signal_062_mode_sweep.rs 152 cases (SNR 3/10/20/30, offset+drift): before 74/152 correct 14 wrong (>=10 dB 70/114, 14 wrong; carrier AM/unknown 5/8, SSB 0/16); after 128/152, 7 wrong (>=10 dB 111/114, 2 wrong = 10 % voice AM at 10 dB read CW, below detection limit and reported). FM fixture still WFM; 27 hk-demod tests; acceptance 20/20 + 1 ignored."
     deps: [T-012]
     parallel_group: T
