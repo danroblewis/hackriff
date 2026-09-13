@@ -14,9 +14,10 @@
 //! branch fires on only 9–18 % of interior bins and the guard lets only 11–21 % through: both
 //! branches lose the interior. Use the wide-signal reference
 //! [`FloorKind::Wide`](super::FloorKind) for both the floor branch and the guard. It equals the
-//! per-frame floor wherever that is within 1.5 dB of the sliding minimum of block floors over
-//! ±16 blocks (so on noise it is unbiased and the floor-branch Pfa stays at design), and the
-//! sliding minimum elsewhere.
+//! per-frame floor except inside step-like elevated regions (a rise of more than 3.5 dB over a
+//! slope-limited envelope), where it reads the surrounding floor; both are shaped by the learned
+//! response, so tilts, baseband roll-off and notches keep the floor-branch Pfa within 1.5× design
+//! (`tests/floor_wide_reference.rs`).
 //!
 //! SNR wall ([`snr_wall_db`]): ±0.5 dB floor uncertainty → −6.4 dB; ±1 dB → −3.3 dB. (S4 §5's
 //! "near −9 dB" corresponds to ±0.25 dB.)

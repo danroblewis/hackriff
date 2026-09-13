@@ -13,6 +13,8 @@ hk-model.workspace = true
 # T-012: C13 ParameterSet / snippets feed auto-mode selection; Complex32 samples; serialisable
 # reports (serde) and Decode metadata (serde_json). All already in the ADR-0010 ledger.
 hk-estimate.workspace = true
+# T-013: gated `bits` stream for framed FSK bursts (project crate, ADR-0004 publisher).
+hk-stream.workspace = true
 num-complex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

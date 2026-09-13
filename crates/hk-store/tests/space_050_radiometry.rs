@@ -768,10 +768,9 @@ fn space_050_impulsive_duty_flags_gate_released_periods() {
     }
 }
 
-/// The frame series' slow floor under the same bursts: currently biased by T-005's gate-release
-/// re-seed (+0.2 to +1.6 dB mean in its re-review). Enable when that fix lands.
+/// The frame series' slow floor under the same bursts (T-005's re-review fix: the gate release
+/// no longer re-seeds the slow floor).
 #[test]
-#[ignore = "depends on the T-005 slow-floor gate-release fix (target mean error ≤ 0.2 dB, p95 ≤ 0.5 dB)"]
 fn space_050_series_slow_floor_under_bursts_within_half_db() {
     let dir = TempDir::new("t021-bursts-series");
     let (rig, truth) = bursty_rig(&dir);
