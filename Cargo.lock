@@ -379,7 +379,12 @@ dependencies = [
 name = "hk-plugins"
 version = "0.1.0"
 dependencies = [
+ "hk-api",
  "hk-model",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

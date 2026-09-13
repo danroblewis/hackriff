@@ -1,0 +1,31 @@
+{
+  "manifest_version": 1,
+  "id": "dummy",
+  "version": "0.1.0",
+  "licence": "LicenseRef-hackriff-undecided",
+  "description": "Test plugin (T-014): reads framed channel IQ on stdin and emits one decode per N records on stdout.",
+  "executable": "hk-dummy-plugin",
+  "args": ["--every", "{param.every}", "--datatype", "{input.datatype}"],
+  "params": { "every": "10" },
+  "input": {
+    "kind": "channel",
+    "datatype": "cf32_le",
+    "framing": "hackriff-v1",
+    "sample_rates_hz": [48000, 250000, 2400000],
+    "center_hz": { "min": 1000000, "max": 6000000000 },
+    "bandwidth_hz": { "max": 20000000 }
+  },
+  "output": {
+    "format": "ndjson",
+    "schema_id": "hackriff.dummy/1",
+    "content_class": "unrestricted"
+  },
+  "restart": { "backoff_initial_ms": 200, "backoff_max_ms": 30000, "max_restarts": 5, "window_s": 300 },
+  "limits": {
+    "input_queue_bytes": 8388608,
+    "stall_timeout_ms": 10000,
+    "max_message_bytes": 1048576,
+    "stderr_lines": 200,
+    "nice": 10
+  }
+}

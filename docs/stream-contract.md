@@ -183,9 +183,107 @@ Gating also covers persistence: the repository refuses content under a forbiddin
   - binary records as a summary plus the first 16 payload bytes in hex;
   - markers as `# dropped N records from seq S`.
 
-## 9. Plugin IPC
+## 9. Plugin IPC (T-014, ADR-0003)
 
-Added by T-014; see §9 below once present.
+Each decoder plugin instance is one subprocess supervised by `hk_plugins::PluginInstance`. The process boundary is also the licence boundary: GPL decoders are only ever run this way (ADR-0010).
+
+### 9.1 Manifest (JSON, `plugins/<id>/manifest.json`)
+
+JSON was chosen because it needs no new dependency and matches the rest of the contract. Unknown fields are errors, so a misspelt `license` is reported, not ignored.
+
+```json
+{
+  "manifest_version": 1,
+  "id": "readsb",                       // [a-z0-9._-]+
+  "version": "0.1.0",                   // wrapper version
+  "licence": "GPL-3.0-or-later",        // REQUIRED, SPDX where possible
+  "description": "…",
+  "executable": "readsb",               // bare name: PATH; with '/': relative to the manifest dir
+  "args": ["--iformat", "{param.iformat}", "--freq", "{input.center_hz}"],
+  "params": {"iformat": "SC16"},
+  "input": {
+    "kind": "iq",                        // iq | channel | audio | bits
+    "datatype": "ci16_le",               // SigMF; iq/channel complex, audio real, bits ru8
+    "framing": "raw",                    // hackriff-v1 (default) | raw
+    "sample_rates_hz": [2400000],        // empty = any
+    "center_hz": {"min": 1089e6, "max": 1091e6},
+    "bandwidth_hz": {"max": 2.4e6}
+  },
+  "output": {
+    "format": "ndjson",
+    "schema_id": "hackriff.adsb/1",
+    "content_class": "unrestricted"      // REQUIRED ceiling, enforced by the host
+  },
+  "restart": {"backoff_initial_ms": 200, "backoff_max_ms": 30000, "max_restarts": 5, "window_s": 300},
+  "limits": {"input_queue_bytes": 8388608, "stall_timeout_ms": 10000,
+             "max_message_bytes": 1048576, "stderr_lines": 200, "nice": 10}
+}
+```
+
+(Comments are for this document only; JSON has none.)
+
+**Argument placeholders:** `{input.sample_rate_hz}`, `{input.center_hz}`, `{input.bandwidth_hz}`, `{input.datatype}`, `{plugin.dir}`, `{param.<name>}`. `{{` and `}}` are literal braces. Unknown placeholders are validation errors.
+
+**`check_input`** refuses an input stream whose datatype, rate, centre or bandwidth the manifest doesn't accept.
+
+### 9.2 Data plane: stdin
+
+- **`hackriff-v1`:** the §4 header (kind `iq` for iq/channel, `audio`, or `bits`), then §5.2 binary records and §5.3 drop markers.
+  - The input header's `content_class` is the channel's class, for information only. **The data plane is not gated**: decoders must see samples to decode them. Their output is gated (§9.3–9.4).
+  - Plugin input never goes to a listener. `DecoderFeed` attaches only to a child's stdin.
+- **`raw`:** payload bytes only, with no header and no markers. This is for existing tools that read raw samples on stdin. Whole records are dropped, so element alignment is kept.
+- **Queueing:** the input queue is bounded and never blocks. `PluginInstance::push` returns `Enqueued`, `DroppedFull` or `DroppedDetached` (no process: starting, backoff or failed). The counters obey `offered = enqueued + dropped_full + dropped_detached` exactly.
+- **Hang watchdog:** if the queue stays full for `stall_timeout`, the plugin is killed (a hang), counted and restarted.
+
+### 9.3 Message plane: stdout
+
+One JSON object per line; lines longer than `max_message_bytes` are discarded and counted as malformed. stderr lines go to a bounded log ring (`PluginMonitor::log_tail`).
+
+| `type` | Fields | Stored as |
+|---|---|---|
+| `decode` | `sample_index`, `frame_model` (default `output.schema_id`), `crc_status` (`valid`/`invalid`/`no-crc`/`unknown`, default `unknown`), `identity` `{scheme, value}`, `metadata`, `content`, `content_class` | `Decode`. `decoder_id`/`version` come from the manifest; `demodulation_ref`/`recording_ref` from the plugin context. |
+| `annotation` | `value` (label, required), `kind` (`label`/`correction`/`ground-truth`), `confidence` (0–1, default 1), `metadata`, `content`, `content_class` | `Annotation`, author `decoder`. The target is the context's detection, else region, emitter or recording. |
+| `log` | `msg` | Log ring |
+
+**Class rule:**
+- A line without `content_class` gets the manifest class.
+- A line with one is clamped to the manifest class (§6 ranking), so a plugin can restrict itself further but never upgrade.
+- An unknown class string fails closed to `metadata-only`.
+- Clamped and unknown lines are counted.
+
+**Time:** the host stamps rows from the line's `sample_index`, using the input anchor and rate (`PluginInstance::set_anchor` after a retune). Plugin wall-clock times are ignored.
+
+### 9.4 Persistence and republish
+
+`hk_plugins::Ingest` (shared as `Arc<Mutex<Ingest>>`) writes rows through `hk_model::Repository`:
+- if the repository refuses content under the row's class (`RepoError::GatedContent`), the row is stored **metadata-only** and counted;
+- gated content is never persisted;
+- each stored row can be republished on a §5.1 messages stream, where §6 gates it again.
+
+### 9.5 Supervision
+
+- **Restart:** an exit is followed by a restart with exponential backoff from `backoff_initial_ms`, doubling up to `backoff_max_ms`. A run longer than `backoff_max_ms` resets the backoff.
+- **Crash loop:** more than `max_restarts` exits within `window_s` stops restarts (`PluginState::Failed`), and pushed records then count as `dropped_detached`.
+- **Crash isolation:** a crash never touches the producer. `push` has no blocking path.
+- **Shutdown** SIGKILLs the process. A pid is only killed while it is unreaped, which rules out pid reuse.
+- **Limits:** only `nice` (via `setpriority`), the queue size, message size and log ring are enforced. Memory and CPU caps are future work.
+
+### 9.6 Fit for readsb (T-015)
+
+readsb is GPL, so it will run as a subprocess against this manifest. Its model:
+- `input.kind: "iq"`, `datatype: "ci16_le"` (readsb `SC16`) or `"cu8"` (`UC8`), `framing: "raw"`, `sample_rates_hz: [2400000]`, `center_hz` around 1090 MHz;
+- readsb reads the raw samples from stdin (ifile device with `/dev/stdin`);
+- its JSON/raw output must become §9.3 `decode` lines, `identity {scheme: "adsb-icao"}`, `crc_status: "valid"`. readsb doesn't print per-message NDJSON on stdout by default, so T-015 will likely need a thin wrapper or a network-output adapter;
+- `content_class: "unrestricted"`.
+
+### 9.7 Test plugin
+
+`hk-dummy-plugin` (bin target of `hk-plugins`, manifest `plugins/dummy/manifest.json`) reads framed or raw input and emits one decode per `--every` records. Its test switches:
+- `--profile adsb-like`
+- `--crash-after K`
+- `--stall`
+- `--claim-class`, `--content`
+- `--annotate`
 
 ## 10. WebSocket mapping (browsers)
 
