@@ -6,7 +6,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 ## Current phase
 
-**Phase 4 (risks & spikes).** Phases 1–3 committed; card sync committed (b5a90fc). Architecture + 10 ADRs written (docs/08 + docs/adr/). Next: `docs/09-risks-and-spikes.md`, then Phase 5 (test strategy + test_tier), Phase 6 (roadmap), Phase 7 (implementation plan + CLAUDE.md sections).
+**Phase 5 (test strategy).** Phases 1–4 committed. docs/09 risks & spikes written (S1–S7). Next: docs/10-test-strategy.md + fill test_tier in use-cases.yaml, then Phase 6 roadmap, Phase 7 plan.
 
 ## Decisions from the user (not provisional)
 
@@ -56,3 +56,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 5. **UI direction (ADR-0002)** — you called this one of the most important decisions. I chose headless-core + web thin clients (reversible). Confirm, or say if you want a native on-device UI as the primary target.
 6. **Runtime substrate (ADR-0001)** — FutureSDR-if-it-holds vs an owned Rust dataflow. Both meet the hard requirement; the spike S1 result decides. Any preference to force one now?
 7. **Project licence (ADR-0010)** — still deliberately undecided; the architecture keeps it open. No action needed unless you want to pick early (it would let GPL code into the core and simplify some choices).
+
+### Phase 4 — risks & spikes (2026-09-13)
+- **P4.1** Seven spikes S1–S7 defined, each tied to the ADR/capability it unblocks. Recommended order **provisional**: S4 (detection in overload) + S5 (blind estimation) first — they run on the user's Mac+HackRF now and de-risk the two highest-impact unknowns and produce the first fixtures; then S1 (reconfig), S3 (web waterfall) on Mac; then S2, S6 on the Jetson; S7 optional.
+- **Needs user:** pick which spikes to run (brief checkpoint). Default = the S4/S5/S1/S3 Mac-runnable set now, Jetson spikes when hardware arrives.
