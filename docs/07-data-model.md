@@ -173,12 +173,20 @@ Links a local Anomaly to a likely cause: `explanation_id`, `anomaly_ref`, `candi
 - **Retention & size:** small; kept with the anomaly.
 - **Tests:** with a synthetic GNSS noise-floor rise + a cached gpsjam event at the same time/region, assert an Explanation of type `time-coincidence`/`geometry` with the event as top cause.
 
+### 2.20 Selection  [C39] (user region, *T-052*)
+A region the user marked and keeps acting on: `selection_id`, `name`, `f_lo`/`f_hi` (Hz, `0 <= f_lo < f_hi`), optional `t_lo`/`t_hi` (both or neither, `t_lo <= t_hi`), `notes`, `tags` (distinct), `links[]` to the actions taken on it (`kind` `demodulation` / `recording` / `bitstream` / `inspection`, `target` id or short reference, `t`, `note`), `created_at`, `updated_at`.
+- **Identity & lifecycle:** `selection_id` (UUID; a client may choose it so an offline-created selection keeps its identity when it syncs). **User metadata, mutable** like bookmarks: renamed, re-bounded, deleted; `created_at` never moves. Links are an append-only ring (oldest dropped past 256). Several selections exist at once.
+- **Relationships:** the entry point of the region-over-time query (§4) and of actions: Listen/Demodulation (T-043), Recording (T-050 manual IQ; per-selection outputs T-061), inspection (history + ranked explanations of the Emitters inside). It references those objects by id and never holds signal content itself.
+- **Retention & size:** small; never auto-deleted (the user's memory of what mattered).
+- **Storage:** `selection` table (id, name, `f_lo`, `f_hi`, `t_lo`, `t_hi`, times, JSON body) in the run database, served by `/api/selections` (`crates/hk-api/src/selections.rs`), token + audit like the control API.
+- **Tests:** repository CRUD, validation, link ring and reopen (`hk-model` `repo/selections.rs`); HTTP CRUD, restart persistence, validation and auth (`crates/hk-api/tests/selections_api.rs`); UI store sync, offline fallback and action dispatch (`ui/test/selections.test.ts`).
+
 ## 3. Storage (provisional — Phase 3 storage ADR finalises)
 
 Three stores under one per-device data directory, so the whole state is one thing to back up, export, or wipe:
 
 ### 3.1 Relational state — SQLite (candidate; DuckDB considered)
-Holds ScanPlan, Survey, Provenance, CalibrationState, SpurMask, Detection, Track, Emitter, Recording (rows, not bytes), Annotation, Demodulation, Decode, Bitstream descriptors, ExternalEvent, Anomaly, Explanation. SQLite for one-writer simplicity and ubiquity on the Jetson; DuckDB if analytic region/time scans dominate. **Provisional**; the ADR decides, and the pick is isolated behind a repository layer so it's reversible.
+Holds ScanPlan, Survey, Provenance, CalibrationState, SpurMask, Detection, Track, Emitter, Recording (rows, not bytes), Annotation, Demodulation, Decode, Bitstream descriptors, ExternalEvent, Anomaly, Explanation, and user metadata (Bookmark, Selection §2.20). SQLite for one-writer simplicity and ubiquity on the Jetson; DuckDB if analytic region/time scans dominate. **Provisional**; the ADR decides, and the pick is isolated behind a repository layer so it's reversible.
 
 ### 3.2 Spectrum history — tiled pyramid
 SpectrumTiles in a columnar store (Parquet) or a purpose-built ring of downsampled tiles, partitioned by time and frequency block, with a resolution pyramid (recent = fine, old = coarse). Fixed rolling byte budget from config. This is the object that makes "region over time" cheap and bounds disk.

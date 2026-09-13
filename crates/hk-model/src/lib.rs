@@ -91,7 +91,7 @@ pub use hash::{ContentHash, canonical_json};
 pub use ids::{
     AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, DecodeId, DemodulationId,
     DetectionId, EmitterId, ExplanationId, ExternalEventId, ProvenanceId, RecordingId, ScanPlanId,
-    SpurMaskId, SurveyId, TrackId,
+    SelectionId, SpurMaskId, SurveyId, TrackId,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
@@ -104,6 +104,8 @@ pub use recording::{
 pub use region::{FreqRange, Region, TimeRange};
 pub use repo::{
     BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterUpsert,
-    ProvenanceChain, RepoBatch, RepoError, Repository, TrustTest, TrustVerdict,
+    ProvenanceChain, RepoBatch, RepoError, Repository, SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX,
+    SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX,
+    Selection, SelectionLink, SelectionLinkKind, TrustTest, TrustVerdict,
 };
 pub use time::{SampleTime, Timestamp, TimestampMethod};
