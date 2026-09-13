@@ -443,9 +443,11 @@ fn gate_releases_on_sustained_sub_threshold_steps_and_rises_only_at_threshold() 
             o.late_flags, 0,
             "gate still locked on after a {step} dB step"
         );
+        // A confirmed rise without SK is Unverified: the slow floor stays at the baseline (T-029).
+        let want_err = if want_rises > 0 { -step } else { 0.0 };
         assert!(
-            o.inside_err_db.abs() < 0.15,
-            "slow floor stuck ({:.3} dB)",
+            (o.inside_err_db - want_err).abs() < 0.15,
+            "slow floor error {:.3} dB, want {want_err:.1} dB",
             o.inside_err_db
         );
         assert!(o.outside_err_db.abs() < 0.15);
@@ -665,8 +667,9 @@ fn aware_006_episode_rise_end_and_holdoff() {
         (520, end.confirmed_seq + holdoff),
         "a rise inside the hold-off keeps its onset and confirms when the hold-off expires"
     );
+    // Unverified (no SK): the slow floor stays at the baseline during the episode (T-029).
     assert!(
-        (during - 6.02).abs() < 0.3 && after.abs() < 0.3,
+        during.abs() < 0.3 && after.abs() < 0.3,
         "{during} / {after}"
     );
 }

@@ -408,26 +408,34 @@ fn aware_006_merge_reparents_and_split_moves_parts_with_their_explanations() {
         (r.reparented.as_slice(), r.closed.len()),
         ([b].as_slice(), 0)
     );
-    let a2 = life
+    // T-029: A's successor covers B, so B is absorbed into it (no overlapping open anomalies)
+    // and B's Explanation is copied to it.
+    let r = life
         .apply(
             &mut repo,
             &EpisodeSignal::Extended(extent(1, 2.5, 1575.0, 1577.0)),
         )
-        .unwrap()
-        .opened[0];
-    let mut open = life.open_anomalies();
-    open.sort();
-    let mut want = vec![a2, b];
-    want.sort();
-    assert_eq!(open, want);
+        .unwrap();
+    let a2 = r.opened[0];
+    assert!(r.superseded.contains(&(b, a2)), "{r:?}");
+    assert_eq!(life.open_anomalies(), [a2]);
     assert!(life.episode_parts(2).is_empty());
     assert_eq!(repo.explanations_for_anomaly(b).unwrap()[0].id, b_expl);
+    assert!(
+        repo.explanations_for_anomaly(a2)
+            .unwrap()
+            .iter()
+            .any(|e| e.supersedes == Some(b_expl)),
+        "B's explanation moves to the absorbing anomaly"
+    );
+    assert_eq!(statuses(&repo, b).last(), Some(&AnomalyStatus::Resolved));
 
     // Restart: membership survives.
     let mut life = FloorAnomalies::resume(FloorAnomalyConfig::new("dev:1"), &repo).unwrap();
-    assert_eq!(life.episode_parts(1).iter().filter(|p| p.open).count(), 2);
+    assert_eq!(life.episode_parts(1).iter().filter(|p| p.open).count(), 1);
 
-    // The bridge returned: the tracker splits B's region off as episode 3 and updates A.
+    // The bridge returned: the tracker splits B's region off as episode 3 and updates A. The
+    // parent's anomaly is clipped off the split extent at once, and episode 3 opens its own.
     let r = life
         .apply(
             &mut repo,
@@ -438,8 +446,18 @@ fn aware_006_merge_reparents_and_split_moves_parts_with_their_explanations() {
             },
         )
         .unwrap();
-    assert_eq!(r.reparented, [b]);
-    assert!(r.opened.is_empty());
+    assert!(r.reparented.is_empty());
+    assert_eq!(r.superseded.len(), 1);
+    let c = life.episode_parts(3)[0].anomaly;
+    assert_eq!(
+        repo.anomaly(c).unwrap().region.freq,
+        FreqRange::new(1576.0e6, 1577.0e6)
+    );
+    let clipped = r.superseded[0].1;
+    assert_eq!(
+        repo.anomaly(clipped).unwrap().region.freq,
+        FreqRange::new(1574.0e6, 1576.0e6)
+    );
     let r = life
         .apply(
             &mut repo,
@@ -456,18 +474,17 @@ fn aware_006_merge_reparents_and_split_moves_parts_with_their_explanations() {
         repo.anomaly(a3).unwrap().region.freq,
         FreqRange::new(1574.0e6, 1575.0e6)
     );
-    assert_eq!(life.episode_parts(3)[0].anomaly, b);
     let life2 = FloorAnomalies::resume(FloorAnomalyConfig::new("dev:1"), &repo).unwrap();
     assert_eq!(
         life2.episode_parts(3)[0].anomaly,
-        b,
+        c,
         "split membership resumes"
     );
     assert_eq!(
         life.apply(&mut repo, &closed(3, 8.0, CloseReason::Returned))
             .unwrap()
             .closed,
-        [b]
+        [c]
     );
     assert_eq!(life.open_anomalies(), [a3]);
     assert_ne!(a, a3);

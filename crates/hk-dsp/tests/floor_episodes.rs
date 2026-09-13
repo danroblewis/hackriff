@@ -337,6 +337,8 @@ fn repro2_sub_band_fall_emits_one_fall() {
 fn repro3_end_waits_until_every_block_returned() {
     let cfg = FloorConfig::default();
     let mut sim = Sim::new(4096, 4e6, cfg, 3);
+    // Noise-like (SK = 1): only a verified noise rise moves the slow floor (T-029).
+    sim.sk = true;
     sim.run(14.0, |t, p| {
         if (1.0..5.1).contains(&t) {
             scale(p, 1000..2300, 6.0);
@@ -578,6 +580,8 @@ fn repro8_slow_and_fast_full_band_ramps_are_one_episode() {
     let cfg = FloorConfig::default();
     for (k, ramp) in [10.0, 1.0].into_iter().enumerate() {
         let mut sim = Sim::new(1024, 1e6, cfg, 80 + k as u64);
+        // Noise-like (SK = 1): only a verified noise rise moves the slow floor (T-029).
+        sim.sk = true;
         sim.run(1.0 + ramp + 5.0, |t, p| {
             scale(p, 0..1024, 20.0 * ((t - 1.0) / ramp).clamp(0.0, 1.0));
             quiet()
@@ -1155,5 +1159,66 @@ fn fix2_merge_keeps_the_noise_like_episode() {
         .find(|e| e.kind == Extend && e.episode == b.episode)
         .expect("the survivor's Extend");
     eprintln!("  survivor Extend change {:?}", ext.change_bins);
-    assert!(ext.change_bins.start <= 600 && ext.change_bins.end >= 1900);
+    // T-029: the structured blocks are their own Extend run, reported Structured; the survivor's
+    // noise-like added extent is the bridge only.
+    let extends: Vec<&FloorEvent> = sim
+        .events
+        .iter()
+        .filter(|e| e.kind == Extend && e.episode == b.episode)
+        .collect();
+    let plain: Vec<_> = extends
+        .iter()
+        .filter(|e| e.class != FloorChangeClass::Structured)
+        .collect();
+    let structured: Vec<_> = extends
+        .iter()
+        .filter(|e| e.class == FloorChangeClass::Structured)
+        .collect();
+    assert!(!plain.is_empty() && !structured.is_empty(), "{extends:?}");
+    for e in &plain {
+        assert!(
+            e.change_bins.start >= 1200 - 128 && e.change_bins.end >= 1900,
+            "{AWARE_006}: noise-like Extend covers the structured region: {:?}",
+            e.change_bins
+        );
+    }
+    assert!(structured.iter().any(|e| e.change_bins.start <= 600));
+}
+
+/// T-029 (T-021 follow-up): a steady wide signal that is not verified noise-like must not move
+/// the slow floor, with SK away from 1 (Structured) or without SK (Unverified).
+#[test]
+fn t029_steady_wide_signal_does_not_lift_the_slow_floor() {
+    for (name, sk) in [("no SK", None), ("SK 0.6", Some(0.6f32))] {
+        let cfg = FloorConfig::default();
+        let mut sim = Sim::new(4096, 4e6, cfg, 290);
+        if let Some(v) = sk {
+            let mut s = vec![1.0f32; 4096];
+            s[1024..2560].fill(v);
+            sim.sk_values = Some(s);
+        }
+        sim.run(12.0, |t, p| {
+            if t >= 1.0 {
+                scale(p, 1024..2560, 6.0);
+            }
+            quiet()
+        });
+        sim.show(&format!("steady +6 dB OFDM-like 1024..2560, {name}"));
+        check_invariants(&sim, &cfg, false);
+        let rise = sim
+            .events
+            .iter()
+            .find(|e| e.kind == Rise)
+            .expect("the wide signal is reported");
+        assert_ne!(rise.class, FloorChangeClass::NoiseLike);
+        let before = sim.seq_at(0.9);
+        let mut worst = 0.0f64;
+        for seq in sim.seq_at(1.0)..sim.recs.len() as u64 {
+            for bin in [1400, 1792, 2200] {
+                worst = worst.max((sim.slow_db(seq, bin) - sim.slow_db(before, bin)).abs());
+            }
+        }
+        eprintln!("  worst slow-floor change inside the signal {worst:.2} dB");
+        assert!(worst <= 0.5, "{name}: slow floor moved {worst:.2} dB");
+    }
 }

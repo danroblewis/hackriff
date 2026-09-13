@@ -1,7 +1,8 @@
 //! AWARE-006 / T-005 third review: floor-tracker episodes through the T-020 Anomaly lifecycle.
 //! Merges, splits and widening keep the still-elevated bins covered by open anomalies
 //! (≥ 95 %), keep one open anomaly per widening rise, and keep Explanations attached to an open
-//! anomaly.
+//! anomaly. T-029: open anomalies never overlap, and a structured region merged into a
+//! noise-like episode is not covered.
 #![allow(clippy::single_range_in_vec_init)] // elevated regions are lists of ranges
 
 #[path = "../../hk-dsp/tests/common/mod.rs"]
@@ -89,6 +90,22 @@ fn run(
                 t: e.confirmed_t.host_time,
             })
             .unwrap();
+        }
+        // T-029: open anomalies never overlap, after every signal.
+        let freqs: Vec<FreqRange> = life
+            .open_anomalies()
+            .iter()
+            .map(|id| repo.anomaly(*id).unwrap().region.freq)
+            .collect();
+        for (k, a) in freqs.iter().enumerate() {
+            for b in &freqs[k + 1..] {
+                assert!(
+                    a.hi_hz.min(b.hi_hz) <= a.lo_hz.max(b.lo_hz),
+                    "{name}: open anomalies overlap after {:?} #{}: {a:?} / {b:?}",
+                    e.kind,
+                    e.episode
+                );
+            }
         }
         eprintln!(
             "  {:?} #{} {:?}{}{} bins {:?} change {:?} -> opened {} closed {} reparented {} superseded {}",
@@ -198,9 +215,14 @@ fn aware_006_structured_older_episode_merge_keeps_the_noise_like_anomaly() {
                 scale(p, 1100..2100, 6.0);
             }
         },
-        &[2000..2800],
+        // The noise-like elevation: B and the bridge beyond A (A is structured).
+        &[1200..2800],
     );
     assert!(o.coverage >= 0.95, "coverage {:.3}", o.coverage);
+    assert_eq!(
+        o.stale_bins, 0,
+        "T-029: the structured region is not covered by the noise-like anomaly"
+    );
     assert_eq!(o.unexplained_open, 0);
 }
 

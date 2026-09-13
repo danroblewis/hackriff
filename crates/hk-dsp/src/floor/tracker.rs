@@ -490,7 +490,10 @@ pub struct FloorEvent {
     pub kind: FloorEventKind,
     /// Episode id (unique per tracker; a Fall has its own).
     pub episode: u64,
-    /// Discriminator verdict of the confirmation group that opened the episode.
+    /// Discriminator verdict of the confirmation group that opened the episode. For an `Extend`
+    /// of a non-structured episode: `Structured` when the added blocks joined as a structured
+    /// group (their own run, e.g. a merged structured episode), so consumers filtering by class
+    /// never cover them; a split-off run of only such blocks is a `Structured` episode.
     pub class: FloorChangeClass,
     /// For `End`.
     pub end_reason: Option<EndReason>,

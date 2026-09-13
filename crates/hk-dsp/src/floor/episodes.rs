@@ -309,8 +309,11 @@ struct Block {
     g0: f64,
     /// Member: recent level (fast EMA).
     recent: f32,
-    /// Member of a structured group: the slow floor stays at the baseline.
+    /// Member of a group that was not noise-like: the slow floor stays at the baseline.
     hold_slow: bool,
+    /// Member that joined in a structured group: never reported as part of a non-structured
+    /// episode's added extent.
+    structured: bool,
     ret_frames: u64,
     ret_onset: Stamp,
     ret_sum: f64,
@@ -335,6 +338,7 @@ impl Block {
             g0: 0.0,
             recent: 1.0,
             hold_slow: false,
+            structured: false,
             ret_frames: 0,
             ret_onset: (0, t),
             ret_sum: 0.0,
@@ -1112,7 +1116,10 @@ impl Engine {
         on_event: &mut impl FnMut(&FloorEvent),
     ) {
         let nb = self.blocks.len();
-        let (mut runs, mut best) = (0usize, (0usize, 0usize));
+        // In a non-structured episode the id stays with a run that has non-structured blocks,
+        // and a run of only structured blocks splits off as a Structured episode.
+        let parent_structured = self.episodes[i].class == FloorChangeClass::Structured;
+        let (mut runs, mut best, mut best_key) = (0usize, (0usize, 0usize), (false, 0usize));
         let mut b = 0;
         while b < nb {
             if self.blocks[b].member != Some(i) {
@@ -1120,12 +1127,15 @@ impl Engine {
                 continue;
             }
             let s = b;
+            let mut plain = parent_structured;
             while b < nb && self.blocks[b].member == Some(i) {
+                plain |= !self.blocks[b].structured;
                 b += 1;
             }
             runs += 1;
-            if b - s > best.1 - best.0 {
+            if (plain, b - s) > best_key {
                 best = (s, b);
+                best_key = (plain, b - s);
             }
         }
         if runs < 2 {
@@ -1153,6 +1163,9 @@ impl Engine {
             child.leave_n = 0;
             child.leave_lo = usize::MAX;
             child.leave_hi = 0;
+            if !parent_structured && self.blocks[s..b].iter().all(|blk| blk.structured) {
+                child.class = FloorChangeClass::Structured;
+            }
             self.episodes[j] = child;
             for blk in &mut self.blocks[s..b] {
                 blk.member = Some(j);
@@ -1378,7 +1391,10 @@ impl Engine {
                 i
             }
         };
-        let hold = g.class == FloorChangeClass::Structured;
+        // Only a noise-like group moves the slow floor: without SK (Unverified) a steady wide
+        // signal is indistinguishable from a floor rise, so the floor stays at the baseline.
+        let hold = g.class != FloorChangeClass::NoiseLike;
+        let structured = g.class == FloorChangeClass::Structured;
         for b in range.clone() {
             let blk = &mut self.blocks[b];
             if blk.member.is_some() || blk.run.dir <= 0 {
@@ -1391,6 +1407,7 @@ impl Engine {
             blk.g0 = self.drift;
             blk.recent = if r.level_n > 0 { r.recent } else { fr.floor[b] };
             blk.hold_slow = hold;
+            blk.structured = structured;
             blk.clear_excursions(fr.ev.now.1);
             if !hold {
                 slow[b] = blk.recent;
@@ -1399,8 +1416,10 @@ impl Engine {
         self.summarize(i, fr.layout, fr.spectrum);
         if survivor.is_some() && self.episodes[i].emitted {
             // One Extend per contiguous run of added blocks (new and absorbed), so a region
-            // widening on both sides reports only what it added.
+            // widening on both sides reports only what it added. In a non-structured episode,
+            // blocks that joined structured form their own runs, reported with class Structured.
             let nb = self.blocks.len();
+            let split_structured = self.episodes[i].class != FloorChangeClass::Structured;
             let mut b = 0;
             while b < nb {
                 let added = |blk: &Block| blk.member == Some(i) && !blk.mark;
@@ -1409,8 +1428,12 @@ impl Engine {
                     continue;
                 }
                 let s = b;
+                let run_structured = split_structured && self.blocks[b].structured;
                 let mut onset = self.blocks[b].onset;
-                while b < nb && added(&self.blocks[b]) {
+                while b < nb
+                    && added(&self.blocks[b])
+                    && (split_structured && self.blocks[b].structured) == run_structured
+                {
                     if self.blocks[b].onset.0 < onset.0 {
                         onset = self.blocks[b].onset;
                     }
@@ -1418,7 +1441,7 @@ impl Engine {
                 }
                 let ep = &mut self.episodes[i];
                 ep.peak_step_db = ep.peak_step_db.max(ep.step_db);
-                let ev = ep.event(
+                let mut ev = ep.event(
                     FloorEventKind::Extend,
                     onset,
                     &fr.ev,
@@ -1427,6 +1450,9 @@ impl Engine {
                     None,
                     false,
                 );
+                if run_structured {
+                    ev.class = FloorChangeClass::Structured;
+                }
                 on_event(&ev);
                 stats.extend_events += 1;
             }

@@ -42,6 +42,14 @@
 //!   accessory change (a −20 dB notch removed or inserted) is learned within two windows
 //!   (floor-branch Pfa back within 1.5× design 1 s after the change). Signals present in most of a
 //!   window lift a learned dip the same way; it re-forms after them.
+//!
+//! **Known limits of the wide reference** (T-005 re-review #3, T-006):
+//! - Interior coverage of wide signals degrades beyond ≈ 2000 bins (4096 bins: ≥ 95 % of a
+//!   2048-bin signal; 16k FFT: 70 % of a 3072-bin and 33.5 % of a 6144-bin signal).
+//! - 0 % for signals wider than ≈ 55 % of the span, or with soft (ramped) edges.
+//! - A band-pass accessory or external LNA passband needs a calibrated response: uncalibrated,
+//!   the floor-branch Pfa is ≈ 900× design, permanently.
+//! - A signal present through most of a 0.4 s snap window lifts a learned dip until it ends.
 //! - Percentile ([`percentile`]): `q_0.2 / (P⁻¹(n, 0.2)/n)`.
 //! - Occupancy: fraction of bins above `Q⁻¹(n, 1e-2)/n · wide_floor`, less the 1 % noise
 //!   exceedance.
@@ -117,9 +125,13 @@
 //!    one before an unverified one before a structured one, then an emitted one, then the oldest;
 //!    every other ends with `End` ([`EndReason::Merged`], `merged_into`). The survivor emits one
 //!    `Extend` per contiguous run of added blocks (new and absorbed), so a merge reports bridge +
-//!    absorbed extent and a region widening on both sides reports only the two added strips. A joining block's slow floor is re-seeded
-//!    at its recent level, unless its group is `Structured` (then it stays at the baseline: the
-//!    floor under a wide signal).
+//!    absorbed extent and a region widening on both sides reports only the two added strips. In a
+//!    non-structured episode, blocks that joined as a structured group are their own runs,
+//!    reported as `Extend` with class `Structured` (so a noise-like anomaly never covers them);
+//!    a split keeps the id on a run with non-structured blocks and a run of only structured blocks
+//!    splits off as a `Structured` episode. A joining block's slow floor is re-seeded at its
+//!    recent level only when its group is `NoiseLike`; otherwise (`Structured`, or `Unverified`
+//!    without SK) it stays at the baseline: the floor under a wide signal.
 //! 3. *Falls.* A maximal run of adjacent blocks pending a fall, with a confirmable seed, is one
 //!    `Fall`. Edge blocks whose hit fraction is below `edge_hit_fraction` [0.5] of the group
 //!    median do not vote; the fall is `interrupted` when more than half of the voting blocks
@@ -137,9 +149,16 @@
 //! `Structured`; otherwise mean spectral kurtosis within 0.15 of 1 → `NoiseLike`, away from 1 →
 //! `Structured`, no SK → `Unverified`. All classes are emitted by default (`emit_structured`);
 //! consumers filter by class. Known limits: a continuous, steady, Gaussian-like wideband emission
-//! (e.g. an OFDM carrier) is indistinguishable from a noise rise, and without SK the slow floor
-//! of a steady wide signal's blocks follows it (T-021); the FM fixture shows a few edge `Fall`s
-//! in its first seconds.
+//! (e.g. an OFDM carrier with SK ≈ 1) is indistinguishable from a noise rise and its blocks'
+//! slow floor follows it. A steady wide signal that is not `NoiseLike` (SK away from 1, or no SK)
+//! holds the slow floor at the baseline (a +6 dB one moves it ≤ 0.5 dB,
+//! `t029_steady_wide_signal_does_not_lift_the_slow_floor`). A **sub-threshold** (< 3 dB) steady
+//! wide signal is still adopted after `settle_s` regardless of SK (T-021: read
+//! `active_episodes`/SK before trusting the slow floor there). The FM fixture
+//! (`fm_100p8M_2p4M…`) gives one `interrupted` `Fall` about 1 s in (4096 bins: 101.27–101.46 MHz,
+//! −4.6 dB; 16k bins: −11 dB; none at 1024). This is not a warm-up bug: the capture's first
+//! ≈ 70–270 ms read 4–11 dB above the later level there, the warm-up median seeds from that
+//! transient, and the Fall corrects it.
 //!
 //! **Resets.** A *comparable* reset (a gap, stream start or [`NoiseFloorTracker::reset`] with the
 //! same [`GainKey`]) suspends open episodes and carries every block's reference (its baseline if
