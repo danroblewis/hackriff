@@ -1146,6 +1146,21 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+  - id: T-071
+    milestone: M0b
+    title: Concurrent multi-signal demodulation (several audio and bits streams at once from one capture)
+    status: todo
+    deps: [T-043, T-060, T-070]
+    parallel_group: U
+    use_cases: [SIGNAL-062, AWARE-036]
+    requested_by: user feedback 2026-09-13 (start of message truncated; visible part gives the test)
+    acceptance: "several demod chains run concurrently on one capture window (listen cap raised/configurable; each chain its own channel, refinement and stream); tests through the mock SDR: fm_100p8M with 3 stations demodulated simultaneously -> 3 audio streams each carrying its own station (distinct RDS PI or distinct audio content), and 2+ FSK emitters producing concurrent bits streams; per-chain CPU/latency and drop counters reported; no cross-talk between streams"
+    area: crates/hk-pipeline (chains, listen service limits), crates/hk-stream/hk-api (concurrent openers), tests/e2e
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    hold: "after T-060 (streams) and T-070 (refinement in listen/analog) merge; front of the slot queue"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
