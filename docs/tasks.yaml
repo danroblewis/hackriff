@@ -88,7 +88,7 @@ tasks:
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
     status: done
     commit: "a40c2eb + review fixes 854614c (merged)"
-    review: "Opus review FIX-BEFORE-MERGE -> fixed (gate release + re-seed, 1 s episode rise/end/fall with hold-off and SK noise-like/structured class, wide-signal floor reference, OS-only guard, FCME caps/NaN guard, log-space gamma inverses, GainKey tolerance). Merged on targeted repro tests. Post-merge re-review URGENT-FIX: wide_floor biased low on sloped floors (Pfa 21-7600x on tilt/roll-off/notch/real urban capture); sub-band Falls suppressed; End fires while part of region elevated; silent merges + duplicate Rises; onset ramps misclassed Structured; episodes never end after drift; gate release biases slow floor up to +1.6 dB mean; slow rises missed; reset re-open semantics. Fix done dbd896e (branch worktree-agent-a08893a2a30aa74c8, main merged): restructured into per-block classifier + episode aggregator, learned floor-shape wide reference (Pfa 0.99-1.36x on tilts/roll-offs/notches, 99.9 % wide-interior coverage), Rise/Extend/Update/End(Returned|Reset|Merged|Rebaselined)/Unknown/Fall event model, slow floor no longer re-seeded on gate release (burst bias <=0.011 dB), property tests over random scenes; T-020 adapter + T-021 adapted, T-021 burst test re-enabled. Pre-merge re-review #3 FIX-BEFORE-MERGE (narrower): single low frame -> interrupted Fall resets slow floor -> 600 s phantom Rise; merges drop T-020 Anomaly coverage (0 % for Structured survivor); learned shape relearns ~1 dB/s (notch removal 890x Pfa for ~15 s). Clean: 1 h stream 0 lifecycle violations, zero alloc, 0 events on urban/915 fixtures. Fix round 2 in progress"
+    review: "post-merge re-review #2 URGENT -> rework (dbd896e) -> pre-merge re-review #3 FIX-BEFORE-MERGE -> final round ab9148b merged under user timebox (no further review): phantom-episode fix, merge survivor by class + Anomaly re-parenting in T-020 (coverage 100 %), learned-shape fast snap (Pfa 1.01-1.09x within ~1 s of notch insert/remove), contiguous episode splits, Extend adds strips only. Remaining nits -> T-029"
     deps: [T-004]
     parallel_group: C
     core_interface: true
@@ -425,7 +425,7 @@ tasks:
     note: "added by coordinator 2026-09-13: M0 DoD needs a runnable survey on the device and T-024's e2e tests need a composed pipeline; no existing task owned the composition"
   - id: T-028
     title: Detection floor-step guard hardening for notch / filter-bank accessories (plateau exemption bypass, OS-only blind spot)
-    status: todo
+    status: in-progress
     deps: [T-006, T-005]
     parallel_group: C
     use_cases: [AWARE-036, AWARE-042]
@@ -437,7 +437,7 @@ tasks:
     note: "follow-up from T-006 re-probe (2026-09-13): a notch below bin 1200 with a second down-step at 3200 read as a plateau -> 23 phantoms (21 confirmed); OS-only in guarded zone misses flat signals wider than ~16 bins (41-bin +15 dB: 0 records; 300-bin: 84.5 % -> 0.2 %). Must land before FM notch / filter-bank field use"
   - id: T-029
     title: Floor-tracker follow-ups after T-005 merge (items listed in the T-005 final-round report)
-    status: todo
+    status: in-progress
     deps: [T-005]
     parallel_group: C
     use_cases: [AWARE-006, SPACE-050]
@@ -446,7 +446,20 @@ tasks:
     needs: none
     model: opus
     effort: medium
-    note: "placeholder populated when T-005 merges (user timebox steer 2026-09-13)"
+    items: "T-006: wide-reference interior coverage degrades for signals > ~2000 bins and is 0 % above ~55 % of span or with soft edges; band-pass accessory needs calibrated response (~900x Pfa otherwise); signals present through most of a 0.4 s window can lift a learned dip until they end | T-020: Structured region merged into a NoiseLike survivor is covered by its Anomaly (1456 extra bins in test); after a split two open anomalies can overlap; extent changes re-insert anomaly rows (in-place region update needs hk-model schema change) | T-021: without SK the slow floor follows steady wide signals; FM fixture shows a few startup edge Falls (uninvestigated)"
+    note: "follow-ups from the T-005 final round (merged ab9148b under the user timebox steer, 2026-09-13)"
+  - id: T-030
+    title: Fix T-011 harmonic rate trust on rectangular high-index FSK (trusted 7x true rate)
+    status: todo
+    deps: [T-011]
+    parallel_group: F
+    use_cases: [AWARE-036]
+    acceptance: rectangular FSK with h in 0.5..4 never yields a trusted-and-wrong rate (0 over a sweep); harmonic divisor logic lives in blind estimation, not only in the T-013 demod workaround
+    area: crates/hk-estimate (blind)
+    needs: none
+    model: opus
+    effort: high
+    note: "found by T-013 (2026-09-13): T-011 trusted 33.6 kBd (7x) on 13/20 bursts of rectangular FSK h=4; T-013 demod checks run lengths and divides (harmonic_divisor) as a workaround. Correctness bug in the 'trusted is never wrong' contract"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
