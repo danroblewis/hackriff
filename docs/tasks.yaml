@@ -579,7 +579,8 @@ tasks:
     note: "follow-ups from T-034 / T-022 / T-033 (2026-09-13); first item is a legal-guardrail gap"
   - id: T-037
     title: Pipeline follow-ups (loop restart control, verification persistence, writer thread, WFM fragment tracks, capture names, shutdown, HackRF source)
-    status: todo
+    status: in-progress
+    split: "T-037a (HackRF live source feature-gated, Ctrl-C, --loop scheduler restart, retune header, calibration loading, attach-test margin; owns hk-core source, hk-cli, hk-pipeline run/control/config/spectrum; exclusive HackRF receive-only HIL) and T-037b (writer thread, verification persistence + rate_change, readsb backpressure/batching, WFM fragments, capture names, FSK bits stream, short-replay coverage attach, pilot freq, hex case, FloorProduct lock, correlator I/O; owns hk-pipeline detect/capture/stats/chains)"
     deps: [T-027]
     parallel_group: J
     use_cases: [SPACE-050, AWARE-042, AWARE-036, SIGNAL-062, SIGNAL-001]
@@ -614,7 +615,8 @@ tasks:
     note: "follow-ups from T-036 (merged 2026-09-13 under the timebox rule)"
   - id: T-039
     title: Pipeline classification to priors (family -> band-plan prior -> Emitter known/unexpected-here)
-    status: todo
+    status: in-progress
+    note: "runs parallel to T-037a/b: owns hk-pipeline family.rs + hk-context priors mapping + hk-demod family names; minimal hooks in detect.rs/chains/analog.rs"
     deps: [T-027, T-024]
     parallel_group: J
     use_cases: [AWARE-053, SIGNAL-062]

@@ -206,3 +206,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Acceptance:** new untagged 930.5 MHz paging case; 12/12 pass.
   - **Follow-ups:** per-channel restriction instead of whole-window; ESMR/FirstNet/CBRS edges unverified.
   - **Next:** T-037 and T-039 holds released; they launch after the merge.
+- **B0.104 T-027 fix merged** (69563f5); verification run in progress. Launched three agents in parallel with file ownership split within hk-pipeline:
+  - **T-037a:** HackRF live source (libhackrf BSD-3, feature-gated so CI needs no library; receive-only with no TX bound in the FFI). It has exclusive HackRF use for an ignored HIL smoke test. Also Ctrl-C shutdown, `--loop` restart, retune header, calibration loading, attach-test margin.
+  - **T-037b:** the data path — writer thread, verification persistence, readsb backpressure, WFM fragments, capture names, FSK bits, short-replay attach, pilot frequency, FloorProduct lock, correlator I/O.
+  - **T-039:** mapping demod families to band-plan priors.
+  T-040 is still running in hk-model.
