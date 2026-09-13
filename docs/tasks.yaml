@@ -230,6 +230,7 @@ tasks:
   - id: T-015
     title: readsb ADS-B plugin wrapper + fixture
     status: in-progress
+    review: "implemented 9f8439c (Sonnet; branch worktree-agent-abb02cd778b5d1e7f): hk-plugin-readsb adapter bin (hackriff-v1 framing, ci8->uc8, readsb --raw --no-fix, CRC-24 recheck, DF17/DF11 parse) + emitter-upsert hook in hk-plugins ingest. Touches core plugin contract -> Opus review running before merge (legal: hook must run on sanitized decode)"
     deps: [T-014, T-025]
     parallel_group: H
     use_cases: [SIGNAL-001]
