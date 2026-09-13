@@ -1,0 +1,13 @@
+[package]
+name = "hk-model"
+description = "hackriff data-model types (docs/07) and, from T-002, the SQLite repository"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

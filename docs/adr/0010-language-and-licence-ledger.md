@@ -50,3 +50,26 @@ CLAUDE.md: no language preference, choose robust support; the real-time path mus
 - The `(verify)` rows are checked at adoption and the ledger is kept current in this ADR; a dependency whose licence would bind the core is either isolated or replaced.
 - Vocoder IP (DVSI AMBE/IMBE) and per-feed data ToS (RadioReference, some map/feed sources) are tracked as separate, non-code licence constraints.
 - Python staying off the sample path is enforced by the language split, not convention.
+
+## Rust crate and tooling ledger (appended as dependencies are adopted)
+
+Licences come from registry metadata: crates.io API and `cargo metadata` for crates, PyPI JSON
+and installed package metadata for Python. Versions are the ones locked when each dependency was
+adopted (`Cargo.lock`, `py/uv.lock`). Every new dependency gets a row here before use. Rows stay
+append-only (`merge=union` in `.gitattributes`).
+
+| Dependency | Version | Licence | Used by | Placement |
+|---|---|---|---|---|
+| serde (+ serde_derive) | 1.0.229 | MIT OR Apache-2.0 | hk-model | In-core, permissive |
+| serde_json | 1.0.151 | MIT OR Apache-2.0 | hk-model | In-core, permissive |
+| thiserror | 2.0.20 | MIT OR Apache-2.0 | hk-model | In-core, permissive |
+| uuid (features `v7`, `serde`) | 1.26.1 | Apache-2.0 OR MIT | hk-model | In-core, permissive |
+| anyhow | 1.0.104 | MIT OR Apache-2.0 | hk-cli | In-core (binaries), permissive |
+| clap (feature `derive`) | 4.6.6 | MIT OR Apache-2.0 | hk-cli | In-core (binaries), permissive |
+| *Rust transitive deps of the above* | per `Cargo.lock` | MIT OR Apache-2.0; MIT (strsim, slab, zmij); Unlicense OR MIT (memchr); (MIT OR Apache-2.0) AND Unicode-3.0 (unicode-ident); MIT OR Apache-2.0 OR LGPL-2.1-or-later (r-efi, UEFI-only and not built; taken under MIT/Apache) | — | All permissive; checked with `cargo metadata` at T-001 |
+| numpy | 2.5.3 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | py/ (hkpy, fixture generation) | Python tooling only |
+| scipy | 1.18.1 | BSD-3-Clause (PyPI classifier "BSD License"; bundled components carry their own permissive licences) | py/ | Python tooling only |
+| pytest | 9.1.1 | MIT | py/ (dev group) | Test tooling only |
+| *pytest transitive: iniconfig 2.3.0, pluggy 1.6.0, packaging 26.3, pygments 2.21.0* | per `py/uv.lock` | MIT; MIT; Apache-2.0 OR BSD-2-Clause; BSD-2-Clause | py/ (dev) | Test tooling only |
+| hatchling | 1.32.0 | MIT | py/ build backend | Build tooling only |
+| GitHub Actions: actions/checkout v5, dtolnay/rust-toolchain, Swatinem/rust-cache v2, astral-sh/setup-uv v6 | — | MIT; MIT OR Apache-2.0; LGPL-3.0 (verify); MIT (verify all) | CI | CI infrastructure only; not linked or distributed |

@@ -1,0 +1,16 @@
+[package]
+name = "hk-dsp"
+description = "hackriff spectral estimation, noise floor and channelizer (CPU path; CUDA behind `gpu`)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# CUDA/cuFFT kernels. Builds on the Jetson only (`just deploy-jetson`); never on in CI.
+gpu = []
+
+[dependencies]
+hk-core.workspace = true
+hk-model.workspace = true

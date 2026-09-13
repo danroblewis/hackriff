@@ -1,0 +1,12 @@
+[package]
+name = "hk-detect"
+description = "hackriff CFAR detection, burst records and burst tracking"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hk-core.workspace = true
+hk-dsp.workspace = true
+hk-model.workspace = true

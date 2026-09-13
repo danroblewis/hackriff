@@ -1,0 +1,11 @@
+[package]
+name = "hk-api"
+description = "hackriff control plane and stream-output contract (ADR-0004)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hk-core.workspace = true
+hk-model.workspace = true
