@@ -15,6 +15,11 @@ test: test-rust test-py test-ui
 test-rust:
     cargo test --workspace
 
+# M0 slice acceptance suite (T-024, docs/11 §1.1): 7 use cases + legal regression through the composed pipeline. Missing uv or LFS fixtures fail; only readsb-dependent parts skip. Extra args go to cargo test, e.g. `just acceptance -- --nocapture`
+acceptance *args:
+    cargo build -p hk-plugins --bins
+    HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo test -p hk-e2e --test acceptance_m0 {{args}}
+
 test-py:
     cd py && uv run --locked pytest
 
