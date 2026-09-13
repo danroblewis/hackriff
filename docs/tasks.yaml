@@ -296,7 +296,9 @@ tasks:
     dod: compact 47 CFR 2.106 table parsed + lookup; known/unexpected status set on emitters
   - id: T-020
     title: context-feeds cache + gpsjam adapter + event correlation
-    status: in-progress
+    status: done
+    commit: "4192c7c (merged)"
+    followups: "gpsjam licence/ToS unverified (no real extracts redistributed; synthetic test extract only); base-rate correction for correlation scores not implemented; Anomaly has no site field (device location passed as evidence); swept-chirp jammers invisible to the floor tracker (needs C09 chirp/comb detector); steady OFDM reads NoiseLike; re-check episode adapter mapping after the T-005 rework merges"
     followups_from_T-002_review: "external-event time-window/geo query; optional frequency extent on events; explanation evidence pins payload hash"
     deps: [T-005, T-002]
     parallel_group: E
