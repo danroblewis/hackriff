@@ -47,7 +47,7 @@ tasks:
     title: source-abstraction + SigMF file-replay source + RAM ring buffer
     status: done
     commit: "8386cbb (merged 76ff126)"
-    review: "merged on green tests to unblock T-004; Opus concurrency review of the seqlock ring running post-merge, fixes go forward"
+    review: "post-merge Opus review URGENT-FIX: stale samples pass seqlock validation in release, inexact overrun/gap accounting, false startup overrun, unchecked u64 overflow; plus Source control/stream split needed before T-009. Fix agent running (may adopt S1 Arc-block ring)"
     deps: [T-001]
     parallel_group: B
     use_cases: [SPACE-050]
@@ -72,7 +72,8 @@ tasks:
     dod: generator produces SigMF with ground-truth annotations; harness replays and exposes pipeline outputs to assertions
   - id: T-004
     title: spectral-estimation (Welch PSD, STFT, persistence, spectral kurtosis)
-    status: in-progress
+    status: done
+    commit: "e404a46 (merged af148bb)"
     deps: [T-003]
     parallel_group: C
     use_cases: [SPACE-050, AWARE-042]
@@ -84,7 +85,7 @@ tasks:
     dod: T1 unit tests pass; SK ~1 for noise, >1 for bursts; CPU path builds on macOS
   - id: T-005
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
-    status: todo
+    status: in-progress
     deps: [T-004]
     parallel_group: C
     core_interface: true
@@ -125,7 +126,7 @@ tasks:
     dod: Track objects with timing features; links detections to one track
   - id: T-008
     title: channelizer (2x oversampled PFB) + on-demand DDC
-    status: todo
+    status: in-progress
     deps: [T-004]
     parallel_group: D
     core_interface: true
@@ -332,7 +333,8 @@ tasks:
     dod: seven e2e tests green in CI; each names its use-case id(s)
   - id: T-025
     title: Fixture capture with the HackRF One (ADS-B, FM+RDS, ISM, sweep, terminated-input)
-    status: todo
+    status: in-progress
+    note: "captures done by coordinator (B0.5-B0.10); offline formalisation agent running; ADS-B and terminated-input items blocked on user (antenna / 50 ohm terminator)"
     deps: [T-003]
     parallel_group: A
     use_cases: [SIGNAL-001, SIGNAL-062, AWARE-036, SPACE-050]
