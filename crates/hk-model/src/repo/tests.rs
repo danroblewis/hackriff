@@ -889,11 +889,20 @@ fn assert_every_insert_path_gates(class: ContentClass) {
     expect_gated(repo.insert_decode(&decode), "decode", class);
     decode.content = None;
     repo.insert_decode(&decode).unwrap();
-    let stored = repo.decode(decode.id).unwrap();
+    let stored = repo.decode_ungated(decode.id).unwrap();
     assert_eq!(
         (stored.content, stored.metadata),
         (None, g.decode.metadata.clone())
     );
+    // T-036: the gated reads withhold a restricted row's metadata, even with authorisation.
+    for access in [
+        IdentityAccess::Standard,
+        IdentityAccess::OwnTrafficAuthorised,
+    ] {
+        let view = repo.decode_with_access(decode.id, access).unwrap();
+        assert!(view.metadata_withheld);
+        assert_eq!(view.decode.metadata, json!({}));
+    }
 
     // Annotation: content refused; the label itself is metadata.
     let mut ann = g.annotation.clone();

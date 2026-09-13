@@ -235,6 +235,29 @@ CREATE TABLE emitter_merge (
 );
 CREATE INDEX idx_emitter_merge_into ON emitter_merge (into_emitter);
 
+-- T-036: append-only audit of user reclassifications that open a decoded identity (legal
+-- guardrail). Only an explicit own-traffic authorisation may open an identity, only to
+-- own-key-decrypted or unrestricted, and never from restricted-cellular / restricted-paging.
+-- Keyed by the identity too, so the opening follows it through merges. Decode rows (the stored
+-- interpretations) are never rewritten; only the emitter aggregate's identity_class changes.
+CREATE TABLE identity_reclassification (
+    reclass_id       INTEGER PRIMARY KEY,
+    emitter_id       BLOB    NOT NULL REFERENCES emitter (emitter_id),
+    identity_scheme  TEXT    NOT NULL,
+    identity_value   TEXT    NOT NULL,
+    old_class        TEXT    NOT NULL CHECK (old_class IN ('unrestricted', 'metadata-only',
+                         'own-key-decrypted')),
+    new_class        TEXT    NOT NULL CHECK (new_class IN ('unrestricted', 'own-key-decrypted')),
+    authorisation    TEXT    NOT NULL CHECK (authorisation = 'own-traffic-authorised'),
+    reason           TEXT    NOT NULL CHECK (length(reason) > 0),
+    author           TEXT    NOT NULL CHECK (length(author) > 0),
+    t                INTEGER NOT NULL
+);
+CREATE INDEX idx_identity_reclassification_identity
+    ON identity_reclassification (identity_scheme, identity_value, reclass_id);
+CREATE INDEX idx_identity_reclassification_emitter
+    ON identity_reclassification (emitter_id, reclass_id);
+
 -- IQ and audio are content: only content-permitting classes may be recorded.
 CREATE TABLE recording (
     recording_id             BLOB    PRIMARY KEY,
@@ -425,6 +448,10 @@ CREATE TRIGGER emitter_link_append_only BEFORE UPDATE ON emitter_link
     BEGIN SELECT RAISE(ABORT, 'emitter links are append-only (only supersession is recorded)'); END;
 CREATE TRIGGER emitter_merge_append_only BEFORE UPDATE ON emitter_merge
     BEGIN SELECT RAISE(ABORT, 'emitter merges are append-only'); END;
+CREATE TRIGGER identity_reclassification_append_only BEFORE UPDATE ON identity_reclassification
+    BEGIN SELECT RAISE(ABORT, 'identity reclassifications are an append-only audit'); END;
+CREATE TRIGGER identity_reclassification_no_delete BEFORE DELETE ON identity_reclassification
+    BEGIN SELECT RAISE(ABORT, 'identity reclassifications are an append-only audit'); END;
 CREATE TRIGGER demodulation_append_only BEFORE UPDATE ON demodulation
     BEGIN SELECT RAISE(ABORT, 'demodulations are append-only'); END;
 CREATE TRIGGER decode_append_only BEFORE UPDATE ON decode

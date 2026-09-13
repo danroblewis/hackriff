@@ -480,7 +480,9 @@ fn clamped_class_and_gated_content_are_never_persisted_or_streamed() {
             stored.extend(wal);
         }
 
-        assert_eq!((decodes.len(), annotations.len()), (10, 10));
+        // T-036: an identity lookup finds nothing once the identity is restricted.
+        let expected_decodes = if gated { 0 } else { 10 };
+        assert_eq!((decodes.len(), annotations.len()), (expected_decodes, 10));
         assert_eq!(istats.republished, 20);
         assert!(contains(&wire, "a1b2c0"), "metadata flows");
         assert_eq!(stats.malformed, 0);
@@ -488,11 +490,9 @@ fn clamped_class_and_gated_content_are_never_persisted_or_streamed() {
             assert_eq!(stats.class_clamped, 20, "every claim was clamped");
             assert_eq!(stats.content_gated, 20);
             assert_eq!(istats.content_gated, 20);
-            for d in &decodes {
-                assert_eq!(d.content_class, ContentClass::RestrictedPaging);
-                assert_eq!(d.content, None);
-                assert_eq!(d.metadata["df"], 17, "metadata kept");
-            }
+            // Stored metadata-only under the clamped class (the file holds it; reads are gated).
+            assert!(contains(&stored, "\"df\":17"), "metadata kept");
+            assert!(contains(&stored, "\"content_class\":\"restricted-paging\""));
             for a in &annotations {
                 assert_eq!(a.content_class, ContentClass::RestrictedPaging);
                 assert_eq!(a.content, None);

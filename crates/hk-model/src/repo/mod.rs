@@ -48,6 +48,10 @@
 //! - **Emitter identities** leave the repository only gated by content class (T-034; rules in
 //!   [`crate::cluster`]): every public emitter read applies it, and the ungated read is
 //!   crate-private.
+//! - **Decodes and tags** are gated the same way (T-036, `gating.rs`): decode identities,
+//!   metadata and identifier-bearing labels leave only when the class permits; tags on withheld
+//!   rows are limited to identity-free labels. `reclassify_identity` is the audited, authorised
+//!   way to open a user's own identity.
 //!
 //! # Region queries
 //! Region-indexed tables keep the largest frequency span and duration ever written
@@ -58,6 +62,9 @@
 mod cluster;
 #[cfg(test)]
 mod cluster_tests;
+mod gating;
+#[cfg(test)]
+mod gating_tests;
 mod interpret;
 mod inventory;
 mod measure;
@@ -142,6 +149,13 @@ pub enum RepoError {
         identity: String,
         /// Emitter that holds it.
         existing: EmitterId,
+    },
+    /// `reclassify_identity` refused to open an identity (T-036 legal guardrail). The reason is a
+    /// fixed string; it never names the identity.
+    #[error("identity reclassification refused: {reason}")]
+    ReclassificationRefused {
+        /// Why.
+        reason: &'static str,
     },
     /// The database was written by a newer build.
     #[error("database schema version {found} is newer than this build supports ({supported})")]

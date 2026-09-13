@@ -12,10 +12,9 @@ use crate::context::{
     ExternalEvent,
 };
 use crate::decode::{Bitstream, BitstreamTransport, Decode, Demodulation};
-use crate::emitter::DecodedIdentity;
 use crate::hash::ContentHash;
 use crate::ids::{
-    AnnotationId, AnomalyId, BitstreamId, DecodeId, DemodulationId, ExplanationId, ExternalEventId,
+    AnnotationId, AnomalyId, BitstreamId, DemodulationId, ExplanationId, ExternalEventId,
 };
 use crate::recording::{Annotation, AnnotationTarget};
 use crate::region::{Region, TimeRange};
@@ -186,28 +185,7 @@ impl Repository {
         Ok(())
     }
 
-    /// One decode.
-    pub fn decode(&self, id: DecodeId) -> Result<Decode, RepoError> {
-        body_by_id(
-            &self.conn,
-            "SELECT body FROM decode WHERE decode_id = ?1",
-            blob(id),
-            "decode",
-        )
-    }
-
-    /// Decodes naming an identity, oldest first.
-    pub fn decodes_for_identity(
-        &self,
-        identity: &DecodedIdentity,
-    ) -> Result<Vec<Decode>, RepoError> {
-        bodies(
-            &self.conn,
-            "SELECT body FROM decode WHERE identity_scheme = ?1 AND identity_value = ?2 \
-             ORDER BY t, decode_id",
-            params![identity.scheme.as_string(), identity.value],
-        )
-    }
+    // Decode reads are gated by class: `repo/gating.rs` (T-036).
 
     /// Appends a bitstream descriptor. A `Stored` bitstream is content and is refused under a
     /// class that does not permit content ([`RepoError::GatedContent`]); a `Live` descriptor is

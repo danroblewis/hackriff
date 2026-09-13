@@ -317,7 +317,9 @@ fn p2_content_smuggled_outside_content_never_leaves() {
                 stats.content_gated, 2,
                 "decode + annotation content refused"
             );
-            // The allowlisted, typed values survive.
+            // The allowlisted, typed values survive storage (checked on the file: T-036 gates
+            // restricted rows on every repository read, and a lookup by the restricted identity
+            // finds nothing).
             let rows = ingest
                 .repo()
                 .decodes_for_identity(&DecodedIdentity {
@@ -325,15 +327,24 @@ fn p2_content_smuggled_outside_content_never_leaves() {
                     value: "1234567".into(),
                 })
                 .unwrap();
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].frame_model, "pocsag");
-            assert_eq!(rows[0].metadata, json!({"function": 2}));
+            assert!(
+                rows.is_empty(),
+                "a restricted identity lookup confirms nothing"
+            );
+            for kept in [
+                "\"frame_model\":\"pocsag\"",
+                "\"function\":2",
+                "\"capcode\":\"1234567\"",
+                "\"value\":\"1234567\"",
+            ] {
+                assert!(contains(&db, kept), "{kept} stored");
+            }
             let ids = republished_decode_ids(&bytes);
             let metas: Vec<Value> = ids
                 .iter()
                 .map(|id| ingest.repo().decode(*id).unwrap().metadata)
                 .collect();
-            assert!(metas.contains(&json!({"capcode": "1234567"})), "{metas:?}");
+            assert!(metas.iter().all(|m| *m == json!({})), "{metas:?}");
         } else {
             assert!(contains(&db, TOKEN), "positive control: DB scan");
             assert!(contains(&bytes, TOKEN), "positive control: wire scan");

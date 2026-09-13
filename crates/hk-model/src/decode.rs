@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::cluster::InventoryIdentity;
 use crate::content::ContentClass;
 use crate::emitter::DecodedIdentity;
 use crate::ids::{
@@ -121,6 +122,31 @@ pub struct Decode {
     pub content_class: ContentClass,
     /// Frame time.
     pub t: Timestamp,
+}
+
+/// Label written in place of a decode label (`frame_model`, `decoder_id`, `decoder_version`) that
+/// names a withheld identifier (T-036).
+pub const WITHHELD_LABEL: &str = "withheld";
+
+/// A decode as it leaves the repository, gated for an [`crate::IdentityAccess`] (T-036; rules in
+/// [`crate::cluster`]).
+///
+/// When the gate withholds the row's detail, `decode.identity` is `None`, `decode.metadata` is
+/// `{}`, `decode.content` is `None` (a content-permitting row whose identity is withheld) and any
+/// label naming the identity, a metadata value or a content value reads [`WITHHELD_LABEL`]. The
+/// class, CRC status, time and references are unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodeView {
+    /// The decode, gated.
+    pub decode: Decode,
+    /// Its identity as shown: clear, withheld (scheme only) or none.
+    pub identity: InventoryIdentity,
+    /// Non-empty stored metadata was withheld.
+    pub metadata_withheld: bool,
+    /// Stored content was withheld.
+    pub content_withheld: bool,
+    /// At least one label was replaced by [`WITHHELD_LABEL`].
+    pub labels_withheld: bool,
 }
 
 /// What a bitstream carries.
