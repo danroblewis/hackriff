@@ -290,3 +290,32 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Once the current worktrees are gone, add an uncommitted `.claude/worktrees/.cargo/config.toml` (`build.target-dir` shared, `incremental = false`) so new worktrees share one target automatically. It isn't added now, because running agents would each start a full rebuild into the shared dir while their old targets still exist.
     - Coordinator verification runs use `CARGO_INCREMENTAL=0`, and main `target/debug/incremental` is cleared when idle.
 - **B0.114 Disk recovered:** 34 GiB free after agents dropped their incremental caches, above the 20 GB bar, so normal operation resumes. T-041's incremental cache (3.9 GB) is still pending. The shared-target and `CARGO_INCREMENTAL=0` rules from B0.113 still apply.
+- **B0.115 T-037a merged** (96f9b48 → 34da3e8), including T-042 live serving and the generic device contract (T-048 contract done). **T-041/T-046 merged** (9504ea7 → 1501679). Both worktrees removed (46 GiB free).
+  - **HackRF:**
+    - Receive-only; no TX symbol in the FFI.
+    - HIL at 1.95 Msps: 0 USB drops, retune ok.
+    - `hk serve --hackrf` put a real FM emitter into `/api/inventory`.
+    - Demo seed removed from serving.
+    - **Problem:** debug-build pipeline readers overran the ring by 9.6 M samples at 2.4 Msps. Measured next in a release build (T-055, launched; the HackRF is assigned to it).
+  - **LiveControl** exists without endpoints. It refuses retunes into a different legal class and refuses rate changes (one rate per run). T-050 revisits both, since exploration needs tuning anywhere with content gated per class, and span changes.
+  - **Compute:**
+    - wgpu chosen (Metal now, Vulkan for Jetson).
+    - GPU async STFT 17–20× and PFB 14× real time at 20 Msps, with parity ≤ 1.9e-6.
+    - Accelerate STFT 12–14×.
+    - Conformance suite gates provider selection.
+    - Pipeline hookup is T-056, held behind T-037b.
+  - **Launched now:**
+    - T-049 mock SDR device plus device conformance test;
+    - T-050 authenticated control API;
+    - T-055 HIL throughput.
+    New agents share `CARGO_TARGET_DIR` with `CARGO_INCREMENTAL=0`. Verification of both merges is running.
+- **B0.116 HackRF sharing and CLAUDE.md:**
+  - The user's web demo (`hk serve` on 127.0.0.1:8899, run by a supervising session) now holds the live HackRF. When an agent needs the device (HIL, captures, T-053, T-055), stop it with `pkill -f 'hk serve.*127.0.0.1:8899'` and wait for `hackrf_info` to show it free. The supervisor restarts the demo on replay while the device is busy and back on live afterwards. Passed to T-055.
+  - The user's CLAUDE.md vision step 4 edit (blind detection first, database only recommends) is committed on the user's approval (90fa6be).
+- **B0.117 T-054, T-044 and T-045 finished; merges wait on the T-037a/T-041 verification run.**
+  - **T-054:** explanations author check, shape-only never sets status, best-candidate status, region rasters, decoder evidence API; acceptance 16/16.
+  - **T-044:** hover failed on touch (pointermove only, and taps never send it); multi-region selections; click-to-inspect via gated inventory; no control endpoints.
+  - **T-045:** offset not reproduced with plain `hk serve`; UI bugs fixed (stale header after reconnect, half-bin offset).
+  - **Axis-formula review: MERGE-OK, root cause found.** Scheduler virtual tuning (hackriffd, `hk replay --schedule`) rewrites the provenance centre to hop/dwell centres while the IQ stays at the recorded centre. Every signal then lands at the wrong absolute frequency in the header, detections, inventory and history. This is the user's ~368 kHz offset, and it is a correctness bug affecting data, not only the UI.
+  - **T-057 opened and split:** the source side goes to the T-049 agent (truthful virtual tunes via an IQ shift, or refusal); header re-offer on any provenance change goes to the T-050 agent.
+  - **Follow-up:** a shader pooling nit goes to T-051.

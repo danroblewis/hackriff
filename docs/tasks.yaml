@@ -582,6 +582,7 @@ tasks:
   - id: T-037
     title: Pipeline follow-ups (loop restart control, verification persistence, writer thread, WFM fragment tracks, capture names, shutdown, HackRF source)
     status: in-progress
+    progress: "T-037a done 96f9b48 (merged 34da3e8): HackRF source (feature hackrf, pkg-config libhackrf, no TX symbol in FFI, HIL 1.95 Msps 0 USB drops, retune ok), Ctrl-C graceful exit 0, --loop switchable scheduler handle, retune re-offers spectrum stream, calibration loaded in-pipeline (--calibration; space_050 post-run step removed), attach test deterministic. T-037b in progress."
     split: "T-037a (HackRF live source feature-gated, Ctrl-C, --loop scheduler restart, retune header, calibration loading, attach-test margin; owns hk-core source, hk-cli, hk-pipeline run/control/config/spectrum; exclusive HackRF receive-only HIL) and T-037b (writer thread, verification persistence + rate_change, readsb backpressure/batching, WFM fragments, capture names, FSK bits stream, short-replay coverage attach, pilot freq, hex case, FloorProduct lock, correlator I/O; owns hk-pipeline detect/capture/stats/chains)"
     deps: [T-027]
     parallel_group: J
@@ -653,7 +654,12 @@ tasks:
     dod: "four nits fixed with tests; hk-model + acceptance legal regression green"
   - id: T-041
     title: Mac compute providers (CPU multi-threaded baseline, GPU FftBackend/PfbBackend, Accelerate vDSP)
-    status: in-progress
+    status: done
+    commit: "9504ea7 (merged 1501679)"
+    result: "wgpu compute chosen (Metal now, Vulkan on Jetson; permissive licences). RTF at 20 Msps under load 20-33: CPU 1-thread STFT4096 8.9x, PFB M=800 4.5x; cpu-mt rayon bit-identical but inconclusive (no idle cores); Accelerate STFT 12-14x (f*2^n sizes only, no PFB); GPU async (2 in flight) STFT 17-20x, PFB 14.4x (M=800) with 1-2 blocks latency, sync mode slower than CPU. Parity FFT <=1.9e-6, STFT <=6.6e-4 dB, PFB 1.5e-5 / -61.3 dB adjacent / 1.5e-7 rad. hk_dsp::compute::Compute::new(ComputeOptions) with auto|cpu|cpu-mt|accelerate|gpu|cuda, env HK_COMPUTE*, conformance-gated fallback with logged reason. ADR-0007 per-platform provider model (PROVISIONAL). Pipeline hookup -> T-056."
+    followups:
+      - "re-measure cpu-mt and CPU baselines on an idle machine"
+      - "try the wgpu provider on the Jetson Orin (Vulkan) when available (T-026/S2)"
     deps: [T-008]
     parallel_group: L
     use_cases: [SPACE-050, AWARE-042]
@@ -669,7 +675,9 @@ tasks:
   - id: T-042
     title: Real live HackRF in the UI (hk serve/hackriffd --hackrf default, full pipeline to inventory, no demo seed)
     milestone: M0b
-    status: in-progress
+    status: done
+    commit: "96f9b48 (with T-037a, merged 34da3e8)"
+    result: "hk serve runs full pipeline over --hackrf (default) or --replay; seed only in hk-api test support, --inventory-db removed, fresh server empty-inventory test; HIL 20 s @100.8 MHz/2.4 Msps real FM emitter (100.45 MHz) in /api/inventory, 0 USB overruns BUT debug build pipeline readers lost 9.6 M samples to ring overruns -> T-055. hk_api::LiveControl (capabilities, tuning, set_center, set_rate, set_gains named, set_bias_tee) on ApiState.live_control, no endpoints; retune into a different legal class refused; rate change refused (one rate per run)"
     deps: [T-037]
     parallel_group: J
     use_cases: [SIGNAL-062, AWARE-042]
@@ -698,7 +706,9 @@ tasks:
   - id: T-044
     title: UI interaction (hover readout through tunnel, click-to-inspect, drag-select as multi-region client-side selections)
     milestone: M0b
-    status: in-progress
+    status: done
+    commit: "8c0fc33 (merged)"
+    result: "hover root cause: readout only on pointermove - touch taps never fire it (tunnel users on touch); now updates on pointerdown too, readout uses canvas-relative coords not offsetX. Drag creates multi-region selections (waterfall vertical drag adds time range) with overlays + Selections list (rename/delete/zoom/history); click/tap inspects nearest emitter via gated /api/inventory (identity shows withheld); Listen/Inspect/Demod/Record are disabled stubs. ui/src/selections.ts SelectionStore {id,name,f_lo,f_hi,t_lo?,t_hi?,created}. No control endpoints (removed). npm test (esbuild + node) added to just test-ui."
     deps: [T-016]
     parallel_group: N
     use_cases: [AWARE-042]
@@ -712,7 +722,13 @@ tasks:
   - id: T-045
     title: Frequency axis offset bug (fm_100p8M replay shows center 100.4324 MHz, 101.3 MHz station at ~101.0 MHz)
     milestone: M0b
-    status: in-progress
+    status: done
+    commit: "8c0fc33 (with T-044, merged)"
+    result: "offset NOT reproduced: server header centre 100.8 MHz and station peak 101.299 MHz correct on hk serve / hk replay --serve / hackriffd, in Chromium at several widths/DPR. UI bugs fixed that plausibly caused it: main.ts ignored the header of every WebSocket connection after the first (stale centre/span after replay loop, server restart or retune); half-bin axis offset for DC-centred bins; spectrum line used i/(N-1). Pure ui/src/axis.ts (bin i at center + (i - floor(N/2))*bw/N) mirrored by new hk-stream StreamHeader::spectrum_bin_hz. tests/e2e/tests/spectrum_axis.rs (tone at centre+500 kHz and FM fixture through the real pipeline, peak within one bin of 101.3 MHz) writes ui/test/spectrum_axis.golden.json checked by ui/test/axis.test.ts."
+    followups:
+      - "review (MERGE-OK) found the likely real cause server-side -> T-057 (scheduler virtual tuning rewrites provenance centre without shifting IQ)"
+      - "waterfall shader max-pools texels [x0, x0+step) instead of a pixel-centred window (~1 screen px bias) -> T-051"
+      - "user to re-check the live demo after merge; if the offset persists, capture the stream header + /api/status from that session (possibly a scheduler/virtual retune or calibration path not exercised by the agent)"
     deps: []
     parallel_group: N
     use_cases: [SIGNAL-062, SPACE-050]
@@ -725,7 +741,9 @@ tasks:
     note: "~368 kHz constant offset suspected; same agent as T-044"
   - id: T-046
     title: Shared compute-provider conformance/parity suite (every FftBackend/PfbBackend provider must pass)
-    status: in-progress
+    status: done
+    commit: "9504ea7 (with T-041, merged 1501679)"
+    result: "crates/hk-dsp/src/conformance.rs: FFT 6 checks, spectral 6, PFB 8, tolerances defined once; CPU ref/batch PFB/cpu-mt bitwise in just test; Accelerate FFT+spectral pass; GPU all three (sync+async); a provider is selectable only when marked conformant (ADR-0007 rule, CUDA must pass)"
     deps: [T-008]
     parallel_group: L
     use_cases: [SPACE-050]
@@ -753,7 +771,8 @@ tasks:
   - id: T-048
     milestone: M0b
     title: Generic SDR device interface (named gain stages, optional bias-tee/sweep, timestamps, overruns; SoapySDR-ready, no HackRF specifics in core)
-    status: todo
+    status: done
+    note_done: "contract delivered by T-037a (96f9b48): SourceDriver/OpenRequest (device, centre, rate, named gains, filter, bias tee), set_gain named stages, optional bias tee + sweep (sweep declared, not implemented for HackRF), SourceStats (overruns/drops/settle discards), DeviceInfo, stream rules (first block flagged, monotonic counter, loss as gap, timestamps from provenance) documented in crates/hk-core/src/source/mod.rs. Remaining device conformance test -> T-049. Deferred: model Tune still stores LNA/VGA/amp (generic stored gains need a data-model change), HackRF sweep mode."
     deps: [T-037]
     parallel_group: O
     use_cases: [SIGNAL-062, SPACE-050]
@@ -764,11 +783,11 @@ tasks:
     model: opus
     effort: high
     core_interface: true
-    hold: "after T-037a merges (it builds the HackRF source on this interface and was told to keep it generic)"
   - id: T-049
     milestone: M0b
     title: Mock SDR device replaying SigMF behind the device interface (realistic retune/gain/rate/overrun behaviour)
-    status: todo
+    status: in-progress
+    scope_note: "includes the device conformance test from T-048; suite switch of acceptance helpers stays in T-047 (after T-037b)"
     deps: [T-048]
     parallel_group: O
     use_cases: [SIGNAL-062, AWARE-036, SIGNAL-001, SPACE-050, AWARE-042, AWARE-006, AWARE-053]
@@ -782,7 +801,7 @@ tasks:
   - id: T-050
     milestone: M0b
     title: Authenticated control API with legal/TX gating (live radio + display controls)
-    status: todo
+    status: in-progress
     deps: [T-037, T-048]
     parallel_group: P
     use_cases: [AWARE-042]
@@ -836,7 +855,12 @@ tasks:
   - id: T-054
     milestone: M0b
     title: Explanations follow-ups (T-039 review nits - serve-path author check, shape-only status, best-candidate status, region rasters, decoder families, test name)
-    status: in-progress
+    status: done
+    commit: "b874e51 (merged with T-044)"
+    result: "query.rs serves explanations only from author_ref EXPLANATIONS_AUTHOR_REF (acceptance test keeps it equal to family map version); shape-only evidence never sets status/prior_ref (blind 162 MHz relabel stays unknown; FM station known via WFM demod); status from best candidate with demod/decoder/classifier evidence (status_evidence_confidence, additive); rasters keyed by region (BandTable::region()); family::decoder_evidence + record_decoder_evidence, re-rank on user reclassification/status change with contradicts-user-status/contradicts-decoder-status flags; test renamed (47 kHz). acceptance 16/16."
+    followups:
+      - "blind 120 MHz unexpected-here test now marks the recording unrestricted and adds the airband to the wfm-rds chain via plan config to keep demod evidence; review in T-047 audit (prefer a demod chain that legitimately covers the band, e.g. auto analog on any confirmed emitter)"
+      - "chains only attach in 88-108 MHz and ~1090 MHz: exploration-first needs demod evidence for emitters anywhere (auto analog chain per confirmed emitter) - relates to T-043 Listen"
     deps: [T-039]
     parallel_group: Q
     use_cases: [AWARE-053, SIGNAL-062]
@@ -845,6 +869,47 @@ tasks:
     needs: none
     model: opus
     effort: medium
+  - id: T-055
+    milestone: M0b
+    title: HIL release-build live ingest throughput (ring overruns seen in debug at 2.4 Msps)
+    status: in-progress
+    deps: [T-037]
+    parallel_group: R
+    use_cases: [SIGNAL-062, SPACE-050]
+    acceptance: "release build with --features hackrf: hk run/serve on the real HackRF at 2.4, 8, 10 and 20 Msps for >=20 s each (FM band, receive-only) reports USB drops and per-reader ring overruns plus CPU per thread; identifies the slow reader(s) and whether the default live config is real-time at 2.4 Msps (debug lost 9.6 M samples); results logged, fixes proposed as follow-up tasks"
+    area: measurement only (no code changes)
+    needs: [hardware]
+    model: sonnet
+    effort: medium
+  - id: T-056
+    milestone: M0b
+    title: Wire compute providers into the pipeline (ComputeOptions in pipeline settings; STFT/PFB via hk_dsp::compute)
+    status: todo
+    deps: [T-041, T-037]
+    parallel_group: J
+    use_cases: [SPACE-050, AWARE-042]
+    acceptance: "pipeline settings carry compute: ComputeOptions (+ with_env), one Compute built per run; StftProcessor::new replaced by compute.stft in detect.rs, history.rs, spectrum.rs; flush at stream end/detach; default resolves to cpu bit-identical (acceptance unchanged); gpu feature run on the Mac passes acceptance and reports live RTF with the HackRF"
+    area: crates/hk-pipeline (detect.rs, history.rs, spectrum.rs, config.rs)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "after T-037b merges (owns detect.rs)"
+  - id: T-057
+    milestone: M0b
+    title: Scheduler virtual tuning places signals at wrong absolute frequencies (~368 kHz axis offset root cause)
+    status: in-progress
+    deps: [T-037]
+    parallel_group: O
+    use_cases: [SIGNAL-062, SPACE-050, AWARE-042]
+    found_by: T-044/T-045 review 2026-09-13
+    acceptance: "scheduled replay (hackriffd, hk replay --schedule) of fm_100p8M with annotations stripped: every header centre matches the IQ actually served; the station's detections, inventory emitter and history at 101.3 MHz +/- 1 bin whatever the scheduler hops; out-of-coverage tunes flagged with no phantom detections; spectrum header re-offered on any provenance tune/rate change so no row is sent under a stale header"
+    area: crates/hk-core/src/source/sigmf_replay.rs (T-049 agent), crates/hk-pipeline/src/spectrum.rs (T-050 agent)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    detail: "sigmf_replay.rs block_provenance (~596-605) rewrites provenance.tune.center_hz to scheduler hop/dwell centres (dwell offsets usable/4 = 450 kHz, scheduler/core.rs:985-993) while recorded IQ stays at 100.8 MHz; spectrum.rs:46 builds the header once from the first chunk. Plain hk serve has no scheduler, which is why T-045 could not reproduce it. Affects detections/inventory/history too, not just the UI."
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
