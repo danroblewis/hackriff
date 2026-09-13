@@ -455,7 +455,10 @@ version = "0.1.0"
 dependencies = [
  "hk-core",
  "hk-dsp",
+ "hk-e2e",
  "hk-model",
+ "num-complex",
+ "serde_json",
 ]
 
 [[package]]

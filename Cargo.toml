@@ -13,6 +13,12 @@ publish = false
 
 # Every dependency here is recorded in the ADR-0010 ledger
 # (docs/adr/0010-language-and-licence-ledger.md) with its licence.
+# T-006: `cargo test -p hk-detect` runs a ≥ 1 MHz·h false-alarm Monte Carlo (≈ 4.5e8 Gamma
+# cells) and real-fixture replays through the detector; optimise the detection crate (only) in
+# dev/test builds so CI stays modest. Debug assertions and overflow checks stay on.
+[profile.dev.package.hk-detect]
+opt-level = 3
+
 [workspace.dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }

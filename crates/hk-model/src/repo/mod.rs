@@ -70,7 +70,10 @@ use crate::region::Region;
 pub use inventory::EmitterUpsert;
 
 /// Embedded migrations, applied in order.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_clock_harmonic_spur_reason.sql"),
+];
 
 /// Schema version this build creates and understands.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -239,6 +242,11 @@ fn migrate(conn: &mut Connection) -> Result<(), RepoError> {
     }
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         tx.execute_batch(sql)?;
+        if sql.contains("writable_schema") {
+            // A stored-schema edit: bump the schema cookie so every connection reparses it.
+            let cookie: i64 = tx.pragma_query_value(None, "schema_version", |r| r.get(0))?;
+            tx.pragma_update(None, "schema_version", cookie + 1)?;
+        }
         tx.pragma_update(None, "user_version", index as i64 + 1)?;
     }
     tx.commit()?;

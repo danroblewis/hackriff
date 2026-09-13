@@ -1851,3 +1851,48 @@ fn attack_map_anomalies_and_explanations_are_region_indexed_and_evidence_is_pinn
         2
     );
 }
+
+/// Migration 0002 widens the `spur_reason` CHECK for `clock-harmonic` (T-006 review) and keeps
+/// refusing unknown reasons; a clock-harmonic detection round-trips.
+#[test]
+fn clock_harmonic_spur_reason_round_trips_after_migration_0002() {
+    let mut b = base_in(Repository::open_in_memory().unwrap());
+    assert_eq!(b.repo.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 2);
+    let mut d = det(b.survey.id, b.prov_id, 434.0e6, 1.5e3, tr(10, 11));
+    d.flags.spur_candidate = true;
+    d.flags.spur_reason = Some(SpurReason::ClockHarmonic);
+    b.repo.insert_detection(&d).unwrap();
+    assert_eq!(b.repo.detection(d.id).unwrap(), d);
+    let raw = b.repo.conn.execute(
+        "INSERT INTO detection (detection_id, survey_id, provenance_id, t_start, t_end, f_center, \
+         obw, f_lo, f_hi, snr_peak, snr_mean, flags, peak_dbfs, clip_count, detector_version, \
+         spur_reason) VALUES (?1, ?2, ?3, 0, 1, 1e6, 1e3, 999500, 1000500, 10, 5, 2, -40, 0, 'x', \
+         'not-a-reason')",
+        params![blob(DetectionId::new()), blob(b.survey.id), blob(b.prov_id)],
+    );
+    assert!(raw.is_err(), "unknown spur reasons stay refused");
+    // A file database migrated in a second connection sees the widened constraint too.
+    let dir = TempDir::new();
+    let path = dir.0.join("m.sqlite");
+    let first = base_in(Repository::open(&path).unwrap());
+    drop(first);
+    let mut again = Repository::open(&path).unwrap();
+    assert_eq!(again.schema_version().unwrap(), 2);
+    let survey: Vec<u8> = again
+        .conn
+        .query_row("SELECT survey_id FROM survey LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let prov: Vec<u8> = again
+        .conn
+        .query_row("SELECT provenance_id FROM provenance LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut e = det(b.survey.id, b.prov_id, 434.0e6, 1.5e3, tr(12, 13));
+    e.survey_id = SurveyId::from_uuid(uuid::Uuid::from_slice(&survey).unwrap());
+    e.provenance_ref = ProvenanceId::from_uuid(uuid::Uuid::from_slice(&prov).unwrap());
+    e.flags.spur_candidate = true;
+    e.flags.spur_reason = Some(SpurReason::ClockHarmonic);
+    again.insert_detection(&e).unwrap();
+}
