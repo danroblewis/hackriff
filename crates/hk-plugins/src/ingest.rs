@@ -17,21 +17,19 @@
 //! identity) is reduced to the empty allowlist before storage and counted in
 //! [`IngestStats::rows_stripped`].
 //!
-//! **Emitter hook (T-015).** A stored decode's `identity` (already allowlisted and shape-checked
-//! by the time `store` returns it) turns into an inventory sighting: a stored decode with an
-//! identity upserts one [`hk_model::EmitterObservation`] built from the returned row, at the
-//! INVARIANT comment in [`Ingest::store_decode`] — a point-in-time sighting at the row's
-//! timestamp and the plugin's channel frequency/bandwidth (whichever channel it was fed; `None`
-//! folds to 0 Hz). `Repository::upsert_emitter_observation` (docs/07 §2.11) does the merge: same
-//! identity widens the existing emitter's `last_seen`, a new identity creates one. Failures (e.g.
-//! an identity now held by a different emitter than a stale caller expected) are counted, never
-//! propagated: a plugin's decode stream must not stall because inventory merging disagrees with
-//! it.
+//! **Emitter hook (T-015, T-018).** A stored decode's `identity` (already allowlisted and
+//! shape-checked by the time `store` returns it) turns into an inventory sighting built from the
+//! returned row, at the INVARIANT comment in [`Ingest::store_decode`]: a point-in-time
+//! [`hk_model::Sighting`] at the row's timestamp and the plugin's channel frequency/bandwidth
+//! (`None` folds to 0 Hz), carrying the row's content class and the plugin's emitter context.
+//! `Repository::record_sighting` (rules in `hk_model::cluster`) resolves it: keyed by the decode
+//! id, so re-ingesting the same row never double-counts; the same identity widens its emitter; a
+//! context emitter receives the identity unless the scheme shares channels (ADS-B, AIS…).
+//! Identity conflicts are reported and counted ([`IngestStats::identity_conflicts`]); failures
+//! are counted, never propagated: a plugin's decode stream must not stall because inventory
+//! merging disagrees with it.
 
-use hk_model::{
-    Annotation, Decode, DecodedIdentity, EmitterId, EmitterObservation, ProvenanceId, RepoError,
-    Repository, TimeRange, Timestamp,
-};
+use hk_model::{Annotation, Decode, EmitterId, ProvenanceId, RepoError, Repository, Sighting};
 use hk_stream::policy;
 use hk_stream::{MessageRecord, Publisher};
 
@@ -60,6 +58,9 @@ pub struct IngestStats {
     pub emitters_upserted: u64,
     /// Emitter observations that failed to merge (counted, never propagated).
     pub emitter_errors: u64,
+    /// Identity sightings that collided with another identity on their cluster (reported by
+    /// entity resolution; nothing merged).
+    pub identity_conflicts: u64,
 }
 
 /// Result of storing one row.
@@ -180,33 +181,35 @@ impl Ingest {
         // table or stream that the stored Decode row would not hold.
         let (row, stored) = self.store(decode, |d| &mut d.content, Repository::insert_decode)?;
         self.stats.decodes_stored += 1;
-        if let Some(identity) = &row.identity {
-            self.upsert_emitter(identity, row.t, channel_center_hz, channel_bandwidth_hz);
-        }
+        self.upsert_emitter(&row, emitter, channel_center_hz, channel_bandwidth_hz);
         self.publish(MessageRecord::from_decode(&row, emitter, provenance));
         Ok(stored)
     }
 
-    /// One sighting at `t` for `identity`. A fresh candidate id is minted each call: the upsert
-    /// only uses it when no emitter already holds the identity, so repeated sightings of the same
-    /// identity always merge into one emitter rather than colliding.
+    /// One identity sighting for the stored `row` (nothing when it has no identity), resolved by
+    /// `Repository::record_sighting` with `context` as the emitter context.
     fn upsert_emitter(
         &mut self,
-        identity: &DecodedIdentity,
-        t: Timestamp,
+        row: &Decode,
+        context: Option<EmitterId>,
         center_hz: Option<f64>,
         bandwidth_hz: Option<f64>,
     ) {
-        let obs = EmitterObservation {
-            emitter_id: EmitterId::new(),
-            seen: TimeRange::instant(t),
-            count: 1,
-            f_center_hz: center_hz.unwrap_or(0.0),
-            bandwidth_hz: bandwidth_hz.unwrap_or(0.0),
-            identity: Some(identity.clone()),
+        let Some(sighting) = Sighting::decode(
+            row,
+            center_hz.unwrap_or(0.0),
+            bandwidth_hz.unwrap_or(0.0),
+            context,
+        ) else {
+            return;
         };
-        match self.repo.upsert_emitter_observation(&obs) {
-            Ok(_) => self.stats.emitters_upserted += 1,
+        match self.repo.record_sighting(&sighting, None) {
+            Ok(r) => {
+                self.stats.emitters_upserted += 1;
+                if r.conflict.is_some() {
+                    self.stats.identity_conflicts += 1;
+                }
+            }
             Err(_) => self.stats.emitter_errors += 1,
         }
     }

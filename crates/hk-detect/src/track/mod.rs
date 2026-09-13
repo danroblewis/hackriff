@@ -64,6 +64,7 @@
 
 mod config;
 mod events;
+pub mod inventory;
 mod persist;
 mod stats;
 mod tracker;

@@ -15,6 +15,8 @@
 //! - [`frames`]: [`SweepFrame`], [`SpectrumFrame`], SpectrumTile key and stats (§2.3–2.5).
 //! - [`detection`]: [`Detection`] and [`Track`] (§2.9–2.10).
 //! - [`emitter`]: the [`Emitter`] inventory entry (§2.11).
+//! - [`cluster`]: emitter [`Fingerprint`]s, entity resolution rules and gated inventory queries
+//!   (C18/C27, T-018).
 //! - [`recording`]: [`Recording`] and [`Annotation`] (§2.12–2.13).
 //! - [`decode`]: [`Demodulation`], [`Decode`], [`Bitstream`] (§2.14–2.16).
 //! - [`context`]: [`ExternalEvent`], [`Anomaly`], [`Explanation`] (§2.17–2.19).
@@ -38,6 +40,7 @@
 //! Aggregates are summaries that can be rebuilt from the measurements and interpretations.
 
 pub mod calibration;
+pub mod cluster;
 pub mod content;
 pub mod context;
 pub mod decode;
@@ -56,6 +59,12 @@ pub mod time;
 
 pub use calibration::{
     CalibrationMethod, CalibrationState, GainSetting, PowerCalPoint, SpurMask, SpurRule,
+};
+pub use cluster::{
+    Assignment, ConflictReason, EmitterMerge, FEATURE_SET_VERSION, FeatureMatch, Fingerprint,
+    IdentityAccess, IdentityClaim, IdentityConflictReport, InventoryEntry, InventoryIdentity,
+    InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord, PriorVerdict,
+    RecordedClassification, Resolution, Sighting, Tolerances,
 };
 pub use content::ContentClass;
 pub use context::{

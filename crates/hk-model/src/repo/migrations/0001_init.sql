@@ -132,9 +132,17 @@ CREATE TABLE emitter (
     fingerprint      TEXT,
     identity_scheme  TEXT,
     identity_value   TEXT,
-    CHECK ((identity_scheme IS NULL) = (identity_value IS NULL))
+    -- T-018: content class of the identity's sources, most restrictive seen. NULL = unclassified:
+    -- inventory queries derive it from linked decodes and fail closed (identity withheld).
+    identity_class   TEXT    CHECK (identity_class IN ('unrestricted', 'metadata-only',
+                         'restricted-cellular', 'restricted-paging', 'own-key-decrypted')),
+    -- T-018: the emitter this one was merged into (never deleted; queries skip merged rows).
+    merged_into      BLOB    REFERENCES emitter (emitter_id),
+    CHECK ((identity_scheme IS NULL) = (identity_value IS NULL)),
+    CHECK (merged_into IS NULL OR merged_into != emitter_id)
 );
 CREATE INDEX idx_emitter_f_lo_f_hi ON emitter (f_lo, f_hi);
+CREATE INDEX idx_emitter_merged_into ON emitter (merged_into) WHERE merged_into IS NOT NULL;
 CREATE INDEX idx_emitter_last_seen ON emitter (last_seen);
 -- One emitter per decoded identity (provisional; C27 open question on entity levels).
 CREATE UNIQUE INDEX idx_emitter_identity ON emitter (identity_scheme, identity_value)
@@ -147,7 +155,8 @@ CREATE TABLE emitter_status (
     prior_ref   TEXT,
     reason      TEXT    NOT NULL,
     t           INTEGER NOT NULL,
-    author      TEXT    NOT NULL CHECK (author IN ('prior', 'decoder', 'classifier', 'user', 'system'))
+    author      TEXT    NOT NULL CHECK (author IN ('prior', 'decoder', 'classifier', 'user', 'system',
+                    'clusterer'))
 );
 CREATE INDEX idx_emitter_status_emitter ON emitter_status (emitter_id, status_id, status);
 
@@ -158,7 +167,12 @@ CREATE TABLE emitter_classification (
     family             TEXT    NOT NULL,
     confidence         REAL    NOT NULL,
     open_set_score     REAL    NOT NULL,
-    model_version      TEXT    NOT NULL
+    model_version      TEXT    NOT NULL,
+    -- T-018: the observation the classifier ran on, and the fingerprint feature-set version.
+    input_kind           TEXT,
+    input_id             BLOB,
+    feature_set_version  INTEGER,
+    CHECK ((input_kind IS NULL) = (input_id IS NULL))
 );
 CREATE INDEX idx_emitter_classification_emitter
     ON emitter_classification (emitter_id, classification_id);
@@ -177,9 +191,41 @@ CREATE TABLE emitter_link (
     target_kind  TEXT    NOT NULL,
     target_id    BLOB    NOT NULL,
     linked_at    INTEGER NOT NULL,
-    PRIMARY KEY (emitter_id, target_kind, target_id)
+    -- T-018: set once when a merge re-points the link to the surviving emitter.
+    superseded_by  BLOB    REFERENCES emitter (emitter_id),
+    superseded_at  INTEGER,
+    PRIMARY KEY (emitter_id, target_kind, target_id),
+    CHECK ((superseded_by IS NULL) = (superseded_at IS NULL))
 ) WITHOUT ROWID;
 CREATE INDEX idx_emitter_link_target ON emitter_link (target_kind, target_id);
+
+-- T-018: which emitter each source observation (track, detection, decode) was counted into and
+-- how much it added, so replaying a source never double-counts. An aggregate ledger: merges
+-- re-point it.
+CREATE TABLE emitter_observation (
+    source_kind  TEXT    NOT NULL,
+    source_id    BLOB    NOT NULL,
+    emitter_id   BLOB    NOT NULL REFERENCES emitter (emitter_id),
+    count        INTEGER NOT NULL CHECK (count >= 0),
+    t_start      INTEGER NOT NULL,
+    t_end        INTEGER NOT NULL CHECK (t_end >= t_start),
+    PRIMARY KEY (source_kind, source_id)
+) WITHOUT ROWID;
+CREATE INDEX idx_emitter_observation_emitter ON emitter_observation (emitter_id);
+
+-- T-018: append-only merge history (undo input). The absorbed emitter keeps its row, its
+-- classification/status history and superseded links.
+CREATE TABLE emitter_merge (
+    merge_id        INTEGER PRIMARY KEY,
+    from_emitter    BLOB    NOT NULL REFERENCES emitter (emitter_id),
+    into_emitter    BLOB    NOT NULL REFERENCES emitter (emitter_id),
+    t               INTEGER NOT NULL,
+    reason          TEXT    NOT NULL,
+    from_count      INTEGER NOT NULL,
+    identity_moved  INTEGER NOT NULL CHECK (identity_moved IN (0, 1)),
+    CHECK (from_emitter != into_emitter)
+);
+CREATE INDEX idx_emitter_merge_into ON emitter_merge (into_emitter);
 
 -- IQ and audio are content: only content-permitting classes may be recorded.
 CREATE TABLE recording (
@@ -365,7 +411,12 @@ CREATE TRIGGER emitter_status_append_only BEFORE UPDATE ON emitter_status
 CREATE TRIGGER emitter_classification_append_only BEFORE UPDATE ON emitter_classification
     BEGIN SELECT RAISE(ABORT, 'classifications are append-only'); END;
 CREATE TRIGGER emitter_link_append_only BEFORE UPDATE ON emitter_link
-    BEGIN SELECT RAISE(ABORT, 'emitter links are append-only'); END;
+    WHEN NOT (OLD.superseded_by IS NULL AND NEW.superseded_by IS NOT NULL
+              AND NEW.emitter_id = OLD.emitter_id AND NEW.target_kind = OLD.target_kind
+              AND NEW.target_id = OLD.target_id AND NEW.linked_at = OLD.linked_at)
+    BEGIN SELECT RAISE(ABORT, 'emitter links are append-only (only supersession is recorded)'); END;
+CREATE TRIGGER emitter_merge_append_only BEFORE UPDATE ON emitter_merge
+    BEGIN SELECT RAISE(ABORT, 'emitter merges are append-only'); END;
 CREATE TRIGGER demodulation_append_only BEFORE UPDATE ON demodulation
     BEGIN SELECT RAISE(ABORT, 'demodulations are append-only'); END;
 CREATE TRIGGER decode_append_only BEFORE UPDATE ON decode
