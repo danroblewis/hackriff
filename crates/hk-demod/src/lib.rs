@@ -21,8 +21,17 @@
 //!
 //! Not yet: NBFM/AM/SSB/CW audio, squelch, AGC, CTCSS/DCS, stereo L−R audio, RDS without a
 //! pilot, RadioText.
+//!
+//! # C20 digital demodulation: 2-FSK / GFSK (T-013, AWARE-036)
+//!
+//! [`fsk`]: discriminator demodulator with T-011-seeded Gardner timing and soft values,
+//! prior-led trial demodulation below the C14 trust floor, framed records (content fails
+//! closed unless the caller classifies the emitter) and a gated `bits` stream. Framing inference
+//! is [`hk_estimate::framing`].
 
 pub(crate) mod dsp;
+/// C20 2-FSK/GFSK demodulation, prior-led trials, framed records and bits streams (T-013).
+pub mod fsk;
 pub mod mode;
 pub mod pilot;
 pub mod rds;
