@@ -280,6 +280,10 @@ version = "0.1.0"
 dependencies = [
  "hk-core",
  "hk-model",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -291,6 +295,7 @@ dependencies = [
  "hk-api",
  "hk-core",
  "hk-model",
+ "serde_json",
 ]
 
 [[package]]
