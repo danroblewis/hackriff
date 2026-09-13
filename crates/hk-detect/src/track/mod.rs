@@ -23,7 +23,10 @@
 //! 4. **Association.** Gated nearest neighbour over open tracks: centre within
 //!    `ε = max(2 bins, 10 % BW)` (or mutual containment), bandwidth ratio ≤ 2, observed idle time
 //!    ≤ the track's timeout; cost `Δf/ε + ln(ratio)/ln 2`. A burst overlapping the track's
-//!    current burst in time extends it. Otherwise a new track opens.
+//!    current burst in time extends it. Otherwise a new track opens **tentative**: no
+//!    `Opened`, not drained, links held, until it has `confirm_bursts` bursts, `confirm_on_time_s`
+//!    on-time or a hop link. A track that closes tentative (a stream-start lobe, a low-SNR
+//!    single-lobe fragment) is discarded (`tentative_discarded`).
 //! 5. **Provenance.** Association ignores gain state; a member under a different provenance
 //!    records a [`SegmentBoundary`] (gain change, retune, other) and the track continues.
 //! 6. **Features** on each finished burst, all bounded per track: inter-arrival and burst-length
@@ -34,12 +37,25 @@
 //!    channel tracks; linked channels form a hop set once ≥ 3 channels have ≥ 2 links and there
 //!    are ≥ 10 hops. The hop set is an aggregate Track (its id is the hop-set id) with
 //!    `hop_set_hz`, `hop_rate_hz` and `co_occurring` = member channel tracks; members carry the
-//!    hop-set id in `co_occurring`.
+//!    hop-set id in `co_occurring`. **Bursty hoppers** (packets separated by silence, T-031): a
+//!    dwell with no contiguous predecessor links to its nearest preceding similar burst (BW ratio
+//!    ≤ 1.5, length ratio ≤ `bursty_length_ratio`, silence ≤ `max_silence_s`) on another channel
+//!    when that burst's own nearest similar predecessor is on a third channel, the three centres
+//!    share a raster, no similar burst on another track overlaps it in time, and neither track is
+//!    periodic (`periodic_veto_*`). Two channels alone never link (two interleaved emitters look
+//!    the same). Periodic channels do not count towards `min_channels` when the set's links are
+//!    mostly bursty or the channels' periods disagree by > 10 % (independent emitters whose bursts
+//!    abut by chance; a cyclic hopper's channels share one period).
+//!    Every member channel also needs hop links on at least `min_link_fraction` of its bursts.
 //! 8. **Lifecycle.** Tracks close after their idle timeout in *observed* time (`idle_timeout_s`,
 //!    stretched to 4 inter-arrivals, ≤ 1 h), at the live-track cap, or at [`Tracker::finish`].
 //!    Two open tracks that converge (centres within ε/2, BW ratio ≤ 1.25, no simultaneous bursts)
 //!    merge into the older one; the younger keeps its member links and becomes `MergedInto`
-//!    ([`TrackEvent::Merged`]). Events are appended; nothing is overwritten.
+//!    ([`TrackEvent::Merged`]); [`TrackBatch`] copies its links to the survivor. A track whose
+//!    latest 16 bursts form two stable centre (or bandwidth) clusters, both active through the
+//!    window, **splits**: the larger cluster continues, the other opens a new track with
+//!    `split_from` ([`TrackEvent::TrackSplit`]); a parent and child never re-merge. Events are
+//!    appended; nothing is overwritten.
 //!
 //! # Duty cycle
 //!
@@ -51,8 +67,9 @@
 //! # Persistence
 //!
 //! [`Tracker::drain_into`] fills a [`TrackBatch`] with changed Track aggregates and new
-//! track↔detection links; [`TrackBatch::write`] upserts and links through the repository.
-//! Write the detections first. docs/07's `TimingFeatures` does not yet store period confidence
+//! track↔detection links; [`TrackBatch::write`] upserts, links and re-points merged tracks'
+//! links through the repository (one transaction per call: hk-model has no public batch
+//! transaction yet). Write the detections first. docs/07's `TimingFeatures` does not yet store period confidence
 //! and jitter, the burst-length distribution, segment boundaries or the hop-set raster; they are
 //! in [`TrackSummary`] / [`HopSetSummary`] only.
 //!
@@ -68,7 +85,7 @@ mod persist;
 mod stats;
 mod tracker;
 
-pub use config::{HopConfig, PeriodConfig, TrackerConfig};
+pub use config::{HopConfig, PeriodConfig, SplitConfig, TrackerConfig};
 pub use events::{
     BoundaryKind, CloseCause, Distribution, HopSetSummary, Periodicity, SegmentBoundary,
     TrackEvent, TrackSummary,

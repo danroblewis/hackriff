@@ -12,6 +12,10 @@
 //!   burst across the transition and its max-duration splits.
 //! - Record-level: a converging fragment merges (recorded, not overwritten); a split-frame fused
 //!   box is spread back onto its two tracks.
+//! - T-031: a bursty hopper (packets separated by 100–310 ms of silence) forms one hop set;
+//!   independent periodic emitters on one raster do not; two emitters sharing a track split
+//!   (`TrackSplit`, `split_from`); low-SNR fragments stay tentative (no `Opened`); a merged
+//!   track's links are re-pointed to the survivor in the repository.
 //! - Real 915 MHz FHSS fixture: whether the bursts form a hop set on the 200 kHz raster (report).
 //!
 //! The continuous-carrier-over-hours bounded-memory test lives in `track_no_alloc.rs`.
@@ -33,7 +37,7 @@ use hk_e2e::{Fixture, SynthRequest, synth_or_skip};
 use hk_model::{
     Detection, DetectionFlags, DetectionId, FreqRange, GainTableEntry, PlanRegion, Repository,
     SampleTime, ScanPlan, ScanPlanId, ScanPolicy, Schedule, Survey, SurveyId, SurveyState,
-    TimeRange, Timestamp, TrackState,
+    TimeRange, Timestamp, TrackId, TrackState,
 };
 use num_complex::Complex;
 
@@ -445,6 +449,127 @@ fn hopper_ten_channels_fifty_hops_per_second_forms_one_hop_set() {
     );
 }
 
+// ---- bursty hopper vs independent periodic emitters (T-031) ----
+
+/// Packets 10 bins (≈ 49 kHz) wide at `(start s, length s, channel)` over `duration_s`.
+fn run_packets(
+    fc: f64,
+    chans: &[f64],
+    packets: &[(f64, f64, usize)],
+    duration_s: f64,
+    seed: u64,
+) -> (Tracker, Out) {
+    let mut s = Scene::new(
+        DetectorConfig::new(SurveyId::new()),
+        GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 24.0), seed),
+    );
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut out = Out::default();
+    let bins: Vec<usize> = chans
+        .iter()
+        .map(|&f| s.bin_of(f).round() as usize)
+        .collect();
+    let frame_s = s.src.frame_period_s();
+    for i in 0..(duration_s / frame_s) as usize {
+        let t = (i as f64 + 0.5) * frame_s;
+        let mut p = flat(BINS);
+        for &(t0, len, c) in packets {
+            if t >= t0 && t < t0 + len {
+                add_line(&mut p, bins[c], 10, 15.0);
+            }
+        }
+        step(&mut s, &mut tr, &mut out, &p, Discontinuity::NONE);
+    }
+    finish(&mut s, &mut tr, &mut out);
+    (tr, out)
+}
+
+#[test]
+fn bursty_hopper_packets_separated_by_silence_form_one_hop_set() {
+    let fc = 915e6;
+    let raster = 200e3;
+    let chans: Vec<f64> = (0..8).map(|k| fc - 0.8e6 + k as f64 * raster).collect();
+    let mut rng = Rng(3);
+    let mut packets = Vec::new();
+    let (mut t, mut ch) = (0.05, 0usize);
+    while t < 7.5 {
+        packets.push((t, 0.01, ch));
+        t += 0.01 + 0.1 + (rng.next_u64() % 200) as f64 * 1e-3;
+        ch = (ch + 1 + (rng.next_u64() % 7) as usize) % 8;
+    }
+    let (tr, out) = run_packets(fc, &chans, &packets, 8.0, 13);
+    let sets = out.hop_sets_closed();
+    eprintln!(
+        "bursty hopper: {} packets, {} tracks, stats {:?}",
+        packets.len(),
+        out.closed().len(),
+        tr.stats()
+    );
+    for h in &sets {
+        eprintln!("bursty hopper: {h:?}");
+    }
+    assert_eq!(sets.len(), 1, "one hop set");
+    let h = sets[0];
+    assert!(h.channels_hz.len() >= 6, "channels {:?}", h.channels_hz);
+    let bin = FS / BINS as f64;
+    for got in &h.channels_hz {
+        assert!(
+            chans.iter().any(|c| (got - c).abs() <= 1.5 * bin),
+            "{got} off the raster"
+        );
+    }
+    let r = h.raster_hz.unwrap();
+    assert!((r - raster).abs() / raster <= 0.01, "raster {r}");
+    let span = packets.last().unwrap().0 - packets[0].0;
+    let mean_gap = span / (packets.len() - 1) as f64;
+    let rate = h.hop_rate_hz.unwrap();
+    assert!((rate * mean_gap - 1.0).abs() <= 0.2, "hop rate {rate}");
+    assert!(tr.stats().bursty_hop_links >= 10);
+}
+
+#[test]
+fn independent_periodic_emitters_on_one_raster_do_not_form_a_hop_set() {
+    let fc = 915e6;
+    let chans: Vec<f64> = (0..3).map(|k| fc + k as f64 * 200e3).collect();
+    let periods = [0.1, 0.13, 0.17];
+    for n in [2usize, 3] {
+        let mut packets = Vec::new();
+        for (c, &period) in periods.iter().enumerate().take(n) {
+            let mut t = 0.03 + 0.037 * c as f64;
+            while t < 5.9 {
+                packets.push((t, 0.02, c));
+                t += period;
+            }
+        }
+        let (tr, out) = run_packets(fc, &chans, &packets, 6.0, 17 + n as u64);
+        let formed = out
+            .events
+            .iter()
+            .filter(|e| matches!(e, TrackEvent::HopSetFormed(_)))
+            .count();
+        let closed = out.closed();
+        for t in &closed {
+            eprintln!("independent x{n}: {}", out.describe(t));
+        }
+        eprintln!("independent x{n}: stats {:?}", tr.stats());
+        assert_eq!(formed, 0, "{n} independent emitters: no hop set");
+        assert_eq!(closed.len(), n, "one track per emitter");
+        assert!(
+            closed
+                .iter()
+                .all(|t| t.hop_set.is_none() && t.period.is_some())
+        );
+        if n == 2 {
+            // (The contiguous rule may link a dwell that happens to start as the other ends.)
+            assert_eq!(
+                tr.stats().bursty_hop_links,
+                0,
+                "two channels never link as a bursty hopper"
+            );
+        }
+    }
+}
+
 // ---- two close emitters ----
 
 fn test_repo() -> (Repository, SurveyId) {
@@ -734,22 +859,22 @@ fn rec(
 #[test]
 fn converging_fragment_merges_into_the_older_track() {
     let prov = provenance(915e6, FS, 24.0);
+    let (mut repo, survey) = test_repo();
     let mut tr = Tracker::new(TrackerConfig::default());
     let mut ev = Vec::new();
+    let mut recs = Vec::new();
     let f0 = 915.5e6;
     for k in 0..80u64 {
+        let fb = f0 + (12e3 - 0.25e3 * k as f64).max(0.0);
         // A: steady at f0, bursts at 0, 100, 200 ms …
-        tr.push_detection(
-            &rec(&prov, 10 * k, 2, f0, 20e3, CloseReason::Ended, false),
-            &mut |e| ev.push(e),
-        );
         // B: opens 12 kHz away (outside ε = 10 kHz) and drifts slowly onto f0 (0.25 kHz per
         // burst, slow enough for its centre estimate to follow), interleaved at +50 ms.
-        let fb = f0 + (12e3 - 0.25e3 * k as f64).max(0.0);
-        tr.push_detection(
-            &rec(&prov, 10 * k + 5, 2, fb, 20e3, CloseReason::Ended, false),
-            &mut |e| ev.push(e),
-        );
+        for (frame0, f) in [(10 * k, f0), (10 * k + 5, fb)] {
+            let mut r = rec(&prov, frame0, 2, f, 20e3, CloseReason::Ended, false);
+            r.detection.survey_id = survey;
+            tr.push_detection(&r, &mut |e| ev.push(e));
+            recs.push(r);
+        }
     }
     let mut batch = TrackBatch::new();
     tr.drain_into(&mut batch);
@@ -796,6 +921,135 @@ fn converging_fragment_merges_into_the_older_track() {
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].track.id, opened[0]);
     assert_eq!(closed[0].burst_count, 160);
+
+    // Persisted: the survivor's links include the absorbed track's (re-pointed); the absorbed
+    // track keeps its own rows (links are append-only).
+    assert_eq!(batch.repoints, vec![(opened[1], opened[0])]);
+    let mut writer = DetectionWriter::new(64);
+    for r in &recs {
+        writer.push(&mut repo, r).unwrap();
+    }
+    writer.flush(&mut repo).unwrap();
+    batch.write(&mut repo).unwrap();
+    tr.drain_into(&mut batch);
+    batch.write(&mut repo).unwrap();
+    let survivor = repo.track_detections(opened[0]).unwrap();
+    assert_eq!(survivor.len(), 160);
+    assert_eq!(survivor.len() as u64, closed[0].track.detection_count);
+    let absorbed = repo.track_detections(opened[1]).unwrap();
+    assert!(!absorbed.is_empty() && absorbed.iter().all(|d| survivor.contains(d)));
+    assert_eq!(
+        repo.track(opened[1]).unwrap().state,
+        TrackState::MergedInto(opened[0])
+    );
+}
+
+#[test]
+fn two_emitters_sharing_a_track_split_into_two() {
+    let prov = provenance(915e6, FS, 24.0);
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut ev = Vec::new();
+    // 8 kHz apart: B's first burst passes A's gate (ε = 10 kHz) and joins A's track.
+    let (fa, fb) = (915.5e6, 915.508e6);
+    for k in 0..60u64 {
+        for (frame0, f) in [(10 * k, fa), (10 * k + 5, fb)] {
+            tr.push_detection(
+                &rec(&prov, frame0, 2, f, 20e3, CloseReason::Ended, false),
+                &mut |e| ev.push(e),
+            );
+        }
+    }
+    tr.finish(&mut |e| ev.push(e));
+    let mut batch = TrackBatch::new();
+    tr.drain_into(&mut batch);
+    let opened: Vec<TrackId> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Opened { track, .. } => Some(*track),
+            _ => None,
+        })
+        .collect();
+    let splits: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::TrackSplit { from, into, .. } => Some((*from, *into)),
+            _ => None,
+        })
+        .collect();
+    let closed: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Closed(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    eprintln!("split: stats {:?}", tr.stats());
+    assert_eq!(opened.len(), 2);
+    assert_eq!(splits, vec![(opened[0], opened[1])]);
+    assert!(!ev.iter().any(|e| matches!(e, TrackEvent::Merged { .. })));
+    assert_eq!(closed.len(), 2);
+    let parent = closed.iter().find(|s| s.track.id == opened[0]).unwrap();
+    let child = closed.iter().find(|s| s.track.id == opened[1]).unwrap();
+    // One track per emitter (the larger cluster in the window stays on the parent).
+    let (pf, cf) = (parent.track.f_center_hz, child.track.f_center_hz);
+    let near = |x: f64, f: f64| (x - f).abs() < 1e3;
+    assert!(
+        (near(pf, fa) && near(cf, fb)) || (near(pf, fb) && near(cf, fa)),
+        "parent {pf} child {cf}"
+    );
+    assert_eq!(parent.track.split_from, None);
+    assert_eq!(child.track.split_from, Some(opened[0]));
+    assert!(child.burst_count >= 45, "{}", child.burst_count);
+    // Recorded, not overwritten: the parent's row at the split precedes the child's rows.
+    let first = |id| batch.upserts.iter().position(|t| t.id == id).unwrap();
+    assert!(first(opened[0]) < first(opened[1]));
+}
+
+#[test]
+fn low_snr_fragments_stay_tentative_and_are_never_opened() {
+    let synth = synth_or_skip!(
+        SynthRequest::new("fsk_burst_train")
+            .seed(1)
+            .param("snr_db", 12.0)
+            .param("duration_s", 3.0)
+    );
+    let fx = synth.fixture(0).unwrap();
+    let iq = to_ci8(&fx.samples().unwrap());
+    let chain = ChainConfig::new(256, 4);
+    let mut det = Detector::new(DetectorConfig::new(SurveyId::new())).unwrap();
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let out = replay_tracked(
+        &iq,
+        fx.sample_rate,
+        fixture_provenance(&fx),
+        &chain,
+        &mut det,
+        &mut tr,
+    );
+    let opened = out
+        .events
+        .iter()
+        .filter(|e| matches!(e, TrackEvent::Opened { .. }))
+        .count();
+    let closed = out.closed();
+    for s in &closed {
+        eprintln!("12 dB: {}", out.describe(s));
+    }
+    eprintln!(
+        "12 dB: {} records, stats {:?}",
+        out.records.len(),
+        tr.stats()
+    );
+    assert!(
+        tr.stats().tentative_discarded >= 1,
+        "a fragment was held and discarded"
+    );
+    assert_eq!(opened, 1, "{AWARE_036:?} only the emitter is opened");
+    assert_eq!(closed.len(), 1, "{AWARE_036:?} one track");
+    assert_eq!(
+        closed[0].burst_count as usize,
+        fx.of_kind("fsk-burst").len()
+    );
 }
 
 #[test]

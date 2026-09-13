@@ -141,6 +141,17 @@ pub enum TrackEvent {
         /// When.
         at: Timestamp,
     },
+    /// Track `from`'s bursts separated into two stable clusters: one continues as `from`, the
+    /// other as the new track `into` (`split_from = from`; announced by its own `Opened` just
+    /// before). `from` keeps its history and links.
+    TrackSplit {
+        /// Continuing track.
+        from: TrackId,
+        /// New track.
+        into: TrackId,
+        /// When.
+        at: Timestamp,
+    },
     /// A box straddling several tracks (a split-frame bridge) was spread back onto them.
     Split {
         /// The fused detection (linked to `tracks[0]`, the largest overlap).
