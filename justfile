@@ -39,6 +39,7 @@ test-ui:
     npm ci --no-audit --no-fund --prefer-offline
     npm run build
     npm run typecheck
+    npm test
 
 # Serve the web UI over a replayed recording, e.g. `just serve fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop`
 serve fixture *args:

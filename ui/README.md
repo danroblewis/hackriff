@@ -14,6 +14,25 @@ Rust. T-022a covers:
   in grey ("not observed" is not "quiet"). `/api/floor` (T-021) is drawn as a floor-vs-time line
   with its uncertainty band. **Live span** fills the live stream's band and time.
 
+T-044/T-045 add live-view interaction and a checked frequency axis:
+
+- **Frequency axis.** Every connection's stream header re-derives the geometry (a new replay pass,
+  a restarted server or a retuned source never keeps an old centre/span). Spectrum bin `i` of `N`
+  is at `center_hz + (i − ⌊N/2⌋)·bandwidth_hz/N` (`StreamHeader::spectrum_bin_hz`, hk-dsp order);
+  `src/axis.ts` holds the pure mapping (bin ↔ Hz ↔ pixel, zoom, ticks). The bar above the
+  waterfall shows centre, span and bin width.
+- **Readout.** Hover, touch or pen press shows frequency (the centre of the bin under the pointer),
+  level and, over the waterfall, the row time. Pointer maths uses the canvas bounding rect.
+- **Drag to select.** Drag across the spectrum or waterfall to add a region; drag vertically in the
+  waterfall to bound its time too. Selections are client-side objects
+  (`src/selections.ts`: `{id, name, f_lo, f_hi, t_lo?, t_hi?, created}`, Hz and Unix seconds),
+  several at once, listed under **Selections** with rename, delete, **Zoom** (live view) and
+  **History** (region over time). Demod, record and inspect are disabled stubs until T-052, which
+  persists selections server-side. **Reset zoom** returns to the whole band.
+- **Click to inspect.** A click or tap looks up the nearest emitter in `/api/inventory` around that
+  frequency and shows its status, extent, family, identity (withheld as the server withholds it),
+  first/last seen, count and tags. **Listen** is a disabled placeholder for T-043.
+
 T-022 adds:
 
 - **Signal inventory.** A table of emitters from `/api/inventory` (the T-018 inventory query).
@@ -38,8 +57,14 @@ bundles only this directory's code.
 
 ```sh
 just ui-build        # npm ci + esbuild → ui/dist/ (gitignored)
-just test-ui         # build + tsc --noEmit; `just test` runs it, and skips it when node is absent
+just test-ui         # build + tsc --noEmit + npm test; `just test` runs it, and skips it when node is absent
 ```
+
+`npm test` bundles `test/*.test.ts` with esbuild and runs them with `node --test` (no extra
+dependencies): axis mapping, selection model and inspect lookup. `test/spectrum_axis.golden.json`
+holds the header geometry and peak bins that `tests/e2e/tests/spectrum_axis.rs` observes through
+the real pipeline (a tone at centre + 500 kHz and the FM fixture's 101.3 MHz station);
+`HK_UPDATE_GOLDEN=1 cargo test -p hk-e2e --test spectrum_axis` rewrites it.
 
 ## Run
 

@@ -70,6 +70,16 @@ export class HistoryPanel {
     else this.info.textContent = "region selected; set a time window and Load";
   }
 
+  /** Selects a region and, when given, a time window (Unix s, widened to whole seconds); loads when complete. */
+  selectWindow(fLoHz: number, fHiHz: number, t0?: number, t1?: number) {
+    if (t0 !== undefined && t1 !== undefined) {
+      const a = Math.floor(t0);
+      $<HTMLInputElement>("t0").value = utcInput(a);
+      $<HTMLInputElement>("t1").value = utcInput(Math.max(a + 1, Math.ceil(t1)));
+    }
+    this.selectRegion(fLoHz, fHiHz);
+  }
+
   private applyLive(force: boolean) {
     if (!this.liveSpan) return;
     const [fl, fh, t0, t1] = this.liveSpan;

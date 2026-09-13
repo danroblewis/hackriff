@@ -1,0 +1,17 @@
+{
+  "_about": "T-045: spectrum stream geometry and the strongest row bin observed through the composed pipeline. Written by tests/e2e/tests/spectrum_axis.rs (HK_UPDATE_GOLDEN=1); read by ui/test/axis.test.ts.",
+  "fm_fixture": {
+    "bandwidth_hz": 2400000.0,
+    "center_hz": 100800000.0,
+    "fft_size": 1024,
+    "peak_bin": 725,
+    "signal_hz": 101300000.0
+  },
+  "synthetic_tone": {
+    "bandwidth_hz": 2400000.0,
+    "center_hz": 100800000.0,
+    "fft_size": 1024,
+    "peak_bin": 725,
+    "signal_hz": 101300000.0
+  }
+}

@@ -4,12 +4,12 @@
 import type { Api } from "./main";
 import { fmtT, fromUtcInput, utcInput, type HistoryPanel } from "./history";
 
-interface Row {
+export interface Row {
   id: string; f_center_hz: number; bandwidth_hz: number; f_lo_hz: number; f_hi_hz: number;
   first_seen_s: number; last_seen_s: number; count: number;
   known_status: "known" | "unexpected-here" | "unknown";
   status: { author: string; reason: string | null; prior_ref: string | null; reason_withheld: boolean } | null;
-  tags: string[]; family: string | null;
+  tags: string[]; tags_withheld?: boolean; family: string | null;
   identity_scheme: string | null; identity_value?: string; identity_class: string | null; withheld: boolean;
 }
 interface Page { entries: Row[]; next_cursor: string | null }
