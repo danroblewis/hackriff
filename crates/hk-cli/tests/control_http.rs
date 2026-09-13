@@ -350,6 +350,7 @@ fn a_replayed_recording_refuses_device_settings_but_accepts_display_settings() {
         rows_per_s: 25.0,
         calibration: None,
         token: Some(TOKEN.into()),
+        listen: Default::default(),
     })
     .unwrap();
     assert!(live_control.is_none());

@@ -83,6 +83,8 @@ pub struct ServeOptions {
     pub calibration: Option<PathBuf>,
     /// API token (default: `HK_TOKEN`, else generated).
     pub token: Option<String>,
+    /// Listen limits (T-066).
+    pub listen: crate::pipeline::ListenArgs,
 }
 
 /// The stream class for a recording (`hk_pipeline::class`).
@@ -119,6 +121,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
     let data_dir = opts.data_dir.clone().unwrap_or_else(temp_data_dir);
     let registry = StreamRegistry::new();
     let token = token(opts.token.as_deref())?;
+    opts.listen.validate()?;
     match &opts.source {
         ServeSource::HackRf { spec, live } => {
             let lp = start_live(
@@ -135,6 +138,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                 },
                 &registry,
             )?;
+            opts.listen.apply(&lp.handle);
             let server = serve_api(
                 opts.bind,
                 opts.ui_dist.clone(),
@@ -192,6 +196,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                 reopen,
                 Box::new(TrackInventory::default()),
             )?;
+            opts.listen.apply(&handle);
             let server = serve_api(
                 opts.bind,
                 opts.ui_dist.clone(),
@@ -352,6 +357,7 @@ mod tests {
             rows_per_s: 25.0,
             calibration: None,
             token: Some(TOKEN.into()),
+            listen: Default::default(),
         })
         .unwrap();
         assert!(live_control.is_none(), "no live control over a recording");
@@ -396,6 +402,7 @@ mod tests {
             rows_per_s: 25.0,
             calibration: None,
             token: Some(TOKEN.into()),
+            listen: Default::default(),
         })
         .err()
         .expect("no driver in this build");

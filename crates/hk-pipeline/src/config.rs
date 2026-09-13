@@ -92,6 +92,41 @@ pub struct PipelineSettings {
     pub site: Option<[f64; 2]>,
     /// Offer confirmed tracks to the scheduler with a verification group (hackriffd).
     pub verify_pois: bool,
+    /// On-demand listening limits (T-066).
+    pub listen: ListenSettings,
+}
+
+/// On-demand listening limits (T-066; `ScanPlan.extra.pipeline.listen`, `--listen-*` flags of
+/// `hk serve` and `hackriffd`). Admission is by count **and** by an estimated CPU budget.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ListenSettings {
+    /// Most listen chains at once (8).
+    pub max_listeners: usize,
+    /// Share of the available CPU cores all listen chains may use together (0.5).
+    pub cpu_fraction: f64,
+    /// Estimated cost of a WFM chain, cores per Msps of tuned sample rate (0.05). A rough,
+    /// conservative estimate (DDC at the full tuned rate dominates); tune it per device.
+    pub wfm_cores_per_msps: f64,
+    /// Estimated cost of an NBFM, AM, SSB or CW chain, cores per Msps (0.04).
+    pub narrow_cores_per_msps: f64,
+    /// A chain with no consumer for this long ends, s (10).
+    pub idle_timeout_s: f64,
+    /// A chain that published no audio (squelch closed) for this long ends, s (600; 0 never).
+    pub squelch_timeout_s: f64,
+}
+
+impl Default for ListenSettings {
+    fn default() -> Self {
+        Self {
+            max_listeners: 8,
+            cpu_fraction: 0.5,
+            wfm_cores_per_msps: 0.05,
+            narrow_cores_per_msps: 0.04,
+            idle_timeout_s: 10.0,
+            squelch_timeout_s: 600.0,
+        }
+    }
 }
 
 impl Default for PipelineSettings {
@@ -110,6 +145,7 @@ impl Default for PipelineSettings {
             classify: Vec::new(),
             site: None,
             verify_pois: true,
+            listen: ListenSettings::default(),
         }
     }
 }

@@ -199,6 +199,51 @@ pub struct DaemonArgs {
     pub token: Option<String>,
     /// T-021 calibration JSON (file or directory).
     pub calibration: Option<PathBuf>,
+    /// Listen limits (T-066).
+    pub listen: ListenArgs,
+}
+
+/// Listen limits (T-066) for `hk serve` and `hackriffd`. Unset flags keep the plan's
+/// (`extra.pipeline.listen`) or the default values.
+#[derive(clap::Args, Clone, Debug, Default, PartialEq)]
+pub struct ListenArgs {
+    /// Most concurrent Listen chains (default 8).
+    #[arg(long = "listen-max")]
+    pub max_listeners: Option<usize>,
+    /// Share of the CPU cores all Listen chains may use together, estimated from each chain's
+    /// sample rate and mode (default 0.5).
+    #[arg(long = "listen-cpu-fraction")]
+    pub cpu_fraction: Option<f64>,
+}
+
+impl ListenArgs {
+    /// Checks the flags.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.max_listeners == Some(0) {
+            anyhow::bail!("--listen-max must be at least 1");
+        }
+        if let Some(f) = self.cpu_fraction
+            && !(f.is_finite() && f > 0.0)
+        {
+            anyhow::bail!("--listen-cpu-fraction must be a positive number");
+        }
+        Ok(())
+    }
+
+    /// Applies the flags given to `handle`'s listen limits.
+    pub fn apply(&self, handle: &PipelineHandle) {
+        if self.max_listeners.is_none() && self.cpu_fraction.is_none() {
+            return;
+        }
+        let mut s = handle.listen_settings();
+        if let Some(n) = self.max_listeners {
+            s.max_listeners = n;
+        }
+        if let Some(f) = self.cpu_fraction {
+            s.cpu_fraction = f;
+        }
+        handle.set_listen_settings(s);
+    }
 }
 
 /// Loads a ScanPlan JSON, or a single-region plan over the source window.
@@ -830,6 +875,7 @@ pub struct Daemon {
 
 /// Starts `hackriffd`'s pipeline (scheduler driven) and API server.
 pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
+    args.listen.validate()?;
     let registry = StreamRegistry::new();
     if is_device_spec(&args.source) {
         if args.unpaced || args.loop_replay {
@@ -862,6 +908,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
                 return Err(e);
             }
         };
+        args.listen.apply(&lp.handle);
         let server = serve_api(
             args.bind,
             args.ui_dist.clone(),
@@ -922,6 +969,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
         reopen,
         Box::new(TrackInventory::default()),
     )?;
+    args.listen.apply(&handle);
     let server = serve_api(
         args.bind,
         args.ui_dist.clone(),
@@ -1040,6 +1088,7 @@ mod tests {
             feeds: None,
             token: token.map(str::to_owned),
             calibration: None,
+            listen: ListenArgs::default(),
         }
     }
 

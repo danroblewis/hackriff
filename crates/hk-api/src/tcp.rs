@@ -401,6 +401,8 @@ fn serve_connection(mut s: TcpStream, sh: &Shared) {
     };
     let _ = s.set_read_timeout(None);
     let _ = s.set_write_timeout(None);
+    // T-066: a vanished peer (no FIN/RST) must not hold an on-demand session forever.
+    crate::ondemand::keepalive(&s, Duration::from_secs(20));
     let clones = s.try_clone().and_then(|w| Ok((w, s.try_clone()?)));
     let Ok((writer, closer)) = clones else {
         sh.refused.fetch_add(1, Ordering::Relaxed);

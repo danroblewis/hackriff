@@ -137,6 +137,9 @@ export class Listener {
   private timer = 0;
   private note = "";
   private _active = false;
+  /** Bumped by every start/stop: a connect still awaiting the audio output opens no socket once
+   * it is stale (T-066: a quick second Listen used to orphan the first socket). */
+  private gen = 0;
   /** Called whenever [[active]] changes (T-069: drives the toolbar's Listen/Stop button and hint). */
   onActiveChange: (active: boolean) => void = () => {};
 
@@ -171,11 +174,13 @@ export class Listener {
     this.render();
     clearInterval(this.timer);
     this.timer = window.setInterval(() => this.render(), 250);
-    void this.connect(target);
+    void this.connect(target, this.gen);
   }
 
-  /** Stops listening (closing the socket detaches the server's chain). */
+  /** Stops listening (closing the socket detaches the server's chain). A start still waiting for
+   * the audio output opens no socket afterwards. */
   stop(note = "stopped") {
+    this.gen++;
     const ws = this.ws;
     this.ws = null;
     if (ws) { ws.onmessage = ws.onclose = null; ws.close(); }
@@ -218,10 +223,11 @@ export class Listener {
     return this.out;
   }
 
-  private async connect(target: ListenTarget) {
+  private async connect(target: ListenTarget, gen: number) {
     let out: Output;
     try { out = await this.output(); }
-    catch (e) { this.note = `audio output: ${(e as Error).message}`; this.render(); return; }
+    catch (e) { if (gen === this.gen) { this.note = `audio output: ${(e as Error).message}`; this.render(); } return; }
+    if (gen !== this.gen) return; // stopped or restarted while the output was being set up
     out.reset();
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws/open/listen?${listenQuery(target)}&token=${encodeURIComponent(this.token)}`);
@@ -281,6 +287,41 @@ export class Listener {
   }
 }
 
+// --- Page lifecycle (T-066) ---------------------------------------------------------------------
+
+/** A hidden page keeps listening this long (background listening is fine), then stops. */
+export const HIDDEN_CLOSE_MS = 10 * 60_000;
+
+/** The part of `window`/`document` the lifecycle hook uses. */
+export interface LifecycleTarget { addEventListener(type: string, fn: () => void): void }
+
+/**
+ * Stops listening (closing the socket, so the server's chain detaches at once instead of after
+ * its peer timeout) when the page goes away (`pagehide`, `beforeunload`) or stays hidden for
+ * `hiddenMs`.
+ */
+export function closeOnPageExit(
+  listener: { readonly active: boolean; stop(note?: string): void },
+  win: LifecycleTarget,
+  doc: LifecycleTarget & { readonly visibilityState: string },
+  hiddenMs = HIDDEN_CLOSE_MS,
+  timers: { set(fn: () => void, ms: number): unknown; clear(t: unknown): void } = {
+    set: (fn, ms) => setTimeout(fn, ms),
+    clear: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+  },
+) {
+  const close = (note: string) => { if (listener.active) listener.stop(note); };
+  win.addEventListener("pagehide", () => close("stopped (page closed)"));
+  win.addEventListener("beforeunload", () => close("stopped (page closed)"));
+  let pending: unknown = null;
+  doc.addEventListener("visibilitychange", () => {
+    if (pending !== null) { timers.clear(pending); pending = null; }
+    if (doc.visibilityState === "hidden") {
+      pending = timers.set(() => { pending = null; close("stopped (page hidden)"); }, hiddenMs);
+    }
+  });
+}
+
 // --- Wiring (T-069: toolbar + inspect-panel button + selection/inventory actions) ---------------
 
 export interface ListenHooks {
@@ -298,6 +339,7 @@ export interface ListenHooks {
  */
 export function installListen(token: string, hooks: ListenHooks) {
   const listener = new Listener(token);
+  closeOnPageExit(listener, window, document); // T-066
   let click: ClickState | null = null;
 
   // The inspect panel's own button: listens to exactly what's shown there.

@@ -68,6 +68,7 @@ fn live_serve_inventory_shows_real_fm_detections() {
         rows_per_s: 25.0,
         calibration: None,
         token: Some(TOKEN.into()),
+        listen: Default::default(),
     })
     .expect("start hk serve over the HackRF (is it free?)");
     let addr = server.local_addr();
