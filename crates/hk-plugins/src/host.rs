@@ -248,6 +248,10 @@ struct Shared {
     ceiling: ContentClass,
     context: PluginContext,
     sample_rate_hz: f64,
+    /// The plugin's input channel frequency/bandwidth, for the emitter-upsert hook
+    /// ([`crate::ingest::Ingest::store_decode`]).
+    center_hz: Option<f64>,
+    bandwidth_hz: Option<f64>,
     anchor: Mutex<SampleTime>,
     proc: Mutex<Proc>,
     wake: Condvar,
@@ -410,6 +414,8 @@ impl PluginInstance {
 
         let shared = Arc::new(Shared {
             sample_rate_hz: input.sample_rate_hz,
+            center_hz: input.center_hz,
+            bandwidth_hz: input.bandwidth_hz,
             anchor: Mutex::new(input.anchor),
             manifest,
             ceiling,
@@ -790,7 +796,13 @@ fn read_stdout(shared: &Arc<Shared>, stdout: impl Read, abandon: &AtomicBool) {
                     return;
                 }
                 PluginOutput::Decode(d) => lock(&shared.ingest)
-                    .store_decode(d, ctx.emitter_ref, ctx.provenance_ref)
+                    .store_decode(
+                        d,
+                        ctx.emitter_ref,
+                        ctx.provenance_ref,
+                        shared.center_hz,
+                        shared.bandwidth_hz,
+                    )
                     .map(|s| (s, &c.decodes)),
                 PluginOutput::Annotation(a) => lock(&shared.ingest)
                     .store_annotation(a, ctx.emitter_ref, ctx.provenance_ref)

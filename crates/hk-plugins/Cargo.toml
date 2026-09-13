@@ -16,3 +16,7 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# T-015 readsb e2e test (tests/readsb.rs): synthetic adsb_squitter fixture generation.
+hk-e2e = { path = "../../tests/e2e" }

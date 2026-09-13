@@ -381,6 +381,7 @@ dependencies = [
 name = "hk-plugins"
 version = "0.1.0"
 dependencies = [
+ "hk-e2e",
  "hk-model",
  "hk-stream",
  "libc",
