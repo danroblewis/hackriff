@@ -277,3 +277,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - rasters keyed by region;
     - decoder-id family path and re-rank on reclassification;
     - a misleading test name.
+- **B0.113 Disk full incident (user alert, 2026-09-13 ~13:20): ~159 MB free, ENOSPC.**
+  - **Cause:** hackriff build dirs used ~39 GB — main `target/` 11 GB plus 4–7 GB per agent worktree, of which incremental caches were 2.5–4.8 GB each.
+  - **Actions:**
+    - `cargo clean` in main freed 15.0 GiB (→ 14 GiB free).
+    - All five worktrees (T-037a, T-037b, T-041, T-044, T-054) had active builds, so none was finished or removable.
+    - Each agent was told to delete `target/debug/incremental` after its current cargo command and build with `CARGO_INCREMENTAL=0` from then on (~11 GB more).
+  - **Rules from now on:**
+    - Launch no new agents or verification builds until free space is above ~20 GB.
+    - Remove each worktree immediately after merge (removal deletes its target).
+    - Every future agent brief sets `CARGO_TARGET_DIR=/Users/daniellewis/hackriff/target` and `CARGO_INCREMENTAL=0`.
+    - Once the current worktrees are gone, add an uncommitted `.claude/worktrees/.cargo/config.toml` (`build.target-dir` shared, `incremental = false`) so new worktrees share one target automatically. It isn't added now, because running agents would each start a full rebuild into the shared dir while their old targets still exist.
+    - Coordinator verification runs use `CARGO_INCREMENTAL=0`, and main `target/debug/incremental` is cleared when idle.
