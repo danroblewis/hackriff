@@ -10,3 +10,11 @@ publish.workspace = true
 hk-core.workspace = true
 hk-dsp.workspace = true
 hk-model.workspace = true
+# T-010: Complex32 samples, and serde for the ParameterSet record (both already in the ledger).
+num-complex.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# T-010: synthetic scenarios and fixture truth for the AWARE-036 / SIGNAL-062 acceptance tests.
+hk-e2e = { path = "../../tests/e2e" }
