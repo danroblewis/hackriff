@@ -18,7 +18,15 @@
 //!   clipped to it; the widest becomes its primary. If none moves, a primary is opened.
 //! - **Extended** (the added extent): the episode's primary grows to cover it. Without an open
 //!   primary, the added extent opens one. So a region widening on both sides stays one open
-//!   anomaly.
+//!   anomaly. An Extend of a non-accepted class (structured blocks merged into a noise-like
+//!   episode) is ignored, so the anomaly covers only the accepted blocks.
+//! - **No overlap.** After an Extend or split, the episode's other open parts that overlap its
+//!   primary are absorbed: the primary grows to their hull, their Explanations are copied to it
+//!   and they are resolved `absorbed;by=<primary>` (in [`LifecycleReport::superseded`]). A split
+//!   also clips the parent's parts off the new extent when it lies at one of their ends. So open
+//!   anomalies never overlap.
+//! - **Deferred (T-029):** every extent change inserts a successor row (supersession, below). An
+//!   in-place region update would need a mutable anomaly region in the hk-model schema.
 //! - **Updated** (the episode's current extent): open parts are clipped to it; parts with no
 //!   overlap of positive width are resolved (`extent-returned`).
 //! - **Closed** (`End`): `Merged` re-parents every open part to the surviving episode (they stay
@@ -436,6 +444,33 @@ pub fn close_orphaned(
     Ok(closed)
 }
 
+/// Copies `from`'s latest Explanations to `to` (`supersedes` = the copied one; ones whose
+/// evidence is stale are skipped).
+fn copy_explanations(
+    repo: &mut Repository,
+    from: AnomalyId,
+    to: AnomalyId,
+    t: Timestamp,
+) -> Result<(), AnomalyError> {
+    let explanations = repo.explanations_for_anomaly(from)?;
+    let replaced: BTreeSet<ExplanationId> =
+        explanations.iter().filter_map(|e| e.supersedes).collect();
+    for e in explanations.iter().filter(|e| !replaced.contains(&e.id)) {
+        let copy = Explanation {
+            id: ExplanationId::new(),
+            anomaly_ref: to,
+            supersedes: Some(e.id),
+            t,
+            ..e.clone()
+        };
+        match repo.insert_explanation(&copy) {
+            Ok(()) | Err(RepoError::StaleEvidence { .. }) => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
 /// One anomaly of the run in the in-memory index.
 #[derive(Clone, Debug)]
 struct Part {
@@ -796,22 +831,7 @@ impl FloorAnomalies {
             t: successor.t,
             note: Some(format!("superseded;by={}", successor.id)),
         })?;
-        let explanations = repo.explanations_for_anomaly(old.id)?;
-        let replaced: BTreeSet<ExplanationId> =
-            explanations.iter().filter_map(|e| e.supersedes).collect();
-        for e in explanations.iter().filter(|e| !replaced.contains(&e.id)) {
-            let copy = Explanation {
-                id: ExplanationId::new(),
-                anomaly_ref: successor.id,
-                supersedes: Some(e.id),
-                t: successor.t,
-                ..e.clone()
-            };
-            match repo.insert_explanation(&copy) {
-                Ok(()) | Err(RepoError::StaleEvidence { .. }) => {}
-                Err(err) => return Err(err.into()),
-            }
-        }
+        copy_explanations(repo, old.id, successor.id, successor.t)?;
         let part = &mut self.parts[i];
         part.anomaly = successor.id;
         part.freq = freq;
@@ -844,6 +864,7 @@ impl FloorAnomalies {
                 if hull != f {
                     self.supersede(repo, i, hull, extent.confirmed, &mut report)?;
                 }
+                self.absorb_into_primary(repo, extent.episode, extent.confirmed, &mut report)?;
             }
             None => {
                 let key = (extent.episode, extent.onset.as_unix_nanos());
@@ -939,6 +960,28 @@ impl FloorAnomalies {
             })
             .collect();
         let mut report = LifecycleReport::default();
+        // The parent keeps the rest: clip its other open parts off the split extent when it lies
+        // at one of their ends (the parent's Update clips the rest), so open parts never overlap.
+        for i in 0..self.parts.len() {
+            let p = &self.parts[i];
+            if !p.open
+                || p.episode != parent
+                || moving.contains(&i)
+                || overlap_hz(&p.freq, &target) <= 0.0
+            {
+                continue;
+            }
+            let rest = if target.lo_hz <= p.freq.lo_hz {
+                FreqRange::new(target.hi_hz, p.freq.hi_hz)
+            } else if target.hi_hz >= p.freq.hi_hz {
+                FreqRange::new(p.freq.lo_hz, target.lo_hz)
+            } else {
+                continue;
+            };
+            if rest.width_hz() > 0.0 {
+                self.supersede(repo, i, rest, extent.confirmed, &mut report)?;
+            }
+        }
         if moving.is_empty() {
             if self.accepts(extent.class) {
                 report.opened.push(self.insert_part(repo, extent, true)?);
@@ -978,7 +1021,68 @@ impl FloorAnomalies {
                 self.supersede(repo, i, clipped, extent.confirmed, &mut report)?;
             }
         }
+        self.absorb_into_primary(repo, extent.episode, extent.confirmed, &mut report)?;
         Ok(report)
+    }
+
+    /// Absorbs the episode's other open parts that overlap its open primary: the primary grows
+    /// to their hull (inside the episode's extent, since every part is), each absorbed part's
+    /// latest Explanations are copied to it, and the part is resolved `absorbed;by=<primary>`
+    /// (reported as superseded by the primary). Open anomalies of one episode never overlap.
+    fn absorb_into_primary(
+        &mut self,
+        repo: &mut Repository,
+        episode: u64,
+        t: Timestamp,
+        report: &mut LifecycleReport,
+    ) -> Result<(), AnomalyError> {
+        let Some(pi) = self
+            .parts
+            .iter()
+            .position(|p| p.open && p.primary && p.episode == episode)
+        else {
+            return Ok(());
+        };
+        let mut hull = self.parts[pi].freq;
+        let mut absorbed: Vec<usize> = Vec::new();
+        loop {
+            let before = absorbed.len();
+            for (j, p) in self.parts.iter().enumerate() {
+                if j != pi
+                    && p.open
+                    && p.episode == episode
+                    && !absorbed.contains(&j)
+                    && overlap_hz(&p.freq, &hull) > 0.0
+                {
+                    hull =
+                        FreqRange::new(hull.lo_hz.min(p.freq.lo_hz), hull.hi_hz.max(p.freq.hi_hz));
+                    absorbed.push(j);
+                }
+            }
+            if absorbed.len() == before {
+                break;
+            }
+        }
+        if absorbed.is_empty() {
+            return Ok(());
+        }
+        if hull != self.parts[pi].freq {
+            self.supersede(repo, pi, hull, t, report)?;
+        }
+        let into = self.parts[pi].anomaly;
+        for j in absorbed {
+            let from = self.parts[j].anomaly;
+            copy_explanations(repo, from, into, t)?;
+            repo.append_anomaly_status(&AnomalyStatusChange {
+                anomaly_id: from,
+                status: AnomalyStatus::Resolved,
+                t,
+                note: Some(format!("absorbed;by={into}")),
+            })?;
+            self.parts[j].open = false;
+            report.superseded.push((from, into));
+        }
+        Ok(())
     }
 
     fn close_where(
