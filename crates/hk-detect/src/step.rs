@@ -12,44 +12,71 @@
 //! stays active `hold_frames` frames after the jump disappears. Contiguous active pairs with the
 //! same direction form one **event**.
 //!
-//! **Plateaus are exempt.** An up event followed by a down event bounds a plateau only when both
-//! outer sides (the lowest block floor on the low side of each event) lie within
-//! `plateau_match_db` of the band's median block floor: a signal-like bump above the common floor,
-//! such as a flat signal wider than about a block. There the per-frame floor is biased low only
-//! over bins that carry the signal, so floor-branch detections are true (they find the signal's
-//! edges). A plateau with a notch on one side, or between two different floor levels (a notch plus
-//! a second down-step, a staircase), is not one (T-028). The segment between a down event and the
-//! next up event is a dip (a notch). An event is guarded when it bounds a dip, or when it bounds no
-//! plateau: bins from `centre(first pair) − margin` to `centre(last pair + sep) + margin`
-//! (margin = `margin_blocks` × block) are guarded. Bins within the margin of a configured known
-//! response edge (`DetectorConfig::response_edges_hz`) are always guarded.
+//! **Floor features and signals (T-033).** A filter-bank passband and a flat signal wider than a
+//! block both raise the block floors over a span with sharp edges. What separates them is the
+//! power statistics over time: inside a floor feature every bin is noise, so its frame-to-frame
+//! power variance is that of the floor, `var(P)·n/mean(P)² ≈ 1` (`Gamma(n)`, `n` =
+//! `FloorFrame::n_avg_effective`); a signal adds power whose variance differs (a steady signal
+//! lowers the ratio to `(N/(S+N))²`, a keyed or fading one raises it). The guard keeps per-bin
+//! running statistics (EMA, `stat_time_constant_frames`; impulsive frames skipped) and classifies
+//! a feature by the median ratio over its **elevated** bins (above the geometric mean of its side
+//! level and the jump): within `[floor_like_min, floor_like_max]` it is *floor-like*, outside it
+//! *signal-like*, and with fewer than `stat_min_frames` frames or `stat_min_bins` elevated bins it
+//! is *undecided*, which is handled as floor-like (conservative).
+//!
+//! **Plateaus.** An up event followed by a down event bounds a plateau when both outer sides (the
+//! lowest block floor on the low side of each event) lie within `plateau_match_db` of the band's
+//! median block floor. A **signal-like** plateau is exempt: there the per-frame floor is biased
+//! low only over bins that carry the signal, so floor-branch detections are true (they find the
+//! signal's edges). A floor-like plateau (a filter-bank passband) is guarded like a step. A
+//! plateau with a notch on one side, or between two different floor levels (a notch plus a second
+//! down-step, a staircase), is not one (T-028). The segment between a down event and the next up
+//! event is a dip (a notch). An event is guarded when it bounds a dip, or when it bounds no exempt
+//! plateau: bins from `centre(first pair) − margin` to `centre(last pair + sep) + margin` (margin
+//! = `margin_blocks` × block) are guarded. Bins within the margin of a configured known response
+//! edge (`DetectorConfig::response_edges_hz`) are always guarded.
 //!
 //! **Guarded bins use the wide reference where the shape explains the step** (T-028). The
-//! tracker's wide reference is built on shape-normalised block floors (T-005), so a notch or
-//! roll-off that the learned shape `S` explains does not bias it; an unlearned step, or a floor
-//! shelf *above* the band floor (`S` never learns upward features, so the wide reference reads it
-//! as a signal), does. Once the shape is trusted (the detector passes it from the floor segment's
-//! `wide_min_frames`-th frame), the guard reconstructs the normalised block floors
-//! (`floor / S` at each block centre when some block's shape varies by more than 1 dB, as the
-//! tracker does; the raw block floors otherwise) and flags a normalised block as *unexplained*
-//! when it sits more than `wide_residual_db` below their median, lies in a residual jump above
-//! `wide_step_db` that is guarded by the same dip/plateau rule, or lies in a residual plateau wider
-//! than `wide_max_plateau_blocks` (a shelf above the band floor and a wide signal are the same
-//! after the shape; only a narrow one is taken for a signal). A guarded zone with no unexplained
-//! block within one block of it runs the floor branch against `FloorFrame::wide_floor`
-//! ([`StepGuard::wide_mask`]); otherwise it is OS-only. A flat signal up to about 1 MHz next to a
-//! notch leaves only a narrow residual plateau, so it keeps the floor branch.
+//! tracker's wide reference is built on the shape-normalised block floors
+//! (`FloorFrame::norm_block_floor`), so a notch or roll-off that the learned shape explains does
+//! not bias it; an unlearned step, or a floor feature *above* the band floor (the shape never
+//! learns upward features, so the wide reference reads it as a signal), does. Once the shape is
+//! trusted (the detector passes it from the floor segment's `wide_min_frames`-th frame), a
+//! normalised block is *unexplained* when it sits more than `wide_residual_db` below their median,
+//! or lies in a residual jump above `wide_step_db` that the same dip/plateau rule guards (so a
+//! residual plateau is explained only when it is signal-like, at any width: a narrow floor shelf
+//! next to a learned step is unexplained, a flat signal next to a notch is not). A guarded zone
+//! with no unexplained block within one block of it runs the floor branch against
+//! `FloorFrame::wide_floor` ([`StepGuard::wide_mask`]); otherwise it is OS-only.
 //!
-//! **Limits.** A floor shelf narrower than `wide_max_plateau_blocks` next to a learned step reads
-//! as a signal (the wide reference is low over it); a shelf whose raw sides are both at the band
-//! floor is a plateau and is exempt (a filter-bank passband with sharp edges).
+//! **Wide reference over floor features.** When the floor branch runs on the wide reference
+//! ([`WideView`]), the guard also finds where it has cut a plateau (`wide_floor` more than
+//! `wide_cut_db` below `floor`, extended while it is below at all): a signal-like cut keeps the
+//! wide reference (a wide signal's interior); a floor-like or undecided one is a floor feature and
+//! runs on the per-frame floor instead ([`StepGuard::frame_ref_mask`]; guarded bins there are
+//! OS-only).
+//!
+//! **OS-only bins** hold the OS branch's guard against the upper envelope of the raw block floors
+//! within one block ([`StepGuard::os_floor`]): next to a sharp step the per-frame floor is biased
+//! low and the OS reference cells straddle the step, so the plain guard let the OS branch fire on
+//! the high side of a +6 dB edge. While a pair's jump stays above `release_db` in its direction,
+//! an active pair is refreshed and a pending pair keeps its persistence count, so a step close to
+//! `jump_db` neither flickers nor waits for consecutive exceedances.
+//!
+//! **Limits.** A stationary noise-like emission (Gaussian at the bin level: OFDM, a wideband noise
+//! jammer) has the floor's statistics and is taken for a floor feature: its edges are OS-only and,
+//! on the wide reference, its interior runs on the per-frame floor (which reads it as floor). The
+//! floor tracker's change episodes (AWARE-006) report such rises. During a feature's first
+//! `stat_min_frames` frames it is guarded.
 //!
 //! **What does not trigger it.** A narrowband emitter (an FM station is ~40 of 256 bins) does not
 //! move a block floor.
 //!
 //! The guard needs the floor tracker's block layout (`blocks`, default 256/64). When the frame's
-//! block count does not match it, the guard is unavailable for that frame and only the configured
-//! edges are guarded (OS-only; counted by the detector).
+//! block count does not match it, the jump test is unavailable for that frame and only the
+//! configured edges are guarded (OS-only; counted by the detector).
+
+use std::ops::Range;
 
 use hk_dsp::floor::BlockConfig;
 
@@ -58,24 +85,38 @@ use crate::rules::Geometry;
 /// Floor-step guard settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StepGuardConfig {
-    /// A block-floor jump above this is a step, dB (6).
+    /// A block-floor jump above this is a step, dB (5: a +6 dB passband's expected block jump is
+    /// 6.0 dB, so a 6 dB threshold caught it in only about half the frames).
     pub jump_db: f64,
     /// Consecutive frames a jump must persist to activate, frames (2).
     pub persist_frames: u32,
     /// Frames a pair stays active after its jump disappears (32).
     pub hold_frames: u32,
+    /// An active pair's hold is refreshed while its jump stays above this in the same direction,
+    /// dB (3), so a step near `jump_db` (a +6 dB passband) does not flicker.
+    pub release_db: f64,
     /// Guard margin beyond the event's block centres, in blocks (1).
     pub margin_blocks: f64,
     /// Both sides of a plateau must lie within this of the median block floor, dB (3).
     pub plateau_match_db: f64,
     /// A shape-normalised block floor more than this below their median is unexplained, dB (1.5).
     pub wide_residual_db: f64,
-    /// A shape-normalised block-floor jump above this that bounds no plateau is unexplained, dB (3).
+    /// A shape-normalised block-floor jump above this that bounds no exempt plateau is
+    /// unexplained, dB (3).
     pub wide_step_db: f64,
-    /// A residual (shape-normalised) plateau wider than this is unexplained, blocks (16: ≈ 1 MHz
-    /// at 20 Msps / 4096 bins). A floor shelf above the band floor and a wide signal look the
-    /// same after the shape; only a narrow one is taken for a signal.
-    pub wide_max_plateau_blocks: usize,
+    /// Where the wide reference lies more than this below the per-frame floor it has cut a
+    /// plateau, dB (3).
+    pub wide_cut_db: f64,
+    /// Lower bound of the floor-like band of a feature's median `var(P)·n/mean(P)²` (0.5).
+    pub floor_like_min: f64,
+    /// Upper bound of the floor-like band (2).
+    pub floor_like_max: f64,
+    /// Frames of power statistics before a feature is classified (16).
+    pub stat_min_frames: u64,
+    /// Time constant of the per-bin power statistics, frames (32).
+    pub stat_time_constant_frames: f64,
+    /// A feature with fewer elevated bins than this is undecided (32).
+    pub stat_min_bins: usize,
     /// Frames of a floor segment before the learned shape is trusted (32: the tracker applies it
     /// from the segment's 32nd frame).
     pub wide_min_frames: u64,
@@ -86,32 +127,60 @@ pub struct StepGuardConfig {
 impl Default for StepGuardConfig {
     fn default() -> Self {
         Self {
-            jump_db: 6.0,
+            jump_db: 5.0,
             persist_frames: 2,
             hold_frames: 32,
+            release_db: 3.0,
             margin_blocks: 1.0,
             plateau_match_db: 3.0,
             wide_residual_db: 1.5,
             wide_step_db: 3.0,
-            wide_max_plateau_blocks: 16,
+            wide_cut_db: 3.0,
+            floor_like_min: 0.5,
+            floor_like_max: 2.0,
+            stat_min_frames: 16,
+            stat_time_constant_frames: 32.0,
+            stat_min_bins: 32,
             wide_min_frames: 32,
             blocks: BlockConfig::default(),
         }
     }
 }
 
-/// The floor tracker's learned response shape and its shaped per-frame floor
-/// (`FloorFrame::{shape, floor}`), per bin.
+/// The floor tracker's learned shape and shape-normalised block floors, once trusted.
 #[derive(Clone, Copy, Debug)]
 pub struct ShapeView<'a> {
     /// `FloorFrame::shape`.
     pub shape: &'a [f32],
-    /// `FloorFrame::floor`.
-    pub floor: &'a [f32],
+    /// `FloorFrame::norm_block_floor`.
+    pub norm_block_floor: &'a [f32],
 }
 
-/// A shape block whose range exceeds this is normalised by the tracker (hk-dsp `ACTIVE_RANGE_DB`).
-const SHAPE_ACTIVE_RANGE_DB: f64 = 1.0;
+/// The per-frame and wide floors, when the floor branch runs on the wide reference.
+#[derive(Clone, Copy, Debug)]
+pub struct WideView<'a> {
+    /// `FloorFrame::floor`.
+    pub floor: &'a [f32],
+    /// `FloorFrame::wide_floor`.
+    pub wide_floor: &'a [f32],
+}
+
+/// One frame's guard inputs.
+#[derive(Clone, Copy, Debug)]
+pub struct GuardFrame<'a> {
+    /// The frame's PSD (`Spectrum::psd`).
+    pub psd: &'a [f32],
+    /// `FloorFrame::n_avg_effective`.
+    pub n_avg_effective: f64,
+    /// `FloorFrame::impulsive` (the frame does not update the power statistics).
+    pub impulsive: bool,
+    /// `FloorFrame::block_floor` (raw block FCME).
+    pub block_floor: &'a [f32],
+    /// The trusted shape (`None`: guarded zones are OS-only).
+    pub shape: Option<ShapeView<'a>>,
+    /// The per-frame and wide floors when the configured reference is the wide one.
+    pub wide: Option<WideView<'a>>,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Event {
@@ -123,6 +192,58 @@ struct Event {
     guarded: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Class {
+    Undecided,
+    FloorLike,
+    SignalLike,
+}
+
+/// Per-bin running power statistics.
+#[derive(Clone, Copy)]
+struct Stats<'a> {
+    mean: &'a [f32],
+    var: &'a [f32],
+    ready: bool,
+    n_eff: f32,
+    lo: f32,
+    hi: f32,
+    min_bins: usize,
+}
+
+impl Stats<'_> {
+    /// Classifies the bins of `bins` for which `elevated(bin, mean)` holds.
+    fn class(
+        &self,
+        bins: Range<usize>,
+        elevated: impl Fn(usize, f32) -> bool,
+        scratch: &mut Vec<f32>,
+    ) -> Class {
+        if !self.ready {
+            return Class::Undecided;
+        }
+        scratch.clear();
+        for b in bins {
+            if elevated(b, self.mean[b]) {
+                scratch.push(self.var[b]);
+            }
+        }
+        if scratch.len() < self.min_bins.max(1) {
+            return Class::Undecided;
+        }
+        let mid = scratch.len() / 2;
+        let (_, &mut v, _) = scratch.select_nth_unstable_by(mid, f32::total_cmp);
+        let r = v * self.n_eff;
+        if r.is_nan() {
+            Class::Undecided
+        } else if (self.lo..=self.hi).contains(&r) {
+            Class::FloorLike
+        } else {
+            Class::SignalLike
+        }
+    }
+}
+
 /// Per-segment guard state. Buffers are sized per resolution.
 #[derive(Clone, Debug)]
 pub struct StepGuard {
@@ -132,14 +253,20 @@ pub struct StepGuard {
     dir: Vec<i8>,
     events: Vec<Event>,
     norm_events: Vec<Event>,
+    plateaus: Vec<bool>,
     mask: Vec<bool>,
     wide: Vec<bool>,
-    norm: Vec<f32>,
+    frame_ref: Vec<bool>,
+    os_floor: Vec<f32>,
     unexplained: Vec<bool>,
     scratch: Vec<f32>,
+    mean: Vec<f32>,
+    var: Vec<f32>,
+    stat_frames: u64,
     available: bool,
     guarded: usize,
     wide_bins: usize,
+    frame_ref_bins: usize,
 }
 
 fn ratio_of(db: f64) -> f32 {
@@ -206,9 +333,19 @@ fn group_events(
     }
 }
 
-/// Marks guarded events: those bounding a dip, or bounding no plateau whose two low sides lie
-/// within `near` of `band` (`level` holds the block values the events were built from).
-fn classify_events(events: &mut [Event], level: &[f32], sep: usize, band: f32, near: f32) {
+/// Marks guarded events: those bounding a dip, or bounding no exempt plateau. A plateau is an up
+/// event and the next down event whose two low sides lie within `near` of `band` (`level` holds
+/// the block values the events were built from) and for which `exempt(up, down, side)` holds
+/// (`side`: the higher of the two low sides). `plateaus` is scratch.
+fn classify_events(
+    events: &mut [Event],
+    plateaus: &mut Vec<bool>,
+    level: &[f32],
+    sep: usize,
+    band: f32,
+    near: f32,
+    mut exempt: impl FnMut(&Event, &Event, f32) -> bool,
+) {
     let floor_level = |x: f32| x > 0.0 && x <= band * near && x * near >= band;
     let low_side = |e: &Event| {
         if e.dir > 0 {
@@ -217,15 +354,24 @@ fn classify_events(events: &mut [Event], level: &[f32], sep: usize, band: f32, n
             min_of(&level[e.first_pair + sep..=e.last_pair + sep])
         }
     };
-    let plateau = |up: &Event, down: &Event| {
-        up.dir > 0 && down.dir < 0 && floor_level(low_side(up)) && floor_level(low_side(down))
-    };
+    plateaus.clear();
+    for w in events.windows(2) {
+        let (up, down) = (&w[0], &w[1]);
+        let (a, b) = (low_side(up), low_side(down));
+        plateaus.push(
+            up.dir > 0
+                && down.dir < 0
+                && floor_level(a)
+                && floor_level(b)
+                && exempt(up, down, a.max(b)),
+        );
+    }
     for k in 0..events.len() {
         let e = events[k];
         let prev = k.checked_sub(1).map(|p| events[p]);
         let next = events.get(k + 1).copied();
-        let plateau_before = prev.is_some_and(|p| plateau(&p, &e));
-        let plateau_after = next.is_some_and(|x| plateau(&e, &x));
+        let plateau_before = k > 0 && plateaus[k - 1];
+        let plateau_after = plateaus.get(k).copied().unwrap_or(false);
         let dip_before = prev.is_some_and(|p| p.dir < 0) && e.dir > 0;
         let dip_after = e.dir < 0 && next.is_some_and(|x| x.dir > 0);
         events[k].guarded = dip_before || dip_after || !(plateau_before || plateau_after);
@@ -242,14 +388,20 @@ impl StepGuard {
             dir: Vec::new(),
             events: Vec::new(),
             norm_events: Vec::new(),
+            plateaus: Vec::new(),
             mask: Vec::new(),
             wide: Vec::new(),
-            norm: Vec::new(),
+            frame_ref: Vec::new(),
+            os_floor: Vec::new(),
             unexplained: Vec::new(),
             scratch: Vec::new(),
+            mean: Vec::new(),
+            var: Vec::new(),
+            stat_frames: 0,
             available: false,
             guarded: 0,
             wide_bins: 0,
+            frame_ref_bins: 0,
         }
     }
 
@@ -258,140 +410,234 @@ impl StepGuard {
         &self.cfg
     }
 
-    /// Starts a segment of `bins` bins (clears the persistence state).
+    fn size(&mut self, bins: usize) {
+        if self.mask.len() != bins {
+            self.mask.resize(bins, true);
+            self.wide.resize(bins, false);
+            self.frame_ref.resize(bins, false);
+            self.os_floor.resize(bins, 0.0);
+            self.mean.resize(bins, 0.0);
+            self.var.resize(bins, 0.0);
+            self.scratch.reserve(bins);
+            self.stat_frames = 0;
+        }
+    }
+
+    /// Starts a segment of `bins` bins (clears the persistence state and the power statistics).
     pub fn reset(&mut self, bins: usize) {
-        self.mask.resize(bins, true);
+        self.size(bins);
         self.mask.fill(true);
-        self.wide.resize(bins, false);
         self.wide.fill(false);
+        self.frame_ref.fill(false);
+        self.os_floor.fill(0.0);
+        self.mean.fill(0.0);
+        self.var.fill(0.0);
+        self.stat_frames = 0;
         self.persist.fill(0);
         self.hold.fill(0);
         self.dir.fill(0);
         self.guarded = 0;
         self.wide_bins = 0;
+        self.frame_ref_bins = 0;
         self.available = false;
     }
 
-    /// Updates the masks from one frame's block floors (linear, raw block FCME) and returns the
-    /// per-frame mask: `true` where the floor branch may run on the per-frame reference. `shape`
-    /// is the tracker's learned shape once it is trusted (`None`: guarded zones are OS-only).
+    /// Folds one frame into the per-bin power statistics.
+    fn observe(&mut self, psd: &[f32], impulsive: bool) {
+        if impulsive || psd.len() != self.mean.len() {
+            return;
+        }
+        let k = self.stat_frames as f64;
+        let tau = self.cfg.stat_time_constant_frames.max(1.0);
+        let am = (1.0 / (k + 1.0)).max(1.0 / tau) as f32;
+        let av = (1.0 / k.max(1.0)).max(1.0 / tau) as f32;
+        for ((m, v), &p) in self.mean.iter_mut().zip(self.var.iter_mut()).zip(psd) {
+            if !(p.is_finite() && p > 0.0) {
+                continue;
+            }
+            if (*m).partial_cmp(&0.0).is_none_or(|o| o.is_le()) {
+                *m = p;
+                *v = 0.0;
+                continue;
+            }
+            let d = (p - *m) / *m;
+            *v += av * (d * d - *v);
+            *m += am * (p - *m);
+        }
+        self.stat_frames += 1;
+    }
+
+    /// Updates the masks from one frame and returns the per-frame mask: `true` where the floor
+    /// branch may run on the configured reference.
     pub fn update(
         &mut self,
-        block_floor: &[f32],
+        frame: GuardFrame<'_>,
         geometry: &Geometry,
         edges_hz: &[f64],
-        shape: Option<ShapeView<'_>>,
     ) -> &[bool] {
         let n = geometry.bins;
-        self.mask.resize(n, true);
+        self.size(n);
         self.mask.fill(true);
-        self.wide.resize(n, false);
         self.wide.fill(false);
+        self.frame_ref.fill(false);
+        self.os_floor.fill(0.0);
+        self.observe(frame.psd, frame.impulsive);
         let block = self.cfg.blocks.block_bins.min(n).max(1);
         let hop = self.cfg.blocks.hop_bins.max(1);
         let margin = (self.cfg.margin_blocks * block as f64).round() as isize;
         let expected = (n - block) / hop + 1;
+        let block_floor = frame.block_floor;
         self.available = block_floor.len() == expected;
         self.events.clear();
         let near = ratio_of(self.cfg.plateau_match_db);
+        let Self {
+            cfg,
+            persist,
+            hold,
+            dir,
+            events,
+            norm_events,
+            plateaus,
+            mask,
+            wide,
+            frame_ref,
+            os_floor,
+            unexplained,
+            scratch,
+            mean,
+            var,
+            ..
+        } = self;
+        let stats = Stats {
+            mean,
+            var,
+            ready: self.stat_frames >= cfg.stat_min_frames,
+            n_eff: frame.n_avg_effective as f32,
+            lo: cfg.floor_like_min as f32,
+            hi: cfg.floor_like_max as f32,
+            min_bins: cfg.stat_min_bins,
+        };
+        let centre = |i: usize| (i * hop) as isize + (block as isize - 1) / 2;
+        let sep = block.div_ceil(hop);
+        let bins_of = |up: &Event, down: &Event| {
+            let lo = centre(up.first_pair).clamp(0, n as isize) as usize;
+            let hi = (centre(down.last_pair + sep) + 1).clamp(0, n as isize) as usize;
+            lo..hi.max(lo)
+        };
         let mut wide_ready = false;
         if self.available {
-            if self.persist.len() != expected {
-                self.persist.clear();
-                self.persist.resize(expected, 0);
-                self.hold.clear();
-                self.hold.resize(expected, 0);
-                self.dir.clear();
-                self.dir.resize(expected, 0);
-                self.norm.clear();
-                self.norm.resize(expected, 0.0);
-                self.unexplained.clear();
-                self.unexplained.resize(expected, false);
-                self.scratch.reserve(expected);
-                self.events.reserve(expected);
-                self.norm_events.reserve(expected);
+            if persist.len() != expected {
+                persist.clear();
+                persist.resize(expected, 0);
+                hold.clear();
+                hold.resize(expected, 0);
+                dir.clear();
+                dir.resize(expected, 0);
+                unexplained.clear();
+                unexplained.resize(expected, false);
+                events.reserve(expected);
+                norm_events.reserve(expected);
+                plateaus.reserve(expected);
             }
-            let sep = block.div_ceil(hop);
             let pairs = expected.saturating_sub(sep);
-            let ratio = ratio_of(self.cfg.jump_db);
-            let centre = |i: usize| (i * hop) as isize + (block as isize - 1) / 2;
+            let ratio = ratio_of(cfg.jump_db);
+            let release = ratio_of(cfg.release_db);
             let span = |i: usize| (centre(i) - margin, centre(i + sep) + margin + 1);
             for i in 0..pairs {
                 let d = jump_dir(block_floor[i], block_floor[i + sep], ratio);
                 if d != 0 {
-                    self.persist[i] = self.persist[i].saturating_add(1);
-                    self.dir[i] = d;
-                    if self.persist[i] >= self.cfg.persist_frames {
-                        self.hold[i] = self.cfg.hold_frames.max(1);
+                    persist[i] = persist[i].saturating_add(1);
+                    dir[i] = d;
+                    if persist[i] >= cfg.persist_frames {
+                        hold[i] = cfg.hold_frames.max(1);
                     }
                 } else {
-                    self.persist[i] = 0;
-                    self.hold[i] = self.hold[i].saturating_sub(1);
-                }
-            }
-            let (hold, dir) = (&self.hold, &self.dir);
-            group_events(
-                &mut self.events,
-                pairs,
-                |i| if hold[i] > 0 { dir[i] } else { 0 },
-                span,
-            );
-            if !self.events.is_empty() {
-                let band = median(block_floor, &mut self.scratch);
-                classify_events(&mut self.events, block_floor, sep, band, near);
-                for e in self.events.iter().filter(|e| e.guarded) {
-                    let lo = e.lo.clamp(0, n as isize) as usize;
-                    let hi = e.hi.clamp(0, n as isize) as usize;
-                    self.mask[lo..hi].fill(false);
-                }
-            }
-            if let Some(v) = shape.filter(|v| v.shape.len() == n && v.floor.len() == n)
-                && (!self.events.is_empty() || !edges_hz.is_empty())
-            {
-                // The tracker's normalised block floors.
-                let active = ratio_of(SHAPE_ACTIVE_RANGE_DB);
-                let any_active = (0..expected).any(|j| {
-                    let s = &v.shape[j * hop..j * hop + block];
-                    let (lo, hi) = s
-                        .iter()
-                        .fold((f32::INFINITY, 0.0f32), |(a, b), &x| (a.min(x), b.max(x)));
-                    hi > lo * active
-                });
-                for (j, x) in self.norm.iter_mut().enumerate() {
-                    let c = (j * hop + block / 2).min(n - 1);
-                    *x = if any_active {
-                        v.floor[c] / v.shape[c].max(1e-30)
+                    // Above `release_db` in the same direction: an active pair is refreshed and a
+                    // pending one keeps its count (a step near `jump_db` activates promptly).
+                    let near_jump =
+                        jump_dir(block_floor[i], block_floor[i + sep], release) == dir[i];
+                    if !near_jump {
+                        persist[i] = 0;
+                    }
+                    hold[i] = if near_jump && hold[i] > 0 {
+                        cfg.hold_frames.max(1)
                     } else {
-                        block_floor[j]
+                        hold[i].saturating_sub(1)
                     };
                 }
-                let med = median(&self.norm, &mut self.scratch);
+            }
+            {
+                let (hold, dir) = (&*hold, &*dir);
+                group_events(
+                    events,
+                    pairs,
+                    |i| if hold[i] > 0 { dir[i] } else { 0 },
+                    span,
+                );
+            }
+            if !events.is_empty() {
+                let band = median(block_floor, scratch);
+                let thr = ratio.sqrt();
+                // `scratch` is reused inside: take it out for the closure.
+                let mut buf = std::mem::take(scratch);
+                classify_events(
+                    events,
+                    plateaus,
+                    block_floor,
+                    sep,
+                    band,
+                    near,
+                    |up, down, side| {
+                        let t = side * thr;
+                        stats.class(bins_of(up, down), |_, m| m > t, &mut buf) == Class::SignalLike
+                    },
+                );
+                *scratch = buf;
+                for e in events.iter().filter(|e| e.guarded) {
+                    let lo = e.lo.clamp(0, n as isize) as usize;
+                    let hi = e.hi.clamp(0, n as isize) as usize;
+                    mask[lo..hi].fill(false);
+                }
+            }
+            if let Some(v) = frame
+                .shape
+                .filter(|v| v.shape.len() == n && v.norm_block_floor.len() == expected)
+                && (!events.is_empty() || !edges_hz.is_empty())
+            {
+                let norm = v.norm_block_floor;
+                let med = median(norm, scratch);
                 if med > 0.0 {
-                    let residual = ratio_of(self.cfg.wide_residual_db);
-                    for (u, &x) in self.unexplained.iter_mut().zip(&self.norm) {
+                    let residual = ratio_of(cfg.wide_residual_db);
+                    for (u, &x) in unexplained.iter_mut().zip(norm) {
                         // NaN (incomparable) counts as unexplained.
                         *u = (x * residual).partial_cmp(&med).is_none_or(|o| o.is_lt());
                     }
-                    let norm = &self.norm;
-                    let step = ratio_of(self.cfg.wide_step_db);
+                    let step = ratio_of(cfg.wide_step_db);
                     group_events(
-                        &mut self.norm_events,
+                        norm_events,
                         pairs,
                         |i| jump_dir(norm[i], norm[i + sep], step),
                         span,
                     );
-                    classify_events(&mut self.norm_events, norm, sep, med, near);
-                    let max_width = self.cfg.wide_max_plateau_blocks;
-                    for (k, e) in self.norm_events.iter().enumerate() {
-                        if e.guarded {
-                            self.unexplained[e.first_pair..=e.last_pair + sep].fill(true);
-                        } else if e.dir > 0
-                            && let Some(down) = self.norm_events.get(k + 1)
-                            && down.last_pair + sep - e.first_pair > max_width
-                        {
-                            // An unguarded up event is a plateau with the next (down) event.
-                            self.unexplained[e.first_pair..=down.last_pair + sep].fill(true);
-                        }
+                    let thr = step.sqrt();
+                    let shape = v.shape;
+                    let mut buf = std::mem::take(scratch);
+                    classify_events(
+                        norm_events,
+                        plateaus,
+                        norm,
+                        sep,
+                        med,
+                        near,
+                        |up, down, side| {
+                            let t = side * thr;
+                            stats.class(bins_of(up, down), |b, m| m > t * shape[b], &mut buf)
+                                == Class::SignalLike
+                        },
+                    );
+                    *scratch = buf;
+                    for e in norm_events.iter().filter(|e| e.guarded) {
+                        unexplained[e.first_pair..=e.last_pair + sep].fill(true);
                     }
                     wide_ready = true;
                 }
@@ -409,7 +655,7 @@ impl StepGuard {
         };
         for &f in edges_hz {
             if let Some((lo, hi)) = edge_range(f) {
-                self.mask[lo..hi].fill(false);
+                mask[lo..hi].fill(false);
             }
         }
         if wide_ready {
@@ -419,15 +665,15 @@ impl StepGuard {
             let valid = |lo: usize, hi: usize| {
                 let j_hi = ((hi + block) / hop).min(nb - 1);
                 let j_lo = (lo.saturating_sub(block) / hop).min(j_hi);
-                !self.unexplained[j_lo..=j_hi].iter().any(|&u| u)
+                !unexplained[j_lo..=j_hi].iter().any(|&u| u)
             };
             // Valid zones first, then invalid ones, so an overlap stays OS-only.
             for pass in [true, false] {
-                for e in self.events.iter().filter(|e| e.guarded) {
+                for e in events.iter().filter(|e| e.guarded) {
                     let lo = e.lo.clamp(0, n as isize) as usize;
                     let hi = e.hi.clamp(0, n as isize) as usize;
                     if lo < hi && valid(lo, hi) == pass {
-                        self.wide[lo..hi].fill(pass);
+                        wide[lo..hi].fill(pass);
                     }
                 }
                 for &f in edges_hz {
@@ -435,17 +681,68 @@ impl StepGuard {
                         && lo < hi
                         && valid(lo, hi) == pass
                     {
-                        self.wide[lo..hi].fill(pass);
+                        wide[lo..hi].fill(pass);
+                    }
+                }
+            }
+        }
+        if let Some(w) = frame
+            .wide
+            .filter(|w| w.floor.len() == n && w.wide_floor.len() == n)
+        {
+            // Where the wide reference cut a plateau: a floor-like or undecided cut is a floor
+            // feature and runs on the per-frame floor.
+            let seed = ratio_of(cfg.wide_cut_db);
+            let below = |b: usize| w.wide_floor[b] < w.floor[b];
+            let mut b = 0;
+            while b < n {
+                if (w.wide_floor[b] * seed)
+                    .partial_cmp(&w.floor[b])
+                    .is_none_or(|o| o.is_ge())
+                {
+                    b += 1;
+                    continue;
+                }
+                let mut lo = b;
+                while lo > 0 && below(lo - 1) {
+                    lo -= 1;
+                }
+                let mut hi = b + 1;
+                while hi < n && below(hi) {
+                    hi += 1;
+                }
+                let class = stats.class(lo..hi, |k, m| m > w.wide_floor[k] * seed, scratch);
+                if class != Class::SignalLike {
+                    frame_ref[lo..hi].fill(true);
+                }
+                b = hi;
+            }
+            for (x, &f) in wide.iter_mut().zip(frame_ref.iter()) {
+                *x &= !f;
+            }
+        }
+        // OS-only bins: the OS guard holds against the upper envelope of the block floors within
+        // one block (the per-frame floor is biased low next to a sharp step, where the OS
+        // branch's reference cells straddle it too).
+        if self.available && mask.iter().any(|&ok| !ok) {
+            for (j, &f) in block_floor.iter().enumerate() {
+                let c = centre(j);
+                let lo = (c - block as isize).clamp(0, n as isize) as usize;
+                let hi = (c + block as isize + 1).clamp(0, n as isize) as usize;
+                for b in lo..hi {
+                    if !mask[b] && !wide[b] && f.is_finite() {
+                        os_floor[b] = os_floor[b].max(f);
                     }
                 }
             }
         }
         self.guarded = self.mask.iter().filter(|&&ok| !ok).count();
         self.wide_bins = self.wide.iter().filter(|&&w| w).count();
+        self.frame_ref_bins = self.frame_ref.iter().filter(|&&f| f).count();
         &self.mask
     }
 
-    /// The last per-frame mask (`true`: floor branch allowed on the per-frame reference).
+    /// The last per-frame mask (`true`: floor branch allowed on the configured reference).
     pub fn mask(&self) -> &[bool] {
         &self.mask
     }
@@ -453,6 +750,20 @@ impl StepGuard {
     /// The last wide mask (`true`: a guarded bin whose floor branch runs on the wide reference).
     pub fn wide_mask(&self) -> &[bool] {
         &self.wide
+    }
+
+    /// The last frame-reference mask (`true`: the wide reference cut a floor feature there, so the
+    /// floor branch and the OS guard use the per-frame floor). Only set when the frame carried a
+    /// [`WideView`].
+    pub fn frame_ref_mask(&self) -> &[bool] {
+        &self.frame_ref
+    }
+
+    /// The last OS-guard floor of OS-only bins (guarded, not on the wide reference): the upper
+    /// envelope of the raw block floors within one block; 0 elsewhere. The detector raises its
+    /// floor reference there to at least this.
+    pub fn os_floor(&self) -> &[f32] {
+        &self.os_floor
     }
 
     /// Bins guarded in the last frame (both wide-reference and OS-only).
@@ -465,6 +776,11 @@ impl StepGuard {
         self.wide_bins
     }
 
+    /// Bins of the last frame on the per-frame floor instead of the wide reference.
+    pub fn frame_ref_bins(&self) -> usize {
+        self.frame_ref_bins
+    }
+
     /// The block layout matched the last frame.
     pub fn available(&self) -> bool {
         self.available
@@ -475,6 +791,8 @@ impl StepGuard {
 mod tests {
     use super::*;
     use crate::config::EdgeRule;
+
+    const N_EFF: f64 = 10.0;
 
     fn geometry() -> Geometry {
         Geometry::new(98e6, 20e6, 4096, 15e6, &EdgeRule::default())
@@ -489,67 +807,152 @@ mod tests {
         blocks_with(|j| min_of(&profile[j * 64..j * 64 + 256]))
     }
 
-    #[test]
-    fn a_persistent_notch_guards_its_neighbourhood_and_releases_after_the_hold() {
-        let g = geometry();
+    /// A bin profile from block values (each block's hop), for the power statistics.
+    fn profile_of(blocks: &[f32]) -> Vec<f32> {
+        (0..4096)
+            .map(|b| blocks[(b / 64).min(blocks.len() - 1)])
+            .collect()
+    }
+
+    /// Frame `t` of a PSD whose `noise` part has the floor's normalised variance `1/n` and whose
+    /// `steady` part is constant.
+    fn psd(noise: &[f32], steady: &[f32], t: usize) -> Vec<f32> {
+        let s = (1.0 / N_EFF).sqrt() as f32;
+        (0..noise.len())
+            .map(|b| noise[b] * (1.0 + if (b + t) % 2 == 0 { s } else { -s }) + steady[b])
+            .collect()
+    }
+
+    struct Run<'a> {
+        noise: &'a [f32],
+        steady: &'a [f32],
+        blocks: &'a [f32],
+        shape: Option<ShapeView<'a>>,
+        wide: Option<WideView<'a>>,
+    }
+
+    impl<'a> Run<'a> {
+        fn new(noise: &'a [f32], steady: &'a [f32], blocks: &'a [f32]) -> Self {
+            Self {
+                noise,
+                steady,
+                blocks,
+                shape: None,
+                wide: None,
+            }
+        }
+
+        /// `frames` frames through `s` (from frame `t0`).
+        fn go(&self, s: &mut StepGuard, t0: usize, frames: usize, edges: &[f64]) {
+            let g = geometry();
+            for t in t0..t0 + frames {
+                let p = psd(self.noise, self.steady, t);
+                s.update(
+                    GuardFrame {
+                        psd: &p,
+                        n_avg_effective: N_EFF,
+                        impulsive: false,
+                        block_floor: self.blocks,
+                        shape: self.shape,
+                        wide: self.wide,
+                    },
+                    &g,
+                    edges,
+                );
+            }
+        }
+    }
+
+    fn guard() -> StepGuard {
         let mut s = StepGuard::new(StepGuardConfig::default());
         s.reset(4096);
+        s
+    }
+
+    #[test]
+    fn a_persistent_notch_guards_its_neighbourhood_and_releases_after_the_hold() {
+        let mut s = guard();
+        let zero = vec![0.0f32; 4096];
         // Blocks 38–41 read a notch 20 dB down.
         let notch = blocks_with(|i| if (38..=41).contains(&i) { 0.01 } else { 1.0 });
         let flat = blocks_with(|_| 1.0);
-        assert!(
-            s.update(&notch, &g, &[], None).iter().all(|&ok| ok),
-            "one frame is not persistent"
-        );
-        let m = s.update(&notch, &g, &[], None).to_vec();
+        let p_notch = profile_of(&notch);
+        let p_flat = profile_of(&flat);
+        Run::new(&p_notch, &zero, &notch).go(&mut s, 0, 1, &[]);
+        assert!(s.mask().iter().all(|&ok| ok), "one frame is not persistent");
+        Run::new(&p_notch, &zero, &notch).go(&mut s, 1, 1, &[]);
+        let m = s.mask().to_vec();
         assert!(s.available());
         // The biased interpolation span (block centres 37..42 → bins 2495..2815) is guarded.
         assert!(m[2400..2900].iter().all(|&ok| !ok));
         assert!(m[..1500].iter().all(|&ok| ok) && m[3500..].iter().all(|&ok| ok));
-        for _ in 0..31 {
-            s.update(&flat, &g, &[], None);
-        }
+        Run::new(&p_flat, &zero, &flat).go(&mut s, 2, 31, &[]);
         assert!(s.guarded_bins() > 0, "held");
-        s.update(&flat, &g, &[], None);
+        Run::new(&p_flat, &zero, &flat).go(&mut s, 33, 1, &[]);
         assert_eq!(s.guarded_bins(), 0, "released");
         // A layout mismatch disables the jump test; a known edge still applies.
-        let m = s.update(&[1.0; 7], &g, &[100e6], None).to_vec();
+        let g = geometry();
+        let p = psd(&p_flat, &zero, 0);
+        let m = s
+            .update(
+                GuardFrame {
+                    psd: &p,
+                    n_avg_effective: N_EFF,
+                    impulsive: false,
+                    block_floor: &[1.0; 7],
+                    shape: None,
+                    wide: None,
+                },
+                &g,
+                &[100e6],
+            )
+            .to_vec();
         assert!(!s.available());
         let b = 2048 + (2e6 / g.bin_width_hz) as usize;
         assert!(!m[b] && m[b + 300]);
     }
 
     #[test]
-    fn plateaus_are_exempt_and_isolated_steps_are_guarded() {
-        let g = geometry();
-        let mut s = StepGuard::new(StepGuardConfig::default());
-        s.reset(4096);
-        // A flat signal 10 dB up over blocks 20–40 (a plateau): not guarded.
+    fn signal_plateaus_are_exempt_floor_plateaus_and_isolated_steps_are_guarded() {
+        let zero = vec![0.0f32; 4096];
+        // A steady signal 10 dB up over blocks 20–40 (a signal-like plateau): not guarded once
+        // classified; guarded before.
         let plateau = blocks_with(|i| if (20..=40).contains(&i) { 10.0 } else { 1.0 });
-        for _ in 0..3 {
-            s.update(&plateau, &g, &[], None);
-        }
-        assert_eq!(s.guarded_bins(), 0);
+        let flat = vec![1.0f32; 4096];
+        let signal: Vec<f32> = profile_of(&plateau).iter().map(|&x| x - 1.0).collect();
+        let mut s = guard();
+        let run = Run::new(&flat, &signal, &plateau);
+        run.go(&mut s, 0, 3, &[]);
+        assert!(s.guarded_bins() > 0, "undecided: guarded");
+        run.go(&mut s, 3, 20, &[]);
+        assert_eq!(s.guarded_bins(), 0, "signal-like plateau exempt");
+        // The same plateau of noise (a passband): guarded.
+        let mut s = guard();
+        let passband = profile_of(&plateau);
+        Run::new(&passband, &zero, &plateau).go(&mut s, 0, 40, &[]);
+        let m = s.mask();
+        assert!(!m[20 * 64 + 128] && !m[40 * 64 + 128] && m[100] && m[4000]);
         // A lone step (an accessory edge): guarded.
-        let mut s = StepGuard::new(StepGuardConfig::default());
-        s.reset(4096);
+        let mut s = guard();
         let step = blocks_with(|i| if i >= 30 { 10.0 } else { 1.0 });
-        for _ in 0..3 {
-            s.update(&step, &g, &[], None);
-        }
+        Run::new(&profile_of(&step), &zero, &step).go(&mut s, 0, 3, &[]);
         let m = s.mask();
         assert!(!m[30 * 64] && m[100] && m[4000]);
-        // A notch inside a plateau (passband roll-offs around it): the notch is guarded.
-        let mut s = StepGuard::new(StepGuardConfig::default());
-        s.reset(4096);
+        // A notch inside a signal plateau: the notch is guarded, the plateau away from it is not.
+        let mut s = guard();
         let band = blocks_with(|i| match i {
             0..=5 | 55.. => 0.1,
             30..=33 => 0.01,
             _ => 1.0,
         });
-        for _ in 0..3 {
-            s.update(&band, &g, &[], None);
-        }
+        let base = vec![0.1f32; 4096];
+        let steady: Vec<f32> = profile_of(&band)
+            .iter()
+            .map(|&x| (x - 0.1).max(0.0))
+            .collect();
+        let noise: Vec<f32> = profile_of(&band).iter().map(|&x| x.min(0.1)).collect();
+        let _ = base;
+        Run::new(&noise, &steady, &band).go(&mut s, 0, 20, &[]);
         let m = s.mask();
         assert!(!m[31 * 64 + 128], "notch guarded");
         assert!(
@@ -561,7 +964,7 @@ mod tests {
     #[test]
     fn a_notch_side_or_a_different_floor_level_is_not_a_plateau() {
         // T-006 re-probe: up … down around a segment whose sides are a notch and a lower step.
-        let g = geometry();
+        let zero = vec![0.0f32; 4096];
         let cases = [
             // Notch over blocks 9–15, back up, then a 10 dB down-step at block 47.
             blocks_with(|i| match i {
@@ -577,11 +980,10 @@ mod tests {
             }),
         ];
         for (k, blocks) in cases.iter().enumerate() {
-            let mut s = StepGuard::new(StepGuardConfig::default());
-            s.reset(4096);
-            for _ in 0..3 {
-                s.update(blocks, &g, &[], None);
-            }
+            let mut s = guard();
+            // Even a steady (signal-like) middle is not an exempt plateau.
+            Run::new(&vec![1e-3; 4096], &profile_of(blocks), blocks).go(&mut s, 0, 20, &[]);
+            let _ = &zero;
             let down = if k == 0 { 47 } else { 50 };
             let m = s.mask();
             assert!(!m[down * 64 - 60], "case {k}: second down-step guarded");
@@ -592,26 +994,26 @@ mod tests {
 
     #[test]
     fn guarded_zones_use_the_wide_reference_once_the_shape_explains_the_step() {
-        let g = geometry();
-        // A −20 dB notch over bins 1920..2240; the tracker floor follows it once learned.
+        // A −20 dB notch over bins 1920..2240; the tracker's normalised blocks are flat once the
+        // shape has learned it.
+        let zero = vec![0.0f32; 4096];
         let mut profile = vec![1.0f32; 4096];
         profile[1920..2240].fill(0.01);
         let blocks = blocks_of(&profile);
+        let flat_blocks = blocks_with(|_| 1.0);
         let unlearned = vec![1.0f32; 4096];
-        for (shape, want_wide) in [
-            (Some(&profile), true),
-            (Some(&unlearned), false),
-            (None, false),
+        for (shape, norm, want_wide) in [
+            (Some(&profile), &flat_blocks, true),
+            (Some(&unlearned), &blocks, false),
+            (None, &blocks, false),
         ] {
-            let view = shape.map(|s| ShapeView {
-                shape: s,
-                floor: &profile,
+            let mut s = guard();
+            let mut run = Run::new(&profile, &zero, &blocks);
+            run.shape = shape.map(|sh| ShapeView {
+                shape: sh,
+                norm_block_floor: norm,
             });
-            let mut s = StepGuard::new(StepGuardConfig::default());
-            s.reset(4096);
-            for _ in 0..3 {
-                s.update(&blocks, &g, &[], view);
-            }
+            run.go(&mut s, 0, 20, &[]);
             let (m, w) = (s.mask(), s.wide_mask());
             assert!(!m[2000] && !m[2300] && m[1000] && m[3500]);
             assert_eq!(w[2000] && w[2300], want_wide, "{want_wide}");
@@ -625,7 +1027,7 @@ mod tests {
         // 0 dB below bin 1200, −10 dB to 3200, −20 dB above; the shape learns only the −20 dB
         // region (below the band floor). The 0 dB shelf is unexplained (the wide reference reads
         // it as a signal): its step stays OS-only, the learned step uses the wide reference.
-        let g = geometry();
+        let zero = vec![0.0f32; 4096];
         let profile: Vec<f32> = (0..4096)
             .map(|b| match b {
                 0..1200 => 1.0,
@@ -636,55 +1038,102 @@ mod tests {
         let shape: Vec<f32> = (0..4096)
             .map(|b| if b < 3200 { 1.0 } else { 0.1 })
             .collect();
+        let norm: Vec<f32> = profile.iter().zip(&shape).map(|(&p, &s)| p / s).collect();
         let blocks = blocks_of(&profile);
-        let mut s = StepGuard::new(StepGuardConfig::default());
-        s.reset(4096);
-        let view = ShapeView {
+        let norm_blocks = blocks_of(&norm);
+        let mut s = guard();
+        let mut run = Run::new(&profile, &zero, &blocks);
+        run.shape = Some(ShapeView {
             shape: &shape,
-            floor: &profile,
-        };
-        for _ in 0..3 {
-            s.update(&blocks, &g, &[], Some(view));
-        }
+            norm_block_floor: &norm_blocks,
+        });
+        run.go(&mut s, 0, 20, &[]);
         let (m, w) = (s.mask(), s.wide_mask());
         assert!(!m[1216] && !m[3200], "both steps guarded");
         assert!(!w[1216], "shelf step OS-only");
         assert!(w[3200], "learned step on the wide reference");
     }
 
-    #[test]
-    fn a_signal_next_to_a_learned_notch_is_explained() {
-        // A +10 dB 300-bin signal 60 bins above a learned notch: only a residual plateau.
-        let g = geometry();
+    /// A −20 dB learned notch over 1600..2000 and a +10 dB feature over 2060..2060 + `width`
+    /// (`steady`: a signal; otherwise a floor shelf); returns the guard after 40 frames.
+    fn next_to_notch(width: usize, steady: bool) -> StepGuard {
         let mut shape = vec![1.0f32; 4096];
         shape[1600..2000].fill(0.01);
-        let mut profile = shape.clone();
-        for v in &mut profile[2060..2360] {
-            *v += 10.0;
+        let (lo, hi) = (2060, 2060 + width);
+        let mut noise = shape.clone();
+        let mut sig = vec![0.0f32; 4096];
+        if steady {
+            sig[lo..hi].fill(10.0);
+        } else {
+            noise[lo..hi].fill(10.0);
         }
-        let blocks = blocks_of(&profile);
-        let mut s = StepGuard::new(StepGuardConfig::default());
-        s.reset(4096);
-        let view = ShapeView {
+        let raw: Vec<f32> = noise.iter().zip(&sig).map(|(&a, &b)| a + b).collect();
+        let norm: Vec<f32> = raw.iter().zip(&shape).map(|(&p, &s)| p / s).collect();
+        let (blocks, norm_blocks) = (blocks_of(&raw), blocks_of(&norm));
+        let mut s = guard();
+        let mut run = Run::new(&noise, &sig, &blocks);
+        run.shape = Some(ShapeView {
             shape: &shape,
-            floor: &profile,
-        };
-        for _ in 0..3 {
-            s.update(&blocks, &g, &[], Some(view));
-        }
+            norm_block_floor: &norm_blocks,
+        });
+        run.go(&mut s, 0, 40, &[]);
+        s
+    }
+
+    #[test]
+    fn a_signal_next_to_a_learned_notch_is_explained() {
+        // A +10 dB 300-bin signal 60 bins above a learned notch: a signal-like residual plateau.
+        let s = next_to_notch(300, true);
         let (m, w) = (s.mask(), s.wide_mask());
         assert!((2060..2360).all(|b| !m[b] && w[b]));
     }
 
     #[test]
-    fn narrow_signals_do_not_move_block_floors() {
-        let g = geometry();
-        let mut s = StepGuard::new(StepGuardConfig::default());
-        s.reset(4096);
-        let near = blocks_with(|i| 1.0 + 0.2 * ((i % 3) as f32));
-        for _ in 0..5 {
-            s.update(&near, &g, &[], None);
+    fn a_narrow_floor_shelf_next_to_a_learned_notch_is_unexplained() {
+        // T-033: the same feature as noise (a floor shelf narrower than 16 blocks) no longer
+        // reads as a signal. (The min-of-block model here needs a full block inside the shelf.)
+        for width in [600, 900] {
+            let s = next_to_notch(width, false);
+            let (m, w) = (s.mask(), s.wide_mask());
+            assert!(
+                (2060..2060 + width).all(|b| m[b] || !w[b]),
+                "{width}: shelf guarded bins OS-only"
+            );
+            assert!(!m[2060], "{width}: shelf edge guarded");
         }
+    }
+
+    #[test]
+    fn the_wide_reference_keeps_signal_cuts_and_drops_floor_feature_cuts() {
+        // The wide reference cut a +6 dB plateau over 1536..2560 (it reads the floor there).
+        let zero = vec![0.0f32; 4096];
+        let flat_blocks = blocks_with(|_| 1.0);
+        let mut floor = vec![1.0f32; 4096];
+        floor[1536..2560].fill(4.0);
+        let wide_floor = vec![1.0f32; 4096];
+        let view = WideView {
+            floor: &floor,
+            wide_floor: &wide_floor,
+        };
+        let flat = vec![1.0f32; 4096];
+        let signal: Vec<f32> = floor.iter().map(|&x| x - 1.0).collect();
+        for (noise, steady, want) in [(&floor, &zero, true), (&flat, &signal, false)] {
+            let mut s = guard();
+            let mut run = Run::new(noise, steady, &flat_blocks);
+            run.wide = Some(view);
+            run.go(&mut s, 0, 20, &[]);
+            let f = s.frame_ref_mask();
+            assert_eq!(f[2000], want, "floor feature {want}");
+            assert!(!f[1000] && !f[3000]);
+        }
+    }
+
+    #[test]
+    fn narrow_signals_do_not_move_block_floors() {
+        let zero = vec![0.0f32; 4096];
+        let mut s = guard();
+        let near = blocks_with(|i| 1.0 + 0.2 * ((i % 3) as f32));
+        Run::new(&profile_of(&near), &zero, &near).go(&mut s, 0, 5, &[]);
         assert_eq!(s.guarded_bins(), 0);
     }
 }

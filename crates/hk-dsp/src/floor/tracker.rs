@@ -607,6 +607,12 @@ pub struct FloorFrame {
     /// Per-frame block floors (raw block FCME, see [`NoiseFloorTracker::layout`]); invalid
     /// blocks hold the nearest valid block's value.
     pub block_floor: Vec<f32>,
+    /// Shape-normalised block floors, linear FS²/Hz: the blocks `floor` and `wide_floor` are
+    /// interpolated from before the shape is multiplied back (FCME on `psd / S` where the shape
+    /// varies by more than 1 dB over a block, the raw floor over the block's mean shape
+    /// elsewhere; equal to `block_floor` while no shape applies, before the segment's 32nd
+    /// frame). Holds the last valid frame's values when `valid` is false.
+    pub norm_block_floor: Vec<f32>,
     /// Per-block FCME validity.
     pub block_valid: Vec<bool>,
     /// Per-block FCME iterations (the cap means not converged).
@@ -671,6 +677,7 @@ impl FloorFrame {
             shape: vec![1.0; bins],
             band_floor: 0.0,
             block_floor: vec![0.0; blocks],
+            norm_block_floor: vec![0.0; blocks],
             block_valid: vec![false; blocks],
             block_iterations: vec![0; blocks],
             valid_blocks: 0,
@@ -942,6 +949,7 @@ impl NoiseFloorTracker {
                 out.shape.resize(bins, 1.0);
                 out.slow_floor.resize(bins, 0.0);
                 out.block_floor.resize(nb, 0.0);
+                out.norm_block_floor.resize(nb, 0.0);
                 out.block_valid.resize(nb, false);
                 out.block_iterations.resize(nb, 0);
                 out.block_slow.resize(nb, 0.0);
@@ -1134,6 +1142,7 @@ impl NoiseFloorTracker {
                 norm_block,
             );
             layout.interpolate(norm_block, &mut out.floor);
+            out.norm_block_floor.copy_from_slice(norm_block);
             wide_blocks(
                 norm_block,
                 &cfg.wide,

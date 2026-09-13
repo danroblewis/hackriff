@@ -86,6 +86,7 @@ fn floor(f: &SpectrumFrame) -> FloorFrame {
         shape: vec![1.0; (ones.clone()).len()],
         band_floor: 1.0,
         block_floor: Vec::new(),
+        norm_block_floor: Vec::new(),
         block_valid: Vec::new(),
         block_iterations: Vec::new(),
         valid_blocks: 1,

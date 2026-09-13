@@ -1,7 +1,7 @@
 //! False-alarm bounds (S4 §3.3): the recommended chain on ideal `Gamma(10)` frames (≥ 1 MHz·h),
 //! the regressions S4 found (fixed −3 dB hysteresis, closing before the duration test), the full
-//! chain with the real floor tracker, and sloped floors (T-005 re-review) with the per-frame
-//! reference.
+//! chain with the real floor tracker, sloped floors (T-005 re-review), floor steps (T-028) and
+//! filter-bank passbands and floor shelves (T-033) on the per-frame and wide references.
 //!
 //! Exposure follows S4 `synth_chain_fa.py`: 4096 bins at 20 Msps (4.88 kHz), 10 averages
 //! (2.048 ms frames), boxes within 64 bins of either band edge excluded; the 95 % upper bound on
@@ -11,7 +11,9 @@ mod common;
 
 use common::*;
 use hk_core::Discontinuity;
-use hk_detect::{ClipCount, DetectionProfile, Detector, DetectorConfig, Hysteresis};
+use hk_detect::{
+    ClipCount, DetectionProfile, Detector, DetectorConfig, FloorReference, Hysteresis,
+};
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker, gamma};
 use hk_model::SurveyId;
 
@@ -361,21 +363,31 @@ fn step_cases() -> Vec<(String, Vec<f32>)> {
     ]
 }
 
+/// `check_floor_cases` on the per-frame and the wide (default) reference.
+fn check_both_references(cases: &[(String, Vec<f32>)]) {
+    for reference in [FloorReference::PerFrame, FloorReference::Wide] {
+        let mut config = DetectorConfig::new(SurveyId::new());
+        config.floor_reference = reference;
+        eprintln!("-- {reference:?}");
+        check_floor_cases(cases, config, true);
+    }
+}
+
 #[test]
-fn sloped_floors_keep_the_false_alarm_bound_with_the_per_frame_reference() {
+fn sloped_floors_keep_the_false_alarm_bound_on_both_references() {
     let cases: Vec<(String, Vec<f32>)> = vec![
         ("6 dB tilt".into(), tilt(6.0)),
         ("12 dB tilt".into(), tilt(12.0)),
         ("baseband roll-off".into(), rolloff()),
     ];
-    check_floor_cases(&cases, DetectorConfig::new(SurveyId::new()), true);
+    check_both_references(&cases);
 }
 
 #[test]
-fn floor_steps_keep_the_false_alarm_bound_with_the_per_frame_reference() {
+fn floor_steps_keep_the_false_alarm_bound_on_both_references() {
     // The floor-step guard switches the floor branch off around the notch edges (block FCME is
     // biased there); where the floor branch still runs, exceedance is at design.
-    check_floor_cases(&step_cases(), DetectorConfig::new(SurveyId::new()), true);
+    check_both_references(&step_cases());
 }
 
 /// A floor from `(start bin, level dB)` breakpoints.
@@ -409,13 +421,15 @@ fn a_notch_plus_a_second_down_step_is_guarded() {
             piecewise(&[(0, 0.0), (1200, -10.0), (3200, -20.0)]),
         ),
     ];
-    check_floor_cases(&cases, DetectorConfig::new(SurveyId::new()), true);
+    // T-033: also on the wide reference (T-028: 614× and 74× there).
+    check_both_references(&cases);
 }
 
 #[test]
 fn floor_steps_without_the_step_guard_break_the_bound() {
     // Regression: without the guard the per-frame floor branch runs far above design at a notch.
     let mut config = DetectorConfig::new(SurveyId::new());
+    config.floor_reference = FloorReference::PerFrame;
     config.step_guard = None;
     let t = tracked_noise_with(&notch(64, -20.0), 400, 0x51_0e, config);
     eprintln!(
@@ -434,9 +448,91 @@ fn floor_steps_with_the_os_only_branch() {
     check_floor_cases(&step_cases(), config, false);
 }
 
+/// +`level_db` passbands with sharp edges over `ranges` (a filter-bank port's response).
+fn passbands(ranges: &[(usize, usize, f64)]) -> Vec<f32> {
+    let mut p = flat(BINS);
+    for &(lo, hi, level_db) in ranges {
+        p[lo..hi].fill(undb(level_db) as f32);
+    }
+    p
+}
+
+fn passband_cases() -> Vec<(String, Vec<f32>)> {
+    vec![
+        (
+            "+6 dB passband 1536..2560 (25 %)".into(),
+            passbands(&[(1536, 2560, 6.0)]),
+        ),
+        (
+            "+6 dB passband 1500..2524 (off the block grid)".into(),
+            passbands(&[(1500, 2524, 6.0)]),
+        ),
+        (
+            "filter bank: +6 dB 600..1100, +8 dB 1800..2300, +6 dB 2900..3350".into(),
+            passbands(&[(600, 1100, 6.0), (1800, 2300, 8.0), (2900, 3350, 6.0)]),
+        ),
+    ]
+}
+
+#[test]
+fn filter_bank_passbands_keep_the_false_alarm_bound_on_both_references() {
+    // T-033: a sharp-edged passband's sides both sit at the band floor, so it read as an exempt
+    // plateau: 25–28 phantoms (≈ 60× design) on the per-frame reference, 100–260× on the wide.
+    // A plateau whose power statistics are the floor's is now a floor feature.
+    for reference in [FloorReference::PerFrame, FloorReference::Wide] {
+        let mut config = DetectorConfig::new(SurveyId::new());
+        config.floor_reference = reference;
+        eprintln!("-- {reference:?}");
+        check_floor_cases_within(&passband_cases(), config, true, 1.5);
+    }
+}
+
+#[test]
+fn narrow_floor_shelves_next_to_a_learned_step_are_not_signals() {
+    // T-033: a floor shelf narrower than 16 blocks next to a learned notch left a narrow residual
+    // plateau that was taken for a signal, so its guarded zone ran on the wide reference, which
+    // is low over the shelf.
+    let cases: Vec<(String, Vec<f32>)> = vec![
+        (
+            "-20 dB notch 1600..2000, +6 dB shelf 2000..2300".into(),
+            piecewise(&[(0, 0.0), (1600, -20.0), (2000, 6.0), (2300, 0.0)]),
+        ),
+        (
+            "-20 dB notch 1600..2000, +6 dB shelf 2000..2600".into(),
+            piecewise(&[(0, 0.0), (1600, -20.0), (2000, 6.0), (2600, 0.0)]),
+        ),
+        (
+            "-20 dB notch 1600..2000, +6 dB shelf 2060..2660".into(),
+            piecewise(&[
+                (0, 0.0),
+                (1600, -20.0),
+                (2000, 0.0),
+                (2060, 6.0),
+                (2660, 0.0),
+            ]),
+        ),
+    ];
+    for reference in [FloorReference::PerFrame, FloorReference::Wide] {
+        let mut config = DetectorConfig::new(SurveyId::new());
+        config.floor_reference = reference;
+        eprintln!("-- {reference:?}");
+        check_floor_cases_within(&cases, config, true, 1.5);
+    }
+}
+
 /// Asserts 0 false boxes, and (when the floor branch is in use) a floor-branch `T_off`
 /// exceedance within 3× design where the floor branch runs over the usable span.
 fn check_floor_cases(cases: &[(String, Vec<f32>)], config: DetectorConfig, floor_branch: bool) {
+    check_floor_cases_within(cases, config, floor_branch, 3.0);
+}
+
+/// [`check_floor_cases`] with a `max_ratio` bound on the exceedance.
+fn check_floor_cases_within(
+    cases: &[(String, Vec<f32>)],
+    config: DetectorConfig,
+    floor_branch: bool,
+    max_ratio: f64,
+) {
     let mut failures = Vec::new();
     for (i, (name, profile)) in cases.iter().enumerate() {
         let t = tracked_noise_with(profile, 1500, 0x51_0e + i as u64, config.clone());
@@ -451,7 +547,7 @@ fn check_floor_cases(cases: &[(String, Vec<f32>)], config: DetectorConfig, floor
             t.guarded * 100.0,
             t.ratio_wide
         );
-        if t.boxes > 0 || (floor_branch && t.ratio_frame > 3.0) {
+        if t.boxes > 0 || (floor_branch && t.ratio_frame > max_ratio) {
             failures.push(format!(
                 "{name}: {} boxes, per-frame exceedance {:.2}×",
                 t.boxes, t.ratio_frame

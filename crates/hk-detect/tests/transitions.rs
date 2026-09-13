@@ -463,7 +463,35 @@ fn occasional_bridging_frames_never_fuse_records_permanently() {
     );
 }
 
+/// Gamma noise with per-bin mean `noise` plus a steady (constant-power) signal `signal`. A flat
+/// signal made of Gamma noise has exactly the statistics of a floor feature (a filter passband),
+/// so the wide-signal tests use a signal whose power statistics differ from the floor's (T-033).
+fn fill_with_signal(
+    src: &mut GammaFrames,
+    frame: &mut hk_dsp::SpectrumFrame,
+    noise: &[f32],
+    signal: &[f32],
+    flags: Discontinuity,
+) {
+    src.fill(frame, noise, flags);
+    for (p, &s) in frame.spectrum.psd.iter_mut().zip(signal) {
+        *p += s;
+    }
+}
+
 fn wide_signal_coverage(reference: FloorReference) -> (f64, f64) {
+    wide_signal_coverage_over(reference, 1024, 3072, 60, 16)
+}
+
+/// Interior coverage (64 bins trimmed each side) and both-edges-detected fraction of a steady
+/// +10 dB signal over `lo..hi`, counted over frames `from..frames`.
+fn wide_signal_coverage_over(
+    reference: FloorReference,
+    lo: usize,
+    hi: usize,
+    frame_count: usize,
+    from: usize,
+) -> (f64, f64) {
     let bins = BINS;
     let prov = provenance(98e6, FS, 24.0);
     let mut src = GammaFrames::new(bins, N_AVG, prov, 28);
@@ -472,23 +500,21 @@ fn wide_signal_coverage(reference: FloorReference) -> (f64, f64) {
     let mut det = Detector::new(cfg).unwrap();
     let mut tracker = NoiseFloorTracker::new(FloorConfig::default()).unwrap();
     let mut out = Collected::default();
-    let mut p = flat(bins);
-    let (lo, hi) = (1024, 3072);
-    for v in &mut p[lo..hi] {
-        *v += undb(10.0) as f32;
-    }
+    let p = flat(bins);
+    let mut sig = vec![0.0f32; bins];
+    sig[lo..hi].fill(undb(10.0) as f32);
     let mut frame = src.empty_frame();
     let (mut covered, mut total, mut edge_frames, mut frames) = (0u64, 0u64, 0u64, 0u64);
-    for i in 0..60 {
+    for i in 0..frame_count {
         let flags = if i == 0 {
             Discontinuity::STREAM_START
         } else {
             Discontinuity::NONE
         };
-        src.fill(&mut frame, &p, flags);
+        fill_with_signal(&mut src, &mut frame, &p, &sig, flags);
         let f = tracker.update(&frame, |_| {});
         det.process(&frame, f, ClipCount::NONE, &mut out.sink());
-        if i >= 16 {
+        if i >= from {
             let codes = det.codes();
             covered += codes[lo + 64..hi - 64].iter().filter(|&&c| c != 0).count() as u64;
             total += (hi - lo - 128) as u64;
@@ -543,9 +569,8 @@ fn notch_neighbour_coverage(
         }
     }
     let (lo, hi) = (n_hi + gap, n_hi + gap + width);
-    for v in &mut p[lo..hi] {
-        *v += undb(snr_db) as f32;
-    }
+    let mut sig = vec![0.0f32; BINS];
+    sig[lo..hi].fill(undb(snr_db) as f32);
     let trim = width / 10;
     let mut frame = src.empty_frame();
     let (mut covered, mut total) = (0u64, 0u64);
@@ -555,7 +580,7 @@ fn notch_neighbour_coverage(
         } else {
             Discontinuity::NONE
         };
-        src.fill(&mut frame, &p, flags);
+        fill_with_signal(&mut src, &mut frame, &p, &sig, flags);
         let f = tracker.update(&frame, |_| {});
         det.process(&frame, f, ClipCount::NONE, &mut out.sink());
         if i >= 64 {
@@ -613,4 +638,115 @@ fn wide_flat_signal_interior_coverage_via_the_wide_floor_branch() {
         coverage * 100.0
     );
     assert!(coverage >= 0.95, "interior coverage {coverage}");
+}
+
+#[test]
+fn a_wide_signal_over_passband_bins_keeps_interior_coverage() {
+    // T-033: the power-statistics rule that guards a +6 dB passband over 1536..2560 (25 % of the
+    // span, `false_alarm.rs`) keeps a steady +10 dB signal over the same bins a signal.
+    let mut failures = Vec::new();
+    for reference in [FloorReference::PerFrame, FloorReference::Wide] {
+        let (coverage, edges) = wide_signal_coverage_over(reference, 1536, 2560, 1500, 16);
+        eprintln!(
+            "1024-bin +10 dB steady signal, {reference:?}: interior coverage {:.1} %, both edges in {:.0} % of frames",
+            coverage * 100.0,
+            edges * 100.0
+        );
+        if reference == FloorReference::Wide && coverage < 0.9 {
+            failures.push(format!("{reference:?}: coverage {coverage}"));
+        }
+        if edges < 0.9 {
+            failures.push(format!("{reference:?}: edges {edges}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A steady +10 dB 300-bin signal 60 bins above a −20 dB notch (bins 1600..2000; `signal`
+/// false: the notch alone) through the real tracker for `frames` frames (PerFrame reference):
+/// the last integrated evaluation's emitters overlapping `2000..2420`, and the records there
+/// confirmed by the integrated spectrum.
+fn integrated_next_to_notch(signal: bool, frames: usize) -> (usize, usize, usize) {
+    let prov = provenance(98e6, FS, 24.0);
+    let mut src = GammaFrames::new(BINS, N_AVG, prov, 31);
+    let mut cfg = config();
+    cfg.floor_reference = FloorReference::PerFrame;
+    let mut det = Detector::new(cfg).unwrap();
+    let mut tracker = NoiseFloorTracker::new(FloorConfig::default()).unwrap();
+    let mut out = Collected::default();
+    let mut p = flat(BINS);
+    for v in &mut p[1600..2000] {
+        *v = undb(-20.0) as f32;
+    }
+    let (lo, hi) = (2060, 2360);
+    let mut sig = vec![0.0f32; BINS];
+    if signal {
+        sig[lo..hi].fill(undb(10.0) as f32);
+    }
+    let mut frame = src.empty_frame();
+    let mut guarded_frames = 0usize;
+    for i in 0..frames {
+        let flags = if i == 0 {
+            Discontinuity::STREAM_START
+        } else {
+            Discontinuity::NONE
+        };
+        fill_with_signal(&mut src, &mut frame, &p, &sig, flags);
+        let f = tracker.update(&frame, |_| {});
+        det.process(&frame, f, ClipCount::NONE, &mut out.sink());
+        guarded_frames += usize::from(det.step_guard().is_some_and(|g| {
+            let (m, w) = (g.mask(), g.wide_mask());
+            (lo..hi).any(|b| !m[b] && w[b])
+        }));
+    }
+    let (f_lo, f_hi) = (
+        98e6 + (1540.0 - 2048.0) * FS / BINS as f64,
+        98e6 + (2420.0 - 2048.0) * FS / BINS as f64,
+    );
+    let emitters = out
+        .evaluations
+        .iter()
+        .rev()
+        .find(|e| e.confirming)
+        .map_or(0, |e| {
+            e.emitters
+                .iter()
+                .filter(|em| em.f_lo_hz < f_hi && f_lo < em.f_hi_hz)
+                .count()
+        });
+    let confirmed_ids = out.confirmed();
+    let confirmed = out
+        .detections
+        .iter()
+        .filter(|d| d.bins.start < hi && lo < d.bins.end)
+        .filter(|d| {
+            confirmed_ids.binary_search(&d.detection.id).is_ok()
+                && (matches!(d.candidate, Candidate::Integrated { .. })
+                    || out.confirmations.iter().any(|c| {
+                        c.detection == d.detection.id
+                            && matches!(c.reason, ConfirmReason::Integrated { .. })
+                    }))
+        })
+        .count();
+    (emitters, confirmed, guarded_frames)
+}
+
+#[test]
+fn guarded_bins_on_the_wide_reference_take_part_in_integrated_confirmation() {
+    // T-033: the integrated spectrum excluded every guarded bin, so a signal inside a notch edge's
+    // guarded zone never had an integrated emitter. Bins whose floor branch runs on the wide
+    // reference now integrate against it.
+    let (emitters, confirmed, guarded) = integrated_next_to_notch(true, 1100);
+    let (notch_emitters, _, _) = integrated_next_to_notch(false, 1100);
+    eprintln!(
+        "300-bin +10 dB steady signal next to a -20 dB notch: {emitters} integrated emitters over it, \
+         {confirmed} records confirmed by the integrated spectrum, wide-guarded in {guarded} frames; \
+         notch alone: {notch_emitters} emitters"
+    );
+    assert!(
+        guarded > 500,
+        "the signal sits in a wide-reference guarded zone"
+    );
+    assert!(emitters >= 1 && confirmed >= 1);
+    assert_eq!(notch_emitters, 0, "no integrated emitter at the notch edge");
 }
