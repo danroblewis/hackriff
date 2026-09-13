@@ -383,7 +383,7 @@ tasks:
     note: "split from T-008 acceptance ('GPU + CPU-fallback paths') by the T-008 review, 2026-09-13; blocked until the Jetson arrives (user purchase)"
   - id: T-022a
     title: Web UI part 1 - WebSocket bridge (hk-stream remote egress) + WebGL2 waterfall + region-over-time history view
-    status: todo
+    status: in-progress
     deps: [T-016, T-017]
     after: "stream enforcement-gap fixes merged (locality rule enforced in subscribe; bridge counts as remote)"
     parallel_group: I
