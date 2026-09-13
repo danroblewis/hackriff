@@ -453,7 +453,7 @@ tasks:
     note: "follow-ups from the T-005 final round (merged ab9148b under the user timebox steer, 2026-09-13)"
   - id: T-030
     title: Fix T-011 harmonic rate trust on rectangular high-index FSK (trusted 7x true rate)
-    status: todo
+    status: in-progress
     deps: [T-011]
     parallel_group: F
     use_cases: [AWARE-036]
