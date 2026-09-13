@@ -1071,8 +1071,9 @@ tasks:
     core_interface: true
   - id: T-066
     milestone: M0b
-    title: Listen robustness (half-open client slot release, 503 replumbing)
-    status: todo
+    title: Listen cap and session leaks (configurable budget-based cap default >=8; close chains on WS close/tab gone/idle/half-open; 503 replumbing)
+    status: in-progress
+    user_report: "live demo build 6b17fe5: 3rd /ws/open/listen refused busy '2 listeners already running' (503) while user may not have had 2 tabs playing; stream ids reached listen/48 (suspected leaked sessions)"
     deps: [T-043]
     parallel_group: P
     use_cases: [SIGNAL-062]
@@ -1084,8 +1085,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    acceptance: "watch_peer read timeout / TCP keepalive so half-open clients release listen slots within a bounded time; 503 replumbing instead of 410 source-ended during re-plumb start; tests"
-    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
+    acceptance: "cap configurable, default >=8, budget-based (per-chain CPU estimate vs cores fraction) with count/budget in /api/status and refusal reason; no leaked sessions (WS close, TCP reset, tab gone via pagehide/visibilitychange, half-open read timeout/keepalive, idle, re-plumb, opener error) with listen.open/closed{reason} counters; test 50 open/close sessions (sequential, parallel, abrupt, half-open) leave 0 running; watch_peer read timeout / TCP keepalive so half-open clients release listen slots within a bounded time; 503 replumbing instead of 410 source-ended during re-plumb start; tests"
   - id: T-067
     milestone: M0b
     title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
@@ -1154,7 +1154,7 @@ tasks:
     parallel_group: U
     use_cases: [SIGNAL-062, AWARE-036]
     requested_by: user feedback 2026-09-13 (start of message truncated; visible part gives the test)
-    acceptance: "several demod chains run concurrently on one capture window (listen cap raised/configurable; each chain its own channel, refinement and stream); tests through the mock SDR: fm_100p8M with 3 stations demodulated simultaneously -> 3 audio streams each carrying its own station (distinct RDS PI or distinct audio content), and 2+ FSK emitters producing concurrent bits streams; per-chain CPU/latency and drop counters reported; no cross-talk between streams"
+    acceptance: "several demod chains run concurrently on one capture window (cap/budget handled in T-066; each chain its own channel, refinement and stream); tests through the mock SDR: fm_100p8M with 3 stations demodulated simultaneously -> 3 audio streams each carrying its own station (distinct RDS PI or distinct audio content), and 2+ FSK emitters producing concurrent bits streams; per-chain CPU/latency and drop counters reported; no cross-talk between streams"
     area: crates/hk-pipeline (chains, listen service limits), crates/hk-stream/hk-api (concurrent openers), tests/e2e
     needs: none
     model: opus
