@@ -1,0 +1,17 @@
+{
+  "name": "s3-web-waterfall-client",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Spike S3: WebGL2 waterfall + DPX persistence client (throwaway)",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --minify --target=es2020 --outfile=dist/main.js && cp src/index.html dist/index.html",
+    "typecheck": "tsc --noEmit",
+    "bench": "node ../bench/bench.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright-core": "1.63.0",
+    "typescript": "7.0.2"
+  }
+}
