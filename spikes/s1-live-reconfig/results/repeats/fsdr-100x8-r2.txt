@@ -1,0 +1,28 @@
+generating synthetic table (4194304 samples)...
+=== S1 FutureSDR 0.8.0 ===
+mode                     : paced 20 Msps
+block / buffer period    : 65536 samples / 3.277 ms
+cycles x parallel        : 100 x 8 = 800 attach/detach
+dwell per chain          : 50 ms
+measured window          : 7.32 s
+window samples produced  : 146341888 (20.00 Msps)
+window samples consumed  : 146341888 (20.00 Msps)
+source dropped in window : 0 samples
+source dropped total     : 0 samples, 0 events, log []
+source late blocks >1ms  : 0, max lag 0.84 ms
+total produced/tap/sink  : 156499968 / 156499968 / 156499968
+consumed == produced     : true
+FFT peaks (Hz, dB)       : [(-5996094.0, 42.5), (-1503906.0, 45.0), (2431641.0, 38.0), (2568359.0, 38.0), (6992188.0, 39.4), (7011719.0, 39.5)]
+attach latency ms        : p50 1.8020 p99 4.3682 max 8.5538
+  build flowgraph        : p50 0.0261 p99 0.0893 max 0.2045
+  rt.start(fg)           : p50 1.7580 p99 4.0535 max 8.4704
+  Tap.subscribe call     : p50 0.0129 p99 0.1164 max 0.4030
+chain edge buffer        : 2048 KiB (same as always-on)
+attach->first output ms  : p50 3.673 p99 6.864 max 9.999
+detach latency ms        : p50 0.3528 p99 0.7815 max 1.2169
+chains bad / dropped     : 0 / 0 samples
+demod nbfm@-1.5MHz/50kSps   : |rms/expected-1| p50 0.0021 max 0.0082; |mean| p50 9.4 Hz max 38.0 Hz (n=400)
+demod wbfm@+2.5MHz/250kSps  : |rms/expected-1| p50 0.0002 max 0.0009; |mean| p50 80.6 Hz max 225.2 Hz (n=400)
+process CPU              : 85.7 % of one core (0.86 cores)
+restart/recompile needed : no (new flowgraph per chain on the running Runtime)
+RESULT                   : FAIL

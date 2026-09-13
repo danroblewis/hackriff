@@ -1,0 +1,3 @@
+generating synthetic table (4194304 samples)...
+bench chain nbfm@-1.5MHz/50kSps   :    849.9 Msps (42.5x real time @20 Msps)
+bench chain wbfm@+2.5MHz/250kSps  :    858.7 Msps (42.9x real time @20 Msps)
