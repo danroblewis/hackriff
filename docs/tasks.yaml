@@ -87,6 +87,7 @@ tasks:
   - id: T-005
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
     status: in-progress
+    review: "implemented a40c2eb (branch worktree-agent-a096af43e3d47a50f); Opus core-interface review running before merge"
     deps: [T-004]
     parallel_group: C
     core_interface: true
