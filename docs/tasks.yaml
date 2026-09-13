@@ -477,7 +477,9 @@ tasks:
     note: "found by T-013 (2026-09-13): T-011 trusted 33.6 kBd (7x) on 13/20 bursts of rectangular FSK h=4; T-013 demod checks run lengths and divides (harmonic_divisor) as a workaround. Correctness bug in the 'trusted is never wrong' contract"
   - id: T-031
     title: Burst-tracking follow-ups (model fields, track region query, merged links, split trigger, bursty hop sets, TDMA)
-    status: in-progress
+    status: done
+    commit: "d043db8 (merged)"
+    results: "bursty hop sets via silence rule (synthetic 8-channel bursty hopper -> one hop set, 5.06 hops/s; independent emitters on a raster -> no hop set); split trigger on two stable clusters (TrackSplit, split_from); tentative tracks suppress low-SNR fragments (fsk 12 dB -> 1 track); merged-track links copied to survivor; batching deferred (no public hk-model transaction API). Real 915 MHz: 20 tracks (was 28), 1 hop set of 7 channels (raster estimate 40.3 kHz wrong)"
     scope_now: "track-module items only (bursty hop sets, split trigger, fragment suppression, merged-track link re-pointing, batching); hk-model TimingFeatures fields, track region query and TDMA/co-occurrence deferred until T-018 merges"
     deps: [T-007]
     parallel_group: C
@@ -528,6 +530,19 @@ tasks:
     effort: medium
     items: "raw Repository::emitter()/emitter_by_identity still return identities ungated - make them crate-private or gated, hk-api/exports must use query_inventory (legal); hk-demod RDS + FSK writers still use upsert_emitter_observation (no identity class) - move to record_sighting; re-demodulating same IQ creates new decode/track ids and doubles counts (dedup by content hash / time overlap); clustering v2: DBSCAN, fingerprints from C13-C15 estimates in pipeline, merge undo, suspect-artifact quarantine, multi-level entities, N+1 query reads"
     note: "follow-ups from T-018 (merged 2026-09-13 under the timebox rule); the first item is a legal-guardrail gap to close before any inventory API/export ships"
+  - id: T-035
+    title: Tracking data-model follow-ups (TimingFeatures fields, track region query, batched writes, hop raster estimate)
+    status: todo
+    deps: [T-031, T-018]
+    parallel_group: E
+    use_cases: [AWARE-036, AWARE-042]
+    acceptance: TrackSummary timing features persisted in hk-model; track region query; TrackBatch writes in one transaction; hop raster estimate within 5 % on the real 915 MHz fixture (200 kHz)
+    area: crates/hk-model, crates/hk-detect (track)
+    needs: none
+    model: opus
+    effort: medium
+    items: "TimingFeatures lacks period confidence/jitter, burst-length distribution, segment boundaries, hop raster, hop-set id; track region query missing; TrackBatch upserts one transaction each (needs a public hk-model transaction/batch API); hop raster estimate wrong on noisy real centres (40.3 kHz vs 200 kHz); TDMA frame + co-occurrence features"
+    note: "follow-ups from T-031 (merged 2026-09-13 under the timebox rule)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
