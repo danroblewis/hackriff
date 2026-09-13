@@ -45,7 +45,9 @@ tasks:
     dod: schema + repository with tests for Emitter upsert, Detection insert, region/time query; provenance chain resolvable
   - id: T-003
     title: source-abstraction + SigMF file-replay source + RAM ring buffer
-    status: in-progress
+    status: done
+    commit: "8386cbb (merged 76ff126)"
+    review: "merged on green tests to unblock T-004; Opus concurrency review of the seqlock ring running post-merge, fixes go forward"
     deps: [T-001]
     parallel_group: B
     use_cases: [SPACE-050]
@@ -69,7 +71,7 @@ tasks:
     dod: generator produces SigMF with ground-truth annotations; harness replays and exposes pipeline outputs to assertions
   - id: T-004
     title: spectral-estimation (Welch PSD, STFT, persistence, spectral kurtosis)
-    status: todo
+    status: in-progress
     deps: [T-003]
     parallel_group: C
     use_cases: [SPACE-050, AWARE-042]
