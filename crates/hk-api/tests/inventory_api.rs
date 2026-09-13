@@ -210,6 +210,89 @@ fn restricted_identities_are_withheld_from_the_raw_response() {
     assert_eq!(legacy["status"]["prior_ref"], Value::Null);
 }
 
+/// T-036: a restricted identity written as a tag (on the withheld pager row, and inside a longer
+/// tag) never appears in `/api/inventory` output, and a tag filter by it never matches the row;
+/// identity-free labels still show and filter, and producer tags naming a restricted claim are
+/// refused at write time.
+#[test]
+fn restricted_identity_written_as_a_tag_never_appears_in_api_output() {
+    let mut repo = Repository::open_in_memory().unwrap();
+    let s = seed::seed(&mut repo, T0).unwrap();
+    let smuggled = format!("capcode-{}", seed::PAGER_CAPCODE);
+    for tag in [seed::PAGER_CAPCODE, smuggled.as_str(), seed::OWN_SENSOR_ID] {
+        repo.add_emitter_tag(s.pager, tag).unwrap();
+        repo.add_emitter_tag(s.own, tag).unwrap();
+    }
+    // A producer deriving a tag from a restricted decode is refused outright.
+    let refused = hk_model::Sighting {
+        source: hk_model::LinkTarget::Decode(hk_model::DecodeId::new()),
+        seen: hk_model::TimeRange::instant(hk_model::Timestamp::from_unix_nanos(
+            T0 * 1_000_000_000,
+        )),
+        count: 1,
+        f_center_hz: 931.9375e6,
+        bandwidth_hz: 25e3,
+        fingerprint: None,
+        identity: Some(hk_model::IdentityClaim {
+            identity: hk_model::DecodedIdentity {
+                scheme: hk_model::IdentityScheme::Other("pocsag-capcode".into()),
+                value: seed::PAGER_CAPCODE.into(),
+            },
+            content_class: hk_model::ContentClass::RestrictedPaging,
+        }),
+        context: None,
+        classification: None,
+        tags: vec![format!("cap{}", seed::PAGER_CAPCODE)],
+    };
+    assert!(repo.record_sighting(&refused, None).is_err());
+
+    let config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        Token::from_config(TOKEN).unwrap(),
+    );
+    let state = ApiState {
+        inventory: Some(Arc::new(Mutex::new(repo))),
+        ..ApiState::default()
+    };
+    let server = Server::start(config, state).unwrap();
+    let addr = server.local_addr();
+    let paths = [
+        "/api/inventory".to_owned(),
+        format!("/api/inventory?tag={}", seed::PAGER_CAPCODE),
+        format!("/api/inventory?tag={smuggled}"),
+        format!("/api/inventory?tag={}", seed::OWN_SENSOR_ID),
+        "/api/inventory?tag=pager".into(),
+        "/api/inventory?scheme=other:pocsag-capcode".into(),
+    ];
+    for path in &paths {
+        let (status, body) = authed(addr, path);
+        assert_eq!(status, 200, "{path}");
+        for sentinel in [seed::PAGER_CAPCODE, seed::OWN_SENSOR_ID] {
+            assert!(
+                !body
+                    .windows(sentinel.len())
+                    .any(|w| w == sentinel.as_bytes()),
+                "{path}: identity {sentinel} leaked through a tag"
+            );
+        }
+    }
+    for tag in [seed::PAGER_CAPCODE, &smuggled, seed::OWN_SENSOR_ID] {
+        let v = page(addr, &format!("/api/inventory?tag={tag}"));
+        assert!(ids(&v).is_empty(), "tag filter matched a withheld row");
+    }
+    let v = page(addr, "/api/inventory");
+    for (id, label) in [(s.pager, "pager"), (s.own, "mine")] {
+        let r = row(&v, id);
+        assert_eq!(r["tags"], json!([label]));
+        assert_eq!(r["tags_withheld"], json!(true));
+    }
+    assert_eq!(row(&v, s.rds)["tags_withheld"], json!(false));
+    assert_eq!(
+        ids(&page(addr, "/api/inventory?tag=pager")),
+        vec![s.pager.to_string()]
+    );
+}
+
 #[test]
 fn aware_042_inventory_filters_by_region_time_status_and_tag() {
     let (server, s) = serve_seeded();
@@ -318,6 +401,10 @@ fn hk_api_never_calls_the_ungated_emitter_getters() {
         "emitters_matching_fingerprint",
         "upsert_emitter",
         "record_sighting",
+        // T-036: decodes stay off HTTP in M0, and reclassification has no HTTP exposure.
+        "decode_with_access",
+        "reclassify_identity",
+        "add_emitter_tag",
     ];
     let mut scanned = 0;
     for entry in std::fs::read_dir(&src).unwrap() {

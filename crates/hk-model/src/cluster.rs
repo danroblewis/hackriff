@@ -79,6 +79,57 @@
 //! lookup by identity value finds nothing unless that identity would be shown, so it cannot
 //! confirm a withheld identity is held. `RepoError::IdentityConflict` names the scheme only.
 //! No public API returns identities ungated.
+//!
+//! # Decodes (T-036)
+//!
+//! `decode` / `decodes_for_identity` (gated at [`IdentityAccess::Standard`]) and their
+//! `decode_with_access` / `decodes_for_identity_with_access` forms ([`crate::DecodeView`]) apply
+//! the same rule; the ungated read is crate-private.
+//!
+//! - **Identity class** of a decoded identity: the most restrictive of every stored decode naming
+//!   it and of the class on the emitter holding it (after any audited reclassification, below).
+//!   A row's identity is shown only if that class is revealed, so one restricted decode withholds
+//!   the value on every row, like the inventory.
+//! - **Detail** (metadata and labels) is shown only if the row's own `content_class` is revealed
+//!   and its identity (if any) is shown. The repository cannot tell identifier keys (a capcode)
+//!   from other metadata keys, so a withheld row's metadata is withheld whole (`{}`), its content
+//!   too (a content-permitting row whose identity is withheld elsewhere), and a label
+//!   (`frame_model`, `decoder_id`, `decoder_version`) that contains the identity value or any
+//!   metadata/content value of three or more characters reads [`crate::WITHHELD_LABEL`]. Labels are
+//!   otherwise kept: they are the protocol labels the legal guardrail lets flow, and plugin rows
+//!   are label-allowlisted before storage (docs/stream-contract.md §9.3).
+//! - `decodes_for_identity*` returns nothing unless the identity would be shown, so a lookup
+//!   cannot confirm a withheld identity was decoded.
+//!
+//! # Tags
+//!
+//! Tags are labels, not identities, and the least lossy fail-closed rule keeps them that way:
+//!
+//! - **Read:** on a row whose identity is withheld, only identity-free tags
+//!   ([`tag_is_identity_free`]: no digits, no hex runs) are shown (`InventoryEntry::tags_withheld`
+//!   says others were removed), and a `tag` filter that is not identity-free never matches such a
+//!   row. The rule does not look at stored values, so neither the output nor the filter can be
+//!   used to test a guessed identity. Unrestricted rows keep every tag.
+//! - **Write:** `record_sighting` and `insert_emitter` refuse a tag that is not identity-free, or
+//!   that contains the identity value, when the sighting's identity claim is not `unrestricted`
+//!   (an `insert_emitter` identity has no class, so it counts as withheld). This stops producers
+//!   deriving tags from restricted decodes. `add_emitter_tag` (a user naming their own label)
+//!   is not value-checked, so it cannot be used as an oracle; the read rule covers it.
+//! - **Residual:** a tag made only of non-hex letters that spells an alphabetic identity value
+//!   and was added by `add_emitter_tag`, or a tag on an emitter with no decoded identity, is
+//!   shown. Producers attach identities as claims, never as tags.
+//!
+//! # Audited reclassification (T-036)
+//!
+//! "Most restrictive wins" means no later sighting can open a withheld identity, even the user's
+//! own device. `Repository::reclassify_identity` is the only way to open one: it needs
+//! [`IdentityAccess::OwnTrafficAuthorised`], opens only to `own-key-decrypted` or `unrestricted`,
+//! refuses identities whose class is unknown or ever `restricted-cellular` / `restricted-paging`
+//! ([`never_openable`]), appends an audit row (who, when, old → new, reason) and changes only the
+//! emitter's `identity_class`: decode rows keep the class their decoder recorded. Afterwards a
+//! source of the opened class or less restrictive (e.g. the same `metadata-only` framer) counts
+//! as the opened class for that identity; a restricted-cellular or restricted-paging source still
+//! closes it. Decode detail stays gated by each row's own class. There is no HTTP exposure (M0).
 
 use serde::{Deserialize, Serialize};
 
@@ -639,18 +690,62 @@ where
     }
 }
 
+/// Restrictiveness rank: unrestricted 0 < own-key-decrypted 1 < metadata-only 2 <
+/// restricted-paging = restricted-cellular 3.
+pub(crate) fn class_rank(c: ContentClass) -> u8 {
+    match c {
+        ContentClass::Unrestricted => 0,
+        ContentClass::OwnKeyDecrypted => 1,
+        ContentClass::MetadataOnly => 2,
+        ContentClass::RestrictedPaging | ContentClass::RestrictedCellular => 3,
+    }
+}
+
 /// The more restrictive of two classes (unrestricted < own-key-decrypted < metadata-only <
 /// restricted-paging = restricted-cellular); ties keep `a`.
 pub fn most_restrictive(a: ContentClass, b: ContentClass) -> ContentClass {
-    fn rank(c: ContentClass) -> u8 {
-        match c {
-            ContentClass::Unrestricted => 0,
-            ContentClass::OwnKeyDecrypted => 1,
-            ContentClass::MetadataOnly => 2,
-            ContentClass::RestrictedPaging | ContentClass::RestrictedCellular => 3,
+    if class_rank(b) > class_rank(a) { b } else { a }
+}
+
+/// Whether a class can never be opened by a reclassification (CLAUDE.md: never circumvent the
+/// security of others' traffic; US law restricts cellular and paging content even unencrypted).
+pub fn never_openable(c: ContentClass) -> bool {
+    matches!(
+        c,
+        ContentClass::RestrictedCellular | ContentClass::RestrictedPaging
+    )
+}
+
+/// Whether a tag is an identity-free label (T-036): 1–64 bytes of ASCII letters and `-` `_` `.`
+/// `/` `:` or space, with **no digits** and no run of four or more letters that are all hex
+/// digits (`a`–`f`). The rule does not depend on stored data, so applying it reveals nothing.
+///
+/// Identifiers (capcodes, IMSIs, MMSIs, ICAO/PI hex, talkgroups, sensor ids) almost always
+/// contain a digit or a hex run, so a label-shaped tag cannot carry one. The residual is an
+/// identity value made only of non-hex letters (e.g. an alphabetic alias); see
+/// [the gating rules](self#tags).
+pub fn tag_is_identity_free(tag: &str) -> bool {
+    if tag.is_empty() || tag.len() > 64 {
+        return false;
+    }
+    let mut hex_run = 0usize;
+    for b in tag.bytes() {
+        if b.is_ascii_alphabetic() {
+            hex_run = if b.is_ascii_hexdigit() {
+                hex_run + 1
+            } else {
+                0
+            };
+            if hex_run >= 4 {
+                return false;
+            }
+        } else if b"-_./: ".contains(&b) {
+            hex_run = 0;
+        } else {
+            return false;
         }
     }
-    if rank(b) > rank(a) { b } else { a }
+    true
 }
 
 /// Who may see identity values in inventory output.
@@ -735,15 +830,39 @@ pub enum InventoryIdentity {
     },
 }
 
-/// One inventory row. When the identity is withheld, `emitter.identity` is `Unknown`.
+/// One inventory row. When the identity is withheld, `emitter.identity` is `Unknown` and
+/// `emitter.tags` keeps only identity-free labels ([`tag_is_identity_free`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct InventoryEntry {
-    /// The emitter (live; identity cleared when withheld).
+    /// The emitter (live; identity cleared and tags filtered when withheld).
     pub emitter: Emitter,
     /// Gated identity.
     pub identity: InventoryIdentity,
     /// Current family.
     pub family: Option<String>,
+    /// Tags that were not identity-free were removed from `emitter.tags` because the identity is
+    /// withheld (T-036).
+    pub tags_withheld: bool,
+}
+
+/// One audited identity reclassification (T-036; `Repository::reclassify_identity`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IdentityReclassification {
+    /// Emitter that held the identity when it was reclassified.
+    pub emitter_id: EmitterId,
+    /// Identity scheme (metadata; the value is never part of the record).
+    pub scheme: IdentityScheme,
+    /// Class before.
+    pub old_class: ContentClass,
+    /// Class after (`own-key-decrypted` or `unrestricted`).
+    pub new_class: ContentClass,
+    /// Who authorised it.
+    pub author: String,
+    /// Why, in the author's words. `None` when the read's access does not reveal `new_class`
+    /// (the reason may name the identity).
+    pub reason: Option<String>,
+    /// When.
+    pub t: Timestamp,
 }
 
 /// A page of inventory rows, most recently seen first.

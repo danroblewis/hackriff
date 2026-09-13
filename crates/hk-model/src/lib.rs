@@ -62,9 +62,10 @@ pub use calibration::{
 };
 pub use cluster::{
     Assignment, ConflictReason, EmitterMerge, FEATURE_SET_VERSION, FeatureMatch, Fingerprint,
-    IdentityAccess, IdentityClaim, IdentityConflictReport, InventoryEntry, InventoryIdentity,
-    InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord, MeasurementKey, PriorVerdict,
-    RecordedClassification, Resolution, Sighting, Tolerances,
+    IdentityAccess, IdentityClaim, IdentityConflictReport, IdentityReclassification,
+    InventoryEntry, InventoryIdentity, InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord,
+    MeasurementKey, PriorVerdict, RecordedClassification, Resolution, Sighting, Tolerances,
+    never_openable, tag_is_identity_free,
 };
 pub use content::ContentClass;
 pub use context::{
@@ -72,8 +73,8 @@ pub use context::{
     CorrelationType, Evidence, Explanation, ExternalEvent, Geo,
 };
 pub use decode::{
-    Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, Decode, Demodulation,
-    EstimatedParams, Framing,
+    Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, Decode, DecodeView, Demodulation,
+    EstimatedParams, Framing, WITHHELD_LABEL,
 };
 pub use detection::{Detection, DetectionFlags, TimingFeatures, Track, TrackState};
 pub use emitter::{

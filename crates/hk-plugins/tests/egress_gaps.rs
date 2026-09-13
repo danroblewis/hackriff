@@ -257,25 +257,26 @@ fn n1_covert_vectors_are_stripped_dropped_or_bounded_through_the_host() {
             decodes.push(
                 ingest
                     .repo()
-                    .decode(id.parse::<DecodeId>().unwrap())
+                    .decode_with_access(
+                        id.parse::<DecodeId>().unwrap(),
+                        hk_model::IdentityAccess::Standard,
+                    )
                     .unwrap(),
             );
         }
     }
     assert_eq!(decodes.len(), 3);
-    let metas: Vec<&Value> = decodes.iter().map(|d| &d.metadata).collect();
-    assert!(
-        metas.contains(&&json!({"capcode": "5551234", "encoding": "alpha", "baud": "1200"})),
-        "hex text and packed integer dropped; bounded capcode kept: {metas:?}"
-    );
-    assert!(metas.contains(&&json!({"function": "2"})), "{metas:?}");
-    assert!(
-        metas.contains(&&json!({"capcode": "1234567", "function": "3"})),
-        "{metas:?}"
-    );
-    let identities: Vec<_> = decodes.iter().filter_map(|d| d.identity.as_ref()).collect();
-    assert_eq!(identities.len(), 1);
-    assert_eq!(identities[0].value, "a1b2c3d4");
+    // T-036: restricted rows read back gated (identity and metadata withheld); what was stored is
+    // checked on the database file below.
+    for v in &decodes {
+        assert_eq!(v.decode.metadata, json!({}));
+        assert!(v.metadata_withheld && v.decode.identity.is_none());
+    }
+    let withheld_identities = decodes
+        .iter()
+        .filter(|v| matches!(v.identity, hk_model::InventoryIdentity::Withheld { .. }))
+        .count();
+    assert_eq!(withheld_identities, 1);
     let annotations = ingest
         .repo()
         .annotations_for(&AnnotationTarget::Region(region))
@@ -289,6 +290,16 @@ fn n1_covert_vectors_are_stripped_dropped_or_bounded_through_the_host() {
     let mut db = std::fs::read(dir.join("hk.sqlite")).unwrap();
     if let Ok(wal) = std::fs::read(dir.join("hk.sqlite-wal")) {
         db.extend(wal);
+    }
+    // Allowlisted values were stored (bounded capcode, enum function, 8-hex identity).
+    for kept in [
+        "\"capcode\":\"5551234\"",
+        "\"function\":\"2\"",
+        "\"capcode\":\"1234567\"",
+        "\"function\":\"3\"",
+        "a1b2c3d4",
+    ] {
+        assert!(contains(&db, kept), "{kept} stored");
     }
     for (what, token) in [
         ("hex text", hex_text.as_str()),
@@ -329,19 +340,28 @@ fn ingest_strips_restricted_rows_that_skipped_the_policy() {
     );
     let raw_id = raw.id;
     ingest.store_decode(raw, None, None, None, None).unwrap();
-    let stored = ingest.repo().decode(raw_id).unwrap();
-    assert_eq!(stored.metadata, json!({}));
-    assert_eq!(stored.frame_model, "hackriff.unsanitized/1");
+    // T-036: restricted rows read back gated; `metadata_withheld` says whether the stored
+    // metadata was non-empty, without revealing it.
+    let standard = hk_model::IdentityAccess::Standard;
+    let stored = ingest.repo().decode_with_access(raw_id, standard).unwrap();
+    assert!(!stored.metadata_withheld, "stripped to the empty allowlist");
+    assert_eq!(stored.decode.metadata, json!({}));
+    assert_eq!(stored.decode.frame_model, "hackriff.unsanitized/1");
     assert_eq!(ingest.stats().rows_stripped, 1);
 
     let clean = row(json!({"function": 2, "capcode": "1234567"}), "pocsag");
     let clean_id = clean.id;
     ingest.store_decode(clean, None, None, None, None).unwrap();
-    let stored = ingest.repo().decode(clean_id).unwrap();
-    assert_eq!(
-        stored.metadata,
-        json!({"function": 2, "capcode": "1234567"})
+    let stored = ingest
+        .repo()
+        .decode_with_access(clean_id, standard)
+        .unwrap();
+    assert!(
+        stored.metadata_withheld,
+        "policy-shaped metadata stored as given"
     );
+    assert_eq!(stored.decode.metadata, json!({}));
+    assert_eq!(stored.decode.frame_model, "pocsag");
     assert_eq!(ingest.stats().rows_stripped, 1);
 
     // Unrestricted rows are never touched.

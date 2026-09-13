@@ -262,6 +262,10 @@ impl Repository {
     /// Inserts a new Emitter with its classification history and tags. `e.known_status` becomes
     /// the first status-history entry (author `system`, at `first_seen`).
     pub fn insert_emitter(&mut self, e: &Emitter) -> Result<(), RepoError> {
+        // T-036: an identity written here has no class (withheld), so tags must be labels.
+        if let Identity::Decoded(d) = &e.identity {
+            super::gating::check_tags(&mut e.tags.iter(), Some((d, None)))?;
+        }
         let tx = self.write_tx()?;
         if let Identity::Decoded(d) = &e.identity
             && let Some(existing) = emitter_id_by_identity(&tx, d)?

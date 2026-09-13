@@ -14,7 +14,7 @@ use crate::cluster::{
     Assignment, ConflictReason, EmitterMerge, Fingerprint, IdentityAccess, IdentityClaim,
     IdentityConflictReport, InventoryEntry, InventoryIdentity, InventoryPage, InventoryQuery,
     KnownStatusPrior, LinkRecord, MAX_INVENTORY_PAGE, MeasurementKey, RecordedClassification,
-    Resolution, Sighting, Tolerances, known_family, most_restrictive,
+    Resolution, Sighting, Tolerances, known_family, most_restrictive, tag_is_identity_free,
 };
 use crate::content::ContentClass;
 use crate::emitter::{
@@ -55,19 +55,19 @@ pub(super) fn live_id(conn: &Connection, id: EmitterId) -> Result<Option<Emitter
 }
 
 /// The aggregate columns entity resolution reads.
-struct EmitterRow {
+pub(super) struct EmitterRow {
     f_center: f64,
     bandwidth: f64,
     first: i64,
     last: i64,
     count: i64,
     fingerprint: Option<Fingerprint>,
-    identity: Option<DecodedIdentity>,
-    class: Option<ContentClass>,
+    pub(super) identity: Option<DecodedIdentity>,
+    pub(super) class: Option<ContentClass>,
     merged: bool,
 }
 
-fn load_row(conn: &Connection, id: EmitterId) -> Result<EmitterRow, RepoError> {
+pub(super) fn load_row(conn: &Connection, id: EmitterId) -> Result<EmitterRow, RepoError> {
     type Raw = (
         f64,
         f64,
@@ -176,7 +176,7 @@ fn current_family(conn: &Connection, id: EmitterId) -> Result<Option<String>, Re
 }
 
 /// Most restrictive class of the live-linked decodes carrying `identity`; `None` if there are none.
-fn derived_identity_class(
+pub(super) fn derived_identity_class(
     conn: &Connection,
     id: EmitterId,
     identity: &DecodedIdentity,
@@ -226,6 +226,13 @@ pub(super) fn gate_entry(
             }
         }
     };
+    let mut tags_withheld = false;
+    if matches!(identity, InventoryIdentity::Withheld { .. }) {
+        // T-036: a withheld row shows identity-free labels only (value-independent rule).
+        let before = emitter.tags.len();
+        emitter.tags.retain(|tag| tag_is_identity_free(tag));
+        tags_withheld = emitter.tags.len() != before;
+    }
     if !matches!(identity, InventoryIdentity::Clear { .. }) {
         emitter.identity = Identity::Unknown;
     }
@@ -233,6 +240,7 @@ pub(super) fn gate_entry(
         emitter,
         identity,
         family,
+        tags_withheld,
     })
 }
 
@@ -673,15 +681,16 @@ fn apply_identity(
     claim: &IdentityClaim,
 ) -> Result<Option<IdentityConflictReport>, RepoError> {
     let row = load_row(conn, target)?;
+    // T-036: after an audited reclassification, a source of the opened class or less restrictive
+    // counts as the opened class; restricted-cellular/paging sources still close the identity.
+    let claim_class = super::gating::claim_class(conn, &claim.identity, claim.content_class)?;
     match &row.identity {
         Some(d) if *d == claim.identity => {
             let base = match row.class {
                 Some(c) => Some(c),
                 None => derived_identity_class(conn, target, d)?,
             };
-            let class = base.map_or(claim.content_class, |c| {
-                most_restrictive(c, claim.content_class)
-            });
+            let class = base.map_or(claim_class, |c| most_restrictive(c, claim_class));
             conn.prepare_cached("UPDATE emitter SET identity_class = ?1 WHERE emitter_id = ?2")?
                 .execute(params![enum_text(&class)?, blob(target)])?;
             Ok(None)
@@ -706,7 +715,7 @@ fn apply_identity(
             .execute(params![
                 claim.identity.scheme.as_string(),
                 claim.identity.value,
-                enum_text(&claim.content_class)?,
+                enum_text(&claim_class)?,
                 blob(target)
             ])?;
             Ok(None)
@@ -972,6 +981,12 @@ impl Repository {
             return Err(RepoError::Invalid("bandwidth_hz must be >= 0".into()));
         }
         int(s.count, "count")?;
+        super::gating::check_tags(
+            &mut s.tags.iter(),
+            s.identity
+                .as_ref()
+                .map(|c| (&c.identity, Some(c.content_class))),
+        )?;
         let tx = self.write_tx()?;
         let r = resolve(&tx, s, key, tol, priors)?;
         tx.commit()?;
@@ -1194,23 +1209,43 @@ impl Repository {
             );
             p.push(SqlValue::Text(family.clone()));
         }
-        sql.push_str(" ORDER BY last_seen DESC, emitter_id LIMIT ? OFFSET ?");
-        p.push(SqlValue::Integer(i64::from(limit) + 1));
-        p.push(SqlValue::Integer(
-            i64::try_from(q.offset).unwrap_or(i64::MAX),
-        ));
-        let mut ids: Vec<[u8; 16]> = {
+        sql.push_str(" ORDER BY last_seen DESC, emitter_id");
+        // T-036: a tag that is not identity-free never matches a row whose identity is withheld
+        // (its non-label tags are hidden), so such a filter is paged after gating.
+        let tag_needs_gate = q.tag.as_deref().is_some_and(|t| !tag_is_identity_free(t));
+        if !tag_needs_gate {
+            sql.push_str(" LIMIT ? OFFSET ?");
+            p.push(SqlValue::Integer(i64::from(limit) + 1));
+            p.push(SqlValue::Integer(
+                i64::try_from(q.offset).unwrap_or(i64::MAX),
+            ));
+        }
+        let ids: Vec<[u8; 16]> = {
             let mut stmt = tx.prepare(&sql)?;
             stmt.query_map(params_from_iter(p), |r| r.get(0))?
                 .collect::<Result<_, _>>()?
         };
-        let more = ids.len() > limit as usize;
-        ids.truncate(limit as usize);
-        let mut entries = Vec::with_capacity(ids.len());
+        let mut entries = Vec::with_capacity(ids.len().min(limit as usize + 1));
+        let mut skip = if tag_needs_gate { q.offset } else { 0 };
         for raw in ids {
             let emitter = self.emitter_ungated(eid(raw))?;
-            entries.push(gate_entry(&tx, emitter, q.access)?);
+            let entry = gate_entry(&tx, emitter, q.access)?;
+            if tag_needs_gate {
+                if matches!(entry.identity, InventoryIdentity::Withheld { .. }) {
+                    continue;
+                }
+                if skip > 0 {
+                    skip -= 1;
+                    continue;
+                }
+            }
+            entries.push(entry);
+            if entries.len() > limit as usize {
+                break;
+            }
         }
+        let more = entries.len() > limit as usize;
+        entries.truncate(limit as usize);
         Ok(InventoryPage {
             entries,
             next_offset: more.then_some(q.offset + u64::from(limit)),
