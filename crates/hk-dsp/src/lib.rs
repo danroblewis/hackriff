@@ -21,11 +21,16 @@
 //! - [`filter`]: Kaiser low-pass design with measured response, PFB prototype, SIMD kernels.
 //! - [`channelizer`]: the 2× oversampled polyphase filter bank ([`Pfb`], [`PfbBackend`]).
 //! - [`ddc`]: the on-demand DDC ([`Ddc`] from a [`DdcSpec`]).
+//!
+//! Noise floor (T-005): [`floor`] — [`NoiseFloorTracker`] (per-frame block-FCME floor, slow
+//! floor, impulsive gate, floor-rise events, per-channel floors), percentile and
+//! minimum-statistics estimators, Gamma utilities and [`FloorThreshold`] for CFAR.
 
 pub mod channelizer;
 pub mod ddc;
 pub mod fft;
 pub mod filter;
+pub mod floor;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod persistence;
@@ -43,6 +48,10 @@ pub use channelizer::{
 pub use ddc::{Ddc, DdcBlock, DdcError, DdcPlan, DdcSpec, ResampleKind};
 pub use fft::{CpuFft, FftBackend};
 pub use filter::{DesignError, FirDesign, LowpassSpec, design_lowpass, pfb_prototype};
+pub use floor::{
+    ChannelFloor, FloorConfig, FloorEvent, FloorEventKind, FloorFrame, FloorKind, FloorThreshold,
+    NoiseFloorTracker,
+};
 pub use persistence::{Persistence, PersistenceConfig};
 pub use spectrum::{Hold, HoldKind, PowerUnit, Resolution, Spectrum};
 pub use stft::{

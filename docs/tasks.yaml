@@ -86,8 +86,9 @@ tasks:
     dod: T1 unit tests pass; SK ~1 for noise, >1 for bursts; CPU path builds on macOS
   - id: T-005
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
-    status: in-progress
-    review: "Opus review FIX-BEFORE-MERGE: impulsive gate locks on for sustained 0.5-3 dB steps (slow floor freezes); rise-event storm on wide bursty signals (5-frame confirm, no hold-off); both CFAR branches lose wide-signal interiors (docs wrong). Numerics verified vs scipy. Implementer applying fixes + cheap follow-ups (guard only on OS branch, FCME iteration cap/NaN guard, event episodes with discriminator, GainKey tolerance)"
+    status: done
+    commit: "a40c2eb + review fixes 854614c (merged)"
+    review: "Opus review FIX-BEFORE-MERGE -> fixed (gate release + re-seed, 1 s episode rise/end/fall with hold-off and SK noise-like/structured class, wide-signal floor reference, OS-only guard, FCME caps/NaN guard, log-space gamma inverses, GainKey tolerance). Merged on targeted repro tests; focused re-review of the episode state machine running post-merge, fixes forward"
     deps: [T-004]
     parallel_group: C
     core_interface: true
@@ -100,7 +101,7 @@ tasks:
     dod: floor within +/-1 dB on synthetic; per-bin and per-channel estimates; feeds thresholds
   - id: T-006
     title: CFAR detection + burst records
-    status: todo
+    status: in-progress
     s4_inputs: "block FCME (256/hop 64, Pfa 1e-3 Gamma(n)) per-frame floor; OS-CFAR N=32 G=4 k=24 OR floor branch; on Pfa 1e-6 / off Pfa 1e-3 (never fixed -3 dB); min 3 frames before gap-merge (2); impulsive-frame gate; emitter confirmation by repeat or >=1 s integration; real-scene FA is a monitored metric, synthetic/terminated FA is the CI gate"
     followups_from_T-002_review: "detection region query is f-bounded only (add R*Tree on f_lo,f_hi,t_start,t_end or time-bucketing); populate detector_version, peak_level_dbfs, clip_count; overload->clipped enforced by repo"
     deps: [T-005]
@@ -293,7 +294,7 @@ tasks:
     dod: compact 47 CFR 2.106 table parsed + lookup; known/unexpected status set on emitters
   - id: T-020
     title: context-feeds cache + gpsjam adapter + event correlation
-    status: todo
+    status: in-progress
     followups_from_T-002_review: "external-event time-window/geo query; optional frequency extent on events; explanation evidence pins payload hash"
     deps: [T-005, T-002]
     parallel_group: E
@@ -306,7 +307,7 @@ tasks:
     dod: offline-first cache; Anomaly + Explanation objects; deterministic on frozen cache
   - id: T-021
     title: radiometry calibrated noise-floor product
-    status: todo
+    status: in-progress
     deps: [T-005, T-017]
     parallel_group: F
     use_cases: [SPACE-050]

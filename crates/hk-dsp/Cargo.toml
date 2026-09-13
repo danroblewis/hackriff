@@ -31,3 +31,7 @@ harness = false
 [[bench]]
 name = "channelizer_throughput"
 harness = false
+
+[[bench]]
+name = "floor_throughput"
+harness = false
