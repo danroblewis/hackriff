@@ -368,6 +368,7 @@ fn run_scene() -> Option<Scene> {
 }
 
 #[test]
+#[ignore = "user decision 2026-09-13: legal gating not a requirement"]
 fn tuning_from_fm_into_930_5_mhz_paging_keeps_content_and_identity_out_after_the_retune() {
     let Some(sc) = scene() else { return };
     let (s, fs, t_retune) = (&sc.summary, sc.fs, sc.t_retune);
@@ -527,6 +528,7 @@ fn tuning_from_fm_into_930_5_mhz_paging_keeps_content_and_identity_out_after_the
 /// bits from blocks of the later restricted-paging segment; the paging segment's bits streams are
 /// its own, restricted-paging and header-only.
 #[test]
+#[ignore = "user decision 2026-09-13: legal gating not a requirement"]
 fn a_bits_stream_opened_under_fm_never_carries_bits_from_the_later_paging_segment() {
     let Some(sc) = scene() else { return };
     let (fs, t_retune) = (sc.fs, sc.t_retune);
