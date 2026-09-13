@@ -33,8 +33,8 @@ pub use receiver::{
     STANDARD_RATES_BD, SeedSource, SyncPrior, TrialOutcome,
 };
 pub use record::{
-    EmitterClassification, FRAMING_IDENTITY_SCHEME, FramedRecordContext, INFER_DECODER_ID,
-    INFER_DECODER_VERSION, WrittenFraming, effective_content_class, framing_identity,
-    write_framed_bursts,
+    EmitterClassification, FRAMING_IDENTITY_SCHEME, FSK_FAMILY, FramedRecordContext,
+    INFER_DECODER_ID, INFER_DECODER_VERSION, WrittenFraming, effective_content_class,
+    framing_identity, write_framed_bursts,
 };
 pub use stream::{BitsPublishStats, bits_stream_header, publish_framed_bits};

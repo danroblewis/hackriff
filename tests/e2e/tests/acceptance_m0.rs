@@ -11,6 +11,9 @@
 #[path = "acceptance/common.rs"]
 mod common;
 
+#[path = "acceptance/blind.rs"]
+mod blind;
+
 #[path = "acceptance/signal_001.rs"]
 mod signal_001;
 
