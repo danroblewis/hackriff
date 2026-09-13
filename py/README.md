@@ -11,7 +11,7 @@ uv run pytest       # run the tooling tests (also `just test-py` from the repo r
 - `hkpy/sigmf.py` reads and writes `.sigmf-meta` documents. It is consistent with the Rust
   `hk_model::sigmf` types, including the `hackriff:` extension (`docs/sigmf-extension.md`).
 - `hkpy/synth/` generates labelled synthetic IQ (below). The Rust harness `tests/e2e` calls it.
-- `fixtures/` will hold fetch/verify tooling for the external fixture store (`fixtures/README.md`).
+- `py/fixtures/` holds the fixture tooling (`trim.py`, `annotate.py`, `verify.py`, `fetch.py`, `build_2026_09_13.py`, reference decoders `rds_ref.py`/`fsk_ref.py`); recipes `just fixtures-verify [--external]`, `just fixtures-fetch`, `just fixtures-build-2026-09-13` (see `fixtures/README.md`).
 
 ## Synthetic IQ generator (`hkpy.synth`)
 
