@@ -13,7 +13,7 @@ spikes:
     S1: "done 2026-09-13 (merged 9c68a17): owned Rust dataflow PASS (attach <=0.81 ms, zero ring loss, raised-priority capture thread required); FutureSDR 0.8.0 FAIL (no in-graph mutation, attach up to 13 ms, source stalls, nightly-only). ADR-0001 -> owned dataflow; S2 still gates on Jetson"
     S3: "mac-pass 2026-09-13 (60 fps @16384 bins, GPU persistence, 5-8x headroom; merged aa09a9e); Jetson kiosk + phone checks pending (needs user/hardware)"
     S4: "INCONCLUSIVE 2026-09-13 (merged 2f38325; REPORT.md saved by coordinator): chain works where testable (7/7 FM stations kept, 100 MHz ref spur + DC always flagged, IM3 ghosts flagged on semi-synthetic control), but no real ghosts in this scene and 4 s captures cannot bound false-alarm rate; defaults for T-005/T-006 in REPORT §5; re-run as S4b (outdoor/better antenna, 60 s, interleaved gain steps, terminated input, FM notch A/B) before freezing T-006 thresholds"
-    S5: in-progress
+    S5: "PASS (scoped) 2026-09-13, merged 9b60c35: trusted symbol rate never wrong (915 FHSS FSK 60/60, RDS 100% >=0.25 s, 0/359 synth); deviation 97% within 10%; FSK family 100% >=20 dB; unknowns never trusted. INCONCLUSIVE: OOK/PSK family on real signals, independent deviation truth. Trusted floor: short FSK/OOK >=20 dB, PSK >=15 dB, long signals >=0 dB; below floor, prior-led trial demod leads"
 tasks:
   - id: T-001
     title: Repo scaffold, Cargo workspace, justfile, CI skeleton (no hardware)
@@ -152,6 +152,7 @@ tasks:
   - id: T-010
     title: parameter-estimation (OBW, CFO, SNR, spectral shape)
     status: todo
+    s5_inputs: "mean-based N0; OBW99 on smoothed noise-subtracted PSD; SNR re-measured over burst extent (unclipped); CFO centroid default, x^2 line for DSB/BPSK; feed pilot-derived clock ppm to C05 (-6.8 ppm measured)"
     deps: [T-008]
     parallel_group: F
     use_cases: [AWARE-036, SIGNAL-062]
@@ -164,6 +165,7 @@ tasks:
   - id: T-011
     title: blind symbol-rate + FSK deviation estimation
     status: todo
+    s5_inputs: "gate PASSED (scoped). Port s5lib.classify_and_estimate: 4 whitened cyclic lines in 2 independent groups, guarded transition-LS (jitter<0.12 UI, kept>=85%), harmonic-aware consensus, separate rate/family trust; pitfalls list REPORT §4; acceptance fixtures = 915 bursts + sync truth, RDS windows (pilot/16), negatives; fail on any trusted-and-wrong"
     deps: [T-010]
     parallel_group: F
     use_cases: [AWARE-036]
@@ -189,6 +191,7 @@ tasks:
   - id: T-013
     title: digital demod (FSK) + framing/CRC inference
     status: todo
+    s5_inputs: "gate PASSED (scoped). Cross-burst preamble/sync inference proven (16-bit sync 0000110001011111 in 414/685 915 MHz bursts); next PHR/length/CRC inference; weak bursts (<15 dB) via prior-led trial demod seeded from strong bursts of the same cluster + standard-rate table"
     deps: [T-011]
     parallel_group: G
     use_cases: [AWARE-036]
