@@ -1124,7 +1124,7 @@ tasks:
     parallel_group: N
     use_cases: [SIGNAL-062]
     requested_by: user UI feedback 2026-09-13 (could not find Listen)
-    acceptance: "always-visible toolbar Listen/Stop above the waterfall playing the last clicked signal, else the active selection, else the strongest signal in view; Listen button per signal-inventory row (by emitter id); visible hint 'click a signal, then Listen'; restricted-classes hint text removed from index.html (refusal reasons still shown); UI tests for target selection/clamping/peak box/URLs; works at phone width"
+    acceptance: "(first) inventory row click (ui/src/inventory.ts ~L155, previously only highlight + selectRegion) opens the Inspect panel for that emitter with Listen enabled (target {emitter: id}) - user clicked the 101.2577 MHz fm-broadcast row and got no Listen; always-visible toolbar Listen/Stop above the waterfall playing the last clicked signal, else the active selection, else the strongest signal in view; Listen button per signal-inventory row (by emitter id); visible hint 'click a signal, then Listen'; restricted-classes hint text removed from index.html (refusal reasons still shown); UI tests for target selection/clamping/peak box/URLs; works at phone width"
     area: ui/ (index.html toolbar, listen.ts, inventory table, main.ts, style.css)
     needs: none
     model: sonnet
