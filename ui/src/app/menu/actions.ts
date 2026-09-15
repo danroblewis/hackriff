@@ -10,7 +10,7 @@ import { apiErrorText } from "../explore/format";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip } from "../explore/focus";
 import { clearUserBand, deleteEntry, loadInventoryRows, promoteEntry, type Row } from "../explore/inventory";
 import { listenAllTargets, recordSelectionClip, selectionStoreFor, type Selection } from "../explore/selections";
-import { focusSignal, patchInventoryRow } from "../explore/slice";
+import { focusSignal, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal } from "../explore/slice";
 import { setMode, toast } from "../state";
 import type { MenuItem } from "./model";
 
@@ -95,7 +95,16 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
   items.push({
     id: "delete", label: r.state === "candidate" ? "Delete" : "Delete from inventory",
     hint: r.state === "candidate" ? "detections kept" : "detections and history kept", danger: true,
-    onSelect: () => { void deleteEntry(ctx.client, r.id, reload).then((res) => { if (!res.ok) ctx.store.set(toast(`delete ${r.id}: ${res.message}`)); }); },
+    onSelect: () => {
+      // T-187: optimistic — remove the row before the server confirms; put it back on a refusal.
+      ctx.store.set(removeInventoryRowLocal(r.id));
+      void deleteEntry(ctx.client, r.id, reload).then((res) => {
+        if (!res.ok) {
+          ctx.store.set(restoreInventoryRowLocal(r));
+          ctx.store.set(toast(`delete ${r.id}: ${res.message}`));
+        }
+      });
+    },
   });
   items.push({
     id: "adjust-band", label: "Adjust band", hint: r.state === "confirmed" ? "drag the yellow box's edges" : "promote it first",

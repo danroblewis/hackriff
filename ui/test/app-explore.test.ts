@@ -13,7 +13,8 @@ import {
 } from "../src/app/explore/inventory";
 import { foundInside, listenAllTargets, recordSelectionClip, type Selection } from "../src/app/explore/selections";
 import {
-  focusSelection, patchInventoryRow, setInventoryError, setInventoryRows, setInventorySort, setInventoryTab, setSelections,
+  focusSelection, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setInventoryError,
+  setInventoryRows, setInventorySort, setInventoryTab, setSelections,
 } from "../src/app/explore/slice";
 import { createStore } from "../src/app/store";
 import { initialState } from "../src/app/state";
@@ -244,6 +245,47 @@ test("explore slice actions: tab, sort, rows, error, selections, focus", () => {
   assert.deepEqual(s.get().selections, { list: sels, sync: "1 region · saved on the server" });
   s.set(focusSelection("s1"));
   assert.deepEqual(s.get().focus, { kind: "selection", id: "s1" });
+});
+
+// ---- optimistic delete (T-187) ----
+
+test("removeInventoryRowLocal drops one row without touching the rest; a no-op if it's already gone", () => {
+  const s = createStore(initialState());
+  const rows = { e1: makeRow({ id: "e1" }), e2: makeRow({ id: "e2" }) };
+  s.set(setInventoryRows(rows, 1));
+  s.set(removeInventoryRowLocal("e1"));
+  assert.deepEqual(Object.keys(s.get().inventory.rows), ["e2"]);
+  const before = s.get().inventory;
+  s.set(removeInventoryRowLocal("e1"));
+  assert.equal(s.get().inventory, before, "removing an absent row changes nothing");
+});
+
+test("restoreInventoryRowLocal puts a removed row back exactly as it was (delete-refused revert)", () => {
+  const s = createStore(initialState());
+  const row = makeRow({ id: "e1", state: "candidate" });
+  s.set(setInventoryRows({ e1: row, e2: makeRow({ id: "e2" }) }, 1));
+  s.set(removeInventoryRowLocal("e1"));
+  assert.ok(!("e1" in s.get().inventory.rows));
+  s.set(restoreInventoryRowLocal(row));
+  assert.deepEqual(s.get().inventory.rows.e1, row);
+  assert.ok("e2" in s.get().inventory.rows, "the other row is untouched");
+});
+
+test("deleting a confirmed row with a user-band override (T-193) drops its box; a refused delete restores the override intact", () => {
+  // `live-spectrum.ts` derives the yellow boxes straight from `Object.values(inventory.rows)`
+  // (confirmedBands), so removing the row is sufficient to drop its box, and restoring the exact
+  // row object brings the override back rather than falling back to the measured extent.
+  const s = createStore(initialState());
+  const ub = { f_lo: 101_150_000, f_hi: 101_450_000, set_at: 1, actor: "fp", reason: null, reason_withheld: false };
+  const row = makeRow({ id: "e1", state: "confirmed", user_band: ub });
+  s.set(setInventoryRows({ e1: row }, 1));
+  assert.deepEqual(s.get().inventory.rows.e1.user_band, ub);
+
+  s.set(removeInventoryRowLocal("e1"));
+  assert.ok(!("e1" in s.get().inventory.rows), "no stale row (and so no stale box) survives the optimistic delete");
+
+  s.set(restoreInventoryRowLocal(row));
+  assert.deepEqual(s.get().inventory.rows.e1.user_band, ub, "the band override comes back, not the measured extent");
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----

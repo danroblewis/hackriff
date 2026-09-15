@@ -464,6 +464,16 @@ fn t082_after_deleting_a_merged_entry_redetection_creates_one_new_candidate() {
     )
     .unwrap();
     assert!(listed(&r).is_empty());
+    // T-187: a deleted survivor's merged (absorbed) ids resolve consistently — both the id that
+    // was itself deleted and the one merged into it before that follow the same live id and read
+    // the same (deleted) state; neither the id nor the merge is undone by the delete.
+    for absorbed in [e, d, survivor] {
+        assert_eq!(r.live_emitter_id(absorbed).unwrap(), survivor);
+        assert_eq!(
+            r.emitter_lifecycle_state(absorbed).unwrap(),
+            LifecycleState::Deleted
+        );
+    }
 
     // Detected again: a track entry and a decoder entry, linked into one new candidate.
     let c = r

@@ -51,6 +51,22 @@ export const setInventoryRows = (rows: Readonly<Record<string, InventoryRow>>, l
 
 export const setInventoryError = (error: string) => (s: AppState): Partial<AppState> => ({ inventory: { ...s.inventory, error } });
 
+/** T-187: optimistic delete — drops one row from the loaded set immediately, before the server has
+ * confirmed the `DELETE`. A no-op if the row is already gone (e.g. a reload raced it out). */
+export const removeInventoryRowLocal = (id: string) => (s: AppState): Partial<AppState> => {
+  if (!(id in s.inventory.rows)) return {};
+  const rows = { ...s.inventory.rows };
+  delete rows[id];
+  return { inventory: { ...s.inventory, rows } };
+};
+
+/** T-187: reverts [[removeInventoryRowLocal]] when the `DELETE` the caller optimistically applied
+ * is refused — puts the row back exactly as it was, so a network blip or a 4xx never silently
+ * drops a candidate the user did not actually delete. */
+export const restoreInventoryRowLocal = (row: InventoryRow) => (s: AppState): Partial<AppState> => ({
+  inventory: { ...s.inventory, rows: { ...s.inventory.rows, [row.id]: row } },
+});
+
 /** Patches one already-loaded row in place (T-193: an optimistic user-band commit/reset lands
  * without waiting for the next poll), leaving every other row untouched; a no-op if the row isn't
  * loaded (e.g. it scrolled out of the view span in the meantime). */
@@ -58,6 +74,7 @@ export const patchInventoryRow = (id: string, patch: Partial<InventoryRow>) => (
   const row = s.inventory.rows[id];
   return row ? { inventory: { ...s.inventory, rows: { ...s.inventory.rows, [id]: { ...row, ...patch } } } } : {};
 };
+
 
 /** Mirrors `SelectionStore`'s list into the store (§3.2); `sync` is a short status string
  * (`selections.ts` `syncText`). */

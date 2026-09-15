@@ -13,7 +13,10 @@ import {
   rowSeenText, sortInventoryRows, type Row,
 } from "./inventory";
 import { foundInside, selectionStoreFor, sortSelections, type Selection } from "./selections";
-import { focusSelection, focusSignal, setInventorySort, setInventoryTab, type InventorySortKey, type InventoryTab } from "./slice";
+import {
+  focusSelection, focusSignal, removeInventoryRowLocal, restoreInventoryRowLocal, setInventorySort,
+  setInventoryTab, type InventorySortKey, type InventoryTab,
+} from "./slice";
 
 const SORT_LABEL: Record<InventorySortKey, string> = { freq: "Freq", last_seen: "Last seen", count: "Count", bandwidth: "Bandwidth" };
 const SORT_KEYS: readonly InventorySortKey[] = ["freq", "last_seen", "count", "bandwidth"];
@@ -60,7 +63,15 @@ const mountInventory: MountFn = (el, ctx) => {
       e.stopPropagation();
       if (busy.deleting) return;
       busy.deleting = true;
-      void deleteEntry(ctx.client, r.id, reload).then((res) => { if (!res.ok) ctx.store.set(toast(`delete ${r.id}: ${res.message}`)); }).finally(() => { busy.deleting = false; });
+      // T-187: optimistic — the row leaves the list immediately (the candidate list fills up
+      // fast, so discarding one must feel instant); a refused delete puts it right back.
+      ctx.store.set(removeInventoryRowLocal(r.id));
+      void deleteEntry(ctx.client, r.id, reload).then((res) => {
+        if (!res.ok) {
+          ctx.store.set(restoreInventoryRowLocal(r));
+          ctx.store.set(toast(`delete ${r.id}: ${res.message}`));
+        }
+      }).finally(() => { busy.deleting = false; });
     } }, "Delete");
     return h("div", { class: "acts" }, r.state === "candidate" ? promote : null, del);
   }
