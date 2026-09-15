@@ -1396,3 +1396,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Lint clean, 1381/1381 tests, acceptance 32/32 (66 s).
   - Disk 8.6 GB free; launches paused below 20 GB (T-140 waiting).
   - T-139 fix round and main merge in progress.
+- **B0.366 T-139 merged (fixes b6132f5, merge 924b1f2).**
+  - Per-tile shape decision survives restart.
+  - Partial rows are disarmed after a full frame and re-armed on retune.
+  - `scheduler_history` asserts tile counts: scheduler 72 level-0 tiles, 0 uniform/floor, 72 mixed; fixed tune 72/72 uniform with floor.
+  - Median floor comparison within 0.5 dB.
+  - T-138 inventory logic consumes scheduler rows with no code change.
+  - Tests: hk-store 51, hk-pipeline 30, hk-context 67.
+  - T-141 added (Gamma-mixture floor for mixed tiles).
+  - T-124 unblocked, but launches are paused on disk (<20 GB) until the demo data dir is dealt with. Full check started.

@@ -1970,7 +1970,7 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: blocked
+    status: todo
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2192,7 +2192,8 @@ tasks:
   - id: T-139
     milestone: M2
     title: "Occupancy/history under the scheduler: short sweep hops and bandit dwells currently yield 0 history frames (partial rows discarded on every retune), so no occupancy rows, baselines or alarms while the scheduler runs"
-    status: review
+    status: done
+    commit: 924b1f2
     deps: [T-136]
     parallel_group: M2A
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2218,6 +2219,20 @@ tasks:
     effort: medium
     core_interface: false
 
+  - id: T-141
+    milestone: M2
+    title: "Bias-corrected floor for mixed-shape tiles (Gamma-mixture log-bias model) so scheduler-driven tiles report floor_db"
+    status: todo
+    deps: [T-139]
+    parallel_group: M2B
+    use_cases: [AWARE-042, SPACE-001]
+    found_by: "T-139 fix round 2026-09-15: in the 2 h default-scheduler scene all 72 level-0 tiles are mixed-shape (varying n_avg per hop), so 0 tiles have floor_db and occupancy uses the 80% method; fixed-tune scene 72/72 uniform with floor"
+    acceptance: "per-cell floor bias for a mixture of Gamma shapes (weights by frame count or span per n_avg) computed from tile metadata; scheduler tiles report floor_db within 0.5 dB median of fixed-tune floor on the same noise; fixed-tune values bit-identical; /api/floor documents mixed handling"
+    area: crates/hk-store/src/radiometry, crates/hk-store/src/history, docs/adr/0012 §2.10
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
