@@ -458,3 +458,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-061 had produced nothing.
   - **Limit reset:** 2026-09-14 20:00 PT (now past).
   - **Resume plan, throttled to conserve budget:** the coordinator verifies and merges T-066 itself; resume T-073 (regression) and T-070 (user priority) only; hold T-072, T-061, T-071 and the slot queue until those land.
+- **B0.151 Resume after the limit reset (2026-09-14 20:05 PT).**
+  - **Staged WIP found intact:** the "WIP commit" step found nothing unstaged; changes in T-070, T-072 and T-073 were already staged in their worktrees.
+  - **T-066 merged** by the coordinator (b7bbe15 → 230d652, clean merge, 22 files including a listen lifecycle test). Its agent never reported, so a full verification is running.
+  - **Resumed with budget guidance:** T-073 (regression) and T-070 (refinement).
+  - **Paused:** T-072 (staged WIP kept) and T-061 (back to todo).

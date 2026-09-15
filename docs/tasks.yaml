@@ -1011,8 +1011,8 @@ tasks:
   - id: T-061
     milestone: M0b
     title: Record outputs to files (bitstreams, symbols, WAV audio, IQ slices) from UI and CLI, per selection
-    status: in-progress
-    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
+    status: todo
+    hold: "agent terminated by spend limit before producing work; relaunch after T-073/T-070 land (budget throttling)"
     deps: [T-060, T-052, T-049]
     parallel_group: P
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1092,8 +1092,8 @@ tasks:
   - id: T-066
     milestone: M0b
     title: Listen cap and session leaks (configurable budget-based cap default >=8; close chains on WS close/tab gone/idle/half-open; 503 replumbing)
-    status: in-progress
-    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
+    status: done
+    commit: "b7bbe15 (merged 230d652; agent terminated by spend limit before reporting - coordinator verification running)"
     user_report: "live demo build 6b17fe5: 3rd /ws/open/listen refused busy '2 listeners already running' (503) while user may not have had 2 tabs playing; stream ids reached listen/48 (suspected leaked sessions)"
     deps: [T-043]
     parallel_group: P
@@ -1157,7 +1157,7 @@ tasks:
     milestone: M0b
     title: Output-driven demod refinement (RefinementLoop per chain; WFM first) storing refined centre/bandwidth on the Emitter
     status: in-progress
-    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
+    interrupted: "terminated by spend limit 2026-09-13; resumed 2026-09-14 20:10 PT with staged WIP intact"
     deps: [T-043, T-049, T-039]
     parallel_group: U
     use_cases: [SIGNAL-062]
@@ -1186,7 +1186,8 @@ tasks:
   - id: T-072
     milestone: M0b
     title: Pipeline fidelity follow-ups from blind acceptance (device-gap sample loss, readsb stamp latency, single-detection tracks, short-burst resolution)
-    status: in-progress
+    status: paused
+    paused: "staged WIP kept in worktree agent-ad62aec43e311666b (hk-cli pipeline.rs, hk-core ring/mod.rs, hk-pipeline run.rs, readsb plugin); resume after T-073/T-070 land (budget throttling)"
     interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
     deps: [T-047]
     parallel_group: J
@@ -1203,7 +1204,7 @@ tasks:
     milestone: M0b
     title: "Regression: intermittent Listen refusal no-analog-mode after mode selector 0.2.0 (listen_retune 1/3 flaky)"
     status: in-progress
-    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
+    interrupted: "terminated by spend limit 2026-09-13; resumed 2026-09-14 20:10 PT with staged WIP intact"
     deps: [T-065]
     parallel_group: T
     use_cases: [SIGNAL-062]
