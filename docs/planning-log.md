@@ -1996,3 +1996,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Bound the recipe_runtime splice exemption to less than 2 frames.
   - **Merge risk:** the mock rendering change may shift other retuned-mock tests (occupancy_retune, bandit e2e, stream_external). The post-merge full check covers this.
   - **Next:** fix round launched (fresh Opus, test files only).
+- **B0.436 T-179 launched (Sonnet, UI-only).** Goal: MUI bundle within 45 KB gzip, via code splitting of the Decode and Review areas or dead-code removal. It re-runs the smoke script afterwards.
+  - **Rust-building agents at cap (4):** T-173, T-175 fix round, T-178, and the full check.
+  - **Unblocked but waiting for a Rust slot:** T-174, plus MUI API gaps T-159..T-168.
