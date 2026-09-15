@@ -686,3 +686,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   A fresh Opus fix round is running in the T-091 worktree.
 - **B0.244 Disk cleanup** (supervisor: disk at 20 GB). Merged M1 worktrees were already removed at merge; `git worktree prune` found nothing stale. The remaining worktrees are all active (T-088, T-091, T-104). Removed coordinator scratchpad leftovers: the bisect `target-verify` (7.7 GB) and old hkdata/long/wgpu-probe outputs (~1 GB).
 - **B0.245 T-088 merged** (fix/integration 75c399d). Fixes: §14 framing via publish_frame/publish_record with the header inspector profile; streams registered only after a successful swap/spawn (tested: a failed edit keeps the running output served); closed taps dropped off the RT thread; DELETE unregisters streams; validate isn't audited. `recipes/rds.recipe.json` runs on a mock channel (all blocks resolve; the tone fixture has no RDS). Follow-up note: the generic `StreamReader` returns §14 records as Unknown. **Launched:** T-092 (decoded capture + scrub), T-093 (follow_hops), T-094 (RDS tutorial). Full check of main running.
+- **B0.246 T-104 delivered** (514b17c); all 7 review items have tests. Changes:
+  - ppm_demod now uses the shared FrameLength; LengthFrom removed.
+  - clock_recovery output is bounded by the shortest spacing, and the step is clamped. A hot bandwidth increase triggers a Rebuild.
+  - `FirDecimator::clear` gives allocation-free restarts.
+  - Caps at init: 65,536 samples per symbol, 65,536 taps, 2^22-sample ppm window.
+  - NaN/infinite input is zeroed and counted as `non_finite`.
+  - manchester: realignment holds later bits for the next chunk so the time map stays exact. Declared max_items grows by about one chunk of latency. Held bits are lost uncounted at END (minor, noted).
+  - Counting-allocator test: zero allocations across 14 blocks × 24 configs, including restarts.
+  hk-blocks 61/61, lint clean. Merge follows the in-flight full check (follow-up to reviewed work, per-item tests).
