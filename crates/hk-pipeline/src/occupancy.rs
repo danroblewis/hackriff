@@ -8,23 +8,34 @@
 //!
 //! 1. new detections since the last close (its own read connection to `hackriff.db`) update the
 //!    learned [`ChannelPlan`]; a new version is saved (`channels.json`);
-//! 2. the level-0 history grid of the tuned band (centre ± 40 % of the rate) for the interval is
-//!    read under the product lock (the history reader queues frames meanwhile, T-037b);
-//! 3. visits come from the observation log when one is fed ([`OccupancyService::record_observation`],
-//!    the T-115 shim) or else from the coverage mask ([`hk_context::occupancy::engine::coverage_visits`],
-//!    at `coverage_tier`: a parked, user-tuned device observes independently of activity);
-//! 4. band and channel visits are evaluated into compact samples kept for `horizon` (24 h + 1 h),
+//! 2. **every band observed in the interval** is evaluated: the distinct snapped analysed extents
+//!    of the observation log's dwell windows and visited sweep hops that start in it (so a retune
+//!    by the user or the scheduler inside an interval loses nothing), or, without a log or any
+//!    record in it, the tuned band (centre ± 40 % of the rate);
+//! 3. each band's level-0 history grid is read in **chunks** of at most `chunk_cells` cells (and
+//!    never across a 15-min boundary), each under the product lock for that read only, so the
+//!    history reader's queue (T-037b, 600 frames) drains between chunks;
+//! 4. visits come from the observation log when one is fed ([`OccupancyService::record_observation`]
+//!    or the T-115 store) or else from the coverage mask ([`hk_context::occupancy::engine::coverage_visits`],
+//!    at `coverage_tier`: a parked, user-tuned device observes independently of activity); a visit
+//!    crossing a chunk boundary is evaluated per chunk piece. Thresholds sit over each column's
+//!    local floor (`engine::local_floors`);
+//! 5. band and channel visits are evaluated into compact samples kept for `horizon` (24 h + 1 h),
 //!    so §2.5 widening needs no second read;
-//! 5. 15-min rows (and 1-h rows at hour boundaries, recomputed from the same samples, which equals
-//!    summing the 15-min counts and weights, §2.8) are appended to `hk_store::occupancy` in one batch.
+//! 6. 15-min rows (and 1-h rows at hour boundaries, recomputed from the same samples, which equals
+//!    summing the 15-min counts and weights, §2.8) for every subject observed in the interval are
+//!    appended to `hk_store::occupancy` in one batch.
 //!
 //! At the end of the run [`OccupancyService::finish`] closes the remaining (possibly partial)
 //! interval. [`OccupancyService::span_stats`] computes rows over an arbitrary span on demand
-//! (`/api/occupancy?interval=span`), reading the history hourly and the final plan.
+//! (`/api/occupancy?interval=span`) with the same chunked reads and the final plan.
 //!
-//! **T-115 status.** The observation log store is not merged; the service accepts records through
-//! [`OccupancyService::record_observation`] into a `MemoryObservations`. Once T-115 lands, its
-//! pipeline observer (or a store reader) feeds that call; nothing else changes.
+//! **Memory bound of a span query:** one chunk grid (`CHUNK_CELLS` × `size_of::<CellStats>()`,
+//! ≈ 44 MB) plus per-column scratch (a few × band cells × 8 B) plus the visit samples, capped at
+//! `MAX_SPAN_SAMPLES` × `size_of::<VisitSample>()` (≈ 96 MB; a query over it fails rather than
+//! grows). Band × span is limited to `MAX_SPAN_HZ_S` (20 MHz × 6 h), which keeps 1 s coverage
+//! visits of a 20 MHz band and ~90 channels inside the sample cap. A 15-min close holds one chunk
+//! grid at a time as well.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -43,7 +54,7 @@ use hk_model::attention::observation::{ObservationRecord, Tier};
 use hk_model::attention::occupancy::{Channel, ChannelKey, OccupancyStat, OccupancySubject};
 use hk_model::frames::PowerUnit;
 use hk_model::{FreqRange, Region, Repository, TimeRange, Timestamp};
-use hk_store::observation::ObservationStore;
+use hk_store::observation::{ObservationStore, RecordQuery};
 use hk_store::occupancy::{
     OccupancyQuery, OccupancyRows, OccupancyStore, OccupancyStoreConfig, StoredChannelPlan,
 };
@@ -57,6 +68,12 @@ const HOUR_NS: i64 = 3_600_000_000_000;
 pub const MAX_SPAN_NS: i64 = 7 * 24 * HOUR_NS;
 /// Widest band `span_stats` computes, Hz.
 pub const MAX_SPAN_WIDTH_HZ: f64 = 20e6;
+/// Largest band width × span `span_stats` computes, Hz·s (20 MHz × 6 h, or 1 MHz × 5 days).
+pub const MAX_SPAN_HZ_S: f64 = 20e6 * 6.0 * 3600.0;
+/// Most visit samples one `span_stats` call keeps.
+pub const MAX_SPAN_SAMPLES: usize = 2_000_000;
+/// Default most cells of one history read.
+pub const CHUNK_CELLS: usize = 1_000_000;
 
 /// Service settings.
 #[derive(Clone, Copy, Debug)]
@@ -77,6 +94,8 @@ pub struct OccupancyConfig {
     pub poll: Duration,
     /// Series store limits.
     pub store: OccupancyStoreConfig,
+    /// Most cells of one history read (and of one product-lock hold), [`CHUNK_CELLS`].
+    pub chunk_cells: usize,
 }
 
 impl Default for OccupancyConfig {
@@ -90,6 +109,7 @@ impl Default for OccupancyConfig {
             learn: LearnConfig::default(),
             poll: Duration::from_millis(500),
             store: OccupancyStoreConfig::default(),
+            chunk_cells: CHUNK_CELLS,
         }
     }
 }
@@ -128,7 +148,7 @@ struct Inner {
     finished: bool,
 }
 
-/// Level-0 history under the product lock, one query at a time.
+/// Level-0 history under the product lock, held for one read only.
 struct ProductLevels<'a>(&'a Mutex<FloorProduct>);
 
 impl LevelSource for ProductLevels<'_> {
@@ -144,6 +164,7 @@ pub struct OccupancyService {
     product: Arc<Mutex<FloorProduct>>,
     db_path: PathBuf,
     counters: Arc<Counters>,
+    t_cell_ns: i64,
     inner: Mutex<Inner>,
     observations: Mutex<Option<MemoryObservations>>,
     store_log: Mutex<Option<ObservationStore>>,
@@ -167,6 +188,50 @@ impl ObservationSource for StoreObservations<'_> {
                 overload: false,
             })
             .collect()
+    }
+
+    fn bands(&self, span: TimeRange) -> Vec<FreqRange> {
+        let starts_in = |t: Timestamp| t >= span.start && t < span.end;
+        let mut out = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = self.0.query(&RecordQuery {
+                freq: FreqRange::new(0.0, 1e12),
+                span,
+                tier: None,
+                cursor,
+                limit: 10_000,
+            });
+            for r in &page.records {
+                match r {
+                    ObservationRecord::Dwell(d) if starts_in(d.observed.start) => {
+                        out.push(d.window.usable);
+                    }
+                    ObservationRecord::Sweep(s) => {
+                        let Some(g) = page.geometries.iter().find(|g| g.id == s.geometry) else {
+                            continue;
+                        };
+                        for v in &s.visits {
+                            let t = s
+                                .span
+                                .start
+                                .saturating_add_nanos(i64::from(v.start_ms) * 1_000_000);
+                            if let Some(h) = g.hops.get(v.hop as usize)
+                                && starts_in(t)
+                            {
+                                out.push(h.usable);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match page.next_cursor {
+                Some(c) if c > cursor => cursor = c,
+                _ => break,
+            }
+        }
+        out
     }
 }
 
@@ -195,60 +260,129 @@ fn inside(inner: FreqRange, outer: FreqRange) -> bool {
     inner.lo_hz >= outer.lo_hz && inner.hi_hz <= outer.hi_hz
 }
 
-/// Evaluates one grid chunk of `band` and its `channels` into `out`.
-#[allow(clippy::too_many_arguments)]
-fn evaluate_chunk(
-    cfg: &OccupancyConfig,
-    grid: &RegionHistory,
+/// `v` restricted to `chunk` when it starts there or crosses into it.
+fn clip(v: &engine::Visit, chunk: TimeRange) -> Option<engine::Visit> {
+    let (s, e) = (
+        v.observed.start.as_unix_nanos(),
+        v.observed.end.as_unix_nanos(),
+    );
+    let (c0, c1) = (chunk.start.as_unix_nanos(), chunk.end.as_unix_nanos());
+    let starts = s >= c0 && s < c1;
+    let crosses = s < c0 && e > c0;
+    (starts || crosses).then(|| {
+        let a = s.max(c0);
+        engine::Visit {
+            observed: TimeRange::new(ts(a), ts(e.min(c1).max(a))),
+            ..*v
+        }
+    })
+}
+
+/// What [`evaluate_band`] reads.
+struct BandJob<'a> {
+    cfg: &'a OccupancyConfig,
+    levels: &'a dyn LevelSource,
+    obs: Option<&'a dyn ObservationSource>,
+    dets: &'a [DetectionExtent],
+    f_cell: f64,
+    t_cell_ns: i64,
+    /// Samples this call may add before it fails.
+    max_samples: usize,
+}
+
+/// Evaluates `band` and its `channels` over `range` into `out`, reading the history in chunks of
+/// at most `cfg.chunk_cells` cells that never cross a 15-min boundary (see the module notes).
+/// Sets `unit` from the grids read. Fails once more than `max_samples` samples were added.
+fn evaluate_band(
+    job: &BandJob<'_>,
     band: FreqRange,
     band_id: SubjectId,
     channels: &[Channel],
-    obs: Option<&dyn ObservationSource>,
-    dets: &[DetectionExtent],
-    chunk: TimeRange,
+    range: TimeRange,
     out: &mut BTreeMap<SubjectId, Vec<VisitSample>>,
-) {
-    let idle = engine::band_levels(grid, band);
-    let band_floor = engine::band_floor_db(grid, band, 0.8);
-    let visits = |f: FreqRange| -> Vec<engine::Visit> {
-        // The log when it has visits of this range; else the coverage mask (an unlogged run's
-        // rows were observed on its own ScanPlan, independently of activity).
-        let v = obs
-            .map(|o| o.visits(f, chunk))
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| engine::coverage_visits(grid, f, cfg.coverage_tier));
-        v.into_iter()
-            .filter(|v| v.observed.start >= chunk.start && v.observed.start < chunk.end)
-            .collect()
-    };
-    let f_cell = grid.f_cell_hz;
+    unit: &mut PowerUnit,
+) -> Result<(), String> {
+    let f_cell = job.f_cell;
     let mut subjects: Vec<(SubjectId, FreqRange, f64)> = vec![(band_id, band, f_cell)];
     subjects.extend(channels.iter().filter_map(|c| {
         let f = c.key.freq(f_cell);
         inside(f, band).then_some((SubjectId::Channel(c.key), f, c.obw_hz))
     }));
-    for (id, f, obw) in subjects {
-        let v = visits(f);
-        if v.is_empty() {
+    // Logged visits starting in the range (small); the coverage mask when the log has none.
+    let logged: Vec<Vec<engine::Visit>> = subjects
+        .iter()
+        .map(|(_, f, _)| job.obs.map(|o| o.visits(*f, range)).unwrap_or_default())
+        .collect();
+    let nf = ((band.width_hz() / f_cell).round() as usize).max(1);
+    let t_cell = job.t_cell_ns.max(1);
+    let step = ((job.cfg.chunk_cells / nf).max(1) as i64).saturating_mul(t_cell);
+    let quarter = job.cfg.interval_ns.max(t_cell);
+    let (s0, s1) = (range.start.as_unix_nanos(), range.end.as_unix_nanos());
+    let mut added = 0usize;
+    let mut a = s0;
+    while a < s1 {
+        let b = ((a.div_euclid(step) + 1) * step)
+            .min((a.div_euclid(quarter) + 1) * quarter)
+            .min(s1);
+        let chunk = TimeRange::new(ts(a), ts(b));
+        a = b;
+        // The product lock is held inside this call only.
+        let Some(grid) = job.levels.level0(band, chunk) else {
             continue;
+        };
+        *unit = grid.unit;
+        let floors = job.cfg.engine.local_floors(&grid);
+        for ((id, f, obw), log) in subjects.iter().zip(&logged) {
+            let v: Vec<engine::Visit> = if log.is_empty() {
+                engine::coverage_visits(&grid, *f, job.cfg.coverage_tier)
+                    .into_iter()
+                    .filter(|v| v.observed.start >= chunk.start && v.observed.start < chunk.end)
+                    .collect()
+            } else {
+                log.iter().filter_map(|v| clip(v, chunk)).collect()
+            };
+            if v.is_empty() {
+                continue;
+            }
+            let (s, _) = engine::evaluate(
+                &job.cfg.engine.threshold,
+                *f,
+                *obw,
+                EvalInput {
+                    grid: &grid,
+                    visits: &v,
+                    detections: job.dets,
+                    floors: &floors,
+                },
+            );
+            added += s.len();
+            out.entry(*id).or_default().extend(s);
         }
-        let (s, _) = engine::evaluate(
-            &cfg.engine.threshold,
-            f,
-            obw,
-            EvalInput {
-                grid,
-                visits: &v,
-                detections: dets,
-                idle_levels_db: &idle,
-                band_floor_db: band_floor,
-            },
-        );
-        out.entry(id).or_default().extend(s);
+        if added > job.max_samples {
+            return Err(format!(
+                "span needs more than {} visit samples; narrow the band or the span",
+                job.max_samples
+            ));
+        }
     }
+    Ok(())
 }
 
-/// Rows of `interval` for every subject with samples.
+/// Band × span limits of `span_stats`.
+fn check_span(freq: FreqRange, span: TimeRange) -> Result<(), String> {
+    if span.duration_ns() <= 0 || span.duration_ns() > MAX_SPAN_NS {
+        return Err("span must be positive and at most 7 days".into());
+    }
+    if freq.hi_hz.is_nan() || freq.hi_hz <= freq.lo_hz || freq.width_hz() > MAX_SPAN_WIDTH_HZ {
+        return Err("band must be positive and at most 20 MHz".into());
+    }
+    if freq.width_hz() * span.duration_ns() as f64 * 1e-9 > MAX_SPAN_HZ_S {
+        return Err("band × span must be at most 120 MHz·h (e.g. 20 MHz × 6 h)".into());
+    }
+    Ok(())
+}
+
+/// Rows of `interval` for every subject with samples in it (not observed is not quiet: no row).
 fn rows_for(
     cfg: &OccupancyConfig,
     channels: &[Channel],
@@ -271,15 +405,22 @@ fn rows_for(
         unit,
         calibration: None,
     };
+    let (i0, i1) = (interval.start.as_unix_nanos(), interval.end.as_unix_nanos());
+    let observed = |s: &[VisitSample]| {
+        s.iter()
+            .any(|v| (i0..i1).contains(&v.start_ns.saturating_add(v.dur_ns / 2)))
+    };
+    let series: Vec<(&SubjectId, &Vec<VisitSample>)> =
+        series.iter().filter(|(_, s)| observed(s)).collect();
     let mut ch_rows = Vec::new();
-    for (id, s) in series {
+    for (id, s) in &series {
         if let SubjectId::Channel(key) = id {
             let c = ctx(OccupancySubject::Channel { key: *key }, Some(obw(key)));
             ch_rows.extend(engine::stat(&cfg.engine, &c, interval, s, data_span, None));
         }
     }
     let mut rows = Vec::new();
-    for (id, s) in series {
+    for (id, s) in &series {
         if let SubjectId::Band(lo, hi) = id {
             let band = FreqRange::new(*lo as f64 * f_cell, *hi as f64 * f_cell);
             let inner: Vec<OccupancyStat> = ch_rows
@@ -318,9 +459,14 @@ impl OccupancyService {
         counters: Arc<Counters>,
         cfg: OccupancyConfig,
     ) -> Arc<Self> {
-        let (scheme, f_cell) = {
+        let (scheme, f_cell, t_cell_ns) = {
             let p = product.lock().unwrap_or_else(PoisonError::into_inner);
-            (p.config().pyramid.scheme, p.config().pyramid.f_cell_hz)
+            let py = &p.config().pyramid;
+            (
+                py.scheme,
+                py.f_cell_hz,
+                i64::try_from(py.t_cell.as_nanos()).unwrap_or(1_000_000_000),
+            )
         };
         let mut stats = OccupancyServiceStats::default();
         let store = OccupancyStore::open(dir, cfg.store)
@@ -340,6 +486,7 @@ impl OccupancyService {
             product,
             db_path,
             counters,
+            t_cell_ns,
             inner: Mutex::new(Inner {
                 store,
                 plan,
@@ -388,7 +535,7 @@ impl OccupancyService {
             .map(Timestamp::as_unix_nanos)
     }
 
-    /// Uses the run's T-115 observation log for visit timing and tiers.
+    /// Uses the run's T-115 observation log for visit timing, tiers and the bands to evaluate.
     pub fn set_observation_store(&self, store: ObservationStore) {
         *self
             .store_log
@@ -516,34 +663,58 @@ impl OccupancyService {
             }
             inner.stats.plan_version = inner.plan.version();
         }
-        // 2–4. Evaluate the tuned band's grid for the interval.
-        let (center, rate) = self.counters.tune();
-        if rate > 0.0 && center > 0.0 {
-            let (band, band_id) = snap_band(FreqRange::centered(center, 0.8 * rate), f_cell);
-            if let Some(grid) = ProductLevels(&self.product).level0(band, iv) {
-                inner.unit = grid.unit;
-                let channels = inner.plan.channels_in(band);
-                let mem = self
-                    .observations
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                let log = self.log();
-                let log = log.as_ref().map(StoreObservations);
-                let obs = pick(mem.as_ref(), log.as_ref());
-                let mut series = std::mem::take(&mut inner.series);
-                evaluate_chunk(
-                    &self.cfg,
-                    &grid,
-                    band,
-                    band_id,
-                    &channels,
-                    obs,
-                    &dets,
-                    iv,
-                    &mut series,
-                );
-                inner.series = series;
+        // 2–5. Every band observed in the interval, else the tuned band.
+        {
+            let mem = self
+                .observations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let log = self.log();
+            let log = log.as_ref().map(StoreObservations);
+            let obs = pick(mem.as_ref(), log.as_ref());
+            let mut bands: BTreeMap<SubjectId, FreqRange> = obs
+                .map(|o| o.bands(iv))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|b| {
+                    // Inward: an outward-snapped edge cell lies outside the analysed extent, so
+                    // no coverage row of the band would be fully observed.
+                    let lo = (b.lo_hz / f_cell - 1e-6).ceil() as i64;
+                    let hi = (b.hi_hz / f_cell + 1e-6).floor() as i64;
+                    (hi > lo).then(|| {
+                        (
+                            SubjectId::Band(lo, hi),
+                            FreqRange::new(lo as f64 * f_cell, hi as f64 * f_cell),
+                        )
+                    })
+                })
+                .collect();
+            if bands.is_empty() {
+                let (center, rate) = self.counters.tune();
+                if rate > 0.0 && center > 0.0 {
+                    let (f, id) = snap_band(FreqRange::centered(center, 0.8 * rate), f_cell);
+                    bands.insert(id, f);
+                }
             }
+            let levels = ProductLevels(&self.product);
+            let job = BandJob {
+                cfg: &self.cfg,
+                levels: &levels,
+                obs,
+                dets: &dets,
+                f_cell,
+                t_cell_ns: self.t_cell_ns,
+                max_samples: usize::MAX,
+            };
+            let mut series = std::mem::take(&mut inner.series);
+            let mut unit = inner.unit;
+            for (id, band) in bands {
+                let channels = inner.plan.channels_in(band);
+                // Unbounded samples: cannot fail.
+                let _ = evaluate_band(&job, band, id, &channels, iv, &mut series, &mut unit);
+            }
+            inner.series = series;
+            inner.unit = unit;
         }
         let keep_from = iv.end.as_unix_nanos() - self.cfg.horizon_ns;
         for s in inner.series.values_mut() {
@@ -554,7 +725,7 @@ impl OccupancyService {
             }
         }
         inner.series.retain(|_, s| !s.is_empty());
-        // 5. Rows.
+        // 6. Rows.
         let Some(first) = inner.first_ns else {
             inner.stats.intervals_closed += 1;
             return;
@@ -616,18 +787,24 @@ impl OccupancyService {
     }
 
     /// Rows over `span` for the band `freq` and the plan's channels inside it, computed on demand
-    /// from the history (hourly reads) and the run's detections; no widening beyond `span`.
+    /// from the history (chunked reads, see the module notes) and the run's detections; no
+    /// widening beyond `span`. Limits: band ≤ 20 MHz, span ≤ 7 days, band × span ≤
+    /// [`MAX_SPAN_HZ_S`], at most [`MAX_SPAN_SAMPLES`] visit samples.
     pub fn span_stats(
         &self,
         freq: FreqRange,
         span: TimeRange,
     ) -> Result<Vec<OccupancyStat>, String> {
-        if span.duration_ns() <= 0 || span.duration_ns() > MAX_SPAN_NS {
-            return Err("span must be positive and at most 7 days".into());
-        }
-        if freq.hi_hz.is_nan() || freq.hi_hz <= freq.lo_hz || freq.width_hz() > MAX_SPAN_WIDTH_HZ {
-            return Err("band must be positive and at most 20 MHz".into());
-        }
+        self.span_stats_from(&ProductLevels(&self.product), freq, span)
+    }
+
+    fn span_stats_from(
+        &self,
+        levels: &dyn LevelSource,
+        freq: FreqRange,
+        span: TimeRange,
+    ) -> Result<Vec<OccupancyStat>, String> {
+        check_span(freq, span)?;
         let (channels, f_cell) = {
             let inner = self.lock();
             (inner.plan.channels(), inner.plan.f_cell_hz())
@@ -648,31 +825,18 @@ impl OccupancyService {
             .clone();
         let log = self.log();
         let log = log.as_ref().map(StoreObservations);
-        let obs = pick(mem.as_ref(), log.as_ref());
-        let levels = ProductLevels(&self.product);
+        let job = BandJob {
+            cfg: &self.cfg,
+            levels,
+            obs: pick(mem.as_ref(), log.as_ref()),
+            dets: &dets,
+            f_cell,
+            t_cell_ns: self.t_cell_ns,
+            max_samples: MAX_SPAN_SAMPLES,
+        };
         let mut series = BTreeMap::new();
         let mut unit = PowerUnit::Dbfs;
-        let (s0, s1) = (span.start.as_unix_nanos(), span.end.as_unix_nanos());
-        let mut a = s0;
-        while a < s1 {
-            let b = ((a.div_euclid(HOUR_NS) + 1) * HOUR_NS).min(s1);
-            let chunk = TimeRange::new(ts(a), ts(b));
-            if let Some(grid) = levels.level0(band, chunk) {
-                unit = grid.unit;
-                evaluate_chunk(
-                    &self.cfg,
-                    &grid,
-                    band,
-                    band_id,
-                    &channels,
-                    obs,
-                    &dets,
-                    chunk,
-                    &mut series,
-                );
-            }
-            a = b;
-        }
+        evaluate_band(&job, band, band_id, &channels, span, &mut series, &mut unit)?;
         Ok(rows_for(
             &self.cfg, &channels, &series, span, span, unit, f_cell,
         ))
@@ -686,7 +850,15 @@ impl OccupancyService {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    use hk_store::CellStats;
+
     use super::*;
+
+    const F_CELL: f64 = 6250.0;
+    const T_CELL: i64 = 1_000_000_000;
 
     #[test]
     fn occupancy_band_snapping_is_outward_and_stable() {
@@ -694,5 +866,187 @@ mod tests {
         assert!(b.lo_hz <= 433_300_001.0 && b.hi_hz >= 433_699_999.0);
         let (_, id2) = snap_band(FreqRange::new(433_300_002.0, 433_699_998.0), 6250.0);
         assert_eq!(id, id2);
+    }
+
+    /// A history that synthesises a fully observed noise grid for any read, under `lock` (the
+    /// product lock stand-in), recording the largest grid it built.
+    struct SynthLevels {
+        lock: Mutex<()>,
+        max_cells: AtomicUsize,
+        reads: AtomicUsize,
+    }
+
+    impl LevelSource for SynthLevels {
+        fn level0(&self, freq: FreqRange, span: TimeRange) -> Option<RegionHistory> {
+            let _held = self.lock.lock().unwrap();
+            let f0 = (freq.lo_hz / F_CELL).floor() as i64;
+            let nf = ((freq.hi_hz / F_CELL).ceil() as i64 - f0) as usize;
+            let t0 = span.start.as_unix_nanos().div_euclid(T_CELL);
+            let nt = ((span.end.as_unix_nanos() + T_CELL - 1).div_euclid(T_CELL) - t0) as usize;
+            let cell = CellStats {
+                max_db: -99.0,
+                mean_db: -99.0,
+                p_low_db: -100.0,
+                p_high_db: -99.0,
+                occupancy: 0.0,
+                occupancy_max: 0.0,
+                coverage: 1.0,
+                floor_db: -100.0,
+                frames: 10,
+                level: 0,
+            };
+            self.max_cells.fetch_max(nt * nf, Ordering::SeqCst);
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Some(RegionHistory {
+                scheme: 1,
+                level: 0,
+                unit: PowerUnit::Dbfs,
+                f_cell_hz: F_CELL,
+                f_first_cell: f0,
+                nf,
+                t_cell_ns: T_CELL,
+                t_first_cell: t0,
+                nt,
+                percentiles: (0.1, 0.9),
+                cells: vec![cell; nt * nf],
+                provenance: Default::default(),
+                tiles_read: 0,
+            })
+        }
+    }
+
+    fn synth() -> SynthLevels {
+        SynthLevels {
+            lock: Mutex::new(()),
+            max_cells: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn run(
+        levels: &SynthLevels,
+        cfg: &OccupancyConfig,
+        width_hz: f64,
+        secs: i64,
+        max_samples: usize,
+    ) -> (Result<(), String>, BTreeMap<SubjectId, Vec<VisitSample>>) {
+        let (band, id) = snap_band(FreqRange::new(100e6, 100e6 + width_hz), F_CELL);
+        let t0 = 1_800_000_000_000_000_000_i64;
+        let job = BandJob {
+            cfg,
+            levels,
+            obs: None,
+            dets: &[],
+            f_cell: F_CELL,
+            t_cell_ns: T_CELL,
+            max_samples,
+        };
+        let mut out = BTreeMap::new();
+        let mut unit = PowerUnit::Dbfs;
+        let r = evaluate_band(
+            &job,
+            band,
+            id,
+            &[],
+            TimeRange::new(ts(t0), ts(t0 + secs * T_CELL)),
+            &mut out,
+            &mut unit,
+        );
+        (r, out)
+    }
+
+    #[test]
+    fn occupancy_span_reads_are_chunked_within_the_cell_budget_and_bounded() {
+        // 20 MHz × 1 h in one read is 3200 × 3600 cells (~11.5 M, ~500 MB of CellStats).
+        let cfg = OccupancyConfig {
+            chunk_cells: 20_000,
+            ..OccupancyConfig::default()
+        };
+        let levels = synth();
+        let (r, out) = run(&levels, &cfg, 20e6, 3600, MAX_SPAN_SAMPLES);
+        r.unwrap();
+        let max = levels.max_cells.load(Ordering::SeqCst);
+        let reads = levels.reads.load(Ordering::SeqCst);
+        eprintln!("chunked: {reads} reads, largest {max} cells");
+        assert!(max <= 20_000, "largest read {max} cells");
+        assert!(reads >= 3600 / 6);
+        // Every 1 s row of the band evaluated exactly once, idle against its local floor.
+        let band = out.values().next().unwrap();
+        assert_eq!(band.len(), 3600);
+        assert!(band.iter().all(|v| !v.occupied
+            && v.floor_source == hk_model::attention::occupancy::FloorSource::History));
+        // Default budget: 15-min-bounded chunks of ≤ 1 M cells.
+        let levels = synth();
+        run(
+            &levels,
+            &OccupancyConfig::default(),
+            20e6,
+            1800,
+            MAX_SPAN_SAMPLES,
+        )
+        .0
+        .unwrap();
+        assert!(levels.max_cells.load(Ordering::SeqCst) <= CHUNK_CELLS);
+        // The documented peak: one chunk grid plus the sample cap.
+        let grid_mb = (CHUNK_CELLS * std::mem::size_of::<CellStats>()) as f64 / 1e6;
+        let samples_mb = (MAX_SPAN_SAMPLES * std::mem::size_of::<VisitSample>()) as f64 / 1e6;
+        eprintln!("peak bound: grid {grid_mb:.0} MB + samples {samples_mb:.0} MB");
+        assert!(grid_mb <= 64.0 && samples_mb <= 128.0);
+        // Too many samples fails instead of growing.
+        let levels = synth();
+        let (r, _) = run(&levels, &cfg, 1e6, 600, 100);
+        assert!(r.is_err());
+        // Band × span limits.
+        let span_h = |h: i64| TimeRange::new(ts(0), ts(h * HOUR_NS));
+        assert!(check_span(FreqRange::new(0.0, 20e6), span_h(6)).is_ok());
+        assert!(check_span(FreqRange::new(0.0, 20e6), span_h(7)).is_err());
+        assert!(check_span(FreqRange::new(0.0, 1e6), span_h(120)).is_ok());
+        assert!(check_span(FreqRange::new(0.0, 1e6), span_h(24 * 7 + 1)).is_err());
+    }
+
+    #[test]
+    fn occupancy_span_query_never_starves_history_ingest() {
+        // The history reader folds a frame under `try_lock` and queues it otherwise, dropping the
+        // oldest beyond HISTORY_QUEUE_FRAMES (T-037b). Simulate 200 frames/s against a 20 MHz ×
+        // 30 min span query at the default chunk budget: the queue never overflows.
+        let levels = Arc::new(synth());
+        let cfg = OccupancyConfig::default();
+        let done = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let (levels, done) = (Arc::clone(&levels), Arc::clone(&done));
+            std::thread::spawn(move || {
+                let r = run(&levels, &cfg, 20e6, 1800, MAX_SPAN_SAMPLES).0;
+                done.store(true, Ordering::SeqCst);
+                r
+            })
+        };
+        let (mut queued, mut max_queued, mut folded) = (0usize, 0usize, 0u64);
+        let mut longest = Duration::ZERO;
+        let mut blocked_since: Option<Instant> = None;
+        while !done.load(Ordering::SeqCst) {
+            match levels.lock.try_lock() {
+                Ok(_g) => {
+                    folded += 1 + queued as u64;
+                    queued = 0;
+                    if let Some(s) = blocked_since.take() {
+                        longest = longest.max(s.elapsed());
+                    }
+                }
+                Err(_) => {
+                    queued += 1;
+                    max_queued = max_queued.max(queued);
+                    blocked_since.get_or_insert_with(Instant::now);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        worker.join().unwrap().unwrap();
+        eprintln!(
+            "ingest during span query: {folded} folded, max queue {max_queued}, longest hold {:.0} ms, {} reads",
+            longest.as_secs_f64() * 1e3,
+            levels.reads.load(Ordering::SeqCst)
+        );
+        assert!(max_queued < crate::history::HISTORY_QUEUE_FRAMES / 4);
+        assert!(folded > 0);
     }
 }

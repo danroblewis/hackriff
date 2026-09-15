@@ -10,9 +10,11 @@
 //! 2. **Evaluation** ([`evaluate`]) reads the level-0 history grid under each visit: the visit's
 //!    level is the highest cell `mean_db` (power mean of the frames folded into the 1 s cell) over
 //!    the subject's cells and rows; it is **occupied** when that exceeds the threshold (SM.1880
-//!    "any sample in the channel"). The threshold is resolved once per evaluated grid
-//!    ([`super::threshold::resolve`]: corrected history floor, else the 80 % method over the band;
-//!    guard; RBW = the level-0 cell width, corrected when it is below the channel OBW). A crossing
+//!    "any sample in the channel"). The threshold is resolved per grid column over its **local**
+//!    floor ([`local_floors`]: the column's own 80 % floor of history floors, or of levels, unless
+//!    it sits more than the guard above the 20th percentile of column floors within ±1 MHz; dense
+//!    neighbourhoods flag the floor suspect) with [`super::threshold::resolve`] (guard; RBW = the
+//!    level-0 cell width, corrected when it is below the channel OBW). A crossing
 //!    under `overload` or coinciding with a §2.6 suspect detection is **suspect**. The outcome is a
 //!    compact [`VisitSample`], so widened windows need no second read of the history.
 //! 3. **Estimation** ([`estimate`]) over a window, then [`stat`] with the §2.5 widening ladder.
@@ -41,8 +43,8 @@ use hk_model::attention::ATTENTION_SCHEMA_VERSION;
 use hk_model::attention::baseline::SiteKey;
 use hk_model::attention::observation::{ObservationRecord, SweepRecord, Tier};
 use hk_model::attention::occupancy::{
-    ConfidenceInterval, ConfidenceLevel, OccupancyStat, OccupancySubject, ThresholdSpec,
-    TimingRegime, effective_samples, fraction_interval,
+    ConfidenceInterval, ConfidenceLevel, FloorSource, OccupancyStat, OccupancySubject,
+    ThresholdMethod, ThresholdSpec, TimingRegime, effective_samples, fraction_interval,
 };
 use hk_model::frames::PowerUnit;
 use hk_model::ids::CalibrationStateId;
@@ -83,6 +85,14 @@ pub struct Visit {
 pub trait ObservationSource {
     /// The visits.
     fn visits(&self, freq: FreqRange, span: TimeRange) -> Vec<Visit>;
+
+    /// Analysed extents (usable band of each dwell window or visited sweep hop, DC notch
+    /// included) of the observations starting in `span`, unordered and possibly repeated: the
+    /// bands an interval must evaluate. Empty when the source cannot tell.
+    fn bands(&self, span: TimeRange) -> Vec<FreqRange> {
+        let _ = span;
+        Vec::new()
+    }
 }
 
 fn covers(covered: &[FreqRange], f: FreqRange) -> bool {
@@ -167,6 +177,37 @@ impl ObservationSource for MemoryObservations {
         out.sort_by_key(|v| v.observed.start);
         out
     }
+
+    fn bands(&self, span: TimeRange) -> Vec<FreqRange> {
+        let hull = |c: &[FreqRange]| {
+            let lo = c.iter().map(|r| r.lo_hz).fold(f64::INFINITY, f64::min);
+            let hi = c.iter().map(|r| r.hi_hz).fold(f64::NEG_INFINITY, f64::max);
+            (hi > lo).then(|| FreqRange::new(lo, hi))
+        };
+        let mut out: Vec<FreqRange> = self
+            .dwells
+            .iter()
+            .filter(|(_, v)| starts_in(v.observed.start, span))
+            .filter_map(|(c, _)| hull(c))
+            .collect();
+        for s in &self.sweeps {
+            let Some(hops) = self.geometries.get(&s.geometry) else {
+                continue;
+            };
+            for hv in &s.visits {
+                let start = s
+                    .span
+                    .start
+                    .saturating_add_nanos(i64::from(hv.start_ms) * 1_000_000);
+                if starts_in(start, span)
+                    && let Some(b) = hops.get(hv.hop as usize).and_then(|c| hull(c))
+                {
+                    out.push(b);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Level-0 history for a region (the evaluation input).
@@ -225,36 +266,144 @@ pub fn coverage_visits(grid: &RegionHistory, freq: FreqRange, tier: Tier) -> Vec
         .collect()
 }
 
-/// Level samples (`mean_db` of every observed cell) of `freq`, for the 80 % method.
-pub fn band_levels(grid: &RegionHistory, freq: FreqRange) -> Vec<f64> {
-    let Some((a, b)) = cells_of(grid, freq) else {
-        return Vec::new();
-    };
-    let mut v = Vec::new();
-    for t in 0..grid.nt {
-        for f in a..b {
-            if cell_ok(grid, t, f) {
-                v.push(f64::from(grid.cell(t, f).mean_db));
-            }
-        }
-    }
-    v
+/// Local noise-floor settings (T-118 review).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalFloorConfig {
+    /// Half-width of a column's neighbourhood, Hz (±1 MHz).
+    pub radius_hz: f64,
+    /// Percentile of the neighbourhood's column floors taken as its reference (0.2).
+    pub percentile: f64,
+    /// Mean history occupancy of the neighbourhood above which its floor is suspect (0.8).
+    pub dense_fraction: f64,
 }
 
-/// The band's noise floor: the 80 % method (discard the highest `discard_fraction`, linearly
-/// average the rest) over the history's bias-corrected `floor_db` of every observed cell of `freq`.
-/// `None` when no cell has a finite floor.
-pub fn band_floor_db(grid: &RegionHistory, freq: FreqRange, discard_fraction: f64) -> Option<f64> {
-    let (a, b) = cells_of(grid, freq)?;
-    let mut v = Vec::new();
-    for t in 0..grid.nt {
-        for f in a..b {
-            if cell_ok(grid, t, f) {
-                v.push(f64::from(grid.cell(t, f).floor_db));
-            }
+impl Default for LocalFloorConfig {
+    fn default() -> Self {
+        Self {
+            radius_hz: 1e6,
+            percentile: 0.2,
+            dense_fraction: 0.8,
         }
     }
-    threshold::eighty_percent_floor_db(&v, discard_fraction)
+}
+
+/// Per-column noise floors of one grid (index = grid column).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColumnFloors {
+    /// Floor, dB/Hz; NaN when the column has no observed cell.
+    pub floor_db: Vec<f64>,
+    /// Its source.
+    pub source: Vec<FloorSource>,
+    /// The neighbourhood is dense (its floor may be signal).
+    pub suspect: Vec<bool>,
+}
+
+/// Local noise floors of every column of `grid` (T-118 review: a whole-band floor is pulled low by
+/// passband ripple and edge roll-off, and in a dense band its lowest fifth is signal).
+///
+/// 1. **Column floor:** the 80 % method (discard the highest `discard_fraction`, linearly average
+///    the rest) over the column's observed cells' bias-corrected `floor_db` (source `History`), or
+///    over their `mean_db` when no cell has a floor (source `EightyPercent`). A channel idle for
+///    at least a fifth of the time gets its noise here.
+/// 2. **Reference:** the `percentile` (20th) of the column floors within `radius_hz` below the
+///    column and, separately, above it; the higher of the two (a side with fewer than a quarter of
+///    its columns measured is ignored).
+/// 3. **Floor:** the column's own floor unless it is more than `guard_db` above the reference,
+///    i.e. above both sides (it follows ripple and roll-off, which a percentile over ±1 MHz
+///    cannot); else the reference (the column is busy nearly all the time, so its own floor is
+///    signal). A continuous signal less than `guard_db` above the reference could not cross a
+///    reference threshold either.
+/// 4. **Suspect:** the neighbourhood's mean history occupancy (fraction of time above the tracker
+///    threshold) exceeds `dense_fraction`: the reference itself is then likely signal. (A bias-model
+///    noise level for the gain state is not in the history grid, so the occupancy rule is used.)
+pub fn local_floors(
+    grid: &RegionHistory,
+    discard_fraction: f64,
+    guard_db: f64,
+    cfg: &LocalFloorConfig,
+) -> ColumnFloors {
+    let nf = grid.nf;
+    let mut col = vec![f64::NAN; nf];
+    let mut src = vec![FloorSource::History; nf];
+    let mut occ = vec![f64::NAN; nf];
+    let mut scratch = Vec::with_capacity(grid.nt);
+    for f in 0..nf {
+        scratch.clear();
+        let (mut occ_sum, mut occ_n) = (0.0, 0u32);
+        for t in 0..grid.nt {
+            if cell_ok(grid, t, f) {
+                let c = grid.cell(t, f);
+                if c.floor_db.is_finite() {
+                    scratch.push(f64::from(c.floor_db));
+                }
+                if c.occupancy.is_finite() {
+                    occ_sum += f64::from(c.occupancy);
+                    occ_n += 1;
+                }
+            }
+        }
+        if scratch.is_empty() {
+            src[f] = FloorSource::EightyPercent;
+            scratch.extend(
+                (0..grid.nt)
+                    .filter(|&t| cell_ok(grid, t, f))
+                    .map(|t| f64::from(grid.cell(t, f).mean_db)),
+            );
+        }
+        if let Some(v) = threshold::eighty_percent_floor_db(&scratch, discard_fraction) {
+            col[f] = v;
+        }
+        if occ_n > 0 {
+            occ[f] = occ_sum / f64::from(occ_n);
+        }
+    }
+    let r = if grid.f_cell_hz > 0.0 {
+        (cfg.radius_hz.max(0.0) / grid.f_cell_hz).round() as usize
+    } else {
+        0
+    };
+    let pct = cfg.percentile.clamp(0.0, 1.0);
+    let mut out = ColumnFloors {
+        floor_db: vec![f64::NAN; nf],
+        source: src.clone(),
+        suspect: vec![false; nf],
+    };
+    let min_side = (r / 4).max(1);
+    let mut win: Vec<(f64, FloorSource)> = Vec::with_capacity(r + 1);
+    let mut side = |range: std::ops::Range<usize>| {
+        win.clear();
+        win.extend(
+            range
+                .filter(|&k| col[k].is_finite())
+                .map(|k| (col[k], src[k])),
+        );
+        if win.len() < min_side {
+            return None;
+        }
+        win.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Some(win[((win.len() - 1) as f64 * pct).round() as usize])
+    };
+    for f in 0..nf {
+        let (lo, hi) = (f.saturating_sub(r), (f + r + 1).min(nf));
+        let (mut occ_sum, mut occ_n) = (0.0, 0u32);
+        for &o in occ[lo..hi].iter().filter(|o| o.is_finite()) {
+            occ_sum += o;
+            occ_n += 1;
+        }
+        out.suspect[f] = occ_n > 0 && occ_sum / f64::from(occ_n) > cfg.dense_fraction;
+        // Busy only when above both sides: a roll-off or slope on one side cannot pull the
+        // reference under a noise column.
+        let reference = match (side(lo..f), side(f + 1..hi)) {
+            (Some(l), Some(h)) => Some(if l.0 >= h.0 { l } else { h }),
+            (one, None) | (None, one) => one,
+        };
+        (out.floor_db[f], out.source[f]) = match reference {
+            Some(rf) if !col[f].is_finite() || col[f] > rf.0 + guard_db => rf,
+            _ if col[f].is_finite() => (col[f], src[f]),
+            _ => continue,
+        };
+    }
+    out
 }
 
 /// One evaluated visit.
@@ -276,6 +425,14 @@ pub struct VisitSample {
     pub threshold_db: f32,
     /// The threshold hit the floor + 3 dB clamp.
     pub guard_clamped: bool,
+    /// Visit level: the highest cell `mean_db` over the subject's cells and rows, dB/Hz.
+    pub level_db: f32,
+    /// Floor under the threshold (median over the subject's columns), dB/Hz.
+    pub floor_db: f32,
+    /// Its source.
+    pub floor_source: FloorSource,
+    /// Most of the subject's columns have a suspect (dense) local floor.
+    pub floor_suspect: bool,
 }
 
 impl VisitSample {
@@ -293,16 +450,15 @@ pub struct EvalInput<'a> {
     pub visits: &'a [Visit],
     /// Detections overlapping the grid (suspect masking).
     pub detections: &'a [DetectionExtent],
-    /// Band level samples for the 80 % fallback (may be empty).
-    pub idle_levels_db: &'a [f64],
-    /// Band noise floor ([`band_floor_db`]), preferred over the subject's own cells: a busy
-    /// channel's low-percentile floor is its own signal level (SM.2256: the calculated threshold
-    /// only works over a band).
-    pub band_floor_db: Option<f64>,
+    /// Local floors of `grid`'s columns ([`local_floors`]), preferred over the subject's own
+    /// cells: a busy channel's low-percentile floor is its own signal level.
+    pub floors: &'a ColumnFloors,
 }
 
-/// Evaluates `visits` of the subject `freq` (occupied bandwidth `obw_hz`) against `grid`.
-/// Returns the samples and the threshold (none when no floor could be resolved).
+/// Evaluates `visits` of the subject `freq` (occupied bandwidth `obw_hz`) against `grid`, each
+/// cell against the threshold over its column's local floor. Returns the samples and a
+/// representative threshold (medians over the subject's columns; none when no floor could be
+/// resolved).
 pub fn evaluate(
     spec: &ThresholdSpec,
     freq: FreqRange,
@@ -314,16 +470,45 @@ pub fn evaluate(
         return (Vec::new(), None);
     };
     let (a, b) = cols;
-    let floor = median_finite((0..grid.nt).flat_map(|t| {
-        (a..b)
-            .filter(move |&f| cell_ok(grid, t, f))
-            .map(move |f| f64::from(grid.cell(t, f).floor_db))
-    }));
-    let floor = input.band_floor_db.or(floor);
-    let Some(thr) = threshold::resolve(spec, floor, input.idle_levels_db, obw_hz, grid.f_cell_hz)
-    else {
+    let fl = input.floors;
+    let mut thr_col = vec![f64::NAN; b - a];
+    let mut floors = Vec::with_capacity(b - a);
+    let (mut clamped, mut n_suspect) = (false, 0usize);
+    let mut sources = [0usize; 3];
+    for (k, f) in (a..b).enumerate() {
+        let measured = fl.floor_db.get(f).copied().filter(|x| x.is_finite());
+        let Some(t) = threshold::resolve(spec, measured, &[], obw_hz, grid.f_cell_hz) else {
+            continue;
+        };
+        thr_col[k] = t.threshold_db;
+        floors.push(t.floor_db);
+        clamped |= t.guard_clamped;
+        let source = match measured {
+            Some(_) => fl.source.get(f).copied().unwrap_or(FloorSource::History),
+            None => t.source,
+        };
+        sources[source as usize] += 1;
+        n_suspect += usize::from(fl.suspect.get(f).copied().unwrap_or(false));
+    }
+    let Some(thr_rep) = median_finite(thr_col.iter().copied()) else {
         return (Vec::new(), None);
     };
+    thr_col
+        .iter_mut()
+        .filter(|x| !x.is_finite())
+        .for_each(|x| *x = thr_rep);
+    let floor_source = [
+        FloorSource::History,
+        FloorSource::EightyPercent,
+        FloorSource::Assumed,
+    ][(0..3).max_by_key(|&i| (sources[i], 3 - i)).unwrap_or(0)];
+    let thr = AppliedThreshold {
+        floor_db: median_finite(floors).unwrap_or(f64::NAN),
+        threshold_db: thr_rep,
+        guard_clamped: clamped,
+        source: floor_source,
+    };
+    let floor_suspect = 2 * n_suspect > b - a;
     let t0_ns = grid.t_first_cell.saturating_mul(grid.t_cell_ns);
     let slack = grid.t_cell_ns;
     let mut out = Vec::with_capacity(input.visits.len());
@@ -347,13 +532,13 @@ pub fn evaluate(
             for (k, f) in (a..b).enumerate() {
                 let m = f64::from(grid.cell(t, f).mean_db);
                 level = level.max(m);
-                above[k] |= m > thr.threshold_db;
+                above[k] |= m > thr_col[k];
             }
         }
         if !any_row {
             continue;
         }
-        let occupied = level > thr.threshold_db;
+        let occupied = above.iter().any(|&x| x);
         let window = TimeRange::new(
             v.observed.start.saturating_add_nanos(-slack),
             v.observed.end.saturating_add_nanos(slack),
@@ -376,9 +561,28 @@ pub fn evaluate(
             above_fraction: above.iter().filter(|&&x| x).count() as f32 / above.len() as f32,
             threshold_db: thr.threshold_db as f32,
             guard_clamped: thr.guard_clamped,
+            level_db: level as f32,
+            floor_db: thr.floor_db as f32,
+            floor_source,
+            floor_suspect,
         });
     }
     (out, Some(thr))
+}
+
+/// Linearly interpolated `p` quantile of the finite values.
+fn quantile_finite(values: impl IntoIterator<Item = f64>, p: f64) -> Option<f64> {
+    let mut v: Vec<f64> = values.into_iter().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    let pos = p.clamp(0.0, 1.0) * (v.len() - 1) as f64;
+    let (i, frac) = (pos.floor() as usize, pos.fract());
+    Some(match v.get(i + 1) {
+        Some(n) => v[i] + frac * (n - v[i]),
+        None => v[i],
+    })
 }
 
 /// Estimates over one window.
@@ -414,6 +618,19 @@ pub struct WindowEstimate {
     pub threshold_db: Option<f64>,
     /// Any applied threshold was clamped.
     pub guard_clamped: bool,
+    /// Median floor under the thresholds, dB/Hz.
+    pub floor_db: Option<f64>,
+    /// Most common floor source.
+    pub floor_source: Option<FloorSource>,
+    /// Any visit's floor was suspect.
+    pub floor_suspect: Option<bool>,
+    /// Median / 90th percentile level of the occupied `fco` visits (activity-independent, not
+    /// suspect), dB/Hz.
+    pub level_occupied_p50_db: Option<f64>,
+    /// See `level_occupied_p50_db`.
+    pub level_occupied_p90_db: Option<f64>,
+    /// Median level of the idle `fco` visits, dB/Hz.
+    pub level_idle_db: Option<f64>,
 }
 
 impl WindowEstimate {
@@ -507,7 +724,7 @@ pub fn estimate(
             .collect::<Vec<_>>(),
     );
     // §2.5 rule 3: occupied time fraction per 1-min stratum from all non-suspect visits, strata
-    // weighted equally (by their represented minute), so a long dwell counts as one minute.
+    // then weighted by their observed duration.
     let mut strata: HashMap<i64, (f64, f64)> = HashMap::new();
     for s in sel.iter().filter(|s| !s.suspect) {
         let e = strata.entry(s.mid_ns().div_euclid(STRATUM_NS)).or_default();
@@ -515,8 +732,25 @@ pub fn estimate(
         e.0 += d * f64::from(u8::from(s.occupied));
         e.1 += d;
     }
-    let fco_all_visits = (!strata.is_empty())
-        .then(|| strata.values().map(|(o, d)| o / d).sum::<f64>() / strata.len() as f64);
+    let fco_all_visits = (!strata.is_empty()).then(|| {
+        let (num, den) = strata
+            .values()
+            .fold((0.0, 0.0), |(n, w), (o, d)| (n + (o / d) * d, w + d));
+        num / den
+    });
+    let mut sources = [0usize; 3];
+    for s in &sel {
+        sources[s.floor_source as usize] += 1;
+    }
+    let floor_source = (!sel.is_empty()).then(|| {
+        [
+            FloorSource::History,
+            FloorSource::EightyPercent,
+            FloorSource::Assumed,
+        ][(0..3).max_by_key(|&i| (sources[i], 3 - i)).unwrap_or(0)]
+    });
+    let level_of = |s: &&VisitSample| f64::from(s.level_db);
+    let occupied_levels: Vec<f64> = clean.iter().filter(|s| s.occupied).map(level_of).collect();
     let ai_mids = mids(&ai);
     let revisit_mean_s = (ai_mids.len() >= 2).then(|| {
         (ai_mids[ai_mids.len() - 1] - ai_mids[0]) as f64 * NS / (ai_mids.len() - 1) as f64
@@ -556,6 +790,12 @@ pub fn estimate(
         confidence,
         threshold_db: median_finite(sel.iter().map(|s| f64::from(s.threshold_db))),
         guard_clamped: sel.iter().any(|s| s.guard_clamped),
+        floor_db: median_finite(sel.iter().map(|s| f64::from(s.floor_db))),
+        floor_source,
+        floor_suspect: (!sel.is_empty()).then(|| sel.iter().any(|s| s.floor_suspect)),
+        level_occupied_p50_db: quantile_finite(occupied_levels.iter().copied(), 0.5),
+        level_occupied_p90_db: quantile_finite(occupied_levels.iter().copied(), 0.9),
+        level_idle_db: median_finite(clean.iter().filter(|s| !s.occupied).map(level_of)),
     }
 }
 
@@ -601,6 +841,28 @@ pub struct EngineConfig {
     pub min_visits: u64,
     /// Site of the measurements.
     pub site: SiteKey,
+    /// Local floor.
+    pub floor: LocalFloorConfig,
+}
+
+impl EngineConfig {
+    /// Share of samples the 80 % method discards (the dynamic `idle_fraction`, else 0.8).
+    pub fn discard_fraction(&self) -> f64 {
+        match self.threshold.method {
+            ThresholdMethod::Dynamic { idle_fraction } => idle_fraction,
+            ThresholdMethod::PreSet { .. } => 0.8,
+        }
+    }
+
+    /// [`local_floors`] of `grid` under these settings.
+    pub fn local_floors(&self, grid: &RegionHistory) -> ColumnFloors {
+        local_floors(
+            grid,
+            self.discard_fraction(),
+            self.threshold.guard_db,
+            &self.floor,
+        )
+    }
 }
 
 impl Default for EngineConfig {
@@ -610,6 +872,7 @@ impl Default for EngineConfig {
             level: ConfidenceLevel::P95,
             min_visits: MIN_ACTIVITY_INDEPENDENT_VISITS,
             site: SiteKey::Unassigned,
+            floor: LocalFloorConfig::default(),
         }
     }
 }
@@ -680,6 +943,12 @@ pub fn stat(
         confidence: e.confidence,
         revisit_biased: false,
         fco_window: Some(e.window),
+        floor_db: e.floor_db,
+        floor_source: e.floor_source,
+        floor_suspect: e.floor_suspect,
+        level_occupied_p50_db: e.level_occupied_p50_db,
+        level_occupied_p90_db: e.level_occupied_p90_db,
+        level_idle_db: e.level_idle_db,
     })
 }
 
@@ -757,6 +1026,10 @@ mod tests {
             above_fraction: f32::from(u8::from(occupied)),
             threshold_db: -100.0,
             guard_clamped: false,
+            level_db: if occupied { -80.0 } else { -104.0 },
+            floor_db: -105.0,
+            floor_source: FloorSource::History,
+            floor_suspect: false,
         }
     }
 
@@ -1128,5 +1401,244 @@ mod tests {
         assert!(m.visits(FreqRange::centered(100e6, 25e3), all).is_empty());
         assert!(m.visits(FreqRange::new(100.79e6, 101.21e6), all).is_empty());
         assert_eq!(m.visits(FreqRange::centered(101.5e6, 25e3), all).len(), 1);
+        // The bands an interval covers: both visited hops and the dwell's window.
+        let b = m.bands(all);
+        assert_eq!(b.len(), 3, "{b:?}");
+        assert!(b.contains(&FreqRange::centered(100e6, 1.6e6)));
+        assert!(b.contains(&FreqRange::centered(102e6, 1.6e6)));
+        let late = TimeRange::new(t0.saturating_add_nanos(1_500_000_000), all.end);
+        assert_eq!(m.bands(late), vec![FreqRange::centered(100e6, 1.6e6)]);
+    }
+
+    const F_FIRST_CELL: i64 = 16_000; // 100 MHz at 6.25 kHz
+
+    /// A level-0 grid of `nt` 1 s rows × `nf` 6.25 kHz columns; `cell(t, f)` gives
+    /// `(mean_db, floor_db, occupancy)`.
+    fn grid(nt: usize, nf: usize, cell: impl Fn(usize, usize) -> (f64, f64, f32)) -> RegionHistory {
+        let mut cells = Vec::with_capacity(nt * nf);
+        for t in 0..nt {
+            for f in 0..nf {
+                let (mean, floor, occ) = cell(t, f);
+                cells.push(hk_store::CellStats {
+                    max_db: mean as f32,
+                    mean_db: mean as f32,
+                    p_low_db: floor as f32,
+                    p_high_db: mean as f32,
+                    occupancy: occ,
+                    occupancy_max: occ,
+                    coverage: 1.0,
+                    floor_db: floor as f32,
+                    frames: 10,
+                    level: 0,
+                });
+            }
+        }
+        RegionHistory {
+            scheme: 1,
+            level: 0,
+            unit: PowerUnit::Dbfs,
+            f_cell_hz: 6250.0,
+            f_first_cell: F_FIRST_CELL,
+            nf,
+            t_cell_ns: 1_000_000_000,
+            t_first_cell: 1_000_000,
+            nt,
+            percentiles: (0.1, 0.9),
+            cells,
+            provenance: Default::default(),
+            tiles_read: 0,
+        }
+    }
+
+    fn whole(g: &RegionHistory) -> (FreqRange, TimeRange) {
+        (
+            FreqRange::new(
+                g.f_first_cell as f64 * g.f_cell_hz,
+                (g.f_first_cell + g.nf as i64) as f64 * g.f_cell_hz,
+            ),
+            span(1e6, 1e6 + g.nt as f64),
+        )
+    }
+
+    #[test]
+    fn occupancy_local_floor_follows_ripple_and_roll_off_and_keeps_noise_idle() {
+        // 10 MHz band: noise −100 dB with ±2.5 dB passband ripple and a 15 dB roll-off over the
+        // outer 400 kHz each side. 16 channels of 50 kHz, 20 dB up: even ones always on, odd ones
+        // on one row in four.
+        let (nt, nf) = (40usize, 1600usize);
+        let noise = |f: usize| {
+            let d = f.min(nf - 1 - f) as f64;
+            let roll = if d < 64.0 {
+                15.0 * (1.0 - d / 64.0)
+            } else {
+                0.0
+            };
+            -100.0 + 2.5 * (2.0 * std::f64::consts::PI * f as f64 / 400.0).sin() - roll
+        };
+        let jitter = |t: usize, f: usize| (((t * 31 + f * 17) % 7) as f64 - 3.0) * 0.1;
+        let chan = |f: usize| (50..58).contains(&(f % 100)).then_some(f / 100);
+        let busy = |t: usize, f: usize| chan(f).is_some_and(|k| k % 2 == 0 || t % 4 == 0);
+        let g = grid(nt, nf, |t, f| {
+            if busy(t, f) {
+                (noise(f) + 20.0, noise(f) + 20.0, 1.0)
+            } else {
+                (noise(f) + 1.0 + jitter(t, f), noise(f) + jitter(t, f), 0.0)
+            }
+        });
+        let cfg = EngineConfig::default();
+        let fl = cfg.local_floors(&g);
+        let mut worst: f64 = 0.0;
+        for f in (0..nf).filter(|&f| chan(f).is_none()) {
+            worst = worst.max((fl.floor_db[f] - noise(f)).abs());
+        }
+        assert!(worst < 1.0, "noise-column floor error {worst:.2} dB");
+        assert!(fl.suspect.iter().all(|s| !s), "sparse band flagged suspect");
+        assert!(fl.source.iter().all(|s| *s == FloorSource::History));
+
+        // Every row: exactly the busy cells are above threshold, at the edges and the centre.
+        let (band, _) = whole(&g);
+        let visits = coverage_visits(&g, band, Tier::ScheduledPlan);
+        let input = EvalInput {
+            grid: &g,
+            visits: &visits,
+            detections: &[],
+            floors: &fl,
+        };
+        let (s, thr) = evaluate(&cfg.threshold, band, 6250.0, input);
+        assert_eq!(s.len(), nt);
+        for (t, v) in s.iter().enumerate() {
+            let want = (0..nf).filter(|&f| busy(t, f)).count() as f32 / nf as f32;
+            assert!(
+                (v.above_fraction - want).abs() < 1e-6,
+                "row {t}: {v:?} vs {want}"
+            );
+            // The strongest busy cell: 20 dB over the ripple, at most at its +2.5 dB crest.
+            assert!((-80.5..=-77.5).contains(&v.level_db), "{v:?}");
+        }
+        assert_eq!(thr.unwrap().source, FloorSource::History);
+        for (lo, hi) in [(5, 13), (790, 798), (1590, 1598)] {
+            let f = FreqRange::new(
+                (F_FIRST_CELL + lo) as f64 * 6250.0,
+                (F_FIRST_CELL + hi) as f64 * 6250.0,
+            );
+            let (s, _) = evaluate(&cfg.threshold, f, 6250.0, input);
+            assert!(
+                s.iter().all(|v| !v.occupied),
+                "noise {lo}..{hi} read occupied"
+            );
+        }
+        // The whole-band 80 % floor this replaces reads ripple peaks as occupied.
+        let all_floors: Vec<f64> = g.cells.iter().map(|c| f64::from(c.floor_db)).collect();
+        let old = threshold::eighty_percent_floor_db(&all_floors, 0.8).unwrap() + 5.0;
+        let phantom = (0..nt * nf)
+            .filter(|&i| !busy(i / nf, i % nf) && f64::from(g.cells[i].mean_db) > old)
+            .count();
+        eprintln!("whole-band threshold {old:.1} dB: {phantom} phantom noise cells; local: 0");
+        assert!(phantom > 0);
+    }
+
+    #[test]
+    fn occupancy_dense_band_flags_its_local_floor_suspect() {
+        let (nt, nf) = (20usize, 800usize);
+        let cfg = EngineConfig::default();
+        let row = |g: &RegionHistory| {
+            let (band, iv) = whole(g);
+            let fl = cfg.local_floors(g);
+            let visits = coverage_visits(g, band, Tier::ScheduledPlan);
+            let (s, _) = evaluate(
+                &cfg.threshold,
+                band,
+                6250.0,
+                EvalInput {
+                    grid: g,
+                    visits: &visits,
+                    detections: &[],
+                    floors: &fl,
+                },
+            );
+            let ctx = SubjectContext {
+                subject: OccupancySubject::Band { freq: band },
+                rbw_hz: 6250.0,
+                obw_hz: None,
+                unit: PowerUnit::Dbfs,
+                calibration: None,
+            };
+            (fl, stat(&cfg, &ctx, iv, &s, iv, None).unwrap())
+        };
+        // FM-like: 90 % of the columns carry an always-on station; every tenth is a gap.
+        let dense = grid(nt, nf, |_, f| {
+            if f % 10 == 0 {
+                (-99.0, -100.0, 0.0)
+            } else {
+                (-80.0, -80.0, 1.0)
+            }
+        });
+        let (fl, r) = row(&dense);
+        assert!(fl.suspect[nf / 2] && fl.suspect[10]);
+        assert_eq!(r.floor_suspect, Some(true));
+        // The same stations sparse: floor is the noise, not suspect, stations occupied.
+        let sparse = grid(nt, nf, |_, f| {
+            if f % 10 == 5 {
+                (-80.0, -80.0, 1.0)
+            } else {
+                (-99.0, -100.0, 0.0)
+            }
+        });
+        let (fl, r) = row(&sparse);
+        assert!(fl.suspect.iter().all(|s| !s));
+        assert_eq!(r.floor_suspect, Some(false));
+        assert_eq!(r.floor_source, Some(FloorSource::History));
+        assert!(
+            (r.floor_db.unwrap() + 100.0).abs() < 1e-3,
+            "{:?}",
+            r.floor_db
+        );
+        assert_eq!(r.fco, Some(1.0));
+        assert_eq!(r.level_occupied_p50_db, Some(-80.0));
+        assert_eq!(r.level_idle_db, None);
+    }
+
+    #[test]
+    fn occupancy_level_fields_summarise_the_fco_visits() {
+        let mut s: Vec<VisitSample> = (0..40)
+            .map(|k| {
+                let occupied = k % 4 == 0;
+                VisitSample {
+                    level_db: if occupied {
+                        -70.0 - k as f32 * 0.25
+                    } else {
+                        -104.0
+                    },
+                    ..sample(f64::from(k) * 10.0, Tier::BackgroundSweep, occupied, false)
+                }
+            })
+            .collect();
+        // A bandit dwell does not enter the fco level summary.
+        s.push(VisitSample {
+            level_db: -20.0,
+            ..sample(5.0, Tier::Bandit, true, false)
+        });
+        let e = estimate(&s, span(0.0, 400.0), ConfidenceLevel::P95);
+        // Occupied levels −79 … −70 dB.
+        assert!((e.level_occupied_p50_db.unwrap() + 74.5).abs() < 1e-9);
+        assert!((e.level_occupied_p90_db.unwrap() + 70.9).abs() < 1e-9);
+        assert_eq!(e.level_idle_db, Some(-104.0));
+        assert_eq!(e.floor_db, Some(-105.0));
+        assert_eq!(
+            (e.floor_source, e.floor_suspect),
+            (Some(FloorSource::History), Some(false))
+        );
+    }
+
+    #[test]
+    fn occupancy_all_visits_strata_are_weighted_by_observed_duration() {
+        // Minute 0: a 1 s idle sweep visit. Minute 1: a 30 s occupied dwell. Equal strata weights
+        // would give 0.5; duration weights give 30/31.
+        let mut a = sample(10.0, Tier::BackgroundSweep, false, false);
+        a.dur_ns = 1_000_000_000;
+        let mut b = sample(70.0, Tier::Bandit, true, false);
+        b.dur_ns = 30_000_000_000;
+        let e = estimate(&[a, b], span(0.0, 120.0), ConfidenceLevel::P95);
+        assert!((e.fco_all_visits.unwrap() - 30.0 / 31.0).abs() < 1e-9);
     }
 }

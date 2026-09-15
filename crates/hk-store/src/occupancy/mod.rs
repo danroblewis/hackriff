@@ -501,6 +501,12 @@ mod tests {
             confidence: None,
             revisit_biased: false,
             fco_window: Some(TimeRange::new(t(start_s), t(start_s + len_s))),
+            floor_db: None,
+            floor_source: None,
+            floor_suspect: None,
+            level_occupied_p50_db: None,
+            level_occupied_p90_db: None,
+            level_idle_db: None,
         }
     }
 

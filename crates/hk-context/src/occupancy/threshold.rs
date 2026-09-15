@@ -14,20 +14,8 @@
 //! The threshold is floor + guard (dynamic) or the pre-set level, lowered by 10·log10(OBW/RBW)
 //! when RBW < OBW and clamped at floor + 3 dB (`ThresholdSpec::applied_db`, hk-model).
 
+pub use hk_model::attention::occupancy::FloorSource;
 use hk_model::attention::occupancy::{MIN_GUARD_DB, ThresholdMethod, ThresholdSpec};
-use serde::{Deserialize, Serialize};
-
-/// Where the floor under a threshold came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FloorSource {
-    /// The history's bias-corrected floor (T-116).
-    History,
-    /// The SM.1753/SM.2256 80 % method over level samples.
-    EightyPercent,
-    /// No floor measured: a pre-set threshold assumed a guard above noise.
-    Assumed,
-}
 
 /// A threshold ready to compare levels against.
 #[derive(Clone, Copy, Debug, PartialEq)]
