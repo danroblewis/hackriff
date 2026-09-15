@@ -47,6 +47,9 @@ mod device_variants;
 #[path = "acceptance/inventory_lifecycle.rs"]
 mod inventory_lifecycle;
 
+#[path = "acceptance/scene_48h.rs"]
+mod scene_48h;
+
 #[path = "acceptance/hil_hackrf.rs"]
 mod hil_hackrf;
 

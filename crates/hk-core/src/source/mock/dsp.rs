@@ -306,7 +306,8 @@ impl Render {
         &self.plan
     }
 
-    fn pos(&self) -> f64 {
+    /// Stream time of the next output sample, as a recording-sample index.
+    pub fn pos(&self) -> f64 {
         self.pos0 + self.k as f64 * self.ratio
     }
 

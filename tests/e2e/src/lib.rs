@@ -32,6 +32,7 @@ pub mod fixture;
 pub mod paths;
 pub mod pipeline;
 pub mod samples;
+pub mod scene;
 pub mod synth;
 
 pub use assertions::{

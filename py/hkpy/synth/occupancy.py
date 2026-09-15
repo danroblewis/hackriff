@@ -318,6 +318,7 @@ SCENE_DEFAULTS: dict[str, Any] = {
     "n_iq_windows": 4,
     "window_duration_s": 0.05,
     "iq_window_starts_s": [],
+    "iq_windows_at_revisits": False,
     "calibration_k_db": -70.0,
 }
 
@@ -696,8 +697,14 @@ def occupancy_markov_scene(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     span = schedule["span_s"]
     if dur <= 0 or dur > span:
         raise ValueError("window_duration_s must be positive and within span_hours")
-    starts = ([float(s) for s in p["iq_window_starts_s"]] if p["iq_window_starts_s"]
-             else _choose_iq_windows(schedule, p))
+    if p["iq_windows_at_revisits"]:
+        # One window per observation-schedule revisit (T-125: the mock SDR serves them as a
+        # time-compressed scene, jumping stream time between revisits).
+        starts = [min(t, span - dur) for t in schedule["observation_schedule"]["times_s"]]
+    elif p["iq_window_starts_s"]:
+        starts = [float(s) for s in p["iq_window_starts_s"]]
+    else:
+        starts = _choose_iq_windows(schedule, p)
     for s in starts:
         if not 0 <= s <= span - dur:
             raise ValueError(f"window start {s} s outside the scene span")

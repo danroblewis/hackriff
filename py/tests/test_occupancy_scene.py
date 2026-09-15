@@ -218,6 +218,20 @@ def test_full_generation_is_deterministic(tmp_path):
     assert ra == rb
 
 
+def test_iq_windows_can_follow_the_observation_schedule(tmp_path):
+    # T-125: one IQ window per revisit, for the mock SDR's time-compressed scene replay.
+    dur = 0.02
+    small = {"span_hours": 2.0, "novelty_start_hour": 1.0, "revisit_mean_gap_s": 900.0,
+             "window_duration_s": dur, "iq_windows_at_revisits": True}
+    manifest = generate("occupancy_markov_scene", 3, tmp_path / "rev", small)
+    sched = json.loads((manifest.parent / "schedule.json").read_text())
+    times = sched["observation_schedule"]["times_s"]
+    starts = [w["start_s"] for w in sched["windows"]]
+    assert len(times) > 1
+    assert starts == [min(t, sched["span_s"] - dur) for t in times]
+    assert len(json.loads(manifest.read_text())["recordings"]) == len(times)
+
+
 # ---- Size / timing (report only; generous CI bounds) -------------------------------------------
 
 

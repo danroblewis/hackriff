@@ -703,3 +703,76 @@ fn open_requests_are_validated_against_the_capabilities() {
     assert_eq!(src.provenance().device_id, "mock:synthetic:t-049");
     assert!(MockSdrDriver::new(dir.0.join("missing.sigmf-meta"), opts(4096)).is_err());
 }
+
+/// A two-window scene: window 1 is samples 0..1 s, window 2 (data samples 1 s..2 s) sits
+/// `gap_s` later on the scene clock (`core:global_index`).
+fn scene_recording(dir: &Path, gap_s: f64) -> (PathBuf, u64, u64) {
+    let synth = Synth::new(Datatype::Ci8);
+    let meta_path = synth.write(dir, "scene");
+    let mut meta = SigmfMeta::read(&meta_path).unwrap();
+    let one_s = synth.fs as u64;
+    let gap = (gap_s * synth.fs) as u64;
+    let mut second = meta.captures[0].clone();
+    second.sample_start = one_s;
+    second.datetime = None;
+    second
+        .extra
+        .insert("core:global_index".into(), serde_json::json!(one_s + gap));
+    meta.captures.push(second);
+    meta.write(&meta_path).unwrap();
+    (meta_path, one_s, gap)
+}
+
+/// T-125: a time-compressed scene. The recording gap between two windows is one `GAP` exactly at
+/// the window boundary (no block straddles it, whatever the block length), stream time jumps by
+/// the gap, and real-time pacing does not wait the hour out.
+#[test]
+fn scene_gaps_jump_stream_time_at_the_window_boundary() {
+    let dir = Scratch::new("scene");
+    let (meta, one_s, gap) = scene_recording(&dir.0, 3600.0);
+    for pacing in [Pacing::Unpaced, Pacing::RealTime { speed: 4.0 }] {
+        let driver = MockSdrDriver::new(
+            &meta,
+            MockOptions {
+                block_len: 300_000,
+                pacing,
+                ..MockOptions::default()
+            },
+        )
+        .unwrap();
+        let mut src = driver.open_mock(&driver.default_request()).unwrap();
+        let t0 = src.start_time().as_unix_nanos();
+        let wall = Instant::now();
+        let mut buf: Vec<Complex<i8>> = Vec::new();
+        let mut end = 0u64;
+        let mut gaps = Vec::new();
+        for _ in 0..100 {
+            let Some(h) = src.read_block_ci8(&mut buf).unwrap() else {
+                break;
+            };
+            let ns = h.time.host_time.as_unix_nanos() - t0;
+            assert_eq!(
+                ns,
+                (h.first_sample() as f64 * 1e9 / 1e6).round() as i64,
+                "block time is the scene clock"
+            );
+            if h.discontinuity.contains(Discontinuity::GAP) {
+                gaps.push((end, h.first_sample(), h.dropped_before));
+            }
+            end = h.first_sample() + buf.len() as u64;
+        }
+        assert_eq!(gaps, vec![(one_s, one_s + gap, gap)], "{pacing:?}");
+        assert_eq!(
+            end,
+            2 * one_s + gap,
+            "{pacing:?}: ends in the second window"
+        );
+        let stats = driver.last_control().unwrap().mock_stats();
+        assert_eq!(stats.source.dropped_samples, gap);
+        assert!(
+            wall.elapsed() < Duration::from_secs(20),
+            "{pacing:?}: the hour between windows is not waited out ({:?})",
+            wall.elapsed()
+        );
+    }
+}

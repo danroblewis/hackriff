@@ -37,7 +37,8 @@ use hk_core::{
 use hk_e2e::blind::{
     TruthVault, assert_truth_free, matches_truth, shift_ci8, strip_truth, truth_emissions,
 };
-use hk_e2e::{Fixture, TruthItem};
+use hk_e2e::scene::{SceneRecording, join_scene_windows};
+use hk_e2e::{Fixture, SynthOutput, TruthItem};
 use hk_model::sigmf::SigmfMeta;
 use hk_model::{ContentClass, FreqRange, Provenance, Region, Timestamp};
 use hk_pipeline::{
@@ -597,6 +598,36 @@ pub fn replay_config(
         Pacing::Unpaced,
     );
     (device_config(dir, &dev, extra), dev)
+}
+
+/// A time-compressed scene (T-125) ready to run blind.
+pub struct BlindScene {
+    /// Holds the joined recording the blinded copy links to; keep it for the run.
+    pub _src: TempDir,
+    /// The joined recording's shape (windows, samples, simulated span, gap samples).
+    pub recording: SceneRecording,
+    /// The run's configuration.
+    pub cfg: PipelineConfig,
+    /// The mock device over the truth-stripped scene.
+    pub device: BlindDevice,
+}
+
+/// T-125: a generated scene's IQ windows joined on the scene clock
+/// ([`hk_e2e::scene::join_scene_windows`]) and served by **one** mock SDR device, unpaced, as
+/// `hk serve` wires a device into the pipeline. Stream time is the scene's simulated time: the
+/// device jumps it between windows (`GAP`), so detections, tracks, history tiles and inventory
+/// carry scene times. The schedule (truth) is not given to the run; the test reads it
+/// ([`hk_e2e::scene::SceneTruth`]) only for assertions.
+pub fn blind_scene(dir: &Path, out: &SynthOutput, extra: serde_json::Value) -> BlindScene {
+    let src = TempDir::new("scenesrc");
+    let recording = join_scene_windows(out, &src.0, "scene").unwrap();
+    let (cfg, device) = replay_config(dir, &recording.meta, extra, Pacing::Unpaced);
+    BlindScene {
+        _src: src,
+        recording,
+        cfg,
+        device,
+    }
 }
 
 /// A blind run's configuration before it starts.
