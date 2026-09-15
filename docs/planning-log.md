@@ -2118,3 +2118,20 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - ADR-0005 wording.
   - **T-183:** signal_062 family-label load flake. Reproduce under bounded load, root-cause (product race vs test timing), fix without loosening, then 10× green under load.
   - **Merge queue after the running full check:** T-180. T-178 waits on its review. T-124 is finishing (lint, squash, acceptance-m2).
+- **B0.455 T-178 review (Opus): FIX-FIRST.**
+  - **Verified:**
+    - Overwrite order: the oldest slot is dropped from the index and the floor moves before overwrite.
+    - Clip reads re-check the floor.
+    - Journal compaction keeps it bounded.
+    - `flock` releases on crash.
+    - `run` is validated and the API contract is updated.
+    - Changed T-157 tests are justified.
+  - **Bug:** a failed ring fsync followed by a later successful sync can seal bytes that never reached disk, and recovery only checks the newest slot. Fix: poison the slot and roll back to `sealed`.
+  - **Risk (affects staging):** ring allocation runs synchronously in `Pipeline::start`, before the API binds. 144 GiB for 1 h is about 5 s with no status, and possibly minutes on filesystems without `fallocate`. Fix: allocate in the background with an allocating status.
+  - **Other risks:**
+    - The writer thread's `F_FULLFSYNC` checkpoint and compaction cost is unmeasured. Measure dropped samples at 20 Msps.
+    - The test quota cap depends on nextest experimental setup scripts. Plain `cargo test` would allocate the production default per test. Fix: explicit small quotas in test constructors.
+  - **Nits:**
+    - A newer ring version gets wiped; disable it instead.
+    - A second instance should show `allocation: locked`.
+  - **Next:** a fix round launches when a Rust slot frees (T-124 is finishing).
