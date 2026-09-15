@@ -1515,7 +1515,8 @@ tasks:
   - id: T-091
     milestone: M1
     title: "M1 Parser-authoring assist: sync/period hunt, entropy field boundaries, CRC/BCH search"
-    status: in-progress
+    status: review
+    commit: 85f813d
     deps: [T-085]
     parallel_group: M1S
     use_cases: [SIGNAL-062, AWARE-036]
