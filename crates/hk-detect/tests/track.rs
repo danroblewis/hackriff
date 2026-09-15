@@ -906,6 +906,40 @@ fn close_packed_co_keyed_channels_stay_separate_emitters_not_a_hop_set() {
     );
 }
 
+#[test]
+fn t109_slow_hopper_whose_dwell_boxes_overlap_within_the_link_tolerance_is_not_vetoed() {
+    // T-109 review: the concurrency veto must allow the same overlap the contiguous link does,
+    // `max(gap_frames · frame, gap_fraction · dwell)`. A slow pseudo-random hopper (200 ms dwells
+    // on 5 channels, A→B→A revisits) whose successive dwell boxes overlap by 30 ms (box extension;
+    // 15 frames, well past 2 frames but inside 0.25 · 200 ms) is one hop set, not co-keyed
+    // emitters.
+    let fc = 915e6;
+    let chans: Vec<f64> = (0..5).map(|k| fc - 320e3 + k as f64 * 160e3).collect();
+    let order = [
+        0, 1, 0, 2, 3, 2, 4, 1, 4, 3, 0, 3, 1, 2, 1, 4, 0, 4, 2, 0, 2, 3, 1, 3, 4, 2, 4, 0, 1, 0,
+    ];
+    let (dwell, overlap) = (0.2, 0.03);
+    let packets: Vec<(f64, f64, usize)> = order
+        .iter()
+        .enumerate()
+        .map(|(k, &c)| (0.03 + k as f64 * (dwell - overlap), dwell, c))
+        .collect();
+    let end = packets.last().map_or(0.0, |p| p.0 + p.1) + 0.1;
+    let (tr, out) = run_packets(fc, &chans, &packets, end, 1091);
+    let formed = out
+        .events
+        .iter()
+        .filter(|e| matches!(e, TrackEvent::HopSetFormed(_)))
+        .count();
+    eprintln!("slow overlapping hopper: stats {:?}", tr.stats());
+    assert_eq!(
+        tr.stats().hop_concurrent_vetoes,
+        0,
+        "overlap within gap_tol is no veto"
+    );
+    assert_eq!(formed, 1, "one hop set");
+}
+
 // ---- two close emitters ----
 
 fn test_repo() -> (Repository, SurveyId) {
@@ -1255,9 +1289,57 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
     }
     // Records arrive when they close.
     recs.sort_by_key(|r| r.frames.end);
+    // T-109 live offers: the staggered flickers hop-link each other under the default config
+    // (never offered while linked), so a hop-disabled twin isolates the live in-band rule.
+    let mut no_hop = TrackerConfig::default();
+    no_hop.hop.enabled = false;
+    let mut twin = Tracker::new(no_hop);
+    let mut offered = Vec::new();
+    let mut checked = false;
     for r in &recs {
+        // While the station is still open (before its last record), the in-band flickers
+        // already have 4 bursts but are never offered live; the flickers that are no fragment
+        // are.
+        if !checked && r.frames.end > 400 {
+            checked = true;
+            let near = |v: &[TrackSummary], fc: f64| {
+                v.iter()
+                    .find(|s| (s.track.f_center_hz - fc).abs() < 5e3)
+                    .map(|s| s.burst_count)
+            };
+            let live = twin.summaries();
+            twin.live_offers_into(4, &mut offered);
+            assert!(near(&live, station).is_some(), "the station is still open");
+            for k in [0, 3] {
+                assert!(
+                    near(&live, flickers[k].0).is_some_and(|b| b >= 4),
+                    "fragment {k} is open with 4 bursts"
+                );
+                assert_eq!(
+                    near(&offered, flickers[k].0),
+                    None,
+                    "fragment {k} not offered"
+                );
+            }
+            for k in [1, 2, 4] {
+                assert!(
+                    near(&offered, flickers[k].0).is_some(),
+                    "flicker {k} is offered"
+                );
+            }
+            tr.live_offers_into(4, &mut offered);
+            for k in [0, 3] {
+                assert_eq!(
+                    near(&offered, flickers[k].0),
+                    None,
+                    "fragment {k} not offered"
+                );
+            }
+        }
         tr.push_detection(r, &mut |e| ev.push(e));
+        twin.push_detection(r, &mut |_| {});
     }
+    assert!(checked);
     tr.finish(&mut |e| ev.push(e));
     let closed: Vec<&TrackSummary> = ev
         .iter()

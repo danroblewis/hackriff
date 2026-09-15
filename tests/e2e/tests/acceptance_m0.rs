@@ -53,9 +53,9 @@ mod hil_hackrf;
 #[path = "acceptance/tutorial_rds.rs"]
 mod tutorial_rds;
 
-#[path = "acceptance/tutorial_pocsag.rs"]
-mod tutorial_pocsag;
 #[path = "acceptance/tutorial_acars.rs"]
 mod tutorial_acars;
 #[path = "acceptance/tutorial_adsb.rs"]
 mod tutorial_adsb;
+#[path = "acceptance/tutorial_pocsag.rs"]
+mod tutorial_pocsag;

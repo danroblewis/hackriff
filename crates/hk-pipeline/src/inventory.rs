@@ -32,8 +32,15 @@
 //!   least `min_duty_cycle`, at most `max_suspect_fraction` suspect members (spur, image, IMD,
 //!   clipping) and at least `min_confirmed_detections` trust-confirmed detections.
 //!
-//! Intermittent, weak or suspect emitters stay candidates until a user promotes them. No rule ever
-//! deletes; user deletion and the re-detection rule are the repository's (`hk_model` lifecycle).
+//! Intermittent, weak or suspect emitters stay candidates until a user promotes them. User deletion
+//! and the re-detection rule are the repository's (`hk_model` lifecycle).
+//!
+//! **Live offers (T-109).** An open channel track whose fate is settled (the tracker's
+//! `live_offers_into`: no hop link or set, not an in-band fragment) is offered before it closes.
+//! When that offer created the entry and the track then ends with no sighting of its own (closes
+//! as a fragment or hop-set member, merges, or its channel joins a forming hop set), the entry is
+//! retracted ([`RETRACT_RULE`], `Repository::retract_provisional_emitter`) — only while it is still
+//! an untouched candidate that nothing else observed, linked, merged, confirmed or promoted.
 //!
 //! **One entry per physical emitter (T-082).** A chain's decoder output of an emission the tracker
 //! also followed (RDS PI on a WFM track, the blind framer's signature on an FSK sensor track) would
@@ -48,15 +55,15 @@
 //! Another policy plugs in through [`Inventory`] without touching the composition. Reads go
 //! through `Repository::query_inventory` only (identities gated).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use hk_context::{BandTable, Region as BandRegion};
 use hk_detect::TrackEvent;
 use hk_detect::track::TrackSummary;
 use hk_detect::track::inventory::{hop_set_sighting, track_sighting};
 use hk_model::{
-    EmitterId, IdentityScheme, LifecycleAuthor, LifecycleState, MeasurementKey, RepoError,
-    Repository, Sighting, Tolerances, TrackId,
+    EmitterId, IdentityScheme, LifecycleAuthor, LifecycleState, LinkTarget, MeasurementKey,
+    RepoError, Repository, Sighting, Timestamp, Tolerances, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +74,9 @@ pub const TRACK_PRODUCER: &str = "hk-track";
 
 /// Actor of automatic confirmations (rule id and version) in the lifecycle history.
 pub const CONFIRM_RULE: &str = "hk-pipeline/confirm@1";
+
+/// Actor of automatic retractions of provisional live entries (T-109) in the lifecycle history.
+pub const RETRACT_RULE: &str = "hk-pipeline/retract@1";
 
 /// Reason of same-emission merges (T-082) in the merge record.
 pub const SAME_EMISSION_REASON: &str =
@@ -237,6 +247,11 @@ pub struct TrackInventory {
     /// Entries this run's sightings and chains reached, oldest first (bounded).
     run: VecDeque<EmitterId>,
     run_set: HashSet<EmitterId>,
+    /// T-109: open tracks whose live offer created their entry; removed when the track closes,
+    /// merges or joins a hop set (every open track ends in one of those).
+    provisional: HashMap<TrackId, EmitterId>,
+    /// Provisional entries retracted because their track's end yielded no sighting (T-109).
+    pub retracted: u64,
     /// Sightings recorded.
     pub sightings: u64,
     /// Emitters created by sightings.
@@ -262,6 +277,8 @@ impl TrackInventory {
             policy,
             run: VecDeque::new(),
             run_set: HashSet::new(),
+            provisional: HashMap::new(),
+            retracted: 0,
             sightings: 0,
             created: 0,
             confirmed: 0,
@@ -373,23 +390,43 @@ impl Inventory for TrackInventory {
     }
 
     fn track_event(&mut self, repo: &mut Repository, event: &TrackEvent) -> Result<(), RepoError> {
-        let (sighting, trust) = match event {
-            TrackEvent::Closed(summary) => (
-                track_sighting(summary).map(|mut s| {
-                    s.classification = track_family(summary).classification(s.seen.end);
-                    s
-                }),
-                Some(TrackTrust::of(summary)),
-            ),
-            TrackEvent::HopSetFormed(h) | TrackEvent::HopSetClosed(h) => {
-                (Some(hop_set_sighting(h)), None)
+        match event {
+            TrackEvent::Closed(summary) => {
+                let track = summary.track.id;
+                let provisional = self.provisional.remove(&track);
+                match track_sighting(summary) {
+                    Some(mut s) => {
+                        s.classification = track_family(summary).classification(s.seen.end);
+                        self.offer(repo, &s, Some(TrackTrust::of(summary)))?;
+                    }
+                    // An in-band fragment or hop-set member after all: withdraw its live entry.
+                    None => {
+                        if let Some(emitter) = provisional {
+                            self.retract(repo, track, emitter, summary.track.time.end)?;
+                        }
+                    }
+                }
             }
-            _ => (None, None),
-        };
-        let Some(sighting) = sighting else {
-            return Ok(());
-        };
-        self.offer(repo, &sighting, trust)
+            TrackEvent::HopSetFormed(h) => {
+                // Channels offered before the set formed now belong to the set's entry.
+                for &m in &h.members {
+                    if let Some(emitter) = self.provisional.remove(&m) {
+                        self.retract(repo, m, emitter, h.time.end)?;
+                    }
+                }
+                self.offer(repo, &hop_set_sighting(h), None)?;
+            }
+            TrackEvent::HopSetClosed(h) => {
+                self.offer(repo, &hop_set_sighting(h), None)?;
+            }
+            TrackEvent::Merged { from, at, .. } => {
+                if let Some(emitter) = self.provisional.remove(from) {
+                    self.retract(repo, *from, emitter, *at)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn live_track(
@@ -397,7 +434,7 @@ impl Inventory for TrackInventory {
         repo: &mut Repository,
         summary: &TrackSummary,
     ) -> Result<(), RepoError> {
-        if summary.closed.is_some() {
+        if summary.closed.is_some() || summary.inband_fragment {
             return Ok(());
         }
         let Some(mut sighting) = track_sighting(summary) else {
@@ -405,7 +442,11 @@ impl Inventory for TrackInventory {
         };
         sighting.classification = track_family(summary).classification(sighting.seen.end);
         // No auto-confirmation on a partial life: the close re-offers with the full evidence.
-        self.offer(repo, &sighting, None)
+        let (emitter, created) = self.offer(repo, &sighting, None)?;
+        if created {
+            self.provisional.insert(summary.track.id, emitter);
+        }
+        Ok(())
     }
 
     fn chain_emitter(
@@ -423,13 +464,41 @@ impl Inventory for TrackInventory {
 }
 
 impl TrackInventory {
-    /// Records a track or hop-set sighting, links it and reviews its lifecycle.
+    /// T-109: withdraws the entry `track`'s live offer created, now that the track ended with no
+    /// sighting, unless anything else made it more than that offer (the repository's guard:
+    /// linked or merged, confirmed or promoted, other observations).
+    fn retract(
+        &mut self,
+        repo: &mut Repository,
+        track: TrackId,
+        emitter: EmitterId,
+        t: Timestamp,
+    ) -> Result<(), RepoError> {
+        let reason = format!(
+            "provisional entry of open track {track} withdrawn: the track ended as an in-band \
+             fragment, hop-set member or merged track, with no sighting of its own"
+        );
+        let change = repo.retract_provisional_emitter(
+            emitter,
+            &LinkTarget::Track(track),
+            RETRACT_RULE,
+            &reason,
+            t,
+        )?;
+        if change.is_some() {
+            self.retracted += 1;
+        }
+        Ok(())
+    }
+
+    /// Records a track or hop-set sighting, links it and reviews its lifecycle; returns the
+    /// recorded emitter and whether the sighting created it.
     fn offer(
         &mut self,
         repo: &mut Repository,
         sighting: &Sighting,
         trust: Option<TrackTrust>,
-    ) -> Result<(), RepoError> {
+    ) -> Result<(EmitterId, bool), RepoError> {
         let sighting = sighting.clone();
         let r = match &self.capture {
             Some(capture) => {
@@ -447,7 +516,8 @@ impl TrackInventory {
         if let Some(table) = &self.table {
             explain_emitter(repo, table, id)?;
         }
-        self.review(repo, id, trust)
+        self.review(repo, id, trust)?;
+        Ok((r.emitter_id, r.created))
     }
 }
 
@@ -531,6 +601,166 @@ mod tests {
         let other = channel_summary(TrackId::new(), 13, 12, Some(CloseCause::Idle));
         inv.live_track(&mut repo, &other).unwrap();
         assert_eq!(rows(&repo).len(), 1);
+    }
+
+    fn listed(repo: &Repository) -> Vec<EmitterId> {
+        repo.query_inventory(&InventoryQuery::default())
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| e.emitter.id)
+            .collect()
+    }
+
+    fn channel_at(
+        f: f64,
+        id: TrackId,
+        end_s: i64,
+        bursts: u64,
+        closed: Option<CloseCause>,
+    ) -> TrackSummary {
+        let mut s = channel_summary(id, end_s, bursts, closed);
+        s.track.f_center_hz = f;
+        s
+    }
+
+    #[test]
+    fn t109_live_entry_of_a_track_that_ends_as_an_inband_fragment_is_retracted_at_close() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let id = TrackId::new();
+        inv.live_track(&mut repo, &channel_summary(id, 6, 5, None))
+            .unwrap();
+        let rows = listed(&repo);
+        assert_eq!(rows.len(), 1);
+        // The host's continuous track outlives it: at close the flicker is a fragment.
+        let mut closed = channel_summary(id, 9, 7, Some(CloseCause::Idle));
+        closed.inband_fragment = true;
+        inv.track_event(&mut repo, &TrackEvent::Closed(closed))
+            .unwrap();
+        assert!(listed(&repo).is_empty(), "no stale row");
+        assert_eq!(inv.retracted, 1);
+        assert_eq!(
+            repo.emitter_lifecycle_state(rows[0]).unwrap(),
+            LifecycleState::Deleted
+        );
+        let history = repo.emitter_lifecycle_history(rows[0]).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].author, LifecycleAuthor::Auto);
+        assert_eq!(history[0].actor, RETRACT_RULE);
+        // A summary already known to be a fragment is never offered live.
+        let mut frag = channel_summary(TrackId::new(), 6, 5, None);
+        frag.inband_fragment = true;
+        inv.live_track(&mut repo, &frag).unwrap();
+        assert!(listed(&repo).is_empty());
+    }
+
+    #[test]
+    fn t109_slow_hopper_channels_offered_before_the_hop_set_formed_are_retracted() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let chans = [152.30e6, 152.40e6, 152.50e6];
+        let ids: Vec<TrackId> = chans.iter().map(|_| TrackId::new()).collect();
+        for (&f, &id) in chans.iter().zip(&ids) {
+            inv.live_track(&mut repo, &channel_at(f, id, 6, 4, None))
+                .unwrap();
+        }
+        let channels = listed(&repo);
+        assert_eq!(channels.len(), 3, "each slow channel was offered early");
+        let set = TrackId::new();
+        let h = hk_detect::track::HopSetSummary {
+            id: set,
+            channels_hz: chans.to_vec(),
+            members: ids.clone(),
+            raster_hz: Some(100e3),
+            hop_rate_hz: Some(2.0),
+            dwell_s: Some(0.4),
+            hops: 12,
+            time: TimeRange::new(
+                Timestamp::from_unix_nanos(1_000_000_000),
+                Timestamp::from_unix_nanos(7_000_000_000),
+            ),
+        };
+        inv.track_event(&mut repo, &TrackEvent::HopSetFormed(h))
+            .unwrap();
+        let rows = listed(&repo);
+        assert_eq!(rows.len(), 1, "only the hop set's entry: {rows:?}");
+        assert!(!channels.contains(&rows[0]));
+        assert_eq!(inv.retracted, 3);
+        // The members' closes (hop-set members: no sighting) change nothing more.
+        for (&f, &id) in chans.iter().zip(&ids) {
+            let mut s = channel_at(f, id, 9, 6, Some(CloseCause::Idle));
+            s.hop_set = Some(set);
+            inv.track_event(&mut repo, &TrackEvent::Closed(s)).unwrap();
+        }
+        assert_eq!(listed(&repo), rows);
+        assert_eq!(inv.retracted, 3);
+    }
+
+    #[test]
+    fn t109_retraction_withdraws_merged_tracks_but_never_user_confirmed_or_shared_rows() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let t = Timestamp::from_unix_nanos(9_000_000_000);
+        // Merged into another track: its live row goes.
+        let a = TrackId::new();
+        inv.live_track(&mut repo, &channel_at(152.30e6, a, 6, 5, None))
+            .unwrap();
+        assert_eq!(listed(&repo).len(), 1);
+        let merged = TrackEvent::Merged {
+            from: a,
+            into: TrackId::new(),
+            at: t,
+        };
+        inv.track_event(&mut repo, &merged).unwrap();
+        assert!(listed(&repo).is_empty());
+        // Confirmed by a user: kept, whatever the track's end.
+        let b = TrackId::new();
+        inv.live_track(&mut repo, &channel_at(152.60e6, b, 6, 5, None))
+            .unwrap();
+        let user = listed(&repo);
+        assert_eq!(user.len(), 1);
+        repo.change_emitter_lifecycle(
+            user[0],
+            LifecycleState::Confirmed,
+            LifecycleAuthor::User,
+            "token:test",
+            "looks real",
+            t,
+        )
+        .unwrap();
+        let mut frag = channel_at(152.60e6, b, 9, 7, Some(CloseCause::Idle));
+        frag.inband_fragment = true;
+        inv.track_event(&mut repo, &TrackEvent::Closed(frag))
+            .unwrap();
+        assert_eq!(listed(&repo), user);
+        assert_eq!(
+            repo.emitter_lifecycle_state(user[0]).unwrap(),
+            LifecycleState::Confirmed
+        );
+        // Reached by another track's sighting too: kept.
+        let c = TrackId::new();
+        inv.live_track(&mut repo, &channel_at(152.90e6, c, 6, 5, None))
+            .unwrap();
+        let shared: Vec<EmitterId> = listed(&repo)
+            .into_iter()
+            .filter(|e| !user.contains(e))
+            .collect();
+        assert_eq!(shared.len(), 1);
+        let other = channel_at(152.90e6, TrackId::new(), 8, 5, Some(CloseCause::Idle));
+        inv.track_event(&mut repo, &TrackEvent::Closed(other))
+            .unwrap();
+        let after: Vec<EmitterId> = listed(&repo)
+            .into_iter()
+            .filter(|e| !user.contains(e))
+            .collect();
+        assert_eq!(after, shared, "the other track joined the live row");
+        let mut frag = channel_at(152.90e6, c, 9, 7, Some(CloseCause::Idle));
+        frag.inband_fragment = true;
+        inv.track_event(&mut repo, &TrackEvent::Closed(frag))
+            .unwrap();
+        assert!(listed(&repo).contains(&shared[0]), "shared row kept");
+        assert_eq!(inv.retracted, 1);
     }
 
     fn steady() -> TrackTrust {

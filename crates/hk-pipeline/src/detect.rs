@@ -260,6 +260,8 @@ struct DetectNode {
     links_seen: usize,
     last_flush_ns: Option<i64>,
     live_offered_ns: Option<i64>,
+    /// Reused for the tracker's live offers (T-109).
+    live_buf: Vec<TrackSummary>,
     now_ns: i64,
     segments: u64,
     segment_start: Timestamp,
@@ -312,6 +314,7 @@ impl DetectNode {
             links_seen: 0,
             last_flush_ns: None,
             live_offered_ns: None,
+            live_buf: Vec::new(),
             now_ns: 0,
             segments: 0,
             segment_start: Timestamp::UNIX_EPOCH,
@@ -497,8 +500,10 @@ impl DetectNode {
                         summary: Box::new(summary),
                     });
                 }
-                TrackEvent::Merged { from, into, .. } => {
+                TrackEvent::Merged { from, into, at } => {
                     inc(&dc.track_merges);
+                    // The inventory withdraws a live entry of the absorbed track (T-109).
+                    self.closed.push(TrackEvent::Merged { from, into, at });
                     self.send(ControlEvent::TrackMerged { from, into });
                 }
                 ev @ (TrackEvent::HopSetFormed(_) | TrackEvent::HopSetClosed(_)) => {
@@ -583,8 +588,10 @@ impl DetectNode {
         };
         // T-109: a channel that keeps keying (a pager net, a repeating beacon) never idles out, so
         // its track would reach the inventory only when the run stops. Offer open confirmed
-        // channel tracks with a few bursts every `LIVE_OFFER_NS`; the sighting is keyed by the
-        // track, so a re-offer (and the final close) adds only new bursts.
+        // channel tracks with a few bursts and a settled fate (no hop link or set, not an in-band
+        // fragment) every `LIVE_OFFER_NS`; the sighting is keyed by the track, so a re-offer (and
+        // the final close) adds only new bursts, and the inventory retracts the entry when the
+        // track ends with no sighting after all.
         let live = if self.namer.named()
             && !self.finishing
             && self
@@ -592,9 +599,10 @@ impl DetectNode {
                 .is_none_or(|t| self.now_ns - t >= LIVE_OFFER_NS)
         {
             self.live_offered_ns = Some(self.now_ns);
-            let mut live = self.tracker.summaries();
-            live.retain(|s| s.burst_count >= LIVE_MIN_BURSTS);
-            live
+            self.tracker
+                .live_offers_into(LIVE_MIN_BURSTS, &mut self.live_buf);
+            // Crosses to the writer thread: allocates only when something is offered.
+            self.live_buf.drain(..).collect()
         } else {
             Vec::new()
         };
@@ -822,13 +830,16 @@ impl Writer {
                     .inventory
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                for e in self.closed.drain(..) {
-                    if inv.track_event(&mut repo, &e).is_err() {
+                // Live offers first: a carried batch can hold an older snapshot of a track whose
+                // close, merge or hop set arrived since, and the end must come after the offer so
+                // the inventory can retract it (T-109).
+                for s in self.live.drain(..) {
+                    if inv.live_track(&mut repo, &s).is_err() {
                         inc(&dc.db_errors);
                     }
                 }
-                for s in self.live.drain(..) {
-                    if inv.live_track(&mut repo, &s).is_err() {
+                for e in self.closed.drain(..) {
+                    if inv.track_event(&mut repo, &e).is_err() {
                         inc(&dc.db_errors);
                     }
                 }
