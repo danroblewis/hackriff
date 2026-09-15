@@ -52,7 +52,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use hk_core::{Discontinuity, ProvenanceHandle};
-use hk_demod::audio::{AudioConfig, AudioDemod, AudioPlan, LISTEN_DEMOD_VERSION, probe};
+use hk_demod::audio::{AudioConfig, AudioDemod, LISTEN_DEMOD_VERSION, probe};
+use hk_demod::refine::RefinementOutcome;
 use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
 use hk_model::{ContentClass, EmitterId, SampleTime, Timestamp};
@@ -69,6 +70,7 @@ use num_complex::Complex;
 use super::{ChainReader, Next};
 use crate::class::{ClassRule, class_name, classify_emitter, is_restricted, restricted_band};
 use crate::config::ListenSettings;
+use crate::refine::{ListenProbe, LiveRefiner, RefineSettings, SOURCE_LISTEN, listen_probe};
 use crate::run::Shared;
 use crate::stats::{Counters, ListenCounters, add, inc};
 
@@ -103,6 +105,8 @@ pub struct ListenConfig {
     pub queue_bytes: usize,
     /// Demodulator settings.
     pub audio: AudioConfig,
+    /// Output-driven refinement of the channel (T-070, [`crate::refine`]).
+    pub refine: RefineSettings,
 }
 
 impl Default for ListenConfig {
@@ -122,6 +126,7 @@ impl Default for ListenConfig {
             probe_bandwidth_hz: (16e3, 300e3),
             queue_bytes: 64 * 1024,
             audio: AudioConfig::default(),
+            refine: RefineSettings::default(),
         };
         c.apply(&ListenSettings::default());
         c
@@ -557,7 +562,13 @@ impl ListenManager {
         let start = shared.ring.next_sample().unwrap_or(0);
         let cursor = shared.gate.register(start);
         let mut reader = ChainReader::new(Arc::clone(shared), start, cursor);
-        let want = ((cfg.probe_s * fs) as usize).max(1);
+        let probe_len = ((cfg.probe_s * fs) as usize).max(1);
+        // T-070: refinement measures on a longer window than the mode probe.
+        let want = if cfg.refine.enabled {
+            probe_len.max((cfg.refine.window_s * fs) as usize)
+        } else {
+            probe_len
+        };
         let mut iq: Vec<Complex<i8>> = Vec::with_capacity(want);
         let mut head: Option<(SampleTime, ProvenanceHandle)> = None;
         let deadline = Instant::now() + cfg.probe_timeout;
@@ -605,15 +616,31 @@ impl ListenManager {
             dropped_before: 0,
             provenance: &prov,
         };
+        let probe_iq = &iq[..probe_len.min(iq.len())];
         let request = SnippetRequest {
             start_index: time.sample_index,
-            end_index: time.sample_index + iq.len() as u64,
+            end_index: time.sample_index + probe_iq.len() as u64,
             center_offset_hz: fc - tune.center_hz,
             bandwidth_hz: probe_bw,
         };
-        let pr = probe(info, &iq, &request)
+        let pr = probe(info, probe_iq, &request)
             .map_err(|e| OpenRefusal::new(422, "probe-failed", format!("estimation: {e}")))?;
-        let plan = AudioPlan::from_probe(&pr, &cfg.audio).map_err(|why| {
+        // T-070: refine the channel from the demodulated output ([`crate::refine`]).
+        let ListenProbe {
+            probe: pr,
+            plan,
+            refined,
+        } = listen_probe(
+            &cfg.refine,
+            &cfg.audio,
+            info,
+            &iq,
+            &request,
+            (lo, hi),
+            cfg.probe_bandwidth_hz,
+            pr,
+        );
+        let plan = plan.map_err(|why| {
             OpenRefusal::new(
                 422,
                 "no-analog-mode",
@@ -621,7 +648,12 @@ impl ListenManager {
             )
         })?;
         let (clo, chi) = plan.channel_extent_hz();
-        if (plan.channel_center_hz - fc).abs() > 0.5 * probe_bw {
+        // A refined emission only has to overlap the selection.
+        let reach = match &refined {
+            Some(_) => (0.5 * (hi - lo) + 0.5 * plan.channel_bandwidth_hz).max(0.5 * probe_bw),
+            None => 0.5 * probe_bw,
+        };
+        if (plan.channel_center_hz - fc).abs() > reach {
             return Err(OpenRefusal::new(
                 422,
                 "no-analog-mode",
@@ -658,6 +690,13 @@ impl ListenManager {
                 .filter(|p| p.found)
                 .and_then(|p| p.frequency_hz);
         }
+        if let Some(o) = &refined {
+            params.bandwidth_hz = Some(o.tuning.bandwidth_hz);
+            params.cfo_hz = Some(o.tuning.center_hz - fc);
+            if let Some(p) = o.mode_params.get("pilot_hz") {
+                params.pilot_hz = Some(*p);
+            }
+        }
         let mut header = StreamHeader::new(
             format!("listen/{}", STREAM_SEQ.fetch_add(1, Ordering::Relaxed)),
             StreamKind::Audio,
@@ -691,6 +730,7 @@ impl ListenManager {
             },
             deemphasis_s: plan.deemphasis_s,
             demod: LISTEN_DEMOD_VERSION.into(),
+            refinement: refined.as_ref().map(crate::refine::audio_refinement),
         });
         let publisher = Publisher::new(
             header.clone(),
@@ -705,6 +745,15 @@ impl ListenManager {
         .map_err(|e| OpenRefusal::new(500, "publisher", e.to_string()))?;
         let handle = publisher.handle();
         let stop = Arc::new(AtomicBool::new(false));
+        // T-070: the refined tuning goes on the target emitter (or the inventory emitter at the
+        // refined channel) and keeps being refined in the background while streaming.
+        let refine_emitter = refined.as_ref().and_then(|o| {
+            crate::refine::store_and_explain(shared, emitter, o, SOURCE_LISTEN, time.host_time)
+        });
+        let refined_tuning = refined
+            .as_ref()
+            .map(|o| (o.tuning.center_hz, o.tuning.bandwidth_hz));
+        let refiner = refined.and_then(|o| LiveRefiner::new(&cfg.refine, plan.mode, o, fs));
         let session = Session {
             shared: Arc::clone(shared),
             reader,
@@ -715,6 +764,9 @@ impl ListenManager {
             config: cfg.clone(),
             tune: (tune.center_hz, tune.sample_rate_hz),
             t0: time.host_time,
+            refiner,
+            refine_emitter: refine_emitter.or(emitter),
+            refined: refined_tuning,
             _slot: slot.clone(),
         };
         inc(&shared.counters.listen.running);
@@ -784,10 +836,44 @@ struct Session {
     tune: (f64, f64),
     /// Host time of the first probed sample (audio time origin).
     t0: Timestamp,
+    /// Background re-refinement (T-070).
+    refiner: Option<LiveRefiner>,
+    /// Emitter refined tunings are stored on.
+    refine_emitter: Option<EmitterId>,
+    /// Refined centre and bandwidth in force.
+    refined: Option<(f64, f64)>,
     _slot: Slot,
 }
 
 impl Session {
+    /// Applies an accepted live refinement (T-070): the demodulator is rebuilt on the refined
+    /// channel when it stays inside the tuned window and passes the gate, and the tuning is
+    /// stored on the emitter.
+    fn retune_refined(&mut self, next: &RefinementOutcome, t: Timestamp, gap: &mut bool) {
+        let mut plan = self.demod.plan().clone();
+        crate::refine::apply_to_plan(&mut plan, next);
+        let (lo, hi) = plan.channel_extent_hz();
+        if !in_window(self.tune.0, self.tune.1, lo, hi) || gate(&self.shared, lo, hi).is_err() {
+            return;
+        }
+        let Ok(demod) = AudioDemod::new(plan, self.config.audio.clone(), self.tune.1, self.tune.0)
+        else {
+            return;
+        };
+        self.demod = demod;
+        self.refined = Some((next.tuning.center_hz, next.tuning.bandwidth_hz));
+        *gap = true;
+        if self.refine_emitter.is_some() {
+            crate::refine::store_and_explain(
+                &self.shared,
+                self.refine_emitter,
+                next,
+                SOURCE_LISTEN,
+                t,
+            );
+        }
+    }
+
     fn run(mut self) {
         let counters = Arc::clone(&self.shared.counters);
         let lc = &counters.listen;
@@ -881,10 +967,16 @@ impl Session {
                         provenance: &chunk.provenance,
                     };
                     let processed = self.demod.process(info, &self.reader.buf[..chunk.len]);
+                    if let Some(r) = self.refiner.as_mut() {
+                        r.feed(chunk.time, &chunk.provenance, &self.reader.buf[..chunk.len]);
+                    }
                     self.reader.release_to(chunk.end_sample());
                     if processed.is_err() {
                         inc(&lc.errors);
                         break End::Error;
+                    }
+                    if let Some(next) = self.refiner.as_mut().and_then(LiveRefiner::poll) {
+                        self.retune_refined(&next, chunk.time.host_time, &mut gap);
                     }
                     self.demod.drain_audio_into(&mut pending);
                     let mut offset = 0;
@@ -968,6 +1060,9 @@ impl Session {
                             .saturating_sub(lost_before),
                     latency_ms: round2(latency_ms),
                     backlog_s: round2(backlog_s),
+                    refined_center_hz: self.refined.map(|r| r.0),
+                    refined_bandwidth_hz: self.refined.map(|r| r.1),
+                    refine_updates: self.refiner.as_ref().map_or(0, LiveRefiner::updates),
                 };
                 let t = self.t0.saturating_add_nanos(
                     (audio_index as f64 * 1e9 / AUDIO_SAMPLE_RATE_HZ).round() as i64,

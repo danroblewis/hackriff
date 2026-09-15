@@ -486,6 +486,7 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
     - `mode` is chosen by auto-mode selection (`wfm`, `nbfm`, `am`, `usb`, `lsb`, `cw`); there is no manual mode.
     - `params` is docs/07 `EstimatedParams`.
     - `squelch` is `{open_snr_db, hysteresis_db, noise_dbfs}`; `agc` is `{enabled, target_dbfs, max_gain_db}`.
+    - `refinement` (optional, T-070): present when the channel was refined from the demodulator's own output (`hk_pipeline::refine`). `{provenance: "refined by output analysis", objective, center_hz, bandwidth_hz, start_center_hz, start_bandwidth_hz, quality, converged, iterations, evaluations, elapsed_s, mode_params, labels}`. The header's `center_hz`/`bandwidth_hz` and `params.bandwidth_hz`/`cfo_hz`/`pilot_hz` are then the refined values; the start values are the selection or detection. Readers that ignore unknown fields are unaffected.
 - **Data records** (type 1):
   - payload: `frame_samples` (960, i.e. 20 ms) `i16` LE samples;
   - `sample_index`: audio samples since the stream start;
@@ -494,6 +495,7 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
 - **Status records** (type 3):
   - 32-byte header; the payload is a flat JSON object of numbers, booleans and short tokens (`policy::metadata_is_allowlist_shaped`, enforced by `Publisher::publish_status`), so no free text rides on it.
   - Audio fields: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `squelched_frames`, `lost_samples`, `latency_ms`, `backlog_s`, sent about every 250 ms.
+  - Refinement fields (T-070): `refined_center_hz` and `refined_bandwidth_hz` (the refined channel in force, absent when not refined) and `refine_updates` (background re-refinements that retuned the channel after passing the hysteresis).
   - They take a `seq`. The reference `StreamReader` returns them as `Record::Unknown`; `record::parse_status_record` decodes them.
 - **Gating:**
   - Audio payloads are content: under a class that forbids content the egress gate withholds them (§6), as for any audio stream.

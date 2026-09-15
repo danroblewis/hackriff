@@ -59,6 +59,40 @@ pub struct AgcInfo {
     pub max_gain_db: f64,
 }
 
+/// How the demodulated channel was refined from the demodulator's own output (T-070, header).
+/// Metadata only: the tuning, the objective's figures and the search statistics.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioRefinement {
+    /// `refined by output analysis`.
+    pub provenance: String,
+    /// Objective name and version, e.g. `hk-demod/wfm-output@1`.
+    pub objective: String,
+    /// Refined channel centre, RF Hz (also the header's `center_hz`).
+    pub center_hz: f64,
+    /// Refined channel bandwidth, Hz (also the header's `bandwidth_hz`).
+    pub bandwidth_hz: f64,
+    /// Where the search started (the selection or detection), Hz.
+    pub start_center_hz: f64,
+    /// Start width, Hz.
+    pub start_bandwidth_hz: f64,
+    /// Objective value at the result.
+    pub quality: f64,
+    /// The centre converged.
+    pub converged: bool,
+    /// Search iterations.
+    pub iterations: u32,
+    /// Measurements made.
+    pub evaluations: u32,
+    /// Search time, s.
+    pub elapsed_s: f64,
+    /// Mode parameters measured at the result (e.g. `pilot_hz`, `occupied_bandwidth_hz`).
+    #[serde(default)]
+    pub mode_params: std::collections::BTreeMap<String, f64>,
+    /// Short labels measured at the result (e.g. `rds_pi`).
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
 /// The `audio` header profile.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AudioInfo {
@@ -86,6 +120,9 @@ pub struct AudioInfo {
     pub deemphasis_s: Option<f64>,
     /// Demodulator id and version.
     pub demod: String,
+    /// Output-driven refinement of the channel (T-070), when it ran and locked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<AudioRefinement>,
 }
 
 /// A status record's fields.
@@ -110,6 +147,15 @@ pub struct AudioStatus {
     pub latency_ms: f64,
     /// Stream samples waiting in the ring behind the reader, as seconds.
     pub backlog_s: f64,
+    /// Refined channel centre in force, Hz (T-070; `None` when not refined).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refined_center_hz: Option<f64>,
+    /// Refined channel bandwidth in force, Hz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refined_bandwidth_hz: Option<f64>,
+    /// Live re-refinements that retuned the channel.
+    #[serde(default)]
+    pub refine_updates: u64,
 }
 
 impl AudioStatus {

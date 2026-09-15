@@ -41,6 +41,7 @@ pub mod events;
 pub mod family;
 pub mod gate;
 pub mod inventory;
+pub mod refine;
 pub mod stats;
 
 mod capture;
@@ -69,6 +70,7 @@ pub use inventory::{Inventory, TrackInventory};
 pub use recorder::{
     RECORDING_DEFAULT_S, RECORDING_LABEL_MAX, RECORDING_MAX_BYTES, RECORDING_MAX_S, RecordingStatus,
 };
+pub use refine::RefineSettings;
 pub use run::{
     ControlFailure, ControlStats, ControlStatus, DeviceReplay, Pipeline, PipelineController,
     PipelineHandle, REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunSummary,

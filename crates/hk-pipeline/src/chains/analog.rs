@@ -7,13 +7,25 @@
 //! continues to the full window only when the selected mode is in `accept_modes` (and a pilot
 //! was found when `require_pilot`); otherwise it stops without writing anything
 //! (`mode_rejected`). Mode selection, not the spec, decides what is demodulated.
+//!
+//! **Refinement (T-070).** When the probe accepted a mode with an objective
+//! ([`crate::refine`]), the collected window refines the channel from the demodulated output,
+//! starting from the channel the chain was attached to. The refined tuning is demodulated instead
+//! of the attach box and stored on the written emitter before its explanations are ranked.
+//! A probe that finds the mode outside this channel refines first and decides by the refined
+//! centre ([`owns`]): the chain takes an emission inside its channel, or one off every raster
+//! channel less than a raster step away, so a station between two channels is demodulated where it
+//! is instead of by neither neighbour.
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::thread;
 
 use hk_core::{Discontinuity, ProvenanceHandle};
-use hk_demod::{AnalogReceiver, AnalogSession, RecordContext, write_session};
+use hk_demod::refine::{IqWindow, RefineStart, RefinementOutcome, Tuning};
+use hk_demod::{
+    AnalogMode, AnalogReceiver, AnalogSession, ReceiverConfig, RecordContext, write_session,
+};
 use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
 use hk_model::SampleTime;
@@ -24,6 +36,7 @@ use hk_model::RecordingTrigger;
 use super::{ChainMsg, ChainReader, Next};
 use crate::events::Candidate;
 use crate::gate::GateCursor;
+use crate::refine::{RefineSettings, SOURCE_ANALOG_CHAIN};
 use crate::run::Shared;
 use crate::stats::{add, inc};
 
@@ -102,11 +115,14 @@ fn collect(cr: &mut ChainReader, rx: &Receiver<ChainMsg>, w: &mut Window, target
     }
 }
 
+/// Demodulates the window's first `len` samples on the attach box, or on a `refined` tuning (its
+/// centre and WFM channel bandwidth, no further CFO correction).
 fn demodulate(
     w: &Window,
     len: usize,
     cand: &Candidate,
     bandwidth_hz: f64,
+    refined: Option<&Tuning>,
 ) -> Option<Result<AnalogSession, hk_demod::DemodError>> {
     let (time, prov) = w.head.as_ref()?;
     let info = InputInfo {
@@ -115,14 +131,22 @@ fn demodulate(
         dropped_before: 0,
         provenance: prov,
     };
-    let center = 0.5 * (cand.f_lo_hz + cand.f_hi_hz);
+    let center = refined.map_or(0.5 * (cand.f_lo_hz + cand.f_hi_hz), |t| t.center_hz);
     let request = SnippetRequest {
         start_index: time.sample_index,
         end_index: time.sample_index + len as u64,
         center_offset_hz: center - prov.tune.center_hz,
         bandwidth_hz,
     };
-    Some(AnalogReceiver::default().run(info, &w.iq[..len], &request))
+    let mut receiver = match refined {
+        Some(t) => AnalogReceiver::new(ReceiverConfig {
+            wfm_channel_bandwidth_hz: t.bandwidth_hz,
+            max_cfo_correction_hz: 0.0,
+            ..ReceiverConfig::default()
+        }),
+        None => AnalogReceiver::default(),
+    };
+    Some(receiver.run(info, &w.iq[..len], &request))
 }
 
 fn mode_name(s: &AnalogSession) -> String {
@@ -148,12 +172,14 @@ pub(crate) fn run(
         ended: false,
         detached: false,
     };
+    let mut probe_mode = None;
+    let mut probe_refined = None;
     if probe > 0 && probe < want {
         collect(&mut cr, &rx, &mut w, probe);
         if w.iq.len() < probe {
             return;
         }
-        let accepted = match demodulate(&w, probe, &cand, node.bandwidth_hz) {
+        let accepted = match demodulate(&w, probe, &cand, node.bandwidth_hz, None) {
             Some(Ok(s)) => {
                 let mode_ok =
                     node.accept_modes.is_empty() || node.accept_modes.contains(&mode_name(&s));
@@ -164,7 +190,16 @@ pub(crate) fn run(
                 let channel_center = 0.5 * (cand.f_lo_hz + cand.f_hi_hz);
                 let in_channel = (s.rf_center_hz - channel_center).abs()
                     <= (0.5 * node.bandwidth_hz).min(node.channel_tolerance_hz);
-                let accepted = mode_ok && pilot_ok && in_channel;
+                let mut accepted = mode_ok && pilot_ok && in_channel;
+                // T-070: an emission outside this channel may sit off every raster channel, where
+                // no chain's channel holds it. Refine from where the probe found it and decide by
+                // the refined centre ([`owns`]).
+                if mode_ok && pilot_ok && !in_channel {
+                    probe_refined =
+                        refine_window(&w, probe, s.rf_center_hz, node.bandwidth_hz, s.mode.mode)
+                            .filter(|o| owns(&node, channel_center, o.tuning.center_hz));
+                    accepted = probe_refined.is_some();
+                }
                 if crate::debug_enabled() {
                     eprintln!(
                         "hk-pipeline: analog probe {:.4} MHz (channel {:.4}): mode {} ({:.2}), pilot {:?} → {}",
@@ -175,6 +210,9 @@ pub(crate) fn run(
                         s.mode.features.pilot.as_ref().map(|p| p.found),
                         if accepted { "continue" } else { "stop" }
                     );
+                }
+                if accepted {
+                    probe_mode = Some(s.mode.mode);
                 }
                 accepted
             }
@@ -214,13 +252,92 @@ pub(crate) fn run(
             }
         }
     });
-    collect_and_write(&shared, &rx, cr, w, &cand, &node, want);
+    collect_and_write(
+        &shared,
+        &rx,
+        cr,
+        w,
+        &cand,
+        &node,
+        want,
+        probe_mode,
+        probe_refined,
+    );
     if let Some(join) = recorder {
         let _ = join.join();
     }
 }
 
-/// Collects the rest of the window, demodulates and writes the session.
+/// Largest distance from the nearest raster channel still read as on that channel, as a fraction
+/// of the raster step (the explanations' US FM raster tolerance is also 10 %).
+const ON_RASTER_FRACTION: f64 = 0.1;
+
+/// Whether the emission refined to `refined_hz` belongs to this chain (T-070): inside its channel
+/// (half a raster step and half the node bandwidth), or off every raster channel and less than one
+/// raster step away. A station between two channels would otherwise belong to neither neighbour's
+/// chain and never be demodulated; either neighbour may take it (a second demodulation of the same
+/// station is a known duplicate, not a loss).
+fn owns(node: &AnalogNode, channel_center: f64, refined_hz: f64) -> bool {
+    let d = refined_hz - channel_center;
+    if d.abs() <= (0.5 * node.bandwidth_hz).min(node.channel_tolerance_hz) {
+        return true;
+    }
+    if !node.channel_tolerance_hz.is_finite() {
+        return false;
+    }
+    let raster = 2.0 * node.channel_tolerance_hz;
+    let nearest = channel_center + (d / raster).round() * raster;
+    (refined_hz - nearest).abs() > ON_RASTER_FRACTION * raster && d.abs() < raster
+}
+
+/// Refines `mode` on the window's first `len` samples from a box at `center_hz` / `bandwidth_hz`
+/// (T-070); the locked result, else `None`.
+fn refine_window(
+    w: &Window,
+    len: usize,
+    center_hz: f64,
+    bandwidth_hz: f64,
+    mode: AnalogMode,
+) -> Option<RefinementOutcome> {
+    let (time, prov) = w.head.as_ref()?;
+    let info = InputInfo {
+        time: *time,
+        discontinuity: Discontinuity::NONE,
+        dropped_before: 0,
+        provenance: prov,
+    };
+    let start = RefineStart {
+        center_hz,
+        bandwidth_hz: bandwidth_hz.max(0.0),
+        warm: false,
+    };
+    let o = crate::refine::refine(
+        &RefineSettings::default(),
+        mode,
+        IqWindow::new(info, &w.iq[..len.min(w.iq.len())]),
+        &start,
+    )?;
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: analog refine {:.4} MHz -> {:.4} MHz / {:.1} kHz, locked {}, quality \
+             {:.1}, {} iterations, {} evaluations, {:.2} s",
+            center_hz / 1e6,
+            o.tuning.center_hz / 1e6,
+            o.tuning.bandwidth_hz / 1e3,
+            o.locked,
+            o.quality,
+            o.iterations,
+            o.evaluations,
+            o.elapsed_s
+        );
+    }
+    o.locked.then_some(o)
+}
+
+/// Collects the rest of the window, refines, demodulates and writes the session. The refinement
+/// starts from the probe's refined result when the probe needed one, else from the attach channel,
+/// and must stay owned by this chain.
+#[allow(clippy::too_many_arguments)]
 fn collect_and_write(
     shared: &Arc<Shared>,
     rx: &Receiver<ChainMsg>,
@@ -229,6 +346,8 @@ fn collect_and_write(
     cand: &Candidate,
     node: &AnalogNode,
     want: usize,
+    probe_mode: Option<AnalogMode>,
+    probe_refined: Option<RefinementOutcome>,
 ) {
     let fs = shared.fs;
     let c = &shared.counters.chains;
@@ -237,7 +356,24 @@ fn collect_and_write(
     if (w.iq.len() as f64) < 0.25 * fs {
         return;
     }
-    let session = match demodulate(&w, w.iq.len(), cand, node.bandwidth_hz) {
+    let channel_center = 0.5 * (cand.f_lo_hz + cand.f_hi_hz);
+    let refined = probe_mode
+        .and_then(|m| {
+            let (start, width) = probe_refined
+                .as_ref()
+                .map_or((channel_center, cand.f_hi_hz - cand.f_lo_hz), |p| {
+                    (p.tuning.center_hz, 0.0)
+                });
+            refine_window(&w, w.iq.len(), start, width, m).or_else(|| probe_refined.clone())
+        })
+        .filter(|o| owns(node, channel_center, o.tuning.center_hz));
+    let session = match demodulate(
+        &w,
+        w.iq.len(),
+        cand,
+        node.bandwidth_hz,
+        refined.as_ref().map(|o| &o.tuning),
+    ) {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
             inc(&c.errors);
@@ -274,6 +410,18 @@ fn collect_and_write(
             add(&c.emitters_created, u64::from(written.emitter_created));
             add(&c.labels, u64::from(written.label.is_some()));
             if let Some(e) = written.emitter_id {
+                if let Some(o) = &refined
+                    && let Err(err) = crate::refine::persist(
+                        &mut repo,
+                        e,
+                        o,
+                        SOURCE_ANALOG_CHAIN,
+                        session.time_range().start,
+                    )
+                {
+                    inc(&c.errors);
+                    eprintln!("hk-pipeline: analog chain refined tuning write: {err}");
+                }
                 let mut inv = shared
                     .inventory
                     .lock()
@@ -287,5 +435,47 @@ fn collect_and_write(
             inc(&c.errors);
             eprintln!("hk-pipeline: analog chain write: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(raster_hz: f64) -> AnalogNode {
+        AnalogNode {
+            pre_s: 0.0,
+            window_s: 1.0,
+            bandwidth_hz: 200e3,
+            probe_s: 0.5,
+            accept_modes: Vec::new(),
+            require_pilot: false,
+            channel_tolerance_hz: 0.5 * raster_hz,
+            record: None,
+        }
+    }
+
+    #[test]
+    fn a_chain_owns_its_channel_and_off_raster_stations_beside_it_not_on_raster_neighbours() {
+        let n = node(200e3);
+        let ch = 101.3e6;
+        assert!(owns(&n, ch, 101.302e6), "in channel");
+        assert!(
+            owns(&n, ch, 101.4495e6),
+            "150 kHz off: off raster, beside it"
+        );
+        assert!(owns(&n, ch, 101.1505e6), "off raster below");
+        assert!(!owns(&n, ch, 101.5e6), "on the neighbour's raster channel");
+        assert!(
+            !owns(&n, ch, 101.49e6),
+            "within the neighbour's raster tolerance"
+        );
+        assert!(!owns(&n, ch, 101.55e6), "a raster step or more away");
+        let unbounded = node(f64::INFINITY);
+        assert!(owns(&unbounded, ch, 101.39e6));
+        assert!(
+            !owns(&unbounded, ch, 101.45e6),
+            "beyond half the bandwidth off a raster"
+        );
     }
 }

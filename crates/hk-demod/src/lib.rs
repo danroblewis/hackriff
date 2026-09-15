@@ -39,6 +39,8 @@ pub mod pilot;
 pub mod rds;
 pub mod receiver;
 pub mod record;
+/// Output-driven parameter refinement: the generic loop and the WFM objective (T-070).
+pub mod refine;
 pub mod wfm;
 
 pub use mode::{
