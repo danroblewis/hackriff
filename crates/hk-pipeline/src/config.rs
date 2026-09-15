@@ -238,6 +238,9 @@ pub struct PipelineConfig {
     /// moves it into another class ([`crate::PipelineController::retune`]). Off for recordings
     /// and scheduler-driven runs (their class covers every window they visit).
     pub live_window_class: bool,
+    /// Rolling IQ capture buffer (T-157, [`crate::iqbuffer`]): on by default for every run that
+    /// is not a lossless replay, 2 GiB or 10 min; `HK_IQ_BUFFER*` override it.
+    pub iq_buffer: hk_store::iqbuffer::IqBufferConfig,
 }
 
 /// Smallest display FFT size.
@@ -396,6 +399,7 @@ impl PipelineConfig {
             calibrations: Vec::new(),
             device_hw: None,
             live_window_class: false,
+            iq_buffer: hk_store::iqbuffer::IqBufferConfig::from_env(),
         })
     }
 }

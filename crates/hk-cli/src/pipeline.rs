@@ -45,7 +45,7 @@ use hk_pipeline::{
     load_calibrations, open_mock_replay, open_replay, replay_plan,
 };
 
-use crate::control::{PipelineOutputs, PipelineRetuner, PipelineRunControl};
+use crate::control::{PipelineIqBuffer, PipelineOutputs, PipelineRetuner, PipelineRunControl};
 use crate::signal;
 
 /// Live HackRF One settings (shared by `hk run`, `hk serve` and `hackriffd`).
@@ -768,6 +768,7 @@ pub fn serve_api(
             .with_attention(Some(handle.occupancy()), handle.attention()), // T-128
         ))), // T-121
         anomalies: Some(Arc::new(PipelineAnomalies(alarms))),             // T-122
+        iq_buffer: Some(Arc::new(PipelineIqBuffer(handle.iq_buffer()))),  // T-157
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

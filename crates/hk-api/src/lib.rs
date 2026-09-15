@@ -34,6 +34,7 @@ pub mod control;
 pub mod http;
 pub mod inspector;
 pub mod inventory;
+pub mod iqbuffer; // T-157
 pub mod live_control;
 pub mod ondemand;
 pub mod outputs;
@@ -59,6 +60,7 @@ pub use control::{
     AuditLog, DisplayLimits, DisplayState, DisplayUpdate, RecordingState, RunControl, RunState,
 };
 pub use http::{ApiState, ROUTES, Server, ServerConfig};
+pub use iqbuffer::{ClipStart, IqBufferControl, IqBufferFailure, IqBufferQuery};
 pub use live_control::{
     LiveControl, LiveControlError, LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner,
     validate_gains,

@@ -118,6 +118,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/outputs/record/start"),
     ("POST", "/api/outputs/record/stop"),
     ("GET", "/api/outputs/{id}/files/{name}"),
+    // T-157 rolling IQ capture buffer
+    ("GET", "/api/iqbuffer"),
+    ("POST", "/api/iqbuffer/clip"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
@@ -271,6 +274,9 @@ pub struct ApiState {
     /// T-122: anomalies and novelty alarms for `/api/anomalies*` ([`crate::anomalies`]); `None`
     /// answers 503.
     pub anomalies: Option<Arc<dyn crate::anomalies::AnomalyControl>>,
+    /// T-157: the rolling IQ capture buffer for `/api/iqbuffer*` ([`crate::iqbuffer`]); `None`
+    /// answers 503.
+    pub iq_buffer: Option<Arc<dyn crate::iqbuffer::IqBufferControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -735,6 +741,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::selections::route(state, &ctl))
         .or_else(|| crate::inventory::route(state, &ctl))
         .or_else(|| crate::outputs::route(state, &ctl))
+        .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
         // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.
         .or_else(|| crate::recipes::route(state, &ctl)) // T-088
         .or_else(|| crate::inspector::route(state, &ctl)) // T-089

@@ -891,6 +891,176 @@ fn outputs_list_and_unknown_file_answer_as_documented() {
     stop_server(serving);
 }
 
+/// T-157: the rolling IQ capture buffer of `hk serve` over the mock SDR device fills with no
+/// request; `GET /api/iqbuffer` reports its span, quota, segments (tuning and gain) and counts, and
+/// `POST /api/iqbuffer/clip` exports a span as a SigMF recording, as `docs/api.md` "IQ capture
+/// buffer" documents; bad queries and bodies answer 400, an empty band 404, other methods 405,
+/// and the clip needs the header token.
+#[test]
+fn iq_buffer_status_and_clip_export_answer_as_documented() {
+    let (serving, addr) = start_server();
+    let mut status = Value::Null;
+    wait_for("0.5 s of buffered IQ", Duration::from_secs(60), || {
+        let (st, v) = get(addr, "/api/iqbuffer");
+        assert_eq!(st, 200, "{v}");
+        status = v;
+        status["span_s"].as_f64().unwrap_or(0.0) >= 0.5
+    });
+    let v = &status;
+    assert_eq!(v["enabled"], json!(true), "{v}");
+    assert!(v["reason"].is_null(), "{v}");
+    assert!(v["dir"].is_string(), "{v}");
+    for k in [
+        "max_bytes",
+        "chunk_bytes",
+        "bytes",
+        "disk_bytes",
+        "samples",
+        "segments_total",
+        "segments_omitted",
+        "dropped_samples",
+        "gated_samples",
+        "write_errors",
+    ] {
+        assert!(v[k].is_u64(), "{k}: {v}");
+    }
+    for k in ["max_s", "t0", "t1", "span_s"] {
+        assert!(v[k].is_f64(), "{k}: {v}");
+    }
+    assert_eq!(v["bytes"].as_u64(), v["samples"].as_u64().map(|n| 2 * n));
+    assert!(v["disk_bytes"].as_u64() >= v["bytes"].as_u64(), "{v}");
+    assert!(v["error"].is_null(), "{v}");
+    assert!(is_object(&v["evicted"]), "{v}");
+    for k in ["chunks", "segments", "samples", "bytes"] {
+        assert!(v["evicted"][k].is_u64(), "evicted.{k}: {v}");
+    }
+    assert!(is_array(&v["gaps"]), "{v}");
+    let segs = v["segments"].as_array().expect("segments");
+    assert!(!segs.is_empty(), "{v}");
+    let seg = &segs[0];
+    for k in ["id", "samples", "global_index", "dropped_before"] {
+        assert!(seg[k].is_u64(), "segment {k}: {seg}");
+    }
+    for k in [
+        "t0",
+        "t1",
+        "center_hz",
+        "sample_rate_hz",
+        "bandwidth_hz",
+        "lna_db",
+        "vga_db",
+    ] {
+        assert!(seg[k].is_number(), "segment {k}: {seg}");
+    }
+    assert_eq!(seg["center_hz"], json!(100.8e6), "{seg}");
+    assert_eq!(seg["sample_rate_hz"], json!(2.4e6), "{seg}");
+    assert!(
+        seg["amp_on"].is_boolean() && seg["overload"].is_boolean(),
+        "{seg}"
+    );
+    assert!(
+        seg["device_id"].is_string() && seg["content_class"].is_string(),
+        "{seg}"
+    );
+
+    let (st, v) = get(addr, "/api/iqbuffer?limit=1");
+    assert_eq!(st, 200, "{v}");
+    assert!(v["segments"].as_array().unwrap().len() <= 1, "{v}");
+    for q in ["bogus=1", "limit=0", "limit=x", "t0=5&t1=4", "t0=abc"] {
+        let (st, v) = get(addr, &format!("/api/iqbuffer?{q}"));
+        assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{q}: {v}");
+    }
+
+    // Export the first 0.1 s of the oldest segment.
+    let t0 = seg["t0"].as_f64().unwrap();
+    let t1 = (t0 + 0.1).min(seg["t1"].as_f64().unwrap());
+    let body = json!({ "t0": t0, "t1": t1, "label": "contract" }).to_string();
+    let (st, _) = call(addr, "POST", "/api/iqbuffer/clip", None, Some(&body));
+    assert_eq!(st, 401, "the clip needs the token");
+    let (st, v) = post(addr, "/api/iqbuffer/clip", &body);
+    assert_eq!(st, 200, "{v}");
+    let r = &v["recording"];
+    assert!(r["id"].is_string(), "{r}");
+    assert_eq!(r["label"], json!("contract"), "{r}");
+    let n = r["samples"].as_u64().unwrap();
+    let want = ((t1 - t0) * 2.4e6).round() as u64;
+    assert!(n.abs_diff(want) <= 1, "{n} vs {want}: {r}");
+    assert_eq!(r["bytes"].as_u64(), Some(2 * n), "{r}");
+    assert_eq!(r["sample_rate_hz"], json!(2.4e6), "{r}");
+    assert_eq!(r["center_hz"], json!(100.8e6), "{r}");
+    assert!(r["band"].is_null() && r["content_class"].is_string(), "{r}");
+    for k in ["t0", "t1"] {
+        assert!(r[k].is_f64(), "{k}: {r}");
+    }
+    let id = r["id"].as_str().unwrap();
+    assert_eq!(
+        r["meta_uri"],
+        json!(format!("recordings/{id}.sigmf-meta")),
+        "{r}"
+    );
+    assert_eq!(
+        r["data_uri"],
+        json!(format!("recordings/{id}.sigmf-data")),
+        "{r}"
+    );
+    let caps = r["captures"].as_array().expect("captures");
+    assert_eq!(caps.len(), 1, "{r}");
+    assert_eq!(caps[0]["sample_start"], json!(0), "{r}");
+    assert_eq!(caps[0]["samples"].as_u64(), Some(n), "{r}");
+    assert_eq!(caps[0]["segment"], seg["id"], "{r}");
+    for k in [
+        "global_index",
+        "t0",
+        "center_hz",
+        "sample_rate_hz",
+        "bandwidth_hz",
+        "lna_db",
+        "vga_db",
+        "amp_on",
+        "device_id",
+    ] {
+        assert!(!caps[0][k].is_null(), "capture {k}: {r}");
+    }
+    let data = std::fs::metadata(r["data_path"].as_str().unwrap()).unwrap();
+    assert_eq!(data.len(), 2 * n);
+    let meta: Value =
+        serde_json::from_slice(&std::fs::read(r["meta_path"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(meta["global"]["core:datatype"], json!("ci8"), "{meta}");
+    assert_eq!(
+        meta["captures"][0]["core:global_index"], caps[0]["global_index"],
+        "{meta}"
+    );
+    assert_eq!(
+        meta["captures"][0]["core:frequency"],
+        json!(100.8e6),
+        "{meta}"
+    );
+
+    let band = json!({ "t0": t0, "t1": t1, "band": { "f_lo": 5.0e9, "f_hi": 5.1e9 } }).to_string();
+    let (st, v) = post(addr, "/api/iqbuffer/clip", &band);
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+    for bad in [
+        json!({ "t0": t1, "t1": t0 }),
+        json!({ "t0": t0 }),
+        json!({ "t0": t0, "t1": t1, "extra": 1 }),
+        json!({ "t0": t0, "t1": t1, "band": { "f_lo": 2.0, "f_hi": 1.0 } }),
+        json!({ "t0": t0, "t1": t1, "label": 5 }),
+    ] {
+        let (st, v) = post(addr, "/api/iqbuffer/clip", &bad.to_string());
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (400, Some("invalid")),
+            "{bad}: {v}"
+        );
+    }
+    let (st, _) = get(addr, "/api/iqbuffer/clip");
+    assert_eq!(st, 405);
+    let (st, _) = post(addr, "/api/iqbuffer", "{}");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
 // --- WebSocket routes -----------------------------------------------------------------------------
 
 fn connect_ws(addr: SocketAddr, path: &str) -> Result<Ws, tungstenite::Error> {
