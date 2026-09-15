@@ -1581,3 +1581,89 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Worktrees:** both removed. Full check started.
   - **T-149 (MUI-DESIGN, Opus high)** launched on main (brief + mockup committed).
   - **T-147 (channel FCO under the scheduler)** launched now that T-141 is merged.
+- **B0.387 T-146 committed (9c1b596; merge of main 72a86d2). Opus review running.**
+  - **Sequential rule:** Stouffer run per (site, subject, cal, direction), p_seq=2k(k+1)·Q(S), z_eq=Q⁻¹(√p_seq).
+  - **Monte-Carlo null at z_on=2:** single-interval 9.92e-4 (limit 2Q²=1.04e-3); sequential raise 1.2e-5; combined 9.96e-4 (limit 1.31e-3).
+  - **Latency:** sparse onset raises at 13 (a-priori limit 14); dense at 2.
+  - **between_var:** sampling-noise correction, floored at 0.1× raw. Slot 28→32 B; baseline format v3. Parked week 218.8 MiB, 0 refusals.
+  - **Changed expectations:** 28 B size assert; golden v2 re-encode; hysteresis test moved to `LevelAboveBaseline`.
+  - **Tests:** 126 targeted green; lint clean.
+  - **T-124 knock-on:** its latency limit must come from the ADR §7.2 table (17@z3.0, 14@3.4, 8@4.7, 7@5.0) using the scene's re-derived z.
+- **B0.388 T-146 review (Opus): FIX-FIRST.**
+  - **Holds:**
+    - union-over-run-length bound
+    - one-sided factor
+    - √p_seq + hysteresis (conservative)
+    - between_var algebra
+    - decay scaling of the new moment
+    - v2 moment=0 (safe direction)
+    - run pruning
+    - new-emitter and quieter paths
+  - **Risks:**
+    - Budget proof assumes Gaussian i.i.d. z. Sparse discrete looks (n_eff=2) break it by about 3000×, and clustered traffic could alarm about monthly. Needs binomial and Markov Monte-Carlo at production thresholds, then a mid-p/continuity and/or autocorrelation deflation fix.
+    - Any opposite-sign z resets the run, so alarms flap. Flap coverage was lost when the hysteresis test changed kind.
+    - p̄(1−p̄) over-subtracts for patterned channels, inflating z by about 12% of τ².
+    - The 2 h wall-time gap blocks accumulation for subjects revisited less often than every 2 h.
+    - The run resets on every dominant gain-key flip.
+  - **Nits:** ADR wording on the 0.1× floor and on sequential vs combined budget; upgraded frozen references stay uncorrected.
+  - **Next:** fix round continued in the T-146 finisher (~159k).
+- **B0.389 Full check green after T-148 + T-141 merges (d00dc80).**
+  - **Results:** lint clean; 1334/1334 nextest+UI (712.8 s, was 583.8 s); acceptance 28/28 (64 s).
+  - **Timing (T-141 mock dequant review item 5):**
+    - adsb 5.63→5.60 s; refine_wfm 25.9→26.1 s; signal_062 6.1→6.6 s; bandit_on 83→110 s.
+    - This run overlapped four agent builds at load up to 36, so it is inconclusive.
+    - The bandit tests retune constantly through the mock, so the per-bin dequant FFT cost is plausible. T-145's Cranelift/timing work should re-measure bandit_on on main at low load. If it is a real ≥20% regression, a follow-up is to vectorise or skip dequant when the recording noise is well above 1 code rms.
+- **B0.390 T-147 WIP (6035543): repro test only, no fix yet; finisher launched.**
+  - **Repro** (`occupancy_sparse_visits`, 6 h, default scheduler + bandit):
+    - 433.400: FCO 0.0, truth 0.570.
+    - 433.375: FCO 0.0, truth 0.083; never learned.
+    - 433.425: FCO 1.0, truth 1.0 (correct).
+  - **Ruled out:** history rows and thresholds are correct (on-rows −64 dB vs threshold −95.9 dB); 476 visits present.
+  - **Leading cause:** sweep hop 1 is centred at 433.3875, so both channels sit 12.5 kHz from DC, inside the detector's 15 kHz rule (`detector.rs:957`). Real carriers get DC-spur flags.
+    - Every DC spur is suspect (`channels.rs:57`), and the suspect rule (`engine.rs:565`) then poisons every occupied visit to that frequency, including clean visits from other tunings.
+    - Suspect visits are dropped from FCO, and learning skips them (`channels.rs:544`).
+  - **Fix direction:** a DC flag marks only that tuning's observation suspect. A frequency is treated as a DC spur only if it is always near its tuning's centre.
+    - ADR-0012 §2.6 amendment.
+    - Real-DC-spur suppression test.
+    - A priori Wilson CI checks.
+- **B0.391 T-149 MUI-DESIGN done (80aa73b skeleton, 9509424 ADR-0013). Opus review running in parallel with the first panel fan-out.**
+  - **Framework:** vanilla TS plus a ~60-line store, no runtime dependencies. Budget: app.js ≤150 KB min / 45 KB gz (skeleton is 24 / 9.4 KB).
+  - **Skeleton:** served at `/app.html` next to the old UI, with the waterfall live and store/shell tests (10 + 7).
+  - **File ownership:** T-150 shell/dock/capture; T-151 explore; T-152 centre + waterfall.ts; T-153 decode pipelines/stages/plots/params; T-154 decode inspector; T-155 review drawer.
+  - **API gaps:** 12, recorded as T-157..T-168 (group MUI-API; large ones on Opus). Not launched yet; they follow the M2 tail.
+  - **Launched now:** T-150, T-151, T-152, based on 9509424. T-153..T-155 follow as agent slots free (agent throttle).
+  - **T-145:** Cranelift dropped (tests slower at 1367 s vs 1293 s, with 3 failures; compile ~20 s vs 31 s). lld and the pacing change also gave no gain. The bandit timing reference is running.
+  - **T-147:** diag3 confirmed DC-suspect poisoning (274 DC-flagged vs 273 clean detections; the suspect-inclusive FCO bound 0.586 matches truth 0.570). The finisher is also asked why the 10% channel was learned in the 6 h run but not in the 46 h one.
+- **B0.392 T-145 done: nothing kept, no commits.**
+  - **Baseline** (6 test threads): nextest 1292.8 s, 1454 passed; acceptance 86 s, 32 passed.
+  - **Top tests:** listen_live 93 s; bandit ×4 at 83–87 s; three_fm 47 s; refine 44 s; stream_external 43 s; rds 35 s; pocsag 31 s.
+  - **Pacing:** no gain (slow tests are already Unpaced). `api_contract` via `hk serve --device mock:` is hard-wired to RealTime (4 tests × ~9 s); unpacing it needs a product change.
+  - **lld:** no gain.
+  - **Cranelift:** faster compile, but slower tests with 3 failures. Dropped.
+  - **Real lever:** bandit tests are CPU-bound in debug (39.5 M samples in 81 s, zero waits). Adding dev opt-level for hk-dsp/hk-core/hk-pipeline/hk-demod would help, at a compile-time cost. Asked the user.
+  - **Bandit reference:** pre-T-141 worktree 81.5 s at load ~17. Now timing the same test on main post-T-141.
+- **B0.393 User chose dev opt-level=2 for the hot crates (hk-dsp, hk-core, hk-pipeline, hk-demod). T-169 launched on Sonnet.**
+  - The existing detect/store/context overrides stay as they are.
+  - T-169 measures nextest wall time and compile time before and after the change.
+  - It keeps the change only if nextest drops by at least 15% with every test green.
+  - Optimisation-only failures get reported rather than bent to pass.
+- **B0.394 T-149 review (Opus): FIX-FIRST, structural fixes only.**
+  - **Checks that passed:** thin client (no signal logic); 6 API routes/streams spot-checked against docs/api.md; spectrum rows bypass the store; token kept in sessionStorage with Referrer-Policy no-referrer; old UI untouched; no gap is already served.
+  - **Problems (they would make nearly every parallel merge conflict):**
+    - main.ts mounts, state.ts slices, package.json test script and app.css are shared hotspots.
+    - Cross-task APIs are missing: dock/api.ts and decode/status-feed.ts.
+    - One throwing store listener freezes the other panels.
+    - Nit: no inventory `total`, so tab counts need a "500+" label.
+  - **Fix round launched** (fresh Opus; the T-149 agent was at 294k tokens): per-area index/slice/css files, glob test runner, typed stubs, listener isolation.
+  - **Correction to B0.391:** T-150..T-152 were not launched. They are back to todo and start after the T-149 fix merges.
+  - **T-145 bandit reference:** 81.5 s pre-T-141. The same test on main is being timed.
+- **B0.395 T-141 mock dequant costs about 33% on bandit tests. Confirmed and launched T-170.**
+  - **Measurement:** `bandit_on_attaches` took 81.5 s before T-141 (load ~17) and 108.8 s on main at 0f2b5c3 (load 8–15).
+  - **T-170 (Opus):** bypass dequant when the recording is not quantisation-limited (threshold fixed a priori from rounding-noise math), and/or a cheaper FFT path. Fidelity tests and the `scheduler_history` 0.5 dB check must hold.
+- **B0.396 T-149 merged (c42284f fix round).**
+  - **Structure:** per-area `index.ts`/`slice.ts`/css files under `ui/src/app/` (explore, centre, capture, dock, decode, review, plus `decode/inspector*` for T-154). `state.ts` and `app.css` only compose them; `test/run.mjs` bundles and runs every test.
+  - **Stubs:** `dock/api.ts` (`startListen`, `startRecordsOutput`, `stopOutput`) and `decode/status-feed.ts` (`subscribePipelineFeed`).
+  - **Store:** listener exceptions are isolated.
+  - **Tests:** 157 UI tests green.
+  - **Gaps:** ADR gap 13 (inventory `total`) added as T-171.
+  - **Panel fan-out:** T-150, T-151 and T-152 launched on main. T-153..T-155 follow when agent slots free.
