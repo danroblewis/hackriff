@@ -2187,3 +2187,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Needs the user:** whether to allow redsea-style ≤2-bit block error correction, which relaxes the crc block's no-correction rule. Not scheduled.
 - **B0.464 Full check green after the T-183 merge (955fd47).** Lint clean; 1372/1372 tests in 137 s; acceptance 28/28.
   - **T-181 merged** (fe2e6a6, merge f322bfe). Worktree removed. Full check running.
+- **B0.465 T-184 closed with no product change: the M2 exit blocker was a test bug.** m2_scene.rs:386 centred its band on whichever hop the device had stopped on.
+  - **Effect:** that cut the 433.375 channel, or dropped "boring", depending on the stop.
+  - **Learning was identical in passing and failing runs:** 363 detections, 33.8 dB SNR, published.
+  - **Fix:** centre on the fixed scene centre. With product code unchanged, 5/5 passes.
+  - **T-124 unblocked; finisher launched (Opus).** It merges main, applies the band fix, runs acceptance_m2 (a)–(j) three times, and checks a possible unasserted per-channel FCO gap (433.475 measured 0.073 vs truth 0.258, yet the test passed).
