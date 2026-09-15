@@ -20,7 +20,7 @@
 //!                  (u8 0 unknown, 1 unassigned, 2 mobile, 3 site + 36 B uuid text) · frames u64 ·
 //!                  other_origin_frames u64 (T-133)
 //! header (v4)      v3 header · cell shapes u8 · per shape: shape f32 · level-0 values u64 ·
-//!                  other_shape_values u64 (T-141; v1–v3 tiles read with every value's shape
+//!                  frames u64 · other_shape_values u64 (T-141; v1–v3 tiles read with every value's shape
 //!                  unrecorded, so a mixed-shape old tile gives no floor)
 //! payload (v1)     observed bitmap (nt·nf bits, row-major t then f)
 //!                  per observed cell: max i16 · mean i16 · p_low i16 · p_high i16 (0.01 dB,
@@ -435,11 +435,14 @@ fn encode_header(h: &Header, buf: &mut Vec<u8>) {
     }
     let n = p.cell_shapes.len().min(MAX_CELL_SHAPES);
     buf.push(n as u8);
-    for (shape, values) in &p.cell_shapes[..n] {
+    for (shape, values, frames) in &p.cell_shapes[..n] {
         buf.extend_from_slice(&shape.to_le_bytes());
         buf.extend_from_slice(&values.to_le_bytes());
+        buf.extend_from_slice(&frames.to_le_bytes());
     }
-    let dropped: u64 = p.cell_shapes[n..].iter().map(|&(_, v)| v).sum();
+    let dropped = p.cell_shapes[n..]
+        .iter()
+        .fold(0u64, |acc, &(_, v, _)| acc.saturating_add(v));
     buf.extend_from_slice(&p.other_shape_values.saturating_add(dropped).to_le_bytes());
 }
 
@@ -565,10 +568,11 @@ fn decode_header(c: &mut Cur<'_>, format: u16) -> Option<Header> {
         for _ in 0..n {
             let shape = c.f32()?;
             let values = c.u64()?;
+            let frames = c.u64()?;
             if !(shape.is_finite() && shape > 0.0) {
                 return None;
             }
-            p.cell_shapes.push((shape, values));
+            p.cell_shapes.push((shape, values, frames));
         }
         p.other_shape_values = c.u64()?;
     } else if p.frames > 0 {

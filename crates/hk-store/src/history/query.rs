@@ -658,14 +658,18 @@ impl BiasCache {
     /// depend on which tile computed it first.
     fn mixture_bias_db(
         &mut self,
-        mixture: &[(f32, u64)],
+        mixture: &[(f32, u64, u64)],
         level: usize,
         frames: u32,
         q: f32,
     ) -> f32 {
-        let total: u64 = mixture.iter().map(|&(_, n)| n).sum();
+        // Saturating: a corrupt tile's counts must not overflow (weights then merely skew).
+        let total = mixture
+            .iter()
+            .fold(0u64, |acc, &(_, n, _)| acc.saturating_add(n))
+            .max(1);
         self.sig.clear();
-        for &(shape, n) in mixture {
+        for &(shape, n, _) in mixture {
             let w = (n as f64 / total as f64 * MIXTURE_WEIGHT_LEVELS).round() as u16;
             if w > 0 {
                 self.sig.push((shape.to_bits(), w));
@@ -752,7 +756,8 @@ fn cell_stats(
     // A uniform tile corrects with its shape's bias (unchanged since T-116). T-141: a mixed-shape
     // tile corrects with the bias of the Gamma mixture its level-0 values pooled, weighted by the
     // values folded per shape over the whole tile (the pooled sample a cell's frames are drawn
-    // from); a mixed tile without a recorded mixture (format < 4) still gives no floor.
+    // from), only when every shape's frames covered equally many cells; a mixed tile without a
+    // valid recorded mixture (format < 4, or coverage differing by shape) gives no floor.
     let floor_db = if p_lo.is_finite() {
         match (
             tile.prov.uniform_cell_shape(),

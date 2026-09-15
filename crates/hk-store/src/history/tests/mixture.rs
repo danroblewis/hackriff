@@ -72,6 +72,56 @@ fn mixed_shape_floor_within_0_2_db_in_the_rank_rules_regime() {
     assert!((m1 - FLOOR_DB).abs() <= 0.2, "level-1 mixture floor {f1:?}");
 }
 
+/// Review fix: 30-look frames cover all 16 cells, 300-look frames only the lower 8 (short hops
+/// beside full-span dwells). The upper cells pool only 30-look values and the lower ones a mix,
+/// so no tile-wide weight is right for every cell: the tile gives no floor (never a wrong one),
+/// at level 0 and rolled up, while its raw percentiles stay.
+#[test]
+fn mixed_shape_tile_whose_coverage_differs_by_shape_gives_no_floor() {
+    let dir = TempDir::new("mixture-coverage");
+    let mut p = Pyramid::open(&dir.0, cfg(vec![level(1, 60), level(2, 60)], 16)).unwrap();
+    let mut rng = Rng(0x1411);
+    let mut psd = vec![0f32; 16];
+    for s in 0..120i64 {
+        for i in 0..10i64 {
+            let k = if i < 3 { 30 } else { 300 };
+            for (b, v) in psd.iter_mut().enumerate() {
+                *v = if k == 300 && b >= 8 {
+                    f32::NAN
+                } else {
+                    lin(FLOOR_DB) * rng.gamma(k) as f32
+                };
+            }
+            let mut f = frame(T0 + s * S + i * S / 10, S / 10, 0.0, 1000.0, &psd);
+            f.noise_shape = NoiseShape::CellShape(k as f32);
+            p.ingest(&f).unwrap();
+        }
+    }
+    p.seal_through(ts(T0 + 3600 * S)).unwrap();
+    let span = (0.0, 16_000.0);
+    for res in [Resolution::Level(0), Resolution::Level(1)] {
+        let h = query(&p, span, (T0, T0 + 120 * S), res);
+        let prov = &h.provenance;
+        assert!(
+            prov.cell_shape_mixed && prov.other_shape_values == 0,
+            "{prov:?}"
+        );
+        assert!(
+            prov.cell_shape_mixture().is_none(),
+            "{:?}",
+            prov.cell_shapes
+        );
+        let observed: Vec<_> = h.cells.iter().filter(|c| c.observed()).collect();
+        assert!(!observed.is_empty());
+        assert!(
+            observed.iter().all(|c| c.floor_db.is_nan()),
+            "{res:?}: coverage differs by shape, yet floors {:?}",
+            observed.iter().map(|c| c.floor_db).collect::<Vec<_>>()
+        );
+        assert!(observed.iter().all(|c| c.p_low_db.is_finite()));
+    }
+}
+
 #[test]
 fn mixed_shape_tiles_correct_with_the_gamma_mixture_bias() {
     let dir = TempDir::new("mixture");
@@ -89,8 +139,11 @@ fn mixed_shape_tiles_correct_with_the_gamma_mixture_bias() {
         prov.cell_shape_mixed && prov.other_shape_values == 0,
         "{prov:?}"
     );
-    let values: Vec<(f32, u64)> = prov.cell_shapes.clone();
-    assert_eq!(values, vec![(4.0, 3 * 120 * 16), (40.0, 7 * 120 * 16)]);
+    let values: Vec<(f32, u64, u64)> = prov.cell_shapes.clone();
+    assert_eq!(
+        values,
+        vec![(4.0, 3 * 120 * 16, 3 * 120), (40.0, 7 * 120 * 16, 7 * 120)]
+    );
 
     let f_mixed = floors(&mixed);
     assert_eq!(f_mixed.len(), 120 * 16);

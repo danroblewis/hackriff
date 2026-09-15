@@ -246,11 +246,12 @@ pub struct ProvenanceSummary {
     pub cell_shape: Option<f32>,
     /// Shapes differing by more than [`SHAPE_TOLERANCE`] contributed (no corrected floor).
     pub cell_shape_mixed: bool,
-    /// T-141: level-0 cell values folded per cell shape, `(shape, values)` in first-seen order
-    /// (shapes within [`SHAPE_TOLERANCE`] of a listed one count under it; at most
-    /// [`MAX_CELL_SHAPES`]). The pooled values' Gamma mixture gives a mixed-shape tile its floor
-    /// bias ([`Self::cell_shape_mixture`]).
-    pub cell_shapes: Vec<(f32, u64)>,
+    /// T-141: level-0 cell values and frames folded per cell shape, `(shape, values, frames)` in
+    /// first-seen order (shapes within [`SHAPE_TOLERANCE`] of a listed one count under it; at
+    /// most [`MAX_CELL_SHAPES`]). The pooled values' Gamma mixture gives a mixed-shape tile its
+    /// floor bias when every shape's frames covered the same number of cells
+    /// ([`Self::cell_shape_mixture`]).
+    pub cell_shapes: Vec<(f32, u64, u64)>,
     /// Values of shapes beyond the listed ones, of frames without a shape, or of tiles written
     /// before format 4 (which recorded no shape histogram): while nonzero there is no mixture.
     pub other_shape_values: u64,
@@ -316,18 +317,35 @@ impl ProvenanceSummary {
         self.cell_shape.filter(|_| !self.cell_shape_mixed)
     }
 
-    /// T-141: the `(shape, values)` mixture of a mixed-shape summary, when every folded value's
-    /// shape is recorded ([`Self::other_shape_values`] is 0). `None` for a uniform summary (use
+    /// T-141: the `(shape, values, frames)` mixture of a mixed-shape summary, when every folded
+    /// value's shape is recorded ([`Self::other_shape_values`] is 0) and every shape's frames
+    /// folded the same number of values each (values/frames equal across shapes). A cell's
+    /// low percentile pools only its own frames, so the tile-wide weights are that cell's only
+    /// when every frame covered as many cells; a shape whose frames covered fewer or other cells
+    /// (short hops beside full-span dwells) could give a cell the wrong weights, so such a tile
+    /// has no mixture and no floor. `None` also for a uniform summary (use
     /// [`Self::uniform_cell_shape`]), for unrecorded shapes (tiles before format 4, frames with
     /// no shape, more than [`MAX_CELL_SHAPES`] shapes) and when nothing was folded.
-    pub fn cell_shape_mixture(&self) -> Option<&[(f32, u64)]> {
+    pub fn cell_shape_mixture(&self) -> Option<&[(f32, u64, u64)]> {
+        let mut per_frame = None;
+        let same_coverage = self.cell_shapes.iter().all(|&(_, v, f)| {
+            if f == 0 {
+                return false;
+            }
+            let (v0, f0) = *per_frame.get_or_insert((v, f));
+            u128::from(v) * u128::from(f0) == u128::from(v0) * u128::from(f)
+        });
         let known = self.cell_shape_mixed
             && self.other_shape_values == 0
-            && self.cell_shapes.iter().any(|&(_, n)| n > 0);
+            && same_coverage
+            && self.cell_shapes.iter().any(|&(_, v, _)| v > 0);
         known.then_some(&self.cell_shapes[..])
     }
 
-    fn add_shape_values(&mut self, shape: Option<f32>, values: u64) {
+    /// Counts `values` level-0 cell values of `frames` frames under `shape`. A shape within
+    /// [`SHAPE_TOLERANCE`] of an already listed one counts under the first such shape seen (its
+    /// listed shape is not updated), so the list's order and shapes depend on fold order.
+    fn add_shape_values(&mut self, shape: Option<f32>, values: u64, frames: u64) {
         if values == 0 {
             return;
         }
@@ -338,11 +356,12 @@ impl ProvenanceSummary {
         if let Some(s) = self
             .cell_shapes
             .iter_mut()
-            .find(|(s, _)| same_shape(Some(*s), Some(k)))
+            .find(|(s, _, _)| same_shape(Some(*s), Some(k)))
         {
             s.1 = s.1.saturating_add(values);
+            s.2 = s.2.saturating_add(frames);
         } else if self.cell_shapes.len() < MAX_CELL_SHAPES {
-            self.cell_shapes.push((k, values));
+            self.cell_shapes.push((k, values, frames));
         } else {
             self.other_shape_values = self.other_shape_values.saturating_add(values);
         }
@@ -437,7 +456,7 @@ impl ProvenanceSummary {
         cell_shape: Option<f32>,
         values: u64,
     ) {
-        self.add_shape_values(cell_shape, values);
+        self.add_shape_values(cell_shape, values, 1);
         if self.frames == 0 {
             self.calibration = state.calibration;
             self.gain_table = state.front_end.gain_table;
@@ -515,8 +534,8 @@ impl ProvenanceSummary {
         } else if o.cell_shape_mixed || !same_shape(self.cell_shape, o.cell_shape) {
             self.cell_shape_mixed = true;
         }
-        for &(s, n) in &o.cell_shapes {
-            self.add_shape_values(Some(s), n);
+        for &(s, n, f) in &o.cell_shapes {
+            self.add_shape_values(Some(s), n, f);
         }
         self.other_shape_values = self.other_shape_values.saturating_add(o.other_shape_values);
         self.frames += o.frames;

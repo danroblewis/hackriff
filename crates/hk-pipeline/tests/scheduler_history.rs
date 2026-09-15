@@ -153,7 +153,7 @@ fn tile_counts(history_dir: &std::path::Path, central: FreqRange) -> TileCounts 
                 }
             }
             n.steps += h.provenance.steps.len();
-            for &(s, v) in &h.provenance.cell_shapes {
+            for &(s, v, _) in &h.provenance.cell_shapes {
                 match n.shapes.iter_mut().find(|(k, _)| *k == s) {
                     Some(e) => e.1 += v,
                     None => n.shapes.push((s, v)),

@@ -20,9 +20,11 @@
 //!   ([`Recording::quant_power`], 1/6 code² for ci8/cu8), and served IQ is rounded to int8 again.
 //!   Rendered (not passed-through) IQ first goes through a short-time spectral subtraction: each
 //!   STFT bin (1024 bins at the recording's rate, sqrt-Hann, hop 512) gets the power gain
-//!   `1 − quant_power / P̂`, with `P̂` the bin's level averaged over past frames (≈ 15) and ±2 bins.
-//!   The rounding noise is counted once and emissions keep their power, including emissions that
-//!   start mid-recording: a retune at the recording's rate serves its floor PSD unchanged, and a
+//!   `1 − quant_power / P̂`, with `P̂` the bin's level averaged over past frames (≈ 15) and ±2 bins;
+//!   a frame ≳ 3× that level replaces it at once (onsets), a frame and the next ≲ 1/4 of it from the first
+//!   frame past them (stops), and a restart after passing through or a dropped history re-seeds it from
+//!   the history window. The rounding noise is counted once and emissions keep their power,
+//!   including emissions that start or stop mid-recording: a retune at the recording's rate serves its floor PSD unchanged, and a
 //!   wider rate or higher gain shows the lower rounding density a radio would.
 //! - **Outside coverage (whole or part of the window, or a rate wider than the recording):** the
 //!   uncovered spectrum is complex white Gaussian noise at the recording's estimated floor PSD
@@ -81,7 +83,7 @@
 //! refused. The rounding-noise correction assumes the recording's rounding error is white and
 //! independent of the signal (true once its floor is ≳ 0.5 code rms). It needs ≈ 15 frames
 //! (≈ 8 k recording samples) to follow an emission's onset, a coherent tone within 20 dB of a
-//! bin's floor loses a little of its amplitude to it (≈ 0.05 dB at 20 dB), it adds 1024 recording
+//! bin's floor loses a little of its amplitude to it (≈ 0.05 dB at 20 dB), it adds 1536 recording
 //! samples of look-ahead while rendering, and passing through at a changed gain still rounds
 //! twice. Real HackRF captures sit at ≈ 0.7 code rms per component (amp off, 20 dB VGA) to tens of
 //! codes, so the second rounding matters at low gain (≈ +0.8 dB uncorrected at 0.7 code).

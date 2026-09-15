@@ -276,9 +276,10 @@ fn provenance_json(p: &ProvenanceSummary) -> Value {
         "spur_mask_mixed": p.spur_mask_mixed,
         "cell_shape": p.cell_shape,
         "cell_shape_mixed": p.cell_shape_mixed,
-        "cell_shapes": p.cell_shapes.iter().map(|(shape, values)| json!({
+        "cell_shapes": p.cell_shapes.iter().map(|(shape, values, frames)| json!({
             "shape": shape,
             "values": values,
+            "frames": frames,
         })).collect::<Vec<_>>(),
         "other_shape_values": p.other_shape_values,
         "steps": steps,
