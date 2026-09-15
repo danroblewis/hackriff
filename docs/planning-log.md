@@ -1268,3 +1268,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Nits (docs/summary):** overflow origins match `unknown`; FilterSummary is double-counted across report chunks; `provenance.origins` cap wording. Also moved to T-136.
   - **Merge plan:** T-133 (4ae8a1f) merges after the T-134 full check finishes.
   - **Launched:** T-136 (site peek, pin across restart, new-emitter alarms, nits) and T-124 (M2 blind acceptance on 4ae8a1f). T-124's new-emitter and restart-site assertions follow once T-136 merges.
+- **B0.347 Full check green after the T-134 merge.**
+  - Lint clean; 1362/1362 nextest+UI tests; acceptance 32/32 (72 s).
+  - T-133 merged cleanly (4ae8a1f); a full check has started.
+  - Running: T-135, T-136, T-124.

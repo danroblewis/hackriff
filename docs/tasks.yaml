@@ -2102,7 +2102,8 @@ tasks:
   - id: T-133
     milestone: M2
     title: "History tiles record source + site; history/report filters by source/site; ADR-0012 §3.4 learning-rule documentation"
-    status: review
+    status: done
+    commit: 4ae8a1f
     deps: [T-131, T-132]
     parallel_group: M2H
     use_cases: [AWARE-042, AWARE-033]
