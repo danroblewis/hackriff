@@ -1142,3 +1142,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Nits:** resume sorted DESC; `explained_step_t` persisted; api.md kind mapping documented; ADR §9 retention note.
 
   Merges after the in-flight full check (order T-129 → T-122 → T-128).
+- **B0.325 T-130 delivered** (ca3ed0c). **Root cause was in the mock SDR gain model, not the detector** (`crates/hk-core/src/source/mock/mod.rs` `gain_scale`).
+  - The bursty test recording has no gain metadata, so SigMF replay invents 0 dB gains. The mock treated those as the recording gains and applied the scheduler default of LNA 24 / VGA 20 as +44 dB, a 158× scale that genuinely clipped the stream (clip fraction ≈0.82).
+  - The detector's clip and overload logic was correct.
+  - **Fix:** recordings without gain metadata are assumed recorded at the scheduler default gains.
+  - **Real HackRF fixtures** carry gain metadata and are unaffected (FM fixture: 402 detections, 0 clipped).
+  - **Bursty replay:** 289/289 clipped before, 0 after.
+  - **New device-level tests:** clipping and overload only at a real +12–24 dB overdrive.
+  - **Regression checks:** hk-detect 124, hk-core 20, pipeline 4, acceptance aware/signal_062/inventory 19; lint clean.
+
+  Coordinator: small, well-evidenced, test-infrastructure-scoped change, so it merges after the in-flight check (after T-122). T-128's suspect-ban test must be made discriminating in T-131.

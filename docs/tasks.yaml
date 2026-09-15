@@ -2056,7 +2056,8 @@ tasks:
   - id: T-130
     milestone: M2
     title: "Spurious clipped:true flags on detections in unclipped replays (all 153 in the bandit bursty replay)"
-    status: in-progress
+    status: review
+    commit: ca3ed0c
     deps: []
     parallel_group: M2X
     use_cases: [AWARE-027, AWARE-042]
