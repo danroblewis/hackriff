@@ -832,3 +832,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **LEAK flag:** not reproducible; test teardown made explicit.
 
   Tests: hk-plugins 52, pipeline 22, hk-model 97, acceptance tutorial_adsb/signal_001 4/4. **All M1 tasks are done** pending this full check.
+- **B0.278 M1 COMPLETE (user, 2026-09-15). M2 started:** attention + memory maturity (docs/11: C04 bandit revisit scheduler, C12 occupancy baselines + novelty alarms, C26 history queries/reports). Tasks T-113..T-124 were added with parallel groups:
+  - **T-113 M2-DESIGN** (ADR-0012 contracts; Opus high, reviewed) blocks T-115/T-118–T-122.
+  - **Independent now:** T-114 scheduler simulator (hk-sim), T-116 history maturity (hk-store), T-117 synthetic occupancy scenes (py, Sonnet with strict budget).
+  - **After design:** T-115 observation log → T-118 occupancy engine → T-119 baselines/novelty/score → T-122 alarms; T-120 bandit (needs T-114 sim); T-121 reports; T-123 UI hooks; T-124 acceptance.
+
+  Launched 4 agents: T-113, T-114, T-116, T-117. Demo-relevant work stays mergeable per task. The UI rewrite and M1 review are pending with the user and don't block M2. Existing scheduler: WRR with a placeholder interestingness (hk-core scheduler/mod.rs); the bandit is an ADR TODO. No occupancy code exists yet.

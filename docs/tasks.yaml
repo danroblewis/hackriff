@@ -4,7 +4,7 @@
 # needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
 version: 1
-milestone: "M0 (first vertical slice) - COMPLETE locally 2026-09-13 (all M0 tasks done except T-026, blocked on Jetson; CI unverified, never pushed); current milestone M0b (closing: T-084), M1 decoder workbench started 2026-09-15 (docs/13)"
+milestone: "M0 COMPLETE 2026-09-13 (T-026 deferred to Jetson); M0b complete (T-100 live HIL re-run deferred); M1 decoder workbench COMPLETE 2026-09-15 (docs/13; user M1 review pending, non-blocking); current milestone M2 attention + memory maturity started 2026-09-15 (docs/11: C04 bandit scheduler, C12 occupancy baselines + novelty, C26 history queries/reports)"
 # M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
 spikes:
   run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
@@ -1815,6 +1815,159 @@ tasks:
     needs: none
     model: opus
     effort: medium
+  - id: T-113
+    milestone: M2
+    title: "M2-DESIGN: attention + memory contracts (ADR-0012)"
+    status: in-progress
+    deps: [T-112]
+    parallel_group: M2D
+    use_cases: [AWARE-042, AWARE-044, AWARE-027]
+    acceptance: "ADR-0012 fixing: observation/revisit log (DwellRecord/SweepRecord with reason codes, per-bin observed coverage, n_revisits, revisit gaps, observation-time weighting); OccupancyStat (FCO/FBO/SRO + threshold method + RBW correction + SM.2256 confidence interval); Baseline (site x hour-of-week x cal-version, maturity flag, frozen reference vs slow adaptation + change-point); NoveltyScore/Candidate with score components and user-tunable weights (S = w1 SNR + w2 novelty + w3 class entropy + w4 decoder + w5 periodicity - w6 boring prior; C12 computes, C04 consumes); scheduler bandit contract (arms, reward per dwell-second, exploration floor, preemption order, POI accounting); survey report schema (occupancy, top emitters, change vs baseline, coverage gaps disclosed); site keying for a moving device; storage home for occupancy/baseline series; planned API routes/streams; compiling type skeletons in hk-model; crate/file ownership map for T-115..T-124; reviewed before merge"
+    area: "docs/adr/0012-*.md, crates/hk-model (types), docs/api.md (planned)"
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    blocks: [T-115, T-118, T-119, T-120, T-121, T-122]
+  - id: T-114
+    milestone: M2
+    title: "Discrete-event scheduler simulator + baseline policies (C04 testing)"
+    status: in-progress
+    deps: [T-112]
+    parallel_group: M2S
+    use_cases: [AWARE-027, SIGNAL-008]
+    acceptance: "offline simulator: emitter population (carriers, Poisson bursts tau 5-100 ms, periodic beacons 30 s/60 s/minutes, hoppers, tagged IMD ghosts), radio model (~0.75 s sweeps, 20 MHz dwells, sweep/stream switch latency, half-duplex), driven through the existing hk-core scheduler API; metrics: emitters discovered vs time, bursts captured per class per hour, time-to-first-detection, revisit T_R per region, dwell-seconds wasted on suspect emitters, POI per formula; baseline policies pure-sweep and round-robin plus current WRR; deterministic seeded runs, fast (simulated days in seconds); report JSON for comparing policies"
+    area: "new crate crates/hk-sim (or crates/hk-core/src/scheduler/sim behind a feature) - own files only"
+    needs: none
+    model: opus
+    effort: medium
+  - id: T-115
+    milestone: M2
+    title: "Observation/revisit log: record where and when the radio actually observed (C04->C12 input)"
+    status: todo
+    deps: [T-113]
+    parallel_group: M2O
+    use_cases: [AWARE-042, AWARE-027]
+    acceptance: "scheduler/pipeline emit DwellRecord/SweepRecord per ADR-0012 with reason codes and per-bin coverage; persisted bounded (retention) with query by region/time; observation-time totals per channel for occupancy weighting; e2e through mock SDR: a ScanPlan run yields a log whose coverage matches the tuned windows exactly; never blocks the pipeline"
+    area: "crates/hk-core/src/scheduler (emit), crates/hk-pipeline (wiring), crates/hk-store (observation log)"
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-116
+    milestone: M2
+    title: "History maturity (C26): coverage mask, per-tile provenance, zstd tiles, tiered retention + per-region overrides, hackrf_sweep CSV import/export"
+    status: in-progress
+    deps: [T-112]
+    parallel_group: M2H
+    use_cases: [AWARE-031, AWARE-033, RESEARCH-050]
+    acceptance: "tiles carry a coverage mask (not observed != quiet) and provenance (gain table, filter, cal id, clip/suspect fraction, spur-mask version, pyramid scheme version); zstd tile compression with measured ratio; per-tier max age + byte quota + per-region overrides; fast-forward clock retention tests; burst survival (10 s every 5 min visible in max tier after 1 h, low percentile within 0.5 dB of injected noise); tier consistency across boundaries; injected gain step visible in provenance; hackrf_sweep CSV import (user format) and CSV/PNG export; history API extended additively with docs/api.md + contract tests"
+    area: "crates/hk-store/src/history/**, crates/hk-api (history routes), docs/api.md"
+    needs: none
+    model: opus
+    effort: medium
+  - id: T-117
+    milestone: M2
+    title: "Synthetic occupancy scenes: Markov on/off channels, irregular revisit, injected novelty, hour-of-week patterns (hidden truth)"
+    status: in-progress
+    deps: [T-112]
+    parallel_group: M2F
+    use_cases: [AWARE-042, AWARE-044, PROP-023]
+    acceptance: "py synth generator for long (fast-forwardable) occupancy scenes: channels with known on/off Markov processes (FCO 1/10/50/100%), hour-of-week activity patterns, an emitter injected at hour 30 of 48, a periodic launch-like event (00Z/12Z), a persistent always-on boring band; emits SweepFrames/IQ chunks consumable by the mock SDR plus a hidden truth file (per-channel true FCO, injection time); scenes small enough for CI via time compression; py tests validate truth statistics"
+    area: "py/hkpy/synth (new occupancy scenario module), py/tests"
+    needs: none
+    model: sonnet
+    effort: medium
+  - id: T-118
+    milestone: M2
+    title: "Occupancy engine (C12): FCO/FBO/SRO per channel/band with thresholds, RBW correction, SM.2256 confidence"
+    status: todo
+    deps: [T-113, T-115, T-117]
+    parallel_group: M2O
+    use_cases: [AWARE-042, PROP-023]
+    acceptance: "OccupancyStat per ADR-0012 from detections + noise-floor thresholds + observation log (observation-time weighted, not detection-weighted); pre-set and dynamic (80% idle) threshold modes with >=3-5 dB guard; RBW<OBW correction; channel plans learned from detections or band raster; IMD/suspect flagged detections excluded/weighted; persisted series; blind tests on T-117 scenes: FCO error within SM.2256 Annex 1 interval under irregular revisit"
+    area: "crates/hk-context/src/occupancy (new), crates/hk-store (series)"
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-119
+    milestone: M2
+    title: "Baselines + novelty + interestingness score (C12)"
+    status: todo
+    deps: [T-118]
+    parallel_group: M2O
+    use_cases: [AWARE-044, AWARE-011, AWARE-060]
+    acceptance: "site x hour-of-week x cal-version baselines (mean/percentiles dB, FCO distribution, sample count); maturity flag (<24 h per slot = immature, no alarms); robust MAD/z novelty normalised by observation time; frozen reference + slow adaptation + change-point flag against baseline poisoning; interestingness S with user-tunable weights and score components; blind test on T-117 48 h scene: injected emitter crosses novelty threshold within N revisits, false-alarm rate on unchanged channels measured and bounded; moving-site keying"
+    area: "crates/hk-context/src/occupancy (baseline, novelty, score)"
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-120
+    milestone: M2
+    title: "Bandit revisit scheduler (C04 full): UCB on C12 interestingness, exploration floor, preemption, POI accounting"
+    status: todo
+    deps: [T-113, T-114]
+    parallel_group: M2Q
+    use_cases: [AWARE-027, SIGNAL-027, SIGNAL-028, AWARE-057]
+    acceptance: "UCB bandit over candidate windows with reward = detections/novelty/decodes per dwell-second (normalised by observation time); interestingness consumed via a trait (stub until T-119, real provider after); boring prior + exploration floor (no lock-in); honours C05 suspect flags; window packing avoiding DC; preemption order interactive > pinned leases > scheduled plans > bandit > background sweep; revisit <= half min on/off where required; DwellRecord reason codes; POI report matches formula; simulator (T-114): bandit beats round-robin on bursts captured per hour and time-to-first-detection with numbers reported; existing scheduler invariants (gap-free coverage, TX gated, determinism) kept"
+    area: "crates/hk-core/src/scheduler/**, crates/hk-pipeline (wiring), crates/hk-sim (policy registration)"
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-121
+    milestone: M2
+    title: "Survey reports + richer history queries (C26/C39): report(region, span)"
+    status: todo
+    deps: [T-113, T-116, T-118]
+    parallel_group: M2R
+    use_cases: [AWARE-033, RESEARCH-050, AWARE-042]
+    acceptance: "report(region, span) API returns occupancy per channel/band (C12), top emitters from inventory (C27), change vs baseline (when T-119 present; otherwise flagged unavailable), coverage gaps and POI explicitly disclosed (never implies nothing there), provenance steps (gain/cal changes); export JSON/CSV/PNG; history queries: filter by time/frequency/source/site; docs/api.md + contract tests; e2e via mock SDR on a T-117 scene"
+    area: "crates/hk-store/src/history/report (new), crates/hk-api (report routes), docs/api.md"
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-122
+    milestone: M2
+    title: "Novelty alarms + what-changed event feed (AWARE-044) into anomaly correlation"
+    status: todo
+    deps: [T-119]
+    parallel_group: M2A
+    use_cases: [AWARE-044, AWARE-012, AWARE-019]
+    acceptance: "novelty alarms from C12 with explanations: correlate with existing hk-context anomaly/attack-map correlation (space weather, gain/cal steps first), alarm masks (level above baseline, new emitter not in inventory), hysteresis/dedupe, immature-baseline suppression; alarm stream + routes (docs/api.md + contract tests); blind e2e: injected emitter raises exactly one alarm with correct explanation ranking; front-end step change explained as provenance, not novelty"
+    area: "crates/hk-context/src/anomaly, crates/hk-context/src/occupancy (alarm), crates/hk-api"
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-123
+    milestone: M2
+    title: "M2 UI hooks (thin client): survey report view, novelty alarm list, scheduler coverage/POI panel"
+    status: todo
+    deps: [T-120, T-121, T-122]
+    parallel_group: M2U
+    use_cases: [AWARE-044, AWARE-033]
+    acceptance: "minimal thin-client views over docs/api.md for report, alarms and scheduler coverage/POI; no signal logic client-side; no redesign (UI rewrite pending with user); phone width; UI tests"
+    area: "ui/"
+    needs: none
+    model: sonnet
+    effort: medium
+  - id: T-124
+    milestone: M2
+    title: "M2 blind acceptance through the mock SDR"
+    status: todo
+    deps: [T-118, T-119, T-120, T-121, T-122]
+    parallel_group: M2E
+    use_cases: [AWARE-042, AWARE-044, AWARE-027]
+    acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s)"
+    area: "tests/e2e"
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
