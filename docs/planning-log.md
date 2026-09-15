@@ -2246,3 +2246,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **M3 started** with T-198 (ADR-0016). MUI continues.
   - **Merging T-194** (UI: multi-band waterfall select and timeline time-window select; bundle 29.7 KB gz; smoke passed).
   - **T-209 launched** into the freed Rust slot.
+- **B0.474 T-194 merged (d02117a).** UI checks green: typecheck clean, 20/20 test files, build ok; `just lint` clean.
+  - **Worktree** removed.
+  - **T-193 still waits on T-191,** which is queued behind the 4 Rust slots (T-185, T-178, T-190, T-209).

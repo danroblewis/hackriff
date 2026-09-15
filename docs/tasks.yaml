@@ -3102,7 +3102,8 @@ tasks:
   - id: T-194
     milestone: MUI
     title: "MUI manual multi-band region select on the waterfall and time-window select on the history/capture timeline (selections with t_lo/t_hi)"
-    status: in-progress
+    status: done
+    commit: a8d445a
     priority: normal
     deps: []
     parallel_group: MUI-X2
@@ -3327,7 +3328,7 @@ tasks:
   - id: T-209
     milestone: M2-hardening
     title: "T-186 review follow-ups: early analog identification double-counts the emitter (SOURCE_ANALOG_CHAIN vs RDS_DECODER_ID sighting keys), pilot-locked no-PI emitters bypass the overload flag, duplicate refined-tuning rows, wasted RDS decode on the 1 s window"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-186]
     parallel_group: PIPELINE
