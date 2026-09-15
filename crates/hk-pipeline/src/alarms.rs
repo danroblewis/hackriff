@@ -25,7 +25,7 @@ use hk_context::feeds::FeedState;
 use hk_context::geo::Site;
 use hk_context::occupancy::alarm::{
     AlarmConfig, AlarmEngine, AlarmEvent, AlarmWriter, DeviceStep, NoveltySnapshot, PoolContext,
-    inputs_from_fold, latest_explanations,
+    inputs_from_fold, latest_explanations, unscored_evidence,
 };
 use hk_context::occupancy::baseline::{FoldOutcome, IntervalObservation};
 use hk_context::occupancy::novelty::NoveltyConfig;
@@ -88,6 +88,8 @@ pub struct AlarmService {
     clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
     errors: AtomicU64,
     published: AtomicU64,
+    inputs_observed: AtomicU64,
+    inputs_mature: AtomicU64,
 }
 
 impl AlarmService {
@@ -126,6 +128,8 @@ impl AlarmService {
             clock,
             errors: AtomicU64::new(0),
             published: AtomicU64::new(0),
+            inputs_observed: AtomicU64::new(0),
+            inputs_mature: AtomicU64::new(0),
         })
     }
 
@@ -177,17 +181,7 @@ impl AlarmService {
         utc_offset_min: i16,
         steps: &[DeviceStep],
     ) -> Vec<AlarmEvent> {
-        let inputs = inputs_from_fold(
-            obs,
-            fold,
-            cal,
-            HourOfWeek::of(obs.t, utc_offset_min),
-            1,
-            SCHEME_1_CELL_HZ,
-            i64::from(CELL_FACTOR),
-            pool,
-            &NoveltyConfig::default(),
-        );
+        let inputs = self.fold_inputs(site, cal, obs, fold, pool, utc_offset_min);
         if inputs.is_empty() {
             return Vec::new();
         }
@@ -199,10 +193,86 @@ impl AlarmService {
         })
     }
 
-    /// Counters and suppressions (for `/api/status` and the report).
+    /// T-131: the alarm inputs of one closed occupancy interval ([`crate::attention::IntervalFold`]s
+    /// from `AttentionService::ingest_interval`), with the provenance `steps` near it. All folds
+    /// of a site go into **one** snapshot, so a gain step is judged against every subject observed
+    /// under it (the broadband-shift rule, §7.4) rather than one subject at a time.
+    pub fn observe_interval(
+        &self,
+        folds: &[crate::attention::IntervalFold],
+        steps: &[DeviceStep],
+    ) -> Vec<AlarmEvent> {
+        let mut by_site: BTreeMap<SiteKey, (Timestamp, Vec<_>)> = BTreeMap::new();
+        for f in folds {
+            let inputs = self.fold_inputs(f.site, f.cal, &f.obs, &f.fold, f.pool, f.utc_offset_min);
+            let e = by_site.entry(f.site).or_insert((f.obs.t, Vec::new()));
+            e.0 = e.0.min(f.obs.t);
+            e.1.extend(inputs);
+        }
+        let mut events = Vec::new();
+        for (site, (t, inputs)) in by_site {
+            if inputs.is_empty() {
+                continue;
+            }
+            events.extend(self.observe(&NoveltySnapshot {
+                t,
+                site,
+                steps: steps.to_vec(),
+                inputs,
+            }));
+        }
+        events
+    }
+
+    /// The scored inputs of one fold; its unscored evidence (immature pool, mobile/unassigned
+    /// site) is counted as suppressions here, never raised (§7.3). Bumps the input counters.
+    fn fold_inputs(
+        &self,
+        site: SiteKey,
+        cal: CalKey,
+        obs: &IntervalObservation,
+        fold: &FoldOutcome,
+        pool: PoolContext,
+        utc_offset_min: i16,
+    ) -> Vec<hk_context::occupancy::alarm::AlarmInput> {
+        let inputs = inputs_from_fold(
+            obs,
+            fold,
+            cal,
+            HourOfWeek::of(obs.t, utc_offset_min),
+            1,
+            SCHEME_1_CELL_HZ,
+            i64::from(CELL_FACTOR),
+            pool,
+            &NoveltyConfig::default(),
+        );
+        let unscored = unscored_evidence(obs, fold);
+        if !unscored.is_empty() {
+            lock(&self.engine).count_unscored(
+                obs.t,
+                site,
+                fold.novelty.maturity,
+                fold.novelty.provenance_explained,
+                &unscored,
+            );
+        }
+        let mature = inputs.iter().filter(|i| i.maturity.is_mature()).count();
+        self.inputs_observed
+            .fetch_add((inputs.len() + unscored.len()) as u64, Ordering::Relaxed);
+        self.inputs_mature
+            .fetch_add(mature as u64, Ordering::Relaxed);
+        inputs
+    }
+
+    /// Counters and suppressions (for `/api/status` and the report). `inputs_observed` counts
+    /// every per-kind piece of fold evidence (scored or not), `inputs_mature` the scored inputs
+    /// from mature pools: zero observed means nothing reached the alarms, observed without mature
+    /// means everything was filtered (see `suppressions`).
     pub fn status_json(&self) -> Value {
         json!({
             "open": lock(&self.engine).open_alarms().len(),
+            "inputs_observed": self.inputs_observed.load(Ordering::Relaxed),
+            "inputs_mature": self.inputs_mature.load(Ordering::Relaxed),
             "errors": self.errors.load(Ordering::Relaxed),
             "published": self.published.load(Ordering::Relaxed),
             "suppressions": self.suppressions(),
@@ -480,5 +550,74 @@ mod tests {
             resumed.get(AnomalyId::new()),
             Err(AlarmFail::NotFound)
         ));
+    }
+
+    /// T-131 review: immature folds with evidence on the live path (`observe_interval`) raise
+    /// nothing and are counted as `immature-baseline` suppressions, and the input counters tell
+    /// observed evidence from mature inputs.
+    #[test]
+    fn alarm_service_counts_immature_folds_as_suppressions() {
+        use crate::attention::IntervalFold;
+        use hk_context::occupancy::alarm::PoolContext;
+        use hk_model::attention::occupancy::{ChannelKey, OccupancySubject};
+        use hk_model::attention::score::NoveltyScore;
+        use hk_store::baseline::BaselineSubject;
+
+        let repo = Arc::new(Mutex::new(Repository::open_in_memory().unwrap()));
+        let svc =
+            AlarmService::open(repo, None, Arc::new(|| Timestamp::from_unix_nanos(0))).unwrap();
+        let site = SiteKey::Site(SiteId::new());
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 69_000,
+            hi_cell: 69_004,
+        };
+        let fold = |i: i64| IntervalFold {
+            subject: OccupancySubject::Channel { key },
+            site,
+            cal: CalKey::Uncalibrated,
+            obs: IntervalObservation {
+                subject: BaselineSubject::Channel { key },
+                t: at(i),
+                gain: 0,
+                level_db: Some(-40.0),
+                max_db: Some(-30.0),
+                occupied_weight_s: 900.0,
+                weight_s: 900.0,
+                observed_s: 900.0,
+                n_eff: 12.0,
+                suspect_fraction: 0.0,
+                provenance_explained: false,
+            },
+            utc_offset_min: 0,
+            pool: PoolContext::default(),
+            fold: FoldOutcome {
+                novelty: NoveltyScore {
+                    novelty: 0.0,
+                    level_z: None,
+                    occupancy_z: None,
+                    new_emitter: None,
+                    observed_s: 900.0,
+                    maturity: Maturity::Immature {
+                        observed_s: 900.0 * i as f64,
+                    },
+                    provenance_explained: false,
+                },
+                change_point: None,
+                accrued: true,
+                accrued_reference: true,
+            },
+        };
+        for i in 0..10 {
+            let events = svc.observe_interval(&[fold(i)], &[]);
+            assert!(events.is_empty(), "interval {i}: {events:?}");
+        }
+        let s = svc.suppressions();
+        assert_eq!(s["busier-than-usual"]["immature-baseline"], 10, "{s}");
+        assert_eq!(s["level-above-baseline"]["immature-baseline"], 10, "{s}");
+        let status = svc.status_json();
+        assert_eq!(status["inputs_observed"], 20, "{status}");
+        assert_eq!(status["inputs_mature"], 0, "{status}");
+        assert_eq!(status["open"], 0);
     }
 }

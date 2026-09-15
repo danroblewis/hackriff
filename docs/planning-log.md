@@ -1168,3 +1168,54 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Gap confirmed for T-131:** nothing in hk-pipeline calls `AlarmService::observe`, so `/api/anomalies` is served but receives no live observations.
 
   Worktrees cleaned. Full check running; **T-131 (M2 integration part 2) launched.**
+- **B0.329 T-131 split to bound agent budgets.** T-131 (part 2a): pipeline alarm wiring, AlarmKind unification, candidates when bandit off, discriminating suspect-ban test, reports and full-path e2e. **T-132** (part 2b): history source+site tiles/filters and baseline internals (memory bound, latch, gain-state key, bimodality, load_site lock, weak-interferer test). Files are disjoint. Both launched; T-124 depends on both. (Commit 89efae6 briefly left tasks.yaml with a doubled quote; fixed in the next commit.)
+- **B0.330 T-123 (M2 UI hooks) launched** (Sonnet, thin client, strict budget). Its deps (T-120 scheduler, T-121 reports, T-122 alarms) are all on main. Scope: survey report view, alarm list with dismiss/reopen, scheduler coverage/POI panel, all over docs/api.md. No redesign (UI rewrite pending with the user).
+- **B0.331 Full check of main f0f2aaf (integration 2): green.** Lint clean. nextest + UI 1340/1340 in 493 s under load from 3 agents; `scheduler_bandit_e2e::bandit_on…` failed on try 1 and passed on try 2, so it's flaky under load even though it's serialized. Acceptance 32/32 in 77 s. Watch the bandit-on flakiness; if it recurs outside heavy load, give the test more stream time or a less timing-sensitive assertion (T-131 is working in this area). In flight: T-123, T-131, T-132.
+- **B0.332 T-123 merged** (f243534; UI only, coordinator scan). Adds three thin-client panels: survey report (null `fco` shown as indicative/biased, coverage statement, suggestions, export links via GET `?token=` per the api.md convention), novelty alarms (list/detail/dismiss/reopen), and scheduler status/POI/arms. UI tests: report 10, alarms 16, scheduler 9. No API gaps found. `just test-ui` running on main.
+- **B0.333 Main c790365 (T-123): `just test-ui` green,** 0 failures across all suites (including report 10, alarms 16, scheduler 9). In flight: T-131, T-132. Remaining M2 after those: T-124 (blind acceptance).
+- **B0.334 T-131 delivered** (d6f397e, branch t-131-alarm-wiring).
+  - **Alarm service:** opened in run.rs and fed at every occupancy close (site-tagged rows, gain steps from history provenance, `set_context`, `observe_interval`). **Site-tagged rows fix a real gap:** rows were always Unassigned, so pipeline runs never built baselines.
+  - **Other wiring:** `ChangeKind` merged into `AlarmKind`; candidates published with the bandit off; `compare_report` status tests; http.rs route rows.
+  - **Suspect-ban test is now discriminating:** plan gain overdrive gives 3 bans, no overdrive gives 0. The bandit-on test is load-robust (20 s stream time, lease added after outcomes).
+  - **Full-path 48 h scene e2e** (29 s): 6 baselines, 4 mature; hour-30 emitter ranks 1/5 in candidates; report 6/6 true fco with baseline comparison available.
+  - **But no alarms raised and zero alarm inputs/suppressions counted.** The agent attributes this to the emitter's channel being immature; zero inputs with 4 mature subjects looks suspicious.
+  - **Not done:** new-emitter alarms aren't fed; the site pin isn't persisted.
+
+  Timeboxed Opus review running; it is investigating the zero-alarm-inputs question.
+- **B0.335 T-132 items 2–7 delivered** (b55b9ba).
+  - **Gain key:** the dominant gain-state key comes from history tiles. A gain step gets a separate pool: z 0.64 vs 6.6.
+  - **Level classes:** occupied/idle pools, with an occupied level requiring ≥3 occupied visits; a single occupied visit gives no level novelty.
+  - **load_site:** reads happen outside the lock.
+  - **Memory cap:** LRU unload, with refusals counted. Dense slots come to about 371 MB per key at 9.7k cells×2, up to about 736 MB with occupied and idle pools. A concern for the Jetson.
+  - **Change-point latch:** per hour of day.
+  - **Weak interferer:** a sequential CUSUM stops learning 2.25 h after onset of a +1.5 dB interferer; reference drift 0.029 dB over 21 d.
+  - **Baseline file format:** v2, still reading v1; fixes a save-drop bug.
+  - **Test change:** the slow-creep assertion is relaxed from day 23 to day 20 (earlier detection).
+
+  Item 1 (history source/site tiles and filters) plus the ADR §3.4 docs become **T-133**, which T-124 now depends on. Timeboxed Opus review running (memory on Jetson, CUSUM false building, key proliferation, load race, merge vs T-131).
+- **B0.336 T-131 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. Immature folds carry no z, so `observe_interval` skips them and `immature-baseline` suppressions are never counted on the live path (breaks ADR §7.3 'never silently dropped'). This explains the zero suppressions in the scene.
+    2. The scene e2e only asserts `errors==0`, which is vacuous.
+  - **Zero alarms with 4 mature subjects is legitimate:** unchanged channels fall below the off level.
+  - **Checked OK:** RT safety (provenance read on the occupancy thread, no DB I/O in candidate publishing); unassigned/mobile build no baselines; no double-writes.
+  - **Merge vs T-132:** one conflict at the `ingest_interval` call in occupancy.rs; keep T-131's site stamping and folds, and use T-132's `dominant_gain_key`. After merge, recheck `PoolContext.level` against T-132's level classes.
+  - **Fix round launched.** T-124 acceptance now includes the alarm assertions the review listed: pre-matured baseline or ≥56 h scene, busier alarm on the injected channel, gain step explained, restart keeps site.
+- **B0.337 T-132 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. The memory cap is never wired in the pipeline, so memory stays unbounded (371–736 MB per key on a Jetson); refused folds also drop novelty scoring and are invisible.
+    2. Load outside the lock can resurrect a stale copy if an unload or eviction happens between plan and insert.
+    3. The gain key is per interval, but the gain table is per band.
+    4. The sequential CUSUM can gate learning on stationary channels: a 4-visit own-pool mean has standard error ≈ slack k, so hours can stay immature forever.
+  - **Checked OK:** v1 codec compatibility; save-drop fix; no double-insert; slow-creep relaxation is honest.
+  - **Fix round launched** (no merge; T-131 merges first, one trivial occupancy.rs conflict).
+  - **Follow-up T-134:** sparse baseline slots for Jetson memory.
+- **B0.338 T-131 merged** (fix round 2b5891d).
+  - **Immature counting:** immature, mobile and unassigned evidence is now counted via `count_unscored` and never raised.
+  - **Counters:** `inputs_observed` / `inputs_mature` added.
+  - **48 h scene:** inputs 1188 observed / 130 mature; 1058 immature-baseline suppressions; 0 anomalies, which is legitimate: unchanged channels plus an immature emitter channel.
+  - **Scene e2e:** now asserts inputs > 0 and suppressions > 0.
+  - **Persistence and clock:** `site_at` persists only on change; `baselines_json` uses the sample clock.
+  - **Follow-ups (for T-124/T-133):** drops with timestamps, mid-interval site changes, new-emitter alarms from first sightings, site pin persistence, `slots_json` clock.
+
+  Full check running. The T-132 fix round is still going and will merge with its one occupancy.rs conflict resolved.

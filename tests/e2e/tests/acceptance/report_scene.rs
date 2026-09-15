@@ -8,16 +8,35 @@
 //! Asserted: the report validates; coverage is disclosed with POI and says unobserved is not
 //! quiet; the scene's longest gap between two observation windows is listed as a coverage gap
 //! across the band; every scene channel the run found blind (an inventory row at its centre) is a
-//! top emitter; the baseline comparison is `unavailable`; CSV and PNG exports render.
+//! top emitter; CSV and PNG exports render.
+//!
+//! **T-131 full path (fixed before the first run).** The run's own services are used, as `hk serve`
+//! wires them: the user pins a site through the attention API right after start (a parked device;
+//! no truth), occupancy rows carry it, baselines fold, candidates publish read-only (bandit off)
+//! and the occupancy thread steps the novelty alarms. Asserted:
+//! 1. baselines populate (subjects under the pinned site);
+//! 2. candidates populate (sets observed as published during the run, as `/api/candidates` would
+//!    serve them: every track closes when the run ends, so the final set is empty), and in the
+//!    latest published set holding the hour-30 novelty emitter its candidate ranks in the top
+//!    max(3, n/4);
+//! 3. the report over the pinned site carries true `fco` on channel rows (activity-independent
+//!    visits) and a baseline comparison that is `available` or `immature` (printed);
+//! 4. the run's alarm service is fed without write errors; alarms and suppressions are printed.
+//!    No alarm for the novelty emitter is expected within 48 h: its channel is learned at hour ~30,
+//!    so its baseline subject is immature (maturity is never loosened).
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use hk_context::report::DEFAULT_MAX_EMITTERS;
 use hk_e2e::scene::SceneTruth;
 use hk_e2e::{SynthRequest, synth_or_skip};
 use hk_model::attention::baseline::SiteKey;
 use hk_model::attention::report::{ComparisonStatus, ExportFormat};
+use hk_model::attention::score::InterestingnessProvider as _;
+use hk_model::repo::alarms::AnomalyQuery;
 use hk_model::{FreqRange, Repository, TimeRange};
+use hk_pipeline::attention::SiteSelect;
 use hk_pipeline::reports::ReportService;
 use serde_json::json;
 
@@ -35,10 +54,11 @@ fn report_over_48h_scene_discloses_longest_gap_and_blind_top_emitters() {
             .seed(7)
             .param("span_hours", 48)
             .param("iq_windows_at_revisits", "true")
-            .param("revisit_mean_gap_s", 1800)
+            .param("revisit_mean_gap_s", 900)
             .param("window_duration_s", WINDOW_S)
     );
     let dir = TempDir::new("t121");
+    let wall = Instant::now();
     let scene = blind_scene(&dir.0, &out, json!({}));
     let rec = scene.recording.clone();
     let (centre, rate) = (
@@ -46,9 +66,47 @@ fn report_over_48h_scene_discloses_longest_gap_and_blind_top_emitters() {
         scene.device.info.sample_rate_hz,
     );
     let handle = start(scene.cfg, scene.device);
+    // T-131: the user pins the parked device's site (`PUT /api/sites/current`).
+    let attention = handle.attention().expect("the run's attention service");
+    attention
+        .set_current_site(SiteSelect {
+            id: None,
+            name: Some("bench".into()),
+            lat_deg: Some(51.5),
+            lon_deg: Some(-0.1),
+            radius_m: None,
+            utc_offset_min: Some(0),
+            release: false,
+        })
+        .unwrap();
+    let alarms = handle.alarms().expect("the run's alarm service");
+    // Published candidate sets, polled like the API (version first, snapshot when it moved).
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poller = {
+        let (provider, stop) = (attention.provider(), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let (mut seen, mut sets) = (0, Vec::new());
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let v = provider.version();
+                if v != seen {
+                    seen = v;
+                    let set = provider.snapshot();
+                    if !set.candidates.is_empty() {
+                        sets.push(set);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            sets
+        })
+    };
+    let occupancy = handle.occupancy();
     let product = handle.floor_product();
     let observations = handle.observation_store();
     let _ = finish(handle);
+    let wall_s = wall.elapsed().as_secs_f64();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let published = poller.join().unwrap();
 
     // ---- The report, from what the device and the run know. ----
     let meta = hk_model::sigmf::SigmfMeta::read(&rec.meta).unwrap();
@@ -67,8 +125,14 @@ fn report_over_48h_scene_discloses_longest_gap_and_blind_top_emitters() {
     let db = Arc::new(Mutex::new(
         Repository::open(dir.0.join("hackriff.db")).unwrap(),
     ));
-    let service = ReportService::new(None, Some(product), observations, db);
-    let report = service.report(region, span, SiteKey::Unassigned).unwrap();
+    let (site, _) = attention.site_at(t_end);
+    assert!(
+        matches!(site, SiteKey::Site(_)),
+        "[{T121}] pinned site {site:?}"
+    );
+    let service = ReportService::new(None, Some(product), observations, db)
+        .with_attention(Some(occupancy), Some(Arc::clone(&attention)));
+    let report = service.report(region, span, site).unwrap();
     report.validate().unwrap();
     let c = &report.coverage;
     eprintln!(
@@ -96,12 +160,27 @@ fn report_over_48h_scene_discloses_longest_gap_and_blind_top_emitters() {
         "[{T121}] 0.5 s windows every ~30 min: {}",
         c.observed_fraction
     );
-    assert_eq!(
-        report.change_vs_baseline.status,
-        ComparisonStatus::Unavailable,
-        "[{T121}] no baselines on this server"
+    let cmp = &report.change_vs_baseline;
+    eprintln!(
+        "[T-131] run wall {wall_s:.1} s; change vs baseline: {:?} (resolution {:?}), {} changes: \
+         {:?}",
+        cmp.status,
+        cmp.resolution,
+        cmp.changes.len(),
+        cmp.changes
+            .iter()
+            .take(6)
+            .map(|c| (c.kind, c.subject, (c.z * 10.0).round() / 10.0))
+            .collect::<Vec<_>>()
     );
-    assert!(report.change_vs_baseline.changes.is_empty());
+    assert!(
+        matches!(
+            cmp.status,
+            ComparisonStatus::Available | ComparisonStatus::Immature
+        ),
+        "[T-131] the pinned site's baselines are compared: {:?}",
+        cmp.status
+    );
 
     // ---- Truth, for assertions only. ----
     let truth = SceneTruth::load(&out).unwrap();
@@ -212,16 +291,135 @@ fn report_over_48h_scene_discloses_longest_gap_and_blind_top_emitters() {
             .any(|s| s.fco_all_visits.is_some()),
         "[{T121}] channel occupancy rows"
     );
-    // The history-tile stand-in never presents its all-visits figure as unbiased `fco` (§2.5).
-    assert!(
+    // T-131: the series rows carry true `fco` (activity-independent visits, §2.5).
+    let with_fco = report
+        .occupancy
+        .channels
+        .iter()
+        .filter(|s| s.fco.is_some())
+        .count();
+    eprintln!(
+        "[T-131] report channels with true fco: {with_fco} of {}; top emitters with fco: {}",
+        report.occupancy.channels.len(),
         report
-            .occupancy
-            .bands
+            .top_emitters
             .iter()
-            .chain(&report.occupancy.channels)
-            .all(|s| s.fco.is_none() && s.revisit_biased)
-            && report.top_emitters.iter().all(|e| e.fco.is_none()),
-        "[{T121}] stand-in occupancy carries an unbiased fco"
+            .filter(|e| e.fco.is_some())
+            .count()
+    );
+    assert!(with_fco > 0, "[T-131] no channel row carries a true fco");
+
+    // ---- T-131: baselines, candidates and alarms from the live run. ----
+    let baselines = attention.baselines_json(None).unwrap();
+    let subjects: u64 = baselines["baselines"]
+        .as_array()
+        .map(|b| b.iter().filter_map(|k| k["subjects"].as_u64()).sum())
+        .unwrap_or(0);
+    let mature: u64 = baselines["baselines"]
+        .as_array()
+        .map(|b| b.iter().filter_map(|k| k["mature_subjects"].as_u64()).sum())
+        .unwrap_or(0);
+    eprintln!("[T-131] baselines: {subjects} subjects, {mature} mature: {baselines}");
+    assert!(subjects > 0, "[T-131] baselines did not populate");
+
+    let novelty = truth.channel("novelty").unwrap();
+    let at_novelty = |f: &FreqRange| {
+        f.lo_hz <= novelty.center_hz + novelty.bandwidth_hz / 2.0
+            && f.hi_hz >= novelty.center_hz - novelty.bandwidth_hz / 2.0
+    };
+    let (anomalies, _) = alarms
+        .list(&AnomalyQuery {
+            limit: 1000,
+            ..Default::default()
+        })
+        .unwrap();
+    let novelty_alarm = anomalies
+        .iter()
+        .find(|a| at_novelty(&a.listing.anomaly.region.freq));
+    let suppressions = alarms.suppressions();
+    eprintln!(
+        "[T-131] alarms: {} anomalies ({:?}); novelty alarm {:?}; suppressions {suppressions}; \
+         status {}",
+        anomalies.len(),
+        anomalies
+            .iter()
+            .take(8)
+            .map(|a| (
+                a.listing.anomaly.kind,
+                (a.listing.anomaly.region.freq.center_hz() / 1e3).round()
+            ))
+            .collect::<Vec<_>>(),
+        novelty_alarm.map(|a| (a.listing.anomaly.kind, a.listing.status)),
+        alarms.status_json()
+    );
+    // No alarm is asserted: the novelty emitter's channel is first learned at scene hour ~30, so
+    // its baseline subject has < 24 h of observation by hour 48 (immature, novelty 0). Raising one
+    // needs the subject observed ≥ 24 h before the change (a ≥ ~56 h scene with the channel learned
+    // early). The live wiring itself is covered by `attention_interval_folds_raise_busier_alarm`.
+    let status = alarms.status_json();
+    assert_eq!(status["errors"], 0, "[T-131] alarm writes failed");
+    // The folds reach the alarms, and the immature ones are counted, not silently dropped (§7.3).
+    let observed = status["inputs_observed"].as_u64().unwrap_or(0);
+    assert!(
+        observed > 0,
+        "[T-131] no fold evidence reached the alarms: {status}"
+    );
+    let immature: u64 = suppressions
+        .as_object()
+        .map(|by_kind| {
+            by_kind
+                .values()
+                .filter_map(|s| s["immature-baseline"].as_u64())
+                .sum()
+        })
+        .unwrap_or(0);
+    eprintln!("[T-131] inputs observed {observed}, immature-baseline suppressions {immature}");
+    assert!(
+        immature > 0,
+        "[T-131] immature folds were not counted as suppressions: {suppressions}"
+    );
+    let holding: Vec<_> = published
+        .iter()
+        .filter(|set| set.candidates.iter().any(|c| at_novelty(&c.freq)))
+        .collect();
+    let ranks: Vec<(f64, usize, usize)> = holding
+        .iter()
+        .map(|set| {
+            let r = set
+                .candidates
+                .iter()
+                .position(|c| at_novelty(&c.freq))
+                .unwrap();
+            (scene_h(set.t), r + 1, set.candidates.len())
+        })
+        .collect();
+    let latest = holding.last().copied();
+    eprintln!(
+        "[T-131] candidates: {} non-empty sets published (polled), {} hold the novelty emitter; \
+         (scene h, rank, n) latest 6: {:?}; latest top: {:?}",
+        published.len(),
+        holding.len(),
+        &ranks[ranks.len().saturating_sub(6)..],
+        latest.map(|set| set
+            .candidates
+            .iter()
+            .take(6)
+            .map(|c| (
+                (c.freq.center_hz() / 1e3).round(),
+                (c.score * 100.0).round() / 100.0,
+                (c.novelty.novelty * 100.0).round() / 100.0,
+                (c.suspect_fraction * 100.0).round() / 100.0
+            ))
+            .collect::<Vec<_>>())
+    );
+    assert!(!published.is_empty(), "[T-131] no candidates published");
+    let (_, rank, n) = *ranks
+        .last()
+        .expect("[T-131] no published candidate set holds the novelty emitter");
+    let top = 3.max(n / 4);
+    assert!(
+        rank <= top,
+        "[T-131] the novelty emitter ranks {rank} of {n} (top {top} required)"
     );
 
     // ---- Exports render in the backend. ----

@@ -864,6 +864,7 @@ pub(crate) fn run(
     rx: Receiver<ControlEvent>,
     mut sched: Option<SchedState>,
     mut interactive: Option<crate::observe::InteractiveObserver>,
+    attention: Option<Arc<crate::attention::AttentionService>>,
 ) -> anyhow::Result<()> {
     let mut chains = ChainManager::new(Arc::clone(&shared));
     if let Some(s) = sched.as_mut() {
@@ -873,12 +874,18 @@ pub(crate) fn run(
                 .set_track_decodes(Arc::clone(&shared.track_decodes));
         }
     }
+    // T-131: without the bandit (the default) nothing else feeds the C12 candidate table, so the
+    // control thread does, read-only: `/api/candidates` is populated and nothing schedules from it.
+    let passive = attention.filter(|_| sched.as_ref().is_none_or(|s| s.bandit.is_none()));
+    if let Some(a) = &passive {
+        a.set_track_decodes(Arc::clone(&shared.track_decodes));
+    }
     let mut detect_done = false;
     loop {
         match rx.recv_timeout(Duration::from_millis(2)) {
             Ok(ev) => match ev {
                 ControlEvent::TrackConfirmed(cand) => {
-                    if let Some(s) = sched.as_mut() {
+                    if sched.is_some() || passive.is_some() {
                         let recipe = crate::chains::spec::select_for_track(
                             &shared.specs,
                             cand.f_lo_hz,
@@ -886,7 +893,14 @@ pub(crate) fn run(
                             cand.bursty,
                         )
                         .is_some();
-                        s.offer(&cand, recipe);
+                        if let Some(s) = sched.as_mut() {
+                            s.offer(&cand, recipe);
+                        }
+                        if let (Some(a), Some(track)) = (&passive, cand.track) {
+                            let freq =
+                                FreqRange::new(cand.f_lo_hz, cand.f_hi_hz.max(cand.f_lo_hz + 1.0));
+                            a.on_track_confirmed(track, freq, recipe);
+                        }
                     }
                     chains.on_confirmed(cand);
                 }
@@ -894,11 +908,17 @@ pub(crate) fn run(
                     if let Some(s) = sched.as_mut() {
                         s.on_member(track, &member);
                     }
+                    if let Some(a) = &passive {
+                        a.on_track_member(track, &member_evidence(&member));
+                    }
                     chains.on_member(track, member);
                 }
                 ControlEvent::TrackClosed { track, .. } => {
                     if let Some(s) = sched.as_mut() {
                         s.remove(track);
+                    }
+                    if let Some(a) = &passive {
+                        a.on_track_closed(track);
                     }
                     chains.on_track_closed(track);
                 }
@@ -927,8 +947,13 @@ pub(crate) fn run(
         }
         if !detect_done {
             chains.poll_coverage();
+            let now_ns = shared.counters.stream_time_ns.load(Ordering::Relaxed);
             if let Some(s) = sched.as_mut() {
-                s.tick(shared.counters.stream_time_ns.load(Ordering::Relaxed));
+                s.tick(now_ns);
+            }
+            // Every 10 s of sample clock (at once when a confirmed track appeared or closed).
+            if let (Some(a), true) = (&passive, now_ns > 0) {
+                a.publish_candidates(Timestamp::from_unix_nanos(now_ns), false);
             }
             // T-115: a live run without the scheduler logs its interactive tuning.
             if let Some(o) = interactive.as_mut() {

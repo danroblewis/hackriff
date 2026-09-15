@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use hk_context::occupancy::alarm::PoolContext;
 use hk_context::occupancy::baseline::{
     BaselineConfig, BaselineCopy, Baselines, FoldOutcome, IntervalObservation, PoolStats,
     from_occupancy_stat, in_pool, maturity, pools,
@@ -41,12 +42,13 @@ use hk_context::occupancy::novelty::NoveltyConfig;
 use hk_context::occupancy::score::{CandidateInput, Scorer};
 use hk_context::occupancy::site::{Fix, SiteAssigner};
 use hk_model::Repository;
+use hk_model::attention::alarm::AlarmKind;
 use hk_model::attention::baseline::MATURITY_MIN_OBSERVED_S;
 use hk_model::attention::baseline::{
     BaselineResolution, CalKey, HourOfWeek, Maturity, SiteConfig, SiteKey, SiteRecord, SiteSource,
 };
 use hk_model::attention::occupancy::{ChannelKey, OccupancyStat, OccupancySubject};
-use hk_model::attention::report::{BaselineComparison, ChangeEntry, ChangeKind, ComparisonStatus};
+use hk_model::attention::report::{BaselineComparison, ChangeEntry, ComparisonStatus};
 use hk_model::attention::score::new_emitter_novelty;
 use hk_model::attention::score::{InterestingnessProvider, ScoreWeights, SharedInterestingness};
 use hk_model::ids::SiteId;
@@ -194,6 +196,27 @@ pub(crate) fn represented_s(stat: &OccupancyStat) -> f64 {
     stat.revisit_mean_s
         .map_or(interval_s, |m| m * stat.n_revisits_all as f64)
         .min(interval_s)
+}
+
+/// T-131: one channel row's baseline fold with what the alarm service needs (ADR-0012 §7): the
+/// site and calibration it was folded under, the observation, the site's UTC offset and the
+/// reference pool its novelty was measured against.
+#[derive(Clone, Copy, Debug)]
+pub struct IntervalFold {
+    /// The row's subject.
+    pub subject: OccupancySubject,
+    /// Site assignment at measurement time.
+    pub site: SiteKey,
+    /// Calibration key.
+    pub cal: CalKey,
+    /// The folded observation.
+    pub obs: IntervalObservation,
+    /// The site's UTC offset, minutes.
+    pub utc_offset_min: i16,
+    /// Reference pool (default when immature).
+    pub pool: PoolContext,
+    /// The fold's outcome.
+    pub fold: FoldOutcome,
 }
 
 /// Level-0 cell width of history scheme 1, Hz.
@@ -541,6 +564,26 @@ impl AttentionService {
         }
     }
 
+    /// T-131: the site assignment at sample time `t` (the state machine ticked to `t`), stamped on
+    /// the occupancy rows of an interval closing at `t`, and its geometry when known.
+    pub fn site_at(&self, t: Timestamp) -> (SiteKey, Option<hk_context::geo::Site>) {
+        let mut sites = lock(&self.sites);
+        let before = sites.current();
+        let key = sites.tick(t);
+        let geo = match key {
+            SiteKey::Site(id) => sites.site(id).and_then(|s| match (s.lat_deg, s.lon_deg) {
+                (Some(lat), Some(lon)) => Some(hk_context::geo::Site::new(lat, lon)),
+                _ => None,
+            }),
+            _ => None,
+        };
+        // Observation accounting persists in `observe`; here only a site change is written.
+        if key != before {
+            self.persist_sites(&mut sites);
+        }
+        (key, geo)
+    }
+
     /// Folds a C06 fix.
     pub fn on_fix(&self, fix: Fix) -> SiteKey {
         let mut sites = lock(&self.sites);
@@ -599,18 +642,42 @@ impl AttentionService {
     /// T-118 adapter: folds one `OccupancyStat` row. The row's own `site` is the assignment at
     /// measurement time; a row whose site does not accrue folds nothing.
     pub fn ingest_occupancy(&self, stat: &OccupancyStat, gain: u32) -> Option<FoldOutcome> {
+        self.fold_row(stat, gain).map(|f| f.fold)
+    }
+
+    /// One channel row's fold with the alarm context (T-131).
+    fn fold_row(&self, stat: &OccupancyStat, gain: u32) -> Option<IntervalFold> {
         let (site, cal, obs) = from_occupancy_stat(stat, gain)?;
         let offset = lock(&self.sites).utc_offset_min(site);
-        let (out, pool_fcos) = {
+        let (out, pool_fcos, pool) = {
             let mut b = lock(&self.baselines);
             let out = b.observe(site, offset, cal, &obs).ok();
             self.sync_baseline_gauges(&b);
-            let pool_fcos = b
+            let sub = b
                 .key(site, cal)
                 .and_then(|key| b.engines().find(|e| e.state.key == key))
-                .and_then(|e| e.state.subjects.get(&obs.subject))
-                .map(|sub| mature_pool_fcos(sub, HourOfWeek::of(obs.t, offset)))
+                .and_then(|e| e.state.subjects.get(&obs.subject));
+            let slot = HourOfWeek::of(obs.t, offset);
+            let pool_fcos = sub
+                .map(|sub| mature_pool_fcos(sub, slot))
                 .unwrap_or_default();
+            // The reference pool the fold's novelty used (its finest mature resolution).
+            let pool = match (sub, out.as_ref().map(|o| o.novelty.maturity)) {
+                (Some(sub), Some(Maturity::Mature { resolution })) => {
+                    let (level, occ) = pools(sub, slot, None, BaselineCopy::Reference);
+                    let ri = res_index(resolution);
+                    PoolContext {
+                        resolution: Some(resolution),
+                        level: level[ri]
+                            .mean_db()
+                            .map(|m| (m, level[ri].std_db().unwrap_or(1.0).max(1.0))),
+                        occupancy: occ[ri]
+                            .fco()
+                            .map(|p| (p, (p * (1.0 - p) / obs.n_eff.max(1.0)).sqrt().max(1e-6))),
+                    }
+                }
+                _ => PoolContext::default(),
+            };
             if let Ok(n) = b.flush(obs.t, false) {
                 self.bump(|c| {
                     c.attention
@@ -618,7 +685,7 @@ impl AttentionService {
                         .fetch_add(n as u64, Ordering::Relaxed);
                 });
             }
-            (out, pool_fcos)
+            (out, pool_fcos, pool)
         };
         let o = out?;
         self.bump(|c| {
@@ -644,7 +711,15 @@ impl AttentionService {
                 ),
             );
         }
-        Some(o)
+        Some(IntervalFold {
+            subject: stat.subject,
+            site,
+            cal,
+            obs,
+            utc_offset_min: offset,
+            pool,
+            fold: o,
+        })
     }
 
     /// T-128: one closed occupancy interval from T-118's occupancy thread. Folds its channel rows
@@ -653,14 +728,14 @@ impl AttentionService {
     /// first-sighting rate, and re-scores the candidates. The sightings accrue to the baseline
     /// rate only under a site that accrues baselines and when they are not themselves novel
     /// (< the alarm "on" level), so a burst of new emitters does not teach the rate. Returns the
-    /// channel rows' fold outcomes (for T-131's alarm service).
+    /// channel rows' folds with their alarm context (T-131: [`crate::alarms::AlarmService`]).
     pub fn ingest_interval(
         &self,
         rows: &[OccupancyStat],
         first_sightings: u64,
         t_end: Timestamp,
         gain: impl SubjectGainKeys,
-    ) -> Vec<(OccupancySubject, FoldOutcome)> {
+    ) -> Vec<IntervalFold> {
         let mut folded = Vec::new();
         let (mut observed_s, mut accrues) = (0.0_f64, false);
         for r in rows {
@@ -670,8 +745,8 @@ impl AttentionService {
                     accrues |= r.site.accrues_baseline();
                 }
                 OccupancySubject::Channel { .. } => {
-                    if let Some(o) = self.ingest_occupancy(r, gain.gain_key(&r.subject)) {
-                        folded.push((r.subject, o));
+                    if let Some(f) = self.fold_row(r, gain.gain_key(&r.subject)) {
+                        folded.push(f);
                     }
                 }
             }
@@ -782,7 +857,7 @@ impl AttentionService {
                 let k = acc.lvl_zw.len() as f64;
                 changes.push(ChangeEntry {
                     subject,
-                    kind: ChangeKind::LevelAboveBaseline,
+                    kind: AlarmKind::LevelAboveBaseline,
                     baseline: acc.lvl_base / k,
                     observed: acc.lvl_obs / k,
                     z,
@@ -795,9 +870,9 @@ impl AttentionService {
                 changes.push(ChangeEntry {
                     subject,
                     kind: if z > 0.0 {
-                        ChangeKind::BusierThanUsual
+                        AlarmKind::BusierThanUsual
                     } else {
-                        ChangeKind::QuieterThanUsual
+                        AlarmKind::QuieterThanUsual
                     },
                     baseline: acc.occ_base / acc.occ_w,
                     observed: acc.occ_obs / acc.occ_w,
@@ -1109,12 +1184,19 @@ impl AttentionService {
     /// `GET /api/baselines`.
     pub fn baselines_json(&self, site: Option<SiteId>) -> Result<Value, AttentionError> {
         let (id, offset) = self.site_or_current(site)?;
-        let now = (self.clock)();
-        let slot = HourOfWeek::of(now, offset);
         // T-132: disk reads outside the baselines lock.
         Baselines::load_site_outside_lock(&self.baselines, id, offset)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
         let b = lock(&self.baselines);
+        // Maturity at the sample clock (ADR-0012 §0): the site's latest folded visit; the
+        // service clock only for a site with no baseline yet.
+        let now = b
+            .engines()
+            .filter(|e| e.state.key.site == id)
+            .map(|e| e.state.last_visit)
+            .max()
+            .unwrap_or_else(|| (self.clock)());
+        let slot = HourOfWeek::of(now, offset);
         let keys: Vec<Value> = b
             .engines()
             .filter(|e| e.state.key.site == id)
@@ -1626,6 +1708,153 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// T-131: `compare_report` statuses directly: unassigned → `no-baseline`; a pinned site with
+    /// too little observation → `immature` (baseline named, no changes); rows longer than 1 h (a
+    /// span rollup) are never compared.
+    #[test]
+    fn attention_compare_report_statuses() {
+        let dir = std::env::temp_dir().join(format!("hk-t131-cmp-{}", SiteId::new()));
+        let s = service(&dir);
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 69_000,
+            hi_cell: 69_004,
+        };
+        let subject = OccupancySubject::Channel { key };
+        let unassigned = s.compare_report(
+            SiteKey::Unassigned,
+            &[series_row(0, SiteKey::Unassigned, subject, 0.5)],
+        );
+        assert_eq!(unassigned.status, ComparisonStatus::NoBaseline);
+        let cur = s
+            .set_current_site(SiteSelect {
+                name: Some("bench".into()),
+                ..SiteSelect::default()
+            })
+            .unwrap();
+        let id: SiteId = cur["record"]["id"].as_str().unwrap().parse().unwrap();
+        let site = SiteKey::Site(id);
+        assert_eq!(
+            s.compare_report(site, &[series_row(0, site, subject, 0.5)])
+                .status,
+            ComparisonStatus::NoBaseline,
+            "no subject folded yet"
+        );
+        for q in 0..8 {
+            s.ingest_occupancy(&series_row(q, site, subject, 0.25), 0);
+        }
+        let rows: Vec<_> = (8..16).map(|q| series_row(q, site, subject, 0.9)).collect();
+        let immature = s.compare_report(site, &rows);
+        assert_eq!(immature.status, ComparisonStatus::Immature);
+        assert!(immature.baseline.is_some() && immature.changes.is_empty());
+        let mut rollup = series_row(16, site, subject, 0.9);
+        rollup.interval = TimeRange::new(
+            rollup.interval.start,
+            rollup
+                .interval
+                .start
+                .saturating_add_nanos(2 * 3_600_000_000_000),
+        );
+        assert_eq!(
+            s.compare_report(site, &[rollup]).status,
+            ComparisonStatus::NoBaseline,
+            "a 2 h rollup row is not compared against one slot"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-131: the occupancy close path's alarm wiring without a device: `ingest_interval` folds
+    /// carry site, calibration, observation and reference pool, and `observe_interval` raises a
+    /// `busier-than-usual` alarm (listed with explanations) once a mature channel stays busy for
+    /// two scored intervals; an unassigned site's folds raise nothing.
+    #[test]
+    fn attention_interval_folds_raise_busier_alarm() {
+        let dir = std::env::temp_dir().join(format!("hk-t131-alarm-{}", SiteId::new()));
+        let s = service(&dir);
+        let cur = s
+            .set_current_site(SiteSelect {
+                name: Some("home".into()),
+                ..SiteSelect::default()
+            })
+            .unwrap();
+        let id: SiteId = cur["record"]["id"].as_str().unwrap().parse().unwrap();
+        let site = SiteKey::Site(id);
+        let subject = OccupancySubject::Channel {
+            key: ChannelKey {
+                scheme: 1,
+                lo_cell: 69_000,
+                hi_cell: 69_004,
+            },
+        };
+        let row = |q: i64, k: u64| {
+            let mut r = series_row(q, site, subject, k as f64 / 12.0);
+            r.n_occupied = k;
+            r
+        };
+        let repo = Arc::new(Mutex::new(Repository::open_in_memory().unwrap()));
+        let alarms = crate::alarms::AlarmService::open(
+            repo,
+            None,
+            Arc::new(|| Timestamp::from_unix_nanos(0)),
+        )
+        .unwrap();
+        let (mut raised, mut last_novelty) = (Vec::new(), None);
+        for q in 0..300 {
+            // ≈ 3 % FCO for 3 days, then fully occupied: per-interval z ≈ 17 at 12 revisits (a
+            // channel busy from 25 % reaches only z ≈ 6, novelty 0.43, below the "on" level).
+            let r = row(
+                q,
+                if q < 288 {
+                    [0, 1, 0][q as usize % 3]
+                } else {
+                    12
+                },
+            );
+            let folds = s.ingest_interval(std::slice::from_ref(&r), 0, r.interval.end, 0);
+            if q == 0 {
+                assert_eq!(folds.len(), 1);
+                assert_eq!((folds[0].site, folds[0].subject), (site, subject));
+            }
+            last_novelty = folds
+                .first()
+                .map(|f| (f.fold.novelty.novelty, f.fold.novelty.occupancy_z));
+            let events = alarms.observe_interval(&folds, &[]);
+            if q < 288 {
+                assert!(events.is_empty(), "interval {q}: {events:?}");
+            }
+            raised.extend(events);
+        }
+        let first = raised.first().unwrap_or_else(|| {
+            panic!(
+                "a busy mature channel raises an alarm; last fold (novelty, occupancy_z) \
+                 {last_novelty:?}, suppressions {}",
+                alarms.suppressions()
+            )
+        });
+        assert_eq!(
+            first.row.key.kind,
+            hk_model::attention::alarm::AlarmKind::BusierThanUsual
+        );
+        let (listed, _) = alarms
+            .list(&hk_model::repo::alarms::AnomalyQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.len(), 1, "one open alarm, extended, not duplicated");
+        assert!(!listed[0].explanations.is_empty());
+        let mut unassigned = row(301, 12);
+        unassigned.site = SiteKey::Unassigned;
+        let folds = s.ingest_interval(
+            std::slice::from_ref(&unassigned),
+            0,
+            unassigned.interval.end,
+            0,
+        );
+        assert!(alarms.observe_interval(&folds, &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// T-128 review item 2: a 24 h report compares each 15-min row against its own slot and
     /// combines the evidence, so an unchanged channel shows no change, and busier / quieter
     /// channels are labelled by the sign.
@@ -1672,10 +1901,10 @@ pub(crate) mod tests {
         assert_eq!(unchanged.status, ComparisonStatus::Available);
         assert!(unchanged.changes.is_empty(), "{:?}", unchanged.changes);
         assert_eq!(busier.changes.len(), 1);
-        assert_eq!(busier.changes[0].kind, ChangeKind::BusierThanUsual);
+        assert_eq!(busier.changes[0].kind, AlarmKind::BusierThanUsual);
         assert!(busier.changes[0].z >= 3.0 && busier.changes[0].observed > 0.5);
         assert_eq!(quieter.changes.len(), 1);
-        assert_eq!(quieter.changes[0].kind, ChangeKind::QuieterThanUsual);
+        assert_eq!(quieter.changes[0].kind, AlarmKind::QuieterThanUsual);
         assert!(quieter.changes[0].z <= -3.0 && quieter.changes[0].observed < 0.05);
         // A span rollup row cannot be compared against one slot.
         let rolled = crate::reports::roll_up(

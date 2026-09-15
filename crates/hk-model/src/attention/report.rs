@@ -70,30 +70,13 @@ pub enum ComparisonStatus {
     Unavailable,
 }
 
-/// Kind of a report change vs baseline. Report-local (T-128): names match the C12 alarm kinds
-/// ([`AlarmKind::as_str`]); `quieter-than-usual` mirrors T-122's alarm kind, which is not merged
-/// yet (T-131 may replace this with `AlarmKind`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ChangeKind {
-    /// Level above the baseline pool (dB).
-    LevelAboveBaseline,
-    /// FCO above the baseline pool.
-    BusierThanUsual,
-    /// FCO below the baseline pool.
-    QuieterThanUsual,
-}
-
-impl ChangeKind {
-    /// The alarm kind of the same name, when it exists in this build.
-    pub fn alarm_kind(self) -> Option<AlarmKind> {
-        match self {
-            ChangeKind::LevelAboveBaseline => Some(AlarmKind::LevelAboveBaseline),
-            ChangeKind::BusierThanUsual => Some(AlarmKind::BusierThanUsual),
-            ChangeKind::QuieterThanUsual => None,
-        }
-    }
-}
+/// The alarm kinds a report change vs baseline can carry (T-131: the report uses [`AlarmKind`]
+/// itself, so a report change and a live alarm on the same subject share one name).
+pub const REPORT_CHANGE_KINDS: [AlarmKind; 3] = [
+    AlarmKind::LevelAboveBaseline,
+    AlarmKind::BusierThanUsual,
+    AlarmKind::QuieterThanUsual,
+];
 
 /// One change vs baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,8 +84,9 @@ impl ChangeKind {
 pub struct ChangeEntry {
     /// Channel or band.
     pub subject: OccupancySubject,
-    /// Change kind.
-    pub kind: ChangeKind,
+    /// Change kind: one of [`REPORT_CHANGE_KINDS`] (`level-above-baseline`, `busier-than-usual`,
+    /// `quieter-than-usual`). New emitters and change points are alarms, not report changes.
+    pub kind: AlarmKind,
     /// Baseline value (dB or fraction by kind).
     pub baseline: f64,
     /// Observed value.
@@ -286,6 +270,13 @@ impl SurveyReport {
                 "only when available",
             )?,
         }
+        for c in &b.changes {
+            ensure(
+                REPORT_CHANGE_KINDS.contains(&c.kind),
+                "change_vs_baseline.changes.kind",
+                "level-above-baseline, busier-than-usual or quieter-than-usual",
+            )?;
+        }
         for s in self.occupancy.bands.iter().chain(&self.occupancy.channels) {
             s.validate()?;
         }
@@ -380,7 +371,7 @@ mod tests {
         let mut r = report();
         r.change_vs_baseline.changes.push(ChangeEntry {
             subject: OccupancySubject::Band { freq: r.region },
-            kind: ChangeKind::BusierThanUsual,
+            kind: AlarmKind::BusierThanUsual,
             baseline: 0.1,
             observed: 0.5,
             z: 9.0,
@@ -388,6 +379,43 @@ mod tests {
         assert_eq!(
             r.validate().unwrap_err().field,
             "change_vs_baseline.changes"
+        );
+    }
+
+    /// T-131: report changes carry the alarm kind, on the wire by the alarm's name; alarm-only
+    /// kinds are refused.
+    #[test]
+    fn report_change_kind_is_the_alarm_kind() {
+        let e = ChangeEntry {
+            subject: OccupancySubject::Band {
+                freq: FreqRange::new(433.0e6, 434.0e6),
+            },
+            kind: AlarmKind::QuieterThanUsual,
+            baseline: 0.5,
+            observed: 0.0,
+            z: -6.0,
+        };
+        let v = serde_json::to_value(e).unwrap();
+        assert_eq!(v["kind"], "quieter-than-usual");
+        let back: ChangeEntry = serde_json::from_value(v).unwrap();
+        assert_eq!(back.kind, AlarmKind::QuieterThanUsual);
+        let mut r = report();
+        r.change_vs_baseline = BaselineComparison {
+            status: ComparisonStatus::Available,
+            baseline: Some(crate::attention::baseline::BaselineKey {
+                site: crate::ids::SiteId::new(),
+                cal: crate::attention::baseline::CalKey::Uncalibrated,
+                scheme: 1,
+                cell_factor: 16,
+            }),
+            resolution: Some(BaselineResolution::AllHours),
+            changes: vec![e],
+        };
+        r.validate().unwrap();
+        r.change_vs_baseline.changes[0].kind = AlarmKind::ChangePoint;
+        assert_eq!(
+            r.validate().unwrap_err().field,
+            "change_vs_baseline.changes.kind"
         );
     }
 }

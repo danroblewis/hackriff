@@ -445,6 +445,86 @@ fn alarm_silenced_transmitter_raises_quieter_than_usual() {
     assert_eq!((d.observed, d.baseline_mean), (0.0, 0.95));
 }
 
+/// T-131 review: an immature fold with evidence yields no scored input but is counted as one
+/// `immature-baseline` suppression per kind (a mobile site as `mobile-site`), never raised; a
+/// mature fold has no unscored evidence.
+#[test]
+fn alarm_immature_evidence_counted_never_raised() {
+    let mut rig = Rig::new();
+    let obs = IntervalObservation {
+        subject: BaselineSubject::Cell { index: 1500 },
+        t: at(0),
+        gain: 0,
+        level_db: Some(-40.0),
+        max_db: Some(-35.0),
+        occupied_weight_s: 900.0,
+        weight_s: 900.0,
+        observed_s: 900.0,
+        n_eff: 60.0,
+        suspect_fraction: 0.0,
+        provenance_explained: false,
+    };
+    let fold = |maturity| FoldOutcome {
+        novelty: NoveltyScore {
+            novelty: 0.0,
+            level_z: None,
+            occupancy_z: None,
+            new_emitter: None,
+            observed_s: 900.0,
+            maturity,
+            provenance_explained: false,
+        },
+        change_point: None,
+        accrued: true,
+        accrued_reference: true,
+    };
+    let immature = fold(Maturity::Immature { observed_s: 900.0 });
+    let mut acts = Vec::new();
+    for i in 0..8 {
+        let o = IntervalObservation { t: at(i), ..obs };
+        let inputs = inputs_from_fold(
+            &o,
+            &immature,
+            CalKey::Uncalibrated,
+            HourOfWeek::of(o.t, 0),
+            1,
+            CELL_HZ,
+            16,
+            PoolContext::default(),
+            &NoveltyConfig::default(),
+        );
+        assert!(inputs.is_empty(), "no z against an immature pool");
+        let kinds = unscored_evidence(&o, &immature);
+        assert_eq!(
+            kinds,
+            [AlarmKind::LevelAboveBaseline, AlarmKind::BusierThanUsual]
+        );
+        rig.engine
+            .count_unscored(o.t, rig.site, immature.novelty.maturity, false, &kinds);
+        acts.extend(rig.run(&snap(rig.site, i, inputs), None));
+    }
+    assert!(acts.is_empty(), "{acts:?}");
+    assert!(rig.alarms().is_empty());
+    let c = rig.engine.suppressions();
+    assert_eq!(
+        c.get(AlarmKind::LevelAboveBaseline, Suppression::ImmatureBaseline),
+        8
+    );
+    assert_eq!(
+        c.get(AlarmKind::BusierThanUsual, Suppression::ImmatureBaseline),
+        8
+    );
+    rig.engine.count_unscored(
+        at(9),
+        SiteKey::Mobile,
+        immature.novelty.maturity,
+        false,
+        &[AlarmKind::BusierThanUsual],
+    );
+    assert_eq!(rig.engine.suppressions().total(Suppression::MobileSite), 1);
+    assert!(unscored_evidence(&obs, &fold(mature())).is_empty());
+}
+
 /// New-emitter novelty (synthetic; T-128 wires `FirstSightingRate`) raises on the emitter subject.
 #[test]
 fn alarm_new_emitter_path() {

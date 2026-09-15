@@ -1957,7 +1957,8 @@ tasks:
   - id: T-123
     milestone: M2
     title: "M2 UI hooks (thin client): survey report view, novelty alarm list, scheduler coverage/POI panel"
-    status: todo
+    status: done
+    commit: f243534
     deps: [T-120, T-121, T-122]
     parallel_group: M2U
     use_cases: [AWARE-044, AWARE-033]
@@ -1970,10 +1971,10 @@ tasks:
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
     status: todo
-    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132]
+    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
-    acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s)"
+    acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s); from T-131 review: pre-mature the baseline (or run >=56 h scene with the channel learned before h24) and assert a busier-than-usual alarm on the injected channel with top explanations; assert new-emitter alarms once fed; assert a gain step yields provenance-explained not an alarm; assert a restart keeps the pinned site"
     area: "tests/e2e"
     needs: none
     model: opus
@@ -2071,12 +2072,13 @@ tasks:
   - id: T-131
     milestone: M2
     title: "M2 integration part 2a: alarm wiring, AlarmKind unification, report/e2e full path, candidates when bandit off, discriminating suspect-ban test"
-    status: in-progress
+    status: done
+    commit: 2b5891d
     deps: [T-128, T-122, T-129, T-130]
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
     found_by: "T-128 report 2026-09-15"
-    acceptance: "AlarmService::observe_fold wired from ingest_interval FoldOutcomes with device steps carrying gain deltas (from history provenance); /api/anomalies receives live alarms; report-only ChangeKind replaced by AlarmKind incl QuieterThanUsual; candidates published (read-only) when bandit off; bandit_suspect_candidate_gets_one_verification_then_is_banned discriminating (fails when clip=false, uses T-130 device-level overdrive); compare_report direct test; report_scene.rs updated; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarm raised for the injected emitter; http.rs module-doc route rows""
+    acceptance: "AlarmService::observe_fold wired from ingest_interval FoldOutcomes with device steps carrying gain deltas (from history provenance); /api/anomalies receives live alarms; report-only ChangeKind replaced by AlarmKind incl QuieterThanUsual; candidates published (read-only) when bandit off; bandit_suspect_candidate_gets_one_verification_then_is_banned discriminating (fails when clip=false, uses T-130 device-level overdrive); compare_report direct test; report_scene.rs updated; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarm raised for the injected emitter; http.rs module-doc route rows"
     area: "crates/hk-pipeline (attention, alarms, candidates, reports wiring), crates/hk-context/src/report, crates/hk-api/src/http.rs module docs, tests/e2e"
     needs: none
     model: opus
@@ -2085,7 +2087,8 @@ tasks:
   - id: T-132
     milestone: M2
     title: "M2 integration part 2b: history source+site tiles and filters; baseline memory bound, per-slot change-point latch, per-gain-state key, level-statistic bimodality, load_site outside lock, weak-interferer sequential test"
-    status: in-progress
+    status: review
+    commit: b55b9ba
     deps: [T-128, T-116, T-126]
     parallel_group: M2B
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
@@ -2095,6 +2098,34 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
+  - id: T-133
+    milestone: M2
+    title: "History tiles record source + site; history/report filters by source/site; ADR-0012 §3.4 learning-rule documentation"
+    status: todo
+    deps: [T-131, T-132]
+    parallel_group: M2H
+    use_cases: [AWARE-042, AWARE-033]
+    found_by: "T-132 item 1 not started (2026-09-15)"
+    acceptance: "history tiles record source (FrameInput::source) and site (current site id / unassigned / mobile) in an additive versioned tile format (v1/v2 readable, tests); /api/history and /api/report filter by source and site; docs/api.md + crates/hk-cli/tests/api_contract.rs; ADR-0012 §3.4 documents per-hour latch, sequential learning CUSUM and occupied/idle level classes"
+    area: crates/hk-store/src/history, crates/hk-api (history/report params), crates/hk-pipeline (history ingest site), docs/api.md, docs/adr/0012
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-134
+    milestone: M2
+    title: "Sparse baseline slots (Jetson memory): store only observed hour-of-week slots or pool cells into channels for level stats"
+    status: todo
+    deps: [T-132]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-132 review 2026-09-15: dense GainSeries ~371-736 MB per key at 9.7k cells x 2 gain states; ADR budgets ~56 B/slot sparse vs ~115 B/slot dense"
+    acceptance: "baseline memory per key at 9.7k cells x 2 gain states measured and reduced to the ADR-0012 §9 budget (sparse slots and/or channel-pooled level stats); default memory cap then rarely refuses folds on a parked 48 h run; codec compatible; baseline/novelty tests unchanged"
+    area: crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline
+    needs: none
+    model: opus
+    effort: medium
     core_interface: true
   - id: T-100
     milestone: M0b

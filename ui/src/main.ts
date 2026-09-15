@@ -12,6 +12,9 @@ import { HistoryPanel } from "./history";
 import { Inspector, inspectHalfWidthHz } from "./inspect";
 import { InventoryTable } from "./inventory";
 import { installListen, type Extent, type PeakBox } from "./listen";
+import { ReportPanel } from "./report";
+import { AlarmsPanel } from "./alarms";
+import { SchedulerPanel } from "./scheduler";
 import { SelectionPanel } from "./selection-panel";
 import { SelectionStore, apiBackend, demodHook, inspectSelection, recordSelection, type NewSelection } from "./selections";
 import { OutputTracker, downloadHref } from "./outputs";
@@ -522,6 +525,9 @@ function main() {
   void live.start();
   void inventory.load();
   new FrameInspectorPanel(client); // T-090 pane; T-092 capture list + scrub
+  new ReportPanel(client, panel, token); // T-123 survey report over GET /api/report
+  new AlarmsPanel(client); // T-123 novelty alarm list over GET/POST /api/anomalies
+  new SchedulerPanel(client); // T-123 scheduler coverage/POI panel over GET /api/scheduler
 }
 
 main();

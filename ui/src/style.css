@@ -47,7 +47,12 @@ canvas { display: block; width: 100%; background: #000; border-radius: 4px; touc
 .mk { padding: 0 6px; border-radius: 3px; color: #111; }
 .mk.drop { background: var(--drop); }
 .mk.gated { background: var(--warn); }
-form#hist-form, form#inv-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+form#hist-form, form#inv-form, form#rpt-form, form#al-form, form#sch-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+h3, h4 { margin: 14px 0 6px; font-size: 14px; }
+h4 { font-size: 13px; color: var(--dim); }
+details > summary { cursor: pointer; color: var(--dim); font-size: 13px; margin: 8px 0; }
+table.grid tbody tr.sel { background: #1c2430; }
 #inspect-body dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: 13px; }
 #inspect-body dt { color: var(--dim); }
 #inspect-body dd { margin: 0; overflow-wrap: anywhere; }
