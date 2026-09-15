@@ -2,7 +2,7 @@
 
 **Status:** PROVISIONAL (T-149, core interface, reviewed before merge)
 **Touches:** the web client (`ui/`); [ADR-0002](0002-ui-web-vs-native.md) (web UI, thin client over the same API as external programs); [`docs/api.md`](../api.md) and its contract tests (`crates/hk-cli/tests/api_contract.rs`, T-079); [`docs/stream-contract.md`](../stream-contract.md) §5, §10, §12, §14; brief [`docs/14-ui-rewrite.md`](../14-ui-rewrite.md); spec `ui/mockups/explorer-v3.html`.
-**Code:** skeleton in `ui/src/app/` (`main.ts`, `store.ts`, `state.ts`, `net.ts`, `dom.ts`, `context.ts`, `shell.ts`, `centre/live-spectrum.ts`, `placeholder.ts`, `index.html`, `app.css`), tests `ui/test/app-store.test.ts` and `ui/test/app-shell.test.ts`. Served at `/app.html`; the old stacked UI stays at `/` until T-156.
+**Code:** skeleton in `ui/src/app/` (`main.ts`, `store.ts`, `state.ts`, `shell-slice.ts`, `net.ts`, `dom.ts`, `context.ts`, `shell.ts`, `placeholder.ts`, `index.html`, `app.css`, `base.css`; per area `<area>/{index.ts,slice.ts,<area>.css}` for `explore`, `centre`, `capture`, `dock`, `decode`, `review`; `centre/live-spectrum.ts`; stub contracts `dock/api.ts`, `decode/status-feed.ts`; `decode/{inspector.ts,inspector-slice.ts,inspector.css}`), tests `ui/test/app-store.test.ts` and `ui/test/app-shell.test.ts`, runner `ui/test/run.mjs`. Served at `/app.html`; the old stacked UI stays at `/` until T-156.
 
 ## Context
 
@@ -28,7 +28,7 @@ Constraints carried in:
 | Rendering | Each panel's `mount(el, ctx)` owns one `data-slot` subtree. Panels re-render from `store.select` on their own slices, using `h()` and `textContent` (never `innerHTML` with API strings). High-rate data bypasses the store: spectrum rows, PCM, per-frame meters. |
 | State | One immutable `AppState` with slices (§3). Actions are pure `(state) => patch` functions. Cross-panel communication goes only through the store. |
 | Transport | `ControlClient` (bearer header) for HTTP. `net.openStream` handles WebSockets with the §10 framing and refusals. `startPoll` polls without overlap and backs off on failure. Reconnect uses `backoffMs` (250 ms doubling to 10 s). |
-| API gaps | 13 found (§4.9). Each becomes a proposed backend task. The UI ships an interim behaviour and never computes the missing thing itself. |
+| API gaps | 14 entries in §4.9, numbered 1–13 (7 is split into 7a and 7b). Each becomes a proposed backend task. The UI ships an interim behaviour and never computes the missing thing itself. |
 | Migration | New app at `/app.html` next to `/`. Tasks T-150…T-155 fill slots in parallel. T-156 makes `/` the new app and deletes the DOM-bound old modules. |
 
 ## 1. Framework
@@ -105,7 +105,7 @@ Mount contract (`ui/src/app/context.ts`): `type MountFn = (el: HTMLElement, ctx:
 
 Rules for panels:
 - A panel never queries or changes DOM outside `el`. The one exception is `shell.ts`, which owns the top bar and the view switch.
-- `main.ts`'s `MOUNTS` table is the only shared edit point: each task swaps its placeholder for its module.
+- Each area's `ui/src/app/<area>/index.ts` exports `mounts: AreaMounts` (slot name → mount). `main.ts` imports the six areas once and mounts every table; a slot appears in exactly one area (tested). The owning task swaps its placeholders in its own `index.ts`; `decode/index.ts` (T-153) takes the `inspector` mount from T-154's `decode/inspector.ts`.
 - Shared DOM helpers (`dom.ts`) and transport helpers (`net.ts`) belong to T-149. A change to them is a small, reviewed edit made by T-150.
 
 ## 3. State store
@@ -126,18 +126,32 @@ A slice that changes must be a new object or array.
 | `theme` | `system` \| `dark` \| `light` | shell | shell (stamps `data-theme`) | UI; persisted per viewer |
 | `review` | `{open, tab, region}` | shell (button); T-151 (selection History); T-155 | T-155 | UI |
 | `conn` | `{api, spectrum, message}` | net and poll error handlers; T-152 | shell (connection note, token dialog) | transport |
-| `device` | `{loaded, live, finished, contentClass, centerHz, sampleRateHz, rowsPerS, recording}` | shell poll (T-150) | top bar, T-152 (time scale), T-155 | `GET /api/control/state`, 2 s |
+| `device` | `{loaded, live, finished, contentClass, centerHz, sampleRateHz, rowsPerS, recording}` | shell poll (T-150 only) | top bar, T-152 (time scale), T-155 (read only; its Device tab keeps the full control state in `review/slice.ts`) | `GET /api/control/state`, 2 s |
 | `live` | `{streamId, centerHz, bandwidthHz, bins, rowRateHz, view}` | T-152 (header, zoom and pan) | T-151 (inventory span), T-150 (capture), T-155 (report default span) | spectrum stream header plus UI zoom |
 | `focus` | `none` \| `{signal, id}` \| `{selection, id}` | T-151, T-152 (click or drag) | T-151 focus panel, T-152 brackets | UI |
 | `inventory` | `{tab, sort, rows by id, loadedAtS, error}` | T-151 poll | T-151, T-152 (brackets), T-150 (dock labels) | `GET /api/inventory`, 5 s, for the view span |
 | `selections` | `{list, sync}` | T-151 (mirrors `SelectionStore`) | T-152 (boxes), T-151 | `/api/selections` via `SelectionStore` |
 | `outputs` | `OutputEntry[]` | T-150 (`upsertOutput` / `removeOutput`); T-151 and T-153 through T-150's `outputs` actions | T-150 dock, T-151 (on-air dots, Listen pressed) | streams this page opened plus `GET /api/pipelines` |
 | `time` | `{live: true}` \| `{live: false, tS}` | T-150 (capture scrub, LIVE) | T-152 (history render), T-151 (inventory `t0`/`t1`), shell | UI cursor over the retained range |
-| `decode` | `{pipelineId, nodeId, frameSeq, fieldNodeId}` | T-153 (pipeline and stage), T-154 (frame and field) | T-153, T-154 | UI |
+| `decode` | `{pipelineId, nodeId}` | T-153 (pipeline and stage) | T-153, T-154 | UI |
+| `inspector` | `{frameSeq, fieldNodeId}` | T-154 (frame and field) | T-154 | UI |
 | `nav` | `{gotoHz, seq}` | shell (Go to) | T-152 (pan or retune), T-151 (focus nearest known row) | UI one-shot request |
 | `toast` | `{text, seq}` | anyone, via `toast(text)` | shell | UI |
 
-Owners extend only their own slice interface in `state.ts` (append-only), so merges stay trivial. Bookmarks (`{list}`) are added by T-155, and T-152 draws them when the slice exists.
+Each slice (type, initial value, pure actions) lives in its owner's file, and `state.ts` only composes them (`AppState extends` every area's state type; `initialState` spreads every area's initial value; it re-exports all slice modules, so `import … from "./state"` keeps working):
+
+| File | Owner | Top-level keys |
+|---|---|---|
+| `app/shell-slice.ts` | T-150 | `mode`, `theme`, `conn`, `device`, `nav`, `toast` (+ `parsePrefs`, `setMode`, `cycleTheme`, `requestGoto`, `toast`) |
+| `app/capture/slice.ts` | T-150 | `time` (+ `goLive`, `reviewAt`) |
+| `app/dock/slice.ts` | T-150 | `outputs` (+ `upsertOutput`, `removeOutput`) |
+| `app/explore/slice.ts` | T-151 | `focus`, `inventory`, `selections` (+ `focusSignal`, `focusSelection`) |
+| `app/centre/slice.ts` | T-152 | `live` |
+| `app/decode/slice.ts` | T-153 | `decode` |
+| `app/decode/inspector-slice.ts` | T-154 | `inspector` |
+| `app/review/slice.ts` | T-155 | `review` (+ `toggleReview`, `openReview`) |
+
+A task adds new top-level keys in its own slice file (e.g. T-155 adds `bookmarks`, and T-152 draws them when the key exists). Writers of another task's key use that owner's exported actions.
 
 ### 3.2 How the API feeds the store
 
@@ -160,7 +174,7 @@ Owners extend only their own slice interface in `state.ts` (append-only), so mer
     - status records (type 3, `level_dbfs`, `snr_db`, `squelch_open`, `refined_center_hz`) update the entry at ≤ 4 Hz;
     - PCM goes to the worklet;
     - no automatic reconnect: a closed listen becomes `ended`, with Retry in the dock.
-  - **`/ws/open/inspector?pipeline=<id>`** (T-154): frame records are kept in a panel-local ring of 200. Status records (`<node>.lock/quality/error_rate`) are summarised into T-153's quality tiles at ≤ 4 Hz. On close, reconnect with backoff while the pipeline is `running`.
+  - **`/ws/open/inspector?pipeline=<id>`**, opened only through T-153's `decode/status-feed.ts` `subscribePipelineFeed` (one reference-counted socket per pipeline). T-154 subscribes to frames and keeps them in a panel-local ring of 200. T-153 subscribes to status records (`<node>.lock/quality/error_rate`) and summarises them into its quality tiles at ≤ 4 Hz. On close, the feed reconnects with backoff while the pipeline is `running`.
   - **`/ws/open/stage?pipeline&node&port[&view=spectrum]`** (T-153): opened only for the visible stage's plots and closed on stage change (a tap costs nothing until opened).
   - **Optional `/ws/anomalies`** (T-155) replaces the 30 s poll when present in `/api/streams`.
 - **Errors:**
@@ -198,7 +212,7 @@ Update modes: **poll** (interval in §3.2), **stream**, **action** (on user acti
 
 | Element | Route / stream | Fields used | Mode | Note |
 |---|---|---|---|---|
-| Confirmed / Candidates tabs and counts | `GET /api/inventory?f_lo&f_hi&state=confirmed` / `state=candidate` (`cursor`, `limit` ≤ 500) | `entries[].state`, `next_cursor` | poll | counts are rows in the view span ("this span") |
+| Confirmed / Candidates tabs and counts | `GET /api/inventory?f_lo&f_hi&state=confirmed` / `state=candidate` (`cursor`, `limit` ≤ 500) | `entries[].state`, `next_cursor` | poll | counts are rows in the view span ("this span"). **API GAP 13**: no `total`, so a count caps at the page size. Interim: show "500+" when `next_cursor` is present. |
 | Row frequency, bandwidth | same | `f_center_hz` (or `refined.center_hz` when present), `bandwidth_hz` | poll | |
 | Family / flag chips | same | `family`, `classification.family`, `explanations[0].flags` (`off-raster`, …), `known_status` | poll | "unknown" when `family` is null |
 | Candidate recurrence dots, "14×/h" | same | `recurrence.recent[]`, `recurrence.occurrences`, `span_s`, `duty_cycle` | poll | dots are a sparkline of `recent[].count` |
@@ -328,6 +342,7 @@ None are implemented here. Each gap has an interim UI behaviour, and none of the
 | 10 | DC mask on the live view | **DC notch extent on the live geometry**: `dc_excluded_hz` on the spectrum stream header (and `run`) | hk-pipeline, hk-api, stream-contract | small |
 | 11 | Hopping pipelines | **Document pipeline `follow_hops`** (served by `recipes/runtime.rs`) in docs/api.md, with a contract assertion | hk-api docs, hk-cli tests | small |
 | 12 | Decode step guide prose | **Recipe per-node `doc`** (additive recipe-schema field, shown in the step guide) | hk-recipe | small |
+| 13 | Inventory tab counts past one page | **Inventory `total`**: the matching row count (before `limit`/`cursor`) on `GET /api/inventory`, with a contract assertion | hk-model (repo query), hk-api | small |
 
 Small means ≤ 1 day for one agent with contract tests; large means a new store, block or contract surface needing review. GAPS 4, 6, 7a, 10 and 11 unlock most of the mockup and are independent of each other. GAP 5 changes the stream contract, so it goes to Fable or Opus.
 
@@ -352,9 +367,9 @@ Small means ≤ 1 day for one agent with contract tests; large means a new store
 ## 6. Testing
 
 - **Unit tests (existing style):**
-  - `node:test` files in `ui/test/*.test.ts`, bundled by esbuild and run by `npm test` (`just test-ui`);
+  - `node:test` files in `ui/test/*.test.ts`, bundled by esbuild and run under `node --test` by `ui/test/run.mjs` (`npm test`, `just test-ui`). The runner globs every `*.test.ts`, so a new `app-<panel>.test.ts` is picked up without editing `package.json`; `npm test -- app-store` runs only matching files;
   - each panel keeps its logic in pure exported functions (query builders, row→view-model, action→API call with an injected client, formatting), tested with fixture JSON captured from `hk serve --replay`;
-  - layout checks read `src/app/index.html` and `app.css` as text, as the skeleton's `app-shell.test.ts` does.
+  - layout checks read `src/app/index.html` and the CSS files `app.css` imports as text, as the skeleton's `app-shell.test.ts` does.
 - **Store tests:** every action in `state.ts` and the store contract (`app-store.test.ts`).
 - **Contract reliance:** the UI trusts `docs/api.md` as enforced by `crates/hk-cli/tests/api_contract.rs` (T-079). A UI task that needs a new field gets it from an API GAP task that updates api.md and the contract test together; the UI never guesses a shape.
 - **Fixtures:** `/api/*` JSON fixtures live under `ui/test/fixtures/` (T-156 moves the existing ones there), each with a `_comment` naming the command that produced it.
@@ -364,7 +379,7 @@ Small means ≤ 1 day for one agent with contract tests; large means a new store
 ## 7. Migration plan
 
 1. **T-149 (this):** skeleton at `/app.html` (`ui/src/app/`); `/` unchanged. Both pages share the `hk-token` session key, so `http://…/app.html#token=…` works.
-2. **T-150…T-155 in parallel:** each replaces its placeholder in `main.ts` `MOUNTS` and owns its files (§8). They import the old pure helpers (`inventory.ts`, `selections.ts`, `frame-inspector.ts`, `alarms.ts`, `report.ts`, `scheduler.ts`, `controls/*`, `axis.ts`, `audio-frames.ts`, `jitter.ts`, `waterfall.ts`) and must not change their exported behaviour, because the old page still uses them. If one needs a change, the task adds a new function rather than altering an old one. Every merge keeps both pages building and green, so the demo stays mergeable.
+2. **T-150…T-155 in parallel:** each replaces its placeholders in its own area `index.ts` and owns its files (§8). They import the old pure helpers (`inventory.ts`, `selections.ts`, `frame-inspector.ts`, `alarms.ts`, `report.ts`, `scheduler.ts`, `controls/*`, `axis.ts`, `audio-frames.ts`, `jitter.ts`, `waterfall.ts`) and must not change their exported behaviour, because the old page still uses them. If one needs a change, the task adds a new function rather than altering an old one. Every merge keeps both pages building and green, so the demo stays mergeable.
 3. **T-156:**
    - build `src/app/index.html` → `dist/index.html` and the old page → `dist/classic.html` for one merge;
    - then delete the DOM-bound old classes (`main.ts` `Live`, `InventoryTable`, `SelectionPanel`, `FrameInspectorPanel`, `ReportPanel`, `AlarmsPanel`, `SchedulerPanel`, `ControlPanel`, `HistoryPanel` DOM parts, `installListen` DOM wiring) and the old `index.html`/`style.css`;
@@ -379,16 +394,20 @@ Small means ≤ 1 day for one agent with contract tests; large means a new store
 Shared rules for every task:
 
 - **Thin client only.** A new "signal-looking" number must come from a route field. If it's missing, use the §4.9 interim behaviour and name the gap in the task report.
-- **Stay inside your subtree.** Mount only into your slots, extend only your own state slices (append-only in `state.ts`), and add CSS only in your own `/* ---- <task> ---- */` section at the end of `app.css`, scoped under your slot's class.
-- **Leave shared files alone.** Don't edit another task's files, or `store.ts`, `net.ts`, `dom.ts`, `context.ts`. The only exception is T-150, which may make small additive changes to `net.ts` and `dom.ts`.
+- **Stay inside your subtree.** Mount only into your slots (in your area's `index.ts`), extend only your own slice file (§3.1), and add CSS only in your own area CSS file (`<area>/<area>.css`, or `decode/inspector.css` for T-154), scoped under your slot's class.
+- **Panel tasks don't edit `main.ts`, `state.ts`, `app.css` or `package.json`.** Those are composition points that already import every area; a need to change one is a T-149 follow-up, not a panel edit.
+- **Leave shared files alone.** Don't edit another task's files, or `store.ts`, `net.ts`, `dom.ts`, `context.ts`, `placeholder.ts`. The only exception is T-150, which may make small additive changes to `net.ts`, `dom.ts` and the shell sections of `base.css`.
+- **Cross-task calls go through the stub contracts,** which exist now with typed signatures and doc comments naming the owner. Callers code against them in parallel; the owner implements the bodies without changing the signatures (a signature change is a reviewed edit coordinated with the callers):
+  - `app/dock/api.ts` (owner T-150; callers T-151, T-153). `startListen(ctx, target: ListenTarget): string | null` with `ListenTarget = {kind: "emitter", emitterId, label} | {kind: "band", fLoHz, fHiHz, label}`; `startRecordsOutput(ctx, target: {pipelineId, outputId, label}): string | null`; `stopOutput(ctx, id): void`. Until T-150 lands, the start functions toast "not implemented yet (T-150)" and return null; `stopOutput` is a no-op.
+  - `app/decode/status-feed.ts` (owner T-153; caller T-154). `subscribePipelineFeed(ctx, pipelineId, {status?(u: StatusUpdate), frame?(f: FrameRecord), state?(s: FeedState, message)}): () => void`, one reference-counted `/ws/open/inspector` socket per pipeline (§3.2). Until T-153 lands, it delivers nothing and returns a no-op unsubscribe.
 - **Don't change old modules' exports** (§7).
-- **Tests:** add `ui/test/app-<panel>.test.ts` to the `npm test` script. Where two tasks append to the same script line, resolve the conflict by keeping both.
+- **Tests:** add `ui/test/app-<panel>.test.ts`; the runner (`ui/test/run.mjs`) picks it up by name.
 - **Done when:** build, typecheck and tests are green; the layout matches the mockup at 1440, 1024 and 400 px; there's no page-wide horizontal scroll; both themes are legible; the old `/` page still works.
 
 ### T-150: shell, Outputs dock, Capture timeline (Sonnet, medium)
-- **Owns:** `ui/src/app/shell.ts`, `ui/src/app/dock/*` (new: `outputs.ts`, `audio-session.ts`), `ui/src/app/capture/*` (new: `timeline.ts`); small additive edits to `net.ts` and `dom.ts`.
+- **Owns:** `ui/src/app/shell.ts`, `shell-slice.ts`, the shell sections of `base.css`, `ui/src/app/dock/*` (`index.ts`, `slice.ts`, `dock.css`, `api.ts`; new: `outputs.ts`, `audio-session.ts`), `ui/src/app/capture/*` (`index.ts`, `slice.ts`, `capture.css`; new: `timeline.ts`); small additive edits to `net.ts` and `dom.ts`.
 - **State:**
-  - writes `device`, `conn.api`, `outputs` (it owns the `upsertOutput`/`removeOutput` actions and exports `startListen(ctx, target)` and `stopOutput(ctx, id)` for T-151 and T-153), and `time`;
+  - writes `device` (sole writer), `conn.api`, `outputs` (it owns the `upsertOutput`/`removeOutput` actions and implements the `dock/api.ts` contract, `startListen`, `startRecordsOutput` and `stopOutput`, for T-151 and T-153), and `time`;
   - reads `live`, `inventory` (labels).
 - **API:**
   - `/api/control/state` (poll), `/api/streams` (tcp address);
@@ -403,9 +422,10 @@ Shared rules for every task:
   - unit tests cover the dock view model, address formatting, scrub pct→time mapping and the activity-band column reduction.
 
 ### T-151: Explore sidebar and focus panel (Sonnet, medium)
-- **Owns:** `ui/src/app/explore/inventory.ts`, `explore/selections.ts`, `explore/focus.ts`, `explore/format.ts` (new).
+- **Owns:** `ui/src/app/explore/*`: `index.ts`, `slice.ts`, `explore.css`; new `inventory.ts`, `selections.ts`, `focus.ts`, `format.ts`.
+- **Tab counts:** "500+" when the page has `next_cursor` (GAP 13 interim).
 - **State:** writes `inventory`, `selections` (mirror of `SelectionStore`), `focus`, `review` (History action), `mode` (Open in Decode); reads `live.view`, `time`, `outputs`, `nav`.
-- **API:** `/api/inventory` (per tab, view span, `t0`/`t1` when reviewing), `/api/inventory/{id}` (+ promote, delete), `/api/selections*` via `SelectionStore`, `/api/recipes` + `POST /api/pipelines` (Decode action), `POST /api/outputs/record/start` (Record IQ), T-150's `startListen`.
+- **API:** `/api/inventory` (per tab, view span, `t0`/`t1` when reviewing), `/api/inventory/{id}` (+ promote, delete), `/api/selections*` via `SelectionStore`, `/api/recipes` + `POST /api/pipelines` (Decode action), `POST /api/outputs/record/start` (Record IQ), `dock/api.ts` `startListen`/`stopOutput` (T-150 contract).
 - **Acceptance:**
   - Promote and Delete are reachable at 400 px without horizontal scroll, and always visible on touch;
   - the tabs switch to a focused row's state;
@@ -417,7 +437,7 @@ Shared rules for every task:
   - unit tests cover the row view model (chips, recurrence text, dots), the explanation "why" formatting from evidence, the refined note, selection found-inside ordering, and action→API calls with a fake client.
 
 ### T-152: centre live view (Opus, medium)
-- **Owns:** `ui/src/app/centre/*` (`live-spectrum.ts` from the skeleton, plus `overlays.ts`, `axis-view.ts`, `review-render.ts`); `ui/src/waterfall.ts` for additive options only (e.g. `setSpecFrac`, `reset()`, theme-neutral line colour), never breaking the old page.
+- **Owns:** `ui/src/app/centre/*` (`index.ts`, `slice.ts`, `centre.css`, `live-spectrum.ts` from the skeleton, plus new `overlays.ts`, `axis-view.ts`, `review-render.ts`); `ui/src/waterfall.ts` for additive options only (e.g. `setSpecFrac`, `reset()`, theme-neutral line colour), never breaking the old page.
 - **State:** writes `live` (geometry, view), `focus` (click), `conn.spectrum`, selections via `SelectionStore` (drag); reads `inventory`, `selections`, `time`, `nav`, `device`, bookmarks (if present).
 - **API:** `/api/streams`, `/ws/<spectrum>`, `/api/history` (review render), `/api/observations` (DC mask interim), `POST /api/control/center` (Go to outside the window, live only), `POST /api/selections`.
 - **Acceptance:**
@@ -430,14 +450,14 @@ Shared rules for every task:
   - unit tests cover bracket placement (Hz→%, clamping, narrow rule), history grid→rows mapping, and the goto decision (pan vs retune vs `not_live`).
 
 ### T-153: Decode workbench (Sonnet, medium; stage-plot data paths reviewed by Opus)
-- **Owns:** `ui/src/app/decode/pipelines.ts`, `decode/stages.ts`, `decode/plots.ts`, `decode/params.ts`, `decode/svg.ts` (new).
-- **State:** writes `decode.pipelineId`, `decode.nodeId`, T-150's outputs via `startRecordsOutput`; reads `focus`, `inventory`, `live.view`.
+- **Owns:** `ui/src/app/decode/index.ts`, `decode/slice.ts`, `decode/decode.css`, `decode/status-feed.ts` (contract stub, implement it); new `decode/pipelines.ts`, `stages.ts`, `plots.ts`, `params.ts`, `svg.ts`. Not `decode/inspector*` (T-154).
+- **State:** writes `decode` (`pipelineId`, `nodeId`), T-150's outputs via `dock/api.ts` `startRecordsOutput`/`stopOutput`; reads `focus`, `inventory`, `live.view`.
 - **API:**
   - `/api/pipelines` (poll + CRUD, recipe PUT, save, channels);
   - `/api/recipes*`, `/api/recipes/validate`, `/api/blocks`;
   - `/ws/open/stage` (visible plots only);
   - `/api/assist/*` + `/api/captures/{id}/frames` (Use suggestions);
-  - inspector `status` records (quality) via a small `decode/status-feed.ts` shared with T-154: T-153 owns it, T-154 subscribes.
+  - inspector `status` records (quality) via `decode/status-feed.ts` `subscribePipelineFeed`: T-153 implements it, T-154 subscribes to frames.
 - **Acceptance:**
   - pipelines show running/hopping/ended with `end_reason`;
   - selecting a stage opens exactly its taps and closes the previous ones;
@@ -448,9 +468,9 @@ Shared rules for every task:
   - unit tests cover the recipe↔stage view model, parameter edit → draft recipe document, status→chip mapping, and frames-rate arithmetic.
 
 ### T-154: packet inspector (Sonnet, medium)
-- **Owns:** `ui/src/app/decode/inspector.ts`, `decode/hexview.ts` (new).
-- **State:** writes `decode.frameSeq`, `decode.fieldNodeId`; reads `decode.pipelineId`.
-- **API:** `/ws/open/inspector?pipeline=` (live frames), `/api/captures`, `/api/captures/{id}/frames`, `POST /api/captures/{id}/parse`, `/api/streams` (served address). Reuses `frame-inspector.ts` pure helpers (`buildTree`, `cycleLeafAt`, `hexBytes`, `asciiChar`, `fitSummaryText`, `crcClass`).
+- **Owns:** `ui/src/app/decode/inspector.ts` (exports `mountInspector`, imported by T-153's `decode/index.ts`), `decode/inspector-slice.ts`, `decode/inspector.css`; new `decode/hexview.ts`.
+- **State:** writes `inspector` (`frameSeq`, `fieldNodeId`); reads `decode.pipelineId`.
+- **API:** live frames from `/ws/open/inspector?pipeline=` through `decode/status-feed.ts` `subscribePipelineFeed(…, {frame})` (T-153 contract; never a second socket), `/api/captures`, `/api/captures/{id}/frames`, `POST /api/captures/{id}/parse`, `/api/streams` (served address). Reuses `frame-inspector.ts` pure helpers (`buildTree`, `cycleLeafAt`, `hexBytes`, `asciiChar`, `fitSummaryText`, `crcClass`).
 - **Acceptance:**
   - frame → hex+ASCII → tree;
   - clicking a byte selects `byte_index[b][0]` and repeat clicks cycle; clicking a field highlights its `bytes`;
@@ -461,8 +481,8 @@ Shared rules for every task:
   - unit tests cover the ring buffer, the frame view model and byte colouring from layer ranges.
 
 ### T-155: Review drawer (Sonnet, medium)
-- **Owns:** `ui/src/app/review/*` (`drawer.ts`, `alarms.ts`, `report.ts`, `history.ts`, `scheduler.ts`, `device.ts`, `bookmarks.ts`).
-- **State:** writes `review`, adds a `bookmarks` slice; reads `live.view`, `time`, `device`.
+- **Owns:** `ui/src/app/review/*` (`index.ts`, `slice.ts`, `review.css`; new `drawer.ts`, `alarms.ts`, `report.ts`, `history.ts`, `scheduler.ts`, `device.ts`, `bookmarks.ts`).
+- **State:** writes `review` (including the Device tab's full control state) and adds a `bookmarks` key, both in `review/slice.ts`; reads `live.view`, `time`, `device` (never writes `device`, which is T-150's).
 - **API:** `/api/anomalies*`, `/api/report`, `/api/history` + `/api/floor`, `/api/scheduler*`, `/api/control/*` (via `controls/model.ts` `panelModel`), `/api/bookmarks*`. Reuses the pure helpers of `alarms.ts`, `report.ts`, `scheduler.ts`, `history.ts` and `controls/*`; renders new DOM rather than moving the old classes.
 - **Acceptance:**
   - every M0b–M2 panel from the old page is reachable from the drawer: nothing is lost;
@@ -479,17 +499,15 @@ Swap `/` to the new app, remove the old DOM code (§7), do the phone-width and t
 
 | Path | T-150 | T-151 | T-152 | T-153 | T-154 | T-155 |
 |---|---|---|---|---|---|---|
-| `app/shell.ts`, `app/dock/*`, `app/capture/*` | own | | | | | |
+| `app/shell.ts`, `app/shell-slice.ts`, `base.css` shell sections, `app/dock/*` (incl. `api.ts`), `app/capture/*` | own | call `dock/api.ts` | | call `dock/api.ts` | | |
 | `app/explore/*` | | own | | | | |
 | `app/centre/*`, `waterfall.ts` (additive) | | | own | | | |
-| `app/decode/{pipelines,stages,plots,params,svg,status-feed}.ts` | | | | own | read | |
-| `app/decode/{inspector,hexview}.ts` | | | | | own | |
+| `app/decode/{index,slice,status-feed,pipelines,stages,plots,params,svg}.ts`, `decode/decode.css` | | | | own | call `status-feed.ts` | |
+| `app/decode/{inspector,inspector-slice,hexview}.ts`, `decode/inspector.css` | | | | | own | |
 | `app/review/*` | | | | | | own |
-| `app/main.ts` `MOUNTS` | own lines | own lines | own lines | own lines | own lines | own lines |
-| `app/state.ts` | own slices | own slices | own slices | own slices | own slices | own slices |
-| `app/app.css` | own section | own section | own section | own section | own section | own section |
-| `app/{store,net,dom,context}.ts` | additive | – | – | – | – | – |
-| `package.json` test script | append | append | append | append | append | append |
+| `ui/test/app-<panel>.test.ts` | own file | own file | own file | own file | own file | own file |
+| `app/{main,state}.ts`, `app/app.css`, `package.json`, `ui/test/run.mjs` | – | – | – | – | – | – |
+| `app/{store,net,dom,context,placeholder}.ts` | additive (`net`, `dom`) | – | – | – | – | – |
 
 ## Consequences
 
@@ -503,11 +521,11 @@ T-149 skeleton, `npm run build` (esbuild 0.28.2, minified, es2020), 2026-09-15:
 
 | Artifact | Size | Budget |
 |---|---|---|
-| `dist/app.js` | 24.0 KB minified, 9.4 KB gzip (store, shell, net, the reused `waterfall.ts` + `axis.ts` + `controls/{client,freq}.ts`) | ≤ 150 KB / ≤ 45 KB gzip |
-| `dist/app.css` | 10.2 KB | ≤ 40 KB |
+| `dist/app.js` | 24.4 KB minified, 9.7 KB gzip (store, shell, net, the reused `waterfall.ts` + `axis.ts` + `controls/{client,freq}.ts`) | ≤ 150 KB / ≤ 45 KB gzip |
+| `dist/app.css` | 8.3 KB (esbuild-bundled from `app.css` imports, minified) | ≤ 40 KB |
 | old `dist/main.js`, for comparison | 113.9 KB minified | – |
 
-`npm run build`, `npm run typecheck` and `npm test` are green (old suites, plus `app-store.test.ts` with 10 tests and `app-shell.test.ts` with 7). The skeleton was not opened against a running `hk serve` (no Rust build in T-149): T-150 checks `/app.html` in a browser as its first step.
+`npm run build`, `npm run typecheck` and `npm test` are green: 13 test files, 157 tests, including `app-store.test.ts` with 13 tests and `app-shell.test.ts` with 9. After the review fixes, the old page's `dist/main.js`, `audio-worklet.js`, `index.html` and `style.css` are byte-identical. The skeleton was not opened against a running `hk serve` (no Rust build in T-149): T-150 checks `/app.html` in a browser as its first step.
 
 ## Sources
 

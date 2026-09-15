@@ -1,12 +1,14 @@
 // MUI state store (ADR-0013 §3): one immutable state object, shallow top-level patches, and
-// selector subscriptions that fire only when the selected value changes. No dependencies; ~60
-// lines on purpose, so every panel and test uses the same small contract.
+// selector subscriptions that fire only when the selected value changes. No dependencies; small on
+// purpose, so every panel and test uses the same contract.
 //
 // Rules:
 // - State is replaced, never mutated: `set` merges a top-level patch into a new object, and a
 //   slice that changes must be a new object/array (panels compare selected values with Object.is).
 // - `set` called from inside a listener is queued and applied after the current notification
 //   pass, so listeners always see a consistent (state, prev) pair.
+// - One panel's bug can't starve the others: a listener that throws is logged (with its function
+//   name when it has one) and the remaining listeners still run; queued patches still flush.
 
 export type Patch<S> = Partial<S> | ((s: S) => Partial<S>);
 export type Equals<T> = (a: T, b: T) => boolean;
@@ -21,11 +23,18 @@ export interface Store<S> {
   select<T>(sel: (s: S) => T, fn: (v: T, prev: T | undefined) => void, opts?: { eq?: Equals<T>; immediate?: boolean }): () => void;
 }
 
+interface Listener<S> { call: (s: S, prev: S) => void; name: string }
+
 export function createStore<S extends object>(initial: S): Store<S> {
   let state = initial;
-  const listeners = new Set<(s: S, prev: S) => void>();
+  const listeners = new Set<Listener<S>>();
   const queue: Patch<S>[] = [];
   let notifying = false;
+
+  const add = (l: Listener<S>) => {
+    listeners.add(l);
+    return () => { listeners.delete(l); };
+  };
 
   const apply = (p: Patch<S>) => {
     const part = typeof p === "function" ? p(state) : p;
@@ -35,7 +44,13 @@ export function createStore<S extends object>(initial: S): Store<S> {
     state = { ...state, ...part };
     notifying = true;
     try {
-      for (const fn of [...listeners]) fn(state, prev);
+      for (const l of [...listeners]) {
+        try {
+          l.call(state, prev);
+        } catch (err) {
+          console.error(`store listener ${l.name} threw`, err);
+        }
+      }
     } finally {
       notifying = false;
     }
@@ -46,25 +61,35 @@ export function createStore<S extends object>(initial: S): Store<S> {
     set(p) {
       queue.push(p);
       if (notifying) return;
-      while (queue.length) apply(queue.shift()!);
+      // A throwing patch function is reported to the caller, but only after the rest of the
+      // queue (patches queued by listeners) has been applied.
+      let failed: { err: unknown } | null = null;
+      while (queue.length) {
+        try {
+          apply(queue.shift()!);
+        } catch (err) {
+          failed ??= { err };
+        }
+      }
+      if (failed) throw failed.err;
     },
     subscribe(fn) {
-      listeners.add(fn);
-      return () => listeners.delete(fn);
+      return add({ call: fn, name: fn.name || "(anonymous subscribe)" });
     },
     select(sel, fn, opts = {}) {
       const eq = opts.eq ?? Object.is;
       let last = sel(state);
       if (opts.immediate) fn(last, undefined);
-      const l = (s: S) => {
-        const v = sel(s);
-        if (eq(v, last)) return;
-        const prev = last;
-        last = v;
-        fn(v, prev);
-      };
-      listeners.add(l);
-      return () => listeners.delete(l);
+      return add({
+        name: fn.name || "(anonymous select)",
+        call: (s) => {
+          const v = sel(s);
+          if (eq(v, last)) return;
+          const prev = last;
+          last = v;
+          fn(v, prev);
+        },
+      });
     },
   };
 }

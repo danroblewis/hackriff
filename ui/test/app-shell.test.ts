@@ -6,11 +6,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { ControlError } from "../src/controls/client";
 import type { ControlState } from "../src/controls/model";
+import { mounts as capture } from "../src/app/capture";
+import { mounts as centre } from "../src/app/centre";
+import { mounts as decode } from "../src/app/decode";
+import { mounts as dock } from "../src/app/dock";
+import { mounts as explore } from "../src/app/explore";
+import { mounts as review } from "../src/app/review";
 import { apiConnFor, backoffMs, parseSpectrumRecord, wsUrl } from "../src/app/net";
 import { deviceFrom } from "../src/app/shell";
 
 const html = readFileSync("src/app/index.html", "utf8");
-const css = readFileSync("src/app/app.css", "utf8");
+const entryCss = readFileSync("src/app/app.css", "utf8");
+const cssImports = [...entryCss.matchAll(/@import "\.\/([^"]+)";/g)].map((m) => m[1]);
+const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n");
+const SLOTS = ["inventory", "selections", "live", "axis", "capture", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review"];
 const replayState = JSON.parse(readFileSync("test/control_state_replay.json", "utf8")) as ControlState;
 
 test("backoff doubles from 250 ms and caps at 10 s", () => {
@@ -68,13 +77,23 @@ test("device slice from a replay control state", () => {
 });
 
 test("the app page has every panel slot once, and the mode toggle", () => {
-  for (const s of ["inventory", "selections", "live", "axis", "capture", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review"]) {
+  for (const s of SLOTS) {
     assert.equal(html.split(`data-slot="${s}"`).length - 1, 1, `slot ${s}`);
   }
   assert.match(html, /data-mode="explore" aria-pressed="true"/);
   assert.match(html, /data-mode="decode" aria-pressed="false"/);
   assert.match(html, /id="view-decode" hidden/);
   assert.doesNotMatch(html, /fonts\.googleapis|<script[^>]+https?:/, "CSP is default-src 'self'");
+});
+
+test("every panel slot is mounted by exactly one area index", () => {
+  const names = [explore, centre, capture, decode, dock, review].flatMap((m) => Object.keys(m));
+  assert.deepEqual([...names].sort(), [...SLOTS].sort());
+});
+
+test("app.css is an import list: base first, then one file per area", () => {
+  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "capture/capture.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "review/review.css"]);
+  assert.doesNotMatch(entryCss.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@import "[^"]+";/g, ""), /\S/, "no rules in app.css itself");
 });
 
 test("app CSS keeps the mockup breakpoints, both themes and no page-wide horizontal scroll", () => {

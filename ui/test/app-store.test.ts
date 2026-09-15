@@ -59,6 +59,47 @@ test("set from inside a listener is queued, so every listener sees consistent pa
   assert.deepEqual(s.get(), { a: 1, b: 1 });
 });
 
+test("a throwing listener is logged by name and the others still receive every update", () => {
+  const s = createStore({ a: 0, b: 0 });
+  const errors: unknown[][] = [];
+  const orig = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    const seen: string[] = [];
+    s.subscribe(function brokenPanel() { throw new Error("boom"); });
+    s.select((st) => st.a, () => { throw new Error("select boom"); });
+    s.subscribe((st) => { if (st.a === 1 && st.b === 0) s.set({ b: 1 }); }); // queues a patch
+    s.subscribe((st, prev) => seen.push(`${prev.a}${prev.b}->${st.a}${st.b}`));
+    s.set({ a: 1 });
+    assert.deepEqual(seen, ["00->10", "10->11"], "queued patch flushed despite the throwing listeners");
+    assert.deepEqual(s.get(), { a: 1, b: 1 });
+    assert.equal(errors.length, 3, "brokenPanel twice (both passes), the select listener once");
+    assert.match(String(errors[0][0]), /brokenPanel/);
+    assert.match(String(errors[1][0]), /anonymous select/);
+    s.set({ a: 2 });
+    assert.equal(seen.at(-1), "11->21", "the store keeps working afterwards");
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("a throwing patch function still lets queued patches flush, then reaches the caller", () => {
+  const s = createStore({ a: 0, b: 0 });
+  s.subscribe((st) => { if (st.a === 1) s.set(() => { throw new Error("bad patch"); }); });
+  s.subscribe((st) => { if (st.a === 1 && st.b === 0) s.set({ b: 1 }); });
+  assert.throws(() => s.set({ a: 1 }), /bad patch/);
+  assert.deepEqual(s.get(), { a: 1, b: 1 });
+});
+
+test("initialState composes every area slice", () => {
+  const st = initialState();
+  for (const k of ["mode", "theme", "conn", "device", "nav", "toast", "time", "outputs", "focus", "inventory", "selections", "live", "decode", "inspector", "review"]) {
+    assert.ok(k in st, `missing ${k}`);
+  }
+  assert.deepEqual(st.decode, { pipelineId: null, nodeId: null });
+  assert.deepEqual(st.inspector, { frameSeq: null, fieldNodeId: null });
+});
+
 test("prefs parse defensively", () => {
   assert.deepEqual(parsePrefs(null), { mode: "explore", theme: "system" });
   assert.deepEqual(parsePrefs("{bad"), { mode: "explore", theme: "system" });

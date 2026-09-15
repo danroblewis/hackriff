@@ -13,3 +13,7 @@ export interface AppContext {
 
 /** A panel entry point. Owns everything inside `el`; never touches DOM outside it. */
 export type MountFn = (el: HTMLElement, ctx: AppContext) => void;
+
+/** What each area's `index.ts` exports as `mounts`: `data-slot` name → mount. main.ts mounts every
+ * area's table; a slot appears in exactly one area. */
+export type AreaMounts = Readonly<Record<string, MountFn>>;

@@ -5,9 +5,9 @@
   "description": "hackriff web UI (T-022a, T-044, T-051): WebGL2 waterfall over the stream bridge, SDR control panel, region-over-time history; MUI one-screen app at /app.html (T-149, ADR-0013)",
   "license": "UNLICENSED",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --minify --sourcemap --target=es2020 --outfile=dist/main.js && esbuild src/audio-worklet.ts --bundle --minify --target=es2020 --outfile=dist/audio-worklet.js && cp src/index.html src/style.css dist/ && esbuild src/app/main.ts --bundle --minify --sourcemap --target=es2020 --outfile=dist/app.js && cp src/app/index.html dist/app.html && cp src/app/app.css dist/app.css",
+    "build": "esbuild src/main.ts --bundle --minify --sourcemap --target=es2020 --outfile=dist/main.js && esbuild src/audio-worklet.ts --bundle --minify --target=es2020 --outfile=dist/audio-worklet.js && cp src/index.html src/style.css dist/ && esbuild src/app/main.ts --bundle --minify --sourcemap --target=es2020 --outfile=dist/app.js && esbuild src/app/app.css --bundle --minify --outfile=dist/app.css && cp src/app/index.html dist/app.html",
     "typecheck": "tsc --noEmit",
-    "test": "esbuild test/axis.test.ts test/selections.test.ts test/inspect.test.ts test/listen.test.ts test/controls.test.ts test/outputs.test.ts test/inventory.test.ts test/frame-inspector.test.ts test/report.test.ts test/alarms.test.ts test/scheduler.test.ts test/app-store.test.ts test/app-shell.test.ts --bundle --platform=node --format=esm --outdir=node_modules/hk-ui-test --out-extension:.js=.mjs --log-level=warning && node node_modules/hk-ui-test/axis.test.mjs && node node_modules/hk-ui-test/selections.test.mjs && node node_modules/hk-ui-test/inspect.test.mjs && node node_modules/hk-ui-test/listen.test.mjs && node node_modules/hk-ui-test/controls.test.mjs && node node_modules/hk-ui-test/outputs.test.mjs && node node_modules/hk-ui-test/inventory.test.mjs && node node_modules/hk-ui-test/frame-inspector.test.mjs && node node_modules/hk-ui-test/report.test.mjs && node node_modules/hk-ui-test/alarms.test.mjs && node node_modules/hk-ui-test/scheduler.test.mjs && node node_modules/hk-ui-test/app-store.test.mjs && node node_modules/hk-ui-test/app-shell.test.mjs"
+    "test": "node test/run.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
