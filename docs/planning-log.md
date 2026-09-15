@@ -1039,3 +1039,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Checked OK:** `refresh_bandit` is an atomic compare; the `on_member` scan is bounded (32); hub publish runs on the control thread; bandit-off behaviour matches main apart from the intended follow-ups; the T-115 observers are intact.
   - **Merge order:** **T-118 → T-119 → T-127 → T-121**. All pairs have additive conflicts (ApiState field, serve_api init, api.md sections); run api_contract after each merge.
   Fix round running, including nits: cut-end credit, TableFull→409, 503 cancel flag, bounded POI cost, doc comments.
+- **B0.311 T-121 fix round done** (c732f17).
+  - **Report grid bounded:** finest level within 4096×1024 and 500k cells, else 400. A 48 h×20 MHz report is 153,600 cells. It's read in ≤256-row tile-aligned chunks with short history locks, and JSON/CSV/PNG share one grid.
+  - **Tile stand-in is honest:** `fco: None`, value in `fco_all_visits`, `revisit_biased: true`, new additive `ThresholdMethod::HistoryTile{margin_db}`, and `ReportEmitter.fco_all_visits`.
+  - **Log coverage** takes one pass over segments (`observations_of_each`).
+  - **E2E top-emitter assert** is now unconditional.
+  - **Partial-log warning** names the time before which data is unobserved.
+
+  Tests: report 11, pipeline 4, hk-model 31, api_contract 18, scene e2e pass. Merges last per order T-118 → T-119 → T-127 → T-121.

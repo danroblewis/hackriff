@@ -1930,7 +1930,7 @@ tasks:
     milestone: M2
     title: "Survey reports + richer history queries (C26/C39): report(region, span)"
     status: review
-    commit: b41fbdd
+    commit: c732f17
     deps: [T-113, T-116, T-118]
     parallel_group: M2R
     use_cases: [AWARE-033, RESEARCH-050, AWARE-042]
