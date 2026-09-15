@@ -463,3 +463,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-066 merged** by the coordinator (b7bbe15 → 230d652, clean merge, 22 files including a listen lifecycle test). Its agent never reported, so a full verification is running.
   - **Resumed with budget guidance:** T-073 (regression) and T-070 (refinement).
   - **Paused:** T-072 (staged WIP kept) and T-061 (back to todo).
+- **B0.152 T-066 merge verified** (lint, 146 Rust test groups including the new listen lifecycle tests, py, ui, acceptance green). The only failure is the known intermittent `listen_retune` no-analog-mode refusal (T-073, resumed). T-066 adds no new failures.

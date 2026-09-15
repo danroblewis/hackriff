@@ -1093,7 +1093,7 @@ tasks:
     milestone: M0b
     title: Listen cap and session leaks (configurable budget-based cap default >=8; close chains on WS close/tab gone/idle/half-open; 503 replumbing)
     status: done
-    commit: "b7bbe15 (merged 230d652; agent terminated by spend limit before reporting - coordinator verification running)"
+    commit: "b7bbe15 (merged 230d652; coordinator verification: lint, 146 Rust test groups incl. listen_lifecycle, py, ui, acceptance green; only failure the known listen_retune no-analog-mode flake owned by T-073)"
     user_report: "live demo build 6b17fe5: 3rd /ws/open/listen refused busy '2 listeners already running' (503) while user may not have had 2 tabs playing; stream ids reached listen/48 (suspected leaked sessions)"
     deps: [T-043]
     parallel_group: P
