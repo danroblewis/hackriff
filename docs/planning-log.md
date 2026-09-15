@@ -912,3 +912,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **nextest:** `a_slow_disk_drops_and_counts_without_blocking_the_publisher` (hk-store decoded, wall-time assert) moved to heavy-serial with 1 retry after failing twice under load.
 
   T-125 merges after the in-flight full check.
+- **B0.289 Full check of main f54e67d (T-113): green.** Lint clean; nextest + UI 1186/1186 in 297 s (cold build after the target cleanup); acceptance 29/29 in 64 s. **T-125 merged** (1ebe82c). Full check covering T-125 running.
