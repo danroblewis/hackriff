@@ -1597,7 +1597,9 @@ tasks:
   - id: T-097
     milestone: M1
     title: "M1 Tutorial 4: ADS-B recipe + blind acceptance vs readsb (live HIL deferred: 1090 MHz antenna)"
-    status: in-progress
+    status: blocked
+    commit: 7fc75c9
+    blocked_by: T-110
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-001]
@@ -1766,6 +1768,20 @@ tasks:
     found_by: "T-095 (Sonnet, out of budget) 2026-09-15: 4-channel pager scene (~10 kHz channels, 35-38 kHz apart) -> inventory shows 1 of 4 distinct; others merged into 118 kHz and 49 kHz clusters; follow_hops detections source never resolves the set"
     acceptance: "stage where channels merge measured and root cause fixed blind (no raster/lookups), with a component test that close-packed simultaneous narrowband bursts stay separate; hk-detect hop-set/fragment/915 tests green; tutorial_pocsag un-ignored and passing blind (pages vs hidden truth, channel tags, simulcast once); tutorial doc numbers filled"
     area: crates/hk-detect (grouping/merge), crates/hk-pipeline (detect), py synth scene, tests/e2e, docs/tutorials/02-pocsag.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-110
+    milestone: M1
+    title: "ADS-B tutorial continuation: ppm_demod content-dependent decode failures (12/16), real readsb agreement, messages output sink"
+    status: in-progress
+    deps: [T-097]
+    parallel_group: M1T3
+    use_cases: [SIGNAL-001]
+    found_by: "T-097 (Sonnet, 480k tokens) 2026-09-15: fixed aircraft x message-kind pairs never decode (0/80), CRC valid 24%; acceptance weakened to >=12/16; readsb agreement skipped claiming readsb absent though /opt/homebrew/bin/readsb exists; OutputKind::Messages still Idle in recipe runtime"
+    acceptance: "root cause of content-dependent ppm_demod failures fixed with a reproducing unit test (alloc-free kept); blind tutorial_adsb asserts all 16 distinct truth squitters with exact fields; readsb agreement actually run (recipe decodes >= readsb on the fixture, fields match); messages sink wired if small; tutorial numbers updated"
+    area: crates/hk-blocks/src/blocks/iq/ppm.rs, tests/e2e/tests/acceptance/tutorial_adsb.rs, crates/hk-pipeline/src/recipes/runtime.rs, docs/tutorials/04-adsb.md
     needs: none
     model: opus
     effort: medium
