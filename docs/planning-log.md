@@ -1999,3 +1999,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.436 T-179 launched (Sonnet, UI-only).** Goal: MUI bundle within 45 KB gzip, via code splitting of the Decode and Review areas or dead-code removal. It re-runs the smoke script afterwards.
   - **Rust-building agents at cap (4):** T-173, T-175 fix round, T-178, and the full check.
   - **Unblocked but waiting for a Rust slot:** T-174, plus MUI API gaps T-159..T-168.
+- **B0.437 T-173 WIP (8f5eb0c): 11 of 12 pipeline tests pass.** A small finisher is launched to update the last one and lint.
+  - **Design:** every other pass shifts each hop centre by `dc_dither_hz` (75 kHz). Hop count and pass length are unchanged, so revisit time is unchanged (tested).
+  - **Passing:**
+    - hk-core, including a new test that every cell gets an off-DC view within 2 passes.
+    - `occupancy_dc_dither`: a carrier exactly at a hop LO is learned (FCO 0.503 vs truth 0.489, 0 suspect).
+    - `occupancy_sparse_visits`: unchanged.
+  - **Failing:** `observation_log` asserts exactly 1 sweep geometry; dithering intentionally gives 2.
+  - **Finisher's job:** assert exactly the even/odd plan geometries and alternating parity, with no loosening.
+  - **ADRs:** ADR-0005 and ADR-0012 §1.3 amended.
+  - **T-124 433.375 MHz:** clean views are now guaranteed by construction, but the root cause is unproven until T-124 reruns.
