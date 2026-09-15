@@ -1582,7 +1582,9 @@ tasks:
   - id: T-096
     milestone: M1
     title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
-    status: in-progress
+    status: blocked
+    commit: ec7adcb
+    blocked_by: T-108
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1733,6 +1735,20 @@ tasks:
     found_by: "T-093 review 2026-09-15"
     acceptance: "per-channel tune stored and added channels re-planned at apply time so a same-rate retune racing set_channels never decodes the wrong frequency (hops.rs:900, test); a channel whose DDC yields no samples on a chunk still carries the pipeline DISCONTINUITY flag (hops.rs:566, test); ordering window handles frames longer than order_window_s (e.g. multi-batch POCSAG) without spurious late counts (by frame end or per-frame hold); tests for the detections channel source and for a hop set found by the tracker from IQ (not inserted); HTTP routes for set_channels/refresh_channels with docs/api.md + contract tests"
     area: crates/hk-pipeline/src/recipes/hops.rs, crates/hk-blocks/src/blocks/multi, crates/hk-api
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-108
+    milestone: M1
+    title: "ACARS tutorial continuation: real ACARS CRC/parity convention from primary source; blind detection of synthetic ACARS bursts; un-ignore tutorial_acars"
+    status: in-progress
+    deps: [T-096]
+    parallel_group: M1T
+    use_cases: [SIGNAL-062]
+    found_by: "T-096 (Sonnet, out of budget) 2026-09-15: recipe fitted to py synth (CRC-16/XMODEM over parity-zeroed chars, new pinned parity zero mode) - possibly non-standard vs acarsdec (KERMIT over bytes incl parity); blind detection never registers the synthetic AM+MSK burst (inventory empty 240 s)"
+    acceptance: "ACARS sync/CRC/parity convention established from acarsdec source or ARINC 618 (cited); synth + recipe match it; parity zero mode removed unless real ACARS needs it; root cause of missing blind detection fixed (no global threshold weakening, no frequency lookup); tutorial_acars un-ignored and passing blind with registration/label/block id/text vs hidden truth"
+    area: recipes/acars.recipe.json, py/hkpy/synth/acars.py, crates/hk-blocks (fec/parity), crates/hk-detect or hk-pipeline (if detection defect), tests/e2e
     needs: none
     model: opus
     effort: medium

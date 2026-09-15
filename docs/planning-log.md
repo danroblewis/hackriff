@@ -741,3 +741,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - The `CtlRequest.query` compile break is fixed and the api.md sections are merged.
   **T-107** (follow_hops hardening) launched now that the runtime is stable. Full check covering T-106 + T-092 running.
 - **B0.260 Full check of main f2561b1 (T-106 + T-092): green.** Lint clean; nextest + UI 1112/1112 in 262 s; acceptance 25/25. In flight: T-107, T-095 and T-096 (both wrapping up past budget, nudged off Monitor waits), T-097.
+- **B0.261 T-096 (ACARS tutorial, Sonnet) ended over budget at ec7adcb; not merged.**
+  - The recipe was fitted to the py synth: SYN SYN SOH sync, CRC-16/XMODEM over parity-zeroed characters, and a new `zero` mode in the pinned parity block.
+  - The coordinator is concerned the synth is non-standard. The T-087 review said acarsdec uses KERMIT over bytes including parity.
+  - The blind acceptance test is `#[ignore]` because detection never registers the synthetic burst (inventory empty after 240 s).
+  - acarsdec is absent.
+
+  **T-108** (fresh Opus agent, same worktree) takes over:
+  - establish the convention from acarsdec source;
+  - correct the synth, recipe and block;
+  - fix the blind detection root cause;
+  - un-ignore the test.
+
+  Lesson: the Sonnet tutorial agents stalled on Monitor waits and overran budget; future tutorial briefs say so explicitly.
