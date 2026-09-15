@@ -943,6 +943,66 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
 
 // T-089 inspector
 
+/// T-089: `POST /api/inspector/parse` evaluates a draft field map (the RDS worked recipe's) over
+/// submitted frames and answers layer trees with absolute bit/byte ranges and the per-byte leaf
+/// index; `POST /api/captures/{id}/parse` answers 503 on a server without a capture store; auth,
+/// method and validation refusals as documented.
+#[test]
+fn inspector_parse_answers_as_documented() {
+    let (serving, addr) = start_server();
+    let recipe: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes/rds.recipe.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let map = &recipe["field_maps"]["rds_group"];
+    // Group 0A: PI 0x54A8, TP, PTY 10, PS segment 1 "CK".
+    let body = json!({"field_map": map, "frames": [{"hex": "54a8054de0cd434b", "bit_len": 64}]});
+    let (st, v) = post(addr, "/api/inspector/parse", &body.to_string());
+    assert_eq!(st, 200, "{v}");
+    let frame = &v["frames"][0];
+    assert_eq!(frame["bit_len"], 64);
+    assert_eq!(frame["hex"], "54a8054de0cd434b");
+    let layers = &frame["layers"];
+    assert_eq!(layers["fit"], "ok");
+    let nodes = layers["nodes"].as_array().unwrap();
+    for n in nodes {
+        for key in ["id", "name", "path", "type", "bits", "bytes"] {
+            assert!(n.get(key).is_some(), "node lacks {key}: {n}");
+        }
+    }
+    let node = |path: &str| nodes.iter().find(|n| n["path"] == path).unwrap();
+    assert_eq!(node("pi")["text"], "0x54A8");
+    assert_eq!(node("pi")["bytes"], json!([0, 2]));
+    assert_eq!(node("ps.segment")["value"], 1);
+    assert_eq!(node("ps.chars")["value"], "CK");
+    assert_eq!(node("ps.flags.music")["type"], "flag");
+    assert_eq!(layers["byte_index"].as_array().unwrap().len(), 8);
+    assert_eq!(layers["byte_index"][7], json!([node("ps.chars")["id"]]));
+    assert_eq!(v["fit"]["ok"], 1);
+
+    let (st, v) = post(
+        addr,
+        "/api/inspector/parse",
+        &json!({"field_map": {"fields": [{"name": "Bad", "type": "uint", "length": 1}]},
+                "frames": [{"hex": "00"}]})
+        .to_string(),
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+    assert!(v["errors"].as_array().is_some_and(|e| !e.is_empty()), "{v}");
+
+    let (st, v) = post(addr, "/api/captures/any/parse", "{}");
+    assert_eq!((st, v["code"].as_str()), (503, Some("unavailable")), "{v}");
+    let (st, _) = call(addr, "POST", "/api/inspector/parse", None, Some("{}"));
+    assert_eq!(st, 401);
+    let (st, _) = get(addr, "/api/inspector/parse");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
 // T-091 assist
 
 // T-092 captures

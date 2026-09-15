@@ -51,12 +51,47 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use hk_model::sigmf::Datatype;
-use hk_model::{ContentClass, DecodedIdentity, Timestamp};
+use hk_model::{ContentClass, CrcStatus, DecodedIdentity, EmitterId, Timestamp};
 use serde_json::Value;
 
 use super::frame::{FrameError, LEN_PREFIX, frame_prefix};
 use super::gate;
 use super::header::{HeaderError, StreamHeader, StreamKind};
+use super::inspector::{FRAME_RECORD_TYPE, FrameContent, FrameRecord, InspectorRecordType};
+
+/// The on-wire inspector `frame` record (§14.2), built only by [`Publisher::publish_frame`].
+#[derive(serde::Serialize)]
+struct FrameWire<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    seq: u64,
+    t: i64,
+    content_class: ContentClass,
+    gated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crc_status: Option<CrcStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoder: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame_model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emitter_id: Option<EmitterId>,
+    metadata: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a FrameContent>,
+}
+
+/// The on-wire inspector `status`/`edit` record (§14.3).
+#[derive(serde::Serialize)]
+struct MetaWire<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    seq: u64,
+    t: Timestamp,
+    content_class: ContentClass,
+    gated: bool,
+    metadata: &'a Value,
+}
 use super::policy::{self, MetadataPolicy};
 use super::record::{
     BINARY_RECORD_HEADER_LEN, BinaryRecord, BinaryRecordHeader, BinaryRecordType, DropMarker,
@@ -1185,6 +1220,133 @@ impl Publisher {
             let seq = self.next_seq;
             self.next_seq += 1;
             self.offer(&[&scratch], seq, rec.t, 0, 1)
+        });
+        self.scratch = scratch;
+        result
+    }
+
+    /// Publishes an inspector `frame` record (docs/stream-contract.md §14.2) on a messages stream.
+    /// The publisher assigns `seq` and `gated` (the record's own values are ignored). As for
+    /// [`Publisher::publish_message`] (§14.5): the class is clamped to the header class;
+    /// `content` (bytes and layers) is serialised only when
+    /// [`gate::message_content_permitted`]; and when the effective class forbids content,
+    /// `metadata`, `frame_model` and `decoder` are reduced to the metadata policy.
+    pub fn publish_frame(&mut self, rec: &FrameRecord) -> Result<PublishOutcome, StreamError> {
+        if self.header.kind != StreamKind::Messages {
+            return Err(StreamError::WrongKind {
+                kind: self.header.kind,
+                operation: "publish_frame",
+            });
+        }
+        let class = gate::clamp(self.header.content_class, rec.content_class);
+        let permitted = gate::message_content_permitted(self.header.content_class, class);
+        let t = Timestamp::from_unix_nanos(rec.t);
+        let (metadata, reduced) = if class.permits_content() {
+            (serde_json::to_value(&rec.metadata)?, None)
+        } else {
+            let as_message = MessageRecord {
+                t,
+                emitter_id: None,
+                provenance_ref: None,
+                content_class: class,
+                decode_id: None,
+                annotation_id: None,
+                decoder: rec.decoder.clone(),
+                frame_model: rec.frame_model.clone(),
+                crc_status: None,
+                identity: None,
+                metadata: serde_json::to_value(&rec.metadata)?,
+                content: None,
+            };
+            let r = self.reduce(&as_message);
+            if r.removed > 0 {
+                self.shared
+                    .metadata_sanitized
+                    .fetch_add(r.removed, Ordering::Relaxed);
+            }
+            (Value::Null, Some(r))
+        };
+        let wire = FrameWire {
+            kind: FRAME_RECORD_TYPE,
+            seq: self.next_seq,
+            t: rec.t,
+            content_class: class,
+            gated: !permitted,
+            crc_status: rec.crc_status,
+            decoder: match &reduced {
+                Some(r) => r.decoder.as_deref(),
+                None => rec.decoder.as_deref(),
+            },
+            frame_model: match &reduced {
+                Some(r) => r.frame_model.as_deref(),
+                None => rec.frame_model.as_deref(),
+            },
+            emitter_id: rec.emitter_id,
+            metadata: reduced.as_ref().map_or(&metadata, |r| &r.metadata),
+            content: if permitted {
+                rec.content.as_ref()
+            } else {
+                None
+            },
+        };
+        self.publish_json(&wire, t)
+    }
+
+    /// Publishes an inspector `status` or `edit` record (§14.3). They are metadata only:
+    /// `metadata` must be a flat object of numbers, booleans and short tokens
+    /// ([`policy::metadata_is_allowlist_shaped`]), otherwise nothing is published and
+    /// [`StreamError::NotMetadata`] is returned. The class is clamped to the header class.
+    pub fn publish_record(
+        &mut self,
+        record_type: InspectorRecordType,
+        t: Timestamp,
+        content_class: ContentClass,
+        metadata: &Value,
+    ) -> Result<PublishOutcome, StreamError> {
+        if self.header.kind != StreamKind::Messages {
+            return Err(StreamError::WrongKind {
+                kind: self.header.kind,
+                operation: "publish_record",
+            });
+        }
+        if !policy::metadata_is_allowlist_shaped(metadata) {
+            return Err(StreamError::NotMetadata);
+        }
+        let wire = MetaWire {
+            kind: record_type.as_str(),
+            seq: self.next_seq,
+            t,
+            content_class: gate::clamp(self.header.content_class, content_class),
+            gated: false,
+            metadata,
+        };
+        self.publish_json(&wire, t)
+    }
+
+    /// Serialises one NDJSON record (whose `seq` is [`Self::next_seq`]) into a frame and offers
+    /// it to every consumer.
+    fn publish_json(
+        &mut self,
+        wire: &impl serde::Serialize,
+        t: Timestamp,
+    ) -> Result<PublishOutcome, StreamError> {
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        scratch.extend_from_slice(&[0; LEN_PREFIX]);
+        let encoded = serde_json::to_writer(&mut scratch, wire)
+            .map_err(StreamError::from)
+            .and_then(|()| {
+                scratch.push(b'\n');
+                Ok(frame_prefix(
+                    scratch.len() - LEN_PREFIX,
+                    self.header.max_frame_len,
+                )?)
+            });
+        let result = encoded.map(|prefix| {
+            scratch[..LEN_PREFIX].copy_from_slice(&prefix);
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            self.offer(&[&scratch], seq, t, 0, 1)
         });
         self.scratch = scratch;
         result

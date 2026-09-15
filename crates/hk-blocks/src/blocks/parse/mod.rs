@@ -1,11 +1,24 @@
 //! Parse blocks (T-089): the declarative parser (`fields`, evaluating an
 //! [`hk_recipe::FieldMap`] into a layer tree) and `text` assembly.
 
+use std::sync::Arc;
+
 use hk_recipe::PortType::Frames;
 use hk_recipe::{BlockDescriptor, ParamType, PortSpec};
 
 use crate::Registry;
 use crate::schema::{ParamExt, descriptor, hex, int, list, one_of, param, string};
+
+pub mod fields;
+pub mod text;
+
+/// The pinned descriptor named `name`.
+fn pinned(name: &str) -> BlockDescriptor {
+    planned()
+        .into_iter()
+        .find(|d| d.name == name)
+        .expect("parse block pinned in planned()")
+}
 
 /// Pinned descriptors of this group.
 pub fn planned() -> Vec<BlockDescriptor> {
@@ -101,5 +114,10 @@ pub fn planned() -> Vec<BlockDescriptor> {
     ]
 }
 
-/// Registers this group's implemented blocks (none yet).
-pub fn register(_r: &mut Registry) {}
+/// Registers this group's implemented blocks.
+pub fn register(r: &mut Registry) {
+    r.register(Arc::new(fields::FieldsFactory::new()))
+        .expect("fields registered once");
+    r.register(Arc::new(text::TextFactory::new()))
+        .expect("text registered once");
+}

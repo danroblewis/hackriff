@@ -220,7 +220,14 @@ fn opened_streams_are_bridged_and_stop_on_disconnect() {
     };
     let header = StreamHeader::from_json_bytes(h.as_bytes()).unwrap();
     assert_eq!(header.kind, StreamKind::Audio);
-    assert_eq!(header.version, "1.1");
+    assert_eq!(
+        header.version,
+        format!(
+            "{}.{}",
+            hk_api::stream::STREAM_VERSION_MAJOR,
+            hk_api::stream::STREAM_VERSION_MINOR
+        )
+    );
     assert_eq!(header.audio.unwrap().mode, "wfm");
     let mut seqs = Vec::new();
     let mut status = None;
