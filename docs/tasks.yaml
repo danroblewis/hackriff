@@ -1913,7 +1913,7 @@ tasks:
   - id: T-120
     milestone: M2
     title: "Bandit revisit scheduler (C04 full): UCB on C12 interestingness, exploration floor, preemption, POI accounting"
-    status: review
+    status: done
     commit: 10bdabb
     deps: [T-113, T-114]
     parallel_group: M2Q
@@ -2012,7 +2012,7 @@ tasks:
     parallel_group: M2Q
     use_cases: [AWARE-027, SIGNAL-027]
     found_by: "T-120 report 2026-09-15 (deferred under token budget)"
-    acceptance: "hk-pipeline control.rs enables the bandit (config/ScanPlan flag), feeds DwellOutcomes from detections/novelty/decodes and report_verification from TrustEvaluator, publishes interestingness via SharedInterestingness (T-119 provider when present); POI and coverage computed from the T-115 observation log via visits_from_records; routes /api/scheduler, /api/scheduler/arms, /api/scheduler/leases (+ lease create/release) with docs/api.md + api_contract; mock-SDR scheduler e2e tests pass with bandit on and off; hk serve demo path unchanged when bandit disabled"
+    acceptance: "hk-pipeline control.rs enables the bandit (config/ScanPlan flag), feeds DwellOutcomes from detections/novelty/decodes and report_verification from TrustEvaluator, publishes interestingness via SharedInterestingness (T-119 provider when present); POI and coverage computed from the T-115 observation log via visits_from_records; routes /api/scheduler, /api/scheduler/arms, /api/scheduler/leases (+ lease create/release) with docs/api.md + api_contract; mock-SDR scheduler e2e tests pass with bandit on and off; hk serve demo path unchanged when bandit disabled; T-120 review follow-ups: move bandit repack off next_step (refresh_bandit() from the control loop or preallocated scratch) and extend the alloc test to publish a new provider version inside the counted loop; gap-free pass-coverage test with the bandit on and floor deferrals; guard UCB NaN when prior_pseudo_dwell_s=0 and suspect_fraction=1; release_lease/release_intent remove unrun planned time from the floor window; floor_violations exempts interactive steps; counter for dropped verification candidates when the 64 slots are full; roll back exploit/explore/beacon counters on cut; amend ADR-0012 for hop exploration arms exempt from the 30-min bound"
     area: "crates/hk-pipeline/src/control.rs, crates/hk-api/src/schedule.rs (ADR-0012 §11), docs/api.md"
     needs: none
     model: opus

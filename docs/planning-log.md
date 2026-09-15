@@ -940,3 +940,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - (b) Usable span follows the history L0 fold extent; ADR §1.4 note added, shared roll-off trim is a follow-up.
   - (c) Torn-tail repair on first append per hour.
   Fresh Opus fix round is running in the T-115 worktree.
+- **B0.297 T-120 merged** (10bdabb). Opus review: MERGE.
+  - **Checked:** bounded preallocated tables; device-clock-only discounting and floors; rollback correct; UCB safe with the default prior; DC avoidance; v1 invariants hold with the bandit on; TX gated; simulator fair (reviewer reproduced seed 1 exactly).
+  - **Discovery trade-off:** later burst but earlier beacon discovery, and a better p90 TTFD than WRR. It's an honest trade-off (WRR's many short dwells land on new frequencies by chance), not a bug.
+  - **Contract gap:** repack runs inside `next_step` and allocates. The caller is the event-rate control thread, so it's non-blocking for now.
+  - **Follow-ups:** folded into **T-127** along with the ADR amendment. Full check running.
