@@ -303,8 +303,55 @@ counter_group!(
         idle_ends,
         /// Demodulation or publish errors.
         errors,
+        /// Sessions opened (T-066). `open == running + sum(closed_*)`.
+        open,
+        /// Chain threads running now (`active` counts admitted slots, which are released as soon
+        /// as the client goes; the thread ends at its next read).
+        running,
+        /// Closed because the client went away: WebSocket close, reset, unresponsive peer, Stop.
+        closed_client,
+        /// Closed with no consumer for the idle timeout.
+        closed_idle,
+        /// Closed after no audio (squelch closed) for the squelch timeout.
+        closed_squelch,
+        /// Closed because an in-place retune moved the window off the channel.
+        closed_retune,
+        /// Closed because a re-plumb ended the chain's segment.
+        closed_segment,
+        /// Closed because the source or run ended.
+        closed_source,
+        /// Closed by a demodulation or publish error.
+        closed_error,
+        /// Admission limit: most chains at once.
+        limit_listeners,
+        /// Admission CPU budget, millicores.
+        budget_mcores,
+        /// Estimated millicores of the admitted chains.
+        budget_used_mcores,
     }
 );
+
+impl ListenCounters {
+    /// The counters plus `budget` (T-066): `{max_listeners, listeners, running, cores,
+    /// used_cores}`, what `/api/status` reports.
+    pub fn status_json(&self) -> Value {
+        let mut v = self.to_json();
+        let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        if let Some(o) = v.as_object_mut() {
+            o.insert(
+                "budget".into(),
+                json!({
+                    "max_listeners": l(&self.limit_listeners),
+                    "listeners": l(&self.active),
+                    "running": l(&self.running),
+                    "cores": l(&self.budget_mcores) as f64 / 1e3,
+                    "used_cores": l(&self.budget_used_mcores) as f64 / 1e3,
+                }),
+            );
+        }
+        v
+    }
+}
 
 counter_group!(
     /// Burst taps (T-060, [`crate::chains::taps`]): bits and symbols streams for external
@@ -388,6 +435,9 @@ impl Counters {
     /// A JSON snapshot (the run summary's `counters` and `/api/status`).
     pub fn to_json(&self) -> Value {
         let (center, rate) = self.tune();
+        // Both on-demand caps side by side: `listen.budget` (T-066) and `taps.max_taps` (T-060).
+        let mut taps = self.taps.to_json();
+        taps["max_taps"] = json!(crate::chains::taps::MAX_TAPS);
         json!({
             "source": self.source.to_json(),
             "readers": {
@@ -399,8 +449,8 @@ impl Counters {
             "history": self.history.to_json(),
             "spectrum": self.spectrum.to_json(),
             "chains": self.chains.to_json(),
-            "listen": self.listen.to_json(),
-            "taps": self.taps.to_json(),
+            "listen": self.listen.status_json(),
+            "taps": taps,
             "scheduler": self.scheduler.to_json(),
             "stream_time_ns": self.stream_time_ns.load(Ordering::Relaxed),
             "tune": { "center_hz": center, "sample_rate_hz": rate },

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SeqTracker, audioHeaderProblem, parseRecord, parseText, type AudioHeader } from "../src/audio-frames";
 import { JitterBuffer } from "../src/jitter";
-import { clampBox, clickTarget, listenQuery, peakBinIndex, resolveTarget, selectionTarget, strongestInView } from "../src/listen";
+import { Listener, clampBox, clickTarget, closeOnPageExit, listenQuery, peakBinIndex, resolveTarget, selectionTarget, strongestInView } from "../src/listen";
 import { rowListenTarget } from "../src/inventory";
 
 function record(type: number, flags: number, seq: number, payload: Uint8Array, sampleIndex = 0): ArrayBuffer {
@@ -230,4 +230,94 @@ test("jitter buffer converts 48 kS/s to the output rate", () => {
   for (let i = 1; i < out.length; i++) if (out[i - 1] < 0 && out[i] >= 0) crossings++;
   const hz = crossings / (out.length / 44100); // already above the target: no prebuffer silence
   assert.ok(Math.abs(hz - 1000) < 30, `tone at ${hz} Hz`);
+});
+
+// --- T-066: the listen socket closes on Stop and when the page goes away ------------------------
+
+class FakeWs {
+  static all: FakeWs[] = [];
+  binaryType = "";
+  onmessage: unknown = null;
+  onclose: unknown = null;
+  closed = false;
+  constructor(public url: string) { FakeWs.all.push(this); }
+  close() { this.closed = true; }
+}
+
+class FakeTarget {
+  visibilityState = "visible";
+  private handlers = new Map<string, (() => void)[]>();
+  addEventListener(type: string, fn: () => void) { this.handlers.set(type, [...(this.handlers.get(type) ?? []), fn]); }
+  fire(type: string) { for (const fn of this.handlers.get(type) ?? []) fn(); }
+}
+
+/** Just enough DOM, Web Audio and WebSocket for Listener in node. */
+function stubBrowser() {
+  const g = globalThis as Record<string, unknown>;
+  g.document = { getElementById: () => ({ value: "1", textContent: "", addEventListener() {} }) };
+  g.window = { setInterval: () => 0 };
+  g.location = { protocol: "http:", host: "127.0.0.1:8787" };
+  g.WebSocket = FakeWs;
+  g.AudioContext = class {
+    sampleRate = 48000;
+    destination = {};
+    resume() { return Promise.resolve(); }
+    createGain() { return { connect() {}, gain: { value: 1 } }; }
+    createScriptProcessor() { return { connect() {}, onaudioprocess: null }; }
+  };
+  FakeWs.all = [];
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test("Stop closes the listen socket, and a superseded or stopped start opens none", async () => {
+  stubBrowser();
+  const l = new Listener("tok");
+  l.start({ label: "a", f_lo: 1e6, f_hi: 1.01e6 });
+  l.start({ label: "b", f_lo: 2e6, f_hi: 2.01e6 }); // before the first start's audio output is ready
+  await tick();
+  assert.equal(FakeWs.all.length, 1, "only the latest start opens a socket");
+  assert.match(FakeWs.all[0].url, /f_lo=2000000/);
+  assert.ok(l.active);
+  l.stop();
+  assert.equal(FakeWs.all[0].closed, true, "Stop closes the socket");
+  assert.equal(l.active, false);
+  l.start({ label: "c", f_lo: 3e6, f_hi: 3.01e6 });
+  l.stop();
+  await tick();
+  assert.equal(FakeWs.all.length, 1, "a start stopped before its output was ready opens nothing");
+});
+
+test("pagehide, beforeunload and staying hidden close the listen socket", async () => {
+  stubBrowser();
+  const win = new FakeTarget(), doc = new FakeTarget();
+  const clock = { fn: null as (() => void) | null, ms: 0 };
+  const l = new Listener("tok");
+  closeOnPageExit(l, win, doc, 1234, { set: (fn, ms) => { clock.fn = fn; clock.ms = ms; return 1; }, clear: () => { clock.fn = null; } });
+
+  l.start({ label: "a", f_lo: 1e6, f_hi: 1.01e6 });
+  await tick();
+  win.fire("pagehide");
+  assert.equal(FakeWs.all[0].closed, true, "pagehide closes the socket");
+  assert.equal(l.active, false);
+
+  l.start({ label: "b", f_lo: 1e6, f_hi: 1.01e6 });
+  await tick();
+  win.fire("beforeunload");
+  assert.equal(FakeWs.all[1].closed, true, "beforeunload closes the socket");
+
+  l.start({ label: "c", f_lo: 1e6, f_hi: 1.01e6 });
+  await tick();
+  doc.visibilityState = "hidden";
+  doc.fire("visibilitychange");
+  assert.equal(clock.ms, 1234);
+  doc.visibilityState = "visible";
+  doc.fire("visibilitychange");
+  assert.equal(clock.fn, null, "coming back cancels the hidden timer");
+  assert.equal(FakeWs.all[2].closed, false, "a short hide keeps listening");
+  doc.visibilityState = "hidden";
+  doc.fire("visibilitychange");
+  clock.fn!();
+  assert.equal(FakeWs.all[2].closed, true, "hidden for long closes the socket");
+  assert.equal(l.active, false);
 });

@@ -708,6 +708,7 @@ name = "hk-pipeline"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hk-api",
  "hk-context",
  "hk-core",
  "hk-demod",
@@ -723,6 +724,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tungstenite",
 ]
 
 [[package]]

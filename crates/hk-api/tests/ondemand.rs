@@ -256,3 +256,144 @@ fn opened_streams_are_bridged_and_stop_on_disconnect() {
     );
     let _ = CloseCode::Normal;
 }
+
+/// Publishes a small record every 20 ms until its session drops; counts live sessions (T-066).
+#[derive(Default)]
+struct Ticking {
+    opened: AtomicUsize,
+    live: Arc<AtomicUsize>,
+}
+
+struct LiveGuard(Arc<AtomicUsize>, Arc<AtomicBool>);
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        self.1.store(true, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl StreamOpener for Ticking {
+    fn open(&self, _req: &OpenRequest) -> Result<OpenedStream, OpenRefusal> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        self.live.fetch_add(1, Ordering::SeqCst);
+        let mut h = StreamHeader::new(
+            "listen/ticking",
+            StreamKind::Audio,
+            ContentClass::Unrestricted,
+            "test",
+        );
+        h.datatype = Some(AUDIO_DATATYPE.into());
+        h.sample_rate_hz = Some(AUDIO_SAMPLE_RATE_HZ);
+        h.max_frame_len = AUDIO_MAX_FRAME_LEN;
+        h.audio = Some(AudioInfo {
+            mode: "nbfm".into(),
+            channels: 1,
+            frame_samples: 4,
+            ..AudioInfo::default()
+        });
+        let mut p = Publisher::new(h.clone(), PublisherConfig::default()).unwrap();
+        let handle = p.handle();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut i = 0u64;
+            while !stopped.load(Ordering::SeqCst) {
+                let _ = p.publish_binary(BinaryRecord {
+                    t: Timestamp::from_unix_nanos(1),
+                    sample_index: 4 * i,
+                    flags: RecordFlags::empty(),
+                    payload: &[0u8; 8],
+                });
+                i += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        Ok(OpenedStream {
+            header: h,
+            handle,
+            session: Box::new(LiveGuard(Arc::clone(&self.live), stop)),
+        })
+    }
+}
+
+/// Upgrades by hand and reads up to the header; the client then never reads or answers again.
+fn raw_open(addr: SocketAddr) -> TcpStream {
+    use std::io::{Read, Write};
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(
+        s,
+        "GET /ws/open/listen?token={TOKEN} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
+         Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    )
+    .unwrap();
+    let (mut got, mut buf) = (Vec::new(), [0u8; 1024]);
+    while !got.windows(7).any(|w| w == b"ri16_le") {
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "closed early: {}", String::from_utf8_lossy(&got));
+        got.extend_from_slice(&buf[..n]);
+    }
+    s
+}
+
+#[test]
+fn silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay() {
+    let opener = Arc::new(Ticking::default());
+    let mut config = ServerConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        Token::from_config(TOKEN).unwrap(),
+    );
+    config.ondemand_ping_interval = Duration::from_millis(50);
+    config.ondemand_peer_timeout = Duration::from_millis(400);
+    let state = ApiState {
+        on_demand: OpenerRegistry::new().with("listen", opener.clone()),
+        ..ApiState::default()
+    };
+    let server = Server::start(config, state).unwrap();
+    let addr = server.local_addr();
+    let live_is = |n: usize| {
+        let t0 = Instant::now();
+        while opener.live.load(Ordering::SeqCst) != n {
+            if t0.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    };
+
+    // A client that keeps reading answers the pings: still attached well past the peer timeout.
+    let mut ws = connect(addr, &format!("/ws/open/listen?token={TOKEN}")).unwrap();
+    let (t0, mut records) = (Instant::now(), 0);
+    while t0.elapsed() < Duration::from_millis(1500) {
+        match ws.read() {
+            Ok(Message::Binary(_)) => records += 1,
+            Ok(_) => {}
+            Err(e) => panic!("an answering client was dropped: {e}"),
+        }
+    }
+    assert!(records > 20, "{records} records");
+    assert_eq!(opener.live.load(Ordering::SeqCst), 1);
+    ws.close(None).unwrap();
+    let _ = drain(&mut ws);
+    assert!(live_is(0), "a clean close drops the session");
+
+    // Half-open: the socket stays open but nothing comes back, not even a pong.
+    let silent = raw_open(addr);
+    assert!(live_is(1));
+    let t = Instant::now();
+    assert!(live_is(0), "a silent peer's session is dropped");
+    eprintln!(
+        "silent peer released after {:.0} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+
+    // Abrupt: a hang-up without a close frame.
+    let gone = raw_open(addr);
+    assert!(live_is(1));
+    drop(gone);
+    assert!(live_is(0), "a hang-up drops the session");
+    drop(silent);
+    assert_eq!(opener.opened.load(Ordering::SeqCst), 3);
+}

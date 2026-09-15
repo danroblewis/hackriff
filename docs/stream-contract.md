@@ -472,6 +472,9 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
   - Upgrade checks: `426`/`400`. Unknown name: `404`.
   - A **refusal completes the upgrade**, sends one text message `{"type":"refused","status","code","reason","content_class"}`, then closes with code **4000 + status** (e.g. 4403 gate refusal, 4503 at capacity). Browsers cannot read the body of a failed upgrade.
   - Otherwise the connection is bridged as a remote consumer (§10). The browser sending anything, or hanging up, drops the session.
+  - **Liveness (T-066):** the server pings every `ondemand_ping_interval` (5 s); a peer that sends nothing, not even the automatic pong, for `ondemand_peer_timeout` (20 s) is treated as gone (half-open connection, vanished tunnel client) and its session is dropped. A write blocked for the peer timeout fails the consumer too.
+  - **While the run re-plumbs** into a new window, requests are refused with `503 replumbing` (retry); `410 source-ended` means the run has ended.
+  - **Listen admission (T-066):** at most `max_listeners` chains (default 8) and an estimated CPU budget (`cpu_fraction` of the cores, each chain costed from its tuned sample rate and mode); beyond either, `503 busy` with both counts in the reason. `/api/status` `listen.budget` reports `{max_listeners, listeners, running, cores, used_cores}`.
 
 ### 12.2 Audio profile
 

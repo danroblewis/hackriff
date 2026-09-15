@@ -601,6 +601,8 @@ struct Common {
     user_stop: AtomicBool,
     recorder: Mutex<Option<ManualRecorder>>,
     last_recording: Mutex<RecordingStatus>,
+    /// Listen limits in force (T-066; changeable at runtime).
+    listen: Arc<Mutex<crate::config::ListenSettings>>,
     /// Burst taps (T-060), closed when the run ends.
     bursts: Arc<crate::chains::taps::BurstHub>,
 }
@@ -720,6 +722,7 @@ impl Pipeline {
             user_stop: AtomicBool::new(false),
             recorder: Mutex::new(None),
             last_recording: Mutex::new(RecordingStatus::default()),
+            listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             bursts: Arc::default(),
         };
         let class = cfg.source_class;
@@ -1526,13 +1529,40 @@ impl PipelineHandle {
         self.send(ControlEvent::DetachManual);
     }
 
-    /// On-demand listening (T-043): an opener attaching audio chains at runtime.
+    /// On-demand listening (T-043): an opener attaching audio chains at runtime. It admits under
+    /// the run's listen limits in force at each request ([`Self::set_listen_settings`]).
     pub fn listen_service(&self) -> Arc<crate::chains::listen::ListenManager> {
         let sup = Arc::clone(&self.sup);
         Arc::new(crate::chains::listen::ListenManager::new(
             Arc::clone(&self.sup.common.counters),
             Arc::new(move || sup.lock().shared.clone()),
+            Arc::clone(&self.sup.common.listen),
         ))
+    }
+
+    /// The listen limits in force (T-066).
+    pub fn listen_settings(&self) -> crate::config::ListenSettings {
+        self.sup
+            .common
+            .listen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces the listen limits (T-066): later requests are admitted under them; running
+    /// chains keep going.
+    pub fn set_listen_settings(&self, settings: crate::config::ListenSettings) {
+        crate::chains::listen::publish_limits(
+            &self.sup.common.counters,
+            &crate::chains::listen::ListenConfig::from_settings(&settings),
+        );
+        *self
+            .sup
+            .common
+            .listen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = settings;
     }
 
     /// Burst bits taps (T-060): an opener streaming the hard bits of demodulated bursts.
