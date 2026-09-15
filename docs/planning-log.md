@@ -2311,3 +2311,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - no RDS decode on the 1 s and 0.5 s probe windows.
   - **Evidence:** concurrent_demod 5/5; identification still 1.000 s.
   - **T-159 launched** (Sonnet): `GET /api/inventory/{id}/decode`, which unblocks T-195.
+- **B0.485 Full check green after the T-178/T-190/T-191 batch (baca31f).** Lint clean; 1401/1401 tests; acceptance 29/29; acceptance_m2 8/8; 54 GB free.
+  - **Merging T-209** with a full check.
