@@ -945,3 +945,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Discovery trade-off:** later burst but earlier beacon discovery, and a better p90 TTFD than WRR. It's an honest trade-off (WRR's many short dwells land on new frequencies by chance), not a bug.
   - **Contract gap:** repack runs inside `next_step` and allocates. The caller is the event-rate control thread, so it's non-blocking for now.
   - **Follow-ups:** folded into **T-127** along with the ADR amendment. Full check running.
+- **B0.298 Full check of main 5729e19 (T-120): green.** Lint clean; nextest + UI 1208/1208 in 261 s; acceptance 30/30 (2 ignored HIL) in 59 s. M2 on main: T-113, T-114, T-116, T-117, T-120, T-125, T-126. In flight: T-115 fix round, T-118, T-119. Next: T-127 after T-115; T-121 after T-118; T-122 after T-119.
