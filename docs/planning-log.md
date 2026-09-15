@@ -1424,3 +1424,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Acceptance re-runs: 32/32 twice.
   - Treated as green for the T-139 merge.
   - T-142 added (Sonnet, test reliability only, no new legal checks): log match context and harden the sentinel byte search against coincidental UUID/timestamp matches. It launches after T-124, which edits tests/e2e.
+- **B0.371 USER DECISION: no legal/licensing tests at all.**
+  - **T-143 launched (Opus), ahead of other M2 work.** It deletes:
+    - crates/hk-pipeline/tests/{retune_legal,legal_restricted,legal_band_derived}.rs
+    - tests/e2e acceptance/legal.rs and the `listen.rs` legal case
+    - legal/withheld/identity-sentinel assertions elsewhere
+  - **Runtime gating** stays but becomes default-permissive (opt-in only), and untested.
+  - **T-142 cancelled** (do not de-flake a test being deleted).
+  - **Merge order:** T-143 merges before T-124/T-140/T-141.

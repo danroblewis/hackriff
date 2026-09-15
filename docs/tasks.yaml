@@ -2236,7 +2236,8 @@ tasks:
   - id: T-142
     milestone: M2
     title: "De-flake legal acceptance sentinel search: identity sentinels matched by chance in per-run UUIDs/timestamps (test reliability only, no new legal checks)"
-    status: todo
+    status: cancelled
+    cancelled_reason: "user 2026-09-15: do not de-flake a test we are deleting; all legal/licensing tests removed in T-143"
     deps: []
     parallel_group: M2E
     use_cases: []
@@ -2247,6 +2248,21 @@ tasks:
     model: sonnet
     effort: medium
     core_interface: false
+  - id: T-143
+    milestone: M2
+    title: "Remove all legal/licensing tests (dedicated files, acceptance legal cases, legal sentinel assertions); runtime content gating stays but default-permissive, opt-in only, untested"
+    status: in-progress
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "user instruction 2026-09-15: hackriff must not run legal/licensing tests at all; legality is the user's concern, not a test"
+    acceptance: "retune_legal.rs, legal_restricted.rs, legal_band_derived.rs and acceptance/legal.rs deleted; legal/withheld/identity-sentinel assertions removed elsewhere (non-legal parts kept); content/identity/recordings/audio flow by default in every band, gating only via explicit opt-in; no gating tests added; workspace builds, targeted nextest + just acceptance + lint green"
+    area: crates/hk-pipeline/{tests,src/class.rs,src/chains,src/recipes}, crates/hk-stream, crates/hk-plugins, crates/hk-model/src/repo, crates/hk-demod/tests, tests/e2e, py/fixtures, ui/src/controls, justfile, docs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    priority: "ahead of other M2 work (user)"
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
