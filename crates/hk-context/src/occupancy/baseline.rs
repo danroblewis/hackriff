@@ -99,7 +99,8 @@ use hk_store::baseline::{
 };
 
 use super::novelty::{
-    Evidence, NoveltyConfig, combine, level_z, occupancy_sigma, occupancy_z, shrunk_fco,
+    Evidence, LookEvidence, NoveltyConfig, PERSISTENCE_MAX_GAP_S, combine, level_z,
+    occupancy_sigma, occupancy_z, persistence_lift, sequential_look, shrunk_fco,
 };
 
 /// Suspect share above which a fold updates neither the reference nor the CUSUM.
@@ -370,7 +371,16 @@ pub struct PoolStats {
     pub max_db: f64,
     /// Σ weight·fco_slot².
     fco_sq_w: f64,
+    /// T-146: Σ over slots of the slot's FCO sampling moment V_j (s).
+    sampling_v: f64,
+    /// T-146: Σ over slots of w_j·V_j (s²).
+    sampling_wv: f64,
 }
+
+/// T-146: the sampling-corrected between-slot variance is floored at this fraction of the raw
+/// weighted spread, so a noisy correction can neither go negative nor claim that a pool has no
+/// spread at all (DerSimonian–Laird truncates at 0; a detector must not).
+pub const BETWEEN_VAR_FLOOR_FRACTION: f64 = 0.1;
 
 impl Default for PoolStats {
     fn default() -> Self {
@@ -383,6 +393,8 @@ impl Default for PoolStats {
             weight_s: 0.0,
             max_db: f64::NEG_INFINITY,
             fco_sq_w: 0.0,
+            sampling_v: 0.0,
+            sampling_wv: 0.0,
         }
     }
 }
@@ -425,6 +437,23 @@ impl PoolStats {
         );
     }
 
+    /// T-146: records the FCO sampling moment `fco_var_s` (Σ(w²/n_eff)/Σw of the slot's folded
+    /// intervals, [`SlotStats::fco_var_s`]) of a slot of weight `weight_s` already [`Self::add`]ed.
+    ///
+    /// T-146 review: the moment is weighted by the slot's **own** unbiased binomial variance
+    /// f_j(1 − f_j)·n_j/(n_j − 1), n_j = `weight_s`/`fco_var_s` its effective looks (at least 2),
+    /// f_j = `occupied_weight_s`/`weight_s`, not by the pool FCO's: a patterned pool (slots at
+    /// 0.1 and 0.7) would otherwise have its sampling part overestimated.
+    pub fn add_fco_sampling(&mut self, weight_s: f64, occupied_weight_s: f64, fco_var_s: f64) {
+        if weight_s > 0.0 && fco_var_s.is_finite() && fco_var_s > 0.0 {
+            let f = (occupied_weight_s / weight_s).clamp(0.0, 1.0);
+            let n = (weight_s / fco_var_s).max(2.0);
+            let v = f * (1.0 - f) * n / (n - 1.0) * fco_var_s;
+            self.sampling_v += v;
+            self.sampling_wv += weight_s * v;
+        }
+    }
+
     /// These level moments with `o`'s occupancy moments (a level pool of one gain state combined
     /// with the all-gain-states occupancy pool, for display).
     pub fn with_occupancy_of(mut self, o: &PoolStats) -> Self {
@@ -432,6 +461,8 @@ impl PoolStats {
         self.occupied_weight_s = o.occupied_weight_s;
         self.weight_s = o.weight_s;
         self.fco_sq_w = o.fco_sq_w;
+        self.sampling_v = o.sampling_v;
+        self.sampling_wv = o.sampling_wv;
         self
     }
 
@@ -458,12 +489,44 @@ impl PoolStats {
         (self.weight_s > 0.0).then(|| (self.occupied_weight_s / self.weight_s).clamp(0.0, 1.0))
     }
 
-    /// Weighted variance of slot FCOs around the pool FCO (0 for a single slot).
-    pub fn between_var(&self) -> f64 {
+    /// Weighted variance of slot FCOs around the pool FCO (0 for a single slot), **uncorrected**:
+    /// it includes each slot FCO's own sampling noise (before T-146 this was `between_var`).
+    pub fn between_var_raw(&self) -> f64 {
         match self.fco() {
             Some(f) => (self.fco_sq_w / self.weight_s - f * f).max(0.0),
             None => 0.0,
         }
+    }
+
+    /// T-146: the part of [`Self::between_var_raw`] expected from binomial sampling alone.
+    ///
+    /// With slot weights w_j (W = Σw_j), slot FCOs f_j = p + e_j, var(e_j) = s_j² and the pool FCO
+    /// f̄ = Σw_j f_j/W, the weighted spread S = Σ(w_j/W)(f_j − f̄)² has
+    /// E[S] = τ² + Σ(w_j/W)s_j² − Σw_j²s_j²/W² (τ² the true between-slot variance). A slot FCO
+    /// folded from intervals of weight wᵢ and nᵢ effective samples has s_j² = p(1−p)·V_j/w_j with
+    /// V_j = Σwᵢ²/nᵢ / w_j ([`SlotStats::fco_var_s`]), so the sampling part is
+    /// p(1−p)·(ΣV_j/W − Σw_jV_j/W²), with p the pool FCO (the null model's occupancy). 0 for a
+    /// single slot, and for slots without the moment (pre-T-146 files).
+    pub fn between_sampling_var(&self) -> f64 {
+        match self.fco() {
+            // T-146 review: each slot's p(1 − p) is its own unbiased f_j(1 − f_j) estimate,
+            // folded into the moments by `add_fco_sampling`.
+            Some(_) if self.weight_s > 0.0 => {
+                let w = self.weight_s;
+                (self.sampling_v / w - self.sampling_wv / (w * w)).max(0.0)
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Between-slot variance of the pool, corrected for sampling noise (T-146, ADR-0012 §3.4):
+    /// [`Self::between_var_raw`] − [`Self::between_sampling_var`], floored at
+    /// [`BETWEEN_VAR_FLOOR_FRACTION`] of the raw spread. So sparse visits (few effective samples per
+    /// interval) no longer inflate the reference spread, while a dense-visit pool, whose sampling
+    /// part is tiny, keeps nearly its raw spread.
+    pub fn between_var(&self) -> f64 {
+        let raw = self.between_var_raw();
+        (raw - self.between_sampling_var()).max(BETWEEN_VAR_FLOOR_FRACTION * raw)
     }
 }
 
@@ -581,6 +644,7 @@ fn pools_where(
                             } else {
                                 p.max_db()
                             },
+                            fco_var_s: p.fco_var_s(),
                         };
                         (o, None)
                     };
@@ -599,6 +663,7 @@ fn pools_where(
                             occupied_weight_s: p.occupied_weight_s(),
                             weight_s: p.weight_s(),
                             max_db: p.max_db(),
+                            fco_var_s: p.fco_var_s(),
                         };
                         (o, None)
                     };
@@ -653,6 +718,7 @@ struct SlotOccupancy {
     occupied_weight_s: f64,
     weight_s: f64,
     max_db: f64,
+    fco_var_s: f64,
 }
 
 impl SlotOccupancy {
@@ -663,6 +729,7 @@ impl SlotOccupancy {
             occupied_weight_s: d.occupied_weight_s,
             weight_s: d.weight_s,
             max_db: d.max_db,
+            fco_var_s: d.fco_var_s,
         }
     }
 }
@@ -696,6 +763,7 @@ fn pool_slot(
             o.weight_s,
             o.max_db,
         );
+        occ[r].add_fco_sampling(o.weight_s, o.occupied_weight_s, o.fco_var_s);
         if let Some(d) = own {
             level[r].add_decayed(d);
         }
@@ -727,6 +795,9 @@ pub struct FoldOutcome {
     pub accrued: bool,
     /// The fold also entered the reference.
     pub accrued_reference: bool,
+    /// T-146 review: the fold's directional sequential evidence
+    /// ([`crate::occupancy::novelty::sequential_look`]) when its occupancy was scored.
+    pub look: Option<LookEvidence>,
 }
 
 impl FoldOutcome {
@@ -744,6 +815,7 @@ impl FoldOutcome {
             change_point: None,
             accrued: false,
             accrued_reference: false,
+            look: None,
         }
     }
 }
@@ -976,6 +1048,12 @@ impl BaselineEngine {
         let observed = observed_pools(sub, slot);
         let (novelty, chosen, learn_novelty) =
             Self::evaluate(sub, slot, gain, obs, &ncfg, observed);
+        // T-146 review: the fold's sequential evidence against the chosen occupancy pool, with the
+        // subject's persistence as learned before this fold.
+        let look = chosen.and_then(|(_, _, occ)| {
+            let z = novelty.occupancy_z?;
+            sequential_look(&occ, &obs.evidence(), z, persistence_lift(&sub.persistence))
+        });
         let hr = res_index(BaselineResolution::HourOfDay);
         // The slot's own hour-of-day reference pools (sequential test, learning), when mature.
         let own_hour = chosen.map(|(r, level, occ)| {
@@ -1094,6 +1172,7 @@ impl BaselineEngine {
                 change_point: raised,
                 accrued: false,
                 accrued_reference: false,
+                look,
             };
         };
         let ref_level_pool = chosen.map(|c| c.1);
@@ -1109,18 +1188,24 @@ impl BaselineEngine {
         for g in &mut sub.gains {
             g.adaptive.scale(factor);
         }
-        sub.gains[gi].adaptive.update(slot_i, |a| match level {
-            Some(l) => a.add(
-                l,
-                max_db,
-                obs.occupied_weight_s,
-                obs.weight_s,
-                obs.observed_s,
-            ),
-            None => {
-                a.observed_s += obs.observed_s;
-                a.occupied_weight_s += obs.occupied_weight_s;
-                a.weight_s += obs.weight_s;
+        // T-146: each interval's FCO sampling moment (w²/n_eff), before its weight is added.
+        let fco_var =
+            |v: f64, prior_w: f64| SlotStats::fco_var_after(v, prior_w, obs.weight_s, obs.n_eff);
+        sub.gains[gi].adaptive.update(slot_i, |a| {
+            a.fco_var_s = fco_var(a.fco_var_s, a.weight_s);
+            match level {
+                Some(l) => a.add(
+                    l,
+                    max_db,
+                    obs.occupied_weight_s,
+                    obs.weight_s,
+                    obs.observed_s,
+                ),
+                None => {
+                    a.observed_s += obs.observed_s;
+                    a.occupied_weight_s += obs.occupied_weight_s;
+                    a.weight_s += obs.weight_s;
+                }
             }
         });
 
@@ -1152,6 +1237,7 @@ impl BaselineEngine {
         let accrue_ref = clean && normal && !latched && !building && !seq_building && hod_immature;
         if accrue_ref {
             sub.gains[gi].reference.update(slot_i, |s| {
+                s.fco_var_s = fco_var(s.fco_var_s, s.weight_s);
                 match level {
                     Some(l) => s.add(
                         l,
@@ -1181,6 +1267,22 @@ impl BaselineEngine {
                 sub.mature_at = Some(obs.t);
             }
         }
+        // T-146 review: lag-1 persistence of consecutive folds, learned with the reference.
+        if let Some(f) = obs.fco() {
+            let pm = &mut sub.persistence;
+            if let (true, Some((lt, lf))) = (accrue_ref, pm.last) {
+                let gap_s = (obs.t.as_unix_nanos() - lt.as_unix_nanos()) as f64 / 1e9;
+                if gap_s > 0.0 && gap_s <= PERSISTENCE_MAX_GAP_S {
+                    pm.pairs += 1.0;
+                    pm.prev += lf;
+                    pm.cur += f;
+                    pm.prod += lf * f;
+                }
+            }
+            if pm.last.is_none_or(|(lt, _)| obs.t > lt) {
+                pm.last = Some((obs.t, f));
+            }
+        }
         sub.last_seen = sub.last_seen.max(obs.t);
         self.state.last_visit = self.state.last_visit.max(obs.t);
         self.dirty = true;
@@ -1189,6 +1291,7 @@ impl BaselineEngine {
             change_point: raised,
             accrued: true,
             accrued_reference: accrue_ref,
+            look,
         }
     }
 
@@ -1261,6 +1364,7 @@ fn to_slot_stats(d: &DecayedStats) -> hk_model::attention::baseline::SlotStats {
             observed_s: d.observed_s,
             occupied_weight_s: d.occupied_weight_s,
             weight_s: d.weight_s,
+            fco_var_s: d.fco_var_s,
             ..SlotStats::EMPTY
         };
     }
@@ -1272,6 +1376,7 @@ fn to_slot_stats(d: &DecayedStats) -> hk_model::attention::baseline::SlotStats {
         occupied_weight_s: d.occupied_weight_s,
         weight_s: d.weight_s,
         max_db: d.max_db,
+        fco_var_s: d.fco_var_s,
     }
 }
 
@@ -1459,6 +1564,7 @@ impl Baselines {
                     change_point: None,
                     accrued: false,
                     accrued_reference: false,
+                    look: None,
                 });
             }
         }

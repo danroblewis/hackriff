@@ -252,7 +252,9 @@ Pools are sums of slots because `SlotStats` is additive. A literal "24 h in each
 - `n_visits`, `observed_s`;
 - Σ level and Σ level² (dB), with levels **winsorised** at the reference mean ± 3σ before adding, so a burst doesn't swamp the spread;
 - Σ weight·occupied and Σ weight (time-weighted FCO, §2.5);
-- `max_db` (raw).
+- `max_db` (raw);
+- `fco_var_s` (T-146): the FCO sampling moment Σ(wᵢ²/n_eff,ᵢ)/Σwᵢ of the folded intervals, s. Under occupancy probability p the slot FCO's binomial sampling variance is p(1−p)·`fco_var_s`/Σw. It is Σw²/n_eff divided by Σw, so forgetting scales it like the weights and the adaptive copy keeps it exactly. Baseline file format 3 stores it; versions 1–2 read it as 0. An upgraded adaptive copy gains the moment as it folds, but a **frozen reference never refolds**: an upgraded mature baseline keeps its uncorrected between-slot spread until it is re-frozen or relearns. That spread is larger, so its z is smaller (the safe direction).
+- `persistence` (T-146 review, per subject rather than per slot): lag-1 moments (pairs, Σf, Σf′, Σf·f′) of the FCOs of consecutive folds that entered the reference (≤ 6 h apart). They give the persistence lift E[f f′]/(E f · E f′) that §7.2 uses; format 3 stores them, and older files read zeros (lift 1).
 
 These give mean, standard deviation, FCO and max; merging equals sequential adding (tested). In memory (T-135) a slot stores them as f32: mean and centred Σ(level − mean)² instead of the two sums, so σ does not cancel. Each fold rounds the stored moments once (≤ 3·10⁻⁸ relative); files keep f64. Percentiles are deliberately not kept per slot: 168 histograms per cell cost ~8× the storage. Low percentiles for the floor come from history tiles (C26), which already keep p10/p90.
 
@@ -261,6 +263,12 @@ These give mean, standard deviation, FCO and max; merging equals sequential addi
 - **Frozen reference:** the pool statistics at the moment of maturity, never updated automatically. Novelty z-scores are computed against it.
 - **Adaptive copy:** the same statistics with exponential forgetting (`half_life_days` 14, in observed days).
 - **Change point:** a per-cell/channel CUSUM of (adaptive − reference)/σ_ref with slack `cusum_k_sigma` 0.5 and threshold `cusum_h_sigma` 8. Crossing raises a `change-point` alarm (§7).
+  - **Amended (T-146, decided 2026-09-15):** this CUSUM compares the 14-day adaptive copy with the reference, so a new steady state moves it only slowly (≈ 0.02 in FCO after 10 h at full occupancy). It detects a drift of the baseline, not a fresh onset. Persistent busier/quieter activity is caught by the per-interval sequential evidence of §7.2, which accumulates the fold z-scores since onset. The change-point CUSUM is unchanged.
+- **Reference spread of occupancy, sampling-corrected (T-146, decided 2026-09-15):** `occupancy_z`, σ_ref and the learning tests use the pool's between-slot FCO variance **minus the part expected from binomial sampling alone** (a DerSimonian–Laird-style estimate).
+  - With slot weights w_j (W = Σw_j) and slot sampling variance s_j² = p(1−p)·V_j/w_j (V_j = `fco_var_s`, §3.3), the weighted spread S has E[S] = τ² + Σ(w_j/W)s_j² − Σw_j²s_j²/W². The subtracted part is therefore p(1−p)·(ΣV_j/W − Σw_jV_j/W²), where p is the pool FCO.
+  - **Per-slot variance (T-146 review).** p(1−p) is each slot's own unbiased f_j(1−f_j)·n_j/(n_j−1), with n_j = w_j/V_j its effective looks (at least 2), folded into the moments. The subtracted part is therefore Σ f_j(1−f_j)c_jV_j/W − Σ w_j f_j(1−f_j)c_jV_j/W², where c_j = n_j/(n_j−1). Using the pool FCO's p̄(1−p̄) instead over-subtracts for patterned pools (slots at 0.1 and 0.7: 0.0826 against τ² = 0.09, which inflates z). The tested tolerance is 0.0035.
+  - The result is floored at `BETWEEN_VAR_FLOOR_FRACTION` = 0.1 of the raw spread, so it never goes negative or claims a pool has no spread. **The floor binds for flat pools.** A pool whose raw spread is nearly all sampling noise keeps only 10% of it: a dense flat pool goes from 1.8·10⁻⁴ to 3·10⁻⁵ (−90%), and its occupancy z rises by up to about 10% where that spread dominates the variance.
+  - Sparse visits (e.g. two 1 s windows per 15-min interval, n_eff ≈ 2) no longer inflate the spread into a z ceiling (≈ 4.7 in the T-124 scene). A dense-visit pool (n_eff ≈ 80) changes by < 10⁻³ (tested).
 - **Re-freeze:** only by `POST /api/baselines/refreeze` (user), or after `auto_refreeze_days` if configured (default off).
   - It copies the **decayed** adaptive statistics into the reference. With a 14-day half-life, a parked device's adaptive copy holds only a few hours (~3 h) of effective observed time per hour-of-week slot, so no slot is mature on its own. Resolution coarsens to the finest pool that is still ≥ 24 h, and slots below their hour-of-day maturity reopen reference learning.
 - **Reference learning (T-119):** a fold enters the reference only if it is clean, not provenance-explained, no change point is open or building (every CUSUM < h/2), and its slot's **hour-of-day pool is immature** (< 24 h). Learning therefore stops after ~24 parked days, which bounds slow-leak poisoning.
@@ -353,7 +361,7 @@ A C17 allocation suggestion (e.g. broadcast FM) may add at most 0.3 of the prior
 
 `NoveltyScore`:
 - **`level_z`:** (observed − reference mean)/max(σ, 1 dB) on the mature pool.
-- **`occupancy_z`:** (FCO_obs − FCO_ref)/sqrt(p(1−p)/n_eff), using §2.4's `n_eff`, so a short look at a channel cannot produce a large z.
+- **`occupancy_z`:** (FCO_obs − FCO_ref)/sqrt(p(1−p)/n_eff), using §2.4's `n_eff`, so a short look at a channel cannot produce a large z. As implemented, the variance is max(p(1−p), q(1−q))/n_eff + v_between, where q is the observed FCO shrunk by half a sample. v_between is the pool's sampling-corrected between-slot spread (T-146, §3.4).
 - **`new_emitter`:** the Poisson tail of k first sightings in the observed seconds at the site's baseline first-sighting rate, mapped as clip(−log10 p / 6, 0, 1) (`new_emitter_novelty`). Expected counts scale with observed time, so dwelling longer does not manufacture novelty (C04 pitfall: observation bias).
 - **Combined:** `novelty` = max over available components, with z mapped by `novelty_from_z(z, 3, 10)`.
 - **Forced zero** when immature or `provenance_explained` (§7.4). Both rules are validated.
@@ -540,6 +548,74 @@ The evidence is an `AlarmDetail` (observed, baseline mean/spread, z, novelty, in
 - **Dedupe key:** `AlarmKey { kind, site, subject }`, with adjacent cells merged (gap ≤ 2 baseline cells) before keying.
 - **Open key:** extended (supersession, as floor anomalies do), never duplicated.
 - **Re-raise within cooldown:** re-opens the same anomaly (appends `open`) rather than creating a row.
+
+**Sequential evidence for `busier-than-usual` / `quieter-than-usual` (T-146, decided 2026-09-15).** A single sparse look cannot reach on: z ≥ 7.9 is out of reach when a two-window interval's FCO carries a large sampling variance. The evidence is in persistence, which the survey report already pools (Stouffer). The alarm path now accumulates it too:
+- **Run.** Each busier/quieter input feeds its subject's run of consecutive same-direction scored intervals. The key is site, the input's own subject and calibration (`novelty::sequential_step`). The run holds k and Σz, and its statistic is Stouffer's S = |Σzᵢ|/√k.
+- **Look evidence (T-146 review).** Each interval adds its directional evidence eᵢ, not its raw z: eᵢ = min(z, Q⁻¹(exact binomial tail of the look's n_eff looks)), so a sparse look never claims more than its discrete tail (2 of 2 busy looks at pool FCO p: Q⁻¹(p²)). A run's first interval is scored at the pool's shrunk FCO p. The interval right after a same-direction one is scored at the subject's lag-1 conditional rate min(1, p·lift), where lift = E[f f′]/(E f·E f′) ≥ 1 comes from the reference's consecutive-fold moments (§3.4 `persistence`, ≥ 16 pairs, else 1); quieter mirrors it on vacancy. A subject whose sessions last hours earns little from its next busy interval.
+- **Run.** The run holds k and Σeᵢ, and S = Σeᵢ/√k. It continues through an opposite-signed interval with |z| ≤ `SEQUENTIAL_SIGN_SLACK_Z` = 1 (one missed sparse look), adding that look's negative evidence. When Σeᵢ falls to ≤ 0, the run ends and a new 1-interval run starts at that look if its first-interval evidence is positive.
+- **Reset.** A run restarts on:
+  - an opposite sign with |z| > 1;
+  - a gap > max(`SEQUENTIAL_MAX_GAP_S` = 2 h, 3 × the subject's revisit period) since its last interval. The period is an EWMA (¼) of the gaps between scored inputs, each gap clipped at 4× the period;
+  - a recorded gain step (device provenance). The gain-state value itself is not part of the rule;
+  - an immature input, including an unscorable fold, which the service reports through `reset_sequential`;
+  - a provenance-explained input, or a device step that explains the subject (§7.4);
+  - a site change, or a mobile or unassigned snapshot.
+
+  A re-fed interval is not counted twice.
+- **Score.**
+  - p_seq = min(1, g(k)·Q(S)), with the multiplicity weight g(k) = 2k(k+1), so Σ_{k≥1} 1/g(k) = ½.
+  - It maps to the single-interval scale as z_eq = Q⁻¹(√p_seq), and the sequential novelty is `novelty_from_z(z_eq, 3, 10)`.
+  - The input's novelty becomes max(single-interval novelty, sequential novelty). The existing hysteresis (on 0.7, off 0.4, 2 up, 3 down, 1 h reopen) and the 7-day dismissal then apply unchanged.
+  - novelty ≥ on ⇔ p_seq ≤ Q(z_on)², with z_on = 7.9: a run reaches on only when it is as improbable under the null as the single-interval rule's raise event (two consecutive intervals at z_on).
+- **False-alarm budget (per subject, per direction, per scored interval, null zᵢ i.i.d. N(0,1)).** Q = Q(z_on).
+  - **Budget:** the single-interval rule raises on two consecutive steps of a direction's key at z ≥ z_on. Busier and quieter are separate keys, and a key is stepped only by intervals of its sign, so the rate is Q·(Q/½) = 2Q² ≈ 3.9·10⁻³⁰ (slightly less while an alarm is open). This was already the pre-T-146 behaviour.
+  - **One run length:** if the run ending at interval t reaches on with length k, the sum of its last k z's, which is N(0, k), is ≥ c_k√k, where Q(c_k) = Q²/g(k). So P(k-run at t reaches on) ≤ Q²/g(k).
+  - **All run lengths:** P(any run at t reaches on) ≤ Q²·Σ1/g(k) = Q²/2. Resets only shorten runs.
+  - **Why √p_seq.** The on level of the single rule is a per-interval tail Q; its raise event, two on intervals, is Q². Mapping z_eq = Q⁻¹(√p_seq) puts the run's on level at p_seq ≤ Q², the probability of that whole raise event, and the hysteresis then still asks for a second on interval on top. The g(k) weighting is a **Bonferroni (union) bound over run length**: runs of different lengths ending at t share most of their z's and are strongly positively correlated, so the true rate is well below the bound (measured ≈ Q²/4 at z_on = 2). The rule is therefore conservative: it can only be later than an exact sequential test, never noisier than the budget.
+  - **Sequential rule:** a raise at t needs on at t, so the rule's null raise rate is ≤ Q²/2 ≈ 9.7·10⁻³¹, within the budget.
+  - **Combined rule** (max of the two novelties): ≤ 2Q² + Q²/2 + Q³ (single then single, sequential on at t, and a sequential on at the previous same-signed step followed by a single-interval on at t).
+  - **Tested.** The same code is run by Monte Carlo at z_on = 2 (Q² = 5.18·10⁻⁴, 2·10⁶ null intervals, fixed seed, tolerances fixed beforehand). Per direction it measures:
+    - single-interval rule 9.9·10⁻⁴ against 2Q² = 1.04·10⁻³ (asserted within [0.8·2Q², 2Q² + 5σ]);
+    - sequential on-rate 1.26·10⁻⁴ and raise rate 1.2·10⁻⁵, against the bound Q²/2 = 2.59·10⁻⁴ (+3σ);
+    - combined rule 9.96·10⁻⁴, against 1.31·10⁻³ (+3σ).
+
+    10⁶ null intervals at the production mapping never reach on (`novelty_sequential_null_false_alarm_rate_within_budget`).
+  - **What the budget covers (T-146 review).** The Gaussian bound above assumes N(0,1) evidence. Sparse looks are discrete, and busy sessions persist, so the raw z broke it. The budget is now checked on the modelled nulls:
+    - i.i.d. binomial looks (n_eff 2), by exact enumeration of outcome counts to k = 240;
+    - a stationary lag-1 (two-state Markov) look process, with mean busy run 4 intervals, by a rounded-up grid to k = 200;
+    - each also with 10⁶ simulated null intervals through the rule and hysteresis.
+
+    It does **not** cover correlation beyond lag 1, clustering absent from the reference, or estimation error in the lift. `novelty_sequential_discrete_and_markov_null_within_budget` computes the union bound as a multiple of the budget Q(z_on)²/2 (tolerance fixed beforehand: ≤ 1, no simulated raise):
+
+    | null process | lift (busier, quieter) | busier: raw z → look evidence | quieter: raw z → look evidence | simulated raises in 10⁶ (before → after) |
+    |---|---|---|---|---|
+    | binomial p 0.05 | 1.04, 1.00 | 25.5 → 2.7·10⁻¹⁴ | 0 → 0 | 0 → 0 |
+    | binomial p 0.2 | 1.00, 1.00 | 1.2·10⁶ → 9.9·10⁻³⁵ | 0 → 0 | 0 → 0 |
+    | binomial p 0.5 | 1.00, 1.00 | 4.1·10⁻⁵ → 0 | 1.3·10⁻⁸ → 0 | 0 → 0 |
+    | Markov duty 0.05 | 13.8, 1.05 | 1.1·10²⁹ → 0 | 0 → 0 | 526 → 0 |
+    | Markov duty 0.5 | 1.52, 1.49 | 2.6·10²⁴ → 0 | 2.6·10²⁴ → 0 | 0 → 0 |
+- **Latency.**
+  - **Dense visits:** an interval that is novel on its own raises within 2 intervals, as before, because single-interval novelty is kept.
+  - **Constant per-look evidence e (from the rule, exact tails):** a run reaches on at the smallest k with g(k)·Q(e√k) ≤ Q(7.9)², and raises one interval later. Dense looks have e = z; sparse all-busy looks have e = min(z, Q⁻¹(pⁿ)) at pool FCO p (continuation evidence at lift 1; a persistent subject's lift makes it smaller and the raise later):
+
+    | dense, per-interval z | 3.0 | 3.2 | 3.4 | 3.6 | 4.0 | 5.0 | 6.0 |
+    |---|---|---|---|---|---|---|---|
+    | raise at interval | 17 | 15 | 14 | 12 | 10 | 7 | 5 |
+
+    | sparse, pool FCO p | 0.02 | 0.05 | 0.1 | 0.2 | 0.3 |
+    |---|---|---|---|---|---|
+    | n_eff 2: e = Q⁻¹(p²) | 3.35 | 2.81 | 2.33 | 1.75 | 1.34 |
+    | raise at interval | 14 | 20 | 28 | 49 | 84 |
+    | n_eff 4: e = Q⁻¹(p⁴) | 5.11 | 4.37 | 3.72 | 2.95 | 2.40 |
+    | raise at interval | 7 | 9 | 12 | 18 | 26 |
+  - **Sparse visits, measured.** On the hk-context scene (FCO 0.05 → 1, n_eff 2; z 3.54, which exact tails cut to e ∈ [2.60, 3.08] for the pool FCO's 3σ range), the alarm raises at interval 22, inside the a-priori window 17–23. Before exact tails it raised at 13. A channel going busy from p 0.02–0.1 with 2-look intervals now takes about 3.5–7 h of consecutive 15-min visits. That is the price of the budget: 2 of 2 busy looks at p 0.2 is a 1-in-25 event.
+  - **Pre-onset dilution.** Stouffer weights every interval of the run equally, so weak same-direction intervals just before the onset lengthen the run without adding much Σe, which delays the raise. In the service scene (`alarm_service_sparse_visits_raise_busier_than_usual`, z 2.50) the last baseline look joins the run, and the alarm raises at interval 25 with k = 26, as the rule predicts. Maximising over suffix lengths of the run would be covered by the same g(k) union bound and would remove this delay, but it needs per-run history. It is not implemented.
+  - **Other scenes.** A sparse busy channel at p 0.9 with 3 missed looks raises once and never clears (sign slack). A 3 h revisit cadence keeps its run and raises at visit 23 (revisit-relative gap).
+- **Storage.** The per-subject persistence moments add 543 200 B of nodes to the parked week at 9 700 cells (nodes 2 793 600 B; total 229 944 392 B; 0 refusals under the default cap).
+- **Unchanged.** `new-emitter` (including the T-136/T-138 rules), `level-above-baseline` and `change-point` keep their semantics.
+- **Not persisted.** Runs are engine state like the hysteresis building count: they restart after `AlarmEngine::resume`. An alarm open at a restart holds on its single-interval novelty. A sparse subject may clear, then raise again once its run has rebuilt.
+- **Explanation evidence.** The `unexplained` explanation of an alarm raised with a run of ≥ 2 intervals carries `sequential_z`, `sequential_intervals` and `sequential_novelty`.
+- **A gain step** that the per-gain split already absorbs raises no alarm, and the step is disclosed in the report's provenance (§6.3). No product change (decided).
 
 ### 7.3 Suppression
 

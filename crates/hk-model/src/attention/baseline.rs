@@ -320,6 +320,11 @@ pub struct SlotStats {
     pub weight_s: f64,
     /// Max level seen, dB (not winsorised). `-inf` when empty.
     pub max_db: f64,
+    /// T-146 sampling moment of the slot FCO: Σ(wᵢ²/n_eff,ᵢ)/Σwᵢ over the folded intervals, s.
+    /// Under an occupancy probability p the slot FCO's binomial sampling variance is
+    /// p(1−p)·`fco_var_s`/`weight_s` ([`Self::fco_var_after`]). 0 for slots written before T-146.
+    #[serde(default)]
+    pub fco_var_s: f64,
 }
 
 impl SlotStats {
@@ -332,7 +337,21 @@ impl SlotStats {
         occupied_weight_s: 0.0,
         weight_s: 0.0,
         max_db: f64::NEG_INFINITY,
+        fco_var_s: 0.0,
     };
+
+    /// T-146: the [`Self::fco_var_s`] moment after folding an interval of weight `weight_s` and
+    /// `n_eff` effective samples (floored at 1, as the novelty σ) into a slot holding `fco_var_s`
+    /// over `prior_weight_s`. The moment is Σw²/n_eff divided by Σw, so multiplying every weight
+    /// by a forgetting factor multiplies it by the same factor (it scales like the other additive
+    /// moments) while the sampling variance p(1−p)·moment/Σw stays exact.
+    pub fn fco_var_after(fco_var_s: f64, prior_weight_s: f64, weight_s: f64, n_eff: f64) -> f64 {
+        if weight_s.is_nan() || weight_s <= 0.0 || !n_eff.is_finite() {
+            return fco_var_s;
+        }
+        let prior = prior_weight_s.max(0.0);
+        (fco_var_s * prior + weight_s * weight_s / n_eff.max(1.0)) / (prior + weight_s)
+    }
 
     /// Folds one visit: its (winsorised) level, raw max, occupancy and time weight.
     pub fn add(
@@ -371,7 +390,11 @@ impl SlotStats {
         self.sum_db += o.sum_db;
         self.sum_sq_db += o.sum_sq_db;
         self.occupied_weight_s += o.occupied_weight_s;
-        self.weight_s += o.weight_s;
+        let w = self.weight_s + o.weight_s;
+        if w > 0.0 {
+            self.fco_var_s = (self.fco_var_s * self.weight_s + o.fco_var_s * o.weight_s) / w;
+        }
+        self.weight_s = w;
         self.max_db = self.max_db.max(o.max_db);
     }
 
