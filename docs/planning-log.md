@@ -1486,3 +1486,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - (i): the span query hit its 7 d cap. A fix is committed but not yet re-run.
   - **Also noted:** 3 bandit dwells in the main scene; a dwell near a replay window's end claims 2 s past its last sample (replay effect).
   - **Status:** T-124 blocked on T-146 and T-147.
+- **B0.378 T-146: no maturity mismatch; the premise was wrong.**
+  - **Evidence:** a diagnostic re-run of the T-124 scene shows the alarm path and the report agree on maturity. h36–46 injected channel: all-hours pool mature, occupancy z 4.67, novelty 0.238.
+    - The 815 immature suppressions are expected: first ~24 h per channel, two channels first seen at h28, and one channel that never reaches 24 h.
+  - **Real gap, per-interval scoring power:**
+    - Alarm on-level needs z ≥ 7.9.
+    - With 2 × 1 s windows per interval, measured FCO is ~0 or 1, and `between_var()` (baseline.rs:462, ~0.041) dominates the variance in novelty.rs:84. One interval caps at z ≈ 4.7.
+    - The report's z 11.4 pools many intervals; the alarm path never does.
+    - The CUSUM compares the 14-day-half-life adaptive copy with the reference, so it barely moves in 10 h.
+  - **Gain step:** the new gain state starts its own level pool, so there is no level z and no alarm (correct), but also no explained anomaly (`provenance_explained` never set).
+  - **Decision needed (user):**
+    - Alarm evidence accumulation across intervals, CUSUM on per-interval z, and/or correcting `between_var` for sampling noise, versus denser scene visits.
+    - What test (h) should expect.
+  - **Artifacts:** diagnostic patch and logs in scratchpad `t146-*`. T-146 worktree removed; no commit.

@@ -2294,7 +2294,8 @@ tasks:
   - id: T-146
     milestone: M2
     title: "Alarm path vs survey report disagree on baseline maturity: AlarmService suppresses every busier/level input as immature-baseline while the report shows the baseline available (injected channel busier z 11.4)"
-    status: in-progress
+    status: blocked
+    blocked_on: "user decision: busier/quieter alarm evidence accumulation across intervals (ADR-0012 §3.4/§7.2) and gain-step expectation (§7.4)"
     deps: []
     parallel_group: M2A
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
