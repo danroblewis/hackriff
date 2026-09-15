@@ -1370,3 +1370,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - A hk-store test tolerance of 2 dB, because full vs short row floors differ by 1.6 dB (possible log-bias correction bug).
     - T-124 thresholds must be set a priori, not calibrated on the first green run.
     - Bandit dwells never happened in a 3.8 h scene.
+- **B0.362 Full check green after the T-137 merge (f092aa4).**
+  - Lint clean; 1378/1378 tests; acceptance 32/32.
+  - Disk recovered to 6.8 GB free after deleting the committed T-139 worktree target; launches stay paused below 20 GB.
+  - The :8900 demo data dir is now growing slowly (~100 MB per 5 min of recordings).
