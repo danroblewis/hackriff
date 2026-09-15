@@ -470,9 +470,107 @@ Classical, compute-only helpers (`hk_estimate::assist`) for writing a parser ove
 
 Errors are `{"error", "code"}`: `400 invalid` (bad id or query, messages never echo values), `404 not_found`, `405` (with `Allow`), `409 conflict`, `422 unreadable` (not a readable inspector stream), `500 unreadable` (store I/O), `503 unavailable` (no capture store on this server).
 
+## Observation log (T-115; ADR-0012 §1)
+
+Where and when the radio actually observed, and why: one `DwellRecord` per non-sweep scheduler step and one `SweepRecord` per discovery pass or 60 s, whichever ends first (hops reference a `SweepGeometry`). Schemas: `hk_model::attention::observation`. Records come from the scheduler of a scheduler-driven run (`hackriffd`, `hk run --schedule`); a live run without the scheduler (`hk serve`) logs its interactive tuning as `interactive`-tier dwell records (one per steady tune, closed on retune and split every 60 s; they add coverage and observed seconds, never activity-independent visits); a recording replayed without the scheduler logs nothing. Frequencies in Hz; times in Unix seconds on the sample clock the captured blocks carry (a replay reports the recording's time).
+
+- **Observed extent.** `window.usable` is the analysed spectrum frame's extent (the span history tiles fold, so log and tile coverage describe the same cells), clipped to the sampled band; `window.dc_excluded` is the ±15 kHz DC notch. A frequency range counts as observed only while it lies **entirely** inside `usable` minus the notch.
+- **Observed interval.** `observed` starts when the analysed data carries the step's tuning (retune settle) and ends when the next step starts, clipped to `planned`; `preempted` marks a step cut before its planned end. Sweep `visits[]` give `start_ms`/`observed_ms` after the record's `span.t0`.
+- **Freshness.** Queries read the segment files plus the writer's unflushed buffer. Records are dropped (and counted in `log.dropped`) only when the writer queue is full; the pipeline never waits for the log.
+- **Storage.** Hourly CRC-line segments `<data>/observations/YYYY/MM/DD/HH.log`, flushed at most once a minute (or at 256 KiB), fsynced at hour seal, kept 30 days / 512 MiB by sample time.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | token | Records overlapping the box, in log order |
+| GET | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | token | `ObservationTotals`, per-channel totals, gaps and POI rows |
+
+`GET /api/observations` → `200`:
+
+```json
+{
+  "f_lo": 100000000.0, "f_hi": 102000000.0, "t0": 1789300800.0, "t1": 1789300860.0,
+  "records": [
+    { "record": "sweep", "schema": 1, "survey_id": "…", "plan_version": 1, "site": { "kind": "unassigned" },
+      "geometry": 1234567890123, "span": { "start": "…", "end": "…" },
+      "visits": [ { "hop": 0, "start_ms": 0, "observed_ms": 50 } ],
+      "preempted_hops": 0, "dropped_samples": 0, "overload_hops": 0 },
+    { "record": "dwell", "schema": 1, "seq": 42, "plan_version": 1, "site": { "kind": "unassigned" },
+      "reason": { "code": "poi-dwell", "poi": 3 }, "tier": "bandit",
+      "window": { "center_hz": 100500000.0, "sample_rate_hz": 2400000.0,
+                  "usable": { "lo_hz": 99300000.0, "hi_hz": 101698828.1 },
+                  "dc_excluded": { "lo_hz": 100485000.0, "hi_hz": 100515000.0 }, "rbw_hz": 3515.6 },
+      "rf_path": 0, "planned": { "start": "…", "end": "…" }, "observed": { "start": "…", "end": "…" },
+      "preempted": false, "dropped_samples": 0, "overload": false }
+  ],
+  "geometries": [ { "schema": 1, "id": 1234567890123, "plan_version": 1, "hops": [ { "center_hz": …, "sample_rate_hz": …, "usable": {…}, "dc_excluded": {…}, "rbw_hz": … } ] } ],
+  "next_cursor": null,
+  "truncated": false,
+  "log": { "offered": 120, "dropped": 0, "written": 120, "flushes": 2, "sealed": 0, "write_errors": 0, "segments_deleted": 0, "bytes": 48213 }
+}
+```
+
+- `tier`: `interactive`, `pinned-lease`, `scheduled-plan`, `bandit` or `background-sweep` (sweep records are `background-sweep`). A sweep record matches when any visited hop's `usable` overlaps the box; `geometries` holds every geometry the page's sweep records reference.
+- `limit` defaults to 1000, at most 10000; `next_cursor` (a record offset) is set when more records match.
+- Times inside records (`span`, `planned`, `observed`, and `totals.span`) are integer Unix nanoseconds (hk-model `Timestamp`); the top-level `t0`/`t1` and `gaps` are seconds.
+
+`GET /api/observations/coverage` → `200`:
+
+```json
+{
+  "f_lo": 100990000.0, "f_hi": 101010000.0, "t0": 1789300800.0, "t1": 1789300860.0,
+  "totals": { "freq": { "lo_hz": 100990000.0, "hi_hz": 101010000.0 }, "span": { "start": "…", "end": "…" },
+              "n_visits": 58, "n_visits_activity_independent": 58,
+              "observed_s": { "interactive": 0.0, "pinned_lease": 0.0, "scheduled_plan": 0.0, "bandit": 0.0, "background_sweep": 2.9 },
+              "max_gap_s": 1.1, "mean_revisit_s": 1.03 },
+  "channels": null,
+  "gaps": [ { "t0": 1789300800.05, "t1": 1789300801.0 } ],
+  "gaps_truncated": false,
+  "poi": [ { "tau_s": 0.01, "p_poi": 0.058 } ]
+}
+```
+
+- A **visit** is a maximal run of contiguous observed time covering the range: consecutive hops that both cover it are one visit. `n_visits_activity_independent` counts visits that include a `background-sweep` or `scheduled-plan` observation (usable for occupancy without revisit bias). `observed_s` sums observed seconds per tier inside the span; `max_gap_s` counts the span edges; `mean_revisit_s` is the mean start-to-start interval (absent with fewer than two visits).
+- `channel_hz` tiles `f_lo..f_hi` into channels (at most 4096) and returns one `totals` object per channel in `channels`.
+- `gaps`: unobserved intervals of at least `min_gap_s` (default: any), at most 1000 (`gaps_truncated`).
+- `tau_s`: up to 16 comma-separated burst durations; each `poi` row is the fraction of burst start times in the span whose burst overlaps an observation (`hk_model::attention::schedule::poi_fraction`).
+- `400 invalid` for a missing or bad `f_lo`/`f_hi`/`t0`/`t1` (`f_hi > f_lo ≥ 0`, `t1 > t0`), `tier`, `cursor`, `limit`, `channel_hz` or `tau_s`; `503 unavailable` when the server has no observation log; `405` for other methods.
+
+Stream `observations` (ADR-0004 `messages` kind, `message_schema` `hackriff.observation/1`, metadata only, listed by `GET /api/streams`): one message per record the log writes, published from the writer thread (a slow subscriber drops messages, never log records). `metadata.kind` is `dwell` (`reason_text`, `record`: the `DwellRecord`) or `sweep-summary` (`plan_version`, `geometry`, `t0_s`, `t1_s`, `visits`, `observed_s`, `f_lo_hz`/`f_hi_hz` of the visited hops, `preempted_hops`, `dropped_samples`, `overload_hops`). Geometry records are not streamed; read them from `GET /api/observations`.
+
+## Occupancy (T-118; ADR-0012 §2)
+
+ITU-R SM.1880 / SM.2256 occupancy per learned channel and per band, computed in the backend (`hk_context::occupancy`) from the level-0 spectrum history, the run's detections and the observation log. Channels are learned blind from detections; band rasters appear only as `raster_hint` suggestions.
+
+| Method | Path | Auth | Returns |
+|---|---|---|---|
+| GET | `/api/occupancy?f_lo&f_hi&t0&t1[&subject=channel\|band][&interval=15m\|1h\|span][&site]` | token | `OccupancyStat` rows overlapping the box |
+| GET | `/api/channels?f_lo&f_hi[&site]` | token | The learned channel plan overlapping `f_lo..f_hi` |
+
+`GET /api/occupancy` → `200`:
+
+```json
+{"interval": "15m", "f_cell_hz": 6250.0, "plan_version": 3, "truncated": false,
+ "rows": [{"schema": 1, "site": {"kind": "unassigned"}, "subject": {"kind": "channel", "key": {"scheme": 1, "lo_cell": 69358, "hi_cell": 69362}},
+           "interval": {"start": "…", "end": "…"}, "fco": 0.12, "fco_all_visits": 0.31, "fco_suspect_upper": 0.13, "fbo": 0.08,
+           "n_revisits": 64, "n_occupied": 8, "n_suspect": 1, "n_revisits_all": 120, "observed_s": 61.5, "revisit_max_s": 41.0, "revisit_mean_s": 14.1,
+           "timing": "unknown", "threshold": {"method": {"method": "dynamic", "idle_fraction": 0.8}, "guard_db": 5.0, "rbw_correction": true},
+           "threshold_db": -121.4, "guard_clamped": true, "rbw_hz": 6250.0, "obw_hz": 15000.0, "unit": "…",
+           "confidence": {"lo": 0.06, "hi": 0.22, "level": "p95", "n_eff": 58.3, "independence_assumed": false},
+           "revisit_biased": false, "fco_window": {"start": "…", "end": "…"}, "subject_extent": {"f_lo_hz": 433475000.0, "f_hi_hz": 433500000.0}}],
+ "coverage": {"rows": 1, "rows_with_fco": 1, "observed_s": 61.5, "unobserved_is_not_quiet": true}}
+```
+
+- **Rows** follow ADR-0012 §2.1 (`OccupancyStat`, `hk_model::attention::occupancy`) plus `subject_extent` (the subject's frequency extent in Hz). `sro` is present on band rows only. Absent optional fields are omitted.
+- **`interval`:** `15m` (default) and `1h` read the persisted series (closed every 15 min of stream time; `1h` rows at hour boundaries); `span` computes one row per subject over exactly `[t0, t1]` from the history, the final channel plan and the detections (band ≤ 20 MHz, span ≤ 7 days).
+- **`fco`** uses activity-independent visits only (background sweep, scheduled plan; an unlogged run's own ScanPlan rows count as scheduled), time-weighted; suspect crossings (§2.6) are excluded and bounded by `fco_suspect_upper`. With fewer than 30 such visits the estimate widens to the enclosing 1 h / 6 h / 24 h window or the data span, reported in `fco_window`; `fco_all_visits` is information only and never replaces `fco`. Interactive-only observation gives `fco` absent.
+- **Coverage.** Rows exist only where something was observed: a subject or interval without a row was not observed, not quiet.
+- `400 invalid` for a missing or bad `f_lo`/`f_hi`/`t0`/`t1` (`f_hi > f_lo ≥ 0`, `t1 > t0`), `subject`, `interval`, `site`, or a `span` request over the limits; `500 failed` for a store error; `503 unavailable` without an occupancy engine; `405` for other methods.
+
+`GET /api/channels` → `200`: `{"plan_version", "scheme", "f_cell_hz", "source": "learned-from-detections", "channels": [{"key": {"scheme", "lo_cell", "hi_cell"}, "source": "learned", "plan_version", "first_learned", "evidence", "obw_hz", "raster_hint"?: {"spacing_hz", "offset_hz", "source"}, "f_lo_hz", "f_hi_hz"}]}`. Keys are level-0 history cells snapped outward from the median detected extent; any change of the key set bumps `plan_version`. `400 invalid` for a bad range, `503`, `405` as above.
+
 ## Attention and memory (planned, M2; ADR-0012)
 
-**Planned, not served yet.** None of these routes are in `ROUTES` today. They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+**Planned, not served yet.** None of these routes are in `ROUTES` today, except the observation log's (above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
 - **Contracts:** [ADR-0012](adr/0012-attention-memory-contracts.md).
 - **Schemas:** `hk_model::attention` (observation records, `OccupancyStat`, baselines, `CandidateSet`, `SurveyReport`, alarm detail).
 
@@ -485,10 +583,6 @@ Conventions:
 
 | Method | Path | Owner | Purpose |
 |---|---|---|---|
-| GET | `/api/observations` | T-115 | `?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]`: observation records (dwell, sweep, geometry) overlapping the box |
-| GET | `/api/observations/coverage` | T-115 | `?f_lo&f_hi&t0&t1[&tau_s…]`: `ObservationTotals`, coverage gaps and POI rows |
-| GET | `/api/occupancy` | T-118 | `?f_lo&f_hi&t0&t1[&subject=channel\|band][&interval=15m\|1h][&site]`: `OccupancyStat` rows |
-| GET | `/api/channels` | T-118 | `?f_lo&f_hi[&site]`: the learned channel plan (with raster suggestions) |
 | GET | `/api/sites` | T-119 | Known sites |
 | GET | `/api/sites/current` | T-119 | Current `SiteKey` and how it was set |
 | PUT | `/api/sites/current` | T-119 | Set or confirm the current site (audited) |
@@ -508,7 +602,7 @@ Conventions:
 | GET | `/api/anomalies/{id}` | T-122 | One anomaly: `AlarmDetail`, ranked explanations, status history |
 | POST | `/api/anomalies/{id}/dismiss` | T-122 | Dismiss (audited) |
 
-Planned streams (ADR-0004 `messages` kind, metadata only): `observations` (T-115: `dwell` / `sweep-summary` records for the coverage panel) and `anomalies` (T-122: raise, reopen, extend and clear records with top explanations).
+Planned streams (ADR-0004 `messages` kind, metadata only): `anomalies` (T-122: raise, reopen, extend and clear records with top explanations). The `observations` stream (T-115) is served; see "Observation log" above.
 
 ## UI decision logic moved server-side (T-079)
 

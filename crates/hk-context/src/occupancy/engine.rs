@@ -18,7 +18,7 @@
 //! 3. **Estimation** ([`estimate`]) over a window, then [`stat`] with the §2.5 widening ladder.
 //!
 //! **Time weighting (§2.5, verified against SM.2256-1 Annex 1 §A5.1.2).** Each visit weighs half
-//! the gap to its predecessor plus half the gap to its successor, each half capped at the median
+//! the gap to its predecessor plus half the gap to its successor, each half capped at the mean
 //! revisit gap (so the total is ≤ 2 × nominal T_R); an edge visit mirrors its one interior half.
 //! Summed over a sequence this equals the Annex's rule for unstable revisit times (δT > 10 %):
 //! T_AI += T_Rj per interval, T_O += T_Rj when both ends are occupied and T_Rj/2 on a changeover,
@@ -188,7 +188,7 @@ impl LevelSource for hk_store::Pyramid {
 
 /// Column range `[a, b)` of `freq`'s cells, snapped outward, when wholly inside the grid.
 fn cells_of(grid: &RegionHistory, freq: FreqRange) -> Option<(usize, usize)> {
-    if !(freq.hi_hz > freq.lo_hz) || grid.nf == 0 {
+    if freq.hi_hz.is_nan() || freq.hi_hz <= freq.lo_hz || grid.nf == 0 {
         return None;
     }
     let eps = 1e-6;
@@ -241,6 +241,22 @@ pub fn band_levels(grid: &RegionHistory, freq: FreqRange) -> Vec<f64> {
     v
 }
 
+/// The band's noise floor: the 80 % method (discard the highest `discard_fraction`, linearly
+/// average the rest) over the history's bias-corrected `floor_db` of every observed cell of `freq`.
+/// `None` when no cell has a finite floor.
+pub fn band_floor_db(grid: &RegionHistory, freq: FreqRange, discard_fraction: f64) -> Option<f64> {
+    let (a, b) = cells_of(grid, freq)?;
+    let mut v = Vec::new();
+    for t in 0..grid.nt {
+        for f in a..b {
+            if cell_ok(grid, t, f) {
+                v.push(f64::from(grid.cell(t, f).floor_db));
+            }
+        }
+    }
+    threshold::eighty_percent_floor_db(&v, discard_fraction)
+}
+
 /// One evaluated visit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VisitSample {
@@ -279,6 +295,10 @@ pub struct EvalInput<'a> {
     pub detections: &'a [DetectionExtent],
     /// Band level samples for the 80 % fallback (may be empty).
     pub idle_levels_db: &'a [f64],
+    /// Band noise floor ([`band_floor_db`]), preferred over the subject's own cells: a busy
+    /// channel's low-percentile floor is its own signal level (SM.2256: the calculated threshold
+    /// only works over a band).
+    pub band_floor_db: Option<f64>,
 }
 
 /// Evaluates `visits` of the subject `freq` (occupied bandwidth `obw_hz`) against `grid`.
@@ -299,6 +319,7 @@ pub fn evaluate(
             .filter(move |&f| cell_ok(grid, t, f))
             .map(move |f| f64::from(grid.cell(t, f).floor_db))
     }));
+    let floor = input.band_floor_db.or(floor);
     let Some(thr) = threshold::resolve(spec, floor, input.idle_levels_db, obw_hz, grid.f_cell_hz)
     else {
         return (Vec::new(), None);
@@ -308,7 +329,10 @@ pub fn evaluate(
     let mut out = Vec::with_capacity(input.visits.len());
     let mut above = vec![false; b - a];
     for v in input.visits {
-        let (s, e) = (v.observed.start.as_unix_nanos(), v.observed.end.as_unix_nanos());
+        let (s, e) = (
+            v.observed.start.as_unix_nanos(),
+            v.observed.end.as_unix_nanos(),
+        );
         let r0 = (s - t0_ns).div_euclid(grid.t_cell_ns).max(0);
         let r1 = ((e - t0_ns + grid.t_cell_ns - 1).div_euclid(grid.t_cell_ns)).max(r0 + 1);
         let (r0, r1) = (r0 as usize, (r1 as usize).min(grid.nt));
@@ -398,14 +422,15 @@ impl WindowEstimate {
     }
 }
 
-/// Time weights of visits at `mids` (sorted): half-gaps each side capped at the median gap.
+/// Time weights of visits at `mids` (sorted): half-gaps each side capped at the mean gap.
 fn weights(mids: &[i64]) -> Vec<f64> {
     let n = mids.len();
     if n <= 1 {
         return vec![1.0; n];
     }
     let gaps: Vec<f64> = mids.windows(2).map(|p| (p[1] - p[0]) as f64).collect();
-    let cap = median_finite(gaps.iter().copied())
+    // Nominal T_R = the mean revisit (a median would collapse to a dwell cluster's spacing).
+    let cap = Some((mids[n - 1] - mids[0]) as f64 / (n - 1) as f64)
         .filter(|g| *g > 0.0)
         .unwrap_or(1.0);
     (0..n)
@@ -447,7 +472,11 @@ fn lag1_rho(x: &[f64]) -> Option<f64> {
 }
 
 /// Estimates over `window` from `samples` (any order) whose midpoint lies in it.
-pub fn estimate(samples: &[VisitSample], window: TimeRange, level: ConfidenceLevel) -> WindowEstimate {
+pub fn estimate(
+    samples: &[VisitSample],
+    window: TimeRange,
+    level: ConfidenceLevel,
+) -> WindowEstimate {
     let (ws, we) = (window.start.as_unix_nanos(), window.end.as_unix_nanos());
     let mut sel: Vec<&VisitSample> = samples
         .iter()
@@ -472,7 +501,10 @@ pub fn estimate(samples: &[VisitSample], window: TimeRange, level: ConfidenceLev
     let fco_suspect_upper = weighted_mean(&mids(&ai), &occ(&ai));
     let fbo = weighted_mean(
         &clean_mids,
-        &clean.iter().map(|s| f64::from(s.above_fraction)).collect::<Vec<_>>(),
+        &clean
+            .iter()
+            .map(|s| f64::from(s.above_fraction))
+            .collect::<Vec<_>>(),
     );
     // §2.5 rule 3: occupied time fraction per 1-min stratum from all non-suspect visits, strata
     // weighted equally (by their represented minute), so a long dwell counts as one minute.
@@ -755,7 +787,12 @@ mod tests {
                         for j in 0..k {
                             let tj = t + f64::from(j) * 2.0;
                             if tj < span_s {
-                                samples.push(sample(tj, Tier::BackgroundSweep, state(&ivs, tj), false));
+                                samples.push(sample(
+                                    tj,
+                                    Tier::BackgroundSweep,
+                                    state(&ivs, tj),
+                                    false,
+                                ));
                             }
                         }
                         t += rng.exp(300.0).max(5.0) + if bursty { 10.0 } else { 0.0 };
@@ -781,7 +818,10 @@ mod tests {
                 }
             }
         }
-        assert!(inside * 10 >= total * 9, "{inside}/{total} intervals hold the truth");
+        assert!(
+            inside * 10 >= total * 9,
+            "{inside}/{total} intervals hold the truth"
+        );
     }
 
     #[test]
@@ -798,10 +838,14 @@ mod tests {
             })
             .collect();
         let e = estimate(&samples, span(0.0, 100.0), ConfidenceLevel::P95);
-        // Median gap 10 s caps each half at 10 s: w = [10, 7.5, 12.5, 12.5, 15, 20]... compute.
         let mids: Vec<i64> = times.iter().map(|t| (t * 1e9) as i64).collect();
         let w = weights(&mids);
-        let expect = w.iter().zip(occ).filter(|(_, o)| *o).map(|(w, _)| w).sum::<f64>()
+        let expect = w
+            .iter()
+            .zip(occ)
+            .filter(|(_, o)| *o)
+            .map(|(w, _)| w)
+            .sum::<f64>()
             / w.iter().sum::<f64>();
         assert!((e.fco.unwrap() - expect).abs() < 1e-12);
         // Uncapped half-gap weights = trapezoid T_O/T_AI over the interior.
@@ -817,20 +861,47 @@ mod tests {
         }
         let half: Vec<f64> = (0..times.len())
             .map(|i| {
-                let p = if i > 0 { (times[i] - times[i - 1]) / 2.0 } else { 0.0 };
-                let q = if i + 1 < times.len() { (times[i + 1] - times[i]) / 2.0 } else { 0.0 };
+                let p = if i > 0 {
+                    (times[i] - times[i - 1]) / 2.0
+                } else {
+                    0.0
+                };
+                let q = if i + 1 < times.len() {
+                    (times[i + 1] - times[i]) / 2.0
+                } else {
+                    0.0
+                };
                 p + q
             })
             .collect();
-        let hw = half.iter().zip(occ).filter(|(_, o)| *o).map(|(w, _)| w).sum::<f64>()
+        let hw = half
+            .iter()
+            .zip(occ)
+            .filter(|(_, o)| *o)
+            .map(|(w, _)| w)
+            .sum::<f64>()
             / half.iter().sum::<f64>();
         assert!((hw - to / tai).abs() < 1e-12, "{hw} vs {}", to / tai);
         // A cluster of 50 visits inside one busy minute does not dominate: plain counting gives
         // ~0.9, time weighting stays near the evenly-sampled 0.5.
         let mut s: Vec<VisitSample> = (0..40)
-            .map(|k| sample(f64::from(k) * 60.0, Tier::BackgroundSweep, k % 2 == 0, false))
+            .map(|k| {
+                sample(
+                    f64::from(k) * 60.0,
+                    Tier::BackgroundSweep,
+                    k % 2 == 0,
+                    false,
+                )
+            })
             .collect();
-        s.extend((0..50).map(|k| sample(600.0 + f64::from(k) * 0.5 + 1.0, Tier::BackgroundSweep, true, false)));
+        s.extend((0..50).map(|k| {
+            sample(
+                600.0 + f64::from(k) * 0.5 + 1.0,
+                Tier::BackgroundSweep,
+                true,
+                false,
+            )
+        }));
         let e = estimate(&s, span(0.0, 2400.0), ConfidenceLevel::P95);
         assert!((e.fco.unwrap() - 0.5).abs() < 0.08, "{:?}", e.fco);
     }
@@ -839,7 +910,14 @@ mod tests {
     fn occupancy_fco_ignores_bandit_visits_and_all_visits_is_information_only() {
         // Sweep visits every 60 s see 20 % occupancy; the bandit dwells only while busy.
         let mut s: Vec<VisitSample> = (0..100)
-            .map(|k| sample(f64::from(k) * 60.0, Tier::BackgroundSweep, k % 5 == 0, false))
+            .map(|k| {
+                sample(
+                    f64::from(k) * 60.0,
+                    Tier::BackgroundSweep,
+                    k % 5 == 0,
+                    false,
+                )
+            })
             .collect();
         s.extend((0..200).map(|k| sample(f64::from(k) * 30.0 + 7.0, Tier::Bandit, true, false)));
         let e = estimate(&s, span(0.0, 6000.0), ConfidenceLevel::P95);
@@ -851,7 +929,14 @@ mod tests {
     #[test]
     fn occupancy_suspect_crossings_are_excluded_and_bound_from_above() {
         let mut s: Vec<VisitSample> = (0..100)
-            .map(|k| sample(f64::from(k) * 10.0, Tier::BackgroundSweep, k % 4 == 0, false))
+            .map(|k| {
+                sample(
+                    f64::from(k) * 10.0,
+                    Tier::BackgroundSweep,
+                    k % 4 == 0,
+                    false,
+                )
+            })
             .collect();
         for k in (1..100).step_by(4) {
             s[k].occupied = true;
@@ -860,7 +945,8 @@ mod tests {
         let e = estimate(&s, span(0.0, 1000.0), ConfidenceLevel::P95);
         assert_eq!(e.n_suspect, 25);
         assert_eq!(e.n_occupied, 25);
-        assert!((e.fco.unwrap() - 25.0 / 75.0).abs() < 0.02, "{:?}", e.fco);
+        // Suspect visits are unobserved: their time goes to the neighbours (15+15+10 per cycle).
+        assert!((e.fco.unwrap() - 15.0 / 40.0).abs() < 0.02, "{:?}", e.fco);
         assert!((e.fco_suspect_upper.unwrap() - 0.5).abs() < 0.02);
         assert!(e.fco.unwrap() <= e.fco_suspect_upper.unwrap());
     }
@@ -884,14 +970,25 @@ mod tests {
         let day = 86_400.0;
         // Sweep visits every 80 s (11 per 15 min) seeing 25 %; the bandit dwells while busy.
         let mut s: Vec<VisitSample> = (0..1080)
-            .map(|k| sample(f64::from(k) * 80.0 + 3.0, Tier::BackgroundSweep, k % 4 == 0, false))
+            .map(|k| {
+                sample(
+                    f64::from(k) * 80.0 + 3.0,
+                    Tier::BackgroundSweep,
+                    k % 4 == 0,
+                    false,
+                )
+            })
             .collect();
         s.extend((0..2000).map(|k| sample(f64::from(k) * 40.0 + 11.0, Tier::Bandit, true, false)));
         let iv = span(day * 0.5, day * 0.5 + 900.0);
         let row = stat(&cfg, &ctx, iv, &s, span(0.0, day), None).unwrap();
         row.validate().unwrap();
         let w = row.fco_window.unwrap();
-        assert_eq!(w.duration_ns(), 3_600_000_000_000, "widened to the aligned hour");
+        assert_eq!(
+            w.duration_ns(),
+            3_600_000_000_000,
+            "widened to the aligned hour"
+        );
         assert!(row.n_revisits >= 30 && !row.revisit_biased);
         assert!((row.fco.unwrap() - 0.25).abs() < 0.1, "{:?}", row.fco);
         assert!(row.fco_all_visits.unwrap() > row.fco.unwrap());
@@ -900,7 +997,15 @@ mod tests {
             .map(|k| sample(f64::from(k) * 3000.0, Tier::ScheduledPlan, k == 0, false))
             .chain((0..500).map(|k| sample(f64::from(k) * 40.0 + 1.0, Tier::Bandit, true, false)))
             .collect();
-        let row = stat(&cfg, &ctx, span(0.0, 900.0), &few, span(0.0, 24_000.0), None).unwrap();
+        let row = stat(
+            &cfg,
+            &ctx,
+            span(0.0, 900.0),
+            &few,
+            span(0.0, 24_000.0),
+            None,
+        )
+        .unwrap();
         row.validate().unwrap();
         assert_eq!(row.n_revisits, 8);
         assert!((row.fco.unwrap() - 0.125).abs() < 0.05, "{:?}", row.fco);
@@ -922,12 +1027,25 @@ mod tests {
     #[test]
     fn occupancy_sm2256_annex1_sample_counts_reproduce_tables_a1_and_a2() {
         // Table A1 (lengthy signals, 95 %, ΔSO 0.5 %, δT 0.5): A16 constant 194.2.
-        for (v, j) in [(10.0, 703.0), (30.0, 1217.0), (50.0, 1572.0), (100.0, 2223.0), (300.0, 3850.0), (500.0, 4970.0)] {
+        for (v, j) in [
+            (10.0, 703.0),
+            (30.0, 1217.0),
+            (50.0, 1572.0),
+            (100.0, 2223.0),
+            (300.0, 3850.0),
+            (500.0, 4970.0),
+        ] {
             let got = sm2256_lengthy_samples(v, 0.005, 0.5, 1.942);
             assert!((got - j).abs() <= 1.0, "V {v}: {got} vs {j}");
         }
         // Table A2 (pulsed signals, 95 % two-sided x_p 1.96, ΔSO 0.5 %): A19 = 153 664·SO(1−SO).
-        for (so, j) in [(0.05, 7300.0), (0.10, 13830.0), (0.20, 24586.0), (0.35, 34960.0), (0.50, 38416.0)] {
+        for (so, j) in [
+            (0.05, 7300.0),
+            (0.10, 13830.0),
+            (0.20, 24586.0),
+            (0.35, 34960.0),
+            (0.50, 38416.0),
+        ] {
             let got = sm2256_pulsed_samples(so, 0.005, 1.96);
             assert!((got - j).abs() / j < 0.001, "SO {so}: {got} vs {j}");
         }
@@ -961,8 +1079,16 @@ mod tests {
             geometry: 7,
             span: TimeRange::new(t0, t0.saturating_add_nanos(1_000_000_000)),
             visits: vec![
-                HopVisit { hop: 0, start_ms: 0, observed_ms: 50 },
-                HopVisit { hop: 1, start_ms: 50, observed_ms: 50 },
+                HopVisit {
+                    hop: 0,
+                    start_ms: 0,
+                    observed_ms: 50,
+                },
+                HopVisit {
+                    hop: 1,
+                    start_ms: 50,
+                    observed_ms: 50,
+                },
             ],
             preempted_hops: 0,
             dropped_samples: 0,
@@ -978,8 +1104,14 @@ mod tests {
             tier: Tier::Bandit,
             window: win(100e6),
             rf_path: 0,
-            planned: TimeRange::new(t0.saturating_add_nanos(2_000_000_000), t0.saturating_add_nanos(3_000_000_000)),
-            observed: TimeRange::new(t0.saturating_add_nanos(2_000_000_000), t0.saturating_add_nanos(3_000_000_000)),
+            planned: TimeRange::new(
+                t0.saturating_add_nanos(2_000_000_000),
+                t0.saturating_add_nanos(3_000_000_000),
+            ),
+            observed: TimeRange::new(
+                t0.saturating_add_nanos(2_000_000_000),
+                t0.saturating_add_nanos(3_000_000_000),
+            ),
             preempted: false,
             dropped_samples: 0,
             overload: true,
@@ -988,7 +1120,10 @@ mod tests {
         let all = TimeRange::new(t0, t0.saturating_add_nanos(10_000_000_000));
         let v = m.visits(FreqRange::centered(100.3e6, 25e3), all);
         assert_eq!(v.len(), 2);
-        assert_eq!((v[0].tier, v[1].tier, v[1].overload), (Tier::BackgroundSweep, Tier::Bandit, true));
+        assert_eq!(
+            (v[0].tier, v[1].tier, v[1].overload),
+            (Tier::BackgroundSweep, Tier::Bandit, true)
+        );
         // Straddling the DC notch or the hop edge is not observed.
         assert!(m.visits(FreqRange::centered(100e6, 25e3), all).is_empty());
         assert!(m.visits(FreqRange::new(100.79e6, 101.21e6), all).is_empty());

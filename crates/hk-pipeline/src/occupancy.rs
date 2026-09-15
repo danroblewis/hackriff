@@ -43,6 +43,7 @@ use hk_model::attention::observation::{ObservationRecord, Tier};
 use hk_model::attention::occupancy::{Channel, ChannelKey, OccupancyStat, OccupancySubject};
 use hk_model::frames::PowerUnit;
 use hk_model::{FreqRange, Region, Repository, TimeRange, Timestamp};
+use hk_store::observation::ObservationStore;
 use hk_store::occupancy::{
     OccupancyQuery, OccupancyRows, OccupancyStore, OccupancyStoreConfig, StoredChannelPlan,
 };
@@ -145,8 +146,40 @@ pub struct OccupancyService {
     counters: Arc<Counters>,
     inner: Mutex<Inner>,
     observations: Mutex<Option<MemoryObservations>>,
+    store_log: Mutex<Option<ObservationStore>>,
     stop: AtomicBool,
     thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// The T-115 observation log as a visit source (overload is not in its visits; §2.6 suspect
+/// masking then rests on detection flags).
+struct StoreObservations<'a>(&'a ObservationStore);
+
+impl ObservationSource for StoreObservations<'_> {
+    fn visits(&self, freq: FreqRange, span: TimeRange) -> Vec<engine::Visit> {
+        self.0
+            .observations_of(freq, span)
+            .into_iter()
+            .filter(|v| v.observed.start >= span.start && v.observed.start < span.end)
+            .map(|v| engine::Visit {
+                observed: v.observed,
+                tier: v.tier,
+                overload: false,
+            })
+            .collect()
+    }
+}
+
+/// Records pushed through the shim win over the store log.
+fn pick<'a>(
+    mem: Option<&'a MemoryObservations>,
+    log: Option<&'a StoreObservations<'a>>,
+) -> Option<&'a dyn ObservationSource> {
+    match (mem, log) {
+        (Some(m), _) => Some(m),
+        (None, Some(l)) => Some(l),
+        (None, None) => None,
+    }
 }
 
 fn snap_band(freq: FreqRange, f_cell: f64) -> (FreqRange, SubjectId) {
@@ -170,17 +203,20 @@ fn evaluate_chunk(
     band: FreqRange,
     band_id: SubjectId,
     channels: &[Channel],
-    obs: Option<&MemoryObservations>,
+    obs: Option<&dyn ObservationSource>,
     dets: &[DetectionExtent],
     chunk: TimeRange,
     out: &mut BTreeMap<SubjectId, Vec<VisitSample>>,
 ) {
     let idle = engine::band_levels(grid, band);
+    let band_floor = engine::band_floor_db(grid, band, 0.8);
     let visits = |f: FreqRange| -> Vec<engine::Visit> {
-        let v = match obs {
-            Some(o) => o.visits(f, chunk),
-            None => engine::coverage_visits(grid, f, cfg.coverage_tier),
-        };
+        // The log when it has visits of this range; else the coverage mask (an unlogged run's
+        // rows were observed on its own ScanPlan, independently of activity).
+        let v = obs
+            .map(|o| o.visits(f, chunk))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| engine::coverage_visits(grid, f, cfg.coverage_tier));
         v.into_iter()
             .filter(|v| v.observed.start >= chunk.start && v.observed.start < chunk.end)
             .collect()
@@ -205,6 +241,7 @@ fn evaluate_chunk(
                 visits: &v,
                 detections: dets,
                 idle_levels_db: &idle,
+                band_floor_db: band_floor,
             },
         );
         out.entry(id).or_default().extend(s);
@@ -316,6 +353,7 @@ impl OccupancyService {
                 finished: false,
             }),
             observations: Mutex::new(None),
+            store_log: Mutex::new(None),
             stop: AtomicBool::new(false),
             thread: Mutex::new(None),
         })
@@ -350,8 +388,23 @@ impl OccupancyService {
             .map(Timestamp::as_unix_nanos)
     }
 
-    /// The T-115 shim: an observation record for visit timing and tiers. Once any record arrives,
-    /// visits come from the log instead of the coverage mask.
+    /// Uses the run's T-115 observation log for visit timing and tiers.
+    pub fn set_observation_store(&self, store: ObservationStore) {
+        *self
+            .store_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(store);
+    }
+
+    fn log(&self) -> Option<ObservationStore> {
+        self.store_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records pushed directly (tests, or a source without the store): once any arrives, visits
+    /// come from these instead of the store log or the coverage mask.
     pub fn record_observation(&self, rec: ObservationRecord) {
         let mut o = self
             .observations
@@ -438,7 +491,9 @@ impl OccupancyService {
     fn close(&self, inner: &mut Inner, iv: TimeRange, hour: bool) {
         let f_cell = inner.plan.f_cell_hz();
         // 1. Learn from detections that started since the last close.
-        let cursor = inner.det_cursor_ns.max(iv.start.as_unix_nanos() - self.cfg.horizon_ns);
+        let cursor = inner
+            .det_cursor_ns
+            .max(iv.start.as_unix_nanos() - self.cfg.horizon_ns);
         let dets: Vec<DetectionExtent> = self
             .detections(inner, TimeRange::new(ts(cursor), iv.end))
             .into_iter()
@@ -468,10 +523,13 @@ impl OccupancyService {
             if let Some(grid) = ProductLevels(&self.product).level0(band, iv) {
                 inner.unit = grid.unit;
                 let channels = inner.plan.channels_in(band);
-                let obs = self
+                let mem = self
                     .observations
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
+                let log = self.log();
+                let log = log.as_ref().map(StoreObservations);
+                let obs = pick(mem.as_ref(), log.as_ref());
                 let mut series = std::mem::take(&mut inner.series);
                 evaluate_chunk(
                     &self.cfg,
@@ -479,7 +537,7 @@ impl OccupancyService {
                     band,
                     band_id,
                     &channels,
-                    obs.as_ref(),
+                    obs,
                     &dets,
                     iv,
                     &mut series,
@@ -503,12 +561,28 @@ impl OccupancyService {
         };
         let data_span = TimeRange::new(ts(first.min(iv.start.as_unix_nanos())), iv.end);
         let channels = inner.plan.channels();
-        let mut rows = rows_for(&self.cfg, &channels, &inner.series, iv, data_span, inner.unit, f_cell);
+        let mut rows = rows_for(
+            &self.cfg,
+            &channels,
+            &inner.series,
+            iv,
+            data_span,
+            inner.unit,
+            f_cell,
+        );
         if hour {
             let e = iv.end.as_unix_nanos();
             let h = TimeRange::new(ts((e - 1).div_euclid(HOUR_NS) * HOUR_NS), iv.end);
             if h.duration_ns() > self.cfg.interval_ns {
-                rows.extend(rows_for(&self.cfg, &channels, &inner.series, h, data_span, inner.unit, f_cell));
+                rows.extend(rows_for(
+                    &self.cfg,
+                    &channels,
+                    &inner.series,
+                    h,
+                    data_span,
+                    inner.unit,
+                    f_cell,
+                ));
             }
         }
         inner.stats.intervals_closed += 1;
@@ -543,11 +617,15 @@ impl OccupancyService {
 
     /// Rows over `span` for the band `freq` and the plan's channels inside it, computed on demand
     /// from the history (hourly reads) and the run's detections; no widening beyond `span`.
-    pub fn span_stats(&self, freq: FreqRange, span: TimeRange) -> Result<Vec<OccupancyStat>, String> {
+    pub fn span_stats(
+        &self,
+        freq: FreqRange,
+        span: TimeRange,
+    ) -> Result<Vec<OccupancyStat>, String> {
         if span.duration_ns() <= 0 || span.duration_ns() > MAX_SPAN_NS {
             return Err("span must be positive and at most 7 days".into());
         }
-        if !(freq.hi_hz > freq.lo_hz) || freq.width_hz() > MAX_SPAN_WIDTH_HZ {
+        if freq.hi_hz.is_nan() || freq.hi_hz <= freq.lo_hz || freq.width_hz() > MAX_SPAN_WIDTH_HZ {
             return Err("band must be positive and at most 20 MHz".into());
         }
         let (channels, f_cell) = {
@@ -563,11 +641,14 @@ impl OccupancyService {
             let mut inner = self.lock();
             self.detections(&mut inner, span)
         };
-        let obs = self
+        let mem = self
             .observations
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        let log = self.log();
+        let log = log.as_ref().map(StoreObservations);
+        let obs = pick(mem.as_ref(), log.as_ref());
         let levels = ProductLevels(&self.product);
         let mut series = BTreeMap::new();
         let mut unit = PowerUnit::Dbfs;
@@ -584,7 +665,7 @@ impl OccupancyService {
                     band,
                     band_id,
                     &channels,
-                    obs.as_ref(),
+                    obs,
                     &dets,
                     chunk,
                     &mut series,
@@ -592,7 +673,9 @@ impl OccupancyService {
             }
             a = b;
         }
-        Ok(rows_for(&self.cfg, &channels, &series, span, span, unit, f_cell))
+        Ok(rows_for(
+            &self.cfg, &channels, &series, span, span, unit, f_cell,
+        ))
     }
 
     /// Counters.

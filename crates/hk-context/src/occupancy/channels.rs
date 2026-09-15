@@ -159,7 +159,11 @@ impl ChannelPlan {
             .iter()
             .map(|c| {
                 let f = c.key.freq(f_cell_hz);
-                let obw = if c.obw_hz > 0.0 { c.obw_hz } else { f.width_hz() };
+                let obw = if c.obw_hz > 0.0 {
+                    c.obw_hz
+                } else {
+                    f.width_hz()
+                };
                 Cluster {
                     centers: VecDeque::from([0.5 * (f.lo_hz + f.hi_hz)]),
                     obws: VecDeque::from([obw]),
@@ -296,8 +300,14 @@ impl ChannelPlan {
     }
 
     /// Attaches a raster suggestion to channels whose centre lies in `range` (never changes keys).
-    pub fn suggest_raster(&mut self, range: FreqRange, spacing_hz: f64, origin_hz: f64, source: &str) {
-        if !(spacing_hz > 0.0) {
+    pub fn suggest_raster(
+        &mut self,
+        range: FreqRange,
+        spacing_hz: f64,
+        origin_hz: f64,
+        source: &str,
+    ) {
+        if spacing_hz.is_nan() || spacing_hz <= 0.0 {
             return;
         }
         for c in &mut self.clusters {
@@ -349,8 +359,14 @@ mod tests {
         let ch = plan.channels();
         assert_eq!(ch.len(), 2, "{ch:?}");
         let f0 = ch[0].key.freq(6250.0);
-        assert!(f0.lo_hz <= 433_392_500.0 && f0.hi_hz >= 433_407_500.0, "{f0:?}");
-        assert!(ch[0].key.hi_cell <= ch[1].key.lo_cell, "channels overlap: {ch:?}");
+        assert!(
+            f0.lo_hz <= 433_392_500.0 && f0.hi_hz >= 433_407_500.0,
+            "{f0:?}"
+        );
+        assert!(
+            ch[0].key.hi_cell <= ch[1].key.lo_cell,
+            "channels overlap: {ch:?}"
+        );
         assert_eq!(ch[0].evidence, 10);
         // The same evidence again: no new version.
         let v = plan.version();
@@ -358,7 +374,11 @@ mod tests {
         assert_eq!(plan.version(), v);
         // One detection is not a channel; suspects never create one.
         let mut p2 = ChannelPlan::new(1, 6250.0, LearnConfig::default());
-        assert!(!p2.learn(&[det(1e8, 1e4, false), det(2e8, 1e4, true), det(2e8, 1e4, true)]));
+        assert!(!p2.learn(&[
+            det(1e8, 1e4, false),
+            det(2e8, 1e4, true),
+            det(2e8, 1e4, true)
+        ]));
         assert!(p2.channels().is_empty());
     }
 

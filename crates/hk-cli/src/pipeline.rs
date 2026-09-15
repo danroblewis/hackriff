@@ -350,12 +350,10 @@ impl hk_api::occupancy::OccupancyControl for PipelineOccupancy {
         let kind_ok = |r: &hk_model::attention::occupancy::OccupancyStat| {
             use hk_model::attention::occupancy::OccupancySubject as S;
             use hk_store::occupancy::SubjectKind as K;
-            match (req.subject, r.subject) {
-                (None, _) | (Some(K::Channel), S::Channel { .. }) | (Some(K::Band), S::Band { .. }) => {
-                    true
-                }
-                _ => false,
-            }
+            matches!(
+                (req.subject, r.subject),
+                (None, _) | (Some(K::Channel), S::Channel { .. }) | (Some(K::Band), S::Band { .. })
+            )
         };
         let (rows, truncated) = match req.interval {
             I::Span => {
@@ -492,6 +490,7 @@ pub fn serve_api(
             .decoded_captures()
             .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
         occupancy: Some(Arc::new(PipelineOccupancy(handle.occupancy()))), // T-118
+        observations: handle.observation_store(),                         // T-115
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

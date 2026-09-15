@@ -216,6 +216,8 @@ pub(crate) struct SchedState {
     next_key: PoiKey,
     pairs: u8,
     verify: bool,
+    /// T-115: records what each applied step observed (ADR-0012 §1).
+    pub(crate) observer: Option<crate::observe::Observer>,
 }
 
 impl SchedState {
@@ -258,6 +260,7 @@ impl SchedState {
             next_key: 1,
             pairs,
             verify,
+            observer: None,
         })
     }
 
@@ -309,9 +312,19 @@ impl SchedState {
         }
     }
 
+    /// The compiled plan (T-115: the observer's hop geometry).
+    pub(crate) fn plan(&self) -> &hk_core::scheduler::CompiledPlan {
+        self.scheduler.plan()
+    }
+
     fn tick(&mut self, now_ns: i64) {
         if now_ns <= 0 {
             return;
+        }
+        // T-115: the single observer call (ADR-0012 §11): closes the previous step's record when
+        // a new step was applied, and tracks the current step's settle.
+        if let Some(o) = self.observer.as_mut() {
+            o.tick(now_ns, self.recent.back());
         }
         self.scheduler
             .clock()
@@ -387,6 +400,7 @@ pub(crate) fn run(
     shared: Arc<Shared>,
     rx: Receiver<ControlEvent>,
     mut sched: Option<SchedState>,
+    mut interactive: Option<crate::observe::InteractiveObserver>,
 ) -> anyhow::Result<()> {
     let mut chains = ChainManager::new(Arc::clone(&shared));
     let mut detect_done = false;
@@ -433,6 +447,10 @@ pub(crate) fn run(
             chains.poll_coverage();
             if let Some(s) = sched.as_mut() {
                 s.tick(shared.counters.stream_time_ns.load(Ordering::Relaxed));
+            }
+            // T-115: a live run without the scheduler logs its interactive tuning.
+            if let Some(o) = interactive.as_mut() {
+                o.tick();
             }
         }
         chains.reap();

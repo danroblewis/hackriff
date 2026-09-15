@@ -46,12 +46,20 @@
 //!   and the plan warns [`PlanWarning::AccessoryTrustPending`]: detection trust near notch /
 //!   filter-bank edges is pending T-028.
 //!
-//! # Not implemented (ADR-0005 revisit)
+//! # Bandit revisit policy (T-120, ADR-0012 §5)
 //!
-//! The ADR's **multi-armed bandit** (UCB on the C12 interestingness score, exploit vs explore
-//! with ITU-R SM.1880 POI-aware dwell lengths), the C12 score itself, decoder-demand leases,
-//! pass/launch-window dwells, cron schedules and hackrf_sweep firmware sweep mode are not in this
-//! version. `interestingness` is a caller-supplied placeholder and priorities are static.
+//! [`Scheduler::enable_bandit`] replaces the weighted-round-robin POI dwells with the
+//! [`bandit`] policy: arms packed from the C12 candidate snapshot of an
+//! `InterestingnessProvider`, discounted UCB on per-dwell-second rewards
+//! ([`Scheduler::record_outcome`]), exploration and sweep floors, one verification group per
+//! suspect candidate, and POI accounting ([`Scheduler::region_poi`]). Preemption tiers, highest
+//! first: interactive intent ([`Scheduler::preempt`]), pinned leases ([`Scheduler::add_lease`]),
+//! scheduled-plan dwells ([`Scheduler::schedule_dwell`]), the bandit/WRR dwell slots, the
+//! background sweep. Without the bandit the v1 policy above is unchanged.
+//!
+//! # Not implemented
+//!
+//! Cron plan syntax and hackrf_sweep firmware sweep mode.
 //!
 //! # TX exclusivity (placeholder)
 //!
@@ -83,6 +91,10 @@ pub mod bandit; // T-120
 pub mod observe; // T-115
 
 pub use apply::{AppliedChanges, StepApplier};
+pub use bandit::{
+    ArmStatus, AttentionStatus, BanditCounters, BanditKind, BanditStatus, CoverageVisit, Lease,
+    RegionPoi, ScheduledDwell,
+};
 pub use clock::{AnchoredClock, Clock, SyntheticClock, WallClock};
 pub use config::{HACKRF_ONE_RF_PATH_BOUNDARIES_HZ, MAX_GAIN_STEP_PAIRS, SchedulerConfig};
 pub use core::{

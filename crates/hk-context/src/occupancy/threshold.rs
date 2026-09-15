@@ -45,7 +45,11 @@ pub struct AppliedThreshold {
 /// The 80 % method: discards the highest `discard_fraction` of `levels_db` and returns the linear
 /// (power) average of the rest, in dB. At least one sample is kept. `None` when no finite sample.
 pub fn eighty_percent_floor_db(levels_db: &[f64], discard_fraction: f64) -> Option<f64> {
-    let mut v: Vec<f64> = levels_db.iter().copied().filter(|x| x.is_finite()).collect();
+    let mut v: Vec<f64> = levels_db
+        .iter()
+        .copied()
+        .filter(|x| x.is_finite())
+        .collect();
     if v.is_empty() {
         return None;
     }
@@ -87,13 +91,15 @@ pub fn resolve(
     };
     let measured = match history_floor_db.filter(|f| f.is_finite()) {
         Some(f) => Some((f, FloorSource::History)),
-        None => eighty_percent_floor_db(idle_levels_db, discard).map(|f| (f, FloorSource::EightyPercent)),
+        None => eighty_percent_floor_db(idle_levels_db, discard)
+            .map(|f| (f, FloorSource::EightyPercent)),
     };
     let (floor_db, source) = match (measured, spec.method) {
         (Some(m), _) => m,
-        (None, ThresholdMethod::PreSet { level_db }) => {
-            (level_db - spec.guard_db.max(MIN_GUARD_DB), FloorSource::Assumed)
-        }
+        (None, ThresholdMethod::PreSet { level_db }) => (
+            level_db - spec.guard_db.max(MIN_GUARD_DB),
+            FloorSource::Assumed,
+        ),
         (None, ThresholdMethod::Dynamic { .. }) => return None,
     };
     let (threshold_db, guard_clamped) = spec.applied_db(floor_db, obw_hz, rbw_hz);

@@ -1,7 +1,9 @@
 //! Schedule output: one [`ScheduleStep`] per window the single radio points at.
 
 use hk_model::Timestamp;
-use hk_model::attention::observation::{Reason, Tier, TrustTestKind};
+use hk_model::attention::observation::{LeaseKind, Reason, Tier, TrustTestKind};
+
+use super::bandit::BanditKind;
 
 use crate::source::Gains;
 
@@ -64,6 +66,27 @@ pub enum Purpose {
         /// Caller's intent id.
         intent: u64,
     },
+    /// A bandit dwell on an arm window (T-120, ADR-0012 §5).
+    Bandit {
+        /// Arm table index.
+        arm: u32,
+        /// The arm's lead candidate (subject key), if any.
+        lead: Option<PoiKey>,
+        /// Exploit, explore or beacon-due.
+        kind: BanditKind,
+    },
+    /// A slice of a pinned lease.
+    Lease {
+        /// Kind.
+        kind: LeaseKind,
+        /// Caller's lease id.
+        lease: u64,
+    },
+    /// A scheduled-plan dwell (plan revisit target).
+    Scheduled {
+        /// Caller's id.
+        target: u32,
+    },
 }
 
 impl Purpose {
@@ -74,9 +97,12 @@ impl Purpose {
             | Purpose::GainStep { poi, .. }
             | Purpose::Retune { poi, .. }
             | Purpose::RateChange { poi, .. } => Some(poi),
-            Purpose::Sweep { .. } | Purpose::RegionDwell { .. } | Purpose::UserIntent { .. } => {
-                None
-            }
+            Purpose::Bandit { lead, .. } => lead,
+            Purpose::Sweep { .. }
+            | Purpose::RegionDwell { .. }
+            | Purpose::UserIntent { .. }
+            | Purpose::Lease { .. }
+            | Purpose::Scheduled { .. } => None,
         }
     }
 
@@ -103,13 +129,16 @@ impl Purpose {
             Purpose::Retune { .. } => "retune",
             Purpose::RateChange { .. } => "rate-change",
             Purpose::UserIntent { .. } => "user-intent",
+            Purpose::Bandit { .. } => "bandit",
+            Purpose::Lease { .. } => "lease",
+            Purpose::Scheduled { .. } => "scheduled",
         }
     }
 }
 
 impl Purpose {
     /// The ADR-0012 §1.2 reason code of this purpose, carried into the observation log. T-120 adds
-    /// the bandit and lease purposes and their arms here.
+    /// the bandit, lease and scheduled purposes.
     pub fn reason(&self) -> Reason {
         match *self {
             Purpose::Sweep { hop } => Reason::BackgroundSweep { hop },
@@ -128,6 +157,13 @@ impl Purpose {
                 test: TrustTestKind::RateChange,
             },
             Purpose::UserIntent { intent } => Reason::Interactive { intent },
+            Purpose::Bandit { arm, kind, .. } => match kind {
+                BanditKind::Exploit { score } => Reason::Novelty { arm, score },
+                BanditKind::Explore => Reason::Explore { arm },
+                BanditKind::BeaconDue { eta_s } => Reason::BeaconDue { arm, eta_s },
+            },
+            Purpose::Lease { kind, lease } => Reason::Lease { kind, lease },
+            Purpose::Scheduled { target } => Reason::RevisitDue { region: target },
         }
     }
 

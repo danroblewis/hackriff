@@ -89,7 +89,9 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         return Some(refuse_route(state, req, Some("GET")));
     }
     let Some(ctl) = state.occupancy.as_deref() else {
-        return Some(Fail::new(503, "unavailable", "no occupancy engine on this server").response());
+        return Some(
+            Fail::new(503, "unavailable", "no occupancy engine on this server").response(),
+        );
     };
     let r = if which == 0 {
         occupancy(ctl, req.query)
@@ -164,7 +166,8 @@ fn occupancy(ctl: &dyn OccupancyControl, q: &[(String, String)]) -> Result<Value
         None => OccupancyInterval::Series(SeriesInterval::Min15),
         Some("span") => OccupancyInterval::Span,
         Some(s) => OccupancyInterval::Series(
-            SeriesInterval::parse(s).ok_or_else(|| Fail::invalid("interval must be 15m, 1h or span"))?,
+            SeriesInterval::parse(s)
+                .ok_or_else(|| Fail::invalid("interval must be 15m, 1h or span"))?,
         ),
     };
     let req = OccupancyRequest {
@@ -175,7 +178,8 @@ fn occupancy(ctl: &dyn OccupancyControl, q: &[(String, String)]) -> Result<Value
         limit: MAX_OCCUPANCY_ROWS,
     };
     let a = ctl.occupancy(&req).map_err(|e| {
-        if interval == OccupancyInterval::Span && (e.contains("at most") || e.contains("positive")) {
+        if interval == OccupancyInterval::Span && (e.contains("at most") || e.contains("positive"))
+        {
             Fail::invalid(e)
         } else {
             Fail::new(500, "failed", e)
@@ -188,7 +192,10 @@ fn occupancy(ctl: &dyn OccupancyControl, q: &[(String, String)]) -> Result<Value
         .map(|r| {
             let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
             if let Some(o) = v.as_object_mut() {
-                o.insert("subject_extent".into(), subject_json(&r.subject, a.f_cell_hz));
+                o.insert(
+                    "subject_extent".into(),
+                    subject_json(&r.subject, a.f_cell_hz),
+                );
             }
             v
         })

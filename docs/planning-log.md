@@ -924,3 +924,34 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Its api_contract failure was only an LFS pointer in the worktree; the full check covers it. Leftover pipeline wiring (FrameInput::source, sweep estimator in live ingest) is folded into T-118's note. Full check running.
 - **B0.292 Full check of main 36c3a3b (T-126): green.** Lint clean; nextest + UI 1197/1197 in 242 s; acceptance 30/30 (2 ignored HIL) in 58 s. M2 on main: T-113, T-114, T-116, T-117, T-125, T-126. In flight: T-115 (observation log), T-120 (bandit). Next after T-115: T-118 → T-119/T-121 → T-122; T-123/T-124 last.
 - **B0.293 T-118 and T-119 launched early.** Both build against the ADR-0012 hk-model attention types, which are on main: T-118 with an in-memory observation provider until T-115's store merges, T-119 with synthetic OccupancyStat inputs until T-118 merges. Per ADR §11, file ownership is disjoint from T-115/T-120. Merge order is still T-115 → T-118 → T-119. Running: T-115, T-118, T-119, T-120.
+- **B0.294 T-115 delivered** (d54e8a6). What landed:
+  - **Records:** a `WindowRule` usable span matching history L0 fold extents (±15 kHz DC notch). `ObservationRecorder` emits DwellRecord per step, SweepRecord per pass/60 s and SweepGeometry on change; alloc-free.
+  - **Wiring:** the pipeline observer is one call in `SchedState::tick`, feeding a bounded try_send queue and a writer thread.
+  - **Storage:** hourly CRC+JSON segments with self-contained geometries and torn-tail recovery; retention 30 d by sample clock, then 512 MiB.
+  - **Queries:** `query`, `totals` for T-118, and gaps.
+  - **API:** `/api/observations`, `/api/observations/coverage` and the `observations` stream.
+  - **E2E:** the mock-SDR run matches the tuned windows hop for hop.
+
+  Open points: the usable span follows the history rule rather than the ADR roll-off trim; overload is always false; **interactive runs without a scheduler log nothing** (demo-relevant, being assessed in review). Timeboxed Opus review running.
+- **B0.295 T-120 delivered** (10bdabb): bandit in hk-core plus an hk-sim policy. Over 24 h on 4 seeds: 124/124 discovered; bursts/h 1642/1873/1399/1762, beating WRR on all seeds and pure-sweep on 3 of 4; median TTFD 118–216 s; suspect dwell ~700–900 s vs WRR 6875–9820 s (about 10× less). The injected burst emitter was found later than WRR on seeds 1–2. v1 policy is unchanged with the bandit off; alloc-free; POI matches the formula and Monte Carlo. Pipeline wiring, routes and POI from the observation log are deferred to **T-127** (after T-115). Timeboxed Opus review running; it probes the seed-3 and injected-emitter discovery trade-off.
+- **B0.296 T-115 review: FIX-FIRST.** Must-fix: an open SweepRecord isn't closed by non-sweep steps, so a long user intent emits it hours late, outside query look-ahead. Checked OK: sample-clock time base; non-blocking try_send on the control thread; fully-inside coverage rule; retention never touches the open hour; merge-tree with main is clean.
+  Coordinator decisions:
+  - (a) **Record interactive runs without a scheduler** as `interactive`-tier DwellRecords (coverage yes, unbiased fco no). This is demo-relevant (the hk serve browsing path) and ~100 lines, so it goes in the fix round.
+  - (b) Usable span follows the history L0 fold extent; ADR §1.4 note added, shared roll-off trim is a follow-up.
+  - (c) Torn-tail repair on first append per hour.
+  Fresh Opus fix round is running in the T-115 worktree.
+- **B0.297 T-120 merged** (10bdabb). Opus review: MERGE.
+  - **Checked:** bounded preallocated tables; device-clock-only discounting and floors; rollback correct; UCB safe with the default prior; DC avoidance; v1 invariants hold with the bandit on; TX gated; simulator fair (reviewer reproduced seed 1 exactly).
+  - **Discovery trade-off:** later burst but earlier beacon discovery, and a better p90 TTFD than WRR. It's an honest trade-off (WRR's many short dwells land on new frequencies by chance), not a bug.
+  - **Contract gap:** repack runs inside `next_step` and allocates. The caller is the event-rate control thread, so it's non-blocking for now.
+  - **Follow-ups:** folded into **T-127** along with the ADR amendment. Full check running.
+- **B0.298 Full check of main 5729e19 (T-120): green.** Lint clean; nextest + UI 1208/1208 in 261 s; acceptance 30/30 (2 ignored HIL) in 59 s. M2 on main: T-113, T-114, T-116, T-117, T-120, T-125, T-126. In flight: T-115 fix round, T-118, T-119. Next: T-127 after T-115; T-121 after T-118; T-122 after T-119.
+- **B0.299 T-121 (survey reports) launched early** against the ADR-0012 report and occupancy types. Occupancy stats and observation coverage come through provider traits until T-118/T-115 merge; change-vs-baseline is flagged unavailable until T-119. File ownership is `hk-context/src/report/**`, disjoint from the running agents. Running: T-115 fix, T-118, T-119, T-121.
+- **B0.300 T-115 merged** (fix round 029024e). Changes:
+  - `ObservationRecorder::begin` closes an open sweep before long non-sweep steps (2 h intent test).
+  - **Interactive `hk serve` without a schedule now logs** `interactive`-tier dwells: polled off the capture thread, split every 60 s, zero activity-independent visits; e2e and contract tests added.
+  - ADR §1.4 usable-span note.
+  - Per-hour torn-tail repair.
+  - Geometries written before their first referencing sweep in each segment.
+
+  Tests: hk-core 6, hk-store 7, pipeline 4, api_contract 17, lint clean. **T-127 launched** (bandit wiring, routes, POI from the log, plus T-120 review follow-ups). T-118 and T-121 can now replace their observation stand-in providers with the T-115 store adapter. Full check running.

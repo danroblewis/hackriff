@@ -159,3 +159,104 @@ fn scheduling_and_applying_steps_do_not_allocate() {
     assert!(stats.verifications_completed > 0, "{stats:?}");
     assert!(stats.intent_steps > 0 && stats.truncated_slots > 0 && stats.trust_steps > 0);
 }
+
+/// T-120: with the bandit enabled, next_step (bandit dwell slots, floors, verification groups),
+/// record_outcome, leases, scheduled dwells and intent allocate nothing once the snapshot is packed.
+#[test]
+fn the_bandit_steady_state_does_not_allocate() {
+    use hk_core::scheduler::{Clock, Lease, Purpose, ScheduledDwell};
+    use hk_model::attention::observation::LeaseKind;
+    use hk_model::attention::schedule::{BanditConfig, DwellOutcome};
+    use hk_model::attention::score::SharedInterestingness;
+
+    let p = plan(
+        "no-alloc-bandit",
+        1,
+        vec![
+            region(420.0, 450.0, 1.0, None),
+            region(902.0, 928.0, 1.0, None),
+        ],
+        ScanPolicy::SweepThenDwell,
+        vec![],
+        json!({ "scheduler": { "sweeps_per_cycle": 2 } }),
+    );
+    let mut s = hackrf(&p);
+    let provider = Arc::new(SharedInterestingness::default());
+    s.enable_bandit(BanditConfig::default(), Arc::clone(&provider) as _)
+        .unwrap();
+    let clk = s.clock().clone();
+    publish_candidates(
+        &provider,
+        clk.now(),
+        vec![
+            candidate(1, 433.92, 50.0, 0.9, false),
+            candidate(2, 915.2, 50.0, 0.8, true),
+            candidate(3, 446.0, 25.0, 0.4, false),
+        ],
+    );
+    let mut applier = StepApplier::new(Arc::new(NullControl(SourceCapabilities::hackrf_one())));
+    for _ in 0..3_000 {
+        let st = s.next_step();
+        clk.advance_ns(st.duration_ns);
+        applier.apply(&st).unwrap();
+    }
+    let lease = Lease {
+        id: 4,
+        kind: LeaseKind::Decoder,
+        center_hz: 915e6,
+        rate_hz: 10e6,
+        gains: None,
+        duration_ns: Some(2 * S),
+    };
+    let intent = UserIntent {
+        id: 1,
+        center_hz: 433e6,
+        rate_hz: 10e6,
+        gains: None,
+        duration_ns: Some(S),
+    };
+    let before = s.stats();
+
+    let ((), allocations) = counted(|| {
+        for i in 0..20_000u64 {
+            let st = s.next_step();
+            applier.apply(&st).unwrap();
+            clk.advance_ns(st.duration_ns);
+            if let Purpose::Bandit { .. } = st.purpose {
+                s.record_outcome(&DwellOutcome {
+                    seq: st.seq,
+                    arm: s.arm_key_of(&st),
+                    dwell_s: st.duration_ns as f64 / 1e9,
+                    new_detections: (i % 3) as u32,
+                    bursts: 4,
+                    novelty_sum: 0.5,
+                    valid_decodes: 0,
+                    suspect_detections: 0,
+                });
+            }
+            if i % 997 == 0 {
+                s.preempt(intent).unwrap();
+            }
+            if i % 1499 == 0 {
+                s.add_lease(lease).unwrap();
+            }
+            if i % 1500 == 7 {
+                s.release_lease(4);
+                s.schedule_dwell(ScheduledDwell {
+                    id: 2,
+                    center_hz: 440e6,
+                    rate_hz: 10e6,
+                    gains: None,
+                    duration_ns: S,
+                    due: clk.now(),
+                    every_ns: None,
+                })
+                .unwrap();
+            }
+        }
+    });
+    assert_eq!(allocations, 0, "allocations in the bandit steady state");
+    let stats = s.stats();
+    assert!(stats.bandit_steps > before.bandit_steps, "{stats:?}");
+    assert!(stats.lease_steps > 0 && stats.scheduled_steps > 0 && stats.intent_steps > 0);
+}

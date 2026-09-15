@@ -299,7 +299,10 @@ impl OccupancyStore {
             std::collections::BTreeMap::new();
         let mut n = 0;
         for r in rows {
-            let Ok(line) = r.validate().map_err(|_| ()).and_then(|()| encode_line(r).map_err(|_| ()))
+            let Ok(line) = r
+                .validate()
+                .map_err(|_| ())
+                .and_then(|()| encode_line(r).map_err(|_| ()))
             else {
                 self.stats.rows_rejected += 1;
                 continue;
@@ -374,7 +377,9 @@ impl OccupancyStore {
         let d = self.dir.join(q.interval.dir());
         for (day, path) in Self::segments_in(&d)? {
             // A row starts inside its day segment; it can end at most one hour later.
-            if day.saturating_mul(DAY_NS) >= s1 || (day + 1).saturating_mul(DAY_NS) + 3_600_000_000_000 <= s0 {
+            if day.saturating_mul(DAY_NS) >= s1
+                || (day + 1).saturating_mul(DAY_NS) + 3_600_000_000_000 <= s0
+            {
                 continue;
             }
             let text = fs::read_to_string(&path).map_err(io(&path))?;
@@ -383,7 +388,10 @@ impl OccupancyStore {
                     out.corrupt_lines += 1;
                     continue;
                 };
-                let (a, b) = (row.interval.start.as_unix_nanos(), row.interval.end.as_unix_nanos());
+                let (a, b) = (
+                    row.interval.start.as_unix_nanos(),
+                    row.interval.end.as_unix_nanos(),
+                );
                 if a >= s1 || b <= s0 || !subject_overlaps(&row, q.freq, q.f_cell_hz) {
                     continue;
                 }
@@ -441,9 +449,7 @@ mod tests {
     use hk_model::Timestamp;
     use hk_model::attention::ATTENTION_SCHEMA_VERSION;
     use hk_model::attention::baseline::SiteKey;
-    use hk_model::attention::occupancy::{
-        ChannelKey, ChannelSource, ThresholdSpec, TimingRegime,
-    };
+    use hk_model::attention::occupancy::{ChannelKey, ChannelSource, ThresholdSpec, TimingRegime};
     use hk_model::frames::PowerUnit;
 
     fn tmp(tag: &str) -> PathBuf {
@@ -517,7 +523,9 @@ mod tests {
         let dir = tmp("rw");
         let mut s = OccupancyStore::open(&dir, OccupancyStoreConfig::default()).unwrap();
         let day0 = 20_000 * 86_400;
-        let rows: Vec<_> = (0..8).map(|k| row(day0 + 80_000 + k * 900, 900, 16_000)).collect();
+        let rows: Vec<_> = (0..8)
+            .map(|k| row(day0 + 80_000 + k * 900, 900, 16_000))
+            .collect();
         assert_eq!(s.append(&rows).unwrap(), 8);
         s.append(&[row(day0, 3600, 16_000)]).unwrap();
         let mut bad = row(day0, 900, 1);
@@ -525,9 +533,17 @@ mod tests {
         assert_eq!(s.append(&[bad]).unwrap(), 0);
         assert_eq!(s.stats().rows_rejected, 1);
         // Rows spanning midnight land in two day files; both read back.
-        let got = s.query(&q(SeriesInterval::Min15, day0, day0 + 2 * 86_400)).unwrap();
+        let got = s
+            .query(&q(SeriesInterval::Min15, day0, day0 + 2 * 86_400))
+            .unwrap();
         assert_eq!(got.rows, rows);
-        assert_eq!(s.query(&q(SeriesInterval::Hour1, day0, day0 + 1)).unwrap().rows.len(), 1);
+        assert_eq!(
+            s.query(&q(SeriesInterval::Hour1, day0, day0 + 1))
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
         // Frequency and span filters.
         let mut fq = q(SeriesInterval::Min15, day0 + 80_000, day0 + 80_900);
         assert_eq!(s.query(&fq).unwrap().rows.len(), 1);
@@ -537,7 +553,9 @@ mod tests {
         let seg = dir.join("15m").join(day_name(day0.div_euclid(86_400)));
         let mut f = fs::OpenOptions::new().append(true).open(&seg).unwrap();
         f.write_all(b"deadbeef {\"schema\":1,\"si").unwrap();
-        let got = s.query(&q(SeriesInterval::Min15, day0, day0 + 2 * 86_400)).unwrap();
+        let got = s
+            .query(&q(SeriesInterval::Min15, day0, day0 + 2 * 86_400))
+            .unwrap();
         assert_eq!((got.rows.len(), got.corrupt_lines), (8, 1));
         // Reopen: same rows; the limit truncates.
         let s2 = OccupancyStore::open(&dir, OccupancyStoreConfig::default()).unwrap();
@@ -559,16 +577,21 @@ mod tests {
         let mut s = OccupancyStore::open(&dir, cfg).unwrap();
         let day0 = 20_100 * 86_400;
         for d in 0..10 {
-            s.append(&[row(day0 + d * 86_400, 900, 1), row(day0 + d * 86_400, 3600, 1)])
-                .unwrap();
+            s.append(&[
+                row(day0 + d * 86_400, 900, 1),
+                row(day0 + d * 86_400, 3600, 1),
+            ])
+            .unwrap();
         }
         let count = |s: SeriesInterval| fs::read_dir(dir.join(s.dir())).unwrap().count();
-        // Newest row ends on day 9: 15-min keeps days whose end is within 2 days (8, 9);
-        // hourly within 5 days (5..=9).
-        assert_eq!(count(SeriesInterval::Min15), 2);
-        assert_eq!(count(SeriesInterval::Hour1), 5);
+        // Newest row ends at day 9 + 1 h: 15-min keeps days ending after day 7 + 1 h (7, 8, 9);
+        // hourly after day 4 + 1 h (4..=9).
+        assert_eq!(count(SeriesInterval::Min15), 3);
+        assert_eq!(count(SeriesInterval::Hour1), 6);
         // A tight quota drops 15-min segments before hourly ones.
-        s.cfg.byte_quota = 5 * fs::metadata(dir.join("1h").join(day_name(20_109))).unwrap().len();
+        s.cfg.byte_quota = 5 * fs::metadata(dir.join("1h").join(day_name(20_109)))
+            .unwrap()
+            .len();
         s.enforce_retention().unwrap();
         assert_eq!(count(SeriesInterval::Min15), 0);
         assert_eq!(count(SeriesInterval::Hour1), 5);

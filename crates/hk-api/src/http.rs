@@ -13,6 +13,8 @@
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&state][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]); `state` = T-078 lifecycle |
 //! | `/api/inventory/<id>[/promote]` | GET, POST, DELETE | token (header only for mutating) | T-078 one entry, promote a candidate, delete ([`crate::inventory`]) |
 //! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
+//! | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | GET | token | T-115 observation log records in a box ([`crate::observations`]) |
+//! | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | GET | token | T-115 observation totals, per-channel totals, gaps and POI ([`crate::observations`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -140,6 +142,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/captures/{id}/frames"),
     // Attention + memory (ADR-0012 §11): each M2 task appends its rows under its own marker.
     // T-115 observations
+    ("GET", "/api/observations"),
+    ("GET", "/api/observations/coverage"),
     // T-118 occupancy
     ("GET", "/api/occupancy"),
     ("GET", "/api/channels"),
@@ -223,6 +227,9 @@ pub struct ApiState {
     pub recipes: Option<Arc<dyn crate::recipes::RecipeControl>>,
     /// Occupancy engine (T-118, [`crate::occupancy`]); `None` answers 503.
     pub occupancy: Option<Arc<dyn crate::occupancy::OccupancyControl>>,
+    /// T-115: the observation log for `/api/observations` ([`crate::observations`]); `None`
+    /// answers 503.
+    pub observations: Option<hk_store::observation::ObservationStore>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
