@@ -573,3 +573,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Hardware-only findings → T-084:** an off-centre station becomes one wide edge row; the run summary counts 6 emitters but /api/inventory returns 1 row; no RDS decodes on live air. T-084 reproduces offline first, then needs the HackRF again.
   - **Device:** the demo `hk serve` was stopped for the run and not restarted; the HackRF is free.
   - **Next:** T-083 launches; full check of main running.
+- **B0.209 Launched T-083** (sortable sidebar lists, Sonnet) and the **offline phase of T-084** (reproduce/fix the edge wide-row, 6-vs-1 inventory count (possible T-082 over-merge) and missing live RDS via the mock SDR; update hil_hackrf.rs to centre the station). Full check of main running. HackRF free; the supervisor may restart the demo. T-084's live re-run will need the device again.

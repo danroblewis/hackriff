@@ -1410,7 +1410,8 @@ tasks:
   - id: T-084
     milestone: M0b
     title: "Live-air HIL findings: off-centre station becomes one wide edge row; run summary 6 emitters vs /api/inventory 1 row; no RDS decodes live"
-    status: todo
+    status: in-progress
+    phase: "offline reproduction and fixes (no HackRF); live re-run later when the device is handed over"
     deps: [T-053]
     parallel_group: J
     use_cases: [SIGNAL-062, AWARE-053]
