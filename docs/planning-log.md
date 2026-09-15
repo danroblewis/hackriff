@@ -1975,3 +1975,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Coordinator:** fixed the final clippy/fmt issue.
   - **Tests:** hk-store/hk-api 7, hk-pipeline 13, hk-cli 24; lint clean.
   - **Next:** worktree removed; full check next. T-178 (pre-allocated persistent ring) launched.
+- **B0.434 T-175 committed (dfee377); Opus review launched (focus: no bent tests).**
+  - **Product fixes:**
+    - `planning_tune()` race: `set_channels` returned 409 before the first block.
+    - Mock band-edge folding: `Plan::served()`, with a new unit test.
+  - **Test fixes (each must keep its property):** fresh-status waits; exact frame spacing except across recording loop splices; band-power station check; quantisation-limited out-of-band skip with inventory/occupancy guards.
+  - **Build:** opt-level=2 overrides added.
+  - **Results:** hk-core 138; t057 5/5 guarded, but the ~9.8 s failing schedule never reproduced, so the guard was vacuous. Lint green.
+  - **Timing:** the post-merge full check measures real nextest time with the overrides.
