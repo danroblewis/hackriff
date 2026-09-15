@@ -696,3 +696,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Counting-allocator test: zero allocations across 14 blocks × 24 configs, including restarts.
   hk-blocks 61/61, lint clean. Merge follows the in-flight full check (follow-up to reviewed work, per-item tests).
 - **B0.247 Full check of main a02e66f (T-088): green.** Lint clean; nextest + UI 1058/1058 in 228 s; acceptance 23/23. **T-104 merged** (514b17c). Full check covering T-104 running.
+- **B0.248 Full check of main 1183760 (T-104): green.** Lint clean; nextest + UI 1068/1068 in 223 s; acceptance 23/23. M1 merged so far: T-085, T-086, T-087, T-088, T-089, T-090 and T-104. In flight: the T-091 fix round, T-092, T-093 and T-094.
