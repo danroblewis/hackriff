@@ -684,3 +684,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   3. Random frames yield a sync word scored 1.0.
   4. Duplicate frames inflate evidence (alternating zeros/ones → BCH at 0.97).
   A fresh Opus fix round is running in the T-091 worktree.
+- **B0.244 Disk cleanup** (supervisor: disk at 20 GB). Merged M1 worktrees were already removed at merge; `git worktree prune` found nothing stale. The remaining worktrees are all active (T-088, T-091, T-104). Removed coordinator scratchpad leftovers: the bisect `target-verify` (7.7 GB) and old hkdata/long/wgpu-probe outputs (~1 GB).
