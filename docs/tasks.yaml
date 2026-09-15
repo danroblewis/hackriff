@@ -927,7 +927,11 @@ tasks:
   - id: T-056
     milestone: M0b
     title: Wire compute providers into the pipeline (ComputeOptions in pipeline settings; STFT/PFB via hk_dsp::compute)
-    status: in-progress
+    status: done
+    commit: "e2ca295 (merged; full check running)"
+    result: "PipelineSettings.compute from extra.pipeline.compute; --compute auto|cpu|cpu-mt|accelerate|gpu on hk replay/run/serve and hackriffd; HK_COMPUTE* overrides. One Compute per run shared across segments. /api/status compute object (options, per-reader requested/chosen provider + fallback reason, availability, provider_changes) documented in docs/api.md and asserted in api_contract; ADR-0007 hookup note updated. detect/history/spectrum STFTs via compute.stft (new hk-pipeline/src/compute.rs); no PFB wired (pipeline uses DDCs, no channelizer). GPU latency: readers flush at stream end/segment detach and when a 50 ms read is empty with rows in flight; spectrum flushes under the old plan before display/rate rebuild; downstream uses each frame's own sample index/time. Default auto -> cpu, cpu vs auto replays store identical detections/frames; re-plumb keeps providers (0 changes). GPU features (gpu-wgpu,accelerate): auto picks GPU for all readers; SPACE-050 (worst floor 0.10 dB), SIGNAL-062, SIGNAL-062 Listen pass via mock SDR. Release RTF (load 22-25): l32g30a1 cpu 0.79/1.01/1.06 vs gpu 0.92/1.02/0.97 (560 detections both); l24g20a0 cpu 0.28-0.33 vs gpu 0.32-0.33 (430 both) - no whole-pipeline gain: 0.6 s fixtures too short for STFT gains and l24 bound by WFM chain (T-081). Live HackRF RTF not measured."
+    followups:
+      - "measure GPU vs CPU on a long capture or live HackRF where STFT dominates (after T-081 removes the WFM chain bottleneck)"
     scope_note: "user 2026-09-14: T-056 stays the Mac GPU wiring task (wgpu/Metal or Accelerate providers into the pipeline behind the conformance suite)"
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-041, T-037]
