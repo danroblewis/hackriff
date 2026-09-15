@@ -1961,3 +1961,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Whole-window one-frame detections — not a render bug.** The scheduler served that window 29 dB below the recording gain, leaving IQ 85% zero codes (`quantisation_limited` provenance). The resulting 2–3 dB spread fires marginal detections.
   - **Coordinator decision:** accept the test skipping quantisation-limited provenance in the out-of-band check, only with a guard assertion that such detections never become inventory emitters/candidates or add FCO occupied time. If the guard fails, fix the product instead of skipping.
   - **Follow-up:** T-180 models a device noise floor at low gain in the mock.
+- **B0.432 Full check green after the T-176 + T-177 merges (220acec).**
+  - Lint clean; 1352/1352 tests; acceptance 28/28 (65 s).
+  - T-157 finishing: its targeted tests pass (hk-store/hk-api 7, hk-pipeline 13, hk-cli 24 including the flag parse test). The coordinator fixed the last clippy `needless_borrow` (`hk-cli` `pipeline.rs:1210`); lint and the final commit are running. T-157 merges next.
