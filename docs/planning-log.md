@@ -560,3 +560,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Bookmarks:** rename via the existing PUT is now documented and tested.
   - **Docs/tests:** api.md and contract tests updated.
   - **Coordination:** T-080 told to merge main (T-067 touched `ui/src/index.html` and controls). Full check running.
+- **B0.202 T-080 merged** (ui-only): left sidebar, inventory Candidates/Confirmed with Promote/Delete, first/last seen columns removed; UI tests pass on main. This completes the user's T-078/T-079/T-080 UI-separation set. **T-081** (WFM/RDS chain ParamEstimator bottleneck) launches next in order; T-053 follows.

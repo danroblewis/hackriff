@@ -1346,7 +1346,9 @@ tasks:
   - id: T-080
     milestone: M0b
     title: "Small UI tweaks only, no redesign: Selections + Signal Inventory into a left sidebar, remove first/last seen columns, inventory split Candidates/Confirmed with Promote and Delete"
-    status: in-progress
+    status: done
+    commit: "5a63c05 (merged; ui-only)"
+    result: "left sidebar with Selections + Signal inventory (stacks at phone width, beside main content >= 900 px, >= 40 px targets); inventory first/last-seen columns removed; separate Candidates and Confirmed lists via GET /api/inventory?state=candidate|confirmed; Promote (candidates) and Delete buttons with Bearer, reload on success, server {error,code} shown on failure; row click (Inspect) and per-row Listen kept; recurrence (occurrences, duty %) shown as API-supplied numbers. Coexists with T-067 index.html control additions. just lint + just test-ui pass (9 new inventory tests)."
     deps: [T-078]
     parallel_group: N
     use_cases: [AWARE-042]
@@ -1359,7 +1361,7 @@ tasks:
   - id: T-081
     milestone: M0b
     title: "Chain parameter estimation cost: ParamEstimator::estimate -> ChannelFilter::apply dominates the WFM/RDS chain (whole-pipeline bottleneck)"
-    status: todo
+    status: in-progress
     deps: [T-064]
     parallel_group: S
     use_cases: [SIGNAL-062, AWARE-042]
@@ -1370,7 +1372,6 @@ tasks:
     model: opus
     effort: high
     core_interface: true
-    hold: "queued after T-078/T-079/T-080 (user UI/inventory priority), ahead of T-053/T-056/T-067"
   - id: T-082
     milestone: M0b
     title: One inventory entry per physical emitter (merge track-based and decoder-based entries)
