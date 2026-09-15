@@ -556,6 +556,7 @@ dependencies = [
  "hk-core",
  "hk-dsp",
  "hk-model",
+ "hk-recipe",
  "hk-store",
  "hk-stream",
  "httparse",
@@ -563,6 +564,21 @@ dependencies = [
  "num-complex",
  "serde_json",
  "tungstenite",
+]
+
+[[package]]
+name = "hk-blocks"
+version = "0.1.0"
+dependencies = [
+ "hk-demod",
+ "hk-dsp",
+ "hk-estimate",
+ "hk-model",
+ "hk-recipe",
+ "hk-stream",
+ "num-complex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -688,6 +704,7 @@ dependencies = [
  "hk-dsp",
  "hk-e2e",
  "hk-model",
+ "hk-recipe",
  "num-complex",
  "serde",
  "serde_json",
@@ -711,6 +728,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hk-api",
+ "hk-blocks",
  "hk-context",
  "hk-core",
  "hk-demod",
@@ -720,6 +738,7 @@ dependencies = [
  "hk-estimate",
  "hk-model",
  "hk-plugins",
+ "hk-recipe",
  "hk-store",
  "hk-stream",
  "libc",
@@ -744,6 +763,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-recipe"
+version = "0.1.0"
+dependencies = [
+ "hk-model",
+ "hk-stream",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hk-store"
 version = "0.1.0"
 dependencies = [
@@ -751,6 +780,7 @@ dependencies = [
  "hk-dsp",
  "hk-e2e",
  "hk-model",
+ "hk-stream",
  "num-complex",
  "serde",
  "serde_json",

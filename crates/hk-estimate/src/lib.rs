@@ -68,6 +68,7 @@
 //! Structure only; payload bits come out solely through `FramingResult::payload`, to be gated
 //! by the caller's content class.
 
+pub mod assist;
 pub mod blind;
 pub mod clock;
 pub(crate) mod dsp;

@@ -1,0 +1,101 @@
+{
+  "schema": "hackriff.recipe",
+  "schema_version": 2,
+  "id": "acars",
+  "version": 1,
+  "name": "ACARS: aircraft messages",
+  "description": "Tutorial 3 skeleton (ADR-0011 §5.1; T-096 tunes it, including the MSK bit polarity and differential step). AM carrier, MSK at 2400 Bd on a 1800 Hz audio subcarrier, characters of 7-bit ASCII + odd parity sent LSB first. Frames start after '+' '*' SYN SYN SOH (air order 0xD554686880) and end at ETX/ETB plus the 16-bit block check (CRC-16/KERMIT), then mode, registration, acknowledgement, label, block id and text.",
+  "match": {
+    "families": ["am"],
+    "freq_hz": [[129000000, 137000000]],
+    "bandwidth_hz": [2000, 8000],
+    "symbol_rate_bd": [2400, 2400],
+    "bursty": true
+  },
+  "input": {
+    "port": "iq",
+    "sample_rate_hz": 24000,
+    "bandwidth_hz": 8000
+  },
+  "nodes": [
+    { "id": "am", "block": "am_demod", "label": "Envelope → audio" },
+    {
+      "id": "tone",
+      "block": "subcarrier",
+      "label": "1800 Hz MSK subcarrier → baseband",
+      "params": { "carrier_hz": 1800, "bandwidth_hz": 2400, "output_rate_hz": 12000 }
+    },
+    { "id": "msk", "block": "msk_demod", "label": "MSK discriminator" },
+    {
+      "id": "clock",
+      "block": "clock_recovery",
+      "label": "2400 Bd timing",
+      "params": { "symbol_rate_bd": 2400, "pulse": "nrz", "algorithm": "gardner" }
+    },
+    { "id": "slice", "block": "slicer" },
+    { "id": "diff", "block": "diff_decode", "label": "MSK bits are differential", "params": { "mode": "xor" } },
+    {
+      "id": "sync",
+      "block": "sync_search",
+      "label": "+* SYN SYN SOH … ETX/ETB + BCS",
+      "params": {
+        "mode": "sync-word",
+        "sync_word": "0xD554686880",
+        "sync_bits": 40,
+        "max_errors": 2,
+        "frame_bits": 2048,
+        "include_sync": false,
+        "bit_order": "lsb",
+        "terminator": { "words": ["0x83", "0x97"], "bits": 8, "step_bits": 8, "trailer_bits": 16 }
+      }
+    },
+    {
+      "id": "crc",
+      "block": "crc",
+      "label": "CRC-16/KERMIT block check",
+      "params": { "width": 16, "poly": "0x1021", "refin": true, "refout": true, "strip": true }
+    },
+    { "id": "msg", "block": "fields", "label": "ACARS block fields", "params": { "map": "acars_block" } }
+  ],
+  "field_maps": {
+    "acars_block": {
+      "description": "One ACARS block between SOH and the block check, as packed characters (7-bit ASCII + odd parity in the top bit). Text is present when STX follows the block id and runs to the end (its closing ETX/ETB included).",
+      "unit": "bytes",
+      "fields": [
+        { "name": "mode", "type": "ascii", "length": 1, "parity": "odd" },
+        { "name": "registration", "type": "ascii", "length": 7, "parity": "odd", "label": "Aircraft registration" },
+        { "name": "ack", "type": "ascii", "length": 1, "parity": "odd", "label": "Technical acknowledgement" },
+        { "name": "label", "type": "ascii", "length": 2, "parity": "odd", "label": "Message label" },
+        { "name": "block_id", "type": "ascii", "length": 1, "parity": "odd" },
+        { "name": "stx", "type": "uint", "length": 1, "display": "hex", "label": "STX (0x02) or ETX" },
+        {
+          "name": "text",
+          "type": "ascii",
+          "length": "remainder",
+          "parity": "odd",
+          "condition": { "field": "stx", "eq": 2 },
+          "label": "Text (closing ETX/ETB included)"
+        }
+      ]
+    }
+  },
+  "outputs": [
+    { "id": "blocks", "kind": "inspector", "from": "msg" },
+    {
+      "id": "message",
+      "kind": "messages",
+      "from": "msg",
+      "decode": {
+        "frame_model": "acars-block",
+        "metadata": ["label", "block_id", "mode"],
+        "content": ["registration", "text"]
+      }
+    },
+    { "id": "symbols", "kind": "stage", "from": "clock.out" }
+  ],
+  "output_policy": { "content_class": "unrestricted" },
+  "refine": {
+    "objective": { "node": "crc", "metric": "error_rate", "goal": "min" },
+    "tune": ["center_hz"]
+  }
+}

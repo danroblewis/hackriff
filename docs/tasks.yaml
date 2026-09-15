@@ -1432,7 +1432,8 @@ tasks:
   - id: T-085
     milestone: M1
     title: "M1-DESIGN: decoder workbench contracts (block contract, recipe schema, parser field-map schema, inspector stream framing)"
-    status: review
+    status: done
+    commit: 527bf95
     deps: [T-060, T-079]
     parallel_group: M1D
     use_cases: [SIGNAL-062]
@@ -1450,8 +1451,8 @@ tasks:
     deps: [T-085]
     parallel_group: M1A
     use_cases: [SIGNAL-062]
-    acceptance: "mix/lowpass/resample wrapped from hk-dsp; fm_demod, am_demod, fsk_demod, msk_demod, ppm_demod, subcarrier extraction; clock_recovery, slicer, diff_decode, nrzi, manchester - each implementing the block contract with params, status/quality and stage-output stream; unit tests per block on synthetic signals; real-time performance bench"
-    area: crates/hk-dsp (blocks), crates/hk-demod
+    acceptance: "mix/lowpass/resample wrapped from hk-dsp; fm_demod, am_demod, fsk_demod, msk_demod, ppm_demod (preamble detect -> frames, length_from DF 56/112), subcarrier extraction; clock_recovery, slicer, diff_decode, nrzi, manchester - each implementing the block contract with params, status/quality and stage-output stream; unit tests per block on synthetic signals; real-time performance bench"
+    area: "crates/hk-blocks/src/blocks/{iq,symbol}/**; additive pub helpers in hk-dsp, hk-demod (ADR-0011 §7)"
     needs: none
     model: opus
     effort: medium
@@ -1463,8 +1464,8 @@ tasks:
     deps: [T-085]
     parallel_group: M1B
     use_cases: [SIGNAL-062]
-    acceptance: "sync_search (sync word / offset words correlation), deframe (fixed and variable frames), interleave/deinterleave; crc (configurable poly/width/init/reflect/xorout), bch, parity, checksum - block contract, status/quality, stage outputs; unit tests incl. RDS offset words + CRC 0x5B9, POCSAG 0x7CD215D8 + BCH(31,21), CRC-16, CRC-24"
-    area: crates/hk-dsp or a new hk-blocks crate (per ADR-0011), crates/hk-estimate framing reuse
+    acceptance: "sync_search (sync word / offset words correlation; variable frames by length_from and terminator, bit_order lsb character reversal), assemble (POCSAG message assembly: address vs message codewords, idle words, slot index, joining across batches), deframe (fixed and variable frames), interleave/deinterleave; crc (configurable poly/width/init/reflect/xorout), bch, parity, checksum - block contract, status/quality, stage outputs; unit tests incl. RDS offset words + CRC 0x5B9, POCSAG 0x7CD215D8 + BCH(31,21), CRC-16, CRC-24"
+    area: "crates/hk-blocks/src/blocks/{framing,fec}/**; additive pub in hk-estimate framing::{crc,sync} (ADR-0011 §7)"
     needs: none
     model: opus
     effort: medium
@@ -1489,8 +1490,8 @@ tasks:
     deps: [T-085]
     parallel_group: M1P
     use_cases: [SIGNAL-062]
-    acceptance: "fields block evaluates a byte record against a nested field map (uint/int/enum/ascii/bitfield, endianness, bit/byte lengths, conditions); text block (character codings); inspector API serves frame lists, hex bytes and layer trees with field<->byte-range mapping; re-run a field map over a recorded stream instantly; docs/api.md + contract tests"
-    area: crates/hk-stream or hk-pipeline (parser), crates/hk-api (inspector routes), docs/api.md, crates/hk-cli tests
+    acceptance: "fields block evaluates a byte record against a nested field map (uint/int/enum/ascii/bitfield, endianness, bit/byte lengths, conditions; ascii 8/7/4-bit incl. pocsag-bcd, bit_order lsb, parity; integer skip_bits and scale/add/value_unit); text block (character codings); inspector API serves frame lists, hex bytes and layer trees with field<->byte-range mapping; re-run a field map over a recorded stream instantly; docs/api.md + contract tests"
+    area: "crates/hk-recipe/src/fields/eval.rs, crates/hk-blocks/src/blocks/parse/**, crates/hk-stream (inspector, publisher, header), crates/hk-api/src/inspector.rs, docs/api.md, crates/hk-cli tests (ADR-0011 §7)"
     needs: none
     model: opus
     effort: medium

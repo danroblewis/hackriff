@@ -11,6 +11,7 @@
 //!   folded into tiles and a floor-vs-time query with uncertainty and flags.
 //! - [`outputs`]: output files (T-061): WAV writer, SigMF-style JSON sidecars, output disk usage.
 
+pub mod decoded;
 pub mod history;
 pub mod outputs;
 pub mod radiometry;

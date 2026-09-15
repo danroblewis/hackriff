@@ -109,6 +109,14 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/outputs/{id}/files/{name}"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
+    // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
+    // T-088 recipes and pipelines
+
+    // T-089 inspector
+
+    // T-091 assist
+
+    // T-092 captures
 ];
 
 /// Server settings.
@@ -641,6 +649,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::selections::route(state, &ctl))
         .or_else(|| crate::inventory::route(state, &ctl))
         .or_else(|| crate::outputs::route(state, &ctl))
+        // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.
+        .or_else(|| crate::recipes::route(state, &ctl)) // T-088
+        .or_else(|| crate::inspector::route(state, &ctl)) // T-089
+        .or_else(|| crate::assist::route(state, &ctl)) // T-091
+        .or_else(|| crate::captures::route(state, &ctl))
+    // T-092
     {
         let allow = r
             .allow

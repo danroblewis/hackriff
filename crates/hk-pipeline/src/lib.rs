@@ -42,6 +42,7 @@ pub mod events;
 pub mod family;
 pub mod gate;
 pub mod inventory;
+pub mod recipes;
 pub mod refine;
 pub mod stats;
 

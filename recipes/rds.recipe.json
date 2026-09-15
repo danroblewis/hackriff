@@ -1,0 +1,233 @@
+{
+  "schema": "hackriff.recipe",
+  "schema_version": 2,
+  "id": "rds",
+  "version": 1,
+  "name": "RDS: data on FM",
+  "description": "Tutorial 1 and the workbench reference (ADR-0011 §5). EN 50067 RDS / NRSC-4 RBDS on the 57 kHz subcarrier of a broadcast FM multiplex: FM discriminator, subcarrier locked to 3 × the 19 kHz pilot, biphase BPSK at 1187.5 Bd, differential decoding, block sync by offset words A–D with the 0x5B9 check polynomial, then group fields (PI, group type, TP, PTY, PS and RadioText segments) and assembled PS and RadioText strings. Oracle: hk-demod's RDS decoder.",
+  "match": {
+    "families": ["wfm"],
+    "freq_hz": [[65800000, 108000000]],
+    "bandwidth_hz": [100000, 300000],
+    "bursty": false,
+    "features": ["pilot-19k"]
+  },
+  "input": {
+    "port": "iq",
+    "sample_rate_hz": 240000,
+    "bandwidth_hz": 200000
+  },
+  "nodes": [
+    {
+      "id": "fm",
+      "block": "fm_demod",
+      "label": "FM discriminator → MPX",
+      "params": { "deviation_hz": 75000 }
+    },
+    {
+      "id": "rds57",
+      "block": "subcarrier",
+      "label": "57 kHz subcarrier (3 × pilot)",
+      "params": {
+        "carrier_hz": 57000,
+        "bandwidth_hz": 4800,
+        "output_rate_hz": 9500,
+        "reference": { "pilot_hz": 19000, "multiple": 3 },
+        "phase_tracking": "bpsk"
+      }
+    },
+    {
+      "id": "clock",
+      "block": "clock_recovery",
+      "label": "Biphase BPSK timing, 1187.5 Bd",
+      "params": {
+        "symbol_rate_bd": 1187.5,
+        "pulse": "biphase",
+        "algorithm": "max-contrast",
+        "soft_from": "in-phase"
+      }
+    },
+    { "id": "slice", "block": "slicer", "params": { "threshold": 0.0 } },
+    { "id": "diff", "block": "diff_decode", "params": { "mode": "xor" } },
+    {
+      "id": "sync",
+      "block": "sync_search",
+      "label": "Block sync: offset words A–D",
+      "params": {
+        "mode": "offset-words",
+        "block_bits": 26,
+        "check_bits": 10,
+        "poly": "0x5B9",
+        "offsets": [
+          { "name": "A", "word": "0x0FC" },
+          { "name": "B", "word": "0x198" },
+          { "name": "C", "word": "0x168" },
+          { "name": "C'", "word": "0x350" },
+          { "name": "D", "word": "0x1B4" }
+        ],
+        "sequence": [["A"], ["B"], ["C", "C'"], ["D"]],
+        "lock_blocks": 2
+      }
+    },
+    {
+      "id": "crc",
+      "block": "crc",
+      "label": "Check words (strip → 64-bit group)",
+      "params": {
+        "width": 10,
+        "poly": "0x5B9",
+        "blocks": {
+          "data_bits": 16,
+          "check_bits": 10,
+          "offsets": [["0x0FC"], ["0x198"], ["0x168", "0x350"], ["0x1B4"]]
+        },
+        "strip": true
+      }
+    },
+    { "id": "group", "block": "fields", "label": "Group fields", "params": { "map": "rds_group" } },
+    {
+      "id": "ps",
+      "block": "text",
+      "label": "Programme service name",
+      "params": {
+        "name": "ps",
+        "key": "pi",
+        "address": ["ps.segment"],
+        "chars": ["ps.chars"],
+        "segments": 4,
+        "charset": "rds"
+      }
+    },
+    {
+      "id": "rt",
+      "block": "text",
+      "label": "RadioText",
+      "inputs": { "in": "group" },
+      "params": {
+        "name": "radiotext",
+        "key": "pi",
+        "address": ["radiotext.segment"],
+        "chars": ["radiotext.chars_a", "radiotext.chars_b"],
+        "segments": 16,
+        "reset_on": "radiotext.ab",
+        "terminator": "0x0D",
+        "charset": "rds"
+      }
+    }
+  ],
+  "field_maps": {
+    "rds_group": {
+      "description": "One RDS group after the check words are stripped: blocks 1–4 as four 16-bit information words, MSB first (64 bits). PTY names differ between RDS (EN 50067) and RBDS (NRSC-4), so PTY stays numeric.",
+      "unit": "bits",
+      "fields": [
+        { "name": "pi", "type": "uint", "offset": 0, "length": 16, "display": "hex", "label": "Programme identification" },
+        { "name": "group_type", "type": "uint", "length": 4, "label": "Group type code" },
+        { "name": "version", "type": "enum", "length": 1, "values": { "0": "A", "1": "B" } },
+        { "name": "tp", "type": "uint", "length": 1, "display": "bool", "label": "Traffic programme" },
+        { "name": "pty", "type": "uint", "length": 5, "label": "Programme type" },
+        {
+          "name": "ps",
+          "type": "layer",
+          "label": "Group 0: basic tuning (PS name segment)",
+          "offset": 27,
+          "length": 37,
+          "condition": { "field": "group_type", "eq": 0 },
+          "fields": [
+            {
+              "name": "flags",
+              "type": "bitfield",
+              "length": 3,
+              "flags": [
+                { "name": "ta", "bit": 0 },
+                { "name": "music", "bit": 1 },
+                { "name": "di", "bit": 2 }
+              ]
+            },
+            { "name": "segment", "type": "uint", "length": 2, "label": "PS segment address" },
+            { "name": "block3", "type": "uint", "length": 16, "display": "hex", "label": "AF codes (0A) or PI (0B)" },
+            { "name": "chars", "type": "ascii", "length": 16, "charset": "rds", "label": "Two PS characters" }
+          ]
+        },
+        {
+          "name": "radiotext",
+          "type": "layer",
+          "label": "Group 2: RadioText segment",
+          "offset": 27,
+          "length": 37,
+          "condition": { "field": "group_type", "eq": 2 },
+          "fields": [
+            { "name": "ab", "type": "uint", "length": 1, "label": "Text A/B flag" },
+            { "name": "segment", "type": "uint", "length": 4, "label": "Text segment address" },
+            {
+              "name": "chars_a",
+              "type": "ascii",
+              "offset": 5,
+              "length": 32,
+              "charset": "rds",
+              "condition": { "field": "version", "eq": 0 },
+              "label": "Four characters (2A)"
+            },
+            {
+              "name": "pi_repeat",
+              "type": "uint",
+              "offset": 5,
+              "length": 16,
+              "display": "hex",
+              "condition": { "field": "version", "eq": 1 },
+              "label": "PI (2B)"
+            },
+            {
+              "name": "chars_b",
+              "type": "ascii",
+              "offset": 21,
+              "length": 16,
+              "charset": "rds",
+              "condition": { "field": "version", "eq": 1 },
+              "label": "Two characters (2B)"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "outputs": [
+    { "id": "groups", "kind": "inspector", "from": "group" },
+    {
+      "id": "group-info",
+      "kind": "messages",
+      "from": "group",
+      "decode": {
+        "frame_model": "rds-group",
+        "identity": { "scheme": "rds-pi", "field": "pi", "format": "hex" },
+        "metadata": ["group_type", "version", "tp", "pty"]
+      }
+    },
+    {
+      "id": "station",
+      "kind": "messages",
+      "from": "ps",
+      "decode": {
+        "frame_model": "rds-ps",
+        "identity": { "scheme": "rds-pi", "field": "ps.key", "format": "hex" },
+        "content": ["ps.text"]
+      }
+    },
+    {
+      "id": "radiotext",
+      "kind": "messages",
+      "from": "rt",
+      "decode": {
+        "frame_model": "rds-rt",
+        "identity": { "scheme": "rds-pi", "field": "radiotext.key", "format": "hex" },
+        "content": ["radiotext.text"]
+      }
+    },
+    { "id": "mpx", "kind": "stage", "from": "fm", "view": "spectrum" },
+    { "id": "symbols", "kind": "stage", "from": "clock.out" }
+  ],
+  "output_policy": { "content_class": "unrestricted" },
+  "refine": {
+    "objective": { "node": "crc", "metric": "error_rate", "goal": "min" },
+    "tune": ["center_hz"]
+  }
+}

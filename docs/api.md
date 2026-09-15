@@ -278,6 +278,45 @@ printf 'open/bits?token=%s\n' "$HK_TOKEN" | nc 127.0.0.1 8788 | xxd | head -40
 
 Python clients (standard library only): `py/examples/` (`hkstream.py`, `hk_bits.py`, `hk_audio_wav.py`), documented in `py/README.md`.
 
+## Decoder workbench (planned, M1; ADR-0011)
+
+**Planned, not served yet.** None of these routes are in `ROUTES` today. They are named here so the parallel M1 tasks and the inspector UI (T-090) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+- **Contracts:** [ADR-0011](adr/0011-decoder-workbench-contracts.md).
+- **Schemas:** `hk_recipe` (recipe, field map, block descriptor types).
+- **Wire formats:** [`docs/stream-contract.md` §14](stream-contract.md) (inspector frame records, stage streams, recorded decoded streams).
+
+Conventions:
+- **Bodies and errors.** Recipe and field-map bodies are the JSON documents themselves, within the 64 KiB body cap. A validation failure is `400 invalid` with `errors: [{path, message}]` and `warnings`. Messages never echo values.
+- **Times.** Unix seconds (floats), as elsewhere in this document.
+- **Audit.** Mutating routes are audited like every other.
+- **Matching.** Recipes are ranked against *measured* signal parameters; nothing tunes to a recipe's frequency hints or starts a recipe unasked.
+
+| Method | Path | Owner | Purpose |
+|---|---|---|---|
+| GET | `/api/blocks` | T-088 | Block catalogue: every `BlockDescriptor` (ports, parameter schemas with `hot` flags, docs) |
+| GET | `/api/recipes` | T-088 | Recipes: `id`, `name`, latest `version`, all versions, `match` hints, built-in or user |
+| GET | `/api/recipes/{id}` | T-088 | The latest version, or `?version=<n>` |
+| POST | `/api/recipes` | T-088 | Save a recipe as a new version (`latest + 1`; saved versions are immutable) |
+| POST | `/api/recipes/validate` | T-088 | Validate without saving: `{valid, errors, warnings, edges}` |
+| GET | `/api/recipes/match` | T-088 | `?emitter=<id>`: recipes ranked against the emitter's measured family, bandwidth, symbol rate, burstiness and features, with reasons |
+| POST | `/api/pipelines` | T-088 | Run `{recipe_id, version?, target: {emitter_id} \| {selection_id} \| {band: {f_lo, f_hi}} \| {capture_id}}` → the pipeline (`503 busy` at the chain budget) |
+| GET | `/api/pipelines` | T-088 | Running pipelines with their revision, per-node status and output stream ids |
+| GET | `/api/pipelines/{id}` | T-088 | One pipeline |
+| PUT | `/api/pipelines/{id}/recipe` | T-088 | Hot edit: the draft recipe document → `{edit_rev, plan, applied_at_sample}`. Capture never stops; an invalid draft leaves the running revision untouched. |
+| POST | `/api/pipelines/{id}/save` | T-088 | Save the running revision as the recipe's next version |
+| DELETE | `/api/pipelines/{id}` | T-088 | Stop a pipeline (its streams finish) |
+| GET | `/api/captures` | T-092 | Recorded decoded streams: pipeline, recipe revision, output, span, frames, bytes |
+| GET | `/api/captures/{id}/frames` | T-092 | `?from_frame&limit` (≤ 500): stored frame records |
+| POST | `/api/captures/{id}/parse` | T-089 | Re-parse `{field_map, from_frame?, limit?}` → frames with layer trees + `fit` summary (ok/partial/failed, errors by path) |
+| POST | `/api/assist/sync` | T-091 | Sync-word and period suggestions over a capture's frames or bits, scored |
+| POST | `/api/assist/fields` | T-091 | Entropy-based field-boundary suggestions as field-map fragments, scored |
+| POST | `/api/assist/crc` | T-091 | CRC/BCH parameter search over a capture's frames → `crc`/`bch` parameter objects, scored |
+| GET | `/ws/open/inspector` | T-089 | `?pipeline=<id>[&output=<id>]` or `?capture=<id>[&from_frame][&field_map=<recipe_id>@<version>:<map_id>]`: an inspector stream (§14.8). TCP: `open/inspector?…` |
+| GET | `/ws/open/stage` | T-088 | `?pipeline=<id>&node=<node>[&port=<port>][&view=raw\|spectrum]`: a stage stream (§14.4). TCP: `open/stage?…` |
+| GET | `/ws/inspector/{pipeline_id}/{output_id}` | T-088 | The always-on inspector stream of a running pipeline output (`/ws/{stream_id}` form) |
+
+Assist suggestions are never applied automatically: the user accepts or edits them into a recipe, which then goes through `POST /api/recipes/validate`.
+
 ## UI decision logic moved server-side (T-079)
 
 The user's direction (2026-09-14): the web UI will be rewritten later as a one-screen exploratory UI; until then, **the backend owns all signal logic — recognition, analysis, classification, demodulation, decoding — and the UI is a thin client over this document**, so it can be replaced without backend changes. `GET /api/analysis/strongest` (above) is the first move under that rule: picking the strongest signal in a frequency range is spectrum *analysis*, not presentation, so it moved out of `ui/src/listen.ts` (`peakBinIndex`/`strongestInView`, which inspected a raw client-held FFT row) into the backend, which can look at its own measured spectrum history instead of one row the browser happened to have decoded. The UI toolbar (`ui/src/listen.ts` `installListen`) now polls this endpoint roughly once a second and caches the answer, so choosing a Listen target still runs synchronously inside the click handler (required to unlock audio playback on mobile browsers) rather than awaiting a fetch.

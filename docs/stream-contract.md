@@ -8,7 +8,7 @@ One contract serves two uses:
 
 ## 1. Versioning
 
-- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.1**: 1.0 plus the optional header `audio` profile and the binary `status` record type (T-043, §12).
+- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.1**: 1.0 plus the optional header `audio` profile and the binary `status` record type (T-043, §12). The **1.2 draft** (§14, ADR-0011) adds the `frame`, `status` and `edit` message record types of inspector streams and the optional header `inspector` and `stage` objects; it is served once T-089 lands.
 - **Minor versions** may only add:
   - optional header fields;
   - optional message-record fields;
@@ -605,6 +605,165 @@ Code: `hk_stream::bursts` (profile), `hk_pipeline::chains::taps` (producer).
 - **Always-on per-emitter streams.** `bits/fsk-bursts/<emitter>` (T-037b) is still published once
   per chain at detach and finished at once, so it is only useful to in-process sinks; external
   programs use `open/bits` (optionally `emitter=<id>`), which sees the same bursts live.
+
+## 14. Inspector streams: decoder-workbench frames (1.2 draft, ADR-0011)
+
+**Status: draft (T-085).** Wire types: `crates/hk-stream/src/inspector.rs`. Nothing publishes these records yet:
+- T-089 adds `Publisher::publish_frame` (through the §6 message gate) and bumps the version to **1.2**;
+- T-088 serves the records from recipe pipelines;
+- T-092 records them.
+
+Everything here is additive under §1:
+- new message record types (`frame`, `status`, `edit`);
+- optional header objects (`inspector`, `stage`).
+
+Framing (§3), binary records (§5.2) and gating (§6) are unchanged. Decoder-workbench concepts (blocks, recipes, field maps) are defined in [ADR-0011](adr/0011-decoder-workbench-contracts.md).
+
+### 14.1 Header
+
+An inspector stream is a `messages` stream:
+- `message_schema`: `"hackriff.inspector/1"`.
+- `stream_id`: `inspector/<pipeline_id>/<output_id>` for a live pipeline output; `inspector/capture/<capture_id>/<n>` for a replay or re-parse of a recorded decoded stream.
+- `content_class`: the pipeline's effective class, `clamp(recipe output_policy.content_class, source class)` (ADR-0011 §2.6).
+- `source`: `hk-pipeline:recipe:<recipe_id>@<version>`.
+- `center_hz`/`bandwidth_hz`: the target channel. `emitter_id` when the target is an emitter.
+- `inspector` (optional, 1.2): `{pipeline_id, recipe_id, recipe_version, output_id, source, channels}`.
+  - `source` is `{"kind": "live"}` or `{"kind": "capture", "capture_id", "reparse"}`.
+  - `channels` is `[{index, center_hz, bandwidth_hz}]`: the channels known at open. `follow_hops` pipelines add more later, and every record names its own channel.
+
+### 14.2 Frame records
+
+One NDJSON record per frame:
+
+```json
+{"type":"frame","seq":41,"t":1789300800123456789,"content_class":"unrestricted","gated":false,
+ "crc_status":"valid","decoder":"recipe:rds@1","frame_model":"rds",
+ "metadata":{"frame":41,"sample_index":123456789,"channel":0,"channel_hz":101300000.0,"bit_len":64,
+             "recipe_version":1,"edit_rev":0,"fec_corrected_bits":0,"fit":"ok"},
+ "content":{"hex":"54a8…",
+            "layers":{"nodes":[{"id":0,"name":"pi","path":"pi","type":"uint","bits":[0,16],"bytes":[0,2],
+                                "value":21672,"text":"0x54A8","label":"Programme identification"}, "…"],
+                      "byte_index":[[0],[0],[1,2,3,4],"…"],"fit":"ok"}}}
+```
+
+| Field | Meaning |
+|---|---|
+| `type`, `seq`, `t`, `content_class`, `gated` | As §5.1. `t` is the time of the frame's first bit, host-stamped from `sample_index` and the ring's time anchor. |
+| `crc_status` | Frame check after FEC: `valid`, `invalid`, `no-crc` (the recipe has no check), `unknown`. |
+| `decoder` | `recipe:<recipe_id>@<version>` |
+| `frame_model` | The recipe id (inspector outputs) or the decode mapping's `frame_model` |
+| `emitter_id` | When the pipeline's target resolved to an emitter |
+| `metadata.frame` | Frame counter of this output, from 0. A gap means frames were not produced (e.g. dropped by `drop_invalid`). Transit loss shows in `seq` and §5.3 markers. |
+| `metadata.sample_index` | Source sample index (ring stream counter, C03) of the frame's first bit |
+| `metadata.channel`, `metadata.channel_hz` | Channel index (0 unless `follow_hops`) and its centre |
+| `metadata.bit_len` | Frame length in bits |
+| `metadata.recipe_version`, `metadata.edit_rev` | Saved recipe version and live-edit revision (0 = as saved) that produced the frame |
+| `metadata.fec_corrected_bits` | Bits corrected before the check |
+| `metadata.fit` | `none` (no field map ran), `ok`, `partial`, `failed` |
+| `content.hex` | Frame bytes, lower-case hex |
+| `content.layers` | The parsed layer tree, when a `fields` block ran |
+
+**Every metadata key is optional on the wire.** Under a class that forbids content the gate keeps only allowlisted keys (§14.5), so readers must not require any of them.
+
+**Packing.**
+- `content.hex` holds `ceil(bit_len / 8)` bytes.
+- Bit 0 of the frame is the **MSB of the first byte**, and the last byte is zero-padded.
+- Air bit order is resolved by the recipe before framing, so every frame, field map and stored stream uses this one convention.
+
+**Layer tree.**
+- `nodes` are in pre-order (a node's children follow it), each with:
+  - `id`, `parent` (absent at top level), `name` (`name[i]` for a repeat instance), `path` (dotted from the root);
+  - `type`: `layer`, `uint`, `int`, `enum`, `ascii`, `bitfield`, `flag`, `bytes`. A bitfield's named bits are child `flag` nodes.
+- `bits: [offset, length]`: absolute from the frame's first bit.
+- `bytes: [first, end)`: the bytes covering `bits`.
+- `value`:
+  - integers ≤ 2⁵³ are JSON numbers, larger ones decimal strings;
+  - `ascii` is a string, a flag a bool;
+  - absent for layers, `bytes` and failed fields.
+- `text` is the rendered value. `label` comes from the field map. `error: true` marks where a fit error was reported.
+- `byte_index[b]`: the ids of the **leaf** nodes overlapping byte `b`, in bit order.
+- `fit` and `errors`: `[{path, kind, need_bits?, have_bits?}]`. `kind` is `out-of-bounds`, `bad-length`, `missing-reference`, `repeat-limit` or `node-limit`.
+- A field that doesn't fit never aborts the frame: its later siblings are still evaluated.
+
+**Linked selection** (inspector UI, T-090) uses only these values, with no arithmetic of its own: click a field → highlight its `bytes` (and `bits` for sub-byte precision); click byte `b` → select `byte_index[b][0]`, with repeat clicks cycling through the list.
+
+### 14.3 Status and edit records
+
+Inspector streams also carry two metadata-only record types. Readers that don't know them skip them (§1).
+
+- **`status`**, one record per ~250 ms tick for the whole pipeline, every node's block-contract status readout (ADR-0011 §1.3) batched as `<node>.<metric>` keys:
+  ```json
+  {"type":"status","seq":57,"t":…,"content_class":"unrestricted","gated":false,
+   "metadata":{"sync.lock":"locked","sync.snr_db":14.2,"sync.error_rate":0.012,"sync.quality":0.93,
+               "sync.items_in":118750,"sync.items_out":1130,"sync.blocks_ok":4480,
+               "crc.lock":"locked","crc.error_rate":0.004,"crc.items_in":1130,"crc.items_out":1130}}
+  ```
+  `metadata` is flat numbers, booleans and short tokens (`policy::metadata_is_allowlist_shaped`); no free text or content ever rides on it.
+- **`edit`**, once per applied hot edit (ADR-0011 §2.3), before the first frame of the new revision:
+  ```json
+  {"type":"edit","seq":90,"t":…,"content_class":"unrestricted","gated":false,
+   "metadata":{"edit_rev":3,"recipe_version":1,"applied_at_sample":123456789,"rebuilt":1,"reset":4,"field_maps_changed":0}}
+  ```
+
+### 14.4 Stage streams
+
+Any output port of any node of a running pipeline can be opened as a stream on demand (§12.1). Opening one costs nothing until it is opened, and closing it stops the tap.
+
+| Port type | `kind` | `datatype` | `sample_rate_hz` | Payload |
+|---|---|---|---|---|
+| `iq` | `iq` | `cf32_le` | port rate | complex baseband |
+| `real` | `audio` | `rf32_le` | port rate | real waveform (no `audio` profile) |
+| `soft` | `symbols` | `rf32_le` | symbol rate | soft values, positive = 1 (as §13.3) |
+| `bits` | `bits` | `ru8` | bit rate | one byte per bit |
+| `frames` | `messages` | – | – | frame records (§14.2) |
+
+- **Records.** §5.2 data records, one per processed chunk.
+  - `sample_index` is the port's element index; `t` comes from the chunk's time map.
+  - `DISCONTINUITY` is set on the first record after a chunk discontinuity, a `RESET` (hot edit) or lost ring samples.
+- **`view=spectrum`** (`iq`/`real` ports): `kind: spectrum`, `rf32_le` dBFS/Hz rows, `fft_size` declared, at most 25 rows/s, which is inside the §6 gated-spectrum cap. The rendering reduction is server-side (the UI is a thin client).
+- **Header** adds the optional (1.2) `stage`: `{pipeline_id, node, port, port_type, edit_rev}`.
+- **Gating.** Stage payloads of `iq`/`audio`/`symbols`/`bits` are content: withheld (`GATED`) under a class that forbids content, as in §6.
+
+### 14.5 Gating
+
+- **Frame records are messages.** The §6 message rules apply unchanged:
+  - the record's class is clamped to the header class;
+  - `content` (bytes and layers) is withheld with `gated: true` when the effective class forbids content;
+  - metadata is reduced to the recipe's `output_policy` allowlist, whose shape and review rules are those of a plugin manifest (§9.3).
+  - Allowlisting inspector metadata keys (`frame`, `bit_len`, `channel`, `fit`, …) for a restricted recipe is a reviewed declaration like any manifest key.
+- **Consequence for restricted services.** A POCSAG recipe (`restricted-paging`) serves frames without bytes or layers unless a user classification rule vouches for the emitter (own pager).
+- **`own-key-decrypted` pipelines** are served to local consumers only (§2).
+- **Status and edit records** carry only allowlist-shaped metadata.
+
+### 14.6 Backpressure and bounds
+
+- §7 applies unchanged: per-consumer bounded rings, drop markers, disconnect after `disconnect_after`. A pipeline never waits on a consumer.
+- A frame record is at most `max_frame_len` (default 1 MiB).
+- A layer tree has at most 4096 nodes (`hk_stream::inspector::MAX_LAYER_NODES`); past that it is truncated with a `node-limit` fit error.
+
+### 14.7 Recorded decoded streams and re-parse (T-092, T-089)
+
+- **Storage format.** Always-on decoded capture stores each pipeline output as a file holding **the §3 byte stream itself**:
+  - the header frame;
+  - optional 1.2 header key `recipe`: the full recipe document at the starting revision;
+  - then the frame, status and edit records as published, but without `content.layers` (layers are derived and re-computable).
+
+  Hot edits during a capture appear as `edit` records. `StreamReader` reads a capture file exactly as it reads a socket.
+- **Content rule (§6 persistence).**
+  - A frame whose effective class forbids content is stored in its gated form, metadata only. Its bytes are never written, so it cannot be re-parsed, by design.
+  - Captures are quota-managed like output recordings (T-061).
+- **Re-parse.** Read the frame records, evaluate a field map (the recording's own or an edited one) over `content.hex` and `metadata.bit_len`, and re-emit them with layers.
+  - The re-emitted records carry `inspector.source = {kind: capture, capture_id, reparse: true}`.
+  - `metadata.recipe_version`/`edit_rev` stay the recording's, so a record always says which pipeline revision produced its bytes.
+  - It is served paged over HTTP (`POST /api/captures/{id}/parse`, docs/api.md) and as a stream (`open/inspector?capture=`).
+- **Recipe tails over recorded bits or symbols.** Running a tail over recorded `bits`/`soft` uses the T-061 output recordings as a recipe `input.port` of `bits`/`soft`.
+
+### 14.8 Planned openers (names only; T-088, T-089)
+
+Served over `/ws/open/<name>` (§12.1) and TCP `open/<name>` (§13.1), with the usual refusals: `404` unknown pipeline, node, port or capture; `409` a view the port type doesn't support; `403` gate; `503` budget.
+- `inspector?pipeline=<id>[&output=<id>]`: a pipeline's inspector output from now. The same records are offered as the always-on stream `inspector/<pipeline_id>/<output_id>` while the pipeline runs.
+- `inspector?capture=<id>[&from_frame=<n>][&field_map=<recipe_id>@<version>:<map_id>]`: replay, optionally re-parsed, of a recorded decoded stream.
+- `stage?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum]`: a stage stream (§14.4).
 
 ## Sources
 
