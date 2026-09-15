@@ -3073,7 +3073,8 @@ tasks:
   - id: T-192
     milestone: MUI
     title: "MUI right-click context menu on signals/boxes/inventory rows carrying the focus-bar actions (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete, Adjust band); right panel freed of controls"
-    status: in-progress
+    status: done
+    commit: 0e57221
     priority: normal
     deps: []
     parallel_group: MUI-X1

@@ -2288,3 +2288,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Rust slots:** T-178, T-209, T-191, T-211.
   - **T-190 (5437f01)** merges at the next full check, batched with T-191 or T-209; its api.md ADR-0014 reference will be fixed to ADR-0015 then.
   - **T-210 (RDS correction, user-approved)** takes the next free slot.
+- **B0.482 T-192 merged (0e57221).** The conflict with T-194 was resolved: data-id on SelectionStore-rendered boxes.
+  - **Real bug found and fixed:** selection boxes had pointer-events none, so right-click could never hit them.
+  - **Checks green:** typecheck, 21/21 UI test files, build (31.2 KB gz JS), lint. Smoke 20/20 at 1440/400; Shift-drag two bands then right-click Delete removes from waterfall and sidebar.
+  - **T-195 still waits on T-159,** a MUI API gap: latest decode fields.
