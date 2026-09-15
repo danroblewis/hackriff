@@ -1860,3 +1860,21 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Task:** confirm the suspected root cause, that an empty occupied pool under a new gain key falls back to the idle pool. The fix treats that key as immature and never substitutes the other level class. It also checks the mirror case on the quieter-than-usual path.
   - **Held:** T-173 (hop placement) waits for T-175 to finish, since both may touch the hk-core scheduler.
   - **Merge queue:** T-172 then T-157 (after its review), once the T-156 full check finishes. T-172's timing test gets pinned to heavy-serial at merge.
+- **B0.420 T-157 review (Opus): FIX-FIRST.**
+  - **Verified:**
+    - capture never waits on the buffer (a slow disk laps only this reader; drops counted)
+    - no join deadlock
+    - index and files kept in sync under one lock
+    - export vs eviction is safe (Arc<File>)
+    - quota includes the partial chunk
+    - segment provenance and sample clock correct
+    - clip auth is 401-tested and audited
+    - fixed-tune clip is byte-compared
+  - **Bug:** a full disk creates a chunk-file storm and unbounded 0-byte index entries; there is no free-space floor.
+  - **Risks:**
+    - 2 GiB default too big for Jetson eMMC/flash
+    - f64 clip times round to about 240 ns (≈5 samples at 20 Msps); this caused the 299,999-sample clip, hidden by ±1 test tolerances
+    - synchronous export with a 4 GiB cap and no free-space check
+    - t0 overflow
+  - **Product question:** chunks are deleted at run end and wiped on start, but the mockup shows "last 48 h kept". Asked the user.
+  - **Next:** fix round launched (fresh Opus), excluding retention.
