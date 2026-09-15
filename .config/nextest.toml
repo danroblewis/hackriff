@@ -116,6 +116,14 @@ retries = 1
 filter = 'test(dc_twin_lookup_scales_n_log_n_over_days)'
 test-group = 'heavy-serial'
 
+# Found flaky under load (full check after the T-124 merge, 2026-09-15): the hot-edit test saw
+# discontinuities - source_discontinuities != 1 (stats snapshot read while the source loops); passes 5/5
+# alone. Serialize and retry once; T-197 checks whether the two counters are read non-atomically.
+[[profile.default.overrides]]
+filter = 'test(hot_edits_apply_at_a_chunk_boundary_without_stopping_capture_or_losing_samples)'
+test-group = 'heavy-serial'
+retries = 1
+
 # Found flaky under load (full check after the T-173 fix, 2026-09-15, load ~12): the T-092 decoded-capture
 # roll/evict test read the last record (1566) before the async recorder flushed it (1999); it took 5.3 s
 # instead of 0.1 s. Passes 3/3 alone. Serialize and retry once; T-182 makes it wait for the flush.
