@@ -1475,8 +1475,8 @@ tasks:
   - id: T-088
     milestone: M1
     title: "M1 Recipe runtime: load/run/hot-edit recipes as chains; save/list; serve records"
-    status: review
-    commit: 0a256ac
+    status: done
+    commit: 75c399d
     deps: [T-085]
     parallel_group: M1R
     use_cases: [SIGNAL-062]
@@ -1530,7 +1530,7 @@ tasks:
   - id: T-092
     milestone: M1
     title: "M1 Always-on decoded-stream capture + scrubbable review"
-    status: todo
+    status: in-progress
     deps: [T-085, T-088]
     parallel_group: M1C
     use_cases: [SIGNAL-062]
@@ -1542,7 +1542,7 @@ tasks:
   - id: T-093
     milestone: M1
     title: "M1 follow_hops: one pipeline spanning several channels"
-    status: todo
+    status: in-progress
     deps: [T-085, T-088]
     parallel_group: M1H
     use_cases: [SIGNAL-062]
@@ -1555,7 +1555,7 @@ tasks:
   - id: T-094
     milestone: M1
     title: "M1 Tutorial 1: RDS recipe (reference) + blind acceptance vs Rust RDS oracle"
-    status: todo
+    status: in-progress
     deps: [T-086, T-087, T-088, T-089]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
