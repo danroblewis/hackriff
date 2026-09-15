@@ -1002,7 +1002,11 @@ mod tests {
         }
         let x: Vec<Complex32> = (0..len)
             .map(|i| {
-                let e = if i >= ONSET { weak[i] + band[i] } else { Complex32::new(0.0, 0.0) };
+                let e = if i >= ONSET {
+                    weak[i] + band[i]
+                } else {
+                    Complex32::new(0.0, 0.0)
+                };
                 ci8(e + rng.complex_gaussian(var))
             })
             .collect();
@@ -1040,8 +1044,8 @@ mod tests {
             let tone_err = 10.0
                 * (power_at(&y, -40e3 + off, rate) / power_at(&rec[..r_len], -40e3, rec_fs))
                     .log10();
-            let band_err =
-                10.0 * (excess(&y, rate, 30e3 + off, n) / excess(&rec[..r_len], rec_fs, 30e3, 2048))
+            let band_err = 10.0
+                * (excess(&y, rate, 30e3 + off, n) / excess(&rec[..r_len], rec_fs, 30e3, 2048))
                     .log10();
             assert!(
                 tone_err.abs() <= 0.2 && band_err.abs() <= 0.2,
