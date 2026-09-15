@@ -8,6 +8,7 @@ use hk_model::{AnomalyKind, Cause};
 use super::*;
 use crate::feeds::FeedAdapter;
 use crate::feeds::gpsjam::GpsjamAdapter;
+use crate::occupancy::baseline::PoolStats;
 use crate::utc::parse_utc;
 
 const CELL_HZ: f64 = 6250.0;
@@ -58,6 +59,8 @@ fn input(kind: AlarmKind, f0_hz: f64, cell: i64, novelty: f64) -> AlarmInput {
         z: 3.0 + 7.0 * novelty,
         novelty,
         observed_s: INTERVAL_S,
+        gain: 0,
+        sequential: None,
     }
 }
 
@@ -194,6 +197,10 @@ fn alarm_injected_emitter_raises_exactly_one_with_ranked_explanations() {
 }
 
 /// Novelty flickering around `on` never raises; once open, dipping between `off` and `on` holds.
+///
+/// T-146: exercised on a level kind. The hysteresis is kind-independent, but a busier/quieter
+/// input now also accumulates evidence, and this fixture's z (3 + 7·novelty ≥ 5.45 for 20
+/// consecutive intervals) is overwhelming sequential evidence that rightly raises.
 #[test]
 fn alarm_hysteresis_does_not_flap() {
     let mut rig = Rig::new();
@@ -204,7 +211,7 @@ fn alarm_hysteresis_does_not_flap() {
             &snap(
                 rig.site,
                 i,
-                vec![input(AlarmKind::BusierThanUsual, 1e8, 0, n)],
+                vec![input(AlarmKind::LevelAboveBaseline, 1e8, 0, n)],
             ),
             None,
         ));
@@ -220,7 +227,7 @@ fn alarm_hysteresis_does_not_flap() {
             &snap(
                 rig.site,
                 i,
-                vec![input(AlarmKind::BusierThanUsual, 1e8, 0, n)],
+                vec![input(AlarmKind::LevelAboveBaseline, 1e8, 0, n)],
             ),
             None,
         ));
@@ -850,4 +857,249 @@ fn alarm_dismissed_key_does_not_swallow_neighbours() {
         AlarmAction::Hold { key, anomaly: held, .. } if *key == open && *held == anomaly)));
     let hull = rig.alarms()[0].alarm.as_ref().unwrap().freq;
     assert!(hull.hi_hz >= cell0(1e8, 108) as f64 * CELL_HZ, "{hull:?}");
+}
+
+// ---- T-146: sequential evidence for busier / quieter than usual ----
+
+fn t146_channel_key() -> hk_model::attention::occupancy::ChannelKey {
+    hk_model::attention::occupancy::ChannelKey {
+        scheme: 1,
+        lo_cell: 69_355,
+        hi_cell: 69_357,
+    }
+}
+
+/// An occupancy-only 15-min interval on the T-146 channel.
+fn t146_obs(i: i64, fco: f64, n_eff: f64, gain: u32) -> IntervalObservation {
+    IntervalObservation {
+        subject: BaselineSubject::Channel {
+            key: t146_channel_key(),
+        },
+        t: at(i),
+        gain,
+        level_db: None,
+        max_db: None,
+        occupied_weight_s: fco * INTERVAL_S,
+        weight_s: INTERVAL_S,
+        observed_s: INTERVAL_S,
+        n_eff,
+        suspect_fraction: 0.0,
+        provenance_explained: false,
+    }
+}
+
+/// The alarm inputs of `obs` scored against `pool` (as a mature T-119 fold would score it).
+fn t146_inputs(pool: &PoolStats, obs: &IntervalObservation) -> Vec<AlarmInput> {
+    use crate::occupancy::novelty::{Evidence as Ev, combine, occupancy_z};
+    let cfg = NoveltyConfig::default();
+    let ev = Ev {
+        level_db: None,
+        fco: obs.fco(),
+        n_eff: obs.n_eff,
+        weight_s: obs.weight_s,
+        observed_s: obs.observed_s,
+    };
+    let fold = FoldOutcome {
+        novelty: combine(
+            mature(),
+            None,
+            occupancy_z(pool, &ev),
+            None,
+            obs.observed_s,
+            false,
+            &cfg,
+        ),
+        change_point: None,
+        accrued: true,
+        accrued_reference: false,
+    };
+    inputs_from_fold(
+        obs,
+        &fold,
+        CalKey::Uncalibrated,
+        HourOfWeek::of(obs.t, 0),
+        1,
+        CELL_HZ,
+        16,
+        PoolContext::default(),
+        &cfg,
+    )
+}
+
+/// An all-hours reference of 168 slots × 4 intervals, each interval's FCO measured from `n_eff`
+/// independent looks at occupancy probability `p` (seeded), with the T-146 sampling moment.
+fn t146_pool(p: f64, n_eff: u32, seed: u64) -> PoolStats {
+    use hk_model::attention::baseline::SlotStats;
+    let mut state = seed;
+    let mut next = move || {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut pool = PoolStats::default();
+    for _ in 0..168 {
+        let mut s = SlotStats::EMPTY;
+        for _ in 0..4 {
+            let hits = (0..n_eff).filter(|_| next() < p).count() as f64;
+            s.fco_var_s =
+                SlotStats::fco_var_after(s.fco_var_s, s.weight_s, INTERVAL_S, f64::from(n_eff));
+            s.occupied_weight_s += INTERVAL_S * hits / f64::from(n_eff);
+            s.weight_s += INTERVAL_S;
+            s.observed_s += INTERVAL_S;
+        }
+        pool.add(
+            0.0,
+            s.observed_s,
+            0.0,
+            0.0,
+            s.occupied_weight_s,
+            s.weight_s,
+            0.0,
+        );
+        pool.add_fco_sampling(s.weight_s, s.fco_var_s);
+    }
+    pool
+}
+
+fn sequential_evidence_value(ev: &AlarmEvent, name: &str) -> Option<f64> {
+    ev.explanations
+        .iter()
+        .filter(|e| e.cause == Cause::Unexplained)
+        .flat_map(|e| e.evidence.iter())
+        .find_map(|v| match v {
+            Evidence::Value { name: n, value } if n == name => Some(*value),
+            _ => None,
+        })
+}
+
+/// T-146 (ADR-0012 §7.2): a sparse-visit channel (FCO 0.05, two effective looks per interval)
+/// that goes fully busy scores z ≈ 3.6 per interval, novelty 0.09, below `off`: the
+/// single-interval rule never alarms. Its evidence accumulates and raises one busier-than-usual
+/// alarm within N intervals.
+///
+/// N a priori from the rule: the run of k intervals reaches on when Q(z√k) ≤ Q(7.9)²/(2k(k+1))
+/// (Q(7.9)² = 1.95·10⁻³⁰); the hysteresis raises one interval later. For the worst case z = 3.4
+/// allowed below: k = 12 gives Q(11.78) ≈ 2.5·10⁻³² > 1.95·10⁻³⁰/312 = 6.2·10⁻³³ (not yet), k = 13
+/// gives Q(12.26) ≈ 7·10⁻³⁵ ≤ 1.95·10⁻³⁰/364 = 5.4·10⁻³³ (on), so **N = 14**. For the best case
+/// z = 3.8: k = 9 gives Q(11.4) ≈ 2·10⁻³⁰ (not yet), k = 10 gives Q(12.02) ≈ 1.4·10⁻³³ ≤
+/// 1.95·10⁻³⁰/220 (on), so the raise is no earlier than interval 11.
+#[test]
+fn alarm_sparse_busier_onset_accumulates_to_one_raise() {
+    const N: i64 = 14;
+    const EARLIEST: i64 = 11;
+    let pool = t146_pool(0.05, 2, 0x146a);
+    let first = t146_inputs(&pool, &t146_obs(0, 1.0, 2.0, 0));
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].kind, AlarmKind::BusierThanUsual);
+    let z = first[0].z;
+    assert!((3.4..=3.8).contains(&z), "per-interval z {z}");
+    assert!(first[0].novelty < HysteresisConfig::default().off);
+
+    let mut rig = Rig::new();
+    let site = rig.site;
+    let mut latency = None;
+    for i in 0..20 {
+        let inputs = t146_inputs(&pool, &t146_obs(i, 1.0, 2.0, 0));
+        let actions = rig.run(&snap(site, i, inputs), None);
+        if raises(&actions) > 0 {
+            assert_eq!(raises(&actions), 1);
+            latency = Some(i + 1);
+            break;
+        }
+    }
+    let latency = latency.expect("the sparse onset raises");
+    println!("T-146 sparse onset: per-interval z {z:.3}, raised at interval {latency} (N = {N})");
+    assert!((EARLIEST..=N).contains(&latency), "latency {latency}");
+    let ev = rig.events.last().unwrap();
+    assert_eq!(ev.row.key.kind, AlarmKind::BusierThanUsual);
+    assert_eq!(
+        ev.row.key.subject,
+        AlarmSubject::Channel {
+            key: t146_channel_key()
+        }
+    );
+    assert!(ev.row.detail.novelty >= 0.7);
+    let k = sequential_evidence_value(ev, "sequential_intervals").expect("sequential evidence");
+    assert_eq!(k, latency as f64);
+    assert!(sequential_evidence_value(ev, "sequential_z").unwrap() >= z * (k.sqrt() - 1e-9));
+}
+
+/// T-146: a dense-visit onset (n_eff 80) is novel on its own and raises within 2 intervals, as
+/// before the sequential rule.
+#[test]
+fn alarm_dense_busier_onset_raises_within_two_intervals() {
+    let pool = t146_pool(0.05, 80, 0x146b);
+    let mut rig = Rig::new();
+    let site = rig.site;
+    let inputs = t146_inputs(&pool, &t146_obs(0, 0.6, 80.0, 0));
+    assert!(
+        inputs[0].novelty >= 0.7,
+        "single interval z {}",
+        inputs[0].z
+    );
+    assert_eq!(raises(&rig.run(&snap(site, 0, inputs), None)), 0);
+    let inputs = t146_inputs(&pool, &t146_obs(1, 0.6, 80.0, 0));
+    assert_eq!(raises(&rig.run(&snap(site, 1, inputs), None)), 1);
+}
+
+/// T-146: the engine's run resets on a direction change, a gap beyond the horizon, a gain-key
+/// change, an immature or provenance-explained input and a site change (and a caller reset).
+#[test]
+fn alarm_sequential_run_resets_in_the_engine() {
+    let pool = t146_pool(0.05, 2, 0x146c);
+    let mut e = AlarmEngine::new(AlarmConfig::default()).unwrap();
+    let site_id = SiteId::new();
+    let site = SiteKey::Site(site_id);
+    let subject = AlarmSubject::Channel {
+        key: t146_channel_key(),
+    };
+    let run = |e: &AlarmEngine| e.sequential_run(site_id, subject, CalKey::Uncalibrated);
+    let k = |e: &AlarmEngine| run(e).map_or(0, |r| r.k);
+    let busy = |i: i64, gain: u32| t146_inputs(&pool, &t146_obs(i, 1.0, 2.0, gain));
+    for i in 0..4 {
+        e.step(&snap(site, i, busy(i, 0)));
+    }
+    assert_eq!(k(&e), 4);
+    // Direction change: an empty interval scores quieter (z < 0).
+    let quiet = t146_inputs(&pool, &t146_obs(4, 0.0, 2.0, 0));
+    assert_eq!(quiet[0].kind, AlarmKind::QuieterThanUsual);
+    e.step(&snap(site, 4, quiet));
+    assert_eq!((run(&e).unwrap().direction, k(&e)), (-1, 1));
+    for i in 5..8 {
+        e.step(&snap(site, i, busy(i, 0)));
+    }
+    assert_eq!(k(&e), 3);
+    // Gap beyond 2 h.
+    e.step(&snap(site, 17, busy(17, 0)));
+    assert_eq!(k(&e), 1);
+    // Gain key change.
+    e.step(&snap(site, 18, busy(18, 0)));
+    e.step(&snap(site, 19, busy(19, 9)));
+    assert_eq!(k(&e), 1);
+    // Immature input.
+    e.step(&snap(site, 20, busy(20, 9)));
+    assert_eq!(k(&e), 2);
+    let mut imm = busy(21, 9);
+    imm[0].maturity = Maturity::Immature { observed_s: 0.0 };
+    e.step(&snap(site, 21, imm));
+    assert!(run(&e).is_none());
+    // Provenance-explained input.
+    e.step(&snap(site, 22, busy(22, 9)));
+    let mut prov = busy(23, 9);
+    prov[0].provenance_explained = true;
+    e.step(&snap(site, 23, prov));
+    assert!(run(&e).is_none());
+    // Site change.
+    e.step(&snap(site, 24, busy(24, 9)));
+    e.step(&snap(site, 25, busy(25, 9)));
+    assert_eq!(k(&e), 2);
+    e.step(&snap(SiteKey::Site(SiteId::new()), 26, Vec::new()));
+    assert!(run(&e).is_none());
+    // Caller reset (an unscorable fold).
+    e.step(&snap(site, 27, busy(27, 9)));
+    assert_eq!(k(&e), 1);
+    e.reset_sequential(site, &subject);
+    assert!(run(&e).is_none());
 }

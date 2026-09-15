@@ -15,8 +15,8 @@
 //! - an FNV-1a 64 checksum of the uncompressed body. A mismatch reads as corrupt, never as data.
 //!
 //! In memory the slots are sparse too ([`SlotSeries`], T-134): a series holds only the
-//! hour-of-week slots it has observed, each packed in 28 B of f32 moments ([`PackedSlot`], T-135).
-//! The file format is unchanged by either (version 2, f64 moments): a file written from packed
+//! hour-of-week slots it has observed, each packed in 32 B of f32 moments ([`PackedSlot`], T-135;
+//! T-146 added the FCO sampling moment, file version 3). The file keeps f64 moments: a file written from packed
 //! slots holds the f32-rounded values, with a series' pending forgetting multiplier (T-137)
 //! applied in f64.
 //!
@@ -34,8 +34,10 @@ use hk_model::time::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// File format version written (T-132: 2 adds the level class per series, the sequential
-/// accumulators and the latched hours per subject). Version 1 is still read.
-pub const BASELINE_FORMAT_VERSION: u16 = 2;
+/// accumulators and the latched hours per subject; T-146: 3 appends the FCO sampling moment
+/// `fco_var_s` to every reference and adaptive slot). Versions 1 and 2 are still read (the
+/// moment reads 0, so their between-slot spread is not sampling-corrected until refolded).
+pub const BASELINE_FORMAT_VERSION: u16 = 3;
 /// Default store quota (ADR-0012 §3.6).
 pub const BASELINE_QUOTA_BYTES: u64 = 1 << 30;
 /// Gain states kept per subject before it reports `mixed` (ADR-0012 §3.1).
@@ -94,6 +96,9 @@ pub struct DecayedStats {
     pub weight_s: f64,
     /// Max level (not decayed), dB; `-inf` when empty.
     pub max_db: f64,
+    /// T-146 FCO sampling moment Σ(w²/n_eff)/Σw, s (as [`SlotStats::fco_var_s`]; decays
+    /// linearly like the weights).
+    pub fco_var_s: f64,
 }
 
 impl Default for DecayedStats {
@@ -112,6 +117,7 @@ impl DecayedStats {
         occupied_weight_s: 0.0,
         weight_s: 0.0,
         max_db: f64::NEG_INFINITY,
+        fco_var_s: 0.0,
     };
 
     /// Folds one visit (as [`SlotStats::add`]).
@@ -140,6 +146,7 @@ impl DecayedStats {
         self.sum_sq_db *= factor;
         self.occupied_weight_s *= factor;
         self.weight_s *= factor;
+        self.fco_var_s *= factor;
     }
 
     /// Nothing folded (or forgotten to nothing).
@@ -162,6 +169,7 @@ impl From<&SlotStats> for DecayedStats {
             } else {
                 s.max_db
             },
+            fco_var_s: s.fco_var_s,
         }
     }
 }
@@ -218,6 +226,8 @@ pub trait PackedMoments {
     fn weight_s(&self) -> f64;
     /// Max level, dB (never forgotten).
     fn max_db(&self) -> f64;
+    /// T-146 FCO sampling moment, s.
+    fn fco_var_s(&self) -> f64;
 }
 
 /// A stored slot's packed form ([`SlotSeries::packed`], [`SlotSeries::packed_at`], T-140) paired
@@ -258,9 +268,13 @@ impl<P: PackedMoments> PackedMoments for ScaledMoments<'_, P> {
     fn max_db(&self) -> f64 {
         self.p.max_db()
     }
+    fn fco_var_s(&self) -> f64 {
+        self.p.fco_var_s() * self.m
+    }
 }
 
-/// One stored slot in 28 B (T-135; the f64 statistics are 56 B): every moment as f32, the level
+/// One stored slot in 32 B (T-135 28 B + the T-146 FCO sampling moment; the f64 statistics are
+/// 64 B): every moment as f32, the level
 /// moments as mean and centred Σ(level − mean)² rather than Σ level and Σ level², so the spread
 /// keeps f32 relative precision instead of cancelling (Σ level² − n·mean² in f32 would lose most
 /// of σ² for a high level over thousands of visits).
@@ -282,6 +296,7 @@ pub struct PackedSlot<N> {
     occupied_weight_s: f32,
     weight_s: f32,
     max_db: f32,
+    fco_var_s: f32,
 }
 
 impl<N: Copy + Into<f64>> PackedMoments for PackedSlot<N> {
@@ -299,6 +314,9 @@ impl<N: Copy + Into<f64>> PackedMoments for PackedSlot<N> {
     }
     fn max_db(&self) -> f64 {
         f64::from(self.max_db)
+    }
+    fn fco_var_s(&self) -> f64 {
+        f64::from(self.fco_var_s)
     }
 }
 
@@ -347,6 +365,7 @@ impl SlotValue for SlotStats {
             occupied_weight_s: self.occupied_weight_s as f32,
             weight_s: self.weight_s as f32,
             max_db: self.max_db as f32,
+            fco_var_s: self.fco_var_s as f32,
         }
     }
 
@@ -361,6 +380,7 @@ impl SlotValue for SlotStats {
             occupied_weight_s: f64::from(p.occupied_weight_s),
             weight_s: f64::from(p.weight_s),
             max_db: f64::from(p.max_db),
+            fco_var_s: f64::from(p.fco_var_s),
         }
     }
 }
@@ -380,6 +400,7 @@ impl SlotValue for DecayedStats {
             occupied_weight_s: (self.occupied_weight_s / m) as f32,
             weight_s: (self.weight_s / m) as f32,
             max_db: self.max_db as f32,
+            fco_var_s: (self.fco_var_s / m) as f32,
         }
     }
 
@@ -394,6 +415,7 @@ impl SlotValue for DecayedStats {
             occupied_weight_s: f64::from(p.occupied_weight_s) * m,
             weight_s: f64::from(p.weight_s) * m,
             max_db: f64::from(p.max_db),
+            fco_var_s: f64::from(p.fco_var_s) * m,
         }
     }
 }
@@ -595,6 +617,7 @@ impl SlotSeries<DecayedStats> {
             s(&mut p.observed_s);
             s(&mut p.occupied_weight_s);
             s(&mut p.weight_s);
+            s(&mut p.fco_var_s);
         }
         self.decay = 1.0;
     }
@@ -1007,6 +1030,9 @@ fn encode_body(state: &BaselineState, version: u16) -> Vec<u8> {
                 ] {
                     w.f64(v);
                 }
+                if version >= 3 {
+                    w.f64(x.fco_var_s);
+                }
             }
             let ads: Vec<_> = g
                 .adaptive
@@ -1026,6 +1052,9 @@ fn encode_body(state: &BaselineState, version: u16) -> Vec<u8> {
                     x.max_db,
                 ] {
                     w.f64(v);
+                }
+                if version >= 3 {
+                    w.f64(x.fco_var_s);
                 }
             }
         }
@@ -1139,6 +1168,7 @@ fn decode_body_with(
                     occupied_weight_s: r.f64()?,
                     weight_s: r.f64()?,
                     max_db: r.f64()?,
+                    fco_var_s: if version >= 3 { r.f64()? } else { 0.0 },
                 };
                 g.reference.set(slot, x);
             }
@@ -1152,6 +1182,7 @@ fn decode_body_with(
                     occupied_weight_s: r.f64()?,
                     weight_s: r.f64()?,
                     max_db: r.f64()?,
+                    fco_var_s: if version >= 3 { r.f64()? } else { 0.0 },
                 };
                 g.adaptive.set(slot, x);
             }
@@ -1454,6 +1485,26 @@ mod tests {
             sub.seq = CusumState::default();
         }
         assert_eq!(decode(&encode_version(&v2, 1).unwrap()).unwrap(), v1);
+        // T-146: version 3 carries the FCO sampling moment; a version-2 file reads it as 0.
+        let mut v3 = s.clone();
+        let mut touched = 0;
+        for sub in v3.subjects.values_mut() {
+            for g in &mut sub.gains {
+                let refs: Vec<usize> = g.reference.iter().map(|(i, _)| i).collect();
+                for i in refs {
+                    g.reference.update(i, |x| x.fco_var_s = 112.5);
+                    touched += 1;
+                }
+                let ads: Vec<usize> = g.adaptive.iter().map(|(i, _)| i).collect();
+                for i in ads {
+                    g.adaptive.update(i, |x| x.fco_var_s = 56.25);
+                    touched += 1;
+                }
+            }
+        }
+        assert!(touched > 0);
+        assert_eq!(decode(&encode(&v3).unwrap()).unwrap(), v3);
+        assert_eq!(decode(&encode_version(&v3, 2).unwrap()).unwrap(), s);
         let mut bad = bytes.clone();
         let n = bad.len();
         bad[n - 1] ^= 1;
@@ -1549,7 +1600,7 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&GOLDEN_V2_DENSE_HEX[i..i + 2], 16).unwrap())
             .collect();
-        assert_eq!(BASELINE_FORMAT_VERSION, 2);
+        assert_eq!(BASELINE_FORMAT_VERSION, 3);
         let decoded = decode(&bytes).unwrap();
         assert_eq!(decoded, golden_state());
         let sub = &decoded.subjects[&BaselineSubject::Cell { index: 7 }];
@@ -1568,10 +1619,16 @@ mod tests {
             vec![(vec![0, 25, 167], vec![0, 100]), (vec![12], vec![12, 13])]
         );
         let body = |b: &[u8]| zstd::decode_all(&b[HEADER_LEN..b.len() - 8]).unwrap();
-        let re = encode(&decoded).unwrap();
+        // T-146: the writer is version 3 (one more f64 per slot); the v2 layout is still what a
+        // version-2 re-encode produces, byte for byte outside the rounded f64 fields.
+        let re = encode_version(&decoded, 2).unwrap();
         assert_eq!(body(&re).len(), body(&bytes).len());
         assert_eq!(decode(&re).unwrap(), decoded);
-        assert_eq!(body(&encode(&decode(&re).unwrap()).unwrap()), body(&re));
+        assert_eq!(decode(&encode(&decoded).unwrap()).unwrap(), decoded);
+        assert_eq!(
+            body(&encode_version(&decode(&re).unwrap(), 2).unwrap()),
+            body(&re)
+        );
         let (golden, again) = (body(&bytes), body(&re));
         let f64_offsets = |b: &[u8]| {
             let mut r = R {
@@ -1713,7 +1770,7 @@ mod tests {
         assert_eq!(s.value(5), DecayedStats::EMPTY);
         assert!(s.is_empty() && s.heap_bytes() == 0);
         let one = std::mem::size_of::<<DecayedStats as SlotValue>::Packed>();
-        assert_eq!(one, 28, "T-135 packed slot");
+        assert_eq!(one, 32, "T-135 packed slot + T-146 FCO sampling moment");
         assert_eq!(s.growth_of(100), 4 * one);
         for i in [100, 3, 167, 64, 63] {
             s.update(i, |d| d.add(f64::from(i as u32), 0.0, 0.0, 1.0, 1.0));

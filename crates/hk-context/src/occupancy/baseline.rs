@@ -370,7 +370,16 @@ pub struct PoolStats {
     pub max_db: f64,
     /// Σ weight·fco_slot².
     fco_sq_w: f64,
+    /// T-146: Σ over slots of the slot's FCO sampling moment V_j (s).
+    sampling_v: f64,
+    /// T-146: Σ over slots of w_j·V_j (s²).
+    sampling_wv: f64,
 }
+
+/// T-146: the sampling-corrected between-slot variance is floored at this fraction of the raw
+/// weighted spread, so a noisy correction can neither go negative nor claim that a pool has no
+/// spread at all (DerSimonian–Laird truncates at 0; a detector must not).
+pub const BETWEEN_VAR_FLOOR_FRACTION: f64 = 0.1;
 
 impl Default for PoolStats {
     fn default() -> Self {
@@ -383,6 +392,8 @@ impl Default for PoolStats {
             weight_s: 0.0,
             max_db: f64::NEG_INFINITY,
             fco_sq_w: 0.0,
+            sampling_v: 0.0,
+            sampling_wv: 0.0,
         }
     }
 }
@@ -425,6 +436,15 @@ impl PoolStats {
         );
     }
 
+    /// T-146: records the FCO sampling moment `fco_var_s` (Σ(w²/n_eff)/Σw of the slot's folded
+    /// intervals, [`SlotStats::fco_var_s`]) of a slot of weight `weight_s` already [`Self::add`]ed.
+    pub fn add_fco_sampling(&mut self, weight_s: f64, fco_var_s: f64) {
+        if weight_s > 0.0 && fco_var_s.is_finite() && fco_var_s > 0.0 {
+            self.sampling_v += fco_var_s;
+            self.sampling_wv += weight_s * fco_var_s;
+        }
+    }
+
     /// These level moments with `o`'s occupancy moments (a level pool of one gain state combined
     /// with the all-gain-states occupancy pool, for display).
     pub fn with_occupancy_of(mut self, o: &PoolStats) -> Self {
@@ -432,6 +452,8 @@ impl PoolStats {
         self.occupied_weight_s = o.occupied_weight_s;
         self.weight_s = o.weight_s;
         self.fco_sq_w = o.fco_sq_w;
+        self.sampling_v = o.sampling_v;
+        self.sampling_wv = o.sampling_wv;
         self
     }
 
@@ -458,12 +480,42 @@ impl PoolStats {
         (self.weight_s > 0.0).then(|| (self.occupied_weight_s / self.weight_s).clamp(0.0, 1.0))
     }
 
-    /// Weighted variance of slot FCOs around the pool FCO (0 for a single slot).
-    pub fn between_var(&self) -> f64 {
+    /// Weighted variance of slot FCOs around the pool FCO (0 for a single slot), **uncorrected**:
+    /// it includes each slot FCO's own sampling noise (before T-146 this was `between_var`).
+    pub fn between_var_raw(&self) -> f64 {
         match self.fco() {
             Some(f) => (self.fco_sq_w / self.weight_s - f * f).max(0.0),
             None => 0.0,
         }
+    }
+
+    /// T-146: the part of [`Self::between_var_raw`] expected from binomial sampling alone.
+    ///
+    /// With slot weights w_j (W = Σw_j), slot FCOs f_j = p + e_j, var(e_j) = s_j² and the pool FCO
+    /// f̄ = Σw_j f_j/W, the weighted spread S = Σ(w_j/W)(f_j − f̄)² has
+    /// E[S] = τ² + Σ(w_j/W)s_j² − Σw_j²s_j²/W² (τ² the true between-slot variance). A slot FCO
+    /// folded from intervals of weight wᵢ and nᵢ effective samples has s_j² = p(1−p)·V_j/w_j with
+    /// V_j = Σwᵢ²/nᵢ / w_j ([`SlotStats::fco_var_s`]), so the sampling part is
+    /// p(1−p)·(ΣV_j/W − Σw_jV_j/W²), with p the pool FCO (the null model's occupancy). 0 for a
+    /// single slot, and for slots without the moment (pre-T-146 files).
+    pub fn between_sampling_var(&self) -> f64 {
+        match self.fco() {
+            Some(f) if self.weight_s > 0.0 => {
+                let w = self.weight_s;
+                (f * (1.0 - f) * (self.sampling_v / w - self.sampling_wv / (w * w))).max(0.0)
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Between-slot variance of the pool, corrected for sampling noise (T-146, ADR-0012 §3.4):
+    /// [`Self::between_var_raw`] − [`Self::between_sampling_var`], floored at
+    /// [`BETWEEN_VAR_FLOOR_FRACTION`] of the raw spread. So sparse visits (few effective samples per
+    /// interval) no longer inflate the reference spread, while a dense-visit pool, whose sampling
+    /// part is tiny, keeps nearly its raw spread.
+    pub fn between_var(&self) -> f64 {
+        let raw = self.between_var_raw();
+        (raw - self.between_sampling_var()).max(BETWEEN_VAR_FLOOR_FRACTION * raw)
     }
 }
 
@@ -581,6 +633,7 @@ fn pools_where(
                             } else {
                                 p.max_db()
                             },
+                            fco_var_s: p.fco_var_s(),
                         };
                         (o, None)
                     };
@@ -599,6 +652,7 @@ fn pools_where(
                             occupied_weight_s: p.occupied_weight_s(),
                             weight_s: p.weight_s(),
                             max_db: p.max_db(),
+                            fco_var_s: p.fco_var_s(),
                         };
                         (o, None)
                     };
@@ -653,6 +707,7 @@ struct SlotOccupancy {
     occupied_weight_s: f64,
     weight_s: f64,
     max_db: f64,
+    fco_var_s: f64,
 }
 
 impl SlotOccupancy {
@@ -663,6 +718,7 @@ impl SlotOccupancy {
             occupied_weight_s: d.occupied_weight_s,
             weight_s: d.weight_s,
             max_db: d.max_db,
+            fco_var_s: d.fco_var_s,
         }
     }
 }
@@ -696,6 +752,7 @@ fn pool_slot(
             o.weight_s,
             o.max_db,
         );
+        occ[r].add_fco_sampling(o.weight_s, o.fco_var_s);
         if let Some(d) = own {
             level[r].add_decayed(d);
         }
@@ -1109,18 +1166,24 @@ impl BaselineEngine {
         for g in &mut sub.gains {
             g.adaptive.scale(factor);
         }
-        sub.gains[gi].adaptive.update(slot_i, |a| match level {
-            Some(l) => a.add(
-                l,
-                max_db,
-                obs.occupied_weight_s,
-                obs.weight_s,
-                obs.observed_s,
-            ),
-            None => {
-                a.observed_s += obs.observed_s;
-                a.occupied_weight_s += obs.occupied_weight_s;
-                a.weight_s += obs.weight_s;
+        // T-146: each interval's FCO sampling moment (w²/n_eff), before its weight is added.
+        let fco_var =
+            |v: f64, prior_w: f64| SlotStats::fco_var_after(v, prior_w, obs.weight_s, obs.n_eff);
+        sub.gains[gi].adaptive.update(slot_i, |a| {
+            a.fco_var_s = fco_var(a.fco_var_s, a.weight_s);
+            match level {
+                Some(l) => a.add(
+                    l,
+                    max_db,
+                    obs.occupied_weight_s,
+                    obs.weight_s,
+                    obs.observed_s,
+                ),
+                None => {
+                    a.observed_s += obs.observed_s;
+                    a.occupied_weight_s += obs.occupied_weight_s;
+                    a.weight_s += obs.weight_s;
+                }
             }
         });
 
@@ -1152,6 +1215,7 @@ impl BaselineEngine {
         let accrue_ref = clean && normal && !latched && !building && !seq_building && hod_immature;
         if accrue_ref {
             sub.gains[gi].reference.update(slot_i, |s| {
+                s.fco_var_s = fco_var(s.fco_var_s, s.weight_s);
                 match level {
                     Some(l) => s.add(
                         l,
@@ -1261,6 +1325,7 @@ fn to_slot_stats(d: &DecayedStats) -> hk_model::attention::baseline::SlotStats {
             observed_s: d.observed_s,
             occupied_weight_s: d.occupied_weight_s,
             weight_s: d.weight_s,
+            fco_var_s: d.fco_var_s,
             ..SlotStats::EMPTY
         };
     }
@@ -1272,6 +1337,7 @@ fn to_slot_stats(d: &DecayedStats) -> hk_model::attention::baseline::SlotStats {
         occupied_weight_s: d.occupied_weight_s,
         weight_s: d.weight_s,
         max_db: d.max_db,
+        fco_var_s: d.fco_var_s,
     }
 }
 
