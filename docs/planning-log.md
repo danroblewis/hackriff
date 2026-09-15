@@ -1695,3 +1695,24 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Bandit test:** 110.4 s → 82.4 s. The bandit recording is ~3.46 codes, so it is bypassed.
   - **Unchanged:** the `scheduler_history` scene (~0.5 code) still dequantises, with the floor gap still 0.070 dB. The 8 mock tests and 4 bandit tests pass; lint clean.
   - **Next:** full check started.
+- **B0.400 T-146 WIP 09c2f45: review fixes work; finisher 2 launched.**
+  - **Budget after the fixes** (union bound ÷ Q²/2; raises per 10⁶ intervals):
+
+    | Null model | Before | After |
+    |---|---|---|
+    | Binomial p 0.05 | 25.5× | 2.7e-14× |
+    | Binomial p 0.2 | 1.2e6× | 1e-34× |
+    | Markov duty 0.05 | 1.1e29×, 526 raises | 0, 0 raises |
+    | Markov duty 0.5 | 2.6e24× | 0 |
+
+  - **Other results:**
+    - Sparse p=0.9: 1 raise, 0 clears.
+    - 3 h revisits raise at visit 23; service sparse onset raises at 25.
+    - Parked week: 229.9 MB, 0 refusals.
+  - **Tests:** 105/107 targeted. Both failures are claimed test-side (run-restart expectation; sparse loop too short for the 17–23 window). The finisher must verify against the ADR rule before editing either test.
+  - **Still open:** ADR §7.2 tables and lint.
+  - **T-147 report:**
+    - 433.400 FCO 0.586 in CI [0.334, 0.799] (truth 0.570); 433.375 0.084 in [0.021, 0.279] (truth 0.083) and learned.
+    - The 46 h run learns all channels.
+    - The Wilson interval edge now returns exactly 1/0.
+  - **T-147 follow-up:** the live candidate path (`detect.rs:458`) still uses the per-detection suspect rule. Record it after review.
