@@ -2671,3 +2671,17 @@ notes:
     effort: medium
     core_interface: false
     size: small
+  - id: T-169
+    milestone: M2
+    title: "Test speed: dev-profile opt-level=2 for hk-dsp, hk-core, hk-pipeline, hk-demod (existing detect/store/context overrides untouched)"
+    status: in-progress
+    deps: [T-145]
+    parallel_group: M2E
+    use_cases: []
+    found_by: "T-145 audit 2026-09-15: slow tests CPU-bound in debug (bandit 39.5 M samples in 81 s, zero waits); user chose opt-level=2 for hot crates"
+    acceptance: "before/after nextest wall (same threads, load recorded) and compile time measured; kept only if nextest total drops >=15% with all tests passing; optimisation-only failures reported, not bent; acceptance 28 passed"
+    area: Cargo.toml
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false

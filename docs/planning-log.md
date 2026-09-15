@@ -1642,3 +1642,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Cranelift:** faster compile, but slower tests with 3 failures. Dropped.
   - **Real lever:** bandit tests are CPU-bound in debug (39.5 M samples in 81 s, zero waits). Adding dev opt-level for hk-dsp/hk-core/hk-pipeline/hk-demod would help, at a compile-time cost. Asked the user.
   - **Bandit reference:** pre-T-141 worktree 81.5 s at load ~17. Now timing the same test on main post-T-141.
+- **B0.393 User chose dev opt-level=2 for the hot crates (hk-dsp, hk-core, hk-pipeline, hk-demod). T-169 launched on Sonnet.**
+  - The existing detect/store/context overrides stay as they are.
+  - T-169 measures nextest wall time and compile time before and after the change.
+  - It keeps the change only if nextest drops by at least 15% with every test green.
+  - Optimisation-only failures get reported rather than bent to pass.
