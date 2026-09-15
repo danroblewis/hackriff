@@ -5,6 +5,7 @@
 // against a running `hk serve`, like every other MUI panel.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { AnomalyRow } from "../src/alarms";
 import { alarmEmitterId, alarmRowView } from "../src/app/review/alarms";
 import { newBookmarkFromForm } from "../src/app/review/bookmarks";
@@ -142,4 +143,14 @@ test("newBookmarkFromForm is null for an unreadable frequency", () => {
   assert.equal(newBookmarkFromForm({ name: "x", freqMHz: "", bandwidthKHz: "", kind: "marker" }), null);
   assert.equal(newBookmarkFromForm({ name: "x", freqMHz: "not a number", bandwidthKHz: "", kind: "marker" }), null);
   assert.equal(newBookmarkFromForm({ name: "x", freqMHz: "-5", bandwidthKHz: "", kind: "marker" }), null);
+});
+
+// ---- layout: the drawer goes full-screen and its wide table scrolls sideways at narrow widths ----
+
+test("review.css/base.css: the drawer is full-screen under 900px, and the survey table is its own scroller", () => {
+  const css = readFileSync("src/app/review/review.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /\.rv-table\s*\{[^}]*display:\s*block;\s*overflow-x:\s*auto/, "the wide survey table gets its own scroller, not the page");
+  assert.match(css, /@media \(max-width:\s*900px\)/);
+  for (const m of css.matchAll(/min-width:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 400);
+  assert.match(readFileSync("src/app/base.css", "utf8"), /@media \(max-width:\s*900px\)\s*\{[\s\S]*\.review\s*\{[^}]*top:\s*0;\s*bottom:\s*0/);
 });

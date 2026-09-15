@@ -20,7 +20,7 @@
 .side-inv .list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; }
 .side-inv .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 8px 8px 10px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
 .side-inv .row:hover { background: var(--panel-2); }
-.side-inv .row[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+.side-inv .row[aria-current="true"] { background: var(--amber-soft); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
 .side-inv .row .f { font-family: var(--mono); font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
 .side-inv .row .f small { color: var(--dim); font-size: 11px; font-weight: 400; }
 .side-inv .row .meta { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; }
@@ -28,9 +28,9 @@
 /* Action buttons wrap into their own row rather than scroll (T-148 rule): always visible, never
    hover-only, so Promote/Delete stay reachable on touch and at ~400 px. */
 .side-inv .acts { display: flex; flex-wrap: wrap; gap: 4px; }
-.side-inv .chip.known { color: var(--teal); border-color: rgba(82,194,174,0.35); }
-.side-inv .chip.unknown { color: var(--lav); border-color: rgba(163,149,224,0.35); }
-.side-inv .chip.flag { color: var(--coral); border-color: rgba(228,123,104,0.4); }
+.side-inv .chip.known { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 35%, transparent); }
+.side-inv .chip.unknown { color: var(--lav); border-color: color-mix(in srgb, var(--lav) 35%, transparent); }
+.side-inv .chip.flag { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 40%, transparent); }
 .side-inv .dots { display: inline-flex; gap: 2px; align-items: flex-end; height: 10px; }
 .side-inv .dots i { width: 3px; background: var(--lav); border-radius: 1px; opacity: 0.85; display: block; }
 
@@ -42,7 +42,7 @@
 .side-sel .sel-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; }
 .side-sel .sel { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-radius: 6px; cursor: pointer; border: 1px dashed transparent; flex-wrap: wrap; }
 .side-sel .sel:hover { background: var(--panel-2); }
-.side-sel .sel[aria-current="true"] { border-color: rgba(240,165,66,0.5); background: var(--amber-soft); }
+.side-sel .sel[aria-current="true"] { border-color: color-mix(in srgb, var(--amber) 50%, transparent); background: var(--amber-soft); }
 .side-sel .sel b { font-weight: 500; }
 .side-sel .sel .mono { color: var(--muted); font-size: 11.5px; }
 
@@ -52,9 +52,9 @@
 .focus .state.confirmed { color: var(--teal); background: var(--teal-soft); }
 .focus .state.candidate { color: var(--lav); background: var(--lav-soft); }
 .focus .state.selection { color: var(--amber); background: var(--amber-soft); }
-.focus .chip.known { color: var(--teal); border-color: rgba(82,194,174,0.35); }
-.focus .chip.unknown { color: var(--lav); border-color: rgba(163,149,224,0.35); }
-.focus .chip.flag { color: var(--coral); border-color: rgba(228,123,104,0.4); }
+.focus .chip.known { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 35%, transparent); }
+.focus .chip.unknown { color: var(--lav); border-color: color-mix(in srgb, var(--lav) 35%, transparent); }
+.focus .chip.flag { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 40%, transparent); }
 .focus .bigf { font-family: var(--mono); font-size: 28px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.05; margin-top: 8px; overflow-wrap: anywhere; }
 .focus .bigf small { font-size: 14px; color: var(--muted); margin-left: 4px; }
 .focus .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
@@ -76,10 +76,10 @@
 .focus .act:hover { border-color: var(--dim); }
 .focus .act b { font-weight: 600; font-size: 12.5px; }
 .focus .act small { color: var(--dim); font-size: 11px; }
-.focus .act.primary { border-color: rgba(240,165,66,0.45); }
+.focus .act.primary { border-color: color-mix(in srgb, var(--amber) 45%, transparent); }
 .focus .act.primary b { color: var(--amber); }
 .focus .act[aria-pressed="true"] { background: var(--amber-soft); border-color: var(--amber); }
-.focus .act.promote { border-color: rgba(82,194,174,0.4); }
+.focus .act.promote { border-color: color-mix(in srgb, var(--teal) 40%, transparent); }
 .focus .act.promote b { color: var(--teal); }
 .focus .act.danger:hover { border-color: var(--coral); }
 .focus .act.danger:hover b { color: var(--coral); }

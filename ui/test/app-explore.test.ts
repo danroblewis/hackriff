@@ -200,3 +200,15 @@ test("explore.css: row and focus actions wrap instead of overflowing", () => {
   assert.match(css, /\.focus \.actions\s*\{[^}]*grid-template-columns/);
   assert.match(css, /@media \(max-width:\s*400px\)\s*\{\s*\.focus \.actions\s*\{[^}]*grid-template-columns:\s*1fr/);
 });
+
+test("index.html: inventory and selections sit inside the left sidebar aside; the live view does not", () => {
+  const html = readFileSync("src/app/index.html", "utf8");
+  const start = html.indexOf('<aside class="side"');
+  assert.ok(start >= 0, "no sidebar aside in src/app/index.html");
+  const end = html.indexOf("</aside>", start);
+  assert.ok(end > start);
+  const region = html.slice(start, end);
+  assert.match(region, /data-slot="inventory"/, "inventory slot not in the sidebar");
+  assert.match(region, /data-slot="selections"/, "selections slot not in the sidebar");
+  assert.doesNotMatch(region, /data-slot="live"/, "the live waterfall/spectrum must stay in the centre area");
+});

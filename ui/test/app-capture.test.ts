@@ -2,6 +2,7 @@
 // scrub↔time mapping and the "reviewing N ago" / coverage wording. No DOM.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   WINDOW_S, agoText, coverageText, currentSpan, pctForAgo, reduceActivity, scrubToTime, type HistoryGrid,
 } from "../src/app/capture/timeline";
@@ -69,4 +70,16 @@ test("currentSpan prefers the live geometry, falls back to the tuned device span
     { loHz: 99_600_000, hiHz: 102_000_000 },
   );
   assert.equal(currentSpan({ live: null, device: { centerHz: null, sampleRateHz: null } }), null);
+});
+
+// ---- layout: the scrubbable band stays touch-usable and full-width at narrow widths ----
+
+test("capture.css: the timeline is fluid (no fixed wide pixel width) and scrubbable by touch", () => {
+  const css = readFileSync("src/app/capture/capture.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  // the 2px playhead line is a decoration, not a layout width; anything wider would be a bug.
+  for (const m of css.matchAll(/(?<!min-)\bwidth:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 4, `unexpected fixed width: ${m[0]}`);
+  assert.match(css, /\.cap-band\s*\{[^}]*touch-action:\s*none/, "pointer events, not native scroll, drive the scrub drag");
+  // base.css gives the capture row a fixed height at every breakpoint down to 900px, so the band
+  // never collapses to nothing when the page goes to one column.
+  assert.match(readFileSync("src/app/base.css", "utf8"), /\.centre\s*\{[^}]*grid-template-rows:[^}]*92px/);
 });
