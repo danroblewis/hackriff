@@ -4,7 +4,7 @@
   "id": "rds",
   "version": 1,
   "name": "RDS: data on FM",
-  "description": "Tutorial 1 and the workbench reference (ADR-0011 §5). EN 50067 RDS / NRSC-4 RBDS on the 57 kHz subcarrier of a broadcast FM multiplex: FM discriminator, subcarrier locked to 3 × the 19 kHz pilot, biphase BPSK at 1187.5 Bd, differential decoding, block sync by offset words A–D with the 0x5B9 check polynomial, then group fields (PI, group type, TP, PTY, PS and RadioText segments) and assembled PS and RadioText strings. Oracle: hk-demod's RDS decoder.",
+  "description": "Tutorial 1 and the workbench reference (ADR-0011 §5). EN 50067 RDS / NRSC-4 RBDS on the 57 kHz subcarrier of a broadcast FM multiplex: FM discriminator, subcarrier locked to 3 × the 19 kHz pilot, biphase BPSK at 1187.5 Bd, differential decoding, block sync by offset words A–D with the 0x5B9 check polynomial (lock on three consecutive offset-consistent blocks, lost after eight invalid in a row), then group fields of CRC-valid groups (PI, group type, TP, PTY, PS and RadioText segments) and assembled PS and RadioText strings. Oracle: hk-demod's RDS decoder.",
   "match": {
     "families": ["wfm"],
     "freq_hz": [[65800000, 108000000]],
@@ -66,7 +66,8 @@
           { "name": "D", "word": "0x1B4" }
         ],
         "sequence": [["A"], ["B"], ["C", "C'"], ["D"]],
-        "lock_blocks": 2
+        "lock_blocks": 3,
+        "unlock_run": 8
       }
     },
     {
@@ -84,7 +85,7 @@
         "strip": true
       }
     },
-    { "id": "group", "block": "fields", "label": "Group fields", "params": { "map": "rds_group" } },
+    { "id": "group", "block": "fields", "label": "Group fields", "params": { "map": "rds_group", "skip_invalid": true } },
     {
       "id": "ps",
       "block": "text",

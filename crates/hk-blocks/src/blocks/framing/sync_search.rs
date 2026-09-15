@@ -257,8 +257,14 @@ struct OffsetSearch {
     offsets: Vec<u32>,
     /// Allowed offset indices per position.
     sequence: Vec<Vec<usize>>,
+    /// Syndrome hits on one block lattice, in sequence order, that lock.
     lock_blocks: u32,
+    /// Most blocks between two successive hits of an acquisition chain.
+    lock_gap_blocks: u64,
     unlock_errors: u16,
+    /// Consecutive invalid blocks that drop lock (0: off).
+    unlock_run: u32,
+    bad_run: u32,
     reg: u64,
     history: Vec<u8>,
     scratch: Vec<u8>,
@@ -267,7 +273,8 @@ struct OffsetSearch {
     locked: bool,
     next_pos: usize,
     bits_since: u32,
-    /// Recent syndrome hits while searching: (bit index, position, chain length).
+    /// Recent syndrome hits while searching: (bit index, position, chain length), a chain being
+    /// hits on one lattice whose positions follow the sequence.
     hits: [(u64, u16, u32); 32],
     hit_next: usize,
     window: RateMeter,
@@ -350,7 +357,10 @@ impl OffsetSearch {
             offsets,
             sequence,
             lock_blocks: p.uint_or("lock_blocks", 2)?.max(1),
+            lock_gap_blocks: u64::from(p.uint_or("lock_gap_blocks", 1)?.clamp(1, 16)),
             unlock_errors: unlock_errors.clamp(1, 1024) as u16,
+            unlock_run: p.uint_or("unlock_run", 0)?,
+            bad_run: 0,
             reg: 0,
             history: vec![0; frame_bits],
             scratch: Vec::with_capacity(frame_bits),
@@ -377,6 +387,7 @@ impl OffsetSearch {
         self.reg = 0;
         self.filled = 0;
         self.locked = false;
+        self.bad_run = 0;
         self.hits = [(u64::MAX, 0, 0); 32];
         self.window.clear();
     }
@@ -419,18 +430,28 @@ impl OffsetSearch {
                 if !self.matches(s, pos) {
                     continue;
                 }
-                let prev = (pos + len - 1) % len;
+                // Extend the longest chain ending k ≤ lock_gap_blocks blocks earlier at the
+                // position k before this one.
+                let gap = self.lock_gap_blocks;
                 let chain = 1 + self
                     .hits
                     .iter()
-                    .find(|h| bit >= bb && h.0 == bit - bb && usize::from(h.1) == prev)
-                    .map_or(0, |h| h.2);
+                    .filter(|h| {
+                        h.0 < bit && (bit - h.0) % bb == 0 && {
+                            let k = (bit - h.0) / bb;
+                            k <= gap && (usize::from(h.1) + k as usize) % len == pos
+                        }
+                    })
+                    .map(|h| h.2)
+                    .max()
+                    .unwrap_or(0);
                 self.hits[self.hit_next] = (bit, pos as u16, chain);
                 self.hit_next = (self.hit_next + 1) % self.hits.len();
                 if chain >= self.lock_blocks {
                     self.locked = true;
                     self.acquisitions += 1;
                     self.bits_since = 0;
+                    self.bad_run = 0;
                     self.next_pos = (pos + 1) % len;
                     for _ in 0..chain.min(len as u32) {
                         self.window.push(false);
@@ -456,15 +477,20 @@ impl OffsetSearch {
         self.window.push(!ok);
         if ok {
             self.blocks_ok += 1;
+            self.bad_run = 0;
         } else {
             self.blocks_bad += 1;
+            self.bad_run += 1;
         }
         if pos == len - 1 {
             self.emit(bit, clock, out, index, channel);
         }
-        if self.window.bad() >= self.unlock_errors {
+        let run_lost = self.unlock_run > 0 && self.bad_run >= self.unlock_run;
+        if run_lost || self.window.bad() >= self.unlock_errors {
             self.locked = false;
+            self.bad_run = 0;
             self.window.clear();
+            self.hits = [(u64::MAX, 0, 0); 32];
         }
     }
 

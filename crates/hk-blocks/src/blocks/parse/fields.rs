@@ -3,12 +3,16 @@
 //! through unchanged (ADR-0011 §3).
 //!
 //! **Status** is the fit rate since the map last changed: `quality` = share of frames that fit
-//! fully, `error_rate` = 1 − quality, extras `frames_ok`, `frames_partial`, `frames_failed`.
+//! fully, `error_rate` = 1 − quality, extras `frames_ok`, `frames_partial`, `frames_failed`,
+//! `frames_invalid` (skipped by `skip_invalid`, not counted in the fit rate).
+//! **`skip_invalid`:** a frame whose check is `invalid` passes through without a layer tree, so
+//! no field value is read from corrupt data (T-185).
 //! **Hot edit:** `update_params` recompiles the named map from the new recipe's `field_maps`
 //! and applies it in place at the chunk boundary (the fit counters restart; no frame state).
 
 use std::sync::Arc;
 
+use hk_model::CrcStatus;
 use hk_recipe::fields::eval::Evaluator;
 use hk_recipe::{BlockDescriptor, Params, PortType};
 use hk_stream::inspector::FitStatus;
@@ -45,21 +49,31 @@ impl BlockFactory for FieldsFactory {
     }
 
     fn build(&self, params: &Params, ctx: &BuildCtx<'_>) -> Result<Box<dyn Block>, BlockError> {
-        let (map_id, evaluator) = compile(params, ctx)?;
+        let (map_id, evaluator, skip_invalid) = compile(params, ctx)?;
         Ok(Box::new(Fields {
             map_id,
             evaluator,
+            skip_invalid,
+            invalid: 0,
             counts: [0; 3],
             status: Status::default(),
         }))
     }
 }
 
-/// Resolves and compiles the `map` parameter's field map.
-fn compile(params: &Params, ctx: &BuildCtx<'_>) -> Result<(String, Evaluator), BlockError> {
-    if let Some(k) = params.keys().find(|k| k.as_str() != "map") {
+/// Resolves and compiles the `map` parameter's field map; reads `skip_invalid`.
+fn compile(params: &Params, ctx: &BuildCtx<'_>) -> Result<(String, Evaluator, bool), BlockError> {
+    if let Some(k) = params
+        .keys()
+        .find(|k| !matches!(k.as_str(), "map" | "skip_invalid"))
+    {
         return Err(BlockError::Params(format!("fields has no parameter {k}")));
     }
+    let skip_invalid = match params.get("skip_invalid") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(BlockError::Params("skip_invalid must be a boolean".into())),
+    };
     let id = params
         .get("map")
         .and_then(Value::as_str)
@@ -74,13 +88,16 @@ fn compile(params: &Params, ctx: &BuildCtx<'_>) -> Result<(String, Evaluator), B
             errors.len()
         ))
     })?;
-    Ok((id.to_owned(), evaluator))
+    Ok((id.to_owned(), evaluator, skip_invalid))
 }
 
 /// The block.
 pub struct Fields {
     map_id: String,
     evaluator: Evaluator,
+    skip_invalid: bool,
+    /// Frames passed through unparsed because their check is invalid.
+    invalid: u64,
     /// Frames ok, partial, failed since the map was (re)compiled.
     counts: [u64; 3],
     status: Status,
@@ -106,6 +123,9 @@ impl Fields {
         self.status.extra.set("frames_ok", ok as f64);
         self.status.extra.set("frames_partial", partial as f64);
         self.status.extra.set("frames_failed", failed as f64);
+        if self.skip_invalid {
+            self.status.extra.set("frames_invalid", self.invalid as f64);
+        }
     }
 }
 
@@ -147,6 +167,13 @@ impl Block for Fields {
             });
         };
         for f in frames.iter() {
+            if self.skip_invalid && f.info.check == CrcStatus::Invalid {
+                self.invalid += 1;
+                let mut info = f.info.clone();
+                info.layers = None;
+                buf.push(f.bytes, info);
+                continue;
+            }
             let tree = self.evaluator.eval(f.bytes, f.info.bit_len);
             match tree.fit {
                 FitStatus::Ok | FitStatus::None => self.counts[0] += 1,
@@ -171,10 +198,12 @@ impl Block for Fields {
         params: &Params,
         ctx: &BuildCtx<'_>,
     ) -> Result<ParamUpdate, BlockError> {
-        let (map_id, evaluator) = compile(params, ctx)?;
+        let (map_id, evaluator, skip_invalid) = compile(params, ctx)?;
         self.map_id = map_id;
         self.evaluator = evaluator;
+        self.skip_invalid = skip_invalid;
         self.counts = [0; 3];
+        self.invalid = 0;
         self.refresh_status();
         Ok(ParamUpdate::Applied)
     }
@@ -229,6 +258,68 @@ mod tests {
         }];
         block.process(&mut Io::new(&inputs, &mut outputs)).unwrap();
         outputs.pop().unwrap()
+    }
+
+    #[test]
+    fn skip_invalid_passes_crc_invalid_frames_through_without_fields() {
+        let m = maps(4);
+        let ctx = BuildCtx {
+            field_maps: &m,
+            input_types: &[PortType::Frames],
+        };
+        let reg = crate::Registry::builtin();
+        let mut p = params();
+        p.insert("skip_invalid".into(), json!(true));
+        let mut b = reg.build("fields", &p, &ctx).unwrap();
+        b.init(&[frames_port()]).unwrap();
+        let mut frames = FrameBuf::with_capacity(3, 8);
+        for (i, check) in [CrcStatus::Valid, CrcStatus::Invalid, CrcStatus::Unknown]
+            .into_iter()
+            .enumerate()
+        {
+            let mut info = FrameInfo::new(i as u64, 100 * i as u64, 0);
+            info.check = check;
+            frames.push_bits(&[1, 0, 1, 1, 0, 0, 0, 0], info);
+        }
+        let out = run(b.as_mut(), &frames);
+        let PortSlice::Frames(got) = out.data.as_slice() else {
+            panic!()
+        };
+        assert_eq!(got.len(), 3, "every frame passes through");
+        assert!(got.get(0).unwrap().info.layers.is_some());
+        let bad = got.get(1).unwrap();
+        assert_eq!(bad.info.check, CrcStatus::Invalid);
+        assert!(bad.info.layers.is_none(), "no fields from an invalid frame");
+        assert_eq!(bad.bytes, frames.get(1).unwrap().bytes);
+        // Unchecked frames (no check block) are still parsed.
+        assert!(got.get(2).unwrap().info.layers.is_some());
+        let s = b.status();
+        assert_eq!(s.quality, Some(1.0));
+        assert_eq!(
+            s.extra
+                .iter()
+                .find(|e| e.0 == "frames_invalid")
+                .map(|e| e.1),
+            Some(1.0)
+        );
+        // Default: invalid frames are parsed (Mode S overlays the address on its parity).
+        let mut b = reg.build("fields", &params(), &ctx).unwrap();
+        b.init(&[frames_port()]).unwrap();
+        let out = run(b.as_mut(), &frames);
+        let PortSlice::Frames(got) = out.data.as_slice() else {
+            panic!()
+        };
+        assert!(got.get(1).unwrap().info.layers.is_some());
+        // Hot: turning it on applies in place.
+        assert_eq!(b.update_params(&p, &ctx).unwrap(), ParamUpdate::Applied);
+        let out = run(b.as_mut(), &frames);
+        let PortSlice::Frames(got) = out.data.as_slice() else {
+            panic!()
+        };
+        assert!(got.get(1).unwrap().info.layers.is_none());
+        let mut wrong = params();
+        wrong.insert("skip_invalid".into(), json!("yes"));
+        assert!(reg.build("fields", &wrong, &ctx).is_err());
     }
 
     #[test]

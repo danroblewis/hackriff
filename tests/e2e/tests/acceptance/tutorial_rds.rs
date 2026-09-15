@@ -601,6 +601,86 @@ fn signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_
     s.finish();
 }
 
+// --- Real air (T-185): CRC-valid rate, PI and complete PS, no fields from invalid groups -------
+
+/// T-185 real-air RDS acceptance on the HackRF capture through the mock SDR, blind: the station
+/// is found from the inventory, the built-in recipe attaches to it, and three passes of the
+/// looping recording are read over TCP. A-priori bounds (set before measuring): CRC-valid group
+/// rate ≥ 0.7 over every group frame (seams included), PI equal to the truth's, at least one
+/// complete (8-character) PS name from the `ps` text node and every one in the truth's set, and
+/// no CRC-invalid group carrying field values (`fields.skip_invalid`).
+#[test]
+fn signal_062_rds_real_air_acceptance_crc_valid_pi_and_complete_ps() {
+    let tag = "SIGNAL-062/T-185 rds real air";
+    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
+        return;
+    };
+    let truth = station(&fx);
+    let n = fx.n_samples().unwrap();
+    let s = serve(&meta, "t185-rds");
+    let (emitter, f_center, _) = found_blind(s.addr(), &truth, 0.0);
+    let (id, _) = start_rds(&s, &emitter);
+    let groups = tail(s.tcp, &format!("inspector/{id}/groups"));
+    let ps = tail(s.tcp, &format!("open/stage?pipeline={id}&node=ps"));
+    let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
+    s.wait_samples(&id, start + 3 * n);
+    let status = s.pipeline(&id)["status"].clone();
+    let group_frames = frames(&groups.finish());
+    let names = strings(&frames(&ps.finish()), "ps");
+
+    let ok = group_frames.iter().filter(|f| f.valid).count();
+    let total = group_frames.len();
+    let crc_rate = ok as f64 / total.max(1) as f64;
+    let invalid_with_fields = group_frames
+        .iter()
+        .filter(|f| !f.valid && !f.values.is_empty())
+        .count();
+    let pis: Vec<u64> = group_frames
+        .iter()
+        .filter(|f| f.valid)
+        .filter_map(|f| f.values.get("pi").and_then(Value::as_u64))
+        .collect();
+    let (pi, pi_share) = majority(pis.iter().copied()).expect("CRC-valid groups with PI");
+    let known_ps: Vec<String> = truth
+        .get("/rds/ps_frames")
+        .and_then(Value::as_object)
+        .expect("truth PS frames")
+        .keys()
+        .cloned()
+        .collect();
+    eprintln!(
+        "[{tag}] RESULT emitter {:.4} MHz; CRC-valid groups {ok}/{total} = {crc_rate:.3}; PI \
+         {pi:04X} (share {pi_share:.3}); PS {names:?}; invalid groups with fields \
+         {invalid_with_fields}; sync acquisitions {}, blocks ok/bad {}/{}",
+        f_center / 1e6,
+        status["sync.acquisitions"],
+        status["sync.blocks_ok"],
+        status["sync.blocks_bad"],
+    );
+    assert!(
+        total >= 80,
+        "[{tag}] {total} group frames over three passes"
+    );
+    assert!(crc_rate >= 0.7, "[{tag}] CRC-valid rate {crc_rate:.3}");
+    let truth_pi = u64::from_str_radix(truth.str("/rds/pi_hex").expect("truth PI"), 16).unwrap();
+    assert_eq!(pi, truth_pi, "[{tag}] PI");
+    assert_eq!(pi_share, 1.0, "[{tag}] every CRC-valid group names the PI");
+    assert!(!names.is_empty(), "[{tag}] no complete PS name");
+    assert!(
+        names
+            .iter()
+            .all(|n| n.chars().count() == 8 && known_ps.contains(n)),
+        "[{tag}] PS {names:?} not all complete names in {known_ps:?}"
+    );
+    assert_eq!(
+        invalid_with_fields, 0,
+        "[{tag}] CRC-invalid groups surfaced field values"
+    );
+    let (code, stopped) = s.call("DELETE", &format!("/api/pipelines/{id}"), None);
+    assert_eq!(code, 200, "[{tag}] {stopped}");
+    s.finish();
+}
+
 // --- Synthetic: exact PI, PTY, PS and RadioText ------------------------------------------------
 
 #[test]

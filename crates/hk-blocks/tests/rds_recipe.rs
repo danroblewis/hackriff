@@ -107,7 +107,7 @@ fn rds_hot_edits_keep_or_reset_state_per_the_block_schemas() {
     // Sync lock depth is cold: sync is rebuilt; crc, group, ps and rt reset; demod state stays.
     let mut cold = old.clone();
     let sync = cold.nodes.iter_mut().find(|n| n.id == "sync").unwrap();
-    sync.params.insert("lock_blocks".into(), json!(3));
+    sync.params.insert("lock_blocks".into(), json!(4));
     let plan = EditPlan::between(&old, &cold, hot);
     assert!(matches!(
         plan.nodes["sync"],
