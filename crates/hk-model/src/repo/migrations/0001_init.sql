@@ -253,6 +253,23 @@ CREATE TABLE emitter_merge (
 );
 CREATE INDEX idx_emitter_merge_into ON emitter_merge (into_emitter);
 
+-- T-070: append-only output-driven refinements of an emitter's tuning (centre, bandwidth, mode
+-- parameters; provenance 'refined by output analysis'). The emitter's detected values stay in
+-- the emitter row; the latest refinement is current. Repeated in repo/refined.rs for databases
+-- created before it.
+CREATE TABLE emitter_refined_tuning (
+    refined_id  INTEGER PRIMARY KEY,
+    emitter_id  BLOB    NOT NULL REFERENCES emitter (emitter_id),
+    t           INTEGER NOT NULL,
+    f_center    REAL    NOT NULL CHECK (f_center > 0),
+    bandwidth   REAL    NOT NULL CHECK (bandwidth > 0),
+    body        TEXT    NOT NULL
+);
+CREATE INDEX idx_emitter_refined_tuning_emitter
+    ON emitter_refined_tuning (emitter_id, t, refined_id);
+CREATE TRIGGER emitter_refined_tuning_append_only BEFORE UPDATE ON emitter_refined_tuning
+    BEGIN SELECT RAISE(ABORT, 'refined tunings are append-only'); END;
+
 -- T-036: append-only audit of user reclassifications that open a decoded identity (legal
 -- guardrail). Only an explicit own-traffic authorisation may open an identity, only to
 -- own-key-decrypted or unrestricted, and never from restricted-cellular / restricted-paging.

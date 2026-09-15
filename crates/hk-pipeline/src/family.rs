@@ -45,6 +45,10 @@
 //! - **Allocation-only candidates.** Every service the band plan expects at the emitter's extent
 //!   is a candidate, with no signal evidence and a base score of [`ALLOCATION_ONLY_SCORE`]. These
 //!   are suggestions ("what is supposed to be here") and never set a status.
+//! - **Centre.** Allocation and raster checks use the emitter's centre and bandwidth **refined by
+//!   output analysis** when a chain stored one (T-070, [`crate::refine`]; raster evidence then
+//!   says `center_source: refined`), else the detected ones. Nothing is snapped to a raster: an
+//!   off-raster refined centre is flagged `off-raster`.
 //! - **Score.**
 //!   `score = base × allocation fit × raster fit`. The base is the evidence confidence, or
 //!   [`ALLOCATION_ONLY_SCORE`]. Allocation fit is 1 for `known`, 0.8 with no allocation data and
@@ -549,7 +553,20 @@ pub enum ExplanationEvidence {
         on_raster: bool,
         /// Raster source.
         source: String,
+        /// Which emitter centre was checked: [`CENTER_REFINED`] (output analysis, T-070) or
+        /// [`CENTER_DETECTED`].
+        #[serde(default = "detected_center")]
+        center_source: String,
     },
+}
+
+/// `Raster.center_source` of the emitter's detected centre.
+pub const CENTER_DETECTED: &str = "detected";
+/// `Raster.center_source` of a centre refined by output analysis (T-070).
+pub const CENTER_REFINED: &str = "refined";
+
+fn detected_center() -> String {
+    CENTER_DETECTED.to_owned()
 }
 
 /// One ranked explanation of an emitter.
@@ -611,6 +628,7 @@ pub fn raster_fit(
         tolerance_hz: r.tolerance_hz,
         on_raster: offset.abs() <= r.tolerance_hz,
         source: r.source.into(),
+        center_source: detected_center(),
     })
 }
 
@@ -949,7 +967,22 @@ pub fn explain_emitter(
         }
     }
     let evidence: Vec<FamilyEvidence> = best.into_values().collect();
-    let all = rank_all(table, &evidence, e.f_center_hz, e.bandwidth_hz);
+    // T-070: a centre refined by output analysis is where the emission is; the detected values
+    // stay on the emitter.
+    let refined = repo.refined_tuning(id)?;
+    let (f_center, bandwidth) = refined
+        .as_ref()
+        .map_or((e.f_center_hz, e.bandwidth_hz), |r| {
+            (r.center_hz, r.bandwidth_hz)
+        });
+    let mut all = rank_all(table, &evidence, f_center, bandwidth);
+    if refined.is_some() {
+        for ev in all.iter_mut().flat_map(|x| x.evidence.iter_mut()) {
+            if let ExplanationEvidence::Raster { center_source, .. } = ev {
+                *center_source = CENTER_REFINED.to_owned();
+            }
+        }
+    }
     let verdict = status_from(&all);
     let cur = repo.known_status_history(id)?.pop();
     let mut ranked = all;

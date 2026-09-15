@@ -104,6 +104,7 @@ pub use recording::{
 pub use region::{FreqRange, Region, TimeRange};
 pub use repo::{
     BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterUpsert,
-    ProvenanceChain, RepoBatch, RepoError, Repository, TrustTest, TrustVerdict,
+    ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning, RepoBatch,
+    RepoError, Repository, TrustTest, TrustVerdict,
 };
 pub use time::{SampleTime, Timestamp, TimestampMethod};

@@ -69,6 +69,7 @@ mod gating_tests;
 mod interpret;
 mod inventory;
 mod measure;
+mod refined;
 #[cfg(test)]
 mod tests;
 mod verification;
@@ -92,6 +93,7 @@ use crate::time::Timestamp;
 
 pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind};
 pub use inventory::EmitterUpsert;
+pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
 pub use verification::{TrustTest, TrustVerdict};
 
 /// Embedded migrations, applied in order.

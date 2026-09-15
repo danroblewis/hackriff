@@ -459,9 +459,20 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
         // T-039 ranked explanations: metadata only (service labels, scores, band-plan and raster
         // evidence, flags; no identity or content), so withheld rows show them too.
         let explanations = explanations_json(repo, e.id).map_err(failed)?;
+        // T-070: the latest output-driven refinement (centre, bandwidth, mode parameters,
+        // objective value, search statistics; metadata only), or null. Detected values stay in
+        // `f_center_hz` / `bandwidth_hz`.
+        let refined = repo.refined_tuning(e.id).map_err(failed)?.map(|r| {
+            let mut v = serde_json::to_value(&r).unwrap_or(Value::Null);
+            if let Some(o) = v.as_object_mut() {
+                o.insert("t_s".into(), json!(ts_s(r.t)));
+            }
+            v
+        });
         let freq = e.freq();
         let mut row = json!({
             "explanations": explanations,
+            "refined": refined,
             "id": e.id.to_string(),
             "f_center_hz": e.f_center_hz,
             "bandwidth_hz": e.bandwidth_hz,
