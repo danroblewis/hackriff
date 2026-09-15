@@ -11,6 +11,7 @@
   --teal: #52C2AE; --teal-soft: rgba(82,194,174,0.13);
   --lav: #A395E0; --lav-soft: rgba(163,149,224,0.14);
   --coral: #E47B68; --coral-soft: rgba(228,123,104,0.14);
+  --yellow: #E8D24B; --yellow-soft: rgba(232,210,75,0.16);
   --cream: #F3E3BF; --shadow: rgba(0,0,0,0.4);
   --ui: "Chivo", "Helvetica Neue", system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
   --mono: "Chivo Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -24,6 +25,7 @@
     --teal: #1E8C79; --teal-soft: rgba(30,140,121,0.12);
     --lav: #6A58C0; --lav-soft: rgba(106,88,192,0.12);
     --coral: #C2513C; --coral-soft: rgba(194,81,60,0.12);
+    --yellow: #8A6D00; --yellow-soft: rgba(138,109,0,0.14);
     --cream: #7A5B1E; --shadow: rgba(0,0,0,0.15);
     color-scheme: light;
   }
@@ -35,6 +37,7 @@
   --teal: #1E8C79; --teal-soft: rgba(30,140,121,0.12);
   --lav: #6A58C0; --lav-soft: rgba(106,88,192,0.12);
   --coral: #C2513C; --coral-soft: rgba(194,81,60,0.12);
+  --yellow: #8A6D00; --yellow-soft: rgba(138,109,0,0.14);
   --cream: #7A5B1E; --shadow: rgba(0,0,0,0.15);
   color-scheme: light;
 }

@@ -7,6 +7,10 @@ export type EntryState = "candidate" | "confirmed" | "deleted";
  * with no client-side interpretation. */
 export interface Recurrence { occurrences: number; appearances: number; span_s: number; on_air_s: number; duty_cycle: number }
 
+/** A user's band-edge override (docs/api.md `user_band`, T-191/T-193): edges in Hz, stored beside
+ * the measured `f_lo_hz`/`f_hi_hz`, which it never overwrites. `null` on the row when unset. */
+export interface UserBand { f_lo: number; f_hi: number; set_at: number; actor: string; reason: string | null; reason_withheld: boolean }
+
 export interface Row {
   id: string; state: EntryState;
   f_center_hz: number; bandwidth_hz: number; f_lo_hz: number; f_hi_hz: number;
@@ -16,6 +20,9 @@ export interface Row {
   tags: string[]; tags_withheld?: boolean; family: string | null;
   identity_scheme: string | null; identity_value?: string; identity_class: string | null; withheld: boolean;
   recurrence: Recurrence | null;
+  /** Optional so existing fixtures/tests that predate T-193 still typecheck; a server that serves
+   * the field always sends `null` when unset, never omits it. */
+  user_band?: UserBand | null;
 }
 interface Page { entries: Row[]; next_cursor: string | null }
 type Key = "status" | "freq" | "bw" | "family" | "identity" | "count" | "recurrence" | "tags";

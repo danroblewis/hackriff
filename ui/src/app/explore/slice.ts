@@ -51,6 +51,14 @@ export const setInventoryRows = (rows: Readonly<Record<string, InventoryRow>>, l
 
 export const setInventoryError = (error: string) => (s: AppState): Partial<AppState> => ({ inventory: { ...s.inventory, error } });
 
+/** Patches one already-loaded row in place (T-193: an optimistic user-band commit/reset lands
+ * without waiting for the next poll), leaving every other row untouched; a no-op if the row isn't
+ * loaded (e.g. it scrolled out of the view span in the meantime). */
+export const patchInventoryRow = (id: string, patch: Partial<InventoryRow>) => (s: AppState): Partial<AppState> => {
+  const row = s.inventory.rows[id];
+  return row ? { inventory: { ...s.inventory, rows: { ...s.inventory.rows, [id]: { ...row, ...patch } } } } : {};
+};
+
 /** Mirrors `SelectionStore`'s list into the store (§3.2); `sync` is a short status string
  * (`selections.ts` `syncText`). */
 export const setSelections = (list: readonly Selection[], sync: string): Partial<AppState> => ({ selections: { list, sync } });

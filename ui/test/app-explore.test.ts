@@ -2,15 +2,19 @@
 // Listen-to-all, focus-panel actions against a fake client, and the slice's pure actions. No DOM
 // under node:test: the "actions reachable without horizontal scroll" rule (T-148) is checked by
 // reading explore.css as text, the technique ui/test/app-shell.test.ts uses.
+// T-193 (docs/14-ui-rewrite.md "Added scope from docs/15 §7"): the user-band commit/reset actions
+// (`PUT`/`DELETE /api/inventory/{id}/band`) and the optimistic single-row store patch.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip, selectionSummary } from "../src/app/explore/focus";
 import {
-  nextInventorySort, recurrenceDots, rowChips, rowSeenText, sortInventoryRows, type Row,
+  clearUserBand, nextInventorySort, recurrenceDots, rowChips, rowSeenText, setUserBand, sortInventoryRows, type Row,
 } from "../src/app/explore/inventory";
 import { foundInside, listenAllTargets, recordSelectionClip, type Selection } from "../src/app/explore/selections";
-import { focusSelection, setInventoryError, setInventoryRows, setInventorySort, setInventoryTab, setSelections } from "../src/app/explore/slice";
+import {
+  focusSelection, patchInventoryRow, setInventoryError, setInventoryRows, setInventorySort, setInventoryTab, setSelections,
+} from "../src/app/explore/slice";
 import { createStore } from "../src/app/store";
 import { initialState } from "../src/app/state";
 
@@ -166,6 +170,56 @@ test("emitterStreamAddress: the tcp address plus the listen opener's target, no 
 test("emitterStreamAddress: null when the server offers no tcp server or listen opener", async () => {
   const client = fakeClient({ get: () => ({ tcp: null, on_demand: [] }) });
   assert.equal(await emitterStreamAddress(client, "e1"), null);
+});
+
+// ---- user band (T-191 route, T-193 draggable box edges) ----
+
+function fakeBandClient(handlers: { put?: (path: string, body?: unknown) => unknown; del?: (path: string) => unknown }) {
+  return {
+    put: async <T>(path: string, body?: unknown): Promise<T> => { if (!handlers.put) throw new Error(`unexpected PUT ${path}`); return handlers.put(path, body) as T; },
+    del: async <T>(path: string): Promise<T> => { if (!handlers.del) throw new Error(`unexpected DELETE ${path}`); return handlers.del(path) as T; },
+  };
+}
+
+test("setUserBand: PUTs the edges (id encoded), reports the server's updated entry", async () => {
+  let seen: { path: string; body: unknown } | null = null;
+  const entry = makeRow({ user_band: { f_lo: 1, f_hi: 2, set_at: 1, actor: "fp", reason: null, reason_withheld: false } });
+  const client = fakeBandClient({ put: (path, body) => { seen = { path, body }; return { user_band: entry.user_band, entry }; } });
+  const res = await setUserBand(client, "e/1", 1, 2);
+  assert.deepEqual(res, { ok: true, entry });
+  assert.equal(seen!.path, "/api/inventory/e%2F1/band");
+  assert.deepEqual(seen!.body, { f_lo: 1, f_hi: 2 });
+});
+
+test("setUserBand: a refused band (e.g. too far from the measured extent) reports the server's own reason, not a thrown exception", async () => {
+  const client = fakeBandClient({ put: () => { throw { code: "invalid", message: "band does not overlap the measured extent" }; } });
+  const res = await setUserBand(client, "e1", 1, 2);
+  assert.deepEqual(res, { ok: false, message: "band does not overlap the measured extent (invalid)" });
+});
+
+test("clearUserBand: DELETEs the override, reports the server's entry (measured band restored)", async () => {
+  const entry = makeRow({ user_band: null });
+  const client = fakeBandClient({ del: () => ({ cleared: true, entry }) });
+  const res = await clearUserBand(client, "e1");
+  assert.deepEqual(res, { ok: true, entry });
+});
+
+test("clearUserBand: a failure reports the server's reason", async () => {
+  const client = fakeBandClient({ del: () => { throw { code: "not_found", message: "unknown id" }; } });
+  const res = await clearUserBand(client, "gone");
+  assert.deepEqual(res, { ok: false, message: "unknown id (not_found)" });
+});
+
+test("patchInventoryRow: merges a patch into one already-loaded row, leaving the rest untouched; a no-op for an unloaded id", () => {
+  const s = createStore(initialState());
+  const ub = { f_lo: 1, f_hi: 2, set_at: 1, actor: "fp", reason: null, reason_withheld: false };
+  s.set(setInventoryRows({ e1: makeRow({ id: "e1" }), e2: makeRow({ id: "e2" }) }, 1));
+  s.set(patchInventoryRow("e1", { user_band: ub }));
+  assert.deepEqual(s.get().inventory.rows.e1.user_band, ub);
+  assert.equal(s.get().inventory.rows.e2.user_band, undefined, "other rows untouched");
+  const before = s.get().inventory.rows;
+  s.set(patchInventoryRow("missing", { user_band: ub }));
+  assert.equal(s.get().inventory.rows, before, "an unloaded row's patch is a no-op");
 });
 
 // ---- slice actions ----

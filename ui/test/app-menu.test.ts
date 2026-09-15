@@ -173,11 +173,42 @@ test("signalMenuItems: Promote appears only for candidates; Delete's wording fol
   assert.equal(candidate.find((i) => i.id === "delete")!.label, "Delete");
 });
 
-test("signalMenuItems: Adjust band focuses the signal and leaves a hint toast (T-193 not landed yet)", () => {
+test("signalMenuItems: Adjust band focuses the signal and hints at dragging the box edges (T-193)", () => {
   const ctx = fakeCtx();
-  signalMenuItems(ctx, makeRow({ id: "e9" })).find((i) => i.id === "adjust-band")!.onSelect();
+  const confirmed = signalMenuItems(ctx, makeRow({ id: "e9", state: "confirmed" })).find((i) => i.id === "adjust-band")!;
+  assert.equal(confirmed.hint, "drag the yellow box's edges");
+  confirmed.onSelect();
   assert.deepEqual(ctx.store.get().focus, { kind: "signal", id: "e9" });
-  assert.match(ctx.store.get().toast.text, /^Adjust band:/);
+  assert.match(ctx.store.get().toast.text, /^Adjust band: focused/);
+
+  const candidate = signalMenuItems(fakeCtx(), makeRow({ id: "e9", state: "candidate" })).find((i) => i.id === "adjust-band")!;
+  assert.equal(candidate.hint, "promote it first");
+  const ctx2 = fakeCtx();
+  signalMenuItems(ctx2, makeRow({ id: "e9", state: "candidate" })).find((i) => i.id === "adjust-band")!.onSelect();
+  assert.match(ctx2.store.get().toast.text, /^Adjust band: promote/);
+});
+
+test("signalMenuItems: Reset band appears only when a user band is set, and DELETEs it via the band route", async () => {
+  const noOverride = signalMenuItems(fakeCtx(), makeRow({ id: "e1" }));
+  assert.ok(!noOverride.some((i) => i.id === "reset-band"));
+
+  const ub = { f_lo: 1, f_hi: 2, set_at: 1, actor: "fp", reason: null, reason_withheld: false };
+  const calls: string[] = [];
+  const ctx = fakeCtx({ del: (path) => { calls.push(`DELETE ${path}`); return { cleared: true, entry: makeRow({ id: "e1", user_band: null }) }; } });
+  const reset = signalMenuItems(ctx, makeRow({ id: "e1", user_band: ub })).find((i) => i.id === "reset-band")!;
+  assert.equal(reset.label, "Reset band");
+  reset.onSelect();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls, ["DELETE /api/inventory/e1/band"]);
+  assert.equal(ctx.store.get().toast.text, "Band reset to the measured extent");
+});
+
+test("signalMenuItems: Reset band reports the server's refusal, without a thrown exception", async () => {
+  const ub = { f_lo: 1, f_hi: 2, set_at: 1, actor: "fp", reason: null, reason_withheld: false };
+  const ctx = fakeCtx({ del: () => { throw new ControlError(404, "not_found", "unknown id"); } });
+  signalMenuItems(ctx, makeRow({ id: "e1", user_band: ub })).find((i) => i.id === "reset-band")!.onSelect();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(ctx.store.get().toast.text, "Reset band: unknown id (not_found)");
 });
 
 test("signalMenuItems: Delete DELETEs the entry, then reloads both inventory tabs", async () => {
