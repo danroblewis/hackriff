@@ -2045,3 +2045,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Goal:** the mock SDR models a gain-dependent receiver noise floor before int8 quantisation when rendering below the recording gain, so low-gain windows are no longer 85% zero codes.
   - **Must hold:** fidelity tests, the `scheduler_history` 0.5 dB check and the band-edge test stay unchanged.
   - **t057:** if its quantisation-limited skip goes unused, remove it or keep it as a no-op.
+- **B0.445 Full check green after the T-179 merge (f7f5212).** Lint clean; 1363/1363 in 134.8 s; acceptance 28/28 in 11.4 s.
+  - **Launched:** T-167 (Sonnet, MUI API gap 10). The spectrum stream header gets `dc_notch_hz`, taken from the detector's DC rule rather than hardcoded. The UI uses it when present.
+  - **Conflict risk:** T-167 and T-178 both edit `docs/api.md` and `api_contract.rs`.
