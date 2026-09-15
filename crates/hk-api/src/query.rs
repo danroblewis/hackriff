@@ -163,7 +163,7 @@ fn choose_level(
     }
 }
 
-fn ts_s(t: Timestamp) -> f64 {
+pub(crate) fn ts_s(t: Timestamp) -> f64 {
     t.as_unix_nanos() as f64 / 1e9
 }
 

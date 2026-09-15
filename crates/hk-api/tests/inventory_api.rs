@@ -240,8 +240,9 @@ fn aware_042_inventory_filters_by_region_time_status_and_tag() {
     }
 }
 
-/// Code-review guard: hk-api reads the inventory only through the gated `query_inventory`. The raw
-/// emitter getters return identities ungated and must never be called from this crate.
+/// Code-review guard: hk-api reads the inventory only through the gated `query_inventory` (or,
+/// since T-159, `decodes_for_identity` in `src/decode.rs` alone — see the exception below). The
+/// other raw emitter getters return identities ungated and must never be called from this crate.
 #[test]
 fn hk_api_never_calls_the_ungated_emitter_getters() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -265,7 +266,16 @@ fn hk_api_never_calls_the_ungated_emitter_getters() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "rs") {
             let text = std::fs::read_to_string(&path).unwrap();
+            // T-159 (ADR-0013 API GAP 3): `decode.rs` alone may call the gated
+            // `decodes_for_identity` — it only reaches it after `emitter_with_access` (Standard
+            // access) already resolved the identity to `InventoryIdentity::Clear`, so a withheld
+            // or absent identity never gets there, and the callee re-checks and gates every row's
+            // own class regardless. Every other forbidden call, and every other file, is unchanged.
+            let is_decode_rs = path.file_name().is_some_and(|n| n == "decode.rs");
             for f in forbidden {
+                if is_decode_rs && f == "decodes_for_identity" {
+                    continue;
+                }
                 assert!(!text.contains(f), "{} calls {f}", path.display());
             }
             scanned += 1;

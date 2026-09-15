@@ -12,6 +12,7 @@
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | GET | token | T-021 floor vs time ([`crate::query`]) |
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&state][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]); `state` = T-078 lifecycle |
 //! | `/api/inventory/<id>[/promote\|/band]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-078 one entry, promote a candidate, delete; T-191 set/clear the user band ([`crate::inventory`]) |
+//! | `/api/inventory/<id>/decode` | GET | token | T-159 the emitter's latest decode fields, one row per decoder/frame-model ([`crate::decode`]) |
 //! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
 //! | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | GET | token | T-115 observation log records in a box ([`crate::observations`]) |
 //! | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | GET | token | T-115 observation totals, per-channel totals, gaps and POI ([`crate::observations`]) |
@@ -93,6 +94,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/api/inventory/{id}"),
     ("PUT", "/api/inventory/{id}/band"),
     ("DELETE", "/api/inventory/{id}/band"),
+    // T-159 latest decode fields
+    ("GET", "/api/inventory/{id}/decode"),
     ("GET", "/api/analysis/strongest"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
@@ -745,6 +748,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     };
     if let Some(r) = control::route(state, &ctl)
         .or_else(|| crate::selections::route(state, &ctl))
+        .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::inventory::route(state, &ctl))
         .or_else(|| crate::outputs::route(state, &ctl))
         .or_else(|| crate::analyze::route(state, &ctl)) // T-190
