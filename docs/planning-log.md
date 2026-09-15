@@ -947,3 +947,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Follow-ups:** folded into **T-127** along with the ADR amendment. Full check running.
 - **B0.298 Full check of main 5729e19 (T-120): green.** Lint clean; nextest + UI 1208/1208 in 261 s; acceptance 30/30 (2 ignored HIL) in 59 s. M2 on main: T-113, T-114, T-116, T-117, T-120, T-125, T-126. In flight: T-115 fix round, T-118, T-119. Next: T-127 after T-115; T-121 after T-118; T-122 after T-119.
 - **B0.299 T-121 (survey reports) launched early** against the ADR-0012 report and occupancy types. Occupancy stats and observation coverage come through provider traits until T-118/T-115 merge; change-vs-baseline is flagged unavailable until T-119. File ownership is `hk-context/src/report/**`, disjoint from the running agents. Running: T-115 fix, T-118, T-119, T-121.
+- **B0.300 T-115 merged** (fix round 029024e). Changes:
+  - `ObservationRecorder::begin` closes an open sweep before long non-sweep steps (2 h intent test).
+  - **Interactive `hk serve` without a schedule now logs** `interactive`-tier dwells: polled off the capture thread, split every 60 s, zero activity-independent visits; e2e and contract tests added.
+  - ADR §1.4 usable-span note.
+  - Per-hour torn-tail repair.
+  - Geometries written before their first referencing sweep in each segment.
+
+  Tests: hk-core 6, hk-store 7, pipeline 4, api_contract 17, lint clean. **T-127 launched** (bandit wiring, routes, POI from the log, plus T-120 review follow-ups). T-118 and T-121 can now replace their observation stand-in providers with the T-115 store adapter. Full check running.

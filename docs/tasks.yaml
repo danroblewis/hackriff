@@ -1846,8 +1846,8 @@ tasks:
   - id: T-115
     milestone: M2
     title: "Observation/revisit log: record where and when the radio actually observed (C04->C12 input)"
-    status: review
-    commit: d54e8a6
+    status: done
+    commit: 029024e
     deps: [T-113]
     parallel_group: M2O
     use_cases: [AWARE-042, AWARE-027]
@@ -2007,7 +2007,7 @@ tasks:
   - id: T-127
     milestone: M2
     title: "Bandit pipeline wiring + scheduler routes + POI from the observation log"
-    status: todo
+    status: in-progress
     deps: [T-115, T-120]
     parallel_group: M2Q
     use_cases: [AWARE-027, SIGNAL-027]
