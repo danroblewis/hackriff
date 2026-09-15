@@ -30,12 +30,26 @@ pub enum ThresholdMethod {
         /// Threshold level, dB.
         level_db: f64,
     },
-    /// Dynamic: noise measured from idle samples ("80 % method": the floor is estimated from the
-    /// lowest `idle_fraction` of samples), then `guard_db` above it.
+    /// Dynamic: noise measured from idle samples ("80 % method", SM.1753/SM.2256: the highest
+    /// `idle_fraction` of samples is discarded and the rest linearly averaged), then `guard_db`
+    /// above it.
     Dynamic {
-        /// Fraction of samples treated as idle, (0, 1); 0.8 by default.
+        /// Share of the highest samples **discarded** as possibly occupied, (0, 1); 0.8 by
+        /// default (the lowest 20 % make the floor).
         idle_fraction: f64,
     },
+}
+
+/// Where the floor under an occupancy threshold came from (T-118).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FloorSource {
+    /// The history's bias-corrected cell floor (T-116), local to the subject's frequency.
+    History,
+    /// The SM.1753/SM.2256 80 % method over level samples, local to the subject's frequency.
+    EightyPercent,
+    /// No floor measured: a pre-set threshold assumed a guard above noise.
+    Assumed,
 }
 
 /// Threshold configuration of an occupancy computation.
@@ -380,6 +394,31 @@ pub struct OccupancyStat {
     pub confidence: Option<ConfidenceInterval>,
     /// Too few activity-independent revisits: `fco` fell back to `fco_all_visits`.
     pub revisit_biased: bool,
+    /// The window `fco`, its counts and `confidence` were computed over (§2.5 "widen, never
+    /// substitute"; additive, T-118). Equals `interval` unless that held fewer than 30
+    /// activity-independent visits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fco_window: Option<TimeRange>,
+    /// Representative noise floor under the threshold (median over the window's visits), in
+    /// `unit` (additive, T-118).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_db: Option<f64>,
+    /// Where `floor_db` came from (most common over the window's visits).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_source: Option<FloorSource>,
+    /// The local floor may be signal rather than noise (dense band: most of the neighbourhood is
+    /// occupied), so `fco` may be underestimated there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_suspect: Option<bool>,
+    /// Median visit level (highest cell) of the `fco` visits that were occupied, in `unit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level_occupied_p50_db: Option<f64>,
+    /// 90th percentile of the same levels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level_occupied_p90_db: Option<f64>,
+    /// Median visit level of the `fco` visits that were idle, in `unit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level_idle_db: Option<f64>,
 }
 
 impl OccupancyStat {
@@ -570,10 +609,29 @@ mod tests {
             calibration: None,
             confidence: Some(ci),
             revisit_biased: false,
+            fco_window: None,
+            floor_db: None,
+            floor_source: None,
+            floor_suspect: None,
+            level_occupied_p50_db: None,
+            level_occupied_p90_db: None,
+            level_idle_db: None,
         };
         s.validate().unwrap();
         let json = serde_json::to_string(&s).unwrap();
+        // Rows written before the level fields existed still read.
+        assert!(!json.contains("floor_db") && !json.contains("level_idle_db"));
         assert_eq!(serde_json::from_str::<OccupancyStat>(&json).unwrap(), s);
+        let mut lv = s.clone();
+        lv.floor_db = Some(-110.0);
+        lv.floor_source = Some(FloorSource::History);
+        lv.floor_suspect = Some(false);
+        lv.level_occupied_p50_db = Some(-80.0);
+        lv.level_occupied_p90_db = Some(-75.0);
+        lv.level_idle_db = Some(-108.0);
+        let json = serde_json::to_string(&lv).unwrap();
+        assert!(json.contains(r#""floor_source":"history""#), "{json}");
+        assert_eq!(serde_json::from_str::<OccupancyStat>(&json).unwrap(), lv);
         s.n_suspect = 40;
         assert_eq!(s.validate().unwrap_err().field, "n_occupied");
         s.n_suspect = 4;

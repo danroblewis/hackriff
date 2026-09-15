@@ -537,6 +537,38 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 
 Stream `observations` (ADR-0004 `messages` kind, `message_schema` `hackriff.observation/1`, metadata only, listed by `GET /api/streams`): one message per record the log writes, published from the writer thread (a slow subscriber drops messages, never log records). `metadata.kind` is `dwell` (`reason_text`, `record`: the `DwellRecord`) or `sweep-summary` (`plan_version`, `geometry`, `t0_s`, `t1_s`, `visits`, `observed_s`, `f_lo_hz`/`f_hi_hz` of the visited hops, `preempted_hops`, `dropped_samples`, `overload_hops`). Geometry records are not streamed; read them from `GET /api/observations`.
 
+## Occupancy (T-118; ADR-0012 §2)
+
+ITU-R SM.1880 / SM.2256 occupancy per learned channel and per band, computed in the backend (`hk_context::occupancy`) from the level-0 spectrum history, the run's detections and the observation log. Channels are learned blind from detections; band rasters appear only as `raster_hint` suggestions.
+
+| Method | Path | Auth | Returns |
+|---|---|---|---|
+| GET | `/api/occupancy?f_lo&f_hi&t0&t1[&subject=channel\|band][&interval=15m\|1h\|span][&site]` | token | `OccupancyStat` rows overlapping the box |
+| GET | `/api/channels?f_lo&f_hi[&site]` | token | The learned channel plan overlapping `f_lo..f_hi` |
+
+`GET /api/occupancy` → `200`:
+
+```json
+{"interval": "15m", "f_cell_hz": 6250.0, "plan_version": 3, "truncated": false,
+ "rows": [{"schema": 1, "site": {"kind": "unassigned"}, "subject": {"kind": "channel", "key": {"scheme": 1, "lo_cell": 69358, "hi_cell": 69362}},
+           "interval": {"start": "…", "end": "…"}, "fco": 0.12, "fco_all_visits": 0.31, "fco_suspect_upper": 0.13, "fbo": 0.08,
+           "n_revisits": 64, "n_occupied": 8, "n_suspect": 1, "n_revisits_all": 120, "observed_s": 61.5, "revisit_max_s": 41.0, "revisit_mean_s": 14.1,
+           "timing": "unknown", "threshold": {"method": {"method": "dynamic", "idle_fraction": 0.8}, "guard_db": 5.0, "rbw_correction": true},
+           "threshold_db": -121.4, "guard_clamped": true, "rbw_hz": 6250.0, "obw_hz": 15000.0, "unit": "…",
+           "confidence": {"lo": 0.06, "hi": 0.22, "level": "p95", "n_eff": 58.3, "independence_assumed": false},
+           "revisit_biased": false, "fco_window": {"start": "…", "end": "…"}, "subject_extent": {"f_lo_hz": 433475000.0, "f_hi_hz": 433500000.0}}],
+ "coverage": {"rows": 1, "rows_with_fco": 1, "observed_s": 61.5, "unobserved_is_not_quiet": true}}
+```
+
+- **Rows** follow ADR-0012 §2.1 (`OccupancyStat`, `hk_model::attention::occupancy`) plus `subject_extent` (the subject's frequency extent in Hz). `sro` is present on band rows only. Absent optional fields are omitted.
+- **`interval`:** `15m` (default) and `1h` read the persisted series (closed every 15 min of stream time; `1h` rows at hour boundaries); `span` computes one row per subject over exactly `[t0, t1]` from the history, the final channel plan and the detections (band ≤ 20 MHz, span ≤ 7 days, band × span ≤ 120 MHz·h, at most 2 M visit samples; the history is read in bounded chunks). Series closes evaluate every band observed in the interval (each dwell window and sweep hop of the observation log), so a retune inside an interval keeps both bands.
+- **Floor and level fields** (additive, optional): `floor_db` (median floor under the thresholds; each cell is compared with its column's local floor within ±1 MHz), `floor_source` (`history` \| `eighty-percent` \| `assumed`), `floor_suspect` (the neighbourhood is mostly occupied, so the floor may be signal and `fco` low), `level_occupied_p50_db` / `level_occupied_p90_db` / `level_idle_db` (visit levels of the `fco` visits).
+- **`fco`** uses activity-independent visits only (background sweep, scheduled plan; an unlogged run's own ScanPlan rows count as scheduled), time-weighted; suspect crossings (§2.6) are excluded and bounded by `fco_suspect_upper`. With fewer than 30 such visits the estimate widens to the enclosing 1 h / 6 h / 24 h window or the data span, reported in `fco_window`; `fco_all_visits` is information only and never replaces `fco`. Interactive-only observation gives `fco` absent.
+- **Coverage.** Rows exist only where something was observed: a subject or interval without a row was not observed, not quiet.
+- `400 invalid` for a missing or bad `f_lo`/`f_hi`/`t0`/`t1` (`f_hi > f_lo ≥ 0`, `t1 > t0`), `subject`, `interval`, `site`, or a `span` request over the limits; `500 failed` for a store error; `503 unavailable` without an occupancy engine; `405` for other methods.
+
+`GET /api/channels` → `200`: `{"plan_version", "scheme", "f_cell_hz", "source": "learned-from-detections", "channels": [{"key": {"scheme", "lo_cell", "hi_cell"}, "source": "learned", "plan_version", "first_learned", "evidence", "obw_hz", "raster_hint"?: {"spacing_hz", "offset_hz", "source"}, "f_lo_hz", "f_hi_hz"}]}`. Keys are level-0 history cells snapped outward from the median detected extent; any change of the key set bumps `plan_version`. `400 invalid` for a bad range, `503`, `405` as above.
+
 ## Attention and memory (planned, M2; ADR-0012)
 
 **Planned, not served yet.** None of these routes are in `ROUTES` today, except the observation log's (above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
@@ -552,8 +584,6 @@ Conventions:
 
 | Method | Path | Owner | Purpose |
 |---|---|---|---|
-| GET | `/api/occupancy` | T-118 | `?f_lo&f_hi&t0&t1[&subject=channel\|band][&interval=15m\|1h][&site]`: `OccupancyStat` rows |
-| GET | `/api/channels` | T-118 | `?f_lo&f_hi[&site]`: the learned channel plan (with raster suggestions) |
 | GET | `/api/sites` | T-119 | Known sites |
 | GET | `/api/sites/current` | T-119 | Current `SiteKey` and how it was set |
 | PUT | `/api/sites/current` | T-119 | Set or confirm the current site (audited) |

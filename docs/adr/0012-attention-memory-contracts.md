@@ -114,7 +114,7 @@ The log lives in hk-store `observation/` (T-115):
 - **`dynamic`** (default): the floor is estimated from the lowest `idle_fraction` (0.8, the "80 % method") of the channel's per-revisit levels over the interval, then `guard_db` (default 5, allowed 3–20) is added.
 - **`pre-set`:** `level_db` is receiver sensitivity plus the service's required S/N.
 
-The floor used by `dynamic` may also be the C08 tracker floor when present. The exact 80 % procedure is to be checked against SM.2256 by T-118 (**unverified**: this ADR restates docs/04 §3.9, not the Report text).
+The floor used by `dynamic` may also be the C08 tracker floor when present. **Verified by T-118 against the Report SM.2256-1 text ("Calculated threshold", citing SM.1753):** the 80 % method discards the highest 80 % of the samples and **linearly averages the remaining lowest 20 %**; the threshold is then 3–5 dB above that noise level. The Report recommends recomputing it per scan and notes it only works over a band or several equal-bandwidth channels (a busy channel raises its own floor). `idle_fraction` is therefore the *discarded* share. T-118 prefers the history's bias-corrected `floor_db` (T-116, the C08/C26 floor) and falls back to the 80 % method pooled over the band's cells.
 
 ### 2.3 RBW < OBW correction
 
@@ -126,7 +126,16 @@ The Annex treats the FCO estimate as approximately normal, with error shrinking 
 - **Effective samples:** `n_eff = n·(1−ρ)/(1+ρ)` with ρ = exp(−T̄_R/τ_c) and τ_c = T_on·T_off/(T_on+T_off) from C10 timing (a two-state on/off process sampled every T̄_R). Unknown τ_c gives `n_eff = n`, flagged `independence_assumed`.
 - **Interval:** Wilson score at 90/95/99 % (`fraction_interval`), which is the normal approximation made well-behaved at FCO 0 and 1.
 
-T-118's blind test asserts FCO error falls inside this interval on T-117 Markov scenes. If it doesn't, T-118 changes `effective_samples` and amends this section. Whether this is the Annex's exact formula is **unverified**.
+T-118's blind test asserts FCO error falls inside this interval on T-117 Markov scenes. If it doesn't, T-118 changes `effective_samples` and amends this section.
+
+**T-118 amendment (ρ measured, formula unchanged).** A blind engine rarely has C10 on/off timing, so T-118 measures ρ as the lag-1 autocorrelation of the activity-independent visit states and passes τ_c = −T̄_R/ln ρ to `effective_samples`; ρ ≤ 0 gives `n_eff = n` (measured), a constant sequence leaves `independence_assumed` set.
+
+**What SM.2256-1 Annex 1 says (verified by T-118 from the Report text).** The Annex does not define an interval formula; it gives sample-size rules for an absolute error ΔSO at confidence P_SOC:
+- **Pulsed signals** (A18/A19): J_min = SO(1−SO)(x_p/ΔSO)², the binomial normal approximation; Wilson is its well-behaved form (Table A2 reproduced in a unit test).
+- **Lengthy signals** (A12/A16): J_min = x_p/(2ΔSO)·√(V_avr(1.06+δT²)), driven by the number of state changes V rather than by SO (Table A1 reproduced with the A16 constant 194.2; the A12 layout is inferred from A16 and Table A1 because the PDF text extraction garbles it).
+- **Unstable revisit times** (A5.1.2, δT > 10 %): accumulate T_AI += T_Rj and T_O += T_Rj (both ends occupied) or T_Rj/2 (a change), SOCR = T_O/T_AI, which is exactly §2.5's half-gap weighting.
+
+**`fco_window` (additive, T-118).** §2.5 rule 4 records the window used in `OccupancyStat::fco_window`.
 
 ### 2.5 Observation-time weighting against revisit bias
 

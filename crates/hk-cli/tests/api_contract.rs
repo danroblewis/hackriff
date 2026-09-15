@@ -1933,6 +1933,72 @@ fn observation_log_routes_answer_as_documented() {
     stop_server(serving);
 }
 // T-118 occupancy
+
+/// T-118: `/api/channels` and `/api/occupancy` (series and span) answer the documented shapes;
+/// bad queries are 400 and other methods 405.
+#[test]
+fn occupancy_and_channel_routes_answer_as_documented() {
+    let (serving, addr) = start_server();
+    let (t0, t1) = (unix_now() - 600.0, unix_now() + 5.0);
+    let q = format!("f_lo=100000000&f_hi=101600000&t0={t0}&t1={t1}");
+
+    let (status, v) = get(addr, "/api/channels?f_lo=100000000&f_hi=101600000");
+    assert_eq!(status, 200, "{v}");
+    assert!(v["plan_version"].is_u64() && v["scheme"].is_u64(), "{v}");
+    assert!(v["f_cell_hz"].as_f64().is_some_and(|f| f > 0.0), "{v}");
+    assert_eq!(v["source"], "learned-from-detections");
+    for c in v["channels"].as_array().expect("channels array") {
+        assert!(
+            is_object(&c["key"]) && c["f_lo_hz"].is_f64() && c["obw_hz"].is_f64(),
+            "{c}"
+        );
+    }
+
+    for interval in ["15m", "1h", "span"] {
+        let (status, v) = get(addr, &format!("/api/occupancy?{q}&interval={interval}"));
+        assert_eq!(status, 200, "{interval}: {v}");
+        assert_eq!(v["interval"], interval);
+        assert!(is_array(&v["rows"]), "{v}");
+        assert_eq!(v["truncated"], false);
+        assert!(v["plan_version"].is_u64() && v["f_cell_hz"].is_f64(), "{v}");
+        assert_eq!(v["coverage"]["unobserved_is_not_quiet"], true);
+        assert!(v["coverage"]["rows"].is_u64() && v["coverage"]["rows_with_fco"].is_u64());
+        for r in v["rows"].as_array().unwrap() {
+            assert!(is_object(&r["subject"]) && !r["interval"].is_null(), "{r}");
+            assert!(
+                r["subject_extent"]["f_lo_hz"].is_f64() && r["n_revisits"].is_u64(),
+                "{r}"
+            );
+            assert_eq!(r["revisit_biased"], false);
+        }
+    }
+    let (status, v) = get(
+        addr,
+        &format!("/api/occupancy?{q}&subject=band&interval=span"),
+    );
+    assert_eq!(status, 200, "{v}");
+    for r in v["rows"].as_array().unwrap() {
+        assert_eq!(r["subject"]["kind"], "band", "{r}");
+    }
+
+    for bad in [
+        "/api/channels?f_lo=2&f_hi=1".to_string(),
+        format!("/api/occupancy?f_lo=1&t0={t0}&t1={t1}"),
+        format!("/api/occupancy?{q}&interval=2h"),
+        format!("/api/occupancy?{q}&subject=cell"),
+        format!("/api/occupancy?f_lo=1&f_hi=2&t0={t1}&t1={t0}"),
+        format!("/api/occupancy?f_lo=0&f_hi=1000000000&t0={t0}&t1={t1}&interval=span"),
+    ] {
+        let (status, v) = get(addr, &bad);
+        assert_eq!(status, 400, "{bad}: {v}");
+        assert_eq!(v["code"], "invalid", "{bad}: {v}");
+    }
+    let (status, _) = post(addr, &format!("/api/occupancy?{q}"), "{}");
+    assert_eq!(status, 405);
+    let (status, _) = post(addr, "/api/channels?f_lo=1&f_hi=2", "{}");
+    assert_eq!(status, 405);
+    stop_server(serving);
+}
 // T-119 sites, baselines, candidates, weights
 // T-120 scheduler
 // T-121 reports

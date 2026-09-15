@@ -337,6 +337,63 @@ pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
 
 /// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`] (public
 /// so acceptance tests wire the recipe routes exactly as `hk serve` does, T-094).
+/// The run's occupancy engine behind `/api/occupancy` and `/api/channels` (T-118).
+pub struct PipelineOccupancy(pub Arc<hk_pipeline::occupancy::OccupancyService>);
+
+impl hk_api::occupancy::OccupancyControl for PipelineOccupancy {
+    fn occupancy(
+        &self,
+        req: &hk_api::occupancy::OccupancyRequest,
+    ) -> Result<hk_api::occupancy::OccupancyAnswer, String> {
+        use hk_api::occupancy::OccupancyInterval as I;
+        let (plan_version, f_cell_hz) = self.0.plan_info();
+        let kind_ok = |r: &hk_model::attention::occupancy::OccupancyStat| {
+            use hk_model::attention::occupancy::OccupancySubject as S;
+            use hk_store::occupancy::SubjectKind as K;
+            matches!(
+                (req.subject, r.subject),
+                (None, _) | (Some(K::Channel), S::Channel { .. }) | (Some(K::Band), S::Band { .. })
+            )
+        };
+        let (rows, truncated) = match req.interval {
+            I::Span => {
+                let mut rows = self.0.span_stats(req.freq, req.span)?;
+                rows.retain(kind_ok);
+                let t = rows.len() > req.limit;
+                rows.truncate(req.limit);
+                (rows, t)
+            }
+            I::Series(interval) => {
+                let r = self.0.query(&hk_store::occupancy::OccupancyQuery {
+                    freq: req.freq,
+                    span: req.span,
+                    interval,
+                    subject: req.subject,
+                    f_cell_hz,
+                    limit: req.limit,
+                })?;
+                (r.rows, r.truncated)
+            }
+        };
+        Ok(hk_api::occupancy::OccupancyAnswer {
+            rows,
+            truncated,
+            f_cell_hz,
+            plan_version,
+        })
+    }
+
+    fn channels(&self, freq: hk_model::FreqRange) -> hk_api::occupancy::ChannelPlanAnswer {
+        let (version, scheme, f_cell_hz, channels) = self.0.channels(freq);
+        hk_api::occupancy::ChannelPlanAnswer {
+            version,
+            scheme,
+            f_cell_hz,
+            channels,
+        }
+    }
+}
+
 pub struct PipelineRecipes(pub Arc<hk_pipeline::recipes::runtime::RecipeRuntime>);
 
 impl hk_api::recipes::RecipeControl for PipelineRecipes {
@@ -432,7 +489,8 @@ pub fn serve_api(
         captures: handle
             .decoded_captures()
             .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
-        observations: handle.observation_store(), // T-115
+        occupancy: Some(Arc::new(PipelineOccupancy(handle.occupancy()))), // T-118
+        observations: handle.observation_store(),                         // T-115
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
