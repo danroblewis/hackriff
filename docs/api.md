@@ -676,9 +676,27 @@ A lease preempts scheduled plans, the bandit and the sweep from the next step; t
 
 Errors: `400` (bad region/span, a box over the grid budget, `site` or `format`), `404` (no coverage source), `405` (not GET), `500` (store failure), `503` (no report service on this server). The `/api/history` region filters (time and frequency) are unchanged; source and site filters are not served yet (history tiles are not keyed by source or site).
 
+## Anomalies and novelty alarms (T-122; ADR-0012 §7–§8)
+
+Every anomaly the run recorded (noise-floor episodes and C12 novelty alarms), with ranked explanations. Alarms are raised blind from baseline novelty (level above baseline, new emitter, busier than usual, **quieter than usual**, change point) with hysteresis (raise after 2 scored intervals ≥ 0.7, clear after 3 < 0.4; a re-raise within 1 h re-opens the same anomaly) and are suppressed while the site is mobile or unassigned, a device provenance step explains the change, or the baseline is immature. **Explain the device first:** a gain/calibration/spur-mask/antenna/overload/restart/drop/site step that fits the change is stored as an anomaly whose top explanation is `self-inflicted` (alarm state `explained`, status `resolved`), never as a novelty alarm. Other alarms get the C30 explanations (cached external events) and an `unexplained` explanation scored `1 − best external score`. Times are Unix seconds on the sample clock; frequencies in Hz.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/anomalies?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]` | Newest first. `kind`: `new-emitter`, `busier-than-baseline`, `quieter-than-baseline`, `noise-floor-rise`, `novelty`, `level-above-baseline`, `change-point`; `status`: `open`, `resolved`, `dismissed`; `limit` default 100, max 1000 |
+| GET | `/api/anomalies/{id}` | One anomaly with every current explanation (best first) and `history` |
+| POST | `/api/anomalies/{id}/dismiss` | `{"note"?}`: dismiss a novelty alarm; its key is suppressed for 7 days of sample time, then must re-raise (audited) |
+| POST | `/api/anomalies/{id}/reopen` | `{}`: lift a dismissal, or re-open a cleared alarm (audited) |
+
+- **List:** `{anomalies[], next_cursor, truncated, suppressions}`. `suppressions` is `{<alarm kind>: {<mobile-site / unassigned-site / provenance-explained / immature-baseline / dismissed>: count}}` since the service started.
+- **Anomaly:** `{id, kind, subject, f_lo, f_hi, t0, t1, t, score, baseline_ref, detector_version, status, alarm, explanations[], history[]}`. Lists and stream messages carry the top 3 explanations and no `history`. `explanations[]` is `{id, cause, correlation_type, score, provisional, rule_version, t, evidence}`; `cause.kind` is `external-event`, `emitter`, `own-history`, `self-inflicted` (with `reason`) or `unexplained`. `history[]` is `{status, t, note}` with notes `raised`, `cleared`, `reopened`, `reopened-by-user`, `dismissed;until_ns=…[;note=…]`, `explained`, `self-inflicted`.
+- **`alarm`** (novelty alarms; `null` otherwise): `{key {kind, site, subject}, state (open, cleared, dismissed, explained), last_transition (raised, held, reopened, cleared, dismissed, undismissed, explained), raised_at, last_t, reopen_count, cleared_at, dismissed_until, f_lo, f_hi, detail}`. `f_lo`/`f_hi` is the hull while open (the anomaly row keeps the extent at raise). `detail` is `AlarmDetail` (`observed`, `baseline_mean`, `baseline_spread`, `z`, `novelty`, `intervals_above`, `observed_s`, `unit`, `cal`, `resolution`, `slot`, `stages_applied`).
+- **Stream `anomalies`** (ADR-0004 `messages`, schema `hackriff.anomaly/1`, metadata only): one message per transition (`raised`, `held`, `reopened`, `cleared`, `explained`, `dismissed`) with `metadata {kind: "anomaly", transition, anomaly}` in the list row shape.
+
+Errors: `400` (bad id, region, span, kind, status, cursor/limit or body field), `404` (no such anomaly), `405`, `409` (dismissing a floor episode or a self-inflicted anomaly; reopening an open alarm), `500`, `503` (no anomaly service).
+
 ## Attention and memory (planned, M2; ADR-0012)
 
-**Planned, not served yet.** None of the routes below are in `ROUTES` today (the observation log's, occupancy's, T-119's sites, baselines, candidates and weights, the attention scheduler's, and the survey report's have landed and moved to their own sections above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+**Planned, not served yet.** None of the routes below are in `ROUTES` today (the observation log's, occupancy's, T-119's sites, baselines, candidates and weights, the attention scheduler's, the survey report's and T-122's anomalies have landed and moved to their own sections above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
 - **Contracts:** [ADR-0012](adr/0012-attention-memory-contracts.md).
 - **Schemas:** `hk_model::attention` (observation records, `OccupancyStat`, baselines, `CandidateSet`, `SurveyReport`, alarm detail).
 
@@ -691,11 +709,8 @@ Conventions:
 
 | Method | Path | Owner | Purpose |
 |---|---|---|---|
-| GET | `/api/anomalies` | T-122 | `?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`: anomalies (all kinds, including novelty alarms) with top explanations |
-| GET | `/api/anomalies/{id}` | T-122 | One anomaly: `AlarmDetail`, ranked explanations, status history |
-| POST | `/api/anomalies/{id}/dismiss` | T-122 | Dismiss (audited) |
 
-Planned streams (ADR-0004 `messages` kind, metadata only): `anomalies` (T-122: raise, reopen, extend and clear records with top explanations). The `observations` stream (T-115) is served; see "Observation log" above.
+Streams: the `observations` stream (T-115) and the `anomalies` stream (T-122) are served; see "Observation log" and "Anomalies and novelty alarms" above.
 
 ## UI decision logic moved server-side (T-079)
 

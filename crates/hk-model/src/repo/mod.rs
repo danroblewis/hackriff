@@ -59,6 +59,7 @@
 //! is more than one max-span below the query cannot overlap it. Exact overlap is then checked on
 //! the stored edges, with the same closed-interval rule as [`crate::region`].
 
+pub mod alarms; // T-122
 mod bookmarks;
 mod cluster;
 #[cfg(test)]
@@ -113,6 +114,7 @@ pub use verification::{TrustTest, TrustVerdict};
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_attention.sql"), // T-119 sites, attention_weights
+    include_str!("migrations/0003_anomaly_detail.sql"), // T-122 alarm detail + lifecycle
 ];
 
 /// Schema version this build creates and understands.
