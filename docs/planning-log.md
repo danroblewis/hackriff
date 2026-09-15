@@ -2202,3 +2202,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-195: per-signal output panels (deps T-192, T-159).
   - **Launch plan:** UI-only T-192 and T-194 launch now; they build no Rust, so they don't count toward the 4-agent cap. Rust T-190 and T-191 queue behind the cap.
   - **Not committed:** docs/15 is left for the user to commit.
+- **B0.467 Main red after the T-181 merge.** The full check stopped at 1039/1374 on the follow_hops hop-set test.
+  - **Cause:** a test race. The test waited for a frame from the added channel, then asserted frames from channels 0 and 1, which under load could arrive later. It passed 3/3 alone.
+  - **Fix (test only):** wait until every channel has delivered a frame. No bound was loosened.

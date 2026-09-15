@@ -686,11 +686,16 @@ fn a_blind_hop_set_supplies_the_channels_and_a_channel_it_gains_is_followed() {
     let r = run.rt.refresh_channels(&id).unwrap();
     assert_eq!(r["added"].as_array().unwrap().len(), 1, "{r}");
     assert_eq!(channels(&run), CHANNELS[..3]);
-    wait("a frame from the added channel", || {
-        frame_records(&sink).iter().any(|f| f.1 == 2)
-    });
-    let frames = frame_records(&sink);
-    assert!(frames.iter().any(|f| f.1 == 0) && frames.iter().any(|f| f.1 == 1));
+    // Every channel, the added one and the two it already followed, delivers a frame. Waiting only
+    // for the added channel and then checking the others raced under load: the added channel's
+    // frame could arrive first (full check after the T-181 merge, 2026-09-15).
+    wait(
+        "a frame from every channel, including the added one",
+        || {
+            let frames = frame_records(&sink);
+            (0..3).all(|c| frames.iter().any(|f| f.1 == c))
+        },
+    );
 
     // A hot edit across the per-channel instances: a node inserted upstream (every lane rebuilds
     // its decoder) and the merge's dedupe window changed in place. Capture never stops and every
