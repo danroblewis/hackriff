@@ -514,7 +514,7 @@ function main() {
       record: (s) => recordSelection(client, s, { tracker: outputs }),
     },
   });
-  const inventory = new InventoryTable(api, panel, (lo, hi) => {
+  const inventory = new InventoryTable(client, panel, (lo, hi) => {
     live.highlight(lo, hi);
     panel.selectRegion(lo, hi);
   }, (r) => inspector.showKnown(r), listen.rowListen);
