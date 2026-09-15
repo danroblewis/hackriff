@@ -1833,3 +1833,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - A false level-above-baseline alarm after the VGA step: an empty occupied level pool under the new gain key falls back to the idle pool → T-176.
   - Channels inside hop 1's DC zone and only in hop 2's edge zone never get a clean twin and are never learned → T-173 (hop placement), now priority.
 - **Full check** after the T-156 merge is next.
+- **B0.417 T-157 finished (WIP 6c2ecc0 → f08aa57 after the coordinator's final checks). Opus review running.**
+  - **Final checks (coordinator, in the worktree):** `just lint` clean; hk-store iqbuffer quota and duration eviction tests pass.
+  - **Design:**
+    - ci8 chunks with a sample-clock segment index.
+    - Oldest-first eviction by 2 GiB or 10 min.
+    - Dedicated writer thread: capture never blocks, drops are counted.
+    - Routes: `GET /api/iqbuffer`, `POST /api/iqbuffer/clip`.
+  - **Clips:** a fixed-tune clip is byte-identical to the source. A retune-spanning clip gives 2 SigMF captures.
+  - **Review questions:**
+    - Deleting the buffer at run end, versus reviewing after a restart.
+    - Whether it is safe on by default given Jetson disk limits.
+    - Export racing with eviction.
+    - Real-time back-pressure.

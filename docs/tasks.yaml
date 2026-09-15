@@ -2492,7 +2492,8 @@ notes:
   - id: T-157
     milestone: MUI
     title: "MUI API gap 1: rolling IQ buffer (always-on capture) with status + clip export for the Capture timeline"
-    status: in-progress
+    status: review
+    commit: f08aa57
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
