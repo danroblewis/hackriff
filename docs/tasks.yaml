@@ -1570,9 +1570,8 @@ tasks:
   - id: T-095
     milestone: M1
     title: "M1 Tutorial 2: POCSAG recipe with follow_hops + blind acceptance"
-    status: blocked
-    commit: 7898e56
-    blocked_by: T-109
+    status: done
+    commit: 4267655
     deps: [T-098, T-094, T-093, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1760,8 +1759,8 @@ tasks:
   - id: T-109
     milestone: M1
     title: "POCSAG tutorial continuation: blind detection merges close-packed simultaneous narrowband channels; un-ignore tutorial_pocsag"
-    status: review
-    commit: 9c7bfd2
+    status: done
+    commit: 4267655
     deps: [T-095]
     parallel_group: M1T2
     use_cases: [SIGNAL-062, AWARE-053]

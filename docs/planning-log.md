@@ -802,3 +802,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **E2E:** ADS-B rows `recipe:adsb` are linked to every truth ICAO emitter; the RDS PI row is attached to the station. The alloc-free queue test passes.
 
   Timeboxed Opus review running. Focus: identity canonical-form compatibility with readsb/RDS (to avoid duplicate emitters), per-output SQLite writer contention, and collision with T-109.
+- **B0.273 T-095/T-109 merged** (fix round 4267655). What changed:
+  - `Tracker::live_offers_into` offers only settled tracks: no hop link or set, and not a live in-band fragment (duty measured over the reported life of a still-open host).
+  - A provisional row is retracted via `Repository::retract_provisional_emitter`, marked deleted by `auto` only if untouched: never confirmed, merged, identified or shared. Retraction happens on fragment close, merge or hop-set formation.
+  - Live offers are processed before end events within a batch.
+  - The hop veto uses `gap_tol` (new slow A→B→A hopper test).
+  - A reused offer buffer means no per-5 s allocation on the detection thread.
+
+  Tests: hk-detect 124; pipeline 9/9; acceptance inventory_lifecycle, signal_062, tutorial_rds, tutorial_pocsag and tutorial_acars 9/9; hk-model lifecycle 5/5; lint clean.
+
+  Accepted residual: a live offer that joined an existing row keeps its bursts counted if the track later proves to be a fragment.
+
+  **All four M1 tutorials (RDS, POCSAG, ACARS, ADS-B) now pass blind on main.** Full check running; T-111 is in review.
