@@ -13,6 +13,7 @@ use hk_model::{
 use super::stats::{db, undb};
 use super::*;
 
+mod followups;
 mod maturity;
 
 const S: i64 = 1_000_000_000;

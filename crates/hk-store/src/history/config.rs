@@ -31,8 +31,13 @@ pub struct LevelConfig {
 /// [`PyramidConfig::byte_budget`] remains a hard ceiling: protected tiles are evicted by it only
 /// after every unprotected candidate.
 ///
-/// Granularity is one tile: every tile whose block overlaps the region is protected (a level-0
-/// block of the default scheme is 6.4 MHz wide).
+/// Granularity is one frequency cell (T-126): a tile overlapping the region is protected as a file
+/// (quota-exempt, budget-last), but each of its cells keeps the age of the overrides overlapping
+/// **that cell**, else the level's own age. Once unprotected cells pass their age the tile is
+/// trimmed — rewritten with those cells cleared — so a narrow override does not keep a whole
+/// 6.4 MHz default-scheme block's unrelated bins. Chosen over a finer protection index because the
+/// tile stays the storage unit (no split files, no new lookup path); the cost is one tile rewrite
+/// per trim deadline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RetentionOverride {
     /// Protected frequency region.

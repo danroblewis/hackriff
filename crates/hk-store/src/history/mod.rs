@@ -77,8 +77,25 @@
 //!
 //! # hackrf_sweep CSV and PNG (T-116)
 //!
-//! [`import_sweep_csv`] folds the user's `hackrf_sweep` CSV into history; [`write_sweep_csv`] and
-//! [`waterfall_png`] export a query result (module `export`).
+//! [`import_sweep_csv`] folds the user's `hackrf_sweep` CSV into history (`hk history
+//! import-sweep-csv`); [`write_sweep_csv`] and [`waterfall_png`] export a query result (module
+//! `export`).
+//!
+//! # Floor for sweep and CSV frames (T-126)
+//!
+//! Sweep rows rarely state how many FFTs were averaged into a bin, so their shape is estimated
+//! from the rows: a noise bin's dB variance over time is `(10/ln 10)²·ψ′(k)` whatever the floor
+//! level, so [`NoiseShapeEstimator`] pools the variance of floor-level, steady bins and inverts it
+//! (method and measured accuracy in [`shape`]). Frames carry it as [`NoiseShape::BinShape`]; the
+//! CSV importer estimates it from the first sweeps. Measured on synthetic 1- and 4-look sweeps:
+//! `k` within 5 %, `floor_db` of hour cells within 0.5 dB of the injected floor.
+//!
+//! # Provenance step state (T-126)
+//!
+//! Steps compare a frame with the last frame **of its source** ([`FrameInput::source`]), and that
+//! state (with its cell shape) is persisted per source in `front_end.state` at every checkpoint
+//! and seal, so a restart neither hides a real change nor invents one, and sources sharing a store
+//! do not show alternating false steps.
 //!
 //! # Retention and crash safety
 //!
@@ -87,8 +104,11 @@
 //! global [`PyramidConfig::byte_budget`]: evict the oldest sealed unprotected tile of the finest
 //! level whose parent is sealed on disk; only when no level below the top has one, expire the
 //! oldest top-level tile; protected tiles last. A tile is never evicted while a finer tile inside it
-//! remains (children first) or before a coarser level covers it. The clock is the data watermark
-//! (see `Pyramid::enforce_budget`). Level-0 open tiles are checkpointed every
+//! remains (children first) or before a coarser level covers it. Overrides are cell-precise
+//! (T-126): a protected tile's unrelated cells are trimmed once past their own age. Age work runs
+//! from a deadline index and quota/budget from an unprotected-tile index, so a retention pass does
+//! not scan the protected tiles it keeps. The clock is the data watermark (see
+//! `Pyramid::enforce_budget`). Level-0 open tiles are checkpointed every
 //! `checkpoint_interval`. On open, temp files and files failing the
 //! length/CRC checks are ignored and removed.
 
@@ -97,6 +117,7 @@ mod config;
 mod export;
 pub mod frame;
 mod query;
+pub mod shape;
 pub mod stats;
 mod store;
 mod tile;
@@ -115,11 +136,12 @@ pub use export::{
     HistoryStat, PNG_UNOBSERVED_RGB, SweepCsvImport, SweepCsvOptions, import_sweep_csv,
     waterfall_index, waterfall_png, waterfall_range, write_sweep_csv,
 };
-pub use frame::{DbScratch, FrameInput, FrontEnd, GainState, NoiseShape, PortTag};
+pub use frame::{DbScratch, FrameInput, FrontEnd, GainState, NoiseShape, PortTag, source_key};
 pub use query::{
     CellStats, ChannelSummary, CoverageSummary, FULL_CELL_OCCUPANCY, MAX_COVERAGE_GAPS,
     MAX_QUERY_CELLS, RegionHistory, RegionQuery, Resolution, burst_histogram,
 };
+pub use shape::NoiseShapeEstimator;
 pub use store::{IngestOutcome, Pyramid, PyramidStats};
 pub use tile::{
     FrontEndState, MAX_GAIN_STATES, MAX_PROVENANCE_STEPS, ProvenanceStep, ProvenanceSummary,

@@ -1,15 +1,16 @@
 //! The [`Pyramid`]: ingest, sealing and rollup, rolling byte budget, checkpoints and recovery.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hk_model::{TileKey, Timestamp};
 
 use super::StoreError;
 use super::codec;
-use super::config::{Geometry, PyramidConfig};
+use super::config::{Geometry, PyramidConfig, RetentionOverride};
 use super::frame::{FrameInput, NoiseShape, RegridPlan};
 use super::stats::{db, hist_percentile};
 use super::tile::{ColEntry, FrontEndState, ProvenanceStep, Tile};
@@ -38,6 +39,8 @@ pub struct PyramidStats {
     pub tiles_expired: u64,
     /// Of those, evicted by a level byte quota.
     pub tiles_evicted_quota: u64,
+    /// Region-protected tiles rewritten with their expired unprotected cells cleared (T-126).
+    pub tiles_trimmed: u64,
     /// Bytes evicted.
     pub bytes_evicted: u64,
     /// Temp, truncated or corrupt files ignored (and removed) on open or read.
@@ -123,15 +126,49 @@ pub struct Pyramid {
     keys: Vec<(i64, i64)>,
     buf: Vec<u8>,
     payload: Vec<u8>,
-    /// Front-end state of the last folded frame (step detection, T-116).
-    last_state: Option<FrontEndState>,
+    /// Front-end state and resolved cell shape of the last folded frame **per source** (step
+    /// detection, T-116; keyed and persisted per source, T-126).
+    last_state: HashMap<u64, (FrontEndState, Option<f32>)>,
+    state_dirty: bool,
+    /// Retention schedule per level (T-126): `(action ns, t_block, f_block)` for sealed tiles with
+    /// a finite trim or expiry deadline. Entries of evicted tiles are dropped when reached.
+    due: Vec<BTreeSet<(i64, i64, i64)>>,
+    /// Sealed tiles no region override protects, per level, `(t_block, f_block)`.
+    unprotected: Vec<BTreeSet<(i64, i64)>>,
+    /// Retention ages per `(level, f_block)`.
+    ages: HashMap<(usize, i64), Arc<Ages>>,
+    /// Tiles examined by retention passes (cost counter).
+    pub(super) retention_visits: u64,
     /// Cell shape of the last STFT resolution seen.
     shape_cache: Option<(hk_dsp::spectrum::Resolution, f32)>,
     stats: PyramidStats,
 }
 
+/// Retention ages of one `(level, f_block)` under the region overrides (T-126).
+#[derive(Debug)]
+pub(super) struct Ages {
+    /// Some override overlaps the block (quota-exempt, budget-last).
+    protected: bool,
+    /// Age after which the whole tile expires (`None`: some cell is kept forever).
+    tile_age: Option<i64>,
+    /// Distinct finite cell ages, ascending: each is a trim deadline, the last may be the expiry.
+    deadlines: Vec<i64>,
+}
+
+/// File of the per-source front-end state (T-126), under the scheme root.
+const SOURCE_STATE_FILE: &str = "front_end.state";
+
 fn dur_ns(d: std::time::Duration) -> i64 {
     i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)
+}
+
+/// A cell `[lo, hi)`'s age: the longest override overlapping it, else the level age.
+fn cell_age(ovs: &[RetentionOverride], lo: f64, hi: f64, level_age: Option<i64>) -> Option<i64> {
+    ovs.iter()
+        .filter(|o| o.freq.lo_hz < hi && o.freq.hi_hz > lo)
+        .map(|o| dur_ns(o.max_age))
+        .max()
+        .or(level_age)
 }
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
@@ -206,7 +243,12 @@ impl Pyramid {
             keys: Vec::new(),
             buf: Vec::new(),
             payload: Vec::new(),
-            last_state: None,
+            last_state: HashMap::new(),
+            state_dirty: false,
+            due: (0..n).map(|_| BTreeSet::new()).collect(),
+            unprotected: (0..n).map(|_| BTreeSet::new()).collect(),
+            ages: HashMap::new(),
+            retention_visits: 0,
             shape_cache: None,
             stats: PyramidStats::default(),
             cfg: config,
@@ -214,8 +256,61 @@ impl Pyramid {
             root,
         };
         p.scan()?;
+        p.load_source_states();
         p.recover()?;
         Ok(p)
+    }
+
+    /// The front-end state and resolved level-0 cell shape of the last frame folded from `source`
+    /// ([`FrameInput::source`]), including state persisted before a restart (T-126).
+    pub fn source_state(&self, source: u64) -> Option<(FrontEndState, Option<f32>)> {
+        self.last_state.get(&source).copied()
+    }
+
+    fn load_source_states(&mut self) {
+        let path = self.root.join(SOURCE_STATE_FILE);
+        let Ok(bytes) = fs::read(&path) else {
+            return;
+        };
+        match codec::decode_source_states(&bytes) {
+            Some(states) => {
+                self.last_state = states.into_iter().map(|(s, st, k)| (s, (st, k))).collect();
+            }
+            None => {
+                let _ = fs::remove_file(&path);
+                self.stats.files_ignored += 1;
+            }
+        }
+    }
+
+    /// Writes the per-source state when it changed (temp → fsync → rename, like tiles).
+    fn save_source_states(&mut self) -> Result<(), StoreError> {
+        if !self.state_dirty {
+            return Ok(());
+        }
+        let mut states: Vec<_> = self
+            .last_state
+            .iter()
+            .map(|(&s, &(st, k))| (s, st, k))
+            .collect();
+        states.sort_unstable_by_key(|e| e.0);
+        let bytes = codec::encode_source_states(&states);
+        let path = self.root.join(SOURCE_STATE_FILE);
+        let tmp = self
+            .root
+            .join(format!("{SOURCE_STATE_FILE}.tmp{}", std::process::id()));
+        let write = || -> std::io::Result<()> {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            fs::rename(&tmp, &path)
+        };
+        if let Err(e) = write() {
+            let _ = fs::remove_file(&tmp);
+            return Err(StoreError::Io { path, source: e });
+        }
+        self.state_dirty = false;
+        Ok(())
     }
 
     /// Settings.
@@ -318,17 +413,20 @@ impl Pyramid {
             return Ok(IngestOutcome::Late);
         }
         let state = FrontEndState::of(frame);
-        let step = match self.last_state {
-            Some(prev) if prev.changes(&state) != 0 => Some(ProvenanceStep {
+        let cell_shape = self.resolve_shape(frame.noise_shape, frame.bin_width_hz);
+        let prev = self.last_state.insert(frame.source, (state, cell_shape));
+        let step = match prev {
+            Some((from, _)) if from.changes(&state) != 0 => Some(ProvenanceStep {
                 t: frame.t,
-                changed: prev.changes(&state),
-                from: prev,
+                changed: from.changes(&state),
+                from,
                 to: state,
             }),
             _ => None,
         };
-        self.last_state = Some(state);
-        let cell_shape = self.resolve_shape(frame.noise_shape);
+        if prev.is_none_or(|(s, k)| s != state || k != cell_shape) {
+            self.state_dirty = true;
+        }
         self.plan.ensure(
             frame.f_lo_hz,
             frame.bin_width_hz,
@@ -432,11 +530,16 @@ impl Pyramid {
         Ok(IngestOutcome::Folded)
     }
 
-    /// The Gamma shape of a level-0 cell value for `shape` (cached per STFT resolution).
-    fn resolve_shape(&mut self, shape: NoiseShape) -> Option<f32> {
+    /// The Gamma shape of a level-0 cell value for `shape` (cached per STFT resolution) of a frame
+    /// with bins `bin_width_hz` wide.
+    fn resolve_shape(&mut self, shape: NoiseShape, bin_width_hz: f64) -> Option<f32> {
         match shape {
             NoiseShape::Unknown => None,
             NoiseShape::CellShape(k) => (k.is_finite() && k > 0.0).then_some(k),
+            NoiseShape::BinShape(k) => (k.is_finite() && k > 0.0).then(|| {
+                let bins_per_cell = self.geom.levels[0].f_cell_hz / bin_width_hz;
+                k * bins_per_cell.max(1.0) as f32
+            }),
             NoiseShape::Spectrum(r) => {
                 if !(r.bin_width_hz.is_finite() && r.bin_width_hz > 0.0) {
                     return None;
@@ -506,6 +609,7 @@ impl Pyramid {
             .map(|(l, tb)| self.geom.block_end_ns(l, tb))
             .min()
             .unwrap_or(i64::MAX);
+        self.save_source_states()?;
         self.enforce_budget()
     }
 
@@ -582,9 +686,13 @@ impl Pyramid {
             self.disk_bytes -= old;
         }
         let old = if sealed {
-            self.stats.tiles_written += 1;
             let old = self.sealed[level].insert((tb, fb), bytes);
             self.level_bytes[level] = self.level_bytes[level] - old.unwrap_or(0) + bytes;
+            if old.is_none() {
+                // A rewrite (retention trim) keeps its index entries.
+                self.stats.tiles_written += 1;
+                self.index_sealed(level, tb, fb);
+            }
             old
         } else {
             self.stats.checkpoints_written += 1;
@@ -614,23 +722,124 @@ impl Pyramid {
             self.level_bytes[level] -= bytes;
             self.stats.bytes_evicted += bytes;
         }
+        self.unprotected[level].remove(&(tb, fb));
         self.stats.tiles_evicted += 1;
+        // A parent waiting for its children to go is re-checked from its first deadline.
+        if level < self.geom.top() {
+            let (pfb, ptb) = self.geom.parent(level, fb, tb);
+            if self.sealed[level + 1].contains_key(&(ptb, pfb)) {
+                let ages = self.ages(level + 1, pfb);
+                if let Some(&a) = ages.deadlines.first() {
+                    let end = self.geom.block_end_ns(level + 1, ptb);
+                    self.due[level + 1].insert((end.saturating_add(a), ptb, pfb));
+                }
+            }
+        }
         Ok(())
     }
 
-    /// The longest region-override age protecting tile `(level, fb)`, ns.
-    fn override_age_ns(&self, level: usize, fb: i64) -> Option<i64> {
-        if self.cfg.retention_overrides.is_empty() {
-            return None;
-        }
-        let w = self.geom.levels[level].f_block_hz(self.geom.nf);
-        let (lo, hi) = (fb as f64 * w, (fb + 1) as f64 * w);
+    /// The overrides at `level`.
+    fn level_overrides(&self, level: usize) -> Vec<RetentionOverride> {
         self.cfg
             .retention_overrides
             .iter()
-            .filter(|o| usize::from(o.level) == level && o.freq.lo_hz < hi && o.freq.hi_hz >= lo)
-            .map(|o| dur_ns(o.max_age))
-            .max()
+            .filter(|o| usize::from(o.level) == level)
+            .copied()
+            .collect()
+    }
+
+    /// Retention ages of `(level, fb)`: per frequency cell, the longest override overlapping the
+    /// cell, else the level's `max_age` (cached; the config is fixed while open).
+    fn ages(&mut self, level: usize, fb: i64) -> Arc<Ages> {
+        if let Some(a) = self.ages.get(&(level, fb)) {
+            return Arc::clone(a);
+        }
+        let level_age = self.cfg.levels[level].max_age.map(dur_ns);
+        let (nf, w) = (self.geom.nf, self.geom.levels[level].f_cell_hz);
+        let (lo, hi) = (fb as f64 * nf as f64 * w, (fb + 1) as f64 * nf as f64 * w);
+        let ovs: Vec<_> = self
+            .level_overrides(level)
+            .into_iter()
+            .filter(|o| o.freq.lo_hz < hi && o.freq.hi_hz > lo)
+            .collect();
+        let ages = if ovs.is_empty() {
+            Ages {
+                protected: false,
+                tile_age: level_age,
+                deadlines: level_age.into_iter().collect(),
+            }
+        } else {
+            let mut forever = false;
+            let mut set = BTreeSet::new();
+            for f in 0..nf {
+                let c_lo = (fb * nf as i64 + f as i64) as f64 * w;
+                match cell_age(&ovs, c_lo, c_lo + w, level_age) {
+                    Some(a) => {
+                        set.insert(a);
+                    }
+                    None => forever = true,
+                }
+            }
+            Ages {
+                protected: true,
+                tile_age: if forever { None } else { set.last().copied() },
+                deadlines: set.into_iter().collect(),
+            }
+        };
+        let ages = Arc::new(ages);
+        self.ages.insert((level, fb), Arc::clone(&ages));
+        ages
+    }
+
+    /// Adds a newly sealed tile to the retention indexes.
+    fn index_sealed(&mut self, level: usize, tb: i64, fb: i64) {
+        let ages = self.ages(level, fb);
+        if !ages.protected {
+            self.unprotected[level].insert((tb, fb));
+        }
+        if let Some(&a) = ages.deadlines.first() {
+            let end = self.geom.block_end_ns(level, tb);
+            self.due[level].insert((end.saturating_add(a), tb, fb));
+        }
+    }
+
+    /// Registers a sealed tile without a file (retention cost tests).
+    #[cfg(test)]
+    pub(super) fn index_fake_sealed(&mut self, level: usize, fb: i64, tb: i64, bytes: u64) {
+        self.sealed[level].insert((tb, fb), bytes);
+        self.level_bytes[level] += bytes;
+        self.disk_bytes += bytes;
+        self.index_sealed(level, tb, fb);
+    }
+
+    /// Clears the cells of protected tile `(level, fb, tb)` whose own age has passed at `w` and
+    /// rewrites the tile if any held data (T-126).
+    fn trim(&mut self, level: usize, fb: i64, tb: i64, w: i64) -> Result<(), StoreError> {
+        let end = self.geom.block_end_ns(level, tb);
+        let level_age = self.cfg.levels[level].max_age.map(dur_ns);
+        let ovs = self.level_overrides(level);
+        let (nf, cw) = (self.geom.nf, self.geom.levels[level].f_cell_hz);
+        let expired: Vec<usize> = (0..nf)
+            .filter(|&f| {
+                let lo = (fb * nf as i64 + f as i64) as f64 * cw;
+                cell_age(&ovs, lo, lo + cw, level_age).is_some_and(|a| end.saturating_add(a) <= w)
+            })
+            .collect();
+        if expired.is_empty() {
+            return Ok(());
+        }
+        let Some(mut tile) = self.read_sealed(level, fb, tb)? else {
+            return Ok(());
+        };
+        let mut cleared = false;
+        for f in expired {
+            cleared |= tile.clear_freq(f);
+        }
+        if cleared {
+            self.write_tile(level, &tile, true)?;
+            self.stats.tiles_trimmed += 1;
+        }
+        Ok(())
     }
 
     /// A sealed tile one level finer lies inside tile `(level, fb, tb)`.
@@ -647,77 +856,92 @@ impl Pyramid {
             .any(|(&(_, cfb), _)| (f0..f1).contains(&cfb))
     }
 
-    /// Covered by a sealed parent (or top level) and no finer tile left inside it.
-    fn evictable(&self, level: usize, fb: i64, tb: i64) -> bool {
-        (level == self.geom.top() || self.covered(level, fb, tb))
-            && !self.has_children(level, fb, tb)
-    }
-
-    /// The oldest tile of `level` the byte budget may evict.
-    fn oldest_victim(&self, level: usize, allow_protected: bool) -> Option<(i64, i64)> {
+    /// The oldest tile of `level` the byte budget may evict: unprotected tiles only, from their
+    /// own index, unless `allow_protected`. Adds the tiles examined to `visits`.
+    fn oldest_victim(
+        &self,
+        level: usize,
+        allow_protected: bool,
+        visits: &mut u64,
+    ) -> Option<(i64, i64)> {
         let top = self.geom.top();
-        for &(tb, fb) in self.sealed[level].keys() {
+        let check = |&(tb, fb): &(i64, i64)| {
+            *visits += 1;
             if level < top && !self.covered(level, fb, tb) {
                 // Parents seal in time order: later tiles are no more covered.
-                return None;
+                return Some(None);
             }
-            if (!allow_protected && self.override_age_ns(level, fb).is_some())
-                || self.has_children(level, fb, tb)
-            {
-                continue;
-            }
-            return Some((tb, fb));
+            (!self.has_children(level, fb, tb)).then_some(Some((tb, fb)))
+        };
+        if allow_protected {
+            self.sealed[level].keys().find_map(check).flatten()
+        } else {
+            self.unprotected[level].iter().find_map(check).flatten()
         }
-        None
     }
 
-    /// Retention (T-116), after every seal, in three passes over **sealed** tiles:
+    /// Retention (T-116, indexed and region-precise in T-126), after every seal, in three passes
+    /// over **sealed** tiles:
     ///
-    /// 1. **Age.** A tile expires once its end is older than `watermark − age`, where `age` is the
-    ///    longest [`super::RetentionOverride`] covering its block at its level, else the level's
-    ///    `max_age` (no age: kept).
-    /// 2. **Quota.** While a level exceeds its `byte_quota`, its oldest unprotected tiles go.
+    /// 1. **Age.** Each frequency cell has an age: the longest [`super::RetentionOverride`]
+    ///    overlapping **the cell** at its level, else the level's `max_age` (no age: kept). A tile
+    ///    expires once its end is older than `watermark − age` for every cell. Before that, a
+    ///    protected tile whose unprotected cells have passed their age is **trimmed**: rewritten
+    ///    with those cells cleared (they read unobserved at that level; coarser levels keep their
+    ///    summary). The pass visits only tiles in the `due` index whose next deadline has passed,
+    ///    so its cost does not grow with the number of protected tiles kept.
+    /// 2. **Quota.** While a level exceeds its `byte_quota`, its oldest unprotected tiles go (from
+    ///    the level's unprotected index).
     /// 3. **Budget.** While all files exceed `byte_budget`: the oldest unprotected tile of the
     ///    finest level that has one, then the oldest unprotected top-level tile, and only then
     ///    protected tiles (finest first).
     ///
-    /// In every pass a tile is evicted only if a coarser level covers it (a sealed parent, or it
-    /// is top-level) and **children go first**: a tile with a sealed finer tile still inside it is
-    /// kept, so history never has a finer tile without its coarser summary. The clock is the data
-    /// watermark, so [`Pyramid::seal_through`] with a later time fast-forwards retention.
+    /// In every pass a tile is evicted or trimmed only if a coarser level covers it (a sealed
+    /// parent, or it is top-level) and **children go first**: a tile with a sealed finer tile still
+    /// inside it is kept (and re-checked when a child goes), so history never has a finer tile
+    /// without its coarser summary. The clock is the data watermark, so [`Pyramid::seal_through`]
+    /// with a later time fast-forwards retention.
     fn enforce_budget(&mut self) -> Result<(), StoreError> {
         let top = self.geom.top();
         let w = self.watermark_ns;
         for level in 0..=top {
-            let level_age = self.cfg.levels[level].max_age.map(dur_ns);
-            let min_age = self
-                .cfg
-                .retention_overrides
-                .iter()
-                .filter(|o| usize::from(o.level) == level)
-                .map(|o| dur_ns(o.max_age))
-                .chain(level_age)
-                .min();
-            let Some(min_age) = min_age else {
-                continue;
-            };
-            let limit = w.saturating_sub(min_age);
-            let mut victims = Vec::new();
-            for &(tb, fb) in self.sealed[level].keys() {
-                let end = self.geom.block_end_ns(level, tb);
-                if end > limit {
-                    break;
-                }
-                let Some(age) = self.override_age_ns(level, fb).or(level_age) else {
-                    continue;
-                };
-                if end <= w.saturating_sub(age) && self.evictable(level, fb, tb) {
-                    victims.push((tb, fb));
-                }
+            let due: Vec<(i64, i64, i64)> = self.due[level]
+                .range(..=(w, i64::MAX, i64::MAX))
+                .copied()
+                .collect();
+            for e in &due {
+                self.due[level].remove(e);
             }
-            for (tb, fb) in victims {
-                self.evict(level, tb, fb)?;
-                self.stats.tiles_expired += 1;
+            for (_, tb, fb) in due {
+                self.retention_visits += 1;
+                if !self.sealed[level].contains_key(&(tb, fb)) {
+                    continue;
+                }
+                if level < top && !self.covered(level, fb, tb) {
+                    let (_, ptb) = self.geom.parent(level, fb, tb);
+                    let at = self
+                        .geom
+                        .block_end_ns(level + 1, ptb)
+                        .max(w.saturating_add(1));
+                    self.due[level].insert((at, tb, fb));
+                    continue;
+                }
+                if self.has_children(level, fb, tb) {
+                    continue; // re-queued by `evict` when a child goes
+                }
+                let end = self.geom.block_end_ns(level, tb);
+                let ages = self.ages(level, fb);
+                if ages.tile_age.is_some_and(|a| end.saturating_add(a) <= w) {
+                    self.evict(level, tb, fb)?;
+                    self.stats.tiles_expired += 1;
+                    continue;
+                }
+                if ages.protected {
+                    self.trim(level, fb, tb, w)?;
+                }
+                if let Some(&a) = ages.deadlines.iter().find(|&&a| end.saturating_add(a) > w) {
+                    self.due[level].insert((end.saturating_add(a), tb, fb));
+                }
             }
         }
         self.stats.over_quota = false;
@@ -729,16 +953,19 @@ impl Pyramid {
                 continue;
             };
             let mut victims = Vec::new();
-            for (&(tb, fb), &bytes) in &self.sealed[level] {
+            let mut visits = 0;
+            for &(tb, fb) in &self.unprotected[level] {
                 if excess == 0 || (level < top && !self.covered(level, fb, tb)) {
                     break;
                 }
-                if self.override_age_ns(level, fb).is_some() || self.has_children(level, fb, tb) {
+                visits += 1;
+                if self.has_children(level, fb, tb) {
                     continue;
                 }
                 victims.push((tb, fb));
-                excess = excess.saturating_sub(bytes);
+                excess = excess.saturating_sub(self.sealed[level][&(tb, fb)]);
             }
+            self.retention_visits += visits;
             for (tb, fb) in victims {
                 self.evict(level, tb, fb)?;
                 self.stats.tiles_evicted_quota += 1;
@@ -749,10 +976,17 @@ impl Pyramid {
         }
         self.stats.over_budget = false;
         while self.disk_bytes > self.cfg.byte_budget {
+            let mut visits = 0;
             let victim = (0..top)
-                .find_map(|l| self.oldest_victim(l, false).map(|v| (l, v)))
-                .or_else(|| self.oldest_victim(top, false).map(|v| (top, v)))
-                .or_else(|| (0..=top).find_map(|l| self.oldest_victim(l, true).map(|v| (l, v))));
+                .find_map(|l| self.oldest_victim(l, false, &mut visits).map(|v| (l, v)))
+                .or_else(|| {
+                    self.oldest_victim(top, false, &mut visits)
+                        .map(|v| (top, v))
+                })
+                .or_else(|| {
+                    (0..=top).find_map(|l| self.oldest_victim(l, true, &mut visits).map(|v| (l, v)))
+                });
+            self.retention_visits += visits;
             match victim {
                 Some((level, (tb, fb))) => self.evict(level, tb, fb)?,
                 None => {
@@ -789,7 +1023,8 @@ impl Pyramid {
         }
         self.keys = keys;
         self.last_checkpoint_ns = Some(self.latest_ns);
-        result
+        result?;
+        self.save_source_states()
     }
 
     /// Checkpoints and closes. Dropping without `close` loses at most one checkpoint interval of
@@ -838,6 +1073,7 @@ impl Pyramid {
                             if h.sealed {
                                 self.sealed[level].insert((tb, fb), len);
                                 self.level_bytes[level] += len;
+                                self.index_sealed(level, tb, fb);
                             } else if level == 0 {
                                 self.checkpoints.insert((fb, tb), len);
                             } else {
@@ -971,6 +1207,7 @@ impl Pyramid {
                             self.disk_bytes -= b;
                             self.level_bytes[level] -= b;
                         }
+                        self.unprotected[level].remove(&(tb, fb));
                         self.stats.files_ignored += 1;
                     }
                 }

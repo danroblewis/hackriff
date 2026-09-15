@@ -109,6 +109,21 @@ pub enum NoiseShape {
     /// The Gamma shape `n_c` of a level-0 cell value, when the caller knows it (e.g. synthetic
     /// k-look noise on a grid aligned with the cells).
     CellShape(f32),
+    /// The Gamma shape `k` of each **input bin** value (T-126): a sweep or `hackrf_sweep` row whose
+    /// look count is known, or estimated by [`super::NoiseShapeEstimator`]. The pyramid derives
+    /// the level-0 cell shape as `k · max(1, f_cell / bin_width)`: a cell no wider than a bin reads
+    /// one bin's value (exact), a wider cell averages `f_cell / bin_width` bins taken as
+    /// independent (rectangular-window FFT bins; a tapered window makes this an overestimate —
+    /// use [`NoiseShape::Spectrum`] for those).
+    BinShape(f32),
+}
+
+/// A stable 64-bit source key for [`FrameInput::source`] from a source name (FNV-1a), e.g. a device
+/// id or `"hackrf_sweep:<file>"`. Stable across runs, so persisted step state finds its source.
+pub fn source_key(name: &str) -> u64 {
+    name.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// One frame to fold into the pyramid. See the [module docs](self) for the resampling rules.
@@ -144,6 +159,11 @@ pub struct FrameInput<'a> {
     pub front_end: FrontEnd,
     /// Noise statistics of the values, for the bias-corrected floor (T-116).
     pub noise_shape: NoiseShape,
+    /// Which source produced the frame (T-126; e.g. [`source_key`] of a device id, 0 by default).
+    /// Provenance steps compare a frame with the previous frame **of the same source**, and that
+    /// state is persisted per source, so interleaved sources and store restarts do not show false
+    /// steps.
+    pub source: u64,
 }
 
 impl<'a> FrameInput<'a> {
@@ -171,6 +191,7 @@ impl<'a> FrameInput<'a> {
             calibration: None,
             front_end: FrontEnd::default(),
             noise_shape: NoiseShape::Unknown,
+            source: 0,
         }
     }
 
@@ -208,6 +229,7 @@ impl<'a> FrameInput<'a> {
                 spur_mask: p.spur_mask_ref,
             },
             noise_shape: NoiseShape::Spectrum(s.resolution),
+            source: 0,
         }
     }
 

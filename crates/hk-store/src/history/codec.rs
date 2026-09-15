@@ -268,6 +268,51 @@ fn get_state(c: &mut Cur<'_>) -> Option<FrontEndState> {
     })
 }
 
+const SOURCE_STATE_MAGIC: &[u8; 4] = b"HKFS";
+
+/// The per-source front-end state file (T-126): `"HKFS" · version u8 (1) · count u32 · count ×
+/// (source u64 · state · shape present u8 · shape f32) · crc32 u32` of everything before it.
+pub(super) fn encode_source_states(states: &[(u64, FrontEndState, Option<f32>)]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + states.len() * 128);
+    buf.extend_from_slice(SOURCE_STATE_MAGIC);
+    buf.push(1);
+    buf.extend_from_slice(&(states.len() as u32).to_le_bytes());
+    for (source, state, shape) in states {
+        buf.extend_from_slice(&source.to_le_bytes());
+        put_state(&mut buf, state);
+        buf.push(u8::from(shape.is_some()));
+        buf.extend_from_slice(&shape.unwrap_or(0.0).to_le_bytes());
+    }
+    let crc = crc32(&buf);
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf
+}
+
+/// Decodes [`encode_source_states`]; `None` if truncated, corrupt or of another version.
+pub(super) fn decode_source_states(b: &[u8]) -> Option<Vec<(u64, FrontEndState, Option<f32>)>> {
+    let body = b.len().checked_sub(4)?;
+    if crc32(&b[..body]).to_le_bytes() != b[body..] {
+        return None;
+    }
+    let mut c = Cur {
+        b: &b[..body],
+        p: 0,
+    };
+    if c.take(4)? != SOURCE_STATE_MAGIC || c.u8()? != 1 {
+        return None;
+    }
+    let n = c.u32()?;
+    let mut out = Vec::with_capacity(n.min(1 << 16) as usize);
+    for _ in 0..n {
+        let source = c.u64()?;
+        let state = get_state(&mut c)?;
+        let present = c.u8()? != 0;
+        let shape = c.f32()?;
+        out.push((source, state, present.then_some(shape)));
+    }
+    (c.p == body).then_some(out)
+}
+
 fn encode_header(h: &Header, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&h.scheme.to_le_bytes());
     buf.push(h.level);
