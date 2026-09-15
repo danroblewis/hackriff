@@ -2103,3 +2103,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Status:** main treated as green.
   - **Merged:** T-174 (live-candidate DC twin) and T-167 (`dc_excluded_hz` header). Both worktrees removed.
   - **Next:** full check.
+- **B0.453 T-180 committed (b5826ad): mock device noise floor at low gain.**
+  - **Model:** `device_noise_codes2(vga)` = 0.25 + 5e-4·10^(VGA/10) code² per component (ADC + VGA input noise). No published HackRF NF exists, so it is calibrated from our captures (l24g20a0, l24g30a1) and is unverified outside VGA 20–30 until HIL.
+  - **Rendering:** noise is added only below the recording gain, with a seeded RNG; passthrough stays bit-exact.
+  - **t057 window:** zero codes 0.848→0.559; quantisation-limited blocks 36/36→0/36. The t057 skip matched 0 boxes and stays as a no-op with its guards.
+  - **Tests:** hk-core mock 22, mock_device 2 (t057 3/3), hk-pipeline 7; `scheduler_history` gap 0.010 dB; lint clean.
+  - **Merge:** after the T-174/T-167 full check.
