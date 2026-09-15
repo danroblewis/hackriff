@@ -8,8 +8,9 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<!-- MUI app shell (ADR-0013). Layout regions follow ui/mockups/explorer-v3.html; every panel mounts
-     into one data-slot and owns only that subtree. -->
+<!-- MUI app shell (ADR-0013, T-156): the default UI, served at / (and aliased at /app.html).
+     Layout regions follow ui/mockups/explorer-v3.html; every panel mounts into one data-slot and
+     owns only that subtree. -->
 <div class="app" id="app">
   <header class="bar">
     <div class="brand">hack<span>riff</span></div>

@@ -3,14 +3,11 @@
 // shapes are tested directly (same technique as inventory.test.ts's promote/delete tests).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { ControlClient, type FetchFn } from "../src/controls/client";
 import {
   type AnomalyRow, anomaliesQuery, canDismiss, canReopen, dismissAnomaly, freqRangeText,
   loadAnomalies, reopenAnomaly, topExplanationText,
 } from "../src/alarms";
-
-const html = readFileSync("src/index.html", "utf8");
 
 // ---- query building ----
 
@@ -138,11 +135,7 @@ test("loadAnomalies GETs the built query and returns the page", async () => {
   assert.ok(calls[0].includes("status=open"));
 });
 
-// ---- layout ----
-
-test("index.html has the alarm list panel with filters, table and detail/dismiss/reopen affordances", () => {
-  assert.ok(html.includes('id="alarms"'), "no #alarms panel");
-  assert.ok(html.includes('id="al-kind"') && html.includes('id="al-status"'), "kind/status filters missing");
-  assert.ok(html.includes('id="al-body"'), "no alarm table body");
-  assert.ok(html.includes('id="al-detail"'), "no detail panel");
-});
+// The Alarms tab (filters, table, detail/dismiss/reopen) is now ui/src/app/review/alarms.ts's
+// AlarmsTab, built with h() rather than a static index.html: exercised manually against a running
+// `hk serve`, like every other MUI DOM-wiring class (see ui/test/app-review.test.ts's top
+// comment). app-review.test.ts unit-tests its pure alarmRowView/alarmEmitterId helpers.

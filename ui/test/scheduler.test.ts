@@ -3,13 +3,10 @@
 // "POI only with a span" query rule and the `scheduler: null` (no scheduler on this run) shape.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import {
   bandit_summaryText, loadArms, loadScheduler, schedulerQuery, sharesText,
   type ArmsResponse, type SchedulerClient, type SchedulerResponse,
 } from "../src/scheduler";
-
-const html = readFileSync("src/index.html", "utf8");
 
 // ---- query building ----
 
@@ -101,14 +98,7 @@ test("loadArms GETs /api/scheduler/arms", async () => {
   assert.equal(r.arms[0].ucb, "inf");
 });
 
-// ---- layout ----
-
-test("index.html has the scheduler panel with status, leases, POI and a collapsed arms table", () => {
-  assert.ok(html.includes('id="scheduler"'), "no #scheduler panel");
-  assert.ok(html.includes('id="sch-status"'));
-  assert.ok(html.includes('id="sch-leases-body"'));
-  assert.ok(html.includes('id="sch-poi-body"'));
-  const details = html.indexOf('id="sch-arms-details"');
-  assert.ok(details >= 0, "no collapsible arms table");
-  assert.ok(!html.slice(Math.max(0, details - 40), details).includes(" open"), "arms table must be collapsed by default");
-});
+// The Scheduler tab (status, leases, POI, the collapsed bandit-arms <details>) is now
+// ui/src/app/review/scheduler.ts's SchedulerTab, built with h() rather than a static index.html:
+// exercised manually against a running `hk serve`, like every other MUI DOM-wiring class (see
+// ui/test/app-review.test.ts's top comment).
