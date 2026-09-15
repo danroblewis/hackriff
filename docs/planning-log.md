@@ -1116,3 +1116,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Reports:** report occupancy comes from the T-118 series, and the baseline comparison from T-119.
 
   **Important finding:** every detection in T-127's unclipped bursty replay is `clipped:true`. With real suspect flags the bandit bans all candidates, so T-127's bandit-on e2e fails; T-128 `#[ignore]`d it. Opened **T-130** to root-cause the spurious clip flag (detector provenance), running now. Items 6–9 plus the T-122 alarm hook become **T-131** (after T-128/T-122/T-129/T-130). T-124 depends on T-131. Timeboxed Opus review of T-128 is running; it recommends whether to gate suspect-driven banning until T-130.
+- **B0.322 T-128 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. `publish_candidates` runs an unbounded class-entropy DB query on the control thread under the cands lock (breaks ADR §4.6).
+    2. `compare_report` scores the whole span-rolled row as one 15-min interval, giving false busier-than-usual with inflated z; negative z is also mislabelled.
+    3. Report FCO rollup is count-weighted rather than time-weighted, which reintroduces revisit bias.
+  - **Item 3 recommendation: merge with the T-127 e2e ignored.** Candidates are only fed when the bandit is on, so the default path is unaffected.
+  - **T-130 findings:** the replay tone peaks at ~46/127, so the clip flag isn't from sample clipping. The same flag already strips FCO visits on main. T-128's suspect-ban test isn't discriminating.
+  - **Fix round running;** alarm hook, gain-state key and bandit-off candidates stay deferred to T-131.
+  - **Merge order:** T-129 → T-122 → T-128 (one trivial ApiState conflict).
