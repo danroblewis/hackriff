@@ -1193,8 +1193,9 @@ tasks:
   - id: T-072
     milestone: M0b
     title: Pipeline fidelity follow-ups from blind acceptance (device-gap sample loss, readsb stamp latency, single-detection tracks, short-burst resolution)
-    status: in-progress
-    resumed: "2026-09-14 after T-061 merged (budget throttle: 2 agents - T-071, T-072); staged WIP intact"
+    status: done
+    commit: "c9bab4a (merged; full verification running)"
+    result: "1) ring (hk-core ring/mod.rs) judged overwrite from the post-jump write end at a core:global_index jump, so readers waiting at the jump looked lapped and skipped to newest (0.05-2.2 s lost per gap); now only actually-stored samples count as overwritten; AWARE-042 2 s tolerance (611k samples) -> 0 lost, gaps asserted exactly. 2) readsb stamps used last index written to stdin (pipe/block buffering, up to 95 ms late); wrapper now reads Beast output on loopback, maps readsb 12 MHz sample-count timestamps to stream indices (constant 200 us offset, sample-exact), 2^20-sample silence lead-in; fallback to old stamp; SIGNAL-001 tolerance 120 ms -> 2 ms, 16/16. 3) SPACE-050: tracker fine - pipeline tagged detections with loaded calibration never stored in the DB so all 60 detection writes failed; run.rs store_calibrations at startup; 6 detections, 6 stored, 6 emitters (was 0); SPACE-050 asserts each carrier blind + stored. 5) daemon test: real-time pace + check stream list after run end. 4) short-burst detector NOT built (budget) -> T-075."
     interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
     deps: [T-047]
     parallel_group: J
@@ -1237,6 +1238,21 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
+  - id: T-075
+    milestone: M0b
+    title: Short-burst time-domain detector (ADS-B squitters, OOK bursts below STFT resolution)
+    status: todo
+    deps: [T-072]
+    parallel_group: S
+    use_cases: [SIGNAL-001, AWARE-036]
+    found_by: T-047 / T-072 (not built for budget)
+    acceptance: "time-domain energy detector beside the STFT path: threshold from a false-alarm rate against a median-power noise estimate; emits only bursts shorter than ~5 ms, rate-capped; stored as untracked detections with us timing; synthetic ADS-B squitters and short OOK bursts detected with timing within tens of us; false-alarm rate on noise reported; bounded CPU at 2-20 Msps; SIGNAL-001 limit note removed"
+    area: crates/hk-detect, crates/hk-pipeline/src/detect.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "waiting for an agent slot (budget throttle)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

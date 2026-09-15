@@ -474,3 +474,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.160 T-072 resumed** with its staged WIP and a priority order (device-gap loss, readsb sample-time stamps, single-detection carriers, flaky daemon test; short-burst detector if time allows). Running: T-071, T-072 (budget throttle). T-071 was told to merge T-061 and count output recorders in its chain budget. Verification of the T-061 merge is running.
 - **B0.161 T-061 merge verification: one failure so far.** It is the known T-074 flake: `stream_external.rs:484`, `consumer_dropped > 0` false under load 36. The stalled client's wait ends before the queue overflows, so this is not a T-061 regression. T-074 launched on Sonnet (small, test-only unless a real race is proven) as a third, cheap agent. Remaining suites still running.
 - **B0.162 T-061 merge verified.** Lint, 150 Rust test groups, Python, UI and acceptance all green. The only failure is the known T-074 stalled-client flake (fix in progress), so T-061 adds no new failures.
+- **B0.163 T-072 merged** (c9bab4a).
+  - **Ring:** device-gap sample loss fixed at the root (hk-core ring overwrite check); AWARE-042 now 0 lost.
+  - **readsb:** stamps come from readsb's sample-count timestamps; SIGNAL-001 tolerance 2 ms.
+  - **SPACE-050:** the real cause was the loaded calibration never being stored, so every detection write failed; now 6/6 carriers stored.
+  - **Daemon test:** flake fixed.
+  - **Short-burst detector:** deferred to T-075.
+  - **Verification:** the core ring change is on the real-time path, so full verification is running.
