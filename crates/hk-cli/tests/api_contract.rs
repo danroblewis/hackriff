@@ -6,16 +6,13 @@
 //! runs the fixture in real time and loops it, T-049/T-057, so detection takes real wall-clock
 //! seconds, not instant).
 //!
-//! Coverage: `/api/streams`, `/api/history`, `/api/floor`, `/api/inventory`,
+//! Coverage: `/api/streams`, `/api/history`, `/api/floor`, `/api/inventory` (including the T-078
+//! `state`/`lifecycle`/`recurrence` fields), `/api/inventory/{id}[/promote]` (T-078),
 //! `/api/analysis/strongest` (T-079), `/api/status`, `/api/control/*`, `/api/bookmarks[/<id>]`,
 //! `/api/selections[/<id>[/links]]`, `/api/outputs[...]`, `/ws/<id>` (spectrum header),
 //! `/ws/open/listen` (audio header + PCM data records on the 101.3 MHz station), and auth/CORS
 //! refusals. `docs/stream-contract.md` covers stream framing in full; this file only checks the
 //! shapes `docs/api.md` promises.
-//!
-//! T-078 (candidate/confirmed/deleted inventory state, `?state=`, `/api/inventory/{id}`,
-//! `/promote`, delete) is not on `main` yet at the time this file was written; its routes are
-//! documented in `docs/api.md` as pending and are not exercised here. Add them once it merges.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -86,14 +83,23 @@ fn stop_server(serving: Serving) {
 
 /// `METHOD path` with an optional `Authorization` header and JSON body; returns the status and the
 /// parsed body (`Value::Null` if the body is empty or not JSON).
-fn call(addr: SocketAddr, method: &str, path: &str, auth: Option<&str>, body: Option<&str>) -> (u16, Value) {
+fn call(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    auth: Option<&str>,
+    body: Option<&str>,
+) -> (u16, Value) {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     let body = body.unwrap_or("");
     let ct = if body.is_empty() {
         String::new()
     } else {
-        format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len())
+        format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
     };
     let auth_h = auth.map_or(String::new(), |a| format!("Authorization: {a}\r\n"));
     write!(
@@ -116,11 +122,23 @@ fn get(addr: SocketAddr, path: &str) -> (u16, Value) {
 }
 
 fn post(addr: SocketAddr, path: &str, body: &str) -> (u16, Value) {
-    call(addr, "POST", path, Some(&format!("Bearer {TOKEN}")), Some(body))
+    call(
+        addr,
+        "POST",
+        path,
+        Some(&format!("Bearer {TOKEN}")),
+        Some(body),
+    )
 }
 
 fn put(addr: SocketAddr, path: &str, body: &str) -> (u16, Value) {
-    call(addr, "PUT", path, Some(&format!("Bearer {TOKEN}")), Some(body))
+    call(
+        addr,
+        "PUT",
+        path,
+        Some(&format!("Bearer {TOKEN}")),
+        Some(body),
+    )
 }
 
 fn delete(addr: SocketAddr, path: &str) -> (u16, Value) {
@@ -164,11 +182,15 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         assert!(names.contains(&want), "on_demand openers: {names:?}");
     }
     assert!(v["tcp"]["addr"].is_string(), "{v}");
-    wait_for("the spectrum stream to be offered", Duration::from_secs(30), || {
-        get(addr, "/api/streams").1["streams"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|s| s["stream_id"] == "spectrum/live"))
-    });
+    wait_for(
+        "the spectrum stream to be offered",
+        Duration::from_secs(30),
+        || {
+            get(addr, "/api/streams").1["streams"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|s| s["stream_id"] == "spectrum/live"))
+        },
+    );
 
     // /api/control/state: device capabilities and tuning for a live source.
     let (st, v) = get(addr, "/api/control/state");
@@ -205,7 +227,16 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         ),
     );
     assert_eq!(st, 200, "{v}");
-    for field in ["level", "f_cell_hz", "f_lo_hz", "nf", "t_cell_s", "t0_s", "nt", "provenance"] {
+    for field in [
+        "level",
+        "f_cell_hz",
+        "f_lo_hz",
+        "nf",
+        "t_cell_s",
+        "t0_s",
+        "nt",
+        "provenance",
+    ] {
         assert!(v.get(field).is_some(), "history missing {field}: {v}");
     }
     assert!(is_array(&v["max_db"]) && is_array(&v["occupancy"]), "{v}");
@@ -265,20 +296,64 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["f_center_hz"].as_f64().is_some_and(|f| (f - STATION_HZ).abs() < 50e3))
+        .find(|e| {
+            e["f_center_hz"]
+                .as_f64()
+                .is_some_and(|f| (f - STATION_HZ).abs() < 50e3)
+        })
         .unwrap();
     for field in [
-        "id", "f_center_hz", "bandwidth_hz", "f_lo_hz", "f_hi_hz", "first_seen_s", "last_seen_s",
-        "count", "known_status", "tags", "family", "explanations", "identity_scheme", "withheld",
+        "id",
+        "f_center_hz",
+        "bandwidth_hz",
+        "f_lo_hz",
+        "f_hi_hz",
+        "first_seen_s",
+        "last_seen_s",
+        "count",
+        "known_status",
+        "tags",
+        "family",
+        "explanations",
+        "identity_scheme",
+        "withheld",
+        // T-078 lifecycle fields.
+        "state",
+        "lifecycle",
+        "recurrence",
     ] {
-        assert!(row.get(field).is_some(), "inventory row missing {field}: {row}");
+        assert!(
+            row.get(field).is_some(),
+            "inventory row missing {field}: {row}"
+        );
     }
     assert!(row["id"].is_string(), "{row}");
+    assert!(
+        matches!(row["state"].as_str(), Some("candidate" | "confirmed")),
+        "default listing excludes deleted entries: {row}"
+    );
+    for field in [
+        "occurrences",
+        "appearances",
+        "span_s",
+        "on_air_s",
+        "duty_cycle",
+        "recent",
+    ] {
+        assert!(
+            row["recurrence"].get(field).is_some(),
+            "recurrence missing {field}: {row}"
+        );
+    }
 
     // Filters and pagination parameters are accepted.
     let (st, v) = get(addr, "/api/inventory?status=known,unknown&limit=5");
     assert_eq!(st, 200, "{v}");
     let (st, v) = get(addr, "/api/inventory?status=bogus");
+    assert_eq!(st, 400, "{v}");
+    let (st, v) = get(addr, "/api/inventory?state=deleted");
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = get(addr, "/api/inventory?state=bogus");
     assert_eq!(st, 400, "{v}");
 
     // /api/analysis/strongest (T-079): the station is the (or a) strongest thing in its own band.
@@ -286,9 +361,19 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     wait_for(
         "/api/analysis/strongest to find the station",
         Duration::from_secs(60),
-        || get(addr, &format!("/api/analysis/strongest?f_lo={f_lo}&f_hi={f_hi}")).1["found"] == json!(true),
+        || {
+            get(
+                addr,
+                &format!("/api/analysis/strongest?f_lo={f_lo}&f_hi={f_hi}"),
+            )
+            .1["found"]
+                == json!(true)
+        },
     );
-    let (st, v) = get(addr, &format!("/api/analysis/strongest?f_lo={f_lo}&f_hi={f_hi}"));
+    let (st, v) = get(
+        addr,
+        &format!("/api/analysis/strongest?f_lo={f_lo}&f_hi={f_hi}"),
+    );
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["found"], json!(true), "{v}");
     for field in ["f_center_hz", "f_lo_hz", "f_hi_hz", "max_db"] {
@@ -304,8 +389,107 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     // Validation.
     let (st, v) = get(addr, "/api/analysis/strongest?f_lo=2&f_hi=1");
     assert_eq!(st, 400, "{v}");
-    let (st, v) = get(addr, &format!("/api/analysis/strongest?f_lo={f_lo}&f_hi={f_hi}&window_s=0"));
+    let (st, v) = get(
+        addr,
+        &format!("/api/analysis/strongest?f_lo={f_lo}&f_hi={f_hi}&window_s=0"),
+    );
     assert_eq!(st, 400, "{v}");
+
+    stop_server(serving);
+}
+
+#[test]
+fn inventory_entry_promote_and_delete_answer_as_documented() {
+    let (serving, addr) = start_server();
+
+    let id = {
+        let mut found = None;
+        wait_for(
+            "the station to appear so its entry id is known",
+            Duration::from_secs(60),
+            || {
+                let (st, v) = get(addr, "/api/inventory");
+                if st != 200 {
+                    return false;
+                }
+                found = v["entries"]
+                    .as_array()
+                    .and_then(|a| {
+                        a.iter().find(|e| {
+                            e["f_center_hz"]
+                                .as_f64()
+                                .is_some_and(|f| (f - STATION_HZ).abs() < 50e3)
+                        })
+                    })
+                    .and_then(|e| e["id"].as_str())
+                    .map(str::to_owned);
+                found.is_some()
+            },
+        );
+        found.unwrap()
+    };
+
+    // GET one entry: same shape as a list row.
+    let (st, row) = get(addr, &format!("/api/inventory/{id}"));
+    assert_eq!(st, 200, "{row}");
+    assert_eq!(row["id"], json!(id));
+    for field in ["state", "lifecycle", "recurrence"] {
+        assert!(
+            row.get(field).is_some(),
+            "inventory entry missing {field}: {row}"
+        );
+    }
+    let (st, v) = get(addr, "/api/inventory/not-a-uuid");
+    assert_eq!(st, 404, "{v}");
+
+    // Promote: candidate -> confirmed (idempotent: a second promote reports changed: false).
+    let (st, v) = post(addr, &format!("/api/inventory/{id}/promote"), "{}");
+    assert_eq!(st, 200, "{v}");
+    assert!(v.get("entry").is_some(), "{v}");
+    assert_eq!(v["entry"]["state"], json!("confirmed"), "{v}");
+    let (st, v) = post(
+        addr,
+        &format!("/api/inventory/{id}/promote"),
+        r#"{"reason": "manual re-check"}"#,
+    );
+    assert_eq!((st, &v["changed"]), (200, &json!(false)), "{v}");
+    let (st, v) = post(
+        addr,
+        &format!("/api/inventory/{id}/promote"),
+        r#"{"bogus": 1}"#,
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    // Delete: leaves the default (candidate/confirmed) list but is still readable with state=deleted.
+    let (st, v) = delete(addr, &format!("/api/inventory/{id}"));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["deleted"]["id"], json!(id), "{v}");
+    let (st, v) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        !v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == id),
+        "a deleted entry must not appear in the default list: {v}"
+    );
+    let (st, v) = get(addr, "/api/inventory?state=deleted");
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == id),
+        "state=deleted still lists it: {v}"
+    );
+    let (st, v) = delete(addr, &format!("/api/inventory/{id}"));
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (404, Some("not_found")),
+        "deleting twice: {v}"
+    );
 
     stop_server(serving);
 }
@@ -316,7 +500,11 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
 fn control_display_pause_and_bookmarks_answer_as_documented() {
     let (serving, addr) = start_server();
 
-    let (st, v) = post(addr, "/api/control/display", r#"{"fft_size": 512, "averaging": 2, "rows_per_s": 10}"#);
+    let (st, v) = post(
+        addr,
+        "/api/control/display",
+        r#"{"fft_size": 512, "averaging": 2, "rows_per_s": 10}"#,
+    );
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["display"],
@@ -330,18 +518,39 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
     assert_eq!((st, &v["display"]["paused"]), (200, &json!(false)));
 
     // Bookmarks: create (201), list, get, update, delete.
-    let (st, bm) = post(addr, "/api/bookmarks", r#"{"name": "test mark", "f_center_hz": 101.3e6}"#);
+    let (st, bm) = post(
+        addr,
+        "/api/bookmarks",
+        r#"{"name": "test mark", "f_center_hz": 101.3e6}"#,
+    );
     assert_eq!(st, 201, "{bm}");
-    for field in ["id", "kind", "name", "f_center_hz", "created_s", "updated_s"] {
+    for field in [
+        "id",
+        "kind",
+        "name",
+        "f_center_hz",
+        "created_s",
+        "updated_s",
+    ] {
         assert!(bm.get(field).is_some(), "bookmark missing {field}: {bm}");
     }
     let id = bm["id"].as_str().unwrap();
     let (st, list) = get(addr, "/api/bookmarks");
     assert_eq!(st, 200, "{list}");
-    assert!(list["bookmarks"].as_array().unwrap().iter().any(|b| b["id"] == id));
+    assert!(
+        list["bookmarks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["id"] == id)
+    );
     let (st, got) = get(addr, &format!("/api/bookmarks/{id}"));
     assert_eq!((st, got["name"].as_str()), (200, Some("test mark")));
-    let (st, updated) = put(addr, &format!("/api/bookmarks/{id}"), r#"{"name": "renamed"}"#);
+    let (st, updated) = put(
+        addr,
+        &format!("/api/bookmarks/{id}"),
+        r#"{"name": "renamed"}"#,
+    );
     assert_eq!((st, updated["name"].as_str()), (200, Some("renamed")));
     let (st, deleted) = delete(addr, &format!("/api/bookmarks/{id}"));
     assert_eq!((st, deleted["deleted"]["id"].as_str()), (200, Some(id)));
@@ -361,16 +570,29 @@ fn selections_crud_and_links_answer_as_documented() {
         r#"{"name": "band", "f_lo": 101.2e6, "f_hi": 101.4e6}"#,
     );
     assert_eq!(st, 201, "{s}");
-    for field in ["id", "name", "f_lo", "f_hi", "t_lo", "t_hi", "notes", "tags", "links", "created", "updated"] {
+    for field in [
+        "id", "name", "f_lo", "f_hi", "t_lo", "t_hi", "notes", "tags", "links", "created",
+        "updated",
+    ] {
         assert!(s.get(field).is_some(), "selection missing {field}: {s}");
     }
     let id = s["id"].as_str().unwrap();
     let (st, list) = get(addr, "/api/selections");
     assert_eq!(st, 200, "{list}");
-    assert!(list["selections"].as_array().unwrap().iter().any(|x| x["id"] == id));
+    assert!(
+        list["selections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == id)
+    );
     let (st, got) = get(addr, &format!("/api/selections/{id}"));
     assert_eq!((st, got["name"].as_str()), (200, Some("band")));
-    let (st, updated) = put(addr, &format!("/api/selections/{id}"), r#"{"name": "renamed band"}"#);
+    let (st, updated) = put(
+        addr,
+        &format!("/api/selections/{id}"),
+        r#"{"name": "renamed band"}"#,
+    );
     assert_eq!((st, updated["name"].as_str()), (200, Some("renamed band")));
     let (st, linked) = post(
         addr,
@@ -383,7 +605,11 @@ fn selections_crud_and_links_answer_as_documented() {
     assert_eq!((st, deleted["deleted"]["id"].as_str()), (200, Some(id)));
     let (st, missing) = get(addr, &format!("/api/selections/{id}"));
     assert_eq!((st, missing["code"].as_str()), (404, Some("not_found")));
-    let (st, bad) = post(addr, "/api/selections", r#"{"name": "x", "f_lo": 2, "f_hi": 1}"#);
+    let (st, bad) = post(
+        addr,
+        "/api/selections",
+        r#"{"name": "x", "f_lo": 2, "f_hi": 1}"#,
+    );
     assert_eq!(st, 400, "{bad}");
 
     stop_server(serving);
@@ -419,11 +645,15 @@ fn connect_ws(addr: SocketAddr, path: &str) -> Result<Ws, tungstenite::Error> {
 #[test]
 fn ws_stream_header_matches_the_stream_contract() {
     let (serving, addr) = start_server();
-    wait_for("the spectrum stream to be offered", Duration::from_secs(30), || {
-        get(addr, "/api/streams").1["streams"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|s| s["stream_id"] == "spectrum/live"))
-    });
+    wait_for(
+        "the spectrum stream to be offered",
+        Duration::from_secs(30),
+        || {
+            get(addr, "/api/streams").1["streams"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|s| s["stream_id"] == "spectrum/live"))
+        },
+    );
 
     let mut ws = connect_ws(addr, &format!("/ws/spectrum/live?token={TOKEN}")).unwrap();
     let Message::Text(text) = ws.read().unwrap() else {
@@ -451,11 +681,7 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     let (serving, addr) = start_server();
     let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
 
-    let mut ws = wait_for_listen(addr, f_lo, f_hi);
-    let Message::Text(text) = ws.read().unwrap() else {
-        panic!("first message must be the audio header (text)")
-    };
-    let header: Value = serde_json::from_str(text.as_str()).unwrap();
+    let (mut ws, header) = wait_for_listen(addr, f_lo, f_hi);
     assert_eq!(header["schema"], json!("hackriff.stream"));
     assert_eq!(header["kind"], json!("audio"));
     assert_eq!(header["datatype"], json!("ri16_le"));
@@ -468,11 +694,22 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     while Instant::now() < deadline && !saw_data {
         match ws.read() {
             Ok(Message::Binary(b)) => {
-                assert!(b.len() >= 32, "binary record shorter than the 32-byte header: {}", b.len());
+                assert!(
+                    b.len() >= 32,
+                    "binary record shorter than the 32-byte header: {}",
+                    b.len()
+                );
                 let record_type = b[0];
-                assert!(matches!(record_type, 1 | 2 | 3), "unknown record type {record_type}");
+                assert!(
+                    matches!(record_type, 1..=3),
+                    "unknown record type {record_type}"
+                );
                 if record_type == 1 {
-                    assert_eq!((b.len() - 32) % 2, 0, "ri16_le PCM payload must be a whole number of samples");
+                    assert_eq!(
+                        (b.len() - 32) % 2,
+                        0,
+                        "ri16_le PCM payload must be a whole number of samples"
+                    );
                     saw_data = true;
                 }
             }
@@ -481,7 +718,10 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
             Err(e) => panic!("listen stream ended early: {e}"),
         }
     }
-    assert!(saw_data, "no PCM data record arrived on the station within 30 s");
+    assert!(
+        saw_data,
+        "no PCM data record arrived on the station within 30 s"
+    );
     let _ = ws.close(None);
 
     // Refused: no target parameters.
@@ -500,11 +740,16 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
 }
 
 /// Retries the `/ws/open/listen` handshake: the run may be mid-replumb (503 `replumbing`) right
-/// after start, before the mock's power-on window settles.
-fn wait_for_listen(addr: SocketAddr, f_lo: f64, f_hi: f64) -> Ws {
+/// after start, before the mock's power-on window settles. Returns the connection *after* its
+/// header message, plus the parsed header (the caller's next read is the first data/status record).
+fn wait_for_listen(addr: SocketAddr, f_lo: f64, f_hi: f64) -> (Ws, Value) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let mut ws = connect_ws(addr, &format!("/ws/open/listen?f_lo={f_lo}&f_hi={f_hi}&token={TOKEN}")).unwrap();
+        let mut ws = connect_ws(
+            addr,
+            &format!("/ws/open/listen?f_lo={f_lo}&f_hi={f_hi}&token={TOKEN}"),
+        )
+        .unwrap();
         match ws.read().unwrap() {
             Message::Text(t) if t.contains("\"type\":\"refused\"") => {
                 assert!(Instant::now() < deadline, "listen kept refusing: {t}");
@@ -513,7 +758,7 @@ fn wait_for_listen(addr: SocketAddr, f_lo: f64, f_hi: f64) -> Ws {
             Message::Text(t) => {
                 let header: Value = serde_json::from_str(t.as_str()).unwrap();
                 assert_eq!(header["schema"], json!("hackriff.stream"), "{header}");
-                return ws;
+                return (ws, header);
             }
             other => panic!("unexpected first message: {other:?}"),
         }
@@ -534,10 +779,17 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
     // A read endpoint accepts the query-string token (browser WebSockets cannot set headers).
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    write!(s, "GET /api/streams?token={TOKEN} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").unwrap();
+    write!(
+        s,
+        "GET /api/streams?token={TOKEN} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();
-    assert!(raw.starts_with("HTTP/1.1 200"), "?token= works for a GET: {raw}");
+    assert!(
+        raw.starts_with("HTTP/1.1 200"),
+        "?token= works for a GET: {raw}"
+    );
 
     // Mutating requests refuse the query-string token (must be the Authorization header).
     let mut s = TcpStream::connect(addr).unwrap();
@@ -552,7 +804,10 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
     .unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();
-    assert!(raw.starts_with("HTTP/1.1 401"), "?token= refused for a mutation: {raw}");
+    assert!(
+        raw.starts_with("HTTP/1.1 401"),
+        "?token= refused for a mutation: {raw}"
+    );
 
     // Cross-origin mutating request (Origin naming a different host than Host).
     let mut s = TcpStream::connect(addr).unwrap();
@@ -567,7 +822,10 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
     .unwrap();
     let mut raw = String::new();
     s.read_to_string(&mut raw).unwrap();
-    assert!(raw.starts_with("HTTP/1.1 403"), "cross-origin mutation refused: {raw}");
+    assert!(
+        raw.starts_with("HTTP/1.1 403"),
+        "cross-origin mutation refused: {raw}"
+    );
 
     // OPTIONS preflight: always refused (no CORS).
     let (st, _) = call(addr, "OPTIONS", "/api/control/display", None, None);
@@ -576,7 +834,13 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
     // Unknown route: 404. Known path, wrong method: 405 with Allow.
     let (st, v) = get(addr, "/api/no-such-route");
     assert_eq!(st, 404, "{v}");
-    let (st, v) = call(addr, "PATCH", "/api/bookmarks", Some(&format!("Bearer {TOKEN}")), None);
+    let (st, v) = call(
+        addr,
+        "PATCH",
+        "/api/bookmarks",
+        Some(&format!("Bearer {TOKEN}")),
+        None,
+    );
     assert_eq!(st, 405, "{v}");
 
     stop_server(serving);
@@ -593,10 +857,15 @@ fn every_route_in_the_route_table_is_documented() {
         .unwrap_or_else(|e| panic!("reading {}: {e}", doc_path.display()));
     let mut missing = Vec::new();
     for (method, path) in hk_api::ROUTES {
-        let documented = doc.lines().any(|line| line.contains(path) && line.contains(method));
+        let documented = doc
+            .lines()
+            .any(|line| line.contains(path) && line.contains(method));
         if !documented {
             missing.push(format!("{method} {path}"));
         }
     }
-    assert!(missing.is_empty(), "routes missing from docs/api.md: {missing:#?}");
+    assert!(
+        missing.is_empty(),
+        "routes missing from docs/api.md: {missing:#?}"
+    );
 }

@@ -649,8 +649,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     }
     let get = req.method == "GET";
     let result = match req.path.as_str() {
-        "/api/streams" | "/api/history" | "/api/floor" | "/api/inventory"
-        | "/api/analysis/strongest" | "/api/status"
+        "/api/streams"
+        | "/api/history"
+        | "/api/floor"
+        | "/api/inventory"
+        | "/api/analysis/strongest"
+        | "/api/status"
             if !get =>
         {
             return respond_json_with(

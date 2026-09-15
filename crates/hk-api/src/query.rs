@@ -335,7 +335,9 @@ pub fn strongest_json(p: &Pyramid, q: &Params, now: Timestamp) -> Result<Value, 
         t0_ns,
         t1_ns,
     };
-    let level = choose_level(p.geometry(), &r, |nt, nf| nt * nf <= DEFAULT_MAX_CELLS as f64)?;
+    let level = choose_level(p.geometry(), &r, |nt, nf| {
+        nt * nf <= DEFAULT_MAX_CELLS as f64
+    })?;
     let h = p
         .query(&RegionQuery {
             freq: r.freq,
