@@ -1,11 +1,16 @@
-//! Content classification for restricted-content gating (ADR-0004; docs/07 §2.12, §2.15, §2.16).
+//! Content classification for optional content gating (ADR-0004; docs/07 §2.12, §2.15, §2.16).
 //!
 //! Every object that can carry *content* (a Recording's samples, a Decode's content fields, a
 //! stored Bitstream, an Annotation's content) carries a [`ContentClass`].
 //!
-//! **Legal guardrail area** (CLAUDE.md, docs/04 §1.3). The variants and
-//! [`ContentClass::permits_content`] encode the ADR-0004 default and are **provisional** pending
-//! the legal-guardrail confirmation with the user. Changing them is a core-interface change.
+//! # Gating is off by default (T-143)
+//!
+//! Legality is the user's concern, not the software's. By default **nothing is gated**: every
+//! class permits content ([`ContentClass::permits_content`] is `true`), identities are shown in
+//! clear, and recordings, audio, chains and streams flow regardless of band. Classes are still
+//! derived and reported, as information only. The rules below apply only when gating is
+//! explicitly enabled: `HK_CONTENT_GATING=1` in the environment, or [`set_content_gating`]. This
+//! opt-in path is deliberately untested.
 //!
 //! # Metadata always flows; content is gated
 //!
@@ -24,7 +29,7 @@
 //! - `insert_bitstream` refuses a *stored* bitstream under such a class; a *live* descriptor is
 //!   metadata, and stream-output (C24) gates the stream itself.
 //!
-//! The schema repeats these rules as CHECK constraints for writers that bypass the repository.
+//! (Migration 0005 removed the schema CHECKs that used to repeat these rules.)
 //!
 //! # Fail closed
 //!
@@ -32,7 +37,31 @@
 //! Producers must choose a class. When a class is missing or unrecognised, use
 //! [`ContentClass::FAIL_CLOSED`] (`MetadataOnly`) via [`ContentClass::parse_fail_closed`].
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use serde::{Deserialize, Serialize};
+
+/// 0 = not yet read from the environment, 1 = off, 2 = on.
+static CONTENT_GATING: AtomicU8 = AtomicU8::new(0);
+
+/// Whether content gating is enabled (default **off**; opt in with `HK_CONTENT_GATING=1` or
+/// [`set_content_gating`]). When off, no class withholds or refuses anything.
+pub fn content_gating_enabled() -> bool {
+    match CONTENT_GATING.load(Ordering::Relaxed) {
+        0 => {
+            let on = std::env::var("HK_CONTENT_GATING")
+                .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "on" | "yes"));
+            CONTENT_GATING.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+        v => v == 2,
+    }
+}
+
+/// Enables or disables content gating for this process (overrides `HK_CONTENT_GATING`).
+pub fn set_content_gating(enabled: bool) {
+    CONTENT_GATING.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+}
 
 /// What may be done with the content of a signal, decode or recording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -75,10 +104,12 @@ impl ContentClass {
     pub const FAIL_CLOSED: ContentClass = ContentClass::MetadataOnly;
 
     /// Whether the *content* (payload, message text, audio, IQ carrying that content) may be
-    /// retained or passed to stream-output. Metadata is never gated.
-    ///
-    /// ADR-0004 default, provisional.
-    pub const fn permits_content(self) -> bool {
+    /// retained or passed to stream-output. Metadata is never gated. Always `true` unless
+    /// [`content_gating_enabled`].
+    pub fn permits_content(self) -> bool {
+        if !content_gating_enabled() {
+            return true;
+        }
         match self {
             ContentClass::Unrestricted | ContentClass::OwnKeyDecrypted => true,
             ContentClass::MetadataOnly
@@ -101,7 +132,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serde_names_and_gating() {
+    fn serde_names_round_trip() {
         let names: Vec<String> = ContentClass::ALL
             .iter()
             .map(|c| serde_json::to_string(c).unwrap())
@@ -116,31 +147,9 @@ mod tests {
                 "\"own-key-decrypted\""
             ]
         );
-        let permitted: Vec<_> = ContentClass::ALL
-            .iter()
-            .filter(|c| c.permits_content())
-            .collect();
-        assert_eq!(
-            permitted,
-            [&ContentClass::Unrestricted, &ContentClass::OwnKeyDecrypted]
-        );
-    }
-
-    #[test]
-    fn missing_or_unknown_classes_fail_closed() {
-        assert!(!ContentClass::FAIL_CLOSED.permits_content());
-        for missing in [None, Some(""), Some("unclassified"), Some("Unrestricted")] {
-            assert_eq!(
-                ContentClass::parse_fail_closed(missing),
-                ContentClass::MetadataOnly,
-                "{missing:?}"
-            );
-        }
         for class in ContentClass::ALL {
             let name = serde_json::to_value(class).unwrap();
             assert_eq!(ContentClass::parse_fail_closed(name.as_str()), *class);
         }
-        // A missing class in JSON is an error, never a silent default.
-        assert!(serde_json::from_str::<ContentClass>("null").is_err());
     }
 }

@@ -1,19 +1,17 @@
-//! T-022a WebSocket bridge (legal-guardrail egress path, docs/stream-contract.md §10):
-//! token auth, own-key refusal, consumer cap, a slow browser dropped without stalling the
-//! producer, 1:1 framing, and gated spectrum at the declared rate.
+//! T-022a WebSocket bridge (docs/stream-contract.md §10): token auth, consumer cap, a slow
+//! browser dropped without stalling the producer, and 1:1 framing.
 //!
 //! Use cases served: AWARE-042 and SPACE-050 are the history views this bridge feeds; the live
 //! waterfall is their live half (C39).
 
 use std::net::{SocketAddr, TcpStream};
-use std::os::unix::net::UnixStream;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use hk_api::stream::client::parse_record;
 use hk_api::stream::{
     BinaryRecord, CloseReason, ConsumerState, MessageRecord, Publisher, PublisherConfig, Record,
-    RecordFlags, StreamError, StreamHeader, StreamKind,
+    RecordFlags, StreamHeader, StreamKind,
 };
 use hk_api::{ApiState, Server, ServerConfig, StreamRegistry, Token};
 use hk_model::{ContentClass, Timestamp};
@@ -152,55 +150,6 @@ fn bridge_rejects_missing_and_bad_tokens() {
     let (mut ws2, _) = tungstenite::connect(req).unwrap();
     assert_eq!(header_of(&ws2.read().unwrap()), *publisher.header());
     assert_eq!(handle.open_consumers(), 2);
-}
-
-#[test]
-fn bridge_refuses_own_key_decrypted_streams_even_from_loopback() {
-    let registry = StreamRegistry::new();
-    let messages = Publisher::new(
-        StreamHeader::new(
-            "decodes/own",
-            StreamKind::Messages,
-            ContentClass::OwnKeyDecrypted,
-            "hk-api-test",
-        ),
-        PublisherConfig::default(),
-    )
-    .unwrap();
-    let mut iq_header = StreamHeader::new(
-        "iq/own",
-        StreamKind::Iq,
-        ContentClass::OwnKeyDecrypted,
-        "hk-api-test",
-    );
-    iq_header.datatype = Some("ci8".into());
-    iq_header.sample_rate_hz = Some(2e6);
-    let iq = Publisher::new(iq_header, PublisherConfig::default()).unwrap();
-    for p in [&messages, &iq] {
-        registry.register(p.header(), p.handle());
-    }
-    let server = serve(&registry);
-    for (id, p) in [("decodes/own", &messages), ("iq/own", &iq)] {
-        let handle = p.handle();
-        assert_eq!(
-            status_of(authed(server.local_addr(), id)),
-            403,
-            "{id}: own-key content never crosses the bridge"
-        );
-        // Refused by the contract's single subscription point, not by a bridge-side shortcut.
-        assert_eq!(handle.gate_stats().remote_consumers_refused, 1, "{id}");
-        assert_eq!(handle.open_consumers(), 0, "{id}");
-        // The same stream still serves a local consumer: the rule is locality.
-        let (local, _peer) = UnixStream::pair().unwrap();
-        handle
-            .subscribe("local", local, Box::new(|_| {}))
-            .expect("local consumer admitted");
-    }
-    let listing = registry.listing();
-    for s in listing["streams"].as_array().unwrap() {
-        assert_eq!(s["remote_permitted"], json!(false));
-        assert_eq!(s["content_class"], json!("own-key-decrypted"));
-    }
 }
 
 #[test]
@@ -443,95 +392,4 @@ fn slow_browser_is_dropped_while_the_producer_keeps_rate() {
         "the reading browser accounts for every seq (records + drop markers)"
     );
     assert!(records >= N / 2, "the reading browser kept receiving");
-}
-
-#[test]
-fn gated_class_spectrum_reaches_the_browser_only_at_the_declared_rate() {
-    const RATE: f64 = 10.0;
-    const BINS: usize = 64;
-    const N: u64 = 150;
-    let registry = StreamRegistry::new();
-    let mut publisher = Publisher::new(
-        spectrum_header(
-            "spectrum/gated",
-            ContentClass::MetadataOnly,
-            RATE,
-            BINS as u32,
-        ),
-        PublisherConfig::default(),
-    )
-    .unwrap();
-    let handle = publisher.handle();
-    registry.register(publisher.header(), handle.clone());
-    let server = serve(&registry);
-    let mut ws = authed(server.local_addr(), "spectrum/gated").unwrap();
-
-    // Offered at 100 rows/s (t and wall clock), ten times the declared rate.
-    let t0 = 1_789_300_800_000_000_000i64;
-    let start = Instant::now();
-    for i in 0..N {
-        let due = start + Duration::from_millis(10 * i);
-        if let Some(wait) = due.checked_duration_since(Instant::now()) {
-            thread::sleep(wait);
-        }
-        match publisher.publish_binary(BinaryRecord {
-            t: Timestamp::from_unix_nanos(t0 + i as i64 * 10_000_000),
-            sample_index: i * 1024,
-            flags: RecordFlags::empty(),
-            payload: &row(i, BINS),
-        }) {
-            Ok(_) | Err(StreamError::SpectrumGated { .. }) => {}
-            Err(e) => panic!("{e}"),
-        }
-    }
-    publisher.finish();
-    let msgs = drain(&mut ws);
-    let header = header_of(&msgs[0]);
-    assert_eq!(header.content_class, ContentClass::MetadataOnly);
-
-    let (mut delivered, mut gated) = (Vec::new(), 0u64);
-    for m in &msgs[1..] {
-        let Message::Binary(b) = m else {
-            panic!("binary stream")
-        };
-        match parse_record(StreamKind::Spectrum, b).unwrap() {
-            Record::Binary(d) => {
-                assert!(!d.header.flags.contains(RecordFlags::GATED));
-                assert_eq!(d.payload.len(), 4 * BINS, "delivered rows are whole");
-                delivered.push(d.header.t.as_unix_nanos());
-            }
-            Record::Dropped(mk) => {
-                assert!(mk.gated, "only gate markers on an unloaded consumer");
-                gated += mk.count;
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-    let span_s = N as f64 * 0.01;
-    eprintln!(
-        "gated spectrum: {} rows delivered, {gated} withheld of {N} offered over {span_s} s at declared {RATE} rows/s",
-        delivered.len()
-    );
-    assert_eq!(delivered.len() as u64 + gated, N, "every seq accounted for");
-    assert_eq!(handle.gate_stats().spectrum_rows_gated, gated);
-    assert!(
-        delivered.len() >= 5,
-        "rows within the declared rate do flow"
-    );
-    let burst = hk_api::stream::GATED_SPECTRUM_BURST_ROWS as usize;
-    assert!(
-        delivered.len() <= (span_s * RATE).ceil() as usize + burst,
-        "{} rows over {span_s} s exceeds {RATE} rows/s + burst",
-        delivered.len()
-    );
-    for (i, &t) in delivered.iter().enumerate() {
-        let in_window = delivered[i..]
-            .iter()
-            .take_while(|&&u| u < t + 1_000_000_000)
-            .count();
-        assert!(
-            in_window <= RATE as usize + burst,
-            "{in_window} rows within 1 s of row {i}"
-        );
-    }
 }

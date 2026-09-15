@@ -1970,7 +1970,7 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: in-progress
+    status: blocked
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2207,7 +2207,8 @@ tasks:
   - id: T-140
     milestone: M2
     title: "Baseline hardening nits: SlotSeries packed()/packed_at() not public without the decay multiplier, assert the fold-equivalence fingerprint (reference-fold count exact, novelty sum 1e-9), debug_assert finite decay factor, share pool membership helper"
-    status: todo
+    status: done
+    commit: 3828015
     deps: [T-137]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2222,13 +2223,102 @@ tasks:
   - id: T-141
     milestone: M2
     title: "Bias-corrected floor for mixed-shape tiles (Gamma-mixture log-bias model) so scheduler-driven tiles report floor_db"
-    status: todo
+    status: in-progress
     deps: [T-139]
     parallel_group: M2B
     use_cases: [AWARE-042, SPACE-001]
     found_by: "T-139 fix round 2026-09-15: in the 2 h default-scheduler scene all 72 level-0 tiles are mixed-shape (varying n_avg per hop), so 0 tiles have floor_db and occupancy uses the 80% method; fixed-tune scene 72/72 uniform with floor"
     acceptance: "per-cell floor bias for a mixture of Gamma shapes (weights by frame count or span per n_avg) computed from tile metadata; scheduler tiles report floor_db within 0.5 dB median of fixed-tune floor on the same noise; fixed-tune values bit-identical; /api/floor documents mixed handling"
     area: crates/hk-store/src/radiometry, crates/hk-store/src/history, docs/adr/0012 §2.10
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-142
+    milestone: M2
+    title: "De-flake legal acceptance sentinel search: identity sentinels matched by chance in per-run UUIDs/timestamps (test reliability only, no new legal checks)"
+    status: cancelled
+    cancelled_reason: "user 2026-09-15: do not de-flake a test we are deleting; all legal/licensing tests removed in T-143"
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "Full check after T-139 (aa41cbb) 2026-09-15: legal_untagged_recording_in_the_paging_band_yields_no_content_or_identity_anywhere failed at tests/e2e/tests/acceptance/legal.rs:346 once; passed in isolation and in 2 of 2 full acceptance re-runs"
+    acceptance: "identify which output/sentinel matched (log the match context on failure); make the byte search robust to coincidental matches (e.g. minimum sentinel length or delimiter-bounded match, excluding UUID/timestamp fields) without weakening detection of a real clear-identity leak (the tagged positive control still trips); 20 repeated runs green"
+    area: tests/e2e/tests/acceptance/{legal.rs,common.rs}
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-143
+    milestone: M2
+    title: "Remove all legal/licensing tests (dedicated files, acceptance legal cases, legal sentinel assertions); runtime content gating stays but default-permissive, opt-in only, untested"
+    status: done
+    commit: 4b40f59
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "user instruction 2026-09-15: hackriff must not run legal/licensing tests at all; legality is the user's concern, not a test"
+    acceptance: "retune_legal.rs, legal_restricted.rs, legal_band_derived.rs and acceptance/legal.rs deleted; legal/withheld/identity-sentinel assertions removed elsewhere (non-legal parts kept); content/identity/recordings/audio flow by default in every band, gating only via explicit opt-in; no gating tests added; workspace builds, targeted nextest + just acceptance + lint green"
+    area: crates/hk-pipeline/{tests,src/class.rs,src/chains,src/recipes}, crates/hk-stream, crates/hk-plugins, crates/hk-model/src/repo, crates/hk-demod/tests, tests/e2e, py/fixtures, ui/src/controls, justfile, docs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    priority: "ahead of other M2 work (user)"
+  - id: T-144
+    milestone: M2
+    title: "Build-CPU tuning for parallel agents: max 4 Rust-building agents, CARGO_BUILD_JOBS=6 + nextest --test-threads 6, seed new worktree targets by APFS clone of main target, sccache on (CLAUDE.md coordination launch step)"
+    status: done
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "user 2026-09-15: agents oversubscribe the 28 cores (several full builds each spawning ~28 jobs)"
+    acceptance: "CLAUDE.md Coordination has the worktree launch step; running agents told to apply the caps; future briefs include CARGO_BUILD_JOBS=6, --test-threads 6 and the cp -c -R -p seed"
+    area: CLAUDE.md
+    needs: none
+    model: opus
+    effort: low
+    core_interface: false
+  - id: T-145
+    milestone: M2
+    title: "Build/test speed: mock SDR Pacing::RealTime -> Unpaced except pacing/backpressure/real-time listen tests; lld linker if faster; cranelift dev/test experiment; measure nextest wall before/after"
+    status: in-progress
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "user 2026-09-15: make compile+test runs themselves faster (not just scheduling); user called it T-144 but that ID was the build-CPU tuning task"
+    acceptance: "before/after nextest total wall and just acceptance wall recorded with load averages; RealTime kept only where pacing is the property under test (named, reasoned); lld kept only if all links succeed and faster; cranelift kept only if faster and all green; opt-level=3 dev-package overrides untouched; all tests green"
+    area: crates/hk-core/src/source/mock, tests using the mock SDR (crates/*/tests, tests/e2e), .cargo/config.toml
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-146
+    milestone: M2
+    title: "Alarm path vs survey report disagree on baseline maturity: AlarmService suppresses every busier/level input as immature-baseline while the report shows the baseline available (injected channel busier z 11.4)"
+    status: in-progress
+    decision: "user 2026-09-15: accumulate busier/quieter alarm evidence across consecutive intervals (sequential/Stouffer like the report) AND correct between_var for expected binomial sampling noise; ADR-0012 §3.4/§7.2 amended, false-alarm budget kept. Gain step: pass = no alarm + step disclosed in provenance (no explained-anomaly row)"
+    deps: []
+    parallel_group: M2A
+    use_cases: [AWARE-042, AWARE-044, AWARE-027]
+    found_by: "T-124 WIP c0ab427 2026-09-15: 46 h scene (2 x 1 s windows per 15-min interval, default scheduler + bandit): 815 immature-baseline suppressions each, 0 busier alarms; gain step at h42 disclosed but not provenance-explained"
+    acceptance: "root cause identified; alarm path and report use one ADR-0012 maturity rule (documented in §7); time-compressed hk-pipeline repro fails before and passes after, asserting alarm-path maturity == report maturity for the same key/time; gain step on a mature baseline is provenance-explained via the alarm path"
+    area: crates/hk-pipeline/src/{attention,alarms,occupancy,reports}.rs, crates/hk-context/src/occupancy/{alarm,baseline,novelty}.rs, crates/hk-context/src/report, docs/adr/0012
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+
+  - id: T-147
+    milestone: M2
+    title: "Channel FCO under the scheduler: 50% channel reads FCO 0.000 (truth 0.494) and a 10% markov channel is never learned in the T-124 scene"
+    status: todo
+    deps: [T-141]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-124 WIP c0ab427 2026-09-15 (acceptance (a)); possibly downstream of mixed-shape tiles having no floor (T-141) or channel learning near 433.35-433.41 MHz"
+    acceptance: "root cause; per-channel FCO within Wilson CI of hidden truth for the T-124 scene channels (a-priori CI from reported n_eff); channel learning finds the 10% markov channel; hk-pipeline time-compressed repro"
+    area: crates/hk-context/src/occupancy/{engine,channels,threshold}.rs, crates/hk-pipeline/src/occupancy.rs
     needs: none
     model: opus
     effort: medium

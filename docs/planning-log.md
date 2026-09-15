@@ -1417,3 +1417,99 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Policy:** the user said no legal extensions, so this is a flaky pre-existing test to harden, not a new legal check.
   - **Disk:** 29 GB free.
   - **T-124 resumed** on main (T-139 included), merging `t-124-wip`: default scheduler settings, windows ≥ dwell minimum, thresholds derived a priori, plus new-emitter and restart-site tests.
+- **B0.369 Disk back to 93 GB free (freed outside this session). Launches resumed.**
+  - T-140 (Sonnet, baseline hardening nits) and T-141 (Opus, Gamma-mixture floor for mixed tiles) launched in parallel with T-124.
+  - The three agents edit disjoint areas: baseline, radiometry/history, tests/e2e.
+- **B0.370 Legal acceptance failure confirmed flaky.**
+  - Acceptance re-runs: 32/32 twice.
+  - Treated as green for the T-139 merge.
+  - T-142 added (Sonnet, test reliability only, no new legal checks): log match context and harden the sentinel byte search against coincidental UUID/timestamp matches. It launches after T-124, which edits tests/e2e.
+- **B0.371 USER DECISION: no legal/licensing tests at all.**
+  - **T-143 launched (Opus), ahead of other M2 work.** It deletes:
+    - crates/hk-pipeline/tests/{retune_legal,legal_restricted,legal_band_derived}.rs
+    - tests/e2e acceptance/legal.rs and the `listen.rs` legal case
+    - legal/withheld/identity-sentinel assertions elsewhere
+  - **Runtime gating** stays but becomes default-permissive (opt-in only), and untested.
+  - **T-142 cancelled** (do not de-flake a test being deleted).
+  - **Merge order:** T-143 merges before T-124/T-140/T-141.
+- **B0.372 T-140 committed (3828015, Sonnet); coordinator reviewed the diff: OK.**
+  - `packed()`/`packed_at()` return `ScaledMoments`, which applies the decay multiplier.
+  - Fingerprint pinned: quiet (0, 0.0); changed (0, 148.000330353452) at 1e-9.
+  - `debug_assert` on a finite factor.
+  - Shared `pool_membership`/`is_empty_slot` helpers.
+  - Tests: hk-store 7, hk-context 40.
+  - Merges after T-143 (user priority).
+- **B0.373 T-144 build-CPU tuning (user request, done).**
+  - **Concurrency:** at most 4 Rust-building agents; the coordinator's full check counts as one.
+  - **Jobs:** `CARGO_BUILD_JOBS=6`, and nextest/cargo test run with `--test-threads 6`.
+  - **Seeding:** a new worktree target is seeded with `cp -c -R -p main/target` (APFS clone). `-p` keeps mtimes so workspace crates rebuild instead of reusing stale artifacts; this is a coordinator addition to the user's `cp -c -R`.
+  - **sccache:** stays on (~44% hit rate).
+  - **Where recorded:** CLAUDE.md Coordination and memory. This supersedes the 2026-09-14 "no target seeding" note.
+  - **Running agents:** T-143, T-124 and T-141 were messaged to apply the caps from their next command (3 building agents, under the cap).
+- **B0.374 T-145 launched (Opus): build/test speed (user request; the user's "T-144" was renumbered because that ID is taken).**
+  - Work items, biggest lever first:
+    1. Mock SDR tests from RealTime to Unpaced, except tests of pacing, backpressure or real-time listen.
+    2. lld linker.
+    3. Cranelift experiment.
+  - Before/after nextest wall times are to be measured.
+  - Four building agents now: T-143, T-124, T-141, T-145 (at the cap).
+- **B0.375 T-143 committed unverified (0170803).** The agent was at 277k tokens and stopped on instruction; handoff is in the scratchpad.
+  - **Deleted:** four hk-pipeline legal test files, acceptance `legal.rs`, `gating_tests.rs`, and two `egress_gaps.rs` files. Acceptance goes from 38 to 35.
+  - **Gating:** off by default; opt in with `HK_CONTENT_GATING=1` or `set_content_gating(true)`.
+  - **Migration 0005:** drops the DB content checks.
+  - **Finisher launched (fresh Opus):**
+    - Audit that the deleted files were legal-only.
+    - Build, run nextest on the affected crates, run acceptance and lint, and fix what fails.
+    - Check `aware_036` acceptance.
+    - Judge the `recovering_consumer_sees_exact_drop_markers` failure.
+- **T-141:** WIP commit f3eeac1, with its handoff pending a final test count.
+- **B0.376 T-141 WIP (f3eeac1): Gamma-mixture floor works, but the acceptance comparison fails.**
+  - **What works:**
+    - Gamma-mixture floor bias solved by bisection, cached by shape set.
+    - Tile format 4 adds per-shape counts; v1–v3 tiles are still readable.
+    - `scheduler_history`: 72/72 tiles have a floor (was 0).
+    - API provenance gains `cell_shapes`.
+  - **What fails:** the a-priori check of scheduler vs fixed-tune floor. The floors are −99.80 vs −100.81 dB, a 1.01 dB gap against the 0.5 dB limit.
+  - **Cause (not yet confirmed):** the gap is already in the uncorrected power mean, and a carrier reads 2.2 dB lower under the scheduler. So it sits upstream of the mixture model; the suspect is mock SDR resample/noise-fill level scaling or per-bin vs PSD normalisation across RBWs.
+  - **Next:** fresh Opus finisher launched to root-cause and fix at the source. The threshold stays unchanged.
+- **B0.377 T-124 WIP (c0ab427): 3/8 green.** Handoff: scratchpad `t124b-handoff.md`.
+  - **Scenes:** main 46 h with 2 × 1 s windows per 15-min interval (413 s run); new-emitter scene 9 d; restart scene 3 h.
+  - **Pass:**
+    - (e) simulator comparison.
+    - (j) restart keeps the pinned site.
+    - (c) false alarms: 0 against a bound of 1. Weak evidence, since no alarm could raise.
+  - **Product bugs:**
+    - (b/g/h): the alarm path marks every input immature-baseline (815) while the report shows the baseline available with z 11.4. → T-146, launched.
+    - (a): the 50% channel reads FCO 0 against truth 0.494, and a 10% channel is never learned. → T-147, after T-141.
+  - **Test issues, fixed in the next T-124 round:**
+    - (d): the coverage bound was mis-derived. The report takes coverage from history, which records ~0.49 s of each 1 s window.
+    - (i): the span query hit its 7 d cap. A fix is committed but not yet re-run.
+  - **Also noted:** 3 bandit dwells in the main scene; a dwell near a replay window's end claims 2 s past its last sample (replay effect).
+  - **Status:** T-124 blocked on T-146 and T-147.
+- **B0.378 T-146: no maturity mismatch; the premise was wrong.**
+  - **Evidence:** a diagnostic re-run of the T-124 scene shows the alarm path and the report agree on maturity. h36–46 injected channel: all-hours pool mature, occupancy z 4.67, novelty 0.238.
+    - The 815 immature suppressions are expected: first ~24 h per channel, two channels first seen at h28, and one channel that never reaches 24 h.
+  - **Real gap, per-interval scoring power:**
+    - Alarm on-level needs z ≥ 7.9.
+    - With 2 × 1 s windows per interval, measured FCO is ~0 or 1, and `between_var()` (baseline.rs:462, ~0.041) dominates the variance in novelty.rs:84. One interval caps at z ≈ 4.7.
+    - The report's z 11.4 pools many intervals; the alarm path never does.
+    - The CUSUM compares the 14-day-half-life adaptive copy with the reference, so it barely moves in 10 h.
+  - **Gain step:** the new gain state starts its own level pool, so there is no level z and no alarm (correct), but also no explained anomaly (`provenance_explained` never set).
+  - **Decision needed (user):**
+    - Alarm evidence accumulation across intervals, CUSUM on per-interval z, and/or correcting `between_var` for sampling noise, versus denser scene visits.
+    - What test (h) should expect.
+  - **Artifacts:** diagnostic patch and logs in scratchpad `t146-*`. T-146 worktree removed; no commit.
+- **B0.379 User decisions and merges.**
+  - **Alarm evidence (user chose "accumulate + fix variance"):** the alarm path pools per-interval evidence across consecutive intervals, and `between_var` subtracts the expected binomial sampling noise. ADR-0012 §3.4/§7.2 amended; false-alarm budget kept. → T-146 re-scoped to implement it.
+  - **Gain step (user chose "no alarm + step disclosed"):** T-124 (h) passes when no alarm is raised and the step is disclosed in provenance.
+  - **T-143 merged (4b40f59):**
+    - Build and lint green; targeted nextest 641 run, 640 passed plus the fixed `stream_tail` test; acceptance 28 + 2 hardware-ignored.
+    - `listen_retune`'s non-legal coverage remains in `listen_lifecycle`.
+    - The drop-markers failure is an unrelated load flake (10/10 in isolation).
+  - **T-140 merged (3828015).** Both worktrees removed; full check started.
+  - **T-141 WIP (e1a3ade), root cause found:** the mock SDR re-rounds re-rendered scheduler hops to int8 a second time.
+    - The scene is quantisation-limited (noise ~0.5 code rms): single rounding predicts −100.77 dBFS/Hz against −100.81 measured; double rounding predicts −99.84 against −99.86 measured.
+    - Pipeline normalisation and gains are correct.
+    - Its fixed dequant filter narrows the gap to 0.62 dB, but attenuates later emitters by up to 1.2 dB, so it is not acceptable as is.
+    - Second finisher launched.
+  - **T-145 progress:** most slow tests are already unpaced (CPU-bound serial tests dominate). Only 2 tests switched; `api_contract` via `hk serve --device mock:` is still to judge. lld and cranelift are installed.

@@ -211,9 +211,7 @@ impl Tap {
         status.burst = self.bursts.fetch_add(1, Ordering::Relaxed);
         status.emitter_id = emitter;
         // Content needs both classes to permit it; own-key content only on an own-key stream.
-        let burst_permits = class.permits_content()
-            && (class != ContentClass::OwnKeyDecrypted
-                || self.class == ContentClass::OwnKeyDecrypted);
+        let burst_permits = hk_stream::gate::message_content_permitted(self.class, class);
         status.content_withheld = self.class.permits_content() && !burst_permits;
         match publisher.publish_status(p.t, p.sample_index, &status.to_value()) {
             Ok(_) => inc(&c.status_records),

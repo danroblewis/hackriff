@@ -224,7 +224,7 @@ fn parse_frames(body: &Map<String, Value>) -> Result<Value, CtlResponse> {
 /// Whether frame content may be served over HTTP: the class permits content and is not
 /// local-only (`own-key-decrypted` is served to Unix-socket consumers only, contract §2).
 pub(crate) fn servable(class: ContentClass) -> bool {
-    class.permits_content() && class != ContentClass::OwnKeyDecrypted
+    hk_stream::gate::remote_transport_permitted(class) && class.permits_content()
 }
 
 pub(crate) fn is_capture_id(id: &str) -> bool {

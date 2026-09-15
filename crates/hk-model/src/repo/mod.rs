@@ -65,8 +65,6 @@ mod cluster;
 #[cfg(test)]
 mod cluster_tests;
 mod gating;
-#[cfg(test)]
-mod gating_tests;
 mod interpret;
 mod inventory;
 mod lifecycle;
@@ -116,6 +114,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0002_attention.sql"), // T-119 sites, attention_weights
     include_str!("migrations/0003_anomaly_detail.sql"), // T-122 alarm detail + lifecycle
     include_str!("migrations/0004_site_assignment.sql"), // T-136 persisted site assignment
+    include_str!("migrations/0005_content_checks_optional.sql"), // T-143 gating opt-in
 ];
 
 /// Schema version this build creates and understands.

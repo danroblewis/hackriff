@@ -924,19 +924,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn restricted_policy_needs_an_allowlist() {
-        let mut v = minimal();
-        v["output_policy"] = json!({"content_class": "restricted-paging"});
-        let r: Recipe = serde_json::from_value(v).unwrap();
-        let errors = r.validate_structure().unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.path == "output_policy.metadata_keys")
-        );
-    }
-
     /// T-111: the `messages` decode mapping (identity scheme, format, at least one field,
     /// `service` token) is validated; unknown token schemes resolve to `other:<scheme>`.
     #[test]

@@ -184,15 +184,6 @@ fn refusals_are_one_frame_and_reveal_nothing_before_the_token() {
         &bits_header("bits/real", ContentClass::Unrestricted),
         p.handle(),
     );
-    let own = Publisher::new(
-        bits_header("bits/own", ContentClass::OwnKeyDecrypted),
-        PublisherConfig::default(),
-    )
-    .unwrap();
-    streams.register(
-        &bits_header("bits/own", ContentClass::OwnKeyDecrypted),
-        own.handle(),
-    );
     let gate = Arc::new(Fake {
         refuse: Some(OpenRefusal::gated(
             ContentClass::RestrictedPaging,
@@ -234,11 +225,7 @@ fn refusals_are_one_frame_and_reveal_nothing_before_the_token() {
     assert_eq!(g["status"], 403);
     assert_eq!(g["content_class"], "restricted-paging");
     assert_eq!(gate.opened.load(Ordering::SeqCst), 0);
-    // Own-key streams are local-only: a TCP consumer is refused before anything is queued.
-    let o = refused(addr, &format!("bits/own?token={TOKEN}\n"));
-    assert_eq!(o["status"], 403);
-    assert_eq!(own.handle().gate_stats().remote_consumers_refused, 1);
-    assert_eq!(server.stats().refused, 10);
+    assert_eq!(server.stats().refused, 9);
     assert_eq!(server.stats().served, 0);
 }
 

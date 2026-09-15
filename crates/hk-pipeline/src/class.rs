@@ -1,4 +1,9 @@
-//! Content classes for the pipeline's outputs (ADR-0004 gating; legal guardrail).
+//! Content classes for the pipeline's outputs (ADR-0004 gating).
+//!
+//! **Gating is off by default (T-143):** classes are derived and reported as information only;
+//! nothing is withheld or refused unless content gating is opted in
+//! ([`hk_model::content_gating_enabled`], `HK_CONTENT_GATING=1`).
+//!
 //!
 //! - **Source class** ([`source_class`]): a recording's `hackriff:content_class` when present
 //!   (parsed failing closed). Without one it is derived from frequency ([`band_class`]):
@@ -365,88 +370,4 @@ pub fn spectrum_header(
     h.bandwidth_hz = Some(fs);
     h.max_frame_len = (hk_stream::BINARY_RECORD_HEADER_LEN + 4 * bins) as u32;
     h
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn band_priors_and_classification_fail_closed() {
-        assert_eq!(band_class(&[100.8e6], 2.4e6), ContentClass::Unrestricted);
-        assert_eq!(band_class(&[1090e6], 2.4e6), ContentClass::Unrestricted);
-        assert_eq!(band_class(&[433.92e6], 0.5e6), ContentClass::MetadataOnly);
-        assert_eq!(band_class(&[], 1e6), ContentClass::MetadataOnly);
-        let rules = vec![ClassRule {
-            freq_hz: [433.0e6, 435.0e6],
-            content_class: ContentClass::Unrestricted,
-            by: "user: own sensor".into(),
-        }];
-        let own = classify_emitter(&rules, ContentClass::MetadataOnly, 433.9e6, 433.99e6);
-        assert_eq!(own.map(|c| c.0), Some(ContentClass::Unrestricted));
-        assert!(classify_emitter(&rules, ContentClass::MetadataOnly, 440e6, 441e6).is_none());
-        let restricted =
-            classify_emitter(&rules, ContentClass::RestrictedPaging, 433.9e6, 433.99e6).unwrap();
-        assert_eq!(restricted.0, ContentClass::RestrictedPaging);
-        assert!(!restricted.0.permits_content());
-    }
-
-    #[test]
-    fn restricted_bands_are_derived_from_frequency_and_clamp_rules() {
-        // Untagged windows over paging and cellular allocations.
-        assert_eq!(band_class(&[930e6], 0.5e6), ContentClass::RestrictedPaging);
-        assert_eq!(band_class(&[931.5e6], 2e6), ContentClass::RestrictedPaging);
-        assert_eq!(
-            band_class(&[152.24e6], 0.2e6),
-            ContentClass::RestrictedPaging
-        );
-        assert_eq!(
-            band_class(&[880e6], 0.5e6),
-            ContentClass::RestrictedCellular
-        );
-        assert_eq!(band_class(&[836e6], 2e6), ContentClass::RestrictedCellular);
-        assert_eq!(
-            band_class(&[1940e6], 10e6),
-            ContentClass::RestrictedCellular
-        );
-        assert_eq!(band_class(&[739e6], 5e6), ContentClass::RestrictedCellular);
-        // A window only partly over a restricted band is restricted (its IQ carries it).
-        assert_eq!(band_class(&[920e6], 20e6), ContentClass::RestrictedPaging);
-        // Unrestricted and fail-closed bands are unchanged.
-        assert_eq!(band_class(&[101.3e6], 2.4e6), ContentClass::Unrestricted);
-        assert_eq!(band_class(&[100.8e6], 2.4e6), ContentClass::Unrestricted);
-        assert_eq!(band_class(&[915e6], 10e6), ContentClass::MetadataOnly);
-        assert_eq!(band_class(&[433.62e6], 2e6), ContentClass::MetadataOnly);
-        assert_eq!(band_class(&[1698e6], 2.4e6), ContentClass::MetadataOnly);
-        // hk-context's cellular rows are part of the table.
-        assert!(
-            restricted_bands()
-                .iter()
-                .any(|b| b.source.starts_with("us-47cfr2106-compact:cellular"))
-        );
-
-        let open = |lo: f64, hi: f64| ClassRule {
-            freq_hz: [lo, hi],
-            content_class: ContentClass::Unrestricted,
-            by: "test: tries to open restricted content".into(),
-        };
-        for (fc, class) in [
-            (930.0e6, ContentClass::RestrictedPaging),
-            (880.0e6, ContentClass::RestrictedCellular),
-        ] {
-            let rules = vec![open(fc - 1e6, fc + 1e6)];
-            for source in [
-                ContentClass::MetadataOnly,
-                ContentClass::Unrestricted,
-                band_class(&[fc], 2e6),
-            ] {
-                let got = classify_emitter(&rules, source, fc - 5e3, fc + 5e3).unwrap();
-                assert_eq!(got.0, class, "{fc} under {source:?}");
-                assert!(!got.0.permits_content());
-            }
-        }
-        let fm = vec![open(101.2e6, 101.4e6)];
-        let got = classify_emitter(&fm, ContentClass::Unrestricted, 101.25e6, 101.35e6).unwrap();
-        assert_eq!(got.0, ContentClass::Unrestricted);
-    }
 }

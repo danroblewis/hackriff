@@ -3,7 +3,6 @@
 //! reduced to the recipe's allowlist; status/edit records are metadata-only; and the published
 //! byte stream is itself a recorded decoded stream that `RecordedFrames` reads back (§14.7).
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,10 +12,7 @@ use hk_stream::inspector::{
     InspectorProfile, InspectorRecordType, InspectorSource, LayerNode, LayerTree, NodeType,
     RecordedFrames, byte_span,
 };
-use hk_stream::{
-    Declared, MetadataPolicy, MetadataType, Publisher, PublisherConfig, StreamError, StreamHeader,
-    StreamKind,
-};
+use hk_stream::{Declared, Publisher, PublisherConfig, StreamError, StreamHeader, StreamKind};
 use serde_json::json;
 
 const SECRET_HEX: &str = "c0ffee5ec2e7";
@@ -142,46 +138,6 @@ fn unrestricted_frames_carry_bytes_and_layers_and_read_back_as_a_recording() {
     assert_eq!(first.content, rec.content);
     assert_eq!(first.metadata, rec.metadata);
     assert_eq!(first.decoder.as_deref(), Some("recipe:trial@1"));
-}
-
-#[test]
-fn restricted_frames_are_gated_and_metadata_is_reduced_to_the_allowlist() {
-    let policy = MetadataPolicy {
-        keys: BTreeMap::from([
-            ("frame".to_owned(), MetadataType::Integer),
-            ("bit_len".to_owned(), MetadataType::Integer),
-        ]),
-        frame_models: Vec::new(),
-        labels: Vec::new(),
-        identity: None,
-    };
-    let p = Publisher::with_metadata_policy(
-        header(ContentClass::RestrictedPaging),
-        PublisherConfig::default(),
-        policy,
-    )
-    .unwrap();
-    // The record claims unrestricted; the header class clamps it.
-    let bytes = publish(p, &[record(ContentClass::Unrestricted)]);
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(
-        !text.contains(SECRET_HEX) && !text.contains("0xC0FF"),
-        "{text}"
-    );
-
-    let mut r = RecordedFrames::open(&bytes[..]).unwrap();
-    let f = r.next_frame().unwrap().unwrap();
-    assert!(f.gated && f.content.is_none());
-    assert_eq!(f.content_class, ContentClass::RestrictedPaging);
-    assert_eq!(
-        f.metadata,
-        FrameMetadata {
-            frame: Some(4),
-            bit_len: Some(48),
-            ..Default::default()
-        }
-    );
-    assert_eq!(f.frame_model.as_deref(), Some(INSPECTOR_MESSAGE_SCHEMA));
 }
 
 #[test]

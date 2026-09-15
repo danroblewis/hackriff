@@ -7,10 +7,6 @@
 //!   whose mode was chosen automatically (WFM), whose content is demodulated FM audio (audio-band
 //!   energy, 19 kHz pilot removed although the probe found it in the signal), with bounded
 //!   latency; a third concurrent listener is refused; frames stop on detach.
-//! - **Sentinel (legal):** the same station relabelled into the 930 MHz paging band, with the
-//!   recording even tagged `unrestricted`, found through its detections, is refused by detection,
-//!   by selection and for every inventory emitter with a restricted-paging reason: no audio
-//!   frame, no probe, no chain attached.
 
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
@@ -20,7 +16,6 @@ use std::time::{Duration, Instant};
 use hk_api::{ApiState, Server, ServerConfig, Token};
 use hk_e2e::TruthItem;
 use hk_e2e::blind::matching;
-use hk_model::{FreqRange, Region};
 use hk_stream::record::parse_status_record;
 use hk_stream::{BinaryRecordHeader, OpenerRegistry, StreamHeader, StreamKind};
 use serde_json::Value;
@@ -330,86 +325,6 @@ fn signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches() {
     assert_eq!(s["refused_busy"], 1);
     assert_eq!(s["refused_class"], 0);
 
-    live.handle.stop();
-    finish(live.handle);
-}
-
-#[test]
-fn legal_listen_paging_band_scene_yields_no_audio_and_no_chain() {
-    const RELABEL_HZ: f64 = 930.5e6 - 101.3e6;
-    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
-        return;
-    };
-    let truth = station(&fx);
-    let live = blind_live(
-        &meta,
-        "lsnpg",
-        BlindSource {
-            relabel_hz: RELABEL_HZ,
-            // Even a recording the user tags `unrestricted` cannot open a paging band.
-            vouched_class: Some("unrestricted"),
-            ..BlindSource::default()
-        },
-    );
-    let server = serve_live(&live);
-    let addr = server.local_addr();
-    // Without a WFM chain in this band the station has no emitter of its own (it sits inside a
-    // wider inventory cluster), so it is found through its detections, matched blind.
-    let deadline = Instant::now() + Duration::from_secs(240);
-    let (detection, f_center, obw) = loop {
-        let all = repo(&live.dir.0)
-            .detections_in_region(&Region::new(FreqRange::new(0.0, 7.0e9), ever()))
-            .unwrap();
-        let hits = matching(
-            &truth,
-            RELABEL_HZ,
-            &all,
-            |d| (d.f_center_hz, d.obw_hz),
-            CENTER_TOL_HZ,
-        );
-        if let Some(d) = hits.iter().max_by(|a, b| a.obw_hz.total_cmp(&b.obw_hz)) {
-            eprintln!(
-                "[{TAG}] {} of {} detections match the relabelled truth",
-                hits.len(),
-                all.len()
-            );
-            break (d.id, d.f_center_hz, d.obw_hz);
-        }
-        assert!(Instant::now() < deadline, "[{TAG}] station not detected");
-        std::thread::sleep(Duration::from_millis(250));
-    };
-    let (_, rows) = api_inventory(addr);
-    let mut queries = vec![
-        format!("detection={detection}"),
-        format!(
-            "f_lo={}&f_hi={}",
-            f_center - obw / 2.0,
-            f_center + obw / 2.0
-        ),
-    ];
-    // Every emitter the inventory holds for this paging-band scene is refused too.
-    queries.extend(
-        rows.iter()
-            .filter_map(|r| r["id"].as_str())
-            .map(|id| format!("emitter={id}")),
-    );
-    let refusals = queries.len() as u64;
-    for query in queries {
-        let mut ws = open(addr, &query);
-        let refusal = first(&mut ws).expect_err("paging-band audio must be refused");
-        eprintln!("[{TAG}] {query}: {refusal}");
-        assert_eq!(refusal["status"], 403);
-        assert_eq!(refusal["content_class"], "restricted-paging");
-        let (bins, code) = drain(&mut ws);
-        assert_eq!(bins, 0, "[{TAG}] no audio frame for a paging-band scene");
-        assert_eq!(code, Some(4403));
-    }
-    let s = status(addr)["listen"].clone();
-    eprintln!("[{TAG}] paging scene listen counters: {s}");
-    assert_eq!(s["refused_class"], refusals);
-    assert_eq!(s["probes"], 0, "no ring read for a refused extent");
-    assert_eq!(s["attached"], 0, "no chain attached");
-    assert_eq!(s["frames"], 0);
     live.handle.stop();
     finish(live.handle);
 }

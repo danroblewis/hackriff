@@ -1,8 +1,6 @@
 //! Plugin host tests (T-014, ADR-0003, docs/stream-contract.md §9), driving the real
 //! `hk-dummy-plugin` subprocess. Use case: SIGNAL-001.
 
-use std::io::Read;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -10,22 +8,20 @@ use std::time::{Duration, Instant};
 
 use hk_model::sigmf::Datatype;
 use hk_model::{
-    AnnotationTarget, ContentClass, CrcStatus, Decode, DecodedIdentity, EmitterId, FreqRange,
-    IdentityScheme, Region, Repository, SampleTime, TimeRange, Timestamp,
+    ContentClass, CrcStatus, Decode, DecodedIdentity, EmitterId, IdentityScheme, Repository,
+    SampleTime, Timestamp,
 };
 use hk_plugins::{
-    Charset, HostError, IdentitySpec, Ingest, InputStreamDesc, ManifestError, MetadataPolicy,
-    MetadataType, PluginContext, PluginInstance, PluginManifest, PluginState, PushOutcome,
-    RestartPolicy,
+    HostError, Ingest, InputStreamDesc, ManifestError, PluginContext, PluginInstance,
+    PluginManifest, PluginState, PushOutcome, RestartPolicy,
 };
 use hk_stream::{
-    BinaryRecord, ListenAddr, Listener, Publisher, PublisherConfig, Record, RecordFlags,
-    StreamHeader, StreamKind, StreamReader,
+    BinaryRecord, Listener, Publisher, PublisherConfig, Record, RecordFlags, StreamHeader,
+    StreamKind, StreamReader,
 };
 use serde_json::json;
 
 const DUMMY: &str = env!("CARGO_BIN_EXE_hk-dummy-plugin");
-const SENTINEL: &str = "SENTINEL-PAGER-TEXT-4c1d";
 const RATE: f64 = 250_000.0;
 const ANCHOR_NS: i64 = 1_757_000_000_000_000_000;
 const ICAOS: [&str; 4] = ["a1b2c0", "a1b2c1", "a1b2c2", "a1b2c3"];
@@ -126,12 +122,6 @@ fn temp_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-fn contains(haystack: &[u8], needle: &str) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|w| w == needle.as_bytes())
 }
 
 /// Dummy round trip: synthetic channel samples in, messages out, Decode rows in an in-memory
@@ -396,175 +386,6 @@ fn stalled_plugin_is_dropped_counted_and_killed() {
         "{:?}",
         mon.log_tail()
     );
-}
-
-/// A plugin claiming `unrestricted` under a `restricted-paging` manifest is clamped, and its
-/// content never reaches the database file or the republished stream. The unrestricted run is
-/// the positive control that the byte scans can see the sentinel.
-#[test]
-fn clamped_class_and_gated_content_are_never_persisted_or_streamed() {
-    for (manifest_class, gated) in [
-        (ContentClass::RestrictedPaging, true),
-        (ContentClass::Unrestricted, false),
-    ] {
-        let dir = temp_dir(if gated { "g" } else { "u" });
-        let db = dir.join("hk.sqlite");
-
-        // What a restricted-class manifest must declare: typed metadata, frame model, label and
-        // identity shape that survive the gate (docs/stream-contract.md §9.3). The republisher
-        // carries the same policy, since egress reduces restricted rows again.
-        let policy = MetadataPolicy {
-            keys: [
-                ("icao", MetadataType::Hex { max_len: 6 }),
-                ("df", MetadataType::Integer),
-                ("crc", MetadataType::Enum(vec!["ok".into()])),
-                ("records", MetadataType::Integer),
-            ]
-            .into_iter()
-            .map(|(k, t)| (k.to_owned(), t))
-            .collect(),
-            frame_models: vec!["adsb-df17".into()],
-            labels: vec!["adsb".into()],
-            identity: Some(IdentitySpec {
-                scheme: IdentityScheme::AdsbIcao,
-                charset: Charset::Hex,
-                max_len: 6,
-            }),
-        };
-        let mut header = StreamHeader::new(
-            "decodes/dummy",
-            StreamKind::Messages,
-            ContentClass::Unrestricted,
-            "hk-plugins-test",
-        );
-        header.max_frame_len = 64 * 1024;
-        header.message_schema = Some("hackriff.dummy/1".into());
-        let publisher = Publisher::with_metadata_policy(
-            header,
-            PublisherConfig {
-                queue_bytes: 1024 * 1024,
-                ..PublisherConfig::default()
-            },
-            policy.clone(),
-        )
-        .unwrap();
-        let handle = publisher.handle();
-        let listener = Listener::bind_tcp("127.0.0.1:0", handle.clone()).unwrap();
-        let ListenAddr::Tcp(addr) = listener.addr().clone() else {
-            unreachable!()
-        };
-        let consumer = thread::spawn(move || {
-            let mut s = TcpStream::connect(addr).unwrap();
-            let mut bytes = Vec::new();
-            s.read_to_end(&mut bytes).unwrap();
-            bytes
-        });
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while handle.open_consumers() == 0 {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(1));
-        }
-
-        let sink = Arc::new(Mutex::new(Ingest::with_republish(
-            Repository::open(&db).unwrap(),
-            publisher,
-        )));
-        let mut m = repo_manifest();
-        m.output.content_class = manifest_class;
-        m.output.metadata_policy = Some(policy);
-        m.params.insert("every".into(), "5".into());
-        add_args(
-            &mut m,
-            &[
-                "--profile",
-                "adsb-like",
-                "--claim-class",
-                "unrestricted",
-                "--content",
-                SENTINEL,
-                "--annotate",
-            ],
-        );
-        let region = Region {
-            freq: FreqRange {
-                lo_hz: 433.82e6,
-                hi_hz: 434.02e6,
-            },
-            time: TimeRange {
-                start: Timestamp::from_unix_nanos(ANCHOR_NS),
-                end: Timestamp::from_unix_nanos(ANCHOR_NS + 1_000_000_000),
-            },
-        };
-        let context = PluginContext {
-            region: Some(region),
-            emitter_ref: Some(EmitterId::new()),
-            ..PluginContext::default()
-        };
-        let mut inst = PluginInstance::spawn(m, input(), context, Arc::clone(&sink)).unwrap();
-        wait_running(&inst);
-        for i in 0..50 {
-            assert_eq!(
-                push(&mut inst, i, &tone(i * 256, 256), 256).0,
-                PushOutcome::Enqueued
-            );
-        }
-        assert!(
-            inst.monitor()
-                .wait_for(Duration::from_secs(10), |s| s.decodes == 10
-                    && s.annotations == 10),
-            "{:?}",
-            inst.stats()
-        );
-        let stats = inst.shutdown();
-
-        let mut ingest = Arc::try_unwrap(sink)
-            .ok()
-            .expect("host released the ingest")
-            .into_inner()
-            .unwrap();
-        drop(ingest.take_publisher());
-        let wire = consumer.join().unwrap();
-        drop(listener);
-        let decodes = all_adsb_decodes(ingest.repo());
-        let annotations = ingest
-            .repo()
-            .annotations_for(&AnnotationTarget::Region(region))
-            .unwrap();
-        let istats = ingest.stats();
-        ingest.repo_mut().checkpoint().unwrap();
-        drop(ingest);
-        let mut stored = std::fs::read(&db).unwrap();
-        if let Ok(wal) = std::fs::read(dir.join("hk.sqlite-wal")) {
-            stored.extend(wal);
-        }
-
-        // T-036: an identity lookup finds nothing once the identity is restricted.
-        let expected_decodes = if gated { 0 } else { 10 };
-        assert_eq!((decodes.len(), annotations.len()), (expected_decodes, 10));
-        assert_eq!(istats.republished, 20);
-        assert!(contains(&wire, "a1b2c0"), "metadata flows");
-        assert_eq!(stats.malformed, 0);
-        if gated {
-            assert_eq!(stats.class_clamped, 20, "every claim was clamped");
-            assert_eq!(stats.content_gated, 20);
-            assert_eq!(istats.content_gated, 20);
-            // Stored metadata-only under the clamped class (the file holds it; reads are gated).
-            assert!(contains(&stored, "\"df\":17"), "metadata kept");
-            assert!(contains(&stored, "\"content_class\":\"restricted-paging\""));
-            for a in &annotations {
-                assert_eq!(a.content_class, ContentClass::RestrictedPaging);
-                assert_eq!(a.content, None);
-            }
-            assert!(!contains(&stored, SENTINEL), "gated content persisted");
-            assert!(!contains(&wire, SENTINEL), "gated content streamed");
-        } else {
-            assert_eq!((stats.class_clamped, stats.content_gated), (0, 0));
-            assert!(decodes.iter().all(|d| d.content.is_some()));
-            assert!(contains(&stored, SENTINEL), "positive control: DB scan");
-            assert!(contains(&wire, SENTINEL), "positive control: wire scan");
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
 }
 
 /// SIGNAL-001 (ADS-B / Mode S baseline): an ADS-B-like plugin's ICAO-hex decodes land as

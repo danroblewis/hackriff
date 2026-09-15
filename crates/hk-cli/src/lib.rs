@@ -248,7 +248,7 @@ mod tests {
         let mut header = StreamHeader::new(
             "iq/test",
             StreamKind::Iq,
-            ContentClass::RestrictedPaging,
+            ContentClass::Unrestricted,
             "hk-cli-test",
         );
         header.datatype = Some("ci8".into());
@@ -277,7 +277,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         for i in 0..3u64 {
-            // Restricted class: payload is withheld at egress, the metadata record still flows.
             let _ = publisher.publish_binary(BinaryRecord {
                 t: Timestamp::from_unix_nanos(10 + i as i64),
                 sample_index: i * 8,
@@ -290,14 +289,9 @@ mod tests {
         assert_eq!(n, 2);
         assert!(text.contains("\"kind\": \"iq\""), "{text}");
         assert!(
-            text.contains("\"content_class\": \"restricted-paging\""),
-            "{text}"
-        );
-        assert!(
-            text.contains("#0 t=10 sample_index=0 len=8 flags=[gated] \n"),
+            text.contains("#0 t=10 sample_index=0 len=8 flags=[] abababababababab\n"),
             "{text}"
         );
         assert!(text.contains("#1 t=11 sample_index=8"), "{text}");
-        assert!(!text.contains("abab"), "{text}");
     }
 }

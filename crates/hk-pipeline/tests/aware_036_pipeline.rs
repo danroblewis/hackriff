@@ -2,7 +2,7 @@
 //! (2-FSK 4800 Bd, preamble + sync 2DD4 + 48-bit payload + CRC-16, bursts every 120 ms) replayed
 //! by `hk replay`'s path. Detections → one confirmed track → the `fsk-bursts` chain attached from
 //! the registry by priors (bursty, 2–200 kHz) → per-burst blind estimate and demodulation →
-//! framing with CRC → Decode rows. Content fails closed until a user rule classifies the emitter.
+//! framing with CRC → Decode rows, whose payloads are stored.
 
 mod common;
 
@@ -13,7 +13,7 @@ use serde_json::json;
 const AWARE_036: &str = "AWARE-036";
 
 #[test]
-fn aware_036_fsk_bursts_detected_tracked_decoded_and_content_gated_by_classification() {
+fn aware_036_fsk_bursts_detected_tracked_decoded_and_stored() {
     let out = synth_or_skip!(
         SynthRequest::new("fsk_burst_train")
             .seed(36)
@@ -29,11 +29,9 @@ fn aware_036_fsk_bursts_detected_tracked_decoded_and_content_gated_by_classifica
         .collect();
     let sent = sentinels(&payloads);
 
-    // Unclassified (433.92 MHz is not a band prior): framed, CRC-checked, content withheld.
     let dir = TempDir::new("aware036");
     let s = run(&dir.0, &fx.meta_path, json!({}));
     let n = truths.len() as u64;
-    assert_eq!(s.source_class, "metadata-only");
     assert_eq!(s.always_on_lost_samples, 0);
     assert!(
         s.counter("/detect/detections") > 0,
@@ -60,23 +58,10 @@ fn aware_036_fsk_bursts_detected_tracked_decoded_and_content_gated_by_classifica
     assert!(crc * 10 >= n * 8, "[{AWARE_036}] CRC-valid {crc} of {n}");
     let decodes = s.counter("/chains/decodes");
     assert!(decodes >= crc, "[{AWARE_036}] decodes {decodes}");
-    assert_eq!(
-        s.counter("/chains/content_withheld"),
-        decodes,
-        "[{AWARE_036}] unclassified content fails closed"
-    );
-    assert_eq!(
-        s.counter("/chains/recordings"),
-        0,
-        "no recording under metadata-only"
-    );
-    let leaked = count_found(&all_bytes(&dir.0), &sent);
-    assert_eq!(
-        leaked, 0,
-        "[{AWARE_036}] payload bytes stored without a classification"
-    );
+    let found = count_found(&all_bytes(&dir.0), &sent);
+    assert!(found > 0, "[{AWARE_036}] payloads are stored");
 
-    // Classified by the user (own test sensor): the same run stores the payloads.
+    // With a user classification rule (own test sensor) the same run stores the payloads too.
     let dir2 = TempDir::new("aware036c");
     let s2 = run(
         &dir2.0,
@@ -90,8 +75,5 @@ fn aware_036_fsk_bursts_detected_tracked_decoded_and_content_gated_by_classifica
     assert!(s2.counter("/chains/decodes") > 0);
     assert_eq!(s2.counter("/chains/content_withheld"), 0, "[{AWARE_036}]");
     let found = count_found(&all_bytes(&dir2.0), &sent);
-    assert!(
-        found > 0,
-        "[{AWARE_036}] positive control: classified payloads are stored"
-    );
+    assert!(found > 0, "[{AWARE_036}] classified payloads are stored");
 }

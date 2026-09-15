@@ -20,7 +20,7 @@
 //! - [`recording`]: [`Recording`] and [`Annotation`] (§2.12–2.13).
 //! - [`decode`]: [`Demodulation`], [`Decode`], [`Bitstream`] (§2.14–2.16).
 //! - [`context`]: [`ExternalEvent`], [`Anomaly`], [`Explanation`] (§2.17–2.19).
-//! - [`content`]: [`ContentClass`] for ADR-0004 restricted-content gating (fail closed).
+//! - [`content`]: [`ContentClass`] for ADR-0004 content gating (off by default; opt-in).
 //! - [`hash`]: canonical JSON and [`ContentHash`] (provenance dedup, evidence pinning).
 //! - [`repo`]: the SQLite [`Repository`] (ADR-0006).
 //! - [`sigmf`]: SigMF `.sigmf-meta` types with the `hackriff:` extension namespace
@@ -71,7 +71,7 @@ pub use cluster::{
     MeasurementKey, PriorVerdict, RecordedClassification, Resolution, Sighting, TAG_VOCABULARY,
     Tolerances, never_openable, tag_in_vocabulary, tag_is_identity_free,
 };
-pub use content::ContentClass;
+pub use content::{ContentClass, content_gating_enabled, set_content_gating};
 pub use context::{
     Anomaly, AnomalyKind, AnomalyStatus, AnomalyStatusChange, AnomalySubject, Cause,
     CorrelationType, Evidence, Explanation, ExternalEvent, Geo,
