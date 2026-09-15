@@ -400,6 +400,7 @@ pub(crate) fn run(
     shared: Arc<Shared>,
     rx: Receiver<ControlEvent>,
     mut sched: Option<SchedState>,
+    mut interactive: Option<crate::observe::InteractiveObserver>,
 ) -> anyhow::Result<()> {
     let mut chains = ChainManager::new(Arc::clone(&shared));
     let mut detect_done = false;
@@ -446,6 +447,10 @@ pub(crate) fn run(
             chains.poll_coverage();
             if let Some(s) = sched.as_mut() {
                 s.tick(shared.counters.stream_time_ns.load(Ordering::Relaxed));
+            }
+            // T-115: a live run without the scheduler logs its interactive tuning.
+            if let Some(o) = interactive.as_mut() {
+                o.tick();
             }
         }
         chains.reap();

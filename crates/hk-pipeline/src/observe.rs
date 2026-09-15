@@ -25,8 +25,10 @@ use std::sync::atomic::Ordering;
 
 use hk_core::scheduler::observe::{ObservationRecorder, StepObservation, WindowRule};
 use hk_core::scheduler::{CompiledPlan, ScheduleStep};
-use hk_model::attention::observation::ObservationRecord;
-use hk_model::{ContentClass, SurveyId, Timestamp};
+use hk_model::attention::ATTENTION_SCHEMA_VERSION;
+use hk_model::attention::baseline::SiteKey;
+use hk_model::attention::observation::{DwellRecord, ObservationRecord, Reason};
+use hk_model::{ContentClass, SurveyId, TimeRange, Timestamp};
 use hk_store::observation::{
     ObservationLogConfig, ObservationQueue, ObservationStore, ObservationWriter, RecordTap,
 };
@@ -103,19 +105,42 @@ impl ObservationLog {
         survey_id: Option<SurveyId>,
         counters: Arc<Counters>,
     ) -> Observer {
-        let rule = WindowRule {
-            fft_bins,
-            dc_half_hz: DC_NOTCH_HALF_HZ,
-            enbw_bins: HANN_ENBW_BINS,
-        };
         Observer {
-            recorder: ObservationRecorder::new(plan, rule, fixed_tuning, survey_id),
+            recorder: ObservationRecorder::new(plan, rule(fft_bins), fixed_tuning, survey_id),
             queue: self.writer.queue(),
             fixed: fixed_tuning.is_some(),
             counters,
             current: None,
             last_now_ns: 0,
         }
+    }
+
+    /// An interactive observer for one segment of a live run without the scheduler. Create it
+    /// before the segment's capture thread starts.
+    pub(crate) fn interactive(
+        &self,
+        fft_bins: usize,
+        survey_id: Option<SurveyId>,
+        counters: Arc<Counters>,
+    ) -> InteractiveObserver {
+        InteractiveObserver {
+            rule: rule(fft_bins),
+            survey_id,
+            queue: self.writer.queue(),
+            seq0: counters.tune_seq.load(Ordering::SeqCst),
+            counters,
+            open: None,
+            last_now_ns: 0,
+            records: 0,
+        }
+    }
+}
+
+fn rule(fft_bins: usize) -> WindowRule {
+    WindowRule {
+        fft_bins,
+        dc_half_hz: DC_NOTCH_HALF_HZ,
+        enbw_bins: HANN_ENBW_BINS,
     }
 }
 
@@ -214,6 +239,10 @@ impl Observer {
         if let Some(step) = latest {
             if self.current.as_ref().is_none_or(|c| c.step.seq != step.seq) {
                 self.close(step.t_start.as_unix_nanos());
+                // A long non-sweep step closes the open sweep record at its start.
+                let (queue, counters) = (&self.queue, &self.counters);
+                self.recorder
+                    .begin(step, &mut |r| offer(queue, counters, r));
                 self.current = Some(InFlight {
                     step: *step,
                     settled_ns: None,
@@ -245,12 +274,7 @@ impl Observer {
     }
 
     fn dropped(&self) -> u64 {
-        self.counters.source.source_dropped.load(Ordering::Relaxed)
-            + self
-                .counters
-                .detect_reader
-                .lost_samples
-                .load(Ordering::Relaxed)
+        lost_samples(&self.counters)
     }
 
     fn close(&mut self, end_ns: i64) {
@@ -293,14 +317,211 @@ impl Drop for Observer {
     }
 }
 
+/// Samples dropped so far by the source and the detection reader.
+fn lost_samples(c: &Counters) -> u64 {
+    c.source.source_dropped.load(Ordering::Relaxed)
+        + c.detect_reader.lost_samples.load(Ordering::Relaxed)
+}
+
+/// Longest interactive dwell record, ns: a steady tune is split so the log stays fresh and every
+/// record fits the queries' one-hour look-ahead.
+pub const INTERACTIVE_RECORD_MAX_NS: i64 = 60_000_000_000;
+
+struct OpenTune {
+    center_bits: u64,
+    rate_bits: u64,
+    intent: u64,
+    start_ns: i64,
+    dropped0: u64,
+}
+
+/// Records the tuning of a live run without the scheduler (interactive `hk serve`): one
+/// [`DwellRecord`] at the `interactive` tier per steady tune, closed when the published tune
+/// changes and split every [`INTERACTIVE_RECORD_MAX_NS`] of stream time. Interactive visits add
+/// coverage and observed seconds but are never activity independent (ADR-0012 §2.5).
+///
+/// Polled on the control thread; it only reads what the capture thread already publishes
+/// (`tune_seq`, the tune, `stream_time_ns`), so the capture path is unchanged. Boundaries are
+/// the stream time of the last poll under the old tune (at most one poll late); the reason's
+/// intent id is the `tune_seq` that first published the tune.
+pub(crate) struct InteractiveObserver {
+    rule: WindowRule,
+    survey_id: Option<SurveyId>,
+    queue: ObservationQueue,
+    counters: Arc<Counters>,
+    /// `tune_seq` before this segment's capture started: nothing is recorded until it moves.
+    seq0: u64,
+    open: Option<OpenTune>,
+    last_now_ns: i64,
+    records: u64,
+}
+
+impl InteractiveObserver {
+    /// One control-thread poll.
+    pub(crate) fn tick(&mut self) {
+        let c = &self.counters;
+        let seq = c.tune_seq.load(Ordering::SeqCst);
+        if seq == self.seq0 {
+            return;
+        }
+        // The capture thread stores the time and tune before bumping `tune_seq`.
+        let center_bits = c.tune_center_bits.load(Ordering::Relaxed);
+        let rate_bits = c.tune_rate_bits.load(Ordering::Relaxed);
+        let now = c.stream_time_ns.load(Ordering::Relaxed);
+        if now <= 0
+            || f64::from_bits(rate_bits).partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+        {
+            return;
+        }
+        let now = now.max(self.last_now_ns);
+        match &self.open {
+            Some(o) if o.center_bits == center_bits && o.rate_bits == rate_bits => {
+                if now - o.start_ns >= INTERACTIVE_RECORD_MAX_NS {
+                    let intent = o.intent;
+                    self.close(now);
+                    self.start(center_bits, rate_bits, intent, now);
+                }
+            }
+            Some(_) => {
+                let at = self.last_now_ns;
+                self.close(at);
+                self.start(center_bits, rate_bits, seq, at);
+            }
+            None => self.start(center_bits, rate_bits, seq, now),
+        }
+        self.last_now_ns = now;
+    }
+
+    fn start(&mut self, center_bits: u64, rate_bits: u64, intent: u64, start_ns: i64) {
+        self.open = Some(OpenTune {
+            center_bits,
+            rate_bits,
+            intent,
+            start_ns,
+            dropped0: lost_samples(&self.counters),
+        });
+    }
+
+    fn close(&mut self, end_ns: i64) {
+        let Some(o) = self.open.take() else { return };
+        if end_ns <= o.start_ns {
+            return;
+        }
+        let span = TimeRange::new(
+            Timestamp::from_unix_nanos(o.start_ns),
+            Timestamp::from_unix_nanos(end_ns),
+        );
+        let reason = Reason::Interactive { intent: o.intent };
+        let rec = ObservationRecord::Dwell(DwellRecord {
+            schema: ATTENTION_SCHEMA_VERSION,
+            survey_id: self.survey_id,
+            seq: self.records,
+            plan_version: 0,
+            site: SiteKey::Unassigned,
+            reason,
+            tier: reason.tier(),
+            window: self
+                .rule
+                .window(f64::from_bits(o.center_bits), f64::from_bits(o.rate_bits)),
+            rf_path: 0,
+            planned: span,
+            observed: span,
+            preempted: false,
+            dropped_samples: lost_samples(&self.counters).saturating_sub(o.dropped0),
+            overload: false,
+            provenance_ref: None,
+        });
+        self.records += 1;
+        offer(&self.queue, &self.counters, rec);
+    }
+}
+
+impl Drop for InteractiveObserver {
+    /// The segment ended: the open tune closes at the last stream time seen.
+    fn drop(&mut self) {
+        self.close(self.last_now_ns);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use hk_core::SourceCapabilities;
-    use hk_core::scheduler::{Scheduler, SchedulerConfig, SyntheticClock};
+    use hk_core::scheduler::{Purpose, Scheduler, SchedulerConfig, SyntheticClock};
+    use hk_model::FreqRange;
+    use hk_store::observation::RecordQuery;
 
     use super::*;
+
+    #[test]
+    fn observe_a_long_intent_between_sweeps_leaves_the_sweep_queryable_in_its_own_hour() {
+        let dir = std::env::temp_dir().join(format!("hk-t115-intent-{}", std::process::id()));
+        let log =
+            ObservationLog::open_with(ObservationLogConfig::new(dir.join("observations")), None)
+                .unwrap();
+        let store = log.store();
+        // 10 min into an hour: a 2 h intent ends two hours later.
+        let t0 = Timestamp::from_unix_nanos(1_789_297_800_000_000_000);
+        let plan = crate::config::replay_plan(100e6, 2e6, t0);
+        let mut sc = SchedulerConfig::from_plan(&plan).unwrap();
+        sc.sweep_rate_hz = 2e6;
+        sc.dwell_min_rate_hz = 2e6;
+        sc.max_span_hz = 2e6;
+        let caps = SourceCapabilities::hackrf_one();
+        let mut s = Scheduler::new(&plan, sc, &caps, SyntheticClock::new(t0)).unwrap();
+        let mut steps = Vec::new();
+        s.run_synthetic(2_000, &mut steps);
+        let tpl = *steps
+            .iter()
+            .find(|st| matches!(st.purpose, Purpose::Sweep { .. }))
+            .expect("a sweep hop");
+        let counters = Arc::new(Counters::default());
+        counters
+            .tune_center_bits
+            .store(tpl.center_hz.to_bits(), Ordering::Relaxed);
+        counters
+            .tune_rate_bits
+            .store(tpl.rate_hz.to_bits(), Ordering::Relaxed);
+        let mut obs = log.observer(s.plan(), 1024, None, None, Arc::clone(&counters));
+
+        let hour_ns = 3_600_000_000_000;
+        let mut hop = tpl;
+        hop.seq = 1;
+        hop.t_start = t0.saturating_add_nanos(1_000_000_000);
+        hop.duration_ns = 50_000_000;
+        let mut intent = hop;
+        intent.seq = 2;
+        intent.t_start = hop.t_end();
+        intent.duration_ns = 2 * hour_ns;
+        intent.purpose = Purpose::UserIntent { intent: 9 };
+        let mut next = hop;
+        next.seq = 3;
+        next.t_start = intent.t_end();
+        for st in [&hop, &intent, &next] {
+            obs.tick(st.t_start.as_unix_nanos(), Some(st));
+        }
+        drop(obs);
+        drop(log);
+
+        let span = TimeRange::new(hop.t_start, hop.t_end());
+        let page = store.query(&RecordQuery {
+            freq: FreqRange::new(0.0, 7e9),
+            span,
+            tier: None,
+            cursor: 0,
+            limit: 100,
+        });
+        assert!(
+            page.records
+                .iter()
+                .any(|r| matches!(r, ObservationRecord::Sweep(sw) if sw.span.end == hop.t_end())),
+            "the sweep before the intent is found in its own hour: {page:?}"
+        );
+        let ch = FreqRange::centered(tpl.center_hz + 200e3, 1e3);
+        assert_eq!(store.observations_of(ch, span).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn observe_stalled_writer_drops_and_counts_without_stalling_the_control_thread() {

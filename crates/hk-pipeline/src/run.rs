@@ -890,6 +890,18 @@ fn start_segment(
             Arc::clone(&common.counters),
         ));
     }
+    // T-115: a live run without the scheduler (interactive `hk serve`) logs its tuning as
+    // interactive dwell records, polled on the control thread.
+    let interactive = match (&sched, &common.observations) {
+        (None, Some(log)) if cfg.live_window_class && common.switch.capabilities().controllable => {
+            Some(log.interactive(
+                fft_len,
+                Some(common.survey_id),
+                Arc::clone(&common.counters),
+            ))
+        }
+        _ => None,
+    };
     let specs = cfg.settings.chain_specs();
     let shared = Arc::new(Shared {
         counters: Arc::clone(&common.counters),
@@ -945,7 +957,7 @@ fn start_segment(
         let s = Arc::clone(&shared);
         workers.push(spawn(
             "hk-control",
-            Box::new(move || crate::control::run(s, rx, sched)),
+            Box::new(move || crate::control::run(s, rx, sched, interactive)),
         )?);
     }
     let s = Arc::clone(&shared);

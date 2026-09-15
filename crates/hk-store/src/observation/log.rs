@@ -1,7 +1,7 @@
 //! The segment store: buffering, flush, seal, retention and read snapshots.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::io::{self, Write};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -12,8 +12,9 @@ use serde_json::{Value, json};
 
 use super::segment::{HOUR_NS, encode_line, hour_of, list_segments, segment_path};
 
-/// Geometries re-written at the head of every segment.
-const GEOMETRIES_KEPT: usize = 4;
+/// Geometries kept in memory. Each segment repeats every kept geometry its sweep records
+/// reference (just before the first such record), so a segment decodes on its own.
+const GEOMETRIES_KEPT: usize = 32;
 
 /// Settings of an observation log.
 #[derive(Clone, Debug, PartialEq)]
@@ -95,6 +96,10 @@ pub(super) struct Inner {
     /// On-disk bytes per hour.
     segments: BTreeMap<i64, u64>,
     geometries: VecDeque<SweepGeometry>,
+    /// Geometry ids already in the open segment (written or buffered).
+    written_geometries: HashSet<u64>,
+    /// Hours whose tail this session checked (and repaired) before appending to them.
+    checked_hours: HashSet<i64>,
     newest_ns: i64,
     last_flush: Instant,
 }
@@ -135,6 +140,8 @@ impl ObservationStore {
                 pending: Vec::new(),
                 segments,
                 geometries: VecDeque::new(),
+                written_geometries: HashSet::new(),
+                checked_hours: HashSet::new(),
                 newest_ns: i64::MIN,
                 last_flush: Instant::now(),
             })),
@@ -248,29 +255,41 @@ impl Inner {
                 None
             }
         };
+        let mut opened = false;
         if let Some(end) = end {
             let hour = hour_of(end);
             self.newest_ns = self.newest_ns.max(end.as_unix_nanos());
             match self.open_hour {
                 None => {
                     self.open(hour);
-                    self.retain(stats);
+                    opened = true;
                 }
                 Some(open) if hour > open => {
                     self.seal(open, stats);
                     self.open(hour);
-                    self.retain(stats);
+                    opened = true;
                 }
                 // The same hour, or a late record: the open segment.
                 Some(_) => {}
             }
         } else if self.open_hour.is_none() {
-            // Written at the head of the first segment.
+            // Written in the first segment, before the first sweep record that references it.
             stats.written.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        match rec {
+            ObservationRecord::Geometry(g) => {
+                self.written_geometries.insert(g.id);
+            }
+            ObservationRecord::Sweep(s) => self.repeat_geometry(s.geometry),
+            ObservationRecord::Dwell(_) => {}
+        }
         self.pending.extend_from_slice(encode_line(rec).as_bytes());
         stats.written.fetch_add(1, Ordering::Relaxed);
+        if opened {
+            // After the new hour's first lines are buffered, so the quota counts them.
+            self.retain(stats);
+        }
         if self.pending.len() >= self.cfg.flush_bytes {
             self.flush(stats);
         }
@@ -278,12 +297,19 @@ impl Inner {
 
     fn open(&mut self, hour: i64) {
         self.open_hour = Some(hour);
-        let head: Vec<u8> = self
-            .geometries
-            .iter()
-            .flat_map(|g| encode_line(&ObservationRecord::Geometry(g.clone())).into_bytes())
-            .collect();
-        self.pending.extend_from_slice(&head);
+        self.written_geometries.clear();
+    }
+
+    /// Writes geometry `id` into the open segment unless it is already there.
+    fn repeat_geometry(&mut self, id: u64) {
+        if self.written_geometries.contains(&id) {
+            return;
+        }
+        if let Some(g) = self.geometries.iter().find(|g| g.id == id) {
+            let line = encode_line(&ObservationRecord::Geometry(g.clone()));
+            self.pending.extend_from_slice(line.as_bytes());
+            self.written_geometries.insert(id);
+        }
     }
 
     fn flush(&mut self, stats: &ObservationLogStats) {
@@ -293,6 +319,14 @@ impl Inner {
             return;
         }
         let path = segment_path(&self.cfg.root, hour);
+        // This session's first append to an hour (or the first after a failed, possibly partial
+        // write) truncates a torn tail first, so a new line never joins a partial one: the newest
+        // hour after a crash, or an older hour a late or replayed record reopens.
+        if self.checked_hours.insert(hour) {
+            if let Ok(Some(len)) = repair_tail(&path) {
+                self.segments.insert(hour, len);
+            }
+        }
         let r = append_bytes(&path, &self.pending);
         match r {
             Ok(()) => {
@@ -301,6 +335,9 @@ impl Inner {
             }
             Err(_) => {
                 stats.write_errors.fetch_add(1, Ordering::Relaxed);
+                self.checked_hours.remove(&hour);
+                // The lost buffer may have held this segment's geometries.
+                self.written_geometries.clear();
             }
         }
         self.pending.clear();
@@ -384,15 +421,32 @@ fn append_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     f.write_all(bytes)
 }
 
-/// Truncates a segment to its last complete line.
-fn repair_tail(path: &Path) -> io::Result<()> {
-    let bytes = std::fs::read(path)?;
-    if bytes.is_empty() || bytes.ends_with(b"\n") {
-        return Ok(());
-    }
-    let keep = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    std::fs::OpenOptions::new()
+/// Truncates a segment to its last complete line; returns its length (`None`: no such file).
+/// An intact tail costs one byte read.
+fn repair_tail(path: &Path) -> io::Result<Option<u64>> {
+    let mut f = match std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
-        .open(path)?
-        .set_len(keep as u64)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let len = f.metadata()?.len();
+    if len == 0 {
+        return Ok(Some(0));
+    }
+    let mut last = [0u8; 1];
+    f.seek(SeekFrom::Start(len - 1))?;
+    f.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(Some(len));
+    }
+    let mut bytes = Vec::new();
+    f.seek(SeekFrom::Start(0))?;
+    f.read_to_end(&mut bytes)?;
+    let keep = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1) as u64;
+    f.set_len(keep)?;
+    Ok(Some(keep))
 }

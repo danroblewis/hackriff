@@ -247,6 +247,54 @@ fn observation_segments_are_hourly_by_sample_time_self_contained_and_recover_tor
 }
 
 #[test]
+fn observation_first_append_to_an_older_hour_repairs_its_torn_tail() {
+    let dir = TempDir::new("older-torn");
+    let root = dir.0.join("observations");
+    {
+        let s = store(&dir);
+        s.append(&ObservationRecord::Geometry(geometry()));
+        s.append(&sweep(T0 + 10 * S));
+        s.append(&sweep(T0 + HOUR_NS + 10 * S));
+    }
+    // Tear hour 0, which is not the newest segment, so opening the store leaves it alone.
+    let h0 = segment_path(&root, hour_of(t(T0)));
+    let mut bytes = std::fs::read(&h0).unwrap();
+    bytes.extend_from_slice(b"0badc0de {\"record\":\"sweep\",");
+    std::fs::write(&h0, &bytes).unwrap();
+    let s = store(&dir);
+    assert!(!std::fs::read(&h0).unwrap().ends_with(b"\n"));
+    // A replayed record of hour 0 is this session's first: it reopens hour 0.
+    s.append(&dwell(T0 + 20 * S, S, 100.5e6, Reason::PoiDwell { poi: 5 }));
+    s.flush();
+    assert!(std::fs::read(&h0).unwrap().ends_with(b"\n"));
+    let page = s.query(&RecordQuery {
+        freq: FreqRange::new(99e6, 102e6),
+        span: TimeRange::new(t(T0), t(T0 + 30 * S)),
+        tier: None,
+        cursor: 0,
+        limit: 10,
+    });
+    assert_eq!(
+        page.records.len(),
+        2,
+        "the old sweep and the new dwell: {page:?}"
+    );
+    assert_eq!(page.geometries, vec![geometry()]);
+    assert_eq!(
+        s.bytes(),
+        list_bytes(&root),
+        "the byte count follows the repaired file"
+    );
+}
+
+fn list_bytes(root: &std::path::Path) -> u64 {
+    super::segment::list_segments(root)
+        .iter()
+        .map(|(_, _, b)| *b)
+        .sum()
+}
+
+#[test]
 fn observation_retention_deletes_whole_hours_by_sample_age_and_byte_quota() {
     let dir = TempDir::new("retention");
     let mut cfg = ObservationLogConfig::new(dir.0.join("observations"));

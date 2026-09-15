@@ -189,11 +189,29 @@ impl ObservationRecorder {
         }
     }
 
+    /// A step is starting (call before it runs). A non-sweep step that would carry the open sweep
+    /// record past [`SweepRecord::MAX_SPAN_NS`] closes it now, so a long preemption (a user intent,
+    /// a lease) never holds a sweep's coverage back until the next hop, hours later and filed in
+    /// a later hour than its own.
+    pub fn begin(&mut self, step: &ScheduleStep, out: &mut impl FnMut(ObservationRecord)) {
+        if matches!(step.purpose, Purpose::Sweep { .. }) {
+            return;
+        }
+        let long = self.open.as_ref().is_some_and(|s| {
+            step.t_end().as_unix_nanos() - s.start.as_unix_nanos() >= SweepRecord::MAX_SPAN_NS
+        });
+        if long {
+            self.flush(out);
+        }
+    }
+
     /// Records one applied step, passing finished records to `out` in emission order.
     pub fn observe(&mut self, o: &StepObservation, out: &mut impl FnMut(ObservationRecord)) {
         match o.step.purpose {
             Purpose::Sweep { hop } => self.hop(o, hop, out),
             _ => {
+                // A caller that did not call `begin` still closes the sweep before this record.
+                self.begin(&o.step, out);
                 let (observed, preempted) = o.observed();
                 let reason = o.step.purpose.reason();
                 out(ObservationRecord::Dwell(DwellRecord {

@@ -211,6 +211,65 @@ fn scheduler_observe_sweep_records_never_span_more_than_60_s() {
 }
 
 #[test]
+fn scheduler_observe_a_long_intent_closes_the_open_sweep_record_when_it_begins() {
+    let p = sweep_plan();
+    let mut s = hackrf(&p);
+    let n = s.plan().hops.len();
+    let steps = run(&mut s, n);
+    let half = (n / 2).max(1);
+    let last = steps[half - 1];
+    let mut intent = last;
+    intent.seq = last.seq + 1;
+    intent.t_start = last.t_end();
+    intent.duration_ns = 2 * 3600 * S;
+    intent.purpose = Purpose::UserIntent { intent: 7 };
+    let sweeps = |out: &[ObservationRecord]| {
+        out.iter()
+            .filter(|r| matches!(r, ObservationRecord::Sweep(_)))
+            .count()
+    };
+
+    // The pipeline calls `begin` as the intent starts: the half pass is emitted then, not 2 h
+    // later with the next hop.
+    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None);
+    let mut out = Vec::new();
+    for st in &steps[..half] {
+        rec.observe(&applied(st), &mut |r| out.push(r));
+    }
+    assert_eq!(sweeps(&out), 0);
+    rec.begin(&intent, &mut |r| out.push(r));
+    let Some(ObservationRecord::Sweep(sw)) = out.last() else {
+        panic!("the open sweep closed when the intent began: {out:?}");
+    };
+    sw.validate().unwrap();
+    assert_eq!(sw.visits.len(), half);
+    assert_eq!(sw.span.end, last.t_end());
+    rec.observe(&applied(&intent), &mut |r| out.push(r));
+    assert!(matches!(out.last(), Some(ObservationRecord::Dwell(d)) if d.tier == Tier::Interactive));
+    assert_eq!(sweeps(&out), 1);
+
+    // A short dwell leaves the pass open; a caller that never calls `begin` still gets the sweep
+    // before the long step's record.
+    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None);
+    let mut out = Vec::new();
+    for st in &steps[..half] {
+        rec.observe(&applied(st), &mut |r| out.push(r));
+    }
+    let mut short = intent;
+    short.duration_ns = S;
+    rec.begin(&short, &mut |r| out.push(r));
+    rec.observe(&applied(&short), &mut |r| out.push(r));
+    assert_eq!(sweeps(&out), 0);
+    let mut long = intent;
+    long.seq = short.seq + 1;
+    long.t_start = short.t_end();
+    rec.observe(&applied(&long), &mut |r| out.push(r));
+    let k = out.len();
+    assert!(matches!(out[k - 2], ObservationRecord::Sweep(_)));
+    assert!(matches!(out[k - 1], ObservationRecord::Dwell(_)));
+}
+
+#[test]
 fn scheduler_observe_steady_state_hops_and_dwells_do_not_allocate() {
     let p = sweep_plan();
     let mut s = hackrf(&p);

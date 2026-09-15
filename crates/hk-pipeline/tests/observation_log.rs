@@ -247,3 +247,132 @@ fn observation_log_through_the_mock_sdr_matches_the_tuned_windows_and_the_schedu
         summary.counter("/observations/records_offered")
     );
 }
+
+fn wait_for(what: &str, limit: Duration, f: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + limit;
+    while !f() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// T-115 review: interactive `hk serve` without a schedule. A live run over the mock SDR, retuned
+/// twice through the control plane, logs one interactive dwell record per steady tune: the
+/// windows are the tuned windows in order, the times are contiguous on the sample clock, and the
+/// coverage counts observed seconds but no activity-independent visits.
+#[test]
+fn observation_log_records_interactive_tuning_without_a_scheduler() {
+    use std::sync::atomic::Ordering;
+    const FS: f64 = 1e6;
+    const CENTERS: [f64; 3] = [433.92e6, 434.22e6, 433.62e6];
+    let dir = TempDir::new("interactive");
+    let rec = tone_recording(&dir.0.join("src"), "tone", FS, 2.0, CENTERS[0], None);
+    let replay = open_mock_replay(&rec, Pacing::RealTime { speed: 4.0 }, MockEnd::Loop).unwrap();
+    let plan = replay_plan(
+        replay.info.center_hz,
+        replay.info.sample_rate_hz,
+        replay.info.start_time,
+    );
+    let mut cfg = PipelineConfig::new(dir.0.join("data"), plan).unwrap();
+    cfg.source_class = replay.class;
+    cfg.live_window_class = true;
+    cfg.device_id = replay.device.device_id.clone();
+    let (fft_len, _) = detection_resolution(FS, &cfg.settings);
+    let t0 = replay.info.start_time;
+    let handle = Pipeline::start(
+        cfg,
+        Box::new(replay.source),
+        replay.info,
+        None,
+        Box::new(TrackInventory::default()),
+    )
+    .unwrap();
+    let store = handle.observation_store().expect("the run opened its log");
+    let counters = handle.counters();
+    let plane = handle.controller();
+    let limit = Duration::from_secs(60);
+    for (k, c) in CENTERS.iter().enumerate() {
+        if k > 0 {
+            plane.retune(*c, FS).expect("retune");
+        }
+        let tuned =
+            || (f64::from_bits(counters.tune_center_bits.load(Ordering::Relaxed)) - c).abs() < 1.0;
+        wait_for("the tune reaches the analysed data", limit, tuned);
+        let s0 = counters.stream_time_ns.load(Ordering::Relaxed);
+        wait_for("a second of stream time at the tune", limit, || {
+            counters.stream_time_ns.load(Ordering::Relaxed) >= s0 + 1_000_000_000
+        });
+    }
+    handle.stop();
+    let (summary, stopped) = wait_guarded(handle, Duration::from_secs(60));
+    assert!(!stopped, "the run stopped when asked");
+    let stream_end = counters.stream_time_ns.load(Ordering::Relaxed);
+
+    let span = TimeRange::new(
+        t0.saturating_add_nanos(-3_600_000_000_000),
+        t0.saturating_add_nanos(3_600_000_000_000),
+    );
+    let page = store.query(&RecordQuery {
+        freq: FreqRange::new(0.0, 7e9),
+        span,
+        tier: None,
+        cursor: 0,
+        limit: 10_000,
+    });
+    assert!(page.geometries.is_empty(), "no sweeps without a scheduler");
+    let rule = WindowRule {
+        fft_bins: fft_len,
+        dc_half_hz: DC_NOTCH_HALF_HZ,
+        enbw_bins: HANN_ENBW_BINS,
+    };
+    let dwells: Vec<_> = page
+        .records
+        .iter()
+        .map(|r| match r {
+            ObservationRecord::Dwell(d) => d,
+            other => panic!("only dwell records: {other:?}"),
+        })
+        .collect();
+    assert!(dwells.len() >= CENTERS.len(), "{dwells:?}");
+    for d in &dwells {
+        d.validate().unwrap();
+        assert_eq!(d.tier, Tier::Interactive);
+        assert_eq!(d.window, rule.window(d.window.center_hz, FS));
+        assert_eq!(d.planned, d.observed);
+        assert!(!d.preempted);
+        assert!(d.observed.duration_ns() > 0);
+        assert!(d.observed.duration_ns() <= hk_pipeline::observe::INTERACTIVE_RECORD_MAX_NS);
+    }
+    // In order and contiguous on the sample clock, inside the stream's own time.
+    for w in dwells.windows(2) {
+        assert_eq!(w[1].observed.start, w[0].observed.end, "{w:?}");
+    }
+    assert!(dwells[0].observed.start >= t0);
+    assert!(dwells[dwells.len() - 1].observed.end.as_unix_nanos() <= stream_end);
+    // One steady tune per retune, in the order tuned, each observed for about its second.
+    let mut tunes: Vec<(f64, i64)> = Vec::new();
+    for d in &dwells {
+        match tunes.last_mut() {
+            Some(t) if t.0 == d.window.center_hz => t.1 += d.observed.duration_ns(),
+            _ => tunes.push((d.window.center_hz, d.observed.duration_ns())),
+        }
+    }
+    assert_eq!(tunes.len(), CENTERS.len(), "{tunes:?}");
+    for ((c, ns), want) in tunes.iter().zip(CENTERS) {
+        assert!((c - want).abs() < 1.0, "{tunes:?}");
+        assert!(*ns >= 900_000_000, "{tunes:?}");
+    }
+
+    // Coverage: observed seconds at the interactive tier, never activity-independent visits.
+    // 434.32 MHz lies inside the first two tuned windows (the third tops out near 434.12 MHz).
+    let inside = FreqRange::centered(CENTERS[1] + 100e3, 12.5e3);
+    let outside = FreqRange::centered(436e6, 12.5e3);
+    let tot = store.totals(&[inside, outside], span);
+    tot[0].validate().unwrap();
+    assert!(tot[0].n_visits >= 1, "{:?}", tot[0]);
+    assert_eq!(tot[0].n_visits_activity_independent, 0);
+    assert!(tot[0].observed_s.interactive >= 1.8, "{:?}", tot[0]);
+    assert_eq!(tot[0].observed_s.background_sweep, 0.0);
+    assert_eq!(tot[1].n_visits, 0);
+    assert_eq!(summary.counter("/observations/records_dropped"), 0);
+}
