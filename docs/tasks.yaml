@@ -1121,7 +1121,9 @@ tasks:
   - id: T-067
     milestone: M0b
     title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
-    status: in-progress
+    status: done
+    commit: "6ace81f + docs/tests 773aad2 + fmt 225c495 (merged; full check running)"
+    result: "POST /api/control/baseband_filter {bandwidth_hz} -> {tuning} (validated vs device.baseband_filter; 501 unsupported, 400 out_of_range, 409 not_live); POST /api/control/display accepts window hann|blackman-harris|flat-top (400 invalid); GET /api/control/state adds display_limits {fft_size_min/max, averaging_max, rows_per_s_min/max, windows}, device.baseband_filter {min_hz,max_hz}|{values_hz}|null, tuning.baseband_filter_hz, display.window; bookmark rename via existing PUT /api/bookmarks/{id} {name} (documented/tested). WindowKind threaded hk-dsp -> hk-pipeline DisplaySettings/row_plan/spectrum STFT rebuild; LiveControl set_baseband_filter; RunControl::display_limits from hk_pipeline::config DISPLAY_* constants. UI controls built from state.display_limits (no hard-coded FFT sizes/averaging/row rates), baseband filter select, window select, bookmark Rename. docs/api.md and api_contract updated. Tests: hk-api 70, hk-cli 32 (10 api_contract), hk-pipeline 75, UI; fmt and clippy -D warnings clean."
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-051, T-062]
     parallel_group: P
