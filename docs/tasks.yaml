@@ -1157,7 +1157,7 @@ tasks:
     milestone: M0b
     title: Output-driven demod refinement (RefinementLoop per chain; WFM first) storing refined centre/bandwidth on the Emitter
     status: done
-    commit: "48cd940 + merge 46c655e (merged)"
+    commit: "48cd940 + merge 46c655e (merged ae33e1e; verified: lint, 149 Rust test groups, py, ui, acceptance green)"
     result: "hk_demod::refine::Objective (space, evaluate, optional occupied_bandwidth) + generic RefinementLoop (centre grid, centre-correction tracking or local search, narrowest bandwidth within tolerance but >= occupied bandwidth, mode axes, validation, evaluation/time budget, live hysteresis); NBFM/AM/FSK hook rows documented only. WFM objective: 19 kHz pilot C/N0 vs MPX guard bands; centre from discriminator MPX mean (pilot gives clock_ppm, not carrier offset); ITU 99 % OBW floor; RDS validation. Mock-SDR blind selections 60/400 kHz at -100/-50/+50/+100 kHz -> -78..-25 Hz of truth, bandwidth 194-201 kHz, PI 1694 every time, 4-5 iterations, 2.1-3.0 s debug; +150 kHz IQ shift -> 101.4494 MHz (-113 Hz), 198.5 kHz, PI, flagged off-raster from refined centre (-50.6 kHz from 101.5 MHz), not snapped. Append-only emitter_refined_tuning table (provenance 'refined by output analysis', objective, iterations, evaluations, time, mode params, original detected/start values); Repository::refined_tuning(id); /api/inventory rows 'refined'; family ranking uses refined centre. Listen header/status carry refined centre/bandwidth + audio.refinement; background re-refinement every 15 s."
     followups:
       - "analog.rs chain ownership changed: a station off every raster channel < one step away is taken by a chain - both neighbouring chains may demodulate it (dedupe per emitter)"
