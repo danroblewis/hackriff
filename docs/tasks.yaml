@@ -1193,8 +1193,8 @@ tasks:
   - id: T-072
     milestone: M0b
     title: Pipeline fidelity follow-ups from blind acceptance (device-gap sample loss, readsb stamp latency, single-detection tracks, short-burst resolution)
-    status: paused
-    paused: "staged WIP kept in worktree agent-ad62aec43e311666b (hk-cli pipeline.rs, hk-core ring/mod.rs, hk-pipeline run.rs, readsb plugin); resume after T-073/T-070 land (budget throttling)"
+    status: in-progress
+    resumed: "2026-09-14 after T-061 merged (budget throttle: 2 agents - T-071, T-072); staged WIP intact"
     interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
     deps: [T-047]
     parallel_group: J
