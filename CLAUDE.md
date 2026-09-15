@@ -104,6 +104,7 @@ Repo layout and build come from `docs/12` and the ADRs; the workspace below exis
 - **Languages/licence rule:** Rust core, C-via-FFI liquid-dsp (MIT), CUDA (Jetson-only, behind the `gpu` cargo feature), TS+WASM UI, Python tooling. **GPLv3 code (VOLK, GNU Radio, most decoders) stays behind the plugin process boundary** (ADR-0010). The dependency licence ledger is optional bookkeeping, not a gate.
 - **Build/test/run:** `just build`, `just test` (T1 unit + T2 component + T3 replay + T4 synthetic; no hardware; `gpu` off), `just replay <fixture.sigmf-meta>` (run a SigMF fixture through the pipeline), `just deploy-jetson` (rsync + on-device build). CI runs `just test` + Python tooling tests with no hardware and must stay green. HIL (T5) runs on a bench rig nightly/manually; field (T6) is logged, never gates CI.
 - **Adding a use case:** append an ID in `docs/05` and `use-cases.yaml` (never renumber), set `capabilities`/`hardware_fit`/`accessory`/`fit_flags`/`fit_note`/`test_tier` per `docs/06 §3` and `docs/10 §2`. **Adding a fixture:** capture/annotate as SigMF, put small ones in `fixtures/` (LFS) or the external store, reference it from the acceptance test by use-case ID.
+- **GPU work is Mac-first.** New GPU work implements the Mac provider (wgpu/Metal or Accelerate) behind the compute-provider conformance suite first; CUDA ports come later, in the Jetson phase.
 
 ## Coordination
 

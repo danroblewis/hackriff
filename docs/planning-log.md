@@ -529,3 +529,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-080:** depends on T-078 only.
   - **Priority:** all three ahead of T-053/T-056/T-067.
 - **B0.181 T-075 + T-076 merge verified.** Lint, 154 Rust test groups (0 failed), Python, UI and acceptance all green; the new short-burst detection rows did not break any exact-count acceptance assertion. Running: T-064 (release bench), T-077 (serial-group timing), T-078 (inventory lifecycle). T-079 takes the next free slot.
+- **B0.182 User decision: GPU work is Mac-first.** T-026 (CUDA PFB) is now `deferred` to the Jetson phase: not blocked, not a gate for any milestone. T-056 stays the Mac GPU wiring task. CLAUDE.md gains a rule: new GPU work implements the Mac provider (wgpu/Metal or Accelerate) behind the conformance suite first, and CUDA ports come later on the Jetson. The M0 completion caveat about T-026 no longer applies.

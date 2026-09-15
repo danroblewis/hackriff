@@ -394,7 +394,8 @@ tasks:
     dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
   - id: T-026
     title: GPU polyphase channelizer (CUDA PfbBackend) on the Jetson
-    status: blocked
+    status: deferred
+    deferred: "user 2026-09-14: GPU work is Mac-first; CUDA PFB deferred to the Jetson phase; not blocked and not a gate for any milestone"
     deps: [T-008]
     gated_on: S2
     parallel_group: D
@@ -927,6 +928,7 @@ tasks:
     milestone: M0b
     title: Wire compute providers into the pipeline (ComputeOptions in pipeline settings; STFT/PFB via hk_dsp::compute)
     status: todo
+    scope_note: "user 2026-09-14: T-056 stays the Mac GPU wiring task (wgpu/Metal or Accelerate providers into the pipeline behind the conformance suite)"
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-041, T-037]
     parallel_group: J
