@@ -11,8 +11,11 @@
 //! 4. `terminator`: the string ends before the first terminator character.
 //!
 //! **Emit.** `on-complete`: when every segment up to the end of the string has arrived since
-//! the last emission (so a repeated PS cycle emits once per cycle). `on-change`: whenever a
-//! segment's characters change, missing segments as spaces. The output frame's bytes are the
+//! the last emission (so a repeated PS cycle emits once per cycle); a segment whose characters
+//! changed clears the other segments' freshness, so a string never mixes two versions of the
+//! text. `on-change`: whenever a segment's characters change, missing segments as spaces. The
+//! emitted frame's check is the source frame's, except that a string holding a segment taken
+//! from a `corrected` frame is itself `corrected` (T-210). The output frame's bytes are the
 //! character codes; its layer tree is `<name>` (layer) with `<name>.key` (the key value, a
 //! zero-length node) and `<name>.text` (the string in `charset`).
 
@@ -150,6 +153,9 @@ pub struct Text {
     fresh: Vec<bool>,
     /// Segment ever arrived since the last restart (for `on-change`).
     seen: Vec<bool>,
+    /// Segment's current characters came from a frame that was not `corrected` (T-210: a string
+    /// holding any corrected segment is emitted `corrected`, never `valid`).
+    clean: Vec<bool>,
     emitted: u64,
     codes: Vec<u8>,
     status: Status,
@@ -167,6 +173,7 @@ impl Text {
             chars: Vec::new(),
             fresh: vec![false; segments],
             seen: vec![false; segments],
+            clean: vec![true; segments],
             emitted: 0,
             codes: Vec::with_capacity(64),
             status: Status::default(),
@@ -177,6 +184,7 @@ impl Text {
         self.chars.fill(b' ');
         self.fresh.fill(false);
         self.seen.fill(false);
+        self.clean.fill(true);
     }
 
     /// Characters in the assembled string (up to the terminator, if one has arrived).
@@ -254,8 +262,15 @@ impl Text {
         let slot = &mut self.chars[segment * cps..(segment + 1) * cps];
         let changed = !self.seen[segment] || slot != self.codes.as_slice();
         slot.copy_from_slice(&self.codes);
+        // A segment that changed invalidates the other segments' freshness: `on-complete` then
+        // waits for them to arrive again, so a string never mixes two versions of the text
+        // (a scrolling RDS PS changing mid-cycle).
+        if changed && self.seen[segment] {
+            self.fresh.fill(false);
+        }
         self.fresh[segment] = true;
         self.seen[segment] = true;
+        self.clean[segment] = f.info.check != CrcStatus::Corrected;
         let len = self.string_len();
         let last_segment = if len == 0 { 0 } else { (len - 1) / cps };
         if self.cfg.on_change {
@@ -272,6 +287,19 @@ impl Text {
     }
 
     fn emit(&mut self, src: &FrameInfo, len: usize, out: &mut FrameBuf) {
+        // The string's provenance: `corrected` as soon as one of its segments came from a
+        // corrected frame, so it is never counted as CRC-valid evidence downstream.
+        let last = if len == 0 {
+            0
+        } else {
+            (len - 1) / self.cps.max(1)
+        };
+        let check = if (0..=last.min(self.cfg.segments - 1)).any(|s| self.seen[s] && !self.clean[s])
+        {
+            CrcStatus::Corrected
+        } else {
+            src.check
+        };
         let bytes = &self.chars[..len];
         let bit_len = (len * 8) as u32;
         let text = decode_chars(self.cfg.charset, bytes);
@@ -331,7 +359,7 @@ impl Text {
             source_index: src.source_index,
             channel: src.channel,
             bit_len,
-            check: src.check,
+            check,
             corrected_bits: 0,
             layers: Some(Arc::new(tree)),
         };

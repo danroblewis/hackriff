@@ -251,7 +251,8 @@ impl FollowHops {
 /// Whether copy `a` is better than `b`.
 fn better(a: &FrameInfo, b: &FrameInfo) -> bool {
     let rank = |c: CrcStatus| match c {
-        CrcStatus::Valid => 3,
+        CrcStatus::Valid => 4,
+        CrcStatus::Corrected => 3,
         CrcStatus::NoCrc => 2,
         CrcStatus::Unknown => 1,
         CrcStatus::Invalid => 0,

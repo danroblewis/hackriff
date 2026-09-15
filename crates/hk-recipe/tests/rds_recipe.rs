@@ -29,6 +29,7 @@ fn rds_recipe_parses_and_validates_structurally() {
             "sync_search",
             "crc",
             "fields",
+            "consensus",
             "text",
             "text"
         ]

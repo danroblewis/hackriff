@@ -4,7 +4,7 @@
   "id": "rds",
   "version": 1,
   "name": "RDS: data on FM",
-  "description": "Tutorial 1 and the workbench reference (ADR-0011 §5). EN 50067 RDS / NRSC-4 RBDS on the 57 kHz subcarrier of a broadcast FM multiplex: FM discriminator, subcarrier locked to 3 × the 19 kHz pilot, biphase BPSK at 1187.5 Bd, differential decoding, block sync by offset words A–D with the 0x5B9 check polynomial (lock on three consecutive offset-consistent blocks, lost after eight invalid in a row), then group fields of CRC-valid groups (PI, group type, TP, PTY, PS and RadioText segments) and assembled PS and RadioText strings. Oracle: hk-demod's RDS decoder.",
+  "description": "Tutorial 1 and the workbench reference (ADR-0011 §5). EN 50067 RDS / NRSC-4 RBDS on the 57 kHz subcarrier of a broadcast FM multiplex: FM discriminator, subcarrier locked to 3 × the 19 kHz pilot, biphase BPSK at 1187.5 Bd, differential decoding, block sync by offset words A–D with the 0x5B9 check polynomial (lock on three consecutive offset-consistent blocks, lost after eight invalid in a row), check words with ≤2-bit burst correction only while block-synced (such groups are marked corrected, never CRC-valid), group fields of CRC-valid and corrected groups (PI, group type, TP, PTY, PS and RadioText segments), per-field consensus (PI, TP, PTY, PS and RadioText segments commit after two agreeing groups with at least one CRC-valid, or three corrected) and assembled PS and RadioText strings. Oracle: hk-demod's RDS decoder.",
   "match": {
     "families": ["wfm"],
     "freq_hz": [[65800000, 108000000]],
@@ -82,10 +82,30 @@
           "check_bits": 10,
           "offsets": [["0x0FC"], ["0x198"], ["0x168", "0x350"], ["0x1B4"]]
         },
-        "strip": true
+        "strip": true,
+        "synced_correction": { "burst_bits": 2, "lock_blocks": 3, "unlock_run": 8 }
       }
     },
     { "id": "group", "block": "fields", "label": "Group fields", "params": { "map": "rds_group", "skip_invalid": true } },
+    {
+      "id": "agree",
+      "block": "consensus",
+      "label": "Field consensus (PI, TP, PTY, PS, RadioText)",
+      "params": {
+        "key": "pi",
+        "fields": [
+          { "field": "tp" },
+          { "field": "pty" },
+          { "field": "ps.chars", "address": "ps.segment" },
+          { "field": "radiotext.chars_a", "address": "radiotext.segment" },
+          { "field": "radiotext.chars_b", "address": "radiotext.segment" }
+        ],
+        "clean_weight": 2,
+        "corrected_weight": 1,
+        "commit_weight": 3,
+        "window": 8
+      }
+    },
     {
       "id": "ps",
       "block": "text",
@@ -103,7 +123,7 @@
       "id": "rt",
       "block": "text",
       "label": "RadioText",
-      "inputs": { "in": "group" },
+      "inputs": { "in": "agree" },
       "params": {
         "name": "radiotext",
         "key": "pi",
@@ -196,7 +216,7 @@
     {
       "id": "group-info",
       "kind": "messages",
-      "from": "group",
+      "from": "agree",
       "decode": {
         "frame_model": "rds-group",
         "identity": { "scheme": "rds-pi", "field": "pi", "format": "hex" },

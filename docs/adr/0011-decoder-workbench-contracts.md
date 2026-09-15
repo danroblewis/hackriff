@@ -156,12 +156,13 @@ A test (`implemented_blocks_match_their_pinned_descriptors`) fails if an impleme
 | framing | `assemble` | frames → frames | pinned: `word_bits`, `start {bit, value}`, `idle_words`, `header`, `slot`, `payload`, `max_words`, `span_frames` (POCSAG address + message codewords → one message, across batches) |
 | framing | `deframe` | bits\|frames → frames | pinned (T-087): `frame_bits` (fixed, or the maximum), `offset_bits`, `length_from`, `terminator` |
 | framing | `interleave`, `deinterleave` | frames → frames | pinned (T-087): `depth` (column interleaver) or `permutation` (per period) |
-| fec | `crc` | frames → frames | pinned: RevEng model (`width, poly, init, refin, refout, xorout`), `span` or `blocks {data_bits, check_bits, offsets}`, `strip`, `drop_invalid` (hot), `correct_burst_bits` |
+| fec | `crc` | frames → frames | pinned: RevEng model (`width, poly, init, refin, refout, xorout`), `span` or `blocks {data_bits, check_bits, offsets}`, `strip`, `drop_invalid` (hot), `correct_burst_bits`, `synced_correction {burst_bits, lock_blocks, unlock_run}` (T-210: block mode; corrects a block's unique ≤`burst_bits`-bit burst only while the lattice is synced, outside the random-block bound, and marks the frame `corrected`) |
 | fec | `bch` | frames → frames | pinned (T-087): `word_bits`, `n`, `k`, `poly` (degree n − k), `parity` (none/even/odd), `correct_bits`, `drop_invalid` (hot) |
 | fec | `parity` | frames → frames | pinned (T-087): `unit_bits`, `parity`, `position` (first/last), `span`, `strip`, `drop_invalid` (hot) |
 | fec | `checksum` | frames → frames | pinned (T-087): `algorithm` (sum/xor/ones-complement), `unit_bits`, `width`, `endianness`, `init`, `complement`, `span`, `strip`, `drop_invalid` (hot) |
 | parse | `fields` | frames → frames | pinned: `map` (hot) |
 | parse | `text` | frames → frames | pinned: `name`, `key`, `address[]`, `chars[]`, `segments`, `chars_per_segment`, `reset_on`, `terminator`, `emit` (hot), `charset` |
+| parse | `consensus` | frames → frames | pinned (T-210): `key`, `fields[] {field, address}`, `clean_weight`, `corrected_weight`, `commit_weight`, `window` — a value passes only once agreeing observations reach `commit_weight` in the slot's window (a CRC-valid frame weighs `clean_weight`, a corrected one `corrected_weight`); every other value is withheld (node value cleared, `error` set) |
 | multi | `follow_hops` | frames → frames | pinned: `dedupe_s` (hot), `order_window_s` |
 | util | `identity` | any → same | none (implemented: the contract example) |
 
@@ -377,10 +378,11 @@ Specified in [`docs/stream-contract.md` §14](../stream-contract.md) (1.2 draft)
 4. `slice` `slicer` (→ bits);
 5. `diff` `diff_decode` (xor);
 6. `sync` `sync_search` (`offset-words`: 26-bit blocks, 10 check bits, poly 0x5B9 (full form: `poly` accepts the RevEng normal form or the full form, and the x^width term is implied either way), offsets A 0x0FC, B 0x198, C 0x168, C′ 0x350, D 0x1B4, sequence A, B, C|C′, D → 104-bit group frames);
-7. `crc` `crc` (block mode, per-position offsets, strip → 64-bit frames with `crc_status`);
+7. `crc` `crc` (block mode, per-position offsets, strip → 64-bit frames with `crc_status`; T-210 `synced_correction`: ≤2-bit bursts corrected only while block-synced, those groups `corrected`, never `valid`);
 8. `group` `fields` (map `rds_group`);
-9. `ps` `text` (PS: key PI, address `ps.segment`, 4 × 2 chars);
-10. `rt` `text` (RadioText: address `radiotext.segment`, chars `chars_a` for 2A or `chars_b` for 2B, 16 segments, reset on the A/B flag, terminator 0x0D).
+9. `agree` `consensus` (T-210: key `pi`, fields `tp`, `pty`, `ps.chars` by `ps.segment`, `radiotext.chars_a`/`chars_b` by `radiotext.segment`; clean 2, corrected 1, commit 3, window 8 — two agreeing groups with at least one CRC-valid, or three corrected);
+10. `ps` `text` (PS: key PI, address `ps.segment`, 4 × 2 chars);
+11. `rt` `text` (RadioText: address `radiotext.segment`, chars `chars_a` for 2A or `chars_b` for 2B, 16 segments, reset on the A/B flag, terminator 0x0D).
 
 **Field map `rds_group`** (bits):
 - `pi` 0–16 (hex), `group_type` 16–20, `version` 20 (enum A/B), `tp` 21 (bool), `pty` 22–27 (numeric: RDS and RBDS name tables differ);
@@ -388,8 +390,8 @@ Specified in [`docs/stream-contract.md` §14](../stream-contract.md) (1.2 draft)
 - layer `radiotext` 27–64 when `group_type == 2`: `ab`, `segment` (4), then `chars_a` (32) if `version == 0`, else `pi_repeat` (16) + `chars_b` (16).
 
 **Outputs:**
-- `groups` (inspector);
-- `group-info` (messages: identity `rds-pi` from `pi`; metadata group_type, version, tp, pty);
+- `groups` (inspector, from `group`: every group as decoded, `valid`, `corrected` or `invalid`);
+- `group-info` (messages, from `agree`: identity `rds-pi` from `pi`; metadata group_type, version, tp, pty — only CRC-valid frames become rows, and only consensus-committed values are present);
 - `station` (messages: PS text, identity from `ps.key`);
 - `radiotext` (messages);
 - stage `mpx` (spectrum view) and `symbols` (the eye/soft symbols).

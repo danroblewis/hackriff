@@ -116,6 +116,18 @@ pub fn planned() -> Vec<BlockDescriptor> {
                     "Correct error bursts up to this length per block/frame. Refused where it would turn more than 1e-3 of random blocks valid (burst patterns × allowed offsets / 2^width): at build for blocks and the shortest span frame, per frame length at run time (status correction_skipped). RDS's 10-bit check allows none; CRC-24 over 112-bit Mode S allows up to 5.",
                 )
                 .default_value(0),
+                param(
+                    "synced_correction",
+                    object(vec![
+                        param("burst_bits", int(1, 2), "Longest burst corrected per block (RDS: 2, one channel-bit error after differential decoding).")
+                            .required(),
+                        param("lock_blocks", int(1, 64), "Consecutive clean blocks on contiguous frames that sync the lattice.")
+                            .default_value(3),
+                        param("unlock_run", int(1, 256), "Consecutive non-clean blocks (or a frame gap, or a discontinuity) that lose sync.")
+                            .default_value(8),
+                    ]),
+                    "Block mode only; absent: off. Corrects a block's unique burst of up to burst_bits bits only while the block lattice is synced (the block's own sync state over contiguous frames), outside the random-block bound. A frame valid only thanks to it is marked corrected (never valid) with corrected_bits; corrected blocks count as errors in error_rate and corrected frames in frames_bad (status frames_corrected, blocks_corrected, lock).",
+                ),
             ],
             true,
         ),

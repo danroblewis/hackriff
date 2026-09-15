@@ -89,6 +89,11 @@ pub enum CrcStatus {
     NoCrc,
     /// Check not yet known (inferred framing, C21).
     Unknown,
+    /// The check passed only after FEC corrected bits that the frame's own check alone could not
+    /// vouch for (T-210: RDS burst correction while block-synced). The frame is usable, but it is
+    /// never CRC-valid evidence: confirm-by-decode, lifecycle and CRC-valid rates count `valid`
+    /// only.
+    Corrected,
 }
 
 /// Structured output from a decoder plugin or bit-framing inference (docs/07 §2.15).

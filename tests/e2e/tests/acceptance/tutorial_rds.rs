@@ -187,6 +187,8 @@ impl Tail {
 struct Frame {
     sample_index: u64,
     valid: bool,
+    /// T-210: the check passed only after ≤2-bit block correction while synced.
+    corrected: bool,
     edit_rev: u64,
     values: BTreeMap<String, Value>,
 }
@@ -210,6 +212,7 @@ fn frames(records: &[Value]) -> Vec<Frame> {
             Frame {
                 sample_index: v["metadata"]["sample_index"].as_u64().unwrap_or(0),
                 valid: v["crc_status"] == "valid",
+                corrected: v["crc_status"] == "corrected",
                 edit_rev: v["metadata"]["edit_rev"].as_u64().unwrap_or(0),
                 values,
             }
@@ -631,9 +634,12 @@ fn signal_062_rds_real_air_acceptance_crc_valid_pi_and_complete_ps() {
     let ok = group_frames.iter().filter(|f| f.valid).count();
     let total = group_frames.len();
     let crc_rate = ok as f64 / total.max(1) as f64;
+    // T-210: a `corrected` group (block correction while synced) legitimately carries fields; it
+    // is counted separately and never as CRC-valid.
+    let corrected = group_frames.iter().filter(|f| f.corrected).count();
     let invalid_with_fields = group_frames
         .iter()
-        .filter(|f| !f.valid && !f.values.is_empty())
+        .filter(|f| !f.valid && !f.corrected && !f.values.is_empty())
         .count();
     let pis: Vec<u64> = group_frames
         .iter()
@@ -649,9 +655,9 @@ fn signal_062_rds_real_air_acceptance_crc_valid_pi_and_complete_ps() {
         .cloned()
         .collect();
     eprintln!(
-        "[{tag}] RESULT emitter {:.4} MHz; CRC-valid groups {ok}/{total} = {crc_rate:.3}; PI \
-         {pi:04X} (share {pi_share:.3}); PS {names:?}; invalid groups with fields \
-         {invalid_with_fields}; sync acquisitions {}, blocks ok/bad {}/{}",
+        "[{tag}] RESULT emitter {:.4} MHz; CRC-valid groups {ok}/{total} = {crc_rate:.3}; \
+         corrected groups {corrected}; PI {pi:04X} (share {pi_share:.3}); PS {names:?}; invalid \
+         groups with fields {invalid_with_fields}; sync acquisitions {}, blocks ok/bad {}/{}",
         f_center / 1e6,
         status["sync.acquisitions"],
         status["sync.blocks_ok"],

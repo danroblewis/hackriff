@@ -9,8 +9,8 @@ It then runs, hot-edits and saves that recipe on a live station through the API.
 A recipe is a block graph (ADR-0011 §2). `POST /api/recipes/validate` checks every node against `GET /api/blocks` and answers the typed edges:
 
 ```text
-input(iq, 240 kS/s) → fm → rds57 → clock → slice → diff → sync → crc → group ─┬→ ps
-                      real   iq     soft    bits    bits  frames frames frames └→ rt
+input(iq, 240 kS/s) → fm → rds57 → clock → slice → diff → sync → crc → group → agree ─┬→ ps
+                      real   iq     soft    bits    bits  frames frames frames frames  └→ rt
 ```
 
 The input stage is a channel DDC. It centres the target and resamples it to `input.sample_rate_hz` (240 kS/s, 200 kHz wide). Each stage publishes a status readout: flat `<node>.<metric>` keys in `GET /api/pipelines/{id}` `status`, and a `status` record on the inspector stream about every 250 ms.
@@ -25,9 +25,10 @@ The values in the table are from the walkthrough in §2, 20 s after start.
 | `slice` | `slicer` (threshold 0) | Soft symbols → hard bits. | `ones_fraction` 0.50 |
 | `diff` | `diff_decode` (`xor`) | RDS is differentially encoded: `b[k] = d[k] ⊕ d[k−1]`. | — |
 | `sync` | `sync_search` (`offset-words`, 26-bit blocks, poly 0x5B9, offsets A B C/C′ D) | Finds block boundaries from the syndromes of the offset words, locks after 2 blocks in sequence, then cuts 104-bit groups. | `lock` locked, `blocks_ok` 821, `blocks_bad` 74 (block error rate 0.06 over 20 s, including the loop seams), `acquisitions` 5 |
-| `crc` | `crc` (width 10, poly 0x5B9, per-block offsets, `strip`) | Checks each block's check word and strips it, leaving a 64-bit group of four 16-bit words. Each frame is marked `valid` or `invalid`. No burst correction: RDS's false-correction bound rules it out (T-087). | `frames_ok` 166, `frames_bad` 56 (`error_rate` 0.10 per block, `quality` 0.90) |
+| `crc` | `crc` (width 10, poly 0x5B9, per-block offsets, `strip`) | Checks each block's check word and strips it, leaving a 64-bit group of four 16-bit words. Each frame is marked `valid`, `corrected` or `invalid`. The generic `correct_burst_bits` stays off: a 10-bit check would turn 5% of random blocks "valid" (T-087). `synced_correction` (T-210) instead corrects a block's unique ≤2-bit burst only while the lattice is synced — three consecutive clean blocks on contiguous frames lock it, eight non-clean blocks or a frame gap drop it — and marks those groups `corrected`, never `valid`, so they are excluded from the CRC-valid rate and from confirm-by-decode. | `frames_ok` 166, `frames_bad` 56 (`error_rate` 0.10 per block, `quality` 0.90), plus `frames_corrected`, `blocks_corrected` |
 | `group` | `fields` (`map: rds_group`) | The recipe's field map lays out PI, group type, version, TP and PTY, plus layers conditional on the group type: 0A/0B PS segment and 2A/2B RadioText segment. Each frame record carries the parsed layer tree (stream contract §14.2). | `frames_ok` 222, `frames_partial` 0 |
-| `ps` | `text` (4 segments of 2 characters, keyed by PI) | Assembles the 8-character programme service name. | `strings` 6 |
+| `agree` | `consensus` (key `pi`; `tp`, `pty`, `ps.chars` by segment, `radiotext.chars_a`/`chars_b` by segment; clean 2, corrected 1, commit 3, window 8) | Per-field consensus (T-210): a value reaches the outputs only after two agreeing groups of which at least one is CRC-valid, or three corrected ones. Anything else is withheld (its node's value cleared and marked in error), so one false correction can never surface a wrong PI or PS. The other fields count only while a group's PI equals the committed one; a newly committed PI clears the rest. | `fields_committed`, `fields_withheld`, `slots` |
+| `ps` | `text` (4 segments of 2 characters, keyed by PI) | Assembles the 8-character programme service name from committed segments; a string holding a segment from a corrected group is itself `corrected`. | `strings` 6 |
 | `rt` | `text` (16 × 4 characters, reset on the A/B flag, terminator 0x0D) | Assembles RadioText. | `quality` 0.94 (15 of 16 segments seen), `strings` 0 (see §3) |
 
 **Recipe parameters.** The worked example needed no changes to decode real RDS. Parameters were compared side by side as parallel pipelines on the same station over 30 s:
