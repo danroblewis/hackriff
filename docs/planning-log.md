@@ -1660,3 +1660,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.395 T-141 mock dequant costs about 33% on bandit tests. Confirmed and launched T-170.**
   - **Measurement:** `bandit_on_attaches` took 81.5 s before T-141 (load ~17) and 108.8 s on main at 0f2b5c3 (load 8–15).
   - **T-170 (Opus):** bypass dequant when the recording is not quantisation-limited (threshold fixed a priori from rounding-noise math), and/or a cheaper FFT path. Fidelity tests and the `scheduler_history` 0.5 dB check must hold.
+- **B0.396 T-149 merged (c42284f fix round).**
+  - **Structure:** per-area `index.ts`/`slice.ts`/css files under `ui/src/app/` (explore, centre, capture, dock, decode, review, plus `decode/inspector*` for T-154). `state.ts` and `app.css` only compose them; `test/run.mjs` bundles and runs every test.
+  - **Stubs:** `dock/api.ts` (`startListen`, `startRecordsOutput`, `stopOutput`) and `decode/status-feed.ts` (`subscribePipelineFeed`).
+  - **Store:** listener exceptions are isolated.
+  - **Tests:** 157 UI tests green.
+  - **Gaps:** ADR gap 13 (inventory `total`) added as T-171.
+  - **Panel fan-out:** T-150, T-151 and T-152 launched on main. T-153..T-155 follow when agent slots free.

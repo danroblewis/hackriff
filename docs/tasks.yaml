@@ -2363,8 +2363,8 @@ notes:
   - id: T-149
     milestone: MUI
     title: "MUI-DESIGN: ADR-0013 UI component + state-store structure, frontend-to-API mapping for every mockup panel, build setup, dependency-light framework decision (vanilla TS + small reactive store, or lit/Preact, justified), reuse existing WebGL waterfall"
-    status: review
-    commit: 9509424
+    status: done
+    commit: c42284f
     deps: []
     parallel_group: MUI-D
     use_cases: []
@@ -2379,7 +2379,7 @@ notes:
   - id: T-150
     milestone: MUI
     title: "MUI shell: top bar with Explore/Decode mode toggle, layout grid, Outputs dock (live audio + record streams: meter/rate, mute, copy address, stop; Listen adds a stream) and always-on Capture timeline (scrub, reviewing N ago / LIVE)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-SHELL
     use_cases: []
@@ -2394,7 +2394,7 @@ notes:
   - id: T-151
     milestone: MUI
     title: "MUI Explore sidebars: inventory Candidates/Confirmed (sortable, Promote/Delete reachable without horizontal scroll), Selections with actions, right focus panel (big frequency, refined-from-output note, measurements, ranked explanations as suggestions, actions Listen/Decode/Record-Export/Stream/Promote/Delete)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-EXPLORE
     use_cases: []
@@ -2409,7 +2409,7 @@ notes:
   - id: T-152
     milestone: MUI
     title: "MUI centre: spectrum trace + existing WebGL waterfall rehomed, brackets for confirmed/candidate/focused signals, DC mask, drag region select, hover readout, capture-timeline time cursor"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-CENTRE
     use_cases: []
@@ -2699,3 +2699,18 @@ notes:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-171
+    milestone: MUI
+    title: "MUI API gap 13: /api/inventory total count (tab counts and Review badge; UI labels 500+ until served)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 review 2026-09-15 (ADR-0013 §4.9 gap 13)"
+    acceptance: "inventory list response carries total for the query; docs/api.md + api_contract.rs updated; UI count labels switch from 500+ to exact"
+    area: hk-api, hk-model
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+    size: small
