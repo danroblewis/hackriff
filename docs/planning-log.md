@@ -1193,3 +1193,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Test change:** the slow-creep assertion is relaxed from day 23 to day 20 (earlier detection).
 
   Item 1 (history source/site tiles and filters) plus the ADR §3.4 docs become **T-133**, which T-124 now depends on. Timeboxed Opus review running (memory on Jetson, CUSUM false building, key proliferation, load race, merge vs T-131).
+- **B0.336 T-131 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. Immature folds carry no z, so `observe_interval` skips them and `immature-baseline` suppressions are never counted on the live path (breaks ADR §7.3 'never silently dropped'). This explains the zero suppressions in the scene.
+    2. The scene e2e only asserts `errors==0`, which is vacuous.
+  - **Zero alarms with 4 mature subjects is legitimate:** unchanged channels fall below the off level.
+  - **Checked OK:** RT safety (provenance read on the occupancy thread, no DB I/O in candidate publishing); unassigned/mobile build no baselines; no double-writes.
+  - **Merge vs T-132:** one conflict at the `ingest_interval` call in occupancy.rs; keep T-131's site stamping and folds, and use T-132's `dominant_gain_key`. After merge, recheck `PoolContext.level` against T-132's level classes.
+  - **Fix round launched.** T-124 acceptance now includes the alarm assertions the review listed: pre-matured baseline or ≥56 h scene, busier alarm on the injected channel, gain step explained, restart keeps site.
