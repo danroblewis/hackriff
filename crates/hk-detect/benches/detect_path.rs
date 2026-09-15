@@ -14,6 +14,10 @@
 //! - `$HK_DETECT_PATH_RATES` comma-separated Msps (default `8,10,20`).
 //! - `--features parity-check`: every hop-set raster is also computed by the pre-T-058 reference
 //!   and compared bit for bit (slow; prints the running count).
+//! - `$HK_DETECT_PATH_HOP=legacy`: the tracker without the T-064 hop-set bounds (every member
+//!   kept, raster refitted on every drain). After each timed run the tracker is finished
+//!   (untimed) and the closed hop sets are printed (channels, raster, hop rate) with the raster
+//!   fit and pruning counters, for parity between the two modes.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -21,7 +25,8 @@ use std::time::{Duration, Instant};
 use hk_core::{BlockHeader, Discontinuity, ProvenanceHandle};
 use hk_detect::clip::is_clipped_ci8;
 use hk_detect::{
-    ClipCount, Detector, DetectorConfig, DetectorEvent, TrackBatch, Tracker, TrackerConfig,
+    ClipCount, Detector, DetectorConfig, DetectorEvent, TrackBatch, TrackEvent, Tracker,
+    TrackerConfig,
 };
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker};
 use hk_dsp::synth::Rng;
@@ -128,6 +133,8 @@ struct Split {
     frames: u64,
     detections: u64,
     upserts: u64,
+    /// Closed hop sets and counters (T-064), printed after the RTF line.
+    hop: String,
 }
 
 fn run(fs: f64, iq: &[Complex<i8>], seconds: f64) -> Split {
@@ -145,7 +152,11 @@ fn run(fs: f64, iq: &[Complex<i8>], seconds: f64) -> Split {
     let mut floor = NoiseFloorTracker::new(floor_cfg).unwrap();
     let dcfg = DetectorConfig::new(SurveyId::new()).with_floor_config(&floor_cfg);
     let mut det = Detector::new(dcfg).unwrap();
-    let mut tracker = Tracker::new(TrackerConfig::default());
+    let mut tcfg = TrackerConfig::default();
+    if std::env::var("HK_DETECT_PATH_HOP").is_ok_and(|v| v == "legacy") {
+        tcfg.hop = tcfg.hop.without_scaling_bounds();
+    }
+    let mut tracker = Tracker::new(tcfg);
     // detect.rs drains the tracker every frame and writes (clearing) the batch every 0.5 s.
     let mut batch = TrackBatch::new();
     let flush_samples = (fs * 0.5) as u64;
@@ -228,6 +239,31 @@ fn run(fs: f64, iq: &[Complex<i8>], seconds: f64) -> Split {
         index += CHUNK as u64;
     }
     split.total = t0.elapsed();
+    let mut sets = Vec::new();
+    tracker.finish(&mut |te| {
+        if let TrackEvent::HopSetClosed(h) = te {
+            sets.push(h);
+        }
+    });
+    let st = tracker.stats();
+    split.hop = format!(
+        "hop sets closed {} (formed {}), raster fits {}, members pruned {}",
+        sets.len(),
+        st.hop_sets_formed,
+        st.hop_raster_fits,
+        st.hop_members_pruned
+    );
+    for h in &sets {
+        split.hop += &format!(
+            "\n    {} channels {:.3}..{:.3} MHz  raster {:?} Hz  hop rate {:?} Hz  hops {}",
+            h.channels_hz.len(),
+            h.channels_hz.first().copied().unwrap_or(0.0) / 1e6,
+            h.channels_hz.last().copied().unwrap_or(0.0) / 1e6,
+            h.raster_hz,
+            h.hop_rate_hz,
+            h.hops
+        );
+    }
     split
 }
 
@@ -289,5 +325,6 @@ fn main() {
             wall / s.frames.max(1) as f64 * 1e6,
             load_before,
         );
+        println!("  {}", s.hop);
     }
 }

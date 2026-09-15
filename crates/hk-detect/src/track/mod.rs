@@ -76,6 +76,31 @@
 //! centres within their uncertainty, weighted by bursts and SNR, preferring a common raster over
 //! an incommensurate larger step (`stats::robust_raster`).
 //!
+//! # Hop-set scaling (T-064)
+//!
+//! The raster fit costs `O(channels²)` channel fits (tens of ms at ~100 channels), so hop sets
+//! are bounded and the fit is cached ([`HopConfig`]):
+//!
+//! - **Membership.** A closed member is dropped once a newer qualifying member covers its channel
+//!   (centres closer than half their summed bandwidths) and its last burst is older than
+//!   `member_retention_s` (10 s; idle-closed tracks are ≥ 60 s idle, so they make way at once);
+//!   beyond `max_members` (256) the oldest closed members go. Dropped members' detections still
+//!   count in the aggregate's `detection_count`; `hop_set_hz` and `co_occurring` then list the
+//!   latest track per channel instead of every track the channel ever had
+//!   (`TrackerStats::hop_members_pruned`).
+//! - **Raster.** The raster is refitted only when the qualifying channel set changed since the
+//!   latest fit (a member joined, left or changed qualification, or a centre moved by more than
+//!   `raster_drift_bins`), at most once per `raster_refit_s` (1 s) of stream time, and always at
+//!   formation, on a merge of formed sets and at closing (`TrackerStats::hop_raster_fits`).
+//!   Before T-064 every drain of a set with a new link refitted.
+//! - **Tolerance.** `HopSetFormed`, `HopSetClosed` and the closed aggregate row are fitted fresh:
+//!   on the synthetic hoppers and the real 915 MHz FHSS fixture they equal the unbounded
+//!   tracker's (raster within 0.1 Hz, same channels, hop rate, hops and members;
+//!   `HopConfig::without_scaling_bounds` restores the old behaviour). An *open* aggregate row
+//!   (and [`Tracker::hop_sets`]) can carry a raster up to `raster_refit_s` old, or fitted before a
+//!   sub-`raster_drift_bins` centre drift or a burst-count/SNR weight change. Sets whose channels
+//!   never close (short captures) prune nothing.
+//!
 //! # Real-time path
 //!
 //! No allocation in steady state except when a track or hop set is created or closed: the
