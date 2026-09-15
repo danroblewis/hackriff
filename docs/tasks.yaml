@@ -1680,7 +1680,7 @@ tasks:
   - id: T-104
     milestone: M1
     title: "Blocks A hardening (T-086 review follow-ups)"
-    status: review
+    status: done
     commit: 514b17c
     deps: [T-086, T-087]
     parallel_group: M1A

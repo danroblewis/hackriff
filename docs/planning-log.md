@@ -695,3 +695,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - manchester: realignment holds later bits for the next chunk so the time map stays exact. Declared max_items grows by about one chunk of latency. Held bits are lost uncounted at END (minor, noted).
   - Counting-allocator test: zero allocations across 14 blocks × 24 configs, including restarts.
   hk-blocks 61/61, lint clean. Merge follows the in-flight full check (follow-up to reviewed work, per-item tests).
+- **B0.247 Full check of main a02e66f (T-088): green.** Lint clean; nextest + UI 1058/1058 in 228 s; acceptance 23/23. **T-104 merged** (514b17c). Full check covering T-104 running.
