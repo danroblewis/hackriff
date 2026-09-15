@@ -1543,7 +1543,7 @@ tasks:
   - id: T-093
     milestone: M1
     title: "M1 follow_hops: one pipeline spanning several channels"
-    status: review
+    status: done
     commit: 8f02471
     deps: [T-085, T-088]
     parallel_group: M1H
@@ -1570,7 +1570,7 @@ tasks:
   - id: T-095
     milestone: M1
     title: "M1 Tutorial 2: POCSAG recipe with follow_hops + blind acceptance"
-    status: todo
+    status: in-progress
     deps: [T-098, T-094, T-093, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1698,7 +1698,7 @@ tasks:
   - id: T-105
     milestone: M1
     title: "Assist CRC search: confident wrong generator in rare cases at >=8 frames; near-tie ordering at 3 frames"
-    status: review
+    status: done
     commit: 52bd4fe
     deps: [T-091]
     parallel_group: M1S
@@ -1712,7 +1712,7 @@ tasks:
   - id: T-106
     milestone: M1
     title: "hk_demod RDS oracle bit/group positions count from pilot lock, not stream start (PS timestamps ~100 ms early)"
-    status: todo
+    status: in-progress
     deps: [T-094]
     parallel_group: T106
     use_cases: [SIGNAL-062]
