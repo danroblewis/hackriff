@@ -1,1 +1,65 @@
-/* Packet inspector styles (ADR-0013 §8). Owner: T-154. Scope rules under .inspector. */
+/* Packet inspector styles (ADR-0013 §8). Owner: T-154. Every rule is scoped under `.inspector`,
+   the slot's own class (`data-slot="inspector"` in index.html); the grid/tokens/breakpoints
+   outside it belong to base.css (T-150). */
+
+.inspector .insp { display: grid; grid-template-columns: 270px minmax(0,1fr) 300px; height: 100%; min-height: 0; gap: 0; }
+
+.inspector .insp-frames { border-right: 1px solid var(--line); display: grid; grid-template-rows: auto minmax(0,1fr); min-height: 0; background: var(--panel); }
+.inspector .insp-head { padding: 0 12px 6px; }
+.inspector .insp-head .section-h { margin: 0; }
+.inspector .insp-frame-list { overflow-y: auto; min-height: 0; font-family: var(--mono); }
+.inspector .insp-fr { display: grid; grid-template-columns: auto auto 1fr; gap: 2px 8px; padding: 5px 12px; cursor: pointer; border-left: 2px solid transparent; font-size: 11.5px; }
+.inspector .insp-fr:hover { background: var(--panel-2); }
+.inspector .insp-fr[aria-current="true"] { background: var(--amber-soft); border-left-color: var(--amber); }
+.inspector .insp-fr .t { color: var(--dim); }
+.inspector .insp-fr .c { color: var(--teal); }
+.inspector .insp-fr .s { grid-column: 3; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inspector .insp-fr.bad .s { color: var(--coral); }
+.inspector .insp-fr.fresh { animation: insp-flash 900ms ease-out; }
+@keyframes insp-flash { from { background: var(--amber-soft); } to { background: transparent; } }
+
+.inspector .insp-bytes { display: grid; grid-template-rows: auto minmax(0,1fr) auto; padding: 0 14px; min-height: 0; background: var(--ground); }
+.inspector .insp-bytes .section-h { margin-bottom: 6px; }
+.inspector .insp-hexgrid { overflow: auto; min-height: 0; font: 12.5px/1.7 var(--mono); }
+.inspector .insp-hexrow { display: grid; grid-template-columns: 42px 1fr 8px auto; gap: 0 10px; align-items: center; }
+.inspector .off { color: var(--dim); }
+.inspector .hx, .inspector .asc { display: flex; flex-wrap: wrap; gap: 0; }
+.inspector .hx b, .inspector .asc b { font-weight: 400; padding: 0 3px; border-radius: 3px; cursor: pointer; white-space: pre; }
+.inspector .hx b { min-width: 22px; text-align: center; }
+.inspector .asc b { min-width: 11px; text-align: center; }
+.inspector .hx b.sel, .inspector .asc b.sel { background: var(--amber); color: var(--ground); }
+.inspector .b-teal { color: var(--teal); }
+.inspector .b-amber { color: var(--amber); }
+.inspector .b-lav { color: var(--lav); }
+.inspector .b-coral { color: var(--coral); }
+.inspector .b-cream { color: var(--cream); }
+.inspector .b-mut { color: var(--muted); }
+.inspector .insp-flow { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 11px; margin-top: 6px; flex-wrap: wrap; }
+.inspector .insp-flow code { color: var(--teal); font-family: var(--mono); word-break: break-all; }
+
+.inspector .insp-tree { border-left: 1px solid var(--line); overflow-y: auto; min-height: 0; padding: 9px 12px 10px; background: var(--panel); }
+.inspector .insp-tnode { display: grid; grid-template-columns: 1fr auto; gap: 1px 8px; padding: 3px 6px; border-radius: 5px; cursor: pointer; border: 1px solid transparent; }
+.inspector .insp-tnode:hover { background: var(--panel-2); }
+.inspector .insp-tnode[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.4); }
+.inspector .insp-tnode.bad { color: var(--coral); }
+.inspector .insp-tnode .nm { font-size: 12px; }
+.inspector .insp-tnode .vv { font: 12px var(--mono); color: var(--text); }
+.inspector .insp-tnode .rg { grid-column: 1 / -1; font: 10px var(--mono); color: var(--dim); }
+.inspector .insp-tnode.d1 { margin-left: 0; }
+.inspector .insp-tnode.d2 { margin-left: 14px; }
+.inspector .insp-tnode.d3 { margin-left: 28px; }
+.inspector .insp-tnode .dot { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; vertical-align: 0; background: currentColor; }
+
+@media (max-width: 1150px) {
+  .inspector .insp { grid-template-columns: 210px minmax(0,1fr) 250px; }
+}
+@media (max-width: 900px) {
+  .inspector { overflow: visible; height: auto; }
+  .inspector .insp { grid-template-columns: 1fr; height: auto; }
+  .inspector .insp-frames { border-right: 0; border-bottom: 1px solid var(--line); max-height: 220px; }
+  .inspector .insp-bytes { padding: 9px 14px; max-height: 280px; }
+  .inspector .insp-tree { border-left: 0; border-top: 1px solid var(--line); max-height: 240px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inspector .insp-fr.fresh { animation: none; }
+}
