@@ -5,7 +5,7 @@
 .dock-label small { color: var(--dim); font: 10.5px var(--mono); }
 .dock .outs { display: flex; gap: 8px; overflow-x: auto; min-width: 0; flex: 1; padding-block: 7px; }
 .dock .out { display: grid; grid-template-columns: auto auto auto; align-items: center; gap: 2px 10px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); white-space: nowrap; }
-.dock .out.pipe-out { border-color: rgba(82, 194, 174, 0.3); }
+.dock .out.pipe-out { border-color: color-mix(in srgb, var(--teal) 30%, transparent); }
 .dock .out .t { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; font-weight: 500; }
 .dock .out .k { color: var(--dim); font-size: 11px; grid-column: 1; }
 .dock .out .ctl { grid-row: 1 / span 2; grid-column: 3; display: flex; gap: 4px; }

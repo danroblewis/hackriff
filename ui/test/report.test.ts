@@ -1,15 +1,12 @@
 // T-123: survey report panel (docs/api.md "Survey reports"). No DOM under node:test (same
 // technique as inventory.test.ts/frame-inspector.test.ts): pure query/formatting functions and the
-// thin API wrapper are tested directly; index.html is read as text for the layout checks.
+// thin API wrapper are tested directly.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import {
   changeStatusText, fcoText, fmtNs, freqText, loadReport, reportExportUrl, reportQuery,
   type ReportClient, type SurveyReport,
 } from "../src/report";
-
-const html = readFileSync("src/index.html", "utf8");
 
 // ---- query building ----
 
@@ -93,12 +90,8 @@ test("loadReport GETs the report query and returns the parsed document", async (
   assert.equal(r.top_emitters[0].top_suggestion, "FM broadcast");
 });
 
-// ---- layout: the panel exists and the coverage/export affordances are present ----
-
-test("index.html has the survey report panel with coverage, export links and use-region button", () => {
-  assert.ok(html.includes('id="report"'), "no #report panel");
-  assert.ok(html.includes('id="rpt-form"'));
-  assert.ok(html.includes('id="rpt-coverage-statement"'), "coverage statement element missing");
-  assert.ok(html.includes('id="rpt-csv"') && html.includes('id="rpt-png"'), "CSV/PNG export links missing");
-  assert.ok(html.includes('id="rpt-use-region"'), "no button to prefill from the current region");
-});
+// The Report tab (coverage statement, CSV/PNG export links, "use this region") is now
+// ui/src/app/review/report.ts's ReportTab, built with h() rather than a static index.html:
+// exercised manually against a running `hk serve`, like every other MUI DOM-wiring class (see
+// ui/test/app-review.test.ts's top comment). app-review.test.ts unit-tests its pure
+// defaultReportParams helper.

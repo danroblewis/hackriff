@@ -5,7 +5,7 @@
 .wb-side .wb-block { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 8px; }
 .wb-side .pl { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 9px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
 .wb-side .pl:hover { background: var(--panel-2); }
-.wb-side .pl[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+.wb-side .pl[aria-current="true"] { background: var(--amber-soft); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
 .wb-side .pl b { font-weight: 600; font-size: 12.5px; }
 .wb-side .pl .st { font: 500 10px var(--ui); letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; align-self: start; }
 .wb-side .pl .st.run { color: var(--teal); background: var(--teal-soft); }
@@ -17,7 +17,7 @@
 .wb-side .stage-list { display: flex; flex-direction: column; gap: 2px; }
 .wb-side .stg { display: grid; grid-template-columns: 20px 1fr auto; gap: 0 8px; align-items: center; padding: 6px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
 .wb-side .stg:hover { background: var(--panel-2); }
-.wb-side .stg[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+.wb-side .stg[aria-current="true"] { background: var(--amber-soft); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
 .wb-side .stg .n { font: 500 11px var(--mono); color: var(--dim); }
 .wb-side .stg code { grid-column: 2; font: 10.5px var(--mono); color: var(--dim); }
 
@@ -56,7 +56,7 @@
 .wb-right .actions { display: flex; flex-direction: column; gap: 6px; }
 .wb-right .act { border: 1px solid var(--line); background: var(--panel-2); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; cursor: pointer; color: var(--text); text-align: left; }
 .wb-right .act:hover { border-color: var(--dim); }
-.wb-right .act.primary { border-color: rgba(240,165,66,0.4); background: var(--amber-soft); }
+.wb-right .act.primary { border-color: color-mix(in srgb, var(--amber) 40%, transparent); background: var(--amber-soft); }
 .wb-right .act b { font-size: 12.5px; font-weight: 600; }
 .wb-right .act small { color: var(--muted); font-size: 11px; }
 .wb-right .act.wide { width: 100%; }

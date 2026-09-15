@@ -1,20 +1,13 @@
-// T-080: candidates/confirmed inventory split, promote/delete (auth + refresh), the removed
-// first/last-seen columns, and the sidebar layout. No DOM is available under node:test, so the
-// DOM-independent query/action functions are tested directly, and the layout checks read
-// index.html as text (same technique as reading a fixture file).
+// T-080: candidates/confirmed inventory split, promote/delete (auth + refresh) and sorting. The
+// MUI layout (sidebar, table columns) is checked by ui/test/app-explore.test.ts against
+// ui/src/app/index.html and app/explore/explore.css instead of the retired src/index.html.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { ControlClient, type FetchFn } from "../src/controls/client";
 import {
   type Filters, type InventoryClient, type Row, type SortState,
   deleteEntry, inventoryQuery, loadInventoryPage, nextSort, promoteEntry, sortRows,
 } from "../src/inventory";
-
-// esbuild bundles this file to ui/node_modules/hk-ui-test/, so a URL relative to import.meta.url
-// would resolve under node_modules; `npm test` always runs with cwd = ui/ (justfile's `test-ui`
-// does `cd ui` first), so a cwd-relative path is the reliable one.
-const html = readFileSync("src/index.html", "utf8");
 
 function mkRow(over: Partial<Row> & { id: string; state: Row["state"] }): Row {
   return {
@@ -172,39 +165,4 @@ test("sort state (not reset by loading new rows) still orders a fresh page the s
     mkRow({ id: "z", state: "candidate", count: 1 }),
   ];
   assert.deepEqual(sortRows(reloaded, sort.key, sort.dir).map((r) => r.id), ["y", "x", "z"]);
-});
-
-test("index.html: candidate/confirmed recurrence columns and the selections frequency column are sortable", () => {
-  assert.ok((html.match(/data-key="recurrence"/g) ?? []).length === 2, "both inventory tables sort by recurrence");
-  const selStart = html.indexOf('<table id="sel-table"');
-  const selEnd = html.indexOf("</table>", selStart);
-  assert.ok(/data-key="freq"/.test(html.slice(selStart, selEnd)), "selections table sorts by frequency");
-});
-
-// ---- layout: first/last-seen columns gone, sidebar present ----
-
-test("the inventory tables no longer have first/last-seen columns", () => {
-  assert.ok(!html.includes('data-key="first"'), "no first-seen sort column");
-  assert.ok(!html.includes('data-key="last"'), "no last-seen sort column");
-  assert.ok(!/>\s*first seen\s*</.test(html), "no 'first seen' header text");
-  assert.ok(!/>\s*last seen\s*</.test(html), "no 'last seen' header text");
-});
-
-test("the inventory tables keep the other columns (frequency, family, identity, count)", () => {
-  assert.ok(html.includes('data-key="freq"'));
-  assert.ok(html.includes('data-key="family"'));
-  assert.ok(html.includes('data-key="identity"'));
-  assert.ok(html.includes('data-key="count"'));
-});
-
-test("Selections and Signal inventory sit inside a left sidebar; the live view and controls do not", () => {
-  const start = html.indexOf('<aside id="sidebar"');
-  assert.ok(start >= 0, "no #sidebar aside in index.html");
-  const end = html.indexOf("</aside>", start);
-  assert.ok(end > start);
-  const region = html.slice(start, end);
-  assert.ok(region.includes('id="selections"'), "selections panel not in the sidebar");
-  assert.ok(region.includes('id="inventory"'), "inventory panel not in the sidebar");
-  assert.ok(!region.includes('id="live"'), "the live waterfall/spectrum must stay in the main area");
-  assert.ok(!region.includes('id="controls"'), "the controls panel must stay in the main area");
 });

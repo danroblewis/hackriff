@@ -4,6 +4,7 @@
 // here; layout is checked by app-shell.test.ts's slot/CSS scan.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { ControlClient, type FetchFn } from "../src/controls/client";
 import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
@@ -296,4 +297,24 @@ test("subscribePipelineFeed: frames reach only the `frame` handler, and resubscr
 
   subscribePipelineFeed(ctx, "p1", { frame: () => {} });
   assert.equal(FakeSocket.instances.length, 2, "a fresh subscribe after the last unsubscribe opens a new socket");
+});
+
+// ---- layout: narrow-width rules (ADR-0013 §5; the T-151/T-152 CSS-text technique) ----
+
+test("decode.css: the plots grid collapses to one column at 900px, and no rule needs more than 400px", () => {
+  const css = readFileSync("src/app/decode/decode.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /@media \(max-width:\s*900px\)\s*\{\s*\.plots\s*\{[^}]*grid-template-columns:\s*1fr/);
+  for (const m of css.matchAll(/min-width:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 400);
+  // the node chain is inherently wide, so it gets its own horizontal scroller (base.css) rather
+  // than collapsing; that's the ADR-0013 §5 "inherently wide" exception, not a layout bug.
+  assert.match(readFileSync("src/app/base.css", "utf8"), /\.pipe\s*\{[^}]*overflow-x:\s*auto/);
+});
+
+test("inspector.css: the three-pane inspector stacks to one column with capped heights at 900px", () => {
+  const css = readFileSync("src/app/decode/inspector.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /@media \(max-width:\s*900px\)\s*\{[\s\S]*\.insp\s*\{[^}]*grid-template-columns:\s*1fr/);
+  assert.match(css, /\.insp-frames\s*\{[^}]*max-height:\s*\d+px/);
+  assert.match(css, /\.insp-bytes\s*\{[^}]*max-height:\s*\d+px/);
+  assert.match(css, /\.insp-tree\s*\{[^}]*max-height:\s*\d+px/);
+  for (const m of css.matchAll(/min-width:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 400);
 });

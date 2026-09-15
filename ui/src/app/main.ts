@@ -1,4 +1,4 @@
-// MUI entry (ADR-0013): served as /app.html beside the old stacked UI (/) until T-156 swaps them.
+// MUI entry (ADR-0013, T-156): served at / (dist/index.html), also aliased at /app.html.
 // Builds the store and the shell, then mounts every area's `mounts` table (`<area>/index.ts`).
 // Panel tasks edit their own area's index.ts, never this file.
 import { ControlClient } from "../controls/client";

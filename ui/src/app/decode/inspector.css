@@ -40,7 +40,7 @@
 .inspector .insp-tree { border-left: 1px solid var(--line); overflow-y: auto; min-height: 0; padding: 9px 12px 10px; background: var(--panel); }
 .inspector .insp-tnode { display: grid; grid-template-columns: 1fr auto; gap: 1px 8px; padding: 3px 6px; border-radius: 5px; cursor: pointer; border: 1px solid transparent; }
 .inspector .insp-tnode:hover { background: var(--panel-2); }
-.inspector .insp-tnode[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.4); }
+.inspector .insp-tnode[aria-current="true"] { background: var(--amber-soft); border-color: color-mix(in srgb, var(--amber) 40%, transparent); }
 .inspector .insp-tnode.bad { color: var(--coral); }
 .inspector .insp-tnode .nm { font-size: 12px; }
 .inspector .insp-tnode .vv { font: 12px var(--mono); color: var(--text); }

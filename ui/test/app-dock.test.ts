@@ -3,6 +3,7 @@
 // per §6 "Canvas, WebGL and audio are never tested headless").
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createStore } from "../src/app/store";
 import { initialState, type AppState, type OutputEntry } from "../src/app/state";
 import { startRecordsOutput, startListen, stopOutput, type ListenTarget } from "../src/app/dock/api";
@@ -91,4 +92,13 @@ test("startListen: the same emitter twice returns the existing entry without add
   const id = startListen(ctx, target);
   assert.equal(id, "listen1");
   assert.equal(ctx.store.get().outputs.length, 1, "no duplicate audio entry for the same emitter");
+});
+
+// ---- layout: the strip scrolls sideways rather than clipping entries at narrow widths ----
+
+test("dock.css: the outputs strip is its own horizontal scroller, wraps at 900px, with no wide min-width", () => {
+  const css = readFileSync("src/app/dock/dock.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /\.dock \.outs\s*\{[^}]*overflow-x:\s*auto/);
+  for (const m of css.matchAll(/min-width:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 400);
+  assert.match(readFileSync("src/app/base.css", "utf8"), /@media \(max-width:\s*900px\)\s*\{[\s\S]*\.dock\s*\{[^}]*flex-wrap:\s*wrap/);
 });
