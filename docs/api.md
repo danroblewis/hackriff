@@ -569,9 +569,32 @@ ITU-R SM.1880 / SM.2256 occupancy per learned channel and per band, computed in 
 
 `GET /api/channels` → `200`: `{"plan_version", "scheme", "f_cell_hz", "source": "learned-from-detections", "channels": [{"key": {"scheme", "lo_cell", "hi_cell"}, "source": "learned", "plan_version", "first_learned", "evidence", "obw_hz", "raster_hint"?: {"spacing_hz", "offset_hz", "source"}, "f_lo_hz", "f_hi_hz"}]}`. Keys are level-0 history cells snapped outward from the median detected extent; any change of the key set bumps `plan_version`. `400 invalid` for a bad range, `503`, `405` as above.
 
+## Sites, baselines, candidates and score weights (T-119)
+
+C12 baselines, novelty and the interestingness score ([ADR-0012](adr/0012-attention-memory-contracts.md) §3–§4; `crates/hk-api/src/attention.rs` over `hk_pipeline::attention::AttentionService`). Blind-first: baselines and candidates are built from measurements only; nothing here looks a frequency up. Times are Unix seconds (floats) on the stream's clock; frequencies Hz. Mutating calls need the bearer token and are audited (`site_select`, `site_update`, `baseline_refreeze`, `weights_update`). Errors: `400 invalid` (unknown field or query parameter, malformed value), `404 not_found`, `405`, `409 conflict`, `500 failed` (store I/O), `503 unavailable` (no attention service).
+
+| Method | Path | Auth | Parameters / body | Answer |
+|---|---|---|---|---|
+| GET | `/api/sites` | token | – | `{"sites": [site], "current": site_key}` |
+| GET | `/api/sites/current` | token | – | `{"site": site_key, "set_by": "config"\|"user"\|"gnss"\|null, "pinned", "accrues_baseline", "record": site\|null}` |
+| PUT | `/api/sites/current` | token | exactly one of `{"id"}` (a known site), `{"name", "lat_deg"?, "lon_deg"?, "radius_m"?, "utc_offset_min"?}` (select by name, or create a `user` site), `{"release": true}` (unpin: fixes decide again) | as GET current; 404 unknown id |
+| PUT | `/api/sites/{id}` | token | `{"name"?: string\|null, "utc_offset_min"?: integer ±840}` (at least one) | the site; 404 unknown, 409 name taken |
+| GET | `/api/baselines` | token | `site`? (default current; 409 when mobile/unassigned) | `{"site", "slot", "baselines": [{"site", "cal": {"kind": "uncalibrated"\|"calibrated", "id"?}, "scheme", "cell_factor", "subjects", "mature_subjects", "finest_resolution"\|null, "last_visit", "change_points": [{"subject", "f_lo", "f_hi", "t", "statistic": "level"\|"occupancy", "direction": 1\|-1, "cusum"}]}]}` |
+| GET | `/api/baselines/slots` | token | `f_lo`, `f_hi` (required), `site`?, `slot`? (0–167 hour-of-week; default now at the site), `resolution`? (`hour-of-week`, `hour-of-day`, `day-part`, `all-hours`; default the finest mature) | `{"site", "slot", "subjects": [{"subject": {"kind": "cell", "index"}\|{"kind": "channel", "key"}, "f_lo", "f_hi", "cal", "maturity": {"state": "mature", "resolution"}\|{"state": "immature", "observed_s"}, "mixed", "gain_states", "reference": pool, "adaptive": pool, "change_point"\|null, "refrozen_at"\|null}], "truncated"}` (at most 2 000 subjects) |
+| POST | `/api/baselines/refreeze` | token | `{"site"?, "f_lo"?, "f_hi"?}` (both edges or neither) | `{"site", "refrozen": n}`: adaptive copy → frozen reference, change points cleared |
+| GET | `/api/candidates` | token | `f_lo`?, `f_hi`?, `limit`? (1–1000, default 100) | `{"version", "t", "site": site_key, "weights", "candidates": [Candidate], "truncated"}`: the latest published `CandidateSet`, `score` descending |
+| GET | `/api/attention/weights` | token | – | `{"weights": {"version", "snr", "novelty", "class_entropy", "decoder", "periodicity", "boring"}, "defaults": weights, "history": [{"version", "created", "author"}]}` (newest first; version 1 = defaults, never stored) |
+| PUT | `/api/attention/weights` | token | all six weights, each in [0, 10], at least one positive term | `{"weights"}` with the next version; takes effect at the next scoring pass, never retroactively |
+
+- **site** = `{"id", "name"|null, "lat_deg"|null, "lon_deg"|null, "radius_m", "utc_offset_min", "source": "config"|"user"|"gnss", "first_seen", "last_seen", "observed_s"}`; **site_key** = `{"kind": "site", "id"}`, `{"kind": "mobile"}` or `{"kind": "unassigned"}`. Only `site` keys build baselines; mobile and unassigned folds are kept as occupancy but never accrue (ADR-0012 §3.5).
+- **pool** = `{"resolution", "n", "observed_s", "mean_db"|null, "std_db"|null, "fco"|null, "max_db"|null}`: the slot's pool at that resolution (levels from the most-visited gain state, occupancy over all).
+- **Maturity** needs ≥ 24 h of observation in the pool; hour-of-week falls back to hour-of-day, day part, then all hours, and the resolution used is always disclosed. Immature pools give novelty 0.
+- **Calibration** is part of the baseline key: a new calibration starts a new, immature baseline, so a calibration step is never novelty.
+- **Candidate** is `hk_model::attention::score::Candidate` as JSON (`subject`, `freq {lo_hz, hi_hz}`, `score`, `score_norm`, `components {snr_db?, novelty, class_entropy?, decoder_available, periodicity?, boring_prior}`, `novelty {novelty, level_z?, occupancy_z?, new_emitter?, observed_s, maturity, provenance_explained}`, `suspect_fraction`, `needs_verification`, `expected_interval_s?`, `min_on_off_s?`, `next_burst_eta?` (Unix s)). `class_entropy` absent means never classified and scores as maximal uncertainty.
+
 ## Attention and memory (planned, M2; ADR-0012)
 
-**Planned, not served yet.** None of these routes are in `ROUTES` today, except the observation log's (above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+**Planned, not served yet.** None of the routes below are in `ROUTES` today (the observation log's, occupancy's, and T-119's sites, baselines, candidates and weights have landed and moved to their own sections above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
 - **Contracts:** [ADR-0012](adr/0012-attention-memory-contracts.md).
 - **Schemas:** `hk_model::attention` (observation records, `OccupancyStat`, baselines, `CandidateSet`, `SurveyReport`, alarm detail).
 
@@ -584,16 +607,6 @@ Conventions:
 
 | Method | Path | Owner | Purpose |
 |---|---|---|---|
-| GET | `/api/sites` | T-119 | Known sites |
-| GET | `/api/sites/current` | T-119 | Current `SiteKey` and how it was set |
-| PUT | `/api/sites/current` | T-119 | Set or confirm the current site (audited) |
-| PUT | `/api/sites/{id}` | T-119 | Rename a site or set its UTC offset (audited) |
-| GET | `/api/baselines` | T-119 | `?site`: baseline keys, maturity per pool, frozen time, change points |
-| GET | `/api/baselines/slots` | T-119 | `?site&f_lo&f_hi[&slot][&resolution]`: slot statistics for plotting |
-| POST | `/api/baselines/refreeze` | T-119 | Re-freeze the reference for a site/region (audited) |
-| GET | `/api/candidates` | T-119 | `?[f_lo&f_hi][&limit]`: latest ranked `CandidateSet` slice with score components |
-| GET | `/api/attention/weights` | T-119 | Current score weights and version |
-| PUT | `/api/attention/weights` | T-119 | New weights version (audited) |
 | GET | `/api/scheduler` | T-120 | Tier shares over the floor window, sweep-floor status, provider version, POI per region |
 | GET | `/api/scheduler/arms` | T-120 | Arm table: key, index, mean reward, dwell-seconds, staleness, banned |
 | POST | `/api/scheduler/leases` | T-120 | Create a user pin lease ("watch this") (audited) |

@@ -399,10 +399,14 @@ impl Default for SharedInterestingness {
 
 impl SharedInterestingness {
     /// Validates and publishes `set`, assigning it the next version; returns that version.
+    ///
+    /// Validation (every candidate's score recomputed) runs before the lock is taken, so a
+    /// concurrent [`snapshot`](InterestingnessProvider::snapshot) never waits on it; the version
+    /// does not take part in validation.
     pub fn publish(&self, mut set: CandidateSet) -> Result<u64, ValidationError> {
+        set.validate()?;
         let mut latest = self.latest.lock().unwrap_or_else(|p| p.into_inner());
         set.version = latest.version + 1;
-        set.validate()?;
         let v = set.version;
         *latest = Arc::new(set);
         self.version.store(v, Ordering::Release);

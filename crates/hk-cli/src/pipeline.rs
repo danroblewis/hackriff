@@ -428,6 +428,106 @@ impl hk_api::recipes::RecipeControl for PipelineRecipes {
     }
 }
 
+/// T-119: the attention routes (sites, baselines, candidates, score weights) over the run's
+/// `AttentionService` (`hk_pipeline::attention`).
+pub struct PipelineAttention(pub Arc<hk_pipeline::attention::AttentionService>);
+
+/// T-119: opens the run's attention service over its database and data directory. Stamps
+/// API-created sites and weight rows with stream time (the wall clock before any frame).
+fn attention_control(
+    handle: &PipelineHandle,
+    db: &Arc<Mutex<Repository>>,
+) -> anyhow::Result<Arc<dyn hk_api::attention::AttentionControl>> {
+    let counters = handle.counters();
+    let clock_counters = Arc::clone(&counters);
+    let clock = Arc::new(move || {
+        let ns = clock_counters
+            .stream_time_ns
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if ns > 0 {
+            hk_model::Timestamp::from_unix_nanos(ns)
+        } else {
+            hk_model::Timestamp::now()
+        }
+    });
+    let service = hk_pipeline::attention::AttentionService::open(
+        handle.data_dir(),
+        Arc::clone(db),
+        Some(counters),
+        clock,
+    )
+    .context("opening the attention service (T-119)")?;
+    Ok(Arc::new(PipelineAttention(Arc::new(service))))
+}
+
+impl hk_api::attention::AttentionControl for PipelineAttention {
+    fn call(
+        &self,
+        call: hk_api::attention::AttentionCall,
+    ) -> Result<hk_api::attention::AttentionAnswer, hk_api::attention::AttentionFail> {
+        use hk_api::attention::{AttentionAnswer as A, AttentionCall as C};
+        let s = &self.0;
+        let changed = |old: serde_json::Value, new: serde_json::Value| A {
+            body: new.clone(),
+            old,
+            new,
+        };
+        match call {
+            C::Sites => Ok(A::read(s.sites_json())),
+            C::CurrentSite => Ok(A::read(s.current_site_json())),
+            C::SelectSite(b) => {
+                let old = s.current_site_json();
+                s.set_current_site(hk_pipeline::attention::SiteSelect {
+                    id: b.id,
+                    name: b.name,
+                    lat_deg: b.lat_deg,
+                    lon_deg: b.lon_deg,
+                    radius_m: b.radius_m,
+                    utc_offset_min: b.utc_offset_min,
+                    release: b.release,
+                })
+                .map(|new| changed(old, new))
+            }
+            C::UpdateSite {
+                id,
+                name,
+                utc_offset_min,
+            } => s
+                .update_site(id, name, utc_offset_min)
+                .map(|(old, new)| changed(old, new)),
+            C::Baselines { site } => s.baselines_json(site).map(A::read),
+            C::Slots {
+                site,
+                f_lo,
+                f_hi,
+                slot,
+                resolution,
+            } => s
+                .slots_json(site, f_lo, f_hi, slot, resolution)
+                .map(A::read),
+            C::Refreeze { site, f_lo, f_hi } => s
+                .refreeze(site, f_lo, f_hi)
+                .map(|v| changed(serde_json::Value::Null, v)),
+            C::Candidates { f_lo, f_hi, limit } => {
+                Ok(A::read(s.candidates_json(f_lo, f_hi, limit)))
+            }
+            C::Weights => s.weights_json().map(A::read),
+            C::SetWeights { weights, author } => {
+                s.set_weights(weights, &author).map(|(old, new)| A {
+                    body: serde_json::json!({ "weights": new }),
+                    old: serde_json::json!(old),
+                    new: serde_json::json!(new),
+                })
+            }
+        }
+        .map_err(|e| hk_api::attention::AttentionFail {
+            status: e.status,
+            code: e.code,
+            message: e.message,
+        })
+    }
+}
+
 /// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
 /// the pipeline writes, the control API (display, pause, recording and bookmarks, audited to
 /// `<data dir>/control-audit.jsonl`), and (live runs without the scheduler) the live control
@@ -463,6 +563,7 @@ pub fn serve_api(
         .with("stage", recipes.stage_service()) // T-088
         .with("inspector", recipes.inspector_service()); // T-088 (T-089/T-092 extend it)
     let tcp = start_stream_tcp(registry, &openers, &token)?;
+    let attention = attention_control(handle, &db)?; // T-119
     let state = ApiState {
         streams: registry.clone(),
         history: None,
@@ -491,6 +592,7 @@ pub fn serve_api(
             .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
         occupancy: Some(Arc::new(PipelineOccupancy(handle.occupancy()))), // T-118
         observations: handle.observation_store(),                         // T-115
+        attention: Some(attention),                                       // T-119
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

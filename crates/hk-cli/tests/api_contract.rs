@@ -2000,6 +2000,130 @@ fn occupancy_and_channel_routes_answer_as_documented() {
     stop_server(serving);
 }
 // T-119 sites, baselines, candidates, weights
+
+/// T-119: `/api/sites[...]`, `/api/baselines[...]`, `/api/candidates` and
+/// `/api/attention/weights` answer with the documented shapes: unassigned start (baselines 409),
+/// a user site pinned by name, rename, empty baselines/slots/refreeze on a fresh site, an empty
+/// version-0 candidate set, versioned weights (v1 defaults → v2), and 400/404/405/401 refusals.
+#[test]
+fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
+    let (serving, addr) = start_server();
+
+    let (st, v) = get(addr, "/api/sites");
+    assert_eq!(st, 200, "{v}");
+    assert!(is_array(&v["sites"]), "{v}");
+    assert_eq!(v["current"]["kind"], "unassigned", "{v}");
+    let (st, v) = get(addr, "/api/baselines");
+    assert_eq!((st, &v["code"]), (409, &json!("conflict")), "{v}");
+
+    let (st, v) = put(
+        addr,
+        "/api/sites/current",
+        &json!({"name": "contract-home", "utc_offset_min": 60}).to_string(),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (&v["site"]["kind"], &v["set_by"], &v["pinned"]),
+        (&json!("site"), &json!("user"), &json!(true)),
+        "{v}"
+    );
+    let id = v["record"]["id"].as_str().unwrap().to_owned();
+    for key in [
+        "name",
+        "radius_m",
+        "utc_offset_min",
+        "source",
+        "first_seen",
+        "last_seen",
+    ] {
+        assert!(!v["record"][key].is_null(), "{key}: {v}");
+    }
+    let (st, v) = get(addr, "/api/sites/current");
+    assert_eq!(
+        (st, v["site"]["id"].as_str()),
+        (200, Some(id.as_str())),
+        "{v}"
+    );
+    let (st, v) = put(addr, "/api/sites/current", "{}");
+    assert_eq!((st, &v["code"]), (400, &json!("invalid")), "{v}");
+
+    let (st, v) = put(
+        addr,
+        &format!("/api/sites/{id}"),
+        &json!({"name": "contract-home-2"}).to_string(),
+    );
+    assert_eq!((st, &v["name"]), (200, &json!("contract-home-2")), "{v}");
+    let (st, v) = put(
+        addr,
+        &format!("/api/sites/{id}"),
+        &json!({"x": 1}).to_string(),
+    );
+    assert_eq!(st, 400, "{v}");
+    let (st, v) = put(
+        addr,
+        "/api/sites/00000000-0000-7000-8000-000000000000",
+        &json!({"name": "nobody"}).to_string(),
+    );
+    assert_eq!((st, &v["code"]), (404, &json!("not_found")), "{v}");
+
+    let (st, v) = get(addr, "/api/baselines");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["site"].as_str(), Some(id.as_str()), "{v}");
+    assert!(is_array(&v["baselines"]) && v["slot"].is_u64(), "{v}");
+    let (st, v) = get(
+        addr,
+        "/api/baselines/slots?f_lo=100000000&f_hi=101000000&resolution=all-hours",
+    );
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        is_array(&v["subjects"]) && v["truncated"] == json!(false),
+        "{v}"
+    );
+    let (st, _) = get(addr, "/api/baselines/slots?f_lo=100000000");
+    assert_eq!(st, 400);
+    let (st, v) = post(addr, "/api/baselines/refreeze", "{}");
+    assert_eq!((st, &v["refrozen"]), (200, &json!(0)), "{v}");
+
+    let (st, v) = get(addr, "/api/candidates?limit=10");
+    assert_eq!(st, 200, "{v}");
+    assert!(v["version"].is_u64() && is_array(&v["candidates"]), "{v}");
+    assert_eq!(v["truncated"], json!(false), "{v}");
+    assert!(is_object(&v["weights"]) && !v["site"].is_null(), "{v}");
+    let (st, _) = get(addr, "/api/candidates?limit=0");
+    assert_eq!(st, 400);
+
+    let (st, v) = get(addr, "/api/attention/weights");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (&v["weights"]["version"], &v["weights"]["novelty"]),
+        (&json!(1), &json!(2.0))
+    );
+    assert!(is_array(&v["history"]) && is_object(&v["defaults"]), "{v}");
+    let w = json!({"snr": 1, "novelty": 3, "class_entropy": 1, "decoder": 0.5,
+        "periodicity": 0.5, "boring": 1});
+    let (st, v) = put(addr, "/api/attention/weights", &w.to_string());
+    assert_eq!((st, &v["weights"]["version"]), (200, &json!(2)), "{v}");
+    let (_, v) = get(addr, "/api/attention/weights");
+    assert_eq!(
+        (&v["weights"]["version"], &v["history"][0]["version"]),
+        (&json!(2), &json!(2))
+    );
+    let mut bad = w.clone();
+    bad["snr"] = json!(11);
+    let (st, v) = put(addr, "/api/attention/weights", &bad.to_string());
+    assert_eq!((st, &v["code"]), (400, &json!("invalid")), "{v}");
+    let (st, _) = call(
+        addr,
+        "PUT",
+        "/api/attention/weights",
+        None,
+        Some(&w.to_string()),
+    );
+    assert_eq!(st, 401);
+    let (st, _) = delete(addr, "/api/attention/weights");
+    assert_eq!(st, 405);
+    stop_server(serving);
+}
 // T-120 scheduler
 // T-121 reports
 // T-122 anomalies
