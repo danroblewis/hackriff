@@ -760,7 +760,7 @@ pub fn serve_api(
             )
             .with_attention(Some(handle.occupancy()), handle.attention()), // T-128
         ))), // T-121
-        anomalies: Some(Arc::new(PipelineAnomalies(alarms))), // T-122
+        anomalies: Some(Arc::new(PipelineAnomalies(alarms))),             // T-122
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
