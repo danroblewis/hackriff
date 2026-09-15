@@ -1,1 +1,66 @@
-/* decode area styles (ADR-0013 §5, §8). Owner: see §8. Scope every rule under the area's slot class; never change shared tokens or the grid. */
+/* decode area styles (ADR-0013 §5, §8). Owner: T-153. The grid (.wb, .wb-side, .wb-centre,
+   .wb-right) is base.css (T-149/T-150); rules here are scoped under those slot classes. Visual
+   language matches ui/mockups/explorer-v3.html "DECODE". */
+
+.wb-side .wb-block { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 8px; }
+.wb-side .pl { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 9px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
+.wb-side .pl:hover { background: var(--panel-2); }
+.wb-side .pl[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+.wb-side .pl b { font-weight: 600; font-size: 12.5px; }
+.wb-side .pl .st { font: 500 10px var(--ui); letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; align-self: start; }
+.wb-side .pl .st.run { color: var(--teal); background: var(--teal-soft); }
+.wb-side .pl .st.hop { color: var(--lav); background: var(--lav-soft); }
+.wb-side .pl .st.end { color: var(--dim); background: var(--panel-2); }
+.wb-side .pl .cx { grid-column: 1 / -1; color: var(--muted); font: 11px var(--mono); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wb-side .new-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.wb-side .new-row .mini { border-style: dashed; }
+.wb-side .stage-list { display: flex; flex-direction: column; gap: 2px; }
+.wb-side .stg { display: grid; grid-template-columns: 20px 1fr auto; gap: 0 8px; align-items: center; padding: 6px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.wb-side .stg:hover { background: var(--panel-2); }
+.wb-side .stg[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+.wb-side .stg .n { font: 500 11px var(--mono); color: var(--dim); }
+.wb-side .stg code { grid-column: 2; font: 10.5px var(--mono); color: var(--dim); }
+
+.pipe { display: flex; align-items: stretch; padding: 9px 14px; overflow-x: auto; }
+.pipe .node { flex: 1; min-width: 116px; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 4px 10px; border: 1px solid var(--line); background: var(--panel); border-radius: 7px; cursor: pointer; text-align: left; }
+.pipe .node:hover { border-color: var(--dim); }
+.pipe .node[aria-current="true"] { border-color: var(--amber); background: var(--amber-soft); }
+.pipe .node .top { display: flex; justify-content: space-between; gap: 6px; align-items: center; }
+.pipe .node b { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pipe .node .n { font: 500 10.5px var(--mono); color: var(--dim); }
+.pipe .node small { font: 10.5px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pipe .node small.fx-bad { color: var(--coral); }
+.pipe .node small.fx-gt { color: var(--amber); }
+.pipe .arrow { align-self: center; color: var(--dim); padding: 0 4px; font-size: 12px; }
+
+.plots { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line-soft); min-height: 0; }
+.plots .plot { background: var(--ground); display: grid; grid-template-rows: auto minmax(0,1fr) auto; padding: 9px 14px 7px; min-height: 0; min-width: 0; }
+.plots .plot .cap { color: var(--dim); font-size: 11.5px; }
+.plots .plot > [data-p$="-body"] { min-height: 0; }
+.plots .plot svg { width: 100%; height: 100%; display: block; }
+
+.wb-right .step { font: 500 11px var(--mono); color: var(--amber); }
+.wb-right h2 { font-size: 17px; font-weight: 600; margin: 2px 0 6px; text-wrap: balance; }
+.wb-right p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.wb-right .param { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; }
+.wb-right .param label { color: var(--muted); font-size: 12px; }
+.wb-right .param output, .wb-right .param .val { font: 12.5px var(--mono); }
+.wb-right .param input[type="text"] { background: var(--ground); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; font: 12px var(--mono); width: 130px; text-align: right; }
+.wb-right .param .suggest { grid-column: 1 / -1; font-size: 11.5px; color: var(--dim); display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wb-right .param .suggest button { border: 1px solid var(--line); background: transparent; color: var(--teal); cursor: pointer; padding: 1px 7px; border-radius: 5px; font-size: 11.5px; }
+.wb-right .quality { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; }
+.wb-right .q { background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; display: flex; flex-direction: column; gap: 1px; }
+.wb-right .q small { color: var(--dim); font-size: 10.5px; }
+.wb-right .q b { font: 500 15px var(--mono); }
+.wb-right .q b.good { color: var(--teal); } .wb-right .q b.mid { color: var(--amber); } .wb-right .q b.bad { color: var(--coral); }
+.wb-right .actions { display: flex; flex-direction: column; gap: 6px; }
+.wb-right .act { border: 1px solid var(--line); background: var(--panel-2); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; cursor: pointer; color: var(--text); text-align: left; }
+.wb-right .act:hover { border-color: var(--dim); }
+.wb-right .act.primary { border-color: rgba(240,165,66,0.4); background: var(--amber-soft); }
+.wb-right .act b { font-size: 12.5px; font-weight: 600; }
+.wb-right .act small { color: var(--muted); font-size: 11px; }
+.wb-right .act.wide { width: 100%; }
+
+@media (max-width: 900px) {
+  .plots { grid-template-columns: 1fr; }
+}
