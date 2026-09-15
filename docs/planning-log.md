@@ -980,3 +980,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **API:** `/api/occupancy` and `/api/channels`.
 
   **Blind 48 h e2e:** 6/6 learned channels' realized FCO lies inside the 95% CI (10/50/100% Markov, diurnal, novelty, boring); the 1% channel and the event aren't learned (<5%, allowed); no phantoms. The first run failed 4/6 because of a per-channel self-floor, fixed with the band floor. Timeboxed Opus review running. Focus areas: 80% correction; dense-band floor (FM); n_eff bounds; exposing a channel level for T-119 level novelty.
+- **B0.304 T-119 review: FIX-FIRST.**
+  - **Must-fix:** the adapter uses `threshold_db` as the channel level, so level novelty would track the floor, not emitters. Fix: `level_db: None` until T-118 exposes a real level.
+  - **Accepted, with follow-ups done in the fix round:**
+    - §3.4 gating maturity deadlock for sharply patterned channels (busy-hour z≈4.4 against the coarse pool): test plus accrue-below-alarm-level while the hour-of-day pool is immature.
+    - Reference learning bounded at hour-of-day maturity (~24 d, not ~24 wk).
+    - Re-freeze behaviour documented.
+    - `enforce_quota` called on flush.
+  - **Checked OK:** sample-clock time base, atomic writes, migration 0002 numbering, FCO novelty two-sided.
+  - **Recorded for follow-up:** FirstSightingRate unwired (no new-emitter novelty); dense GainSeries memory (~200 MB per gain state per key); a latched change point stops accrual; T-122 needs a quieter-than-usual alarm kind.
+  Fix round running (fresh Opus). T-118 review pending (includes adding a channel level to OccupancyStat).
