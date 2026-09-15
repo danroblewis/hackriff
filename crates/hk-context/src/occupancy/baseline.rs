@@ -99,7 +99,8 @@ use hk_store::baseline::{
 };
 
 use super::novelty::{
-    Evidence, NoveltyConfig, combine, level_z, occupancy_sigma, occupancy_z, shrunk_fco,
+    Evidence, LookEvidence, NoveltyConfig, PERSISTENCE_MAX_GAP_S, combine, level_z,
+    occupancy_sigma, occupancy_z, persistence_lift, sequential_look, shrunk_fco,
 };
 
 /// Suspect share above which a fold updates neither the reference nor the CUSUM.
@@ -438,10 +439,18 @@ impl PoolStats {
 
     /// T-146: records the FCO sampling moment `fco_var_s` (Σ(w²/n_eff)/Σw of the slot's folded
     /// intervals, [`SlotStats::fco_var_s`]) of a slot of weight `weight_s` already [`Self::add`]ed.
-    pub fn add_fco_sampling(&mut self, weight_s: f64, fco_var_s: f64) {
+    ///
+    /// T-146 review: the moment is weighted by the slot's **own** unbiased binomial variance
+    /// f_j(1 − f_j)·n_j/(n_j − 1), n_j = `weight_s`/`fco_var_s` its effective looks (at least 2),
+    /// f_j = `occupied_weight_s`/`weight_s`, not by the pool FCO's: a patterned pool (slots at
+    /// 0.1 and 0.7) would otherwise have its sampling part overestimated.
+    pub fn add_fco_sampling(&mut self, weight_s: f64, occupied_weight_s: f64, fco_var_s: f64) {
         if weight_s > 0.0 && fco_var_s.is_finite() && fco_var_s > 0.0 {
-            self.sampling_v += fco_var_s;
-            self.sampling_wv += weight_s * fco_var_s;
+            let f = (occupied_weight_s / weight_s).clamp(0.0, 1.0);
+            let n = (weight_s / fco_var_s).max(2.0);
+            let v = f * (1.0 - f) * n / (n - 1.0) * fco_var_s;
+            self.sampling_v += v;
+            self.sampling_wv += weight_s * v;
         }
     }
 
@@ -500,9 +509,11 @@ impl PoolStats {
     /// single slot, and for slots without the moment (pre-T-146 files).
     pub fn between_sampling_var(&self) -> f64 {
         match self.fco() {
-            Some(f) if self.weight_s > 0.0 => {
+            // T-146 review: each slot's p(1 − p) is its own unbiased f_j(1 − f_j) estimate,
+            // folded into the moments by `add_fco_sampling`.
+            Some(_) if self.weight_s > 0.0 => {
                 let w = self.weight_s;
-                (f * (1.0 - f) * (self.sampling_v / w - self.sampling_wv / (w * w))).max(0.0)
+                (self.sampling_v / w - self.sampling_wv / (w * w)).max(0.0)
             }
             _ => 0.0,
         }
@@ -752,7 +763,7 @@ fn pool_slot(
             o.weight_s,
             o.max_db,
         );
-        occ[r].add_fco_sampling(o.weight_s, o.fco_var_s);
+        occ[r].add_fco_sampling(o.weight_s, o.occupied_weight_s, o.fco_var_s);
         if let Some(d) = own {
             level[r].add_decayed(d);
         }
@@ -784,6 +795,9 @@ pub struct FoldOutcome {
     pub accrued: bool,
     /// The fold also entered the reference.
     pub accrued_reference: bool,
+    /// T-146 review: the fold's directional sequential evidence
+    /// ([`crate::occupancy::novelty::sequential_look`]) when its occupancy was scored.
+    pub look: Option<LookEvidence>,
 }
 
 impl FoldOutcome {
@@ -801,6 +815,7 @@ impl FoldOutcome {
             change_point: None,
             accrued: false,
             accrued_reference: false,
+            look: None,
         }
     }
 }
@@ -1033,6 +1048,12 @@ impl BaselineEngine {
         let observed = observed_pools(sub, slot);
         let (novelty, chosen, learn_novelty) =
             Self::evaluate(sub, slot, gain, obs, &ncfg, observed);
+        // T-146 review: the fold's sequential evidence against the chosen occupancy pool, with the
+        // subject's persistence as learned before this fold.
+        let look = chosen.and_then(|(_, _, occ)| {
+            let z = novelty.occupancy_z?;
+            sequential_look(&occ, &obs.evidence(), z, persistence_lift(&sub.persistence))
+        });
         let hr = res_index(BaselineResolution::HourOfDay);
         // The slot's own hour-of-day reference pools (sequential test, learning), when mature.
         let own_hour = chosen.map(|(r, level, occ)| {
@@ -1151,6 +1172,7 @@ impl BaselineEngine {
                 change_point: raised,
                 accrued: false,
                 accrued_reference: false,
+                look,
             };
         };
         let ref_level_pool = chosen.map(|c| c.1);
@@ -1245,6 +1267,22 @@ impl BaselineEngine {
                 sub.mature_at = Some(obs.t);
             }
         }
+        // T-146 review: lag-1 persistence of consecutive folds, learned with the reference.
+        if let Some(f) = obs.fco() {
+            let pm = &mut sub.persistence;
+            if let (true, Some((lt, lf))) = (accrue_ref, pm.last) {
+                let gap_s = (obs.t.as_unix_nanos() - lt.as_unix_nanos()) as f64 / 1e9;
+                if gap_s > 0.0 && gap_s <= PERSISTENCE_MAX_GAP_S {
+                    pm.pairs += 1.0;
+                    pm.prev += lf;
+                    pm.cur += f;
+                    pm.prod += lf * f;
+                }
+            }
+            if pm.last.is_none_or(|(lt, _)| obs.t > lt) {
+                pm.last = Some((obs.t, f));
+            }
+        }
         sub.last_seen = sub.last_seen.max(obs.t);
         self.state.last_visit = self.state.last_visit.max(obs.t);
         self.dirty = true;
@@ -1253,6 +1291,7 @@ impl BaselineEngine {
             change_point: raised,
             accrued: true,
             accrued_reference: accrue_ref,
+            look,
         }
     }
 
@@ -1525,6 +1564,7 @@ impl Baselines {
                     change_point: None,
                     accrued: false,
                     accrued_reference: false,
+                    look: None,
                 });
             }
         }

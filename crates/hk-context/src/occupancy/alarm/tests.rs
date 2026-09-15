@@ -59,7 +59,7 @@ fn input(kind: AlarmKind, f0_hz: f64, cell: i64, novelty: f64) -> AlarmInput {
         z: 3.0 + 7.0 * novelty,
         novelty,
         observed_s: INTERVAL_S,
-        gain: 0,
+        look: None,
         sequential: None,
     }
 }
@@ -412,6 +412,7 @@ fn alarm_silenced_transmitter_raises_quieter_than_usual() {
     let mut acts = Vec::new();
     for i in 0..4 {
         let fold = FoldOutcome {
+            look: None,
             novelty: NoveltyScore {
                 novelty: 1.0,
                 level_z: None,
@@ -472,6 +473,7 @@ fn alarm_immature_evidence_counted_never_raised() {
         provenance_explained: false,
     };
     let fold = |maturity| FoldOutcome {
+        look: None,
         novelty: NoveltyScore {
             novelty: 0.0,
             level_z: None,
@@ -890,7 +892,7 @@ fn t146_obs(i: i64, fco: f64, n_eff: f64, gain: u32) -> IntervalObservation {
 
 /// The alarm inputs of `obs` scored against `pool` (as a mature T-119 fold would score it).
 fn t146_inputs(pool: &PoolStats, obs: &IntervalObservation) -> Vec<AlarmInput> {
-    use crate::occupancy::novelty::{Evidence as Ev, combine, occupancy_z};
+    use crate::occupancy::novelty::{Evidence as Ev, combine, occupancy_z, sequential_look};
     let cfg = NoveltyConfig::default();
     let ev = Ev {
         level_db: None,
@@ -900,6 +902,7 @@ fn t146_inputs(pool: &PoolStats, obs: &IntervalObservation) -> Vec<AlarmInput> {
         observed_s: obs.observed_s,
     };
     let fold = FoldOutcome {
+        look: occupancy_z(pool, &ev).and_then(|z| sequential_look(pool, &ev, z, (1.0, 1.0))),
         novelty: combine(
             mature(),
             None,
@@ -958,7 +961,7 @@ fn t146_pool(p: f64, n_eff: u32, seed: u64) -> PoolStats {
             s.weight_s,
             0.0,
         );
-        pool.add_fco_sampling(s.weight_s, s.fco_var_s);
+        pool.add_fco_sampling(s.weight_s, s.occupied_weight_s, s.fco_var_s);
     }
     pool
 }
@@ -979,28 +982,32 @@ fn sequential_evidence_value(ev: &AlarmEvent, name: &str) -> Option<f64> {
 /// single-interval rule never alarms. Its evidence accumulates and raises one busier-than-usual
 /// alarm within N intervals.
 ///
-/// N a priori from the rule: the run of k intervals reaches on when Q(z√k) ≤ Q(7.9)²/(2k(k+1))
-/// (Q(7.9)² = 1.95·10⁻³⁰); the hysteresis raises one interval later. For the worst case z = 3.4
-/// allowed below: k = 12 gives Q(11.78) ≈ 2.5·10⁻³² > 1.95·10⁻³⁰/312 = 6.2·10⁻³³ (not yet), k = 13
-/// gives Q(12.26) ≈ 7·10⁻³⁵ ≤ 1.95·10⁻³⁰/364 = 5.4·10⁻³³ (on), so **N = 14**. For the best case
-/// z = 3.8: k = 9 gives Q(11.4) ≈ 2·10⁻³⁰ (not yet), k = 10 gives Q(12.02) ≈ 1.4·10⁻³³ ≤
-/// 1.95·10⁻³⁰/220 (on), so the raise is no earlier than interval 11.
+/// N a priori from the rule (T-146 review): each look's evidence is its exact binomial tail,
+/// e = Q⁻¹(p²) for 2 of 2 looks at the pool FCO p (smaller than z). With the pool FCO within 3σ
+/// of 0.05 (1 344 looks: p ∈ [0.032, 0.068]) e ∈ [2.60, 3.08]. A run of k intervals reaches on
+/// when g(k)·Q(e√k) ≤ Q(7.9)² and the hysteresis raises one interval later: at e = 2.60 that is
+/// interval 23 (**N**), at e = 3.08 interval 17 (**EARLIEST**).
 #[test]
 fn alarm_sparse_busier_onset_accumulates_to_one_raise() {
-    const N: i64 = 14;
-    const EARLIEST: i64 = 11;
+    const N: i64 = 23;
+    const EARLIEST: i64 = 17;
     let pool = t146_pool(0.05, 2, 0x146a);
     let first = t146_inputs(&pool, &t146_obs(0, 1.0, 2.0, 0));
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].kind, AlarmKind::BusierThanUsual);
     let z = first[0].z;
-    assert!((3.4..=3.8).contains(&z), "per-interval z {z}");
+    let evidence = first[0].look.expect("scored look").busier_start;
+    assert!(
+        (2.60..=3.08).contains(&evidence),
+        "per-look evidence {evidence} (z {z})"
+    );
+    assert!(evidence < z);
     assert!(first[0].novelty < HysteresisConfig::default().off);
 
     let mut rig = Rig::new();
     let site = rig.site;
     let mut latency = None;
-    for i in 0..20 {
+    for i in 0..N {
         let inputs = t146_inputs(&pool, &t146_obs(i, 1.0, 2.0, 0));
         let actions = rig.run(&snap(site, i, inputs), None);
         if raises(&actions) > 0 {
@@ -1023,7 +1030,8 @@ fn alarm_sparse_busier_onset_accumulates_to_one_raise() {
     assert!(ev.row.detail.novelty >= 0.7);
     let k = sequential_evidence_value(ev, "sequential_intervals").expect("sequential evidence");
     assert_eq!(k, latency as f64);
-    assert!(sequential_evidence_value(ev, "sequential_z").unwrap() >= z * (k.sqrt() - 1e-9));
+    // Identical looks: the run's z is the per-look evidence × √k.
+    assert!(sequential_evidence_value(ev, "sequential_z").unwrap() >= evidence * (k.sqrt() - 1e-9));
 }
 
 /// T-146: a dense-visit onset (n_eff 80) is novel on its own and raises within 2 intervals, as
@@ -1062,25 +1070,33 @@ fn alarm_sequential_run_resets_in_the_engine() {
         e.step(&snap(site, i, busy(i, 0)));
     }
     assert_eq!(k(&e), 4);
-    // Direction change: an empty interval scores quieter (z < 0).
-    let quiet = t146_inputs(&pool, &t146_obs(4, 0.0, 2.0, 0));
-    assert_eq!(quiet[0].kind, AlarmKind::QuieterThanUsual);
-    e.step(&snap(site, 4, quiet));
+    // T-146 review: a sparse miss (0 of 2 looks, |z| within the slack) scores quieter but
+    // continues the busier run.
+    let slack = crate::occupancy::novelty::SEQUENTIAL_SIGN_SLACK_Z;
+    let miss = t146_inputs(&pool, &t146_obs(4, 0.0, 2.0, 0));
+    assert_eq!(miss[0].kind, AlarmKind::QuieterThanUsual);
+    assert!(miss[0].z.abs() <= slack, "{}", miss[0].z);
+    e.step(&snap(site, 4, miss));
+    assert_eq!((run(&e).unwrap().direction, k(&e)), (1, 5));
+    // Direction change beyond the slack: a dense empty interval (n_eff 80).
+    let quiet = t146_inputs(&pool, &t146_obs(5, 0.0, 80.0, 0));
+    assert!(quiet[0].z < -slack, "{}", quiet[0].z);
+    e.step(&snap(site, 5, quiet));
     assert_eq!((run(&e).unwrap().direction, k(&e)), (-1, 1));
-    for i in 5..8 {
+    for i in 6..9 {
         e.step(&snap(site, i, busy(i, 0)));
     }
     assert_eq!(k(&e), 3);
-    // Gap beyond 2 h.
+    // Gap beyond 2 h (the revisit period is still 15 min, so the allowance is 2 h).
     e.step(&snap(site, 17, busy(17, 0)));
     assert_eq!(k(&e), 1);
-    // Gain key change.
+    // T-146 review: a gain-key change alone does not end the run (a recorded gain step does).
     e.step(&snap(site, 18, busy(18, 0)));
     e.step(&snap(site, 19, busy(19, 9)));
-    assert_eq!(k(&e), 1);
+    assert_eq!(k(&e), 3);
     // Immature input.
     e.step(&snap(site, 20, busy(20, 9)));
-    assert_eq!(k(&e), 2);
+    assert_eq!(k(&e), 4);
     let mut imm = busy(21, 9);
     imm[0].maturity = Maturity::Immature { observed_s: 0.0 };
     e.step(&snap(site, 21, imm));
@@ -1102,4 +1118,67 @@ fn alarm_sequential_run_resets_in_the_engine() {
     assert_eq!(k(&e), 1);
     e.reset_sequential(site, &subject);
     assert!(run(&e).is_none());
+}
+
+/// T-146 review: a sparse-visit channel busy at p = 0.9 (two looks per interval, seeded draws plus
+/// two forced misses) over 200 intervals. A look that misses (0 of 2, |z| within the slack) no
+/// longer ends the run, so the channel raises exactly one busier-than-usual alarm and never clears
+/// (flap coverage for the busier/quieter kinds).
+#[test]
+fn alarm_sparse_busy_channel_with_misses_raises_once_and_holds() {
+    let pool = t146_pool(0.05, 2, 0x146a);
+    let mut rig = Rig::new();
+    let site = rig.site;
+    let mut state = 0x1490_u64;
+    let mut next = move || {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let (mut raised, mut cleared, mut misses) = (0, 0, 0);
+    for i in 0..200 {
+        let drawn = (0..2).filter(|_| next() < 0.9).count();
+        let hits = if i == 50 || i == 120 { 0 } else { drawn };
+        misses += usize::from(hits == 0);
+        let inputs = t146_inputs(&pool, &t146_obs(i, hits as f64 / 2.0, 2.0, 0));
+        let actions = rig.run(&snap(site, i, inputs), None);
+        raised += raises(&actions);
+        cleared += actions
+            .iter()
+            .filter(|a| matches!(a, AlarmAction::Clear { .. }))
+            .count();
+    }
+    println!("T-146r sparse p = 0.9: {misses} missed looks, {raised} raises, {cleared} clears");
+    assert!(misses >= 2);
+    assert_eq!((raised, cleared), (1, 0));
+    assert_eq!(rig.alarms().len(), 1);
+}
+
+/// T-146 review: a subject a large survey revisits only every 3 h still accumulates, because its
+/// run survives gaps of up to 3 × its revisit period. The first gap (period still unknown,
+/// allowance 2 h) ends the first one-look run, so the raise comes one visit later than the sparse
+/// onset's a-priori window [17, 23], i.e. within [18, 24].
+#[test]
+fn alarm_sparse_three_hour_revisits_accumulate() {
+    const N: i64 = 24;
+    const EARLIEST: i64 = 18;
+    let pool = t146_pool(0.05, 2, 0x146a);
+    let mut rig = Rig::new();
+    let site = rig.site;
+    let mut latency = None;
+    for v in 0..40 {
+        let i = 12 * v;
+        let inputs = t146_inputs(&pool, &t146_obs(i, 1.0, 2.0, 0));
+        if raises(&rig.run(&snap(site, i, inputs), None)) > 0 {
+            latency = Some(v + 1);
+            break;
+        }
+    }
+    let latency = latency.expect("3 h revisits raise");
+    println!("T-146r 3 h revisits: raised at visit {latency}");
+    assert!((EARLIEST..=N).contains(&latency), "visit {latency}");
+    let k = sequential_evidence_value(rig.events.last().unwrap(), "sequential_intervals").unwrap();
+    assert_eq!(k, (latency - 1) as f64);
 }

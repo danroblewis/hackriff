@@ -190,6 +190,204 @@ impl FirstSightingRate {
 /// than this, s (2 h, eight 15-min intervals): evidence is not stitched across a long absence.
 pub const SEQUENTIAL_MAX_GAP_S: f64 = 7200.0;
 
+/// A busier/quieter run continues through an opposite-signed interval whose |z| is at most this
+/// (T-146 review): one sparse look that misses a busy channel does not end its run. The look's
+/// own directional evidence (negative) still enters the run's sum.
+pub const SEQUENTIAL_SIGN_SLACK_Z: f64 = 1.0;
+
+/// Consecutive reference-fold pairs below which a subject's persistence is not estimated (lift 1).
+pub const PERSISTENCE_MIN_PAIRS: f64 = 16.0;
+
+/// Folds further apart than this, s, are not a consecutive pair for [`PersistenceMoments`].
+pub const PERSISTENCE_MAX_GAP_S: f64 = 3.0 * SEQUENTIAL_MAX_GAP_S;
+
+/// ln Γ(x), x > 0 (Lanczos, g = 7).
+fn ln_gamma(x: f64) -> f64 {
+    const C: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885,
+        -1_259.139_216_722_403,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_9,
+        -0.138_571_095_265_720_1,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_312e-7,
+    ];
+    if x < 0.5 {
+        let pi = std::f64::consts::PI;
+        return (pi / (pi * x).sin()).ln() - ln_gamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let t = x + 7.5;
+    let a = C[1..]
+        .iter()
+        .enumerate()
+        .fold(C[0], |a, (i, c)| a + c / (x + i as f64 + 1.0));
+    0.5 * std::f64::consts::TAU.ln() + (x + 0.5) * t.ln() - t + a.ln()
+}
+
+/// Continued fraction of the incomplete beta function (modified Lentz).
+fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
+    const TINY: f64 = 1e-300;
+    let guard = |v: f64| if v.abs() < TINY { TINY } else { v };
+    let (qab, qap, qam) = (a + b, a + 1.0, a - 1.0);
+    let mut c = 1.0;
+    let mut d = 1.0 / guard(1.0 - qab * x / qap);
+    let mut h = d;
+    for m in 1..=500 {
+        let m = f64::from(m);
+        let m2 = 2.0 * m;
+        let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1.0 / guard(1.0 + aa * d);
+        c = guard(1.0 + aa / c);
+        h *= d * c;
+        let aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1.0 / guard(1.0 + aa * d);
+        c = guard(1.0 + aa / c);
+        let del = d * c;
+        h *= del;
+        if (del - 1.0).abs() < 1e-15 {
+            break;
+        }
+    }
+    h
+}
+
+/// ln I_x(a, b), the regularised incomplete beta function (a, b > 0), accurate in the far tail.
+pub fn ln_regularized_beta(a: f64, b: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if x >= 1.0 {
+        return 0.0;
+    }
+    let ln_front = ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b) + a * x.ln() + b * (-x).ln_1p();
+    if x < (a + 1.0) / (a + b + 2.0) {
+        ln_front + (beta_cf(a, b, x) / a).ln()
+    } else {
+        (-(ln_front + (beta_cf(b, a, 1.0 - x) / b).ln()).exp()).ln_1p()
+    }
+}
+
+/// ln P(X ≥ x), X ~ Binomial(n, p): I_p(x, n − x + 1), exact for integer x and n and continuous in
+/// both (non-integer effective looks); ln 1 for x ≤ 0.
+pub fn ln_binomial_upper_tail(x: f64, n: f64, p: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x > n {
+        return f64::NEG_INFINITY;
+    }
+    ln_regularized_beta(x, n - x + 1.0, p)
+}
+
+/// Evidence z that `x` of `n` independent looks at occupancy `p` are high: Q⁻¹ of the exact tail
+/// P(X ≥ x) when that tail is ≤ ½ (never more evidence than the tail), else, for a look at or
+/// below the expectation, Q⁻¹ of max(½, mid-p) ≤ 0 (a miss is finite negative evidence).
+fn binomial_tail_z(x: f64, n: f64, p: f64) -> f64 {
+    let p = p.clamp(1e-12, 1.0 - 1e-12);
+    let ln_ge = ln_binomial_upper_tail(x, n, p);
+    if ln_ge <= -std::f64::consts::LN_2 {
+        return normal_upper_tail_inv_ln(ln_ge);
+    }
+    let gt = if x + 1.0 > n {
+        0.0
+    } else {
+        ln_regularized_beta(x + 1.0, n - x, p).exp()
+    };
+    normal_upper_tail_inv_ln((0.5 * (ln_ge.exp() + gt)).max(0.5).ln())
+}
+
+/// Directional evidence of one scored interval for the sequential rule (T-146 review, ADR-0012
+/// §7.2); positive values support the direction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LookEvidence {
+    /// Busier, as a run's first interval or after an interval that was not busier.
+    pub busier_start: f64,
+    /// Busier, right after a busier interval (at the subject's conditional occupancy).
+    pub busier_cont: f64,
+    /// Quieter, as a run's first interval or after an interval that was not quieter.
+    pub quieter_start: f64,
+    /// Quieter, right after a quieter interval.
+    pub quieter_cont: f64,
+}
+
+impl LookEvidence {
+    /// The single-interval z itself, for inputs without a scored look (no discreteness or
+    /// persistence information).
+    pub fn gaussian(z: f64) -> Self {
+        Self {
+            busier_start: z,
+            busier_cont: z,
+            quieter_start: -z,
+            quieter_cont: -z,
+        }
+    }
+
+    /// The evidence for `direction` (+1 busier, −1 quieter), `cont` after a same-direction interval.
+    pub fn of(&self, direction: i8, cont: bool) -> f64 {
+        match (direction > 0, cont) {
+            (true, false) => self.busier_start,
+            (true, true) => self.busier_cont,
+            (false, false) => self.quieter_start,
+            (false, true) => self.quieter_cont,
+        }
+    }
+}
+
+/// Persistence lifts (busier, quieter) of a subject: E[f f′]/(E f · E f′) of consecutive
+/// reference folds, and the same for vacancy 1 − f. At least 1 (the null is never made less
+/// persistent than independent intervals); 1 below [`PERSISTENCE_MIN_PAIRS`] pairs.
+pub fn persistence_lift(m: &hk_store::baseline::PersistenceMoments) -> (f64, f64) {
+    if m.pairs.is_nan() || m.pairs < PERSISTENCE_MIN_PAIRS {
+        return (1.0, 1.0);
+    }
+    let n = m.pairs;
+    let lift = |prod: f64, a: f64, b: f64| {
+        if a > 0.0 && b > 0.0 && prod.is_finite() {
+            (prod * n / (a * b)).max(1.0)
+        } else {
+            1.0
+        }
+    };
+    (
+        lift(m.prod, m.prev, m.cur),
+        lift(n - m.prev - m.cur + m.prod, n - m.prev, n - m.cur),
+    )
+}
+
+/// The sequential evidence of one look (T-146 review, ADR-0012 §7.2).
+///
+/// Each direction takes the smaller of the single-interval `z` (which carries the pool's
+/// between-slot spread) and [`binomial_tail_z`] of the look's `n_eff` effective looks, so a
+/// sparse look never claims more evidence than its exact binomial tail. The null occupancy is
+/// the pool's (shrunk) FCO p for a run's first interval; right after a same-direction interval it
+/// is the subject's conditional occupancy min(1, p·lift) (busier) or 1 − min(1, (1 − p)·lift)
+/// (quieter), `lift` from [`persistence_lift`]: a subject whose sessions last hours earns
+/// little evidence from its next busy interval.
+pub fn sequential_look(
+    pool: &PoolStats,
+    ev: &Evidence,
+    z: f64,
+    lift: (f64, f64),
+) -> Option<LookEvidence> {
+    let fco = ev.fco?.clamp(0.0, 1.0);
+    if ev.n_eff < 1.0 || ev.weight_s <= 0.0 || !z.is_finite() {
+        return None;
+    }
+    let p = shrunk_fco(pool, ev.weight_s / ev.n_eff)?;
+    let (n, x) = (ev.n_eff, fco * ev.n_eff);
+    let busier = |p: f64| z.min(binomial_tail_z(x, n, p));
+    let quieter = |p: f64| (-z).min(binomial_tail_z(n - x, n, 1.0 - p));
+    Some(LookEvidence {
+        busier_start: busier(p),
+        busier_cont: busier((p * lift.0).min(1.0)),
+        quieter_start: quieter(p),
+        quieter_cont: quieter(1.0 - ((1.0 - p) * lift.1).min(1.0)),
+    })
+}
+
 /// ln Q(x), Q the standard normal upper tail, accurate in the far tail (no underflow): the
 /// Chebyshev erfc fit of Numerical Recipes (fractional error < 1.2·10⁻⁷ for every x) in log form.
 pub fn ln_normal_upper_tail(x: f64) -> f64 {
@@ -278,71 +476,94 @@ pub fn sequential_novelty(k: u32, s: f64, cfg: &NoveltyConfig) -> f64 {
     novelty_from_z(normal_upper_tail_inv_ln(ln_p_eq), cfg.z_min, cfg.z_sat)
 }
 
-/// One subject's run of consecutive same-direction scored intervals (T-146).
+/// One subject's run of scored intervals accumulating evidence for one direction (T-146).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SequentialRun {
     /// +1 busier, −1 quieter.
     pub direction: i8,
     /// Intervals in the run.
     pub k: u32,
-    /// Σ z (signed).
-    pub sum_z: f64,
+    /// Σ of the intervals' directional evidence ([`LookEvidence::of`]), > 0 while the run lives.
+    pub sum: f64,
     /// Last interval folded (sample clock).
     pub last_t: Timestamp,
-    /// Front-end gain-state key of the run.
-    pub gain: u32,
+    /// The last interval's z had the run's sign (the next one is a continuation).
+    pub last_same: bool,
 }
 
-/// Steps `run` with an interval scored `z` at `t` under `gain` and returns the run's evidence.
+/// Steps `run` with an interval scored `z` (the single-interval z, whose sign is the interval's
+/// direction) with directional evidence `look` at `t`, and returns the run's evidence.
 ///
-/// The run **resets** (starts again at this interval) on a direction change (sign of z), a gain
-/// key change, a gap longer than `max_gap_s` since its last interval, or a time going backwards;
-/// a z of 0 or non-finite ends it. The same interval fed twice (`t` = last) is not counted
-/// twice. Maturity, provenance and site resets are the caller's (the alarm engine's).
+/// The run continues through an interval of its own sign and through an opposite-signed one
+/// with |z| ≤ [`SEQUENTIAL_SIGN_SLACK_Z`], adding the interval's evidence for the run's direction
+/// (the continuation value right after a same-signed interval). It **ends** on an opposite sign
+/// beyond the slack, a gap longer than `max_gap_s`, time going backwards, a non-finite z, or its
+/// evidence sum falling to ≤ 0; a new run then starts at this interval if its sign's evidence is
+/// positive. The same interval fed twice (`t` = last) is not counted twice. The front-end gain
+/// state does not end a run (a recorded gain step does, in the engine). Maturity, provenance and
+/// site resets are the caller's (the alarm engine's). The false-alarm bound of
+/// [`sequential_novelty`] holds for any such rule: every run sum is a sum of the last k
+/// intervals' evidence.
 pub fn sequential_step(
     run: &mut Option<SequentialRun>,
     t: Timestamp,
     z: f64,
-    gain: u32,
+    look: &LookEvidence,
     max_gap_s: f64,
     cfg: &NoveltyConfig,
 ) -> Option<SequentialEvidence> {
-    if !z.is_finite() || z == 0.0 {
+    let evidence = |r: &SequentialRun| {
+        let s = r.sum.max(0.0) / f64::from(r.k).sqrt();
+        SequentialEvidence {
+            intervals: r.k,
+            z: f64::from(r.direction) * s,
+            novelty: sequential_novelty(r.k, s, cfg),
+        }
+    };
+    if !z.is_finite() {
         *run = None;
         return None;
     }
-    let direction: i8 = if z > 0.0 { 1 } else { -1 };
-    let gap_s = |r: &SequentialRun| (t.as_unix_nanos() - r.last_t.as_unix_nanos()) as f64 / 1e9;
-    match run {
-        Some(r)
-            if r.direction == direction
-                && r.gain == gain
-                && gap_s(r) >= 0.0
-                && gap_s(r) <= max_gap_s =>
-        {
-            if t > r.last_t {
-                r.k += 1;
-                r.sum_z += z;
-                r.last_t = t;
+    let sign: i8 = if z > 0.0 {
+        1
+    } else if z < 0.0 {
+        -1
+    } else {
+        0
+    };
+    if let Some(r) = run.as_mut() {
+        let gap_s = (t.as_unix_nanos() - r.last_t.as_unix_nanos()) as f64 / 1e9;
+        if gap_s == 0.0 {
+            return Some(evidence(r));
+        }
+        let same = sign == r.direction;
+        if gap_s > 0.0 && gap_s <= max_gap_s && (same || z.abs() <= SEQUENTIAL_SIGN_SLACK_Z) {
+            r.k += 1;
+            r.sum += look.of(r.direction, r.last_same);
+            r.last_t = t;
+            r.last_same = same;
+            if r.sum > 0.0 {
+                return Some(evidence(r));
             }
         }
-        _ => {
-            *run = Some(SequentialRun {
-                direction,
-                k: 1,
-                sum_z: z,
-                last_t: t,
-                gain,
-            });
-        }
     }
-    let r = run.as_ref()?;
-    let s = r.sum_z.abs() / f64::from(r.k).sqrt();
-    Some(SequentialEvidence {
-        intervals: r.k,
-        z: f64::from(r.direction) * s,
-        novelty: sequential_novelty(r.k, s, cfg),
-    })
+    *run = None;
+    if sign == 0 {
+        return None;
+    }
+    let e = look.of(sign, false);
+    if e.is_nan() || e <= 0.0 {
+        return None;
+    }
+    let r = SequentialRun {
+        direction: sign,
+        k: 1,
+        sum: e,
+        last_t: t,
+        last_same: true,
+    };
+    *run = Some(r);
+    Some(evidence(&r))
 }
 
 /// T-138 (ADR-0012 §7.1, rule "single persistent new emitter"): the first-sighting count a
@@ -571,8 +792,17 @@ mod tests {
             let t = t_at(i as i64);
             let z = rng.normal();
             let one = novelty_from_z(z.abs(), cfg.z_min, cfg.z_sat);
-            let s = sequential_step(&mut run, t, z, 0, SEQUENTIAL_MAX_GAP_S, cfg)
-                .map_or(0.0, |e| e.novelty);
+            // Only a run of the interval's own direction feeds that direction's key.
+            let s = sequential_step(
+                &mut run,
+                t,
+                z,
+                &LookEvidence::gaussian(z),
+                SEQUENTIAL_MAX_GAP_S,
+                cfg,
+            )
+            .filter(|e| e.z.signum() == z.signum())
+            .map_or(0.0, |e| e.novelty);
             seq_on += u64::from(s >= h.on);
             let [single, seq, both] = &mut states[usize::from(z < 0.0)];
             n_single += u64::from(raised(single.step(one, t, &h)));
@@ -645,40 +875,80 @@ mod tests {
         assert_eq!((single, seq, both, seq_on), (0, 0, 0, 0));
     }
 
-    /// T-146: a run resets on a direction change, a gap beyond the horizon, a gain change and
-    /// time going backwards; a re-fed interval is not counted twice.
+    /// T-146: a run ends on an opposite sign beyond the slack, a gap beyond the horizon, time
+    /// going backwards and an exhausted evidence sum; it continues through a slack opposite look
+    /// (adding that look's negative evidence) and a zero z; a re-fed interval is not counted
+    /// twice; the gain state is not part of the rule.
     #[test]
     fn novelty_sequential_run_resets() {
         let cfg = NoveltyConfig::default();
         let gap = SEQUENTIAL_MAX_GAP_S;
+        let g = LookEvidence::gaussian;
         let mut run = None;
         for i in 0..5 {
-            let e = sequential_step(&mut run, t_at(i), 4.0, 7, gap, &cfg).unwrap();
+            let e = sequential_step(&mut run, t_at(i), 4.0, &g(4.0), gap, &cfg).unwrap();
             assert_eq!(e.intervals, i as u32 + 1);
             assert!((e.z - 4.0 * f64::from(e.intervals).sqrt()).abs() < 1e-9);
         }
-        let e = sequential_step(&mut run, t_at(4), 4.0, 7, gap, &cfg).unwrap();
+        let e = sequential_step(&mut run, t_at(4), 4.0, &g(4.0), gap, &cfg).unwrap();
         assert_eq!(e.intervals, 5, "the same interval is not counted twice");
-        // Direction change.
-        let e = sequential_step(&mut run, t_at(5), -1.0, 7, gap, &cfg).unwrap();
-        assert_eq!((e.intervals, e.z), (1, -1.0));
-        for i in 6..9 {
-            sequential_step(&mut run, t_at(i), 4.0, 7, gap, &cfg);
+        // A slack opposite look (|z| ≤ 1) continues the run with its own evidence; so does z = 0.
+        let e = sequential_step(&mut run, t_at(5), -0.5, &g(-0.5), gap, &cfg).unwrap();
+        assert_eq!(e.intervals, 6);
+        assert!((e.z - 19.5 / 6f64.sqrt()).abs() < 1e-9, "{e:?}");
+        let e = sequential_step(&mut run, t_at(6), 0.0, &g(0.0), gap, &cfg).unwrap();
+        assert_eq!(e.intervals, 7);
+        // Continuation evidence applies after a same-signed interval only.
+        let look = LookEvidence {
+            busier_start: 3.0,
+            busier_cont: 1.0,
+            quieter_start: -3.0,
+            quieter_cont: -3.0,
+        };
+        sequential_step(&mut run, t_at(7), 3.0, &look, gap, &cfg);
+        assert!(
+            (run.unwrap().sum - 22.5).abs() < 1e-9,
+            "after a zero z: first-interval value"
+        );
+        sequential_step(&mut run, t_at(8), 3.0, &look, gap, &cfg);
+        assert!(
+            (run.unwrap().sum - 23.5).abs() < 1e-9,
+            "after a busier interval: continuation"
+        );
+        // Direction change beyond the slack.
+        let e = sequential_step(&mut run, t_at(9), -1.5, &g(-1.5), gap, &cfg).unwrap();
+        assert_eq!((e.intervals, e.z), (1, -1.5));
+        for i in 10..13 {
+            sequential_step(&mut run, t_at(i), 4.0, &g(4.0), gap, &cfg);
         }
         assert_eq!(run.unwrap().k, 3);
         // A gap of 2 h is still one run; a longer one resets.
-        let e = sequential_step(&mut run, t_at(16), 4.0, 7, gap, &cfg).unwrap();
+        let e = sequential_step(&mut run, t_at(20), 4.0, &g(4.0), gap, &cfg).unwrap();
         assert_eq!(e.intervals, 4, "8 intervals = the 2 h horizon");
-        let e = sequential_step(&mut run, t_at(25), 4.0, 7, gap, &cfg).unwrap();
+        let e = sequential_step(&mut run, t_at(29), 4.0, &g(4.0), gap, &cfg).unwrap();
         assert_eq!(e.intervals, 1, "beyond the horizon");
-        // Gain key change.
-        sequential_step(&mut run, t_at(26), 4.0, 7, gap, &cfg);
-        let e = sequential_step(&mut run, t_at(27), 4.0, 8, gap, &cfg).unwrap();
-        assert_eq!(e.intervals, 1, "new gain state");
-        // Backwards in time, and a zero z.
-        let e = sequential_step(&mut run, t_at(20), 4.0, 8, gap, &cfg).unwrap();
+        // Backwards in time.
+        let e = sequential_step(&mut run, t_at(21), 4.0, &g(4.0), gap, &cfg).unwrap();
         assert_eq!(e.intervals, 1);
-        assert!(sequential_step(&mut run, t_at(21), 0.0, 8, gap, &cfg).is_none());
+        // An exhausted sum ends the run, and a new 1-interval run starts from the look's own
+        // positive first-interval evidence; a look without positive evidence starts none.
+        let spent = LookEvidence::gaussian(0.5);
+        let spent = LookEvidence {
+            busier_cont: -5.0,
+            ..spent
+        };
+        let e = sequential_step(&mut run, t_at(22), 0.5, &spent, gap, &cfg).unwrap();
+        assert_eq!(
+            (e.intervals, e.z),
+            (1, 0.5),
+            "restarted from the look's start evidence"
+        );
+        assert_eq!(run.unwrap().k, 1);
+        let none = LookEvidence {
+            busier_start: -0.1,
+            ..spent
+        };
+        assert!(sequential_step(&mut run, t_at(23), 0.5, &none, gap, &cfg).is_none());
         assert!(run.is_none());
     }
 
@@ -713,7 +983,7 @@ mod tests {
                 s.weight_s,
                 0.0,
             );
-            pool.add_fco_sampling(s.weight_s, s.fco_var_s);
+            pool.add_fco_sampling(s.weight_s, s.occupied_weight_s, s.fco_var_s);
         }
         pool
     }
@@ -743,7 +1013,9 @@ mod tests {
         );
 
         let sparse_flat = sampled_pool(400, 4, 2, flat, &mut rng);
-        let sparse_pat = sampled_pool(400, 4, 2, patterned, &mut rng);
+        // T-146 review: 16 000 slots, so the spread estimate's own noise (σ ≈ 0.0012) is small
+        // enough to see a bias of the correction.
+        let sparse_pat = sampled_pool(16_000, 4, 2, patterned, &mut rng);
         let (raw, corr) = (sparse_flat.between_var_raw(), sparse_flat.between_var());
         println!("T-146 sparse flat: between raw {raw:.6}, corrected {corr:.6}");
         // Raw ≈ p(1−p)/(4·2) ≈ 0.0059, all sampling noise: corrected to near the floor.
@@ -755,8 +1027,10 @@ mod tests {
             raw > tau2 + 0.015,
             "sampling inflates the raw spread: {raw}"
         );
+        // T-146 review: tolerance 0.0035 (≈ 3σ of the estimate). The pool-FCO p(1−p) weighting
+        // over-subtracted here (≈ 0.0826, a bias of −0.0074); each slot's own f(1−f) does not.
         assert!(
-            (corr - tau2).abs() < 0.015,
+            (corr - tau2).abs() < 0.0035,
             "the pattern spread is kept: {corr}"
         );
 
@@ -773,5 +1047,305 @@ mod tests {
         assert!(z > 3.4, "sparse onset z {z}");
         assert!(occupancy_z(&sparse_pat, &look(0.75, 2.0)).unwrap() < 3.0);
         assert!(occupancy_z(&dense_pat, &look(0.75, 80.0)).unwrap() < 3.0);
+    }
+
+    // ---- T-146 review: discrete and autocorrelated null looks at production thresholds ----
+
+    fn look_ev(fco: f64, n_eff: f64) -> Evidence {
+        Evidence {
+            level_db: None,
+            fco: Some(fco),
+            n_eff,
+            weight_s: 900.0,
+            observed_s: 900.0,
+        }
+    }
+
+    /// z_on at the production mapping and hysteresis.
+    fn z_on(cfg: &NoveltyConfig) -> f64 {
+        use hk_model::attention::alarm::HysteresisConfig;
+        cfg.z_min + HysteresisConfig::default().on * (cfg.z_sat - cfg.z_min)
+    }
+
+    /// c_k·√k: a k-interval run reaches `on` iff its directional evidence sum is ≥ this.
+    fn on_sum(k: u32, cfg: &NoveltyConfig) -> f64 {
+        let ln_target = 2.0 * ln_normal_upper_tail(z_on(cfg)) - sequential_weight(k).ln();
+        normal_upper_tail_inv_ln(ln_target) * f64::from(k).sqrt()
+    }
+
+    /// The sequential budget per direction per interval, Q(z_on)²/2.
+    fn seq_budget(cfg: &NoveltyConfig) -> f64 {
+        (2.0 * ln_normal_upper_tail(z_on(cfg))).exp() / 2.0
+    }
+
+    /// Σ_{k ≤ kmax} P(Σ_{i ≤ k} e[xᵢ] ≥ c_k√k) / budget for i.i.d. outcomes x ∈ {0, 1, 2} of
+    /// probabilities `probs`, by exact enumeration of the outcome counts. This is the union bound
+    /// of [`sequential_novelty`] evaluated on the true discrete null instead of N(0, 1).
+    fn iid_union_ratio(probs: [f64; 3], e: [f64; 3], kmax: u32, cfg: &NoveltyConfig) -> f64 {
+        let lnf: Vec<f64> = (0..=kmax)
+            .scan(0.0, |a, i| {
+                *a += f64::from(i.max(1)).ln();
+                Some(*a)
+            })
+            .collect();
+        let term = |n: u32, p: f64| if n == 0 { 0.0 } else { f64::from(n) * p.ln() };
+        let mut acc = 0.0;
+        for k in 1..=kmax {
+            let thr = on_sum(k, cfg);
+            for n2 in 0..=k {
+                for n1 in 0..=k - n2 {
+                    let n0 = k - n2 - n1;
+                    let s = f64::from(n0) * e[0] + f64::from(n1) * e[1] + f64::from(n2) * e[2];
+                    if s >= thr {
+                        let lnp = lnf[k as usize]
+                            - lnf[n0 as usize]
+                            - lnf[n1 as usize]
+                            - lnf[n2 as usize]
+                            + term(n0, probs[0])
+                            + term(n1, probs[1])
+                            + term(n2, probs[2]);
+                        acc += lnp.exp();
+                    }
+                }
+            }
+        }
+        acc / seq_budget(cfg)
+    }
+
+    /// The same union bound for a stationary two-state Markov look process (state 0 idle, 1 busy;
+    /// `p[a][b]` the transition probability), with `e(prev, cur)` the evidence of an interval in
+    /// state `cur` (prev `None` for the first interval of the window). Sums live on a grid of
+    /// 0.01 with every increment rounded **up**, so the result is an upper bound.
+    fn markov_union_ratio(
+        p: [[f64; 2]; 2],
+        e: impl Fn(Option<usize>, usize) -> f64,
+        kmax: u32,
+        cfg: &NoveltyConfig,
+    ) -> f64 {
+        const H: f64 = 0.01;
+        let pi1 = p[0][1] / (p[0][1] + p[1][0]);
+        let inc = |v: f64| (v / H).ceil() as i64;
+        let steps: Vec<i64> = [e(None, 0), e(None, 1), e(Some(0), 0), e(Some(0), 1)]
+            .into_iter()
+            .chain([e(Some(1), 0), e(Some(1), 1)])
+            .map(inc)
+            .collect();
+        let (lo, hi) = (
+            (*steps.iter().min().unwrap()).min(0),
+            (*steps.iter().max().unwrap()).max(0),
+        );
+        let off = -lo * i64::from(kmax);
+        let len = ((hi - lo) * i64::from(kmax) + 1) as usize;
+        let mut dist = vec![vec![0.0_f64; len]; 2];
+        dist[0][(off + steps[0]) as usize] += 1.0 - pi1;
+        dist[1][(off + steps[1]) as usize] += pi1;
+        let mut acc = 0.0;
+        for k in 1..=kmax {
+            if k > 1 {
+                let mut next = vec![vec![0.0_f64; len]; 2];
+                let (a, b) = (
+                    (off + lo * i64::from(k - 1)) as usize,
+                    (off + hi * i64::from(k - 1)) as usize,
+                );
+                for prev in 0..2 {
+                    for s in a..=b {
+                        let m = dist[prev][s];
+                        if m == 0.0 {
+                            continue;
+                        }
+                        for cur in 0..2 {
+                            let d = steps[2 + 2 * prev + cur];
+                            next[cur][(s as i64 + d) as usize] += m * p[prev][cur];
+                        }
+                    }
+                }
+                dist = next;
+            }
+            let thr = off + (on_sum(k, cfg) / H).ceil() as i64;
+            for d in &dist {
+                acc += d[(thr.max(0) as usize).min(len)..].iter().sum::<f64>();
+            }
+        }
+        acc / seq_budget(cfg)
+    }
+
+    /// Markov transition matrix with duty `duty` and mean busy length `busy` intervals.
+    fn markov(duty: f64, busy: f64) -> [[f64; 2]; 2] {
+        let p10 = 1.0 / busy;
+        let p01 = p10 * duty / (1.0 - duty);
+        [[1.0 - p01, p01], [p10, 1.0 - p10]]
+    }
+
+    /// Simulates `n` null intervals of a look process through the engine's per-direction
+    /// hysteresis with `step` (fco → (single-interval z, sequential evidence)) and returns the
+    /// raises (raise or reopen) summed over both directions.
+    fn null_raises(
+        n: usize,
+        mut fco: impl FnMut(&mut Rng) -> f64,
+        mut step: impl FnMut(Timestamp, f64) -> (f64, Option<SequentialEvidence>),
+        cfg: &NoveltyConfig,
+        seed: u64,
+    ) -> u64 {
+        use hk_model::attention::alarm::{AlarmTransition, HysteresisConfig, HysteresisState};
+        let h = HysteresisConfig::default();
+        let mut rng = Rng(seed);
+        let mut keys = [HysteresisState::default(); 2];
+        let mut raises = 0;
+        for i in 0..n {
+            let t = t_at(i as i64);
+            let (z, ev) = step(t, fco(&mut rng));
+            if !z.is_finite() || z == 0.0 {
+                continue;
+            }
+            let one = novelty_from_z(z.abs(), cfg.z_min, cfg.z_sat);
+            let s = ev
+                .filter(|e| e.z.signum() == z.signum())
+                .map_or(0.0, |e| e.novelty);
+            let tr = keys[usize::from(z < 0.0)].step(one.max(s), t, &h);
+            raises += u64::from(matches!(
+                tr,
+                AlarmTransition::Raise | AlarmTransition::Reopen
+            ));
+        }
+        raises
+    }
+
+    /// Lag-1 moments of a consecutive FCO series, as the baseline folds them.
+    fn moments_of(fcos: &[f64]) -> hk_store::baseline::PersistenceMoments {
+        let mut m = hk_store::baseline::PersistenceMoments::default();
+        for w in fcos.windows(2) {
+            m.pairs += 1.0;
+            m.prev += w[0];
+            m.cur += w[1];
+            m.prod += w[0] * w[1];
+        }
+        m
+    }
+
+    /// T-146 review (ADR-0012 §7.2): the sequential rule's null budget on **discrete** sparse
+    /// looks and on **autocorrelated** occupancy, at the production thresholds, fed through
+    /// `occupancy_z` and [`sequential_look`] on a pool learned from the same process.
+    ///
+    /// For each process the test evaluates, per direction, the union bound
+    /// Σ_k P(Σ of the last k intervals' evidence ≥ c_k√k) exactly on the process: count
+    /// enumeration for i.i.d. binomial(2, p) looks, p ∈ {0.05, 0.2, 0.5}, and a grid DP (increments
+    /// rounded up) for a stationary on/off Markov chain with mean busy length 4 intervals, duty
+    /// 0.05 and 0.5, busy intervals FCO 1 and idle FCO 0. The **before** value uses the plain
+    /// single-interval z as evidence (the rule as first merged); the **after** value uses
+    /// [`sequential_look`] with the persistence lift estimated from 20 000 simulated intervals
+    /// (the i.i.d. case uses the first-interval evidence everywhere, an upper bound because the
+    /// continuation evidence is never larger). Then 10⁶ simulated null intervals per process run
+    /// through the engine's rule and per-direction hysteresis.
+    ///
+    /// Tolerances fixed before running: after the fix every union bound is ≤ 1 × the budget
+    /// Q(z_on)²/2 (the i.i.d. sums to k = 240, the Markov ones to k = 200) and no simulated
+    /// interval raises. Before the fix (measured): binomial p 0.05 busier 25.5×, p 0.2 1.2·10⁶×;
+    /// Markov duty 0.05 1.1·10²⁹× with 526 simulated raises, duty 0.5 2.6·10²⁴×.
+    #[test]
+    fn novelty_sequential_discrete_and_markov_null_within_budget() {
+        let cfg = NoveltyConfig::default();
+        for p in [0.05, 0.2, 0.5] {
+            let pool = sampled_pool(168, 4, 2, |_| p, &mut Rng(0x146e));
+            let fcos = [0.0, 0.5, 1.0];
+            let z = fcos.map(|f| occupancy_z(&pool, &look_ev(f, 2.0)).unwrap());
+            let mut rng = Rng(0x1472);
+            let series: Vec<f64> = (0..20_000)
+                .map(|_| (0..2).filter(|_| rng.next() < p).count() as f64 / 2.0)
+                .collect();
+            let lift = persistence_lift(&moments_of(&series));
+            let looks = [0, 1, 2]
+                .map(|x| sequential_look(&pool, &look_ev(fcos[x], 2.0), z[x], lift).unwrap());
+            let probs = [(1.0 - p) * (1.0 - p), 2.0 * p * (1.0 - p), p * p];
+            let before = (
+                iid_union_ratio(probs, z, 240, &cfg),
+                iid_union_ratio(probs, z.map(|v| -v), 240, &cfg),
+            );
+            let after = (
+                iid_union_ratio(probs, looks.map(|l| l.busier_start), 240, &cfg),
+                iid_union_ratio(probs, looks.map(|l| l.quieter_start), 240, &cfg),
+            );
+            let mut run = None;
+            let raises = null_raises(
+                1_000_000,
+                |r| (0..2).filter(|_| r.next() < p).count() as f64 / 2.0,
+                |t, f| {
+                    let x = (f * 2.0) as usize;
+                    let e =
+                        sequential_step(&mut run, t, z[x], &looks[x], SEQUENTIAL_MAX_GAP_S, &cfg);
+                    (z[x], e)
+                },
+                &cfg,
+                0x146f,
+            );
+            println!(
+                "T-146r binomial(2, {p}): lift {lift:?}; union/budget busier {:.3e} → {:.3e}, \
+                 quieter {:.3e} → {:.3e}; simulated raises in 1e6: {raises}",
+                before.0, after.0, before.1, after.1
+            );
+            assert!(
+                after.0 <= 1.0 && after.1 <= 1.0,
+                "binomial p {p}: {after:?}"
+            );
+            assert_eq!(raises, 0, "binomial p {p}");
+        }
+        for duty in [0.05, 0.5] {
+            let m = markov(duty, 4.0);
+            let pool = sampled_pool(168, 4, 2, |_| duty, &mut Rng(0x1470));
+            let z = [0.0, 1.0].map(|f| occupancy_z(&pool, &look_ev(f, 2.0)).unwrap());
+            let mut rng = Rng(0x1473);
+            let mut s = 0_usize;
+            let series: Vec<f64> = (0..20_000)
+                .map(|_| {
+                    s = usize::from(rng.next() < m[s][1]);
+                    s as f64
+                })
+                .collect();
+            let lift = persistence_lift(&moments_of(&series));
+            let looks = [0, 1]
+                .map(|x| sequential_look(&pool, &look_ev(x as f64, 2.0), z[x], lift).unwrap());
+            // Evidence for `dir` of an interval in state `cur` after `prev` (a continuation when
+            // the previous interval had the direction's sign: busy for busier, idle for quieter).
+            let e = |dir: i8| {
+                move |prev: Option<usize>, cur: usize| {
+                    let same = prev.is_some_and(|p| (p == 1) == (dir > 0));
+                    looks[cur].of(dir, same)
+                }
+            };
+            let before = (
+                markov_union_ratio(m, |_, c| z[c], 200, &cfg),
+                markov_union_ratio(m, |_, c| -z[c], 200, &cfg),
+            );
+            let after = (
+                markov_union_ratio(m, e(1), 200, &cfg),
+                markov_union_ratio(m, e(-1), 200, &cfg),
+            );
+            let mut run = None;
+            let mut state = 0_usize;
+            let raises = null_raises(
+                1_000_000,
+                |r| {
+                    state = usize::from(r.next() < m[state][1]);
+                    state as f64
+                },
+                |t, f| {
+                    let x = f as usize;
+                    let e =
+                        sequential_step(&mut run, t, z[x], &looks[x], SEQUENTIAL_MAX_GAP_S, &cfg);
+                    (z[x], e)
+                },
+                &cfg,
+                0x1471,
+            );
+            println!(
+                "T-146r markov(duty {duty}, busy 4): lift {lift:?}; union/budget busier {:.3e} → \
+                 {:.3e}, quieter {:.3e} → {:.3e}; simulated raises in 1e6: {raises}",
+                before.0, after.0, before.1, after.1
+            );
+            assert!(
+                after.0 <= 1.0 && after.1 <= 1.0,
+                "markov duty {duty}: {after:?}"
+            );
+            assert_eq!(raises, 0, "markov duty {duty}");
+        }
     }
 }

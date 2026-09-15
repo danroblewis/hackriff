@@ -14,7 +14,7 @@
 //!    [`crate::occupancy::novelty::sequential_step`]) and its novelty becomes the larger of its own
 //!    and the run's sequential novelty (a Stouffer z corrected over run lengths, reaching `on` only
 //!    as improbably as two consecutive on-level intervals). A run resets on a direction change, a
-//!    gap beyond `sequential_max_gap_s`, a gain-key change, an immature or provenance-explained
+//!    revisit-relative gap ([`REVISIT_GAP_FACTOR`]), a recorded gain step, an immature or provenance-explained
 //!    input, a device step that explains the subject, and a site change. Runs are not persisted:
 //!    like the hysteresis' building count they restart after [`AlarmEngine::resume`] (an alarm
 //!    open at the restart holds on its single-interval novelty, and a sparse subject may clear
@@ -72,8 +72,15 @@ use hk_store::baseline::{BaselineSubject, ChangeStatistic};
 
 use super::baseline::{FoldOutcome, IntervalObservation};
 use super::novelty::{
-    NoveltyConfig, SEQUENTIAL_MAX_GAP_S, SequentialEvidence, SequentialRun, sequential_step,
+    LookEvidence, NoveltyConfig, SEQUENTIAL_MAX_GAP_S, SequentialEvidence, SequentialRun,
+    sequential_step,
 };
+
+/// T-146 review: a run survives a gap of up to this many times its subject's revisit period (and
+/// at least `sequential_max_gap_s`).
+pub const REVISIT_GAP_FACTOR: f64 = 3.0;
+/// Revisit trackers of subjects not seen for this long are dropped, s (7 d).
+const REVISIT_MEMORY_S: f64 = 7.0 * 86_400.0;
 use crate::correlate::{CorrelateError, Correlator};
 use crate::feeds::FeedState;
 use crate::geo::Site;
@@ -208,9 +215,10 @@ pub struct AlarmInput {
     pub novelty: f64,
     /// Observed seconds behind the value.
     pub observed_s: f64,
-    /// Front-end gain-state key of the interval (0 = unknown/single). T-146: a change resets the
-    /// subject's sequential evidence.
-    pub gain: u32,
+    /// T-146 review: the interval's directional sequential evidence
+    /// ([`crate::occupancy::novelty::sequential_look`]), for busier/quieter inputs from a scored
+    /// fold; `None` uses the single-interval z.
+    pub look: Option<LookEvidence>,
     /// T-146: the subject's sequential evidence, set by [`AlarmEngine::step`] (builders leave it
     /// `None`).
     pub sequential: Option<SequentialEvidence>,
@@ -355,6 +363,9 @@ pub struct AlarmEngine {
     now: Option<Timestamp>,
     /// T-146 busier/quieter runs (not persisted; see the module docs).
     runs: BTreeMap<RunKey, SequentialRun>,
+    /// T-146 review: per subject, the last scored input's time and the revisit period, s
+    /// ([`AlarmEngine::revisit_gap`]; not persisted).
+    revisits: BTreeMap<RunKey, (Timestamp, f64)>,
 }
 
 /// Two subjects cover common spectrum: overlapping cells of one scheme, else equal.
@@ -621,7 +632,7 @@ impl AlarmEngine {
         t: Timestamp,
         inputs: &[AlarmInput],
     ) -> Vec<AlarmInput> {
-        let (gap, ncfg) = (self.cfg.sequential_max_gap_s, self.cfg.novelty);
+        let ncfg = self.cfg.novelty;
         inputs
             .iter()
             .map(|i| {
@@ -630,21 +641,46 @@ impl AlarmEngine {
                     return i;
                 }
                 let key = (site, i.subject, i.cal);
+                let gap = self.revisit_gap(key, t);
                 let mut run = self.runs.remove(&key);
                 if !i.maturity.is_mature() || i.provenance_explained {
                     return i;
                 }
-                let evidence = sequential_step(&mut run, t, i.z, i.gain, gap, &ncfg);
+                let look = i.look.unwrap_or_else(|| LookEvidence::gaussian(i.z));
+                let evidence = sequential_step(&mut run, t, i.z, &look, gap, &ncfg);
                 if let Some(r) = run {
                     self.runs.insert(key, r);
                 }
-                if let Some(e) = evidence {
+                // A busier run carried through a slack quieter interval does not lend its
+                // evidence to that quieter input (and vice versa).
+                if let Some(e) = evidence.filter(|e| e.z.signum() == i.z.signum()) {
                     i.novelty = i.novelty.max(e.novelty);
                     i.sequential = Some(e);
                 }
                 i
             })
             .collect()
+    }
+
+    /// T-146 review: the gap after which `key`'s run ends, max(`sequential_max_gap_s`,
+    /// [`REVISIT_GAP_FACTOR`] × the subject's revisit period), and records this visit. The period
+    /// is an EWMA (¼) of the gaps between the subject's scored inputs, each clipped at 4× the
+    /// period so one long absence does not stretch it; the first gap sets it. A survey revisiting a
+    /// subject every 3 h thus accumulates from the third visit on.
+    fn revisit_gap(&mut self, key: RunKey, t: Timestamp) -> f64 {
+        let base = self.cfg.sequential_max_gap_s;
+        let v = self.revisits.entry(key).or_insert((t, 0.0));
+        let gap = base.max(REVISIT_GAP_FACTOR * v.1);
+        if t > v.0 {
+            let d = secs_between(v.0, t);
+            v.1 = if v.1 > 0.0 {
+                0.75 * v.1 + 0.25 * d.min(4.0 * v.1)
+            } else {
+                d
+            };
+            v.0 = t;
+        }
+        gap
     }
 
     /// Open alarm keys and their anomalies.
@@ -944,8 +980,12 @@ impl AlarmEngine {
     /// would be after the cooldown anyway.
     fn evict(&mut self, now: Timestamp) {
         let cooldown = self.cfg.hysteresis.cooldown_s;
-        let gap = self.cfg.sequential_max_gap_s;
-        self.runs.retain(|_, r| secs_between(r.last_t, now) <= gap);
+        let (base, revisits) = (self.cfg.sequential_max_gap_s, &self.revisits);
+        let gap = |k: &RunKey| base.max(REVISIT_GAP_FACTOR * revisits.get(k).map_or(0.0, |v| v.1));
+        self.runs
+            .retain(|k, r| secs_between(r.last_t, now) <= gap(k));
+        self.revisits
+            .retain(|_, v| secs_between(v.0, now) <= REVISIT_MEMORY_S);
         let recent = |t: Option<Timestamp>| t.is_some_and(|t| secs_between(t, now) < cooldown);
         self.keys.retain(|_, st| {
             st.hyst.is_open()
@@ -1037,7 +1077,7 @@ pub fn inputs_from_fold(
         z,
         novelty: novelty_from_z(z.abs(), cfg.z_min, cfg.z_sat),
         observed_s: obs.observed_s,
-        gain: obs.gain,
+        look: None,
         sequential: None,
     };
     let mut out = Vec::new();
@@ -1062,7 +1102,9 @@ pub fn inputs_from_fold(
         } else {
             AlarmKind::QuieterThanUsual
         };
-        out.push(base(kind, AlarmUnit::Fraction, fco, mean, sigma, z));
+        let mut i = base(kind, AlarmUnit::Fraction, fco, mean, sigma, z);
+        i.look = fold.look;
+        out.push(i);
     }
     if let Some(cp) = fold.change_point {
         let (unit, observed, mean, spread) = match cp.statistic {
@@ -1144,7 +1186,7 @@ pub fn new_emitter_input(
         },
         novelty: new_emitter.clamp(0.0, 1.0),
         observed_s,
-        gain: 0,
+        look: None,
         sequential: None,
     }
 }

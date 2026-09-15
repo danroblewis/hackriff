@@ -565,7 +565,7 @@ mod tests {
                 z: 30.0,
                 novelty,
                 observed_s: 900.0,
-                gain: 0,
+                look: None,
                 sequential: None,
             }],
         }
@@ -657,6 +657,7 @@ mod tests {
             utc_offset_min: 0,
             pool: PoolContext::default(),
             fold: FoldOutcome {
+                look: None,
                 novelty: NoveltyScore {
                     novelty: 0.0,
                     level_z: None,
@@ -1132,7 +1133,7 @@ mod tests {
     fn alarm_service_sparse_visits_raise_busier_than_usual() {
         use crate::attention::IntervalFold;
         use hk_context::occupancy::baseline::{BaselineConfig, BaselineEngine};
-        use hk_context::occupancy::novelty::sequential_novelty;
+        use hk_context::occupancy::novelty::{SEQUENTIAL_MAX_GAP_S, sequential_step};
         use hk_model::attention::alarm::HysteresisConfig;
         use hk_model::attention::baseline::BaselineKey;
         use hk_model::attention::occupancy::{ChannelKey, OccupancySubject};
@@ -1174,8 +1175,8 @@ mod tests {
         let mut raised = None;
         // The rule's prediction: (k, Σz) of the busier run, whether the last interval was on,
         // the predicted raise (interval, k), and the pre-onset run.
-        let (mut run, mut prev_on, mut predicted, mut pre) = ((0_u32, 0.0_f64), false, None, None);
-        for i in 0..BASELINE + 20 {
+        let (mut run, mut prev_on, mut predicted, mut pre) = (None, false, None, None);
+        for i in 0..BASELINE + 60 {
             let fco = if i < BASELINE {
                 (0..2).filter(|_| next() < 0.05).count() as f64 / 2.0
             } else {
@@ -1213,19 +1214,18 @@ mod tests {
                         AlarmSubject::Channel { key },
                         CalKey::Uncalibrated,
                     );
-                    if let Some(r) = r.filter(|r| r.direction > 0) {
-                        run = (r.k, r.sum_z);
-                    }
-                    pre = Some(run);
+                    run = r;
+                    pre = Some(r.map(|r| (r.direction, r.k, r.sum)));
                 }
                 continue;
             }
             let z = fold.novelty.occupancy_z.expect("a mature fold is scored");
             assert!(z > 0.0, "interval {i}: busier ({z})");
-            run = (run.0 + 1, run.1 + z);
-            let on = sequential_novelty(run.0, run.1 / f64::from(run.0).sqrt(), &ncfg) >= hcfg.on;
+            let look = fold.look.expect("a scored fold carries its look");
+            let ev = sequential_step(&mut run, at(i), z, &look, SEQUENTIAL_MAX_GAP_S, &ncfg);
+            let on = ev.is_some_and(|e| e.z > 0.0 && e.novelty >= hcfg.on);
             if on && prev_on && predicted.is_none() {
-                predicted = Some((i - BASELINE + 1, run.0, z));
+                predicted = Some((i - BASELINE + 1, ev.unwrap().intervals, look.busier_start));
             }
             prev_on = on;
             assert!(

@@ -35,8 +35,11 @@ use serde::{Deserialize, Serialize};
 
 /// File format version written (T-132: 2 adds the level class per series, the sequential
 /// accumulators and the latched hours per subject; T-146: 3 appends the FCO sampling moment
-/// `fco_var_s` to every reference and adaptive slot). Versions 1 and 2 are still read (the
-/// moment reads 0, so their between-slot spread is not sampling-corrected until refolded).
+/// `fco_var_s` to every reference and adaptive slot and the [`PersistenceMoments`] to every
+/// subject). Versions 1 and 2 are still read: the moment and the persistence read 0. Their
+/// adaptive copies gain the moment as they fold, but a **frozen reference never refolds**, so an
+/// upgraded mature baseline keeps its uncorrected (larger, so safer) between-slot spread and a
+/// persistence lift of 1 until it is re-frozen or relearns (ADR-0012 §3.3).
 pub const BASELINE_FORMAT_VERSION: u16 = 3;
 /// Default store quota (ADR-0012 §3.6).
 pub const BASELINE_QUOTA_BYTES: u64 = 1 << 30;
@@ -736,6 +739,27 @@ pub struct SubjectBaseline {
     pub refrozen_at: Option<Timestamp>,
     /// Last fold.
     pub last_seen: Timestamp,
+    /// T-146 review: lag-1 moments of consecutive reference folds' FCO (the subject's occupancy
+    /// persistence under the null, ADR-0012 §7.2).
+    pub persistence: PersistenceMoments,
+}
+
+/// Lag-1 moments of the FCO of consecutive folds that entered the reference, per subject over
+/// all hours and gain states (T-146 review). E[f f′]/(E f · E f′) is how much more likely a
+/// subject is occupied right after an occupied interval than at random (1 for independent
+/// intervals, ≈ 1/duty for long sessions).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PersistenceMoments {
+    /// Pairs of consecutive folds.
+    pub pairs: f64,
+    /// Σ FCO of each pair's earlier fold.
+    pub prev: f64,
+    /// Σ FCO of each pair's later fold.
+    pub cur: f64,
+    /// Σ product of the pair's FCOs.
+    pub prod: f64,
+    /// The last usable fold (time, FCO): the next pair's earlier fold.
+    pub last: Option<(Timestamp, f64)>,
 }
 
 impl SubjectBaseline {
@@ -752,6 +776,7 @@ impl SubjectBaseline {
             mature_at: None,
             refrozen_at: None,
             last_seen: t,
+            persistence: PersistenceMoments::default(),
         }
     }
 }
@@ -1001,6 +1026,20 @@ fn encode_body(state: &BaselineState, version: u16) -> Vec<u8> {
             }
             w.u32(s.latched_hours);
         }
+        if version >= 3 {
+            let p = &s.persistence;
+            for v in [p.pairs, p.prev, p.cur, p.prod] {
+                w.f64(v);
+            }
+            match p.last {
+                Some((t, f)) => {
+                    w.u8(1);
+                    w.i64(t.as_unix_nanos());
+                    w.f64(f);
+                }
+                None => w.u8(0),
+            }
+        }
         w.u8(s.gains.len() as u8);
         for g in &s.gains {
             w.u32(g.gain);
@@ -1141,6 +1180,18 @@ fn decode_body_with(
             }
             latched_hours = r.u32()?;
         }
+        let mut persistence = PersistenceMoments::default();
+        if version >= 3 {
+            persistence.pairs = r.f64()?;
+            persistence.prev = r.f64()?;
+            persistence.cur = r.f64()?;
+            persistence.prod = r.f64()?;
+            persistence.last = match r.u8()? {
+                0 => None,
+                1 => Some((Timestamp::from_unix_nanos(r.i64()?), r.f64()?)),
+                _ => return Err("bad persistence tag"),
+            };
+        }
         let n_gains = usize::from(r.u8()?);
         if n_gains > 2 * MAX_GAIN_STATES {
             return Err("too many gain states");
@@ -1203,6 +1254,7 @@ fn decode_body_with(
                 mature_at,
                 refrozen_at,
                 last_seen,
+                persistence,
             },
         );
     }
@@ -1503,6 +1555,16 @@ mod tests {
             }
         }
         assert!(touched > 0);
+        // T-146 review: version 3 also carries each subject's persistence moments.
+        for sub in v3.subjects.values_mut() {
+            sub.persistence = PersistenceMoments {
+                pairs: 40.0,
+                prev: 6.5,
+                cur: 6.0,
+                prod: 4.25,
+                last: Some((sub.last_seen, 0.5)),
+            };
+        }
         assert_eq!(decode(&encode(&v3).unwrap()).unwrap(), v3);
         assert_eq!(decode(&encode_version(&v3, 2).unwrap()).unwrap(), s);
         let mut bad = bytes.clone();
