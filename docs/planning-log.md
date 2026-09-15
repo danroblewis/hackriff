@@ -1002,3 +1002,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Demo note for T-121/T-123:** with only interactive tuning, `fco` is None by contract. Show `fco_all_visits` labelled biased/indicative, never as `fco`.
   Fix round running.
 - **B0.306 T-121 delivered** (b41fbdd). `report(region, span)` is built from five provider traits and refuses to build without a coverage source. Coverage lists gaps, never-observed ranges, POI and the statement 'unobserved is not quiet'. `GET /api/report` serves JSON, CSV and PNG (rendered in the backend). The 48 h scene e2e reports the scene's longest gap as the top gap and 7/8 channels found blind. Stand-ins for now: tile-based occupancy, `NoBaselines`. Not done: source/site history filters (need a tile-format change). Timeboxed Opus review running; it checks honesty of disclosure, whether stand-in FCO is labelled biased, whether explanation labels are shown as suggestions, and auth on a route outside the control chain. **T-128 (M2 integration) added:** occupancy levels into baselines, real providers into reports, inventory candidates to the scheduler, first sightings, site/source tile filters, T-119 memory bound. T-124 now depends on T-127 and T-128.
+- **B0.307 T-121 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. Unbounded report history grid (~350–400 MB, no top-level cap, f_hi to 1e12) built under the FloorProduct lock, so history frames drop.
+    2. Tile stand-in occupancy written as unbiased ADR `fco` (`revisit_biased:false`, invented 80% threshold metadata).
+  - **Checked OK:**
+    - No overstated coverage: first provider only, partial log reads as unobserved.
+    - "amateur" is the classifier's top suggestion, carried as a suggestion.
+    - The route passes the same auth/audit gate.
+    - Error codes consistent; docs/contract in sync; merge-tree with main clean.
+  - **Fix round launched:** must-fixes, plus one-pass log coverage, an unconditional e2e top-emitter assert and partial-log warning wording.
+  - **Merge order:** T-118 before T-121. Source/site history filters are tracked in T-128.
