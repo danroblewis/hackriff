@@ -1554,3 +1554,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - The parked-week 0-refusal test under 256 MiB, now at risk from the 32 B slots.
     - Conflict with T-140 accessors when merging main.
   - **T-124 knock-on:** its busier-alarm latency limit must be re-derived from the new rule (14-interval sparse bound) before its next run.
+- **B0.384 T-148 launched (Sonnet, user request).** Sidebar Selections/Inventory rows overflow sideways, pushing the action buttons off-screen. The fix wraps rows so the buttons are always reachable. It is a thin-client CSS tweak separate from the UI rewrite, and not a Rust build.

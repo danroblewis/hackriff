@@ -2323,6 +2323,20 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-148
+    milestone: M2
+    title: "UI bug: sidebar Selections/Signal Inventory rows overflow horizontally; action buttons (Promote/Delete/Listen) off-screen - wrap rows, buttons always reachable, no per-row x-scroll"
+    status: in-progress
+    deps: []
+    parallel_group: UI
+    use_cases: []
+    found_by: "user 2026-09-15 (current UI; separate from the later UI rewrite)"
+    acceptance: "row content wraps; action buttons reachable without horizontal scroll at a narrow sidebar width; thin-client CSS/markup tweak only, no redesign or behaviour change; UI build/tests green"
+    area: ui/src (sidebar lists + styles)
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
