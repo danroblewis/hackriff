@@ -1280,6 +1280,7 @@ tasks:
     effort: high
     core_interface: true
     priority: "ahead of queued work (user)"
+    finding: "NO code regression. Live server tuning matches fm_100p8M (centre 100.8 MHz, 2.4 Msps, LNA 32/VGA 30/amp); the strong station is at 101.3 MHz. The requested box 100.6-101.0 MHz covers the HackRF DC spike plus a weak ~2 dB signal, so squelch correctly stays closed (mock real-time: SNR ~2.3 dB, -29 dBFS, 0-5 frames at BOTH 268fcd4 and e95ec47 - nothing to bisect). At HEAD, 400 kHz selection / tight 150 kHz box / emitter around 101.3 MHz stream audio for 20 s past the 15 s re-refinement: 1000/1000 PCM records, squelch open ~16 dB SNR, refined centre within 1 kHz. Old tests ran unpaced and checked headers/status only. Unexplained: live refined centre 100.8365 MHz. Supervisor to check whether the UI shows the station at 100.8 MHz while /api/inventory has ~101.3 MHz (live UI axis/click mapping, T-045/T-057 class). Deliverable: test-only - tests/e2e/tests/listen_live.rs (real-time paced) + blind_live_paced option."
   - id: T-077
     milestone: M0b
     title: Parallel test runner with serial groups for heavy suites (flake-free), faster than the 914 s sequential baseline
