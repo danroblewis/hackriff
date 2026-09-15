@@ -652,6 +652,9 @@ struct Common {
     /// T-128: the run's C12 attention service (baselines, candidates), fed by the occupancy
     /// thread and the scheduler; `None` when it could not open.
     attention: Option<Arc<crate::attention::AttentionService>>,
+    /// T-131: the run's novelty alarm service (fed by the occupancy thread, served by
+    /// `/api/anomalies`); `None` when it could not open.
+    alarms: Option<Arc<crate::alarms::AlarmService>>,
     /// T-115: the observation log (`None` when it could not be opened).
     observations: Option<crate::observe::ObservationLog>,
     /// T-127: the scheduler as the API sees it (snapshot + lease commands), shared by segments.
@@ -782,6 +785,33 @@ impl Pipeline {
         .ok()
         .map(Arc::new);
         occupancy.set_attention(attention.clone());
+        // T-131: the alarm service sits next to the attention loop that feeds it, so `hk run` and
+        // `hk serve` both raise alarms; never fails the run. Dismissals before any snapshot are
+        // stamped with stream time (the wall clock before any frame).
+        let alarms = {
+            let clock_counters = Arc::clone(&counters);
+            let clock: Arc<dyn Fn() -> Timestamp + Send + Sync> = Arc::new(move || {
+                let ns = clock_counters.stream_time_ns.load(Ordering::Relaxed);
+                if ns > 0 {
+                    Timestamp::from_unix_nanos(ns)
+                } else {
+                    Timestamp::now()
+                }
+            });
+            Repository::open(&db_path)
+                .map_err(anyhow::Error::from)
+                .and_then(|repo| {
+                    crate::alarms::AlarmService::open(
+                        Arc::new(Mutex::new(repo)),
+                        cfg.stream_sink.as_ref(),
+                        clock,
+                    )
+                })
+                .map_err(|e| eprintln!("novelty alarms disabled: {e:#}"))
+                .ok()
+                .map(Arc::new)
+        };
+        occupancy.set_alarms(alarms.clone(), cfg.feeds_dir.as_deref());
         let common = Common {
             data_dir: cfg.data_dir.clone(),
             db_path,
@@ -790,6 +820,7 @@ impl Pipeline {
             compute,
             occupancy,
             attention,
+            alarms,
             product,
             display: Arc::new(DisplayControl::new(DisplaySettings::from_settings(
                 &cfg.settings,
@@ -997,9 +1028,10 @@ fn start_segment(
     }
     {
         let s = Arc::clone(&shared);
+        let attention = common.attention.clone();
         workers.push(spawn(
             "hk-control",
-            Box::new(move || crate::control::run(s, rx, sched, interactive)),
+            Box::new(move || crate::control::run(s, rx, sched, interactive, attention)),
         )?);
     }
     let s = Arc::clone(&shared);
@@ -1644,6 +1676,12 @@ impl PipelineHandle {
     /// not open.
     pub fn attention(&self) -> Option<Arc<crate::attention::AttentionService>> {
         self.sup.common.attention.clone()
+    }
+
+    /// The run's novelty alarm service (T-131; `/api/anomalies`, the `anomalies` stream); `None`
+    /// when it could not open.
+    pub fn alarms(&self) -> Option<Arc<crate::alarms::AlarmService>> {
+        self.sup.common.alarms.clone()
     }
 
     /// The observation log (T-115), shared with `/api/observations`; `None` when it could not be

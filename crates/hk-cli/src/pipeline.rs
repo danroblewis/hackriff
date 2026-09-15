@@ -507,13 +507,18 @@ impl hk_api::recipes::RecipeControl for PipelineRecipes {
 pub struct PipelineAttention(pub Arc<hk_pipeline::attention::AttentionService>);
 
 /// T-122: the run's novelty alarm service behind `/api/anomalies*`, offering the `anomalies`
-/// stream. Dismissals use the engine's sample clock (stream time before any snapshot). T-128 moves
-/// construction next to the attention loop that calls `AlarmService::observe`.
+/// stream. Dismissals use the engine's sample clock (stream time before any snapshot). T-131: the
+/// run opens the service next to the attention loop that feeds it (`PipelineHandle::alarms`,
+/// offering the stream through the run's sink); this opens a read-only stand-in only when the
+/// run's service could not open.
 fn alarm_control(
     handle: &PipelineHandle,
     registry: &StreamRegistry,
     db: &Arc<Mutex<Repository>>,
 ) -> anyhow::Result<Arc<hk_pipeline::alarms::AlarmService>> {
+    if let Some(service) = handle.alarms() {
+        return Ok(service);
+    }
     let counters = handle.counters();
     let clock = Arc::new(move || {
         let ns = counters

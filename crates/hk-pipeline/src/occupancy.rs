@@ -174,6 +174,15 @@ pub struct OccupancyService {
     thread: Mutex<Option<JoinHandle<()>>>,
     /// T-128: the run's attention service, fed at each close.
     attention: Mutex<Option<Arc<crate::attention::AttentionService>>>,
+    /// T-131: the run's novelty alarm service and the feed cache (correlation context), fed with
+    /// each close's folds.
+    alarms: Mutex<Option<AlarmSlot>>,
+}
+
+/// T-131: the alarm service the occupancy thread feeds, with its feed cache.
+struct AlarmSlot {
+    service: Arc<crate::alarms::AlarmService>,
+    feeds: Option<(hk_context::Correlator, hk_context::FeedCache)>,
 }
 
 /// The T-115 observation log as a visit source (overload is not in its visits; §2.6 suspect
@@ -518,6 +527,7 @@ impl OccupancyService {
             stop: AtomicBool::new(false),
             thread: Mutex::new(None),
             attention: Mutex::new(None),
+            alarms: Mutex::new(None),
         })
     }
 
@@ -646,6 +656,92 @@ impl OccupancyService {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// T-131: feeds each close's baseline folds to `alarms` (with the device's provenance steps
+    /// and site/feed context). `feeds_dir` is the context-feed cache (staleness for correlation).
+    pub fn set_alarms(
+        &self,
+        alarms: Option<Arc<crate::alarms::AlarmService>>,
+        feeds_dir: Option<&std::path::Path>,
+    ) {
+        *self.alarms.lock().unwrap_or_else(PoisonError::into_inner) =
+            alarms.map(|service| AlarmSlot {
+                service,
+                feeds: feeds_dir.and_then(|d| {
+                    hk_context::FeedCache::open(d)
+                        .ok()
+                        .map(|c| (hk_context::Correlator::default(), c))
+                }),
+            });
+    }
+
+    /// T-131 (ADR-0012 §6.3, §7.4): the front-end provenance steps in `[start − lookback, end]`
+    /// from the history's tile provenance (gain steps carry their dB delta in the detail). The
+    /// steps are front-end wide, so one level-0 column at `at` is read, keeping the product lock
+    /// short.
+    fn device_steps(
+        &self,
+        at: f64,
+        f_cell: f64,
+        span: TimeRange,
+    ) -> Vec<hk_context::occupancy::alarm::DeviceStep> {
+        let history = {
+            let p = self.product.lock().unwrap_or_else(PoisonError::into_inner);
+            p.uncalibrated_pyramid()
+                .level0(FreqRange::new(at - 0.5 * f_cell, at + 0.5 * f_cell), span)
+        };
+        // The summary's sample-drop step is an aggregate count with no time of its own (stamped at
+        // the query's first frame), so any gap in the looked-back span would "explain" the whole
+        // interval. A drop removes observation (already out of the visit counts and `n_eff`); it
+        // does not shift levels or occupancy, so only timestamped front-end steps are passed.
+        history.map_or_else(Vec::new, |h| {
+            hk_context::report::steps_from_summary(&h.provenance, span)
+                .0
+                .iter()
+                .filter(|s| s.kind != hk_model::attention::report::ProvenanceStepKind::SampleDrop)
+                .map(hk_context::occupancy::alarm::DeviceStep::from_report)
+                .collect()
+        })
+    }
+
+    /// T-131: steps the alarm service with one close's folds.
+    fn feed_alarms(
+        &self,
+        folds: &[crate::attention::IntervalFold],
+        rows: &[OccupancyStat],
+        iv: TimeRange,
+        f_cell: f64,
+        geo: Option<hk_context::Site>,
+    ) {
+        if folds.is_empty() {
+            return;
+        }
+        let guard = self.alarms.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(slot) = guard.as_ref() else { return };
+        let states = slot
+            .feeds
+            .as_ref()
+            .and_then(|(c, cache)| c.feed_states(Some(cache)).ok())
+            .unwrap_or_default();
+        slot.service.set_context(geo, states);
+        let at = rows.iter().find_map(|r| match r.subject {
+            OccupancySubject::Band { freq } => Some(freq.center_hz()),
+            OccupancySubject::Channel { .. } => None,
+        });
+        let lookback_ns = (hk_context::occupancy::alarm::AlarmConfig::default()
+            .provenance_lookback_s
+            * 1e9) as i64;
+        let steps = at.map_or_else(Vec::new, |at| {
+            self.device_steps(
+                at,
+                f_cell,
+                TimeRange::new(iv.start.saturating_add_nanos(-lookback_ns), iv.end),
+            )
+        });
+        let service = Arc::clone(&slot.service);
+        drop(guard);
+        service.observe_interval(folds, &steps);
     }
 
     /// Inventory emitters first seen inside `iv` within the observed bands of `rows`.
@@ -827,11 +923,19 @@ impl OccupancyService {
         // inventory's first sightings feed the new-emitter rate, and candidates are re-scored.
         // This thread never touches samples. Gain-state key 0 (single/unknown): levels are above
         // the local floor, so a gain step moves floor and level together.
+        // T-131: rows carry the site assigned at the close (a pinned or fixed site accrues
+        // baselines; unassigned/mobile never do), and the folds step the novelty alarms with the
+        // history's provenance steps around the interval.
         if let Some(a) = self.attention() {
+            let (site, geo) = a.site_at(iv.end);
+            for r in &mut rows {
+                r.site = site;
+            }
             let own: Vec<OccupancyStat> =
                 rows.iter().filter(|r| r.interval == iv).cloned().collect();
             let k = self.first_sightings(inner, iv, &own);
-            a.ingest_interval(&own, k, iv.end, 0);
+            let folds = a.ingest_interval(&own, k, iv.end, 0);
+            self.feed_alarms(&folds, &own, iv, f_cell, geo);
         }
         match inner.store.as_mut().map(|s| s.append(&rows)) {
             Some(Ok(n)) => inner.stats.rows_written += n as u64,
