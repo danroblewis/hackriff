@@ -822,3 +822,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - a nextest LEAK flag.
 
   T-111 merges after the in-flight full check.
+- **B0.275 Full check of main c90b8c6 (POCSAG tutorial): green.** Lint clean; nextest + UI 1127/1127; acceptance 29/29 (2 ignored HIL) in 60 s, down from 100 s. **T-111 merged** (dc8be90). **T-112 launched** (decode ingest hardening). Full check covering T-111 running.

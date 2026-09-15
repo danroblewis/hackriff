@@ -1789,7 +1789,7 @@ tasks:
   - id: T-111
     milestone: M1
     title: "Recipe messages output ingests decodes into the Repository (like plugin decodes)"
-    status: review
+    status: done
     commit: dc8be90
     deps: [T-088, T-089]
     parallel_group: M1R
@@ -1804,7 +1804,7 @@ tasks:
   - id: T-112
     milestone: M1
     title: "Recipe/plugin decode ingest hardening (T-111 review follow-ups)"
-    status: todo
+    status: in-progress
     deps: [T-111]
     parallel_group: M1R
     use_cases: [SIGNAL-001, SIGNAL-062]
