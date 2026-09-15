@@ -101,3 +101,11 @@ retries = 1
 filter = 'test(p7_connect_close_flood_is_reaped_and_consumers_are_capped)'
 test-group = 'heavy-serial'
 retries = 1
+
+# Found flaky under load (full check after the M2 integration merge, 2026-09-15, load ~32): the bandit-on
+# mock-SDR e2e runs ~58 s against a paced replay; under load the pipeline logged only 6.8 s of bandit dwell
+# before its deadline. Passed 3/3 alone and in a full rerun. Serialize the binary and retry once.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(scheduler_bandit_e2e)'
+test-group = 'heavy-serial'
+retries = 1
