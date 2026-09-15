@@ -49,6 +49,7 @@ use std::time::Duration;
 use hk_context::{Correlator, FeedCache, FloorAnomalies, FloorAnomalyConfig, Site};
 use hk_core::ReadOutcome;
 use hk_detect::clip::is_clipped_ci8;
+use hk_detect::track::TrackSummary;
 use hk_detect::{
     BandProfile, BurstConfig, BurstDetector, ClipCount, Confirmation, DetectionProfile,
     DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, TrackBatch,
@@ -66,6 +67,14 @@ use crate::stats::{add, inc, set};
 
 /// Boxes and links older than this (stream time) are forgotten.
 const MEMORY_NS: i64 = 120_000_000_000;
+
+/// Open confirmed channel tracks are offered to the inventory at most this often, stream ns
+/// (T-109).
+const LIVE_OFFER_NS: i64 = 5_000_000_000;
+
+/// Bursts an open track needs before it is offered live (T-109): a repeating emitter, not a
+/// one-off or a continuous carrier (those enter at close, as before).
+const LIVE_MIN_BURSTS: u64 = 4;
 /// Batches the writer queue holds.
 pub(crate) const WRITER_QUEUE: usize = 8;
 /// Retry period for failed writes (and queued trust verdicts) while no batch arrives.
@@ -102,6 +111,8 @@ struct WriteBatch {
     detections: Vec<DetectionRecord>,
     tracks: TrackBatch,
     closed: Vec<TrackEvent>,
+    /// Open confirmed channel tracks offered to the inventory before they close (T-109).
+    live: Vec<TrackSummary>,
     floor: Vec<FloorEvent>,
     now_ns: i64,
     capture_name: Option<String>,
@@ -120,6 +131,7 @@ impl WriteBatch {
         self.detections.is_empty()
             && self.tracks.is_empty()
             && self.closed.is_empty()
+            && self.live.is_empty()
             && self.floor.is_empty()
             && self.capture_name.is_none()
     }
@@ -129,6 +141,7 @@ impl WriteBatch {
             mut detections,
             tracks,
             mut closed,
+            live,
             mut floor,
             now_ns,
             capture_name,
@@ -136,6 +149,10 @@ impl WriteBatch {
         self.detections.append(&mut detections);
         merge_tracks(&mut self.tracks, tracks);
         self.closed.append(&mut closed);
+        if !live.is_empty() {
+            // Only the newest offer matters: each summary supersedes the older one of its track.
+            self.live = live;
+        }
         self.floor.append(&mut floor);
         self.now_ns = self.now_ns.max(now_ns);
         if capture_name.is_some() {
@@ -242,6 +259,7 @@ struct DetectNode {
     tracks: HashMap<TrackId, TrackState>,
     links_seen: usize,
     last_flush_ns: Option<i64>,
+    live_offered_ns: Option<i64>,
     now_ns: i64,
     segments: u64,
     segment_start: Timestamp,
@@ -293,6 +311,7 @@ impl DetectNode {
             tracks: HashMap::new(),
             links_seen: 0,
             last_flush_ns: None,
+            live_offered_ns: None,
             now_ns: 0,
             segments: 0,
             segment_start: Timestamp::UNIX_EPOCH,
@@ -562,10 +581,28 @@ impl DetectNode {
         } else {
             Vec::new()
         };
+        // T-109: a channel that keeps keying (a pager net, a repeating beacon) never idles out, so
+        // its track would reach the inventory only when the run stops. Offer open confirmed
+        // channel tracks with a few bursts every `LIVE_OFFER_NS`; the sighting is keyed by the
+        // track, so a re-offer (and the final close) adds only new bursts.
+        let live = if self.namer.named()
+            && !self.finishing
+            && self
+                .live_offered_ns
+                .is_none_or(|t| self.now_ns - t >= LIVE_OFFER_NS)
+        {
+            self.live_offered_ns = Some(self.now_ns);
+            let mut live = self.tracker.summaries();
+            live.retain(|s| s.burst_count >= LIVE_MIN_BURSTS);
+            live
+        } else {
+            Vec::new()
+        };
         let batch = WriteBatch {
             detections: std::mem::take(&mut self.pending),
             tracks: std::mem::take(&mut self.batch),
             closed,
+            live,
             floor: std::mem::take(&mut self.pending_floor),
             now_ns: self.now_ns,
             capture_name: self.namer.take(),
@@ -654,6 +691,7 @@ struct Writer {
     pending: Vec<DetectionRecord>,
     tracks: TrackBatch,
     closed: Vec<TrackEvent>,
+    live: Vec<TrackSummary>,
     floor: Vec<FloorEvent>,
     anomalies: Option<FloorAnomalies>,
     correlator: Option<(Correlator, FeedCache)>,
@@ -689,6 +727,7 @@ impl Writer {
             pending: Vec::new(),
             tracks: TrackBatch::new(),
             closed: Vec::new(),
+            live: Vec::new(),
             floor: Vec::new(),
             anomalies,
             correlator,
@@ -702,6 +741,7 @@ impl Writer {
             detections,
             tracks,
             closed,
+            live,
             floor,
             now_ns,
             capture_name,
@@ -716,6 +756,9 @@ impl Writer {
         self.pending.extend(detections);
         merge_tracks(&mut self.tracks, tracks);
         self.closed.extend(closed);
+        if !live.is_empty() {
+            self.live = live;
+        }
         self.floor.extend(floor);
         self.now_ns = self.now_ns.max(now_ns);
     }
@@ -725,6 +768,7 @@ impl Writer {
             || self.detections.pending() > 0
             || !self.tracks.is_empty()
             || !self.closed.is_empty()
+            || !self.live.is_empty()
             || !self.floor.is_empty()
     }
 
@@ -773,13 +817,18 @@ impl Writer {
                         false
                     }
                 };
-            if tracks_stored && !self.closed.is_empty() {
+            if tracks_stored && !(self.closed.is_empty() && self.live.is_empty()) {
                 let mut inv = shared
                     .inventory
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 for e in self.closed.drain(..) {
                     if inv.track_event(&mut repo, &e).is_err() {
+                        inc(&dc.db_errors);
+                    }
+                }
+                for s in self.live.drain(..) {
+                    if inv.live_track(&mut repo, &s).is_err() {
                         inc(&dc.db_errors);
                     }
                 }

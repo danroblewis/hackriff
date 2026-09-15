@@ -467,6 +467,7 @@ POCSAG_DEFAULTS: dict[str, Any] = {
     "snr_db": 22.0,
     "noise_dbfs": -40.0,
     "start_s": 0.05,
+    "start_offsets_s": [0.0, 0.0, 0.0],  # per-channel key-up after start_s (missing = 0)
     "margin_s": 0.05,
     "channel_offsets_hz": [-40e3, 0.0, 40e3],
     "bauds_bd": [512.0, 1200.0, 2400.0],
@@ -490,7 +491,13 @@ def pocsag_pagers(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     if not (len(bauds) == len(rics) == len(functions) == len(messages) == n_ch):
         raise ValueError("channel_offsets_hz, bauds_bd, rics, functions and messages must have the same length")
     dev = float(p["deviation_hz"])
-    start = float(p["start_s"])
+    # Per-channel key-up offsets after start_s (T-109): independent pager channels key up at their
+    # own times; a simulcast pair shares one. Missing entries are 0 (all channels together).
+    offsets_s = [float(v) for v in p["start_offsets_s"]]
+    if any(v < 0 for v in offsets_s) or any(v != 0 for v in offsets_s[n_ch:]):
+        raise ValueError("start_offsets_s: at most one non-negative offset per channel")
+    offsets_s = (offsets_s + [0.0] * n_ch)[:n_ch]
+    starts = [float(p["start_s"]) + v for v in offsets_s]
 
     channels = []
     for i in range(n_ch):
@@ -498,7 +505,7 @@ def pocsag_pagers(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                     else pocsag.encode_alpha(messages[i]))
         bits = pocsag.build_bits(rics[i], functions[i], codewords)
         channels.append({"bits": bits, "codewords": codewords, "duration_s": len(bits) / bauds[i]})
-    total_s = start + max(c["duration_s"] for c in channels) + float(p["margin_s"])
+    total_s = max(starts[i] + c["duration_s"] for i, c in enumerate(channels)) + float(p["margin_s"])
     scene = ctx.scene("pocsag_pagers", fs, int(round(total_s * fs)),
                       "hkpy.synth pocsag_pagers: multi-channel 2-FSK POCSAG (512/1200/2400 Bd), "
                       "BCH(31,21)+parity, numeric and alphanumeric messages")
@@ -516,7 +523,7 @@ def pocsag_pagers(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         amp = math.sqrt(undb(power))
         phase0 = float(scene.rng("phase", i).uniform(0, 2 * math.pi))
         iq = fsk.cpfsk(1 - bits, fs, baud, dev, bt=0.0, phase0=phase0)  # invert: POCSAG bit1 -> -dev
-        s0 = int(round(start * fs))
+        s0 = int(round(starts[i] * fs))
         tt = scene.time(s0, len(iq))
         scene.add_samples(s0, amp * iq * np.exp(2j * math.pi * off * tt))
         f = cap.center_hz + off

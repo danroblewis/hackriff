@@ -857,6 +857,55 @@ fn independent_periodic_emitters_on_one_raster_do_not_form_a_hop_set() {
     }
 }
 
+#[test]
+fn close_packed_co_keyed_channels_stay_separate_emitters_not_a_hop_set() {
+    // T-109 (SIGNAL-062 pager net): four close-packed narrowband channels (spacing ≈ 3× occupied
+    // width) keyed together, repeating with a short off-gap. Each cycle's burst on one channel ends
+    // just before the next cycle's burst on another starts, which looks like a contiguous hop, but
+    // a hopper is on one channel at a time: these channels were on *simultaneously*, so they are
+    // four emitters, never one hop set (which the inventory would fold into one wide row).
+    let fc = 915e6;
+    let chans: Vec<f64> = (0..4).map(|k| fc - 240e3 + k as f64 * 160e3).collect();
+    let mut packets = Vec::new();
+    let mut t = 0.03;
+    while t < 2.4 {
+        for c in 0..chans.len() {
+            packets.push((t, 0.3, c));
+        }
+        t += 0.35;
+    }
+    let (tr, out) = run_packets(fc, &chans, &packets, 2.5, 109);
+    let formed = out
+        .events
+        .iter()
+        .filter(|e| matches!(e, TrackEvent::HopSetFormed(_)))
+        .count();
+    let closed = out.closed();
+    for t in &closed {
+        eprintln!("co-keyed: {}", out.describe(t));
+    }
+    eprintln!("co-keyed: stats {:?}", tr.stats());
+    assert_eq!(formed, 0, "co-keyed channels form no hop set");
+    assert_eq!(closed.len(), chans.len(), "one track per channel");
+    for (k, &f) in chans.iter().enumerate() {
+        let t = closed
+            .iter()
+            .find(|t| (t.track.f_center_hz - f).abs() < 20e3)
+            .unwrap_or_else(|| panic!("channel {k} has its own track"));
+        assert!(t.hop_set.is_none(), "channel {k} is not a hop-set member");
+        assert!(t.burst_count >= 6, "channel {k} bursts {}", t.burst_count);
+    }
+    assert_eq!(
+        tr.stats().hop_links,
+        0,
+        "no hop links between co-keyed channels"
+    );
+    assert!(
+        tr.stats().hop_concurrent_vetoes > 0,
+        "the cycle-to-cycle abutments were vetoed"
+    );
+}
+
 // ---- two close emitters ----
 
 fn test_repo() -> (Repository, SurveyId) {

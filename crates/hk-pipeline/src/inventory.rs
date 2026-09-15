@@ -56,7 +56,7 @@ use hk_detect::track::TrackSummary;
 use hk_detect::track::inventory::{hop_set_sighting, track_sighting};
 use hk_model::{
     EmitterId, IdentityScheme, LifecycleAuthor, LifecycleState, MeasurementKey, RepoError,
-    Repository, Tolerances, TrackId,
+    Repository, Sighting, Tolerances, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,6 +96,16 @@ pub trait Inventory: Send {
         _repo: &mut Repository,
         _track: Option<TrackId>,
         _emitter: EmitterId,
+    ) -> Result<(), RepoError> {
+        Ok(())
+    }
+
+    /// An open, confirmed channel track whose Track row is stored, offered before it closes
+    /// (T-109: a channel that never idles out would otherwise enter the inventory only at stop).
+    fn live_track(
+        &mut self,
+        _repo: &mut Repository,
+        _summary: &TrackSummary,
     ) -> Result<(), RepoError> {
         Ok(())
     }
@@ -379,6 +389,48 @@ impl Inventory for TrackInventory {
         let Some(sighting) = sighting else {
             return Ok(());
         };
+        self.offer(repo, &sighting, trust)
+    }
+
+    fn live_track(
+        &mut self,
+        repo: &mut Repository,
+        summary: &TrackSummary,
+    ) -> Result<(), RepoError> {
+        if summary.closed.is_some() {
+            return Ok(());
+        }
+        let Some(mut sighting) = track_sighting(summary) else {
+            return Ok(());
+        };
+        sighting.classification = track_family(summary).classification(sighting.seen.end);
+        // No auto-confirmation on a partial life: the close re-offers with the full evidence.
+        self.offer(repo, &sighting, None)
+    }
+
+    fn chain_emitter(
+        &mut self,
+        repo: &mut Repository,
+        _track: Option<TrackId>,
+        emitter: EmitterId,
+    ) -> Result<(), RepoError> {
+        let id = self.link(repo, emitter)?;
+        if let Some(table) = &self.table {
+            explain_emitter(repo, table, id)?;
+        }
+        self.review(repo, id, None)
+    }
+}
+
+impl TrackInventory {
+    /// Records a track or hop-set sighting, links it and reviews its lifecycle.
+    fn offer(
+        &mut self,
+        repo: &mut Repository,
+        sighting: &Sighting,
+        trust: Option<TrackTrust>,
+    ) -> Result<(), RepoError> {
+        let sighting = sighting.clone();
         let r = match &self.capture {
             Some(capture) => {
                 let key = MeasurementKey {
@@ -397,24 +449,89 @@ impl Inventory for TrackInventory {
         }
         self.review(repo, id, trust)
     }
-
-    fn chain_emitter(
-        &mut self,
-        repo: &mut Repository,
-        _track: Option<TrackId>,
-        emitter: EmitterId,
-    ) -> Result<(), RepoError> {
-        let id = self.link(repo, emitter)?;
-        if let Some(table) = &self.table {
-            explain_emitter(repo, table, id)?;
-        }
-        self.review(repo, id, None)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hk_detect::track::CloseCause;
+    use hk_model::{InventoryQuery, TimeRange, Timestamp, TimingFeatures, Track, TrackState};
+
+    fn channel_summary(
+        id: TrackId,
+        end_s: i64,
+        bursts: u64,
+        closed: Option<CloseCause>,
+    ) -> TrackSummary {
+        let t0 = Timestamp::from_unix_nanos(1_000_000_000);
+        TrackSummary {
+            track: Track {
+                id,
+                state: if closed.is_some() {
+                    TrackState::Closed
+                } else {
+                    TrackState::Open
+                },
+                split_from: None,
+                time: TimeRange::new(t0, Timestamp::from_unix_nanos(end_s * 1_000_000_000)),
+                f_center_hz: 152.342e6,
+                bandwidth_hz: 12e3,
+                detection_count: bursts,
+                timing: TimingFeatures::default(),
+                updated_at: t0,
+            },
+            burst_count: bursts,
+            on_time_s: 0.9 * bursts as f64,
+            observed_s: bursts as f64,
+            period: None,
+            burst_length: None,
+            inter_arrival_cv: None,
+            segments: 0,
+            hop_set: None,
+            inband_fragment: false,
+            suspect_fraction: 0.0,
+            confirmed_detections: bursts,
+            next_burst_eta: None,
+            closed,
+        }
+    }
+
+    #[test]
+    fn t109_live_channel_track_enters_the_inventory_before_close_without_double_counting() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let id = TrackId::new();
+        let rows = |repo: &Repository| {
+            repo.query_inventory(&InventoryQuery::default())
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|e| (e.emitter.id, e.emitter.count))
+                .collect::<Vec<_>>()
+        };
+        // A repeating channel still open after 5 bursts is catalogued now, not at stop.
+        inv.live_track(&mut repo, &channel_summary(id, 6, 5, None))
+            .unwrap();
+        let first = rows(&repo);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].1, 5);
+        // Re-offers and the final close of the same track add only the new bursts, to one row.
+        inv.live_track(&mut repo, &channel_summary(id, 11, 10, None))
+            .unwrap();
+        let closed = channel_summary(id, 13, 12, Some(CloseCause::Idle));
+        inv.track_event(&mut repo, &TrackEvent::Closed(closed.clone()))
+            .unwrap();
+        let last = rows(&repo);
+        assert_eq!(
+            last,
+            vec![(first[0].0, 12)],
+            "one emitter, counted once per burst"
+        );
+        // A closed summary is never offered as live.
+        let other = channel_summary(TrackId::new(), 13, 12, Some(CloseCause::Idle));
+        inv.live_track(&mut repo, &other).unwrap();
+        assert_eq!(rows(&repo).len(), 1);
+    }
 
     fn steady() -> TrackTrust {
         TrackTrust {

@@ -65,6 +65,9 @@ pub struct TrackerStats {
     pub hop_sets_formed: u64,
     /// Hop links between bursts separated by silence (included in `hop_links`).
     pub bursty_hop_links: u64,
+    /// Contiguous hop candidates vetoed because the two channels were keyed at the same time
+    /// (T-109: a hopper is on one channel at a time; co-keyed channels are separate emitters).
+    pub hop_concurrent_vetoes: u64,
     /// Hop-set raster fits run (T-064: formation, channel-set changes, merges, closing).
     pub hop_raster_fits: u64,
     /// Closed hop-set members dropped (T-064: superseded on their channel, or over the cap).
@@ -1513,6 +1516,16 @@ impl Tracker {
             {
                 continue;
             }
+            // T-109: a hopper is on one channel at a time. When this track was also keyed during
+            // `e` (or `e`'s track during `c`), the abutment is two co-keyed emitters repeating (a
+            // pager net's channels keying together), not a hop.
+            let tol = (h.gap_frames * c.frame_ns as f64) as i64;
+            if self.keyed_during(s.id, c.t0, e.t0, e.t1, tol)
+                || self.keyed_during(e.track, e.t0, c.t0, c.t1, tol)
+            {
+                self.stats.hop_concurrent_vetoes += 1;
+                continue;
+            }
             if best.is_none_or(|(_, g)| gap.abs() < g) {
                 best = Some((*e, gap.abs()));
             }
@@ -1540,6 +1553,15 @@ impl Tracker {
             self.stats.bursty_hop_links += 1;
             self.hop_link(e.slot, i, c.t0 - e.t0, e.t0, c.t1, false, out);
         }
+    }
+
+    /// Whether a recent burst of `track` other than the one starting at `own_t0` overlaps
+    /// `t0..t1` by more than `tol` (T-109 concurrency veto for contiguous hop links).
+    fn keyed_during(&self, track: TrackId, own_t0: i64, t0: i64, t1: i64, tol: i64) -> bool {
+        self.recent
+            .iter()
+            .flatten()
+            .any(|r| r.track == track && r.t0 != own_t0 && r.t0 < t1 - tol && t0 < r.t1 - tol)
     }
 
     /// Bursts separated by silence: `x`'s nearest similar predecessor `e` on another channel,

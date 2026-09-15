@@ -683,6 +683,45 @@ def test_multimon_ng_decodes_pocsag_pages(tmp_path):
         assert expect in out.replace("\x00", "").replace("<NUL>", "")
 
 
+#: The M1 tutorial 2 pager net (tests/e2e/tests/acceptance/tutorial_pocsag.rs, T-109): 25 kHz
+#: raster, staggered key-ups with channels 1 and 3 simulcast, all 1200 Bd.
+POCSAG_TUTORIAL_NET = {
+    "center_hz": 152.36e6, "sample_rate": 132300.0,
+    "channel_offsets_hz": [-50e3, -25e3, 25e3, 50e3], "bauds_bd": [1200.0] * 4,
+    "start_offsets_s": [0.0, 0.21, 0.37, 0.21],
+    "rics": [1234560, 1876544, 654320, 1876544], "functions": [0, 3, 3, 3],
+    "messages": ["911234", "STANDBY AT GATE 12", "HACKRIFF PAGE TEST", "STANDBY AT GATE 12"],
+}
+
+
+@pytest.mark.skipif(shutil.which("multimon-ng") is None, reason="multimon-ng not installed")
+def test_multimon_ng_decodes_the_tutorial_pager_net_per_channel(tmp_path):
+    """Oracle (T-109): multimon-ng on the tutorial's own IQ, whole recording, one channel at a time."""
+    _, meta, x = load(gen(tmp_path, "pocsag_pagers", seed=95, **POCSAG_TUTORIAL_NET))
+    fs = meta["global"]["core:sample_rate"]
+    factor = int(round(fs / 22050))
+    tt = np.arange(len(x)) / fs
+    pages = truths(meta, kind="pocsag-page")
+    assert len(pages) == 4
+    starts = sorted({ann["core:sample_start"] for ann, _ in pages})
+    assert len(starts) == 3, "independent key-ups, simulcast pair together"
+    for _, t in pages:
+        seg = np.convolve(x * np.exp(-2j * math.pi * t["offset_hz"] * tt),
+                          signal.firwin(401, 6000, fs=fs), mode="same")
+        inst = np.angle(seg[1:] * np.conj(seg[:-1])) * fs / (2 * math.pi)
+        audio = signal.decimate(inst, factor, ftype="fir")
+        raw = tmp_path / f"net_{t['offset_hz']:.0f}.raw"
+        np.clip(audio / t["deviation_hz"] * 20000, -32000, 32000).astype("<i2").tofile(raw)
+        res = subprocess.run(["multimon-ng", "-t", "raw", "-a", "POCSAG1200", "-e", str(raw)],
+                             capture_output=True, text=True, timeout=30)
+        out = (res.stdout + res.stderr).replace("\x00", "").replace("<NUL>", "")
+        lines = [ln for ln in out.splitlines() if ln.startswith("POCSAG1200:")]
+        assert len(lines) == 1, f"one page on channel {t['offset_hz']}: {lines}"
+        assert f"Address: {t['ric']:>7}" in lines[0]
+        assert f"Function: {t['function']}" in lines[0]
+        assert t["message_text"].strip() in lines[0]
+
+
 # ---- ACARS (T-098, M1 tutorial 3; synthetic, not oracle-validated -- see hkpy.synth.acars) -------
 
 

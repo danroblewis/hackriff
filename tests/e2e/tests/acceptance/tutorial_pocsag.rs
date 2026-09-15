@@ -54,7 +54,9 @@ const LIMIT: Duration = Duration::from_secs(600);
 /// alphanumeric) and one message simulcast on channels 1 and 3, all 1200 Bd.
 const CENTER_HZ: f64 = 152.360e6;
 const SAMPLE_RATE_HZ: f64 = 132_300.0;
-const OFFSETS_HZ: [f64; 4] = [-55_000.0, -18_000.0, 20_000.0, 57_000.0];
+/// A 25 kHz raster (T-109): every channel's 16 kHz recipe DDC fits the usable ±0.49 fs window
+/// (T-095's +57 kHz channel reached +65.1 kHz, past it, and the start was refused).
+const OFFSETS_HZ: [f64; 4] = [-50_000.0, -25_000.0, 25_000.0, 50_000.0];
 const RICS: [u64; 4] = [1_234_560, 1_876_544, 654_320, 1_876_544];
 const FUNCTIONS: [u64; 4] = [0, 3, 3, 3];
 const MESSAGES: [&str; 4] = [
@@ -65,6 +67,11 @@ const MESSAGES: [&str; 4] = [
 ];
 /// Channels 1 and 3 carry the same RIC and message: a simulcast pair for `follow_hops` dedupe.
 const SIMULCAST: (usize, usize) = (1, 3);
+/// A decode's channel tag (the blind lane centre) must be within this of its channel, Hz.
+const TAG_TOL_HZ: f64 = 3_000.0;
+/// Per-channel key-up offsets (s): independent channels key at their own times, the simulcast
+/// pair together (T-109: a real net never keys every channel in lockstep).
+const START_OFFSETS_S: [f64; 4] = [0.0, 0.21, 0.37, 0.21];
 
 // --- API wiring (as `serve()` in tutorial_rds.rs / tutorial_01) --------------------------------
 
@@ -233,7 +240,16 @@ fn frames(records: &[Value]) -> Vec<Frame> {
                 .get("numeric")
                 .or_else(|| values.get("alpha"))
                 .and_then(Value::as_str)
-                .map(|s| s.trim_end_matches('\u{0}').trim_end().to_owned());
+                .map(|s| {
+                    // POCSAG pads an alphanumeric message's last codeword with NUL characters; the
+                    // ascii field renders a control byte as a `\x00` escape.
+                    let mut s = s.trim_end();
+                    while let Some(t) = s.strip_suffix("\\x00").or_else(|| s.strip_suffix('\u{0}'))
+                    {
+                        s = t.trim_end();
+                    }
+                    s.to_owned()
+                });
             Frame {
                 sample_index: v["metadata"]["sample_index"].as_u64().unwrap_or(0),
                 channel: v["metadata"]["channel"].as_u64().unwrap_or(0) as u16,
@@ -338,7 +354,19 @@ fn start_pocsag(s: &Served, band: (f64, f64)) -> (String, Value) {
             "target": {"band": {"f_lo": band.0, "f_hi": band.1}},
         })),
     );
-    assert_eq!(code, 201, "[{TAG}] start: {p}");
+    if code != 201 {
+        let (_, rows) = api_inventory(s.addr());
+        panic!(
+            "[{TAG}] start: {code} {p}; inventory (MHz, kHz, count): {:?}",
+            rows.iter()
+                .map(|r| (
+                    r["f_center_hz"].as_f64().unwrap_or(0.0) / 1e6,
+                    r["bandwidth_hz"].as_f64().unwrap_or(0.0) / 1e3,
+                    r["count"].as_u64().unwrap_or(0)
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
     assert_eq!(p["state"], json!("running"), "[{TAG}] {p}");
     eprintln!(
         "[{TAG}] pipeline {}: follow_hops {}",
@@ -356,22 +384,22 @@ fn multimon_oracle() -> Option<bool> {
         eprintln!("[{TAG}] SKIP oracle: multimon-ng not installed");
         return None;
     }
-    let root = hk_e2e::paths::repo_root();
     let py = hk_e2e::paths::py_project();
+    // pytest resolves the test path from the py project (where `tests/` lives), not the repo root.
     let out = Command::new("uv")
-        .current_dir(&root)
+        .current_dir(&py)
         .args(["run", "--locked", "--quiet", "--project"])
         .arg(&py)
         .args([
             "pytest",
             "-q",
-            "tests/test_synth.py::test_multimon_ng_decodes_pocsag_pages",
+            "tests/test_synth.py::test_multimon_ng_decodes_the_tutorial_pager_net_per_channel",
         ])
         .output();
     match out {
         Ok(o) => {
             eprintln!(
-                "[{TAG}] multimon-ng oracle (py/tests/test_synth.py, T-098 scenario): {}\n{}{}",
+                "[{TAG}] multimon-ng oracle (py/tests/test_synth.py, this tutorial's net per channel): {}\n{}{}",
                 if o.status.success() { "PASS" } else { "FAIL" },
                 String::from_utf8_lossy(&o.stdout),
                 String::from_utf8_lossy(&o.stderr)
@@ -387,22 +415,12 @@ fn multimon_oracle() -> Option<bool> {
 
 // --- The test --------------------------------------------------------------------------------
 
-// T-095 (measured 2026-09-15, follow-up tracked): the follow_hops recipe and the POCSAG chain
-// (fsk_demod -> clock_recovery -> sync_search -> bch -> assemble -> fields) are wired and pass
-// `cargo check`/`clippy`, but blind detection does not resolve this scene's four simultaneous
-// same-instant channels into four inventory emitters -- only 1/4 was found blind, the other three
-// merged into two wide clusters (152.36118 MHz/118.14 kHz and 152.39857 MHz/49.04 kHz spanning
-// several channels each). `follow_hops`'s "detections" channel source (crates/hk-pipeline/src/
-// recipes/hops.rs::resolve_channels) then never gets a usable 4-channel set, so the run never
-// reaches the decode assertions. Root cause not yet isolated (candidates: the emitter
-// clustering/hop-set linker treating four ~10 kHz bursts starting at the same instant 35-38 kHz
-// apart as one wideband event; or the scene's identical start_s across channels). Ignored pending
-// that follow-up so `just acceptance` stays green; see the T-095 report for reproduction.
+// T-109: T-095 found only 1/4 channels blind. Root cause: the tracker's contiguous hop rule
+// (`hk_detect::track::Tracker::hop_check`) linked each loop's burst on one channel to the next
+// loop's burst on another (they abut), forming a hop set whose inventory row (118 kHz wide) hid
+// the four channel tracks. Fixed with a concurrency veto (a hopper is on one channel at a time);
+// see `close_packed_co_keyed_channels_stay_separate_emitters_not_a_hop_set` in hk-detect.
 #[test]
-#[ignore = "T-095 follow-up: blind detection merges the 4 simultaneous pocsag_pagers channels \
-            into 2 wide clusters instead of resolving them; only 1/4 found blind (measured \
-            2026-09-15). Run manually with `cargo test -p hk-e2e --test acceptance_m0 \
-            tutorial_pocsag -- --ignored --nocapture` once the detector/scene issue is fixed."]
 fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcast() {
     let fx = match SynthRequest::new("pocsag_pagers")
         .seed(95)
@@ -417,6 +435,14 @@ fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcas
                 .join(","),
         )
         .param("bauds_bd", "1200,1200,1200,1200")
+        .param(
+            "start_offsets_s",
+            START_OFFSETS_S
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        )
         .param(
             "rics",
             RICS.iter()
@@ -452,9 +478,10 @@ fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcas
     let n = fx.n_samples().unwrap();
 
     let s = serve(&fx.meta_path, "t095-pocsag");
+    // The usable tuned window (a DDC target must sit inside ±0.49 fs), never a channel list.
     let band = (
-        CENTER_HZ - SAMPLE_RATE_HZ / 2.0,
-        CENTER_HZ + SAMPLE_RATE_HZ / 2.0,
+        CENTER_HZ - 0.49 * SAMPLE_RATE_HZ,
+        CENTER_HZ + 0.49 * SAMPLE_RATE_HZ,
     );
     let refs: Vec<&TruthItem> = truth.clone();
     found_blind_all(s.addr(), &refs);
@@ -483,11 +510,17 @@ fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcas
         valid.len()
     );
 
-    // Every channel's message: found, tagged with its channel, RIC and function correct.
-    for (i, t) in truth.iter().enumerate() {
+    // Every channel's message: found, tagged with its channel, RIC and function correct. Truth items
+    // come in annotation (key-up) order, not channel order: each names its own channel offset.
+    for t in &truth {
         let want_ric = t.f64("ric").unwrap() as u64;
         let want_function = t.f64("function").unwrap() as u64;
         let want_text = t.str("message_text").unwrap();
+        let off = t.f64("offset_hz").unwrap();
+        let i = OFFSETS_HZ
+            .iter()
+            .position(|o| (o - off).abs() < 1.0)
+            .unwrap_or_else(|| panic!("[{TAG}] truth offset {off} is not a scene channel"));
         let want_hz = CENTER_HZ + OFFSETS_HZ[i];
         let matches: Vec<&&Frame> = valid
             .iter()
@@ -506,8 +539,10 @@ fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcas
         if i != SIMULCAST.0 && i != SIMULCAST.1 {
             // A non-simulcast channel: every decode is tagged with its own channel.
             for f in &matches {
+                // The lane centre is the blind detection's, not the truth's: it must be this
+                // channel's lane (well under half the 25 kHz spacing), not an exact frequency.
                 assert!(
-                    (f.channel_hz - want_hz).abs() < 1.0,
+                    (f.channel_hz - want_hz).abs() < TAG_TOL_HZ,
                     "[{TAG}] channel {i} decode tagged {} Hz, want {want_hz} Hz",
                     f.channel_hz
                 );
@@ -519,10 +554,18 @@ fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcas
     // per net loop (never twice), tagged with one of the two channels it was sent on, and its
     // `dups` counter shows the duplicate was actually removed (not just one channel silent).
     let (a, b) = SIMULCAST;
-    let sim_ric = truth[a].f64("ric").unwrap() as u64;
-    let sim_text = truth[a].str("message_text").unwrap();
-    assert_eq!(sim_ric, truth[b].f64("ric").unwrap() as u64);
-    assert_eq!(sim_text, truth[b].str("message_text").unwrap());
+    let (sim_ric, sim_text) = (RICS[a], MESSAGES[a]);
+    assert_eq!((sim_ric, sim_text), (RICS[b], MESSAGES[b]));
+    assert!(
+        truth
+            .iter()
+            .filter(
+                |t| t.f64("ric") == Some(sim_ric as f64) && t.str("message_text") == Some(sim_text)
+            )
+            .count()
+            == 2,
+        "[{TAG}] the hidden truth carries the simulcast pair"
+    );
     let sim_hz = [CENTER_HZ + OFFSETS_HZ[a], CENTER_HZ + OFFSETS_HZ[b]];
     let sim_frames: Vec<&Frame> = valid
         .iter()
@@ -535,7 +578,9 @@ fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcas
     );
     for f in &sim_frames {
         assert!(
-            sim_hz.iter().any(|&hz| (f.channel_hz - hz).abs() < 1.0),
+            sim_hz
+                .iter()
+                .any(|&hz| (f.channel_hz - hz).abs() < TAG_TOL_HZ),
             "[{TAG}] simulcast decode tagged {} Hz, want one of {sim_hz:?}",
             f.channel_hz
         );
@@ -555,12 +600,26 @@ fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcas
     assert!(dups >= 1.0, "[{TAG}] follow_hops dups counted: {status}");
 
     // BCH / CRC stats.
-    let (ok, bad) = (
-        status["bch.words_ok"].as_f64().unwrap_or(0.0)
-            + status["bch.words_corrected"].as_f64().unwrap_or(0.0),
-        status["bch.words_bad"].as_f64().unwrap_or(0.0),
+    // Upstream stage status is per lane (`ch<k>.bch.*`): sum it over the followed channels.
+    let lanes = |key: &str| -> f64 {
+        status
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(k, _)| k.starts_with("ch") && k.ends_with(&format!(".bch.{key}")))
+            .filter_map(|(_, v)| v.as_f64())
+            .sum()
+    };
+    let (ok, corrected_words, bad) = (
+        lanes("words_ok"),
+        lanes("words_corrected"),
+        lanes("words_bad"),
     );
-    let corrected = status["bch.corrected_bits"].as_f64().unwrap_or(0.0);
+    let corrected = lanes("corrected_bits");
+    assert!(
+        ok + corrected_words > 0.0 && bad <= 0.05 * (ok + corrected_words),
+        "[{TAG}] BCH words ok {ok} corrected {corrected_words} bad {bad}: {status}"
+    );
     eprintln!(
         "[{TAG}] RESULT {} frames, {} CRC-valid; BCH words ok+corrected {ok} bad {bad} \
          (corrected bits {corrected}); follow_hops dups {dups}",
