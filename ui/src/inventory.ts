@@ -20,7 +20,7 @@ export interface Row {
   recurrence: Recurrence | null;
 }
 interface Page { entries: Row[]; next_cursor: string | null }
-type Key = "status" | "freq" | "bw" | "family" | "identity" | "count" | "tags";
+type Key = "status" | "freq" | "bw" | "family" | "identity" | "count" | "recurrence" | "tags";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const val = (id: string) => $<HTMLInputElement>(id).value.trim();
@@ -33,12 +33,39 @@ export function rowListenTarget(r: Pick<Row, "id" | "f_center_hz">): { emitter: 
   return { emitter: r.id, label: `${(r.f_center_hz / 1e6).toFixed(4)} MHz` };
 }
 
-const sortValue: Record<Key, (r: Row) => number | string> = {
+/** A sort key's value for one row; `null` means the field is absent, which [[sortRows]] always
+ * places last regardless of direction. */
+const sortValue: Record<Key, (r: Row) => number | string | null> = {
   status: (r) => STATUS_ORDER[r.known_status] ?? 3,
   freq: (r) => r.f_center_hz, bw: (r) => r.bandwidth_hz, family: (r) => r.family ?? "",
   identity: (r) => `${r.identity_scheme ?? ""} ${identityText(r)}`,
-  count: (r) => r.count, tags: (r) => r.tags.join(","),
+  count: (r) => r.count, recurrence: (r) => r.recurrence?.occurrences ?? null,
+  tags: (r) => r.tags.join(","),
 };
+
+export interface SortState { key: Key; dir: 1 | -1 }
+
+/** First-click direction per column: busiest/most-recurring first for count and recurrence,
+ * ascending for everything else (frequency low-to-high, text A-to-Z). */
+const DEFAULT_DIR: Partial<Record<Key, 1 | -1>> = { count: -1, recurrence: -1 };
+
+/** Click-to-sort transition: clicking the already-active column toggles its direction; clicking a
+ * different column switches to it at that column's default direction. Pure so header-click
+ * behaviour is unit-tested without a DOM. */
+export function nextSort(current: SortState, key: Key): SortState {
+  return { key, dir: current.key === key ? ((-current.dir) as 1 | -1) : (DEFAULT_DIR[key] ?? 1) };
+}
+
+/** Sorts rows by `key`/`dir`. A row missing the field (`null`) always sorts last, in either
+ * direction. Pure so ordering is unit-tested without a DOM. */
+export function sortRows(rows: readonly Row[], key: Key, dir: 1 | -1): Row[] {
+  const f = sortValue[key];
+  return [...rows].sort((a, b) => {
+    const x = f(a), y = f(b);
+    if (x === null || y === null) return x === y ? 0 : x === null ? 1 : -1;
+    return (x < y ? -1 : x > y ? 1 : 0) * dir;
+  });
+}
 
 /** Shared filter fields (frequency, time, status, tag): applied to both the candidate and
  * confirmed queries alike. */
@@ -114,12 +141,14 @@ function recurrenceText(r: Recurrence | null): string {
   return `${r.occurrences} occurrences · ${(r.duty_cycle * 100).toFixed(0)}% duty`;
 }
 
-interface ListState { rows: Row[]; cursor: string | null; sort: { key: Key; dir: 1 | -1 }; selected: string | null }
+interface ListState { rows: Row[]; cursor: string | null; sort: SortState; selected: string | null }
 
 /** One state's list (candidates or confirmed): loads, sorts, filters by the shared search box,
- * and renders its own table, actions and info line. */
+ * and renders its own table, actions and info line. Default order is frequency ascending; the
+ * chosen sort key/direction is kept across reloads (e.g. after Promote or Delete), since it lives
+ * in this list's own state rather than being reset when rows are (re)loaded. */
 class InventoryList {
-  private st: ListState = { rows: [], cursor: null, sort: { key: "count", dir: -1 }, selected: null };
+  private st: ListState = { rows: [], cursor: null, sort: { key: "freq", dir: 1 }, selected: null };
 
   constructor(
     private state: "candidate" | "confirmed",
@@ -137,8 +166,7 @@ class InventoryList {
     $(`${p}-more`).addEventListener("click", () => void this.load(true));
     for (const th of $(`${p}-table`).querySelectorAll<HTMLElement>("th[data-key]")) {
       th.addEventListener("click", () => {
-        const key = th.dataset.key as Key;
-        this.st.sort = { key, dir: this.st.sort.key === key ? (-this.st.sort.dir as 1 | -1) : key === "count" ? -1 : 1 };
+        this.st.sort = nextSort(this.st.sort, th.dataset.key as Key);
         this.render();
       });
     }
@@ -163,10 +191,10 @@ class InventoryList {
 
   render() {
     const needle = this.search();
-    const shown = this.st.rows.filter((r) => !needle ||
+    const filtered = this.st.rows.filter((r) => !needle ||
       [r.id, r.identity_scheme, r.identity_value, r.family, ...r.tags].some((s) => s?.toLowerCase().includes(needle)));
-    const { key, dir } = this.st.sort, f = sortValue[key];
-    shown.sort((a, b) => { const x = f(a), y = f(b); return (x < y ? -1 : x > y ? 1 : 0) * dir; });
+    const { key, dir } = this.st.sort;
+    const shown = sortRows(filtered, key, dir);
     const table = $(`${this.prefix}-table`);
     for (const th of table.querySelectorAll<HTMLElement>("th[data-key]")) {
       if (th.dataset.key === key) th.setAttribute("aria-sort", dir > 0 ? "ascending" : "descending");

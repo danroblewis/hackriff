@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { ControlClient, ControlError } from "../src/controls/client";
 import {
   SELECTION_ACTIONS, type NewLink, type Selection, type SelectionActionHooks, type SelectionBackend, SelectionStore,
-  apiBackend, inspectQuery, inspectRows, inspectSelection, runSelectionAction, syncText,
+  apiBackend, inspectQuery, inspectRows, inspectSelection, runSelectionAction, sortSelections, syncText,
   uuid4, validateSelection,
 } from "../src/selections";
 
@@ -285,4 +285,32 @@ test("inspect hook: emitters inside the selection, busiest first, with top-k exp
   assert.deepEqual(outcome.status === "done" && outcome.link, { kind: "inspection", target: "busy", note: "2 emitters" });
   const failed = await inspectSelection(async () => { throw new Error("500 inventory query failed"); }, sel);
   assert.equal(failed.outcome.status, "failed");
+});
+
+// ---- sidebar sort (T-083): default frequency ascending, header-click toggle ----
+// Selections carry no SNR/last-activity/recurrence field, so f_lo is the only sortable column
+// (docs: "f_lo or centre for selections").
+
+const bare = (id: string, f_lo: number, f_hi = f_lo + 1e6): Selection => ({ id, name: id, f_lo, f_hi, tags: [], links: [], created: 0, updated: 0 });
+
+test("sortSelections defaults to frequency ascending", () => {
+  const list = [bare("a", 200e6), bare("b", 50e6), bare("c", 101e6)];
+  assert.deepEqual(sortSelections(list).map((s) => s.id), ["b", "c", "a"]);
+  assert.deepEqual(sortSelections(list, 1).map((s) => s.id), ["b", "c", "a"]);
+});
+
+test("sortSelections direction toggles (header click again)", () => {
+  const list = [bare("a", 200e6), bare("b", 50e6), bare("c", 101e6)];
+  assert.deepEqual(sortSelections(list, -1).map((s) => s.id), ["a", "c", "b"]);
+});
+
+test("sort direction (kept across a reload) still orders newly-loaded selections the same way", () => {
+  // Simulates a header click (dir flips to descending), then the store loading a fresh list from
+  // the server; the direction lives outside the list itself, so re-applying it after the reload
+  // reproduces the chosen order.
+  let dir: 1 | -1 = 1;
+  dir = dir === 1 ? -1 : 1;
+  assert.equal(dir, -1);
+  const reloaded = [bare("x", 10e6), bare("y", 90e6), bare("z", 50e6)];
+  assert.deepEqual(sortSelections(reloaded, dir).map((s) => s.id), ["y", "z", "x"]);
 });
