@@ -1,4 +1,4 @@
-//! `follow_hops` unit tests: ordering within the window, deduplication across channels (best
+//! `follow_hops` unit tests: end ordering within the window (long frames too), deduplication across channels (best
 //! copy kept), same-channel repeats kept, flushing on flags, hot `dedupe_s`.
 
 use hk_model::CrcStatus;
@@ -87,22 +87,76 @@ const V: CrcStatus = CrcStatus::Valid;
 const N: ChunkFlags = ChunkFlags::NONE;
 
 #[test]
-fn frames_leave_in_source_time_order_after_the_window() {
+fn frames_leave_in_end_order_after_the_window() {
     let mut h = Harness::new(json!({"order_window_s": 0.2, "dedupe_s": 0.5}));
-    // Channel 1's frame at 1100 arrives before channel 0's earlier frame at 1050.
+    // Channel 1's frame at 1100 ends (arrives) by 1150, channel 0's frame at 1050 by 1200.
     assert!(h.chunk(&[(b"b", 1100, 1, V, 0)], 1150.0, N).is_empty());
     assert!(h.chunk(&[(b"a", 1050, 0, V, 0)], 1200.0, N).is_empty());
-    // Watermark 1250: 1050 + 200 <= 1250 leaves, 1100 waits.
-    assert_eq!(h.chunk(&[], 1250.0, N), vec![(b'a', 1050, 0)]);
-    assert_eq!(h.chunk(&[], 1300.0, N), vec![(b'b', 1100, 1)]);
-    // A frame older than one that already left is emitted at once and counted late.
+    // Watermark 1350: 1150 + 200 <= 1350 leaves, the frame that ended by 1200 waits.
+    assert_eq!(h.chunk(&[], 1350.0, N), vec![(b'b', 1100, 1)]);
+    assert_eq!(h.chunk(&[], 1400.0, N), vec![(b'a', 1050, 0)]);
+    // An input whose watermark went backwards past what already left: emitted at once, late.
     assert_eq!(
-        h.chunk(&[(b"c", 1000, 2, V, 0)], 1300.0, N),
+        h.chunk(&[(b"c", 1000, 2, V, 0)], 1100.0, N),
         vec![(b'c', 1000, 2)]
     );
     let s = h.block.status();
     assert_eq!(s.items_out, 3);
     assert_eq!(s.extra.iter().find(|(k, _)| *k == "late").unwrap().1, 1.0);
+}
+
+/// T-107: frames five times longer than `order_window_s` (a multi-batch POCSAG message)
+/// interleaved with short frames on other channels leave in end order, none `late`, each within
+/// the window (plus one input chunk) of its end, and the buffer stays small.
+#[test]
+fn long_frames_interleaved_with_short_ones_leave_in_end_order_without_late_counts() {
+    let mut h = Harness::new(json!({"order_window_s": 0.2, "dedupe_s": 0.5}));
+    // `(bytes, start, channel, end)`: what each channel's decoder emits once the frame ended.
+    let sent: [(&'static [u8], u64, u16, u64); 7] = [
+        (b"L", 0, 0, 1000),    // 1 s long on channel 0
+        (b"s", 300, 1, 350),   // short, starts and ends inside L
+        (b"t", 600, 2, 650),   // short, inside L
+        (b"u", 950, 1, 1000),  // ends in the same input chunk as L: ordered by start
+        (b"M", 800, 2, 2400),  // 1.6 s long on channel 2, overlapping the next ones
+        (b"v", 1100, 0, 1150), // short on channel 0 after L
+        (b"w", 2300, 1, 2350), // short, ends inside M
+    ];
+    let mut out: Vec<(u8, u64, u16, f64)> = Vec::new();
+    let mut peak = 0;
+    let mut wm = 0u64;
+    while wm < 3000 {
+        wm += 50;
+        let frames: Vec<F> = sent
+            .iter()
+            .filter(|f| f.3 == wm)
+            .map(|f| (f.0, f.1, f.2, V, 0))
+            .collect();
+        for (b, si, ch) in h.chunk(&frames, wm as f64, N) {
+            out.push((b, si, ch, wm as f64));
+        }
+        let pending = h
+            .block
+            .status()
+            .extra
+            .iter()
+            .find(|(k, _)| *k == "pending")
+            .unwrap()
+            .1;
+        peak = peak.max(pending as usize);
+    }
+    let order: Vec<u8> = out.iter().map(|o| o.0).collect();
+    assert_eq!(order, b"stLuvwM".to_vec(), "end order: {out:?}");
+    for (b, _, _, left_at) in &out {
+        let end = sent.iter().find(|f| f.0[0] == *b).unwrap().3 as f64;
+        assert!(
+            *left_at - end <= 200.0 + 50.0,
+            "{} held past the window: ended {end}, left {left_at}",
+            *b as char
+        );
+    }
+    let s = h.block.status();
+    assert_eq!(s.extra.iter().find(|(k, _)| *k == "late").unwrap().1, 0.0);
+    assert!(peak <= 3, "the buffer holds only the window: {peak}");
 }
 
 #[test]

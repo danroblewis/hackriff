@@ -4,12 +4,19 @@
 //! channel's frames (each tagged with `FrameInfo::channel`) as one frames input per chunk. The
 //! block turns them into one stream:
 //!
-//! - **Ordered.** Frames wait in a bounded reorder buffer sorted by `(source_index, channel)`
-//!   and leave once the source time has advanced `order_window_s` past them. The watermark is the
-//!   larger of the input chunk's `meta.source_index` (the runtime sets it to the ring sample every
-//!   channel has been processed up to) and the newest frame seen. A frame that arrives after a
-//!   later frame already left (its channel lagged by more than the window) is emitted at once and
-//!   counted `late`.
+//! - **Ordered by frame end.** A frame is complete only at its last bit, so the merge orders
+//!   frames by when they **ended** in source time, not when they started: a multi-batch POCSAG
+//!   message that started seconds ago leaves after the short page on another channel that ended
+//!   before it, and neither is held longer than `order_window_s` (the ADR-0011 latency bound).
+//!   A frame's end is its arrival watermark: the input chunk's `meta.source_index` (the runtime
+//!   sets it to the ring sample every channel has been processed up to), or its own
+//!   `source_index` if later. Frames that ended within the same input chunk are ordered by start
+//!   (`source_index`, then channel), so the end resolution is one input chunk. Frames wait in a
+//!   bounded reorder buffer sorted by `(end, source_index, channel)` and leave once the
+//!   watermark (the larger of `meta.source_index` and the newest frame start seen) has advanced
+//!   `order_window_s` past their end. A frame that arrives with an end earlier than one that
+//!   already left (the input's watermark went backwards) is emitted at once and counted `late`;
+//!   a long frame is never late for being long.
 //! - **Deduplicated.** A frame with the same `bit_len` and bytes as one from *another* channel
 //!   within `dedupe_s` (source time) is a duplicate: the same transmission decoded on an adjacent
 //!   channel or an overlapping window. While both wait in the buffer the better copy is kept
@@ -79,6 +86,8 @@ impl BlockFactory for FollowHopsFactory {
 }
 
 struct Pending {
+    /// Source index the frame ended by (its arrival watermark): the ordering key.
+    end: u64,
     hash: u64,
     bytes: Vec<u8>,
     info: FrameInfo,
@@ -102,7 +111,7 @@ pub struct FollowHops {
     /// Source samples per second (from the input chunk meta).
     source_rate: f64,
     watermark: f64,
-    /// Source index of the newest frame that left.
+    /// Latest end of a frame that left.
     left_upto: Option<u64>,
     index: u64,
     dups: u64,
@@ -144,7 +153,13 @@ impl FollowHops {
         }
     }
 
-    fn ingest(&mut self, bytes: &[u8], info: &FrameInfo, out: &mut crate::buffer::FrameBuf) {
+    fn ingest(
+        &mut self,
+        bytes: &[u8],
+        info: &FrameInfo,
+        end: u64,
+        out: &mut crate::buffer::FrameBuf,
+    ) {
         let hash = fnv(info.bit_len, bytes);
         let dd = self.samples(self.dedupe_s);
         let near = |a: u64, b: u64| (a as f64 - b as f64).abs() <= dd;
@@ -181,12 +196,13 @@ impl FollowHops {
         buf.clear();
         buf.extend_from_slice(bytes);
         let p = Pending {
+            end,
             hash,
             bytes: buf,
             info: info.clone(),
         };
-        if self.left_upto.is_some_and(|u| info.source_index < u) {
-            // Its channel lagged past the window: emit now rather than out of order later.
+        if self.left_upto.is_some_and(|u| end < u) {
+            // It ended before a frame that already left: emit now rather than out of order later.
             self.late += 1;
             self.emit(p, out);
         } else {
@@ -195,10 +211,10 @@ impl FollowHops {
     }
 
     fn insert(&mut self, p: Pending) {
-        let key = (p.info.source_index, p.info.channel);
+        let key = (p.end, p.info.source_index, p.info.channel);
         let at = self
             .pending
-            .partition_point(|q| (q.info.source_index, q.info.channel) <= key);
+            .partition_point(|q| (q.end, q.info.source_index, q.info.channel) <= key);
         self.pending.insert(at, p);
     }
 
@@ -221,10 +237,7 @@ impl FollowHops {
             source_index: p.info.source_index,
             channel: p.info.channel,
         });
-        self.left_upto = Some(
-            self.left_upto
-                .map_or(p.info.source_index, |u| u.max(p.info.source_index)),
-        );
+        self.left_upto = Some(self.left_upto.map_or(p.end, |u| u.max(p.end)));
         self.pool.push(p.bytes);
     }
 
@@ -314,8 +327,14 @@ impl Block for FollowHops {
             self.left_upto = None;
             self.watermark = f64::NEG_INFINITY;
         }
+        // Every frame of this chunk ended by the ring sample all channels were processed up to.
+        let arrived = if meta.source_index.is_finite() && meta.source_index > 0.0 {
+            meta.source_index as u64
+        } else {
+            0
+        };
         for f in frames.iter() {
-            self.ingest(f.bytes, f.info, buf);
+            self.ingest(f.bytes, f.info, arrived.max(f.info.source_index), buf);
             self.watermark = self.watermark.max(f.info.source_index as f64);
         }
         if meta.source_index.is_finite() {
@@ -328,7 +347,7 @@ impl Block for FollowHops {
             while self
                 .pending
                 .front()
-                .is_some_and(|p| p.info.source_index as f64 + win <= self.watermark)
+                .is_some_and(|p| p.end as f64 + win <= self.watermark)
             {
                 self.release_front(buf);
             }

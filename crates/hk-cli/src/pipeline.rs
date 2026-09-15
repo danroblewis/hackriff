@@ -359,6 +359,8 @@ impl hk_api::recipes::RecipeControl for PipelineRecipes {
             C::EditPipeline { id, recipe } => r.edit_json(&id, recipe),
             C::SavePipeline(id) => r.save_pipeline_json(&id),
             C::StopPipeline(id) => r.stop_json(&id),
+            C::SetChannels { id, channels_hz } => r.set_channels(&id, &channels_hz),
+            C::RefreshChannels(id) => r.refresh_channels(&id),
         }
         .map_err(|e| hk_api::recipes::RecipeFail {
             detail: e.detail(),

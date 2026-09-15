@@ -273,7 +273,7 @@ Hot edits don't save. `POST /api/pipelines/{id}/save` writes the running revisio
 - **`follow_hops`** (one pipeline spanning several channels):
   - The recipe declares `input.channels = {mode: "follow-hops", channel_bandwidth_hz, max_channels, band_hz?, list_hz?}` and contains exactly one `follow_hops` node, whose input is `frames`.
   - The runtime instantiates **every node upstream of `follow_hops`** once per channel (per-channel state, its own DDC). Each instance stamps `ChunkMeta::channel`/`FrameInfo::channel`.
-  - All instances feed the single `follow_hops` node, which merges frames in source-time order within `order_window_s` and drops duplicates within `dedupe_s`. Everything downstream runs once.
+  - All instances feed the single `follow_hops` node, which merges frames in frame-end order (the watermark of the chunk a frame completes in; ties by start then channel) within `order_window_s` and drops duplicates within `dedupe_s`. End order (T-107) keeps the `order_window_s` bound for frames longer than the window (e.g. multi-batch POCSAG); consequently `sample_index` (frame start) need not increase across channels when a long frame overlaps short ones. Everything downstream runs once.
   - Channels come from blind detections in the band (default) or `list_hz`; `max_channels` bounds them.
   - Every frame record carries `channel` and `channel_hz`, and the header lists channels known at open.
   - Cross-channel **fusion** (decoding one stream to steer another, e.g. trunking) is M4, not this.

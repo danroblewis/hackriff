@@ -1571,6 +1571,8 @@ tasks:
     milestone: M1
     title: "M1 Tutorial 2: POCSAG recipe with follow_hops + blind acceptance"
     status: blocked
+    commit: 7898e56
+    blocked_by: T-109
     deps: [T-098, T-094, T-093, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1579,8 +1581,6 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
-    found_by: "T-095 build 2026-09-15: test written (tests/e2e/tests/acceptance/tutorial_pocsag.rs, #[ignore]) against a 4-channel synthetic pocsag_pagers net (3 distinct pages + 1 simulcast, all 1200 Bd); blind detection resolves only 1/4 channels as separate inventory emitters -- the other three merge into two wide clusters (152.36118 MHz/118.14 kHz, 152.39857 MHz/49.04 kHz). follow_hops's detections channel source (hops.rs::resolve_channels) then has nothing usable. Root cause not isolated: candidates are the clustering/hop-set linker merging four ~10 kHz bursts 35-38 kHz apart starting at the same instant, or the scene needing staggered start_s per channel. Recipe/block wiring (fsk_demod/clock_recovery/sync_search/bch/assemble/fields, content-class-vouched draft start) is in place and compiles/lints clean; the decode-vs-truth assertions were never exercised because channel discovery fails first."
-    note: "follow-up task needed to diagnose blind multi-channel detection for close-packed simultaneous bursts (or restagger the synthetic scene) before the acceptance test can run; recipe/test code is ready to re-enable (drop #[ignore]) once channel discovery works"
   - id: T-096
     milestone: M1
     title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
@@ -1730,7 +1730,8 @@ tasks:
   - id: T-107
     milestone: M1
     title: "follow_hops hardening (T-093 review follow-ups)"
-    status: in-progress
+    status: done
+    commit: 74c9a9e
     deps: [T-093]
     parallel_group: M1H
     use_cases: [SIGNAL-062]
@@ -1751,6 +1752,20 @@ tasks:
     found_by: "T-096 (Sonnet, out of budget) 2026-09-15: recipe fitted to py synth (CRC-16/XMODEM over parity-zeroed chars, new pinned parity zero mode) - possibly non-standard vs acarsdec (KERMIT over bytes incl parity); blind detection never registers the synthetic AM+MSK burst (inventory empty 240 s)"
     acceptance: "ACARS sync/CRC/parity convention established from acarsdec source or ARINC 618 (cited); synth + recipe match it; parity zero mode removed unless real ACARS needs it; root cause of missing blind detection fixed (no global threshold weakening, no frequency lookup); tutorial_acars un-ignored and passing blind with registration/label/block id/text vs hidden truth"
     area: recipes/acars.recipe.json, py/hkpy/synth/acars.py, crates/hk-blocks (fec/parity), crates/hk-detect or hk-pipeline (if detection defect), tests/e2e
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-109
+    milestone: M1
+    title: "POCSAG tutorial continuation: blind detection merges close-packed simultaneous narrowband channels; un-ignore tutorial_pocsag"
+    status: in-progress
+    deps: [T-095]
+    parallel_group: M1T2
+    use_cases: [SIGNAL-062, AWARE-053]
+    found_by: "T-095 (Sonnet, out of budget) 2026-09-15: 4-channel pager scene (~10 kHz channels, 35-38 kHz apart) -> inventory shows 1 of 4 distinct; others merged into 118 kHz and 49 kHz clusters; follow_hops detections source never resolves the set"
+    acceptance: "stage where channels merge measured and root cause fixed blind (no raster/lookups), with a component test that close-packed simultaneous narrowband bursts stay separate; hk-detect hop-set/fragment/915 tests green; tutorial_pocsag un-ignored and passing blind (pages vs hidden truth, channel tags, simulcast once); tutorial doc numbers filled"
+    area: crates/hk-detect (grouping/merge), crates/hk-pipeline (detect), py synth scene, tests/e2e, docs/tutorials/02-pocsag.md
     needs: none
     model: opus
     effort: medium
