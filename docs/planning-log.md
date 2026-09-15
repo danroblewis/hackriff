@@ -1405,3 +1405,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Tests: hk-store 51, hk-pipeline 30, hk-context 67.
   - T-141 added (Gamma-mixture floor for mixed tiles).
   - T-124 unblocked, but launches are paused on disk (<20 GB) until the demo data dir is dealt with. Full check started.
+- **B0.367 URGENT disk cleanup (user request): 9.1 GB → 26 GB free.**
+  - **Worktrees:** all merged-task worktrees were already removed (`git worktree prune`; `.claude/worktrees` is empty). `target/debug/incremental` was already 0 B (CARGO_INCREMENTAL=0).
+  - **Freed:** stopped the running full check, then `cargo clean` on the main target (8.7 GiB of stale per-merge artifacts, including a 2.3 GB synth-cache), and stopped sccache and deleted its local cache (8 GiB, regenerable).
+  - **Untouched:** the :8900 demo data dir (~10 GB, not ours), the npm cache (3 GB) and the other session's :8789 `hk serve`. That serve is still running, but its `target/debug/hk` binary was removed by the clean, so a restart of it needs a rebuild.
+  - **Launch policy:** no new agent launches; the post-T-139 full check re-runs first (rebuild), then T-124 only if disk stays above 20 GB.
+  - **Lesson:** check the sccache cache (8 GiB cap) and stale main-target artifacts before disk gets low; a periodic `cargo clean` between merges is cheap relative to disk.
