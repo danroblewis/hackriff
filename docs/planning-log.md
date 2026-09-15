@@ -1303,3 +1303,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Verified:** peek and tick agree; no hot-path DB writes; migration 0004 is ordered and transactional; nothing weakened; the LEAK warning is not an attention-thread leak (look at subprocesses).
   - **Product gap:** a single new emitter can never alarm (novelty -log10(p)/6 with the prior tops out around 0.5). That contradicts AWARE-044/027 intent. Coordinator decision: add T-138 (an ADR §7.1 quiet-site single-emitter rule) after T-136 rather than block. The user can override; this is recorded as an open question for them.
   - **Next:** fix round launched as a fresh Opus agent (the original was at 277k tokens). A full check after the T-135 merge and dev opt-level change is running.
+- **B0.352 T-137 launched** (baseline fold CPU and decay precision), running in parallel with the T-136 fix round (disjoint files) and T-124.
