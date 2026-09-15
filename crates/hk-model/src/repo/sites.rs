@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn sites_upsert_read_and_names_are_unique() {
         let r = Repository::open_in_memory().unwrap();
-        assert_eq!(r.schema_version().unwrap(), 2);
+        assert!(r.schema_version().unwrap() >= 2);
         let mut home = site(Some("home"));
         r.upsert_site(&home).unwrap();
         home.observed_s = 3600.0;

@@ -436,8 +436,11 @@ Validation refuses a report without them, and serde refuses a document missing `
 |---|---|---|---|
 | `level-above-baseline` | `level-above-baseline` (new) | `level_z` novelty on merged adjacent cells | dB |
 | `new-emitter` | `new-emitter` | a new inventory emitter with `new_emitter` novelty ≥ on | count |
-| `busier-than-usual` | `busier-than-baseline` | `occupancy_z` novelty on a channel/band | fraction |
+| `busier-than-usual` | `busier-than-baseline` | `occupancy_z` novelty on a channel/band, z > 0 | fraction |
+| `quieter-than-usual` | `quieter-than-baseline` (new, T-122) | `occupancy_z` novelty on a channel/band, z < 0 | fraction |
 | `change-point` | `change-point` (new) | CUSUM (§3.4) | dB or fraction |
+
+**Quieter than usual (T-122, additive).** `occupancy_z` is two-sided (T-119), so a usual transmitter going silent is as novel as a new one. It is its own kind rather than a signed `busier-than-usual`: the direction changes the dedupe key, the UI filter and the C30 reading (a failed transmitter or a desensitised receiver vs. new activity), and a sign inside one key would let a busy→quiet swing extend one alarm instead of raising a second. Level novelty stays upward only (a level drop is a front-end or propagation question, §4.4).
 
 Each alarm is an `Anomaly` row (existing tables, append-only, status history, Explanations):
 - `subject`: emitter or region;
@@ -497,6 +500,8 @@ Streams (ADR-0004 `messages` kind, metadata only, never content):
 | Candidates, bandit arm state | memory | `Arc<CandidateSet>`, arm table | none; arms cold-start, priors from the next snapshot | — |
 | Sites, weights | hk-model SQLite (migration 0002, T-119) | rows | on change | kept (user metadata) |
 | Alarms | hk-model SQLite `anomaly`/`anomaly_status`/`explanation` + `anomaly_detail` (migration 0003, T-122) | rows | per transition, batched with correlation writes | ADR-0006 retention object |
+
+**Alarm retention caveat.** Migration 0003 puts a no-delete trigger (`anomaly_detail_no_delete`) on `anomaly_detail`, and `anomaly_detail.anomaly_id` references `anomaly`. Any future retention job that ages out alarm anomalies must handle that trigger explicitly: it deletes the child rows first (`anomaly_detail`, then `explanation`/`anomaly_status`, then `anomaly`), dropping or bypassing the trigger inside the retention transaction. It must never delete the parent alone.
 
 Why files for the series: they are rebuildable aggregates with steady append rates, and the same pattern already serves history tiles, radiometry and decoded captures. Keeping them out of SQLite avoids WAL churn and write-lock contention with detection/inventory writes (T-112 batching), and limits flash wear to ≤ 1 append per minute per store. SQLite holds what must join with Explanations or be edited by the user.
 

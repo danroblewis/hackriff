@@ -2293,3 +2293,64 @@ fn report_route_serves_document_and_exports() {
     stop_server(serving);
 }
 // T-122 anomalies
+
+/// T-122: `/api/anomalies[...]` answer the documented shapes (an empty list with suppression
+/// counts on a fresh run), refuse bad ids, kinds and methods, and a dismiss of an unknown anomaly
+/// is 404; the `anomalies` stream is offered.
+#[test]
+fn anomalies_routes_answer_documented_shapes() {
+    let (serving, addr) = start_server();
+    let (st, v) = get(
+        addr,
+        "/api/anomalies?f_lo=1e8&f_hi=2e9&t0=0&t1=4e9&status=open&limit=5",
+    );
+    assert_eq!(st, 200, "{v}");
+    for field in ["anomalies", "next_cursor", "truncated", "suppressions"] {
+        assert!(v.get(field).is_some(), "missing {field}: {v}");
+    }
+    assert!(
+        is_array(&v["anomalies"]) && v["suppressions"].is_object(),
+        "{v}"
+    );
+    assert_eq!(v["truncated"], false);
+
+    for bad in [
+        "/api/anomalies?kind=loud",
+        "/api/anomalies?status=maybe",
+        "/api/anomalies?f_lo=2&f_hi=1",
+        "/api/anomalies?f_lo=1",
+        "/api/anomalies/not-a-uuid",
+    ] {
+        let (st, v) = get(addr, bad);
+        assert_eq!(st, 400, "{bad}: {v}");
+    }
+    let unknown = "01890000-0000-7000-8000-000000000000";
+    let (st, _) = get(addr, &format!("/api/anomalies/{unknown}"));
+    assert_eq!(st, 404);
+    let auth = format!("Bearer {TOKEN}");
+    let (st, _) = call(
+        addr,
+        "POST",
+        &format!("/api/anomalies/{unknown}/dismiss"),
+        Some(&auth),
+        Some("{}"),
+    );
+    assert_eq!(st, 404);
+    let (st, _) = call(
+        addr,
+        "POST",
+        &format!("/api/anomalies/{unknown}/reopen"),
+        Some(&auth),
+        Some(r#"{"bogus":1}"#),
+    );
+    assert_eq!(st, 400);
+    let (st, _) = call(addr, "POST", "/api/anomalies", Some(&auth), Some("{}"));
+    assert_eq!(st, 405);
+    let (st, v) = get(addr, "/api/streams");
+    assert_eq!(st, 200);
+    assert!(
+        v.to_string().contains("\"anomalies\""),
+        "stream offered: {v}"
+    );
+    stop_server(serving);
+}
