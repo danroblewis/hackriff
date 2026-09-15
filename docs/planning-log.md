@@ -2041,3 +2041,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Tests: hk-pipeline 12, hk-core 20; lint clean.
   - **ADRs:** ADR-0005 and ADR-0012 §1.3 amended.
   - **Review focus:** plan-edge coverage, bandit/verification dwell interactions, occupancy weighting by parity, history tiles, mock re-render cost, config/disable, and whether the live demo retunes more.
+- **B0.444 T-180 launched (Opus) into the build slot the T-173 finisher freed.**
+  - **Goal:** the mock SDR models a gain-dependent receiver noise floor before int8 quantisation when rendering below the recording gain, so low-gain windows are no longer 85% zero codes.
+  - **Must hold:** fidelity tests, the `scheduler_history` 0.5 dB check and the band-edge test stay unchanged.
+  - **t057:** if its quantisation-limited skip goes unused, remove it or keep it as a no-op.
