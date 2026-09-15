@@ -1125,3 +1125,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-130 findings:** the replay tone peaks at ~46/127, so the clip flag isn't from sample clipping. The same flag already strips FCO visits on main. T-128's suspect-ban test isn't discriminating.
   - **Fix round running;** alarm hook, gain-state key and bandit-off candidates stay deferred to T-131.
   - **Merge order:** T-129 → T-122 → T-128 (one trivial ApiState conflict).
+- **B0.323 T-129 merged** (fix round 5acd4ce).
+  - **Channel publication:** a channel is published when confident (median SNR ≥7 dB over the last 64 non-fragment samples) or persistent (≥3 15-min intervals at a stable centre, ≥0.5 s total). A steady 5 dB carrier publishes on its 3rd visit; scattered flicker publishes nothing.
+  - **Restore:** evidence persists in `channels.json`, so a restart keeps key, `first_learned` and version.
+  - **Fragments:** require time overlap with the host and a non-persistent own cluster. A persistent weak emitter at +100 kHz keeps its channel. Joins also need widths within 4×, which stops a station collapsing a narrow carrier's cluster.
+  - **Suspect extents:** widened by 1 cell and 1 time cell.
+  - **Docs:** ADR §2.6 and §2.7 amended.
+
+  **Results:** FM fixture has 2 channels (101.3 station at 344 kHz, plus a weak blind carrier at 100.44 MHz), band fco 1.0. Dense FM gives 3 channels, one per station. The t118 table is identical to B0.303. Full check running.
