@@ -2207,7 +2207,7 @@ tasks:
   - id: T-140
     milestone: M2
     title: "Baseline hardening nits: SlotSeries packed()/packed_at() not public without the decay multiplier, assert the fold-equivalence fingerprint (reference-fold count exact, novelty sum 1e-9), debug_assert finite decay factor, share pool membership helper"
-    status: in-progress
+    status: review
     deps: [T-137]
     parallel_group: M2B
     use_cases: [AWARE-042]

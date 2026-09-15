@@ -1432,3 +1432,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Runtime gating** stays but becomes default-permissive (opt-in only), and untested.
   - **T-142 cancelled** (do not de-flake a test being deleted).
   - **Merge order:** T-143 merges before T-124/T-140/T-141.
+- **B0.372 T-140 committed (3828015, Sonnet); coordinator reviewed the diff: OK.**
+  - `packed()`/`packed_at()` return `ScaledMoments`, which applies the decay multiplier.
+  - Fingerprint pinned: quiet (0, 0.0); changed (0, 148.000330353452) at 1e-9.
+  - `debug_assert` on a finite factor.
+  - Shared `pool_membership`/`is_empty_slot` helpers.
+  - Tests: hk-store 7, hk-context 40.
+  - Merges after T-143 (user priority).
