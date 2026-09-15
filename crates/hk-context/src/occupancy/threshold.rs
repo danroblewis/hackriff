@@ -75,7 +75,7 @@ pub fn resolve(
 ) -> Option<AppliedThreshold> {
     let discard = match spec.method {
         ThresholdMethod::Dynamic { idle_fraction } => idle_fraction,
-        ThresholdMethod::PreSet { .. } => 0.8,
+        ThresholdMethod::PreSet { .. } | ThresholdMethod::HistoryTile { .. } => 0.8,
     };
     let measured = match history_floor_db.filter(|f| f.is_finite()) {
         Some(f) => Some((f, FloorSource::History)),
@@ -88,7 +88,8 @@ pub fn resolve(
             level_db - spec.guard_db.max(MIN_GUARD_DB),
             FloorSource::Assumed,
         ),
-        (None, ThresholdMethod::Dynamic { .. }) => return None,
+        // T-121's report stand-in carries no floor of its own: no threshold without a measured one.
+        (None, ThresholdMethod::Dynamic { .. } | ThresholdMethod::HistoryTile { .. }) => return None,
     };
     let (threshold_db, guard_clamped) = spec.applied_db(floor_db, obw_hz, rbw_hz);
     Some(AppliedThreshold {

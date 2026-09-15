@@ -850,7 +850,7 @@ impl EngineConfig {
     pub fn discard_fraction(&self) -> f64 {
         match self.threshold.method {
             ThresholdMethod::Dynamic { idle_fraction } => idle_fraction,
-            ThresholdMethod::PreSet { .. } => 0.8,
+            ThresholdMethod::PreSet { .. } | ThresholdMethod::HistoryTile { .. } => 0.8,
         }
     }
 

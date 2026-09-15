@@ -659,9 +659,26 @@ A lease preempts scheduled plans, the bandit and the sweep from the next step; t
 
 **`DELETE /api/scheduler/leases/{id}`** answers `{ "released": id }`, 404 when no such lease is active, 400 for a non-numeric id, 409 without a scheduler, 503 `busy` as for create. The lease's unrun planned time leaves the sweep-floor window.
 
+## Survey reports (T-121; ADR-0012 §6)
+
+`GET /api/report?f_lo&f_hi&t0&t1[&site][&format=json|csv|png]` (token): `report(region, span)`. `f_lo`/`f_hi` in Hz, `t0`/`t1` in Unix seconds on the sample clock (a replay or time-compressed scene reports its own time). `site` is `unassigned` (default), `mobile` or a site id. Schema: `hk_model::attention::report::SurveyReport` (wire structs reject unknown fields; every `Timestamp` is an integer of Unix **nanoseconds**, `FreqRange` is `{lo_hz, hi_hz}`, `TimeRange` is `{start, end}`).
+
+- **`format=json`** (default): the document `{schema, generated_at, region, span, site, occupancy {bands, channels, truncated}, top_emitters[], change_vs_baseline {status, baseline?, resolution?, changes[]}, coverage, provenance_steps[], anomalies[], warnings[]}`. `generated_at` is the stream time the history has reached (never the wall clock).
+- **Coverage is mandatory** (`coverage {observed_fraction, observed_s, gaps[{freq, time}], gaps_truncated, never_observed[], poi[{tau_s, p_poi}], statement}`): POI for τ = 5 ms, 100 ms, 1 s, 10 s; gaps are unobserved stretches longer than twice the measured mean revisit, coalesced across adjacent frequency cells, longest first (≤ 64); `statement` always says unobserved is not quiet. Coverage comes from the observation log (T-115) when it holds visits for the box, else from history-tile coverage (a replay without the scheduler logs nothing); `warnings` names the source and, when it holds nothing for the box before some time inside the span (e.g. the log started mid-span), says that time is shown as unobserved, not quiet. A server that cannot disclose coverage (no spectrum history) answers `404` instead of a report.
+- **Occupancy.** One band row for the region and channel rows (FCO descending, ≤ 64, `truncated`) over **blind** channel extents: the inventory emitters' measured extents in the box, overlapping extents merged. `fco` is the unbiased figure from activity-independent visits only (ADR-0012 §2.5) and is never substituted: it is absent when the source cannot give it. Until the occupancy engine (T-118) lands, rows come from history-tile occupancy (floor + the pyramid margin), which mixes activity-driven dwells, so rows carry **no `fco`**: `fco_all_visits` = occupied grid rows / observed grid rows, `n_revisits_all` = observed grid rows (`n_revisits`/`n_occupied` 0), `revisit_biased: true`, `threshold.method: history-tile` with the pyramid `margin_db`, `fbo` = coverage-weighted tile occupancy, `timing: unknown`; channel rows sort by `fco`, then `fco_all_visits`; `warnings` says so.
+- **Top emitters** (≤ 20, most sightings in the span first): `emitter_id`, measured `freq`, `first_seen`/`last_seen`, `sightings` in the span, `lifecycle` (`candidate`/`confirmed`), channel `fco` and `fco_all_visits` (each copied from its channel row, so no `fco` from the tile stand-in), `top_suggestion` (the top-ranked explanation's service label: a suggestion, never truth) and `new_in_span`.
+- **Change vs baseline.** `status` is `unavailable` until baselines (T-119) land; `changes` is non-empty only when `available`. A warning states that no comparison is implied.
+- **Provenance steps** (time order): `{t, kind, freq?, detail}` with `kind` `gain` (LNA/VGA/amp or gain table), `calibration`, `spur-mask`, `antenna-port`, `sample-drop`, … from the history tiles' provenance, e.g. `detail: "lna 32→24 dB"`. Overload share and mixed calibration appear in `warnings`.
+- **`format=csv`** (`text/csv; charset=utf-8`): `#` comment lines carrying the coverage statement, observed fraction, POI and baseline status; then `row,f_lo_hz,f_hi_hz,t0_s,t1_s,fco,fco_all_visits,fbo,n_revisits,n_occupied,n_revisits_all,observed_s,revisit_biased` (`fco` empty when unavailable) with `band` and `channel` rows, then `gap` and `never_observed` rows.
+- **`format=png`** (`image/png`): tile-occupancy heatmap over the report's own history grid (time down, frequency right; one pixel per cell, the same grid the JSON/CSV use), unobserved cells grey with a diagonal hatch.
+
+**Grid budget.** The report reads the finest history level within 4096 time rows × 1024 frequency columns and 500 000 cells (the `/api/history` `MAX_API_CELLS` budget), else the top level if it fits 500 000 cells; a box larger than that even at the top level is `400`. The grid is read in ≤ 256-row chunks, each under its own short history lock, so a report never locks ingest out for its whole build; e.g. 48 h × 20 MHz on the default ladder is 192 × 800 cells (15 min × 25 kHz).
+
+Errors: `400` (bad region/span, a box over the grid budget, `site` or `format`), `404` (no coverage source), `405` (not GET), `500` (store failure), `503` (no report service on this server). The `/api/history` region filters (time and frequency) are unchanged; source and site filters are not served yet (history tiles are not keyed by source or site).
+
 ## Attention and memory (planned, M2; ADR-0012)
 
-**Planned, not served yet.** None of the routes below are in `ROUTES` today (the observation log's, occupancy's, T-119's sites, baselines, candidates and weights, and the attention scheduler's have landed and moved to their own sections above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+**Planned, not served yet.** None of the routes below are in `ROUTES` today (the observation log's, occupancy's, T-119's sites, baselines, candidates and weights, the attention scheduler's, and the survey report's have landed and moved to their own sections above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
 - **Contracts:** [ADR-0012](adr/0012-attention-memory-contracts.md).
 - **Schemas:** `hk_model::attention` (observation records, `OccupancyStat`, baselines, `CandidateSet`, `SurveyReport`, alarm detail).
 
@@ -674,7 +691,6 @@ Conventions:
 
 | Method | Path | Owner | Purpose |
 |---|---|---|---|
-| GET | `/api/report` | T-121 | `?f_lo&f_hi&t0&t1[&site][&format=json\|csv\|png]`: `SurveyReport` or its export |
 | GET | `/api/anomalies` | T-122 | `?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`: anomalies (all kinds, including novelty alarms) with top explanations |
 | GET | `/api/anomalies/{id}` | T-122 | One anomaly: `AlarmDetail`, ranked explanations, status history |
 | POST | `/api/anomalies/{id}/dismiss` | T-122 | Dismiss (audited) |

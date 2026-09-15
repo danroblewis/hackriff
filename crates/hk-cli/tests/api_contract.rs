@@ -2207,4 +2207,89 @@ fn scheduler_routes_answer_as_documented_without_a_scheduler() {
     stop_server(serving);
 }
 // T-121 reports
+
+/// T-121: `/api/report` answers a `SurveyReport` (coverage and POI always disclosed, baseline
+/// comparison explicitly unavailable) and backend-rendered CSV/PNG exports.
+#[test]
+fn report_route_serves_document_and_exports() {
+    let (serving, addr) = start_server();
+    let now = unix_now();
+    let region = format!(
+        "f_lo={}&f_hi={}&t0={}&t1={}",
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+        now - 7.0 * 86_400.0,
+        now + 60.0
+    );
+    let (st, v) = get(addr, &format!("/api/report?{region}"));
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "schema",
+        "generated_at",
+        "region",
+        "span",
+        "site",
+        "occupancy",
+        "top_emitters",
+        "change_vs_baseline",
+        "coverage",
+        "provenance_steps",
+        "anomalies",
+        "warnings",
+    ] {
+        assert!(v.get(field).is_some(), "report missing {field}: {v}");
+    }
+    let c = &v["coverage"];
+    for field in [
+        "observed_fraction",
+        "observed_s",
+        "gaps",
+        "gaps_truncated",
+        "never_observed",
+        "poi",
+        "statement",
+    ] {
+        assert!(c.get(field).is_some(), "coverage missing {field}: {v}");
+    }
+    assert_eq!(c["poi"].as_array().map(Vec::len), Some(4), "{v}");
+    assert!(
+        c["statement"].as_str().unwrap().contains("not quiet"),
+        "{v}"
+    );
+    assert_eq!(v["change_vs_baseline"]["status"], "unavailable", "{v}");
+    assert!(is_array(&v["occupancy"]["channels"]) && is_array(&v["top_emitters"]));
+
+    let (st, ct, body) = get_raw(addr, &format!("/api/report?{region}&format=csv"));
+    assert_eq!((st, ct.as_str()), (200, "text/csv; charset=utf-8"));
+    let text = String::from_utf8(body).unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("# coverage:") && l.contains("not quiet")),
+        "{text}"
+    );
+    assert!(text.lines().any(|l| l.starts_with("row,f_lo_hz,f_hi_hz")));
+    let (st, ct, body) = get_raw(addr, &format!("/api/report?{region}&format=png"));
+    assert_eq!((st, ct.as_str()), (200, "image/png"));
+    assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+    for bad in [
+        format!("/api/report?{region}&format=xml"),
+        format!("/api/report?{region}&site=nowhere"),
+        "/api/report?f_lo=2&f_hi=1&t0=0&t1=1".to_owned(),
+        // Over the report grid budget even at the coarsest history level.
+        "/api/report?f_lo=1&f_hi=1000000000000&t0=0&t1=172800".to_owned(),
+    ] {
+        let (st, v) = get(addr, &bad);
+        assert_eq!(st, 400, "{bad}: {v}");
+    }
+    let (st, _) = call(
+        addr,
+        "POST",
+        &format!("/api/report?{region}"),
+        Some(&format!("Bearer {TOKEN}")),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
+    stop_server(serving);
+}
 // T-122 anomalies
