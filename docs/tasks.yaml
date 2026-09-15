@@ -2011,7 +2011,7 @@ tasks:
     milestone: M2
     title: "Bandit pipeline wiring + scheduler routes + POI from the observation log"
     status: review
-    commit: 8ff6b30
+    commit: f366619
     deps: [T-115, T-120]
     parallel_group: M2Q
     use_cases: [AWARE-027, SIGNAL-027]

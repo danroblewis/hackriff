@@ -1047,3 +1047,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Partial-log warning** names the time before which data is unobserved.
 
   Tests: report 11, pipeline 4, hk-model 31, api_contract 18, scene e2e pass. Merges last per order T-118 → T-119 → T-127 → T-121.
+- **B0.312 T-127 fix round done** (f366619).
+  - **Step accounting:** a step is only cut early when the scheduler actually cut or trimmed it (`running_end()` before and after). A refused or unknown lease command leaves step accounting untouched, and lease updates trim the running step.
+  - **Decode credit:** a per-track `TrackDecodes` table now credits a dwell only for its own tracks. Test: 207 unrelated decodes are not credited.
+  - **Lease cuts:** a lease-cut dwell drops its outcome.
+  - **Status codes:** `TableFull` returns 409.
+  - **503 timeouts:** a timed-out command is cancelled and never applies later.
+  - **POI:** computed only when a span is given.
+  - **Docs:** doc comments fixed.
+
+  Tests: hk-core 28, hk-api 2, pipeline 18 (3 nextest-leaky, to be checked in the full check), api_contract 18. Waiting to merge after T-118 and T-119.
