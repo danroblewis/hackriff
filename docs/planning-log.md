@@ -1901,3 +1901,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Status:** T-124 is blocked on T-176. Its next round fixes (d), investigates (a) with T-172's twin LO rule in place, and re-checks bandit dwells.
 - **B0.423 T-156 full check green (af07b5e).** Lint clean; 1349/1349 nextest+UI tests; acceptance 28/28. The new MUI default UI is verified on main.
 - **T-172 merged (0e3d429).** Its worktree is removed. Full check started.
+- **B0.424 User refinement of the IQ capture buffer.**
+  - **Design:** configurable time-based retention with an optional size cap. Storage becomes a pre-allocated on-disk ring that overwrites the oldest data in place (no grow-and-delete), with crash recovery from the ring and index on start.
+  - **Flags (coordinator-decided names):**
+    - `hk serve --iq-retention <DURATION>`: default `2m`; `0`/`off` disables; env `HK_IQ_RETENTION`.
+    - `hk serve --iq-buffer-max <SIZE>`: optional cap; env `HK_IQ_BUFFER_MAX`.
+    - Effective quota = min(retention × max sample rate × 2 B/sample, max), with the free-space floor kept.
+  - **Rollout:**
+    - The T-157 fix round wires these flags now on the current chunked storage.
+    - T-178 (rewritten) replaces the storage with the pre-allocated ring and restart persistence, keeping the same flags.
+  - **Staging:** the staging/demo server will run with 1 h retention.
+    - Implied size is 144 GiB at 20 Msps, 14.4 GiB at 2 Msps, 3.6 GiB at 500 kS/s, so staging needs `--iq-buffer-max` set.
+    - The flags don't exist until T-157 merges.

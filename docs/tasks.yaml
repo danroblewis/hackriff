@@ -2816,15 +2816,15 @@ notes:
     core_interface: false
   - id: T-178
     milestone: MUI
-    title: "IQ capture buffer survives restarts: keep chunks + segment index on disk within the quota, reload on start, recover/trim stale or partial chunks after a crash, no delete at run end"
+    title: "IQ capture buffer as a PRE-ALLOCATED on-disk ring that survives restarts: allocate the full effective quota up front (fixed ring file or fixed set of fixed-size chunk files), overwrite oldest in place (no grow-and-delete), crash recovery re-reads ring + index on start; retention configurable via --iq-retention / --iq-buffer-max"
     status: todo
     deps: [T-157]
     parallel_group: MUI-API
     use_cases: []
-    found_by: "user decision 2026-09-15 (T-157 review product question): retention = survive restarts"
-    acceptance: "restart of hk serve on the same data dir reports the previous buffer span/segments in GET /api/iqbuffer and can export clips from before the restart (mock-SDR test with a restart); crash-recovery test (truncated last chunk, missing index entries) rebuilds a consistent index; quota/free-space floor enforced across restarts; docs/api.md + ADR-0013 timeline note updated"
-    area: crates/hk-store/src/iqbuffer.rs, crates/hk-pipeline/src/iqbuffer.rs, docs/api.md
+    found_by: "user decisions 2026-09-15: retention survives restarts; configurable time-based window with optional size cap; pre-allocated ring for bounded known disk use and even flash wear; staging/demo runs 1h"
+    acceptance: "flags unchanged from T-157 (hk serve --iq-retention <DURATION> default 2m, 0/off disables, env HK_IQ_RETENTION; --iq-buffer-max <SIZE> optional cap, env HK_IQ_BUFFER_MAX; effective quota = min(retention x max sample rate x 2 B, max)); full quota allocated at start (refuse or shrink with a logged warning and status flag if free space below quota + floor); writes overwrite oldest slots in place, file count and size constant during operation; segment index persisted (append log or header table) and rebuilt/validated on start; restart test on the same data dir exports a clip from before the restart; crash test (torn write / stale index) recovers a consistent index; quota change between runs re-allocates safely; GET /api/iqbuffer reports allocated_bytes, retention_s, wrap position; docs/api.md + ADR-0013 timeline note + ADR for the ring format"
+    area: crates/hk-store/src/iqbuffer.rs, crates/hk-pipeline/src/iqbuffer.rs, crates/hk-cli (serve flags), docs/api.md, docs/adr
     needs: none
     model: opus
-    effort: medium
+    effort: high
     core_interface: true
