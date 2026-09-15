@@ -67,3 +67,15 @@ retries = 1
 [[profile.default.overrides]]
 filter = 'test(racing_readers_get_exact_samples_and_exact_loss_accounting)'
 retries = 1
+
+# Found flaky on main after the T-081 merge (planning-log B0.206): the readsb plugin
+# chain decoded 0 frames under load (spawned plugin process startup racing a short
+# replay); passed 5/5 on rerun. Serialize the data_path binary (it spawns plugin
+# processes) and retry this test once.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(data_path)'
+test-group = 'heavy-serial'
+
+[[profile.default.overrides]]
+filter = 'test(plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated)'
+retries = 1
