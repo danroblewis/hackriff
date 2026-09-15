@@ -27,8 +27,9 @@ use hk_model::ids::{CalibrationStateId, SiteId};
 use hk_model::time::Timestamp;
 use serde::{Deserialize, Serialize};
 
-/// File format version.
-pub const BASELINE_FORMAT_VERSION: u16 = 1;
+/// File format version written (T-132: 2 adds the level class per series, the sequential
+/// accumulators and the latched hours per subject). Version 1 is still read.
+pub const BASELINE_FORMAT_VERSION: u16 = 2;
 /// Default store quota (ADR-0012 §3.6).
 pub const BASELINE_QUOTA_BYTES: u64 = 1 << 30;
 /// Gain states kept per subject before it reports `mixed` (ADR-0012 §3.1).
@@ -159,11 +160,29 @@ impl From<&SlotStats> for DecayedStats {
     }
 }
 
-/// Reference and adaptive slots of one subject under one gain state.
+/// Which visits a series' level moments come from (T-132): a low-FCO channel's occupied and idle
+/// levels are two modes, so they are pooled apart.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LevelClass {
+    /// Intervals with no occupied weight (level = idle level above the floor). Version-1 files
+    /// load as this.
+    #[default]
+    Idle,
+    /// Intervals with any occupied weight (level = occupied level above the floor; with too few
+    /// occupied visits for a level, occupancy only).
+    Occupied,
+}
+
+/// Reference and adaptive slots of one subject under one gain state and level class.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GainSeries {
     /// Front-end gain-state key (hash of the gain settings; 0 = unknown/single).
     pub gain: u32,
+    /// Level class (T-132).
+    pub class: LevelClass,
     /// Frozen reference, [`HourOfWeek::SLOTS`] slots.
     pub reference: Vec<SlotStats>,
     /// Adaptive copy, [`HourOfWeek::SLOTS`] slots.
@@ -173,8 +192,14 @@ pub struct GainSeries {
 impl GainSeries {
     /// Empty series for `gain`.
     pub fn new(gain: u32) -> Self {
+        Self::with_class(gain, LevelClass::Idle)
+    }
+
+    /// Empty series for `gain` and `class`.
+    pub fn with_class(gain: u32, class: LevelClass) -> Self {
         Self {
             gain,
+            class,
             reference: vec![SlotStats::EMPTY; HourOfWeek::SLOTS],
             adaptive: vec![DecayedStats::EMPTY; HourOfWeek::SLOTS],
         }
@@ -231,6 +256,16 @@ pub struct SubjectBaseline {
     pub cusum: CusumState,
     /// Open change point.
     pub change_point: Option<ChangePoint>,
+    /// Sequential test of fold z-scores against the reference, over all folds (T-132): gates
+    /// reference learning subject-wide while it builds, so a weak persistent interferer (every
+    /// fold below the novelty z) cannot drain into the reference.
+    pub seq: CusumState,
+    /// The same test per hour of day (empty until first used, then 24 entries): a crossing latches
+    /// that hour only.
+    pub seq_hod: Vec<CusumState>,
+    /// Hours of day (bit i = hour i) whose reference learning is latched off by a change point or
+    /// a sequential crossing, until re-freeze (T-132 per-slot latch).
+    pub latched_hours: u32,
     /// When the reference first became mature (any resolution).
     pub mature_at: Option<Timestamp>,
     /// Last user re-freeze.
@@ -247,6 +282,9 @@ impl SubjectBaseline {
             mixed: false,
             cusum: CusumState::default(),
             change_point: None,
+            seq: CusumState::default(),
+            seq_hod: Vec::new(),
+            latched_hours: 0,
             mature_at: None,
             refrozen_at: None,
             last_seen: t,
@@ -265,7 +303,38 @@ pub struct BaselineState {
     pub subjects: BTreeMap<BaselineSubject, SubjectBaseline>,
 }
 
+/// Approximate heap bytes of one slot pair (reference + adaptive).
+pub const SLOT_PAIR_BYTES: usize =
+    std::mem::size_of::<SlotStats>() + std::mem::size_of::<DecayedStats>();
+
+impl SubjectBaseline {
+    /// Approximate heap bytes (the subject, its map node and its series; T-132 memory cap).
+    pub fn approx_bytes(&self) -> usize {
+        let node = std::mem::size_of::<BaselineSubject>() + std::mem::size_of::<Self>() + 16;
+        let series = self.gains.capacity() * std::mem::size_of::<GainSeries>()
+            + self
+                .gains
+                .iter()
+                .map(|g| {
+                    g.reference.capacity() * std::mem::size_of::<SlotStats>()
+                        + g.adaptive.capacity() * std::mem::size_of::<DecayedStats>()
+                })
+                .sum::<usize>();
+        node + series + self.seq_hod.capacity() * std::mem::size_of::<CusumState>()
+    }
+}
+
 impl BaselineState {
+    /// Approximate heap bytes of the whole state (T-132 memory cap).
+    pub fn approx_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .subjects
+                .values()
+                .map(SubjectBaseline::approx_bytes)
+                .sum::<usize>()
+    }
+
     /// Empty state for `key`.
     pub fn new(key: BaselineKey, t: Timestamp) -> Self {
         Self {
@@ -398,10 +467,10 @@ fn id_text<T: std::str::FromStr>(b: &[u8]) -> Rd<T> {
         .ok_or("bad id")
 }
 
-fn header(key: &BaselineKey, last_visit: Timestamp) -> Vec<u8> {
+fn header(key: &BaselineKey, last_visit: Timestamp, version: u16) -> Vec<u8> {
     let mut w = W(Vec::with_capacity(64));
     w.0.extend_from_slice(MAGIC);
-    w.u16(BASELINE_FORMAT_VERSION);
+    w.u16(version);
     w.key(key);
     w.i64(last_visit.as_unix_nanos());
     w.0
@@ -409,7 +478,7 @@ fn header(key: &BaselineKey, last_visit: Timestamp) -> Vec<u8> {
 
 const HEADER_LEN: usize = 4 + 2 + 36 + 1 + 36 + 2 + 2 + 8;
 
-fn encode_body(state: &BaselineState) -> Vec<u8> {
+fn encode_body(state: &BaselineState, version: u16) -> Vec<u8> {
     let mut w = W(Vec::new());
     w.u32(state.subjects.len() as u32);
     for (subject, s) in &state.subjects {
@@ -450,14 +519,30 @@ fn encode_body(state: &BaselineState) -> Vec<u8> {
         w.opt_t(s.mature_at);
         w.opt_t(s.refrozen_at);
         w.i64(s.last_seen.as_unix_nanos());
+        if version >= 2 {
+            w.u8(s.seq_hod.len() as u8);
+            for c in std::iter::once(&s.seq).chain(&s.seq_hod) {
+                for v in [c.level_pos, c.level_neg, c.occ_pos, c.occ_neg] {
+                    w.f64(v);
+                }
+            }
+            w.u32(s.latched_hours);
+        }
         w.u8(s.gains.len() as u8);
         for g in &s.gains {
             w.u32(g.gain);
+            if version >= 2 {
+                w.u8(match g.class {
+                    LevelClass::Idle => 0,
+                    LevelClass::Occupied => 1,
+                });
+            }
             let refs: Vec<_> = g
                 .reference
                 .iter()
                 .enumerate()
-                .filter(|(_, x)| x.n_visits > 0)
+                // T-132: occupancy-only slots (no level visit) are data too.
+                .filter(|(_, x)| x.n_visits > 0 || x.observed_s > 0.0 || x.weight_s > 0.0)
                 .collect();
             w.u8(refs.len() as u8);
             for (slot, x) in refs {
@@ -478,7 +563,7 @@ fn encode_body(state: &BaselineState) -> Vec<u8> {
                 .adaptive
                 .iter()
                 .enumerate()
-                .filter(|(_, x)| !x.is_empty())
+                .filter(|(_, x)| !x.is_empty() || x.observed_s > 0.0 || x.weight_s > 0.0)
                 .collect();
             w.u8(ads.len() as u8);
             for (slot, x) in ads {
@@ -509,7 +594,21 @@ fn slot_index(v: u8) -> Rd<usize> {
     }
 }
 
-fn decode_body(key: BaselineKey, last_visit: Timestamp, b: &[u8]) -> Rd<BaselineState> {
+fn read_cusum(r: &mut R<'_>) -> Rd<CusumState> {
+    Ok(CusumState {
+        level_pos: r.f64()?,
+        level_neg: r.f64()?,
+        occ_pos: r.f64()?,
+        occ_neg: r.f64()?,
+    })
+}
+
+fn decode_body(
+    version: u16,
+    key: BaselineKey,
+    last_visit: Timestamp,
+    b: &[u8],
+) -> Rd<BaselineState> {
     let mut r = R { b, at: 0 };
     let n = r.u32()?;
     let mut state = BaselineState::new(key, last_visit);
@@ -526,12 +625,7 @@ fn decode_body(key: BaselineKey, last_visit: Timestamp, b: &[u8]) -> Rd<Baseline
             _ => return Err("bad subject tag"),
         };
         let mixed = r.u8()? != 0;
-        let cusum = CusumState {
-            level_pos: r.f64()?,
-            level_neg: r.f64()?,
-            occ_pos: r.f64()?,
-            occ_neg: r.f64()?,
-        };
+        let cusum = read_cusum(&mut r)?;
         let change_point = match r.u8()? {
             0 => None,
             1 => Some(ChangePoint {
@@ -549,13 +643,35 @@ fn decode_body(key: BaselineKey, last_visit: Timestamp, b: &[u8]) -> Rd<Baseline
         let mature_at = r.opt_t()?;
         let refrozen_at = r.opt_t()?;
         let last_seen = Timestamp::from_unix_nanos(r.i64()?);
+        let (mut seq, mut seq_hod, mut latched_hours) = (CusumState::default(), Vec::new(), 0);
+        if version >= 2 {
+            let n_hod = usize::from(r.u8()?);
+            if n_hod != 0 && n_hod != 24 {
+                return Err("bad hour-of-day accumulators");
+            }
+            seq = read_cusum(&mut r)?;
+            for _ in 0..n_hod {
+                seq_hod.push(read_cusum(&mut r)?);
+            }
+            latched_hours = r.u32()?;
+        }
         let n_gains = usize::from(r.u8()?);
-        if n_gains > MAX_GAIN_STATES {
+        if n_gains > 2 * MAX_GAIN_STATES {
             return Err("too many gain states");
         }
         let mut gains = Vec::with_capacity(n_gains);
         for _ in 0..n_gains {
-            let mut g = GainSeries::new(r.u32()?);
+            let gain = r.u32()?;
+            let class = if version >= 2 {
+                match r.u8()? {
+                    0 => LevelClass::Idle,
+                    1 => LevelClass::Occupied,
+                    _ => return Err("bad level class"),
+                }
+            } else {
+                LevelClass::Idle
+            };
+            let mut g = GainSeries::with_class(gain, class);
             for _ in 0..r.u8()? {
                 let slot = slot_index(r.u8()?)?;
                 g.reference[slot] = SlotStats {
@@ -589,6 +705,9 @@ fn decode_body(key: BaselineKey, last_visit: Timestamp, b: &[u8]) -> Rd<Baseline
                 mixed,
                 cusum,
                 change_point,
+                seq,
+                seq_hod,
+                latched_hours,
                 mature_at,
                 refrozen_at,
                 last_seen,
@@ -603,28 +722,34 @@ fn decode_body(key: BaselineKey, last_visit: Timestamp, b: &[u8]) -> Rd<Baseline
 
 /// Encodes a state as a complete file image.
 pub fn encode(state: &BaselineState) -> io::Result<Vec<u8>> {
-    let body = encode_body(state);
-    let mut out = header(&state.key, state.last_visit);
+    encode_version(state, BASELINE_FORMAT_VERSION)
+}
+
+/// Encodes as `version` (1 drops the T-132 fields; kept for the backward-read test).
+fn encode_version(state: &BaselineState, version: u16) -> io::Result<Vec<u8>> {
+    let body = encode_body(state, version);
+    let mut out = header(&state.key, state.last_visit, version);
     out.extend_from_slice(&zstd::encode_all(body.as_slice(), 3)?);
     out.extend_from_slice(&fnv1a(&body).to_le_bytes());
     Ok(out)
 }
 
-fn read_header(bytes: &[u8]) -> Rd<(BaselineKey, Timestamp)> {
+fn read_header(bytes: &[u8]) -> Rd<(BaselineKey, Timestamp, u16)> {
     let mut r = R { b: bytes, at: 0 };
     if r.take(4)? != MAGIC {
         return Err("bad magic");
     }
-    if r.u16()? != BASELINE_FORMAT_VERSION {
+    let version = r.u16()?;
+    if !(1..=BASELINE_FORMAT_VERSION).contains(&version) {
         return Err("unsupported format version");
     }
     let key = r.key()?;
-    Ok((key, Timestamp::from_unix_nanos(r.i64()?)))
+    Ok((key, Timestamp::from_unix_nanos(r.i64()?), version))
 }
 
 /// Decodes a file image.
 pub fn decode(bytes: &[u8]) -> Result<BaselineState, &'static str> {
-    let (key, last_visit) = read_header(bytes)?;
+    let (key, last_visit, version) = read_header(bytes)?;
     if bytes.len() < HEADER_LEN + 8 {
         return Err("truncated");
     }
@@ -633,7 +758,7 @@ pub fn decode(bytes: &[u8]) -> Result<BaselineState, &'static str> {
     if fnv1a(&body).to_le_bytes() != sum {
         return Err("checksum mismatch");
     }
-    decode_body(key, last_visit, &body)
+    decode_body(version, key, last_visit, &body)
 }
 
 // ---- store ----
@@ -733,7 +858,7 @@ impl BaselineStore {
                         continue;
                     }
                     let Ok(bytes) = fs::read(&file) else { continue };
-                    if let Ok((key, t)) = read_header(&bytes) {
+                    if let Ok((key, t, _)) = read_header(&bytes) {
                         out.push((key, t, bytes.len() as u64));
                     }
                 }
@@ -848,6 +973,23 @@ mod tests {
         let s = state(SiteId::new(), 42);
         let bytes = encode(&s).unwrap();
         assert_eq!(decode(&bytes).unwrap(), s);
+        // T-132: version 1 files still read (the new fields default).
+        let mut v1 = s.clone();
+        let mut v2 = s.clone();
+        for sub in v2.subjects.values_mut() {
+            sub.seq.level_pos = 1.5;
+            sub.seq_hod = vec![CusumState::default(); 24];
+            sub.seq_hod[3].occ_neg = 2.0;
+            sub.latched_hours = 1 << 3;
+            for g in &mut sub.gains {
+                g.class = LevelClass::Occupied;
+            }
+        }
+        assert_eq!(decode(&encode(&v2).unwrap()).unwrap(), v2);
+        for sub in v1.subjects.values_mut() {
+            sub.seq = CusumState::default();
+        }
+        assert_eq!(decode(&encode_version(&v2, 1).unwrap()).unwrap(), v1);
         let mut bad = bytes.clone();
         let n = bad.len();
         bad[n - 1] ^= 1;

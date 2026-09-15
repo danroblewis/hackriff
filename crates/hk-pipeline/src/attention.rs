@@ -390,6 +390,43 @@ fn pool_json(p: &PoolStats, resolution: BaselineResolution) -> Value {
     })
 }
 
+/// T-132: default bound on the loaded baselines (ADR-0012 §9); `HK_BASELINE_MEMORY_MB` overrides
+/// it (`0` = unbounded).
+pub const DEFAULT_BASELINE_MEMORY_CAP_BYTES: usize = 256 << 20;
+
+fn baseline_memory_cap() -> Option<usize> {
+    match std::env::var("HK_BASELINE_MEMORY_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(0) => None,
+        Some(mb) => Some(mb.saturating_mul(1 << 20)),
+        None => Some(DEFAULT_BASELINE_MEMORY_CAP_BYTES),
+    }
+}
+
+/// T-132: the gain-state key of each folded channel row: one key for all (`u32`) or per channel
+/// (gains are per band; a channel missing from the map is unknown, 0).
+pub trait SubjectGainKeys {
+    /// Key of `subject`.
+    fn gain_key(&self, subject: &OccupancySubject) -> u32;
+}
+
+impl SubjectGainKeys for u32 {
+    fn gain_key(&self, _: &OccupancySubject) -> u32 {
+        *self
+    }
+}
+
+impl SubjectGainKeys for BTreeMap<ChannelKey, u32> {
+    fn gain_key(&self, subject: &OccupancySubject) -> u32 {
+        match subject {
+            OccupancySubject::Channel { key } => self.get(key).copied().unwrap_or(0),
+            OccupancySubject::Band { .. } => 0,
+        }
+    }
+}
+
 impl AttentionService {
     /// Opens the service over `data_dir/baselines` and the run database (sites and weights).
     pub fn open(
@@ -466,12 +503,13 @@ impl AttentionService {
             class_tx,
             repo,
             sites: Mutex::new(SiteAssigner::new(SiteConfig::default(), sites)),
-            baselines: Mutex::new(Baselines::new(
-                BaselineConfig::default(),
-                1,
-                CELL_FACTOR,
-                store,
-            )),
+            baselines: Mutex::new({
+                let b = Baselines::new(BaselineConfig::default(), 1, CELL_FACTOR, store);
+                match baseline_memory_cap() {
+                    Some(cap) => b.with_memory_cap(cap),
+                    None => b,
+                }
+            }),
             scorer: Mutex::new(Scorer::default()),
             weights: Mutex::new(weights),
             provider: Arc::new(SharedInterestingness::default()),
@@ -490,6 +528,25 @@ impl AttentionService {
         if let Some(c) = &self.counters {
             f(c);
         }
+    }
+
+    /// T-132: publishes the baseline memory bound's counters and gauge (`/api/status`).
+    fn sync_baseline_gauges(&self, b: &Baselines) {
+        self.bump(|c| {
+            let a = &c.attention;
+            a.refused_folds.store(b.refused_folds(), Ordering::Relaxed);
+            a.unloaded_engines
+                .store(b.unloaded_engines(), Ordering::Relaxed);
+            a.gain_overflow_folds
+                .store(b.gain_overflow_folds(), Ordering::Relaxed);
+            a.memory_bytes
+                .store(b.memory_bytes() as u64, Ordering::Relaxed);
+        });
+    }
+
+    /// T-132: replaces the baseline memory cap (`None` = unbounded); applies from the next fold.
+    pub fn set_baseline_memory_cap(&self, bytes: Option<usize>) {
+        lock(&self.baselines).set_memory_cap(bytes);
     }
 
     fn persist_sites(&self, sites: &mut SiteAssigner) {
@@ -548,6 +605,7 @@ impl AttentionService {
         let out = {
             let mut b = lock(&self.baselines);
             let out = b.observe(site, offset, cal, obs);
+            self.sync_baseline_gauges(&b);
             if let Ok(n) = b.flush(obs.t, false) {
                 self.bump(|c| {
                     c.attention
@@ -594,6 +652,7 @@ impl AttentionService {
         let (out, pool_fcos, pool) = {
             let mut b = lock(&self.baselines);
             let out = b.observe(site, offset, cal, &obs).ok();
+            self.sync_baseline_gauges(&b);
             let sub = b
                 .key(site, cal)
                 .and_then(|key| b.engines().find(|e| e.state.key == key))
@@ -675,7 +734,7 @@ impl AttentionService {
         rows: &[OccupancyStat],
         first_sightings: u64,
         t_end: Timestamp,
-        gain: u32,
+        gain: impl SubjectGainKeys,
     ) -> Vec<IntervalFold> {
         let mut folded = Vec::new();
         let (mut observed_s, mut accrues) = (0.0_f64, false);
@@ -686,7 +745,7 @@ impl AttentionService {
                     accrues |= r.site.accrues_baseline();
                 }
                 OccupancySubject::Channel { .. } => {
-                    if let Some(f) = self.fold_row(r, gain) {
+                    if let Some(f) = self.fold_row(r, gain.gain_key(&r.subject)) {
                         folded.push(f);
                     }
                 }
@@ -729,10 +788,11 @@ impl AttentionService {
         let Some(offset) = lock(&self.sites).site(id).map(|s| s.utc_offset_min) else {
             return empty(ComparisonStatus::NoBaseline);
         };
-        let mut b = lock(&self.baselines);
-        if b.load_site(id, offset).is_err() {
+        // T-132: disk reads outside the baselines lock.
+        if Baselines::load_site_outside_lock(&self.baselines, id, offset).is_err() {
             return empty(ComparisonStatus::Unavailable);
         }
+        let b = lock(&self.baselines);
         let z_min = NoveltyConfig::default().z_min;
         /// One subject's per-interval evidence.
         #[derive(Default)]
@@ -1124,9 +1184,10 @@ impl AttentionService {
     /// `GET /api/baselines`.
     pub fn baselines_json(&self, site: Option<SiteId>) -> Result<Value, AttentionError> {
         let (id, offset) = self.site_or_current(site)?;
-        let mut b = lock(&self.baselines);
-        b.load_site(id, offset)
+        // T-132: disk reads outside the baselines lock.
+        Baselines::load_site_outside_lock(&self.baselines, id, offset)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
+        let b = lock(&self.baselines);
         // Maturity at the sample clock (ADR-0012 §0): the site's latest folded visit; the
         // service clock only for a site with no baseline yet.
         let now = b
@@ -1183,9 +1244,10 @@ impl AttentionService {
     ) -> Result<Value, AttentionError> {
         let (id, offset) = self.site_or_current(site)?;
         let slot = slot.unwrap_or_else(|| HourOfWeek::of((self.clock)(), offset));
-        let mut b = lock(&self.baselines);
-        b.load_site(id, offset)
+        // T-132: disk reads outside the baselines lock.
+        Baselines::load_site_outside_lock(&self.baselines, id, offset)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
+        let b = lock(&self.baselines);
         let mut rows = Vec::new();
         let mut truncated = false;
         for e in b.engines().filter(|e| e.state.key.site == id) {
@@ -1257,9 +1319,10 @@ impl AttentionService {
         let (id, offset) = self.site_or_current(site)?;
         let t = (self.clock)();
         let (lo, hi) = (f_lo.unwrap_or(f64::MIN), f_hi.unwrap_or(f64::MAX));
-        let mut b = lock(&self.baselines);
-        b.load_site(id, offset)
+        // T-132: disk reads outside the baselines lock.
+        Baselines::load_site_outside_lock(&self.baselines, id, offset)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
+        let mut b = lock(&self.baselines);
         let mut n = 0;
         for e in b.engines_mut().filter(|e| e.state.key.site == id) {
             n += e.refreeze(t, |s| {
@@ -1358,6 +1421,64 @@ pub(crate) mod tests {
             Arc::new(|| Timestamp::from_unix_nanos(7 * 86_400 * 1_000_000_000)),
         )
         .unwrap()
+    }
+
+    /// T-132 review: the service caps the loaded baselines by default, and a fold the cap refuses
+    /// is visible in `/api/status` (`attention.refused_folds`, `memory_bytes`, …) while still being
+    /// scored.
+    #[test]
+    fn attention_memory_cap_refusals_show_in_status() {
+        let dir = std::env::temp_dir().join(format!("hk-att-cap-{}", SiteId::new()));
+        let counters = Arc::new(Counters::default());
+        let s = AttentionService::open(
+            &dir,
+            Arc::new(Mutex::new(Repository::open_in_memory().unwrap())),
+            Some(Arc::clone(&counters)),
+            Arc::new(|| Timestamp::from_unix_nanos(7 * 86_400 * 1_000_000_000)),
+        )
+        .unwrap();
+        if std::env::var_os("HK_BASELINE_MEMORY_MB").is_none() {
+            assert_eq!(
+                lock(&s.baselines).memory_cap(),
+                Some(DEFAULT_BASELINE_MEMORY_CAP_BYTES)
+            );
+        }
+        let cur = s
+            .set_current_site(SiteSelect {
+                name: Some("home".into()),
+                ..SiteSelect::default()
+            })
+            .unwrap();
+        let site = SiteKey::Site(cur["record"]["id"].as_str().unwrap().parse().unwrap());
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 69_000,
+            hi_cell: 69_004,
+        };
+        let row = series_row(0, site, OccupancySubject::Channel { key }, 0.1);
+        s.ingest_occupancy(&row, 0).expect("scored");
+        let a = counters.to_json()["attention"].clone();
+        assert!(a["memory_bytes"].as_u64().unwrap() > 0, "{a}");
+        assert_eq!(a["refused_folds"], 0, "{a}");
+        // A cap below what is loaded: a new subject's fold is refused but still scored.
+        s.set_baseline_memory_cap(Some(1));
+        let other = ChannelKey {
+            lo_cell: 70_000,
+            hi_cell: 70_004,
+            ..key
+        };
+        let row = series_row(1, site, OccupancySubject::Channel { key: other }, 0.1);
+        let out = s
+            .ingest_occupancy(&row, 0)
+            .expect("refused folds are still scored");
+        assert!(!out.accrued);
+        let a = counters.to_json()["attention"].clone();
+        println!("T-132 status after a refused fold: {a}");
+        assert_eq!(a["refused_folds"], 1, "{a}");
+        for field in ["unloaded_engines", "gain_overflow_folds", "memory_bytes"] {
+            assert!(a[field].is_u64(), "{field}: {a}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A 15-min T-118 row at `q` quarter-hours of `subject` under `site` (12 revisits, 75 s apart:

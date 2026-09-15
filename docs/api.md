@@ -196,6 +196,15 @@ Opaque, per-build JSON object of counters (source samples, chain stats, control-
 | `compute.stft_builds` | number | STFTs built this run (one per reader per segment, plus display rebuilds) |
 | `compute.provider_changes` | number | Builds whose provider differed from that reader's first. Always `0` in a correct run |
 
+**Baselines and attention (T-119, T-132, ADR-0012 §3)** are reported under `"attention"`: counters `folds`, `novel_folds`, `change_points`, `publishes`, `baseline_writes`, `errors`, plus the baseline memory bound. Loaded baselines are capped at 256 MiB by default (`HK_BASELINE_MEMORY_MB`, `0` = unbounded).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `attention.memory_bytes` | number | Gauge: approximate heap bytes of the loaded baselines |
+| `attention.unloaded_engines` | number | Baseline keys saved and unloaded by the cap (reloaded on their next fold) |
+| `attention.refused_folds` | number | Folds whose learning the cap refused; their novelty is still scored against what is loaded |
+| `attention.gain_overflow_folds` | number | Folds under a gain state beyond a subject's kept gain slots (4 per level class); scored, not learned |
+
 ## Control API (T-050)
 
 Device, display, recording and bookmark endpoints, all behind the bearer token, all audited once authenticated. Every mutating body is a JSON object (`Content-Type: application/json`); an unknown field is `400 invalid`. Device endpoints (`center`, `rate`, `gains`, `bias_tee`) act on a *live* source ([`ApiState::live_control`]); on a replayed recording they answer `409 not_live`, while display, pause, recording and bookmarks keep working.

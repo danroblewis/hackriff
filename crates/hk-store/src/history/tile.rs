@@ -182,6 +182,14 @@ fn same_shape(a: Option<f32>, b: Option<f32>) -> bool {
 }
 
 impl ProvenanceSummary {
+    /// Key ([`super::GainState::key`]) of the gain state with the most frames, 0 when none is
+    /// known (T-132 baseline gain-state key).
+    pub fn dominant_gain_key(&self) -> u32 {
+        self.gain_states
+            .iter()
+            .max_by_key(|(_, n)| *n)
+            .map_or(0, |(g, _)| g.key())
+    }
     /// Fraction of contributions flagged suspect (the hk-model `SpectrumTile::suspect_fraction`).
     pub fn suspect_fraction(&self) -> f64 {
         if self.frames == 0 {

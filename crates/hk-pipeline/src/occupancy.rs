@@ -260,6 +260,29 @@ fn pick<'a>(
     }
 }
 
+/// T-132: each channel's dominant gain-state key over its own visits starting in `iv` (gain tables
+/// are per band, so channels on different bands can differ within one interval).
+fn channel_gain_keys(
+    series: &BTreeMap<SubjectId, Vec<VisitSample>>,
+    iv: TimeRange,
+) -> BTreeMap<ChannelKey, u32> {
+    let (s0, s1) = (iv.start.as_unix_nanos(), iv.end.as_unix_nanos());
+    series
+        .iter()
+        .filter_map(|(id, visits)| match id {
+            SubjectId::Channel(key) => Some((
+                *key,
+                engine::dominant_gain_key(
+                    visits
+                        .iter()
+                        .filter(|s| s.start_ns >= s0 && s.start_ns < s1),
+                ),
+            )),
+            SubjectId::Band(..) => None,
+        })
+        .collect()
+}
+
 fn snap_band(freq: FreqRange, f_cell: f64) -> (FreqRange, SubjectId) {
     let lo = (freq.lo_hz / f_cell).floor() as i64;
     let hi = ((freq.hi_hz / f_cell).ceil() as i64).max(lo + 1);
@@ -921,8 +944,8 @@ impl OccupancyService {
         }
         // T-128: the interval's own rows (not the hour rollup) fold into the baselines, the
         // inventory's first sightings feed the new-emitter rate, and candidates are re-scored.
-        // This thread never touches samples. Gain-state key 0 (single/unknown): levels are above
-        // the local floor, so a gain step moves floor and level together.
+        // This thread never touches samples. T-132: each channel's gain-state key is the dominant
+        // front-end gain state of its own visits (gains are per band).
         // T-131: rows carry the site assigned at the close (a pinned or fixed site accrues
         // baselines; unassigned/mobile never do), and the folds step the novelty alarms with the
         // history's provenance steps around the interval.
@@ -934,7 +957,8 @@ impl OccupancyService {
             let own: Vec<OccupancyStat> =
                 rows.iter().filter(|r| r.interval == iv).cloned().collect();
             let k = self.first_sightings(inner, iv, &own);
-            let folds = a.ingest_interval(&own, k, iv.end, 0);
+            let gains = channel_gain_keys(&inner.series, iv);
+            let folds = a.ingest_interval(&own, k, iv.end, gains);
             self.feed_alarms(&folds, &own, iv, f_cell, geo);
         }
         match inner.store.as_mut().map(|s| s.append(&rows)) {
@@ -1036,6 +1060,63 @@ mod tests {
 
     const F_CELL: f64 = 6250.0;
     const T_CELL: i64 = 1_000_000_000;
+
+    /// T-132 review: gains are per band, so two channels on bands with different gain states get
+    /// different keys in the same interval (and a visit outside the interval does not count).
+    #[test]
+    fn occupancy_gain_key_is_per_subject_within_one_interval() {
+        let visit = |start_s: i64, dur_s: i64, gain_key: u32| VisitSample {
+            start_ns: start_s * T_CELL,
+            dur_ns: dur_s * T_CELL,
+            tier: Tier::BackgroundSweep,
+            occupied: false,
+            suspect: false,
+            above_fraction: 0.0,
+            threshold_db: -100.0,
+            guard_clamped: false,
+            level_db: -104.0,
+            floor_db: -105.0,
+            floor_source: hk_model::attention::occupancy::FloorSource::History,
+            floor_suspect: false,
+            gain_key,
+        };
+        let key = |lo| ChannelKey {
+            scheme: 1,
+            lo_cell: lo,
+            hi_cell: lo + 4,
+        };
+        let (band_a, band_b) = (key(16_000), key(64_000));
+        let mut series = BTreeMap::new();
+        // Band A (LNA 16 dB): mostly key 0xA in the interval; a long 0xB visit before it.
+        series.insert(
+            SubjectId::Channel(band_a),
+            vec![
+                visit(0, 5000, 0xB),
+                visit(1000, 1, 0xA),
+                visit(1500, 1, 0xA),
+            ],
+        );
+        // Band B (LNA 32 dB): key 0xB.
+        series.insert(
+            SubjectId::Channel(band_b),
+            vec![visit(1100, 1, 0xB), visit(1600, 1, 0xB)],
+        );
+        series.insert(SubjectId::Band(0, 1), vec![visit(1100, 1, 0xC)]);
+        let iv = TimeRange::new(
+            Timestamp::from_unix_nanos(900 * T_CELL),
+            Timestamp::from_unix_nanos(1800 * T_CELL),
+        );
+        let keys = channel_gain_keys(&series, iv);
+        assert_eq!(keys.len(), 2, "channels only: {keys:?}");
+        assert_eq!(keys[&band_a], 0xA);
+        assert_eq!(keys[&band_b], 0xB);
+        use crate::attention::SubjectGainKeys;
+        assert_ne!(
+            keys.gain_key(&OccupancySubject::Channel { key: band_a }),
+            keys.gain_key(&OccupancySubject::Channel { key: band_b })
+        );
+        assert_eq!(keys.gain_key(&OccupancySubject::Channel { key: key(9) }), 0);
+    }
 
     #[test]
     fn occupancy_band_snapping_is_outward_and_stable() {
