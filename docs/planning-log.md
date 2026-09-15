@@ -1232,3 +1232,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Sparse hour-of-week `SlotSeries` (168-bit mask plus touched slots); behaviour bit-identical per a 34,560-fold fingerprint against dense; codec stays v2.
   - Memory per key at 9.7k cells x 2 gain states: 369 MB dense, 123 MiB sparse after a parked 48 h. The 48 h test under the default cap refuses 0 folds.
   - A full week refills all slots (~480 MB), so T-135 (channel-pooled level stats) is added as a follow-up; it does not block T-124.
+- **B0.342 T-134 review (Opus): FIX-FIRST.**
+  - **Bug:** user refreeze swaps sparse reference↔adaptive without updating engine bytes, so memory can pass the cap unseen (about 130 MB after a week).
+  - **Risk:** `growth_of` ignores auto-refreeze growth.
+  - **Verified OK:** mask/insert sync, decay/pooling/refreeze equivalence to dense, untrusted-file indexing, hour-of-day reservation.
+  - **Nits:** a boxed iterator per series in `pools`; the 48 h test's `early` run is unused.
+  - **Next:** one fix round launched in the T-134 worktree.
