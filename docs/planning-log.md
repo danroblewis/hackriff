@@ -1013,3 +1013,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Error codes consistent; docs/contract in sync; merge-tree with main clean.
   - **Fix round launched:** must-fixes, plus one-pass log coverage, an unconditional e2e top-emitter assert and partial-log warning wording.
   - **Merge order:** T-118 before T-121. Source/site history filters are tracked in T-128.
+- **B0.308 T-127 delivered** (8ff6b30). What it adds:
+  - **Bandit wiring:** enabled by the plan's `extra.bandit`, off by default so the demo is unchanged.
+  - **Stub interestingness:** built from confirmed tracks and published via `SharedInterestingness`.
+  - **Dwell outcomes:** built from detections in each dwell window, recorded 1 s after on the stream clock.
+  - **Verification:** TrustEval verdicts are passed to the bandit.
+  - **Repack:** `refresh_bandit()` runs before each step.
+  - **SchedulerHub snapshots.**
+  - **Routes:** `/api/scheduler` (POI and gaps from the observation log), `/arms`, `/leases` create/list/delete (audited).
+  - **T-120 follow-ups:** all 8, including an alloc-free repack test, gap-free passes with floor deferrals, NaN guard, `verifications_dropped` and the ADR amendment.
+
+  The mock-SDR e2e passes with the bandit on and off. Known gaps for T-128: the real candidates, and `valid_decodes`, which is a global delta. A timeboxed Opus review is running and will also recommend a merge order across T-118, T-119, T-121 and T-127.

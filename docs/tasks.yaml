@@ -2010,7 +2010,8 @@ tasks:
   - id: T-127
     milestone: M2
     title: "Bandit pipeline wiring + scheduler routes + POI from the observation log"
-    status: in-progress
+    status: review
+    commit: 8ff6b30
     deps: [T-115, T-120]
     parallel_group: M2Q
     use_cases: [AWARE-027, SIGNAL-027]
