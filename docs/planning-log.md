@@ -487,3 +487,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Suspects:** T-070 refinement centre, the squelch SNR measure, T-065/T-073 mode rules, T-066 lifecycle, the T-072 ring change.
   - **T-076 does:** a mock-SDR real-time looping test with the exact request, a bisect over 268fcd4..e95ec47, and a root-cause fix. The supervisor re-verifies live.
   - **Why the existing tests may have missed it:** they are unpaced, short, or request by emitter id.
+- **B0.166 T-072 merge verified** (core ring change): lint, 151 Rust test groups (0 failed), Python, UI and acceptance all green. The T-076 bisect covers the range including this merge.

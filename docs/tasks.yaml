@@ -1194,7 +1194,7 @@ tasks:
     milestone: M0b
     title: Pipeline fidelity follow-ups from blind acceptance (device-gap sample loss, readsb stamp latency, single-detection tracks, short-burst resolution)
     status: done
-    commit: "c9bab4a (merged; full verification running)"
+    commit: "c9bab4a (merged cde65cf; verified: lint, 151 Rust test groups, py, ui, acceptance green)"
     result: "1) ring (hk-core ring/mod.rs) judged overwrite from the post-jump write end at a core:global_index jump, so readers waiting at the jump looked lapped and skipped to newest (0.05-2.2 s lost per gap); now only actually-stored samples count as overwritten; AWARE-042 2 s tolerance (611k samples) -> 0 lost, gaps asserted exactly. 2) readsb stamps used last index written to stdin (pipe/block buffering, up to 95 ms late); wrapper now reads Beast output on loopback, maps readsb 12 MHz sample-count timestamps to stream indices (constant 200 us offset, sample-exact), 2^20-sample silence lead-in; fallback to old stamp; SIGNAL-001 tolerance 120 ms -> 2 ms, 16/16. 3) SPACE-050: tracker fine - pipeline tagged detections with loaded calibration never stored in the DB so all 60 detection writes failed; run.rs store_calibrations at startup; 6 detections, 6 stored, 6 emitters (was 0); SPACE-050 asserts each carrier blind + stored. 5) daemon test: real-time pace + check stream list after run end. 4) short-burst detector NOT built (budget) -> T-075."
     interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
     deps: [T-047]
