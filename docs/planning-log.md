@@ -505,3 +505,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Every agent brief from now on starts with the seed step.
     - Coordinator verification moves back to main's `target/` so it stays warm as the seed; agents no longer build there.
     - Coordinator memory updated.
+- **B0.171 Supervisor retracted B0.170.** A cold hk-pipeline build (70 crates) takes 16 s uncached, so target seeding saves nothing: no seed-target recipe, no new launch step. T-077 stays on parallel nextest runs; the bottleneck is the 914 s sequential test run. Memory reverted. Coordinator verification stays on its isolated scratchpad target.
