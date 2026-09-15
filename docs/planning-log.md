@@ -1319,3 +1319,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Why earlier tests missed it:** the non-scheduler tests (T-118/T-121) never retune, and the bandit e2e only checks dwell logs.
   - **Decision:** do not bend the scene to slow scheduler settings. T-139 (Opus, high effort) fixes the product; T-124 is blocked on it.
   - **T-124 handoff:** the agent is at 293k tokens; it will write a handoff note and commit WIP. The simulator comparison passed: bandit 124/124 emitters vs round-robin 101/124; median time to first detection 152 s vs 833 s.
+- **B0.355 T-135 full check green; T-136 merged; T-139 launched.**
+  - T-135 full check: lint clean, 1370/1370 tests, acceptance 32/32 (67 s).
+  - T-136 merged cleanly (f0b963b).
+  - T-124 WIP is kept on branch `t-124-wip` (d46cb65); its handoff is in the coordinator scratchpad, `t124-handoff.keep.md`. Diagnostics with 0.5 s sweep steps at 1 M/500 k gave 108 frames, 105 tiles and 133 alarm inputs (all immature) over 3.8 h. Root cause: `history.rs:73-80` row length; `stft.rs:125-128,:314` drop partial rows on retune; `scheduler/config.rs:91-94` sets 50 ms hops.
+  - T-139 launched (Opus, high effort). Full check started.
