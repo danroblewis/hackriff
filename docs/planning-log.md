@@ -2230,3 +2230,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - (h) gain step shows 0 provenance-explained suppressions; the evidence is no alarm plus the disclosure.
     - The bandit made only 4 dwells per run, a scene-design artefact.
   - **Filed T-196:** span_stats FCO depends on the query band (433.475: 0.073 vs 0.296).
+- **B0.471 Board reconciled** (user report: ticket counts wrong).
+  - **Cause:** every task from T-149 on was appended below the `notes:` key, so parsers saw only T-001..T-148 (plus T-100).
+  - **Fix:** all entries moved into `tasks`; milestone M0 set on T-001..T-046; ids validated with no gaps and no dangling deps.
+  - **Filed:** T-197 (hot-edit flake, pinned), M3 T-198..T-207, MAUTO-DESIGN T-208 (ADR-0015, since ADR-0014 is the IQ ring), T-209 (T-186 review follow-ups).
+- **B0.472 M2 exit check on main after the T-124 merge (302655e).**
+  - **Green:** acceptance_m2 8/8 (80.9 s), acceptance 28/28, lint clean.
+  - **Stopped:** `just test` halted at 1054/1374 on the hot-edit flake (5/5 alone, now pinned).
+  - **T-186 Opus review: MERGE.** Findings became T-209.
+  - **Now:** T-186 merged; confirming full check (test + acceptance + acceptance-m2) running. M2 closes when it is green.
+  - **Launched (planning only, no builds):** T-198 M3-DESIGN (ADR-0016) and T-208 MAUTO-DESIGN (ADR-0015).

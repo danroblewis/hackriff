@@ -2013,7 +2013,7 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: review
+    status: done
     commit: 00cbaf9
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133, T-146, T-147, T-173, T-176]
     parallel_group: M2E
@@ -2981,7 +2981,7 @@ tasks:
   - id: T-186
     milestone: M2-fix
     title: "Detection -> identification latency: a strong continuous WFM station takes too long to get family + top explanation"
-    status: review
+    status: done
     commit: e5261b7
     priority: high
     deps: []
@@ -3162,7 +3162,7 @@ tasks:
   - id: T-198
     milestone: M3
     title: "M3-DESIGN: ADR-0016 classification contracts (C15/C18/C38): Classification output with open-set unknown, taxonomy versioning, fusion with C17 priors, EmissionFeatures/Signature schema, ml-runtime interface (Mac-first), blind evaluation protocol; finalise M3 task graph"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: M3D
@@ -3324,6 +3324,21 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+  - id: T-209
+    milestone: M2-hardening
+    title: "T-186 review follow-ups: early analog identification double-counts the emitter (SOURCE_ANALOG_CHAIN vs RDS_DECODER_ID sighting keys), pilot-locked no-PI emitters bypass the overload flag, duplicate refined-tuning rows, wasted RDS decode on the 1 s window"
+    status: todo
+    priority: high
+    deps: [T-186]
+    parallel_group: PIPELINE
+    use_cases: [SIGNAL-062]
+    found_by: "Opus review of T-186 (2026-09-15), verdict MERGE"
+    acceptance: "full-window write does not increment the sighting count when the early write placed the emitter (test: count +1 per session); mode_emitter refuses to place an emitter while the front-end overload flag is set (test with an overloaded mock capture); refined tuning stored once per session; identify skips RDS on the 1 s window; concurrent_demod re-run 10x on main with no failure or a filed root cause"
+    area: crates/hk-pipeline/src/chains/analog.rs, crates/hk-demod record.rs, crates/hk-pipeline tests
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
