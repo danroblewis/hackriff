@@ -1645,7 +1645,8 @@ tasks:
   - id: T-102
     milestone: M0b
     title: "Steady WFM station track width overestimated (407.8 kHz vs 400 kHz wfm-rds cap) so the station itself never gets a chain"
-    status: in-progress
+    status: done
+    commit: be5934c
     deps: [T-101]
     parallel_group: T101
     use_cases: [SIGNAL-062, AWARE-053]
@@ -1659,7 +1660,7 @@ tasks:
   - id: T-103
     milestone: M0b
     title: "readsb plugin chain loses the first frame(s) under load (plugin process startup races the stream start)"
-    status: todo
+    status: in-progress
     deps: []
     parallel_group: T103
     use_cases: [SIGNAL-001]
