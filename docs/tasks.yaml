@@ -1970,7 +1970,7 @@ tasks:
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
     status: todo
-    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131]
+    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
     acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s)"
@@ -2070,14 +2070,28 @@ tasks:
     core_interface: true
   - id: T-131
     milestone: M2
-    title: "M2 integration part 2 (T-128 items 6-9): history source/site tiles + filters, baseline memory bound, T-119 residuals, full-path e2e, alarm hook"
+    title: "M2 integration part 2a: alarm wiring, AlarmKind unification, report/e2e full path, candidates when bandit off, discriminating suspect-ban test"
     status: in-progress
     deps: [T-128, T-122, T-129, T-130]
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
     found_by: "T-128 report 2026-09-15"
-    acceptance: "history tiles record source+site (versioned, v1/v2 readable) with report/history filters + api.md/api_contract; GainSeries memory bounded with measured bound; per-slot change-point latch or documented auto re-freeze + test; sequential weak-interferer reference test with real levels; http.rs module-doc route rows; AlarmService::observe_fold called after ingest_occupancy with device steps carrying gain deltas; T-127 bandit-on e2e un-ignored; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarms raise for the injected emitter; report_scene.rs updated; compare_report direct test; from T-128 fix round: replace report-only ChangeKind with AlarmKind (incl QuieterThanUsual); wire observe_fold from ingest_interval returned FoldOutcomes; per-gain-state key (hard-coded 0); low-FCO level-statistic bimodality; candidates when bandit off; Baselines load/insert split so load_site is outside the lock; make bandit_suspect_candidate_gets_one_verification_then_is_banned discriminating (fails when clip=false, using T-130 device-level overdrive)"
-    area: crates/hk-store/src/history, crates/hk-context/src/occupancy/baseline.rs, crates/hk-pipeline (attention/alarms wiring), tests/e2e
+    acceptance: "AlarmService::observe_fold wired from ingest_interval FoldOutcomes with device steps carrying gain deltas (from history provenance); /api/anomalies receives live alarms; report-only ChangeKind replaced by AlarmKind incl QuieterThanUsual; candidates published (read-only) when bandit off; bandit_suspect_candidate_gets_one_verification_then_is_banned discriminating (fails when clip=false, uses T-130 device-level overdrive); compare_report direct test; report_scene.rs updated; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarm raised for the injected emitter; http.rs module-doc route rows""
+    area: "crates/hk-pipeline (attention, alarms, candidates, reports wiring), crates/hk-context/src/report, crates/hk-api/src/http.rs module docs, tests/e2e"
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-132
+    milestone: M2
+    title: "M2 integration part 2b: history source+site tiles and filters; baseline memory bound, per-slot change-point latch, per-gain-state key, level-statistic bimodality, load_site outside lock, weak-interferer sequential test"
+    status: in-progress
+    deps: [T-128, T-116, T-126]
+    parallel_group: M2B
+    use_cases: [AWARE-042, AWARE-044, AWARE-033]
+    found_by: "T-128/T-119 reviews 2026-09-15 (split from T-131)"
+    acceptance: "history tiles record source+site (additive versioned tile format, v1/v2 readable) with history + report filters by source/site, docs/api.md + api_contract; Baselines GainSeries memory bounded (sparse or unload idle engines) with measured bound; per-slot change-point latch (or documented auto re-freeze) + test; sequential weak-interferer test with real channel levels showing reference not absorbed; adapter per-gain-state key from occupancy/provenance (not hard-coded 0); low-FCO level-statistic bimodality fixed (e.g. separate occupied/idle pools or level only from occupied visits with min count); Baselines load/insert split so load_site disk I/O is outside the lock"
+    area: "crates/hk-store/src/history, crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline, crates/hk-api (history/report filter params)"
     needs: none
     model: opus
     effort: high
