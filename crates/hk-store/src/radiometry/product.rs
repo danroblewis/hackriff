@@ -58,7 +58,8 @@ pub struct FloorProductConfig {
     /// T-139: fold frames of another cell shape (e.g. a scheduler's short-step history rows with
     /// fewer averages) instead of rejecting them (false). Tiles record whether their shape is
     /// uniform, and [`FloorProduct::floor_vs_time`] decides per tile from that persisted record: a
-    /// uniform tile's cells use their own shape's bias, a mixed-shape tile's cells give no floor.
+    /// uniform tile's cells use their own shape's bias, a mixed-shape tile's cells the bias of the
+    /// Gamma mixture of its values (T-141; no floor for a mixed tile of format < 4).
     pub mixed_shapes: bool,
 }
 
@@ -557,9 +558,10 @@ impl FloorProduct {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let (mut coverage, mut level, mut rolled_up) = (0f32, u8::MAX, false);
         // T-139: the decision is per tile, from the tile's own persisted shape, so it survives a
-        // restart. Every frame here resolves a shape from its resolution, so a cell with a finite
-        // `p_low_db` and no `floor_db` sits in a mixed-shape tile: it gives no floor, never a
-        // wrong one. A uniform tile's own bias is `p_low − floor_db`; when that agrees with the
+        // restart. A mixed-shape tile's cells carry the Gamma-mixture bias (T-141); a cell with a
+        // finite `p_low_db` and no `floor_db` sits in a mixed tile without per-shape counts
+        // (format < 4): it gives no floor, never a wrong one. A cell's own bias is
+        // `p_low − floor_db`; when that agrees with the
         // product shape's to the stored 0.01-dB rounding, the product's exact bias is used (so a
         // single-geometry product computes exactly as before T-139).
         for c in cells

@@ -23,6 +23,7 @@ use hk_store::{FloorProduct, FloorProductConfig, RegionQuery, Resolution};
 use serde_json::{Value, json};
 
 const T139: &str = "T-139";
+const T141: &str = "T-141";
 const SAMPLE_RATE: f64 = 500e3;
 /// Simulated span, h: eight 15-min occupancy intervals.
 const SPAN_H: f64 = 2.0;
@@ -64,13 +65,39 @@ struct TileCounts {
     uniform: usize,
     /// Uniform tiles with an observed cell (finite low percentile).
     uniform_observed: usize,
+    /// Tiles with an observed cell.
+    observed: usize,
     /// Tiles with at least one bias-corrected `floor_db`.
     with_floor: usize,
-    /// Mixed-shape tiles with a `floor_db` (must be none).
+    /// Mixed-shape tiles with a `floor_db` (T-141: Gamma-mixture bias).
     mixed_with_floor: usize,
+    /// T-141: every finite level-0 `floor_db` in the central half of the recording's span.
+    central_floors: Vec<f32>,
+    /// The same cells' raw low percentile, power mean and frame count (diagnostics).
+    central_raw: Vec<f32>,
+    central_mean: Vec<f32>,
+    central_frames: Vec<f32>,
+    /// Level-0 values per cell shape over all tiles.
+    shapes: Vec<(f32, u64)>,
+    /// Frames per gain state and provenance steps over all tiles (diagnostics).
+    gains: Vec<(String, u64)>,
+    steps: usize,
 }
 
-fn tile_counts(history_dir: &std::path::Path) -> TileCounts {
+fn median_of(v: &[f32]) -> Option<f32> {
+    let mut v = v.to_vec();
+    v.sort_by(f32::total_cmp);
+    (!v.is_empty()).then(|| v[v.len() / 2])
+}
+
+impl TileCounts {
+    fn median_floor(&self) -> Option<f32> {
+        median_of(&self.central_floors)
+    }
+}
+
+/// `central` is the frequency range whose level-0 floors are collected.
+fn tile_counts(history_dir: &std::path::Path, central: FreqRange) -> TileCounts {
     let product = FloorProduct::open(
         history_dir,
         FloorProductConfig {
@@ -108,7 +135,32 @@ fn tile_counts(history_dir: &std::path::Path) -> TileCounts {
                 .iter()
                 .any(|c| c.observed() && c.p_low_db.is_finite());
             let floor = h.cells.iter().any(|c| c.floor_db.is_finite());
+            for (i, c) in h.cells.iter().enumerate() {
+                let f = h.freq_of(i % h.nf);
+                let mid = 0.5 * (f.lo_hz + f.hi_hz);
+                if c.floor_db.is_finite() && mid >= central.lo_hz && mid <= central.hi_hz {
+                    n.central_floors.push(c.floor_db);
+                    n.central_raw.push(c.p_low_db);
+                    n.central_mean.push(c.mean_db);
+                    n.central_frames.push(c.frames as f32);
+                }
+            }
+            for (g, frames) in &h.provenance.gain_states {
+                let key = format!("{g:?}");
+                match n.gains.iter_mut().find(|(k, _)| *k == key) {
+                    Some(e) => e.1 += frames,
+                    None => n.gains.push((key, *frames)),
+                }
+            }
+            n.steps += h.provenance.steps.len();
+            for &(s, v, _) in &h.provenance.cell_shapes {
+                match n.shapes.iter_mut().find(|(k, _)| *k == s) {
+                    Some(e) => e.1 += v,
+                    None => n.shapes.push((s, v)),
+                }
+            }
             n.tiles += 1;
+            n.observed += usize::from(observed);
             n.uniform += usize::from(uniform);
             n.uniform_observed += usize::from(uniform && observed);
             n.with_floor += usize::from(floor);
@@ -128,6 +180,8 @@ fn run_scene(out: &SynthOutput, scheduler: bool) -> Outcome {
     let rec = hk_e2e::scene::join_scene_windows(out, &src.0, "scene").unwrap();
     let blind = blind_meta(&rec.meta, &src.0);
     let replay = open_mock_replay(&blind, Pacing::Unpaced, MockEnd::Stop).unwrap();
+    // T-141: the central half of the recording's span, clear of its roll-off and coverage edges.
+    let central = FreqRange::centered(replay.info.center_hz, replay.info.sample_rate_hz / 2.0);
     let mut plan = replay_plan(
         replay.info.center_hz,
         replay.info.sample_rate_hz,
@@ -158,16 +212,31 @@ fn run_scene(out: &SynthOutput, scheduler: bool) -> Outcome {
     assert!(summary.errors.is_empty(), "{:?}", summary.errors);
     let stats = occ.stats();
     let alarms = alarms.status_json();
-    let tiles = tile_counts(&data_dir.join("history"));
+    let tiles = tile_counts(&data_dir.join("history"), central);
     let tag = if scheduler { "scheduler" } else { "fixed" };
     eprintln!(
         "[{T139}] {tag}: history reader {}; history {}; scheduler {}; attention {}; occupancy \
-         {stats:?}; alarms {alarms}; level-0 tiles {tiles:?} (mixed {})",
+         {stats:?}; alarms {alarms}; level-0 tiles {} observed {} uniform {} with floor {} mixed \
+         with floor {} (mixed {}); central floors {} median {:?} dB (raw p_low {:?}, mean {:?}, \
+         frames {:?}); shapes {:?}; gains {:?}; steps {}",
         summary.counters["readers"]["history"],
         summary.counters["history"],
         summary.counters["scheduler"],
         summary.counters["attention"],
+        tiles.tiles,
+        tiles.observed,
+        tiles.uniform,
+        tiles.with_floor,
+        tiles.mixed_with_floor,
         tiles.tiles - tiles.uniform,
+        tiles.central_floors.len(),
+        tiles.median_floor(),
+        median_of(&tiles.central_raw),
+        median_of(&tiles.central_mean),
+        median_of(&tiles.central_frames),
+        tiles.shapes,
+        tiles.gains,
+        tiles.steps,
     );
     Outcome {
         counters: summary.counters,
@@ -217,19 +286,43 @@ fn scheduler_default_settings_feed_history_occupancy_baselines_and_alarms() {
         "[{T139}] alarm inputs: {}",
         r.alarms
     );
-    // Mixed-shape tiles are expected (a tile spans sweep hops and dwells of different `n_avg`)
-    // and are counted, not bounded: they give no floor, while occupancy above still has rows.
-    // What must hold is that a bias-corrected floor appears exactly in the uniform-shape tiles
-    // that observed anything, and never in a mixed one.
+    // Mixed-shape tiles are expected (a tile spans sweep hops and dwells of different `n_avg`).
+    // T-141: they correct with their Gamma-mixture bias, so every tile that observed anything,
+    // uniform or mixed, reports a floor.
     let t = &r.tiles;
-    assert!(t.tiles > 0, "[{T139}] tiles on disk: {t:?}");
+    let brief = |t: &TileCounts| {
+        format!(
+            "tiles {} observed {} uniform {} uniform_observed {} with_floor {} mixed_with_floor {}",
+            t.tiles, t.observed, t.uniform, t.uniform_observed, t.with_floor, t.mixed_with_floor
+        )
+    };
+    assert!(t.tiles > 0, "[{T139}] tiles on disk: {}", brief(t));
     assert_eq!(
-        t.mixed_with_floor, 0,
-        "[{T139}] no floor from a mixed tile: {t:?}"
+        t.with_floor,
+        t.observed,
+        "[{T141}] every observed tile has a floor: {}",
+        brief(t)
     );
-    assert_eq!(
-        t.with_floor, t.uniform_observed,
-        "[{T139}] every observed uniform tile has a floor: {t:?}"
+    assert!(
+        t.mixed_with_floor > 0 && t.mixed_with_floor == t.observed - t.uniform_observed,
+        "[{T141}] mixed tiles report a floor: {}",
+        brief(t)
+    );
+    // The same noise without the scheduler: the median level-0 floor over the central half of the
+    // span agrees within 0.5 dB (set before measuring).
+    let fixed = run_scene(&out, false);
+    let (sched, fixed) = (t.median_floor(), fixed.tiles.median_floor());
+    let (Some(sched), Some(fixed)) = (sched, fixed) else {
+        panic!("[{T141}] central floors: scheduler {sched:?}, fixed tune {fixed:?}");
+    };
+    eprintln!(
+        "[{T141}] median central floor: scheduler {sched:.3} dB, fixed tune {fixed:.3} dB, \
+         difference {:.3} dB",
+        sched - fixed
+    );
+    assert!(
+        (sched - fixed).abs() <= 0.5,
+        "[{T141}] scheduler floor {sched} vs fixed tune {fixed}"
     );
 }
 
