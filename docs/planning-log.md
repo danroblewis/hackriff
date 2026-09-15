@@ -2388,3 +2388,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.499 Correction to B0.498's method note.** The nudges worked: 12 cargo/rustc processes and load 26.6 (from 14), so all four agents resumed building.
   - **Wrong heuristic, do not reuse:** the task .output paths are SYMLINKS, and stat reads the link itself, so their mtimes never change and say nothing about liveness. They were identical before and during heavy building.
   - **Reliable liveness signals:** whether SendMessage reports the message queued for the agent's next tool round (a live agent), plus cargo/rustc process count and load average. Never read a task .output file for a local agent; it is the full transcript and will overflow the coordinator's context.
+- **B0.500 T-223 merged (9488f51): the ADS-B start-up race was a lost first record, not a drop.**
+  - **Measured:** the chain fed its first record 2 ms after the plugin attached, but readsb opened its Beast connector only at 1.63 s under load, so the earliest squitter was never forwarded and the wrapper fell back after its 250 ms match wait.
+  - **Fix (mirror of T-103, at the other end):** a plugin declares `input.ready_signal` and emits `{"type":"ready"}` (stream contract section 9.3). The host tracks and re-arms it across restarts, a non-declaring plugin counts as ready when attached, and the chain holds its first record until then.
+  - **Live safety:** lossless replay waits as a lossless push would, so nothing is lost; a live chain waits at most `ready_timeout_ms` (5 s) and then feeds anyway, counting `plugin_ready_timeouts` and `plugin_fed_before_ready`. No sleep, no retry, no tolerance change.
+  - **Evidence:** 3/3 loaded attempts failed before; acceptance_m0 now passes 10/10 under 6 burners at load 27-39, with zero fallback stamps.
+  - **T-219 launched** into the freed slot; an Opus read-only review of the contract change runs in parallel.

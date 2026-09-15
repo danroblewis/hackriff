@@ -3496,7 +3496,7 @@ tasks:
   - id: T-219
     milestone: M3
     title: "Overlapping-candidate resolution: a Confirmed signal suppresses candidates overlapping its band, and overlapping candidates compete (merge or rank by evidence) so duplicate offset boxes collapse"
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: DETECT
@@ -3563,7 +3563,8 @@ tasks:
   - id: T-223
     milestone: M2-hardening
     title: "signal_001 readsb plugin chain misses the earliest ADS-B emission when the acceptance suite runs in parallel under load (just acceptance uses cargo test, so nextest heavy-serial pinning does not apply)"
-    status: in-progress
+    status: done
+    commit: 9488f51
     priority: high
     deps: []
     parallel_group: PLUGINS
