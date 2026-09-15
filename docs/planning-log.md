@@ -922,3 +922,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Retention:** indexed, flat cost at 100 vs 5000 protected tiles.
 
   Its api_contract failure was only an LFS pointer in the worktree; the full check covers it. Leftover pipeline wiring (FrameInput::source, sweep estimator in live ingest) is folded into T-118's note. Full check running.
+- **B0.292 Full check of main 36c3a3b (T-126): green.** Lint clean; nextest + UI 1197/1197 in 242 s; acceptance 30/30 (2 ignored HIL) in 58 s. M2 on main: T-113, T-114, T-116, T-117, T-125, T-126. In flight: T-115 (observation log), T-120 (bandit). Next after T-115: T-118 → T-119/T-121 → T-122; T-123/T-124 last.
