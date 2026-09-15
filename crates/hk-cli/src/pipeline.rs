@@ -426,8 +426,10 @@ pub fn serve_api(
         on_demand: openers,
         outputs: Some(Arc::new(PipelineOutputs(handle.output_recorders()))),
         recipes: Some(Arc::new(PipelineRecipes(recipes))),
-        // T-092 wires its decoded-capture store here.
-        captures: None,
+        // T-092: the run's always-on decoded-stream capture store.
+        captures: handle
+            .decoded_captures()
+            .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

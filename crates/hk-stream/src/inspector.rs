@@ -462,6 +462,102 @@ pub trait CaptureSource: Send + Sync {
     /// Capture `id`'s §3 byte stream from its first byte (header frame first). `Ok(None)`: no
     /// such capture.
     fn open(&self, id: &str) -> std::io::Result<Option<Box<dyn Read + Send>>>;
+
+    /// Capture `id` positioned at frame record `from_frame` (T-092): the header frame, then the
+    /// records from that frame record on, so paging seeks instead of scanning. The default opens
+    /// from the start ([`CaptureCursor::first_frame`] 0, total unknown) and callers skip.
+    fn open_at(&self, id: &str, from_frame: u64) -> std::io::Result<Option<CaptureCursor>> {
+        let _ = from_frame;
+        Ok(self.open(id)?.map(|reader| CaptureCursor {
+            reader,
+            first_frame: 0,
+            total_frames: None,
+        }))
+    }
+
+    /// Every capture, newest first. The default: unsupported.
+    fn list(&self) -> std::io::Result<Vec<CaptureInfo>> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    /// One capture's catalogue entry.
+    fn info(&self, id: &str) -> std::io::Result<Option<CaptureInfo>> {
+        Ok(self.list()?.into_iter().find(|c| c.id == id))
+    }
+
+    /// The first frame record whose `t` is at or after `t_unix_nanos` (the frame count when none
+    /// is). `Ok(None)`: no such capture. The default: unsupported.
+    fn frame_at_time(&self, id: &str, t_unix_nanos: i64) -> std::io::Result<Option<u64>> {
+        let _ = (id, t_unix_nanos);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    /// Deletes a capture. The default: unsupported.
+    fn delete(&self, id: &str) -> std::io::Result<CaptureDelete> {
+        let _ = id;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// A capture opened at a frame ([`CaptureSource::open_at`]).
+pub struct CaptureCursor {
+    /// The header frame, then the records from frame record [`Self::first_frame`] on.
+    pub reader: Box<dyn Read + Send>,
+    /// Index of the first frame record the reader yields.
+    pub first_frame: u64,
+    /// Frame records in the capture, when the store knows without scanning.
+    pub total_frames: Option<u64>,
+}
+
+/// Outcome of [`CaptureSource::delete`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureDelete {
+    /// Deleted.
+    Deleted,
+    /// No such capture.
+    NotFound,
+    /// Still recording; not deleted.
+    Recording,
+}
+
+/// A recorded decoded stream's catalogue entry (T-092, §14.7).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CaptureInfo {
+    /// Capture id (`[A-Za-z0-9_.:-]{1,128}`).
+    pub id: String,
+    /// Pipeline that produced it.
+    pub pipeline_id: String,
+    /// Recipe id.
+    pub recipe_id: String,
+    /// Recipe version at the start of the capture.
+    pub recipe_version: u32,
+    /// Output id.
+    pub output_id: String,
+    /// The recorded stream's id.
+    pub stream_id: String,
+    /// The recorded stream's content class.
+    pub content_class: ContentClass,
+    /// Segment number within the pipeline output (a capture rolls to a new segment at the
+    /// per-capture size limit).
+    pub segment: u32,
+    /// Unix seconds the capture started.
+    pub started: f64,
+    /// Unix seconds it ended (`None` while recording).
+    pub ended: Option<f64>,
+    /// `t` of the first frame record, Unix seconds.
+    pub t_first: Option<f64>,
+    /// `t` of the last frame record, Unix seconds.
+    pub t_last: Option<f64>,
+    /// Frame records stored.
+    pub frames: u64,
+    /// Stream bytes stored (header and records).
+    pub bytes: u64,
+    /// Records dropped before storage (slow disk: the publisher's drop markers; full quota).
+    pub dropped_records: u64,
+    /// Whether it is still recording.
+    pub recording: bool,
+    /// Why it ended (`finished`, `rolled`, `slow-consumer`, `write-failed`, `interrupted`, ...).
+    pub end_reason: Option<String>,
 }
 
 /// Reads the frame records of a recorded decoded stream (§14.7) from any byte source: the

@@ -2,6 +2,8 @@
 //! the runtime instantiates everything upstream of it once per channel and feeds each
 //! instance's frames (tagged with `FrameInfo::channel`) into this one node (ADR-0011 §2.5).
 
+use std::sync::Arc;
+
 use hk_recipe::PortType::Frames;
 use hk_recipe::{BlockDescriptor, PortSpec};
 
@@ -31,5 +33,16 @@ pub fn planned() -> Vec<BlockDescriptor> {
     )]
 }
 
-/// Registers this group's implemented blocks (none yet).
-pub fn register(_r: &mut Registry) {}
+pub mod follow_hops;
+#[cfg(test)]
+mod tests;
+
+pub use follow_hops::{FollowHops, FollowHopsFactory};
+
+/// Registers this group's implemented blocks.
+pub fn register(r: &mut Registry) {
+    for d in planned() {
+        r.register(Arc::new(FollowHopsFactory::new(d)))
+            .expect("multi block names are unique");
+    }
+}

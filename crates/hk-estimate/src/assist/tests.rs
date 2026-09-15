@@ -672,3 +672,88 @@ fn assist_work_cap_returns_a_partial_result() {
     assert!(r.work.partial, "{:?}", r.work);
     assert!(!r.work.skipped.is_empty());
 }
+
+const MODE_S_G: u64 = 0x1FF_F409;
+
+fn mode_s_search(seed: u64, nf: usize) -> CodeReport {
+    let mut rng = Rng(0xABCD_0000 + seed * 7919);
+    search_codes(&mode_s_frames(&mut rng, nf), &CodeSearchConfig::default())
+}
+
+#[test]
+fn assist_crc_many_frames_never_confidently_wrong() {
+    // T-105: CRC-24/Mode-S already has the factor (x+1). With 8 frames, 1 draw in 128 gives every
+    // difference one more (x+1), and (x+1)·CRC-24 fits as the largest generator. It has a
+    // repeated factor, so it must not win confidently.
+    for nf in [8usize, 16] {
+        let mut right = 0;
+        for seed in 0..200u64 {
+            let r = mode_s_search(seed, nf);
+            let c = r.codes.first().expect("a code");
+            if c.generator == MODE_S_G {
+                right += 1;
+                assert!(c.score > 0.8, "{nf} frames, seed {seed}: {c:?}");
+            } else {
+                assert!(c.score < 0.5, "{nf} frames, seed {seed}: {:?}", r.codes);
+            }
+        }
+        assert!(right >= 197, "{nf} frames: {right}/200 right");
+    }
+    // Seed 34: every one of the 7 differences carries the extra (x+1). The squared generator
+    // stays only as a low-scored alternative, named in the group.
+    let r = mode_s_search(34, 8);
+    let (c, alt) = (&r.codes[0], 0x200_1C1Bu64);
+    assert_eq!(
+        (c.generator, c.ambiguous_with.as_slice()),
+        (MODE_S_G, &[alt][..]),
+        "{:?}",
+        r.codes
+    );
+    let a = r
+        .codes
+        .iter()
+        .find(|x| x.generator == alt)
+        .expect("alternative");
+    assert!(a.score < 0.1 && a.ambiguous_with == [MODE_S_G], "{a:?}");
+    assert!(
+        a.reasons.iter().any(|s| s.contains("repeated factor")),
+        "{a:?}"
+    );
+}
+
+#[test]
+fn assist_crc_few_frames_ambiguity_is_explicit() {
+    // T-105: with 3–4 frames the generators fitting one hypothesis are near-ties. They are ranked
+    // by posterior share (no longer smallest-divisor-first), name each other in
+    // `ambiguous_with`, and a wrong top scores low.
+    for (nf, min_right) in [(3usize, 150), (4, 190)] {
+        let mut right = 0;
+        for seed in 0..200u64 {
+            let r = mode_s_search(seed, nf);
+            for c in &r.codes {
+                let mates: Vec<u64> = r
+                    .codes
+                    .iter()
+                    .filter(|x| {
+                        (x.start_bit, x.tail_bits, &x.bit_order, x.classes)
+                            == (c.start_bit, c.tail_bits, &c.bit_order, c.classes)
+                            && x.generator != c.generator
+                    })
+                    .map(|x| x.generator)
+                    .collect();
+                let mut named = c.ambiguous_with.clone();
+                named.sort_unstable();
+                let mut mates = mates;
+                mates.sort_unstable();
+                assert_eq!(named, mates, "{nf} frames, seed {seed}: {c:?}");
+            }
+            let c = r.codes.first().expect("a code");
+            if c.generator == MODE_S_G {
+                right += 1;
+            } else {
+                assert!(c.score < 0.4, "{nf} frames, seed {seed}: {:?}", r.codes);
+            }
+        }
+        assert!(right >= min_right, "{nf} frames: {right}/200 right");
+    }
+}

@@ -132,6 +132,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/assist/fields"),
     ("POST", "/api/assist/crc"),
     // T-092 captures
+    ("GET", "/api/captures"),
+    ("GET", "/api/captures/{id}"),
+    ("DELETE", "/api/captures/{id}"),
+    ("GET", "/api/captures/{id}/frames"),
 ];
 
 /// Server settings.
@@ -664,6 +668,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         body: &req.body,
         content_type: req.header("content-type"),
         caller: caller(&stream, &req, token),
+        query: &req.query,
     };
     if let Some(r) = control::route(state, &ctl)
         .or_else(|| crate::selections::route(state, &ctl))

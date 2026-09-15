@@ -491,10 +491,10 @@ fn signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_
 
     // Group-level agreement, matched by position in the recording (the looping device's sample
     // counter modulo its length). Recipe frames carry their first bit's source index (§14.2,
-    // checked on the exact synthetic lattice below). The oracle counts bit positions from its
-    // pilot lock (`WfmDemod` feeds RDS only once the pilot PLL has locked), so its positions sit
-    // a constant lag before the recording's: estimated as the most common recipe − oracle
-    // difference, in 1-bit bins, over groups with identical fields.
+    // checked on the exact synthetic lattice below); the oracle's group positions count from the
+    // stream's start the same way (T-106: `hk_demod::rds` used to count from pilot lock, since
+    // `WfmDemod` only feeds RDS once the pilot PLL has locked), so both should agree directly,
+    // within filter/timing-recovery jitter.
     let len = n as f64;
     let per_bit = fx.sample_rate / 1187.5;
     let wrap = |d: f64| (d + len / 2.0).rem_euclid(len) - len / 2.0;
@@ -507,20 +507,12 @@ fn signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_
         .iter()
         .filter_map(|(p, g)| Some((p.rem_euclid(len), oracle_fields(g)?)))
         .collect();
-    let (lag_bits, _) = majority(oracle_ok.iter().flat_map(|(po, want)| {
-        recipe_at
-            .iter()
-            .filter(move |(_, f)| f == want)
-            .map(move |(pr, _)| (wrap(pr - po) / per_bit).round() as i64)
-    }))
-    .expect("identical groups to align on");
-    let lag = lag_bits as f64 * per_bit;
     let tol = 4.0 * per_bit;
     let (total, mut agree, mut conflict, mut missing) = (oracle_ok.len(), 0usize, 0usize, 0usize);
     for (po, want) in &oracle_ok {
         let near: Vec<&GroupFields> = recipe_at
             .iter()
-            .filter(|(pr, _)| wrap(pr - po - lag).abs() <= tol)
+            .filter(|(pr, _)| wrap(pr - po).abs() <= tol)
             .map(|(_, f)| f)
             .collect();
         if near.is_empty() {
@@ -536,12 +528,10 @@ fn signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_
     eprintln!(
         "[{TAG}] RESULT emitter {:.4} MHz ({:.0} kHz); PI {pi:04X} PTY {pty} TP {tp}; PS {names:?}; \
          CRC-valid groups {ok}/{} = {crc_rate:.3}; oracle CRC-valid groups {total}: agree {agree}, \
-         conflict {conflict}, no CRC-valid recipe group there {missing} → agreement \
-         {agreement:.3} (oracle position lag {lag_bits} bits = {:.1} ms)",
+         conflict {conflict}, no CRC-valid recipe group there {missing} → agreement {agreement:.3}",
         f_center / 1e6,
         bw / 1e3,
         ok + bad,
-        lag / fx.sample_rate * 1e3
     );
     assert!(total >= 30, "[{TAG}] oracle valid groups {total}");
     assert_eq!(

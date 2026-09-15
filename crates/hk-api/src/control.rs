@@ -610,6 +610,8 @@ pub(crate) struct CtlRequest<'a> {
     pub body: &'a [u8],
     pub content_type: Option<&'a str>,
     pub caller: Caller,
+    /// Decoded query parameters (T-092 capture scrubbing reads them).
+    pub query: &'a [(String, String)],
 }
 
 /// A control response.

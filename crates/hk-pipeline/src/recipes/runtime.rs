@@ -53,6 +53,7 @@ use crate::chains::{ChainReader, Next};
 use crate::class::{classify_emitter, is_restricted, restricted_band};
 use crate::config::ListenSettings;
 use crate::recipes::graph::{self, Graph, OutputBinding, Shape, Src, StageError, Staged};
+use crate::recipes::hops;
 use crate::recipes::store::{RecipeStore, StoreError};
 use crate::recipes::swap::{self, SwapReport};
 use crate::recipes::taps::{
@@ -105,7 +106,7 @@ impl RuntimeError {
         }
     }
 
-    fn invalid(errors: Vec<RecipeError>) -> Self {
+    pub(crate) fn invalid(errors: Vec<RecipeError>) -> Self {
         Self {
             errors,
             ..Self::new(400, "invalid", "the recipe is not valid")
@@ -342,6 +343,8 @@ pub(crate) struct PipelineEdit {
     sinks: SinkEdit,
     /// New channel DDC, tune it was planned at, bandwidth and input port (an `input` edit).
     channel: Option<(Ddc, (f64, f64), f64)>,
+    /// Follow-hops: the upstream sub-recipe staged per channel.
+    lanes: Option<hops::LaneEdit>,
     input: PortInfo,
     new_rev: u32,
     reply: SyncSender<EditDone>,
@@ -380,6 +383,8 @@ pub(crate) struct PipelineCtl {
     pub streams: Mutex<Vec<StreamEntry>>,
     pub warnings: Mutex<Vec<RecipeError>>,
     pub stats: PipelineStats,
+    /// Follow-hops pipelines: channel set and per-channel sub-recipe (T-093).
+    pub hops: Option<hops::HopsCtl>,
 }
 
 impl PipelineCtl {
@@ -402,22 +407,26 @@ pub struct RecipeRuntime {
     next_id: AtomicU64,
     /// How long an edit waits for a chunk boundary, ms ([`EDIT_TIMEOUT`] by default).
     edit_timeout_ms: AtomicU64,
+    /// Always-on decoded-stream capture (T-092, [`crate::recipes::capture`]).
+    pub(crate) captures: std::sync::OnceLock<hk_store::decoded::DecodedCaptures>,
+    /// Capture replays streaming now (T-092; capped at `capture::MAX_CAPTURE_REPLAYS`).
+    pub(crate) capture_replays: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
+pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
     rate.is_finite() && rate > 0.0 && lo >= center - 0.49 * rate && hi <= center + 0.49 * rate
 }
 
-struct ChannelPlan {
-    ddc: Ddc,
-    tune: (f64, f64),
-    input: PortInfo,
-    bandwidth_hz: f64,
+pub(crate) struct ChannelPlan {
+    pub(crate) ddc: Ddc,
+    pub(crate) tune: (f64, f64),
+    pub(crate) input: PortInfo,
+    pub(crate) bandwidth_hz: f64,
 }
 
 /// The channel DDC and recipe input port for `recipe` on a channel at `center` (Hz) of
 /// `target_bw` (Hz) under the window `tune` = (centre, rate).
-fn channel_plan(
+pub(crate) fn channel_plan(
     recipe: &Recipe,
     center: f64,
     target_bw: f64,
@@ -602,6 +611,8 @@ impl RecipeRuntime {
             pipelines: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             edit_timeout_ms: AtomicU64::new(EDIT_TIMEOUT.as_millis() as u64),
+            captures: std::sync::OnceLock::new(),
+            capture_replays: std::sync::Arc::default(),
         }
     }
 
@@ -773,13 +784,6 @@ impl RecipeRuntime {
                  decoded streams (T-092)",
             ));
         }
-        if !matches!(recipe.input.channels, ChannelsSpec::Single) {
-            return Err(RuntimeError::new(
-                422,
-                "unsupported_input",
-                "follow-hops pipelines land with T-093",
-            ));
-        }
         let shared = (self.segment)().ok_or_else(|| {
             RuntimeError::new(503, "unavailable", "the run is changing window; try again")
         })?;
@@ -802,11 +806,34 @@ impl RecipeRuntime {
         } else {
             (center, shared.fs)
         };
-        let plan = channel_plan(&recipe, center, hi - lo, tune)?;
-        let (clo, chi) = (
-            center - 0.5 * plan.bandwidth_hz,
-            center + 0.5 * plan.bandwidth_hz,
-        );
+        // Follow-hops (T-093): per-channel lanes run everything upstream of the merge node; the
+        // main graph is the merge node and downstream of it.
+        let hop = match recipe.input.channels {
+            ChannelsSpec::Single => None,
+            ChannelsSpec::FollowHops { .. } => Some(hops::prepare(
+                &shared,
+                &recipe,
+                &registry,
+                &target,
+                (lo, hi),
+                tune,
+            )?),
+        };
+        let plan = match &hop {
+            None => channel_plan(&recipe, center, hi - lo, tune)?,
+            Some(h) => channel_plan(&h.up, h.lanes[0].center_hz, h.lanes[0].bandwidth_hz, tune)?,
+        };
+        let (clo, chi) = match &hop {
+            None => (
+                center - 0.5 * plan.bandwidth_hz,
+                center + 0.5 * plan.bandwidth_hz,
+            ),
+            Some(h) => h.extent,
+        };
+        let (center, bandwidth_hz) = match &hop {
+            None => (center, plan.bandwidth_hz),
+            Some(_) => (0.5 * (clo + chi), chi - clo),
+        };
         if !in_window(tune.0, tune.1, clo, chi) {
             return Err(RuntimeError::new(
                 409,
@@ -823,20 +850,29 @@ impl RecipeRuntime {
             cfg.chain_mcores(tune.1, Some(false)),
             tune.1,
         )?;
+        let extra_slots = match &hop {
+            Some(h) => hops::claim_extra(&self.counters, &cfg, h.lanes.len() - 1, tune.1)?,
+            None => Vec::new(),
+        };
         let id = format!("p{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let recipe = Arc::new(recipe);
-        let mut staged = graph::stage(None, Arc::clone(&recipe), &registry, plan.input)?;
+        let graph_input = hop.as_ref().map_or(plan.input, |h| h.merge_port);
+        let graph_recipe = hop
+            .as_ref()
+            .map_or_else(|| Arc::clone(&recipe), |h| Arc::clone(&h.down));
+        let mut staged = graph::stage(None, graph_recipe, &registry, graph_input)?;
         let shape = staged.shape.clone();
         let warnings = staged.warnings.clone();
-        let mut g = Graph::empty(plan.input);
+        let mut g = Graph::empty(graph_input);
         swap::apply(&mut g, &mut staged).map_err(|m| RuntimeError::new(500, "failed", m))?;
         drop(staged);
         let streams_ctx = StreamCtx {
             pipeline_id: id.clone(),
             class,
             center_hz: center,
-            bandwidth_hz: plan.bandwidth_hz,
+            bandwidth_hz,
             emitter_id: emitter,
+            channels: hop.as_ref().map_or_else(Vec::new, |h| h.channel_infos()),
         };
         let mut sinks = Vec::with_capacity(g.outputs.len());
         let mut streams = Vec::new();
@@ -846,13 +882,20 @@ impl RecipeRuntime {
             streams.extend(e);
         }
         let stat = self.counters.chain_stats.register("recipe");
-        stat.set_channel(center, plan.bandwidth_hz);
+        stat.set_channel(center, bandwidth_hz);
         if let Some(e) = streams.first() {
             stat.set_stream(&e.stream_id, e.handle.clone());
         }
         let start = shared.ring.next_sample().unwrap_or(0);
         let cursor = shared.gate.register(start);
         let reader = ChainReader::new(Arc::clone(&shared), start, cursor).with_stat(stat.stat());
+        let (hops_ctl, hops_rt) = match hop {
+            Some(h) => {
+                let (c, r) = h.finish(extra_slots, shared.fs);
+                (Some(c), Some(r))
+            }
+            None => (None, None),
+        };
         let ctl = Arc::new(PipelineCtl {
             id: id.clone(),
             recipe_id: recipe.id.clone(),
@@ -870,7 +913,7 @@ impl RecipeRuntime {
                 recipe: Arc::clone(&recipe),
                 shape,
                 outputs: g.outputs.clone(),
-                input: plan.input,
+                input: graph_input,
             }),
             pending: Mutex::new(None),
             edit_pending: AtomicBool::new(false),
@@ -881,6 +924,7 @@ impl RecipeRuntime {
             streams: Mutex::new(streams),
             warnings: Mutex::new(warnings),
             stats: PipelineStats::default(),
+            hops: hops_ctl,
         });
         let mut runner = Runner {
             ctl: Arc::clone(&ctl),
@@ -896,16 +940,19 @@ impl RecipeRuntime {
             stat,
             tune: plan.tune,
             center_hz: center,
-            bandwidth_hz: plan.bandwidth_hz,
+            bandwidth_hz,
             next_sample: None,
             anchor: (start, Timestamp::now()),
             edit_rev: 0,
             disc: true,
+            hops: hops_rt,
         };
         runner.retap();
         // Held until the streams are offered, so an edit can't offer its streams first.
         let _serial = lock(&ctl.edit_lock);
         lock(&self.pipelines).insert(id.clone(), Arc::clone(&ctl));
+        // T-092: recorded from the first frame (a failed spawn leaves no frames, so no capture).
+        crate::recipes::capture::tee_streams(self, lock(&ctl.streams).iter());
         if let Err(e) = thread::Builder::new()
             .name("hk-recipe".into())
             .spawn(move || runner.run())
@@ -984,6 +1031,7 @@ impl RecipeRuntime {
             "status": lock(&ctl.status).clone(),
             "stats": ctl.stats.to_json(),
             "warnings": graph::errors_json(&lock(&ctl.warnings)),
+            "follow_hops": ctl.hops.as_ref().map(hops::HopsCtl::json),
         })
     }
 
@@ -1028,12 +1076,21 @@ impl RecipeRuntime {
                 ..RuntimeError::invalid(Vec::new())
             });
         }
-        if draft.input.port != PortType::Iq || !matches!(draft.input.channels, ChannelsSpec::Single)
+        let follow = ctl.hops.is_some();
+        if draft.input.port != PortType::Iq
+            || (!follow && !matches!(draft.input.channels, ChannelsSpec::Single))
         {
             return Err(RuntimeError::new(
                 422,
                 "unsupported_input",
                 "a running pipeline keeps a single iq input",
+            ));
+        }
+        if follow && draft.input != cs.recipe.input {
+            return Err(RuntimeError::new(
+                422,
+                "unsupported_input",
+                "a follow-hops pipeline keeps its input; change its channels with set_channels",
             ));
         }
         let registry = self.registry();
@@ -1056,12 +1113,19 @@ impl RecipeRuntime {
             (None, cs.input)
         };
         let recipe = Arc::new(draft);
-        let staged = graph::stage(
-            Some((&cs.recipe, &cs.shape)),
-            Arc::clone(&recipe),
-            &registry,
-            input,
-        )?;
+        let hops_edit = match &ctl.hops {
+            Some(h) => Some(h.stage_edit(&recipe, &registry)?),
+            None => None,
+        };
+        let (base, next) = match &hops_edit {
+            Some(h) => (Arc::clone(&h.old_down), Arc::clone(&h.new_down)),
+            None => (Arc::clone(&cs.recipe), Arc::clone(&recipe)),
+        };
+        let staged = graph::stage(Some((&base, &cs.shape)), next, &registry, input)?;
+        let (lanes, hops_commit) = match hops_edit {
+            Some(h) => (Some(h.lanes), Some(h.commit)),
+            None => (None, None),
+        };
         // Output streams: unchanged outputs keep their publishers (consumers and seq); changed or
         // new ones get new streams; removed ones finish.
         let mut plan = Vec::with_capacity(staged.outputs.len());
@@ -1102,6 +1166,7 @@ impl RecipeRuntime {
                 new: Vec::with_capacity(n_out),
             },
             channel,
+            lanes,
             input,
             new_rev,
             reply: tx,
@@ -1137,12 +1202,16 @@ impl RecipeRuntime {
                 }
             }
             offer_streams(&shared, entries.iter().flatten());
+            crate::recipes::capture::tee_streams(self, entries.iter().flatten()); // T-092
             withdraw_streams(
                 &shared,
                 old.iter()
                     .filter(|o| !streams.iter().any(|s| s.stream_id == o.stream_id))
                     .map(|o| o.stream_id.as_str()),
             );
+        }
+        if let (Some(h), Some(c)) = (&ctl.hops, hops_commit) {
+            h.commit(c);
         }
         *lock(&ctl.control) = ControlState {
             recipe: Arc::clone(&recipe),
@@ -1160,6 +1229,36 @@ impl RecipeRuntime {
                      "updated": report.updated, "kept": report.kept},
             "warnings": graph::errors_json(&warnings),
         }))
+    }
+
+    /// Changes the channel set of follow-hops pipeline `id` (T-093, [`hops`]): a running channel
+    /// within a quarter channel bandwidth of a requested one keeps its instance and state, new
+    /// ones start without stopping the others, missing ones stop.
+    pub fn set_channels(&self, id: &str, channels_hz: &[f64]) -> Result<Value, RuntimeError> {
+        let ctl = self.found(id)?;
+        let cfg = ListenConfig::from_settings(&lock(&self.listen));
+        hops::set_channels(
+            &ctl,
+            &self.registry(),
+            &self.counters,
+            &cfg,
+            channels_hz,
+            Duration::from_millis(self.edit_timeout_ms.load(Ordering::Relaxed)),
+        )
+    }
+
+    /// Re-resolves follow-hops pipeline `id`'s channel source (its list, hop-set emitter or the
+    /// detections in its band) and applies the change, e.g. a hop set that gained a channel.
+    pub fn refresh_channels(&self, id: &str) -> Result<Value, RuntimeError> {
+        let ctl = self.found(id)?;
+        let shared = ctl
+            .shared
+            .upgrade()
+            .ok_or_else(|| RuntimeError::new(409, "ended", "the pipeline has ended"))?;
+        let recipe = Arc::clone(&lock(&ctl.control).recipe);
+        let (lo, hi, _) = self.resolve(&shared, &ctl.target)?;
+        let set = hops::resolve_channels(&shared, &recipe, &ctl.target, (lo, hi))?;
+        self.set_channels(id, &set.channels_hz)
     }
 
     /// `POST /api/pipelines/{id}/save`: the running revision as the recipe's next version.
@@ -1259,6 +1358,8 @@ struct Runner {
     recipe_version: u32,
     decoder: String,
     disc: bool,
+    /// Follow-hops: the per-channel lanes feeding `graph` (T-093).
+    hops: Option<hops::Hops>,
 }
 
 impl Runner {
@@ -1279,6 +1380,7 @@ impl Runner {
                 Next::Lost => self.disc = true,
                 Next::Idle => {}
                 Next::Closed => {
+                    self.flush_hops();
                     break if self.shared.continues.load(Ordering::SeqCst) {
                         "segment-ended".to_owned()
                     } else {
@@ -1336,6 +1438,29 @@ impl Runner {
                 self.apply_edit(e);
             }
         }
+        if let Some(h) = self.hops.as_mut()
+            && let Some(hc) = self.ctl.hops.as_ref()
+            && hc.edit_pending.swap(false, Ordering::SeqCst)
+        {
+            let edit = lock(&hc.pending).take();
+            if let Some(mut e) = edit {
+                h.apply_channels(&mut e);
+                let at = self
+                    .next_sample
+                    .unwrap_or_else(|| self.shared.ring.next_sample().unwrap_or(0));
+                e.done(at);
+            }
+        }
+    }
+
+    /// Follow-hops: flushes the merge when the source ends and publishes what it released.
+    fn flush_hops(&mut self) {
+        let at = self.next_sample.unwrap_or(self.anchor.0);
+        if let Some(h) = self.hops.as_mut()
+            && h.flush(at, &mut self.graph).is_ok()
+        {
+            self.publish_outputs();
+        }
     }
 
     /// Resolves taps to graph positions and sets the nodes' tap masks. A tap whose node or port
@@ -1375,8 +1500,14 @@ impl Runner {
     }
 
     fn apply_edit(&mut self, mut e: PipelineEdit) {
-        let report = swap::apply(&mut self.graph, &mut e.staged);
+        let report = match (self.hops.as_ref(), e.lanes.as_ref()) {
+            (Some(h), Some(l)) if !h.lanes_ready(l) => Err("a channel changed during the edit"),
+            _ => swap::apply(&mut self.graph, &mut e.staged),
+        };
         if report.is_ok() {
+            if let (Some(h), Some(l)) = (self.hops.as_mut(), e.lanes.as_mut()) {
+                h.apply_lanes(l);
+            }
             {
                 let SinkEdit { plan, old, new } = &mut e.sinks;
                 old.clear();
@@ -1443,7 +1574,13 @@ impl Runner {
             chunk.provenance.tune.center_hz,
             chunk.provenance.tune.sample_rate_hz,
         );
-        if tune != self.tune {
+        if tune != self.tune
+            && let Some(h) = self.hops.as_mut()
+        {
+            h.retune(tune)?;
+            self.tune = tune;
+            self.disc = true;
+        } else if tune != self.tune {
             let (lo, hi) = (
                 self.center_hz - 0.5 * self.bandwidth_hz,
                 self.center_hz + 0.5 * self.bandwidth_hz,
@@ -1498,8 +1635,22 @@ impl Runner {
             graph,
             reader,
             disc,
+            hops,
             ..
         } = self;
+        if let Some(h) = hops.as_mut() {
+            let flags = if *disc {
+                inc(&st.discontinuities);
+                ChunkFlags::DISCONTINUITY
+            } else {
+                ChunkFlags::NONE
+            };
+            *disc = false;
+            h.process(chunk, &reader.buf[..chunk.len], flags, graph)?;
+            reader.release_to(chunk.end_sample());
+            self.publish_outputs();
+            return Ok(());
+        }
         let block = ddc
             .process(InputInfo::from(chunk), &reader.buf[..chunk.len])
             .map_err(|_| "error: channel down-conversion failed".to_owned())?;
@@ -1544,6 +1695,10 @@ impl Runner {
             frame_model: &self.ctl.recipe_id,
             emitter_id: self.ctl.streams_ctx.emitter_id,
             channel_hz: self.center_hz,
+            channels_hz: self
+                .hops
+                .as_ref()
+                .map_or(&[][..], |h| h.channels_hz.as_slice()),
             recipe_version: self.recipe_version,
             edit_rev: self.edit_rev,
         };
@@ -1574,7 +1729,10 @@ impl Runner {
     }
 
     fn status_tick(&mut self) {
-        let m = self.graph.status_metadata();
+        let mut m = self.graph.status_metadata();
+        if let Some(h) = &self.hops {
+            h.status_metadata(&mut m);
+        }
         *lock(&self.ctl.status) = Value::Object(m.clone());
         let at = self.next_sample.unwrap_or(self.anchor.0);
         let t = Self::time_of(self.anchor, self.shared.fs, at as f64);
