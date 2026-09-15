@@ -791,3 +791,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-097's readsb skip** was the unbuilt `hk-plugin-readsb`, not readsb itself.
   - **Remaining:** 81% of emitted frames are noise-triggered preambles, rejected by CRC. Recipe `messages` outputs are still Idle, now **T-111** (launched).
   All four M1 tutorials now have blind acceptance on main or in review (POCSAG in T-109 review). Full check running.
+- **B0.270 T-109 review: FIX-FIRST.** Must-fix: live inventory offers ignore the T-101 in-band fragment rule (computed only at close), merges and pending hop sets. A WFM flicker with ≥4 bursts got a live 16 kHz row that was never retracted, and `tutorial_rds` then tuned to it and failed. It fails on the branch and passes on main. The same flaw covers merged tracks and slow-hopper channels offered before the hop set forms.
+  Checked OK: no double counting (ledger keyed by source track); FM stations not duplicated; DB writes on the writer thread; the hop veto is bounded and passes the 915/hopper tests.
+  Fix round launched (fresh Opus, T-109 worktree): merge main; offer only settled tracks plus retract rows created solely by a live offer (never user-confirmed rows); veto uses `gap_tol`; reuse the summaries buffer.
