@@ -16,6 +16,21 @@
 //! centre ([`owns`]): the chain takes an emission inside its channel, or one off every raster
 //! channel less than a raster step away, so a station between two channels is demodulated where it
 //! is instead of by neither neighbour.
+//!
+//! **Early identification (T-186).** RDS needs the full window, but the mode, the pilot and the
+//! refined tuning do not: the refinement reads only the leading [`RefineSettings::window_s`]. When
+//! the probe accepted a refinable mode, the chain first collects that leading window, refines,
+//! demodulates it and, when the session is pilot-locked, writes it at once ([`identify`]): the
+//! Demodulation, the mode Classification on the emitter, the refined tuning, then
+//! `Inventory::chain_emitter` (merge, explanations, review). Its RDS is left out, so no decode is
+//! written twice. The full window then reuses that refinement (same leading samples, same claim)
+//! and writes as before with the early emitter as its hint, adding the RDS decodes and identity.
+//! Without a decoded PI, a pilot-locked session over at least the leading window still places its
+//! emitter through a sighting keyed by its Demodulation ([`mode_emitter`]), so a station with
+//! weak RDS reaches the inventory too. Nothing is identified on less evidence than before: a
+//! channel is only here after a confirmed, trusted track and an accepted probe, an early write
+//! needs the whole leading window and a pilot lock, and lifecycle confirmation is unchanged (no
+//! identity or decode is written early).
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -28,7 +43,10 @@ use hk_demod::{
 };
 use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
-use hk_model::SampleTime;
+use hk_model::{
+    Classification, EmitterId, EmitterLink, Fingerprint, LinkTarget, MeasurementKey, RepoError,
+    Repository, SampleTime, Sighting,
+};
 use num_complex::Complex;
 
 use hk_model::RecordingTrigger;
@@ -320,6 +338,162 @@ pub(crate) fn run(
     }
 }
 
+/// Samples of the leading window the refinement reads (T-186: the early identification's window).
+fn identify_len(fs: f64) -> usize {
+    (RefineSettings::default().window_s * fs).round() as usize
+}
+
+/// The mode evidence an emitter may be placed on without a decoded identity (T-186): a
+/// demodulator-selected refinable mode (WFM) whose 19 kHz pilot was found.
+fn pilot_locked(session: &AnalogSession) -> bool {
+    crate::refine::refinable(session.mode.mode)
+        && session
+            .mode
+            .features
+            .pilot
+            .as_ref()
+            .is_some_and(|p| p.found)
+}
+
+/// Outcome of [`identify`].
+enum Identified {
+    /// Written; the emitter it placed (none without pilot-locked mode evidence).
+    Written(Option<EmitterId>),
+    /// Not written (the leading window did not demodulate to pilot-locked evidence).
+    Skipped,
+    /// A neighbouring chain owns the emission.
+    Preempted,
+}
+
+/// T-186: demodulates the leading window `w` (on `refined` when locked) and writes it without its
+/// RDS (the full window writes the decodes once): Demodulation, mode Classification on the emitter
+/// ([`mode_emitter`]), refined tuning, then `Inventory::chain_emitter` (explanations, review).
+fn identify(
+    shared: &Arc<Shared>,
+    w: &Window,
+    cand: &Candidate,
+    node: &AnalogNode,
+    refined: Option<&RefinementOutcome>,
+) -> Identified {
+    let c = &shared.counters.chains;
+    let Some(Ok(mut session)) = demodulate(
+        w,
+        w.iq.len(),
+        cand,
+        node.bandwidth_hz,
+        refined.map(|o| &o.tuning),
+    ) else {
+        return Identified::Skipped;
+    };
+    let mode_ok = node.accept_modes.is_empty() || node.accept_modes.contains(&mode_name(&session));
+    if !mode_ok || !pilot_locked(&session) {
+        return Identified::Skipped;
+    }
+    if !shared.claims.commit(node.owner) {
+        inc(&c.duplicate_emission);
+        return Identified::Preempted;
+    }
+    if let Some(wfm) = session.wfm.as_mut() {
+        wfm.rds = None;
+    }
+    let ctx = RecordContext {
+        recording_ref: None,
+        detection_ref: super::stored_detection(shared, cand.detection),
+        emitter_hint: None,
+    };
+    let mut repo = shared.repo();
+    let emitter = match write_session(&mut repo, &session, &ctx)
+        .and_then(|written| mode_emitter(&mut repo, &session, &written, true))
+    {
+        Ok(e) => e,
+        Err(err) => {
+            inc(&c.errors);
+            eprintln!("hk-pipeline: analog chain early identification write: {err}");
+            return Identified::Written(None);
+        }
+    };
+    inc(&c.identifications);
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: analog chain {:.4} MHz identified from {} samples: mode {} ({:.2}), emitter {emitter:?}",
+            session.rf_center_hz / 1e6,
+            w.iq.len(),
+            mode_name(&session),
+            session.mode.confidence,
+        );
+    }
+    if let Some(e) = emitter {
+        if let Some(o) = refined
+            && let Err(err) = crate::refine::persist(
+                &mut repo,
+                e,
+                o,
+                SOURCE_ANALOG_CHAIN,
+                session.time_range().start,
+            )
+        {
+            inc(&c.errors);
+            eprintln!("hk-pipeline: analog chain refined tuning write: {err}");
+        }
+        let mut inv = shared
+            .inventory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inv.chain_emitter(&mut repo, cand.track, e).is_err() {
+            inc(&c.errors);
+        }
+    }
+    Identified::Written(emitter)
+}
+
+/// The emitter a written session belongs to: the one `write_session` resolved (decoded PI or the
+/// caller's hint), else — T-186 — for pilot-locked mode evidence over at least the leading
+/// window (`enough`), a sighting keyed by the Demodulation (no identity) carrying the mode
+/// Classification. `None` otherwise, as before.
+fn mode_emitter(
+    repo: &mut Repository,
+    session: &AnalogSession,
+    written: &hk_demod::WrittenSession,
+    enough: bool,
+) -> Result<Option<EmitterId>, RepoError> {
+    if written.emitter_id.is_some() || !enough || !pilot_locked(session) {
+        return Ok(written.emitter_id);
+    }
+    let time = session.time_range();
+    let family = session.mode.mode.as_str();
+    let bandwidth = session.params.obw99_hz.value().unwrap_or(200e3);
+    let source = LinkTarget::Demodulation(written.demodulation_id);
+    let sighting = Sighting {
+        source,
+        seen: time,
+        count: 1,
+        f_center_hz: session.rf_center_hz,
+        bandwidth_hz: bandwidth,
+        fingerprint: Some(Fingerprint {
+            family: Some(family.into()),
+            ..Fingerprint::new(session.rf_center_hz, bandwidth)
+        }),
+        identity: None,
+        context: None,
+        classification: Some(Classification {
+            t: time.end,
+            family: family.into(),
+            confidence: session.mode.confidence,
+            open_set_score: 1.0 - session.mode.confidence,
+            model_version: session.mode.rules_version.clone(),
+        }),
+        tags: Vec::new(),
+    };
+    let r =
+        repo.record_sighting_measured(&sighting, &MeasurementKey::new(SOURCE_ANALOG_CHAIN), None)?;
+    repo.link_emitter(&EmitterLink {
+        emitter_id: r.emitter_id,
+        target: source,
+        linked_at: time.end,
+    })?;
+    Ok(Some(r.emitter_id))
+}
+
 /// Largest distance from the nearest raster channel still read as on that channel, as a fraction
 /// of the raster step (the explanations' US FM raster tolerance is also 10 %).
 const ON_RASTER_FRACTION: f64 = 0.1;
@@ -403,29 +577,61 @@ fn collect_and_write(
 ) {
     let fs = shared.fs;
     let c = &shared.counters.chains;
+    let channel_center = 0.5 * (cand.f_lo_hz + cand.f_hi_hz);
+    // The refinement reads only the leading `RefineSettings::window_s` of the window.
+    let refine_leading = |w: &Window, m: AnalogMode| {
+        let (start, width) = probe_refined
+            .as_ref()
+            .map_or((channel_center, cand.f_hi_hz - cand.f_lo_hz), |p| {
+                (p.tuning.center_hz, 0.0)
+            });
+        refine_window(w, w.iq.len(), start, width, m)
+            .or_else(|| probe_refined.clone())
+            .filter(|o| owns(node, channel_center, o.tuning.center_hz))
+    };
+    // T-186: identify from the leading window first (see the module docs).
+    let identify_samples = identify_len(fs);
+    let mut early = None;
+    if let Some(m) = probe_mode.filter(|&m| crate::refine::refinable(m))
+        && identify_samples < want
+    {
+        collect(&mut cr, rx, &mut w, identify_samples);
+        if w.iq.len() == identify_samples {
+            let refined = refine_leading(&w, m);
+            // T-071: one chain per emission, even when a neighbour's chain refined to it too.
+            let emission = refined
+                .as_ref()
+                .map_or(channel_center, |o| o.tuning.center_hz);
+            if !claim_emission(shared, node, channel_center, emission) {
+                return;
+            }
+            match identify(shared, &w, cand, node, refined.as_ref()) {
+                Identified::Preempted => return,
+                Identified::Written(emitter) => early = Some((refined, emitter)),
+                Identified::Skipped => early = Some((refined, None)),
+            }
+        }
+    }
     collect(&mut cr, rx, &mut w, want);
     drop(cr);
     if (w.iq.len() as f64) < 0.25 * fs {
         return;
     }
-    let channel_center = 0.5 * (cand.f_lo_hz + cand.f_hi_hz);
-    let refined = probe_mode
-        .and_then(|m| {
-            let (start, width) = probe_refined
+    let (refined, hint) = match early {
+        // Same leading samples, so the same refinement, already claimed at its centre.
+        Some(e) => e,
+        None => {
+            let refined = probe_mode.and_then(|m| refine_leading(&w, m));
+            // T-071: one chain per emission, even when a neighbour's chain refined to it too.
+            let emission = refined
                 .as_ref()
-                .map_or((channel_center, cand.f_hi_hz - cand.f_lo_hz), |p| {
-                    (p.tuning.center_hz, 0.0)
-                });
-            refine_window(&w, w.iq.len(), start, width, m).or_else(|| probe_refined.clone())
-        })
-        .filter(|o| owns(node, channel_center, o.tuning.center_hz));
-    // T-071: one chain per emission, even when a neighbour's chain refined to it too.
-    let emission = refined
-        .as_ref()
-        .map_or(channel_center, |o| o.tuning.center_hz);
-    if !claim_emission(shared, node, channel_center, emission) {
-        return;
-    }
+                .map_or(channel_center, |o| o.tuning.center_hz);
+            if !claim_emission(shared, node, channel_center, emission) {
+                return;
+            }
+            (refined, None)
+        }
+    };
     let session = match demodulate(
         &w,
         w.iq.len(),
@@ -459,13 +665,15 @@ fn collect_and_write(
         recording_ref: None,
         // Only a stored detection: the writer thread may lag (see `stored_detection`).
         detection_ref: super::stored_detection(shared, cand.detection),
-        emitter_hint: None,
+        // T-186: the emitter the early identification placed.
+        emitter_hint: hint,
     };
     if !shared.claims.commit(node.owner) {
         // Preempted by the chain whose channel is nearer the emission.
         inc(&c.duplicate_emission);
         return;
     }
+    let enough = w.iq.len() >= identify_samples;
     let mut repo = shared.repo();
     match write_session(&mut repo, &session, &ctx) {
         Ok(written) => {
@@ -476,7 +684,13 @@ fn collect_and_write(
                 .add(cand.track, written.decode_ids.len() as u64);
             add(&c.emitters_created, u64::from(written.emitter_created));
             add(&c.labels, u64::from(written.label.is_some()));
-            if let Some(e) = written.emitter_id {
+            let emitter =
+                mode_emitter(&mut repo, &session, &written, enough).unwrap_or_else(|err| {
+                    inc(&c.errors);
+                    eprintln!("hk-pipeline: analog chain emitter write: {err}");
+                    None
+                });
+            if let Some(e) = emitter {
                 if let Some(o) = &refined
                     && let Err(err) = crate::refine::persist(
                         &mut repo,

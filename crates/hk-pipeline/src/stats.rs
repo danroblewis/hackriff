@@ -247,6 +247,9 @@ counter_group!(
         /// Analog chains that stopped because a neighbouring chain already owns the emission they
         /// refined to (T-071 dedupe, [`crate::chains::EmissionClaims`]).
         duplicate_emission,
+        /// T-186: analog chains that identified their emission (mode, pilot, refined tuning,
+        /// family and explanations) from the leading refine window, before the full window.
+        identifications,
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,
