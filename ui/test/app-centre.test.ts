@@ -10,8 +10,8 @@ import type { Row } from "../src/inventory";
 import { tickModel } from "../src/app/centre/axis-view";
 import { mounts } from "../src/app/centre";
 import {
-  DC_NOTCH_HALF_HZ, LABEL_MIN_PX, assumedDc, bracketLayout, clickTarget, dcFromHeader, dcFromObservations, dcQuery, dragSelection, draftBox,
-  hoverText, isDrag, levelU, placeExtent, regionName, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft, type RowClock,
+  DC_NOTCH_HALF_HZ, LABEL_MIN_PX, addModeActive, assumedDc, bracketLayout, clickTarget, dcFromHeader, dcFromObservations, dcQuery, dragSelection,
+  draftBox, hoverText, isDrag, levelU, placeExtent, regionName, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft, type RowClock,
 } from "../src/app/centre/overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor, type HistoryGrid } from "../src/app/centre/review-render";
 import { centreInitial } from "../src/app/centre/slice";
@@ -122,6 +122,13 @@ test("drag: 6 px threshold; frequency-only selection, timed within the waterfall
   assert.deepEqual(draftBox({ x: 0.6, y: 0.8 }, { x: 0.2, y: 0.5 }, true), { leftPct: 20, widthPct: 40, topPct: 50, heightPct: 30.000000000000004 });
   assert.deepEqual(draftBox({ x: 0.6, y: 0.8 }, { x: 0.2, y: 0.5 }, false).heightPct, 100);
   assert.equal(selectionLabel({ f_lo: 99.5e6, f_hi: 100e6, t_lo: 1, t_hi: 3.5 }, 2343.75), "99.500–100.000 MHz · 500.00 kHz · 2.50 s");
+});
+
+test("addModeActive (T-194): the toggle or Shift puts a drag into add mode", () => {
+  assert.equal(addModeActive(false, false), false);
+  assert.equal(addModeActive(true, false), true);
+  assert.equal(addModeActive(false, true), true);
+  assert.equal(addModeActive(true, true), true);
 });
 
 test("click: nearest loaded row within the half-width, else the narrowest containing selection", () => {

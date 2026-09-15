@@ -52,6 +52,11 @@ export interface NewSelection {
 /** Editable fields. */
 export interface SelectionPatch { name?: string; notes?: string | null; tags?: string[] }
 
+/** Fields a client may change on an existing selection's frequency and/or time extent (T-194: a
+ * waterfall or capture-timeline drag). `t_lo`/`t_hi` as `null` clears the time window together;
+ * omitted fields are unchanged. */
+export interface ExtentPatch { f_lo?: number; f_hi?: number; t_lo?: number | null; t_hi?: number | null }
+
 /** Actions each selection offers (rendered by selection-panel.ts, dispatched by `runSelectionAction`). */
 export const SELECTION_ACTIONS = [
   { id: "inspect", label: "Inspect", title: "Region history plus the ranked explanations of the emitters inside" },
@@ -251,6 +256,28 @@ export class SelectionStore {
     }
     if (patch.notes !== undefined) { if (patch.notes) next.notes = patch.notes; else delete next.notes; }
     if (patch.tags !== undefined) next.tags = [...new Set(patch.tags.map((x) => x.trim()).filter(Boolean))];
+    this.replace(next);
+    if (this.backend) this.dirty.add(id);
+    this.emit();
+    this.push(id);
+    return true;
+  }
+
+  /** Changes a selection's frequency and/or time extent (optimistic; PUT to the server on next
+   * flush). False when the id is unknown or the result would be invalid
+   * ([`validateSelection`]) — the store is left unchanged either way. */
+  setExtent(id: string, patch: ExtentPatch): boolean {
+    const cur = this.get(id);
+    if (!cur) return false;
+    const next: Selection = { ...cur, updated: Math.max(cur.created, this.now()) };
+    if (patch.f_lo !== undefined) next.f_lo = patch.f_lo;
+    if (patch.f_hi !== undefined) next.f_hi = patch.f_hi;
+    if (patch.t_lo === null || patch.t_hi === null) { delete next.t_lo; delete next.t_hi; }
+    else {
+      if (patch.t_lo !== undefined) next.t_lo = patch.t_lo;
+      if (patch.t_hi !== undefined) next.t_hi = patch.t_hi;
+    }
+    if (validateSelection(next)) return false;
     this.replace(next);
     if (this.backend) this.dirty.add(id);
     this.emit();
