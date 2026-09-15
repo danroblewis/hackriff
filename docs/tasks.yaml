@@ -1179,7 +1179,11 @@ tasks:
   - id: T-071
     milestone: M0b
     title: Concurrent multi-signal demodulation (several audio and bits streams at once from one capture)
-    status: in-progress
+    status: done
+    commit: "dfa57b7 (merged; full verification running)"
+    result: "chains/budget.rs: one per-run admission for Listen chains and bits/symbols taps (defaults 16 chains, 8 listeners, 8 taps, CPU budget; tap 0.01 cores); output recordings count via openers; refusal 503 busy naming the limit; /api/status budget + per-chain chain_stats (thread CPU, latency, backlog, lost samples, records, per-stream drops), old listen.budget/taps.max_taps kept. Dedupe: nearer-channel analog chain owns a shared refined emission (chains.duplicate_emission; e2e shows one writer, preemption unit-tested). Release 30 s real time 2.4 Msps: 3 WFM listeners + 2 FSK taps kept up, ~0.05 cores/listener, max latency 1.6-8.4 ms, 0 skipped/lost (load 21-26). Mock-SDR tests: fm_100p8M + 2 synthetic RDS stations (100.3/100.7 MHz) found blind -> 3 streams with own PI, cross-correlation <= 0.007 (0.990 duplicate listener); closing one stream leaves others contiguous; over-budget listen and tap refused without affecting running streams; two FSK sensors -> two bits streams 8/8 each. New tests/e2e/tests/concurrent_demod.rs."
+    followups:
+      - "fm_100p8M has only one strong station; capture a multi-station FM fixture for real concurrent-demod evidence (HackRF, T-053 window)"
     deps: [T-043, T-060, T-070]
     parallel_group: U
     use_cases: [SIGNAL-062, AWARE-036]
