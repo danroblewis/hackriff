@@ -29,7 +29,9 @@ pub struct FilterSummary {
 }
 
 impl FilterSummary {
-    /// Adds another chunk's counts (the filter is kept).
+    /// Adds another chunk's counts (the filter is kept). Cell counts stay exact (chunks cover
+    /// disjoint time rows); tile counts are **per chunk read** and are summed, so a coarse tile
+    /// read by two chunks counts twice (T-136: stated, not deduplicated).
     pub fn merge(&mut self, o: &FilterSummary) {
         self.tiles_matched += o.tiles_matched;
         self.tiles_mixed += o.tiles_mixed;

@@ -14,9 +14,11 @@
 //!
 //! **Source and site (T-133).** Every frame is folded with its origin: the source key of the run's
 //! `device_id` and the site the attention service's site state machine gives at the frame's sample
-//! time ([`AttentionService::site_at`]; `unassigned` when the run has no attention service), so
-//! history tiles record where their frames came from and `/api/history` / `/api/report` can filter
-//! by source and site.
+//! time ([`frame_site`]; `unassigned` when the run has no attention service), so history tiles
+//! record where their frames came from and `/api/history` / `/api/report` can filter by source and
+//! site. **T-136:** frames run ahead of the occupancy close, so this thread only *peeks*
+//! ([`AttentionService::site_at_peek`]): it never expires, clears or persists site state (that
+//! would stamp the close's rows `unassigned` and block frames on a database write).
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -60,6 +62,13 @@ fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
     }
 }
 
+/// T-136: the site a frame at sample time `t` is folded under: the attention service's assignment
+/// peeked at `t` (never advancing or persisting the state machine; only the occupancy close does),
+/// `unassigned` without a service.
+pub(crate) fn frame_site(attention: Option<&AttentionService>, t: Timestamp) -> SiteKey {
+    attention.map_or(SiteKey::Unassigned, |a| a.site_at_peek(t))
+}
+
 /// Runs reader 2 until the ring closes.
 pub(crate) fn run(
     shared: Arc<Shared>,
@@ -90,9 +99,7 @@ pub(crate) fn run(
     let mut frames_since_update = 0u32;
     let mut on_frame = |frame: &SpectrumFrame| {
         let floor = tracker.update(frame, |_| {});
-        let site = attention
-            .as_ref()
-            .map_or(SiteKey::Unassigned, |a| a.site_at(frame.t.host_time).0);
+        let site = frame_site(attention.as_deref(), frame.t.host_time);
         let origin = FrameOrigin {
             source,
             site: Some(site),

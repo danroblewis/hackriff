@@ -257,6 +257,8 @@ Assignment (T-119):
   - Otherwise the device joins the nearest site whose radius contains it, or creates one.
 - **Without a fix:** the last site is kept for `no_fix_hold_s` (600 s), then `Unassigned`.
 - **`Mobile` and `Unassigned`:** observations, occupancy and inventory continue, but baselines don't accrue and baseline alarms are suppressed.
+- **Who advances it (T-136):** expiry is irreversible, so only the occupancy close advances the state machine (`site_at`). History frames run ahead of the close; they only peek (`site_at_peek`) and never expire, clear or persist site state.
+- **Restart (T-136):** the assignment in force (site, source, pin, last in-site time) is stored in the run database (`site_assignment`, migration 0004) and restored on start. A pinned site survives a restart with no `Unassigned` gap; a fixed site keeps its no-fix hold on the sample clock.
 
 Why not geohash/H3 buckets:
 - **Cell edges:** a device parked near a cell edge splits one RF environment into two immature baselines.
@@ -441,7 +443,7 @@ Validation refuses a report without them, and serde refuses a document missing `
 
 ### 6.3a Source and site of history tiles (T-133)
 
-History tiles (C26, format 3) record their frame counts per **origin**: the `FrameInput::source` key and the site at the frame's sample time. The site is a site id, `unassigned` or `mobile`, taken from the §3.5 state machine (`AttentionService::site_at`). At most 8 origins are kept per tile; frames of further origins read as unknown.
+History tiles (C26, format 3) record their frame counts per **origin**: the `FrameInput::source` key and the site at the frame's sample time. The site is a site id, `unassigned` or `mobile`, taken from the §3.5 state machine without advancing it (`AttentionService::site_at_peek`, T-136). At most 8 origins are kept per tile; frames of further origins read as unknown. An `unknown` site or source filter can therefore include such overflow frames, and a tile that overflowed never matches a specific site or source whole. Query results merge origins under the same cap, so `provenance.origins` lists at most 8 origins for the whole result.
 
 Tiles are not split by origin. A filtered query (`Pyramid::query_filtered`; the `source` and `site` parameters of `/api/history` and `/api/report`) treats each tile as follows:
 - **Every frame matches:** the tile is used as usual.
@@ -468,7 +470,7 @@ In a filtered report:
 | `AlarmKind` | Stored `AnomalyKind` | Trigger | Unit |
 |---|---|---|---|
 | `level-above-baseline` | `level-above-baseline` (new) | `level_z` novelty on merged adjacent cells | dB |
-| `new-emitter` | `new-emitter` | a new inventory emitter with `new_emitter` novelty ≥ on | count |
+| `new-emitter` | `new-emitter` | a new inventory emitter with `new_emitter` novelty ≥ on (T-136: first sightings within the rate's 1 h window are grouped by the engine's cell-merge gap, and each group is scored on its own count against the site's expected count for the window, so an ordinary sighting beside a burst stays quiet; each emitter carries its group's novelty; subject = its extent as scheme-1 cells, merged like other cells, so a burst on one channel is one alarm; state is per site; each sighting is counted once, at the close that first sees it) | count |
 | `busier-than-usual` | `busier-than-baseline` | `occupancy_z` novelty on a channel/band, z > 0 | fraction |
 | `quieter-than-usual` | `quieter-than-baseline` (new, T-122) | `occupancy_z` novelty on a channel/band, z < 0 | fraction |
 | `change-point` | `change-point` (new) | CUSUM (§3.4) | dB or fraction |
