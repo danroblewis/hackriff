@@ -24,6 +24,9 @@ export const MIN_BRACKET_FRAC = 0.0045;
 export const LABEL_MIN_PX = 64;
 /** docs/api.md observation log: the DC notch is ±15 kHz (GAP 10 interim default). */
 export const DC_NOTCH_HALF_HZ = 15e3;
+/** Confirmed-band edge drag: a few px either side of the drawn edge take priority over
+ * region-select/click (T-193). */
+export const EDGE_HIT_PX = 6;
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
@@ -42,15 +45,16 @@ export function placeExtent(v: ax.View, loHz: number, hiHz: number, minFrac = 0)
   return { leftPct: left * 100, widthPct: w * 100 };
 }
 
-export type BracketState = "confirmed" | "candidate";
+export type BracketState = "candidate";
 export interface Bracket extends Span { id: string; state: BracketState; active: boolean; narrow: boolean; label: string }
 
-/** Brackets for the confirmed and candidate rows in view (deleted rows never), the focused one last
- * so it draws on top. `widthPx` is the live view's width, for the narrow-label rule. */
+/** Brackets for the candidate rows in view (deleted rows never), the focused one last so it draws
+ * on top. `widthPx` is the live view's width, for the narrow-label rule. Confirmed rows no longer
+ * draw a bracket here: they get the full-height [[confirmedBands]] box instead (T-193). */
 export function bracketLayout(rows: readonly Row[], v: ax.View, widthPx: number, focusedId: string | null): Bracket[] {
   const out: Bracket[] = [];
   for (const r of rows) {
-    if (r.state !== "confirmed" && r.state !== "candidate") continue;
+    if (r.state !== "candidate") continue;
     const p = placeExtent(v, r.f_lo_hz, r.f_hi_hz, MIN_BRACKET_FRAC);
     if (!p) continue;
     out.push({
@@ -59,6 +63,98 @@ export function bracketLayout(rows: readonly Row[], v: ax.View, widthPx: number,
     });
   }
   return out.sort((a, b) => Number(a.active) - Number(b.active));
+}
+
+// ---- Confirmed-signal band boxes (T-193): span both the spectrum trace and the waterfall, drawn
+// in a full-height layer over both panes; draggable left/right edges set a user band override
+// (docs/api.md `user_band`, T-191) via `explore/inventory.ts`'s `setUserBand`/`clearUserBand`. ----
+
+/** The band a Confirmed row draws: the user override's edges when set, else the measured extent.
+ * The measured extent (`f_lo_hz`/`f_hi_hz`) is never overwritten by the override (docs/api.md). */
+export function effectiveBand(r: Pick<Row, "user_band" | "f_lo_hz" | "f_hi_hz">): { loHz: number; hiHz: number; hasUserBand: boolean } {
+  const u = r.user_band;
+  return u ? { loHz: u.f_lo, hiHz: u.f_hi, hasUserBand: true } : { loHz: r.f_lo_hz, hiHz: r.f_hi_hz, hasUserBand: false };
+}
+
+export interface ConfirmedBand extends Span {
+  id: string; active: boolean; hasUserBand: boolean; label: string;
+  /** Measured-edge tick position (percent of the view), only when a user band has moved that edge
+   * off the measured one and the measured edge is still in view; null otherwise. */
+  measuredLeftPct: number | null; measuredRightPct: number | null;
+}
+
+/** One box per Confirmed row in view (deleted, candidate and other states never), the focused one
+ * last so it draws on top — same stacking rule as [[bracketLayout]]. `overrides` substitutes a
+ * row's band with an in-progress drag's value (T-193, so the box tracks the pointer before the
+ * `PUT` commits), forcing `hasUserBand` since a drag always edits the user band. */
+export function confirmedBands(rows: readonly Row[], v: ax.View, focusedId: string | null,
+  overrides: ReadonlyMap<string, { loHz: number; hiHz: number }> = new Map()): ConfirmedBand[] {
+  const out: ConfirmedBand[] = [];
+  for (const r of rows) {
+    if (r.state !== "confirmed") continue;
+    const ov = overrides.get(r.id);
+    const eff = ov ? { ...ov, hasUserBand: true } : effectiveBand(r);
+    const p = placeExtent(v, eff.loHz, eff.hiHz, MIN_BRACKET_FRAC);
+    if (!p) continue;
+    let measuredLeftPct: number | null = null, measuredRightPct: number | null = null;
+    if (eff.hasUserBand) {
+      if (eff.loHz !== r.f_lo_hz && r.f_lo_hz >= v.loHz && r.f_lo_hz <= v.hiHz) measuredLeftPct = ax.hzToFrac(v, r.f_lo_hz) * 100;
+      if (eff.hiHz !== r.f_hi_hz && r.f_hi_hz >= v.loHz && r.f_hi_hz <= v.hiHz) measuredRightPct = ax.hzToFrac(v, r.f_hi_hz) * 100;
+    }
+    out.push({ ...p, id: r.id, active: r.id === focusedId, hasUserBand: eff.hasUserBand, measuredLeftPct, measuredRightPct, label: ax.fmtMHz((eff.loHz + eff.hiHz) / 2, 1e3) });
+  }
+  return out.sort((a, b) => Number(a.active) - Number(b.active));
+}
+
+export type BandEdge = "lo" | "hi";
+
+/** Which edge (if any) of a drawn box is within `hitPx` of pointer position `xPx` (client px from
+ * the live element's left edge). Null elsewhere, leaving priority to region-select/click there
+ * (T-193 "priority over region select only on the edge hit zone"). */
+export function bandEdgeHit(xPx: number, box: Span, widthPx: number, hitPx = EDGE_HIT_PX): BandEdge | null {
+  const loPx = (box.leftPct / 100) * widthPx, hiPx = ((box.leftPct + box.widthPct) / 100) * widthPx;
+  if (Math.abs(xPx - loPx) <= hitPx) return "lo";
+  if (Math.abs(xPx - hiPx) <= hitPx) return "hi";
+  return null;
+}
+
+export interface BandEdgeTarget { id: string; edge: BandEdge }
+
+/** The topmost (focused-first) Confirmed band whose edge sits under pointer position `xPx`; null
+ * when none does. Combines [[confirmedBands]] and [[bandEdgeHit]] for the pointerdown handler. */
+export function confirmedEdgeAt(rows: readonly Row[], v: ax.View, widthPx: number, xPx: number, focusedId: string | null,
+  overrides?: ReadonlyMap<string, { loHz: number; hiHz: number }>): BandEdgeTarget | null {
+  const bands = confirmedBands(rows, v, focusedId, overrides);
+  for (let i = bands.length - 1; i >= 0; i--) {
+    const hit = bandEdgeHit(xPx, bands[i], widthPx);
+    if (hit) return { id: bands[i].id, edge: hit };
+  }
+  return null;
+}
+
+/** The narrowest band a drag may leave: a few pixels' worth of the current view, so an edge drag
+ * can't collapse the band to nothing ("pixel snapping and a min width", T-193). Arithmetic over the
+ * already-known view/width, not a signal decision. */
+export function minUserBandHz(v: ax.View, widthPx: number, minPx = 4): number {
+  if (!(widthPx > 0) || !(v.hiHz > v.loHz)) return 1;
+  return Math.max(1, (minPx * (v.hiHz - v.loHz)) / widthPx);
+}
+
+/** Rounds a horizontal view fraction to the nearest device pixel of a `widthPx`-wide element
+ * ("pixel snapping"). */
+export function snapFracToPixel(frac: number, widthPx: number): number {
+  return widthPx > 0 ? Math.round(frac * widthPx) / widthPx : frac;
+}
+
+/** The band a drag of `edge` to pointer fraction `xFrac` produces: the moved edge snapped to a
+ * pixel and clamped so the band stays at least [[minUserBandHz]] wide and never crosses 0 Hz; the
+ * other edge is untouched. */
+export function dragBandEdge(v: ax.View, widthPx: number, edge: BandEdge, startLoHz: number, startHiHz: number, xFrac: number): { loHz: number; hiHz: number } {
+  const snappedHz = ax.fracToHz(v, snapFracToPixel(clamp01(xFrac), widthPx));
+  const minW = minUserBandHz(v, widthPx);
+  return edge === "lo"
+    ? { loHz: Math.max(0, Math.min(snappedHz, startHiHz - minW)), hiHz: startHiHz }
+    : { loHz: startLoHz, hiHz: Math.max(startLoHz + minW, snappedHz) };
 }
 
 export interface SelBox extends Span { id: string; active: boolean; pending: boolean }

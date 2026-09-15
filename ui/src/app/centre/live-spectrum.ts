@@ -1,7 +1,8 @@
 // MUI centre live view (T-152; ADR-0013 §3.3, §4.3). One WebGL canvas (ui/src/waterfall.ts: the
 // spectrum trace in its top part, the waterfall below), fed from the first remote-permitted
 // `spectrum` stream in `GET /api/streams` with reconnect and backoff. DOM overlays on top:
-// - brackets for inventory rows (confirmed / candidate / focused);
+// - brackets for candidate rows, and one full-height yellow box per Confirmed row spanning both
+//   panes, with draggable left/right edges that commit a user band override (T-193, overlays.ts);
 // - selection boxes, and the DC notch mask (see overlays.ts for GAP 10);
 // - a hover crosshair and readout;
 // - drag to select (`POST /api/selections`), click to focus, wheel or two-finger pinch to zoom;
@@ -18,15 +19,17 @@ import type { NewSelection } from "../../selections";
 import { MARK_DROP, MARK_GATED, Waterfall } from "../../waterfall";
 import type { AppContext } from "../context";
 import { h } from "../dom";
+import { setUserBand } from "../explore/inventory";
 import { selectionStoreFor } from "../explore/selections";
-import { focusSelection, focusSignal } from "../explore/slice";
+import { focusSelection, focusSignal, patchInventoryRow } from "../explore/slice";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
 import { toast } from "../shell-slice";
 import {
-  MIN_BRACKET_FRAC, addModeActive, assumedDc, bracketLayout, clickTarget, dcFromHeader, dcFromObservations, dcQuery, dragSelection, draftBox,
+  MIN_BRACKET_FRAC, addModeActive, assumedDc, bracketLayout, clickTarget, confirmedBands, confirmedEdgeAt,
+  dcFromHeader, dcFromObservations, dcQuery, dragBandEdge, dragSelection, draftBox, effectiveBand,
   hoverText, isDrag, levelU, placeExtent, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft,
-  type DcMask, type DragPoint, type RowClock, type Span,
+  type BandEdge, type DcMask, type DragPoint, type RowClock, type Span,
 } from "./overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
 import { geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retune, setLiveView, viewHooks } from "./view";
@@ -44,6 +47,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const brackets = h("div", { class: "c-brackets" });
   const specLayer = h("div", { class: "c-spec" }, brackets);
   const wfLayer = h("div", { class: "c-wf" });
+  const bandLayer = h("div", { class: "c-bands" }); // T-193: full-height, spans both panes
   const draftLabel = h("span");
   const draft = h("div", { class: "c-drag", hidden: true }, draftLabel);
   const cross = h("div", { class: "c-cross", hidden: true });
@@ -57,12 +61,32 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const badge = h("div", { class: "c-review", role: "status", hidden: true });
   const perf = h("div", { class: "c-perf", hidden: true });
   const note = h("div", { class: "live-note", role: "status" });
-  el.replaceChildren(canvas, specLayer, wfLayer, draft, cross, tip, hint, addToggle, scale, badge, perf, note);
+  el.replaceChildren(canvas, specLayer, wfLayer, bandLayer, draft, cross, tip, hint, addToggle, scale, badge, perf, note);
 
   let wf: Waterfall | null = null, sock: StreamSocket | null = null, attempt = 0, lastSeq = -1;
   let dc: DcMask | null = null, dcAsk = false;
   let reviewPeriodS: number | null = null, reviewSeq = 0, reviewTimer = 0;
   const bracketEls = new Map<string, HTMLElement>();
+
+  // ---- Confirmed-signal band boxes (T-193): draggable edges, pixel-snapped, min width, revert on
+  // a refused PUT. `bandOverride` is the optimistic in-progress/pending value so the box tracks the
+  // drag (and survives until the commit resolves) without waiting on the next inventory poll. ----
+  let bandDrag: { id: string; edge: BandEdge; startLoHz: number; startHiHz: number; pointerId: number } | null = null;
+  const bandOverride = new Map<string, { loHz: number; hiHz: number }>();
+
+  async function commitBand(id: string) {
+    const band = bandOverride.get(id);
+    if (!band) return;
+    const res = await setUserBand(ctx.client, id, band.loHz, band.hiHz);
+    if (res.ok) {
+      store.set(patchInventoryRow(id, { user_band: res.entry.user_band }));
+      store.set(toast(`Band set: ${ax.fmtMHz(band.loHz, 1e3)}–${ax.fmtMHz(band.hiHz, 1e3)} MHz`));
+    } else {
+      store.set(toast(`Band not saved: ${res.message}`));
+    }
+    bandOverride.delete(id); // success: the patched/reloaded row now carries it; failure: revert
+    schedule();
+  }
 
   // ---- multi-band select (T-194): a plain drag replaces only the one selection this tool itself
   // last made; add mode (the toggle, or Shift) keeps building a set instead. ----
@@ -105,6 +129,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       for (const e of bracketEls.values()) e.remove();
       bracketEls.clear();
       wfLayer.replaceChildren();
+      bandLayer.replaceChildren();
       return;
     }
     const focusSig = s.focus.kind === "signal" ? s.focus.id : null;
@@ -124,6 +149,20 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       seen.add(b.id);
     }
     for (const [id, e] of bracketEls) if (!seen.has(id)) { e.remove(); bracketEls.delete(id); }
+
+    // Confirmed signals: one yellow box per row, spanning both panes (T-193). A faint tick marks a
+    // measured edge the user band has moved off; the box itself is pointer-events: none (edge
+    // dragging is resolved by pixel math in the pointerdown/hover handlers below, same as
+    // click-to-focus resolves a click by frequency rather than by DOM hit).
+    const bandEls: HTMLElement[] = [];
+    for (const b of confirmedBands(Object.values(s.inventory.rows), v, focusSig, bandOverride)) {
+      const e = h("div", { class: `c-band${b.active ? " active" : ""}`, "data-id": b.id, title: `${b.label} MHz · confirmed${b.hasUserBand ? " · user band" : ""}` });
+      place(e, b);
+      bandEls.push(e);
+      if (b.measuredLeftPct !== null) bandEls.push(h("div", { class: "c-band-tick", style: `left:${b.measuredLeftPct}%` }));
+      if (b.measuredRightPct !== null) bandEls.push(h("div", { class: "c-band-tick", style: `left:${b.measuredRightPct}%` }));
+    }
+    bandLayer.replaceChildren(...bandEls);
 
     const layer: HTMLElement[] = [];
     const m = dc ? placeExtent(v, dc.loHz, dc.hiHz, 0.002) : null;
@@ -173,6 +212,11 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     cross.hidden = false;
     tip.hidden = false;
     hint.hidden = true;
+    if (!drag && !pinch && !bandDrag) {
+      const focus0 = store.get().focus; const focusSig = focus0.kind === "signal" ? focus0.id : null;
+      const edge = confirmedEdgeAt(Object.values(store.get().inventory.rows), v, el.clientWidth, p.x * el.clientWidth, focusSig, bandOverride);
+      el.style.cursor = edge ? "ew-resize" : "";
+    }
   }
 
   function drawDraft(a: DragPoint, b: { x: number; y: number; heightPx: number }) {
@@ -223,6 +267,25 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     if ((e.target as Element | null)?.closest?.(".c-addmode")) return;
     const bk = (e.target as Element | null)?.closest?.(".bk") as HTMLElement | null;
     if (bk?.dataset.id) { store.set(focusSignal(bk.dataset.id)); return; }
+    // T-193: a Confirmed band's edge hit zone takes priority over region-select/click, but only on
+    // that zone (a few px either side of the drawn edge) — everywhere else a drag still selects.
+    const v0 = store.get().live.view;
+    if (v0 && pts.size === 0) {
+      const focus0 = store.get().focus; const focusSig = focus0.kind === "signal" ? focus0.id : null;
+      const p0 = locate(e);
+      const edge = confirmedEdgeAt(Object.values(store.get().inventory.rows), v0, el.clientWidth, p0.x * el.clientWidth, focusSig, bandOverride);
+      const row = edge ? store.get().inventory.rows[edge.id] : null;
+      const cur = edge ? (bandOverride.get(edge.id) ?? (row ? effectiveBand(row) : null)) : null;
+      if (edge && cur) {
+        try { el.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
+        e.preventDefault();
+        bandDrag = { id: edge.id, edge: edge.edge, startLoHz: cur.loHz, startHiHz: cur.hiHz, pointerId: e.pointerId };
+        store.set(focusSignal(edge.id));
+        hideHover();
+        el.style.cursor = "ew-resize";
+        return;
+      }
+    }
     pts.set(e.pointerId, e.clientX);
     try { el.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ }
     e.preventDefault();
@@ -232,6 +295,14 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     hover(e);
   });
   el.addEventListener("pointermove", (e) => {
+    if (bandDrag && bandDrag.pointerId === e.pointerId) {
+      const v = store.get().live.view;
+      if (v) {
+        bandOverride.set(bandDrag.id, dragBandEdge(v, el.clientWidth, bandDrag.edge, bandDrag.startLoHz, bandDrag.startHiHz, ax.pointerFrac(e.clientX, el.getBoundingClientRect())));
+        schedule();
+      }
+      return;
+    }
     if (pts.has(e.pointerId)) pts.set(e.pointerId, e.clientX);
     if (pinch) {
       const g = geom(), xs = pinchXs();
@@ -245,6 +316,15 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     drawDraft(drag.a, locate(e));
   });
   const end = (e: PointerEvent) => {
+    if (bandDrag && bandDrag.pointerId === e.pointerId) {
+      const id = bandDrag.id;
+      bandDrag = null;
+      el.style.cursor = "";
+      if (e.type === "pointerup") void commitBand(id);
+      else bandOverride.delete(id); // cancelled: drop the optimistic preview, back to the last-known band
+      schedule();
+      return;
+    }
     if (!pts.delete(e.pointerId)) return;
     if (pinch) { if (pts.size < 2) pinch = null; return; } // a pinch never selects or focuses
     const d = drag;
@@ -280,7 +360,17 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     if (box?.dataset.id) {
       const sel = store.get().selections.list.find((x) => x.id === box.dataset.id);
       if (sel) openSelectionMenu(ctx, sel, mx, my);
+      return;
     }
+    // Confirmed-signal boxes (T-193) are pointer-events: none — edge dragging is resolved by pixel
+    // math, not DOM hit-testing — so a right-click/long-press over one never lands on an element
+    // `.closest()` finds above; resolve it the same way a plain click does instead.
+    const v = store.get().live.view, g = geom();
+    if (!v || !g) return;
+    const hz = ax.snapHz(g, ax.fracToHz(v, ax.pointerFrac(mx, el.getBoundingClientRect())));
+    const t = clickTarget(Object.values(store.get().inventory.rows), store.get().selections.list, hz, inspectHalfWidthHz(v.hiHz - v.loHz, ax.binWidthHz(g)));
+    if (t?.kind === "signal") { const r = store.get().inventory.rows[t.id]; if (r) openSignalMenu(ctx, r, mx, my); }
+    else if (t?.kind === "selection") { const sel = store.get().selections.list.find((x) => x.id === t.id); if (sel) openSelectionMenu(ctx, sel, mx, my); }
   });
 
   // ---- spectrum stream ----
