@@ -481,3 +481,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Daemon test:** flake fixed.
   - **Short-burst detector:** deferred to T-075.
   - **Verification:** the core ring change is on the real-time path, so full verification is running.
+- **B0.164 T-074 merged** (125c232, test-only). The test used `listen.active == 0` as a proxy for counted drops, but release runs just before drops are folded in; it now waits on `consumer_dropped` (20/20, and 3/3 under load). T-075 short-burst detector launches in the freed slot.

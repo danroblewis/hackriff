@@ -1227,7 +1227,9 @@ tasks:
   - id: T-074
     milestone: M0b
     title: Flaky stream_external slow-client drop test (wait also ends on disconnect)
-    status: in-progress
+    status: done
+    commit: "125c232 (merged)"
+    result: "test-only: listen.active reaches 0 in _slot.release() a few instructions before the disconnected consumer's drops are folded into consumer_dropped (chains/listen.rs teardown); the test used active == 0 as a proxy for drops counted. Now waits deterministically on consumer_dropped > 0 before the release/final asserts. 20/20 sequential, 3/3 concurrent under load."
     recurrence: "failed again in the T-061 merge verification under load 36: stream_external.rs:484 assertion counters.listen.consumer_dropped > 0"
     deps: [T-060]
     parallel_group: P
@@ -1241,7 +1243,7 @@ tasks:
   - id: T-075
     milestone: M0b
     title: Short-burst time-domain detector (ADS-B squitters, OOK bursts below STFT resolution)
-    status: todo
+    status: in-progress
     deps: [T-072]
     parallel_group: S
     use_cases: [SIGNAL-001, AWARE-036]
