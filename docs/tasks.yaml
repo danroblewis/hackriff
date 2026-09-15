@@ -1361,7 +1361,9 @@ tasks:
   - id: T-081
     milestone: M0b
     title: "Chain parameter estimation cost: ParamEstimator::estimate -> ChannelFilter::apply dominates the WFM/RDS chain (whole-pipeline bottleneck)"
-    status: in-progress
+    status: done
+    commit: "fbbb6de (merged; full check running)"
+    result: "root cause: a narrow carrier in a probe box (OBW 214 Hz on l24g20a0) made ChannelFilter hit its 8191-tap Kaiser clamp, filtering directly at 500 kHz over 250k samples - 1.43 s of the replay's 1.68 s filter time across 37 calls; estimate cadence was fine (one estimate per chain probe, analog.rs unchanged). Fix (crates/hk-estimate/src/dsp.rs): when fs >= 32x stopband edge, the same Kaiser kernel runs at fs/D between a 70 dB zero-phase decimator and matching interpolator (29 taps vs 8191); wider channels (all WFM boxes) keep the direct filter with an eight-lane SIMD dot product (hk_dsp::filter::kernels::dot_real); blind/mod.rs benefits too. Parity: 152 mode-sweep cases identical; SIGNAL-062 OBW/SNR/noise/pilot identical, RDS CFO and line dB differ past 7 significant digits; replay counts identical; unit tests vs old filter: multirate -53..-61 dB, ENBW within 0.2 %, direct form < -100 dB. Release RTF (old/new alternating 4 rounds, load 6.7-7.3): l24g20a0 0.37-0.38 -> 1.76-1.83; l32g30a1 1.25-1.27 -> 1.26-1.30. Microbench: narrow carrier 1398 -> 8.4 ms, WFM 13.0 -> 9.6 ms, noise 1.3 -> 1.2 ms. Tests: hk-estimate 68, hk-pipeline analog 2, signal_062 + refine_wfm_real 5, e2e listen_live + refine 3, lint."
     deps: [T-064]
     parallel_group: S
     use_cases: [SIGNAL-062, AWARE-042]
