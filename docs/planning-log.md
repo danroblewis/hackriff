@@ -1539,3 +1539,18 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Nits:** u64 sum overflow on a corrupt tile; shape tolerance undocumented.
   - **Verified:** bisection, per-query cache, pass-through never dequantised, deterministic, no ground-truth use, v4 decode bounds, no weakened tests.
   - **Next:** fix round continued in finisher 2 (~128k tokens), including an e2e/pipeline timing comparison and `just acceptance` in the worktree.
+- **B0.383 T-146 WIP (0e83566), untested. The agent was at 252k tokens; a finisher was launched.**
+  - **Rule:** a Stouffer run per (site, subject, cal) with S = |Σz|/√k and p_seq = 2k(k+1)·Q(S), mapped to z_eq = Q⁻¹(√p_seq).
+    - Novelty is the max of the interval's own score and the run score.
+    - The null on-rate ≤ Q(7.9)²/2.
+    - The run resets on direction change, a gap over 2 h, gain key, immature/explained input, or site change. Runs are not persisted.
+  - **`between_var` correction:** subtracts p(1−p)(ΣV/W − ΣwV/W²), floored at 0.1× raw.
+    - This needs a per-slot sampling moment: baseline format goes v2 → v3, and a slot grows 28 → 32 B.
+    - Two store-test expectations change.
+  - **Latency:** sparse onset raises within 14 intervals (a priori); dense within 2.
+  - **Finisher must check:**
+    - Compile and test fixes.
+    - The Monte-Carlo null test.
+    - The parked-week 0-refusal test under 256 MiB, now at risk from the 32 B slots.
+    - Conflict with T-140 accessors when merging main.
+  - **T-124 knock-on:** its busier-alarm latency limit must be re-derived from the new rule (14-interval sparse bound) before its next run.
