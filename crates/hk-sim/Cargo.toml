@@ -1,0 +1,17 @@
+[package]
+name = "hk-sim"
+description = "hackriff offline discrete-event attention-scheduler simulator (C04 testing, T-114)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Offline tooling: drives the existing hk-core scheduler against a synthetic emitter population.
+# No DSP and no hardware; T-120 registers its bandit policy here.
+[dependencies]
+clap.workspace = true
+hk-core.workspace = true
+hk-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
