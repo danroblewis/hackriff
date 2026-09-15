@@ -945,6 +945,130 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
 
 // T-091 assist
 
+/// Bits of `v` (`n` bits, MSB first) as a `"0101…"` string.
+fn t091_bits(v: u64, n: usize) -> String {
+    (0..n)
+        .rev()
+        .map(|i| if (v >> i) & 1 == 1 { '1' } else { '0' })
+        .collect()
+}
+
+/// Bit-serial CRC-16 (poly 0x1021, init 0) over a bit string.
+fn t091_crc16(bits: &str) -> u64 {
+    let mut reg = 0u64;
+    for b in bits.bytes() {
+        let top = ((reg >> 15) & 1) ^ u64::from(b == b'1');
+        reg = (reg << 1) & 0xFFFF;
+        if top == 1 {
+            reg ^= 0x1021;
+        }
+    }
+    reg
+}
+
+/// T-091: `/api/assist/{sync,fields,crc}` answer scored suggestions in the documented shapes,
+/// refuse bad input with 400 and other methods with 405. Blind: the posted data carry a CRC-16
+/// and a sync word the request never names.
+#[test]
+fn assist_routes_answer_suggestions_as_documented() {
+    let (serving, addr) = start_server();
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    // 24 frames: 8-bit constant, 16-bit counter, 32 random bits, CRC-16 over all of it.
+    let frames: Vec<String> = (0..24u64)
+        .map(|i| {
+            let mut f = t091_bits(0xA7, 8) + &t091_bits(100 + i, 16) + &t091_bits(next() >> 32, 32);
+            let c = t091_crc16(&f);
+            f.push_str(&t091_bits(c, 16));
+            f
+        })
+        .collect();
+    let frames_json: Vec<Value> = frames.iter().map(|f| json!({ "bits": f })).collect();
+
+    let (st, v) = post(
+        addr,
+        "/api/assist/crc",
+        &json!({ "frames": frames_json }).to_string(),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert!(is_array(&v["codes"]) && is_array(&v["parity"]), "{v}");
+    assert!(
+        v["work"]["partial"].is_boolean() && v["work"]["ops"].is_u64(),
+        "{v}"
+    );
+    let code = &v["codes"][0];
+    assert_eq!(code["generator"].as_u64(), Some(0x1_1021), "{v}");
+    assert_eq!(code["fragment"]["block"].as_str(), Some("crc"), "{v}");
+    assert!(code["score"].is_f64() && is_array(&code["reasons"]), "{v}");
+
+    let (st, v) = post(
+        addr,
+        "/api/assist/fields",
+        &json!({ "frames": frames_json }).to_string(),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        is_array(&v["suggestions"]) && is_array(&v["field_map"]["fields"]),
+        "{v}"
+    );
+    assert!(
+        is_array(&v["field_map_errors"]) && is_array(&v["per_bit"]),
+        "{v}"
+    );
+    assert_eq!(v["frames_aligned"].as_u64(), Some(24), "{v}");
+
+    // A stream: 20 packets of alternating preamble + 0x1ACF sync + 40 random bits.
+    let mut stream = String::new();
+    for _ in 0..20 {
+        stream.push_str(&"10".repeat(16));
+        stream.push_str(&t091_bits(0x1ACF, 16));
+        stream.push_str(&t091_bits(next() >> 24, 40));
+    }
+    let (st, v) = post(
+        addr,
+        "/api/assist/sync",
+        &json!({ "bits": stream }).to_string(),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["input"].as_str(), Some("bits"), "{v}");
+    assert!(
+        is_array(&v["syncs"]) && is_array(&v["periods"]) && is_array(&v["block_codes"]),
+        "{v}"
+    );
+    assert_eq!(v["syncs"][0]["hex"].as_str(), Some("0x1ACF"), "{v}");
+    assert_eq!(
+        v["syncs"][0]["fragment"]["block"].as_str(),
+        Some("sync_search"),
+        "{v}"
+    );
+    let (st, v) = post(
+        addr,
+        "/api/assist/sync",
+        &json!({ "frames": frames_json, "max_ops": 1000 }).to_string(),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["input"].as_str(), Some("frames"), "{v}");
+    assert!(v["work"]["partial"].is_boolean(), "{v}");
+
+    let (st, v) = post(addr, "/api/assist/crc", r#"{"frames": [{"bits": "01x"}]}"#);
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+    let (st, v) = post(
+        addr,
+        "/api/assist/sync",
+        r#"{"bits": "0101", "frames": []}"#,
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+    let (st, v) = get(addr, "/api/assist/crc");
+    assert_eq!(st, 405, "{v}");
+
+    stop_server(serving);
+}
+
 // T-092 captures
 
 // --- Route-table / docs consistency ---------------------------------------------------------------

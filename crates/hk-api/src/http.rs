@@ -115,7 +115,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-089 inspector
 
     // T-091 assist
-
+    ("POST", "/api/assist/sync"),
+    ("POST", "/api/assist/fields"),
+    ("POST", "/api/assist/crc"),
     // T-092 captures
 ];
 

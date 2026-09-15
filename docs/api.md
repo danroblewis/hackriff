@@ -317,6 +317,32 @@ Conventions:
 
 Assist suggestions are never applied automatically: the user accepts or edits them into a recipe, which then goes through `POST /api/recipes/validate`.
 
+### Authoring assist (T-091)
+
+Classical, compute-only helpers (`hk_estimate::assist`) for writing a parser over recorded bits. They answer **scored suggestions** with reasons, never truth, and save nothing, so they need the token in the `Authorization` header like every POST but are not audited. Nothing is looked up by protocol: the search measures structure blind, and catalogues only *name* what it measured (`known_as`, `reveng.name`, `cyclic.name`).
+
+**Input.** `Content-Type: application/json`; unknown keys are `400 invalid`. Bits are air order.
+- `bits`: one stream, `"0101…"` or `{"hex": "…", "bit_len": n}` (hex digits MSB first; `bit_len` trims the tail);
+- `frames`: an array of `{"bits": "0101…"}`, `"0101…"` or `{"hex", "bit_len"}` in capture order (the frame packing rule: MSB of byte 0 first). Capture ids (T-092) are not accepted yet: post the frames.
+- Limits: ≤ 400 000 bits and ≤ 20 000 frames per call (the 64 KiB body limit usually binds first).
+- `max_ops` (optional): the work cap in word operations (default 4 × 10⁸, ceiling 2 × 10⁹). Every answer has `work {ops, max_ops, partial, hypotheses, skipped[]}`; `partial: true` means the cap was hit and the answer holds what was found before it.
+
+**Fragments.** Suggestions carry `fragment: {block, params}` in the pinned block-parameter shapes (ADR-0011 §1.5): `sync_search` (`sync-word` or `offset-words`), `crc` (RevEng model with `span` or `blocks`), `bch` (`word_bits, n, k, poly, parity`) and `parity`. Hex values are `0x…` strings.
+
+| Route | Body | Answer |
+|---|---|---|
+| POST `/api/assist/sync` with `bits` | `{bits, max_errors?, max_sync_bits? (≤ 64), max_block_bits? (≤ 128), max_lag?, max_ops?}` | `{input: "bits", bit_len, syncs[], periods[], block_period?, block_codes[], block_parity[], offset_words?, work}` |
+| POST `/api/assist/sync` with `frames` | `{frames, max_errors?, max_sync_bits?, max_ops?}` | `{input: "frames", frames, syncs[], work}` |
+| POST `/api/assist/fields` | `{frames, align?: {sync: "0101…", max_errors?}, find_crc? (default true), max_ops?}` | `{frames, frames_given, frames_aligned, byte_structured, fixed_length, per_bit[], suggestions[], field_map, field_map_errors[], codes[], work}` |
+| POST `/api/assist/crc` | `{frames, min_width? (3), max_width? (32), max_tail_bits? (16), max_classes? (8), max_ops?}` | `{frames, codes[], parity[], work}` |
+
+- **`syncs[]`** (best first): `{bits, bit_len, hex, hex_lsb_first?, complement_hex, kind (sync | repeat | fill), occurrences, inverted_occurrences, max_errors, modal_interval_bits?, regularity, preamble_fraction, preamble_bits, frames_with?, modal_offset?, evidence_bits, score, reasons[], fragment}`. Seeds are counted with the complement folded in (an inverting demodulator finds the same word); `hex_lsb_first` reads the bits as LSB-first bytes; `fill` marks words that repeat back to back (idle codewords).
+- **`periods[]`**: `{period_bits, offset_bits?, method (linear-block | autocorrelation), agreement?, z?, rank?, deficiency?, constant_columns?, rows?, harmonic_of?, evidence, score, reasons[]}`. `linear-block` means stacked `period_bits`-bit blocks at `offset_bits` have deficient GF(2) rank: they are codewords of a linear code (RDS 26-bit blocks, POCSAG 32-bit codewords). The stream answer then runs the code search over those blocks (`block_codes`, `block_parity`) and, when the best code has per-position constants, proposes an `offset_words` `sync_search` fragment.
+- **`codes[]`**: `{kind (crc | bch), width, generator (with the x^w term), poly (without), start_bit, tail_bits, bit_order (air | byte-reflected), classes, init, xorout, init_resolved, class_constants[], cross_length, method (exhaustive | catalogue), cyclic? {n, k, covered_bits, name?}, known_as?, reveng? {name, params, byte_order, field_endianness}, validated, tested, evidence_bits, score, reasons[], fragment}`. Values are bit-serial over the air-order bits; `reveng` maps a byte-aligned CRC onto the RevEng model when one reproduces the frames. `classes > 1` means frames grouped by index mod `classes` each have their own constant (`class_constants`, e.g. RDS offset words).
+- **`parity[]`**: `{scope: frame {start_bit, tail_bits} | character {char_bits, phase}, parity, validated, tested, score, fragment}`.
+- **`suggestions[]`** (fields): `{name, kind (constant | counter | length | high-entropy | mixed | check), bit_offset, bit_len (null = varies), from_end, value_hex?, length_scale?, length_add?, mean_entropy, mean_constancy, score, reasons[]}`; `field_map` is the matching draft `FieldMap` (unit bits) and `field_map_errors` its static validation errors. `per_bit[]` is `{coverage, ones, entropy, transition}` per bit position for plotting.
+- **Errors:** `400 invalid` (bad bits, unknown key, both or neither of `bits`/`frames`), `415` (not JSON), `405` for other methods.
+
 ## UI decision logic moved server-side (T-079)
 
 The user's direction (2026-09-14): the web UI will be rewritten later as a one-screen exploratory UI; until then, **the backend owns all signal logic — recognition, analysis, classification, demodulation, decoding — and the UI is a thin client over this document**, so it can be replaced without backend changes. `GET /api/analysis/strongest` (above) is the first move under that rule: picking the strongest signal in a frequency range is spectrum *analysis*, not presentation, so it moved out of `ui/src/listen.ts` (`peakBinIndex`/`strongestInView`, which inspected a raw client-held FFT row) into the backend, which can look at its own measured spectrum history instead of one row the browser happened to have decoded. The UI toolbar (`ui/src/listen.ts` `installListen`) now polls this endpoint roughly once a second and caches the answer, so choosing a Listen target still runs synchronously inside the click handler (required to unlock audio playback on mobile browsers) rather than awaiting a fetch.
