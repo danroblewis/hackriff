@@ -2444,7 +2444,8 @@ notes:
   - id: T-154
     milestone: MUI
     title: "MUI packet inspector rehomed into Decode: frame list -> hex+ASCII -> layer tree with linked selection both ways, served byte-record and TCP address (reuse T-090 inspector logic-free rendering)"
-    status: in-progress
+    status: review
+    commit: e12b895
     deps: [T-149]
     parallel_group: MUI-INSPECT
     use_cases: []

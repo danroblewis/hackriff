@@ -1767,3 +1767,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Merged:** T-147 (695d850), T-146 (132eccf), T-150 (c1b296a), T-151 (8866b71), T-152 (0c596a5). Their worktrees were removed.
   - **If the combined check fails:** bisect by merge.
   - **T-124 (M2 blind acceptance):** resumed now that T-146 and T-147 are on main.
+- **B0.409 T-154 committed (e12b895, Sonnet).**
+  - **Coordinator check:** the diff touches only `decode/inspector*` and one test file. No lockfile changes. npm test: 169 passed, 0 failed.
+  - **Reuse:** it reuses the M1 `frame-inspector.ts` helpers, so no parsing lives in the UI.
+  - **Data source:** frames come through T-153's `subscribePipelineFeed`, which stays a no-op until T-153 lands.
+  - **Merge:** queued after the combined full check.
