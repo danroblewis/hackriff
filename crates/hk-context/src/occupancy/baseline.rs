@@ -16,13 +16,31 @@
 //!    crossing `cusum_h_sigma` latches a [`ChangePoint`] until the user re-freezes.
 //! 4. **Adaptive copy** accrues every fold with forgetting (half-life `half_life_days` of the
 //!    subject's observed time), levels winsorised at the reference mean ± 3σ.
-//! 5. **Reference** accrues only folds that are not novel, not provenance-explained, not mostly
-//!    suspect, with no open or building change point (every CUSUM < h/2), into slots whose own
-//!    hour-of-week slot holds < 24 h.
-//!    So the reference is the statistics of "normal" up to maturity of each slot, and a
-//!    persistent new interferer is never learnt into it (baseline poisoning): it shows in the
-//!    adaptive copy, crosses the CUSUM, and stays novel against the reference until
+//! 5. **Reference** accrues only folds that are not provenance-explained, not mostly suspect, with
+//!    no open or building change point (every CUSUM < h/2), into slots whose **hour-of-day pool**
+//!    holds < 24 h, and that are either not novel or, while that hour-of-day pool is immature,
+//!    below the alarm "on" level ([`REFERENCE_LEARN_MAX_NOVELTY`], §7.2) **and** not novel
+//!    (every z < `z_min`) against the slot's own immature hour-of-day reference, whose adaptive
+//!    copy has not drifted from it by 2·`cusum_k_sigma` σ or more, and which is itself novel
+//!    against the coarse pool (an established pattern explains the fold's novelty).
+//!    - The second branch avoids a maturity deadlock: novelty is judged at the finest *mature*
+//!      pool, which for a sharply patterned channel (one busy hour a day) is the all-hours pool,
+//!      where that hour is novel every day and would otherwise never accrue.
+//!    - The own-hour checks keep a change (an interferer, novel against the slot's own history)
+//!      out. The on level alone, or a per-fold own-hour z alone, lets a moderate interferer drain
+//!      into the immature pool fold by fold, dragging the reference along so the CUSUM never
+//!      builds. An interferer's own hour looks like the coarse pool (not established), so it
+//!      keeps the strict rule; the drift guard covers a change on an already patterned slot.
+//!    - Ending at hour-of-day maturity (~24 parked days) bounds slow-leak poisoning; waiting for
+//!      each hour-of-week slot to hold 24 h would keep learning for ~24 weeks.
+//!
+//!    So the reference is the statistics of "normal" up to maturity, and a persistent new
+//!    interferer is not learnt into it (baseline poisoning): it shows in the adaptive copy,
+//!    crosses the CUSUM, and stays novel against the reference until
 //!    [`BaselineEngine::refreeze`] (user) or `auto_refreeze_days` copies adaptive → reference.
+//!    Re-freeze copies the *decayed* adaptive statistics (a few hours per hour-of-week slot at a
+//!    14-day half-life), so resolution coarsens and slots below hour-of-day maturity reopen
+//!    learning.
 //!
 //! # Keys
 //! A new calibration is a new `BaselineKey` ([`Baselines::observe`]): it starts immature, so a cal
@@ -52,6 +70,80 @@ use super::novelty::{
 pub const SUSPECT_MAX_FRACTION: f64 = 0.5;
 /// Winsorising half-width, reference σ.
 pub const WINSOR_SIGMA: f64 = 3.0;
+/// Novelty below which a fold may still enter the reference while its hour-of-day pool is
+/// immature: the default alarm "on" level (ADR-0012 §7.2).
+pub const REFERENCE_LEARN_MAX_NOVELTY: f64 = 0.7;
+
+/// Reference observed time of `slot`'s hour-of-day pool (the 7 hour-of-week slots sharing its
+/// hour), over all gain states.
+fn hour_of_day_observed_s(sub: &SubjectBaseline, slot: HourOfWeek) -> f64 {
+    let s = slot.index();
+    sub.gains
+        .iter()
+        .flat_map(|g| g.reference.iter().skip(s % 24).step_by(24))
+        .map(|r| r.observed_s)
+        .sum()
+}
+
+/// Whether `obs`'s novelty against the chosen (coarse) pool is explained by its own slot's
+/// established hour-of-day pattern. Separates a slot repeating its own pattern from a change:
+/// - established: the own (possibly immature) hour-of-day reference has history and is itself
+///   novel (z ≥ `z_min`) against the chosen pool;
+/// - the fold: level and occupancy z below `z_min` against the own hour-of-day reference;
+/// - no drift: the own hour-of-day adaptive copy within `max_drift_sigma` of that reference, so a
+///   change cannot drain into the reference by dragging it along fold by fold. A reference that
+///   tracks a change stays about `max_drift_sigma` behind, above the CUSUM slack, so the CUSUM
+///   builds and stops learning.
+fn consistent_with_own_hour(
+    sub: &SubjectBaseline,
+    slot: HourOfWeek,
+    gain: Option<usize>,
+    obs: &IntervalObservation,
+    cfg: &NoveltyConfig,
+    max_drift_sigma: f64,
+    chosen: Option<(usize, PoolStats, PoolStats)>,
+) -> bool {
+    let Some((_, chosen_level, chosen_occ)) = chosen else {
+        return false;
+    };
+    let (level, occ) = pools(sub, slot, gain, BaselineCopy::Reference);
+    let r = res_index(BaselineResolution::HourOfDay);
+    if occ[r].observed_s <= 0.0 {
+        return false;
+    }
+    let ev = obs.evidence();
+    // Established pattern: the slot's own history is itself novel against the coarse pool, so
+    // that pool (not a change) explains the fold's novelty.
+    let own = Evidence {
+        level_db: level[r].mean_db(),
+        fco: occ[r].fco(),
+        ..ev
+    };
+    let established = level_z(&chosen_level, &own, cfg).is_some_and(|z| z >= cfg.z_min)
+        || occupancy_z(&chosen_occ, &own).is_some_and(|z| z.abs() >= cfg.z_min);
+    if !established {
+        return false;
+    }
+    let fold_ok = level_z(&level[r], &ev, cfg).is_none_or(|z| z < cfg.z_min)
+        && occupancy_z(&occ[r], &ev).is_none_or(|z| z.abs() < cfg.z_min);
+    if !fold_ok {
+        return false;
+    }
+    let (ad_level, ad_occ) = pools(sub, slot, gain, BaselineCopy::Adaptive);
+    let level_drift = match (ad_level[r].mean_db(), level[r].mean_db()) {
+        (Some(a), Some(m)) => {
+            (a - m).abs() / level[r].std_db().unwrap_or(0.0).max(cfg.sigma_floor_db)
+        }
+        _ => 0.0,
+    };
+    let occ_drift = match (ad_occ[r].fco(), obs.weight_s > 0.0 && obs.n_eff >= 1.0) {
+        (Some(af), true) => shrunk_fco(&occ[r], obs.weight_s / obs.n_eff).map_or(0.0, |p| {
+            (af - p).abs() / occupancy_sigma(&occ[r], p, obs.n_eff)
+        }),
+        _ => 0.0,
+    };
+    level_drift < max_drift_sigma && occ_drift < max_drift_sigma
+}
 
 /// One interval's measurement of one subject.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,8 +201,12 @@ impl IntervalObservation {
 /// T-118 adapter: an `OccupancyStat` row as a fold, with its site and calibration keys. `None` for
 /// band subjects and rows without usable revisits.
 ///
-/// Provisional until T-118 exposes channel levels and per-visit weights: the level is the applied
-/// threshold (floor + guard, so floor shifts show), the represented time is
+/// **Occupancy only** (`level_db: None`): the row's `threshold_db` follows the noise floor, not the
+/// emitter, so using it as the level would miss an emitter appearing and turn every floor rise into
+/// level novelty plus a level change point duplicating the noise-floor anomalies. Level novelty
+/// stays off on this path until T-118 exposes a real channel level (follow-up).
+///
+/// Provisional until T-118 exposes channel levels and per-visit weights: the represented time is
 /// `min(interval, n_revisits_all × revisit_mean_s)` and the weight its non-suspect share.
 pub fn from_occupancy_stat(
     stat: &OccupancyStat,
@@ -135,7 +231,7 @@ pub fn from_occupancy_stat(
         subject: BaselineSubject::Channel { key },
         t: stat.interval.start,
         gain,
-        level_db: Some(stat.threshold_db),
+        level_db: None,
         max_db: None,
         occupied_weight_s: if stat.fco.is_some() {
             fco * weight
@@ -612,12 +708,22 @@ impl BaselineEngine {
             }
         }
 
-        // Reference: normal folds only, until the slot itself is mature.
-        let slot_observed: f64 = sub
-            .gains
-            .iter()
-            .map(|g| g.reference[slot_i].observed_s)
-            .sum();
+        // Reference: normal folds only, until the slot's hour-of-day pool is mature.
+        let hod_immature = hour_of_day_observed_s(sub, slot) < MATURITY_MIN_OBSERVED_S;
+        // Not novel, or (while the hour-of-day pool is immature, which learning requires anyway)
+        // below the on level and consistent with the slot's own hour-of-day history.
+        let normal = novelty.novelty == 0.0
+            || (novelty.novelty < REFERENCE_LEARN_MAX_NOVELTY
+                && hod_immature
+                && consistent_with_own_hour(
+                    sub,
+                    slot,
+                    gain,
+                    obs,
+                    &ncfg,
+                    2.0 * policy.cusum_k_sigma,
+                    chosen,
+                ));
         let building = [
             sub.cusum.level_pos,
             sub.cusum.level_neg,
@@ -627,11 +733,7 @@ impl BaselineEngine {
         .into_iter()
         .fold(0.0, f64::max)
             >= 0.5 * policy.cusum_h_sigma;
-        let accrue_ref = clean
-            && novelty.novelty == 0.0
-            && sub.change_point.is_none()
-            && !building
-            && slot_observed < MATURITY_MIN_OBSERVED_S;
+        let accrue_ref = clean && normal && sub.change_point.is_none() && !building && hod_immature;
         if accrue_ref {
             let s = &mut sub.gains[gi].reference[slot_i];
             match level {
@@ -667,6 +769,11 @@ impl BaselineEngine {
 
     /// Copies adaptive → reference for subjects matching `filter`, clears their change points and
     /// CUSUMs. Returns how many were re-frozen.
+    ///
+    /// The copy is of the *decayed* adaptive statistics: at a 14-day half-life each hour-of-week
+    /// slot holds only a few hours (~3 h) of effective observed time, so the re-frozen reference
+    /// is mature at a coarser resolution than before, and slots whose hour-of-day pool falls below
+    /// 24 h reopen reference learning.
     pub fn refreeze(
         &mut self,
         t: Timestamp,
@@ -734,6 +841,8 @@ pub struct Baselines {
     store: Option<BaselineStore>,
     engines: BTreeMap<BaselineKey, BaselineEngine>,
     last_hour: Option<i64>,
+    /// Site of the latest fold: protected from quota eviction.
+    current: Option<hk_model::ids::SiteId>,
 }
 
 impl Baselines {
@@ -751,6 +860,7 @@ impl Baselines {
             store,
             engines: BTreeMap::new(),
             last_hour: None,
+            current: None,
         }
     }
 
@@ -800,6 +910,7 @@ impl Baselines {
                 Maturity::Immature { observed_s: 0.0 },
             ));
         };
+        self.current = Some(key.site);
         Ok(self.engine(key, utc_offset_min, obs.t)?.observe(obs))
     }
 
@@ -835,7 +946,9 @@ impl Baselines {
     }
 
     /// Saves dirty engines when the hour slot of `t` differs from the last save's (≤ 24
-    /// writes/day per active key), or always when `force` (checkpoint). Returns files written.
+    /// writes/day per active key), or always when `force` (checkpoint), then enforces the store
+    /// quota (evicting least recently visited sites, never the current one) and drops the evicted
+    /// sites' engines so they are not written back. Returns files written.
     pub fn flush(&mut self, t: Timestamp, force: bool) -> Result<usize, BaselineStoreError> {
         let hour = t.as_unix_nanos().div_euclid(3_600_000_000_000);
         if !force && self.last_hour.is_none_or(|h| h == hour) {
@@ -851,6 +964,10 @@ impl Baselines {
             store.save(&e.state)?;
             e.mark_saved();
             n += 1;
+        }
+        let evicted = store.enforce_quota(self.current)?;
+        if !evicted.is_empty() {
+            self.engines.retain(|k, _| !evicted.contains(&k.site));
         }
         Ok(n)
     }
@@ -1345,5 +1462,252 @@ mod tests {
         assert_eq!(o.observed_s, 900.0);
         assert!((o.weight_s - 720.0).abs() < 1e-9 && (o.fco().unwrap() - 0.5).abs() < 1e-12);
         assert!((o.suspect_fraction - 0.2).abs() < 1e-12);
+        assert_eq!(
+            o.level_db, None,
+            "occupancy only: the threshold is not a level"
+        );
+    }
+
+    /// A T-118 channel row at `hours` (15 min) with FCO `fco` and applied threshold `threshold_db`.
+    fn occupancy_row(hours: f64, fco: f64, threshold_db: f64) -> Option<OccupancyStat> {
+        use hk_model::attention::occupancy::{ThresholdSpec, TimingRegime};
+        use hk_model::region::TimeRange;
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 10,
+            hi_cell: 12,
+        };
+        let json = serde_json::json!({
+            "schema": 1,
+            "site": {"kind": "mobile"},
+            "subject": {"kind": "channel", "key": key},
+            "interval": TimeRange::new(at(hours), at(hours + 0.25)),
+            "fco": fco,
+            "n_revisits": 12, "n_occupied": (fco * 12.0).round() as u64, "n_suspect": 0,
+            "n_revisits_all": 12, "observed_s": 1.2, "revisit_mean_s": 75.0,
+            "timing": serde_json::to_value(TimingRegime::Statistical).unwrap(),
+            "threshold": serde_json::to_value(ThresholdSpec::default()).unwrap(),
+            "threshold_db": threshold_db, "guard_clamped": false, "rbw_hz": 6250.0,
+            "unit": "dbfs", "revisit_biased": false,
+        });
+        serde_json::from_value(json).ok()
+    }
+
+    /// A noise-floor rise moves the applied threshold, not the emitter: through the adapter it
+    /// must give neither level novelty nor a level change point.
+    #[test]
+    fn baseline_adapter_floor_rise_is_not_level_novelty() {
+        assert!(
+            occupancy_row(0.0, 0.3, -95.0).is_some(),
+            "OccupancyStat shape"
+        );
+        let mut e = engine();
+        let (mut level_cps, mut max_after) = (0, 0.0_f64);
+        // 3 days at a −95 dB threshold, then 3 days with the floor (and threshold) 10 dB higher.
+        for q in 0..(24 * 4 * 6) {
+            let hours = f64::from(q) / 4.0;
+            let thr = if hours >= 72.0 { -85.0 } else { -95.0 };
+            let row = occupancy_row(hours, 0.3, thr).unwrap();
+            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let out = e.observe(&o);
+            assert_eq!(out.novelty.level_z, None, "no level z at {hours} h");
+            level_cps += usize::from(
+                out.change_point
+                    .is_some_and(|c| c.statistic == ChangeStatistic::Level),
+            );
+            if hours >= 72.0 {
+                max_after = max_after.max(out.novelty.novelty);
+            }
+        }
+        println!(
+            "T-119 adapter floor +10 dB: max novelty after {max_after}, level change points \
+             {level_cps}"
+        );
+        assert_eq!(level_cps, 0);
+        assert_eq!(max_after, 0.0);
+    }
+
+    /// An occupancy-only 15-min fold with `n_eff` 50 and FCO drawn around `p`.
+    fn occ_fold(
+        subject: BaselineSubject,
+        hours: f64,
+        p: f64,
+        rng: &mut Rng,
+    ) -> IntervalObservation {
+        let n = 50;
+        let fco = (0..n).filter(|_| rng.next() < p).count() as f64 / f64::from(n);
+        IntervalObservation {
+            subject,
+            t: at(hours),
+            gain: 0,
+            level_db: None,
+            max_db: None,
+            occupied_weight_s: fco * 900.0,
+            weight_s: 900.0,
+            observed_s: 900.0,
+            n_eff: f64::from(n),
+            suspect_fraction: 0.0,
+            provenance_explained: false,
+        }
+    }
+
+    /// A channel quiet all day except one busy hour (FCO 0.8). After day 1 that hour is novel
+    /// against the coarse (all-hours) pool; it must still accrue into its own slot while its
+    /// hour-of-day pool is immature, so it matures instead of staying novel every day. A genuinely
+    /// new emitter in a quiet hour is still novel.
+    #[test]
+    fn baseline_sharply_patterned_channel_matures_instead_of_deadlocking() {
+        const BUSY_HOD: f64 = 14.0;
+        let mut rng = Rng(0x119);
+        let mut e = engine();
+        let ch = channel(0);
+        let days = 9;
+        let mut busy_max = vec![0.0_f64; days];
+        let mut busy_ref = vec![0usize; days];
+        for q in 0..(24 * 4 * days) {
+            let hours = f64::from(q as u32) / 4.0;
+            let hod = hours.rem_euclid(24.0);
+            let busy = (BUSY_HOD..BUSY_HOD + 1.0).contains(&hod);
+            let out = e.observe(&occ_fold(ch, hours, if busy { 0.8 } else { 0.0 }, &mut rng));
+            if busy {
+                let d = (hours / 24.0) as usize;
+                busy_max[d] = busy_max[d].max(out.novelty.novelty);
+                busy_ref[d] += usize::from(out.accrued_reference);
+            }
+        }
+        println!(
+            "T-119 busy hour: max novelty per day {busy_max:.3?}, reference folds {busy_ref:?}"
+        );
+        assert!(
+            busy_max[1] > 0.0,
+            "day 2 is novel against the all-hours pool"
+        );
+        assert!(
+            busy_ref[1..].iter().all(|n| *n > 0),
+            "the busy slot keeps accruing"
+        );
+        assert!(
+            busy_max[6..].iter().all(|n| *n < 0.05),
+            "the busy hour matured: {busy_max:?}"
+        );
+        // A genuinely new emitter in a quiet hour (03:00) on day 10.
+        let h = 24.0 * days as f64 + 3.0;
+        let out = e.observe(&occ_fold(ch, h, 0.8, &mut rng));
+        println!(
+            "T-119 new emitter at 03:00: novelty {:.3}",
+            out.novelty.novelty
+        );
+        assert!(
+            out.novelty.novelty >= 0.7,
+            "new emitter novelty {}",
+            out.novelty.novelty
+        );
+    }
+
+    /// A slow creep (FCO +0.003/day) never looks novel per fold; reference learning must end once
+    /// the hour-of-day pool is mature (~24 parked days), not when each hour-of-week slot holds
+    /// 24 h (~24 weeks), so the creep stops entering the reference.
+    #[test]
+    fn baseline_slow_creep_stops_entering_the_reference_after_maturity() {
+        let mut e = engine();
+        let ch = channel(3);
+        let mut last_ref_h = 0.0;
+        let mut accrued_day_23 = 0;
+        for q in 0..(24 * 4 * 40) {
+            let hours = f64::from(q) / 4.0;
+            let p = 0.2 + 0.003 * hours / 24.0;
+            let o = IntervalObservation {
+                subject: ch,
+                t: at(hours),
+                gain: 0,
+                level_db: None,
+                max_db: None,
+                occupied_weight_s: p * 900.0,
+                weight_s: 900.0,
+                observed_s: 900.0,
+                n_eff: 50.0,
+                suspect_fraction: 0.0,
+                provenance_explained: false,
+            };
+            let out = e.observe(&o);
+            if out.accrued_reference {
+                last_ref_h = hours;
+                accrued_day_23 += usize::from((23.0..24.0).contains(&(hours / 24.0)));
+            }
+        }
+        let sub = &e.state.subjects[&ch];
+        let (_, rf) = pools(sub, e.slot(at(0.0)), Some(0), BaselineCopy::Reference);
+        let (_, ad) = pools(sub, e.slot(at(0.0)), Some(0), BaselineCopy::Adaptive);
+        let (rf_fco, ad_fco) = (rf[1].fco().unwrap(), ad[1].fco().unwrap());
+        println!(
+            "T-119 slow creep: last reference fold at day {:.2}, reference FCO {rf_fco:.3}, \
+             adaptive {ad_fco:.3}",
+            last_ref_h / 24.0
+        );
+        assert!(accrued_day_23 > 0, "still learning before maturity");
+        assert!(
+            last_ref_h < 24.0 * 24.0,
+            "learning ended at hour-of-day maturity"
+        );
+        assert!(rf_fco < 0.25 && ad_fco - rf_fco > 0.03);
+    }
+
+    /// Flush enforces the store quota and drops evicted sites' engines so they are not written
+    /// back.
+    #[test]
+    fn baseline_flush_enforces_quota_and_drops_evicted_engines() {
+        let tmp = |tag: &str| std::env::temp_dir().join(format!("hk-t119-{tag}-{}", SiteId::new()));
+        let mut rng = Rng(5);
+        let fold = interval(channel(4), 0.0, 0.5, 10.0, &mut rng);
+        let at_h = |mut o: IntervalObservation, h: f64| {
+            o.t = at(h);
+            o
+        };
+        // One site's file size.
+        let d1 = tmp("quota-size");
+        let s1 = BaselineStore::open(&d1).unwrap();
+        let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(s1.clone()));
+        b.observe(SiteKey::Site(SiteId::new()), 0, CalKey::Uncalibrated, &fold)
+            .unwrap();
+        b.flush(at(0.5), true).unwrap();
+        let size = s1.usage().unwrap();
+        let _ = std::fs::remove_dir_all(d1);
+
+        let d2 = tmp("quota");
+        let store = BaselineStore::open(&d2).unwrap().with_quota(size * 3 / 2);
+        let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(store.clone()));
+        let (a, bsite) = (SiteId::new(), SiteId::new());
+        b.observe(SiteKey::Site(a), 0, CalKey::Uncalibrated, &fold)
+            .unwrap();
+        assert_eq!(b.flush(at(0.5), true).unwrap(), 1);
+        // A dirty again (same visit time), then B visited later: A is the oldest and evicted.
+        b.observe(SiteKey::Site(a), 0, CalKey::Uncalibrated, &fold)
+            .unwrap();
+        b.observe(
+            SiteKey::Site(bsite),
+            0,
+            CalKey::Uncalibrated,
+            &at_h(fold, 1.0),
+        )
+        .unwrap();
+        b.flush(at(1.5), true).unwrap();
+        let on_disk: Vec<_> = store.entries().unwrap().iter().map(|e| e.0.site).collect();
+        assert_eq!(on_disk, vec![bsite], "A evicted from the store");
+        assert!(
+            b.engines().all(|e| e.state.key.site != a),
+            "A's engine dropped"
+        );
+        // A later flush does not write A back.
+        b.observe(
+            SiteKey::Site(bsite),
+            0,
+            CalKey::Uncalibrated,
+            &at_h(fold, 2.0),
+        )
+        .unwrap();
+        b.flush(at(2.5), true).unwrap();
+        let on_disk: Vec<_> = store.entries().unwrap().iter().map(|e| e.0.site).collect();
+        assert_eq!(on_disk, vec![bsite]);
+        let _ = std::fs::remove_dir_all(d2);
     }
 }
