@@ -110,6 +110,24 @@ def test_novelty_start_hour_is_configurable():
     assert all(iv["start_s"] >= 10.0 * 3600.0 for iv in sched["intervals"] if iv["channel"] == nov_ch)
 
 
+def test_novelty_pre_fco_makes_an_established_channel_busier():
+    # T-124: a low-FCO channel before the injection, the configured FCO after it.
+    sched, p = schedule(novelty_start_hour=36.0, span_hours=60.0, novelty_pre_fco=0.05, novelty_fco=1.0)
+    nov = sched["novelty"]
+    assert nov["pre_fco"] == 0.05
+    mine = [iv for iv in sched["intervals"] if iv["channel"] == nov["channel"]]
+    pre = [iv for iv in mine if iv["start_s"] < nov["start_s"]]
+    assert pre and all(iv["start_s"] + iv["duration_s"] <= nov["start_s"] + 1e-6 for iv in pre)
+    pre_on = sum(iv["duration_s"] for iv in pre) / nov["start_s"]
+    tol = _time_average_tolerance(0.05, p["novelty_mean_on_s"], p["novelty_mean_on_s"] * 19.0,
+                                  nov["start_s"])
+    assert abs(pre_on - 0.05) <= tol
+    post_on = sum(iv["duration_s"] for iv in mine if iv["start_s"] >= nov["start_s"])
+    assert post_on == pytest.approx(sched["span_s"] - nov["start_s"])
+    # The default stays silent before the start (T-125's scene is unchanged).
+    assert schedule()[0]["novelty"]["pre_fco"] == 0.0
+
+
 # ---- Periodic launch-like event (00Z/12Z) ------------------------------------------------------
 
 

@@ -4,7 +4,7 @@
 # needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
 version: 1
-milestone: "M0 COMPLETE 2026-09-13 (T-026 deferred to Jetson); M0b complete (T-100 live HIL re-run deferred); M1 decoder workbench COMPLETE 2026-09-15 (docs/13; user M1 review pending, non-blocking); current milestone M2 attention + memory maturity started 2026-09-15 (docs/11: C04 bandit scheduler, C12 occupancy baselines + novelty, C26 history queries/reports)"
+milestone: "M0 COMPLETE 2026-09-13 (T-026 deferred to Jetson); M0b complete (T-100 deferred); M1 decoder workbench COMPLETE 2026-09-15; M2 attention + memory maturity COMPLETE 2026-09-15 (T-124 green, full check d0e74df; M2-hardening follow-ups open); current milestone M3 classification started 2026-09-15 (ADR-0016 design T-198); MUI in parallel; MAUTO design only (T-208), build after M3"
 # M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
 spikes:
   run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
@@ -17,6 +17,7 @@ spikes:
     S5: "PASS (scoped) 2026-09-13, merged 9b60c35: trusted symbol rate never wrong (915 FHSS FSK 60/60, RDS 100% >=0.25 s, 0/359 synth); deviation 97% within 10%; FSK family 100% >=20 dB; unknowns never trusted. INCONCLUSIVE: OOK/PSK family on real signals, independent deviation truth. Trusted floor: short FSK/OOK >=20 dB, PSK >=15 dB, long signals >=0 dB; below floor, prior-led trial demod leads"
 tasks:
   - id: T-001
+    milestone: M0
     title: Repo scaffold, Cargo workspace, justfile, CI skeleton (no hardware)
     status: done
     commit: 4c16e27 (merged to main)
@@ -31,6 +32,7 @@ tasks:
     effort: medium
     dod: workspace builds on macOS (CPU path); CI runs cargo test + python tooling test; README build/run commands work
   - id: T-002
+    milestone: M0
     title: Data-model types + SQLite repository (docs/07)
     status: done
     commit: "3d6ba9f + review fixes b6d4902 (merged)"
@@ -46,6 +48,7 @@ tasks:
     effort: high
     dod: schema + repository with tests for Emitter upsert, Detection insert, region/time query; provenance chain resolvable
   - id: T-003
+    milestone: M0
     title: source-abstraction + SigMF file-replay source + RAM ring buffer
     status: done
     commit: "8386cbb (merged 76ff126)"
@@ -60,6 +63,7 @@ tasks:
     effort: medium
     dod: file-replay source feeds frames with provenance; ring buffer with pre-trigger read; HackRF source stubbed behind same trait
   - id: T-023
+    milestone: M0
     title: Synthetic IQ generator + end-to-end replay harness
     status: done
     commit: "1bf8bce (merged)"
@@ -73,6 +77,7 @@ tasks:
     effort: high
     dod: generator produces SigMF with ground-truth annotations; harness replays and exposes pipeline outputs to assertions
   - id: T-004
+    milestone: M0
     title: spectral-estimation (Welch PSD, STFT, persistence, spectral kurtosis)
     status: done
     commit: "e404a46 (merged af148bb)"
@@ -86,6 +91,7 @@ tasks:
     effort: medium
     dod: T1 unit tests pass; SK ~1 for noise, >1 for bursts; CPU path builds on macOS
   - id: T-005
+    milestone: M0
     title: noise-floor estimation (FCME / percentile / minimum-statistics)
     status: done
     commit: "a40c2eb + review fixes 854614c (merged)"
@@ -101,6 +107,7 @@ tasks:
     effort: high
     dod: floor within +/-1 dB on synthetic; per-bin and per-channel estimates; feeds thresholds
   - id: T-006
+    milestone: M0
     title: CFAR detection + burst records
     status: done
     commit: "6891727 + review fixes 1e5bc99 + in-place schema edit 855ce9f (merged)"
@@ -119,6 +126,7 @@ tasks:
     effort: high
     dod: OS-CFAR + hysteresis + min-duration; false-alarm bound met (informed by spike S4); Detection rows written
   - id: T-007
+    milestone: M0
     title: burst-tracking (tracks, periodicity, duty cycle, hop set)
     status: done
     commit: "a0cbd95 (merged)"
@@ -136,6 +144,7 @@ tasks:
     effort: medium
     dod: Track objects with timing features; links detections to one track
   - id: T-008
+    milestone: M0
     title: channelizer (2x oversampled PFB) + on-demand DDC
     status: done
     commit: "3beb92b + review fixes 88c13c5 (merged)"
@@ -152,6 +161,7 @@ tasks:
     effort: high
     dod: N-channel PFB with tested isolation; DDC to arbitrary center/bw; feeds demods
   - id: T-009
+    milestone: M0
     title: sweep-survey + first (simple) attention scheduler
     status: done
     commit: "85b06be (merged 86ae931)"
@@ -168,6 +178,7 @@ tasks:
     effort: high
     dod: ScanPlan-driven sweep/dwell alternation with POI-sized dwells; golden-file the schedule
   - id: T-010
+    milestone: M0
     title: parameter-estimation (OBW, CFO, SNR, spectral shape)
     status: done
     commit: "337d16a (merged)"
@@ -183,6 +194,7 @@ tasks:
     effort: high
     dod: estimates within tolerance; normalises snippets for demod/classify
   - id: T-011
+    milestone: M0
     title: blind symbol-rate + FSK deviation estimation
     status: done
     commit: "b86244e (merged)"
@@ -200,6 +212,7 @@ tasks:
     gated_on: S5
     dod: estimators pass on synthetic and on an S5 capture; unknown flagged not mislabelled
   - id: T-012
+    milestone: M0
     title: analog auto-mode demod + RDS
     status: done
     commit: "8ae13de (merged)"
@@ -214,6 +227,7 @@ tasks:
     effort: medium
     dod: replay FM+RDS fixture -> WFM chosen, PI/PS decoded, label written
   - id: T-013
+    milestone: M0
     title: digital demod (FSK) + framing/CRC inference
     status: done
     commit: "ca718d8 (merged)"
@@ -231,6 +245,7 @@ tasks:
     gated_on: S5
     dod: bits recovered; framing model + CRC id; ground-truth annotation on valid decode
   - id: T-014
+    milestone: M0
     title: plugin host + manifest + IPC (ADR-0003)
     status: done
     commit: "457f11f + review fixes 993612d (merged)"
@@ -247,6 +262,7 @@ tasks:
     effort: high
     dod: manifest schema + IPC; a dummy plugin round-trips; plugin crash does not drop capture
   - id: T-015
+    milestone: M0
     title: readsb ADS-B plugin wrapper + fixture
     status: done
     commit: "9f8439c + review fixes e0777d1 (merged)"
@@ -261,6 +277,7 @@ tasks:
     effort: medium
     dod: readsb wrapped per manifest; e2e replay assertion passes
   - id: T-016
+    milestone: M0
     title: stream-output contract (framed UDS/TCP, SigMF headers, drop-not-block, gating)
     status: done
     commit: "526dbfd + review fixes 993612d (merged)"
@@ -276,6 +293,7 @@ tasks:
     effort: high
     dod: contract impl + a sample consumer; backpressure + gating tested
   - id: T-017
+    milestone: M0
     title: spectrum-history pyramid + region/time query
     status: done
     commit: "0ea888d (merged)"
@@ -291,6 +309,7 @@ tasks:
     effort: high
     dod: pyramid with rolling byte budget; region-over-time query tested
   - id: T-018
+    milestone: M0
     title: signal-inventory writes + emitter clustering (read/query)
     status: done
     commit: "4c68648 (merged)"
@@ -306,6 +325,7 @@ tasks:
     effort: medium
     dod: clustering by fingerprint; inventory query by region/time/status/tag
   - id: T-019
+    milestone: M0
     title: known-signal-priors — band-plan table + lookup
     status: done
     commit: "1b10130 (merged)"
@@ -320,6 +340,7 @@ tasks:
     effort: medium
     dod: compact 47 CFR 2.106 table parsed + lookup; known/unexpected status set on emitters
   - id: T-020
+    milestone: M0
     title: context-feeds cache + gpsjam adapter + event correlation
     status: done
     commit: "4192c7c (merged)"
@@ -335,6 +356,7 @@ tasks:
     effort: high
     dod: offline-first cache; Anomaly + Explanation objects; deterministic on frozen cache
   - id: T-021
+    milestone: M0
     title: radiometry calibrated noise-floor product
     status: done
     commit: "423945f (merged 84148da)"
@@ -349,6 +371,7 @@ tasks:
     effort: medium
     dod: calibration applied (dBFS->dBm); floor-vs-time product from tiles
   - id: T-022
+    milestone: M0
     title: web UI — WebGL2 waterfall + inventory table + region-over-time
     status: done
     commit: "T-022a ab75627 + inventory table 98e4247 (merged 7011ffd)"
@@ -365,6 +388,7 @@ tasks:
     gate_note: "S3 passed on Mac; proceed on web UI; confirm fps on Jetson/phone when hardware is available"
     dod: browser app consumes the API; waterfall + table + history view; fps target met or native-shell fallback invoked
   - id: T-024
+    milestone: M0
     title: Wire the 7 slice acceptance tests (docs/11 1.1) in CI
     status: done
     commit: "0749296 (merged 522cf77)"
@@ -379,6 +403,7 @@ tasks:
     effort: medium
     dod: seven e2e tests green in CI; each names its use-case id(s)
   - id: T-025
+    milestone: M0
     title: Fixture capture with the HackRF One (ADS-B, FM+RDS, ISM, sweep, terminated-input)
     status: done
     commit: "f9d71b0 (merged)"
@@ -393,6 +418,7 @@ tasks:
     effort: medium
     dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
   - id: T-026
+    milestone: M0
     title: GPU polyphase channelizer (CUDA PfbBackend) on the Jetson
     status: deferred
     deferred: "user 2026-09-14: GPU work is Mac-first; CUDA PFB deferred to the Jetson phase; not blocked and not a gate for any milestone"
@@ -410,6 +436,7 @@ tasks:
     note: "split from T-008 acceptance ('GPU + CPU-fallback paths') by the T-008 review, 2026-09-13; blocked until the Jetson arrives (user purchase)"
     provider_note: "CUDA becomes one provider in the ADR-0007 per-platform provider model from T-041; Mac GPU path via T-041 unblocks GPU work before the Jetson arrives"
   - id: T-022a
+    milestone: M0
     title: Web UI part 1 - WebSocket bridge (hk-stream remote egress) + WebGL2 waterfall + region-over-time history view
     status: done
     commit: "ab75627 (merged)"
@@ -425,6 +452,7 @@ tasks:
     effort: medium
     note: "split from T-022 (coordinator, 2026-09-13): only the inventory table needs T-018; the bridge is a remote egress on the legal-guardrail path, so Opus not Sonnet; reuse spikes/s3-web-waterfall client"
   - id: T-027
+    milestone: M0
     title: Pipeline assembly - hackriffd composes source, ring, STFT, floor, detection, history, stream output and plugins under a ScanPlan
     status: done
     commit: "a75f781 (merged)"
@@ -447,6 +475,7 @@ tasks:
     followups_from_T-015_review: "two SQLite write txns per decode under the ingest lock can back up readsb to a stall kill at busy sites (batch); readsb idle keepalive; plugin decode sample_index late by ~readsb block + pipe buffering (~40 ms)"
     note: "added by coordinator 2026-09-13: M0 DoD needs a runnable survey on the device and T-024's e2e tests need a composed pipeline; no existing task owned the composition"
   - id: T-028
+    milestone: M0
     title: Detection floor-step guard hardening for notch / filter-bank accessories (plateau exemption bypass, OS-only blind spot)
     status: done
     commit: "370bab3 (merged)"
@@ -461,6 +490,7 @@ tasks:
     effort: medium
     note: "follow-up from T-006 re-probe (2026-09-13): a notch below bin 1200 with a second down-step at 3200 read as a plateau -> 23 phantoms (21 confirmed); OS-only in guarded zone misses flat signals wider than ~16 bins (41-bin +15 dB: 0 records; 300-bin: 84.5 % -> 0.2 %). Must land before FM notch / filter-bank field use"
   - id: T-029
+    milestone: M0
     title: Floor-tracker follow-ups after T-005 merge (items listed in the T-005 final-round report)
     status: done
     commit: "5641167 (merged)"
@@ -476,6 +506,7 @@ tasks:
     items: "T-006: wide-reference interior coverage degrades for signals > ~2000 bins and is 0 % above ~55 % of span or with soft edges; band-pass accessory needs calibrated response (~900x Pfa otherwise); signals present through most of a 0.4 s window can lift a learned dip until they end | T-020: Structured region merged into a NoiseLike survivor is covered by its Anomaly (1456 extra bins in test); after a split two open anomalies can overlap; extent changes re-insert anomaly rows (in-place region update needs hk-model schema change) | T-021: without SK the slow floor follows steady wide signals; FM fixture shows a few startup edge Falls (uninvestigated)"
     note: "follow-ups from the T-005 final round (merged ab9148b under the user timebox steer, 2026-09-13)"
   - id: T-030
+    milestone: M0
     title: Fix T-011 harmonic rate trust on rectangular high-index FSK (trusted 7x true rate)
     status: done
     commit: "25d1ddb (merged b6645eb)"
@@ -490,6 +521,7 @@ tasks:
     effort: high
     note: "found by T-013 (2026-09-13): T-011 trusted 33.6 kBd (7x) on 13/20 bursts of rectangular FSK h=4; T-013 demod checks run lengths and divides (harmonic_divisor) as a workaround. Correctness bug in the 'trusted is never wrong' contract"
   - id: T-031
+    milestone: M0
     title: Burst-tracking follow-ups (model fields, track region query, merged links, split trigger, bursty hop sets, TDMA)
     status: done
     commit: "d043db8 (merged)"
@@ -506,6 +538,7 @@ tasks:
     items: "hk-model TimingFeatures lacks period confidence/jitter, burst-length distribution, segment boundaries, hop raster, hop-set id (only in TrackSummary); track region query missing; merged track keeps its own detection links (not re-pointed to survivor); no split trigger (only merges); bursty hopper needs looser hop rule; stream-start tone lobes and low-SNR single-lobe fragments create short extra tracks; TDMA frame + co-occurrence features not implemented; track upserts one transaction each (batch)"
     note: "follow-ups from T-007 (merged 2026-09-13 under the timebox rule)"
   - id: T-032
+    milestone: M0
     title: Scheduler follow-ups (bandit revisit, per-region revisit, gain-down re-verification, rate-change trust, RF path constants)
     status: done
     commit: "1fbe932 (merged)"
@@ -521,6 +554,7 @@ tasks:
     items: "ADR-0005 bandit revisit + C12 interestingness score; per-region revisit rates (one pass serves all today); automatic gain-down re-verification after a clipped gain-step pair; hk_detect rate-change trust function (dwell scheduled, not evaluated); cron schedules + hackrf_sweep firmware mode; offset sweep slices to avoid DC; move RF path boundaries into SourceCapabilities; verify HackRF 2170/2740 MHz path constants against firmware tuning.c (recalled, unverified); hk-core <-> hk-detect dev-dependency cycle | from T-009 review: verify.rs retune/rate-change comparisons run on clipped captures and use a clipped A0 as base (skip clipped, use first unclipped A); steps carry no verification-group id (stale captures can mix after a cut/plan update); WallClock not monotonic (backwards clock breaks t_start ordering and cut rollback); interestingness x priority can overflow to inf and starve other POIs (clamp); tiny weights starve POIs (minimum share/aging); update_plan restarts pass at hop 0 (frequent updates never reach tail hops); +-1 MHz retune can push wide POIs over DC/usable edge; hop seams at exact +-7.5 MHz sit in 15 MHz filter rolloff (overlap or narrower slices); wide POIs (BW > usable) get offset 0 on DC with no warning"
     note: "follow-ups from T-009 (merged 2026-09-13 under the timebox rule)"
   - id: T-033
+    milestone: M0
     title: Filter-bank passband phantoms and remaining guard gaps (before filter-bank field use)
     status: done
     commit: "1a354cc (merged 7e346e8)"
@@ -536,6 +570,7 @@ tasks:
     items: "sharp-edged filter-bank passband still exempt as plateau (both sides at band floor) -> 25-28 phantoms (~60x design) PerFrame, 100-260x Wide; floor shelf narrower than 1 MHz next to a learned step reads as signal; integrated-spectrum mask excludes all guarded bins; hk-detect duplicates hk-dsp shape internals (1 dB rule, block-centre sampling) - expose normalised block floors in FloorFrame; default reference still PerFrame (Wide fails stepped notch at 614x)"
     note: "follow-ups from T-028 (merged 2026-09-13 under the timebox rule); must land before filter-bank accessory field use"
   - id: T-034
+    milestone: M0
     title: Inventory follow-ups (ungated raw emitter getters, writers to record_sighting, re-demod dedup, clustering v2)
     status: done
     commit: "f891cbd (merged 02200e5)"
@@ -551,6 +586,7 @@ tasks:
     items: "raw Repository::emitter()/emitter_by_identity still return identities ungated - make them crate-private or gated, hk-api/exports must use query_inventory (legal); hk-demod RDS + FSK writers still use upsert_emitter_observation (no identity class) - move to record_sighting; re-demodulating same IQ creates new decode/track ids and doubles counts (dedup by content hash / time overlap); clustering v2: DBSCAN, fingerprints from C13-C15 estimates in pipeline, merge undo, suspect-artifact quarantine, multi-level entities, N+1 query reads"
     note: "follow-ups from T-018 (merged 2026-09-13 under the timebox rule); the first item is a legal-guardrail gap to close before any inventory API/export ships"
   - id: T-035
+    milestone: M0
     title: Tracking data-model follow-ups (TimingFeatures fields, track region query, batched writes, hop raster estimate)
     status: done
     commit: "288ad04 (merged)"
@@ -566,6 +602,7 @@ tasks:
     items: "TimingFeatures lacks period confidence/jitter, burst-length distribution, segment boundaries, hop raster, hop-set id; track region query missing; TrackBatch upserts one transaction each (needs a public hk-model transaction/batch API); hop raster estimate wrong on noisy real centres (40.3 kHz vs 200 kHz); TDMA frame + co-occurrence features"
     note: "follow-ups from T-031 (merged 2026-09-13 under the timebox rule)"
   - id: T-036
+    milestone: M0
     title: Remaining identity/content gating gaps (decode getters, tags, reclassification) + steady wide-emission detection limit
     status: done
     commit: "b14cc33 (merged)"
@@ -581,6 +618,7 @@ tasks:
     items: "decode() and decodes_for_identity() still return decode identities ungated (restricted rows rely on pre-storage sanitize allowlist) - gate them (legal); tags are not gated - review/forbid identity-bearing tags; most-restrictive-class-wins means a later EmitterClassification cannot open a MetadataOnly identity - needs an audited reclassify API; T-033 limit: steady noise-like wide emissions (OFDM, noise jammers) read as floor features - check impact on AWARE-006 GNSS noise-jammer detection (floor tracker episodes should still catch it) and document"
     note: "follow-ups from T-034 / T-022 / T-033 (2026-09-13); first item is a legal-guardrail gap"
   - id: T-037
+    milestone: M0
     title: Pipeline follow-ups (loop restart control, verification persistence, writer thread, WFM fragment tracks, capture names, shutdown, HackRF source)
     status: done
     commit: "T-037a 96f9b48 (34da3e8); T-037b b648511 (merged, blind.rs conflict resolved)"
@@ -607,6 +645,7 @@ tasks:
     items: "after --loop restart the scheduler still controls the old replay (gain steps stop applying); verification verdicts not persisted and hk_detect::rate_change not wired; DB writes under one mutex on the detection reader (separate writer thread) + T-015 readsb batching/keepalive/latency + dense-frame flags on records; many fragment tracks per WFM station and CPU on empty-channel probes, FM raster US-only; inventory sightings don't pass a stable capture name for T-034 replay dedup; FSK bits stream not published; graceful Ctrl-C shutdown; HackRF source still a stub (libhackrf BSD-3 -> in-process option); spectrum header centre not updated on retune; calibration not loaded for SPACE-050 (uncalibrated dBFS/Hz); attach test relies on 4 s ring margin (CI load risk); unpaced plugin feeding can overflow readsb 8 MB queue on long recordings | from T-027 review (not in fix agent): live-mode FloorProduct lock held by slow /api/history|floor queries stalls reader 2; correlator feed-cache I/O under repo lock in detect flush"
     note: "follow-ups from T-027 (merged 2026-09-13 under the timebox rule)"
   - id: T-038
+    milestone: M0
     title: Attack-map precision follow-ups (steady OFDM false floor-rise anomaly, partial-band extent, letters-only identity tags)
     status: done
     commit: "51c23f1 (merged 86b39a5)"
@@ -625,6 +664,7 @@ tasks:
     items: "steady 1 MHz OFDM opens a NoiseLike floor-rise Anomaly (SK 0.89) - attack map would explain a normal emitter as jamming; 800 kHz partial-band jammer episode reports 375 kHz extent; letters-only (non-hex) identity tag added via add_emitter_tag not caught by the value-independent tag rule"
     note: "follow-ups from T-036 (merged 2026-09-13 under the timebox rule)"
   - id: T-039
+    milestone: M0
     title: Pipeline classification to priors (family -> band-plan prior -> Emitter known/unexpected-here)
     status: done
     commit: "f555e10 (merged 7855ec5)"
@@ -646,6 +686,7 @@ tasks:
     core_interface: true
     dod: "AWARE-053 passes end-to-end through the pipeline; family vocabulary mapping documented; restricted-class rules unaffected (legal regression green)"
   - id: T-040
+    milestone: M0
     title: Emitter tag storage hardening (T-038 review nits)
     status: done
     commit: "7014e55 (merged a12848a)"
@@ -661,6 +702,7 @@ tasks:
     core_interface: true
     dod: "four nits fixed with tests; hk-model + acceptance legal regression green"
   - id: T-041
+    milestone: M0
     title: Mac compute providers (CPU multi-threaded baseline, GPU FftBackend/PfbBackend, Accelerate vDSP)
     status: done
     commit: "9504ea7 (merged 1501679)"
@@ -753,6 +795,7 @@ tasks:
     effort: high
     note: "~368 kHz constant offset suspected; same agent as T-044"
   - id: T-046
+    milestone: M0
     title: Shared compute-provider conformance/parity suite (every FftBackend/PfbBackend provider must pass)
     status: done
     commit: "9504ea7 (with T-041, merged 1501679)"
@@ -1970,7 +2013,8 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: in-progress
+    status: done
+    commit: 00cbaf9
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133, T-146, T-147, T-173, T-176]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2357,13 +2401,6 @@ tasks:
     model: opus
     effort: medium
     deferred: "user 2026-09-15: defer to a quiet time; needs exclusive HackRF (supervisor demo)"
-notes:
-  - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
-  - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
-  - Core-interface tasks (T-002, T-005, T-006, T-008, T-009, T-014, T-016) are Fable/Opus and reviewed before merge.
-  - "Parallel groups can run in separate worktrees; groups sharing a crate (group C on hk-dsp/hk-detect, group E on hk-store/hk-model/hk-core) serialise on that crate or coordinate file ownership."
-  - T-011/T-013 gated on spike S5; T-022 gated on S3. If a gate fails, see docs/12 1 for the fallback.
-  - T-025 needs the HackRF + the user; keep it with the coordinator, not a background agent.
   - id: T-149
     milestone: MUI
     title: "MUI-DESIGN: ADR-0013 UI component + state-store structure, frontend-to-API mapping for every mockup panel, build setup, dependency-light framework decision (vanilla TS + small reactive store, or lit/Preact, justified), reuse existing WebGL waterfall"
@@ -2944,7 +2981,8 @@ notes:
   - id: T-186
     milestone: M2-fix
     title: "Detection -> identification latency: a strong continuous WFM station takes too long to get family + top explanation"
-    status: in-progress
+    status: done
+    commit: e5261b7
     priority: high
     deps: []
     parallel_group: FIELD
@@ -3004,7 +3042,7 @@ notes:
   - id: T-190
     milestone: MUI
     title: "Analyze / synthesize decoder stub endpoint: POST /api/analyze on a selection, emitter or ad-hoc band (optional history window) validates the target and returns 501 not_implemented until MAUTO"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: API
@@ -3034,7 +3072,7 @@ notes:
   - id: T-192
     milestone: MUI
     title: "MUI right-click context menu on signals/boxes/inventory rows carrying the focus-bar actions (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete, Adjust band); right panel freed of controls"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: MUI-X1
@@ -3064,7 +3102,8 @@ notes:
   - id: T-194
     milestone: MUI
     title: "MUI manual multi-band region select on the waterfall and time-window select on the history/capture timeline (selections with t_lo/t_hi)"
-    status: todo
+    status: done
+    commit: a8d445a
     priority: normal
     deps: []
     parallel_group: MUI-X2
@@ -3091,3 +3130,220 @@ notes:
     model: sonnet
     effort: medium
     core_interface: false
+  - id: T-196
+    milestone: M2-hardening
+    title: "Occupancy span_stats FCO for a channel depends on the query band: 433.475 MHz lay inside both bands yet reported 0.073 (old band 433.2375-433.6875) vs 0.296 (fixed band 433.275-433.725), truth 0.258"
+    status: todo
+    priority: normal
+    deps: [T-124]
+    parallel_group: CONTEXT
+    use_cases: [AWARE-042]
+    found_by: "T-124 finisher report (2026-09-15), from T-184 repro runs"
+    acceptance: "root cause found (band-edge cell/hop coverage normalisation, channel extent clipping, or per-band denominator); a channel fully inside two query bands reports the same FCO and interval from both (hk-context test on a fixed observation log); no acceptance threshold changed"
+    area: crates/hk-context (occupancy span_stats), crates/hk-store radiometry if relevant
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-197
+    milestone: M2-hardening
+    title: "recipe_runtime hot-edit test flaky under load: discontinuities - source_discontinuities != 1 (stats counters possibly read non-atomically while the source loops)"
+    status: todo
+    priority: low
+    deps: []
+    parallel_group: PIPELINE
+    use_cases: []
+    found_by: "full check after the T-124 merge (2026-09-15); passes 5/5 alone; pinned heavy-serial + retries=1"
+    acceptance: "root cause: either a consistent stats snapshot (both counters read under one lock/epoch) or a real extra discontinuity at a loop splice during an edit; fix so the assertion holds 20/20 under 6 CPU burners without the retry; remove the nextest retry pin"
+    area: crates/hk-pipeline (recipes runtime stats), crates/hk-pipeline/tests/recipe_runtime.rs, .config/nextest.toml
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-198
+    milestone: M3
+    title: "M3-DESIGN: ADR-0016 classification contracts (C15/C18/C38): Classification output with open-set unknown, taxonomy versioning, fusion with C17 priors, EmissionFeatures/Signature schema, ml-runtime interface (Mac-first), blind evaluation protocol; finalise M3 task graph"
+    status: in-progress
+    priority: normal
+    deps: []
+    parallel_group: M3D
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "ADR-0016 PROVISIONAL covering: Classification{family dist incl unknown, open-set score, provenance, taxonomy@version}; fusion P(c|x,f,l) with priors never vetoing evidence; EmissionFeatures + Signature + SignatureMatch schema (docs/07 additions); ml-runtime Prediction contract, shadow mode, model versioning, Mac-first provider (CoreML/ONNX/wgpu) behind a conformance suite, CUDA later; how M3 output feeds MAUTO search (docs/15); blind evaluation protocol with per-SNR conditions and fixtures/synthetic scenes; docs/07 + api.md deltas listed; T-199..T-207 deps/areas/models confirmed or revised in the ADR"
+    area: docs/adr/0016-*.md, docs/07, capability cards C15/C18/C38
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-199
+    milestone: M3
+    title: "C15 classical feature-tree modulation-family classifier (cumulants, instantaneous amplitude/phase/frequency stats, cyclic features) with open-set unknown and C17 prior fusion"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3A
+    use_cases: [SIGNAL-062]
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "families analog/OOK-ASK/FSK/PSK-QAM/OFDM/CSS/pulsed/noise-like/unknown on normalised snippets; blind tests on synthetic impairment sweeps and real fixtures (fm_100p8M, 915 MHz FSK, ADS-B, POCSAG) report accuracy per SNR with a-priori floors from ADR-0016; unknown returned for out-of-taxonomy inputs; replaces or wraps the current family rules without regressing M0/M1/M2 acceptance"
+    area: crates/hk-estimate or new hk-classify crate, crates/hk-pipeline integration
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-200
+    milestone: M3
+    title: "C15 likelihood verifier (ALRT/GLRT) within the post-sync candidate set"
+    status: todo
+    priority: normal
+    deps: [T-199]
+    parallel_group: M3A
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "verifier re-ranks the top classical candidates for synchronised signals; measured gain on confusable pairs (2FSK vs GFSK, BPSK vs QPSK) at stated SNRs; never promotes a candidate absent from the feature-tree output"
+    area: crates/hk-classify (or hk-estimate)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-201
+    milestone: M3
+    title: "C18 fingerprint schema + editable signature database + matching (partial matches with ranked candidates)"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3B
+    use_cases: [AWARE-053]
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "EmissionFeatures aggregated per track/cluster with uncertainty; Signature store (hk-model migration) seeded from recipe outputs; SignatureMatch full/partial/none with ranked candidates, never an identity from too few fields; API route + docs/api.md + contract tests; blind tests on fixtures"
+    area: crates/hk-model, crates/hk-context or hk-classify, crates/hk-api, docs/api.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-202
+    milestone: M3
+    title: "C18 incremental clustering of unknown emissions (the same thing I saw before) linked to inventory emitter identity"
+    status: todo
+    priority: normal
+    deps: [T-201]
+    parallel_group: M3B
+    use_cases: [AWARE-053]
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "incremental DBSCAN (or the ADR-0016 choice) on normalised features; repeated unknown bursts across a multi-day synthetic scene cluster to one id, distinct unknowns stay apart (a-priori purity/completeness floors); cluster id on inventory rows; survives restart"
+    area: crates/hk-context or hk-classify, crates/hk-model
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-203
+    milestone: M3
+    title: "C38 ml-runtime Mac-first: model host with load/unload, batching, shadow mode and model@version provenance behind a conformance suite"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3C
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "Mac provider (ADR-0016 choice: ONNX Runtime CoreML EP, Candle/Metal, or wgpu) plus CPU reference; conformance suite comparing providers on a fixed model; batching delay <=20 ms and batch <=32 defaults; inference only on CFAR-surviving detections; shadow mode records predictions without acting; CUDA deferred to the Jetson phase"
+    area: new crate hk-ml (or per ADR), crates/hk-pipeline hook
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-204
+    milestone: M3
+    title: "C15 per-family DL stage with open-set (energy OOD or OpenMax), trained on synthetic impairments, inference via T-203 in shadow mode first"
+    status: todo
+    priority: normal
+    deps: [T-199, T-203]
+    parallel_group: M3C
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "py training pipeline (impairment augmentation; orchestration only) exports a versioned model; Rust inference via hk-ml; shadow-mode comparison vs classical on fixtures reported per SNR; enabled per family only where it beats classical at a-priori margins; unknown handled without softmax"
+    area: py/ (training), crates/hk-ml, crates/hk-classify
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-205
+    milestone: M3
+    title: "Labelled-capture dataset path for fine-tuning: CRC-valid decoder labels and user labels become exportable training snippets with provenance"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3B
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "decoder-validated (CRC/BCH pass) and user-labelled emissions export normalised IQ snippets + labels + provenance (SigMF annotations); no fixture data committed; tests on synthetic"
+    area: crates/hk-store, crates/hk-api, docs/api.md
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-206
+    milestone: M3
+    title: "M3 blind acceptance through the mock SDR: family top-k and unknown rate vs hidden truth, signature match and unknown clustering, per-SNR conditions (M3 exit gate)"
+    status: todo
+    priority: normal
+    deps: [T-199, T-201, T-202, T-204]
+    parallel_group: M3E
+    use_cases: [SIGNAL-062, AWARE-053]
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "acceptance_m3 suite: blind scenes with hidden truth (known families, out-of-taxonomy emitters, repeated unknowns); a-priori thresholds from ADR-0016; accuracy reported with conditions; separate just step if >60 s"
+    area: tests/e2e
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-207
+    milestone: M3
+    title: "MUI: classification distribution, unknown score, signature match and cluster id in the focus panel and inventory"
+    status: todo
+    priority: normal
+    deps: [T-199, T-201]
+    parallel_group: MUI-X3
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "thin client over the M3 API fields; unknown shown prominently; UI tests; bundle within budget"
+    area: ui/src/app/explore
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-208
+    milestone: MAUTO
+    title: "MAUTO-DESIGN (planning only): ADR-0015 decoder synthesis contracts - pipeline/objective representation, evidence-metric API, search strategy and budget, template format, region-analyze API (fills the T-190 stub), consumption of M3 Classification"
+    status: in-progress
+    priority: normal
+    deps: []
+    parallel_group: MAUTOD
+    use_cases: []
+    found_by: "user 2026-09-15: MAUTO after M3; ADR design may start now in parallel (planning only)"
+    acceptance: "ADR-0015 PROVISIONAL per docs/15 section 8 (renumbered: ADR-0014 is the IQ capture ring); defines the POST /api/analyze response/stream contract; how the M3 family distribution and C18 signatures seed and prune the search; per-signal compute budget; MAUTO task sketch for after M3; no code"
+    area: docs/adr/0015-*.md, docs/15 cross-refs
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-209
+    milestone: M2-hardening
+    title: "T-186 review follow-ups: early analog identification double-counts the emitter (SOURCE_ANALOG_CHAIN vs RDS_DECODER_ID sighting keys), pilot-locked no-PI emitters bypass the overload flag, duplicate refined-tuning rows, wasted RDS decode on the 1 s window"
+    status: in-progress
+    priority: high
+    deps: [T-186]
+    parallel_group: PIPELINE
+    use_cases: [SIGNAL-062]
+    found_by: "Opus review of T-186 (2026-09-15), verdict MERGE"
+    acceptance: "full-window write does not increment the sighting count when the early write placed the emitter (test: count +1 per session); mode_emitter refuses to place an emitter while the front-end overload flag is set (test with an overloaded mock capture); refined tuning stored once per session; identify skips RDS on the 1 s window; concurrent_demod re-run 10x on main with no failure or a filed root cause"
+    area: crates/hk-pipeline/src/chains/analog.rs, crates/hk-demod record.rs, crates/hk-pipeline tests
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+notes:
+  - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
+  - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
+  - Core-interface tasks (T-002, T-005, T-006, T-008, T-009, T-014, T-016) are Fable/Opus and reviewed before merge.
+  - "Parallel groups can run in separate worktrees; groups sharing a crate (group C on hk-dsp/hk-detect, group E on hk-store/hk-model/hk-core) serialise on that crate or coordinate file ownership."
+  - T-011/T-013 gated on spike S5; T-022 gated on S3. If a gate fails, see docs/12 1 for the fallback.
+  - T-025 needs the HackRF + the user; keep it with the coordinator, not a background agent.

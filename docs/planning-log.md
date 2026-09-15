@@ -2202,3 +2202,50 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-195: per-signal output panels (deps T-192, T-159).
   - **Launch plan:** UI-only T-192 and T-194 launch now; they build no Rust, so they don't count toward the 4-agent cap. Rust T-190 and T-191 queue behind the cap.
   - **Not committed:** docs/15 is left for the user to commit.
+- **B0.467 Main red after the T-181 merge.** The full check stopped at 1039/1374 on the follow_hops hop-set test.
+  - **Cause:** a test race. The test waited for a frame from the added channel, then asserted frames from channels 0 and 1, which under load could arrive later. It passed 3/3 alone.
+  - **Fix (test only):** wait until every channel has delivered a frame. No bound was loosened.
+- **B0.468 Full check green after the follow_hops test fix (0b393df).** Lint clean; 1374/1374 tests; acceptance 28/28; 61 GB free.
+  - **Main green with T-181 merged.**
+  - **T-178 fix round launched** (Opus, existing worktree). Scope: fsync-failure poison, background allocation, 20 Msps drop measurement, explicit test quotas, newer-version disable, locked status.
+- **B0.469 T-186 committed (e5261b7) and in Opus review (read-only).** A strong continuous station now gets family and top explanation at 1.0 s sample-clock after first detection. The a-priori bound was 3 s; before the fix it was about 4.5 s.
+  - **Root causes:** the WFM chain wrote only at 4 s window close, and no emitter was created without a decoded RDS PI. The second also explains why a weak-RDS station never identified live.
+  - **Fix:** an early pilot-locked write from the first 1 s, with RDS deferred to the full window. Test: signal_062_identify_latency.
+  - **Watch:** concurrent_demod failed once under load.
+  - **T-190 launched** (Sonnet) into the freed Rust slot. T-192 and T-194 marked in-progress.
+- **B0.470 T-124 green (00cbaf9) and merged to main.** acceptance_m2 passed 8/8 in 3 consecutive runs (75–87 s wall), thresholds unchanged. The only change: the band is built from the fixed scene centre.
+  - **Letter mapping, from T-124 acceptance order:**
+    - (a) FCO per channel (Wilson 95%, ≤2 of 7 outside, set a priori); every run learned 433.375 with 0 outside.
+    - (b)/(g) busier-than-usual alarm on the matured injected channel.
+    - (c) false-alarm bounds.
+    - (d) report coverage/POI.
+    - (e) simulator bandit vs round-robin.
+    - (f) wall time: kept in its own `just acceptance-m2` step.
+    - (h) gain step: no alarm, and disclosed as a provenance step.
+    - (i) new-emitter alarm.
+    - (j) restart keeps the pinned site.
+  - **M2 exit** pending the main full check plus acceptance-m2, now running.
+  - **Noted, not loosened:**
+    - (b) top explanation is `Unexplained`; the test only requires that the top cause isn't the device.
+    - (h) gain step shows 0 provenance-explained suppressions; the evidence is no alarm plus the disclosure.
+    - The bandit made only 4 dwells per run, a scene-design artefact.
+  - **Filed T-196:** span_stats FCO depends on the query band (433.475: 0.073 vs 0.296).
+- **B0.471 Board reconciled** (user report: ticket counts wrong).
+  - **Cause:** every task from T-149 on was appended below the `notes:` key, so parsers saw only T-001..T-148 (plus T-100).
+  - **Fix:** all entries moved into `tasks`; milestone M0 set on T-001..T-046; ids validated with no gaps and no dangling deps.
+  - **Filed:** T-197 (hot-edit flake, pinned), M3 T-198..T-207, MAUTO-DESIGN T-208 (ADR-0015, since ADR-0014 is the IQ ring), T-209 (T-186 review follow-ups).
+- **B0.472 M2 exit check on main after the T-124 merge (302655e).**
+  - **Green:** acceptance_m2 8/8 (80.9 s), acceptance 28/28, lint clean.
+  - **Stopped:** `just test` halted at 1054/1374 on the hot-edit flake (5/5 alone, now pinned).
+  - **T-186 Opus review: MERGE.** Findings became T-209.
+  - **Now:** T-186 merged; confirming full check (test + acceptance + acceptance-m2) running. M2 closes when it is green.
+  - **Launched (planning only, no builds):** T-198 M3-DESIGN (ADR-0016) and T-208 MAUTO-DESIGN (ADR-0015).
+- **B0.473 M2 CLOSED 2026-09-15.** Main at d0e74df (T-124 + T-186) is green: lint clean, 1376/1376 tests, acceptance 28/28, acceptance_m2 8/8 (69 s).
+  - **Recorded as done:** the docs/11 roadmap row and the tasks.yaml milestone header.
+  - **Left open as M2-hardening, not exit-blocking:** T-182, T-188, T-189, T-196, T-197, T-209.
+  - **M3 started** with T-198 (ADR-0016). MUI continues.
+  - **Merging T-194** (UI: multi-band waterfall select and timeline time-window select; bundle 29.7 KB gz; smoke passed).
+  - **T-209 launched** into the freed Rust slot.
+- **B0.474 T-194 merged (d02117a).** UI checks green: typecheck clean, 20/20 test files, build ok; `just lint` clean.
+  - **Worktree** removed.
+  - **T-193 still waits on T-191,** which is queued behind the 4 Rust slots (T-185, T-178, T-190, T-209).

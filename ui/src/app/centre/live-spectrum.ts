@@ -14,17 +14,18 @@
 import * as ax from "../../axis";
 import { attachWheelZoom } from "../../controls/gestures";
 import { inspectHalfWidthHz } from "../../inspect";
-import { apiBackend, uuid4, type NewSelection, type Selection } from "../../selections";
+import type { NewSelection } from "../../selections";
 import { MARK_DROP, MARK_GATED, Waterfall } from "../../waterfall";
 import type { AppContext } from "../context";
 import { h } from "../dom";
+import { selectionStoreFor } from "../explore/selections";
 import { focusSelection, focusSignal } from "../explore/slice";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
 import { toast } from "../shell-slice";
 import {
-  MIN_BRACKET_FRAC, assumedDc, bracketLayout, clickTarget, dcFromHeader, dcFromObservations, dcQuery, dragSelection, draftBox, hoverText,
-  isDrag, levelU, placeExtent, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft,
+  MIN_BRACKET_FRAC, addModeActive, assumedDc, bracketLayout, clickTarget, dcFromHeader, dcFromObservations, dcQuery, dragSelection, draftBox,
+  hoverText, isDrag, levelU, placeExtent, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft,
   type DcMask, type DragPoint, type RowClock, type Span,
 } from "./overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
@@ -47,19 +48,36 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const draft = h("div", { class: "c-drag", hidden: true }, draftLabel);
   const cross = h("div", { class: "c-cross", hidden: true });
   const tip = h("div", { class: "c-tip", hidden: true });
-  const hint = h("div", { class: "c-hint" }, "Click a signal · drag to select a region");
+  const hint = h("div", { class: "c-hint" });
+  const addToggle = h("button", {
+    type: "button", class: "c-addmode", "aria-pressed": "false",
+    title: "Add mode: keep every selection when you drag another region (Shift also works while dragging)",
+  }, "+ Add");
   const scale = h("div", { class: "c-time" });
   const badge = h("div", { class: "c-review", role: "status", hidden: true });
   const perf = h("div", { class: "c-perf", hidden: true });
   const note = h("div", { class: "live-note", role: "status" });
-  el.replaceChildren(canvas, specLayer, wfLayer, draft, cross, tip, hint, scale, badge, perf, note);
+  el.replaceChildren(canvas, specLayer, wfLayer, draft, cross, tip, hint, addToggle, scale, badge, perf, note);
 
   let wf: Waterfall | null = null, sock: StreamSocket | null = null, attempt = 0, lastSeq = -1;
   let dc: DcMask | null = null, dcAsk = false;
   let reviewPeriodS: number | null = null, reviewSeq = 0, reviewTimer = 0;
-  const pending = new Map<string, Selection>();
   const bracketEls = new Map<string, HTMLElement>();
-  const backend = apiBackend(ctx.client);
+
+  // ---- multi-band select (T-194): a plain drag replaces only the one selection this tool itself
+  // last made; add mode (the toggle, or Shift) keeps building a set instead. ----
+  let addMode = false;
+  let lastAutoId: string | null = null;
+  const renderAddUi = () => {
+    addToggle.setAttribute("aria-pressed", String(addMode));
+    addToggle.classList.toggle("on", addMode);
+    addToggle.textContent = addMode ? "Adding…" : "+ Add";
+    hint.textContent = addMode
+      ? "Add mode: drag to add another region · tap + Add to stop"
+      : "Click a signal · drag to select a region · Shift or + Add keeps several";
+  };
+  renderAddUi();
+  addToggle.addEventListener("click", () => { addMode = !addMode; renderAddUi(); });
 
   const say = (text: string) => { note.textContent = text; note.hidden = !text; };
   const review = (text: string) => { badge.textContent = text; badge.hidden = !text; };
@@ -117,9 +135,9 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       place(e, m);
       layer.push(e);
     }
-    const listed = new Set(s.selections.list.map((x) => x.id));
-    const sels = [...s.selections.list, ...[...pending.values()].filter((p) => !listed.has(p.id))];
-    for (const b of selectionBoxes(sels, v, focusSel, pending)) {
+    // Selections come straight from the shared SelectionStore (T-194); `data-id` (T-192) lets the
+    // context menu (menu/) resolve which selection a right-click/long-press landed on.
+    for (const b of selectionBoxes(s.selections.list, v, focusSel)) {
       const e = h("div", { class: `c-sel${b.active ? " active" : ""}${b.pending ? " pending" : ""}`, "data-id": b.id });
       place(e, b);
       layer.push(e);
@@ -178,20 +196,19 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     else if (t?.kind === "selection") store.set(focusSelection(t.id));
   }
 
-  async function createSelection(ns: NewSelection) {
-    const now = Date.now() / 1000;
-    const sel: Selection = { id: uuid4(), name: ns.name ?? "Region", f_lo: ns.f_lo, f_hi: ns.f_hi, tags: [], links: [], created: now, updated: now };
-    if (ns.t_lo !== undefined && ns.t_hi !== undefined) { sel.t_lo = ns.t_lo; sel.t_hi = ns.t_hi; }
-    pending.set(sel.id, sel);
-    schedule();
+  /** Commits a drag-made selection through the shared `SelectionStore` (optimistic; synced in the
+   * background). `useAdd`: keep every earlier one (and stop tracking a "solo" replaceable id) when
+   * building a multi-band set; otherwise replace only the one this tool itself last made. */
+  function createSelection(ns: NewSelection, useAdd: boolean) {
+    const shared = selectionStoreFor(ctx);
+    if (!useAdd && lastAutoId) shared.remove(lastAutoId);
     try {
-      await backend.create(sel);
-      store.set(focusSelection(sel.id));
+      const sel = shared.add(ns);
+      lastAutoId = useAdd ? null : sel.id;
+      if (!useAdd) store.set(focusSelection(sel.id));
       store.set(toast(`Selected ${sel.name}`));
     } catch (e) {
-      pending.delete(sel.id);
-      schedule();
-      store.set(toast(`Selection not saved: ${apiConnFor(e).message || String(e)}`));
+      store.set(toast(`Selection not saved: ${e instanceof Error ? e.message : String(e)}`));
     }
   }
 
@@ -203,6 +220,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
 
   el.addEventListener("pointerdown", (e) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    if ((e.target as Element | null)?.closest?.(".c-addmode")) return;
     const bk = (e.target as Element | null)?.closest?.(".bk") as HTMLElement | null;
     if (bk?.dataset.id) { store.set(focusSignal(bk.dataset.id)); return; }
     pts.set(e.pointerId, e.clientX);
@@ -239,7 +257,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     const p = locate(e);
     if (!d.moved) { click(ax.fracToHz(v, p.x)); return; }
     const sel = dragSelection(v, d.a, p, p.heightPx, clock());
-    if (sel) void createSelection(sel);
+    if (sel) createSelection(sel, addModeActive(addMode, e.shiftKey));
   };
   el.addEventListener("pointerup", end);
   el.addEventListener("pointercancel", end);
@@ -419,10 +437,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   });
   store.select((s) => s.inventory.rows, schedule);
   store.select((s) => s.focus, schedule);
-  store.select((s) => s.selections.list, (list) => {
-    for (const x of list) pending.delete(x.id);
-    schedule();
-  });
+  store.select((s) => s.selections.list, schedule);
   store.select((s) => s.nav.seq, () => {
     const s = store.get();
     if (s.nav.gotoHz === null) return;

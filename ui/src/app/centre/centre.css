@@ -20,7 +20,7 @@
 .specwf .c-dc { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ground) 0%, transparent) 0 4px, color-mix(in srgb, var(--ground) 60%, transparent) 4px 6px); }
 .specwf .c-dc.assumed { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ground) 0%, transparent) 0 6px, color-mix(in srgb, var(--ground) 45%, transparent) 6px 8px); }
 .specwf .c-dc span { position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%); font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 1px 4px; border-radius: 3px; white-space: nowrap; }
-.specwf .c-sel { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--amber); border-right: 1px dashed var(--amber); opacity: 0.6; }
+.specwf .c-sel { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--amber); border-right: 1px dashed var(--amber); opacity: 0.6; pointer-events: auto; }
 .specwf .c-sel.active { background: var(--amber-soft); opacity: 1; }
 .specwf .c-sel.pending { border-style: dotted; }
 .specwf .c-drag { position: absolute; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
@@ -29,6 +29,8 @@
 .specwf .c-cross { position: absolute; top: 0; bottom: 0; width: 1px; background: color-mix(in srgb, var(--text) 45%, transparent); pointer-events: none; }
 .specwf .c-tip { position: absolute; top: 46px; max-width: calc(100% - 16px); overflow: hidden; text-overflow: ellipsis; font: 11px var(--mono); color: var(--text); background: var(--panel); border: 1px solid var(--line); padding: 3px 7px; border-radius: 4px; pointer-events: none; white-space: nowrap; z-index: 4; }
 .specwf .c-hint { position: absolute; right: 10px; bottom: 28px; font-size: 11px; color: var(--muted); background: var(--panel); opacity: 0.9; padding: 3px 8px; border-radius: 4px; pointer-events: none; }
+.specwf .c-addmode { position: absolute; left: 8px; top: 8px; z-index: 5; font: 600 10.5px var(--ui); letter-spacing: 0.03em; color: var(--muted); background: var(--panel); border: 1px solid var(--line); padding: 3px 9px; border-radius: 12px; cursor: pointer; pointer-events: auto; touch-action: manipulation; }
+.specwf .c-addmode.on { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 55%, transparent); background: color-mix(in srgb, var(--amber) 14%, transparent); }
 .specwf .c-time { position: absolute; right: 8px; bottom: 8px; font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 0 4px; border-radius: 3px; pointer-events: none; }
 .specwf .c-review { position: absolute; left: 10px; top: calc(35% + 8px); max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--amber); background: var(--panel); border: 1px solid var(--amber); padding: 2px 8px; border-radius: 4px; pointer-events: none; }
 .specwf .c-perf { position: absolute; left: 8px; bottom: 8px; font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 0 4px; border-radius: 3px; pointer-events: none; }
