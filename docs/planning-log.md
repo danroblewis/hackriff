@@ -490,3 +490,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.166 T-072 merge verified** (core ring change): lint, 151 Rust test groups (0 failed), Python, UI and acceptance all green. The T-076 bisect covers the range including this merge.
 - **B0.167 User request (start of message truncated) → T-077.** Parallel test runner (nextest preferred) with serial groups for e2e and pipeline listen/refine/stream tests, CLAUDE.md build commands updated, and wall time reported against the 914 s sequential `cargo test` baseline. Launched on Sonnet (infra only; no overlap with T-071/T-075/T-076). Measurements are noisy while agents build, so load is recorded. The user was asked to resend the truncated start.
 - **B0.168 T-071 merged** (dfa57b7): unified per-run chain budget (16 chains / 8 listeners / 8 taps, CPU budget) with per-chain stats in /api/status, dedupe of neighbouring-chain ownership, and 3 concurrent WFM streams each carrying its own PI plus 2 isolated FSK bits streams through the mock SDR. The release build stays real-time with 3 listeners + 2 taps. T-076 was told to merge main (listen.rs admission changed). Full verification running.
+- **B0.169 User token-budget rules** (uncommitted user edit to prompts/model-selection.md, 21:48).
+  - **Waiting:** agents never wait in the foreground; builds and tests run in the background and resume on notification.
+  - **Testing:** agents run targeted tests only. The coordinator runs one full check per merge, and flake hunts use one background command with N runs.
+  - **Context:** lean; start a fresh agent rather than continue past ~300k tokens.
+  - **Models:** Opus at medium effort unless the work is real-time, novel DSP or hard debugging; Sonnet is the default off the real-time path.
+  - **Applied now:** T-075, T-076 and T-077 received the rules (T-077 aligns the runner and CLAUDE.md with them). Saved to coordinator memory; future briefs follow them.
+  - **Also:** T-071 merged; full verification running.
