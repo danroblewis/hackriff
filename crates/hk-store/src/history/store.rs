@@ -10,9 +10,9 @@ use hk_model::{TileKey, Timestamp};
 use super::StoreError;
 use super::codec;
 use super::config::{Geometry, PyramidConfig};
-use super::frame::{FrameInput, RegridPlan};
+use super::frame::{FrameInput, NoiseShape, RegridPlan};
 use super::stats::{db, hist_percentile};
-use super::tile::{ColEntry, Tile};
+use super::tile::{ColEntry, FrontEndState, ProvenanceStep, Tile};
 
 /// Counters.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -29,8 +29,15 @@ pub struct PyramidStats {
     pub checkpoints_written: u64,
     /// Bytes written (sealed tiles and checkpoints).
     pub bytes_written: u64,
-    /// Tiles evicted by budget or age.
+    /// Bytes the same files would have taken with raw payloads (T-116): the compression ratio is
+    /// `raw_bytes_written / bytes_written`.
+    pub raw_bytes_written: u64,
+    /// Tiles evicted by budget, quota or age (all reasons).
     pub tiles_evicted: u64,
+    /// Of those, expired by age (level `max_age` or a region override).
+    pub tiles_expired: u64,
+    /// Of those, evicted by a level byte quota.
+    pub tiles_evicted_quota: u64,
     /// Bytes evicted.
     pub bytes_evicted: u64,
     /// Temp, truncated or corrupt files ignored (and removed) on open or read.
@@ -38,6 +45,9 @@ pub struct PyramidStats {
     /// After the last enforcement, the budget could not be met without evicting tiles that no
     /// coarser level covers yet.
     pub over_budget: bool,
+    /// After the last enforcement, some level's byte quota could not be met without evicting
+    /// protected or uncovered tiles.
+    pub over_quota: bool,
 }
 
 /// What [`Pyramid::ingest`] did with a frame.
@@ -96,6 +106,8 @@ pub struct Pyramid {
     /// Level-0 checkpoint files of open tiles, `(f_block, t_block)` → bytes.
     checkpoints: HashMap<(i64, i64), u64>,
     disk_bytes: u64,
+    /// Sealed bytes per level.
+    level_bytes: Vec<u64>,
     /// Boxed so tiles move between the open maps and the pool without copying.
     #[allow(clippy::vec_box)]
     pool: Vec<Vec<Box<Tile>>>,
@@ -110,7 +122,16 @@ pub struct Pyramid {
     group_hist: Vec<u32>,
     keys: Vec<(i64, i64)>,
     buf: Vec<u8>,
+    payload: Vec<u8>,
+    /// Front-end state of the last folded frame (step detection, T-116).
+    last_state: Option<FrontEndState>,
+    /// Cell shape of the last STFT resolution seen.
+    shape_cache: Option<(hk_dsp::spectrum::Resolution, f32)>,
     stats: PyramidStats,
+}
+
+fn dur_ns(d: std::time::Duration) -> i64 {
+    i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)
 }
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
@@ -172,6 +193,7 @@ impl Pyramid {
             sealed: (0..n).map(|_| BTreeMap::new()).collect(),
             checkpoints: HashMap::new(),
             disk_bytes: 0,
+            level_bytes: vec![0; n],
             pool: (0..n).map(|_| Vec::new()).collect(),
             plan: RegridPlan::default(),
             floors: HashMap::new(),
@@ -183,6 +205,9 @@ impl Pyramid {
             group_hist: vec![0; bins],
             keys: Vec::new(),
             buf: Vec::new(),
+            payload: Vec::new(),
+            last_state: None,
+            shape_cache: None,
             stats: PyramidStats::default(),
             cfg: config,
             geom,
@@ -215,7 +240,7 @@ impl Pyramid {
 
     /// Bytes of sealed tiles at `level`.
     pub fn level_bytes(&self, level: usize) -> u64 {
-        self.sealed.get(level).map_or(0, |m| m.values().sum())
+        self.level_bytes.get(level).copied().unwrap_or(0)
     }
 
     /// Every tile ending at or before this instant has sealed; frames for them are late.
@@ -292,6 +317,18 @@ impl Pyramid {
             self.stats.frames_late += 1;
             return Ok(IngestOutcome::Late);
         }
+        let state = FrontEndState::of(frame);
+        let step = match self.last_state {
+            Some(prev) if prev.changes(&state) != 0 => Some(ProvenanceStep {
+                t: frame.t,
+                changed: prev.changes(&state),
+                from: prev,
+                to: state,
+            }),
+            _ => None,
+        };
+        self.last_state = Some(state);
+        let cell_shape = self.resolve_shape(frame.noise_shape);
         self.plan.ensure(
             frame.f_lo_hz,
             frame.bin_width_hz,
@@ -371,10 +408,8 @@ impl Pyramid {
                     });
                 }
             }
-            let Tile {
-                prov, last_gain, ..
-            } = tile;
-            prov.add_frame(frame, last_gain);
+            tile.prov
+                .add_frame(frame, &state, step.as_ref(), cell_shape);
             i = j;
         }
         self.stats.frames_folded += 1;
@@ -395,6 +430,28 @@ impl Pyramid {
             }
         }
         Ok(IngestOutcome::Folded)
+    }
+
+    /// The Gamma shape of a level-0 cell value for `shape` (cached per STFT resolution).
+    fn resolve_shape(&mut self, shape: NoiseShape) -> Option<f32> {
+        match shape {
+            NoiseShape::Unknown => None,
+            NoiseShape::CellShape(k) => (k.is_finite() && k > 0.0).then_some(k),
+            NoiseShape::Spectrum(r) => {
+                if !(r.bin_width_hz.is_finite() && r.bin_width_hz > 0.0) {
+                    return None;
+                }
+                if let Some((cached, k)) = self.shape_cache
+                    && cached == r
+                {
+                    return Some(k);
+                }
+                let k =
+                    hk_dsp::radiometry::cell_value_shape(&r, self.geom.levels[0].f_cell_hz) as f32;
+                self.shape_cache = Some((r, k));
+                Some(k)
+            }
+        }
     }
 
     /// Seals every tile ending at or before `t` (shutdown, tests, or an idle clock), rolls them
@@ -493,14 +550,16 @@ impl Pyramid {
 
     fn write_tile(&mut self, level: usize, tile: &Tile, sealed: bool) -> Result<(), StoreError> {
         let (fb, tb) = (tile.key.f_block, tile.key.t_block);
-        codec::encode(
+        let raw_bytes = codec::encode(
             tile,
             sealed,
             self.cfg.unit,
             &self.geom.levels[level],
             &self.cfg.histogram,
             self.pct(),
+            self.cfg.compression_level,
             &mut self.buf,
+            &mut self.payload,
         );
         let path = self.path(level, fb, tb);
         let dir = path.parent().expect("tile path has a parent");
@@ -524,13 +583,16 @@ impl Pyramid {
         }
         let old = if sealed {
             self.stats.tiles_written += 1;
-            self.sealed[level].insert((tb, fb), bytes)
+            let old = self.sealed[level].insert((tb, fb), bytes);
+            self.level_bytes[level] = self.level_bytes[level] - old.unwrap_or(0) + bytes;
+            old
         } else {
             self.stats.checkpoints_written += 1;
             self.checkpoints.insert((fb, tb), bytes)
         };
         self.disk_bytes = self.disk_bytes - old.unwrap_or(0) + bytes;
         self.stats.bytes_written += bytes;
+        self.stats.raw_bytes_written += raw_bytes;
         Ok(())
     }
 
@@ -549,47 +611,150 @@ impl Pyramid {
         }
         if let Some(bytes) = self.sealed[level].remove(&(tb, fb)) {
             self.disk_bytes -= bytes;
+            self.level_bytes[level] -= bytes;
             self.stats.bytes_evicted += bytes;
         }
         self.stats.tiles_evicted += 1;
         Ok(())
     }
 
-    /// Applies per-level `max_age`, then evicts until under the byte budget: the oldest sealed
-    /// tile of the finest level whose parent is sealed on disk goes first; only when no level
-    /// below the top has such a tile is the oldest top-level tile expired. A tile that no coarser
-    /// level covers yet is never evicted.
+    /// The longest region-override age protecting tile `(level, fb)`, ns.
+    fn override_age_ns(&self, level: usize, fb: i64) -> Option<i64> {
+        if self.cfg.retention_overrides.is_empty() {
+            return None;
+        }
+        let w = self.geom.levels[level].f_block_hz(self.geom.nf);
+        let (lo, hi) = (fb as f64 * w, (fb + 1) as f64 * w);
+        self.cfg
+            .retention_overrides
+            .iter()
+            .filter(|o| usize::from(o.level) == level && o.freq.lo_hz < hi && o.freq.hi_hz >= lo)
+            .map(|o| dur_ns(o.max_age))
+            .max()
+    }
+
+    /// A sealed tile one level finer lies inside tile `(level, fb, tb)`.
+    fn has_children(&self, level: usize, fb: i64, tb: i64) -> bool {
+        if level == 0 {
+            return false;
+        }
+        let g = &self.geom.levels[level];
+        let (t0, t1) = (tb * g.nt as i64, (tb + 1) * g.nt as i64);
+        let factor = i64::from(g.f_factor);
+        let (f0, f1) = (fb * factor, (fb + 1) * factor);
+        self.sealed[level - 1]
+            .range((t0, i64::MIN)..(t1, i64::MIN))
+            .any(|(&(_, cfb), _)| (f0..f1).contains(&cfb))
+    }
+
+    /// Covered by a sealed parent (or top level) and no finer tile left inside it.
+    fn evictable(&self, level: usize, fb: i64, tb: i64) -> bool {
+        (level == self.geom.top() || self.covered(level, fb, tb))
+            && !self.has_children(level, fb, tb)
+    }
+
+    /// The oldest tile of `level` the byte budget may evict.
+    fn oldest_victim(&self, level: usize, allow_protected: bool) -> Option<(i64, i64)> {
+        let top = self.geom.top();
+        for &(tb, fb) in self.sealed[level].keys() {
+            if level < top && !self.covered(level, fb, tb) {
+                // Parents seal in time order: later tiles are no more covered.
+                return None;
+            }
+            if (!allow_protected && self.override_age_ns(level, fb).is_some())
+                || self.has_children(level, fb, tb)
+            {
+                continue;
+            }
+            return Some((tb, fb));
+        }
+        None
+    }
+
+    /// Retention (T-116), after every seal, in three passes over **sealed** tiles:
+    ///
+    /// 1. **Age.** A tile expires once its end is older than `watermark − age`, where `age` is the
+    ///    longest [`super::RetentionOverride`] covering its block at its level, else the level's
+    ///    `max_age` (no age: kept).
+    /// 2. **Quota.** While a level exceeds its `byte_quota`, its oldest unprotected tiles go.
+    /// 3. **Budget.** While all files exceed `byte_budget`: the oldest unprotected tile of the
+    ///    finest level that has one, then the oldest unprotected top-level tile, and only then
+    ///    protected tiles (finest first).
+    ///
+    /// In every pass a tile is evicted only if a coarser level covers it (a sealed parent, or it
+    /// is top-level) and **children go first**: a tile with a sealed finer tile still inside it is
+    /// kept, so history never has a finer tile without its coarser summary. The clock is the data
+    /// watermark, so [`Pyramid::seal_through`] with a later time fast-forwards retention.
     fn enforce_budget(&mut self) -> Result<(), StoreError> {
         let top = self.geom.top();
+        let w = self.watermark_ns;
         for level in 0..=top {
-            let Some(age) = self.cfg.levels[level].max_age else {
+            let level_age = self.cfg.levels[level].max_age.map(dur_ns);
+            let min_age = self
+                .cfg
+                .retention_overrides
+                .iter()
+                .filter(|o| usize::from(o.level) == level)
+                .map(|o| dur_ns(o.max_age))
+                .chain(level_age)
+                .min();
+            let Some(min_age) = min_age else {
                 continue;
             };
-            let cutoff = self
-                .watermark_ns
-                .saturating_sub(i64::try_from(age.as_nanos()).unwrap_or(i64::MAX));
-            while let Some((&(tb, fb), _)) = self.sealed[level].first_key_value() {
-                if self.geom.block_end_ns(level, tb) > cutoff
-                    || (level < top && !self.covered(level, fb, tb))
-                {
+            let limit = w.saturating_sub(min_age);
+            let mut victims = Vec::new();
+            for &(tb, fb) in self.sealed[level].keys() {
+                let end = self.geom.block_end_ns(level, tb);
+                if end > limit {
                     break;
                 }
+                let Some(age) = self.override_age_ns(level, fb).or(level_age) else {
+                    continue;
+                };
+                if end <= w.saturating_sub(age) && self.evictable(level, fb, tb) {
+                    victims.push((tb, fb));
+                }
+            }
+            for (tb, fb) in victims {
                 self.evict(level, tb, fb)?;
+                self.stats.tiles_expired += 1;
+            }
+        }
+        self.stats.over_quota = false;
+        for level in 0..=top {
+            let Some(quota) = self.cfg.levels[level].byte_quota else {
+                continue;
+            };
+            let Some(mut excess) = self.level_bytes[level].checked_sub(quota) else {
+                continue;
+            };
+            let mut victims = Vec::new();
+            for (&(tb, fb), &bytes) in &self.sealed[level] {
+                if excess == 0 || (level < top && !self.covered(level, fb, tb)) {
+                    break;
+                }
+                if self.override_age_ns(level, fb).is_some() || self.has_children(level, fb, tb) {
+                    continue;
+                }
+                victims.push((tb, fb));
+                excess = excess.saturating_sub(bytes);
+            }
+            for (tb, fb) in victims {
+                self.evict(level, tb, fb)?;
+                self.stats.tiles_evicted_quota += 1;
+            }
+            if self.level_bytes[level] > quota {
+                self.stats.over_quota = true;
             }
         }
         self.stats.over_budget = false;
         while self.disk_bytes > self.cfg.byte_budget {
-            let mut victim = (0..top).find_map(|level| {
-                let (&(tb, fb), _) = self.sealed[level].first_key_value()?;
-                self.covered(level, fb, tb).then_some((level, tb, fb))
-            });
-            if victim.is_none() {
-                victim = self.sealed[top]
-                    .first_key_value()
-                    .map(|(&(tb, fb), _)| (top, tb, fb));
-            }
+            let victim = (0..top)
+                .find_map(|l| self.oldest_victim(l, false).map(|v| (l, v)))
+                .or_else(|| self.oldest_victim(top, false).map(|v| (top, v)))
+                .or_else(|| (0..=top).find_map(|l| self.oldest_victim(l, true).map(|v| (l, v))));
             match victim {
-                Some((level, tb, fb)) => self.evict(level, tb, fb)?,
+                Some((level, (tb, fb))) => self.evict(level, tb, fb)?,
                 None => {
                     self.stats.over_budget = true;
                     break;
@@ -672,6 +837,7 @@ impl Pyramid {
                             self.check_header(&h, level, fb, tb, &path)?;
                             if h.sealed {
                                 self.sealed[level].insert((tb, fb), len);
+                                self.level_bytes[level] += len;
                             } else if level == 0 {
                                 self.checkpoints.insert((fb, tb), len);
                             } else {
@@ -803,6 +969,7 @@ impl Pyramid {
                         let _ = fs::remove_file(self.path(level, fb, tb));
                         if let Some(b) = self.sealed[level].remove(&(tb, fb)) {
                             self.disk_bytes -= b;
+                            self.level_bytes[level] -= b;
                         }
                         self.stats.files_ignored += 1;
                     }

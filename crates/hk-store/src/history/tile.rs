@@ -1,20 +1,116 @@
 //! In-memory tile accumulators: level-0 frame folding and level-to-level rollup.
 
-use hk_model::{CalibrationStateId, TileKey, Timestamp};
+use hk_model::{CalibrationStateId, SpurMaskId, TileKey, Timestamp};
 
 use super::config::{HistogramConfig, LevelGeometry};
-use super::frame::{FrameInput, GainState};
+use super::frame::{FrameInput, FrontEnd, GainState, PortTag};
 use super::stats::{exact_percentile, hist_percentile, undb};
 
 /// Most distinct gain states listed per tile; further states are counted in
 /// [`ProvenanceSummary::other_gain_frames`].
 pub const MAX_GAIN_STATES: usize = 8;
 
+/// Most provenance steps listed per tile or query result; further steps are counted in
+/// [`ProvenanceSummary::steps_dropped`].
+pub const MAX_PROVENANCE_STEPS: usize = 32;
+
+/// Relative difference within which two cell shapes count as the same.
+pub const SHAPE_TOLERANCE: f32 = 0.05;
+
+/// The front-end state a frame was taken under: what a [`ProvenanceStep`] compares.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct FrontEndState {
+    /// Gain state.
+    pub gain: Option<GainState>,
+    /// Calibration in force.
+    pub calibration: Option<CalibrationStateId>,
+    /// Gain table, filter, spur mask.
+    pub front_end: FrontEnd,
+}
+
+impl FrontEndState {
+    /// The state of a frame.
+    pub fn of(f: &FrameInput<'_>) -> Self {
+        Self {
+            gain: f.gain,
+            calibration: f.calibration,
+            front_end: f.front_end,
+        }
+    }
+
+    /// [`ProvenanceStep`] change flags from `self` to `to` (0 when equal).
+    pub fn changes(&self, to: &Self) -> u8 {
+        let mut c = 0;
+        if self.gain != to.gain {
+            c |= ProvenanceStep::GAIN;
+        }
+        if self.calibration != to.calibration {
+            c |= ProvenanceStep::CALIBRATION;
+        }
+        if self.front_end.gain_table != to.front_end.gain_table {
+            c |= ProvenanceStep::GAIN_TABLE;
+        }
+        if self.front_end.filter != to.front_end.filter {
+            c |= ProvenanceStep::FILTER;
+        }
+        if self.front_end.spur_mask != to.front_end.spur_mask {
+            c |= ProvenanceStep::SPUR_MASK;
+        }
+        c
+    }
+}
+
+/// A change of front-end state between consecutive folded frames (T-116). Tiles and cells are
+/// not split at a step (the grid is fixed); the step is recorded instead, so a level change it
+/// causes can be explained as provenance, not as an event (C26/C30).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProvenanceStep {
+    /// Start of the first frame under the new state.
+    pub t: Timestamp,
+    /// What changed ([`ProvenanceStep::GAIN`] | …).
+    pub changed: u8,
+    /// State before.
+    pub from: FrontEndState,
+    /// State after.
+    pub to: FrontEndState,
+}
+
+impl ProvenanceStep {
+    /// Gain state changed.
+    pub const GAIN: u8 = 1;
+    /// Calibration changed.
+    pub const CALIBRATION: u8 = 2;
+    /// Gain table changed.
+    pub const GAIN_TABLE: u8 = 4;
+    /// Filter / antenna port changed.
+    pub const FILTER: u8 = 8;
+    /// Spur-mask version changed.
+    pub const SPUR_MASK: u8 = 16;
+
+    /// Names of the changed fields.
+    pub fn change_names(&self) -> Vec<&'static str> {
+        [
+            (Self::GAIN, "gain"),
+            (Self::CALIBRATION, "calibration"),
+            (Self::GAIN_TABLE, "gain_table"),
+            (Self::FILTER, "filter"),
+            (Self::SPUR_MASK, "spur_mask"),
+        ]
+        .into_iter()
+        .filter(|(f, _)| self.changed & f != 0)
+        .map(|(_, n)| n)
+        .collect()
+    }
+}
+
 /// Provenance and gain-state digest of the frames behind a tile or query result (C26: "store
 /// provenance per tile so C30 can rule front-end changes out first").
 ///
 /// `frames` counts frame contributions per level-0 tile (a frame spanning two tiles counts once in
-/// each); ratios such as [`ProvenanceSummary::suspect_fraction`] are unaffected.
+/// each); ratios such as [`ProvenanceSummary::suspect_fraction`] are unaffected. Single-valued
+/// tags (calibration, gain table, filter, spur mask, cell shape) keep the first value and a
+/// `*_mixed` flag once another value contributed, and every front-end change is listed in
+/// [`ProvenanceSummary::steps`]: different provenance never merges silently.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProvenanceSummary {
     /// Frame contributions.
@@ -23,7 +119,8 @@ pub struct ProvenanceSummary {
     pub suspect_frames: u64,
     /// Samples reported dropped before contributing frames.
     pub dropped_samples: u64,
-    /// Frame-to-frame gain changes seen while folding (summed over tiles).
+    /// Gain steps seen while folding (summed over tiles: a step in a frame spanning several
+    /// frequency tiles counts in each).
     pub gain_changes: u64,
     /// Distinct gain states and their frame counts (at most [`MAX_GAIN_STATES`]).
     pub gain_states: Vec<(GainState, u64)>,
@@ -35,10 +132,53 @@ pub struct ProvenanceSummary {
     pub calibration: Option<CalibrationStateId>,
     /// More than one calibration contributed.
     pub calibration_mixed: bool,
+    /// Gain table of the first frame (T-116).
+    pub gain_table: Option<u32>,
+    /// More than one gain table contributed.
+    pub gain_table_mixed: bool,
+    /// Filter / antenna port of the first frame (T-116).
+    pub filter: Option<PortTag>,
+    /// More than one filter contributed.
+    pub filter_mixed: bool,
+    /// Spur-mask version of the first frame (T-116).
+    pub spur_mask: Option<SpurMaskId>,
+    /// More than one spur mask contributed.
+    pub spur_mask_mixed: bool,
+    /// Gamma shape `n_c` of the level-0 cell values (T-116; drives the floor bias correction).
+    pub cell_shape: Option<f32>,
+    /// Shapes differing by more than [`SHAPE_TOLERANCE`] contributed (no corrected floor).
+    pub cell_shape_mixed: bool,
+    /// Front-end steps, in time order, deduplicated (at most [`MAX_PROVENANCE_STEPS`]).
+    pub steps: Vec<ProvenanceStep>,
+    /// Steps beyond the listed ones.
+    pub steps_dropped: u64,
     /// Earliest frame start.
     pub first_frame: Option<Timestamp>,
     /// Latest frame start.
     pub last_frame: Option<Timestamp>,
+}
+
+fn fold_tag<T: PartialEq>(
+    cur: &mut Option<T>,
+    mixed: &mut bool,
+    v: Option<T>,
+    v_mixed: bool,
+    first: bool,
+) {
+    if first {
+        *cur = v;
+        *mixed = v_mixed;
+    } else if v_mixed || *cur != v {
+        *mixed = true;
+    }
+}
+
+fn same_shape(a: Option<f32>, b: Option<f32>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => (a - b).abs() <= SHAPE_TOLERANCE * a.max(b),
+        _ => false,
+    }
 }
 
 impl ProvenanceSummary {
@@ -51,11 +191,19 @@ impl ProvenanceSummary {
         }
     }
 
+    /// The cell shape, when one shape (within tolerance) contributed.
+    pub fn uniform_cell_shape(&self) -> Option<f32> {
+        self.cell_shape.filter(|_| !self.cell_shape_mixed)
+    }
+
     pub(crate) fn clear(&mut self) {
         let mut states = std::mem::take(&mut self.gain_states);
+        let mut steps = std::mem::take(&mut self.steps);
         states.clear();
+        steps.clear();
         *self = Self {
             gain_states: states,
+            steps,
             ..Self::default()
         };
     }
@@ -70,29 +218,52 @@ impl ProvenanceSummary {
         }
     }
 
-    fn set_calibration(&mut self, cal: Option<CalibrationStateId>, mixed: bool, had_frames: bool) {
-        if !had_frames {
-            self.calibration = cal;
-            self.calibration_mixed = mixed;
-        } else if mixed || self.calibration != cal {
-            self.calibration_mixed = true;
+    fn add_step(&mut self, s: &ProvenanceStep) {
+        if self.steps.contains(s) {
+            return;
         }
+        if self.steps.len() >= MAX_PROVENANCE_STEPS {
+            self.steps_dropped += 1;
+            return;
+        }
+        let at = self.steps.partition_point(|x| x.t <= s.t);
+        self.steps.insert(at, *s);
     }
 
-    pub(crate) fn add_frame(&mut self, f: &FrameInput<'_>, last_gain: &mut Option<GainState>) {
-        self.set_calibration(f.calibration, false, self.frames > 0);
+    /// Folds one frame: `state` is its front-end state, `step` the change from the previous
+    /// folded frame (if any), `cell_shape` its resolved level-0 cell shape.
+    pub(crate) fn add_frame(
+        &mut self,
+        f: &FrameInput<'_>,
+        state: &FrontEndState,
+        step: Option<&ProvenanceStep>,
+        cell_shape: Option<f32>,
+    ) {
+        if self.frames == 0 {
+            self.calibration = state.calibration;
+            self.gain_table = state.front_end.gain_table;
+            self.filter = state.front_end.filter;
+            self.spur_mask = state.front_end.spur_mask;
+            self.cell_shape = cell_shape;
+        } else {
+            self.calibration_mixed |= self.calibration != state.calibration;
+            self.gain_table_mixed |= self.gain_table != state.front_end.gain_table;
+            self.filter_mixed |= self.filter != state.front_end.filter;
+            self.spur_mask_mixed |= self.spur_mask != state.front_end.spur_mask;
+            self.cell_shape_mixed |= !same_shape(self.cell_shape, cell_shape);
+        }
         self.frames += 1;
         self.suspect_frames += u64::from(f.suspect);
         self.dropped_samples += f.dropped_samples;
         match f.gain {
-            Some(g) => {
-                if last_gain.is_some_and(|l| l != g) {
-                    self.gain_changes += 1;
-                }
-                *last_gain = Some(g);
-                self.add_gain(g, 1);
-            }
+            Some(g) => self.add_gain(g, 1),
             None => self.unknown_gain_frames += 1,
+        }
+        if let Some(s) = step {
+            if s.changed & ProvenanceStep::GAIN != 0 {
+                self.gain_changes += 1;
+            }
+            self.add_step(s);
         }
         self.first_frame = Some(self.first_frame.map_or(f.t, |t| t.min(f.t)));
         self.last_frame = Some(self.last_frame.map_or(f.t, |t| t.max(f.t)));
@@ -103,7 +274,41 @@ impl ProvenanceSummary {
         if o.frames == 0 {
             return;
         }
-        self.set_calibration(o.calibration, o.calibration_mixed, self.frames > 0);
+        let first = self.frames == 0;
+        fold_tag(
+            &mut self.calibration,
+            &mut self.calibration_mixed,
+            o.calibration,
+            o.calibration_mixed,
+            first,
+        );
+        fold_tag(
+            &mut self.gain_table,
+            &mut self.gain_table_mixed,
+            o.gain_table,
+            o.gain_table_mixed,
+            first,
+        );
+        fold_tag(
+            &mut self.filter,
+            &mut self.filter_mixed,
+            o.filter,
+            o.filter_mixed,
+            first,
+        );
+        fold_tag(
+            &mut self.spur_mask,
+            &mut self.spur_mask_mixed,
+            o.spur_mask,
+            o.spur_mask_mixed,
+            first,
+        );
+        if first {
+            self.cell_shape = o.cell_shape;
+            self.cell_shape_mixed = o.cell_shape_mixed;
+        } else if o.cell_shape_mixed || !same_shape(self.cell_shape, o.cell_shape) {
+            self.cell_shape_mixed = true;
+        }
         self.frames += o.frames;
         self.suspect_frames += o.suspect_frames;
         self.dropped_samples += o.dropped_samples;
@@ -113,6 +318,10 @@ impl ProvenanceSummary {
         }
         self.other_gain_frames += o.other_gain_frames;
         self.unknown_gain_frames += o.unknown_gain_frames;
+        for s in &o.steps {
+            self.add_step(s);
+        }
+        self.steps_dropped += o.steps_dropped;
         for t in [o.first_frame, o.last_frame].into_iter().flatten() {
             self.first_frame = Some(self.first_frame.map_or(t, |x| x.min(t)));
             self.last_frame = Some(self.last_frame.map_or(t, |x| x.max(t)));
@@ -159,7 +368,6 @@ pub(crate) struct Tile {
     pub p_hi: Vec<f32>,
     pub hist: Vec<u32>,
     pub prov: ProvenanceSummary,
-    pub last_gain: Option<GainState>,
     /// Level 0: the time column currently buffering values.
     pub col_t: Option<usize>,
     /// Level 0: the highest column already closed (later values for it take the late path).
@@ -189,9 +397,9 @@ impl Tile {
             hist: vec![0; nf * bins],
             prov: ProvenanceSummary {
                 gain_states: Vec::with_capacity(MAX_GAIN_STATES),
+                steps: Vec::with_capacity(MAX_PROVENANCE_STEPS),
                 ..Default::default()
             },
-            last_gain: None,
             col_t: None,
             col_done: None,
             col: Vec::new(),
@@ -217,7 +425,6 @@ impl Tile {
         self.p_hi.fill(f32::NAN);
         self.hist.fill(0);
         self.prov.clear();
-        self.last_gain = None;
         self.col_t = None;
         self.col_done = None;
         self.col.clear();

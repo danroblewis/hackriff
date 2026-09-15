@@ -1,9 +1,11 @@
 //! JSON for the read-only history endpoints.
 //!
-//! - `/api/history?f_lo&f_hi&t0&t1[&max_cells]`: [`Pyramid::query`] (T-017) at the finest level
-//!   whose grid over the region fits in `max_cells` cells (default [`DEFAULT_MAX_CELLS`], at most
-//!   [`MAX_API_CELLS`]). Cells are row-major (time then frequency), one array per statistic;
-//!   unobserved cells are `null` ("not observed" is not "quiet", C26).
+//! - `/api/history?f_lo&f_hi&t0&t1[&max_cells][&format][&stat]`: [`Pyramid::query`] (T-017) at the
+//!   finest level whose grid over the region fits in `max_cells` cells (default
+//!   [`DEFAULT_MAX_CELLS`], at most [`MAX_API_CELLS`]). Cells are row-major (time then frequency),
+//!   one array per statistic; unobserved cells are `null` ("not observed" is not "quiet", C26).
+//!   T-116: `floor_db`, `coverage_summary`, `scheme`/`tile_format` and richer provenance in JSON;
+//!   `format=csv` (hackrf_sweep CSV) or `format=png` (waterfall) of one `stat` ([`history_export`]).
 //! - `/api/floor?f_lo&f_hi&t0&t1[&max_steps]`: [`FloorProduct::floor_vs_time`] (T-021) at the
 //!   finest level with at most `max_steps` time steps.
 //!
@@ -17,7 +19,9 @@ use hk_model::{
     InventoryIdentity, InventoryQuery, KnownStatus, LifecycleAuthor, LifecycleState, RepoError,
     Repository, StatusAuthor, TimeRange, Timestamp,
 };
-use hk_store::history::Geometry;
+use hk_store::history::{
+    FORMAT_VERSION, FrontEndState, Geometry, HistoryStat, waterfall_png, write_sweep_csv,
+};
 use hk_store::{
     FloorFlags, FloorProduct, FloorVsTime, ProvenanceSummary, Pyramid, RegionHistory, RegionQuery,
     Resolution,
@@ -44,6 +48,8 @@ pub const STRONGEST_BOX_HALF_HZ: f64 = 100_000.0;
 pub const DEFAULT_MAX_CELLS: usize = 100_000;
 /// Largest cell budget `/api/history` accepts (bounds response size).
 pub const MAX_API_CELLS: usize = 500_000;
+/// Cells per line of `/api/history?format=csv` (hackrf_sweep prints ~5 MHz slices).
+pub const CSV_CELLS_PER_LINE: usize = 256;
 /// Default step budget of `/api/floor`.
 pub const DEFAULT_MAX_STEPS: usize = 1024;
 /// Largest step budget of `/api/floor`.
@@ -158,12 +164,34 @@ fn ts_s(t: Timestamp) -> f64 {
     t.as_unix_nanos() as f64 / 1e9
 }
 
+fn front_end_state_json(s: &FrontEndState) -> Value {
+    json!({
+        "gain": s.gain.map(|g| json!({"lna_db": g.lna_db, "vga_db": g.vga_db, "amp_on": g.amp_on})),
+        "calibration": s.calibration,
+        "gain_table": s.front_end.gain_table,
+        "filter": s.front_end.filter.map(|t| t.to_string()),
+        "spur_mask": s.front_end.spur_mask,
+    })
+}
+
 fn provenance_json(p: &ProvenanceSummary) -> Value {
     let gains: Vec<Value> = p
         .gain_states
         .iter()
         .map(|(g, frames)| {
             json!({"lna_db": g.lna_db, "vga_db": g.vga_db, "amp_on": g.amp_on, "frames": frames})
+        })
+        .collect();
+    let steps: Vec<Value> = p
+        .steps
+        .iter()
+        .map(|s| {
+            json!({
+                "t_s": ts_s(s.t),
+                "changed": s.change_names(),
+                "from": front_end_state_json(&s.from),
+                "to": front_end_state_json(&s.to),
+            })
         })
         .collect();
     json!({
@@ -174,6 +202,16 @@ fn provenance_json(p: &ProvenanceSummary) -> Value {
         "gain_states": gains,
         "calibration": p.calibration,
         "calibration_mixed": p.calibration_mixed,
+        "gain_table": p.gain_table,
+        "gain_table_mixed": p.gain_table_mixed,
+        "filter": p.filter.map(|t| t.to_string()),
+        "filter_mixed": p.filter_mixed,
+        "spur_mask": p.spur_mask,
+        "spur_mask_mixed": p.spur_mask_mixed,
+        "cell_shape": p.cell_shape,
+        "cell_shape_mixed": p.cell_shape_mixed,
+        "steps": steps,
+        "steps_dropped": p.steps_dropped,
         "first_frame_s": p.first_frame.map(ts_s),
         "last_frame_s": p.last_frame.map(ts_s),
     })
@@ -184,7 +222,15 @@ pub fn region_history_json(h: &RegionHistory) -> Value {
     let col = |f: fn(&hk_store::CellStats) -> Value| -> Value {
         Value::Array(h.cells.iter().map(f).collect())
     };
+    let cov = h.coverage_summary();
+    let gaps: Vec<Value> = cov
+        .gaps
+        .iter()
+        .map(|g| json!({"t0_s": ts_s(g.start), "t1_s": ts_s(g.end)}))
+        .collect();
     json!({
+        "scheme": h.scheme,
+        "tile_format": FORMAT_VERSION,
         "level": h.level,
         "unit": h.unit,
         "f_cell_hz": h.f_cell_hz,
@@ -201,7 +247,15 @@ pub fn region_history_json(h: &RegionHistory) -> Value {
         "occupancy": col(|c| json!(c.occupancy)),
         "occupancy_max": col(|c| json!(c.occupancy_max)),
         "coverage": col(|c| json!(c.coverage)),
+        "floor_db": col(|c| json!(c.floor_db)),
         "frames": col(|c| json!(c.frames)),
+        "coverage_summary": {
+            "cells": cov.cells,
+            "observed_cells": cov.observed_cells,
+            "observed_fraction": cov.observed_fraction,
+            "gaps": gaps,
+            "gaps_truncated": cov.gaps_truncated,
+        },
         "provenance": provenance_json(&h.provenance),
         "tiles_read": h.tiles_read,
     })
@@ -209,6 +263,48 @@ pub fn region_history_json(h: &RegionHistory) -> Value {
 
 /// `/api/history`.
 pub fn history_json(p: &Pyramid, q: &Params) -> Result<Value, ApiError> {
+    Ok(region_history_json(&region_history(p, q)?))
+}
+
+/// `/api/history?format=csv|png[&stat]` (T-116): `Ok(None)` when the format is JSON (the default),
+/// else `(content type, body)`: the grid as `hackrf_sweep` CSV of `stat` (default `mean`, per-bin
+/// dB, UTC, [`CSV_CELLS_PER_LINE`] cells per line) or a PNG waterfall of `stat` (default `max`;
+/// grey = not observed).
+pub fn history_export(
+    p: &Pyramid,
+    q: &Params,
+) -> Result<Option<(&'static str, Vec<u8>)>, ApiError> {
+    let Some(format) = history_format(q)? else {
+        return Ok(None);
+    };
+    let stat = match param(q, "stat") {
+        None if format == "csv" => HistoryStat::Mean,
+        None => HistoryStat::Max,
+        Some(s) => HistoryStat::parse(s)
+            .ok_or_else(|| bad("stat must be max, mean, p_low, p_high or floor"))?,
+    };
+    let h = region_history(p, q)?;
+    if format == "csv" {
+        let mut out = Vec::new();
+        write_sweep_csv(&h, stat, CSV_CELLS_PER_LINE, &mut out)
+            .map_err(|_| ApiError::new(500, "csv export failed"))?;
+        Ok(Some(("text/csv; charset=utf-8", out)))
+    } else {
+        Ok(Some(("image/png", waterfall_png(&h, stat, None))))
+    }
+}
+
+/// The `format` of a `/api/history` request: `None` for JSON, else `csv` or `png`.
+pub fn history_format(q: &Params) -> Result<Option<&'static str>, ApiError> {
+    match param(q, "format") {
+        None | Some("json") => Ok(None),
+        Some("csv") => Ok(Some("csv")),
+        Some("png") => Ok(Some("png")),
+        Some(_) => Err(bad("format must be json, csv or png")),
+    }
+}
+
+fn region_history(p: &Pyramid, q: &Params) -> Result<RegionHistory, ApiError> {
     let r = parse_region(q)?;
     let max_cells = count(q, "max_cells", DEFAULT_MAX_CELLS, MAX_API_CELLS)?;
     let level = choose_level(p.geometry(), &r, |nt, nf| nt * nf <= max_cells as f64)?;
@@ -222,7 +318,7 @@ pub fn history_json(p: &Pyramid, q: &Params) -> Result<Value, ApiError> {
             resolution: Resolution::Level(level),
         })
         .map_err(|_| ApiError::new(400, "history query refused"))?;
-    Ok(region_history_json(&h))
+    Ok(h)
 }
 
 const FLAG_NAMES: [(FloorFlags, &str); 14] = [

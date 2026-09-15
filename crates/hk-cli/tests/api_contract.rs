@@ -132,6 +132,31 @@ fn post(addr: SocketAddr, path: &str, body: &str) -> (u16, Value) {
     )
 }
 
+/// A GET whose body is not JSON: `(status, content type, body)`.
+fn get_raw(addr: SocketAddr, path: &str) -> (u16, String, Vec<u8>) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).unwrap();
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head");
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let status = head[9..12].parse().unwrap();
+    let content_type = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Content-Type: "))
+        .unwrap_or("")
+        .to_owned();
+    (status, content_type, raw[split + 4..].to_vec())
+}
+
 fn put(addr: SocketAddr, path: &str, body: &str) -> (u16, Value) {
     call(
         addr,
@@ -300,6 +325,64 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         assert!(v.get(field).is_some(), "history missing {field}: {v}");
     }
     assert!(is_array(&v["max_db"]) && is_array(&v["occupancy"]), "{v}");
+    // T-116: coverage, floor, scheme/format and provenance steps (additive).
+    for field in [
+        "scheme",
+        "tile_format",
+        "coverage",
+        "floor_db",
+        "coverage_summary",
+    ] {
+        assert!(v.get(field).is_some(), "history missing {field}: {v}");
+    }
+    assert!(
+        is_array(&v["floor_db"]) && is_array(&v["coverage_summary"]["gaps"]),
+        "{v}"
+    );
+    let prov = &v["provenance"];
+    for field in [
+        "gain_table",
+        "filter",
+        "spur_mask",
+        "cell_shape",
+        "steps_dropped",
+    ] {
+        assert!(prov.get(field).is_some(), "provenance missing {field}: {v}");
+    }
+    assert!(is_array(&prov["steps"]), "{v}");
+    let region = format!(
+        "f_lo={}&f_hi={}&t0=0&t1={t1}",
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0
+    );
+    let (st, ct, body) = get_raw(addr, &format!("/api/history?{region}&format=csv"));
+    assert_eq!((st, ct.as_str()), (200, "text/csv; charset=utf-8"));
+    let text = String::from_utf8(body).unwrap();
+    // Lines may be absent before history has ingested (unobserved lines are omitted); every line
+    // present has the hackrf_sweep shape (hk-store tests cover the values).
+    for line in text.lines() {
+        let f: Vec<&str> = line.split(", ").collect();
+        assert!(
+            f.len() > 6
+                && f[0].len() == 10
+                && f[2].parse::<u64>().is_ok()
+                && f[3].parse::<u64>().is_ok()
+                && f[4].parse::<f64>().is_ok()
+                && f[5].parse::<u32>().is_ok()
+                && f[6..].iter().all(|x| x.parse::<f64>().is_ok()),
+            "hackrf_sweep line: {line}"
+        );
+    }
+    let (st, ct, body) = get_raw(addr, &format!("/api/history?{region}&format=png&stat=max"));
+    assert_eq!((st, ct.as_str()), (200, "image/png"));
+    assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let (st, _) = get(addr, &format!("/api/history?{region}&format=xml"));
+    assert_eq!(st, 400, "unknown format refused");
+    let (st, _) = get(
+        addr,
+        &format!("/api/history?{region}&format=csv&stat=median"),
+    );
+    assert_eq!(st, 400, "unknown stat refused");
     let (st, _) = get(addr, "/api/history?f_lo=2&f_hi=1&t0=0&t1=1");
     assert_eq!(st, 400, "inverted region refused");
     let (st, _) = get(addr, "/api/history");

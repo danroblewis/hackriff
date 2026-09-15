@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use hk_model::PowerUnit;
+use hk_model::{FreqRange, PowerUnit};
 
 use super::StoreError;
 
@@ -20,6 +20,27 @@ pub struct LevelConfig {
     /// Optional retention age: sealed tiles whose end is older than `watermark − max_age` are
     /// evicted (still only once a coarser level covers them).
     pub max_age: Option<Duration>,
+    /// Optional byte quota for this level's sealed tiles (T-116): the oldest evictable tiles of
+    /// the level go first; tiles protected by a [`RetentionOverride`] are never evicted by quota.
+    pub byte_quota: Option<u64>,
+}
+
+/// A per-region retention override (T-116), e.g. "keep 433 MHz at 1 s for 90 days": sealed tiles
+/// of `level` whose frequency block overlaps `freq` are kept for `max_age` instead of the level's
+/// own age, and are exempt from the level's byte quota. The global
+/// [`PyramidConfig::byte_budget`] remains a hard ceiling: protected tiles are evicted by it only
+/// after every unprotected candidate.
+///
+/// Granularity is one tile: every tile whose block overlaps the region is protected (a level-0
+/// block of the default scheme is 6.4 MHz wide).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RetentionOverride {
+    /// Protected frequency region.
+    pub freq: FreqRange,
+    /// Level the override applies to.
+    pub level: u8,
+    /// Retention age of protected tiles.
+    pub max_age: Duration,
 }
 
 /// Fixed-bin dB histogram used for mergeable percentiles.
@@ -90,6 +111,10 @@ pub struct PyramidConfig {
     pub checkpoint_interval: Option<Duration>,
     /// Rolling byte budget for all tile files of this scheme.
     pub byte_budget: u64,
+    /// Per-region retention overrides (T-116).
+    pub retention_overrides: Vec<RetentionOverride>,
+    /// zstd level for tile payloads (T-116, format 2); `None` stores payloads uncompressed.
+    pub compression_level: Option<i32>,
 }
 
 impl Default for PyramidConfig {
@@ -104,12 +129,14 @@ impl Default for PyramidConfig {
     /// | 3 | 50 kHz × 1 h | 1 day | 51.2 MHz |
     /// | 4 | 100 kHz × 1 day | 1 week | 102.4 MHz |
     ///
-    /// Histogram −200…+20 dB in 0.5 dB bins; p10/p90; 6 dB occupancy margin; 8 GiB budget.
+    /// Histogram −200…+20 dB in 0.5 dB bins; p10/p90; 6 dB occupancy margin; 8 GiB budget; no
+    /// per-level ages, quotas or region overrides; zstd level 3 payloads.
     fn default() -> Self {
         let level = |f_factor, t_cells_per_block| LevelConfig {
             f_factor,
             t_cells_per_block,
             max_age: None,
+            byte_quota: None,
         };
         Self {
             scheme: 1,
@@ -136,6 +163,8 @@ impl Default for PyramidConfig {
             seal_lag: Duration::from_secs(2),
             checkpoint_interval: Some(Duration::from_secs(60)),
             byte_budget: 8 << 30,
+            retention_overrides: Vec::new(),
+            compression_level: Some(3),
         }
     }
 }
@@ -229,6 +258,23 @@ impl PyramidConfig {
         }
         if self.floor_memory_tiles == 0 {
             return bad("floor_memory_tiles must be >= 1".into());
+        }
+        for o in &self.retention_overrides {
+            if usize::from(o.level) >= self.levels.len() {
+                return bad(format!(
+                    "retention override level {} does not exist",
+                    o.level
+                ));
+            }
+            if !(o.freq.lo_hz.is_finite() && o.freq.hi_hz >= o.freq.lo_hz) {
+                return bad("retention override needs a valid frequency range".into());
+            }
+        }
+        if self
+            .compression_level
+            .is_some_and(|l| !zstd::compression_level_range().contains(&l))
+        {
+            return bad("compression_level outside zstd's range".into());
         }
         let nf = self.f_cells_per_block as usize;
         let mut levels = Vec::with_capacity(self.levels.len());

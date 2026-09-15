@@ -24,7 +24,7 @@
 | Method | Path | Auth | Query | Response | Errors |
 |---|---|---|---|---|---|
 | GET | `/api/streams` | token | – | Discovery document (T-060, below) | 401 |
-| GET | `/api/history` | token | `f_lo`, `f_hi` (Hz), `t0`, `t1` (Unix s), `max_cells`? (default 100 000, max 500 000) | T-017 region-over-time grid (below) | 400 invalid region/cells, 404 no history store on this server |
+| GET | `/api/history` | token | `f_lo`, `f_hi` (Hz), `t0`, `t1` (Unix s), `max_cells`? (default 100 000, max 500 000), `format`? (`json` default, `csv`, `png`), `stat`? (csv/png: `max`, `mean`, `p_low`, `p_high`, `floor`) | T-017 region-over-time grid (below); T-116 hackrf_sweep CSV or PNG waterfall | 400 invalid region/cells/format/stat, 404 no history store on this server |
 | GET | `/api/floor` | token | `f_lo`, `f_hi`, `t0`, `t1`, `max_steps`? (default 1024, max 20 000) | T-021 calibrated floor-vs-time series (below) | 400, 404 no floor product |
 | GET | `/api/inventory` | token | see below | T-018/T-078 signal inventory, one page (below) | 400 invalid filter, 404 no inventory store |
 | GET | `/api/inventory/{id}` | token | – | One inventory entry (T-078, same shape as a list row) | 404 not_found, 503 unavailable |
@@ -73,16 +73,35 @@ A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level w
 
 ```jsonc
 {
+  "scheme": 1, "tile_format": 2,
   "level": 0, "unit": "dbfs-per-hz", "f_cell_hz": 3125.0, "f_lo_hz": 99600000.0, "nf": 384,
   "t_cell_s": 0.1, "t0_s": 1789300800.0, "nt": 1200, "percentiles": [10.0, 90.0],
   "max_db": [-71.2, null, "…"], "mean_db": ["…"], "p_low_db": ["…"], "p_high_db": ["…"],
-  "occupancy": ["…"], "occupancy_max": ["…"], "coverage": ["…"], "frames": ["…"],
-  "provenance": { "frames": 12000, "suspect_fraction": 0.0, "dropped_samples": 0, "gain_changes": 0,
+  "occupancy": ["…"], "occupancy_max": ["…"], "coverage": ["…"], "floor_db": [-140.1, null, "…"],
+  "frames": ["…"],
+  "coverage_summary": { "cells": 460800, "observed_cells": 458000, "observed_fraction": 0.99,
+                        "gaps": [ { "t0_s": 1789300850.0, "t1_s": 1789300860.0 } ], "gaps_truncated": false },
+  "provenance": { "frames": 12000, "suspect_fraction": 0.0, "dropped_samples": 0, "gain_changes": 1,
                   "gain_states": ["…"], "calibration": null, "calibration_mixed": false,
+                  "gain_table": null, "gain_table_mixed": false, "filter": "fm-notch", "filter_mixed": false,
+                  "spur_mask": null, "spur_mask_mixed": false, "cell_shape": 109.4, "cell_shape_mixed": false,
+                  "steps": [ { "t_s": 1789300900.0, "changed": ["gain"],
+                               "from": { "gain": { "lna_db": 16.0, "vga_db": 20.0, "amp_on": false },
+                                         "calibration": null, "gain_table": null, "filter": "fm-notch", "spur_mask": null },
+                               "to": { "gain": { "lna_db": 32.0, "vga_db": 20.0, "amp_on": false }, "…": "…" } } ],
+                  "steps_dropped": 0,
                   "first_frame_s": 1789300800.0, "last_frame_s": 1789300920.0 },
   "tiles_read": 4
 }
 ```
+
+T-116 additions (all additive):
+
+- `coverage` is each cell's observed fraction of its duration; `coverage_summary.gaps` lists maximal time runs in which **no** cell of the grid was observed. A gap is never reported as quiet.
+- `floor_db` is the noise-floor estimate: `p_low_db` corrected for the low-percentile bias of averaged-periodogram noise (Gamma model, shape `provenance.cell_shape`). `null` when the frames carried no noise shape or tiles with different shapes mixed; `p_low_db` stays the raw percentile.
+- `provenance` records gain table, filter/antenna port, spur-mask version and cell shape (first value plus a `*_mixed` flag) and every front-end change as a `steps` entry (time, what changed, state before and after; at most 32, the rest counted in `steps_dropped`). Cells are not split at a step — use the steps to explain level changes as provenance, not events. `scheme` is the pyramid scheme/version id and `tile_format` the tile format written.
+
+**Exports.** `format=csv` returns `text/csv; charset=utf-8` in the `hackrf_sweep` line format `date, time, hz_low, hz_high, bin_width, num_samples, dB…` (UTC; dB per `bin_width`-wide bin, i.e. `stat` dB/Hz + 10·log10(bin_width); `num_samples` = largest frame count in the line; 256 cells per line; unobserved cells `nan`, fully unobserved lines omitted). `stat` defaults to `mean`. `format=png` returns an `image/png` waterfall (one pixel per cell, frequency left→right, earliest time at the top, 8-bit palette; grey = not observed; colour range 2nd percentile to maximum of `stat`, default `max`). Errors are JSON as for every endpoint.
 
 A region too large for the cell budget even at the coarsest level is `400`.
 

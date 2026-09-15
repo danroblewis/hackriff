@@ -8,7 +8,7 @@
 //! | Path | Method | Auth | Returns |
 //! |---|---|---|---|
 //! | `/api/streams` | GET | token | Discovery (T-060): offered streams (id, kind, class, geometry, format), on-demand openers, the TCP stream address. Never content. |
-//! | `/api/history?f_lo&f_hi&t0&t1[&max_cells]` | GET | token | T-017 region-over-time grid ([`crate::query`]) |
+//! | `/api/history?f_lo&f_hi&t0&t1[&max_cells][&format][&stat]` | GET | token | T-017 region-over-time grid ([`crate::query`]); T-116 `format=csv` (hackrf_sweep) / `format=png` (waterfall) |
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | GET | token | T-021 floor vs time ([`crate::query`]) |
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&state][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]); `state` = T-078 lifecycle |
 //! | `/api/inventory/<id>[/promote]` | GET, POST, DELETE | token (header only for mutating) | T-078 one entry, promote a candidate, delete ([`crate::inventory`]) |
@@ -711,7 +711,13 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             &state.on_demand,
             shared.config.stream_tcp,
         )),
-        "/api/history" => history(state, &req),
+        "/api/history" => match with_history(state, |p| query::history_export(p, &req.query)) {
+            Ok(Some((content_type, body))) => {
+                return respond(&mut stream, 200, content_type, "", &body);
+            }
+            Ok(None) => history(state, &req),
+            Err(e) => Err(e),
+        },
         "/api/floor" => floor(state, &req),
         "/api/inventory" => inventory(state, &req),
         "/api/analysis/strongest" => strongest(state, &req),
@@ -766,20 +772,29 @@ fn output_file(stream: &mut TcpStream, state: &ApiState, id: &str, name: &str) {
     }
 }
 
-fn history(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
+/// Runs `f` on the server's spectrum history: the history store, else the floor product's
+/// uncalibrated pyramid.
+fn with_history<T>(
+    state: &ApiState,
+    f: impl FnOnce(&hk_store::Pyramid) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
     if let Some(p) = &state.history {
         let p = p
             .lock()
             .map_err(|_| ApiError::new(500, "history store poisoned"))?;
-        return query::history_json(&p, &req.query);
+        return f(&p);
     }
-    if let Some(f) = &state.floor {
-        let f = f
+    if let Some(fl) = &state.floor {
+        let fl = fl
             .lock()
             .map_err(|_| ApiError::new(500, "floor store poisoned"))?;
-        return query::history_json(f.uncalibrated_pyramid(), &req.query);
+        return f(fl.uncalibrated_pyramid());
     }
     Err(ApiError::new(404, "no spectrum history on this server"))
+}
+
+fn history(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
+    with_history(state, |p| query::history_json(p, &req.query))
 }
 
 fn floor(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
