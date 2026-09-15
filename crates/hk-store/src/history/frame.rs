@@ -21,7 +21,8 @@
 //! Cells the frame covers by less than half are not touched (not observed).
 
 use hk_model::{
-    CalibrationStateId, PowerUnit, SpectrumFrame as ModelSpectrumFrame, SweepFrame, Timestamp,
+    CalibrationStateId, PowerUnit, SpectrumFrame as ModelSpectrumFrame, SpurMaskId, SweepFrame,
+    Timestamp,
 };
 
 use super::stats::undb;
@@ -35,6 +36,79 @@ pub struct GainState {
     pub vga_db: f32,
     /// RF amp on.
     pub amp_on: bool,
+}
+
+/// A short front-end filter or antenna-port name (at most 16 bytes, longer names truncated at a
+/// character boundary), so [`FrameInput`] stays `Copy`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PortTag([u8; 16]);
+
+impl PortTag {
+    /// Tag of `name` (truncated to 16 bytes).
+    pub fn new(name: &str) -> Self {
+        let mut end = name.len().min(16);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut b = [0u8; 16];
+        b[..end].copy_from_slice(&name.as_bytes()[..end]);
+        Self(b)
+    }
+
+    /// The raw 16 bytes (zero-padded).
+    pub fn bytes(&self) -> [u8; 16] {
+        self.0
+    }
+
+    /// From raw bytes (as stored).
+    pub fn from_bytes(b: [u8; 16]) -> Self {
+        Self(b)
+    }
+
+    /// The name.
+    pub fn as_str(&self) -> &str {
+        let n = self.0.iter().position(|&c| c == 0).unwrap_or(16);
+        std::str::from_utf8(&self.0[..n]).unwrap_or("")
+    }
+}
+
+impl std::fmt::Debug for PortTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PortTag({:?})", self.as_str())
+    }
+}
+
+impl std::fmt::Display for PortTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Front-end configuration beyond the gain state (T-116, C26 "store provenance per tile"): a
+/// change in any of these makes a step in the spectrum that is not an event.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct FrontEnd {
+    /// Gain-table / gain-calibration profile version in force, caller-assigned.
+    pub gain_table: Option<u32>,
+    /// Active filter or antenna port (e.g. a filter-bank path or Opera Cake port).
+    pub filter: Option<PortTag>,
+    /// Spur-mask version in force.
+    pub spur_mask: Option<SpurMaskId>,
+}
+
+/// The noise statistics of a frame's values, used to bias-correct the stored low percentile
+/// (T-116; the Gamma model of `hk_dsp::radiometry::bias`).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum NoiseShape {
+    /// Unknown: queries report the raw low percentile only (`floor_db` is NaN).
+    #[default]
+    Unknown,
+    /// An STFT of this resolution: the pyramid derives the level-0 cell shape
+    /// (`hk_dsp::radiometry::cell_value_shape`, cached per resolution).
+    Spectrum(hk_dsp::spectrum::Resolution),
+    /// The Gamma shape `n_c` of a level-0 cell value, when the caller knows it (e.g. synthetic
+    /// k-look noise on a grid aligned with the cells).
+    CellShape(f32),
 }
 
 /// One frame to fold into the pyramid. See the [module docs](self) for the resampling rules.
@@ -66,6 +140,10 @@ pub struct FrameInput<'a> {
     pub dropped_samples: u64,
     /// Calibration in force.
     pub calibration: Option<CalibrationStateId>,
+    /// Gain table, filter and spur-mask versions in force (T-116).
+    pub front_end: FrontEnd,
+    /// Noise statistics of the values, for the bias-corrected floor (T-116).
+    pub noise_shape: NoiseShape,
 }
 
 impl<'a> FrameInput<'a> {
@@ -91,6 +169,8 @@ impl<'a> FrameInput<'a> {
             suspect: false,
             dropped_samples: 0,
             calibration: None,
+            front_end: FrontEnd::default(),
+            noise_shape: NoiseShape::Unknown,
         }
     }
 
@@ -122,6 +202,12 @@ impl<'a> FrameInput<'a> {
             suspect: p.overload,
             dropped_samples: frame.dropped_samples,
             calibration: p.calibration_state_ref,
+            front_end: FrontEnd {
+                gain_table: None,
+                filter: p.antenna_port.as_deref().map(PortTag::new),
+                spur_mask: p.spur_mask_ref,
+            },
+            noise_shape: NoiseShape::Spectrum(s.resolution),
         }
     }
 

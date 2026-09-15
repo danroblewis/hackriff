@@ -34,7 +34,22 @@
 //!
 //! Every tile also keeps, per frequency cell, a fixed-bin dB histogram of all frame values over the
 //! **tile's whole duration** — exactly the histogram of the parent cell it becomes — plus a
-//! [`ProvenanceSummary`] (gain states, suspect fraction, dropped samples, calibration id).
+//! [`ProvenanceSummary`] (gain states, suspect/clip fraction, dropped samples, calibration id; T-116:
+//! gain table, filter, spur-mask version, the cell noise shape, and every front-end
+//! [`ProvenanceStep`]). The grid is fixed, so tiles are not split at a front-end change: single-valued
+//! tags carry a `*_mixed` flag and the step is listed with its time, before and after state, and it
+//! survives rollup — different provenance never merges silently. The pyramid scheme/version id is in
+//! every [`hk_model::TileKey`], tile header and query result.
+//!
+//! # Coverage mask and floor (T-116)
+//!
+//! Each tile's observed-cell bitmap is its coverage mask, and every cell keeps the observed fraction
+//! of its duration; queries return `coverage` per cell and [`RegionHistory::coverage_summary`] (observed
+//! cells, mean coverage, fully unobserved time runs). A gap in the input is unobserved at level 0 and
+//! lowers coverage (or stays unobserved) at every coarser level. The raw low percentile of averaged
+//! noise reads below the noise mean (≈ −0.5 dB for T-017's STFT geometry, −2.5 dB for 8-look noise);
+//! [`CellStats::floor_db`] corrects it with the Gamma model when the frames carry a
+//! [`NoiseShape`].
 //!
 //! # Rollup
 //!
@@ -50,24 +65,36 @@
 //! # Storage format (decision)
 //!
 //! A compact custom binary file per tile (module `codec`, format version [`FORMAT_VERSION`]): header with scheme and geometry,
-//! bitmap-sparse 15–19 B cell records (dB as i16 at 0.01 dB, fractions as u16, varint frames), varint
+//! bitmap-sparse cell statistics (dB as i16 at 0.01 dB, fractions as u16, varint frames), varint
 //! sparse histograms, CRC-32, written temp → fsync → rename. Chosen over Parquet because the access
 //! pattern is "whole tile by key", not columnar scans; the arrow/parquet crates are large
 //! (compile time and binary size on the Jetson) for no query benefit; and one file per key needs no
-//! index service, compaction or schema tooling (one developer, low ops). No compression codec yet
-//! (the header reserves the choice via the format version); the sparse encoding already skips
-//! unobserved cells and empty histogram bins.
+//! index service, compaction or schema tooling (one developer, low ops). Format 2 (T-116) stores the
+//! statistics column-wise and compresses the payload with zstd ([`PyramidConfig::compression_level`],
+//! default level 3; raw when zstd does not shrink it); format-1 tiles remain readable, so existing
+//! history needs no migration. [`PyramidStats::raw_bytes_written`] / `bytes_written` is the
+//! measured compression ratio.
 //!
-//! # Budget and crash safety
+//! # hackrf_sweep CSV and PNG (T-116)
 //!
-//! After every seal the budget is enforced ([`PyramidConfig::byte_budget`], optional per-level
-//! `max_age`): evict the oldest sealed tile of the finest level whose parent is sealed on disk;
-//! only when no level below the top has one, expire the oldest top-level tile. Level-0 open tiles
-//! are checkpointed every `checkpoint_interval`. On open, temp files and files failing the
+//! [`import_sweep_csv`] folds the user's `hackrf_sweep` CSV into history; [`write_sweep_csv`] and
+//! [`waterfall_png`] export a query result (module `export`).
+//!
+//! # Retention and crash safety
+//!
+//! After every seal retention runs over sealed tiles (T-116): per-level `max_age`, per-level
+//! `byte_quota`, per-region [`RetentionOverride`]s ("keep 433 MHz at level 0 for 90 days"), then the
+//! global [`PyramidConfig::byte_budget`]: evict the oldest sealed unprotected tile of the finest
+//! level whose parent is sealed on disk; only when no level below the top has one, expire the
+//! oldest top-level tile; protected tiles last. A tile is never evicted while a finer tile inside it
+//! remains (children first) or before a coarser level covers it. The clock is the data watermark
+//! (see `Pyramid::enforce_budget`). Level-0 open tiles are checkpointed every
+//! `checkpoint_interval`. On open, temp files and files failing the
 //! length/CRC checks are ignored and removed.
 
 mod codec;
 mod config;
+mod export;
 pub mod frame;
 mod query;
 pub mod stats;
@@ -82,14 +109,22 @@ use std::path::PathBuf;
 pub use codec::FORMAT_VERSION;
 pub use config::{
     Geometry, HistogramConfig, LevelConfig, LevelGeometry, MAX_LEVELS, PyramidConfig,
+    RetentionOverride,
 };
-pub use frame::{DbScratch, FrameInput, GainState};
+pub use export::{
+    HistoryStat, PNG_UNOBSERVED_RGB, SweepCsvImport, SweepCsvOptions, import_sweep_csv,
+    waterfall_index, waterfall_png, waterfall_range, write_sweep_csv,
+};
+pub use frame::{DbScratch, FrameInput, FrontEnd, GainState, NoiseShape, PortTag};
 pub use query::{
-    CellStats, ChannelSummary, FULL_CELL_OCCUPANCY, MAX_QUERY_CELLS, RegionHistory, RegionQuery,
-    Resolution, burst_histogram,
+    CellStats, ChannelSummary, CoverageSummary, FULL_CELL_OCCUPANCY, MAX_COVERAGE_GAPS,
+    MAX_QUERY_CELLS, RegionHistory, RegionQuery, Resolution, burst_histogram,
 };
 pub use store::{IngestOutcome, Pyramid, PyramidStats};
-pub use tile::{MAX_GAIN_STATES, ProvenanceSummary};
+pub use tile::{
+    FrontEndState, MAX_GAIN_STATES, MAX_PROVENANCE_STEPS, ProvenanceStep, ProvenanceSummary,
+    SHAPE_TOLERANCE,
+};
 
 /// Errors from the history store.
 #[derive(Debug, thiserror::Error)]

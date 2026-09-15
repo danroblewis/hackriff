@@ -13,6 +13,8 @@ use hk_model::{
 use super::stats::{db, undb};
 use super::*;
 
+mod maturity;
+
 const S: i64 = 1_000_000_000;
 /// 2026-09-13T12:00:00Z (aligned to the hour).
 const T0: i64 = 1_789_300_800 * S;
@@ -60,6 +62,7 @@ fn level(f_factor: u32, t_cells_per_block: u32) -> LevelConfig {
         f_factor,
         t_cells_per_block,
         max_age: None,
+        byte_quota: None,
     }
 }
 

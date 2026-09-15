@@ -37,6 +37,8 @@ thiserror = "2.0"
 # T-022a: synchronous WebSocket framing + handshake key for the hk-api browser bridge (no async
 # runtime; the bridge plugs into hk-stream's per-consumer writer threads).
 tungstenite = "0.29"
+# T-116: history tile compression (codec v2).
+zstd = { version = "0.13", default-features = false }
 uuid = { version = "1.26", features = ["v7", "serde"] }
 
 hk-model = { path = "crates/hk-model" }

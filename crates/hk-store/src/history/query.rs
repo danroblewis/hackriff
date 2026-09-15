@@ -71,6 +71,12 @@ pub struct CellStats {
     pub occupancy_max: f32,
     /// Fraction of the cell's duration observed.
     pub coverage: f32,
+    /// Noise floor estimate, dB/Hz (T-116): the low percentile corrected for its bias on
+    /// averaged-periodogram noise (`floor = p_low − 10·log10(P⁻¹(n_c, p)/n_c)`, the Gamma model of
+    /// `hk_dsp::radiometry::bias`; `p` is the exact order-statistic probability at level 0 and the
+    /// percentile itself at rolled-up levels). NaN when the tile's cell shape `n_c` is unknown or
+    /// mixed ([`ProvenanceSummary::uniform_cell_shape`]).
+    pub floor_db: f32,
     /// Frames folded (see [`ProvenanceSummary`] for counting).
     pub frames: u32,
     /// Level the values came from (coarser than the query's level when finer tiles are absent);
@@ -88,6 +94,7 @@ impl CellStats {
         occupancy: f32::NAN,
         occupancy_max: f32::NAN,
         coverage: 0.0,
+        floor_db: f32::NAN,
         frames: 0,
         level: u8::MAX,
     };
@@ -101,6 +108,8 @@ impl CellStats {
 /// A query result: a `nt × nf` grid (row-major, time then frequency) at one level.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegionHistory {
+    /// Pyramid scheme/version id of the tiles (T-116).
+    pub scheme: u16,
     /// Level of the grid.
     pub level: u8,
     /// Unit of the dB values (densities per Hz).
@@ -127,7 +136,61 @@ pub struct RegionHistory {
     pub tiles_read: usize,
 }
 
+/// Largest number of gaps [`RegionHistory::coverage_summary`] lists.
+pub const MAX_COVERAGE_GAPS: usize = 1000;
+
+/// What a [`RegionHistory`] actually observed (T-116): not observed is not quiet (C26).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoverageSummary {
+    /// Cells in the grid.
+    pub cells: usize,
+    /// Cells with at least one frame.
+    pub observed_cells: usize,
+    /// Mean coverage over all cells (unobserved cells count as 0).
+    pub observed_fraction: f64,
+    /// Maximal runs of time rows in which no cell was observed, in time order (at most
+    /// [`MAX_COVERAGE_GAPS`]).
+    pub gaps: Vec<TimeRange>,
+    /// More gaps than listed.
+    pub gaps_truncated: bool,
+}
+
 impl RegionHistory {
+    /// The grid's coverage mask digest: observed cells, mean coverage, fully unobserved time runs.
+    pub fn coverage_summary(&self) -> CoverageSummary {
+        let observed_cells = self.cells.iter().filter(|c| c.observed()).count();
+        let cov_sum: f64 = self.cells.iter().map(|c| f64::from(c.coverage)).sum();
+        let mut gaps = Vec::new();
+        let mut truncated = false;
+        let mut run: Option<usize> = None;
+        for t in 0..=self.nt {
+            let empty = t < self.nt && !self.row(t).iter().any(CellStats::observed);
+            match (empty, run) {
+                (true, None) => run = Some(t),
+                (false, Some(t0)) => {
+                    if gaps.len() < MAX_COVERAGE_GAPS {
+                        gaps.push(TimeRange::new(self.time_of(t0), self.time_of(t)));
+                    } else {
+                        truncated = true;
+                    }
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        CoverageSummary {
+            cells: self.cells.len(),
+            observed_cells,
+            observed_fraction: if self.cells.is_empty() {
+                0.0
+            } else {
+                cov_sum / self.cells.len() as f64
+            },
+            gaps,
+            gaps_truncated: truncated,
+        }
+    }
+
     /// Cell `(t, f)`.
     pub fn cell(&self, t: usize, f: usize) -> &CellStats {
         &self.cells[t * self.nf + f]
@@ -377,6 +440,7 @@ impl Pyramid {
         let mut cells = vec![CellStats::NONE; nf * nt];
         let mut cache: HashMap<(usize, i64, i64), Option<Source<'_>>> = HashMap::new();
         let mut provenance = ProvenanceSummary::default();
+        let mut bias = BiasCache::default();
         for ti in 0..nt {
             let t_start = (t_lo + ti as i64) * g.t_cell_ns;
             for fi in 0..nf {
@@ -398,7 +462,7 @@ impl Pyramid {
                         slot.insert(src);
                     }
                     if let Some(src) = &cache[&key] {
-                        cells[ti * nf + fi] = cell_stats(src, l, t_in, f_in);
+                        cells[ti * nf + fi] = cell_stats(src, l, t_in, f_in, pct.0, &mut bias);
                         break;
                     }
                 }
@@ -406,6 +470,7 @@ impl Pyramid {
         }
         let tiles_read = cache.values().filter(|s| s.is_some()).count();
         Ok(RegionHistory {
+            scheme: self.cfg.scheme,
             level: level as u8,
             unit: self.cfg.unit,
             f_cell_hz: g.f_cell_hz,
@@ -444,7 +509,32 @@ impl Pyramid {
     }
 }
 
-fn cell_stats(src: &Source<'_>, level: usize, t_in: usize, f_in: usize) -> CellStats {
+/// Floor bias per `(shape bits, frames)` (`frames` = 0 for rolled-up cells).
+#[derive(Default)]
+struct BiasCache(HashMap<(u32, u32), f32>);
+
+impl BiasCache {
+    fn bias_db(&mut self, shape: f32, level: usize, frames: u32, q: f32) -> f32 {
+        let n = if level == 0 { frames } else { 0 };
+        *self.0.entry((shape.to_bits(), n)).or_insert_with(|| {
+            let p = if level == 0 {
+                hk_dsp::radiometry::exact_percentile_probability(f64::from(q), frames)
+            } else {
+                f64::from(q) / 100.0
+            };
+            hk_dsp::radiometry::percentile_bias_db(f64::from(shape), p) as f32
+        })
+    }
+}
+
+fn cell_stats(
+    src: &Source<'_>,
+    level: usize,
+    t_in: usize,
+    f_in: usize,
+    q_low: f32,
+    bias: &mut BiasCache,
+) -> CellStats {
     let tile = src.tile();
     let i = t_in * tile.nf + f_in;
     let n = tile.count[i];
@@ -480,7 +570,14 @@ fn cell_stats(src: &Source<'_>, level: usize, t_in: usize, f_in: usize) -> CellS
         // An open level-0 column: its max-occupancy is its own occupancy so far.
         occ_max = occ_max.max(occupancy as f32);
     }
+    let floor_db = match tile.prov.uniform_cell_shape() {
+        Some(shape) if p_lo.is_finite() => {
+            round_centi(round_centi(p_lo) - bias.bias_db(shape, level, n, q_low))
+        }
+        _ => f32::NAN,
+    };
     CellStats {
+        floor_db,
         max_db: round_centi(tile.max[i]),
         mean_db: round_centi(db(tile.sum_lin[i] / f64::from(n))),
         p_low_db: round_centi(p_lo),
