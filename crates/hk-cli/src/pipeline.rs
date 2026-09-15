@@ -1205,10 +1205,8 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
         cfg.settings.spectrum_rows_per_s = r;
     }
     opts.compute.apply(&mut cfg.settings);
-    opts.iq_buffer.apply(
-        &mut cfg.iq_buffer,
-        max_rate_hz(&live.control.capabilities()),
-    );
+    opts.iq_buffer
+        .apply(&mut cfg.iq_buffer, max_rate_hz(live.control.capabilities()));
     cfg.source_class = class;
     // A radio cannot pause: never lossless (Pipeline::start would refuse it anyway).
     cfg.lossless = false;
