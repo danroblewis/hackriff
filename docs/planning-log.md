@@ -2304,3 +2304,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Staging note:** a 1 h ring allocates in the background; no IQ is buffered until allocation completes.
   - **Filed T-217** (T-178 follow-ups).
   - **Launched:** T-193 (yellow confirmed boxes, UI) and T-210 (RDS correction, Opus). T-211 told to use migration 0007. Full check running.
+- **B0.484 T-209 committed (48dbac4); merge after the running full check.** Fixes:
+  - one sighting per session (`counted_as` re-measurement);
+  - no emitter from pilot-lock evidence alone when the window is overloaded or its clip fraction exceeds 1e-4 (counter `mode_emitters_withheld`);
+  - refined tuning stored once;
+  - no RDS decode on the 1 s and 0.5 s probe windows.
+  - **Evidence:** concurrent_demod 5/5; identification still 1.000 s.
+  - **T-159 launched** (Sonnet): `GET /api/inventory/{id}/decode`, which unblocks T-195.
