@@ -11,8 +11,9 @@
 //! A recorded decoded stream is the §3 byte stream itself (`docs/stream-contract.md` §14.7),
 //! opened through [`ApiState::captures`] ([`hk_stream::inspector::CaptureSource`], implemented by
 //! the capture store). `from_frame`/`limit` page over the recording's frame records in order;
-//! the `fit` summary covers **every** frame of the recording, so one request answers "does my
-//! guess hold across the whole capture". Frames whose class forbids content (or that are only
+//! the `fit` summary covers **every** frame of the recording (up to [`MAX_FIT_FRAMES`], then
+//! marked `truncated`), so one request answers "does my guess hold across the whole capture".
+//! Frames whose class forbids content (or that are only
 //! served to local consumers) are returned metadata-only and are never parsed.
 //!
 //! Errors are `{"error", "code"}` (`invalid`, `not_found`, `unavailable`, `unreadable`,
@@ -35,6 +36,10 @@ use crate::http::ApiState;
 pub const MAX_PARSE_FRAMES: usize = 500;
 /// Default page size of a capture re-parse.
 pub const DEFAULT_PARSE_LIMIT: usize = 100;
+/// Most frames a capture re-parse evaluates for its `fit` summary, bounding CPU per request;
+/// a longer recording's summary covers its first frames and says `truncated: true`. Page frames
+/// past the cap are still parsed.
+pub const MAX_FIT_FRAMES: u64 = 100_000;
 
 enum Action<'a> {
     ParseFrames,
@@ -272,29 +277,9 @@ fn parse_capture(
     };
     let mut frames = RecordedFrames::open(reader).map_err(unreadable)?;
     let header = frames.header().clone();
-    let stream_servable = servable(header.content_class);
-    let mut fit = FitSummary::default();
-    let mut page = Vec::new();
-    let mut total = 0u64;
-    while let Some(rec) = frames.next_frame().map_err(unreadable)? {
-        let index = total;
-        total += 1;
-        let in_page = index >= from && index - from < limit;
-        if ev.is_none() && !in_page {
-            continue;
-        }
-        let parseable = stream_servable && servable(rec.content_class) && !rec.gated;
-        let tree = match &ev {
-            Some(ev) if parseable => ev.eval_record(&rec),
-            _ => None,
-        };
-        if ev.is_some() {
-            fit.add(tree.as_ref());
-        }
-        if in_page {
-            page.push(serve_record(rec, parseable, tree));
-        }
-    }
+    let scan =
+        reparse(&mut frames, ev.as_ref(), from, limit, MAX_FIT_FRAMES).map_err(unreadable)?;
+    let total = scan.total;
     let mut stream = json!({
         "stream_id": header.stream_id,
         "content_class": header.content_class,
@@ -315,9 +300,57 @@ fn parse_capture(
         "from_frame": from,
         "limit": limit,
         "next_from_frame": (next < total).then_some(next),
-        "frames": page,
-        "fit": ev.is_some().then_some(fit),
+        "frames": scan.page,
+        "fit": scan.fit,
     }))
+}
+
+struct Scan {
+    page: Vec<Value>,
+    /// The fit summary with `truncated`; `None` without a field map.
+    fit: Option<Value>,
+    total: u64,
+}
+
+/// Reads every frame record: serves `[from, from + limit)` and, with a field map, sums the fit
+/// of the first `fit_cap` frames.
+fn reparse<R: std::io::Read>(
+    frames: &mut RecordedFrames<R>,
+    ev: Option<&Evaluator>,
+    from: u64,
+    limit: u64,
+    fit_cap: u64,
+) -> Result<Scan, hk_stream::ClientError> {
+    let stream_servable = servable(frames.header().content_class);
+    let mut fit = FitSummary::default();
+    let mut page = Vec::new();
+    let mut total = 0u64;
+    while let Some(rec) = frames.next_frame()? {
+        let index = total;
+        total += 1;
+        let in_page = index >= from && index - from < limit;
+        let in_fit = ev.is_some() && index < fit_cap;
+        if !in_page && !in_fit {
+            continue;
+        }
+        let parseable = stream_servable && servable(rec.content_class) && !rec.gated;
+        let tree = match ev {
+            Some(ev) if parseable => ev.eval_record(&rec),
+            _ => None,
+        };
+        if in_fit {
+            fit.add(tree.as_ref());
+        }
+        if in_page {
+            page.push(serve_record(rec, parseable, tree));
+        }
+    }
+    let fit = ev.map(|_| {
+        let mut v = json!(fit);
+        v["truncated"] = json!(total > fit_cap);
+        v
+    });
+    Ok(Scan { page, fit, total })
 }
 
 /// A stored frame record as served: content withheld when not servable (fail closed), layers
@@ -358,5 +391,74 @@ mod tests {
         assert!(resolve("GET", "/api/captures/c1/frames").is_none());
         assert!(resolve("POST", "/api/captures//parse").is_none());
         assert!(resolve("GET", "/api/captures").is_none());
+    }
+
+    /// The fit summary stops at the cap and says so; paging and `total` still see every frame.
+    #[test]
+    fn capture_fit_summary_is_capped_and_marked_truncated() {
+        use hk_stream::frame::encode_frame;
+        use hk_stream::inspector::{FrameContent, FrameMetadata, INSPECTOR_MESSAGE_SCHEMA};
+        use hk_stream::{StreamHeader, StreamKind};
+
+        let mut h = StreamHeader::new(
+            "inspector/p/frames",
+            StreamKind::Messages,
+            ContentClass::Unrestricted,
+            "test",
+        );
+        h.message_schema = Some(INSPECTOR_MESSAGE_SCHEMA.into());
+        let mut bytes = Vec::new();
+        encode_frame(&mut bytes, &h.to_json_bytes().unwrap(), h.max_frame_len).unwrap();
+        for i in 0..10u64 {
+            let rec = FrameRecord {
+                record_type: "frame".into(),
+                seq: i,
+                t: 0,
+                content_class: ContentClass::Unrestricted,
+                gated: false,
+                crc_status: None,
+                decoder: None,
+                frame_model: None,
+                emitter_id: None,
+                metadata: FrameMetadata {
+                    frame: Some(i),
+                    bit_len: Some(8),
+                    ..Default::default()
+                },
+                content: Some(FrameContent {
+                    hex: to_hex(&[i as u8]),
+                    layers: None,
+                }),
+            };
+            let json = serde_json::to_vec(&rec).unwrap();
+            encode_frame(&mut bytes, &json, h.max_frame_len).unwrap();
+        }
+        let map: FieldMap = serde_json::from_value(json!({
+            "fields": [{"name": "b", "type": "uint", "length": 1}]
+        }))
+        .unwrap();
+        let ev = Evaluator::new(&map).unwrap();
+        let scan = |cap| {
+            let mut frames = RecordedFrames::open(std::io::Cursor::new(bytes.clone())).unwrap();
+            reparse(&mut frames, Some(&ev), 8, 2, cap).unwrap()
+        };
+
+        let capped = scan(4);
+        assert_eq!(capped.total, 10);
+        let fit = capped.fit.unwrap();
+        assert_eq!(
+            (fit["frames"].as_u64(), fit["ok"].as_u64()),
+            (Some(4), Some(4))
+        );
+        assert_eq!(fit["truncated"], true);
+        assert_eq!(capped.page.len(), 2, "pages past the cap are served");
+        assert_eq!(
+            capped.page[1]["content"]["layers"]["fit"], "ok",
+            "and parsed"
+        );
+
+        let whole = scan(10).fit.unwrap();
+        assert_eq!(whole["frames"], 10);
+        assert_eq!(whole["truncated"], false);
     }
 }

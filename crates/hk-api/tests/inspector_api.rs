@@ -211,7 +211,7 @@ fn capture_reparse_pages_frames_with_layers_and_summarises_fit_over_the_whole_re
     assert_eq!(
         v["fit"],
         json!({"frames": 27, "ok": 24, "partial": 1, "failed": 0, "unparsed": 2,
-               "errors": {"payload": {"out-of-bounds": 1}}})
+               "errors": {"payload": {"out-of-bounds": 1}}, "truncated": false})
     );
 
     // Last page: gated records served metadata-only, never parsed.

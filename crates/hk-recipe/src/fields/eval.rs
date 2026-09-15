@@ -405,13 +405,17 @@ impl Run<'_> {
                     }
                 }
             }
-            let Some(mut pos) = f.offset_bits.map(|o| start + o).or(cursor) else {
+            // Positions and lengths come from frame data: sums saturate or are checked. A
+            // saturated position lies past every frame's end, so it reads as out of bounds.
+            let Some(mut pos) = f.offset_bits.map(|o| start.saturating_add(o)).or(cursor) else {
                 self.clear(f.slot_range);
                 self.error(&path, FitErrorKind::MissingReference, None, None);
                 continue;
             };
             let Some(repeat) = &f.repeat else {
-                cursor = self.instance(f, pos, end, parent, None).map(|n| pos + n);
+                cursor = self
+                    .instance(f, pos, end, parent, None)
+                    .map(|n| pos.saturating_add(n));
                 continue;
             };
             let count = match repeat {
@@ -423,9 +427,9 @@ impl Run<'_> {
                         cursor = None;
                         continue;
                     }
-                    Some(v) => match u64::try_from(v * scale + add) {
-                        Ok(n) => Some(n),
-                        Err(_) => {
+                    Some(v) => match scaled(v, *scale, *add) {
+                        Some(n) => Some(n),
+                        None => {
                             self.error(&path, FitErrorKind::BadLength, None, None);
                             cursor = None;
                             continue;
@@ -442,7 +446,7 @@ impl Run<'_> {
                 if count.is_none() {
                     // `remainder`: as many whole instances as fit, silently.
                     match self.length_of(f, pos, end) {
-                        Ok(len) if len > 0 && pos + len <= end => {}
+                        Ok(len) if len > 0 && pos.checked_add(len).is_some_and(|e| e <= end) => {}
                         _ => break,
                     }
                 }
@@ -451,7 +455,7 @@ impl Run<'_> {
                     break;
                 }
                 match self.instance(f, pos, end, parent, Some(i)) {
-                    Some(n) => pos += n,
+                    Some(n) => pos = pos.saturating_add(n),
                     None => {
                         placed = false;
                         break;
@@ -477,7 +481,7 @@ impl Run<'_> {
             }
             CLen::From { slot, scale, add } => {
                 let v = self.slots[*slot].ok_or(FitErrorKind::MissingReference)?;
-                u64::try_from(v * scale + add).map_err(|_| FitErrorKind::BadLength)?
+                scaled(v, *scale, *add).ok_or(FitErrorKind::BadLength)?
             }
         })
     }
@@ -512,7 +516,7 @@ impl Run<'_> {
             len,
             have: end.saturating_sub(pos),
         };
-        let fits = p.start + p.len <= end;
+        let fits = p.start.checked_add(p.len).is_some_and(|e| e <= end);
         if !fits {
             self.error(&path, FitErrorKind::OutOfBounds, Some(p.len), Some(p.have));
         }
@@ -530,7 +534,8 @@ impl Run<'_> {
                     !fits,
                 );
                 let saved = std::mem::replace(&mut self.path, path);
-                self.layer(&f.children, p.start, (p.start + p.len).min(end), Some(id));
+                let inner_end = p.start.saturating_add(p.len).min(end);
+                self.layer(&f.children, p.start, inner_end, Some(id));
                 self.path = saved;
             }
             _ if !fits => {
@@ -794,6 +799,13 @@ fn child_path(scope: &str, name: &str, index: Option<u64>) -> String {
     p
 }
 
+/// A length or count read from a field: `v × scale + add`, `None` when negative or beyond u64.
+fn scaled(v: i128, scale: i128, add: i128) -> Option<u64> {
+    v.checked_mul(scale)
+        .and_then(|x| x.checked_add(add))
+        .and_then(|x| u64::try_from(x).ok())
+}
+
 fn clamp_u32(x: u64) -> u32 {
     u32::try_from(x).unwrap_or(u32::MAX)
 }
@@ -1013,6 +1025,79 @@ mod tests {
         let empty = m.evaluate(&[], 0).unwrap();
         assert_eq!(empty.fit, FitStatus::Failed);
         assert!(empty.byte_index.is_empty());
+    }
+
+    /// Over-the-air lengths near u64::MAX must misfit, never overflow (debug panic) or wrap into
+    /// a huge allocation (release abort).
+    #[test]
+    fn data_derived_lengths_near_u64_max_misfit_without_overflow() {
+        let frame = [0xff; 16];
+        for ty in ["bytes", "ascii"] {
+            let m = map(json!({
+                "unit": "bits",
+                "fields": [
+                    {"name": "len", "type": "uint", "length": 64},
+                    {"name": "body", "type": ty, "length": {"field": "len"}},
+                    {"name": "next", "type": "uint", "length": 8}
+                ]
+            }));
+            let t = m.evaluate(&frame, 128).unwrap();
+            assert_eq!(t.fit, FitStatus::Partial, "{ty}");
+            let kinds: Vec<_> = t.errors.iter().map(|e| (e.path.as_str(), e.kind)).collect();
+            assert_eq!(
+                kinds,
+                [
+                    ("body", FitErrorKind::OutOfBounds),
+                    ("next", FitErrorKind::OutOfBounds)
+                ],
+                "{ty}"
+            );
+            assert_eq!(t.errors[0].need_bits, Some(u64::MAX));
+            assert_eq!(t.errors[0].have_bits, Some(64));
+            assert!(t.node("body").unwrap().error);
+        }
+
+        // Repeats: a huge instance length under `remainder`, a huge count, and huge instances
+        // repeated by count all end in misfits.
+        let m = map(json!({
+            "unit": "bits",
+            "fields": [
+                {"name": "len", "type": "uint", "length": 64},
+                {"name": "rest", "type": "bytes", "length": {"field": "len"}, "repeat": "remainder"},
+                {"name": "items", "type": "uint", "length": 8, "repeat": {"field": "len"}}
+            ]
+        }));
+        let t = m.evaluate(&frame, 128).unwrap();
+        assert!(t.node("rest[0]").is_none(), "no whole instance fits");
+        assert_eq!(t.node("items[7]").unwrap().value, Some(json!(0xff)));
+        assert_eq!(
+            t.errors.first().map(|e| (e.path.as_str(), e.kind)),
+            Some(("items[8]", FitErrorKind::OutOfBounds))
+        );
+        let limited = |t: &LayerTree| {
+            t.errors
+                .iter()
+                .any(|e| matches!(e.kind, FitErrorKind::RepeatLimit | FitErrorKind::NodeLimit))
+        };
+        assert!(limited(&t));
+
+        let m = map(json!({
+            "unit": "bits",
+            "fields": [
+                {"name": "len", "type": "uint", "length": 64},
+                {"name": "big", "type": "layer", "length": {"field": "len"}, "repeat": {"field": "len"},
+                 "fields": [{"name": "x", "type": "uint", "length": 8}]}
+            ]
+        }));
+        let t = m.evaluate(&frame, 128).unwrap();
+        assert_eq!(t.node("big[0].x").unwrap().value, Some(json!(0xff)));
+        assert!(t.node("big[1]").unwrap().error);
+        assert!(
+            t.errors
+                .iter()
+                .any(|e| e.path == "big[1].x" && e.kind == FitErrorKind::OutOfBounds)
+        );
+        assert!(limited(&t));
     }
 
     #[test]

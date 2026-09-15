@@ -260,7 +260,14 @@ fn fsk_bursts_stream_as_bits_and_symbols_over_tcp_matching_the_private_truth() {
     assert_eq!(header.kind, StreamKind::Bits);
     assert_eq!(header.datatype.as_deref(), Some("ru8"));
     assert_eq!(header.content_class, hk_model::ContentClass::Unrestricted);
-    assert_eq!(header.version, "1.1");
+    assert_eq!(
+        header.version,
+        format!(
+            "{}.{}",
+            hk_api::stream::STREAM_VERSION_MAJOR,
+            hk_api::stream::STREAM_VERSION_MINOR
+        )
+    );
     assert_eq!(dropped, 0, "a reading client loses nothing");
 
     // Every CRC-valid burst's payload is a truth payload, and the sync word precedes it.
