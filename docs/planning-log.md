@@ -1210,3 +1210,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Checked OK:** v1 codec compatibility; save-drop fix; no double-insert; slow-creep relaxation is honest.
   - **Fix round launched** (no merge; T-131 merges first, one trivial occupancy.rs conflict).
   - **Follow-up T-134:** sparse baseline slots for Jetson memory.
+- **B0.338 T-131 merged** (fix round 2b5891d).
+  - **Immature counting:** immature, mobile and unassigned evidence is now counted via `count_unscored` and never raised.
+  - **Counters:** `inputs_observed` / `inputs_mature` added.
+  - **48 h scene:** inputs 1188 observed / 130 mature; 1058 immature-baseline suppressions; 0 anomalies, which is legitimate: unchanged channels plus an immature emitter channel.
+  - **Scene e2e:** now asserts inputs > 0 and suppressions > 0.
+  - **Persistence and clock:** `site_at` persists only on change; `baselines_json` uses the sample clock.
+  - **Follow-ups (for T-124/T-133):** drops with timestamps, mid-interval site changes, new-emitter alarms from first sightings, site pin persistence, `slots_json` clock.
+
+  Full check running. The T-132 fix round is still going and will merge with its one occupancy.rs conflict resolved.

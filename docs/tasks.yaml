@@ -2072,8 +2072,8 @@ tasks:
   - id: T-131
     milestone: M2
     title: "M2 integration part 2a: alarm wiring, AlarmKind unification, report/e2e full path, candidates when bandit off, discriminating suspect-ban test"
-    status: review
-    commit: d6f397e
+    status: done
+    commit: 2b5891d
     deps: [T-128, T-122, T-129, T-130]
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
