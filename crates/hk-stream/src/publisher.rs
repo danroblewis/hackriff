@@ -1829,6 +1829,24 @@ impl FeedAttacher {
         Some(c.stats())
     }
 
+    /// Ends one plugin's input without discarding it: bytes already queued are still written,
+    /// then the consumer closes and its stdin pipe is dropped, so the plugin reads EOF (the
+    /// contract's "no more input": a decoder flushes and exits). Records pushed afterwards do not
+    /// reach it. `false` for an unknown consumer or one that is not open.
+    pub fn finish_input(&self, id: ConsumerId) -> bool {
+        let Some(c) = self.shared.find(id) else {
+            return false;
+        };
+        let mut g = lock(&c.inner);
+        if g.state != ConsumerState::Open {
+            return false;
+        }
+        g.state = ConsumerState::Draining;
+        drop(g);
+        c.cv.notify_all();
+        true
+    }
+
     /// Stats for one consumer.
     pub fn stats(&self, id: ConsumerId) -> Option<ConsumerStats> {
         self.shared.find(id).map(|c| c.stats())

@@ -206,6 +206,64 @@ fn dummy_round_trip_into_repository() {
     }
 }
 
+/// T-103: `finish` ends the input without losing it. A plugin that has not started reading yet
+/// still gets every queued record, then EOF; the host waits for it to flush and exit (a clean
+/// exit, not restarted) instead of killing it after a fixed settle time.
+#[test]
+fn finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit() {
+    const SAMPLES: usize = 1024;
+    let mut m = repo_manifest();
+    add_args(
+        &mut m,
+        &[
+            "--profile",
+            "adsb-like",
+            "--every",
+            "1",
+            "--start-delay-ms",
+            "2500",
+        ],
+    );
+    let sink = shared_ingest(Repository::open_in_memory().unwrap());
+    let mut inst =
+        PluginInstance::spawn(m, input(), PluginContext::default(), Arc::clone(&sink)).unwrap();
+    wait_running(&inst);
+    for i in 0..20u64 {
+        let payload = tone(i * SAMPLES as u64, SAMPLES);
+        assert_eq!(
+            push(&mut inst, i, &payload, SAMPLES as u64).0,
+            PushOutcome::Enqueued
+        );
+    }
+    let t0 = Instant::now();
+    let stats = inst.finish(Duration::from_secs(30));
+    assert_eq!(stats.decodes, 20, "{stats:?}");
+    assert_eq!(
+        (
+            stats.starts,
+            stats.restarts,
+            stats.crashes,
+            stats.clean_exits
+        ),
+        (1, 0, 0, 1),
+        "{stats:?}"
+    );
+    assert_eq!(stats.state, PluginState::Stopped);
+    assert!(
+        t0.elapsed() < Duration::from_secs(20),
+        "finish returned on the plugin's exit, not on the idle timeout: {:?}",
+        t0.elapsed()
+    );
+    let sink = sink.lock().unwrap();
+    let decodes = all_adsb_decodes(sink.repo());
+    assert_eq!(decodes.len(), 20);
+    assert_eq!(
+        decodes[0].metadata["records"],
+        json!(1),
+        "first record decoded"
+    );
+}
+
 /// A plugin that crashes mid-stream is restarted with backoff until the crash-loop cap; the
 /// producer never blocks, and every pushed record is counted in exactly one bucket.
 #[test]

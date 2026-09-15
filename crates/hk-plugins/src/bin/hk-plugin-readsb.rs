@@ -439,8 +439,13 @@ const BEAST_STAMP_OFFSET_S: f64 = 200e-6;
 /// the first squitter's frame, 600 000 and more lost none). 2²⁰ samples (~0.44 s at 2.4 Msps, a
 /// few ms of readsb CPU per chain start) keeps a margin; a missed frame still falls back.
 const PREROLL_SAMPLES: u64 = 1 << 20;
-/// Longest wait for readsb's Beast connection before real samples are forwarded anyway.
-const BEAST_CONNECT_WAIT: Duration = Duration::from_secs(2);
+/// Longest wait for readsb's Beast connection before real samples are forwarded anyway. readsb
+/// runs at the manifest's `nice` and opens its connector from its main loop, which under heavy
+/// load took over the old 2 s: the chain's first squitters then decoded before the connection
+/// existed and kept only the fallback stamp (T-103). Real samples wait in the host's bounded
+/// input queue meanwhile (a lossless replay waits for room; a live chain drops and counts), so a
+/// longer wait loses nothing; it stays under the chain's 30 s lossless stall limit.
+const BEAST_CONNECT_WAIT: Duration = Duration::from_secs(20);
 /// Longest wait for the Beast frame of a raw line.
 const BEAST_MATCH_WAIT: Duration = Duration::from_millis(250);
 /// Unmatched Beast frames kept (frames of downlink formats this wrapper never emits).
@@ -742,9 +747,25 @@ fn feed_readsb(
         while written < PREROLL_SAMPLES {
             send_silence(&mut readsb_stdin, &mut written);
         }
-        let deadline = Instant::now() + BEAST_CONNECT_WAIT;
-        while !timing.wait_connected(Duration::from_millis(200)) && Instant::now() < deadline {
+        let started = Instant::now();
+        let deadline = started + BEAST_CONNECT_WAIT;
+        let mut connected = false;
+        while Instant::now() < deadline {
+            if timing.wait_connected(Duration::from_millis(200)) {
+                connected = true;
+                break;
+            }
             send_silence(&mut readsb_stdin, &mut written);
+        }
+        if connected {
+            eprintln!(
+                "hk-plugin-readsb: Beast connected after {} ms",
+                started.elapsed().as_millis()
+            );
+        } else {
+            eprintln!(
+                "hk-plugin-readsb: no Beast connection after {BEAST_CONNECT_WAIT:?}; decode stamps fall back"
+            );
         }
     }
     loop {
