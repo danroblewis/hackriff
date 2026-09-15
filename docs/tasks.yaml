@@ -2944,7 +2944,8 @@ notes:
   - id: T-186
     milestone: M2-fix
     title: "Detection -> identification latency: a strong continuous WFM station takes too long to get family + top explanation"
-    status: in-progress
+    status: review
+    commit: e5261b7
     priority: high
     deps: []
     parallel_group: FIELD
@@ -3004,7 +3005,7 @@ notes:
   - id: T-190
     milestone: MUI
     title: "Analyze / synthesize decoder stub endpoint: POST /api/analyze on a selection, emitter or ad-hoc band (optional history window) validates the target and returns 501 not_implemented until MAUTO"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: API
@@ -3034,7 +3035,7 @@ notes:
   - id: T-192
     milestone: MUI
     title: "MUI right-click context menu on signals/boxes/inventory rows carrying the focus-bar actions (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete, Adjust band); right panel freed of controls"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: MUI-X1
@@ -3064,7 +3065,7 @@ notes:
   - id: T-194
     milestone: MUI
     title: "MUI manual multi-band region select on the waterfall and time-window select on the history/capture timeline (selections with t_lo/t_hi)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: MUI-X2

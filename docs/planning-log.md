@@ -2208,3 +2208,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.468 Full check green after the follow_hops test fix (0b393df).** Lint clean; 1374/1374 tests; acceptance 28/28; 61 GB free.
   - **Main green with T-181 merged.**
   - **T-178 fix round launched** (Opus, existing worktree). Scope: fsync-failure poison, background allocation, 20 Msps drop measurement, explicit test quotas, newer-version disable, locked status.
+- **B0.469 T-186 committed (e5261b7) and in Opus review (read-only).** A strong continuous station now gets family and top explanation at 1.0 s sample-clock after first detection. The a-priori bound was 3 s; before the fix it was about 4.5 s.
+  - **Root causes:** the WFM chain wrote only at 4 s window close, and no emitter was created without a decoded RDS PI. The second also explains why a weak-RDS station never identified live.
+  - **Fix:** an early pilot-locked write from the first 1 s, with RDS deferred to the full window. Test: signal_062_identify_latency.
+  - **Watch:** concurrent_demod failed once under load.
+  - **T-190 launched** (Sonnet) into the freed Rust slot. T-192 and T-194 marked in-progress.
