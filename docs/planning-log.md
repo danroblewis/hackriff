@@ -1921,3 +1921,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **ADR:** §3.4 amended.
   - **Tests:** hk-context 54 (incl. Monte Carlo budget), hk-pipeline 17, lint clean.
   - **Next:** merge after the T-172 full check. That unblocks T-124 (c) and (h).
+- **B0.426 T-177 launched (Sonnet): headless playwright smoke of the new MUI.**
+  - **Setup:** `hk serve` with the mock device on a free port (not the user's demo ports 8789/8899/8900); playwright is installed in the scratchpad, not the repo.
+  - **Checks:** console errors, horizontal overflow at 1440 px and 400 px, waterfall frames, mode switch, Review drawer tabs, dock and timeline. Screenshots go to the scratchpad; any bugs found get listed for new tasks.
+  - **Queue:** the T-172 full check is still running; T-176 merges after it.
