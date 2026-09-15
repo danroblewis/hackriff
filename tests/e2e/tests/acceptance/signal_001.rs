@@ -369,9 +369,10 @@ fn signal_001_adsb_readsb_plugin_chain() {
     assert_adsb_outputs(&dir.0, &tap.socket_results(), &icaos, PLUGIN_DECODES);
     // Blind truth (T-047): every squitter of the private truth list decoded (identity and time,
     // one decode per squitter in time order) and an ADS-B explanation in the top-k at its extent.
-    // Decode stamps were observed up to ~95 ms after the squitter (T-047 run; the wrapper
-    // documents ≤ ~40 ms), hence 120 ms; in-order pairing keeps a late stamp from counting twice.
-    assert_truth_decoded(SIGNAL_001, &dir.0, &fx, 0.12);
+    // Decode stamps come from readsb's own sample clock (T-072, hk-plugin-readsb "Timestamps"):
+    // exact to the sample on this synth, so 2 ms (before T-072: write-time stamps up to ~95 ms
+    // late, tolerance 120 ms). In-order pairing keeps one decode per squitter.
+    assert_truth_decoded(SIGNAL_001, &dir.0, &fx, 0.002);
     for t in truth_report(SIGNAL_001, &dir.0, &fx, 0.0) {
         assert!(
             t.emitters

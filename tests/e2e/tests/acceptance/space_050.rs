@@ -18,7 +18,7 @@ use hk_model::{FreqRange, PowerUnit, TimeRange};
 use hk_store::{RegionQuery, Resolution};
 use serde_json::json;
 
-use crate::blind::{replay_config, start, truth_report};
+use crate::blind::{assert_truth_found, replay_config, start};
 use crate::common::*;
 
 const SPACE_050: &str = "SPACE-050";
@@ -86,11 +86,22 @@ fn space_050_injected_floor_calibrated_floor_vs_time_from_pipeline_tiles() {
         s.counter("/history/tiles_written") > 0,
         "[{SPACE_050}] no SpectrumTiles written"
     );
-    // Each segment's reference carrier, matched blind across the survey (T-047) but reported
-    // only: the pipeline detects the six 1 s carriers (`/detect/detections`) yet stores none,
-    // because a single-detection track never confirms (a pre-existing persistence policy, not a
-    // device-path effect).
-    truth_report(SPACE_050, &dir.0.join("run"), &fx, 0.0);
+    // Each segment's reference carrier, matched blind across the survey (T-047) against the
+    // private truth: detected, and stored as an inventory emitter. Before T-072 the six carriers
+    // were detected but nothing was stored: the pipeline pinned the loaded calibration on the
+    // provenance without storing the calibration version the Provenance row references, so every
+    // detection write failed (`/detect/db_errors`) and no track reached the inventory.
+    assert_eq!(
+        s.counter("/detect/db_errors"),
+        0,
+        "[{SPACE_050}] store errors"
+    );
+    for t in assert_truth_found(SPACE_050, &dir.0.join("run"), &fx, 0.0, false) {
+        assert!(
+            !t.emitters.is_empty(),
+            "[{SPACE_050}] carrier detected but not stored as an emitter: {t:?}"
+        );
+    }
 
     let p = product.lock().unwrap();
     assert!(

@@ -94,13 +94,17 @@ fn aware_042_occupancy_burst_lengths_and_hour_profile_via_region_over_time_query
     let product = handle.floor_product();
     let s = finish(handle);
     // The hour-long recording gaps reach the pipeline as device overruns (GAP). Lossless readers
-    // still lose a fraction of a second where the stream jumps (T-047 finding, reported); anything
-    // beyond that edge loss fails.
-    let gaps = (WINDOW_STARTS_S.len() - 1) as f64;
-    assert!(
-        (s.always_on_lost_samples as f64) <= 2.0 * gaps * fs,
-        "[{AWARE_042}] readers lost {} samples beyond the recording-gap edges",
-        s.always_on_lost_samples
+    // lose nothing beyond the true gap (T-072: the ring used to treat a reader parked at the index
+    // jump as lapped and resynced it past up to half a ring of retained post-gap samples).
+    assert_eq!(
+        s.always_on_lost_samples, 0,
+        "[{AWARE_042}] readers lost samples at the recording gaps"
+    );
+    let gaps = (WINDOW_STARTS_S.len() - 1) as u64;
+    assert_eq!(
+        s.counter("/readers/detect/gap_samples"),
+        gaps * ((WINDOW_STARTS_S[1] - WINDOW_STARTS_S[0] - WINDOW_S) * fs).round() as u64,
+        "[{AWARE_042}] the gaps are reported exactly"
     );
     assert!(s.counter("/history/tiles_written") > 0);
     // Every rendered burst of every window detected blind (T-047).

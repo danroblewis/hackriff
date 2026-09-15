@@ -69,6 +69,40 @@ use crate::stats::{Counters, get, inc};
 /// `(device_id, calibration)` pins: the newest non-superseded version per device.
 type CalibrationPins = Arc<Vec<(String, CalibrationStateId)>>;
 
+/// Stores the loaded calibration versions the run pins on its provenance (T-072). A Provenance row
+/// references its `calibration_state_ref` (foreign key), so without the version in the repository
+/// every detection, track and recording interning a calibrated provenance failed to store
+/// (SPACE-050: 6 detections, 0 stored). Versions already stored are kept; a version is stored after
+/// the one it supersedes when both are loaded.
+fn store_calibrations(repo: &mut Repository, states: &[CalibrationState]) -> anyhow::Result<()> {
+    let mut pending: Vec<&CalibrationState> = states
+        .iter()
+        .filter(|s| repo.calibration_state(s.id).is_err())
+        .collect();
+    while !pending.is_empty() {
+        let before = pending.len();
+        let mut i = 0;
+        while i < pending.len() {
+            let s = pending[i];
+            let ready = s
+                .supersedes
+                .is_none_or(|p| pending.iter().all(|q| q.id != p));
+            if ready {
+                repo.insert_calibration_state(s)
+                    .with_context(|| format!("storing calibration state {}", s.id))?;
+                pending.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        anyhow::ensure!(
+            pending.len() < before,
+            "calibration states supersede each other in a cycle"
+        );
+    }
+    Ok(())
+}
+
 fn calibration_pins(states: &[CalibrationState]) -> CalibrationPins {
     let superseded: Vec<CalibrationStateId> = states.iter().filter_map(|s| s.supersedes).collect();
     let mut newest: Vec<(String, CalibrationStateId, Timestamp)> = Vec::new();
@@ -698,6 +732,7 @@ impl Pipeline {
             summary: None,
         };
         repo.insert_survey(&survey)?;
+        store_calibrations(&mut repo, &cfg.calibrations)?;
         let product = FloorProduct::open(
             cfg.data_dir.join("history"),
             FloorProductConfig::default(),
