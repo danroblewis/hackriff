@@ -142,6 +142,16 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-115 observations
     // T-118 occupancy
     // T-119 sites, baselines, candidates, weights
+    ("GET", "/api/sites"),
+    ("GET", "/api/sites/current"),
+    ("PUT", "/api/sites/current"),
+    ("PUT", "/api/sites/{id}"),
+    ("GET", "/api/baselines"),
+    ("GET", "/api/baselines/slots"),
+    ("POST", "/api/baselines/refreeze"),
+    ("GET", "/api/candidates"),
+    ("GET", "/api/attention/weights"),
+    ("PUT", "/api/attention/weights"),
     // T-120 scheduler
     // T-121 reports
     // T-122 anomalies
@@ -219,6 +229,9 @@ pub struct ApiState {
     pub captures: Option<Arc<dyn hk_stream::inspector::CaptureSource>>,
     /// Decoder-workbench recipe runtime (T-088, [`crate::recipes`]); `None` answers 503.
     pub recipes: Option<Arc<dyn crate::recipes::RecipeControl>>,
+    /// T-119: sites, baselines, candidates and score weights ([`crate::attention`]); `None`
+    /// answers 503.
+    pub attention: Option<Arc<dyn crate::attention::AttentionControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

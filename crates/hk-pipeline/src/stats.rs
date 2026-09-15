@@ -25,6 +25,24 @@ macro_rules! counter_group {
 }
 
 counter_group!(
+    /// C12 baselines, novelty and scoring (T-119).
+    AttentionCounters {
+        /// Observations folded into baselines.
+        folds,
+        /// Folds with novelty > 0.
+        novel_folds,
+        /// Change points latched.
+        change_points,
+        /// Candidate sets published.
+        publishes,
+        /// Baseline files written.
+        baseline_writes,
+        /// Store or database errors.
+        errors,
+    }
+);
+
+counter_group!(
     /// Capture thread.
     SourceCounters {
         /// Samples pushed into the ring.
@@ -722,6 +740,8 @@ pub struct Counters {
     pub chain_stats: std::sync::Arc<ChainTable>,
     /// Scheduler.
     pub scheduler: SchedulerCounters,
+    /// C12 baselines/novelty/score (T-119).
+    pub attention: AttentionCounters,
     /// Stream time of the newest block end, ns.
     pub stream_time_ns: AtomicI64,
     /// Newest tuned centre, Hz (f64 bits).
@@ -774,6 +794,7 @@ impl Counters {
             "budget": self.budget.status_json(),
             "chain_stats": self.chain_stats.to_json(),
             "scheduler": self.scheduler.to_json(),
+            "attention": self.attention.to_json(),
             "stream_time_ns": self.stream_time_ns.load(Ordering::Relaxed),
             "tune": { "center_hz": center, "sample_rate_hz": rate },
             "compute": self.compute.to_json(),
