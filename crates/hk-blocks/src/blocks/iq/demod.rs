@@ -65,6 +65,7 @@ pub(crate) fn build_fm(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, B
         de: None,
         mean: Ema::default(),
         ms: Ema::default(),
+        non_finite: 0,
         status: Status::default(),
     }))
 }
@@ -80,6 +81,7 @@ struct Fm {
     de: Option<Deemphasis>,
     mean: Ema,
     ms: Ema,
+    non_finite: u64,
     status: Status,
 }
 
@@ -97,6 +99,7 @@ impl Fm {
     /// Instantaneous frequency of one sample, scaled.
     #[inline]
     fn step(&mut self, s: num_complex::Complex32) -> f32 {
+        let s = finite_iq(s, &mut self.non_finite);
         let f = f64::from(self.disc.push(s));
         let mean = self.mean.push(f);
         let d = f - mean;
@@ -178,6 +181,7 @@ impl Block for Fm {
             .unwrap_or_else(|| (2.0 * self.ms.value).sqrt());
         self.status.extra.set("deviation_hz", dev);
         self.status.extra.set("offset_hz", self.mean.value);
+        report_non_finite(&mut self.status, self.non_finite);
         Ok(())
     }
 
@@ -209,6 +213,7 @@ pub(crate) fn build_am(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, B
         fs: 0.0,
         level: Ema::default(),
         depth: Ema::default(),
+        non_finite: 0,
         status: Status::default(),
     };
     b.apply(p);
@@ -223,6 +228,7 @@ struct Am {
     fs: f64,
     level: Ema,
     depth: Ema,
+    non_finite: u64,
     status: Status,
 }
 
@@ -260,7 +266,7 @@ impl Block for Am {
         set_meta(out, &m, m.source_index, m.source_per_item);
         let y = real_out(out)?;
         for &s in x {
-            let a = f64::from(s.norm());
+            let a = f64::from(finite_iq(s, &mut self.non_finite).norm());
             let v = if self.normalized {
                 let level = self.level.push(a);
                 if level > 1e-20 { a / level - 1.0 } else { 0.0 }
@@ -279,6 +285,7 @@ impl Block for Am {
         self.status
             .extra
             .set("depth", (2.0 * self.depth.value).sqrt());
+        report_non_finite(&mut self.status, self.non_finite);
         Ok(())
     }
 
@@ -322,6 +329,7 @@ struct Fsk {
     disc: Discriminator,
     track: Ema,
     ms: Ema,
+    non_finite: u64,
     status: Status,
 }
 
@@ -337,6 +345,7 @@ impl Fsk {
             disc: Discriminator::new(1.0),
             track: Ema::default(),
             ms: Ema::default(),
+            non_finite: 0,
             status: Status::default(),
         };
         b.apply(p);
@@ -384,6 +393,7 @@ impl Block for Fsk {
         let y = real_out(out)?;
         let tracking = self.tracking_s > 0.0;
         for &s in x {
+            let s = finite_iq(s, &mut self.non_finite);
             let mut f = f64::from(self.disc.push(s)) - self.offset_hz;
             if tracking {
                 f -= self.track.push(f);
@@ -400,6 +410,7 @@ impl Block for Fsk {
         self.status
             .extra
             .set("offset_hz", self.offset_hz + self.track.value);
+        report_non_finite(&mut self.status, self.non_finite);
         Ok(())
     }
 
@@ -560,6 +571,86 @@ mod tests {
         let (amp, res) = fit_amplitude(&c.out(0, 0).real[24_000..], fs, 800.0, 24_000.0, 1.0);
         assert!((amp - 0.5).abs() < 0.02, "depth {amp}");
         assert!(res < 0.05, "residual {res}");
+    }
+
+    #[test]
+    fn non_finite_samples_do_not_poison_running_averages() {
+        let non_finite = |c: &Chain| {
+            c.block(0)
+                .status()
+                .extra
+                .iter()
+                .find(|e| e.0 == "non_finite")
+                .map(|e| e.1)
+        };
+        let fs = 48_000.0;
+        let clean = fm(fs, 5_000.0, 700.0, 24_000, 1e-3);
+        let (mut bad, mut zeroed) = (clean.clone(), clean);
+        for i in [10usize, 11, 12_000, 20_001] {
+            bad[i] = Complex32::new(f32::NAN, 0.3);
+            zeroed[i] = Complex32::new(0.0, 0.0);
+        }
+        bad[15_000] = Complex32::new(0.1, f32::INFINITY);
+        zeroed[15_000] = Complex32::new(0.0, 0.0);
+        for (name, p) in [
+            ("fm_demod", json!({})),
+            (
+                "fm_demod",
+                json!({"deemphasis_s": 75e-6, "output_rate_hz": 24_000}),
+            ),
+            ("am_demod", json!({})),
+            ("fsk_demod", json!({"offset_tracking_s": 0.1})),
+            ("msk_demod", json!({})),
+        ] {
+            let make = || vec![build(name, p.clone(), PortType::Iq)];
+            let got = assert_chunk_invariant(
+                make,
+                PortType::Iq,
+                fs,
+                &PortVec::Iq(bad.clone()),
+                &[4096, 999],
+            );
+            let want = assert_chunk_invariant(
+                make,
+                PortType::Iq,
+                fs,
+                &PortVec::Iq(zeroed.clone()),
+                &[4096],
+            );
+            let y = &got.out(0, 0).real;
+            assert_eq!(y, &want.out(0, 0).real, "{name} {p}");
+            assert!(y.iter().all(|v| v.is_finite()), "{name} {p}");
+            assert_eq!(non_finite(&got), Some(5.0), "{name}");
+        }
+        // subcarrier: the pilot PLL and the phase averages.
+        let fs = 240_000.0;
+        let clean: Vec<f32> = (0..48_000)
+            .map(|i| {
+                let th = TAU * 19_000.0 * i as f64 / fs;
+                (0.1 * th.cos() + 0.05 * (3.0 * th).sin()) as f32
+            })
+            .collect();
+        let (mut bad, mut zeroed) = (clean.clone(), clean);
+        for i in [5usize, 30_000, 30_001] {
+            bad[i] = f32::NAN;
+            zeroed[i] = 0.0;
+        }
+        let make = || {
+            vec![build(
+                "subcarrier",
+                json!({"carrier_hz": 57000, "bandwidth_hz": 4800, "output_rate_hz": 9500,
+                       "reference": {"pilot_hz": 19000, "multiple": 3}, "phase_tracking": "bpsk"}),
+                PortType::Real,
+            )]
+        };
+        let got =
+            assert_chunk_invariant(make, PortType::Real, fs, &PortVec::Real(bad), &[8192, 1500]);
+        let want =
+            assert_chunk_invariant(make, PortType::Real, fs, &PortVec::Real(zeroed), &[8192]);
+        let y = &got.out(0, 0).iq;
+        assert_eq!(y, &want.out(0, 0).iq);
+        assert!(y.iter().all(|z| z.re.is_finite() && z.im.is_finite()));
+        assert_eq!(non_finite(&got), Some(3.0));
     }
 
     #[test]

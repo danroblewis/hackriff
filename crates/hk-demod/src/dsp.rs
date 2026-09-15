@@ -55,6 +55,13 @@ impl<T: FirSample> FirDecimator<T> {
         }
     }
 
+    /// Clears the history and decimation phase, as if newly constructed (no allocation).
+    pub fn clear(&mut self) {
+        self.hist.fill(T::default());
+        self.pos = 0;
+        self.phase = 0;
+    }
+
     /// Group delay in input samples.
     pub fn group_delay(&self) -> f64 {
         (self.taps.len() as f64 - 1.0) / 2.0
@@ -168,6 +175,21 @@ mod tests {
             }
         }
         assert!(peak < 2e-3, "stopband leak {peak}");
+    }
+
+    #[test]
+    fn decimator_clear_matches_a_fresh_decimator() {
+        let taps = lowpass_taps(48_000.0, 3_000.0, 6_000.0, 60.0).unwrap();
+        let mut used = FirDecimator::<f32>::new(taps.clone(), 3);
+        for n in 0..1_001 {
+            used.push((n as f32 * 0.37).sin());
+        }
+        used.clear();
+        let mut fresh = FirDecimator::<f32>::new(taps, 3);
+        for n in 0..500 {
+            let x = (n as f32 * 0.11).cos();
+            assert_eq!(used.push(x), fresh.push(x), "sample {n}");
+        }
     }
 
     #[test]
