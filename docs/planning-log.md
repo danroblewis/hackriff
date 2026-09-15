@@ -1256,3 +1256,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Tests: hk-context 26, hk-store 5, hk-pipeline 17.
 
   Full check started. T-135 (full-week baseline memory) launched.
+- **B0.346 T-133 review (Opus): MERGE.**
+  - **Checks passed:**
+    - Codec bounds on bad input are safe.
+    - Rollup origin sums are correct.
+    - Filters leak no data through coarse tiles (each coarse column is exactly one finer tile).
+    - Unfiltered results are unchanged.
+    - No deadlock.
+    - Test edits were additive only.
+  - **Risk:** the history thread's `site_at` ticks (mutates/persists) site state ahead of the occupancy close. Moved to T-136 with a non-mutating peek.
+  - **Nits (docs/summary):** overflow origins match `unknown`; FilterSummary is double-counted across report chunks; `provenance.origins` cap wording. Also moved to T-136.
+  - **Merge plan:** T-133 (4ae8a1f) merges after the T-134 full check finishes.
+  - **Launched:** T-136 (site peek, pin across restart, new-emitter alarms, nits) and T-124 (M2 blind acceptance on 4ae8a1f). T-124's new-emitter and restart-site assertions follow once T-136 merges.

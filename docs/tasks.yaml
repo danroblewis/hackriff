@@ -1970,7 +1970,7 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: todo
+    status: in-progress
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2138,6 +2138,20 @@ tasks:
     found_by: "T-134 2026-09-15: sparse slots give 123 MiB/key after a parked 48 h at 9.7k cells, but a full week fills all 168 slots (~480 MB at 4 series per busy cell), so refusals return after ~4-5 days; seq_hod is 768 B/subject"
     acceptance: "parked 7-day run at 9.7k cells under the default cap refuses 0 folds (time-compressed test); novelty/alarm behaviour on channels unchanged or the change documented in ADR-0012 §3; codec compatible"
     area: crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-136
+    milestone: M2
+    title: "Site/alarm follow-ups for M2 acceptance: non-mutating site peek on the history thread, restart keeps pinned site, new-emitter alarms fed from first sightings, T-133 doc/summary nits"
+    status: in-progress
+    deps: [T-131, T-133]
+    parallel_group: M2A
+    use_cases: [AWARE-042, AWARE-044, AWARE-027]
+    found_by: "T-133 review 2026-09-15 (history thread calls site_at -> sites.tick mutates/persists site state ahead of the occupancy close) + T-131 follow-ups (site pin persistence, new-emitter alarms not fed)"
+    acceptance: "history thread uses site_at_peek (no state change/persist; test: occupancy row before expiry keeps the pinned site); pin + site survive restart on the same DB (test); new-emitter Anomaly opens from first sightings with a mature baseline and is a counted suppression when immature (pipeline test); docs/api.md + ADR §6.3a note overflow origins count as unknown, FilterSummary tiles deduped across report chunks, provenance.origins cap wording"
+    area: crates/hk-pipeline/src/{history,attention,alarms,occupancy}.rs, crates/hk-context/src/occupancy/{site,alarm}.rs, crates/hk-context/src/report/history.rs, docs/api.md, docs/adr/0012
     needs: none
     model: opus
     effort: medium
