@@ -330,6 +330,156 @@
     <p class="hint">Click a tree field to highlight its bytes; click a byte to select its field (repeat clicks cycle through
       overlapping fields). Byte ranges, values, units and fit/error status all come from the server.</p>
   </section>
+
+  <section id="report" class="panel">
+    <h2>Survey report</h2>
+    <form id="rpt-form">
+      <label>f lo (MHz) <input id="rpt-f-lo" type="number" step="any" required></label>
+      <label>f hi (MHz) <input id="rpt-f-hi" type="number" step="any" required></label>
+      <label>from (UTC) <input id="rpt-t0" type="datetime-local" step="1" required></label>
+      <label>to (UTC) <input id="rpt-t1" type="datetime-local" step="1" required></label>
+      <label>site <input id="rpt-site" type="text" autocomplete="off" placeholder="unassigned"></label>
+      <button type="button" id="rpt-use-region" title="Copy the region-over-time frequency and time window">Region over time</button>
+      <button>Load report</button>
+    </form>
+    <p id="rpt-info" class="hint"></p>
+    <p id="rpt-exports" class="hint" hidden>Export: <a id="rpt-csv" target="_blank" rel="noopener">CSV</a> · <a id="rpt-png" target="_blank" rel="noopener">PNG</a>
+      (downloads may be blocked in some viewers; open in a new tab)</p>
+
+    <div id="rpt-body" hidden>
+      <h3>Coverage</h3>
+      <p id="rpt-coverage-statement" class="hint"></p>
+      <p id="rpt-coverage-stats" class="stats"></p>
+      <details>
+        <summary>POI (probability of interception)</summary>
+        <div class="table-wrap"><table class="grid"><thead><tr><th>τ</th><th class="num">p(POI)</th></tr></thead><tbody id="rpt-poi-body"></tbody></table></div>
+      </details>
+      <details>
+        <summary>Gaps</summary>
+        <div class="table-wrap"><table class="grid"><thead><tr><th>freq</th><th>time</th></tr></thead><tbody id="rpt-gaps-body"></tbody></table></div>
+      </details>
+      <details>
+        <summary>Never observed</summary>
+        <div class="table-wrap"><table class="grid"><thead><tr><th>freq</th></tr></thead><tbody id="rpt-never-body"></tbody></table></div>
+      </details>
+
+      <h3>Occupancy <span id="rpt-occ-info" class="hint"></span></h3>
+      <h4>Bands</h4>
+      <div class="table-wrap"><table class="grid">
+        <thead><tr><th>freq</th><th class="num">fco</th><th class="num opt">fbo</th><th class="num opt">revisits</th><th class="num opt">observed s</th><th class="opt"></th></tr></thead>
+        <tbody id="rpt-bands-body"></tbody>
+      </table></div>
+      <h4>Channels</h4>
+      <div class="table-wrap"><table class="grid">
+        <thead><tr><th>freq</th><th class="num">fco</th><th class="num opt">fbo</th><th class="num opt">revisits</th><th class="num opt">observed s</th><th class="opt"></th></tr></thead>
+        <tbody id="rpt-channels-body"></tbody>
+      </table></div>
+
+      <h3>Top emitters <span id="rpt-emitters-info" class="hint"></span></h3>
+      <div class="table-wrap"><table class="grid">
+        <thead><tr><th>id</th><th>freq</th><th>lifecycle</th><th class="num">sightings</th><th class="num">fco</th><th class="opt">new</th><th>suggestion</th></tr></thead>
+        <tbody id="rpt-emitters-body"></tbody>
+      </table></div>
+
+      <h3>Change vs baseline <span id="rpt-change-status" class="hint"></span></h3>
+      <div class="table-wrap"><table id="rpt-change-table" class="grid" hidden>
+        <thead><tr><th>kind</th><th class="num">baseline</th><th class="num">observed</th><th class="num">z</th></tr></thead>
+        <tbody id="rpt-change-body"></tbody>
+      </table></div>
+
+      <details>
+        <summary>Provenance</summary>
+        <div class="table-wrap"><table class="grid"><thead><tr><th>t</th><th>kind</th><th class="opt">freq</th><th>detail</th></tr></thead><tbody id="rpt-prov-body"></tbody></table></div>
+      </details>
+
+      <div id="rpt-warnings-wrap" hidden>
+        <h4>Warnings</h4>
+        <ul id="rpt-warnings"></ul>
+      </div>
+    </div>
+    <p class="hint">Blind-first (CLAUDE.md): occupancy, emitters and change come from measurements; suggestions are ranked labels,
+      never truth. Coverage is mandatory — unobserved is never reported as quiet.</p>
+  </section>
+
+  <section id="alarms" class="panel">
+    <h2>Novelty alarms</h2>
+    <form id="al-form">
+      <label>kind
+        <select id="al-kind">
+          <option value="">any</option>
+          <option value="new-emitter">new emitter</option>
+          <option value="busier-than-baseline">busier than baseline</option>
+          <option value="quieter-than-baseline">quieter than baseline</option>
+          <option value="noise-floor-rise">noise floor rise</option>
+          <option value="novelty">novelty</option>
+          <option value="level-above-baseline">level above baseline</option>
+          <option value="change-point">change point</option>
+        </select>
+      </label>
+      <label>status
+        <select id="al-status">
+          <option value="">any</option>
+          <option value="open">open</option>
+          <option value="resolved">resolved</option>
+          <option value="dismissed">dismissed</option>
+        </select>
+      </label>
+      <button>Load</button>
+    </form>
+    <p id="al-info" class="hint"></p>
+    <div class="table-wrap">
+      <table id="al-table" class="grid">
+        <thead><tr><th>kind</th><th>freq</th><th>status</th><th>time</th><th>top explanation</th></tr></thead>
+        <tbody id="al-body"></tbody>
+      </table>
+    </div>
+    <button type="button" id="al-more" hidden>Load more</button>
+
+    <div id="al-detail" class="panel" hidden>
+      <h3>Anomaly <button type="button" id="al-detail-close">Close</button></h3>
+      <div id="al-detail-body"></div>
+    </div>
+    <p class="hint">Alarms are raised blind from baseline novelty; <code>unexplained</code> is a valid, visible explanation, not an
+      error. Dismiss suppresses this alarm's key for 7 days of sample time; Reopen lifts a dismissal or re-opens a cleared alarm.</p>
+  </section>
+
+  <section id="scheduler" class="panel">
+    <h2>Attention scheduler</h2>
+    <form id="sch-form">
+      <label>f lo (MHz) <input id="sch-f-lo" type="number" step="any"></label>
+      <label>f hi (MHz) <input id="sch-f-hi" type="number" step="any"></label>
+      <label>from (Unix s) <input id="sch-t0" type="number" step="any"></label>
+      <label>to (Unix s) <input id="sch-t1" type="number" step="any"></label>
+      <button>Load</button>
+    </form>
+    <p id="sch-info" class="hint"></p>
+    <p id="sch-status" class="stats"></p>
+    <p id="sch-bandit" class="hint"></p>
+
+    <h3>Leases <span id="sch-leases-info" class="hint"></span></h3>
+    <div class="table-wrap"><table class="grid">
+      <thead><tr><th class="num">id</th><th>kind</th><th class="num">MHz</th><th class="num opt">rate MHz</th><th class="num opt">duration</th></tr></thead>
+      <tbody id="sch-leases-body"></tbody>
+    </table></div>
+
+    <h3>POI + coverage gaps</h3>
+    <p id="sch-poi-info" class="hint"></p>
+    <div class="table-wrap"><table class="grid">
+      <thead><tr><th>band</th><th class="num">observed</th><th class="num opt">mean revisit</th><th class="opt">POI</th><th class="num opt">gaps</th></tr></thead>
+      <tbody id="sch-poi-body"></tbody>
+    </table></div>
+
+    <details id="sch-arms-details">
+      <summary>Bandit arms (collapsed by default)</summary>
+      <p id="sch-arms-info" class="hint"></p>
+      <div class="table-wrap"><table class="grid">
+        <thead><tr><th class="num">#</th><th class="num">MHz</th><th class="opt">active</th><th class="num">visits</th><th class="num opt">reward</th><th class="num opt">ucb</th><th class="num opt">stale s</th><th class="num opt">suspect</th></tr></thead>
+        <tbody id="sch-arms-body"></tbody>
+      </table></div>
+    </details>
+    <p class="hint">POI needs from/to (Unix seconds); without a span, POI and gaps are not computed. Leave f lo/f hi empty to use
+      the plan's own regions.</p>
+  </section>
   </div>
  </div>
 </main>
