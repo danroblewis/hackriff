@@ -1647,3 +1647,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - T-169 measures nextest wall time and compile time before and after the change.
   - It keeps the change only if nextest drops by at least 15% with every test green.
   - Optimisation-only failures get reported rather than bent to pass.
+- **B0.394 T-149 review (Opus): FIX-FIRST, structural fixes only.**
+  - **Checks that passed:** thin client (no signal logic); 6 API routes/streams spot-checked against docs/api.md; spectrum rows bypass the store; token kept in sessionStorage with Referrer-Policy no-referrer; old UI untouched; no gap is already served.
+  - **Problems (they would make nearly every parallel merge conflict):**
+    - main.ts mounts, state.ts slices, package.json test script and app.css are shared hotspots.
+    - Cross-task APIs are missing: dock/api.ts and decode/status-feed.ts.
+    - One throwing store listener freezes the other panels.
+    - Nit: no inventory `total`, so tab counts need a "500+" label.
+  - **Fix round launched** (fresh Opus; the T-149 agent was at 294k tokens): per-area index/slice/css files, glob test runner, typed stubs, listener isolation.
+  - **Correction to B0.391:** T-150..T-152 were not launched. They are back to todo and start after the T-149 fix merges.
+  - **T-145 bandit reference:** 81.5 s pre-T-141. The same test on main is being timed.

@@ -2379,7 +2379,7 @@ notes:
   - id: T-150
     milestone: MUI
     title: "MUI shell: top bar with Explore/Decode mode toggle, layout grid, Outputs dock (live audio + record streams: meter/rate, mute, copy address, stop; Listen adds a stream) and always-on Capture timeline (scrub, reviewing N ago / LIVE)"
-    status: in-progress
+    status: todo
     deps: [T-149]
     parallel_group: MUI-SHELL
     use_cases: []
@@ -2394,7 +2394,7 @@ notes:
   - id: T-151
     milestone: MUI
     title: "MUI Explore sidebars: inventory Candidates/Confirmed (sortable, Promote/Delete reachable without horizontal scroll), Selections with actions, right focus panel (big frequency, refined-from-output note, measurements, ranked explanations as suggestions, actions Listen/Decode/Record-Export/Stream/Promote/Delete)"
-    status: in-progress
+    status: todo
     deps: [T-149]
     parallel_group: MUI-EXPLORE
     use_cases: []
@@ -2409,7 +2409,7 @@ notes:
   - id: T-152
     milestone: MUI
     title: "MUI centre: spectrum trace + existing WebGL waterfall rehomed, brackets for confirmed/candidate/focused signals, DC mask, drag region select, hover readout, capture-timeline time cursor"
-    status: in-progress
+    status: todo
     deps: [T-149]
     parallel_group: MUI-CENTRE
     use_cases: []
