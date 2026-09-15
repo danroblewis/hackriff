@@ -1925,3 +1925,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Setup:** `hk serve` with the mock device on a free port (not the user's demo ports 8789/8899/8900); playwright is installed in the scratchpad, not the repo.
   - **Checks:** console errors, horizontal overflow at 1440 px and 400 px, waterfall frames, mode switch, Review drawer tabs, dock and timeline. Screenshots go to the scratchpad; any bugs found get listed for new tasks.
   - **Queue:** the T-172 full check is still running; T-176 merges after it.
+- **B0.427 T-175 WIP (00691e3): 5 of 6 optimisation-exposed failures fixed. Finisher launched.**
+  - **Fixed, passing with and without the opt-level overrides:**
+    - Product: `planning_tune()` fallback, so `hops::set_channels` no longer returns 409 before the first block.
+    - Tests: fresh-status waits (status publishes every 250 ms), and exact frame spacing except across recording loop splices.
+  - **t057:**
+    - Station check now integrates channel band power, threshold unchanged. A 7-point sample had read 3.3×.
+    - New issue: while dwelling on the partly covered window at 99.873 MHz / 3 Msps, detections appear outside the recorded band (23 kHz at 98.375 MHz, 2.9 MHz wide below 99.6 MHz). They are stored as `marginal`. Possible mock-render or detector bug.
+  - **Finisher (fresh Opus):** root-cause t057, strip the T175DBG prints, then run the full timed nextest, acceptance and lint with the overrides.
