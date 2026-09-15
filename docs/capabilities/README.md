@@ -57,6 +57,7 @@ To list use cases for a capability once mapping exists, query `use-cases.yaml` i
 | C37 | [tx-experiments](C37-tx-experiments.md) | G — Specialised |
 | C38 | [ml-runtime](C38-ml-runtime.md) | G — Specialised |
 | C39 | [live-view-inspector](C39-live-view-inspector.md) | G — Specialised |
+| C40 | [signal-relationships](C40-signal-relationships.md) | Image/harmonic/intermod attribution and content-correlated multipath; ranked relationships, never automatic deletion |
 
 ## Card template
 

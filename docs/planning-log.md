@@ -2337,3 +2337,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-221 (MAUTO design):** Listen becomes a decode pipeline with an audio sink, so audio and digital decoders share one model.
   - **Hopping** stays deferred to M4.
   - **Note:** T-219 waits for a Rust slot; T-210, T-188, T-199 and the full check hold all four.
+- **B0.491 User idea tracked: signal relationships, added as capability C40** (card, docs/06 row, roadmap note).
+  - **Geometric half (deterministic):** image 2*LO-f, harmonics n*f, intermod a*f1+/-b*f2 of strong confirmed emitters; a candidate on a predicted frequency is attributed to its source. Folded into T-219 as a same-source duplicate, the same idea as the ADR-0012 §2.6 DC twin rule.
+  - **Content half:** filed as T-222 (deps T-201, T-219): same decoded identity means one emission, and the cross-correlation lag gives the path difference.
+  - **Not built now** beyond the T-219 fold-in. T-220 told to number its task graph from T-230.
+  - **Disk:** back to 37 GB after removing four merged worktrees.

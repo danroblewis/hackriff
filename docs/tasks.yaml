@@ -3504,6 +3504,8 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+    also: "fold in the geometric half of C40 (user 2026-09-15): predict image 2*LO-f, harmonics n*f and intermod a*f1+/-b*f2 from strong confirmed emitters using the tuning history, and attribute a candidate landing on a predicted frequency as image/harmonic/IMD of that source rather than an independent signal (same-source duplicate). Level consistency and presence only while the source is present are required; the attribution is ranked evidence with its arithmetic disclosed, reversible, never an automatic delete. Blind test: an injected image/IMD is attributed, and a real adjacent station is not."
+
   - id: T-220
     milestone: MAUTO
     title: "DESIGN: a candidate IS a decode pipeline - Emitter owns competing decode-pipeline hypotheses each with an evidence score, not one family label (amend ADR-0015 + docs/07; confirm-by-decode promotes the winning pipeline)"
@@ -3533,6 +3535,21 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: true
+  - id: T-222
+    milestone: M3
+    title: "C40 content-correlated multipath: two detections that decode to the same content (same RDS PI, same ADS-B ICAO, high audio/bit cross-correlation) are one emission, with the correlation lag giving the path difference"
+    status: todo
+    priority: normal
+    deps: [T-201, T-219]
+    parallel_group: M3B
+    use_cases: [AWARE-053]
+    found_by: "user 2026-09-15 (roadmap capability C40, content half)"
+    acceptance: "blind test through the mock SDR: a synthetic two-path scene (same content, delayed and attenuated copy) yields ONE emission with a multipath Relationship whose measured lag matches the injected delay within an a-priori tolerance; two distinct stations sharing a family are NOT related; relationship is ranked evidence with reasoning, reversible, never an automatic delete; no M0/M1/M2 acceptance regression"
+    area: crates/hk-classify or hk-context (relationships), crates/hk-model (Relationship), crates/hk-dsp (cross-correlation)
+    needs: none
+    model: opus
+    effort: high
     core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
