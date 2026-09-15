@@ -1069,7 +1069,9 @@ tasks:
   - id: T-064
     milestone: M0b
     title: Hop-set tracker scaling (prune/dedupe closed members; recompute raster only when the channel set changes)
-    status: in-progress
+    status: done
+    commit: "b4db9e9 (merged; full check running)"
+    result: "closed hop-set members pruned once a newer member covers the channel and last burst > 10 s old; >256 members prunes oldest closed; pruned detections still counted. Raster refit only when qualifying channels change (join/leave/qualify flip/centre drift > 0.75 bin), at most once per 1 s stream time, always on form/merge/close; HopConfig::without_scaling_bounds() restores old behaviour; documented in track/mod.rs. Tolerance: formed/closed events and closed rows exact; an open set row may carry a raster up to 1 s old. Parity (raster 0.0 Hz, channels, hop rate, hops, members, dwell) on synthetic hoppers, 915 fixture, both urban captures. 300 s hopper: 450 tracks, peak 24 members, 426 pruned, 149 fits. Whole-pipeline replay (old/new alternating, load 17-19): l32g30a1 0.95-1.01 -> 1.14-1.24 RTF (1.23 in 3/4); l24g20a0 unchanged 0.34-0.35 - bottleneck is the WFM/RDS chain ParamEstimator::estimate -> ChannelFilter::apply (T-081). Detect bench 20 Msps urban (load ~32) 1.47-1.54 -> 2.09-2.36; tracker share 62-67 % -> 7 %; raster fits ~1000 -> 5-11. hk-detect all tests, aware_036/aware_042 acceptance, clippy, rustfmt pass."
     deps: [T-058]
     parallel_group: S
     use_cases: [AWARE-036, AWARE-042]
@@ -1318,7 +1320,7 @@ tasks:
   - id: T-079
     milestone: M0b
     title: API reference docs/api.md + HTTP contract tests on the mock device; move UI decision logic into backend; CLAUDE.md thin-client rule
-    status: todo
+    status: in-progress
     deps: []
     parallel_group: W
     use_cases: [AWARE-042]
@@ -1328,7 +1330,6 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
-    hold: "after running T-077/T-064 (next free slot), ahead of T-053/T-056/T-067; merge main after T-078 lands so docs/tests include its endpoints"
   - id: T-080
     milestone: M0b
     title: "Small UI tweaks only, no redesign: Selections + Signal Inventory into a left sidebar, remove first/last seen columns, inventory split Candidates/Confirmed with Promote and Delete"
