@@ -719,3 +719,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **UI:** picker, slider and jump-to-time.
   - **Tests:** mock-SDR e2e covering stored==live, scrub, replay re-parse, quota, stalled disk.
   Timeboxed Opus review running; it checks crash consistency, eviction versus open readers, gating on replay, and the runtime.rs conflict with T-093.
+- **B0.254 T-093 review: MERGE.** The review confirmed:
+  - budget claims N−1 extra slots; overrun is marked as a discontinuity;
+  - the merge buffer is sized and allocation-free; swaps are atomic across channels at a boundary and retired instances are dropped off the RT thread;
+  - the watermark advances per chunk; `graph.rs` only affects frames-input graphs (follow-hops downstream);
+  - merge-tree against main is clean.
+  Nits filed as **T-107**: stale-tune race in set_channels; a lost DISCONTINUITY on an empty DDC chunk; ordering of long frames (relevant to T-095 POCSAG); detections-source and tracker-found hop-set tests; set_channels routes. T-093 and T-105 merge after the in-flight full check; the T-092 vs T-093 runtime.rs conflict is expected and resolvable.

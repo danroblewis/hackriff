@@ -1722,6 +1722,20 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
+  - id: T-107
+    milestone: M1
+    title: "follow_hops hardening (T-093 review follow-ups)"
+    status: todo
+    deps: [T-093]
+    parallel_group: M1H
+    use_cases: [SIGNAL-062]
+    found_by: "T-093 review 2026-09-15"
+    acceptance: "per-channel tune stored and added channels re-planned at apply time so a same-rate retune racing set_channels never decodes the wrong frequency (hops.rs:900, test); a channel whose DDC yields no samples on a chunk still carries the pipeline DISCONTINUITY flag (hops.rs:566, test); ordering window handles frames longer than order_window_s (e.g. multi-batch POCSAG) without spurious late counts (by frame end or per-frame hold); tests for the detections channel source and for a hop set found by the tracker from IQ (not inserted); HTTP routes for set_channels/refresh_channels with docs/api.md + contract tests"
+    area: crates/hk-pipeline/src/recipes/hops.rs, crates/hk-blocks/src/blocks/multi, crates/hk-api
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
