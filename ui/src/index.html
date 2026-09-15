@@ -267,12 +267,24 @@
 
   <section id="frame-inspector" class="panel">
     <h2>Frame inspector <span id="fi-status" class="hint"></span></h2>
+    <div class="fi-row">
+      <label class="grow">Recorded streams <select id="fi-capture-list"><option value="">(none loaded)</option></select></label>
+      <button type="button" id="fi-capture-refresh">Refresh</button>
+    </div>
     <form id="fi-capture-form" class="fi-row">
-      <label class="grow">Capture id <input id="fi-capture-id" type="text" autocomplete="off" placeholder="cap-1"></label>
+      <label class="grow">Capture id <input id="fi-capture-id" type="text" autocomplete="off" placeholder="dc…"></label>
       <button>Load</button>
     </form>
-    <p class="hint">Points at one recorded decoded stream (<code>POST /api/captures/{id}/parse</code>); the always-on capture
-      list arrives with T-092. Live streaming (<code>/ws/open/inspector</code>) is not served yet &mdash; TODO once T-088/T-092 land.</p>
+    <div class="fi-row">
+      <label class="grow">Scrub frame <input id="fi-scrub" type="range" min="0" max="0" value="0" step="1" disabled></label>
+      <span id="fi-scrub-info" class="hint"></span>
+    </div>
+    <form id="fi-seek-form" class="fi-row">
+      <label class="grow">Jump to time (s from capture start) <input id="fi-seek-s" type="number" min="0" step="0.1" inputmode="decimal"></label>
+      <button id="fi-seek-go" disabled>Jump</button>
+    </form>
+    <p class="hint">Every running pipeline's decoded stream is recorded (<code>GET /api/captures</code>, quota-managed, oldest
+      evicted first). Pick one, scrub by frame or time, and re-parse it with a draft field map below.</p>
 
     <details id="fi-map-details">
       <summary>Draft field map (JSON)</summary>

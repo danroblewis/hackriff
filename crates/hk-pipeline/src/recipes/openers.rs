@@ -111,11 +111,7 @@ impl RecipeRuntime {
     /// Opens a pipeline's live inspector stream (see the module docs).
     pub fn open_inspector(&self, req: &OpenRequest) -> Result<OpenedStream, OpenRefusal> {
         if req.param("capture").is_some() {
-            return Err(OpenRefusal::new(
-                422,
-                "not-served",
-                "inspector streams over recorded captures land with T-089/T-092",
-            ));
+            return self.open_capture(req); // T-092 (recipes/capture.rs)
         }
         let pid = param(req, "pipeline")?;
         let ctl = self
@@ -180,7 +176,7 @@ impl StreamOpener for InspectorOpener {
         json!({
             "kind": "messages",
             "message_schema": hk_stream::inspector::INSPECTOR_MESSAGE_SCHEMA,
-            "params": ["pipeline", "output"],
+            "params": ["pipeline", "output", "capture", "from_frame", "field_map"],
             "records": "frame (one per frame), status (one per ~250 ms tick), edit (per hot edit)",
         })
     }

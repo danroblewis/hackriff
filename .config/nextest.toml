@@ -80,3 +80,9 @@ test-group = 'heavy-serial'
 [[profile.default.overrides]]
 filter = 'package(hk-pipeline) and binary(signal_001_readsb)'
 test-group = 'heavy-serial'
+
+# T-092: decoded-stream capture drives a real-time mock pipeline and asserts the recorder
+# never stalls it (a stalled disk must drop, not block), so it runs with the other timing tests.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(decoded_capture)'
+test-group = 'heavy-serial'

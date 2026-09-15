@@ -521,7 +521,7 @@ function main() {
   }, (r) => inspector.showKnown(r), listen.rowListen);
   void live.start();
   void inventory.load();
-  new FrameInspectorPanel(client); // T-090: capture id entered by hand until T-092's capture list
+  new FrameInspectorPanel(client); // T-090 pane; T-092 capture list + scrub
 }
 
 main();

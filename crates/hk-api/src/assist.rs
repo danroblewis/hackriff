@@ -466,6 +466,7 @@ mod tests {
             body,
             content_type: Some("application/json"),
             caller: crate::control::Caller::default(),
+            query: &[],
         };
         // A running call holds the slot.
         let running = Permit::try_acquire().expect("free slot");

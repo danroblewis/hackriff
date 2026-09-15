@@ -766,7 +766,7 @@ Any output port of any node of a running pipeline can be opened as a stream on d
 
 Served over `/ws/open/<name>` (§12.1) and TCP `open/<name>` (§13.1), with the usual refusals: `404` unknown pipeline, node, port or capture; `409` a view the port type doesn't support; `403` gate; `503` budget.
 - `inspector?pipeline=<id>[&output=<id>]`: a pipeline's inspector output from now. The same records are offered as the always-on stream `inspector/<pipeline_id>/<output_id>` while the pipeline runs.
-- `inspector?capture=<id>[&from_frame=<n>][&field_map=<recipe_id>@<version>:<map_id>]`: replay, optionally re-parsed, of a recorded decoded stream.
+- `inspector?capture=<id>[&from_frame=<n>][&field_map=<recipe_id>@<version>:<map_id>]`: replay, optionally re-parsed, of a recorded decoded stream. **Served (T-092):** frame records from frame `n` by index seek, paced to the consumer, stream id `capture/<id>`; see docs/api.md "Decoded captures".
 - `stage?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum]`: a stage stream (§14.4).
 
 ## Sources
