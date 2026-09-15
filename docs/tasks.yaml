@@ -3510,6 +3510,7 @@ tasks:
     core_interface: true
     also: "fold in the geometric half of C40 (user 2026-09-15): predict image 2*LO-f, harmonics n*f and intermod a*f1+/-b*f2 from strong confirmed emitters using the tuning history, and attribute a candidate landing on a predicted frequency as image/harmonic/IMD of that source rather than an independent signal (same-source duplicate). Level consistency and presence only while the source is present are required; the attribution is ranked evidence with its arithmetic disclosed, reversible, never an automatic delete. Blind test: an injected image/IMD is attributed, and a real adjacent station is not."
     binding_constraint: "from ADR-0015 section 11 (T-220): record duplicate/artifact groups as APPEND-ONLY rows keyed by emitter (duplicate_of / artifact_of links plus suppression rows) - never mutate or delete the losing candidates, so the later candidate-pipeline model can fold these groups in and evidence can revive a superseded row. Guard: any distinguishing evidence blocks a merge (differing decoded identities, then fingerprint distance, then separated -3 dB extents); band overlap alone only makes rows compete. Rank duplicates by an SNR x duty x trust proxy until evidence bits exist."
+    field_case: "user field observation 2026-09-15: short intermittent DATA-looking (possibly AM) bursts near 100.3 MHz, distinct from the 100.3 WFM station. Exactly the artifact-vs-real question this task decides: check whether the geometric predictor attributes it to the WFM station (image/harmonic/IMD) or leaves it as an independent narrowband emitter. Do not assume either; it must be decided by evidence."
 
   - id: T-220
     milestone: MAUTO
@@ -3557,6 +3558,8 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+    field_case: "user field observation 2026-09-15: intermittent bursts near 100.3 MHz next to a strong WFM station - a real-air case for distinguishing a same-source duplicate from an independent emitter once content correlation exists."
+
   - id: T-223
     milestone: M2-hardening
     title: "signal_001 readsb plugin chain misses the earliest ADS-B emission when the acceptance suite runs in parallel under load (just acceptance uses cargo test, so nextest heavy-serial pinning does not apply)"

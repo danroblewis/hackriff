@@ -2375,3 +2375,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-223 is intermittent, not constant:** it failed twice at load ~14, then passed at similar load. The task stands, and its fix must be deterministic (10/10 under 6 burners) rather than lucky.
   - **User-visible now on main:** RDS correction with consensus safeguards (T-210), candidate discard verified with an optimistic UI delete (T-187), yellow Confirmed boxes with draggable edges (T-193), the right-click menu (T-192), multi-band and timeline select (T-194), band-edge override (T-191), the analyze stub (T-190), the pre-allocated IQ ring (T-178) and per-signal decode fields (T-159).
   - **Slots:** T-188, T-199, T-205, T-223 fill the cap; T-219 is next.
+- **B0.497 Field observation (user, live demo 2026-09-15): intermittent DATA-like bursts near 100.3 MHz.** Short, intermittent, possibly AM, and distinct from the 100.3 WFM station. Candidate explanations, none assumed: a subcarrier, an adjacent narrowband emitter, or a receiver artifact of the strong station.
+  - **Logged as a real-world burst test case** for the short-burst detector (T-075, done) and for the auto-decode and IQ-ring work.
+  - **When burst detection and auto-decode are verified, check this case:** intermittent AM/data bursts near 100.3 are caught, their IQ retained, and a decode attempted.
+  - **Attached as `field_case` to T-219** (artifact versus independent emitter: the geometric image/harmonic/IMD predictor must decide it by evidence) **and T-222** (content-correlated multipath).
+  - **To capture it:** the demo server must run with `--iq-retention` on a build containing T-178, so the burst's IQ survives long enough to analyse. No action taken now; the user's demo was not touched.
