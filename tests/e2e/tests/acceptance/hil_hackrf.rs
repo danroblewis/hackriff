@@ -180,9 +180,9 @@ fn stations_in(psd: &[f32], fc: f64, fs: f64) -> (Vec<Station>, f64) {
         }
         let (a, b) = (k.saturating_sub(cent), (k + cent).min(n - 1));
         let (mut w, mut wf) = (0f64, 0f64);
-        for j in a..=b {
-            w += f64::from(psd[j]);
-            wf += f64::from(psd[j]) * freq(j);
+        for (j, &v) in psd.iter().enumerate().take(b + 1).skip(a) {
+            w += f64::from(v);
+            wf += f64::from(v) * freq(j);
         }
         out.push(Station {
             f_hz: (wf / w / 1e3).round() * 1e3,
