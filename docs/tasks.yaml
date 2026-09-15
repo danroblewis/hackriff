@@ -1475,7 +1475,8 @@ tasks:
   - id: T-088
     milestone: M1
     title: "M1 Recipe runtime: load/run/hot-edit recipes as chains; save/list; serve records"
-    status: in-progress
+    status: review
+    commit: 0a256ac
     deps: [T-085]
     parallel_group: M1R
     use_cases: [SIGNAL-062]

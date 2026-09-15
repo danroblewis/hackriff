@@ -650,3 +650,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Also noted for T-088: the runtime must set RESET on a rebuilt node's first chunk. Full check deferred until the T-087/T-089 merges, so one run covers all three.
 - **B0.235 T-087 review: FIX-FIRST** (timeboxed). One must-fix: CRC burst correction manufactures valid frames on narrow CRCs. RDS 10-bit at burst 5 turns 36% of garbage blocks Valid; burst 1 turns 2.5–5%. Also real-time nits: assemble/deframe under-declare output counts, so FrameBuf reallocates on the RT thread. Checked OK: bch 3-bit refusal guaranteed with parity, ACARS CRC-16/KERMIT span and sync, blind tests, clean merge-tree with T-086. Keep `FrameLength` as the shared length evaluator; porting ppm_demod goes to T-104. Fix round running.
 - **B0.236 T-089 merged** (5b578ec; fix round dc453ce). Fixes: checked/saturating length arithmetic, with tests near u64::MAX for bytes/ascii/repeats; stream_external version test now uses constants; capture re-parse fit capped at 100k frames with a `truncated` flag; api.md 413/422/500 documented. **T-090 inspector UI** launched (Sonnet, thin client over docs/api.md; merge after coordinator review). Full check of main covering T-086 + T-089 is running.
+- **B0.237 T-088 delivered** (0a256ac). What landed:
+  - recipe chains (ring→DDC→graph) under the chain budget;
+  - off-thread build with swap at a chunk boundary, RESET on rebuilt nodes, zero sample loss across 4 hot edits;
+  - file-backed versioned recipe store;
+  - routes /api/blocks, /api/recipes*, /api/pipelines* (PUT hot-edit, save);
+  - stage and inspector streams (interim §6 message framing), with openers registered;
+  - mock-SDR e2e and allocation-free tests.
+  Not yet: messages outputs (needs T-089 eval), follow-hops (T-093), capture targets (T-092), and `/api/recipes/match`. The branch predates the T-086/T-089 merges, so integration is needed. A timeboxed Opus review is running, including a merge-tree against main. **T-087 fix round done** (40ecd1a: CRC false-correction bound ≤1e-3 means no RDS correction and CRC-24 1-bit OK; output bounds; FrameLength validation). It merges after the current full check. The T-088 agent ran to ~444k tokens, past the 300k guideline; fix rounds go to a fresh agent.
