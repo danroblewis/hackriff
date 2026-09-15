@@ -1,0 +1,429 @@
+# ADR-0016 — Classification contracts: Classification with open-set unknown, prior fusion, classical cascade, signatures and clustering, ml-runtime, blind evaluation
+
+**Status:** PROVISIONAL (T-198, core interface, planning only; reviewed before the T-211 skeleton lands)
+**Touches:** C15 modulation classifier, C18 fingerprint signatures, C38 ml-runtime; inputs C13/C14/C16, priors C17, consumers C27 inventory, C12/C04 attention ([ADR-0012 §4](0012-attention-memory-contracts.md)), recipes ([ADR-0011 §2.4](0011-decoder-workbench-contracts.md)), decoder synthesis (MAUTO, [docs/15](../15-decoder-synthesis.md), ADR-0015 in progress under T-208); Emitter ([docs/07 §2.11](../07-data-model.md)), Annotation §2.13, Decode §2.15; [ADR-0007](0007-compute-placement.md) provider model
+**Code (today):** `hk-estimate::blind::Family {Unknown, Ook, Fsk, Bpsk, Qpsk}` with S5 floors; `hk-pipeline/src/family.rs` (label → service vocabulary, ranked explanations, `FAMILY_MAP_VERSION`); `hk-model` `emitter_classification` table + `Classification {family, confidence, open_set_score, model_version}`, `FAMILY_ORDER` (T-183), `cluster::Fingerprint` v1; `hk-pipeline/src/candidates.rs::class_entropy`. Nothing in this ADR is implemented yet; T-211 lands the skeleton.
+
+## Context
+
+M3 (docs/11) adds classification: a cascaded classical classifier with open-set output (C15), signatures and clustering of unknowns (C18), and an ML runtime (C38). Today "family" is a string written by three unrelated producers: demod chain labels (`wfm`, `2fsk`), decoder ids mapped to services (`decoder:readsb` → `adsb`), and track shape. The row has no distribution, taxonomy, or explicit unknown. T-183 only ranks track shape below the rest.
+
+Constraints carried in:
+- **Blind first, database suggests.** Priors (C17) never veto measurement. Mismatches get flagged, and unknown signals are the priority (CLAUDE.md).
+- **Classical first, ML as a later stage** after normalisation, with open-set output, never a softmax unknown (CLAUDE.md key findings; C15/C38 cards).
+- **8-bit front end.** S5 measured the family floors: FSK/OOK labels need ≥ 20 dB in-band SNR, PSK ≥ 15 dB. Below those floors the chain abstains and has never mislabelled (0 trusted-and-wrong in 900 synthetic runs and on real 915 MHz FSK; `spikes/s5-blind-estimation/REPORT.md` §3). OOK/PSK on real signals is still INCONCLUSIVE.
+- **Decode confirms.** A CRC-valid decode is the only thing that confirms a signal (docs/15 §1). Classification and signatures rank; they do not identify.
+- **Mac first.** GPU and ML providers run on the Mac behind a conformance suite; CUDA/TensorRT waits for the Jetson phase.
+- **Thin client** over `docs/api.md`; e2e tests run blind through the mock SDR.
+
+## Decision summary
+
+| Question | Decision |
+|---|---|
+| Where the types live | `hk_model::classify` (taxonomy, `Classification`, thresholds, pure `fuse`, arbitration rank) and `hk_model::signature` (`EmissionFeatures`, `Signature`, `SignatureMatch`, `SignatureCluster`). Classifier implementation in a new crate **`hk-classify`**. ML host in a new crate **`hk-ml`**. Matching and clustering engines in `hk-context/src/signature/`. |
+| Taxonomy | Tree `hk-mod@1`: coarse (analog / digital / noise-like) → family → class. `unknown` is a global open-set outcome, not a leaf. Class names reuse existing labels (`2fsk`, `wfm`, `bpsk`…). |
+| Classification | Posterior **and** likelihood-only distributions over families, each including `unknown`. Also: optional within-family class distribution, open-set score, normalised entropy, deciding stage, provenance (features@version, rules/model@version, SNR vs gate, suspect flags), and reason codes. Stored additively on `emitter_classification` (migration 0006). |
+| Current family | `FAMILY_ORDER` becomes an arbitration rank: user 0 > decoder (CRC-valid) 1 > lock-verified (demod lock, ALRT/GLRT) 2 > classifier 3 > track shape 4; latest wins among equals. This is a superset of the T-183 rule. |
+| Fusion | `P(c∣x,f,ℓ) ∝ p(x∣c)·P(c∣f,ℓ)` over known families only, with λ₀ ≥ 0.1 enforced. The unknown mass is set by the open-set score and is never scaled by priors. **Evidence-dominance:** when the likelihood ratio of the likelihood top-1 over the runner-up is ≥ 10, the posterior top equals the likelihood top. A prior that flips a closer call sets `prior-tiebreak`; disagreement sets `prior-mismatch`. |
+| Cascade | Feature tree (C13 shape, instantaneous statistics, cumulants, cyclic features, C16) → class-conditional densities give `p(x∣c)` and a χ² open-set score → optional verifier (ALRT/GLRT, post-sync only, can only re-rank) → optional per-family DL, within-family class only, energy-score open set → fusion → decoders arbitrate. |
+| DL enable | Per family, only when the dev-set evaluation beats classical by ≥ 5 points at every SNR bin ≥ the gate, with the 95 % CI lower bound > 0, no AUROC loss > 0.02, and no higher false-known rate. Otherwise the stage runs in shadow mode or is off. |
+| C18 | `EmissionFeatures` (per-field value ± σ, method, n) superset of `Fingerprint` v1; immutable versioned `Signature`s (SQLite, seeded from recipe `match` + CRC-confirmed emitters); `SignatureMatch` full/partial/none with ranked candidates, never an identity or status. |
+| Clustering | Online leader clustering on the **tolerance-normalised** distance shared with matching (ε = 1), min 3 members before a cluster becomes visible, nightly batch DBSCAN repair with append-only merge/split history. A cluster is a *type* above emitters (*instances*). |
+| ML runtime | `MlProvider` trait over ONNX models loaded at runtime (no rebuild). CPU reference **tract** (pure Rust); Mac acceleration **ort + CoreML EP** behind opt-in `ml-coreml`; Jetson **ort + TensorRT EP** (`ml-trt`, deferred). Candle and Burn are rejected: model code in Rust means a rebuild per model. Hand-written wgpu is rejected for v1. |
+| Evaluation | A-priori floors in this ADR. Dev and acceptance seeds are disjoint; OTA labels come only from CRC-valid decodes, split by session. Every number is reported per SNR bin × source (synthetic / OTA). T-206 is the exit gate. |
+| MAUTO | `SearchSeed {classification, features, signature_match, cluster}`. The search *orders* by posterior and *prunes* only on the likelihood, so priors cannot prune. It reserves ≥ max(p_unknown, 0.2) of the budget for open search. |
+
+## 1. Taxonomy `hk-mod@1`
+
+| Coarse | Family | Classes (label strings) |
+|---|---|---|
+| analog | `analog` | `am`, `nbfm`, `wfm`, `ssb`, `cw` |
+| digital | `ook-ask` | `ook`, `ask4` |
+| digital | `fsk` | `2fsk`, `gfsk`, `msk`, `4fsk` |
+| digital | `psk-qam` | `bpsk`, `qpsk`, `8psk`, `qam16`, `qam64` |
+| digital | `ofdm` | `ofdm` (C16 parameters as features) |
+| digital | `css` | `chirp` |
+| digital | `dsss` | `dsss` (C16; may always abstain in M3) |
+| digital | `pulsed` | `ppm`, `pulse` (radar/ADS-B-like envelopes) |
+| noise-like | `noise-like` | `noise-like` (flat PSD, SK ≈ 0, no cyclic line: jammers, wideband noise, radiometric rises) |
+
+- **`unknown`** is the open-set outcome at every level. A classification may be `coarse: digital`, family `unknown`: the "digital, unknown order" case below ~0 dB (C15 card).
+- **Versioning.** The taxonomy is data (`hk_model::classify::taxonomy::HK_MOD_V1`). Adding a class or family is a new version (`hk-mod@2`). Rows keep the version they were written under. Readers map old labels through `taxonomy::family_of(label, version)`. The pre-M3 labels (`fsk`, `ook`, `bpsk`, `qpsk`, `wfm`, `nbfm`, `am`, `2fsk`) map into `hk-mod@1`. Service families (`adsb`, `fm-broadcast`) are not modulation labels. They stay decoder evidence in `family.rs` (`taxonomy: null`).
+- **Fingerprint gate fix (T-211).** `cluster::Fingerprint` compares family exactly. Since `fsk` and `2fsk` would otherwise split one emitter, the comparison moves to `family_of` at the family level. This is additive and keeps `FEATURE_SET_VERSION` 1.
+
+## 2. `Classification` contract (C15 output)
+
+```rust
+pub struct Classification {                 // hk_model::classify; serde, deny_unknown_fields, validate()
+    pub schema: u16,                        // 1
+    pub t: Timestamp,
+    pub taxonomy: TaxonomyRef,              // "hk-mod@1"
+    pub input: Option<InputRef>,            // existing input_kind/input_id (track, detection, demodulation, decode, snippet)
+    pub coarse: Coarse,                     // analog | digital | noise-like | unknown
+    pub posterior: Vec<LabelP>,             // families + "unknown"; sums to 1 ± 1e-6; no entry is exactly 1.0
+    pub likelihood: Vec<LabelP>,            // evidence-only normalisation over the same labels (uniform prior)
+    pub prior: Option<PriorUse>,            // {prior_ref, lambda: [λ0..λ3], dist: Vec<LabelP>} or None (no C17 data)
+    pub family: String,                     // top posterior label (may be "unknown")
+    pub confidence: f64,                    // posterior of `family`, ≤ 0.999
+    pub class: Option<ClassCall>,           // {label, p, dist, stage} within `family`; None if below its gate
+    pub open_set_score: f64,                // 0..1, higher = further from every known class
+    pub entropy_norm: f64,                  // H(posterior)/ln K, K incl. unknown (ADR-0012 §4.1 class_entropy)
+    pub stage: Stage,                       // deciding stage: feature-tree | verifier | dl | decoder | user | chain | track-shape
+    pub provenance: ClassProvenance,        // below
+    pub flags: Vec<ClassFlag>,              // prior-tiebreak, prior-mismatch, below-gate, suspect-input, dl-shadow-disagrees
+    pub reasons: Vec<String>,               // machine codes: low_snr, too_short, clipped, multi_signal, no_cyclic_line …
+}
+pub struct ClassProvenance {
+    pub rules: String,                      // "hk-classify/tree@1"
+    pub features_version: u32,              // EmissionFeatures version
+    pub features_ref: Option<FeaturesId>,
+    pub ml: Option<ModelRef>,               // "amc-psk-qam@0.2.0#sha8", with provider + precision, only if stage=dl
+    pub snr_db: Option<f64>, pub snr_gate_db: f64, pub gated: bool,
+    pub thresholds: String,                 // "thresholds@1"
+    pub suspect: SuspectFlags,              // clipped / suspect_imd / image_candidate / spur from Detection+Provenance
+    pub power_mode: Option<String>,
+}
+```
+
+**Legacy fit.** Columns `family`, `confidence`, `open_set_score` and `model_version` (= `provenance.rules`, or the `ml` ref for DL, or `decoder:<id>`) keep their meaning. So `/api/inventory`, `FAMILY_ORDER` readers, `class_entropy` and `family.rs` evidence keep working. Migration 0006 adds nullable `taxonomy`, `stage`, `arb_rank INTEGER` and `detail TEXT` (JSON of the rest). Rows written before M3 have NULLs and are read as legacy: `stage` is derived (`decoder:` prefix → decoder; `input_kind='track'` → track-shape; else chain). The append-only trigger is unchanged.
+
+**Arbitration rank (replaces `FAMILY_ORDER`):** `ORDER BY coalesce(arb_rank, <derived>) ASC, classification_id DESC`.
+
+| Rank | Stage | Why |
+|---|---|---|
+| 0 | user | Explicit reclassify (`family::reclassify`) |
+| 1 | decoder | A CRC-valid decode is ground truth (C15 card) |
+| 2 | verifier, or a chain label with demod lock (pilot/RDS lock, clock lock) | Post-sync evidence |
+| 3 | feature-tree / dl (fused classifier) | Pre-sync evidence |
+| 4 | track-shape | Occupancy only (T-183) |
+
+- T-183's tests stay green: track-shape remains below everything.
+- A rank-3 `unknown` never hides a rank-2 label. It is still appended to the history, and the API shows it as `latest`.
+
+**Per-family thresholds `thresholds@1`** (a-priori; S5-derived where measured, otherwise **unverified** literature guesses):
+
+| Family | SNR gate (in-band, C13 definition) | Class gate | Min confidence to report | Open-set max | DL |
+|---|---|---|---|---|---|
+| fsk, ook-ask | 20 dB (partial 15) — S5 | +3 dB | 0.6 | 0.5 | off |
+| psk-qam | 15 dB — S5 (synthetic only) | order: +5 dB | 0.6 | 0.5 | off |
+| analog | 10 dB — *unverified* (Azzouz–Nandi synthetic) | wfm/nbfm/am +0; ssb/cw +5 | 0.6 | 0.5 | off |
+| css, ofdm, pulsed | 10 dB — *unverified* | +0 | 0.6 | 0.5 | off |
+| dsss | 10 dB — *unverified* | — | 0.7 | 0.4 | off |
+| noise-like | none (SK/flatness test) | — | 0.7 | — | off |
+
+Below a gate, a family contributes no likelihood mass, so its mass moves to `unknown` with reason `low_snr`. `coarse` can still be set. Continuous signals integrate: the gate applies to the SNR of the analysed extent (S5: RDS rate is trusted at 0 dB over ≥ 0.25 s).
+
+## 3. Fusion with C17 priors
+
+- **Input.** `FamilyPriorSet {prior_ref, lambda, dist: P(family ∣ f, ℓ), status, staleness}` from hk-context (T-212). It is derived from the allocation services at the emitter's measured extent via a service → expected-family table: `fm-broadcast → analog/wfm`, `adsb → pulsed/ppm`, `ais → fsk/gfsk`… Emission designators feed it where present. `P = λ₁P_alloc + λ₂P_license + λ₃P_history + λ₀P_uniform`, and validation refuses λ₀ < 0.1.
+- **Computation** (`hk_model::classify::fuse`, pure):
+  1. `u = open_set_score`. Unknown posterior = `max(u, likelihood[unknown])`. Priors never touch it.
+  2. Known posterior ∝ `likelihood[c] · prior[c]`, renormalised to `1 − p_unknown`.
+  3. **Evidence dominance.** Let `a` be the likelihood top-1 and `b` the runner-up. If `L[a]/L[b] ≥ 10` and the posterior top ≠ `a`, the prior factor is tempered, `prior^τ` with τ bisected in [0, 1], until `a` is top again. The row gets flag `prior-mismatch`.
+  4. If the prior changed the top within that margin, set `prior-tiebreak`.
+  5. If the prior's top ≠ the likelihood top and `L[a] ≥ 0.5`, set `prior-mismatch`. That flag feeds `unexpected-here` in explanations, and ADR-0012 §4.3 zeroes the C17 part of the boring prior.
+- **Invariant tests (T-211):** the posterior with a uniform prior equals the likelihood; no prior can raise `p_unknown` or lower it; no prior can flip a ≥ 10:1 likelihood call; `lambda0 = 0` is refused.
+- **No C17 data** (`status: no_reference_data`): `prior: None`, posterior = likelihood.
+
+## 4. Classical cascade (C15, T-199/T-200)
+
+1. **Input.** A `NormalisedSnippet` (hk-estimate, CFO-corrected, resampled) plus the C13 `ParameterSet`, C14 `SymbolParameters` and C16 result when present. The raw snippet is kept. Suspect detections (clipped, IMD, image) still classify, but they carry `suspect-input` and never mint signatures (§5).
+2. **Features** (`hk-classify/src/features.rs`, one vector, `features_version` 1). Each feature is a value or an abstention reason:
+   - Azzouz–Nandi γ_max, σ_ap, σ_dp, σ_aa, σ_af, P;
+   - normalised cumulants C̃₂₀, C̃₄₀, C̃₄₂, and μ₄₂;
+   - instantaneous-frequency histogram modality and levels;
+   - C14 cyclic-line strengths at Rs, 2Rs, 2fc, 4fc, and the rate trust flag;
+   - C13 flatness, symmetry, carrier line, OBW/Rs;
+   - envelope duty and PRI regularity;
+   - chirp IF-slope linearity;
+   - C16 CP correlation;
+   - spectral kurtosis;
+   - the existing `blind::Family` label, as one feature.
+3. **Tree.** Coarse split first (C13 `analog_digital`, IF histogram continuity, cyclic line). Then family nodes on constant-envelope vs varying envelope, IF levels, cumulant signatures, chirp slope, CP, duty/PRI, SK. Each leaf has a **class-conditional Gaussian** (diagonal + shrinkage) over the features present, fitted on the synthetic **dev** grid (§7) and shipped as versioned data (`hk-classify/data/densities@1.json`). `p(x∣c)` is the density over non-abstaining dimensions.
+4. **Open set.** `open_set_score = 1 − max_c P(χ²_k ≥ d²_c)`, with d_c the Mahalanobis distance and k the dimensions used. Unknown also wins when no family passes its gate, or when the top family's likelihood share is < 0.5 with entropy > 0.9.
+5. **Verifier (T-200).** Runs only when a clock is locked (C14 trusted rate, or a recipe clock-recovery lock). The candidates are the within-family classes with p ≥ 0.05 (for example `bpsk`/`qpsk`/`8psk`, or `2fsk`/`gfsk`). ALRT is used with known SNR, GLRT with unknown phase or CFO. It re-ranks, may sharpen or flatten the class distribution, and **never adds a candidate** absent from step 3. Stage `verifier`, rank 2.
+6. **Per-family DL (T-204).** Within-family class only (it never chooses the family). The open set uses an **energy score** `E = −T·logsumexp(z/T)`, with the threshold at 95 % TPR on dev in-distribution data; softmax max is never used. Modes per family: `off` / `shadow` / `active`.
+   - **Enable rule, a-priori.** On the dev evaluation, at every SNR bin ≥ the family gate:
+     - class accuracy of DL − classical ≥ 5 points, with the bootstrap 95 % CI lower bound > 0;
+     - open-set AUROC not lower by > 0.02;
+     - false-known rate on held-out classes ≤ classical;
+     - if ≥ 50 OTA decode-labelled examples exist for the family, OTA accuracy not lower.
+   - The evidence file is referenced from the model manifest (§6). Without it, `active` is refused unless the request carries `force: true`, which is audited.
+7. **Decoders arbitrate.** A CRC-valid decode writes a rank-1 row (existing `record_decoder_evidence`, now carrying the `hk-mod@1` class the recipe/decoder declares) and an Annotation `ground-truth`.
+
+**Placement.** Per event on the CPU (ADR-0007): features cost µs–ms per snippet. Classification runs where `family::explain_emitter` already runs (track close, chain writers), through a single call site `hk-pipeline/src/classify.rs`, off the ring and DSP real-time threads. In low-power mode only the tree runs; the stage is reported.
+
+## 5. C18 schema: EmissionFeatures, Signature, SignatureMatch, clusters
+
+**`EmissionFeatures`** (`hk_model::signature`, version 1) is aggregated per emitter, append-only snapshot rows. A row is written when a field changes by > σ or ≥ 16 new observations have been folded in. Each field is `Feat<T> {value, sigma, method, n}` or absent:
+- band `f_lo/f_hi`, centre, raster offset, OBW, family/class (top from the current Classification);
+- symbol rate (+ harmonic alternatives), deviation, levels, constellation order, roll-off / BT;
+- line code, preamble, sync word (bits, polarity, rotation set), frame-length histogram, CRC parameters (C21 / assist);
+- period, duty cycle, burst length, TDMA period, hop raster, hop set (C10);
+- spectral shape: flatness, symmetry, carrier line, comb spacing and count (RFI combs, AWARE-029/030);
+- optional `pri_s` / `scan_period_s` (radar) and `cfo_offset_hz` (oscillator, AWARE-051, later);
+- `suspect_fraction`, `snr_db` distribution.
+
+`Fingerprint` v1 is a projection (`EmissionFeatures::fingerprint()`). Entity resolution is unchanged.
+
+**`Signature`** is immutable per `(signature_id, version)`, like recipes:
+- `name`, `kind` (`protocol` / `device-type` / `rfi` / `radar` / `learned`), `taxonomy`;
+- `fields: map<field, {expect: value | range | set | bits, tolerance, required, weight}>`. The default symbol-rate tolerance is ±1 %. Sync words match with ≤ k bit errors in both polarities and every PSK rotation;
+- `min_discriminating` (default 3 required fields present, e.g. rate + deviation + sync);
+- `recipe: {id, version}?`, `content_class` tag, `provenance` (`user` / `recipe-confirmed` / `rtl433-import` / `cluster-promoted`), `author`, `created`, `supersedes`;
+- optional `bands[]`. These are **rank-only**: a band never gates a match.
+- **Store:** SQLite. Built-ins are seeded read-only from `signatures/*.signature.json`. A `recipe-confirmed` signature is minted when a recipe decode is CRC-valid on ≥ 3 frames from ≥ 2 bursts of one emitter: the recipe `match` plus measured features ± 3σ. Signatures are never minted from all-suspect clusters. Imports are untrusted and validated.
+
+**`SignatureMatch`** is an append-only row per emitter when the outcome or top-1 changes:
+- `outcome`, `features_ref`, `signatures_rev`, `reasons`;
+- `candidates[] {signature_id, version, name, score 0..1, agreement[] {field, measured, expected, z, ok}, missing[], conflicting[], recipe?}`, top 5.
+
+Pipeline (`hk-context/src/signature/matcher.rs`):
+1. Gate on family compatibility (`family_of`; unknown gates nothing).
+2. Per-field z = |Δ|/tolerance, with the sync-word distance in bits.
+3. `score = Σ w·exp(−z²/2) / Σ w_required`. Missing required fields count 0.
+4. Outcome:
+   - `full`: every required field present with z ≤ 1, ≥ `min_discriminating`, score ≥ 0.8;
+   - `partial`: no required field conflicting (z > 3), but some missing, or score in [0.4, 0.8);
+   - `none`: otherwise.
+
+A match **never sets identity, known_status or lifecycle**. It adds explanation evidence of kind `signature` (ranked like `family`), feeds `decoder_available` in ADR-0012 when the signature has a recipe, and seeds MAUTO (§8).
+
+**Clusters of unknowns** (`hk-context/src/signature/cluster.rs`, T-202):
+- **Online assignment.** An emitter whose `SignatureMatch` is not `full` is assigned to the nearest active cluster centroid when the tolerance-normalised distance (the same z metric, RMS over shared fields, ≥ 3 shared fields) is ≤ 1. Otherwise it seeds a `pending` cluster.
+- **Visibility.** A cluster becomes `active` (visible, API) at ≥ 3 member emitters, or ≥ 3 appearances of one emitter across ≥ 2 sessions. Centroids use a running mean with weight cap 16, as `Fingerprint` does.
+- **Repair.** Nightly (or on demand), batch DBSCAN (ε = 1, minPts = 3) over current features re-derives clusters. Differences become append-only `cluster_event` rows (`merge` / `split` / `reassign`); ids of the larger side survive.
+- **Promotion.** `POST /api/clusters/{id}/promote` (user) or a CRC-valid recipe decode on a member → a `Signature` (`cluster-promoted` or `recipe-confirmed`) linked back.
+- **Identity link.** A cluster groups **emitters** (instances). An emitter has at most one current cluster (`emitter_cluster`, append-only with supersession). Type ≠ instance: two identical sensors share a cluster and stay two emitters (C18 pitfall).
+
+**Privacy.** Clusters and signatures stay local. No instance-level RF fingerprinting is done in M3 (AWARE-047 is later).
+
+## 6. C38 ml-runtime interface (`hk-ml`, T-203)
+
+```rust
+pub trait MlProvider: Send + Sync {
+    fn kind(&self) -> MlProviderKind;                       // cpu-tract | ort-cpu | ort-coreml | ort-trt (stub)
+    fn conformant(&self) -> bool;                           // ADR-0007 rule: unused unless marked
+    fn load(&self, m: &ModelManifest, bytes: &[u8]) -> Result<Box<dyn LoadedModel>, MlError>;
+}
+pub trait LoadedModel: Send + Sync { fn infer(&self, batch: &TensorBatch) -> Result<Vec<RawOutput>, MlError>; }
+pub struct InferenceRequest { model: ModelRef, consumer: ConsumerId, subject: SubjectRef, input: Tensor, deadline: Instant }
+pub struct Prediction {
+    pub model: ModelRef,                 // id@version#sha8
+    pub provider: MlProviderKind, pub precision: Precision,
+    pub labels: Arc<[String]>, pub logits: Vec<f32>, pub probs: Vec<f32>, // probs temperature-calibrated
+    pub energy: f32, pub unknown_score: f32,                              // energy-based, calibrated 0..1
+    pub embedding: Option<Vec<f32>>,
+    pub mode: MlMode,                    // shadow | active
+    pub latency_ms: f32, pub batch_size: u16, pub t: Timestamp,
+}
+```
+
+- **Registry.** `<data dir>/models/<id>/<version>/{model.onnx, manifest.json}`, plus read-only built-ins. The manifest contains:
+  - `id`, semver `version` (**immutable once saved**), `sha256`, `task` (`family-class` / `embedding` / `detector` / `anomaly`), `consumer`, `taxonomy`;
+  - input spec (`iq-2xN`, N 1024 / 4096, canonical sps, normalisation);
+  - `labels`, `open_set {method: energy, T, threshold, calibrated_on}`, `precision`;
+  - `training {generator@version, seeds, ota_sessions, dataset_ids}`, `metrics_ref` (per-SNR report), `enable_evidence` (§4.6);
+  - ONNX **op allowlist**: Conv, BatchNorm (folded), Relu/Gelu, pooling, Gemm/MatMul, LayerNorm, Add/Mul, Reshape/Flatten.
+  - Models are data: loading, swapping or rolling back needs no rebuild (ADR-0001's hard requirement). Rollback = set the mode of the previous version.
+- **Batching.** One worker thread per loaded model, never a ring/DSP thread. It flushes at batch 32, after 20 ms, or at the earliest deadline (C38 card defaults, *estimates*). The queue is bounded: when full, requests are dropped and counted, and the consumer falls back to classical (the stage is reported). Inference runs only on CFAR-surviving, classified-by-tree events. `max_in_flight` bounds GPU contention. In low-power mode, active and shadow are both off.
+- **Shadow mode.** Per `(model, consumer)`: `off` / `shadow` / `active`. Shadow runs the model and appends `{Prediction, classical decision, snr_bin, subject}` to hk-store `ml/shadow/` hourly CRC-line NDJSON (256 MiB, 30 days), with per-SNR agreement aggregates. **Shadow never writes a Classification row or changes any decision.** T-203 unit-tests this and T-206 asserts it.
+- **Provider choice (Mac-first).**
+  - **CPU reference = `tract-onnx`.** Pure Rust, loads ONNX at runtime, no native library in the default build or CI (*maintenance and op coverage unverified; checked in T-203*).
+  - **Mac acceleration = `ort`** (ONNX Runtime bindings) with the CoreML execution provider, behind the opt-in feature `ml-coreml` (*unverified: CoreML EP op coverage for 1-D conv and dynamic batch; ort's build-time binary download*).
+  - **Jetson = `ort` + TensorRT EP** (`ml-trt`, stub, deferred with T-026/T-216). The same crate and ONNX source serve both, and engines are never the source of truth.
+  - **Rejected:**
+    - Candle (Metal): model graphs are Rust code, so a rebuild per model, and ONNX import is partial;
+    - Burn: `burn-import` generates code at build time;
+    - hand-written wgpu kernels: writing an inference engine. It stays a possible later provider behind the same suite.
+  - **Bake-off rule (T-203, day 1).** On the reference model, if ort+CoreML p99 at batch 32 is not ≥ 2× better than tract, ship CPU-only on the Mac and leave `ml-coreml` off. Small CNNs per event may not need a GPU (*unverified*).
+- **Conformance suite** (`hk-ml/tests/conformance.rs`). A tiny fixed ONNX model (KB-sized, generated by `py/hkpy/ml/make_conformance_model.py`) plus fixed tensors. Against the CPU reference:
+  - FP32 max |Δlogit| ≤ 1e-3;
+  - FP16/INT8 top-1 agreement ≥ 99 % and |Δprob| ≤ 0.02 (C38 card, *estimate*);
+  - batch invariance (32 singles = one batch of 32);
+  - typed shape/op errors;
+  - deadline-miss accounting;
+  - a manifest sha mismatch refuses the load.
+
+## 7. Blind evaluation protocol
+
+- **Data.**
+  - **Synthetic dev.** `py/hkpy/synth` extended with an AMC grid (T-213): every class in §1 × SNR −10…+30 dB (2.5 dB steps from gate − 10 dB to gate + 10 dB, 5 dB elsewhere) × HackRF impairments already modelled (8-bit quantisation, LO ppm, phase noise, IQ imbalance, DC, spurs, blocker/IMD, ADC gain/clipping) plus random symbol rate, roll-off/BT and burst length. **Seeds 0–9999**, 20 trials per cell. Used for densities, thresholds, DL training, and DL enable evidence.
+  - **Synthetic acceptance.** Scenes generated at test time from **seeds ≥ 1 000 000**, with randomised composition and a hidden truth file, run through the mock SDR (the M2 scene pattern). Never used for fitting.
+  - **Held-out unknowns.** Generators not in the dev grid: 3-level ASK, FSK with a chirped carrier, Costas-hopped tones, 8-level FSK, OFDM with a non-standard CP (dev excludes it), random-phase noise bursts. Plus real negatives: S5 noise snippets and the empty 433 MHz capture.
+  - **OTA.** `fixtures/hackrf/2026-09-13` (`fm_100p8M` analog/wfm + RDS, `ism_915M` FSK, `ism_433p62M` negatives, `urban_98M` overload) and the M1 tutorial captures (POCSAG, ACARS, ADS-B). **Labels come only from CRC-valid decodes or user labels** (T-205), split by capture session and date, never by frame.
+- **Reporting** (`hk_model::classify::eval::EvalReport`, JSON + Markdown table): for each source (synthetic-dev / synthetic-acceptance / OTA) × stage × SNR bin (measured in-band SNR per C13, plus true SNR for synthetic):
+  - top-1 and top-2 family accuracy, class accuracy, abstention rate;
+  - wrong-label rate (non-unknown and wrong);
+  - confusion matrix, macro-F1;
+  - open-set AUROC and false-known rate at the operating point;
+  - ECE;
+  - latency p50/p99.
+  A single SNR-averaged number is never reported alone.
+- **A-priori thresholds.** Gates (§2), margins (§4.6) and exit floors (below) are fixed here as `thresholds@1`. Changing one needs an ADR amendment citing **dev** evidence. Tuning against acceptance-scene failures is not allowed (the blind-test rule).
+- **M3 exit gate (T-206)**, all through the mock SDR. Floors are a-priori and *unverified*:
+
+| Check | Floor |
+|---|---|
+| Known families, synthetic acceptance, SNR ≥ gate + 5 dB | top-1 ≥ 0.90, top-2 ≥ 0.95 |
+| Wrong-label rate, any bin (abstaining is allowed) | ≤ 0.05 per bin, ≤ 0.02 overall |
+| OTA: 915 MHz FSK ≥ 20 dB; FM broadcast (analog/wfm); POCSAG (fsk); ADS-B (pulsed) | family correct ≥ 0.95 of labelled emitters; RDS subcarrier stays abstaining below the gate |
+| Held-out unknowns | `unknown` (or open_set ≥ 0.5) ≥ 0.80; false-known ≤ 0.10; noise snippets labelled as a comm family ≤ 0.01 |
+| Prior mismatch scene (FSK carrier in the FM allocation, off-raster WFM) | posterior top = likelihood top whenever LR ≥ 10 (100 %); `prior-mismatch` set |
+| Signatures, synthetic population incl. the P25/DMR near-collision, ≥ 20 dB | full-match precision ≥ 0.95, recall ≥ 0.80; below `min_discriminating` → `partial` 100 %; never an identity |
+| Clustering, multi-day scene with repeated unknowns | ARI ≥ 0.8; ≤ 1.5 clusters per truth type; merge rate ≤ 0.05; identical after restart |
+| ML | shadow changes no Classification row; each `active` family has enable evidence; zero ring sample drops with ML on |
+| Regression | M0/M1/M2 acceptance unchanged |
+
+## 8. MAUTO interface (M3 side; ADR-0015 owns the search)
+
+`hk_model::classify::SearchSeed`, assembled by `hk-pipeline/src/seed.rs` (T-215) and served at `GET /api/inventory/{id}/seed`:
+
+```rust
+pub struct SearchSeed {
+    pub emitter: EmitterId, pub t: Timestamp,
+    pub classification: Classification,          // current by arbitration rank
+    pub features: Option<EmissionFeatures>,      // parameter ranges: value ± 3σ, plus harmonic alternatives
+    pub signature_match: Option<SignatureMatch>, // full/partial candidates with recipe bindings and missing fields
+    pub cluster: Option<ClusterSeed>,            // {cluster_id, members, best_pipeline: Option<{recipe_id, version, evidence_score}>}
+    pub budget_hint: BudgetHint,                 // {open_search_min_share, families_ordered: Vec<(family, posterior, likelihood)>}
+}
+```
+
+Rules the M3 side guarantees (ADR-0015 decides how the search uses them):
+- **Order by posterior, prune by likelihood.** A family branch may be pruned only if its likelihood share < 0.02 **and** it is below no gate (a below-gate family is "not measured", not "ruled out"). A prior can reorder but never prune.
+- **Open-search share** ≥ `max(p_unknown, 0.2)` of the per-signal budget.
+- **Templates first.** `full` and `partial` candidates with a `recipe` are the fast path in score order. `missing[]` names what the search must estimate.
+- **Cluster reuse.** A cluster's best partial pipeline so far seeds every member.
+- **Feedback.** A search that reaches a CRC-valid decode writes a rank-1 Classification (the recipe's declared class), mints or confirms a `recipe-confirmed` Signature, and promotes the cluster. A failed search writes nothing to Classification: failing to decode is not evidence against a modulation. It is recorded on the cluster as `search_exhausted {family, budget}` for ADR-0015 to use.
+
+## 9. API and data-model deltas
+
+**Routes** (planned; each task moves its rows into a served section of `docs/api.md` with contract tests):
+
+| Method | Path | Task | Shape |
+|---|---|---|---|
+| GET | `/api/inventory` (row, additive) | T-199/T-201/T-202 | `classification` gains `taxonomy, stage, coarse, class?, top[] (≤5, incl. unknown), entropy_norm, flags`; new `signature {outcome, top?, missing[]}`, `cluster_id?`; filter `cluster`, `family` via `family_of` |
+| GET | `/api/inventory/{id}/classification` | T-199 | the full current `Classification` (likelihood, prior, provenance, reasons) plus `latest` if it differs |
+| GET | `/api/inventory/{id}/classifications` | T-199 | history, `cursor`/`limit` |
+| POST | `/api/inventory/{id}/classify` | T-199 | re-run on the stored snippet/recording (audited) → `Classification` |
+| GET | `/api/taxonomy` | T-211 | taxonomy tree, versions, `thresholds@1` |
+| GET | `/api/inventory/{id}/features` | T-201 | current `EmissionFeatures` |
+| GET, POST | `/api/signatures`, `/api/signatures/{id}` (`?version`) | T-201 | list, read, create a new version (validated, audited) |
+| DELETE | `/api/signatures/{id}` | T-201 | retire (versions kept) |
+| GET | `/api/signatures/match?emitter=<id>` | T-201 | `SignatureMatch` |
+| POST | `/api/signatures/import` | T-214 | rtl_433 flex specs (untrusted, validated) |
+| GET | `/api/clusters`, `/api/clusters/{id}` | T-202 | members, centroid, events, best pipeline |
+| POST | `/api/clusters/{id}/promote` | T-202 | → `Signature` |
+| GET | `/api/ml/models` | T-203 | registry, loaded, provider, mode per consumer, conformance |
+| PUT | `/api/ml/models/{id}/mode` | T-203 | `{consumer, version, mode, force?}` (audited; `active` needs evidence or `force`) |
+| GET | `/api/ml/shadow` | T-203 | per-model, per-SNR-bin agreement summary |
+| POST, GET | `/api/datasets`, `/api/datasets/{id}` | T-205 | export a labelled snippet set (job), list/read manifests |
+| GET | `/api/inventory/{id}/seed` | T-215 | `SearchSeed` |
+
+**Stream.** `classifications`: ADR-0004 `messages`, metadata only. One record per change of current family, signature outcome or cluster.
+
+**Migrations** (all T-211, so the M3 groups never touch `MIGRATIONS`):
+- `0006_classification.sql`:
+  - `emitter_classification` + `taxonomy`, `stage`, `arb_rank`, `detail`;
+  - `emission_features` (id, emitter_id, t, version, body; append-only);
+  - `signature` (id, version, name, kind, provenance, author, created_at, body; PK (id, version); no-update trigger);
+  - `signature_match` (append-only);
+  - `signature_cluster` (id, state `pending`/`active`/`merged`/`promoted`, merged_into, signature ref, centroid, created_at);
+  - `emitter_cluster` (append-only with supersession, as `emitter_link`);
+  - `cluster_event` (append-only).
+- `0007_datasets.sql`: `dataset_export` manifest rows (T-205 fills it).
+
+**docs/07 additions** (T-211 applies them):
+- §2.11 Emitter: `classification` now references §2.21; add `cluster_ref`, `features_ref`, `signature_match`.
+- New sections:
+  - §2.21 Classification (this ADR §2, arbitration rank, legacy fit);
+  - §2.22 EmissionFeatures;
+  - §2.23 Signature;
+  - §2.24 SignatureMatch;
+  - §2.25 SignatureCluster + cluster events;
+  - §2.26 ModelManifest / Prediction (provenance only; shadow records live in hk-store);
+  - §2.27 DatasetExport.
+- §2.13 Annotation: `kind: label` values use `hk-mod@1` labels with `label_source` (`decoder` / `user`).
+
+## 10. Crate and file ownership (T-211 pre-adds every shared declaration)
+
+| Task | Owns |
+|---|---|
+| T-211 | `hk-model/src/classify/**`, `hk-model/src/signature/**` (types, `fuse`, taxonomy, eval report); migrations 0006/0007; `repo/cluster.rs` arbitration rank + `family_of` gate; new crates `hk-classify`, `hk-ml` (stubs, Cargo); `pub mod` lines; `hk-api` dispatch stubs `classify.rs`, `signatures.rs`, `clusters.rs`, `ml.rs`, `datasets.rs`; `/api/taxonomy`; docs/07; docs/api.md "Classification (planned)" |
+| T-199 | `hk-classify/src/{features,tree,density,openset,pipeline}.rs`, `hk-classify/data/**`, `hk-pipeline/src/classify.rs` (single call site), `hk-api/src/classify.rs` |
+| T-200 | `hk-classify/src/verify.rs` |
+| T-212 | `hk-context/src/priors/family_prior.rs` |
+| T-213 | `py/hkpy/synth/amc/**`, `py/tests/test_amc*.py`, `tests/e2e/tests/acceptance/common/classify.rs` |
+| T-201 | `hk-context/src/signature/{features,matcher,store}.rs`, `hk-model/src/repo/signatures.rs`, `hk-pipeline/src/signatures.rs`, `hk-api/src/signatures.rs`, `signatures/*.signature.json` |
+| T-202 | `hk-context/src/signature/cluster.rs`, `hk-model/src/repo/clusters.rs`, `hk-api/src/clusters.rs` |
+| T-203 | `hk-ml/**`, `hk-store/src/ml/**`, `hk-api/src/ml.rs`, `py/hkpy/ml/make_conformance_model.py` |
+| T-204 | `py/hkpy/ml/train_amc/**`, `hk-classify/src/dl.rs` |
+| T-205 | `hk-store/src/dataset/**`, `hk-api/src/datasets.rs` |
+| T-215 | `hk-pipeline/src/seed.rs`, the seed route in `hk-api/src/classify.rs` (after T-199 merges) |
+| T-206 | `tests/e2e/tests/acceptance/m3_*.rs`, `just acceptance-m3` |
+| T-207 | `ui/src/app/explore/**` classification/signature/cluster views |
+
+Shared, append-only (merge order T-199 → T-201 → T-202 → T-203 → T-205): `http.rs ROUTES`, `api_contract.rs`, `docs/api.md` subsections, `ApiState` fields, `hk-cli` construction lines. Evolution rule as in ADR-0012 §10: additive changes are allowed in the owning PR; renames and semantic changes amend this ADR.
+
+## Options considered
+
+- **Softmax confidence as the unknown score.** Rejected: overconfident on unknowns (C15/C38 cards).
+- **Priors multiplied into every label, unknown included.** Rejected: a strong allocation prior would erase unknowns and hide pirates (C15 pitfall).
+- **A new `classification` table replacing `emitter_classification`.** Rejected: it breaks T-183 ranking, inventory reads and append-only history for no gain. The migration is additive.
+- **DL chooses the family.** Rejected for M3: the sim-to-real gap (−7 points, 59–80 % under LO offsets, docs/04 §5.3). The within-family class is the smallest blast radius.
+- **Signatures as files, like recipes.** Rejected: clusters and matches join with emitters and are minted automatically. Built-ins stay seed files.
+- **Plain batch DBSCAN only.** Rejected: an on-device inventory needs an answer per sighting, so batch DBSCAN is used only as repair.
+- **Candle / Burn / hand-written wgpu for ML** (§6).
+
+## Consequences
+
+- One classification row shape serves the UI, attention (`class_entropy` from `entropy_norm`), explanations and MAUTO. Legacy rows keep working.
+- Priors, DL and signatures are bounded by construction (dominance rule, likelihood-only pruning, within-family DL, no identity from a match), and T-206 tests those bounds.
+- Two new crates (`hk-classify`, `hk-ml`). The default build adds one pure-Rust ONNX dependency; ort is opt-in.
+- After T-211, the groups M3A (C15), M3B (C18), M3C (C38), M3P, M3V and M3L run in parallel within the 4-build limit.
+
+## M3 task graph
+
+| ID | Title (confirmed / revised) | Deps | Area | Model, effort | Group | Change |
+|---|---|---|---|---|---|---|
+| **T-211** | M3 contracts skeleton: `hk_model::{classify,signature}` types + `fuse` invariants + taxonomy `hk-mod@1` + eval report schema; migrations 0006/0007; arbitration rank replacing `FAMILY_ORDER` + `family_of` fingerprint gate; `hk-classify`/`hk-ml` crate stubs; API dispatch stubs + `/api/taxonomy`; docs/07 §2.21–2.27; docs/api.md planned section | T-198 | hk-model, new crates, hk-api, docs | Opus, high, core_interface | M3K | **new** (serial first) |
+| T-199 | C15 classical feature tree with class-conditional densities, χ² open set, per-family gates, fusion via T-211 `fuse`, single pipeline call site, classification routes | T-211 | hk-classify, hk-pipeline/classify.rs, hk-api/classify.rs | Opus, high, core_interface | M3A | revised: deps; prior source split to T-212; eval data from T-213 (may start on its own grid, switches when T-213 merges) |
+| T-200 | C15 ALRT/GLRT verifier within the post-sync class set | T-199 | hk-classify/verify.rs | Opus, medium | M3A | confirmed |
+| **T-212** | C17 `FamilyPriorSet`: service → expected-family table, P(family∣f,ℓ) with λ₀ ≥ 0.1, mismatch flag inputs | T-211 | hk-context/priors | Sonnet, medium (Opus review: fusion correctness) | M3P | **new** (split from T-199) |
+| **T-213** | M3 evaluation harness: AMC synthetic grid (classes × SNR × HackRF impairments), dev/acceptance seed split, held-out unknown generators, OTA decode-label loader, per-SNR `EvalReport` writer | T-211 | py/hkpy/synth/amc, tests/e2e common | Sonnet, medium | M3V | **new** |
+| T-201 | C18 EmissionFeatures aggregation + Signature store (recipe-confirmed minting) + SignatureMatch full/partial/none + routes | T-211 | hk-context/signature, hk-model repo, hk-pipeline/signatures.rs, hk-api | Opus, medium, core_interface | M3B | revised: deps T-211 |
+| T-202 | C18 incremental clustering (online leader + nightly DBSCAN repair, merge/split history) linked to emitters; cluster routes + promote | T-201 | hk-context/signature/cluster.rs, hk-model repo, hk-api | Opus, medium | M3B | confirmed; algorithm fixed |
+| **T-214** | rtl_433 flex-spec import as untrusted signatures (validated; must match fixtures where available) | T-201 | hk-context/signature/import.rs, hk-api | Sonnet, low; priority low | M3B | **new** |
+| T-203 | C38 `hk-ml`: MlProvider (tract CPU reference, ort+CoreML opt-in after the day-1 bake-off), registry/manifest, batching, shadow mode + store, conformance suite, ml routes | T-211 | hk-ml, hk-store/ml, hk-api/ml.rs | Opus, high, core_interface | M3C | revised: provider decided, deps T-211 |
+| T-204 | C15 per-family DL (within-family class, energy open set), py training on the T-213 grid, shadow first, enable evidence per §4.6 | T-199, T-203, T-213 | py/hkpy/ml, hk-classify/dl.rs | Opus, high | M3C | revised: deps + scope (class only) |
+| T-205 | Labelled-capture dataset export: CRC-valid decode + user labels → `hk-mod@1` labels, SigMF snippets with provenance and session split keys, content-class gated | T-211 | hk-store/dataset, hk-api/datasets.rs | Sonnet, medium | M3L | revised: deps T-211, group renamed |
+| **T-215** | SearchSeed assembly + `GET /api/inventory/{id}/seed` for MAUTO (§8 rules) | T-199, T-201, T-202 | hk-pipeline/seed.rs, hk-api | Opus, medium, core_interface | M3M | **new** |
+| T-206 | M3 blind acceptance through the mock SDR (§7 gate) | T-199, T-200, T-201, T-202, T-204, T-212, T-213, T-215 | tests/e2e | Opus, medium, core_interface | M3E | revised: deps |
+| T-207 | MUI: posterior top-k with unknown prominent, flags, signature match, cluster link in focus panel + inventory | T-199, T-201, T-202 | ui/src/app/explore | Sonnet, low | MUI-X3 | revised: + T-202 |
+| **T-216** | Jetson: `ort` TensorRT EP provider through the conformance suite + head-only on-device fine-tune spike | T-203 (+ Jetson hardware) | hk-ml `ml-trt` | Opus, high | JET | **new**, blocked (like T-026) |
+
+**Wave plan.**
+- Wave 0: T-211.
+- Wave 1: T-199, T-201, T-203 (three Rust builds), with T-212, T-213 and T-205 as the fourth slot, rotating (T-213 is mostly Python).
+- Wave 2: T-200, T-202, T-204, T-214.
+- Wave 3: T-215, T-207.
+- Wave 4: T-206.
+
+On-device fine-tuning (docs/11 M3 row) moves to T-216. M3 closes on off-device training plus the T-205 dataset path.
+
+## Open questions (for the user)
+
+1. **Exit floors.** Are the §7 floors (top-1 ≥ 0.90 above gate + 5 dB, wrong-label ≤ 2 %, unknown recall ≥ 0.80) the right bar? Real OOK/PSK truth is still missing (S5 §6). Would you capture an owned 433 MHz remote and an AIS or NOAA pass so the OTA rows aren't FSK/analog only?
+2. **ML dependency.** Is tract (pure Rust) in the default build acceptable? And ort only if the Mac bake-off shows ≥ 2×?
+3. **User authority.** Should a user reclassification (rank 0) outrank a CRC-valid decode (rank 1), or should a decode win and flag the contradiction?
+4. **Cluster novelty.** Should a newly `active` cluster (a never-seen *type*) feed ADR-0012 novelty as its own component? That would amend ADR-0012 §4.4.
+5. **Signature sharing.** Are signatures exportable (without instance data) for a later friend-user exchange, or local only for now?
+
+## Sources
+
+- `spikes/s5-blind-estimation/REPORT.md` §3.2–3.5 and the SNR-floor table (repository; measured 2026-09-13).
+- docs/04 §1.1 (prior formula, λ₀), §5.1–5.5 (cascade, open set, compute), §7.6–7.7 (signature schema, DBSCAN); docs/03 §4.1–4.2 (datasets, OTA accuracy): via capability cards C15, C17, C18, C38, not re-read for this ADR.
+- Azzouz & Nandi feature set and cumulant values: via the C15 card (synthetic results, *unverified* for HackRF).
+- Energy-based OOD (Liu et al., NeurIPS 2020), OpenMax (Bendale & Boult, CVPR 2016): named in docs/04 §5.4, *not re-read*.
+- tract (github.com/sonos/tract), ort (github.com/pykeio/ort, ONNX Runtime CoreML/TensorRT EPs), Candle, Burn: capabilities as described are *unverified*; T-203's bake-off confirms them.

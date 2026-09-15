@@ -21,6 +21,13 @@ It is the "ML after normalisation, with explicit unknown" stage, not a replaceme
   - Registry entry: ONNX source, TensorRT engine, precision, input spec, classes, open-set calibration, training-data manifest.
 - **Outputs:** `Prediction{class_probs, unknown_score, embedding?, model_id@version, precision, latency_ms}` attached to Detection/Emission provenance.
 - **Control:** load/unload, batch size and max batching delay, power-mode awareness, per-consumer enable, shadow mode (run without acting).
+- **Decided in [ADR-0016](../adr/0016-classification-contracts.md) §6 (PROVISIONAL, Mac-first; supersedes the TensorRT-first wording above for M3):**
+  - **Crate and trait.** New crate `hk-ml` with an `MlProvider` trait over **ONNX loaded at runtime**, so changing a model needs no rebuild.
+  - **Providers.** The CPU reference is `tract` (pure Rust). Mac acceleration is `ort` + CoreML EP behind opt-in `ml-coreml`, kept only if the bake-off shows ≥ 2× p99. The Jetson provider is `ort` + TensorRT EP (`ml-trt`, deferred, T-216).
+  - **`Prediction`.** Adds `energy`, calibrated `unknown_score`, `mode` and model `id@version#sha8`.
+  - **Manifests.** Versions are immutable and carry an op allowlist, training provenance and enable evidence.
+  - **Shadow mode.** Per (model, consumer). It writes to hk-store `ml/shadow/` and never writes a Classification.
+  - **Conformance suite.** Checks FP32 Δlogit ≤ 1e-3, FP16/INT8 top-1 ≥ 99 %, and batch invariance.
 - **Rates** (docs; estimates, not benchmarked):
   - Small CNN: sub-ms on Jetson GPU.
   - EfficientNet-B0/XCiT-Nano: a few ms at FP16/INT8.
