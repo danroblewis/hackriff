@@ -1011,8 +1011,8 @@ tasks:
   - id: T-061
     milestone: M0b
     title: Record outputs to files (bitstreams, symbols, WAV audio, IQ slices) from UI and CLI, per selection
-    status: todo
-    hold: "agent terminated by spend limit before producing work; relaunch after T-073/T-070 land (budget throttling)"
+    status: in-progress
+    relaunched: "2026-09-14 after T-070 merge (first agent stopped by spend limit before producing work)"
     deps: [T-060, T-052, T-049]
     parallel_group: P
     use_cases: [SIGNAL-062, AWARE-036]
