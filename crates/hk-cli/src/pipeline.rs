@@ -761,6 +761,9 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
         sample_rate_hz: fs,
         gains: live.gains.clone(),
         bias_tee: live.control.capabilities().bias_tee.then_some(false),
+        // The device's own default (usually derived from the sample rate); unknown until a
+        // control request sets it explicitly (T-067).
+        baseband_filter_hz: None,
     };
     let control = Arc::clone(&live.control);
     let handle = hk_pipeline::Pipeline::start(

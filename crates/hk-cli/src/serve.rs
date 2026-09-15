@@ -290,7 +290,7 @@ mod tests {
             (ContentClass::Unrestricted, 60.0),
             (ContentClass::RestrictedPaging, 25.0),
         ] {
-            let plan = row_plan(2.4e6, 4096, rows, class);
+            let plan = row_plan(2.4e6, 4096, rows, class, hk_dsp::WindowKind::default());
             assert!(plan.row_rate_hz <= rows + 1e-9);
             if !class.permits_content() {
                 assert!(plan.declared_hz <= GATED_SPECTRUM_MAX_ROW_RATE_HZ);

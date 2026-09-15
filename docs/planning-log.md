@@ -553,3 +553,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.197 T-080 UI tweaks launched** (Sonnet medium) after the T-082 merge: left sidebar for Selections and Inventory, first/last seen columns removed, Candidates/Confirmed lists with Promote/Delete via the T-078 endpoints. It owns layout, inventory.ts and the selection panel; T-067 keeps ui/src/controls. Full check of main after T-082 running. T-081 follows T-080; then T-053.
 - **B0.198 Lint failed on main after the T-082 merge:** rustfmt diffs in `cluster.rs`, `repo/mod.rs`, `same_emission_tests.rs` and `inventory_lifecycle.rs`, because the agent skipped fmt. The coordinator ran `cargo fmt --all` and committed 22a1add (format-only). Clippy is re-checking in the background, and the T-082 test and acceptance results come from the running check. T-080 and T-067 were told to run `just lint` before committing.
 - **B0.199 Clippy fix after the T-082 merge.** Once rustfmt was fixed, clippy flagged `if !(err <= f_tol)` (neg_cmp_op_on_partial_ord) at `crates/hk-model/src/repo/cluster.rs:471`. It is rewritten as an explicit `partial_cmp` match with the same NaN-as-out-of-tolerance behaviour. `just lint` green; hk-model 97/97 tests pass. The full check started after the T-082 merge is still running.
+- **B0.200 T-082 merge verified.** nextest 939 passed (5 skipped; just test 241 s under load) and acceptance green. The run's lint failure is resolved by 22a1add (rustfmt) and 9ef59cd (clippy), and lint is now green. Running: T-080, T-067. Then T-081, then T-053; M1 on hold.
+- **B0.201 T-067 merged:** control API completeness.
+  - **State endpoint:** display limits and the device baseband-filter range; the UI no longer hard-codes limits.
+  - **New controls:** baseband filter endpoint and FFT window option.
+  - **Bookmarks:** rename via the existing PUT is now documented and tested.
+  - **Docs/tests:** api.md and contract tests updated.
+  - **Coordination:** T-080 told to merge main (T-067 touched `ui/src/index.html` and controls). Full check running.

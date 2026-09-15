@@ -1,6 +1,6 @@
 # API reference
 
-**Status:** Engineering (T-050, T-051, T-052, T-060, T-061, T-078, T-079). Code: `crates/hk-api/src/http.rs` (`ROUTES`, the complete table — nothing else answers `2xx` under `/api/` or `/ws/`), `control.rs` (device/display/recording/bookmarks), `selections.rs`, `outputs.rs`, `inventory.rs` (T-078 lifecycle), `query.rs` (read-only history/floor/inventory/analysis), `ondemand.rs` (`/ws/open/*`), `bridge.rs` (`/ws/<id>`, discovery), `tcp.rs` (the TCP stream server). Contract tests: `crates/hk-cli/tests/api_contract.rs` (drives a real `hk serve` over the mock SDR device, T-049, and asserts every route's status, JSON shape and auth refusals), `crates/hk-cli/tests/control_http.rs`, and per-module tests under `crates/hk-api/tests/`.
+**Status:** Engineering (T-050, T-051, T-052, T-060, T-061, T-067, T-078, T-079). Code: `crates/hk-api/src/http.rs` (`ROUTES`, the complete table — nothing else answers `2xx` under `/api/` or `/ws/`), `control.rs` (device/display/recording/bookmarks), `selections.rs`, `outputs.rs`, `inventory.rs` (T-078 lifecycle), `query.rs` (read-only history/floor/inventory/analysis), `ondemand.rs` (`/ws/open/*`), `bridge.rs` (`/ws/<id>`, discovery), `tcp.rs` (the TCP stream server). Contract tests: `crates/hk-cli/tests/api_contract.rs` (drives a real `hk serve` over the mock SDR device, T-049, and asserts every route's status, JSON shape and auth refusals), `crates/hk-cli/tests/control_http.rs`, and per-module tests under `crates/hk-api/tests/`.
 
 **The web UI is a thin client over this document** (ADR-0002): the UI, `hk`, and any other program talk to the exact same HTTP/WS/TCP surface. Nothing here is UI-only. Streamed payloads (framing, headers, binary record layout, content-class gating) are the versioned wire contract in [`docs/stream-contract.md`](stream-contract.md); this document covers the plain HTTP/WS/TCP *endpoints* (status codes, request/response JSON) and links to the stream contract wherever a route opens or discovers a stream.
 
@@ -183,12 +183,13 @@ Device, display, recording and bookmark endpoints, all behind the bearer token, 
 
 | Method | Path | Body | Response | Notable errors |
 |---|---|---|---|---|
-| GET | `/api/control/state` | – | `{live, device, tuning, run, transmit: {available: false, reason}, audit, routes}` | – |
+| GET | `/api/control/state` | – | `{live, device, tuning, run, display_limits, transmit: {available: false, reason}, audit, routes}` | – |
 | POST | `/api/control/center` | `{"center_hz"}` | `{tuning, run}` | 400 invalid/out_of_range, 409 not_live/conflict/finished |
 | POST | `/api/control/rate` | `{"sample_rate_hz"}` | `{tuning, run}` | as above |
 | POST | `/api/control/gains` | `{"gains": {"<stage>": <dB>, …}}` | `{tuning}` (gains quantised per stage) | 400, 409 not_live |
 | POST | `/api/control/bias_tee` | `{"enabled"}` | `{tuning}` | 501 unsupported (no bias tee), 409 not_live |
-| POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s"}` (at least one) | `{display}` | 400 invalid |
+| POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz"}` | `{tuning}` (validated against `device.baseband_filter`) | 501 unsupported (no selectable filter), 400 out_of_range, 409 not_live |
+| POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s", "window"}` (T-067; at least one) | `{display}` | 400 invalid |
 | POST | `/api/control/pause` | `{}` (or empty) | `{display}` | – |
 | POST | `/api/control/resume` | `{}` (or empty) | `{display}` | – |
 | POST | `/api/control/record/start` | `{"label"?, "max_s"?}` | `{recording}` | 409 refused (a content-forbidding class), conflict (already recording) |
@@ -196,12 +197,16 @@ Device, display, recording and bookmark endpoints, all behind the bearer token, 
 | GET | `/api/bookmarks` | – | `{"bookmarks": [Bookmark, …]}` | – |
 | POST | `/api/bookmarks` | `{"name", "f_center_hz", "kind"?, "bandwidth_hz"?, "note"?}` | `Bookmark` (`201`) | 400 invalid |
 | GET | `/api/bookmarks/{id}` | – | `Bookmark` | 404 not_found |
-| PUT | `/api/bookmarks/{id}` | any create field (`null` clears `bandwidth_hz`/`note`) | `Bookmark` | 400, 404 |
+| PUT | `/api/bookmarks/{id}` | any create field (`null` clears `bandwidth_hz`/`note`); `{"name"}` alone renames it | `Bookmark` | 400, 404 |
 | DELETE | `/api/bookmarks/{id}` | – | `{"deleted": Bookmark}` | 404 |
 
 `Bookmark`: `{id, kind ("marker"|"bookmark"), name, f_center_hz, bandwidth_hz, note, created_s, updated_s}`.
 
-`tuning`: `{center_hz, sample_rate_hz, gains: {"<stage>": <dB>, …}, bias_tee}` (`bias_tee: null` without that capability). `display`: `{fft_size, averaging, rows_per_s, paused}`. `run`: `{live, content_class, content_permitted, center_hz, sample_rate_hz, segment, replumbing, finished, display, recording}` — `segment` increments on every re-plumb (a retune or rate change into a window of another content class). `recording`: `{active, id, label, center_hz, sample_rate_hz, samples, lost_samples, max_s, stored, ended}`.
+`tuning`: `{center_hz, sample_rate_hz, gains: {"<stage>": <dB>, …}, bias_tee, baseband_filter_hz}` (`bias_tee`/`baseband_filter_hz`: `null` without that capability, or before it's been set explicitly — the device's own default is in force). `display`: `{fft_size, averaging, rows_per_s, paused, window}` (`window`: `"hann"`, `"blackman-harris"` or `"flat-top"`; T-067). `run`: `{live, content_class, content_permitted, center_hz, sample_rate_hz, segment, replumbing, finished, display, recording}` — `segment` increments on every re-plumb (a retune or rate change into a window of another content class). `recording`: `{active, id, label, center_hz, sample_rate_hz, samples, lost_samples, max_s, stored, ended}`.
+
+**`display_limits` (T-067)** reports the bounds `POST /api/control/display` accepts, so the UI stops hard-coding hk-pipeline's `DISPLAY_*` constants: `{fft_size_min, fft_size_max, averaging_max, rows_per_s_min, rows_per_s_max, windows}` — `fft_size` must be a power of two in `[fft_size_min, fft_size_max]`, `averaging` in `[1, averaging_max]`, `rows_per_s` in `[rows_per_s_min, rows_per_s_max]`, `window` one of the `windows` list. `null` when this server has no running pipeline (503-class servers only; both live and replayed runs report it).
+
+`device.baseband_filter` (inside the `caps_json`, T-067) describes the selectable bandwidths: `{"min_hz", "max_hz"}` for a continuous range or `{"values_hz": [...]}` for a discrete list (e.g. the HackRF's MAX2837 filter steps), or `null` when the device has no selectable filter.
 
 **Legal gating lives in the pipeline and repository, not the API**: a retune re-derives the window's content class and re-plumbs at a block boundary; recordings are refused under a class that forbids content; the API never opens content itself (bookmarks are user metadata only). `transmit.available` is always `false`.
 
@@ -282,10 +287,6 @@ Target-priority arithmetic (a click beats a selection beats the strongest-in-vie
 ## Route table completeness
 
 `crates/hk-api/src/http.rs::ROUTES` is the single source of truth for what answers under `/api/` and `/ws/`; `crates/hk-cli/tests/api_contract.rs::every_route_in_the_route_table_is_documented` asserts every entry in it appears (method and path together) somewhere in this file, so this document cannot silently fall behind the server.
-
-## Pending: not yet on `main`
-
-- **T-067 (control API completeness):** in progress at the time of writing. Its routes will be added here and to the contract tests once it lands.
 
 ## Sources
 

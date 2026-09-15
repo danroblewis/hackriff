@@ -1121,7 +1121,9 @@ tasks:
   - id: T-067
     milestone: M0b
     title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
-    status: in-progress
+    status: done
+    commit: "6ace81f + docs/tests 773aad2 + fmt 225c495 (merged; full check running)"
+    result: "POST /api/control/baseband_filter {bandwidth_hz} -> {tuning} (validated vs device.baseband_filter; 501 unsupported, 400 out_of_range, 409 not_live); POST /api/control/display accepts window hann|blackman-harris|flat-top (400 invalid); GET /api/control/state adds display_limits {fft_size_min/max, averaging_max, rows_per_s_min/max, windows}, device.baseband_filter {min_hz,max_hz}|{values_hz}|null, tuning.baseband_filter_hz, display.window; bookmark rename via existing PUT /api/bookmarks/{id} {name} (documented/tested). WindowKind threaded hk-dsp -> hk-pipeline DisplaySettings/row_plan/spectrum STFT rebuild; LiveControl set_baseband_filter; RunControl::display_limits from hk_pipeline::config DISPLAY_* constants. UI controls built from state.display_limits (no hard-coded FFT sizes/averaging/row rates), baseband filter select, window select, bookmark Rename. docs/api.md and api_contract updated. Tests: hk-api 70, hk-cli 32 (10 api_contract), hk-pipeline 75, UI; fmt and clippy -D warnings clean."
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-051, T-062]
     parallel_group: P
@@ -1373,7 +1375,7 @@ tasks:
     milestone: M0b
     title: One inventory entry per physical emitter (merge track-based and decoder-based entries)
     status: done
-    commit: "56a6d09 (merged; full check running)"
+    commit: "56a6d09 (merged 14d7d35; verified: nextest 939 passed / 5 skipped, acceptance green; lint needed coordinator rustfmt 22a1add + clippy fix 9ef59cd, now green)"
     result: "cause: identity-carrying decoder sightings (RDS PI, FSK framer signature) created a new entry when no entry held that identity, never checking the same-emission track entry. Repository::same_emission: two live non-deleted entries are one emitter when detected/refined centres are within max(10 ppm*f, 0.25*BW, 500 Hz) and observations overlap in time; hop sets only link to hop sets; two identities never link; two track entries also need matching fingerprints (co-channel sensors stay apart); runs after every sighting/chain write within a run; never links ADS-B-style channel-sharing identities. Merge: survivor = confirmed, else first seen, else larger count; carries links, recurrence, tags, identity, refined tuning, classification history, decoder/classifier/user status (overlapping time not double-counted); confirmed beats candidate, survivor history gains 'merged from emitter'; deleted never merged; annotations include merged entries (RDS label kept). Tests: hk-model 5 new (97 pass); inventory_lifecycle.rs e2e 11/11 (FM once confirmed with track+RDS, FSK once, stations 300 kHz apart stay two, re-detection after deleting merged entry -> one new candidate); just test-one inventory 14/14; api_contract 10/10. signal_062 test picks the PI-carrying label; docs/07 2.11 linking and merge semantics added; /api/inventory JSON unchanged."
     deps: [T-078]
     parallel_group: W

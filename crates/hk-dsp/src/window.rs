@@ -19,8 +19,12 @@
 
 use std::fmt;
 
-/// The window family.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+/// The window family. Serialises/deserialises as [`WindowKind::name`] (`"hann"`,
+/// `"blackman-harris"`, `"flat-top"`), e.g. for the control API's display settings (T-067).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum WindowKind {
     /// Hann: the default. Good leakage/resolution balance for PSD estimation.
     #[default]
@@ -55,6 +59,25 @@ impl WindowKind {
             WindowKind::FlatTop => "flat-top",
         }
     }
+
+    /// Parses [`WindowKind::name`] (also accepting `_` for `-`, e.g. from a form field);
+    /// `None` for anything else.
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.replace('_', "-").as_str() {
+            "hann" => Some(WindowKind::Hann),
+            "blackman-harris" => Some(WindowKind::BlackmanHarris),
+            "flat-top" => Some(WindowKind::FlatTop),
+            _ => None,
+        }
+    }
+
+    /// Every window kind, in [`WindowKind::name`] order (for listing, e.g. control-API state
+    /// limits, T-067).
+    pub const ALL: [WindowKind; 3] = [
+        WindowKind::Hann,
+        WindowKind::BlackmanHarris,
+        WindowKind::FlatTop,
+    ];
 }
 
 impl fmt::Display for WindowKind {
@@ -188,6 +211,20 @@ mod tests {
         assert!((ft.enbw_bins - 3.770).abs() < 0.005, "{ft:?}");
         assert!((ft.coherent_gain - 0.21557895).abs() < 1e-5);
         assert!(ft.scalloping_loss_db.abs() < 0.01, "{ft:?}");
+    }
+
+    #[test]
+    fn from_name_round_trips_every_kind_and_rejects_the_rest() {
+        for k in WindowKind::ALL {
+            assert_eq!(WindowKind::from_name(k.name()), Some(k), "{k}");
+        }
+        assert_eq!(
+            WindowKind::from_name("blackman_harris"),
+            Some(WindowKind::BlackmanHarris),
+            "underscore accepted"
+        );
+        assert_eq!(WindowKind::from_name("kaiser"), None);
+        assert_eq!(WindowKind::from_name(""), None);
     }
 
     #[test]

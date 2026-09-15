@@ -2,6 +2,14 @@
   "audit": true,
   "device": null,
   "live": false,
+  "display_limits": {
+    "fft_size_min": 64,
+    "fft_size_max": 65536,
+    "averaging_max": 100,
+    "rows_per_s_min": 0.5,
+    "rows_per_s_max": 200.0,
+    "windows": ["hann", "blackman-harris", "flat-top"]
+  },
   "run": {
     "center_hz": 100800000.0,
     "content_class": "unrestricted",
@@ -10,7 +18,8 @@
       "averaging": 1,
       "fft_size": 4096,
       "paused": false,
-      "rows_per_s": 25.0
+      "rows_per_s": 25.0,
+      "window": "hann"
     },
     "finished": false,
     "live": false,
