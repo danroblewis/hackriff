@@ -528,3 +528,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-079:** no dependency; next free slot.
   - **T-080:** depends on T-078 only.
   - **Priority:** all three ahead of T-053/T-056/T-067.
+- **B0.181 T-075 + T-076 merge verified.** Lint, 154 Rust test groups (0 failed), Python, UI and acceptance all green; the new short-burst detection rows did not break any exact-count acceptance assertion. Running: T-064 (release bench), T-077 (serial-group timing), T-078 (inventory lifecycle). T-079 takes the next free slot.
