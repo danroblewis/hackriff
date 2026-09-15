@@ -50,6 +50,13 @@ pub struct HopConfig {
     pub min_link_fraction: f64,
     /// Hops (links) for a hop set (10).
     pub min_hops: u64,
+    /// A member channel's mean detection SNR (`snr_mean`), dB, must be at least this to count
+    /// (8; `f64::NEG_INFINITY` disables). T-084: near-threshold flicker inside weak or dense FM
+    /// channels (narrow fragments at 4–7 dB mean SNR on the 8-bit HackRF) linked by chance into a
+    /// "hop set" whose 1.1 MHz extent became one wide inventory row hiding the stations. A hopper
+    /// is asserted only from channels that clearly stand above the floor; weak ones stay channel
+    /// tracks.
+    pub min_channel_snr_db: f64,
     /// Bursty hoppers (packets separated by silence, T-031): a finished burst with no contiguous
     /// predecessor links to the nearest preceding similar burst on another channel when the
     /// silence between them is at most this long, s (0.5; 0 disables). The link also needs that
@@ -109,6 +116,7 @@ impl Default for HopConfig {
             min_channels: 3,
             min_link_fraction: 0.5,
             min_hops: 10,
+            min_channel_snr_db: 8.0,
             max_silence_s: 0.5,
             bursty_length_ratio: 3.0,
             periodic_veto_bursts: 5,

@@ -8,10 +8,13 @@
 //! ```
 //!
 //! Truth comes from a **blind live survey**, not fixture metadata: the device is opened directly
-//! (8 Msps windows across 86–109 MHz, LNA 32 / VGA 30 / amp on), strong channels are picked from
-//! Welch channel power over a lower-quartile floor, and the device is closed. The survey result is
-//! held only by the test. `hk serve --hackrf` then runs the whole pipeline on the densest 2.4 Msps
-//! window, which knows nothing of the survey, and the test matches what it produced:
+//! (2.4 Msps windows every 0.6 MHz across 86–109 MHz, the run's own rate and filter, LNA 32 /
+//! VGA 30 / amp on), strong channels are picked from Welch channel power over the survey-wide
+//! 10th-percentile floor, and the device is closed. The survey result is held only by the test.
+//! `hk serve --hackrf` then runs the whole pipeline on a 2.4 Msps window with the strongest
+//! station [`RUN_OFFSET_HZ`] from centre (the `hackrf_serve_hil` shape: clear of DC and well inside
+//! the baseband filter; T-084), which knows nothing of the survey, and the test matches what it
+//! produced:
 //!
 //! - **SIGNAL-062:** every strong surveyed station detected (inventory centre within 100 kHz) with
 //!   `fm-broadcast` in the top-k; RDS PI decoded blind on at least one; Listen streams WFM audio on
@@ -22,6 +25,10 @@
 //!   the columns the survey found empty.
 //! - **Retune within the band:** live control moves to a second surveyed window and its stations
 //!   are detected there.
+//! - **No wide rows (T-084):** no inventory row wider than [`MAX_ROW_BW_HZ`] (T-053 saw one
+//!   0.9–1.2 MHz row, a false hop set of near-threshold flicker, instead of the station). The
+//!   `/api/inventory` count at stop is logged beside the run summary's (the summary counts after
+//!   every open track closed at stop; mid-run the inventory holds closed tracks and chain entries).
 //!
 //! Every check is recorded; the table (`HIL-RESULT` lines) is printed before the final assert.
 
@@ -46,14 +53,17 @@ const LNA_DB: f64 = 32.0;
 const VGA_DB: f64 = 30.0;
 const AMP: bool = true;
 
-const SURVEY_RATE_HZ: f64 = 8e6;
-/// Overlapping 8 Msps windows: every frequency in 86.2–109.3 MHz lies inside the baseband filter
-/// (±3 MHz) of a window whose centre (DC, LO leakage) is at least 300 kHz away.
-const SURVEY_CENTRES_HZ: [f64; 8] = [
-    89.0e6, 91.5e6, 94.0e6, 96.5e6, 99.0e6, 101.5e6, 104.0e6, 106.5e6,
-];
-const SURVEY_EDGE_HZ: f64 = 2.8e6;
-const SURVEY_DC_HZ: f64 = 300e3;
+/// T-084: the survey runs at the pipeline's 2.4 Msps (T-053 surveyed at 8 Msps, where the strongest
+/// station stood only ~22 dB over the channel floor and one station reached 20 dB).
+const SURVEY_RATE_HZ: f64 = 2.4e6;
+/// Survey centres every `SURVEY_STEP_HZ` from `SURVEY_FIRST_HZ` to `SURVEY_LAST_HZ`: every
+/// frequency in 86.0–109.0 MHz lies between `SURVEY_DC_HZ` and `SURVEY_EDGE_HZ` of some centre.
+const SURVEY_FIRST_HZ: f64 = 86.6e6;
+const SURVEY_LAST_HZ: f64 = 108.2e6;
+const SURVEY_STEP_HZ: f64 = 0.6e6;
+/// Inside the 1.75 MHz baseband filter, with a channel's margin.
+const SURVEY_EDGE_HZ: f64 = 0.75e6;
+const SURVEY_DC_HZ: f64 = 150e3;
 const SURVEY_S: f64 = 0.5;
 const CHANNEL_HALF_HZ: f64 = 75e3;
 /// Channel power over the survey floor for a station.
@@ -62,10 +72,25 @@ const STATION_SNR_DB: f64 = 15.0;
 const STRONG_SNR_DB: f64 = 20.0;
 
 const RUN_RATE_HZ: f64 = 2.4e6;
-/// Inside the 1.8 MHz baseband filter (0.75 x 2.4 Msps) with room for a 200 kHz channel.
-const RUN_EDGE_HZ: f64 = 0.7e6;
+/// The strongest station's offset from the run centre (T-084: as `hackrf_serve_hil`, 101.3 MHz at
+/// 100.8 MHz; T-053 put it 0.7–0.8 MHz out, near the filter edge).
+const RUN_OFFSET_HZ: f64 = 0.5e6;
+/// Truth stations lie within this of the run centre (inside the 1.75 MHz filter with a channel's
+/// margin).
+const RUN_EDGE_HZ: f64 = 0.6e6;
 const RUN_DC_HZ: f64 = 150e3;
 const MATCH_TOL_HZ: f64 = 100e3;
+/// No inventory row may be wider than this (an FM station is ~200–300 kHz; T-053's false hop-set
+/// row was 0.9–1.2 MHz).
+const MAX_ROW_BW_HZ: f64 = 500e3;
+
+/// The survey centres (see [`SURVEY_FIRST_HZ`]).
+fn survey_centres() -> Vec<f64> {
+    let n = ((SURVEY_LAST_HZ - SURVEY_FIRST_HZ) / SURVEY_STEP_HZ).round() as usize;
+    (0..=n)
+        .map(|k| SURVEY_FIRST_HZ + k as f64 * SURVEY_STEP_HZ)
+        .collect()
+}
 
 fn live_args(center_hz: f64, sample_rate_hz: f64) -> LiveArgs {
     LiveArgs {
@@ -140,10 +165,10 @@ fn capture(src: &mut LiveSource, center_hz: f64, n: usize) -> Vec<Complex32> {
     out
 }
 
-/// Blind station picking on one survey window: 150 kHz channel power at every bin, local maxima
-/// over ±150 kHz standing `STATION_SNR_DB` above the lower-quartile channel power; centre is the
-/// PSD centroid over ±100 kHz.
-fn stations_in(psd: &[f32], fc: f64, fs: f64) -> (Vec<Station>, f64) {
+/// One survey window's usable 150 kHz channel powers and its local maxima over ±150 kHz (centre:
+/// PSD centroid over ±100 kHz, `snr_db` still the raw channel power): `(peaks, powers)`. Stations
+/// are the peaks standing `STATION_SNR_DB` over the survey-wide floor ([`stations`]).
+fn peaks_in(psd: &[f32], fc: f64, fs: f64) -> (Vec<Station>, Vec<f64>) {
     let n = psd.len();
     let df = fs / n as f64;
     let half = (CHANNEL_HALF_HZ / df).round() as usize;
@@ -159,18 +184,11 @@ fn stations_in(psd: &[f32], fc: f64, fs: f64) -> (Vec<Station>, f64) {
             (SURVEY_DC_HZ..=SURVEY_EDGE_HZ).contains(&o)
         })
         .collect();
-    let mut powers: Vec<f64> = usable.iter().map(|&k| ch(k)).collect();
-    powers.sort_by(f64::total_cmp);
-    // 10th percentile: most FM channels are occupied, so a quartile sits on weak stations.
-    let floor = powers[powers.len() / 10];
+    let powers: Vec<f64> = usable.iter().map(|&k| ch(k)).collect();
     let cent = (100e3 / df).round() as usize;
     let mut out = Vec::new();
     for &k in &usable {
         let p = ch(k);
-        let snr_db = 10.0 * (p / floor).log10();
-        if snr_db < STATION_SNR_DB {
-            continue;
-        }
         let (lo, hi) = (
             k.saturating_sub(2 * half).max(half),
             (k + 2 * half).min(n - half - 1),
@@ -186,9 +204,26 @@ fn stations_in(psd: &[f32], fc: f64, fs: f64) -> (Vec<Station>, f64) {
         }
         out.push(Station {
             f_hz: (wf / w / 1e3).round() * 1e3,
-            snr_db,
+            snr_db: p,
         });
     }
+    (out, powers)
+}
+
+/// Stations over every window's peaks: channel power `STATION_SNR_DB` over the survey-wide 10th
+/// percentile of channel power (one 1.2 MHz window of a dense band can be all stations, so a
+/// per-window floor sits on weak ones). Returns the stations (SNR in dB) and the floor.
+fn stations(peaks: Vec<Station>, mut powers: Vec<f64>) -> (Vec<Station>, f64) {
+    powers.sort_by(f64::total_cmp);
+    let floor = powers[powers.len() / 10];
+    let out = peaks
+        .into_iter()
+        .map(|s| Station {
+            snr_db: 10.0 * (s.snr_db / floor).log10(),
+            ..s
+        })
+        .filter(|s| s.snr_db >= STATION_SNR_DB)
+        .collect();
     (out, floor)
 }
 
@@ -218,20 +253,29 @@ fn in_window(stations: &[Station], c: f64, min_snr: f64) -> Vec<Station> {
         .collect()
 }
 
-/// The 100 kHz-grid centre with the most strong stations (then the most SNR), excluding centres
-/// within `avoid.1` of `avoid.0`.
-fn best_window(stations: &[Station], avoid: Option<(f64, f64)>) -> Option<f64> {
+/// The run centre for the strongest strong station whose window avoids `avoid` (centres within
+/// `avoid.1` of `avoid.0` are skipped): the station [`RUN_OFFSET_HZ`] below or above centre, on the
+/// side holding more strong stations (then more SNR), inside the 88–108 MHz band.
+fn station_window(stations: &[Station], avoid: Option<(f64, f64)>) -> Option<f64> {
     let score = |c: f64| {
         let w = in_window(stations, c, STRONG_SNR_DB);
         (w.len(), w.iter().map(|s| s.snr_db).sum::<f64>())
     };
-    (885..=1075)
-        .map(|k| f64::from(k) * 1e5)
-        .filter(|c| avoid.is_none_or(|(a, d)| (c - a).abs() >= d))
-        .map(|c| (c, score(c)))
-        .filter(|(_, (n, _))| *n > 0)
-        .max_by(|a, b| a.1.0.cmp(&b.1.0).then(a.1.1.total_cmp(&b.1.1)))
-        .map(|(c, _)| c)
+    let mut strong: Vec<&Station> = stations
+        .iter()
+        .filter(|s| s.snr_db >= STRONG_SNR_DB)
+        .collect();
+    strong.sort_by(|a, b| b.snr_db.total_cmp(&a.snr_db));
+    strong.iter().find_map(|s| {
+        [s.f_hz + RUN_OFFSET_HZ, s.f_hz - RUN_OFFSET_HZ]
+            .into_iter()
+            .map(|c| (c / 1e3).round() * 1e3)
+            .filter(|&c| (88.0e6..=108.0e6).contains(&c))
+            .filter(|&c| avoid.is_none_or(|(a, d)| (c - a).abs() >= d))
+            .map(|c| (c, score(c)))
+            .max_by(|a, b| a.1.0.cmp(&b.1.0).then(a.1.1.total_cmp(&b.1.1)))
+            .map(|(c, _)| c)
+    })
 }
 
 fn matched<'a>(rows: &'a [Value], s: &Station) -> Vec<&'a Value> {
@@ -299,12 +343,13 @@ fn hil_blind_fm_survey_on_the_hackrf() {
 
     // 1. Blind live survey (the test's private truth).
     let t_survey = Instant::now();
-    let mut src = open_live("hackrf", &live_args(SURVEY_CENTRES_HZ[0], SURVEY_RATE_HZ))
+    let centres = survey_centres();
+    let mut src = open_live("hackrf", &live_args(centres[0], SURVEY_RATE_HZ))
         .expect("open the HackRF (is it free? built with --features hk-core/hackrf?)");
     let hw = src.device.hw.clone();
     let control = src.control.clone();
-    let mut all = Vec::new();
-    for (i, &c) in SURVEY_CENTRES_HZ.iter().enumerate() {
+    let (mut peaks, mut powers) = (Vec::new(), Vec::new());
+    for (i, &c) in centres.iter().enumerate() {
         if i > 0 {
             control.tune(c).expect("survey retune");
         }
@@ -312,22 +357,25 @@ fn hil_blind_fm_survey_on_the_hackrf() {
         let cfg = WelchConfig {
             holds: false,
             spectral_kurtosis: false,
-            ..WelchConfig::new(8192)
+            ..WelchConfig::new(4096)
         };
         let psd = welch(&iq, SURVEY_RATE_HZ, c, &cfg).unwrap().psd;
-        let (st, floor) = stations_in(&psd, c, SURVEY_RATE_HZ);
-        eprintln!(
-            "[{TAG}] survey {} MHz: floor {:.1} dBFS/150 kHz, {} stations",
-            mhz(c),
-            db(floor),
-            st.len()
-        );
-        all.extend(st);
+        let (p, w) = peaks_in(&psd, c, SURVEY_RATE_HZ);
+        peaks.extend(p);
+        powers.extend(w);
     }
     let survey_stats = control.stats();
     drop(control);
     drop(src);
-    let stations = merge(all);
+    let (surveyed, floor) = stations(peaks, powers);
+    eprintln!(
+        "[{TAG}] survey {} windows {}–{} MHz: floor {:.1} dBFS/150 kHz",
+        centres.len(),
+        mhz(centres[0]),
+        mhz(centres[centres.len() - 1]),
+        db(floor)
+    );
+    let stations = merge(surveyed);
     eprintln!("[{TAG}] device: {hw}");
     eprintln!(
         "[{TAG}] survey in {:.1} s, source stats {survey_stats:?}; stations (MHz, dB): {:?}",
@@ -349,9 +397,9 @@ fn hil_blind_fm_survey_on_the_hackrf() {
             stations.len()
         ),
     );
-    let ca = best_window(&stations, None).expect("the survey found a strong FM station");
+    let ca = station_window(&stations, None).expect("the survey found a strong FM station");
     let truth_a = in_window(&stations, ca, STRONG_SNR_DB);
-    let cb = best_window(&stations, Some((ca, 2.4e6)));
+    let cb = station_window(&stations, Some((ca, 2.4e6)));
     eprintln!(
         "[{TAG}] run window {} MHz: truth {:?}; retune window {:?}",
         mhz(ca),
@@ -699,6 +747,31 @@ fn hil_blind_fm_survey_on_the_hackrf() {
         .expect("the live run ends without error");
     eprintln!("{}", summary.to_text());
     let stats = source_control.and_then(|c| c.stats());
+    // T-084: no wide rows; the inventory at stop against the summary's count.
+    let (_, at_stop) = api_inventory(addr);
+    let wide: Vec<(String, f64)> = at_stop
+        .iter()
+        .filter_map(|r| {
+            let (f, bw) = (r["f_center_hz"].as_f64()?, r["bandwidth_hz"].as_f64()?);
+            (bw > MAX_ROW_BW_HZ).then(|| (mhz(f), (bw / 1e3).round()))
+        })
+        .collect();
+    res.add(
+        format!("no inventory row wider than {:.0} kHz", MAX_ROW_BW_HZ / 1e3),
+        wide.is_empty(),
+        format!("wide rows (MHz, kHz): {wide:?}"),
+    );
+    res.push(
+        "inventory count",
+        "INFO",
+        format!(
+            "/api/inventory {} rows at stop, {} mid-run (RDS poll); run summary {} emitters \
+             (counted after every open track closed at stop)",
+            at_stop.len(),
+            rows.len(),
+            summary.emitters
+        ),
+    );
     drop(server);
     eprintln!(
         "[{TAG}] source {stats:?}; status source {}",
