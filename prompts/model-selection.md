@@ -37,7 +37,9 @@ Use for judgment across many files, or work that needs long context:
 - Writing the test harness itself: IQ replay, synthetic scenario generator, SigMF fixture tooling.
 
 ### Sonnet 5 — medium effort
-Use for well-specified tasks with clear acceptance tests and a narrow footprint:
+The default implementer for anything off the real-time path and outside core interfaces. Use for well-specified tasks with clear acceptance tests and a narrow footprint:
+- Web UI work, the HTTP/control API surface, CLI and config, stream openers and discovery.
+- Test additions, flaky-test fixes, and follow-up tasks from reviews.
 - Wrapping existing decoders as plugins (rtl_433, readsb, multimon-ng, AIS-catcher…) against an approved plugin contract.
 - UI views and components after the UI ADR and data model exist.
 - CLI tools, config handling, storage and queries against the approved schema, external feed adapters (C29).
@@ -72,6 +74,15 @@ Use for mechanical, easily checked work:
 - **Low:** mechanical tasks.
 
 When unsure between two efforts, choose the higher one for work on the real-time path and the lower one for everything else.
+
+## Token budget
+
+The budget ran out early on 2026-09-13. Most of the spend was long agent contexts re-read every turn, and prompt caches that expired while an agent waited more than 5 minutes on a build or test run. Rules:
+- **Never wait in the foreground.** Run builds, test suites and repeated test runs as background tasks and act on the completion notification. No sleep or poll loops.
+- **Targeted tests while developing:** `cargo nextest run -p <crate>` or a single test. Agents don't run the full suite.
+- **One full check per merge.** The coordinator runs `just test` plus acceptance on main after merging. Flake hunts run a test N times in one background command, not N turns.
+- **Lean context.** Read logs with `grep`/`tail`, never whole. Keep briefs to the task entry plus at most 5 pointers. Start a fresh agent rather than continuing one past about 300k tokens.
+- **Opus at medium effort** unless the task is on the real-time path, novel DSP or hard debugging.
 
 ## In task entries
 
