@@ -17,7 +17,8 @@
 //! In memory the slots are sparse too ([`SlotSeries`], T-134): a series holds only the
 //! hour-of-week slots it has observed, each packed in 28 B of f32 moments ([`PackedSlot`], T-135).
 //! The file format is unchanged by either (version 2, f64 moments): a file written from packed
-//! slots holds the f32-rounded values.
+//! slots holds the f32-rounded values, with a series' pending forgetting multiplier (T-137)
+//! applied in f64.
 //!
 //! All times are the device/sample clock (ADR-0012 §0).
 
@@ -187,11 +188,36 @@ pub trait SlotValue: Copy {
     /// The untouched slot.
     const EMPTY: Self;
     /// Stored form.
-    type Packed: Copy + std::fmt::Debug;
+    type Packed: Copy + std::fmt::Debug + PackedMoments;
     /// To the stored form (rounds, see [`PackedSlot`]).
-    fn pack(&self) -> Self::Packed;
+    fn pack(&self) -> Self::Packed {
+        self.pack_scaled(1.0)
+    }
     /// From the stored form.
-    fn unpack(p: &Self::Packed) -> Self;
+    fn unpack(p: &Self::Packed) -> Self {
+        Self::unpack_scaled(p, 1.0)
+    }
+    /// To the stored form under a series' pending forgetting multiplier `m` (T-137): the additive
+    /// moments are stored divided by `m`, so [`Self::unpack_scaled`]`(.., m)` reads `self` back.
+    /// Statistics that are never forgotten are only stored under `m` = 1.
+    fn pack_scaled(&self, m: f64) -> Self::Packed;
+    /// From the stored form under multiplier `m` (the additive moments × `m`, in f64).
+    fn unpack_scaled(p: &Self::Packed, m: f64) -> Self;
+}
+
+/// Field accessors of a stored slot (T-137): the moments pooling reads, without rebuilding the
+/// level sums. Additive moments are as stored (before a series' forgetting multiplier).
+pub trait PackedMoments {
+    /// Visit count or decayed visit weight.
+    fn n(&self) -> f64;
+    /// Observed seconds.
+    fn observed_s(&self) -> f64;
+    /// Σ weight·occupied, s.
+    fn occupied_weight_s(&self) -> f64;
+    /// Σ weight, s.
+    fn weight_s(&self) -> f64;
+    /// Max level, dB (never forgotten).
+    fn max_db(&self) -> f64;
 }
 
 /// One stored slot in 28 B (T-135; the f64 statistics are 56 B): every moment as f32, the level
@@ -199,11 +225,14 @@ pub trait SlotValue: Copy {
 /// keeps f32 relative precision instead of cancelling (Σ level² − n·mean² in f32 would lose most
 /// of σ² for a high level over thousands of visits).
 ///
-/// Tolerance: each fold rounds every moment to the nearest f32 once (≤ 3·10⁻⁸ relative, e.g.
-/// 4·10⁻⁶ dB on a 100 dB mean); the rounding does not compound through the spread. Seconds and
-/// visit counts stay exact while they are integers below 2²⁴ (194 days per slot). A decayed
-/// weight below f32's range (~150 half-lives unvisited) reads as empty. A slot without level visits
-/// keeps no level moments.
+/// Tolerance: each update of a slot rounds its moments to the nearest f32 once (≤ 3·10⁻⁸
+/// relative, e.g. 4·10⁻⁶ dB on a 100 dB mean); the rounding does not compound through the spread.
+/// Visit counts are exact (u32). Seconds and weights are rounded like every other moment: an
+/// integer sum below 2²⁴ s (194 days per slot) happens to round to itself, a fractional one does
+/// not. Forgetting is not applied to the stored f32 (a factor within ~5·10⁻⁸ of 1 would round
+/// away): a series keeps it as an f64 multiplier (T-137, [`SlotSeries::scale`]). A decayed weight
+/// below f32's range (~150 half-lives unvisited) reads as empty. A slot without level visits keeps
+/// no level moments.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PackedSlot<N> {
     n: N,
@@ -215,6 +244,24 @@ pub struct PackedSlot<N> {
     max_db: f32,
 }
 
+impl<N: Copy + Into<f64>> PackedMoments for PackedSlot<N> {
+    fn n(&self) -> f64 {
+        self.n.into()
+    }
+    fn observed_s(&self) -> f64 {
+        f64::from(self.observed_s)
+    }
+    fn occupied_weight_s(&self) -> f64 {
+        f64::from(self.occupied_weight_s)
+    }
+    fn weight_s(&self) -> f64 {
+        f64::from(self.weight_s)
+    }
+    fn max_db(&self) -> f64 {
+        f64::from(self.max_db)
+    }
+}
+
 /// Visit count of a stored reference slot.
 type PackedStats = PackedSlot<u32>;
 /// Decayed visit weight of a stored adaptive slot.
@@ -222,7 +269,7 @@ type PackedDecayed = PackedSlot<f32>;
 
 /// Mean and centred Σ(x − mean)² of `n` visits with sums `sum`, `sum_sq`. f64 cancellation noise
 /// in the centred moment reads as 0, so repacking an unpacked slot is stable.
-fn pack_moments(n: f64, sum: f64, sum_sq: f64) -> (f32, f32) {
+fn pack_moments(n: f64, sum: f64, sum_sq: f64) -> (f32, f64) {
     if n <= 0.0 {
         return (0.0, 0.0);
     }
@@ -233,28 +280,29 @@ fn pack_moments(n: f64, sum: f64, sum_sq: f64) -> (f32, f32) {
     } else {
         dev
     };
-    ((sum / n) as f32, dev as f32)
+    ((sum / n) as f32, dev)
 }
 
 /// Σ level and Σ level² back from [`pack_moments`].
-fn unpack_moments(n: f64, mean: f32, dev: f32) -> (f64, f64) {
+fn unpack_moments(n: f64, mean: f32, dev: f64) -> (f64, f64) {
     if n <= 0.0 {
         return (0.0, 0.0);
     }
     let sum = n * f64::from(mean);
-    (sum, f64::from(dev) + sum * sum / n)
+    (sum, dev + sum * sum / n)
 }
 
 impl SlotValue for SlotStats {
     const EMPTY: Self = SlotStats::EMPTY;
     type Packed = PackedStats;
 
-    fn pack(&self) -> PackedStats {
+    fn pack_scaled(&self, m: f64) -> PackedStats {
+        debug_assert!(m == 1.0, "reference slots are never forgotten");
         let (mean_db, dev_sq_db) = pack_moments(self.n_visits as f64, self.sum_db, self.sum_sq_db);
         PackedSlot {
             n: u32::try_from(self.n_visits).unwrap_or(u32::MAX),
             mean_db,
-            dev_sq_db,
+            dev_sq_db: dev_sq_db as f32,
             observed_s: self.observed_s as f32,
             occupied_weight_s: self.occupied_weight_s as f32,
             weight_s: self.weight_s as f32,
@@ -262,8 +310,9 @@ impl SlotValue for SlotStats {
         }
     }
 
-    fn unpack(p: &PackedStats) -> Self {
-        let (sum_db, sum_sq_db) = unpack_moments(f64::from(p.n), p.mean_db, p.dev_sq_db);
+    fn unpack_scaled(p: &PackedStats, m: f64) -> Self {
+        debug_assert!(m == 1.0, "reference slots are never forgotten");
+        let (sum_db, sum_sq_db) = unpack_moments(f64::from(p.n), p.mean_db, f64::from(p.dev_sq_db));
         SlotStats {
             n_visits: u64::from(p.n),
             observed_s: f64::from(p.observed_s),
@@ -280,29 +329,30 @@ impl SlotValue for DecayedStats {
     const EMPTY: Self = DecayedStats::EMPTY;
     type Packed = PackedDecayed;
 
-    fn pack(&self) -> PackedDecayed {
+    fn pack_scaled(&self, m: f64) -> PackedDecayed {
+        // Dividing by m = 1 is exact: an unscaled series packs as before T-137.
         let (mean_db, dev_sq_db) = pack_moments(self.n, self.sum_db, self.sum_sq_db);
         PackedSlot {
-            n: self.n as f32,
+            n: (self.n / m) as f32,
             mean_db,
-            dev_sq_db,
-            observed_s: self.observed_s as f32,
-            occupied_weight_s: self.occupied_weight_s as f32,
-            weight_s: self.weight_s as f32,
+            dev_sq_db: (dev_sq_db / m) as f32,
+            observed_s: (self.observed_s / m) as f32,
+            occupied_weight_s: (self.occupied_weight_s / m) as f32,
+            weight_s: (self.weight_s / m) as f32,
             max_db: self.max_db as f32,
         }
     }
 
-    fn unpack(p: &PackedDecayed) -> Self {
-        let n = f64::from(p.n);
-        let (sum_db, sum_sq_db) = unpack_moments(n, p.mean_db, p.dev_sq_db);
+    fn unpack_scaled(p: &PackedDecayed, m: f64) -> Self {
+        let n = f64::from(p.n) * m;
+        let (sum_db, sum_sq_db) = unpack_moments(n, p.mean_db, f64::from(p.dev_sq_db) * m);
         DecayedStats {
             n,
-            observed_s: f64::from(p.observed_s),
+            observed_s: f64::from(p.observed_s) * m,
             sum_db,
             sum_sq_db,
-            occupied_weight_s: f64::from(p.occupied_weight_s),
-            weight_s: f64::from(p.weight_s),
+            occupied_weight_s: f64::from(p.occupied_weight_s) * m,
+            weight_s: f64::from(p.weight_s) * m,
             max_db: f64::from(p.max_db),
         }
     }
@@ -320,8 +370,16 @@ const SLOT_GROWTH: (usize, usize) = (4, 12);
 #[derive(Clone, Debug)]
 pub struct SlotSeries<T: SlotValue> {
     mask: [u64; 3],
+    /// Pending forgetting multiplier of the additive moments (T-137): every read multiplies the
+    /// stored moments by it in f64, so [`Self::scale`] is O(1) and does not round in f32. 1 for a
+    /// series that is never forgotten.
+    decay: f64,
     values: Vec<T::Packed>,
 }
+
+/// [`SlotSeries::scale`] folds the pending multiplier into the stored slots below this, so stored
+/// moments stay within 10³ of their values (a walk per ~10 half-lives of observed time).
+const DECAY_FOLD_BELOW: f64 = 1e-3;
 
 impl<T: SlotValue> Default for SlotSeries<T> {
     fn default() -> Self {
@@ -334,6 +392,7 @@ impl<T: SlotValue> SlotSeries<T> {
     pub const fn new() -> Self {
         Self {
             mask: [0; 3],
+            decay: 1.0,
             values: Vec::new(),
         }
     }
@@ -351,7 +410,8 @@ impl<T: SlotValue> SlotSeries<T> {
 
     /// Slot `i` when stored.
     pub fn get(&self, i: usize) -> Option<T> {
-        (i < HourOfWeek::SLOTS && self.present(i)).then(|| T::unpack(&self.values[self.rank(i)]))
+        (i < HourOfWeek::SLOTS && self.present(i))
+            .then(|| T::unpack_scaled(&self.values[self.rank(i)], self.decay))
     }
 
     /// Slot `i`'s value (`EMPTY` when untouched).
@@ -372,9 +432,9 @@ impl<T: SlotValue> SlotSeries<T> {
             self.values.insert(r, T::EMPTY.pack());
             self.mask[i / 64] |= 1 << (i % 64);
         }
-        let mut v = T::unpack(&self.values[r]);
+        let mut v = T::unpack_scaled(&self.values[r], self.decay);
         let out = f(&mut v);
-        self.values[r] = v.pack();
+        self.values[r] = v.pack_scaled(self.decay);
         out
     }
 
@@ -395,24 +455,44 @@ impl<T: SlotValue> SlotSeries<T> {
 
     /// Stored slots' values, in slot order (untouched slots contribute nothing to a sum).
     pub fn values(&self) -> impl Iterator<Item = T> + '_ {
-        self.values.iter().map(T::unpack)
+        let m = self.decay;
+        self.values.iter().map(move |p| T::unpack_scaled(p, m))
+    }
+
+    /// Stored slot indices, in slot order.
+    fn indices(&self) -> impl Iterator<Item = usize> + use<T> {
+        let mask = self.mask;
+        (0..3).flat_map(move |w| {
+            let mut m = mask[w];
+            std::iter::from_fn(move || {
+                (m != 0).then(|| {
+                    let b = m.trailing_zeros() as usize;
+                    m &= m - 1;
+                    w * 64 + b
+                })
+            })
+        })
     }
 
     /// Stored slots with their index, in slot order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, T)> + '_ {
-        let mask = self.mask;
-        (0..3)
-            .flat_map(move |w| {
-                let mut m = mask[w];
-                std::iter::from_fn(move || {
-                    (m != 0).then(|| {
-                        let b = m.trailing_zeros() as usize;
-                        m &= m - 1;
-                        w * 64 + b
-                    })
-                })
-            })
-            .zip(self.values.iter().map(T::unpack))
+        self.indices().zip(self.values())
+    }
+
+    /// Stored slots' packed form with their index, in slot order (field accessors,
+    /// [`PackedMoments`], T-137): additive moments read × [`Self::decay`].
+    pub fn packed(&self) -> impl Iterator<Item = (usize, &T::Packed)> + '_ {
+        self.indices().zip(self.values.iter())
+    }
+
+    /// Slot `i`'s packed form when stored (a field accessor, as [`Self::packed`]).
+    pub fn packed_at(&self, i: usize) -> Option<&T::Packed> {
+        (i < HourOfWeek::SLOTS && self.present(i)).then(|| &self.values[self.rank(i)])
+    }
+
+    /// Pending forgetting multiplier of the stored additive moments (1 unless forgotten, T-137).
+    pub fn decay(&self) -> f64 {
+        self.decay
     }
 
     /// Stored slots.
@@ -439,20 +519,24 @@ impl<T: SlotValue> SlotSeries<T> {
     pub fn map<U: SlotValue>(&self, mut f: impl FnMut(&T) -> U) -> SlotSeries<U> {
         SlotSeries {
             mask: self.mask,
-            values: self
-                .values
-                .iter()
-                .map(|p| f(&T::unpack(p)).pack())
-                .collect(),
+            decay: 1.0,
+            values: self.values().map(|v| f(&v).pack()).collect(),
         }
     }
 }
 
 impl SlotSeries<DecayedStats> {
-    /// [`DecayedStats::scale`] on every stored slot, in place on the stored form (the mean is
-    /// unchanged by forgetting; the weight, seconds and centred spread scale).
+    /// [`DecayedStats::scale`] on every stored slot (the mean is unchanged by forgetting; the
+    /// weight, seconds and centred spread scale). Lazy (T-137): the factor multiplies the series'
+    /// f64 [`Self::decay`], so it is O(1) and exact however close to 1; the multiplier is folded
+    /// into the stored slots (one f32 rounding) only once it falls below 10⁻³.
     pub fn scale(&mut self, factor: f64) {
-        let s = |v: &mut f32| *v = (f64::from(*v) * factor) as f32;
+        self.decay *= factor;
+        if self.decay >= DECAY_FOLD_BELOW {
+            return;
+        }
+        let m = self.decay;
+        let s = |v: &mut f32| *v = (f64::from(*v) * m) as f32;
         for p in &mut self.values {
             s(&mut p.n);
             s(&mut p.dev_sq_db);
@@ -460,6 +544,7 @@ impl SlotSeries<DecayedStats> {
             s(&mut p.occupied_weight_s);
             s(&mut p.weight_s);
         }
+        self.decay = 1.0;
     }
 }
 
@@ -702,9 +787,21 @@ impl W {
 struct R<'a> {
     b: &'a [u8],
     at: usize,
+    /// Offsets of the f64 fields read, when traced (tests).
+    f64_at: Option<Vec<usize>>,
 }
 
 type Rd<T> = Result<T, &'static str>;
+
+impl<'a> R<'a> {
+    fn new(b: &'a [u8]) -> Self {
+        Self {
+            b,
+            at: 0,
+            f64_at: None,
+        }
+    }
+}
 
 impl R<'_> {
     fn take(&mut self, n: usize) -> Rd<&[u8]> {
@@ -731,6 +828,9 @@ impl R<'_> {
         Ok(i64::from_le_bytes(self.arr()?))
     }
     fn f64(&mut self) -> Rd<f64> {
+        if let Some(t) = &mut self.f64_at {
+            t.push(self.at);
+        }
         Ok(f64::from_le_bytes(self.arr()?))
     }
     fn opt_t(&mut self) -> Rd<Option<Timestamp>> {
@@ -905,7 +1005,16 @@ fn decode_body(
     last_visit: Timestamp,
     b: &[u8],
 ) -> Rd<BaselineState> {
-    let mut r = R { b, at: 0 };
+    decode_body_with(&mut R::new(b), version, key, last_visit)
+}
+
+/// [`decode_body`] through `r` (a traced reader records the f64 fields' offsets).
+fn decode_body_with(
+    r: &mut R<'_>,
+    version: u16,
+    key: BaselineKey,
+    last_visit: Timestamp,
+) -> Rd<BaselineState> {
     let n = r.u32()?;
     let mut state = BaselineState::new(key, last_visit);
     for _ in 0..n {
@@ -921,7 +1030,7 @@ fn decode_body(
             _ => return Err("bad subject tag"),
         };
         let mixed = r.u8()? != 0;
-        let cusum = read_cusum(&mut r)?;
+        let cusum = read_cusum(r)?;
         let change_point = match r.u8()? {
             0 => None,
             1 => Some(ChangePoint {
@@ -945,9 +1054,9 @@ fn decode_body(
             if n_hod != 0 && n_hod != 24 {
                 return Err("bad hour-of-day accumulators");
             }
-            seq = read_cusum(&mut r)?;
+            seq = read_cusum(r)?;
             for _ in 0..n_hod {
-                seq_hod.push(read_cusum(&mut r)?);
+                seq_hod.push(read_cusum(r)?);
             }
             latched_hours = r.u32()?;
         }
@@ -1014,7 +1123,7 @@ fn decode_body(
             },
         );
     }
-    if r.at != b.len() {
+    if r.at != r.b.len() {
         return Err("trailing bytes");
     }
     Ok(state)
@@ -1035,7 +1144,7 @@ fn encode_version(state: &BaselineState, version: u16) -> io::Result<Vec<u8>> {
 }
 
 fn read_header(bytes: &[u8]) -> Rd<(BaselineKey, Timestamp, u16)> {
-    let mut r = R { b: bytes, at: 0 };
+    let mut r = R::new(bytes);
     if r.take(4)? != MAGIC {
         return Err("bad magic");
     }
@@ -1380,6 +1489,8 @@ mod tests {
     /// unchanged, stores only its touched slots, and re-encodes to the same body layout (the format
     /// did not change, so the version stays 2). T-135: slots are packed to f32 moments, so a
     /// re-encoded value is the f32-rounded one (same length, a fixed point on the next load).
+    /// T-137: every re-encoded f64 field is within 10⁻⁶ relative of the golden one, and every
+    /// other byte is identical.
     #[test]
     fn baseline_codec_reads_v2_files_written_by_the_dense_layout() {
         let bytes: Vec<u8> = (0..GOLDEN_V2_DENSE_HEX.len())
@@ -1409,6 +1520,88 @@ mod tests {
         assert_eq!(body(&re).len(), body(&bytes).len());
         assert_eq!(decode(&re).unwrap(), decoded);
         assert_eq!(body(&encode(&decode(&re).unwrap()).unwrap()), body(&re));
+        let (golden, again) = (body(&bytes), body(&re));
+        let f64_offsets = |b: &[u8]| {
+            let mut r = R {
+                f64_at: Some(Vec::new()),
+                ..R::new(b)
+            };
+            decode_body_with(&mut r, 2, decoded.key, decoded.last_visit).unwrap();
+            r.f64_at.unwrap()
+        };
+        let offsets = f64_offsets(&golden);
+        assert_eq!(offsets, f64_offsets(&again), "same layout");
+        assert!(offsets.len() > 50, "{} f64 fields", offsets.len());
+        let f = |b: &[u8], at: usize| f64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let (mut golden_rest, mut again_rest) = (golden.clone(), again.clone());
+        for &at in &offsets {
+            let (g, a) = (f(&golden, at), f(&again, at));
+            assert!(
+                g == a || ((a - g) / g).abs() <= 1e-6,
+                "f64 at body byte {at}: {a} vs golden {g}"
+            );
+            golden_rest[at..at + 8].fill(0);
+            again_rest[at..at + 8].fill(0);
+        }
+        assert_eq!(golden_rest, again_rest, "non-f64 bytes identical");
+    }
+
+    /// T-137: forgetting is an f64 multiplier per series, exact for factors within 5·10⁻⁸ of 1
+    /// (where per-slot f32 forgetting stalls), and folding the multiplier into the stored slots
+    /// once it is small keeps the values.
+    #[test]
+    fn baseline_slot_series_forgets_in_f64_and_folds_the_multiplier() {
+        let factor = 0.5_f64.powf(1.0 / (365.0 * 86_400.0));
+        assert_eq!((f64::from(600.0_f32) * factor) as f32, 600.0, "f32 stalls");
+        let mut exact = [DecayedStats::EMPTY; 3];
+        let mut s: SlotSeries<DecayedStats> = SlotSeries::new();
+        let rel = |a: f64, b: f64| if a == b { 0.0 } else { ((a - b) / b).abs() };
+        let check = |s: &SlotSeries<DecayedStats>, exact: &[DecayedStats; 3], tol: f64| {
+            for (i, e) in exact.iter().enumerate() {
+                let d = s.value(i * 50);
+                for (a, b) in [
+                    (d.n, e.n),
+                    (d.observed_s, e.observed_s),
+                    (d.weight_s, e.weight_s),
+                    (d.occupied_weight_s, e.occupied_weight_s),
+                    (d.sum_db / d.n, e.sum_db / e.n),
+                ] {
+                    assert!(
+                        rel(a, b) <= tol,
+                        "slot {i}: {a} vs {b} (decay {})",
+                        s.decay()
+                    );
+                }
+            }
+        };
+        for k in 0..30_000_u32 {
+            let i = (k % 3) as usize;
+            let level = 10.0 + f64::from(k % 7) * 0.1;
+            for e in &mut exact {
+                e.scale(factor);
+            }
+            s.scale(factor);
+            // 30 visits per slot (f32 rounding ≤ 6·10⁻⁸ per update), then 29 910 s forgotten.
+            if k < 90 {
+                exact[i].add(level, level, 0.25, 1.0, 1.0);
+                s.update(i * 50, |d| d.add(level, level, 0.25, 1.0, 1.0));
+            }
+        }
+        // Per-slot f32 forgetting would leave every slot ~6.6·10⁻⁴ high.
+        assert!(s.decay() < 1.0 - 6e-4, "decay {}", s.decay());
+        check(&s, &exact, 3e-6);
+        // Strong forgetting folds the multiplier into the slots (below 10⁻³).
+        for _ in 0..30 {
+            for e in &mut exact {
+                e.scale(0.75);
+            }
+            s.scale(0.75);
+        }
+        assert!(
+            s.decay() > DECAY_FOLD_BELOW && s.decay() < 1.0,
+            "folded once"
+        );
+        check(&s, &exact, 3e-6);
     }
 
     /// T-135: packed slots keep the moments within the f32 tolerance of [`PackedSlot`] over a long
