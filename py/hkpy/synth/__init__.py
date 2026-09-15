@@ -7,10 +7,11 @@ datatype, generator version). It writes one or more SigMF recordings, any extra 
 
 Scenarios (use cases): ``tone`` (building block), ``fsk_burst_train`` (AWARE-036),
 ``noise_floor_rise`` (AWARE-006), ``injected_floor`` (SPACE-050), ``occupancy_multi_hour``
-(AWARE-042), ``fm_broadcast_rds`` (SIGNAL-062), ``adsb_squitter`` (SIGNAL-001), ``pocsag_pagers``
-(SIGNAL-062, M1 tutorial fixture T-098), ``acars_message`` (SIGNAL-062, M1 tutorial fixture T-098,
-synthetic-only -- see :mod:`hkpy.synth.acars`). Every scenario also accepts the impairment
-parameters in :data:`hkpy.synth.impairments.IMPAIRMENT_DEFAULTS`.
+(AWARE-042), ``occupancy_markov_scene`` (AWARE-042/AWARE-044/PROP-023, T-117), ``fm_broadcast_rds``
+(SIGNAL-062), ``adsb_squitter`` (SIGNAL-001), ``pocsag_pagers`` (SIGNAL-062, M1 tutorial fixture
+T-098), ``acars_message`` (SIGNAL-062, M1 tutorial fixture T-098, synthetic-only -- see
+:mod:`hkpy.synth.acars`). Every scenario also accepts the impairment parameters in
+:data:`hkpy.synth.impairments.IMPAIRMENT_DEFAULTS`.
 
 Truth conventions (dBFS reference, calibration constant, annotation roles) are documented in
 :mod:`hkpy.synth.scene`; the ``hackriff:truth`` fields per kind are listed in ``py/README.md``.
@@ -46,6 +47,11 @@ SCENARIOS: dict[str, ScenarioSpec] = {
                                    ("SPACE-050",), "known calibrated floors across band segments"),
     "occupancy_multi_hour": ScenarioSpec(occupancy.occupancy_multi_hour, occupancy.OCCUPANCY_DEFAULTS,
                                          ("AWARE-042",), "multi-hour burst schedule + on-demand IQ windows"),
+    "occupancy_markov_scene": ScenarioSpec(
+        occupancy.occupancy_markov_scene, occupancy.SCENE_DEFAULTS,
+        ("AWARE-042", "AWARE-044", "PROP-023"),
+        "Markov on/off channels (known FCO), hour-of-week pattern, injected novelty, periodic "
+        "event, boring band, irregular revisit schedule"),
     "fm_broadcast_rds": ScenarioSpec(scenarios.fm_broadcast_rds, scenarios.FM_DEFAULTS, ("SIGNAL-062",),
                                      "stereo WFM with pilot and RDS 0A (PI, PS)"),
     "adsb_squitter": ScenarioSpec(scenarios.adsb_squitter, scenarios.ADSB_DEFAULTS, ("SIGNAL-001",),

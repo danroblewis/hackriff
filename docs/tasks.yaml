@@ -1869,7 +1869,7 @@ tasks:
   - id: T-117
     milestone: M2
     title: "Synthetic occupancy scenes: Markov on/off channels, irregular revisit, injected novelty, hour-of-week patterns (hidden truth)"
-    status: in-progress
+    status: done
     deps: [T-112]
     parallel_group: M2F
     use_cases: [AWARE-042, AWARE-044, PROP-023]
