@@ -1687,3 +1687,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - ADR wording.
   - **Latency cost:** sparse-onset a-priori window is now intervals 17–23 (was 14). T-124 must re-derive its latency limit.
   - **Also recorded:** T-147 fix committed 47dc746 (merge a05202c; lint green). Post-merge tests and the 46 h diagnostic are pending.
+- **B0.398 T-147 in review (47dc746, merge a05202c). Opus review launched.**
+  - Post-merge tests: hk-detect 6, hk-context 69, hk-model 8, hk-pipeline 6 (incl. the 6 h sparse-visit repro); lint clean.
+  - The 46 h 10%-channel learning diagnostic is still running. It is explanatory only and not required for the merge.

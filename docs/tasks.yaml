@@ -2314,7 +2314,7 @@ tasks:
   - id: T-147
     milestone: M2
     title: "Channel FCO under the scheduler: 50% channel reads FCO 0.000 (truth 0.494) and a 10% markov channel is never learned in the T-124 scene"
-    status: in-progress
+    status: review
     deps: [T-141]
     parallel_group: M2B
     use_cases: [AWARE-042]
