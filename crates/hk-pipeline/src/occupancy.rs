@@ -478,7 +478,16 @@ impl OccupancyService {
             .filter(|p| p.scheme == scheme && p.f_cell_hz == f_cell)
             .map_or_else(
                 || ChannelPlan::new(scheme, f_cell, cfg.learn),
-                |p| ChannelPlan::from_channels(scheme, f_cell, p.version, &p.channels, cfg.learn),
+                |p| {
+                    ChannelPlan::from_channels(
+                        scheme,
+                        f_cell,
+                        p.version,
+                        &p.channels,
+                        &p.evidence,
+                        cfg.learn,
+                    )
+                },
             );
         stats.plan_version = plan.version();
         Arc::new(Self {
@@ -655,6 +664,7 @@ impl OccupancyService {
                 scheme: inner.plan.scheme(),
                 f_cell_hz: f_cell,
                 channels: inner.plan.channels(),
+                evidence: inner.plan.evidence(),
             };
             if let Some(s) = inner.store.as_mut()
                 && s.save_plan(&stored).is_err()

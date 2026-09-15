@@ -147,7 +147,7 @@ The bandit dwells where activity is, so counting its visits overstates FCO (C12 
 
 ### 2.6 Suspect and IMD detections
 
-A threshold crossing that coincides (time and frequency) with a detection flagged `clipped`, `suspect_imd`, `spur_candidate`, confirmed image, or `compressed`, or that lies under an `overload` provenance, makes the revisit **suspect**:
+A threshold crossing coincides with a suspect detection (flagged `clipped`, `suspect_imd`, `spur_candidate`, confirmed image, or `compressed`) when it lies in the visit window ± one time cell and inside the detection's extent widened by one level-0 cell. A revisit is **suspect** when it lies under `overload`, or when every above-threshold cell coincides with a suspect detection. One clean crossing makes the visit occupied and not suspect (T-129). A suspect revisit:
 - It is excluded from `fco`, as unobserved rather than unoccupied, and counted in `n_suspect`.
 - `fco_suspect_upper` counts it as occupied, so the pair brackets the truth.
 - Suspect crossings never create or widen a learned channel.
@@ -158,6 +158,13 @@ Channels come from **blind detections**:
 - The union of confirmed tracks' and inventory emitters' occupied extents, snapped outward to the history level-0 grid: `ChannelKey { scheme, lo_cell, hi_cell }`.
 - The key is deterministic and needs no registry.
 - The plan is versioned. Merges and splits bump `plan_version`; series keyed by an old extent stay readable.
+
+Channels are learned from non-suspect detections (T-129):
+- A cluster is **published** when it is **confident** (median SNR ≥ 7 dB over a bounded window of its newest detections) or **persistent** (it recurs across ≥ 3 intervals at a stable centre, spread ≤ max(1 level-0 cell, 0.1 × OBW), with cumulative detected duration ≥ D, default 0.5 s).
+- A detection inside a published host ≥ 4× wider and ≥ 6 dB stronger, overlapping it in time, is an **in-band fragment** unless its own cluster is persistent. Fragments never seed, join or narrow a channel, and never remove a published one.
+- Overlapping neighbours split at the midpoint of their centres.
+- Non-recurring flicker makes no channel; FBO and cell baselines still cover it.
+- The persisted plan carries each channel's learning evidence (median centre and SNR, interval and duration evidence), so a restart keeps a host's width, `first_learned` and fragment hosting.
 
 A band raster from C17 is only a `RasterHint { spacing_hz, offset_hz, source }` attached to a learned channel, and a non-zero `offset_hz` is itself interesting. Where nothing was ever detected there are no channels, but FBO and cell baselines still cover the band, so a first emitter there is caught as `level-above-baseline` / `new-emitter`.
 

@@ -543,15 +543,29 @@ pub fn evaluate(
             v.observed.start.saturating_add_nanos(-slack),
             v.observed.end.saturating_add_nanos(slack),
         );
+        // §2.6: a crossing is suspect where it coincides with a suspect detection (visit window
+        // ± one time cell; the detection's extent widened by one cell, so a spur's leakage into
+        // the adjacent cell is covered); the visit is suspect when all its crossings are. One
+        // clean crossing makes it occupied and not suspect (T-129).
         let suspect = occupied
-            && (v.overload
-                || input.detections.iter().any(|d| {
+            && (v.overload || {
+                let widen = grid.f_cell_hz;
+                let active = |d: &DetectionExtent| {
                     d.suspect
-                        && d.freq.lo_hz < freq.hi_hz
-                        && d.freq.hi_hz > freq.lo_hz
+                        && d.freq.lo_hz - widen < freq.hi_hz
+                        && d.freq.hi_hz + widen > freq.lo_hz
                         && d.time.start <= window.end
                         && d.time.end >= window.start
-                }));
+                };
+                input.detections.iter().any(active)
+                    && (a..b).zip(&above).all(|(f, &x)| {
+                        let lo = (grid.f_first_cell + f as i64) as f64 * grid.f_cell_hz;
+                        let hi = lo + grid.f_cell_hz;
+                        !x || input.detections.iter().any(|d| {
+                            active(d) && d.freq.lo_hz - widen < hi && d.freq.hi_hz + widen > lo
+                        })
+                    })
+            });
         out.push(VisitSample {
             start_ns: s,
             dur_ns: (e - s).max(0),
@@ -1535,6 +1549,54 @@ mod tests {
             .count();
         eprintln!("whole-band threshold {old:.1} dB: {phantom} phantom noise cells; local: 0");
         assert!(phantom > 0);
+    }
+
+    /// T-129 review (§2.6): one clean crossing makes a visit occupied and not suspect; a
+    /// spur-only visit is suspect, including the spur's leakage into the adjacent cell.
+    #[test]
+    fn occupancy_visit_is_suspect_only_when_every_crossing_is_a_suspect_detection() {
+        let (nt, nf) = (10usize, 200usize);
+        let cfg = EngineConfig::default();
+        // A station in cells 40..48 on rows 0..5; a spur in cell 150 leaking into 151 on every row.
+        let g = grid(nt, nf, |t, f| match f {
+            40..48 if t < 5 => (-80.0, -80.0, 1.0),
+            150 => (-80.0, -80.0, 1.0),
+            151 => (-88.0, -100.0, 0.0),
+            _ => (-99.0, -100.0, 0.0),
+        });
+        let (band, iv) = whole(&g);
+        let fl = cfg.local_floors(&g);
+        let visits = coverage_visits(&g, band, Tier::ScheduledPlan);
+        // The spur's detection: a 200 Hz line at the centre of cell 150.
+        let spur_hz = (F_FIRST_CELL + 150) as f64 * 6250.0 + 3125.0;
+        let spur = DetectionExtent {
+            time: iv,
+            freq: FreqRange::centered(spur_hz, 200.0),
+            obw_hz: 200.0,
+            snr_db: 20.0,
+            suspect: true,
+        };
+        let run = |dets: &[DetectionExtent]| {
+            let input = EvalInput {
+                grid: &g,
+                visits: &visits,
+                detections: dets,
+                floors: &fl,
+            };
+            evaluate(&cfg.threshold, band, 6250.0, input).0
+        };
+        let s = run(&[spur]);
+        assert_eq!(s.len(), nt);
+        for (t, v) in s.iter().enumerate() {
+            assert!(v.occupied, "row {t}: {v:?}");
+            assert_eq!(v.suspect, t >= 5, "row {t}: {v:?}");
+        }
+        // A spur detection that ended before the visit window (± one time cell) does not apply.
+        let old = DetectionExtent {
+            time: span(1e6 - 10.0, 1e6 - 5.0),
+            ..spur
+        };
+        assert!(run(&[old]).iter().all(|v| v.occupied && !v.suspect));
     }
 
     #[test]

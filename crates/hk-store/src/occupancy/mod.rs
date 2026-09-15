@@ -21,7 +21,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use hk_model::attention::occupancy::{Channel, OccupancyStat, OccupancySubject};
+use hk_model::attention::occupancy::{Channel, ChannelEvidence, OccupancyStat, OccupancySubject};
 use hk_model::{FreqRange, TimeRange};
 use serde::{Deserialize, Serialize};
 
@@ -141,6 +141,9 @@ pub struct StoredChannelPlan {
     pub f_cell_hz: f64,
     /// Channels.
     pub channels: Vec<Channel>,
+    /// Learning evidence per channel (T-129; absent in older plans).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<ChannelEvidence>,
 }
 
 /// Store counters.
@@ -626,6 +629,19 @@ mod tests {
                 evidence: 12,
                 obw_hz: 15_000.0,
                 raster_hint: None,
+            }],
+            evidence: vec![ChannelEvidence {
+                key: ChannelKey {
+                    scheme: 1,
+                    lo_cell: 69_360,
+                    hi_cell: 69_363,
+                },
+                center_hz: 433_510_000.0,
+                snr_db: Some(12.5),
+                clean: 12,
+                intervals: 4,
+                recent_intervals: vec![1, 2, 3, 4],
+                detected_ns: 3_000_000_000,
             }],
         };
         s.save_plan(&plan).unwrap();

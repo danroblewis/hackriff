@@ -3,12 +3,41 @@
 //!
 //! **Learning.** Each non-suspect detection's occupied extent (`f_center ± obw/2`) joins the
 //! cluster whose median extent holds its centre (or whose median centre its extent holds), else
-//! starts one. Clusters keep a bounded sample of centres and OBWs; the channel key is the median
-//! extent snapped **outward** to the level-0 grid (`ChannelKey::snap`), so a jittery OBW estimate
-//! does not drift the key the way a running union would. Clusters whose median extents come to
-//! hold each other's centres merge. A cluster is published as a channel once it has
-//! `min_evidence` detections. Any change to the published key set bumps `version`; series keyed
-//! by an old extent stay readable (rows carry their key).
+//! starts one, provided the two OBWs are within `fragment_bw_ratio` of each other (nested
+//! emitters of very different width stay apart). Clusters keep a bounded window of the newest samples (centre, OBW, SNR, time); the
+//! channel key is the median extent snapped **outward** to the level-0 grid (`ChannelKey::snap`),
+//! so a jittery OBW estimate does not drift the key the way a running union would. Clusters whose
+//! median extents come to hold each other's centres merge. Any change to the published key set
+//! bumps `version`; series keyed by an old extent stay readable (rows carry their key).
+//!
+//! **Publication (T-129): confident or persistent.** A cluster with `min_evidence` detections is
+//! published when it is
+//! - **confident:** the median SNR of the non-fragment detections in its (bounded, newest-first)
+//!   window is ≥ `min_confident_snr_db`, so one strong flicker never holds a channel; or
+//! - **persistent:** detections at a stable centre (within ± max(1 level-0 cell, 0.1 × OBW) / 2 of
+//!   the median, and at least half the window there) recur in ≥ `persist_intervals` separated
+//!   intervals with cumulative detected duration ≥ `persist_min_detected_ns`, so a steady weak
+//!   unknown carrier gets a channel. Short, scattered threshold flicker is neither; such places
+//!   still show in FBO and cell baselines.
+//!
+//! **In-band fragments (the T-101 host rule, with time).** A wide emitter (broadcast FM) also
+//! yields short narrow detections inside its own band. A detection centred inside a published
+//! cluster's median extent, that cluster ≥ `fragment_bw_ratio` × wider and
+//! `fragment_snr_margin_db` stronger and **detected at the same time** (± `fragment_time_slack_ns`),
+//! is a fragment unless its own cluster is persistent. A detection never joins a cluster that
+//! would host it (its narrow OBW would drag the host's median extent down); fragments only count
+//! as persistence evidence in their own cluster, never towards confidence, so they never seed,
+//! join or narrow a channel. When a host gains evidence, earlier samples of other clusters it
+//! hosts are re-flagged as fragments, except in clusters already published or persistent: fragment
+//! absorption never removes a published channel.
+//!
+//! **Restore.** The plan persists each channel's [`ChannelEvidence`] (median centre and SNR,
+//! interval and duration evidence), so a restarted host keeps hosting its fragments and keeps its
+//! width and `first_learned`. Plans saved without evidence restore as confident.
+//!
+//! **Neighbours partition.** Two published side-by-side channels whose extents overlap (dense
+//! 200 kHz FM, where a 99 % OBW includes the neighbours' skirts) are split at the grid edge nearest
+//! the midpoint of their centres, so each channel keys its own emitter.
 //!
 //! **Suspects never create or widen a channel** (§2.6): detections flagged `clipped`,
 //! `suspect_imd`, `spur_candidate`, a retune-confirmed image, or `compressed` are ignored here.
@@ -19,7 +48,9 @@
 
 use std::collections::VecDeque;
 
-use hk_model::attention::occupancy::{Channel, ChannelKey, ChannelSource, RasterHint};
+use hk_model::attention::occupancy::{
+    Channel, ChannelEvidence, ChannelKey, ChannelSource, RasterHint,
+};
 use hk_model::{Detection, DetectionFlags, FreqRange, TimeRange, Timestamp};
 
 /// The §2.6 suspect rule for a detection's flags.
@@ -36,6 +67,8 @@ pub struct DetectionExtent {
     pub freq: FreqRange,
     /// Occupied bandwidth, Hz.
     pub obw_hz: f64,
+    /// Mean SNR, dB (0 when unknown).
+    pub snr_db: f64,
     /// §2.6 suspect.
     pub suspect: bool,
 }
@@ -52,6 +85,11 @@ impl DetectionExtent {
             time: d.time,
             freq: FreqRange::centered(d.f_center_hz, obw),
             obw_hz: obw,
+            snr_db: if d.snr_mean_db.is_finite() {
+                d.snr_mean_db
+            } else {
+                0.0
+            },
             suspect: detection_is_suspect(&d.flags),
         }
     }
@@ -60,10 +98,25 @@ impl DetectionExtent {
 /// Learning parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LearnConfig {
-    /// Detections before a cluster is published as a channel (2).
+    /// Detections before a cluster can be published as a channel (2).
     pub min_evidence: u64,
-    /// Centre/OBW samples kept per cluster (64, newest).
+    /// Samples kept per cluster (64, newest).
     pub max_samples: usize,
+    /// A published cluster at least this many times wider than a detection inside its extent
+    /// hosts it as an in-band fragment (4, `TrackerConfig::inband_fragment_bw_ratio`).
+    pub fragment_bw_ratio: f64,
+    /// … when also at least this much stronger, dB (6, the tracker's fragment SNR margin).
+    pub fragment_snr_margin_db: f64,
+    /// … and detected within this long of one of the host's detections, ns (1 s).
+    pub fragment_time_slack_ns: i64,
+    /// Confident: median non-fragment SNR over the sample window at least this, dB (7).
+    pub min_confident_snr_db: f64,
+    /// Persistent: detections at a stable centre in at least this many separated intervals (3).
+    pub persist_intervals: u32,
+    /// Interval length for `persist_intervals`, ns (15 min).
+    pub persist_interval_ns: i64,
+    /// Persistent: cumulative detected duration at the stable centre at least this, ns (0.5 s).
+    pub persist_min_detected_ns: i64,
 }
 
 impl Default for LearnConfig {
@@ -71,22 +124,58 @@ impl Default for LearnConfig {
         Self {
             min_evidence: 2,
             max_samples: 64,
+            fragment_bw_ratio: 4.0,
+            fragment_snr_margin_db: 6.0,
+            fragment_time_slack_ns: 1_000_000_000,
+            min_confident_snr_db: 7.0,
+            persist_intervals: 3,
+            persist_interval_ns: 900_000_000_000,
+            persist_min_detected_ns: 500_000_000,
         }
+    }
+}
+
+/// Newest distinct intervals remembered per cluster (for de-duplicating the interval count).
+const RECENT_INTERVALS: usize = 8;
+
+#[derive(Clone, Copy, Debug)]
+struct Sample {
+    center: f64,
+    obw: f64,
+    snr: f64,
+    start_ns: i64,
+    end_ns: i64,
+    /// An in-band fragment of a host: persistence evidence only.
+    fragment: bool,
+}
+
+impl Sample {
+    fn overlaps(&self, start_ns: i64, end_ns: i64, slack_ns: i64) -> bool {
+        self.start_ns <= end_ns.saturating_add(slack_ns)
+            && self.end_ns.saturating_add(slack_ns) >= start_ns
     }
 }
 
 #[derive(Clone, Debug)]
 struct Cluster {
-    centers: VecDeque<f64>,
-    obws: VecDeque<f64>,
+    samples: VecDeque<Sample>,
     evidence: u64,
+    /// Non-fragment detections.
+    clean: u64,
+    intervals: u32,
+    recent_intervals: VecDeque<i64>,
+    detected_ns: i64,
+    /// Published at the end of the last `learn` (or restored).
+    visible: bool,
     first_learned: Timestamp,
     source: ChannelSource,
     raster_hint: Option<RasterHint>,
 }
 
-fn median(v: &VecDeque<f64>) -> f64 {
-    let mut s: Vec<f64> = v.iter().copied().collect();
+fn median(mut s: Vec<f64>) -> f64 {
+    if s.is_empty() {
+        return f64::NAN;
+    }
     s.sort_by(f64::total_cmp);
     let m = s.len() / 2;
     if s.len() % 2 == 1 {
@@ -97,12 +186,42 @@ fn median(v: &VecDeque<f64>) -> f64 {
 }
 
 impl Cluster {
+    fn new(first_learned: Timestamp) -> Self {
+        Self {
+            samples: VecDeque::new(),
+            evidence: 0,
+            clean: 0,
+            intervals: 0,
+            recent_intervals: VecDeque::new(),
+            detected_ns: 0,
+            visible: false,
+            first_learned,
+            source: ChannelSource::Learned,
+            raster_hint: None,
+        }
+    }
+
     fn center(&self) -> f64 {
-        median(&self.centers)
+        median(self.samples.iter().map(|s| s.center).collect())
     }
 
     fn obw(&self) -> f64 {
-        median(&self.obws)
+        median(self.samples.iter().map(|s| s.obw).collect())
+    }
+
+    /// Median SNR of the window's non-fragment samples; −∞ when there are none.
+    fn snr(&self) -> f64 {
+        let v: Vec<f64> = self
+            .samples
+            .iter()
+            .filter(|s| !s.fragment)
+            .map(|s| s.snr)
+            .collect();
+        if v.is_empty() {
+            f64::NEG_INFINITY
+        } else {
+            median(v)
+        }
     }
 
     fn extent(&self) -> FreqRange {
@@ -114,15 +233,112 @@ impl Cluster {
         f_hz >= e.lo_hz - tol_hz && f_hz <= e.hi_hz + tol_hz
     }
 
-    fn push(&mut self, center: f64, obw: f64, max: usize) {
-        self.centers.push_back(center);
-        self.obws.push_back(obw);
-        while self.centers.len() > max {
-            self.centers.pop_front();
-            self.obws.pop_front();
-        }
-        self.evidence += 1;
+    /// Half the allowed centre spread: max(1 level-0 cell, 0.1 × OBW) / 2.
+    fn stable_tol(&self, f_cell_hz: f64) -> f64 {
+        0.5 * f_cell_hz.max(0.1 * self.obw())
     }
+
+    fn note_interval(&mut self, k: i64) -> bool {
+        if self.recent_intervals.contains(&k) {
+            return false;
+        }
+        self.recent_intervals.push_back(k);
+        if self.recent_intervals.len() > RECENT_INTERVALS {
+            self.recent_intervals.pop_front();
+        }
+        true
+    }
+
+    fn push(&mut self, s: Sample, cfg: &LearnConfig, f_cell_hz: f64) {
+        let stable = self.samples.is_empty()
+            || (s.center - self.center()).abs() <= self.stable_tol(f_cell_hz);
+        if stable {
+            self.detected_ns = self
+                .detected_ns
+                .saturating_add((s.end_ns - s.start_ns).max(0));
+            if cfg.persist_interval_ns > 0
+                && self.note_interval(s.start_ns.div_euclid(cfg.persist_interval_ns))
+            {
+                self.intervals += 1;
+            }
+        }
+        self.samples.push_back(s);
+        self.trim(cfg.max_samples);
+        self.evidence += 1;
+        self.clean += u64::from(!s.fragment);
+    }
+
+    fn trim(&mut self, max: usize) {
+        while self.samples.len() > max.max(1) {
+            self.samples.pop_front();
+        }
+    }
+
+    fn confident(&self, cfg: &LearnConfig) -> bool {
+        self.clean >= cfg.min_evidence && self.snr() >= cfg.min_confident_snr_db
+    }
+
+    fn persistent(&self, cfg: &LearnConfig, f_cell_hz: f64) -> bool {
+        if self.evidence < cfg.min_evidence
+            || self.intervals < cfg.persist_intervals
+            || self.detected_ns < cfg.persist_min_detected_ns
+        {
+            return false;
+        }
+        let (c, tol) = (self.center(), self.stable_tol(f_cell_hz));
+        let stable = self
+            .samples
+            .iter()
+            .filter(|s| (s.center - c).abs() <= tol)
+            .count();
+        2 * stable >= self.samples.len()
+    }
+
+    fn published(&self, cfg: &LearnConfig, f_cell_hz: f64) -> bool {
+        self.evidence >= cfg.min_evidence
+            && (self.confident(cfg) || self.persistent(cfg, f_cell_hz))
+    }
+
+    /// Whether an emission centred at `center` with `obw`/`snr` would be an in-band fragment of
+    /// this cluster by extent and level (publication and time not checked).
+    fn would_host(&self, cfg: &LearnConfig, center: f64, obw: f64, snr: f64) -> bool {
+        fragment_of(cfg, self.extent(), self.snr(), center, obw, snr)
+    }
+
+    fn would_host_cluster(&self, cfg: &LearnConfig, other: &Cluster) -> bool {
+        self.would_host(cfg, other.center(), other.obw(), other.snr())
+    }
+
+    /// A non-fragment sample of this cluster overlaps `[start_ns, end_ns]` ± `slack_ns`.
+    fn overlaps_in_time(&self, start_ns: i64, end_ns: i64, slack_ns: i64) -> bool {
+        self.samples
+            .iter()
+            .any(|s| !s.fragment && s.overlaps(start_ns, end_ns, slack_ns))
+    }
+}
+
+/// The T-101 host rule on extents: `host` at least `fragment_bw_ratio` × wider, holding the
+/// fragment's centre, and `fragment_snr_margin_db` stronger.
+fn fragment_of(
+    cfg: &LearnConfig,
+    host: FreqRange,
+    host_snr: f64,
+    center: f64,
+    obw: f64,
+    snr: f64,
+) -> bool {
+    cfg.fragment_bw_ratio > 0.0
+        && host_snr.is_finite()
+        && host.width_hz() >= cfg.fragment_bw_ratio * obw
+        && center >= host.lo_hz
+        && center <= host.hi_hz
+        && host_snr >= snr + cfg.fragment_snr_margin_db
+}
+
+/// Two OBWs are the same emitter's estimates only within `fragment_bw_ratio` of each other: a
+/// wide detection never joins (and widens) a narrow cluster whose centre it holds, nor the reverse.
+fn comparable_widths(cfg: &LearnConfig, a: f64, b: f64) -> bool {
+    cfg.fragment_bw_ratio <= 0.0 || (a < cfg.fragment_bw_ratio * b && b < cfg.fragment_bw_ratio * a)
 }
 
 /// A versioned learned channel plan on one history grid.
@@ -147,27 +363,56 @@ impl ChannelPlan {
         }
     }
 
-    /// Restores a persisted plan: each channel becomes a cluster seeded at its key's centre.
+    /// Restores a persisted plan: each channel becomes a published cluster seeded from its
+    /// [`ChannelEvidence`] (matched by key); a channel without evidence is seeded confident.
     pub fn from_channels(
         scheme: u16,
         f_cell_hz: f64,
         version: u32,
         channels: &[Channel],
+        evidence: &[ChannelEvidence],
         cfg: LearnConfig,
     ) -> Self {
         let clusters = channels
             .iter()
             .map(|c| {
                 let f = c.key.freq(f_cell_hz);
+                let ev = evidence.iter().find(|e| e.key == c.key);
                 let obw = if c.obw_hz > 0.0 {
                     c.obw_hz
                 } else {
                     f.width_hz()
                 };
+                let center = ev
+                    .map(|e| e.center_hz)
+                    .filter(|x| x.is_finite())
+                    .unwrap_or(0.5 * (f.lo_hz + f.hi_hz));
+                // Without evidence: confident, and strong enough to host threshold fragments.
+                let (snr, fragment) = match ev {
+                    Some(e) => (e.snr_db.unwrap_or(f64::NEG_INFINITY), e.snr_db.is_none()),
+                    None => (cfg.min_confident_snr_db + cfg.fragment_snr_margin_db, false),
+                };
+                let evidence = c.evidence.max(cfg.min_evidence);
+                // A few seeded samples give the restored median some inertia.
+                let n = evidence.min((cfg.max_samples / 4).max(1) as u64) as usize;
+                let seed = Sample {
+                    center,
+                    obw,
+                    snr,
+                    start_ns: i64::MIN,
+                    end_ns: i64::MIN,
+                    fragment,
+                };
                 Cluster {
-                    centers: VecDeque::from([0.5 * (f.lo_hz + f.hi_hz)]),
-                    obws: VecDeque::from([obw]),
-                    evidence: c.evidence.max(cfg.min_evidence),
+                    samples: std::iter::repeat_n(seed, n).collect(),
+                    evidence,
+                    clean: ev.map_or(evidence, |e| e.clean),
+                    intervals: ev.map_or(0, |e| e.intervals),
+                    recent_intervals: ev
+                        .map(|e| e.recent_intervals.iter().copied().collect())
+                        .unwrap_or_default(),
+                    detected_ns: ev.map_or(0, |e| e.detected_ns),
+                    visible: true,
                     first_learned: c.first_learned,
                     source: c.source,
                     raster_hint: c.raster_hint.clone(),
@@ -198,32 +443,83 @@ impl ChannelPlan {
         self.f_cell_hz
     }
 
-    fn channel_of(&self, c: &Cluster) -> Option<Channel> {
-        if c.evidence < self.cfg.min_evidence {
-            return None;
+    /// Published clusters with their (neighbour-partitioned) keys, by key.
+    fn published(&self) -> Vec<(ChannelKey, &Cluster)> {
+        let mut published: Vec<(f64, FreqRange, &Cluster)> = self
+            .clusters
+            .iter()
+            .filter(|c| c.published(&self.cfg, self.f_cell_hz))
+            .map(|c| (c.center(), c.extent(), c))
+            .collect();
+        published.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let cell = self.f_cell_hz;
+        let mut keys: Vec<Option<ChannelKey>> = published
+            .iter()
+            .map(|(_, e, _)| ChannelKey::snap(self.scheme, cell, *e))
+            .collect();
+        // Side-by-side neighbours whose keys overlap split at the grid edge nearest the midpoint
+        // of their centres; the extent is about the centre (OBW), so that bound applies to both
+        // sides (nested extents are left alone).
+        for i in 1..published.len() {
+            let (c0, e0, _) = published[i - 1];
+            let (c1, e1, _) = published[i];
+            let (Some(k0), Some(k1)) = (keys[i - 1], keys[i]) else {
+                continue;
+            };
+            if !(k0.hi_cell > k1.lo_cell && e0.lo_hz < e1.lo_hz && e0.hi_hz < e1.hi_hz && c0 < c1) {
+                continue;
+            }
+            let m = (0.5 * (c0 + c1) / cell).round() as i64;
+            if m <= k0.lo_cell || m >= k1.hi_cell {
+                continue;
+            }
+            let k0 = keys[i - 1].as_mut().unwrap();
+            k0.hi_cell = k0.hi_cell.min(m);
+            k0.lo_cell = k0.lo_cell.max((2.0 * c0 / cell - m as f64).floor() as i64);
+            let k1 = keys[i].as_mut().unwrap();
+            k1.lo_cell = k1.lo_cell.max(m);
+            k1.hi_cell = k1.hi_cell.min((2.0 * c1 / cell - m as f64).ceil() as i64);
         }
-        let key = ChannelKey::snap(self.scheme, self.f_cell_hz, c.extent())?;
-        Some(Channel {
-            key,
-            source: c.source,
-            plan_version: self.version,
-            first_learned: c.first_learned,
-            evidence: c.evidence,
-            obw_hz: c.obw(),
-            raster_hint: c.raster_hint.clone(),
-        })
+        let mut v: Vec<(ChannelKey, &Cluster)> = published
+            .into_iter()
+            .zip(keys)
+            .filter_map(|((_, _, c), key)| Some((key.filter(|k| k.hi_cell > k.lo_cell)?, c)))
+            .collect();
+        v.sort_by_key(|(k, _)| *k);
+        v.dedup_by_key(|(k, _)| *k);
+        v
     }
 
     /// Published channels, by key.
     pub fn channels(&self) -> Vec<Channel> {
-        let mut v: Vec<Channel> = self
-            .clusters
-            .iter()
-            .filter_map(|c| self.channel_of(c))
-            .collect();
-        v.sort_by_key(|c| c.key);
-        v.dedup_by_key(|c| c.key);
-        v
+        self.published()
+            .into_iter()
+            .map(|(key, c)| Channel {
+                key,
+                source: c.source,
+                plan_version: self.version,
+                first_learned: c.first_learned,
+                evidence: c.evidence,
+                obw_hz: c.obw(),
+                raster_hint: c.raster_hint.clone(),
+            })
+            .collect()
+    }
+
+    /// The learning evidence of the published channels, by key (persisted with the plan).
+    pub fn evidence(&self) -> Vec<ChannelEvidence> {
+        self.published()
+            .into_iter()
+            .map(|(key, c)| ChannelEvidence {
+                key,
+                center_hz: c.center(),
+                snr_db: Some(c.snr()).filter(|x| x.is_finite()),
+                clean: c.clean,
+                intervals: c.intervals,
+                recent_intervals: c.recent_intervals.iter().copied().collect(),
+                detected_ns: c.detected_ns,
+            })
+            .collect()
     }
 
     /// Published channels overlapping `freq`.
@@ -235,37 +531,59 @@ impl ChannelPlan {
     }
 
     fn keys(&self) -> Vec<ChannelKey> {
-        self.channels().into_iter().map(|c| c.key).collect()
+        self.published().into_iter().map(|(k, _)| k).collect()
     }
 
-    /// Learns from `detections` (suspects ignored). Returns whether the plan version changed.
+    /// Learns from `detections` (suspects ignored; in-band fragments count only as persistence
+    /// evidence). Returns whether the plan version changed.
     pub fn learn(&mut self, detections: &[DetectionExtent]) -> bool {
         let before = self.keys();
-        let tol = 0.5 * self.f_cell_hz;
+        let (cfg, cell) = (self.cfg, self.f_cell_hz);
+        let tol = 0.5 * cell;
         for d in detections {
             if d.suspect || d.obw_hz <= 0.0 {
                 continue;
             }
             let center = 0.5 * (d.freq.lo_hz + d.freq.hi_hz);
+            let (start_ns, end_ns) = (d.time.start.as_unix_nanos(), d.time.end.as_unix_nanos());
+            // Its own cluster: never one that would host it (a fragment never narrows its host)
+            // nor one it would host (a host never pools with its fragments' clusters).
             let hit = self.clusters.iter().position(|c| {
-                c.holds(center, tol) || (c.center() >= d.freq.lo_hz && c.center() <= d.freq.hi_hz)
+                (c.holds(center, tol) || (c.center() >= d.freq.lo_hz && c.center() <= d.freq.hi_hz))
+                    && comparable_widths(&cfg, c.obw(), d.obw_hz)
+                    && !c.would_host(&cfg, center, d.obw_hz, d.snr_db)
+                    && !fragment_of(&cfg, d.freq, d.snr_db, c.center(), c.obw(), c.snr())
             });
-            match hit {
-                Some(i) => self.clusters[i].push(center, d.obw_hz, self.cfg.max_samples),
-                None => {
-                    let mut c = Cluster {
-                        centers: VecDeque::new(),
-                        obws: VecDeque::new(),
-                        evidence: 0,
-                        first_learned: d.time.start,
-                        source: ChannelSource::Learned,
-                        raster_hint: None,
-                    };
-                    c.push(center, d.obw_hz, self.cfg.max_samples);
-                    self.clusters.push(c);
-                }
+            let persistent = hit.is_some_and(|i| self.clusters[i].persistent(&cfg, cell));
+            let fragment = !persistent
+                && self.clusters.iter().any(|c| {
+                    c.published(&cfg, cell)
+                        && c.would_host(&cfg, center, d.obw_hz, d.snr_db)
+                        && c.overlaps_in_time(start_ns, end_ns, cfg.fragment_time_slack_ns)
+                });
+            let i = hit.unwrap_or_else(|| {
+                self.clusters.push(Cluster::new(d.time.start));
+                self.clusters.len() - 1
+            });
+            self.clusters[i].push(
+                Sample {
+                    center,
+                    obw: d.obw_hz,
+                    snr: d.snr_db,
+                    start_ns,
+                    end_ns,
+                    fragment,
+                },
+                &cfg,
+                cell,
+            );
+            if !fragment && self.clusters[i].published(&cfg, cell) {
+                self.flag_fragments(i);
             }
             self.merge();
+        }
+        for c in &mut self.clusters {
+            c.visible = c.published(&cfg, cell);
         }
         let changed = self.keys() != before;
         if changed {
@@ -274,25 +592,82 @@ impl ChannelPlan {
         changed
     }
 
+    /// Re-flags as fragments the samples of other clusters that published cluster `host` hosts
+    /// and overlaps in time (detections that arrived before their host). Clusters already
+    /// published or persistent are left alone: absorption never removes a channel.
+    fn flag_fragments(&mut self, host: usize) {
+        let (cfg, cell) = (self.cfg, self.f_cell_hz);
+        let h = &self.clusters[host];
+        let (he, hs) = (h.extent(), h.snr());
+        if !hs.is_finite() {
+            return;
+        }
+        let times: Vec<(i64, i64)> = h
+            .samples
+            .iter()
+            .filter(|s| !s.fragment)
+            .map(|s| (s.start_ns, s.end_ns))
+            .collect();
+        let hosted = |s: &Sample| {
+            !s.fragment
+                && fragment_of(&cfg, he, hs, s.center, s.obw, s.snr)
+                && times
+                    .iter()
+                    .any(|&(a, b)| s.overlaps(a, b, cfg.fragment_time_slack_ns))
+        };
+        for (k, c) in self.clusters.iter_mut().enumerate() {
+            if k == host || c.visible || !c.samples.iter().any(hosted) || c.persistent(&cfg, cell) {
+                continue;
+            }
+            for s in c.samples.iter_mut() {
+                if hosted(s) {
+                    s.fragment = true;
+                    c.clean = c.clean.saturating_sub(1);
+                }
+            }
+        }
+    }
+
     fn merge(&mut self) {
         let tol = 0.5 * self.f_cell_hz;
+        let cfg = self.cfg;
         'outer: loop {
             for i in 0..self.clusters.len() {
                 for j in i + 1..self.clusters.len() {
                     let (a, b) = (&self.clusters[i], &self.clusters[j]);
-                    if a.holds(b.center(), -tol) || b.holds(a.center(), -tol) {
-                        let b = self.clusters.remove(j);
-                        let a = &mut self.clusters[i];
-                        a.centers.extend(b.centers);
-                        a.obws.extend(b.obws);
-                        while a.centers.len() > self.cfg.max_samples {
-                            a.centers.pop_front();
-                            a.obws.pop_front();
-                        }
-                        a.evidence += b.evidence;
-                        a.first_learned = a.first_learned.min(b.first_learned);
-                        continue 'outer;
+                    if !(a.holds(b.center(), -tol) || b.holds(a.center(), -tol)) {
+                        continue;
                     }
+                    // Nested emitters of very different width, and a host and its fragments'
+                    // cluster, never pool.
+                    if !comparable_widths(&cfg, a.obw(), b.obw())
+                        || a.would_host_cluster(&cfg, b)
+                        || b.would_host_cluster(&cfg, a)
+                    {
+                        continue;
+                    }
+                    let b = self.clusters.remove(j);
+                    let a = &mut self.clusters[i];
+                    let shared = b
+                        .recent_intervals
+                        .iter()
+                        .filter(|k| a.recent_intervals.contains(k))
+                        .count() as u32;
+                    a.intervals += b.intervals.saturating_sub(shared);
+                    for k in b.recent_intervals {
+                        a.note_interval(k);
+                    }
+                    a.samples.extend(b.samples);
+                    a.trim(cfg.max_samples);
+                    a.evidence += b.evidence;
+                    a.clean += b.clean;
+                    a.detected_ns = a.detected_ns.saturating_add(b.detected_ns);
+                    a.visible |= b.visible;
+                    a.first_learned = a.first_learned.min(b.first_learned);
+                    if a.raster_hint.is_none() {
+                        a.raster_hint = b.raster_hint;
+                    }
+                    continue 'outer;
                 }
             }
             return;
@@ -334,14 +709,39 @@ pub fn raster_hint(center_hz: f64, spacing_hz: f64, origin_hz: f64, source: &str
 mod tests {
     use super::*;
 
-    fn det(center: f64, obw: f64, suspect: bool) -> DetectionExtent {
+    fn det_snr(center: f64, obw: f64, snr_db: f64, suspect: bool) -> DetectionExtent {
         let t = Timestamp::from_unix_nanos(1_000_000_000);
         DetectionExtent {
             time: TimeRange::new(t, t.saturating_add_nanos(1)),
             freq: FreqRange::centered(center, obw),
             obw_hz: obw,
+            snr_db,
             suspect,
         }
+    }
+
+    fn det(center: f64, obw: f64, suspect: bool) -> DetectionExtent {
+        det_snr(center, obw, 20.0, suspect)
+    }
+
+    /// A non-suspect detection starting `start_s` for `dur_s`.
+    fn det_at(center: f64, obw: f64, snr_db: f64, start_s: f64, dur_s: f64) -> DetectionExtent {
+        let t = Timestamp::from_unix_nanos((start_s * 1e9) as i64);
+        DetectionExtent {
+            time: TimeRange::new(t, t.saturating_add_nanos((dur_s * 1e9) as i64)),
+            freq: FreqRange::centered(center, obw),
+            obw_hz: obw,
+            snr_db,
+            suspect: false,
+        }
+    }
+
+    /// Deterministic uniform draw in [0, 1).
+    fn lcg(x: &mut u64) -> f64 {
+        *x = x
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (*x >> 11) as f64 / (1u64 << 53) as f64
     }
 
     #[test]
@@ -392,9 +792,210 @@ mod tests {
         assert_eq!(before[0].key, after[0].key);
         let h = after[0].raster_hint.as_ref().unwrap();
         assert!((h.offset_hz - 10_000.0).abs() < 1e-6 || (h.offset_hz + 2_500.0).abs() < 1e-6);
-        let restored =
-            ChannelPlan::from_channels(1, 6250.0, plan.version(), &after, LearnConfig::default());
+        let restored = ChannelPlan::from_channels(
+            1,
+            6250.0,
+            plan.version(),
+            &after,
+            &plan.evidence(),
+            LearnConfig::default(),
+        );
         assert_eq!(restored.channels()[0].key, after[0].key);
         assert_eq!(restored.version(), plan.version());
+    }
+
+    /// T-129: a wide station with narrow in-band flicker (before and after the host is
+    /// published) learns one channel of the station's OBW; short scattered flicker in a gap makes
+    /// no channel; overlapping neighbours partition at the midpoint.
+    #[test]
+    fn occupancy_channel_learning_merges_inband_fragments_into_one_station_channel() {
+        let cell = 6250.0;
+        let st = 101_300_000.0;
+        let mut dets = Vec::new();
+        // Flicker fragments inside the station first (before any host exists).
+        for k in 0..12 {
+            dets.push(det_snr(st - 80e3 + f64::from(k) * 15e3, 14e3, 4.5, false));
+        }
+        for k in 0..5 {
+            dets.push(det_snr(st + f64::from(k) * 300.0, 200e3, 17.0, false));
+            for j in 0..6 {
+                dets.push(det_snr(st - 60e3 + f64::from(j) * 20e3, 9.4e3, 4.6, false));
+            }
+        }
+        // Short random flicker in an idle gap over two days: scattered centres, durations,
+        // levels and times; never confident, never persistent.
+        let mut x = 0x5EED_u64;
+        for _ in 0..120 {
+            let c = 100_300_000.0 + 100e3 * lcg(&mut x);
+            let start = 3600.0 + 48.0 * 3600.0 * lcg(&mut x);
+            let dur = 0.005 + 0.045 * lcg(&mut x);
+            dets.push(det_at(c, 9.4e3, 3.5 + 2.5 * lcg(&mut x), start, dur));
+        }
+        // A weak narrow real carrier elsewhere (confident): its own channel.
+        for _ in 0..5 {
+            dets.push(det_snr(100_440_000.0, 37.5e3, 10.0, false));
+        }
+        let mut plan = ChannelPlan::new(1, cell, LearnConfig::default());
+        assert!(plan.learn(&dets));
+        let ch = plan.channels();
+        assert_eq!(ch.len(), 2, "{ch:?}");
+        let f = ch[1].key.freq(cell);
+        assert!(f.lo_hz <= st - 95e3 && f.hi_hz >= st + 95e3, "{f:?}");
+        assert!(f.width_hz() <= 220e3, "{f:?}");
+        // More fragments later never narrow it.
+        let v = plan.version();
+        let late: Vec<_> = (0..50)
+            .map(|k| det_snr(st - 50e3 + f64::from(k % 10) * 10e3, 9.4e3, 5.0, false))
+            .collect();
+        assert!(!plan.learn(&late));
+        assert_eq!(plan.version(), v);
+
+        // Dense FM: three stations 200 kHz apart whose OBW includes the neighbours' skirts.
+        let mut dense = Vec::new();
+        for k in 0..4 {
+            for s in [-200e3, 0.0, 200e3] {
+                dense.push(det_snr(st + s + f64::from(k) * 100.0, 300e3, 18.0, false));
+            }
+        }
+        let mut plan = ChannelPlan::new(1, cell, LearnConfig::default());
+        plan.learn(&dense);
+        let ch = plan.channels();
+        assert_eq!(ch.len(), 3, "{ch:?}");
+        for (c, s) in ch.iter().zip([-200e3, 0.0, 200e3]) {
+            let f = c.key.freq(cell);
+            assert!(f.lo_hz < st + s && f.hi_hz > st + s, "{f:?}");
+            assert!(f.width_hz() <= 215e3, "{f:?}");
+        }
+        assert!(ch.windows(2).all(|w| w[0].key.hi_cell <= w[1].key.lo_cell));
+    }
+
+    /// T-129 review: a steady 5 dB narrow carrier in a gap is persistent and publishes; a
+    /// persistent narrow emitter 6 dB under a station, inside its skirt, gets its channel; a
+    /// channel published before its host appears is never absorbed.
+    #[test]
+    fn occupancy_channel_learning_publishes_persistent_weak_and_skirt_emitters() {
+        let (cell, cfg) = (6250.0, LearnConfig::default());
+        let gap = 100_350_000.0;
+        let steady = |k: u32| -> Vec<DetectionExtent> {
+            (0..3)
+                .map(|j| {
+                    let t = 3600.0 + 900.0 * f64::from(k) + 2.0 * f64::from(j);
+                    det_at(gap + f64::from(j - 1) * 300.0, 9.4e3, 5.0, t, 1.0)
+                })
+                .collect()
+        };
+        let mut plan = ChannelPlan::new(1, cell, cfg);
+        assert!(!plan.learn(&steady(0)), "one visit is not persistent");
+        assert!(!plan.learn(&steady(1)));
+        assert!(plan.learn(&steady(2)));
+        let ch = plan.channels();
+        assert_eq!(ch.len(), 1, "{ch:?}");
+        let f = ch[0].key.freq(cell);
+        assert!(
+            f.lo_hz <= gap - 4e3 && f.hi_hz >= gap + 4e3 && f.width_hz() <= 3.0 * cell,
+            "{f:?}"
+        );
+
+        let st = 101_300_000.0;
+        let mut plan = ChannelPlan::new(1, cell, cfg);
+        // A narrow 12 dB carrier at −120 kHz, published on its own.
+        assert!(plan.learn(&[
+            det_at(st - 120e3, 9.4e3, 12.0, 3605.0, 1.0),
+            det_at(st - 120e3, 9.4e3, 12.0, 3625.0, 1.0),
+        ]));
+        // Then a 16 dB station (344 kHz 99 % OBW) over the same time, with a 10 dB narrow
+        // emitter at +100 kHz inside its skirt on every visit.
+        let visit = |k: u32| {
+            let t0 = 3600.0 + 900.0 * f64::from(k);
+            let mut v = vec![
+                det_at(st, 344e3, 16.0, t0, 60.0),
+                det_at(st + 500.0, 344e3, 16.5, t0 + 60.0, 60.0),
+            ];
+            for j in 0..4 {
+                v.push(det_at(
+                    st + 100e3,
+                    9.4e3,
+                    10.0,
+                    t0 + 5.0 + 20.0 * f64::from(j),
+                    1.0,
+                ));
+            }
+            v
+        };
+        let narrow = |ch: &[Channel], f_hz: f64| {
+            ch.iter().any(|c| {
+                let f = c.key.freq(cell);
+                f.lo_hz < f_hz && f.hi_hz > f_hz && f.width_hz() <= 3.0 * cell
+            })
+        };
+        plan.learn(&visit(0));
+        let ch = plan.channels();
+        assert_eq!(
+            ch.len(),
+            2,
+            "one visit: station + the earlier carrier: {ch:?}"
+        );
+        assert!(narrow(&ch, st - 120e3), "{ch:?}");
+        assert!(!narrow(&ch, st + 100e3), "{ch:?}");
+        for k in 1..4 {
+            plan.learn(&visit(k));
+        }
+        let ch = plan.channels();
+        assert_eq!(ch.len(), 3, "{ch:?}");
+        assert!(narrow(&ch, st - 120e3) && narrow(&ch, st + 100e3), "{ch:?}");
+        let wide = ch
+            .iter()
+            .map(|c| c.key.freq(cell))
+            .find(|f| f.width_hz() > 300e3);
+        assert!(
+            wide.is_some_and(|f| f.lo_hz <= st - 170e3 && f.hi_hz >= st + 170e3),
+            "{ch:?}"
+        );
+    }
+
+    /// T-129 review: restoring the plan mid-run (with its persisted evidence, or from an older
+    /// plan without it) keeps the station's width and `first_learned` while fragments arrive,
+    /// including fragments that come before the station's next detection.
+    #[test]
+    fn occupancy_channel_plan_restart_mid_run_keeps_station_width_and_first_learned() {
+        let (cell, cfg, st) = (6250.0, LearnConfig::default(), 101_300_000.0);
+        let station = |t: f64| det_at(st, 344e3, 17.0, t, 10.0);
+        let frags = |t: f64| {
+            (0..6).map(move |j| {
+                det_at(
+                    st - 60e3 + 20e3 * f64::from(j),
+                    9.4e3,
+                    4.5,
+                    t + 1.0 + f64::from(j),
+                    0.02,
+                )
+            })
+        };
+        let mut plan = ChannelPlan::new(1, cell, cfg);
+        let mut first = vec![station(100.0), station(110.0)];
+        first.extend(frags(100.0));
+        assert!(plan.learn(&first));
+        let before = plan.channels();
+        assert_eq!(before.len(), 1, "{before:?}");
+        for evidence in [plan.evidence(), Vec::new()] {
+            let mut r =
+                ChannelPlan::from_channels(1, cell, plan.version(), &before, &evidence, cfg);
+            let mut later: Vec<_> = frags(120.0).chain(frags(121.0)).collect();
+            later.push(station(120.0));
+            later.extend(frags(130.0));
+            later.push(station(130.0));
+            later.extend(frags(131.0));
+            assert!(
+                !r.learn(&later),
+                "evidence {}: {:?}",
+                evidence.len(),
+                r.channels()
+            );
+            let after = r.channels();
+            assert_eq!(after.len(), 1, "{after:?}");
+            assert_eq!(after[0].key, before[0].key);
+            assert_eq!(after[0].first_learned, before[0].first_learned);
+            assert_eq!(r.version(), plan.version());
+        }
     }
 }
