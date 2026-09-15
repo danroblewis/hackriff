@@ -1306,7 +1306,11 @@ tasks:
   - id: T-078
     milestone: M0b
     title: Potential vs confirmed signal inventory (candidate/confirmed/deleted, auto-confirm, recurrence stats, promote/delete API)
-    status: in-progress
+    status: done
+    commit: "a5a1854 (merge after the T-064 verification run)"
+    result: "lifecycle_state candidate/confirmed/deleted with append-only history (new/previous state, auto|user, actor = rule id hk-pipeline/confirm@1 or token fingerprint, reason, time); never back to candidate; only users delete. Auto-confirm (ConfirmPolicy defaults): decoded transmitter identity from >= 1 CRC-valid decode (blind other:hk-framing signature excluded), or one closed track >= 2 s on air, duty >= 0.8, <= 50 % suspect, >= 1 trust-confirmed detection. Delete hides the entry but keeps row/detections/tracks/links/history (visible with state=deleted); clustering ignores deleted entries so re-detection creates a new candidate; a held decoded identity moves to the new entry; no undelete. API: GET /api/inventory?state=candidate,confirmed,deleted (default candidate+confirmed) with state, lifecycle and recurrence (occurrences, appearances, span, on-air, duty, last 8 appearances); GET /api/inventory/{id}; POST /api/inventory/{id}/promote and DELETE /api/inventory/{id} with optional {reason}, Bearer, audited inventory_promote/inventory_delete, {error, code} 400/404/503. Old databases gain the column/table on open. Mock-SDR e2e: 101.3 MHz FM auto-confirms (continuous track + RDS PI decode); FSK sensor (duty ~0.22) stays candidate, promote -> confirmed, delete leaves list, later capture -> new candidate. hk-model 5, hk-api 3, confirm-rule unit test."
+    followups:
+      - "FM station and FSK sensor each appear as two inventory entries (track-based and decoder-based) - existing clustering behaviour -> T-082"
     deps: [T-039, T-052]
     parallel_group: W
     use_cases: [AWARE-053, AWARE-042]
@@ -1359,6 +1363,21 @@ tasks:
     effort: high
     core_interface: true
     hold: "queued after T-078/T-079/T-080 (user UI/inventory priority), ahead of T-053/T-056/T-067"
+  - id: T-082
+    milestone: M0b
+    title: One inventory entry per physical emitter (merge track-based and decoder-based entries)
+    status: todo
+    deps: [T-078]
+    parallel_group: W
+    use_cases: [AWARE-053, SIGNAL-062]
+    found_by: "T-078 agent 2026-09-14: FM station and FSK sensor each appear twice (track entry + decoder entry)"
+    acceptance: "entity resolution links a decoder-based emitter to the track-based emitter of the same emission (overlapping frequency/extent and time, refined tuning), so the inventory shows one entry per physical emitter with both track and decode evidence; lifecycle state/history carried correctly on merge; mock-SDR tests: FM station and FSK sensor each appear once; distinct nearby emitters stay separate"
+    area: crates/hk-model (cluster/entity resolution), crates/hk-pipeline/src/inventory.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "after T-078 merges; ideally before T-080 so the UI shows single rows (or T-080 proceeds and picks it up later)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
