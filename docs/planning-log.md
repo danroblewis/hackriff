@@ -1846,3 +1846,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Whether it is safe on by default given Jetson disk limits.
     - Export racing with eviction.
     - Real-time back-pressure.
+- **B0.418 T-172 committed (0e3d429).** Coordinator-reviewed: diff limited to `channels.rs`, `engine.rs`, `hk-pipeline` `occupancy.rs` and the ADR §2.6 wording.
+  - **Twin lookup:** sorted by (level-0 cell, start) with a running max end time and a binary-searched ±slack window.
+    - Timed ratio 18 h→72 h: 4.61 after, against a quadratic 15.25 before (72 h: 0.597 s → 0.032 s).
+    - The test asserts ratio < 8 using best-of-N timing. Because wall-clock ratios can flake under load, it goes in the nextest heavy-serial group at merge.
+  - **Slack:** now `t_cell_ns`.
+  - **Tuning check:** a twin must have its own LO more than 15 kHz outside its extent, using the provenance `tune.center_hz` (cached, no schema change). A twin with unknown tuning clears nothing.
+  - **New test:** covers both the artefact near B's LO and a genuine carrier.
+  - **`occupancy_sparse_visits` unchanged:** 433.400 at 0.586 and 433.375 at 0.084, both inside their CIs.
+  - **Tests:** hk-context 83, hk-pipeline 5, hk-detect 6. Lint clean.
+  - **Merge:** after the T-156 full check.
