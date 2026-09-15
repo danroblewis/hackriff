@@ -39,12 +39,14 @@ pub struct GainState {
 }
 
 impl GainState {
-    /// A stable non-zero 32-bit key of this gain state (FNV-1a of the settings), the baseline
-    /// gain-state key (T-132; 0 is reserved for unknown).
+    /// A stable non-zero 32-bit key of this gain state (FNV-1a of the settings quantised to whole
+    /// dB, −0 as +0), the baseline gain-state key (T-132; 0 is reserved for unknown).
     pub fn key(&self) -> u32 {
+        // `+ 0.0` turns −0.0 into +0.0.
+        let q = |db: f32| (db.round() + 0.0).to_bits().to_le_bytes();
         let mut b = [0u8; 9];
-        b[..4].copy_from_slice(&self.lna_db.to_bits().to_le_bytes());
-        b[4..8].copy_from_slice(&self.vga_db.to_bits().to_le_bytes());
+        b[..4].copy_from_slice(&q(self.lna_db));
+        b[4..8].copy_from_slice(&q(self.vga_db));
         b[8] = u8::from(self.amp_on);
         let h = b.iter().fold(0x811c_9dc5_u32, |h, &x| {
             (h ^ u32::from(x)).wrapping_mul(0x0100_0193)
@@ -411,6 +413,21 @@ impl RegridPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-132 review: the gain-state key is quantised to whole dB and −0 equals +0.
+    #[test]
+    fn gain_state_key_is_quantised_to_whole_db() {
+        let g = |lna_db, vga_db, amp_on| GainState {
+            lna_db,
+            vga_db,
+            amp_on,
+        };
+        assert_eq!(g(16.0, 20.0, false).key(), g(16.3, 19.8, false).key());
+        assert_eq!(g(0.0, 0.0, false).key(), g(-0.0, -0.2, false).key());
+        assert_ne!(g(16.0, 20.0, false).key(), g(24.0, 20.0, false).key());
+        assert_ne!(g(16.0, 20.0, false).key(), g(16.0, 20.0, true).key());
+        assert_ne!(g(0.0, 0.0, false).key(), 0);
+    }
 
     fn tone_frame(n: usize, bin: usize, floor: f32, tone: f32) -> Vec<f32> {
         let mut v = vec![floor; n];

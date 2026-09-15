@@ -167,11 +167,12 @@ impl From<&SlotStats> for DecayedStats {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum LevelClass {
-    /// Intervals with no occupied visit (level = idle level above the floor), or with too few
-    /// occupied visits for an occupied level (occupancy only). Version-1 files load as this.
+    /// Intervals with no occupied weight (level = idle level above the floor). Version-1 files
+    /// load as this.
     #[default]
     Idle,
-    /// Intervals with enough occupied visits (level = occupied level above the floor).
+    /// Intervals with any occupied weight (level = occupied level above the floor; with too few
+    /// occupied visits for a level, occupancy only).
     Occupied,
 }
 

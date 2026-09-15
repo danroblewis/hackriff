@@ -39,6 +39,14 @@ counter_group!(
         baseline_writes,
         /// Store or database errors.
         errors,
+        /// Folds whose learning the baseline memory cap refused (novelty still scored; T-132).
+        refused_folds,
+        /// Baseline engines saved and unloaded by the memory cap (T-132).
+        unloaded_engines,
+        /// Folds under a gain state beyond the subject's kept gain slots: not learned (T-132).
+        gain_overflow_folds,
+        /// Gauge: approximate heap bytes of the loaded baselines (T-132).
+        memory_bytes,
     }
 );
 

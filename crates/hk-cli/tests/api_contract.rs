@@ -285,6 +285,15 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     let (st, v) = get(addr, "/api/status");
     assert_eq!(st, 200, "{v}");
     assert!(is_object(&v), "{v}");
+    // T-132: the baseline memory bound (docs/api.md `attention`).
+    for field in [
+        "memory_bytes",
+        "unloaded_engines",
+        "refused_folds",
+        "gain_overflow_folds",
+    ] {
+        assert!(v["attention"][field].is_u64(), "attention.{field}: {v}");
+    }
     // T-056: compute providers, chosen once per run (docs/api.md `compute`).
     let compute = &v["compute"];
     assert!(is_object(&compute["options"]), "{v}");

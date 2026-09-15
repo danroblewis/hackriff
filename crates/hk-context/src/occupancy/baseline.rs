@@ -56,7 +56,9 @@
 //!   (±`z_min`) level and occupancy z against the reference — the slot's own hour-of-day mean once
 //!   that holds [`SEQ_OWN_MIN_VISITS`] visits (so a daily pattern is not a shift), else the chosen
 //!   pool — subject-wide ([`SubjectBaseline::seq`]) and per hour of day
-//!   ([`SubjectBaseline::seq_hod`]). Either building (≥ h/2) stops reference learning; an
+//!   ([`SubjectBaseline::seq_hod`]); the level slack is widened by that mean's standard error
+//!   (k + 1/√n), so an unchanged channel's biased pool mean does not drift the test up. Either
+//!   building (≥ h/2) stops reference learning; an
 //!   hour-of-day crossing h latches that hour. So a weak persistent interferer, below the novelty z
 //!   on every fold, stops entering the reference within a few folds instead of draining into it
 //!   until hour-of-day maturity.
@@ -106,8 +108,10 @@ pub const REFERENCE_LEARN_MAX_NOVELTY: f64 = 0.7;
 /// visit on a quiet channel is occupancy evidence, not a level.
 pub const LEVEL_MIN_OCCUPIED: u64 = 3;
 /// Level visits the slot's own hour-of-day reference needs before the sequential test uses its
-/// mean (one parked day of 15-min folds).
-pub const SEQ_OWN_MIN_VISITS: f64 = 4.0;
+/// mean (four parked days of 15-min folds). The mean's standard error is σ/√n: at 4 visits it is
+/// 0.5σ, equal to the CUSUM slack, so about a third of an unchanged channel's hours drifted up and
+/// held their learning off (T-132 review); at 16 it is 0.25σ.
+pub const SEQ_OWN_MIN_VISITS: f64 = 16.0;
 /// Observed seconds the own hour-of-day reference needs before the sequential occupancy test uses
 /// it.
 pub const SEQ_OWN_MIN_OBSERVED_S: f64 = 3600.0;
@@ -834,12 +838,16 @@ impl BaselineEngine {
             let (own_level, own_occ) = pools(sub, slot, gain, BaselineCopy::Reference);
             let hr = res_index(BaselineResolution::HourOfDay);
             let zc = ncfg.z_min;
+            // The pool mean is itself uncertain (standard error σ/√n): the level slack is widened
+            // by it, so an unchanged channel's biased own-hour mean does not drift the test up.
+            let level_pool = if own_level[hr].n >= SEQ_OWN_MIN_VISITS {
+                own_level[hr]
+            } else {
+                ref_level
+            };
+            let k_level = policy.cusum_k_sigma + 1.0 / level_pool.n.max(1.0).sqrt();
             let lz = obs.level_db.and_then(|l| {
-                let mean = if own_level[hr].n >= SEQ_OWN_MIN_VISITS {
-                    own_level[hr].mean_db()
-                } else {
-                    ref_level.mean_db()
-                }?;
+                let mean = level_pool.mean_db()?;
                 let sigma = ref_level.std_db().unwrap_or(0.0).max(ncfg.sigma_floor_db);
                 Some(((l - mean) / sigma).clamp(-zc, zc))
             });
@@ -864,8 +872,8 @@ impl BaselineEngine {
             let k = policy.cusum_k_sigma;
             for c in [&mut sub.seq, &mut sub.seq_hod[hod]] {
                 if let Some(z) = lz {
-                    c.level_pos = (c.level_pos + z - k).max(0.0);
-                    c.level_neg = (c.level_neg - z - k).max(0.0);
+                    c.level_pos = (c.level_pos + z - k_level).max(0.0);
+                    c.level_neg = (c.level_neg - z - k_level).max(0.0);
                 }
                 if let Some(z) = oz {
                     c.occ_pos = (c.occ_pos + z - k).max(0.0);
@@ -1061,6 +1069,10 @@ pub struct Baselines {
     memory_cap: Option<usize>,
     refused_folds: u64,
     unloaded_engines: u64,
+    gain_overflow_folds: u64,
+    /// Bumped whenever engines leave memory (cap unload, quota eviction): a read planned under an
+    /// older generation may hold a stale disk copy and is re-planned, not inserted.
+    generation: u64,
 }
 
 /// What [`Baselines::load_plan`] hands to the unlocked read: the store and the keys already in
@@ -1071,7 +1083,12 @@ pub struct LoadPlan {
     pub store: BaselineStore,
     /// Keys already loaded (not read again).
     pub loaded: BTreeSet<BaselineKey>,
+    /// [`Baselines`]' unload generation at plan time.
+    pub generation: u64,
 }
+
+/// Attempts [`Baselines::load_site_outside_lock`] makes before reading under the lock.
+const LOAD_OUTSIDE_LOCK_ATTEMPTS: usize = 3;
 
 impl Baselines {
     /// A set over `store` (None = memory only) on grid `scheme` × `cell_factor`.
@@ -1092,7 +1109,14 @@ impl Baselines {
             memory_cap: None,
             refused_folds: 0,
             unloaded_engines: 0,
+            gain_overflow_folds: 0,
+            generation: 0,
         }
+    }
+
+    /// Replaces the memory cap (`None` = unbounded); applies from the next fold or load.
+    pub fn set_memory_cap(&mut self, bytes: Option<usize>) {
+        self.memory_cap = bytes;
     }
 
     /// Bounds the loaded engines to about `bytes` ([`BaselineState::approx_bytes`]): least
@@ -1149,6 +1173,7 @@ impl Baselines {
                 return Err(err);
             }
             self.unloaded_engines += 1;
+            self.generation += 1;
         }
         Ok(())
     }
@@ -1204,20 +1229,35 @@ impl Baselines {
         if let Some(cap) = self.memory_cap {
             let growth = self.engines[&key].growth_of(obs);
             self.unload_to(cap.saturating_sub(growth), Some(key))?;
-            let e = &self.engines[&key];
             if growth > 0 && self.memory_bytes() + growth > cap {
+                // Learning is refused, novelty is not: score against what is loaded, so an
+                // emitter appearing under memory pressure still raises novelty.
                 self.refused_folds += 1;
-                let m = e
-                    .state
-                    .subjects
-                    .get(&obs.subject)
-                    .map_or(Maturity::Immature { observed_s: 0.0 }, |s| {
-                        maturity(s, e.slot(obs.t))
-                    });
-                return Ok(FoldOutcome::none(obs, m));
+                return Ok(FoldOutcome {
+                    novelty: self.engines[&key].novelty_of(obs),
+                    change_point: None,
+                    accrued: false,
+                    accrued_reference: false,
+                });
             }
         }
-        Ok(self.engines.get_mut(&key).expect("loaded").observe(obs))
+        let e = self.engines.get_mut(&key).expect("loaded");
+        let out = e.observe(obs);
+        if obs.usable()
+            && e.state
+                .subjects
+                .get(&obs.subject)
+                .is_some_and(|s| gain_index(s, obs.gain, obs.level_class()).is_none())
+        {
+            self.gain_overflow_folds += 1;
+        }
+        Ok(out)
+    }
+
+    /// Folds under a gain state beyond the subject's [`MAX_GAIN_STATES`] kept slots (scored, not
+    /// learned).
+    pub fn gain_overflow_folds(&self) -> u64 {
+        self.gain_overflow_folds
     }
 
     /// Engines loaded or created.
@@ -1236,6 +1276,7 @@ impl Baselines {
         Some(LoadPlan {
             store: self.store.clone()?,
             loaded: self.engines.keys().copied().collect(),
+            generation: self.generation,
         })
     }
 
@@ -1262,19 +1303,26 @@ impl Baselines {
 
     /// Phase 3 (under the lock, no I/O): inserts the read states whose keys are still absent (a
     /// fold may have loaded or created one meanwhile; memory is newer) and applies the memory cap.
+    /// Returns `false` and inserts nothing when engines left memory since `plan` (a cap unload or
+    /// quota eviction may have saved a newer file, or deleted the site, after the read): the
+    /// caller re-plans.
     pub fn insert_loaded(
         &mut self,
+        plan: &LoadPlan,
         states: Vec<BaselineState>,
         utc_offset_min: i16,
-    ) -> Result<(), BaselineStoreError> {
+    ) -> Result<bool, BaselineStoreError> {
+        if plan.generation != self.generation {
+            return Ok(false);
+        }
         for state in states {
             self.engines
                 .entry(state.key)
                 .or_insert_with(|| BaselineEngine::new(state, utc_offset_min, self.cfg));
         }
         match self.memory_cap {
-            Some(cap) => self.unload_to(cap, None),
-            None => Ok(()),
+            Some(cap) => self.unload_to(cap, None).map(|()| true),
+            None => Ok(true),
         }
     }
 
@@ -1293,17 +1341,28 @@ impl Baselines {
         baselines: &Mutex<Baselines>,
         site: hk_model::ids::SiteId,
         utc_offset_min: i16,
-        read: impl FnMut(
+        mut read: impl FnMut(
             &BaselineStore,
             &BaselineKey,
         ) -> Result<Option<BaselineState>, BaselineStoreError>,
     ) -> Result<(), BaselineStoreError> {
         let lock = || baselines.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(plan) = lock().load_plan() else {
-            return Ok(());
-        };
-        let states = Self::read_site(&plan, site, read)?;
-        lock().insert_loaded(states, utc_offset_min)
+        for _ in 0..LOAD_OUTSIDE_LOCK_ATTEMPTS {
+            let Some(plan) = lock().load_plan() else {
+                return Ok(());
+            };
+            let states = Self::read_site(&plan, site, &mut read)?;
+            if lock().insert_loaded(&plan, states, utc_offset_min)? {
+                return Ok(());
+            }
+        }
+        // Engines kept leaving memory during the reads: read under the lock (never stale).
+        lock().load_site(site, utc_offset_min)
+    }
+
+    /// The memory cap in force (`None` = unbounded).
+    pub fn memory_cap(&self) -> Option<usize> {
+        self.memory_cap
     }
 
     /// Loads every stored key of `site` not yet in memory (API listing). Reads the disk under the
@@ -1351,6 +1410,7 @@ impl Baselines {
         let evicted = store.enforce_quota(self.current)?;
         if !evicted.is_empty() {
             self.engines.retain(|k, _| !evicted.contains(&k.site));
+            self.generation += 1;
         }
         Ok(n)
     }
@@ -2050,7 +2110,6 @@ mod tests {
         let mut e = engine();
         let ch = channel(3);
         let mut last_ref_h = 0.0;
-        let mut accrued_day_23 = 0;
         for q in 0..(24 * 4 * 40) {
             let hours = f64::from(q) / 4.0;
             let p = 0.2 + 0.003 * hours / 24.0;
@@ -2070,7 +2129,6 @@ mod tests {
             let out = e.observe(&o);
             if out.accrued_reference {
                 last_ref_h = hours;
-                accrued_day_23 += usize::from((23.0..24.0).contains(&(hours / 24.0)));
             }
         }
         let sub = &e.state.subjects[&ch];
@@ -2084,7 +2142,6 @@ mod tests {
         );
         // T-132: the sequential learning test notices the creep (+0.03 FCO against its own
         // hour's reference by then) a little before hour-of-day maturity.
-        let _ = accrued_day_23;
         assert!(last_ref_h > 20.0 * 24.0, "still learning for weeks");
         assert!(
             last_ref_h < 24.0 * 24.0,
@@ -2302,6 +2359,47 @@ mod tests {
         );
     }
 
+    /// T-132 review: on an unchanged channel (the weak-interferer generator without the
+    /// interferer) the sequential learning test must not hold an hour's learning off: over 30
+    /// parked days every hour of day reaches hour-of-day maturity and none is latched. Several
+    /// seeds, since a small own-hour pool biases a third of the hours.
+    #[test]
+    fn baseline_stationary_channel_matures_every_hour_without_latching() {
+        let mut worst = (usize::MAX, f64::INFINITY, 0u32);
+        for seed in 0..4_u64 {
+            let mut rng = Rng(0x1330 + seed);
+            let mut e = engine();
+            let mut subject = None;
+            for q in 0..(24 * 4 * 30) {
+                let hours = f64::from(q) / 4.0;
+                let row = leveled_row(hours, 0.5, -100.0, 2.0, 12.0 + rng.normal());
+                let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+                subject = Some(o.subject);
+                e.observe(&o);
+            }
+            let sub = &e.state.subjects[&subject.unwrap()];
+            let hod_s: Vec<f64> = (0..24)
+                .map(|h| hour_of_day_observed_s(sub, e.slot(at(f64::from(h)))))
+                .collect();
+            let mature = hod_s
+                .iter()
+                .filter(|s| **s >= MATURITY_MIN_OBSERVED_S)
+                .count();
+            let min_h = hod_s.iter().copied().fold(f64::INFINITY, f64::min) / H;
+            println!(
+                "T-132 stationary channel seed {seed}: {mature}/24 hours mature, least-learned \
+                 hour {min_h:.2} h, latched hours {:#x}",
+                sub.latched_hours
+            );
+            if mature < worst.0 {
+                worst = (mature, min_h, sub.latched_hours);
+            }
+            worst.2 |= sub.latched_hours;
+        }
+        assert_eq!(worst.0, 24, "every hour matures: {worst:?}");
+        assert_eq!(worst.2, 0, "no hour latched: {worst:?}");
+    }
+
     /// T-132 item 2: a memory cap unloads (saves) least recently visited engines and loses no fold;
     /// with only the active key loaded, growth past the cap is refused.
     #[test]
@@ -2450,6 +2548,122 @@ mod tests {
         );
         assert!(b.engines().any(|e| e.state.key.site == other));
         drop(b);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// T-132 review: a fold the memory cap refuses skips learning only; its novelty is still
+    /// scored against what is loaded, so an emitter appearing under memory pressure is not lost.
+    #[test]
+    fn baseline_refused_fold_still_scores_novelty() {
+        let site = SiteKey::Site(SiteId::new());
+        let mut b = Baselines::new(BaselineConfig::default(), 1, 16, None);
+        for q in 0..(24 * 4 * 3) {
+            let hours = f64::from(q) / 4.0;
+            let row = leveled_row(hours, 0.0, -100.0, 2.0 + 0.3 * ((q % 5) as f64 - 2.0), 25.0);
+            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            b.observe(site, 0, CalKey::Uncalibrated, &o).unwrap();
+        }
+        let loaded = b.memory_bytes();
+        b.set_memory_cap(Some(loaded));
+        // An emitter 25 dB above the floor: a new occupied-level series, so the fold would grow.
+        let (_, _, o) = from_occupancy_stat(&leveled_row(72.0, 0.8, -100.0, 2.0, 25.0), 0).unwrap();
+        let out = b.observe(site, 0, CalKey::Uncalibrated, &o).unwrap();
+        let before_learning = b.memory_bytes();
+        b.set_memory_cap(None);
+        let control = b.observe(site, 0, CalKey::Uncalibrated, &o).unwrap();
+        println!(
+            "T-132 refused fold: novelty {:.3} (level z {:?}), refused {}, memory {loaded} → \
+             {before_learning} B; uncapped control novelty {:.3}",
+            out.novelty.novelty,
+            out.novelty.level_z,
+            b.refused_folds(),
+            control.novelty.novelty
+        );
+        assert_eq!(b.refused_folds(), 1);
+        assert!(!out.accrued && !out.accrued_reference, "learning refused");
+        assert_eq!(before_learning, loaded, "nothing grew");
+        assert!(
+            out.novelty.novelty >= 0.7 && out.novelty.level_z.is_some_and(|z| z >= 3.0),
+            "novelty kept: {:?}",
+            out.novelty
+        );
+        assert!(control.accrued);
+    }
+
+    /// T-132 review: a cap unload between the unlocked read's plan and its insert must not
+    /// resurrect the stale disk copy the read returned (it would later be marked dirty and
+    /// overwrite the newer file); the load re-plans and reads the newer file.
+    #[test]
+    fn baseline_unload_between_plan_and_insert_does_not_resurrect_stale_state() {
+        let root = std::env::temp_dir().join(format!("hk-bl-gen-{}", SiteId::new()));
+        let store = BaselineStore::open(&root).unwrap();
+        let mut rng = Rng(0x1328);
+        let (a, other) = (SiteKey::Site(SiteId::new()), SiteKey::Site(SiteId::new()));
+        let SiteKey::Site(a_id) = a else {
+            unreachable!()
+        };
+        let observed_of = |b: &Baselines| -> Option<f64> {
+            b.engines().find(|e| e.state.key.site == a_id).map(|e| {
+                e.state
+                    .subjects
+                    .values()
+                    .flat_map(|s| s.gains.iter().flat_map(|g| &g.reference))
+                    .map(|r| r.observed_s)
+                    .sum()
+            })
+        };
+        let mut fold = |h: f64| occ_fold(channel(0), h, 0.2, &mut rng);
+        {
+            // On disk: one fold (900 s).
+            let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(store.clone()));
+            b.observe(a, 0, CalKey::Uncalibrated, &fold(0.0)).unwrap();
+            b.flush(at(0.5), true).unwrap();
+        }
+        let (f1, f2) = (fold(1.0), fold(2.0));
+        let shared = Mutex::new(Baselines::new(
+            BaselineConfig::default(),
+            1,
+            16,
+            Some(store.clone()),
+        ));
+        let mut reads = 0;
+        Baselines::load_site_outside_lock_with(&shared, a_id, 0, |st, k| {
+            reads += 1;
+            let read = st.load(k);
+            if reads == 1 {
+                // While this (stale) copy is in flight: a fold loads and grows the key, then the
+                // cap unloads it (saving 1800 s).
+                let mut b = shared.lock().unwrap();
+                b.observe(a, 0, CalKey::Uncalibrated, &f1).unwrap();
+                b.set_memory_cap(Some(1));
+                let _ = b.observe(other, 0, CalKey::Uncalibrated, &f2).unwrap();
+                b.set_memory_cap(None);
+                assert_eq!(observed_of(&b), None, "unloaded");
+            }
+            read
+        })
+        .unwrap();
+        let in_memory = observed_of(&shared.lock().unwrap());
+        // A later fold marks it dirty and it is written back.
+        {
+            let mut b = shared.lock().unwrap();
+            b.observe(a, 0, CalKey::Uncalibrated, &fold(3.0)).unwrap();
+            b.flush(at(3.5), true).unwrap();
+        }
+        let mut fresh = Baselines::new(BaselineConfig::default(), 1, 16, Some(store));
+        fresh.load_site(a_id, 0).unwrap();
+        let on_disk = observed_of(&fresh);
+        println!(
+            "T-132 generation: {reads} reads; loaded {in_memory:?} s (stale copy 900 s); after one \
+             more fold on disk {on_disk:?} s"
+        );
+        assert!(reads >= 2, "re-planned");
+        assert_eq!(
+            in_memory,
+            Some(1800.0),
+            "the newer file, not the stale read"
+        );
+        assert_eq!(on_disk, Some(2700.0), "no fold lost");
         let _ = std::fs::remove_dir_all(root);
     }
 
