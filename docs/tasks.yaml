@@ -1247,7 +1247,12 @@ tasks:
   - id: T-075
     milestone: M0b
     title: Short-burst time-domain detector (ADS-B squitters, OOK bursts below STFT resolution)
-    status: in-progress
+    status: done
+    commit: "44f9130 (merge after T-071 verification; coordinator full check follows)"
+    result: "crates/hk-detect/src/burst.rs fed every chunk from detect.rs; bursts stored as untracked detections. 8 us power blocks, 32 us sliding window vs median noise over ~66 ms of windows, threshold from 0.01/s false-alarm target, 300 us quiet ends a burst, max 5 ms (less if STFT would see it), 500 rows/s cap, short FFT coarse centre. SNR 3/6/10/20 dB: 24/24 ADS-B squitters, 23/23 OOK bursts; start error mean 2-11 us, worst 34 us (ADS-B 3 dB); centre <= 1.2 kHz; end times up to 292 us late after noise spikes. 0 false alarms in 6 s noise (0.1/s target gave ~1 per 10 s -> default 0.01/s). 8/30 ms tone bursts and a steady carrier: no burst rows, STFT still detects, no overlap. One core: 212x RT @2.4 Msps, 139x @10, 82x @20, no per-sample allocation. SIGNAL-001 requires all 16 squitters blind within 50 us, one row each (worst 7.2 us), limit note removed. Agent ran targeted tests only (burst 4/4, SIGNAL-001 2/2, lint)."
+    followups:
+      - "burst rows add to detection counts and the detections counter - acceptance tests asserting exact counts may shift; add separate burst counters in stats.rs"
+      - "burst end-time accuracy (up to 292 us late after a noise spike) - consider a hysteresis/energy-tail end rule"
     deps: [T-072]
     parallel_group: S
     use_cases: [SIGNAL-001, AWARE-036]
