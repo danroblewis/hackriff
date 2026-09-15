@@ -329,18 +329,36 @@ struct SiteSightings {
     /// T-138: first sightings waiting for (or holding) the persistent single-emitter rule, by
     /// emitter; bounded by [`PERSIST_HORIZON_S`] and [`PERSIST_MAX_PENDING`].
     pending: BTreeMap<EmitterId, PendingEmitter>,
-    /// T-138: what the latest close observed (`note_emitters_seen`): its end, the observed bands
-    /// and the inventory emitters seen in the interval.
-    seen: Option<(Timestamp, Vec<FreqRange>, Vec<EmitterSeen>)>,
+    /// T-138: what the latest close observed (`note_emitters_seen`).
+    seen: Option<SeenAtClose>,
 }
 
-/// T-138: how long after its first sighting a new emitter can still be confirmed (a later visit).
+/// T-138: what one close observed, for the persistent single-emitter rule.
+struct SeenAtClose {
+    iv: TimeRange,
+    observed: Vec<ObservedBand>,
+    seen: Vec<EmitterSeen>,
+    churned: Vec<EmitterId>,
+}
+
+/// T-138: how long after its first sighting a new emitter can still be confirmed (a later visit);
+/// also the churn look-back (another emitter over its extent seen this recently).
 pub const PERSIST_HORIZON_S: f64 = 7.0 * 86_400.0;
-/// T-138: a re-sighting confirms persistence only this long after the first sighting, so one
-/// transmission straddling an interval boundary is not "two intervals".
-pub const PERSIST_MIN_SPAN_S: f64 = 300.0;
 /// T-138: pending first sightings kept per site (oldest dropped first).
 pub const PERSIST_MAX_PENDING: usize = 512;
+/// T-138: an observed band "covers" a pending emitter (so its absence feeds 0) only when the
+/// band's bin width is at most this multiple of the emitter's bandwidth: a coarse sweep that
+/// cannot resolve it neither confirms nor resets.
+pub const PERSIST_COVER_MAX_RBW_RATIO: f64 = 1.0;
+
+/// T-138: one band a close observed, with the bin width it was measured at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ObservedBand {
+    /// Extent.
+    pub freq: FreqRange,
+    /// Resolution bandwidth of its occupancy row, Hz.
+    pub rbw_hz: f64,
+}
 
 /// T-138: one first sighting tracked by the persistent single-emitter rule.
 #[derive(Clone, Copy, Debug)]
@@ -355,6 +373,10 @@ struct PendingEmitter {
     armed: bool,
     /// Consecutive zero inputs fed since last scored.
     zeros: u32,
+    /// Consecutive closes scored at or above `on` (mirrors the engine's raise streak).
+    streak: u32,
+    /// One-shot: the streak reached the raise count, so the rule never scores it again.
+    spent: bool,
 }
 
 /// T-138: an inventory emitter seen in a closed interval, for the persistent single-emitter rule.
@@ -366,7 +388,7 @@ pub struct EmitterSeen {
     pub freq: FreqRange,
     /// Inventory first sighting.
     pub first_seen: Timestamp,
-    /// Inventory latest sighting (inside the interval).
+    /// Inventory latest sighting (may already be past the interval's end when the close runs).
     pub last_seen: Timestamp,
     /// Its detections in the interval are all suspect (§2.6: spur, IMD, image, clipped,
     /// compressed…), so the sighting cannot confirm anything.
@@ -1042,6 +1064,8 @@ impl AttentionService {
                     disqualified: false,
                     armed: false,
                     zeros: 0,
+                    streak: 0,
+                    spent: false,
                 });
             }
             while st.pending.len() > PERSIST_MAX_PENDING {
@@ -1068,21 +1092,43 @@ impl AttentionService {
             .is_some_and(|s| !s.pending.is_empty())
     }
 
-    /// T-138: what a close ending `t_end` under `site` observed, for the persistent single-emitter
-    /// rule in [`Self::new_emitter_inputs`] at the same close: the observed bands and the
-    /// inventory emitters seen in the interval (with their suspect state).
+    /// T-138: whether the persistent single-emitter rule can score at `site` now (a discrete site
+    /// whose mature rate puts the rule score at or above the alarm off level). The close runs its
+    /// churn look-back only then.
+    pub fn persistent_rule_active(&self, site: SiteKey) -> bool {
+        matches!(site, SiteKey::Site(_))
+            && lock(&self.cands)
+                .sightings
+                .get(&site)
+                .and_then(|s| s.rate.rate())
+                .is_some_and(|r| {
+                    persistent_single_novelty(r) >= AlarmConfig::default().hysteresis.off
+                })
+    }
+
+    /// T-138: what the close of `iv` under `site` observed, for the persistent single-emitter rule
+    /// in [`Self::new_emitter_inputs`] at the same close: the observed bands (with their bin
+    /// widths), the inventory emitters seen in the interval (with their suspect state) and the
+    /// first sightings that are churn (their extent overlaps another emitter seen within
+    /// [`PERSIST_HORIZON_S`]: a track split or drift, never scored).
     pub fn note_emitters_seen(
         &self,
         site: SiteKey,
-        t_end: Timestamp,
-        observed: &[FreqRange],
+        iv: TimeRange,
+        observed: &[ObservedBand],
         seen: &[EmitterSeen],
+        churned: &[EmitterId],
     ) {
         let mut c = lock(&self.cands);
         if let Some(st) = c.sightings.get_mut(&site)
             && !st.pending.is_empty()
         {
-            st.seen = Some((t_end, observed.to_vec(), seen.to_vec()));
+            st.seen = Some(SeenAtClose {
+                iv,
+                observed: observed.to_vec(),
+                seen: seen.to_vec(),
+                churned: churned.to_vec(),
+            });
         }
     }
 
@@ -1102,12 +1148,15 @@ impl AttentionService {
     ///
     /// T-138 (§7.1 rule "single persistent new emitter"): on a discrete site with a mature rate,
     /// a first sighting tracked for [`PERSIST_HORIZON_S`] scores [`persistent_single_novelty`] at
-    /// every close that saw it clean ([`Self::note_emitters_seen`]: at its sighting close, or later
-    /// once [`PERSIST_MIN_SPAN_S`] after its inventory first sighting), and 0 at an observed close
-    /// without it once scored. The usual 2-interval hysteresis then raises only when it was seen in
-    /// two consecutive closes of the site (the same visit, or the next visit's first close), so a
-    /// one-off transient never raises and a busy site (P(≥1 | μ) > α) never reaches the on level.
-    /// A suspect sighting is never scored. The emitter's input takes the larger of the two scores.
+    /// closes that saw it clean ([`Self::note_emitters_seen`]: its sighting close, or a later close
+    /// once the inventory has seen it at least one full interval after its first sighting), and 0
+    /// at a close whose band resolves it ([`PERSIST_COVER_MAX_RBW_RATIO`]) without it once scored.
+    /// The usual 2-interval hysteresis then raises only when it was seen in two consecutive closes
+    /// of the site (the same visit, or the next visit's first close), so a one-off transient or
+    /// one transmission shorter than an interval never raises, and a busy site (P(≥1 | μ) > α)
+    /// never reaches the on level. One-shot: once its streak reaches the raise count it is never
+    /// scored again (zeros clear the alarm). Suspect and churn sightings are never scored. The
+    /// emitter's input takes the larger of the two scores.
     pub fn new_emitter_inputs(&self, site: SiteKey, t_end: Timestamp) -> Vec<NewEmitterInput> {
         let offset = lock(&self.sites).utc_offset_min(site);
         let mut c = lock(&self.cands);
@@ -1119,7 +1168,7 @@ impl AttentionService {
         let since = st.last_inputs_end.replace(t_end).map(|t| t.as_unix_nanos());
         st.recent
             .retain(|s| s.t.as_unix_nanos() > end.saturating_sub(2 * window_ns));
-        let seen = st.seen.take().filter(|(t, _, _)| *t == t_end);
+        let seen = st.seen.take().filter(|s| s.iv.end == t_end);
         if st.recent.is_empty() && st.pending.is_empty() {
             return Vec::new();
         }
@@ -1192,43 +1241,67 @@ impl AttentionService {
             i = j;
         }
         // T-138: the persistent single-emitter rule.
-        let (observed, seen) = seen.map_or((Vec::new(), Vec::new()), |(_, o, s)| (o, s));
+        let (interval_ns, observed, seen, churned) = seen
+            .map_or((i64::MAX, Vec::new(), Vec::new(), Vec::new()), |s| {
+                (s.iv.duration_ns().max(1), s.observed, s.seen, s.churned)
+            });
         let score = rate
             .filter(|_| matches!(site, SiteKey::Site(_)))
             .map(persistent_single_novelty);
         let mu = rate.map_or(0.0, |r| r * FirstSightingRate::WINDOW_S);
         let horizon_ns = (PERSIST_HORIZON_S * 1e9) as i64;
-        let min_span_ns = (PERSIST_MIN_SPAN_S * 1e9) as i64;
-        let clear_after = cfg.hysteresis.off_intervals;
+        let hcfg = cfg.hysteresis;
+        let clear_after = hcfg.off_intervals;
         st.pending.retain(|id, p| {
             let expired = end.saturating_sub(p.sighted.as_unix_nanos()) > horizon_ns;
             let here = seen.iter().find(|e| e.emitter == *id);
-            if here.is_some_and(|e| e.suspect) {
+            if here.is_some_and(|e| e.suspect) || churned.contains(id) {
                 p.disqualified = true;
             }
+            // Its sighting close, or a later close once the inventory saw it a full interval after
+            // its first sighting: one transmission shorter than an interval that straddles a
+            // boundary shows at two closes but never confirms at the second.
             let confirms = here.is_some_and(|e| {
                 !e.suspect
                     && (p.sighted == t_end
-                        || e.last_seen.as_unix_nanos() - e.first_seen.as_unix_nanos()
-                            >= min_span_ns)
+                        || e.last_seen
+                            .as_unix_nanos()
+                            .saturating_sub(e.first_seen.as_unix_nanos())
+                            >= interval_ns)
             });
+            let width = p.freq.hi_hz - p.freq.lo_hz;
             let covered = here.is_some()
-                || observed
-                    .iter()
-                    .any(|b| b.lo_hz < p.freq.hi_hz && b.hi_hz > p.freq.lo_hz);
+                || observed.iter().any(|b| {
+                    b.freq.lo_hz < p.freq.hi_hz
+                        && b.freq.hi_hz > p.freq.lo_hz
+                        && b.rbw_hz <= PERSIST_COVER_MAX_RBW_RATIO * width
+                });
             let value = match score {
                 // A score below `off` is cold: it could neither raise nor hold, so it arms nothing
                 // (a busy site's sightings feed no zero inputs later).
-                Some(n) if confirms && !p.disqualified && !expired && n >= cfg.hysteresis.off => {
+                Some(n) if confirms && !p.disqualified && !p.spent && !expired && n >= hcfg.off => {
                     p.armed = true;
                     p.zeros = 0;
+                    if n >= hcfg.on {
+                        p.streak += 1;
+                        p.spent = p.streak >= hcfg.on_intervals;
+                    } else {
+                        p.streak = 0;
+                    }
                     Some(n)
                 }
                 _ if p.armed && covered && p.zeros < clear_after => {
                     p.zeros = p.zeros.saturating_add(1);
+                    p.streak = 0;
                     Some(0.0)
                 }
-                _ => None,
+                _ => {
+                    // The group rule's own (sub-on) input steps the key: the engine's streak resets.
+                    if by_emitter.contains_key(id) {
+                        p.streak = 0;
+                    }
+                    None
+                }
             };
             if let Some(v) = value {
                 match by_emitter.get(id) {
@@ -1264,7 +1337,7 @@ impl AttentionService {
             }
             // Kept while it can still confirm, and an armed one until it has fed enough zeros to
             // clear an open alarm.
-            (!expired && !p.disqualified) || (p.armed && p.zeros < clear_after)
+            (!expired && !p.disqualified && !p.spent) || (p.armed && p.zeros < clear_after)
         });
         out
     }
