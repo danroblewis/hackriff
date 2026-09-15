@@ -2015,3 +2015,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **t057 ×3:** all pass. Run 3 skipped 2 boxes, with 0 learned channels and 0 emitters out of band, so the guards were actually exercised. No product bug found.
   - **Other tests:** mock_device 2/2; recipe_runtime 8/8; lint clean.
   - **Next:** merges after the T-157 full check; the post-merge check measures the opt-level speed-up.
+- **B0.439 T-157 full check green (3ee5ec1).** Lint clean; 1362/1362 tests; acceptance 28/28. The `--iq-retention` and `--iq-buffer-max` flags are usable on main; storage is still the grow-and-delete kind until T-178.
+- **T-175 merged (c11f05a).** Dev opt-level=2 is now active for hk-dsp, hk-core, hk-pipeline and hk-demod. The next full check measures the speed-up.
