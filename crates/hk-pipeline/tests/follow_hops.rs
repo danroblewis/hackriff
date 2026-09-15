@@ -9,10 +9,15 @@
 //! runs once per channel; `follow_hops` merges.
 //!
 //! Asserted per complete recording loop: every message decoded exactly once, tagged with the
-//! channel it was sent on (index and `channel_hz`), frames in source-time order across channels
-//! (including a short burst that ends before an earlier, longer one on another channel), the
-//! duplicate removed with the strong copy kept and counted, and a channel added mid-run followed
-//! from then on without a gap on the others.
+//! channel it was sent on (index and `channel_hz`), frames in end order across channels (a
+//! message is complete only at its end, T-107; including a short burst that ends before an
+//! earlier, longer one on another channel), none counted `late`, the duplicate removed with the
+//! strong copy kept and counted, and a channel added mid-run followed from then on without a gap
+//! on the others.
+//!
+//! T-107 also covers the other channel sources end to end: the blind detections in a band (from a
+//! survey run's own detector and tracker) and a hop set the tracker found from a hopping net's IQ;
+//! the test inserts neither.
 
 mod common;
 
@@ -31,7 +36,7 @@ use hk_core::{MockEnd, MockOptions, MockSdrDriver, Source};
 use hk_detect::track::HopSetSummary;
 use hk_detect::track::inventory::hop_set_sighting;
 use hk_model::sigmf::{Capture, Datatype, SigmfMeta};
-use hk_model::{CrcStatus, EmitterId, TimeRange, Timestamp, TrackId};
+use hk_model::{CrcStatus, EmitterId, FreqRange, InventoryQuery, TimeRange, Timestamp, TrackId};
 use hk_pipeline::class::band_class;
 use hk_pipeline::recipes::runtime::{RecipeRuntime, Target, parse_recipe};
 use hk_pipeline::{
@@ -65,7 +70,7 @@ const TRUTH: &[(usize, f64, u8, bool)] = &[
     (1, 1.60, 8, true),
     (2, 0.30, 9, true),
     (2, 1.003, DUP_CODE, false),
-    // Starts after A's 96 ms burst at 1.20 s and ends before it: arrives first, leaves second.
+    // Starts after A's 96 ms burst at 1.20 s and ends before it: complete first, leaves first.
     (2, 1.22, 5, true),
     (3, 0.40, 11, true),
     (3, 0.90, 10, true),
@@ -83,18 +88,53 @@ fn wait(what: &str, f: impl Fn() -> bool) {
 // --- The scene ---------------------------------------------------------------------------------
 
 fn scene(dir: &std::path::Path) -> std::path::PathBuf {
+    let bursts: Vec<(f64, f64, f64, f64)> = TRUTH
+        .iter()
+        .map(|&(ch, start, code, strong)| {
+            let amp = if strong { 60.0 } else { 20.0 };
+            (CHANNELS[ch], start, f64::from(code) * 0.008, amp)
+        })
+        .collect();
+    write_scene(dir, &bursts)
+}
+
+/// Length of one hop of the hopping net (T-107): the burst decoder reads it as message 4.
+const HOP_DWELL_S: f64 = 0.034;
+
+/// A net hopping over the four channels (T-107): contiguous 34 ms dwells in a scrambled order
+/// (never the same channel twice in a row) from 0.1 s to 1.29 s of each loop, then silence.
+fn hopper_scene(dir: &std::path::Path) -> std::path::PathBuf {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut prev = 0usize;
+    let bursts: Vec<(f64, f64, f64, f64)> = (0..35)
+        .map(|k| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let ch = (prev + 1 + (state % 3) as usize) % 4;
+            prev = ch;
+            (
+                CHANNELS[ch],
+                0.1 + f64::from(k) * HOP_DWELL_S,
+                HOP_DWELL_S,
+                60.0,
+            )
+        })
+        .collect();
+    write_scene(dir, &bursts)
+}
+
+/// Writes one loop of tone bursts `(channel Hz, start s, length s, amplitude)` (each tone 1 kHz
+/// above its channel centre, 2 ms raised-cosine edges) plus noise as a ci8 SigMF recording.
+fn write_scene(dir: &std::path::Path, bursts: &[(f64, f64, f64, f64)]) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let n = LOOP as usize;
     let mut re = vec![0f64; n];
     let mut im = vec![0f64; n];
     let ramp = (0.002 * FS) as usize;
-    for &(ch, start, code, strong) in TRUTH {
-        let amp = if strong { 60.0 } else { 20.0 };
-        let f = CHANNELS[ch] - CENTER_HZ + 1_000.0;
-        let (s0, len) = (
-            (start * FS) as usize,
-            (f64::from(code) * 0.008 * FS) as usize,
-        );
+    for &(ch_hz, start, len_s, amp) in bursts {
+        let f = ch_hz - CENTER_HZ + 1_000.0;
+        let (s0, len) = ((start * FS).round() as usize, (len_s * FS).round() as usize);
         for i in 0..len {
             let edge = i.min(len - 1 - i);
             let w = if edge < ramp {
@@ -314,8 +354,13 @@ struct Run {
 
 impl Run {
     fn start(tag: &str) -> Self {
-        let dir = TempDir::new(tag);
-        let meta = scene(&dir.0.join("rec"));
+        Self::start_in(TempDir::new(tag), scene)
+    }
+
+    /// A run over the recording `make` writes, with `dir` as its data directory (an earlier run's
+    /// directory keeps that run's inventory).
+    fn start_in(dir: TempDir, make: fn(&std::path::Path) -> std::path::PathBuf) -> Self {
+        let meta = make(&dir.0.join("rec"));
         let driver = MockSdrDriver::new(
             &meta,
             MockOptions {
@@ -373,13 +418,15 @@ impl Run {
         self.rt.stats_json(id).unwrap()["frames"].as_u64().unwrap()
     }
 
-    fn finish(mut self) {
+    /// Stops the run; returns its data directory.
+    fn finish(mut self) -> TempDir {
         self.rt.stop_all();
         let handle = self.handle.take().unwrap();
         handle.stop();
         let (s, fired) = wait_guarded(handle, Duration::from_secs(120));
         assert!(!fired, "the run stopped within the limit");
         assert!(s.errors.is_empty(), "{:?}", s.errors);
+        self.dir
     }
 }
 
@@ -411,8 +458,10 @@ fn subscribe(run: &Run, stream_id: &str) -> Collected {
 fn frame_records(c: &Collected) -> Vec<(u64, u16, f64, u8)> {
     let bytes = c.0.lock().unwrap().clone();
     let mut r = StreamReader::new(Cursor::new(bytes));
-    r.read_header().unwrap();
     let mut out = Vec::new();
+    if r.read_header().is_err() {
+        return out; // nothing delivered yet
+    }
     loop {
         let v: Value = match r.next_record() {
             Ok(Some(Record::Message(m))) => m.value,
@@ -494,9 +543,14 @@ fn one_recipe_follows_a_channel_net_ordered_tagged_deduplicated_and_gains_a_chan
             "channel_hz of {code}"
         );
     }
-    // Time-ordered across channels.
+    // Time-ordered across channels by when each message ended (T-107), to the resolution of one
+    // ring read (at most 65 536 samples); nothing counted late.
+    let end = |f: &(u64, u16, f64, u8)| f.0 + (f64::from(f.3) * 0.008 * FS) as u64;
     for w in frames.windows(2) {
-        assert!(w[0].0 <= w[1].0, "frames out of source-time order: {w:?}");
+        assert!(
+            end(&w[0]) <= end(&w[1]) + (1 << 16),
+            "frames out of end order: {w:?}"
+        );
     }
     // Loop bookkeeping from the first frame of message 3 (A at 0.20 s).
     let first = frames.iter().find(|f| f.3 == 3).expect("message 3");
@@ -564,6 +618,7 @@ fn one_recipe_follows_a_channel_net_ordered_tagged_deduplicated_and_gains_a_chan
     assert!(before_add + after_add + spanning >= 3);
     let dups = status["hops.dups"].as_f64().unwrap_or(0.0);
     assert!(dups >= 2.0, "duplicates counted in status: {status}");
+    assert_eq!(status["hops.late"].as_f64(), Some(0.0), "{status}");
 }
 
 /// Records a hop set as the tracker's hop-set linking does (T-059/T-084): a blind measurement of
@@ -650,5 +705,146 @@ fn a_blind_hop_set_supplies_the_channels_and_a_channel_it_gains_is_followed() {
         "{}",
         p["status"]
     );
+    run.finish();
+}
+
+// --- T-107: the blind channel sources, end to end ----------------------------------------------
+
+/// Inventory rows around the net: `(centre Hz, bandwidth Hz, hop_set_hz, id)`.
+fn inventory(dir: &std::path::Path) -> Vec<(f64, f64, Vec<f64>, EmitterId)> {
+    let repo = common::repo(dir);
+    let q = InventoryQuery {
+        freq: Some(FreqRange {
+            lo_hz: CHANNELS[0] - 20e3,
+            hi_hz: CHANNELS[3] + 20e3,
+        }),
+        limit: 256,
+        ..InventoryQuery::default()
+    };
+    repo.query_inventory(&q)
+        .unwrap()
+        .entries
+        .iter()
+        .map(|x| {
+            let e = &x.emitter;
+            let hop: Vec<f64> = e
+                .fingerprint
+                .get("hop_set_hz")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_f64).collect())
+                .unwrap_or_default();
+            (e.f_center_hz, e.bandwidth_hz, hop, e.id)
+        })
+        .collect()
+}
+
+/// The sent channel a measured centre belongs to (the tones sit 1 kHz above the centres).
+fn sent_channel(hz: f64) -> Option<usize> {
+    CHANNELS
+        .iter()
+        .position(|c| (hz - (c + 1_000.0)).abs() < 3_000.0)
+}
+
+fn channel_centers(p: &Value) -> Vec<f64> {
+    p["follow_hops"]["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["center_hz"].as_f64().unwrap())
+        .collect()
+}
+
+/// T-107 (SIGNAL-062): with no `list_hz` and no hop-set target, a follow-hops pipeline follows the
+/// blind detections in its band. A survey run replays the net through the mock SDR and its own
+/// detector and tracker write the inventory from IQ (the test inserts nothing); a second run on
+/// the same data directory follows the channels those detections found, and every channel
+/// decodes its own messages.
+#[test]
+fn the_blind_detections_in_a_band_supply_the_channels() {
+    let survey = Run::start("t107-detections");
+    let counters = survey.handle.as_ref().unwrap().counters();
+    wait("three survey loops", || {
+        counters.source.samples.load(Ordering::Relaxed) >= 3 * LOOP
+    });
+    let dir = survey.finish();
+    let rows = inventory(&dir.0);
+    for k in 0..CHANNELS.len() {
+        assert!(
+            rows.iter()
+                .any(|r| r.2.is_empty() && sent_channel(r.0) == Some(k)),
+            "channel {k} detected: {rows:?}"
+        );
+    }
+
+    let run = Run::start_in(dir, scene);
+    let id = run
+        .rt
+        .start(parse_recipe(recipe(&[])).unwrap(), band())
+        .unwrap();
+    let p = run.rt.pipeline_json(&id).unwrap();
+    assert_eq!(p["follow_hops"]["channel_source"], "detections", "{p}");
+    let chans = channel_centers(&p);
+    assert_eq!(chans.len(), CHANNELS.len(), "{chans:?} from {rows:?}");
+    for (k, f) in chans.iter().enumerate() {
+        assert_eq!(sent_channel(*f), Some(k), "{chans:?}");
+    }
+    let sink = subscribe(&run, &format!("inspector/{id}/frames"));
+    wait("a message decoded on every channel", || {
+        let f = frame_records(&sink);
+        (0..CHANNELS.len() as u16).all(|c| f.iter().any(|x| x.1 == c))
+    });
+    for &(si, ch, _, code) in &frame_records(&sink) {
+        let t = truth_of(code);
+        assert!(!t.is_empty(), "frame {code} at {si} is not a sent message");
+        let sent = t.iter().find(|t| t.3).unwrap();
+        assert_eq!(usize::from(ch), sent.0, "message {code} on its channel");
+    }
+    run.finish();
+}
+
+/// T-107 (SIGNAL-062): a net hops over four channels; the pipeline's tracker links the dwells
+/// into a hop set from IQ through the mock SDR (the test inserts nothing), and a follow-hops
+/// pipeline targeting that emitter follows the measured channels and decodes hops on each.
+#[test]
+fn a_hop_set_the_tracker_found_from_iq_supplies_the_channels() {
+    let run = Run::start_in(TempDir::new("t107-hopper"), hopper_scene);
+    let deadline = Instant::now() + LIMIT;
+    let (eid, hop) = loop {
+        let rows = inventory(&run.dir.0);
+        if let Some(r) = rows.iter().find(|r| r.2.len() >= 3) {
+            break (r.3, r.2.clone());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the tracker formed no hop set: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    for f in &hop {
+        assert!(
+            sent_channel(*f).is_some(),
+            "measured hop channel {f} is a channel the net used: {hop:?}"
+        );
+    }
+    let mut doc = recipe(&[]);
+    // Every hop carries the same message: copies on different channels are separate hops.
+    doc["nodes"][1]["params"]["dedupe_s"] = json!(0.005);
+    let id = run
+        .rt
+        .start(parse_recipe(doc).unwrap(), Target::Emitter(eid))
+        .unwrap();
+    let p = run.rt.pipeline_json(&id).unwrap();
+    assert_eq!(p["follow_hops"]["channel_source"], "hop-set", "{p}");
+    let chans = channel_centers(&p);
+    assert_eq!(chans.len(), hop.len().min(4), "{chans:?} from {hop:?}");
+    let sink = subscribe(&run, &format!("inspector/{id}/frames"));
+    wait("a hop decoded on every followed channel", || {
+        let f = frame_records(&sink);
+        (0..chans.len() as u16).all(|c| f.iter().any(|x| x.1 == c))
+    });
+    for &(si, ch, ch_hz, code) in &frame_records(&sink) {
+        assert_eq!(code, 4, "a {HOP_DWELL_S} s hop at {si}");
+        assert!((ch_hz - chans[usize::from(ch)]).abs() < 1.0);
+    }
     run.finish();
 }

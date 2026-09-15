@@ -1444,11 +1444,13 @@ impl Runner {
         {
             let edit = lock(&hc.pending).take();
             if let Some(mut e) = edit {
-                h.apply_channels(&mut e);
-                let at = self
-                    .next_sample
-                    .unwrap_or_else(|| self.shared.ring.next_sample().unwrap_or(0));
-                e.done(at);
+                // At the tune the lanes follow now (T-107: a retune may have landed since the
+                // new lanes were built).
+                let applied = h.apply_channels(&mut e, self.tune).map(|()| {
+                    self.next_sample
+                        .unwrap_or_else(|| self.shared.ring.next_sample().unwrap_or(0))
+                });
+                e.done(applied);
             }
         }
     }

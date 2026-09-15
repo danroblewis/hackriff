@@ -11,7 +11,9 @@
 //!   is the pipeline's main graph: recipe outputs, taps and sinks bind to it, so every recipe
 //!   output must come from the merge node or downstream of it.
 //!
-//! Per ring chunk the pipeline thread runs every lane on the chunk, copies each lane's frames
+//! Per ring chunk the pipeline thread runs every lane on the chunk (a `DISCONTINUITY` stays pending
+//! on a lane whose DDC yields no samples for that chunk and reaches its graph with the next
+//! samples, T-107), copies each lane's frames
 //! into one pre-sized merge buffer (stamping `FrameInfo::channel` with the lane's index, so the
 //! tag never depends on a block) and runs the downstream graph once with that buffer and
 //! `meta.source_index` = the ring sample every lane has been processed up to (the merge node's
@@ -28,7 +30,10 @@
 //!
 //! A channel set change ([`set_channels`]; `RecipeRuntime::refresh_channels` re-resolves the
 //! source, e.g. a hop set that gained a channel) builds the new lanes off the real-time thread
-//! and swaps them in at a chunk boundary: the other lanes keep their instances and state, so
+//! at the tune read then, and swaps them in at a chunk boundary. Each lane records the tune its
+//! DDC was planned for; a lane built before a retune that the pipeline thread has already applied
+//! is re-planned for the running tune at the swap (T-107), and if the channel is no longer inside
+//! the window the change is refused (`409 outside_window`) and nothing changes. At the swap the other lanes keep their instances and state, so
 //! they continue without a gap, and the merge input carries `CHANNEL_CHANGE`. Channel indices
 //! are never reused within a pipeline. A hot edit stages the upstream sub-recipe once per lane
 //! and swaps every lane and the downstream graph at the same boundary.
@@ -342,9 +347,42 @@ pub(crate) struct Lane {
     pub index: u16,
     pub center_hz: f64,
     pub bandwidth_hz: f64,
+    /// Window `(centre, rate)` the DDC is planned for.
+    tune: (f64, f64),
     ddc: Ddc,
     graph: Graph,
+    /// A `DISCONTINUITY` not yet delivered to the graph.
     disc: bool,
+}
+
+impl Lane {
+    /// Re-plans the DDC for `tune` (window centre, rate); allocates, retune rate only.
+    fn retune(&mut self, tune: (f64, f64)) -> Result<(), String> {
+        if tune == self.tune {
+            return Ok(());
+        }
+        let (lo, hi) = (
+            self.center_hz - 0.5 * self.bandwidth_hz,
+            self.center_hz + 0.5 * self.bandwidth_hz,
+        );
+        if !in_window(tune.0, tune.1, lo, hi) {
+            return Err(format!(
+                "retune: channel {} left the tuned window",
+                self.index
+            ));
+        }
+        let mut spec = self.ddc.spec().clone();
+        spec.center_offset_hz = self.center_hz - tune.0;
+        let ddc = Ddc::new(spec, tune.1)
+            .map_err(|_| "rate-change: a channel cannot be down-converted".to_owned())?;
+        if (ddc.output_rate_hz() - self.graph.input.rate_hz).abs() > 1e-6 {
+            return Err("rate-change: the channel rate changed; start the pipeline again".into());
+        }
+        self.ddc = ddc;
+        self.tune = tune;
+        self.disc = true;
+        Ok(())
+    }
 }
 
 /// Builds channel `index` at `center` (off the real-time thread): the lane, its frames output
@@ -374,6 +412,7 @@ fn build_lane(
             index,
             center_hz: center,
             bandwidth_hz: plan.bandwidth_hz,
+            tune: plan.tune,
             ddc: plan.ddc,
             graph: g,
             disc: true,
@@ -560,6 +599,8 @@ impl Hops {
                 disc,
                 ..
             } = lane;
+            // Held until delivered: a DDC that yields nothing on this chunk must not lose it.
+            *disc |= flags.contains(ChunkFlags::DISCONTINUITY);
             let block = ddc
                 .process(InputInfo::from(chunk), samples)
                 .map_err(|_| "error: channel down-conversion failed".to_owned())?;
@@ -635,30 +676,7 @@ impl Hops {
 
     /// Re-plans every lane's DDC for a new tune (window centre, rate).
     pub fn retune(&mut self, tune: (f64, f64)) -> Result<(), String> {
-        for lane in &mut self.lanes {
-            let (lo, hi) = (
-                lane.center_hz - 0.5 * lane.bandwidth_hz,
-                lane.center_hz + 0.5 * lane.bandwidth_hz,
-            );
-            if !in_window(tune.0, tune.1, lo, hi) {
-                return Err(format!(
-                    "retune: channel {} left the tuned window",
-                    lane.index
-                ));
-            }
-            let mut spec = lane.ddc.spec().clone();
-            spec.center_offset_hz = lane.center_hz - tune.0;
-            let ddc = Ddc::new(spec, tune.1)
-                .map_err(|_| "rate-change: a channel cannot be down-converted".to_owned())?;
-            if (ddc.output_rate_hz() - lane.graph.input.rate_hz).abs() > 1e-6 {
-                return Err(
-                    "rate-change: the channel rate changed; start the pipeline again".into(),
-                );
-            }
-            lane.ddc = ddc;
-            lane.disc = true;
-        }
-        Ok(())
+        self.lanes.iter_mut().try_for_each(|l| l.retune(tune))
     }
 
     /// Every lane's node status as `ch<index>.<node>.<metric>` (allocates: status rate).
@@ -688,8 +706,14 @@ impl Hops {
         }
     }
 
-    /// Applies a channel set change at a chunk boundary: moves lanes, no allocation.
-    pub fn apply_channels(&mut self, e: &mut ChannelEdit) {
+    /// Applies a channel set change at a chunk boundary: moves lanes, no allocation unless an
+    /// added lane was planned for a tune older than `tune` (the tune the running lanes follow),
+    /// which re-plans its DDC first. A lane that cannot follow `tune` refuses the whole change
+    /// (nothing moves).
+    pub fn apply_channels(&mut self, e: &mut ChannelEdit, tune: (f64, f64)) -> Result<(), String> {
+        for l in &mut e.add {
+            l.retune(tune)?;
+        }
         e.lanes.clear();
         e.retired.clear();
         for l in self.lanes.drain(..) {
@@ -703,6 +727,7 @@ impl Hops {
         std::mem::swap(&mut self.lanes, &mut e.lanes);
         std::mem::swap(&mut self.channels_hz, &mut e.channels_hz);
         self.pending_flags |= ChunkFlags::CHANNEL_CHANGE;
+        Ok(())
     }
 }
 
@@ -746,12 +771,13 @@ pub(crate) struct ChannelEdit {
 /// The pipeline thread's answer to a [`ChannelEdit`].
 pub(crate) struct ChannelDone {
     edit: ChannelEdit,
-    applied_at_sample: u64,
+    /// `Ok(sample)` applied there, or why the pipeline thread refused it (nothing changed).
+    applied_at_sample: Result<u64, String>,
 }
 
 impl ChannelEdit {
-    /// The answer, holding what was retired.
-    pub fn done(self, applied_at_sample: u64) {
+    /// The answer, holding what was retired (or, refused, what was to be added).
+    pub fn done(self, applied_at_sample: Result<u64, String>) {
         let reply = self.reply.clone();
         let _ = reply.try_send(ChannelDone {
             edit: self,
@@ -952,8 +978,15 @@ pub(crate) fn set_channels(
         edit,
         applied_at_sample,
     } = done;
-    // Removed lanes are dropped here, off the pipeline thread.
+    // Removed (or refused) lanes are dropped here, off the pipeline thread.
     drop(edit);
+    let applied_at_sample = applied_at_sample.map_err(|m| {
+        RuntimeError::new(
+            409,
+            "outside_window",
+            format!("the pipeline retuned before the change applied; nothing changed ({m})"),
+        )
+    })?;
     let mut c = lock(&hc.control);
     c.extra_slots.extend(slots);
     for _ in 0..remove.len() {
@@ -975,6 +1008,329 @@ pub(crate) fn set_channels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hk_blocks::{Block, BlockError, BlockFactory, BuildCtx, Io, ParamUpdate, Status};
+    use hk_core::{Discontinuity, ProvenanceHandle};
+    use hk_model::{ClockSource, Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
+    use hk_recipe::{BlockDescriptor, Params, PortSpec};
+
+    /// What a probe saw per call: `(channel, items, mean power, flags)`.
+    type Log = Arc<Mutex<Vec<(u16, usize, f64, ChunkFlags)>>>;
+
+    struct ProbeFactory(BlockDescriptor, Log);
+
+    impl BlockFactory for ProbeFactory {
+        fn descriptor(&self) -> &BlockDescriptor {
+            &self.0
+        }
+        fn build(&self, _: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, BlockError> {
+            Ok(Box::new(Probe(Arc::clone(&self.1))))
+        }
+    }
+
+    /// iq → frames, emitting nothing: logs each chunk's meta and power.
+    struct Probe(Log);
+
+    impl Block for Probe {
+        fn init(&mut self, _: &[PortInfo]) -> Result<Vec<PortInfo>, BlockError> {
+            Ok(vec![PortInfo {
+                ty: PortType::Frames,
+                rate_hz: 10.0,
+                max_items: 4,
+                hold_items: 0,
+            }])
+        }
+        fn process(&mut self, io: &mut Io<'_>) -> Result<(), BlockError> {
+            let input = io.input(0)?;
+            let (n, p) = match input.data {
+                PortSlice::Iq(x) => (
+                    x.len(),
+                    x.iter().map(|z| f64::from(z.norm_sqr())).sum::<f64>() / x.len().max(1) as f64,
+                ),
+                _ => (0, 0.0),
+            };
+            let meta = input.meta;
+            lock(&self.0).push((meta.channel, n, p, meta.flags));
+            let out = io.output(0)?;
+            out.meta = ChunkMeta {
+                index: out.meta.index,
+                ..meta
+            };
+            Ok(())
+        }
+        fn reset(&mut self) {}
+        fn update_params(
+            &mut self,
+            _: &Params,
+            _: &BuildCtx<'_>,
+        ) -> Result<ParamUpdate, BlockError> {
+            Ok(ParamUpdate::Applied)
+        }
+        fn status(&self) -> Status {
+            Status::default()
+        }
+    }
+
+    const CBW: f64 = 12_500.0;
+    const FS: f64 = 1e6;
+
+    struct Rig {
+        registry: Registry,
+        up: Arc<Recipe>,
+        hops: Hops,
+        down: Graph,
+        log: Log,
+    }
+
+    /// A follow-hops pipeline (`test_probe` per channel → `follow_hops`) on `centers` at `tune`.
+    fn rig(centers: &[f64], tune: (f64, f64)) -> Rig {
+        let log: Log = Arc::default();
+        let mut registry = Registry::builtin();
+        registry
+            .register(Arc::new(ProbeFactory(
+                hk_blocks::schema::descriptor(
+                    "test_probe",
+                    "test",
+                    "logs chunk meta",
+                    vec![PortSpec::new("in", PortType::Iq)],
+                    vec![PortSpec::new("out", PortType::Frames)],
+                    vec![],
+                    true,
+                ),
+                Arc::clone(&log),
+            )))
+            .unwrap();
+        let recipe = crate::recipes::runtime::parse_recipe(json!({
+            "schema": "hackriff.recipe", "schema_version": 2, "id": "probe-net", "version": 1,
+            "name": "T-107 probe net",
+            "input": {"port": "iq", "sample_rate_hz": 25000.0,
+                      "channels": {"mode": "follow-hops", "channel_bandwidth_hz": CBW,
+                                   "max_channels": 4}},
+            "nodes": [{"id": "probe", "block": "test_probe"}, {"id": "hops", "block": "follow_hops"}],
+            "outputs": [{"id": "frames", "kind": "inspector", "from": "hops"}],
+            "output_policy": {"content_class": "unrestricted"}
+        }))
+        .unwrap();
+        let Split { up, down } = split(&recipe, &registry).unwrap();
+        let up = Arc::new(up);
+        let lanes: Vec<Lane> = centers
+            .iter()
+            .enumerate()
+            .map(|(k, &f)| {
+                build_lane(&up, &registry, k as u16, f, CBW, tune)
+                    .unwrap()
+                    .0
+            })
+            .collect();
+        let merge_port = PortInfo {
+            ty: PortType::Frames,
+            rate_hz: 40.0,
+            max_items: 16,
+            hold_items: 0,
+        };
+        let mut staged = graph::stage(None, Arc::new(down), &registry, merge_port).unwrap();
+        let mut g = Graph::empty(merge_port);
+        swap::apply(&mut g, &mut staged).unwrap();
+        let hops = Hops {
+            lanes,
+            merged: FrameBuf::with_capacity(16, 1024),
+            merge_port,
+            channels_hz: centers.to_vec(),
+            merge_index: 0,
+            pending_flags: ChunkFlags::NONE,
+            fs: tune.1,
+        };
+        Rig {
+            registry,
+            up,
+            hops,
+            down: g,
+            log,
+        }
+    }
+
+    fn provenance(tune: (f64, f64)) -> ProvenanceHandle {
+        ProvenanceHandle::new(Provenance {
+            device_id: "synthetic:t107".into(),
+            tune: Tune {
+                center_hz: tune.0,
+                sample_rate_hz: tune.1,
+                lna_db: 16.0,
+                vga_db: 20.0,
+                amp_on: false,
+                bandwidth_hz: tune.1,
+            },
+            quantisation_limited: false,
+            overload: false,
+            temperature_c: None,
+            antenna_port: None,
+            clock_source: ClockSource::Internal,
+            clock_locked: true,
+            calibration_state_ref: None,
+            spur_mask_ref: None,
+            timestamp_method: TimestampMethod::Synthetic,
+            timestamp_error_budget_ns: Some(0),
+        })
+    }
+
+    /// Ring samples `[first, first + len)` carrying a tone at `tone_hz` under `prov`'s tune.
+    fn chunk(
+        prov: &ProvenanceHandle,
+        first: u64,
+        len: usize,
+        tone_hz: f64,
+    ) -> (ReadChunk, Vec<Complex<i8>>) {
+        let f = tone_hz - prov.tune.center_hz;
+        let x = (0..len as u64)
+            .map(|i| {
+                let ph = std::f64::consts::TAU * f * (first + i) as f64 / prov.tune.sample_rate_hz;
+                Complex::new(
+                    (60.0 * ph.cos()).round() as i8,
+                    (60.0 * ph.sin()).round() as i8,
+                )
+            })
+            .collect();
+        let c = ReadChunk {
+            time: SampleTime {
+                sample_index: first,
+                host_time: Timestamp::from_unix_nanos(first as i64 * 1_000),
+            },
+            len,
+            block_start: false,
+            discontinuity: Discontinuity::NONE,
+            dropped_before: 0,
+            provenance: prov.clone(),
+        };
+        (c, x)
+    }
+
+    fn mean_power(log: &Log, ch: u16) -> f64 {
+        let log = lock(log);
+        let p: Vec<f64> = log
+            .iter()
+            .filter(|e| e.0 == ch && e.1 > 0)
+            .map(|e| e.2)
+            .collect();
+        p.iter().sum::<f64>() / p.len().max(1) as f64
+    }
+
+    /// T-107: a channel added by `set_channels` is built at the tune read then; when a same-rate
+    /// retune reaches the pipeline thread before the swap, the swap re-plans the new lane for the
+    /// running tune, so it decodes its own frequency, not one shifted by the retune.
+    #[test]
+    fn a_retune_racing_set_channels_never_decodes_the_wrong_frequency() {
+        let t0 = (100.0e6, FS);
+        let t1 = (100.05e6, FS);
+        let (a, b) = (100.1e6, 100.2e6);
+        let mut r = rig(&[a], t0);
+        // Control side: the new lane is built at the tune it read (t0)…
+        let (lane, _, _) = build_lane(&r.up, &r.registry, 1, b, CBW, t0).unwrap();
+        let (mut stale, _, _) = build_lane(&r.up, &r.registry, 2, b, CBW, t0).unwrap();
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let mut edit = ChannelEdit {
+            add: vec![lane],
+            remove: vec![],
+            lanes: Vec::with_capacity(2),
+            retired: Vec::new(),
+            channels_hz: vec![a, b],
+            reply: tx.clone(),
+        };
+        // …while the pipeline thread already follows a retune to t1, then reaches the boundary.
+        r.hops.retune(t1).unwrap();
+        r.hops.apply_channels(&mut edit, t1).unwrap();
+        assert_eq!(r.hops.lanes.len(), 2);
+        for l in &r.hops.lanes {
+            assert_eq!(l.tune, t1, "channel {}", l.index);
+            let want = l.center_hz - t1.0;
+            let got = l.ddc.spec().center_offset_hz;
+            assert!(
+                (got - want).abs() < 1e-6,
+                "channel {}: offset {got}, want {want}",
+                l.index
+            );
+        }
+        // A tone on channel b under t1 is heard on channel 1 (b), not on channel 0 (a).
+        let prov = provenance(t1);
+        for k in 0..4 {
+            let (c, x) = chunk(&prov, k * 50_000, 50_000, b);
+            r.hops
+                .process(&c, &x, ChunkFlags::NONE, &mut r.down)
+                .unwrap();
+        }
+        let (on, off) = (mean_power(&r.log, 1), mean_power(&r.log, 0));
+        assert!(on > 0.05, "channel b hears its tone: {on}");
+        assert!(on > 100.0 * off, "channel a does not: {on} vs {off}");
+        // The lane as built (left at t0) sits 50 kHz off its channel: the tone is gone there.
+        let (c, x) = chunk(&prov, 0, 50_000, b);
+        let out = stale.ddc.process(InputInfo::from(&c), &x).unwrap();
+        let p = out
+            .samples
+            .iter()
+            .map(|z| f64::from(z.norm_sqr()))
+            .sum::<f64>()
+            / out.samples.len().max(1) as f64;
+        assert!(
+            on > 100.0 * p,
+            "an unplanned lane decodes elsewhere: {on} vs {p}"
+        );
+
+        // A channel the running tune cannot reach refuses the whole change: nothing moves.
+        let far_hz = 100.6e6;
+        let (far, _, _) = build_lane(&r.up, &r.registry, 3, far_hz, CBW, (100.4e6, FS)).unwrap();
+        let mut refused = ChannelEdit {
+            add: vec![far],
+            remove: vec![0],
+            lanes: Vec::with_capacity(2),
+            retired: Vec::new(),
+            channels_hz: vec![b, far_hz],
+            reply: tx,
+        };
+        assert!(r.hops.apply_channels(&mut refused, t1).is_err());
+        let idx: Vec<u16> = r.hops.lanes.iter().map(|l| l.index).collect();
+        assert_eq!(idx, [0, 1]);
+        assert_eq!(r.hops.channels_hz, [a, b]);
+    }
+
+    /// T-107: a `DISCONTINUITY` on a chunk too short for a lane's DDC to yield a sample reaches
+    /// that lane's graph with its next samples, once.
+    #[test]
+    fn a_discontinuity_on_a_chunk_without_channel_samples_is_delivered_with_the_next() {
+        let tune = (100.0e6, FS);
+        let mut r = rig(&[100.1e6], tune);
+        let prov = provenance(tune);
+        let (c, x) = chunk(&prov, 0, 40_000, 100.1e6);
+        r.hops
+            .process(&c, &x, ChunkFlags::NONE, &mut r.down)
+            .unwrap();
+        lock(&r.log).clear();
+        // 5 samples at a 40:1 decimation: no channel sample, and the flag must not be lost.
+        let (c, x) = chunk(&prov, 40_000, 5, 100.1e6);
+        r.hops
+            .process(&c, &x, ChunkFlags::DISCONTINUITY, &mut r.down)
+            .unwrap();
+        {
+            let log = lock(&r.log);
+            assert!(
+                log.iter().all(|e| e.1 == 0),
+                "precondition: the short chunk yields no channel samples: {log:?}"
+            );
+        }
+        lock(&r.log).clear();
+        let (c, x) = chunk(&prov, 40_005, 40_000, 100.1e6);
+        r.hops
+            .process(&c, &x, ChunkFlags::NONE, &mut r.down)
+            .unwrap();
+        let log = lock(&r.log);
+        let first = log.iter().find(|e| e.1 > 0).expect("the lane ran");
+        assert!(
+            first.3.contains(ChunkFlags::DISCONTINUITY),
+            "the held discontinuity is delivered: {log:?}"
+        );
+        let n = log
+            .iter()
+            .filter(|e| e.3.contains(ChunkFlags::DISCONTINUITY))
+            .count();
+        assert_eq!(n, 1, "exactly once: {log:?}");
+    }
 
     #[test]
     fn normalize_merges_close_channels_caps_by_rank_and_sorts() {

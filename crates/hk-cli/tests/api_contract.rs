@@ -1603,3 +1603,113 @@ fn every_route_in_the_route_table_is_documented() {
         "routes missing from docs/api.md: {missing:#?}"
     );
 }
+
+/// T-107: `PUT /api/pipelines/{id}/channels` and `POST /api/pipelines/{id}/channels/refresh` on a
+/// follow-hops pipeline over the mock device's FM window, as `docs/api.md` documents them: the
+/// answer shape, a no-op change, `400 invalid` bodies, the refresh back to the recipe's
+/// `list_hz`, and `503 busy` (nothing changed) when the added channels exceed the chain budget.
+#[test]
+fn follow_hops_channel_routes_match_the_documented_shapes() {
+    let (serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    let (a, b) = (STATION_HZ - 200e3, STATION_HZ + 200e3);
+    let draft = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "t107-channels", "version": 1,
+        "name": "T-107 channel routes",
+        "input": {"port": "iq", "sample_rate_hz": 24000.0, "bandwidth_hz": 16000.0,
+                  "channels": {"mode": "follow-hops", "channel_bandwidth_hz": 12500.0,
+                               "max_channels": 64, "list_hz": [a]}},
+        "nodes": [
+            {"id": "fsk", "block": "fsk_demod"},
+            {"id": "clock", "block": "clock_recovery",
+             "params": {"symbol_rate_bd": 1200, "pulse": "nrz", "algorithm": "gardner"}},
+            {"id": "slice", "block": "slicer", "params": {"threshold": 0.0}},
+            {"id": "sync", "block": "sync_search",
+             "params": {"mode": "sync-word", "sync_word": "0x7CD215D8", "sync_bits": 32,
+                        "max_errors": 2, "frame_bits": 512, "include_sync": false}},
+            {"id": "hops", "block": "follow_hops"}
+        ],
+        "outputs": [{"id": "frames", "kind": "inspector", "from": "hops"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let start = json!({"recipe": draft,
+        "target": {"band": {"f_lo": a - 10e3, "f_hi": a + 10e3}}});
+    let (st, p) = post(addr, "/api/pipelines", &start.to_string());
+    assert_eq!(st, 201, "{p}");
+    let pid = p["id"].as_str().unwrap().to_owned();
+    assert_eq!(p["follow_hops"]["channel_source"], json!("list"), "{p}");
+    let path = format!("/api/pipelines/{pid}/channels");
+    let centers = |v: &Value| -> Vec<f64> {
+        v["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["center_hz"].as_f64().unwrap())
+            .collect()
+    };
+
+    // A channel added: the documented answer.
+    let (st, v) = put(addr, &path, &json!({"channels_hz": [a, b]}).to_string());
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["id"], json!(pid));
+    assert_eq!(centers(&v), [a, b], "{v}");
+    for k in ["index", "center_hz", "bandwidth_hz"] {
+        assert!(!v["channels"][1][k].is_null(), "{k}: {v}");
+    }
+    assert_eq!(v["added"][0]["index"], json!(1), "{v}");
+    assert_eq!(v["removed"], json!([]));
+    assert!(v["applied_at_sample"].is_u64(), "{v}");
+    let (_, p) = get(addr, &format!("/api/pipelines/{pid}"));
+    assert_eq!(centers(&p["follow_hops"]), [a, b], "{p}");
+
+    // The same set again: nothing changes.
+    let (st, v) = put(addr, &path, &json!({"channels_hz": [b, a]}).to_string());
+    assert_eq!(
+        (st, &v["added"], &v["applied_at_sample"]),
+        (200, &json!([]), &Value::Null),
+        "{v}"
+    );
+
+    // Invalid bodies.
+    for bad in [
+        json!({"channels_hz": "101.1e6"}),
+        json!({"channels_hz": [a, -1.0]}),
+        json!({"channels_hz": [a], "extra": 1}),
+        json!({}),
+    ] {
+        let (st, v) = put(addr, &path, &bad.to_string());
+        assert_eq!((st, &v["code"]), (400, &json!("invalid")), "{bad}: {v}");
+    }
+    let (st, v) = post(addr, &path, "{}");
+    assert_eq!(st, 405, "{v}");
+
+    // Refresh re-resolves the recipe's list: back to one channel.
+    let (st, v) = post(addr, &format!("{path}/refresh"), "");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["removed"], json!([1]), "{v}");
+    assert_eq!(centers(&v), [a]);
+
+    // 64 channels at 25 kHz: each added one claims a chain; beyond the budget, 503 busy and the
+    // running channel set is untouched.
+    let many: Vec<f64> = (0..64).map(|k| 100.0e6 + f64::from(k) * 25e3).collect();
+    let (st, v) = put(addr, &path, &json!({"channels_hz": many}).to_string());
+    assert_eq!((st, &v["code"]), (503, &json!("busy")), "{v}");
+    let (_, p) = get(addr, &format!("/api/pipelines/{pid}"));
+    assert_eq!(centers(&p["follow_hops"]), [a], "{p}");
+    let (st, v) = put(
+        addr,
+        "/api/pipelines/p999/channels",
+        &json!({"channels_hz": [a]}).to_string(),
+    );
+    assert_eq!(st, 404, "{v}");
+
+    let (st, v) = call(
+        addr,
+        "DELETE",
+        &format!("/api/pipelines/{pid}"),
+        Some(&bearer),
+        None,
+    );
+    assert_eq!(st, 200, "{v}");
+    stop_server(serving);
+}
