@@ -1913,7 +1913,8 @@ tasks:
   - id: T-120
     milestone: M2
     title: "Bandit revisit scheduler (C04 full): UCB on C12 interestingness, exploration floor, preemption, POI accounting"
-    status: in-progress
+    status: review
+    commit: 10bdabb
     deps: [T-113, T-114]
     parallel_group: M2Q
     use_cases: [AWARE-027, SIGNAL-027, SIGNAL-028, AWARE-057]
@@ -2003,6 +2004,20 @@ tasks:
     needs: none
     model: opus
     effort: medium
+  - id: T-127
+    milestone: M2
+    title: "Bandit pipeline wiring + scheduler routes + POI from the observation log"
+    status: todo
+    deps: [T-115, T-120]
+    parallel_group: M2Q
+    use_cases: [AWARE-027, SIGNAL-027]
+    found_by: "T-120 report 2026-09-15 (deferred under token budget)"
+    acceptance: "hk-pipeline control.rs enables the bandit (config/ScanPlan flag), feeds DwellOutcomes from detections/novelty/decodes and report_verification from TrustEvaluator, publishes interestingness via SharedInterestingness (T-119 provider when present); POI and coverage computed from the T-115 observation log via visits_from_records; routes /api/scheduler, /api/scheduler/arms, /api/scheduler/leases (+ lease create/release) with docs/api.md + api_contract; mock-SDR scheduler e2e tests pass with bandit on and off; hk serve demo path unchanged when bandit disabled"
+    area: "crates/hk-pipeline/src/control.rs, crates/hk-api/src/schedule.rs (ADR-0012 §11), docs/api.md"
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
