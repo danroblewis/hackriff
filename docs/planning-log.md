@@ -2161,3 +2161,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-187 (C, Sonnet):** verify candidate discard end to end (removed from list, raw detections kept, re-detection gives a new candidate), using mock `hk serve` rather than the user's demo data.
   - **Scheduling:** the T-178 fix round and the remaining MUI API gaps queue behind A and B.
   - **Roadmap:** the strategic auto-decode direction is noted in docs/11 as proposed MAUTO, not scheduled. Ask the user before scheduling, after M2 closes and MUI is usable.
+- **B0.459 Full check green after the T-180 merge (95b567e).** Lint clean; 1371/1371 tests in 135 s; acceptance 28/28.
+  - **T-186 launched** (Opus high, field-test Task B): per-stage detection→identification latency budget on the `fm_100p8M` capture. Target is ≤3 s sample-clock to family + top explanation, set a priori, without weakening trust. It likely overlaps T-183 in the hk-pipeline family/classifier code.
+  - **Queue after this:** T-178 fix round, T-187, the remaining MUI API gaps, T-182.

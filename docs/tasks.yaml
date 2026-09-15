@@ -2941,7 +2941,7 @@ notes:
   - id: T-186
     milestone: M2-fix
     title: "Detection -> identification latency: a strong continuous WFM station takes too long to get family + top explanation"
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: FIELD
