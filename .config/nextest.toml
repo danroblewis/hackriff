@@ -79,3 +79,13 @@ test-group = 'heavy-serial'
 [[profile.default.overrides]]
 filter = 'test(plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated)'
 retries = 1
+
+# Found flaky on main after the T-084/T-098 merges (planning-log B0.219): readsb decoded 0/16
+# under load ~24 (plugin process startup racing the replay); passed 3/3 on rerun.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(signal_001_readsb)'
+test-group = 'heavy-serial'
+
+[[profile.default.overrides]]
+filter = 'test(signal_001_adsb_squitters_decoded_by_the_readsb_plugin_chain)'
+retries = 1
