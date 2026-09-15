@@ -913,3 +913,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
   T-125 merges after the in-flight full check.
 - **B0.289 Full check of main f54e67d (T-113): green.** Lint clean; nextest + UI 1186/1186 in 297 s (cold build after the target cleanup); acceptance 29/29 in 64 s. **T-125 merged** (1ebe82c). Full check covering T-125 running.
+- **B0.290 Main 4d03322 (T-125) verified green.** First run: acceptance 30/30 (including scene_48h) and lint clean, but `hk-stream::review_fixes::p7_connect_close_flood_is_reaped_and_consumers_are_capped` failed at load ~37 (4 of 8 consumers accepted in time). It passed 3/3 alone, and a full rerun gave nextest + UI 1187/1187. The test is now heavy-serial with 1 retry in nextest. In flight: T-115, T-120, T-126.

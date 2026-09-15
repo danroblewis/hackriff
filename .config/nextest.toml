@@ -93,3 +93,11 @@ test-group = 'heavy-serial'
 filter = 'test(a_slow_disk_drops_and_counts_without_blocking_the_publisher)'
 test-group = 'heavy-serial'
 retries = 1
+
+# Found flaky under load (full check after T-125, 2026-09-15, load ~37): hk-stream connect/close
+# flood test saw 4 of 8 expected consumers accepted before its deadline; passed 3/3 alone and in a
+# full rerun.
+[[profile.default.overrides]]
+filter = 'test(p7_connect_close_flood_is_reaped_and_consumers_are_capped)'
+test-group = 'heavy-serial'
+retries = 1
