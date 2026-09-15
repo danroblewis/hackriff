@@ -934,3 +934,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
   Open points: the usable span follows the history rule rather than the ADR roll-off trim; overload is always false; **interactive runs without a scheduler log nothing** (demo-relevant, being assessed in review). Timeboxed Opus review running.
 - **B0.295 T-120 delivered** (10bdabb): bandit in hk-core plus an hk-sim policy. Over 24 h on 4 seeds: 124/124 discovered; bursts/h 1642/1873/1399/1762, beating WRR on all seeds and pure-sweep on 3 of 4; median TTFD 118–216 s; suspect dwell ~700–900 s vs WRR 6875–9820 s (about 10× less). The injected burst emitter was found later than WRR on seeds 1–2. v1 policy is unchanged with the bandit off; alloc-free; POI matches the formula and Monte Carlo. Pipeline wiring, routes and POI from the observation log are deferred to **T-127** (after T-115). Timeboxed Opus review running; it probes the seed-3 and injected-emitter discovery trade-off.
+- **B0.296 T-115 review: FIX-FIRST.** Must-fix: an open SweepRecord isn't closed by non-sweep steps, so a long user intent emits it hours late, outside query look-ahead. Checked OK: sample-clock time base; non-blocking try_send on the control thread; fully-inside coverage rule; retention never touches the open hour; merge-tree with main is clean.
+  Coordinator decisions:
+  - (a) **Record interactive runs without a scheduler** as `interactive`-tier DwellRecords (coverage yes, unbiased fco no). This is demo-relevant (the hk serve browsing path) and ~100 lines, so it goes in the fix round.
+  - (b) Usable span follows the history L0 fold extent; ADR §1.4 note added, shared roll-off trim is a follow-up.
+  - (c) Torn-tail repair on first append per hour.
+  Fresh Opus fix round is running in the T-115 worktree.
