@@ -1734,3 +1734,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Bundle:** app.js 36.9 KB (14.6 KB gzip).
   - **Merge:** after the T-170 full check.
   - **T-153** (Decode workbench, Sonnet) launched.
+- **B0.403 T-152 committed (9bbd85a, Opus); T-154 launched.**
+  - **Coordinator check on T-152:** diff limited to `centre/*`, `waterfall.ts` and `test/app-centre.test.ts`.
+    - The removed `waterfall.ts` lines are the row decimation moved into the pure `decimateRow`; push behaviour is unchanged.
+    - UI tests: 170 passed, 0 failed.
+  - **T-152 features:** spectrum trace, brackets from inventory, drag-select via `POST /api/selections`, hover readout, review-render from `/api/history`, perf counters (row prep 0.13 ms at 65k→16k).
+  - **Gap 10:** DC mask uses the observation-log notch, otherwise ±15 kHz labelled "assumed".
+  - **Needs user attention:** T-152 calls `POST /api/control/center` (click to tune). This is a control action through the authenticated API.
+  - **Merges:** T-147, T-150 and T-152 merge after the T-170 full check.
+  - **T-154** (packet inspector rehome, Sonnet) launched.

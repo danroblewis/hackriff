@@ -2410,7 +2410,8 @@ notes:
   - id: T-152
     milestone: MUI
     title: "MUI centre: spectrum trace + existing WebGL waterfall rehomed, brackets for confirmed/candidate/focused signals, DC mask, drag region select, hover readout, capture-timeline time cursor"
-    status: in-progress
+    status: review
+    commit: 9bbd85a
     deps: [T-149]
     parallel_group: MUI-CENTRE
     use_cases: []
@@ -2440,7 +2441,7 @@ notes:
   - id: T-154
     milestone: MUI
     title: "MUI packet inspector rehomed into Decode: frame list -> hex+ASCII -> layer tree with linked selection both ways, served byte-record and TCP address (reuse T-090 inspector logic-free rendering)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-INSPECT
     use_cases: []
