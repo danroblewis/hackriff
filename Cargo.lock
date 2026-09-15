@@ -693,6 +693,7 @@ dependencies = [
  "hk-model",
  "hk-pipeline",
  "hk-plugins",
+ "hk-sim",
  "hk-store",
  "hk-stream",
  "num-complex",

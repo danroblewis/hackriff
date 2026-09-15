@@ -55,6 +55,10 @@ acceptance *args:
     cargo build -p hk-plugins --bins
     HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo test -p hk-e2e --test acceptance_m0 {{args}}
 
+# M2 attention acceptance suite (T-124): a time-compressed multi-day occupancy scene through the mock SDR under the bandit scheduler (FCO vs hidden truth, busier-than-usual alarm, false alarms, gain step, survey report coverage/POI) plus the recorded bandit vs round-robin simulator comparison. Kept apart from `acceptance` for wall time. Extra args go to cargo test.
+acceptance-m2 *args:
+    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m2 {{args}}
+
 test-py:
     cd py && uv run --locked pytest
 
