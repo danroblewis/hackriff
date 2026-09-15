@@ -1657,3 +1657,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Fix round launched** (fresh Opus; the T-149 agent was at 294k tokens): per-area index/slice/css files, glob test runner, typed stubs, listener isolation.
   - **Correction to B0.391:** T-150..T-152 were not launched. They are back to todo and start after the T-149 fix merges.
   - **T-145 bandit reference:** 81.5 s pre-T-141. The same test on main is being timed.
+- **B0.395 T-141 mock dequant costs about 33% on bandit tests. Confirmed and launched T-170.**
+  - **Measurement:** `bandit_on_attaches` took 81.5 s before T-141 (load ~17) and 108.8 s on main at 0f2b5c3 (load 8–15).
+  - **T-170 (Opus):** bypass dequant when the recording is not quantisation-limited (threshold fixed a priori from rounding-noise math), and/or a cheaper FFT path. Fidelity tests and the `scheduler_history` 0.5 dB check must hold.

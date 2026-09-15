@@ -2685,3 +2685,17 @@ notes:
     model: sonnet
     effort: low
     core_interface: false
+  - id: T-170
+    milestone: M2
+    title: "Mock SDR dequant perf regression: bandit test 81.5 s -> 108.8 s after T-141's per-bin FFT dequant on re-rendered hops; bypass when not quantisation-limited and/or cheaper FFT path"
+    status: in-progress
+    deps: [T-141]
+    parallel_group: M2E
+    use_cases: []
+    found_by: "coordinator timing 2026-09-15: bandit_on_attaches 81.5 s pre-T-141 (load ~17) vs 108.8 s on main (load ~8-15), +33%"
+    acceptance: "bandit test within ~10% of 81.5 s at comparable load (or remaining gap explained); T-141 fidelity tests unchanged and green; scheduler_history 0.5 dB a-priori check holds; fixed-tune passthrough bit-identical"
+    area: crates/hk-core/src/source/mock
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
