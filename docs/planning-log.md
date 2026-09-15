@@ -2027,3 +2027,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Initial load: 78.1 KB min / 29.3 KB gzip (was 140.2 / 48.2). Lazy chunks: decode 10.0 KB gz, review 11.3 KB gz. CSS unchanged at 32.3 KB.
   - No Rust change. npm test 20/20. Smoke: 20/20 checks at both viewports, including lazy Decode and Review.
   - Merges after the timed T-175 full check.
+- **B0.442 The T-175 opt-level=2 speed-up is confirmed on main (2f268c0).**
+  - **Results:** lint clean; nextest 1363/1363 in 135 s, was 598 s on the previous check (4.4× faster); acceptance 28/28 in 12 s, was 71 s.
+  - **Load:** load averages were 22 → 10 during the run.
+  - **Merged:** T-179 (8d38d3b) and its worktree removed.
+  - **Next:** full check.
