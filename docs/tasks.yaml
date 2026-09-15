@@ -1447,7 +1447,8 @@ tasks:
   - id: T-086
     milestone: M1
     title: "M1 Blocks A: IQ/demod + symbol blocks to the block contract"
-    status: in-progress
+    status: review
+    commit: 691ef04
     deps: [T-085]
     parallel_group: M1A
     use_cases: [SIGNAL-062]
