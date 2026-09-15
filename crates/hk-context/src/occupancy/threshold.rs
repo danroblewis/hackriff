@@ -89,7 +89,9 @@ pub fn resolve(
             FloorSource::Assumed,
         ),
         // T-121's report stand-in carries no floor of its own: no threshold without a measured one.
-        (None, ThresholdMethod::Dynamic { .. } | ThresholdMethod::HistoryTile { .. }) => return None,
+        (None, ThresholdMethod::Dynamic { .. } | ThresholdMethod::HistoryTile { .. }) => {
+            return None;
+        }
     };
     let (threshold_db, guard_clamped) = spec.applied_db(floor_db, obw_hz, rbw_hz);
     Some(AppliedThreshold {
