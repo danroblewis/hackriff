@@ -7,10 +7,14 @@ use std::sync::Arc;
 
 use hk_api::live_control::AppliedWindow;
 use hk_api::{
-    DisplayState, DisplayUpdate, LiveControlError, OutputControl, OutputFailure, OutputStart,
-    RecordingState, RunControl, RunState, WindowRetuner,
+    DisplayLimits, DisplayState, DisplayUpdate, LiveControlError, OutputControl, OutputFailure,
+    OutputStart, RecordingState, RunControl, RunState, WindowRetuner,
 };
+use hk_dsp::window::WindowKind;
 use hk_model::ContentClass;
+use hk_pipeline::config::{
+    DISPLAY_AVERAGING_MAX, DISPLAY_FFT_MAX, DISPLAY_FFT_MIN, DISPLAY_ROWS_MAX, DISPLAY_ROWS_MIN,
+};
 use hk_pipeline::{
     ControlFailure, DisplayPatch, DisplaySettings, OutputError, OutputKind, OutputRecorders,
     OutputRequest, OutputTarget, PipelineController, RecordingStatus,
@@ -43,6 +47,22 @@ fn display(d: DisplaySettings) -> DisplayState {
         averaging: d.averaging,
         rows_per_s: d.rows_per_s,
         paused: d.paused,
+        window: d.window.name().to_owned(),
+    }
+}
+
+/// [`hk_pipeline::config`]'s `DISPLAY_*` bounds, translated for the control API (T-067).
+fn pipeline_display_limits() -> DisplayLimits {
+    DisplayLimits {
+        fft_size_min: DISPLAY_FFT_MIN,
+        fft_size_max: DISPLAY_FFT_MAX,
+        averaging_max: DISPLAY_AVERAGING_MAX,
+        rows_per_s_min: DISPLAY_ROWS_MIN,
+        rows_per_s_max: DISPLAY_ROWS_MAX,
+        windows: WindowKind::ALL
+            .iter()
+            .map(|w| w.name().to_owned())
+            .collect(),
     }
 }
 
@@ -77,12 +97,30 @@ impl RunControl for PipelineRunControl {
         }
     }
 
+    fn display_limits(&self) -> DisplayLimits {
+        pipeline_display_limits()
+    }
+
     fn set_display(&self, update: &DisplayUpdate) -> Result<DisplayState, LiveControlError> {
+        let window = match &update.window {
+            None => None,
+            Some(s) => Some(WindowKind::from_name(s).ok_or_else(|| {
+                LiveControlError::Invalid(format!(
+                    "window {s:?} must be one of {}",
+                    WindowKind::ALL
+                        .iter()
+                        .map(|w| w.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?),
+        };
         self.0
             .set_display(&DisplayPatch {
                 fft_size: update.fft_size,
                 averaging: update.averaging,
                 rows_per_s: update.rows_per_s,
+                window,
             })
             .map(display)
             .map_err(api_error)

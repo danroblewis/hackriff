@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use hk_dsp::window::WindowKind;
 use hk_model::{
     CalibrationState, ContentClass, FreqRange, PlanRegion, ScanPlan, ScanPlanId, ScanPolicy,
     Schedule, Timestamp,
@@ -258,6 +259,8 @@ pub struct DisplaySettings {
     pub rows_per_s: f64,
     /// Publishing is paused (the waterfall freezes). Capture, detection and history continue.
     pub paused: bool,
+    /// Analysis window for the published PSD (T-067; default Hann).
+    pub window: WindowKind,
 }
 
 /// A partial display update.
@@ -269,16 +272,19 @@ pub struct DisplayPatch {
     pub averaging: Option<u32>,
     /// New row rate.
     pub rows_per_s: Option<f64>,
+    /// New analysis window (T-067).
+    pub window: Option<WindowKind>,
 }
 
 impl DisplaySettings {
-    /// The settings from a run's [`PipelineSettings`] (unpaused, no averaging).
+    /// The settings from a run's [`PipelineSettings`] (unpaused, no averaging, Hann window).
     pub fn from_settings(s: &PipelineSettings) -> Self {
         Self {
             fft_size: s.spectrum_fft_len,
             averaging: 1,
             rows_per_s: s.spectrum_rows_per_s,
             paused: false,
+            window: WindowKind::default(),
         }
     }
 
@@ -308,6 +314,9 @@ impl DisplaySettings {
                 ));
             }
             next.rows_per_s = r;
+        }
+        if let Some(w) = patch.window {
+            next.window = w;
         }
         Ok(next)
     }
@@ -433,14 +442,22 @@ mod tests {
     fn display_patches_are_validated_all_or_nothing() {
         let d = DisplaySettings::from_settings(&PipelineSettings::default());
         assert_eq!((d.fft_size, d.averaging, d.paused), (1024, 1, false));
+        assert_eq!(d.window, WindowKind::Hann, "default window");
         let ok = d
             .patched(&DisplayPatch {
                 fft_size: Some(4096),
                 averaging: Some(8),
                 rows_per_s: Some(10.0),
+                window: Some(WindowKind::FlatTop),
             })
             .unwrap();
         assert_eq!((ok.fft_size, ok.averaging, ok.rows_per_s), (4096, 8, 10.0));
+        assert_eq!(ok.window, WindowKind::FlatTop);
+        assert_eq!(
+            d.patched(&DisplayPatch::default()).unwrap().window,
+            WindowKind::Hann,
+            "an omitted window leaves it unchanged"
+        );
         for bad in [
             DisplayPatch {
                 fft_size: Some(1000),

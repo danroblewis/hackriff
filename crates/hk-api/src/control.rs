@@ -9,19 +9,20 @@
 //!
 //! | Method | Path | Body | Answers |
 //! |---|---|---|---|
-//! | GET | `/api/control/state` | – | `live`, `device` (capabilities), `tuning`, `run` (content class, segment, display, recording), `transmit.available: false`, `routes` |
+//! | GET | `/api/control/state` | – | `live`, `device` (capabilities), `tuning`, `run` (content class, segment, display, recording), `display_limits` (T-067: FFT size/averaging/rows-per-s bounds, allowed windows), `transmit.available: false`, `routes` |
 //! | POST | `/api/control/center` | `{"center_hz"}` | `tuning`, `run`. A window of another class **re-plumbs** the run with that class |
 //! | POST | `/api/control/rate` | `{"sample_rate_hz"}` | `tuning`, `run` (a rate change re-plumbs the run) |
 //! | POST | `/api/control/gains` | `{"gains": {"lna": 24, ...}}` | `tuning` (quantised per stage) |
 //! | POST | `/api/control/bias_tee` | `{"enabled"}` | `tuning` (501 without a bias tee) |
-//! | POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s"}` | `display` |
+//! | POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz"}` | `tuning` (validated against `device.baseband_filter`; 501 without one) |
+//! | POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s", "window"}` (T-067) | `display` |
 //! | POST | `/api/control/pause`, `/api/control/resume` | `{}` or empty | `display` |
 //! | POST | `/api/control/record/start` | `{"label"?, "max_s"?}` | `recording` (409 `refused` under a class that forbids content) |
 //! | POST | `/api/control/record/stop` | `{}` or empty | `recording` (the stored Recording) |
 //! | GET, POST | `/api/bookmarks` | create: `{"name", "f_center_hz", "kind"?, "bandwidth_hz"?, "note"?}` | list / the created bookmark (201) |
-//! | GET, PUT, DELETE | `/api/bookmarks/<id>` | update: any create field (`null` clears optional ones) | the bookmark / `{"deleted": ...}` |
+//! | GET, PUT, DELETE | `/api/bookmarks/<id>` | update (rename included): any create field (`null` clears optional ones) | the bookmark / `{"deleted": ...}` |
 //!
-//! Device endpoints (centre, rate, gains, bias tee) need a live source
+//! Device endpoints (centre, rate, gains, bias tee, baseband filter) need a live source
 //! ([`crate::ApiState::live_control`]); on a replayed recording they answer 409 `not_live`, while
 //! display, pause, recording and bookmarks keep working.
 //!
@@ -62,7 +63,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use hk_core::source::{SampleRates, SourceKind};
+use hk_core::source::{BasebandFilters, SampleRates, SourceKind};
 use hk_core::{NamedGain, SourceCapabilities};
 use hk_model::{
     BOOKMARK_NAME_MAX, Bookmark, BookmarkId, BookmarkKind, ContentClass, RepoError, Timestamp,
@@ -73,7 +74,7 @@ use crate::http::{ApiState, ROUTES};
 use crate::live_control::{LiveControlError, LiveTuning};
 
 /// Display settings of the spectrum stream.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DisplayState {
     /// Bins per row.
     pub fft_size: usize,
@@ -83,10 +84,12 @@ pub struct DisplayState {
     pub rows_per_s: f64,
     /// Publishing paused.
     pub paused: bool,
+    /// Analysis window for the published PSD (T-067), e.g. `"hann"`.
+    pub window: String,
 }
 
 /// A partial display update.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DisplayUpdate {
     /// New FFT size.
     pub fft_size: Option<usize>,
@@ -94,6 +97,27 @@ pub struct DisplayUpdate {
     pub averaging: Option<u32>,
     /// New row rate.
     pub rows_per_s: Option<f64>,
+    /// New analysis window (T-067), by name; the implementor validates it (a pipeline against
+    /// `hk_dsp::WindowKind::from_name`, [`LiveControlError::Invalid`] if unrecognised).
+    pub window: Option<String>,
+}
+
+/// Bounds on [`DisplayUpdate`] fields ([`RunControl::display_limits`], T-067): the UI reads them
+/// instead of hard-coding the pipeline's limits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisplayLimits {
+    /// [`DisplayUpdate::fft_size`] bounds, inclusive (a power of two).
+    pub fft_size_min: usize,
+    /// See [`DisplayLimits::fft_size_min`].
+    pub fft_size_max: usize,
+    /// [`DisplayUpdate::averaging`] largest value (the smallest is always 1, off).
+    pub averaging_max: u32,
+    /// [`DisplayUpdate::rows_per_s`] bounds, inclusive.
+    pub rows_per_s_min: f64,
+    /// See [`DisplayLimits::rows_per_s_min`].
+    pub rows_per_s_max: f64,
+    /// Accepted [`DisplayUpdate::window`] names.
+    pub windows: Vec<String>,
 }
 
 /// A manual recording's state.
@@ -149,6 +173,8 @@ pub struct RunState {
 pub trait RunControl: Send + Sync {
     /// The run's state.
     fn state(&self) -> RunState;
+    /// Bounds accepted by [`RunControl::set_display`] (T-067).
+    fn display_limits(&self) -> DisplayLimits;
     /// Applies a display update (all or nothing).
     fn set_display(&self, update: &DisplayUpdate) -> Result<DisplayState, LiveControlError>;
     /// Pauses or resumes spectrum publishing.
@@ -643,6 +669,7 @@ enum Action {
     Rate,
     Gains,
     BiasTee,
+    BasebandFilter,
     Display,
     Pause,
     Resume,
@@ -663,6 +690,7 @@ impl Action {
             Self::Rate => "rate",
             Self::Gains => "gains",
             Self::BiasTee => "bias_tee",
+            Self::BasebandFilter => "baseband_filter",
             Self::Display => "display",
             Self::Pause => "pause",
             Self::Resume => "resume",
@@ -701,6 +729,7 @@ fn resolve(method: &str, path: &str) -> Option<Result<Action, Option<&'static st
             "rate" => pick("POST", Action::Rate),
             "gains" => pick("POST", Action::Gains),
             "bias_tee" => pick("POST", Action::BiasTee),
+            "baseband_filter" => pick("POST", Action::BasebandFilter),
             "display" => pick("POST", Action::Display),
             "pause" => pick("POST", Action::Pause),
             "resume" => pick("POST", Action::Resume),
@@ -1029,6 +1058,18 @@ fn display_json(d: &DisplayState) -> Value {
         "averaging": d.averaging,
         "rows_per_s": d.rows_per_s,
         "paused": d.paused,
+        "window": d.window,
+    })
+}
+
+fn display_limits_json(l: &DisplayLimits) -> Value {
+    json!({
+        "fft_size_min": l.fft_size_min,
+        "fft_size_max": l.fft_size_max,
+        "averaging_max": l.averaging_max,
+        "rows_per_s_min": l.rows_per_s_min,
+        "rows_per_s_max": l.rows_per_s_max,
+        "windows": l.windows,
     })
 }
 
@@ -1073,7 +1114,17 @@ fn tuning_json(t: &LiveTuning) -> Value {
         "sample_rate_hz": t.sample_rate_hz,
         "gains": gains,
         "bias_tee": t.bias_tee,
+        "baseband_filter_hz": t.baseband_filter_hz,
     })
+}
+
+fn baseband_filter_json(f: &BasebandFilters) -> Value {
+    match f {
+        BasebandFilters::Continuous { min_hz, max_hz } => {
+            json!({ "min_hz": min_hz, "max_hz": max_hz })
+        }
+        BasebandFilters::Discrete(v) => json!({ "values_hz": v }),
+    }
 }
 
 fn caps_json(c: &SourceCapabilities) -> Value {
@@ -1093,6 +1144,7 @@ fn caps_json(c: &SourceCapabilities) -> Value {
             "name": s.name, "min_db": s.min_db, "max_db": s.max_db, "step_db": s.step_db,
         })).collect::<Vec<_>>(),
         "bias_tee": c.bias_tee,
+        "baseband_filter": c.baseband_filter.as_ref().map(baseband_filter_json),
         "adc_bits": c.adc_bits,
         // A hardware descriptor only: the API has no transmit operation (see `transmit`).
         "tx_capable_hardware": c.tx_capable,
@@ -1121,6 +1173,7 @@ pub(crate) fn state_json(state: &ApiState) -> Value {
         "device": live.map(|l| caps_json(l.capabilities())),
         "tuning": live.map(|l| tuning_json(&l.tuning())),
         "run": state.run_control.as_deref().map(|r| run_json(&r.state())),
+        "display_limits": state.run_control.as_deref().map(|r| display_limits_json(&r.display_limits())),
         "transmit": {
             "available": false,
             "reason": "receive only: the control API has no transmit operation (C37 gated)",
@@ -1253,16 +1306,30 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
             let new = tuning_json(&lc.set_bias_tee(enabled)?);
             Ok(ok(json!({ "tuning": new }), old, new))
         }
+        Action::BasebandFilter => {
+            only(body, &["bandwidth_hz"])?;
+            let hz = required(body, "bandwidth_hz")?;
+            let lc = live(state)?;
+            let old = tuning_json(&lc.tuning());
+            let new = tuning_json(&lc.set_baseband_filter(hz)?);
+            Ok(ok(json!({ "tuning": new }), old, new))
+        }
         Action::Display => {
-            only(body, &["fft_size", "averaging", "rows_per_s"])?;
+            only(body, &["fft_size", "averaging", "rows_per_s", "window"])?;
+            let window = match text(body, "window")? {
+                None => None,
+                Some(None) => return Err(Fail::invalid("window must be a string, not null")),
+                Some(Some(s)) => Some(s.to_owned()),
+            };
             let update = DisplayUpdate {
                 fft_size: integer(body, "fft_size", 1 << 20)?.map(|n| n as usize),
                 averaging: integer(body, "averaging", u64::from(u32::MAX))?.map(|n| n as u32),
                 rows_per_s: number(body, "rows_per_s")?,
+                window,
             };
             if update == DisplayUpdate::default() {
                 return Err(Fail::invalid(
-                    "give at least one of fft_size, averaging, rows_per_s",
+                    "give at least one of fft_size, averaging, rows_per_s, window",
                 ));
             }
             let rc = run(state)?;

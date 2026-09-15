@@ -108,6 +108,21 @@ export class BookmarkPanel {
     }
   }
 
+  /** Renames (and re-notes) a bookmark via `PUT /api/bookmarks/{id}` (T-067). */
+  private async rename(b: Bookmark) {
+    const name = window.prompt(`Rename "${b.name}" to:`, b.name);
+    if (name === null) return;
+    const clipped = clip(name);
+    if (!clipped) { this.hooks.message("name cannot be empty", true); return; }
+    try {
+      await this.client.put<Bookmark>(`/api/bookmarks/${encodeURIComponent(b.id)}`, { name: clipped });
+      this.hooks.message(`renamed to "${clipped}"`);
+      await this.load();
+    } catch (e) {
+      this.hooks.fail(e);
+    }
+  }
+
   private jump(b: Bookmark) {
     const plan = jumpPlan(this.hooks.geometry(), b, this.hooks.canRetune());
     if (plan.kind === "zoom") this.hooks.zoomTo(plan.loHz, plan.hiHz);
@@ -135,7 +150,11 @@ export class BookmarkPanel {
       const acts = document.createElement("div");
       acts.className = "acts";
       td("").append(acts);
-      for (const [label, fn] of [["Jump", () => this.jump(b)], ["Delete", () => void this.remove(b)]] as const) {
+      for (const [label, fn] of [
+        ["Jump", () => this.jump(b)],
+        ["Rename", () => void this.rename(b)],
+        ["Delete", () => void this.remove(b)],
+      ] as const) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.textContent = label;

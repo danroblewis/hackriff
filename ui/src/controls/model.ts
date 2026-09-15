@@ -4,6 +4,9 @@
 
 export interface GainStageCap { name: string; min_db: number; max_db: number; step_db: number }
 
+/** A device's selectable baseband (anti-alias) filter bandwidths (T-067), Hz. */
+export type BasebandFilterCap = { min_hz: number; max_hz: number } | { values_hz: number[] };
+
 export interface DeviceCaps {
   driver: string;
   kind: "hardware" | "replay";
@@ -12,12 +15,21 @@ export interface DeviceCaps {
   sample_rates_hz: { min: number; max: number } | { values: number[] };
   gain_stages: GainStageCap[];
   bias_tee: boolean;
+  baseband_filter: BasebandFilterCap | null;
   adc_bits: number;
   tx_capable_hardware: boolean;
 }
 
-export interface Tuning { center_hz: number; sample_rate_hz: number; gains: Record<string, number>; bias_tee: boolean | null }
-export interface Display { fft_size: number; averaging: number; rows_per_s: number; paused: boolean }
+export interface Tuning {
+  center_hz: number; sample_rate_hz: number; gains: Record<string, number>; bias_tee: boolean | null;
+  baseband_filter_hz: number | null;
+}
+export interface Display { fft_size: number; averaging: number; rows_per_s: number; paused: boolean; window: string }
+/** `/api/control/state`'s `display_limits` (T-067): the UI stops hard-coding hk-pipeline's `DISPLAY_*` bounds. */
+export interface DisplayLimits {
+  fft_size_min: number; fft_size_max: number; averaging_max: number;
+  rows_per_s_min: number; rows_per_s_max: number; windows: string[];
+}
 export interface Recording {
   active: boolean; id: string | null; label: string | null; center_hz: number | null; sample_rate_hz: number | null;
   samples: number; lost_samples: number; max_s: number; stored: boolean; ended: string | null;
@@ -31,14 +43,40 @@ export interface ControlState {
   device: DeviceCaps | null;
   tuning: Tuning | null;
   run: Run | null;
+  display_limits: DisplayLimits | null;
   transmit: { available: false; reason: string };
   audit: boolean;
 }
 
-/** Display limits (hk-pipeline `DISPLAY_*`; not in the state body, see ui/CONTROLS.md). */
-export const FFT_SIZES = Array.from({ length: 11 }, (_, i) => 64 << i); // 64 .. 65536
-export const AVERAGING_MAX = 100;
-export const ROW_RATES = [0.5, 1, 2, 5, 10, 25, 50, 100, 200];
+/**
+ * Fallback display limits (T-067), used only until the first `/api/control/state` answers: after
+ * that the panel reads `state.display_limits` instead of hard-coding hk-pipeline's `DISPLAY_*`.
+ */
+export const FALLBACK_LIMITS: DisplayLimits = {
+  fft_size_min: 64, fft_size_max: 65536, averaging_max: 100,
+  rows_per_s_min: 0.5, rows_per_s_max: 200, windows: ["hann", "blackman-harris", "flat-top"],
+};
+
+/** FFT sizes offered: every power of two in the limits' range. */
+export function fftSizeOptions(limits: DisplayLimits): number[] {
+  const out: number[] = [];
+  for (let n = limits.fft_size_min; n <= limits.fft_size_max; n *= 2) out.push(n);
+  return out;
+}
+
+/** Waterfall speeds offered: the standard steps, clamped into the limits' range (always including the max). */
+const STANDARD_ROW_RATES = [0.5, 1, 2, 5, 10, 25, 50, 100, 200];
+export function rowRateOptions(limits: DisplayLimits): number[] {
+  const out = STANDARD_ROW_RATES.filter((r) => r >= limits.rows_per_s_min && r <= limits.rows_per_s_max);
+  if (!out.includes(limits.rows_per_s_max)) out.push(limits.rows_per_s_max);
+  return out.sort((a, b) => a - b);
+}
+
+/** A window name into a human label ("hann" -> "Hann", "blackman-harris" -> "Blackman-Harris"). */
+export function windowLabel(name: string): string {
+  return name.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join("-");
+}
+
 /** Content-forbidding classes gate spectrum at this many rows per second (hk-pipeline class.rs). */
 export const GATED_ROWS_PER_S = 50;
 
@@ -96,9 +134,9 @@ export function classLabel(cls: string, permitted: boolean): string {
 export interface Gate { enabled: boolean; reason: string }
 
 export interface PanelModel {
-  /** Centre, rate, gains, bias tee. */
+  /** Centre, rate, gains, bias tee, baseband filter. */
   device: Gate;
-  /** FFT size, averaging, speed, pause (server-side display). */
+  /** FFT size, averaging, speed, window, pause (server-side display). */
   display: Gate;
   /** Record start (stop stays possible while one is active). */
   record: Gate & { active: boolean };
@@ -110,7 +148,27 @@ export interface PanelModel {
   rates: number[];
   gains: GainControl[];
   biasTee: { available: boolean; on: boolean };
+  basebandFilter: { available: boolean; options: number[]; value: number | null };
   frequencyRanges: [number, number][];
+  /** Display setting bounds (T-067): from `state.display_limits`, else [`FALLBACK_LIMITS`]. */
+  limits: DisplayLimits;
+}
+
+/** Baseband filter choices (T-067) from the device's discrete list, or 9 log-spaced steps of a
+ * continuous range; the current value is always included. */
+export function basebandFilterOptions(cap: BasebandFilterCap | null, currentHz: number | undefined): number[] {
+  let out: number[] = [];
+  if (cap) {
+    if ("values_hz" in cap) out = [...cap.values_hz];
+    else {
+      const { min_hz, max_hz } = cap, steps = 8;
+      out = min_hz > 0
+        ? Array.from({ length: steps + 1 }, (_, i) => min_hz * (max_hz / min_hz) ** (i / steps))
+        : Array.from({ length: steps + 1 }, (_, i) => min_hz + ((max_hz - min_hz) * i) / steps);
+    }
+  }
+  if (currentHz !== undefined && Number.isFinite(currentHz) && !out.includes(currentHz)) out.push(currentHz);
+  return out.sort((a, b) => a - b);
 }
 
 const on: Gate = { enabled: true, reason: "" };
@@ -150,7 +208,13 @@ export function panelModel(s: ControlState, pending = false): PanelModel {
     rates: rateOptions(s.device, s.tuning?.sample_rate_hz ?? run?.sample_rate_hz),
     gains: live ? gainControls(s.device, s.tuning) : [],
     biasTee: { available: live && !!s.device!.bias_tee, on: s.tuning?.bias_tee === true },
+    basebandFilter: {
+      available: live && !!s.device!.baseband_filter,
+      options: basebandFilterOptions(s.device?.baseband_filter ?? null, s.tuning?.baseband_filter_hz ?? undefined),
+      value: s.tuning?.baseband_filter_hz ?? null,
+    },
     frequencyRanges: s.device?.frequency_ranges_hz ?? [],
+    limits: s.display_limits ?? FALLBACK_LIMITS,
   };
 }
 
