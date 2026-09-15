@@ -51,3 +51,6 @@ hk-stream = { path = "crates/hk-stream" }
 hk-api = { path = "crates/hk-api" }
 hk-plugins = { path = "crates/hk-plugins" }
 hk-pipeline = { path = "crates/hk-pipeline" }
+# T-085 (ADR-0011): decoder workbench contracts.
+hk-recipe = { path = "crates/hk-recipe" }
+hk-blocks = { path = "crates/hk-blocks" }

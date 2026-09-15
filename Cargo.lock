@@ -566,6 +566,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-blocks"
+version = "0.1.0"
+dependencies = [
+ "hk-demod",
+ "hk-dsp",
+ "hk-estimate",
+ "hk-model",
+ "hk-recipe",
+ "hk-stream",
+ "num-complex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hk-cli"
 version = "0.1.0"
 dependencies = [
@@ -741,6 +756,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "hk-recipe"
+version = "0.1.0"
+dependencies = [
+ "hk-model",
+ "hk-stream",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

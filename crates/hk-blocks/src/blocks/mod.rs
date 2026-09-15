@@ -1,0 +1,34 @@
+//! Block implementations, one module per group. Each group owns its directory, its
+//! `planned()` descriptors and its `register()` function, so the parallel M1 tasks never edit
+//! the same file (ADR-0011 §7):
+//!
+//! | Module | Task | Blocks |
+//! |---|---|---|
+//! | [`iq`] | T-086 | mix, lowpass, resample, fm_demod, am_demod, fsk_demod, msk_demod, ppm_demod, subcarrier |
+//! | [`symbol`] | T-086 | clock_recovery, slicer, diff_decode, nrzi, manchester |
+//! | [`framing`] | T-087 | sync_search, deframe, interleave, deinterleave |
+//! | [`fec`] | T-087 | crc, bch, parity, checksum |
+//! | [`parse`] | T-089 | fields, text |
+//! | [`multi`] | T-093 | follow_hops |
+//! | [`util`] | T-085 | identity (contract example) |
+
+use crate::Registry;
+
+pub mod fec;
+pub mod framing;
+pub mod iq;
+pub mod multi;
+pub mod parse;
+pub mod symbol;
+pub mod util;
+
+/// Registers every implemented block.
+pub(crate) fn register_all(r: &mut Registry) {
+    iq::register(r);
+    symbol::register(r);
+    framing::register(r);
+    fec::register(r);
+    parse::register(r);
+    multi::register(r);
+    util::register(r);
+}

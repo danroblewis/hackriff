@@ -1,0 +1,20 @@
+[package]
+name = "hk-blocks"
+description = "hackriff decoder workbench block library (ADR-0011): the Block contract, typed port buffers, status readouts, registry and the M1 block catalogue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# hk-dsp, hk-estimate and hk-demod are pre-added for the wrapped kernels (T-086 Blocks A,
+# T-087 Blocks B) so those parallel tasks never edit this manifest.
+[dependencies]
+hk-demod.workspace = true
+hk-dsp.workspace = true
+hk-estimate.workspace = true
+hk-model.workspace = true
+hk-recipe.workspace = true
+hk-stream.workspace = true
+num-complex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

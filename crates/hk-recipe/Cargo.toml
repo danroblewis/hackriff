@@ -1,0 +1,16 @@
+[package]
+name = "hk-recipe"
+description = "hackriff decoder workbench data contracts (ADR-0011): recipe schema, port types, parameter schemas, parser field maps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Deliberately light (no DSP): hk-api, hk-store and hk-estimate (authoring assist) validate and
+# store recipes and field maps without linking the block library. hk-stream is pre-added for
+# the T-089 field-map evaluator, which produces `hk_stream::inspector::LayerTree`.
+[dependencies]
+hk-model.workspace = true
+hk-stream.workspace = true
+serde.workspace = true
+serde_json.workspace = true
