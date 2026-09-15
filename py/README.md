@@ -65,6 +65,8 @@ any extra truth files, and `manifest.json` listing them. Lists are comma-separat
 | `occupancy_multi_hour` | AWARE-042 | 8 PMR446-style NBFM channels over 3 h: seeded burst schedule (`schedule.json`) plus two 250 ms IQ windows rendered on demand |
 | `fm_broadcast_rds` | SIGNAL-062 | stereo WFM (L 1 kHz, R 400 Hz), 19 kHz pilot, RDS group 0A with PI `C0DE`, PS `HACKRIFF`, PTY 10; 456 kSps, 0.6 s |
 | `adsb_squitter` | SIGNAL-001 fallback | four aircraft (`a0b1c2`, `4ca853`, `3c6444`, `c0ffee`), 8 DF17 squitters each cycling identification / even position / odd position / velocity, CRC-24, CPR; 1090 MHz at 2.4 Msps (readsb's rate; 2 Msps also works) |
+| `pocsag_pagers` | SIGNAL-062, M1 tutorial 2 fixture (T-098) | three channels (offsets −40/0/+40 kHz) at 512/1200/2400 Bd, BCH(31,21)+even parity, one numeric and two alphanumeric pages (RICs 1234567/1876543/654321); 152.36 MHz, 132.3 kSps (6× 22050 Hz, so decimating to multimon-ng's rate is exact). Oracle: `multimon-ng` (built from source, not in Homebrew core — see `hkpy/synth/pocsag.py`) |
+| `acars_message` | SIGNAL-062, M1 tutorial 3 fixture (T-098) | AM carrier (131.55 MHz) with a 2400 Bd MSK-like tone (mark 2400 Hz / space 1200 Hz), SYN·SYN·SOH·mode·reg·ack·label·block_id·STX·text·ETX framing, CRC-16; **synthetic only** — `acarsdec` was not a cheap Homebrew install, so this is this project's own reading of the public framing, cross-checked only by an independent decoder in `tests/test_synth.py`, not a third-party oracle (see `hkpy/synth/acars.py`) |
 
 **Occupancy representation.** Multi-hour IQ is too large to store (3 h at 200 kSps is about
 4.3 GB), so the truth is the burst schedule: every burst's channel, start and duration, with exact
@@ -99,6 +101,8 @@ detections straight from the schedule. Detector tests replay the rendered window
 | `emission` / `fsk-burst` | `levels`, `symbol_rate_bd`, `deviation_hz`, `mod_index`, `bt`, `nominal_center_hz`, `cfo_hz`, `burst_index`, `bit_order`, `mapping`, `frame: {n_bits, bits_hex, preamble_bits, preamble_hex, sync_hex, payload_hex, crc_hex, layout}`, `payload_fields`, `crc: {algorithm, poly, init, refin, refout, xorout, value, valid}`, `identity` (`sensor_id`) |
 | `emission` / `wfm-broadcast` | `peak_deviation_hz`, `stereo`, `preemphasis`, `pilot: {present, frequency_hz, deviation_hz}`, `audio: {...}`, `rds: {pi_hex, pi, ps, pty, tp, ta, music, di, group_types, n_groups, bitrate_bd, subcarrier_hz, deviation_hz, first_bit_s, encoding, check_poly, offset_words, blocks_hex}`, `label_expected`, `identity` (`rds_pi`) |
 | `emission` / `adsb-df17` | `df`, `ca`, `icao`, `tc`, `message_kind`, `message_hex`, `crc_hex`, `crc`, `metadata` (`callsign`, or `altitude_ft`/`lat`/`lon`/`cpr_format`/`cpr_lat`/`cpr_lon`, or `ew_velocity_kt`/`ns_velocity_kt`/`vertical_rate_fpm`), `power_definition`, `identity` (`icao`) |
+| `emission` / `pocsag-page` | `symbol_rate_bd`, `deviation_hz`, `mod_index`, `preamble_bits`, `sync_hex`, `idle_hex`, `bit_order`, `mapping`, `bch: {algorithm, generator_poly, codeword_bits, layout, corrects}`, `frame: {n_bits, n_codewords, n_batches}`, `ric`, `address`, `frame_position`, `function`, `message_kind`, `message_text`, `message_codewords_hex`, `identity` (`ric`) |
+| `emission` / `acars-message` | `carrier_modulation`, `am_depth`, `subcarrier_modulation`, `symbol_rate_bd`, `mark_hz`, `space_hz`, `char_bits`, `framing`, `crc: {algorithm, poly, init, refin, refout, xorout, covers}`, `fields: {mode, reg, label, block_id, text}`, `text_expected`, `frame: {n_bits, chars_hex, crc_hex}`, `identity` (`acars_reg`) |
 | `emission` / `nbfm-burst` | `deviation_hz`, `audio_tone_hz`, `channel`, `burst_index`, `burst_start_s`, `burst_duration_s`, `clipped_by_window`, `identity` (`channel-user`) |
 | `emission` / `blocker` | `input_power_dbfs`, `tone_index` |
 | `artefact` / `spur`, `im3`, `iq-image`, `dc-offset`, `overload` | `center_hz`, `offset_hz`, `power_dbfs`, `power_dbm`, plus `harmonic_n`/`spur_step_hz`/`tuner_center_hz`; `order`/`products_of_hz`; `image_of_hz`/`image_of_kind`; `i_offset`/`q_offset`; `clipped_samples`/`merge_gap_samples` |
@@ -112,4 +116,9 @@ detections straight from the schedule. Detector tests replay the rendered window
 - FSK bits demodulated with CRC checked against the stdlib `binascii.crc_hqx`;
 - RDS PI/PS through a reference decoder whose block sync uses the EN 50067 parity-check matrix and published syndromes;
 - ADS-B PPM demodulation with an independent CRC-24 and a global CPR decode;
-- and, when `readsb` is installed, every squitter decoded by readsb (ci8 converted to uc8 by XOR 0x80).
+- and, when `readsb` is installed, every squitter decoded by readsb (ci8 converted to uc8 by XOR 0x80);
+- POCSAG pages: an independent FM-discriminator + BCH(31,21) decoder recovers address/function/text
+  on all three channels, and, when `multimon-ng` is installed, it independently decodes the same
+  address/function/text from each channel's FM-discriminated, decimated-to-22050 Hz audio;
+- ACARS: an independent envelope/MSK matched-filter decoder recovers the frame fields and the
+  CRC-16 checks out (no third-party oracle — see the `acars_message` row above).

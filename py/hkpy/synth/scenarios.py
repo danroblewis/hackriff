@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from scipy import signal
 
-from hkpy.synth import adsb, fsk, rds
+from hkpy.synth import acars, adsb, fsk, pocsag, rds
 from hkpy.synth.scene import (
     Scene,
     complex_noise,
@@ -442,6 +442,162 @@ def fm_broadcast_rds(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     )
     f = cap.center_hz + off
     scene.annotate(0, n, f - bw / 2, f + bw / 2, "wfm-rds", truth)
+    return [scene], {}
+
+
+# ---------------------------------------------------------------------------------------------
+# pocsag_pagers (SIGNAL-062 M1 tutorial fixture, T-098): multi-channel, multi-baud POCSAG
+# ---------------------------------------------------------------------------------------------
+
+POCSAG_DEFAULTS: dict[str, Any] = {
+    "sample_rate": 132300.0,  # 6 * 22050, so decimating to multimon-ng's rate is an integer /6
+    "center_hz": 152.360e6,
+    "deviation_hz": 4500.0,
+    "snr_db": 22.0,
+    "noise_dbfs": -40.0,
+    "start_s": 0.05,
+    "margin_s": 0.05,
+    "channel_offsets_hz": [-40e3, 0.0, 40e3],
+    "bauds_bd": [512.0, 1200.0, 2400.0],
+    "rics": [1234567, 1876543, 654321],  # POCSAG address is 21 bits: max 2097151
+    "functions": [0, 3, 3],
+    "messages": ["911234", "STANDBY AT GATE 12", "HACKRIFF PAGE TEST"],
+    "calibration_k_db": -70.0,
+    "start_utc": DEFAULT_START_UTC,
+}
+
+
+def pocsag_pagers(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    p = ctx.params
+    fs = float(p["sample_rate"])
+    offsets = [float(v) for v in p["channel_offsets_hz"]]
+    bauds = [float(v) for v in p["bauds_bd"]]
+    rics = [int(v) for v in p["rics"]]
+    functions = [int(v) for v in p["functions"]]
+    messages = [str(v) for v in p["messages"]]
+    n_ch = len(offsets)
+    if not (len(bauds) == len(rics) == len(functions) == len(messages) == n_ch):
+        raise ValueError("channel_offsets_hz, bauds_bd, rics, functions and messages must have the same length")
+    dev = float(p["deviation_hz"])
+    start = float(p["start_s"])
+
+    channels = []
+    for i in range(n_ch):
+        codewords = (pocsag.encode_numeric(messages[i]) if functions[i] == 0
+                    else pocsag.encode_alpha(messages[i]))
+        bits = pocsag.build_bits(rics[i], functions[i], codewords)
+        channels.append({"bits": bits, "codewords": codewords, "duration_s": len(bits) / bauds[i]})
+    total_s = start + max(c["duration_s"] for c in channels) + float(p["margin_s"])
+    scene = ctx.scene("pocsag_pagers", fs, int(round(total_s * fs)),
+                      "hkpy.synth pocsag_pagers: multi-channel 2-FSK POCSAG (512/1200/2400 Bd), "
+                      "BCH(31,21)+parity, numeric and alphanumeric messages")
+    _noise_capture(scene, p, p["center_hz"], p["calibration_k_db"])
+    cap = scene.captures[0]
+
+    truth_channels = []
+    for i in range(n_ch):
+        off, baud = offsets[i], bauds[i]
+        bits, codewords = channels[i]["bits"], channels[i]["codewords"]
+        bw = 2 * dev + baud
+        power = float(p["snr_db"]) + cap.floor_dbfs_per_hz + db(bw)
+        if abs(off) + bw / 2 > fs / 2:
+            raise ValueError(f"pocsag channel {i} does not fit inside the sample rate")
+        amp = math.sqrt(undb(power))
+        phase0 = float(scene.rng("phase", i).uniform(0, 2 * math.pi))
+        iq = fsk.cpfsk(1 - bits, fs, baud, dev, bt=0.0, phase0=phase0)  # invert: POCSAG bit1 -> -dev
+        s0 = int(round(start * fs))
+        tt = scene.time(s0, len(iq))
+        scene.add_samples(s0, amp * iq * np.exp(2j * math.pi * off * tt))
+        f = cap.center_hz + off
+        text = messages[i]
+        truth = scene.emission_truth(
+            cap, off, bw, power, kind="pocsag-page", modulation="2fsk", levels=2,
+            symbol_rate_bd=baud, deviation_hz=dev, mod_index=2 * dev / baud,
+            preamble_bits=pocsag.PREAMBLE_BITS, sync_hex=f"{pocsag.SYNC_CODEWORD:08x}",
+            idle_hex=f"{pocsag.IDLE_CODEWORD:08x}", bit_order="msb-first",
+            mapping="bit 1 = -deviation_hz (multimon-ng gen_pocsag.c convention; polarity is "
+                    "auto-detected on decode)",
+            bch=pocsag.BCH_SPEC,
+            frame={"n_bits": int(len(bits)), "n_codewords": len(codewords) + 2,
+                  "n_batches": (len(bits) - pocsag.PREAMBLE_BITS) // (pocsag.CODEWORDS_PER_BATCH * 32 + 32)},
+            ric=rics[i], address=rics[i], frame_position=rics[i] & 7, function=functions[i],
+            message_kind="numeric" if functions[i] == 0 else "alphanumeric", message_text=text,
+            message_codewords_hex=[f"{w:08x}" for w in codewords],
+            identity={"type": "ric", "value": str(rics[i])},
+        )
+        scene.annotate(s0, len(iq), f - bw / 2, f + bw / 2, "pocsag-page", truth)
+        truth_channels.append({"channel": i, "offset_hz": off, "rf_center_hz": f, "baud": baud,
+                               "ric": rics[i], "function": functions[i], "message": text})
+    scene.scenario_truth["channels"] = truth_channels
+    scene.scenario_truth["note"] = ("multi-channel pager net for follow_hops: one RIC/message per "
+                                    "channel offset, at a distinct baud each")
+    return [scene], {}
+
+
+# ---------------------------------------------------------------------------------------------
+# acars_message (SIGNAL-062 M1 tutorial fixture, T-098): AM + MSK 2400 Bd VHF ACARS
+# ---------------------------------------------------------------------------------------------
+
+ACARS_DEFAULTS: dict[str, Any] = {
+    "sample_rate": 96_000.0,
+    "center_hz": 131.550e6,
+    "am_depth": 0.7,
+    "snr_db": 25.0,
+    "noise_dbfs": -40.0,
+    "prekey_s": 0.15,
+    "start_s": 0.02,
+    "margin_s": 0.02,
+    "mode": "2",
+    "reg": ".HKRF01",
+    "label": "H1",
+    "block_id": "1",
+    "text": "HACKRIFF ACARS TUTORIAL FIXTURE TEST MESSAGE 001",
+    "calibration_k_db": -70.0,
+    "start_utc": DEFAULT_START_UTC,
+}
+
+
+def acars_message(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    p = ctx.params
+    fs = float(p["sample_rate"])
+    frame = acars.build_frame(str(p["mode"]), str(p["reg"]), str(p["label"]), str(p["block_id"]),
+                              str(p["text"]))
+    mpx = acars.msk_baseband(frame.bits, fs, prekey_s=float(p["prekey_s"]))
+    n = len(mpx)
+    start = int(round(float(p["start_s"]) * fs))
+    total = start + n + int(round(float(p["margin_s"]) * fs))
+    scene = ctx.scene("acars_message", fs, total,
+                      "hkpy.synth acars_message: AM-modulated VHF ACARS, MSK 2400 Bd, "
+                      "SYN/SOH..ETX framing, CRC-16")
+    _noise_capture(scene, p, p["center_hz"], p["calibration_k_db"])
+    cap = scene.captures[0]
+    bw = 2 * acars.MARK_HZ  # AM double-sideband around the MSK tone band
+    power = float(p["snr_db"]) + cap.floor_dbfs_per_hz + db(bw)
+    amp = math.sqrt(undb(power))
+    depth = float(p["am_depth"])
+    carrier = 1.0 + depth * mpx  # mpx in [-1,1] (0 during prekey) -> envelope in [1-depth,1+depth]
+    phase0 = float(scene.rng("carrier").uniform(0, 2 * math.pi))
+    scene.add_samples(start, amp * carrier * np.exp(1j * phase0))
+    truth = scene.emission_truth(
+        cap, 0.0, bw, power, kind="acars-message", modulation="am+msk", carrier_modulation="am",
+        am_depth=depth, subcarrier_modulation="msk", symbol_rate_bd=acars.BAUD,
+        mark_hz=acars.MARK_HZ, space_hz=acars.SPACE_HZ, char_bits="7 data (LSB-first) + odd parity",
+        framing=acars.FRAMING_NOTE, crc=frame.crc_spec,
+        fields={"mode": frame.mode, "reg": frame.reg, "label": frame.label, "block_id": frame.block_id,
+               "text": frame.text}, text_expected=frame.text,
+        frame={"n_bits": len(frame.bits), "chars_hex": frame.chars.hex(), "crc_hex": f"{frame.crc:04x}"},
+        identity={"type": "acars_reg", "value": frame.reg.strip()},
+    )
+    f = cap.center_hz
+    scene.annotate(start, n, f - bw / 2, f + bw / 2, "acars-message", truth)
+    scene.scenario_truth["message"] = {"mode": frame.mode, "reg": frame.reg, "label": frame.label,
+                                       "block_id": frame.block_id, "text": frame.text,
+                                       "crc_hex": f"{frame.crc:04x}"}
+    scene.scenario_truth["note"] = ("synthetic: acarsdec was not available to build (not in "
+                                    "Homebrew, no cheap tap) so this fixture's truth is the "
+                                    "generator's own frame, cross-checked by an independent "
+                                    "MSK/CRC reference decoder in py/tests/test_synth.py, not "
+                                    "acarsdec (T-098)")
     return [scene], {}
 
 

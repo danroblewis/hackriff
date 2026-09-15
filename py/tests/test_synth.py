@@ -20,8 +20,10 @@ from scipy import signal
 
 from hkpy import sigmf
 from hkpy.synth import SCENARIOS, ParamError, generate, resolve_params
+from hkpy.synth import acars as acars_mod
 from hkpy.synth import adsb as adsb_mod
 from hkpy.synth import fsk as fsk_mod
+from hkpy.synth import pocsag as pocsag_mod
 from hkpy.synth.__main__ import main as cli_main
 
 #: Small parameter sets so the suite stays fast.
@@ -33,6 +35,8 @@ SMALL: dict[str, dict] = {
     "occupancy_multi_hour": {"hours": 1.0, "windows": 1, "window_duration_s": 0.1},
     "fm_broadcast_rds": {},
     "adsb_squitter": {"duration_s": 0.1, "messages_per_aircraft": 4},
+    "pocsag_pagers": {},
+    "acars_message": {"prekey_s": 0.02, "text": "TEST"},
 }
 
 
@@ -521,3 +525,210 @@ def test_readsb_decodes_adsb_squitters(tmp_path):
     decoded = set(re.findall(r"^\*([0-9a-f]{28});", verbose.stdout + verbose.stderr, re.M))
     if decoded:  # this readsb build prints each decoded frame; older builds print only counters
         assert decoded == {t["message_hex"] for _, t in msgs}
+
+
+# ---- POCSAG (T-098, M1 tutorial 2) --------------------------------------------------------------
+
+#: Independently re-derived from ITU-R M.584 / the multimon-ng bch.c reference (see py/hkpy/synth/
+#: pocsag.py's module docstring); cross-checked below against the standard sync/idle codewords.
+POCSAG_BCH_POLY = 0x769
+POCSAG_SYNC = 0x7CD215D8
+POCSAG_IDLE = 0x7A89C197
+POCSAG_NUMERIC_CHARSET = "084 2.6]195-3U7["  # nibble -> char; published POCSAG numeric table
+
+
+def pocsag_bch_parity(data21: int) -> int:
+    reg = (data21 & 0x1FFFFF) << 10
+    for i in range(20, -1, -1):
+        if reg & (1 << (i + 10)):
+            reg ^= POCSAG_BCH_POLY << i
+    return reg & 0x3FF
+
+
+def pocsag_bch_ok(codeword: int) -> bool:
+    data = (codeword >> 11) & 0x1FFFFF
+    parity_ok = pocsag_bch_parity(data) == (codeword >> 1) & 0x3FF
+    return parity_ok and bin(codeword).count("1") % 2 == 0
+
+
+def pocsag_bch_encode(data21: int) -> int:
+    d = data21 & 0x1FFFFF
+    codeword = (d << 11) | (pocsag_bch_parity(d) << 1)
+    return codeword | (bin(codeword).count("1") % 2)
+
+
+def test_pocsag_bch_matches_published_sync_and_idle_codewords():
+    assert pocsag_bch_ok(POCSAG_SYNC) and pocsag_bch_ok(POCSAG_IDLE)
+    assert pocsag_bch_encode(POCSAG_SYNC >> 11) == POCSAG_SYNC
+    assert pocsag_bch_encode(POCSAG_IDLE >> 11) == POCSAG_IDLE
+    assert pocsag_mod.bch_encode(POCSAG_SYNC >> 11) == POCSAG_SYNC == pocsag_mod.SYNC_CODEWORD
+
+
+def pocsag_numeric_decode(codewords: list[int]) -> str:
+    out = []
+    for w in codewords:
+        data20 = (w >> 11) & 0xFFFFF
+        for shift in (16, 12, 8, 4, 0):
+            out.append(POCSAG_NUMERIC_CHARSET[(data20 >> shift) & 0xF])
+    return "".join(out)
+
+
+def pocsag_alpha_decode(codewords: list[int]) -> str:
+    bits = np.concatenate([[(((w >> 11) & 0xFFFFF) >> b) & 1 for b in range(19, -1, -1)] for w in codewords])
+    chars = []
+    for i in range(0, len(bits) - 6, 7):
+        v = int("".join(map(str, bits[i : i + 7])), 2)
+        r = int(f"{v:07b}"[::-1], 2)  # rev7: this project's packing reverses each 7-bit char
+        if r == 0:
+            break
+        chars.append(chr(r))
+    return "".join(chars)
+
+
+def decode_pocsag_channel(x: np.ndarray, fs: float, t: dict) -> dict:
+    """Independent FM-discriminator + BCH decoder: locate the preamble/sync/batches structurally,
+    exactly as a real decoder would walk frame/codeword slots, and BCH-check every codeword."""
+    off, baud, n_bits = t["offset_hz"], t["symbol_rate_bd"], t["frame"]["n_bits"]
+    tt = np.arange(len(x)) / fs
+    seg = np.convolve(x * np.exp(-2j * math.pi * off * tt), signal.firwin(401, 1.5 * baud + 3 * t["deviation_hz"], fs=fs), mode="same")
+    inst = np.angle(seg[1:] * np.conj(seg[:-1])) * fs / (2 * math.pi)
+    sps = fs / baud
+    sidx = ((np.arange(n_bits) + 0.5) * sps).astype(int)
+    bits = (inst[np.minimum(sidx, len(inst) - 1)] < 0).astype(np.uint8)  # bit1 -> -deviation (see truth "mapping")
+    assert np.array_equal(bits[:576], np.array([1 - (i & 1) for i in range(576)], dtype=np.uint8))
+
+    words, pos = [], 576
+    n_batches = t["frame"]["n_batches"]
+    for _ in range(n_batches):
+        sync = int("".join(map(str, bits[pos : pos + 32])), 2)
+        assert sync == POCSAG_SYNC
+        pos += 32
+        for _ in range(16):
+            words.append(int("".join(map(str, bits[pos : pos + 32])), 2))
+            pos += 32
+    assert all(pocsag_bch_ok(w) for w in words)
+
+    addr_slot = t["frame_position"] * 2
+    addr_data = (words[addr_slot] >> 11) & 0x1FFFFF
+    assert (addr_data >> 20) & 1 == 0  # address flag
+    address = ((addr_data >> 2) << 3) | t["frame_position"]
+    function = addr_data & 3
+    msg_words = []
+    for w in words[addr_slot + 1 :]:
+        if w == POCSAG_IDLE or (((w >> 11) & 0x1FFFFF) >> 20) & 1 == 0:  # message flag (bit20) clear
+            break
+        msg_words.append(w)
+    text = pocsag_numeric_decode(msg_words) if function == 0 else pocsag_alpha_decode(msg_words)
+    return {"address": address, "function": function, "text": text.rstrip(" \x00")}
+
+
+def test_pocsag_pages_demodulate_and_decode(tmp_path):
+    """SIGNAL-062 M1 tutorial 2: BCH(31,21)+parity, 512/1200/2400 Bd, multi-channel (follow_hops)."""
+    _, meta, x = load(gen(tmp_path, "pocsag_pagers"))
+    fs = meta["global"]["core:sample_rate"]
+    fc = meta["captures"][0]["core:frequency"]
+    pages = truths(meta, kind="pocsag-page")
+    assert len(pages) == 3
+    bauds = set()
+    for ann, t in pages:
+        s, n = ann["core:sample_start"], ann["core:sample_count"]
+        got = decode_pocsag_channel(x[s : s + n], fs, t)
+        assert got["address"] == t["ric"]
+        assert got["function"] == t["function"]
+        assert got["text"].strip() == t["message_text"].strip()
+        bauds.add(t["symbol_rate_bd"])
+    assert bauds == {512.0, 1200.0, 2400.0}
+    assert fc == scenario_truth(meta)["channels"][0]["rf_center_hz"] - scenario_truth(meta)["channels"][0]["offset_hz"]
+
+
+@pytest.mark.skipif(shutil.which("multimon-ng") is None, reason="multimon-ng not installed")
+def test_multimon_ng_decodes_pocsag_pages(tmp_path):
+    """Oracle check (T-098): multimon-ng decodes every channel's address/function/text exactly."""
+    demod_name = {512.0: "POCSAG512", 1200.0: "POCSAG1200", 2400.0: "POCSAG2400"}
+    _, meta, x = load(gen(tmp_path, "pocsag_pagers"))
+    fs = meta["global"]["core:sample_rate"]
+    factor = int(round(fs / 22050))
+    assert factor * 22050 == fs
+    for ann, t in truths(meta, kind="pocsag-page"):
+        s, n = ann["core:sample_start"], ann["core:sample_count"]
+        tt = np.arange(n) / fs
+        seg = np.convolve(x[s : s + n] * np.exp(-2j * math.pi * t["offset_hz"] * tt),
+                          signal.firwin(401, 6000, fs=fs), mode="same")
+        inst = np.angle(seg[1:] * np.conj(seg[:-1])) * fs / (2 * math.pi)
+        audio = signal.decimate(inst, factor, ftype="fir")
+        raw = tmp_path / f"ch_{t['offset_hz']:.0f}.raw"
+        np.clip(audio / t["deviation_hz"] * 20000, -32000, 32000).astype("<i2").tofile(raw)
+        res = subprocess.run(["multimon-ng", "-t", "raw", "-a", demod_name[t["symbol_rate_bd"]], "-e", str(raw)],
+                             capture_output=True, text=True, timeout=30)
+        out = res.stdout + res.stderr
+        assert f"Address: {t['ric']:>7}" in out
+        assert f"Function: {t['function']}" in out
+        expect = t["message_text"].strip()
+        assert expect in out.replace("\x00", "").replace("<NUL>", "")
+
+
+# ---- ACARS (T-098, M1 tutorial 3; synthetic, not oracle-validated -- see hkpy.synth.acars) -------
+
+
+def acars_char_parity_ok(byte: int) -> bool:
+    return bin(byte).count("1") % 2 == 1
+
+
+def decode_acars_frame(x: np.ndarray, fs: float, t: dict, prekey_s: float) -> dict:
+    """Independent matched-filter MSK decoder + CRC-16 check, decoupled from acars.py's encoder."""
+    baud = t["symbol_rate_bd"]
+    n_bits = t["frame"]["n_bits"]
+    sps = fs / baud
+    start = int(round(prekey_s * fs))
+    mark_w = 2 * math.pi * t["mark_hz"] / fs
+    space_w = 2 * math.pi * t["space_hz"] / fs
+    env = np.abs(x)
+    dc = np.mean(env[:start])  # unmodulated prekey carrier level: subtract so tone correlation isn't DC-biased
+    bits = np.zeros(n_bits, dtype=np.uint8)
+    for k in range(n_bits):
+        s0 = start + int(round(k * sps))
+        s1 = start + int(round((k + 1) * sps))
+        seg = env[s0:s1] - dc
+        n = len(seg)
+        if n == 0:
+            break
+        tsamp = np.arange(n)
+        e_mark = abs(np.sum(seg * np.exp(-1j * mark_w * tsamp)))
+        e_space = abs(np.sum(seg * np.exp(-1j * space_w * tsamp)))
+        bits[k] = 1 if e_mark > e_space else 0
+    data_bits = bits[32:]  # skip the alternating clock-sync preamble
+    tx = np.packbits(data_bits).tobytes()
+    assert tx[0] == 0x16 and tx[1] == 0x16  # SYN SYN
+    body_with_parity = tx[2:-2]
+    crc_hi, crc_lo = tx[-2], tx[-1]
+    for b in body_with_parity:
+        assert acars_char_parity_ok(b)
+    body = bytes(b & 0x7F for b in body_with_parity)
+    crc = acars_mod.crc16_acars(body)
+    assert crc == (crc_hi << 8) | crc_lo
+    assert body[0] == 0x01 and body[-1] == 0x03  # SOH .. ETX
+    stx = body.index(0x02)
+    return {
+        "mode": chr(body[1]), "reg": body[2:9].decode("ascii"), "ack": chr(body[9]),
+        "label": body[10:12].decode("ascii"), "block_id": chr(body[12]),
+        "text": body[stx + 1 : -1].decode("ascii"), "crc": crc,
+    }
+
+
+def test_acars_message_demodulates_with_valid_crc(tmp_path):
+    """SIGNAL-062 M1 tutorial 3: AM + MSK 2400 Bd, SYN/SOH..ETX framing, CRC-16 (synthetic)."""
+    manifest = gen(tmp_path, "acars_message")
+    man = json.loads(manifest.read_text())
+    prekey_s = man["params"]["prekey_s"]
+    _, meta, x = load(manifest)
+    fs = meta["global"]["core:sample_rate"]
+    [(ann, t)] = truths(meta, kind="acars-message")
+    s, n = ann["core:sample_start"], ann["core:sample_count"]
+    got = decode_acars_frame(x[s : s + n], fs, t, prekey_s)
+    assert got["mode"] == t["fields"]["mode"]
+    assert got["reg"] == t["fields"]["reg"]
+    assert got["label"] == t["fields"]["label"]
+    assert got["block_id"] == t["fields"]["block_id"]
+    assert got["text"] == t["fields"]["text"] == t["text_expected"]
+    assert f"{got['crc']:04x}" == t["frame"]["crc_hex"]
+    assert t["identity"] == {"type": "acars_reg", "value": t["fields"]["reg"].strip()}
