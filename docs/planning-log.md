@@ -1607,3 +1607,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - The run resets on every dominant gain-key flip.
   - **Nits:** ADR wording on the 0.1× floor and on sequential vs combined budget; upgraded frozen references stay uncorrected.
   - **Next:** fix round continued in the T-146 finisher (~159k).
+- **B0.389 Full check green after T-148 + T-141 merges (d00dc80).**
+  - **Results:** lint clean; 1334/1334 nextest+UI (712.8 s, was 583.8 s); acceptance 28/28 (64 s).
+  - **Timing (T-141 mock dequant review item 5):**
+    - adsb 5.63→5.60 s; refine_wfm 25.9→26.1 s; signal_062 6.1→6.6 s; bandit_on 83→110 s.
+    - This run overlapped four agent builds at load up to 36, so it is inconclusive.
+    - The bandit tests retune constantly through the mock, so the per-bin dequant FFT cost is plausible. T-145's Cranelift/timing work should re-measure bandit_on on main at low load. If it is a real ≥20% regression, a follow-up is to vectorise or skip dequant when the recording noise is well above 1 code rms.
