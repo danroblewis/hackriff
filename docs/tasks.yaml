@@ -1414,8 +1414,9 @@ tasks:
   - id: T-084
     milestone: M0b
     title: "Live-air HIL findings: off-centre station becomes one wide edge row; run summary 6 emitters vs /api/inventory 1 row; no RDS decodes live"
-    status: in-progress
-    phase: "offline phase done (f1798e3, merged); live HackRF re-run pending (needs the device)"
+    status: done
+    closed: "user 2026-09-15: close on the offline fixes; live HackRF re-run deferred -> T-100"
+    commit: "f1798e3 (merged 3d2a3db)"
     offline_result: "(1) wide edge row: not floor/CFAR/roll-off (floor flat to +/-1.1 MHz); weak stations' short near-threshold detections (4-7 dB) chance-linked 19 channels into a false bursty hop set whose span became the 1116-1155 kHz row; fix HopConfig::min_channel_snr_db = 8 dB -> no hop set, station row 101.305 MHz 272 kHz confirmed with RDS PI; test near_threshold_bursty_flicker_does_not_form_a_hop_set; hopper/915 hop-set tests pass. (2) 6 vs 1: tracks enter the inventory only on close (continuous station closes at stop); summary counts at stop, test polled mid-run (real-time mock: 1 row at 15/30 s, 31 in summary); summary line and RunSummary.emitters now say 'at stop', HIL test logs both. (3) no live RDS: not level/AGC/off-centre (PI decodes at HackRF levels 0.7 MHz off centre); limit: strong neighbours 200 kHz away make mode selection return unknown bandwidth and reject the chain (documented; HK_PIPELINE_DEBUG=1 prints per-probe bandwidth/reason); live, the false hop-set row hid the station. (4) hil_hackrf.rs surveys at 2.4 Msps in 0.6 MHz steps, strongest station 0.5 MHz from centre, fails on any row > 500 kHz, logs inventory-at-stop vs summary. hk-detect 120/120, hk-pipeline 81/81, lint."
     deps: [T-053]
     parallel_group: J
@@ -1596,7 +1597,11 @@ tasks:
   - id: T-098
     milestone: M1
     title: "M1 tutorial fixtures: POCSAG, ACARS, ADS-B recorded IQ (SigMF) with oracle truth lists"
-    status: in-progress
+    status: done
+    commit: "3ce5cba (merged)"
+    result: "POCSAG: no downloadable recording -> synthetic pocsag_pagers scenario (py/hkpy/synth/pocsag.py): 3 channels 512/1200/2400 Bd, BCH(31,21)+parity, 152.36 MHz, 132.3 kSps, numeric + 2 alphanumeric pages; multimon-ng (built from source) decodes all 3 exactly; numpy BCH decoder in CI. ACARS: acarsdec not cheaply installable -> synthetic acars_message scenario (py/hkpy/synth/acars.py): AM+MSK 2400 Bd, 131.55 MHz, 96 kSps, SYN/SOH..ETX + CRC-16, 1 message; no third-party oracle (independent matched-filter/CRC decoder in the test), labelled synthetic. ADS-B: existing adsb_squitter synthetic + readsb oracle; real 1090 MHz capture stays blocked in fixtures/manifest.json. Generator code only (no fixtures/ files). py tests 60 passed, 2 skipped."
+    followups:
+      - "real recorded POCSAG/ACARS fixtures when the user can capture (HackRF on VHF pager/airband) - acarsdec oracle for ACARS"
     deps: []
     parallel_group: M1F
     use_cases: [SIGNAL-001, SIGNAL-062]
@@ -1620,6 +1625,19 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-100
+    milestone: M0b
+    title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
+    status: deferred
+    deps: [T-084]
+    parallel_group: J
+    use_cases: [SIGNAL-062, AWARE-053]
+    acceptance: "updated hil_hackrf acceptance on the real HackRF (FM band, receive-only): no inventory row > 500 kHz; strongest surveyed station detected with fm-broadcast in top-3; RDS PI decoded; Listen streams audio; inventory-at-stop vs summary counts logged with debug probe lines; results appended to docs/hil"
+    area: tests/e2e (hil_hackrf.rs), docs/hil
+    needs: [hardware]
+    model: opus
+    effort: medium
+    deferred: "user 2026-09-15: defer to a quiet time; needs exclusive HackRF (supervisor demo)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
