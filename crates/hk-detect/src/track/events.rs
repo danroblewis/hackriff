@@ -109,6 +109,10 @@ pub struct TrackSummary {
     pub segments: u32,
     /// Hop set this channel belongs to.
     pub hop_set: Option<TrackId>,
+    /// Closed inside (or in the skirt of) a continuous, much wider and ≥ 6 dB stronger track that
+    /// covered its whole life ([`crate::TrackerConfig::inband_fragment_bw_ratio`]): modulation/edge
+    /// flicker of that emission, not an emitter of its own. It gets no inventory entry (T-101).
+    pub inband_fragment: bool,
     /// Share of member detections with a suspect flag (spur, image, IMD, compressed, clipped).
     pub suspect_fraction: f64,
     /// Member detections confirmed as emitter candidates (at emission or later).

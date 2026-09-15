@@ -1146,6 +1146,102 @@ fn rec(
     }
 }
 
+/// T-101: weak narrow flicker inside a continuous wide station, or in its modulation skirt just
+/// past the detected core (the WFM edge boxes T-084's hop gate stopped hiding in chance hop sets),
+/// closes as an in-band fragment with no inventory sighting, even when its first burst arrives
+/// before the station's first (1 s) record. Flicker beyond the skirt, stronger than the station,
+/// or a neighbour within 6 dB of the station's strength stays an emitter of its own.
+#[test]
+fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
+    let prov = provenance(100e6, FS, 24.0);
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut ev = Vec::new();
+    let station = 101.3e6;
+    // (fc, snr_mean) of the flickers: in band and weak; beyond the 150 kHz skirt; in band and
+    // strong; in the skirt and weak; in the skirt at nearly the station's strength.
+    let flickers = [
+        (101.21e6, 5.0),
+        (101.7e6, 5.0),
+        (101.39e6, 25.0),
+        (101.51e6, 5.0),
+        (101.1e6, 14.0),
+    ];
+    let mut recs: Vec<DetectionRecord> = Vec::new();
+    for chunk in 0..5u64 {
+        let mut r = rec(
+            &prov,
+            100 * chunk,
+            100,
+            station,
+            300e3,
+            if chunk == 4 {
+                CloseReason::Ended
+            } else {
+                CloseReason::MaxDuration
+            },
+            chunk > 0,
+        );
+        r.detection.snr_mean_db = 17.0;
+        recs.push(r);
+    }
+    for (k, &(fc, snr)) in flickers.iter().enumerate() {
+        for frame0 in [75u64, 150, 260, 330, 410] {
+            let mut r = rec(
+                &prov,
+                frame0 + k as u64,
+                2,
+                fc,
+                15e3,
+                CloseReason::Ended,
+                false,
+            );
+            r.detection.snr_mean_db = snr;
+            recs.push(r);
+        }
+    }
+    // Records arrive when they close.
+    recs.sort_by_key(|r| r.frames.end);
+    for r in &recs {
+        tr.push_detection(r, &mut |e| ev.push(e));
+    }
+    tr.finish(&mut |e| ev.push(e));
+    let closed: Vec<&TrackSummary> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Closed(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let at = |fc: f64| {
+        closed
+            .iter()
+            .find(|s| (s.track.f_center_hz - fc).abs() < 5e3)
+            .unwrap_or_else(|| panic!("no closed track at {fc}: {closed:?}"))
+    };
+    eprintln!(
+        "inband: {:?}",
+        closed
+            .iter()
+            .map(|s| (s.track.f_center_hz, s.burst_count, s.inband_fragment))
+            .collect::<Vec<_>>()
+    );
+    assert!(!at(station).inband_fragment, "the station is no fragment");
+    for (k, why) in [(0, "weak in-band flicker"), (3, "weak skirt flicker")] {
+        let frag = at(flickers[k].0);
+        assert!(frag.inband_fragment, "{why} is a fragment");
+        assert!(hk_detect::track::inventory::track_sighting(frag).is_none());
+    }
+    for (k, why) in [
+        (1, "beyond the skirt"),
+        (2, "stronger than the station"),
+        (4, "within 6 dB of the station"),
+    ] {
+        let own = at(flickers[k].0);
+        assert!(!own.inband_fragment, "{why}: an emitter of its own");
+        assert!(hk_detect::track::inventory::track_sighting(own).is_some());
+    }
+}
+
 #[test]
 fn converging_fragment_merges_into_the_older_track() {
     let prov = provenance(915e6, FS, 24.0);

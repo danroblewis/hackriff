@@ -44,7 +44,10 @@ pub fn track_fingerprint(summary: &TrackSummary) -> Fingerprint {
 
 /// Sighting of a finished channel track; `None` for hop-set members and merged tracks.
 pub fn track_sighting(summary: &TrackSummary) -> Option<Sighting> {
-    if summary.hop_set.is_some() || matches!(summary.track.state, TrackState::MergedInto(_)) {
+    if summary.hop_set.is_some()
+        || summary.inband_fragment
+        || matches!(summary.track.state, TrackState::MergedInto(_))
+    {
         return None;
     }
     let mut s = Sighting::track(&summary.track, track_fingerprint(summary));

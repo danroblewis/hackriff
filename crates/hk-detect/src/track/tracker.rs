@@ -298,6 +298,34 @@ struct SplitEntry {
     detection: DetectionId,
 }
 
+/// Recently closed continuous tracks kept as in-band hosts (T-101).
+const CLOSED_HOSTS: usize = 32;
+/// On-air share of its observed span a track needs to host in-band fragments (T-101).
+const HOST_DUTY: f64 = 0.9;
+/// A host's band is widened by this share of its width on each side (T-101): a wideband
+/// modulated emission's detected core (e.g. ~100 kHz of a 200 kHz WFM channel on a clean signal)
+/// is narrower than its occupied band, whose skirts flicker.
+const HOST_SKIRT_FRACTION: f64 = 0.5;
+/// A fragment's mean detection SNR is at least this far below its host's, dB (T-101): skirt
+/// flicker sits near threshold, while a neighbouring emitter of comparable strength stays its own.
+const FRAGMENT_SNR_MARGIN_DB: f64 = 6.0;
+
+/// A continuous track's band, SNR and on-air span, for the in-band fragment rule (T-101).
+#[derive(Clone, Copy, Debug)]
+struct HostSpan {
+    lo: f64,
+    hi: f64,
+    bw: f64,
+    snr_db: f64,
+    t_first: i64,
+    t_last_end: i64,
+}
+
+/// Mean detection SNR of the groups linked to `s`, dB.
+fn slot_snr(s: &Slot) -> Option<f64> {
+    (s.snr_n > 0).then(|| s.snr_sum / s.snr_n as f64)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RecentBurst {
     slot: usize,
@@ -434,6 +462,8 @@ pub struct Tracker {
     member_head: usize,
     recent: [Option<RecentBurst>; RECENT_BURSTS],
     recent_head: usize,
+    closed_hosts: [Option<HostSpan>; CLOSED_HOSTS],
+    closed_hosts_head: usize,
     seg_starts: [(u64, u64); SEGMENT_STARTS],
     seg_len: usize,
     seg_head: usize,
@@ -470,6 +500,8 @@ impl Tracker {
             member_head: 0,
             recent: [None; RECENT_BURSTS],
             recent_head: 0,
+            closed_hosts: [None; CLOSED_HOSTS],
+            closed_hosts_head: 0,
             seg_starts: [(0, 0); SEGMENT_STARTS],
             seg_len: 0,
             seg_head: 0,
@@ -1094,6 +1126,58 @@ impl Tracker {
         {
             self.confirm_track(i, out);
         }
+    }
+
+    /// T-101: closing track `i` is an in-band fragment — its band lies inside a continuous track's
+    /// (duty ≥ [`HOST_DUTY`]) band widened by [`HOST_SKIRT_FRACTION`] of its width on each side,
+    /// that track is at least [`TrackerConfig::inband_fragment_bw_ratio`] times wider and
+    /// [`FRAGMENT_SNR_MARGIN_DB`] stronger (mean detection SNR), and `i`'s whole observed life lies
+    /// inside the track's. The host is live or among the recently closed continuous tracks.
+    fn inband_fragment(&self, i: usize) -> bool {
+        let ratio = self.cfg.inband_fragment_bw_ratio;
+        let s = &self.slots[i];
+        if ratio <= 0.0 || s.bursts == 0 {
+            return false;
+        }
+        let (lo, hi) = (s.fc - 0.5 * s.bw, s.fc + 0.5 * s.bw);
+        let Some(s_snr) = slot_snr(s) else {
+            return false;
+        };
+        let fits = |h: &HostSpan| {
+            let skirt = HOST_SKIRT_FRACTION * h.bw;
+            h.bw >= ratio * s.bw
+                && h.lo - skirt <= lo
+                && hi <= h.hi + skirt
+                && h.snr_db >= s_snr + FRAGMENT_SNR_MARGIN_DB
+                && h.t_first <= s.t_first
+                && h.t_last_end >= s.t_last_end
+        };
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|&(j, h)| j != i && h.live && !h.tentative)
+            .filter_map(|(_, h)| self.host_span(h))
+            .chain(self.closed_hosts.iter().flatten().copied())
+            .any(|h| fits(&h))
+    }
+
+    /// Track `h` as a potential in-band host: continuous (duty ≥ [`HOST_DUTY`]) with an SNR.
+    fn host_span(&self, h: &Slot) -> Option<HostSpan> {
+        let end = if h.cur.is_some() {
+            self.now.max(h.t_last_end)
+        } else {
+            h.t_last_end
+        };
+        let span = (end - h.t_first).max(1);
+        let snr_db = slot_snr(h)?;
+        (h.on_ns as f64 >= HOST_DUTY * span as f64).then_some(HostSpan {
+            lo: h.fc - 0.5 * h.bw,
+            hi: h.fc + 0.5 * h.bw,
+            bw: h.bw,
+            snr_db,
+            t_first: h.t_first,
+            t_last_end: end,
+        })
     }
 
     /// Confirms track `i`: `Opened` (with its first burst), its held links released.
@@ -2140,6 +2224,12 @@ impl Tracker {
             return;
         }
         let summary = self.summary(i, Some(cause));
+        if self.cfg.inband_fragment_bw_ratio > 0.0
+            && let Some(h) = self.host_span(&self.slots[i])
+        {
+            self.closed_hosts[self.closed_hosts_head] = Some(h);
+            self.closed_hosts_head = (self.closed_hosts_head + 1) % CLOSED_HOSTS;
+        }
         self.staged.push(summary.track.clone());
         self.slots[i].live = false;
         if let Some(set) = self.slots[i].hop_set {
@@ -2237,6 +2327,7 @@ impl Tracker {
             },
             segments: s.segments,
             hop_set,
+            inband_fragment: closed.is_some() && self.inband_fragment(i),
             suspect_fraction: if s.detections > 0 {
                 s.suspect as f64 / s.detections as f64
             } else {
