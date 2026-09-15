@@ -927,7 +927,7 @@ tasks:
   - id: T-056
     milestone: M0b
     title: Wire compute providers into the pipeline (ComputeOptions in pipeline settings; STFT/PFB via hk_dsp::compute)
-    status: todo
+    status: in-progress
     scope_note: "user 2026-09-14: T-056 stays the Mac GPU wiring task (wgpu/Metal or Accelerate providers into the pipeline behind the conformance suite)"
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-041, T-037]
@@ -939,7 +939,6 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-057
     milestone: M0b
     title: Scheduler virtual tuning places signals at wrong absolute frequencies (~368 kHz axis offset root cause)
@@ -1070,7 +1069,7 @@ tasks:
     milestone: M0b
     title: Hop-set tracker scaling (prune/dedupe closed members; recompute raster only when the channel set changes)
     status: done
-    commit: "b4db9e9 (merged; full check running)"
+    commit: "b4db9e9 (merged 4ef3ff0; verified: lint, 154 Rust test groups, py, ui, acceptance green)"
     result: "closed hop-set members pruned once a newer member covers the channel and last burst > 10 s old; >256 members prunes oldest closed; pruned detections still counted. Raster refit only when qualifying channels change (join/leave/qualify flip/centre drift > 0.75 bin), at most once per 1 s stream time, always on form/merge/close; HopConfig::without_scaling_bounds() restores old behaviour; documented in track/mod.rs. Tolerance: formed/closed events and closed rows exact; an open set row may carry a raster up to 1 s old. Parity (raster 0.0 Hz, channels, hop rate, hops, members, dwell) on synthetic hoppers, 915 fixture, both urban captures. 300 s hopper: 450 tracks, peak 24 members, 426 pruned, 149 fits. Whole-pipeline replay (old/new alternating, load 17-19): l32g30a1 0.95-1.01 -> 1.14-1.24 RTF (1.23 in 3/4); l24g20a0 unchanged 0.34-0.35 - bottleneck is the WFM/RDS chain ParamEstimator::estimate -> ChannelFilter::apply (T-081). Detect bench 20 Msps urban (load ~32) 1.47-1.54 -> 2.09-2.36; tracker share 62-67 % -> 7 %; raster fits ~1000 -> 5-11. hk-detect all tests, aware_036/aware_042 acceptance, clippy, rustfmt pass."
     deps: [T-058]
     parallel_group: S
@@ -1118,7 +1117,7 @@ tasks:
   - id: T-067
     milestone: M0b
     title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
-    status: todo
+    status: in-progress
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-051, T-062]
     parallel_group: P
@@ -1127,9 +1126,9 @@ tasks:
     acceptance: "/api/control/state reports display limits (FFT size range, averaging max, rows/s range) so the UI stops hard-coding them; endpoints for FFT window, baseband filter (validated against device capabilities) and bookmark rename; UI consumes them; auth/audit/TX rules unchanged; tests"
     area: crates/hk-api (control), crates/hk-cli/src/control.rs, ui/src/controls
     needs: none
-    model: opus
+    model: sonnet
+    model_note: "token-budget rules 2026-09-14: API/UI surface off the real-time path -> Sonnet medium"
     effort: medium
-    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-068
     milestone: M0b
     title: "Legal: restricted decodes must not drive entity-resolution links to emitters outside their class (identity confirmation side channel)"
@@ -1309,7 +1308,7 @@ tasks:
     milestone: M0b
     title: Potential vs confirmed signal inventory (candidate/confirmed/deleted, auto-confirm, recurrence stats, promote/delete API)
     status: done
-    commit: "a5a1854 (merge after the T-064 verification run)"
+    commit: "a5a1854 (merged; coordinator full check running)"
     result: "lifecycle_state candidate/confirmed/deleted with append-only history (new/previous state, auto|user, actor = rule id hk-pipeline/confirm@1 or token fingerprint, reason, time); never back to candidate; only users delete. Auto-confirm (ConfirmPolicy defaults): decoded transmitter identity from >= 1 CRC-valid decode (blind other:hk-framing signature excluded), or one closed track >= 2 s on air, duty >= 0.8, <= 50 % suspect, >= 1 trust-confirmed detection. Delete hides the entry but keeps row/detections/tracks/links/history (visible with state=deleted); clustering ignores deleted entries so re-detection creates a new candidate; a held decoded identity moves to the new entry; no undelete. API: GET /api/inventory?state=candidate,confirmed,deleted (default candidate+confirmed) with state, lifecycle and recurrence (occurrences, appearances, span, on-air, duty, last 8 appearances); GET /api/inventory/{id}; POST /api/inventory/{id}/promote and DELETE /api/inventory/{id} with optional {reason}, Bearer, audited inventory_promote/inventory_delete, {error, code} 400/404/503. Old databases gain the column/table on open. Mock-SDR e2e: 101.3 MHz FM auto-confirms (continuous track + RDS PI decode); FSK sensor (duty ~0.22) stays candidate, promote -> confirmed, delete leaves list, later capture -> new candidate. hk-model 5, hk-api 3, confirm-rule unit test."
     followups:
       - "FM station and FSK sensor each appear as two inventory entries (track-based and decoder-based) - existing clustering behaviour -> T-082"
