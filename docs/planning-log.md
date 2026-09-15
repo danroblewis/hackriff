@@ -546,3 +546,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **CLAUDE.md:** thin-client rule added.
   - **T-067:** told its new routes must be documented in docs/api.md (the sync test enforces it).
   - **Next:** full check running.
+- **B0.193 T-079 merge verified:** lint, nextest 928 passed (5 skipped; the whole `just test` took 190.5 s under load ~43), acceptance green. The new API contract tests and the route-docs sync test are part of the suite. Running: T-056 (GPU acceptance + RTF), T-067 (merging main, documenting routes), T-082.
