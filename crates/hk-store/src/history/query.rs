@@ -1,15 +1,43 @@
 //! The central query (docs/07 §4 step 1): region × time → per-cell statistics and per-channel
 //! summaries.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 use hk_model::{FreqRange, PowerUnit, TimeRange, Timestamp};
 
 use super::StoreError;
 use super::stats::{db, round_centi, round_frac};
 use super::store::Pyramid;
-use super::tile::{ColumnPreview, ProvenanceSummary, Tile};
+use super::tile::{ColumnPreview, OriginFilter, OriginMatch, ProvenanceSummary, Tile};
+
+/// What a source/site-filtered query kept and dropped (T-133; see [`Pyramid::query_filtered`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct FilterSummary {
+    /// The filter.
+    pub filter: OriginFilter,
+    /// Tiles read whose frames all pass.
+    pub tiles_matched: usize,
+    /// Tiles read holding passing and other frames.
+    pub tiles_mixed: usize,
+    /// Tiles read with no passing frame.
+    pub tiles_other: usize,
+    /// Observed cells returned as unobserved because other origins' frames are folded into them.
+    pub cells_excluded: usize,
+    /// Cells of mixed tiles kept because the one finer tile they roll up passes whole.
+    pub cells_from_children: usize,
+}
+
+impl FilterSummary {
+    /// Adds another chunk's counts (the filter is kept).
+    pub fn merge(&mut self, o: &FilterSummary) {
+        self.tiles_matched += o.tiles_matched;
+        self.tiles_mixed += o.tiles_mixed;
+        self.tiles_other += o.tiles_other;
+        self.cells_excluded += o.cells_excluded;
+        self.cells_from_children += o.cells_from_children;
+    }
+}
 
 /// Largest result a query may return, in cells.
 pub const MAX_QUERY_CELLS: usize = 20_000_000;
@@ -134,6 +162,8 @@ pub struct RegionHistory {
     pub provenance: ProvenanceSummary,
     /// Distinct tiles read (memory or disk).
     pub tiles_read: usize,
+    /// The source/site filter and what it excluded (T-133); `None` for an unfiltered query.
+    pub filter: Option<FilterSummary>,
 }
 
 /// Largest number of gaps [`RegionHistory::coverage_summary`] lists.
@@ -415,6 +445,30 @@ impl Pyramid {
     /// level has no tile (evicted, or never written), the cell is filled from the finest coarser
     /// level that has one, and [`CellStats::level`] says so.
     pub fn query(&self, q: &RegionQuery) -> Result<RegionHistory, StoreError> {
+        self.query_filtered(q, &OriginFilter::ANY)
+    }
+
+    /// [`Pyramid::query`] over the frames of one source and/or site only (T-133).
+    ///
+    /// Tiles are not split by origin (the grid is fixed), so the filter works on what each tile
+    /// recorded ([`ProvenanceSummary::origins`]):
+    /// - a tile whose frames **all** pass answers its cells as usual;
+    /// - a tile with **no** passing frame answers its cells as unobserved at its level (no coarser
+    ///   fallback: a coarser cell there rolls up the same frames);
+    /// - a **mixed** tile's cell is kept only when the one finer tile it rolls up (the tile of the
+    ///   level below that forms its time column) exists and passes whole; otherwise the cell is
+    ///   unobserved. Level-0 cells of a mixed tile are unobserved. So a site change costs one
+    ///   finer tile's duration of coverage, never mixes another site's data in.
+    ///
+    /// Frames of unknown origin (tiles written before format 3, frames without a site) pass only
+    /// an unfiltered query or an [`super::OriginField::Unknown`] field. Excluded cells are "not
+    /// observed", never "quiet"; [`RegionHistory::filter`] counts them. The result's provenance
+    /// merges only the tiles whose data it returns.
+    pub fn query_filtered(
+        &self,
+        q: &RegionQuery,
+        filter: &OriginFilter,
+    ) -> Result<RegionHistory, StoreError> {
         if !(q.freq.lo_hz.is_finite() && q.freq.hi_hz >= q.freq.lo_hz) {
             return Err(StoreError::BadQuery("frequency range".into()));
         }
@@ -438,9 +492,20 @@ impl Pyramid {
         let pct = (self.cfg.low_percentile, self.cfg.high_percentile);
         let tile_nf = self.geom.nf as i64;
         let mut cells = vec![CellStats::NONE; nf * nt];
-        let mut cache: HashMap<(usize, i64, i64), Option<Source<'_>>> = HashMap::new();
+        let mut cache: HashMap<(usize, i64, i64), Option<(Source<'_>, OriginMatch)>> =
+            HashMap::new();
         let mut provenance = ProvenanceSummary::default();
         let mut bias = BiasCache::default();
+        let filtered = !filter.is_any();
+        let mut summary = FilterSummary {
+            filter: *filter,
+            ..FilterSummary::default()
+        };
+        // Finer tiles consulted for mixed tiles' cells: their origin match, and whether their
+        // provenance is already merged into the result.
+        let mut children: HashMap<(usize, i64, i64), Option<(OriginMatch, ProvenanceSummary)>> =
+            HashMap::new();
+        let mut merged_children: HashSet<(usize, i64, i64)> = HashSet::new();
         for ti in 0..nt {
             let t_start = (t_lo + ti as i64) * g.t_cell_ns;
             for fi in 0..nf {
@@ -455,16 +520,75 @@ impl Pyramid {
                     let f_in = (fc - fb * tile_nf) as usize;
                     let key = (l, fb, tb);
                     if let Entry::Vacant(slot) = cache.entry(key) {
-                        let src = self.load_source(l, fb, tb, margin, pct)?;
-                        if let Some(s) = &src {
-                            provenance.merge(&s.tile().prov);
-                        }
+                        let src = self.load_source(l, fb, tb, margin, pct)?.map(|s| {
+                            let m = if filtered {
+                                s.tile().prov.origin_match(filter)
+                            } else {
+                                OriginMatch::All
+                            };
+                            match m {
+                                OriginMatch::All => {
+                                    provenance.merge(&s.tile().prov);
+                                    summary.tiles_matched += 1;
+                                }
+                                OriginMatch::Mixed => summary.tiles_mixed += 1,
+                                OriginMatch::None => summary.tiles_other += 1,
+                            }
+                            (s, m)
+                        });
                         slot.insert(src);
                     }
-                    if let Some(src) = &cache[&key] {
-                        cells[ti * nf + fi] = cell_stats(src, l, t_in, f_in, pct.0, &mut bias);
-                        break;
-                    }
+                    let Some((src, m)) = &cache[&key] else {
+                        continue;
+                    };
+                    let keep = match m {
+                        OriginMatch::All => true,
+                        OriginMatch::None => false,
+                        OriginMatch::Mixed if l == 0 => false,
+                        OriginMatch::Mixed => {
+                            // The cell rolls up the level-(l−1) tile(s) at time block `tc`
+                            // holding its `f_factor` finer frequency cells.
+                            let factor = i64::from(gl.f_factor);
+                            let (b0, b1) = (
+                                (fc * factor).div_euclid(tile_nf),
+                                ((fc + 1) * factor - 1).div_euclid(tile_nf),
+                            );
+                            let mut ok = true;
+                            for cb in b0..=b1 {
+                                let ck = (l - 1, cb, tc);
+                                if let Entry::Vacant(slot) = children.entry(ck) {
+                                    let p = self.tile_provenance(l - 1, cb, tc)?;
+                                    slot.insert(p.map(|p| (p.origin_match(filter), p)));
+                                }
+                                ok &= matches!(children[&ck], Some((OriginMatch::All, _)));
+                            }
+                            if ok {
+                                summary.cells_from_children += 1;
+                                for cb in b0..=b1 {
+                                    let ck = (l - 1, cb, tc);
+                                    if merged_children.insert(ck)
+                                        && let Some((_, p)) = &children[&ck]
+                                    {
+                                        provenance.merge(p);
+                                    }
+                                }
+                            }
+                            ok
+                        }
+                    };
+                    cells[ti * nf + fi] = if keep {
+                        cell_stats(src, l, t_in, f_in, pct.0, &mut bias)
+                    } else {
+                        let tile = src.tile();
+                        if tile.count[t_in * tile.nf + f_in] > 0 {
+                            summary.cells_excluded += 1;
+                        }
+                        CellStats {
+                            level: l as u8,
+                            ..CellStats::NONE
+                        }
+                    };
+                    break;
                 }
             }
         }
@@ -483,6 +607,7 @@ impl Pyramid {
             cells,
             provenance,
             tiles_read,
+            filter: filtered.then_some(summary),
         })
     }
 

@@ -1169,6 +1169,7 @@ mod tests {
                 cells: vec![cell; nt * nf],
                 provenance: Default::default(),
                 tiles_read: 0,
+                filter: None,
             })
         }
     }

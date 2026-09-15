@@ -44,6 +44,7 @@ pub const REPORT_MAX_SERIES_ROWS: usize = 200_000;
 use hk_model::attention::baseline::SiteKey;
 use hk_model::attention::report::{ExportFormat, SurveyReport};
 use hk_model::{FreqRange, Repository, TimeRange, Timestamp};
+use hk_store::history::{OriginField, OriginFilter};
 use hk_store::observation::ObservationStore;
 use hk_store::{FloorProduct, Pyramid};
 
@@ -112,7 +113,22 @@ impl ReportService {
         span: TimeRange,
         site: SiteKey,
     ) -> Result<SurveyReport, ReportError> {
-        self.build(region, span, site).map(|(r, _)| r)
+        self.report_filtered(region, span, site, OriginFilter::ANY)
+    }
+
+    /// T-133: [`Self::report`] over the history of one source and/or site (`filter`). With a
+    /// filter, coverage comes from the filtered history tiles (the observation log is not keyed by
+    /// site or source), and occupancy from the series rows of the filtered site, or from the
+    /// filtered tiles when the filter names a source or the unknown site (series rows carry no
+    /// source and always a site).
+    pub fn report_filtered(
+        &self,
+        region: FreqRange,
+        span: TimeRange,
+        site: SiteKey,
+        filter: OriginFilter,
+    ) -> Result<SurveyReport, ReportError> {
+        self.build(region, span, site, filter).map(|(r, _)| r)
     }
 
     /// The report's export: `(content type, body)`.
@@ -123,7 +139,19 @@ impl ReportService {
         site: SiteKey,
         format: ExportFormat,
     ) -> Result<(&'static str, Vec<u8>), ReportError> {
-        let (r, tiles) = self.build(region, span, site)?;
+        self.export_filtered(region, span, site, OriginFilter::ANY, format)
+    }
+
+    /// [`Self::export`] with a history filter ([`Self::report_filtered`]).
+    pub fn export_filtered(
+        &self,
+        region: FreqRange,
+        span: TimeRange,
+        site: SiteKey,
+        filter: OriginFilter,
+        format: ExportFormat,
+    ) -> Result<(&'static str, Vec<u8>), ReportError> {
+        let (r, tiles) = self.build(region, span, site, filter)?;
         Ok(match format {
             ExportFormat::Json => (
                 "application/json",
@@ -144,6 +172,7 @@ impl ReportService {
         &self,
         region: FreqRange,
         span: TimeRange,
+        filter: &OriginFilter,
         between: &mut dyn FnMut(),
     ) -> Result<(HistoryTiles, Timestamp), ReportError> {
         let (geom, margin_db) = self.with_pyramid(|p| {
@@ -161,7 +190,7 @@ impl ReportService {
             }
             let (grid, latest) = self.with_pyramid(|p| {
                 Ok((
-                    HistoryTiles::query_level(p, region, chunk, level)?,
+                    HistoryTiles::query_level(p, region, chunk, level, filter)?,
                     p.latest_frame_end(),
                 ))
             })?;
@@ -177,15 +206,22 @@ impl ReportService {
         region: FreqRange,
         span: TimeRange,
         site: SiteKey,
+        filter: OriginFilter,
     ) -> Result<(SurveyReport, HistoryTiles), ReportError> {
         // `report_chunks` runs the one region/span check before any store is read.
-        let (tiles, generated_at) = self.query_tiles(region, span, &mut || {})?;
+        let (tiles, generated_at) = self.query_tiles(region, span, &filter, &mut || {})?;
         let repo = self
             .inventory
             .lock()
             .map_err(|_| ReportError::Provider("inventory database poisoned".into()))?;
         let inventory = RepoInventory(&repo);
-        let log = self.observations.as_ref().map(ObservationCoverage);
+        // T-133: the log is not keyed by site or source, so a filtered report discloses the
+        // filtered tiles' coverage instead.
+        let log = self
+            .observations
+            .as_ref()
+            .filter(|_| filter.is_any())
+            .map(ObservationCoverage);
         let mut coverage: Vec<&dyn CoverageProvider> = Vec::with_capacity(2);
         if let Some(log) = &log {
             coverage.push(log);
@@ -193,6 +229,7 @@ impl ReportService {
         coverage.push(&tiles);
         let mut req = ReportRequest::new(region, span, generated_at);
         req.site = site;
+        req.history_filter = filter;
         // T-128: T-118's series and T-119's comparison when the run attached them.
         let series = self.occupancy.as_deref().map(|svc| SeriesOccupancy {
             svc,
@@ -357,12 +394,27 @@ impl OccupancyProvider for SeriesOccupancy<'_> {
             f_cell_hz: f_cell,
             limit: REPORT_MAX_SERIES_ROWS,
         };
+        let filter = req.history_filter;
+        // T-133: series rows carry a site but no source, so a source or unknown-site filter is
+        // answered by the filtered history tiles.
+        if !matches!(filter.source, OriginField::Any) || filter.site == OriginField::Unknown {
+            let mut rows = self.fallback.occupancy(req, channels)?;
+            rows.warnings.push(
+                "occupancy series rows are not keyed by source and always carry a site: \
+                 filtered history-tile stand-in"
+                    .into(),
+            );
+            return Ok(rows);
+        }
         let stored = self.svc.query(&q).unwrap_or_default();
-        let by_site = matches!(req.site, SiteKey::Site(_));
+        let (by_site, want) = match filter.site {
+            OriginField::Is(s) => (true, s),
+            _ => (matches!(req.site, SiteKey::Site(_)), req.site),
+        };
         let mut groups: BTreeMap<(u8, i64, i64), Vec<&OccupancyStat>> = BTreeMap::new();
         for r in &stored.rows {
             let overlaps = r.interval.start < req.span.end && r.interval.end > req.span.start;
-            if overlaps && (!by_site || r.site == req.site) {
+            if overlaps && (!by_site || r.site == want) {
                 groups.entry(subject_group(&r.subject)).or_default().push(r);
             }
         }
@@ -565,7 +617,7 @@ mod tests {
         let (region, span) = (FreqRange::new(100e6, 100.1e6), span_h(240));
         let mut releases = 0;
         let (tiles, _) = svc
-            .query_tiles(region, span, &mut || {
+            .query_tiles(region, span, &OriginFilter::ANY, &mut || {
                 assert!(history.try_lock().is_ok(), "ingest locked out mid-report");
                 releases += 1;
             })
@@ -575,7 +627,14 @@ mod tests {
         assert!(releases >= 3, "{releases} lock releases");
         assert!(g.nt * g.nf <= REPORT_MAX_CELLS);
         // The stitched grid is the one-shot grid.
-        let whole = HistoryTiles::query_level(&history.lock().unwrap(), region, span, 2).unwrap();
+        let whole = HistoryTiles::query_level(
+            &history.lock().unwrap(),
+            region,
+            span,
+            2,
+            &OriginFilter::ANY,
+        )
+        .unwrap();
         assert_eq!(
             (whole.nt, whole.nf, whole.t_first_cell),
             (g.nt, g.nf, g.t_first_cell)

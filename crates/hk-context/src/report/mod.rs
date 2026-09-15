@@ -34,6 +34,7 @@ use hk_model::attention::report::{
 };
 use hk_model::attention::schedule::{PoiEntry, poi_fraction};
 use hk_model::{AnomalyId, FreqRange, TimeRange, Timestamp};
+use hk_store::history::OriginFilter;
 
 pub use export::{report_csv, report_png};
 pub use history::{
@@ -61,8 +62,10 @@ pub struct ReportRequest {
     pub region: FreqRange,
     /// Span.
     pub span: TimeRange,
-    /// Site the report is for.
+    /// Site the report is for (baselines and occupancy series).
     pub site: SiteKey,
+    /// T-133: the history source/site filter the providers apply (no filter by default).
+    pub history_filter: OriginFilter,
     /// Generation time (sample clock: the stores' stream time).
     pub generated_at: Timestamp,
     /// Channel rows kept.
@@ -78,6 +81,7 @@ impl ReportRequest {
             region,
             span,
             site: SiteKey::Unassigned,
+            history_filter: OriginFilter::ANY,
             generated_at,
             max_channels: DEFAULT_MAX_CHANNELS,
             max_emitters: DEFAULT_MAX_EMITTERS,

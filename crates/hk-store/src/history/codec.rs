@@ -1,5 +1,6 @@
-//! The tile file format. Little-endian throughout. Version 2 (T-116) is written; version 1
-//! (T-017) is still read, so no migration is needed: v1 tiles stay valid until evicted.
+//! The tile file format. Little-endian throughout. Version 3 (T-133) is written; versions 1
+//! (T-017) and 2 (T-116) are still read, so no migration is needed: older tiles stay valid until
+//! evicted, and their frames read as of unknown source and site.
 //!
 //! ```text
 //! preamble (28 B)  magic "HKTILE\0\x01" [8] · format u16 · header_len u16 · payload_len u64 ·
@@ -14,13 +15,16 @@
 //!                  to state (state = gain u8·f32·f32·u8, calibration u8·36 B, gain table u8·u32,
 //!                  filter u8·16 B, spur mask u8·36 B) · payload codec u8 (0 raw, 1 zstd) ·
 //!                  raw payload length u64
+//! header (v3)      v2 header · origins u8 · per origin: source present u8 · source u64 · site
+//!                  (u8 0 unknown, 1 unassigned, 2 mobile, 3 site + 36 B uuid text) · frames u64 ·
+//!                  other_origin_frames u64 (T-133)
 //! payload (v1)     observed bitmap (nt·nf bits, row-major t then f)
 //!                  per observed cell: max i16 · mean i16 · p_low i16 · p_high i16 (0.01 dB,
 //!                    i16::MIN = unknown) · occupancy u16 · occupancy_max u16 · coverage u16
 //!                    (fractions × 65535) · frames varint
 //!                  histogram bitmap (nf bits); per present row: first bin varint · len varint ·
 //!                    len counts varint (leading/trailing zero bins trimmed)
-//! payload (v2)     after zstd decompression when codec = 1: observed bitmap · then one column per
+//! payload (v2, v3) after zstd decompression when codec = 1: observed bitmap · then one column per
 //!                  statistic over the observed cells in bitmap order (max i16[] · mean i16[] ·
 //!                  p_low i16[] · p_high i16[] · occupancy u16[] · occupancy_max u16[] ·
 //!                  coverage u16[] · frames varint[]) · histogram section as v1
@@ -40,17 +44,21 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
+use hk_model::attention::baseline::SiteKey;
+use hk_model::ids::SiteId;
 use hk_model::{CalibrationStateId, PowerUnit, SpurMaskId, TileKey, Timestamp};
 
 use super::config::{HistogramConfig, LevelGeometry};
 use super::frame::{FrontEnd, GainState, PortTag};
 use super::tile::{
-    FrontEndState, MAX_GAIN_STATES, MAX_PROVENANCE_STEPS, ProvenanceStep, ProvenanceSummary, Tile,
+    FrontEndState, MAX_GAIN_STATES, MAX_ORIGINS, MAX_PROVENANCE_STEPS, Origin, ProvenanceStep,
+    ProvenanceSummary, Tile,
 };
 
 const MAGIC: [u8; 8] = *b"HKTILE\0\x01";
-/// Tile file format version written (T-116: 2). Version 1 is still read.
-pub const FORMAT_VERSION: u16 = 2;
+/// Tile file format version written (T-116: 2; T-133: 3, per-tile origins). Versions 1 and 2 are
+/// still read.
+pub const FORMAT_VERSION: u16 = 3;
 const PREAMBLE_LEN: usize = 28;
 const UNKNOWN_DB: i16 = i16::MIN;
 /// Largest raw payload a zstd tile may claim (bounds decompression memory).
@@ -215,6 +223,30 @@ impl<'a> Cur<'a> {
         let present = self.u8()? != 0;
         let b = self.arr::<16>()?;
         Some(present.then(|| PortTag::from_bytes(b)))
+    }
+    fn site(&mut self) -> Option<Option<SiteKey>> {
+        Some(match self.u8()? {
+            0 => None,
+            1 => Some(SiteKey::Unassigned),
+            2 => Some(SiteKey::Mobile),
+            3 => {
+                let s = std::str::from_utf8(self.take(36)?).ok()?;
+                Some(SiteKey::Site(s.parse::<SiteId>().ok()?))
+            }
+            _ => return None,
+        })
+    }
+}
+
+fn put_site(buf: &mut Vec<u8>, site: Option<SiteKey>) {
+    match site {
+        None => buf.push(0),
+        Some(SiteKey::Unassigned) => buf.push(1),
+        Some(SiteKey::Mobile) => buf.push(2),
+        Some(SiteKey::Site(id)) => {
+            buf.push(3);
+            buf.extend_from_slice(id.to_string().as_bytes()); // 36 bytes
+        }
     }
 }
 
@@ -382,6 +414,18 @@ fn encode_header(h: &Header, buf: &mut Vec<u8>) {
         PayloadCodec::Zstd => 1,
     });
     buf.extend_from_slice(&h.raw_payload_len.to_le_bytes());
+    if h.format < 3 {
+        return;
+    }
+    let n = p.origins.len().min(MAX_ORIGINS);
+    buf.push(n as u8);
+    for (o, frames) in &p.origins[..n] {
+        buf.push(u8::from(o.source.is_some()));
+        buf.extend_from_slice(&o.source.unwrap_or(0).to_le_bytes());
+        put_site(buf, o.site);
+        buf.extend_from_slice(&frames.to_le_bytes());
+    }
+    buf.extend_from_slice(&p.other_origin_frames.to_le_bytes());
 }
 
 fn decode_header(c: &mut Cur<'_>, format: u16) -> Option<Header> {
@@ -472,6 +516,30 @@ fn decode_header(c: &mut Cur<'_>, format: u16) -> Option<Header> {
             _ => return None,
         };
         raw_payload_len = c.u64()?;
+    }
+    p.origins.reserve_exact(MAX_ORIGINS);
+    if format >= 3 {
+        let n = c.u8()? as usize;
+        if n > MAX_ORIGINS {
+            return None;
+        }
+        for _ in 0..n {
+            let present = c.u8()? != 0;
+            let source = c.u64()?;
+            let site = c.site()?;
+            let frames = c.u64()?;
+            p.origins.push((
+                Origin {
+                    source: present.then_some(source),
+                    site,
+                },
+                frames,
+            ));
+        }
+        p.other_origin_frames = c.u64()?;
+    } else if p.frames > 0 {
+        // Before T-133 tiles did not record where frames came from.
+        p.origins.push((Origin::UNKNOWN, p.frames));
     }
     Some(Header {
         format,
@@ -570,6 +638,36 @@ pub(crate) fn encode(
     buf: &mut Vec<u8>,
     payload: &mut Vec<u8>,
 ) -> u64 {
+    encode_format(
+        FORMAT_VERSION,
+        tile,
+        sealed,
+        unit,
+        g,
+        hist,
+        pct,
+        compression,
+        buf,
+        payload,
+    )
+}
+
+/// [`encode`] as `format` (2 or [`FORMAT_VERSION`]; the older writer is kept for the
+/// backward-read tests).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_format(
+    format: u16,
+    tile: &Tile,
+    sealed: bool,
+    unit: PowerUnit,
+    g: &LevelGeometry,
+    hist: &HistogramConfig,
+    pct: (f32, f32),
+    compression: Option<i32>,
+    buf: &mut Vec<u8>,
+    payload: &mut Vec<u8>,
+) -> u64 {
+    debug_assert!((2..=FORMAT_VERSION).contains(&format));
     encode_payload(tile, payload);
     let raw_len = payload.len();
     let compressed = compression
@@ -583,7 +681,7 @@ pub(crate) fn encode(
     buf.clear();
     buf.resize(PREAMBLE_LEN, 0);
     let header = Header {
-        format: FORMAT_VERSION,
+        format,
         scheme: tile.key.scheme,
         level: tile.key.level,
         sealed,
@@ -603,7 +701,7 @@ pub(crate) fn encode(
     encode_header(&header, buf);
     let header_end = buf.len();
     buf.extend_from_slice(compressed.as_deref().unwrap_or(payload));
-    finish_preamble(buf, FORMAT_VERSION, header_end);
+    finish_preamble(buf, format, header_end);
     (header_end + raw_len) as u64
 }
 

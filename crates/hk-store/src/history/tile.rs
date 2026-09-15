@@ -1,5 +1,6 @@
 //! In-memory tile accumulators: level-0 frame folding and level-to-level rollup.
 
+use hk_model::attention::baseline::SiteKey;
 use hk_model::{CalibrationStateId, SpurMaskId, TileKey, Timestamp};
 
 use super::config::{HistogramConfig, LevelGeometry};
@@ -9,6 +10,99 @@ use super::stats::{exact_percentile, hist_percentile, undb};
 /// Most distinct gain states listed per tile; further states are counted in
 /// [`ProvenanceSummary::other_gain_frames`].
 pub const MAX_GAIN_STATES: usize = 8;
+
+/// Most distinct origins (source × site) listed per tile (T-133); frames of further origins are
+/// counted in [`ProvenanceSummary::other_origin_frames`] and read as unknown origin.
+pub const MAX_ORIGINS: usize = 8;
+
+/// Where a tile's frames came from (T-133): the [`FrameInput::source`] key and the site
+/// ([`FrameInput::site`]). `None` is **unknown**: frames of tiles written before format 3, frames
+/// whose caller stated no site, and origins beyond [`MAX_ORIGINS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct Origin {
+    /// Source key, `None` when unknown.
+    pub source: Option<u64>,
+    /// Site, `None` when unknown.
+    pub site: Option<SiteKey>,
+}
+
+impl Origin {
+    /// Unknown source and site.
+    pub const UNKNOWN: Origin = Origin {
+        source: None,
+        site: None,
+    };
+}
+
+/// One field of an [`OriginFilter`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginField<T> {
+    /// Any value, including unknown (no filter).
+    Any,
+    /// Exactly this known value.
+    Is(T),
+    /// Only frames whose value is unknown.
+    Unknown,
+}
+
+impl<T: PartialEq + Copy> OriginField<T> {
+    /// Whether a frame whose value is `v` (`None` = unknown) passes.
+    pub fn matches(&self, v: Option<T>) -> bool {
+        match self {
+            OriginField::Any => true,
+            OriginField::Is(x) => v == Some(*x),
+            OriginField::Unknown => v.is_none(),
+        }
+    }
+}
+
+/// A source/site filter on history queries (T-133). See [`super::Pyramid::query_filtered`] for how
+/// tiles holding several origins are treated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OriginFilter {
+    /// Source key.
+    pub source: OriginField<u64>,
+    /// Site.
+    pub site: OriginField<SiteKey>,
+}
+
+impl Default for OriginFilter {
+    fn default() -> Self {
+        Self::ANY
+    }
+}
+
+impl OriginFilter {
+    /// No filter.
+    pub const ANY: OriginFilter = OriginFilter {
+        source: OriginField::Any,
+        site: OriginField::Any,
+    };
+
+    /// Neither field filters.
+    pub fn is_any(&self) -> bool {
+        matches!(
+            (self.source, self.site),
+            (OriginField::Any, OriginField::Any)
+        )
+    }
+
+    /// Whether frames of origin `o` pass.
+    pub fn matches(&self, o: &Origin) -> bool {
+        self.source.matches(o.source) && self.site.matches(o.site)
+    }
+}
+
+/// How a tile's frames relate to an [`OriginFilter`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginMatch {
+    /// Every frame passes (or the tile has no frames).
+    All,
+    /// Some frames pass, others do not.
+    Mixed,
+    /// No frame passes.
+    None,
+}
 
 /// Most provenance steps listed per tile or query result; further steps are counted in
 /// [`ProvenanceSummary::steps_dropped`].
@@ -156,6 +250,12 @@ pub struct ProvenanceSummary {
     pub first_frame: Option<Timestamp>,
     /// Latest frame start.
     pub last_frame: Option<Timestamp>,
+    /// Frame contributions per origin (source × site, T-133), in first-seen order (at most
+    /// [`MAX_ORIGINS`]). Tiles written before format 3 list all their frames under
+    /// [`Origin::UNKNOWN`].
+    pub origins: Vec<(Origin, u64)>,
+    /// Frames of origins beyond the listed ones (read as unknown origin).
+    pub other_origin_frames: u64,
 }
 
 fn fold_tag<T: PartialEq>(
@@ -204,16 +304,57 @@ impl ProvenanceSummary {
         self.cell_shape.filter(|_| !self.cell_shape_mixed)
     }
 
+    /// `(passing, other)` frame contributions under `filter` (frames beyond the listed origins
+    /// count as unknown origin).
+    pub fn origin_frames(&self, filter: &OriginFilter) -> (u64, u64) {
+        let (mut pass, mut other) = (0, 0);
+        for (o, n) in &self.origins {
+            if filter.matches(o) {
+                pass += n;
+            } else {
+                other += n;
+            }
+        }
+        if filter.matches(&Origin::UNKNOWN) {
+            pass += self.other_origin_frames;
+        } else {
+            other += self.other_origin_frames;
+        }
+        (pass, other)
+    }
+
+    /// How these frames relate to `filter`.
+    pub fn origin_match(&self, filter: &OriginFilter) -> OriginMatch {
+        match self.origin_frames(filter) {
+            (_, 0) => OriginMatch::All,
+            (0, _) => OriginMatch::None,
+            _ => OriginMatch::Mixed,
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         let mut states = std::mem::take(&mut self.gain_states);
         let mut steps = std::mem::take(&mut self.steps);
+        let mut origins = std::mem::take(&mut self.origins);
         states.clear();
         steps.clear();
+        origins.clear();
         *self = Self {
             gain_states: states,
             steps,
+            origins,
             ..Self::default()
         };
+    }
+
+    fn add_origin(&mut self, o: Origin, frames: u64) {
+        if let Some(s) = self.origins.iter_mut().find(|(s, _)| *s == o) {
+            s.1 += frames;
+        } else if self.origins.len() < MAX_ORIGINS {
+            self.origins.push((o, frames));
+        } else {
+            self.other_origin_frames += frames;
+        }
     }
 
     fn add_gain(&mut self, g: GainState, frames: u64) {
@@ -263,6 +404,13 @@ impl ProvenanceSummary {
         self.frames += 1;
         self.suspect_frames += u64::from(f.suspect);
         self.dropped_samples += f.dropped_samples;
+        self.add_origin(
+            Origin {
+                source: Some(f.source),
+                site: f.site,
+            },
+            1,
+        );
         match f.gain {
             Some(g) => self.add_gain(g, 1),
             None => self.unknown_gain_frames += 1,
@@ -326,6 +474,10 @@ impl ProvenanceSummary {
         }
         self.other_gain_frames += o.other_gain_frames;
         self.unknown_gain_frames += o.unknown_gain_frames;
+        for &(origin, n) in &o.origins {
+            self.add_origin(origin, n);
+        }
+        self.other_origin_frames += o.other_origin_frames;
         for s in &o.steps {
             self.add_step(s);
         }
@@ -406,6 +558,7 @@ impl Tile {
             prov: ProvenanceSummary {
                 gain_states: Vec::with_capacity(MAX_GAIN_STATES),
                 steps: Vec::with_capacity(MAX_PROVENANCE_STEPS),
+                origins: Vec::with_capacity(MAX_ORIGINS),
                 ..Default::default()
             },
             col_t: None,

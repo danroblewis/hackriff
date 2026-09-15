@@ -1478,6 +1478,7 @@ mod tests {
             cells,
             provenance: Default::default(),
             tiles_read: 0,
+            filter: None,
         }
     }
 

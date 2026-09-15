@@ -385,6 +385,16 @@ impl FloorProduct {
         spectrum: &SpectrumFrame,
         floor: &FloorFrame,
     ) -> Result<FloorIngest, StoreError> {
+        self.ingest_from(spectrum, floor, crate::history::FrameOrigin::default())
+    }
+
+    /// [`Self::ingest`] with the frame's source and site recorded in the history tiles (T-133).
+    pub fn ingest_from(
+        &mut self,
+        spectrum: &SpectrumFrame,
+        floor: &FloorFrame,
+        origin: crate::history::FrameOrigin,
+    ) -> Result<FloorIngest, StoreError> {
         if spectrum.seq != floor.seq || spectrum.t != floor.t || spectrum.spectrum.bins() == 0 {
             self.stats.rejected_frames += 1;
             return Err(StoreError::BadFrame(
@@ -400,7 +410,7 @@ impl FloorProduct {
         let band = FreqRange::new(s.bin_frequency_hz(0), s.bin_frequency_hz(n - 1));
         let mut flags = frame_flags(floor);
         flags.set(FloorFlags::QUANTISATION_LIMITED, floor.quantisation_limited);
-        let base = FrameInput::from_dsp(spectrum);
+        let base = FrameInput::from_dsp(spectrum).with_origin(origin);
         let (outcome, calibration, sigma) =
             match self.cals.band(prov.calibration_state_ref, &gain, band, t) {
                 Ok(bc) => {
