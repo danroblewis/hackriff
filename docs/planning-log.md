@@ -1330,3 +1330,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Golden test compares re-encoded f64 fields within 1e-6.
   - Parked week: 193.1 MiB, 0 refusals; week test 14.9 → 9.6 s.
   - Tests: hk-store 7, hk-context 39, hk-pipeline 18.
+- **B0.357 T-138 committed (64972b7, on f0b963b); Opus review running.**
+  - **Rule:** a persistence-confirmed single new emitter is scored as `new_emitter_novelty(2, rate, 1 h)`, which reaches 0.7 when P(≥1 new emitter/h | μ) ≤ α ≈ 0.0112.
+  - **Persistence:** the re-sighting must come ≥300 s after first sighting, at consecutive closes.
+  - **Gates:** a suspect sighting disqualifies; only named, mature sites qualify; pending sightings kept 7 days, max 512.
+  - **Tests:** quiet site alarms (novelty 0.744); busy site (0.067), transient and suspect do not; immature is counted.
+  - **Merge risk:** T-138 touches `occupancy.rs`, so expect a conflict with T-139.
