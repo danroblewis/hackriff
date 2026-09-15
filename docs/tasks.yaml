@@ -1818,7 +1818,8 @@ tasks:
   - id: T-113
     milestone: M2
     title: "M2-DESIGN: attention + memory contracts (ADR-0012)"
-    status: in-progress
+    status: review
+    commit: 391249b
     deps: [T-112]
     parallel_group: M2D
     use_cases: [AWARE-042, AWARE-044, AWARE-027]

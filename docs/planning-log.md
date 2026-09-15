@@ -875,3 +875,24 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Contract test:** its CSV check now accepts zero lines (empty server history); shape is still checked, and values are covered in hk-store tests.
 
   Follow-ups filed as **T-126**. Note for T-118: the occupancy threshold should use the corrected floor. Full check covering T-114/T-116/T-117 running.
+- **B0.285 T-113 M2-DESIGN delivered** (391249b): ADR-0012 plus shared types in `hk-model/src/attention` and stub modules. Key decisions:
+  - **Observation log:** DwellRecord per step with reason codes; SweepRecord aggregated per pass.
+  - **FCO:** computed only from activity-independent visits (sweep + scheduled), time-weighted; Wilson CI on effective samples.
+  - **Channels** learned from detections on the history grid.
+  - **Sites:** discrete (250 m), with `mobile`/`unassigned` states.
+  - **Baselines:** 168 slots with pooled maturity fallback; frozen reference + 14-day adaptive copy.
+  - **Score S:** computed by C12 via `InterestingnessProvider`; unknowns rank high; band plan ≤30% of the boring prior and only after blind discovery.
+  - **Bandit:** deterministic discounted UCB; 15% exploration floor, 25% sweep floor.
+  - **Reports** must carry coverage.
+  - **Alarms:** Anomaly rows with hysteresis, suppressed when immature or mobile.
+  - **API:** 22 planned routes.
+  - **Ownership map** (ADR §11) moves the T-121 report to `hk-context/src/report` and T-122 alarm rows to SQLite.
+
+  **Open questions for the user** (proceeding on defaults unless the user objects):
+  1. Pooled baseline maturity (~1 parked day) instead of literal 24 h per hour-of-week slot (~24 weeks).
+  2. Fixed UTC offset per site versus a timezone DB (DST shifts patterns an hour).
+  3. Retention defaults: observation 30 d / 512 MiB; occupancy 90 d at 15 min, 2 y hourly; baselines 1 GiB.
+  4. Novelty alarms off while moving, and a 250 m site radius.
+  5. Sweep and exploration floors and score weights, to be retuned with hk-sim.
+
+  Timeboxed Opus review running; it checks against main (T-116 tile API, hk-sim Policy) and T-125 simulated time.
