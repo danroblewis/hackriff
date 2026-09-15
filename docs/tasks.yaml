@@ -1818,8 +1818,8 @@ tasks:
   - id: T-113
     milestone: M2
     title: "M2-DESIGN: attention + memory contracts (ADR-0012)"
-    status: review
-    commit: 391249b
+    status: done
+    commit: d3af1cf
     deps: [T-112]
     parallel_group: M2D
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -1929,7 +1929,7 @@ tasks:
     parallel_group: M2R
     use_cases: [AWARE-033, RESEARCH-050, AWARE-042]
     acceptance: "report(region, span) API returns occupancy per channel/band (C12), top emitters from inventory (C27), change vs baseline (when T-119 present; otherwise flagged unavailable), coverage gaps and POI explicitly disclosed (never implies nothing there), provenance steps (gain/cal changes); export JSON/CSV/PNG; history queries: filter by time/frequency/source/site; docs/api.md + contract tests; e2e via mock SDR on a T-117 scene"
-    area: "crates/hk-store/src/history/report (new), crates/hk-api (report routes), docs/api.md"
+    area: "crates/hk-context/src/report/** (ADR-0012 §11), crates/hk-pipeline/src/reports.rs, crates/hk-api/src/reports.rs, docs/api.md"
     needs: none
     model: opus
     effort: medium
@@ -1942,7 +1942,7 @@ tasks:
     parallel_group: M2A
     use_cases: [AWARE-044, AWARE-012, AWARE-019]
     acceptance: "novelty alarms from C12 with explanations: correlate with existing hk-context anomaly/attack-map correlation (space weather, gain/cal steps first), alarm masks (level above baseline, new emitter not in inventory), hysteresis/dedupe, immature-baseline suppression; alarm stream + routes (docs/api.md + contract tests); blind e2e: injected emitter raises exactly one alarm with correct explanation ranking; front-end step change explained as provenance, not novelty"
-    area: "crates/hk-context/src/anomaly, crates/hk-context/src/occupancy (alarm), crates/hk-api"
+    area: "crates/hk-context/src/occupancy/alarm.rs, crates/hk-context/src/correlate (non-floor gate), crates/hk-model/src/repo/alarms.rs + migration 0003, crates/hk-pipeline/src/alarms.rs, crates/hk-api/src/anomalies.rs (ADR-0012 §11)"
     needs: none
     model: opus
     effort: medium

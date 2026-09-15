@@ -896,3 +896,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   5. Sweep and exploration floors and score weights, to be retuned with hk-sim.
 
   Timeboxed Opus review running; it checks against main (T-116 tile API, hk-sim Policy) and T-125 simulated time.
+- **B0.286 Full check of main b72f1b3 (T-114, T-116, T-117): green.** Lint clean; nextest + UI 1155/1155; acceptance 29/29 in 57 s. **T-113 merged** (d3af1cf). The review was FIX-FIRST; the coordinator applied the fixes directly:
+  - ADR §0 time base: all contract time uses the device/sample clock, never wall time; only I/O flush may use wall time.
+  - §2.5: too few activity-independent visits widens the rollup window instead of substituting the biased all-visits FCO. At the 25% sweep floor, 15-min intervals would otherwise always fall back.
+  - §11: T-117 truth field names corrected.
+
+  Reviewer view on the 5 open questions: Q1/Q2/Q3/Q5 are safe defaults; Q4 (walk-survey alarms, 250 m radius) is worth asking the user, with alarms suppressed while moving as the safe default. tasks.yaml T-121/T-122 areas were aligned to the ADR §11 ownership map. Deferred nit: `SharedInterestingness::publish` validates under the lock. Merge order per ADR: T-115 → T-118 → T-119 → T-122; T-115 before T-120 touches control.rs. **Disk at 20 GB floor**; worktrees are being cleaned before the next launches.
