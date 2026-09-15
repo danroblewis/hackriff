@@ -561,3 +561,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Docs/tests:** api.md and contract tests updated.
   - **Coordination:** T-080 told to merge main (T-067 touched `ui/src/index.html` and controls). Full check running.
 - **B0.202 T-080 merged** (ui-only): left sidebar, inventory Candidates/Confirmed with Promote/Delete, first/last seen columns removed; UI tests pass on main. This completes the user's T-078/T-079/T-080 UI-separation set. **T-081** (WFM/RDS chain ParamEstimator bottleneck) launches next in order; T-053 follows.
+- **B0.203 T-067 merge verified:** lint, nextest 941 passed (5 skipped; just test 216 s), acceptance green. T-080 (ui-only) verified with UI tests (59 passing). T-081 launched.
