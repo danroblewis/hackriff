@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use hk_dsp::fft::{CpuFft, FftBackend};
 use hk_dsp::filter::design::windowed_sinc;
-use hk_dsp::filter::{kaiser_beta, kaiser_taps};
+use hk_dsp::filter::{kaiser_beta, kaiser_taps, kernels};
 use hk_dsp::{SegmentEngine, Spectrum, WelchConfig, WindowKind};
 use num_complex::Complex32;
 
@@ -153,11 +153,46 @@ pub(crate) fn smooth(v: &[f64], w: usize, out: &mut Vec<f64>) {
     }));
 }
 
+/// Longest direct channel filter, taps (the S5-era clamp; it also bounds the kernel's time span
+/// in the multirate form).
+const CHANNEL_FILTER_MAX_TAPS: usize = 8191;
+/// Channel filter stopband attenuation, dB.
+const CHANNEL_FILTER_DB: f64 = 40.0;
+/// Multirate form: the intermediate rate is at least this many times the stopband edge.
+const MULTIRATE_OVERSAMPLE: f64 = 8.0;
+/// Multirate form only from this decimation factor up (wider channels filter directly).
+const MULTIRATE_MIN_DECIMATION: usize = 4;
+/// Attenuation of the multirate anti-alias / anti-image filter, dB.
+const MULTIRATE_AA_DB: f64 = 70.0;
+
 /// A symmetric low-pass channel filter at unity DC gain.
+///
+/// **Cost (T-081).** A narrow passband at a wide snippet rate needs a long kernel: a 214 Hz
+/// carrier in a 500 kHz snippet clamps at 8191 taps, 2·10⁹ multiply-adds over a 0.5 s probe
+/// (1.4 s, the whole WFM/RDS chain's cost on the dense urban replay). When the rate is at least
+/// [`MULTIRATE_MIN_DECIMATION`] × [`MULTIRATE_OVERSAMPLE`] × the stopband edge, the same Kaiser
+/// kernel (same cutoff, β and time span, so the same passband, transition and ENBW) runs at
+/// `fs/D` between a zero-phase anti-alias decimator and the matching interpolator
+/// (≥ [`MULTIRATE_AA_DB`] dB outside `±(fs/D − stop)`, flat inside `±stop`). The output stays at
+/// `fs`, zero-delay, as the filtered zero-extended input; it differs from the direct form only
+/// by residual aliases/images of the 70 dB decimator and the tap rounding of the shorter
+/// kernel: −53 to −61 dB relative output error, ENBW within 0.2 % (unit test
+/// `multirate_channel_filter_matches_the_reference_within_tolerance`). Wider channels (every WFM
+/// box) filter directly with the same kernel, the products summed in eight SIMD lanes (float
+/// rounding only, below −100 dB).
 pub(crate) struct ChannelFilter {
+    /// Kernel (at `fs`, or at `fs/D` in the multirate form).
     taps: Vec<f32>,
+    multirate: Option<Multirate>,
     /// Equivalent noise bandwidth, Hz.
     pub enbw_hz: f64,
+}
+
+/// Decimate by `d` → kernel → interpolate by `d`.
+struct Multirate {
+    d: usize,
+    /// Anti-alias / anti-image low-pass at `fs`, symmetric, odd length, DC gain 1.
+    aa: Vec<f32>,
 }
 
 impl ChannelFilter {
@@ -169,35 +204,110 @@ impl ChannelFilter {
             return None;
         }
         let stop = (passband_hz * 4.0 / 3.0).min(0.5 * fs);
-        let a = 40.0;
-        let n = (kaiser_taps(a, (stop - passband_hz) / fs).clamp(3, 8191)) | 1;
-        let cutoff = (passband_hz + stop) / 2.0 / fs;
-        let taps = windowed_sinc(n, cutoff, kaiser_beta(a), 1.0);
-        let sum: f64 = taps.iter().map(|&t| f64::from(t)).sum();
-        let sum_sq: f64 = taps.iter().map(|&t| f64::from(t) * f64::from(t)).sum();
+        let a = CHANNEL_FILTER_DB;
+        let n = (kaiser_taps(a, (stop - passband_hz) / fs).clamp(3, CHANNEL_FILTER_MAX_TAPS)) | 1;
+        let cutoff = (passband_hz + stop) / 2.0;
+        let d = (fs / (MULTIRATE_OVERSAMPLE * stop)).floor() as usize;
+        if d >= MULTIRATE_MIN_DECIMATION {
+            // The direct kernel's time span (n/fs) at fs/d, so a clamped design keeps its
+            // (wider) transition and ENBW.
+            let r = fs / d as f64;
+            let nc = (n.div_ceil(d).max(3)) | 1;
+            let taps = windowed_sinc(nc, cutoff / r, kaiser_beta(a), 1.0);
+            let aa_n = (kaiser_taps(MULTIRATE_AA_DB, (r - 2.0 * stop) / fs).max(3)) | 1;
+            let aa = windowed_sinc(aa_n, 0.5 / d as f64, kaiser_beta(MULTIRATE_AA_DB), 1.0);
+            return Some(Self {
+                enbw_hz: enbw(&taps, r),
+                taps,
+                multirate: Some(Multirate { d, aa }),
+            });
+        }
+        let taps = windowed_sinc(n, cutoff / fs, kaiser_beta(a), 1.0);
         Some(Self {
+            enbw_hz: enbw(&taps, fs),
             taps,
-            enbw_hz: fs * sum_sq / (sum * sum),
+            multirate: None,
         })
+    }
+
+    /// Kernel length (at the kernel's rate).
+    #[cfg(test)]
+    pub fn taps_len(&self) -> usize {
+        self.taps.len()
+    }
+
+    /// Whether the multirate form runs.
+    #[cfg(test)]
+    pub fn is_multirate(&self) -> bool {
+        self.multirate.is_some()
     }
 
     /// Zero-delay filtering (`out.len() == x.len()`, zero outside `x`).
     pub fn apply(&self, x: &[Complex32], out: &mut Vec<Complex32>) {
-        let l = self.taps.len();
-        let d = l / 2;
+        match &self.multirate {
+            None => fir_zero_phase(&self.taps, x, out),
+            Some(m) => self.apply_multirate(m, x, out),
+        }
+    }
+
+    fn apply_multirate(&self, m: &Multirate, x: &[Complex32], out: &mut Vec<Complex32>) {
         let n = x.len();
         out.clear();
-        out.extend((0..n).map(|i| {
-            // taps[m] multiplies x[i + d − m], for 0 <= i + d − m < n.
-            let lo = (i + d + 1).saturating_sub(n);
-            let hi = (i + d).min(l - 1);
+        if n == 0 {
+            return;
+        }
+        let d = m.d as isize;
+        let ha = (m.aa.len() / 2) as isize;
+        let hc = (self.taps.len() / 2) as isize;
+        // Interpolated output i reads kernel outputs at positions k·d within ±ha of i; each of
+        // those reads decimated samples within ±hc; a decimated sample at k·d reads x within ±ha.
+        let k_min = -(ha.div_euclid(d) + 1);
+        let k_max = (n as isize - 1 + ha).div_euclid(d) + 1;
+        let (y_lo, y_hi) = (k_min - hc, k_max + hc);
+        let y: Vec<Complex32> = (y_lo..=y_hi)
+            .map(|k| dot_zero_extended(&m.aa, x, k * d - ha))
+            .collect();
+        let z: Vec<Complex32> = (k_min..=k_max)
+            .map(|k| dot_zero_extended(&self.taps, &y, k - hc - y_lo))
+            .collect();
+        // out[i] = d · Σ_k z[k] · aa[ha + i − k·d] (the interpolator has DC gain d).
+        let gain = d as f32;
+        out.extend((0..n as isize).map(|i| {
+            let k0 = (i - ha + d - 1).div_euclid(d).max(k_min);
+            let k1 = (i + ha).div_euclid(d).min(k_max);
             let mut acc = Complex32::default();
-            for m in lo..=hi {
-                acc += x[i + d - m] * self.taps[m];
+            for k in k0..=k1 {
+                acc += z[(k - k_min) as usize] * m.aa[(ha + i - k * d) as usize];
             }
-            acc
+            acc * gain
         }));
     }
+}
+
+/// `fs · Σt² / (Σt)²`, Hz.
+fn enbw(taps: &[f32], fs: f64) -> f64 {
+    let sum: f64 = taps.iter().map(|&t| f64::from(t)).sum();
+    let sum_sq: f64 = taps.iter().map(|&t| f64::from(t) * f64::from(t)).sum();
+    fs * sum_sq / (sum * sum)
+}
+
+/// `Σ_j taps[j] · x[start + j]` with `x` zero outside its bounds (symmetric `taps`).
+fn dot_zero_extended(taps: &[f32], x: &[Complex32], start: isize) -> Complex32 {
+    let l = taps.len() as isize;
+    let a = start.max(0);
+    let b = (start + l).min(x.len() as isize);
+    if b <= a {
+        return Complex32::default();
+    }
+    let t0 = (a - start) as usize;
+    kernels::dot_real(&taps[t0..], &x[a as usize..b as usize])
+}
+
+/// Zero-delay FIR of a symmetric odd-length kernel over zero-extended `x`.
+fn fir_zero_phase(taps: &[f32], x: &[Complex32], out: &mut Vec<Complex32>) {
+    let h = (taps.len() / 2) as isize;
+    out.clear();
+    out.extend((0..x.len() as isize).map(|i| dot_zero_extended(taps, x, i - h)));
 }
 
 /// Settings of one spectral line search.
@@ -525,5 +635,107 @@ mod tests {
         assert_eq!(wrap_offset(6e6, 10e6), -4e6);
         assert_eq!(wrap_offset(-5e6, 10e6), -5e6);
         assert_eq!(wrap_offset(5e6, 10e6), -5e6);
+    }
+
+    /// The pre-T-081 channel filter: direct Kaiser kernel at `fs`, scalar loop.
+    fn reference_filter(fs: f64, passband_hz: f64, x: &[Complex32]) -> (Vec<Complex32>, f64) {
+        let stop = (passband_hz * 4.0 / 3.0).min(0.5 * fs);
+        let n = (kaiser_taps(40.0, (stop - passband_hz) / fs).clamp(3, 8191)) | 1;
+        let taps = windowed_sinc(n, (passband_hz + stop) / 2.0 / fs, kaiser_beta(40.0), 1.0);
+        let (l, d, len) = (taps.len(), taps.len() / 2, x.len());
+        let out = (0..len)
+            .map(|i| {
+                let lo = (i + d + 1).saturating_sub(len);
+                let hi = (i + d).min(l - 1);
+                let mut acc = Complex32::default();
+                for m in lo..=hi {
+                    acc += x[i + d - m] * taps[m];
+                }
+                acc
+            })
+            .collect();
+        (out, enbw(&taps, fs))
+    }
+
+    /// Noise, an in-band tone, a gated in-band tone (a burst edge at n/3 and 2n/3) and a strong
+    /// out-of-band tone.
+    fn filter_scene(n: usize, fs: f64, passband_hz: f64) -> Vec<Complex32> {
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        let mut u = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / fs;
+                let ph = |f: f64| Complex32::from_polar(1.0, (TAU * f * t) as f32);
+                let gate = if (n / 3..2 * n / 3).contains(&i) {
+                    0.5
+                } else {
+                    0.0
+                };
+                ph(0.3 * passband_hz) * 0.8
+                    + ph(-0.6 * passband_hz) * gate
+                    + ph(5.0 * passband_hz) * 2.0
+                    + Complex32::new(u() as f32, u() as f32)
+            })
+            .collect()
+    }
+
+    fn rel_error_db(a: &[Complex32], b: &[Complex32]) -> f64 {
+        let e: f64 = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| f64::from((x - y).norm_sqr()))
+            .sum();
+        let p: f64 = b.iter().map(|y| f64::from(y.norm_sqr())).sum();
+        10.0 * (e / p).log10()
+    }
+
+    #[test]
+    fn direct_channel_filter_matches_the_reference() {
+        let fs = 500e3;
+        for pass in [40e3, 100e3, 150e3] {
+            let x = filter_scene(30_000, fs, pass);
+            let f = ChannelFilter::new(fs, pass).unwrap();
+            assert!(!f.is_multirate(), "{pass}");
+            let mut y = Vec::new();
+            f.apply(&x, &mut y);
+            let (r, enbw_ref) = reference_filter(fs, pass, &x);
+            assert_eq!(y.len(), r.len());
+            let err = rel_error_db(&y, &r);
+            assert!(err < -100.0, "{pass} Hz: {err:.1} dB");
+            assert!((f.enbw_hz / enbw_ref - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn multirate_channel_filter_matches_the_reference_within_tolerance() {
+        let fs = 500e3;
+        // 160 Hz: the clamped 8191-tap case of the dense urban replay (T-081).
+        for (pass, n) in [
+            (160.0, 20_000),
+            (750.0, 40_000),
+            (3e3, 40_000),
+            (10e3, 40_000),
+        ] {
+            let x = filter_scene(n, fs, pass);
+            let f = ChannelFilter::new(fs, pass).unwrap();
+            assert!(f.is_multirate(), "{pass}");
+            let mut y = Vec::new();
+            f.apply(&x, &mut y);
+            let (r, enbw_ref) = reference_filter(fs, pass, &x);
+            assert_eq!(y.len(), n);
+            let err = rel_error_db(&y, &r);
+            eprintln!(
+                "{pass} Hz: {} kernel taps, output differs by {err:.1} dB, ENBW {:.2} vs {enbw_ref:.2}",
+                f.taps_len(),
+                f.enbw_hz
+            );
+            assert!(err < -40.0, "{pass} Hz: output differs by {err:.1} dB");
+            assert!((f.enbw_hz / enbw_ref - 1.0).abs() < 0.01, "{pass} Hz ENBW");
+        }
     }
 }
