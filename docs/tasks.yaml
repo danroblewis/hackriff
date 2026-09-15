@@ -2175,7 +2175,7 @@ tasks:
   - id: T-138
     milestone: M2
     title: "Single new emitter on a quiet mature site: ADR-0012 §7 rule so one genuinely new emitter can alarm (today novelty -log10(p)/6 with the prior needs ~1.8 years of observation)"
-    status: todo
+    status: in-progress
     deps: [T-136]
     parallel_group: M2A
     use_cases: [AWARE-044, AWARE-027]

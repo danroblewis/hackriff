@@ -1304,3 +1304,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Product gap:** a single new emitter can never alarm (novelty -log10(p)/6 with the prior tops out around 0.5). That contradicts AWARE-044/027 intent. Coordinator decision: add T-138 (an ADR §7.1 quiet-site single-emitter rule) after T-136 rather than block. The user can override; this is recorded as an open question for them.
   - **Next:** fix round launched as a fresh Opus agent (the original was at 277k tokens). A full check after the T-135 merge and dev opt-level change is running.
 - **B0.352 T-137 launched** (baseline fold CPU and decay precision), running in parallel with the T-136 fix round (disjoint files) and T-124.
+- **B0.353 T-136 fix round done (f0b963b).**
+  - New-emitter scoring is per sighting group (200 kHz merge gap) against the whole site's expected count.
+  - Only fresh inputs are counted; immature suppressions are asserted `== 8`.
+  - Sighting state is kept per site, with a new test.
+  - A stale assignment row is deleted.
+  - The persist lag is documented.
+  - Tests: hk-pipeline 24, hk-context 29.
+  - T-136 merges after the T-135 full check.
+  - T-138 (single-emitter rule) launched on f0b963b.
