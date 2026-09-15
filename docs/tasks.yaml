@@ -2113,6 +2113,20 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-134
+    milestone: M2
+    title: "Sparse baseline slots (Jetson memory): store only observed hour-of-week slots or pool cells into channels for level stats"
+    status: todo
+    deps: [T-132]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-132 review 2026-09-15: dense GainSeries ~371-736 MB per key at 9.7k cells x 2 gain states; ADR budgets ~56 B/slot sparse vs ~115 B/slot dense"
+    acceptance: "baseline memory per key at 9.7k cells x 2 gain states measured and reduced to the ADR-0012 §9 budget (sparse slots and/or channel-pooled level stats); default memory cap then rarely refuses folds on a parked 48 h run; codec compatible; baseline/novelty tests unchanged"
+    area: crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"

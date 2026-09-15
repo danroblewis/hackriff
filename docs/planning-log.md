@@ -1201,3 +1201,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Checked OK:** RT safety (provenance read on the occupancy thread, no DB I/O in candidate publishing); unassigned/mobile build no baselines; no double-writes.
   - **Merge vs T-132:** one conflict at the `ingest_interval` call in occupancy.rs; keep T-131's site stamping and folds, and use T-132's `dominant_gain_key`. After merge, recheck `PoolContext.level` against T-132's level classes.
   - **Fix round launched.** T-124 acceptance now includes the alarm assertions the review listed: pre-matured baseline or ≥56 h scene, busier alarm on the injected channel, gain step explained, restart keeps site.
+- **B0.337 T-132 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. The memory cap is never wired in the pipeline, so memory stays unbounded (371–736 MB per key on a Jetson); refused folds also drop novelty scoring and are invisible.
+    2. Load outside the lock can resurrect a stale copy if an unload or eviction happens between plan and insert.
+    3. The gain key is per interval, but the gain table is per band.
+    4. The sequential CUSUM can gate learning on stationary channels: a 4-visit own-pool mean has standard error ≈ slack k, so hours can stay immature forever.
+  - **Checked OK:** v1 codec compatibility; save-drop fix; no double-insert; slow-creep relaxation is honest.
+  - **Fix round launched** (no merge; T-131 merges first, one trivial occupancy.rs conflict).
+  - **Follow-up T-134:** sparse baseline slots for Jetson memory.
