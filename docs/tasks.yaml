@@ -2027,7 +2027,7 @@ tasks:
     milestone: M2
     title: "M2 integration: wire occupancy levels into baselines, real providers into reports, candidates from inventory, first sightings, site/source history filters"
     status: review
-    commit: 0e2ce73
+    commit: 1c7256c
     deps: [T-118, T-119, T-121, T-127]
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
@@ -2076,7 +2076,7 @@ tasks:
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
     found_by: "T-128 report 2026-09-15"
-    acceptance: "history tiles record source+site (versioned, v1/v2 readable) with report/history filters + api.md/api_contract; GainSeries memory bounded with measured bound; per-slot change-point latch or documented auto re-freeze + test; sequential weak-interferer reference test with real levels; http.rs module-doc route rows; AlarmService::observe_fold called after ingest_occupancy with device steps carrying gain deltas; T-127 bandit-on e2e un-ignored; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarms raise for the injected emitter; report_scene.rs updated; compare_report direct test"
+    acceptance: "history tiles record source+site (versioned, v1/v2 readable) with report/history filters + api.md/api_contract; GainSeries memory bounded with measured bound; per-slot change-point latch or documented auto re-freeze + test; sequential weak-interferer reference test with real levels; http.rs module-doc route rows; AlarmService::observe_fold called after ingest_occupancy with device steps carrying gain deltas; T-127 bandit-on e2e un-ignored; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarms raise for the injected emitter; report_scene.rs updated; compare_report direct test; from T-128 fix round: replace report-only ChangeKind with AlarmKind (incl QuieterThanUsual); wire observe_fold from ingest_interval returned FoldOutcomes; per-gain-state key (hard-coded 0); low-FCO level-statistic bimodality; candidates when bandit off; Baselines load/insert split so load_site is outside the lock; make bandit_suspect_candidate_gets_one_verification_then_is_banned discriminating (fails when clip=false, using T-130 device-level overdrive)"
     area: crates/hk-store/src/history, crates/hk-context/src/occupancy/baseline.rs, crates/hk-pipeline (attention/alarms wiring), tests/e2e
     needs: none
     model: opus

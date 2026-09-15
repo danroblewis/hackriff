@@ -1152,3 +1152,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Regression checks:** hk-detect 124, hk-core 20, pipeline 4, acceptance aware/signal_062/inventory 19; lint clean.
 
   Coordinator: small, well-evidenced, test-infrastructure-scoped change, so it merges after the in-flight check (after T-122). T-128's suspect-ban test must be made discriminating in T-131.
+- **B0.326 T-128 fix round done** (1c7256c).
+  - **Class entropies:** refreshed by an `hk-attn-class` worker (row-limited query, ≥10 s apart, non-blocking request) so the control path does no DB I/O. Test: publish takes 0.05 ms while a refresh is blocked.
+  - **compare_report:** per 15-min row against its own slot, combined with Stouffer over √n_eff. A 24 h unchanged channel gives no change; busier z=+23.5; quieter z=−16.8. Report-only ChangeKind for now.
+  - **FCO rollup:** time-weighted, with the CI recomputed from summed n_eff (0.5 vs count-weighted 0.375).
+  - **Late first sightings:** now counted.
+  - **Other:** `ingest_interval` returns FoldOutcomes for the alarm hook; stale report contract assertion fixed.
+
+  Leftovers are folded into T-131. **Merge queue after the in-flight check:** T-122 → T-130 → T-128.
