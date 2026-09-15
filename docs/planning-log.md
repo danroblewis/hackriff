@@ -2084,3 +2084,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Follow-ups: pool rebuild cost on Jetson, MAX_CLEAN eviction counter, e2e assertion in `occupancy_sparse_visits`, f_cell source, ADR note.
   - **T-167 committed (eb63567):** spectrum header carries `dc_excluded_hz`, taken from `DC_NOTCH_HALF_HZ` (DcRule tolerance); docs, stream-contract and api_contract updated; UI prefers the header value.
   - **Merge queue once main is green:** T-174, T-167.
+- **B0.450 Full check after the hk-sim fix: hk-sim now passes.**
+  - **New failure:** `hk-store decoded::tests::rolls_segments_and_evicts_oldest_first_within_quota` hit a load flake. Under load it read the last record as 1566 against 1999 after 5.3 s; alone it passes 3/3 in 0.1 s. The code is unchanged since T-092.
+  - **Cost:** nextest fail-fast stopped at 1264/1365; acceptance passed 28/28.
+  - **Fix:** pinned the test to heavy-serial with one retry; T-182 will make it deterministic.
+  - **Next:** full check re-running.

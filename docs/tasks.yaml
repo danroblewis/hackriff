@@ -2878,3 +2878,17 @@ notes:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-182
+    milestone: M2-hardening
+    title: "Deterministic decoded-capture roll/evict test: wait for the async recorder flush (or a synchronous flush hook) instead of reading the tail immediately"
+    status: todo
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "full check 2026-09-15: hk-store decoded::tests::rolls_segments_and_evicts_oldest_first_within_quota read last record 1566 vs 1999 under load (5.3 s); passes 3/3 alone in 0.1 s; pinned heavy-serial + retries=1 meanwhile"
+    acceptance: "test waits on an explicit flush/drain condition with a deadline; passes 20/20 under parallel load; nextest pin removed"
+    area: crates/hk-store/src/decoded.rs
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
