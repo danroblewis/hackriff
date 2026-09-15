@@ -2162,7 +2162,8 @@ tasks:
   - id: T-137
     milestone: M2
     title: "Baseline fold CPU + decay precision: compute Reference pools once per fold, lazy f64 decay multiplier per series, field accessors, stronger golden re-encode check"
-    status: review
+    status: done
+    commit: c1dd979
     deps: [T-135]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2201,6 +2202,21 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+  - id: T-140
+    milestone: M2
+    title: "Baseline hardening nits: SlotSeries packed()/packed_at() not public without the decay multiplier, assert the fold-equivalence fingerprint (reference-fold count exact, novelty sum 1e-9), debug_assert finite decay factor, share pool membership helper"
+    status: todo
+    deps: [T-137]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-137 review 2026-09-15 (MERGE): hk-store baseline/mod.rs:482-491 public packed moments skip the lazy multiplier; baseline.rs:3082-3166 equivalence only printed; mod.rs:533-547 NaN factor; baseline.rs:622-684 duplicated skip/membership"
+    acceptance: "packed accessors pub(crate) or multiplier-applying; fingerprint asserted for quiet and changed cells; debug_assert on factor; one membership helper; baseline tests green"
+    area: crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"

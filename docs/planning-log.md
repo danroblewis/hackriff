@@ -1336,3 +1336,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Gates:** a suspect sighting disqualifies; only named, mature sites qualify; pending sightings kept 7 days, max 512.
   - **Tests:** quiet site alarms (novelty 0.744); busy site (0.067), transient and suspect do not; immature is counted.
   - **Merge risk:** T-138 touches `occupancy.rs`, so expect a conflict with T-139.
+- **B0.358 T-136 full check green; T-137 merged.**
+  - **T-136 full check:** lint clean, 1375/1375 tests, acceptance 32/32 (67 s).
+  - **T-137 review: MERGE, no bugs.**
+    - Single Reference read is correct: auto-refreeze runs before the read, and accrue after it.
+    - Pool spans match `in_pool` in the same order.
+    - The lazy multiplier is applied on every read and encode path; byte accounting is unaffected.
+    - The timing test is print-only.
+  - **Nits → T-140 (Sonnet, reviewed by the coordinator):** public packed accessors skip the multiplier; the equivalence fingerprint is printed rather than asserted; no NaN guard; duplicated helpers.
+  - T-137 merged; full check started.
