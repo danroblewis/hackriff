@@ -2385,3 +2385,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Nudged anyway** with: foreground runs only, never end a turn waiting, and commit WIP plus a handoff at the context budget.
   - **T-223 corrected:** its failure is intermittent, so a single passing run proves nothing; the fix must pass 10/10 under 6 CPU burners.
   - **Method note:** a seeded worktree target keeps main's mtimes, so target mtime is not a liveness signal; transcript mtime plus queued-message acceptance is.
+- **B0.499 Correction to B0.498's method note.** The nudges worked: 12 cargo/rustc processes and load 26.6 (from 14), so all four agents resumed building.
+  - **Wrong heuristic, do not reuse:** the task .output paths are SYMLINKS, and stat reads the link itself, so their mtimes never change and say nothing about liveness. They were identical before and during heavy building.
+  - **Reliable liveness signals:** whether SendMessage reports the message queued for the agent's next tool round (a live agent), plus cargo/rustc process count and load average. Never read a task .output file for a local agent; it is the full transcript and will overflow the coordinator's context.
