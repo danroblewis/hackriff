@@ -839,3 +839,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
   Launched 4 agents: T-113, T-114, T-116, T-117. Demo-relevant work stays mergeable per task. The UI rewrite and M1 review are pending with the user and don't block M2. Existing scheduler: WRR with a placeholder interestingness (hk-core scheduler/mod.rs); the bandit is an ADR TODO. No occupancy code exists yet.
 - **B0.279 Full check of main 17f7561 (T-112, end of M1): green.** Lint clean; nextest + UI 1138/1138 in 257 s; acceptance 29/29 (2 ignored HIL) in 61 s. M1 closes on a verified main.
+- **B0.280 T-117 merged** (4a34de5; py only). New scenario `occupancy_markov_scene`, 48 h default:
+  - 4 Markov channels at FCO 1/10/50/100%;
+  - an hour-of-week channel;
+  - novelty at hour 30;
+  - 00Z/12Z events;
+  - a boring band.
+
+  Truth is exact interval arithmetic. An irregular observation schedule gives sampled FCO with a Wilson CI. Only a few short IQ windows are rendered on demand (~0.03 s, ~620 KiB). No Rust plumbing was needed. py suite 82 passed / 2 skipped. Note for T-118/T-124: mock-SDR replay of observation windows needs harness support for the scene's observation schedule.
