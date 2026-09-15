@@ -278,9 +278,56 @@ printf 'open/bits?token=%s\n' "$HK_TOKEN" | nc 127.0.0.1 8788 | xxd | head -40
 
 Python clients (standard library only): `py/examples/` (`hkstream.py`, `hk_bits.py`, `hk_audio_wav.py`), documented in `py/README.md`.
 
+## Recipes and pipelines (T-088, M1; ADR-0011 §2.3–§2.5)
+
+A **recipe** is a decoder as data (`hk_recipe::Recipe`, JSON; ADR-0011 §2). A **pipeline** runs one recipe as a chain on the running capture: one ring reader, a channel DDC to `input.sample_rate_hz`, and the recipe's block graph. Pipelines are admitted as `recipe` chains in the run's on-demand chain budget (`/api/status` `budget`), are hot-edited without stopping capture, and serve their outputs over the stream contract (§14). All signal logic is in `hk_pipeline::recipes`; these routes only route, audit and shape errors (`crates/hk-api/src/recipes.rs`).
+
+Conventions:
+- **Bodies.** Recipe bodies are the recipe documents themselves (64 KiB body cap). Unknown fields are errors.
+- **Validation errors.** `400 invalid` with `{error, code, errors: [{path, message}], warnings}`. Messages never echo values.
+- **Storage.** Built-in recipes are `recipes/*.recipe.json` (read-only; `$HK_RECIPES_DIR` overrides the directory). Saved versions are files `<data dir>/recipes/<id>/<version>.json`. A save always writes `latest + 1` (the built-in version counts), and a saved version is immutable.
+- **Targets.** A pipeline attaches to what the user names: `{emitter_id}` (an inventory entry's measured centre and bandwidth), `{selection_id}` (a persisted selection's extent) or `{band: {f_lo, f_hi}}`. `{capture_id}` answers 422 until T-092. Recipe `match` hints never tune anything.
+- **Class.** A pipeline's streams carry `clamp(source class of the channel, recipe output_policy.content_class)`. Under a class that forbids content, frame bytes and layers are withheld and metadata is reduced to the §14.2 keys the recipe's `metadata_keys` names.
+- **Audit.** Mutating routes are audited (`recipe_save`, `recipe_validate`, `recipe_delete`, `pipeline_start`, `pipeline_edit`, `pipeline_save`, `pipeline_stop`) with ids and revisions, not whole documents.
+
+| Method | Path | Body | Answers |
+|---|---|---|---|
+| GET | `/api/blocks` | – | `{"blocks": [BlockDescriptor]}`: `name`, `version`, `group`, `doc`, `inputs`/`outputs` (`{name, types, diagnostic}`), `params` (`{name, type, required, default, hot, doc}`), `params_pinned` |
+| GET | `/api/recipes` | – | `{"recipes": [{id, name, version (latest), versions, builtin, builtin_version, description, match, input: {port}}]}` by id |
+| POST | `/api/recipes` | recipe document | 201 `{id, version, warnings, recipe}`: saved as `latest + 1` after validation against `/api/blocks` |
+| POST | `/api/recipes/validate` | recipe document | 200 `{valid, errors, warnings, edges: [{node, port, from ("input" \| "node.port"), type}]}`. Nothing is saved. |
+| GET | `/api/recipes/{id}` | – | the latest version's document; 404 `not_found` |
+| GET | `/api/recipes/{id}/versions/{version}` | – | that version's document |
+| DELETE | `/api/recipes/{id}` | – | `{id, deleted_versions}`: every saved (user) version; 409 `conflict` when only a built-in exists |
+| POST | `/api/pipelines` | `{recipe_id, version?, target}` or `{recipe, target}` (an unsaved draft) | 201 the pipeline (below). Refusals: 400 `invalid` (with paths), 404 unknown recipe/target, 409 `outside_window` (the channel is not inside the tuned window), 422 `unrealisable` / `unsupported_input` (non-`iq` input, `follow-hops` until T-093, a capture target until T-092), 503 `busy` (chain budget; running chains untouched), 503 `unavailable` (re-plumbing), 410 `source_ended` |
+| GET | `/api/pipelines` | – | `{"pipelines": [pipeline]}` |
+| GET | `/api/pipelines/{id}` | – | the pipeline |
+| PUT | `/api/pipelines/{id}/recipe` | draft recipe document (same `id`) | 200 `{id, edit_rev, applied_at_sample, plan, swap: {rebuilt, reset, updated, kept}, warnings}`. An invalid draft is 400 and the running revision is untouched; 409 `ended`; 504 `timeout` (no chunk boundary within 10 s; nothing changed) |
+| POST | `/api/pipelines/{id}/save` | – | 201 `{id, version, pipeline_id}`: the running revision saved as the recipe's next version |
+| DELETE | `/api/pipelines/{id}` | – | `{"stopped": pipeline}`: the pipeline stops and its streams finish |
+
+**Pipeline** JSON: `id` (`p<n>`), `recipe_id`, `recipe_version`, `edit_rev` (0 = as started), `state` (`running` \| `ended`), `end_reason` (`stopped`, `source-ended`, `segment-ended`, `retune: …`, `rate-change: …`, `error: node <id>: …`), `target`, `channel: {center_hz, bandwidth_hz, sample_rate_hz}`, `content_class`, `emitter_id`, `started` (Unix s), `nodes: [{id, block, outputs}]` (topological order), `outputs: [{id, kind (inspector \| stage), stream_id}]`, `status` (the latest status tick: flat `<node>.<metric>` keys, ADR-0011 §1.3), `stats: {samples, chunks, frames, gaps, discontinuities, skipped_samples, edits, status_ticks}`, `warnings`.
+
+**Hot edit** (ADR-0011 §2.3). The draft is a whole recipe document. The server plans it against the running revision (`plan.nodes[]`: `{id, change: unchanged | params-hot | params-cold | rebuilt | added | removed, keys?}`, `plan.reset`, `plan.field_maps_changed`, `plan.input_changed`, `plan.outputs_changed`). It builds new instances off the pipeline thread, which swaps graphs at its next chunk boundary.
+- Unchanged nodes keep their state. Hot parameters, field-map content included, apply in place. Nodes downstream of a rebuilt node are reset.
+- The ring reader never moves, so no sample is lost and capture never pauses.
+- An `input` edit re-plumbs the channel DDC and rebuilds every node.
+- Unchanged outputs keep their streams and consumers. Changed outputs get new streams, and removed ones finish.
+- An `edit` record marks the boundary on every inspector stream, and later frames carry the new `edit_rev`. Edits don't save: use `POST /api/pipelines/{id}/save`.
+
+**Streams of a pipeline** (stream contract §14; discovery lists them under `/api/streams`):
+
+| Stream | How to open | Carries |
+|---|---|---|
+| `inspector/<pipeline>/<output>` | `GET /ws/inspector/<pipeline>/<output>` (the `/ws/{stream_id}` route), TCP `inspector/<pipeline>/<output>?token=…`, or the opener `GET /ws/open/inspector?pipeline=<id>[&output=<id>]` / TCP `open/inspector?…` (first inspector output by default) | messages stream, `message_schema: hackriff.inspector/1`: one frame record per frame, one `status` record per ~250 ms tick (every node batched), one `edit` record per applied edit |
+| `stage/<pipeline>/<output>` | `/ws/stage/<pipeline>/<output>` or TCP (a recipe's declared `stage` outputs) | §14.4 binary records, one per processed chunk |
+| on-demand stage tap | `GET /ws/open/stage?pipeline=<id>&node=<node>[&port=<port>][&view=raw]` / TCP `open/stage?…` | any node port: `iq` → `iq`/`cf32_le`, `real` → `audio`/`rf32_le`, `soft` → `symbols`/`rf32_le`, `bits` → `bits`/`ru8`, `frames` → frame records. The tap costs nothing until opened and stops when the consumer leaves. 404 unknown pipeline/node/port, 410 ended, 422 `view=spectrum` (not served yet) |
+
+**Interim record framing (until T-089).** Until `Publisher::publish_frame` lands, frame, status and edit records ride as §6 message records (`"type": "message"`) through the same gate. `metadata.record` names the §14 record type (`frame` \| `status` \| `edit`), and the other §14.2 fields keep their names: `crc_status`, `decoder`, `frame_model`, `metadata.{frame, sample_index, channel, channel_hz, bit_len, recipe_version, edit_rev, fec_corrected_bits, fit}`, `content.{hex, layers}`. Readers should accept either framing.
+
 ## Decoder workbench (planned, M1; ADR-0011)
 
-**Planned, not served yet.** None of these routes are in `ROUTES` today. They are named here so the parallel M1 tasks and the inspector UI (T-090) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+**Planned, not served yet.** None of these routes are in `ROUTES` today (the served T-088 routes moved to "Recipes and pipelines" above). They are named here so the parallel M1 tasks and the inspector UI (T-090) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
 - **Contracts:** [ADR-0011](adr/0011-decoder-workbench-contracts.md).
 - **Schemas:** `hk_recipe` (recipe, field map, block descriptor types).
 - **Wire formats:** [`docs/stream-contract.md` §14](stream-contract.md) (inspector frame records, stage streams, recorded decoded streams).
@@ -293,18 +340,7 @@ Conventions:
 
 | Method | Path | Owner | Purpose |
 |---|---|---|---|
-| GET | `/api/blocks` | T-088 | Block catalogue: every `BlockDescriptor` (ports, parameter schemas with `hot` flags, docs) |
-| GET | `/api/recipes` | T-088 | Recipes: `id`, `name`, latest `version`, all versions, `match` hints, built-in or user |
-| GET | `/api/recipes/{id}` | T-088 | The latest version, or `?version=<n>` |
-| POST | `/api/recipes` | T-088 | Save a recipe as a new version (`latest + 1`; saved versions are immutable) |
-| POST | `/api/recipes/validate` | T-088 | Validate without saving: `{valid, errors, warnings, edges}` |
 | GET | `/api/recipes/match` | T-088 | `?emitter=<id>`: recipes ranked against the emitter's measured family, bandwidth, symbol rate, burstiness and features, with reasons |
-| POST | `/api/pipelines` | T-088 | Run `{recipe_id, version?, target: {emitter_id} \| {selection_id} \| {band: {f_lo, f_hi}} \| {capture_id}}` → the pipeline (`503 busy` at the chain budget) |
-| GET | `/api/pipelines` | T-088 | Running pipelines with their revision, per-node status and output stream ids |
-| GET | `/api/pipelines/{id}` | T-088 | One pipeline |
-| PUT | `/api/pipelines/{id}/recipe` | T-088 | Hot edit: the draft recipe document → `{edit_rev, plan, applied_at_sample}`. Capture never stops; an invalid draft leaves the running revision untouched. |
-| POST | `/api/pipelines/{id}/save` | T-088 | Save the running revision as the recipe's next version |
-| DELETE | `/api/pipelines/{id}` | T-088 | Stop a pipeline (its streams finish) |
 | GET | `/api/captures` | T-092 | Recorded decoded streams: pipeline, recipe revision, output, span, frames, bytes |
 | GET | `/api/captures/{id}/frames` | T-092 | `?from_frame&limit` (≤ 500): stored frame records |
 | POST | `/api/captures/{id}/parse` | T-089 | Re-parse `{field_map, from_frame?, limit?}` → frames with layer trees + `fit` summary (ok/partial/failed, errors by path) |
@@ -312,8 +348,6 @@ Conventions:
 | POST | `/api/assist/fields` | T-091 | Entropy-based field-boundary suggestions as field-map fragments, scored |
 | POST | `/api/assist/crc` | T-091 | CRC/BCH parameter search over a capture's frames → `crc`/`bch` parameter objects, scored |
 | GET | `/ws/open/inspector` | T-089 | `?pipeline=<id>[&output=<id>]` or `?capture=<id>[&from_frame][&field_map=<recipe_id>@<version>:<map_id>]`: an inspector stream (§14.8). TCP: `open/inspector?…` |
-| GET | `/ws/open/stage` | T-088 | `?pipeline=<id>&node=<node>[&port=<port>][&view=raw\|spectrum]`: a stage stream (§14.4). TCP: `open/stage?…` |
-| GET | `/ws/inspector/{pipeline_id}/{output_id}` | T-088 | The always-on inspector stream of a running pipeline output (`/ws/{stream_id}` form) |
 
 Assist suggestions are never applied automatically: the user accepts or edits them into a recipe, which then goes through `POST /api/recipes/validate`.
 

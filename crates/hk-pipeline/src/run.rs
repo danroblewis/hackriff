@@ -815,6 +815,7 @@ impl Pipeline {
             sup,
             thread: Some(thread),
             started: Instant::now(),
+            recipes: std::sync::OnceLock::new(),
         })
     }
 }
@@ -1353,6 +1354,8 @@ pub struct PipelineHandle {
     sup: Arc<Supervisor>,
     thread: Option<JoinHandle<Finished>>,
     started: Instant,
+    /// The run's recipe runtime (T-088), created on first use.
+    recipes: std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>,
 }
 
 /// Detection resolution of the run.
@@ -1676,6 +1679,32 @@ impl PipelineHandle {
             self.listen_service(),
             self.sup.common.data_dir.clone(),
         ))
+    }
+
+    /// The decoder-workbench recipe runtime (T-088, ADR-0011): runs, hot-edits and stores
+    /// recipes as chains on this run, and serves their `stage` and `inspector` streams. One
+    /// instance per run (later calls return the same). Built-in recipes come from
+    /// `$HK_RECIPES_DIR` or the repository's `recipes/`; user versions live in
+    /// `<data dir>/recipes/`.
+    pub fn recipe_runtime(&self) -> Arc<crate::recipes::runtime::RecipeRuntime> {
+        Arc::clone(self.recipes.get_or_init(|| {
+            let sup = Arc::clone(&self.sup);
+            let builtin = std::env::var_os("HK_RECIPES_DIR")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes"))
+                        .filter(|p| p.is_dir())
+                });
+            Arc::new(crate::recipes::runtime::RecipeRuntime::new(
+                Arc::clone(&self.sup.common.counters),
+                Arc::new(move || sup.lock().shared.clone()),
+                Arc::clone(&self.sup.common.listen),
+                crate::recipes::store::RecipeStore::new(
+                    builtin,
+                    self.sup.common.data_dir.join("recipes"),
+                ),
+            ))
+        }))
     }
 
     /// The newest ring sample index.

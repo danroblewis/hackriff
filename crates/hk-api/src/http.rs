@@ -111,7 +111,19 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/ws/open/{name}"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
-
+    ("GET", "/api/blocks"),
+    ("GET", "/api/recipes"),
+    ("POST", "/api/recipes"),
+    ("POST", "/api/recipes/validate"),
+    ("GET", "/api/recipes/{id}"),
+    ("DELETE", "/api/recipes/{id}"),
+    ("GET", "/api/recipes/{id}/versions/{version}"),
+    ("GET", "/api/pipelines"),
+    ("POST", "/api/pipelines"),
+    ("GET", "/api/pipelines/{id}"),
+    ("DELETE", "/api/pipelines/{id}"),
+    ("PUT", "/api/pipelines/{id}/recipe"),
+    ("POST", "/api/pipelines/{id}/save"),
     // T-089 inspector
 
     // T-091 assist
@@ -186,6 +198,8 @@ pub struct ApiState {
     pub on_demand: hk_stream::OpenerRegistry,
     /// Output recordings (T-061, [`crate::outputs`]); `None` answers 503.
     pub outputs: Option<Arc<dyn crate::outputs::OutputControl>>,
+    /// Decoder-workbench recipe runtime (T-088, [`crate::recipes`]); `None` answers 503.
+    pub recipes: Option<Arc<dyn crate::recipes::RecipeControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

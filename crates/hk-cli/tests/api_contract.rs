@@ -941,6 +941,219 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
 // --- Decoder workbench (ADR-0011 §7): each task appends its test fns under its own marker ---
 // T-088 recipes and pipelines
 
+/// T-088: `/api/blocks`, `/api/recipes[...]`, `/api/pipelines[...]` and the `stage` opener, as
+/// `docs/api.md` "Recipes and pipelines" documents them, on the mock device's FM window.
+#[test]
+fn recipe_and_pipeline_routes_match_the_documented_shapes() {
+    let (serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    let rid = "t088-contract";
+
+    let (st, v) = get(addr, "/api/blocks");
+    assert_eq!(st, 200, "{v}");
+    let identity = v["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "identity")
+        .cloned()
+        .expect("the identity block is in the catalogue");
+    for k in ["version", "group", "doc", "inputs", "outputs", "params"] {
+        assert!(!identity[k].is_null(), "{k}: {identity}");
+    }
+
+    let doc = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": rid, "version": 1,
+        "name": "T-088 contract",
+        "input": {"port": "iq", "sample_rate_hz": 240000.0, "bandwidth_hz": 200000.0},
+        "nodes": [{"id": "a", "block": "identity"}],
+        "outputs": [{"id": "base", "kind": "stage", "from": "a"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let mut bad = doc.clone();
+    bad["nodes"][0]["block"] = json!("no_such_block");
+
+    // Validate: 200 either way, with paths.
+    let (st, v) = post(addr, "/api/recipes/validate", &doc.to_string());
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["valid"], json!(true));
+    assert_eq!(
+        v["edges"][0],
+        json!({"node": "a", "port": "in", "from": "input", "type": "iq"})
+    );
+    let (st, v) = post(addr, "/api/recipes/validate", &bad.to_string());
+    assert_eq!((st, &v["valid"]), (200, &json!(false)), "{v}");
+    assert_eq!(v["errors"][0]["path"], json!("nodes[0].block"));
+
+    // Save: invalid 400 with paths; valid 201 as latest + 1.
+    let (st, v) = post(addr, "/api/recipes", &bad.to_string());
+    assert_eq!((st, &v["code"]), (400, &json!("invalid")), "{v}");
+    assert!(v["errors"].is_array() && v["warnings"].is_array(), "{v}");
+    for want in [1, 2] {
+        let (st, v) = post(addr, "/api/recipes", &doc.to_string());
+        assert_eq!(st, 201, "{v}");
+        assert_eq!((&v["id"], &v["version"]), (&json!(rid), &json!(want)));
+    }
+    let (st, v) = get(addr, "/api/recipes");
+    assert_eq!(st, 200);
+    let mine = v["recipes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == rid)
+        .cloned()
+        .unwrap();
+    assert_eq!(mine["versions"], json!([1, 2]));
+    assert_eq!(mine["builtin"], json!(false));
+    assert!(
+        v["recipes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == "rds" && r["builtin"] == json!(true)),
+        "built-in recipes are listed: {v}"
+    );
+    let (st, v) = get(addr, &format!("/api/recipes/{rid}"));
+    assert_eq!((st, &v["version"]), (200, &json!(2)), "{v}");
+    let (st, v) = get(addr, &format!("/api/recipes/{rid}/versions/1"));
+    assert_eq!((st, &v["version"]), (200, &json!(1)), "{v}");
+    let (st, v) = get(addr, "/api/recipes/no-such-recipe");
+    assert_eq!((st, &v["code"]), (404, &json!("not_found")), "{v}");
+
+    // Start on the station's band: 201 with the documented pipeline shape.
+    let start = json!({"recipe_id": rid,
+        "target": {"band": {"f_lo": STATION_HZ - 100e3, "f_hi": STATION_HZ + 100e3}}});
+    let (st, p) = post(addr, "/api/pipelines", &start.to_string());
+    assert_eq!(st, 201, "{p}");
+    let pid = p["id"].as_str().unwrap().to_owned();
+    assert_eq!(p["state"], json!("running"));
+    assert_eq!(
+        (&p["recipe_version"], &p["edit_rev"]),
+        (&json!(2), &json!(0))
+    );
+    assert!(
+        (p["channel"]["sample_rate_hz"].as_f64().unwrap() - 240e3).abs() < 1.0,
+        "{p}"
+    );
+    assert_eq!(
+        p["outputs"][0]["stream_id"],
+        json!(format!("stage/{pid}/base"))
+    );
+    assert_eq!(p["nodes"][0]["id"], json!("a"));
+    assert!(p["stats"].is_object() && p["status"].is_object() && p["target"]["band"].is_object());
+    let (st, v) = get(addr, "/api/pipelines");
+    assert_eq!(st, 200);
+    assert!(
+        v["pipelines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == json!(pid))
+    );
+    let (st, _) = get(addr, &format!("/api/pipelines/{pid}"));
+    assert_eq!(st, 200);
+    let (st, v) = post(
+        addr,
+        "/api/pipelines",
+        &json!({"recipe_id": rid, "target": {"band": {"f_lo": 90e6, "f_hi": 90.1e6}}}).to_string(),
+    );
+    assert_eq!((st, &v["code"]), (409, &json!("outside_window")), "{v}");
+
+    // A stage tap over WebSocket: iq header, then data records.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=a"),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("header first")
+    };
+    let header: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(
+        (&header["kind"], &header["datatype"]),
+        (&json!("iq"), &json!("cf32_le"))
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(Instant::now() < deadline, "a stage data record");
+        if let Message::Binary(_) = ws.read().unwrap() {
+            break;
+        }
+    }
+    let _ = ws.close(None);
+
+    // Hot edit: a node added; an invalid draft leaves the revision untouched.
+    let mut edited = doc.clone();
+    edited["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "b", "block": "identity"}));
+    let (st, v) = put(
+        addr,
+        &format!("/api/pipelines/{pid}/recipe"),
+        &edited.to_string(),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["edit_rev"], json!(1));
+    assert!(v["applied_at_sample"].is_u64(), "{v}");
+    assert!(
+        v["plan"]["nodes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"id": "b", "change": "added"})),
+        "{v}"
+    );
+    assert!(v["swap"]["rebuilt"].is_u64());
+    let (st, v) = put(
+        addr,
+        &format!("/api/pipelines/{pid}/recipe"),
+        &bad.to_string(),
+    );
+    assert_eq!((st, &v["code"]), (400, &json!("invalid")), "{v}");
+    assert_eq!(
+        get(addr, &format!("/api/pipelines/{pid}")).1["edit_rev"],
+        json!(1)
+    );
+
+    // Save the running revision; stop; delete.
+    let (st, v) = post(addr, &format!("/api/pipelines/{pid}/save"), "");
+    assert_eq!((st, &v["version"]), (201, &json!(3)), "{v}");
+    let (st, v) = call(
+        addr,
+        "DELETE",
+        &format!("/api/pipelines/{pid}"),
+        Some(&bearer),
+        None,
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["stopped"]["state"], json!("ended"));
+    let (st, _) = get(addr, &format!("/api/pipelines/{pid}"));
+    assert_eq!(st, 404);
+    let (st, v) = call(
+        addr,
+        "DELETE",
+        &format!("/api/recipes/{rid}"),
+        Some(&bearer),
+        None,
+    );
+    assert_eq!(
+        (st, &v["deleted_versions"]),
+        (200, &json!([1, 2, 3])),
+        "{v}"
+    );
+
+    // Mutations need the bearer header.
+    let (st, _) = call(
+        addr,
+        "POST",
+        "/api/pipelines",
+        None,
+        Some(&start.to_string()),
+    );
+    assert_eq!(st, 401);
+    stop_server(serving);
+}
+
 // T-089 inspector
 
 // T-091 assist
