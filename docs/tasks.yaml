@@ -1284,6 +1284,7 @@ tasks:
     use_cases: []
     requested_by: user 2026-09-14 (start of message truncated; scope inferred from visible part)
     acceptance: "parallel runner (cargo-nextest preferred, pinned) with serial/limited groups for tests/e2e, hk-pipeline listen/refine/stream tests, hk-api/hk-cli server tests and acceptance; doctests still run; just test-seq fallback; CI updated; CLAUDE.md Build/test/run updated; wall time vs 914 s sequential cargo test baseline reported with load; heavy groups 5x flake check clean (retries only for documented timing-sensitive tests, reported)"
+    scope_addition: "supervisor 2026-09-14: sccache hits only with identical target path (0 across dirs); add just seed-target <dir> (APFS clone cp -c -R of main target, ~4 s, no extra disk; only 11 workspace crates recompile, deps reused) and the seeding step in CLAUDE.md worktree launch; keep CARGO_INCREMENTAL=0 per worktree; sccache stays on"
     area: .config/nextest.toml, justfile, .github/workflows/ci.yml, CLAUDE.md (Build/test/run)
     needs: none
     model: sonnet

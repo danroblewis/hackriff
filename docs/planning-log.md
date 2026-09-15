@@ -497,3 +497,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Models:** Opus at medium effort unless the work is real-time, novel DSP or hard debugging; Sonnet is the default off the real-time path.
   - **Applied now:** T-075, T-076 and T-077 received the rules (T-077 aligns the runner and CLAUDE.md with them). Saved to coordinator memory; future briefs follow them.
   - **Also:** T-071 merged; full verification running.
+- **B0.170 Supervisor correction on build caching.**
+  - **Finding:** sccache only hits with an identical target path, so it doesn't help new worktrees; it stays on since it is harmless.
+  - **What works:** seed each new worktree target with an APFS clone of main's target (`cp -c -R`, about 4 s, no extra disk). Only the 11 workspace crates then recompile; all dependencies are reused.
+  - **Actions:**
+    - T-077 adds `just seed-target <dir>` and the CLAUDE.md worktree-launch step.
+    - Every agent brief from now on starts with the seed step.
+    - Coordinator verification moves back to main's `target/` so it stays warm as the seed; agents no longer build there.
+    - Coordinator memory updated.
