@@ -1726,3 +1726,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-172: twin search O(DC × clean) → time-bounded; slack from `t_cell_ns`; twin must be off its own tuning's DC; ADR wording.
     - T-173: scheduler hops guarantee an off-DC view.
     - T-174: the live candidate path (`detect.rs:458`) uses the twin rule.
+- **B0.402 T-150 committed (7df8129, Sonnet).** Coordinator check passed: diff confined to shell, dock and capture plus one line in base.css; npm test 173 passed, 0 failed (exit 0).
+  - **Outputs dock:** implements `dock/api.ts` (`startListen` / `startRecordsOutput` / `stopOutput`) plus a multi-stream `AudioSession` that reuses the worklet.
+  - **Capture timeline:** activity band from `/api/history`; scrubbing writes the time cursor.
+  - **Gap 1 (no rolling buffer):** the timeline shows observed_fraction and an interim "Record IQ" button rather than invented buffer numbers.
+  - **Review badge:** polls `/api/anomalies`.
+  - **Bundle:** app.js 36.9 KB (14.6 KB gzip).
+  - **Merge:** after the T-170 full check.
+  - **T-153** (Decode workbench, Sonnet) launched.

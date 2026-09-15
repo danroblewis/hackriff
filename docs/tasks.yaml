@@ -2379,7 +2379,8 @@ notes:
   - id: T-150
     milestone: MUI
     title: "MUI shell: top bar with Explore/Decode mode toggle, layout grid, Outputs dock (live audio + record streams: meter/rate, mute, copy address, stop; Listen adds a stream) and always-on Capture timeline (scrub, reviewing N ago / LIVE)"
-    status: in-progress
+    status: review
+    commit: 7df8129
     deps: [T-149]
     parallel_group: MUI-SHELL
     use_cases: []
@@ -2424,7 +2425,7 @@ notes:
   - id: T-153
     milestone: MUI
     title: "MUI Decode workbench: pipelines list (parallel, hop-following), selected recipe stages, blocks palette, per-stage plots (MPX/subcarrier, eye, timing, constellation, sync search, group/frame counts, channel map), stage parameters with blind-estimate Use suggestions and live quality"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-DECODE
     use_cases: []
