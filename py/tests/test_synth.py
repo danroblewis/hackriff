@@ -428,6 +428,22 @@ def decode_rds(x: np.ndarray, fs: float) -> dict:
             "ps": "".join(ps[k] for k in range(4)) if len(ps) == 4 else None}
 
 
+def test_fm_rds_radiotext_groups_carry_the_text(tmp_path):
+    text = "HACKRIFF TUTORIAL 1 - RDS BUILT FROM BLOCKS"
+    _, meta, _ = load(gen(tmp_path, "fm_broadcast_rds", duration_s=1.5, radiotext=text))
+    [(_, t)] = truths(meta, kind="wfm-broadcast")
+    assert t["rds"]["group_types"] == ["0A", "2A"] and t["rds"]["radiotext"] == text
+    blocks = [int(b, 16) for b in t["rds"]["blocks_hex"]]
+    segments = {}
+    for g in range(0, len(blocks) - 3, 4):
+        assert [rds_syndrome(blocks[g + k]) for k in range(4)] == [RDS_SYNDROMES[o] for o in "ABCD"]
+        b2 = blocks[g + 1] >> 10
+        if b2 >> 12 == 2:
+            c, d = blocks[g + 2] >> 10, blocks[g + 3] >> 10
+            segments[b2 & 15] = bytes([c >> 8, c & 0xFF, d >> 8, d & 0xFF])
+    assert b"".join(segments[k] for k in sorted(segments)).split(b"\r")[0].decode() == text
+
+
 @pytest.mark.parametrize("extra", [{}, {"offset_hz": 40e3, "lo_ppm": 3.0, "iq_gain_db": 0.3}])
 def test_fm_rds_pi_and_ps_recoverable(tmp_path, extra):
     _, meta, x = load(gen(tmp_path, "fm_broadcast_rds", **extra))

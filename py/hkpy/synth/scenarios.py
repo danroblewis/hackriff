@@ -383,6 +383,8 @@ FM_DEFAULTS: dict[str, Any] = {
     "stereo_deviation_hz": 30000.0,
     "pilot_deviation_hz": 6750.0,
     "rds_deviation_hz": 2000.0,
+    # RadioText (group 2A, up to 64 characters; T-094). Empty: PS groups only.
+    "radiotext": "",
     "calibration_k_db": -70.0,
     "start_utc": DEFAULT_START_UTC,
 }
@@ -406,10 +408,17 @@ def fm_broadcast_rds(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         mpx += float(p["stereo_deviation_hz"]) * (left - right) / 2 * np.sin(2 * w_pilot)
     pi = int(p["pi_hex"], 16)
     n_groups = int(math.ceil(n / fs * rds.BITRATE_BD / 104)) + 1
+    # One cycle: PS segments 0-3 (0A), then every RadioText segment (2A) when there is text.
+    rt = str(p["radiotext"] or "")
+    cycle = [("0A", s) for s in range(4)] + [("2A", s) for s in range(len(rds.radiotext_codes(rt)) // 4 if rt else 0)]
     blocks: list[int] = []
     for g in range(n_groups):
-        blocks += rds.group_0a(pi, p["ps"], g % 4, pty=int(p["pty"]), tp=bool(p["tp"]),
-                               ta=bool(p["ta"]), music=bool(p["music"]), di=int(p["di"]))
+        kind, seg = cycle[g % len(cycle)]
+        if kind == "0A":
+            blocks += rds.group_0a(pi, p["ps"], seg, pty=int(p["pty"]), tp=bool(p["tp"]),
+                                   ta=bool(p["ta"]), music=bool(p["music"]), di=int(p["di"]))
+        else:
+            blocks += rds.group_2a(pi, rt, seg, pty=int(p["pty"]), tp=bool(p["tp"]))
     dbits = rds.differential(rds.blocks_to_bits(blocks))
     bb = rds.biphase_baseband(dbits, fs)[:n]
     mpx += float(p["rds_deviation_hz"]) * bb * np.sin(3 * w_pilot)
@@ -422,7 +431,9 @@ def fm_broadcast_rds(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     ps = p["ps"].ljust(8)[:8]
     rds_truth = {
         "pi_hex": f"{pi:04X}", "pi": pi, "ps": ps, "pty": int(p["pty"]), "tp": bool(p["tp"]),
-        "ta": bool(p["ta"]), "music": bool(p["music"]), "di": int(p["di"]), "group_types": ["0A"],
+        "ta": bool(p["ta"]), "music": bool(p["music"]), "di": int(p["di"]),
+        "group_types": ["0A", "2A"] if rt else ["0A"],
+        **({"radiotext": rt[:64]} if rt else {}),
         "n_groups": n_groups, "bitrate_bd": rds.BITRATE_BD, "subcarrier_hz": rds.SUBCARRIER_HZ,
         "deviation_hz": float(p["rds_deviation_hz"]), "first_bit_s": 0.0,
         "encoding": rds.ENCODING_NOTE, "check_poly": f"0x{rds.CHECK_POLY:03X}",

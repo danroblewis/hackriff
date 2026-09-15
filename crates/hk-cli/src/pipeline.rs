@@ -335,8 +335,9 @@ pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     }
 }
 
-/// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`].
-struct PipelineRecipes(Arc<hk_pipeline::recipes::runtime::RecipeRuntime>);
+/// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`] (public
+/// so acceptance tests wire the recipe routes exactly as `hk serve` does, T-094).
+pub struct PipelineRecipes(pub Arc<hk_pipeline::recipes::runtime::RecipeRuntime>);
 
 impl hk_api::recipes::RecipeControl for PipelineRecipes {
     fn call(

@@ -685,6 +685,7 @@ dependencies = [
  "hk-cli",
  "hk-context",
  "hk-core",
+ "hk-demod",
  "hk-dsp",
  "hk-model",
  "hk-pipeline",

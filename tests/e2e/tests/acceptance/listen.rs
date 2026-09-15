@@ -76,7 +76,7 @@ fn listen_counter(addr: SocketAddr, name: &str) -> u64 {
 
 /// Polls `/api/inventory` until an emitter matches the private truth (moved by `shift_hz`);
 /// returns `(id, f_center_hz, bandwidth_hz)` of the strongest-evidence match.
-fn found_blind(addr: SocketAddr, truth: &TruthItem, shift_hz: f64) -> (String, f64, f64) {
+pub fn found_blind(addr: SocketAddr, truth: &TruthItem, shift_hz: f64) -> (String, f64, f64) {
     let deadline = Instant::now() + Duration::from_secs(240);
     loop {
         let (_, rows) = api_inventory(addr);
