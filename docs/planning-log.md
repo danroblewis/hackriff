@@ -726,3 +726,31 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - merge-tree against main is clean.
   Nits filed as **T-107**: stale-tune race in set_channels; a lost DISCONTINUITY on an empty DDC chunk; ordering of long frames (relevant to T-095 POCSAG); detections-source and tracker-found hop-set tests; set_channels routes. T-093 and T-105 merge after the in-flight full check; the T-092 vs T-093 runtime.rs conflict is expected and resolvable.
 - **B0.255 Full check of main 315aaf3 (T-094): green.** Lint clean; nextest + UI 1086/1086; acceptance 25/25 (tutorial_rds included). **T-093 and T-105 merged.** **Launched:** T-095 POCSAG tutorial (with follow_hops; long-frame ordering caveat from T-107) and T-106 (RDS oracle timestamp offset). T-107 is held until T-092 merges, since both touch the recipe runtime. Full check covering T-093 + T-105 running.
+- **B0.256 T-092 review: FIX-FIRST** (timeboxed). Real-time safety, gating on store/replay, ids, 409 races and input validation are fine. Must-fix:
+  1. Merging with main breaks the build: T-091's assist test builds `CtlRequest` without the new `query` field. There's also an api.md text conflict.
+  2. A disk stall over 5 s trips the publisher slow-consumer disconnect and permanently stops the always-on recorder.
+  3. Interrupted-capture recovery doesn't validate the tail record, so the last /frames page returns 422 forever.
+  Promoted from nit: a partial-write retry duplicates bytes or misaligns the index. A fresh Opus fix and integration round is running in the T-092 worktree; T-107 follows after it merges.
+- **B0.257 Full check of main 415f112 (T-093 + T-105): green.** Lint clean; nextest + UI 1099/1099 in 239 s; acceptance 25/25. M1 on main: T-085–T-091, T-093, T-094, T-104, T-105. In flight: T-092 fix/integration, T-095, T-096, T-097, T-106. Held: T-107 (after T-092).
+- **B0.258 T-106 merged** (acb1552; coordinator diff review). `WfmDemod` records the MPX index of the first sample fed to the RDS demod after pilot lock and adds it to bit positions. Group, PS and record timestamps are now stream-absolute (previously 122 bits / 102.7 ms late). tutorial_rds dropped its offset estimate: direct agreement is 43/44 oracle-valid groups (0.977, 0 conflicts, 1 missing). New unit test with a 0.3 s pre-lock prefix: positions land within ~17 ms of truth. hk-demod 35/35, acceptance tutorial_rds + signal_062 4/4. Full check is batched with the T-092 merge (imminent).
+- **B0.259 T-092 merged** (fix/integration 082a745). Changes:
+  - The recorder subscribes via `subscribe_recorder`, which is exempt from the slow-consumer close; it keeps dropping with drop markers. Tested with a 600 ms stall against a 100 ms policy.
+  - Interrupted captures are walked and truncated to the last complete indexed record.
+  - A partial write retries only the remainder, and on failure cuts back to the last good commit.
+  - Replay is capped at 4 (503 busy).
+  - The `CtlRequest.query` compile break is fixed and the api.md sections are merged.
+  **T-107** (follow_hops hardening) launched now that the runtime is stable. Full check covering T-106 + T-092 running.
+- **B0.260 Full check of main f2561b1 (T-106 + T-092): green.** Lint clean; nextest + UI 1112/1112 in 262 s; acceptance 25/25. In flight: T-107, T-095 and T-096 (both wrapping up past budget, nudged off Monitor waits), T-097.
+- **B0.261 T-096 (ACARS tutorial, Sonnet) ended over budget at ec7adcb; not merged.**
+  - The recipe was fitted to the py synth: SYN SYN SOH sync, CRC-16/XMODEM over parity-zeroed characters, and a new `zero` mode in the pinned parity block.
+  - The coordinator is concerned the synth is non-standard. The T-087 review said acarsdec uses KERMIT over bytes including parity.
+  - The blind acceptance test is `#[ignore]` because detection never registers the synthetic burst (inventory empty after 240 s).
+  - acarsdec is absent.
+
+  **T-108** (fresh Opus agent, same worktree) takes over:
+  - establish the convention from acarsdec source;
+  - correct the synth, recipe and block;
+  - fix the blind detection root cause;
+  - un-ignore the test.
+
+  Lesson: the Sonnet tutorial agents stalled on Monitor waits and overran budget; future tutorial briefs say so explicitly.

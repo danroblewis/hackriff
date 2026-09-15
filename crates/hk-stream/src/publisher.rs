@@ -11,7 +11,8 @@
 //!   released. A slow or stuck consumer therefore only ever blocks its own writer thread.
 //! - A consumer that stays full for [`PublisherConfig::disconnect_after`], or drops
 //!   [`PublisherConfig::disconnect_after_drops`] consecutive records, is disconnected: its
-//!   transport is shut down (which unblocks its writer) and its ring is freed.
+//!   transport is shut down (which unblocks its writer) and its ring is freed. A local recorder
+//!   ([`PublisherHandle::subscribe_recorder`]) is exempt: it keeps dropping and counting instead.
 //! - At most [`PublisherConfig::max_consumers`] consumers are open at once; after the publisher
 //!   finishes, a consumer still draining after [`PublisherConfig::drain_timeout`] is closed.
 //!
@@ -486,6 +487,9 @@ struct Consumer {
     cv: Condvar,
     closed: AtomicBool,
     closer: Mutex<Option<Closer>>,
+    /// Never closed by the slow-consumer policy: it keeps dropping (and marking) instead
+    /// ([`PublisherHandle::subscribe_recorder`]).
+    slow_exempt: bool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -613,6 +617,7 @@ impl Shared {
         locality: Locality,
         closer: Closer,
         queue_bytes: usize,
+        slow_exempt: bool,
     ) -> Result<ConsumerId, StreamError> {
         if locality == Locality::Remote && !gate::remote_transport_permitted(self.class) {
             self.remote_refused.fetch_add(1, Ordering::Relaxed);
@@ -659,6 +664,7 @@ impl Shared {
             cv: Condvar::new(),
             closed: AtomicBool::new(false),
             closer: Mutex::new(Some(closer)),
+            slow_exempt,
         });
         let for_thread = Arc::clone(&consumer);
         let (binary, markers) = (self.kind.is_binary(), self.mode != Mode::FeedRaw);
@@ -807,6 +813,31 @@ impl PublisherHandle {
         closer: Box<dyn FnOnce(CloseReason) + Send>,
         queue_bytes: usize,
     ) -> Result<ConsumerId, StreamError> {
+        self.subscribe_inner(label.into(), writer, closer, queue_bytes, false)
+    }
+
+    /// [`PublisherHandle::subscribe_with_queue`] for a local recorder (T-092 decoded captures):
+    /// the slow-consumer policy never closes it. While it stays full it keeps dropping, and the
+    /// drop marker it gets on the next record it accepts counts them, so a disk stall longer than
+    /// [`PublisherConfig::disconnect_after`] loses records but not the recording.
+    pub fn subscribe_recorder<W: EgressWriter>(
+        &self,
+        label: impl Into<String>,
+        writer: W,
+        closer: Box<dyn FnOnce(CloseReason) + Send>,
+        queue_bytes: usize,
+    ) -> Result<ConsumerId, StreamError> {
+        self.subscribe_inner(label.into(), writer, closer, queue_bytes, true)
+    }
+
+    fn subscribe_inner<W: EgressWriter>(
+        &self,
+        label: String,
+        writer: W,
+        closer: Box<dyn FnOnce(CloseReason) + Send>,
+        queue_bytes: usize,
+        slow_exempt: bool,
+    ) -> Result<ConsumerId, StreamError> {
         if self.shared.mode != Mode::Egress {
             return Err(StreamError::Config(
                 "decoder feeds attach through FeedAttacher".into(),
@@ -814,11 +845,12 @@ impl PublisherHandle {
         }
         let locality = writer.locality();
         self.shared.subscribe(
-            label.into(),
+            label,
             Box::new(writer),
             locality,
             closer,
             queue_bytes,
+            slow_exempt,
         )
     }
 
@@ -1624,8 +1656,9 @@ impl Publisher {
                     }
                 }
                 let since = *g.full_since.get_or_insert_with(Instant::now);
-                let stale = g.consecutive_drops >= config.disconnect_after_drops
-                    || since.elapsed() >= config.disconnect_after;
+                let stale = !c.slow_exempt
+                    && (g.consecutive_drops >= config.disconnect_after_drops
+                        || since.elapsed() >= config.disconnect_after);
                 drop(g);
                 if stale && c.close(CloseReason::SlowConsumer) {
                     out.disconnected += 1;
@@ -1817,6 +1850,7 @@ impl FeedAttacher {
                 let _ = wake_tx.shutdown(std::net::Shutdown::Both);
             }),
             self.shared.config.queue_bytes,
+            false,
         )
     }
 

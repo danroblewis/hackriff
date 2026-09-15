@@ -1695,7 +1695,7 @@ impl PipelineHandle {
                     Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes"))
                         .filter(|p| p.is_dir())
                 });
-            Arc::new(crate::recipes::runtime::RecipeRuntime::new(
+            let rt = Arc::new(crate::recipes::runtime::RecipeRuntime::new(
                 Arc::clone(&self.sup.common.counters),
                 Arc::new(move || sup.lock().shared.clone()),
                 Arc::clone(&self.sup.common.listen),
@@ -1703,8 +1703,17 @@ impl PipelineHandle {
                     builtin,
                     self.sup.common.data_dir.join("recipes"),
                 ),
-            ))
+            ));
+            // T-092: always-on decoded-stream capture into `<data dir>/captures/`.
+            rt.attach_default_capture_store(&self.sup.common.data_dir);
+            rt
         }))
+    }
+
+    /// The run's decoded-stream capture store (T-092): every pipeline's inspector output is
+    /// recorded there, quota-managed. `None` when the store could not be opened.
+    pub fn decoded_captures(&self) -> Option<hk_store::decoded::DecodedCaptures> {
+        self.recipe_runtime().capture_store().cloned()
     }
 
     /// The newest ring sample index.
