@@ -1513,3 +1513,71 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Its fixed dequant filter narrows the gap to 0.62 dB, but attenuates later emitters by up to 1.2 dB, so it is not acceptable as is.
     - Second finisher launched.
   - **T-145 progress:** most slow tests are already unpaced (CPU-bound serial tests dominate). Only 2 tests switched; `api_contract` via `hk serve --device mock:` is still to judge. lld and cranelift are installed.
+- **B0.380 Full check green after the T-143 + T-140 merges (066372c).**
+  - Lint clean.
+  - Tests: 1328/1328 nextest+UI (down from 1387, since T-143 deleted the legal tests).
+  - Acceptance: 28/28 plus 2 hardware-ignored (was 32; the legal cases are gone).
+  - Disk: 75 GB free.
+- **B0.381 T-141 done (69c9c70 fix, 9e971a4 merge main, 51cf279 fmt); Opus review running.**
+  - **Noise measured in codes rms:** real captures 0.75 / 1.43 / 1.67 / 8.7 / 25.2; synthetic scene ~0.5.
+    - Low-gain HackRF captures are also quantisation-limited, so the scene is realistic and unchanged.
+  - **Mock fix:** per-bin adaptive subtraction of the recording's rounding noise on re-rendered IQ only.
+    - Gain is causal from earlier frames.
+    - The earlier fixed filter was dropped.
+    - Fixed-tune passthrough is untouched.
+  - **Result:** `scheduler_history` −100.770 vs −100.810 (0.040 dB, was 1.01; a-priori limit 0.5 unchanged).
+  - **New mock test:** emitters starting mid-recording stay within 0.2 dB.
+  - **Tests:** 90/90 targeted; lint clean.
+  - **Review focus:** mixture solve/cache, tile v4 codec, whether mock subtraction distorts bursts/transients across e2e tests, per-block cost.
+- **B0.382 T-141 review (Opus): FIX-FIRST.**
+  - **Bug:** mixture weights are per tile, but each cell's p10 pools only that cell's frames. Sweep-only cells get dwell-heavy weights (~0.8 dB wrong), which breaks "no floor, never a wrong one".
+  - **Risks:**
+    - The adaptive dequant (α=1/8) attenuates transients by ~−1.8 dB at onset and overshoots +1.25 dB after an emitter stops.
+    - `level` is not re-seeded after skip/pass-through, so every hop starts stale.
+    - The emitter test skips the transient window.
+    - No full e2e/acceptance run after the mock change.
+  - **Nits:** u64 sum overflow on a corrupt tile; shape tolerance undocumented.
+  - **Verified:** bisection, per-query cache, pass-through never dequantised, deterministic, no ground-truth use, v4 decode bounds, no weakened tests.
+  - **Next:** fix round continued in finisher 2 (~128k tokens), including an e2e/pipeline timing comparison and `just acceptance` in the worktree.
+- **B0.383 T-146 WIP (0e83566), untested. The agent was at 252k tokens; a finisher was launched.**
+  - **Rule:** a Stouffer run per (site, subject, cal) with S = |Σz|/√k and p_seq = 2k(k+1)·Q(S), mapped to z_eq = Q⁻¹(√p_seq).
+    - Novelty is the max of the interval's own score and the run score.
+    - The null on-rate ≤ Q(7.9)²/2.
+    - The run resets on direction change, a gap over 2 h, gain key, immature/explained input, or site change. Runs are not persisted.
+  - **`between_var` correction:** subtracts p(1−p)(ΣV/W − ΣwV/W²), floored at 0.1× raw.
+    - This needs a per-slot sampling moment: baseline format goes v2 → v3, and a slot grows 28 → 32 B.
+    - Two store-test expectations change.
+  - **Latency:** sparse onset raises within 14 intervals (a priori); dense within 2.
+  - **Finisher must check:**
+    - Compile and test fixes.
+    - The Monte-Carlo null test.
+    - The parked-week 0-refusal test under 256 MiB, now at risk from the 32 B slots.
+    - Conflict with T-140 accessors when merging main.
+  - **T-124 knock-on:** its busier-alarm latency limit must be re-derived from the new rule (14-interval sparse bound) before its next run.
+- **B0.384 T-148 launched (Sonnet, user request).** Sidebar Selections/Inventory rows overflow sideways, pushing the action buttons off-screen. The fix wraps rows so the buttons are always reachable. It is a thin-client CSS tweak separate from the UI rewrite, and not a Rust build.
+- **B0.385 MUI milestone approved by the user (exploratory UI rewrite).**
+  - **Inputs:** brief docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html. Both were untracked, so they are committed now so agent worktrees see them.
+  - **Roadmap:** MUI row added to docs/11.
+  - **Tasks:** T-149..T-156.
+    - T-149 MUI-DESIGN (Opus high, core; ADR-0013, blocks the rest).
+    - Then in parallel: T-150 shell + Outputs dock + Capture timeline (Sonnet), T-151 Explore sidebars + focus (Sonnet), T-152 centre spectrum/WebGL waterfall/brackets (Opus), T-153 Decode workbench (Sonnet), T-154 packet inspector rehome (Sonnet), T-155 alarms/reports/scheduler rehome (Sonnet).
+    - T-156 finish/tests/phone-width/retire old layout (Sonnet).
+  - **API gaps:** gaps found by the design (e.g. capture timeline scrub) become backend tasks.
+  - **Constraints:**
+    - The thin-client rule already exists in CLAUDE.md.
+    - MUI runs in parallel with the M2 tail.
+    - UI agents don't count toward the 4 Rust-building-agent cap unless they build Rust.
+  - **T-148** (current-UI sidebar fix) lands separately.
+- **B0.386 T-148 and T-141 merged; T-149 MUI-DESIGN and T-147 launched.**
+  - **T-148 merged (589fad6):** CSS row-cards scoped to the three sidebar tables; tsc, npm test and build green.
+  - **T-141 merged (ce0c8a4, fix round):**
+    - Tile v4 stores per-shape frames; a mixture floor exists only when every shape covers the same cells, otherwise none.
+    - Mock dequant: fast attack (>3× level), one-frame look-ahead release, re-seeded on restart.
+    - Transient test bounds set a priori: 0.5 dB for the first 2048 samples, 0.2 dB settled; worst measured +0.34 dB.
+    - Floor sums saturate on overflow.
+    - Scheduler vs fixed-tune floor: 0.070 dB.
+    - Targeted tests 91/91.
+    - Timing and acceptance were not run in the worktree; the post-merge full check covers them, with e2e timings compared against `test-t143.log`.
+  - **Worktrees:** both removed. Full check started.
+  - **T-149 (MUI-DESIGN, Opus high)** launched on main (brief + mockup committed).
+  - **T-147 (channel FCO under the scheduler)** launched now that T-141 is merged.

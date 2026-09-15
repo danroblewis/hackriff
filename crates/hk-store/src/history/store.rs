@@ -485,11 +485,13 @@ impl Pyramid {
             if !late && tile.col_t.is_none() {
                 tile.col_t = Some(t_in);
             }
+            let mut values = 0u64;
             for s in &cells[i..j] {
                 let v_lin = plan.mean(s, frame.psd);
                 if !v_lin.is_finite() {
                     continue;
                 }
+                values += 1;
                 let v_db = db(v_lin);
                 let pk_db = db(f64::from(plan.max(s, peak)).max(v_lin));
                 let f = (s.cell - fb * nf) as usize;
@@ -514,7 +516,7 @@ impl Pyramid {
                 }
             }
             tile.prov
-                .add_frame(frame, &state, step.as_ref(), cell_shape);
+                .add_frame(frame, &state, step.as_ref(), cell_shape, values);
             i = j;
         }
         self.stats.frames_folded += 1;

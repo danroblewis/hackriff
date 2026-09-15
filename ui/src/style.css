@@ -88,6 +88,30 @@ table.grid .num { text-align: right; font-variant-numeric: tabular-nums; }
 #inventory table.grid tbody tr:hover, #inventory table.grid tbody tr.sel { background: #1c2430; }
 .inv-actions { display: flex; gap: 4px; flex-wrap: wrap; white-space: normal; }
 .inv-actions button { min-height: 40px; padding: 2px 10px; }
+
+/* T-148: Selections/Signal-inventory rows always sit in a narrow sidebar (a fixed 340px column on
+   desktop, or the full panel width on phones), so lay their tables out as wrapping row "cards"
+   instead of a fixed-width grid: long text wraps, and each row's actions cell always starts its
+   own line. That keeps Promote/Delete/Listen reachable without ever scrolling the panel sideways. */
+#sel-table, #inv-candidate-table, #inv-confirmed-table,
+#sel-table thead, #sel-table tbody, #inv-candidate-table thead, #inv-candidate-table tbody,
+#inv-confirmed-table thead, #inv-confirmed-table tbody { display: block; }
+#sel-table tr, #inv-candidate-table tr, #inv-confirmed-table tr {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px;
+  border-bottom: 1px solid #222a33; padding: 3px 0;
+}
+#sel-table th, #sel-table td, #inv-candidate-table th, #inv-candidate-table td,
+#inv-confirmed-table th, #inv-confirmed-table td {
+  display: block; min-width: 0; max-width: 100%; padding: 0; border-bottom: none;
+  white-space: normal; overflow-wrap: anywhere;
+}
+/* The actions cell always wraps onto its own full-width line so its buttons have room to wrap
+   without ever pushing the row wider than the panel. */
+#sel-table td:last-child { flex: 1 1 100%; margin-top: 2px; }
+#inv-candidate-table td.inv-actions, #inv-confirmed-table td.inv-actions { display: flex; flex: 1 1 100%; margin-top: 2px; }
+#sel-table tr.picked { background: rgba(250,204,21,.08); }
+.sel-name { max-width: 100%; box-sizing: border-box; }
+#selections .table-wrap, #inventory .table-wrap { overflow-x: hidden; }
 .badge.st-known { background: #14532d; }
 .badge.st-unexpected-here { background: var(--warn); color: #111; }
 .badge.st-unknown { background: #1e3a5f; }

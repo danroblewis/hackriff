@@ -21,7 +21,8 @@
 //!   `FloorProductConfig::mixed_shapes` (T-139: the pipeline's history, whose scheduler short-step
 //!   rows average fewer segments). Those are folded and counted. The floor decides per tile from
 //!   the tile's persisted shape (so it survives a restart): uniform tiles use their own shape's
-//!   bias, mixed-shape tiles give no floor.
+//!   bias, mixed-shape tiles the bias of the Gamma mixture of their values per shape (T-141,
+//!   [`hk_dsp::radiometry::mixture_percentile_bias_db`]; mixed tiles of format < 4 give no floor).
 //!
 //! # Estimator: bias-corrected p10, not the power mean
 //!

@@ -237,8 +237,28 @@ fn mixed_shapes_fold_short_rows_instead_of_rejecting_them() {
         "median floors {m_full} vs {m_short}: {v_full:?} {v_short:?}"
     );
 
+    // T-141: a tile holding both geometries corrects with its Gamma-mixture bias: it reports a
+    // floor, and its median agrees with the uniform tiles' within the same 0.5 dB.
+    let (_d2, mut both) = open("shape-both", true);
+    for (s, f) in full.iter().chain(&shared) {
+        both.ingest(s, f).unwrap();
+    }
+    both.seal_through(Timestamp::from_unix_nanos(T0 + 3_600_000_000_000))
+        .unwrap();
+    assert!(both.stats().mixed_shape_frames > 0);
+    let v_both = floor(&both, 0, 60);
+    assert!(
+        v_both.len() >= 7,
+        "a mixed-shape tile reports a floor: {v_both:?}"
+    );
+    let m_both = median(&v_both);
+    assert!(
+        (m_both - m_full).abs() < 0.5,
+        "mixed-tile median floor {m_both} vs uniform {m_full}: {v_both:?} {v_full:?}"
+    );
+
     // The per-tile decision needs no in-memory state: after a restart the uniform tiles keep
-    // their floors and the mixed tile still has none.
+    // their floors and the mixed tile its mixture (the per-shape value counts are persisted).
     let (d3, mut restarted) = open("shape-restart", true);
     let dir3 = d3.0.clone();
     for (s, f) in full.iter().chain(&shared).chain(&short) {
@@ -259,27 +279,14 @@ fn mixed_shapes_fold_short_rows_instead_of_rejecting_them() {
         0,
         "memory-only counter"
     );
+    let mixed_after = floor(&reopened, 0, 60);
     assert!(
-        floor(&reopened, 0, 60).is_empty(),
-        "a mixed-shape tile reports no floor after a restart"
+        !mixed_after.is_empty() && (median(&mixed_after) - m_both).abs() < 0.01,
+        "a mixed-shape tile keeps its mixture floor after a restart: {mixed_after:?} vs {v_both:?}"
     );
     let after = floor(&reopened, 120, 126);
     assert!(
         !after.is_empty() && (median(&after) - m_short).abs() < 0.01,
         "a uniform tile keeps its floor after a restart: {after:?} vs {v_short:?}"
-    );
-
-    // A tile holding both geometries has no single shape: no bias-corrected floor, never a
-    // wrong one.
-    let (_d2, mut both) = open("shape-both", true);
-    for (s, f) in full.iter().chain(&shared) {
-        both.ingest(s, f).unwrap();
-    }
-    both.seal_through(Timestamp::from_unix_nanos(T0 + 3_600_000_000_000))
-        .unwrap();
-    assert!(both.stats().mixed_shape_frames > 0);
-    assert!(
-        floor(&both, 0, 60).is_empty(),
-        "a mixed-shape tile reports no floor"
     );
 }

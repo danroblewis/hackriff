@@ -354,6 +354,8 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         "filter",
         "spur_mask",
         "cell_shape",
+        "cell_shapes",
+        "other_shape_values",
         "steps_dropped",
     ] {
         assert!(prov.get(field).is_some(), "provenance missing {field}: {v}");
