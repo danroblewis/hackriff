@@ -1160,3 +1160,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Other:** `ingest_interval` returns FoldOutcomes for the alarm hook; stale report contract assertion fixed.
 
   Leftovers are folded into T-131. **Merge queue after the in-flight check:** T-122 → T-130 → T-128.
+- **B0.327 Full check of main 23b4916 (T-129): green.** Lint clean; nextest + UI 1316/1316 in 443 s under agent load; acceptance 32/32 (2 ignored HIL) in 77 s. **Merge chain T-122 → T-130 → T-128** delegated to an Opus integration agent on a branch: conflict resolution, api_contract + targeted tests after each merge, un-ignore T-127's bandit-on e2e now that T-130 removes the spurious clip, lint, acceptance e2es. The coordinator then merges into main and runs the full check. T-131 launches after that.
