@@ -35,6 +35,7 @@
 
 pub mod chains;
 pub mod class;
+pub mod compute;
 pub mod config;
 pub mod control;
 pub mod events;

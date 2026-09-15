@@ -18,11 +18,12 @@ use std::time::Duration;
 
 use hk_core::ReadOutcome;
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker};
-use hk_dsp::{InputInfo, StftConfig, StftProcessor, WelchConfig};
+use hk_dsp::{InputInfo, SpectrumFrame, StftConfig, WelchConfig};
 use hk_model::Timestamp;
 use hk_store::{FloorIngest, FloorIngestQueue, FloorProduct, IngestOutcome, StoreError};
 use num_complex::Complex;
 
+use crate::compute::Reader;
 use crate::run::Shared;
 use crate::stats::{HistoryCounters, add, inc, set};
 
@@ -57,8 +58,12 @@ pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> any
     welch.spectral_kurtosis = false;
     let rows = shared.cfg.settings.history_rows_per_s.max(0.01);
     let k = ((shared.fs / (welch.hop() as f64 * rows)).round() as usize).max(1);
-    let mut stft = StftProcessor::new(StftConfig::new(welch, k))
-        .map_err(|e| anyhow::anyhow!("history STFT: {e:?}"))?;
+    let mut stft = crate::compute::stft(
+        &shared.compute,
+        &shared.counters.compute,
+        Reader::History,
+        StftConfig::new(welch, k),
+    )?;
     let mut tracker = NoiseFloorTracker::new(FloorConfig::default())
         .map_err(|e| anyhow::anyhow!("history floor tracker: {e:?}"))?;
     let mut queue = FloorIngestQueue::new(HISTORY_QUEUE_FRAMES);
@@ -69,30 +74,34 @@ pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> any
     let h = &shared.counters.history;
     let mut last_end = Timestamp::UNIX_EPOCH;
     let mut frames_since_update = 0u32;
+    let mut on_frame = |frame: &SpectrumFrame| {
+        let floor = tracker.update(frame, |_| {});
+        let r = queue.ingest(&product, frame, floor);
+        if r.deferred {
+            inc(&h.frames_deferred);
+        }
+        add(&h.frames_dropped, r.dropped);
+        tally(h, &r.folded);
+        let dur = (frame.sample_count as f64 * 1e9 / frame.spectrum.sample_rate_hz) as i64;
+        last_end = frame.t.host_time.saturating_add_nanos(dur);
+        frames_since_update += 1;
+        if frames_since_update >= 50 {
+            if let Ok(p) = product.try_lock() {
+                frames_since_update = 0;
+                update_tiles(&shared, &p);
+            }
+        }
+    };
     loop {
         match reader.read_timeout(&mut buf, Duration::from_millis(50)) {
             ReadOutcome::Data(chunk) => {
-                stft.push(InputInfo::from(&chunk), &buf[..chunk.len], |frame| {
-                    let floor = tracker.update(frame, |_| {});
-                    let r = queue.ingest(&product, frame, floor);
-                    if r.deferred {
-                        inc(&h.frames_deferred);
-                    }
-                    add(&h.frames_dropped, r.dropped);
-                    tally(h, &r.folded);
-                    let dur =
-                        (frame.sample_count as f64 * 1e9 / frame.spectrum.sample_rate_hz) as i64;
-                    last_end = frame.t.host_time.saturating_add_nanos(dur);
-                    frames_since_update += 1;
-                    if frames_since_update >= 50 {
-                        if let Ok(p) = product.try_lock() {
-                            frames_since_update = 0;
-                            update_tiles(&shared, &p);
-                        }
-                    }
-                });
+                stft.push(InputInfo::from(&chunk), &buf[..chunk.len], &mut on_frame);
                 cursor.set(chunk.end_sample());
                 add(&rc.samples, chunk.len as u64);
+            }
+            // Nothing new for a read timeout: deliver an asynchronous provider's rows (T-056).
+            ReadOutcome::Empty if stft.in_flight() > 0 => {
+                stft.flush(&mut on_frame);
             }
             ReadOutcome::Overrun { .. } | ReadOutcome::Empty => {}
             ReadOutcome::Closed => break,
@@ -104,6 +113,11 @@ pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> any
         set(&rc.frames, st.frames);
         set(&rc.stft_resets, st.resets);
     }
+    // Stream end or detach: frames still in flight are folded in before the queue drains.
+    stft.flush(&mut on_frame);
+    let st = stft.stats();
+    set(&rc.frames, st.frames);
+    set(&rc.stft_resets, st.resets);
     drop(cursor);
     let mut p = product.lock().unwrap_or_else(PoisonError::into_inner);
     tally(h, &queue.drain(&mut p));

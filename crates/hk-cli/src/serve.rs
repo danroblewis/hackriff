@@ -85,6 +85,8 @@ pub struct ServeOptions {
     pub token: Option<String>,
     /// Listen limits (T-066).
     pub listen: crate::pipeline::ListenArgs,
+    /// Compute provider (T-056).
+    pub compute: crate::pipeline::ComputeArgs,
 }
 
 /// The stream class for a recording (`hk_pipeline::class`).
@@ -135,6 +137,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                     calibration: opts.calibration.clone(),
                     spectrum_fft_len: Some(opts.fft_len),
                     spectrum_rows_per_s: Some(opts.rows_per_s),
+                    compute: opts.compute.clone(),
                 },
                 &registry,
             )?;
@@ -177,6 +180,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
             )?;
             cfg.settings.spectrum_fft_len = opts.fft_len;
             cfg.settings.spectrum_rows_per_s = opts.rows_per_s;
+            opts.compute.apply(&mut cfg.settings);
             cfg.source_class = replay.class;
             cfg.lossless = !*realtime;
             if let Some(hw) = &replay.meta.global.hw {
@@ -358,6 +362,7 @@ mod tests {
             calibration: None,
             token: Some(TOKEN.into()),
             listen: Default::default(),
+            compute: Default::default(),
         })
         .unwrap();
         assert!(live_control.is_none(), "no live control over a recording");
@@ -403,6 +408,7 @@ mod tests {
             calibration: None,
             token: Some(TOKEN.into()),
             listen: Default::default(),
+            compute: Default::default(),
         })
         .err()
         .expect("no driver in this build");

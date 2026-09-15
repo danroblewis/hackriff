@@ -52,6 +52,8 @@ enum Command {
         /// Built UI directory (with --serve; default: ui/dist).
         #[arg(long)]
         ui_dist: Option<PathBuf>,
+        #[command(flatten)]
+        compute: hk_cli::pipeline::ComputeArgs,
     },
     /// Run the whole pipeline over the live HackRF One (receive only) until --duration or Ctrl-C,
     /// then print the run summary. Needs a build with `--features hackrf`.
@@ -89,6 +91,8 @@ enum Command {
         /// Built UI directory (with --serve; default: ui/dist).
         #[arg(long)]
         ui_dist: Option<PathBuf>,
+        #[command(flatten)]
+        compute: hk_cli::pipeline::ComputeArgs,
     },
     /// Connect to a stream-output endpoint and print its header and records
     /// (docs/stream-contract.md).
@@ -178,6 +182,8 @@ enum Command {
         rows_per_s: f64,
         #[command(flatten)]
         listen: hk_cli::pipeline::ListenArgs,
+        #[command(flatten)]
+        compute: hk_cli::pipeline::ComputeArgs,
     },
 }
 
@@ -218,6 +224,7 @@ fn main() -> anyhow::Result<()> {
             info,
             json,
             ui_dist,
+            compute,
         } => {
             if info {
                 print!("{}", hk_cli::replay_summary(&fixture)?);
@@ -234,6 +241,7 @@ fn main() -> anyhow::Result<()> {
                 feeds,
                 ui_dist: default_ui_dist(ui_dist),
                 calibration,
+                compute,
             })?;
             print_summary(&summary, json)?;
         }
@@ -249,6 +257,7 @@ fn main() -> anyhow::Result<()> {
             calibration,
             json,
             ui_dist,
+            compute,
         } => {
             hk_cli::signal::install()?;
             let summary = hk_cli::pipeline::run_live(&hk_cli::pipeline::RunArgs {
@@ -262,6 +271,7 @@ fn main() -> anyhow::Result<()> {
                 feeds,
                 ui_dist: default_ui_dist(ui_dist),
                 calibration,
+                compute,
             })?;
             print_summary(&summary, json)?;
         }
@@ -278,6 +288,7 @@ fn main() -> anyhow::Result<()> {
             fft,
             rows_per_s,
             listen,
+            compute,
         } => {
             hk_cli::signal::install()?;
             let source = match (replay, device) {
@@ -305,6 +316,7 @@ fn main() -> anyhow::Result<()> {
                 calibration,
                 token: None,
                 listen,
+                compute,
             })?;
         }
         Command::Record {

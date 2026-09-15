@@ -154,6 +154,17 @@ Before T-041 the CPU path was single-threaded: STFT 4096/50 % at 8.9× and PFB M
 - Unified CPU/GPU memory is the reason the GPU is worth using at these modest rates: no copy tax. On the M3 the wgpu path still pays a staging copy and per-pass overhead, which is why STFT rows stay on the CPU there. Spike S2 confirms or overturns this on the Orin, where the CPU is ~4× weaker and the balance may flip.
 - Thermal in a sealed handheld at MAXN is a real risk (spike S6). The low-power mode is the mitigation and the default when idle. Runtime selection lets that mode move work between providers without a rebuild.
 - Keeping detection on CPU and only spawning GPU/ML work per surviving detection matches "classification cost scales with detections, not bandwidth" ([docs/04 §4.4](../04-radio-engineering-and-signals-analysis.md)).
-- **Pipeline hookup (not done in T-041).** hk-pipeline adds `compute: ComputeOptions` to its settings, reads it from `ScanPlan::extra.pipeline.compute` with `.with_env()` applied, and builds one `Compute`. It replaces `StftProcessor::new(config)` with `compute.stft(config)?.0` in `detect.rs`, `history.rs` and `spectrum.rs`, and logs the `Selection`. A stream end or chain detach calls `stft.flush(emit)`, or drains `pfb.flush()`. In the default build (no `gpu-wgpu`, no `accelerate`), `auto` resolves to `cpu` for STFT rows, bit-identical to today. With `gpu-wgpu` compiled, `auto` moves STFT rows to the GPU: frames and headers are identical, but they can arrive up to `gpu_in_flight` blocks later, so the `flush` calls above become necessary.
+- **Pipeline hookup (T-056, `hk_pipeline::compute`).**
+  - **Options.** `PipelineSettings::compute: ComputeOptions` comes from `ScanPlan::extra.pipeline.compute` or `--compute auto|cpu|cpu-mt|accelerate|gpu` on `hk replay/run/serve` and `hackriffd`. `HK_COMPUTE*` wins over both.
+  - **One registry per run.** `Pipeline::start` applies `.with_env()` and builds one `Compute`, shared by every segment including re-plumbs. The provider cannot change mid-run; `provider_changes` counts any change and should stay 0.
+  - **Call sites.** The detection, history and spectrum readers build their STFTs through `compute.stft`. Their selections, fallback reasons and provider availability are reported under `compute` in the run summary and `/api/status` (docs/api.md).
+  - **No PFB.** No pipeline stage runs a channelizer (the chains use DDCs), so none is selected yet.
+  - **Default build** (no `gpu-wgpu`, no `accelerate`): `auto` resolves to `cpu`, bit-identical to before. A replay with `provider: cpu` and one with `auto` store identical detections (`tests/compute_providers.rs`).
+  - **Asynchronous latency.** With `gpu-wgpu`, frames can arrive up to `gpu_in_flight` ring chunks late. Every reader keeps that safe:
+    - it flushes at `Closed` (stream end, stop, or segment detach), before its stage finishes;
+    - it flushes when a 50 ms read finds nothing new and rows are in flight;
+    - the spectrum reader flushes under the old row plan before a display or rate rebuild.
+
+    Downstream stages key on each frame's own sample index and time, and the ring holds seconds of pre-trigger reach, so detection, tracking and history timing are unchanged.
 - The CUDA slot is explicit: `ProviderKind::Cuda`, `Preference::Cuda` and the `PfbExecutor` seam exist. T-026 implements an executor, passes `pfb_suite` on the Orin, and flips `conformant()`.
 - `cpu-mt` (rayon) is a default dependency of hk-dsp. The GPU and Accelerate code never builds in CI (`gpu-wgpu`, `accelerate` off), and their conformance binaries compile to empty test sets there.

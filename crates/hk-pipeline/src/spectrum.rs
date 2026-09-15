@@ -31,6 +31,7 @@ use hk_stream::{BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamErr
 use num_complex::Complex;
 
 use crate::class::{RowPlan, row_plan, spectrum_header};
+use crate::compute::Reader;
 use crate::config::{DisplayPatch, DisplaySettings};
 use crate::run::Shared;
 use crate::stats::{add, inc, set};
@@ -231,21 +232,30 @@ impl<'a> Output<'a> {
     }
 }
 
-fn stft_for(plan: &RowPlan) -> anyhow::Result<StftProcessor> {
-    StftProcessor::new(plan.stft).map_err(|e| anyhow::anyhow!("spectrum STFT: {e:?}"))
+fn stft_for(shared: &Shared, plan: &RowPlan) -> anyhow::Result<StftProcessor> {
+    crate::compute::stft(
+        &shared.compute,
+        &shared.counters.compute,
+        Reader::Spectrum,
+        plan.stft,
+    )
 }
 
-/// Replaces the STFT for `plan`, carrying its counters into `bases` (frames, resets).
+/// Replaces the STFT for `plan`, carrying its counters into `bases` (frames, resets). Rows still
+/// in flight on an asynchronous provider belong to the old plan: they are published under it
+/// first (T-056).
 fn rebuild(
+    shared: &Shared,
     plan: RowPlan,
     stft: &mut StftProcessor,
     out: &mut Output<'_>,
     bases: &mut (u64, u64),
 ) -> anyhow::Result<()> {
+    stft.flush(|frame| out.row(frame));
     let st = stft.stats();
     bases.0 += st.frames;
     bases.1 += st.resets;
-    *stft = stft_for(&plan)?;
+    *stft = stft_for(shared, &plan)?;
     out.set_plan(plan);
     Ok(())
 }
@@ -258,7 +268,7 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
     let mut settings = display.get();
     let mut fs = shared.fs;
     let plan = row_plan(fs, settings.fft_size, settings.rows_per_s, class);
-    let mut stft = stft_for(&plan)?;
+    let mut stft = stft_for(&shared, &plan)?;
     let mut out = Output::new(&shared, plan, settings);
     let mut reader = shared.ring.reader_at(0);
     let cursor = shared.gate.register(0);
@@ -276,7 +286,7 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
             out.settings = next;
             if geometry {
                 let plan = row_plan(fs, settings.fft_size, settings.rows_per_s, class);
-                rebuild(plan, &mut stft, &mut out, &mut bases)?;
+                rebuild(&shared, plan, &mut stft, &mut out, &mut bases)?;
             }
         }
         match reader.read_timeout(&mut buf, Duration::from_millis(50)) {
@@ -285,7 +295,7 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
                 if rate.is_finite() && rate > 0.0 && rate != fs {
                     fs = rate;
                     let plan = row_plan(fs, settings.fft_size, settings.rows_per_s, class);
-                    rebuild(plan, &mut stft, &mut out, &mut bases)?;
+                    rebuild(&shared, plan, &mut stft, &mut out, &mut bases)?;
                 }
                 if out.publisher.is_none() {
                     // Offer the stream as soon as samples arrive (clients connect before the
@@ -308,6 +318,13 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
                 cursor.set(chunk.end_sample());
                 add(&rc.samples, chunk.len as u64);
             }
+            // Nothing new for a read timeout: publish an asynchronous provider's rows (T-056).
+            ReadOutcome::Empty if stft.in_flight() > 0 => {
+                stft.flush(|frame| out.row(frame));
+                if let Some(e) = out.error.take() {
+                    return Err(e);
+                }
+            }
             ReadOutcome::Overrun { .. } | ReadOutcome::Empty => {}
             ReadOutcome::Closed => break,
         }
@@ -317,6 +334,14 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
         let st = stft.stats();
         set(&rc.frames, bases.0 + st.frames);
         set(&rc.stft_resets, bases.1 + st.resets);
+    }
+    // Stream end or detach: rows still in flight are published before the publisher finishes.
+    stft.flush(|frame| out.row(frame));
+    let st = stft.stats();
+    set(&rc.frames, bases.0 + st.frames);
+    set(&rc.stft_resets, bases.1 + st.resets);
+    if let Some(e) = out.error.take() {
+        return Err(e);
     }
     drop(cursor);
     out.finish();

@@ -351,6 +351,7 @@ fn a_replayed_recording_refuses_device_settings_but_accepts_display_settings() {
         calibration: None,
         token: Some(TOKEN.into()),
         listen: Default::default(),
+        compute: Default::default(),
     })
     .unwrap();
     assert!(live_control.is_none());
