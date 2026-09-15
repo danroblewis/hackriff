@@ -176,14 +176,22 @@ fn current_status(conn: &Connection, id: EmitterId) -> Result<Option<CurrentStat
     .transpose()
 }
 
-/// Latest classification family, else the fingerprint family.
+/// Order of an emitter's classifications for its current family (T-183): a family measured from a
+/// track's occupancy (input `track`: shape evidence only) never supersedes one from a
+/// demodulation, decoder or classifier; among equals the latest wins. Insert order alone made the
+/// family depend on which pipeline thread (detection writer or chain) wrote last, and on merge
+/// direction.
+const FAMILY_ORDER: &str =
+    "ORDER BY (c.input_kind IS 'track') ASC, c.classification_id DESC LIMIT 1";
+
+/// Current family (see [`FAMILY_ORDER`]), else the fingerprint family.
 fn current_family(conn: &Connection, id: EmitterId) -> Result<Option<String>, RepoError> {
     let family: Option<String> = conn
-        .prepare_cached(
+        .prepare_cached(&format!(
             "SELECT coalesce((SELECT c.family FROM emitter_classification c \
-               WHERE c.emitter_id = emitter.emitter_id ORDER BY c.classification_id DESC LIMIT 1), \
+               WHERE c.emitter_id = emitter.emitter_id {FAMILY_ORDER}), \
              json_extract(fingerprint, '$.family')) FROM emitter WHERE emitter_id = ?1",
-        )?
+        ))?
         .query_row([blob(id)], |r| r.get(0))
         .optional()?
         .flatten();
@@ -1682,11 +1690,11 @@ fn inventory_where(
         p.push(SqlValue::Text(scheme.as_string()));
     }
     if let Some(family) = &q.family {
-        sql.push_str(
+        sql.push_str(&format!(
             " AND coalesce((SELECT c.family FROM emitter_classification c WHERE \
-             c.emitter_id = emitter.emitter_id ORDER BY c.classification_id DESC LIMIT 1), \
+             c.emitter_id = emitter.emitter_id {FAMILY_ORDER}), \
              json_extract(fingerprint, '$.family')) = ?",
-        );
+        ));
         p.push(SqlValue::Text(family.clone()));
     }
     let tag_needs_gate = q.tag.as_deref().is_some_and(|t| !tag_in_vocabulary(t));

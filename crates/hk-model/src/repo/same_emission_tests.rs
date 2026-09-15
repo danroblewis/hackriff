@@ -115,6 +115,106 @@ fn listed(r: &Repository) -> Vec<EmitterId> {
         .collect()
 }
 
+/// A track sighting carrying the pipeline's occupancy (shape) family.
+fn shaped_track(f: f64, seen: TimeRange, context: Option<EmitterId>) -> Sighting {
+    Sighting {
+        context,
+        classification: Some(Classification {
+            t: seen.end,
+            family: "fm-broadcast".into(),
+            confidence: 0.8,
+            open_set_score: 0.2,
+            model_version: "hk-pipeline/family-map@1".into(),
+        }),
+        ..track(f, 200e3, seen, 5)
+    }
+}
+
+fn family_of(r: &Repository, id: EmitterId) -> Option<String> {
+    let q = InventoryQuery {
+        family: Some("wfm".into()),
+        ..InventoryQuery::default()
+    };
+    let filtered: Vec<EmitterId> = r
+        .query_inventory(&q)
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|e| e.emitter.id)
+        .collect();
+    let family = r
+        .query_inventory(&InventoryQuery::default())
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|e| e.emitter.id == id)
+        .and_then(|e| e.family);
+    assert_eq!(
+        filtered.contains(&id),
+        family.as_deref() == Some("wfm"),
+        "family filter agrees with the entry's family"
+    );
+    family
+}
+
+/// T-183: the detection writer and a chain write concurrently, so a track's occupancy family can
+/// land after the demodulator's. The entry's family is the demodulator's either way, and whichever
+/// entry survives a same-emission merge.
+#[test]
+fn t183_track_shape_family_never_supersedes_the_demodulator_family_in_any_order() {
+    // Chain first, the lagging track's re-offers after.
+    let mut r = repo();
+    let d = r
+        .record_sighting(&rds(101.3e6, tr(1.0, 4.0), "C0DE"), None)
+        .unwrap()
+        .emitter_id;
+    let e = r
+        .record_sighting(&shaped_track(101.3e6, tr(0.0, 5.0), Some(d)), None)
+        .unwrap()
+        .emitter_id;
+    assert_eq!(e, d);
+    assert_eq!(family_of(&r, d).as_deref(), Some("wfm"));
+
+    // Track first, chain after.
+    let mut r = repo();
+    let e = r
+        .record_sighting(&shaped_track(101.3e6, tr(0.0, 5.0), None), None)
+        .unwrap()
+        .emitter_id;
+    assert_eq!(family_of(&r, e).as_deref(), Some("fm-broadcast"));
+    let chain = Sighting {
+        context: Some(e),
+        ..rds(101.3e6, tr(1.0, 4.0), "C0DE")
+    };
+    let d = r.record_sighting(&chain, None).unwrap().emitter_id;
+    assert_eq!(d, e);
+    assert_eq!(family_of(&r, d).as_deref(), Some("wfm"));
+
+    // Separate entries merged in both directions: the absorbed history is appended last.
+    for track_survives in [true, false] {
+        let mut r = repo();
+        let e = r
+            .record_sighting(&shaped_track(101.3e6, tr(0.0, 5.0), None), None)
+            .unwrap()
+            .emitter_id;
+        let d = r
+            .record_sighting(&rds(101.3022e6, tr(1.0, 4.0), "C0DE"), None)
+            .unwrap()
+            .emitter_id;
+        assert_ne!(e, d);
+        let (from, into) = if track_survives { (d, e) } else { (e, d) };
+        let m = r
+            .merge_same_emission(from, into, t(5.0), "same emission", &tol())
+            .unwrap()
+            .expect("merged");
+        assert_eq!(
+            family_of(&r, m.into).as_deref(),
+            Some("wfm"),
+            "survivor track={track_survives}"
+        );
+    }
+}
+
 #[test]
 fn t082_decoder_entry_of_a_tracked_emission_merges_into_one_entry_with_all_evidence() {
     let mut r = repo();
