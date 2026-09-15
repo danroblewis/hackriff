@@ -1761,7 +1761,8 @@ tasks:
   - id: T-109
     milestone: M1
     title: "POCSAG tutorial continuation: blind detection merges close-packed simultaneous narrowband channels; un-ignore tutorial_pocsag"
-    status: in-progress
+    status: review
+    commit: 9c7bfd2
     deps: [T-095]
     parallel_group: M1T2
     use_cases: [SIGNAL-062, AWARE-053]
