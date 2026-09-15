@@ -1,7 +1,7 @@
 //! T-089 inspector routes at the HTTP boundary over an in-memory capture store: re-parse a
 //! recorded decoded stream (the §3 byte stream, stream-contract §14.7) with a draft field map
 //! (paged frames with layer trees and byte ranges, a fit summary over the whole recording,
-//! nothing saved), gated records never parsed or served, and the documented refusals.
+//! nothing saved), and the documented refusals.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -143,11 +143,6 @@ fn captures() -> MemCaptures {
         }
         records.push(frame(i, ContentClass::Unrestricted, &bytes));
     }
-    // A restricted record stored gated (metadata only), and one wrongly stored with content.
-    records.push(frame(25, ContentClass::RestrictedPaging, &[]));
-    let mut leaked = frame(26, ContentClass::Unrestricted, &[0x13, b's', b'e', b'c']);
-    leaked.content_class = ContentClass::RestrictedPaging;
-    records.push(leaked);
     MemCaptures(BTreeMap::from([
         (
             "cap-1".to_owned(),
@@ -169,7 +164,7 @@ fn capture_reparse_pages_frames_with_layers_and_summarises_fit_over_the_whole_re
     );
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["capture_id"], "cap-1");
-    assert_eq!(v["total_frames"], 27);
+    assert_eq!(v["total_frames"], 25);
     assert_eq!(
         (v["from_frame"].clone(), v["limit"].clone()),
         (json!(5), json!(3))
@@ -207,28 +202,11 @@ fn capture_reparse_pages_frames_with_layers_and_summarises_fit_over_the_whole_re
         "out-of-bounds"
     );
 
-    // The summary covers all 27 frames, not the page.
+    // The summary covers all 25 frames, not the page.
     assert_eq!(
         v["fit"],
-        json!({"frames": 27, "ok": 24, "partial": 1, "failed": 0, "unparsed": 2,
+        json!({"frames": 25, "ok": 24, "partial": 1, "failed": 0, "unparsed": 0,
                "errors": {"payload": {"out-of-bounds": 1}}, "truncated": false})
-    );
-
-    // Last page: gated records served metadata-only, never parsed.
-    let (st, v) = post(
-        addr,
-        "/api/captures/cap-1/parse",
-        json!({"field_map": draft_map(), "from_frame": 25}),
-    );
-    assert_eq!(st, 200, "{v}");
-    assert_eq!(v["next_from_frame"], Value::Null);
-    for f in v["frames"].as_array().unwrap() {
-        assert_eq!(f["gated"], true, "{f}");
-        assert!(f.get("content").is_none(), "{f}");
-    }
-    assert!(
-        !v.to_string().contains("736563"),
-        "restricted bytes never served"
     );
 
     // Nothing was saved: the plain frame list has stored records without layers.

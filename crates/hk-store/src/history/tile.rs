@@ -111,6 +111,10 @@ pub const MAX_PROVENANCE_STEPS: usize = 32;
 /// Relative difference within which two cell shapes count as the same.
 pub const SHAPE_TOLERANCE: f32 = 0.05;
 
+/// Most distinct cell shapes (within [`SHAPE_TOLERANCE`]) listed per tile or query result (T-141);
+/// values of further shapes are counted in [`ProvenanceSummary::other_shape_values`].
+pub const MAX_CELL_SHAPES: usize = 32;
+
 /// The front-end state a frame was taken under: what a [`ProvenanceStep`] compares.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct FrontEndState {
@@ -242,6 +246,15 @@ pub struct ProvenanceSummary {
     pub cell_shape: Option<f32>,
     /// Shapes differing by more than [`SHAPE_TOLERANCE`] contributed (no corrected floor).
     pub cell_shape_mixed: bool,
+    /// T-141: level-0 cell values and frames folded per cell shape, `(shape, values, frames)` in
+    /// first-seen order (shapes within [`SHAPE_TOLERANCE`] of a listed one count under it; at
+    /// most [`MAX_CELL_SHAPES`]). The pooled values' Gamma mixture gives a mixed-shape tile its
+    /// floor bias when every shape's frames covered the same number of cells
+    /// ([`Self::cell_shape_mixture`]).
+    pub cell_shapes: Vec<(f32, u64, u64)>,
+    /// Values of shapes beyond the listed ones, of frames without a shape, or of tiles written
+    /// before format 4 (which recorded no shape histogram): while nonzero there is no mixture.
+    pub other_shape_values: u64,
     /// Front-end steps, in time order, deduplicated (at most [`MAX_PROVENANCE_STEPS`]).
     pub steps: Vec<ProvenanceStep>,
     /// Steps beyond the listed ones.
@@ -304,6 +317,56 @@ impl ProvenanceSummary {
         self.cell_shape.filter(|_| !self.cell_shape_mixed)
     }
 
+    /// T-141: the `(shape, values, frames)` mixture of a mixed-shape summary, when every folded
+    /// value's shape is recorded ([`Self::other_shape_values`] is 0) and every shape's frames
+    /// folded the same number of values each (values/frames equal across shapes). A cell's
+    /// low percentile pools only its own frames, so the tile-wide weights are that cell's only
+    /// when every frame covered as many cells; a shape whose frames covered fewer or other cells
+    /// (short hops beside full-span dwells) could give a cell the wrong weights, so such a tile
+    /// has no mixture and no floor. `None` also for a uniform summary (use
+    /// [`Self::uniform_cell_shape`]), for unrecorded shapes (tiles before format 4, frames with
+    /// no shape, more than [`MAX_CELL_SHAPES`] shapes) and when nothing was folded.
+    pub fn cell_shape_mixture(&self) -> Option<&[(f32, u64, u64)]> {
+        let mut per_frame = None;
+        let same_coverage = self.cell_shapes.iter().all(|&(_, v, f)| {
+            if f == 0 {
+                return false;
+            }
+            let (v0, f0) = *per_frame.get_or_insert((v, f));
+            u128::from(v) * u128::from(f0) == u128::from(v0) * u128::from(f)
+        });
+        let known = self.cell_shape_mixed
+            && self.other_shape_values == 0
+            && same_coverage
+            && self.cell_shapes.iter().any(|&(_, v, _)| v > 0);
+        known.then_some(&self.cell_shapes[..])
+    }
+
+    /// Counts `values` level-0 cell values of `frames` frames under `shape`. A shape within
+    /// [`SHAPE_TOLERANCE`] of an already listed one counts under the first such shape seen (its
+    /// listed shape is not updated), so the list's order and shapes depend on fold order.
+    fn add_shape_values(&mut self, shape: Option<f32>, values: u64, frames: u64) {
+        if values == 0 {
+            return;
+        }
+        let Some(k) = shape else {
+            self.other_shape_values = self.other_shape_values.saturating_add(values);
+            return;
+        };
+        if let Some(s) = self
+            .cell_shapes
+            .iter_mut()
+            .find(|(s, _, _)| same_shape(Some(*s), Some(k)))
+        {
+            s.1 = s.1.saturating_add(values);
+            s.2 = s.2.saturating_add(frames);
+        } else if self.cell_shapes.len() < MAX_CELL_SHAPES {
+            self.cell_shapes.push((k, values, frames));
+        } else {
+            self.other_shape_values = self.other_shape_values.saturating_add(values);
+        }
+    }
+
     /// `(passing, other)` frame contributions under `filter` (frames beyond the listed origins
     /// count as unknown origin).
     pub fn origin_frames(&self, filter: &OriginFilter) -> (u64, u64) {
@@ -336,13 +399,16 @@ impl ProvenanceSummary {
         let mut states = std::mem::take(&mut self.gain_states);
         let mut steps = std::mem::take(&mut self.steps);
         let mut origins = std::mem::take(&mut self.origins);
+        let mut shapes = std::mem::take(&mut self.cell_shapes);
         states.clear();
         steps.clear();
         origins.clear();
+        shapes.clear();
         *self = Self {
             gain_states: states,
             steps,
             origins,
+            cell_shapes: shapes,
             ..Self::default()
         };
     }
@@ -380,14 +446,17 @@ impl ProvenanceSummary {
     }
 
     /// Folds one frame: `state` is its front-end state, `step` the change from the previous
-    /// folded frame (if any), `cell_shape` its resolved level-0 cell shape.
+    /// folded frame (if any), `cell_shape` its resolved level-0 cell shape and `values` the cell
+    /// values it folded into this tile.
     pub(crate) fn add_frame(
         &mut self,
         f: &FrameInput<'_>,
         state: &FrontEndState,
         step: Option<&ProvenanceStep>,
         cell_shape: Option<f32>,
+        values: u64,
     ) {
+        self.add_shape_values(cell_shape, values, 1);
         if self.frames == 0 {
             self.calibration = state.calibration;
             self.gain_table = state.front_end.gain_table;
@@ -465,6 +534,10 @@ impl ProvenanceSummary {
         } else if o.cell_shape_mixed || !same_shape(self.cell_shape, o.cell_shape) {
             self.cell_shape_mixed = true;
         }
+        for &(s, n, f) in &o.cell_shapes {
+            self.add_shape_values(Some(s), n, f);
+        }
+        self.other_shape_values = self.other_shape_values.saturating_add(o.other_shape_values);
         self.frames += o.frames;
         self.suspect_frames += o.suspect_frames;
         self.dropped_samples += o.dropped_samples;
@@ -559,6 +632,7 @@ impl Tile {
                 gain_states: Vec::with_capacity(MAX_GAIN_STATES),
                 steps: Vec::with_capacity(MAX_PROVENANCE_STEPS),
                 origins: Vec::with_capacity(MAX_ORIGINS),
+                cell_shapes: Vec::with_capacity(MAX_CELL_SHAPES),
                 ..Default::default()
             },
             col_t: None,

@@ -161,6 +161,55 @@ pub fn percentile_bias_db(shape: f64, p: f64) -> f64 {
     10.0 * gamma::mean_quantile(shape, p).log10()
 }
 
+/// Bisection steps of [`mixture_percentile_bias_db`]: the bracket (at most a factor ~10 wide)
+/// narrows below 1e-12 relative, far under the 0.01-dB storage rounding.
+const MIXTURE_BISECTION_STEPS: usize = 48;
+
+/// T-141: [`percentile_bias_db`] for values pooled from a **mixture** of Gamma shapes: `components`
+/// are `(shape, weight)` pairs (weights need not sum to 1; non-positive ones are ignored), the
+/// fraction of pooled values of each shape. The `p`-quantile `x` (in units of the common mean)
+/// solves `Σ wᵢ·P(nᵢ, nᵢ·x) = p`, found by bisection on `[minᵢ xᵢ, maxᵢ xᵢ]` (the mixture
+/// quantile lies between its components' quantiles `xᵢ = P⁻¹(nᵢ, p)/nᵢ`); returns `10·log10 x`.
+/// One component is exactly [`percentile_bias_db`]; NaN when no component is valid.
+pub fn mixture_percentile_bias_db(components: &[(f64, f64)], p: f64) -> f64 {
+    let valid = || {
+        components
+            .iter()
+            .filter(|(n, w)| n.is_finite() && *n > 0.0 && w.is_finite() && *w > 0.0)
+    };
+    let total: f64 = valid().map(|(_, w)| w).sum();
+    let (mut lo, mut hi, mut count) = (f64::INFINITY, 0.0f64, 0usize);
+    for &(n, _) in valid() {
+        let x = gamma::mean_quantile(n, p);
+        lo = lo.min(x);
+        hi = hi.max(x);
+        count += 1;
+    }
+    match count {
+        0 => return f64::NAN,
+        1 => return 10.0 * lo.log10(),
+        _ => {}
+    }
+    if hi <= lo {
+        return 10.0 * lo.log10();
+    }
+    let cdf = |x: f64| {
+        valid()
+            .map(|&(n, w)| w * gamma::regularized_lower(n, n * x))
+            .sum::<f64>()
+            / total
+    };
+    for _ in 0..MIXTURE_BISECTION_STEPS {
+        let mid = 0.5 * (lo + hi);
+        if cdf(mid) < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    10.0 * (0.5 * (lo + hi)).log10()
+}
+
 /// The expected CDF value of a numpy-interpolated `q_percent` sample percentile of `frames`
 /// values: `(1 + q·(n − 1))/(n + 1)`.
 pub fn exact_percentile_probability(q_percent: f64, frames: u32) -> f64 {
@@ -224,6 +273,44 @@ mod tests {
         assert!(percentile_bias_db(100.0, 0.5) < 0.0);
         assert!((exact_percentile_probability(10.0, 59) - 6.8 / 60.0).abs() < 1e-12);
         assert_eq!(exact_percentile_probability(10.0, 1), 0.5);
+    }
+
+    /// T-141: the mixture quantile matches the pooled sample of a Monte Carlo Gamma mixture, lies
+    /// between its components, and reduces to the single-shape bias.
+    #[test]
+    fn mixture_bias_matches_monte_carlo() {
+        for (n, p) in [(12.0, 0.1), (100.0, 0.5), (3.0, 0.113)] {
+            let one = mixture_percentile_bias_db(&[(n, 1.0)], p);
+            assert_eq!(one, percentile_bias_db(n, p));
+            let two = mixture_percentile_bias_db(&[(n, 2.0), (n * 1.0000001, 3.0)], p);
+            assert!((two - one).abs() < 1e-5, "{two} vs {one}");
+        }
+        assert!(mixture_percentile_bias_db(&[], 0.1).is_nan());
+        assert!(mixture_percentile_bias_db(&[(0.0, 1.0), (5.0, 0.0)], 0.1).is_nan());
+        let comps = [(4.0, 0.3), (40.0, 0.7)];
+        let mut rng = Rng::new(0x141);
+        let draws = 200_000;
+        let mut v: Vec<f64> = (0..draws)
+            .map(|i| {
+                let n = if i % 10 < 3 { 4 } else { 40 };
+                crate::floor::gamma::sample_unit_mean(&mut rng, n)
+            })
+            .collect();
+        v.sort_by(f64::total_cmp);
+        for p in [0.1, 0.25, 0.5] {
+            let model = mixture_percentile_bias_db(&comps, p);
+            let empirical = 10.0 * v[(p * draws as f64) as usize].log10();
+            let (a, b) = (percentile_bias_db(4.0, p), percentile_bias_db(40.0, p));
+            assert!(
+                model > a.min(b) && model < a.max(b),
+                "{model} in ({a}, {b})"
+            );
+            // The naive single-shape corrections are off by > 0.5 dB at p = 0.1.
+            assert!(
+                (model - empirical).abs() < 0.02,
+                "p {p}: model {model:.4} dB, Monte Carlo {empirical:.4} dB"
+            );
+        }
     }
 
     /// Monte Carlo: white noise → Hann periodograms (50 % overlap, K = 8) → overlap-weighted

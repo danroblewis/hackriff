@@ -1,6 +1,7 @@
-//! The tile file format. Little-endian throughout. Version 3 (T-133) is written; versions 1
-//! (T-017) and 2 (T-116) are still read, so no migration is needed: older tiles stay valid until
-//! evicted, and their frames read as of unknown source and site.
+//! The tile file format. Little-endian throughout. Version 4 (T-141) is written; versions 1
+//! (T-017), 2 (T-116) and 3 (T-133) are still read, so no migration is needed: older tiles stay
+//! valid until evicted, frames of v1/v2 tiles read as of unknown source and site, and v1–v3 tiles
+//! carry no per-shape value counts.
 //!
 //! ```text
 //! preamble (28 B)  magic "HKTILE\0\x01" [8] · format u16 · header_len u16 · payload_len u64 ·
@@ -18,13 +19,16 @@
 //! header (v3)      v2 header · origins u8 · per origin: source present u8 · source u64 · site
 //!                  (u8 0 unknown, 1 unassigned, 2 mobile, 3 site + 36 B uuid text) · frames u64 ·
 //!                  other_origin_frames u64 (T-133)
+//! header (v4)      v3 header · cell shapes u8 · per shape: shape f32 · level-0 values u64 ·
+//!                  frames u64 · other_shape_values u64 (T-141; v1–v3 tiles read with every value's shape
+//!                  unrecorded, so a mixed-shape old tile gives no floor)
 //! payload (v1)     observed bitmap (nt·nf bits, row-major t then f)
 //!                  per observed cell: max i16 · mean i16 · p_low i16 · p_high i16 (0.01 dB,
 //!                    i16::MIN = unknown) · occupancy u16 · occupancy_max u16 · coverage u16
 //!                    (fractions × 65535) · frames varint
 //!                  histogram bitmap (nf bits); per present row: first bin varint · len varint ·
 //!                    len counts varint (leading/trailing zero bins trimmed)
-//! payload (v2, v3) after zstd decompression when codec = 1: observed bitmap · then one column per
+//! payload (v2–v4) after zstd decompression when codec = 1: observed bitmap · then one column per
 //!                  statistic over the observed cells in bitmap order (max i16[] · mean i16[] ·
 //!                  p_low i16[] · p_high i16[] · occupancy u16[] · occupancy_max u16[] ·
 //!                  coverage u16[] · frames varint[]) · histogram section as v1
@@ -51,14 +55,14 @@ use hk_model::{CalibrationStateId, PowerUnit, SpurMaskId, TileKey, Timestamp};
 use super::config::{HistogramConfig, LevelGeometry};
 use super::frame::{FrontEnd, GainState, PortTag};
 use super::tile::{
-    FrontEndState, MAX_GAIN_STATES, MAX_ORIGINS, MAX_PROVENANCE_STEPS, Origin, ProvenanceStep,
-    ProvenanceSummary, Tile,
+    FrontEndState, MAX_CELL_SHAPES, MAX_GAIN_STATES, MAX_ORIGINS, MAX_PROVENANCE_STEPS, Origin,
+    ProvenanceStep, ProvenanceSummary, Tile,
 };
 
 const MAGIC: [u8; 8] = *b"HKTILE\0\x01";
-/// Tile file format version written (T-116: 2; T-133: 3, per-tile origins). Versions 1 and 2 are
-/// still read.
-pub const FORMAT_VERSION: u16 = 3;
+/// Tile file format version written (T-116: 2; T-133: 3, per-tile origins; T-141: 4, per-shape
+/// value counts). Versions 1–3 are still read.
+pub const FORMAT_VERSION: u16 = 4;
 const PREAMBLE_LEN: usize = 28;
 const UNKNOWN_DB: i16 = i16::MIN;
 /// Largest raw payload a zstd tile may claim (bounds decompression memory).
@@ -426,6 +430,20 @@ fn encode_header(h: &Header, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&frames.to_le_bytes());
     }
     buf.extend_from_slice(&p.other_origin_frames.to_le_bytes());
+    if h.format < 4 {
+        return;
+    }
+    let n = p.cell_shapes.len().min(MAX_CELL_SHAPES);
+    buf.push(n as u8);
+    for (shape, values, frames) in &p.cell_shapes[..n] {
+        buf.extend_from_slice(&shape.to_le_bytes());
+        buf.extend_from_slice(&values.to_le_bytes());
+        buf.extend_from_slice(&frames.to_le_bytes());
+    }
+    let dropped = p.cell_shapes[n..]
+        .iter()
+        .fold(0u64, |acc, &(_, v, _)| acc.saturating_add(v));
+    buf.extend_from_slice(&p.other_shape_values.saturating_add(dropped).to_le_bytes());
 }
 
 fn decode_header(c: &mut Cur<'_>, format: u16) -> Option<Header> {
@@ -540,6 +558,26 @@ fn decode_header(c: &mut Cur<'_>, format: u16) -> Option<Header> {
     } else if p.frames > 0 {
         // Before T-133 tiles did not record where frames came from.
         p.origins.push((Origin::UNKNOWN, p.frames));
+    }
+    p.cell_shapes.reserve_exact(MAX_CELL_SHAPES);
+    if format >= 4 {
+        let n = c.u8()? as usize;
+        if n > MAX_CELL_SHAPES {
+            return None;
+        }
+        for _ in 0..n {
+            let shape = c.f32()?;
+            let values = c.u64()?;
+            let frames = c.u64()?;
+            if !(shape.is_finite() && shape > 0.0) {
+                return None;
+            }
+            p.cell_shapes.push((shape, values, frames));
+        }
+        p.other_shape_values = c.u64()?;
+    } else if p.frames > 0 {
+        // Before T-141 tiles did not count values per shape: a mixed old tile has no mixture.
+        p.other_shape_values = p.frames;
     }
     Some(Header {
         format,

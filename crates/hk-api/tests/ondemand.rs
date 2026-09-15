@@ -184,26 +184,6 @@ fn refusals_close_with_a_reason_and_attach_nothing() {
         Err(tungstenite::Error::Http(r)) => assert_eq!(r.status().as_u16(), 404),
         other => panic!("expected 404, got {:?}", other.map(|_| ())),
     }
-
-    // An own-key-decrypted stream is local-only: the bridge refuses it, closed as 4403.
-    let own = fake(ContentClass::OwnKeyDecrypted, None);
-    let server = serve(OpenerRegistry::new().with("listen", own.clone()));
-    let mut ws = connect(
-        server.local_addr(),
-        &format!("/ws/open/listen?token={TOKEN}"),
-    )
-    .unwrap();
-    let (_, bins, code) = drain(&mut ws);
-    assert!(bins.is_empty());
-    assert_eq!(code, Some(4403));
-    let t0 = Instant::now();
-    while !own.stopped.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        own.stopped.load(Ordering::SeqCst),
-        "the refused session was dropped"
-    );
 }
 
 #[test]

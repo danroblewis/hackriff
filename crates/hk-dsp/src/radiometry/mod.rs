@@ -20,7 +20,7 @@ pub mod series;
 
 pub use bias::{
     averaged_bin_covariance, bin_power_correlation, cell_value_sd_db, cell_value_shape,
-    exact_percentile_probability, percentile_bias_db,
+    exact_percentile_probability, mixture_percentile_bias_db, percentile_bias_db,
 };
 pub use calibration::{
     BandCal, CalPoint, CalValue, PowerCalTable, PowerCalibrations, SyntheticCalSegment,

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hackriff Explorer</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<!-- MUI app shell (ADR-0013). Layout regions follow ui/mockups/explorer-v3.html; every panel mounts
+     into one data-slot and owns only that subtree. -->
+<div class="app" id="app">
+  <header class="bar">
+    <div class="brand">hack<span>riff</span></div>
+    <div class="modes" role="group" aria-label="View">
+      <button class="mode" type="button" data-mode="explore" aria-pressed="true">Explore</button>
+      <button class="mode" type="button" data-mode="decode" aria-pressed="false">Decode</button>
+    </div>
+    <div class="device" id="device" data-state="connecting"><span class="live-dot" aria-hidden="true"></span><span id="device-label">connecting…</span></div>
+    <div class="rec-pill" id="rec-pill" data-slot="rec-pill" hidden></div>
+    <div class="readouts">
+      <div class="ro"><small>Centre</small><b id="ro-centre">–</b></div>
+      <div class="ro opt"><small>Span</small><b id="ro-span">–</b></div>
+    </div>
+    <span class="conn" id="conn" role="status" hidden></span>
+    <div class="bar-spacer"></div>
+    <form class="goto" id="goto-form" autocomplete="off"><label for="goto">Go to</label><input id="goto" class="mono" placeholder="101.3 MHz" inputmode="decimal"></form>
+    <button class="mini" type="button" id="review-btn" aria-pressed="false">Review</button>
+    <button class="mini" type="button" id="theme-btn">Theme</button>
+  </header>
+
+  <!-- EXPLORE -->
+  <div class="main" id="view-explore">
+    <aside class="side" aria-label="Inventory and selections">
+      <div class="side-inv" data-slot="inventory"></div>
+      <div class="side-sel" data-slot="selections"></div>
+    </aside>
+    <section class="centre" aria-label="Spectrum and waterfall">
+      <div class="specwf" data-slot="live"></div>
+      <div class="axis" data-slot="axis" aria-hidden="true"></div>
+      <div class="capture" data-slot="capture"></div>
+    </section>
+    <aside class="focus" data-slot="focus" aria-live="polite" aria-label="Focused signal"></aside>
+  </div>
+
+  <!-- DECODE -->
+  <div class="wb" id="view-decode" hidden>
+    <aside class="wb-side" data-slot="pipelines" aria-label="Pipelines and recipe"></aside>
+    <section class="wb-centre" aria-label="Decoder stages and packets">
+      <div class="pipe" data-slot="stages"></div>
+      <div class="plots" data-slot="plots"></div>
+      <div class="inspector" data-slot="inspector"></div>
+    </section>
+    <aside class="wb-right" data-slot="params" aria-label="Stage parameters"></aside>
+  </div>
+
+  <footer class="dock" data-slot="outputs" aria-label="Live outputs"></footer>
+</div>
+
+<aside class="review" id="review" data-slot="review" aria-label="Review" hidden></aside>
+
+<form class="auth" id="auth" hidden>
+  <label>API token <input id="token-input" type="password" autocomplete="off" required></label>
+  <button class="mini" type="submit">Connect</button>
+  <span class="hint">Open <code>hk serve</code>'s printed link, or paste the token from <code>~/.config/hackriff/api-token</code>. It stays in this tab only.</span>
+</form>
+<div class="toast" id="toast" role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>

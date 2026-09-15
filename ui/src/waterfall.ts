@@ -12,6 +12,9 @@
 // T-051: each screen pixel max-pools the texels under its own footprint, centred on the pixel
 // (`axis.poolWindow`, mirrored by POOL below; previously [x0, x0+step), ~1 px biased); colour
 // scale auto or manual; peak (max) hold trace.
+//
+// T-152 (additive, MUI centre): `reset()`, `setRows()` bulk history load, `texWidth`, `lineColor`,
+// the UNOBSERVED_DB grey sentinel, and `uploadMs`/`frameMs` frame-time counters.
 
 const ROWS = 512;
 const LEVELS = 256;
@@ -21,6 +24,24 @@ const MAX_ROWS_PER_FRAME = 16;
 const SPEC_FRAC = 0.35;
 export const MARK_DROP = 1;
 export const MARK_GATED = 2;
+/** A cell value meaning "not observed" (T-152 review render: history `null` cells). Drawn grey, never
+ * as quiet; ignored by the auto colour range. Far below any real dB level. */
+export const UNOBSERVED_DB = -1e20;
+
+/** One row max-decimated (or nearest-stretched) to `texW` texels: what `push` uploads. Pure, so the
+ * row-preparation cost is measured in node (ui/test/app-centre.test.ts). */
+export function decimateRow(db: Float32Array, texW: number): Float32Array {
+  if (db.length === texW) return db.slice();
+  const row = new Float32Array(texW);
+  const r = db.length / texW;
+  for (let i = 0; i < texW; i++) {
+    let m = -Infinity;
+    const s = Math.floor(i * r), e = Math.min(db.length, Math.max(s + 1, Math.floor((i + 1) * r)));
+    for (let j = s; j < e; j++) if (db[j] > m) m = db[j];
+    row[i] = m;
+  }
+  return row;
+}
 
 const VS_FULL = `#version 300 es
 out vec2 vUv;
@@ -50,6 +71,11 @@ export class Waterfall {
   latest: Float32Array;
   /** Fraction of the canvas height taken by the spectrum (the rest is the waterfall). */
   specFrac = SPEC_FRAC;
+  /** Spectrum line colour (RGB 0..1). */
+  lineColor: [number, number, number] = [1.0, 1.0, 0.6];
+  /** Smoothed CPU time (ms) of one frame's row uploads, and of the whole frame (T-152 perf check). */
+  uploadMs = 0;
+  frameMs = 0;
   private gl: WebGL2RenderingContext;
   private texW: number;
   private wf: WebGLTexture;
@@ -112,6 +138,47 @@ export class Waterfall {
     this.gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
 
+  /** Texture width in texels (≤ bins): the row length history renders resample to. */
+  get texWidth(): number { return this.texW; }
+
+  /** Clears every row, time, mark, persistence and the peak trace (a retune or a switch between
+   * live and reviewing): the ring reads as "not received" again. */
+  reset() {
+    const gl = this.gl;
+    this.pending = [];
+    this.times.fill(NaN);
+    this.head = 0;
+    this.nextMark = 0;
+    this.latest = new Float32Array(this.texW).fill(NaN);
+    gl.bindTexture(gl.TEXTURE_2D, this.wf);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.texW, ROWS, gl.RED, gl.FLOAT, new Float32Array(this.texW * ROWS).fill(-1e30));
+    gl.bindTexture(gl.TEXTURE_2D, this.mk);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, ROWS, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(ROWS));
+    for (const hb of this.hist) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, hb.fb);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.resetPeak();
+  }
+
+  /** Replaces the ring with `rows` (oldest first, at most `rows` kept, newest on top) and their
+   * times, uploaded at once rather than through the per-frame queue: a history render (T-152). */
+  setRows(rows: readonly Float32Array[], times: readonly number[]) {
+    this.reset();
+    const gl = this.gl, from = Math.max(0, rows.length - ROWS);
+    gl.bindTexture(gl.TEXTURE_2D, this.wf);
+    for (let k = from; k < rows.length; k++) {
+      const row = decimateRow(rows[k], this.texW);
+      this.autoRange(row);
+      this.head = (this.head + 1) % ROWS;
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, this.texW, 1, gl.RED, gl.FLOAT, row);
+      this.times[this.head] = times[k] ?? NaN;
+      this.latest = row;
+    }
+  }
+
   /** Shows the texture window [u0, u1] of the full band (0..1): the zoom. */
   setView(u0: number, u1: number) {
     if (Number.isFinite(u0) && Number.isFinite(u1) && u1 > u0) { this.u0 = u0; this.u1 = u1; }
@@ -159,18 +226,7 @@ export class Waterfall {
 
   /** Queues one row of dB values (max-decimated to the texture width if needed) with its time. */
   push(db: Float32Array, tS = NaN) {
-    let row: Float32Array;
-    if (db.length === this.texW) row = db.slice();
-    else {
-      row = new Float32Array(this.texW);
-      const r = db.length / this.texW;
-      for (let i = 0; i < this.texW; i++) {
-        let m = -Infinity;
-        const s = Math.floor(i * r), e = Math.min(db.length, Math.max(s + 1, Math.floor((i + 1) * r)));
-        for (let j = s; j < e; j++) if (db[j] > m) m = db[j];
-        row[i] = m;
-      }
-    }
+    const row = decimateRow(db, this.texW);
     this.autoRange(row);
     if (this.peakHold) {
       if (!this.peak) this.peak = row.slice();
@@ -191,7 +247,7 @@ export class Waterfall {
     let n = 0, peak = -Infinity;
     for (let i = 0; i < row.length; i++) {
       const v = row[i];
-      if (!Number.isFinite(v)) continue;
+      if (!Number.isFinite(v) || v <= UNOBSERVED_DB / 10) continue;
       if (v > peak) peak = v;
       if (i % step === 0 && n < s.length) s[n++] = v;
     }
@@ -246,6 +302,7 @@ void main(){
   if (u < 0.0 || u >= 1.0) { o = vec4(0,0,0,1); return; }
   ivec2 pw = poolWin(u, uPxU, sz.x); float m = -1e30;
   for (int i=0;i<64;i++){ if(i>=pw.y) break; m = max(m, texelFetch(uWf, ivec2(clamp(pw.x+i, 0, sz.x-1),row),0).r); }
+  if (m > -1e25 && m < -1e19) { o = vec4(0.32,0.34,0.36,1); return; } // UNOBSERVED_DB: not observed, not quiet
   o = vec4(cmap((m-uLo)/(uHi-uLo)),1);
 }`);
     // Spectrum line: vertex i at its bin centre (i + 0.5)/N, mapped through the texture window.
@@ -299,6 +356,7 @@ void main(){
     // stretches it over the element, so fractions of the element stay fractions of the view.
     const W = gl.drawingBufferWidth, H = gl.drawingBufferHeight;
 
+    const tFrame = performance.now();
     let rows = this.pending;
     this.pending = [];
     if (rows.length > MAX_ROWS_PER_FRAME) { this.skipped += rows.length - MAX_ROWS_PER_FRAME; rows = rows.slice(-MAX_ROWS_PER_FRAME); }
@@ -314,6 +372,7 @@ void main(){
       this.latest = r.row;
       if (this.hist.length === 2) this.accumulate();
     }
+    if (rows.length) this.uploadMs += 0.1 * (performance.now() - tFrame - this.uploadMs);
 
     const specH = Math.floor(H * SPEC_FRAC);
     if (H > 0) this.specFrac = specH / H;
@@ -357,7 +416,7 @@ void main(){
     gl.uniform1f(l.u.uHi, this.hi);
     gl.uniform1f(l.u.uU0, this.u0);
     gl.uniform1f(l.u.uU1, this.u1);
-    gl.uniform3f(l.u.uColor, 1.0, 1.0, 0.6);
+    gl.uniform3f(l.u.uColor, ...this.lineColor);
     gl.drawArrays(gl.LINE_STRIP, 0, this.texW);
     if (this.peakHold && this.peak) {
       if (this.peakDirty) {
@@ -370,6 +429,7 @@ void main(){
       gl.uniform3f(l.u.uColor, 1.0, 0.35, 0.35);
       gl.drawArrays(gl.LINE_STRIP, 0, this.texW);
     }
+    this.frameMs += 0.1 * (performance.now() - tFrame - this.frameMs);
   }
 
   private accumulate() {

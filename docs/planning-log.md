@@ -1411,3 +1411,359 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Untouched:** the :8900 demo data dir (~10 GB, not ours), the npm cache (3 GB) and the other session's :8789 `hk serve`. That serve is still running, but its `target/debug/hk` binary was removed by the clean, so a restart of it needs a rebuild.
   - **Launch policy:** no new agent launches; the post-T-139 full check re-runs first (rebuild), then T-124 only if disk stays above 20 GB.
   - **Lesson:** check the sccache cache (8 GiB cap) and stale main-target artifacts before disk gets low; a periodic `cargo clean` between merges is cheap relative to disk.
+- **B0.368 Full check after T-139 (aa41cbb): lint clean; 1387/1387 tests; acceptance 31/32.**
+  - **Failure:** `legal_untagged_recording_in_the_paging_band_yields_no_content_or_identity_anywhere` at `legal.rs:346` (identity sentinel byte search).
+  - **In isolation it passes:** 10/10 decodes withheld, 0 recordings. Suspected cause: a coincidental substring match in per-run UUIDs/timestamps in streams or `/api/status`, not a leak. Acceptance is re-running twice to confirm.
+  - **Policy:** the user said no legal extensions, so this is a flaky pre-existing test to harden, not a new legal check.
+  - **Disk:** 29 GB free.
+  - **T-124 resumed** on main (T-139 included), merging `t-124-wip`: default scheduler settings, windows ≥ dwell minimum, thresholds derived a priori, plus new-emitter and restart-site tests.
+- **B0.369 Disk back to 93 GB free (freed outside this session). Launches resumed.**
+  - T-140 (Sonnet, baseline hardening nits) and T-141 (Opus, Gamma-mixture floor for mixed tiles) launched in parallel with T-124.
+  - The three agents edit disjoint areas: baseline, radiometry/history, tests/e2e.
+- **B0.370 Legal acceptance failure confirmed flaky.**
+  - Acceptance re-runs: 32/32 twice.
+  - Treated as green for the T-139 merge.
+  - T-142 added (Sonnet, test reliability only, no new legal checks): log match context and harden the sentinel byte search against coincidental UUID/timestamp matches. It launches after T-124, which edits tests/e2e.
+- **B0.371 USER DECISION: no legal/licensing tests at all.**
+  - **T-143 launched (Opus), ahead of other M2 work.** It deletes:
+    - crates/hk-pipeline/tests/{retune_legal,legal_restricted,legal_band_derived}.rs
+    - tests/e2e acceptance/legal.rs and the `listen.rs` legal case
+    - legal/withheld/identity-sentinel assertions elsewhere
+  - **Runtime gating** stays but becomes default-permissive (opt-in only), and untested.
+  - **T-142 cancelled** (do not de-flake a test being deleted).
+  - **Merge order:** T-143 merges before T-124/T-140/T-141.
+- **B0.372 T-140 committed (3828015, Sonnet); coordinator reviewed the diff: OK.**
+  - `packed()`/`packed_at()` return `ScaledMoments`, which applies the decay multiplier.
+  - Fingerprint pinned: quiet (0, 0.0); changed (0, 148.000330353452) at 1e-9.
+  - `debug_assert` on a finite factor.
+  - Shared `pool_membership`/`is_empty_slot` helpers.
+  - Tests: hk-store 7, hk-context 40.
+  - Merges after T-143 (user priority).
+- **B0.373 T-144 build-CPU tuning (user request, done).**
+  - **Concurrency:** at most 4 Rust-building agents; the coordinator's full check counts as one.
+  - **Jobs:** `CARGO_BUILD_JOBS=6`, and nextest/cargo test run with `--test-threads 6`.
+  - **Seeding:** a new worktree target is seeded with `cp -c -R -p main/target` (APFS clone). `-p` keeps mtimes so workspace crates rebuild instead of reusing stale artifacts; this is a coordinator addition to the user's `cp -c -R`.
+  - **sccache:** stays on (~44% hit rate).
+  - **Where recorded:** CLAUDE.md Coordination and memory. This supersedes the 2026-09-14 "no target seeding" note.
+  - **Running agents:** T-143, T-124 and T-141 were messaged to apply the caps from their next command (3 building agents, under the cap).
+- **B0.374 T-145 launched (Opus): build/test speed (user request; the user's "T-144" was renumbered because that ID is taken).**
+  - Work items, biggest lever first:
+    1. Mock SDR tests from RealTime to Unpaced, except tests of pacing, backpressure or real-time listen.
+    2. lld linker.
+    3. Cranelift experiment.
+  - Before/after nextest wall times are to be measured.
+  - Four building agents now: T-143, T-124, T-141, T-145 (at the cap).
+- **B0.375 T-143 committed unverified (0170803).** The agent was at 277k tokens and stopped on instruction; handoff is in the scratchpad.
+  - **Deleted:** four hk-pipeline legal test files, acceptance `legal.rs`, `gating_tests.rs`, and two `egress_gaps.rs` files. Acceptance goes from 38 to 35.
+  - **Gating:** off by default; opt in with `HK_CONTENT_GATING=1` or `set_content_gating(true)`.
+  - **Migration 0005:** drops the DB content checks.
+  - **Finisher launched (fresh Opus):**
+    - Audit that the deleted files were legal-only.
+    - Build, run nextest on the affected crates, run acceptance and lint, and fix what fails.
+    - Check `aware_036` acceptance.
+    - Judge the `recovering_consumer_sees_exact_drop_markers` failure.
+- **T-141:** WIP commit f3eeac1, with its handoff pending a final test count.
+- **B0.376 T-141 WIP (f3eeac1): Gamma-mixture floor works, but the acceptance comparison fails.**
+  - **What works:**
+    - Gamma-mixture floor bias solved by bisection, cached by shape set.
+    - Tile format 4 adds per-shape counts; v1–v3 tiles are still readable.
+    - `scheduler_history`: 72/72 tiles have a floor (was 0).
+    - API provenance gains `cell_shapes`.
+  - **What fails:** the a-priori check of scheduler vs fixed-tune floor. The floors are −99.80 vs −100.81 dB, a 1.01 dB gap against the 0.5 dB limit.
+  - **Cause (not yet confirmed):** the gap is already in the uncorrected power mean, and a carrier reads 2.2 dB lower under the scheduler. So it sits upstream of the mixture model; the suspect is mock SDR resample/noise-fill level scaling or per-bin vs PSD normalisation across RBWs.
+  - **Next:** fresh Opus finisher launched to root-cause and fix at the source. The threshold stays unchanged.
+- **B0.377 T-124 WIP (c0ab427): 3/8 green.** Handoff: scratchpad `t124b-handoff.md`.
+  - **Scenes:** main 46 h with 2 × 1 s windows per 15-min interval (413 s run); new-emitter scene 9 d; restart scene 3 h.
+  - **Pass:**
+    - (e) simulator comparison.
+    - (j) restart keeps the pinned site.
+    - (c) false alarms: 0 against a bound of 1. Weak evidence, since no alarm could raise.
+  - **Product bugs:**
+    - (b/g/h): the alarm path marks every input immature-baseline (815) while the report shows the baseline available with z 11.4. → T-146, launched.
+    - (a): the 50% channel reads FCO 0 against truth 0.494, and a 10% channel is never learned. → T-147, after T-141.
+  - **Test issues, fixed in the next T-124 round:**
+    - (d): the coverage bound was mis-derived. The report takes coverage from history, which records ~0.49 s of each 1 s window.
+    - (i): the span query hit its 7 d cap. A fix is committed but not yet re-run.
+  - **Also noted:** 3 bandit dwells in the main scene; a dwell near a replay window's end claims 2 s past its last sample (replay effect).
+  - **Status:** T-124 blocked on T-146 and T-147.
+- **B0.378 T-146: no maturity mismatch; the premise was wrong.**
+  - **Evidence:** a diagnostic re-run of the T-124 scene shows the alarm path and the report agree on maturity. h36–46 injected channel: all-hours pool mature, occupancy z 4.67, novelty 0.238.
+    - The 815 immature suppressions are expected: first ~24 h per channel, two channels first seen at h28, and one channel that never reaches 24 h.
+  - **Real gap, per-interval scoring power:**
+    - Alarm on-level needs z ≥ 7.9.
+    - With 2 × 1 s windows per interval, measured FCO is ~0 or 1, and `between_var()` (baseline.rs:462, ~0.041) dominates the variance in novelty.rs:84. One interval caps at z ≈ 4.7.
+    - The report's z 11.4 pools many intervals; the alarm path never does.
+    - The CUSUM compares the 14-day-half-life adaptive copy with the reference, so it barely moves in 10 h.
+  - **Gain step:** the new gain state starts its own level pool, so there is no level z and no alarm (correct), but also no explained anomaly (`provenance_explained` never set).
+  - **Decision needed (user):**
+    - Alarm evidence accumulation across intervals, CUSUM on per-interval z, and/or correcting `between_var` for sampling noise, versus denser scene visits.
+    - What test (h) should expect.
+  - **Artifacts:** diagnostic patch and logs in scratchpad `t146-*`. T-146 worktree removed; no commit.
+- **B0.379 User decisions and merges.**
+  - **Alarm evidence (user chose "accumulate + fix variance"):** the alarm path pools per-interval evidence across consecutive intervals, and `between_var` subtracts the expected binomial sampling noise. ADR-0012 §3.4/§7.2 amended; false-alarm budget kept. → T-146 re-scoped to implement it.
+  - **Gain step (user chose "no alarm + step disclosed"):** T-124 (h) passes when no alarm is raised and the step is disclosed in provenance.
+  - **T-143 merged (4b40f59):**
+    - Build and lint green; targeted nextest 641 run, 640 passed plus the fixed `stream_tail` test; acceptance 28 + 2 hardware-ignored.
+    - `listen_retune`'s non-legal coverage remains in `listen_lifecycle`.
+    - The drop-markers failure is an unrelated load flake (10/10 in isolation).
+  - **T-140 merged (3828015).** Both worktrees removed; full check started.
+  - **T-141 WIP (e1a3ade), root cause found:** the mock SDR re-rounds re-rendered scheduler hops to int8 a second time.
+    - The scene is quantisation-limited (noise ~0.5 code rms): single rounding predicts −100.77 dBFS/Hz against −100.81 measured; double rounding predicts −99.84 against −99.86 measured.
+    - Pipeline normalisation and gains are correct.
+    - Its fixed dequant filter narrows the gap to 0.62 dB, but attenuates later emitters by up to 1.2 dB, so it is not acceptable as is.
+    - Second finisher launched.
+  - **T-145 progress:** most slow tests are already unpaced (CPU-bound serial tests dominate). Only 2 tests switched; `api_contract` via `hk serve --device mock:` is still to judge. lld and cranelift are installed.
+- **B0.380 Full check green after the T-143 + T-140 merges (066372c).**
+  - Lint clean.
+  - Tests: 1328/1328 nextest+UI (down from 1387, since T-143 deleted the legal tests).
+  - Acceptance: 28/28 plus 2 hardware-ignored (was 32; the legal cases are gone).
+  - Disk: 75 GB free.
+- **B0.381 T-141 done (69c9c70 fix, 9e971a4 merge main, 51cf279 fmt); Opus review running.**
+  - **Noise measured in codes rms:** real captures 0.75 / 1.43 / 1.67 / 8.7 / 25.2; synthetic scene ~0.5.
+    - Low-gain HackRF captures are also quantisation-limited, so the scene is realistic and unchanged.
+  - **Mock fix:** per-bin adaptive subtraction of the recording's rounding noise on re-rendered IQ only.
+    - Gain is causal from earlier frames.
+    - The earlier fixed filter was dropped.
+    - Fixed-tune passthrough is untouched.
+  - **Result:** `scheduler_history` −100.770 vs −100.810 (0.040 dB, was 1.01; a-priori limit 0.5 unchanged).
+  - **New mock test:** emitters starting mid-recording stay within 0.2 dB.
+  - **Tests:** 90/90 targeted; lint clean.
+  - **Review focus:** mixture solve/cache, tile v4 codec, whether mock subtraction distorts bursts/transients across e2e tests, per-block cost.
+- **B0.382 T-141 review (Opus): FIX-FIRST.**
+  - **Bug:** mixture weights are per tile, but each cell's p10 pools only that cell's frames. Sweep-only cells get dwell-heavy weights (~0.8 dB wrong), which breaks "no floor, never a wrong one".
+  - **Risks:**
+    - The adaptive dequant (α=1/8) attenuates transients by ~−1.8 dB at onset and overshoots +1.25 dB after an emitter stops.
+    - `level` is not re-seeded after skip/pass-through, so every hop starts stale.
+    - The emitter test skips the transient window.
+    - No full e2e/acceptance run after the mock change.
+  - **Nits:** u64 sum overflow on a corrupt tile; shape tolerance undocumented.
+  - **Verified:** bisection, per-query cache, pass-through never dequantised, deterministic, no ground-truth use, v4 decode bounds, no weakened tests.
+  - **Next:** fix round continued in finisher 2 (~128k tokens), including an e2e/pipeline timing comparison and `just acceptance` in the worktree.
+- **B0.383 T-146 WIP (0e83566), untested. The agent was at 252k tokens; a finisher was launched.**
+  - **Rule:** a Stouffer run per (site, subject, cal) with S = |Σz|/√k and p_seq = 2k(k+1)·Q(S), mapped to z_eq = Q⁻¹(√p_seq).
+    - Novelty is the max of the interval's own score and the run score.
+    - The null on-rate ≤ Q(7.9)²/2.
+    - The run resets on direction change, a gap over 2 h, gain key, immature/explained input, or site change. Runs are not persisted.
+  - **`between_var` correction:** subtracts p(1−p)(ΣV/W − ΣwV/W²), floored at 0.1× raw.
+    - This needs a per-slot sampling moment: baseline format goes v2 → v3, and a slot grows 28 → 32 B.
+    - Two store-test expectations change.
+  - **Latency:** sparse onset raises within 14 intervals (a priori); dense within 2.
+  - **Finisher must check:**
+    - Compile and test fixes.
+    - The Monte-Carlo null test.
+    - The parked-week 0-refusal test under 256 MiB, now at risk from the 32 B slots.
+    - Conflict with T-140 accessors when merging main.
+  - **T-124 knock-on:** its busier-alarm latency limit must be re-derived from the new rule (14-interval sparse bound) before its next run.
+- **B0.384 T-148 launched (Sonnet, user request).** Sidebar Selections/Inventory rows overflow sideways, pushing the action buttons off-screen. The fix wraps rows so the buttons are always reachable. It is a thin-client CSS tweak separate from the UI rewrite, and not a Rust build.
+- **B0.385 MUI milestone approved by the user (exploratory UI rewrite).**
+  - **Inputs:** brief docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html. Both were untracked, so they are committed now so agent worktrees see them.
+  - **Roadmap:** MUI row added to docs/11.
+  - **Tasks:** T-149..T-156.
+    - T-149 MUI-DESIGN (Opus high, core; ADR-0013, blocks the rest).
+    - Then in parallel: T-150 shell + Outputs dock + Capture timeline (Sonnet), T-151 Explore sidebars + focus (Sonnet), T-152 centre spectrum/WebGL waterfall/brackets (Opus), T-153 Decode workbench (Sonnet), T-154 packet inspector rehome (Sonnet), T-155 alarms/reports/scheduler rehome (Sonnet).
+    - T-156 finish/tests/phone-width/retire old layout (Sonnet).
+  - **API gaps:** gaps found by the design (e.g. capture timeline scrub) become backend tasks.
+  - **Constraints:**
+    - The thin-client rule already exists in CLAUDE.md.
+    - MUI runs in parallel with the M2 tail.
+    - UI agents don't count toward the 4 Rust-building-agent cap unless they build Rust.
+  - **T-148** (current-UI sidebar fix) lands separately.
+- **B0.386 T-148 and T-141 merged; T-149 MUI-DESIGN and T-147 launched.**
+  - **T-148 merged (589fad6):** CSS row-cards scoped to the three sidebar tables; tsc, npm test and build green.
+  - **T-141 merged (ce0c8a4, fix round):**
+    - Tile v4 stores per-shape frames; a mixture floor exists only when every shape covers the same cells, otherwise none.
+    - Mock dequant: fast attack (>3× level), one-frame look-ahead release, re-seeded on restart.
+    - Transient test bounds set a priori: 0.5 dB for the first 2048 samples, 0.2 dB settled; worst measured +0.34 dB.
+    - Floor sums saturate on overflow.
+    - Scheduler vs fixed-tune floor: 0.070 dB.
+    - Targeted tests 91/91.
+    - Timing and acceptance were not run in the worktree; the post-merge full check covers them, with e2e timings compared against `test-t143.log`.
+  - **Worktrees:** both removed. Full check started.
+  - **T-149 (MUI-DESIGN, Opus high)** launched on main (brief + mockup committed).
+  - **T-147 (channel FCO under the scheduler)** launched now that T-141 is merged.
+- **B0.387 T-146 committed (9c1b596; merge of main 72a86d2). Opus review running.**
+  - **Sequential rule:** Stouffer run per (site, subject, cal, direction), p_seq=2k(k+1)·Q(S), z_eq=Q⁻¹(√p_seq).
+  - **Monte-Carlo null at z_on=2:** single-interval 9.92e-4 (limit 2Q²=1.04e-3); sequential raise 1.2e-5; combined 9.96e-4 (limit 1.31e-3).
+  - **Latency:** sparse onset raises at 13 (a-priori limit 14); dense at 2.
+  - **between_var:** sampling-noise correction, floored at 0.1× raw. Slot 28→32 B; baseline format v3. Parked week 218.8 MiB, 0 refusals.
+  - **Changed expectations:** 28 B size assert; golden v2 re-encode; hysteresis test moved to `LevelAboveBaseline`.
+  - **Tests:** 126 targeted green; lint clean.
+  - **T-124 knock-on:** its latency limit must come from the ADR §7.2 table (17@z3.0, 14@3.4, 8@4.7, 7@5.0) using the scene's re-derived z.
+- **B0.388 T-146 review (Opus): FIX-FIRST.**
+  - **Holds:**
+    - union-over-run-length bound
+    - one-sided factor
+    - √p_seq + hysteresis (conservative)
+    - between_var algebra
+    - decay scaling of the new moment
+    - v2 moment=0 (safe direction)
+    - run pruning
+    - new-emitter and quieter paths
+  - **Risks:**
+    - Budget proof assumes Gaussian i.i.d. z. Sparse discrete looks (n_eff=2) break it by about 3000×, and clustered traffic could alarm about monthly. Needs binomial and Markov Monte-Carlo at production thresholds, then a mid-p/continuity and/or autocorrelation deflation fix.
+    - Any opposite-sign z resets the run, so alarms flap. Flap coverage was lost when the hysteresis test changed kind.
+    - p̄(1−p̄) over-subtracts for patterned channels, inflating z by about 12% of τ².
+    - The 2 h wall-time gap blocks accumulation for subjects revisited less often than every 2 h.
+    - The run resets on every dominant gain-key flip.
+  - **Nits:** ADR wording on the 0.1× floor and on sequential vs combined budget; upgraded frozen references stay uncorrected.
+  - **Next:** fix round continued in the T-146 finisher (~159k).
+- **B0.389 Full check green after T-148 + T-141 merges (d00dc80).**
+  - **Results:** lint clean; 1334/1334 nextest+UI (712.8 s, was 583.8 s); acceptance 28/28 (64 s).
+  - **Timing (T-141 mock dequant review item 5):**
+    - adsb 5.63→5.60 s; refine_wfm 25.9→26.1 s; signal_062 6.1→6.6 s; bandit_on 83→110 s.
+    - This run overlapped four agent builds at load up to 36, so it is inconclusive.
+    - The bandit tests retune constantly through the mock, so the per-bin dequant FFT cost is plausible. T-145's Cranelift/timing work should re-measure bandit_on on main at low load. If it is a real ≥20% regression, a follow-up is to vectorise or skip dequant when the recording noise is well above 1 code rms.
+- **B0.390 T-147 WIP (6035543): repro test only, no fix yet; finisher launched.**
+  - **Repro** (`occupancy_sparse_visits`, 6 h, default scheduler + bandit):
+    - 433.400: FCO 0.0, truth 0.570.
+    - 433.375: FCO 0.0, truth 0.083; never learned.
+    - 433.425: FCO 1.0, truth 1.0 (correct).
+  - **Ruled out:** history rows and thresholds are correct (on-rows −64 dB vs threshold −95.9 dB); 476 visits present.
+  - **Leading cause:** sweep hop 1 is centred at 433.3875, so both channels sit 12.5 kHz from DC, inside the detector's 15 kHz rule (`detector.rs:957`). Real carriers get DC-spur flags.
+    - Every DC spur is suspect (`channels.rs:57`), and the suspect rule (`engine.rs:565`) then poisons every occupied visit to that frequency, including clean visits from other tunings.
+    - Suspect visits are dropped from FCO, and learning skips them (`channels.rs:544`).
+  - **Fix direction:** a DC flag marks only that tuning's observation suspect. A frequency is treated as a DC spur only if it is always near its tuning's centre.
+    - ADR-0012 §2.6 amendment.
+    - Real-DC-spur suppression test.
+    - A priori Wilson CI checks.
+- **B0.391 T-149 MUI-DESIGN done (80aa73b skeleton, 9509424 ADR-0013). Opus review running in parallel with the first panel fan-out.**
+  - **Framework:** vanilla TS plus a ~60-line store, no runtime dependencies. Budget: app.js ≤150 KB min / 45 KB gz (skeleton is 24 / 9.4 KB).
+  - **Skeleton:** served at `/app.html` next to the old UI, with the waterfall live and store/shell tests (10 + 7).
+  - **File ownership:** T-150 shell/dock/capture; T-151 explore; T-152 centre + waterfall.ts; T-153 decode pipelines/stages/plots/params; T-154 decode inspector; T-155 review drawer.
+  - **API gaps:** 12, recorded as T-157..T-168 (group MUI-API; large ones on Opus). Not launched yet; they follow the M2 tail.
+  - **Launched now:** T-150, T-151, T-152, based on 9509424. T-153..T-155 follow as agent slots free (agent throttle).
+  - **T-145:** Cranelift dropped (tests slower at 1367 s vs 1293 s, with 3 failures; compile ~20 s vs 31 s). lld and the pacing change also gave no gain. The bandit timing reference is running.
+  - **T-147:** diag3 confirmed DC-suspect poisoning (274 DC-flagged vs 273 clean detections; the suspect-inclusive FCO bound 0.586 matches truth 0.570). The finisher is also asked why the 10% channel was learned in the 6 h run but not in the 46 h one.
+- **B0.392 T-145 done: nothing kept, no commits.**
+  - **Baseline** (6 test threads): nextest 1292.8 s, 1454 passed; acceptance 86 s, 32 passed.
+  - **Top tests:** listen_live 93 s; bandit ×4 at 83–87 s; three_fm 47 s; refine 44 s; stream_external 43 s; rds 35 s; pocsag 31 s.
+  - **Pacing:** no gain (slow tests are already Unpaced). `api_contract` via `hk serve --device mock:` is hard-wired to RealTime (4 tests × ~9 s); unpacing it needs a product change.
+  - **lld:** no gain.
+  - **Cranelift:** faster compile, but slower tests with 3 failures. Dropped.
+  - **Real lever:** bandit tests are CPU-bound in debug (39.5 M samples in 81 s, zero waits). Adding dev opt-level for hk-dsp/hk-core/hk-pipeline/hk-demod would help, at a compile-time cost. Asked the user.
+  - **Bandit reference:** pre-T-141 worktree 81.5 s at load ~17. Now timing the same test on main post-T-141.
+- **B0.393 User chose dev opt-level=2 for the hot crates (hk-dsp, hk-core, hk-pipeline, hk-demod). T-169 launched on Sonnet.**
+  - The existing detect/store/context overrides stay as they are.
+  - T-169 measures nextest wall time and compile time before and after the change.
+  - It keeps the change only if nextest drops by at least 15% with every test green.
+  - Optimisation-only failures get reported rather than bent to pass.
+- **B0.394 T-149 review (Opus): FIX-FIRST, structural fixes only.**
+  - **Checks that passed:** thin client (no signal logic); 6 API routes/streams spot-checked against docs/api.md; spectrum rows bypass the store; token kept in sessionStorage with Referrer-Policy no-referrer; old UI untouched; no gap is already served.
+  - **Problems (they would make nearly every parallel merge conflict):**
+    - main.ts mounts, state.ts slices, package.json test script and app.css are shared hotspots.
+    - Cross-task APIs are missing: dock/api.ts and decode/status-feed.ts.
+    - One throwing store listener freezes the other panels.
+    - Nit: no inventory `total`, so tab counts need a "500+" label.
+  - **Fix round launched** (fresh Opus; the T-149 agent was at 294k tokens): per-area index/slice/css files, glob test runner, typed stubs, listener isolation.
+  - **Correction to B0.391:** T-150..T-152 were not launched. They are back to todo and start after the T-149 fix merges.
+  - **T-145 bandit reference:** 81.5 s pre-T-141. The same test on main is being timed.
+- **B0.395 T-141 mock dequant costs about 33% on bandit tests. Confirmed and launched T-170.**
+  - **Measurement:** `bandit_on_attaches` took 81.5 s before T-141 (load ~17) and 108.8 s on main at 0f2b5c3 (load 8–15).
+  - **T-170 (Opus):** bypass dequant when the recording is not quantisation-limited (threshold fixed a priori from rounding-noise math), and/or a cheaper FFT path. Fidelity tests and the `scheduler_history` 0.5 dB check must hold.
+- **B0.396 T-149 merged (c42284f fix round).**
+  - **Structure:** per-area `index.ts`/`slice.ts`/css files under `ui/src/app/` (explore, centre, capture, dock, decode, review, plus `decode/inspector*` for T-154). `state.ts` and `app.css` only compose them; `test/run.mjs` bundles and runs every test.
+  - **Stubs:** `dock/api.ts` (`startListen`, `startRecordsOutput`, `stopOutput`) and `decode/status-feed.ts` (`subscribePipelineFeed`).
+  - **Store:** listener exceptions are isolated.
+  - **Tests:** 157 UI tests green.
+  - **Gaps:** ADR gap 13 (inventory `total`) added as T-171.
+  - **Panel fan-out:** T-150, T-151 and T-152 launched on main. T-153..T-155 follow when agent slots free.
+- **B0.397 T-146 fix round: review risk confirmed, fixes applied, not yet committed. The agent is at 304k tokens and was told to finish or WIP after its run.**
+  - **Pre-fix null budget ratios** (union-bound quantity ÷ Q²/2, production thresholds):
+
+    | Null | Busier ratio | Raises / 10⁶ intervals |
+    |---|---|---|
+    | binomial(2, 0.2) | 1.2·10⁶× | 0 |
+    | Markov duty 5%, mean busy 4 | 1.1·10²⁹× | 526 (~1 per 20 days) |
+    | Markov duty 50% | 2.6·10²⁴× | — |
+
+    The review's discrete/autocorrelation risk was real.
+  - **Fixes:**
+    - Look evidence = min(z, exact binomial-tail z).
+    - Lag-1 conditional "still occupied" rate from new per-subject lag-1 moments.
+    - Sign-reset slack |z| ≤ 1.
+    - Per-slot sampling variance.
+    - Revisit-relative gap max(2 h, 3× revisit).
+    - Gain-step-only reset.
+    - ADR wording.
+  - **Latency cost:** sparse-onset a-priori window is now intervals 17–23 (was 14). T-124 must re-derive its latency limit.
+  - **Also recorded:** T-147 fix committed 47dc746 (merge a05202c; lint green). Post-merge tests and the 46 h diagnostic are pending.
+- **B0.398 T-147 in review (47dc746, merge a05202c). Opus review launched.**
+  - Post-merge tests: hk-detect 6, hk-context 69, hk-model 8, hk-pipeline 6 (incl. the 6 h sparse-visit repro); lint clean.
+  - The 46 h 10%-channel learning diagnostic is still running. It is explanatory only and not required for the merge.
+- **B0.399 T-170 merged (5f5def7).**
+  - **Change:** dequant is bypassed when rounding noise ≤ 1.1579% of the floor (10^0.005−1), i.e. the floor is ≥ 2.68 codes rms.
+  - **Bandit test:** 110.4 s → 82.4 s. The bandit recording is ~3.46 codes, so it is bypassed.
+  - **Unchanged:** the `scheduler_history` scene (~0.5 code) still dequantises, with the floor gap still 0.070 dB. The 8 mock tests and 4 bandit tests pass; lint clean.
+  - **Next:** full check started.
+- **B0.400 T-146 WIP 09c2f45: review fixes work; finisher 2 launched.**
+  - **Budget after the fixes** (union bound ÷ Q²/2; raises per 10⁶ intervals):
+
+    | Null model | Before | After |
+    |---|---|---|
+    | Binomial p 0.05 | 25.5× | 2.7e-14× |
+    | Binomial p 0.2 | 1.2e6× | 1e-34× |
+    | Markov duty 0.05 | 1.1e29×, 526 raises | 0, 0 raises |
+    | Markov duty 0.5 | 2.6e24× | 0 |
+
+  - **Other results:**
+    - Sparse p=0.9: 1 raise, 0 clears.
+    - 3 h revisits raise at visit 23; service sparse onset raises at 25.
+    - Parked week: 229.9 MB, 0 refusals.
+  - **Tests:** 105/107 targeted. Both failures are claimed test-side (run-restart expectation; sparse loop too short for the 17–23 window). The finisher must verify against the ADR rule before editing either test.
+  - **Still open:** ADR §7.2 tables and lint.
+  - **T-147 report:**
+    - 433.400 FCO 0.586 in CI [0.334, 0.799] (truth 0.570); 433.375 0.084 in [0.021, 0.279] (truth 0.083) and learned.
+    - The 46 h run learns all channels.
+    - The Wilson interval edge now returns exactly 1/0.
+  - **T-147 follow-up:** the live candidate path (`detect.rs:458`) still uses the per-detection suspect rule. Record it after review.
+- **B0.401 T-147 review (Opus): MERGE.** It merges after the T-170 full check.
+  - **Verified:**
+    - The per-tuning rule can't self-clear. A DC-flag tolerance of 15 kHz against a twin tolerance of ~3.2 kHz means any near-LO twin is itself flagged. Twins are compared against pre-refutation flags.
+    - The ±1 s window is bounded, and the 5 s close settle covers it.
+    - The n_eff → n_revisits change is justified: §2.5 counts visits, while the CI comes from n_eff 13.5 and is honestly wide. The test still asserts truth in the CI, and pre-fix values fail it.
+    - Blind rules held. Bandit dwells sit off-centre. No tests weakened. The Wilson edge fix is exact.
+  - **Follow-ups:**
+    - T-172: twin search O(DC × clean) → time-bounded; slack from `t_cell_ns`; twin must be off its own tuning's DC; ADR wording.
+    - T-173: scheduler hops guarantee an off-DC view.
+    - T-174: the live candidate path (`detect.rs:458`) uses the twin rule.
+- **B0.402 T-150 committed (7df8129, Sonnet).** Coordinator check passed: diff confined to shell, dock and capture plus one line in base.css; npm test 173 passed, 0 failed (exit 0).
+  - **Outputs dock:** implements `dock/api.ts` (`startListen` / `startRecordsOutput` / `stopOutput`) plus a multi-stream `AudioSession` that reuses the worklet.
+  - **Capture timeline:** activity band from `/api/history`; scrubbing writes the time cursor.
+  - **Gap 1 (no rolling buffer):** the timeline shows observed_fraction and an interim "Record IQ" button rather than invented buffer numbers.
+  - **Review badge:** polls `/api/anomalies`.
+  - **Bundle:** app.js 36.9 KB (14.6 KB gzip).
+  - **Merge:** after the T-170 full check.
+  - **T-153** (Decode workbench, Sonnet) launched.
+- **B0.403 T-152 committed (9bbd85a, Opus); T-154 launched.**
+  - **Coordinator check on T-152:** diff limited to `centre/*`, `waterfall.ts` and `test/app-centre.test.ts`.
+    - The removed `waterfall.ts` lines are the row decimation moved into the pure `decimateRow`; push behaviour is unchanged.
+    - UI tests: 170 passed, 0 failed.
+  - **T-152 features:** spectrum trace, brackets from inventory, drag-select via `POST /api/selections`, hover readout, review-render from `/api/history`, perf counters (row prep 0.13 ms at 65k→16k).
+  - **Gap 10:** DC mask uses the observation-log notch, otherwise ±15 kHz labelled "assumed".
+  - **Needs user attention:** T-152 calls `POST /api/control/center` (click to tune). This is a control action through the authenticated API.
+  - **Merges:** T-147, T-150 and T-152 merge after the T-170 full check.
+  - **T-154** (packet inspector rehome, Sonnet) launched.
+- **B0.404 T-146 finished (5739fde; merge with main d110030); merges after the full check.**
+  - **The two failing tests were test-side; code unchanged.**
+    - The run-restart test now follows the documented rule: a new k=1 run starts from a positive look.
+    - The sparse-onset loop now extends to N=23. It raises at 22, inside the unchanged a-priori window 17–23.
+  - **ADR §7.2 tables**
+    - Budget: every null case (binomial p 0.05 / 0.2 / 0.5, Markov duty 0.05 / 0.5) is now within budget.
+    - Coverage is stated as i.i.d. binomial plus lag-1 Markov only.
+    - Latency: dense z 3/4/6 raises at 17/10/5; sparse pool FCO 0.02/0.05/0.1/0.2 raises at 14/20/28/49.
+  - **Parked week:** 229.9 MB, 0 refusals.
+  - **Post-merge tests:** hk-store 7, hk-model 6, hk-context 53, hk-pipeline 28, report scene 1. Lint clean.
+  - **Merge queue after the T-170 full check:** T-147 (a05202c), T-146 (d110030), T-150 (7df8129), T-152 (9bbd85a). One combined full check follows, bisecting by merge if red.
+  - **Then:** T-124 (M2 acceptance) resumes, with thresholds re-derived from the §7.2 latency tables.
+- **B0.405 T-155 launched (Sonnet).** It builds the Review drawer that rehomes alarms, survey reports, history, scheduler/attention and device status. With T-150 and T-152 committed, all six MUI panel tasks are now launched or done.
+- **B0.406 T-151 committed (7ad402a, Sonnet). Coordinator check: diff confined to `explore/*` plus 2 tests; npm test 178 passed / 0 failed.**
+  - Built the inventory tabs (sortable, wrap-layout Promote/Delete), selections and the focus panel (explanations labelled suggestions).
+  - Honest placeholders for gaps 2, 3 and 13 ("500+").
+  - Re-exports `promoteEntry`/`deleteEntry` from the old UI module. T-156 must move these before retiring the old UI.
+  - Merge queue after the T-170 full check: T-147, T-146, T-150, T-151, T-152, then one combined full check.
+- **B0.407 T-158 + T-171 launched as one Sonnet task.** Both are MUI API gaps on `/api/inventory`: per-row SNR and peak level, plus a `total` count for the list. They are combined because they touch the same route, docs and contract. Other API gaps wait until the M2 tail merges.
+- **B0.408 T-170 full check green (7af4dc1). Five tasks merged in sequence without conflicts; combined full check started; T-124 resumed.**
+  - **T-170 full check:** lint clean; 1334/1334 tests; acceptance 28/28 (63 s).
+  - **Merged:** T-147 (695d850), T-146 (132eccf), T-150 (c1b296a), T-151 (8866b71), T-152 (0c596a5). Their worktrees were removed.
+  - **If the combined check fails:** bisect by merge.
+  - **T-124 (M2 blind acceptance):** resumed now that T-146 and T-147 are on main.

@@ -129,7 +129,7 @@ fn blind_fm_through_the_mock_device_detects_the_station_with_fm_broadcast_in_top
         center_hz: source.recording().center_hz,
         start_time: source.start_time(),
     };
-    // Legal class exactly as a live device tuned there would get.
+    // Content class (informational) exactly as a live device tuned there would get.
     let class = band_class(&[info.center_hz], info.sample_rate_hz);
     assert_eq!(
         class,

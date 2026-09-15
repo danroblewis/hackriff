@@ -134,6 +134,8 @@ A consumer that is disconnected (§7) sees no final marker: the connection just 
 
 ## 6. Content gating (egress enforcement point)
 
+**Default: gating off (T-143).** Content gating is opt-in: unless `HK_CONTENT_GATING=1` is set (or `hk_model::set_content_gating(true)` is called), every class permits content, identities are shown in clear, and nothing below withholds or refuses anything. Classes are still derived and reported (`content_class`, `source_class`) as information only. The opt-in path is untested.
+
 The enforcement code is `hk_api::stream::gate`, called by `Publisher` before any record byte is produced.
 - Metadata always flows. Content is refused unless its class `permits_content()` (`hk_model::ContentClass`).
 - Classes are ranked by restrictiveness: `unrestricted` (0) < `own-key-decrypted` (1) < `metadata-only` = `restricted-cellular` = `restricted-paging` (2).
@@ -190,8 +192,6 @@ The ~30 fps survey waterfall therefore still works under every class, including 
 | `metadata-only` | policy-reduced metadata (policy required) | GATED | GATED | GATED | GATED | payload if declared ≤ 50 rows/s with geometry; rate and size enforced per row |
 | `restricted-cellular` | policy-reduced metadata (policy required) | GATED | GATED | GATED | GATED | payload if declared ≤ 50 rows/s with geometry; rate and size enforced per row |
 | `restricted-paging` | policy-reduced metadata (policy required) | GATED | GATED | GATED | GATED | payload if declared ≤ 50 rows/s with geometry; rate and size enforced per row |
-
-The re-probe regressions (locality per consumer, in-process metadata policy, per-row spectrum enforcement) are `crates/hk-stream/tests/egress_gaps.rs`.
 
 Gating also covers persistence: the repository refuses content under a forbidding class (`RepoError::GatedContent`, T-002). The plugin host stores the metadata-only form instead (§9.4).
 
@@ -308,8 +308,6 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 - **`sample_index` bound.** A restricted line's `sample_index` becomes the row's time, so it must lie within the inclusive range of input offered to that plugin instance: from the lowest record `sample_index` to the highest `sample_index + elements`. A line with an index outside that range, a non-integer index, or an index before any input is offered is dropped and counted (`sample_index_out_of_range`). Lines without `sample_index` get host arrival time.
 - **Confidence.** A restricted annotation's `confidence` is rounded to 0.01.
 - **Example paging policy (not a plugin):** `crates/hk-plugins/policies/restricted-paging.json` (`hk_plugins::EXAMPLE_RESTRICTED_PAGING_OUTPUT`). It allowlists only `capcode` (digits, at most 8), `function` (enum `0`–`3`), `baud` (enum `512`/`1200`/`2400`) and `encoding` (enum `numeric`/`alpha`/`tone`). `t` is host-stamped from `sample_index`. Message bodies, numeric pages included, are content and are never allowlisted.
-
-The N1 covert-channel regressions (hex text, packed integer, numeric page in capcode, `sample_index` offset, confidence digits) are `crates/hk-plugins/tests/egress_gaps.rs`.
 
 **Logs:** plugin `log` lines and stderr are stored in the log ring only when the ceiling permits content; otherwise they are counted (`log_lines_withheld`, `stderr_lines_withheld`). Host errors about malformed lines name the field, never the offending value. `PluginMonitor::log_tail()` returns the lines tagged with the ceiling, so a control API can gate them.
 

@@ -1,4 +1,8 @@
-//! Egress gating (ADR-0004; docs/stream-contract.md §6). **Legal guardrail.**
+//! Egress gating (ADR-0004; docs/stream-contract.md §6).
+//!
+//! **Off by default (T-143):** unless content gating is enabled ([`hk_model::content_gating_enabled`],
+//! `HK_CONTENT_GATING=1`), every class permits content and none of the rules below withholds or
+//! refuses anything; classes are informational. The rules apply only when gating is opted in.
 //!
 //! This module is the single enforcement point for restricted content leaving hackriff on a
 //! stream. The publisher calls it for every record before any byte is produced:
@@ -71,14 +75,17 @@ pub const fn clamp(ceiling: ContentClass, claimed: ContentClass) -> ContentClass
 
 /// Whether a message whose effective (clamped) class is `effective` may carry its `content` on a
 /// stream whose header class is `stream`. Own-key content needs an own-key stream.
-pub const fn message_content_permitted(stream: ContentClass, effective: ContentClass) -> bool {
+pub fn message_content_permitted(stream: ContentClass, effective: ContentClass) -> bool {
+    if !hk_model::content_gating_enabled() {
+        return true;
+    }
     effective.permits_content()
         && (!matches!(effective, ContentClass::OwnKeyDecrypted)
             || matches!(stream, ContentClass::OwnKeyDecrypted))
 }
 
 /// Whether a binary record of `kind` under the header class `class` may carry its payload.
-pub const fn binary_payload_permitted(kind: StreamKind, class: ContentClass) -> bool {
+pub fn binary_payload_permitted(kind: StreamKind, class: ContentClass) -> bool {
     !kind.payload_is_content() || class.permits_content()
 }
 
@@ -90,70 +97,6 @@ pub fn spectrum_stream_permitted(class: ContentClass, row_rate_hz: Option<f64>) 
 }
 
 /// Whether a stream of `class` may be served on a remote transport (TCP, WebSocket bridge).
-pub const fn remote_transport_permitted(class: ContentClass) -> bool {
-    !matches!(class, ContentClass::OwnKeyDecrypted)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clamp_never_loosens() {
-        for &ceiling in ContentClass::ALL {
-            for &claimed in ContentClass::ALL {
-                let eff = clamp(ceiling, claimed);
-                assert!(restrictiveness(eff) >= restrictiveness(ceiling));
-                assert!(restrictiveness(eff) >= restrictiveness(claimed));
-                if !ceiling.permits_content() || !claimed.permits_content() {
-                    assert!(!eff.permits_content(), "{ceiling:?} {claimed:?}");
-                }
-            }
-        }
-        assert_eq!(
-            clamp(ContentClass::RestrictedPaging, ContentClass::Unrestricted),
-            ContentClass::RestrictedPaging
-        );
-        assert_eq!(
-            clamp(ContentClass::Unrestricted, ContentClass::RestrictedCellular),
-            ContentClass::RestrictedCellular
-        );
-        assert_eq!(
-            clamp(ContentClass::OwnKeyDecrypted, ContentClass::Unrestricted),
-            ContentClass::OwnKeyDecrypted
-        );
-    }
-
-    #[test]
-    fn own_key_content_needs_an_own_key_stream() {
-        for &stream in ContentClass::ALL {
-            for &record in ContentClass::ALL {
-                let eff = clamp(stream, record);
-                let permitted = message_content_permitted(stream, eff);
-                let expected = match eff {
-                    ContentClass::Unrestricted => true,
-                    ContentClass::OwnKeyDecrypted => stream == ContentClass::OwnKeyDecrypted,
-                    _ => false,
-                };
-                assert_eq!(permitted, expected, "stream {stream:?} record {record:?}");
-            }
-        }
-        assert!(!remote_transport_permitted(ContentClass::OwnKeyDecrypted));
-        assert!(remote_transport_permitted(ContentClass::RestrictedPaging));
-    }
-
-    #[test]
-    fn spectrum_row_rate_cap() {
-        let gated = ContentClass::RestrictedPaging;
-        assert!(spectrum_stream_permitted(gated, Some(30.0)));
-        assert!(spectrum_stream_permitted(gated, Some(50.0)));
-        assert!(!spectrum_stream_permitted(gated, Some(50.1)));
-        assert!(!spectrum_stream_permitted(gated, None));
-        assert!(!spectrum_stream_permitted(gated, Some(f64::NAN)));
-        assert!(spectrum_stream_permitted(
-            ContentClass::Unrestricted,
-            Some(1e6)
-        ));
-        assert!(spectrum_stream_permitted(ContentClass::Unrestricted, None));
-    }
+pub fn remote_transport_permitted(class: ContentClass) -> bool {
+    !hk_model::content_gating_enabled() || !matches!(class, ContentClass::OwnKeyDecrypted)
 }

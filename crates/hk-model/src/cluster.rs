@@ -751,10 +751,11 @@ pub fn most_restrictive(a: ContentClass, b: ContentClass) -> ContentClass {
 /// Whether a class can never be opened by a reclassification (CLAUDE.md: never circumvent the
 /// security of others' traffic; US law restricts cellular and paging content even unencrypted).
 pub fn never_openable(c: ContentClass) -> bool {
-    matches!(
-        c,
-        ContentClass::RestrictedCellular | ContentClass::RestrictedPaging
-    )
+    crate::content::content_gating_enabled()
+        && matches!(
+            c,
+            ContentClass::RestrictedCellular | ContentClass::RestrictedPaging
+        )
 }
 
 /// Whether a tag is an identity-free label (T-036): 1–64 bytes of ASCII letters and `-` `_` `.`
@@ -896,8 +897,12 @@ pub enum IdentityAccess {
 }
 
 impl IdentityAccess {
-    /// Whether an identity of this class is shown in clear. Fails closed on `None`.
+    /// Whether an identity of this class is shown in clear. Always `true` unless content gating
+    /// is enabled ([`crate::content_gating_enabled`]); then fails closed on `None`.
     pub fn reveals(self, class: Option<ContentClass>) -> bool {
+        if !crate::content::content_gating_enabled() {
+            return true;
+        }
         match class {
             Some(ContentClass::Unrestricted) => true,
             Some(ContentClass::OwnKeyDecrypted) => self == IdentityAccess::OwnTrafficAuthorised,
@@ -1130,31 +1135,5 @@ mod tests {
         let mut old = json;
         old["version"] = 0.into();
         assert_eq!(Fingerprint::from_value(&old), None);
-    }
-
-    #[test]
-    fn identity_access_fails_closed() {
-        use ContentClass::*;
-        for access in [
-            IdentityAccess::Standard,
-            IdentityAccess::OwnTrafficAuthorised,
-        ] {
-            assert!(access.reveals(Some(Unrestricted)));
-            for c in [MetadataOnly, RestrictedCellular, RestrictedPaging] {
-                assert!(!access.reveals(Some(c)));
-            }
-            assert!(!access.reveals(None));
-        }
-        assert!(!IdentityAccess::Standard.reveals(Some(OwnKeyDecrypted)));
-        assert!(IdentityAccess::OwnTrafficAuthorised.reveals(Some(OwnKeyDecrypted)));
-        assert_eq!(
-            most_restrictive(Unrestricted, RestrictedPaging),
-            RestrictedPaging
-        );
-        assert_eq!(
-            most_restrictive(MetadataOnly, OwnKeyDecrypted),
-            MetadataOnly
-        );
-        assert_eq!(most_restrictive(Unrestricted, Unrestricted), Unrestricted);
     }
 }

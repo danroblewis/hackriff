@@ -1,0 +1,91 @@
+/* explore area styles (ADR-0013 §5, §8). Owner: T-151. Everything below is scoped under
+   `.side-inv`, `.side-sel` or `.focus` — the inventory/selections/focus slot roots defined in
+   src/app/index.html/base.css (T-150-owned). Shared atoms (.chip, .mini, .section-h, .empty, .hint)
+   come from base.css and are only extended here, never redefined. */
+
+/* ---- inventory ---- */
+.side-inv { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.side-inv .side-head { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; }
+.side-inv .h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; }
+.side-inv .h em { font-style: normal; color: var(--dim); font-weight: 400; letter-spacing: 0.02em; text-transform: none; }
+.side-inv .tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }
+.side-inv .tab { border: 0; background: transparent; padding: 5px 6px; border-radius: 5px; cursor: pointer; color: var(--muted); display: flex; justify-content: center; gap: 6px; align-items: center; }
+.side-inv .tab .count { font-family: var(--mono); font-size: 11px; padding: 0 5px; border-radius: 8px; }
+.side-inv .tab[aria-selected="true"] { background: var(--raise); color: var(--text); }
+.side-inv .tab[data-tab="confirmed"] .count { color: var(--teal); background: var(--teal-soft); }
+.side-inv .tab[data-tab="candidate"] .count { color: var(--lav); background: var(--lav-soft); }
+.side-inv .tab-note { color: var(--dim); font-size: 11.5px; line-height: 1.35; }
+.side-inv .sort-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.side-inv .sort-row .hint { flex: 0 0 auto; }
+.side-inv .list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; }
+.side-inv .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 8px 8px 10px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
+.side-inv .row:hover { background: var(--panel-2); }
+.side-inv .row[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+.side-inv .row .f { font-family: var(--mono); font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.side-inv .row .f small { color: var(--dim); font-size: 11px; font-weight: 400; }
+.side-inv .row .meta { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; }
+.side-inv .on-air { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 2px var(--amber-soft); flex: 0 0 auto; }
+/* Action buttons wrap into their own row rather than scroll (T-148 rule): always visible, never
+   hover-only, so Promote/Delete stay reachable on touch and at ~400 px. */
+.side-inv .acts { display: flex; flex-wrap: wrap; gap: 4px; }
+.side-inv .chip.known { color: var(--teal); border-color: rgba(82,194,174,0.35); }
+.side-inv .chip.unknown { color: var(--lav); border-color: rgba(163,149,224,0.35); }
+.side-inv .chip.flag { color: var(--coral); border-color: rgba(228,123,104,0.4); }
+.side-inv .dots { display: inline-flex; gap: 2px; align-items: flex-end; height: 10px; }
+.side-inv .dots i { width: 3px; background: var(--lav); border-radius: 1px; opacity: 0.85; display: block; }
+
+/* ---- selections ---- */
+.side-sel { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.side-sel .side-sel-head { flex: 0 0 auto; }
+.side-sel .h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; }
+.side-sel .h em { font-style: normal; color: var(--dim); font-weight: 400; letter-spacing: 0.02em; text-transform: none; }
+.side-sel .sel-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; }
+.side-sel .sel { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-radius: 6px; cursor: pointer; border: 1px dashed transparent; flex-wrap: wrap; }
+.side-sel .sel:hover { background: var(--panel-2); }
+.side-sel .sel[aria-current="true"] { border-color: rgba(240,165,66,0.5); background: var(--amber-soft); }
+.side-sel .sel b { font-weight: 500; }
+.side-sel .sel .mono { color: var(--muted); font-size: 11.5px; }
+
+/* ---- focus panel ---- */
+.focus .eyebrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.focus .state { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; padding: 2px 7px; border-radius: 4px; }
+.focus .state.confirmed { color: var(--teal); background: var(--teal-soft); }
+.focus .state.candidate { color: var(--lav); background: var(--lav-soft); }
+.focus .state.selection { color: var(--amber); background: var(--amber-soft); }
+.focus .chip.known { color: var(--teal); border-color: rgba(82,194,174,0.35); }
+.focus .chip.unknown { color: var(--lav); border-color: rgba(163,149,224,0.35); }
+.focus .chip.flag { color: var(--coral); border-color: rgba(228,123,104,0.4); }
+.focus .bigf { font-family: var(--mono); font-size: 28px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.05; margin-top: 8px; overflow-wrap: anywhere; }
+.focus .bigf small { font-size: 14px; color: var(--muted); margin-left: 4px; }
+.focus .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.focus .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
+.focus .kv dt { color: var(--dim); font-size: 11.5px; }
+.focus .kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.focus .kv dd.flag { color: var(--coral); }
+.focus .expl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.focus .expl li { display: grid; grid-template-columns: 22px 1fr; gap: 2px 8px; }
+.focus .expl .rank { font: 500 11px var(--mono); color: var(--dim); padding-top: 1px; }
+.focus .expl b { font-weight: 600; }
+.focus .expl .why { grid-column: 2; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.focus .expl li:not(:first-child) b { color: var(--muted); font-weight: 500; }
+.focus .conf { font: 10.5px var(--mono); color: var(--dim); margin-left: 6px; }
+/* Wraps to one column at narrow widths so every action stays reachable without horizontal scroll
+   (T-148 rule); two columns otherwise, matching the mockup. */
+.focus .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.focus .act { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; text-align: left; }
+.focus .act:hover { border-color: var(--dim); }
+.focus .act b { font-weight: 600; font-size: 12.5px; }
+.focus .act small { color: var(--dim); font-size: 11px; }
+.focus .act.primary { border-color: rgba(240,165,66,0.45); }
+.focus .act.primary b { color: var(--amber); }
+.focus .act[aria-pressed="true"] { background: var(--amber-soft); border-color: var(--amber); }
+.focus .act.promote { border-color: rgba(82,194,174,0.4); }
+.focus .act.promote b { color: var(--teal); }
+.focus .act.danger:hover { border-color: var(--coral); }
+.focus .act.danger:hover b { color: var(--coral); }
+.focus .act.wide { grid-column: 1 / -1; }
+.focus .decode { background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; }
+
+@media (max-width: 400px) {
+  .focus .actions { grid-template-columns: 1fr; }
+}

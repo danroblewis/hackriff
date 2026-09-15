@@ -25,7 +25,7 @@ use hk_context::feeds::FeedState;
 use hk_context::geo::Site;
 use hk_context::occupancy::alarm::{
     AlarmConfig, AlarmEngine, AlarmEvent, AlarmInput, AlarmWriter, DeviceStep, NoveltySnapshot,
-    PoolContext, inputs_from_fold, latest_explanations, unscored_evidence,
+    PoolContext, inputs_from_fold, latest_explanations, subject_of, unscored_evidence,
 };
 use hk_context::occupancy::baseline::{FoldOutcome, IntervalObservation};
 use hk_context::occupancy::novelty::NoveltyConfig;
@@ -306,13 +306,18 @@ impl AlarmService {
         );
         let unscored = unscored_evidence(obs, fold);
         if !unscored.is_empty() {
-            lock(&self.engine).count_unscored(
+            let mut engine = lock(&self.engine);
+            engine.count_unscored(
                 obs.t,
                 site,
                 fold.novelty.maturity,
                 fold.novelty.provenance_explained,
                 &unscored,
             );
+            // T-146: an unscorable (immature) fold ends the subject's busier/quieter run.
+            let (subject, _) =
+                subject_of(&obs.subject, 1, SCHEME_1_CELL_HZ, i64::from(CELL_FACTOR));
+            engine.reset_sequential(site, &subject);
         }
         let mature = inputs.iter().filter(|i| i.maturity.is_mature()).count();
         self.inputs_observed
@@ -560,6 +565,8 @@ mod tests {
                 z: 30.0,
                 novelty,
                 observed_s: 900.0,
+                look: None,
+                sequential: None,
             }],
         }
     }
@@ -650,6 +657,7 @@ mod tests {
             utc_offset_min: 0,
             pool: PoolContext::default(),
             fold: FoldOutcome {
+                look: None,
                 novelty: NoveltyScore {
                     novelty: 0.0,
                     level_z: None,
@@ -1106,5 +1114,153 @@ mod tests {
             1,
             "{s}"
         );
+    }
+
+    /// T-146 (ADR-0012 §7.2): a time-compressed sparse-visit run through the live service path
+    /// (`BaselineEngine::observe` → `observe_interval`). A channel observed with two effective
+    /// looks per 15-min interval at FCO ≈ 0.05 builds a mature baseline over 26 h, then goes
+    /// fully busy. No single interval is novel enough, but the accumulated evidence raises one
+    /// busier-than-usual alarm carrying the site, the channel and its explanation (with the
+    /// sequential evidence).
+    ///
+    /// The service raises exactly where the §7.2 rule says: from the run the engine holds just
+    /// before onset (here the last baseline look, FCO 0.5, already counts as a busier interval)
+    /// plus each onset interval's z, the first second-consecutive interval whose sequential
+    /// novelty is ≥ on. So every interval is counted once and nothing resets the run on the
+    /// service path. The a-priori latency bound for a given z is the hk-context sparse onset
+    /// test's; this scene's pool gives z ≈ 3.09, diluted by the pre-onset look.
+    #[test]
+    fn alarm_service_sparse_visits_raise_busier_than_usual() {
+        use crate::attention::IntervalFold;
+        use hk_context::occupancy::baseline::{BaselineConfig, BaselineEngine};
+        use hk_context::occupancy::novelty::{SEQUENTIAL_MAX_GAP_S, sequential_step};
+        use hk_model::attention::alarm::HysteresisConfig;
+        use hk_model::attention::baseline::BaselineKey;
+        use hk_model::attention::occupancy::{ChannelKey, OccupancySubject};
+        use hk_model::{Cause, Evidence};
+        use hk_store::baseline::{BaselineState, BaselineSubject};
+
+        const BASELINE: i64 = 26 * 4;
+        let (hcfg, ncfg) = (HysteresisConfig::default(), NoveltyConfig::default());
+        let repo = Arc::new(Mutex::new(Repository::open_in_memory().unwrap()));
+        let svc = AlarmService::open(Arc::clone(&repo), None, Arc::new(|| at(0))).unwrap();
+        let site_id = SiteId::new();
+        let site = SiteKey::Site(site_id);
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 69_355,
+            hi_cell: 69_357,
+        };
+        let mut baseline = BaselineEngine::new(
+            BaselineState::new(
+                BaselineKey {
+                    site: site_id,
+                    cal: CalKey::Uncalibrated,
+                    scheme: 1,
+                    cell_factor: 16,
+                },
+                at(0),
+            ),
+            0,
+            BaselineConfig::default(),
+        );
+        let mut state = 0x146d_u64;
+        let mut next = move || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut raised = None;
+        // The rule's prediction: (k, Σz) of the busier run, whether the last interval was on,
+        // the predicted raise (interval, k), and the pre-onset run.
+        let (mut run, mut prev_on, mut predicted, mut pre) = (None, false, None, None);
+        for i in 0..BASELINE + 60 {
+            let fco = if i < BASELINE {
+                (0..2).filter(|_| next() < 0.05).count() as f64 / 2.0
+            } else {
+                1.0
+            };
+            let obs = IntervalObservation {
+                subject: BaselineSubject::Channel { key },
+                t: at(i),
+                gain: 0,
+                level_db: None,
+                max_db: None,
+                occupied_weight_s: fco * 900.0,
+                weight_s: 900.0,
+                observed_s: 900.0,
+                n_eff: 2.0,
+                suspect_fraction: 0.0,
+                provenance_explained: false,
+            };
+            let fold = baseline.observe(&obs);
+            let f = IntervalFold {
+                subject: OccupancySubject::Channel { key },
+                site,
+                cal: CalKey::Uncalibrated,
+                obs,
+                utc_offset_min: 0,
+                pool: PoolContext::default(),
+                fold,
+            };
+            let events = svc.observe_interval(&[f], &[]);
+            if i < BASELINE {
+                assert!(events.is_empty(), "baseline interval {i}: {events:?}");
+                if i == BASELINE - 1 {
+                    let r = lock(&svc.engine).sequential_run(
+                        site_id,
+                        AlarmSubject::Channel { key },
+                        CalKey::Uncalibrated,
+                    );
+                    run = r;
+                    pre = Some(r.map(|r| (r.direction, r.k, r.sum)));
+                }
+                continue;
+            }
+            let z = fold.novelty.occupancy_z.expect("a mature fold is scored");
+            assert!(z > 0.0, "interval {i}: busier ({z})");
+            let look = fold.look.expect("a scored fold carries its look");
+            let ev = sequential_step(&mut run, at(i), z, &look, SEQUENTIAL_MAX_GAP_S, &ncfg);
+            let on = ev.is_some_and(|e| e.z > 0.0 && e.novelty >= hcfg.on);
+            if on && prev_on && predicted.is_none() {
+                predicted = Some((i - BASELINE + 1, ev.unwrap().intervals, look.busier_start));
+            }
+            prev_on = on;
+            assert!(
+                fold.novelty.novelty < 0.4,
+                "interval {i}: one interval alone is not novel ({:?})",
+                fold.novelty
+            );
+            if let Some(e) = events
+                .into_iter()
+                .find(|e| e.transition == AlarmLifecycle::Raised)
+            {
+                raised = Some((i - BASELINE + 1, e));
+                break;
+            }
+        }
+        let (latency, e) = raised.expect("the sparse busy channel raises");
+        let (want, k, z) = predicted.expect("the rule predicts a raise within the scene");
+        println!(
+            "T-146 service sparse onset: per-interval z {z:.3}, pre-onset run {pre:?}, raised at \
+             interval {latency} (rule: {want}, run k {k})"
+        );
+        assert_eq!(latency, want, "the service raises where the rule does");
+        assert_eq!(e.row.key.kind, AlarmKind::BusierThanUsual);
+        assert_eq!(e.row.key.site, site_id);
+        assert_eq!(e.row.key.subject, AlarmSubject::Channel { key });
+        assert_eq!(e.anomaly.region.freq.lo_hz, 69_355.0 * SCHEME_1_CELL_HZ);
+        assert_eq!(e.anomaly.region.freq.hi_hz, 69_357.0 * SCHEME_1_CELL_HZ);
+        let top = e.explanations.first().expect("explained");
+        assert_eq!(top.cause, Cause::Unexplained);
+        let intervals = top.evidence.iter().find_map(|v| match v {
+            Evidence::Value { name, value } if name == "sequential_intervals" => Some(*value),
+            _ => None,
+        });
+        assert_eq!(intervals, Some(f64::from(k)));
+        let status = svc.status_json();
+        assert_eq!(status["open"], 1, "{status}");
     }
 }

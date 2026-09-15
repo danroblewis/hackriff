@@ -104,8 +104,9 @@ pub struct CellStats {
     /// Noise floor estimate, dB/Hz (T-116): the low percentile corrected for its bias on
     /// averaged-periodogram noise (`floor = p_low − 10·log10(P⁻¹(n_c, p)/n_c)`, the Gamma model of
     /// `hk_dsp::radiometry::bias`; `p` is the exact order-statistic probability at level 0 and the
-    /// percentile itself at rolled-up levels). NaN when the tile's cell shape `n_c` is unknown or
-    /// mixed ([`ProvenanceSummary::uniform_cell_shape`]).
+    /// percentile itself at rolled-up levels). A mixed-shape tile uses the bias of the Gamma
+    /// mixture of its values per shape (T-141, [`ProvenanceSummary::cell_shape_mixture`]). NaN
+    /// when a shape is unknown, or a mixed tile recorded no per-shape counts (format < 4).
     pub floor_db: f32,
     /// Frames folded (see [`ProvenanceSummary`] for counting).
     pub frames: u32,
@@ -636,14 +637,69 @@ impl Pyramid {
     }
 }
 
-/// Floor bias per `(shape bits, frames)` (`frames` = 0 for rolled-up cells).
+/// Weight quantum of a mixture signature: weights are value fractions rounded to 1/1024.
+const MIXTURE_WEIGHT_LEVELS: f64 = 1024.0;
+
+/// A tile's mixture signature: `(shape bits, quantised weight)` for each shape with weight > 0.
+type MixtureSignature = Vec<(u32, u16)>;
+
+/// Floor bias per `(shape bits, frames)` (`frames` = 0 for rolled-up cells), and per mixture
+/// signature and `frames` (T-141).
 #[derive(Default)]
-struct BiasCache(HashMap<(u32, u32), f32>);
+struct BiasCache {
+    single: HashMap<(u32, u32), f32>,
+    mixture: HashMap<MixtureSignature, HashMap<u32, f32>>,
+    sig: MixtureSignature,
+}
 
 impl BiasCache {
+    /// T-141: the floor bias of a cell pooling values of the `(shape, values)` mixture. The
+    /// weights are quantised to 1/1024 before solving, so a signature's cached bias does not
+    /// depend on which tile computed it first.
+    fn mixture_bias_db(
+        &mut self,
+        mixture: &[(f32, u64, u64)],
+        level: usize,
+        frames: u32,
+        q: f32,
+    ) -> f32 {
+        // Saturating: a corrupt tile's counts must not overflow (weights then merely skew).
+        let total = mixture
+            .iter()
+            .fold(0u64, |acc, &(_, n, _)| acc.saturating_add(n))
+            .max(1);
+        self.sig.clear();
+        for &(shape, n, _) in mixture {
+            let w = (n as f64 / total as f64 * MIXTURE_WEIGHT_LEVELS).round() as u16;
+            if w > 0 {
+                self.sig.push((shape.to_bits(), w));
+            }
+        }
+        let n = if level == 0 { frames } else { 0 };
+        if let Some(&b) = self.mixture.get(&self.sig[..]).and_then(|m| m.get(&n)) {
+            return b;
+        }
+        let p = if level == 0 {
+            hk_dsp::radiometry::exact_percentile_probability(f64::from(q), frames)
+        } else {
+            f64::from(q) / 100.0
+        };
+        let comps: Vec<(f64, f64)> = self
+            .sig
+            .iter()
+            .map(|&(s, w)| (f64::from(f32::from_bits(s)), f64::from(w)))
+            .collect();
+        let b = hk_dsp::radiometry::mixture_percentile_bias_db(&comps, p) as f32;
+        self.mixture
+            .entry(self.sig.clone())
+            .or_default()
+            .insert(n, b);
+        b
+    }
+
     fn bias_db(&mut self, shape: f32, level: usize, frames: u32, q: f32) -> f32 {
         let n = if level == 0 { frames } else { 0 };
-        *self.0.entry((shape.to_bits(), n)).or_insert_with(|| {
+        *self.single.entry((shape.to_bits(), n)).or_insert_with(|| {
             let p = if level == 0 {
                 hk_dsp::radiometry::exact_percentile_probability(f64::from(q), frames)
             } else {
@@ -697,11 +753,26 @@ fn cell_stats(
         // An open level-0 column: its max-occupancy is its own occupancy so far.
         occ_max = occ_max.max(occupancy as f32);
     }
-    let floor_db = match tile.prov.uniform_cell_shape() {
-        Some(shape) if p_lo.is_finite() => {
-            round_centi(round_centi(p_lo) - bias.bias_db(shape, level, n, q_low))
+    // A uniform tile corrects with its shape's bias (unchanged since T-116). T-141: a mixed-shape
+    // tile corrects with the bias of the Gamma mixture its level-0 values pooled, weighted by the
+    // values folded per shape over the whole tile (the pooled sample a cell's frames are drawn
+    // from), only when every shape's frames covered equally many cells; a mixed tile without a
+    // valid recorded mixture (format < 4, or coverage differing by shape) gives no floor.
+    let floor_db = if p_lo.is_finite() {
+        match (
+            tile.prov.uniform_cell_shape(),
+            tile.prov.cell_shape_mixture(),
+        ) {
+            (Some(shape), _) => {
+                round_centi(round_centi(p_lo) - bias.bias_db(shape, level, n, q_low))
+            }
+            (None, Some(mix)) => {
+                round_centi(round_centi(p_lo) - bias.mixture_bias_db(mix, level, n, q_low))
+            }
+            (None, None) => f32::NAN,
         }
-        _ => f32::NAN,
+    } else {
+        f32::NAN
     };
     CellStats {
         floor_db,

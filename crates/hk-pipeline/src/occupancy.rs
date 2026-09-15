@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use hk_context::occupancy::channels::{ChannelPlan, DetectionExtent, LearnConfig};
+use hk_context::occupancy::channels::{self, ChannelPlan, DetectionExtent, LearnConfig};
 use hk_context::occupancy::engine::{
     self, EngineConfig, EvalInput, LevelSource, MemoryObservations, ObservationSource,
     SubjectContext, VisitSample,
@@ -976,8 +976,18 @@ impl OccupancyService {
             inner.stats.errors += 1;
             return Vec::new();
         };
-        match repo.detections_in_region(&Region::new(FreqRange::new(0.0, 1e12), span)) {
-            Ok(d) => d.iter().map(DetectionExtent::of).collect(),
+        // T-147: read a DC-twin slack either side so a DC flag near the span's edge can be
+        // refuted, then keep the extents overlapping `span`.
+        let slack = channels::DC_TWIN_SLACK_NS;
+        let wide = TimeRange::new(
+            span.start.saturating_add_nanos(-slack),
+            span.end.saturating_add_nanos(slack),
+        );
+        match repo.detections_in_region(&Region::new(FreqRange::new(0.0, 1e12), wide)) {
+            Ok(d) => channels::extents_of(&d, inner.plan.f_cell_hz())
+                .into_iter()
+                .filter(|e| e.time.end >= span.start && e.time.start <= span.end)
+                .collect(),
             Err(_) => {
                 inner.stats.errors += 1;
                 Vec::new()

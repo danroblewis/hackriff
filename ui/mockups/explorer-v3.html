@@ -1,0 +1,844 @@
+<title>hackriff Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;500;600;700&family=Chivo+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #0D1317; --panel: #131B20; --panel-2: #18222A; --raise: #1E2A33;
+    --line: #243039; --line-soft: #1B252D; --text: #D5DEE2; --muted: #8595A0; --dim: #5A6973;
+    --amber: #F0A542; --amber-soft: rgba(240,165,66,0.14);
+    --teal: #52C2AE; --teal-soft: rgba(82,194,174,0.13);
+    --lav: #A395E0; --lav-soft: rgba(163,149,224,0.14);
+    --coral: #E47B68; --coral-soft: rgba(228,123,104,0.14);
+    --cream: #F3E3BF;
+    --ui: "Chivo","Helvetica Neue",Arial,sans-serif; --mono: "Chivo Mono",ui-monospace,Menlo,monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--ground); color: var(--text); font: 13px/1.45 var(--ui); overflow: hidden; }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .app { height: 100vh; display: grid; grid-template-rows: 48px minmax(0,1fr) 62px; }
+
+  .bar { display: flex; align-items: center; gap: 18px; padding-inline: 16px; border-bottom: 1px solid var(--line); background: var(--panel); min-width: 0; }
+  .brand { font-weight: 700; letter-spacing: 0.02em; font-size: 15px; }
+  .brand span { color: var(--amber); }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }
+  .mode { border: 0; background: transparent; padding: 4px 12px; border-radius: 5px; cursor: pointer; color: var(--muted); white-space: nowrap; }
+  .mode[aria-pressed="true"] { background: var(--raise); color: var(--text); }
+  .device { display: flex; align-items: center; gap: 8px; color: var(--muted); white-space: nowrap; }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft); }
+  .rec-pill { display: flex; align-items: center; gap: 6px; color: var(--coral); font-size: 11.5px; white-space: nowrap; }
+  .rec-pill .d { width: 8px; height: 8px; border-radius: 50%; background: var(--coral); }
+  .readouts { display: flex; gap: 16px; min-width: 0; overflow: hidden; }
+  .ro { display: flex; flex-direction: column; line-height: 1.1; white-space: nowrap; }
+  .ro small { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); }
+  .ro b { font-family: var(--mono); font-weight: 500; font-size: 13px; }
+  .bar-spacer { flex: 1; }
+  .goto { display: flex; align-items: center; gap: 6px; background: var(--ground); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  .goto input { background: transparent; border: 0; width: 100px; font-family: var(--mono); outline: none; }
+  .goto label { color: var(--dim); font-size: 11px; }
+  .mock-badge { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--lav); border: 1px solid var(--lav-soft); background: var(--lav-soft); padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
+
+  .h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .h em { font-style: normal; color: var(--dim); font-weight: 400; letter-spacing: 0.02em; text-transform: none; }
+  .chip { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); font-weight: 600; letter-spacing: 0.03em; white-space: nowrap; }
+  .chip.wfm, .chip.ok { color: var(--teal); border-color: rgba(82,194,174,0.35); }
+  .chip.unk { color: var(--lav); border-color: rgba(163,149,224,0.35); }
+  .chip.flag, .chip.bad { color: var(--coral); border-color: rgba(228,123,104,0.4); }
+  .chip.warn { color: var(--amber); border-color: rgba(240,165,66,0.4); }
+  .mini { border: 1px solid var(--line); background: var(--panel); border-radius: 5px; padding: 1px 7px; font-size: 11px; cursor: pointer; color: var(--muted); white-space: nowrap; }
+  .mini:hover { color: var(--text); border-color: var(--dim); }
+  .mini.promote { color: var(--teal); border-color: rgba(82,194,174,0.4); }
+  .mini.del:hover { color: var(--coral); border-color: var(--coral); }
+  .empty { color: var(--dim); padding: 16px 10px; font-size: 12px; }
+  .section-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; margin: 0 0 8px; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .section-h em { font-style: normal; text-transform: none; letter-spacing: 0; color: var(--dim); font-weight: 400; }
+  .state { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; padding: 2px 7px; border-radius: 4px; }
+  .state.confirmed { color: var(--teal); background: var(--teal-soft); }
+  .state.candidate { color: var(--lav); background: var(--lav-soft); }
+  .state.selection { color: var(--amber); background: var(--amber-soft); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
+  .kv dt { color: var(--dim); font-size: 11.5px; }
+  .kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; }
+  .kv dd.flag { color: var(--coral); }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .act { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; text-align: left; }
+  .act:hover { border-color: var(--dim); }
+  .act b { font-weight: 600; font-size: 12.5px; }
+  .act small { color: var(--dim); font-size: 11px; }
+  .act.primary { border-color: rgba(240,165,66,0.45); }
+  .act.primary b { color: var(--amber); }
+  .act[aria-pressed="true"] { background: var(--amber-soft); border-color: var(--amber); }
+  .act.promote { border-color: rgba(82,194,174,0.4); }
+  .act.promote b { color: var(--teal); }
+  .act.danger:hover { border-color: var(--coral); }
+  .act.danger:hover b { color: var(--coral); }
+  .act.wide { grid-column: 1 / -1; }
+
+  /* EXPLORE */
+  .main { display: grid; grid-template-columns: 290px minmax(0,1fr) 330px; min-height: 0; }
+  .side { border-right: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: auto minmax(0,1fr) auto minmax(0,150px); min-height: 0; }
+  .side-head { padding: 12px 14px 8px; display: flex; flex-direction: column; gap: 10px; }
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }
+  .tab { border: 0; background: transparent; padding: 5px 6px; border-radius: 5px; cursor: pointer; color: var(--muted); display: flex; justify-content: center; gap: 6px; align-items: center; }
+  .tab .count { font-family: var(--mono); font-size: 11px; padding: 0 5px; border-radius: 8px; }
+  .tab[aria-selected="true"] { background: var(--raise); color: var(--text); }
+  .tab[data-tab="confirmed"] .count { color: var(--teal); background: var(--teal-soft); }
+  .tab[data-tab="candidate"] .count { color: var(--lav); background: var(--lav-soft); }
+  .tab-note { color: var(--dim); font-size: 11.5px; line-height: 1.35; }
+  .list { overflow-y: auto; min-height: 0; padding: 2px 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 8px 8px 10px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
+  .row:hover { background: var(--panel-2); }
+  .row[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+  .row .f { font-family: var(--mono); font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+  .row .f small { color: var(--dim); font-size: 11px; font-weight: 400; }
+  .row .meta { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 11.5px; }
+  .on-air { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 2px var(--amber-soft); }
+  .lvl { width: 46px; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .lvl i { display: block; height: 100%; background: var(--muted); }
+  .row .acts { display: flex; gap: 4px; opacity: 0; transition: opacity 120ms; }
+  .row:hover .acts, .row:focus-within .acts, .row[aria-current="true"] .acts { opacity: 1; }
+  .dots { display: inline-flex; gap: 2px; align-items: flex-end; height: 10px; }
+  .dots i { width: 3px; background: var(--lav); border-radius: 1px; opacity: 0.85; }
+  .side-sel-head { padding: 10px 14px 6px; border-top: 1px solid var(--line); }
+  .sel-list { overflow-y: auto; padding: 0 8px 10px; display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+  .sel { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-radius: 6px; cursor: pointer; border: 1px dashed transparent; }
+  .sel:hover { background: var(--panel-2); }
+  .sel[aria-current="true"] { border-color: rgba(240,165,66,0.5); background: var(--amber-soft); }
+  .sel b { font-weight: 500; }
+  .sel .mono { color: var(--muted); font-size: 11.5px; }
+
+  .centre { display: grid; grid-template-rows: 118px minmax(0,1fr) 26px 92px; min-height: 0; min-width: 0; background: var(--ground); }
+  .spec { position: relative; border-bottom: 1px solid var(--line-soft); }
+  .spec canvas, .wf canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .brackets { position: absolute; inset: 0; pointer-events: none; }
+  .bk { position: absolute; top: 8px; height: 16px; border-top: 2px solid; border-left: 1px solid; border-right: 1px solid; pointer-events: auto; cursor: pointer; }
+  .bk span { position: absolute; top: -18px; left: 50%; transform: translateX(-50%); font: 500 10.5px var(--mono); white-space: nowrap; padding: 0 4px; border-radius: 3px; background: var(--ground); }
+  .bk.confirmed { border-color: var(--teal); color: var(--teal); }
+  .bk.candidate { border-color: var(--lav); color: var(--lav); border-style: dashed; }
+  .bk.active { border-color: var(--amber); color: var(--amber); }
+  .bk.narrow span { display: none; }
+  .bk.active span, .bk:hover span { display: block; }
+  .db-scale { position: absolute; left: 6px; top: 26px; bottom: 6px; display: flex; flex-direction: column; justify-content: space-between; font: 10px var(--mono); color: var(--dim); pointer-events: none; }
+  .wf { position: relative; cursor: crosshair; overflow: hidden; }
+  .col-hi { position: absolute; top: 0; bottom: 0; background: var(--amber-soft); border-left: 1px solid rgba(240,165,66,0.55); border-right: 1px solid rgba(240,165,66,0.55); pointer-events: none; }
+  .dc-mask { position: absolute; top: 0; bottom: 0; pointer-events: none; background: repeating-linear-gradient(135deg, rgba(13,19,23,0) 0 4px, rgba(13,19,23,0.55) 4px 6px); }
+  .dc-mask span { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 1px 4px; border-radius: 3px; white-space: nowrap; }
+  .drag-box { position: absolute; top: 0; bottom: 0; border: 1px dashed var(--amber); background: rgba(240,165,66,0.08); pointer-events: none; }
+  .sel-box { position: absolute; top: 0; bottom: 0; border-left: 1px dashed rgba(240,165,66,0.45); border-right: 1px dashed rgba(240,165,66,0.45); pointer-events: none; }
+  .sel-box.active { background: rgba(240,165,66,0.07); border-color: var(--amber); }
+  .cross { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(213,222,226,0.35); pointer-events: none; }
+  .tip { position: absolute; top: 10px; font: 11px var(--mono); background: rgba(19,27,32,0.95); border: 1px solid var(--line); padding: 3px 7px; border-radius: 4px; pointer-events: none; white-space: nowrap; }
+  .hint { position: absolute; right: 10px; top: 10px; font-size: 11px; color: var(--muted); background: rgba(13,19,23,0.8); padding: 3px 8px; border-radius: 4px; pointer-events: none; }
+  .time-scale { position: absolute; right: 8px; bottom: 8px; font: 10px var(--mono); color: var(--dim); pointer-events: none; }
+  .axis { position: relative; border-top: 1px solid var(--line); background: var(--panel); font: 10.5px var(--mono); color: var(--muted); }
+  .tick { position: absolute; top: 0; height: 100%; }
+  .tick::before { content: ""; position: absolute; top: 0; left: 0; width: 1px; height: 5px; background: var(--dim); }
+  .tick span { position: absolute; top: 7px; transform: translateX(-50%); white-space: nowrap; }
+  .tick.minor span { display: none; }
+
+  /* capture timeline (always-on recording) */
+  .capture { border-top: 1px solid var(--line); background: var(--panel); padding: 7px 14px 6px; display: grid; grid-template-rows: auto 1fr; gap: 4px; min-height: 0; }
+  .cap-band { position: relative; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); overflow: hidden; cursor: text; min-height: 0; }
+  .cap-band svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--amber); box-shadow: 0 0 0 1px rgba(13,19,23,0.6); }
+  .playhead::after { content: ""; position: absolute; top: -1px; left: -3px; border: 4px solid transparent; border-top-color: var(--amber); }
+  .live-pill { position: absolute; top: 4px; right: 6px; font: 600 9.5px var(--ui); letter-spacing: 0.08em; color: var(--coral); border: 1px solid rgba(228,123,104,0.5); background: rgba(228,123,104,0.12); padding: 1px 6px; border-radius: 4px; cursor: pointer; }
+  .cap-band.reviewing .live-pill { color: var(--amber); border-color: rgba(240,165,66,0.5); background: rgba(240,165,66,0.12); }
+  .cap-note b { color: var(--muted); font-weight: 500; }
+
+  .focus { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; min-height: 0; padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 16px; }
+  .eyebrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .bigf { font-family: var(--mono); font-size: 30px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.05; }
+  .bigf small { font-size: 14px; color: var(--muted); margin-left: 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .expl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .expl li { display: grid; grid-template-columns: 22px 1fr; gap: 2px 8px; }
+  .expl .rank { font: 500 11px var(--mono); color: var(--dim); padding-top: 1px; }
+  .expl b { font-weight: 600; }
+  .expl .why { grid-column: 2; color: var(--muted); font-size: 12px; line-height: 1.4; }
+  .expl li:not(:first-child) b { color: var(--muted); font-weight: 500; }
+  .conf { font: 10.5px var(--mono); color: var(--dim); margin-left: 6px; }
+  .decode { background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; }
+
+  /* OUTPUTS DOCK */
+  .dock { border-top: 1px solid var(--line); background: var(--panel); display: flex; align-items: center; gap: 10px; padding-inline: 16px; min-width: 0; }
+  .dock-label { display: flex; flex-direction: column; line-height: 1.15; white-space: nowrap; }
+  .dock-label b { font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; }
+  .dock-label small { color: var(--dim); font: 10.5px var(--mono); }
+  .outs { display: flex; gap: 8px; overflow-x: auto; min-width: 0; flex: 1; padding-block: 7px; }
+  .out { display: grid; grid-template-columns: auto auto auto; align-items: center; gap: 2px 10px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); white-space: nowrap; }
+  .out.pipe-out { border-color: rgba(82,194,174,0.3); }
+  .out .t { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; font-weight: 500; }
+  .out .k { color: var(--dim); font-size: 11px; grid-column: 1; }
+  .out .ctl { grid-row: 1 / span 2; grid-column: 3; display: flex; gap: 4px; }
+  .out .vis { grid-row: 1 / span 2; grid-column: 2; }
+  .out.muted .t { color: var(--muted); }
+  .kind-dot { width: 7px; height: 7px; border-radius: 2px; }
+  .kind-dot.audio { background: var(--amber); }
+  .kind-dot.bits { background: var(--teal); }
+  .meter { display: flex; gap: 2px; align-items: flex-end; height: 20px; }
+  .meter i { width: 3px; background: var(--amber); border-radius: 1px; height: 30%; }
+  .out.muted .meter i { background: var(--dim); }
+  .rate { font: 11px var(--mono); color: var(--teal); }
+
+  /* DECODE */
+  .wb { display: grid; grid-template-columns: 300px minmax(0,1fr) 330px; min-height: 0; }
+  .wb-side { border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+  .wb-block { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 8px; }
+  .pl { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 9px; border-radius: 7px; cursor: pointer; border: 1px solid transparent; }
+  .pl:hover { background: var(--panel-2); }
+  .pl[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+  .pl b { font-weight: 600; font-size: 12.5px; }
+  .pl .st { font: 500 10px var(--ui); letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; align-self: start; }
+  .pl .st.run { color: var(--teal); background: var(--teal-soft); }
+  .pl .st.hop { color: var(--lav); background: var(--lav-soft); }
+  .pl .cx { grid-column: 1 / -1; color: var(--muted); font: 11px var(--mono); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .pl .cx .hopdot { color: var(--lav); }
+  .new-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .new-row .mini { border-style: dashed; }
+  .stage-list { display: flex; flex-direction: column; gap: 2px; }
+  .stg { display: grid; grid-template-columns: 20px 1fr auto; gap: 0 8px; align-items: center; padding: 6px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  .stg:hover { background: var(--panel-2); }
+  .stg[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.35); }
+  .stg .n { font: 500 11px var(--mono); color: var(--dim); }
+  .stg code { grid-column: 2; font: 10.5px var(--mono); color: var(--dim); }
+  .stg .chip { grid-row: 1 / span 2; grid-column: 3; }
+
+  .wb-centre { display: grid; grid-template-rows: 58px minmax(0,1fr) minmax(250px, 48%); min-height: 0; min-width: 0; background: var(--ground); }
+  .pipe { display: flex; align-items: stretch; padding: 9px 14px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .node { flex: 1; min-width: 116px; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 4px 10px; border: 1px solid var(--line); background: var(--panel); border-radius: 7px; cursor: pointer; text-align: left; }
+  .node:hover { border-color: var(--dim); }
+  .node[aria-current="true"] { border-color: var(--amber); background: var(--amber-soft); }
+  .node .top { display: flex; justify-content: space-between; gap: 6px; align-items: center; }
+  .node b { font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .node .n { font: 500 10.5px var(--mono); color: var(--dim); }
+  .node small { font: 10.5px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node small.fx-bad { color: var(--coral); }
+  .node small.fx-gt { color: var(--amber); }
+  .arrow { align-self: center; color: var(--dim); padding: 0 4px; font-size: 12px; }
+  .plots { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line-soft); min-height: 0; }
+  .plot { background: var(--ground); display: grid; grid-template-rows: auto minmax(0,1fr) auto; padding: 9px 14px 7px; min-height: 0; min-width: 0; }
+  .plot .cap { color: var(--dim); font-size: 11.5px; }
+  .plot > div[id] { min-height: 0; }
+  .plot svg { width: 100%; height: 100%; display: block; }
+
+  /* inspector (Wireshark-style) */
+  .inspector { display: grid; grid-template-columns: 270px minmax(0,1fr) 300px; border-top: 1px solid var(--line); min-height: 0; }
+  .frames { border-right: 1px solid var(--line); display: grid; grid-template-rows: auto minmax(0,1fr); min-height: 0; background: var(--panel); }
+  .frames .head { padding: 8px 12px 6px; }
+  .frame-list { overflow-y: auto; min-height: 0; font-family: var(--mono); }
+  .fr { display: grid; grid-template-columns: auto auto 1fr; gap: 2px 8px; padding: 5px 12px; cursor: pointer; border-left: 2px solid transparent; font-size: 11.5px; }
+  .fr:hover { background: var(--panel-2); }
+  .fr[aria-current="true"] { background: var(--amber-soft); border-left-color: var(--amber); }
+  .fr .ft { color: var(--dim); }
+  .fr .fc { color: var(--teal); }
+  .fr .fc.hop { color: var(--lav); }
+  .fr .fs { grid-column: 3; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fr.bad .fs { color: var(--coral); }
+  .fr.fresh { animation: flash 900ms ease-out; }
+  @keyframes flash { from { background: var(--amber-soft); } to { background: transparent; } }
+
+  .bytes { display: grid; grid-template-rows: auto minmax(0,1fr) auto; padding: 9px 14px 8px; min-height: 0; background: var(--ground); }
+  .hexgrid { overflow: auto; min-height: 0; font: 12.5px/1.7 var(--mono); }
+  .hexrow { display: grid; grid-template-columns: 42px 1fr 8px auto; gap: 0 10px; align-items: center; }
+  .off { color: var(--dim); }
+  .hx, .asc { display: flex; gap: 0; }
+  .hx b, .asc b { font-weight: 400; padding: 0 3px; border-radius: 3px; cursor: pointer; white-space: pre; }
+  .hx b { min-width: 22px; text-align: center; }
+  .asc b { min-width: 11px; text-align: center; }
+  .hx b.sel, .asc b.sel { background: var(--amber); color: #0D1317; }
+  .b-teal { color: var(--teal); } .b-amber { color: var(--amber); } .b-lav { color: var(--lav); } .b-coral { color: var(--coral); } .b-cream { color: var(--cream); } .b-mut { color: var(--muted); }
+  .bytes .flow { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 11px; margin-top: 6px; flex-wrap: wrap; }
+  .bytes .flow code { color: var(--teal); font-family: var(--mono); }
+
+  .tree { border-left: 1px solid var(--line); overflow-y: auto; min-height: 0; padding: 9px 12px 10px; background: var(--panel); }
+  .tnode { display: grid; grid-template-columns: 1fr auto; gap: 1px 8px; padding: 3px 6px; border-radius: 5px; cursor: pointer; border: 1px solid transparent; }
+  .tnode:hover { background: var(--panel-2); }
+  .tnode[aria-current="true"] { background: var(--amber-soft); border-color: rgba(240,165,66,0.4); }
+  .tnode .nm { font-size: 12px; }
+  .tnode .vv { font: 12px var(--mono); color: var(--text); }
+  .tnode .rg { grid-column: 1 / -1; font: 10px var(--mono); color: var(--dim); }
+  .tnode.d1 { margin-left: 0; } .tnode.d2 { margin-left: 14px; } .tnode.d3 { margin-left: 28px; }
+  .tnode .dot { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+
+  .wb-right { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; min-height: 0; padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 16px; }
+  .step { font: 500 11px var(--mono); color: var(--amber); }
+  .wb-right h2 { font-size: 17px; font-weight: 600; margin: 2px 0 6px; text-wrap: balance; }
+  .wb-right p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  .param { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; }
+  .param label { color: var(--muted); font-size: 12px; }
+  .param output, .param .val { font: 12.5px var(--mono); }
+  .param input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--amber); }
+  .param .suggest { grid-column: 1 / -1; font-size: 11.5px; color: var(--dim); display: flex; justify-content: space-between; gap: 8px; }
+  .param .suggest button { border: 0; background: transparent; color: var(--teal); cursor: pointer; padding: 0; font-size: 11.5px; }
+  .param input[type="text"], .param select { background: var(--ground); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; font: 12px var(--mono); width: 130px; text-align: right; }
+  .quality { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; }
+  .q { background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; display: flex; flex-direction: column; gap: 1px; }
+  .q small { color: var(--dim); font-size: 10.5px; }
+  .q b { font: 500 15px var(--mono); }
+  .q b.good { color: var(--teal); } .q b.mid { color: var(--amber); } .q b.bad { color: var(--coral); }
+
+  .toast { position: fixed; right: 16px; bottom: 74px; background: var(--raise); border: 1px solid var(--line); padding: 9px 14px; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.4); font-size: 12.5px; transform: translateY(8px); opacity: 0; transition: opacity 160ms, transform 160ms; pointer-events: none; max-width: min(440px, calc(100vw - 32px)); }
+  .toast.show { opacity: 1; transform: translateY(0); }
+
+  @media (max-width: 1150px) {
+    .main, .wb { grid-template-columns: 250px minmax(0,1fr) 290px; }
+    .readouts .ro.opt { display: none; }
+    .inspector { grid-template-columns: 210px minmax(0,1fr) 250px; }
+  }
+  @media (max-width: 900px) {
+    body { overflow: auto; }
+    .app { height: auto; grid-template-rows: auto auto auto; }
+    .bar { flex-wrap: wrap; padding-block: 8px; gap: 10px 14px; }
+    .bar-spacer { display: none; }
+    .main, .wb { grid-template-columns: 1fr; }
+    .side { grid-template-rows: auto 240px auto 130px; border-right: 0; border-bottom: 1px solid var(--line); }
+    .centre { grid-template-rows: 110px 260px 26px 92px; }
+    .focus, .wb-right { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
+    .wb-side { border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; }
+    .wb-centre { grid-template-rows: auto 440px 460px; }
+    .plots { grid-template-columns: 1fr; }
+    .inspector { grid-template-columns: 1fr; }
+    .frames { border-right: 0; border-bottom: 1px solid var(--line); }
+    .frames { grid-template-rows: auto 180px; }
+    .tree { border-left: 0; border-top: 1px solid var(--line); }
+    .tick.mid span { display: none; }
+    .dock { flex-wrap: wrap; padding-block: 8px; }
+    .toast { bottom: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .toast, .row .acts { transition: none; } .fr.fresh { animation: none; } }
+</style>
+
+<div class="app">
+  <header class="bar">
+    <div class="brand">hack<span>riff</span></div>
+    <div class="modes" role="group" aria-label="View">
+      <button class="mode" type="button" data-mode="explore" aria-pressed="true">Explore</button>
+      <button class="mode" type="button" data-mode="decode" aria-pressed="false">Decode</button>
+    </div>
+    <div class="device"><span class="live-dot" aria-hidden="true"></span>HackRF One · live</div>
+    <div class="rec-pill" title="Everything is captured continuously"><span class="d" aria-hidden="true"></span>Recording all · 48 h buffer</div>
+    <div class="readouts">
+      <div class="ro"><small>Centre</small><b>100.800 MHz</b></div>
+      <div class="ro opt"><small>Span</small><b>2.4 MHz</b></div>
+    </div>
+    <div class="bar-spacer"></div>
+    <form class="goto" id="goto-form" autocomplete="off"><label for="goto">Go to</label><input id="goto" class="mono" placeholder="101.3 MHz" inputmode="decimal"></form>
+    <span class="mock-badge">Mockup · example data</span>
+  </header>
+
+  <!-- EXPLORE -->
+  <div class="main" id="view-explore">
+    <aside class="side" aria-label="Inventory and selections">
+      <div class="side-head">
+        <div class="h">Signal inventory <em>this span</em></div>
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" data-tab="confirmed" aria-selected="true">Confirmed <span class="count" id="n-confirmed">0</span></button>
+          <button class="tab" role="tab" data-tab="candidate" aria-selected="false">Candidates <span class="count" id="n-candidate">0</span></button>
+        </div>
+        <div class="tab-note" id="tab-note"></div>
+      </div>
+      <div class="list" id="inv" role="list"></div>
+      <div class="side-sel-head"><div class="h">Selections <em>drag on the waterfall</em></div></div>
+      <div class="sel-list" id="sels"></div>
+    </aside>
+    <section class="centre" aria-label="Spectrum and waterfall">
+      <div class="spec" id="spec"><canvas id="spec-canvas"></canvas><div class="db-scale" aria-hidden="true"><span>−20</span><span>−60</span><span>−100</span></div><div class="brackets" id="brackets"></div></div>
+      <div class="wf" id="wf"><canvas id="wf-canvas"></canvas><div id="wf-overlays"></div><div class="hint" id="hint">Click a signal · drag to select a region</div><div class="time-scale">↓ 20 s</div></div>
+      <div class="axis" id="axis" aria-hidden="true"></div>
+      <div class="capture">
+        <div class="section-h" style="margin-bottom:0"><span id="cap-title">Capture · always recording</span><em class="cap-note" id="cap-note"><b>viewing live</b> · last 48 h kept · 6.2 h buffered · 41 GB of 220 GB</em></div>
+        <div class="cap-band" id="cap-band"><svg id="cap-svg" viewBox="0 0 600 60" preserveAspectRatio="none" role="img" aria-label="Activity over the retained buffer"></svg><div class="playhead" id="playhead" style="left:100%"></div><button class="live-pill" id="live-pill" type="button">● LIVE</button></div>
+      </div>
+    </section>
+    <aside class="focus" id="focus" aria-live="polite" aria-label="Focused signal"></aside>
+  </div>
+
+  <!-- DECODE -->
+  <div class="wb" id="view-decode" hidden>
+    <aside class="wb-side" aria-label="Pipelines and recipe">
+      <div class="wb-block">
+        <div class="h">Pipelines <em>decoders running now</em></div>
+        <div id="pipelines"></div>
+        <div class="new-row"><span style="color:var(--dim);font-size:11px;align-self:center">New from tutorial:</span><button class="mini" data-new="rds" type="button">RDS</button><button class="mini" data-new="pocsag" type="button">POCSAG</button><button class="mini" data-new="acars" type="button">ACARS</button><button class="mini" data-new="adsb" type="button">ADS-B</button></div>
+      </div>
+      <div class="wb-block">
+        <div class="h">Recipe <em id="recipe-name"></em></div>
+        <div class="stage-list" id="stage-list"></div>
+      </div>
+      <div class="wb-block">
+        <div class="h">Blocks <em>drag into a recipe</em></div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">
+          <span class="chip">fm_demod</span><span class="chip">am_demod</span><span class="chip">fsk_demod</span><span class="chip">msk_demod</span><span class="chip">mix</span><span class="chip">resample</span><span class="chip">clock_recovery</span><span class="chip">sync_search</span><span class="chip">deframe</span><span class="chip">crc</span><span class="chip">bch</span><span class="chip">fields</span><span class="chip">follow_hops</span>
+        </div>
+      </div>
+    </aside>
+
+    <section class="wb-centre" aria-label="Decoder stages and packets">
+      <div class="pipe" id="pipe"></div>
+      <div class="plots">
+        <div class="plot"><div class="section-h"><span id="pa-title"></span><em id="pa-note"></em></div><div id="pa"></div><div class="cap" id="pa-cap"></div></div>
+        <div class="plot"><div class="section-h"><span id="pb-title"></span><em id="pb-note"></em></div><div id="pb"></div><div class="cap" id="pb-cap"></div></div>
+      </div>
+      <div class="inspector">
+        <div class="frames">
+          <div class="head"><div class="section-h" style="margin:0"><span>Output stream</span><em id="fr-note"></em></div></div>
+          <div class="frame-list" id="frame-list" role="list"></div>
+        </div>
+        <div class="bytes">
+          <div class="section-h" style="margin-bottom:6px"><span>Frame bytes</span><em id="byte-note">hex · ASCII · click a byte or a field</em></div>
+          <div class="hexgrid" id="hexgrid"></div>
+          <div class="flow" id="flow"></div>
+        </div>
+        <div class="tree" id="tree" aria-label="Packet fields"></div>
+      </div>
+    </section>
+
+    <aside class="wb-right" id="wb-right" aria-label="Stage parameters"></aside>
+  </div>
+
+  <footer class="dock" aria-label="Live outputs">
+    <div class="dock-label"><b>Outputs</b><small id="out-count">0 live</small></div>
+    <div class="outs" id="outs"></div>
+  </footer>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+(() => {
+  const F0 = 99.6, F1 = 102.0, SPAN = F1 - F0, DC = 100.8;
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const $ = (id) => document.getElementById(id);
+  const x = (f) => (f - F0) / SPAN * 100;
+  const fmtF = (f, d = 3) => f.toFixed(d);
+  const kHz = (m) => Math.round(m * 1000) + " kHz";
+  const COL = { teal: "#8FD9C9", amber: "#F0A542", lav: "#A395E0", coral: "#E47B68", cream: "#F3E3BF", mut: "#8595A0" };
+  const clsFor = { teal: "b-teal", amber: "b-amber", lav: "b-lav", coral: "b-coral", cream: "b-cream", mut: "b-mut" };
+
+  // ===== explore data =====
+  const signals = [
+    { id: "e1", f: 101.3000, bw: 0.183, fam: "WFM", state: "confirmed", level: -22, snr: 38, kind: "wfm", seen: "continuous · 1 h 32 m", raster: "on raster", refined: true, duty: 1, rds: { pi: "1694", pty: "10 · Pop", ps: "101.3 FM" },
+      expl: [["FM broadcast", "0.94", "183 kHz wideband FM, 19 kHz pilot locked, RDS decoded (PI 1694)."], ["Wideband data link", "0.03", "Unlikely: pilot and RDS present."]] },
+    { id: "e2", f: 100.3004, bw: 0.176, fam: "WFM", state: "confirmed", level: -38, snr: 24, kind: "wfm", seen: "continuous · 1 h 32 m", raster: "on raster", refined: true, duty: 1, rds: { pi: "1C2A", pty: "3 · Info", ps: "—" },
+      expl: [["FM broadcast", "0.91", "Wideband FM with locked pilot; RDS PI recovered."], ["Image of 101.3 MHz", "0.02", "Unlikely: no matching offset."]] },
+    { id: "e3", f: 99.7490, bw: 0.170, fam: "WFM", state: "confirmed", level: -47, snr: 17, kind: "wfm", offRaster: true, seen: "continuous · 1 h 32 m", raster: "49 kHz off raster", refined: true, duty: 1, rds: null,
+      expl: [["FM broadcast, off raster", "0.72", "Wideband FM, pilot locked, centred 49 kHz above the 99.7 MHz channel."], ["Low-power or unlicensed FM", "0.19", "Off-raster centre and weak level fit a nearby low-power transmitter."], ["Intermodulation", "0.06", "No detected pair predicts this frequency."]] },
+    { id: "e4", f: 101.9008, bw: 0.168, fam: "WFM", state: "confirmed", level: -52, snr: 13, kind: "wfm", seen: "continuous · 1 h 32 m", raster: "on raster", refined: true, duty: 1, rds: null,
+      expl: [["FM broadcast", "0.83", "Wideband FM, pilot intermittent at this SNR."], ["Adjacent-channel splatter", "0.09", "No stronger station within 400 kHz."]] },
+    { id: "c1", f: 99.8784, bw: 0.057, fam: "Unknown", state: "candidate", level: -58, snr: 11, kind: "burst", seen: "14× in last hour", raster: "—", refined: false, duty: 0.23, occ: 14,
+      expl: [["Unknown narrowband data", "0.61", "57 kHz bursts of 0.4–1.2 s, roughly every 4 minutes."], ["Intermodulation product", "0.22", "2×100.300 − 100.722 lands here, but nothing is at 100.722 MHz."]] },
+    { id: "c2", f: 101.2476, bw: 0.0117, fam: "Unknown", state: "candidate", level: -64, snr: 8, kind: "burst", seen: "6× in last hour", raster: "—", refined: false, duty: 0.1, occ: 6,
+      expl: [["Intermittent narrowband carrier", "0.48", "12 kHz wide, 2–8 s at a time, 52 kHz below 101.3 MHz."], ["Sideband of 101.3 MHz", "0.31", "Offset is steady relative to 101.3 MHz."]] },
+    { id: "c3", f: 101.4332, bw: 0.0094, fam: "Carrier", state: "candidate", level: -66, snr: 7, kind: "carrier", flag: "possible spur", seen: "steady · 1 h 32 m", raster: "—", refined: false, duty: 1, occ: 60,
+      expl: [["Receiver spur", "0.57", "Unmodulated 9 kHz line unchanged by the gain step."], ["Unmodulated carrier", "0.33", "Could be real CW; a ±1 MHz retune check will tell."]] },
+    { id: "c4", f: 101.5786, bw: 0.0094, fam: "Unknown", state: "candidate", level: -69, snr: 6, kind: "burst", seen: "3× in last hour", raster: "—", refined: false, duty: 0.05, occ: 3,
+      expl: [["Unknown short bursts", "0.52", "Three bursts under a second each."], ["Noise event", "0.29", "Low SNR; promote only if it recurs."]] }
+  ];
+  const rf = signals.map((s) => ({ ...s, on: s.kind !== "burst", hold: 0 }));
+  let selections = [{ id: "s1", name: "Around 101.3", lo: 101.18, hi: 101.62 }, { id: "s2", name: "Low edge", lo: 99.80, hi: 99.95 }];
+  let outputs = [
+    { id: "o1", kind: "audio", sig: "e1", label: "101.300", sub: "WFM audio · 48 kHz", muted: false },
+    { id: "o2", kind: "audio", sig: "e2", label: "100.300", sub: "WFM audio · 48 kHz", muted: true },
+    { id: "o3", kind: "bits", pipe: "rds", label: "RDS · 101.300", sub: "records → tcp :8788", muted: false, rate: 11.4 },
+    { id: "o4", kind: "bits", pipe: "pocsag", label: "Pager net · 3 ch", sub: "records → tcp :8788", muted: false, rate: 3.2 }
+  ];
+  let mode = "explore", tab = "confirmed", focus = { type: "signal", id: "e1" };
+
+  let toastT = 0;
+  const toast = (m) => { const t = $("toast"); t.textContent = m; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), 2800); };
+
+  // ===== outputs dock =====
+  const audioFor = (id) => outputs.find((o) => o.kind === "audio" && o.sig === id);
+  function renderOutputs() {
+    $("out-count").textContent = `${outputs.length} live · ${outputs.filter((o) => o.kind === "bits").length} pipelines`;
+    $("outs").innerHTML = outputs.length ? outputs.map((o) => {
+      const vis = o.kind === "audio" ? `<div class="meter" aria-hidden="true">${"<i></i>".repeat(8)}</div>` : `<span class="rate" data-rate="${o.id}">${o.rate.toFixed(1)} rec/s</span>`;
+      const mute = o.kind === "audio" ? `<button class="mini" type="button" data-act="out-mute" data-id="${o.id}" aria-pressed="${o.muted}">${o.muted ? "Unmute" : "Mute"}</button>` : `<button class="mini" type="button" data-act="out-open" data-id="${o.id}">Open</button>`;
+      return `<div class="out${o.muted ? " muted" : ""}${o.kind === "bits" ? " pipe-out" : ""}" data-out="${o.id}"><span class="t"><span class="kind-dot ${o.kind}" aria-hidden="true"></span>${o.label}</span><div class="vis">${vis}</div><div class="ctl">${mute}<button class="mini" type="button" data-act="out-copy" data-id="${o.id}">Copy address</button><button class="mini del" type="button" data-act="out-stop" data-id="${o.id}">Stop</button></div><span class="k">${o.sub}</span></div>`;
+    }).join("") : `<div class="empty" style="padding:0">Nothing streaming. Listen or run a decode pipeline to add one.</div>`;
+  }
+
+  // ===== explore render (inventory / waterfall / focus) =====
+  const levelPct = (s) => Math.max(6, Math.min(100, (s.level + 80) / 60 * 100));
+  function dots(s) { let seed = s.f * 1000, o = ""; for (let i = 0; i < 8; i++) { seed = (seed * 9301 + 49297) % 233280; const on = seed / 233280 < Math.max(s.duty * 1.6, 0.18); o += `<i style="height:${on ? 4 + Math.round(seed % 6) : 1}px"></i>`; } return `<span class="dots" aria-hidden="true">${o}</span>`; }
+  function renderInventory() {
+    const conf = signals.filter((s) => s.state === "confirmed"), cand = signals.filter((s) => s.state === "candidate");
+    $("n-confirmed").textContent = conf.length; $("n-candidate").textContent = cand.length;
+    $("tab-note").textContent = tab === "confirmed" ? "Strong, unambiguous signals are confirmed automatically." : "Seen more than once but not certain. Promote the ones worth keeping.";
+    const rows = (tab === "confirmed" ? conf : cand).sort((a, b) => a.f - b.f);
+    $("inv").innerHTML = rows.length ? rows.map((s) => {
+      const chipCls = s.flag ? "flag" : s.fam === "WFM" ? "wfm" : "unk";
+      const extra = s.state === "candidate" ? `${dots(s)}<span>${s.occ >= 60 ? "steady" : s.occ + "×/h"}</span>` : `<span class="lvl"><i style="width:${levelPct(s)}%"></i></span><span>${s.snr} dB</span>`;
+      const acts = s.state === "candidate" ? `<button class="mini promote" data-act="promote" data-id="${s.id}" type="button">Promote</button><button class="mini del" data-act="delete" data-id="${s.id}" type="button">Delete</button>` : `<button class="mini del" data-act="delete" data-id="${s.id}" type="button">Delete</button>`;
+      const air = audioFor(s.id) ? `<span class="on-air" title="Streaming"></span>` : "";
+      return `<div class="row" role="listitem" tabindex="0" data-id="${s.id}" aria-current="${focus.type === "signal" && focus.id === s.id}"><div class="f">${fmtF(s.f)}<small>MHz</small>${air}</div><div class="acts">${acts}</div><div class="meta"><span class="chip ${chipCls}">${s.flag || s.fam}</span>${s.offRaster ? `<span class="chip flag">off raster</span>` : ""}<span class="mono">${kHz(s.bw)}</span>${extra}</div></div>`;
+    }).join("") : `<div class="empty">Nothing here yet.</div>`;
+  }
+  function renderSelections() { $("sels").innerHTML = selections.length ? selections.map((s) => `<div class="sel" tabindex="0" data-sel="${s.id}" aria-current="${focus.type === "selection" && focus.id === s.id}"><b>${s.name}</b><span class="mono">${fmtF(s.lo, 2)}–${fmtF(s.hi, 2)}</span></div>`).join("") : `<div class="empty">Drag across the waterfall to mark a region.</div>`; }
+  function renderOverlays() {
+    $("brackets").innerHTML = signals.map((s) => { const active = focus.type === "signal" && focus.id === s.id, w = Math.max(x(s.f + s.bw / 2) - x(s.f - s.bw / 2), 0.45); return `<div class="bk ${s.state}${active ? " active" : ""}${s.bw < 0.05 ? " narrow" : ""}" data-id="${s.id}" style="left:${x(s.f) - w / 2}%;width:${w}%"><span>${fmtF(s.f)}</span></div>`; }).join("");
+    let html = `<div class="dc-mask" style="left:${x(DC - 0.012)}%;width:${x(DC + 0.012) - x(DC - 0.012)}%"><span>DC · masked</span></div>`;
+    html += selections.map((s) => `<div class="sel-box${focus.type === "selection" && focus.id === s.id ? " active" : ""}" style="left:${x(s.lo)}%;width:${x(s.hi) - x(s.lo)}%"></div>`).join("");
+    if (focus.type === "signal") { const s = signals.find((z) => z.id === focus.id); if (s) { const w = Math.max(x(s.f + s.bw / 2) - x(s.f - s.bw / 2), 0.5); html += `<div class="col-hi" style="left:${x(s.f) - w / 2}%;width:${w}%"></div>`; } }
+    $("wf-overlays").innerHTML = html;
+  }
+  function renderAxis() { let h = ""; for (let i = 0; i <= 24; i++) { const f = F0 + i * 0.1, major = i % 2 === 0; h += `<div class="tick${major ? "" : " minor"}${major && i % 4 !== 0 ? " mid" : ""}" style="left:${x(f)}%"><span>${f.toFixed(1)}</span></div>`; } $("axis").innerHTML = h; }
+  function renderCapture() {
+    const W = 600, H = 60, n = 96, gap = 1.5, bw = W / n - gap;
+    let seed = 4231, bars = "";
+    for (let i = 0; i < n; i++) { seed = (seed * 9301 + 49297) % 233280; const r = seed / 233280; const v = 0.3 + r * 0.65; const hgt = v * (H - 10); bars += `<rect x="${i * (bw + gap)}" y="${H - hgt}" width="${bw}" height="${hgt}" rx="1" fill="${r > 0.7 ? "#52C2AE" : "#2E4A5B"}" fill-opacity="0.8"></rect>`; }
+    $("cap-svg").innerHTML = bars;
+  }
+  function renderFocus() {
+    const el = $("focus");
+    if (focus.type === "selection") {
+      const sel = selections.find((z) => z.id === focus.id);
+      if (!sel) { focus = { type: "signal", id: (signals[0] || {}).id }; return renderFocus(); }
+      const inside = signals.filter((s) => s.f >= sel.lo && s.f <= sel.hi).sort((a, b) => b.snr - a.snr);
+      el.innerHTML = `<div><div class="eyebrow"><span class="state selection">Selection</span><span class="chip">${sel.name}</span></div><div class="bigf" style="margin-top:8px">${fmtF(sel.lo, 2)}–${fmtF(sel.hi, 2)}<small>MHz</small></div><div class="sub">${kHz(sel.hi - sel.lo)} wide · ${inside.length} signal${inside.length === 1 ? "" : "s"} inside</div></div>
+        <div><div class="section-h">Found inside <em>strongest first</em></div><div class="list" style="padding:0">${inside.length ? inside.map((s) => `<div class="row" tabindex="0" data-id="${s.id}" role="button"><div class="f">${fmtF(s.f)}<small>MHz</small></div><div></div><div class="meta"><span class="state ${s.state}">${s.state}</span><span class="chip ${s.fam === "WFM" ? "wfm" : "unk"}">${s.fam}</span><span class="mono">${s.snr} dB</span></div></div>`).join("") : `<div class="empty">No detections here yet.</div>`}</div></div>
+        <div><div class="section-h">Actions</div><div class="actions"><button class="act primary" data-act="listen-all" type="button"><b>Listen to all</b><small>${inside.length} streams at once</small></button><button class="act" data-act="export" type="button"><b>Export clip</b><small>from the buffer</small></button><button class="act" data-act="watch" type="button"><b>Watch</b><small>alert on new activity</small></button><button class="act danger" data-act="delete-sel" type="button"><b>Delete selection</b><small>detections kept</small></button></div></div>`;
+      return;
+    }
+    const s = signals.find((z) => z.id === focus.id);
+    if (!s) { el.innerHTML = `<div class="empty">Select a signal.</div>`; return; }
+    const on = !!audioFor(s.id);
+    el.innerHTML = `<div><div class="eyebrow"><span class="state ${s.state}">${s.state}</span><span class="chip ${s.fam === "WFM" ? "wfm" : "unk"}">${s.fam}</span>${s.flag ? `<span class="chip flag">${s.flag}</span>` : s.offRaster ? `<span class="chip flag">off raster</span>` : ""}</div><div class="bigf" style="margin-top:8px">${fmtF(s.f, 4)}<small>MHz</small></div><div class="sub">${s.refined ? "Centre refined from the demodulated output (±1 kHz)" : "Centre from detection; not refined yet"}</div></div>
+      <dl class="kv"><dt>Bandwidth</dt><dd>${kHz(s.bw)}</dd><dt>SNR</dt><dd>${s.snr} dB</dd><dt>Peak level</dt><dd>${s.level} dBFS</dd><dt>Seen</dt><dd>${s.seen}</dd><dt>Channel raster</dt><dd class="${s.offRaster ? "flag" : ""}">${s.raster}</dd></dl>
+      <div><div class="section-h">Possible explanations <em>ranked suggestions</em></div><ol class="expl">${s.expl.map((e, i) => `<li><span class="rank">${i + 1}</span><div><b>${e[0]}</b><span class="conf">${e[1]}</span></div><div class="why">${e[2]}</div></li>`).join("")}</ol></div>
+      <div><div class="section-h">Actions</div><div class="actions">
+        <button class="act primary" data-act="listen" aria-pressed="${on}" type="button"><b>${on ? "Stop listening" : "Listen"}</b><small>${on ? "removes from Outputs" : "adds to Outputs"}</small></button>
+        <button class="act" data-act="open-decode" type="button"><b>${s.rds ? "Decode RDS" : "Open in Decode"}</b><small>${s.rds ? "tutorial · data on FM" : "build a pipeline"}</small></button>
+        <button class="act" data-act="export" type="button"><b>Export clip</b><small>from the buffer</small></button>
+        <button class="act" data-act="stream" type="button"><b>Stream out</b><small>audio or IQ</small></button>
+        ${s.state === "candidate" ? `<button class="act promote" data-act="promote" data-id="${s.id}" type="button"><b>Promote</b><small>to confirmed</small></button><button class="act danger" data-act="delete" data-id="${s.id}" type="button"><b>Delete</b><small>detections kept</small></button>` : `<button class="act danger wide" data-act="delete" data-id="${s.id}" type="button"><b>Delete from inventory</b><small>raw detections and history kept</small></button>`}
+      </div></div>
+      ${s.rds ? `<div class="decode"><div class="section-h" style="margin-bottom:6px">RDS <em>decoded</em></div><dl class="kv"><dt>PI</dt><dd>${s.rds.pi}</dd><dt>Programme type</dt><dd>${s.rds.pty}</dd><dt>Station name</dt><dd>${s.rds.ps}</dd></dl></div>` : ""}`;
+  }
+
+  // ===== DECODE: plot library =====
+  const svg = (w, h, body) => `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img">${body}</svg>`;
+  const T = (a, b, s, an = "start", fill = "#5A6973") => `<text x="${a}" y="${b}" fill="${fill}" font-size="10" text-anchor="${an}" font-family="Chivo Mono, monospace">${s}</text>`;
+  const rnd = (seed) => { let s = seed; return () => { s = (s * 16807) % 2147483647; return s / 2147483647; }; };
+  function mpx(zoom, sub) {
+    const W = 520, H = 190, L = 34, B = 20, lo = zoom ? 52 : 0, hi = 62;
+    const fx = (k) => L + (k - lo) / (hi - lo) * (W - L - 6), fy = (db) => 8 + (1 - (db + 80) / 70) * (H - B - 8);
+    const dens = (k) => { let p = -74; const add = (v) => p = 10 * Math.log10(Math.pow(10, p / 10) + Math.pow(10, v / 10)); if (k > 0.03 && k < 15) add(-18 - 14 * (k / 15) ** 2); if (k > 23 && k < 53) add(-36 - 16 * Math.abs(k - 38 / 15) ** 0 * ((k - 38) / 15) ** 2); add(-12 - 1600 * (k - 19) ** 2); add(-44 - 3.2 * ((k - 57) / 1.2) ** 2); return p; };
+    let path = `M${fx(lo)},${H - B}`; for (let i = 0; i <= 380; i++) { const k = lo + (hi - lo) * i / 380; path += ` L${fx(k).toFixed(1)},${fy(dens(k) + (Math.sin(i * 12.9898) * 43758.5 % 1) * 1.4).toFixed(1)}`; } path += ` L${fx(hi)},${H - B} Z`;
+    const s = sub / 1000; let grid = "";
+    for (let db = -70; db <= -10; db += 20) grid += `<line x1="${L}" x2="${W - 6}" y1="${fy(db)}" y2="${fy(db)}" stroke="#1B252D"></line>${T(L - 4, fy(db) + 3, db, "end")}`;
+    (zoom ? [52, 55, 57, 60, 62] : [0, 15, 19, 38, 57]).forEach((k) => grid += T(fx(k), H - 6, k, "middle"));
+    const lbl = zoom ? "" : `${T(fx(19), fy(-12) - 4, "pilot 19k", "middle", "#8595A0")}${T(fx(38), fy(-36) - 6, "stereo 38k", "middle", "#8595A0")}${T(fx(57), fy(-44) - 8, "RDS 57k", "middle", "#F0A542")}`;
+    return svg(W, H, `${grid}<path d="${path}" fill="rgba(82,194,174,0.16)" stroke="#8FD9C9" stroke-width="1.1"></path><rect x="${fx(s - 2.4)}" y="8" width="${Math.max(2, fx(s + 2.4) - fx(s - 2.4))}" height="${H - B - 8}" fill="rgba(240,165,66,0.12)" stroke="#F0A542" stroke-dasharray="4 3"></rect>${lbl}${T(W - 6, H - 6 - 12, "kHz", "end")}`);
+  }
+  function timing(q, rate, bits) {
+    const W = 520, H = 190, n = 14, L = 60, per = (W - L - 8) / n, drift = (rate - 1187.5) / 1187.5, R = rnd(31);
+    let wave = "", clock = "", dig = ""; const yMid = 50, amp = 24;
+    for (let i = 0; i <= n * 20; i++) { const tt = i / 20, k = Math.min(n - 1, Math.floor(tt)), ph = tt - k; const lvl = (bits[k] ? 1 : -1) * (ph < 0.5 ? 1 : -1); const sm = lvl * Math.min(1, Math.min(ph, Math.abs(ph - 0.5), 1 - ph) * 9 + 0.15); wave += `${i ? "L" : "M"}${(L + tt * per).toFixed(1)},${(yMid - (sm + Math.sin(i * 7.13) * 0.08 * (1 + (1 - q) * 5)) * amp).toFixed(1)} `; }
+    for (let k = 0; k < n; k++) { const off = ((k * drift * 180) % 1 + 1) % 1; const cx = L + (k + 0.25 + off * 0.5) * per; clock += `<line x1="${cx}" x2="${cx}" y1="90" y2="116" stroke="${Math.abs(off) < 0.08 || off > 0.92 ? "#F0A542" : "#E47B68"}" stroke-width="2"></line>`; dig += T(L + (k + 0.5) * per, 146, bits[k], "middle", "#F3E3BF"); }
+    let cells = ""; for (let k = 0; k <= n; k++) cells += `<line x1="${L + k * per}" x2="${L + k * per}" y1="14" y2="156" stroke="#1B252D"></line>`;
+    return svg(W, H, `${cells}${T(4, yMid + 3, "signal")}${T(4, 106, "clock")}${T(4, 149, "bits")}<path d="${wave}" fill="none" stroke="#8FD9C9" stroke-width="1.4"></path>${clock}${dig}${T(L, 180, `${n} symbols · rate ${rate.toFixed(1)} Bd`)}`);
+  }
+  function eye(q) {
+    const W = 520, H = 190, L = 10, R = rnd(12345); let tr = "";
+    for (let t = 0; t < 64; t++) { const a = R() < 0.5 ? 1 : -1, b = R() < 0.5 ? 1 : -1, c = R() < 0.5 ? 1 : -1, jit = (R() - 0.5) * (1 - q) * 0.9, nz = 0.06 + (1 - q) * 0.45; let d = ""; for (let i = 0; i <= 56; i++) { const u = i / 56 * 2 + jit, lv = u < 0.5 ? a : u < 1.5 ? b : c, prev = u < 1.5 ? a : b, ph = u < 0.5 ? 1 : u < 1.5 ? u - 0.5 : u - 1.5, e = ph < 0.25 ? prev + (lv - prev) * (0.5 - 0.5 * Math.cos(Math.PI * ph / 0.25)) : lv, y = H / 2 - (e + (R() - 0.5) * nz) * (H * 0.36); d += `${i ? "L" : "M"}${(L + i / 56 * (W - 2 * L)).toFixed(1)},${y.toFixed(1)} `; } tr += `<path d="${d}" fill="none" stroke="rgba(143,217,201,${0.1 + q * 0.12})" stroke-width="1.2"></path>`; }
+    const open = Math.max(0, q);
+    return svg(W, H, `<line x1="${W / 2}" x2="${W / 2}" y1="6" y2="${H - 6}" stroke="#F0A542" stroke-dasharray="3 4"></line><line x1="${L}" x2="${W - L}" y1="${H / 2}" y2="${H / 2}" stroke="#243039"></line>${tr}<rect x="${W / 2 - 28 * open}" y="${H / 2 - 38 * open}" width="${56 * open}" height="${76 * open}" fill="none" stroke="#F0A542" stroke-opacity="${open}" rx="3"></rect>${T(W / 2 + 6, 16, "sample instant", "start", "#F0A542")}`);
+  }
+  function constp(q, rot) {
+    const W = 300, H = 190, cx = W / 2, cy = H / 2, sc = 54, R = rnd(777); let pts = "";
+    for (let i = 0; i < 340; i++) { const sym = i % 2 ? 1 : -1, sp = 0.09 + (1 - q) * 0.6, ph = rot + (R() - 0.5) * (1 - q) * 2.4, I = sym + (R() - 0.5) * sp * 2, Q = (R() - 0.5) * sp * 1.4, xr = I * Math.cos(ph) - Q * Math.sin(ph), yr = I * Math.sin(ph) + Q * Math.cos(ph); pts += `<circle cx="${(cx + xr * sc).toFixed(1)}" cy="${(cy - yr * sc).toFixed(1)}" r="1.4" fill="#8FD9C9" fill-opacity="0.55"></circle>`; }
+    return svg(W, H, `<line x1="10" x2="${W - 10}" y1="${cy}" y2="${cy}" stroke="#243039"></line><line x1="${cx}" x2="${cx}" y1="8" y2="${H - 8}" stroke="#243039"></line><circle cx="${cx - sc}" cy="${cy}" r="5" fill="none" stroke="#F0A542"></circle><circle cx="${cx + sc}" cy="${cy}" r="5" fill="none" stroke="#F0A542"></circle>${pts}`);
+  }
+  function sync(q, names) {
+    const W = 520, H = 190, n = 48, L = 26, bw = (W - L - 8) / n, cols = ["#52C2AE", "#F0A542", "#A395E0", "#F3E3BF"], R = rnd(99); let bars = "";
+    for (let i = 0; i < n; i++) { const hit = R() < q * 0.99, h = hit ? 108 + R() * 18 : 8 + R() * 28 * (1 - q * 0.8), k = i % names.length, xx = L + i * bw; bars += `<rect x="${xx + 1}" y="${148 - h}" width="${bw - 2}" height="${h}" rx="1" fill="${hit ? cols[k] : "#243039"}" fill-opacity="${hit ? 0.85 : 1}"></rect>`; if (hit && i < 16) bars += T(xx + bw / 2, 148 - h - 4, names[k], "middle", cols[k]); }
+    return svg(W, H, `<line x1="${L}" x2="${W - 8}" y1="148" y2="148" stroke="#243039"></line><line x1="${L}" x2="${W - 8}" y1="40" y2="40" stroke="#1B252D" stroke-dasharray="3 4"></line>${T(L - 4, 43, "match", "end")}${bars}${T(L, 174, "one bar per block position · locked when regular")}`);
+  }
+  function channelMap(chans) {
+    const W = 520, H = 190, L = 70, top = 16, rowH = (H - top - 24) / chans.length, R = rnd(55); let body = "", leg = "";
+    chans.forEach((c, i) => {
+      const y = top + i * rowH + 4;
+      body += `${T(L - 8, y + rowH / 2, c.f, "end", c.ctrl ? "#F0A542" : "#8595A0")}<line x1="${L}" x2="${W - 8}" y1="${y + rowH - 4}" y2="${y + rowH - 4}" stroke="#1B252D"></line>`;
+      let t = 0;
+      while (t < 1) { const seg = c.ctrl ? 0.14 : 0.04 + R() * 0.1, gap = c.ctrl ? 0.02 : 0.03 + R() * 0.22, on = c.ctrl ? true : R() < 0.6; if (on) body += `<rect x="${L + t * (W - L - 8)}" y="${y}" width="${Math.max(3, seg * (W - L - 8))}" height="${rowH - 8}" rx="2" fill="${c.ctrl ? "#F0A542" : "#8FD9C9"}" fill-opacity="0.8"></rect>`; t += seg + gap; }
+    });
+    leg = `${T(L, H - 6, "time →")}${T(W - 8, H - 6, "amber = control channel · teal = voice/data bursts", "end")}`;
+    return svg(W, H, body + leg);
+  }
+  function counts(data, q) {
+    const W = 520, H = 190, L = 44, max = Math.max(...data.map((d) => d[1])), bh = Math.min(22, (H - 30) / data.length - 8); let body = "";
+    data.forEach(([g, v], i) => { const y = 12 + i * (bh + 8), w = (W - L - 70) * (v * q) / max; body += `${T(L - 8, y + bh * 0.7, g, "end", "#F0A542")}<rect x="${L}" y="${y}" width="${Math.max(1, w)}" height="${bh}" rx="2" fill="#52C2AE" fill-opacity="0.7"></rect>${T(L + w + 6, y + bh * 0.7, Math.round(v * q), "start", "#8595A0")}`; });
+    return svg(W, H, body + T(L, H - 4, "in the last 60 s"));
+  }
+
+  // ===== DECODE: pipelines & recipes =====
+  const wb = { rate: 1187.5, sub: 57000, sync: "0FC 198 168 350 1B4", poly: "5B9", loop: "0.5%" };
+  const quality = () => { const re = Math.abs(wb.rate - 1187.5) / 1187.5, se = Math.abs(wb.sub - 57000); let q = Math.exp(-((re / 0.0035) ** 2)) * Math.exp(-((se / 160) ** 2)); if (wb.poly.trim().toUpperCase() !== "5B9") q *= 0.02; if (wb.sync.replace(/\s+/g, " ").trim().toUpperCase() !== "0FC 198 168 350 1B4") q *= 0.25; return q; };
+  const RDSbits = [1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1];
+  const PGbits = [0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0];
+
+  const pipelines = [
+    { id: "rds", name: "RDS · 101.300 MHz", short: "RDS", status: "run", chan: "101.300 MHz · 1 channel", detail: "WFM → 57 kHz subcarrier",
+      stages: [
+        { name: "FM demod", block: "fm_demod · 101.300", st: () => ["pilot locked", "ok"], plots: () => [["FM baseband (MPX)", "0–62 kHz", mpx(false, wb.sub), "Everything the station sends. The RDS data rides at 57 kHz."], ["Pilot lock", "19 kHz", timing(1, 1187.5, RDSbits), "Lock the 19 kHz pilot and 57 kHz is known exactly."]] },
+        { name: "57 kHz subcarrier", block: "mix 57k → lowpass 2.4k", st: () => { const e = Math.abs(wb.sub - 57000); return e < 40 ? ["on carrier", "ok"] : e < 200 ? [`${e} Hz off`, "warn"] : ["off carrier", "bad"]; }, plots: () => [["Subcarrier filter", "52–62 kHz", mpx(true, wb.sub), "The amber box is the band this block keeps."], ["Mixed to baseband", "BPSK", constp(quality(), (wb.sub - 57000) / 160 * 0.9), "On carrier the points sit in two clusters; off it they smear."]] },
+        { name: "Symbol clock", block: "clock_recovery · biphase", st: () => { const q = quality(); return q > 0.8 ? ["eye open", "ok"] : q > 0.3 ? ["eye closing", "warn"] : ["no lock", "bad"]; }, plots: () => [["Eye diagram", "2 symbols overlaid", eye(quality()), "The eye opens when the clock matches 1187.5 Bd. Try 1200 and watch it close."], ["Timing diagram", "clock vs. signal", timing(quality(), wb.rate, RDSbits), "Amber ticks land mid-symbol when locked; red ticks drift."]] },
+        { name: "Blocks", block: "sync_search + crc 0x5B9", st: () => { const q = quality(); return q > 0.8 ? [`${(97.8 * q).toFixed(0)}% CRC`, "ok"] : q > 0.3 ? [`${(97.8 * q).toFixed(0)}% CRC`, "warn"] : ["no sync", "bad"]; }, plots: () => [["Sync search", "offset words A–D", sync(quality(), ["A", "B", "C", "D"]), "Each 26-bit block ends in a check word XOR an offset. Regular hits mean lock."], ["Groups by type", "last 60 s", counts([["0A", 412], ["2A", 356], ["14A", 31], ["8A", 44]], quality()), "0A carries the station name; 2A carries RadioText."]] },
+        { name: "Fields", block: "fields · RDS layout", st: () => [quality() > 0.3 ? "PS · RT" : "waiting", quality() > 0.3 ? "ok" : "bad"], plots: () => [["Groups by type", "last 60 s", counts([["0A", 412], ["2A", 356], ["14A", 31], ["8A", 44]], quality()), "The output stream below carries one record per decoded group."], ["Constellation", "BPSK", constp(quality(), 0), "Two clusters: a phase flip is a 1, no flip a 0."]] }
+      ], params: "rds" },
+    { id: "pocsag", name: "Pager net · POCSAG", short: "POCSAG", status: "hop", chan: "152.240 / 152.480 / 157.740", detail: "3 channels · follows hops",
+      stages: [
+        { name: "Channels", block: "follow_hops · 3 channels", st: () => ["3 active", "ok"], plots: () => [["Channel map", "who's on when", channelMap([{ f: "157.740", ctrl: true }, { f: "152.480" }, { f: "152.240" }]), "One pipeline follows a signal across channels. Amber is the steady control channel."], ["Timing diagram", "2-FSK", timing(0.85, 1200, PGbits), "Each channel is 2-FSK. The pipeline demods all of them in parallel."]] },
+        { name: "FSK demod", block: "fsk_demod · 1200 Bd", st: () => ["locked", "ok"], plots: () => [["Eye diagram", "2-FSK", eye(0.82), "A clean two-level eye: mark and space."], ["Timing diagram", "clock vs. signal", timing(0.85, 1200, PGbits), "1200 baud recovered on each channel."]] },
+        { name: "Deframe", block: "sync_search 0x7CD215D8 + bch", st: () => ["93% BCH", "ok"], plots: () => [["Sync search", "batch sync word", sync(0.9, ["S", "A", "M", "I"]), "POCSAG batches start with a 32-bit sync word, then codewords."], ["Frames by channel", "last 60 s", counts([["157.740", 88], ["152.480", 41], ["152.240", 22]], 1), "Messages arrive across all three channels."]] },
+        { name: "Fields", block: "fields · address + message", st: () => ["address · text", "ok"], plots: () => [["Frames by channel", "last 60 s", counts([["157.740", 88], ["152.480", 41], ["152.240", 22]], 1), "Each record below is one pager message."], ["Channel map", "who's on when", channelMap([{ f: "157.740", ctrl: true }, { f: "152.480" }, { f: "152.240" }]), "The message's channel is kept in the record."]] }
+      ], params: "pocsag" },
+    { id: "acars", name: "ACARS · 131.550 MHz", short: "ACARS", status: "run", chan: "131.550 MHz · 1 channel", detail: "AM → MSK 2400 Bd",
+      stages: [
+        { name: "AM + MSK", block: "am_demod · msk_demod 2400", st: () => ["locked", "ok"], plots: () => [["Constellation", "MSK", constp(0.85, 0), "Minimum-shift keying: two tones, continuous phase."], ["Timing diagram", "2400 Bd", timing(0.85, 2400, PGbits), "2400 baud recovered from the AM envelope."]] },
+        { name: "Deframe", block: "sync SYN + crc16", st: () => ["CRC ok", "ok"], plots: () => [["Sync search", "SYN preamble", sync(0.9, ["S", "Y", "N", "*"]), "ACARS frames start with SYN characters, then STX."], ["Frames", "last 60 s", counts([["uplink", 12], ["downlink", 31]], 1), "Uplink and downlink messages."]] },
+        { name: "Fields", block: "fields · label + text", st: () => ["label · text", "ok"], plots: () => [["Frames", "last 60 s", counts([["uplink", 12], ["downlink", 31]], 1), "Each record below is one ACARS message."], ["Constellation", "MSK", constp(0.85, 0), "Kept locked across the message."]] }
+      ], params: "acars" }
+  ];
+  let curPipe = "rds", stageIdx = { rds: 2, pocsag: 0, acars: 0 }, selFrame = {}, selField = {};
+
+  // ---- frame builders (byte-oriented output stream) ----
+  const asc = (n) => (n >= 32 && n < 127) ? String.fromCharCode(n) : ".";
+  const flat = (fields) => { const out = []; const walk = (f, d) => { out.push({ ...f, depth: d }); (f.children || []).forEach((c) => walk(c, d + 1)); }; fields.forEach((f) => walk(f, 1)); return out; };
+  let rdsSeq = 0, pgSeq = 0, acSeq = 0, tClock = 812.4;
+  function rdsFrame() {
+    rdsSeq++; const is0A = rdsSeq % 2 === 0, seg = is0A ? (rdsSeq / 2) % 4 : Math.floor(rdsSeq / 2) % 14, ok = Math.random() < quality() * 0.98 + 0.02;
+    const PI = 0x1694, B = (is0A ? 0x00 : 0x20) | 0x0A, Bp = (0 << 2) | 10 >> 3, PS = "101.3 FM", RT = "Weather at the top of the hour.  ";
+    let C, D, txt; if (is0A) { C = 0xE2; const a = PS.charCodeAt(seg * 2) || 32, b = PS.charCodeAt(seg * 2 + 1) || 32; D = [a, b]; txt = PS.substr(seg * 2, 2); } else { const t = RT.substr(seg * 4, 4); C = t.charCodeAt(0); D = [t.charCodeAt(2) || 32, t.charCodeAt(3) || 32]; txt = t; }
+    tClock += 0.0876; const bytes = [0x16, 0x94, is0A ? 0x0A : 0x2A, (10 << 0), C, is0A ? 0x0D : (RT.charCodeAt(seg * 4 + 1) || 32), D[0], D[1], ok ? 0x01 : 0x00];
+    const fields = [{ name: "RDS group record", val: `${is0A ? "0A" : "2A"} · seg ${seg}`, off: 0, len: 9, cls: "cream", children: [
+      { name: "Block A — PI code", val: "0x1694", off: 0, len: 2, cls: "teal" },
+      { name: "Block B — group/flags", val: `${is0A ? "0A" : "2A"}`, off: 2, len: 2, cls: "amber", children: [
+        { name: "group type", val: is0A ? "0A (PS)" : "2A (RadioText)", off: 2, len: 1, cls: "amber" },
+        { name: "TP / PTY", val: "TP 0 · PTY 10 Pop", off: 3, len: 1, cls: "lav" }] },
+      { name: "Block C", val: is0A ? "AF/flags" : "text", off: 4, len: 2, cls: "lav" },
+      { name: "Block D — text", val: `"${txt}"`, off: 6, len: 2, cls: "cream" },
+      { name: "status", val: ok ? "CRC ✓" : "CRC ✗", off: 8, len: 1, cls: ok ? "mut" : "coral" }] }];
+    return { id: "r" + rdsSeq, t: tClock, chan: "101.300", proto: "RDS", summary: ok ? `${is0A ? "PS" : "RT"}[${seg}] "${txt}"` : "dropped · CRC fail", ok, bytes, fields: flat(fields) };
+  }
+  const PGmsgs = [["157.740", 1274591, "3", "CALL EXT 4471"], ["152.480", 883210, "0", ""], ["152.240", 1450102, "3", "MTG RM 210 1500"], ["157.740", 1274591, "3", "PARTS DOCK B"]];
+  function pgFrame() {
+    pgSeq++; const [ch, addr, fn, msg] = PGmsgs[pgSeq % PGmsgs.length]; tClock += 0.31;
+    const ab = [(addr >> 16) & 255, (addr >> 8) & 255, addr & 255], mb = [...msg].map((c) => c.charCodeAt(0));
+    const bytes = [0x7C, 0xD2, 0x15, 0xD8, ...ab, +fn, ...mb];
+    const fields = [{ name: "POCSAG frame", val: `ch ${ch}`, off: 0, len: bytes.length, cls: "lav", children: [
+      { name: "sync codeword", val: "0x7CD215D8", off: 0, len: 4, cls: "lav" },
+      { name: "address (RIC)", val: String(addr), off: 4, len: 3, cls: "teal" },
+      { name: "function", val: `${fn} · ${fn === "3" ? "alphanumeric" : "tone"}`, off: 7, len: 1, cls: "amber" },
+      ...(mb.length ? [{ name: "message", val: `"${msg}"`, off: 8, len: mb.length, cls: "cream" }] : [])] }];
+    return { id: "p" + pgSeq, t: tClock, chan: ch, proto: "POCSAG", hop: true, summary: msg ? `RIC ${addr} · "${msg}"` : `RIC ${addr} · tone`, ok: true, bytes, fields: flat(fields) };
+  }
+  const ACmsgs = [["down", ".G-EUUB", "5Z", "OPS NORMAL 1830Z"], ["up", ".N204FR", "H1", "WX REQUEST KDEN"], ["down", ".G-EUUB", "Q0", "LINK TEST"]];
+  function acFrame() {
+    acSeq++; const [dir, reg, label, msg] = ACmsgs[acSeq % ACmsgs.length]; tClock += 0.44;
+    const rb = [...reg].map((c) => c.charCodeAt(0)), lb = [...label].map((c) => c.charCodeAt(0)), mb = [...msg].map((c) => c.charCodeAt(0));
+    const bytes = [dir === "up" ? 0x48 : 0x32, ...rb, 0x15, ...lb, 0x31, 0x02, ...mb, 0x03];
+    let off = 0; const F = (name, len, val, cls) => { const f = { name, off, len, val, cls }; off += len; return f; };
+    const fields = [{ name: "ACARS message", val: dir, off: 0, len: bytes.length, cls: "teal", children: [
+      F("mode", 1, dir === "up" ? "H (uplink)" : "2 (downlink)", "amber"), F("registration", 7, reg, "teal"), F("ack", 1, "NAK", "mut"),
+      F("label", 2, label, "lav"), F("block id", 1, "1", "mut"), F("STX", 1, "0x02", "mut"), F("text", mb.length, `"${msg}"`, "cream"), F("ETX", 1, "0x03", "mut")] }];
+    return { id: "a" + acSeq, t: tClock, chan: "131.550", proto: "ACARS", summary: `${reg} · ${label} · "${msg}"`, ok: true, bytes, fields: flat(fields) };
+  }
+  const framesByPipe = { rds: [], pocsag: [], acars: [] };
+  const makeFrame = { rds: rdsFrame, pocsag: pgFrame, acars: acFrame };
+  function pushFrame(pipe, fresh) { const f = makeFrame[pipe](); f.fresh = fresh; framesByPipe[pipe].unshift(f); framesByPipe[pipe] = framesByPipe[pipe].slice(0, 60); if (!selFrame[pipe]) selFrame[pipe] = f.id; }
+
+  // ---- decode render ----
+  function renderPipelines() {
+    $("pipelines").innerHTML = pipelines.map((p) => `<div class="pl" tabindex="0" data-pipe="${p.id}" aria-current="${p.id === curPipe}"><b>${p.name}</b><span class="st ${p.status}">${p.status === "hop" ? "hopping" : "running"}</span><span class="cx">${p.status === "hop" ? '<span class="hopdot">⇄</span>' : "•"} ${p.chan}</span></div>`).join("");
+  }
+  function renderStages() {
+    const p = pipelines.find((z) => z.id === curPipe); $("recipe-name").textContent = `${p.short} · ${p.stages.length} blocks`;
+    $("stage-list").innerHTML = p.stages.map((s, i) => { const [txt, cls] = s.st(); return `<div class="stg" tabindex="0" data-stage="${i}" aria-current="${i === stageIdx[curPipe]}"><span class="n">${i + 1}</span><span>${s.name}</span><span class="chip ${cls}">${txt}</span><code>${s.block}</code></div>`; }).join("");
+    $("pipe").innerHTML = p.stages.map((s, i) => { const [txt, cls] = s.st(); return `${i ? `<span class="arrow" aria-hidden="true">→</span>` : ""}<button class="node" type="button" data-stage="${i}" aria-current="${i === stageIdx[curPipe]}"><span class="top"><b>${s.name}</b><span class="n">${i + 1}</span></span><small class="${cls === "bad" ? "fx-bad" : cls === "warn" ? "fx-gt" : ""}">${txt}</small></button>`; }).join("");
+  }
+  function renderPlots() {
+    const p = pipelines.find((z) => z.id === curPipe), [a, b] = p.stages[stageIdx[curPipe]].plots();
+    $("pa-title").textContent = a[0]; $("pa-note").textContent = a[1]; $("pa").innerHTML = a[2]; $("pa-cap").textContent = a[3];
+    $("pb-title").textContent = b[0]; $("pb-note").textContent = b[1]; $("pb").innerHTML = b[2]; $("pb-cap").textContent = b[3];
+  }
+  function renderFrameList() {
+    const p = pipelines.find((z) => z.id === curPipe), list = framesByPipe[curPipe];
+    $("fr-note").textContent = `${p.short} · tcp :8788`;
+    $("frame-list").innerHTML = list.map((f) => `<div class="fr${f.ok ? "" : " bad"}${f.fresh ? " fresh" : ""}" data-frame="${f.id}" role="listitem" aria-current="${f.id === selFrame[curPipe]}"><span class="ft">${f.t.toFixed(2)}</span><span class="fc${f.hop ? " hop" : ""}">${f.chan}</span><span class="fs">${f.summary}</span></div>`).join("");
+    list.forEach((f) => f.fresh = false);
+  }
+  function curFrame() { const list = framesByPipe[curPipe]; return list.find((f) => f.id === selFrame[curPipe]) || list[0]; }
+  function renderBytes() {
+    const f = curFrame(); if (!f) return;
+    const owner = new Array(f.bytes.length).fill(null);
+    f.fields.forEach((fl, idx) => { for (let i = fl.off; i < fl.off + fl.len; i++) if (owner[i] === null || fl.depth >= f.fields[owner[i]].depth) owner[i] = idx; });
+    const sel = selField[curPipe], selRange = sel != null && f.fields[sel] ? [f.fields[sel].off, f.fields[sel].off + f.fields[sel].len] : null;
+    let rows = "";
+    for (let r = 0; r < f.bytes.length; r += 16) {
+      let hx = "", ac = "";
+      for (let i = r; i < Math.min(r + 16, f.bytes.length); i++) {
+        const o = owner[i], cls = o != null ? clsFor[f.fields[o].cls] : "b-mut", inSel = selRange && i >= selRange[0] && i < selRange[1];
+        hx += `<b class="${cls}${inSel ? " sel" : ""}" data-b="${i}">${f.bytes[i].toString(16).toUpperCase().padStart(2, "0")}</b>`;
+        ac += `<b class="${cls}${inSel ? " sel" : ""}" data-b="${i}">${asc(f.bytes[i])}</b>`;
+      }
+      rows += `<div class="hexrow"><span class="off">${r.toString(16).padStart(4, "0")}</span><span class="hx">${hx}</span><span></span><span class="asc">${ac}</span></div>`;
+    }
+    $("hexgrid").innerHTML = rows;
+    $("byte-note").textContent = `${f.bytes.length} bytes · frame at t=${f.t.toFixed(2)}s`;
+    $("flow").innerHTML = `served as → <code>tcp://127.0.0.1:8788 · open/bits?pipeline=${curPipe}</code> · one record per frame`;
+    renderTree();
+  }
+  function renderTree() {
+    const f = curFrame(); if (!f) return; const sel = selField[curPipe];
+    $("tree").innerHTML = `<div class="section-h" style="margin-bottom:6px"><span>Fields</span><em>${f.proto}</em></div>` + f.fields.map((fl, idx) => `<div class="tnode d${fl.depth}" tabindex="0" data-field="${idx}" aria-current="${idx === sel}"><span class="nm"><span class="dot" style="background:${COL[fl.cls]}"></span>${fl.name}</span><span class="vv">${fl.val}</span><span class="rg">bytes ${fl.off}–${fl.off + fl.len - 1}</span></div>`).join("");
+  }
+  function selectField(idx) { selField[curPipe] = idx; renderBytes(); }
+  function selectByteField(b) { const f = curFrame(); let best = null, bestDepth = -1; f.fields.forEach((fl, idx) => { if (b >= fl.off && b < fl.off + fl.len && fl.depth > bestDepth) { best = idx; bestDepth = fl.depth; } }); if (best != null) selectField(best); }
+
+  const paramSets = {
+    rds: () => `<div class="param"><label for="p-sub">Subcarrier</label><output id="o-sub">${wb.sub.toLocaleString("en-US")} Hz</output><input type="range" id="p-sub" min="56400" max="57600" step="10" value="${wb.sub}"><div class="suggest"><span>Suggested: 3 × pilot = 57,000 Hz</span><button type="button" data-act="suggest" data-p="sub">Use</button></div></div>
+      <div class="param"><label for="p-rate">Symbol rate</label><output id="o-rate">${wb.rate.toFixed(1)} Bd</output><input type="range" id="p-rate" min="1150" max="1230" step="0.5" value="${wb.rate}"><div class="suggest"><span>Blind estimate: 1187.6 Bd</span><button type="button" data-act="suggest" data-p="rate">Use</button></div></div>
+      <div class="param"><label for="p-sync">Offset words (hex)</label><input type="text" id="p-sync" value="${wb.sync}" style="width:150px"></div>
+      <div class="param"><label for="p-poly">CRC polynomial</label><input type="text" id="p-poly" value="${wb.poly}"></div>`,
+    pocsag: () => `<div class="param"><label>Modulation</label><span class="val">2-FSK</span></div><div class="param"><label>Symbol rate</label><span class="val">1200 Bd</span><div class="suggest"><span>Blind estimate: 1198 Bd · also seen: 512, 2400</span></div></div><div class="param"><label>Sync word</label><span class="val">0x7CD215D8</span></div><div class="param"><label>Error check</label><span class="val">BCH(31,21) + parity</span></div><div class="param"><label>Follow hops</label><span class="val">3 channels linked</span></div>`,
+    acars: () => `<div class="param"><label>Modulation</label><span class="val">AM → MSK</span></div><div class="param"><label>Symbol rate</label><span class="val">2400 Bd</span></div><div class="param"><label>Framing</label><span class="val">SYN · STX … ETX</span></div><div class="param"><label>Error check</label><span class="val">CRC-16</span></div>`
+  };
+  function renderRight() {
+    const p = pipelines.find((z) => z.id === curPipe), si = stageIdx[curPipe], st = p.stages[si];
+    const rdsGuide = [["Demodulate the station", "Wideband FM gives the baseband: audio, a 19 kHz pilot, stereo, and a quiet hump at 57 kHz. That hump is the data."], ["Pull out the 57 kHz subcarrier", "Shift 57 kHz to zero and keep ±2.4 kHz. The pilot fixes it exactly at 3× 19 kHz."], ["Recover the symbol clock", "RDS runs at 1187.5 Bd. The blind estimator suggested it; open the eye to confirm."], ["Find the blocks", "Every 26 bits is 16 data + a 10-bit check word plus an offset. Matching A–D gives sync; the CRC confirms."], ["Read the fields", "Group type says what the blocks mean. 0A is the station name, 2A is RadioText. Save the recipe to reuse it."]];
+    const genGuide = { pocsag: [["Follow the channels", "This network hops across three frequencies. One pipeline follows it and demods all three at once — the frames below carry their channel."], ["Demodulate 2-FSK", "Two tones, mark and space, at 1200 baud on each channel."], ["Find the batches", "Each batch starts with the 0x7CD215D8 sync word, then address and message codewords checked by BCH."], ["Read address and message", "Each record is a pager message: a RIC address, a function, and alphanumeric text."]], acars: [["Demodulate AM + MSK", "ACARS is MSK riding on an AM carrier around 131 MHz, at 2400 baud."], ["Find the frames", "SYN characters, then STX marks the start; CRC-16 checks each frame."], ["Read the fields", "Registration, label, and free text. Each record is one ACARS message."]] };
+    const g = curPipe === "rds" ? rdsGuide[si] : genGuide[curPipe][si];
+    const q = quality(), crc = 97.8 * q, gps = 11.4 * q, cls = (v, a, b) => v >= a ? "good" : v >= b ? "mid" : "bad";
+    const qualityBlock = curPipe === "rds"
+      ? `<div class="quality"><div class="q"><small>Blocks pass CRC</small><b class="${cls(crc, 90, 50)}">${crc.toFixed(1)}%</b></div><div class="q"><small>Records / s</small><b class="${cls(gps, 10, 5)}">${gps.toFixed(1)}</b></div><div class="q"><small>Sync</small><b class="${cls(q, 0.8, 0.3)}">${q > 0.8 ? "locked" : q > 0.3 ? "weak" : "lost"}</b></div></div>`
+      : curPipe === "pocsag" ? `<div class="quality"><div class="q"><small>Frames pass BCH</small><b class="good">93%</b></div><div class="q"><small>Records / s</small><b class="good">3.2</b></div><div class="q"><small>Channels</small><b class="good">3</b></div></div>`
+      : `<div class="quality"><div class="q"><small>Frames pass CRC</small><b class="good">96%</b></div><div class="q"><small>Records / s</small><b class="good">1.1</b></div><div class="q"><small>Lock</small><b class="good">MSK</b></div></div>`;
+    const last = si === p.stages.length - 1;
+    $("wb-right").innerHTML = `<div><div class="step">${p.short} · step ${si + 1} of ${p.stages.length}</div><h2>${g[0]}</h2><p>${g[1]}</p></div>
+      <div><div class="section-h">Block parameters <em>${st.block}</em></div><div style="display:flex;flex-direction:column;gap:12px">${paramSets[curPipe]()}</div></div>
+      <div><div class="section-h">How well it's decoding</div>${qualityBlock}</div>
+      <div class="actions">
+        ${last ? `<button class="act primary wide" type="button" data-act="save"><b>Save recipe “${p.short}”</b><small>reuse on any matching signal, no rebuild</small></button>` : `<button class="act primary wide" type="button" data-act="next"><b>Next step</b><small>${p.stages[si + 1].name}</small></button>`}
+        <button class="act" type="button" data-act="stream-pipe"><b>Stream records</b><small>to Outputs / TCP</small></button>
+        <button class="act" type="button" data-act="reset"><b>Reset params</b><small>to suggested</small></button>
+      </div>`;
+    if (curPipe === "rds") {
+      const bind = (id, fn) => { const el = $(id); if (el) el.addEventListener("input", fn); };
+      bind("p-sub", (e) => { wb.sub = +e.target.value; $("o-sub").textContent = `${wb.sub.toLocaleString("en-US")} Hz`; liveRds(); });
+      bind("p-rate", (e) => { wb.rate = +e.target.value; $("o-rate").textContent = `${wb.rate.toFixed(1)} Bd`; liveRds(); });
+      bind("p-sync", (e) => { wb.sync = e.target.value; liveRds(); });
+      bind("p-poly", (e) => { wb.poly = e.target.value; liveRds(); });
+    }
+  }
+  function liveRds() { renderStages(); renderPlots(); const q = quality(), crc = 97.8 * q, gps = 11.4 * q, cls = (v, a, b) => v >= a ? "good" : v >= b ? "mid" : "bad", qs = document.querySelectorAll("#wb-right .q b"); if (qs.length === 3) { qs[0].textContent = `${crc.toFixed(1)}%`; qs[0].className = cls(crc, 90, 50); qs[1].textContent = gps.toFixed(1); qs[1].className = cls(gps, 10, 5); qs[2].textContent = q > 0.8 ? "locked" : q > 0.3 ? "weak" : "lost"; qs[2].className = cls(q, 0.8, 0.3); } }
+  function renderDecode() { renderPipelines(); renderStages(); renderPlots(); renderFrameList(); renderBytes(); renderRight(); }
+
+  // ===== mode + events =====
+  function renderExplore() { renderInventory(); renderSelections(); renderOverlays(); renderFocus(); }
+  function renderAll() { renderOutputs(); if (mode === "explore") renderExplore(); else renderDecode(); }
+  function setMode(m) { mode = m; document.querySelectorAll(".mode").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === m))); $("view-explore").hidden = m !== "explore"; $("view-decode").hidden = m !== "decode"; renderAll(); if (m === "explore") requestAnimationFrame(() => { sizeCanvases(); drawSpectrum(); }); }
+  const syncTabs = () => document.querySelectorAll(".tab").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
+  function selectSignal(id) { const s = signals.find((z) => z.id === id); if (!s) return; focus = { type: "signal", id }; if (s.state !== tab) { tab = s.state; syncTabs(); } renderExplore(); }
+  function addAudio(s) { if (audioFor(s.id)) return false; outputs.push({ id: "o" + Date.now() + s.id, kind: "audio", sig: s.id, label: fmtF(s.f), sub: `${s.fam === "WFM" ? "WFM" : "auto"} audio · 48 kHz`, muted: false }); return true; }
+
+  function act(name, id, el) {
+    const s = signals.find((z) => z.id === (id || (focus.type === "signal" ? focus.id : "")));
+    switch (name) {
+      case "promote": if (!s) return; s.state = "confirmed"; tab = "confirmed"; syncTabs(); focus = { type: "signal", id: s.id }; toast(`Promoted ${fmtF(s.f)} MHz to confirmed.`); break;
+      case "delete": if (!s) return; signals.splice(signals.indexOf(s), 1); outputs = outputs.filter((o) => o.sig !== s.id); if (focus.type === "signal" && focus.id === s.id) { const nx = signals.filter((z) => z.state === tab)[0] || signals[0]; focus = { type: "signal", id: nx ? nx.id : "" }; } toast(`Deleted ${fmtF(s.f)} MHz. Returns as a candidate if seen again.`); break;
+      case "listen": if (!s) return; { const o = audioFor(s.id); if (o) { outputs = outputs.filter((z) => z !== o); toast(`Stopped ${fmtF(s.f)} MHz.`); } else { addAudio(s); toast(`Listening to ${fmtF(s.f)} MHz. ${outputs.filter((z) => z.kind === "audio").length} audio streams live.`); } } break;
+      case "listen-all": { const sel = selections.find((z) => z.id === focus.id), inside = signals.filter((z) => z.f >= sel.lo && z.f <= sel.hi), added = inside.filter(addAudio).length; toast(added ? `Added ${added} audio stream${added === 1 ? "" : "s"} from ${sel.name}.` : "Everything here is already streaming."); break; }
+      case "delete-sel": { const sel = selections.find((z) => z.id === focus.id); selections = selections.filter((z) => z.id !== focus.id); focus = { type: "signal", id: (signals[0] || {}).id || "" }; toast(`Deleted selection ${sel.name}.`); break; }
+      case "open-decode": setMode("decode"); if (s && s.rds) { curPipe = "rds"; } toast(s && s.rds ? "Tutorial: decode the data channel on 101.3 MHz." : "Decode opens with blind estimates."); return;
+      case "export": toast("Exported a clip from the always-on buffer. It appears in Recordings."); return;
+      case "watch": toast("Watching this region. New activity shows up as candidates."); return;
+      case "stream": toast("Streaming. Copy its address from the Outputs dock."); return;
+      case "out-mute": { const o = outputs.find((z) => z.id === id); o.muted = !o.muted; break; }
+      case "out-stop": { const o = outputs.find((z) => z.id === id); outputs = outputs.filter((z) => z.id !== id); toast(`Stopped ${o.label}.`); break; }
+      case "out-copy": { const o = outputs.find((z) => z.id === id); toast(`Copied tcp://127.0.0.1:8788 · ${o.kind === "bits" ? "open/bits?pipeline=" + o.pipe : "open/audio?emitter=" + o.sig}`); return; }
+      case "out-open": { const o = outputs.find((z) => z.id === id); if (o.pipe) { curPipe = o.pipe; setMode("decode"); } return; }
+      case "next": stageIdx[curPipe] = Math.min(pipelines.find((z) => z.id === curPipe).stages.length - 1, stageIdx[curPipe] + 1); renderDecode(); return;
+      case "save": toast(`Saved recipe “${pipelines.find((z) => z.id === curPipe).short}”. It now runs on any matching signal.`); return;
+      case "stream-pipe": if (!outputs.some((o) => o.pipe === curPipe)) outputs.push({ id: "o" + Date.now(), kind: "bits", pipe: curPipe, label: pipelines.find((z) => z.id === curPipe).short, sub: "records → tcp :8788", rate: 3 }); toast("Streaming decoded records."); renderOutputs(); return;
+      case "reset": Object.assign(wb, { rate: 1187.5, sub: 57000, sync: "0FC 198 168 350 1B4", poly: "5B9", loop: "0.5%" }); toast("Parameters reset to suggested."); renderDecode(); return;
+      case "suggest": if (el.dataset.p === "rate") wb.rate = 1187.5; else wb.sub = 57000; renderRight(); liveRds(); return;
+      case "new-tut": return;
+    }
+    renderAll();
+  }
+
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-act]"); if (a) { e.stopPropagation(); act(a.dataset.act, a.dataset.id, a); return; }
+    const m = e.target.closest(".mode"); if (m) { setMode(m.dataset.mode); return; }
+    const nw = e.target.closest("[data-new]"); if (nw) { const map = { rds: "rds", pocsag: "pocsag", acars: "acars" }; if (map[nw.dataset.new]) { curPipe = map[nw.dataset.new]; renderDecode(); toast(`Opened the ${nw.dataset.new.toUpperCase()} pipeline.`); } else toast("ADS-B needs a 1090 MHz antenna, which isn't connected yet."); return; }
+    const tb = e.target.closest(".tab"); if (tb) { tab = tb.dataset.tab; syncTabs(); renderInventory(); return; }
+    const pp = e.target.closest("[data-pipe]"); if (pp) { curPipe = pp.dataset.pipe; renderDecode(); return; }
+    const st = e.target.closest("[data-stage]"); if (st) { stageIdx[curPipe] = +st.dataset.stage; renderDecode(); return; }
+    const fr = e.target.closest("[data-frame]"); if (fr) { selFrame[curPipe] = fr.dataset.frame; selField[curPipe] = null; renderFrameList(); renderBytes(); return; }
+    const tf = e.target.closest("[data-field]"); if (tf) { selectField(+tf.dataset.field); return; }
+    const bb = e.target.closest("[data-b]"); if (bb) { selectByteField(+bb.dataset.b); return; }
+    const row = e.target.closest(".row[data-id], .bk[data-id]"); if (row) { selectSignal(row.dataset.id); return; }
+    const sel = e.target.closest(".sel[data-sel]"); if (sel) { focus = { type: "selection", id: sel.dataset.sel }; renderExplore(); }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return; const t = e.target; if (!t.closest) return;
+    const row = t.closest(".row[data-id]"); if (row && t === row) { e.preventDefault(); selectSignal(row.dataset.id); return; }
+    const sel = t.closest(".sel[data-sel]"); if (sel && t === sel) { e.preventDefault(); focus = { type: "selection", id: sel.dataset.sel }; renderExplore(); return; }
+    const stg = t.closest(".stg[data-stage]"); if (stg && t === stg) { e.preventDefault(); stageIdx[curPipe] = +stg.dataset.stage; renderDecode(); return; }
+    const pp = t.closest(".pl[data-pipe]"); if (pp && t === pp) { e.preventDefault(); curPipe = pp.dataset.pipe; renderDecode(); return; }
+    const tf = t.closest(".tnode[data-field]"); if (tf && t === tf) { e.preventDefault(); selectField(+tf.dataset.field); }
+  });
+  $("goto-form").addEventListener("submit", (e) => { e.preventDefault(); const v = parseFloat($("goto").value); if (mode !== "explore") setMode("explore"); if (!isFinite(v) || v < F0 || v > F1) { toast(`Enter a frequency between ${F0} and ${F1} MHz.`); return; } const near = [...signals].sort((a, b) => Math.abs(a.f - v) - Math.abs(b.f - v))[0]; if (near && Math.abs(near.f - v) < 0.15) { selectSignal(near.id); toast(`Nearest signal: ${fmtF(near.f)} MHz.`); } else toast(`No signal detected near ${v.toFixed(3)} MHz.`); });
+
+  // capture scrubber
+  const band = $("cap-band");
+  function scrub(clientX) { const r = band.getBoundingClientRect(); const pct = Math.min(100, Math.max(0, (clientX - r.left) / r.width * 100)); $("playhead").style.left = pct + "%"; const live = pct > 98.5; band.classList.toggle("reviewing", !live); const mins = Math.round((100 - pct) / 100 * 48 * 60); $("cap-note").innerHTML = live ? `<b>viewing live</b> · last 48 h kept · 6.2 h buffered · 41 GB of 220 GB` : `<b>reviewing ${mins < 60 ? mins + " min" : (mins / 60).toFixed(1) + " h"} ago</b> · the waterfall above shows this moment · press LIVE to return`; }
+  band.addEventListener("pointerdown", (e) => { if (e.target.id === "live-pill") return; scrub(e.clientX); band.setPointerCapture(e.pointerId); band.dataset.drag = "1"; });
+  band.addEventListener("pointermove", (e) => { if (band.dataset.drag) scrub(e.clientX); });
+  band.addEventListener("pointerup", () => { band.dataset.drag = ""; });
+  $("live-pill").addEventListener("click", () => { $("playhead").style.left = "100%"; band.classList.remove("reviewing"); $("cap-note").innerHTML = `<b>viewing live</b> · last 48 h kept · 6.2 h buffered · 41 GB of 220 GB`; toast("Back to live."); });
+
+  // ===== waterfall canvas =====
+  const wf = $("wf");
+  let drag = null, dragEl = null, crossEl = null, tipEl = null;
+  const fAt = (cx) => { const r = wf.getBoundingClientRect(); return F0 + Math.min(1, Math.max(0, (cx - r.left) / r.width)) * SPAN; };
+  wf.addEventListener("pointerdown", (e) => { drag = { f0: fAt(e.clientX), moved: false }; dragEl = document.createElement("div"); dragEl.className = "drag-box"; wf.appendChild(dragEl); wf.setPointerCapture(e.pointerId); });
+  wf.addEventListener("pointermove", (e) => { const f = fAt(e.clientX); if (!crossEl) { crossEl = document.createElement("div"); crossEl.className = "cross"; wf.appendChild(crossEl); tipEl = document.createElement("div"); tipEl.className = "tip"; wf.appendChild(tipEl); } const pct = x(f); crossEl.style.left = pct + "%"; const col = Math.min(latest.length - 1, Math.max(0, Math.floor((f - F0) / SPAN * latest.length))); tipEl.textContent = `${f.toFixed(4)} MHz · ${Math.round(latest[col] || -96)} dBFS`; tipEl.style.left = `calc(${pct}% + ${pct > 70 ? -170 : 10}px)`; $("hint").style.display = "none"; if (drag) { const lo = Math.min(drag.f0, f), hi = Math.max(drag.f0, f); if (hi - lo > 0.004) drag.moved = true; dragEl.style.left = x(lo) + "%"; dragEl.style.width = (x(hi) - x(lo)) + "%"; } });
+  wf.addEventListener("pointerleave", () => { if (crossEl) { crossEl.remove(); tipEl.remove(); crossEl = tipEl = null; } });
+  wf.addEventListener("pointerup", (e) => { if (!drag) return; const f = fAt(e.clientX); dragEl.remove(); if (drag.moved && Math.abs(f - drag.f0) > 0.02) { const lo = Math.min(drag.f0, f), hi = Math.max(drag.f0, f), id = "s" + Date.now(); selections.push({ id, name: `Region ${selections.length + 1}`, lo, hi }); focus = { type: "selection", id }; toast(`Selected ${lo.toFixed(2)}–${hi.toFixed(2)} MHz.`); renderExplore(); } else { const hit = signals.filter((s) => Math.abs(s.f - f) <= Math.max(s.bw / 2, 0.012)).sort((a, b) => b.snr - a.snr)[0]; if (hit) selectSignal(hit.id); } drag = null; });
+
+  const wfc = $("wf-canvas"), spc = $("spec-canvas"), wctx = wfc.getContext("2d"), sctx = spc.getContext("2d");
+  let W = 0, latest = new Float32Array(1), smooth = new Float32Array(1), img = null;
+  const stops = [[0, [13, 19, 23]], [0.28, [18, 46, 61]], [0.48, [30, 106, 115]], [0.64, [88, 179, 154]], [0.82, [232, 195, 106]], [1, [255, 243, 214]]], lut = new Uint8ClampedArray(768);
+  for (let i = 0; i < 256; i++) { const t = i / 255; let k = 0; while (k < stops.length - 2 && t > stops[k + 1][0]) k++; const [t0, c0] = stops[k], [t1, c1] = stops[k + 1], u = (t - t0) / (t1 - t0); for (let c = 0; c < 3; c++) lut[i * 3 + c] = c0[c] + (c1[c] - c0[c]) * Math.min(1, Math.max(0, u)); }
+  const gN = () => (Math.random() + Math.random() + Math.random() - 1.5) * 1.15;
+  function sizeCanvases() { const r = wf.getBoundingClientRect(), rs = $("spec").getBoundingClientRect(); if (r.width < 10 || r.height < 10) return; const dpr = Math.min(1.5, window.devicePixelRatio || 1), nw = Math.floor(r.width * dpr), nh = Math.floor(r.height * dpr); if (nw !== W || wfc.height !== nh) { W = nw; wfc.width = W; wfc.height = nh; latest = new Float32Array(W); smooth = new Float32Array(W).fill(-96); img = null; wctx.fillStyle = "#0D1317"; wctx.fillRect(0, 0, W, nh); for (let y = nh - 1; y >= 0; y--) { makeRow(); drawRow(y); } } spc.width = Math.floor(rs.width * dpr); spc.height = Math.floor(rs.height * dpr); }
+  function makeRow() { for (const e of rf) if (e.kind === "burst") { if (e.hold > 0) e.hold--; else { e.on = Math.random() < e.duty * 0.9; e.hold = 20 + Math.floor(Math.random() * 60); } } for (let i = 0; i < W; i++) { const f = F0 + (i + 0.5) / W * SPAN, edge = (f - DC) / (SPAN / 2); let lin = Math.pow(10, (-96 - 5 * Math.pow(edge, 6) + gN() * 2.1) / 10); const dcd = (f - DC) / 0.003; lin += Math.pow(10, (-60 - dcd * dcd * 4) / 10); for (const e of rf) { if (!e.on) continue; const d = (f - e.f) / (e.bw / 2); if (Math.abs(d) > 1.6) continue; const s = e.kind === "wfm" ? e.level - 18 * Math.pow(Math.abs(d), 5) + gN() * 1.6 : e.level - 11 * d * d + gN() * 1.2; lin += Math.pow(10, s / 10); } latest[i] = 10 * Math.log10(lin); smooth[i] = smooth[i] * 0.72 + latest[i] * 0.28; } }
+  function drawRow(y) { if (!img || img.width !== W) img = wctx.createImageData(W, 1); const d = img.data; for (let i = 0; i < W; i++) { let t = (latest[i] + 100) / 80; t = t < 0 ? 0 : t > 1 ? 1 : t; const k = (t * 255) | 0; d[i * 4] = lut[k * 3]; d[i * 4 + 1] = lut[k * 3 + 1]; d[i * 4 + 2] = lut[k * 3 + 2]; d[i * 4 + 3] = 255; } wctx.putImageData(img, 0, y); }
+  function drawSpectrum() { const w = spc.width, h = spc.height, top = h * 0.22; if (!w || !h || !W) return; sctx.clearRect(0, 0, w, h); sctx.strokeStyle = "#1B252D"; sctx.lineWidth = 1; for (let i = 0; i <= 24; i += 2) { const gx = Math.round(i / 24 * w) + 0.5; sctx.beginPath(); sctx.moveTo(gx, top); sctx.lineTo(gx, h); sctx.stroke(); } const yOf = (v) => top + (1 - Math.min(1, Math.max(0, (v + 100) / 80))) * (h - top - 4); for (let db = -100; db <= -20; db += 20) { const gy = Math.round(yOf(db)) + 0.5; sctx.beginPath(); sctx.moveTo(0, gy); sctx.lineTo(w, gy); sctx.stroke(); } sctx.beginPath(); sctx.moveTo(0, h); for (let i = 0; i < w; i++) sctx.lineTo(i, yOf(smooth[Math.floor(i / w * W)])); sctx.lineTo(w, h); sctx.closePath(); const g = sctx.createLinearGradient(0, top, 0, h); g.addColorStop(0, "rgba(82,194,174,0.28)"); g.addColorStop(1, "rgba(82,194,174,0.02)"); sctx.fillStyle = g; sctx.fill(); sctx.beginPath(); for (let i = 0; i < w; i++) { const yy = yOf(smooth[Math.floor(i / w * W)]); i ? sctx.lineTo(i, yy) : sctx.moveTo(i, yy); } sctx.strokeStyle = "#8FD9C9"; sctx.lineWidth = 1; sctx.stroke(); }
+
+  let last = 0, lastFrame = 0;
+  function loop(t) {
+    if (t - last > 45) { last = t; if (mode === "explore" && W && !band.classList.contains("reviewing")) { makeRow(); wctx.drawImage(wfc, 0, 0, wfc.width, wfc.height - 1, 0, 1, wfc.width, wfc.height - 1); drawRow(0); drawSpectrum(); }
+      document.querySelectorAll(".out").forEach((el) => { const o = outputs.find((z) => z.id === el.dataset.out); if (!o) return; if (o.kind === "audio") el.querySelectorAll(".meter i").forEach((m) => m.style.height = (o.muted ? 15 + Math.random() * 18 : 20 + Math.random() * 80) + "%"); else { const r = el.querySelector("[data-rate]"); if (r) r.textContent = `${(o.rate + (Math.random() - 0.5) * 0.5).toFixed(1)} rec/s`; } });
+    }
+    if (mode === "decode" && t - lastFrame > 850) { lastFrame = t; pushFrame(curPipe, true); if (!$("view-decode").hidden) { renderFrameList(); if (selField[curPipe] == null && framesByPipe[curPipe][0]) { /* keep selection */ } } }
+    requestAnimationFrame(loop);
+  }
+
+  // boot
+  renderAxis(); renderCapture();
+  ["rds", "pocsag", "acars"].forEach((p) => { for (let i = 0; i < 12; i++) pushFrame(p, false); });
+  selFrame.rds = framesByPipe.rds[0].id;
+  renderAll();
+  sizeCanvases(); drawSpectrum();
+  new ResizeObserver(() => { if (mode === "explore") { sizeCanvases(); drawSpectrum(); } }).observe(wf);
+  if (!reduced) requestAnimationFrame(loop);
+})();
+</script>

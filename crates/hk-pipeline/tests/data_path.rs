@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use hk_core::Pacing;
 use hk_e2e::{SynthRequest, synth_or_skip};
-use hk_model::{DetectionId, IdentityScheme, InventoryIdentity, InventoryQuery, Timestamp};
+use hk_model::{DetectionId, IdentityScheme, InventoryQuery, Timestamp};
 use hk_pipeline::{Candidate, ChainSpec, PipelineConfig, replay_plan};
 use hk_stream::{Declared, Record, RecordFlags, StreamHeader, StreamKind, StreamReader};
 use serde_json::json;
@@ -362,8 +362,6 @@ fn plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated() 
     let mut m: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
     m["id"] = json!("readsb");
-    // A metadata policy (T-016): under a gated class the typed ICAO identity is kept (withheld from
-    // inventory output) and the decode stream republishes through this allowlist only.
     m["output"]["identity"] = json!({ "scheme": "adsb-icao", "charset": "hex", "max_len": 6 });
     m["output"]["frame_models"] = json!(["adsb-df17"]);
     std::fs::write(&manifest, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
@@ -403,30 +401,6 @@ fn plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated() 
             "{ranked:?}"
         );
     }
-
-    // 433.5 MHz (no band prior: metadata-only): explained, identities withheld, no aircraft named.
-    let gated = TempDir::new("family-gated");
-    assert!(!run_at(433.5e6, &gated.0).permits_content());
-    let repo2 = repo(&gated.0);
-    let entries = inventory(&repo2, InventoryQuery::default());
-    let mut explained = 0;
-    for e in &entries {
-        assert!(
-            !matches!(e.identity, InventoryIdentity::Clear { .. }),
-            "identity withheld under metadata-only: {:?}",
-            e.identity
-        );
-        let ranked = hk_pipeline::explanations(&repo2, e.emitter.id).unwrap();
-        explained += usize::from(!ranked.is_empty());
-        let text = serde_json::to_string(&ranked).unwrap();
-        for icao in icaos {
-            assert!(
-                !text.to_ascii_lowercase().contains(icao),
-                "an explanation names an aircraft: {text}"
-            );
-        }
-    }
-    assert!(explained > 0, "the plugin's emitters were explained");
 }
 
 /// T-055 HIL: `analog chain write: FOREIGN KEY constraint failed` when the detect reader overran
@@ -522,7 +496,7 @@ fn hex_bits(hex: &str) -> Vec<u8> {
 }
 
 #[test]
-fn fsk_bits_are_published_and_gated_like_the_other_content_streams() {
+fn fsk_bits_are_published_like_the_other_content_streams() {
     let out = synth_or_skip!(
         SynthRequest::new("fsk_burst_train")
             .seed(36)
@@ -562,26 +536,6 @@ fn fsk_bits_are_published_and_gated_like_the_other_content_streams() {
             .collect();
         (s, captured)
     };
-
-    // Unclassified: the Decode rows withhold content, and so does the bits stream.
-    let (s, streams) = run_bits(json!({}));
-    assert_eq!(s.source_class, "metadata-only");
-    assert!(!streams.is_empty(), "a bits stream was offered");
-    assert!(s.counter("/chains/bits_gated") > 0);
-    assert_eq!(s.counter("/chains/bits_records"), 0);
-    for bytes in &streams {
-        let (header, records) = binary_records(bytes);
-        assert_eq!(header.kind, StreamKind::Bits);
-        assert_eq!(header.datatype.as_deref(), Some("ru8"));
-        assert!(!header.content_class.permits_content());
-        assert!(!records.is_empty());
-        for (flags, payload) in &records {
-            assert!(
-                flags & RecordFlags::GATED.0 != 0 && payload.is_empty(),
-                "a gated bits record carries no payload"
-            );
-        }
-    }
 
     // Classified by the user (own test sensor): the bits are delivered.
     let (s2, streams2) = run_bits(json!({ "pipeline": { "classify": [{

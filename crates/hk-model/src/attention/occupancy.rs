@@ -208,9 +208,19 @@ pub fn fraction_interval(
     let denom = 1.0 + z2 / n_eff;
     let centre = (p_hat + z2 / (2.0 * n_eff)) / denom;
     let half = z * (p_hat * (1.0 - p_hat) / n_eff + z2 / (4.0 * n_eff * n_eff)).sqrt() / denom;
+    // The Wilson bound is exactly 0 at p̂ = 0 and 1 at p̂ = 1; pin them against float rounding
+    // (T-147: an always-on channel's interval read hi 0.9999999999999999, excluding FCO 1).
     Some(ConfidenceInterval {
-        lo: (centre - half).max(0.0),
-        hi: (centre + half).min(1.0),
+        lo: if p_hat == 0.0 {
+            0.0
+        } else {
+            (centre - half).max(0.0)
+        },
+        hi: if p_hat == 1.0 {
+            1.0
+        } else {
+            (centre + half).min(1.0)
+        },
         level,
         n_eff,
         independence_assumed,
@@ -554,11 +564,17 @@ mod tests {
         assert!(a.lo < 0.1 && 0.1 < a.hi);
         assert!(b.hi - b.lo < (a.hi - a.lo) / 5.0);
         let zero = fraction_interval(0.0, 50.0, ConfidenceLevel::P95, true).unwrap();
-        assert!(zero.lo.abs() < 1e-12, "{}", zero.lo);
+        assert_eq!(zero.lo, 0.0);
         assert!(
             zero.hi > 0.0,
             "Wilson keeps a non-zero upper bound at p = 0"
         );
+        // T-147: the bound at p̂ = 1 is exactly 1, so the interval holds an always-on truth.
+        for n in [13.0, 50.0, 950.0] {
+            let one = fraction_interval(1.0, n, ConfidenceLevel::P95, false).unwrap();
+            assert_eq!(one.hi, 1.0, "n_eff {n}: {one:?}");
+            assert!(one.lo < 1.0);
+        }
         assert!(fraction_interval(0.5, 0.5, ConfidenceLevel::P95, true).is_none());
     }
 
