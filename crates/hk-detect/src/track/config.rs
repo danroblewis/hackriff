@@ -63,6 +63,38 @@ pub struct HopConfig {
     pub periodic_veto_bursts: u64,
     /// …when the fold's confidence is at least this (0.8).
     pub periodic_veto_confidence: f64,
+    /// Bounded membership (T-064): a closed member is dropped from its hop set once a newer
+    /// qualifying member covers its channel (centres closer than half their summed bandwidths)
+    /// and its last burst is more than this many stream seconds old (10; below the 60 s idle
+    /// timeout, so a channel's idle-closed track makes way for its successor at once). Its
+    /// detections still count towards the set. `f64::INFINITY` keeps every member (before T-064).
+    pub member_retention_s: f64,
+    /// Members per hop set (256): beyond it the oldest closed members are dropped
+    /// (`usize::MAX`: no cap).
+    pub max_members: usize,
+    /// Raster refits (T-064): an open set's raster is refitted only when its qualifying channel
+    /// set changed since the last fit (a member joined, left or (re)qualified, or a channel centre
+    /// moved by more than this many bins) (0.75; 0 refits on every drain of a changed set, as
+    /// before T-064)…
+    pub raster_drift_bins: f64,
+    /// …and at most once per this many stream seconds (1; 0 = no limit). Formation, merges and
+    /// closing always refit, so `HopSetFormed`/`HopSetClosed` and the closed row are exact; only
+    /// the open set's intermediate rows can carry a raster up to this old.
+    pub raster_refit_s: f64,
+}
+
+impl HopConfig {
+    /// These settings with the T-064 bounds off: every member kept and the raster refitted on
+    /// every drain of a changed set (the pre-T-064 behaviour, for parity checks).
+    pub fn without_scaling_bounds(self) -> Self {
+        Self {
+            member_retention_s: f64::INFINITY,
+            max_members: usize::MAX,
+            raster_drift_bins: 0.0,
+            raster_refit_s: 0.0,
+            ..self
+        }
+    }
 }
 
 impl Default for HopConfig {
@@ -81,6 +113,10 @@ impl Default for HopConfig {
             bursty_length_ratio: 3.0,
             periodic_veto_bursts: 5,
             periodic_veto_confidence: 0.8,
+            member_retention_s: 10.0,
+            max_members: 256,
+            raster_drift_bins: 0.75,
+            raster_refit_s: 1.0,
         }
     }
 }

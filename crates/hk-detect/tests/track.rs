@@ -65,6 +65,16 @@ impl Out {
             .collect()
     }
 
+    fn hop_sets_formed(&self) -> Vec<&HopSetSummary> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                TrackEvent::HopSetFormed(h) => Some(h),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn hop_sets_closed(&self) -> Vec<&HopSetSummary> {
         self.events
             .iter()
@@ -374,14 +384,15 @@ fn aware_042_occupancy_windows_per_channel_tracks_match_the_schedule() {
 
 // ---- hopper ----
 
-#[test]
-fn hopper_ten_channels_fifty_hops_per_second_forms_one_hop_set() {
+/// Ten channels on a 200 kHz raster around 915 MHz, 20 ms dwells in random order for 3 s:
+/// `(tracker, output, channels, frame period s)`.
+fn run_hopper(cfg: TrackerConfig) -> (Tracker, Out, Vec<f64>, f64) {
     let fc = 915e6;
     let mut s = Scene::new(
         DetectorConfig::new(SurveyId::new()),
         GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 24.0), 7),
     );
-    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut tr = Tracker::new(cfg);
     let mut out = Out::default();
     let raster = 200e3;
     let chans: Vec<f64> = (0..10).map(|k| fc - 1.0e6 + k as f64 * raster).collect();
@@ -413,6 +424,13 @@ fn hopper_ten_channels_fifty_hops_per_second_forms_one_hop_set() {
         );
     }
     finish(&mut s, &mut tr, &mut out);
+    (tr, out, chans, frame_s)
+}
+
+#[test]
+fn hopper_ten_channels_fifty_hops_per_second_forms_one_hop_set() {
+    let (tr, out, chans, frame_s) = run_hopper(TrackerConfig::default());
+    let (raster, dwell) = (200e3, 0.02);
     let sets = out.hop_sets_closed();
     eprintln!("hopper: stats {:?}", tr.stats());
     for h in &sets {
@@ -461,11 +479,29 @@ fn run_packets(
     duration_s: f64,
     seed: u64,
 ) -> (Tracker, Out) {
+    run_packets_with(
+        TrackerConfig::default(),
+        fc,
+        chans,
+        packets,
+        duration_s,
+        seed,
+    )
+}
+
+fn run_packets_with(
+    cfg: TrackerConfig,
+    fc: f64,
+    chans: &[f64],
+    packets: &[(f64, f64, usize)],
+    duration_s: f64,
+    seed: u64,
+) -> (Tracker, Out) {
     let mut s = Scene::new(
         DetectorConfig::new(SurveyId::new()),
         GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 24.0), seed),
     );
-    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut tr = Tracker::new(cfg);
     let mut out = Out::default();
     let bins: Vec<usize> = chans
         .iter()
@@ -486,10 +522,10 @@ fn run_packets(
     (tr, out)
 }
 
-#[test]
-fn bursty_hopper_packets_separated_by_silence_form_one_hop_set() {
-    let fc = 915e6;
-    let raster = 200e3;
+/// Eight channels on a 200 kHz raster around 915 MHz, 10 ms packets separated by 100–300 ms of
+/// silence for 7.5 s: `(channels, packets)`.
+fn bursty_packets() -> (Vec<f64>, Vec<(f64, f64, usize)>) {
+    let (fc, raster) = (915e6, 200e3);
     let chans: Vec<f64> = (0..8).map(|k| fc - 0.8e6 + k as f64 * raster).collect();
     let mut rng = Rng(3);
     let mut packets = Vec::new();
@@ -499,6 +535,13 @@ fn bursty_hopper_packets_separated_by_silence_form_one_hop_set() {
         t += 0.01 + 0.1 + (rng.next_u64() % 200) as f64 * 1e-3;
         ch = (ch + 1 + (rng.next_u64() % 7) as usize) % 8;
     }
+    (chans, packets)
+}
+
+#[test]
+fn bursty_hopper_packets_separated_by_silence_form_one_hop_set() {
+    let (fc, raster) = (915e6, 200e3);
+    let (chans, packets) = bursty_packets();
     let (tr, out) = run_packets(fc, &chans, &packets, 8.0, 13);
     let sets = out.hop_sets_closed();
     eprintln!(
@@ -527,6 +570,178 @@ fn bursty_hopper_packets_separated_by_silence_form_one_hop_set() {
     let rate = h.hop_rate_hz.unwrap();
     assert!((rate * mean_gap - 1.0).abs() <= 0.2, "hop rate {rate}");
     assert!(tr.stats().bursty_hop_links >= 10);
+}
+
+// ---- T-064: hop-set scaling (bounded membership, raster refit on channel-set change) ----
+
+/// A tracker config with the T-064 bounds off (the pre-T-064 behaviour).
+fn unbounded() -> TrackerConfig {
+    let mut cfg = TrackerConfig::default();
+    cfg.hop = cfg.hop.without_scaling_bounds();
+    cfg
+}
+
+/// The documented T-064 tolerance: `HopSetFormed`/`HopSetClosed` carry the same raster (within
+/// 0.1 Hz), the same channels, hop rate, hop count and member count as the unbounded tracker.
+fn assert_hop_parity(tag: &str, got: &Out, want: &Out) {
+    for (kind, a, b) in [
+        ("formed", got.hop_sets_formed(), want.hop_sets_formed()),
+        ("closed", got.hop_sets_closed(), want.hop_sets_closed()),
+    ] {
+        assert_eq!(a.len(), b.len(), "{tag}: {kind} hop sets");
+        for (x, y) in a.iter().zip(&b) {
+            eprintln!(
+                "{tag} {kind}: raster {:?} vs {:?}, {} channels, rate {:?}",
+                x.raster_hz,
+                y.raster_hz,
+                x.channels_hz.len(),
+                x.hop_rate_hz
+            );
+            match (x.raster_hz, y.raster_hz) {
+                (Some(p), Some(q)) => {
+                    assert!((p - q).abs() <= 0.1, "{tag} {kind}: raster {p} vs {q}")
+                }
+                (p, q) => assert_eq!(p, q, "{tag} {kind}: raster"),
+            }
+            assert_eq!(x.channels_hz, y.channels_hz, "{tag} {kind}: channels");
+            assert_eq!(x.hop_rate_hz, y.hop_rate_hz, "{tag} {kind}: hop rate");
+            assert_eq!(x.hops, y.hops, "{tag} {kind}: hops");
+            assert_eq!(x.members.len(), y.members.len(), "{tag} {kind}: members");
+            assert_eq!(x.dwell_s, y.dwell_s, "{tag} {kind}: dwell");
+        }
+    }
+}
+
+#[test]
+fn hop_set_outputs_match_the_unbounded_tracker_on_synthetic_hoppers() {
+    let (tr, got, ..) = run_hopper(TrackerConfig::default());
+    let (tr_old, want, ..) = run_hopper(unbounded());
+    assert!(!got.hop_sets_closed().is_empty());
+    assert_hop_parity("hopper", &got, &want);
+    eprintln!(
+        "hopper: raster fits {} (unbounded {}), pruned {}",
+        tr.stats().hop_raster_fits,
+        tr_old.stats().hop_raster_fits,
+        tr.stats().hop_members_pruned
+    );
+    assert!(tr.stats().hop_raster_fits <= tr_old.stats().hop_raster_fits);
+
+    let (chans, packets) = bursty_packets();
+    let (tr, got) = run_packets(915e6, &chans, &packets, 8.0, 13);
+    let (tr_old, want) = run_packets_with(unbounded(), 915e6, &chans, &packets, 8.0, 13);
+    assert!(!got.hop_sets_closed().is_empty());
+    assert_hop_parity("bursty hopper", &got, &want);
+    eprintln!(
+        "bursty hopper: raster fits {} (unbounded {}), pruned {}",
+        tr.stats().hop_raster_fits,
+        tr_old.stats().hop_raster_fits,
+        tr.stats().hop_members_pruned
+    );
+}
+
+/// A long hopper whose channel tracks keep closing and reopening: 12 channels on a 200 kHz
+/// raster, 20 ms dwells, alternating 4 s epochs on channels 0–5 and 6–11 for 300 s with a 1 s
+/// idle timeout, so each channel's track closes and a new one joins the set every 8 s (about 450
+/// tracks). Before T-064 every one stayed a member; now membership stays within a few per
+/// channel, raster fits stay near one per second, and the set keeps its raster and hop rate.
+#[test]
+fn long_hopper_hop_set_membership_and_raster_fits_stay_bounded() {
+    let prov = provenance(915e6, FS, 24.0);
+    let mut tr = Tracker::new(TrackerConfig {
+        idle_timeout_s: 1.0,
+        max_idle_timeout_s: 1.0,
+        ..TrackerConfig::default()
+    });
+    let raster = 200e3;
+    let chans: Vec<f64> = (0..12).map(|k| 914e6 + k as f64 * raster).collect();
+    let (dwell_frames, epoch_dwells, dwells) = (2u64, 200u64, 15_000u64);
+    let mut rng = Rng(64);
+    let mut events = Vec::new();
+    let (mut prev, mut max_members, mut samples) = (usize::MAX, 0usize, 0u64);
+    for k in 0..dwells {
+        let half = ((k / epoch_dwells) % 2) as usize;
+        let c = loop {
+            let c = 6 * half + (rng.next_u64() % 6) as usize;
+            if c != prev {
+                break c;
+            }
+        };
+        prev = c;
+        let r = rec(
+            &prov,
+            k * dwell_frames,
+            dwell_frames,
+            chans[c],
+            20e3,
+            CloseReason::Ended,
+            false,
+        );
+        tr.push_detection(&r, &mut |e| events.push(e));
+        let mut batch = TrackBatch::new();
+        tr.drain_into(&mut batch);
+        if k % 50 == 49 {
+            let now = tr
+                .hop_sets()
+                .iter()
+                .map(|h| h.members.len())
+                .max()
+                .unwrap_or(0);
+            max_members = max_members.max(now);
+            samples += 1;
+        }
+    }
+    let st = tr.stats();
+    tr.finish(&mut |e| events.push(e));
+    let out = Out {
+        records: Vec::new(),
+        events,
+    };
+    let closed = out.hop_sets_closed();
+    eprintln!(
+        "long hopper: {} tracks opened, max members {max_members} over {samples} samples, stats {st:?}",
+        st.tracks_opened
+    );
+    for h in &closed {
+        eprintln!(
+            "long hopper: closed set {} channels raster {:?} rate {:?} hops {}",
+            h.channels_hz.len(),
+            h.raster_hz,
+            h.hop_rate_hz,
+            h.hops
+        );
+    }
+    assert!(
+        st.tracks_opened >= 300,
+        "channel tracks reopen ({})",
+        st.tracks_opened
+    );
+    assert!(
+        max_members <= 4 * chans.len(),
+        "hop-set members bounded: {max_members}"
+    );
+    assert!(st.hop_members_pruned as usize + 4 * chans.len() >= st.tracks_opened as usize);
+    // About one fit per second of stream plus formations (300 s).
+    assert!(
+        st.hop_raster_fits <= 400,
+        "raster fits {}",
+        st.hop_raster_fits
+    );
+    let h = closed
+        .iter()
+        .max_by_key(|h| h.hops)
+        .expect("a closed hop set");
+    let r = h.raster_hz.expect("raster");
+    assert!((r - raster).abs() / raster <= 0.01, "raster {r}");
+    let rate = h.hop_rate_hz.expect("hop rate");
+    assert!((rate - 50.0).abs() / 50.0 <= 0.05, "hop rate {rate}");
+    let mut distinct: Vec<f64> = Vec::new();
+    for &f in &h.channels_hz {
+        if distinct.last().is_none_or(|&d| f - d > 50e3) {
+            distinct.push(f);
+        }
+    }
+    assert_eq!(distinct.len(), chans.len(), "channels {:?}", h.channels_hz);
+    assert!(h.channels_hz.len() <= 4 * chans.len());
 }
 
 #[test]
@@ -1418,5 +1633,43 @@ fn report_915_fhss_bursts_hop_set_on_200_khz_raster() {
         closed.len(),
         tr.stats().hop_links,
         !hop_sets.is_empty()
+    );
+}
+
+/// T-064 parity on the real 915 MHz FHSS fixture: the bounded tracker's hop sets equal the
+/// unbounded (pre-T-064) tracker's within the documented tolerance.
+#[test]
+fn hop_set_outputs_match_the_unbounded_tracker_on_the_915_fixture() {
+    let name = "ism_915M_10M_l24g30a1_t42p3_1p2s";
+    let Some((fx, iq)) = load_main_checkout_fixture(name) else {
+        eprintln!("SKIP {name}");
+        return;
+    };
+    let run = |tcfg: TrackerConfig| {
+        let mut cfg = DetectorConfig::new(SurveyId::new());
+        cfg.band_profiles.push(BandProfile {
+            freq: FreqRange::new(902e6, 928e6),
+            profile: DetectionProfile::short_burst(),
+        });
+        let mut det = Detector::new(cfg).unwrap();
+        let mut tr = Tracker::new(tcfg);
+        let chain = ChainConfig::new(1024, 4);
+        let out = replay_tracked(
+            &iq,
+            fx.sample_rate,
+            fixture_provenance(&fx),
+            &chain,
+            &mut det,
+            &mut tr,
+        );
+        (tr.stats(), out)
+    };
+    let (st, got) = run(TrackerConfig::default());
+    let (st_old, want) = run(unbounded());
+    assert!(!got.hop_sets_closed().is_empty(), "915 hop set formed");
+    assert_hop_parity("915", &got, &want);
+    eprintln!(
+        "915: raster fits {} (unbounded {}), pruned {}",
+        st.hop_raster_fits, st_old.hop_raster_fits, st.hop_members_pruned
     );
 }
