@@ -167,7 +167,7 @@ A cached fact from a context feed: `event_id`, `source` (SWPC scale / GOES X-ray
 - **Tests:** with a frozen cache, assert correlation results are deterministic and a stale cache degrades gracefully (no network in CI).
 
 ### 2.18 Anomaly  [C08, C12, C27 → C30]
-The shared record §5 said doc 07 must define: `anomaly_id`, `kind` (`new-emitter` / `busier-than-baseline` / `noise-floor-rise` / `novelty`), `subject_ref` (Detection/Emitter/region), `region` (`f_lo,f_hi,t`), `score`, `baseline_ref`, `t`.
+The shared record §5 said doc 07 must define: `anomaly_id`, `kind` (`new-emitter` / `busier-than-baseline` / `noise-floor-rise` / `novelty` / `level-above-baseline` / `change-point`; the C12 novelty-alarm kinds and their `baseline_ref` format are in [ADR-0012 §7](adr/0012-attention-memory-contracts.md)), `subject_ref` (Detection/Emitter/region), `region` (`f_lo,f_hi,t`), `score`, `baseline_ref`, `t`.
 - **Identity & lifecycle:** `anomaly_id`; emitted by C08/C12/C27; consumed by C30; resolved/dismissed state tracked.
 - **Relationships:** the input to Explanation; references the baseline it deviated from.
 - **Retention & size:** small; kept while relevant, then summarised.

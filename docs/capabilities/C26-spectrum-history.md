@@ -1,5 +1,6 @@
 # C26 · spectrum-history
 > Layer E — Remember · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C02, C05, C06, C07 · Used by: C12, C17, C30, C33, C39
+> **M2 contracts:** [ADR-0012](../adr/0012-attention-memory-contracts.md) §1.4 (tile coverage vs observation log alignment), §6 (survey report schema, reports owned by hk-context), §9 (series storage homes).
 
 ## Purpose
 Keeps a compressed, multi-resolution record of power spectra over months, from sweep rows and dwell spectrograms, so the user can pick a region and time span and see what was active. Serves workflow step 1 (open reports of past surveys) and step 3 (review history). It is the raw material for occupancy baselines (C12) and for the attack map's "what changed" (C30). No open-source receiver keeps persistent survey history (docs/03 §5.1 #5).

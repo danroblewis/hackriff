@@ -451,6 +451,46 @@ Classical, compute-only helpers (`hk_estimate::assist`) for writing a parser ove
 
 Errors are `{"error", "code"}`: `400 invalid` (bad id or query, messages never echo values), `404 not_found`, `405` (with `Allow`), `409 conflict`, `422 unreadable` (not a readable inspector stream), `500 unreadable` (store I/O), `503 unavailable` (no capture store on this server).
 
+## Attention and memory (planned, M2; ADR-0012)
+
+**Planned, not served yet.** None of these routes are in `ROUTES` today. They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+- **Contracts:** [ADR-0012](adr/0012-attention-memory-contracts.md).
+- **Schemas:** `hk_model::attention` (observation records, `OccupancyStat`, baselines, `CandidateSet`, `SurveyReport`, alarm detail).
+
+Conventions:
+- **Units.** Frequencies in Hz; times in Unix seconds (floats); results capped in size with a `truncated` flag.
+- **Blind-first.** Candidates, channels and reports are computed from measurements; database suggestions appear only as labelled suggestions. Nothing here tunes to a database frequency.
+- **Coverage.** Every route that reports occupancy or absence also returns coverage and POI (ADR-0012 §5.5, §6.2). Unobserved is never reported as quiet.
+- **Audit.** Mutating routes are audited like every other.
+- **Content.** Streams are metadata only.
+
+| Method | Path | Owner | Purpose |
+|---|---|---|---|
+| GET | `/api/observations` | T-115 | `?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]`: observation records (dwell, sweep, geometry) overlapping the box |
+| GET | `/api/observations/coverage` | T-115 | `?f_lo&f_hi&t0&t1[&tau_s…]`: `ObservationTotals`, coverage gaps and POI rows |
+| GET | `/api/occupancy` | T-118 | `?f_lo&f_hi&t0&t1[&subject=channel\|band][&interval=15m\|1h][&site]`: `OccupancyStat` rows |
+| GET | `/api/channels` | T-118 | `?f_lo&f_hi[&site]`: the learned channel plan (with raster suggestions) |
+| GET | `/api/sites` | T-119 | Known sites |
+| GET | `/api/sites/current` | T-119 | Current `SiteKey` and how it was set |
+| PUT | `/api/sites/current` | T-119 | Set or confirm the current site (audited) |
+| PUT | `/api/sites/{id}` | T-119 | Rename a site or set its UTC offset (audited) |
+| GET | `/api/baselines` | T-119 | `?site`: baseline keys, maturity per pool, frozen time, change points |
+| GET | `/api/baselines/slots` | T-119 | `?site&f_lo&f_hi[&slot][&resolution]`: slot statistics for plotting |
+| POST | `/api/baselines/refreeze` | T-119 | Re-freeze the reference for a site/region (audited) |
+| GET | `/api/candidates` | T-119 | `?[f_lo&f_hi][&limit]`: latest ranked `CandidateSet` slice with score components |
+| GET | `/api/attention/weights` | T-119 | Current score weights and version |
+| PUT | `/api/attention/weights` | T-119 | New weights version (audited) |
+| GET | `/api/scheduler` | T-120 | Tier shares over the floor window, sweep-floor status, provider version, POI per region |
+| GET | `/api/scheduler/arms` | T-120 | Arm table: key, index, mean reward, dwell-seconds, staleness, banned |
+| POST | `/api/scheduler/leases` | T-120 | Create a user pin lease ("watch this") (audited) |
+| DELETE | `/api/scheduler/leases/{id}` | T-120 | Release a lease (audited) |
+| GET | `/api/report` | T-121 | `?f_lo&f_hi&t0&t1[&site][&format=json\|csv\|png]`: `SurveyReport` or its export |
+| GET | `/api/anomalies` | T-122 | `?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`: anomalies (all kinds, including novelty alarms) with top explanations |
+| GET | `/api/anomalies/{id}` | T-122 | One anomaly: `AlarmDetail`, ranked explanations, status history |
+| POST | `/api/anomalies/{id}/dismiss` | T-122 | Dismiss (audited) |
+
+Planned streams (ADR-0004 `messages` kind, metadata only): `observations` (T-115: `dwell` / `sweep-summary` records for the coverage panel) and `anomalies` (T-122: raise, reopen, extend and clear records with top explanations).
+
 ## UI decision logic moved server-side (T-079)
 
 The user's direction (2026-09-14): the web UI will be rewritten later as a one-screen exploratory UI; until then, **the backend owns all signal logic — recognition, analysis, classification, demodulation, decoding — and the UI is a thin client over this document**, so it can be replaced without backend changes. `GET /api/analysis/strongest` (above) is the first move under that rule: picking the strongest signal in a frequency range is spectrum *analysis*, not presentation, so it moved out of `ui/src/listen.ts` (`peakBinIndex`/`strongestInView`, which inspected a raw client-held FFT row) into the backend, which can look at its own measured spectrum history instead of one row the browser happened to have decoded. The UI toolbar (`ui/src/listen.ts` `installListen`) now polls this endpoint roughly once a second and caches the answer, so choosing a Listen target still runs synchronously inside the click handler (required to unlock audio playback on mobile browsers) rather than awaiting a fetch.

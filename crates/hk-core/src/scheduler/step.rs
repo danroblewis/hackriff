@@ -1,6 +1,7 @@
 //! Schedule output: one [`ScheduleStep`] per window the single radio points at.
 
 use hk_model::Timestamp;
+use hk_model::attention::observation::{Reason, Tier, TrustTestKind};
 
 use crate::source::Gains;
 
@@ -103,6 +104,36 @@ impl Purpose {
             Purpose::RateChange { .. } => "rate-change",
             Purpose::UserIntent { .. } => "user-intent",
         }
+    }
+}
+
+impl Purpose {
+    /// The ADR-0012 §1.2 reason code of this purpose, carried into the observation log. T-120 adds
+    /// the bandit and lease purposes and their arms here.
+    pub fn reason(&self) -> Reason {
+        match *self {
+            Purpose::Sweep { hop } => Reason::BackgroundSweep { hop },
+            Purpose::RegionDwell { hop } => Reason::RegionDwell { hop },
+            Purpose::Dwell { poi } => Reason::PoiDwell { poi },
+            Purpose::GainStep { poi, .. } => Reason::Verification {
+                poi,
+                test: TrustTestKind::GainStep,
+            },
+            Purpose::Retune { poi, .. } => Reason::Verification {
+                poi,
+                test: TrustTestKind::Retune,
+            },
+            Purpose::RateChange { poi, .. } => Reason::Verification {
+                poi,
+                test: TrustTestKind::RateChange,
+            },
+            Purpose::UserIntent { intent } => Reason::Interactive { intent },
+        }
+    }
+
+    /// The ADR-0012 §5.4 preemption tier this purpose runs at.
+    pub fn tier(&self) -> Tier {
+        self.reason().tier()
     }
 }
 

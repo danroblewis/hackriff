@@ -11,6 +11,8 @@ hk-model.workspace = true
 # T-020: FloorEvent (C08) → Anomaly lifecycle.
 hk-dsp.workspace = true
 h3o.workspace = true
+# T-113 (ADR-0012 §11): occupancy engine, baselines and reports read/write hk-store series.
+hk-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

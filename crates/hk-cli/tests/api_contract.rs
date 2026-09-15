@@ -1718,3 +1718,11 @@ fn follow_hops_channel_routes_match_the_documented_shapes() {
     assert_eq!(st, 200, "{v}");
     stop_server(serving);
 }
+
+// Attention + memory (ADR-0012 §11): each M2 task appends its contract tests under its marker.
+// T-115 observations
+// T-118 occupancy
+// T-119 sites, baselines, candidates, weights
+// T-120 scheduler
+// T-121 reports
+// T-122 anomalies

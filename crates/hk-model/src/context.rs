@@ -105,6 +105,10 @@ pub enum AnomalyKind {
     NoiseFloorRise,
     /// Something unlike anything seen before (open-set novelty).
     Novelty,
+    /// Level above the learned baseline (C12 novelty alarm, ADR-0012 §7).
+    LevelAboveBaseline,
+    /// The adaptive baseline diverged from its frozen reference (C12 change point, ADR-0012 §7).
+    ChangePoint,
 }
 
 /// What an anomaly is about.

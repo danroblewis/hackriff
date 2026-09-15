@@ -78,6 +78,10 @@ mod step;
 mod survey;
 mod verify;
 
+// ADR-0012 §11 (pre-added by T-113; the owners fill them in).
+pub mod bandit; // T-120
+pub mod observe; // T-115
+
 pub use apply::{AppliedChanges, StepApplier};
 pub use clock::{AnchoredClock, Clock, SyntheticClock, WallClock};
 pub use config::{HACKRF_ONE_RF_PATH_BOUNDARIES_HZ, MAX_GAIN_STEP_PAIRS, SchedulerConfig};
