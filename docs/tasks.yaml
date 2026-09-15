@@ -2747,7 +2747,7 @@ notes:
   - id: T-173
     milestone: M2
     title: "Scheduler hop placement: guarantee every frequency gets a view away from DC (hop overlap or dithered centres) so a carrier near one LO is not permanently suspect"
-    status: todo
+    status: in-progress
     deps: [T-147]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2830,3 +2830,17 @@ notes:
     model: opus
     effort: high
     core_interface: true
+  - id: T-179
+    milestone: MUI
+    title: "MUI JS bundle over ADR-0013 gzip budget (48.2 KB vs 45 KB): trim or code-split rarely used panels (Decode plots/params, Review tabs), or re-baseline the budget with justification"
+    status: todo
+    deps: [T-156]
+    parallel_group: MUI-FINAL
+    use_cases: []
+    found_by: "T-156 2026-09-15: dist/app.js 140.2 KB min / 48.2 KB gzip after all panels landed"
+    acceptance: "app.js <= 45 KB gzip (lazy-load or trim) or ADR-0013 budget amended with a measured rationale; T-177 smoke script still passes; UI tests green"
+    area: ui/
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false

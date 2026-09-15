@@ -1945,3 +1945,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Live data:** WFM at 101.3 MHz, 3 confirmed and 14 candidate detections.
   - **Artefacts:** 26 screenshots in scratchpad `t177/shots/`. The script `ui/scripts/smoke.mjs` (b084530) is not in CI.
   - **MUI status:** functionally verified in a real browser. The only open MUI UI item is the bundle budget (+3 KB gzip).
+- **B0.429 T-173 launched (Opus)** into the build slot T-177 freed.
+  - **Goal:** sweep plans guarantee every cell an off-DC view per revisit cycle (hop overlap, dithered centres, or a DC-fill dwell), with the revisit-time cost quantified.
+  - **Tests:** a carrier sitting exactly at a hop LO must be learned. The task must also explain T-124's unlearned 433.375 MHz channel.
+- **T-179 added:** the MUI bundle is 48.2 KB gzip against a 45 KB budget (small, Sonnet).
+- **Screenshots:** T-177 screenshots were sent to the user.
