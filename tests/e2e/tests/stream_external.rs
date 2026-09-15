@@ -468,6 +468,16 @@ fn fm_audio_streams_over_websocket_and_a_stalled_tcp_client_never_blocks_the_cha
         listen_counter(&handle, |c| c.listen.frames.load(Ordering::Relaxed)) >= before + 50
             || counters.listen.active.load(Ordering::Relaxed) == 0
     });
+    // T-074: the pipeline only folds a closed consumer's drops into `consumer_dropped` when the
+    // session itself tears down (after the idle timeout past disconnect), and it clears
+    // `listen.active` a few instructions *before* that fold-in. Waiting on `active == 0` as a
+    // proxy for "drops are counted" was the flaky assertion at the end of this test: poll the
+    // counter we actually assert on, not a proxy that can settle first.
+    wait_for(
+        "the pipeline to fold the stalled consumer's drops into consumer_dropped",
+        LIMIT,
+        || counters.listen.consumer_dropped.load(Ordering::Relaxed) > 0,
+    );
     // The stalled consumer is disconnected and its session ends.
     wait_for("the stalled client to be released", LIMIT, || {
         tcp.stats().active == 0 && counters.listen.active.load(Ordering::Relaxed) == 0
