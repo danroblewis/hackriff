@@ -1343,6 +1343,21 @@ tasks:
     model: sonnet
     effort: medium
     hold: "after T-078 (endpoints) and T-079 (ui/src logic audit, to avoid ui conflicts)"
+  - id: T-081
+    milestone: M0b
+    title: "Chain parameter estimation cost: ParamEstimator::estimate -> ChannelFilter::apply dominates the WFM/RDS chain (whole-pipeline bottleneck)"
+    status: todo
+    deps: [T-064]
+    parallel_group: S
+    use_cases: [SIGNAL-062, AWARE-042]
+    found_by: "T-064 profile 2026-09-14 (urban l24g20a0 whole-pipeline replay: 1,047/1,060 samples in hk-chain-wfm-rds-32 ParamEstimator::estimate -> ChannelFilter::apply; unpaced replay waits for the chain)"
+    acceptance: "profile-guided fix of ChannelFilter::apply / estimate cadence (e.g. decimate before filtering, reuse filter state, SIMD/compute provider, estimate less often once parameters are stable per the output-driven tuning principle); estimates unchanged within documented tolerance; whole-pipeline dense urban 20 Msps replay RTF >= 1.2 at moderate load reported with load average; targeted tests (hk-estimate, WFM chain, SIGNAL-062)"
+    area: crates/hk-estimate (params, ChannelFilter), crates/hk-pipeline/src/chains/analog.rs
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    hold: "queued after T-078/T-079/T-080 (user UI/inventory priority), ahead of T-053/T-056/T-067"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
