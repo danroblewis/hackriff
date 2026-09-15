@@ -2313,3 +2313,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-159 launched** (Sonnet): `GET /api/inventory/{id}/decode`, which unblocks T-195.
 - **B0.485 Full check green after the T-178/T-190/T-191 batch (baca31f).** Lint clean; 1401/1401 tests; acceptance 29/29; acceptance_m2 8/8; 54 GB free.
   - **Merging T-209** with a full check.
+- **B0.486 Full check green after the T-209 merge (6ca23a8).** Lint clean; 1403/1403 tests; acceptance 29/29; acceptance_m2 8/8; 53 GB free.
+  - **T-209 done;** worktree removed.
+  - **T-187 launched** (Sonnet, candidate discard end-to-end, field-test Task C).

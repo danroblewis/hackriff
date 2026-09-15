@@ -2998,7 +2998,7 @@ tasks:
   - id: T-187
     milestone: M1-fix
     title: "Verify candidate discard end-to-end: delete a candidate via UI/API -> leaves list; raw detections/history kept; later re-detection makes a new candidate; fix if not usable"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: FIELD
@@ -3336,7 +3336,7 @@ tasks:
   - id: T-209
     milestone: M2-hardening
     title: "T-186 review follow-ups: early analog identification double-counts the emitter (SOURCE_ANALOG_CHAIN vs RDS_DECODER_ID sighting keys), pilot-locked no-PI emitters bypass the overload flag, duplicate refined-tuning rows, wasted RDS decode on the 1 s window"
-    status: review
+    status: done
     commit: 48dbac4
     priority: high
     deps: [T-186]
