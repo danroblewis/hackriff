@@ -847,3 +847,18 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - a boring band.
 
   Truth is exact interval arithmetic. An irregular observation schedule gives sampled FCO with a Wilson CI. Only a few short IQ windows are rendered on demand (~0.03 s, ~620 KiB). No Rust plumbing was needed. py suite 82 passed / 2 skipped. Note for T-118/T-124: mock-SDR replay of observation windows needs harness support for the scene's observation schedule.
+- **B0.281 T-114 merged** (be26ea5). New crate `hk-sim`:
+  - **Emitters:** seeded population with per-emitter RNG streams, so every policy sees identical transmissions; hoppers; tagged IMD ghosts.
+  - **Radio model:** hackrf_sweep-like 0.75 s pass; dwells 0.75·fs wide with a DC notch; dead time on retunes and mode switches.
+  - **Policy:** `Policy` trait over `hk_core::ScheduleStep`, fed measured detections only; `PolicyRegistry` so T-120 can register the bandit.
+  - **Output:** metrics JSON `hk-sim/comparison/v1`.
+
+  **Baseline, seed 1, 24 h, 124 emitters + 10 ghosts:**
+
+  | Policy | Discovered | Bursts/h | Median TTFD | T_R |
+  |---|---|---|---|---|
+  | pure-sweep | 120/124 | 1566 | 119 s | 0.75 s |
+  | round-robin | 122/124 | 53 | 3219 s | 401 s |
+  | WRR | 124/124 | 842 | 346 s | 2.7 s |
+
+  WRR also wastes **6875 s of dwell on suspect ghosts**: that's the gap T-120 must close. POI matches the formula within statistical error. 9 tests; 1 simulated day × 3 policies takes 4.9 s in release. Not covered: preemption / 24 h baseline flag (needs T-120), replay.

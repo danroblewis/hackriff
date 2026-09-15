@@ -1832,7 +1832,8 @@ tasks:
   - id: T-114
     milestone: M2
     title: "Discrete-event scheduler simulator + baseline policies (C04 testing)"
-    status: in-progress
+    status: done
+    commit: be26ea5
     deps: [T-112]
     parallel_group: M2S
     use_cases: [AWARE-027, SIGNAL-008]
