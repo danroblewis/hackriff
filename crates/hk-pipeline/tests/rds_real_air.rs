@@ -45,10 +45,17 @@ struct Report {
     crc_bad: u64,
     /// Group frames out of `fields` carrying a layer tree although CRC-invalid.
     invalid_with_fields: u64,
+    /// Groups valid only after <=2-bit block correction while synced (T-210).
+    crc_corrected: u64,
     /// Valid groups' PI counts.
     pi: BTreeMap<u16, u64>,
+    /// PI values the `agree` consensus node let through, with their counts (T-210): what reaches
+    /// the messages outputs and the inventory.
+    committed_pi: BTreeMap<u16, u64>,
     /// Assembled PS strings (`ps` text node).
     ps: Vec<String>,
+    /// PS strings whose every segment came from a CRC-valid group.
+    ps_clean: usize,
     radiotext: Vec<String>,
     acquisitions: f64,
     /// Acquisitions (seen per chunk) that lost lock again without one CRC-valid group.
@@ -74,17 +81,21 @@ impl Report {
 
     fn line(&self) -> String {
         format!(
-            "{:.1} s: CRC-valid groups {}/{} = {:.3}; invalid groups with fields {}; PI {:?} \
-             {:?}; PS {:?}; RT {}; sync acquisitions {}; barren locks {}; first lock {:?} s; \
-             [diag ≤2-bit burst: groups {}, corrected PI mismatches {}]",
+            "{:.1} s: CRC-valid groups {}/{} = {:.3}; corrected groups {}; invalid groups with \
+             fields {}; PI {:?} {:?}; committed PI {:?}; PS {:?} ({} fully clean); RT {}; sync \
+             acquisitions {}; barren locks {}; first lock {:?} s; [diag ≤2-bit burst: groups {}, \
+             corrected PI mismatches {}]",
             self.secs,
             self.crc_ok,
             self.crc_ok + self.crc_bad,
             self.crc_rate(),
+            self.crc_corrected,
             self.invalid_with_fields,
             self.top_pi().map(|p| format!("{p:04X}")),
             self.pi,
+            self.committed_pi,
             self.ps,
+            self.ps_clean,
             self.radiotext.len(),
             self.acquisitions,
             self.barren_locks,
@@ -133,6 +144,17 @@ fn text_of(info: &hk_blocks::FrameInfo, path: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn uint_of(info: &hk_blocks::FrameInfo, path: &str) -> Option<u64> {
+    info.layers
+        .as_ref()?
+        .nodes
+        .iter()
+        .find(|n| n.path == path && !n.error)?
+        .value
+        .as_ref()?
+        .as_u64()
+}
+
 /// Runs the RDS recipe over `passes` of IQ at `fs`, the channel `offset_hz` from the capture
 /// centre. Each pass starts with a discontinuity.
 fn run_recipe(
@@ -154,7 +176,13 @@ fn run_recipe(
     let (mut g, _) = Graph::build(recipe, &Registry::builtin(), info).unwrap();
     let ids: Vec<String> = g.node_status().into_iter().map(|(id, _, _)| id).collect();
     let pos = |id: &str| ids.iter().position(|x| x == id).unwrap();
-    let (p_sync, p_group, p_ps, p_rt) = (pos("sync"), pos("group"), pos("ps"), pos("rt"));
+    let (p_sync, p_group, p_agree, p_ps, p_rt) = (
+        pos("sync"),
+        pos("group"),
+        pos("agree"),
+        pos("ps"),
+        pos("rt"),
+    );
     let bursts = burst_syndromes();
     let mut burst_pis: Vec<u16> = Vec::new();
     let (mut locked, mut valid_in_lock) = (false, 0u64);
@@ -222,6 +250,10 @@ fn run_recipe(
                             let pi = u16::from_be_bytes([fr.bytes[0], fr.bytes[1]]);
                             *rep.pi.entry(pi).or_default() += 1;
                         }
+                        CrcStatus::Corrected => {
+                            rep.crc_bad += 1;
+                            rep.crc_corrected += 1;
+                        }
                         _ => {
                             rep.crc_bad += 1;
                             if fr.info.layers.is_some() {
@@ -231,9 +263,23 @@ fn run_recipe(
                     }
                 }
             }
+            // What consensus committed: only these PI values reach the messages outputs.
+            if let Some(f) = frames(p_agree) {
+                for fr in f.iter() {
+                    if matches!(fr.info.check, CrcStatus::Valid | CrcStatus::Corrected)
+                        && let Some(pi) = uint_of(fr.info, "pi")
+                    {
+                        *rep.committed_pi.entry(pi as u16).or_default() += 1;
+                    }
+                }
+            }
             if let Some(f) = frames(p_ps) {
-                rep.ps
-                    .extend(f.iter().filter_map(|fr| text_of(fr.info, "ps.text")));
+                for fr in f.iter() {
+                    if let Some(t) = text_of(fr.info, "ps.text") {
+                        rep.ps_clean += usize::from(fr.info.check == CrcStatus::Valid);
+                        rep.ps.push(t);
+                    }
+                }
             }
             if let Some(f) = frames(p_rt) {
                 rep.radiotext
@@ -383,6 +429,15 @@ fn measure(iq: &[Complex32], fs: f64, offset_hz: Option<f64>) -> (f64, f64, f64,
 struct Gauss(u64);
 
 impl Gauss {
+    /// A generator per seed: splitmix64 (a bijection), so 2 and 3 differ — `seed | 1` made them
+    /// the same stream (T-185).
+    fn seeded(seed: u64) -> Self {
+        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        Self((z ^ (z >> 31)) | 1)
+    }
+
     fn uniform(&mut self) -> f64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
@@ -433,7 +488,7 @@ fn weak(
     let b = (2.0 * (100e3 / (fs / 4096.0)).round() + 1.0) * fs / 4096.0;
     let n0_target = sig / (b * 10f64.powf(snr_db / 10.0));
     let var = (n0_target - n0).max(0.0) * fs;
-    let mut rng = Gauss(seed | 1);
+    let mut rng = Gauss::seeded(seed);
     let first = add_noise(iq, var, &mut rng);
     let (snr, ..) = measure(&first, fs, Some(offset));
     eprintln!("[{TAG}] channel {offset:.0} Hz from centre; SNR {snr0:.1} dB → {snr:.1} dB");
@@ -561,6 +616,69 @@ fn signal_062_rds_recipe_weak_signal_14db_decodes_pi_and_complete_ps_without_inv
         "[{TAG}] CRC-valid rate {:.3}",
         r.crc_rate()
     );
+}
+
+/// T-210, seeded AWGN at 11 and 14 dB RF SNR over three distinct seeds. Bounds set before
+/// running: **no wrong PI and no wrong PS may ever surface** (what consensus commits at the
+/// `agree` node and what the `ps` text node assembles) at either SNR, and at 14 dB every seed
+/// must commit the truth PI and assemble at least one complete PS name. 11 dB is reported, not
+/// bounded: it is below the hard-decision limit and only has to stay silent rather than wrong.
+#[test]
+fn signal_062_rds_recipe_seeded_awgn_11_and_14db_surfaces_no_wrong_pi_or_ps() {
+    let Some(meta) = real_fixture(NAME) else {
+        return;
+    };
+    let (iq, fs, truth) = load(&meta);
+    let (pi, known) = (truth_pi(&truth), truth_ps_frames(&truth));
+    for snr_db in [14.0, 11.0] {
+        for seed in [7u64, 2, 3] {
+            let passes = if snr_db >= 14.0 { 3 } else { 2 };
+            let (r, snr, _) = weak(&iq, fs, snr_db, passes, seed, recipe_doc());
+            eprintln!(
+                "[{TAG}] RESULT {snr_db:.0} dB seed {seed} ({snr:.1} dB): {}",
+                r.line()
+            );
+            assert!(
+                (snr - snr_db).abs() < 0.3,
+                "[{TAG}] degraded SNR {snr:.2} dB"
+            );
+            assert!(
+                r.committed_pi.keys().all(|&p| p == pi),
+                "[{TAG}] {snr_db:.0} dB seed {seed}: wrong PI surfaced {:?} (truth {pi:04X})",
+                r.committed_pi
+            );
+            assert!(
+                r.ps.iter()
+                    .all(|p| p.chars().count() == 8 && known.contains(p)),
+                "[{TAG}] {snr_db:.0} dB seed {seed}: wrong PS surfaced {:?} (truth {known:?})",
+                r.ps
+            );
+            if snr_db >= 14.0 {
+                assert_eq!(
+                    r.committed_pi.len(),
+                    1,
+                    "[{TAG}] 14 dB seed {seed}: PI {:?}",
+                    r.committed_pi
+                );
+                assert!(
+                    !r.ps.is_empty(),
+                    "[{TAG}] 14 dB seed {seed}: no complete PS"
+                );
+            }
+        }
+    }
+}
+
+/// The seeds really differ (T-185's `seed | 1` made 2 and 3 the same noise).
+#[test]
+fn seeded_noise_differs_per_seed() {
+    let draw = |seed: u64| {
+        let mut g = Gauss::seeded(seed);
+        (0..4).map(|_| g.pair(1.0)).collect::<Vec<_>>()
+    };
+    let (a, b, c) = (draw(7), draw(2), draw(3));
+    assert_ne!(b, c);
+    assert_ne!(a, b);
 }
 
 /// The clean capture: block sync locks within half a second, every lock yields CRC-valid

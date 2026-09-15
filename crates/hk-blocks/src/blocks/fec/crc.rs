@@ -7,20 +7,35 @@
 //! and the shortest span frame, and per span length at run time (`correction_skipped`). A
 //! 10-bit RDS check allows no correction; CRC-24 over a 112-bit Mode S frame allows bursts ≤ 5.
 //!
+//! **Correction while block-synced (T-210, `synced_correction`, block mode only).** A 10-bit
+//! check cannot vouch for a corrected random block (a ≤2-bit burst table covers 51 of 1024
+//! syndromes), but a block on a known lattice is not random. The block keeps its own sync
+//! state over contiguous frames, as `sync_search` does: synced after `lock_blocks` consecutive
+//! clean blocks (syndrome exactly an allowed offset word), lost after `unlock_run` consecutive
+//! non-clean blocks, a frame that does not follow the previous one (source index off by more
+//! than 2 bits from the chunk's frame period) or a history-dropping chunk flag. Only while
+//! synced is a non-clean block corrected, by the unique burst of ≤ `burst_bits` bits whose
+//! syndrome turns it into an allowed offset word (bursts of 1 and 2 adjacent bits: a single
+//! channel-bit error after differential decoding flips two adjacent data bits). A frame valid
+//! only thanks to such a correction is `corrected` (never `valid`), with `corrected_bits` set;
+//! corrected blocks count as errors in `error_rate` and corrected frames in `frames_bad`
+//! (`frames_ok` is clean frames only, `frames_corrected` the corrected subset).
+//!
 //! **Check field.** Read MSB first from the frame, except a reflected (`refout`) whole-byte
 //! CRC, which is read as little-endian bytes: the order a LSB-first protocol sends it once the
 //! framing block has reversed its characters (ACARS CRC-16/KERMIT).
 
 use hk_estimate::framing::crc::BitCrc;
+use hk_model::CrcStatus;
 use hk_recipe::{Params, PortType};
 
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::blocks::framing::common::{
-    P, RateMeter, Span, combine, extend_bits, frames_io, frames_port, one_input, read_bits,
+    P, RateMeter, Span, drops_history, extend_bits, frames_io, frames_port, one_input, read_bits,
     update_hot,
 };
 use crate::registry::BuildCtx;
-use crate::status::Status;
+use crate::status::{Lock, Status};
 
 const HOT: &[&str] = &["drop_invalid"];
 const CACHE: usize = 4;
@@ -32,6 +47,46 @@ enum Mode {
         offsets: Vec<Vec<u32>>,
         units: Vec<u32>,
     },
+}
+
+/// Burst correction gated on the block lattice being synced.
+#[derive(Clone, Debug)]
+struct SyncedCorrection {
+    burst: usize,
+    lock_blocks: u32,
+    unlock_run: u32,
+    synced: bool,
+    clean_run: u32,
+    bad_run: u32,
+    last_source: Option<u64>,
+    frames_corrected: u64,
+    blocks_corrected: u64,
+}
+
+impl SyncedCorrection {
+    fn unsync(&mut self) {
+        self.synced = false;
+        self.clean_run = 0;
+        self.bad_run = 0;
+        self.last_source = None;
+    }
+
+    /// Records one block: clean or not. Returns nothing; the state applies to later blocks.
+    fn record(&mut self, clean: bool) {
+        if clean {
+            self.clean_run += 1;
+            self.bad_run = 0;
+            if self.clean_run >= self.lock_blocks {
+                self.synced = true;
+            }
+        } else {
+            self.clean_run = 0;
+            self.bad_run += 1;
+            if self.bad_run >= self.unlock_run {
+                self.synced = false;
+            }
+        }
+    }
 }
 
 /// Builds a `crc`.
@@ -67,6 +122,28 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
                  (limit {MAX_FALSE_CORRECTION:.0e}); lower it or use a wider CRC"
             ))
         })
+    };
+    let synced = match p.obj("synced_correction") {
+        None => None,
+        Some(s) => {
+            let burst = s.req_uint("burst_bits")? as usize;
+            if !(1..=MAX_SYNCED_BURST).contains(&burst) || burst * 2 > width {
+                return Err(perr(
+                    "synced_correction.burst_bits must be 1..=2 and at most width / 2",
+                ));
+            }
+            Some(SyncedCorrection {
+                burst,
+                lock_blocks: s.uint_or("lock_blocks", 3)?.max(1),
+                unlock_run: s.uint_or("unlock_run", 8)?.max(1),
+                synced: false,
+                clean_run: 0,
+                bad_run: 0,
+                last_source: None,
+                frames_corrected: 0,
+                blocks_corrected: 0,
+            })
+        }
     };
     let mode = match (p.obj("span"), p.obj("blocks")) {
         (Some(_), Some(_)) => return Err(perr("span and blocks are exclusive")),
@@ -106,6 +183,9 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
             }
         }
         _ => {
+            if synced.is_some() {
+                return Err(perr("synced_correction needs blocks mode"));
+            }
             // The shortest frame (check word alone); longer frames are bounded per length in
             // `check`.
             if let Some(e) = refuse(width, 1) {
@@ -127,6 +207,7 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         strip: p.bool_or("strip", true),
         drop_invalid: p.bool_or("drop_invalid", false),
         burst,
+        synced,
         bits: Vec::new(),
         out: Vec::new(),
         cache: Vec::with_capacity(CACHE),
@@ -142,11 +223,13 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
 
 /// Largest accepted chance that burst correction turns a random (garbage) block valid.
 const MAX_FALSE_CORRECTION: f64 = 1e-3;
+/// Longest burst `synced_correction` corrects.
+const MAX_SYNCED_BURST: usize = 2;
 
 /// Upper bound on the chance that syndrome correction of bursts up to `burst` bits turns a
 /// uniformly random `len`-bit block (data + check) valid: correctable burst patterns (start,
 /// mask with both end bits set) × accepted syndromes (offset words) / 2^width.
-fn false_correction(len: usize, burst: usize, accepted: usize, width: usize) -> f64 {
+pub(crate) fn false_correction(len: usize, burst: usize, accepted: usize, width: usize) -> f64 {
     let patterns: f64 = (1..=burst.min(len))
         .map(|t| (len + 1 - t) as f64 * 2f64.powi(t.saturating_sub(2) as i32))
         .sum();
@@ -165,7 +248,7 @@ fn read_check(bytes: &[u8], pos: usize, width: usize, le: bool) -> u32 {
 }
 
 /// Syndrome of a single-bit error at each position of `data` data bits then `width` check bits.
-fn units(crc: &BitCrc, data: usize, width: usize, le: bool) -> Vec<u32> {
+pub(crate) fn units(crc: &BitCrc, data: usize, width: usize, le: bool) -> Vec<u32> {
     let mut v = Vec::with_capacity(data + width);
     let mut buf = vec![0u8; data.div_ceil(8).max(1)];
     for i in 0..data {
@@ -184,7 +267,11 @@ fn units(crc: &BitCrc, data: usize, width: usize, le: bool) -> Vec<u32> {
 
 /// The unique burst (start, mask with bit 0 set, length ≤ `burst`) whose syndrome `accept`s;
 /// `None` when there is none or more than one.
-fn find_burst(units: &[u32], burst: usize, accept: impl Fn(u32) -> bool) -> Option<(usize, u32)> {
+pub(crate) fn find_burst(
+    units: &[u32],
+    burst: usize,
+    accept: impl Fn(u32) -> bool,
+) -> Option<(usize, u32)> {
     let mut found = None;
     for st in 0..units.len() {
         for mask in (1u32..(1 << burst)).step_by(2) {
@@ -209,6 +296,16 @@ fn find_burst(units: &[u32], burst: usize, accept: impl Fn(u32) -> bool) -> Opti
     found
 }
 
+/// Result of checking one frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct Checked {
+    passed: bool,
+    /// Bits corrected under the random-block bound (`correct_burst_bits`): still `valid`.
+    corrected: u32,
+    /// Bits corrected only because the lattice was synced: the frame is `corrected`.
+    synced_corrected: u32,
+}
+
 /// The block.
 pub struct Crc {
     params: Params,
@@ -219,6 +316,7 @@ pub struct Crc {
     strip: bool,
     drop_invalid: bool,
     burst: usize,
+    synced: Option<SyncedCorrection>,
     bits: Vec<u8>,
     out: Vec<u8>,
     /// Single-bit syndromes per span data length; `None` where correction at that length
@@ -235,8 +333,7 @@ pub struct Crc {
 
 impl Crc {
     /// Checks one frame (unpacked into `self.bits`, corrected in place); fills `self.out`.
-    /// Returns (passed, corrected bits).
-    fn check(&mut self, bytes: &[u8]) -> (bool, u32) {
+    fn check(&mut self, bytes: &[u8]) -> Checked {
         let len = self.bits.len();
         let w = self.width;
         self.out.clear();
@@ -245,13 +342,16 @@ impl Crc {
                 if len < span.start + span.trim + w {
                     self.meter.push(true);
                     self.out.extend_from_slice(&self.bits);
-                    return (false, 0);
+                    return Checked::default();
                 }
                 let data = len - span.trim - w - span.start;
                 let cpos = span.start + data;
                 let s =
                     self.crc.compute(bytes, span.start, data) ^ read_check(bytes, cpos, w, self.le);
-                let mut result = (s == 0, 0);
+                let mut result = Checked {
+                    passed: s == 0,
+                    ..Checked::default()
+                };
                 if s != 0 && self.burst > 0 {
                     let i = match self.cache.iter().position(|(l, _)| *l == data) {
                         Some(i) => i,
@@ -285,10 +385,11 @@ impl Crc {
                             self.bits[pos] ^= 1;
                             m &= m - 1;
                         }
-                        result = (true, mask.count_ones());
+                        result.passed = true;
+                        result.corrected = mask.count_ones();
                     }
                 }
-                self.meter.push(!result.0);
+                self.meter.push(!result.passed);
                 if self.strip {
                     self.out.extend_from_slice(&self.bits[..cpos]);
                     self.out.extend_from_slice(&self.bits[cpos + w..]);
@@ -307,32 +408,56 @@ impl Crc {
                 if len < n * bb {
                     self.meter.push(true);
                     self.out.extend_from_slice(&self.bits);
-                    return (false, 0);
+                    return Checked::default();
                 }
-                let (mut all, mut corrected) = (true, 0);
+                let mut result = Checked {
+                    passed: true,
+                    ..Checked::default()
+                };
                 for (b, allowed) in offsets.iter().enumerate() {
                     let base = b * bb;
                     let s = self.crc.compute(bytes, base, *data)
                         ^ read_check(bytes, base + data, w, self.le);
-                    let mut ok = allowed.contains(&s);
-                    if !ok
-                        && self.burst > 0
-                        && let Some((st, mask)) =
-                            find_burst(units, self.burst, |x| allowed.contains(&(s ^ x)))
+                    let clean = allowed.contains(&s);
+                    let mut ok = clean;
+                    let mut fix = None;
+                    if !ok && self.burst > 0 {
+                        fix = find_burst(units, self.burst, |x| allowed.contains(&(s ^ x)))
+                            .map(|f| (f, false));
+                    }
+                    if fix.is_none()
+                        && !ok
+                        && let Some(sc) = self.synced.as_ref().filter(|sc| sc.synced)
                     {
+                        fix = find_burst(units, sc.burst, |x| allowed.contains(&(s ^ x)))
+                            .map(|f| (f, true));
+                    }
+                    if let Some(((st, mask), synced)) = fix {
                         let mut m = mask;
                         while m != 0 {
                             self.bits[base + st + m.trailing_zeros() as usize] ^= 1;
                             m &= m - 1;
                         }
-                        corrected += mask.count_ones();
+                        if synced {
+                            result.synced_corrected += mask.count_ones();
+                        } else {
+                            result.corrected += mask.count_ones();
+                        }
                         ok = true;
                     }
-                    self.meter.push(!ok);
+                    if let Some(sc) = self.synced.as_mut() {
+                        if ok && !clean && fix.is_some_and(|(_, synced)| synced) {
+                            sc.blocks_corrected += 1;
+                        }
+                        sc.record(clean);
+                    }
+                    // Synced corrections are not clean evidence: they count as block errors.
+                    let synced_fix = fix.is_some_and(|(_, synced)| synced);
+                    self.meter.push(!ok || synced_fix);
                     if !ok {
                         self.blocks_bad += 1;
                     }
-                    all &= ok;
+                    result.passed &= ok;
                 }
                 if self.strip {
                     for b in 0..n {
@@ -343,9 +468,19 @@ impl Crc {
                 } else {
                     self.out.extend_from_slice(&self.bits);
                 }
-                (all, corrected)
+                result
             }
         }
+    }
+}
+
+/// `existing` (an upstream check) combined with this block's result: invalid dominates, then
+/// corrected.
+fn merge(existing: CrcStatus, r: Checked) -> CrcStatus {
+    match (existing, r.passed, r.synced_corrected > 0) {
+        (CrcStatus::Invalid, _, _) | (_, false, _) => CrcStatus::Invalid,
+        (CrcStatus::Corrected, _, _) | (_, true, true) => CrcStatus::Corrected,
+        _ => CrcStatus::Valid,
     }
 }
 
@@ -356,23 +491,46 @@ impl Block for Crc {
     }
 
     fn process(&mut self, io: &mut Io<'_>) -> Result<(), BlockError> {
-        let (_, frames, buf) = frames_io(io)?;
+        let (meta, frames, buf) = frames_io(io)?;
         let before = buf.len();
+        if let Some(sc) = self.synced.as_mut()
+            && drops_history(meta.flags)
+        {
+            sc.unsync();
+        }
         for f in frames.iter() {
+            if let Some(sc) = self.synced.as_mut() {
+                // Contiguity: this frame starts one frame period after the previous one (±2 bits).
+                let period = meta.source_per_item;
+                let tol = (2.0 * period / f64::from(f.info.bit_len.max(1))).max(1.0);
+                if let Some(prev) = sc.last_source
+                    && ((f.info.source_index as f64 - prev as f64) - period).abs() > tol
+                {
+                    sc.unsync();
+                }
+                sc.last_source = Some(f.info.source_index);
+            }
             self.bits.clear();
             extend_bits(&mut self.bits, f.bytes, 0, f.info.bit_len as usize);
-            let (ok, corrected) = self.check(f.bytes);
-            if ok {
+            let r = self.check(f.bytes);
+            let check = merge(f.info.check, r);
+            if check == CrcStatus::Valid {
                 self.frames_ok += 1;
             } else {
                 self.frames_bad += 1;
             }
+            if check == CrcStatus::Corrected
+                && let Some(sc) = self.synced.as_mut()
+            {
+                sc.frames_corrected += 1;
+            }
+            let corrected = r.corrected + r.synced_corrected;
             self.corrected_bits += u64::from(corrected);
-            if !ok && self.drop_invalid {
+            if check == CrcStatus::Invalid && self.drop_invalid {
                 continue;
             }
             let mut info = f.info.clone();
-            info.check = combine(info.check, ok);
+            info.check = check;
             info.corrected_bits += corrected;
             if self.strip || corrected > 0 {
                 info.layers = None;
@@ -393,10 +551,23 @@ impl Block for Crc {
             s.extra
                 .set("correction_skipped", self.correction_skipped as f64);
         }
+        if let Some(sc) = &self.synced {
+            s.lock = if sc.synced {
+                Lock::Locked
+            } else {
+                Lock::Searching
+            };
+            s.extra.set("frames_corrected", sc.frames_corrected as f64);
+            s.extra.set("blocks_corrected", sc.blocks_corrected as f64);
+        }
         Ok(())
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        if let Some(sc) = self.synced.as_mut() {
+            sc.unsync();
+        }
+    }
 
     fn update_params(
         &mut self,

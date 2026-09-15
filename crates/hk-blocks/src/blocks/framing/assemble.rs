@@ -134,7 +134,8 @@ pub struct Assemble {
 
 fn worse(a: CrcStatus, b: CrcStatus) -> CrcStatus {
     let rank = |s| match s {
-        CrcStatus::Invalid => 3,
+        CrcStatus::Invalid => 4,
+        CrcStatus::Corrected => 3,
         CrcStatus::Unknown => 2,
         CrcStatus::NoCrc => 1,
         CrcStatus::Valid => 0,

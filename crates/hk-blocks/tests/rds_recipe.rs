@@ -30,6 +30,7 @@ fn rds_recipe_validates_against_the_pinned_catalogue() {
         ("sync", Bits),
         ("crc", Frames),
         ("group", Frames),
+        ("agree", Frames),
         ("ps", Frames),
         ("rt", Frames),
     ] {
@@ -114,7 +115,7 @@ fn rds_hot_edits_keep_or_reset_state_per_the_block_schemas() {
         NodeChange::Params { hot: false, .. }
     ));
     let reset: Vec<&str> = plan.reset.iter().map(String::as_str).collect();
-    assert_eq!(reset, ["crc", "group", "ps", "rt"]);
+    assert_eq!(reset, ["agree", "crc", "group", "ps", "rt"]);
     assert_eq!(plan.nodes["clock"], NodeChange::Unchanged);
 
     // A field-map edit is a hot `map` change on `group` only: no DSP state touched, and the

@@ -215,6 +215,7 @@ pub(crate) fn push_value(dst: &mut Vec<u8>, v: u64, n: usize) {
 pub(crate) fn combine(existing: CrcStatus, passed: bool) -> CrcStatus {
     match (existing, passed) {
         (CrcStatus::Invalid, _) | (_, false) => CrcStatus::Invalid,
+        (CrcStatus::Corrected, true) => CrcStatus::Corrected,
         _ => CrcStatus::Valid,
     }
 }
@@ -427,6 +428,18 @@ pub(crate) mod testutil {
         per_chunk: usize,
         end: bool,
     ) -> Vec<Owned> {
+        run_frames_period(block, input, per_chunk, end, 1.0)
+    }
+
+    /// [`run_frames`] with the chunks' frame period (`source_per_item`) set: blocks that check
+    /// frame contiguity (`crc`'s synced correction) need it to match the frames' source indexes.
+    pub fn run_frames_period(
+        block: &mut dyn Block,
+        input: &[Owned],
+        per_chunk: usize,
+        end: bool,
+        period: f64,
+    ) -> Vec<Owned> {
         let info = block.init(&[port(PortType::Frames, per_chunk)]).unwrap();
         let mut outputs = vec![Output::for_port(&info[0])];
         let mut frames = Vec::new();
@@ -438,6 +451,7 @@ pub(crate) mod testutil {
             }
             outputs[0].begin_chunk();
             let mut meta = ChunkMeta {
+                source_per_item: period,
                 flags: if k == 0 {
                     ChunkFlags::DISCONTINUITY
                 } else {

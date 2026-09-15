@@ -283,7 +283,7 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 
 | `type` | Fields | Stored as |
 |---|---|---|
-| `decode` | `sample_index`, `frame_model` (default `output.schema_id`), `crc_status` (`valid`/`invalid`/`no-crc`/`unknown`, default `unknown`), `identity` `{scheme, value}`, `metadata`, `content`, `content_class` | `Decode`. `decoder_id`/`version` come from the manifest; `demodulation_ref`/`recording_ref` from the plugin context. |
+| `decode` | `sample_index`, `frame_model` (default `output.schema_id`), `crc_status` (`valid`/`invalid`/`corrected`/`no-crc`/`unknown`, default `unknown`), `identity` `{scheme, value}`, `metadata`, `content`, `content_class` | `Decode`. `decoder_id`/`version` come from the manifest; `demodulation_ref`/`recording_ref` from the plugin context. |
 | `annotation` | `value` (label, required), `kind` (`label`/`correction`/`ground-truth`), `confidence` (0–1, default 1), `metadata`, `content`, `content_class` | `Annotation`, author `decoder`. The target is the context's detection, else region, emitter or recording. |
 | `log` | `msg` | Log ring |
 
@@ -650,7 +650,7 @@ One NDJSON record per frame:
 | Field | Meaning |
 |---|---|
 | `type`, `seq`, `t`, `content_class`, `gated` | As §5.1. `t` is the time of the frame's first bit, host-stamped from `sample_index` and the ring's time anchor. |
-| `crc_status` | Frame check after FEC: `valid`, `invalid`, `no-crc` (the recipe has no check), `unknown`. |
+| `crc_status` | Frame check after FEC: `valid`, `invalid`, `corrected` (the check passed only after FEC corrected bits it cannot vouch for — usable, but never CRC-valid evidence: T-210), `no-crc` (the recipe has no check), `unknown`. |
 | `decoder` | `recipe:<recipe_id>@<version>` |
 | `frame_model` | The recipe id (inspector outputs) or the decode mapping's `frame_model` |
 | `emitter_id` | When the pipeline's target resolved to an emitter |
