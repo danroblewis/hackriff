@@ -193,12 +193,15 @@ test("explore slice actions: tab, sort, rows, error, selections, focus", () => {
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----
+// The focus panel's own action buttons (and their `.focus .actions` grid/400px rule) moved to the
+// right-click/long-press context menu (T-192, ui/src/app/menu/); its viewport clamping is tested
+// in app-menu.test.ts's `clampMenuPosition` tests instead. The sidebar row actions (Promote/
+// Delete, still buttons in the list) keep the wrap rule this test originally checked.
 
-test("explore.css: row and focus actions wrap instead of overflowing", () => {
+test("explore.css: sidebar row actions wrap instead of overflowing", () => {
   const css = readFileSync("src/app/explore/explore.css", "utf8");
   assert.match(css, /\.side-inv \.acts\s*\{[^}]*flex-wrap:\s*wrap/);
-  assert.match(css, /\.focus \.actions\s*\{[^}]*grid-template-columns/);
-  assert.match(css, /@media \(max-width:\s*400px\)\s*\{\s*\.focus \.actions\s*\{[^}]*grid-template-columns:\s*1fr/);
+  assert.doesNotMatch(css, /\.focus \.act\b/, "the focus panel's action buttons moved to the context menu (T-192)");
 });
 
 test("index.html: inventory and selections sit inside the left sidebar aside; the live view does not", () => {

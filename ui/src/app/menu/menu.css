@@ -1,0 +1,38 @@
+/* Context menu popup (T-192). Fixed-position, appended to <body> (not any area's slot), so its
+   rules live at the top level rather than scoped under an area class. Reuses base.css tokens only;
+   theme-aware for free since it never redefines them. */
+.ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  max-width: min(280px, calc(100vw - 8px));
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ctx-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  border-radius: 5px;
+  padding: 7px 10px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+}
+.ctx-item .lbl { font-size: 12.5px; font-weight: 600; }
+.ctx-item small { color: var(--dim); font-size: 11px; }
+.ctx-item:hover, .ctx-item.active { background: var(--raise); }
+.ctx-item.active { outline: 2px solid var(--amber); outline-offset: -2px; }
+.ctx-item.danger .lbl { color: var(--coral); }
+.ctx-item[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+.ctx-item[aria-disabled="true"]:hover { background: transparent; }

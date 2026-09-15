@@ -19,6 +19,7 @@ import { MARK_DROP, MARK_GATED, Waterfall } from "../../waterfall";
 import type { AppContext } from "../context";
 import { h } from "../dom";
 import { focusSelection, focusSignal } from "../explore/slice";
+import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
 import { toast } from "../shell-slice";
 import {
@@ -119,7 +120,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     const listed = new Set(s.selections.list.map((x) => x.id));
     const sels = [...s.selections.list, ...[...pending.values()].filter((p) => !listed.has(p.id))];
     for (const b of selectionBoxes(sels, v, focusSel, pending)) {
-      const e = h("div", { class: `c-sel${b.active ? " active" : ""}${b.pending ? " pending" : ""}` });
+      const e = h("div", { class: `c-sel${b.active ? " active" : ""}${b.pending ? " pending" : ""}`, "data-id": b.id });
       place(e, b);
       layer.push(e);
     }
@@ -244,6 +245,25 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   el.addEventListener("pointercancel", end);
   el.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse" && !drag) hideHover(); });
   attachWheelZoom(el, viewHooks(ctx));
+
+  // Right-click / long-press on a confirmed/candidate bracket or a selection box opens the
+  // T-192 context menu (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete,
+  // Adjust band); empty waterfall/spectrum space opens nothing.
+  bindContextTrigger(el, (mx, my, target) => {
+    drag = null; // a long-press or right-click never also starts/finishes a drag-select
+    draft.hidden = true;
+    const bk = target.closest<HTMLElement>(".bk");
+    if (bk?.dataset.id) {
+      const r = store.get().inventory.rows[bk.dataset.id];
+      if (r) openSignalMenu(ctx, r, mx, my);
+      return;
+    }
+    const box = target.closest<HTMLElement>(".c-sel");
+    if (box?.dataset.id) {
+      const sel = store.get().selections.list.find((x) => x.id === box.dataset.id);
+      if (sel) openSelectionMenu(ctx, sel, mx, my);
+    }
+  });
 
   // ---- spectrum stream ----
 
