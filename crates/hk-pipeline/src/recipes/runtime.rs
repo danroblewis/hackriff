@@ -409,6 +409,8 @@ pub struct RecipeRuntime {
     edit_timeout_ms: AtomicU64,
     /// Always-on decoded-stream capture (T-092, [`crate::recipes::capture`]).
     pub(crate) captures: std::sync::OnceLock<hk_store::decoded::DecodedCaptures>,
+    /// Capture replays streaming now (T-092; capped at `capture::MAX_CAPTURE_REPLAYS`).
+    pub(crate) capture_replays: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
@@ -610,6 +612,7 @@ impl RecipeRuntime {
             next_id: AtomicU64::new(1),
             edit_timeout_ms: AtomicU64::new(EDIT_TIMEOUT.as_millis() as u64),
             captures: std::sync::OnceLock::new(),
+            capture_replays: std::sync::Arc::default(),
         }
     }
 

@@ -28,6 +28,7 @@ use hk_blocks::{
 };
 use hk_core::{MockEnd, MockOptions, MockSdrDriver, Source};
 use hk_pipeline::class::band_class;
+use hk_pipeline::recipes::capture::MAX_CAPTURE_REPLAYS;
 use hk_pipeline::recipes::runtime::{RecipeRuntime, Target, parse_recipe};
 use hk_pipeline::{
     Pipeline, PipelineConfig, PipelineHandle, SourceInfo, TrackInventory, replay_plan,
@@ -469,6 +470,27 @@ fn a_pipeline_is_recorded_automatically_and_scrubs_reparses_and_replays_like_liv
             Some(json!(r.metadata.frame.unwrap() & 0xff))
         );
     }
+    // Replays are capped: unsubscribed replays hold their slots; beyond the cap, 503 busy until
+    // one ends.
+    let cap_req = OpenRequest {
+        params: vec![("capture".into(), cap.id.clone())],
+        peer: "t".into(),
+    };
+    let mut held = Vec::new();
+    let refusal = loop {
+        match run.rt.inspector_service().open(&cap_req) {
+            Ok(s) => held.push(s),
+            Err(e) => break e,
+        }
+        assert!(held.len() <= MAX_CAPTURE_REPLAYS, "no replay cap");
+    };
+    assert_eq!((refusal.status, refusal.code.as_str()), (503, "busy"));
+    assert!(!held.is_empty());
+    drop(held);
+    wait("a replay slot to free", LIMIT, || {
+        run.rt.inspector_service().open(&cap_req).is_ok()
+    });
+
     // Unknown capture: 404.
     let req = OpenRequest {
         params: vec![("capture".into(), "nope".into())],

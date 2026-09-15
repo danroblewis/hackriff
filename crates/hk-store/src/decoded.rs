@@ -19,7 +19,13 @@
 //! I/O. A slow disk fills the ring and the publisher drops records (counted, then marked with a
 //! drop marker that this writer stores and sums into `dropped_records`); the publishing thread
 //! never waits. The egress gate has already run, so a frame whose class forbids content arrives
-//! (and is stored) metadata-only.
+//! (and is stored) metadata-only. The recorder is exempt from the publisher's slow-consumer
+//! disconnect, so a disk stall of any length loses (and counts) records but never the recording.
+//!
+//! **Failures.** A write error never writes a byte twice (a retry resumes after the bytes that
+//! landed) and a segment that ends on an error is truncated to its last complete commit. On open,
+//! a capture left recording by a crashed process is cut back to its last complete, indexed record
+//! (torn tail records and partial index entries are removed) and closed as `interrupted`.
 //!
 //! **Quota** ([`CaptureQuota`], defaults 1 GiB total, 64 MiB per capture): a capture that reaches
 //! the per-capture size rolls to a new segment (a new capture id, `segment + 1`, same header);
@@ -28,14 +34,14 @@
 //! and records are dropped and counted until the store is under quota again.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hk_stream::frame::encode_frame;
+use hk_stream::frame::{MAX_FRAME_LEN, encode_frame};
 use hk_stream::inspector::{
     CaptureCursor, CaptureDelete, CaptureInfo, CaptureSource, INSPECTOR_MESSAGE_SCHEMA,
 };
@@ -55,6 +61,8 @@ pub const MIN_CAPTURE_BYTES: u64 = 2 * 1024;
 /// Smallest per-consumer queue: a header, one default-size (1 MiB) record and a marker.
 const MIN_QUEUE_BYTES: usize = 2 * 1024 * 1024 + 64 * 1024;
 const META_SCHEMA: &str = "hackriff-decoded-capture/1";
+/// Bytes in a §3 record's little-endian `u32` length prefix.
+const LEN_PREFIX: u64 = 4;
 
 /// Environment override of [`CaptureQuota::total_bytes`].
 pub const ENV_TOTAL_BYTES: &str = "HK_DECODED_CAPTURE_TOTAL_BYTES";
@@ -250,6 +258,42 @@ impl Inner {
         id
     }
 
+    /// Repairs a capture a previous process left recording. A power loss can leave a torn final
+    /// record, a partial index entry, or an entry for a record that never landed: keep the longest
+    /// run of complete records whose frame records are all indexed, truncate both files to it, and
+    /// take `frames`, `bytes`, `t_first`/`t_last` from what is kept (`dropped_records` from the
+    /// drop markers kept, if more than the catalogue last saw). Returns the frames kept.
+    fn recover(&self, e: &mut Entry) -> u64 {
+        let (data_path, idx_path) = (self.path(&e.info.id, "hks"), self.path(&e.info.id, "idx"));
+        let data_len = fs::metadata(&data_path).map_or(0, |m| m.len());
+        let index: Vec<(u64, i64)> = fs::read(&idx_path)
+            .unwrap_or_default()
+            .chunks_exact(INDEX_ENTRY_LEN as usize)
+            .map(|b| {
+                let (off, t) = b.split_at(8);
+                (
+                    u64::from_le_bytes(off.try_into().unwrap_or_default()),
+                    i64::from_le_bytes(t.try_into().unwrap_or_default()),
+                )
+            })
+            .collect();
+        let (frames, end, dropped) = match File::open(&data_path) {
+            Ok(f) if data_len >= e.header_len => {
+                walk_records(&mut BufReader::new(f), e.header_len, data_len, &index)
+            }
+            _ => (0, 0, 0),
+        };
+        truncate(&data_path, end);
+        truncate(&idx_path, frames * INDEX_ENTRY_LEN);
+        let kept = &index[..usize::try_from(frames).unwrap_or(0).min(index.len())];
+        e.info.frames = frames;
+        e.info.bytes = end;
+        e.info.t_first = kept.first().map(|&(_, t)| ns_to_s(t));
+        e.info.t_last = kept.last().map(|&(_, t)| ns_to_s(t));
+        e.info.dropped_records = e.info.dropped_records.max(dropped);
+        frames
+    }
+
     fn index_entry(&self, id: &str, k: u64) -> io::Result<(u64, i64)> {
         let mut f = File::open(self.path(id, "idx"))?;
         read_index_entry(&mut f, k)
@@ -299,20 +343,10 @@ impl DecodedCaptures {
                 header_len: meta.header_len,
             };
             if e.info.recording {
-                let id = e.info.id.clone();
-                let data_len = fs::metadata(inner.path(&id, "hks")).map_or(0, |m| m.len());
-                let idx_len = fs::metadata(inner.path(&id, "idx")).map_or(0, |m| m.len());
-                let mut frames = idx_len / INDEX_ENTRY_LEN;
-                // Entries whose record never reached the stream file are not frames.
-                while frames > 0
-                    && inner
-                        .index_entry(&id, frames - 1)
-                        .map_or(true, |(off, _)| off >= data_len)
-                {
-                    frames -= 1;
+                if inner.recover(&mut e) == 0 {
+                    inner.remove_files(&e.info.id);
+                    continue;
                 }
-                e.info.frames = frames;
-                e.info.bytes = data_len;
                 e.info.recording = false;
                 e.info.ended = Some(e.info.ended.unwrap_or(now_s()));
                 e.info.end_reason = Some("interrupted".into());
@@ -380,7 +414,7 @@ impl DecodedCaptures {
         };
         let queue = self.quota().queue_bytes.max(MIN_QUEUE_BYTES);
         handle
-            .subscribe_with_queue(
+            .subscribe_recorder(
                 "decoded-capture",
                 Declared::local(writer),
                 Box::new(move |r| *lock(&reason) = Some(r)),
@@ -415,6 +449,92 @@ struct CaptureWriter {
     next_segment: u32,
     reason: Arc<Mutex<Option<CloseReason>>>,
     failed: bool,
+}
+
+/// Writes `buf` to `w`, removing what was written: after an error (e.g. a partial write on a full
+/// disk) `buf` holds exactly the unwritten remainder, so a retry never writes a byte twice.
+fn write_pending<W: Write + ?Sized>(w: &mut W, buf: &mut Vec<u8>) -> io::Result<()> {
+    let mut done = 0;
+    let result = loop {
+        if done == buf.len() {
+            break Ok(());
+        }
+        match w.write(&buf[done..]) {
+            Ok(0) => break Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => done += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => break Err(e),
+        }
+    };
+    buf.drain(..done);
+    result
+}
+
+/// Shortens the file at `path` to `len` bytes if it is longer (best effort).
+fn truncate(path: &Path, len: u64) {
+    if fs::metadata(path).is_ok_and(|m| m.len() > len) {
+        let _ = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_len(len));
+    }
+}
+
+/// Walks `.hks` records from `start` (just past the header) while each is complete and every
+/// frame record among them is the next `index` entry: `(frames, end offset, dropped-marker
+/// counts)`. A torn record, or a frame record whose index entry never landed, ends the walk.
+fn walk_records(
+    r: &mut BufReader<File>,
+    start: u64,
+    data_len: u64,
+    index: &[(u64, i64)],
+) -> (u64, u64, u64) {
+    let (mut frames, mut pos, mut dropped) = (0u64, start, 0u64);
+    if r.seek(SeekFrom::Start(start)).is_err() {
+        return (0, start, 0);
+    }
+    let mut prefix = [0u8; LEN_PREFIX as usize];
+    while r.read_exact(&mut prefix).is_ok() {
+        let len = u64::from(u32::from_le_bytes(prefix));
+        let next = pos + LEN_PREFIX + len;
+        if len > u64::from(MAX_FRAME_LEN) || next > data_len {
+            break;
+        }
+        let indexed = usize::try_from(frames)
+            .ok()
+            .and_then(|k| index.get(k))
+            .is_some_and(|&(off, _)| off == pos);
+        if indexed {
+            let Ok(skip) = i64::try_from(len) else { break };
+            if r.seek_relative(skip).is_err() {
+                break;
+            }
+            frames += 1;
+        } else {
+            let mut payload = vec![0u8; len as usize];
+            if r.read_exact(&mut payload).is_err() {
+                break;
+            }
+            let v: Option<Value> = serde_json::from_slice(&payload).ok();
+            match v
+                .as_ref()
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str)
+            {
+                Some("frame") => break,
+                Some("dropped") => {
+                    dropped += v
+                        .as_ref()
+                        .and_then(|v| v.get("count"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1);
+                }
+                _ => {}
+            }
+        }
+        pos = next;
+    }
+    (frames, pos, dropped)
 }
 
 fn invalid(e: impl std::fmt::Display) -> io::Error {
@@ -574,13 +694,11 @@ impl CaptureWriter {
             return Ok(());
         };
         if !seg.data_buf.is_empty() {
-            seg.data.write_all(&seg.data_buf)?;
+            write_pending(&mut seg.data, &mut seg.data_buf)?;
             seg.data.flush()?;
-            seg.data_buf.clear();
         }
         if !seg.idx_buf.is_empty() {
-            seg.idx.write_all(&seg.idx_buf)?;
-            seg.idx_buf.clear();
+            write_pending(&mut seg.idx, &mut seg.idx_buf)?;
         }
         let meta_due = seg.meta_at.elapsed() >= META_EVERY;
         {
@@ -603,7 +721,8 @@ impl CaptureWriter {
 
     /// Ends the current segment with `reason` (a capture without frame records is deleted).
     fn finish_segment(&mut self, reason: &str) {
-        if self.commit().is_err() {
+        let committed = self.commit().is_ok();
+        if !committed {
             self.failed = true;
         }
         let Some(seg) = self.seg.take() else {
@@ -618,6 +737,15 @@ impl CaptureWriter {
                 entries.remove(&id);
                 self.store.remove_files(&id);
             } else if let Some(e) = entries.get_mut(&id) {
+                if !committed {
+                    // A failed write may have left part of a record or index entry: end both
+                    // files at the last commit, whose counts the entry holds.
+                    truncate(&self.store.path(&id, "hks"), e.info.bytes);
+                    truncate(
+                        &self.store.path(&id, "idx"),
+                        e.info.frames * INDEX_ENTRY_LEN,
+                    );
+                }
                 e.info.recording = false;
                 e.info.ended = Some(now_s());
                 e.info.end_reason = Some(reason.to_owned());
@@ -1031,5 +1159,268 @@ mod tests {
         assert_eq!(c.frames, 10);
         drop(p);
         wait_ended(&store);
+    }
+
+    fn publisher_with(class: ContentClass, config: PublisherConfig) -> Publisher {
+        Publisher::new(publisher(class).header().clone(), config).unwrap()
+    }
+
+    fn wait_frames(store: &DecodedCaptures, n: u64) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while store.list().unwrap().first().is_none_or(|c| c.frames < n) {
+            assert!(Instant::now() < deadline, "{n} frames not recorded");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Reads every stored frame and checks frames are `0..frames` in order and that each index
+    /// entry seeks to its frame.
+    fn assert_fully_readable(store: &DecodedCaptures, c: &CaptureInfo, what: &str) {
+        let mut r = RecordedFrames::open(store.open(&c.id).unwrap().unwrap()).unwrap();
+        let mut n = 0;
+        while let Some(f) = r.next_frame().unwrap() {
+            assert_eq!(f.metadata.frame, Some(n), "{what}");
+            n += 1;
+        }
+        assert_eq!(n, c.frames, "{what}");
+        for k in 0..c.frames {
+            let cur = store.open_at(&c.id, k).unwrap().unwrap();
+            let mut r = RecordedFrames::open(cur.reader).unwrap();
+            assert_eq!(
+                r.next_frame().unwrap().unwrap().metadata.frame,
+                Some(k),
+                "{what}"
+            );
+        }
+        let len = |ext: &str| {
+            fs::metadata(store.dir().join(format!("{}.{ext}", c.id)))
+                .unwrap()
+                .len()
+        };
+        assert_eq!(len("hks"), c.bytes, "{what}");
+        assert_eq!(len("idx"), c.frames * INDEX_ENTRY_LEN, "{what}");
+    }
+
+    /// A stream file whose writes block while the flag is set.
+    struct StalledFile(File, Arc<AtomicBool>);
+
+    impl Write for StalledFile {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            while self.1.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            self.0.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    #[test]
+    fn a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops() {
+        let dir = TempDir::new("stall");
+        let store = DecodedCaptures::open(&dir.0, CaptureQuota::default()).unwrap();
+        let stalled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stalled);
+        store.set_data_writer(Arc::new(move |p: &Path| {
+            Ok(Box::new(StalledFile(File::create(p)?, Arc::clone(&flag))) as Box<dyn Write + Send>)
+        }));
+        let config = PublisherConfig {
+            disconnect_after: Duration::from_millis(100),
+            ..PublisherConfig::default()
+        };
+        let mut p = publisher_with(ContentClass::Unrestricted, config);
+        store.tee(p.header(), &p.handle()).unwrap();
+        let mut i = 0u64;
+        for _ in 0..5 {
+            p.publish_frame(&frame(i)).unwrap();
+            i += 1;
+        }
+        wait_frames(&store, 5);
+        // The disk hangs for 6× the disconnect policy while large frames fill the queue.
+        stalled.store(true, Ordering::SeqCst);
+        let big = "ab".repeat(100_000);
+        let until = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < until {
+            let mut f = frame(i);
+            f.content.as_mut().unwrap().hex = big.clone();
+            p.publish_frame(&f).unwrap();
+            i += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            p.handle().open_consumers(),
+            1,
+            "the recorder was disconnected"
+        );
+        stalled.store(false, Ordering::SeqCst);
+        // Once the recorder has drained what it queued, later frames are accepted, and the first
+        // one carries the drop marker.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while p
+            .handle()
+            .consumer_stats()
+            .iter()
+            .any(|s| s.queued_bytes > 0)
+        {
+            assert!(Instant::now() < deadline, "the recorder did not drain");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for _ in 0..20 {
+            p.publish_frame(&frame(i)).unwrap();
+            i += 1;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(p);
+        wait_ended(&store);
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 1, "{list:?}");
+        let c = &list[0];
+        assert_eq!(c.end_reason.as_deref(), Some("finished"), "{c:?}");
+        assert!(c.dropped_records > 0, "{c:?}");
+        assert_eq!(c.frames + c.dropped_records, i, "{c:?}");
+        // Frames after the stall were recorded: the last one published is the last stored.
+        let mut r = RecordedFrames::open(store.open(&c.id).unwrap().unwrap()).unwrap();
+        let mut last = None;
+        while let Some(f) = r.next_frame().unwrap() {
+            last = f.metadata.frame;
+        }
+        assert_eq!(last, Some(i - 1));
+    }
+
+    #[test]
+    fn a_torn_tail_record_or_index_entry_recovers_to_a_fully_readable_capture() {
+        for case in ["torn-record", "torn-index"] {
+            let dir = TempDir::new(case);
+            let store = DecodedCaptures::open(&dir.0, CaptureQuota::default()).unwrap();
+            let mut p = publisher(ContentClass::Unrestricted);
+            store.tee(p.header(), &p.handle()).unwrap();
+            for i in 0..20 {
+                p.publish_frame(&frame(i)).unwrap();
+            }
+            drop(p);
+            wait_ended(&store);
+            let id = store.list().unwrap()[0].id.clone();
+            drop(store);
+            let path = |ext: &str| dir.0.join(format!("{id}.{ext}"));
+            // A power loss mid-write: the catalogue still says recording, with stale counts.
+            let mut meta: Value = serde_json::from_slice(&fs::read(path("json")).unwrap()).unwrap();
+            meta["recording"] = Value::Bool(true);
+            meta["ended"] = Value::Null;
+            meta["end_reason"] = Value::Null;
+            fs::write(path("json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+            let idx = fs::read(path("idx")).unwrap();
+            let data_len = fs::metadata(path("hks")).unwrap().len();
+            let expect = if case == "torn-record" {
+                // Half of the last frame record reached the disk, and its index entry did.
+                let last =
+                    u64::from_le_bytes(idx[idx.len() - 16..idx.len() - 8].try_into().unwrap());
+                File::options()
+                    .write(true)
+                    .open(path("hks"))
+                    .unwrap()
+                    .set_len(last + (data_len - last) / 2)
+                    .unwrap();
+                19
+            } else {
+                // A torn length prefix, one whole index entry for it and a partial one.
+                let mut hks = File::options().append(true).open(path("hks")).unwrap();
+                hks.write_all(&[0x40, 0, 0]).unwrap();
+                let mut ix = File::options().append(true).open(path("idx")).unwrap();
+                ix.write_all(&data_len.to_le_bytes()).unwrap();
+                ix.write_all(&[7u8; 8]).unwrap();
+                ix.write_all(&[1, 2, 3, 4, 5]).unwrap();
+                20
+            };
+            let store = DecodedCaptures::open(&dir.0, CaptureQuota::default()).unwrap();
+            let c = store.info(&id).unwrap().unwrap();
+            assert!(!c.recording, "{case}");
+            assert_eq!(c.end_reason.as_deref(), Some("interrupted"), "{case}");
+            assert_eq!(c.frames, expect, "{case}");
+            assert_eq!(c.t_first, Some(ns_to_s(frame(0).t)), "{case}");
+            assert_eq!(c.t_last, Some(ns_to_s(frame(expect - 1).t)), "{case}");
+            assert_fully_readable(&store, &c, case);
+        }
+    }
+
+    /// A stream file on a disk that fills at `budget` bytes: the write reaching it lands partly
+    /// and later writes fail, until (with `transient`) the disk has room again.
+    struct FullDisk {
+        file: File,
+        budget: Arc<AtomicU64>,
+        written: u64,
+        failed: bool,
+        transient: bool,
+    }
+
+    impl Write for FullDisk {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let n = if self.failed && self.transient {
+                buf.len()
+            } else {
+                let room = self
+                    .budget
+                    .load(Ordering::SeqCst)
+                    .saturating_sub(self.written);
+                if room == 0 {
+                    self.failed = true;
+                    return Err(io::Error::other("disk full"));
+                }
+                buf.len().min(usize::try_from(room).unwrap_or(usize::MAX))
+            };
+            let n = self.file.write(&buf[..n])?;
+            self.written += n as u64;
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    #[test]
+    fn a_partial_write_never_duplicates_bytes_and_ends_at_a_complete_record() {
+        for transient in [true, false] {
+            let what = if transient { "transient" } else { "full" };
+            let dir = TempDir::new(what);
+            let store = DecodedCaptures::open(&dir.0, CaptureQuota::default()).unwrap();
+            let budget = Arc::new(AtomicU64::new(u64::MAX));
+            let b = Arc::clone(&budget);
+            store.set_data_writer(Arc::new(move |p: &Path| {
+                Ok(Box::new(FullDisk {
+                    file: File::create(p)?,
+                    budget: Arc::clone(&b),
+                    written: 0,
+                    failed: false,
+                    transient,
+                }) as Box<dyn Write + Send>)
+            }));
+            let mut p = publisher(ContentClass::Unrestricted);
+            store.tee(p.header(), &p.handle()).unwrap();
+            for i in 0..5 {
+                p.publish_frame(&frame(i)).unwrap();
+            }
+            wait_frames(&store, 5);
+            // The disk fills part-way through a later record.
+            let committed = store.list().unwrap()[0].bytes;
+            budget.store(committed + 1001, Ordering::SeqCst);
+            for i in 5..100 {
+                p.publish_frame(&frame(i)).unwrap();
+            }
+            drop(p);
+            wait_ended(&store);
+            let c = store.list().unwrap()[0].clone();
+            assert_eq!(
+                c.end_reason.as_deref(),
+                Some("write-failed"),
+                "{what}: {c:?}"
+            );
+            if transient {
+                // The retry wrote the rest of the failed commit, once.
+                assert!(c.frames > 5, "{what}: {c:?}");
+            } else {
+                assert!(c.frames >= 5, "{what}: {c:?}");
+            }
+            assert_fully_readable(&store, &c, what);
+        }
     }
 }

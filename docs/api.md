@@ -403,13 +403,14 @@ Classical, compute-only helpers (`hk_estimate::assist`) for writing a parser ove
 **Every running pipeline's inspector output is recorded automatically** ("always recorded", docs/13 layer 4), so a parser can be authored and re-run over what was actually decoded. Recording, index and quota live in `hk_store::decoded`; `hk_pipeline::recipes::capture` tees each inspector stream in when a pipeline starts or a hot edit adds an output; these routes only route, audit and shape errors (`crates/hk-api/src/captures.rs`).
 
 - **Storage** (`<data dir>/captures/`). `<id>.hks` is the §3 byte stream itself: the header frame, then the records as published. Frame records are stored without `content.layers` (derived; re-parse recomputes them). `<id>.idx` is the frame index: one 16-byte little-endian entry per frame record, `u64` byte offset + `i64` `t` (Unix ns), so frame and time scrubs seek. `<id>.json` is the catalogue entry.
-- **Never blocks capture.** The recorder is a local consumer of the stream's publisher, with a bounded queue (4 MiB) and its own writer thread. A slow disk makes the publisher drop records; drops are counted in `dropped_records`, and the pipeline never waits.
+- **Never blocks capture.** The recorder is a local consumer of the stream's publisher, with a bounded queue (4 MiB) and its own writer thread. A slow disk makes the publisher drop records; drops are counted in `dropped_records`, and the pipeline never waits. The publisher's slow-consumer disconnect does not apply to the recorder, so a disk stall of any length loses records, never the recording.
+- **Failures.** A failed write never stores a byte twice; the capture ends (`write-failed`) at its last complete record.
 - **Content rule.** The §6 gate runs before storage. A frame whose class forbids content is stored metadata-only and can never be re-parsed.
 - **Quota.** Defaults: 1 GiB total (`$HK_DECODED_CAPTURE_TOTAL_BYTES`) and 64 MiB per capture (`$HK_DECODED_CAPTURE_BYTES`, clamped to at most a quarter of the total).
   - At the per-capture size a recording **rolls** to a new capture: a new id, `segment + 1` and the same header.
   - Past the total, the **oldest finished captures are evicted first**. If only recording captures remain, their segments roll and new records are dropped and counted until the store is back under quota.
   - A capture that ends with no frame records is deleted.
-  - When `hk serve` starts, captures a previous process left recording are closed with `end_reason: "interrupted"`.
+  - When `hk serve` starts, captures a previous process left recording are closed with `end_reason: "interrupted"`. Each is first cut back to its last complete, indexed record: a torn tail record or partial index entry left by a power loss is removed, and `frames`, `bytes` and `t_first`/`t_last` come from what is kept.
 
 | Method | Path | Auth | Answers |
 |---|---|---|---|
@@ -437,7 +438,7 @@ Classical, compute-only helpers (`hk_estimate::assist`) for writing a parser ove
 - The header is the recording's, with `stream_id: capture/<id>` and `inspector.source: {kind: "capture", capture_id, reparse}`. The §6 gate runs again.
 - `seq` is the replay stream's own (from 0, for its drop detection). `t`, `metadata` (`frame`, `sample_index`, `recipe_version`, `edit_rev`, ...) and `content` are the recording's.
 - Records are paced to the consumer rather than dropped. The stream finishes after the last frame stored when it opened. Only frame records are replayed (not `status`/`edit`).
-- Refusals: 400 `bad-request` (bad `capture`, `from_frame` or `field_map` syntax), 404 `not-found` (capture, recipe version or map), 422 `unreadable`/`invalid`.
+- Refusals: 400 `bad-request` (bad `capture`, `from_frame` or `field_map` syntax), 404 `not-found` (capture, recipe version or map), 422 `unreadable`/`invalid`, 503 `busy` (4 capture replays are already streaming on this server; no queueing, retry when one ends, like assist's `busy`).
 
 Errors are `{"error", "code"}`: `400 invalid` (bad id or query, messages never echo values), `404 not_found`, `405` (with `Allow`), `409 conflict`, `422 unreadable` (not a readable inspector stream), `500 unreadable` (store I/O), `503 unavailable` (no capture store on this server).
 

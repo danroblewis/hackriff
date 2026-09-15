@@ -1362,6 +1362,8 @@ fn assist_routes_answer_suggestions_as_documented() {
 /// `/ws/open/inspector?capture=` replays it. All as `docs/api.md` "Decoded captures" documents,
 /// on the mock device's FM window. The recipe (FM discriminator, clock recovery, slicer, 32-bit
 /// deframe) yields frames from any signal, so the test does not depend on a decoder's lock.
+/// The documented replay cap (503 `busy` beyond 4 at once) is exercised in hk-pipeline's
+/// `decoded_capture` test, which can hold replays open without a WebSocket client.
 #[test]
 fn decoded_captures_are_recorded_listed_scrubbed_reparsed_and_replayed_as_documented() {
     let (serving, addr) = start_server();

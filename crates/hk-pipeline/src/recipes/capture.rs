@@ -17,7 +17,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,29 @@ use crate::recipes::runtime::{RecipeRuntime, StreamEntry};
 
 /// How long a replay waits for its consumer to subscribe.
 const SUBSCRIBE_WAIT: Duration = Duration::from_secs(10);
+
+/// Most capture replays streaming at once per runtime; more are refused with 503 `busy`.
+pub const MAX_CAPTURE_REPLAYS: usize = 4;
+
+/// One of the [`MAX_CAPTURE_REPLAYS`] replay slots, released when the replay thread ends.
+struct ReplayPermit(Arc<AtomicUsize>);
+
+impl ReplayPermit {
+    fn try_acquire(in_flight: &Arc<AtomicUsize>) -> Option<Self> {
+        in_flight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_CAPTURE_REPLAYS).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(in_flight)))
+    }
+}
+
+impl Drop for ReplayPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Tees the `inspector` entries into the runtime's capture store (no store: nothing).
 pub(crate) fn tee_streams<'a>(
@@ -95,6 +118,13 @@ impl RecipeRuntime {
             .open_at(id, from)
             .map_err(|_| OpenRefusal::new(500, "unreadable", "the capture could not be opened"))?
             .ok_or_else(|| OpenRefusal::new(404, "not-found", "no such capture"))?;
+        let permit = ReplayPermit::try_acquire(&self.capture_replays).ok_or_else(|| {
+            OpenRefusal::new(
+                503,
+                "busy",
+                format!("at most {MAX_CAPTURE_REPLAYS} capture replays at once"),
+            )
+        })?;
         let mut frames = RecordedFrames::open(cursor.reader).map_err(|_| {
             OpenRefusal::new(
                 422,
@@ -121,6 +151,7 @@ impl RecipeRuntime {
         thread::Builder::new()
             .name("hk-capture-replay".into())
             .spawn(move || {
+                let _permit = permit;
                 let deadline = Instant::now() + SUBSCRIBE_WAIT;
                 while pace.open_consumers() == 0 {
                     if stop.load(Ordering::SeqCst) || Instant::now() > deadline {
