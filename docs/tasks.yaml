@@ -2861,8 +2861,8 @@ tasks:
   - id: T-178
     milestone: MUI
     title: "IQ capture buffer as a PRE-ALLOCATED on-disk ring that survives restarts: allocate the full effective quota up front (fixed ring file or fixed set of fixed-size chunk files), overwrite oldest in place (no grow-and-delete), crash recovery re-reads ring + index on start; retention configurable via --iq-retention / --iq-buffer-max"
-    status: review
-    commit: 34b8229
+    status: done
+    commit: df57f38
     deps: [T-157]
     parallel_group: MUI-API
     use_cases: []
@@ -3043,7 +3043,8 @@ tasks:
   - id: T-190
     milestone: MUI
     title: "Analyze / synthesize decoder stub endpoint: POST /api/analyze on a selection, emitter or ad-hoc band (optional history window) validates the target and returns 501 not_implemented until MAUTO"
-    status: in-progress
+    status: done
+    commit: 5437f01
     priority: normal
     deps: []
     parallel_group: API
@@ -3058,7 +3059,8 @@ tasks:
   - id: T-191
     milestone: MUI
     title: "User-adjusted band edges on an inventory entry: set/clear f_lo/f_hi override with provenance and audit, measured band preserved"
-    status: todo
+    status: done
+    commit: 7369cdd
     priority: normal
     deps: []
     parallel_group: API
@@ -3089,7 +3091,7 @@ tasks:
   - id: T-193
     milestone: MUI
     title: "MUI Confirmed-signal yellow boxes spanning spectrum trace + waterfall with draggable left/right edges (sets user band via T-191)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-191, T-194]
     parallel_group: MUI-X2
@@ -3349,7 +3351,7 @@ tasks:
   - id: T-210
     milestone: M1-fix
     title: "RDS block error correction (<=2-bit burst, redsea-style) for weak live reception, with corrected-group provenance and PI/PS consensus against false corrections"
-    status: todo
+    status: in-progress
     decision: "user 2026-09-15: allow <=2-bit correction with safeguards (only while block-synced; corrected groups flagged and never confirm-by-decode evidence; PI/PS/RT committed by multi-group consensus)"
     priority: high
     deps: [T-185]
@@ -3452,6 +3454,21 @@ tasks:
     needs: hardware
     model: opus
     effort: high
+    core_interface: false
+  - id: T-217
+    milestone: MUI
+    title: "T-178 follow-ups: HTTP-level test that serve answers during ring allocation; count samples lost while a large ring allocates; surface the buffer-off library default; measure ring fsync cost on the Jetson"
+    status: todo
+    priority: low
+    deps: [T-178]
+    parallel_group: STORE
+    use_cases: []
+    found_by: "T-178 fix round report (2026-09-15)"
+    acceptance: "hk-cli HTTP test: /api/status and the capture routes answer within 1 s while a sparse large ring allocates; allocation-window loss counted in status; IqBufferConfig default documented in docs/api.md; Jetson fsync measurement deferred until hardware"
+    area: crates/hk-cli tests, crates/hk-store iqbuffer, docs/api.md
+    needs: none
+    model: sonnet
+    effort: low
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

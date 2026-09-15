@@ -2292,3 +2292,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Real bug found and fixed:** selection boxes had pointer-events none, so right-click could never hit them.
   - **Checks green:** typecheck, 21/21 UI test files, build (31.2 KB gz JS), lint. Smoke 20/20 at 1440/400; Shift-drag two bands then right-click Delete removes from waterfall and sidebar.
   - **T-195 still waits on T-159,** a MUI API gap: latest decode fields.
+- **B0.483 Batched merge: T-190 (analyze stub), T-191 (user band override, migration 0006) and T-178 (IQ ring fix round).**
+  - **Conflicts:** T-178's merge conflicted in docs/api.md and the ADR index; both resolved, and the analyze future contract now points to ADR-0015.
+  - **T-178 results:**
+    - fsync failure rolls back to the last seal (sync_errors / poisoned_samples);
+    - background allocation with `allocation: allocating`; capture is disabled until the ring is open, and clips return 503;
+    - 20 Msps for 30 s: 0 drops;
+    - explicit test quotas;
+    - a newer on-disk version reports `incompatible` with files untouched;
+    - `locked` status.
+  - **Staging note:** a 1 h ring allocates in the background; no IQ is buffered until allocation completes.
+  - **Filed T-217** (T-178 follow-ups).
+  - **Launched:** T-193 (yellow confirmed boxes, UI) and T-210 (RDS correction, Opus). T-211 told to use migration 0007. Full check running.
