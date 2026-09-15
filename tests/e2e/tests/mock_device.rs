@@ -396,10 +396,13 @@ fn t057_scheduled_replay_keeps_every_frequency_truthful() {
         .into_iter()
         .filter(|d| (d.f_center_hz < lo || d.f_center_hz > hi) && d.obw_hz > 20e3)
         .filter(|d| {
-            let ql = repo
-                .provenance(d.provenance_ref)
-                .unwrap()
-                .quantisation_limited;
+            // Only a marginal box from a quantisation-limited window is skipped: a confident
+            // detection there still counts as a phantom.
+            let ql = d.flags.marginal
+                && repo
+                    .provenance(d.provenance_ref)
+                    .unwrap()
+                    .quantisation_limited;
             if ql {
                 skipped.push(d.id);
             }
@@ -410,7 +413,13 @@ fn t057_scheduled_replay_keeps_every_frequency_truthful() {
     // The skip is only sound while the product does not learn from those boxes: none of them backs
     // an inventory emitter (confirmed or candidate), through a track or directly.
     let mut learned = Vec::new();
+    // And, whatever the link path, no inventory emitter (confirmed or candidate) is centred
+    // outside the recording.
+    let mut misplaced = Vec::new();
     for e in inventory(&repo, InventoryQuery::default()) {
+        if e.emitter.f_center_hz < lo || e.emitter.f_center_hz > hi {
+            misplaced.push((e.emitter.f_center_hz, e.emitter.bandwidth_hz));
+        }
         for link in repo.emitter_links(e.emitter.id).unwrap() {
             let dets = match link.target {
                 LinkTarget::Track(t) => repo.track_detections(t).unwrap(),
@@ -449,9 +458,62 @@ fn t057_scheduled_replay_keeps_every_frequency_truthful() {
             }
         }
     }
+    // Band rows only see windows wholly outside the recording; the quantisation-limited windows
+    // (99.33 and 99.87 MHz at 3 Msps) overlap it, so their rows are invisible above. Learned
+    // channels are keyed by their own extent: none may be centred outside the recording, in the
+    // stored channel plan or in any channel occupancy row.
+    let plan = store.load_plan().unwrap();
+    let mut outside_channels = Vec::new();
+    let mut channel_rows = 0usize;
+    if let Some(plan) = &plan {
+        for ch in &plan.channels {
+            let f = ch.key.freq(plan.f_cell_hz);
+            let c = 0.5 * (f.lo_hz + f.hi_hz);
+            if c < lo || c > hi {
+                outside_channels.push(("plan", f.lo_hz, f.hi_hz));
+            }
+        }
+    }
+    for interval in [SeriesInterval::Min15, SeriesInterval::Hour1] {
+        let found = store
+            .query(&OccupancyQuery {
+                freq: FreqRange::new(0.0, 7.0e9),
+                span: ever(),
+                interval,
+                subject: Some(SubjectKind::Channel),
+                f_cell_hz: 1_000.0,
+                limit: 100_000,
+            })
+            .unwrap();
+        for r in found.rows {
+            channel_rows += 1;
+            let OccupancySubject::Channel { key } = r.subject else {
+                continue;
+            };
+            let plan = plan
+                .as_ref()
+                .expect("channel occupancy rows without a stored channel plan");
+            let f = key.freq(plan.f_cell_hz);
+            let c = 0.5 * (f.lo_hz + f.hi_hz);
+            if c < lo || c > hi {
+                outside_channels.push(("row", f.lo_hz, f.hi_hz));
+            }
+        }
+    }
     eprintln!(
-        "{} out-of-band boxes from quantisation-limited windows; {rows} occupancy band rows",
-        skipped.len()
+        "{} out-of-band boxes from marginal quantisation-limited windows; {rows} occupancy band \
+         rows; {} learned channels; {channel_rows} channel rows; {} inventory emitters out of band",
+        skipped.len(),
+        plan.as_ref().map_or(0, |p| p.channels.len()),
+        misplaced.len()
+    );
+    assert!(
+        outside_channels.is_empty(),
+        "learned channels centred outside the recorded band {lo}..{hi} Hz: {outside_channels:?}"
+    );
+    assert!(
+        misplaced.is_empty(),
+        "inventory emitters centred outside the recorded band {lo}..{hi} Hz: {misplaced:?}"
     );
     assert!(
         learned.is_empty(),

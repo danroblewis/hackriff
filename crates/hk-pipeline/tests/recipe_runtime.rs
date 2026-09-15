@@ -465,8 +465,13 @@ fn a_recipe_runs_on_a_mock_channel_and_frame_records_arrive_over_tcp_and_ws() {
             w[0]["metadata"]["sample_index"].as_u64().unwrap(),
             w[1]["metadata"]["sample_index"].as_u64().unwrap(),
         );
+        // A splice exempts only the exact spacing, not the gap's size: the framer emits one frame
+        // every 50 000 ring samples of channel output, so even a DDC restart at the splice (its
+        // settle is far shorter than a frame period) can delay the next frame by less than one
+        // extra period. A gap of two periods or more would be a lost frame, which the consecutive
+        // frame numbers above cannot see if the counter kept running.
         assert!(
-            (49_990..=50_010).contains(&(b - a)) || a / LOOP != b / LOOP,
+            (49_990..=50_010).contains(&(b - a)) || (a / LOOP != b / LOOP && b - a < 2 * 50_000),
             "frame spacing {} between {a} and {b}, away from a loop splice: {frames:?}",
             b - a
         );
