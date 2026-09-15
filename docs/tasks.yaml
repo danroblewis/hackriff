@@ -2076,7 +2076,7 @@ tasks:
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
     found_by: "T-128 report 2026-09-15"
-    acceptance: "AlarmService::observe_fold wired from ingest_interval FoldOutcomes with device steps carrying gain deltas (from history provenance); /api/anomalies receives live alarms; report-only ChangeKind replaced by AlarmKind incl QuieterThanUsual; candidates published (read-only) when bandit off; bandit_suspect_candidate_gets_one_verification_then_is_banned discriminating (fails when clip=false, uses T-130 device-level overdrive); compare_report direct test; report_scene.rs updated; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarm raised for the injected emitter; http.rs module-doc route rows""
+    acceptance: "AlarmService::observe_fold wired from ingest_interval FoldOutcomes with device steps carrying gain deltas (from history provenance); /api/anomalies receives live alarms; report-only ChangeKind replaced by AlarmKind incl QuieterThanUsual; candidates published (read-only) when bandit off; bandit_suspect_candidate_gets_one_verification_then_is_banned discriminating (fails when clip=false, uses T-130 device-level overdrive); compare_report direct test; report_scene.rs updated; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarm raised for the injected emitter; http.rs module-doc route rows"
     area: "crates/hk-pipeline (attention, alarms, candidates, reports wiring), crates/hk-context/src/report, crates/hk-api/src/http.rs module docs, tests/e2e"
     needs: none
     model: opus

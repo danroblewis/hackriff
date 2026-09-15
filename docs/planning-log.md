@@ -1168,3 +1168,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Gap confirmed for T-131:** nothing in hk-pipeline calls `AlarmService::observe`, so `/api/anomalies` is served but receives no live observations.
 
   Worktrees cleaned. Full check running; **T-131 (M2 integration part 2) launched.**
+- **B0.329 T-131 split to bound agent budgets.** T-131 (part 2a): pipeline alarm wiring, AlarmKind unification, candidates when bandit off, discriminating suspect-ban test, reports and full-path e2e. **T-132** (part 2b): history source+site tiles/filters and baseline internals (memory bound, latch, gain-state key, bimodality, load_site lock, weak-interferer test). Files are disjoint. Both launched; T-124 depends on both. (Commit 89efae6 briefly left tasks.yaml with a doubled quote; fixed in the next commit.)
