@@ -190,7 +190,8 @@ fn signal_062_fm_rds_auto_wfm_pilot_pi_label() {
     assert_eq!(
         entry.family.as_deref(),
         Some("wfm"),
-        "[{SIGNAL_062}] family from the auto classifier"
+        "[{SIGNAL_062}] family from the auto classifier (classifications {:?})",
+        entry.emitter.classifications
     );
     // The RDS decoder's label (other labels, such as the family map's explanations, may sit on the
     // same emitter in any order once its track and decoder entries are one, T-082).

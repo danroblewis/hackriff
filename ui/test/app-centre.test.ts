@@ -10,7 +10,7 @@ import type { Row } from "../src/inventory";
 import { tickModel } from "../src/app/centre/axis-view";
 import { mounts } from "../src/app/centre";
 import {
-  DC_NOTCH_HALF_HZ, LABEL_MIN_PX, assumedDc, bracketLayout, clickTarget, dcFromObservations, dcQuery, dragSelection, draftBox,
+  DC_NOTCH_HALF_HZ, LABEL_MIN_PX, assumedDc, bracketLayout, clickTarget, dcFromHeader, dcFromObservations, dcQuery, dragSelection, draftBox,
   hoverText, isDrag, levelU, placeExtent, regionName, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft, type RowClock,
 } from "../src/app/centre/overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor, type HistoryGrid } from "../src/app/centre/review-render";
@@ -80,6 +80,13 @@ test("DC mask: observation-log notch for this tune, else the documented ±15 kHz
   assert.equal(dcFromObservations({ error: "unavailable" }, G), null);
   const q = dcQuery(G, 1000);
   assert.match(q, /^\/api\/observations\?f_lo=\d+&f_hi=\d+&t0=880&t1=1001&tier=interactive&limit=1$/);
+});
+
+test("DC mask: the spectrum stream header's own dc_excluded_hz is preferred over the fallbacks (T-167)", () => {
+  assert.deepEqual(dcFromHeader({ dc_excluded_hz: 15_000 }, G), { loHz: G.centerHz - 15_000, hiHz: G.centerHz + 15_000, assumed: false });
+  assert.equal(dcFromHeader({ dc_excluded_hz: 0 }, G), null, "a non-positive width is not a mask");
+  assert.equal(dcFromHeader({ dc_excluded_hz: null }, G), null, "absent on older servers or unmasked streams");
+  assert.equal(dcFromHeader({}, G), null);
 });
 
 test("hover readout: bin centre, level, not observed, row time", () => {

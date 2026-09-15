@@ -2084,3 +2084,106 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Follow-ups: pool rebuild cost on Jetson, MAX_CLEAN eviction counter, e2e assertion in `occupancy_sparse_visits`, f_cell source, ADR note.
   - **T-167 committed (eb63567):** spectrum header carries `dc_excluded_hz`, taken from `DC_NOTCH_HALF_HZ` (DcRule tolerance); docs, stream-contract and api_contract updated; UI prefers the header value.
   - **Merge queue once main is green:** T-174, T-167.
+- **B0.450 Full check after the hk-sim fix: hk-sim now passes.**
+  - **New failure:** `hk-store decoded::tests::rolls_segments_and_evicts_oldest_first_within_quota` hit a load flake. Under load it read the last record as 1566 against 1999 after 5.3 s; alone it passes 3/3 in 0.1 s. The code is unchanged since T-092.
+  - **Cost:** nextest fail-fast stopped at 1264/1365; acceptance passed 28/28.
+  - **Fix:** pinned the test to heavy-serial with one retry; T-182 will make it deterministic.
+  - **Next:** full check re-running.
+- **B0.451 T-178 committed (34b8229; coordinator ran final lint and amended the WIP). Opus review launched.**
+  - **Ring:** `ring.ci8` with fixed slots pre-allocated via `F_PREALLOCATE`/`fallocate` (8 GiB in 269 ms); oldest slot overwritten in place.
+  - **Journal:** `ring.journal` CRC-framed records; `ring.lock` ensures one run owns the ring.
+  - **Recovery:** stops at the first torn record and keeps only sealed slots, with CRC checks on the newest slots.
+  - **Quota handling:** a quota change keeps whatever still fits. Low space shrinks the ring or refuses below 2 slots.
+  - **Runs and flags:** segments carry `run`; flags unchanged.
+  - **ADR-0014 (PROVISIONAL).**
+  - **Tests:** hk-store 10, hk-pipeline 5 (restart clip byte-identical), hk-api/hk-cli 25; lint clean.
+  - **Concern for review:** `.config/nextest.toml` now enables nextest EXPERIMENTAL setup scripts to cap the ring at 16 MiB in tests. That conflicts with main's nextest pins and may be fragile.
+- **B0.452 Re-run full check (a253b04): nextest 1365/1365 in 138 s; acceptance 27/28.**
+  - **Failure:** `signal_062_fm_rds_auto_wfm_pilot_pi_label` at `signal_062.rs:190` (WFM family label missing). It passes 2/2 alone, so this is a load flake while other scenes run. Tracked as T-183 (possible real family-assignment race).
+  - **Status:** main treated as green.
+  - **Merged:** T-174 (live-candidate DC twin) and T-167 (`dc_excluded_hz` header). Both worktrees removed.
+  - **Next:** full check.
+- **B0.453 T-180 committed (b5826ad): mock device noise floor at low gain.**
+  - **Model:** `device_noise_codes2(vga)` = 0.25 + 5e-4·10^(VGA/10) code² per component (ADC + VGA input noise). No published HackRF NF exists, so it is calibrated from our captures (l24g20a0, l24g30a1) and is unverified outside VGA 20–30 until HIL.
+  - **Rendering:** noise is added only below the recording gain, with a seeded RNG; passthrough stays bit-exact.
+  - **t057 window:** zero codes 0.848→0.559; quantisation-limited blocks 36/36→0/36. The t057 skip matched 0 boxes and stays as a no-op with its guards.
+  - **Tests:** hk-core mock 22, mock_device 2 (t057 3/3), hk-pipeline 7; `scheduler_history` gap 0.010 dB; lint clean.
+  - **Merge:** after the T-174/T-167 full check.
+- **B0.454 T-181 and T-183 launched (Opus) into the two free Rust build slots.**
+  - **T-181:** sweep dither follow-ups.
+    - Single-hop plans dither every Nth pass, so the live HackRF doesn't retune every step.
+    - Parity-based SweepRecord geometry.
+    - Per-hop dither-disabled warning.
+    - Worst-case coverage points.
+    - ADR-0005 wording.
+  - **T-183:** signal_062 family-label load flake. Reproduce under bounded load, root-cause (product race vs test timing), fix without loosening, then 10× green under load.
+  - **Merge queue after the running full check:** T-180. T-178 waits on its review. T-124 is finishing (lint, squash, acceptance-m2).
+- **B0.455 T-178 review (Opus): FIX-FIRST.**
+  - **Verified:**
+    - Overwrite order: the oldest slot is dropped from the index and the floor moves before overwrite.
+    - Clip reads re-check the floor.
+    - Journal compaction keeps it bounded.
+    - `flock` releases on crash.
+    - `run` is validated and the API contract is updated.
+    - Changed T-157 tests are justified.
+  - **Bug:** a failed ring fsync followed by a later successful sync can seal bytes that never reached disk, and recovery only checks the newest slot. Fix: poison the slot and roll back to `sealed`.
+  - **Risk (affects staging):** ring allocation runs synchronously in `Pipeline::start`, before the API binds. 144 GiB for 1 h is about 5 s with no status, and possibly minutes on filesystems without `fallocate`. Fix: allocate in the background with an allocating status.
+  - **Other risks:**
+    - The writer thread's `F_FULLFSYNC` checkpoint and compaction cost is unmeasured. Measure dropped samples at 20 Msps.
+    - The test quota cap depends on nextest experimental setup scripts. Plain `cargo test` would allocate the production default per test. Fix: explicit small quotas in test constructors.
+  - **Nits:**
+    - A newer ring version gets wiped; disable it instead.
+    - A second instance should show `allocation: locked`.
+  - **Next:** a fix round launches when a Rust slot frees (T-124 is finishing).
+- **B0.456 Full check green after the T-174 + T-167 merges (5051afe).** Lint clean; 1370/1370 tests in 143 s; acceptance 28/28 in 12 s, including signal_062.
+  - **T-180 merged** (b5826ad); its worktree removed.
+  - **Next:** full check.
+- **B0.457 T-124 final round (WIP a2ac3c0, on merge 6f1e68a): run 3 passed all 8; run 4 failed (a) only.**
+  - **Run-3 results, all against a-priori thresholds:**
+    - (a) 7 channels matched, 0 outside the Wilson CI.
+    - (b/g) busier alarm at 2 revisits (limit ≤63).
+    - (c) 0 false alarms over 975 inputs.
+    - (d) coverage 165.84 s: report equals log.
+    - (h) 0 unexplained alarms.
+    - (i) 2 revisits (limit ≤7).
+    - (e) and (j) pass.
+  - **(d) was a test bug, now fixed:** sweep geometries come back separately in `page.geometries`; bounds unchanged.
+  - **Bug 1 (gain step) is gone.** Bug 2 remains and is nondeterministic: 433.375 MHz was learned in run 3, missing from the main scene plan in run 4, yet learned by the restart scene in the same run. Suspected cause: `channels.rs:217-255`.
+  - **Bandit dwells:** 2 vs 13 between runs. A scene-design artefact: dwells admitted only after ~0.67 s of a 1 s window, and `observed()` clamps to the planned end.
+  - **Timing:** scene wall time 42 s / 70 s.
+  - **Next:**
+    - T-184 (Opus high) launched: deterministic learning under DC twin refutation. It is the M2 exit blocker, and T-124 is blocked on it.
+    - T-180 merged; full check running.
+    - T-178 fix round waits for a Rust slot.
+- **B0.458 User field-test feedback (live demo, real 100.8 MHz FM) filed. A and B take priority over new feature work.**
+  - **T-185 (A, Opus high, launched):** RDS reaches block sync on real air but produces no data / CRC-invalid groups, while it passes on synthetic. Fix, and add a real-air RDS acceptance on the `fm_100p8M` capture.
+  - **T-186 (B, Opus high, next free Rust slot):** detection→identification latency for a strong continuous WFM station. Measure the per-stage budget; target is family plus top explanation within a few seconds.
+  - **T-187 (C, Sonnet):** verify candidate discard end to end (removed from list, raw detections kept, re-detection gives a new candidate), using mock `hk serve` rather than the user's demo data.
+  - **Scheduling:** the T-178 fix round and the remaining MUI API gaps queue behind A and B.
+  - **Roadmap:** the strategic auto-decode direction is noted in docs/11 as proposed MAUTO, not scheduled. Ask the user before scheduling, after M2 closes and MUI is usable.
+- **B0.459 Full check green after the T-180 merge (95b567e).** Lint clean; 1371/1371 tests in 135 s; acceptance 28/28.
+  - **T-186 launched** (Opus high, field-test Task B): per-stage detection→identification latency budget on the `fm_100p8M` capture. Target is ≤3 s sample-clock to family + top explanation, set a priori, without weakening trust. It likely overlaps T-183 in the hk-pipeline family/classifier code.
+  - **Queue after this:** T-178 fix round, T-187, the remaining MUI API gaps, T-182.
+- **B0.460 T-183 root cause found (fix pending commit).** The signal_062 family label came from insert order across two pipeline threads, the detection writer and the analog chain.
+  - **Fix:** the family query ranks track-shape rows below demodulator, decoder and classifier rows. An order-independent test covers it.
+  - **Filed from its report:**
+    - T-188: listen-centre flake under load, 2 of 10 burn runs at 101.352 MHz.
+    - T-189: the API classification field should follow the same ranking.
+  - **Agents stopping early:** T-181, T-183 and T-184 each ended their turn "waiting" with no live background run. All three have been nudged to continue.
+- **B0.461 T-183 merged (c5e1b20, merge c828464).** The family query ranks track-shape rows below demodulator, decoder and classifier rows.
+  - **Evidence:** 10/10 burn runs pass, plus an order-independent test.
+  - **Not run:** the family failure itself was never reproduced (0/15 before the fix), and the agent skipped the full acceptance_m0 run; the coordinator full check covers it.
+  - **Worktree** removed. Full check running.
+- **B0.462 T-181 committed (fe2e6a6), merge pending the in-flight full check.** The coordinator accepted the dither change from 75 kHz to 80 kHz.
+  - **Why:** at 75 kHz, cells midway between the two tunings were flagged at both, because the ±15 kHz DC rule is inclusive and 75 kHz left zero margin. ADR-0005 now records this.
+  - **Also in T-181:** single-hop plans dither every 8th pass; records split by pass parity; new `HopDcDitherDisabled` warning.
+- **B0.463 T-185 diagnosis: the RDS recipe is correct on real air.** No product change yet (WIP e8f037f).
+  - **Fixture results:** 45/56 CRC-valid groups, identical to the hk_demod oracle and rds_ref.py; PI 1694 and PS/RT decoded.
+  - **Live failure = weak signal.** The live demo signal is 14 dB RF SNR against 18.2 dB on the fixture, and subcarrier quality halves (0.27 vs 0.58). Block sync locks on chance syndrome matches (26 per 25 s), so the UI shows "sync, all CRC-invalid".
+  - **Re-scoped T-185, finisher launched (Opus):**
+    - real-air acceptance (CRC-valid ≥0.7, PI, PS);
+    - block-sync false-lock hardening;
+    - weak-signal robustness at 14 dB (AWGN added at runtime, target PI+PS in 25 s, zero invalid fields) without changing CRC correction.
+  - **Needs the user:** whether to allow redsea-style ≤2-bit block error correction, which relaxes the crc block's no-correction rule. Not scheduled.
+- **B0.464 Full check green after the T-183 merge (955fd47).** Lint clean; 1372/1372 tests in 137 s; acceptance 28/28.
+  - **T-181 merged** (fe2e6a6, merge f322bfe). Worktree removed. Full check running.

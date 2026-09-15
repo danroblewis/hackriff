@@ -1970,7 +1970,8 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: in-progress
+    status: blocked
+    blocked_on: "T-184 (433.375 MHz learning flips between runs); WIP a2ac3c0 otherwise 8/8 in run 3"
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133, T-146, T-147, T-173, T-176]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2656,7 +2657,7 @@ notes:
   - id: T-167
     milestone: MUI
     title: "MUI API gap 10: DC notch width in the spectrum stream header"
-    status: review
+    status: done
     commit: eb63567
     deps: [T-149]
     parallel_group: MUI-API
@@ -2764,7 +2765,7 @@ notes:
   - id: T-174
     milestone: M2-hardening
     title: "Live candidate path uses the per-tuning DC twin rule (detect.rs:458 still per-detection suspect)"
-    status: review
+    status: done
     commit: 9c58f81
     deps: [T-147]
     parallel_group: M2B
@@ -2824,7 +2825,8 @@ notes:
   - id: T-178
     milestone: MUI
     title: "IQ capture buffer as a PRE-ALLOCATED on-disk ring that survives restarts: allocate the full effective quota up front (fixed ring file or fixed set of fixed-size chunk files), overwrite oldest in place (no grow-and-delete), crash recovery re-reads ring + index on start; retention configurable via --iq-retention / --iq-buffer-max"
-    status: in-progress
+    status: review
+    commit: 34b8229
     deps: [T-157]
     parallel_group: MUI-API
     use_cases: []
@@ -2853,7 +2855,8 @@ notes:
   - id: T-180
     milestone: M2-hardening
     title: "Mock SDR device noise floor at low gain: re-rendered windows served far below the recording gain become quantisation-limited (85% zero codes) and produce whole-window marginal detections; model the receiver's own analog noise floor per gain state so low-gain windows look like a real HackRF"
-    status: in-progress
+    status: done
+    commit: b5826ad
     deps: [T-175]
     parallel_group: M2E
     use_cases: []
@@ -2867,7 +2870,8 @@ notes:
   - id: T-181
     milestone: M2-hardening
     title: "Sweep DC dither follow-ups: single-hop plans on a live radio now retune 75 kHz every step (dither single-hop plans only every Nth pass or disclose), pick SweepRecord geometry by pass parity not tuning match, per-hop DcDitherDisabled warning, off-DC test samples LO +-37.5 kHz (or 80 kHz dither), ADR-0005 wording on half-visit edge cells"
-    status: todo
+    status: done
+    commit: fe2e6a6
     deps: [T-173]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2878,3 +2882,122 @@ notes:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-182
+    milestone: M2-hardening
+    title: "Deterministic decoded-capture roll/evict test: wait for the async recorder flush (or a synchronous flush hook) instead of reading the tail immediately"
+    status: todo
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "full check 2026-09-15: hk-store decoded::tests::rolls_segments_and_evicts_oldest_first_within_quota read last record 1566 vs 1999 under load (5.3 s); passes 3/3 alone in 0.1 s; pinned heavy-serial + retries=1 meanwhile"
+    acceptance: "test waits on an explicit flush/drain condition with a deadline; passes 20/20 under parallel load; nextest pin removed"
+    area: crates/hk-store/src/decoded.rs
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-183
+    milestone: M2-hardening
+    title: "acceptance signal_062 load flake: WFM emitter family label (auto classifier) missing under load; passes alone - check for a real race in when the family is assigned vs pipeline stop"
+    status: done
+    commit: c5e1b20
+    deps: []
+    parallel_group: M2E
+    use_cases: [SIGNAL-062]
+    found_by: "full check 2026-09-15 (a253b04): signal_062_fm_rds_auto_wfm_pilot_pi_label failed at signal_062.rs:190 (entry.family != wfm) under load ~12 with T-124/T-180 scenes running; passed 2/2 alone in 1.24 s; acceptance runs under cargo test with no retries"
+    acceptance: "root cause identified (family assignment ordering/async classifier vs run stop or inventory read); product race fixed or test waits on an explicit completion condition with the same assertion; 10 consecutive acceptance runs under parallel load green"
+    area: crates/hk-pipeline (family/classifier, run stop), tests/e2e/tests/acceptance/signal_062.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-184
+    milestone: M2
+    title: "Nondeterministic channel learning: 433.375 MHz (10% Markov, near hop-1 DC) learned in one M2 scene run, missing in the next (same code); make learning under DC twin refutation deterministic"
+    status: in-progress
+    deps: [T-173, T-174, T-180]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-124 final round 2026-09-15: run 3 all 8 pass (433.375 learned FCO 0.084 vs 0.094), run 4 (a) fails (not in final channel plan; restart scene learned it); suspected channels.rs:217-255 DC-only refutation"
+    acceptance: "root cause file:line; product fix makes learning independent of thread timing; deterministic regression test fails before / passes after; M2 scene 5x (or reduced repro 10x) learns 433.375; DC-spur suppression and occupancy_sparse_visits unchanged green"
+    area: crates/hk-context/src/occupancy/channels.rs, crates/hk-pipeline/src/occupancy.rs
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-185
+    milestone: M1-fix
+    title: "RDS on REAL air fails past block sync: fm_100p8M capture reaches block sync but block/field stages yield no data and rare groups are all CRC-invalid (passes on synthetic T-094); fix and add a real-air RDS acceptance"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: FIELD
+    use_cases: [SIGNAL-062]
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "RDS recipe decodes CRC-valid groups (PI + PS + RadioText, high CRC-valid rate) on the real fixtures/hackrf/2026-09-13 fm_100p8M capture through the mock SDR; root cause identified (57 kHz carrier phase/lock, biphase polarity, differential decode direction, offset words A/B/C/C'/D, CRC-10 syndrome poly 0x5B9, timing); new real-air RDS acceptance test on that capture (blind: no PI/PS lookup; expected values only in assertions, from an independent oracle such as redsea or a manual decode); synthetic T-094 still green"
+    rescope_2026_09_15: "diagnosis (WIP e8f037f): recipe correct on the fixture (45/56 CRC-valid = oracle = rds_ref.py); live failure is weak reception (14 vs 18.2 dB RF SNR). Finish: real-air acceptance (CRC-valid>=0.7, PI, PS) + block-sync false-lock hardening + weak-signal robustness at 14 dB (runtime AWGN) without block error correction (user decision pending)"
+    area: crates/hk-blocks, crates/hk-recipe (RDS recipe), crates/hk-demod, tests/e2e/tests/acceptance
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-186
+    milestone: M2-fix
+    title: "Detection -> identification latency: a strong continuous WFM station takes too long to get family + top explanation"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: FIELD
+    use_cases: [SIGNAL-062]
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "per-stage latency budget measured (first detection -> track confirm -> candidate -> classification/family -> explanation ranking -> UI-visible) on the fm_100p8M capture via mock SDR; root causes (dwell/revisit, classification cadence, refinement iterations, ranking cadence); a strong continuous station classified (family + top explanation) within a few seconds of first detection, asserted in a test with an a-priori bound; report before/after budget"
+    area: crates/hk-pipeline (family/classifier, candidates, refine), crates/hk-context (explanations)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-187
+    milestone: M1-fix
+    title: "Verify candidate discard end-to-end: delete a candidate via UI/API -> leaves list; raw detections/history kept; later re-detection makes a new candidate; fix if not usable"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: FIELD
+    use_cases: []
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "scripted check against hk serve (mock SDR, not the user's demo data) + the new MUI Explore Delete action: candidate removed from /api/inventory candidates; detections/history rows retained; re-detection after delete yields a new candidate id; any gap fixed with a test"
+    area: crates/hk-api (inventory delete), crates/hk-model, ui/src/app/explore
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-188
+    milestone: M2-hardening
+    title: "Listen-centre flake under CPU load: acceptance_m0 listen.rs:224 listen channel at 101.352 MHz, >50 kHz from truth (2/10 burn runs in T-183)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPELINE
+    use_cases: []
+    found_by: "T-183 burn runs with 6 CPU burners (2026-09-15)"
+    acceptance: "root cause identified (listen channel centre chosen before refinement converges / sample-vs-wall timing); listen.rs passes 20/20 under 6 CPU burners without loosening the 50 kHz bound"
+    area: crates/hk-pipeline (listen), tests/e2e/tests/acceptance/listen.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-189
+    milestone: M2-hardening
+    title: "API inventory row classification field (hk-api query.rs:818) still shows latest emitter_classification row; align with T-183 family ranking (track-shape below demod/decoder/classifier)"
+    status: todo
+    priority: low
+    deps: [T-183]
+    parallel_group: API
+    use_cases: []
+    found_by: "T-183 report (2026-09-15)"
+    acceptance: "classification and family never disagree for the same entry; docs/api.md and api_contract tests updated together"
+    area: crates/hk-api/src/query.rs, docs/api.md, crates/hk-cli/tests/api_contract.rs
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false

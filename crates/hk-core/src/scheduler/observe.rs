@@ -128,6 +128,8 @@ pub struct ObservationRecorder {
     /// T-173: the other pass parity's geometry (DC-dithered hops), when it differs.
     alt: Option<SweepGeometry>,
     alt_pending: bool,
+    /// `geometry` is the dithered passes' one (T-181).
+    dithered: bool,
     open: Option<OpenSweep>,
     visits: Vec<HopVisit>,
 }
@@ -154,6 +156,7 @@ impl ObservationRecorder {
             geometry_pending: true,
             alt: None,
             alt_pending: false,
+            dithered: false,
             open: None,
             visits: Vec::with_capacity(SWEEP_VISITS_CAPACITY),
         };
@@ -172,16 +175,22 @@ impl ObservationRecorder {
         &self.geometry
     }
 
-    /// Rebuilds the geometries for a new or updated plan: one for even passes and, when the plan
-    /// DC-dithers its hops (T-173), one for odd passes. Emits nothing; the next hop closes any
-    /// open sweep record and emits its geometry first (each geometry once, until it changes).
+    /// Rebuilds the geometries for a new or updated plan: one for undithered passes and, when the
+    /// plan DC-dithers its hops (T-173), one for dithered passes. Emits nothing; the next hop
+    /// closes any open sweep record and emits its geometry first (each geometry once, until it
+    /// changes).
     pub fn set_plan(&mut self, plan: &CompiledPlan, fixed_tuning: Option<(f64, f64)>) {
-        let build = |pass: u64| {
+        let build = |dithered: bool| {
             let hops = plan
                 .hops
                 .iter()
                 .map(|h| {
-                    let (c, r) = fixed_tuning.unwrap_or((h.center_on_pass(pass), h.rate_hz));
+                    let c = if dithered {
+                        h.center_hz + h.dither_hz
+                    } else {
+                        h.center_hz
+                    };
+                    let (c, r) = fixed_tuning.unwrap_or((c, h.rate_hz));
                     self.rule.window(c, r)
                 })
                 .collect();
@@ -196,7 +205,7 @@ impl ObservationRecorder {
                 ..g
             }
         };
-        let (even, odd) = (build(0), build(1));
+        let (even, odd) = (build(false), build(true));
         // A geometry already known keeps its pending flag (it was, or is yet to be, emitted).
         let pending = |g: &SweepGeometry| {
             if g.id == self.geometry.id {
@@ -218,6 +227,7 @@ impl ObservationRecorder {
         }
         self.geometry = even;
         self.geometry_pending = even_pending;
+        self.dithered = false;
     }
 
     /// A step is starting (call before it runs). A non-sweep step that would carry the open sweep
@@ -292,12 +302,14 @@ impl ObservationRecorder {
                     && (w.sample_rate_hz - o.rate_hz).abs() <= TUNE_TOLERANCE_HZ
             })
         };
-        // T-173: a hop tuned at the other pass parity's centre switches to that geometry.
-        if !fits(&self.geometry)
-            && let Some(alt) = self.alt.as_mut().filter(|a| fits(a))
+        // T-173/T-181: the step's scheduled pass picks the geometry, not its tuning, so a hop that
+        // could not dither (same centre on both) never splits a pass's record.
+        if o.step.dither_pass != self.dithered
+            && let Some(alt) = self.alt.as_mut()
         {
             std::mem::swap(&mut self.geometry, alt);
             std::mem::swap(&mut self.geometry_pending, &mut self.alt_pending);
+            self.dithered = o.step.dither_pass;
         }
         // A hop whose data came from elsewhere than the geometry says: the geometry changed.
         let matches = fits(&self.geometry);

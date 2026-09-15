@@ -3,10 +3,13 @@
 // served; nothing here detects or measures a signal. Pixel↔Hz is axis.ts; clamping and the narrow
 // label rule are presentation.
 //
-// DC notch (API GAP 10): the notch width is not on the spectrum header. The mask uses
-// `GET /api/observations` `records[].window.dc_excluded` for the current tune when the server has an
-// observation log; otherwise it shows the ±15 kHz notch docs/api.md documents ("Observation log":
-// `window.dc_excluded` is the ±15 kHz DC notch), labelled "assumed". Never a measured value.
+// DC notch (API GAP 10, closed by T-167): the spectrum stream header now carries its own
+// `dc_excluded_hz` half-width, preferred whenever present. A server that doesn't send it (an older
+// build, or a stream with no DC mask applied) falls back to `GET /api/observations`
+// `records[].window.dc_excluded` for the current tune when the server has an observation log, and
+// finally to the documented ±15 kHz default, labelled "assumed". Only the fallback default is ever
+// "assumed"; both the header value and the observation-log value are measured/configured, not
+// guessed.
 import * as ax from "../../axis";
 import { nearestEntry } from "../../inspect";
 import type { Row } from "../../inventory";
@@ -75,6 +78,15 @@ export interface DcMask { loHz: number; hiHz: number; assumed: boolean }
 
 /** GAP 10 interim: the documented ±15 kHz notch around the tuned centre. */
 export const assumedDc = (g: ax.Geometry): DcMask => ({ loHz: g.centerHz - DC_NOTCH_HALF_HZ, hiHz: g.centerHz + DC_NOTCH_HALF_HZ, assumed: true });
+
+/** The spectrum stream header's own `dc_excluded_hz` half-width (T-167), centred on the tune; null
+ * when the header carries none (an older server, or a producer applying no DC mask to this
+ * stream), in which case the observation-log query or the assumed default applies instead. */
+export function dcFromHeader(hd: { dc_excluded_hz?: unknown }, g: ax.Geometry): DcMask | null {
+  const half = hd.dc_excluded_hz;
+  if (typeof half !== "number" || !(half > 0)) return null;
+  return { loHz: g.centerHz - half, hiHz: g.centerHz + half, assumed: false };
+}
 
 /** The observation-log query for the current tune's notch, around the first row time `tS`. */
 export function dcQuery(g: ax.Geometry, tS: number): string {
