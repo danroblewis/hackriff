@@ -1391,6 +1391,20 @@ tasks:
     effort: medium
     core_interface: true
     hold: "after T-078 merges; ideally before T-080 so the UI shows single rows (or T-080 proceeds and picks it up later)"
+  - id: T-083
+    milestone: M0b
+    title: Sortable left-sidebar lists (inventory Candidates/Confirmed and Selections; frequency ascending default; clickable headers)
+    status: todo
+    deps: [T-080]
+    parallel_group: N
+    use_cases: [AWARE-042]
+    requested_by: user via supervisor 2026-09-14
+    acceptance: "Signal Inventory Candidates and Confirmed lists and Selections list default-sort by frequency ascending; column headers clickable to re-sort (frequency, and where present SNR / last activity / recurrence), toggling asc/desc with a visible indicator; sort is presentation-only on API-supplied fields (no client-side signal logic); UI tests for default order and toggle; no redesign"
+    area: ui/src (inventory.ts, selection-panel.ts, style.css)
+    needs: none
+    model: sonnet
+    effort: medium
+    hold: "queued after T-053 (HIL run in progress); M1 on hold pending user brief"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
