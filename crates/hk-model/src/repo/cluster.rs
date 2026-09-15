@@ -713,6 +713,7 @@ fn merge_rows(
         identity_moved
     ])?;
     carry_evidence(conn, from, into, t)?;
+    super::user_band::carry_user_band(conn, from, into)?; // T-191: latest set_at wins
     bump_extent(conn, "emitter", freq.width_hz(), 0)?;
     Ok(EmitterMerge {
         from,

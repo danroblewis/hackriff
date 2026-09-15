@@ -78,6 +78,7 @@ mod selections;
 pub mod sites; // T-119
 #[cfg(test)]
 mod tests;
+mod user_band; // T-191
 mod verification;
 
 use std::path::Path;
@@ -106,6 +107,7 @@ pub use selections::{
     SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection, SelectionLink,
     SelectionLinkKind,
 };
+pub use user_band::{USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand};
 pub use verification::{TrustTest, TrustVerdict};
 
 /// Embedded migrations, applied in order.
@@ -115,6 +117,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0003_anomaly_detail.sql"), // T-122 alarm detail + lifecycle
     include_str!("migrations/0004_site_assignment.sql"), // T-136 persisted site assignment
     include_str!("migrations/0005_content_checks_optional.sql"), // T-143 gating opt-in
+    include_str!("migrations/0006_user_band.sql"), // T-191 user band override
 ];
 
 /// Schema version this build creates and understands.

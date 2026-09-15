@@ -327,6 +327,121 @@ fn t078_promote_and_delete_are_authenticated_audited_and_validated() {
         && e["status"] == 404));
 }
 
+/// T-191: set/clear the user band over HTTP, the measured band kept, audited as `inventory_band`,
+/// persisted across a restart, refused on deleted entries.
+#[test]
+fn t191_user_band_is_set_cleared_audited_and_survives_restart() {
+    let dir = TempDir::new("band");
+    let (server, sensor, _) = start(&dir.0, true);
+    let addr = server.local_addr();
+    let band = format!("/api/inventory/{sensor}/band");
+    // Measured: 433.902e6 ..= 433.938e6.
+    let set = call(
+        addr,
+        "PUT",
+        &band,
+        true,
+        Some(r#"{"f_lo": 433.9e6, "f_hi": 433.94e6, "reason": "wider"}"#),
+    );
+    assert_eq!(set.status, 200, "{}", set.body);
+    let row = &set.body["entry"];
+    assert_eq!(row["user_band"]["f_lo"], 433.9e6);
+    assert_eq!(row["user_band"]["reason"], "wider");
+    assert!(
+        row["user_band"]["actor"]
+            .as_str()
+            .unwrap()
+            .starts_with("tok-")
+    );
+    assert_eq!(
+        (row["f_lo_hz"].as_f64(), row["bandwidth_hz"].as_f64()),
+        (Some(433.902e6), Some(36e3)),
+        "measured band unchanged"
+    );
+    let bad = call(
+        addr,
+        "PUT",
+        &band,
+        true,
+        Some(r#"{"f_lo": 1e6, "f_hi": 2e6}"#),
+    );
+    assert_eq!(
+        (bad.status, bad.body["code"].as_str()),
+        (400, Some("invalid"))
+    );
+    let wrong = call(addr, "POST", &band, true, Some("{}"));
+    assert_eq!(wrong.status, 405);
+    let replaced = call(
+        addr,
+        "PUT",
+        &band,
+        true,
+        Some(r#"{"f_lo": 433.91e6, "f_hi": 433.93e6}"#),
+    );
+    assert_eq!(replaced.status, 200, "{}", replaced.body);
+    assert_eq!(replaced.body["user_band"]["reason"], Value::Null);
+    drop(server);
+
+    // Restart over the same database: still there.
+    let repo = Repository::open(dir.0.join("hackriff.db")).unwrap();
+    let state = ApiState {
+        inventory: Some(Arc::new(Mutex::new(repo))),
+        audit: Some(Arc::new(
+            AuditLog::open(&dir.0.join("audit.jsonl")).unwrap(),
+        )),
+        ..ApiState::default()
+    };
+    let server = Server::start(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Token::from_config(TOKEN).unwrap(),
+        ),
+        state,
+    )
+    .unwrap();
+    let addr = server.local_addr();
+    let got = call(addr, "GET", &format!("/api/inventory/{sensor}"), true, None);
+    assert_eq!(got.body["user_band"]["f_hi"], 433.93e6, "{}", got.body);
+    let cleared = call(addr, "DELETE", &band, true, None);
+    assert_eq!(cleared.body["cleared"], true, "{}", cleared.body);
+    assert_eq!(cleared.body["entry"]["user_band"], Value::Null);
+    let del = call(
+        addr,
+        "DELETE",
+        &format!("/api/inventory/{sensor}"),
+        true,
+        None,
+    );
+    assert_eq!(del.status, 200);
+    let gone = call(
+        addr,
+        "PUT",
+        &band,
+        true,
+        Some(r#"{"f_lo": 433.91e6, "f_hi": 433.93e6}"#),
+    );
+    assert_eq!(gone.status, 404);
+
+    let entries = audit_entries(&dir.0.join("audit.jsonl"));
+    let ok: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["result"] == "ok" && e["action"] == "inventory_band")
+        .collect();
+    assert_eq!(ok.len(), 3, "{entries:#?}");
+    assert_eq!(ok[0]["old"]["user_band"], Value::Null);
+    assert_eq!(ok[0]["new"]["user_band"]["f_lo"], 433.9e6);
+    assert_eq!(ok[1]["old"]["user_band"]["f_lo"], 433.9e6);
+    assert_eq!(ok[1]["new"]["user_band"]["f_lo"], 433.91e6);
+    assert_eq!(ok[2]["old"]["user_band"]["f_lo"], 433.91e6);
+    assert_eq!(ok[2]["new"]["user_band"], Value::Null);
+    assert!(ok[0]["token_id"].as_str().unwrap().starts_with("tok-"));
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["action"] == "inventory_band" && e["status"] == 400)
+    );
+}
+
 #[test]
 fn t078_mutating_inventory_calls_need_an_audit_log() {
     let dir = TempDir::new("noaudit");

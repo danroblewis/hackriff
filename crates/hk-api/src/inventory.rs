@@ -10,6 +10,8 @@
 //! | GET | `/api/inventory/<id>` | – | the entry (as in `/api/inventory`, deleted entries included) |
 //! | POST | `/api/inventory/<id>/promote` | `{"reason"?}` | `{"changed", "entry"}`: candidate → confirmed; `changed: false` when already confirmed |
 //! | DELETE | `/api/inventory/<id>` | `{"reason"?}` | `{"deleted": entry}` |
+//! | PUT | `/api/inventory/<id>/band` | `{"f_lo", "f_hi", "reason"?}` | `{"user_band", "entry"}`: T-191 sets the user band override |
+//! | DELETE | `/api/inventory/<id>/band` | `{"reason"?}` | `{"cleared", "entry"}`: T-191 clears it; `cleared: false` when there was none |
 //!
 //! Errors: 404 `not_found` (unknown id, or an entry already deleted), 400 `invalid` (unknown
 //! body field, bad reason), 503 `unavailable` (no inventory or no audit log).
@@ -21,26 +23,34 @@
 //! Mutating calls need `Authorization: Bearer` (enforced by [`crate::http`] for every mutating
 //! `/api/` request) and are audited as `inventory_promote` and `inventory_delete`, with the old
 //! and new state. The lifecycle history records author `user` and the token fingerprint as actor.
+//!
+//! **User band (T-191).** A user-adjusted `f_lo`/`f_hi` stored beside the measured band, which is
+//! never overwritten (blind detection stays the source of truth). Validation is the repository's
+//! ([`hk_model::Repository::set_user_band`]: finite, `0 < f_lo < f_hi`, width ≤
+//! [`hk_model::USER_BAND_MAX_WIDTH_HZ`], within [`hk_model::USER_BAND_MAX_GAP_HZ`] of the measured
+//! band). Both calls are audited as `inventory_band` with the old and new `user_band`.
 
 use std::sync::{MutexGuard, PoisonError};
 
 use hk_model::{
     EmitterId, IdentityAccess, LIFECYCLE_TEXT_MAX, LifecycleAuthor, LifecycleState, RepoError,
-    Repository, Timestamp,
+    Repository, Timestamp, UserBand,
 };
 use serde_json::{Map, Value, json};
 
 use crate::control::{
-    Applied, CtlRequest, CtlResponse, Fail, dispatch, ok, only, refuse_route, text,
+    Applied, CtlRequest, CtlResponse, Fail, dispatch, ok, only, refuse_route, required, text,
 };
 use crate::http::ApiState;
-use crate::query::inventory_entry_json;
+use crate::query::{inventory_entry_json, user_band_json};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Action {
     Get(EmitterId),
     Promote(EmitterId),
     Delete(EmitterId),
+    SetBand(EmitterId),
+    ClearBand(EmitterId),
 }
 
 impl Action {
@@ -49,6 +59,7 @@ impl Action {
             Self::Get(_) => "inventory_get",
             Self::Promote(_) => "inventory_promote",
             Self::Delete(_) => "inventory_delete",
+            Self::SetBand(_) | Self::ClearBand(_) => "inventory_band",
         }
     }
 
@@ -60,19 +71,23 @@ impl Action {
 /// Resolves `(method, path)`: `None` when `path` is not an inventory entry path.
 fn resolve(method: &str, path: &str) -> Option<Result<Action, Option<&'static str>>> {
     let rest = path.strip_prefix("/api/inventory/")?;
-    let (id, promote) = match rest.strip_suffix("/promote") {
-        Some(id) => (id, true),
-        None => (rest, false),
+    let (id, sub) = match (rest.strip_suffix("/promote"), rest.strip_suffix("/band")) {
+        (Some(id), _) => (id, "promote"),
+        (_, Some(id)) => (id, "band"),
+        _ => (rest, ""),
     };
     let Ok(id) = id.parse::<EmitterId>() else {
         return Some(Err(None));
     };
-    Some(match (promote, method) {
-        (true, "POST") => Ok(Action::Promote(id)),
-        (true, _) => Err(Some("POST")),
-        (false, "GET") => Ok(Action::Get(id)),
-        (false, "DELETE") => Ok(Action::Delete(id)),
-        (false, _) => Err(Some("GET, DELETE")),
+    Some(match (sub, method) {
+        ("promote", "POST") => Ok(Action::Promote(id)),
+        ("promote", _) => Err(Some("POST")),
+        ("band", "PUT") => Ok(Action::SetBand(id)),
+        ("band", "DELETE") => Ok(Action::ClearBand(id)),
+        ("band", _) => Err(Some("PUT, DELETE")),
+        (_, "GET") => Ok(Action::Get(id)),
+        (_, "DELETE") => Ok(Action::Delete(id)),
+        (_, _) => Err(Some("GET, DELETE")),
     })
 }
 
@@ -134,15 +149,20 @@ fn read(state: &ApiState, action: Action) -> Result<Value, Fail> {
 }
 
 /// Optional `reason`: a non-empty string of at most [`LIFECYCLE_TEXT_MAX`] bytes.
-fn reason<'a>(body: &'a Map<String, Value>, default: &'a str) -> Result<&'a str, Fail> {
-    only(body, &["reason"])?;
+fn opt_reason(body: &Map<String, Value>) -> Result<Option<&str>, Fail> {
     match text(body, "reason")?.flatten().map(str::trim) {
-        None => Ok(default),
+        None => Ok(None),
         Some(r) if r.is_empty() || r.len() > LIFECYCLE_TEXT_MAX => Err(Fail::invalid(format!(
             "reason must be a non-empty string of at most {LIFECYCLE_TEXT_MAX} bytes"
         ))),
-        Some(r) => Ok(r),
+        Some(r) => Ok(Some(r)),
     }
+}
+
+/// A body of only an optional `reason`, or `default`.
+fn reason<'a>(body: &'a Map<String, Value>, default: &'a str) -> Result<&'a str, Fail> {
+    only(body, &["reason"])?;
+    Ok(opt_reason(body)?.unwrap_or(default))
 }
 
 fn apply(
@@ -154,6 +174,7 @@ fn apply(
     let (id, to, why) = match action {
         Action::Promote(id) => (id, LifecycleState::Confirmed, "promoted by user"),
         Action::Delete(id) => (id, LifecycleState::Deleted, "deleted by user"),
+        Action::SetBand(_) | Action::ClearBand(_) => return apply_band(state, action, actor, body),
         Action::Get(_) => return Err(Fail::new(500, "failed", "not a mutating action")),
     };
     let why = reason(body, why)?;
@@ -188,6 +209,55 @@ fn apply(
     })
 }
 
+/// T-191: sets or clears the user band. Refused like promote on an unknown or deleted entry.
+fn apply_band(
+    state: &ApiState,
+    action: Action,
+    actor: &str,
+    body: &Map<String, Value>,
+) -> Result<Applied, Fail> {
+    let (id, edges) = match action {
+        Action::SetBand(id) => {
+            only(body, &["f_lo", "f_hi", "reason"])?;
+            (id, Some((required(body, "f_lo")?, required(body, "f_hi")?)))
+        }
+        Action::ClearBand(id) => {
+            only(body, &["reason"])?;
+            (id, None)
+        }
+        _ => return Err(Fail::new(500, "failed", "not a band action")),
+    };
+    let why = opt_reason(body)?;
+    let mut repo = store(state)?;
+    let (live, before_row, state_before) = entry(&repo, id)?;
+    if state_before == LifecycleState::Deleted {
+        return Err(repo_fail(RepoError::NotFound {
+            kind: "emitter",
+            id: id.to_string(),
+        }));
+    }
+    let withheld = before_row["withheld"] == Value::Bool(true);
+    let audit = |b: Option<&UserBand>| json!({ "id": live.to_string(), "user_band": b.map(|b| user_band_json(b, withheld)) });
+    let (old, new, cleared) = match edges {
+        Some((f_lo, f_hi)) => {
+            let (old, new) = repo
+                .set_user_band(live, f_lo, f_hi, actor, why, Timestamp::now())
+                .map_err(repo_fail)?;
+            (audit(old.as_ref()), audit(Some(&new)), false)
+        }
+        None => {
+            let old = repo.clear_user_band(live).map_err(repo_fail)?;
+            (audit(old.as_ref()), audit(None), old.is_some())
+        }
+    };
+    let (_, row, _) = entry(&repo, live)?;
+    let body = match edges {
+        Some(_) => json!({ "user_band": row["user_band"], "entry": row }),
+        None => json!({ "cleared": cleared, "entry": row }),
+    };
+    Ok(ok(body, old, new))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,13 +282,26 @@ mod tests {
             resolve("PUT", &format!("/api/inventory/{id}")),
             Some(Err(Some("GET, DELETE")))
         );
+        assert_eq!(
+            resolve("PUT", &format!("/api/inventory/{id}/band")),
+            Some(Ok(Action::SetBand(id)))
+        );
+        assert_eq!(
+            resolve("DELETE", &format!("/api/inventory/{id}/band")),
+            Some(Ok(Action::ClearBand(id)))
+        );
+        assert_eq!(
+            resolve("POST", &format!("/api/inventory/{id}/band")),
+            Some(Err(Some("PUT, DELETE")))
+        );
+        assert_eq!(resolve("PUT", "/api/inventory/nope/band"), Some(Err(None)));
         assert_eq!(resolve("DELETE", "/api/inventory/nope"), Some(Err(None)));
         assert_eq!(resolve("GET", "/api/inventory"), None);
         let listed: Vec<_> = ROUTES
             .iter()
             .filter(|(_, p)| p.starts_with("/api/inventory/"))
             .collect();
-        assert_eq!(listed.len(), 3);
+        assert_eq!(listed.len(), 5);
         for (method, path) in listed {
             let concrete = path.replace("{id}", &EmitterId::new().to_string());
             assert!(
