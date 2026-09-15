@@ -64,7 +64,7 @@ All contract time comes from the **device/sample clock** (the `Timestamp` carrie
 ### 1.3 Sweep records
 
 Discovery hops run at ~20 steps/s (`sweep_step_ns` 50 ms), so per-hop rows would be ~1.7 M/day. Instead:
-- **`SweepGeometry`** (id = hash of the canonical hop windows, `plan_version`, `hops: Vec<ObservedWindow>`) is written once per geometry change.
+- **`SweepGeometry`** (id = hash of the canonical hop windows, `plan_version`, `hops: Vec<ObservedWindow>`) is written once per geometry change. A DC-dithered plan (T-173, ADR-0005) has two, one per pass parity. Each is written once, before the first record that uses it, and each pass's record references its parity's geometry. `HopVisit::hop` stays the plan's hop index.
 - **`SweepRecord`** covers at most one pass or 60 s, whichever ends first. It holds `geometry`, `span`, and `visits: Vec<HopVisit { hop, start_ms, observed_ms }>` in time order, plus `preempted_hops`, `dropped_samples` and `overload_hops`.
 
 At 400 hops per pass that is ~12 B per visit before compression, about 7 MB/day worst case.

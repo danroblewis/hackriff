@@ -1413,7 +1413,10 @@ impl<C: Clock> Scheduler<C> {
             scheduled: None,
         });
         let index = self.cursor.hop;
-        let t = Template::from_hop(index, &self.plan.hops[index]);
+        let hop = &self.plan.hops[index];
+        let mut t = Template::from_hop(index, hop);
+        // T-173: odd passes tune the hop's DC-dithered centre (same slice, path and gains).
+        t.center_hz = hop.center_on_pass(self.cursor.passes);
         self.cursor.hop += 1;
         if self.cursor.hop == self.plan.hops.len() {
             self.cursor.hop = 0;

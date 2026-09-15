@@ -104,16 +104,30 @@ fn scheduler_observe_records_one_sweep_record_per_pass_in_schedule_order() {
     let ObservationRecord::Geometry(g) = &out[0] else {
         panic!("geometry first: {:?}", out[0]);
     };
+    // T-173: odd passes tune the DC-dithered centres, recorded against their own geometry. Each
+    // geometry is written once, before the first record that uses it.
+    let geometries: Vec<_> = out
+        .iter()
+        .filter_map(|r| match r {
+            ObservationRecord::Geometry(g) => Some(g),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        out.iter()
-            .filter(|r| matches!(r, ObservationRecord::Geometry(_)))
-            .count(),
-        1,
-        "geometry written once"
+        geometries.len(),
+        2,
+        "each pass parity's geometry written once"
     );
-    for (hop, w) in s.plan().hops.iter().zip(&g.hops) {
-        assert_eq!(*w, RULE.window(hop.center_hz, hop.rate_hz));
+    for (pass, geometry) in geometries.iter().enumerate() {
+        assert_eq!(geometry.hops.len(), n);
+        for (hop, w) in s.plan().hops.iter().zip(&geometry.hops) {
+            assert_eq!(
+                *w,
+                RULE.window(hop.center_on_pass(pass as u64), hop.rate_hz)
+            );
+        }
     }
+    assert_ne!(geometries[0].id, geometries[1].id);
     let sweeps: Vec<_> = out
         .iter()
         .filter_map(|r| match r {
@@ -123,8 +137,9 @@ fn scheduler_observe_records_one_sweep_record_per_pass_in_schedule_order() {
         .collect();
     assert_eq!(sweeps.len(), 3, "one record per pass");
     let mut i = 0;
-    for sw in &sweeps {
-        assert_eq!(sw.geometry, g.id);
+    for (pass, sw) in sweeps.iter().enumerate() {
+        assert_eq!(sw.geometry, geometries[pass % 2].id);
+        assert_eq!(g.id, geometries[0].id);
         assert_eq!(sw.visits.len(), n);
         assert_eq!(sw.span.start, steps[i].t_start);
         for (k, v) in sw.visits.iter().enumerate() {
