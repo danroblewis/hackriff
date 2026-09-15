@@ -586,3 +586,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - **Tutorials:** T-094 RDS reference, then T-095 POCSAG, T-096 ACARS, T-097 ADS-B.
   - **Blocker:** T-097's live HIL needs a **1090 MHz antenna** (user); the recorded/mock path is unblocked.
   - **Now:** T-085 launched; the 4–6 agent fan-out follows its reviewed merge. T-083 already merged; T-084 (offline HIL fixes) continues in parallel.
+- **B0.214 T-098 launched** (Sonnet) in parallel with T-085: source the POCSAG/ACARS/ADS-B tutorial fixtures (public SigMF or decoder test vectors, oracle truth lists, synthetic fallback). Tutorials T-095/T-096/T-097 now depend on it. Running: T-085 (M1-DESIGN), T-084 (offline HIL fixes), T-098.

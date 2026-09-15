@@ -1559,7 +1559,7 @@ tasks:
     milestone: M1
     title: "M1 Tutorial 2: POCSAG recipe with follow_hops + blind acceptance"
     status: todo
-    deps: [T-094, T-093, T-087]
+    deps: [T-098, T-094, T-093, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
     acceptance: "POCSAG recipe: 2-FSK 512/1200/2400 -> sync 0x7CD215D8 -> BCH(31,21)+parity -> fields (RIC, function, numeric/alphanumeric); follow_hops across a multi-channel pager net; blind acceptance via mock SDR on a public/user POCSAG SigMF fixture (licence not a gate); oracle where available (multimon-ng)"
@@ -1571,7 +1571,7 @@ tasks:
     milestone: M1
     title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
     status: todo
-    deps: [T-094, T-086, T-087]
+    deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
     acceptance: "ACARS recipe: AM -> MSK 2400 Bd -> SYN/STX framing -> CRC-16 -> fields (registration, label, block id, text); blind acceptance via mock SDR on an ACARS SigMF fixture; oracle where available (acarsdec)"
@@ -1583,7 +1583,7 @@ tasks:
     milestone: M1
     title: "M1 Tutorial 4: ADS-B recipe + blind acceptance vs readsb (live HIL deferred: 1090 MHz antenna)"
     status: todo
-    deps: [T-094, T-086, T-087]
+    deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-001]
     acceptance: "ADS-B recipe: PPM 1 Mbit/s -> preamble -> 56/112-bit frames -> CRC-24 -> fields (ICAO, position, velocity); blind acceptance via mock SDR on a recorded/synthetic 1090 MHz fixture; fields match readsb oracle; live HIL part deferred until the user has a 1090 MHz antenna"
@@ -1592,6 +1592,19 @@ tasks:
     model: sonnet
     effort: medium
     blocked_part: "live HIL on 1090 MHz needs an antenna (user blocker); recorded/mock path is not blocked"
+  - id: T-098
+    milestone: M1
+    title: "M1 tutorial fixtures: POCSAG, ACARS, ADS-B recorded IQ (SigMF) with oracle truth lists"
+    status: in-progress
+    deps: []
+    parallel_group: M1F
+    use_cases: [SIGNAL-001, SIGNAL-062]
+    acceptance: "small SigMF fixtures for POCSAG (2-FSK 512/1200/2400, ideally multi-channel), ACARS (AM+MSK 2400 Bd) and ADS-B (PPM 1 Mbit/s) from public sample sets or decoder test vectors; hidden truth lists from oracles (multimon-ng, acarsdec, readsb/dump1090) or published metadata; synthetic scene fallback where no recording exists; fixture manifest updated (source, licence recorded but not a gate, centre, rate, datatype, oracle, message count); py tests load each fixture and truth list"
+    area: fixtures/, py/fixtures, py/hkpy/synth, py/tests
+    needs: none
+    model: sonnet
+    effort: medium
+    note: "independent of T-085; unblocks tutorials T-095/T-096/T-097"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
