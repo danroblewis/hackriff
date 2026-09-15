@@ -1392,3 +1392,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Verified:** the tracker uses each row's n_avg; no FCO inflation (n_c ≳ 100, SD ~0.4 dB); spans don't overlap; spectrum/detect streams unchanged; fixed-tune floor math unchanged.
   - **Bandit dwells missing in T-124 diagnostics:** a scene artifact (0.13 s windows vs `min_dwell_s` 0.5 s; `core.rs:926`), not a scheduler bug. T-124 must use windows ≥ the dwell minimum.
   - **Next:** fix round launched as a fresh Opus agent (the original was at 288k), including merging main (T-137/T-138) into T-139.
+- **B0.365 Full check green after the T-138 merge (672e606).**
+  - Lint clean, 1381/1381 tests, acceptance 32/32 (66 s).
+  - Disk 8.6 GB free; launches paused below 20 GB (T-140 waiting).
+  - T-139 fix round and main merge in progress.
