@@ -207,7 +207,6 @@ fn observed_s(records: &[ObservationRecord], tier: Tier) -> f64 {
 }
 
 #[test]
-#[ignore = "T-128 follow-up: with real C12 candidates (T-128) suspect flags reach the bandit; on this unclipped replay every detection is flagged `clipped` (all 153 in a diagnostic run), so each candidate is verified then banned and no bandit outcome is recorded. Fix the replay clipped/overload flagging, then re-enable."]
 fn bandit_on_attaches_dwells_to_the_bursty_emitter_keeps_the_floor_and_logs_reasons() {
     let dir = TempDir::new("on");
     let r = run(&dir, true);
