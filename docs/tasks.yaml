@@ -2788,7 +2788,7 @@ notes:
   - id: T-176
     milestone: M2
     title: "False level-above-baseline alarm after a gain step: empty occupied level pool under the new gain key falls back to the idle pool in evaluate"
-    status: todo
+    status: in-progress
     deps: [T-146]
     parallel_group: M2A
     use_cases: [AWARE-042, AWARE-044]

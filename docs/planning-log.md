@@ -1856,3 +1856,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **`occupancy_sparse_visits` unchanged:** 433.400 at 0.586 and 433.375 at 0.084, both inside their CIs.
   - **Tests:** hk-context 83, hk-pipeline 5, hk-detect 6. Lint clean.
   - **Merge:** after the T-156 full check.
+- **B0.419 T-176 launched (Opus): false level alarm after a gain step.**
+  - **Task:** confirm the suspected root cause, that an empty occupied pool under a new gain key falls back to the idle pool. The fix treats that key as immature and never substitutes the other level class. It also checks the mirror case on the quieter-than-usual path.
+  - **Held:** T-173 (hop placement) waits for T-175 to finish, since both may touch the hk-core scheduler.
+  - **Merge queue:** T-172 then T-157 (after its review), once the T-156 full check finishes. T-172's timing test gets pinned to heavy-serial at merge.
