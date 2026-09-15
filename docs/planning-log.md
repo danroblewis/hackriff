@@ -2067,3 +2067,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Refuted flags don't count toward bandit bans.
   - **Tests (unit only):** hk-pipeline 21, hk-context 17; lint clean.
   - **Review focus:** hot-path cost under detection floods, confirmation lag, `MemberRefuted` races/double-decrement/ban reversal, whether an e2e mock-SDR test is needed.
+- **B0.448 MAIN RED after the T-173 merge (a572e58).**
+  - **Failure:** `hk-sim::sim round_robin_revisit_matches_its_schedule` fails. The hk-sim crate was outside T-173's targeted filters and its reviewer's scope.
+  - **Unaffected:** lint clean, acceptance 28/28; nextest stopped at 1124/1365 (fail-fast).
+  - **Next:** investigating now. Fix forward if the dither legitimately changed round-robin revisit geometry, else revert T-173. No merges until main is green.
