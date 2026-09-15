@@ -928,7 +928,7 @@ tasks:
     milestone: M0b
     title: Wire compute providers into the pipeline (ComputeOptions in pipeline settings; STFT/PFB via hk_dsp::compute)
     status: done
-    commit: "e2ca295 (merged; full check running)"
+    commit: "e2ca295 (merged 7092600; verified: lint, nextest 934 passed / 5 skipped, just test 224.9 s, acceptance green)"
     result: "PipelineSettings.compute from extra.pipeline.compute; --compute auto|cpu|cpu-mt|accelerate|gpu on hk replay/run/serve and hackriffd; HK_COMPUTE* overrides. One Compute per run shared across segments. /api/status compute object (options, per-reader requested/chosen provider + fallback reason, availability, provider_changes) documented in docs/api.md and asserted in api_contract; ADR-0007 hookup note updated. detect/history/spectrum STFTs via compute.stft (new hk-pipeline/src/compute.rs); no PFB wired (pipeline uses DDCs, no channelizer). GPU latency: readers flush at stream end/segment detach and when a 50 ms read is empty with rows in flight; spectrum flushes under the old plan before display/rate rebuild; downstream uses each frame's own sample index/time. Default auto -> cpu, cpu vs auto replays store identical detections/frames; re-plumb keeps providers (0 changes). GPU features (gpu-wgpu,accelerate): auto picks GPU for all readers; SPACE-050 (worst floor 0.10 dB), SIGNAL-062, SIGNAL-062 Listen pass via mock SDR. Release RTF (load 22-25): l32g30a1 cpu 0.79/1.01/1.06 vs gpu 0.92/1.02/0.97 (560 detections both); l24g20a0 cpu 0.28-0.33 vs gpu 0.32-0.33 (430 both) - no whole-pipeline gain: 0.6 s fixtures too short for STFT gains and l24 bound by WFM chain (T-081). Live HackRF RTF not measured."
     followups:
       - "measure GPU vs CPU on a long capture or live HackRF where STFT dominates (after T-081 removes the WFM chain bottleneck)"
@@ -1374,7 +1374,7 @@ tasks:
     milestone: M0b
     title: One inventory entry per physical emitter (merge track-based and decoder-based entries)
     status: done
-    commit: "56a6d09 (merge after the T-056 verification run)"
+    commit: "56a6d09 (merged; full check running)"
     result: "cause: identity-carrying decoder sightings (RDS PI, FSK framer signature) created a new entry when no entry held that identity, never checking the same-emission track entry. Repository::same_emission: two live non-deleted entries are one emitter when detected/refined centres are within max(10 ppm*f, 0.25*BW, 500 Hz) and observations overlap in time; hop sets only link to hop sets; two identities never link; two track entries also need matching fingerprints (co-channel sensors stay apart); runs after every sighting/chain write within a run; never links ADS-B-style channel-sharing identities. Merge: survivor = confirmed, else first seen, else larger count; carries links, recurrence, tags, identity, refined tuning, classification history, decoder/classifier/user status (overlapping time not double-counted); confirmed beats candidate, survivor history gains 'merged from emitter'; deleted never merged; annotations include merged entries (RDS label kept). Tests: hk-model 5 new (97 pass); inventory_lifecycle.rs e2e 11/11 (FM once confirmed with track+RDS, FSK once, stations 300 kHz apart stay two, re-detection after deleting merged entry -> one new candidate); just test-one inventory 14/14; api_contract 10/10. signal_062 test picks the PI-carrying label; docs/07 2.11 linking and merge semantics added; /api/inventory JSON unchanged."
     deps: [T-078]
     parallel_group: W
