@@ -6,13 +6,14 @@
 //! helpers (`*_small`) work on generators of degree ≤ 32 held in a `u64` with the `x^w` term.
 
 /// A polynomial over GF(2).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Poly {
     w: Vec<u64>,
 }
 
 impl Poly {
     /// From a `u64` (bit `i` = coefficient of `xⁱ`).
+    #[cfg(test)]
     pub fn from_u64(v: u64) -> Self {
         let mut p = Self { w: vec![v] };
         p.trim();
@@ -101,7 +102,42 @@ impl Poly {
         (r, ops)
     }
 
+    /// Remainder modulo a generator of degree 1–62 held in a `u64` (the `x^w` bit set), bit by
+    /// bit without allocating; costs one step per coefficient word bit (`64 · words`).
+    pub fn rem_small(&self, g: u64) -> u64 {
+        let top = 1u64 << (63 - g.leading_zeros());
+        let mut reg = 0u64;
+        for &word in self.w.iter().rev() {
+            for b in (0..64).rev() {
+                reg = (reg << 1) | ((word >> b) & 1);
+                if reg & top != 0 {
+                    reg ^= g;
+                }
+            }
+        }
+        reg
+    }
+
+    /// Bit `i` (coefficient of `xⁱ`).
+    fn bit(&self, i: usize) -> bool {
+        self.w.get(i / 64).is_some_and(|w| (w >> (i % 64)) & 1 == 1)
+    }
+
+    /// Whether the low `len` coefficients repeat with period `k` (`bᵢ = bᵢ₊ₖ`), and the bit
+    /// comparisons spent.
+    pub fn is_periodic(&self, len: usize, k: usize) -> (bool, u64) {
+        let mut ops = 0;
+        for i in 0..len.saturating_sub(k) {
+            ops += 1;
+            if self.bit(i) != self.bit(i + k) {
+                return (false, ops);
+            }
+        }
+        (true, ops)
+    }
+
     /// Quotient and remainder modulo a non-zero `m`, and the word operations spent.
+    #[cfg(test)]
     pub fn div_rem(&self, m: &Poly) -> (Poly, Poly, u64) {
         let dm = m.degree().expect("non-zero modulus");
         let mut r = self.clone();
@@ -131,6 +167,23 @@ pub(crate) fn gcd(a: &Poly, b: &Poly) -> (Poly, u64) {
         b = r;
     }
     (a, ops)
+}
+
+/// Quotient and remainder of `a / b` for polynomials held in `u64`s (`b` non-zero), and the
+/// steps spent.
+pub(crate) fn divrem_small(a: u64, b: u64) -> (u64, u64, u64) {
+    let db = 63 - b.leading_zeros();
+    let (mut q, mut r, mut ops) = (0u64, a, 1u64);
+    while r != 0 {
+        let dr = 63 - r.leading_zeros();
+        if dr < db {
+            break;
+        }
+        q |= 1 << (dr - db);
+        r ^= b << (dr - db);
+        ops += 1;
+    }
+    (q, r, ops)
 }
 
 /// Carry-less product of two polynomials of degree < 64.
@@ -264,6 +317,18 @@ mod tests {
         assert!(r.is_zero());
         assert_eq!(q.to_u64(), Some(0b1011));
         assert_eq!(Poly::from_bits(&[1, 0, 1, 1]).to_u64(), Some(0b1011));
+        // The allocation-free paths agree with the general ones.
+        let long = Poly::from_bits(
+            &(0..300)
+                .map(|i| ((i * 7 + i / 3) % 2) as u8)
+                .collect::<Vec<_>>(),
+        );
+        let (r, _) = long.rem(&Poly::from_u64(g));
+        assert_eq!(Some(long.rem_small(g)), r.to_u64());
+        let (q2, r2, _) = divrem_small(clmul(g, 0b1011) as u64 ^ 0b101, g);
+        assert_eq!((q2, r2), (0b1011, 0b101));
+        let alt = Poly::from_bits(&[1, 0, 1, 0, 1, 0, 1, 0, 1, 0]);
+        assert!(alt.is_periodic(10, 2).0 && !alt.is_periodic(10, 1).0);
     }
 
     #[test]

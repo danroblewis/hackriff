@@ -450,6 +450,79 @@ fn space_050_floor_endpoint_serves_the_calibrated_floor_product() {
     }));
 }
 
+fn post_json(addr: SocketAddr, path: &str, body: &str) -> (u16, Value) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+    write!(
+        s,
+        "POST {path} HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {TOKEN}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).unwrap();
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head");
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let status = head.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap();
+    (status, serde_json::from_slice(&raw[split + 4..]).unwrap())
+}
+
+/// T-091: assist searches run on connection threads, so only one computes at a time; a call
+/// meanwhile answers 503 `busy` at once instead of queueing.
+#[test]
+fn a_second_assist_call_is_busy_while_one_runs() {
+    let server = serve(ApiState::default(), None);
+    let addr = server.local_addr();
+    // Long random frames: a code search that runs for a while (bounded by max_ops).
+    let mut seed = 0x0091_0091_u64;
+    let frames: Vec<Value> = (0..12)
+        .map(|_| {
+            let hex: String = (0..500)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    format!("{:X}", seed >> 60)
+                })
+                .collect();
+            json!({ "hex": hex })
+        })
+        .collect();
+    let heavy =
+        json!({ "frames": frames, "max_tail_bits": 256, "max_ops": 300_000_000u64 }).to_string();
+    let running = std::thread::spawn(move || post_json(addr, "/api/assist/crc", &heavy));
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while hk_api::assist::in_flight() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline && !running.is_finished(),
+            "the heavy call never started computing"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (status, v) = post_json(
+        addr,
+        "/api/assist/crc",
+        r#"{"frames": ["01100110", "10101010", "11001100"]}"#,
+    );
+    assert!(
+        running.is_finished() || hk_api::assist::in_flight() == 1,
+        "the heavy call ended too early for this check"
+    );
+    assert_eq!((status, v["code"].as_str()), (503, Some("busy")), "{v}");
+    let (status, v) = running.join().unwrap();
+    assert_eq!(status, 200, "{v}");
+    let (status, v) = post_json(
+        addr,
+        "/api/assist/crc",
+        r#"{"frames": ["01100110", "10101010", "11001100"]}"#,
+    );
+    assert_eq!(status, 200, "{v}");
+}
+
 #[test]
 fn unauthenticated_api_calls_are_rejected() {
     let registry = StreamRegistry::new();

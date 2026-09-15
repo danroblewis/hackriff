@@ -17,10 +17,13 @@
 //! 3. Recount with `max_errors` (default `len / 16`) in both polarities; spacing statistics:
 //!    modal interval, regularity (share of intervals equal to it), back-to-back repeats, and the
 //!    share of occurrences directly after a preamble.
-//! 4. Kind: `fill` (repeats back to back: idle codewords), `sync` (regular spacing, after a
-//!    preamble, or in most frames), else `repeat`. Ranked by kind, then by evidence
-//!    `occurrences × (len − log2 positions − errors·log2 len)` weighted by regularity and
-//!    preamble share.
+//! 4. Chance correction: `λ`, the occurrences expected in random bits of the same lengths (either
+//!    polarity, ≤ `max_errors`; frames mode: frames holding one). Kind: `fill` (repeats back to
+//!    back: idle codewords), `sync` (regular spacing, after a preamble, or in most frames beyond
+//!    chance), else `repeat`. Ranked by kind, then by evidence
+//!    `(occurrences − λ) × (len − log2 positions − errors·log2 len)` weighted by regularity and
+//!    preamble share (`relative_score`). The absolute `score` is `1 − e^(−significance/32)`,
+//!    significance = −log2 of the Chernoff bound on the count given `λ`, minus `len`.
 //!
 //! # Periods
 //! - **Autocorrelation** (masked: degenerate runs excluded): agreement at each lag as a z-score;
@@ -147,10 +150,17 @@ pub struct SyncSuggestion {
     /// Most common start offset within a frame (frames mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal_offset: Option<usize>,
-    /// Evidence, bits.
+    /// Evidence, bits: occurrences beyond the chance expectation × information per occurrence
+    /// (the ranking key).
     pub evidence_bits: f64,
-    /// 0–1, relative to the best suggestion.
+    /// Significance, bits: −log2 of the Chernoff bound on this many occurrences in random bits
+    /// of the same lengths, minus the pattern width (any pattern of that width could have been
+    /// found).
+    pub significance_bits: f64,
+    /// 0–1, absolute: `1 − e^(−significance/32)`; noise scores ≈ 0.
     pub score: f64,
+    /// 0–1, the ranking key relative to the best suggestion of this answer.
+    pub relative_score: f64,
     /// Human-readable reasons.
     pub reasons: Vec<String>,
     /// `sync_search` fragment.
@@ -307,19 +317,35 @@ pub fn hunt_sync_frames(frames: &[Vec<u8>], cfg: &SyncConfig) -> SyncFramesRepor
 /// The bits after the first occurrence of `pattern` (either polarity, ≤ `max_errors`) in each
 /// frame, complemented when the occurrence was inverted. Frames without one are dropped.
 pub fn align_on_sync(frames: &[Vec<u8>], pattern: &[u8], max_errors: usize) -> Vec<Vec<u8>> {
-    frames
-        .iter()
-        .filter_map(|f| {
-            let hits = recount(&[f.as_slice()], pattern, max_errors, true);
-            let &(_, pos, inv) = hits.first()?;
-            Some(
+    let mut meter = Meter::new(Budget { max_ops: u64::MAX });
+    align_frames(frames, pattern, max_errors, &mut meter)
+}
+
+/// [`align_on_sync`] within a work meter (frames after the cap are dropped and reported).
+pub(crate) fn align_frames(
+    frames: &[Vec<u8>],
+    pattern: &[u8],
+    max_errors: usize,
+    meter: &mut Meter,
+) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for f in frames {
+        // A sliding match per bit, then the copy.
+        if !meter.charge(f.len() as u64 * 3 + 32) {
+            meter.skip("sync alignment stopped at the work cap: later frames dropped");
+            break;
+        }
+        let hits = recount(&[f.as_slice()], pattern, max_errors, true);
+        if let Some(&(_, pos, inv)) = hits.first() {
+            out.push(
                 f[pos + pattern.len()..]
                     .iter()
                     .map(|b| (b & 1) ^ u8::from(inv))
                     .collect(),
-            )
-        })
-        .collect()
+            );
+        }
+    }
+    out
 }
 
 fn degenerate_mask(bits: &[u8]) -> Vec<bool> {
@@ -397,7 +423,9 @@ fn hunt(
         .collect();
     let mut counts: HashMap<u64, u32> = HashMap::new();
     for (si, s) in segs.iter().enumerate() {
-        meter.charge(s.len() as u64 * 2);
+        // Degenerate mask, prefix counts and a hash-map update per window (plus a per-frame
+        // hash-set insert in frames mode).
+        meter.charge(s.len() as u64 * if frames_mode { 48 } else { 24 } + 64);
         let mut here = HashSet::new();
         let mut w = 0u64;
         for (i, &b) in s.iter().enumerate() {
@@ -455,6 +483,7 @@ fn hunt(
             continue;
         }
         let pattern = extend(segs, &occ, seed_bits.clone(), cfg);
+        meter.charge(extend_ops(occ.len(), pattern.len(), l));
         extended.push(pattern.clone());
         if let Some(s) = finish(
             segs,
@@ -521,6 +550,45 @@ fn trim_fill(p: &[u8], fills: &[Vec<u8>]) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// Work of one [`extend`]: a vote over every occurrence per grown bit (and the failing votes).
+fn extend_ops(occurrences: usize, grown_len: usize, core_len: usize) -> u64 {
+    (occurrences as u64 + 1) * (grown_len.saturating_sub(core_len) as u64 + 2) * 3
+}
+
+/// Chance that the pattern (`lp` bits, either polarity, ≤ `e` errors) matches at one position
+/// of random bits.
+fn chance_per_position(lp: usize, e: usize) -> f64 {
+    let mut c = 1.0f64; // C(lp, k)
+    let mut sum = 0.0;
+    for k in 0..=e.min(lp) {
+        sum += c;
+        c = c * (lp - k) as f64 / (k + 1) as f64;
+    }
+    (2.0 * sum * 2f64.powi(-(lp as i32))).min(1.0)
+}
+
+/// −log2 of the Chernoff bound on seeing ≥ `k` occurrences by chance when `lambda` are expected:
+/// Poisson in a stream (`frames = None`), binomial over `frames` otherwise.
+fn chernoff_bits(k: f64, lambda: f64, frames: Option<f64>) -> f64 {
+    if k <= lambda || lambda <= 0.0 {
+        return 0.0;
+    }
+    let nats = match frames {
+        None => k * (k / lambda).ln() - (k - lambda),
+        Some(n) => {
+            let p = (lambda / n).clamp(1e-300, 1.0);
+            let x = (k / n).min(1.0);
+            let rest = if x < 1.0 {
+                (1.0 - x) * ((1.0 - x) / (1.0 - p).max(1e-300)).ln()
+            } else {
+                0.0
+            };
+            n * (x * (x / p).ln() + rest)
+        }
+    };
+    (nats / std::f64::consts::LN_2).max(0.0)
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -630,6 +698,7 @@ fn finish(
     // A pattern grown from a seed that occurs in only some frames, matched everywhere through
     // the error tolerance, disagrees at the same bit positions in many occurrences (unlike
     // noise): keep the longest run of agreeing bits, then grow it again over all occurrences.
+    meter.charge((pattern.len() * positions.len()) as u64 * 2 + 1);
     let bad: Vec<bool> = (0..pattern.len())
         .map(|k| {
             let dis = positions
@@ -665,7 +734,10 @@ fn finish(
             .iter()
             .map(|&(s, p, inv)| (s, p + best.0, inv))
             .collect();
-        extend(segs, &occ, core, cfg)
+        let core_len = core.len();
+        let grown = extend(segs, &occ, core, cfg);
+        meter.charge(extend_ops(occ.len(), grown.len(), core_len));
+        grown
     } else {
         core
     };
@@ -764,15 +836,38 @@ fn finish(
             (Some(d), c as f64 / intervals.len() as f64, b2b, None, None)
         }
     };
+    // Chance model: occurrences expected in random bits of the same lengths (frames mode: frames
+    // holding one). Evidence and significance count only what exceeds it.
+    let q = chance_per_position(lp, e);
+    let lambda: f64 = if frames_mode {
+        segs.iter()
+            .map(|s| 1.0 - (1.0 - q).powf((s.len() + 1).saturating_sub(lp) as f64))
+            .sum()
+    } else {
+        segs.iter()
+            .map(|s| (s.len() + 1).saturating_sub(lp) as f64)
+            .sum::<f64>()
+            * q
+    };
+    let excess = (total as f64 - lambda).max(0.0);
+    let frames_n = frames_mode.then_some(segs.len() as f64);
+    // Look-elsewhere: any of the 2^lp patterns of this width could have been the one.
+    let significance = (chernoff_bits(total as f64, lambda, frames_n) - lp as f64).max(0.0);
+    let in_most_frames = frames_mode && excess >= 0.5 * (segs.len() as f64 - lambda).max(1.0);
     let kind = if back_to_back {
         PatternKind::Fill
-    } else if regularity >= 0.5 || (!frames_mode && pre >= 0.2) {
+    } else if (!frames_mode && (regularity >= 0.5 || pre >= 0.2)) || in_most_frames {
         PatternKind::Sync
     } else {
         PatternKind::Repeat
     };
     let per = lp as f64 - (positions_count.max(2) as f64).log2() - e as f64 * (lp as f64).log2();
-    let evidence = (total as f64 * per).max(0.0);
+    let evidence = (excess * per).max(0.0);
+    if lambda >= 0.1 * total as f64 {
+        reasons.push(format!(
+            "{lambda:.1} of the {total} occurrences are expected by chance"
+        ));
+    }
     match kind {
         PatternKind::Fill => reasons.push("repeats back to back: an idle/fill word".into()),
         PatternKind::Sync if frames_mode => reasons.push(format!(
@@ -817,7 +912,9 @@ fn finish(
         frames_with,
         modal_offset,
         evidence_bits: evidence,
-        score: 0.0,
+        significance_bits: significance,
+        score: 1.0 - (-significance / 32.0).exp(),
+        relative_score: 0.0,
         reasons,
         fragment: BlockFragment {
             block: "sync_search".into(),
@@ -908,7 +1005,7 @@ fn rank_syncs(mut out: Vec<SyncSuggestion>, cfg: &SyncConfig) -> Vec<SyncSuggest
     kept.truncate(cfg.max_candidates);
     let best = kept.iter().map(key).fold(0.0, f64::max);
     for s in &mut kept {
-        s.score = if best > 0.0 { key(s) / best } else { 0.0 };
+        s.relative_score = if best > 0.0 { key(s) / best } else { 0.0 };
     }
     kept
 }
@@ -969,7 +1066,8 @@ fn linear_blocks(
                 while p + nb <= b {
                     if prefix[p + nb] == prefix[p] {
                         rows.insert(block_row(&bits[p..p + nb]));
-                        ops += nb as u64 / 8 + 1;
+                        // Pack bit by bit, hash-set insert.
+                        ops += nb as u64 + 24;
                         if rows.len() >= cap {
                             break 'segs;
                         }

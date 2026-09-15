@@ -19,11 +19,18 @@
 //! 3. Per width (32 down to 3): degree-`w` divisors of the GCD with a constant term, enumerated
 //!    exhaustively when the cofactor degree is ≤ 12, else the catalogue generators of that width
 //!    are tested (`method: catalogue`).
-//! 4. Validation over every **distinct** frame; init/xorout solved over GF(2) from two lengths
-//!    (a linear system in `I`), else the standard settings, else `init 0` with the constant as
-//!    xorout. Divisors of a stronger generator in the same cell are dropped as sub-codes.
-//! 5. Claim only when `validated − constants ≥ 2`, `validated / tested ≥ 0.5` and the evidence
-//!    `w·(validated − constants) − log2(hypotheses)` is ≥ 16 bits.
+//! 4. Validation over frames **distinct across all classes** (a repeated frame is one piece of
+//!    evidence); init/xorout solved over GF(2) from two lengths (a linear system in `I`), else
+//!    the standard settings, else `init 0` with the constant as xorout.
+//! 5. Claim only when the independent differences `D = validated − constants − structured`
+//!    (differences from the group's first frame that repeat with a period ≤ 16 bits are not
+//!    random multiples of the generator) are ≥ 2, `validated / tested ≥ 0.5` and the evidence
+//!    `w·D − log2(hypotheses)` is ≥ 16 bits.
+//! 6. Ambiguity: every divisor of a fitting generator fits too, and with few differences the GCD
+//!    carries chance factors (3 Mode-S frames: CRC-24 × a small factor fits). The largest
+//!    fitting generator is kept with its score scaled by `exp(−6·P)`, `P` the chance that `D`
+//!    random differences share an extra irreducible factor; a divisor stays listed as an
+//!    alternative, scored by `2^(d−1−d·D)`, while that is ≥ 0.05 of its base score.
 //!
 //! A generator whose order `n` (of `x`) equals the covered length is a cyclic `(n, n−w)` code
 //! and is labelled `bch` (named when it is a textbook BCH generator); a shorter coverage is a
@@ -37,7 +44,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::gf2::{Poly, clmul, gcd, mod_small, order_of_x, reflect, solve, xpow_mod};
+use super::gf2::{Poly, clmul, divrem_small, gcd, mod_small, order_of_x, reflect, solve, xpow_mod};
 use super::{
     BchFragment, BlockFragment, Budget, CrcBlocks, CrcFragment, CrcSpan, FragmentParams, Meter,
     ParityFragment, WorkReport, hex_bits,
@@ -179,9 +186,15 @@ pub struct CodeSuggestion {
     pub validated: usize,
     /// Distinct frames tested.
     pub tested: usize,
-    /// `w·(validated − constants) − log2(hypotheses)`.
+    /// Independent frame differences behind the claim: validated distinct frames minus the
+    /// constants, not counting differences that repeat with a short period.
+    pub differences: usize,
+    /// `w·differences − log2(hypotheses)`.
     pub evidence_bits: f64,
-    /// 0–1: validated share, discounted when evidence is thin.
+    /// 0–1, absolute: validated share × `(1 − e^(−evidence/16))` × a generator confidence,
+    /// `exp(−6·Σ_k I_k·2^(−k·differences))` for the largest generator that fits (the chance
+    /// that the differences share a chance factor, `I_k` irreducible polynomials of degree `k`)
+    /// or `2^(d−1−d·differences)` for a divisor listed as an alternative (`d` = degree gap).
     pub score: f64,
     /// Human-readable reasons.
     pub reasons: Vec<String>,
@@ -400,6 +413,41 @@ fn covered_bits(frame: &[u8], cell: Cell) -> Option<Vec<u8>> {
     }
 }
 
+/// Irreducible polynomials over GF(2) with a constant term, by degree 1..=8.
+const IRREDUCIBLE: [f64; 8] = [1.0, 1.0, 2.0, 3.0, 6.0, 9.0, 18.0, 30.0];
+
+/// Chance that `d` independent random frame differences share one more irreducible factor
+/// (degree ≤ 8) besides the generator: `Σ I_k · 2^(−k·d)`. The GCD then carries it, and the
+/// largest validating generator is the true one times that factor.
+pub(crate) fn spurious_factor_chance(d: usize) -> f64 {
+    IRREDUCIBLE
+        .iter()
+        .enumerate()
+        .map(|(i, n)| n * 2f64.powf(-((i + 1) as f64) * d as f64))
+        .sum::<f64>()
+        .min(1.0)
+}
+
+/// Multiplier of [`spurious_factor_chance`] in the confidence `exp(−k · chance)`: conservative,
+/// because the prior over real generators is unknown.
+const AMBIGUITY_WEIGHT: f64 = 6.0;
+
+/// Periods (bits) up to which a frame difference counts as structured rather than random.
+const MAX_STRUCTURED_PERIOD: usize = 16;
+
+/// A generator that satisfies the frames of a cell, before it becomes a suggestion.
+struct Fit {
+    gen_full: u64,
+    w: usize,
+    method: &'static str,
+    validated: usize,
+    tested: usize,
+    n_consts: usize,
+    differences: usize,
+    evidence: f64,
+    modal: BTreeMap<(usize, usize), u64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn search_cell(
     frames: &[(usize, &[u8])],
@@ -411,24 +459,29 @@ fn search_cell(
     meter: &mut Meter,
     found: &mut Vec<CodeSuggestion>,
 ) {
-    // Distinct covered frames per (class, length).
-    let mut seen = HashSet::new();
+    // Distinct covered frames: a frame repeated (in any class) is one piece of evidence.
+    let mut seen: HashSet<(usize, Poly)> = HashSet::new();
     let mut covered: Vec<Covered> = Vec::new();
     for (idx, f) in frames {
         let Some(bits) = covered_bits(f, cell) else {
             continue;
         };
-        let class = idx % cell.classes;
-        if bits.len() < 2 * min_w || !seen.insert((class, bits.clone())) {
+        // Copy, pack bit by bit, hash the words.
+        meter.charge(bits.len() as u64 * 2 + 64);
+        if bits.len() < 2 * min_w {
             continue;
         }
-        meter.charge(bits.len() as u64 / 8 + 1);
+        let poly = Poly::from_bits(&bits);
+        if !seen.insert((bits.len(), poly.clone())) {
+            continue;
+        }
         covered.push(Covered {
-            class,
+            class: idx % cell.classes,
             len: bits.len(),
-            poly: Poly::from_bits(&bits),
+            poly,
         });
     }
+    drop(seen);
     if covered.len() < 3 {
         return;
     }
@@ -441,24 +494,17 @@ fn search_cell(
     if deg < min_w {
         return;
     }
-    let before = found.len();
+    let structured = structured_differences(&covered, cross_length, meter);
+    let mut fits: Vec<Fit> = Vec::new();
     for w in (min_w..=max_w.min(deg)).rev() {
         if !meter.ok() {
-            return;
+            break;
         }
         let (cands, method) = divisors_of_degree(&g, w, meter);
         for gen_full in cands {
-            // A divisor of a generator already accepted in this cell is a sub-code.
-            if found[before..].iter().any(|s| {
-                let (_, r, _) = Poly::from_u64(s.generator).div_rem(&Poly::from_u64(gen_full));
-                r.is_zero()
-            }) {
-                continue;
-            }
-            if let Some(s) = validate(
-                frames,
+            if let Some(f) = check(
                 &covered,
-                cell,
+                &structured,
                 gen_full,
                 w,
                 cross_length,
@@ -466,10 +512,90 @@ fn search_cell(
                 log2_h,
                 meter,
             ) {
-                found.push(s);
+                fits.push(f);
             }
         }
     }
+    // Every divisor of a validating generator validates too, and with few frame differences
+    // the GCD can carry a chance factor: the largest generator is the best single guess, but
+    // its confidence falls with the chance of a spurious factor, and a divisor stays listed
+    // (with a low score) while that chance is real.
+    for (i, f) in fits.iter().enumerate() {
+        let parent = fits
+            .iter()
+            .enumerate()
+            .filter(|(j, p)| *j != i && p.w > f.w && divrem_small(p.gen_full, f.gen_full).1 == 0)
+            .min_by_key(|(_, p)| p.w)
+            .map(|(_, p)| p);
+        let base = (f.validated as f64 / f.tested as f64) * (1.0 - (-f.evidence / 16.0).exp());
+        let (confidence, note) = match parent {
+            None => {
+                let chance = spurious_factor_chance(f.differences);
+                let c = (-AMBIGUITY_WEIGHT * chance).exp();
+                let note = (c < 0.9).then(|| {
+                    format!(
+                        "only {} independent frame differences: the generator may carry a chance \
+                         factor (confidence {c:.2}); more distinct frames settle it",
+                        f.differences
+                    )
+                });
+                (c, note)
+            }
+            Some(p) => {
+                let d = p.w - f.w;
+                let dd = p.differences.min(f.differences);
+                let c = 2f64.powf((d as f64 - 1.0) - (d * dd) as f64).min(1.0);
+                let note = format!(
+                    "divides {} (width {}), which also fits: with {dd} frame differences the extra \
+                     degree-{d} factor may be chance, so this one is an alternative",
+                    hex_bits(p.gen_full, p.w + 1),
+                    p.w
+                );
+                (c, Some(note))
+            }
+        };
+        let score = base * confidence;
+        if parent.is_some() && score < 0.05 {
+            continue; // a sub-code of a well-supported generator
+        }
+        found.push(build(
+            frames,
+            &covered,
+            cell,
+            f,
+            cross_length,
+            score,
+            note,
+            meter,
+        ));
+    }
+}
+
+/// Per covered frame: its difference from the first frame of its group repeats with a short
+/// period (constant, alternating, …). Such differences are not the random multiples of the
+/// generator the evidence assumes (they are divisible by many cyclotomic factors).
+fn structured_differences(covered: &[Covered], cross_length: bool, meter: &mut Meter) -> Vec<bool> {
+    let mut first: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    covered
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let key = (c.class, if cross_length { 0 } else { c.len });
+            let r = *first.entry(key).or_insert(i);
+            if r == i {
+                return false;
+            }
+            let mut d = c.poly.clone();
+            d.add(&covered[r].poly);
+            let len = c.len.max(covered[r].len);
+            meter.charge(d.words() * 2 + 1);
+            (1..=MAX_STRUCTURED_PERIOD.min(len / 4)).any(|k| {
+                let (p, ops) = d.is_periodic(len, k);
+                meter.charge(ops);
+                p
+            })
+        })
+        .collect()
 }
 
 /// GCD of frame differences within (class, length) groups; outliers skipped. Falls back to
@@ -556,25 +682,22 @@ fn divisors_of_degree(g: &Poly, w: usize, meter: &mut Meter) -> (Vec<u64>, &'sta
     let deg = g.degree().unwrap_or(0);
     let d = deg - w;
     let mut out = Vec::new();
-    if d <= 12 {
+    // d ≤ 12 and w ≤ 32: g has degree ≤ 44 and fits a word.
+    if d <= 12
+        && let Some(gv) = g.to_u64()
+    {
         for q in (1u64 << d)..(1u64 << (d + 1)) {
-            let (p, r, ops) = g.div_rem(&Poly::from_u64(q));
-            meter.charge(ops);
-            if r.is_zero()
-                && let Some(p) = p.to_u64()
-                && p & 1 == 1
-                && p.leading_zeros() as usize == 63 - w
-                && !out.contains(&p)
-            {
+            let (p, r, ops) = divrem_small(gv, q);
+            meter.charge(ops + 2);
+            if r == 0 && p & 1 == 1 && p.leading_zeros() as usize == 63 - w && !out.contains(&p) {
                 out.push(p);
             }
         }
         (out, "exhaustive")
     } else {
         for gen_full in known_generators(w) {
-            let (_, r, ops) = g.div_rem(&Poly::from_u64(gen_full));
-            meter.charge(ops);
-            if r.is_zero() && !out.contains(&gen_full) {
+            meter.charge(g.words() * 64 + 8);
+            if g.rem_small(gen_full) == 0 && !out.contains(&gen_full) {
                 out.push(gen_full);
             }
         }
@@ -622,56 +745,99 @@ fn known_name(gen_full: u64, w: usize) -> Option<String> {
     (!names.is_empty()).then(|| format!("poly of {}", names.join(", ")))
 }
 
+/// Whether `gen_full` satisfies the covered frames: modal remainder per (class, length), the
+/// independent differences behind it (validated − constants − structured) and the evidence.
 #[allow(clippy::too_many_arguments)]
-fn validate(
-    frames: &[(usize, &[u8])],
+fn check(
     covered: &[Covered],
-    cell: Cell,
+    structured: &[bool],
     gen_full: u64,
     w: usize,
     cross_length: bool,
-    method: &str,
+    method: &'static str,
     log2_h: f64,
     meter: &mut Meter,
-) -> Option<CodeSuggestion> {
-    let g = Poly::from_u64(gen_full);
-    let mask = (1u64 << w) - 1;
-    // Constant per (class, length): modal remainder.
-    let mut consts: BTreeMap<(usize, usize), BTreeMap<u64, usize>> = BTreeMap::new();
-    for c in covered {
-        let (r, ops) = c.poly.rem(&g);
-        meter.charge(ops);
-        let r = r.to_u64().unwrap_or(0);
+) -> Option<Fit> {
+    // Constant per (class, length): modal remainder; (count, structured count) per remainder.
+    let mut consts: BTreeMap<(usize, usize), BTreeMap<u64, (usize, usize)>> = BTreeMap::new();
+    for (c, &s) in covered.iter().zip(structured) {
+        meter.charge(c.poly.words() * 64 + 8);
+        let r = c.poly.rem_small(gen_full);
         let key = if cross_length {
             (c.class, 0)
         } else {
             (c.class, c.len)
         };
-        *consts.entry(key).or_default().entry(r).or_default() += 1;
+        let e = consts.entry(key).or_default().entry(r).or_default();
+        e.0 += 1;
+        e.1 += usize::from(s);
     }
     let tested = covered.len();
-    let mut validated = 0;
+    let (mut validated, mut structured_validated) = (0, 0);
     let mut modal: BTreeMap<(usize, usize), u64> = BTreeMap::new();
     for (key, hist) in &consts {
-        let (&r, &n) = hist.iter().max_by_key(|(_, n)| **n).expect("non-empty");
+        let (&r, &(n, s)) = hist.iter().max_by_key(|(_, (n, _))| *n).expect("non-empty");
         if n >= 2 || hist.len() == 1 {
             modal.insert(*key, r);
         }
         if n >= 2 {
             validated += n;
+            structured_validated += s;
         }
     }
     let n_consts = consts
         .values()
-        .filter(|h| h.values().any(|&n| n >= 2))
+        .filter(|h| h.values().any(|&(n, _)| n >= 2))
         .count();
     if validated < n_consts + 2 || validated * 2 < tested {
         return None;
     }
-    let evidence = (w * (validated - n_consts)) as f64 - log2_h;
+    let differences = (validated - n_consts).saturating_sub(structured_validated);
+    if differences < 2 {
+        return None;
+    }
+    let evidence = (w * differences) as f64 - log2_h;
     if evidence < 16.0 {
         return None;
     }
+    Some(Fit {
+        gen_full,
+        w,
+        method,
+        validated,
+        tested,
+        n_consts,
+        differences,
+        evidence,
+        modal,
+    })
+}
+
+/// A [`Fit`] as a suggestion: init/xorout, cyclic facts, RevEng mapping and the fragment.
+#[allow(clippy::too_many_arguments)]
+fn build(
+    frames: &[(usize, &[u8])],
+    covered: &[Covered],
+    cell: Cell,
+    fit: &Fit,
+    cross_length: bool,
+    score: f64,
+    note: Option<String>,
+    meter: &mut Meter,
+) -> CodeSuggestion {
+    let Fit {
+        gen_full,
+        w,
+        method,
+        validated,
+        tested,
+        n_consts,
+        differences,
+        evidence,
+        ..
+    } = *fit;
+    let modal = &fit.modal;
+    let mask = (1u64 << w) - 1;
     let classes = cell.classes;
     // Init / xorout.
     let mut reasons = Vec::new();
@@ -696,8 +862,9 @@ fn validate(
         let lens: Vec<(usize, u64)> = modal.iter().map(|((_, l), k)| (*l, *k)).collect();
         solve_init(&lens, gen_full, w, mask)
     };
-    let score = (validated as f64 / tested as f64) * (1.0 - (-evidence / 16.0).exp());
+    // Up to 2^16 register steps.
     let order = order_of_x(gen_full, 1 << 16);
+    meter.charge(order.unwrap_or(1 << 16) * 4);
     let min_cov = covered.iter().map(|c| c.len).min().unwrap_or(0);
     let max_cov = covered.iter().map(|c| c.len).max().unwrap_or(0);
     let cyclic = order.map(|n| CyclicInfo {
@@ -735,10 +902,12 @@ fn validate(
         }
     }
     reasons.push(format!(
-        "{validated}/{tested} distinct frames satisfy it ({} constant{})",
+        "{validated}/{tested} distinct frames satisfy it ({} constant{}, {differences} independent \
+         differences)",
         n_consts,
         if n_consts == 1 { "" } else { "s" }
     ));
+    reasons.extend(note);
     let reveng = if classes == 1 {
         reveng_match(frames, cell, gen_full, w, init, xorout, meter)
     } else {
@@ -801,7 +970,7 @@ fn validate(
             }
         }
     };
-    Some(CodeSuggestion {
+    CodeSuggestion {
         kind,
         width: w as u8,
         generator: gen_full,
@@ -821,11 +990,12 @@ fn validate(
         reveng,
         validated,
         tested,
+        differences,
         evidence_bits: evidence,
         score,
         reasons,
         fragment,
-    })
+    }
 }
 
 /// Init/xorout from per-length constants `K_L = (I·x^L mod G) ⊕ X`, where `L` is the message
@@ -919,12 +1089,15 @@ fn reveng_match(
     for (name, params) in cands {
         for order in BitOrder::ALL {
             for e in [Endianness::Big, Endianness::Little] {
-                meter.charge(sample.len() as u64 * 16);
+                let mut bits_done = 0u64;
                 let ok = sample.iter().all(|bits| {
+                    bits_done += bits.len() as u64;
                     let bytes = pack(bits, order);
                     let nb = bytes.len() - w / 8;
                     params.compute(&bytes[..nb]) == read_field(&bytes[nb..], w as u8, e)
                 });
+                // Pack and a bitwise CRC per byte bit.
+                meter.charge(bits_done * 3 + 32);
                 if ok {
                     return Some(RevEngMatch {
                         name: name.map_or_else(|| params.name(), str::to_owned),
@@ -957,12 +1130,16 @@ fn search_parity(
         return out;
     }
     // Frame parity: bit (len − 1 − t) over [s, len − t).
-    for tail in 0..=cfg.max_tail_bits.min(min_len - 2) {
+    'tails: for tail in 0..=cfg.max_tail_bits.min(min_len - 2) {
         for start in std::iter::once(0).chain(cfg.starts.iter().copied()) {
             if start + 2 > min_len - tail {
                 continue;
             }
-            meter.charge(distinct.len() as u64 * (min_len as u64 / 64 + 1));
+            // A vectorised XOR fold over every covered bit of every frame (~16 bits per ns).
+            if !meter.charge(distinct.len() as u64 * (min_len as u64 / 16 + 8)) {
+                meter.skip("frame parity search stopped at the work cap");
+                break 'tails;
+            }
             let ones = distinct
                 .iter()
                 .filter(|f| f[start..f.len() - tail].iter().fold(0u8, |a, b| a ^ b) == 1)
@@ -1006,7 +1183,7 @@ fn search_parity(
                 hold[usize::from(c.iter().fold(0u8, |a, b| a ^ b))] += 1;
             }
         }
-        meter.charge(n as u64);
+        meter.charge(n as u64 * 8);
         if n < 32 {
             continue;
         }

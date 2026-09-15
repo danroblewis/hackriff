@@ -26,6 +26,7 @@ use hk_recipe::{Display, Field, FieldMap, FieldType, Length, LengthFrom, LengthK
 use serde::{Deserialize, Serialize};
 
 use super::codes::{CodeSearchConfig, CodeSuggestion, search_indexed};
+use super::sync::align_frames;
 use super::{Budget, Meter, WorkReport, bits_value, hex_bits};
 use crate::framing::bits::binary_entropy;
 
@@ -45,8 +46,29 @@ pub struct FieldsConfig {
     pub find_codes: bool,
     /// Code search settings.
     pub codes: CodeSearchConfig,
+    /// Align frames on a sync word first (inside the work cap); frames without it are dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<SyncAlign>,
     /// Work cap.
     pub budget: Budget,
+}
+
+/// Alignment of [`FieldsConfig::align`]: the bits after the first occurrence of `sync` (either
+/// polarity, ≤ `max_errors`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SyncAlign {
+    /// Sync word, one `u8` per bit.
+    pub sync: Vec<u8>,
+    /// Tolerated bit errors.
+    pub max_errors: usize,
+}
+
+/// Longest frame classified (bits).
+pub const MAX_FIELD_BITS: usize = 4096;
+
+/// `1 − e^(−bits/8)`: a 0–1 confidence from significance bits.
+fn confidence(bits: f64) -> f64 {
+    1.0 - (-bits.max(0.0) / 8.0).exp()
 }
 
 impl Default for FieldsConfig {
@@ -61,6 +83,7 @@ impl Default for FieldsConfig {
                 max_classes: 1,
                 ..CodeSearchConfig::default()
             },
+            align: None,
             budget: Budget::default(),
         }
     }
@@ -166,6 +189,14 @@ struct Region {
 /// Suggests field boundaries over aligned `frames` (bits, one `u8` per bit), in capture order.
 pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
     let mut meter = Meter::new(cfg.budget);
+    let aligned;
+    let frames = match &cfg.align {
+        Some(a) => {
+            aligned = align_frames(frames, &a.sync, a.max_errors, &mut meter);
+            aligned.as_slice()
+        }
+        None => frames,
+    };
     let n = frames.len();
     let min_len = frames.iter().map(Vec::len).min().unwrap_or(0);
     let max_len = frames.iter().map(Vec::len).max().unwrap_or(0);
@@ -193,6 +224,13 @@ pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
         report.work = meter.report();
         return report;
     }
+    if max_len > MAX_FIELD_BITS {
+        meter.skip(format!(
+            "fields: frames longer than {MAX_FIELD_BITS} bits are not classified (post a shorter span)"
+        ));
+        report.work = meter.report();
+        return report;
+    }
     // 1. Check field.
     if cfg.find_codes {
         let idx: Vec<(usize, &[u8])> = frames
@@ -211,8 +249,11 @@ pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
         .as_ref()
         .map_or((0, 0), |c| (usize::from(c.width), c.tail_bits));
     let head_len = min_len.saturating_sub(check_w + tail);
+    let log2_head = (head_len.max(2) as f64).log2();
     // Per-bit statistics.
-    let span = max_len.min(4096);
+    let span = max_len;
+    // A lookup, a branch and two counters per frame bit.
+    meter.charge((n * span) as u64 * 2 + 1);
     let mut stats = Vec::with_capacity(span);
     for i in 0..span {
         let mut cov = 0;
@@ -249,7 +290,6 @@ pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
             },
         });
     }
-    meter.charge((n * span) as u64 / 8 + 1);
     let constancy = |i: usize| stats[i].ones.max(1.0 - stats[i].ones);
     let mut claimed = vec![false; head_len];
     let mut regions: Vec<Region> = Vec::new();
@@ -262,6 +302,7 @@ pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
                 if off + width > head_len {
                     continue;
                 }
+                meter.charge((n * (width + 4)) as u64);
                 let vals: Vec<u64> = frames
                     .iter()
                     .map(|f| bits_value(&f[off..off + width]))
@@ -275,11 +316,17 @@ pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
                         .count();
                     if hold as f64 >= 0.9 * n as f64 {
                         claimed[off..off + width].fill(true);
+                        // A random value matches a length with chance 2^−width; ~130
+                        // (offset, width, scale) hypotheses.
+                        let share = hold as f64 / n as f64;
+                        let sig = ((hold - 1) * width) as f64
+                            - n as f64 * binary_entropy(share)
+                            - 130f64.log2();
                         regions.push(Region {
                             kind: FieldKind::Length,
                             start: off,
                             len: width,
-                            score: hold as f64 / n as f64,
+                            score: share * confidence(sig),
                             scale: Some(scale),
                             add: Some(add),
                             reasons: vec![format!(
@@ -301,23 +348,25 @@ pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
             continue;
         }
         let mut kmax = 0;
-        let mut hold_at = 0.0;
+        let (mut hold_at, mut steps_at) = (0.0, 0);
+        let pairs = used.len().saturating_sub(1).max(1);
         for k in 1..=(j + 1).min(32) {
             let a = j + 1 - k;
             if claimed[a] {
                 break;
             }
             let modulus = if k == 64 { u64::MAX } else { (1u64 << k) - 1 };
+            meter.charge((used.len() * (k + 4)) as u64);
             let vals: Vec<u64> = used.iter().map(|f| bits_value(&f[a..=j])).collect();
-            meter.charge((used.len() * k) as u64 / 8 + 1);
             let steps = vals
                 .windows(2)
                 .filter(|w| w[1].wrapping_sub(w[0]) & modulus == 1)
                 .count();
-            let hold = steps as f64 / (vals.len() - 1).max(1) as f64;
+            let hold = steps as f64 / pairs as f64;
             if hold >= cfg.counter_hold {
                 kmax = k;
                 hold_at = hold;
+                steps_at = steps;
             } else {
                 break;
             }
@@ -339,11 +388,17 @@ pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
         };
         let start = j + 1 - width;
         claimed[start..=j].fill(true);
+        // Random `varying`-bit values step by one with chance 2^−varying per pair; every end
+        // bit and width was a hypothesis.
+        let sig = (varying * steps_at) as f64
+            - pairs as f64 * binary_entropy(hold_at.min(1.0))
+            - log2_head
+            - 5.0;
         regions.push(Region {
             kind: FieldKind::Counter,
             start,
             len: width,
-            score: hold_at,
+            score: hold_at * confidence(sig),
             scale: None,
             add: None,
             reasons: vec![format!(
@@ -406,7 +461,18 @@ pub fn suggest_fields(frames: &[Vec<u8>], cfg: &FieldsConfig) -> FieldsReport {
             FieldKind::Mixed
         };
         let score = match kind {
-            FieldKind::Constant => (s..e).map(constancy).sum::<f64>() / (e - s) as f64,
+            // A random bit is this constant over `coverage` frames with chance
+            // ≈ 2^−(coverage·(1 − H(constancy)) − 1); any run start was a hypothesis.
+            FieldKind::Constant => {
+                let sig = (s..e)
+                    .map(|i| {
+                        (stats[i].coverage as f64 * (1.0 - binary_entropy(constancy(i))) - 1.0)
+                            .max(0.0)
+                    })
+                    .sum::<f64>()
+                    - log2_head;
+                (s..e).map(constancy).sum::<f64>() / (e - s) as f64 * confidence(sig)
+            }
             FieldKind::HighEntropy => ent,
             _ => 0.5,
         };

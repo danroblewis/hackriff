@@ -11,10 +11,14 @@
 //!   packing rule), in capture order.
 //!
 //! Every call is bounded: `max_ops` (default and ceiling [`MAX_OPS`]) caps the work, and a capped
-//! answer carries `work.partial: true`.
+//! answer carries `work.partial: true`. The search runs on the connection thread, so at most
+//! [`MAX_CONCURRENT`] calls compute at once; another call meanwhile answers 503 `busy` without
+//! waiting.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hk_estimate::assist::{
-    Budget, CodeSearchConfig, FieldsConfig, SyncConfig, align_on_sync, analyze_stream,
+    Budget, CodeSearchConfig, FieldsConfig, SyncAlign, SyncConfig, analyze_stream,
     hunt_sync_frames, search_codes, suggest_fields,
 };
 use serde_json::{Map, Value, json};
@@ -51,8 +55,40 @@ impl Bad {
     }
 }
 
-/// Ceiling for `max_ops` (a few seconds of one connection thread in release builds).
-pub const MAX_OPS: u64 = 2_000_000_000;
+/// Ceiling for `max_ops`: about 2–3 s of one connection thread in a release build on the dev
+/// Mac (the default, [`hk_estimate::assist::DEFAULT_MAX_OPS`], is about 1 s or less).
+pub const MAX_OPS: u64 = hk_estimate::assist::MAX_OPS;
+/// Most assist calls computing at once; another call meanwhile answers 503 `busy` at once.
+pub const MAX_CONCURRENT: usize = 1;
+
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Assist calls computing right now (for tests and status).
+#[doc(hidden)]
+pub fn in_flight() -> usize {
+    IN_FLIGHT.load(Ordering::SeqCst)
+}
+
+/// One of the [`MAX_CONCURRENT`] compute slots, released on drop.
+struct Permit;
+
+impl Permit {
+    /// Takes a slot without waiting; `None` when all are taken.
+    fn try_acquire() -> Option<Self> {
+        IN_FLIGHT
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_CONCURRENT).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 /// Most bits accepted in one call (stream or all frames together).
 pub const MAX_BITS: usize = 400_000;
 /// Most frames accepted in one call.
@@ -90,6 +126,20 @@ pub(crate) fn route(_state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespon
                 allow: Some(allow),
             });
         }
+    };
+    // The search runs on this connection thread: bound how many run at once so assist calls
+    // cannot tie up the server's connection threads (no queueing: a busy server answers now).
+    let Some(_permit) = Permit::try_acquire() else {
+        return Some(
+            Bad::new(
+                503,
+                "busy",
+                format!(
+                    "an assist call is already running (at most {MAX_CONCURRENT} at once); retry"
+                ),
+            )
+            .into_response(),
+        );
     };
     Some(match run(action, req) {
         Ok(body) => CtlResponse {
@@ -155,11 +205,16 @@ fn run(action: Action, req: &CtlRequest<'_>) -> Result<Value, Bad> {
         }
         Action::Fields => {
             only(&body, &["frames", "align", "find_crc", "max_ops"])?;
-            let mut frames = parse_frames(
+            let frames = parse_frames(
                 body.get("frames")
                     .ok_or_else(|| Bad::invalid("`frames` is required"))?,
             )?;
             let given = frames.len();
+            let mut cfg = FieldsConfig {
+                budget,
+                ..FieldsConfig::default()
+            };
+            cfg.codes.budget = budget;
             if let Some(a) = body.get("align") {
                 let a = a.as_object().ok_or_else(|| {
                     Bad::invalid("`align` must be {\"sync\": \"0101…\", \"max_errors\"?}")
@@ -173,14 +228,10 @@ fn run(action: Action, req: &CtlRequest<'_>) -> Result<Value, Bad> {
                 if !(8..=64).contains(&sync.len()) {
                     return Err(Bad::invalid("`align.sync` must be 8–64 bits"));
                 }
-                let e = opt_usize(a, "max_errors", 16)?.unwrap_or(sync.len() / 16);
-                frames = align_on_sync(&frames, &sync, e);
+                let max_errors = opt_usize(a, "max_errors", 16)?.unwrap_or(sync.len() / 16);
+                // Aligned inside the work cap.
+                cfg.align = Some(SyncAlign { sync, max_errors });
             }
-            let mut cfg = FieldsConfig {
-                budget,
-                ..FieldsConfig::default()
-            };
-            cfg.codes.budget = budget;
             if let Some(v) = body.get("find_crc") {
                 cfg.find_codes = v
                     .as_bool()
@@ -189,7 +240,7 @@ fn run(action: Action, req: &CtlRequest<'_>) -> Result<Value, Bad> {
             let r = suggest_fields(&frames, &cfg);
             let mut v = ser(serde_json::to_value(&r))?;
             v["frames_given"] = json!(given);
-            v["frames_aligned"] = json!(frames.len());
+            v["frames_aligned"] = json!(r.frames);
             Ok(v)
         }
         Action::Crc => {
@@ -403,5 +454,26 @@ mod tests {
             .ok()
             .unwrap();
         assert_eq!(frames, vec![vec![0, 1], vec![1, 1, 1, 1, 0, 0, 0, 0]]);
+    }
+
+    #[test]
+    fn assist_second_call_is_busy_while_one_runs() {
+        let state = ApiState::default();
+        let body = br#"{"frames": ["0110", "1010", "1100"]}"#;
+        let req = CtlRequest {
+            method: "POST",
+            path: "/api/assist/crc",
+            body,
+            content_type: Some("application/json"),
+            caller: crate::control::Caller::default(),
+        };
+        // A running call holds the slot.
+        let running = Permit::try_acquire().expect("free slot");
+        let r = route(&state, &req).expect("mine");
+        assert_eq!((r.status, r.body["code"].as_str()), (503, Some("busy")));
+        drop(running);
+        let r = route(&state, &req).expect("mine");
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(in_flight(), 0);
     }
 }

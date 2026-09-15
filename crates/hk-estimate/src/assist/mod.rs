@@ -37,14 +37,21 @@ pub use codes::{
     CodeKind, CodeReport, CodeSearchConfig, CodeSuggestion, CyclicInfo, ParityScope,
     ParitySuggestion, RevEngMatch, search_codes,
 };
-pub use fields::{BitStat, FieldKind, FieldSuggestion, FieldsConfig, FieldsReport, suggest_fields};
+pub use fields::{
+    BitStat, FieldKind, FieldSuggestion, FieldsConfig, FieldsReport, MAX_FIELD_BITS, SyncAlign,
+    suggest_fields,
+};
 pub use sync::{
     PatternKind, PeriodMethod, PeriodSuggestion, StreamReport, SyncConfig, SyncFramesReport,
     SyncSuggestion, align_on_sync, analyze_stream, hunt_sync_frames,
 };
 
-/// Default work cap, in word operations (about a second of single-core release time).
-pub const DEFAULT_MAX_OPS: u64 = 400_000_000;
+/// Default work cap, in operations (charged at about 1 ns of release time each on the dev Mac
+/// in the most expensive stages; ≤ about 1 s).
+pub const DEFAULT_MAX_OPS: u64 = 500_000_000;
+
+/// Largest sensible work cap (≤ about 2–3 s of release time); the API clamps `max_ops` to it.
+pub const MAX_OPS: u64 = 1_500_000_000;
 
 /// A work cap for one assist call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

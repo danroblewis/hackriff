@@ -426,6 +426,240 @@ fn assist_fsk_packet_sync_and_field_boundaries_blind() {
 
 // --- Bounded compute ----------------------------------------------------------------------------
 
+// --- Honest scores: few frames, noise, repeats, degenerate input ------------------------------
+
+fn mode_s_frames(rng: &mut Rng, n: usize) -> Vec<Vec<u8>> {
+    (0..n)
+        .map(|_| {
+            let mut f = Vec::new();
+            push(&mut f, 17, 5);
+            push(&mut f, 5, 3);
+            push(&mut f, rng.below(1 << 24), 24);
+            push(&mut f, rng.next() >> 8, 56);
+            let pi = crc_bits(&f, 0x1FF_F409, 24, 0, 0);
+            push(&mut f, pi, 24);
+            f
+        })
+        .collect()
+}
+
+#[test]
+fn assist_crc_few_frames_never_confidently_wrong() {
+    // With 3–4 frames the GCD of the differences often carries a chance factor, so
+    // CRC-24 × (small factor) fits as well as CRC-24 itself: never claim it confidently.
+    for nf in [3usize, 4] {
+        let mut wrong = 0;
+        for seed in 0..120u64 {
+            let mut rng = Rng(0xABCD_0000 + seed * 7919);
+            let frames = mode_s_frames(&mut rng, nf);
+            let r = search_codes(&frames, &CodeSearchConfig::default());
+            if let Some(c) = r.codes.first()
+                && c.generator != 0x1FF_F409
+            {
+                wrong += 1;
+                assert!(c.score < 0.5, "{nf} frames, seed {seed}: {c:?}");
+            }
+        }
+        assert!(
+            wrong > 0,
+            "{nf} frames: the probe should hit ambiguous cases"
+        );
+    }
+    // Enough frames settle it.
+    let mut rng = Rng(0xABCD_0001);
+    let r = search_codes(&mode_s_frames(&mut rng, 8), &CodeSearchConfig::default());
+    let c = r.codes.first().expect("a code");
+    assert_eq!(c.generator, 0x1FF_F409, "{c:?}");
+    assert!(c.score > 0.8, "{c:?}");
+}
+
+#[test]
+fn assist_noise_gives_no_confident_sync() {
+    for seed in 0..4u64 {
+        let mut rng = Rng(0x7777 + seed);
+        let frames: Vec<Vec<u8>> = (0..200).map(|_| rng.bits(112)).collect();
+        let s = hunt_sync_frames(&frames, &SyncConfig::default());
+        assert!(
+            s.syncs.iter().all(|x| x.score < 0.2),
+            "frames, seed {seed}: {:?}",
+            s.syncs
+        );
+        let st = analyze_stream(&rng.bits(20_000), &SyncConfig::default());
+        assert!(
+            st.syncs.iter().all(|x| x.score < 0.2),
+            "stream, seed {seed}: {:?}",
+            st.syncs
+        );
+        assert!(st.block_codes.iter().all(|c| c.score < 0.2), "{st:?}");
+    }
+}
+
+#[test]
+fn assist_repeated_frames_are_not_fresh_evidence() {
+    // Alternating all-zero / all-one frames: two distinct frames, whatever the classes.
+    let alt: Vec<Vec<u8>> = (0..40).map(|i| vec![(i % 2) as u8; 32]).collect();
+    let r = search_codes(&alt, &CodeSearchConfig::default());
+    assert!(r.codes.iter().all(|c| c.score < 0.2), "{:?}", r.codes);
+    // Three random frames repeated: three distinct frames.
+    let mut rng = Rng(0x4242);
+    let three: Vec<Vec<u8>> = (0..3).map(|_| rng.bits(64)).collect();
+    let rep: Vec<Vec<u8>> = (0..48).map(|i| three[i % 3].clone()).collect();
+    let r = search_codes(&rep, &CodeSearchConfig::default());
+    assert!(r.codes.iter().all(|c| c.score < 0.2), "{:?}", r.codes);
+    // Distinct but degenerate frames (constant and short-period patterns): their differences
+    // are structured, not random multiples of a generator.
+    let periodic: Vec<Vec<u8>> = (0..24)
+        .map(|i| {
+            let period = 1 + i % 8;
+            let phase = i / 8;
+            (0..32)
+                .map(|b| u8::from((b + phase) % period == 0))
+                .collect()
+        })
+        .collect();
+    let r = search_codes(&periodic, &CodeSearchConfig::default());
+    assert!(r.codes.iter().all(|c| c.score < 0.2), "{:?}", r.codes);
+}
+
+#[test]
+fn assist_random_frames_give_no_confident_fields() {
+    for (n, len) in [(200usize, 112usize), (5, 64), (8, 48)] {
+        for seed in 0..4u64 {
+            let mut rng = Rng(0x5151 + seed);
+            let frames: Vec<Vec<u8>> = (0..n).map(|_| rng.bits(len)).collect();
+            let f = suggest_fields(&frames, &FieldsConfig::default());
+            for s in &f.suggestions {
+                let structural = !matches!(s.kind, FieldKind::HighEntropy | FieldKind::Mixed);
+                assert!(
+                    !structural || s.score < 0.5,
+                    "{n}×{len}, seed {seed}: {s:?}"
+                );
+            }
+        }
+    }
+    // Frames past the classified length answer nothing, and say why.
+    let mut rng = Rng(0x5152);
+    let huge: Vec<Vec<u8>> = (0..6).map(|_| rng.bits(MAX_FIELD_BITS + 8)).collect();
+    let f = suggest_fields(&huge, &FieldsConfig::default());
+    assert!(f.suggestions.is_empty());
+    assert!(
+        f.work.skipped.iter().any(|s| s.contains("longer than")),
+        "{:?}",
+        f.work
+    );
+}
+
+#[test]
+fn assist_alignment_is_metered() {
+    let mut rng = Rng(0x5153);
+    let frames: Vec<Vec<u8>> = (0..400)
+        .map(|_| {
+            let mut f = rng.bits(40);
+            push(&mut f, 0x2DD4, 16);
+            f.extend(rng.bits(64));
+            f
+        })
+        .collect();
+    let cfg = FieldsConfig {
+        align: Some(SyncAlign {
+            sync: (0..16).rev().map(|i| ((0x2DD4 >> i) & 1) as u8).collect(),
+            max_errors: 1,
+        }),
+        budget: Budget { max_ops: 10_000 },
+        ..FieldsConfig::default()
+    };
+    let f = suggest_fields(&frames, &cfg);
+    assert!(f.work.partial && f.frames < 400, "{:?}", f.work);
+    assert!(f.work.skipped.iter().any(|s| s.contains("alignment")));
+}
+
+/// Release timing of heavy calls at the default and the maximum work cap (op charges should be
+/// ≈ 1 ns each): `cargo test --release -p hk-estimate --lib assist_bench -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing bench, release builds"]
+fn assist_bench_work_cap_timing() {
+    use std::time::Instant;
+    let mut rng = Rng(0x9999);
+    let long: Vec<Vec<u8>> = (0..100).map(|_| rng.bits(4000)).collect();
+    let short: Vec<Vec<u8>> = (0..2000).map(|_| rng.bits(112)).collect();
+    let tiny: Vec<Vec<u8>> = (0..20_000).map(|_| rng.bits(20)).collect();
+    let stream = rng.bits(400_000);
+    let rds = rds_stream(&mut rng, 5, 3800);
+    for (label, max_ops) in [("default", DEFAULT_MAX_OPS), ("max", MAX_OPS)] {
+        let budget = Budget { max_ops };
+        let wide = CodeSearchConfig {
+            max_tail_bits: 256,
+            max_classes: 16,
+            budget,
+            ..CodeSearchConfig::default()
+        };
+        let sync = SyncConfig {
+            budget,
+            codes: CodeSearchConfig {
+                budget,
+                ..CodeSearchConfig::default()
+            },
+            max_block_bits: 128,
+            max_lag: 65_536,
+            ..SyncConfig::default()
+        };
+        let fields = FieldsConfig {
+            budget,
+            codes: CodeSearchConfig {
+                max_classes: 1,
+                max_tail_bits: 256,
+                budget,
+                ..CodeSearchConfig::default()
+            },
+            ..FieldsConfig::default()
+        };
+        type Case<'a> = (&'a str, Box<dyn Fn() -> WorkReport + 'a>);
+        let cases: Vec<Case> = vec![
+            (
+                "crc 100×4000 tails≤256",
+                Box::new(|| search_codes(&long, &wide).work),
+            ),
+            (
+                "crc 2000×112 tails≤256",
+                Box::new(|| search_codes(&short, &wide).work),
+            ),
+            ("crc 20000×20", Box::new(|| search_codes(&tiny, &wide).work)),
+            (
+                "sync frames 2000×112",
+                Box::new(|| hunt_sync_frames(&short, &sync).work),
+            ),
+            (
+                "sync stream 400k noise",
+                Box::new(|| analyze_stream(&stream, &sync).work),
+            ),
+            (
+                "sync stream rds",
+                Box::new(|| analyze_stream(&rds, &sync).work),
+            ),
+            (
+                "fields 100×4000",
+                Box::new(|| suggest_fields(&long, &fields).work),
+            ),
+            (
+                "fields 20000×20",
+                Box::new(|| suggest_fields(&tiny, &fields).work),
+            ),
+        ];
+        for (name, run) in cases {
+            let t0 = Instant::now();
+            let w = run();
+            let s = t0.elapsed().as_secs_f64();
+            eprintln!(
+                "BENCH {label:7} {name:26} {:.3} s  ops {:>10}  partial {:5}  {:.2} ns/op",
+                s,
+                w.ops,
+                w.partial,
+                s * 1e9 / w.ops.max(1) as f64
+            );
+        }
+    }
+}
+
 #[test]
 fn assist_work_cap_returns_a_partial_result() {
     let mut rng = Rng(0x5EED_0006);

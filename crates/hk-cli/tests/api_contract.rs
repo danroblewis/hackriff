@@ -1005,6 +1005,8 @@ fn assist_routes_answer_suggestions_as_documented() {
     assert_eq!(code["generator"].as_u64(), Some(0x1_1021), "{v}");
     assert_eq!(code["fragment"]["block"].as_str(), Some("crc"), "{v}");
     assert!(code["score"].is_f64() && is_array(&code["reasons"]), "{v}");
+    assert!(code["differences"].as_u64().is_some_and(|d| d >= 20), "{v}");
+    assert!(code["score"].as_f64().is_some_and(|s| s > 0.9), "{v}");
 
     let (st, v) = post(
         addr,
@@ -1041,6 +1043,13 @@ fn assist_routes_answer_suggestions_as_documented() {
         "{v}"
     );
     assert_eq!(v["syncs"][0]["hex"].as_str(), Some("0x1ACF"), "{v}");
+    let sync = &v["syncs"][0];
+    assert!(
+        sync["significance_bits"].is_f64()
+            && sync["relative_score"].is_f64()
+            && sync["score"].as_f64().is_some_and(|s| s > 0.5),
+        "{v}"
+    );
     assert_eq!(
         v["syncs"][0]["fragment"]["block"].as_str(),
         Some("sync_search"),
