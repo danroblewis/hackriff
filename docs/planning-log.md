@@ -587,3 +587,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Blocker:** T-097's live HIL needs a **1090 MHz antenna** (user); the recorded/mock path is unblocked.
   - **Now:** T-085 launched; the 4–6 agent fan-out follows its reviewed merge. T-083 already merged; T-084 (offline HIL fixes) continues in parallel.
 - **B0.214 T-098 launched** (Sonnet) in parallel with T-085: source the POCSAG/ACARS/ADS-B tutorial fixtures (public SigMF or decoder test vectors, oracle truth lists, synthetic fallback). Tutorials T-095/T-096/T-097 now depend on it. Running: T-085 (M1-DESIGN), T-084 (offline HIL fixes), T-098.
+- **B0.215 T-084 offline phase merged** (f1798e3).
+  - **Wide edge row:** a false bursty hop set formed from near-threshold flicker; fixed with an 8 dB hop-set channel SNR gate.
+  - **6 vs 1 emitters:** the summary counts at stop, while tracks enter the inventory on close. Clarified in the summary and logged in HIL.
+  - **Missing live RDS:** hidden by the false row. A documented limit remains for strong adjacent channels → follow-up T-099.
+  - **HIL test:** now centres the station.
+  - **Next:** full check with acceptance (the hop-set gate may affect AWARE-036/042). The user is asked about the live re-run.

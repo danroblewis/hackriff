@@ -1415,7 +1415,8 @@ tasks:
     milestone: M0b
     title: "Live-air HIL findings: off-centre station becomes one wide edge row; run summary 6 emitters vs /api/inventory 1 row; no RDS decodes live"
     status: in-progress
-    phase: "offline reproduction and fixes (no HackRF); live re-run later when the device is handed over"
+    phase: "offline phase done (f1798e3, merged); live HackRF re-run pending (needs the device)"
+    offline_result: "(1) wide edge row: not floor/CFAR/roll-off (floor flat to +/-1.1 MHz); weak stations' short near-threshold detections (4-7 dB) chance-linked 19 channels into a false bursty hop set whose span became the 1116-1155 kHz row; fix HopConfig::min_channel_snr_db = 8 dB -> no hop set, station row 101.305 MHz 272 kHz confirmed with RDS PI; test near_threshold_bursty_flicker_does_not_form_a_hop_set; hopper/915 hop-set tests pass. (2) 6 vs 1: tracks enter the inventory only on close (continuous station closes at stop); summary counts at stop, test polled mid-run (real-time mock: 1 row at 15/30 s, 31 in summary); summary line and RunSummary.emitters now say 'at stop', HIL test logs both. (3) no live RDS: not level/AGC/off-centre (PI decodes at HackRF levels 0.7 MHz off centre); limit: strong neighbours 200 kHz away make mode selection return unknown bandwidth and reject the chain (documented; HK_PIPELINE_DEBUG=1 prints per-probe bandwidth/reason); live, the false hop-set row hid the station. (4) hil_hackrf.rs surveys at 2.4 Msps in 0.6 MHz steps, strongest station 0.5 MHz from centre, fails on any row > 500 kHz, logs inventory-at-stop vs summary. hk-detect 120/120, hk-pipeline 81/81, lint."
     deps: [T-053]
     parallel_group: J
     use_cases: [SIGNAL-062, AWARE-053]
@@ -1605,6 +1606,20 @@ tasks:
     model: sonnet
     effort: medium
     note: "independent of T-085; unblocks tutorials T-095/T-096/T-097"
+  - id: T-099
+    milestone: M0b
+    title: "Mode selection with strong adjacent channels (bandwidth unknown -> chain rejected in dense FM)"
+    status: todo
+    deps: [T-084]
+    parallel_group: T
+    use_cases: [SIGNAL-062]
+    found_by: T-084 offline repro 2026-09-15
+    acceptance: "when neighbours 200 kHz away are as strong as the target station, mode selection still measures bandwidth (e.g. channel-limited OBW, adjacent-channel-aware measure, or refinement-driven box) and does not reject the WFM chain; synthetic dense FM scene test passes with RDS PI decoded; T-065/T-073 sweep unchanged"
+    area: crates/hk-demod (mode selection/measure), crates/hk-pipeline chains (probe box)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
