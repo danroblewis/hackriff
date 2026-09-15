@@ -210,6 +210,14 @@ pub struct TrackerConfig {
     pub confirm_bursts: u64,
     /// …or this much on-time, s (0.1), or a hop link. A track closing tentative is discarded.
     pub confirm_on_time_s: f64,
+    /// In-band fragments (T-101): a track that closes with its band inside a continuous track's
+    /// (≥ 90 % on air, live or recently closed) band plus half that width on each side, its whole
+    /// observed life inside that track's, the track at least this many times wider and ≥ 6 dB
+    /// stronger (mean detection SNR), is edge/modulation flicker of that emission (a WFM
+    /// station's 6 ms, 5 dB skirt boxes). It is still tracked (and may attach a chain) but its
+    /// summary is marked `TrackSummary::inband_fragment` and it gets no inventory entry. Before
+    /// T-084's channel-SNR gate these fragments hid inside chance hop sets (4; 0 disables).
+    pub inband_fragment_bw_ratio: f64,
     /// Split trigger.
     pub split: SplitConfig,
     /// Periodicity fold.
@@ -241,6 +249,7 @@ impl Default for TrackerConfig {
             maintain_interval_s: 0.1,
             confirm_bursts: 2,
             confirm_on_time_s: 0.1,
+            inband_fragment_bw_ratio: 4.0,
             split: SplitConfig::default(),
             period: PeriodConfig::default(),
             hop: HopConfig::default(),
