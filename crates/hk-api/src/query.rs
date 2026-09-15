@@ -14,13 +14,16 @@
 //!
 //! `f_lo`/`f_hi` are Hz; `t0`/`t1` are Unix seconds.
 
+use hk_model::attention::baseline::SiteKey;
+use hk_model::ids::SiteId;
 use hk_model::{
     AnnotationAuthor, AnnotationTarget, FreqRange, IdentityAccess, IdentityScheme, InventoryEntry,
     InventoryIdentity, InventoryQuery, KnownStatus, LifecycleAuthor, LifecycleState, RepoError,
     Repository, StatusAuthor, TimeRange, Timestamp,
 };
 use hk_store::history::{
-    FORMAT_VERSION, FrontEndState, Geometry, HistoryStat, waterfall_png, write_sweep_csv,
+    FORMAT_VERSION, FilterSummary, FrontEndState, Geometry, HistoryStat, OriginField, OriginFilter,
+    waterfall_png, write_sweep_csv,
 };
 use hk_store::{
     FloorFlags, FloorProduct, FloorVsTime, ProvenanceSummary, Pyramid, RegionHistory, RegionQuery,
@@ -174,6 +177,69 @@ fn front_end_state_json(s: &FrontEndState) -> Value {
     })
 }
 
+/// A source key as the API spells it: 16 lowercase hex digits (T-133; JSON numbers lose `u64`
+/// precision).
+pub fn source_text(key: u64) -> String {
+    format!("{key:016x}")
+}
+
+/// A site as the API spells it: `unassigned`, `mobile` or the site id.
+pub fn site_text(site: SiteKey) -> String {
+    match site {
+        SiteKey::Unassigned => "unassigned".into(),
+        SiteKey::Mobile => "mobile".into(),
+        SiteKey::Site(id) => id.to_string(),
+    }
+}
+
+/// Parses the T-133 history filters: `source` (16 hex digits, or `unknown`) and `site`
+/// (`unassigned`, `mobile`, a site id, or `unknown`). Absent or empty = no filter on that field.
+pub fn parse_origin_filter(q: &Params) -> Result<OriginFilter, ApiError> {
+    let get = |k| param(q, k).filter(|v| !v.is_empty());
+    let source = match get("source") {
+        None => OriginField::Any,
+        Some("unknown") => OriginField::Unknown,
+        Some(v) if v.len() == 16 && v.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            OriginField::Is(u64::from_str_radix(v, 16).map_err(|_| bad("source"))?)
+        }
+        Some(_) => return Err(bad("source must be a 16-hex-digit source key or unknown")),
+    };
+    let site = match get("site") {
+        None => OriginField::Any,
+        Some("unknown") => OriginField::Unknown,
+        Some("unassigned") => OriginField::Is(SiteKey::Unassigned),
+        Some("mobile") => OriginField::Is(SiteKey::Mobile),
+        Some(id) => id
+            .parse::<SiteId>()
+            .map(|id| OriginField::Is(SiteKey::Site(id)))
+            .map_err(|_| bad("site must be unassigned, mobile, a site id or unknown"))?,
+    };
+    Ok(OriginFilter { source, site })
+}
+
+fn field_json<T: Copy>(f: OriginField<T>, text: impl Fn(T) -> String) -> Value {
+    match f {
+        OriginField::Any => Value::Null,
+        OriginField::Unknown => json!("unknown"),
+        OriginField::Is(v) => json!(text(v)),
+    }
+}
+
+/// The JSON of a [`FilterSummary`] (`null` for an unfiltered query).
+pub fn filter_json(f: Option<&FilterSummary>) -> Value {
+    f.map_or(Value::Null, |f| {
+        json!({
+            "source": field_json(f.filter.source, source_text),
+            "site": field_json(f.filter.site, site_text),
+            "tiles_matched": f.tiles_matched,
+            "tiles_mixed": f.tiles_mixed,
+            "tiles_other": f.tiles_other,
+            "cells_excluded": f.cells_excluded,
+            "cells_from_children": f.cells_from_children,
+        })
+    })
+}
+
 fn provenance_json(p: &ProvenanceSummary) -> Value {
     let gains: Vec<Value> = p
         .gain_states
@@ -214,6 +280,12 @@ fn provenance_json(p: &ProvenanceSummary) -> Value {
         "steps_dropped": p.steps_dropped,
         "first_frame_s": p.first_frame.map(ts_s),
         "last_frame_s": p.last_frame.map(ts_s),
+        "origins": p.origins.iter().map(|(o, frames)| json!({
+            "source": o.source.map(source_text),
+            "site": o.site.map(site_text),
+            "frames": frames,
+        })).collect::<Vec<_>>(),
+        "other_origin_frames": p.other_origin_frames,
     })
 }
 
@@ -258,6 +330,7 @@ pub fn region_history_json(h: &RegionHistory) -> Value {
         },
         "provenance": provenance_json(&h.provenance),
         "tiles_read": h.tiles_read,
+        "filter": filter_json(h.filter.as_ref()),
     })
 }
 
@@ -307,16 +380,20 @@ pub fn history_format(q: &Params) -> Result<Option<&'static str>, ApiError> {
 fn region_history(p: &Pyramid, q: &Params) -> Result<RegionHistory, ApiError> {
     let r = parse_region(q)?;
     let max_cells = count(q, "max_cells", DEFAULT_MAX_CELLS, MAX_API_CELLS)?;
+    let filter = parse_origin_filter(q)?;
     let level = choose_level(p.geometry(), &r, |nt, nf| nt * nf <= max_cells as f64)?;
     let h = p
-        .query(&RegionQuery {
-            freq: r.freq,
-            time: TimeRange::new(
-                Timestamp::from_unix_nanos(r.t0_ns),
-                Timestamp::from_unix_nanos(r.t1_ns),
-            ),
-            resolution: Resolution::Level(level),
-        })
+        .query_filtered(
+            &RegionQuery {
+                freq: r.freq,
+                time: TimeRange::new(
+                    Timestamp::from_unix_nanos(r.t0_ns),
+                    Timestamp::from_unix_nanos(r.t1_ns),
+                ),
+                resolution: Resolution::Level(level),
+            },
+            &filter,
+        )
         .map_err(|_| ApiError::new(400, "history query refused"))?;
     Ok(h)
 }
@@ -745,6 +822,43 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    /// T-133: `source`/`site` history filters.
+    #[test]
+    fn origin_filter_parsing() {
+        let f = |pairs: &[(&str, &str)]| parse_origin_filter(&getter(pairs));
+        assert_eq!(f(&[]).unwrap(), OriginFilter::ANY);
+        assert_eq!(
+            f(&[("site", ""), ("source", "")]).unwrap(),
+            OriginFilter::ANY
+        );
+        let id = SiteId::new();
+        let got = f(&[("source", "8A1f0c3b5d2e4f60"), ("site", &id.to_string())]).unwrap();
+        assert_eq!(got.source, OriginField::Is(0x8a1f_0c3b_5d2e_4f60));
+        assert_eq!(got.site, OriginField::Is(SiteKey::Site(id)));
+        assert_eq!(source_text(0x8a1f_0c3b_5d2e_4f60), "8a1f0c3b5d2e4f60");
+        let got = f(&[("source", "unknown"), ("site", "unknown")]).unwrap();
+        assert_eq!(
+            (got.source, got.site),
+            (OriginField::Unknown, OriginField::Unknown)
+        );
+        assert_eq!(
+            f(&[("site", "mobile")]).unwrap().site,
+            OriginField::Is(SiteKey::Mobile)
+        );
+        assert_eq!(
+            f(&[("site", "unassigned")]).unwrap().site,
+            OriginField::Is(SiteKey::Unassigned)
+        );
+        for bad in [
+            ("source", "123"),
+            ("source", "+123456789abcdef"),
+            ("source", "0123456789abcdefg"),
+            ("site", "nowhere"),
+        ] {
+            assert_eq!(f(&[bad]).unwrap_err().status, 400, "{bad:?}");
+        }
     }
 
     #[test]

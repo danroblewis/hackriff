@@ -225,6 +225,21 @@ These give mean, standard deviation, FCO and max; merging equals sequential addi
 - **Reference learning (T-119):** a fold enters the reference only if it is clean, not provenance-explained, no change point is open or building (every CUSUM < h/2), and its slot's **hour-of-day pool is immature** (< 24 h). Learning therefore stops after ~24 parked days, which bounds slow-leak poisoning.
   - The fold must also be not novel (novelty 0), **or** its novelty must be below the alarm "on" level (0.7, §7.2) while that hour-of-day pool is immature **and** it must not be novel (all z < 3) against the slot's own immature hour-of-day reference, whose adaptive copy must be within 2·`cusum_k_sigma` σ of it (no drift), and which must itself be novel against the coarse pool (an established pattern, not a change, explains the fold's novelty). Novelty is judged at the finest mature pool, which may be coarser than the slot's pattern. Without this exception, a sharply patterned channel (e.g. one busy hour a day) would stay novel against the all-hours pool and never accrue. Without the own-hour checks, a moderate new interferer would drain into the immature pool fold by fold, dragging the reference along, instead of raising a change point.
 
+**As implemented after T-132** (`crates/hk-context/src/occupancy/baseline.rs`; constants named there):
+
+- **Occupied and idle level classes.** A fold carrying occupied weight is an *occupied* fold; otherwise it is *idle*. Their levels pool apart (`LevelClass`), so a low-FCO channel's level pool is not bimodal.
+  - An occupied fold's level is the median occupied-visit level. It is given only with at least `LEVEL_MIN_OCCUPIED` = 3 occupied visits in the interval; with fewer, the fold carries occupancy only.
+  - An idle fold's level is the median idle level.
+  - An occupied fold whose occupied pool does not exist yet is compared with the idle pool, so an emitter appearing on a quiet channel is level novelty. That cross-class level z does not keep the fold out of the reference: learning then judges occupancy only.
+  - Levels are further pooled per front-end gain-state key (`GainState::key`, whole-dB quantised), so a gain change starts a separate, immature level pool.
+- **Sequential learning CUSUM.** Every clean fold with a mature pool feeds CUSUMs of its level z and occupancy z, each winsorised to ±`z_min`. There are two sets: subject-wide (`seq`) and one per hour of day (`seq_hod`, 24).
+  - **Reference mean.** The level mean is the slot's own hour-of-day reference pool once that holds ≥ `SEQ_OWN_MIN_VISITS` = **16 visits**, else the chosen mature pool, so a daily pattern is not a shift. Occupancy switches to the own-hour pool once it holds ≥ `SEQ_OWN_MIN_OBSERVED_S` = 1 h observed. σ is the chosen pool's level σ, floored at `sigma_floor_db`.
+  - **Level slack `k + 1/√n`.** `k` is `cusum_k_sigma` (0.5) and `n` is the visits in the pool the mean came from. The widening is that mean's standard error, so an unchanged channel's slightly biased pool mean does not drift the test up. The occupancy slack is `k`.
+  - **Gating.** Either CUSUM (subject-wide, or the fold's hour of day) at ≥ h/2 (4σ) blocks reference learning for the fold. An hour-of-day CUSUM at ≥ h (8σ) latches that hour, but only together with a novel fold, so fat-tailed noise does not switch an hour off for good.
+  - A weak persistent interferer, below the novelty z on every fold, therefore stops entering the reference within a few folds instead of draining into it until hour-of-day maturity.
+- **Per-hour latch.** A change-point crossing (the CUSUM above) or a sequential hour-of-day crossing latches reference learning off for **that hour of day only** (`latched_hours`, a 24-bit mask). The subject-wide change-point CUSUM blocks learning in every hour only while it builds (≥ h/2) towards its first crossing. Once latched, other hours keep learning unless their own tests build. Re-freeze clears the change point, the sequential CUSUMs and the latches.
+- **Learning rule in full.** A fold enters the reference only if it is clean, it is normal (the novelty rule above), its hour is not latched, no change point is building, no sequential CUSUM is building, and its hour-of-day pool is immature.
+
 A persistent new interferer thus becomes "normal" in the adaptive copy but stays flagged against the reference until the user accepts it (C12 pitfall: baseline poisoning).
 
 ### 3.5 Site keying for a moving device (decided: discrete sites)
@@ -423,6 +438,24 @@ Validation refuses a report without them, and serde refuses a document missing `
 ### 6.3 Provenance steps
 
 `ProvenanceStep { t, kind, freq?, detail }`, time-ordered. Kinds: gain, calibration, spur mask, antenna port, overload, source restart, sample drop, site change. They come from history `ProvenanceSummary` and the observation log. They are what C30 rules out first (§7.4).
+
+### 6.3a Source and site of history tiles (T-133)
+
+History tiles (C26, format 3) record their frame counts per **origin**: the `FrameInput::source` key and the site at the frame's sample time. The site is a site id, `unassigned` or `mobile`, taken from the §3.5 state machine (`AttentionService::site_at`). At most 8 origins are kept per tile; frames of further origins read as unknown.
+
+Tiles are not split by origin. A filtered query (`Pyramid::query_filtered`; the `source` and `site` parameters of `/api/history` and `/api/report`) treats each tile as follows:
+- **Every frame matches:** the tile is used as usual.
+- **No frame matches:** its cells read as unobserved.
+- **Mixed tile:** a cell is kept only when the one finer tile it rolls up exists and matches whole. Otherwise the cell is unobserved.
+
+A site change therefore costs one finer tile's duration of coverage and never mixes another site's data in. Excluded cells are "not observed", never quiet, and are counted in the result.
+
+**Unknown origin (decided).** Tiles written before format 3, and frames whose caller gave no site, have an unknown source and site. They match only an unfiltered query or an explicit `unknown` filter. A report filtered by site therefore never silently counts pre-T-133 history as that site's.
+
+In a filtered report:
+- Coverage comes from the filtered tiles, because the observation log is not keyed by site or source.
+- Occupancy series rows are filtered by site; a source or `unknown` filter uses the filtered tile stand-in.
+- A warning states what was filtered and excluded.
 
 ### 6.4 Exports
 

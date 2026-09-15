@@ -97,6 +97,17 @@
 //! and seal, so a restart neither hides a real change nor invents one, and sources sharing a store
 //! do not show alternating false steps.
 //!
+//! # Source and site (T-133)
+//!
+//! Every tile records the frames it folded per **origin**: the [`FrameInput::source`] key and the
+//! site the device was at ([`FrameInput::site`]: a site id, `unassigned` or `mobile`; ADR-0012
+//! §3.5), at most [`MAX_ORIGINS`] per tile ([`ProvenanceSummary::origins`], format 3). Tiles are
+//! not split by origin. [`Pyramid::query_filtered`] answers for one source and/or site: cells
+//! other origins' frames were folded into read as unobserved, except that a coarse cell of a mixed
+//! tile is kept when the one finer tile it rolls up passes whole. Tiles written before format 3
+//! (and frames without a site) are of **unknown** origin: only an unfiltered query or an explicit
+//! [`OriginField::Unknown`] filter matches them.
+//!
 //! # Retention and crash safety
 //!
 //! After every seal retention runs over sealed tiles (T-116): per-level `max_age`, per-level
@@ -136,16 +147,18 @@ pub use export::{
     HistoryStat, PNG_UNOBSERVED_RGB, SweepCsvImport, SweepCsvOptions, import_sweep_csv,
     waterfall_index, waterfall_png, waterfall_range, write_sweep_csv,
 };
-pub use frame::{DbScratch, FrameInput, FrontEnd, GainState, NoiseShape, PortTag, source_key};
+pub use frame::{
+    DbScratch, FrameInput, FrameOrigin, FrontEnd, GainState, NoiseShape, PortTag, source_key,
+};
 pub use query::{
-    CellStats, ChannelSummary, CoverageSummary, FULL_CELL_OCCUPANCY, MAX_COVERAGE_GAPS,
-    MAX_QUERY_CELLS, RegionHistory, RegionQuery, Resolution, burst_histogram,
+    CellStats, ChannelSummary, CoverageSummary, FULL_CELL_OCCUPANCY, FilterSummary,
+    MAX_COVERAGE_GAPS, MAX_QUERY_CELLS, RegionHistory, RegionQuery, Resolution, burst_histogram,
 };
 pub use shape::NoiseShapeEstimator;
 pub use store::{IngestOutcome, Pyramid, PyramidStats};
 pub use tile::{
-    FrontEndState, MAX_GAIN_STATES, MAX_PROVENANCE_STEPS, ProvenanceStep, ProvenanceSummary,
-    SHAPE_TOLERANCE,
+    FrontEndState, MAX_GAIN_STATES, MAX_ORIGINS, MAX_PROVENANCE_STEPS, Origin, OriginField,
+    OriginFilter, OriginMatch, ProvenanceStep, ProvenanceSummary, SHAPE_TOLERANCE,
 };
 
 /// Errors from the history store.

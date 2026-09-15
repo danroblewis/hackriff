@@ -336,6 +336,7 @@ fn grid() -> RegionHistory {
             .collect(),
         provenance: gain_step_summary(),
         tiles_read: 1,
+        filter: None,
     }
 }
 
@@ -402,6 +403,70 @@ fn report_from_history_tiles_and_exports() {
     let png = report_png(tiles.grid());
     assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     assert!(png.len() > 60);
+}
+
+/// T-133: a source/site-filtered grid says what it filtered and excluded; an unfiltered grid for a
+/// site report says its rows include every site.
+#[test]
+fn report_discloses_history_source_site_filter() {
+    use hk_store::history::{FilterSummary, OriginField, OriginFilter};
+    let inv = FakeInventory(vec![emitter(101.0, 4)]);
+    let site = SiteKey::Site(hk_model::ids::SiteId::new());
+    let mut req = request();
+    req.site = site;
+    let build = |grid: RegionHistory| {
+        let tiles = HistoryTiles::from_grid(grid, 4.0 * MHZ, 6.0);
+        assemble(
+            &req,
+            &Providers {
+                coverage: vec![&tiles],
+                occupancy: &tiles,
+                inventory: &inv,
+                baseline: &NoBaselines,
+                provenance: &tiles,
+            },
+        )
+        .unwrap()
+    };
+    let r = build(grid());
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("include every source and site")),
+        "{:?}",
+        r.warnings
+    );
+    let mut g = grid();
+    g.filter = Some(FilterSummary {
+        filter: OriginFilter {
+            source: OriginField::Any,
+            site: OriginField::Is(site),
+        },
+        tiles_matched: 3,
+        tiles_mixed: 1,
+        tiles_other: 0,
+        cells_excluded: 16,
+        cells_from_children: 4,
+    });
+    let r = build(g);
+    let w = r
+        .warnings
+        .iter()
+        .find(|w| w.contains("history tiles filtered"))
+        .unwrap_or_else(|| panic!("{:?}", r.warnings));
+    let SiteKey::Site(id) = site else {
+        unreachable!()
+    };
+    assert!(w.contains(&format!("source any and site {id}")), "{w}");
+    assert!(
+        w.contains("16 observed cells") && w.contains("not quiet"),
+        "{w}"
+    );
+    assert!(
+        !r.warnings
+            .iter()
+            .any(|w| w.contains("include every source"))
+    );
 }
 
 /// ADR-0012 §2.5: the history-tile stand-in reports its ratio as `fco_all_visits` only, never as

@@ -20,6 +20,7 @@
 //!
 //! Cells the frame covers by less than half are not touched (not observed).
 
+use hk_model::attention::baseline::SiteKey;
 use hk_model::{
     CalibrationStateId, PowerUnit, SpectrumFrame as ModelSpectrumFrame, SpurMaskId, SweepFrame,
     Timestamp,
@@ -179,8 +180,22 @@ pub struct FrameInput<'a> {
     /// Which source produced the frame (T-126; e.g. [`source_key`] of a device id, 0 by default).
     /// Provenance steps compare a frame with the previous frame **of the same source**, and that
     /// state is persisted per source, so interleaved sources and store restarts do not show false
-    /// steps.
+    /// steps. T-133: recorded per tile ([`super::ProvenanceSummary::origins`]).
     pub source: u64,
+    /// The site the device was at when the frame was taken (T-133; ADR-0012 §3.5), recorded per
+    /// tile with `source`. `None` when the caller does not know it: stored as an unknown site,
+    /// which only an unfiltered or an explicit `unknown` site filter matches.
+    pub site: Option<SiteKey>,
+}
+
+/// A frame's origin as the caller states it (T-133): [`FrameInput::source`] and
+/// [`FrameInput::site`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct FrameOrigin {
+    /// Source key ([`source_key`]).
+    pub source: u64,
+    /// Site, `None` when unknown.
+    pub site: Option<SiteKey>,
 }
 
 impl<'a> FrameInput<'a> {
@@ -209,6 +224,16 @@ impl<'a> FrameInput<'a> {
             front_end: FrontEnd::default(),
             noise_shape: NoiseShape::Unknown,
             source: 0,
+            site: None,
+        }
+    }
+
+    /// The frame with `origin`'s source and site (T-133).
+    pub fn with_origin(self, origin: FrameOrigin) -> Self {
+        Self {
+            source: origin.source,
+            site: origin.site,
+            ..self
         }
     }
 
@@ -247,6 +272,7 @@ impl<'a> FrameInput<'a> {
             },
             noise_shape: NoiseShape::Spectrum(s.resolution),
             source: 0,
+            site: None,
         }
     }
 

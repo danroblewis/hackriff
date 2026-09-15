@@ -24,7 +24,7 @@
 | Method | Path | Auth | Query | Response | Errors |
 |---|---|---|---|---|---|
 | GET | `/api/streams` | token | – | Discovery document (T-060, below) | 401 |
-| GET | `/api/history` | token | `f_lo`, `f_hi` (Hz), `t0`, `t1` (Unix s), `max_cells`? (default 100 000, max 500 000), `format`? (`json` default, `csv`, `png`), `stat`? (csv/png: `max`, `mean`, `p_low`, `p_high`, `floor`) | T-017 region-over-time grid (below); T-116 hackrf_sweep CSV or PNG waterfall | 400 invalid region/cells/format/stat, 404 no history store on this server |
+| GET | `/api/history` | token | `f_lo`, `f_hi` (Hz), `t0`, `t1` (Unix s), `max_cells`? (default 100 000, max 500 000), `format`? (`json` default, `csv`, `png`), `stat`? (csv/png: `max`, `mean`, `p_low`, `p_high`, `floor`), `source`? (16 hex digits or `unknown`), `site`? (`unassigned`, `mobile`, a site id or `unknown`) | T-017 region-over-time grid (below); T-116 hackrf_sweep CSV or PNG waterfall; T-133 source/site filter | 400 invalid region/cells/format/stat/source/site, 404 no history store on this server |
 | GET | `/api/floor` | token | `f_lo`, `f_hi`, `t0`, `t1`, `max_steps`? (default 1024, max 20 000) | T-021 calibrated floor-vs-time series (below) | 400, 404 no floor product |
 | GET | `/api/inventory` | token | see below | T-018/T-078 signal inventory, one page (below) | 400 invalid filter, 404 no inventory store |
 | GET | `/api/inventory/{id}` | token | – | One inventory entry (T-078, same shape as a list row) | 404 not_found, 503 unavailable |
@@ -73,7 +73,7 @@ A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level w
 
 ```jsonc
 {
-  "scheme": 1, "tile_format": 2,
+  "scheme": 1, "tile_format": 3,
   "level": 0, "unit": "dbfs-per-hz", "f_cell_hz": 3125.0, "f_lo_hz": 99600000.0, "nf": 384,
   "t_cell_s": 0.1, "t0_s": 1789300800.0, "nt": 1200, "percentiles": [10.0, 90.0],
   "max_db": [-71.2, null, "…"], "mean_db": ["…"], "p_low_db": ["…"], "p_high_db": ["…"],
@@ -90,8 +90,11 @@ A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level w
                                          "calibration": null, "gain_table": null, "filter": "fm-notch", "spur_mask": null },
                                "to": { "gain": { "lna_db": 32.0, "vga_db": 20.0, "amp_on": false }, "…": "…" } } ],
                   "steps_dropped": 0,
-                  "first_frame_s": 1789300800.0, "last_frame_s": 1789300920.0 },
-  "tiles_read": 4
+                  "first_frame_s": 1789300800.0, "last_frame_s": 1789300920.0,
+                  "origins": [ { "source": "8a1f0c3b5d2e4f60", "site": "unassigned", "frames": 12000 } ],
+                  "other_origin_frames": 0 },
+  "tiles_read": 4,
+  "filter": null
 }
 ```
 
@@ -100,6 +103,12 @@ T-116 additions (all additive):
 - `coverage` is each cell's observed fraction of its duration; `coverage_summary.gaps` lists maximal time runs in which **no** cell of the grid was observed. A gap is never reported as quiet.
 - `floor_db` is the noise-floor estimate: `p_low_db` corrected for the low-percentile bias of averaged-periodogram noise (Gamma model, shape `provenance.cell_shape`). `null` when the frames carried no noise shape or tiles with different shapes mixed; `p_low_db` stays the raw percentile.
 - `provenance` records gain table, filter/antenna port, spur-mask version and cell shape (first value plus a `*_mixed` flag) and every front-end change as a `steps` entry (time, what changed, state before and after; at most 32, the rest counted in `steps_dropped`). Cells are not split at a step — use the steps to explain level changes as provenance, not events. `scheme` is the pyramid scheme/version id and `tile_format` the tile format written.
+
+T-133 additions (all additive; tile format 3, formats 1 and 2 still read):
+
+- **Origins.** `provenance.origins` lists the frames behind the result per origin (at most 8 per tile; the rest in `other_origin_frames`). An origin is `source`, the 16-hex-digit key of the source (`hk_store::history::source_key` of the run's `device_id`), plus `site`, the site at the frame's sample time (`unassigned`, `mobile` or a site id; ADR-0012 §3.5). `null` means **unknown**: tiles written before format 3, or frames without a site.
+- **Filter.** `source` and `site` restrict the grid to the frames of that source and/or site (both given: both must match). `unknown` selects frames of unknown source or site. Tiles are not split by origin, so a cell into which frames of other origins were folded reads `null` (**unobserved**, not quiet). The exception is a cell of a coarse tile that mixed origins: it is kept when the one finer tile it rolls up matches whole, so a site change costs about one finer tile's duration of coverage. Unknown-origin (old) history matches only an unfiltered request or `unknown`.
+- **Filter disclosure.** `filter` is `null` without a filter, else `{source, site, tiles_matched, tiles_mixed, tiles_other, cells_excluded, cells_from_children}`; `source`/`site` are `null` when that field is not filtered. `provenance` then merges only the tiles whose data the grid returns. CSV and PNG exports honour the filter.
 
 **Exports.** `format=csv` returns `text/csv; charset=utf-8` in the `hackrf_sweep` line format `date, time, hz_low, hz_high, bin_width, num_samples, dB…` (UTC; dB per `bin_width`-wide bin, i.e. `stat` dB/Hz + 10·log10(bin_width); `num_samples` = largest frame count in the line; 256 cells per line; unobserved cells `nan`, fully unobserved lines omitted). `stat` defaults to `mean`. `format=png` returns an `image/png` waterfall (one pixel per cell, frequency left→right, earliest time at the top, 8-bit palette; grey = not observed; colour range 2nd percentile to maximum of `stat`, default `max`). Errors are JSON as for every endpoint.
 
@@ -670,7 +679,15 @@ A lease preempts scheduled plans, the bandit and the sweep from the next step; t
 
 ## Survey reports (T-121; ADR-0012 §6)
 
-`GET /api/report?f_lo&f_hi&t0&t1[&site][&format=json|csv|png]` (token): `report(region, span)`. `f_lo`/`f_hi` in Hz, `t0`/`t1` in Unix seconds on the sample clock (a replay or time-compressed scene reports its own time). `site` is `unassigned` (default), `mobile` or a site id. Schema: `hk_model::attention::report::SurveyReport` (wire structs reject unknown fields; every `Timestamp` is an integer of Unix **nanoseconds**, `FreqRange` is `{lo_hz, hi_hz}`, `TimeRange` is `{start, end}`).
+`GET /api/report?f_lo&f_hi&t0&t1[&site][&source][&format=json|csv|png]` (token): `report(region, span)`. `f_lo`/`f_hi` in Hz, `t0`/`t1` in Unix seconds on the sample clock (a replay or time-compressed scene reports its own time). `site` is `unassigned` (default), `mobile`, a site id or `unknown`. It keys the baseline comparison; `unknown` compares as `unassigned`.
+
+**Source and site filter (T-133).** An explicitly given `site`, and `source` (16 hex digits or `unknown`), filter the report's history exactly as on `/api/history`. Without either parameter nothing is filtered: rows include every source and site, and a site report says so in `warnings`. With a filter:
+- the history grid, CSV and PNG use only matching frames; cells of other origins are unobserved, not quiet;
+- coverage and POI come from the filtered history tiles, because the observation log is not keyed by site or source;
+- occupancy comes from the occupancy series rows of the filtered site, or from the filtered tile stand-in when the filter names a source or `unknown`;
+- `warnings` states the filter and how many cells it excluded.
+
+Inventory emitters and anomalies are not keyed by site or source. Schema: `hk_model::attention::report::SurveyReport` (wire structs reject unknown fields; every `Timestamp` is an integer of Unix **nanoseconds**, `FreqRange` is `{lo_hz, hi_hz}`, `TimeRange` is `{start, end}`).
 
 - **`format=json`** (default): the document `{schema, generated_at, region, span, site, occupancy {bands, channels, truncated}, top_emitters[], change_vs_baseline {status, baseline?, resolution?, changes[]}, coverage, provenance_steps[], anomalies[], warnings[]}`. `change_vs_baseline.status` is `available` / `immature` / `no-baseline` (mobile or unassigned site, or no baselined subject) / `unavailable` (no baselines on this server); each `changes[]` entry `{subject, kind, baseline, observed, z}` combines the subject's 15-min rows, each compared against its own hour-of-week slot, with `kind` `level-above-baseline`, `busier-than-usual` (z > 0) or `quieter-than-usual` (z < 0). `generated_at` is the stream time the history has reached (never the wall clock).
 - **Coverage is mandatory** (`coverage {observed_fraction, observed_s, gaps[{freq, time}], gaps_truncated, never_observed[], poi[{tau_s, p_poi}], statement}`): POI for τ = 5 ms, 100 ms, 1 s, 10 s; gaps are unobserved stretches longer than twice the measured mean revisit, coalesced across adjacent frequency cells, longest first (≤ 64); `statement` always says unobserved is not quiet. Coverage comes from the observation log (T-115) when it holds visits for the box, else from history-tile coverage (a replay without the scheduler logs nothing); `warnings` names the source and, when it holds nothing for the box before some time inside the span (e.g. the log started mid-span), says that time is shown as unobserved, not quiet. A server that cannot disclose coverage (no spectrum history) answers `404` instead of a report.
@@ -683,7 +700,7 @@ A lease preempts scheduled plans, the bandit and the sweep from the next step; t
 
 **Grid budget.** The report reads the finest history level within 4096 time rows × 1024 frequency columns and 500 000 cells (the `/api/history` `MAX_API_CELLS` budget), else the top level if it fits 500 000 cells; a box larger than that even at the top level is `400`. The grid is read in ≤ 256-row chunks, each under its own short history lock, so a report never locks ingest out for its whole build; e.g. 48 h × 20 MHz on the default ladder is 192 × 800 cells (15 min × 25 kHz).
 
-Errors: `400` (bad region/span, a box over the grid budget, `site` or `format`), `404` (no coverage source), `405` (not GET), `500` (store failure), `503` (no report service on this server). The `/api/history` region filters (time and frequency) are unchanged; source and site filters are not served yet (history tiles are not keyed by source or site).
+Errors: `400` (bad region/span, a box over the grid budget, `site` or `format`), `404` (no coverage source), `405` (not GET), `500` (store failure), `503` (no report service on this server). A bad `source` is `400` as well.
 
 ## Anomalies and novelty alarms (T-122; ADR-0012 §7–§8)
 

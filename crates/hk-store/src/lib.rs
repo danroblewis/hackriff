@@ -22,9 +22,9 @@ pub mod observation; // T-115
 pub mod occupancy; // T-118
 
 pub use history::{
-    CellStats, ChannelSummary, FrameInput, GainState, HistogramConfig, IngestOutcome, LevelConfig,
-    ProvenanceSummary, Pyramid, PyramidConfig, PyramidStats, RegionHistory, RegionQuery,
-    Resolution, StoreError,
+    CellStats, ChannelSummary, FilterSummary, FrameInput, FrameOrigin, GainState, HistogramConfig,
+    IngestOutcome, LevelConfig, OriginField, OriginFilter, ProvenanceSummary, Pyramid,
+    PyramidConfig, PyramidStats, RegionHistory, RegionQuery, Resolution, StoreError,
 };
 pub use radiometry::{
     FloorFlags, FloorIngest, FloorIngestQueue, FloorProduct, FloorProductConfig, FloorProductStats,

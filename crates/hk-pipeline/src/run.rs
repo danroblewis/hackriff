@@ -1013,10 +1013,14 @@ fn start_segment(
         )?);
     }
     {
-        let (s, p) = (Arc::clone(&shared), Arc::clone(&common.product));
+        let (s, p, a) = (
+            Arc::clone(&shared),
+            Arc::clone(&common.product),
+            common.attention.clone(),
+        );
         workers.push(spawn(
             "hk-history",
-            Box::new(move || crate::history::run(s, p)),
+            Box::new(move || crate::history::run(s, p, a)),
         )?);
     }
     {
