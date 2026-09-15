@@ -733,3 +733,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Promoted from nit: a partial-write retry duplicates bytes or misaligns the index. A fresh Opus fix and integration round is running in the T-092 worktree; T-107 follows after it merges.
 - **B0.257 Full check of main 415f112 (T-093 + T-105): green.** Lint clean; nextest + UI 1099/1099 in 239 s; acceptance 25/25. M1 on main: T-085–T-091, T-093, T-094, T-104, T-105. In flight: T-092 fix/integration, T-095, T-096, T-097, T-106. Held: T-107 (after T-092).
 - **B0.258 T-106 merged** (acb1552; coordinator diff review). `WfmDemod` records the MPX index of the first sample fed to the RDS demod after pilot lock and adds it to bit positions. Group, PS and record timestamps are now stream-absolute (previously 122 bits / 102.7 ms late). tutorial_rds dropped its offset estimate: direct agreement is 43/44 oracle-valid groups (0.977, 0 conflicts, 1 missing). New unit test with a 0.3 s pre-lock prefix: positions land within ~17 ms of truth. hk-demod 35/35, acceptance tutorial_rds + signal_062 4/4. Full check is batched with the T-092 merge (imminent).
+- **B0.259 T-092 merged** (fix/integration 082a745). Changes:
+  - The recorder subscribes via `subscribe_recorder`, which is exempt from the slow-consumer close; it keeps dropping with drop markers. Tested with a 600 ms stall against a 100 ms policy.
+  - Interrupted captures are walked and truncated to the last complete indexed record.
+  - A partial write retries only the remainder, and on failure cuts back to the last good commit.
+  - Replay is capped at 4 (503 busy).
+  - The `CtlRequest.query` compile break is fixed and the api.md sections are merged.
+  **T-107** (follow_hops hardening) launched now that the runtime is stable. Full check covering T-106 + T-092 running.

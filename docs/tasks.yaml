@@ -1530,8 +1530,8 @@ tasks:
   - id: T-092
     milestone: M1
     title: "M1 Always-on decoded-stream capture + scrubbable review"
-    status: review
-    commit: 8866566
+    status: done
+    commit: 082a745
     deps: [T-085, T-088]
     parallel_group: M1C
     use_cases: [SIGNAL-062]
@@ -1726,7 +1726,7 @@ tasks:
   - id: T-107
     milestone: M1
     title: "follow_hops hardening (T-093 review follow-ups)"
-    status: todo
+    status: in-progress
     deps: [T-093]
     parallel_group: M1H
     use_cases: [SIGNAL-062]
