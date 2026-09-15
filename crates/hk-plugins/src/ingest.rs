@@ -29,6 +29,8 @@
 //! are counted, never propagated: a plugin's decode stream must not stall because inventory
 //! merging disagrees with it.
 
+use std::collections::HashSet;
+
 use hk_model::{Annotation, Decode, EmitterId, ProvenanceId, RepoError, Repository, Sighting};
 use hk_stream::policy;
 use hk_stream::{MessageRecord, Publisher};
@@ -70,15 +72,49 @@ pub struct Stored {
     pub content_gated: bool,
 }
 
-/// Emitters [`Ingest::emitters`] remembers.
-const MAX_TRACKED_EMITTERS: usize = 4096;
+/// Recently seen emitters [`Ingest`] remembers, so a re-sighting is not offered again.
+pub const MAX_TRACKED_EMITTERS: usize = 4096;
+
+/// Emitters awaiting [`Ingest::take_new_emitters`]. When it is full a new emitter is not marked
+/// seen, so its next sighting after a take offers it again: nothing is lost, memory stays bounded.
+pub const MAX_PENDING_EMITTERS: usize = 1 << 16;
+
+/// A bounded, approximately least-recently-used set: two generations of at most `cap / 2` ids
+/// each. A hit in the old generation is promoted; when the current generation fills, it becomes
+/// the old one and the previous old one is forgotten. O(1) per sighting, at most `cap` ids.
+#[derive(Default)]
+struct RecentEmitters {
+    current: HashSet<EmitterId>,
+    previous: HashSet<EmitterId>,
+}
+
+impl RecentEmitters {
+    fn contains_touch(&mut self, id: EmitterId) -> bool {
+        if self.current.contains(&id) {
+            return true;
+        }
+        if self.previous.remove(&id) {
+            self.insert(id);
+            return true;
+        }
+        false
+    }
+
+    fn insert(&mut self, id: EmitterId) {
+        if self.current.len() >= MAX_TRACKED_EMITTERS / 2 {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        self.current.insert(id);
+    }
+}
 
 /// The shared sink for every plugin instance (wrap in `Arc<Mutex<_>>`).
 pub struct Ingest {
     repo: Repository,
     republish: Option<Publisher>,
     stats: IngestStats,
-    emitters: Vec<EmitterId>,
+    seen: RecentEmitters,
+    new_emitters: Vec<EmitterId>,
 }
 
 impl Ingest {
@@ -88,15 +124,32 @@ impl Ingest {
             repo,
             republish: None,
             stats: IngestStats::default(),
-            emitters: Vec::new(),
+            seen: RecentEmitters::default(),
+            new_emitters: Vec::new(),
         }
     }
 
-    /// The emitters the stored decodes' identity sightings resolved to, in first-seen order (at
-    /// most 4096), so a caller can add the plugin's service family to them (T-037b). Ids only:
-    /// identities stay gated by their decodes' class.
-    pub fn emitters(&self) -> &[EmitterId] {
-        &self.emitters
+    /// The emitters the stored decodes' identity sightings resolved to that were not seen
+    /// recently, in first-seen order since the last call, so a caller can add the decoder's service
+    /// family to them (T-037b, T-112). A long-running caller drains it periodically: tracking is
+    /// bounded (the last [`MAX_TRACKED_EMITTERS`] or so emitters), so an emitter first seen hours
+    /// in is still offered, and one silent long enough to be forgotten is offered again (the
+    /// family step is idempotent in effect). Ids only: identities stay gated by their decodes'
+    /// class.
+    pub fn take_new_emitters(&mut self) -> Vec<EmitterId> {
+        std::mem::take(&mut self.new_emitters)
+    }
+
+    /// Runs `f` with every repository write it makes in one write transaction (T-112), committed
+    /// at the end. Each row keeps its own gate, sanitising and error handling: a write that fails
+    /// inside is counted as before and does not undo the others (writes that open their own
+    /// transaction nest as savepoints). On a failed begin or commit nothing of the batch is
+    /// stored and the error is returned.
+    pub fn batch<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> Result<T, RepoError> {
+        self.repo.begin_write_batch()?;
+        let out = f(self);
+        self.repo.commit_write_batch()?;
+        Ok(out)
     }
 
     /// Stores into `repo` and republishes each stored row on a messages-stream `publisher`.
@@ -218,10 +271,11 @@ impl Ingest {
         match self.repo.record_sighting(&sighting, None) {
             Ok(r) => {
                 self.stats.emitters_upserted += 1;
-                if !self.emitters.contains(&r.emitter_id)
-                    && self.emitters.len() < MAX_TRACKED_EMITTERS
+                if !self.seen.contains_touch(r.emitter_id)
+                    && self.new_emitters.len() < MAX_PENDING_EMITTERS
                 {
-                    self.emitters.push(r.emitter_id);
+                    self.seen.insert(r.emitter_id);
+                    self.new_emitters.push(r.emitter_id);
                 }
                 if r.conflict.is_some() {
                     self.stats.identity_conflicts += 1;
@@ -260,5 +314,121 @@ fn token_or_unsanitized(value: &str) -> String {
         value.to_owned()
     } else {
         UNSANITIZED.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hk_model::{
+        ContentClass, CrcStatus, DecodeId, DecodedIdentity, IdentityAccess, IdentityScheme,
+        Timestamp,
+    };
+
+    const IDENTITIES: u32 = 5000;
+
+    fn aircraft(icao: u32) -> Decode {
+        Decode {
+            id: DecodeId::new(),
+            demodulation_ref: None,
+            recording_ref: None,
+            decoder_id: "readsb".into(),
+            decoder_version: "1".into(),
+            frame_model: "adsb-es".into(),
+            metadata: serde_json::json!({"df": 17}),
+            content: None,
+            crc_status: CrcStatus::Valid,
+            identity: Some(DecodedIdentity {
+                scheme: IdentityScheme::AdsbIcao,
+                value: format!("{icao:06x}"),
+            }),
+            content_class: ContentClass::Unrestricted,
+            t: Timestamp::from_unix_nanos(i64::from(icao) + 1),
+        }
+    }
+
+    fn store(ing: &mut Ingest, icao: u32) {
+        ing.store_decode(aircraft(icao), None, None, Some(1090e6), Some(2e6))
+            .unwrap();
+    }
+
+    /// T-112: a writer that drains periodically (a long ADS-B run) keeps being offered emitters
+    /// first seen after the first 4096, while re-sightings of recent ones are not offered again.
+    #[test]
+    fn a_draining_writer_is_offered_new_emitters_beyond_the_tracking_limit() {
+        let mut ing = Ingest::new(Repository::open_in_memory().unwrap());
+        let mut offered = HashSet::new();
+        for icao in 0..IDENTITIES {
+            store(&mut ing, icao);
+            // A recent aircraft seen again: no new emitter.
+            if icao > 0 {
+                store(&mut ing, icao - 1);
+            }
+            if icao % 500 == 499 {
+                for e in ing.take_new_emitters() {
+                    assert!(offered.insert(e), "an emitter offered twice while recent");
+                }
+            }
+        }
+        offered.extend(ing.take_new_emitters());
+        assert!(IDENTITIES as usize > MAX_TRACKED_EMITTERS);
+        assert_eq!(offered.len(), IDENTITIES as usize);
+        assert_eq!(ing.stats().emitters_upserted, 2 * u64::from(IDENTITIES) - 1);
+        assert!(ing.take_new_emitters().is_empty());
+        // A late aircraft (past 4096) seen again is still recent: not offered again.
+        store(&mut ing, IDENTITIES - 1);
+        assert!(ing.take_new_emitters().is_empty());
+    }
+
+    /// A plugin chain takes its emitters once at the end: all of them, not the first 4096.
+    #[test]
+    fn a_chain_that_takes_at_the_end_gets_every_emitter() {
+        let mut ing = Ingest::new(Repository::open_in_memory().unwrap());
+        for icao in 0..IDENTITIES {
+            store(&mut ing, icao);
+        }
+        let all = ing.take_new_emitters();
+        assert_eq!(all.len(), IDENTITIES as usize);
+        assert_eq!(all.iter().collect::<HashSet<_>>().len(), all.len());
+    }
+
+    /// Rows stored in one batch commit together with their sightings, each row keeps its own gate,
+    /// and a batch leaves the connection usable for ordinary writes.
+    #[test]
+    fn a_batch_stores_rows_and_sightings_in_one_transaction_with_per_row_gating() {
+        let mut ing = Ingest::new(Repository::open_in_memory().unwrap());
+        let mut gated = aircraft(7);
+        gated.content_class = ContentClass::RestrictedPaging;
+        gated.content = Some(serde_json::json!({"text": "refused"}));
+        gated.identity = None;
+        let gated_id = gated.id;
+        let ids = ing
+            .batch(|ing| {
+                let mut ids = Vec::new();
+                for icao in 0..10 {
+                    let d = aircraft(icao);
+                    ids.push(d.id);
+                    ing.store_decode(d, None, None, None, None).unwrap();
+                }
+                let stored = ing.store_decode(gated, None, None, None, None).unwrap();
+                assert!(stored.content_gated, "the gate still applies per row");
+                ids
+            })
+            .unwrap();
+        assert_eq!(ing.take_new_emitters().len(), 10);
+        let s = ing.stats();
+        assert_eq!((s.decodes_stored, s.content_gated), (11, 1));
+        for id in ids {
+            ing.repo()
+                .decode_with_access(id, IdentityAccess::Standard)
+                .unwrap();
+        }
+        let g = ing
+            .repo()
+            .decode_with_access(gated_id, IdentityAccess::Standard)
+            .unwrap();
+        assert!(g.decode.content.is_none());
+        store(&mut ing, 99);
+        assert!(ing.repo_mut().commit_write_batch().is_err(), "batch closed");
     }
 }

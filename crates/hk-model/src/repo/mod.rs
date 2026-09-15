@@ -280,16 +280,82 @@ impl Repository {
         Ok(out)
     }
 
-    /// A write transaction that holds the write lock from its first statement.
-    fn write_tx(&mut self) -> Result<Transaction<'_>, RepoError> {
-        Ok(self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?)
+    /// Opens a write batch (T-112): every write on this connection until
+    /// [`Self::commit_write_batch`] lands in one IMMEDIATE transaction. Writes that open their
+    /// own transaction nest as savepoints, so a failed one rolls back only itself. Refused when a
+    /// transaction is already open.
+    pub fn begin_write_batch(&mut self) -> Result<(), RepoError> {
+        if !self.conn.is_autocommit() {
+            return Err(RepoError::Invalid("a transaction is already open".into()));
+        }
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(())
     }
 
-    /// A read transaction: every read inside it sees one snapshot. Dropping it ends it.
-    fn read_tx(&self) -> Result<Transaction<'_>, RepoError> {
-        Ok(self.conn.unchecked_transaction()?)
+    /// Commits the batch [`Self::begin_write_batch`] opened (rolled back if the commit fails, or
+    /// an error if SQLite already rolled it back).
+    pub fn commit_write_batch(&mut self) -> Result<(), RepoError> {
+        if self.conn.is_autocommit() {
+            return Err(RepoError::Invalid("no write batch is open".into()));
+        }
+        if let Err(e) = self.conn.execute_batch("COMMIT") {
+            if !self.conn.is_autocommit() {
+                let _ = self.conn.execute_batch("ROLLBACK");
+            }
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    /// A write transaction that holds the write lock from its first statement, or a savepoint
+    /// inside an open write batch.
+    fn write_tx(&mut self) -> Result<Tx<'_>, RepoError> {
+        if self.conn.is_autocommit() {
+            Ok(Tx::Own(self.conn.transaction_with_behavior(
+                TransactionBehavior::Immediate,
+            )?))
+        } else {
+            Ok(Tx::Savepoint(self.conn.savepoint()?))
+        }
+    }
+
+    /// A read transaction: every read inside it sees one snapshot. Dropping it ends it. Inside
+    /// an open write batch the reads join it (one snapshot, the batch's own writes included).
+    fn read_tx(&self) -> Result<Tx<'_>, RepoError> {
+        if self.conn.is_autocommit() {
+            Ok(Tx::Own(self.conn.unchecked_transaction()?))
+        } else {
+            Ok(Tx::Joined(&self.conn))
+        }
+    }
+}
+
+/// A transaction scope: its own transaction, a savepoint in an open batch, or the batch itself.
+enum Tx<'a> {
+    Own(Transaction<'a>),
+    Savepoint(rusqlite::Savepoint<'a>),
+    Joined(&'a Connection),
+}
+
+impl Tx<'_> {
+    fn commit(self) -> rusqlite::Result<()> {
+        match self {
+            Tx::Own(t) => t.commit(),
+            Tx::Savepoint(s) => s.commit(),
+            Tx::Joined(_) => Ok(()),
+        }
+    }
+}
+
+impl std::ops::Deref for Tx<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        match self {
+            Tx::Own(t) => t,
+            Tx::Savepoint(s) => s,
+            Tx::Joined(c) => c,
+        }
     }
 }
 

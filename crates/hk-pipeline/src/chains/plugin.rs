@@ -353,7 +353,7 @@ fn run_inner(
     if let Some(p) = ing.take_publisher() {
         p.finish();
     }
-    let emitters = ing.emitters().to_vec();
+    let emitters = ing.take_new_emitters();
     drop(ing);
     classify_decoder_emitters(shared, &plugin_id, cand.track, &emitters, last_t);
     Ok(())

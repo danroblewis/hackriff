@@ -195,4 +195,20 @@ fn a_messages_output_queues_frames_without_allocating() {
     assert_eq!(queued, 64);
     assert_eq!(stats.decodes_dropped.load(Ordering::Relaxed), 2);
     assert_eq!(rx.try_iter().count(), 64);
+
+    // T-112: nothing outlives the test. Dropping the sink closes its queue (the receiver sees the
+    // disconnect, no sender left) and releases its frames' layer trees; the output buffer is the
+    // last holder of the tree.
+    drop(sink);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+    drop(rx);
+    drop(out);
+    assert_eq!(
+        Arc::strong_count(&tree),
+        1,
+        "no queued frame still holds the tree"
+    );
 }

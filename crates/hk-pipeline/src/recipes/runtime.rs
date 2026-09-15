@@ -81,6 +81,53 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Takes the value out of `m` and releases the lock before returning it, so the caller drops it
+/// unlocked (`drop(lock(m).take())` would drop it while the guard is still held: a pending edit's
+/// drop joins sink writers).
+pub(crate) fn take_unlocked<T>(m: &Mutex<Option<T>>) -> Option<T> {
+    let mut guard = lock(m);
+    let value = guard.take();
+    drop(guard);
+    value
+}
+
+#[cfg(test)]
+mod take_unlocked_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    type Slot = Arc<Mutex<Option<Probe>>>;
+
+    /// Records whether its mutex was free when it was dropped (as a pending edit's sink writers
+    /// are joined on drop).
+    struct Probe(Slot, Arc<AtomicBool>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.1.store(self.0.try_lock().is_ok(), Ordering::SeqCst);
+        }
+    }
+
+    /// T-112: a never-applied pending edit is dropped after `ctl.pending` is released.
+    #[test]
+    fn a_taken_pending_value_is_dropped_with_the_lock_released() {
+        let free = Arc::new(AtomicBool::new(false));
+        let pending: Slot = Arc::new(Mutex::new(None));
+        *lock(&pending) = Some(Probe(Arc::clone(&pending), Arc::clone(&free)));
+        drop(take_unlocked(&pending));
+        assert!(
+            free.load(Ordering::SeqCst),
+            "dropped while the lock was held"
+        );
+        assert!(lock(&pending).is_none());
+
+        // The pattern it replaces drops the value under the guard.
+        *lock(&pending) = Some(Probe(Arc::clone(&pending), Arc::clone(&free)));
+        drop(lock(&pending).take());
+        assert!(!free.load(Ordering::SeqCst));
+    }
+}
+
 /// A refused or failed runtime request: HTTP-style status, stable code, message without values,
 /// and the recipe errors/warnings with paths when validation refused it.
 #[derive(Clone, Debug, PartialEq)]
@@ -1337,7 +1384,8 @@ fn wait_edit(
             Ok(d) => return Ok(d),
             Err(RecvTimeoutError::Timeout) => {
                 let running = ctl.running.load(Ordering::SeqCst);
-                if (!running || Instant::now() > deadline) && lock(&ctl.pending).take().is_some() {
+                if (!running || Instant::now() > deadline) && take_unlocked(&ctl.pending).is_some()
+                {
                     // Not taken by the pipeline thread: withdrawn, nothing changed.
                     return Err(if running {
                         RuntimeError::new(
@@ -1426,8 +1474,10 @@ impl Runner {
         }
         *lock(&self.ctl.end) = Some(reason);
         self.ctl.running.store(false, Ordering::SeqCst);
-        // An edit that never reached a boundary: dropping it disconnects its waiter.
-        drop(lock(&self.ctl.pending).take());
+        // An edit that never reached a boundary: dropping it disconnects its waiter. Dropping it
+        // joins the idle writers of its new message sinks, so it is taken out under the lock and
+        // dropped after the lock is released (T-112).
+        drop(take_unlocked(&self.ctl.pending));
         drop(std::mem::take(&mut *lock(&self.ctl.new_taps)));
         crate::chains::set_thread_stat(None);
     }

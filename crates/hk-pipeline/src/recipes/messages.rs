@@ -23,6 +23,7 @@
 //!   recipe id) as decoder evidence.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
@@ -41,7 +42,7 @@ use crate::chains::plugin::classify_decoder_emitters;
 use crate::recipes::runtime::PipelineStats;
 use crate::recipes::taps::{FrameCtx, StreamCtx};
 use crate::run::Shared;
-use crate::stats::inc;
+use crate::stats::{add, inc};
 
 /// Frames a `messages` output queues for its writer before dropping (and counting) more.
 pub const MESSAGE_QUEUE: usize = 1024;
@@ -194,9 +195,7 @@ impl MessagesSink {
             .decode
             .clone()
             .ok_or("a messages output needs a decode mapping")?;
-        let policy: Option<MetadataPolicy> = serde_json::to_value(&recipe.output_policy)
-            .ok()
-            .and_then(|v| output_metadata_policy(&v).ok().flatten());
+        let policy = policy_or_warn(recipe, &spec.id);
         let mut header = StreamHeader::new(
             format!("decodes/{}/{}", ctx.pipeline_id, spec.id),
             StreamKind::Messages,
@@ -219,8 +218,8 @@ impl MessagesSink {
         let stream = publisher.as_ref().map(|p| (header.clone(), p.handle()));
         let repo = Repository::open(&shared.db_path).map_err(|e| format!("repository: {e}"))?;
         let evidence = mapping.service.clone().unwrap_or_else(|| recipe.id.clone());
+        let (classify, errors) = (Arc::clone(shared), Arc::clone(shared));
         let writer = Writer {
-            shared: Arc::clone(shared),
             stats: Arc::clone(&stats),
             ingest: match publisher {
                 Some(p) => Ingest::with_republish(repo, p),
@@ -230,22 +229,64 @@ impl MessagesSink {
             policy,
             emitter: ctx.emitter_id,
             bandwidth_hz: ctx.bandwidth_hz,
-            evidence,
-            classified: 0,
+            max_batch: MAX_BATCH,
+            on_emitters: Box::new(move |new, t| {
+                classify_decoder_emitters(&classify, &evidence, None, new, t);
+            }),
+            on_error: Box::new(move |n| add(&errors.counters.chains.errors, n)),
         };
+        Ok((Self::start(writer, stats)?, stream))
+    }
+
+    /// A writer for output `output_id` of `recipe` storing into the repository at `db_path` under
+    /// `class`, without a run: no republish, no emitter context, and the family step replaced by
+    /// `on_emitters` (the emitters first seen per batch). Transactions hold at most `max_batch`
+    /// rows. For tests and benchmarks of the writer side; a pipeline uses its own sinks.
+    #[doc(hidden)]
+    pub fn spawn_standalone(
+        db_path: &Path,
+        recipe: &Recipe,
+        output_id: &str,
+        class: ContentClass,
+        max_batch: usize,
+        stats: Arc<PipelineStats>,
+        on_emitters: impl FnMut(&[EmitterId], Timestamp) + Send + 'static,
+    ) -> Result<Self, String> {
+        let spec = recipe
+            .outputs
+            .iter()
+            .find(|o| o.id == output_id)
+            .ok_or("no such output")?;
+        let mapping = spec
+            .decode
+            .clone()
+            .ok_or("a messages output needs a decode mapping")?;
+        let repo = Repository::open(db_path).map_err(|e| format!("repository: {e}"))?;
+        let writer = Writer {
+            stats: Arc::clone(&stats),
+            ingest: Ingest::new(repo),
+            row: RowSpec::new(recipe, mapping, class),
+            policy: policy_or_warn(recipe, output_id),
+            emitter: None,
+            bandwidth_hz: 0.0,
+            max_batch: max_batch.max(1),
+            on_emitters: Box::new(on_emitters),
+            on_error: Box::new(|_| {}),
+        };
+        Self::start(writer, stats)
+    }
+
+    fn start(writer: Writer, stats: Arc<PipelineStats>) -> Result<Self, String> {
         let (tx, rx) = mpsc::sync_channel(MESSAGE_QUEUE);
         let join = thread::Builder::new()
             .name("hk-recipe-decodes".into())
             .spawn(move || writer.run(rx))
             .map_err(|e| format!("spawn: {e}"))?;
-        Ok((
-            Self {
-                tx: Some(tx),
-                writer: Some(join),
-                stats,
-            },
-            stream,
-        ))
+        Ok(Self {
+            tx: Some(tx),
+            writer: Some(join),
+            stats,
+        })
     }
 
     /// Queues the output's CRC-valid, fitted frames for the writer (pipeline thread: no
@@ -300,51 +341,146 @@ impl Drop for MessagesSink {
     }
 }
 
+/// Rows a writer stores per transaction when its queue has backed up (T-112).
+pub const MAX_BATCH: usize = 128;
+
+/// The recipe's `output_policy` as the manifest rules parse it: `Err` (with the reason) when
+/// malformed, `Ok(None)` when it declares no allowlist.
+pub(crate) fn recipe_output_policy(recipe: &Recipe) -> Result<Option<MetadataPolicy>, String> {
+    let v = serde_json::to_value(&recipe.output_policy).map_err(|e| e.to_string())?;
+    output_metadata_policy(&v).map_err(|e| e.to_string())
+}
+
+/// [`recipe_output_policy`], failing closed: a malformed policy is no policy (restricted rows
+/// reduced to the empty allowlist, nothing republished) and is logged. Staging reports it as a
+/// pipeline warning ([`crate::recipes::graph::stage`]).
+fn policy_or_warn(recipe: &Recipe, output_id: &str) -> Option<MetadataPolicy> {
+    recipe_output_policy(recipe).unwrap_or_else(|e| {
+        eprintln!(
+            "hk-pipeline: warning: recipe {}@{} output {output_id}: malformed output_policy ({e}); \
+             restricted decodes keep no metadata and are not republished",
+            recipe.id, recipe.version
+        );
+        None
+    })
+}
+
+/// Emitters first seen in a batch, and the batch's last frame time.
+type OnEmitters = Box<dyn FnMut(&[EmitterId], Timestamp) + Send>;
+
 /// The off-thread end: sanitise, store, attach, classify, republish.
 struct Writer {
-    shared: Arc<Shared>,
     stats: Arc<PipelineStats>,
     ingest: Ingest,
     row: RowSpec,
     policy: Option<MetadataPolicy>,
     emitter: Option<EmitterId>,
     bandwidth_hz: f64,
-    evidence: String,
-    classified: usize,
+    max_batch: usize,
+    /// The family step for new emitters.
+    on_emitters: OnEmitters,
+    /// Counts rows that could not be stored.
+    on_error: Box<dyn FnMut(u64) + Send>,
 }
 
 impl Writer {
     fn run(mut self, rx: Receiver<QueuedFrame>) {
-        for job in rx {
-            let Some(mut d) = self.row.decode(&job.layers, job.t) else {
-                continue;
-            };
-            drop(job.layers);
-            // The same sanitising as `hk_plugins::output::parse_line`: a no-op under a class that
-            // permits content, the output policy's allowlist otherwise.
-            policy::sanitize_decode(self.policy.as_ref(), DECODE_MESSAGE_SCHEMA, &mut d);
-            let stored = self.ingest.store_decode(
-                d,
-                self.emitter,
-                None,
-                Some(job.channel_hz),
-                Some(self.bandwidth_hz),
-            );
-            match stored {
-                Ok(_) => inc(&self.stats.decodes),
-                Err(_) => inc(&self.shared.counters.chains.errors),
+        let mut batch = Vec::with_capacity(self.max_batch);
+        while let Ok(first) = rx.recv() {
+            // Whatever queued up behind the first frame (at most `max_batch`) goes in one
+            // transaction: one commit per batch instead of two per row when the queue backs up.
+            batch.push(first);
+            while batch.len() < self.max_batch {
+                match rx.try_recv() {
+                    Ok(job) => batch.push(job),
+                    Err(_) => break,
+                }
             }
-            let emitters = self.ingest.emitters();
-            if emitters.len() > self.classified {
-                let new = emitters[self.classified..].to_vec();
-                self.classified = emitters.len();
-                classify_decoder_emitters(&self.shared, &self.evidence, None, &new, job.t);
-            }
+            self.store_batch(&mut batch);
         }
         if let Some(p) = self.ingest.take_publisher() {
             p.finish();
         }
     }
+
+    /// Stores `batch` (drained) in one transaction, then runs the family step for the emitters it
+    /// saw first (after the commit, so the step's own connection sees them).
+    fn store_batch(&mut self, batch: &mut Vec<QueuedFrame>) {
+        let Some(last_t) = batch.last().map(|j| j.t) else {
+            return;
+        };
+        let (row, policy) = (&self.row, self.policy.as_ref());
+        let (emitter, bandwidth_hz) = (self.emitter, self.bandwidth_hz);
+        let mut attempted = 0u64;
+        let result = self.ingest.batch(|ingest| {
+            store_rows(
+                ingest,
+                row,
+                policy,
+                emitter,
+                bandwidth_hz,
+                batch,
+                &mut attempted,
+            )
+        });
+        let (ok, failed) = match result {
+            Ok(counts) => counts,
+            // The batch could not begin (the closure never ran, nothing was drained): store the
+            // rows one transaction each, as before T-112, so none is lost uncounted.
+            Err(_) if !batch.is_empty() => store_rows(
+                &mut self.ingest,
+                row,
+                policy,
+                emitter,
+                bandwidth_hz,
+                batch,
+                &mut attempted,
+            ),
+            // The commit failed: every attempted row was rolled back, and so were the emitters
+            // they created (their ids must not reach the family step).
+            Err(_) => {
+                drop(self.ingest.take_new_emitters());
+                (0, attempted)
+            }
+        };
+        batch.clear();
+        add(&self.stats.decodes, ok);
+        (self.on_error)(failed);
+        let new = self.ingest.take_new_emitters();
+        if !new.is_empty() {
+            (self.on_emitters)(&new, last_t);
+        }
+    }
+}
+
+/// Stores the rows of `batch` (drained) through `ingest`, each with its own sanitising, shape
+/// check and repository content gate exactly as before T-112. Returns `(stored, failed)` and
+/// counts rows that mapped to a Decode in `attempted`.
+fn store_rows(
+    ingest: &mut Ingest,
+    row: &RowSpec,
+    policy: Option<&MetadataPolicy>,
+    emitter: Option<EmitterId>,
+    bandwidth_hz: f64,
+    batch: &mut Vec<QueuedFrame>,
+    attempted: &mut u64,
+) -> (u64, u64) {
+    let (mut ok, mut failed) = (0u64, 0u64);
+    for job in batch.drain(..) {
+        let Some(mut d) = row.decode(&job.layers, job.t) else {
+            continue;
+        };
+        drop(job.layers);
+        *attempted += 1;
+        // The same sanitising as `hk_plugins::output::parse_line`: a no-op under a class that
+        // permits content, the output policy's allowlist otherwise.
+        policy::sanitize_decode(policy, DECODE_MESSAGE_SCHEMA, &mut d);
+        match ingest.store_decode(d, emitter, None, Some(job.channel_hz), Some(bandwidth_hz)) {
+            Ok(_) => ok += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    (ok, failed)
 }
 
 #[cfg(test)]

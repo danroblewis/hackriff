@@ -415,6 +415,22 @@ pub fn stage(
             rate_hz: info.rate_hz,
         });
     }
+    // T-112: a malformed `output_policy` fails closed at the writer (no allowlist: restricted
+    // decodes keep no metadata and are not republished); say so instead of swallowing it.
+    if recipe
+        .outputs
+        .iter()
+        .any(|o| o.kind == hk_recipe::OutputKind::Messages)
+        && let Err(e) = crate::recipes::messages::recipe_output_policy(&recipe)
+    {
+        warnings.push(RecipeError {
+            path: "output_policy".into(),
+            message: format!(
+                "malformed output_policy ({e}); messages outputs store restricted decodes with \
+                 no metadata and do not republish them"
+            ),
+        });
+    }
     let _ = doc_index;
     let old_len = old.map_or(0, |(_, s)| s.nodes.len());
     let n = nodes.len();
