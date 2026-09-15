@@ -184,6 +184,43 @@ impl FirstSightingRate {
     }
 }
 
+/// T-138 (ADR-0012 §7.1, rule "single persistent new emitter"): the first-sighting count a
+/// confirmed persistent single new emitter stands for. Its re-sighting in a later interval is a
+/// second, independent look at the same arrival, so it is scored as two first sightings.
+pub const PERSISTENT_SINGLE_EQUIVALENT_COUNT: u64 = 2;
+
+/// T-138: novelty of one confirmed persistent new emitter at a site whose baseline first-sighting
+/// rate is `rate_per_s`: [`new_emitter_novelty`] of [`PERSISTENT_SINGLE_EQUIVALENT_COUNT`]
+/// sightings over a full [`FirstSightingRate::WINDOW_S`] (the global −log10 p / 6 mapping is
+/// unchanged). With μ = rate · WINDOW_S, novelty ≥ `on` ⇔ P(X ≥ 1 | μ) ≤
+/// [`persistent_single_alpha`]`(on)`, i.e. at the default on level 0.7 the gate
+/// P(≥ 1 new emitter in the window | μ) ≤ α ≈ 0.0112 (μ ≤ 0.0113): the rule alarms exactly where
+/// two first sightings in one window would reach the existing 0.7 budget (tail 10^−4.2).
+pub fn persistent_single_novelty(rate_per_s: f64) -> f64 {
+    new_emitter_novelty(
+        PERSISTENT_SINGLE_EQUIVALENT_COUNT,
+        rate_per_s,
+        FirstSightingRate::WINDOW_S,
+    )
+}
+
+/// T-138: the α equivalent to an alarm on level `on` for [`persistent_single_novelty`]:
+/// μ* solves P(X ≥ 2 | μ*) = 10^(−6·on) and α = P(X ≥ 1 | μ*) = 1 − e^(−μ*).
+pub fn persistent_single_alpha(on: f64) -> f64 {
+    let target = 10f64.powf(-6.0 * on.clamp(0.0, 1.0));
+    let tail2 = |mu: f64| -(-mu).exp_m1() - mu * (-mu).exp();
+    let (mut lo, mut hi) = (0.0_f64, 50.0_f64);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if tail2(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    -(-0.5 * (lo + hi)).exp_m1()
+}
+
 #[cfg(test)]
 mod tests {
     use hk_model::attention::baseline::BaselineResolution;
@@ -273,5 +310,32 @@ mod tests {
         // Ten first sightings in the next hour: novel.
         r.record(t(24.5), 10, 3600.0, false);
         assert!(r.novelty().unwrap() > 0.9, "{:?}", r.novelty());
+    }
+
+    /// T-138: the persistent single-emitter rule's gate P(≥1 | μ) ≤ α is the 0.7 on level of two
+    /// first sightings, and the single-sighting (global) score is untouched.
+    #[test]
+    fn novelty_persistent_single_alpha_matches_on_level() {
+        let alpha = persistent_single_alpha(0.7);
+        assert!((alpha - 0.011_21).abs() < 1e-4, "α = {alpha}");
+        let w = FirstSightingRate::WINDOW_S;
+        for mu in [1e-4, 0.005, 0.0105, 0.0112, 0.0114, 0.012, 0.05, 0.5] {
+            let rate = mu / w;
+            let p1 = -(-mu).exp_m1();
+            assert_eq!(
+                persistent_single_novelty(rate) >= 0.7,
+                p1 <= alpha,
+                "μ = {mu}: novelty {} vs P(≥1) {p1}",
+                persistent_single_novelty(rate)
+            );
+            assert!(
+                new_emitter_novelty(1, rate, w) < 0.7,
+                "a lone sighting still tops out"
+            );
+        }
+        // One new emitter a week, (k + 1) over 7 days: quiet. One every 2 h: busy.
+        let quiet = 1.0 / (7.0 * 86_400.0);
+        assert!(persistent_single_novelty(quiet) >= 0.7);
+        assert!(persistent_single_novelty(1.0 / 7200.0) < 0.4);
     }
 }

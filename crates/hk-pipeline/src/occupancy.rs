@@ -62,7 +62,7 @@ use hk_store::occupancy::{
 use hk_store::{FloorProduct, RegionHistory};
 use serde::Serialize;
 
-use crate::attention::{AttentionService, FirstSighting};
+use crate::attention::{AttentionService, EmitterSeen, FirstSighting};
 use crate::stats::Counters;
 
 const HOUR_NS: i64 = 3_600_000_000_000;
@@ -835,6 +835,66 @@ impl OccupancyService {
         new
     }
 
+    /// T-138: the observed bands of `rows` and the inventory emitters last seen inside `iv` within
+    /// them. An emitter is suspect when the interval's detections over its extent are all suspect
+    /// (§2.6); with none read (inventory lag) it is not.
+    fn emitters_seen(
+        &self,
+        inner: &mut Inner,
+        iv: TimeRange,
+        rows: &[OccupancyStat],
+        dets: &[DetectionExtent],
+    ) -> (Vec<FreqRange>, Vec<EmitterSeen>) {
+        let bands: Vec<FreqRange> = rows
+            .iter()
+            .filter_map(|r| match r.subject {
+                OccupancySubject::Band { freq } => Some(freq),
+                OccupancySubject::Channel { .. } => None,
+            })
+            .collect();
+        if inner.repo.is_none() {
+            inner.repo = Repository::open(&self.db_path).ok();
+        }
+        let Some(repo) = inner.repo.as_ref() else {
+            inner.stats.errors += 1;
+            return (bands, Vec::new());
+        };
+        let mut seen: BTreeMap<hk_model::ids::EmitterId, EmitterSeen> = BTreeMap::new();
+        for band in &bands {
+            match repo.emitters_in_region(&Region::new(*band, iv)) {
+                Ok(es) => {
+                    for e in es
+                        .iter()
+                        .filter(|e| e.last_seen >= iv.start && e.last_seen <= iv.end)
+                    {
+                        let freq = e.freq();
+                        let over: Vec<&DetectionExtent> = dets
+                            .iter()
+                            .filter(|d| {
+                                d.freq.lo_hz < freq.hi_hz
+                                    && d.freq.hi_hz > freq.lo_hz
+                                    && d.time.end >= iv.start
+                                    && d.time.start <= iv.end
+                            })
+                            .collect();
+                        seen.insert(
+                            e.id,
+                            EmitterSeen {
+                                emitter: e.id,
+                                freq,
+                                first_seen: e.first_seen,
+                                last_seen: e.last_seen,
+                                suspect: !over.is_empty() && over.iter().all(|d| d.suspect),
+                            },
+                        );
+                    }
+                }
+                Err(_) => inner.stats.errors += 1,
+            }
+        }
+        (bands, seen.into_values().collect())
+    }
+
     fn detections(&self, inner: &mut Inner, span: TimeRange) -> Vec<DetectionExtent> {
         if inner.repo.is_none() {
             inner.repo = Repository::open(&self.db_path).ok();
@@ -993,6 +1053,11 @@ impl OccupancyService {
                 rows.iter().filter(|r| r.interval == iv).cloned().collect();
             let sightings = self.first_sightings(inner, iv, &own);
             a.note_first_sightings(site, &sightings);
+            // T-138: the persistent single-emitter rule reads what this interval saw.
+            if a.has_pending_sightings(site) {
+                let (observed, seen) = self.emitters_seen(inner, iv, &own, &dets);
+                a.note_emitters_seen(site, iv.end, &observed, &seen);
+            }
             let gains = channel_gain_keys(&inner.series, iv);
             let folds = a.ingest_interval(&own, sightings.len() as u64, iv.end, gains);
             let new_emitters = a.new_emitter_inputs(site, iv.end);
