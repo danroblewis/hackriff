@@ -1,5 +1,8 @@
-//! Framing blocks (T-087): turn a bit stream into frames. Reuse hk-estimate `framing::sync`
-//! and hk-demod `rds::block` syndromes (ADR-0011 §1.6).
+//! Framing blocks (T-087): turn a bit stream into frames and frames into messages.
+//! `sync_search` wraps hk-estimate `framing::sync::SyncCorrelator` and generalises hk-demod
+//! `rds::block` syndromes (ADR-0011 §1.6); [`length`] is the shared frame-length evaluator.
+
+use std::sync::Arc;
 
 use hk_recipe::PortType::{Bits, Frames};
 use hk_recipe::{BlockDescriptor, PortSpec};
@@ -9,17 +12,42 @@ use crate::schema::{
     ParamExt, boolean, descriptor, frame_length, hex, int, list, object, one_of, param, string,
 };
 
+mod assemble;
+pub(crate) mod common;
+mod deframe;
+mod interleave;
+pub mod length;
+mod sync_search;
+#[cfg(test)]
+mod tests;
+
+pub use assemble::Assemble;
+pub use deframe::Deframe;
+pub use interleave::Interleave;
+pub use sync_search::SyncSearch;
+
 /// Pinned descriptors of this group.
 pub fn planned() -> Vec<BlockDescriptor> {
-    let frames = |name: &str, doc: &str, input: PortSpec| {
+    let interleaver = |name: &str, doc: &str| {
         descriptor(
             name,
             "framing",
             doc,
-            vec![input],
+            vec![PortSpec::new("in", Frames)],
             vec![PortSpec::new("out", Frames)],
-            vec![],
-            false,
+            vec![
+                param(
+                    "depth",
+                    int(1, 65_536),
+                    "Column interleaver: the frame's bits are written row-wise into rows of depth bits and read column by column (a partial last row is ragged). Exclusive with permutation.",
+                ),
+                param(
+                    "permutation",
+                    list(int(0, 65_535), 1),
+                    "Explicit permutation of each period of len bits: output bit i = input bit permutation[i]; a trailing partial period is copied. Exclusive with depth.",
+                ),
+            ],
+            true,
         )
     };
     vec![
@@ -179,23 +207,52 @@ pub fn planned() -> Vec<BlockDescriptor> {
             ],
             true,
         ),
-        frames(
+        descriptor(
             "deframe",
-            "Fixed or length-field variable frames from bits or frames.",
-            PortSpec::any_of("in", &[Bits, Frames]),
+            "framing",
+            "Frames without a sync word: from bits, consecutive frames cut from the stream after a discontinuity; from frames, each input frame split into consecutive sub-frames (a truncated last one is dropped). Fixed frame_bits, or variable by length_from/terminator with frame_bits as the maximum.",
+            vec![PortSpec::any_of("in", &[Bits, Frames])],
+            vec![PortSpec::new("out", Frames)],
+            vec![
+                param(
+                    "frame_bits",
+                    int(1, 1_000_000),
+                    "Frame length, bits; with length_from or terminator, the maximum.",
+                )
+                .required(),
+                param(
+                    "offset_bits",
+                    int(0, 1_000_000),
+                    "Bits skipped before the first frame: after a discontinuity (bits input) or at the start of each input frame (frames input).",
+                )
+                .default_value(0),
+            ]
+            .into_iter()
+            .chain(frame_length())
+            .collect(),
+            true,
         ),
-        frames(
-            "interleave",
-            "Interleave frame bits.",
-            PortSpec::new("in", Frames),
-        ),
-        frames(
+        interleaver("interleave", "Interleave frame bits (column depth or explicit permutation)."),
+        interleaver(
             "deinterleave",
-            "Deinterleave frame bits.",
-            PortSpec::new("in", Frames),
+            "Deinterleave frame bits: the exact inverse of interleave with the same params.",
         ),
     ]
 }
 
-/// Registers this group's implemented blocks (none yet).
-pub fn register(_r: &mut Registry) {}
+/// Registers this group's blocks.
+pub fn register(r: &mut Registry) {
+    use common::{BuildFn, FnFactory};
+    let pinned = planned();
+    let blocks: [(&str, BuildFn); 5] = [
+        ("sync_search", sync_search::build),
+        ("assemble", assemble::build),
+        ("deframe", deframe::build),
+        ("interleave", interleave::build_interleave),
+        ("deinterleave", interleave::build_deinterleave),
+    ];
+    for (name, build) in blocks {
+        r.register(Arc::new(FnFactory::new(&pinned, name, build)))
+            .expect("framing block names are unique");
+    }
+}

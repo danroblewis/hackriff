@@ -186,6 +186,65 @@ pub fn locate_sync(
     best.map(|(h, _)| h)
 }
 
+/// A streaming sync-word correlator (the `sync_search` block, T-087): bits in, the Hamming
+/// distance between the last `bits` bits and the word out. The word's MSB is its first bit on
+/// air.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyncCorrelator {
+    word: u64,
+    mask: u64,
+    bits: u32,
+    reg: u64,
+    fill: u32,
+}
+
+impl SyncCorrelator {
+    /// A correlator for a `bits`-bit word (1..=64). `None` if the word is wider.
+    pub fn new(word: u64, bits: u32) -> Option<Self> {
+        if !(1..=64).contains(&bits) {
+            return None;
+        }
+        let mask = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        (word & !mask == 0).then_some(Self {
+            word,
+            mask,
+            bits,
+            reg: 0,
+            fill: 0,
+        })
+    }
+
+    /// Word length, bits.
+    pub fn bits(&self) -> u32 {
+        self.bits
+    }
+
+    /// Forgets received bits: the next `bits` bits must all arrive before a match.
+    pub fn reset(&mut self) {
+        self.reg = 0;
+        self.fill = 0;
+    }
+
+    /// The last `bits` bits received (first on air = MSB).
+    pub fn register(&self) -> u64 {
+        self.reg & self.mask
+    }
+
+    /// Pushes one bit; the distance to the word once `bits` bits arrived since the last reset.
+    #[inline]
+    pub fn push(&mut self, bit: u8) -> Option<u32> {
+        self.reg = (self.reg << 1) | u64::from(bit & 1);
+        if self.fill < self.bits {
+            self.fill += 1;
+        }
+        (self.fill == self.bits).then(|| ((self.reg ^ self.word) & self.mask).count_ones())
+    }
+}
+
 /// How the learned sync was placed in the common region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -313,6 +372,24 @@ pub(crate) fn learn_sync(
 mod tests {
     use super::*;
     use crate::framing::bits::parse_bit_string;
+
+    #[test]
+    fn sync_correlator_counts_errors_after_a_full_word() {
+        let mut c = SyncCorrelator::new(0b1011, 4).unwrap();
+        assert!(SyncCorrelator::new(0b10110, 4).is_none());
+        let got: Vec<Option<u32>> = [1u8, 0, 1, 1, 1, 0, 1, 0]
+            .iter()
+            .map(|&x| c.push(x))
+            .collect();
+        assert_eq!(got[..3], [None, None, None]);
+        assert_eq!(got[3], Some(0));
+        assert_eq!(c.register(), 0b1010);
+        assert_eq!(got[7], Some(1));
+        c.reset();
+        assert_eq!(c.push(1), None);
+        let mut w = SyncCorrelator::new(u64::MAX, 64).unwrap();
+        assert_eq!((0..64).filter_map(|_| w.push(1)).last(), Some(0));
+    }
 
     fn b(s: &str) -> Vec<u8> {
         parse_bit_string(s).unwrap()

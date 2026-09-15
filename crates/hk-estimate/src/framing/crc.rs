@@ -389,6 +389,122 @@ impl CrcCore {
     }
 }
 
+/// A CRC in the RevEng model over a **bit range** of MSB-first packed bytes, for any width
+/// 1..=32 and any bit count (the `crc` block, T-087; RDS's 10-bit block check, CRC-24 over an
+/// 88-bit ADS-B body). The register is the normal MSB-first one; `refin` feeds each 8-bit
+/// group of the range (from its first bit; a trailing partial group likewise) last bit first,
+/// `refout` reverses the register before `xorout`. Whole-byte ranges with width ≥ 8 and
+/// `refin == refout` run on the table-driven [`CrcCore`]; everything else bit-serially.
+#[derive(Clone, Debug)]
+pub struct BitCrc {
+    width: u8,
+    poly: u32,
+    init: u32,
+    refin: bool,
+    refout: bool,
+    xorout: u32,
+    core: Option<CrcCore>,
+}
+
+impl BitCrc {
+    /// A CRC; `poly` in normal form or full form (with the x^width term, e.g. RDS `0x5B9`), the
+    /// top term implied either way. `None` for a width outside 1..=32 or a wider polynomial.
+    pub fn new(
+        width: u8,
+        poly: u64,
+        init: u32,
+        refin: bool,
+        refout: bool,
+        xorout: u32,
+    ) -> Option<Self> {
+        if !(1..=32).contains(&width) || poly >> (u32::from(width) + 1) != 0 {
+            return None;
+        }
+        let mask = width_mask(width);
+        let poly = (poly & u64::from(mask)) as u32;
+        let core = (width >= 8 && refin == refout).then(|| CrcCore::new(width, poly, refin));
+        Some(Self {
+            width,
+            poly,
+            init: init & mask,
+            refin,
+            refout,
+            xorout: xorout & mask,
+            core,
+        })
+    }
+
+    /// Width, bits.
+    pub fn width(&self) -> u8 {
+        self.width
+    }
+
+    /// All-ones mask for the width.
+    pub fn mask(&self) -> u32 {
+        width_mask(self.width)
+    }
+
+    /// CRC of `n_bits` bits of `bytes` from bit `start_bit` (bit 0 = MSB of byte 0). The range
+    /// must lie inside `bytes`.
+    pub fn compute(&self, bytes: &[u8], start_bit: usize, n_bits: usize) -> u32 {
+        self.run(bytes, start_bit, n_bits, self.init, self.xorout)
+    }
+
+    /// The linear part (init and xorout 0): `compute(d ^ e) = compute(d) ^ linear(e)` for
+    /// ranges of equal length, which syndrome-based correction relies on.
+    pub fn linear(&self, bytes: &[u8], start_bit: usize, n_bits: usize) -> u32 {
+        self.run(bytes, start_bit, n_bits, 0, 0)
+    }
+
+    fn run(&self, bytes: &[u8], start_bit: usize, n_bits: usize, init: u32, xorout: u32) -> u32 {
+        if let Some(core) = &self.core
+            && start_bit % 8 == 0
+            && n_bits % 8 == 0
+        {
+            let s = start_bit / 8;
+            return core.run(core.internal_init(init), &bytes[s..s + n_bits / 8]) ^ xorout;
+        }
+        self.serial(bytes, start_bit, n_bits, init) ^ xorout
+    }
+
+    fn serial(&self, bytes: &[u8], start_bit: usize, n_bits: usize, init: u32) -> u32 {
+        let w = u32::from(self.width);
+        let mask = u64::from(self.mask());
+        let top = 1u64 << (w - 1);
+        let poly = u64::from(self.poly);
+        let bit = |i: usize| u64::from((bytes[i / 8] >> (7 - i % 8)) & 1);
+        let mut reg = u64::from(init);
+        let mut feed = |b: u64| {
+            let fb = u64::from(reg & top != 0) ^ b;
+            reg = (reg << 1) & mask;
+            if fb == 1 {
+                reg ^= poly;
+            }
+        };
+        let end = start_bit + n_bits;
+        if self.refin {
+            let mut g = start_bit;
+            while g < end {
+                let ge = (g + 8).min(end);
+                for i in (g..ge).rev() {
+                    feed(bit(i));
+                }
+                g = ge;
+            }
+        } else {
+            for i in start_bit..end {
+                feed(bit(i));
+            }
+        }
+        let reg = reg as u32;
+        if self.refout {
+            reflect(reg, self.width)
+        } else {
+            reg
+        }
+    }
+}
+
 /// Byte order of a transmitted CRC field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -444,6 +560,46 @@ mod tests {
                 e.name
             );
         }
+    }
+
+    #[test]
+    fn bit_crc_matches_the_catalogue_on_both_paths() {
+        for e in CATALOGUE {
+            let c = e.params;
+            let crc = BitCrc::new(
+                c.width,
+                u64::from(c.poly),
+                c.init,
+                c.refin,
+                c.refout,
+                c.xorout,
+            )
+            .unwrap();
+            assert_eq!(
+                crc.compute(b"123456789", 0, 72),
+                e.check,
+                "{} table",
+                e.name
+            );
+            let serial = crc.serial(b"123456789", 0, 72, c.init) ^ c.xorout;
+            assert_eq!(serial, e.check, "{} serial", e.name);
+            // A range that starts mid-byte takes the serial path and sees the same bits.
+            let mut shifted = vec![0u8; 10];
+            for (i, &b) in b"123456789".iter().enumerate() {
+                shifted[i] |= b >> 3;
+                shifted[i + 1] |= b << 5;
+            }
+            assert_eq!(crc.compute(&shifted, 3, 72), e.check, "{} offset", e.name);
+        }
+        // Full-form polynomial (RDS 0x5B9 = x¹⁰ + …) equals its normal form.
+        let full = BitCrc::new(10, 0x5B9, 0, false, false, 0).unwrap();
+        let normal = BitCrc::new(10, 0x1B9, 0, false, false, 0).unwrap();
+        assert_eq!(
+            full.compute(&[0xC0, 0xDE], 0, 16),
+            normal.compute(&[0xC0, 0xDE], 0, 16)
+        );
+        assert!(BitCrc::new(10, 0xFFF, 0, false, false, 0).is_none());
+        assert!(BitCrc::new(33, 0x1, 0, false, false, 0).is_none());
     }
 
     #[test]
