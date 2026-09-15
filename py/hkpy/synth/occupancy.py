@@ -305,6 +305,10 @@ SCENE_DEFAULTS: dict[str, Any] = {
     "novelty_start_hour": 30.0,
     "novelty_fco": 0.4,
     "novelty_mean_on_s": 90.0,
+    # T-124: the novelty channel's FCO before novelty_start_hour (0: silent until then, the
+    # default). Non-zero makes the injection a change on an established channel ("busier than
+    # usual") instead of a new one.
+    "novelty_pre_fco": 0.0,
     "event_hours_utc": [0, 12],
     "event_duration_s": 90.0,
     "boring_offset_hz": 170e3,
@@ -554,18 +558,25 @@ def build_scene_schedule(seed: int, p: dict[str, Any]) -> dict[str, Any]:
                d_mean_off, "diurnal0")
     add_intervals(diurnal_idx, d_ivs)
 
-    # Novelty: silent until novelty_start_hour, then Markov on/off ---------------------------------
+    # Novelty: silent (or at novelty_pre_fco) until novelty_start_hour, then Markov on/off ---------
     novelty_idx = diurnal_idx + 1
     novelty_start_s = float(p["novelty_start_hour"]) * 3600.0
     n_fco, n_mean_on = float(p["novelty_fco"]), float(p["novelty_mean_on_s"])
     n_mean_off = 0.0 if n_fco >= 1.0 else n_mean_on * (1.0 - n_fco) / n_fco
     n_power = float(ch_rng.uniform(p["power_dbfs_min"], p["power_dbfs_max"]))
+    pre_fco = float(p["novelty_pre_fco"])
+    if not 0.0 <= pre_fco < 1.0:
+        raise ValueError("novelty_pre_fco must be in [0, 1)")
+    n_ivs = []
+    if pre_fco > 0.0:
+        pre_span = min(novelty_start_s, span)
+        pre = _simulate_two_state(rng_for(seed, "occscene", "novelty-pre"), pre_span, n_mean_on,
+                                  n_mean_on * (1.0 - pre_fco) / pre_fco)
+        n_ivs = [(s, min(d, pre_span - s)) for s, d in pre]
     if novelty_start_s < span:
         sub = _simulate_two_state(rng_for(seed, "occscene", "novelty"), span - novelty_start_s,
                                   n_mean_on, n_mean_off)
-        n_ivs = [(novelty_start_s + s, d) for s, d in sub]
-    else:
-        n_ivs = []
+        n_ivs += [(novelty_start_s + s, d) for s, d in sub]
     n_offset = first_offset + (n_markov + 1) * spacing
     add_channel(novelty_idx, "novelty", n_offset, n_power, n_fco, n_mean_on, n_mean_off, "novelty0")
     add_intervals(novelty_idx, n_ivs)
@@ -608,7 +619,8 @@ def build_scene_schedule(seed: int, p: dict[str, Any]) -> dict[str, Any]:
         "channels": channels,
         "intervals": intervals,
         "novelty": {"channel": novelty_idx, "start_hour": float(p["novelty_start_hour"]),
-                   "start_s": novelty_start_s, "center_hz": fc + n_offset, "target_fco": n_fco},
+                   "start_s": novelty_start_s, "center_hz": fc + n_offset, "target_fco": n_fco,
+                   "pre_fco": pre_fco},
         "event_schedule": [{"start_s": t, "duration_s": min(event_dur, span - t),
                             "center_hz": fc + e_offset} for t in event_times],
         "observation_schedule": {"mode": p["revisit_mode"], "n_revisits": int(obs_times.size),
