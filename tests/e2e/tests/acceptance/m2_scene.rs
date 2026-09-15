@@ -27,13 +27,21 @@
 //!
 //! Thresholds are derived below from ADR-0012 and the scene design, fixed before the first green run.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use hk_context::occupancy::alarm::AlarmConfig;
-use hk_context::occupancy::novelty::persistent_single_alpha;
+use hk_context::occupancy::novelty::{
+    LookEvidence, NoveltyConfig, SEQUENTIAL_MAX_GAP_S, ln_normal_upper_tail,
+    normal_upper_tail_inv_ln, persistent_single_alpha, sequential_step,
+};
+use hk_context::report::{MAX_COVERAGE_CELLS, coverage_cells};
+use hk_model::attention::observation::ObservedWindow;
+use hk_model::attention::schedule::poi_fraction;
+use hk_model::attention::score::novelty_from_z;
 use hk_core::{BlockHeader, Pacing, Source, SourceCapabilities, SourceControl, SourceError};
 use hk_e2e::scene::{SceneTruth, join_scene_windows};
 use hk_e2e::{SynthOutput, SynthRequest};
@@ -291,6 +299,8 @@ struct DeviceRun {
     bandit_s: f64,
     sweep_s: f64,
     run_s: f64,
+    /// The observation log over the run (the device's own record of where it looked).
+    records: Vec<ObservationRecord>,
 }
 
 /// Runs `meta` blind through the mock SDR under the bandit scheduler on data dir `dir`. `pin`: the
@@ -374,6 +384,27 @@ fn run_device(dir: &Path, meta: &Path, gain_at: Option<Timestamp>, pin: bool) ->
     );
     let rows = occupancy.span_stats(band, stats_span).expect("span stats");
     let (_, f_cell) = occupancy.plan_info();
+    // Diagnostic (system output only): the learned channel plan and its whole-span rows.
+    let (plan_version, _, _, channels) = occupancy.channels(band);
+    for ch in &channels {
+        let f = ch.key.freq(f_cell);
+        let row = rows.iter().find(|r| {
+            matches!(r.subject, OccupancySubject::Channel { key } if key == ch.key)
+        });
+        eprintln!(
+            "[{T124}] plan v{plan_version} channel {:.4}-{:.4} MHz obw {:.0} Hz evidence {} \
+             first_learned {:.3}: fco {:?} n {:?} suspect {:?} n_eff {:?}",
+            f.lo_hz / 1e6,
+            f.hi_hz / 1e6,
+            ch.obw_hz,
+            ch.evidence,
+            ch.first_learned.as_unix_nanos() as f64 / 1e9,
+            row.and_then(|r| r.fco),
+            row.map(|r| r.n_revisits),
+            row.map(|r| r.n_suspect),
+            row.and_then(|r| r.confidence).map(|c| c.n_eff),
+        );
+    }
     let interval_rows = occupancy
         .query(&OccupancyQuery {
             freq: band,
@@ -408,7 +439,13 @@ fn run_device(dir: &Path, meta: &Path, gain_at: Option<Timestamp>, pin: bool) ->
         }
     }
     let (mut bandit_dwells, mut bandit_s, mut sweep_s) = (0, 0.0, 0.0);
+    let mut tier_s: HashMap<String, (usize, f64)> = HashMap::new();
     for r in &records {
+        if let ObservationRecord::Dwell(d) = r {
+            let e = tier_s.entry(format!("{:?}", d.tier)).or_default();
+            e.0 += 1;
+            e.1 += d.observed_s();
+        }
         match r {
             ObservationRecord::Dwell(d) if d.tier == Tier::Bandit => {
                 bandit_dwells += 1;
@@ -463,10 +500,11 @@ fn run_device(dir: &Path, meta: &Path, gain_at: Option<Timestamp>, pin: bool) ->
         bandit_s,
         sweep_s,
         run_s: wall.elapsed().as_secs_f64(),
+        records,
     };
     eprintln!(
         "[{T124}] run {:.1} s; lost {}; bandit outcomes {}, {} bandit dwells ({:.1} s), sweep \
-         {:.1} s; site {:?}; alarm status {}",
+         {:.1} s; dwell tiers {tier_s:?}; site {:?}; alarm status {}",
         run.run_s,
         run.lost_samples,
         run.bandit_outcomes,
@@ -517,12 +555,27 @@ fn scene_s(truth: &SceneTruth, t_first: Timestamp, t: Timestamp) -> f64 {
 }
 
 fn summary(truth: &SceneTruth, t_first: Timestamp, a: &AnomalyView) -> String {
+    let detail = a.listing.alarm.as_ref().map(|r| {
+        let d = &r.detail;
+        format!(
+            "observed {:.3} baseline {:.3}±{:.3} z {:.2} novelty {:.2} above {} res {:?} slot {:?}",
+            d.observed,
+            d.baseline_mean,
+            d.baseline_spread,
+            d.z,
+            d.novelty,
+            d.intervals_above,
+            d.resolution,
+            d.slot
+        )
+    });
     format!(
-        "{:?} {:.1} kHz raised h{:.2} status {:?} explained {} top {:?}",
+        "{:?} {:.1} kHz raised h{:.2} status {:?} [{}] explained {} top {:?}",
         kind(a),
         freq(a).center_hz() / 1e3,
         scene_s(truth, t_first, raised(a)) / HOUR_S,
         a.listing.status,
+        detail.unwrap_or_default(),
         explained(a),
         a.explanations
             .iter()
@@ -537,10 +590,11 @@ fn at_channel(truth: &SceneTruth, kind: &str, f: &FreqRange) -> bool {
     f.lo_hz <= n.center_hz + n.bandwidth_hz / 2.0 && f.hi_hz >= n.center_hz - n.bandwidth_hz / 2.0
 }
 
-/// (b, i) The revisit budget for an alarm on a change at scene time `inject_s`, derived from the
-/// ADR-0012 §7.2 hysteresis: the change fills the first interval starting at or after it (the
-/// scenes inject on an interval boundary), each close scores it ≥ on, and the alarm raises at the
-/// `on_intervals`-th close. One more interval is allowed for the close running behind the history
+/// (i) The revisit budget for the new-emitter alarm on an emitter appearing at scene time
+/// `inject_s`, derived from T-138 (ADR-0012 §7.1; its latency is not changed by T-146's
+/// busier/quieter rule): the emitter is sighted in the first interval starting at or after
+/// `inject_s` (the scenes inject on an interval boundary), each close that sees it scores it ≥ on
+/// at a mature quiet site's rate, and the alarm raises at the `on_intervals`-th consecutive close. One more interval is allowed for the close running behind the history
 /// (the occupancy close waits on its interval's frames), and one window for the close's trigger:
 /// N = windows starting in [inject, boundary + (on_intervals + 1) · interval] + 1.
 fn max_alarm_revisits(truth: &SceneTruth, inject_s: f64) -> usize {
@@ -591,18 +645,303 @@ fn binomial_upper(n: usize, p: f64, tail: f64) -> usize {
     n
 }
 
-/// (c, i) The false-alarm bound, derived from ADR-0012 §7: novelty = −log10(p)/6, so a scored
-/// input reaches the on level (0.7) under no change with probability ≤ 10^(−6·on); raising needs
-/// `on_intervals` consecutive such closes, so ≤ 10^(−6·on) per scored input is conservative. With
-/// `inputs_mature` scored inputs the unexplained raises are ≲ Poisson(inputs · 10^(−6·on)); the
-/// bound is its 99 % upper quantile.
-fn false_alarm_bound(alarm_status: &Value) -> (u64, usize) {
-    let on = AlarmConfig::default().hysteresis.on;
+/// (c, i) False-alarm bounds per alarm class, derived a priori from ADR-0012 §7.2 (budget) and
+/// §7.1 (T-138).
+///
+/// Per mature scored input (one subject's interval of one kind; `inputs_mature` counts inputs of
+/// every kind, so it bounds each class's count), with Q = Q(z_on), z_on = z_min + on·(z_sat −
+/// z_min) = 7.9 at the defaults:
+/// - `busier-than-usual` / `quieter-than-usual`: the combined single-interval + sequential rule
+///   raises with probability ≤ 2Q² + Q²/2 + Q³ per direction;
+/// - `level-above-baseline`: the single-interval rule (two consecutive intervals ≥ z_on), ≤ Q²;
+/// - `new-emitter` (T-136/T-138): a scored input reaches on with tail ≤ 10^(−6·on).
+///
+/// The unexplained raises of a class are ≲ Poisson(inputs · rate); each bound is the 99 % upper
+/// quantile. At ~10³ inputs the §7.2 classes' mean is ~10⁻²⁷ (bound 0) and new-emitter's ~0.06
+/// (bound 1).
+struct FalseAlarmBound {
+    trials: u64,
+    /// Busier, quieter and level-above-baseline together.
+    budget: usize,
+    new_emitter: usize,
+}
+
+fn false_alarm_bound(alarm_status: &Value) -> FalseAlarmBound {
+    let h = AlarmConfig::default().hysteresis;
+    let cfg = NoveltyConfig::default();
+    let z_on = cfg.z_min + h.on * (cfg.z_sat - cfg.z_min);
+    let q = ln_normal_upper_tail(z_on).exp();
+    let q2 = q * q;
+    let rate = 2.0 * (2.0 * q2 + q2 / 2.0 + q2 * q) + q2;
     let trials = alarm_status["inputs_mature"].as_u64().unwrap_or(0);
-    (
+    FalseAlarmBound {
         trials,
-        poisson_upper(trials as f64 * 10f64.powf(-6.0 * on), 0.01),
-    )
+        budget: poisson_upper(trials as f64 * rate, 0.01),
+        new_emitter: poisson_upper(trials as f64 * 10f64.powf(-6.0 * h.on), 0.01),
+    }
+}
+
+// ---- (b) The busier alarm's latency, predicted a priori by the §7.2 rule itself ----
+
+/// Pools mature at 24 h represented (§3.2): no baseline input is scored before this scene hour.
+const MATURITY_H: f64 = 24.0;
+/// Fewest effective looks per interval: §5.3 keeps discovery ≥ 25 % of radio time, so ≥ 0.25 s
+/// of 50 ms hops per 1 s window, each visiting the injected channel (it lies inside both hops'
+/// covered spans) ⇒ ≥ 5 looks per window, ≥ 10 per interval. An interval of constant state has
+/// no lag-1 ρ, so §2.4 gives n_eff = n.
+const N_EFF_LO: f64 = 10.0;
+/// Most effective looks per interval: both windows fully swept, 20 hops each.
+const N_EFF_HI: f64 = 40.0;
+
+/// On-time fraction of [a, b] under truth intervals `ivs`.
+fn on_fraction(ivs: &[(f64, f64)], a: f64, b: f64) -> f64 {
+    ivs.iter()
+        .map(|&(s, e)| (e.min(b) - s.max(a)).max(0.0))
+        .sum::<f64>()
+        / (b - a)
+}
+
+/// Per 15-min interval of the scene, the channel's truth FCO as the sweep samples it: the mean
+/// on-fraction of the interval's windows (visits spread evenly over each window). `None` for an
+/// interval without windows.
+fn interval_fcos(truth: &SceneTruth, kind: &str, window_s: f64) -> Vec<Option<f64>> {
+    let ivs = truth.intervals(truth.channel(kind).unwrap().channel);
+    let n = (truth.span_s / INTERVAL_S).ceil() as usize;
+    let mut sums = vec![(0.0, 0usize); n];
+    for &s in &truth.window_starts_s {
+        let q = (s / INTERVAL_S).floor() as usize;
+        if q < n {
+            sums[q].0 += on_fraction(&ivs, s, s + window_s);
+            sums[q].1 += 1;
+        }
+    }
+    sums.into_iter()
+        .map(|(f, k)| (k > 0).then(|| f / k as f64))
+        .collect()
+}
+
+/// ln P(X ≥ x) for X ~ Binomial(n, p), x and n rounded to whole looks.
+fn ln_binomial_ge(x: f64, n: f64, p: f64) -> f64 {
+    let (x, n) = (x.round().max(0.0) as u64, n.round() as u64);
+    if x == 0 {
+        return 0.0;
+    }
+    if x > n {
+        return f64::NEG_INFINITY;
+    }
+    let ln_c = |k: u64| {
+        (1..=k)
+            .map(|i| ((n - k + i) as f64 / i as f64).ln())
+            .sum::<f64>()
+    };
+    let terms: Vec<f64> = (x..=n)
+        .map(|k| ln_c(k) + k as f64 * p.ln() + (n - k) as f64 * (1.0 - p).ln())
+        .collect();
+    let m = terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    m + terms.iter().map(|t| (t - m).exp()).sum::<f64>().ln()
+}
+
+/// A look's evidence against occupancy `p`, as §7.2 defines it: Q⁻¹ of the exact binomial tail
+/// P(X ≥ x) when that is ≤ ½, else Q⁻¹ of max(½, mid-p) ≤ 0.
+fn tail_z(x: f64, n: f64, p: f64) -> f64 {
+    let p = p.clamp(1e-12, 1.0 - 1e-12);
+    let ge = ln_binomial_ge(x, n, p);
+    if ge <= -std::f64::consts::LN_2 {
+        return normal_upper_tail_inv_ln(ge);
+    }
+    let gt = ln_binomial_ge(x.round() + 1.0, n, p).exp();
+    normal_upper_tail_inv_ln((0.5 * (ge.exp() + gt)).max(0.5).ln())
+}
+
+/// The first interval index ≥ `not_before` at whose close the §7.2 rule raises
+/// `busier-than-usual` when fed per-interval FCOs `f` from interval `from`: the single-interval
+/// z as §3.4/`occupancy_z` computes it for pool FCO `p`, `n` effective looks and between-slot
+/// variance `bv`; look evidence at `p` for a run's first interval and at min(1, p·lift) after a
+/// busier one; the run through `sequential_step` (sign slack, gap, evidence sum); novelty = max
+/// of the single-interval and sequential novelty; raise after `on_intervals` consecutive on.
+fn predicted_raise(
+    f: &[Option<f64>],
+    from: usize,
+    not_before: usize,
+    p: f64,
+    n: f64,
+    bv: f64,
+    lift: f64,
+) -> Option<usize> {
+    let cfg = NoveltyConfig::default();
+    let h = AlarmConfig::default().hysteresis;
+    let (mut run, mut streak) = (None, 0u32);
+    for (q, fq) in f.iter().enumerate().skip(from) {
+        let Some(fq) = *fq else { continue };
+        let o = (fq * n + 0.5) / (n + 1.0);
+        let z = (fq - p) / ((p * (1.0 - p)).max(o * (1.0 - o)) / n + bv).sqrt();
+        let x = (fq * n).round();
+        let look = LookEvidence {
+            busier_start: z.min(tail_z(x, n, p)),
+            busier_cont: z.min(tail_z(x, n, (p * lift).min(1.0))),
+            quieter_start: (-z).min(tail_z(n - x, n, 1.0 - p)),
+            quieter_cont: (-z).min(tail_z(n - x, n, 1.0 - p)),
+        };
+        let t = Timestamp::from_unix_nanos((q as f64 * INTERVAL_S * 1e9) as i64);
+        let seq = sequential_step(&mut run, t, z, &look, SEQUENTIAL_MAX_GAP_S, &cfg)
+            .filter(|s| s.z > 0.0)
+            .map_or(0.0, |s| s.novelty);
+        let single = if z > 0.0 {
+            novelty_from_z(z, cfg.z_min, cfg.z_sat)
+        } else {
+            0.0
+        };
+        if single.max(seq) >= h.on {
+            streak += 1;
+            if streak >= h.on_intervals && q >= not_before {
+                return Some(q);
+            }
+        } else {
+            streak = 0;
+        }
+    }
+    None
+}
+
+/// (b) The revisit budget for the injected channel's busier alarm, derived before the run from
+/// ADR-0012 §7.2 and the scene design, never from the run's output.
+///
+/// The per-interval FCO is the truth's, sampled at the scene's windows (`interval_fcos`). The
+/// pool FCO p is the realized pre-onset FCO p̂ or its Wilson 99 % upper bound over the pre-onset
+/// windows. The reference persistence lift is 1 or the truth's lag-1 lift E[f f′]/p̂² of
+/// consecutive pre-onset intervals (≥ 1). n_eff is [`N_EFF_LO`] or [`N_EFF_HI`]. The between-slot
+/// variance is 0 or its ceiling p(1 − p) (any [0, 1] quantity with mean p). The rule
+/// ([`predicted_raise`], from scene hour [`MATURITY_H`], pre-onset dilution included) is run
+/// over all 16 corners and the latest raise interval is kept.
+///
+/// The measured raise may come one interval later than predicted, because the close of an
+/// interval waits on its frames. N is the windows from the injection to the end of that lag
+/// interval, plus the triggering window.
+///
+/// Before T-146 this bound assumed the single-interval rule, i.e. raise at the second close. The
+/// sequential rule and its exact-tail look evidence can only delay the raise when per-interval
+/// z < z_on, and this derivation covers that case.
+fn max_busier_revisits(truth: &SceneTruth) -> (usize, usize) {
+    let f = interval_fcos(truth, "novelty", WINDOW_S);
+    let onset_q = (truth.novelty_start_s / INTERVAL_S).ceil() as usize;
+    let pre: Vec<f64> = f[..onset_q].iter().flatten().copied().collect();
+    let p_hat = pre.iter().sum::<f64>() / pre.len() as f64;
+    let windows_pre = truth
+        .window_starts_s
+        .iter()
+        .filter(|&&s| s < truth.novelty_start_s)
+        .count();
+    let (_, p_hi) = wilson(p_hat, windows_pre as f64, 2.575_829);
+    let pairs: Vec<f64> = f[..onset_q]
+        .windows(2)
+        .filter_map(|w| Some(w[0]? * w[1]?))
+        .collect();
+    let lift_truth = if p_hat > 0.0 {
+        (pairs.iter().sum::<f64>() / pairs.len() as f64 / (p_hat * p_hat)).max(1.0)
+    } else {
+        1.0
+    };
+    let from = (MATURITY_H * HOUR_S / INTERVAL_S) as usize;
+    let mut worst = onset_q;
+    for p in [p_hat, p_hi] {
+        for n in [N_EFF_LO, N_EFF_HI] {
+            for bv in [0.0, p * (1.0 - p)] {
+                for lift in [1.0, lift_truth] {
+                    let q = predicted_raise(&f, from, onset_q, p, n, bv, lift).unwrap_or_else(|| {
+                        panic!(
+                            "[{T124}] the §7.2 rule predicts no raise (p {p:.4}, n {n}, bv \
+                             {bv:.4}, lift {lift:.2})"
+                        )
+                    });
+                    eprintln!(
+                        "[{T124}] predicted busier raise: p {p:.4} n {n} bv {bv:.4} lift \
+                         {lift:.2} → interval {} (onset {onset_q}, +{})",
+                        q,
+                        q - onset_q
+                    );
+                    worst = worst.max(q);
+                }
+            }
+        }
+    }
+    let end = worst as f64 * INTERVAL_S + INTERVAL_S;
+    (revisits_between(truth, truth.novelty_start_s, end) + 1, worst)
+}
+
+// ---- (d) Coverage from the observation log ----
+
+/// Per report coverage cell, the log's observed intervals. A cell counts for every dwell and
+/// hop visit whose covered extent (usable span minus the DC notch) holds the whole cell
+/// (ADR-0012 §1.4). A hop visit is clipped at its sweep record's end. The rule is restated from
+/// ADR-0012 and computed here from the raw records.
+fn log_cell_intervals(records: &[ObservationRecord], cells: &[FreqRange]) -> Vec<Vec<TimeRange>> {
+    let geoms: HashMap<u64, &[ObservedWindow]> = records
+        .iter()
+        .filter_map(|r| match r {
+            ObservationRecord::Geometry(g) => Some((g.id, &g.hops[..])),
+            _ => None,
+        })
+        .collect();
+    let mut out = vec![Vec::new(); cells.len()];
+    let mut push = |w: &ObservedWindow, obs: TimeRange| {
+        if obs.duration_ns() <= 0 {
+            return;
+        }
+        let cov = w.covered();
+        for (i, c) in cells.iter().enumerate() {
+            if cov.iter().any(|r| r.lo_hz <= c.lo_hz && c.hi_hz <= r.hi_hz) {
+                out[i].push(obs);
+            }
+        }
+    };
+    for r in records {
+        match r {
+            ObservationRecord::Dwell(d) => push(&d.window, d.observed),
+            ObservationRecord::Sweep(s) => {
+                let Some(hops) = geoms.get(&s.geometry) else {
+                    continue;
+                };
+                for v in &s.visits {
+                    let Some(w) = hops.get(v.hop as usize) else {
+                        continue;
+                    };
+                    let start = s
+                        .span
+                        .start
+                        .saturating_add_nanos(i64::from(v.start_ms) * 1_000_000);
+                    let end = start
+                        .saturating_add_nanos(i64::from(v.observed_ms) * 1_000_000)
+                        .min(s.span.end);
+                    push(w, TimeRange::new(start, end.max(start)));
+                }
+            }
+            ObservationRecord::Geometry(_) => {}
+        }
+    }
+    out
+}
+
+/// Seconds of the union of `iv` clipped to `span`.
+fn merged_s(iv: &[TimeRange], span: TimeRange) -> f64 {
+    let (s0, s1) = (span.start.as_unix_nanos(), span.end.as_unix_nanos());
+    let mut v: Vec<(i64, i64)> = iv
+        .iter()
+        .map(|r| (r.start.as_unix_nanos().max(s0), r.end.as_unix_nanos().min(s1)))
+        .filter(|(a, b)| b > a)
+        .collect();
+    v.sort_unstable();
+    let (mut total, mut cur) = (0i64, None::<(i64, i64)>);
+    for (a, b) in v {
+        cur = match cur {
+            Some((ca, cb)) if a <= cb => Some((ca, cb.max(b))),
+            Some((ca, cb)) => {
+                total += cb - ca;
+                Some((a, b))
+            }
+            None => Some((a, b)),
+        };
+    }
+    (total + cur.map_or(0, |(a, b)| b - a)) as f64 / 1e9
 }
 
 /// Wilson score interval at z for a fraction `p` over `n_eff` effective samples (ADR-0012 §2.4).
@@ -805,12 +1144,17 @@ fn m2_fco_per_channel_within_ci_of_hidden_truth() {
 
 /// (b, g) AWARE-044: the injected channel (learned at low FCO from hour 0, its baseline matured by
 /// the scene's own earlier hours) raises busier-than-usual within N revisits
-/// ([`max_alarm_revisits`]), with explanations whose top cause is not the device.
+/// ([`max_busier_revisits`]), with explanations whose top cause is not the device.
 #[test]
 fn m2_injected_channel_alarmed_busier_than_usual_within_n_revisits() {
     let Some(m) = scene() else { return };
     let inject_s = m.truth.novelty_start_s;
-    let max_revisits = max_alarm_revisits(&m.truth, inject_s);
+    let (max_revisits, predicted_q) = max_busier_revisits(&m.truth);
+    eprintln!(
+        "[{T124}] busier alarm: latest predicted raise interval {predicted_q} (h{:.2}), max \
+         revisits {max_revisits}",
+        predicted_q as f64 * INTERVAL_S / HOUR_S
+    );
     let alarm = m.injected_busier().unwrap_or_else(|| {
         panic!(
             "[{T124}] no busier-than-usual alarm on the injected channel; status {}",
@@ -858,29 +1202,56 @@ fn main_false_alarms(m: &M2Run) -> Vec<&AnomalyView> {
         .collect()
 }
 
-/// (c): false alarms within [`false_alarm_bound`].
+/// (c): unexplained alarms off the injected channel (or on it before the injection) within
+/// [`false_alarm_bound`], per class, over the scene's mature scored inputs. Alarms can raise in
+/// this scene ((b) raises), so the bound is not vacuous.
 #[test]
 fn m2_false_alarms_bounded() {
     let Some(m) = scene() else { return };
     let false_alarms = main_false_alarms(m);
-    let (trials, bound) = false_alarm_bound(&m.run.alarm_status);
+    let b = false_alarm_bound(&m.run.alarm_status);
+    let (new_emitter, budget): (Vec<&AnomalyView>, Vec<&AnomalyView>) = false_alarms
+        .iter()
+        .copied()
+        .partition(|a| kind(a) == Some(AlarmKind::NewEmitter));
     eprintln!(
-        "[{T124}] {} alarms, {} false (bound {bound} from {trials} mature inputs): {:#?}",
+        "[{T124}] {} alarms; false: {} budget-class (bound {}), {} new-emitter (bound {}) from {} \
+         mature inputs: {:#?}",
         m.run.anomalies.len(),
-        false_alarms.len(),
+        budget.len(),
+        b.budget,
+        new_emitter.len(),
+        b.new_emitter,
+        b.trials,
         false_alarms.iter().map(|a| m.summary(a)).collect::<Vec<_>>()
     );
-    assert!(trials > 0, "[{T124}] no mature alarm input was scored");
+    assert!(b.trials > 0, "[{T124}] no mature alarm input was scored");
     assert!(
-        false_alarms.len() <= bound,
-        "[{T124}] {} false alarms (bound {bound})",
-        false_alarms.len()
+        m.injected_busier().is_some(),
+        "[{T124}] no alarm raised at all: the bound would be vacuous"
+    );
+    assert!(
+        budget.len() <= b.budget,
+        "[{T124}] {} busier/quieter/level false alarms (bound {})",
+        budget.len(),
+        b.budget
+    );
+    assert!(
+        new_emitter.len() <= b.new_emitter,
+        "[{T124}] {} new-emitter false alarms (bound {})",
+        new_emitter.len(),
+        b.new_emitter
     );
 }
 
-/// (h) AWARE-044: a gain step is a provenance-explained step, not a novelty alarm. The window in
-/// which the step could raise an alarm is the same hysteresis horizon as (b): (on_intervals + 1)
-/// intervals after the step.
+/// (h) AWARE-044: a user gain step raises no novelty alarm and is disclosed in the report's
+/// provenance (ADR-0012 §7.2, decided: the per-gain split absorbs it; no explained-anomaly row is
+/// required).
+///
+/// The scene is stationary apart from the injected channel, so any unexplained alarm raised at or
+/// after the step, anywhere except the injected channel, fails. The window runs to the end of the
+/// run, because a step-induced alarm needs the affected subject's own activity: a low-FCO channel
+/// may first be busy hours after the step.
 #[test]
 fn m2_gain_step_is_provenance_explained_not_an_alarm() {
     let Some(m) = scene() else { return };
@@ -918,20 +1289,12 @@ fn m2_gain_step_is_provenance_explained_not_an_alarm() {
         .iter()
         .filter(|a| explained(a) && raised(a).as_unix_nanos() >= step.t.as_unix_nanos())
         .count();
-    let on_intervals = f64::from(AlarmConfig::default().hysteresis.on_intervals);
-    let window_end = step
-        .t
-        .saturating_add_nanos(((on_intervals + 1.0) * INTERVAL_S * 1e9) as i64);
-    let injected_busier = m.injected_busier().map(|a| a.listing.anomaly.id);
     let unexplained_after: Vec<_> = run
         .anomalies
         .iter()
         .filter(|a| a.listing.alarm.is_some() && !explained(a))
-        .filter(|a| Some(a.listing.anomaly.id) != injected_busier)
-        .filter(|a| {
-            let t = raised(a).as_unix_nanos();
-            t >= step.t.as_unix_nanos() && t <= window_end.as_unix_nanos()
-        })
+        .filter(|a| !m.at_injected(&freq(a)))
+        .filter(|a| raised(a).as_unix_nanos() >= step.t.as_unix_nanos())
         .collect();
     eprintln!(
         "[{T124}] after the gain step (h{:.2}): provenance-explained suppressions \
@@ -945,25 +1308,38 @@ fn m2_gain_step_is_provenance_explained_not_an_alarm() {
         run.suppressions
     );
     assert!(
-        explained_suppressions + explained_anomalies as u64 > 0,
-        "[{T124}] the gain step's change was not explained by provenance: {}",
-        run.suppressions
-    );
-    assert!(
         unexplained_after.is_empty(),
-        "[{T124}] the gain step raised novelty alarms"
+        "[{T124}] unexplained novelty alarms at or after the gain step (h{:.2}): {:?}",
+        m.h(step.t),
+        unexplained_after
+            .iter()
+            .map(|a| m.summary(a))
+            .collect::<Vec<_>>()
     );
 }
 
 /// (d) AWARE-042/AWARE-027: the survey report over the pinned site discloses coverage and POI and
 /// compares against a mature baseline; the run was the bandit scheduler's.
 ///
-/// Coverage derivation (ADR-0012 §5.5, §6.2): the radio can only observe inside the scene's
-/// windows, and a step's observed interval is clamped to its planned end on the stream clock, so a
-/// dwell started inside a window may claim up to `max_dwell_s` past its last sample (the stream
-/// jumps to the next window; time compression only). The sweep observes at least the first half of
-/// every window (≥ 2/3 s swept before a dwell is admitted). Hence observed_s ∈ [Σ W/2, Σ (W +
-/// max_dwell)] and, for each POI τ, P_POI ∈ [|∪[s−τ, s+W/2]|, |∪[s−τ, s+W+max_dwell]|] / span.
+/// Coverage derivation (ADR-0012 §1.4, §5.5, §6.2; re-derived after run 1, whose lower bound of
+/// Σ W/2 assumed every window was at least half-observed across the whole region). An unfiltered
+/// report takes coverage from the **observation log** (`ReportService`: log first, tiles only when
+/// the log holds nothing). A cell is observed only while it lies entirely inside a visit's covered
+/// extent (usable span minus the ±15 kHz DC notch). With 2 sweep hops of 500 kHz frames at ±112.5
+/// kHz around the 450 kHz plan region, each hop covers ≈ 357.5/500 of the report region. A 1 s
+/// window therefore records well under 1 s of region-weighted coverage (run 1: 0.49 s, which is
+/// consistent with ≈ 0.7 s of sweep per window × 0.715). Asserted:
+/// 1. `observed_s` equals the region-weighted union of the log's per-cell observed intervals
+///    ([`log_cell_intervals`], computed here from the raw records), and each POI(τ) equals the
+///    same weighting of |∪[start − τ, end]| / span;
+/// 2. envelope: 0 < observed_s ≤ Σ (W + max_dwell) (a step's observed interval is clamped to its
+///    planned end on the stream clock, so a dwell may claim up to `max_dwell_s` past a window's
+///    last sample; time compression only), and POI(τ) is non-decreasing in τ, ≥ the observed
+///    fraction and ≤ |∪[s − τ, s + W + max_dwell]| / span;
+/// 3. every coverage cell is observed in the **first window of every interval**: that window
+///    starts 880 s after the previous one, so the §5.3 floor window (10 s) holds no sweep and a
+///    dwell is admitted only after ≥ 0.25 · (total + dwell) of discovery, which alternates both
+///    hops, and together the hops cover every cell of the region.
 #[test]
 fn m2_survey_report_discloses_coverage_and_poi_under_the_bandit() {
     let Some(m) = scene() else { return };
@@ -1005,31 +1381,95 @@ fn m2_survey_report_discloses_coverage_and_poi_under_the_bandit() {
         c.statement
     );
     assert_eq!(c.poi.len(), 4, "[{T124}] POI rows for τ ∈ {{5 ms, 100 ms, 1 s, 10 s}}");
+    // 1. The report's coverage is the log's, cell by cell.
+    let cells = coverage_cells(report.region, MAX_COVERAGE_CELLS);
+    let per_cell = log_cell_intervals(&run.records, &cells);
+    let width = report.region.width_hz();
+    let weight = |cell: &FreqRange| cell.width_hz() / width;
+    let log_obs: f64 = cells
+        .iter()
+        .zip(&per_cell)
+        .map(|(cell, iv)| weight(cell) * merged_s(iv, report.span))
+        .sum();
     let n = m.windows as f64;
-    let (obs_lo, obs_hi) = (n * WINDOW_S / 2.0, n * (WINDOW_S + MAX_DWELL_S));
+    let obs_hi = n * (WINDOW_S + MAX_DWELL_S);
+    eprintln!(
+        "[{T124}] coverage: report {:.3} s, log-derived {log_obs:.3} s, envelope (0, {obs_hi}]; \
+         {:.3} s per window",
+        c.observed_s,
+        c.observed_s / n
+    );
     assert!(
-        c.observed_s >= obs_lo && c.observed_s <= obs_hi,
-        "[{T124}] observed {} s outside [{obs_lo}, {obs_hi}]",
+        (c.observed_s - log_obs).abs() <= 1e-3,
+        "[{T124}] report observed {} s, the log records {log_obs} s",
+        c.observed_s
+    );
+    // 2. Envelope.
+    assert!(
+        c.observed_s > 0.0 && c.observed_s <= obs_hi,
+        "[{T124}] observed {} s outside (0, {obs_hi}]",
         c.observed_s
     );
     let span_lo = scene_s(&m.truth, run.t_first, report.span.start);
     let span_hi = scene_s(&m.truth, run.t_first, report.span.end);
     let span = span_hi - span_lo;
     let starts = &m.truth.window_starts_s;
-    for p in &c.poi {
-        let lo = union_s(starts, p.tau_s, WINDOW_S / 2.0, span_lo, span_hi) / span;
+    let mut poi = c.poi.clone();
+    poi.sort_by(|a, b| a.tau_s.total_cmp(&b.tau_s));
+    let mut prev = c.observed_fraction;
+    for p in &poi {
+        let tau_ns = (p.tau_s * 1e9).round() as i64;
+        let expect: f64 = cells
+            .iter()
+            .zip(&per_cell)
+            .map(|(cell, iv)| weight(cell) * poi_fraction(iv, report.span, tau_ns))
+            .sum();
         let hi = union_s(starts, p.tau_s, WINDOW_S + MAX_DWELL_S, span_lo, span_hi) / span;
         eprintln!(
-            "[{T124}] poi τ {} s: {:.5} in [{lo:.5}, {hi:.5}]",
+            "[{T124}] poi τ {} s: {:.6} (log-derived {expect:.6}) in [{prev:.6}, {hi:.6}]",
             p.tau_s, p.p_poi
         );
         assert!(
-            p.p_poi >= lo - 1e-3 && p.p_poi <= hi + 1e-3,
-            "[{T124}] P_POI(τ {} s) {} outside [{lo}, {hi}]",
+            (p.p_poi - expect).abs() <= 1e-6,
+            "[{T124}] P_POI(τ {} s) {} but the log gives {expect}",
             p.tau_s,
             p.p_poi
         );
+        assert!(
+            p.p_poi >= prev - 1e-9 && p.p_poi <= hi + 1e-9,
+            "[{T124}] P_POI(τ {} s) {} outside [{prev}, {hi}]",
+            p.tau_s,
+            p.p_poi
+        );
+        prev = p.p_poi;
     }
+    // 3. Every cell observed in the first window of every interval.
+    let t_of = |s: f64| {
+        run.t_first
+            .saturating_add_nanos(((s - starts[0]) * 1e9).round() as i64)
+    };
+    let mut unobserved = Vec::new();
+    for &s in starts {
+        if ((s - EDGE_S) / INTERVAL_S).fract().abs() > 1e-6 {
+            continue;
+        }
+        let w = TimeRange::new(t_of(s), t_of(s + WINDOW_S + MAX_DWELL_S));
+        if w.end > report.span.end {
+            continue;
+        }
+        let missing = cells
+            .iter()
+            .zip(&per_cell)
+            .filter(|(_, iv)| !iv.iter().any(|r| r.overlaps(&w)))
+            .count();
+        if missing > 0 {
+            unobserved.push((s / HOUR_S, missing));
+        }
+    }
+    assert!(
+        unobserved.is_empty(),
+        "[{T124}] interval-first windows with unobserved cells (scene h, cells): {unobserved:?}"
+    );
     assert!(!c.gaps.is_empty(), "[{T124}] no coverage gap disclosed");
     assert_eq!(
         cmp.status,
@@ -1117,20 +1557,34 @@ fn m2_new_emitter_alarms_on_a_quiet_mature_site() {
         revisits <= max_revisits,
         "[{T124}] alarmed after {revisits} revisits (max {max_revisits})"
     );
+    // T-138: the sighting close cannot confirm; confirmation needs inventory last − first seen
+    // ≥ one full interval, so the raise is no earlier than one interval after the injection.
+    assert!(
+        raised_s >= inject_s + INTERVAL_S - 1e-6,
+        "[{T124}] raised h{:.2}, before a re-sighting one interval after the emitter appeared",
+        raised_s / HOUR_S
+    );
     let row = alarm.listing.alarm.as_ref().unwrap();
     assert_eq!(row.detail.observed, 1.0, "[{T124}] one new emitter");
+    assert_eq!(row.reopen_count, 0, "[{T124}] T-138 is one-shot: no re-raise");
     assert!(!alarm.explanations.is_empty(), "[{T124}] no explanations");
     assert!(!explained(alarm), "[{T124}] blamed on the device");
-    let others = run
+    let (new_emitter, budget): (Vec<_>, Vec<_>) = run
         .anomalies
         .iter()
         .filter(|a| a.listing.alarm.is_some() && !explained(a))
         .filter(|a| a.listing.anomaly.id != alarm.listing.anomaly.id)
-        .count();
-    let (trials, bound) = false_alarm_bound(&run.alarm_status);
+        .partition(|a| kind(a) == Some(AlarmKind::NewEmitter));
+    let b = false_alarm_bound(&run.alarm_status);
     assert!(
-        others <= bound,
-        "[{T124}] {others} other unexplained alarms (bound {bound} from {trials} inputs)"
+        budget.len() <= b.budget && new_emitter.len() <= b.new_emitter,
+        "[{T124}] other unexplained alarms: {} budget-class (bound {}), {} new-emitter (bound {}) \
+         from {} inputs",
+        budget.len(),
+        b.budget,
+        new_emitter.len(),
+        b.new_emitter,
+        b.trials
     );
 }
 
