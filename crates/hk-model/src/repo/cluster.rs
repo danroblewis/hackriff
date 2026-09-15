@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::inventory::{
     emitter_id_by_identity, identity_label, insert_status, link_kind, link_target,
 };
+use super::lifecycle;
 use super::{
     RepoError, Repository, blob, bump_extent, enum_parse, enum_text, finite, int, region_bounds,
 };
@@ -65,6 +66,8 @@ pub(super) struct EmitterRow {
     pub(super) identity: Option<DecodedIdentity>,
     pub(super) class: Option<ContentClass>,
     merged: bool,
+    /// T-078: deleted from the inventory.
+    deleted: bool,
 }
 
 pub(super) fn load_row(conn: &Connection, id: EmitterId) -> Result<EmitterRow, RepoError> {
@@ -79,11 +82,12 @@ pub(super) fn load_row(conn: &Connection, id: EmitterId) -> Result<EmitterRow, R
         Option<String>,
         Option<String>,
         Option<[u8; 16]>,
+        String,
     );
     let raw: Raw = conn
         .prepare_cached(
             "SELECT f_center, bandwidth, first_seen, last_seen, count, fingerprint, \
-             identity_scheme, identity_value, identity_class, merged_into \
+             identity_scheme, identity_value, identity_class, merged_into, lifecycle_state \
              FROM emitter WHERE emitter_id = ?1",
         )?
         .query_row([blob(id)], |r| {
@@ -98,6 +102,7 @@ pub(super) fn load_row(conn: &Connection, id: EmitterId) -> Result<EmitterRow, R
                 r.get(7)?,
                 r.get(8)?,
                 r.get(9)?,
+                r.get(10)?,
             ))
         })
         .optional()?
@@ -105,7 +110,7 @@ pub(super) fn load_row(conn: &Connection, id: EmitterId) -> Result<EmitterRow, R
             kind: "emitter",
             id: id.to_string(),
         })?;
-    let (f_center, bandwidth, first, last, count, fp, scheme, value, class, merged) = raw;
+    let (f_center, bandwidth, first, last, count, fp, scheme, value, class, merged, state) = raw;
     let identity = match (scheme, value) {
         (Some(s), Some(v)) => Some(DecodedIdentity {
             scheme: s.parse().map_err(RepoError::Invalid)?,
@@ -127,7 +132,17 @@ pub(super) fn load_row(conn: &Connection, id: EmitterId) -> Result<EmitterRow, R
         identity,
         class: class.map(|c| ContentClass::parse_fail_closed(Some(&c))),
         merged: merged.is_some(),
+        deleted: state == "deleted",
     })
+}
+
+/// The live emitter an id resolves to, unless it is deleted (T-078: deleted rows take no
+/// sightings).
+fn active_id(conn: &Connection, id: EmitterId) -> Result<Option<EmitterId>, RepoError> {
+    match live_id(conn, id)? {
+        Some(live) if !lifecycle::is_deleted(conn, live)? => Ok(Some(live)),
+        _ => Ok(None),
+    }
 }
 
 fn fingerprint_text(fp: &Fingerprint) -> Result<String, RepoError> {
@@ -226,6 +241,7 @@ pub(super) fn gate_entry(
             }
         }
     };
+    let lifecycle = lifecycle::state_of(conn, id)?;
     let mut tags_withheld = false;
     if matches!(identity, InventoryIdentity::Withheld { .. }) {
         // T-036/T-038: a withheld row shows vocabulary labels only (value-independent rule).
@@ -240,6 +256,7 @@ pub(super) fn gate_entry(
         emitter,
         identity,
         family,
+        lifecycle,
         tags_withheld,
     })
 }
@@ -275,7 +292,7 @@ fn remeasured(
         if (f - s.f_center_hz).abs() > ours.center_tolerance_hz(&theirs, tol) {
             continue;
         }
-        let Some(live) = live_id(conn, eid(e))? else {
+        let Some(live) = active_id(conn, eid(e))? else {
             continue;
         };
         if let Some(claim) = &s.identity
@@ -315,6 +332,11 @@ fn merge_rows(
     if a.merged || b.merged {
         return Err(RepoError::Invalid(format!(
             "merge {from} into {into}: both emitters must be live (not already merged)"
+        )));
+    }
+    if a.deleted || b.deleted {
+        return Err(RepoError::Invalid(format!(
+            "merge {from} into {into}: a deleted inventory entry cannot be merged"
         )));
     }
     if let (Some(ai), Some(_)) = (&a.identity, &b.identity) {
@@ -460,7 +482,8 @@ fn fingerprint_candidates(
         let mut stmt = conn.prepare_cached(
             "SELECT emitter_id, f_center, bandwidth, last_seen, fingerprint, identity_scheme, \
              identity_value FROM emitter \
-             WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND merged_into IS NULL",
+             WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND merged_into IS NULL \
+             AND lifecycle_state != 'deleted'",
         )?;
         stmt.query_map(params![b.f_lo_min, b.hi, b.lo], |r| {
             Ok((
@@ -519,12 +542,12 @@ fn decide(
     merge: &mut Option<EmitterMerge>,
 ) -> Result<(Option<EmitterId>, Assignment), RepoError> {
     let context = match s.context {
-        Some(c) => live_id(conn, c)?,
+        Some(c) => active_id(conn, c)?,
         None => None,
     };
     if let Some(claim) = &s.identity {
         let holder = match emitter_id_by_identity(conn, &claim.identity)? {
-            Some(h) => live_id(conn, h)?,
+            Some(h) => active_id(conn, h)?,
             None => None,
         };
         let ctx = context.filter(|_| !claim.identity.scheme.shares_channel());
@@ -777,9 +800,12 @@ fn resolve(
             Ok((r.get(0)?, r.get(1)?))
         })
         .optional()?;
-    let mut report = None;
-    let mut merge = None;
-    let (target, assignment, add) = match ledger {
+    // T-078: an identity held by a deleted entry goes to whichever live emitter this sighting
+    // reaches (a new candidate, unless another live emitter matches).
+    if let Some(claim) = &s.identity {
+        lifecycle::release_deleted_identity(conn, &claim.identity)?;
+    }
+    let ledger = match ledger {
         Some((e, counted)) => {
             let live = live_id(conn, eid(e))?.ok_or_else(|| {
                 RepoError::Invalid(format!(
@@ -787,12 +813,19 @@ fn resolve(
                     eid(e)
                 ))
             })?;
-            (
-                Some(live),
-                Assignment::Replay,
-                s.count.saturating_sub(counted as u64),
-            )
+            // T-078: a source counted into a since-deleted entry is sighted afresh.
+            (!lifecycle::is_deleted(conn, live)?).then_some((live, counted))
         }
+        None => None,
+    };
+    let mut report = None;
+    let mut merge = None;
+    let (target, assignment, add) = match ledger {
+        Some((live, counted)) => (
+            Some(live),
+            Assignment::Replay,
+            s.count.saturating_sub(counted as u64),
+        ),
         None => match key
             .map(|k| remeasured(conn, s, k, tol))
             .transpose()?
@@ -1195,6 +1228,16 @@ impl Repository {
             sql.push_str(" AND last_seen >= ? AND first_seen <= ?");
             p.push(SqlValue::Integer(t.start.as_unix_nanos()));
             p.push(SqlValue::Integer(t.end.as_unix_nanos()));
+        }
+        if q.states.is_empty() {
+            sql.push_str(" AND lifecycle_state != 'deleted'");
+        } else {
+            sql.push_str(" AND lifecycle_state IN (");
+            for (i, s) in q.states.iter().enumerate() {
+                sql.push_str(if i == 0 { "?" } else { ", ?" });
+                p.push(SqlValue::Text(enum_text(s)?));
+            }
+            sql.push(')');
         }
         if !q.status.is_empty() {
             sql.push_str(

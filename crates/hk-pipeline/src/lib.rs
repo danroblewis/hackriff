@@ -35,6 +35,7 @@
 
 pub mod chains;
 pub mod class;
+pub mod compute;
 pub mod config;
 pub mod control;
 pub mod events;
@@ -70,7 +71,7 @@ pub use config::{
 pub use control::SwitchableControl;
 pub use events::Candidate;
 pub use family::{Explanation, FamilyPrior, explain_emitter, explanations};
-pub use inventory::{Inventory, TrackInventory};
+pub use inventory::{CONFIRM_RULE, ConfirmPolicy, Inventory, TrackInventory};
 pub use recorder::{
     RECORDING_DEFAULT_S, RECORDING_LABEL_MAX, RECORDING_MAX_BYTES, RECORDING_MAX_S, RecordingStatus,
 };

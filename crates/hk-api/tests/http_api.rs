@@ -236,6 +236,82 @@ fn aware_042_history_endpoint_serves_the_region_query() {
     assert_eq!(status, 400, "inverted region refused");
 }
 
+/// T-079: `/api/analysis/strongest` (`hk_api::query::strongest_json`) replaces the client-side
+/// peak-picking that used to run over a locally held spectrum row. Tested against the function
+/// directly (with an explicit `now`) rather than over HTTP: the HTTP route uses the wall clock, and
+/// this fixture is anchored at a fixed past timestamp.
+#[test]
+fn analysis_strongest_finds_a_signal_in_band_and_reports_not_found_outside_it() {
+    let dir = TempDir::new("strongest");
+    let pyramid = duty_cycle_pyramid(&dir);
+    let params = |q: &[(&str, &str)]| -> Vec<(String, String)> {
+        q.iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    };
+    let (f_lo, f_hi) = (446e6 - 100e3, 446e6 + 100e3);
+    // A wide window sees both channel A (bins 10-12) and channel B (bins 40-42), both +30 dB: some
+    // in-band cell is found regardless of which the max-hold favours.
+    let v = hk_api::query::strongest_json(
+        &pyramid,
+        &params(&[
+            ("f_lo", &f_lo.to_string()),
+            ("f_hi", &f_hi.to_string()),
+            ("window_s", "300"),
+        ]),
+        ts(T0 + 15 * S),
+    )
+    .unwrap();
+    assert_eq!(v["found"], json!(true), "{v}");
+    let center = v["f_center_hz"].as_f64().unwrap();
+    assert!((f_lo..f_hi).contains(&center), "{v}");
+    assert!(
+        v["f_lo_hz"].as_f64().unwrap() >= f_lo && v["f_hi_hz"].as_f64().unwrap() <= f_hi,
+        "the reported box stays inside the requested band: {v}"
+    );
+    assert!(v["max_db"].as_f64().is_some());
+
+    // Nothing observed outside the recorded band.
+    let empty = hk_api::query::strongest_json(
+        &pyramid,
+        &params(&[("f_lo", "1e9"), ("f_hi", "1.0001e9")]),
+        ts(T0 + 15 * S),
+    )
+    .unwrap();
+    assert_eq!(empty, json!({ "found": false }));
+
+    // Validation.
+    assert_eq!(
+        hk_api::query::strongest_json(&pyramid, &params(&[("f_lo", "2"), ("f_hi", "1")]), ts(T0))
+            .unwrap_err()
+            .status,
+        400,
+        "f_hi must exceed f_lo"
+    );
+    assert_eq!(
+        hk_api::query::strongest_json(
+            &pyramid,
+            &params(&[("f_lo", "1"), ("f_hi", "2"), ("window_s", "0")]),
+            ts(T0)
+        )
+        .unwrap_err()
+        .status,
+        400,
+        "window_s must be positive"
+    );
+    assert_eq!(
+        hk_api::query::strongest_json(
+            &pyramid,
+            &params(&[("f_lo", "1"), ("f_hi", "2"), ("window_s", "301")]),
+            ts(T0)
+        )
+        .unwrap_err()
+        .status,
+        400,
+        "window_s is capped"
+    );
+}
+
 #[test]
 fn space_050_floor_endpoint_serves_the_calibrated_floor_product() {
     const FS: f64 = 250e3;

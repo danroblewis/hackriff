@@ -152,7 +152,8 @@ use crate::content::ContentClass;
 use crate::decode::Decode;
 use crate::detection::Track;
 use crate::emitter::{
-    Classification, DecodedIdentity, Emitter, EmitterLink, IdentityScheme, KnownStatus, LinkTarget,
+    Classification, DecodedIdentity, Emitter, EmitterLink, IdentityScheme, KnownStatus,
+    LifecycleState, LinkTarget,
 };
 use crate::ids::EmitterId;
 use crate::region::{FreqRange, TimeRange};
@@ -889,6 +890,9 @@ pub struct InventoryQuery {
     pub time: Option<TimeRange>,
     /// Current known status is one of these (empty = any).
     pub status: Vec<KnownStatus>,
+    /// Lifecycle state is one of these (T-078). Empty = candidate or confirmed: deleted entries
+    /// are listed only when `Deleted` is asked for.
+    pub states: Vec<LifecycleState>,
     /// Carries this tag.
     pub tag: Option<String>,
     /// Identity in this scheme (scheme is metadata; values are never a filter).
@@ -909,6 +913,7 @@ impl Default for InventoryQuery {
             freq: None,
             time: None,
             status: Vec::new(),
+            states: Vec::new(),
             tag: None,
             identity_scheme: None,
             family: None,
@@ -950,6 +955,8 @@ pub struct InventoryEntry {
     pub identity: InventoryIdentity,
     /// Current family.
     pub family: Option<String>,
+    /// Inventory lifecycle state (T-078).
+    pub lifecycle: LifecycleState,
     /// Tags outside the controlled vocabulary were removed from `emitter.tags` because the
     /// identity is withheld (T-036, T-038).
     pub tags_withheld: bool,

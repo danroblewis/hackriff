@@ -734,6 +734,8 @@ pub struct Counters {
     pub coverage_seq: AtomicU64,
     /// Trust verdicts from the control thread, awaiting the detection writer thread.
     pub verdicts: crate::verify::VerdictOutbox,
+    /// Compute provider selections of the run (T-056).
+    pub compute: crate::compute::ComputeReport,
 }
 
 impl Counters {
@@ -774,6 +776,7 @@ impl Counters {
             "scheduler": self.scheduler.to_json(),
             "stream_time_ns": self.stream_time_ns.load(Ordering::Relaxed),
             "tune": { "center_hz": center, "sample_rate_hz": rate },
+            "compute": self.compute.to_json(),
         })
     }
 

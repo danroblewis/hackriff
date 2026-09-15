@@ -30,6 +30,7 @@ pub mod auth;
 pub mod bridge;
 pub mod control;
 pub mod http;
+pub mod inventory;
 pub mod live_control;
 pub mod ondemand;
 pub mod outputs;

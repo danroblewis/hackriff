@@ -7,15 +7,15 @@
 //! - `/api/floor?f_lo&f_hi&t0&t1[&max_steps]`: [`FloorProduct::floor_vs_time`] (T-021) at the
 //!   finest level with at most `max_steps` time steps.
 //!
-//! - `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]`:
-//!   the T-018 signal inventory ([`inventory_json`]).
+//! - `/api/inventory?[f_lo&f_hi][&t0&t1][&state][&status][&tag][&scheme][&family][&cursor][&limit]`:
+//!   the T-018 signal inventory ([`inventory_json`]); `state` is the T-078 lifecycle.
 //!
 //! `f_lo`/`f_hi` are Hz; `t0`/`t1` are Unix seconds.
 
 use hk_model::{
-    AnnotationAuthor, AnnotationTarget, FreqRange, IdentityAccess, IdentityScheme,
-    InventoryIdentity, InventoryQuery, KnownStatus, RepoError, Repository, StatusAuthor, TimeRange,
-    Timestamp,
+    AnnotationAuthor, AnnotationTarget, FreqRange, IdentityAccess, IdentityScheme, InventoryEntry,
+    InventoryIdentity, InventoryQuery, KnownStatus, LifecycleAuthor, LifecycleState, RepoError,
+    Repository, StatusAuthor, TimeRange, Timestamp,
 };
 use hk_store::history::Geometry;
 use hk_store::{
@@ -30,6 +30,15 @@ fn param<'a>(q: &'a Params, key: &str) -> Option<&'a str> {
     q.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 use serde_json::{Value, json};
+
+/// Default recent window `/api/analysis/strongest` looks over, s.
+pub const DEFAULT_STRONGEST_WINDOW_S: f64 = 5.0;
+/// Largest window `/api/analysis/strongest` accepts, s.
+pub const MAX_STRONGEST_WINDOW_S: f64 = 300.0;
+/// Half-width of the frequency box `/api/analysis/strongest` reports around the strongest cell's
+/// centre, Hz (spectrum-history cells carry no per-bin skirt to fit, unlike a live FFT row, so this
+/// is fixed rather than measured).
+pub const STRONGEST_BOX_HALF_HZ: f64 = 100_000.0;
 
 /// Default cell budget of `/api/history`.
 pub const DEFAULT_MAX_CELLS: usize = 100_000;
@@ -297,6 +306,72 @@ pub fn floor_json(product: &FloorProduct, q: &Params) -> Result<Value, ApiError>
     Ok(floor_vs_time_json(&f))
 }
 
+/// `/api/analysis/strongest?f_lo&f_hi[&window_s]`: the strongest observed signal (max-hold dB/Hz)
+/// in `[f_lo, f_hi)` over the last `window_s` seconds (default [`DEFAULT_STRONGEST_WINDOW_S`], at
+/// most [`MAX_STRONGEST_WINDOW_S`]), read from the spectrum-history pyramid ([`Pyramid::query`]).
+///
+/// Backend replacement (T-079) for client-side peak-picking over a locally held spectrum row: the
+/// UI no longer inspects raw FFT bins itself, only asks what the strongest thing in view is. Unlike
+/// a live row, history cells carry no per-bin skirt to fit a box to, so the reported box is a fixed
+/// [`STRONGEST_BOX_HALF_HZ`] half-width around the strongest cell's centre, clamped to
+/// `[f_lo, f_hi)`. `{"found": false}` when nothing was observed in the window.
+pub fn strongest_json(p: &Pyramid, q: &Params, now: Timestamp) -> Result<Value, ApiError> {
+    let (f_lo, f_hi) = (num(q, "f_lo")?, num(q, "f_hi")?);
+    if !(f_lo >= 0.0 && f_hi > f_lo && f_hi <= 1e12) {
+        return Err(bad("need 0 <= f_lo < f_hi"));
+    }
+    let window_s = match param(q, "window_s") {
+        None => DEFAULT_STRONGEST_WINDOW_S,
+        Some(v) => v
+            .parse::<f64>()
+            .ok()
+            .filter(|w| w.is_finite() && *w > 0.0 && *w <= MAX_STRONGEST_WINDOW_S)
+            .ok_or_else(|| bad("window_s must be a finite number of seconds in (0, 300]"))?,
+    };
+    let t1_ns = now.as_unix_nanos();
+    let t0_ns = t1_ns - (window_s * 1e9) as i64;
+    let r = Region {
+        freq: FreqRange::new(f_lo, f_hi),
+        t0_ns,
+        t1_ns,
+    };
+    let level = choose_level(p.geometry(), &r, |nt, nf| {
+        nt * nf <= DEFAULT_MAX_CELLS as f64
+    })?;
+    let h = p
+        .query(&RegionQuery {
+            freq: r.freq,
+            time: TimeRange::new(
+                Timestamp::from_unix_nanos(t0_ns),
+                Timestamp::from_unix_nanos(t1_ns),
+            ),
+            resolution: Resolution::Level(level),
+        })
+        .map_err(|_| ApiError::new(400, "history query refused"))?;
+    let mut best: Option<(f32, usize)> = None;
+    for (i, c) in h.cells.iter().enumerate() {
+        if c.observed() && best.is_none_or(|(bv, _)| c.max_db > bv) {
+            best = Some((c.max_db, i % h.nf));
+        }
+    }
+    Ok(match best {
+        None => json!({ "found": false }),
+        Some((max_db, f)) => {
+            let freq = h.freq_of(f);
+            let center = 0.5 * (freq.lo_hz + freq.hi_hz);
+            let lo = (center - STRONGEST_BOX_HALF_HZ).max(f_lo);
+            let hi = (center + STRONGEST_BOX_HALF_HZ).min(f_hi);
+            json!({
+                "found": true,
+                "f_center_hz": center,
+                "f_lo_hz": lo,
+                "f_hi_hz": hi,
+                "max_db": max_db,
+            })
+        }
+    })
+}
+
 /// Default page size of `/api/inventory`.
 pub const DEFAULT_INVENTORY_LIMIT: usize = 100;
 /// Largest page size `/api/inventory` accepts.
@@ -354,6 +429,14 @@ pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
             status.push(parsed);
         }
     }
+    let mut states = Vec::new();
+    for s in nonempty(q, "state").into_iter().flat_map(|v| v.split(',')) {
+        let parsed: LifecycleState = serde_json::from_value(Value::String(s.trim().to_owned()))
+            .map_err(|_| bad("state must be candidate, confirmed or deleted"))?;
+        if !states.contains(&parsed) {
+            states.push(parsed);
+        }
+    }
     let identity_scheme = nonempty(q, "scheme")
         .map(|s| s.parse::<IdentityScheme>())
         .transpose()
@@ -371,6 +454,7 @@ pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
         freq,
         time,
         status,
+        states,
         tag: short_text(q, "tag")?,
         identity_scheme,
         family: short_text(q, "family")?,
@@ -422,12 +506,38 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// lists only controlled-vocabulary labels (`hk_model::TAG_VOCABULARY`), `tags_withheld: true` when
 /// others were removed, and a `tag` filter outside the vocabulary never matches it. No decode content, fingerprint or link is included.
 /// `explanations` lists the emitter's ranked T-039 explanations (`hk_pipeline::family`), best first, or `[]`.
+///
+/// T-078: `state` filters by lifecycle (`candidate`, `confirmed`, `deleted`, comma-separated; by
+/// default candidates and confirmed entries, never deleted ones). Each row carries `state`,
+/// `lifecycle` (the latest change: state, previous, author `auto`/`user`, actor, reason, `t_s`; or
+/// `null` for an untouched candidate; a user's reason is withheld on withheld-identity rows) and
+/// `recurrence` (occurrences, appearances, span, on-air time, duty cycle and the
+/// [`RECENT_APPEARANCES`] latest appearances).
 pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> {
     let query = parse_inventory_query(q)?;
     let failed = |_| ApiError::new(500, "inventory query failed");
     let page = repo.query_inventory(&query).map_err(failed)?;
     let mut entries = Vec::with_capacity(page.entries.len());
     for entry in &page.entries {
+        entries.push(inventory_entry_json(repo, entry).map_err(failed)?);
+    }
+    Ok(json!({
+        "entries": entries,
+        "next_cursor": page
+            .next_offset
+            .filter(|&o| o <= MAX_INVENTORY_CURSOR)
+            .map(|o| o.to_string()),
+        "limit": query.limit,
+        "identity_access": "standard",
+    }))
+}
+
+/// Latest appearances listed per `/api/inventory` row.
+pub const RECENT_APPEARANCES: usize = 8;
+
+/// One `/api/inventory` row (see [`inventory_json`]).
+pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result<Value, RepoError> {
+    {
         let e = &entry.emitter;
         let (scheme, value, class, withheld) = match &entry.identity {
             InventoryIdentity::None => (None, None, None, false),
@@ -441,36 +551,61 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
                 (Some(scheme.as_string()), None, *class, true)
             }
         };
-        let status = repo
-            .known_status_history(e.id)
-            .map_err(failed)?
-            .last()
-            .map(|c| {
-                let show = !withheld || reason_is_identity_free(c.author);
-                json!({
-                    "status": c.status,
-                    "author": c.author,
-                    "t_s": ts_s(c.t),
-                    "reason": show.then_some(c.reason.as_str()),
-                    "prior_ref": if show { c.prior_ref.as_deref() } else { None },
-                    "reason_withheld": !show,
-                })
-            });
+        let status = repo.known_status_history(e.id)?.last().map(|c| {
+            let show = !withheld || reason_is_identity_free(c.author);
+            json!({
+                "status": c.status,
+                "author": c.author,
+                "t_s": ts_s(c.t),
+                "reason": show.then_some(c.reason.as_str()),
+                "prior_ref": if show { c.prior_ref.as_deref() } else { None },
+                "reason_withheld": !show,
+            })
+        });
         // T-039 ranked explanations: metadata only (service labels, scores, band-plan and raster
         // evidence, flags; no identity or content), so withheld rows show them too.
-        let explanations = explanations_json(repo, e.id).map_err(failed)?;
+        let explanations = explanations_json(repo, e.id)?;
         // T-070: the latest output-driven refinement (centre, bandwidth, mode parameters,
         // objective value, search statistics; metadata only), or null. Detected values stay in
         // `f_center_hz` / `bandwidth_hz`.
-        let refined = repo.refined_tuning(e.id).map_err(failed)?.map(|r| {
+        let refined = repo.refined_tuning(e.id)?.map(|r| {
             let mut v = serde_json::to_value(&r).unwrap_or(Value::Null);
             if let Some(o) = v.as_object_mut() {
                 o.insert("t_s".into(), json!(ts_s(r.t)));
             }
             v
         });
+        let lifecycle = repo.emitter_lifecycle_history(e.id)?.pop().map(|c| {
+            let show = !withheld || c.author == LifecycleAuthor::Auto;
+            json!({
+                "state": c.state,
+                "previous": c.previous,
+                "author": c.author,
+                "actor": c.actor,
+                "t_s": ts_s(c.t),
+                "reason": show.then_some(c.reason.as_str()),
+                "reason_withheld": !show,
+            })
+        });
+        let rec = repo.emitter_recurrence(e.id, RECENT_APPEARANCES)?;
+        let recurrence = json!({
+            "occurrences": rec.occurrences,
+            "appearances": rec.appearances,
+            "span_s": rec.span_s,
+            "on_air_s": rec.on_air_s,
+            "duty_cycle": rec.duty_cycle,
+            "recent": rec.recent.iter().map(|a| json!({
+                "t_start_s": ts_s(a.time.start),
+                "t_end_s": ts_s(a.time.end),
+                "count": a.count,
+                "duty_cycle": a.duty_cycle,
+            })).collect::<Vec<_>>(),
+        });
         let freq = e.freq();
         let mut row = json!({
+            "state": entry.lifecycle,
+            "lifecycle": lifecycle,
+            "recurrence": recurrence,
             "explanations": explanations,
             "refined": refined,
             "id": e.id.to_string(),
@@ -501,17 +636,8 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
         if let Some(v) = value {
             row["identity_value"] = json!(v);
         }
-        entries.push(row);
+        Ok(row)
     }
-    Ok(json!({
-        "entries": entries,
-        "next_cursor": page
-            .next_offset
-            .filter(|&o| o <= MAX_INVENTORY_CURSOR)
-            .map(|o| o.to_string()),
-        "limit": query.limit,
-        "identity_access": "standard",
-    }))
 }
 
 #[cfg(test)]

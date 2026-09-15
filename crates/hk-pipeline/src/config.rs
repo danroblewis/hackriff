@@ -95,6 +95,11 @@ pub struct PipelineSettings {
     pub verify_pois: bool,
     /// On-demand listening limits (T-066).
     pub listen: ListenSettings,
+    /// Compute providers (T-056, ADR-0007): `{"provider": "auto|cpu|cpu-mt|accelerate|gpu",
+    /// "stft": …, "pfb": …, "threads": n, "gpu_in_flight": 2}`. `Pipeline::start` applies the
+    /// `HK_COMPUTE*` environment over it (the environment wins) and builds one
+    /// `hk_dsp::compute::Compute` for the whole run; see [`crate::compute`].
+    pub compute: hk_dsp::compute::ComputeOptions,
 }
 
 /// On-demand listening limits (T-066; `ScanPlan.extra.pipeline.listen`, `--listen-*` flags of
@@ -158,6 +163,7 @@ impl Default for PipelineSettings {
             site: None,
             verify_pois: true,
             listen: ListenSettings::default(),
+            compute: hk_dsp::compute::ComputeOptions::default(),
         }
     }
 }
@@ -476,6 +482,30 @@ mod tests {
             },
         ] {
             assert!(d.patched(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn plan_extra_carries_compute_options() {
+        use hk_dsp::compute::Preference;
+        let mut plan = replay_plan(100e6, 2.4e6, Timestamp::UNIX_EPOCH);
+        assert_eq!(
+            PipelineSettings::from_plan(&plan).unwrap().compute.provider,
+            Preference::Auto
+        );
+        plan.extra = serde_json::json!({
+            "pipeline": { "compute": { "provider": "cpu", "pfb": "gpu", "gpu_in_flight": 1 } }
+        });
+        let s = PipelineSettings::from_plan(&plan).unwrap();
+        assert_eq!(s.compute.provider, Preference::Cpu);
+        assert_eq!(s.compute.pfb, Some(Preference::Gpu));
+        assert_eq!(s.compute.gpu_in_flight, 1);
+        for bad in [
+            serde_json::json!({ "pipeline": { "compute": { "provider": "fpga" } } }),
+            serde_json::json!({ "pipeline": { "compute": { "bogus": 1 } } }),
+        ] {
+            plan.extra = bad;
+            assert!(PipelineSettings::from_plan(&plan).is_err());
         }
     }
 

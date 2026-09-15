@@ -43,3 +43,6 @@ mod listen;
 
 #[path = "acceptance/device_variants.rs"]
 mod device_variants;
+
+#[path = "acceptance/inventory_lifecycle.rs"]
+mod inventory_lifecycle;

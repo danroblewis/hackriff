@@ -22,6 +22,7 @@ _Research completed 2026-09-13. Items the agents could not confirm are marked **
 | 12 | [Implementation plan](12-implementation-plan.md) + [tasks.yaml](tasks.yaml) | — | **Planning (Phase 7).** Spike order, repo scaffold, dev env + CI, fixture capture plan, the 25-task M0 breakdown (state in `tasks.yaml`), and the hardware shopping list with timing. |
 | — | [SigMF extension](sigmf-extension.md) | — | **Engineering (T-001).** The `hackriff` SigMF namespace: `hackriff:provenance` on global/captures and `hackriff:truth` on annotations, used by recordings and test fixtures. |
 | — | [Stream-output contract](stream-contract.md) | — | **Engineering (T-016, T-014).** Versioned wire contract for external consumers and the plugin data plane: length-prefixed framing, JSON stream header, NDJSON/binary records, drop markers, egress `content_class` gating matrix, drop-not-block backpressure, WebSocket mapping, plugin manifest and IPC. |
+| — | [API reference](api.md) | — | **Engineering (T-050, T-051, T-052, T-060, T-061, T-079).** Every `/api` and `/ws` route the control API serves (`hk-api`): auth, request/response JSON, error codes, audit. The web UI is a thin client over this document (ADR-0002); `docs/stream-contract.md` covers stream framing. |
 | — | [use-cases.yaml](use-cases.yaml) | — | Machine-readable copy of 05 and the source of truth for use-case IDs (`SPACE-`, `PROP-`, `AWARE-`, `SIGNAL-`, `RESEARCH-`). Architecture planning fills in `capabilities`, `hardware_fit` and `test_tier`. |
 
 ## Findings across the four documents

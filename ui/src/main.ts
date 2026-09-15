@@ -10,7 +10,7 @@ import { ControlPanel } from "./controls/panel";
 import { HistoryPanel } from "./history";
 import { Inspector, inspectHalfWidthHz } from "./inspect";
 import { InventoryTable } from "./inventory";
-import { installListen, strongestInView, type Extent, type PeakBox } from "./listen";
+import { installListen, type Extent, type PeakBox } from "./listen";
 import { SelectionPanel } from "./selection-panel";
 import { SelectionStore, apiBackend, demodHook, inspectSelection, recordSelection, type NewSelection } from "./selections";
 import { OutputTracker, downloadHref } from "./outputs";
@@ -223,13 +223,20 @@ class Live {
   /** The current view (Hz), or null before the first stream header (T-069 Listen toolbar). */
   currentView(): Extent | null { return this.view; }
 
-  /** The strongest signal in the current view, from the latest spectrum row (T-069 Listen toolbar
-   * fallback target); null before the first row, or when nothing is finite in view. */
-  strongestSignal(): PeakBox | null {
-    const g = this.geom, w = this.wf, v = this.view;
-    if (!g || !w || !v) return null;
-    const full = ax.fullView(g);
-    return strongestInView(w.latest, full.loHz, full.hiHz, v.loHz, v.hiHz);
+  /** The strongest signal in the current view (T-069 Listen toolbar fallback target), from the
+   * backend's spectrum-history analysis (`GET /api/analysis/strongest`, T-079: peak-picking is no
+   * longer done client-side over a locally held row); null before the first view, or on failure. */
+  async strongestSignal(): Promise<PeakBox | null> {
+    const v = this.view;
+    if (!v) return null;
+    try {
+      const r = await this.api(`/api/analysis/strongest?f_lo=${Math.round(v.loHz)}&f_hi=${Math.round(v.hiHz)}`) as
+        { found: boolean; f_center_hz?: number; f_lo_hz?: number; f_hi_hz?: number };
+      if (!r.found || r.f_center_hz === undefined || r.f_lo_hz === undefined || r.f_hi_hz === undefined) return null;
+      return { hz: r.f_center_hz, f_lo: r.f_lo_hz, f_hi: r.f_hi_hz };
+    } catch {
+      return null;
+    }
   }
 
   /** Restores `v` once the next retuned header arrives (null: forget it). */
@@ -470,7 +477,7 @@ function main() {
   const listen = installListen(token, { // T-043, T-069
     selections,
     view: () => liveRef?.currentView() ?? null,
-    strongest: () => liveRef?.strongestSignal() ?? null,
+    strongest: () => liveRef?.strongestSignal() ?? Promise.resolve(null),
   });
   const inspector = new Inspector(api, listen.onShown);
   const live = new Live(api, token, panel, selections, inspector);

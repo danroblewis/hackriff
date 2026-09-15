@@ -94,6 +94,7 @@ Items in `docs/05` and `docs/use-cases.yaml` are acceptance targets:
   Changes to core interfaces or the real-time path never go to Sonnet or Haiku alone.
 - Don't recommend SDR#/GQRX-style tune-and-listen tools as answers; the user wants exploration and analysis tooling.
 - The user runs the `md` doc viewer and cloudflared tunnel themselves. Don't start, restart or kill those processes.
+- **The web UI is a thin client over `docs/api.md`.** All signal logic — recognition, analysis, classification, demodulation, decoding — lives in the backend (`hk-api`/`hk-pipeline`); `ui/src` holds interaction and presentation only (pixel↔Hz axis mapping, formatting, target-priority/clamping arithmetic over already-known UI state). Adding a route: update `docs/api.md` and its contract tests (`crates/hk-cli/tests/api_contract.rs`) together (T-079).
 - Ask before committing.
 
 ## Engineering

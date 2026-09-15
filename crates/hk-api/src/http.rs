@@ -10,7 +10,9 @@
 //! | `/api/streams` | GET | token | Discovery (T-060): offered streams (id, kind, class, geometry, format), on-demand openers, the TCP stream address. Never content. |
 //! | `/api/history?f_lo&f_hi&t0&t1[&max_cells]` | GET | token | T-017 region-over-time grid ([`crate::query`]) |
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | GET | token | T-021 floor vs time ([`crate::query`]) |
-//! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
+//! | `/api/inventory?[f_lo&f_hi][&t0&t1][&state][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]); `state` = T-078 lifecycle |
+//! | `/api/inventory/<id>[/promote]` | GET, POST, DELETE | token (header only for mutating) | T-078 one entry, promote a candidate, delete ([`crate::inventory`]) |
+//! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -50,7 +52,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use hk_model::Repository;
+use hk_model::{Repository, Timestamp};
 use hk_store::{FloorProduct, Pyramid};
 use hk_stream::StreamError;
 use serde_json::{Value, json};
@@ -74,6 +76,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/history"),
     ("GET", "/api/floor"),
     ("GET", "/api/inventory"),
+    ("GET", "/api/inventory/{id}"),
+    ("POST", "/api/inventory/{id}/promote"),
+    ("DELETE", "/api/inventory/{id}"),
+    ("GET", "/api/analysis/strongest"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -633,6 +639,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     };
     if let Some(r) = control::route(state, &ctl)
         .or_else(|| crate::selections::route(state, &ctl))
+        .or_else(|| crate::inventory::route(state, &ctl))
         .or_else(|| crate::outputs::route(state, &ctl))
     {
         let allow = r
@@ -643,7 +650,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     }
     let get = req.method == "GET";
     let result = match req.path.as_str() {
-        "/api/streams" | "/api/history" | "/api/floor" | "/api/inventory" | "/api/status"
+        "/api/streams"
+        | "/api/history"
+        | "/api/floor"
+        | "/api/inventory"
+        | "/api/analysis/strongest"
+        | "/api/status"
             if !get =>
         {
             return respond_json_with(
@@ -661,6 +673,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         "/api/history" => history(state, &req),
         "/api/floor" => floor(state, &req),
         "/api/inventory" => inventory(state, &req),
+        "/api/analysis/strongest" => strongest(state, &req),
         "/api/status" => state
             .status
             .as_ref()
@@ -748,6 +761,24 @@ fn inventory(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
         .lock()
         .map_err(|_| ApiError::new(500, "inventory store poisoned"))?;
     query::inventory_json(&repo, &req.query)
+}
+
+/// `/api/analysis/strongest` (T-079): the same spectrum-history source as `/api/history`.
+fn strongest(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
+    let now = Timestamp::now();
+    if let Some(p) = &state.history {
+        let p = p
+            .lock()
+            .map_err(|_| ApiError::new(500, "history store poisoned"))?;
+        return query::strongest_json(&p, &req.query, now);
+    }
+    if let Some(f) = &state.floor {
+        let f = f
+            .lock()
+            .map_err(|_| ApiError::new(500, "floor store poisoned"))?;
+        return query::strongest_json(f.uncalibrated_pyramid(), &req.query, now);
+    }
+    Err(ApiError::new(404, "no spectrum history on this server"))
 }
 
 fn websocket(mut stream: TcpStream, shared: &Shared, req: &Request, stream_id: &str) {
