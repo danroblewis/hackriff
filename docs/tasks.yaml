@@ -2732,7 +2732,7 @@ notes:
   - id: T-172
     milestone: M2
     title: "DC twin refutation hardening: time-bounded twin search (sort by cell+start, binary-search +-slack), slack from grid t_cell_ns not hardcoded 1 s, twin must be off its own tuning DC (tuning centre from provenance_ref), ADR-0012 §2.6 wording per-detection"
-    status: review
+    status: done
     commit: 0e3d429
     deps: [T-147]
     parallel_group: M2B

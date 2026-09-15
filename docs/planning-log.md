@@ -1899,3 +1899,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - (a) per-channel FCO: 433.375 MHz (FCO 0.094) is never learned, although 0 of 5 matched channels fall outside their CI. **Bug 2 is unconfirmed:** 433.400 sits in a similar DC/edge spot and is learned.
   - **Also noted:** only 3 bandit dwells (4.47 s) in the 46 h scene; check this isn't hiding an issue. Scenes run 546 s and 644 s.
   - **Status:** T-124 is blocked on T-176. Its next round fixes (d), investigates (a) with T-172's twin LO rule in place, and re-checks bandit dwells.
+- **B0.423 T-156 full check green (af07b5e).** Lint clean; 1349/1349 nextest+UI tests; acceptance 28/28. The new MUI default UI is verified on main.
+- **T-172 merged (0e3d429).** Its worktree is removed. Full check started.
