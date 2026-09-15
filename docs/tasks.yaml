@@ -2762,7 +2762,8 @@ notes:
   - id: T-174
     milestone: M2
     title: "Live candidate path uses the per-tuning DC twin rule (detect.rs:458 still per-detection suspect)"
-    status: in-progress
+    status: review
+    commit: 9c58f81
     deps: [T-147]
     parallel_group: M2B
     use_cases: [AWARE-042]

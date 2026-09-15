@@ -2060,3 +2060,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Live-device effect (user heads-up):** a single-hop scheduled plan on the HackRF (`hackriffd` or `hk serve --schedule`) now retunes 75 kHz every 50 ms step, where it previously held one tune. Plain `hk serve` without `--schedule` is unchanged.
   - **Follow-up:** T-181 (single-hop cadence, parity-based geometry pick, dither-disabled warning, test margin, ADR wording).
   - **Next:** full check.
+- **B0.447 T-174 committed (9c58f81); Opus review launched. Full check for the T-173 merge started.**
+  - **Change:**
+    - Bounded per-reader `dc_twin` index (no locks or DB) reusing the T-172 `refute_dc_suspects` helper.
+    - `MemberRefuted` event decrements candidate and pending-dwell suspect counts in both attention services.
+    - Refuted flags don't count toward bandit bans.
+  - **Tests (unit only):** hk-pipeline 21, hk-context 17; lint clean.
+  - **Review focus:** hot-path cost under detection floods, confirmation lag, `MemberRefuted` races/double-decrement/ban reversal, whether an e2e mock-SDR test is needed.
