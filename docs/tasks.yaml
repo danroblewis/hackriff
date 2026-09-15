@@ -879,7 +879,7 @@ tasks:
     milestone: M0b
     title: HIL - run the device-interface acceptance suite against the real HackRF (receive-only, manual/nightly)
     status: done
-    commit: "abb595f (merged; full check running)"
+    commit: "abb595f (merged e3ef3e7; verified: nextest 943 passed / 5 skipped, acceptance green; coordinator rustfmt fix for hil_hackrf.rs)"
     result: "HackRF One serial 0000000000000000d2b861dc263bc293, firmware 2026.01.3 (API 1.10), board < r6; LNA 32/VGA 30/amp on, antenna unrecorded. Device HIL: conformance 20/20; hackrf_hil 1.96 Msps 0 drops, retune applied; hackrf_serve_hil /api/inventory FM rows at 100.6 and 101.3 MHz after 20 s. Built the real HK_DEVICE=hackrf acceptance (tests/e2e/tests/acceptance/hil_hackrf.rs: survey then 150 s blind hk serve --hackrf) - previously only a stub. Run 2: PASS survey (5 stations, 101.30 MHz 22 dB), uncalibrated floor 0.17 dB spread, occupancy 0.52 vs 0.00, live 1.000x RT at 2.4 Msps 0 overruns/drops; FAIL detection of the surveyed station, FM top-3, RDS PI, Listen (not reached); SKIP retune (one strong station), calibrated floor (no calibration for serial); 23 fixture/synthetic acceptance tests skip under HK_DEVICE=hackrf. Hardware-only findings -> T-084. Results table docs/hil/2026-09-14-t053.md. Demo hk serve (pid 45833) stopped, not restarted; HackRF released."
     followups:
       - "live-air acceptance failures -> T-084"

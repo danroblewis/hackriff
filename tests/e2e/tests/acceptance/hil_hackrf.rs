@@ -49,7 +49,9 @@ const AMP: bool = true;
 const SURVEY_RATE_HZ: f64 = 8e6;
 /// Overlapping 8 Msps windows: every frequency in 86.2–109.3 MHz lies inside the baseband filter
 /// (±3 MHz) of a window whose centre (DC, LO leakage) is at least 300 kHz away.
-const SURVEY_CENTRES_HZ: [f64; 8] = [89.0e6, 91.5e6, 94.0e6, 96.5e6, 99.0e6, 101.5e6, 104.0e6, 106.5e6];
+const SURVEY_CENTRES_HZ: [f64; 8] = [
+    89.0e6, 91.5e6, 94.0e6, 96.5e6, 99.0e6, 101.5e6, 104.0e6, 106.5e6,
+];
 const SURVEY_EDGE_HZ: f64 = 2.8e6;
 const SURVEY_DC_HZ: f64 = 300e3;
 const SURVEY_S: f64 = 0.5;
@@ -169,7 +171,10 @@ fn stations_in(psd: &[f32], fc: f64, fs: f64) -> (Vec<Station>, f64) {
         if snr_db < STATION_SNR_DB {
             continue;
         }
-        let (lo, hi) = (k.saturating_sub(2 * half).max(half), (k + 2 * half).min(n - half - 1));
+        let (lo, hi) = (
+            k.saturating_sub(2 * half).max(half),
+            (k + 2 * half).min(n - half - 1),
+        );
         if (lo..=hi).any(|j| ch(j) > p || (ch(j) == p && j < k)) {
             continue;
         }
@@ -266,7 +271,11 @@ fn percentile(v: &mut [f64], p: f64) -> f64 {
 }
 
 /// Waits until `pred(rows)` or `timeout`; returns the last rows.
-fn poll_inventory(addr: SocketAddr, timeout: Duration, pred: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+fn poll_inventory(
+    addr: SocketAddr,
+    timeout: Duration,
+    pred: impl Fn(&[Value]) -> bool,
+) -> Vec<Value> {
     let t = Instant::now();
     loop {
         let (_, rows) = api_inventory(addr);
@@ -328,11 +337,17 @@ fn hil_blind_fm_survey_on_the_hackrf() {
             .map(|s| (mhz(s.f_hz), (s.snr_db * 10.0).round() / 10.0))
             .collect::<Vec<_>>()
     );
-    let strong = stations.iter().filter(|s| s.snr_db >= STRONG_SNR_DB).count();
+    let strong = stations
+        .iter()
+        .filter(|s| s.snr_db >= STRONG_SNR_DB)
+        .count();
     res.add(
         "survey",
         strong > 0,
-        format!("{} stations >= {STATION_SNR_DB} dB, {strong} >= {STRONG_SNR_DB} dB", stations.len()),
+        format!(
+            "{} stations >= {STATION_SNR_DB} dB, {strong} >= {STRONG_SNR_DB} dB",
+            stations.len()
+        ),
     );
     let ca = best_window(&stations, None).expect("the survey found a strong FM station");
     let truth_a = in_window(&stations, ca, STRONG_SNR_DB);
@@ -384,9 +399,11 @@ fn hil_blind_fm_survey_on_the_hackrf() {
             .map(|r| (
                 mhz(r["f_center_hz"].as_f64().unwrap_or(0.0)),
                 (r["bandwidth_hz"].as_f64().unwrap_or(0.0) / 1e3).round(),
-                r["explanations"]
-                    .as_array()
-                    .map(|x| x.iter().take(TOP_K).map(|e| e["service"].clone()).collect::<Vec<_>>())
+                r["explanations"].as_array().map(|x| x
+                    .iter()
+                    .take(TOP_K)
+                    .map(|e| e["service"].clone())
+                    .collect::<Vec<_>>())
             ))
             .collect::<Vec<_>>()
     );
@@ -398,7 +415,9 @@ fn hil_blind_fm_survey_on_the_hackrf() {
             format!(
                 "{} inventory rows within 100 kHz: {:?}",
                 m.len(),
-                m.iter().map(|r| mhz(r["f_center_hz"].as_f64().unwrap_or(0.0))).collect::<Vec<_>>()
+                m.iter()
+                    .map(|r| mhz(r["f_center_hz"].as_f64().unwrap_or(0.0)))
+                    .collect::<Vec<_>>()
             ),
         );
         res.add(
@@ -407,9 +426,11 @@ fn hil_blind_fm_survey_on_the_hackrf() {
             format!(
                 "top-{TOP_K}: {:?}",
                 m.iter()
-                    .map(|r| r["explanations"]
-                        .as_array()
-                        .map(|x| x.iter().take(TOP_K).map(|e| e["service"].clone()).collect::<Vec<_>>()))
+                    .map(|r| r["explanations"].as_array().map(|x| x
+                        .iter()
+                        .take(TOP_K)
+                        .map(|e| e["service"].clone())
+                        .collect::<Vec<_>>()))
                     .collect::<Vec<_>>()
             ),
         );
@@ -504,7 +525,11 @@ fn hil_blind_fm_survey_on_the_hackrf() {
     let rows = poll_inventory(
         addr,
         Duration::from_secs(150).saturating_sub(run_start.elapsed()),
-        |rows| truth_a.iter().all(|s| matched(rows, s).iter().any(|r| pi(r).is_some())),
+        |rows| {
+            truth_a
+                .iter()
+                .all(|s| matched(rows, s).iter().any(|r| pi(r).is_some()))
+        },
     );
     let pis: Vec<(String, Option<String>)> = truth_a
         .iter()
@@ -575,7 +600,9 @@ fn hil_blind_fm_survey_on_the_hackrf() {
     );
     let occ = hist["occupancy"].as_array().cloned().unwrap_or_default();
     let col_occ = |j: usize| {
-        let v: Vec<f64> = (0..nt).filter_map(|i| occ.get(i * nf + j)?.as_f64()).collect();
+        let v: Vec<f64> = (0..nt)
+            .filter_map(|i| occ.get(i * nf + j)?.as_f64())
+            .collect();
         (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
     };
     let col_f = |j: usize| f_lo + (j as f64 + 0.5) * f_cell;
@@ -599,7 +626,10 @@ fn hil_blind_fm_survey_on_the_hackrf() {
         .collect();
     if nt > 0 && !station_occ.is_empty() && !quiet.is_empty() {
         let quiet_med = percentile(&mut quiet, 0.5);
-        let min_station = station_occ.iter().map(|(_, o)| *o).fold(f64::INFINITY, f64::min);
+        let min_station = station_occ
+            .iter()
+            .map(|(_, o)| *o)
+            .fold(f64::INFINITY, f64::min);
         res.add(
             "AWARE-042 occupancy (stations vs survey-empty)",
             min_station - quiet_med >= 0.25,
@@ -626,7 +656,11 @@ fn hil_blind_fm_survey_on_the_hackrf() {
     // Retune within the band.
     let lc = live_control.expect("live control for the live radio");
     match cb {
-        None => res.push("retune within FM band", "SKIP", "the survey found one window only"),
+        None => res.push(
+            "retune within FM band",
+            "SKIP",
+            "the survey found one window only",
+        ),
         Some(cb) => {
             let truth_b = in_window(&stations, cb, STRONG_SNR_DB);
             let t_retune = Instant::now();
@@ -635,8 +669,10 @@ fn hil_blind_fm_survey_on_the_hackrf() {
             let rows = poll_inventory(addr, Duration::from_secs(60), |rows| {
                 truth_b.iter().all(|s| found(rows, s))
             });
-            let hits: Vec<(String, bool)> =
-                truth_b.iter().map(|s| (mhz(s.f_hz), found(&rows, s))).collect();
+            let hits: Vec<(String, bool)> = truth_b
+                .iter()
+                .map(|s| (mhz(s.f_hz), found(&rows, s)))
+                .collect();
             res.add(
                 format!("retune {} -> {} MHz", mhz(ca), mhz(cb)),
                 ok && hits.iter().all(|(_, h)| *h),
@@ -664,7 +700,10 @@ fn hil_blind_fm_survey_on_the_hackrf() {
     eprintln!("{}", summary.to_text());
     let stats = source_control.and_then(|c| c.stats());
     drop(server);
-    eprintln!("[{TAG}] source {stats:?}; status source {}", status["source"]);
+    eprintln!(
+        "[{TAG}] source {stats:?}; status source {}",
+        status["source"]
+    );
     let samples = summary.counter("/source/samples");
     let (dropped, overruns) = stats.map_or((0, 0), |s| (s.dropped_samples, s.overruns));
     res.add(
@@ -684,6 +723,14 @@ fn hil_blind_fm_survey_on_the_hackrf() {
     for (test, outcome, detail) in &res.0 {
         eprintln!("HIL-RESULT | {test} | {outcome} | {detail}");
     }
-    let failed: Vec<_> = res.0.iter().filter(|r| r.1 == "FAIL").map(|r| &r.0).collect();
-    assert!(failed.is_empty(), "[{TAG}] failed on the HackRF: {failed:?}");
+    let failed: Vec<_> = res
+        .0
+        .iter()
+        .filter(|r| r.1 == "FAIL")
+        .map(|r| &r.0)
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "[{TAG}] failed on the HackRF: {failed:?}"
+    );
 }
