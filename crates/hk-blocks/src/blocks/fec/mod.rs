@@ -159,7 +159,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
         descriptor(
             "parity",
             "fec",
-            "Per-unit parity over a span of the frame (e.g. 7-bit characters + parity bit); sets the frame's check status and optionally strips the parity bits.",
+            "Per-unit parity over a span of the frame (e.g. 7-bit characters + parity bit); sets the frame's check status and optionally strips the parity bits, or replaces each with a constant 0 in place (unit width unchanged) for a check field computed over the pre-parity data padded back to the unit width (ACARS's block check).",
             par_in,
             par_out,
             vec![
@@ -178,6 +178,12 @@ pub fn planned() -> Vec<BlockDescriptor> {
                 ),
                 param("strip", boolean(), "Remove the parity bits of checked units.")
                     .default_value(false),
+                param(
+                    "zero",
+                    boolean(),
+                    "Replace the parity bit of each checked unit with 0 in place instead of removing it (unit width unchanged); exclusive with strip.",
+                )
+                .default_value(false),
                 drop_invalid(),
             ],
             true,

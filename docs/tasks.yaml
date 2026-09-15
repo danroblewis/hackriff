@@ -1581,7 +1581,7 @@ tasks:
   - id: T-096
     milestone: M1
     title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
-    status: in-progress
+    status: blocked
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1590,6 +1590,11 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
+    result: "Recipe tuned and verified offline against the T-098 synthetic fixture (docs/tutorials/03-acars.md): dropped diff_decode (MSK maps straight to bit 1/0, per the existing T-086 unit test); sync word corrected to SYN SYN SOH 0x160116/24 bits, no bit_order reversal (the skeleton's '+* SYN SYN SOH' / lsb assumed real ACARS conventions the synthetic generator doesn't use); CRC corrected to CRC-16/XMODEM (refin/refout false, not KERMIT); found (empirically, against py/hkpy/synth/acars.py) that the block check covers the pre-parity data zero-padded back to 8 bits, not the as-sent bytes nor a stripped/repacked stream, and added a new parity block mode (zero, crates/hk-blocks/src/blocks/fec/parity.rs) to reproduce that without corrupting fields' own parity-checked extraction; recipe fans out sync -> unwrap(crc, real parity) -> msg(fields) and sync -> pz(parity zero) -> crc(status). crates/hk-blocks/tests/acars_recipe.rs (catalogue + constants) and fec/tests.rs::parity_zero_then_crc_matches_pre_parity_check_t096 (bit-exact CRC vector from the generator) pass. Blind acceptance (tests/e2e/tests/acceptance/tutorial_acars.rs) is written following the tutorial_rds.rs pattern but marked #[ignore]: found_blind times out with an EMPTY /api/inventory after looping the acars_message synthetic scene for 240s -- blind detection/tracking never registers an emitter for the short AM+MSK burst, upstream of the recipe/decode chain (no acarsdec on this machine either, oracle cross-check not implemented)."
+    followups:
+      - "why doesn't blind detection register an inventory entry for the acars_message synthetic scene (burst duration/dwell vs tracker confidence window? 131.55 MHz / am family not covered by the mock's default ScanPlan chains?); compare against T-097's ADS-B detection path, which is also bursty"
+      - "un-ignore tutorial_acars.rs once an emitter is found blind"
+      - "real recorded ACARS fixture + acarsdec oracle when the user can capture (T-098 followup)"
   - id: T-097
     milestone: M1
     title: "M1 Tutorial 4: ADS-B recipe + blind acceptance vs readsb (live HIL deferred: 1090 MHz antenna)"

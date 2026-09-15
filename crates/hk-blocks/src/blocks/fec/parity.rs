@@ -1,5 +1,8 @@
 //! `parity`: per-unit parity (e.g. 7-bit characters + parity bit) over a span of the frame;
-//! optionally strips the parity bits.
+//! optionally strips the parity bits, or (`zero`) replaces each with a constant 0 in place
+//! (unit width unchanged) — for a check field computed, like ACARS's block check, over the
+//! pre-parity data padded back to the unit width rather than over the as-sent bits or a
+//! repacked (narrower, misaligned) bit stream.
 
 use hk_recipe::{Params, PortType};
 
@@ -15,6 +18,11 @@ const HOT: &[&str] = &["drop_invalid"];
 /// Builds a `parity`.
 pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Block>, BlockError> {
     let p = P(params);
+    let strip = p.bool_or("strip", false);
+    let zero = p.bool_or("zero", false);
+    if strip && zero {
+        return Err(BlockError::Params("strip and zero are exclusive".into()));
+    }
     Ok(Box::new(Parity {
         params: params.clone(),
         unit: p.req_uint("unit_bits")? as usize,
@@ -25,7 +33,8 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         },
         first: p.str("position") == Some("first"),
         span: Span::from_params(p)?,
-        strip: p.bool_or("strip", false),
+        strip,
+        zero,
         drop_invalid: p.bool_or("drop_invalid", false),
         bits: Vec::new(),
         out: Vec::new(),
@@ -44,6 +53,7 @@ pub struct Parity {
     first: bool,
     span: Span,
     strip: bool,
+    zero: bool,
     drop_invalid: bool,
     bits: Vec<u8>,
     out: Vec<u8>,
@@ -83,10 +93,18 @@ impl Block for Parity {
                 }
                 all &= ok;
                 checked = true;
-                match (self.strip, self.first) {
-                    (false, _) => self.out.extend_from_slice(u),
-                    (true, true) => self.out.extend_from_slice(&u[1..]),
-                    (true, false) => self.out.extend_from_slice(&u[..self.unit - 1]),
+                match (self.strip, self.zero, self.first) {
+                    (false, false, _) => self.out.extend_from_slice(u),
+                    (true, _, true) => self.out.extend_from_slice(&u[1..]),
+                    (true, _, false) => self.out.extend_from_slice(&u[..self.unit - 1]),
+                    (false, true, true) => {
+                        self.out.push(0);
+                        self.out.extend_from_slice(&u[1..]);
+                    }
+                    (false, true, false) => {
+                        self.out.extend_from_slice(&u[..self.unit - 1]);
+                        self.out.push(0);
+                    }
                 }
                 pos += self.unit;
             }

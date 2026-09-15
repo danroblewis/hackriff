@@ -231,6 +231,62 @@ fn parity_units_and_strip() {
 }
 
 #[test]
+fn parity_zero_then_crc_matches_pre_parity_check_t096() {
+    // T-096 ACARS: the block check (CRC-16/XMODEM, poly 0x1021, init 0, not reflected) is
+    // computed over the *pre-parity* 7-bit values padded back to 8 bits with the parity position
+    // forced to 0 (py/hkpy/synth/acars.py `crc16_acars`), not over the as-sent bytes (their real
+    // parity bit) nor over a parity-stripped, narrower, byte-misaligned repacking. `zero` (as
+    // opposed to `strip`) keeps the unit width and replaces the parity bit in place, so a
+    // downstream `crc` block reproduces that exact convention while a separate, unzeroed path
+    // (T-096's `unwrap` node) keeps the real parity bits for `fields`.
+    let body_wp: [u8; 19] = [
+        0x01, 0x32, 0xae, 0xc8, 0xcb, 0x52, 0x46, 0xb0, 0x31, 0xdc, 0xc8, 0x31, 0x31, 0x02, 0x54,
+        0x45, 0xd3, 0x54, 0x83,
+    ];
+    let body: [u8; 19] = [
+        0x01, 0x32, 0x2e, 0x48, 0x4b, 0x52, 0x46, 0x30, 0x31, 0x5c, 0x48, 0x31, 0x31, 0x02, 0x54,
+        0x45, 0x53, 0x54, 0x03,
+    ];
+    let crc = 0x9435u64;
+    let mut bits = bytes_bits(&body_wp);
+    bits.extend(bits_of(crc, 16));
+
+    let pz_params = json!({
+        "unit_bits": 8, "parity": "odd", "position": "first", "zero": true,
+        "span": {"end_trim_bits": 16},
+    });
+    let mut pz = build("parity", pz_params, PortType::Frames);
+    let pz_out = run_frames(pz.as_mut(), &[frame(&bits)], 1, false);
+    let mut expect = bytes_bits(&body);
+    expect.extend(bits_of(crc, 16));
+    assert_eq!(
+        pz_out[0].bits, expect,
+        "zero keeps width, forces parity bit to 0"
+    );
+
+    let crc_params =
+        json!({"width": 16, "poly": "0x1021", "refin": false, "refout": false, "strip": true});
+    let mut c = build("crc", crc_params, PortType::Frames);
+    let out = run_frames(c.as_mut(), &[frame(&pz_out[0].bits)], 1, false);
+    assert_eq!(
+        out[0].info.check,
+        CrcStatus::Valid,
+        "CRC-16/XMODEM over the zeroed body"
+    );
+    assert_eq!(out[0].bits, bytes_bits(&body));
+
+    // strip and zero are mutually exclusive.
+    assert!(
+        try_build(
+            "parity",
+            json!({"unit_bits": 8, "parity": "odd", "strip": true, "zero": true}),
+            PortType::Frames
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn checksums_xor_and_ones_complement() {
     // NMEA: XOR of "GPGLL,…" characters.
     let body = b"GPGLL,5300.97914,N,00259.98174,E,125926,A";
