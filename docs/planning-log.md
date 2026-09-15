@@ -609,3 +609,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   3. POCSAG 4-bit BCD text, ACARS parity and integer scaling can't be expressed.
   4. The ownership map misses shared files (hk-api lib.rs/http dispatch, Cargo deps, api_contract.rs, opener registration).
   Real-time safety and gating reuse passed. A fresh Opus agent (the original was past 300k tokens) is making the fixes plus cheap nits in the T-085 worktree; merge follows unless a real correctness bug remains.
+- **B0.222 T-099 merged** (5855c2a). In dense FM, when C13's OBW99 abstains, the adjacent-channel OBW is measured between the spectral valleys; the channel filter is capped inside them, and the pilot check runs on that channel only (mode-rules@0.3.0, blind, no raster). Coordinator reviewed the diff: ~200 lines, not per-chunk real-time, no allocation concerns. Tests:
+  - dense scene: all 5 boxes WFM, PI decoded; pipeline 3/3 chains and PIs;
+  - sweep unchanged (111/114 at ≥10 dB);
+  - hk-demod 33/33; analog/listen_retune/lossless/signal_062/refine pass.
+  The full check is deferred until T-101 merges, so one run covers both; main still has the known T-084 inventory regression.
