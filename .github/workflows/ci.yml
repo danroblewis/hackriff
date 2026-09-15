@@ -31,11 +31,23 @@ jobs:
       # uv must exist before cargo test: the hk-e2e harness generates synthetic IQ via py/.
       - uses: astral-sh/setup-uv@v6
 
+      # T-077: cargo-nextest runs the workspace in parallel, with heavy/timing-sensitive tests
+      # (tests/e2e, hk-pipeline listen/retune/lossless/refine/stream, hk-api, hk-cli, hk-core ring
+      # stress/concurrency) pinned to a serial group by .config/nextest.toml. Pinned version so a
+      # nextest release can't silently change CI behaviour.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.144
+
       # hk-e2e (harness smoke tests + the M0 acceptance suite) runs in the `acceptance` job.
-      - name: cargo test
+      - name: cargo nextest run
         env:
           HK_E2E_REQUIRE_SYNTH: "1"
-        run: cargo test --workspace --exclude hk-e2e
+        run: cargo nextest run --workspace --exclude hk-e2e
+
+      # nextest doesn't run doctests.
+      - name: cargo test --doc
+        run: cargo test --workspace --exclude hk-e2e --doc
 
       - name: python tooling tests
         working-directory: py

@@ -1,0 +1,69 @@
+# T-077: parallel test runner with serial groups.
+#
+# Default: full parallelism (nextest's usual one-process-per-test model, all binaries
+# concurrent). A `heavy-serial` group pulls in the tests that are timing-sensitive or
+# contend for shared resources (ports, real OS threads/timing, spawned daemon
+# processes) so they don't race each other under load:
+#   - tests/e2e (hk-e2e): the harness + M0 acceptance suite drive the whole pipeline
+#     end to end and spawn real processes/servers.
+#   - hk-pipeline: tests named listen*/retune*/lossless*/refine*/stream* exercise
+#     live retune/listen/streaming timing against a running pipeline.
+#   - hk-api, hk-cli: bind real TCP/WebSocket ports and (hk-cli) spawn the daemon
+#     process, so concurrent runs can collide on ports or process lifecycle.
+#   - hk-core: ring_concurrency/ring_stress race real reader/writer threads against
+#     wall-clock timing (the "HackRF fake drop/gap" ring test, T-072/T-074 history).
+#
+# Everything else (hk-model, hk-dsp, hk-detect, hk-estimate, hk-demod, hk-store,
+# hk-context, hk-stream, hk-plugins, and the rest of hk-core/hk-pipeline) runs fully
+# parallel at the default test-threads.
+#
+# Retries are scoped to the specific tests known to be flaky under load (see CLAUDE.md
+# "Build/test/run" and docs/planning-log.md T-072/T-074/T-076 history) so a genuine
+# regression in any other test still fails on the first try. nextest reports retried
+# tests as "try N/M" in its human and JUnit output.
+
+[test-groups.heavy-serial]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(hk-e2e)'
+test-group = 'heavy-serial'
+
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream))'
+test-group = 'heavy-serial'
+
+[[profile.default.overrides]]
+filter = 'package(hk-api) or package(hk-cli)'
+test-group = 'heavy-serial'
+
+[[profile.default.overrides]]
+filter = 'package(hk-core) and (binary(ring_concurrency) or binary(ring_stress))'
+test-group = 'heavy-serial'
+
+# Found flaky under measurement (T-077): wfm_refinement_on_the_recorded_station runs a
+# wall-clock time-budgeted optimizer (hk-demod's refinement search) and failed with
+# stop: TimeBudget / converged: false under heavy machine load (load average ~95, other
+# agents building concurrently) when it ran fully parallel. Serialize it rather than loosen
+# the time budget in test code.
+[[profile.default.overrides]]
+filter = 'package(hk-demod) and binary(refine_wfm_real)'
+test-group = 'heavy-serial'
+
+# Known timing-sensitive flakes (documented in CLAUDE.md / planning-log): retry once
+# so a load-induced hiccup doesn't fail CI, without masking a real, repeatable failure.
+[[profile.default.overrides]]
+filter = 'test(retuning_into_paging_while_listening_stops_the_audio_and_refuses_new_listeners)'
+retries = 1
+
+[[profile.default.overrides]]
+filter = 'test(fm_audio_streams_over_websocket_and_a_stalled_tcp_client_never_blocks_the_chain)'
+retries = 1
+
+[[profile.default.overrides]]
+filter = 'test(hackriffd_stops_gracefully_on_ctrl_c)'
+retries = 1
+
+[[profile.default.overrides]]
+filter = 'test(racing_readers_get_exact_samples_and_exact_loss_accounting)'
+retries = 1

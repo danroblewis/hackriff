@@ -9,11 +9,46 @@ default:
 build:
     cargo build --workspace
 
-# All offline tests: Rust (T1-T4, no hardware, `gpu` off) + Python tooling + UI build check (skipped without node)
-test: test-rust test-py test-ui
+# All offline tests: Rust (T1-T4, no hardware, `gpu` off) + Python tooling + UI build check (skipped without node).
+# Runs via cargo-nextest for parallelism: heavy/timing-sensitive tests (tests/e2e, hk-pipeline
+# listen/retune/lossless/refine/stream tests, hk-api, hk-cli, hk-core ring stress/concurrency, hk-demod::refine_wfm_real)
+# are pinned to the serial `heavy-serial` test group in .config/nextest.toml; everything else runs
+# fully parallel. hk-e2e (harness + M0 acceptance suite) is excluded here, same as CI's `test` job
+# — run it with `just acceptance`. Falls back to plain `cargo test` if nextest isn't installed.
+# See `just test-seq` for a fully sequential run, and `just test-crate`/`just test-one` to run a
+# single crate or test (the T1-T4 subset an agent working on one crate should use, not full `test`).
+test: test-rust test-doc test-py test-ui
 
 test-rust:
-    cargo test --workspace
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v cargo-nextest >/dev/null 2>&1; then
+        cargo nextest run --workspace --exclude hk-e2e
+    else
+        echo "test-rust: cargo-nextest not found; falling back to plain 'cargo test' (see just test-seq)" >&2
+        cargo test --workspace --exclude hk-e2e
+    fi
+
+# nextest doesn't run doctests, so `just test` runs them separately.
+test-doc:
+    cargo test --workspace --exclude hk-e2e --doc
+
+# Fully sequential fallback (no nextest, no parallelism, no serial groups needed): matches
+# pre-T-077 behaviour, for bisecting a nextest-only failure or when nextest isn't installed.
+test-seq:
+    cargo test --workspace --exclude hk-e2e
+    cargo test --workspace --exclude hk-e2e --doc
+
+# Targeted run for one crate, e.g. `just test-crate hk-pipeline`. What an agent working on a
+# single crate should run instead of the full `just test` — the coordinator runs the full
+# suite once per merge.
+test-crate crate:
+    cargo nextest run -p {{crate}}
+
+# Targeted run for one test by (substring) test-function name or test-file/binary name,
+# e.g. `just test-one retuning_into_paging` or `just test-one listen_retune`.
+test-one name:
+    cargo nextest run -E 'test({{name}}) or binary({{name}})'
 
 # M0 slice acceptance suite (T-024, docs/11 §1.1): 7 use cases + legal regression through the composed pipeline. Missing uv or LFS fixtures fail; only readsb-dependent parts skip. Extra args go to cargo test, e.g. `just acceptance -- --nocapture`
 acceptance *args:
