@@ -191,7 +191,7 @@ hk-store `occupancy/` (T-118):
 - **Per cell and per learned channel, per slot:** mergeable `SlotStats`, with level statistics further split by gain state (at most 4 per slot; beyond that the cell reports `mixed`).
 - **Calibration:** dBFS baselines are keyed `uncalibrated`. A new CalibrationState starts a new key (C12 pitfall: calibration changes look like anomalies).
 
-Only observed cells are stored. Size estimate: a 30–1000 MHz plan is ~9 700 cells × 168 × ~56 B ≈ 90 MB per site/cal for one copy, doubled with the frozen reference.
+Only observed cells, and within each series only observed hour-of-week slots (T-134), are stored, in memory and on disk. Size estimate: a 30–1000 MHz plan is ~9 700 cells × 168 × ~56 B ≈ 90 MB per site/cal for one copy, doubled with the frozen reference. Each gain state and level class is its own series, so a busy week can exceed that; a parked 48 h run touches 48 slots per series (T-134 measurement in `hk-pipeline` attention tests).
 
 ### 3.2 Maturity (decided; see open question 1)
 
@@ -254,7 +254,7 @@ H3 (already a dependency) may index sites for nearest-site lookup; it is not the
 ### 3.6 Storage and retention
 
 hk-store `baseline/` (T-119):
-- **Layout:** one file per `BaselineKey` (`<data>/baselines/<site>/<cal>/<scheme>-<factor>.bin`) holding the reference and adaptive slot stats, sparse by cell.
+- **Layout:** one file per `BaselineKey` (`<data>/baselines/<site>/<cal>/<scheme>-<factor>.bin`) holding the reference and adaptive slot stats, sparse by cell and slot.
 - **Writes:** temp → fsync → rename when an hour slot closes (≤ 24 writes/day per active key).
 - **Quota:** 1 GiB. Eviction takes the least recently visited site first, and never a site visited within 180 days unless over quota.
 
