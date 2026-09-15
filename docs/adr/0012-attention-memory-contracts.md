@@ -200,9 +200,20 @@ hk-store `occupancy/` (T-118):
 - **Mixed cell shapes are recorded, not rejected.**
   - A partial row's per-cell Gamma shape differs from a full row's.
   - The pipeline's `FloorProduct` therefore sets `mixed_shapes`: such frames fold and are counted (`mixed_shape_frames`) instead of being rejected.
-  - Tiles already mark a mixed shape and then give no bias-corrected `floor_db`, so occupancy's local floors fall back to the §2.2 80 % method.
-  - `floor_vs_time` decides per tile from the tile's persisted shape record, so the decision survives a restart: uniform tiles use their own shape's bias, mixed tiles give no floor.
-  - Most scheduler tiles mix sweep-hop and dwell shapes, so they lose `floor_db`; the scheduler test counts them. A Gamma-mixture bias model (the mixture's percentile lies between its components') is a follow-up.
+  - `floor_vs_time` and `floor_db` decide per tile from the tile's persisted shape record, so the decision survives a restart: uniform tiles use their own shape's bias.
+  - **Mixed tiles use a Gamma-mixture bias (T-141).** Before T-141 they gave no `floor_db`, so every level-0 tile of the default-scheduler scene (72/72) fell back to the §2.2 80 % method.
+    - *Record.* Tile format 4 adds `cell_shapes`: level-0 cell values folded per shape, with shapes within 5 % merged, at most 32 per tile, and further or unknown shapes counted in `other_shape_values`. Ingest adds one short scan per frame per tile, and roll-ups sum the counts.
+    - *Correction.* A cell's `p` is unchanged: `(1 + q(n−1))/(n+1)` at level 0, `q` rolled up. The mixture quantile solves `Σ wᵢ·P(nᵢ, nᵢ·x) = p`, with weights `wᵢ` = the tile's values per shape. It is found by 48-step bisection between the components' quantiles (`hk_dsp::radiometry::mixture_percentile_bias_db`). The bias is `10·log10 x`.
+    - *Cost.* Computed at query time. It is cached per signature (shape bits plus weights quantised to 1/1024, solved with the quantised weights so the cache is order-independent) and per frame count.
+    - *Why value counts per tile, not per cell.* Pooled values are what a percentile samples. Per-cell composition would need a payload column; a cell whose own mix differs from its tile's gets the tile's correction, bounded by the spread of the component biases, and the step's cross-cell median absorbs this.
+    - *Old tiles.* Format 1–3 tiles read with every value's shape unrecorded, so a mixed old tile still gives no floor. Uniform old tiles and fixed-tune tiles take the unchanged single-shape path, so their `floor_db` and floor steps are bit-identical.
+    - *Measured (T-141, `hk-pipeline` `scheduler_history`, same 2 h scene).* With the scheduler, 72/72 level-0 tiles are mixed and all 72 report a floor (0 before). The pre-registered check (median level-0 `floor_db` over the central half of the span within 0.5 dB of the fixed-tune run) **fails at 1.01 dB**: scheduler −99.80, fixed tune −100.81 dB/Hz. The offset is upstream of the bias model.
+      - The unbiased power mean already differs by 0.94 dB (−99.86 vs −100.81), uniformly across the span. A carrier at +150 kHz reads 2.2 dB lower in the scheduler run.
+      - The correction itself adds +0.06 dB (fixed tune: 0.00).
+      - Probable cause: sweep hops tune at `sweep_rate_hz` = 20 Msps, off the recording's centre. The mock then band-selects, resamples and adds complement noise instead of passing through, while the fixed-tune run passes through bit-exact.
+      - Open: the mock render level (or the comparison scene) must be resolved before this check can pass. The threshold is not loosened.
+      - Synthetic mixtures in the valid regime (shapes 30/300) correct to within 0.2 dB at levels 0 and 1 (`hk-store` `history::tests::mixture`).
+    - *Mean.* `mean_db` stays `sum_lin / frames`, frame-weighted. It is an unbiased cross-check for any shape mix. Weighting by sample span would lower its variance slightly but needs span in the tile; not done.
 - **Fixed tuning is untouched.** A stream that never retunes emits bit-identical frames, and so bit-identical tiles: gaps and gain steps alone never arm partial rows (`hk-dsp` `partial_frames_never_armed_are_bit_identical`). With no mixed frame the floor product computes exactly as before.
 - *Measured (T-139, `hk-pipeline` `scheduler_history`).* The scene is 2 h, time-compressed, 60 s mean gap, 0.13 s windows, default scheduler plus bandit.
   - Before T-139: 0 history frames.

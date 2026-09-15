@@ -101,7 +101,8 @@ A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level w
 T-116 additions (all additive):
 
 - `coverage` is each cell's observed fraction of its duration; `coverage_summary.gaps` lists maximal time runs in which **no** cell of the grid was observed. A gap is never reported as quiet.
-- `floor_db` is the noise-floor estimate: `p_low_db` corrected for the low-percentile bias of averaged-periodogram noise (Gamma model, shape `provenance.cell_shape`). `null` when the frames carried no noise shape or tiles with different shapes mixed; `p_low_db` stays the raw percentile.
+- `floor_db` is the noise-floor estimate: `p_low_db` corrected for the low-percentile bias of averaged-periodogram noise (Gamma model, shape `provenance.cell_shape`). T-141: a tile whose frames had different shapes (a scheduler's short-step rows) is corrected with the bias of the Gamma **mixture** of its level-0 values, weighted by the values folded per shape over the tile (`provenance.cell_shapes`). `null` when the frames carried no noise shape, or when a mixed tile recorded no per-shape counts (tile format < 4, more than 32 shapes: `provenance.other_shape_values` > 0); `p_low_db` stays the raw percentile.
+- T-141 (additive, tile format 4): `provenance.cell_shapes` lists `{shape, values}` (level-0 cell values folded per cell shape, shapes within 5 % merged, at most 32) and `provenance.other_shape_values` counts values whose shape is unrecorded.
 - `provenance` records gain table, filter/antenna port, spur-mask version and cell shape (first value plus a `*_mixed` flag) and every front-end change as a `steps` entry (time, what changed, state before and after; at most 32, the rest counted in `steps_dropped`). Cells are not split at a step — use the steps to explain level changes as provenance, not events. `scheme` is the pyramid scheme/version id and `tile_format` the tile format written.
 
 T-133 additions (all additive; tile format 3, formats 1 and 2 still read):
@@ -133,6 +134,8 @@ Same region parameters as `/api/history`, `max_steps` in place of `max_cells`.
   "uncalibrated_provenance": { "…": "as in /api/history" }
 }
 ```
+
+**Mixed cell shapes (T-141).** A run whose history rows average different segment counts (the scheduler's short steps) folds tiles of several Gamma cell shapes. Each tile decides from its own persisted record: a uniform tile's cells use their shape's bias; a mixed tile's cells use the bias of the Gamma mixture of the tile's level-0 values (weights = values folded per shape, `provenance.cell_shapes`; the percentile's CDF point is solved on `Σ wᵢ·P(nᵢ, nᵢ·x)`), so `bias_db` then lies between the components' biases. Weights are per tile, not per cell: a cell whose frames' shape composition differs from its tile's is corrected with the tile's mix (the step median absorbs this). A mixed tile written before tile format 4 (no per-shape counts) contributes no cells, as before; `shape` stays the product's first shape. No field changed.
 
 ### `GET /api/inventory` — signal inventory (T-018, T-078, AWARE-053/AWARE-042)
 
