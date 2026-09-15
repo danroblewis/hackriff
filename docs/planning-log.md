@@ -1238,3 +1238,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Verified OK:** mask/insert sync, decay/pooling/refreeze equivalence to dense, untrusted-file indexing, hour-of-day reservation.
   - **Nits:** a boxed iterator per series in `pools`; the 48 h test's `early` run is unused.
   - **Next:** one fix round launched in the T-134 worktree.
+- **B0.343 Full check green after the T-132 merge (42b9b53).**
+  - Lint clean.
+  - Tests: 1358/1358 nextest+UI, no retries.
+  - Acceptance: 32/32, 75 s.
