@@ -1133,3 +1133,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Docs:** ADR §2.6 and §2.7 amended.
 
   **Results:** FM fixture has 2 channels (101.3 station at 344 kHz, plus a weak blind carrier at 100.44 MHz), band fco 1.0. Dense FM gives 3 channels, one per station. The t118 table is identical to B0.303. Full check running.
+- **B0.324 T-122 fix round done** (dcd4135).
+  - **Gain steps:** a step explains a change only if all of these hold: the delta is known; ≥70% of ≥4 observed subjects moved with the delta within ±3 dB; the subject has no residual.
+  - **Steps that don't fit** don't suppress; they are recorded as a 'possible contributor' ranked below unexplained.
+  - **Delta parsing:** `from_report` parses deltas from gain details.
+  - **Tests:** a +20 dB step plus a coincident emitter gives 20 self-inflicted and exactly 1 raise, with `unexplained` on top. A no-delta step doesn't suppress.
+  - **Dismissed keys:** they only absorb groups inside their extent; best-overlap reuse; key eviction after cooldown.
+  - **Nits:** resume sorted DESC; `explained_step_t` persisted; api.md kind mapping documented; ADR §9 retention note.
+
+  Merges after the in-flight full check (order T-129 → T-122 → T-128).
