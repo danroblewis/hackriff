@@ -21,3 +21,4 @@ Changing an ACCEPTED ADR goes to Fable plus the user, never a silent code change
 | [0011](0011-decoder-workbench-contracts.md) | Decoder workbench contracts: blocks, recipes, field maps, inspector stream |
 | [0012](0012-attention-memory-contracts.md) | Attention + memory contracts: observation log, occupancy, baselines, interestingness, bandit, reports, alarms |
 | [0013](0013-ui-architecture.md) | MUI web UI architecture: vanilla TS + small store, component tree, state slices, frontend↔API map with API gaps, migration, per-panel briefs |
+| [0015](0015-decoder-synthesis-contracts.md) | Decoder synthesis contracts (MAUTO): recipe-prefix candidates, stage evidence in significance bits, beam search + budget, templates, `POST /api/analyze` jobs, confirm-by-decode, burst path, blind evaluation |
