@@ -1772,3 +1772,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Reuse:** it reuses the M1 `frame-inspector.ts` helpers, so no parsing lives in the UI.
   - **Data source:** frames come through T-153's `subscribePipelineFeed`, which stays a no-op until T-153 lands.
   - **Merge:** queued after the combined full check.
+- **B0.410 T-153 committed (c66d538, Sonnet).**
+  - **Coordinator check:** diff touches only `decode/*` plus one test file; npm test 179 passed, 0 failed.
+  - **Built:**
+    - Pipelines, recipes and blocks come from a shared, ref-counted cache.
+    - Stage chain.
+    - SVG plots from `/ws/open/stage` taps, with placeholders for gaps 4, 5 and 6.
+    - Params: hot-edit through `validate` then `PUT` recipe; Suggest/Use via `/api/assist`.
+    - `status-feed.ts` implemented to T-154's contract: one ref-counted inspector socket per pipeline, reconnecting with backoff.
+  - **Merge queue** (after the combined full check): T-153, T-154.

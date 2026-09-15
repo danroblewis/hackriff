@@ -2429,7 +2429,8 @@ notes:
   - id: T-153
     milestone: MUI
     title: "MUI Decode workbench: pipelines list (parallel, hop-following), selected recipe stages, blocks palette, per-stage plots (MPX/subcarrier, eye, timing, constellation, sync search, group/frame counts, channel map), stage parameters with blind-estimate Use suggestions and live quality"
-    status: in-progress
+    status: review
+    commit: c66d538
     deps: [T-149]
     parallel_group: MUI-DECODE
     use_cases: []
