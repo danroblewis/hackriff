@@ -2747,7 +2747,8 @@ notes:
   - id: T-173
     milestone: M2
     title: "Scheduler hop placement: guarantee every frequency gets a view away from DC (hop overlap or dithered centres) so a carrier near one LO is not permanently suspect"
-    status: in-progress
+    status: review
+    commit: d313f56
     deps: [T-147]
     parallel_group: M2B
     use_cases: [AWARE-042]

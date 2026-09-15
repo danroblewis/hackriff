@@ -2032,3 +2032,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Load:** load averages were 22 → 10 during the run.
   - **Merged:** T-179 (8d38d3b) and its worktree removed.
   - **Next:** full check.
+- **B0.443 T-173 committed (d313f56); Opus review launched.**
+  - **Change:** every other pass shifts each sweep hop centre by `dc_dither_hz` (75 kHz). Revisit time is unchanged.
+  - **Evidence:**
+    - New hk-core test: every cell gets an off-DC view within 2 passes.
+    - `occupancy_dc_dither`: a carrier at a hop LO is learned (FCO 0.503 vs 0.489).
+    - `observation_log` now requires the two plan geometries exactly; no product bug found.
+    - Tests: hk-pipeline 12, hk-core 20; lint clean.
+  - **ADRs:** ADR-0005 and ADR-0012 §1.3 amended.
+  - **Review focus:** plan-edge coverage, bandit/verification dwell interactions, occupancy weighting by parity, history tiles, mock re-render cost, config/disable, and whether the live demo retunes more.
