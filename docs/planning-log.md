@@ -1032,3 +1032,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Quota** is enforced on flush, and evicted engines are dropped.
 
   The 48 h scene is unchanged: 3-interval latency, 1/1824 false alarms. Residuals go to T-128. Merge waits for T-118, per the ADR order.
+- **B0.310 T-127 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. Any lease command, even a refused POST or an unknown DELETE, forces a new step without trimming, so the abandoned dwell/hop still counts in floor, coverage and visits.
+    2. `valid_decodes` is the global counter read ≥1 s after the dwell, so arms are credited with unrelated decodes.
+  - **Checked OK:** `refresh_bandit` is an atomic compare; the `on_member` scan is bounded (32); hub publish runs on the control thread; bandit-off behaviour matches main apart from the intended follow-ups; the T-115 observers are intact.
+  - **Merge order:** **T-118 → T-119 → T-127 → T-121**. All pairs have additive conflicts (ApiState field, serve_api init, api.md sections); run api_contract after each merge.
+  Fix round running, including nits: cut-end credit, TableFull→409, 503 cancel flag, bounded POI cost, doc comments.
