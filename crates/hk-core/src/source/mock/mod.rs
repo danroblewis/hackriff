@@ -81,7 +81,10 @@
 //! lowering it cannot undo clipping baked into the recording. The noise fill is white at the
 //! floor measured in the recording's central half, so spurs, DC and the baseband-filter roll-off
 //! are not synthesised outside coverage, and the floor dips ≈ 3 dB over the transition band at a
-//! coverage edge. The band-select filter (≈ 60 dB, transition 8 % of the output rate) adds about
+//! coverage edge. The band-select filter (≈ 60 dB, transition 8 % of the output rate) ends its
+//! roll-off half a transition inside any window edge the recording extends past (T-175: centred
+//! on ±rate/2 it folded recorded content just outside the window onto the opposite edge), so the
+//! outer 4 % of such a side is that dip, filled with the same noise. The filter adds about
 //! half its length in recording samples of latency after a retune. Multi-centre recordings are
 //! refused. The rounding-noise correction assumes the recording's rounding error is white and
 //! independent of the signal (true once its floor is ≳ 0.5 code rms). It needs ≈ 15 frames

@@ -451,18 +451,31 @@ fn a_recipe_runs_on_a_mock_channel_and_frame_records_arrive_over_tcp_and_ws() {
     assert!(f["metadata"]["sample_index"].as_u64().is_some(), "{f}");
     assert_eq!(frame_bytes(f)[0], 1, "the tag parameter");
     // One record per frame, in order, 5000 channel samples (50 000 ring samples) apart (a pair
-    // across the looping recording's splice may differ by the DDC's restart).
-    let mut exact = 0;
+    // across the looping recording's splice may differ by the DDC's restart). How many frames
+    // arrive before the first status record depends on how fast the pipeline runs (T-175: an
+    // optimised build reads many loops of the 1 s recording in one status interval), so every
+    // pair not straddling a splice (every `LOOP` ring samples) must be exact.
+    const LOOP: u64 = FS as u64; // `tone_recording` below: 1.0 s at FS
     for w in frames.windows(2) {
         assert_eq!(
             w[1]["metadata"]["frame"].as_u64().unwrap(),
             w[0]["metadata"]["frame"].as_u64().unwrap() + 1
         );
-        let d = w[1]["metadata"]["sample_index"].as_u64().unwrap()
-            - w[0]["metadata"]["sample_index"].as_u64().unwrap();
-        exact += usize::from((49_990..=50_010).contains(&d));
+        let (a, b) = (
+            w[0]["metadata"]["sample_index"].as_u64().unwrap(),
+            w[1]["metadata"]["sample_index"].as_u64().unwrap(),
+        );
+        // A splice exempts only the exact spacing, not the gap's size: the framer emits one frame
+        // every 50 000 ring samples of channel output, so even a DDC restart at the splice (its
+        // settle is far shorter than a frame period) can delay the next frame by less than one
+        // extra period. A gap of two periods or more would be a lost frame, which the consecutive
+        // frame numbers above cannot see if the counter kept running.
+        assert!(
+            (49_990..=50_010).contains(&(b - a)) || (a / LOOP != b / LOOP && b - a < 2 * 50_000),
+            "frame spacing {} between {a} and {b}, away from a loop splice: {frames:?}",
+            b - a
+        );
     }
-    assert!(exact + 1 >= frames.len() - 1, "frame spacing: {frames:?}");
     // Status: every node batched in one record.
     let m = &status[0]["metadata"];
     for node in ["pre", "framer", "post"] {
@@ -843,6 +856,15 @@ fn hot_edits_apply_at_a_chunk_boundary_without_stopping_capture_or_losing_sample
         (0, 0),
         "{mock:?}"
     );
+    // Status is published every STATUS_INTERVAL: read one published after the edits (T-175: an
+    // optimised build gets here before the first tick).
+    let ticks = || {
+        rt.stats_json(&id).unwrap()["status_ticks"]
+            .as_u64()
+            .unwrap()
+    };
+    let t0 = ticks();
+    wait("status ticks after the edits", LIMIT, || ticks() >= t0 + 2);
     let status = &rt.pipeline_json(&id).unwrap()["status"];
     assert_eq!(
         status["pre.lock"],

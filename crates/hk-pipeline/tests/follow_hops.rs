@@ -418,6 +418,21 @@ impl Run {
         self.rt.stats_json(id).unwrap()["frames"].as_u64().unwrap()
     }
 
+    /// The pipeline's status as published after this call: status is published every
+    /// `STATUS_INTERVAL`, so a snapshot taken right after a wait may predate what was waited for
+    /// (T-175: an optimised build gets here before the first tick). Two ticks guarantee one began
+    /// after the call.
+    fn fresh_status(&self, id: &str) -> Value {
+        let ticks = || {
+            self.rt.stats_json(id).unwrap()["status_ticks"]
+                .as_u64()
+                .unwrap()
+        };
+        let t0 = ticks();
+        wait("status ticks", || ticks() >= t0 + 2);
+        self.rt.pipeline_json(id).unwrap()["status"].clone()
+    }
+
     /// Stops the run; returns its data directory.
     fn finish(mut self) -> TempDir {
         self.rt.stop_all();
@@ -522,7 +537,7 @@ fn one_recipe_follows_a_channel_net_ordered_tagged_deduplicated_and_gains_a_chan
     wait("three loops on four channels", || {
         run.frames(&id) >= n1 + 3 * per_loop_all
     });
-    let status = run.rt.pipeline_json(&id).unwrap()["status"].clone();
+    let status = run.fresh_status(&id);
     run.rt.stop_json(&id).unwrap();
     let frames = frame_records(&sink);
     run.finish();
@@ -698,12 +713,12 @@ fn a_blind_hop_set_supplies_the_channels_and_a_channel_it_gains_is_followed() {
         let f = frame_records(&sink);
         (0..3).all(|c| f.iter().any(|x| x.1 == c && x.0 > at))
     });
+    let status = run.fresh_status(&id);
     let p = run.rt.pipeline_json(&id).unwrap();
     assert_eq!(p["state"], "running");
     assert!(
-        p["status"]["ch2.pre.items_in"].as_f64().unwrap_or(0.0) > 0.0,
-        "{}",
-        p["status"]
+        status["ch2.pre.items_in"].as_f64().unwrap_or(0.0) > 0.0,
+        "{status}"
     );
     run.finish();
 }
