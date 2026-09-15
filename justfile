@@ -26,7 +26,7 @@ test-rust:
         cargo nextest run --workspace --exclude hk-e2e
     else
         echo "test-rust: cargo-nextest not found; falling back to plain 'cargo test' (see just test-seq)" >&2
-        HK_IQ_BUFFER_MAX=16MiB cargo test --workspace --exclude hk-e2e
+        cargo test --workspace --exclude hk-e2e
     fi
 
 # nextest doesn't run doctests, so `just test` runs them separately.
@@ -36,7 +36,7 @@ test-doc:
 # Fully sequential fallback (no nextest, no parallelism, no serial groups needed): matches
 # pre-T-077 behaviour, for bisecting a nextest-only failure or when nextest isn't installed.
 test-seq:
-    HK_IQ_BUFFER_MAX=16MiB cargo test --workspace --exclude hk-e2e
+    cargo test --workspace --exclude hk-e2e
     cargo test --workspace --exclude hk-e2e --doc
 
 # Targeted run for one crate, e.g. `just test-crate hk-pipeline`. What an agent working on a
@@ -53,7 +53,7 @@ test-one name:
 # M0 slice acceptance suite (T-024, docs/11 §1.1): 7 use cases through the composed pipeline. Missing uv or LFS fixtures fail; only readsb-dependent parts skip. Extra args go to cargo test, e.g. `just acceptance -- --nocapture`
 acceptance *args:
     cargo build -p hk-plugins --bins
-    HK_IQ_BUFFER_MAX=16MiB HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo test -p hk-e2e --test acceptance_m0 {{args}}
+    HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo test -p hk-e2e --test acceptance_m0 {{args}}
 
 test-py:
     cd py && uv run --locked pytest

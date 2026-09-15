@@ -30,8 +30,10 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use hk_core::{ReadOutcome, RingReader};
 use hk_model::sigmf::{Annotation, Capture, Datatype, SigmfMeta};
@@ -42,8 +44,16 @@ use hk_model::{
 pub use hk_store::iqbuffer::ClipRange;
 use hk_store::iqbuffer::{
     Allocation, ClipError, IqBuffer, IqBufferConfig, IqBufferStatus, IqBufferWriter, OsHooks,
-    SegmentStart, is_allocation_refused,
+    SegmentStart, is_allocation_refused, is_ring_incompatible, is_ring_locked,
 };
+
+/// How long a segment's feeder waits for the ring to open before it reads (and, while the ring
+/// is still allocating, discards) captured blocks.
+const ALLOCATION_WAIT: Duration = Duration::from_secs(2);
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
 use num_complex::Complex;
 use serde::Serialize;
 
@@ -173,14 +183,50 @@ pub struct ClipExported {
     pub captures: Vec<ClipCaptureInfo>,
 }
 
-/// The run's buffer: status, clip export and the per-segment feeder.
-pub struct IqBufferService {
-    buffer: Option<IqBuffer>,
+/// Where the ring's background open stands.
+enum Phase {
+    /// Opening, recovering and allocating (`hk-iqbuffer-alloc`); nothing is buffered yet.
+    Allocating,
+    /// Open: the buffer's index (the writer is in [`Alloc::writer`]).
+    Ready(IqBuffer),
+    /// No buffer for this run.
+    Disabled {
+        reason: String,
+        allocation: Option<Allocation>,
+    },
+}
+
+/// State shared by the service, its feeder and the allocation thread (which never holds the
+/// service itself, so dropping the service can cancel and join it).
+struct Alloc {
+    phase: Mutex<Phase>,
+    changed: Condvar,
     writer: Mutex<Option<IqBufferWriter>>,
+    /// `f64` bits of the allocated fraction.
+    progress: AtomicU64,
+    cancel: AtomicBool,
+}
+
+impl Alloc {
+    fn settle(&self, phase: Phase) {
+        *lock(&self.phase) = phase;
+        self.changed.notify_all();
+    }
+}
+
+/// The run's buffer: status, clip export and the per-segment feeder.
+///
+/// The ring opens **in the background** (T-178 fix round): recovery and allocating a large quota
+/// (144 GB for `--iq-retention 1h`) never hold up the run's start or the API. Until it is open
+/// the status reports `allocation: "allocating"` with `allocation_progress`, `enabled` is false,
+/// clips answer unavailable, and captured samples are **not buffered** (the feeder keeps reading
+/// the ring so nothing waits on it); buffering starts with the first block after the ring opens.
+pub struct IqBufferService {
+    alloc: Arc<Alloc>,
+    allocator: Mutex<Option<JoinHandle<()>>>,
+    active: bool,
     cfg: IqBufferConfig,
-    reason: Option<String>,
-    /// The ring was refused for lack of free space.
-    refused: bool,
+    dir: PathBuf,
     data_dir: PathBuf,
     db_path: PathBuf,
     device_hw: Option<String>,
@@ -189,43 +235,35 @@ pub struct IqBufferService {
 
 impl IqBufferService {
     /// Opens the buffer for a run under `cfg` (never fails the run: a buffer that cannot open is
-    /// reported as disabled with its reason).
+    /// reported as disabled with its reason). Returns at once; the ring opens on a background
+    /// thread.
     pub(crate) fn open(cfg: &PipelineConfig, db_path: PathBuf) -> Self {
         let bc = cfg.iq_buffer;
-        let mut refused = false;
-        let (buffer, writer, reason) = if bc.active(cfg.lossless) {
-            let dir = cfg.data_dir.join(hk_store::iqbuffer::DIR_NAME);
+        let dir = cfg.data_dir.join(hk_store::iqbuffer::DIR_NAME);
+        let active = bc.active(cfg.lossless);
+        let alloc = Arc::new(Alloc {
+            phase: Mutex::new(Phase::Allocating),
+            changed: Condvar::new(),
+            writer: Mutex::new(None),
+            progress: AtomicU64::new(0f64.to_bits()),
+            cancel: AtomicBool::new(false),
+        });
+        let mut allocator = None;
+        if active {
             let hooks = cfg
                 .iq_buffer_hooks
                 .clone()
                 .unwrap_or_else(|| Arc::new(OsHooks));
-            let started = std::time::Instant::now();
-            match IqBuffer::open_with(&dir, bc, hooks) {
-                Ok((b, w)) => {
-                    let s = b.status(None, None, 0);
-                    eprintln!(
-                        "IQ capture ring {}: {} slots of {} bytes ({:?}, preallocated {}), run {}, \
-                         {} segments recovered, opened in {:.3} s",
-                        dir.display(),
-                        s.slot_count,
-                        s.chunk_bytes,
-                        s.allocation,
-                        s.preallocated,
-                        b.run(),
-                        s.recovered_segments,
-                        started.elapsed().as_secs_f64()
-                    );
-                    (Some(b), Some(w), None)
-                }
-                Err(e) if is_allocation_refused(&e) => {
-                    eprintln!("IQ capture buffer disabled: {e}");
-                    refused = true;
-                    (None, None, Some(e.to_string()))
-                }
-                Err(e) => {
-                    eprintln!("IQ capture buffer disabled: opening {}: {e}", dir.display());
-                    (None, None, Some(format!("the buffer could not open: {e}")))
-                }
+            let (a, d) = (Arc::clone(&alloc), dir.clone());
+            let spawned = std::thread::Builder::new()
+                .name("hk-iqbuffer-alloc".into())
+                .spawn(move || open_ring(&a, &d, bc, hooks));
+            match spawned {
+                Ok(h) => allocator = Some(h),
+                Err(e) => alloc.settle(Phase::Disabled {
+                    reason: format!("the buffer could not open: spawning its thread: {e}"),
+                    allocation: None,
+                }),
             }
         } else {
             let why = if bc.enabled == Some(false)
@@ -237,14 +275,17 @@ impl IqBufferService {
             } else {
                 "off for a lossless replay (the recording is the history); HK_IQ_BUFFER=1 forces it"
             };
-            (None, None, Some(why.to_owned()))
-        };
+            alloc.settle(Phase::Disabled {
+                reason: why.to_owned(),
+                allocation: None,
+            });
+        }
         Self {
-            buffer,
-            writer: Mutex::new(writer),
+            alloc,
+            allocator: Mutex::new(allocator),
+            active,
             cfg: bc,
-            reason,
-            refused,
+            dir,
             data_dir: cfg.data_dir.clone(),
             db_path,
             device_hw: cfg.device_hw.clone(),
@@ -252,33 +293,78 @@ impl IqBufferService {
         }
     }
 
-    /// Whether the run buffers IQ.
+    /// Whether the run is configured to buffer IQ (the ring may still be allocating, or have
+    /// failed to open: [`Self::enabled`]).
+    pub fn active(&self) -> bool {
+        self.active
+    }
+
+    /// Whether the ring is open and buffering.
     pub fn enabled(&self) -> bool {
-        self.buffer.is_some()
+        self.buffer().is_some()
+    }
+
+    /// Waits up to `timeout` for the background open to finish (open or disabled); whether it
+    /// finished.
+    pub fn wait_allocated(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut phase = lock(&self.alloc.phase);
+        while matches!(*phase, Phase::Allocating) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            phase = self
+                .alloc
+                .changed
+                .wait_timeout(phase, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
+    fn buffer(&self) -> Option<IqBuffer> {
+        match &*lock(&self.alloc.phase) {
+            Phase::Ready(b) => Some(b.clone()),
+            _ => None,
+        }
     }
 
     /// The status: segments overlapping `[t0_s, t1_s)` (all when `None`), the newest `limit`.
     pub fn status(&self, t0_s: Option<f64>, t1_s: Option<f64>, limit: usize) -> IqBufferStatus {
         let ns = |s: f64| (s * 1e9).round() as i64;
-        match &self.buffer {
-            Some(b) => b.status(t0_s.map(ns), t1_s.map(ns), limit),
-            None => {
-                let mut s =
-                    IqBufferStatus::disabled(&self.cfg, self.reason.clone().unwrap_or_default());
-                if self.refused {
-                    s.allocation = Some(Allocation::Refused);
-                }
-                s
+        let (reason, allocation) = match &*lock(&self.alloc.phase) {
+            Phase::Ready(b) => {
+                let b = b.clone();
+                return b.status(t0_s.map(ns), t1_s.map(ns), limit);
             }
+            Phase::Allocating => (
+                "allocating the IQ capture ring in the background: capture is not buffered until \
+                 it is allocated"
+                    .to_owned(),
+                Some(Allocation::Allocating),
+            ),
+            Phase::Disabled { reason, allocation } => (reason.clone(), *allocation),
+        };
+        let mut s = IqBufferStatus::disabled(&self.cfg, reason);
+        s.allocation = allocation;
+        if allocation == Some(Allocation::Allocating) {
+            s.allocation_progress =
+                Some(f64::from_bits(self.alloc.progress.load(Ordering::Relaxed)));
         }
+        if allocation.is_some() {
+            s.dir = Some(self.dir.display().to_string());
+        }
+        s
     }
 
     /// Exports `request` as a SigMF recording and stores its `Recording` row.
     pub fn export_clip(&self, request: &ClipRequest) -> Result<ClipExported, ClipFailure> {
-        let buffer = self.buffer.as_ref().ok_or_else(|| {
+        let buffer = self.buffer().ok_or_else(|| {
             ClipFailure::Unavailable(format!(
                 "this run has no IQ capture buffer: {}",
-                self.reason.clone().unwrap_or_default()
+                self.status(None, None, 0).reason.unwrap_or_default()
             ))
         })?;
         let ClipRequest {
@@ -505,14 +591,18 @@ impl IqBufferService {
     /// block is buffered.
     pub(crate) fn feed(
         &self,
-        _shared: Arc<Shared>,
+        shared: Arc<Shared>,
         mut reader: RingReader<Complex<i8>>,
         cursor: GateCursor,
     ) -> anyhow::Result<()> {
-        let mut guard = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(w) = guard.as_mut() else {
-            return Ok(());
-        };
+        // A ring that opens quickly (every quota up to a few GiB opens in milliseconds) buffers
+        // from the segment's first block: wait for it, briefly, before reading. Capture never
+        // waits for this reader; a larger quota is not buffered until it is allocated.
+        let deadline = Instant::now() + ALLOCATION_WAIT;
+        while Instant::now() < deadline
+            && !shared.stop.load(Ordering::Relaxed)
+            && !self.wait_allocated(Duration::from_millis(50))
+        {}
         let mut buf = vec![Complex::<i8>::default(); 1 << 16];
         let mut bytes = Vec::with_capacity(2 << 16);
         let mut last_prov: Option<ProvenanceId> = None;
@@ -522,6 +612,13 @@ impl IqBufferService {
         loop {
             match reader.read_timeout(&mut buf, Duration::from_millis(50)) {
                 ReadOutcome::Data(c) => {
+                    // The ring may still be allocating: nothing is buffered until it is open.
+                    let mut guard = lock(&self.alloc.writer);
+                    let Some(w) = guard.as_mut() else {
+                        next_index = None;
+                        cursor.set(c.end_sample());
+                        continue;
+                    };
                     let t = &c.provenance.tune;
                     let class = window_class(t.center_hz, t.sample_rate_hz);
                     if !class.permits_content() {
@@ -570,8 +667,10 @@ impl IqBufferService {
                     resume_at,
                     ..
                 } => {
-                    w.count_dropped(lost_samples);
-                    dropped_before += lost_samples;
+                    if let Some(w) = lock(&self.alloc.writer).as_mut() {
+                        w.count_dropped(lost_samples);
+                        dropped_before += lost_samples;
+                    }
                     next_index = None;
                     cursor.set(resume_at);
                 }
@@ -580,11 +679,73 @@ impl IqBufferService {
                 ReadOutcome::Closed => break,
             }
         }
-        w.end_segment();
-        // The segment's end (stop or re-plumb) makes everything stored durable for a restart.
-        if let Err(e) = w.checkpoint() {
-            eprintln!("IQ capture buffer: checkpoint failed: {e}");
+        if let Some(w) = lock(&self.alloc.writer).as_mut() {
+            w.end_segment();
+            // The segment's end (stop or re-plumb) makes everything stored durable for a restart.
+            if let Err(e) = w.checkpoint() {
+                eprintln!("IQ capture buffer: checkpoint failed: {e}");
+            }
         }
         Ok(())
     }
+}
+
+impl Drop for IqBufferService {
+    /// Cancels a background open still allocating and waits for it (at most one allocation step),
+    /// so the ring's lock is released before a later run opens the same directory.
+    fn drop(&mut self) {
+        self.alloc.cancel.store(true, Ordering::Relaxed);
+        if let Some(h) = lock(&self.allocator).take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// The background open of the ring (`hk-iqbuffer-alloc`).
+fn open_ring(
+    alloc: &Alloc,
+    dir: &std::path::Path,
+    cfg: IqBufferConfig,
+    hooks: Arc<dyn hk_store::iqbuffer::IqBufferHooks>,
+) {
+    let started = Instant::now();
+    let progress = |f: f64| alloc.progress.store(f.to_bits(), Ordering::Relaxed);
+    let phase = match IqBuffer::open_with_progress(dir, cfg, hooks, &progress, &alloc.cancel) {
+        Ok((b, w)) => {
+            let s = b.status(None, None, 0);
+            eprintln!(
+                "IQ capture ring {}: {} slots of {} bytes ({:?}, preallocated {}), run {}, {} \
+                 segments recovered, opened in {:.3} s",
+                dir.display(),
+                s.slot_count,
+                s.chunk_bytes,
+                s.allocation,
+                s.preallocated,
+                b.run(),
+                s.recovered_segments,
+                started.elapsed().as_secs_f64()
+            );
+            *lock(&alloc.writer) = Some(w);
+            Phase::Ready(b)
+        }
+        Err(e) => {
+            let allocation = if is_allocation_refused(&e) {
+                Some(Allocation::Refused)
+            } else if is_ring_locked(&e) {
+                Some(Allocation::Locked)
+            } else if is_ring_incompatible(&e) {
+                Some(Allocation::Incompatible)
+            } else {
+                None
+            };
+            let reason = if allocation.is_some() {
+                e.to_string()
+            } else {
+                format!("the buffer could not open: {e}")
+            };
+            eprintln!("IQ capture buffer disabled ({}): {reason}", dir.display());
+            Phase::Disabled { reason, allocation }
+        }
+    };
+    alloc.settle(phase);
 }

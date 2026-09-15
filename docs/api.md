@@ -296,9 +296,13 @@ There is no record button; `POST /api/outputs/record/start` still records forwar
 - **Storage: a pre-allocated ring** (`<data dir>/iqbuffer/`).
   - **Files.** `ring.ci8` holds `slot_count` fixed-size slots (a sixteenth of the quota, 64 KiB..64 MiB each) of interleaved ci8 (2 bytes/sample, as captured). `ring.journal` is a small CRC-framed index. `ring.lock` stops two runs sharing a directory.
   - **Allocation.** The whole ring is allocated when the run starts: `F_PREALLOCATE` on macOS, `fallocate` on Linux, or a sparse file where neither works (`preallocated: false`). Allocation writes no data: 8 GiB took 0.27 s on the dev Mac.
+  - **In the background.** Opening the ring (recovery, then allocation in steps of about 1 GiB) runs on its own thread, so neither the run's start nor the API waits for a large quota. Until it completes the status answers `enabled: false`, `allocation: "allocating"` and `allocation_progress` (0..1); clips answer `503 unavailable`. **Captured samples are not buffered while allocating.** Each segment's reader first waits up to 2 s for the ring to open, so a ring that opens quickly (any quota up to a few GiB, in milliseconds) buffers from the first block. After that it reads and discards until the ring opens, and buffering starts with the next block. Capture never waits for this reader.
+  - **Locked.** If another process holds `ring.lock`, the buffer is disabled with `allocation: "locked"` and a `reason`; the run carries on.
+  - **Newer format.** A ring whose journal header has a newer version than this build reads is left untouched (never wiped): `enabled: false`, `allocation: "incompatible"`, and a `reason`. An older format or another slot size resets the ring.
   - **Overwrite in place.** A new slot overwrites the oldest one, so the file count and sizes never change while a run is open, and every position is rewritten in turn.
   - **Persistence.** Everything written is made durable (checkpointed) at least every second, when a slot fills and when the run stops. A restart recovers the segments and continues the ring. A crash loses at most the last unsynced second.
   - **Torn data.** Recovery re-checks the newest slots' CRC-32. A torn slot is discarded together with anything newer, as is a torn journal tail.
+  - **Failed fsync.** The bytes written since the last checkpoint may never reach the disk, so they are **poisoned**: removed from the index at once (no clip exports them), never sealed or recovered, and rewritten by the next writes. Counted in `sync_errors` and `poisoned_samples`; the segment ends there.
   - **Clips** are ordinary recordings and are never evicted.
 - **Runs.** Every start of the buffer is a new `run`. Stream indices (`global_index`) restart with each run, and a replayed recording repeats its sample-clock times, so segments carry their `run`.
 - **Quota changed between runs.**
@@ -340,17 +344,23 @@ There is no record button; `POST /api/outputs/record/start` still records forwar
 | GET | `/api/iqbuffer` | `?[t0=<unix s>][&t1=<unix s>][&limit=1..10000, default 1000]` | `IqBufferStatus` |
 | POST | `/api/iqbuffer/clip` | one range: `{"t0", "t1"}` (Unix s), `{"t0_ns", "t1_ns"}` (integer Unix ns) or `{"global_index", "samples"}`; plus `"band"?: {"f_lo", "f_hi"}, "label"?, "run"?` | `{"recording": Clip}` (audited `iqbuffer_clip`) |
 
-**`IqBufferStatus`**: `{enabled, reason, dir, retention_s, max_bytes, quota_bytes, max_clip_bytes, chunk_bytes, chunk_files, slot_count, allocated_bytes, allocation, preallocated, persisted, run, recovered_segments, discarded_slots, head_slot, head_offset_bytes, wrap_count, fs_free_bytes, fs_total_bytes, min_free_bytes, paused, pauses, paused_samples, t0, t1, span_s, bytes, disk_bytes, samples, segments_total, segments_omitted, segments: [Segment], gaps: [Gap], evicted: {chunks, segments, samples, bytes}, dropped_samples, gated_samples, write_errors, failed_samples, error}`.
-- `enabled: false` with a `reason` when the run has no buffer (disabled, lossless replay, allocation refused, or the ring could not open, e.g. another run holds it). Every count is then 0.
+**`IqBufferStatus`**: `{enabled, reason, dir, retention_s, max_bytes, quota_bytes, max_clip_bytes, chunk_bytes, chunk_files, slot_count, allocated_bytes, allocation, allocation_progress, preallocated, persisted, run, recovered_segments, discarded_slots, head_slot, head_offset_bytes, wrap_count, fs_free_bytes, fs_total_bytes, min_free_bytes, paused, pauses, paused_samples, t0, t1, span_s, bytes, disk_bytes, samples, segments_total, segments_omitted, segments: [Segment], gaps: [Gap], evicted: {chunks, segments, samples, bytes}, dropped_samples, gated_samples, write_errors, failed_samples, sync_errors, poisoned_samples, error}`.
+- `enabled: false` with a `reason` when the run has no buffer (disabled, lossless replay, still allocating, allocation refused, locked by another process, a newer ring format, or the ring could not open). Every count is then 0.
 - **Sizes.**
   - `retention_s` is the window, `max_bytes` the hard cap (`null` without one), and `quota_bytes` the quota the configuration asks for.
   - `chunk_bytes` is the slot size, `slot_count` the slots of the ring, and `allocated_bytes` = `slot_count × chunk_bytes`, the ring file's fixed size (≤ `quota_bytes`).
   - `chunk_files` counts the slots holding retained samples.
-- **Allocation.** `allocation` is `"full"`, `"shrunk"` (not enough free space for the quota) or `"refused"` (disabled: not even two slots fit); `null` when disabled for another reason. `preallocated` is false when the filesystem only made a sparse file.
+- **Allocation.** `allocation` is one of:
+  - `"full"`, or `"shrunk"` (not enough free space for the quota): the ring is open;
+  - `"allocating"`: the ring is still opening in the background (`enabled: false`);
+  - `"refused"` (not even two slots fit), `"locked"` (another process holds the ring) or `"incompatible"` (a newer ring format, left untouched): disabled;
+  - `null` when disabled for another reason.
+
+  `allocation_progress` is the allocated fraction (0..1) while allocating, 1 once the ring is open, and `null` without a ring. `preallocated` is false when the filesystem only made a sparse file.
 - **Persistence.** `persisted` is always true when enabled. `run` is this run's number. `recovered_segments` counts the segments recovered from earlier runs at start, and `discarded_slots` the slots recovery dropped (unsealed, torn, failed CRC, or no longer fitting).
 - **Write head.** `head_slot` is the ring position being written and `head_offset_bytes` its byte offset in the ring file (`null` before the first write). `wrap_count` counts complete passes over the ring.
 - `fs_free_bytes` and `fs_total_bytes` describe the buffer's filesystem, and `min_free_bytes` is the floor enforced on it; all three are `null` when disabled or unknown.
-- `paused` is true while writing waits for free space. `failed_samples` counts samples lost to failed writes and back-off.
+- `paused` is true while writing waits for free space. `failed_samples` counts samples lost to failed writes and back-off. `sync_errors` counts failed ring fsyncs, and `poisoned_samples` the samples written but discarded because their fsync failed.
 - `t0`/`t1` are the earliest retained sample and the latest end over all runs (`null` when empty). `bytes` = `2 × samples` retained. `disk_bytes` is the buffer's files: `allocated_bytes` plus the journal. `evicted` counts this run's evictions, and `evicted.chunks` the slots overwritten.
 - `t0`/`t1` query parameters list only segments overlapping `[t0, t1)`; of the matching segments the newest `limit` are listed, oldest first, and `segments_omitted` counts the rest. `segments_total` counts every retained segment.
 - **`Segment`**: `{id, run, t0, t1, t0_ns, t1_ns, samples, global_index, center_hz, sample_rate_hz, bandwidth_hz, lna_db, vga_db, amp_on, device_id, antenna_port, overload, content_class, dropped_before}`.

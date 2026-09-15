@@ -978,12 +978,18 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
         "run",
         "head_slot",
         "head_offset_bytes",
+        "sync_errors",
+        "poisoned_samples",
     ] {
         assert!(v[k].is_u64(), "{k}: {v}");
     }
     assert_eq!(
-        (&v["persisted"], &v["allocation"]),
-        (&json!(true), &json!("full")),
+        (
+            &v["persisted"],
+            &v["allocation"],
+            v["allocation_progress"].as_f64()
+        ),
+        (&json!(true), &json!("full"), Some(1.0)),
         "{v}"
     );
     assert!(v["preallocated"].is_boolean(), "{v}");

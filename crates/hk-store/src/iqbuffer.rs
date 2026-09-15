@@ -49,7 +49,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -406,6 +406,64 @@ pub fn is_allocation_refused(e: &io::Error) -> bool {
         .is_some_and(|x| x.downcast_ref::<AllocationRefused>().is_some())
 }
 
+/// Another process (or another buffer in this one) holds the ring's `flock`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RingLocked {
+    /// The lock file.
+    pub lock_path: PathBuf,
+}
+
+impl std::fmt::Display for RingLocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the IQ capture ring is in use by another process ({} is locked)",
+            self.lock_path.display()
+        )
+    }
+}
+
+impl std::error::Error for RingLocked {}
+
+/// Whether an [`IqBuffer::open`] error is a [`RingLocked`].
+pub fn is_ring_locked(e: &io::Error) -> bool {
+    e.get_ref()
+        .is_some_and(|x| x.downcast_ref::<RingLocked>().is_some())
+}
+
+/// The ring was written by a newer on-disk format than this build reads: it is left untouched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RingIncompatible {
+    /// The version in the ring's journal header.
+    pub found: u64,
+    /// The newest version this build reads ([`RING_VERSION`]).
+    pub supported: u32,
+}
+
+impl std::fmt::Display for RingIncompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the IQ capture ring was written by a newer format (version {}; this build reads up to \
+             {}): it is left untouched and the buffer is disabled (move or delete the iqbuffer \
+             directory to start a new ring)",
+            self.found, self.supported
+        )
+    }
+}
+
+impl std::error::Error for RingIncompatible {}
+
+/// Whether an [`IqBuffer::open`] error is a [`RingIncompatible`].
+pub fn is_ring_incompatible(e: &io::Error) -> bool {
+    e.get_ref()
+        .is_some_and(|x| x.downcast_ref::<RingIncompatible>().is_some())
+}
+
+/// Allocation grows the ring file in steps of about this many bytes (whole slots), reporting
+/// progress and checking for cancellation between steps.
+pub const ALLOCATION_STEP_BYTES: u64 = 1 << 30;
+
 /// Filesystem probes of the buffer, replaceable for tests (a full disk, a slow writer, a
 /// filesystem without preallocation).
 pub trait IqBufferHooks: Send + Sync {
@@ -422,6 +480,12 @@ pub trait IqBufferHooks: Send + Sync {
     /// Sizes the ring file ([`preallocate`]).
     fn preallocate(&self, file: &File, len: u64) -> io::Result<bool> {
         preallocate(file, len)
+    }
+
+    /// Called before every ring fsync; an error fails that fsync (the unsealed bytes are then
+    /// poisoned, [`IqBufferWriter::checkpoint`]).
+    fn before_sync(&self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -671,6 +735,8 @@ struct Counts {
     failed_samples: u64,
     pauses: u64,
     paused_samples: u64,
+    sync_errors: u64,
+    poisoned_samples: u64,
 }
 
 #[derive(Default)]
@@ -701,6 +767,13 @@ pub enum Allocation {
     Shrunk,
     /// Not even two slots fit: the run has no buffer.
     Refused,
+    /// The ring is being opened and allocated in the background (`allocation_progress`); nothing
+    /// is buffered until it completes.
+    Allocating,
+    /// Another process holds the ring's lock: the run has no buffer.
+    Locked,
+    /// The ring was written by a newer on-disk format: left untouched, the run has no buffer.
+    Incompatible,
 }
 
 /// What recovery found when the ring opened.
@@ -860,6 +933,9 @@ pub struct IqBufferStatus {
     /// `full`, `shrunk` (fewer slots than the quota: not enough free space) or `refused`
     /// (disabled for lack of space); `null` when disabled otherwise.
     pub allocation: Option<Allocation>,
+    /// Fraction of the ring allocated, 0..1, while `allocation` is `allocating`; 1 once the ring
+    /// is open; `null` when there is no ring.
+    pub allocation_progress: Option<f64>,
     /// The filesystem reserved the ring's blocks (false: a sparse file).
     pub preallocated: bool,
     /// The buffer survives restarts (always true when enabled).
@@ -918,6 +994,11 @@ pub struct IqBufferStatus {
     pub write_errors: u64,
     /// Samples not stored because a write failed or writing was backing off.
     pub failed_samples: u64,
+    /// Failed ring fsyncs.
+    pub sync_errors: u64,
+    /// Samples written but discarded because the fsync meant to make them durable failed: they are
+    /// never indexed, sealed, exported or recovered, and the ring rewrites their span.
+    pub poisoned_samples: u64,
     /// The last write error.
     pub error: Option<String>,
 }
@@ -938,6 +1019,7 @@ impl IqBufferStatus {
             slot_count: 0,
             allocated_bytes: 0,
             allocation: None,
+            allocation_progress: None,
             preallocated: false,
             persisted: false,
             run: None,
@@ -967,6 +1049,8 @@ impl IqBufferStatus {
             gated_samples: 0,
             write_errors: 0,
             failed_samples: 0,
+            sync_errors: 0,
+            poisoned_samples: 0,
             error: None,
         }
     }
@@ -1189,6 +1273,57 @@ fn write_snapshot(dir: &Path, recs: &[Rec]) -> io::Result<(File, u64)> {
     Ok((f, bytes.len() as u64))
 }
 
+/// The `version` of the journal's header record, if the first record is a ring header (read
+/// loosely, so a newer format's header is still recognised).
+fn journal_version(dir: &Path) -> Option<u64> {
+    let data = fs::read(dir.join(JOURNAL_FILE)).ok()?;
+    let n = u32::from_le_bytes(data.get(0..4)?.try_into().ok()?) as usize;
+    let crc = u32::from_le_bytes(data.get(4..8)?.try_into().ok()?);
+    let p = data.get(8..8usize.checked_add(n)?)?;
+    if crc32_update(0, p) != crc {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(p).ok()?;
+    (v["k"] == "header" && v["magic"] == RING_MAGIC)
+        .then(|| v["version"].as_u64())
+        .flatten()
+}
+
+/// Sizes the ring from `from` to `len` bytes in steps of whole slots near
+/// [`ALLOCATION_STEP_BYTES`], reporting the fraction done and stopping when `cancel` is set.
+/// `Ok(true)`: every step reserved its blocks.
+fn allocate_stepwise(
+    hooks: &dyn IqBufferHooks,
+    ring: &File,
+    from: u64,
+    len: u64,
+    slot_bytes: u64,
+    progress: &dyn Fn(f64),
+    cancel: &AtomicBool,
+) -> io::Result<bool> {
+    if len <= from {
+        let r = hooks.preallocate(ring, len);
+        progress(1.0);
+        return r;
+    }
+    let step = ALLOCATION_STEP_BYTES.div_ceil(slot_bytes).max(1) * slot_bytes;
+    let mut reserved = true;
+    let mut at = from;
+    progress(0.0);
+    while at < len {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "IQ capture ring allocation cancelled",
+            ));
+        }
+        at = (at + step).min(len);
+        reserved &= hooks.preallocate(ring, at)?;
+        progress((at - from) as f64 / (len - from) as f64);
+    }
+    Ok(reserved)
+}
+
 /// The ring's state as the journal and ring file describe it, before this run.
 struct Recovered {
     slots: VecDeque<Slot>,
@@ -1407,19 +1542,49 @@ impl IqBuffer {
         cfg: IqBufferConfig,
         hooks: Arc<dyn IqBufferHooks>,
     ) -> io::Result<(Self, IqBufferWriter)> {
+        Self::open_with_progress(dir, cfg, hooks, &|_| {}, &AtomicBool::new(false))
+    }
+
+    /// [`Self::open_with`] reporting the allocated fraction (0..1) to `progress` and giving up
+    /// (an [`io::ErrorKind::Interrupted`] error, the ring file back at its old size) when `cancel`
+    /// is set between allocation steps ([`ALLOCATION_STEP_BYTES`]).
+    ///
+    /// - Held lock: [`RingLocked`] ([`is_ring_locked`]).
+    /// - A ring of a newer on-disk version: [`RingIncompatible`] ([`is_ring_incompatible`]),
+    ///   before anything in the directory is changed.
+    pub fn open_with_progress(
+        dir: &Path,
+        cfg: IqBufferConfig,
+        hooks: Arc<dyn IqBufferHooks>,
+        progress: &dyn Fn(f64),
+        cancel: &AtomicBool,
+    ) -> io::Result<(Self, IqBufferWriter)> {
         fs::create_dir_all(dir)?;
+        let lock_path = dir.join(LOCK_FILE);
         let lock_file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(dir.join(LOCK_FILE))?;
+            .open(&lock_path)?;
         // SAFETY: a valid open descriptor.
         if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    RingLocked { lock_path },
+                ));
+            }
             return Err(io::Error::new(
                 e.kind(),
-                format!("the IQ capture ring is in use by another run ({e})"),
+                format!("locking the IQ capture ring {}: {e}", lock_path.display()),
             ));
+        }
+        if let Some(found) = journal_version(dir).filter(|v| *v > u64::from(RING_VERSION)) {
+            return Err(io::Error::other(RingIncompatible {
+                found,
+                supported: RING_VERSION,
+            }));
         }
         remove_legacy_chunks(dir)?;
         let slot_bytes = cfg.chunk_bytes();
@@ -1449,7 +1614,24 @@ impl IqBuffer {
             .truncate(false)
             .open(&ring_path)?;
         let rec = recover(dir, &ring, file_len, slot_bytes, slot_count);
-        let preallocated = hooks.preallocate(&ring, slot_count * slot_bytes)?;
+        let preallocated = match allocate_stepwise(
+            &*hooks,
+            &ring,
+            file_len,
+            slot_count * slot_bytes,
+            slot_bytes,
+            progress,
+            cancel,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                // Leave the file as it was (a later open sees the ring it recovered from).
+                if ring.metadata().is_ok_and(|m| m.len() > file_len) {
+                    let _ = ring.set_len(file_len);
+                }
+                return Err(e);
+            }
+        };
         let run = rec.last_run + 1;
         let mut st = State {
             slots: rec.slots,
@@ -1611,6 +1793,7 @@ impl IqBuffer {
             slot_count: inner.slot_count,
             allocated_bytes: allocated,
             allocation: Some(inner.allocation),
+            allocation_progress: Some(1.0),
             preallocated: inner.preallocated,
             persisted: true,
             run: Some(inner.run),
@@ -1648,6 +1831,8 @@ impl IqBuffer {
             gated_samples: c.gated_samples,
             write_errors: c.write_errors,
             failed_samples: c.failed_samples,
+            sync_errors: c.sync_errors,
+            poisoned_samples: c.poisoned_samples,
             error: st.error.clone(),
         }
     }
@@ -2129,7 +2314,16 @@ impl IqBufferWriter {
         if recs.is_empty() && c.offset == c.sealed {
             return Ok(());
         }
-        self.data.sync_data()?;
+        if let Err(e) = inner
+            .hooks
+            .before_sync()
+            .and_then(|()| self.data.sync_data())
+        {
+            // The unsealed bytes may never reach the disk, and a later fsync can succeed without
+            // them: never seal over them.
+            self.poison();
+            return Err(e);
+        }
         recs.push(Rec::Seal {
             slot: c.l,
             bytes: c.offset,
@@ -2158,6 +2352,54 @@ impl IqBufferWriter {
             self.compacted_len = len;
         }
         Ok(())
+    }
+
+    /// A ring fsync failed: rolls the current slot back to its last seal. The unsealed span leaves
+    /// the index (its samples are counted in `poisoned_samples`, the segments covering it are cut
+    /// there and the open one ends), so no clip exports it and no seal ever covers it; the next
+    /// writes overwrite it and are made durable by a later, successful fsync of their own.
+    fn poison(&mut self) {
+        let inner = Arc::clone(&self.buffer.inner);
+        let sb = inner.slot_bytes;
+        let Some(c) = self.cur.as_mut() else {
+            return;
+        };
+        let mut st = lock(&inner.state);
+        st.counts.sync_errors += 1;
+        st.open = false;
+        let lost = c.offset - c.sealed;
+        if lost == 0 {
+            return;
+        }
+        let sealed_crc = match st.slots.iter_mut().rev().find(|s| s.l == c.l) {
+            Some(s) => {
+                s.bytes = c.sealed;
+                s.crc
+            }
+            None => 0,
+        };
+        (c.offset, c.crc) = (c.sealed, sealed_crc);
+        let cut = c.l * sb + c.sealed;
+        st.counts.poisoned_samples += lost / BYTES_PER_SAMPLE;
+        st.log_end = st.log_end.min(cut);
+        st.log_floor = st.log_floor.min(cut);
+        while let Some(seg) = st.segments.back_mut() {
+            let end = seg.log_start + seg.samples * BYTES_PER_SAMPLE;
+            if end <= cut {
+                break;
+            }
+            if seg.log_start >= cut {
+                // Only ever unpersisted: a persisted segment start lies below a seal.
+                st.segments.pop_back();
+                continue;
+            }
+            seg.samples = (cut - seg.log_start) / BYTES_PER_SAMPLE;
+            break;
+        }
+        st.error = Some(format!(
+            "ring fsync failed: {} unsynced samples discarded",
+            lost / BYTES_PER_SAMPLE
+        ));
     }
 
     /// Test support: drops the writer like a crash (no final checkpoint).
@@ -2199,6 +2441,7 @@ mod tests {
     /// A filesystem whose free space, write failures and preallocation support the test sets.
     struct Faults {
         fail: AtomicBool,
+        sync_fail: AtomicBool,
         sparse: AtomicBool,
         free: AtomicU64,
         writes: AtomicU64,
@@ -2231,11 +2474,20 @@ mod tests {
                 preallocate(file, len)
             }
         }
+
+        fn before_sync(&self) -> io::Result<()> {
+            if self.sync_fail.load(Ordering::SeqCst) {
+                Err(io::Error::from_raw_os_error(libc::EIO))
+            } else {
+                Ok(())
+            }
+        }
     }
 
     fn faults() -> Arc<Faults> {
         Arc::new(Faults {
             fail: AtomicBool::new(false),
+            sync_fail: AtomicBool::new(false),
             sparse: AtomicBool::new(false),
             free: AtomicU64::new(100 << 30),
             writes: AtomicU64::new(0),
@@ -3048,6 +3300,173 @@ mod tests {
         assert!(is_allocation_refused(&e), "{e}");
         assert!(e.to_string().contains("allocation refused"), "{e}");
         assert!(!dir.join(RING_FILE).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A failed ring fsync poisons the unsealed span: it leaves the index at once (no clip exports
+    /// it), is counted, and a later successful fsync never seals over it; recovery keeps exactly
+    /// what was durable plus what was rewritten and synced after the failure.
+    #[test]
+    fn ring_fsync_failure_poisons_the_unsealed_span_and_never_seals_it() {
+        let dir = tmp("fsync-poison");
+        let hooks = faults();
+        let c = cfg(1e9, Some(4 * MIN_CHUNK_BYTES));
+        let (buf, mut w) = IqBuffer::open_with(&dir, c, hooks.clone()).unwrap();
+        let all = ClipRange::Index {
+            start: 0,
+            end: 1 << 40,
+        };
+        // A: durable.
+        w.begin_segment(start(0, 0, 100e6, 1e6));
+        w.append(&ramp(0, 4096)).unwrap();
+        w.checkpoint().unwrap();
+        // B: written, then its fsync fails.
+        w.append(&ramp(4096, 4096)).unwrap();
+        hooks.sync_fail.store(true, Ordering::SeqCst);
+        assert!(w.checkpoint().is_err());
+        hooks.sync_fail.store(false, Ordering::SeqCst);
+        // What the disk may hold for B after the failure: not B.
+        let raw = OpenOptions::new()
+            .write(true)
+            .open(dir.join(RING_FILE))
+            .unwrap();
+        raw.write_all_at(&[0xEE; 8192], 8192).unwrap();
+        let s = buf.status(None, None, 10);
+        assert_eq!(
+            (s.samples, s.sync_errors, s.poisoned_samples),
+            (4096, 1, 4096),
+            "{s:?}"
+        );
+        assert!(!w.is_open(), "the poisoned segment ended");
+        assert!(s.error.is_some());
+        assert!(matches!(
+            export(
+                &buf,
+                ClipRange::Index {
+                    start: 4096,
+                    end: 8192
+                },
+                None
+            ),
+            Err(ClipError::Empty)
+        ));
+        assert_eq!(export(&buf, all, None).unwrap(), ramp(0, 4096));
+        // C: rewritten over B's span and synced; the seal covers A and C only.
+        w.begin_segment(start(8192, 8_192_000_000, 100e6, 1e6));
+        w.append(&ramp(8192, 1024)).unwrap();
+        w.checkpoint().unwrap();
+        let mut want = ramp(0, 4096);
+        want.extend(ramp(8192, 1024));
+        assert_eq!(export(&buf, all, None).unwrap(), want);
+        w.simulate_crash();
+        drop(buf);
+        let (buf, w) = IqBuffer::open_with(&dir, c, hooks).unwrap();
+        let s = buf.status(None, None, 10);
+        assert_eq!(
+            (s.samples, s.discarded_slots, s.recovered_segments),
+            (5120, 0, 2),
+            "the seal's CRC matches the disk: {s:?}"
+        );
+        assert_eq!(export(&buf, all, Some(1)).unwrap(), want);
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ring_locked_by_another_holder_is_reported_as_locked() {
+        let dir = tmp("locked");
+        let c = cfg(1e9, Some(2 * MIN_CHUNK_BYTES));
+        let (buf, w) = IqBuffer::open_with(&dir, c, faults()).unwrap();
+        let e = IqBuffer::open_with(&dir, c, faults())
+            .err()
+            .expect("locked");
+        assert!(is_ring_locked(&e) && !is_allocation_refused(&e), "{e}");
+        assert!(e.to_string().contains("in use by another process"), "{e}");
+        drop(w);
+        drop(buf);
+        let (buf, w) = IqBuffer::open_with(&dir, c, faults()).expect("free again");
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A ring whose journal header carries a newer version is refused and left byte-identical.
+    #[test]
+    fn ring_of_a_newer_version_disables_the_buffer_and_is_not_wiped() {
+        let dir = tmp("newer");
+        let c = cfg(1e9, Some(2 * MIN_CHUNK_BYTES));
+        let (buf, mut w) = IqBuffer::open_with(&dir, c, faults()).unwrap();
+        w.begin_segment(start(0, 0, 100e6, 1e6));
+        w.append(&ramp(0, 1000)).unwrap();
+        drop(w);
+        drop(buf);
+        let jpath = dir.join(JOURNAL_FILE);
+        let old = fs::read(&jpath).unwrap();
+        let first = 8 + u32::from_le_bytes(old[0..4].try_into().unwrap()) as usize;
+        let header = serde_json::to_vec(&serde_json::json!({
+            "k": "header", "magic": RING_MAGIC, "version": RING_VERSION + 1,
+            "slot_bytes": MIN_CHUNK_BYTES, "slots": 2, "future_field": true
+        }))
+        .unwrap();
+        let mut j = (header.len() as u32).to_le_bytes().to_vec();
+        j.extend(crc32_update(0, &header).to_le_bytes());
+        j.extend(&header);
+        j.extend(&old[first..]);
+        fs::write(&jpath, &j).unwrap();
+        let ring = fs::read(dir.join(RING_FILE)).unwrap();
+        for _ in 0..2 {
+            let e = IqBuffer::open_with(&dir, c, faults())
+                .err()
+                .expect("incompatible");
+            assert!(is_ring_incompatible(&e), "{e}");
+            assert!(e.to_string().contains("newer format"), "{e}");
+        }
+        assert_eq!(fs::read(&jpath).unwrap(), j, "the journal is untouched");
+        assert_eq!(fs::read(dir.join(RING_FILE)).unwrap(), ring, "the ring too");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Allocation grows the ring in steps with progress, and a cancel leaves the file as it was.
+    #[test]
+    fn ring_allocation_reports_progress_in_steps_and_cancels() {
+        let dir = tmp("steps");
+        let hooks = faults();
+        hooks.sparse.store(true, Ordering::SeqCst);
+        let c = cfg(1e9, Some(3 << 30));
+        assert_eq!((c.chunk_bytes(), c.slot_count()), (MAX_CHUNK_BYTES, 48));
+        let seen = Mutex::new(Vec::new());
+        let never = AtomicBool::new(false);
+        let (buf, w) = IqBuffer::open_with_progress(
+            &dir,
+            c,
+            hooks.clone(),
+            &|f| seen.lock().unwrap().push(f),
+            &never,
+        )
+        .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
+        assert_eq!(buf.status(None, None, 0).allocation_progress, Some(1.0));
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+
+        let cancel = AtomicBool::new(false);
+        let e = IqBuffer::open_with_progress(
+            &dir,
+            c,
+            hooks,
+            &|f| {
+                if f > 0.0 {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+            },
+            &cancel,
+        )
+        .err()
+        .expect("cancelled");
+        assert_eq!(e.kind(), io::ErrorKind::Interrupted, "{e}");
+        assert_eq!(ring_len(&dir), 0, "back to its size before the open");
         let _ = fs::remove_dir_all(&dir);
     }
 }

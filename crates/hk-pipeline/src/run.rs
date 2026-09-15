@@ -1052,8 +1052,10 @@ fn start_segment(
             Box::new(move || crate::history::run(s, p, a)),
         )?);
     }
-    if common.iq_buffer.enabled() {
-        // T-157: positioned before the capture thread starts, so the first block is buffered.
+    if common.iq_buffer.active() {
+        // T-157: positioned before the capture thread starts, so the first block is buffered
+        // (T-178: once the ring has opened in the background; until then blocks are read and
+        // not buffered).
         let (s, b) = (Arc::clone(&shared), Arc::clone(&common.iq_buffer));
         let reader = shared.ring.reader_at(0);
         let cursor = shared.gate.register(0);

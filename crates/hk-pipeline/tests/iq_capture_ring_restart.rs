@@ -101,6 +101,8 @@ fn start_run(dir: &std::path::Path, meta: &std::path::Path) -> (PipelineHandle, 
         Box::new(TrackInventory::default()),
     )
     .unwrap();
+    // The ring opens in the background (recovery + allocation).
+    assert!(handle.iq_buffer().wait_allocated(LIMIT));
     (handle, info)
 }
 

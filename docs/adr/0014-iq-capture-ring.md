@@ -31,7 +31,7 @@ Constraints carried in from T-157:
 |---|---|---|
 | `ring.ci8` | `slot_count` slots of `slot_bytes`, interleaved ci8 (2 bytes/sample) | `slot_count × slot_bytes`, fixed while open |
 | `ring.journal` | append-only CRC-framed records; rewritten as a snapshot on open and when it outgrows 1 MiB and 4× its last snapshot | bounded (KiB..MiB) |
-| `ring.lock` | `flock(LOCK_EX\|LOCK_NB)`: a second buffer on the same directory fails to open | 0 |
+| `ring.lock` | `flock(LOCK_EX\|LOCK_NB)`: a second buffer on the same directory fails to open (`allocation: "locked"`) | 0 |
 
 - **Geometry.** `slot_bytes` = quota / 16, clamped to 64 KiB..64 MiB (T-157's chunk size). `slot_count` = ⌊quota / slot_bytes⌋, at least 2. A 1 h ring at 20 Msps is 2146 × 64 MiB.
 - **Allocation.** `preallocate`:
@@ -39,7 +39,11 @@ Constraints carried in from T-157:
   - macOS: `fcntl(F_PREALLOCATE)` (contiguous, then any), then `ftruncate`.
   - Elsewhere, or when the filesystem refuses: a sparse `ftruncate`, reported as `preallocated: false`.
   - Neither call writes data, so allocation is metadata-only.
-  - **Measured** on the dev Mac (APFS, 2026-09-15): `F_PREALLOCATE` of 8 GiB plus `ftruncate` took 269 ms, and free space dropped by 8 GiB (the space was reserved). Extrapolated linearly, a 144 GB ring takes about 5 s when the run starts. That time is not verified at that size.
+  - **Measured** on the dev Mac (APFS, 2026-09-15): `F_PREALLOCATE` of 8 GiB plus `ftruncate` took 269 ms, and free space dropped by 8 GiB (the space was reserved). Extrapolated linearly, a 144 GB ring takes about 5 s. That time is not verified at that size.
+- **In the background** (fix round). The whole open (lock, version check, recovery, allocation, snapshot) runs on `hk-iqbuffer-alloc`, so a large quota (or a filesystem without `fallocate`) never delays the run's start or the API.
+  - Allocation grows the file in steps of whole slots near 1 GiB (`ALLOCATION_STEP_BYTES`), publishing `allocation_progress` and checking a cancel flag between steps. Stopping the run cancels and joins it (at most one step), and a cancelled or failed allocation truncates the file back to its old size.
+  - While allocating, status is `enabled: false, allocation: "allocating"`, clips are unavailable, and **capture is not buffered**. Each segment's feeder first waits up to 2 s (`ALLOCATION_WAIT`, or until the run stops) without reading, so a quickly opened ring buffers from the segment's first block; after that it reads and discards blocks until the writer exists. Capture never waits for the feeder, and the bounded wait caps how long a stop or re-plumb can wait on it. The alternative (writing into the already-allocated prefix) was rejected: recovery and the slot geometry would need a variable ring size mid-run, for a few seconds of history.
+- **Lock held** by another process: the open fails with `RingLocked`; the status reports `allocation: "locked"` and a reason, and the run carries on without a buffer.
 
 ### Logical log and slots
 
@@ -59,7 +63,7 @@ Each record is framed as `[len u32 LE][crc32 u32 LE][JSON payload]`. Recovery st
 
 | `k` | Fields | Meaning |
 |---|---|---|
-| `header` | `magic, version (1), slot_bytes, slots` | first record; a different `slot_bytes` or version resets the ring |
+| `header` | `magic, version (1), slot_bytes, slots` | first record; a different `slot_bytes` or an older version resets the ring; a **newer** version (read loosely from the first record, before anything is changed) disables the buffer with `allocation: "incompatible"` and leaves the ring untouched |
 | `run` | `run` | a buffer opened the ring; stream indices restart per run |
 | `open` | `slot, pos` | slot `L` is written at `pos` from here on; any older slot at `pos` is dead |
 | `seal` | `slot, bytes, crc, floor` | the first `bytes` of the slot are durable with CRC-32 `crc`; the log floor (duration eviction) is `floor` |
@@ -74,11 +78,13 @@ Each record is framed as `[len u32 LE][crc32 u32 LE][JSON payload]`. Recovery st
   3. `fdatasync` the journal.
 
   A seal therefore always follows the data it covers, and a segment start always precedes the seal that covers its bytes.
+- **Failed ring fsync: poison, never seal** (fix round). After a failed `fsync`, the unsynced pages may be gone while a *later* `fsync` succeeds (Linux clears the error), so sealing the same bytes then would put a seal over data that never reached the disk. The writer instead rolls the current slot back to its last seal: the cursor, the slot's byte count and CRC return to the sealed point, the log end and the segments covering the span are cut there (segments starting inside it are dropped; they are never journalled), and the open segment ends. The span's samples are counted in `poisoned_samples` and the failure in `sync_errors`. No clip can export the span, no seal covers it, and the next writes overwrite it and are sealed only after their own successful fsync. Only the current slot can hold unsealed bytes, because a slot is sealed before the writer moves on.
 - **Failed writes.** A failed journal append truncates the journal back to its last good length, so a torn record never hides later ones. Write failures keep T-157's semantics:
   - the segment ends;
   - `write_errors` and `failed_samples` are counted;
   - writes back off from 100 ms, doubling to 10 s.
 - **Never blocks capture.** All I/O is on the writer thread and outside the index mutex. A lapped reader counts `dropped_samples`.
+  - **Measured** (fix round, dev Mac APFS, debug build, `iq_capture_ring_rate`, ignored by default): the mock SDR device at 20 Msps paced in real time for 30.3 s with a 1 GiB ring (64 MiB slots, so it wrapped once and checkpointed every second and every slot) produced 600 244 224 samples; the buffer stored 600 178 688 (the one-block difference was in flight when the status was read), **dropped 0**, with 0 write, fsync or poisoned samples. The pipeline's always-on readers lost 0 samples both with the ring on and off. The feeder is already a dedicated thread behind a bounded queue (the capture ring), which drops and counts and never blocks, so no change was needed.
 
 ### Recovery (on open)
 
@@ -125,9 +131,10 @@ Stream indices and sample-clock times restart when a process restarts. A replaye
 
 **New status fields:**
 - `slot_count`, `allocated_bytes`;
-- `allocation` (`full`/`shrunk`/`refused`), `preallocated`, `persisted: true`;
+- `allocation` (`full`/`shrunk`/`allocating`/`refused`/`locked`/`incompatible`), `allocation_progress`, `preallocated`, `persisted: true`;
 - `run`, `recovered_segments`, `discarded_slots`;
-- `head_slot`, `head_offset_bytes`, `wrap_count` (head slot ÷ slot count).
+- `head_slot`, `head_offset_bytes`, `wrap_count` (head slot ÷ slot count);
+- `sync_errors`, `poisoned_samples`.
 
 **Changed meanings:**
 - `chunk_bytes` is the slot size;
@@ -137,10 +144,9 @@ Stream indices and sample-clock times restart when a process restarts. A replaye
 
 ### Tests keep rings small
 
-Every paced pipeline test opens a buffer, and the default quota is 4.8 GB. So:
-- `.config/nextest.toml` has a setup script that sets `HK_IQ_BUFFER_MAX=16MiB` for every test process;
-- the `cargo test` recipes in the `justfile` set the same variable;
-- tests that need a specific ring size set it explicitly.
+The default quota is 4.8 GB, allocated up front. So (fix round, replacing a nextest setup script):
+- `PipelineConfig::new` leaves the buffer **off**; only the `hk`/`hackriffd` composition (`config_for`) turns it on from the environment and flags;
+- every test that buffers sets an explicit small quota (`IqBufferConfig { max_bytes: Some(..) }` or `--iq-buffer-max`), so plain `cargo test` and nextest need no environment or experimental features.
 
 ## Consequences
 

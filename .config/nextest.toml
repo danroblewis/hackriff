@@ -22,21 +22,8 @@
 # regression in any other test still fails on the first try. nextest reports retried
 # tests as "try N/M" in its human and JUnit output.
 
-# T-178: setup scripts (the small IQ ring cap below).
-experimental = ["setup-scripts"]
-
 [test-groups.heavy-serial]
 max-threads = 1
-
-# T-178: the IQ capture ring is allocated up front (retention × 20 Msps × 2 bytes: 4.8 GB at the
-# default 2 min), and every paced pipeline test opens one in its temp data dir. Cap it for every
-# test process; a test that needs its own size sets `IqBufferConfig`/`--iq-buffer-max` explicitly.
-[scripts.setup.small-iq-ring]
-command = ["sh", "-c", "echo HK_IQ_BUFFER_MAX=16MiB >> \"$NEXTEST_ENV\""]
-
-[[profile.default.scripts]]
-filter = 'all()'
-setup = 'small-iq-ring'
 
 [[profile.default.overrides]]
 filter = 'package(hk-e2e)'

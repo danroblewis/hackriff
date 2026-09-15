@@ -889,6 +889,8 @@ pub(crate) fn config_for(
     calibration: Option<&Path>,
 ) -> anyhow::Result<PipelineConfig> {
     let mut cfg = PipelineConfig::new(data_dir, plan)?;
+    // The IQ capture buffer is on for the composed daemon (the library default is off, T-178).
+    cfg.iq_buffer = hk_store::iqbuffer::IqBufferConfig::from_env();
     let reg = registry.clone();
     cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
     let reg = registry.clone();
@@ -1968,7 +1970,11 @@ mod tests {
                 spectrum_fft_len: Some(1024),
                 spectrum_rows_per_s: None,
                 compute: ComputeArgs::default(),
-                iq_buffer: IqBufferArgs::default(),
+                // An explicit small ring (allocated up front, T-178).
+                iq_buffer: IqBufferArgs {
+                    retention_s: None,
+                    max_bytes: Some(16 << 20),
+                },
             },
             &StreamRegistry::new(),
         )
