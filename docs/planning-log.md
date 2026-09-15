@@ -1356,3 +1356,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Nit:** ADR wording should call it a rate gate.
   - **Verified:** no double alarms (engine `keyed()` plus max); fresh counting holds; uncovered closes are skipped; memory cap and pruning are OK.
   - **Next:** one fix round, continued in the original agent (~180k tokens).
+- **B0.360 DISK LOW: 6.4 GB free (was 23 GB about an hour earlier).**
+  - **Cause:** the user's demo `hk serve` on 127.0.0.1:8900 (another session's scratchpad, `573a0024…/scratchpad/hk-data`) holds 10 GB: `hackriff.db` 6.4 GB and `recordings` 3.8 GB. The process started about 1.5 h ago.
+  - **Not touched:** it is not the coordinator's process, so it was left alone and the user was notified.
+  - **Freed:** 0.5 GB of the coordinator's own old scratch data.
+  - **Launches paused:** T-140 and anything else, until the user decides or space returns.
+  - **T-139 progress:** the history STFT now emits partial rows after a retune (true n_avg), and the floor product folds mixed shapes (ADR §2.10). A 2 h default-scheduler scene gives 323 rows, 82 tiles, 66 OccupancyStat rows, 36 baseline folds and 78 alarm inputs (was 0); fixed-tune frames are bit-identical. Final targeted runs are still going.
