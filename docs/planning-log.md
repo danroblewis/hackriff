@@ -2259,3 +2259,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Live copies:** still fail (RDS SNR −4.6 dB). PI decodes, PS does not.
   - **Filed T-210** (blocked on the user): ≤2-bit correction with consensus.
   - **User-visible now:** no false "sync" and no garbage fields.
+- **B0.477 User decision:** allow ≤2-bit RDS block error correction with safeguards.
+  - **Safeguards:** correct only while block-synced; corrected groups are flagged and never count as confirm-by-decode evidence; PI/PS/RT are committed only by multi-group consensus.
+  - **T-210** unblocked, queued behind the 4 Rust slots.
+  - **T-185 merged (7e9d011).** Worktree removed; full check running.
+  - **T-190 committed (5437f01),** merges after that check.
+  - **T-191 launched** (Opus, band-edge override).

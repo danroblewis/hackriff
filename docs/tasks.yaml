@@ -2965,7 +2965,7 @@ tasks:
   - id: T-185
     milestone: M1-fix
     title: "RDS on REAL air fails past block sync: fm_100p8M capture reaches block sync but block/field stages yield no data and rare groups are all CRC-invalid (passes on synthetic T-094); fix and add a real-air RDS acceptance"
-    status: review
+    status: done
     commit: a61d910
     priority: high
     deps: []
@@ -3344,8 +3344,8 @@ tasks:
   - id: T-210
     milestone: M1-fix
     title: "RDS block error correction (<=2-bit burst, redsea-style) for weak live reception, with corrected-group provenance and PI/PS consensus against false corrections"
-    status: blocked
-    blocked_on: "user decision: relaxing the crc block no-correction rule (T-185 numbers: live 25+26 correctable 44 vs valid 1; live 28 14 vs 2; fixture@11 dB 52 vs 5; false corrections 0-3 wrong-PI groups per run)"
+    status: todo
+    decision: "user 2026-09-15: allow <=2-bit correction with safeguards (only while block-synced; corrected groups flagged and never confirm-by-decode evidence; PI/PS/RT committed by multi-group consensus)"
     priority: high
     deps: [T-185]
     parallel_group: DECODE
@@ -3353,7 +3353,7 @@ tasks:
     found_by: "T-185 (2026-09-15): live demo RDS SNR -4.6 dB vs fixture -1.3 dB at 14 dB; hard-decision BPSK limit reached, chain changes did not help"
     acceptance: "if approved: crc block option correct_bits<=2 only while block-synced; corrected groups flagged corrected (never counted as CRC-valid evidence for confirm-by-decode); PS/PI/RT committed only by per-field consensus (N agreeing groups) so false corrections never surface; live copies decode PI + complete PS; zero wrong-PI surfaced on fixtures at 11/14 dB across seeds; real-air acceptance unchanged"
     area: crates/hk-blocks (crc, fields), recipes/rds, tests/e2e tutorial_rds
-    needs: user
+    needs: none
     model: opus
     effort: medium
     core_interface: false
