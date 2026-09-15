@@ -1267,7 +1267,9 @@ tasks:
   - id: T-076
     milestone: M0b
     title: "Regression: Listen sends no audio on live HackRF (squelch never opens, refined centre ~36 kHz off)"
-    status: in-progress
+    status: done
+    commit: "526dc08 (test-only; merge with T-075 after the T-071 verification)"
+    tests: "tests/e2e/tests/listen_live.rs real-time paced: PCM records, squelch open, SNR >= 15 dB, refined centre within 5 kHz (HK_T076_CASE=exact runs the off-station request as a diagnostic); blind.rs blind_live_paced; merged tree: listen_live, refine (2), acceptance listen (2), listen_retune (3), listen_lifecycle (1), listen unit (6), hk-demod pass"
     deps: [T-070, T-073, T-066]
     parallel_group: U
     use_cases: [SIGNAL-062]
