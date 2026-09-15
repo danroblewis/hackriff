@@ -1,0 +1,11 @@
+/* MUI app stylesheet entry (ADR-0013 §5, §8). Bundled by esbuild into dist/app.css. Import list
+   only: shared tokens, grid and shell styles are in base.css (T-150 owns its shell sections), and
+   each area adds rules in its own file. Panel tasks never edit this file. */
+@import "./base.css";
+@import "./explore/explore.css";
+@import "./centre/centre.css";
+@import "./capture/capture.css";
+@import "./dock/dock.css";
+@import "./decode/decode.css";
+@import "./decode/inspector.css";
+@import "./review/review.css";
