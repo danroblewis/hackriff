@@ -740,3 +740,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Replay is capped at 4 (503 busy).
   - The `CtlRequest.query` compile break is fixed and the api.md sections are merged.
   **T-107** (follow_hops hardening) launched now that the runtime is stable. Full check covering T-106 + T-092 running.
+- **B0.260 Full check of main f2561b1 (T-106 + T-092): green.** Lint clean; nextest + UI 1112/1112 in 262 s; acceptance 25/25. In flight: T-107, T-095 and T-096 (both wrapping up past budget, nudged off Monitor waits), T-097.
