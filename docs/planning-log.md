@@ -2380,3 +2380,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **When burst detection and auto-decode are verified, check this case:** intermittent AM/data bursts near 100.3 are caught, their IQ retained, and a decode attempted.
   - **Attached as `field_case` to T-219** (artifact versus independent emitter: the geometric image/harmonic/IMD predictor must decide it by evidence) **and T-222** (content-correlated multipath).
   - **To capture it:** the demo server must run with `--iq-retention` on a build containing T-178, so the burst's IQ survives long enough to analyse. No action taken now; the user's demo was not touched.
+- **B0.498 Agent liveness check (no agent lost).** All four in-progress tasks had uncommitted WIP, no cargo/rustc running, and transcripts idle 13-22 min, so I checked rather than assumed.
+  - **Result:** all four messages queued for delivery at each agent's next tool round, so T-199, T-205, T-188 and T-223 are alive and mid-turn. No relaunch, and no WIP at risk.
+  - **Nudged anyway** with: foreground runs only, never end a turn waiting, and commit WIP plus a handoff at the context budget.
+  - **T-223 corrected:** its failure is intermittent, so a single passing run proves nothing; the fix must pass 10/10 under 6 CPU burners.
+  - **Method note:** a seeded worktree target keeps main's mtimes, so target mtime is not a liveness signal; transcript mtime plus queued-message acceptance is.
