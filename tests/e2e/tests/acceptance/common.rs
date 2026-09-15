@@ -98,14 +98,13 @@ pub fn real_fixture(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// `HK_DEVICE=hackrf` (T-053): the device-driven tests would run against the real HackRF, with
-/// truth derived from a live survey of an always-occupied band instead of fixture metadata. Not
-/// wired yet: prints the skip and never opens the device.
+/// `HK_DEVICE=hackrf` (T-053): fixture truth is not on the air, so fixture-based tests skip; the
+/// live run with truth from an FM survey is `hil_hackrf.rs`. Never opens the device.
 pub fn hardware_skip(what: &str) -> bool {
     if hk_e2e::synth::hardware_device_selected() {
         eprintln!(
-            "SKIP {what}: HK_DEVICE=hackrf selects the real HackRF (T-053: truth from a live FM \
-             survey, receive-only, one user at a time); not wired yet, the device was not opened"
+            "SKIP {what}: HK_DEVICE=hackrf selects the real HackRF; fixture truth is not on the air \
+             (the live-air HIL run is hil_blind_fm_survey_on_the_hackrf)"
         );
         return true;
     }

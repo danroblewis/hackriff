@@ -127,7 +127,7 @@ fn found_blind(addr: SocketAddr, truth: &TruthItem, shift_hz: f64) -> (String, f
     }
 }
 
-fn open(addr: SocketAddr, query: &str) -> Ws {
+pub fn open(addr: SocketAddr, query: &str) -> Ws {
     let (mut ws, _) = tungstenite::connect(format!(
         "ws://{addr}/ws/open/listen?token={API_TOKEN}&{query}"
     ))
@@ -139,7 +139,7 @@ fn open(addr: SocketAddr, query: &str) -> Ws {
 }
 
 /// The first message: the stream header, or the refusal JSON.
-fn first(ws: &mut Ws) -> Result<StreamHeader, Value> {
+pub fn first(ws: &mut Ws) -> Result<StreamHeader, Value> {
     loop {
         if let Message::Text(t) = ws.read().expect("first message") {
             return match StreamHeader::from_json_bytes(t.as_bytes()) {
@@ -163,13 +163,13 @@ fn drain(ws: &mut Ws) -> (usize, Option<u16>) {
     }
 }
 
-fn close(mut ws: Ws) {
+pub fn close(mut ws: Ws) {
     let _ = ws.close(None);
     let _ = drain(&mut ws);
 }
 
 /// Mean power of `x` at `f` over Hann-windowed segments (Hz resolution `fs / seg`).
-fn band_power(x: &[f32], fs: f64, f_lo: f64, f_hi: f64) -> f64 {
+pub fn band_power(x: &[f32], fs: f64, f_lo: f64, f_hi: f64) -> f64 {
     const SEG: usize = 4800;
     let win: Vec<f64> = (0..SEG)
         .map(|n| 0.5 - 0.5 * (std::f64::consts::TAU * n as f64 / SEG as f64).cos())
@@ -193,7 +193,7 @@ fn band_power(x: &[f32], fs: f64, f_lo: f64, f_hi: f64) -> f64 {
     acc / n.max(1) as f64
 }
 
-fn db(x: f64) -> f64 {
+pub fn db(x: f64) -> f64 {
     10.0 * x.max(1e-30).log10()
 }
 

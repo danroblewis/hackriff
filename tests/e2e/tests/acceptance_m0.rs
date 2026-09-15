@@ -46,3 +46,6 @@ mod device_variants;
 
 #[path = "acceptance/inventory_lifecycle.rs"]
 mod inventory_lifecycle;
+
+#[path = "acceptance/hil_hackrf.rs"]
+mod hil_hackrf;
