@@ -129,7 +129,7 @@ impl RefinedTuning {
 }
 
 impl Repository {
-    fn ensure_refined_table(&self) -> Result<(), RepoError> {
+    pub(super) fn ensure_refined_table(&self) -> Result<(), RepoError> {
         self.conn.execute_batch(ENSURE_TABLE)?;
         Ok(())
     }

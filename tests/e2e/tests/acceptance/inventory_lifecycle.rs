@@ -8,25 +8,55 @@
 //! - A deleted entry leaves the list and stays in history (listed with `state=deleted`, detections
 //!   kept); a later re-detection of the same sensor creates a new candidate.
 //!
+//! T-082: one entry per physical emitter. The FM station (track + RDS decode) and the FSK sensor
+//! (track + blind framer) each appear once with both kinds of evidence; two nearby stations stay
+//! two entries; re-detection after deleting a merged entry creates exactly one new candidate.
+//!
 //! Emitters are matched to the private truth after the run (`matches_truth`); no frequency is
 //! looked up.
 
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hk_api::{ApiState, AuditLog, Server, ServerConfig, Token};
 use hk_e2e::blind::{matches_truth, matching};
 use hk_e2e::{Fixture, SynthRequest, synth_or_skip};
-use hk_model::{FreqRange, Region};
+use hk_model::sigmf::Datatype;
+use hk_model::{EmitterId, FreqRange, IdentityScheme, LinkTarget, Region, Repository};
 use serde_json::{Value, json};
 
-use crate::blind::{center_tol_hz, inventory_rows, replay_config, start};
+use crate::blind::{
+    BlindSource, blind_replay, center_tol_hz, inventory_rows, private_truth, replay_config, start,
+};
 use crate::common::*;
 
 const T078: &str = "T-078";
+const T082: &str = "T-082";
+
+/// The inventory row's emitter id.
+fn row_id(row: &Value) -> EmitterId {
+    row["id"].as_str().unwrap().parse().unwrap()
+}
+
+/// The entry carries track evidence and decoder evidence (a demodulation or decode linked).
+fn assert_track_and_decoder_evidence(r: &Repository, row: &Value) {
+    let links = r.emitter_links(row_id(row)).unwrap();
+    assert!(
+        links.iter().any(|l| matches!(l.target, LinkTarget::Track(_))),
+        "[{T082}] track evidence on {row}"
+    );
+    assert!(
+        links.iter().any(|l| matches!(
+            l.target,
+            LinkTarget::Demodulation(_) | LinkTarget::Decode(_)
+        )),
+        "[{T082}] decoder evidence on {row}"
+    );
+}
 
 fn api(dir: &Path) -> Server {
     let state = ApiState {
@@ -134,6 +164,11 @@ fn t078_steady_fm_station_auto_confirms() {
                 ))
                 .collect::<Vec<_>>()
         );
+        assert_eq!(
+            matched.len(),
+            1,
+            "[{T082}] the station appears once in the inventory"
+        );
         let confirmed = matched
             .iter()
             .find(|r| r["state"] == "confirmed")
@@ -145,7 +180,116 @@ fn t078_steady_fm_station_auto_confirms() {
         );
         assert_eq!(confirmed["lifecycle"]["previous"], "candidate");
         assert!(confirmed["recurrence"]["appearances"].as_u64().unwrap() >= 1);
+        let r = repo(&run.dir.0);
+        assert_track_and_decoder_evidence(&r, confirmed);
+        assert_eq!(
+            r.identity_decode_evidence(row_id(confirmed))
+                .unwrap()
+                .map(|(scheme, _)| scheme),
+            Some(IdentityScheme::RdsPi),
+            "[{T082}] the one entry holds the decoded RDS PI"
+        );
     }
+}
+
+fn read_json(p: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+}
+
+fn cf32(bytes: &[u8]) -> impl Iterator<Item = f32> + '_ {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+}
+
+/// The real ci8 FM recording (scaled x/128, as the pipeline quantises) with a synthetic cf32
+/// station of the same capture added, keeping both truths.
+fn add_station(real: &Path, synth: &hk_e2e::SynthOutput, dir: &Path) -> PathBuf {
+    let mut meta = read_json(real);
+    let raw = std::fs::read(real.with_extension("sigmf-data")).unwrap();
+    let mut iq: Vec<f32> = raw[..raw.len() / 2 * 2]
+        .iter()
+        .map(|&b| f32::from(b as i8) / 128.0)
+        .collect();
+    let m = synth.fixture(0).unwrap().meta_path;
+    let extra: Vec<Value> = read_json(&m)["annotations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| !x.to_string().contains("\"kind\":\"capture\""))
+        .cloned()
+        .collect();
+    meta["annotations"].as_array_mut().unwrap().extend(extra);
+    let d = std::fs::read(m.with_extension("sigmf-data")).unwrap();
+    for (x, v) in iq.iter_mut().zip(cf32(&d)) {
+        *x += v;
+    }
+    meta["global"]["core:datatype"] = json!("cf32_le");
+    if let Some(g) = meta["global"].as_object_mut() {
+        g.remove("core:sha512");
+    }
+    let mut out = Vec::with_capacity(4 * iq.len());
+    for v in &iq {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    let path = dir.join("two_stations.sigmf-meta");
+    std::fs::write(path.with_extension("sigmf-data"), out).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+    path
+}
+
+#[test]
+fn t082_two_nearby_fm_stations_stay_two_entries() {
+    let Some((real, _)) = private_truth(crate::signal_062::FM_FIXTURE) else {
+        return;
+    };
+    // A second RDS station 300 kHz above the recording's 101.3 MHz station, on air with it.
+    let near = synth_or_skip!(
+        SynthRequest::new("fm_broadcast_rds")
+            .seed(8201)
+            .datatype(Datatype::Cf32Le)
+            .param("sample_rate", 2.4e6)
+            .param("center_hz", 100.8e6)
+            .param("offset_hz", 800e3)
+            .param("duration_s", 5.0)
+            .param("power_dbfs", -16.0)
+            .param("noise_dbfs", -120.0)
+            .param("pi_hex", "8A2B")
+            .param("ps", "T082")
+    );
+    let work = TempDir::new("t082-scene");
+    let meta = add_station(&real, &near, &work.0);
+    let fx = Fixture::load(&meta).unwrap();
+    let stations = fx.of_kind("wfm-broadcast");
+    assert_eq!(stations.len(), 2, "[{T082}] two truth stations");
+    let run = blind_replay(&meta, "t082", BlindSource::default());
+    let mut ids = BTreeSet::new();
+    for station in stations {
+        let matched = matching(
+            station,
+            0.0,
+            &run.api_rows,
+            |r| {
+                (
+                    r["f_center_hz"].as_f64().unwrap_or(f64::NAN),
+                    r["bandwidth_hz"].as_f64().unwrap_or(0.0),
+                )
+            },
+            center_tol_hz(station),
+        );
+        eprintln!(
+            "[{T082}] station {:.4}..{:.4} MHz: {:?}",
+            station.f_lo_hz / 1e6,
+            station.f_hi_hz / 1e6,
+            matched
+                .iter()
+                .map(|r| (r["id"].clone(), r["f_center_hz"].clone(), r["state"].clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(matched.len(), 1, "[{T082}] each station appears once");
+        ids.insert(matched[0]["id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(ids.len(), 2, "[{T082}] nearby stations stay two entries");
 }
 
 #[test]
@@ -180,6 +324,8 @@ fn t078_intermittent_fsk_stays_candidate_until_promoted_then_delete_and_redetect
         !sensor.is_empty(),
         "[{T078}] the FSK sensor reached the inventory"
     );
+    assert_eq!(sensor.len(), 1, "[{T082}] the FSK sensor appears once");
+    assert_track_and_decoder_evidence(&repo(&dir.0), sensor[0]);
     for r in &sensor {
         assert_eq!(
             r["state"], "candidate",
@@ -269,6 +415,11 @@ fn t078_intermittent_fsk_stays_candidate_until_promoted_then_delete_and_redetect
     assert!(
         !fresh.is_empty(),
         "[{T078}] the re-detected sensor is listed"
+    );
+    assert_eq!(
+        fresh.len(),
+        1,
+        "[{T082}] re-detection creates exactly one new candidate"
     );
     assert!(
         fresh

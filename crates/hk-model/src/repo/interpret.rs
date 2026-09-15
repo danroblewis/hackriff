@@ -93,10 +93,18 @@ impl Repository {
     /// free-region annotations.
     pub fn annotations_for(&self, target: &AnnotationTarget) -> Result<Vec<Annotation>, RepoError> {
         let (kind, id) = annotation_target_columns(target);
+        // T-082: an emitter's annotations include those of emitters merged into it (a decoder's
+        // label written on an entry later merged into the track's entry stays with the emitter).
         let rows: Vec<(String, bool)> = {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT body, exported FROM annotation \
-                 WHERE target_kind = ?1 AND target_id IS ?2 ORDER BY t, annotation_id",
+                "WITH RECURSIVE absorbed(id) AS ( \
+                     SELECT ?2 WHERE ?1 = 'emitter' \
+                     UNION SELECT e.emitter_id FROM emitter e JOIN absorbed a ON e.merged_into = a.id \
+                 ) \
+                 SELECT body, exported FROM annotation \
+                 WHERE target_kind = ?1 AND (target_id IS ?2 \
+                   OR (?1 = 'emitter' AND target_id IN (SELECT id FROM absorbed))) \
+                 ORDER BY t, annotation_id",
             )?;
             stmt.query_map(params![kind, id], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<Result<_, _>>()?
