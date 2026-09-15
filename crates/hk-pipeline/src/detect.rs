@@ -3,6 +3,10 @@
 //! separate writer thread.
 //!
 //! - **STFT:** Hann, 0 % overlap, `K` averages (see [`crate::config`] for why), SK on.
+//! - **Short bursts (T-075):** every raw chunk also goes through [`BurstDetector`] (time-domain
+//!   energy, µs timing) for bursts below the STFT's resolution (ADS-B squitters, OOK). Its
+//!   records are stored like any detection but never reach the tracker (untracked), and its
+//!   longest burst stays below the STFT path's minimum duration ([`burst_config`]).
 //! - **Clip counts:** the reader scans each raw ci8 chunk for clipped samples and keeps their
 //!   stream indices until the frame covering them is processed, so every frame gets its exact
 //!   clip count (`hk_detect::count_clipped_ci8` semantics).
@@ -46,8 +50,9 @@ use hk_context::{Correlator, FeedCache, FloorAnomalies, FloorAnomalyConfig, Site
 use hk_core::ReadOutcome;
 use hk_detect::clip::is_clipped_ci8;
 use hk_detect::{
-    BandProfile, ClipCount, Confirmation, DetectionProfile, DetectionRecord, DetectionWriter,
-    Detector, DetectorConfig, DetectorEvent, TrackBatch, TrackEvent, Tracker, TrackerConfig,
+    BandProfile, BurstConfig, BurstDetector, ClipCount, Confirmation, DetectionProfile,
+    DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, TrackBatch,
+    TrackEvent, Tracker, TrackerConfig,
 };
 use hk_dsp::floor::{FloorConfig, FloorEvent, NoiseFloorTracker};
 use hk_dsp::window::WindowKind;
@@ -384,6 +389,12 @@ impl DetectNode {
         if due {
             self.flush();
         }
+    }
+
+    /// A short-burst detection (T-075): stored untracked (never offered to the tracker).
+    fn push_burst(&mut self, r: DetectionRecord) {
+        inc(&self.shared.counters.detect.detections);
+        self.pending.push(r);
     }
 
     fn flush_ns(&self) -> i64 {
@@ -864,6 +875,22 @@ impl Writer {
     }
 }
 
+/// Short-burst detector settings (T-075): the hk-detect defaults, with the longest burst held
+/// below what the STFT path can detect (`min_frames − 1` frame periods, at most 5 ms), so a
+/// signal is never detected by both paths.
+fn burst_config(shared: &Shared) -> BurstConfig {
+    let period_s = (shared.fft_len * shared.averages) as f64 / shared.fs;
+    let mut min_frames = DetectorConfig::new(shared.survey_id).profile.min_frames;
+    if !shared.cfg.settings.short_burst_bands_hz.is_empty() {
+        min_frames = min_frames.min(DetectionProfile::short_burst().min_frames);
+    }
+    let mut cfg = BurstConfig::default();
+    cfg.max_duration_s = cfg
+        .max_duration_s
+        .min(f64::from(min_frames.saturating_sub(1).max(1)) * period_s);
+    cfg
+}
+
 /// Runs reader 1 until the ring closes.
 pub(crate) fn run(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()> {
     let result = run_inner(shared, tx.clone());
@@ -887,6 +914,7 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
         .name("hk-detect-writer".into())
         .spawn(move || writer.run(writer_rx))?;
     let mut node = DetectNode::new(Arc::clone(&shared), tx, writer_tx)?;
+    let mut burst = BurstDetector::new(shared.survey_id, burst_config(&shared));
     let mut reader = shared.ring.reader_at(0);
     let cursor = shared.gate.register(0);
     let mut buf = vec![Complex::<i8>::default(); 1 << 16];
@@ -908,6 +936,13 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
                         node.namer.finalize(shared.fs);
                     }
                 }
+                burst.push(
+                    chunk.time,
+                    chunk.discontinuity,
+                    &chunk.provenance,
+                    s,
+                    &mut |r| node.push_burst(r),
+                );
                 stft.push(InputInfo::from(&chunk), s, |frame| {
                     node.process_frame(frame)
                 });
@@ -924,6 +959,7 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
         set(&rc.frames, st.frames);
         set(&rc.stft_resets, st.resets);
     }
+    burst.finish(&mut |r| node.push_burst(r));
     node.finish();
     // Closing the queue ends the writer after its last attempts.
     drop(node);
