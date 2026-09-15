@@ -192,11 +192,13 @@ fn signal_062_fm_rds_auto_wfm_pilot_pi_label() {
         Some("wfm"),
         "[{SIGNAL_062}] family from the auto classifier"
     );
+    // The RDS decoder's label (other labels, such as the family map's explanations, may sit on the
+    // same emitter in any order once its track and decoder entries are one, T-082).
     let labels: Vec<_> = repo
         .annotations_for(&AnnotationTarget::Emitter(eid))
         .unwrap()
         .into_iter()
-        .filter(|a| a.kind == AnnotationKind::Label)
+        .filter(|a| a.kind == AnnotationKind::Label && a.metadata.get("pi").is_some())
         .collect();
     assert!(!labels.is_empty(), "[{SIGNAL_062}] no Emitter label");
     assert_eq!(

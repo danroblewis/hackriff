@@ -37,6 +37,31 @@
 //!    best unidentified match (or a new emitter) is used.
 //! 5. **Create.** A new emitter with `known_status: unknown` (author `clusterer`).
 //!
+//! # Same emission (T-082)
+//!
+//! A decoder or chain output of an emission the tracker also followed can become a second
+//! entry. An identity sighting with no holder and no context is created on its own (rule 2), and
+//! emitters identified by a channel-sharing scheme (such as the blind framer's structural
+//! signature) never absorb anonymous matches (rule 4). `Repository::same_emission` recognises
+//! two live, listed entries of one emission:
+//! - **Frequency:** the closest pair of their detected or refined centres is within the centre
+//!   tolerance above, `max(10 ppm · f, 0.25 · max BW, 500 Hz)`. Partners are searched by
+//!   detected extent.
+//! - **Time:** an observation of one overlaps an observation of the other (ledger spans).
+//! - **Hops:** both are hop sets or neither (a hop set and one of its channels stay apart).
+//! - **Identity:** not both identified.
+//! - **Two track-based entries** also need their stored fingerprints within tolerance, so two
+//!   emitters sharing a channel with another period or burst length stay apart.
+//!
+//! `Repository::merge_same_emission` merges such a pair. The survivor is the confirmed entry,
+//! else the first seen, else the larger count. Observations the survivor already covers in time
+//! are not counted again. Every merge (this one, rule 2's, `merge_emitters`) keeps the absorbed
+//! row's links, observations (recurrence), tags, identity, classification history, refined
+//! tunings (read through merges) and a decoder, classifier or user known status. A confirmed row
+//! merged into a candidate confirms it, recorded in the survivor's lifecycle history. A deleted
+//! row is never merged. The pipeline decides when to link (`hk_pipeline::inventory`: only the
+//! run's own entries, never channel-sharing transmitter identities).
+//!
 //! After assignment, when the emitter was created or its family changed, a
 //! [`KnownStatusPrior`] (C17, e.g. hk-context's `match_known_status`) may append a status. A prior
 //! never overrides a status decided by a decoder, classifier or user.

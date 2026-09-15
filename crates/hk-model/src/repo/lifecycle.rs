@@ -101,6 +101,55 @@ pub(super) fn release_deleted_identity(
     Ok(Some(holder))
 }
 
+/// T-082: a confirmed emitter merged into a candidate confirms the survivor. The survivor's
+/// history gets the absorbed row's latest confirmation (author, actor, reason) with the merge
+/// named in the reason.
+pub(super) fn carry_confirmation(
+    conn: &Connection,
+    from: EmitterId,
+    into: EmitterId,
+    t: Timestamp,
+) -> Result<(), RepoError> {
+    let last: Option<(String, String, String)> = conn
+        .prepare_cached(
+            "SELECT author, actor, reason FROM emitter_lifecycle \
+             WHERE emitter_id = ?1 AND state = 'confirmed' ORDER BY lifecycle_id DESC LIMIT 1",
+        )?
+        .query_row([blob(from)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .optional()?;
+    let (author, actor, why) = last.unwrap_or_else(|| {
+        (
+            enum_text(&LifecycleAuthor::Auto).unwrap_or_else(|_| "auto".into()),
+            "hk-model/merge".into(),
+            "confirmed".into(),
+        )
+    });
+    let mut reason = format!("{why} (merged from emitter {from})");
+    if reason.len() > LIFECYCLE_TEXT_MAX {
+        let mut n = LIFECYCLE_TEXT_MAX;
+        while !reason.is_char_boundary(n) {
+            n -= 1;
+        }
+        reason.truncate(n);
+    }
+    conn.prepare_cached(
+        "INSERT INTO emitter_lifecycle (emitter_id, state, previous, author, actor, reason, t) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?
+    .execute(params![
+        blob(into),
+        enum_text(&LifecycleState::Confirmed)?,
+        enum_text(&LifecycleState::Candidate)?,
+        author,
+        actor,
+        reason,
+        t.as_unix_nanos()
+    ])?;
+    conn.prepare_cached("UPDATE emitter SET lifecycle_state = ?1 WHERE emitter_id = ?2")?
+        .execute(params![enum_text(&LifecycleState::Confirmed)?, blob(into)])?;
+    Ok(())
+}
+
 fn check_text(what: &str, v: &str) -> Result<(), RepoError> {
     if v.trim().is_empty() || v.len() > LIFECYCLE_TEXT_MAX {
         return Err(RepoError::Invalid(format!(
