@@ -1957,7 +1957,7 @@ tasks:
   - id: T-123
     milestone: M2
     title: "M2 UI hooks (thin client): survey report view, novelty alarm list, scheduler coverage/POI panel"
-    status: todo
+    status: in-progress
     deps: [T-120, T-121, T-122]
     parallel_group: M2U
     use_cases: [AWARE-044, AWARE-033]
