@@ -1529,3 +1529,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **New mock test:** emitters starting mid-recording stay within 0.2 dB.
   - **Tests:** 90/90 targeted; lint clean.
   - **Review focus:** mixture solve/cache, tile v4 codec, whether mock subtraction distorts bursts/transients across e2e tests, per-block cost.
+- **B0.382 T-141 review (Opus): FIX-FIRST.**
+  - **Bug:** mixture weights are per tile, but each cell's p10 pools only that cell's frames. Sweep-only cells get dwell-heavy weights (~0.8 dB wrong), which breaks "no floor, never a wrong one".
+  - **Risks:**
+    - The adaptive dequant (α=1/8) attenuates transients by ~−1.8 dB at onset and overshoots +1.25 dB after an emitter stops.
+    - `level` is not re-seeded after skip/pass-through, so every hop starts stale.
+    - The emitter test skips the transient window.
+    - No full e2e/acceptance run after the mock change.
+  - **Nits:** u64 sum overflow on a corrupt tile; shape tolerance undocumented.
+  - **Verified:** bisection, per-query cache, pass-through never dequantised, deterministic, no ground-truth use, v4 decode bounds, no weakened tests.
+  - **Next:** fix round continued in finisher 2 (~128k tokens), including an e2e/pipeline timing comparison and `just acceptance` in the worktree.
