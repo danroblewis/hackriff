@@ -1513,3 +1513,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Its fixed dequant filter narrows the gap to 0.62 dB, but attenuates later emitters by up to 1.2 dB, so it is not acceptable as is.
     - Second finisher launched.
   - **T-145 progress:** most slow tests are already unpaced (CPU-bound serial tests dominate). Only 2 tests switched; `api_contract` via `hk serve --device mock:` is still to judge. lld and cranelift are installed.
+- **B0.380 Full check green after the T-143 + T-140 merges (066372c).**
+  - Lint clean.
+  - Tests: 1328/1328 nextest+UI (down from 1387, since T-143 deleted the legal tests).
+  - Acceptance: 28/28 plus 2 hardware-ignored (was 32; the legal cases are gone).
+  - Disk: 75 GB free.
