@@ -672,3 +672,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - linked selection via the backend's `bytes`/`byte_index`;
   - a draft field map + pasted frames box using `/api/inspector/parse`.
   26 UI tests, all green in `just test-ui`. Coordinator scan: the only client-side byte handling is hex→bytes for display, with no parsing or range math (thin-client rule OK). Missing API: a capture listing (T-092) and `/ws/open/inspector` (T-088 integration). It merges after the in-flight full check.
+- **B0.241 T-088 review: FIX-FIRST** (timeboxed). Two must-fixes:
+  1. The interim `metadata.record` framing isn't wire-compatible with T-089's §14 (frame/status/edit record types plus the header `inspector` profile), and T-090 is coded against §14.
+  2. The stream registry is overwritten while staging an edit that keeps an output id, so a failed edit leaves the running output unreachable; `start()` has the same problem.
+  Held up: RT path (retired graph dropped on the control thread), edit races serialised, store path safety, and zero loss across 4 hot edits (5/5 tests). merge-tree conflicts: http.rs, cli pipeline.rs, api.md. A fresh Opus agent is merging main into the branch, then fixing both and running the RDS recipe through the runtime.
