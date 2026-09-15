@@ -65,6 +65,9 @@ pub struct TrackerStats {
     pub hop_sets_formed: u64,
     /// Hop links between bursts separated by silence (included in `hop_links`).
     pub bursty_hop_links: u64,
+    /// Contiguous hop candidates vetoed because the two channels were keyed at the same time
+    /// (T-109: a hopper is on one channel at a time; co-keyed channels are separate emitters).
+    pub hop_concurrent_vetoes: u64,
     /// Hop-set raster fits run (T-064: formation, channel-set changes, merges, closing).
     pub hop_raster_fits: u64,
     /// Closed hop-set members dropped (T-064: superseded on their channel, or over the cap).
@@ -760,6 +763,27 @@ impl Tracker {
             .collect()
     }
 
+    /// T-109: summaries of the open, confirmed tracks whose inventory fate is settled enough to
+    /// offer before they close, into `out` (cleared first; summaries are built only for these):
+    /// at least `min_bursts` bursts, no hop link and no hop set, formed or pending (a member's
+    /// inventory row is its hop set's), and not an in-band fragment of a live or recently closed
+    /// continuous host (the T-101 rule, evaluated now against the live host set).
+    pub fn live_offers_into(&self, min_bursts: u64, out: &mut Vec<TrackSummary>) {
+        out.clear();
+        for (i, s) in self.slots.iter().enumerate() {
+            if !s.live
+                || s.tentative
+                || s.bursts < min_bursts
+                || s.hop_links > 0
+                || s.hop_set.is_some()
+                || self.inband_fragment(i, true)
+            {
+                continue;
+            }
+            out.push(self.summary(i, None));
+        }
+    }
+
     /// Formed, open hop sets.
     pub fn hop_sets(&self) -> Vec<HopSetSummary> {
         self.hop_sets
@@ -1160,7 +1184,11 @@ impl Tracker {
     /// that extent is at least [`TrackerConfig::inband_fragment_bw_ratio`] times wider and
     /// [`FRAGMENT_SNR_MARGIN_DB`] stronger (mean detection SNR), and `i`'s whole observed life lies
     /// inside the track's. The host is live or among the recently closed continuous tracks.
-    fn inband_fragment(&self, i: usize) -> bool {
+    ///
+    /// `live` (T-109, evaluating an open track for a live offer): a live host's duty is measured
+    /// over its recorded life (`t_first..t_last_end`), since its current record is only reported
+    /// when it closes (up to the detector's max record duration behind `now`).
+    fn inband_fragment(&self, i: usize, live: bool) -> bool {
         let ratio = self.cfg.inband_fragment_bw_ratio;
         let s = &self.slots[i];
         if ratio <= 0.0 || s.bursts == 0 {
@@ -1181,19 +1209,24 @@ impl Tracker {
             .iter()
             .enumerate()
             .filter(|&(j, h)| j != i && h.live && !h.tentative)
-            .filter_map(|(_, h)| self.host_span(h))
+            .filter_map(|(_, h)| self.host_span(h, live))
             .chain(self.closed_hosts.iter().flatten().copied())
             .any(|h| fits(&h))
     }
 
     /// Track `h` as a potential in-band host: continuous (duty ≥ [`HOST_DUTY`]) with an SNR.
-    fn host_span(&self, h: &Slot) -> Option<HostSpan> {
+    /// `live`: duty over the recorded life only (see [`Self::inband_fragment`]).
+    fn host_span(&self, h: &Slot, live: bool) -> Option<HostSpan> {
         let end = if h.cur.is_some() {
             self.now.max(h.t_last_end)
         } else {
             h.t_last_end
         };
-        let span = (end - h.t_first).max(1);
+        let span = if live && h.cur.is_some() {
+            (h.t_last_end - h.t_first).max(1)
+        } else {
+            (end - h.t_first).max(1)
+        };
         let snr_db = slot_snr(h)?;
         let tol = self.cfg.freq_tolerance_bins * h.bin_hz;
         let (below, above) = (h.px_lo_off.max(0.5 * h.bw), h.px_hi_off.max(0.5 * h.bw));
@@ -1513,9 +1546,21 @@ impl Tracker {
             {
                 continue;
             }
-            if best.is_none_or(|(_, g)| gap.abs() < g) {
-                best = Some((*e, gap.abs()));
+            // Only a closer abutment can replace `best`; skip the veto scan otherwise.
+            if best.is_some_and(|(_, g)| gap.abs() >= g) {
+                continue;
             }
+            // T-109: a hopper is on one channel at a time. When this track was also keyed during
+            // `e` (or `e`'s track during `c`), the abutment is two co-keyed emitters repeating (a
+            // pager net's channels keying together), not a hop. Overlap within the link tolerance
+            // (`gap_tol`: box extension of successive dwells) is not co-keying.
+            if self.keyed_during(s.id, c.t0, e.t0, e.t1, gap_tol)
+                || self.keyed_during(e.track, e.t0, c.t0, c.t1, gap_tol)
+            {
+                self.stats.hop_concurrent_vetoes += 1;
+                continue;
+            }
+            best = Some((*e, gap.abs()));
         }
         let me = RecentBurst {
             slot: i,
@@ -1540,6 +1585,15 @@ impl Tracker {
             self.stats.bursty_hop_links += 1;
             self.hop_link(e.slot, i, c.t0 - e.t0, e.t0, c.t1, false, out);
         }
+    }
+
+    /// Whether a recent burst of `track` other than the one starting at `own_t0` overlaps
+    /// `t0..t1` by more than `tol` (T-109 concurrency veto for contiguous hop links).
+    fn keyed_during(&self, track: TrackId, own_t0: i64, t0: i64, t1: i64, tol: i64) -> bool {
+        self.recent
+            .iter()
+            .flatten()
+            .any(|r| r.track == track && r.t0 != own_t0 && r.t0 < t1 - tol && t0 < r.t1 - tol)
     }
 
     /// Bursts separated by silence: `x`'s nearest similar predecessor `e` on another channel,
@@ -2264,7 +2318,7 @@ impl Tracker {
         }
         let summary = self.summary(i, Some(cause));
         if self.cfg.inband_fragment_bw_ratio > 0.0
-            && let Some(h) = self.host_span(&self.slots[i])
+            && let Some(h) = self.host_span(&self.slots[i], false)
         {
             self.closed_hosts[self.closed_hosts_head] = Some(h);
             self.closed_hosts_head = (self.closed_hosts_head + 1) % CLOSED_HOSTS;
@@ -2366,7 +2420,7 @@ impl Tracker {
             },
             segments: s.segments,
             hop_set,
-            inband_fragment: closed.is_some() && self.inband_fragment(i),
+            inband_fragment: closed.is_some() && self.inband_fragment(i, false),
             suspect_fraction: if s.detections > 0 {
                 s.suspect as f64 / s.detections as f64
             } else {

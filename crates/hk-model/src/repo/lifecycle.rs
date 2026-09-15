@@ -5,6 +5,9 @@
 //!   (rule id or credential fingerprint), the reason and the time.
 //! - **Transitions:** `candidate → confirmed` (auto or user), `candidate | confirmed → deleted`
 //!   (user only). Nothing returns to `candidate`; confirming a confirmed emitter changes nothing.
+//!   One automatic exception (T-109): [`Repository::retract_provisional_emitter`] deletes an
+//!   untouched candidate made only by an open track's live offer when that track ends with no
+//!   sighting (fragment, hop-set member, merged).
 //! - **Deleted** rows leave the inventory (`query_inventory` shows them only when asked) and entity
 //!   resolution: no sighting is counted into them, merged into them, or matched to them by
 //!   fingerprint, context, ledger or re-measurement. A later sighting of the same signal therefore
@@ -23,7 +26,7 @@ use super::{RepoError, Repository, blob, enum_parse, enum_text};
 use crate::decode::CrcStatus;
 use crate::emitter::{
     Appearance, DecodedIdentity, IdentityScheme, LifecycleAuthor, LifecycleChange, LifecycleState,
-    Recurrence,
+    LinkTarget, Recurrence,
 };
 use crate::ids::EmitterId;
 use crate::region::TimeRange;
@@ -237,6 +240,77 @@ impl Repository {
             id: id.to_string(),
         })?;
         state_of(&self.conn, live)
+    }
+
+    /// T-109: retracts an entry made only by a provisional sighting of `source` (an open track
+    /// offered to the inventory before it closed) whose final outcome is no sighting: an in-band
+    /// fragment, a hop-set member, a track merged into another. The entry moves to `deleted`
+    /// (author `auto`, `actor` naming the rule) only while it is still exactly what `source`
+    /// made: not merged and never merged into, a candidate with no lifecycle history (never
+    /// confirmed, promoted or deleted by anyone), no decoded identity, and no observation or live
+    /// link other than `source`'s. Otherwise it is left untouched and `None` is returned. This is
+    /// the only automatic delete; user deletes go through [`Self::change_emitter_lifecycle`].
+    pub fn retract_provisional_emitter(
+        &mut self,
+        id: EmitterId,
+        source: &LinkTarget,
+        actor: &str,
+        reason: &str,
+        t: Timestamp,
+    ) -> Result<Option<LifecycleChange>, RepoError> {
+        check_text("actor", actor)?;
+        check_text("reason", reason)?;
+        let (kind, source_id) = super::inventory::link_kind(source);
+        let source_id = source_id.into_bytes();
+        let tx = self.write_tx()?;
+        let only_source: Option<bool> = tx
+            .prepare_cached(
+                "SELECT merged_into IS NULL AND lifecycle_state = 'candidate' \
+                 AND identity_scheme IS NULL \
+                 AND NOT EXISTS (SELECT 1 FROM emitter_lifecycle l WHERE l.emitter_id = ?1) \
+                 AND NOT EXISTS (SELECT 1 FROM emitter_merge m WHERE m.into_emitter = ?1) \
+                 AND NOT EXISTS (SELECT 1 FROM emitter_observation o WHERE o.emitter_id = ?1 \
+                     AND NOT (o.source_kind = ?2 AND o.source_id = ?3)) \
+                 AND NOT EXISTS (SELECT 1 FROM emitter_link k WHERE k.emitter_id = ?1 \
+                     AND k.superseded_by IS NULL \
+                     AND NOT (k.target_kind = ?2 AND k.target_id = ?3)) \
+                 FROM emitter WHERE emitter_id = ?1",
+            )?
+            .query_row(params![blob(id), kind, source_id], |r| r.get(0))
+            .optional()?;
+        if only_source != Some(true) {
+            return Ok(None);
+        }
+        let (to, previous, author) = (
+            LifecycleState::Deleted,
+            LifecycleState::Candidate,
+            LifecycleAuthor::Auto,
+        );
+        tx.prepare_cached(
+            "INSERT INTO emitter_lifecycle (emitter_id, state, previous, author, actor, reason, t) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?
+        .execute(params![
+            blob(id),
+            enum_text(&to)?,
+            enum_text(&previous)?,
+            enum_text(&author)?,
+            actor,
+            reason,
+            t.as_unix_nanos()
+        ])?;
+        tx.prepare_cached("UPDATE emitter SET lifecycle_state = ?1 WHERE emitter_id = ?2")?
+            .execute(params![enum_text(&to)?, blob(id)])?;
+        tx.commit()?;
+        Ok(Some(LifecycleChange {
+            emitter_id: id,
+            state: to,
+            previous,
+            author,
+            actor: actor.to_owned(),
+            reason: reason.to_owned(),
+            t,
+        }))
     }
 
     /// An emitter's lifecycle history, oldest first (empty while it is an untouched candidate).
