@@ -204,6 +204,27 @@ The full classification (likelihood, prior, provenance, reasons) is not on the r
 
 `{id}` may be the id of an entity that has since been merged into another (the API resolves to the live emitter). `reason` (optional on the mutating routes) is a free-text string of up to `LIFECYCLE_TEXT_MAX` bytes; promote and delete are audited (`inventory_promote`, `inventory_delete`) with the old/new lifecycle state and the token fingerprint as actor. Errors: `404 not_found` (unknown id, or an entry already deleted), `400 invalid` (unknown body field, bad `reason`, a band breaking the rules below), `503 unavailable` (no inventory store or no audit log).
 
+### `GET /api/inventory/{id}/decode` — latest decode fields (T-159, ADR-0013 API GAP 3)
+
+The emitter's most recently decoded fields: the focus panel's "Decoded summary" and per-signal output panels (RDS PS/RT for FM, decoded records for digital recipes; docs/14 "Added scope from docs/15 §7"). `{id}` resolves like `/api/inventory/{id}` (a merged id resolves to its live survivor). No parsing happens in the UI — every field here is as the decoder or recipe committed it.
+
+```jsonc
+{
+  "decodes": [
+    { "decoder": "hk-rds", "recipe_id": null, "frame_model": "rds-pi", "at": 1789300820.5,
+      "fields": { "pi": "C0DE", "pty": 10, "tp": false, "ta": false, "ps": "KROQ    ",
+                  "pi_votes": 12, "pi_total_votes": 12, "pi_share": 1.0,
+                  "groups_ok": 41, "groups_total": 42, "block_error_rate": 0.01 },
+      "crc": { "valid": true },
+      "source_session": "0199…" }
+  ]
+}
+```
+
+One row per `(decoder, frame_model)` pair the emitter's decoded identity has produced, newest first: a plugin decoder (`readsb`, or the built-in `hk-rds`) commits one frame model per row, while a recipe's several `messages` outputs share one `decoder` (`recipe:<id>`, e.g. `rds.recipe.json`'s `group-info`/`station`/`radiotext` outputs) but each names its own `frame_model`, so RDS's PI/group metadata, PS and RadioText each get their own row. `recipe_id` is the id after `recipe:` when `decoder` has that prefix, else `null`. `fields` merges the row's metadata (frame type, addresses, counts — always stored) and content (payload/text, only when the caller's identity access reveals it; content gating is off by default, T-143) into one object, exactly as the decoder/recipe committed them. `crc.valid` is whether the frame's check passed; `source_session` is the producing `Demodulation`'s id, else the replayed `Recording`'s id, else `null` for a live decode with neither. An emitter with no decoded identity, or one content gating withholds, answers `{"decodes": []}` — the same lookup never confirms a withheld identity by naming its decodes (T-036). `404 not_found` for an unknown id.
+
+**Evidence rule (T-185/T-210).** A CRC-invalid frame never reaches a row: the `fields` block's `skip_invalid` drops it before parsing, so `crc.valid` is `true` for every row today. T-210 (in progress) adds bounded RDS block error correction with consensus-gated PI/PS/RT commits; **TODO(T-210):** once corrected-group provenance lands on `Decode`, add `crc.corrected` here without changing what `crc.valid` means.
+
 **User band (T-191).** Every row (list and one entry) carries `user_band`: `null`, or `{"f_lo", "f_hi", "set_at", "actor", "reason", "reason_withheld"}` — edges in Hz, `set_at` in Unix s, `actor` the token fingerprint, `reason` the user's note or `null` (withheld, with `reason_withheld: true`, on a withheld-identity row like any user-authored reason). It is a user's adjustment of the band edges (e.g. dragging a confirmed signal's box) stored **beside** the measured band: `f_center_hz`/`bandwidth_hz`/`f_lo_hz`/`f_hi_hz` stay what blind detection measured and are never overwritten. Rules for `PUT`: `f_lo` and `f_hi` finite numbers with `0 < f_lo < f_hi`; width `f_hi − f_lo` ≤ 40 MHz (`hk_model::USER_BAND_MAX_WIDTH_HZ`); and the band must overlap the measured `[f_lo_hz, f_hi_hz]` or lie within 1 MHz of it (`USER_BAND_MAX_GAP_HZ`; both limits inclusive) — an adjusted edge, not a different signal. Set and clear are both audited as `inventory_band` with `old`/`new` = `{"id", "user_band"}` and the token fingerprint as actor. The override survives restart; when two entries merge (same emission, T-082) the survivor keeps an override if either had one, the latest `set_at` winning (a tie keeps the survivor's). The pipeline never uses it for detection, tracking or entity resolution; consumers that tune to an entry (Listen, Decode, recipes' `{emitter_id}` target) still use the measured band today and may prefer `user_band` later.
 
 ### `GET /api/analysis/strongest` — strongest signal in a band (T-079)

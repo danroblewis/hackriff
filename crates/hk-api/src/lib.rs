@@ -32,6 +32,7 @@ pub mod auth;
 pub mod bridge;
 pub mod captures;
 pub mod control;
+pub mod decode; // T-159
 pub mod http;
 pub mod inspector;
 pub mod inventory;

@@ -299,7 +299,9 @@ mod tests {
         assert_eq!(resolve("GET", "/api/inventory"), None);
         let listed: Vec<_> = ROUTES
             .iter()
-            .filter(|(_, p)| p.starts_with("/api/inventory/"))
+            // T-159's /decode sub-path is a separate module (`crate::decode`), routed before
+            // this one; this table only lists paths `resolve` above itself understands.
+            .filter(|(_, p)| p.starts_with("/api/inventory/") && !p.ends_with("/decode"))
             .collect();
         assert_eq!(listed.len(), 5);
         for (method, path) in listed {

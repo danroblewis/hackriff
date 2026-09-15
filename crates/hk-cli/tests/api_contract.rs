@@ -7,7 +7,8 @@
 //! seconds, not instant).
 //!
 //! Coverage: `/api/streams`, `/api/history`, `/api/floor`, `/api/inventory` (including the T-078
-//! `state`/`lifecycle`/`recurrence` fields), `/api/inventory/{id}[/promote]` (T-078),
+//! `state`/`lifecycle`/`recurrence` fields), `/api/inventory/{id}[/promote\|/decode]` (T-078,
+//! T-159),
 //! `/api/analysis/strongest` (T-079), `/api/status`, `/api/control/*`, `/api/bookmarks[/<id>]`,
 //! `/api/selections[/<id>[/links]]`, `/api/outputs[...]`, `/ws/<id>` (spectrum header),
 //! `/ws/open/listen` (audio header + PCM data records on the 101.3 MHz station), and auth/CORS
@@ -735,6 +736,33 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     }
     let (st, v) = get(addr, "/api/inventory/not-a-uuid");
     assert_eq!(st, 404, "{v}");
+
+    // T-159: the emitter's latest decode fields. `hk serve`'s composed pipeline runs its
+    // built-in RDS decoder on every WFM station automatically (no recipe started here), so this
+    // station's row is often already populated by the time it is confirmed above; shape only
+    // (`decoder`/`frame_model`/`at`/`fields`/`crc`/`source_session`), since RDS lock timing on a
+    // fixture is not deterministic. Emptiness and per-frame-model grouping are covered against a
+    // controlled seeded repository in `crates/hk-api/tests/decode_api.rs`.
+    let (st, v) = get(addr, &format!("/api/inventory/{id}/decode"));
+    assert_eq!(st, 200, "{v}");
+    let decodes = v["decodes"].as_array().unwrap_or_else(|| panic!("{v}"));
+    for row in decodes {
+        assert!(row["decoder"].is_string(), "{row}");
+        assert!(row["frame_model"].is_string(), "{row}");
+        assert!(row["at"].is_f64(), "{row}");
+        assert!(row["fields"].is_object(), "{row}");
+        assert!(row["crc"]["valid"].is_boolean(), "{row}");
+        assert!(
+            row["recipe_id"].is_null() || row["recipe_id"].is_string(),
+            "{row}"
+        );
+        assert!(
+            row["source_session"].is_null() || row["source_session"].is_string(),
+            "{row}"
+        );
+    }
+    let (st, v) = get(addr, &format!("/api/inventory/{}/decode", EmitterId::new()));
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
 
     // Promote: candidate -> confirmed (idempotent: a second promote reports changed: false).
     let (st, v) = post(addr, &format!("/api/inventory/{id}/promote"), "{}");
