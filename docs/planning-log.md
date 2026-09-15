@@ -924,3 +924,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Its api_contract failure was only an LFS pointer in the worktree; the full check covers it. Leftover pipeline wiring (FrameInput::source, sweep estimator in live ingest) is folded into T-118's note. Full check running.
 - **B0.292 Full check of main 36c3a3b (T-126): green.** Lint clean; nextest + UI 1197/1197 in 242 s; acceptance 30/30 (2 ignored HIL) in 58 s. M2 on main: T-113, T-114, T-116, T-117, T-125, T-126. In flight: T-115 (observation log), T-120 (bandit). Next after T-115: T-118 → T-119/T-121 → T-122; T-123/T-124 last.
 - **B0.293 T-118 and T-119 launched early.** Both build against the ADR-0012 hk-model attention types, which are on main: T-118 with an in-memory observation provider until T-115's store merges, T-119 with synthetic OccupancyStat inputs until T-118 merges. Per ADR §11, file ownership is disjoint from T-115/T-120. Merge order is still T-115 → T-118 → T-119. Running: T-115, T-118, T-119, T-120.
+- **B0.294 T-115 delivered** (d54e8a6). What landed:
+  - **Records:** a `WindowRule` usable span matching history L0 fold extents (±15 kHz DC notch). `ObservationRecorder` emits DwellRecord per step, SweepRecord per pass/60 s and SweepGeometry on change; alloc-free.
+  - **Wiring:** the pipeline observer is one call in `SchedState::tick`, feeding a bounded try_send queue and a writer thread.
+  - **Storage:** hourly CRC+JSON segments with self-contained geometries and torn-tail recovery; retention 30 d by sample clock, then 512 MiB.
+  - **Queries:** `query`, `totals` for T-118, and gaps.
+  - **API:** `/api/observations`, `/api/observations/coverage` and the `observations` stream.
+  - **E2E:** the mock-SDR run matches the tuned windows hop for hop.
+
+  Open points: the usable span follows the history rule rather than the ADR roll-off trim; overload is always false; **interactive runs without a scheduler log nothing** (demo-relevant, being assessed in review). Timeboxed Opus review running.
