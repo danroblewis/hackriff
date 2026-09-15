@@ -16,9 +16,17 @@
 //!   never reads as a floor step). It is shifted to the new centre, band-selected and resampled to
 //!   the requested rate ([`dsp`]); absolute frequencies are preserved. Tuned to the recording's
 //!   own centre and rate the whole recording passes through bit-exact, as the radio captured it.
+//! - **Rounding noise (T-141):** recorded IQ already holds its capture's rounding noise
+//!   ([`Recording::quant_power`], 1/6 code² for ci8/cu8), and served IQ is rounded to int8 again.
+//!   Rendered (not passed-through) IQ first goes through a linear-phase FIR with power gain
+//!   `1 − quant_power / P(f)` designed from the recording's Welch level `P` (emissions keep unit
+//!   gain), so the rounding noise is counted once: a retune at the recording's rate serves its
+//!   floor PSD unchanged, and a wider rate or higher gain shows the lower rounding density a radio
+//!   would.
 //! - **Outside coverage (whole or part of the window, or a rate wider than the recording):** the
 //!   uncovered spectrum is complex white Gaussian noise at the recording's estimated floor PSD
-//!   (Welch median, [`Recording::floor_power`]). The provenance `antenna_port` says what was
+//!   less its rounding noise (Welch median, [`Recording::floor_power`]; the output rounding adds
+//!   the device's own). The provenance `antenna_port` says what was
 //!   served: `mock:recording`, `mock:recording+noise` or `mock:noise` ([`Coverage`]); a coverage
 //!   change is a `PROVENANCE_CHANGE`, and [`MockStats::uncovered_samples`] counts noise-filled
 //!   output.
@@ -69,7 +77,11 @@
 //! are not synthesised outside coverage, and the floor dips ≈ 3 dB over the transition band at a
 //! coverage edge. The band-select filter (≈ 60 dB, transition 8 % of the output rate) adds about
 //! half its length in recording samples of latency after a retune. Multi-centre recordings are
-//! refused.
+//! refused. The rounding-noise correction assumes the recording's rounding error is white and
+//! independent of the signal (true once its floor is ≳ 0.5 code rms), is designed from the first
+//! ≈ 65 k samples, holds unit gain within ±3/64 of the recording rate of any stronger emission
+//! there (so the floor right beside an emission keeps the extra rounding noise), and costs 127
+//! taps per recording sample while rendering; passing through at a changed gain still rounds twice.
 
 mod dsp;
 
@@ -81,7 +93,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use hk_model::sigmf::SigmfMeta;
+use hk_model::sigmf::{Datatype, SigmfMeta};
 use hk_model::{Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
 use num_complex::{Complex, Complex32};
 
@@ -231,6 +243,11 @@ pub struct Recording {
     pub start_time: Timestamp,
     /// Estimated floor power, full scale² per sample at the recording rate.
     pub floor_power: f64,
+    /// Rounding noise of the recording's sample format (part of `floor_power`), full scale² per
+    /// sample: 1/6 code² of ci8/cu8 or ci16, 0 for float recordings.
+    pub quant_power: f64,
+    /// T-141: removes `quant_power` from rendered IQ (`None` when it is negligible).
+    pub(crate) dequant: Option<Arc<dsp::Dequant>>,
 }
 
 /// Rounding noise of an 8-bit ADC, full scale² per complex sample (1/6 code²).
@@ -278,6 +295,12 @@ impl Recording {
         let floor_power = estimate_floor_power(&samples)
             .filter(|p| p.is_finite() && *p > 0.0)
             .unwrap_or(QUANTISATION_POWER);
+        let quant_power = match meta.global.datatype {
+            Datatype::Ci8 | Datatype::Cu8 => QUANTISATION_POWER,
+            Datatype::Ci16Le => 1.0 / 6.0 / (32_768.0 * 32_768.0),
+            _ => 0.0,
+        };
+        let dequant = dsp::Dequant::design(&samples, quant_power).map(Arc::new);
         let gains_recorded = meta.global.provenance.is_some()
             || meta.captures.iter().any(|c| c.provenance.is_some());
         let mut provenance = first.provenance.get().clone();
@@ -299,6 +322,8 @@ impl Recording {
             provenance,
             start_time: first.time.host_time,
             floor_power,
+            quant_power,
+            dequant,
         })
     }
 
@@ -824,7 +849,7 @@ impl MockSdrSource {
         };
         let plan = plan_for(&recording, &tune, options.transition);
         let mut source = Self {
-            render: Render::new(plan, options.seed),
+            render: Render::new(plan, options.seed, recording.dequant.clone()),
             provenance: ProvenanceHandle::new(recording.provenance.clone()),
             control,
             recording,
@@ -1113,6 +1138,7 @@ fn plan_for(recording: &Recording, tune: &Tune, transition: f64) -> Plan {
         center_hz: tune.center_hz,
         rate_hz: tune.sample_rate_hz,
         floor_power: recording.floor_power,
+        quant_power: recording.quant_power,
         transition,
     }
 }
