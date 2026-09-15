@@ -2,8 +2,9 @@
 //! interval persists occupancy rows for **both** bands (every band the observation log saw in the
 //! interval is evaluated, not only the one tuned at close), with the additive floor fields set.
 //!
-//! Also an ignored sanity print over the real FM fixture (a dense band): local floors, occupied
-//! runs vs. gaps, and the suspect flag. Run with `--run-ignored only`; it never fails on values.
+//! Also the real FM fixture (a dense band): a print of local floors, occupied runs vs. gaps and
+//! the suspect flag, then (T-129) asserts the learned channels against the fixture's station truth
+//! (one channel per station covering its occupied band, occupied) and that the band row has `fco`.
 
 mod common;
 
@@ -121,8 +122,9 @@ fn occupancy_rows_cover_every_band_retuned_within_one_interval() {
     }
 }
 
+/// T-118 sanity print over the real FM fixture (local floors, occupied runs); T-129 asserts the
+/// learned channels against the fixture's station truth and the band row's `fco`.
 #[test]
-#[ignore = "sanity print over the real FM fixture; never fails on values"]
 fn occupancy_fm_fixture_local_floor_sanity() {
     let Some(meta) = real_fixture("fm_100p8M_2p4M_l32g30a1_t1p5_5s") else {
         return;
@@ -215,29 +217,45 @@ fn occupancy_fm_fixture_local_floor_sanity() {
         eprintln!("[T-118 FM] SANITY WARN: 101.3 MHz station not occupied");
     }
     let (band, span) = band;
-    match occ.span_stats(band, span) {
-        Ok(rows) => {
-            let (_, f_cell) = occ.plan_info();
-            for r in rows {
-                let extent = match r.subject {
-                    OccupancySubject::Channel { key } => {
-                        let f = key.freq(f_cell);
-                        format!("ch {:.3}-{:.3}", f.lo_hz / 1e6, f.hi_hz / 1e6)
-                    }
-                    OccupancySubject::Band { .. } => "band".into(),
-                };
-                eprintln!(
-                    "[T-118 FM] {extent:<18} fco {:?} fbo {:?} floor {:?} {:?} suspect {:?} occ p50 {:?} idle {:?}",
-                    r.fco.or(r.fco_all_visits),
-                    r.fbo,
-                    r.floor_db.map(|x| (x * 10.0).round() / 10.0),
-                    r.floor_source,
-                    r.floor_suspect,
-                    r.level_occupied_p50_db.map(|x| (x * 10.0).round() / 10.0),
-                    r.level_idle_db.map(|x| (x * 10.0).round() / 10.0),
-                );
+    let rows = occ.span_stats(band, span).expect("span stats");
+    let (_, f_cell) = occ.plan_info();
+    let mut channels = Vec::new();
+    let mut band_row = None;
+    for r in &rows {
+        let extent = match r.subject {
+            OccupancySubject::Channel { key } => {
+                let f = key.freq(f_cell);
+                channels.push((f, r.fco));
+                format!("ch {:.3}-{:.3}", f.lo_hz / 1e6, f.hi_hz / 1e6)
             }
-        }
-        Err(e) => eprintln!("[T-118 FM] span stats: {e}"),
+            OccupancySubject::Band { .. } => {
+                band_row = Some(r.clone());
+                "band".into()
+            }
+        };
+        eprintln!(
+            "[T-129 FM] {extent:<18} fco {:?} all-visits {:?} fbo {:?} floor {:?} {:?} suspect {:?}/{} occ p50 {:?} idle {:?}",
+            r.fco,
+            r.fco_all_visits,
+            r.fbo,
+            r.floor_db.map(|x| (x * 10.0).round() / 10.0),
+            r.floor_source,
+            r.floor_suspect,
+            r.n_suspect,
+            r.level_occupied_p50_db.map(|x| (x * 10.0).round() / 10.0),
+            r.level_idle_db.map(|x| (x * 10.0).round() / 10.0),
+        );
     }
+    // T-129 against the fixture's hidden truth (annotations partial: the 101.3 MHz station, the
+    // 100.000 MHz spur, DC): one channel of the station's occupied band, no in-band fragments.
+    let stations = emission_truth(&meta);
+    assert!(!stations.is_empty(), "fixture carries station truth");
+    assert_station_channels("T-129 FM", &channels, &stations, 2.0);
+    let band_row = band_row.expect("a band row");
+    assert!(
+        band_row.fco.is_some() && band_row.fco_all_visits.is_some(),
+        "band row fco {:?} / all visits {:?}",
+        band_row.fco,
+        band_row.fco_all_visits
+    );
 }

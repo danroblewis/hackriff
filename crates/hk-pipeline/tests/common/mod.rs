@@ -191,6 +191,74 @@ pub fn run(dir: &Path, meta: &Path, extra: serde_json::Value) -> RunSummary {
 }
 
 /// The run's repository.
+/// `(center_hz, bandwidth_hz)` of every `role: emission` truth annotation of `meta`: the test's
+/// private truth, never shown to the pipeline.
+pub fn emission_truth(meta: &Path) -> Vec<(f64, f64)> {
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(meta).unwrap()).unwrap();
+    v["annotations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| {
+            let t = &a["hackriff:truth"];
+            if t["role"] != "emission" {
+                return None;
+            }
+            Some((t["center_hz"].as_f64()?, t["bandwidth_hz"].as_f64()?))
+        })
+        .collect()
+}
+
+/// T-129: learned channels (`(extent, fco)` per channel row) against station truth
+/// `(center, bandwidth)`: exactly one channel per station, its centre inside the station's band,
+/// covering it (± a quarter bandwidth) and at most `max_width_ratio` × its bandwidth wide; the
+/// station's channel reads occupied.
+pub fn assert_station_channels(
+    tag: &str,
+    channels: &[(hk_model::FreqRange, Option<f64>)],
+    stations: &[(f64, f64)],
+    max_width_ratio: f64,
+) {
+    for &(fc, bw) in stations {
+        let (lo, hi) = (fc - 0.5 * bw, fc + 0.5 * bw);
+        let inside: Vec<_> = channels
+            .iter()
+            .filter(|(f, _)| {
+                let c = 0.5 * (f.lo_hz + f.hi_hz);
+                c > lo && c < hi
+            })
+            .collect();
+        assert_eq!(
+            inside.len(),
+            1,
+            "[{tag}] station {:.3} MHz: want one channel, got {inside:?}",
+            fc / 1e6
+        );
+        let (f, fco) = inside[0];
+        assert!(
+            f.lo_hz <= lo + 0.25 * bw && f.hi_hz >= hi - 0.25 * bw,
+            "[{tag}] station {:.3} MHz ({:.0} kHz) not covered by {:.3}-{:.3} MHz",
+            fc / 1e6,
+            bw / 1e3,
+            f.lo_hz / 1e6,
+            f.hi_hz / 1e6
+        );
+        assert!(
+            f.width_hz() <= max_width_ratio * bw,
+            "[{tag}] station {:.3} MHz channel {:.0} kHz wide (truth {:.0} kHz)",
+            fc / 1e6,
+            f.width_hz() / 1e3,
+            bw / 1e3
+        );
+        assert!(
+            fco.is_some_and(|x| x >= 0.9),
+            "[{tag}] station {:.3} MHz channel reads {fco:?}, not occupied",
+            fc / 1e6
+        );
+    }
+}
+
 pub fn repo(dir: &Path) -> Repository {
     Repository::open(dir.join("hackriff.db")).unwrap()
 }

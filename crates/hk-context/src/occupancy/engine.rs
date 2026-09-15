@@ -543,15 +543,31 @@ pub fn evaluate(
             v.observed.start.saturating_add_nanos(-slack),
             v.observed.end.saturating_add_nanos(slack),
         );
+        // §2.6: a crossing is suspect where it coincides (time and frequency) with a suspect
+        // detection; the visit is suspect when all its crossings are (T-129: a spur elsewhere in
+        // a wide band row no longer hides a clean station crossing).
         let suspect = occupied
-            && (v.overload
-                || input.detections.iter().any(|d| {
-                    d.suspect
-                        && d.freq.lo_hz < freq.hi_hz
-                        && d.freq.hi_hz > freq.lo_hz
-                        && d.time.start <= window.end
-                        && d.time.end >= window.start
-                }));
+            && (v.overload || {
+                let active: Vec<&DetectionExtent> = input
+                    .detections
+                    .iter()
+                    .filter(|d| {
+                        d.suspect
+                            && d.freq.lo_hz < freq.hi_hz
+                            && d.freq.hi_hz > freq.lo_hz
+                            && d.time.start <= window.end
+                            && d.time.end >= window.start
+                    })
+                    .collect();
+                !active.is_empty()
+                    && (a..b).zip(&above).all(|(f, &x)| {
+                        let lo = (grid.f_first_cell + f as i64) as f64 * grid.f_cell_hz;
+                        let hi = lo + grid.f_cell_hz;
+                        !x || active
+                            .iter()
+                            .any(|d| d.freq.lo_hz < hi && d.freq.hi_hz > lo)
+                    })
+            });
         out.push(VisitSample {
             start_ns: s,
             dur_ns: (e - s).max(0),
