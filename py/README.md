@@ -63,6 +63,7 @@ any extra truth files, and `manifest.json` listing them. Lists are comma-separat
 | `noise_floor_rise` | AWARE-006 | L1 centred 1575.42 MHz, 2 Msps; +10 dB floor step at t0 = 0.1 s (whole band, or `rise_bandwidth_hz`); two weak CW; `start_utc`, `lat`/`lon` for correlation with a frozen feed |
 | `injected_floor` | SPACE-050 | six 50 ms captures at 10/144/433.92/915/2450/5800 MHz, each with its own floor (seeded −42…−28 dBFS) and calibration constant K (seeded −80…−60 dB), per-capture provenance; one CW 10 dB below the floor power per segment |
 | `occupancy_multi_hour` | AWARE-042 | 8 PMR446-style NBFM channels over 3 h: seeded burst schedule (`schedule.json`) plus two 250 ms IQ windows rendered on demand |
+| `occupancy_markov_scene` | AWARE-042, AWARE-044, PROP-023 (T-117) | 48 h span, 8 channels: four Markov on/off channels at configured true FCO (1/10/50/100%), one hour-of-week-modulated channel, one novelty emitter silent until hour 30, a periodic launch-like event at 00Z/12Z, and a persistent wideband "boring" band; seeded interval schedule + irregular observation schedule (`schedule.json`) plus a few short IQ windows rendered on demand |
 | `fm_broadcast_rds` | SIGNAL-062 | stereo WFM (L 1 kHz, R 400 Hz), 19 kHz pilot, RDS group 0A with PI `C0DE`, PS `HACKRIFF`, PTY 10; 456 kSps, 0.6 s |
 | `adsb_squitter` | SIGNAL-001 fallback | four aircraft (`a0b1c2`, `4ca853`, `3c6444`, `c0ffee`), 8 DF17 squitters each cycling identification / even position / odd position / velocity, CRC-24, CPR; 1090 MHz at 2.4 Msps (readsb's rate; 2 Msps also works) |
 | `pocsag_pagers` | SIGNAL-062, M1 tutorial 2 fixture (T-098) | three channels (offsets −40/0/+40 kHz) at 512/1200/2400 Bd, BCH(31,21)+even parity, one numeric and two alphanumeric pages (RICs 1234567/1876543/654321); 152.36 MHz, 132.3 kSps (6× 22050 Hz, so decimating to multimon-ng's rate is exact). Oracle: `multimon-ng` (built from source, not in Homebrew core — see `hkpy/synth/pocsag.py`) |
@@ -75,6 +76,17 @@ histogram. IQ windows are rendered from the schedule on demand (`windows`, `wind
 `render_start_s`). Rendering is a pure function of the seed, the schedule and the window start, so
 the same burst renders identically in overlapping windows. History and occupancy tests can take
 detections straight from the schedule. Detector tests replay the rendered windows.
+
+`occupancy_markov_scene` (T-117) uses the same on-demand-IQ idea over a longer (48 h default),
+fast-forwardable span, with channels driven by a seeded two-state Markov on/off process instead of
+a Poisson burst train, so each channel's *true* FCO is a configured parameter (not just something
+recomputed from the draw). It also adds an **observation schedule**: irregular revisit times over
+the whole span (random gaps, or an explicit list), independent of which few windows got IQ
+rendered, so a test can check a scheduler's sampled FCO against the hidden truth (ITU-R SM.2256
+Annex 1 style, via `hkpy.synth.occupancy.wilson_ci`) without paying for full-resolution IQ at every
+revisit. `schedule.json` carries per-channel intervals, exact overall and per-calendar-hour-of-week
+(168 slots) occupancy, the novelty injection time, the periodic-event schedule, and the observation
+schedule.
 
 **Impairments** apply to any scenario, in signal-path order (`hkpy/synth/impairments.py`):
 - `blocker_dbfs` (+ `blocker_offsets_hz`, `im3_coeff`) adds a two-tone blocker through a cubic front end, producing IM3 at 2f1−f2 and 2f2−f1 with exact truth power, plus desensitisation.
@@ -104,6 +116,7 @@ detections straight from the schedule. Detector tests replay the rendered window
 | `emission` / `pocsag-page` | `symbol_rate_bd`, `deviation_hz`, `mod_index`, `preamble_bits`, `sync_hex`, `idle_hex`, `bit_order`, `mapping`, `bch: {algorithm, generator_poly, codeword_bits, layout, corrects}`, `frame: {n_bits, n_codewords, n_batches}`, `ric`, `address`, `frame_position`, `function`, `message_kind`, `message_text`, `message_codewords_hex`, `identity` (`ric`) |
 | `emission` / `acars-message` | `carrier_modulation`, `am_depth`, `subcarrier_modulation`, `symbol_rate_bd`, `mark_hz`, `space_hz`, `char_bits`, `framing`, `crc: {algorithm, poly, init, refin, refout, xorout, covers}`, `fields: {mode, reg, label, block_id, text}`, `text_expected`, `frame: {n_bits, chars_hex, crc_hex}`, `identity` (`acars_reg`) |
 | `emission` / `nbfm-burst` | `deviation_hz`, `audio_tone_hz`, `channel`, `burst_index`, `burst_start_s`, `burst_duration_s`, `clipped_by_window`, `identity` (`channel-user`) |
+| `emission` / `occupancy-markov`, `occupancy-diurnal`, `occupancy-novelty`, `occupancy-event`, `occupancy-boring` | `channel`, `interval_index`, `interval_start_s`, `interval_duration_s`, `clipped_by_window`, `target_fco` (nullable for the event/boring channels), `identity` (`channel-user`) |
 | `emission` / `blocker` | `input_power_dbfs`, `tone_index` |
 | `artefact` / `spur`, `im3`, `iq-image`, `dc-offset`, `overload` | `center_hz`, `offset_hz`, `power_dbfs`, `power_dbm`, plus `harmonic_n`/`spur_step_hz`/`tuner_center_hz`; `order`/`products_of_hz`; `image_of_hz`/`image_of_kind`; `i_offset`/`q_offset`; `clipped_samples`/`merge_gap_samples` |
 | `floor` / `noise-floor` | `floor_dbfs` (integrated over the box), `floor_dbfs_per_hz`, `calibration_k_db`, `floor_dbm`, `floor_dbm_per_hz`, `bandwidth_hz`, `quantisation_noise_dbfs`, `expected_floor_dbfs` (analogue + quantisation noise: what a measurement should read) |

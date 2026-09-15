@@ -260,3 +260,448 @@ def occupancy_multi_hour(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     schedule["windows"] = [{"index": i, "start_s": s, "duration_s": dur,
                             "recording": f"window_{i:02d}.sigmf-meta"} for i, s in enumerate(starts)]
     return scenes, {"schedule.json": schedule}
+
+
+# ---------------------------------------------------------------------------------------------
+# ``occupancy_markov_scene`` (T-117, AWARE-042/AWARE-044/PROP-023): channels with a known two-state
+# Markov on/off process (configured true FCO), hour-of-week activity modulation, a novelty emitter
+# injected at a fixed hour, a periodic launch-like event, and a persistent "boring" wideband
+# channel -- for M2's occupancy engine (T-118), baseline/novelty (T-119) and acceptance (T-124).
+#
+# **Representation.** Same on-demand-IQ idea as :func:`occupancy_multi_hour`: the ground truth is a
+# seeded schedule of on/off **intervals** per channel over the whole (fast-forwardable) simulated
+# span, computed once by exact renewal-process sampling; a handful of short IQ windows are rendered
+# from it on demand. Two more things the multi-hour schedule doesn't need:
+#
+# - an **observation schedule** (irregular revisit times over the whole span, from the same
+#   ``revisit_mode="random"`` process a real scheduler would produce, or an explicit list) used to
+#   compute a *sampled* FCO from the truth intervals, independent of whether that revisit's IQ was
+#   ever rendered -- this is what lets a downstream test assert ITU-R SM.2256 Annex 1 style binomial
+#   agreement without paying for full-resolution IQ at every revisit;
+# - **hour-of-week** (168-slot, calendar-aware) occupancy stats per channel, not just hour-of-day.
+#
+# Two-state process: OFF dwells ~Exponential(mean_off_s), ON dwells ~Exponential(mean_on_s); the
+# stationary P(on) = mean_on_s/(mean_on_s+mean_off_s) is the channel's *configured* (hidden) true
+# FCO. The hour-of-week channel additionally thins the OFF->ON rate by a 168-slot activity
+# multiplier (thinning/rejection, as in :func:`build_schedule` above) so its realized FCO varies by
+# slot; its target FCO is nominal (a rate parameter), not asserted exactly.
+# ---------------------------------------------------------------------------------------------
+
+SCENE_DEFAULTS: dict[str, Any] = {
+    "start_utc": "2026-09-15T00:00:00Z",
+    "span_hours": 48.0,
+    "sample_rate": 500e3,
+    "center_hz": 433.5e6,
+    "channel_spacing_hz": 25e3,
+    "channel_bandwidth_hz": 15e3,
+    "markov_fcos": [0.01, 0.10, 0.50, 1.00],
+    "markov_mean_on_s": 60.0,
+    "power_dbfs_min": -30.0,
+    "power_dbfs_max": -15.0,
+    "noise_dbfs": -45.0,
+    "diurnal_target_fco": 0.2,
+    "diurnal_mean_on_s": 120.0,
+    "diurnal_profile": [],
+    "novelty_start_hour": 30.0,
+    "novelty_fco": 0.4,
+    "novelty_mean_on_s": 90.0,
+    "event_hours_utc": [0, 12],
+    "event_duration_s": 90.0,
+    "boring_offset_hz": 170e3,
+    "boring_bandwidth_hz": 80e3,
+    "boring_power_dbfs": -20.0,
+    "revisit_mode": "random",
+    "revisit_mean_gap_s": 60.0,
+    "revisit_min_gap_s": 5.0,
+    "revisit_times_s": [],
+    "revisit_ci_z": 3.0,
+    "n_iq_windows": 4,
+    "window_duration_s": 0.05,
+    "iq_window_starts_s": [],
+    "calibration_k_db": -70.0,
+}
+
+
+def wilson_ci(k: int, n: int, z: float = 3.0) -> tuple[float, float]:
+    """Wilson score confidence interval for a binomial proportion (SM.2256 Annex 1 style).
+
+    ``k`` successes out of ``n`` trials; ``z=3.0`` is a generous (~99.7%) two-sided bound so the
+    check is not flaky against a single seeded draw.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    phat = k / n
+    denom = 1.0 + z * z / n
+    center = phat + z * z / (2 * n)
+    half = z * math.sqrt(phat * (1 - phat) / n + z * z / (4 * n * n))
+    return (max(0.0, (center - half) / denom), min(1.0, (center + half) / denom))
+
+
+def _hour_of_week(start_dt: _dt.datetime, elapsed_s: float) -> int:
+    """Calendar hour-of-week (0 = Monday 00:00 UTC .. 167) at ``start_dt + elapsed_s``."""
+    t = start_dt + _dt.timedelta(seconds=elapsed_s)
+    return t.weekday() * 24 + t.hour
+
+
+def _week_slot_edges(start_dt: _dt.datetime, span_s: float) -> list[float]:
+    """Elapsed-second boundaries of every calendar-hour slot covering ``[0, span_s)``."""
+    edges = [0.0]
+    boundary = start_dt.replace(minute=0, second=0, microsecond=0)
+    if boundary < start_dt:
+        boundary += _dt.timedelta(hours=1)
+    end_dt = start_dt + _dt.timedelta(seconds=span_s)
+    while boundary < end_dt:
+        edges.append((boundary - start_dt).total_seconds())
+        boundary += _dt.timedelta(hours=1)
+    edges.append(span_s)
+    return sorted(set(edges))
+
+
+def _event_times(start_dt: _dt.datetime, span_s: float, event_hours_utc: list[int]) -> list[float]:
+    """Elapsed seconds of every UTC clock hour in ``event_hours_utc`` within ``[0, span_s)``."""
+    times = []
+    boundary = start_dt.replace(minute=0, second=0, microsecond=0)
+    if boundary < start_dt:
+        boundary += _dt.timedelta(hours=1)
+    end_dt = start_dt + _dt.timedelta(seconds=span_s)
+    while boundary < end_dt:
+        if boundary.hour in event_hours_utc:
+            times.append((boundary - start_dt).total_seconds())
+        boundary += _dt.timedelta(hours=1)
+    return times
+
+
+def _simulate_two_state(rng: np.random.Generator, span_s: float, mean_on_s: float,
+                        mean_off_s: float) -> list[tuple[float, float]]:
+    """Alternating-renewal on/off intervals; ``mean_off_s <= 0`` means always on."""
+    if span_s <= 0:
+        return []
+    if mean_off_s <= 0:
+        return [(0.0, span_s)]
+    p_on = mean_on_s / (mean_on_s + mean_off_s)
+    intervals: list[tuple[float, float]] = []
+    t = 0.0
+    if rng.uniform() < p_on:  # start already on (exponential is memoryless: draw the remainder)
+        dur = min(float(rng.exponential(mean_on_s)), span_s)
+        if dur > 0:
+            intervals.append((0.0, dur))
+        t = dur
+    while t < span_s:
+        t += float(rng.exponential(mean_off_s))
+        if t >= span_s:
+            break
+        dur = min(float(rng.exponential(mean_on_s)), span_s - t)
+        if dur > 0:
+            intervals.append((t, dur))
+        t += dur
+    return intervals
+
+
+def _simulate_modulated(rng: np.random.Generator, span_s: float, mean_on_s: float,
+                        base_mean_off_s: float, week_profile: np.ndarray,
+                        start_dt: _dt.datetime) -> list[tuple[float, float]]:
+    """Like :func:`_simulate_two_state` but the off->on rate is thinned by ``week_profile[hour_of_week]``."""
+    if span_s <= 0:
+        return []
+    lam_max = (1.0 / base_mean_off_s) * float(week_profile.max())
+    intervals: list[tuple[float, float]] = []
+    t = 0.0
+    how0 = _hour_of_week(start_dt, 0.0)
+    p_on0 = mean_on_s / (mean_on_s + base_mean_off_s / week_profile[how0])
+    if rng.uniform() < p_on0:
+        dur = min(float(rng.exponential(mean_on_s)), span_s)
+        if dur > 0:
+            intervals.append((0.0, dur))
+        t = dur
+    while t < span_s:
+        while True:
+            t += float(rng.exponential(1.0 / lam_max))
+            if t >= span_s:
+                break
+            if rng.uniform() < week_profile[_hour_of_week(start_dt, t)] / week_profile.max():
+                break
+        if t >= span_s:
+            break
+        dur = min(float(rng.exponential(mean_on_s)), span_s - t)
+        if dur > 0:
+            intervals.append((t, dur))
+        t += dur
+    return intervals
+
+
+def _sample_revisits(seed: int, span_s: float, p: dict[str, Any]) -> np.ndarray:
+    """The scheduler's revisit times: ``"given"`` (explicit list) or ``"random"`` (irregular gaps)."""
+    mode = p["revisit_mode"]
+    if mode == "given":
+        times = np.asarray(sorted(float(t) for t in p["revisit_times_s"]), dtype=np.float64)
+        if times.size and (times.min() < 0 or times.max() >= span_s):
+            raise ValueError("revisit_times_s outside the scene span")
+        return times
+    if mode != "random":
+        raise ValueError(f"revisit_mode must be 'random' or 'given', got {mode!r}")
+    r = rng_for(seed, "occscene", "revisits")
+    mean_gap, min_gap = float(p["revisit_mean_gap_s"]), float(p["revisit_min_gap_s"])
+    times: list[float] = []
+    t = 0.0
+    while True:
+        t += max(min_gap, float(r.exponential(mean_gap)))
+        if t >= span_s:
+            break
+        times.append(t)
+    return np.asarray(times, dtype=np.float64)
+
+
+def _sampled_fco(intervals: list[dict[str, Any]], channels: list[dict[str, Any]],
+                 times_s: np.ndarray, z: float) -> dict[int, dict[str, Any]]:
+    """FCO as a real scheduler would measure it: fraction of ``times_s`` landing inside an interval."""
+    out: dict[int, dict[str, Any]] = {}
+    for c in channels:
+        idx = c["channel"]
+        mine = sorted((iv for iv in intervals if iv["channel"] == idx), key=lambda x: x["start_s"])
+        n = int(times_s.size)
+        if n == 0:
+            out[idx] = {"n_revisits": 0, "n_occupied": 0, "fco": None, "ci_wilson": None}
+            continue
+        starts = np.array([m["start_s"] for m in mine], dtype=np.float64)
+        occ = np.zeros(n, dtype=bool)
+        if starts.size:
+            ends = starts + np.array([m["duration_s"] for m in mine], dtype=np.float64)
+            pos = np.searchsorted(starts, times_s, side="right") - 1
+            valid = pos >= 0
+            occ[valid] = times_s[valid] < ends[pos[valid]]
+        n_occ = int(occ.sum())
+        out[idx] = {"n_revisits": n, "n_occupied": n_occ, "fco": n_occ / n,
+                    "ci_wilson": list(wilson_ci(n_occ, n, z))}
+    return out
+
+
+def week_occupancy_stats(intervals: list[dict[str, Any]], channels: list[dict[str, Any]],
+                         span_s: float, start_utc: str) -> dict[str, Any]:
+    """Exact (interval-arithmetic) per-channel occupancy overall and per calendar hour-of-week slot."""
+    start_dt = parse_utc(start_utc)
+    edges = _week_slot_edges(start_dt, span_s)
+    per_channel = []
+    for c in channels:
+        idx = c["channel"]
+        mine = [iv for iv in intervals if iv["channel"] == idx]
+        on = sum(iv["duration_s"] for iv in mine)
+        week_slots: dict[int, dict[str, float]] = {}
+        for e0, e1 in zip(edges[:-1], edges[1:], strict=True):
+            slot = week_slots.setdefault(_hour_of_week(start_dt, e0), {"exposure_s": 0.0, "on_s": 0.0})
+            slot["exposure_s"] += e1 - e0
+            slot["on_s"] += sum(_overlap(iv["start_s"], iv["start_s"] + iv["duration_s"], e0, e1) for iv in mine)
+        per_channel.append({
+            "channel": idx, "kind": c["kind"], "n_intervals": len(mine), "on_time_s": on,
+            "fco_realized": on / span_s if span_s > 0 else 0.0, "target_fco": c.get("target_fco"),
+            "hour_of_week": {str(h): {**v, "occupancy": (v["on_s"] / v["exposure_s"]) if v["exposure_s"] else None}
+                            for h, v in sorted(week_slots.items())},
+        })
+    return {"span_s": span_s, "n_intervals": len(intervals), "per_channel": per_channel}
+
+
+def build_scene_schedule(seed: int, p: dict[str, Any]) -> dict[str, Any]:
+    start_dt = parse_utc(p["start_utc"])
+    span = float(p["span_hours"]) * 3600.0
+    fs = float(p["sample_rate"])
+    fc = float(p["center_hz"])
+    spacing = float(p["channel_spacing_hz"])
+    bw = float(p["channel_bandwidth_hz"])
+    ch_rng = rng_for(seed, "occscene", "channels")
+
+    channels: list[dict[str, Any]] = []
+    intervals: list[dict[str, Any]] = []
+
+    def add_channel(idx: int, kind: str, offset_hz: float, power: float, target_fco: float | None,
+                    mean_on_s: float | None, mean_off_s: float | None, value: str) -> None:
+        channels.append({"channel": idx, "kind": kind, "center_hz": fc + offset_hz,
+                         "offset_hz": offset_hz, "bandwidth_hz": bw, "power_dbfs": power,
+                         "target_fco": target_fco, "mean_on_s": mean_on_s, "mean_off_s": mean_off_s,
+                         "identity": {"type": "channel-user", "value": value}})
+
+    def add_intervals(idx: int, ivs: list[tuple[float, float]]) -> None:
+        for s, d in ivs:
+            d = min(d, span - s)
+            if d > 0:
+                intervals.append({"channel": idx, "start_s": round(s, 6), "duration_s": round(d, 6)})
+
+    # Markov channels: one per configured target FCO --------------------------------------------
+    fcos = [float(x) for x in p["markov_fcos"]]
+    n_markov = len(fcos)
+    first_offset = -(n_markov + 2) * spacing
+    mean_on_s = float(p["markov_mean_on_s"])
+    for i, fco in enumerate(fcos):
+        power = float(ch_rng.uniform(p["power_dbfs_min"], p["power_dbfs_max"]))
+        mean_off_s = 0.0 if fco >= 1.0 else mean_on_s * (1.0 - fco) / fco
+        ivs = _simulate_two_state(rng_for(seed, "occscene", "markov", i), span, mean_on_s, mean_off_s)
+        add_channel(i, "markov", first_offset + i * spacing, power, fco, mean_on_s, mean_off_s, f"markov{i}")
+        add_intervals(i, ivs)
+
+    # Hour-of-week-modulated channel --------------------------------------------------------------
+    diurnal_idx = n_markov
+    profile24 = np.asarray(p["diurnal_profile"] or DIURNAL_PROFILE, dtype=np.float64)
+    if profile24.shape != (24,) or np.any(profile24 < 0) or profile24.sum() <= 0:
+        raise ValueError("diurnal_profile needs 24 non-negative values")
+    profile24 = profile24 / profile24.mean()
+    week_profile = np.tile(profile24, 7)
+    d_fco, d_mean_on = float(p["diurnal_target_fco"]), float(p["diurnal_mean_on_s"])
+    d_mean_off = d_mean_on * (1.0 - d_fco) / d_fco if d_fco < 1.0 else 0.0
+    d_power = float(ch_rng.uniform(p["power_dbfs_min"], p["power_dbfs_max"]))
+    d_ivs = ([(0.0, span)] if d_mean_off <= 0 else
+             _simulate_modulated(rng_for(seed, "occscene", "diurnal"), span, d_mean_on, d_mean_off,
+                                 week_profile, start_dt))
+    add_channel(diurnal_idx, "diurnal", first_offset + n_markov * spacing, d_power, d_fco, d_mean_on,
+               d_mean_off, "diurnal0")
+    add_intervals(diurnal_idx, d_ivs)
+
+    # Novelty: silent until novelty_start_hour, then Markov on/off ---------------------------------
+    novelty_idx = diurnal_idx + 1
+    novelty_start_s = float(p["novelty_start_hour"]) * 3600.0
+    n_fco, n_mean_on = float(p["novelty_fco"]), float(p["novelty_mean_on_s"])
+    n_mean_off = 0.0 if n_fco >= 1.0 else n_mean_on * (1.0 - n_fco) / n_fco
+    n_power = float(ch_rng.uniform(p["power_dbfs_min"], p["power_dbfs_max"]))
+    if novelty_start_s < span:
+        sub = _simulate_two_state(rng_for(seed, "occscene", "novelty"), span - novelty_start_s,
+                                  n_mean_on, n_mean_off)
+        n_ivs = [(novelty_start_s + s, d) for s, d in sub]
+    else:
+        n_ivs = []
+    n_offset = first_offset + (n_markov + 1) * spacing
+    add_channel(novelty_idx, "novelty", n_offset, n_power, n_fco, n_mean_on, n_mean_off, "novelty0")
+    add_intervals(novelty_idx, n_ivs)
+
+    # Periodic launch-like event: fixed UTC clock hours (default 00Z/12Z) --------------------------
+    event_idx = novelty_idx + 1
+    event_hours = [int(h) for h in p["event_hours_utc"]]
+    event_dur = float(p["event_duration_s"])
+    event_times = _event_times(start_dt, span, event_hours)
+    e_offset = first_offset + (n_markov + 2) * spacing
+    e_power = float(ch_rng.uniform(p["power_dbfs_min"], p["power_dbfs_max"]))
+    add_channel(event_idx, "event", e_offset, e_power, None, event_dur, None, "launch-event")
+    add_intervals(event_idx, [(t, event_dur) for t in event_times])
+
+    # Boring band: persistent, always on, wideband -------------------------------------------------
+    boring_idx = event_idx + 1
+    boring_offset, boring_bw = float(p["boring_offset_hz"]), float(p["boring_bandwidth_hz"])
+    channels.append({"channel": boring_idx, "kind": "boring", "center_hz": fc + boring_offset,
+                     "offset_hz": boring_offset, "bandwidth_hz": boring_bw,
+                     "power_dbfs": float(p["boring_power_dbfs"]), "target_fco": 1.0,
+                     "mean_on_s": None, "mean_off_s": None,
+                     "identity": {"type": "channel-user", "value": "boring-band"}})
+    intervals.append({"channel": boring_idx, "start_s": 0.0, "duration_s": span})
+
+    for c in channels:
+        if abs(c["offset_hz"]) + c["bandwidth_hz"] / 2 > 0.45 * fs:
+            raise ValueError(f"channel {c['channel']} ({c['kind']}) at offset {c['offset_hz']} Hz "
+                             f"is outside the rendered bandwidth")
+
+    intervals.sort(key=lambda iv: (iv["start_s"], iv["channel"]))
+    for i, iv in enumerate(intervals):
+        iv["index"] = i
+
+    z = float(p["revisit_ci_z"])
+    obs_times = _sample_revisits(seed, span, p)
+    return {
+        "kind": "occupancy-markov-scene",
+        "start_utc": p["start_utc"],
+        "span_s": span,
+        "channels": channels,
+        "intervals": intervals,
+        "novelty": {"channel": novelty_idx, "start_hour": float(p["novelty_start_hour"]),
+                   "start_s": novelty_start_s, "center_hz": fc + n_offset, "target_fco": n_fco},
+        "event_schedule": [{"start_s": t, "duration_s": min(event_dur, span - t),
+                            "center_hz": fc + e_offset} for t in event_times],
+        "observation_schedule": {"mode": p["revisit_mode"], "n_revisits": int(obs_times.size),
+                                 "times_s": obs_times.tolist()},
+        "stats": week_occupancy_stats(intervals, channels, span, p["start_utc"]),
+        "sampled_fco": {"z": z, "by_channel": _sampled_fco(intervals, channels, obs_times, z)},
+    }
+
+
+def render_scene_window(ctx: Ctx, schedule: dict[str, Any], index: int, start_s: float) -> Scene:
+    """IQ for ``[start_s, start_s + window_duration_s)`` of the scene, with truth annotations."""
+    p = ctx.params
+    fs = float(p["sample_rate"])
+    dur = float(p["window_duration_s"])
+    n = int(round(dur * fs))
+    g0 = int(round(start_s * fs))
+    scene = ctx.scene(f"window_{index:02d}", fs, n,
+                      f"hkpy.synth occupancy_markov_scene window {index} at t={start_s:.6f} s")
+    fc = float(p["center_hz"])
+    cap = scene.add_capture(0, n, fc, utc_plus(schedule["start_utc"], g0 / fs),
+                            calibration_k_db=float(p["calibration_k_db"]))
+    cap.floor_dbfs_per_hz = float(p["noise_dbfs"]) - db(fs)
+    scene.add_samples(0, complex_noise(rng_for(ctx.seed, "occscene", "noise", g0), n, float(p["noise_dbfs"])))
+    scene.add_floor(0, n, cap.floor_dbfs_per_hz)
+    w0, w1 = g0 / fs, (g0 + n) / fs
+    chans = {c["channel"]: c for c in schedule["channels"]}
+    in_window = []
+    for iv in schedule["intervals"]:
+        b0, b1 = iv["start_s"], iv["start_s"] + iv["duration_s"]
+        if b1 <= w0 or b0 >= w1:
+            continue
+        ch = chans[iv["channel"]]
+        off = ch["center_hz"] - fc
+        i0 = max(0, int(math.ceil(b0 * fs)) - g0)
+        i1 = min(n, int(math.ceil(b1 * fs)) - g0)
+        if i1 <= i0:
+            continue
+        r = rng_for(ctx.seed, "occscene", "interval", iv["index"])
+        phase0 = float(r.uniform(0, 2 * math.pi))
+        t_abs = (g0 + np.arange(i0, i1)) / fs
+        amp = math.sqrt(undb(ch["power_dbfs"]))
+        scene.add_samples(i0, amp * np.exp(1j * (phase0 + 2 * math.pi * off * t_abs)))
+        hbw = ch["bandwidth_hz"] / 2
+        scene.annotate(i0, i1 - i0, ch["center_hz"] - hbw, ch["center_hz"] + hbw, f"occupancy-{ch['kind']}",
+                       scene.emission_truth(
+                           cap, off, ch["bandwidth_hz"], ch["power_dbfs"], kind=f"occupancy-{ch['kind']}",
+                           modulation="cw", channel=iv["channel"], interval_index=iv["index"],
+                           interval_start_s=b0, interval_duration_s=iv["duration_s"],
+                           clipped_by_window=bool(b0 < w0 or b1 > w1), target_fco=ch.get("target_fco"),
+                           identity=ch["identity"]))
+        in_window.append(iv["index"])
+    scene.scenario_truth["window"] = {"index": index, "start_s": w0, "duration_s": n / fs,
+                                      "start_utc": cap.datetime, "intervals": in_window,
+                                      "schedule_file": "schedule.json"}
+    return scene
+
+
+def _choose_iq_windows(schedule: dict[str, Any], p: dict[str, Any]) -> list[float]:
+    """A handful of windows: right after the novelty injection, at the first event, then spread out."""
+    span, dur = schedule["span_s"], float(p["window_duration_s"])
+
+    def clip(s: float) -> float:
+        return min(max(0.0, s), max(0.0, span - dur))
+
+    forced = [clip(schedule["novelty"]["start_s"] + 5.0)]
+    if schedule["event_schedule"]:
+        forced.append(clip(schedule["event_schedule"][0]["start_s"]))
+    remaining = max(0, int(p["n_iq_windows"]) - len(forced))
+    if remaining > 0:
+        step = span / (remaining + 1)
+        forced += [clip(step * (i + 1)) for i in range(remaining)]
+    seen: set[float] = set()
+    out = []
+    for s in forced:
+        key = round(s, 6)
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+def occupancy_markov_scene(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    p = ctx.params
+    dur = float(p["window_duration_s"])
+    schedule = build_scene_schedule(ctx.seed, p)
+    span = schedule["span_s"]
+    if dur <= 0 or dur > span:
+        raise ValueError("window_duration_s must be positive and within span_hours")
+    starts = ([float(s) for s in p["iq_window_starts_s"]] if p["iq_window_starts_s"]
+             else _choose_iq_windows(schedule, p))
+    for s in starts:
+        if not 0 <= s <= span - dur:
+            raise ValueError(f"window start {s} s outside the scene span")
+    scenes = [render_scene_window(ctx, schedule, i, s) for i, s in enumerate(starts)]
+    schedule["windows"] = [{"index": i, "start_s": s, "duration_s": dur,
+                            "recording": f"window_{i:02d}.sigmf-meta"} for i, s in enumerate(starts)]
+    return scenes, {"schedule.json": schedule}

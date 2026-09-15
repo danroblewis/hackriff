@@ -33,6 +33,8 @@ SMALL: dict[str, dict] = {
     "noise_floor_rise": {"duration_s": 0.1, "t0_s": 0.05},
     "injected_floor": {"segment_duration_s": 0.02},
     "occupancy_multi_hour": {"hours": 1.0, "windows": 1, "window_duration_s": 0.1},
+    "occupancy_markov_scene": {"span_hours": 2.0, "novelty_start_hour": 1.0, "n_iq_windows": 1,
+                               "window_duration_s": 0.02, "revisit_mean_gap_s": 120.0},
     "fm_broadcast_rds": {},
     "adsb_squitter": {"duration_s": 0.1, "messages_per_aircraft": 4},
     "pocsag_pagers": {},
