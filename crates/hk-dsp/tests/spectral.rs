@@ -594,3 +594,63 @@ fn config_validation() {
     let d = StftConfig::for_bin_width(20e6, 1000.0, 4);
     assert_eq!(d.welch.fft_len, 32768);
 }
+
+/// T-139 review: a full frame on unchanged tuning disarms partial frames, so a tune the scheduler
+/// left and then held emits no partial row at a later gap (e.g. a USB overrun); the next retune
+/// arms them again.
+#[test]
+fn partial_frames_disarm_after_a_full_frame_and_rearm_on_retune() {
+    let (fs, n, k) = (1e6, 256, 8);
+    let mut config = history_like(n, k);
+    config.partial = Some(hk_dsp::PartialFrames {
+        min_segments: 2,
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+    });
+    let mut rng = Rng::new(33);
+    let (prov_a, prov_b) = (provenance(100e6, fs), provenance(101e6, fs));
+    let mut inputs = Vec::new();
+    // A: 3 segments at the stream start.
+    inputs.push((
+        header(0, &prov_a, Discontinuity::STREAM_START),
+        synth::complex_noise(&mut rng, 3 * n, 1e-3),
+    ));
+    // B: retuned (armed, A's 3 segments emitted), then held for three full frames + 4 segments.
+    let start_b = (3 * n) as u64;
+    let len_b = 3 * k * n + 4 * n;
+    inputs.push((
+        header(start_b, &prov_b, Discontinuity::RETUNE),
+        synth::complex_noise(&mut rng, len_b, 1e-3),
+    ));
+    // C: an overrun gap on the held tune: B's 4 segments are discarded, not emitted.
+    let start_c = start_b + len_b as u64 + 500;
+    let mut hc = header(start_c, &prov_b, Discontinuity::GAP);
+    hc.dropped_before = 500;
+    inputs.push((hc, synth::complex_noise(&mut rng, 5 * n, 1e-3)));
+    // D: retuned back: armed again, C's 5 segments emitted.
+    let start_d = start_c + (5 * n) as u64;
+    inputs.push((
+        header(start_d, &prov_a, Discontinuity::RETUNE),
+        synth::complex_noise(&mut rng, k * n, 1e-3),
+    ));
+
+    let (frames, st) = run_inputs(config, &inputs);
+    let summary: Vec<(u64, u32)> = frames
+        .iter()
+        .map(|f| (f.t.sample_index, f.spectrum.resolution.n_avg))
+        .collect();
+    let kn = (k * n) as u64;
+    assert_eq!(
+        summary,
+        vec![
+            (0, 3),
+            (start_b, 8),
+            (start_b + kn, 8),
+            (start_b + 2 * kn, 8),
+            (start_c, 5),
+            (start_d, 8),
+        ],
+        "no partial row at the held tune's gap"
+    );
+    assert_eq!(st.partial_frames, 2);
+    assert_eq!(st.segments_discarded, 4, "B's tail at the gap");
+}

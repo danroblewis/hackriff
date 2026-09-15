@@ -27,7 +27,8 @@
 //! it holds at least `K / 10` segments ([`hk_dsp::PartialFrames`]): its resolution's `n_avg` and
 //! `sample_count` are what was actually averaged, so the pyramid's per-cell noise shape and
 //! observed duration stay honest. A stream that never retunes (fixed tuning; gaps and gain steps
-//! only) folds exactly the frames it did before. Rows are one per step at most beyond the full
+//! only) folds exactly the frames it did before, and a full row disarms partial rows until the
+//! next retune, so a tune held after the scheduler left it discards at overrun gaps as before. Rows are one per step at most beyond the full
 //! rows, so the reader's per-block cost is unchanged.
 
 use std::sync::atomic::Ordering;

@@ -20,12 +20,14 @@
 //!
 //! **Partial frames (T-139, opt-in).** With [`StftConfig::partial`] set, a reset emits the
 //! averaging in progress as a frame instead of discarding it, once the stream is *armed* (an
-//! input carried one of [`PartialFrames::arm_on`], e.g. a retune) and at least
+//! input carried one of [`PartialFrames::arm_on`], e.g. a retune, and no full frame has completed
+//! since) and at least
 //! [`PartialFrames::min_segments`] segments were averaged. The frame is the measurement before the
 //! reset: its tuning, time and flags; its [`Resolution::n_avg`](crate::spectrum::Resolution) is
 //! the segments actually averaged and its `sample_count` the samples they span, so reduced
 //! averaging is explicit. A stream that never arms (fixed tuning, gaps and gain changes only)
-//! emits exactly the frames it would without the option.
+//! emits exactly the frames it would without the option, and so does a tune held for a full frame
+//! after a retune (its later gaps discard the partial averaging, as without the option).
 //!
 //! **Compute providers (T-041).** The per-segment rows (window → FFT → `|X|²`) come from a
 //! [`SpectralBackend`]: the CPU reference by default, or a multi-threaded CPU, Accelerate or GPU
@@ -138,8 +140,8 @@ pub struct StftConfig {
 pub struct PartialFrames {
     /// Fewest averaged segments a partial frame needs (values below 1 count as 1).
     pub min_segments: usize,
-    /// Input flags that arm partial frames for the rest of the stream (until
-    /// [`StftProcessor::reset`]).
+    /// Input flags that arm partial frames. A full frame disarms them (the tuning held for a whole
+    /// frame) until the next such input; [`StftProcessor::reset`] disarms too.
     pub arm_on: Discontinuity,
 }
 
@@ -272,7 +274,7 @@ struct Replay {
     persistence: Option<Persistence>,
     stats: StftStats,
     emitted: usize,
-    /// T-139: an input carried one of [`PartialFrames::arm_on`].
+    /// T-139: an input carried one of [`PartialFrames::arm_on`] and no full frame completed since.
     partial_armed: bool,
 }
 
@@ -410,6 +412,9 @@ impl Replay {
         if self.acc.count() as usize == self.config.averages {
             self.emit_frame(emit);
             self.emitted += 1;
+            // T-139: a full frame on unchanged tuning disarms partial frames until the next
+            // arming input, so a held tune's later gaps (USB overruns) discard as before.
+            self.partial_armed = false;
         }
     }
 

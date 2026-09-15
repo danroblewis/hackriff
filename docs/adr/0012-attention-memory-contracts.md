@@ -187,6 +187,7 @@ hk-store `occupancy/` (T-118):
 
 **Decision: emit rows from short steps; visits keep coming from the observation log.** The alternative, occupancy from the §1 log alone, was rejected: the log says when and where the radio looked, not what level it measured, so it cannot decide occupied.
 - Once the stream has retuned or changed rate, the history reader's STFT emits the averaging in progress at each reset, provided it holds at least `K/10` segments (`hk_dsp::PartialFrames`). Shorter pieces are still discarded.
+- A full row on unchanged tuning disarms partial rows until the next retune or rate change, so a tune held after the scheduler left it discards at overrun gaps exactly as a fixed-tune run does.
 - The row is the measurement before the reset: its tuning, gains, time and flags.
 - **Provenance stays honest:**
   - its `Resolution::n_avg` is the segments actually averaged, and its `sample_count` and duration are the samples they span;
@@ -200,7 +201,8 @@ hk-store `occupancy/` (T-118):
   - A partial row's per-cell Gamma shape differs from a full row's.
   - The pipeline's `FloorProduct` therefore sets `mixed_shapes`: such frames fold and are counted (`mixed_shape_frames`) instead of being rejected.
   - Tiles already mark a mixed shape and then give no bias-corrected `floor_db`, so occupancy's local floors fall back to the §2.2 80 % method.
-  - Once a mixed frame has folded, `floor_vs_time` uses each cell's own tile-shape `floor_db`.
+  - `floor_vs_time` decides per tile from the tile's persisted shape record, so the decision survives a restart: uniform tiles use their own shape's bias, mixed tiles give no floor.
+  - Most scheduler tiles mix sweep-hop and dwell shapes, so they lose `floor_db`; the scheduler test counts them. A Gamma-mixture bias model (the mixture's percentile lies between its components') is a follow-up.
 - **Fixed tuning is untouched.** A stream that never retunes emits bit-identical frames, and so bit-identical tiles: gaps and gain steps alone never arm partial rows (`hk-dsp` `partial_frames_never_armed_are_bit_identical`). With no mixed frame the floor product computes exactly as before.
 - *Measured (T-139, `hk-pipeline` `scheduler_history`).* The scene is 2 h, time-compressed, 60 s mean gap, 0.13 s windows, default scheduler plus bandit.
   - Before T-139: 0 history frames.

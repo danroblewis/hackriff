@@ -166,9 +166,10 @@ fn ingest_never_waits_for_a_query_holding_the_floor_product() {
 /// and counted with `mixed_shapes`; the floor then still answers from the cells' own shapes.
 #[test]
 fn mixed_shapes_fold_short_rows_instead_of_rejecting_them() {
-    let full = frames_k(2.0, 8, 0);
+    // Six 1-s level-0 cells per geometry, so a median absorbs a single outlying cell.
+    let full = frames_k(6.0, 8, 0);
     // K = 3: a partial row's geometry, 120 s later (its own 60-s level-0 tile, uniform shape).
-    let short = frames_k(2.0, 3, 120_000_000_000);
+    let short = frames_k(6.0, 3, 120_000_000_000);
     // And the same geometry inside the full rows' tile (30 s in): that tile's shape is mixed.
     let shared = frames_k(2.0, 3, 30_000_000_000);
     let open = |tag: &str, mixed: bool| {
@@ -218,20 +219,55 @@ fn mixed_shapes_fold_short_rows_instead_of_rejecting_them() {
         .filter_map(|s| s.value_db_per_hz)
         .collect()
     };
-    let (v_full, v_short) = (floor(&mixed, 0, 3), floor(&mixed, 120, 123));
+    let (v_full, v_short) = (floor(&mixed, 0, 6), floor(&mixed, 120, 126));
     assert!(
-        !v_full.is_empty() && !v_short.is_empty(),
+        v_full.len() >= 5 && v_short.len() >= 5,
         "each uniform tile has a floor: {v_full:?} {v_short:?}"
     );
-    let values: Vec<f64> = v_full.iter().chain(&v_short).copied().collect();
-    // Both geometries measure the same noise (same seed): bias-corrected floors agree within 2 dB
-    // (0.5 dB histogram step; the Gamma bias model is looser at K = 3, measured 1.6 dB worst cell).
-    let (lo, hi) = values
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |a, v| {
-            (a.0.min(*v), a.1.max(*v))
-        });
-    assert!(hi - lo < 2.0, "floors {values:?}");
+    // Both geometries measure the same noise level: their typical bias-corrected floors agree
+    // within 0.5 dB (the histogram step).
+    let median = |v: &[f64]| {
+        let mut v = v.to_vec();
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let (m_full, m_short) = (median(&v_full), median(&v_short));
+    assert!(
+        (m_full - m_short).abs() < 0.5,
+        "median floors {m_full} vs {m_short}: {v_full:?} {v_short:?}"
+    );
+
+    // The per-tile decision needs no in-memory state: after a restart the uniform tiles keep
+    // their floors and the mixed tile still has none.
+    let (d3, mut restarted) = open("shape-restart", true);
+    let dir3 = d3.0.clone();
+    for (s, f) in full.iter().chain(&shared).chain(&short) {
+        restarted.ingest(s, f).unwrap();
+    }
+    restarted.close().unwrap();
+    let reopened = FloorProduct::open(
+        &dir3,
+        FloorProductConfig {
+            mixed_shapes: true,
+            ..FloorProductConfig::default()
+        },
+        PowerCalibrations::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.stats().mixed_shape_frames,
+        0,
+        "memory-only counter"
+    );
+    assert!(
+        floor(&reopened, 0, 60).is_empty(),
+        "a mixed-shape tile reports no floor after a restart"
+    );
+    let after = floor(&reopened, 120, 126);
+    assert!(
+        !after.is_empty() && (median(&after) - m_short).abs() < 0.01,
+        "a uniform tile keeps its floor after a restart: {after:?} vs {v_short:?}"
+    );
 
     // A tile holding both geometries has no single shape: no bias-corrected floor, never a
     // wrong one.

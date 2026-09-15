@@ -19,8 +19,9 @@
 //!   the first frame's spectral geometry and persisted in `product.txt`; frames of another
 //!   geometry are rejected (use a separate product per STFT configuration), unless
 //!   `FloorProductConfig::mixed_shapes` (T-139: the pipeline's history, whose scheduler short-step
-//!   rows average fewer segments). Those are folded and counted, and the floor then uses each
-//!   cell's own tile-shape `floor_db`, skipping mixed-shape cells.
+//!   rows average fewer segments). Those are folded and counted. The floor decides per tile from
+//!   the tile's persisted shape (so it survives a restart): uniform tiles use their own shape's
+//!   bias, mixed-shape tiles give no floor.
 //!
 //! # Estimator: bias-corrected p10, not the power mean
 //!

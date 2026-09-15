@@ -15,9 +15,11 @@ mod common;
 
 use common::*;
 use hk_core::{MockEnd, Pacing};
+use hk_dsp::radiometry::PowerCalibrations;
 use hk_e2e::{SynthOutput, SynthRequest};
-use hk_model::ScanPolicy;
+use hk_model::{FreqRange, ScanPolicy, TimeRange, Timestamp};
 use hk_pipeline::{Pipeline, PipelineConfig, TrackInventory, open_mock_replay, replay_plan};
+use hk_store::{FloorProduct, FloorProductConfig, RegionQuery, Resolution};
 use serde_json::{Value, json};
 
 const T139: &str = "T-139";
@@ -51,6 +53,69 @@ struct Outcome {
     rows_written: u64,
     intervals_closed: u64,
     alarms: Value,
+    tiles: TileCounts,
+}
+
+/// Level-0 history tiles of a finished run (both pyramids), read back from disk.
+#[derive(Debug, Default)]
+struct TileCounts {
+    tiles: usize,
+    /// Tiles whose frames all had one cell shape.
+    uniform: usize,
+    /// Uniform tiles with an observed cell (finite low percentile).
+    uniform_observed: usize,
+    /// Tiles with at least one bias-corrected `floor_db`.
+    with_floor: usize,
+    /// Mixed-shape tiles with a `floor_db` (must be none).
+    mixed_with_floor: usize,
+}
+
+fn tile_counts(history_dir: &std::path::Path) -> TileCounts {
+    let product = FloorProduct::open(
+        history_dir,
+        FloorProductConfig {
+            mixed_shapes: true,
+            ..FloorProductConfig::default()
+        },
+        PowerCalibrations::new(),
+    )
+    .unwrap();
+    let mut n = TileCounts::default();
+    for pyramid in [product.calibrated_pyramid(), product.uncalibrated_pyramid()] {
+        let g = pyramid.geometry().clone();
+        let l0 = g.levels[0];
+        let mut keys = pyramid.sealed_keys(0);
+        keys.extend(pyramid.open_keys(0));
+        keys.sort_by_key(|k| (k.f_block, k.t_block));
+        keys.dedup();
+        for key in keys {
+            let t0 = key.t_block * l0.t_block_ns();
+            let f0 = key.f_block as f64 * l0.f_block_hz(g.nf);
+            let half = l0.f_cell_hz / 2.0;
+            let h = pyramid
+                .query(&RegionQuery {
+                    freq: FreqRange::new(f0 + half, f0 + l0.f_block_hz(g.nf) - half),
+                    time: TimeRange::new(
+                        Timestamp::from_unix_nanos(t0),
+                        Timestamp::from_unix_nanos(t0 + l0.t_block_ns() - 1),
+                    ),
+                    resolution: Resolution::Level(0),
+                })
+                .unwrap();
+            let uniform = h.provenance.uniform_cell_shape().is_some();
+            let observed = h
+                .cells
+                .iter()
+                .any(|c| c.observed() && c.p_low_db.is_finite());
+            let floor = h.cells.iter().any(|c| c.floor_db.is_finite());
+            n.tiles += 1;
+            n.uniform += usize::from(uniform);
+            n.uniform_observed += usize::from(uniform && observed);
+            n.with_floor += usize::from(floor);
+            n.mixed_with_floor += usize::from(!uniform && floor);
+        }
+    }
+    n
 }
 
 fn run_scene(out: &SynthOutput, scheduler: bool) -> Outcome {
@@ -78,6 +143,7 @@ fn run_scene(out: &SynthOutput, scheduler: bool) -> Outcome {
     cfg.lossless = true;
     cfg.drive_scheduler = scheduler;
     cfg.device_id = replay.device.device_id.clone();
+    let data_dir = cfg.data_dir.clone();
     let handle = Pipeline::start(
         cfg,
         Box::new(replay.source),
@@ -92,20 +158,23 @@ fn run_scene(out: &SynthOutput, scheduler: bool) -> Outcome {
     assert!(summary.errors.is_empty(), "{:?}", summary.errors);
     let stats = occ.stats();
     let alarms = alarms.status_json();
+    let tiles = tile_counts(&data_dir.join("history"));
     let tag = if scheduler { "scheduler" } else { "fixed" };
     eprintln!(
         "[{T139}] {tag}: history reader {}; history {}; scheduler {}; attention {}; occupancy \
-         {stats:?}; alarms {alarms}",
+         {stats:?}; alarms {alarms}; level-0 tiles {tiles:?} (mixed {})",
         summary.counters["readers"]["history"],
         summary.counters["history"],
         summary.counters["scheduler"],
         summary.counters["attention"],
+        tiles.tiles - tiles.uniform,
     );
     Outcome {
         counters: summary.counters,
         rows_written: stats.rows_written,
         intervals_closed: stats.intervals_closed,
         alarms,
+        tiles,
     }
 }
 
@@ -147,6 +216,20 @@ fn scheduler_default_settings_feed_history_occupancy_baselines_and_alarms() {
         n(&r.alarms["inputs_observed"]) > 0,
         "[{T139}] alarm inputs: {}",
         r.alarms
+    );
+    // Mixed-shape tiles are expected (a tile spans sweep hops and dwells of different `n_avg`)
+    // and are counted, not bounded: they give no floor, while occupancy above still has rows.
+    // What must hold is that a bias-corrected floor appears exactly in the uniform-shape tiles
+    // that observed anything, and never in a mixed one.
+    let t = &r.tiles;
+    assert!(t.tiles > 0, "[{T139}] tiles on disk: {t:?}");
+    assert_eq!(
+        t.mixed_with_floor, 0,
+        "[{T139}] no floor from a mixed tile: {t:?}"
+    );
+    assert_eq!(
+        t.with_floor, t.uniform_observed,
+        "[{T139}] every observed uniform tile has a floor: {t:?}"
     );
 }
 

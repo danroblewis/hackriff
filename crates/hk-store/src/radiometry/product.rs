@@ -57,11 +57,17 @@ pub struct FloorProductConfig {
     pub shape_tolerance: f64,
     /// T-139: fold frames of another cell shape (e.g. a scheduler's short-step history rows with
     /// fewer averages) instead of rejecting them (false). Tiles record whether their shape is
-    /// uniform; once such a frame was folded, [`FloorProduct::floor_vs_time`] takes each cell's own
-    /// bias-corrected `floor_db` (tile shape) and skips mixed-shape cells instead of applying the
-    /// product's shape.
+    /// uniform, and [`FloorProduct::floor_vs_time`] decides per tile from that persisted record: a
+    /// uniform tile's cells use their own shape's bias, a mixed-shape tile's cells give no floor.
     pub mixed_shapes: bool,
 }
+
+/// Resolutions whose cell shape is cached before the cache is cleared.
+const SHAPE_CACHE_MAX: usize = 16;
+
+/// A uniform tile's stored `floor_db` and `p_low_db` are each rounded to 0.01 dB, so its own bias
+/// is known to about this much; within it the product shape's exact bias is used.
+const STORED_BIAS_ROUNDING_DB: f64 = 0.015;
 
 impl Default for FloorProductConfig {
     fn default() -> Self {
@@ -198,7 +204,7 @@ pub struct FloorProduct {
     cals: PowerCalibrations,
     runs: RunLog,
     shape: Option<f64>,
-    shape_cache: Option<(ShapeKey, f64)>,
+    shape_cache: HashMap<ShapeKey, f64>,
     factor_key: Option<FactorKey>,
     factor: Vec<f32>,
     lin: Vec<f32>,
@@ -303,7 +309,7 @@ impl FloorProduct {
             cals: calibrations,
             runs,
             shape,
-            shape_cache: None,
+            shape_cache: HashMap::new(),
             factor_key: None,
             factor: Vec::new(),
             lin: Vec::new(),
@@ -360,14 +366,15 @@ impl FloorProduct {
             r.window,
             r.bin_width_hz.to_bits(),
         );
-        let s = match self.shape_cache {
-            Some((k, s)) if k == key => s,
-            _ => {
-                let s = cell_value_shape(r, self.cfg.pyramid.f_cell_hz);
-                self.shape_cache = Some((key, s));
-                s
-            }
-        };
+        // T-139: scheduler rows alternate between a few `n_avg`s; a small map avoids recomputing.
+        if self.shape_cache.len() > SHAPE_CACHE_MAX {
+            self.shape_cache.clear();
+        }
+        let f_cell_hz = self.cfg.pyramid.f_cell_hz;
+        let s = *self
+            .shape_cache
+            .entry(key)
+            .or_insert_with(|| cell_value_shape(r, f_cell_hz));
         match self.shape {
             None => {
                 write_meta(&self.dir, s)?;
@@ -546,31 +553,36 @@ impl FloorProduct {
         cache: &mut HashMap<(bool, u32), f64>,
     ) -> Option<RowStats> {
         let shape = self.shape?;
-        // T-139: with frames of other shapes folded, only a cell's own tile shape is right.
-        let per_cell = self.stats.mixed_shape_frames > 0;
         let (mut corr, mut raw, mut mean, mut bias) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let (mut coverage, mut level, mut rolled_up) = (0f32, u8::MAX, false);
+        // T-139: the decision is per tile, from the tile's own persisted shape, so it survives a
+        // restart. Every frame here resolves a shape from its resolution, so a cell with a finite
+        // `p_low_db` and no `floor_db` sits in a mixed-shape tile: it gives no floor, never a
+        // wrong one. A uniform tile's own bias is `p_low − floor_db`; when that agrees with the
+        // product shape's to the stored 0.01-dB rounding, the product's exact bias is used (so a
+        // single-geometry product computes exactly as before T-139).
         for c in cells
             .iter()
-            .filter(|c| c.observed() && c.p_low_db.is_finite())
-            .filter(|c| !per_cell || c.floor_db.is_finite())
+            .filter(|c| c.observed() && c.p_low_db.is_finite() && c.floor_db.is_finite())
         {
             let exact = c.level == 0;
             rolled_up |= !exact;
-            let b = if per_cell {
-                f64::from(c.p_low_db) - f64::from(c.floor_db)
+            let own = f64::from(c.p_low_db) - f64::from(c.floor_db);
+            let product_bias = *cache
+                .entry((exact, if exact { c.frames } else { 0 }))
+                .or_insert_with(|| {
+                    let p = if exact {
+                        exact_percentile_probability(q, c.frames)
+                    } else {
+                        q / 100.0
+                    };
+                    percentile_bias_db(shape, p)
+                });
+            let b = if (own - product_bias).abs() <= STORED_BIAS_ROUNDING_DB {
+                product_bias
             } else {
-                *cache
-                    .entry((exact, if exact { c.frames } else { 0 }))
-                    .or_insert_with(|| {
-                        let p = if exact {
-                            exact_percentile_probability(q, c.frames)
-                        } else {
-                            q / 100.0
-                        };
-                        percentile_bias_db(shape, p)
-                    })
+                own
             };
             let p_low = f64::from(c.p_low_db);
             corr.push(p_low - b);
