@@ -1461,8 +1461,8 @@ tasks:
   - id: T-087
     milestone: M1
     title: "M1 Blocks B: framing + error control blocks"
-    status: review
-    commit: 0979e48
+    status: done
+    commit: 40ecd1a
     deps: [T-085]
     parallel_group: M1B
     use_cases: [SIGNAL-062]
@@ -1664,7 +1664,8 @@ tasks:
   - id: T-103
     milestone: M0b
     title: "readsb plugin chain loses the first frame(s) under load (plugin process startup races the stream start)"
-    status: in-progress
+    status: done
+    commit: 071fb12
     deps: []
     parallel_group: T103
     use_cases: [SIGNAL-001]
@@ -1677,7 +1678,7 @@ tasks:
   - id: T-104
     milestone: M1
     title: "Blocks A hardening (T-086 review follow-ups)"
-    status: todo
+    status: in-progress
     deps: [T-086, T-087]
     parallel_group: M1A
     use_cases: [SIGNAL-062]
