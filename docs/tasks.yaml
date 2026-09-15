@@ -2776,7 +2776,7 @@ notes:
     milestone: M2
     title: "Fix races/timing assumptions exposed by optimised builds (6 deterministic failures), then enable dev opt-level=2 for hk-dsp/hk-core/hk-pipeline/hk-demod (~4x faster nextest)"
     status: review
-    commit: dfee377
+    commit: c11f05a
     deps: [T-169]
     parallel_group: M2E
     use_cases: []

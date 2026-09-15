@@ -2009,3 +2009,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Finisher's job:** assert exactly the even/odd plan geometries and alternating parity, with no loosening.
   - **ADRs:** ADR-0005 and ADR-0012 §1.3 amended.
   - **T-124 433.375 MHz:** clean views are now guaranteed by construction, but the root cause is unproven until T-124 reruns.
+- **B0.438 T-175 fix round passed (c11f05a, test-only).**
+  - **Tighter t057 guards:** stored learned channels must be centred in the band; no inventory emitter out of band; skips only marginal AND quantisation-limited detections.
+  - **Splice exemption:** now bounded to a gap under 2 frames.
+  - **t057 ×3:** all pass. Run 3 skipped 2 boxes, with 0 learned channels and 0 emitters out of band, so the guards were actually exercised. No product bug found.
+  - **Other tests:** mock_device 2/2; recipe_runtime 8/8; lint clean.
+  - **Next:** merges after the T-157 full check; the post-merge check measures the opt-level speed-up.
