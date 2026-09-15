@@ -14,6 +14,8 @@
 //! | GET, DELETE | `/api/pipelines/{id}` | one pipeline / stop it |
 //! | PUT | `/api/pipelines/{id}/recipe` | hot edit → `{edit_rev, applied_at_sample, plan, swap}` |
 //! | POST | `/api/pipelines/{id}/save` | the running revision as the next version (201) |
+//! | PUT | `/api/pipelines/{id}/channels` | follow-hops channel set → `{channels, added, removed, applied_at_sample}` |
+//! | POST | `/api/pipelines/{id}/channels/refresh` | re-resolve the channel source and apply it (same answer) |
 //!
 //! A validation failure answers `400 invalid` with `errors: [{path, message}]` and `warnings`.
 //! Mutating routes are audited like every other; `POST /api/recipes/validate` saves nothing and
@@ -63,6 +65,15 @@ pub enum RecipeCall {
     },
     /// Save a pipeline's running revision.
     SavePipeline(String),
+    /// Change a follow-hops pipeline's channel set (T-107).
+    SetChannels {
+        /// Pipeline id.
+        id: String,
+        /// Requested channel centres, Hz.
+        channels_hz: Vec<f64>,
+    },
+    /// Re-resolve a follow-hops pipeline's channel source and apply it (T-107).
+    RefreshChannels(String),
     /// Stop a pipeline.
     StopPipeline(String),
 }
@@ -101,6 +112,8 @@ enum Action {
     Edit(String),
     SavePipeline(String),
     Stop(String),
+    Channels(String),
+    RefreshChannels(String),
 }
 
 impl Action {
@@ -118,6 +131,8 @@ impl Action {
             Self::Edit(_) => "pipeline_edit",
             Self::SavePipeline(_) => "pipeline_save",
             Self::Stop(_) => "pipeline_stop",
+            Self::Channels(_) => "pipeline_channels",
+            Self::RefreshChannels(_) => "pipeline_channels_refresh",
         }
     }
 
@@ -212,6 +227,14 @@ fn resolve(method: &str, path: &str) -> Option<Result<Action, Option<&'static st
                 Some(id) => by(&[("POST", Action::SavePipeline(id))], "POST"),
                 None => Some(Err(None)),
             },
+            [id, "channels"] => match segment(id) {
+                Some(id) => by(&[("PUT", Action::Channels(id))], "PUT"),
+                None => Some(Err(None)),
+            },
+            [id, "channels", "refresh"] => match segment(id) {
+                Some(id) => by(&[("POST", Action::RefreshChannels(id))], "POST"),
+                None => Some(Err(None)),
+            },
             _ => Some(Err(None)),
         };
     }
@@ -300,6 +323,17 @@ fn apply(state: &ApiState, action: &Action, body: &Map<String, Value>) -> Result
             no_fields(body)?;
             (RecipeCall::StopPipeline(id.clone()), 200)
         }
+        Action::Channels(id) => (
+            RecipeCall::SetChannels {
+                id: id.clone(),
+                channels_hz: channels_body(body)?,
+            },
+            200,
+        ),
+        Action::RefreshChannels(id) => {
+            no_fields(body)?;
+            (RecipeCall::RefreshChannels(id.clone()), 200)
+        }
         _ => return Err(Fail::new(500, "failed", "not a mutating action")),
     };
     match control(state)?.call(call) {
@@ -323,6 +357,25 @@ fn apply(state: &ApiState, action: &Action, body: &Map<String, Value>) -> Result
         }),
         Err(f) => Err(Fail::new(f.status, f.code, f.message)),
     }
+}
+
+/// `{"channels_hz": [Hz, ...]}`: finite positive numbers, nothing else (`400 invalid`).
+fn channels_body(body: &Map<String, Value>) -> Result<Vec<f64>, Fail> {
+    let invalid = |m: &str| Fail::new(400, "invalid", m);
+    if body.keys().any(|k| k != "channels_hz") {
+        return Err(invalid("the body has only channels_hz"));
+    }
+    let list = body
+        .get("channels_hz")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("channels_hz must be an array of frequencies (Hz)"))?;
+    list.iter()
+        .map(|v| {
+            v.as_f64()
+                .filter(|f| f.is_finite() && *f > 0.0)
+                .ok_or_else(|| invalid("channels_hz must hold positive frequencies (Hz)"))
+        })
+        .collect()
 }
 
 /// What the audit log keeps of a response: ids and revisions, not whole documents.
@@ -377,6 +430,18 @@ mod tests {
             resolve("POST", "/api/pipelines/p1"),
             Some(Err(Some("GET, DELETE")))
         );
+        assert_eq!(
+            resolve("PUT", "/api/pipelines/p1/channels"),
+            Some(Ok(Action::Channels("p1".into())))
+        );
+        assert_eq!(
+            resolve("POST", "/api/pipelines/p1/channels"),
+            Some(Err(Some("PUT")))
+        );
+        assert_eq!(
+            resolve("POST", "/api/pipelines/p1/channels/refresh"),
+            Some(Ok(Action::RefreshChannels("p1".into())))
+        );
         assert_eq!(resolve("GET", "/api/pipelines/a/b/c"), Some(Err(None)));
         assert_eq!(resolve("GET", "/api/recipesx"), None);
         assert_eq!(resolve("GET", "/api/selections"), None);
@@ -392,7 +457,7 @@ mod tests {
                     || p.starts_with("/api/pipelines")
             })
             .collect();
-        assert_eq!(listed.len(), 13);
+        assert_eq!(listed.len(), 15);
         for (method, path) in listed {
             let concrete = path.replace("{id}", "x1").replace("{version}", "3");
             assert!(
