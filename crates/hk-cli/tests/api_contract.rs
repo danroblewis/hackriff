@@ -703,6 +703,86 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     );
     assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
 
+    // User band (T-191): set, read back beside the unchanged measured band, validate, clear.
+    let band = format!("/api/inventory/{id}/band");
+    assert_eq!(row["user_band"], Value::Null, "{row}");
+    let (m_lo, m_hi) = (
+        row["f_lo_hz"].as_f64().unwrap(),
+        row["f_hi_hz"].as_f64().unwrap(),
+    );
+    let (lo, hi) = (m_lo + 5e3, m_hi - 5e3);
+    let (st, v) = put(
+        addr,
+        &band,
+        &format!(r#"{{"f_lo": {lo}, "f_hi": {hi}, "reason": "tighter edges"}}"#),
+    );
+    assert_eq!(st, 200, "{v}");
+    let ub = &v["user_band"];
+    assert_eq!(
+        (ub["f_lo"].as_f64(), ub["f_hi"].as_f64()),
+        (Some(lo), Some(hi)),
+        "{v}"
+    );
+    assert!(ub["set_at"].is_number() && ub["actor"].is_string(), "{v}");
+    assert_eq!(v["entry"]["user_band"], *ub, "{v}");
+    let (st, got) = get(addr, &format!("/api/inventory/{id}"));
+    assert_eq!(st, 200);
+    assert_eq!(got["user_band"]["f_lo"].as_f64(), Some(lo), "{got}");
+    assert_eq!(got["user_band"]["reason"], json!("tighter edges"), "{got}");
+    // The measured band is untouched by the override (the live pipeline may move it on its own,
+    // but never to the user's edges).
+    assert_ne!(got["f_lo_hz"].as_f64(), Some(lo), "{got}");
+    let (st, v) = get(addr, "/api/inventory");
+    assert_eq!(st, 200);
+    assert!(
+        v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == id && e["user_band"]["f_hi"].as_f64() == Some(hi)),
+        "list rows carry user_band: {v}"
+    );
+    for bad in [
+        format!(r#"{{"f_lo": {hi}, "f_hi": {lo}}}"#),
+        format!(r#"{{"f_lo": 0, "f_hi": {hi}}}"#),
+        format!(r#"{{"f_lo": {lo}}}"#),
+        format!(r#"{{"f_lo": "x", "f_hi": {hi}}}"#),
+        format!(r#"{{"f_lo": {}, "f_hi": {}}}"#, m_lo - 30e6, m_hi + 30e6),
+        format!(r#"{{"f_lo": {}, "f_hi": {}}}"#, m_hi + 2e6, m_hi + 3e6),
+        format!(r#"{{"f_lo": {lo}, "f_hi": {hi}, "bogus": 1}}"#),
+    ] {
+        let (st, v) = put(addr, &band, &bad);
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (400, Some("invalid")),
+            "{bad}: {v}"
+        );
+    }
+    let (st, v) = put(
+        addr,
+        &format!(
+            "/api/inventory/{}/band",
+            "0199aaaa-0000-7000-8000-000000000000"
+        ),
+        &format!(r#"{{"f_lo": {lo}, "f_hi": {hi}}}"#),
+    );
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+    let (st, v) = call(
+        addr,
+        "PUT",
+        &band,
+        None,
+        Some(&format!(r#"{{"f_lo": {lo}, "f_hi": {hi}}}"#)),
+    );
+    assert_eq!(st, 401, "{v}");
+    let (st, v) = call(addr, "DELETE", &band, None, None);
+    assert_eq!(st, 401, "{v}");
+    let (st, v) = delete(addr, &band);
+    assert_eq!((st, &v["cleared"]), (200, &json!(true)), "{v}");
+    assert_eq!(v["entry"]["user_band"], Value::Null, "{v}");
+    let (st, v) = delete(addr, &band);
+    assert_eq!((st, &v["cleared"]), (200, &json!(false)), "{v}");
+
     // Delete: leaves the default (candidate/confirmed) list but is still readable with state=deleted.
     let (st, v) = delete(addr, &format!("/api/inventory/{id}"));
     assert_eq!(st, 200, "{v}");
@@ -732,6 +812,12 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
         (st, v["code"].as_str()),
         (404, Some("not_found")),
         "deleting twice: {v}"
+    );
+    let (st, v) = put(addr, &band, &format!(r#"{{"f_lo": {lo}, "f_hi": {hi}}}"#));
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (404, Some("not_found")),
+        "a deleted entry takes no user band: {v}"
     );
 
     stop_server(serving);

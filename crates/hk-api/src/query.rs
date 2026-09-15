@@ -727,6 +727,20 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
 pub const RECENT_APPEARANCES: usize = 8;
 
 /// One `/api/inventory` row (see [`inventory_json`]).
+/// T-191 `user_band` object: edges (Hz), `set_at` (Unix s), actor (token fingerprint) and the
+/// user's reason, withheld (`reason: null`, `reason_withheld: true`) on a withheld-identity row
+/// like any user-authored reason.
+pub(crate) fn user_band_json(b: &hk_model::UserBand, withheld: bool) -> Value {
+    json!({
+        "f_lo": b.f_lo_hz,
+        "f_hi": b.f_hi_hz,
+        "set_at": ts_s(b.set_at),
+        "actor": b.actor,
+        "reason": if withheld { None } else { b.reason.as_deref() },
+        "reason_withheld": withheld && b.reason.is_some(),
+    })
+}
+
 pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result<Value, RepoError> {
     {
         let e = &entry.emitter;
@@ -781,6 +795,8 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
         // T-158: the newest linked detection's peak SNR and absolute peak level, or `null` when
         // the emitter has no linked detection yet (e.g. an identity-only sighting).
         let measurement = repo.emitter_latest_measurement(e.id)?;
+        // T-191: the user-adjusted band, beside (never replacing) the measured f_lo_hz/f_hi_hz.
+        let user_band = repo.user_band(e.id)?.map(|b| user_band_json(&b, withheld));
         let rec = repo.emitter_recurrence(e.id, RECENT_APPEARANCES)?;
         let recurrence = json!({
             "occurrences": rec.occurrences,
@@ -802,6 +818,7 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             "recurrence": recurrence,
             "explanations": explanations,
             "refined": refined,
+            "user_band": user_band,
             "id": e.id.to_string(),
             "f_center_hz": e.f_center_hz,
             "bandwidth_hz": e.bandwidth_hz,

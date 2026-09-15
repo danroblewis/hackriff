@@ -155,6 +155,7 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
                       "recent": [ { "t_start_s": 1789300000.0, "t_end_s": 1789300300.0, "count": 4, "duty_cycle": 1.0 } ] },
       "explanations": [ { "rank": 1, "service": "band-plan", "label": "FM broadcast", "score": 0.92, "flags": [] } ],
       "refined": null,
+      "user_band": null,
       "f_center_hz": 101300000.0, "bandwidth_hz": 150000.0, "f_lo_hz": 101225000.0, "f_hi_hz": 101375000.0,
       "first_seen_s": 1789300800.0, "last_seen_s": 1789300920.0, "count": 42,
       "known_status": "known",
@@ -181,15 +182,19 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
 
 **Lifecycle (T-078).** Every emitter starts `candidate`. An auto rule (e.g. a continuous trust-confirmed track, or a valid decode/identity) or a user promotes it to `confirmed`; a user (or nothing) can delete either. `deleted` is final for that row — it leaves the default list and entity resolution, but its detections, tracks, links and history are kept (visible with `state=deleted`); a later sighting of the same signal creates a *new* candidate. See `docs/07` §2.11.
 
-### `/api/inventory/{id}` — one entry, promote, delete (T-078)
+### `/api/inventory/{id}` — one entry, promote, delete (T-078), user band (T-191)
 
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/inventory/{id}` | – | One entry (same row shape as a list entry above; deleted entries included) |
 | POST | `/api/inventory/{id}/promote` | `{"reason"?}` | `{"changed", "entry"}` — candidate → confirmed; `changed: false` when already confirmed |
 | DELETE | `/api/inventory/{id}` | `{"reason"?}` | `{"deleted": entry}` |
+| PUT | `/api/inventory/{id}/band` | `{"f_lo", "f_hi", "reason"?}` | `{"user_band", "entry"}` — sets (replaces) the user band override |
+| DELETE | `/api/inventory/{id}/band` | `{"reason"?}` | `{"cleared", "entry"}` — clears it; `cleared: false` when there was none |
 
-`{id}` may be the id of an entity that has since been merged into another (the API resolves to the live emitter). `reason` (optional on the mutating routes) is a free-text string of up to `LIFECYCLE_TEXT_MAX` bytes; both actions are audited (`inventory_promote`, `inventory_delete`) with the old/new lifecycle state and the token fingerprint as actor. Errors: `404 not_found` (unknown id, or an entry already deleted), `400 invalid` (unknown body field, bad `reason`), `503 unavailable` (no inventory store or no audit log).
+`{id}` may be the id of an entity that has since been merged into another (the API resolves to the live emitter). `reason` (optional on the mutating routes) is a free-text string of up to `LIFECYCLE_TEXT_MAX` bytes; promote and delete are audited (`inventory_promote`, `inventory_delete`) with the old/new lifecycle state and the token fingerprint as actor. Errors: `404 not_found` (unknown id, or an entry already deleted), `400 invalid` (unknown body field, bad `reason`, a band breaking the rules below), `503 unavailable` (no inventory store or no audit log).
+
+**User band (T-191).** Every row (list and one entry) carries `user_band`: `null`, or `{"f_lo", "f_hi", "set_at", "actor", "reason", "reason_withheld"}` — edges in Hz, `set_at` in Unix s, `actor` the token fingerprint, `reason` the user's note or `null` (withheld, with `reason_withheld: true`, on a withheld-identity row like any user-authored reason). It is a user's adjustment of the band edges (e.g. dragging a confirmed signal's box) stored **beside** the measured band: `f_center_hz`/`bandwidth_hz`/`f_lo_hz`/`f_hi_hz` stay what blind detection measured and are never overwritten. Rules for `PUT`: `f_lo` and `f_hi` finite numbers with `0 < f_lo < f_hi`; width `f_hi − f_lo` ≤ 40 MHz (`hk_model::USER_BAND_MAX_WIDTH_HZ`); and the band must overlap the measured `[f_lo_hz, f_hi_hz]` or lie within 1 MHz of it (`USER_BAND_MAX_GAP_HZ`; both limits inclusive) — an adjusted edge, not a different signal. Set and clear are both audited as `inventory_band` with `old`/`new` = `{"id", "user_band"}` and the token fingerprint as actor. The override survives restart; when two entries merge (same emission, T-082) the survivor keeps an override if either had one, the latest `set_at` winning (a tie keeps the survivor's). The pipeline never uses it for detection, tracking or entity resolution; consumers that tune to an entry (Listen, Decode, recipes' `{emitter_id}` target) still use the measured band today and may prefer `user_band` later.
 
 ### `GET /api/analysis/strongest` — strongest signal in a band (T-079)
 

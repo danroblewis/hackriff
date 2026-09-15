@@ -561,3 +561,88 @@ fn t082_refined_centre_links_an_offset_decode() {
         vec![d]
     );
 }
+
+/// T-191: a user band override survives a same-emission merge. The survivor keeps an override if
+/// either entry had one; when both had one the latest `set_at` wins (a tie keeps the survivor's).
+#[test]
+fn t191_merge_keeps_either_user_band_and_the_latest_set_at_wins() {
+    // `e` (track, first seen) survives; `d` (RDS decode entry of the same emission) is absorbed.
+    let merged = |setup: &dyn Fn(&mut Repository, EmitterId, EmitterId)| {
+        let mut r = repo();
+        let e = r
+            .record_sighting(&track(101.303e6, 200e3, tr(0.0, 5.0), 5), None)
+            .unwrap()
+            .emitter_id;
+        let d = r
+            .record_sighting(&rds(101.3022e6, tr(1.0, 4.0), "C0DE"), None)
+            .unwrap()
+            .emitter_id;
+        setup(&mut r, e, d);
+        let m = r
+            .merge_same_emission(d, e, t(20.0), "same emission", &tol())
+            .unwrap()
+            .expect("merged");
+        assert_eq!((m.from, m.into), (d, e));
+        let band = r.user_band(e).unwrap();
+        assert_eq!(r.user_band(d).unwrap(), band, "the merged id follows");
+        assert_eq!(
+            r.emitter(e).unwrap().bandwidth_hz,
+            200e3,
+            "the measured band is not the override"
+        );
+        band.map(|b| (b.actor, b.emitter_id == e))
+    };
+    let set = |r: &mut Repository, id: EmitterId, actor: &str, at: f64| {
+        r.set_user_band(id, 101.22e6, 101.38e6, actor, None, t(at))
+            .unwrap();
+    };
+    assert_eq!(merged(&|_, _, _| {}), None, "neither had one");
+    assert_eq!(
+        merged(&|r, _, d| set(r, d, "absorbed", 8.0)),
+        Some(("absorbed".into(), true)),
+        "only the absorbed entry had one: the survivor gets it"
+    );
+    assert_eq!(
+        merged(&|r, e, _| set(r, e, "survivor", 8.0)),
+        Some(("survivor".into(), true))
+    );
+    assert_eq!(
+        merged(&|r, e, d| {
+            set(r, e, "survivor", 8.0);
+            set(r, d, "absorbed", 9.0);
+        }),
+        Some(("absorbed".into(), true)),
+        "the absorbed entry's newer override wins"
+    );
+    assert_eq!(
+        merged(&|r, e, d| {
+            set(r, d, "absorbed", 8.0);
+            set(r, e, "survivor", 9.0);
+        }),
+        Some(("survivor".into(), true)),
+        "the survivor's newer override wins"
+    );
+    assert_eq!(
+        merged(&|r, e, d| {
+            set(r, e, "survivor", 8.0);
+            set(r, d, "absorbed", 8.0);
+        }),
+        Some(("survivor".into(), true)),
+        "a tie keeps the survivor's"
+    );
+
+    // The plain merge follows the same rule.
+    let mut r = repo();
+    let a = r
+        .record_sighting(&track(101.3e6, 200e3, tr(0.0, 5.0), 5), None)
+        .unwrap()
+        .emitter_id;
+    let c = r
+        .record_sighting(&track(900e6, 20e3, tr(0.0, 5.0), 5), None)
+        .unwrap()
+        .emitter_id;
+    r.set_user_band(c, 899.99e6, 900.01e6, "tok-c", None, t(3.0))
+        .unwrap();
+    r.merge_emitters(c, a, t(4.0), "test").unwrap();
+    assert_eq!(r.user_band(a).unwrap().unwrap().actor, "tok-c");
+}
