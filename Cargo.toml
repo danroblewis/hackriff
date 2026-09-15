@@ -26,6 +26,20 @@ opt-level = 3
 [profile.dev.package.hk-context]
 opt-level = 3
 
+# T-175: the real-time crates (DSP, ring/source, pipeline, demod) at opt-level 2 in dev/test builds
+# cut full nextest ~4x and run tests at the speed release/Jetson builds do (which exposed races).
+[profile.dev.package.hk-dsp]
+opt-level = 2
+
+[profile.dev.package.hk-core]
+opt-level = 2
+
+[profile.dev.package.hk-pipeline]
+opt-level = 2
+
+[profile.dev.package.hk-demod]
+opt-level = 2
+
 [workspace.dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }

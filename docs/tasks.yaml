@@ -1971,7 +1971,7 @@ tasks:
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
     status: in-progress
-    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
+    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133, T-146, T-147, T-173, T-176]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
     acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s); from T-131 review: pre-mature the baseline (or run >=56 h scene with the channel learned before h24) and assert a busier-than-usual alarm on the injected channel with top explanations; assert new-emitter alarms once fed; assert a gain step yields provenance-explained not an alarm; assert a restart keeps the pinned site"
@@ -1980,6 +1980,8 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+    m2_exit: "M2 closes when T-124 passes all acceptance_m2 tests (a)-(j) with a-priori thresholds and the main full check is green; T-174/T-180/T-181 are post-M2 hardening"
+
   - id: T-125
     milestone: M2
     title: "Mock SDR + e2e harness: replay time-compressed occupancy scenes on their observation schedule with a simulated clock"
@@ -2429,7 +2431,8 @@ notes:
   - id: T-153
     milestone: MUI
     title: "MUI Decode workbench: pipelines list (parallel, hop-following), selected recipe stages, blocks palette, per-stage plots (MPX/subcarrier, eye, timing, constellation, sync search, group/frame counts, channel map), stage parameters with blind-estimate Use suggestions and live quality"
-    status: in-progress
+    status: done
+    commit: c66d538
     deps: [T-149]
     parallel_group: MUI-DECODE
     use_cases: []
@@ -2444,7 +2447,8 @@ notes:
   - id: T-154
     milestone: MUI
     title: "MUI packet inspector rehomed into Decode: frame list -> hex+ASCII -> layer tree with linked selection both ways, served byte-record and TCP address (reuse T-090 inspector logic-free rendering)"
-    status: in-progress
+    status: done
+    commit: e12b895
     deps: [T-149]
     parallel_group: MUI-INSPECT
     use_cases: []
@@ -2459,7 +2463,8 @@ notes:
   - id: T-155
     milestone: MUI
     title: "MUI rehome M2 panels: alarms, survey reports, scheduler/attention status into their proper Explore/review places (not stacked at the bottom)"
-    status: in-progress
+    status: done
+    commit: 35f9190
     deps: [T-149]
     parallel_group: MUI-REVIEW
     use_cases: []
@@ -2474,7 +2479,8 @@ notes:
   - id: T-156
     milestone: MUI
     title: "MUI finish: UI tests for all panels, phone-width (~400px) pass, theme pass, retire the old stacked layout and dead code, demo mergeable"
-    status: todo
+    status: done
+    commit: 52afcd4
     deps: [T-150, T-151, T-152, T-153, T-154, T-155]
     parallel_group: MUI-FINAL
     use_cases: []
@@ -2488,7 +2494,8 @@ notes:
   - id: T-157
     milestone: MUI
     title: "MUI API gap 1: rolling IQ buffer (always-on capture) with status + clip export for the Capture timeline"
-    status: todo
+    status: done
+    commit: a4b5784
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2504,7 +2511,8 @@ notes:
   - id: T-158
     milestone: MUI
     title: "MUI API gap 2: SNR + peak level on /api/inventory rows"
-    status: in-progress
+    status: done
+    commit: f7f841c
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2648,7 +2656,8 @@ notes:
   - id: T-167
     milestone: MUI
     title: "MUI API gap 10: DC notch width in the spectrum stream header"
-    status: todo
+    status: review
+    commit: eb63567
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2679,7 +2688,8 @@ notes:
   - id: T-169
     milestone: M2
     title: "Test speed: dev-profile opt-level=2 for hk-dsp, hk-core, hk-pipeline, hk-demod (existing detect/store/context overrides untouched)"
-    status: in-progress
+    status: done
+    result: "reverted (keep rule): opt-level=2 cut nextest 1496 s -> 368 s (~4x) but each of hk-dsp/hk-core/hk-pipeline/hk-demod deterministically broke tests (6 total); follow-up T-175 fixes the exposed races then enables it"
     deps: [T-145]
     parallel_group: M2E
     use_cases: []
@@ -2708,7 +2718,8 @@ notes:
   - id: T-171
     milestone: MUI
     title: "MUI API gap 13: /api/inventory total count (tab counts and Review badge; UI labels 500+ until served)"
-    status: in-progress
+    status: done
+    commit: f7f841c
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2723,7 +2734,8 @@ notes:
   - id: T-172
     milestone: M2
     title: "DC twin refutation hardening: time-bounded twin search (sort by cell+start, binary-search +-slack), slack from grid t_cell_ns not hardcoded 1 s, twin must be off its own tuning DC (tuning centre from provenance_ref), ADR-0012 §2.6 wording per-detection"
-    status: todo
+    status: done
+    commit: 0e3d429
     deps: [T-147]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2737,7 +2749,8 @@ notes:
   - id: T-173
     milestone: M2
     title: "Scheduler hop placement: guarantee every frequency gets a view away from DC (hop overlap or dithered centres) so a carrier near one LO is not permanently suspect"
-    status: todo
+    status: done
+    commit: d313f56
     deps: [T-147]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2749,15 +2762,118 @@ notes:
     effort: medium
     core_interface: true
   - id: T-174
-    milestone: M2
+    milestone: M2-hardening
     title: "Live candidate path uses the per-tuning DC twin rule (detect.rs:458 still per-detection suspect)"
-    status: todo
+    status: review
+    commit: 9c58f81
     deps: [T-147]
     parallel_group: M2B
     use_cases: [AWARE-042]
     found_by: "T-147 finisher report 2026-09-15"
     acceptance: "candidates from the live path apply the same DC twin refutation as occupancy/learning; test with a carrier near one hop LO seen clean elsewhere becomes a non-suspect candidate"
     area: crates/hk-pipeline/src/detect.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-175
+    milestone: M2
+    title: "Fix races/timing assumptions exposed by optimised builds (6 deterministic failures), then enable dev opt-level=2 for hk-dsp/hk-core/hk-pipeline/hk-demod (~4x faster nextest)"
+    status: done
+    commit: c11f05a
+    deps: [T-169]
+    parallel_group: M2E
+    use_cases: []
+    found_by: "T-169 bisection 2026-09-15: recipe_runtime hot_edits (hk-dsp), mock_device t057 scheduled replay (hk-core), follow_hops blind hop set (hk-demod), api_contract follow_hops shapes + recipe_runtime mock channel + follow_hops channel net (hk-pipeline)"
+    acceptance: "each failure root-caused (product race fixed or test sleep replaced by bounded condition wait, same assertion); tests pass with and without opt-level overrides; overrides enabled; full nextest wall recorded (target ~370 s vs ~1500 s at 6 threads) all green except documented load flakes; acceptance green; lint clean"
+    area: Cargo.toml, crates/hk-pipeline (recipe_runtime, follow_hops), crates/hk-core (mock/scheduler), crates/hk-dsp, crates/hk-demod
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-176
+    milestone: M2
+    title: "False level-above-baseline alarm after a gain step: empty occupied level pool under the new gain key falls back to the idle pool in evaluate"
+    status: done
+    commit: 31ac67c
+    deps: [T-146]
+    parallel_group: M2A
+    use_cases: [AWARE-042, AWARE-044]
+    found_by: "T-124 resume 2026-09-15 (suspected; T-124 confirming from diagnostics): unexplained level-above-baseline alarm at 433.375 MHz h45.75 after the VGA step"
+    acceptance: "root cause confirmed with file:line; a new gain key with no occupied level history scores no level z (immature for level) instead of falling back to the idle pool; unit test reproducing the post-gain-step false alarm fails before/passes after; T-124 (h) gain step raises no alarm"
+    area: crates/hk-context/src/occupancy/{baseline,novelty}.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-177
+    milestone: MUI
+    title: "MUI browser smoke: headless playwright against hk serve --device mock at desktop and ~400px widths (both modes, dock, timeline, review drawer), screenshots + console-error check"
+    status: done
+    commit: b084530
+    deps: [T-156]
+    parallel_group: MUI-FINAL
+    use_cases: []
+    found_by: "coordinator 2026-09-15: no MUI panel was verified in a real browser (agents ran unit tests/build only); playwright-core is already used for T-022a manual smokes"
+    acceptance: "scripted smoke (not added to CI) loads / against hk serve --device mock, switches Explore/Decode, opens Review drawer, checks no console errors, no page-level horizontal overflow at 400px and 1440px, waterfall canvas receives frames; screenshots saved to scratchpad and summarised; any bugs filed"
+    area: ui/ (script under ui/scripts or spikes/), no product change unless a bug is found
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-178
+    milestone: MUI
+    title: "IQ capture buffer as a PRE-ALLOCATED on-disk ring that survives restarts: allocate the full effective quota up front (fixed ring file or fixed set of fixed-size chunk files), overwrite oldest in place (no grow-and-delete), crash recovery re-reads ring + index on start; retention configurable via --iq-retention / --iq-buffer-max"
+    status: in-progress
+    deps: [T-157]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "user decisions 2026-09-15: retention survives restarts; configurable time-based window with optional size cap; pre-allocated ring for bounded known disk use and even flash wear; staging/demo runs 1h"
+    acceptance: "flags unchanged from T-157 (hk serve --iq-retention <DURATION> default 2m, 0/off disables, env HK_IQ_RETENTION; --iq-buffer-max <SIZE> optional cap, env HK_IQ_BUFFER_MAX; effective quota = min(retention x max sample rate x 2 B, max)); full quota allocated at start (refuse or shrink with a logged warning and status flag if free space below quota + floor); writes overwrite oldest slots in place, file count and size constant during operation; segment index persisted (append log or header table) and rebuilt/validated on start; restart test on the same data dir exports a clip from before the restart; crash test (torn write / stale index) recovers a consistent index; quota change between runs re-allocates safely; GET /api/iqbuffer reports allocated_bytes, retention_s, wrap position; docs/api.md + ADR-0013 timeline note + ADR for the ring format"
+    area: crates/hk-store/src/iqbuffer.rs, crates/hk-pipeline/src/iqbuffer.rs, crates/hk-cli (serve flags), docs/api.md, docs/adr
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-179
+    milestone: MUI
+    title: "MUI JS bundle over ADR-0013 gzip budget (48.2 KB vs 45 KB): trim or code-split rarely used panels (Decode plots/params, Review tabs), or re-baseline the budget with justification"
+    status: done
+    commit: 8d38d3b
+    deps: [T-156]
+    parallel_group: MUI-FINAL
+    use_cases: []
+    found_by: "T-156 2026-09-15: dist/app.js 140.2 KB min / 48.2 KB gzip after all panels landed"
+    acceptance: "app.js <= 45 KB gzip (lazy-load or trim) or ADR-0013 budget amended with a measured rationale; T-177 smoke script still passes; UI tests green"
+    area: ui/
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-180
+    milestone: M2-hardening
+    title: "Mock SDR device noise floor at low gain: re-rendered windows served far below the recording gain become quantisation-limited (85% zero codes) and produce whole-window marginal detections; model the receiver's own analog noise floor per gain state so low-gain windows look like a real HackRF"
+    status: in-progress
+    deps: [T-175]
+    parallel_group: M2E
+    use_cases: []
+    found_by: "T-175 finisher 2026-09-15: t057 window at 99.33 MHz served at LNA 24/VGA 20 (29 dB below the recording's l32g30a1), IQ 85% zero codes, quantisation_limited provenance, frame-to-frame 2-3 dB spread fires marginal detections"
+    acceptance: "mock adds a gain-dependent device noise floor (documented model, e.g. HackRF NF vs LNA/VGA) before int8 quantisation when rendering below the recording gain; low-gain windows no longer quantisation-limited at realistic settings; t057 quantisation-limited skip can be removed or shown unused; T-141/T-170 fidelity tests and scheduler_history floor check unchanged"
+    area: crates/hk-core/src/source/mock
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-181
+    milestone: M2-hardening
+    title: "Sweep DC dither follow-ups: single-hop plans on a live radio now retune 75 kHz every step (dither single-hop plans only every Nth pass or disclose), pick SweepRecord geometry by pass parity not tuning match, per-hop DcDitherDisabled warning, off-DC test samples LO +-37.5 kHz (or 80 kHz dither), ADR-0005 wording on half-visit edge cells"
+    status: todo
+    deps: [T-173]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-173 review 2026-09-15 (MERGE) findings 1-5 (core.rs:1419 + apply.rs:84; observe.rs:296; plan.rs:503; scheduler.rs test; ADR-0005)"
+    acceptance: "single-hop live plans do not retune every step (documented cadence, test on StepApplier retune count); SweepRecords not split mid-pass when hop 0 has dither 0; warning emitted for dither-disabled hops; coverage test samples worst-case offsets; ADR-0005 states edge-cell visit halving"
+    area: crates/hk-core/src/scheduler, crates/hk-pipeline/src/observe.rs, docs/adr/0005
     needs: none
     model: opus
     effort: medium

@@ -168,6 +168,41 @@ impl WindowRetuner for PipelineRetuner {
     }
 }
 
+/// The rolling IQ capture buffer (T-157) over the pipeline's service.
+pub struct PipelineIqBuffer(pub Arc<hk_pipeline::iqbuffer::IqBufferService>);
+
+impl hk_api::IqBufferControl for PipelineIqBuffer {
+    fn status(&self, q: &hk_api::IqBufferQuery) -> Value {
+        serde_json::to_value(self.0.status(q.t0, q.t1, q.limit)).unwrap_or_default()
+    }
+
+    fn clip(&self, r: &hk_api::ClipStart) -> Result<Value, hk_api::IqBufferFailure> {
+        use hk_pipeline::iqbuffer::{ClipFailure, ClipRequest};
+        self.0
+            .export_clip(&ClipRequest {
+                range: r.range,
+                band: r.band,
+                label: r.label.clone(),
+            })
+            .map(|c| serde_json::to_value(c).unwrap_or_default())
+            .map_err(|e| {
+                let (status, code) = match &e {
+                    ClipFailure::Unavailable(_) => (503, "unavailable"),
+                    ClipFailure::Invalid(_) | ClipFailure::TooLarge(_) => (400, "invalid"),
+                    ClipFailure::NotFound(_) => (404, "not_found"),
+                    ClipFailure::Conflict(_) => (409, "conflict"),
+                    ClipFailure::NoSpace(_) => (507, "insufficient_storage"),
+                    ClipFailure::Failed(_) => (500, "failed"),
+                };
+                hk_api::IqBufferFailure {
+                    status,
+                    code: code.into(),
+                    message: e.to_string(),
+                }
+            })
+    }
+}
+
 /// Output recordings (T-061) over the pipeline's recorders.
 pub struct PipelineOutputs(pub Arc<OutputRecorders>);
 

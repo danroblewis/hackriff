@@ -1538,62 +1538,11 @@ impl Repository {
     pub fn query_inventory(&self, q: &InventoryQuery) -> Result<InventoryPage, RepoError> {
         let limit = q.limit.clamp(1, MAX_INVENTORY_PAGE);
         let tx = self.read_tx()?;
-        let mut sql = String::from("SELECT emitter_id FROM emitter WHERE merged_into IS NULL");
-        let mut p: Vec<SqlValue> = Vec::new();
-        if let Some(f) = q.freq {
-            let b = region_bounds(&tx, "emitter", &Region::new(f, ANY_TIME))?;
-            sql.push_str(" AND f_lo BETWEEN ? AND ? AND f_hi >= ?");
-            p.extend([b.f_lo_min, b.hi, b.lo].map(SqlValue::Real));
-        }
-        if let Some(t) = q.time {
-            sql.push_str(" AND last_seen >= ? AND first_seen <= ?");
-            p.push(SqlValue::Integer(t.start.as_unix_nanos()));
-            p.push(SqlValue::Integer(t.end.as_unix_nanos()));
-        }
-        if q.states.is_empty() {
-            sql.push_str(" AND lifecycle_state != 'deleted'");
-        } else {
-            sql.push_str(" AND lifecycle_state IN (");
-            for (i, s) in q.states.iter().enumerate() {
-                sql.push_str(if i == 0 { "?" } else { ", ?" });
-                p.push(SqlValue::Text(enum_text(s)?));
-            }
-            sql.push(')');
-        }
-        if !q.status.is_empty() {
-            sql.push_str(
-                " AND (SELECT s.status FROM emitter_status s WHERE s.emitter_id = \
-                 emitter.emitter_id ORDER BY s.status_id DESC LIMIT 1) IN (",
-            );
-            for (i, s) in q.status.iter().enumerate() {
-                sql.push_str(if i == 0 { "?" } else { ", ?" });
-                p.push(SqlValue::Text(enum_text(s)?));
-            }
-            sql.push(')');
-        }
-        if let Some(tag) = &q.tag {
-            sql.push_str(
-                " AND EXISTS (SELECT 1 FROM emitter_tag g WHERE g.emitter_id = \
-                 emitter.emitter_id AND g.tag = ?)",
-            );
-            p.push(SqlValue::Text(tag.clone()));
-        }
-        if let Some(scheme) = &q.identity_scheme {
-            sql.push_str(" AND identity_scheme = ?");
-            p.push(SqlValue::Text(scheme.as_string()));
-        }
-        if let Some(family) = &q.family {
-            sql.push_str(
-                " AND coalesce((SELECT c.family FROM emitter_classification c WHERE \
-                 c.emitter_id = emitter.emitter_id ORDER BY c.classification_id DESC LIMIT 1), \
-                 json_extract(fingerprint, '$.family')) = ?",
-            );
-            p.push(SqlValue::Text(family.clone()));
-        }
+        let (where_sql, mut p, tag_needs_gate) = inventory_where(&tx, q)?;
+        let mut sql = format!("SELECT emitter_id FROM emitter{where_sql}");
         sql.push_str(" ORDER BY last_seen DESC, emitter_id");
         // T-036/T-038: a tag outside the vocabulary never matches a row whose identity is
         // withheld (such tags are hidden there), so such a filter is paged after gating.
-        let tag_needs_gate = q.tag.as_deref().is_some_and(|t| !tag_in_vocabulary(t));
         if !tag_needs_gate {
             sql.push_str(" LIMIT ? OFFSET ?");
             p.push(SqlValue::Integer(i64::from(limit) + 1));
@@ -1632,4 +1581,114 @@ impl Repository {
             next_offset: more.then_some(q.offset + u64::from(limit)),
         })
     }
+
+    /// T-171: the number of live emitters `q` matches, ignoring `limit`/`offset` (so a caller can
+    /// show a count past one page). Most filters run as a single indexed `COUNT(*)` — the same
+    /// predicates and `f_lo`/`f_hi`/`last_seen` indexes as [`Self::query_inventory`].
+    ///
+    /// A `tag` filter naming a label outside [`crate::TAG_VOCABULARY`] is the one filter that
+    /// needs per-row identity gating (T-036/T-038: such a tag is hidden, and so never matches, on
+    /// a row whose identity is withheld) — SQL alone cannot tell a withheld row from a matching
+    /// one. That path scans candidate rows and gates each one, capped at
+    /// [`MAX_INVENTORY_COUNT_SCAN`] rows so a broad non-vocabulary-tag filter over a large
+    /// inventory cannot make this call expensive; `total` is then the matches found within that
+    /// scan (a lower bound past the cap). The cap is rarely hit: the filter is a rare, exact,
+    /// single-tag match.
+    pub fn count_inventory(&self, q: &InventoryQuery) -> Result<u64, RepoError> {
+        let tx = self.read_tx()?;
+        let (where_sql, p, tag_needs_gate) = inventory_where(&tx, q)?;
+        if !tag_needs_gate {
+            let sql = format!("SELECT COUNT(*) FROM emitter{where_sql}");
+            let n: i64 = tx.query_row(&sql, params_from_iter(p), |r| r.get(0))?;
+            return Ok(n.max(0) as u64);
+        }
+        let sql = format!("SELECT emitter_id FROM emitter{where_sql} LIMIT ?");
+        let mut p = p;
+        p.push(SqlValue::Integer(
+            i64::try_from(MAX_INVENTORY_COUNT_SCAN).unwrap_or(i64::MAX),
+        ));
+        let ids: Vec<[u8; 16]> = {
+            let mut stmt = tx.prepare(&sql)?;
+            stmt.query_map(params_from_iter(p), |r| r.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        let mut n: u64 = 0;
+        for raw in ids {
+            let emitter = self.emitter_ungated(eid(raw))?;
+            let entry = gate_entry(&tx, emitter, q.access)?;
+            if !matches!(entry.identity, InventoryIdentity::Withheld { .. }) {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// Largest number of candidate rows [`Repository::count_inventory`] scans and gates one at a time
+/// for a `tag` filter outside [`crate::TAG_VOCABULARY`] (the one filter a plain `COUNT(*)` cannot
+/// answer). See [`Repository::count_inventory`].
+pub const MAX_INVENTORY_COUNT_SCAN: u64 = 5_000;
+
+/// The `WHERE` clause (leading space, starting `WHERE merged_into IS NULL`) and bound parameters
+/// for `q`'s filters over the `emitter` table, shared by [`Repository::query_inventory`] and
+/// [`Repository::count_inventory`]; also reports whether the `tag` filter needs post-gating
+/// (T-036/T-038: a tag outside the vocabulary never matches a withheld row).
+fn inventory_where(
+    tx: &Connection,
+    q: &InventoryQuery,
+) -> Result<(String, Vec<SqlValue>, bool), RepoError> {
+    let mut sql = String::from(" WHERE merged_into IS NULL");
+    let mut p: Vec<SqlValue> = Vec::new();
+    if let Some(f) = q.freq {
+        let b = region_bounds(tx, "emitter", &Region::new(f, ANY_TIME))?;
+        sql.push_str(" AND f_lo BETWEEN ? AND ? AND f_hi >= ?");
+        p.extend([b.f_lo_min, b.hi, b.lo].map(SqlValue::Real));
+    }
+    if let Some(t) = q.time {
+        sql.push_str(" AND last_seen >= ? AND first_seen <= ?");
+        p.push(SqlValue::Integer(t.start.as_unix_nanos()));
+        p.push(SqlValue::Integer(t.end.as_unix_nanos()));
+    }
+    if q.states.is_empty() {
+        sql.push_str(" AND lifecycle_state != 'deleted'");
+    } else {
+        sql.push_str(" AND lifecycle_state IN (");
+        for (i, s) in q.states.iter().enumerate() {
+            sql.push_str(if i == 0 { "?" } else { ", ?" });
+            p.push(SqlValue::Text(enum_text(s)?));
+        }
+        sql.push(')');
+    }
+    if !q.status.is_empty() {
+        sql.push_str(
+            " AND (SELECT s.status FROM emitter_status s WHERE s.emitter_id = \
+             emitter.emitter_id ORDER BY s.status_id DESC LIMIT 1) IN (",
+        );
+        for (i, s) in q.status.iter().enumerate() {
+            sql.push_str(if i == 0 { "?" } else { ", ?" });
+            p.push(SqlValue::Text(enum_text(s)?));
+        }
+        sql.push(')');
+    }
+    if let Some(tag) = &q.tag {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM emitter_tag g WHERE g.emitter_id = \
+             emitter.emitter_id AND g.tag = ?)",
+        );
+        p.push(SqlValue::Text(tag.clone()));
+    }
+    if let Some(scheme) = &q.identity_scheme {
+        sql.push_str(" AND identity_scheme = ?");
+        p.push(SqlValue::Text(scheme.as_string()));
+    }
+    if let Some(family) = &q.family {
+        sql.push_str(
+            " AND coalesce((SELECT c.family FROM emitter_classification c WHERE \
+             c.emitter_id = emitter.emitter_id ORDER BY c.classification_id DESC LIMIT 1), \
+             json_extract(fingerprint, '$.family')) = ?",
+        );
+        p.push(SqlValue::Text(family.clone()));
+    }
+    let tag_needs_gate = q.tag.as_deref().is_some_and(|t| !tag_in_vocabulary(t));
+    Ok((sql, p, tag_needs_gate))
 }

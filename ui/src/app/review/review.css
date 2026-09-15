@@ -1,1 +1,54 @@
-/* review area styles (ADR-0013 §5, §8). Owner: see §8. Scope every rule under the area's slot class; never change shared tokens or the grid. */
+/* review area styles (ADR-0013 §5, §8). Owner: T-155. Scoped under .review (the drawer's own slot
+   class, `.review` in base.css owns the fixed positioning/width/breakpoints); never changes shared
+   tokens or the grid. */
+
+.review .rv-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+
+.review .rv-tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 10px; }
+.review .rv-tab { border: 1px solid transparent; background: transparent; border-radius: 5px; padding: 4px 9px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.review .rv-tab:hover { color: var(--text); }
+.review .rv-tab[aria-selected="true"] { background: var(--raise); color: var(--text); border-color: var(--line); }
+
+.review .rv-body { min-width: 0; }
+.review .rv-tabpanel { min-width: 0; }
+.review .rv-panel { display: flex; flex-direction: column; gap: 10px; }
+
+.review .rv-form { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: end; }
+.review .rv-form label { display: flex; flex-direction: column; gap: 3px; font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; }
+.review .rv-form input, .review .rv-form select { background: var(--ground); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; font-size: 12.5px; color: var(--text); min-width: 0; }
+.review .rv-form input { width: 128px; }
+
+.review .rv-info { min-height: 1.4em; }
+.review .rv-section-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; margin-top: 6px; display: flex; gap: 8px; align-items: baseline; }
+.review .rv-section-h em { font-style: normal; text-transform: none; color: var(--dim); font-weight: 400; }
+
+.review .rv-list { display: flex; flex-direction: column; gap: 8px; }
+.review .rv-row { border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; background: var(--panel-2); display: flex; flex-direction: column; gap: 5px; }
+.review .rv-row[data-status="open"] { border-color: var(--coral); }
+.review .rv-row-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.review .rv-row-expl { color: var(--muted); font-size: 12px; }
+.review .rv-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.review .rv-status { font-size: 12.5px; }
+.review .rv-fieldset { border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.review .rv-fieldset legend { padding: 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.review .rv-fieldset:disabled, .review fieldset.rv-fieldset:disabled { opacity: 0.55; }
+.review .rv-toggle { display: flex; align-items: center; gap: 6px; }
+.review .rv-gains { display: flex; flex-direction: column; gap: 8px; }
+.review .rv-gain { display: flex; flex-direction: column; gap: 3px; }
+.review .rv-gain input[type="range"] { width: 100%; }
+
+.review .rv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.review .rv-table th, .review .rv-table td { padding: 3px 6px; border-bottom: 1px solid var(--line-soft); text-align: left; white-space: nowrap; }
+.review .rv-table td.num, .review .rv-table th.num { text-align: right; font-family: var(--mono); }
+.review .rv-table { display: block; overflow-x: auto; }
+
+.review .rv-heat, .review .rv-floor { width: 100%; height: 140px; display: block; background: var(--ground); border-radius: 6px; }
+.review .rv-coverage p { margin: 4px 0; font-size: 12px; }
+.review .rv-warnings { margin: 4px 0 0; padding-left: 18px; font-size: 12px; color: var(--coral); }
+
+.review .rv-exports { display: flex; gap: 8px; }
+
+@media (max-width: 900px) {
+  .review .rv-form input { width: 104px; }
+}

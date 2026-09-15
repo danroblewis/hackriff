@@ -10,9 +10,11 @@
 //! - [`radiometry`]: the calibrated noise-floor product (T-021, SPACE-050): calibrated frames
 //!   folded into tiles and a floor-vs-time query with uncertainty and flags.
 //! - [`outputs`]: output files (T-061): WAV writer, SigMF-style JSON sidecars, output disk usage.
+//! - [`iqbuffer`]: the rolling raw-IQ capture buffer behind the Capture timeline (T-157).
 
 pub mod decoded;
 pub mod history;
+pub mod iqbuffer; // T-157
 pub mod outputs;
 pub mod radiometry;
 

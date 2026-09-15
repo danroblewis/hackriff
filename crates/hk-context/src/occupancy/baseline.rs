@@ -46,10 +46,12 @@
 //! - **Level classes.** A fold with occupied weight is an *occupied* fold (level = occupied level
 //!   above the floor), otherwise *idle*; their levels pool apart ([`LevelClass`]), so a low-FCO
 //!   channel's pool is not bimodal. The adapter gives an occupied level only with at least
-//!   [`LEVEL_MIN_OCCUPIED`] occupied visits (fewer: occupancy only). An occupied fold with no
-//!   occupied level pool yet is compared with the idle pool (an emitter appearing on a quiet
-//!   channel is level novelty), but that cross-class level z does not keep it out of the
-//!   reference: learning then judges occupancy only.
+//!   [`LEVEL_MIN_OCCUPIED`] occupied visits (fewer: occupancy only). An occupied fold on a subject
+//!   with no occupied level history at all is compared with the idle pool (an emitter appearing
+//!   on a quiet channel is level novelty), but that cross-class level z does not keep it out of
+//!   the reference: learning then judges occupancy only. With occupied level history elsewhere
+//!   (another gain key, other hours) an empty occupied pool is immature for level scoring, never
+//!   substituted by the idle pool (T-176).
 //! - **Gain states.** Levels are pooled per front-end gain-state key (the caller's key, e.g.
 //!   `hk_store::history::GainState::key`): a gain change starts a separate, immature level pool.
 //! - **Sequential learning test.** Every mature, clean fold feeds CUSUMs of its winsorised
@@ -980,12 +982,17 @@ impl BaselineEngine {
         let r = res_index(resolution);
         let (level, occ) = pool_at(sub, slot, gain, BaselineCopy::Reference, r);
         let ev = obs.evidence();
-        // An occupied fold without an occupied level pool yet: compare with the idle pool.
-        let fallback = (level.n < 2.0 && obs.level_class() == LevelClass::Occupied)
-            .then(|| gain_index(sub, obs.gain, LevelClass::Idle))
-            .flatten()
-            .map(|ig| pool_at(sub, slot, Some(ig), BaselineCopy::Reference, r).0)
-            .filter(|p| p.n >= 2.0);
+        // An occupied fold on a subject with no occupied level history at all (an emitter
+        // appearing on a quiet channel): compare with the idle pool. With occupied level history
+        // under another gain key or in other hours, the occupied pool here is immature for level
+        // scoring: never substitute the idle class (T-176, a busy channel after a gain step).
+        let fallback = (level.n < 2.0
+            && obs.level_class() == LevelClass::Occupied
+            && !has_level_history(sub, LevelClass::Occupied))
+        .then(|| gain_index(sub, obs.gain, LevelClass::Idle))
+        .flatten()
+        .map(|ig| pool_at(sub, slot, Some(ig), BaselineCopy::Reference, r).0)
+        .filter(|p| p.n >= 2.0);
         let lz = level_z(fallback.as_ref().unwrap_or(&level), &ev, cfg);
         let oz = occupancy_z(&occ, &ev);
         let combined = |lz| {
@@ -1333,6 +1340,17 @@ fn auto_refreezes(policy: &AdaptationPolicy, sub: &SubjectBaseline, t: Timestamp
         (policy.auto_refreeze_days, sub.change_point),
         (Some(days), Some(cp)) if secs(cp.t, t) >= days * 86_400.0
     )
+}
+
+/// `sub` holds reference level history (≥ 2 level visits) of `class` under any gain key and slot.
+fn has_level_history(sub: &SubjectBaseline, class: LevelClass) -> bool {
+    sub.gains
+        .iter()
+        .filter(|g| g.class == class)
+        .flat_map(|g| g.reference.packed())
+        .map(|(_, p)| p.n())
+        .sum::<f64>()
+        >= 2.0
 }
 
 fn gain_index(sub: &SubjectBaseline, gain: u32, class: LevelClass) -> Option<usize> {
@@ -2599,6 +2617,58 @@ mod tests {
         );
         let occ = occupied_series(&sub, 0xBEEF);
         assert_ne!(occ, occupied_series(&sub, 0x1234), "separate level pools");
+    }
+
+    /// T-176: a busy channel (occupied and idle level history under gain key A) steps to gain key
+    /// B. Idle folds build B's idle pool first; B's first occupied folds at the same RF level must
+    /// not be scored against that idle pool (a false `level-above-baseline`): the occupied class
+    /// under B is immature for level scoring.
+    #[test]
+    fn baseline_gain_step_on_a_busy_channel_is_level_immature_not_cross_class_novelty() {
+        let mut rng = Rng(0x1760);
+        let mut e = engine();
+        let (mut max_lz_before, mut max_lz_after) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let mut occupied_after = 0;
+        for q in 0..(24 * 4 * 4) {
+            let hours = f64::from(q) / 4.0;
+            let after = hours >= 72.0;
+            let gain = if after { 0xBEEF } else { 0x1234 };
+            // One occupied interval an hour (FCO 0.5, +20 dB) after three idle ones (+2 dB).
+            let fco = if q % 4 == 3 { 0.5 } else { 0.0 };
+            let row = leveled_row(
+                hours,
+                fco,
+                -100.0,
+                2.0 + 0.3 * rng.normal(),
+                20.0 + 0.3 * rng.normal(),
+            );
+            let (_, _, o) = from_occupancy_stat(&row, gain).unwrap();
+            let out = e.observe(&o);
+            if o.level_class() != LevelClass::Occupied || o.level_db.is_none() {
+                continue;
+            }
+            let lz = out.novelty.level_z.unwrap_or(f64::NEG_INFINITY);
+            if (48.0..72.0).contains(&hours) {
+                max_lz_before = max_lz_before.max(lz);
+            } else if (72.0..84.0).contains(&hours) {
+                occupied_after += 1;
+                max_lz_after = max_lz_after.max(lz);
+            }
+        }
+        println!(
+            "T-176 gain step on a busy channel: occupied-fold max level z before {max_lz_before:.2}, \
+             after the step {max_lz_after:.2} over {occupied_after} occupied folds"
+        );
+        assert!(
+            max_lz_before < 3.0,
+            "control: mature, unchanged under key A"
+        );
+        assert!(occupied_after >= 12);
+        assert!(
+            max_lz_after < 3.0,
+            "an occupied fold under a new gain key is not level novelty against the idle pool: \
+             {max_lz_after}"
+        );
     }
 
     /// T-132 item 6: on a quiet channel one occupied visit in an interval is occupancy evidence,

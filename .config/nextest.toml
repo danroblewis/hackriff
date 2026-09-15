@@ -109,3 +109,9 @@ retries = 1
 filter = 'package(hk-pipeline) and binary(scheduler_bandit_e2e)'
 test-group = 'heavy-serial'
 retries = 1
+
+# T-172: the DC twin lookup scaling test asserts a best-of-N wall-clock ratio (18 h vs 72 h < 8, measured
+# 4.6). Wall-clock ratios can skew under parallel load, so serialize it rather than loosen the bound.
+[[profile.default.overrides]]
+filter = 'test(dc_twin_lookup_scales_n_log_n_over_days)'
+test-group = 'heavy-serial'

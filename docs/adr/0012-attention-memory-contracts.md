@@ -64,7 +64,7 @@ All contract time comes from the **device/sample clock** (the `Timestamp` carrie
 ### 1.3 Sweep records
 
 Discovery hops run at ~20 steps/s (`sweep_step_ns` 50 ms), so per-hop rows would be ~1.7 M/day. Instead:
-- **`SweepGeometry`** (id = hash of the canonical hop windows, `plan_version`, `hops: Vec<ObservedWindow>`) is written once per geometry change.
+- **`SweepGeometry`** (id = hash of the canonical hop windows, `plan_version`, `hops: Vec<ObservedWindow>`) is written once per geometry change. A DC-dithered plan (T-173, ADR-0005) has two, one per pass parity. Each is written once, before the first record that uses it, and each pass's record references its parity's geometry. `HopVisit::hop` stays the plan's hop index.
 - **`SweepRecord`** covers at most one pass or 60 s, whichever ends first. It holds `geometry`, `span`, and `visits: Vec<HopVisit { hop, start_ms, observed_ms }>` in time order, plus `preempted_hops`, `dropped_samples` and `overload_hops`.
 
 At 400 hops per pass that is ~12 B per visit before compression, about 7 MB/day worst case.
@@ -147,7 +147,12 @@ The bandit dwells where activity is, so counting its visits overstates FCO (C12 
 
 ### 2.6 Suspect and IMD detections
 
-A threshold crossing coincides with a suspect detection (flagged `clipped`, `suspect_imd`, `spur_candidate`, confirmed image, or `compressed`) when it lies in the visit window ± one time cell and inside the detection's extent widened by one level-0 cell. A revisit is **suspect** when it lies under `overload`, or when every above-threshold cell coincides with a suspect detection. One clean crossing makes the visit occupied and not suspect (T-129). **A DC spur flag is per tuning (T-147):** a detection flagged only as a DC spur (`spur_reason = dc`, no other suspect flag) is not suspect when a clean detection of the same emission (centres within half a level-0 cell plus half the narrower OBW) lies within one time cell, since that detection came from a tuning whose DC is elsewhere. A frequency stays a DC spur for masking and learning only while all its occupied observations sit at their own tuning's centre; a real DC spur moves with the LO, has no clean twin and stays suspect. A suspect revisit:
+A threshold crossing coincides with a suspect detection (flagged `clipped`, `suspect_imd`, `spur_candidate`, confirmed image, or `compressed`) when it lies in the visit window ± one time cell and inside the detection's extent widened by one level-0 cell. A revisit is **suspect** when it lies under `overload`, or when every above-threshold cell coincides with a suspect detection. One clean crossing makes the visit occupied and not suspect (T-129). **A DC spur flag is per tuning (T-147, T-172):** the rule is applied to each detection on its own, not to a frequency. A detection flagged only as a DC spur (`spur_reason = dc`, no other suspect flag) is not suspect when a **clean twin** exists:
+- a clean detection of the same emission (centres within half a level-0 cell plus half the narrower OBW),
+- overlapping it in time within ± one time cell (the grid's `t_cell_ns`, the same slack as the visit window),
+- whose own tuning centre (its Provenance `tune.center_hz`) lies more than the detector's DC tolerance (15 kHz) outside its extent, so it came from a tuning whose DC is elsewhere. A twin whose tuning is unknown refutes nothing, and an unflagged image or intermod sitting at its own LO is not a twin.
+
+Other DC flags at the same frequency with no twin in their own window stay suspect. A real DC spur moves with the LO, has no clean off-LO twin and stays suspect. A suspect revisit:
 - It is excluded from `fco`, as unobserved rather than unoccupied, and counted in `n_suspect`.
 - `fco_suspect_upper` counts it as occupied, so the pair brackets the truth.
 - Suspect crossings never create or widen a learned channel.
@@ -280,6 +285,7 @@ These give mean, standard deviation, FCO and max; merging equals sequential addi
   - An occupied fold's level is the median occupied-visit level. It is given only with at least `LEVEL_MIN_OCCUPIED` = 3 occupied visits in the interval; with fewer, the fold carries occupancy only.
   - An idle fold's level is the median idle level.
   - An occupied fold whose occupied pool does not exist yet is compared with the idle pool, so an emitter appearing on a quiet channel is level novelty. That cross-class level z does not keep the fold out of the reference: learning then judges occupancy only.
+  - **Amended (T-176):** the cross-class comparison applies only when the subject has no occupied level history under any gain key or slot (a genuinely quiet channel). Otherwise, an occupied pool with fewer than 2 visits at the fold's gain key and resolution is immature for level scoring: no level z, and occupancy scoring is unchanged. A busy channel after a gain step is therefore never scored against its idle (noise) level. Levels are not widened across gain keys, because the key carries no gain delta; the "widen, never substitute" rule of §2.5 applies. Idle folds never substitute the occupied pool.
   - Levels are further pooled per front-end gain-state key (`GainState::key`, whole-dB quantised), so a gain change starts a separate, immature level pool.
 - **Sequential learning CUSUM.** Every clean fold with a mature pool feeds CUSUMs of its level z and occupancy z, each winsorised to ±`z_min`. There are two sets: subject-wide (`seq`) and one per hour of day (`seq_hod`, 24).
   - **Reference mean.** The level mean is the slot's own hour-of-day reference pool once that holds ≥ `SEQ_OWN_MIN_VISITS` = **16 visits**, else the chosen mature pool, so a daily pattern is not a shift. Occupancy switches to the own-hour pool once it holds ≥ `SEQ_OWN_MIN_OBSERVED_S` = 1 h observed. σ is the chosen pool's level σ, floored at `sigma_floor_db`.

@@ -800,6 +800,7 @@ dependencies = [
  "hk-e2e",
  "hk-model",
  "hk-stream",
+ "libc",
  "num-complex",
  "serde",
  "serde_json",

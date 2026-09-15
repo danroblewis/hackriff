@@ -79,6 +79,16 @@ pub struct SchedulerConfig {
     /// here). Raising it (e.g. 0.2: 12 MHz slices) trades more hops per pass (≈ 1/(1 − f)), so a
     /// longer pass and a tighter dwell cap under revisit targets, for seam sensitivity.
     pub seam_guard_fraction: f64,
+    /// DC dither of discovery hops, Hz (75 kHz; 0 disables). T-173: every odd pass tunes each hop
+    /// this far from its even-pass centre ([`super::Hop::dither_hz`]); hop count, slices and
+    /// even-pass centres are unchanged, so the pass is no longer. An emission whose extent is
+    /// within the detector's DC rule of one tuning's LO (extent within 15 kHz, width ≤ 40 kHz:
+    /// `hk_detect::DcRule`) lies more than 15 kHz outside its extent at the other tuning, and
+    /// inside its usable span, for extents up to `dc_dither_hz − 2 × 15 kHz` = 45 kHz (DcRule's
+    /// 40 kHz plus 5 kHz of bin margin): every covered cell has an off-DC view within two passes.
+    /// Plans whose usable span is below `4 × dc_dither_hz` are not dithered and warn
+    /// [`super::PlanWarning::DcDitherDisabled`].
+    pub dc_dither_hz: f64,
     /// POI queue capacity, preallocated (64).
     pub max_pois: usize,
     /// Per-region policy overrides by region index (`None` = the plan's policy).
@@ -116,6 +126,7 @@ impl Default for SchedulerConfig {
             rate_change_factor: 0.8,
             rf_path_boundaries_hz: Vec::new(),
             seam_guard_fraction: 0.0,
+            dc_dither_hz: 75e3,
             max_pois: 64,
             region_policy: Vec::new(),
         }
@@ -127,7 +138,7 @@ impl SchedulerConfig {
     /// `usable_fraction`, `sweep_step_s`, `region_dwell_s`, `sweeps_per_cycle`,
     /// `dwells_per_cycle`, `dwell_min_rate_hz`, `dwell_default_s`, `dwell_min_s`,
     /// `dwell_max_s`, `gain_step_pairs`, `gain_step_block_s`, `gain_step_lna_db`,
-    /// `retune_delta_hz`, `retune_dwell_s`, `rate_change`, `seam_guard_fraction`, `region_policy` (array of
+    /// `retune_delta_hz`, `retune_dwell_s`, `rate_change`, `seam_guard_fraction`, `dc_dither_hz`, `region_policy` (array of
     /// `null` / `"sweep-only"` / `"dwell-only"` / `"sweep-then-dwell"`). Unknown keys are errors.
     pub fn from_plan(plan: &ScanPlan) -> Result<Self, PlanError> {
         let mut cfg = Self::default();
@@ -169,6 +180,7 @@ impl SchedulerConfig {
                 "retune_dwell_s" => cfg.retune_dwell_ns = secs()?,
                 "rate_change" => cfg.rate_change = value.as_bool().ok_or_else(bad)?,
                 "seam_guard_fraction" => cfg.seam_guard_fraction = num()?,
+                "dc_dither_hz" => cfg.dc_dither_hz = num()?,
                 "region_policy" => {
                     cfg.region_policy = serde_json::from_value(value.clone()).map_err(|_| bad())?;
                 }
@@ -240,8 +252,13 @@ impl SchedulerConfig {
             );
         }
         let non_negative = |v: f64| v.is_finite() && v >= 0.0;
-        if !(non_negative(self.gain_step_lna_db) && non_negative(self.retune_delta_hz)) {
-            return fail("gain_step_lna_db and retune_delta_hz must be finite and >= 0".into());
+        if !(non_negative(self.gain_step_lna_db)
+            && non_negative(self.retune_delta_hz)
+            && non_negative(self.dc_dither_hz))
+        {
+            return fail(
+                "gain_step_lna_db, retune_delta_hz and dc_dither_hz must be finite and >= 0".into(),
+            );
         }
         if !(self.rate_change_factor > 0.0 && self.rate_change_factor < 1.0) {
             return fail("rate_change_factor must be in (0, 1)".into());

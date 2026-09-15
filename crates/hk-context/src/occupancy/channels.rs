@@ -41,8 +41,9 @@
 //!
 //! **Suspects never create or widen a channel** (§2.6): detections flagged `clipped`,
 //! `suspect_imd`, `spur_candidate`, a retune-confirmed image, or `compressed` are ignored here.
-//! A DC spur flag is per tuning (T-147): [`extents_of`] clears it when a clean detection of the
-//! same emission from another tuning is near in time.
+//! A DC spur flag is per tuning (T-147, T-172): [`extents_of`] clears it, per detection, when a
+//! clean detection of the same emission, from a tuning whose own LO is not at it, lies within one
+//! time cell.
 //!
 //! **Rasters are hints.** [`ChannelPlan::suggest_raster`] attaches a `RasterHint` (spacing, the
 //! channel centre's offset from the nearest raster point, source) to channels inside a range. It
@@ -106,42 +107,112 @@ pub fn dc_only_suspect(f: &DetectionFlags) -> bool {
         && !(f.clipped || f.suspect_imd || f.image_retune_confirmed || f.compressed)
 }
 
-/// Time slack within which a clean twin refutes a DC flag (T-147): one level-0 time cell, the
-/// engine's visit-window slack.
-pub const DC_TWIN_SLACK_NS: i64 = 1_000_000_000;
+/// The detector's DC-spur tolerance, Hz (`hk_detect::DcRule::default().tolerance_hz`): a DC twin's
+/// own tuning centre must lie further than this outside its extent (T-172).
+pub const DC_TWIN_LO_TOLERANCE_HZ: f64 = 15e3;
+
+/// Parameters of the §2.6 DC-twin rule (T-147, T-172).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DcTwinRule {
+    /// Level-0 frequency cell, Hz.
+    pub f_cell_hz: f64,
+    /// Time slack, ns: one level-0 time cell, the grid's `t_cell_ns` (the engine's visit-window
+    /// slack), passed in so the two cannot diverge.
+    pub slack_ns: i64,
+    /// A twin's own tuning centre must lie more than this outside its extent, Hz
+    /// ([`DC_TWIN_LO_TOLERANCE_HZ`]).
+    pub lo_tolerance_hz: f64,
+}
 
 /// §2.6 extents of stored detections with DC flags checked across tunings
-/// ([`refute_dc_suspects`]).
-pub fn extents_of(detections: &[Detection], f_cell_hz: f64) -> Vec<DetectionExtent> {
+/// ([`refute_dc_suspects`]). `tuning_centre` gives a detection's own tuning centre, Hz (its
+/// Provenance `tune.center_hz`), or `None` when unknown; it is asked only of candidate twins.
+pub fn extents_of(
+    detections: &[Detection],
+    rule: DcTwinRule,
+    mut tuning_centre: impl FnMut(&Detection) -> Option<f64>,
+) -> Vec<DetectionExtent> {
     let mut out: Vec<DetectionExtent> = detections.iter().map(DetectionExtent::of).collect();
     let dc: Vec<bool> = detections
         .iter()
         .map(|d| dc_only_suspect(&d.flags))
         .collect();
-    refute_dc_suspects(&mut out, &dc, f_cell_hz);
+    refute_dc_suspects(&mut out, &dc, rule, |j| tuning_centre(&detections[j]));
     out
 }
 
 /// T-147 (§2.6): DC-ness belongs to a tuning, not to a frequency. A DC flag (`dc_only[i]`) is a
 /// hypothesis about the capture whose LO sat there; it is refuted, and `extents[i]` made
-/// non-suspect, when a clean (non-suspect, so not itself DC-flagged) detection of the same
-/// emission exists within [`DC_TWIN_SLACK_NS`]: centres within half a level-0 cell plus half the
-/// narrower OBW of each other, so each centre lies in the other's extent widened by half a cell.
-/// That twin came from a tuning whose DC is elsewhere. A true DC spur moves with the tuning, has
-/// no such twin and stays suspect; a real carrier 2 cells away does not refute it.
-pub fn refute_dc_suspects(extents: &mut [DetectionExtent], dc_only: &[bool], f_cell_hz: f64) {
+/// non-suspect, when a **clean twin** exists: a clean (non-suspect, so not itself DC-flagged)
+/// detection of the same emission (centres within half a level-0 cell plus half the narrower OBW
+/// of each other), overlapping it within ± `rule.slack_ns`, whose own tuning centre
+/// (`own_lo(j)`) lies more than `rule.lo_tolerance_hz` outside its extent (T-172: an unflagged
+/// image or intermod sitting at its own LO is not a twin; an unknown tuning refutes nothing). A
+/// true DC spur moves with the tuning, has no such twin and stays suspect; a real carrier 2 cells
+/// away does not refute it. The rule is per detection: other DC flags at the frequency with no
+/// twin in their own window stay suspect.
+///
+/// **Cost (T-172).** Clean detections are indexed by (level-0 cell of their centre, start time)
+/// with a per-cell running maximum of end times, so each DC flag visits only the few cells its
+/// reach spans and, within each, binary-searches its ± slack window: O((n + m) log n) for n clean
+/// and m DC-flagged detections, not O(n × m).
+pub fn refute_dc_suspects(
+    extents: &mut [DetectionExtent],
+    dc_only: &[bool],
+    rule: DcTwinRule,
+    mut own_lo: impl FnMut(usize) -> Option<f64>,
+) {
+    struct Clean {
+        cell: i64,
+        start: i64,
+        end: i64,
+        /// Running maximum of `end` over this cell's entries up to here (non-decreasing).
+        max_end: i64,
+        idx: usize,
+    }
+    if !dc_only.iter().any(|&b| b) {
+        return;
+    }
     let centre = |e: &DetectionExtent| 0.5 * (e.freq.lo_hz + e.freq.hi_hz);
-    let mut clean: Vec<(f64, usize)> = extents
+    let f_cell = if rule.f_cell_hz.is_finite() && rule.f_cell_hz > 0.0 {
+        rule.f_cell_hz
+    } else {
+        0.0
+    };
+    let cell_of = |f: f64| {
+        if f_cell > 0.0 {
+            (f / f_cell).floor() as i64
+        } else {
+            0
+        }
+    };
+    let slack = rule.slack_ns.max(0);
+    let tol = rule.lo_tolerance_hz.max(0.0);
+    let mut clean: Vec<Clean> = extents
         .iter()
         .enumerate()
         .filter(|(_, e)| !e.suspect && centre(e).is_finite())
-        .map(|(i, e)| (centre(e), i))
+        .map(|(i, e)| Clean {
+            cell: cell_of(centre(e)),
+            start: e.time.start.as_unix_nanos(),
+            end: e.time.end.as_unix_nanos(),
+            max_end: i64::MIN,
+            idx: i,
+        })
         .collect();
     if clean.is_empty() {
         return;
     }
-    clean.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let half = 0.5 * f_cell_hz.max(0.0);
+    clean.sort_unstable_by_key(|c| (c.cell, c.start, c.idx));
+    let mut run = i64::MIN;
+    for k in 0..clean.len() {
+        if k > 0 && clean[k].cell != clean[k - 1].cell {
+            run = i64::MIN;
+        }
+        run = run.max(clean[k].end);
+        clean[k].max_end = run;
+    }
+    let half = 0.5 * f_cell;
     let mut refuted = Vec::new();
     for (i, e) in extents.iter().enumerate() {
         if !(e.suspect && dc_only.get(i).copied().unwrap_or(false)) {
@@ -153,16 +224,28 @@ pub fn refute_dc_suspects(extents: &mut [DetectionExtent], dc_only: &[bool], f_c
         }
         let (s, t) = (e.time.start.as_unix_nanos(), e.time.end.as_unix_nanos());
         let reach = half + 0.5 * e.obw_hz;
-        let from = clean.partition_point(|x| x.0 < c - reach);
-        let twin = clean[from..]
-            .iter()
-            .take_while(|x| x.0 <= c + reach)
-            .any(|&(fc, j)| {
-                let w = &extents[j];
-                (fc - c).abs() <= half + 0.5 * w.obw_hz.min(e.obw_hz)
-                    && w.time.start.as_unix_nanos() <= t.saturating_add(DC_TWIN_SLACK_NS)
-                    && w.time.end.as_unix_nanos().saturating_add(DC_TWIN_SLACK_NS) >= s
-            });
+        let (cell_lo, cell_hi) = (cell_of(c - reach), cell_of(c + reach));
+        let mut k = clean.partition_point(|x| x.cell < cell_lo);
+        let mut twin = false;
+        while !twin && k < clean.len() && clean[k].cell <= cell_hi {
+            let cell = clean[k].cell;
+            let seg_end = k + clean[k..].partition_point(|x| x.cell == cell);
+            let seg = &clean[k..seg_end];
+            // Entries before `from` all end (running max included) before `s - slack`; entries
+            // from `to` on all start after `t + slack`.
+            let from = seg.partition_point(|x| x.max_end.saturating_add(slack) < s);
+            let to = seg.partition_point(|x| x.start <= t.saturating_add(slack));
+            if from < to {
+                twin = seg[from..to].iter().any(|x| {
+                    let w = &extents[x.idx];
+                    (centre(w) - c).abs() <= half + 0.5 * w.obw_hz.min(e.obw_hz)
+                        && x.end.saturating_add(slack) >= s
+                        && own_lo(x.idx)
+                            .is_some_and(|lo| lo < w.freq.lo_hz - tol || lo > w.freq.hi_hz + tol)
+                });
+            }
+            k = seg_end;
+        }
         if twin {
             refuted.push(i);
         }
@@ -811,6 +894,136 @@ mod tests {
             snr_db,
             suspect: false,
         }
+    }
+
+    /// T-172: a multi-day hop pattern, one visit every 10 s. Tuning A (LO 433.4125 MHz) DC-flags a
+    /// real 433.4 MHz carrier that tuning B (LO 434 MHz) sees clean 55 ms later; tuning A also
+    /// carries a true LO leak at 433.5 MHz with no twin; 20 clean carriers elsewhere. Returns the
+    /// extents, DC-only flags and each detection's own LO.
+    fn dc_twin_scenario(hours: u64) -> (Vec<DetectionExtent>, Vec<bool>, Vec<f64>) {
+        let (mut ext, mut dc, mut lo) = (Vec::new(), Vec::new(), Vec::new());
+        let at = |c: f64, from: f64, to: f64, suspect: bool| {
+            let mut e = det_at(c, 3000.0, 20.0, from, to - from);
+            e.suspect = suspect;
+            e
+        };
+        for k in 0..hours * 360 {
+            let t = 1.0e6 + 10.0 * k as f64;
+            ext.push(at(433_400_000.0, t + 0.01, t + 0.05, true));
+            dc.push(true);
+            lo.push(433_412_500.0);
+            ext.push(at(433_500_000.0, t + 0.01, t + 0.05, true));
+            dc.push(true);
+            lo.push(433_500_000.0);
+            ext.push(at(433_400_000.0, t + 0.065, t + 0.1, false));
+            dc.push(false);
+            lo.push(434_000_000.0);
+            for m in 0..20 {
+                ext.push(at(
+                    433_600_000.0 + 25e3 * f64::from(m),
+                    t + 0.065,
+                    t + 0.1,
+                    false,
+                ));
+                dc.push(false);
+                lo.push(434_000_000.0);
+            }
+        }
+        (ext, dc, lo)
+    }
+
+    const TWIN_RULE: DcTwinRule = DcTwinRule {
+        f_cell_hz: 6250.0,
+        slack_ns: 1_000_000_000,
+        lo_tolerance_hz: DC_TWIN_LO_TOLERANCE_HZ,
+    };
+
+    /// T-172: the twin lookup is time-indexed. 18 h → 72 h (4× the detections) must cost about
+    /// 4 × log; the T-147 centre-only scan was quadratic here (ratio 15.25: 0.039 s → 0.597 s).
+    #[test]
+    fn dc_twin_lookup_scales_n_log_n_over_days() {
+        let run = |hours: u64| {
+            let (ext, dc, lo) = dc_twin_scenario(hours);
+            let mut best = f64::INFINITY;
+            let mut out = Vec::new();
+            for _ in 0..3 {
+                let mut e = ext.clone();
+                let t0 = std::time::Instant::now();
+                refute_dc_suspects(&mut e, &dc, TWIN_RULE, |j| Some(lo[j]));
+                best = best.min(t0.elapsed().as_secs_f64());
+                out = e;
+            }
+            (ext.len(), best, out)
+        };
+        let (n1, t1, _) = run(18);
+        let (n2, t2, out) = run(72);
+        eprintln!(
+            "dc twin lookup: n={n1} {t1:.4}s, n={n2} {t2:.4}s, ratio {:.2}",
+            t2 / t1
+        );
+        // The carrier's DC flags are all refuted; the twinless LO leak stays suspect.
+        assert!(out.iter().step_by(23).all(|e| !e.suspect));
+        assert!(out.iter().skip(1).step_by(23).all(|e| e.suspect));
+        assert!(t2 / t1 < 8.0, "ratio {:.2}: not O(n log n)", t2 / t1);
+    }
+
+    /// T-172: a twin must be off its own LO, lie within the rule's slack, and refutes only the DC
+    /// flags in its own window.
+    #[test]
+    fn dc_twin_must_be_off_its_own_lo_and_within_one_time_cell() {
+        let f = 433_400_000.0;
+        let flagged = |start_s: f64| {
+            let mut e = det_at(f, 2000.0, 20.0, start_s, 0.04);
+            e.suspect = true;
+            e
+        };
+        let refute = |ext: &[DetectionExtent], lo: &[Option<f64>], rule: DcTwinRule| {
+            let mut e = ext.to_vec();
+            let dc: Vec<bool> = ext.iter().map(|x| x.suspect).collect();
+            refute_dc_suspects(&mut e, &dc, rule, |j| lo[j]);
+            e.iter().map(|x| x.suspect).collect::<Vec<_>>()
+        };
+        // Tuning A's LO leak at f; tuning B's unflagged artefact at the same RF frequency, B's LO
+        // 10 kHz away (inside the DC tolerance): not a twin, A's flag stands.
+        let a = flagged(100.0);
+        let artefact = det_at(f, 2000.0, 20.0, 100.05, 0.04);
+        let ext = [a, artefact];
+        assert_eq!(
+            refute(&ext, &[Some(f), Some(f + 10e3)], TWIN_RULE),
+            [true, false]
+        );
+        // Unknown tuning: refutes nothing.
+        assert_eq!(refute(&ext, &[Some(f), None], TWIN_RULE), [true, false]);
+        // A genuine carrier seen off-DC from tuning C (LO 600 kHz away) clears it.
+        assert_eq!(
+            refute(&ext, &[Some(f), Some(f + 600e3)], TWIN_RULE),
+            [false, false]
+        );
+        // 1.5 s apart: outside a 1 s time cell, inside a 2 s one.
+        let late = det_at(f, 2000.0, 20.0, 101.59, 0.04);
+        let ext = [a, late];
+        let lo = [Some(f), Some(f + 600e3)];
+        assert_eq!(refute(&ext, &lo, TWIN_RULE), [true, false]);
+        let two_s = DcTwinRule {
+            slack_ns: 2_000_000_000,
+            ..TWIN_RULE
+        };
+        assert_eq!(refute(&ext, &lo, two_s), [false, false]);
+        // Per detection: the twin clears the flag beside it, not one an hour later at the same
+        // frequency; a long twin overlapping a later flag still reaches it (running max end).
+        let hour = flagged(3700.0);
+        let long = det_at(f, 2000.0, 20.0, 50.0, 3600.0);
+        let short = det_at(f, 2000.0, 20.0, 100.05, 0.04);
+        let ext = [a, hour, short];
+        let lo = [Some(f), Some(f), Some(f + 600e3)];
+        assert_eq!(refute(&ext, &lo, TWIN_RULE), [false, true, false]);
+        let ext = [long, short, hour];
+        let lo = [Some(f + 600e3), Some(f + 600e3), Some(f)];
+        assert_eq!(refute(&ext, &lo, TWIN_RULE), [false, false, true]);
+        let far = flagged(3649.5);
+        let ext = [short, long, far];
+        let lo = [Some(f + 600e3), Some(f + 600e3), Some(f)];
+        assert_eq!(refute(&ext, &lo, TWIN_RULE), [false, false, false]);
     }
 
     /// Deterministic uniform draw in [0, 1).

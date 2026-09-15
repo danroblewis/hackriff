@@ -189,6 +189,8 @@ enum Command {
         listen: hk_cli::pipeline::ListenArgs,
         #[command(flatten)]
         compute: hk_cli::pipeline::ComputeArgs,
+        #[command(flatten)]
+        iq_buffer: hk_cli::pipeline::IqBufferArgs,
     },
 }
 
@@ -319,6 +321,7 @@ fn main() -> anyhow::Result<()> {
             rows_per_s,
             listen,
             compute,
+            iq_buffer,
         } => {
             hk_cli::signal::install()?;
             let source = match (replay, device) {
@@ -347,6 +350,7 @@ fn main() -> anyhow::Result<()> {
                 token: None,
                 listen,
                 compute,
+                iq_buffer,
             })?;
         }
         Command::Record {

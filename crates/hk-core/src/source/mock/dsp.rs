@@ -251,6 +251,25 @@ impl Plan {
         }
     }
 
+    /// The recorded band the renderer band-selects, `(lo, hi)` absolute Hz: [`Self::overlap`] with
+    /// each side that the window's own edge clips pulled in by half the transition (T-175). The
+    /// band-select roll-off then ends inside the window. Centred on ±rate/2 it passed recorded
+    /// content up to half a transition beyond the window edge, which the output rate folded onto
+    /// the opposite edge (the 101.3 MHz station just past a window's upper edge read as a line at
+    /// its lower edge). The complement noise fills the strip. Passing through, the whole overlap.
+    pub fn served(&self) -> Option<(f64, f64)> {
+        let (lo, hi) = self.overlap()?;
+        if self.passthrough() {
+            return Some((lo, hi));
+        }
+        let guard = 0.5 * self.transition * self.rate_hz;
+        let w_lo = self.center_hz - self.rate_hz / 2.0;
+        let w_hi = self.center_hz + self.rate_hz / 2.0;
+        let lo = if lo <= w_lo + 1.0 { w_lo + guard } else { lo };
+        let hi = if hi >= w_hi - 1.0 { w_hi - guard } else { hi };
+        (hi - lo > 1.0).then_some((lo, hi))
+    }
+
     fn passthrough(&self) -> bool {
         self.center_hz == self.rec_center_hz && self.rate_hz == self.rec_rate_hz
     }
@@ -334,11 +353,12 @@ impl Render {
         // adds the device's own, as a radio's ADC would.
         self.noise_var =
             (plan.floor_power - plan.quant_power).max(0.0) * plan.rate_hz / plan.rec_rate_hz;
-        self.noise_only = plan.coverage() == Coverage::Noise;
+        let served = plan.served();
+        self.noise_only = served.is_none();
         let width = (plan.transition * plan.rate_hz / plan.rec_rate_hz).min(0.25);
         let passthrough = plan.passthrough() && pos.fract() == 0.0;
         self.dq_delay = 0;
-        match plan.overlap() {
+        match served {
             Some((lo, hi)) if !passthrough => {
                 let c = 0.5 * (lo + hi) - plan.rec_center_hz;
                 let kernel = Kernel::new((hi - lo) / 2.0 / plan.rec_rate_hz, width);
@@ -363,14 +383,16 @@ impl Render {
                 self.out_phase = 0.0;
             }
         }
-        self.noise = match plan.coverage() {
-            Coverage::Partial => plan.overlap().map(|(lo, hi)| {
-                ComplementNoise::new(
+        // Noise fills whatever the band select leaves of a rendered window: the uncovered part
+        // and, since T-175, the guard strip inside each window edge the recording extends past.
+        self.noise = match served {
+            Some((lo, hi)) if self.kernel.is_some() && hi - lo < plan.rate_hz - 1.0 => {
+                Some(ComplementNoise::new(
                     (lo - plan.center_hz) / plan.rate_hz,
                     (hi - plan.center_hz) / plan.rate_hz,
                     plan.transition,
-                )
-            }),
+                ))
+            }
             _ => None,
         };
         // Re-mix the history under the new input mix.
@@ -947,6 +969,20 @@ mod tests {
             quant_power: 0.0,
             transition: 0.08,
         }
+    }
+
+    /// T-175: recorded content just past a window edge, inside the band-select transition, does
+    /// not fold onto the opposite edge.
+    #[test]
+    fn content_just_past_a_window_edge_does_not_fold_to_the_other_edge() {
+        // Recording 99.5..100.5 MHz; window 99.79..100.19 MHz at 400 kS/s (transition 32 kHz); a
+        // tone at 100.2 MHz sits 10 kHz past the upper edge and would fold to −190 kHz.
+        let x = tone(200e3, 1e6, 1 << 16, 0.25);
+        let mut r = Render::new(plan(99.99e6, 400e3), 1, None);
+        let mut out = Vec::new();
+        r.render(&mut VecFeed(x, 0), &mut out, 20_000).unwrap();
+        let alias = power_at(&out[2_000..], -190e3, 400e3);
+        assert!(alias < 1e-6, "tone folded to the lower edge: {alias:e}");
     }
 
     #[test]

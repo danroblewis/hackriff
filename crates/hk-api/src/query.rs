@@ -686,16 +686,27 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// others were removed, and a `tag` filter outside the vocabulary never matches it. No decode content, fingerprint or link is included.
 /// `explanations` lists the emitter's ranked T-039 explanations (`hk_pipeline::family`), best first, or `[]`.
 ///
+/// T-158: `snr_db` and `peak_dbfs` are the newest (highest `t_start`) detection linked to the
+/// emitter's `snr_peak_db` and `peak_level_dbfs` — directly, or through one of its
+/// currently-linked tracks ([`Repository::emitter_latest_measurement`]); both `null` when no
+/// detection is linked yet (e.g. an emitter seen only through a decode sighting).
+///
 /// T-078: `state` filters by lifecycle (`candidate`, `confirmed`, `deleted`, comma-separated; by
 /// default candidates and confirmed entries, never deleted ones). Each row carries `state`,
 /// `lifecycle` (the latest change: state, previous, author `auto`/`user`, actor, reason, `t_s`; or
 /// `null` for an untouched candidate; a user's reason is withheld on withheld-identity rows) and
 /// `recurrence` (occurrences, appearances, span, on-air time, duty cycle and the
 /// [`RECENT_APPEARANCES`] latest appearances).
+///
+/// T-171: `total` is [`Repository::count_inventory`] — the number of rows the same filters match,
+/// ignoring `cursor`/`limit`, so a caller can show a count past one page. It is an efficient
+/// indexed `COUNT(*)` for every filter but a `tag` outside `hk_model::TAG_VOCABULARY`, which is
+/// capped (see `count_inventory`'s docs) and can then read as a lower bound.
 pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> {
     let query = parse_inventory_query(q)?;
     let failed = |_| ApiError::new(500, "inventory query failed");
     let page = repo.query_inventory(&query).map_err(failed)?;
+    let total = repo.count_inventory(&query).map_err(failed)?;
     let mut entries = Vec::with_capacity(page.entries.len());
     for entry in &page.entries {
         entries.push(inventory_entry_json(repo, entry).map_err(failed)?);
@@ -707,6 +718,7 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
             .filter(|&o| o <= MAX_INVENTORY_CURSOR)
             .map(|o| o.to_string()),
         "limit": query.limit,
+        "total": total,
         "identity_access": "standard",
     }))
 }
@@ -766,6 +778,9 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
                 "reason_withheld": !show,
             })
         });
+        // T-158: the newest linked detection's peak SNR and absolute peak level, or `null` when
+        // the emitter has no linked detection yet (e.g. an identity-only sighting).
+        let measurement = repo.emitter_latest_measurement(e.id)?;
         let rec = repo.emitter_recurrence(e.id, RECENT_APPEARANCES)?;
         let recurrence = json!({
             "occurrences": rec.occurrences,
@@ -811,6 +826,8 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             "identity_scheme": scheme,
             "identity_class": class,
             "withheld": withheld,
+            "snr_db": measurement.map(|(snr, _)| snr),
+            "peak_dbfs": measurement.map(|(_, peak)| peak),
         });
         if let Some(v) = value {
             row["identity_value"] = json!(v);

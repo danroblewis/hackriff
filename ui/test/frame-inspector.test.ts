@@ -5,15 +5,12 @@
 // server responses exactly.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import {
   type CaptureParseResponse, type FitSummary, type InspectorClient, type LayerTree,
   buildTree, cycleLeafAt, errorsByPath, fitClass, fitSummaryText, frameViewFromCapture, frameViewFromInline,
   hexBytes, asciiChar, loadCapturePage, nodeById, pagePrevFrom, parseFieldMapInput, parseInlineFrames, parsePastedFrames,
   type CaptureInfoDto, type CaptureListClient, captureLabel, frameAtTime, listCaptures, scrubPageStart, seekTimeS,
 } from "../src/frame-inspector";
-
-const html = readFileSync("src/index.html", "utf8");
 
 // ---- T-092 decoded captures: list, labels, scrub and time seek (shapes from docs/api.md "Decoded captures") ----
 
@@ -59,13 +56,6 @@ test("frameAtTime asks the frames route for from_t and returns the server's fram
   const { client, paths } = mkGetClient(() => ({ capture_id: "a/b", total_frames: 640, from_frame: 321, limit: 1, next_from_frame: 322, frames: [] }));
   assert.equal(await frameAtTime(client, "a/b", 1789300830.25), 321);
   assert.equal(paths[0], "/api/captures/a%2Fb/frames?from_t=1789300830.25&limit=1");
-});
-
-test("index.html declares the T-092 capture picker and scrub controls", () => {
-  for (const id of ["fi-capture-list", "fi-capture-refresh", "fi-scrub", "fi-scrub-info", "fi-seek-form", "fi-seek-s", "fi-seek-go"]) {
-    const matches = html.match(new RegExp(`id="${id}"`, "g")) ?? [];
-    assert.equal(matches.length, 1, `expected exactly one id="${id}" in index.html`);
-  }
 });
 
 // ---- fixture: kind/len/payload field map over frame 5 of a 27-frame recording
@@ -312,15 +302,6 @@ test("parseInlineFrames posts field_map and frames to /api/inspector/parse", asy
   assert.deepEqual(calls[0].body, { field_map: { unit: "bits", fields: [] }, frames: [{ hex: "1348494a" }, { hex: "2f", bit_len: 8 }] });
 });
 
-// ---- layout: the pane's ids exist once each, and phone-width uses no fixed wide widths ----
-
-test("index.html declares the frame-inspector pane's element ids", () => {
-  for (const id of [
-    "frame-inspector", "fi-status", "fi-capture-form", "fi-capture-id", "fi-field-map", "fi-map-apply",
-    "fi-paste-frames", "fi-paste-parse", "fi-fit", "fi-error", "fi-frame-table", "fi-frame-body",
-    "fi-prev", "fi-next", "fi-page-info", "fi-hex", "fi-tree",
-  ]) {
-    const matches = html.match(new RegExp(`id="${id}"`, "g")) ?? [];
-    assert.equal(matches.length, 1, `expected exactly one id="${id}" in index.html`);
-  }
-});
+// The MUI packet inspector's layout (element structure, narrow-width rules) is checked by
+// ui/test/app-inspector.test.ts against ui/src/app/decode/inspector.css instead of the retired
+// src/index.html.

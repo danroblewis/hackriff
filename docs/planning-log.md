@@ -1767,3 +1767,320 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Merged:** T-147 (695d850), T-146 (132eccf), T-150 (c1b296a), T-151 (8866b71), T-152 (0c596a5). Their worktrees were removed.
   - **If the combined check fails:** bisect by merge.
   - **T-124 (M2 blind acceptance):** resumed now that T-146 and T-147 are on main.
+- **B0.409 T-154 committed (e12b895, Sonnet).**
+  - **Coordinator check:** the diff touches only `decode/inspector*` and one test file. No lockfile changes. npm test: 169 passed, 0 failed.
+  - **Reuse:** it reuses the M1 `frame-inspector.ts` helpers, so no parsing lives in the UI.
+  - **Data source:** frames come through T-153's `subscribePipelineFeed`, which stays a no-op until T-153 lands.
+  - **Merge:** queued after the combined full check.
+- **B0.410 T-153 committed (c66d538, Sonnet).**
+  - **Coordinator check:** diff touches only `decode/*` plus one test file; npm test 179 passed, 0 failed.
+  - **Built:**
+    - Pipelines, recipes and blocks come from a shared, ref-counted cache.
+    - Stage chain.
+    - SVG plots from `/ws/open/stage` taps, with placeholders for gaps 4, 5 and 6.
+    - Params: hot-edit through `validate` then `PUT` recipe; Suggest/Use via `/api/assist`.
+    - `status-feed.ts` implemented to T-154's contract: one ref-counted inspector socket per pipeline, reconnecting with backoff.
+  - **Merge queue** (after the combined full check): T-153, T-154.
+- **B0.411 T-155 committed (35f9190, Sonnet).** Coordinator check: diff limited to `review/*` plus one test; npm test 175 passed / 0 failed.
+  - **Review drawer tabs:** alarms, report (with source filter), history/floor, scheduler/arms, device via `controls/model.ts` `panelModel`, bookmarks.
+  - **Gaps:** none needed; every route is already served.
+- **T-158+T-171 committed (f7f841c, Sonnet; over budget at 240k).**
+  - **Inventory rows:** gain `snr_db`/`peak_dbfs` from the newest linked detection, via index lookups.
+  - **List response:** gains `total`, a COUNT sharing the `inventory_where` predicate; a non-vocabulary tag filter scans at most 5,000 rows and returns a lower bound beyond that.
+  - **Checks:** docs and contract updated; hk-model 3, hk-api 83, api_contract 22 passing; lint clean.
+- **Merge queue after the combined check:** T-153, T-154, T-155, T-158/171. T-156 (MUI finish) launches once those are on main.
+- **B0.412 Combined full check green (0c596a5).** Lint clean; 1347/1347 tests; acceptance 28/28.
+  - **Merged in sequence, no conflicts:**
+    - T-153 (a0cd045)
+    - T-154 (aecd385)
+    - T-155 (9c22276)
+    - T-158+T-171 (e7a336f)
+  - **MUI panels T-150..T-155:** all on main.
+  - **Worktrees:** removed. Full check started.
+  - **Launched:**
+    - T-156: MUI finish (UI tests, phone width, retire the old layout; must move the old-UI `promoteEntry`/`deleteEntry` imports T-151 uses).
+    - T-157: rolling IQ capture buffer, API gap 1, the Capture timeline's scrub/export (Opus high).
+- **B0.413 T-172 launched (Opus)** on the free Rust build slot: DC twin refutation hardening from the T-147 review.
+  - Time-indexed twin lookup, with a benchmark.
+  - Slack set to `t_cell_ns`.
+  - A twin must be off its own tuning's LO.
+  - ADR §2.6 wording.
+- **Status of other work:**
+  - The full check after the four MUI/API merges is past 1348 tests with no failures; acceptance is pending.
+  - T-169 is bisecting which opt-level=2 crate causes optimisation-only test failures.
+  - T-124, T-156 and T-157 are still running.
+- **B0.414 Full check green after the T-153/T-154/T-155/T-158+T-171 merges (e7a336f).** Lint clean; 1349/1349 nextest+UI; acceptance 28/28 (68 s). All six MUI panels plus the inventory API gaps are verified on main.
+- **B0.415 T-169 done: change reverted per the keep rule, but it found something important.**
+  - **Speed:** dev opt-level=2 on the 4 hot crates cut full nextest from 1496 s to 368 s (6 threads, ~4×). Build 50 s; acceptance 28/28 in 42 s.
+  - **Failures:** every crate deterministically broke tests (bisected, 1–3× reproductions), 6 in total:
+    - recipe_runtime hot_edits status Null vs "none" (hk-dsp)
+    - mock_device t057 scheduled replay (hk-core)
+    - follow_hops blind hop set (hk-demod)
+    - api_contract follow_hops shapes (hk-pipeline)
+    - recipe_runtime mock channel (hk-pipeline)
+    - follow_hops channel net (hk-pipeline)
+  - **Why it matters:** these are likely races or timing assumptions exposed by faster code. Release/Jetson builds run optimised, so they are latent bugs.
+  - **Baseline at 6 threads under load:** also showed 2 failures (`outputs_record` fsk_bits, `stream_external` fsk_bursts), probably load flakes.
+  - **Next:** T-175 (Opus high) launched to fix the races, then enable the opt-level overrides.
+- **B0.416 T-156 merged (52afcd4). The new MUI app is now the default UI at `/`.**
+  - **Change:** old stacked layout retired (37 files, −4107 lines). Pure helpers kept; DOM classes removed.
+  - **Theme fix:** hardcoded dark rgba overlays replaced with `color-mix` tokens.
+  - **Tests:** narrow-width layout tests added; npm test 241 passed. No Rust change.
+  - **Bundle:** 48.2 KB gzip, ~3 KB over budget (follow-up).
+  - **Demo:** the supervisor's demo will show the new UI once rebuilt.
+  - **Not yet verified:** no MUI panel has been checked in a real browser → T-177 (playwright smoke, desktop and 400px).
+- **T-124 (267k tokens) is wrapping up with WIP + handoff.** It reports two suspected product bugs, to be confirmed from diagnostics:
+  - A false level-above-baseline alarm after the VGA step: an empty occupied level pool under the new gain key falls back to the idle pool → T-176.
+  - Channels inside hop 1's DC zone and only in hop 2's edge zone never get a clean twin and are never learned → T-173 (hop placement), now priority.
+- **Full check** after the T-156 merge is next.
+- **B0.417 T-157 finished (WIP 6c2ecc0 → f08aa57 after the coordinator's final checks). Opus review running.**
+  - **Final checks (coordinator, in the worktree):** `just lint` clean; hk-store iqbuffer quota and duration eviction tests pass.
+  - **Design:**
+    - ci8 chunks with a sample-clock segment index.
+    - Oldest-first eviction by 2 GiB or 10 min.
+    - Dedicated writer thread: capture never blocks, drops are counted.
+    - Routes: `GET /api/iqbuffer`, `POST /api/iqbuffer/clip`.
+  - **Clips:** a fixed-tune clip is byte-identical to the source. A retune-spanning clip gives 2 SigMF captures.
+  - **Review questions:**
+    - Deleting the buffer at run end, versus reviewing after a restart.
+    - Whether it is safe on by default given Jetson disk limits.
+    - Export racing with eviction.
+    - Real-time back-pressure.
+- **B0.418 T-172 committed (0e3d429).** Coordinator-reviewed: diff limited to `channels.rs`, `engine.rs`, `hk-pipeline` `occupancy.rs` and the ADR §2.6 wording.
+  - **Twin lookup:** sorted by (level-0 cell, start) with a running max end time and a binary-searched ±slack window.
+    - Timed ratio 18 h→72 h: 4.61 after, against a quadratic 15.25 before (72 h: 0.597 s → 0.032 s).
+    - The test asserts ratio < 8 using best-of-N timing. Because wall-clock ratios can flake under load, it goes in the nextest heavy-serial group at merge.
+  - **Slack:** now `t_cell_ns`.
+  - **Tuning check:** a twin must have its own LO more than 15 kHz outside its extent, using the provenance `tune.center_hz` (cached, no schema change). A twin with unknown tuning clears nothing.
+  - **New test:** covers both the artefact near B's LO and a genuine carrier.
+  - **`occupancy_sparse_visits` unchanged:** 433.400 at 0.586 and 433.375 at 0.084, both inside their CIs.
+  - **Tests:** hk-context 83, hk-pipeline 5, hk-detect 6. Lint clean.
+  - **Merge:** after the T-156 full check.
+- **B0.419 T-176 launched (Opus): false level alarm after a gain step.**
+  - **Task:** confirm the suspected root cause, that an empty occupied pool under a new gain key falls back to the idle pool. The fix treats that key as immature and never substitutes the other level class. It also checks the mirror case on the quieter-than-usual path.
+  - **Held:** T-173 (hop placement) waits for T-175 to finish, since both may touch the hk-core scheduler.
+  - **Merge queue:** T-172 then T-157 (after its review), once the T-156 full check finishes. T-172's timing test gets pinned to heavy-serial at merge.
+- **B0.420 T-157 review (Opus): FIX-FIRST.**
+  - **Verified:**
+    - capture never waits on the buffer (a slow disk laps only this reader; drops counted)
+    - no join deadlock
+    - index and files kept in sync under one lock
+    - export vs eviction is safe (Arc<File>)
+    - quota includes the partial chunk
+    - segment provenance and sample clock correct
+    - clip auth is 401-tested and audited
+    - fixed-tune clip is byte-compared
+  - **Bug:** a full disk creates a chunk-file storm and unbounded 0-byte index entries; there is no free-space floor.
+  - **Risks:**
+    - 2 GiB default too big for Jetson eMMC/flash
+    - f64 clip times round to about 240 ns (≈5 samples at 20 Msps); this caused the 299,999-sample clip, hidden by ±1 test tolerances
+    - synchronous export with a 4 GiB cap and no free-space check
+    - t0 overflow
+  - **Product question:** chunks are deleted at run end and wiped on start, but the mockup shows "last 48 h kept". Asked the user.
+  - **Next:** fix round launched (fresh Opus), excluding retention.
+- **B0.421 User decision: the IQ capture buffer survives restarts.** Tracked as T-178, after T-157 merges.
+  - Chunks and the segment index stay on disk within the quota, reload on start, and are recovered after a crash.
+  - The T-157 fix round keeps its scope: disk safety, 512 MiB/120 s defaults, exact clips, fs status fields, clip guard.
+- **T-175 progress: 5 of 6 optimisation-exposed failures fixed.**
+  - Four were test-side, now waiting for a fresh status tick.
+  - One is a frame-spacing tolerance limited to recording loop splices. The review must check this isn't bending.
+  - One was a product race: `hops.rs` `set_channels` refused with 409 before the first block. It now shares `planning_tune()` with pipeline start.
+  - Still open: t057 at block 928, after a retune to 100.041 MHz at 3 Msps, 241 kHz from the recorded band edge. Station/floor is 3.3 against the threshold of 4, and the agent is profiling for a mock render bug vs a recording dip.
+- **B0.422 T-124 WIP (d610360, on merge 2752ad4): 4/8 pass.**
+  - **Passing:**
+    - (b/g) busier alarm: 2 revisits, z 8.51, against an a-priori limit of ≤63 (ADR §7.2 rule applied to the truth window).
+    - (i) new emitter: 4 revisits, one-shot, against ≤7.
+    - (e) and (j).
+  - **Failing:**
+    - (c) false alarms: 1 against a budget of 0.
+    - (h) gain step: disclosed, but 1 unexplained alarm follows it.
+    - Both come from **Bug 1, confirmed.** `baseline.rs:983-988`: the empty occupied pool falls back to idle (30.6 dB observed vs 0.47 dB baseline), 3.75 h after the VGA step. T-176 is already fixing it.
+    - (d) coverage: a T-124 test bug; its log-coverage count omitted sweep visits (4.15 s vs the report's 180.75 s).
+    - (a) per-channel FCO: 433.375 MHz (FCO 0.094) is never learned, although 0 of 5 matched channels fall outside their CI. **Bug 2 is unconfirmed:** 433.400 sits in a similar DC/edge spot and is learned.
+  - **Also noted:** only 3 bandit dwells (4.47 s) in the 46 h scene; check this isn't hiding an issue. Scenes run 546 s and 644 s.
+  - **Status:** T-124 is blocked on T-176. Its next round fixes (d), investigates (a) with T-172's twin LO rule in place, and re-checks bandit dwells.
+- **B0.423 T-156 full check green (af07b5e).** Lint clean; 1349/1349 nextest+UI tests; acceptance 28/28. The new MUI default UI is verified on main.
+- **T-172 merged (0e3d429).** Its worktree is removed. Full check started.
+- **B0.424 User refinement of the IQ capture buffer.**
+  - **Design:** configurable time-based retention with an optional size cap. Storage becomes a pre-allocated on-disk ring that overwrites the oldest data in place (no grow-and-delete), with crash recovery from the ring and index on start.
+  - **Flags (coordinator-decided names):**
+    - `hk serve --iq-retention <DURATION>`: default `2m`; `0`/`off` disables; env `HK_IQ_RETENTION`.
+    - `hk serve --iq-buffer-max <SIZE>`: optional cap; env `HK_IQ_BUFFER_MAX`.
+    - Effective quota = min(retention × max sample rate × 2 B/sample, max), with the free-space floor kept.
+  - **Rollout:**
+    - The T-157 fix round wires these flags now on the current chunked storage.
+    - T-178 (rewritten) replaces the storage with the pre-allocated ring and restart persistence, keeping the same flags.
+  - **Staging:** the staging/demo server will run with 1 h retention.
+    - Implied size is 144 GiB at 20 Msps, 14.4 GiB at 2 Msps, 3.6 GiB at 500 kS/s, so staging needs `--iq-buffer-max` set.
+    - The flags don't exist until T-157 merges.
+- **B0.425 T-176 committed (31ac67c).**
+  - **Root cause:** `baseline.rs:983-988` `evaluate` scored an occupied fold with fewer than 2 occupied-pool visits against the idle pool at the same gain key. After a gain step, idle folds fill the new key first, so the busy channel was scored against its noise level.
+  - **Fix:** the idle fallback applies only when the subject has no occupied level history under any key (so a new emitter still alarms). Otherwise the occupied class is immature at that key and gets no level z.
+  - **Repro:** occupied z after the step was 18.41 before the fix and 0.44 after. The new-emitter check still gives 23.0.
+  - **Quieter path:** unaffected.
+  - **ADR:** §3.4 amended.
+  - **Tests:** hk-context 54 (incl. Monte Carlo budget), hk-pipeline 17, lint clean.
+  - **Next:** merge after the T-172 full check. That unblocks T-124 (c) and (h).
+- **B0.426 T-177 launched (Sonnet): headless playwright smoke of the new MUI.**
+  - **Setup:** `hk serve` with the mock device on a free port (not the user's demo ports 8789/8899/8900); playwright is installed in the scratchpad, not the repo.
+  - **Checks:** console errors, horizontal overflow at 1440 px and 400 px, waterfall frames, mode switch, Review drawer tabs, dock and timeline. Screenshots go to the scratchpad; any bugs found get listed for new tasks.
+  - **Queue:** the T-172 full check is still running; T-176 merges after it.
+- **B0.427 T-175 WIP (00691e3): 5 of 6 optimisation-exposed failures fixed. Finisher launched.**
+  - **Fixed, passing with and without the opt-level overrides:**
+    - Product: `planning_tune()` fallback, so `hops::set_channels` no longer returns 409 before the first block.
+    - Tests: fresh-status waits (status publishes every 250 ms), and exact frame spacing except across recording loop splices.
+  - **t057:**
+    - Station check now integrates channel band power, threshold unchanged. A 7-point sample had read 3.3×.
+    - New issue: while dwelling on the partly covered window at 99.873 MHz / 3 Msps, detections appear outside the recorded band (23 kHz at 98.375 MHz, 2.9 MHz wide below 99.6 MHz). They are stored as `marginal`. Possible mock-render or detector bug.
+  - **Finisher (fresh Opus):** root-cause t057, strip the T175DBG prints, then run the full timed nextest, acceptance and lint with the overrides.
+- **B0.428 T-177 MUI headless smoke: all 10 checks pass at 1440×900 and 400×800; no bugs found.**
+  - **Setup:** `hk serve` with a mock FM fixture on port 8931 (user demo ports untouched); playwright-core 1.63 plus cached Chrome for Testing installed in the scratchpad only.
+  - **Checks passed:**
+    - No console errors or uncaught exceptions.
+    - No horizontal overflow at either width.
+    - Waterfall frames arrive (perf counter 11 / 82 fps).
+    - Decode↔Explore switch works.
+    - Review drawer opens with all 6 tabs.
+    - Dock and timeline are visible.
+  - **Live data:** WFM at 101.3 MHz, 3 confirmed and 14 candidate detections.
+  - **Artefacts:** 26 screenshots in scratchpad `t177/shots/`. The script `ui/scripts/smoke.mjs` (b084530) is not in CI.
+  - **MUI status:** functionally verified in a real browser. The only open MUI UI item is the bundle budget (+3 KB gzip).
+- **B0.429 T-173 launched (Opus)** into the build slot T-177 freed.
+  - **Goal:** sweep plans guarantee every cell an off-DC view per revisit cycle (hop overlap, dithered centres, or a DC-fill dwell), with the revisit-time cost quantified.
+  - **Tests:** a carrier sitting exactly at a hop LO must be learned. The task must also explain T-124's unlearned 433.375 MHz channel.
+- **T-179 added:** the MUI bundle is 48.2 KB gzip against a 45 KB budget (small, Sonnet).
+- **Screenshots:** T-177 screenshots were sent to the user.
+- **B0.430 T-172 full check green (18dec33).** Lint clean; 1351/1351 tests; acceptance 28/28.
+  - **Merged:** T-176 (gain-step false alarm fix) and T-177 (smoke script). Both worktrees removed.
+  - **T-124:** now blocked only on T-173 (off-DC coverage for 433.375 MHz). Its (c) and (h) should pass on rerun.
+  - **Next:** full check.
+- **B0.431 T-175 finisher progress (uncommitted, on 00691e3).**
+  - **t057 edge phantom — real mock bug, fixed.** `Render::retarget` built its band-select kernel from `Plan::overlap()`; with a clipped side, the transition sat on Nyquist and folded the 101.3 MHz sideband to the opposite edge (+4.1 dB).
+    - New `Plan::served()` pulls clipped sides in by half the transition and noise-fills the strip.
+    - Unit test added; mock Limits doc updated.
+  - **Whole-window one-frame detections — not a render bug.** The scheduler served that window 29 dB below the recording gain, leaving IQ 85% zero codes (`quantisation_limited` provenance). The resulting 2–3 dB spread fires marginal detections.
+  - **Coordinator decision:** accept the test skipping quantisation-limited provenance in the out-of-band check, only with a guard assertion that such detections never become inventory emitters/candidates or add FCO occupied time. If the guard fails, fix the product instead of skipping.
+  - **Follow-up:** T-180 models a device noise floor at low gain in the mock.
+- **B0.432 Full check green after the T-176 + T-177 merges (220acec).**
+  - Lint clean; 1352/1352 tests; acceptance 28/28 (65 s).
+  - T-157 finishing: its targeted tests pass (hk-store/hk-api 7, hk-pipeline 13, hk-cli 24 including the flag parse test). The coordinator fixed the last clippy `needless_borrow` (`hk-cli` `pipeline.rs:1210`); lint and the final commit are running. T-157 merges next.
+- **B0.433 T-157 merged (a4b5784).**
+  - **Fix round:**
+    - Full-disk-safe chunking with a free-space floor (10% of disk, clamped to 2–8 GiB).
+    - Exact sample-index clips: fixed-tune clip 300000 samples; retune clip 300000+300000, byte-compared per segment.
+    - Status fields for fs free/total, pause state and retention/quota.
+    - Clip cap 256 MiB with a free-space pre-check.
+    - Overflow validation.
+  - **Flags:** `hk serve` / hackriffd `--iq-retention` (default 2m) and `--iq-buffer-max`.
+  - **Coordinator:** fixed the final clippy/fmt issue.
+  - **Tests:** hk-store/hk-api 7, hk-pipeline 13, hk-cli 24; lint clean.
+  - **Next:** worktree removed; full check next. T-178 (pre-allocated persistent ring) launched.
+- **B0.434 T-175 committed (dfee377); Opus review launched (focus: no bent tests).**
+  - **Product fixes:**
+    - `planning_tune()` race: `set_channels` returned 409 before the first block.
+    - Mock band-edge folding: `Plan::served()`, with a new unit test.
+  - **Test fixes (each must keep its property):** fresh-status waits; exact frame spacing except across recording loop splices; band-power station check; quantisation-limited out-of-band skip with inventory/occupancy guards.
+  - **Build:** opt-level=2 overrides added.
+  - **Results:** hk-core 138; t057 5/5 guarded, but the ~9.8 s failing schedule never reproduced, so the guard was vacuous. Lint green.
+  - **Timing:** the post-merge full check measures real nextest time with the overrides.
+- **B0.435 T-175 review (Opus): FIX-FIRST, test-only.**
+  - **Product changes are fine:**
+    - `planning_tune`: `apply_channels` re-plans on the pipeline thread; no stale lanes.
+    - `Plan::served()`: math is sound, noise is seeded, T-141 central-half checks are unaffected.
+    - Fresh-status waits assert the same things as before.
+    - Band-power station check still fails when the station is missing.
+    - Opt-level overrides are placed correctly.
+  - **Tighten:**
+    - The t057 occupancy guard can't see the quantisation-limited windows, which overlap the recording. Check that no learned channel or inventory emitter is centred outside the band.
+    - Skip only detections that are both marginal and quantisation-limited.
+    - Bound the recipe_runtime splice exemption to less than 2 frames.
+  - **Merge risk:** the mock rendering change may shift other retuned-mock tests (occupancy_retune, bandit e2e, stream_external). The post-merge full check covers this.
+  - **Next:** fix round launched (fresh Opus, test files only).
+- **B0.436 T-179 launched (Sonnet, UI-only).** Goal: MUI bundle within 45 KB gzip, via code splitting of the Decode and Review areas or dead-code removal. It re-runs the smoke script afterwards.
+  - **Rust-building agents at cap (4):** T-173, T-175 fix round, T-178, and the full check.
+  - **Unblocked but waiting for a Rust slot:** T-174, plus MUI API gaps T-159..T-168.
+- **B0.437 T-173 WIP (8f5eb0c): 11 of 12 pipeline tests pass.** A small finisher is launched to update the last one and lint.
+  - **Design:** every other pass shifts each hop centre by `dc_dither_hz` (75 kHz). Hop count and pass length are unchanged, so revisit time is unchanged (tested).
+  - **Passing:**
+    - hk-core, including a new test that every cell gets an off-DC view within 2 passes.
+    - `occupancy_dc_dither`: a carrier exactly at a hop LO is learned (FCO 0.503 vs truth 0.489, 0 suspect).
+    - `occupancy_sparse_visits`: unchanged.
+  - **Failing:** `observation_log` asserts exactly 1 sweep geometry; dithering intentionally gives 2.
+  - **Finisher's job:** assert exactly the even/odd plan geometries and alternating parity, with no loosening.
+  - **ADRs:** ADR-0005 and ADR-0012 §1.3 amended.
+  - **T-124 433.375 MHz:** clean views are now guaranteed by construction, but the root cause is unproven until T-124 reruns.
+- **B0.438 T-175 fix round passed (c11f05a, test-only).**
+  - **Tighter t057 guards:** stored learned channels must be centred in the band; no inventory emitter out of band; skips only marginal AND quantisation-limited detections.
+  - **Splice exemption:** now bounded to a gap under 2 frames.
+  - **t057 ×3:** all pass. Run 3 skipped 2 boxes, with 0 learned channels and 0 emitters out of band, so the guards were actually exercised. No product bug found.
+  - **Other tests:** mock_device 2/2; recipe_runtime 8/8; lint clean.
+  - **Next:** merges after the T-157 full check; the post-merge check measures the opt-level speed-up.
+- **B0.439 T-157 full check green (3ee5ec1).** Lint clean; 1362/1362 tests; acceptance 28/28. The `--iq-retention` and `--iq-buffer-max` flags are usable on main; storage is still the grow-and-delete kind until T-178.
+- **T-175 merged (c11f05a).** Dev opt-level=2 is now active for hk-dsp, hk-core, hk-pipeline and hk-demod. The next full check measures the speed-up.
+- **B0.440 Timed full check started on main after the T-175 merge (bf65fb0),** to measure the opt-level=2 speed-up.
+- **T-174 launched (Opus): the live candidate path now uses the per-tuning DC twin rule.**
+  - Reuses the T-172 helper, with a small per-cell recent-clean index.
+  - Refuted DC flags don't count toward bandit suspect bans.
+- **B0.441 T-179 committed (8d38d3b, Sonnet): MUI bundle within budget via code splitting.**
+  - Build: esbuild `--splitting` ESM; `index.html` loads the entry as a module.
+  - Decode and Review load lazily on first use.
+  - Initial load: 78.1 KB min / 29.3 KB gzip (was 140.2 / 48.2). Lazy chunks: decode 10.0 KB gz, review 11.3 KB gz. CSS unchanged at 32.3 KB.
+  - No Rust change. npm test 20/20. Smoke: 20/20 checks at both viewports, including lazy Decode and Review.
+  - Merges after the timed T-175 full check.
+- **B0.442 The T-175 opt-level=2 speed-up is confirmed on main (2f268c0).**
+  - **Results:** lint clean; nextest 1363/1363 in 135 s, was 598 s on the previous check (4.4× faster); acceptance 28/28 in 12 s, was 71 s.
+  - **Load:** load averages were 22 → 10 during the run.
+  - **Merged:** T-179 (8d38d3b) and its worktree removed.
+  - **Next:** full check.
+- **B0.443 T-173 committed (d313f56); Opus review launched.**
+  - **Change:** every other pass shifts each sweep hop centre by `dc_dither_hz` (75 kHz). Revisit time is unchanged.
+  - **Evidence:**
+    - New hk-core test: every cell gets an off-DC view within 2 passes.
+    - `occupancy_dc_dither`: a carrier at a hop LO is learned (FCO 0.503 vs 0.489).
+    - `observation_log` now requires the two plan geometries exactly; no product bug found.
+    - Tests: hk-pipeline 12, hk-core 20; lint clean.
+  - **ADRs:** ADR-0005 and ADR-0012 §1.3 amended.
+  - **Review focus:** plan-edge coverage, bandit/verification dwell interactions, occupancy weighting by parity, history tiles, mock re-render cost, config/disable, and whether the live demo retunes more.
+- **B0.444 T-180 launched (Opus) into the build slot the T-173 finisher freed.**
+  - **Goal:** the mock SDR models a gain-dependent receiver noise floor before int8 quantisation when rendering below the recording gain, so low-gain windows are no longer 85% zero codes.
+  - **Must hold:** fidelity tests, the `scheduler_history` 0.5 dB check and the band-edge test stay unchanged.
+  - **t057:** if its quantisation-limited skip goes unused, remove it or keep it as a no-op.
+- **B0.445 Full check green after the T-179 merge (f7f5212).** Lint clean; 1363/1363 in 134.8 s; acceptance 28/28 in 11.4 s.
+  - **Launched:** T-167 (Sonnet, MUI API gap 10). The spectrum stream header gets `dc_notch_hz`, taken from the detector's DC rule rather than hardcoded. The UI uses it when present.
+  - **Conflict risk:** T-167 and T-178 both edit `docs/api.md` and `api_contract.rs`.
+- **B0.446 T-173 review (Opus): MERGE; merged d313f56.**
+  - **Coverage design holds.**
+    - Hops with room shift toward the band middle.
+    - Bands with no room shift up, so only their lowest 75 kHz is unseen on odd passes, far from any LO.
+    - `dc_dither_hz` is plan-configurable: 0 disables it and negative values are rejected.
+  - **`observation_log`:** the change tightens the test rather than loosening it.
+  - **Golden diffs:** only odd-pass ±75 kHz centre shifts.
+  - **Weighting:** occupancy and report coverage use per-record geometry, so no parity bias.
+  - **Verified by coordinator:** the DC rule uses the STFT frame `geometry.center_hz`, which follows the stream tuning. Replays that ignore virtual tunes can't falsely refute a DC flag.
+  - **Live-device effect (user heads-up):** a single-hop scheduled plan on the HackRF (`hackriffd` or `hk serve --schedule`) now retunes 75 kHz every 50 ms step, where it previously held one tune. Plain `hk serve` without `--schedule` is unchanged.
+  - **Follow-up:** T-181 (single-hop cadence, parity-based geometry pick, dither-disabled warning, test margin, ADR wording).
+  - **Next:** full check.
+- **B0.447 T-174 committed (9c58f81); Opus review launched. Full check for the T-173 merge started.**
+  - **Change:**
+    - Bounded per-reader `dc_twin` index (no locks or DB) reusing the T-172 `refute_dc_suspects` helper.
+    - `MemberRefuted` event decrements candidate and pending-dwell suspect counts in both attention services.
+    - Refuted flags don't count toward bandit bans.
+  - **Tests (unit only):** hk-pipeline 21, hk-context 17; lint clean.
+  - **Review focus:** hot-path cost under detection floods, confirmation lag, `MemberRefuted` races/double-decrement/ban reversal, whether an e2e mock-SDR test is needed.
+- **B0.448 MAIN RED after the T-173 merge (a572e58).**
+  - **Failure:** `hk-sim::sim round_robin_revisit_matches_its_schedule` fails. The hk-sim crate was outside T-173's targeted filters and its reviewer's scope.
+  - **Unaffected:** lint clean, acceptance 28/28; nextest stopped at 1124/1365 (fail-fast).
+  - **Next:** investigating now. Fix forward if the dither legitimately changed round-robin revisit geometry, else revert T-173. No merges until main is green.
+- **B0.449 Main fix committed (hk-sim max revisit +1 dwell under the T-173 dither). T-124 board corrected at the user's prompt.**
+  - **T-124:** its "blocked" status was stale. What it actually waited on (T-146, T-147, T-173, T-176) is merged but was never listed in its deps. Those four are now added, status is in-progress, and it has been launched.
+  - **M2 exit criterion:** T-124's acceptance_m2 tests (a)–(j) all pass with a-priori thresholds, and the main full check is green.
+  - **Retagged M2-hardening (not required for M2 exit):** T-174 (live candidates DC twin), T-180 (mock noise floor), T-181 (dither follow-ups).
+  - **T-174 review: MERGE.**
+    - Twin rule matches T-172.
+    - No double decrement and no ordering race.
+    - Scheduler and passive paths are exclusive.
+    - Confirmation is not delayed.
+    - Bans run to expiry.
+    - Follow-ups: pool rebuild cost on Jetson, MAX_CLEAN eviction counter, e2e assertion in `occupancy_sparse_visits`, f_cell source, ADR note.
+  - **T-167 committed (eb63567):** spectrum header carries `dc_excluded_hz`, taken from `DC_NOTCH_HALF_HZ` (DcRule tolerance); docs, stream-contract and api_contract updated; UI prefers the header value.
+  - **Merge queue once main is green:** T-174, T-167.

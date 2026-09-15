@@ -148,10 +148,16 @@ struct Inner {
     /// Emitters counted as first sightings over the last close's window.
     sighted: std::collections::HashSet<hk_model::ids::EmitterId>,
     repo: Option<Repository>,
+    /// T-172: Provenance id → tuning centre, Hz, for the DC-twin rule.
+    tune_centres: std::collections::HashMap<hk_model::ids::ProvenanceId, f64>,
     unit: PowerUnit,
     stats: OccupancyServiceStats,
     finished: bool,
 }
+
+/// Provenances whose tuning centre is remembered before the cache is dropped (one per distinct
+/// tune/gain state).
+const TUNE_CENTRE_CACHE_MAX: usize = 65_536;
 
 /// Level-0 history under the product lock, held for one read only.
 struct ProductLevels<'a>(&'a Mutex<FloorProduct>);
@@ -604,6 +610,7 @@ impl OccupancyService {
                 det_cursor_ns: i64::MIN,
                 sighted: std::collections::HashSet::new(),
                 repo: None,
+                tune_centres: std::collections::HashMap::new(),
                 unit: PowerUnit::Dbfs,
                 stats,
                 finished: false,
@@ -976,18 +983,38 @@ impl OccupancyService {
             inner.stats.errors += 1;
             return Vec::new();
         };
-        // T-147: read a DC-twin slack either side so a DC flag near the span's edge can be
-        // refuted, then keep the extents overlapping `span`.
-        let slack = channels::DC_TWIN_SLACK_NS;
+        // T-147: read a DC-twin slack (one time cell, T-172) either side so a DC flag near the
+        // span's edge can be refuted, then keep the extents overlapping `span`.
+        let rule = channels::DcTwinRule {
+            f_cell_hz: inner.plan.f_cell_hz(),
+            slack_ns: self.t_cell_ns.max(1),
+            lo_tolerance_hz: hk_detect::DcRule::default().tolerance_hz,
+        };
         let wide = TimeRange::new(
-            span.start.saturating_add_nanos(-slack),
-            span.end.saturating_add_nanos(slack),
+            span.start.saturating_add_nanos(-rule.slack_ns),
+            span.end.saturating_add_nanos(rule.slack_ns),
         );
         match repo.detections_in_region(&Region::new(FreqRange::new(0.0, 1e12), wide)) {
-            Ok(d) => channels::extents_of(&d, inner.plan.f_cell_hz())
+            Ok(d) => {
+                // T-172: a twin's own tuning centre, from its Provenance (content-addressed, so
+                // immutable and cached per id; failed reads are not cached).
+                let cache = &mut inner.tune_centres;
+                if cache.len() > TUNE_CENTRE_CACHE_MAX {
+                    cache.clear();
+                }
+                channels::extents_of(&d, rule, |det| {
+                    let id = det.provenance_ref;
+                    if let Some(&c) = cache.get(&id) {
+                        return Some(c);
+                    }
+                    let c = repo.provenance(id).ok()?.tune.center_hz;
+                    cache.insert(id, c);
+                    Some(c)
+                })
                 .into_iter()
                 .filter(|e| e.time.end >= span.start && e.time.start <= span.end)
-                .collect(),
+                .collect()
+            }
             Err(_) => {
                 inner.stats.errors += 1;
                 Vec::new()
