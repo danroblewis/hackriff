@@ -1970,7 +1970,7 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: blocked
+    status: in-progress
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2298,7 +2298,7 @@ tasks:
   - id: T-146
     milestone: M2
     title: "Alarm path vs survey report disagree on baseline maturity: AlarmService suppresses every busier/level input as immature-baseline while the report shows the baseline available (injected channel busier z 11.4)"
-    status: review
+    status: done
     commit: 5739fde
     decision: "user 2026-09-15: accumulate busier/quieter alarm evidence across consecutive intervals (sequential/Stouffer like the report) AND correct between_var for expected binomial sampling noise; ADR-0012 §3.4/§7.2 amended, false-alarm budget kept. Gain step: pass = no alarm + step disclosed in provenance (no explained-anomaly row)"
     deps: []
@@ -2315,7 +2315,8 @@ tasks:
   - id: T-147
     milestone: M2
     title: "Channel FCO under the scheduler: 50% channel reads FCO 0.000 (truth 0.494) and a 10% markov channel is never learned in the T-124 scene"
-    status: review
+    status: done
+    commit: 47dc746
     deps: [T-141]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2380,7 +2381,7 @@ notes:
   - id: T-150
     milestone: MUI
     title: "MUI shell: top bar with Explore/Decode mode toggle, layout grid, Outputs dock (live audio + record streams: meter/rate, mute, copy address, stop; Listen adds a stream) and always-on Capture timeline (scrub, reviewing N ago / LIVE)"
-    status: review
+    status: done
     commit: 7df8129
     deps: [T-149]
     parallel_group: MUI-SHELL
@@ -2396,7 +2397,7 @@ notes:
   - id: T-151
     milestone: MUI
     title: "MUI Explore sidebars: inventory Candidates/Confirmed (sortable, Promote/Delete reachable without horizontal scroll), Selections with actions, right focus panel (big frequency, refined-from-output note, measurements, ranked explanations as suggestions, actions Listen/Decode/Record-Export/Stream/Promote/Delete)"
-    status: review
+    status: done
     commit: 7ad402a
     deps: [T-149]
     parallel_group: MUI-EXPLORE
@@ -2412,7 +2413,7 @@ notes:
   - id: T-152
     milestone: MUI
     title: "MUI centre: spectrum trace + existing WebGL waterfall rehomed, brackets for confirmed/candidate/focused signals, DC mask, drag region select, hover readout, capture-timeline time cursor"
-    status: review
+    status: done
     commit: 9bbd85a
     deps: [T-149]
     parallel_group: MUI-CENTRE

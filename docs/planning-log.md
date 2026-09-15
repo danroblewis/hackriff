@@ -1762,3 +1762,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Re-exports `promoteEntry`/`deleteEntry` from the old UI module. T-156 must move these before retiring the old UI.
   - Merge queue after the T-170 full check: T-147, T-146, T-150, T-151, T-152, then one combined full check.
 - **B0.407 T-158 + T-171 launched as one Sonnet task.** Both are MUI API gaps on `/api/inventory`: per-row SNR and peak level, plus a `total` count for the list. They are combined because they touch the same route, docs and contract. Other API gaps wait until the M2 tail merges.
+- **B0.408 T-170 full check green (7af4dc1). Five tasks merged in sequence without conflicts; combined full check started; T-124 resumed.**
+  - **T-170 full check:** lint clean; 1334/1334 tests; acceptance 28/28 (63 s).
+  - **Merged:** T-147 (695d850), T-146 (132eccf), T-150 (c1b296a), T-151 (8866b71), T-152 (0c596a5). Their worktrees were removed.
+  - **If the combined check fails:** bisect by merge.
+  - **T-124 (M2 blind acceptance):** resumed now that T-146 and T-147 are on main.
