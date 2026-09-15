@@ -2923,3 +2923,48 @@ notes:
     model: opus
     effort: high
     core_interface: true
+  - id: T-185
+    milestone: M1-fix
+    title: "RDS on REAL air fails past block sync: fm_100p8M capture reaches block sync but block/field stages yield no data and rare groups are all CRC-invalid (passes on synthetic T-094); fix and add a real-air RDS acceptance"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: FIELD
+    use_cases: [SIGNAL-062]
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "RDS recipe decodes CRC-valid groups (PI + PS + RadioText, high CRC-valid rate) on the real fixtures/hackrf/2026-09-13 fm_100p8M capture through the mock SDR; root cause identified (57 kHz carrier phase/lock, biphase polarity, differential decode direction, offset words A/B/C/C'/D, CRC-10 syndrome poly 0x5B9, timing); new real-air RDS acceptance test on that capture (blind: no PI/PS lookup; expected values only in assertions, from an independent oracle such as redsea or a manual decode); synthetic T-094 still green"
+    area: crates/hk-blocks, crates/hk-recipe (RDS recipe), crates/hk-demod, tests/e2e/tests/acceptance
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-186
+    milestone: M2-fix
+    title: "Detection -> identification latency: a strong continuous WFM station takes too long to get family + top explanation"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: FIELD
+    use_cases: [SIGNAL-062]
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "per-stage latency budget measured (first detection -> track confirm -> candidate -> classification/family -> explanation ranking -> UI-visible) on the fm_100p8M capture via mock SDR; root causes (dwell/revisit, classification cadence, refinement iterations, ranking cadence); a strong continuous station classified (family + top explanation) within a few seconds of first detection, asserted in a test with an a-priori bound; report before/after budget"
+    area: crates/hk-pipeline (family/classifier, candidates, refine), crates/hk-context (explanations)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-187
+    milestone: M1-fix
+    title: "Verify candidate discard end-to-end: delete a candidate via UI/API -> leaves list; raw detections/history kept; later re-detection makes a new candidate; fix if not usable"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: FIELD
+    use_cases: []
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "scripted check against hk serve (mock SDR, not the user's demo data) + the new MUI Explore Delete action: candidate removed from /api/inventory candidates; detections/history rows retained; re-detection after delete yields a new candidate id; any gap fixed with a test"
+    area: crates/hk-api (inventory delete), crates/hk-model, ui/src/app/explore
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false

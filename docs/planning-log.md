@@ -2155,3 +2155,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-184 (Opus high) launched: deterministic learning under DC twin refutation. It is the M2 exit blocker, and T-124 is blocked on it.
     - T-180 merged; full check running.
     - T-178 fix round waits for a Rust slot.
+- **B0.458 User field-test feedback (live demo, real 100.8 MHz FM) filed. A and B take priority over new feature work.**
+  - **T-185 (A, Opus high, launched):** RDS reaches block sync on real air but produces no data / CRC-invalid groups, while it passes on synthetic. Fix, and add a real-air RDS acceptance on the `fm_100p8M` capture.
+  - **T-186 (B, Opus high, next free Rust slot):** detection→identification latency for a strong continuous WFM station. Measure the per-stage budget; target is family plus top explanation within a few seconds.
+  - **T-187 (C, Sonnet):** verify candidate discard end to end (removed from list, raw detections kept, re-detection gives a new candidate), using mock `hk serve` rather than the user's demo data.
+  - **Scheduling:** the T-178 fix round and the remaining MUI API gaps queue behind A and B.
+  - **Roadmap:** the strategic auto-decode direction is noted in docs/11 as proposed MAUTO, not scheduled. Ask the user before scheduling, after M2 closes and MUI is usable.
