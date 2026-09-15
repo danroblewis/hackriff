@@ -42,6 +42,14 @@ pub mod recipes;
 pub mod selections;
 pub mod tcp;
 
+// ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).
+pub mod anomalies; // T-122
+pub mod attention; // T-119
+pub mod observations; // T-115
+pub mod occupancy; // T-118
+pub mod reports; // T-121
+pub mod schedule; // T-120
+
 pub use hk_stream as stream;
 pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};
 

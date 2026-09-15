@@ -138,6 +138,13 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/captures/{id}"),
     ("DELETE", "/api/captures/{id}"),
     ("GET", "/api/captures/{id}/frames"),
+    // Attention + memory (ADR-0012 §11): each M2 task appends its rows under its own marker.
+    // T-115 observations
+    // T-118 occupancy
+    // T-119 sites, baselines, candidates, weights
+    // T-120 scheduler
+    // T-121 reports
+    // T-122 anomalies
 ];
 
 /// Server settings.
@@ -680,8 +687,15 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::recipes::route(state, &ctl)) // T-088
         .or_else(|| crate::inspector::route(state, &ctl)) // T-089
         .or_else(|| crate::assist::route(state, &ctl)) // T-091
-        .or_else(|| crate::captures::route(state, &ctl))
-    // T-092
+        .or_else(|| crate::captures::route(state, &ctl)) // T-092
+        // Attention + memory (ADR-0012 §11): one line per owning task, pre-added by T-113.
+        .or_else(|| crate::observations::route(state, &ctl)) // T-115
+        .or_else(|| crate::occupancy::route(state, &ctl)) // T-118
+        .or_else(|| crate::attention::route(state, &ctl)) // T-119
+        .or_else(|| crate::schedule::route(state, &ctl)) // T-120
+        .or_else(|| crate::reports::route(state, &ctl)) // T-121
+        .or_else(|| crate::anomalies::route(state, &ctl))
+    // T-122
     {
         let allow = r
             .allow

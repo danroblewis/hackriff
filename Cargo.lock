@@ -611,6 +611,7 @@ dependencies = [
  "hk-dsp",
  "hk-e2e",
  "hk-model",
+ "hk-store",
  "num-complex",
  "serde",
  "serde_json",

@@ -1,5 +1,6 @@
 # C04 · attention-scheduler
 > Layer A — Acquire · Status: taxonomy frozen 2026-09-13 (resolved in docs/06 §5) · Depends on: C01, C02, C03, C10, C12, C22, C23, C29 · Used by: C02, C03, C23, C34, C37, C39
+> **M2 contracts:** [ADR-0012](../adr/0012-attention-memory-contracts.md) §1 (observation log, reason codes), §5 (bandit, preemption tiers, POI); types in `hk_model::attention::{observation, schedule, score}`.
 
 ## Purpose
 Decides where the single half-duplex radio points. It alternates discovery sweeps (C02) with dwells (C03), weighted by user intent, novelty, expected burst timing and decoder demand. The **interestingness score it prioritises on is computed by C12** (occupancy-baseline, which holds the baselines and novelty); C04 only *consumes* it and does not recompute it (docs/06 §5). docs/06 calls it the single hardest design problem for a one-radio device. It turns workflow step 2 (automate) into efficient use of a 20 MHz window across 6 GHz.

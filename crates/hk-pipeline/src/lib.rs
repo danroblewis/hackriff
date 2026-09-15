@@ -46,6 +46,13 @@ pub mod recipes;
 pub mod refine;
 pub mod stats;
 
+// ADR-0012 §11 attention + memory wiring (pre-added by T-113; the owners fill them in).
+pub mod alarms; // T-122
+pub mod attention; // T-119
+pub mod observe; // T-115
+pub mod occupancy; // T-118
+pub mod reports; // T-121
+
 mod capture;
 mod detect;
 mod history;

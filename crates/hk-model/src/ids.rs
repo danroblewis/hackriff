@@ -110,6 +110,9 @@ define_ids! {
     /// A persisted region selection (T-052): a frequency extent, optionally a time extent, the
     /// user named. User metadata, mutable.
     SelectionId;
+    /// A survey site (ADR-0012 §3.5): a discrete place the device was parked, the key of
+    /// occupancy baselines for a moving device. Aggregate, user-renamable.
+    SiteId;
 }
 
 #[cfg(test)]

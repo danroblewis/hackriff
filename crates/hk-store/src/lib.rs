@@ -16,6 +16,11 @@ pub mod history;
 pub mod outputs;
 pub mod radiometry;
 
+// ADR-0012 §9/§11 (pre-added by T-113; the owners fill them in).
+pub mod baseline; // T-119
+pub mod observation; // T-115
+pub mod occupancy; // T-118
+
 pub use history::{
     CellStats, ChannelSummary, FrameInput, GainState, HistogramConfig, IngestOutcome, LevelConfig,
     ProvenanceSummary, Pyramid, PyramidConfig, PyramidStats, RegionHistory, RegionQuery,

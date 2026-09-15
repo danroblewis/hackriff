@@ -25,6 +25,9 @@
 //! - [`repo`]: the SQLite [`Repository`] (ADR-0006).
 //! - [`sigmf`]: SigMF `.sigmf-meta` types with the `hackriff:` extension namespace
 //!   (docs/sigmf-extension.md).
+//! - [`attention`]: M2 attention + memory contracts (ADR-0012): observation log, occupancy,
+//!   baselines, interestingness, bandit/POI, survey reports, novelty alarms. Not re-exported at
+//!   the crate root; use `hk_model::attention::…`.
 //!
 //! # Measurement vs interpretation (docs/07 intro; planning-log P2.1)
 //!
@@ -39,6 +42,7 @@
 //!
 //! Aggregates are summaries that can be rebuilt from the measurements and interpretations.
 
+pub mod attention;
 pub mod calibration;
 pub mod cluster;
 pub mod content;
