@@ -8,7 +8,13 @@
 //!  "content":{"callsign":"BAW123"},"content_class":"unrestricted"}
 //! {"type":"annotation","value":"adsb","kind":"ground-truth","confidence":1.0,"metadata":{}}
 //! {"type":"log","msg":"lost sync"}
+//! {"type":"ready"}
 //! ```
+//!
+//! **Readiness (T-223).** A decoder that declares `input.ready_signal` in its manifest sends
+//! `{"type":"ready"}` once it can account for the input it is given (the readsb wrapper: once
+//! readsb's Beast connection and its pre-roll are in place). Producers that can pause hold their
+//! first record until then.
 //!
 //! **Class rule (legal guardrail).** The host passes a *ceiling*: the manifest's
 //! `output.content_class` clamped to the input channel's class. A line without `content_class`
@@ -61,6 +67,9 @@ pub enum PluginOutput {
     Annotation(Annotation),
     /// A log line. The host stores it only when the ceiling permits content.
     Log(String),
+    /// The plugin can account for the input it is given from now on (T-223). Carries nothing, so
+    /// no class applies.
+    Ready,
 }
 
 /// A parsed line and what the class rules did to it.
@@ -139,6 +148,15 @@ pub fn parse_line(
         let msg = obj.get("msg").and_then(Value::as_str).unwrap_or_default();
         return Ok(Parsed {
             output: PluginOutput::Log(msg.to_owned()),
+            clamped: false,
+            unknown_class: false,
+            sanitized: 0,
+        });
+    }
+    if kind == "ready" {
+        // Readiness carries no values, so it is accepted under every class (T-223).
+        return Ok(Parsed {
+            output: PluginOutput::Ready,
             clamped: false,
             unknown_class: false,
             sanitized: 0,

@@ -85,6 +85,17 @@ fn dummy_manifest(dir: &Path, exe: &Path, args: &[&str], queue_bytes: usize) -> 
     path
 }
 
+/// [`dummy_manifest`] plus `input.ready_signal` (T-223): the plugin promises a `ready` line, so a
+/// lossless chain must hold its first record until it arrives.
+fn dummy_ready_manifest(dir: &Path, exe: &Path, args: &[&str]) -> PathBuf {
+    let path = dummy_manifest(dir, exe, args, 8 << 20);
+    let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    m["input"]["ready_signal"] = json!(true);
+    let path = dir.join("dummy-ready-manifest.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    path
+}
+
 /// A plan extra whose only chain is a dummy-plugin coverage chain over `center ± 0.5 MHz`.
 fn coverage_plan(center: f64, manifest: &Path) -> serde_json::Value {
     json!({ "pipeline": { "chains": [{
@@ -190,6 +201,64 @@ fn a_short_lossless_replay_attaches_its_coverage_chain_and_feeds_every_sample() 
         "the plugin decoded"
     );
     assert_eq!(s.counter("/source/coverage_wait_timeouts"), 0);
+}
+
+/// T-223: a plugin whose manifest declares `input.ready_signal` is not fed until it has said it
+/// is ready. `Running` (its process is attached) is not enough: the readsb wrapper is attached
+/// long before readsb's Beast connection exists, and under load the squitters fed in between were
+/// decoded without their sample time. Here the plugin reports ready 2 s after it starts; before
+/// the fix the chain fed it from the first record, so `plugin_fed_before_ready` was non-zero.
+#[test]
+fn a_plugin_that_declares_readiness_is_not_fed_until_it_is_ready() {
+    let src = TempDir::new("ready-src");
+    let dir = TempDir::new("ready");
+    let Some(exe) = dummy_plugin(&dir.0) else {
+        return;
+    };
+    let meta = tone_recording(&src.0, "short", 2.4e6, 0.1, 1090e6, None);
+    let manifest = dummy_ready_manifest(
+        &src.0,
+        &exe,
+        &[
+            "--every",
+            "1",
+            "--profile",
+            "adsb-like",
+            "--ready-after-ms",
+            "2000",
+        ],
+    );
+    let (cfg, replay, _input) = blind_replay_config(
+        &dir.0,
+        &meta,
+        coverage_plan(1090e6, &manifest),
+        Pacing::Unpaced,
+    );
+    let (s, fired) = wait_guarded(start(cfg, replay), Duration::from_secs(120));
+    eprintln!("{}", s.to_text());
+    assert!(!fired, "the run did not finish; the watchdog stopped it");
+    assert!(s.errors.is_empty(), "{:?}", s.errors);
+    assert_eq!(s.counter("/chains/attached"), 1);
+    assert_eq!(
+        s.counter("/chains/plugin_fed_before_ready"),
+        0,
+        "records reached the plugin before it reported ready"
+    );
+    assert_eq!(
+        s.counter("/chains/plugin_ready_timeouts"),
+        0,
+        "the lossless chain gave up waiting for readiness"
+    );
+    // Holding the first record loses nothing: the gate cursor holds capture while the chain waits.
+    assert_eq!(s.counter("/chains/plugin_dropped"), 0);
+    assert_eq!(
+        s.counter("/chains/plugin_samples"),
+        s.counter("/source/samples")
+    );
+    assert!(
+        s.counter("/chains/plugin_decodes") > 0,
+        "the plugin decoded nothing"
+    );
 }
 
 /// T-103: a plugin that takes longer to start reading than the old 2 s settle window (the flaky

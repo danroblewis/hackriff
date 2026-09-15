@@ -10,6 +10,8 @@
 //! - `--read-delay-us N`: sleep N µs after reading each record (a slow decoder that still makes
 //!   progress, for lossless backpressure tests).
 //! - `--start-delay-ms N`: sleep N ms before reading anything from stdin (a slow start-up, T-103).
+//! - `--ready-after-ms N`: sleep N ms, then emit the contract's `{"type":"ready"}` line before
+//!   reading stdin (a decoder that needs setup, T-223).
 //! - `--claim-class C` / `--content TEXT`: claim a class and attach content (clamping, gating).
 //! - `--annotate`: also emit an `annotation` line per message.
 //! - `--datatype D`: exit with code 4 unless the header's datatype is D.
@@ -47,6 +49,7 @@ struct Args {
     stall_child: bool,
     read_delay_us: u64,
     start_delay_ms: u64,
+    ready_after_ms: Option<u64>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -65,6 +68,7 @@ fn parse_args() -> Result<Args, String> {
         stall_child: false,
         read_delay_us: 0,
         start_delay_ms: 0,
+        ready_after_ms: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -114,6 +118,13 @@ fn parse_args() -> Result<Args, String> {
                 args.start_delay_ms = value()?
                     .parse()
                     .map_err(|e| format!("--start-delay-ms: {e}"))?
+            }
+            "--ready-after-ms" => {
+                args.ready_after_ms = Some(
+                    value()?
+                        .parse()
+                        .map_err(|e| format!("--ready-after-ms: {e}"))?,
+                )
             }
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -325,6 +336,14 @@ fn main() {
     if args.start_delay_ms > 0 {
         // A slow start-up (T-103): nothing is read from stdin until the delay has passed.
         std::thread::sleep(Duration::from_millis(args.start_delay_ms));
+    }
+    if let Some(ms) = args.ready_after_ms {
+        // A decoder that needs setup before it can account for input (T-223): it reports ready
+        // only after `ms`, and a producer that can pause must not have fed it before that.
+        std::thread::sleep(Duration::from_millis(ms));
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "{}", json!({"type": "ready"}));
+        let _ = out.flush();
     }
     match run(&args) {
         Ok(records) => eprintln!("hk-dummy-plugin: stdin closed after {records} records"),

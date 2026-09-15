@@ -408,6 +408,18 @@ fn signal_001_adsb_readsb_plugin_chain() {
         0,
         "[{SIGNAL_001}] lossless replay drops no plugin input"
     );
+    // T-223: nothing is fed before the decoder reports ready, so no squitter is decoded while the
+    // wrapper is still setting up and loses its sample time (the first one did, under load).
+    assert_eq!(
+        s.counter("/chains/plugin_fed_before_ready"),
+        0,
+        "[{SIGNAL_001}] records reached the decoder before it was ready"
+    );
+    assert_eq!(
+        s.counter("/chains/plugin_ready_timeouts"),
+        0,
+        "[{SIGNAL_001}] the readiness wait timed out"
+    );
     assert_eq!(
         decodes, PLUGIN_DECODES,
         "[{SIGNAL_001}] readsb decodes {decodes} of {PLUGIN_DECODES}"

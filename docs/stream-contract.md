@@ -249,7 +249,8 @@ JSON was chosen because it needs no new dependency and matches the rest of the c
     "framing": "raw",                    // hackriff-v1 (default) | raw
     "sample_rates_hz": [2400000],        // empty = any
     "center_hz": {"min": 1089e6, "max": 1091e6},
-    "bandwidth_hz": {"max": 2.4e6}
+    "bandwidth_hz": {"max": 2.4e6},
+    "ready_signal": true                 // the plugin sends a `ready` line (§9.3); default false
   },
   "output": {
     "format": "ndjson",
@@ -257,7 +258,7 @@ JSON was chosen because it needs no new dependency and matches the rest of the c
     "content_class": "unrestricted"      // REQUIRED ceiling, enforced by the host
   },
   "restart": {"backoff_initial_ms": 200, "backoff_max_ms": 30000, "max_restarts": 5, "window_s": 300},
-  "limits": {"input_queue_bytes": 8388608, "stall_timeout_ms": 10000,
+  "limits": {"input_queue_bytes": 8388608, "stall_timeout_ms": 10000, "ready_timeout_ms": 5000,
              "max_message_bytes": 1048576, "stderr_lines": 200, "nice": 10}
 }
 ```
@@ -286,6 +287,7 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 | `decode` | `sample_index`, `frame_model` (default `output.schema_id`), `crc_status` (`valid`/`invalid`/`corrected`/`no-crc`/`unknown`, default `unknown`), `identity` `{scheme, value}`, `metadata`, `content`, `content_class` | `Decode`. `decoder_id`/`version` come from the manifest; `demodulation_ref`/`recording_ref` from the plugin context. |
 | `annotation` | `value` (label, required), `kind` (`label`/`correction`/`ground-truth`), `confidence` (0–1, default 1), `metadata`, `content`, `content_class` | `Annotation`, author `decoder`. The target is the context's detection, else region, emitter or recording. |
 | `log` | `msg` | Log ring |
+| `ready` | — | Nothing stored; marks the plugin ready for input (see **Readiness**). |
 
 **Class rule:**
 - The **ceiling** is `clamp(manifest output.content_class, input channel content_class)`: a restricted channel fed to an `unrestricted` decoder still yields restricted output.
@@ -311,6 +313,8 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 - **Example paging policy (not a plugin):** `crates/hk-plugins/policies/restricted-paging.json` (`hk_plugins::EXAMPLE_RESTRICTED_PAGING_OUTPUT`). It allowlists only `capcode` (digits, at most 8), `function` (enum `0`–`3`), `baud` (enum `512`/`1200`/`2400`) and `encoding` (enum `numeric`/`alpha`/`tone`). `t` is host-stamped from `sample_index`. Message bodies, numeric pages included, are content and are never allowlisted.
 
 **Logs:** plugin `log` lines and stderr are stored in the log ring only when the ceiling permits content; otherwise they are counted (`log_lines_withheld`, `stderr_lines_withheld`). Host errors about malformed lines name the field, never the offending value. `PluginMonitor::log_tail()` returns the lines tagged with the ceiling, so a control API can gate them.
+
+**Readiness (T-223).** `PluginState::Running` only means the process is attached: a decoder can still be setting up what it needs to account for input. A manifest that sets `input.ready_signal: true` promises a `{"type":"ready"}` line once it is past that, and the host tracks it (`PluginStats::ready`, `PluginInstance::wait_ready`, and `records_offered_before_ready`, the records offered before the first `ready`). A producer that can pause — a lossless replay, whose gate cursor holds capture — must hold its first record until then; a producer that cannot (a live chain) waits at most `limits.ready_timeout_ms` (default 5 s) and then feeds anyway, counting it. A restart re-arms the flag: the new process reports ready again. Without the declaration a plugin is ready as soon as it is attached, and nothing waits. The `ready` line carries no values, so it is accepted under every class.
 
 **Time:** the host stamps rows from the line's `sample_index`, using the input anchor and rate (`PluginInstance::set_anchor` after a retune). Plugin wall-clock times are ignored.
 
