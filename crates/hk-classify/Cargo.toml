@@ -1,0 +1,12 @@
+[package]
+name = "hk-classify"
+description = "hackriff C15 modulation classifier (ADR-0016): the classical cascade lands in T-199; T-211 pre-adds the crate over the hk-model classification contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The contract types live in hk_model::classify so the repository can store and rank them without
+# a dependency cycle; this crate re-exports them and will hold the implementation.
+[dependencies]
+hk-model.workspace = true

@@ -111,7 +111,7 @@ A linked series of Detections (same `f±ε`, similar BW) with timing features: p
 - **Tests:** synthesise a periodic/hopping emitter; assert recovered period, hop set and duty cycle within tolerance.
 
 ### 2.11 Emitter  [C27] (the inventory entry)
-The persistent "thing seen on the air": `emitter_id`, current `f`/`BW`, `fingerprint` (C18), `first_seen`, `last_seen`, `count`, `classification` (family + confidence + open-set score + model version) as an **append-only history** (not overwritten), `identity` (decoded id such as ADS-B hex, RDS PI, MMSI, talkgroup) or `unknown`, `known_status` vs priors (`known` / `unexpected-here` / `unknown`), `tags`, and links to Tracks, Detections, Recordings, Demodulations, Explanations, Annotations.
+The persistent "thing seen on the air": `emitter_id`, current `f`/`BW`, `fingerprint` (C18), `first_seen`, `last_seen`, `count`, `classification` (family + confidence + open-set score + model version; from M3 the full §2.21 Classification) as an **append-only history** (not overwritten), with the current family picked by arbitration rank (§2.21), `identity` (decoded id such as ADS-B hex, RDS PI, MMSI, talkgroup) or `unknown`, `known_status` vs priors (`known` / `unexpected-here` / `unknown`), `tags`, and links to Tracks, Detections, Recordings, Demodulations, Explanations, Annotations.
 - **Identity & lifecycle:** `emitter_id` stable for the life of the cluster; created when detections cluster to a new fingerprint (C18); `last_seen`/`count` update continuously; classification is re-run and appended as models improve — the measurement it ran on is unchanged.
 - **Inventory lifecycle (T-078):** `lifecycle_state` is `candidate` / `confirmed` / `deleted`, with an append-only history (`emitter_lifecycle`: new and previous state, author `auto` or `user`, actor = rule id such as `hk-pipeline/confirm@1` or the API token fingerprint, reason, `t`).
   - Every emitter starts as a **candidate**. Candidates carry **recurrence statistics** from the observation ledger: occurrences (`count`), appearances (track observations, or decoder sightings when there are no tracks), span, on-air time (Σ appearance span × measured duty cycle; unknown duty adds nothing), duty cycle, and the latest appearances.
@@ -188,6 +188,36 @@ A region the user marked and keeps acting on: `selection_id`, `name`, `f_lo`/`f_
 - **Retention & size:** small; never auto-deleted (the user's memory of what mattered).
 - **Storage:** `selection` table (id, name, `f_lo`, `f_hi`, `t_lo`, `t_hi`, times, JSON body) in the run database, served by `/api/selections` (`crates/hk-api/src/selections.rs`), token + audit like the control API.
 - **Tests:** repository CRUD, validation, link ring and reopen (`hk-model` `repo/selections.rs`); HTTP CRUD, restart persistence, validation and auth (`crates/hk-api/tests/selections_api.rs`); UI store sync, offline fallback and action dispatch (`ui/test/selections.test.ts`).
+
+### 2.21 Classification  [C15] (*T-211*, [ADR-0016](adr/0016-classification-contracts.md) §1–§2)
+One C15 output about an emitter (`hk_model::classify::Classification`, schema 1):
+- `t`, `taxonomy` (e.g. `hk-mod@1`), `input` (the observation it ran on) and `coarse` (`analog` / `digital` / `noise-like` / `unknown`).
+- `posterior` **and** `likelihood` (evidence only): distributions over the taxonomy's families plus `unknown`, each summing to 1. No posterior entry is exactly 1.
+- `prior` (C17 `{prior_ref, lambda [λ₀..λ₃] with λ₀ ≥ 0.1, dist over known families}`, or none).
+- `family` (the top posterior label, possibly `unknown`), `confidence` (≤ 0.999) and `class` (`{label, p, dist, stage}` within the family, or none below its gate).
+- `open_set_score` (0–1) and `entropy_norm` (H/ln K, K = families + 1).
+- `stage` (`feature-tree` / `verifier` / `dl` / `decoder` / `user` / `chain` / `track-shape`) and `provenance` (rules@version, features version/ref, model ref when a DL stage decided, SNR vs gate, thresholds@version, suspect flags, power mode).
+- `flags` (`prior-tiebreak`, `prior-mismatch`, `below-gate`, `suspect-input`, `dl-shadow-disagrees`) and machine `reasons`.
+- **Taxonomy `hk-mod@1`** (data: `hk_model::classify::taxonomy`):
+  - analog → `analog` {am, nbfm, wfm, ssb, cw};
+  - digital → `ook-ask` {ook, ask4}, `fsk` {2fsk, gfsk, msk, 4fsk}, `psk-qam` {bpsk, qpsk, 8psk, qam16, qam64}, `ofdm`, `css` {chirp}, `dsss`, `pulsed` {ppm, pulse};
+  - noise-like → `noise-like`.
+
+  `unknown` is the open-set outcome at every level. A new class or family is a new version, and rows keep their version. `taxonomy::family_of(label, version)` maps pre-M3 labels (`fsk`, `2fsk`, `ook`, `wfm` …). Service labels (`adsb`, `fm-broadcast`, decoder ids) map to nothing.
+- **Storage (legacy fit):** additive nullable columns on `emitter_classification` (migration 0007): `taxonomy`, `stage`, `arb_rank`, and `detail` (the full Classification as JSON). The legacy columns keep their meaning (`model_version` = rules@version, the DL model ref, or `decoder:<id>`), so existing readers and writers are unchanged. Rows written before M3 have NULLs, and readers derive their stage and rank.
+- **Arbitration rank (current family):** the emitter's current family is the row with the lowest rank, latest among equals.
+
+  | Rank | Evidence |
+  |---|---|
+  | 0 | user |
+  | 1 | decoder (CRC-valid) |
+  | 2 | lock-verified: verifier, or a chain label with demod lock |
+  | 3 | classifier: feature tree / DL, or a chain label without a recorded lock |
+  | 4 | track shape |
+
+  Derivation for pre-M3 rows: a `decoder:` model version → 1; `input_kind = track` → 4; anything else → `chain` at 3. The inventory `family`, its filter and `classification` all use this rank. A newer lower-ranked row is still history (`latest_classification` in the API).
+- **Identity & lifecycle:** append-only (the table's no-update trigger), re-run and appended as classifiers improve; carried to the survivor on a merge with every column.
+- **Tests:** `hk-model` `classify::{taxonomy,rank}` unit tests and serde round trips; `repo/classify_rank_tests.rs` covers every writer pair in both write orders and both merge directions, the SQL-versus-Rust legacy rule, and migration 0007 over pre-M3 rows; `crates/hk-api/tests/inventory_classification_api.rs` checks the row fields.
 
 ## 3. Storage (provisional — Phase 3 storage ADR finalises)
 

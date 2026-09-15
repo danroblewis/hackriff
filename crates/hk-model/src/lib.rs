@@ -44,6 +44,7 @@
 
 pub mod attention;
 pub mod calibration;
+pub mod classify; // T-211 (ADR-0016)
 pub mod cluster;
 pub mod content;
 pub mod context;
