@@ -39,17 +39,17 @@ use hk_context::occupancy::novelty::{
     normal_upper_tail_inv_ln, persistent_single_alpha, sequential_step,
 };
 use hk_context::report::{MAX_COVERAGE_CELLS, coverage_cells};
-use hk_model::attention::observation::ObservedWindow;
-use hk_model::attention::schedule::poi_fraction;
-use hk_model::attention::score::novelty_from_z;
 use hk_core::{BlockHeader, Pacing, Source, SourceCapabilities, SourceControl, SourceError};
 use hk_e2e::scene::{SceneTruth, join_scene_windows};
 use hk_e2e::{SynthOutput, SynthRequest};
 use hk_model::attention::alarm::AlarmKind;
 use hk_model::attention::baseline::SiteKey;
+use hk_model::attention::observation::ObservedWindow;
 use hk_model::attention::observation::{ObservationRecord, Tier};
 use hk_model::attention::occupancy::{OccupancyStat, OccupancySubject};
 use hk_model::attention::report::{ComparisonStatus, ProvenanceStepKind, SurveyReport};
+use hk_model::attention::schedule::poi_fraction;
+use hk_model::attention::score::novelty_from_z;
 use hk_model::context::Cause;
 use hk_model::repo::alarms::{AnomalyQuery, AnomalyView};
 use hk_model::sigmf::SigmfMeta;
@@ -261,7 +261,11 @@ fn split_recording(meta_path: &Path, at: Timestamp, dir: &Path) -> (PathBuf, Pat
     let mut parts = Vec::new();
     for (name, range, caps) in [
         ("part1", 0..(s0 as usize * bps), meta.captures[..k].to_vec()),
-        ("part2", (s0 as usize * bps)..data.len(), meta.captures[k..].to_vec()),
+        (
+            "part2",
+            (s0 as usize * bps)..data.len(),
+            meta.captures[k..].to_vec(),
+        ),
     ] {
         let mut m = meta.clone();
         m.captures = caps;
@@ -348,19 +352,31 @@ fn run_device(dir: &Path, meta: &Path, gain_at: Option<Timestamp>, pin: bool) ->
     let poller = {
         let (hub, stop) = (Arc::clone(&hub), Arc::clone(&stop));
         std::thread::spawn(move || {
-            let mut outcomes = 0;
+            let (mut outcomes, mut last) = (0, None);
             while !stop.load(Ordering::Relaxed) {
-                if let Some(b) = hub.snapshot().and_then(|s| s.status.bandit.clone()) {
+                if let Some(b) = hub.snapshot().and_then(|s| s.status.bandit) {
                     outcomes = outcomes.max(b.counters.outcomes);
+                    last = Some(b);
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            outcomes
+            (outcomes, last)
         })
     };
     let summary = finish(handle);
     stop.store(true, Ordering::Relaxed);
-    let bandit_outcomes = poller.join().unwrap();
+    let (bandit_outcomes, bandit_last) = poller.join().unwrap();
+    if let Some(b) = bandit_last {
+        eprintln!(
+            "[{T124}] bandit at stop: arms {}, active {}, pending verifications {}, floor \
+             deferrals {}, total dwell {:.2} s",
+            b.arms,
+            b.active_arms,
+            b.pending_verifications,
+            b.counters.floor_deferrals,
+            b.total_dwell_s
+        );
+    }
 
     // ---- What the system knows: device tuning, the history's extent, the pinned site. ----
     let t_end = product
@@ -388,9 +404,9 @@ fn run_device(dir: &Path, meta: &Path, gain_at: Option<Timestamp>, pin: bool) ->
     let (plan_version, _, _, channels) = occupancy.channels(band);
     for ch in &channels {
         let f = ch.key.freq(f_cell);
-        let row = rows.iter().find(|r| {
-            matches!(r.subject, OccupancySubject::Channel { key } if key == ch.key)
-        });
+        let row = rows
+            .iter()
+            .find(|r| matches!(r.subject, OccupancySubject::Channel { key } if key == ch.key));
         eprintln!(
             "[{T124}] plan v{plan_version} channel {:.4}-{:.4} MHz obw {:.0} Hz evidence {} \
              first_learned {:.3}: fco {:?} n {:?} suspect {:?} n_eff {:?}",
@@ -432,7 +448,11 @@ fn run_device(dir: &Path, meta: &Path, gain_at: Option<Timestamp>, pin: bool) ->
             cursor,
             limit: 100_000,
         });
+        // A page returns the hop geometries its sweep records reference separately; keep them as
+        // records so the log's sweep visits resolve to covered extents (run 2 dropped them, and
+        // the log replication counted only dwells).
         records.extend(page.records);
+        records.extend(page.geometries.into_iter().map(ObservationRecord::Geometry));
         match page.next_cursor {
             Some(c) => cursor = c,
             None => break,
@@ -632,7 +652,9 @@ fn poisson_upper(mean: f64, tail: f64) -> usize {
 /// Smallest k with P(X > k) < `tail` for X ~ Binomial(`n`, `p`).
 fn binomial_upper(n: usize, p: f64, tail: f64) -> usize {
     let pmf = |k: usize| {
-        let ln_c = (1..=k).map(|i| ((n - k + i) as f64 / i as f64).ln()).sum::<f64>();
+        let ln_c = (1..=k)
+            .map(|i| ((n - k + i) as f64 / i as f64).ln())
+            .sum::<f64>();
         (ln_c + k as f64 * p.ln() + (n - k) as f64 * (1.0 - p).ln()).exp()
     };
     let mut cdf = 0.0;
@@ -847,12 +869,13 @@ fn max_busier_revisits(truth: &SceneTruth) -> (usize, usize) {
         for n in [N_EFF_LO, N_EFF_HI] {
             for bv in [0.0, p * (1.0 - p)] {
                 for lift in [1.0, lift_truth] {
-                    let q = predicted_raise(&f, from, onset_q, p, n, bv, lift).unwrap_or_else(|| {
-                        panic!(
-                            "[{T124}] the §7.2 rule predicts no raise (p {p:.4}, n {n}, bv \
+                    let q =
+                        predicted_raise(&f, from, onset_q, p, n, bv, lift).unwrap_or_else(|| {
+                            panic!(
+                                "[{T124}] the §7.2 rule predicts no raise (p {p:.4}, n {n}, bv \
                              {bv:.4}, lift {lift:.2})"
-                        )
-                    });
+                            )
+                        });
                     eprintln!(
                         "[{T124}] predicted busier raise: p {p:.4} n {n} bv {bv:.4} lift \
                          {lift:.2} → interval {} (onset {onset_q}, +{})",
@@ -865,7 +888,10 @@ fn max_busier_revisits(truth: &SceneTruth) -> (usize, usize) {
         }
     }
     let end = worst as f64 * INTERVAL_S + INTERVAL_S;
-    (revisits_between(truth, truth.novelty_start_s, end) + 1, worst)
+    (
+        revisits_between(truth, truth.novelty_start_s, end) + 1,
+        worst,
+    )
 }
 
 // ---- (d) Coverage from the observation log ----
@@ -926,7 +952,12 @@ fn merged_s(iv: &[TimeRange], span: TimeRange) -> f64 {
     let (s0, s1) = (span.start.as_unix_nanos(), span.end.as_unix_nanos());
     let mut v: Vec<(i64, i64)> = iv
         .iter()
-        .map(|r| (r.start.as_unix_nanos().max(s0), r.end.as_unix_nanos().min(s1)))
+        .map(|r| {
+            (
+                r.start.as_unix_nanos().max(s0),
+                r.end.as_unix_nanos().min(s1),
+            )
+        })
         .filter(|(a, b)| b > a)
         .collect();
     v.sort_unstable();
@@ -1000,9 +1031,7 @@ impl M2Run {
         self.run
             .anomalies
             .iter()
-            .filter(|a| {
-                kind(a) == Some(AlarmKind::BusierThanUsual) && self.at_injected(&freq(a))
-            })
+            .filter(|a| kind(a) == Some(AlarmKind::BusierThanUsual) && self.at_injected(&freq(a)))
             .min_by_key(|a| raised(a).as_unix_nanos())
     }
 }
@@ -1066,9 +1095,7 @@ fn m2_fco_per_channel_within_ci_of_hidden_truth() {
     for r in &run.rows {
         r.validate().unwrap();
     }
-    let per = m.truth.schedule["stats"]["per_channel"]
-        .as_array()
-        .unwrap();
+    let per = m.truth.schedule["stats"]["per_channel"].as_array().unwrap();
     let extent = |r: &OccupancyStat| match r.subject {
         OccupancySubject::Channel { key } => Some(key.freq(run.f_cell)),
         OccupancySubject::Band { .. } => None,
@@ -1223,7 +1250,10 @@ fn m2_false_alarms_bounded() {
         new_emitter.len(),
         b.new_emitter,
         b.trials,
-        false_alarms.iter().map(|a| m.summary(a)).collect::<Vec<_>>()
+        false_alarms
+            .iter()
+            .map(|a| m.summary(a))
+            .collect::<Vec<_>>()
     );
     assert!(b.trials > 0, "[{T124}] no mature alarm input was scored");
     assert!(
@@ -1339,7 +1369,16 @@ fn m2_gain_step_is_provenance_explained_not_an_alarm() {
 /// 3. every coverage cell is observed in the **first window of every interval**: that window
 ///    starts 880 s after the previous one, so the §5.3 floor window (10 s) holds no sweep and a
 ///    dwell is admitted only after ≥ 0.25 · (total + dwell) of discovery, which alternates both
-///    hops, and together the hops cover every cell of the region.
+///    hops over several passes. Even passes (hops at ±112.5 kHz, usable ±187.5 kHz) cover the
+///    whole ±250 kHz report region except each hop's ±15 kHz DC notch, which the other hop covers
+///    only where it lies inside that hop's usable span; odd passes (T-173, ADR-0012 §1.3) move
+///    both hops 75 kHz towards the middle, so every even-pass DC notch is covered off-DC. A window
+///    holding passes of both parities therefore observes every cell.
+///
+/// **Run 2 → run 3 change (disclosed):** the log replication in 1 used only the records of each
+/// `RecordQuery` page and dropped the page's hop geometries, so sweep visits never resolved and
+/// the log gave 4.15 s (the bandit dwells alone) against the report's 180.75 s. The rule and
+/// every bound above are unchanged; the replication now resolves sweep visits as the store does.
 #[test]
 fn m2_survey_report_discloses_coverage_and_poi_under_the_bandit() {
     let Some(m) = scene() else { return };
@@ -1374,13 +1413,20 @@ fn m2_survey_report_discloses_coverage_and_poi_under_the_bandit() {
         run.bandit_outcomes,
         run.bandit_dwells
     );
-    assert!(run.sweep_s > 0.0, "[{T124}] no background sweep observation");
+    assert!(
+        run.sweep_s > 0.0,
+        "[{T124}] no background sweep observation"
+    );
     assert!(
         c.statement.contains("not quiet"),
         "[{T124}] {}",
         c.statement
     );
-    assert_eq!(c.poi.len(), 4, "[{T124}] POI rows for τ ∈ {{5 ms, 100 ms, 1 s, 10 s}}");
+    assert_eq!(
+        c.poi.len(),
+        4,
+        "[{T124}] POI rows for τ ∈ {{5 ms, 100 ms, 1 s, 10 s}}"
+    );
     // 1. The report's coverage is the log's, cell by cell.
     let cells = coverage_cells(report.region, MAX_COVERAGE_CELLS);
     let per_cell = log_cell_intervals(&run.records, &cells);
@@ -1552,7 +1598,10 @@ fn m2_new_emitter_alarms_on_a_quiet_mature_site() {
         inject_s / HOUR_S,
         raised_s / HOUR_S
     );
-    assert!(raised_s >= inject_s, "[{T124}] raised before the emitter appeared");
+    assert!(
+        raised_s >= inject_s,
+        "[{T124}] raised before the emitter appeared"
+    );
     assert!(
         revisits <= max_revisits,
         "[{T124}] alarmed after {revisits} revisits (max {max_revisits})"
@@ -1566,7 +1615,10 @@ fn m2_new_emitter_alarms_on_a_quiet_mature_site() {
     );
     let row = alarm.listing.alarm.as_ref().unwrap();
     assert_eq!(row.detail.observed, 1.0, "[{T124}] one new emitter");
-    assert_eq!(row.reopen_count, 0, "[{T124}] T-138 is one-shot: no re-raise");
+    assert_eq!(
+        row.reopen_count, 0,
+        "[{T124}] T-138 is one-shot: no re-raise"
+    );
     assert!(!alarm.explanations.is_empty(), "[{T124}] no explanations");
     assert!(!explained(alarm), "[{T124}] blamed on the device");
     let (new_emitter, budget): (Vec<_>, Vec<_>) = run
@@ -1598,19 +1650,30 @@ fn m2_restart_keeps_the_pinned_site() {
     };
     let src = TempDir::new("t124rssrc");
     let rec = join_scene_windows(&out, &src.0, "restart").unwrap();
-    let at = first_sample_time(&rec.meta).saturating_add_nanos((RS_RESTART_H * HOUR_S * 1e9) as i64);
+    let at =
+        first_sample_time(&rec.meta).saturating_add_nanos((RS_RESTART_H * HOUR_S * 1e9) as i64);
     let (part1, part2) = split_recording(&rec.meta, at, &src.0);
     let dir = TempDir::new("t124rs");
     let first = run_device(&dir.0, &part1, None, true);
     let SiteKey::Site(id) = first.site else {
-        panic!("[{T124}] the pinned site before the restart: {:?}", first.site)
+        panic!(
+            "[{T124}] the pinned site before the restart: {:?}",
+            first.site
+        )
     };
     let second = run_device(&dir.0, &part2, None, false);
     eprintln!(
         "[{T124}] restart: before {} / after {}; rows after the restart {}; suppressions after {}",
-        first.current_site, second.current_site, second.interval_rows.len(), second.suppressions
+        first.current_site,
+        second.current_site,
+        second.interval_rows.len(),
+        second.suppressions
     );
-    assert_eq!(second.site, SiteKey::Site(id), "[{T124}] the site after the restart");
+    assert_eq!(
+        second.site,
+        SiteKey::Site(id),
+        "[{T124}] the site after the restart"
+    );
     assert_eq!(
         second.current_site["site"], first.current_site["site"],
         "[{T124}] current site after the restart"
@@ -1621,7 +1684,10 @@ fn m2_restart_keeps_the_pinned_site() {
         .iter()
         .filter(|r| r.interval.start.as_unix_nanos() >= second.t_first.as_unix_nanos())
         .collect();
-    assert!(!after.is_empty(), "[{T124}] no interval closed after the restart");
+    assert!(
+        !after.is_empty(),
+        "[{T124}] no interval closed after the restart"
+    );
     for r in &after {
         assert_eq!(r.site, SiteKey::Site(id), "[{T124}] row {:?}", r.interval);
     }
@@ -1630,6 +1696,10 @@ fn m2_restart_keeps_the_pinned_site() {
             .values()
             .any(|s| s.get("unassigned-site").is_some() || s.get("mobile-site").is_some())
     });
-    assert!(!gap, "[{T124}] unassigned after the restart: {}", second.suppressions);
+    assert!(
+        !gap,
+        "[{T124}] unassigned after the restart: {}",
+        second.suppressions
+    );
     assert!(second.t_end.as_unix_nanos() > second.t_first.as_unix_nanos());
 }
