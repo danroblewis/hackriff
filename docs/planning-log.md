@@ -1761,3 +1761,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Honest placeholders for gaps 2, 3 and 13 ("500+").
   - Re-exports `promoteEntry`/`deleteEntry` from the old UI module. T-156 must move these before retiring the old UI.
   - Merge queue after the T-170 full check: T-147, T-146, T-150, T-151, T-152, then one combined full check.
+- **B0.407 T-158 + T-171 launched as one Sonnet task.** Both are MUI API gaps on `/api/inventory`: per-row SNR and peak level, plus a `total` count for the list. They are combined because they touch the same route, docs and contract. Other API gaps wait until the M2 tail merges.

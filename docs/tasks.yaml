@@ -2503,7 +2503,7 @@ notes:
   - id: T-158
     milestone: MUI
     title: "MUI API gap 2: SNR + peak level on /api/inventory rows"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2707,7 +2707,7 @@ notes:
   - id: T-171
     milestone: MUI
     title: "MUI API gap 13: /api/inventory total count (tab counts and Review badge; UI labels 500+ until served)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
