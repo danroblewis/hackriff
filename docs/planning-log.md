@@ -1913,3 +1913,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Staging:** the staging/demo server will run with 1 h retention.
     - Implied size is 144 GiB at 20 Msps, 14.4 GiB at 2 Msps, 3.6 GiB at 500 kS/s, so staging needs `--iq-buffer-max` set.
     - The flags don't exist until T-157 merges.
+- **B0.425 T-176 committed (31ac67c).**
+  - **Root cause:** `baseline.rs:983-988` `evaluate` scored an occupied fold with fewer than 2 occupied-pool visits against the idle pool at the same gain key. After a gain step, idle folds fill the new key first, so the busy channel was scored against its noise level.
+  - **Fix:** the idle fallback applies only when the subject has no occupied level history under any key (so a new emitter still alarms). Otherwise the occupied class is immature at that key and gets no level z.
+  - **Repro:** occupied z after the step was 18.41 before the fix and 0.44 after. The new-emitter check still gives 23.0.
+  - **Quieter path:** unaffected.
+  - **ADR:** §3.4 amended.
+  - **Tests:** hk-context 54 (incl. Monte Carlo budget), hk-pipeline 17, lint clean.
+  - **Next:** merge after the T-172 full check. That unblocks T-124 (c) and (h).
