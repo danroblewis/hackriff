@@ -824,3 +824,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   T-111 merges after the in-flight full check.
 - **B0.275 Full check of main c90b8c6 (POCSAG tutorial): green.** Lint clean; nextest + UI 1127/1127; acceptance 29/29 (2 ignored HIL) in 60 s, down from 100 s. **T-111 merged** (dc8be90). **T-112 launched** (decode ingest hardening). Full check covering T-111 running.
 - **B0.276 Full check of main 946e99a (T-111): green.** Lint clean; nextest + UI 1132/1132 in 267 s, no LEAK lines (the flagged leak did not reproduce in the full run); acceptance 29/29 (2 ignored HIL) in 61 s. M1 remaining: T-112 (ingest hardening, running). Deferred: T-100 (live HIL re-run), T-026 (CUDA). Live ADS-B blocked on the 1090 MHz antenna.
+- **B0.277 T-112 merged** (30a099c). Coordinator reviewed the hk-model change: `begin_write_batch`/`commit_write_batch` (BEGIN IMMEDIATE); inside a batch `write_tx` becomes a savepoint (per-row rollback on drop) and `read_tx` joins; outside a batch, behaviour is unchanged. Other changes:
+  - **Emitter tracking:** a bounded recent-emitter set with `take_new_emitters` drain, so long runs classify past 4096 emitters (5000-identity test).
+  - **output_policy:** a malformed policy is surfaced as a pipeline warning.
+  - **Pending edit:** dropped outside the lock.
+  - **Batched writer:** up to 128 rows per transaction, 5634 → 9262 rows/s; 0 dropped at 1000 decodes/s.
+  - **LEAK flag:** not reproducible; test teardown made explicit.
+
+  Tests: hk-plugins 52, pipeline 22, hk-model 97, acceptance tutorial_adsb/signal_001 4/4. **All M1 tasks are done** pending this full check.

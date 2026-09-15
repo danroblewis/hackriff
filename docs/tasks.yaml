@@ -1804,7 +1804,8 @@ tasks:
   - id: T-112
     milestone: M1
     title: "Recipe/plugin decode ingest hardening (T-111 review follow-ups)"
-    status: in-progress
+    status: done
+    commit: 30a099c
     deps: [T-111]
     parallel_group: M1R
     use_cases: [SIGNAL-001, SIGNAL-062]
