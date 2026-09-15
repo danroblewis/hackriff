@@ -1970,7 +1970,8 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: in-progress
+    status: blocked
+    blocked_on: "T-184 (433.375 MHz learning flips between runs); WIP a2ac3c0 otherwise 8/8 in run 3"
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133, T-146, T-147, T-173, T-176]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2908,3 +2909,17 @@ notes:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-184
+    milestone: M2
+    title: "Nondeterministic channel learning: 433.375 MHz (10% Markov, near hop-1 DC) learned in one M2 scene run, missing in the next (same code); make learning under DC twin refutation deterministic"
+    status: in-progress
+    deps: [T-173, T-174, T-180]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-124 final round 2026-09-15: run 3 all 8 pass (433.375 learned FCO 0.084 vs 0.094), run 4 (a) fails (not in final channel plan; restart scene learned it); suspected channels.rs:217-255 DC-only refutation"
+    acceptance: "root cause file:line; product fix makes learning independent of thread timing; deterministic regression test fails before / passes after; M2 scene 5x (or reduced repro 10x) learns 433.375; DC-spur suppression and occupancy_sparse_visits unchanged green"
+    area: crates/hk-context/src/occupancy/channels.rs, crates/hk-pipeline/src/occupancy.rs
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true

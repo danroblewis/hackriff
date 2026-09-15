@@ -2138,3 +2138,20 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.456 Full check green after the T-174 + T-167 merges (5051afe).** Lint clean; 1370/1370 tests in 143 s; acceptance 28/28 in 12 s, including signal_062.
   - **T-180 merged** (b5826ad); its worktree removed.
   - **Next:** full check.
+- **B0.457 T-124 final round (WIP a2ac3c0, on merge 6f1e68a): run 3 passed all 8; run 4 failed (a) only.**
+  - **Run-3 results, all against a-priori thresholds:**
+    - (a) 7 channels matched, 0 outside the Wilson CI.
+    - (b/g) busier alarm at 2 revisits (limit ≤63).
+    - (c) 0 false alarms over 975 inputs.
+    - (d) coverage 165.84 s: report equals log.
+    - (h) 0 unexplained alarms.
+    - (i) 2 revisits (limit ≤7).
+    - (e) and (j) pass.
+  - **(d) was a test bug, now fixed:** sweep geometries come back separately in `page.geometries`; bounds unchanged.
+  - **Bug 1 (gain step) is gone.** Bug 2 remains and is nondeterministic: 433.375 MHz was learned in run 3, missing from the main scene plan in run 4, yet learned by the restart scene in the same run. Suspected cause: `channels.rs:217-255`.
+  - **Bandit dwells:** 2 vs 13 between runs. A scene-design artefact: dwells admitted only after ~0.67 s of a 1 s window, and `observed()` clamps to the planned end.
+  - **Timing:** scene wall time 42 s / 70 s.
+  - **Next:**
+    - T-184 (Opus high) launched: deterministic learning under DC twin refutation. It is the M2 exit blocker, and T-124 is blocked on it.
+    - T-180 merged; full check running.
+    - T-178 fix round waits for a Rust slot.
