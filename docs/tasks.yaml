@@ -2116,12 +2116,26 @@ tasks:
   - id: T-134
     milestone: M2
     title: "Sparse baseline slots (Jetson memory): store only observed hour-of-week slots or pool cells into channels for level stats"
-    status: in-progress
+    status: review
     deps: [T-132]
     parallel_group: M2B
     use_cases: [AWARE-042]
     found_by: "T-132 review 2026-09-15: dense GainSeries ~371-736 MB per key at 9.7k cells x 2 gain states; ADR budgets ~56 B/slot sparse vs ~115 B/slot dense"
     acceptance: "baseline memory per key at 9.7k cells x 2 gain states measured and reduced to the ADR-0012 §9 budget (sparse slots and/or channel-pooled level stats); default memory cap then rarely refuses folds on a parked 48 h run; codec compatible; baseline/novelty tests unchanged"
+    area: crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-135
+    milestone: M2
+    title: "Full-week baseline memory: channel-pooled level stats (or cell-series compaction) so a parked week stays under the 256 MiB default cap"
+    status: todo
+    deps: [T-134]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-134 2026-09-15: sparse slots give 123 MiB/key after a parked 48 h at 9.7k cells, but a full week fills all 168 slots (~480 MB at 4 series per busy cell), so refusals return after ~4-5 days; seq_hod is 768 B/subject"
+    acceptance: "parked 7-day run at 9.7k cells under the default cap refuses 0 folds (time-compressed test); novelty/alarm behaviour on channels unchanged or the change documented in ADR-0012 §3; codec compatible"
     area: crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline
     needs: none
     model: opus

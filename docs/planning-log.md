@@ -1228,3 +1228,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.340 T-131 full check green; T-132 merged.**
   - T-131 full check on main (f81f566): lint clean; 1346/1346 nextest+UI tests (bandit e2e passed without a retry); acceptance 32/32, 79 s.
   - T-132 merged (77be712); T-132 worktree removed; full check started.
+- **B0.341 T-134 committed (737a7a0, on 77be712); Opus review running.**
+  - Sparse hour-of-week `SlotSeries` (168-bit mask plus touched slots); behaviour bit-identical per a 34,560-fold fingerprint against dense; codec stays v2.
+  - Memory per key at 9.7k cells x 2 gain states: 369 MB dense, 123 MiB sparse after a parked 48 h. The 48 h test under the default cap refuses 0 folds.
+  - A full week refills all slots (~480 MB), so T-135 (channel-pooled level stats) is added as a follow-up; it does not block T-124.
