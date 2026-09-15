@@ -2071,3 +2071,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Failure:** `hk-sim::sim round_robin_revisit_matches_its_schedule` fails. The hk-sim crate was outside T-173's targeted filters and its reviewer's scope.
   - **Unaffected:** lint clean, acceptance 28/28; nextest stopped at 1124/1365 (fail-fast).
   - **Next:** investigating now. Fix forward if the dither legitimately changed round-robin revisit geometry, else revert T-173. No merges until main is green.
+- **B0.449 Main fix committed (hk-sim max revisit +1 dwell under the T-173 dither). T-124 board corrected at the user's prompt.**
+  - **T-124:** its "blocked" status was stale. What it actually waited on (T-146, T-147, T-173, T-176) is merged but was never listed in its deps. Those four are now added, status is in-progress, and it has been launched.
+  - **M2 exit criterion:** T-124's acceptance_m2 tests (a)–(j) all pass with a-priori thresholds, and the main full check is green.
+  - **Retagged M2-hardening (not required for M2 exit):** T-174 (live candidates DC twin), T-180 (mock noise floor), T-181 (dither follow-ups).
+  - **T-174 review: MERGE.**
+    - Twin rule matches T-172.
+    - No double decrement and no ordering race.
+    - Scheduler and passive paths are exclusive.
+    - Confirmation is not delayed.
+    - Bans run to expiry.
+    - Follow-ups: pool rebuild cost on Jetson, MAX_CLEAN eviction counter, e2e assertion in `occupancy_sparse_visits`, f_cell source, ADR note.
+  - **T-167 committed (eb63567):** spectrum header carries `dc_excluded_hz`, taken from `DC_NOTCH_HALF_HZ` (DcRule tolerance); docs, stream-contract and api_contract updated; UI prefers the header value.
+  - **Merge queue once main is green:** T-174, T-167.

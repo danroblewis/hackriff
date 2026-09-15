@@ -1970,9 +1970,8 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: blocked
-    blocked_on: "T-173 (off-DC view; explain/fix 433.375 MHz never learned); then rerun: (c),(h) should pass with T-176 merged, fix own (d) coverage derivation"
-    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
+    status: in-progress
+    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133, T-146, T-147, T-173, T-176]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
     acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s); from T-131 review: pre-mature the baseline (or run >=56 h scene with the channel learned before h24) and assert a busier-than-usual alarm on the injected channel with top explanations; assert new-emitter alarms once fed; assert a gain step yields provenance-explained not an alarm; assert a restart keeps the pinned site"
@@ -1981,6 +1980,8 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+    m2_exit: "M2 closes when T-124 passes all acceptance_m2 tests (a)-(j) with a-priori thresholds and the main full check is green; T-174/T-180/T-181 are post-M2 hardening"
+
   - id: T-125
     milestone: M2
     title: "Mock SDR + e2e harness: replay time-compressed occupancy scenes on their observation schedule with a simulated clock"
@@ -2655,7 +2656,8 @@ notes:
   - id: T-167
     milestone: MUI
     title: "MUI API gap 10: DC notch width in the spectrum stream header"
-    status: in-progress
+    status: review
+    commit: eb63567
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2760,7 +2762,7 @@ notes:
     effort: medium
     core_interface: true
   - id: T-174
-    milestone: M2
+    milestone: M2-hardening
     title: "Live candidate path uses the per-tuning DC twin rule (detect.rs:458 still per-detection suspect)"
     status: review
     commit: 9c58f81
@@ -2849,7 +2851,7 @@ notes:
     effort: low
     core_interface: false
   - id: T-180
-    milestone: M2
+    milestone: M2-hardening
     title: "Mock SDR device noise floor at low gain: re-rendered windows served far below the recording gain become quantisation-limited (85% zero codes) and produce whole-window marginal detections; model the receiver's own analog noise floor per gain state so low-gain windows look like a real HackRF"
     status: in-progress
     deps: [T-175]
@@ -2863,7 +2865,7 @@ notes:
     effort: medium
     core_interface: false
   - id: T-181
-    milestone: M2
+    milestone: M2-hardening
     title: "Sweep DC dither follow-ups: single-hop plans on a live radio now retune 75 kHz every step (dither single-hop plans only every Nth pass or disclose), pick SweepRecord geometry by pass parity not tuning match, per-hop DcDitherDisabled warning, off-DC test samples LO +-37.5 kHz (or 80 kHz dither), ADR-0005 wording on half-visit edge cells"
     status: todo
     deps: [T-173]
