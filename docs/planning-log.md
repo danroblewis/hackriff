@@ -823,3 +823,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
   T-111 merges after the in-flight full check.
 - **B0.275 Full check of main c90b8c6 (POCSAG tutorial): green.** Lint clean; nextest + UI 1127/1127; acceptance 29/29 (2 ignored HIL) in 60 s, down from 100 s. **T-111 merged** (dc8be90). **T-112 launched** (decode ingest hardening). Full check covering T-111 running.
+- **B0.276 Full check of main 946e99a (T-111): green.** Lint clean; nextest + UI 1132/1132 in 267 s, no LEAK lines (the flagged leak did not reproduce in the full run); acceptance 29/29 (2 ignored HIL) in 61 s. M1 remaining: T-112 (ingest hardening, running). Deferred: T-100 (live HIL re-run), T-026 (CUDA). Live ADS-B blocked on the 1090 MHz antenna.
