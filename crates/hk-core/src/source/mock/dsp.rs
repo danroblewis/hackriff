@@ -281,7 +281,7 @@ pub(crate) struct Render {
     noise_var: f64,
     rng: Rng,
     /// The recording's rounding-noise remover, applied to rendered (not passed-through) IQ.
-    dequant: Option<Arc<Dequant>>,
+    dequant: Option<DequantState>,
     /// Look-ahead of `dequant` in force (0 when passing through or without one).
     dq_delay: usize,
 }
@@ -289,7 +289,7 @@ pub(crate) struct Render {
 impl Render {
     pub fn new(plan: Plan, seed: u64, dequant: Option<Arc<Dequant>>) -> Self {
         let mut r = Self {
-            dequant,
+            dequant: dequant.map(DequantState::new),
             dq_delay: 0,
             plan,
             ratio: 1.0,
@@ -344,7 +344,7 @@ impl Render {
                 let kernel = Kernel::new((hi - lo) / 2.0 / plan.rec_rate_hz, width);
                 self.half = kernel.half;
                 self.kernel = Some(kernel);
-                self.dq_delay = self.dequant.as_ref().map_or(0, |d| d.delay);
+                self.dq_delay = if self.dequant.is_some() { DEQUANT_N } else { 0 };
                 self.in_step = c / plan.rec_rate_hz;
                 let delta = plan.center_hz - plan.rec_center_hz;
                 self.out_step = (c - delta) / plan.rate_hz;
@@ -392,6 +392,10 @@ impl Render {
             self.hist.drain(..self.start);
             let m = self.start.min(self.mixed.len());
             self.mixed.drain(..m);
+            if let Some(dq) = self.dequant.as_mut() {
+                let c = self.start.min(dq.clean.len());
+                dq.clean.drain(..c);
+            }
             self.start = 0;
         }
         while self.base < keep {
@@ -407,6 +411,9 @@ impl Render {
             scratch.drain(..skip);
             self.hist = scratch;
             self.mixed.clear();
+            if let Some(dq) = self.dequant.as_mut() {
+                dq.clean.clear();
+            }
             self.start = 0;
         }
         while self.base + ((self.hist.len() - self.start) as u64) <= hi + d as u64 {
@@ -420,13 +427,19 @@ impl Render {
                 self.mixed.resize(self.start, Complex32::new(0.0, 0.0));
             }
             let first = self.mixed.len();
-            let end = self.hist.len().saturating_sub(d).max(first);
+            let dq = match self.dequant.as_mut() {
+                Some(dq) if d > 0 => {
+                    let done = dq.advance(&self.hist, self.start, self.base);
+                    Some((&dq.clean, done))
+                }
+                _ => None,
+            };
+            let end = dq.map_or(self.hist.len(), |(_, done)| done).max(first);
             let idx0 = self.base + (first - self.start) as u64;
             let mut phase = (-self.in_step * (idx0 as f64 - self.m0 as f64)).rem_euclid(1.0);
-            let dq = if d > 0 { self.dequant.as_deref() } else { None };
             for i in first..end {
                 let z = match dq {
-                    Some(dq) => dq.apply(&self.hist, i),
+                    Some((clean, _)) => clean[i],
                     None => self.hist[i],
                 };
                 let a = std::f64::consts::TAU * phase;
@@ -596,101 +609,160 @@ pub(crate) fn estimate_floor_power(x: &[Complex32]) -> Option<f64> {
     Some(median / bias)
 }
 
-/// Frequency groups of the dequantiser's gain design.
-const DEQUANT_GROUPS: usize = 64;
-/// Groups either side whose strongest level a group's gain follows, so an emission and its
-/// neighbourhood keep unit gain through the FIR's smoothing (about ±1 group).
-const DEQUANT_GUARD: usize = 3;
-/// FIR half length (taps `2·D + 1`, linear phase, look-ahead `D` recording samples).
-const DEQUANT_DELAY: usize = 63;
+/// STFT length of the dequantiser (bins; periodic sqrt-Hann analysis and synthesis, hop `N/2`).
+/// It is also the look-ahead, in recording samples, that rendering with it needs.
+const DEQUANT_N: usize = 1024;
+/// Weight of each new frame in a bin's level estimate (≈ 15 frames of memory).
+const DEQUANT_ALPHA: f64 = 1.0 / 8.0;
+/// Bins either side averaged into a bin's level estimate.
+const DEQUANT_SPREAD: usize = 2;
 /// Floor of the power gain where the recording holds hardly more than rounding noise.
 const DEQUANT_MIN_GAIN2: f64 = 0.05;
 
-/// T-141: removes the recording's own rounding noise from IQ the mock re-renders.
+/// T-141: what the mock needs to take a recording's own rounding noise out of IQ it re-renders.
 ///
 /// Recorded IQ is `RF + q_rec`, with `q_rec` the capture's rounding noise (white, `quant_power`
 /// per sample). A retuned or resampled window is filtered and rounded to int8 again, which adds
 /// the device's rounding noise a second time: a quantisation-limited recording's floor read
-/// ≈ 1 dB high after a retune at its own rate (6 dB when rounding noise dominates). A linear-phase
-/// FIR with power gain `G²(f) = 1 − quant_power / P(f)` (`P` the recording's Welch level, taken
-/// as the strongest within ±[`DEQUANT_GUARD`] of 64 groups) takes `q_rec` out of the floor and
-/// leaves emissions at unit gain, so the served PSD `G²·P + q_out` equals the recording's where
-/// the output is rounded at the recording's rate and gain, and a wider rate or higher gain shows
-/// the smaller rounding density a radio would.
+/// ≈ 1 dB high after a retune at its own rate (6 dB when rounding noise dominates). The
+/// dequantiser ([`DequantState`]) is a short-time spectral subtraction: each STFT bin gets the
+/// power gain `G² = 1 − quant_power / P̂`, `P̂` the bin's level (±[`DEQUANT_SPREAD`] bins) averaged
+/// over *past* frames only. A floor bin (`P̂ = A + q`) serves `A`, and a bin holding an emission
+/// (`S + A + q`) serves `S + A`: the rounding noise comes out, the emission's power stays, and
+/// the level estimate follows emissions that start or stop within ≈ 15 frames. The served PSD
+/// `G²·P + q_out` then equals the recording's where the output is rounded at the recording's
+/// rate and gain, and a wider rate or higher gain shows the smaller rounding density a radio
+/// would.
 #[derive(Debug)]
 pub(crate) struct Dequant {
-    taps: Vec<Complex32>,
-    delay: usize,
+    quant_power: f64,
+    /// Level estimate to start from (Welch of the recording's first samples, FFT bin order).
+    initial: Vec<f64>,
 }
 
 impl Dequant {
     /// The dequantiser for a recording whose samples start `x`, or `None` when its rounding noise
-    /// changes no level by more than ≈ 0.01 dB (or `x` is too short to design from).
+    /// changes no level there by more than ≈ 0.01 dB (or `x` is too short to design from).
     pub fn design(x: &[Complex32], quant_power: f64) -> Option<Self> {
         if quant_power <= 0.0 {
             return None;
         }
         let (bins, _) = welch_bins(x)?;
-        let (n, m) = (bins.len(), DEQUANT_GROUPS);
-        if n < 4 * m {
+        if bins.len() != DEQUANT_N || bins.iter().all(|p| quant_power < 2e-3 * p) {
             return None;
         }
-        // Group means (group k centred on k/m cycles/sample, FFT order).
-        let mut mean = vec![0f64; m];
-        let mut count = vec![0usize; m];
-        let group = |i: usize| (i * m + n / 2) / n % m;
-        for (i, p) in bins.iter().enumerate() {
-            mean[group(i)] += p;
-            count[group(i)] += 1;
+        Some(Self {
+            quant_power,
+            initial: bins,
+        })
+    }
+}
+
+/// Streaming state of a [`Dequant`] over [`Render`]'s history: `clean[i]` is the dequantised
+/// `hist[i]`, final before the next frame's start and half-accumulated for `N/2` beyond it.
+#[derive(Debug)]
+struct DequantState {
+    design: Arc<Dequant>,
+    window: Vec<f64>,
+    level: Vec<f64>,
+    gain: Vec<f64>,
+    /// Absolute recording index of the next frame's first sample.
+    next: i64,
+    clean: Vec<Complex32>,
+    re: Vec<f64>,
+    im: Vec<f64>,
+}
+
+impl DequantState {
+    fn new(design: Arc<Dequant>) -> Self {
+        let n = DEQUANT_N;
+        Self {
+            window: (0..n)
+                .map(|i| (std::f64::consts::PI * i as f64 / n as f64).sin())
+                .collect(),
+            level: design.initial.clone(),
+            gain: vec![1.0; n],
+            design,
+            next: 0,
+            clean: Vec::new(),
+            re: vec![0.0; n],
+            im: vec![0.0; n],
         }
-        for (v, c) in mean.iter_mut().zip(&count) {
-            *v /= (*c).max(1) as f64;
-        }
-        let gain2: Vec<f64> = (0..m)
-            .map(|k| {
-                let p = (0..=2 * DEQUANT_GUARD)
-                    .map(|o| mean[(k + m + o - DEQUANT_GUARD) % m])
-                    .fold(0f64, f64::max);
-                if p > 0.0 {
-                    (1.0 - quant_power / p).max(DEQUANT_MIN_GAIN2)
-                } else {
-                    DEQUANT_MIN_GAIN2
-                }
-            })
-            .collect();
-        if gain2.iter().all(|g| *g > 1.0 - 2e-3) {
-            return None;
-        }
-        let d = DEQUANT_DELAY;
-        let amp: Vec<f64> = (0..n).map(|i| gain2[group(i)].sqrt()).collect();
-        let taps = (0..=2 * d)
-            .map(|t| {
-                let j = t as f64 - d as f64;
-                let mut acc = num_complex::Complex64::new(0.0, 0.0);
-                for (i, a) in amp.iter().enumerate() {
-                    let f = if i < n / 2 {
-                        i as f64
-                    } else {
-                        i as f64 - n as f64
-                    } / n as f64;
-                    acc += num_complex::Complex64::from_polar(*a, std::f64::consts::TAU * f * j);
-                }
-                let v = acc * (kaiser(j / (d as f64 + 1.0)) / n as f64);
-                Complex32::new(v.re as f32, v.im as f32)
-            })
-            .collect();
-        Some(Self { taps, delay: d })
     }
 
-    /// The dequantised sample `i` of `x` (`x[i − D ..= i + D]`; before index 0 is silence).
-    fn apply(&self, x: &[Complex32], i: usize) -> Complex32 {
-        let mut acc = Complex32::new(0.0, 0.0);
-        for (k, h) in self.taps.iter().enumerate() {
-            if let Some(j) = (i + self.delay).checked_sub(k) {
-                acc += h * x[j];
-            }
+    /// Processes every frame `hist` (starting at absolute index `base − start`) holds, and returns
+    /// how many leading `clean` samples are final. A history that no longer lines up with `clean`
+    /// (discarded input, or dropped past the next frame) restarts at `base`, with the frame
+    /// straddling it zero-padded before the history.
+    fn advance(&mut self, hist: &[Complex32], start: usize, base: u64) -> usize {
+        let (n, h) = (DEQUANT_N as i64, DEQUANT_N as i64 / 2);
+        let hist0 = base as i64 - start as i64;
+        if self.next - hist0 < -h || self.clean.len() as i64 != self.next - hist0 + h {
+            self.next = base as i64 - h;
+            self.clean.clear();
+            self.clean.resize(start, Complex32::new(0.0, 0.0));
         }
-        acc
+        let w2 = n as f64 / 2.0;
+        let q = self.design.quant_power;
+        let len = DEQUANT_N;
+        loop {
+            let s = self.next - hist0;
+            if s + n > hist.len() as i64 {
+                break;
+            }
+            let mut padded = false;
+            for i in 0..len {
+                let j = s + i as i64;
+                let z = if j >= 0 {
+                    hist[j as usize]
+                } else {
+                    padded = true;
+                    Complex32::new(0.0, 0.0)
+                };
+                self.re[i] = f64::from(z.re) * self.window[i];
+                self.im[i] = f64::from(z.im) * self.window[i];
+            }
+            fft(&mut self.re, &mut self.im);
+            // Gains from past frames only, so a bin's gain is independent of its current value.
+            let mut acc: f64 = (0..=2 * DEQUANT_SPREAD)
+                .map(|o| self.level[(len + o - DEQUANT_SPREAD) % len])
+                .sum();
+            for k in 0..len {
+                let p = acc / (2 * DEQUANT_SPREAD + 1) as f64;
+                self.gain[k] = if p > 0.0 {
+                    (1.0 - q / p).max(DEQUANT_MIN_GAIN2).sqrt()
+                } else {
+                    DEQUANT_MIN_GAIN2.sqrt()
+                };
+                acc += self.level[(k + DEQUANT_SPREAD + 1) % len]
+                    - self.level[(k + len - DEQUANT_SPREAD) % len];
+            }
+            for k in 0..len {
+                if !padded {
+                    let p = (self.re[k] * self.re[k] + self.im[k] * self.im[k]) / w2;
+                    self.level[k] += DEQUANT_ALPHA * (p - self.level[k]);
+                }
+                // Gain, and conjugate for the inverse transform.
+                self.re[k] *= self.gain[k];
+                self.im[k] *= -self.gain[k];
+            }
+            fft(&mut self.re, &mut self.im);
+            // Overlap-add: sqrt-Hann² at hop N/2 sums to one.
+            for i in 0..len {
+                let w = self.window[i] / n as f64;
+                let y = Complex32::new((self.re[i] * w) as f32, (-self.im[i] * w) as f32);
+                let j = s + i as i64;
+                if (i as i64) < h {
+                    if j >= 0 {
+                        self.clean[j as usize] += y;
+                    }
+                } else {
+                    self.clean.push(y);
+                }
+            }
+            self.next += h;
+        }
+        (self.next - hist0).max(0) as usize
     }
 }
 
@@ -892,6 +964,104 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// T-141: emissions that start after the recording's first samples keep their power through
+    /// the dequantiser (within 0.2 dB): a weak tone (≈ 20 dB above a bin's floor) and a 10 kHz
+    /// noise-like emission (≈ 10 dB above the floor density) appearing at sample 70 000 of a
+    /// quantisation-limited recording, served after a retune at the recording's rate and at
+    /// 2 MS/s. A dequantiser fixed from the first samples would take ≈ 1.2 dB off both.
+    #[test]
+    fn rendered_int8_keeps_emitters_that_appear_mid_recording() {
+        const QUANT: f64 = 1.0 / 6.0 / (128.0 * 128.0);
+        const ONSET: usize = 70_000;
+        let rec_fs = 500e3;
+        let len = 1 << 18;
+        let mut rng = Rng::new(11);
+        let var = 10f64.powf(-45.0 / 10.0);
+        let weak = tone(-40e3, rec_fs, len, 10f32.powf(-55.0 / 20.0));
+        // Band-limited emission: white noise through a 10 kHz low-pass, shifted to +30 kHz.
+        let lp = Kernel::new(5e3 / rec_fs, 0.01);
+        let taps = lp.row(0).to_vec();
+        let white: Vec<Complex32> = (0..len + taps.len())
+            .map(|_| rng.complex_gaussian(1.0))
+            .collect();
+        let band_var = 10.0 * var * 10e3 / rec_fs;
+        let mut band: Vec<Complex32> = (0..len)
+            .map(|i| {
+                let a = std::f64::consts::TAU * 30e3 * i as f64 / rec_fs;
+                let acc: Complex32 = taps.iter().zip(&white[i..]).map(|(h, z)| z * *h).sum();
+                acc * Complex32::new(a.cos() as f32, a.sin() as f32)
+            })
+            .collect();
+        let gain = (band_var / band.iter().map(|z| f64::from(z.norm_sqr())).sum::<f64>()
+            * len as f64)
+            .sqrt() as f32;
+        for z in &mut band {
+            *z *= gain;
+        }
+        let x: Vec<Complex32> = (0..len)
+            .map(|i| {
+                let e = if i >= ONSET { weak[i] + band[i] } else { Complex32::new(0.0, 0.0) };
+                ci8(e + rng.complex_gaussian(var))
+            })
+            .collect();
+        let floor = estimate_floor_power(&x).unwrap();
+        let dq = Dequant::design(&x, QUANT).map(Arc::new);
+        assert!(dq.is_some());
+        let from = ONSET + 10_000;
+        let rec = &x[from..];
+        let thermal = density_near(&x[..ONSET], rec_fs, 512, -150e3) - QUANT / rec_fs;
+        // Emission density above the floor over ±5 kHz of +30 kHz (thermal + one rounding).
+        let excess = |y: &[Complex32], fs: f64, f0: f64, n: usize| {
+            density_near_band(y, fs, n, f0, 5e3) - (thermal + QUANT / fs)
+        };
+        for (center, rate, n) in [(100.125e6, rec_fs, 2048), (100e6, 2e6, 8192)] {
+            let plan = Plan {
+                rec_center_hz: 100e6,
+                rec_rate_hz: rec_fs,
+                rec_usable_hz: 0.75 * rec_fs,
+                center_hz: center,
+                rate_hz: rate,
+                floor_power: floor,
+                quant_power: QUANT,
+                transition: 0.08,
+            };
+            let mut r = Render::new(plan, 3, dq.clone());
+            let mut out = Vec::new();
+            let want = ((len - 2000) as f64 * rate / rec_fs) as usize;
+            r.render(&mut VecFeed(x.clone(), 0), &mut out, want)
+                .unwrap();
+            let k0 = (from as f64 * rate / rec_fs) as usize;
+            let k1 = k0 + ((len - 2000 - from) as f64 * rate / rec_fs) as usize;
+            let y: Vec<Complex32> = out[k0..k1].iter().map(|z| ci8(*z)).collect();
+            let r_len = ((k1 - k0) as f64 * rec_fs / rate) as usize;
+            let off = 100e6 - center;
+            let tone_err = 10.0
+                * (power_at(&y, -40e3 + off, rate) / power_at(&rec[..r_len], -40e3, rec_fs))
+                    .log10();
+            let band_err =
+                10.0 * (excess(&y, rate, 30e3 + off, n) / excess(&rec[..r_len], rec_fs, 30e3, 2048))
+                    .log10();
+            assert!(
+                tone_err.abs() <= 0.2 && band_err.abs() <= 0.2,
+                "{center} Hz / {rate} S/s: weak tone {tone_err:+.3} dB, band emission \
+                 {band_err:+.3} dB"
+            );
+        }
+    }
+
+    /// Mean density (per Hz) of `y` within `half` Hz of `f0` (baseband Hz).
+    fn density_near_band(y: &[Complex32], fs: f64, n: usize, f0: f64, half: f64) -> f64 {
+        let shifted: Vec<Complex32> = y
+            .iter()
+            .enumerate()
+            .map(|(i, z)| {
+                let a = -std::f64::consts::TAU * f0 * i as f64 / fs;
+                z * Complex32::new(a.cos() as f32, a.sin() as f32)
+            })
+            .collect();
+        noise_density(&shifted, fs, n, half, f64::INFINITY, 0.0)
     }
 
     #[test]

@@ -82,29 +82,6 @@ struct TileCounts {
     /// Frames per gain state and provenance steps over all tiles (diagnostics).
     gains: Vec<(String, u64)>,
     steps: usize,
-    /// Every observed level-0 cell: `(centre Hz, mean_db, p_low_db)` (diagnostics).
-    cells: Vec<(f64, f32, f32)>,
-}
-
-/// Median mean and p_low of observed cells per 25-kHz bin over `span` (diagnostics).
-fn binned(cells: &[(f64, f32, f32)], span: FreqRange) -> String {
-    let mut out = String::new();
-    let mut lo = span.lo_hz;
-    while lo < span.hi_hz {
-        let hi = lo + 25e3;
-        let sel: Vec<&(f64, f32, f32)> = cells.iter().filter(|c| c.0 >= lo && c.0 < hi).collect();
-        let means: Vec<f32> = sel.iter().map(|c| c.1).collect();
-        let lows: Vec<f32> = sel.iter().map(|c| c.2).collect();
-        out.push_str(&format!(
-            "[{:+.0} kHz n {} mean {:?} p_low {:?}] ",
-            (lo - 0.5 * (span.lo_hz + span.hi_hz)) / 1e3,
-            sel.len(),
-            median_of(&means),
-            median_of(&lows)
-        ));
-        lo = hi;
-    }
-    out
 }
 
 fn median_of(v: &[f32]) -> Option<f32> {
@@ -161,9 +138,6 @@ fn tile_counts(history_dir: &std::path::Path, central: FreqRange) -> TileCounts 
             for (i, c) in h.cells.iter().enumerate() {
                 let f = h.freq_of(i % h.nf);
                 let mid = 0.5 * (f.lo_hz + f.hi_hz);
-                if c.observed() {
-                    n.cells.push((mid, c.mean_db, c.p_low_db));
-                }
                 if c.floor_db.is_finite() && mid >= central.lo_hz && mid <= central.hi_hz {
                     n.central_floors.push(c.floor_db);
                     n.central_raw.push(c.p_low_db);
@@ -239,14 +213,6 @@ fn run_scene(out: &SynthOutput, scheduler: bool) -> Outcome {
     let stats = occ.stats();
     let alarms = alarms.status_json();
     let tiles = tile_counts(&data_dir.join("history"), central);
-    eprintln!(
-        "[T-141] {} per 25 kHz: {}",
-        if scheduler { "scheduler" } else { "fixed" },
-        binned(
-            &tiles.cells,
-            FreqRange::centered(central.center_hz(), 2.0 * central.width_hz())
-        )
-    );
     let tag = if scheduler { "scheduler" } else { "fixed" };
     eprintln!(
         "[{T139}] {tag}: history reader {}; history {}; scheduler {}; attention {}; occupancy \

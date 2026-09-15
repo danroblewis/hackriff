@@ -18,11 +18,12 @@
 //!   own centre and rate the whole recording passes through bit-exact, as the radio captured it.
 //! - **Rounding noise (T-141):** recorded IQ already holds its capture's rounding noise
 //!   ([`Recording::quant_power`], 1/6 code² for ci8/cu8), and served IQ is rounded to int8 again.
-//!   Rendered (not passed-through) IQ first goes through a linear-phase FIR with power gain
-//!   `1 − quant_power / P(f)` designed from the recording's Welch level `P` (emissions keep unit
-//!   gain), so the rounding noise is counted once: a retune at the recording's rate serves its
-//!   floor PSD unchanged, and a wider rate or higher gain shows the lower rounding density a radio
-//!   would.
+//!   Rendered (not passed-through) IQ first goes through a short-time spectral subtraction: each
+//!   STFT bin (1024 bins at the recording's rate, sqrt-Hann, hop 512) gets the power gain
+//!   `1 − quant_power / P̂`, with `P̂` the bin's level averaged over past frames (≈ 15) and ±2 bins.
+//!   The rounding noise is counted once and emissions keep their power, including emissions that
+//!   start mid-recording: a retune at the recording's rate serves its floor PSD unchanged, and a
+//!   wider rate or higher gain shows the lower rounding density a radio would.
 //! - **Outside coverage (whole or part of the window, or a rate wider than the recording):** the
 //!   uncovered spectrum is complex white Gaussian noise at the recording's estimated floor PSD
 //!   less its rounding noise (Welch median, [`Recording::floor_power`]; the output rounding adds
@@ -78,10 +79,12 @@
 //! coverage edge. The band-select filter (≈ 60 dB, transition 8 % of the output rate) adds about
 //! half its length in recording samples of latency after a retune. Multi-centre recordings are
 //! refused. The rounding-noise correction assumes the recording's rounding error is white and
-//! independent of the signal (true once its floor is ≳ 0.5 code rms), is designed from the first
-//! ≈ 65 k samples, holds unit gain within ±3/64 of the recording rate of any stronger emission
-//! there (so the floor right beside an emission keeps the extra rounding noise), and costs 127
-//! taps per recording sample while rendering; passing through at a changed gain still rounds twice.
+//! independent of the signal (true once its floor is ≳ 0.5 code rms). It needs ≈ 15 frames
+//! (≈ 8 k recording samples) to follow an emission's onset, a coherent tone within 20 dB of a
+//! bin's floor loses a little of its amplitude to it (≈ 0.05 dB at 20 dB), it adds 1024 recording
+//! samples of look-ahead while rendering, and passing through at a changed gain still rounds
+//! twice. Real HackRF captures sit at ≈ 0.7 code rms per component (amp off, 20 dB VGA) to tens of
+//! codes, so the second rounding matters at low gain (≈ +0.8 dB uncorrected at 0.7 code).
 
 mod dsp;
 
