@@ -1292,7 +1292,9 @@ tasks:
   - id: T-077
     milestone: M0b
     title: Parallel test runner with serial groups for heavy suites (flake-free), faster than the 914 s sequential baseline
-    status: in-progress
+    status: done
+    commit: "a897c08 (merged)"
+    result: "cargo-nextest 0.9.144 with .config/nextest.toml; just test = nextest + doctests; just test-seq = plain cargo test fallback; just test-crate / just test-one for agents' targeted runs. heavy-serial group (max-threads 1): hk-e2e (incl. concurrent_demod, listen_live), hk-pipeline listen/retune/lossless/refine/stream tests, hk-api, hk-cli, hk-core ring_stress/ring_concurrency, hk-demod refine_wfm_real (found flaky under load: TimeBudget); retries=1 on 4 documented timing-sensitive tests. Full just test 170.86 s vs 914 s sequential baseline (~5.3x) at load ~17, all green; heavy-serial group 5x all passed (432-450 s each under load ~95). CLAUDE.md Build/test/run updated. Seed-target addition retracted (not implemented)."
     deps: []
     parallel_group: V
     use_cases: []
