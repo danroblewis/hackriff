@@ -18,6 +18,12 @@
 //!   are recorded. **On/off keying** of the carrier reference separates keyed CW.
 //! - **19 kHz pilot** from a trial quadrature discriminator on wide channels ([`tone_frequency`]
 //!   in 18.9–19.1 kHz with a significance test).
+//! - **Adjacent channels (T-099).** When C13's OBW99 abstains because strong neighbours fill the
+//!   snippet (dense FM: equal-power stations 200 kHz away inflate its noise reference or reach
+//!   the snippet edge), OBW99 is measured between the spectral valleys that separate the emission
+//!   at the box centre from its neighbours ([`AdjacentChannels`]). It replaces C13's CFO and
+//!   caps the channel filter, and the pilot discriminator runs on that channel, not across the
+//!   neighbours. An isolated emission, or one reaching the snippet edge, keeps C13's abstention.
 //!
 //! Rules (thresholds tuned on the T-065 synthetic sweep, still to be trained on captures):
 //! - **WFM:** OBW ≥ 120 kHz; a pilot confirms it (stereo). Without a pilot, mono WFM needs
@@ -49,7 +55,7 @@ use crate::dsp::Discriminator;
 use measure::{Band, Line};
 
 /// Rule-set id and version recorded with every decision.
-pub const MODE_RULES_VERSION: &str = "hk-demod/mode-rules@0.2.1";
+pub const MODE_RULES_VERSION: &str = "hk-demod/mode-rules@0.3.0";
 
 /// Analog demodulation modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -211,11 +217,32 @@ pub struct PilotCheck {
     pub found: bool,
 }
 
+/// OBW99 measured between adjacent emissions after C13 abstained (T-099). Frequencies are
+/// relative to the box centre.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdjacentChannels {
+    /// Mid-point of the OBW99 band, Hz.
+    pub center_offset_hz: f64,
+    /// Lower channel limit (valley before the lower neighbour, or the snippet edge), Hz.
+    pub lower_limit_hz: f64,
+    /// Upper channel limit, Hz.
+    pub upper_limit_hz: f64,
+    /// An emission rises beyond the lower limit.
+    pub lower_neighbour: bool,
+    /// An emission rises beyond the upper limit.
+    pub upper_neighbour: bool,
+    /// Shallowest neighbour valley below the emission's peak (smoothed density), dB.
+    pub valley_depth_db: f64,
+}
+
 /// Features the decision used.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModeFeatures {
-    /// OBW99, Hz.
+    /// OBW99, Hz (C13's, or measured between adjacent emissions: see `adjacent`).
     pub obw99_hz: Option<f64>,
+    /// Set when OBW99 was measured between adjacent emissions because C13 abstained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjacent: Option<AdjacentChannels>,
     /// Box SNR, dB.
     pub snr_db: Option<f64>,
     /// Spectral symmetry (C13, about the OBW99 mid-point).
@@ -300,7 +327,7 @@ impl ModeSelector {
     /// Selects a mode for a snippet and its C13 estimate.
     pub fn select(&self, snip: &ChannelSnippet, params: &ParameterSet) -> ModeDecision {
         let c = &self.config;
-        let cfo = params.cfo_hz.value();
+        let mut cfo = params.cfo_hz.value();
         let mut f = ModeFeatures {
             obw99_hz: params.obw99_hz.value(),
             snr_db: params.snr_box_db.value(),
@@ -317,14 +344,39 @@ impl ModeSelector {
         };
         let box_samples = &snip.samples[snip.box_range.clone()];
         let x = &box_samples[..box_samples.len().min(c.max_feature_samples)];
-        let m = params
-            .noise_density
-            .value()
+        let mut n0 = params.noise_density.value();
+        // T-099: C13 abstained; strong neighbours may fill the snippet. Measure between them.
+        let mut channel_half = None;
+        if f.obw99_hz.is_none()
+            && let Some(a) = measure::adjacent_obw(
+                x,
+                snip.sample_rate_hz,
+                snip.passband_hz,
+                snip.box_bandwidth_hz,
+            )
+        {
+            f.obw99_hz = Some(a.obw_hz);
+            f.adjacent = Some(AdjacentChannels {
+                center_offset_hz: a.center_hz,
+                lower_limit_hz: a.lower_hz,
+                upper_limit_hz: a.upper_hz,
+                lower_neighbour: a.lower_neighbour,
+                upper_neighbour: a.upper_neighbour,
+                valley_depth_db: a.valley_db,
+            });
+            cfo = Some(a.center_hz);
+            // The band's lowest density bounds the noise; C13's may carry the neighbours.
+            n0 = Some(n0.map_or(a.floor, |v| v.min(a.floor)));
+            // The channel filter's stopband (1.4 × half) stays inside the valleys.
+            channel_half = Some((a.center_hz - a.lower_hz).min(a.upper_hz - a.center_hz) / 1.4);
+        }
+        let m = n0
             .map(|n0| {
                 let band = Band {
                     obw_hz: f.obw99_hz,
                     cfo_hz: cfo.unwrap_or(0.0),
                     n0,
+                    max_half_hz: channel_half,
                 };
                 measure::measure(x, snip.sample_rate_hz, snip.box_bandwidth_hz, band, c)
             })
@@ -358,7 +410,14 @@ impl ModeSelector {
         if let Some(o) = obw
             && o >= c.pilot_check_min_obw_hz
         {
-            f.pilot = Some(self.pilot_check(x, snip.sample_rate_hz));
+            // Between neighbours the trial discriminator sees only this channel.
+            let channel = channel_half.and_then(|half| {
+                measure::channel32(x, snip.sample_rate_hz, cfo.unwrap_or(0.0), half)
+            });
+            f.pilot = Some(match &channel {
+                Some((w, rate)) => self.pilot_check(w, *rate),
+                None => self.pilot_check(x, snip.sample_rate_hz),
+            });
         }
         let env = f.envelope_variation;
         let constant = env.is_some_and(|v| v <= c.constant_envelope_max);
@@ -393,6 +452,17 @@ impl ModeSelector {
                         obw / 1e3
                     )
                 }];
+                if let Some(a) = f.adjacent {
+                    ev.push(format!(
+                        "OBW99 measured between adjacent emissions: channel {:+.0} to {:+.0} kHz \
+                         (neighbour below {}, above {}), valleys ≥ {:.0} dB below the peak",
+                        a.lower_limit_hz / 1e3,
+                        a.upper_limit_hz / 1e3,
+                        a.lower_neighbour,
+                        a.upper_neighbour,
+                        a.valley_depth_db
+                    ));
+                }
                 ev.push(env_txt.clone());
                 let conf = if let Some(p) = pilot {
                     ev.push(format!(
