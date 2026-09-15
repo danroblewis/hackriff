@@ -1182,3 +1182,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Not done:** new-emitter alarms aren't fed; the site pin isn't persisted.
 
   Timeboxed Opus review running; it is investigating the zero-alarm-inputs question.
+- **B0.335 T-132 items 2–7 delivered** (b55b9ba).
+  - **Gain key:** the dominant gain-state key comes from history tiles. A gain step gets a separate pool: z 0.64 vs 6.6.
+  - **Level classes:** occupied/idle pools, with an occupied level requiring ≥3 occupied visits; a single occupied visit gives no level novelty.
+  - **load_site:** reads happen outside the lock.
+  - **Memory cap:** LRU unload, with refusals counted. Dense slots come to about 371 MB per key at 9.7k cells×2, up to about 736 MB with occupied and idle pools. A concern for the Jetson.
+  - **Change-point latch:** per hour of day.
+  - **Weak interferer:** a sequential CUSUM stops learning 2.25 h after onset of a +1.5 dB interferer; reference drift 0.029 dB over 21 d.
+  - **Baseline file format:** v2, still reading v1; fixes a save-drop bug.
+  - **Test change:** the slow-creep assertion is relaxed from day 23 to day 20 (earlier detection).
+
+  Item 1 (history source/site tiles and filters) plus the ADR §3.4 docs become **T-133**, which T-124 now depends on. Timeboxed Opus review running (memory on Jetson, CUSUM false building, key proliferation, load race, merge vs T-131).

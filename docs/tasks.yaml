@@ -1971,7 +1971,7 @@ tasks:
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
     status: todo
-    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132]
+    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
     acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s)"
@@ -2087,7 +2087,8 @@ tasks:
   - id: T-132
     milestone: M2
     title: "M2 integration part 2b: history source+site tiles and filters; baseline memory bound, per-slot change-point latch, per-gain-state key, level-statistic bimodality, load_site outside lock, weak-interferer sequential test"
-    status: in-progress
+    status: review
+    commit: b55b9ba
     deps: [T-128, T-116, T-126]
     parallel_group: M2B
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
@@ -2097,6 +2098,20 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
+  - id: T-133
+    milestone: M2
+    title: "History tiles record source + site; history/report filters by source/site; ADR-0012 §3.4 learning-rule documentation"
+    status: todo
+    deps: [T-131, T-132]
+    parallel_group: M2H
+    use_cases: [AWARE-042, AWARE-033]
+    found_by: "T-132 item 1 not started (2026-09-15)"
+    acceptance: "history tiles record source (FrameInput::source) and site (current site id / unassigned / mobile) in an additive versioned tile format (v1/v2 readable, tests); /api/history and /api/report filter by source and site; docs/api.md + crates/hk-cli/tests/api_contract.rs; ADR-0012 §3.4 documents per-hour latch, sequential learning CUSUM and occupied/idle level classes"
+    area: crates/hk-store/src/history, crates/hk-api (history/report params), crates/hk-pipeline (history ingest site), docs/api.md, docs/adr/0012
+    needs: none
+    model: opus
+    effort: medium
     core_interface: true
   - id: T-100
     milestone: M0b
