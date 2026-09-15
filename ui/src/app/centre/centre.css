@@ -1,1 +1,44 @@
-/* centre area styles (ADR-0013 §5, §8). Owner: see §8. Scope every rule under the area's slot class; never change shared tokens or the grid. */
+/* centre area styles (ADR-0013 §5, §8). Owner: T-152. Every rule is scoped under the centre slots
+   (.specwf = live, .axis). Tokens only; the waterfall canvas keeps its fixed data colormap (always
+   dark), so the lines drawn over it (crosshair, DC hatching) are fixed light/dark overlays. */
+.specwf [hidden] { display: none !important; }
+.specwf { cursor: crosshair; user-select: none; -webkit-user-select: none; touch-action: none; }
+.specwf.reviewing { box-shadow: inset 0 2px 0 var(--amber); }
+
+.specwf .c-spec { position: absolute; left: 0; right: 0; top: 0; height: 35%; pointer-events: none; }
+.specwf .c-brackets { position: absolute; inset: 0; pointer-events: none; }
+.specwf .bk { position: absolute; top: 24px; height: 14px; box-sizing: border-box; border-top: 2px solid; border-left: 1px solid; border-right: 1px solid; pointer-events: auto; cursor: pointer; }
+.specwf .bk span { position: absolute; top: -17px; left: 50%; transform: translateX(-50%); font: 500 10.5px var(--mono); white-space: nowrap; padding: 0 4px; border-radius: 3px; background: var(--ground); }
+.specwf .bk.confirmed { border-color: var(--teal); color: var(--teal); }
+.specwf .bk.candidate { border-color: var(--lav); color: var(--lav); border-style: dashed; }
+.specwf .bk.active { border-color: var(--amber); color: var(--amber); border-style: solid; z-index: 2; }
+.specwf .bk.narrow span { display: none; }
+.specwf .bk.active span, .specwf .bk:hover span { display: block; }
+
+.specwf .c-wf { position: absolute; left: 0; right: 0; top: 35%; bottom: 0; pointer-events: none; overflow: hidden; }
+.specwf .c-colhi { position: absolute; top: 0; bottom: 0; background: var(--amber-soft); border-left: 1px solid var(--amber); border-right: 1px solid var(--amber); }
+.specwf .c-dc { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, rgba(13,19,23,0) 0 4px, rgba(13,19,23,0.6) 4px 6px); }
+.specwf .c-dc.assumed { background: repeating-linear-gradient(135deg, rgba(13,19,23,0) 0 6px, rgba(13,19,23,0.45) 6px 8px); }
+.specwf .c-dc span { position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%); font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 1px 4px; border-radius: 3px; white-space: nowrap; }
+.specwf .c-sel { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--amber); border-right: 1px dashed var(--amber); opacity: 0.6; }
+.specwf .c-sel.active { background: var(--amber-soft); opacity: 1; }
+.specwf .c-sel.pending { border-style: dotted; }
+.specwf .c-drag { position: absolute; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
+.specwf .c-drag span { position: absolute; top: 4px; left: 4px; font: 10.5px var(--mono); color: var(--text); background: var(--panel); padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
+
+.specwf .c-cross { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(213,222,226,0.45); pointer-events: none; }
+.specwf .c-tip { position: absolute; top: 46px; max-width: calc(100% - 16px); overflow: hidden; text-overflow: ellipsis; font: 11px var(--mono); color: var(--text); background: var(--panel); border: 1px solid var(--line); padding: 3px 7px; border-radius: 4px; pointer-events: none; white-space: nowrap; z-index: 4; }
+.specwf .c-hint { position: absolute; right: 10px; bottom: 28px; font-size: 11px; color: var(--muted); background: var(--panel); opacity: 0.9; padding: 3px 8px; border-radius: 4px; pointer-events: none; }
+.specwf .c-time { position: absolute; right: 8px; bottom: 8px; font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 0 4px; border-radius: 3px; pointer-events: none; }
+.specwf .c-review { position: absolute; left: 10px; top: calc(35% + 8px); max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--amber); background: var(--panel); border: 1px solid var(--amber); padding: 2px 8px; border-radius: 4px; pointer-events: none; }
+.specwf .c-perf { position: absolute; left: 8px; bottom: 8px; font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 0 4px; border-radius: 3px; pointer-events: none; }
+
+.axis { touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+.axis.dragging { cursor: grabbing; }
+.axis .c-tick { position: absolute; top: 0; height: 100%; }
+.axis .c-tick::before { content: ""; position: absolute; top: 0; left: 0; width: 1px; height: 5px; background: var(--dim); }
+.axis .c-tick span { position: absolute; top: 7px; transform: translateX(-50%); white-space: nowrap; }
+
+@media (max-width: 900px) {
+  .specwf .c-hint { display: none; }
+}
