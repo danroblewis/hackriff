@@ -142,6 +142,8 @@ struct Inner {
     next_close_ns: Option<i64>,
     first_ns: Option<i64>,
     det_cursor_ns: i64,
+    /// Emitters counted as first sightings over the last close's window.
+    sighted: std::collections::HashSet<hk_model::ids::EmitterId>,
     repo: Option<Repository>,
     unit: PowerUnit,
     stats: OccupancyServiceStats,
@@ -496,6 +498,7 @@ impl OccupancyService {
                 next_close_ns: None,
                 first_ns: None,
                 det_cursor_ns: i64::MIN,
+                sighted: std::collections::HashSet::new(),
                 repo: None,
                 unit: PowerUnit::Dbfs,
                 stats,
@@ -645,21 +648,27 @@ impl OccupancyService {
             inner.stats.errors += 1;
             return 0;
         };
+        // The window reaches back one interval: an emitter first seen in the previous interval
+        // but written to the inventory after its close counts here, once (the previous window's
+        // ids are remembered).
+        let window = TimeRange::new(iv.start.saturating_add_nanos(-iv.duration_ns()), iv.end);
         let mut seen = std::collections::HashSet::new();
         for r in rows {
             let OccupancySubject::Band { freq } = r.subject else {
                 continue;
             };
-            match repo.emitters_in_region(&Region::new(freq, iv)) {
+            match repo.emitters_in_region(&Region::new(freq, window)) {
                 Ok(es) => seen.extend(
                     es.iter()
-                        .filter(|e| e.first_seen >= iv.start && e.first_seen < iv.end)
+                        .filter(|e| e.first_seen >= window.start && e.first_seen < window.end)
                         .map(|e| e.id),
                 ),
                 Err(_) => inner.stats.errors += 1,
             }
         }
-        seen.len() as u64
+        let new = seen.difference(&inner.sighted).count() as u64;
+        inner.sighted = seen;
+        new
     }
 
     fn detections(&self, inner: &mut Inner, span: TimeRange) -> Vec<DetectionExtent> {

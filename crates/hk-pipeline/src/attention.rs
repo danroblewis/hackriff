@@ -27,7 +27,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use hk_context::occupancy::baseline::{
@@ -40,13 +41,12 @@ use hk_context::occupancy::novelty::NoveltyConfig;
 use hk_context::occupancy::score::{CandidateInput, Scorer};
 use hk_context::occupancy::site::{Fix, SiteAssigner};
 use hk_model::Repository;
-use hk_model::attention::alarm::AlarmKind;
 use hk_model::attention::baseline::MATURITY_MIN_OBSERVED_S;
 use hk_model::attention::baseline::{
     BaselineResolution, CalKey, HourOfWeek, Maturity, SiteConfig, SiteKey, SiteRecord, SiteSource,
 };
 use hk_model::attention::occupancy::{ChannelKey, OccupancyStat, OccupancySubject};
-use hk_model::attention::report::{BaselineComparison, ChangeEntry, ComparisonStatus};
+use hk_model::attention::report::{BaselineComparison, ChangeEntry, ChangeKind, ComparisonStatus};
 use hk_model::attention::score::new_emitter_novelty;
 use hk_model::attention::score::{InterestingnessProvider, ScoreWeights, SharedInterestingness};
 use hk_model::ids::SiteId;
@@ -63,6 +63,118 @@ use crate::stats::Counters;
 
 /// How far back scoring looks for an inventory classification of a track, ns.
 const CLASS_LOOKBACK_NS: i64 = 24 * 3_600_000_000_000;
+/// Minimum sample-clock gap between class-entropy snapshot refreshes, ns.
+const CLASS_REFRESH_NS: i64 = 10_000_000_000;
+/// Most inventory emitters one class-entropy refresh reads (the most recently seen).
+pub const CLASS_ROWS_MAX: usize = 2_000;
+/// Longest row `compare_report` compares against a single hour-of-week slot, ns.
+const COMPARE_ROW_MAX_NS: i64 = 3_600_000_000_000;
+
+/// Classified inventory emitters for class entropy: extent and entropy of the latest
+/// classification. Read only by the class-entropy worker thread, never by the control thread.
+pub trait ClassSource: Send + Sync {
+    /// Classified emitters overlapping `region` (at most `limit`, most recently seen first).
+    fn classified(&self, region: &Region, limit: usize) -> Vec<(FreqRange, f64)>;
+}
+
+/// [`ClassSource`] over the run's inventory database.
+struct RepoClasses(Arc<Mutex<Repository>>);
+
+impl ClassSource for RepoClasses {
+    fn classified(&self, region: &Region, limit: usize) -> Vec<(FreqRange, f64)> {
+        let Ok(emitters) = lock(&self.0).emitters_in_region_limited(region, Some(limit)) else {
+            return Vec::new();
+        };
+        emitters
+            .iter()
+            .filter_map(|e| {
+                e.classifications.last().map(|c| {
+                    (
+                        e.freq(),
+                        class_entropy(&c.family, c.confidence, c.open_set_score),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+/// T-128 review: the class-entropy snapshot scoring reads. A worker thread refreshes it; the
+/// control thread only swaps an `Arc` out (no DB I/O, no waiting on a query).
+struct ClassCache {
+    source: Mutex<Arc<dyn ClassSource>>,
+    snapshot: Mutex<Arc<Vec<(FreqRange, f64)>>>,
+    in_flight: AtomicBool,
+    last_request_ns: AtomicI64,
+    refreshes: AtomicU64,
+}
+
+impl ClassCache {
+    fn new(source: Arc<dyn ClassSource>) -> Self {
+        Self {
+            source: Mutex::new(source),
+            snapshot: Mutex::new(Arc::new(Vec::new())),
+            in_flight: AtomicBool::new(false),
+            last_request_ns: AtomicI64::new(i64::MIN),
+            refreshes: AtomicU64::new(0),
+        }
+    }
+
+    /// Spawns the refresh worker; it exits when the returned sender drops (with the service).
+    fn spawn_worker(self: &Arc<Self>) -> Option<SyncSender<Region>> {
+        let (tx, rx) = sync_channel::<Region>(1);
+        let cache = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("hk-attn-class".into())
+            .spawn(move || {
+                while let Ok(region) = rx.recv() {
+                    let source = Arc::clone(&*lock(&cache.source));
+                    let v = Arc::new(source.classified(&region, CLASS_ROWS_MAX));
+                    *lock(&cache.snapshot) = v;
+                    cache.refreshes.fetch_add(1, Ordering::Relaxed);
+                    cache.in_flight.store(false, Ordering::Release);
+                }
+            })
+            .ok()?;
+        Some(tx)
+    }
+}
+
+/// Class entropy of each track from the snapshot emitter covering most of its extent (≥ ½).
+/// Tracks without one are unclassified.
+fn class_entropies(
+    classified: &[(FreqRange, f64)],
+    tracks: &[(TrackId, FreqRange)],
+) -> HashMap<TrackId, f64> {
+    let mut out = HashMap::new();
+    if classified.is_empty() {
+        return out;
+    }
+    for (id, f) in tracks {
+        let best = classified
+            .iter()
+            .map(|(ef, h)| {
+                let overlap = (ef.hi_hz.min(f.hi_hz) - ef.lo_hz.max(f.lo_hz)).max(0.0);
+                (overlap / f.width_hz().max(1.0), *h)
+            })
+            .filter(|(share, _)| *share >= 0.5)
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, h)) = best {
+            out.insert(*id, h);
+        }
+    }
+    out
+}
+
+/// Stouffer combination of per-interval z-scores with weights `w` (`Σ wᵢzᵢ / √Σ wᵢ²`): N(0, 1)
+/// under no change when the intervals are independent.
+fn stouffer(zw: &[(f64, f64)]) -> Option<f64> {
+    let (num, den) = zw
+        .iter()
+        .filter(|(z, w)| z.is_finite() && w.is_finite() && *w > 0.0)
+        .fold((0.0, 0.0), |(n, d), (z, w)| (n + w * z, d + w * w));
+    (den > 0.0).then(|| num / den.sqrt())
+}
 
 /// FCO of each mature reference occupancy pool of `sub` at `slot`.
 fn mature_pool_fcos(sub: &SubjectBaseline, slot: HourOfWeek) -> Vec<f64> {
@@ -74,7 +186,7 @@ fn mature_pool_fcos(sub: &SubjectBaseline, slot: HourOfWeek) -> Vec<f64> {
 }
 
 /// The time a row's visits represent, s (as [`from_occupancy_stat`] weighs a fold).
-fn represented_s(stat: &OccupancyStat) -> f64 {
+pub(crate) fn represented_s(stat: &OccupancyStat) -> f64 {
     let interval_s = stat.interval.duration_ns() as f64 / 1e9;
     if stat.n_revisits_all == 0 {
         return 0.0;
@@ -155,6 +267,9 @@ pub struct AttentionService {
     clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
     /// T-128: candidate evidence, channel novelty and the site's first-sighting rate.
     cands: Mutex<CandidateState>,
+    /// Class-entropy snapshot, refreshed off the control thread.
+    classes: Arc<ClassCache>,
+    class_tx: Mutex<Option<SyncSender<Region>>>,
 }
 
 /// T-128: what scoring reads besides the baselines.
@@ -321,7 +436,11 @@ impl AttentionService {
         counters: Option<Arc<Counters>>,
         clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
     ) -> Self {
+        let classes = Arc::new(ClassCache::new(Arc::new(RepoClasses(Arc::clone(&repo)))));
+        let class_tx = Mutex::new(classes.spawn_worker());
         Self {
+            classes,
+            class_tx,
             repo,
             sites: Mutex::new(SiteAssigner::new(SiteConfig::default(), sites)),
             baselines: Mutex::new(Baselines::new(
@@ -475,15 +594,15 @@ impl AttentionService {
     /// first-sighting rate, and re-scores the candidates. The sightings accrue to the baseline
     /// rate only under a site that accrues baselines and when they are not themselves novel
     /// (< the alarm "on" level), so a burst of new emitters does not teach the rate. Returns the
-    /// channel rows folded.
+    /// channel rows' fold outcomes (for T-131's alarm service).
     pub fn ingest_interval(
         &self,
         rows: &[OccupancyStat],
         first_sightings: u64,
         t_end: Timestamp,
         gain: u32,
-    ) -> usize {
-        let mut folded = 0;
+    ) -> Vec<(OccupancySubject, FoldOutcome)> {
+        let mut folded = Vec::new();
         let (mut observed_s, mut accrues) = (0.0_f64, false);
         for r in rows {
             match r.subject {
@@ -492,7 +611,9 @@ impl AttentionService {
                     accrues |= r.site.accrues_baseline();
                 }
                 OccupancySubject::Channel { .. } => {
-                    folded += usize::from(self.ingest_occupancy(r, gain).is_some());
+                    if let Some(o) = self.ingest_occupancy(r, gain) {
+                        folded.push((r.subject, o));
+                    }
                 }
             }
         }
@@ -509,12 +630,17 @@ impl AttentionService {
         folded
     }
 
-    /// T-128: a survey report's change vs baseline (ADR-0012 §6.1): each channel row (rolled up
-    /// over the report span) against its subject's reference under `site` and the row's
-    /// calibration, at the finest mature pool. `no-baseline` for mobile/unassigned sites or when no
-    /// row has a baseline subject; `immature` when subjects exist but none is mature; otherwise
-    /// `available` with every level (`level-above-baseline`, dB above the floor) and occupancy
-    /// (`busier-than-usual`, FCO) change with |z| ≥ 3, largest |z| first.
+    /// T-128: a survey report's change vs baseline (ADR-0012 §6.1). Each channel's 15-min (or
+    /// hourly) rows are compared one by one against the reference pool of the row's **own**
+    /// hour-of-week slot under `site` and the row's calibration (finest mature pool), and the
+    /// per-interval z-scores are combined per subject (Stouffer: occupancy weighted by √n_eff,
+    /// level equally), so a long span neither shrinks the variance nor collapses onto one slot.
+    /// Rows longer than 1 h (a span rollup) are not comparable and are skipped. `no-baseline` for
+    /// mobile/unassigned sites or when no row has a baseline subject; `immature` when subjects exist
+    /// but none is mature; otherwise `available` with every level change (`level-above-baseline`,
+    /// combined z ≥ 3, dB above the floor) and occupancy change with |combined z| ≥ 3
+    /// (`busier-than-usual` when positive, `quieter-than-usual` when negative; FCO means weighted
+    /// by the rows' observation weight), largest |z| first.
     pub fn compare_report(&self, site: SiteKey, rows: &[OccupancyStat]) -> BaselineComparison {
         let empty = |status| BaselineComparison {
             status,
@@ -533,8 +659,24 @@ impl AttentionService {
             return empty(ComparisonStatus::Unavailable);
         }
         let z_min = NoveltyConfig::default().z_min;
-        let (mut key_used, mut finest, mut changes) = (None, None, Vec::new());
+        /// One subject's per-interval evidence.
+        #[derive(Default)]
+        struct Acc {
+            subject: Option<OccupancySubject>,
+            occ_zw: Vec<(f64, f64)>,
+            occ_base: f64,
+            occ_obs: f64,
+            occ_w: f64,
+            lvl_zw: Vec<(f64, f64)>,
+            lvl_base: f64,
+            lvl_obs: f64,
+        }
+        let (mut key_used, mut finest) = (None, None);
+        let mut subjects: BTreeMap<BaselineSubject, Acc> = BTreeMap::new();
         for r in rows {
+            if r.interval.duration_ns() > COMPARE_ROW_MAX_NS {
+                continue;
+            }
             let Some((_, cal, obs)) = from_occupancy_stat(r, 0) else {
                 continue;
             };
@@ -555,25 +697,50 @@ impl AttentionService {
             finest = Some(finest.map_or(resolution, |f: BaselineResolution| f.min(resolution)));
             let (level, occ) = pools(sub, e.slot(obs.t), None, BaselineCopy::Reference);
             let ri = res_index(resolution);
-            if let (Some(z), Some(l), Some(m)) = (n.level_z, obs.level_db, level[ri].mean_db())
+            let acc = subjects.entry(obs.subject).or_default();
+            acc.subject.get_or_insert(r.subject);
+            if let (Some(z), Some(l), Some(m)) = (n.level_z, obs.level_db, level[ri].mean_db()) {
+                acc.lvl_zw.push((z, 1.0));
+                acc.lvl_base += m;
+                acc.lvl_obs += l;
+            }
+            if let (Some(z), Some(f), Some(p)) = (n.occupancy_z, obs.fco(), occ[ri].fco()) {
+                acc.occ_zw.push((z, obs.n_eff.max(0.0).sqrt()));
+                acc.occ_base += p * obs.weight_s;
+                acc.occ_obs += f * obs.weight_s;
+                acc.occ_w += obs.weight_s;
+            }
+        }
+        let mut changes = Vec::new();
+        for acc in subjects.values() {
+            let Some(subject) = acc.subject else {
+                continue;
+            };
+            if let Some(z) = stouffer(&acc.lvl_zw)
                 && z >= z_min
             {
+                let k = acc.lvl_zw.len() as f64;
                 changes.push(ChangeEntry {
-                    subject: r.subject,
-                    kind: AlarmKind::LevelAboveBaseline,
-                    baseline: m,
-                    observed: l,
+                    subject,
+                    kind: ChangeKind::LevelAboveBaseline,
+                    baseline: acc.lvl_base / k,
+                    observed: acc.lvl_obs / k,
                     z,
                 });
             }
-            if let (Some(z), Some(f), Some(p)) = (n.occupancy_z, obs.fco(), occ[ri].fco())
+            if let Some(z) = stouffer(&acc.occ_zw)
                 && z.abs() >= z_min
+                && acc.occ_w > 0.0
             {
                 changes.push(ChangeEntry {
-                    subject: r.subject,
-                    kind: AlarmKind::BusierThanUsual,
-                    baseline: p,
-                    observed: f,
+                    subject,
+                    kind: if z > 0.0 {
+                        ChangeKind::BusierThanUsual
+                    } else {
+                        ChangeKind::QuieterThanUsual
+                    },
+                    baseline: acc.occ_base / acc.occ_w,
+                    observed: acc.occ_obs / acc.occ_w,
                     z,
                 });
             }
@@ -650,7 +817,9 @@ impl AttentionService {
                 }
             }
             let tracks = c.table.confirmed();
-            let entropy = self.class_entropies(&tracks, t);
+            self.request_class_refresh(&tracks, t);
+            let snapshot = Arc::clone(&*lock(&self.classes.snapshot));
+            let entropy = class_entropies(&snapshot, &tracks);
             let new_emitter = c.sightings.novelty();
             let CandidateState {
                 table,
@@ -669,16 +838,20 @@ impl AttentionService {
         self.score(t, false, &inputs)
     }
 
-    /// Class entropy of each track from the inventory emitter covering most of its extent (≥ ½)
-    /// with a classification in the last day. Tracks without one are unclassified.
-    fn class_entropies(
-        &self,
-        tracks: &[(TrackId, FreqRange)],
-        t: Timestamp,
-    ) -> HashMap<TrackId, f64> {
-        let mut out = HashMap::new();
+    /// Asks the class-entropy worker for a fresh snapshot over the confirmed tracks' extent (the
+    /// last day's classified emitters) when none is in flight and the last request is at least
+    /// [`CLASS_REFRESH_NS`] of sample clock old. Never blocks: a full queue drops the request.
+    fn request_class_refresh(&self, tracks: &[(TrackId, FreqRange)], t: Timestamp) {
         if tracks.is_empty() {
-            return out;
+            return;
+        }
+        let now = t.as_unix_nanos();
+        let last = self.classes.last_request_ns.load(Ordering::Relaxed);
+        if last != i64::MIN && now >= last && now - last < CLASS_REFRESH_NS {
+            return;
+        }
+        if self.classes.in_flight.swap(true, Ordering::AcqRel) {
+            return;
         }
         let lo = tracks
             .iter()
@@ -692,35 +865,25 @@ impl AttentionService {
             t.saturating_add_nanos(-CLASS_LOOKBACK_NS),
             t.saturating_add_nanos(1),
         );
-        let Ok(emitters) =
-            lock(&self.repo).emitters_in_region(&Region::new(FreqRange::new(lo, hi), span))
-        else {
-            return out;
-        };
-        let classified: Vec<_> = emitters
-            .iter()
-            .filter_map(|e| e.classifications.last().map(|c| (e.freq(), c)))
-            .collect();
-        if classified.is_empty() {
-            return out;
+        let region = Region::new(FreqRange::new(lo, hi), span);
+        let sent = lock(&self.class_tx)
+            .as_ref()
+            .is_some_and(|tx| tx.try_send(region).is_ok());
+        if sent {
+            self.classes.last_request_ns.store(now, Ordering::Relaxed);
+        } else {
+            self.classes.in_flight.store(false, Ordering::Release);
         }
-        for (id, f) in tracks {
-            let best = classified
-                .iter()
-                .map(|(ef, c)| {
-                    let overlap = (ef.hi_hz.min(f.hi_hz) - ef.lo_hz.max(f.lo_hz)).max(0.0);
-                    (overlap / f.width_hz().max(1.0), c)
-                })
-                .filter(|(share, _)| *share >= 0.5)
-                .max_by(|a, b| a.0.total_cmp(&b.0));
-            if let Some((_, c)) = best {
-                out.insert(
-                    *id,
-                    class_entropy(&c.family, c.confidence, c.open_set_score),
-                );
-            }
-        }
-        out
+    }
+
+    /// Class-entropy snapshot refreshes completed (tests, diagnostics).
+    pub fn class_refreshes(&self) -> u64 {
+        self.classes.refreshes.load(Ordering::Relaxed)
+    }
+
+    /// Replaces the class-entropy source (tests).
+    pub fn set_class_source(&self, source: Arc<dyn ClassSource>) {
+        *lock(&self.classes.source) = source;
     }
 
     /// Scores `inputs` at `t` and publishes when due and changed.
@@ -1226,6 +1389,180 @@ pub(crate) mod tests {
         assert!(c.novelty.novelty > 0.9 && c.novelty.new_emitter == Some(after));
         assert!(c.components.class_entropy.is_none(), "unclassified");
         set.validate().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A class source that blocks in its "query" until released, recording the calling threads.
+    struct GatedClasses {
+        gate: (Mutex<bool>, std::sync::Condvar),
+        calls: AtomicU64,
+        threads: Mutex<Vec<std::thread::ThreadId>>,
+    }
+
+    impl ClassSource for GatedClasses {
+        fn classified(&self, _region: &Region, limit: usize) -> Vec<(FreqRange, f64)> {
+            assert!(limit <= CLASS_ROWS_MAX);
+            lock(&self.threads).push(std::thread::current().id());
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut open = lock(&self.gate.0);
+            while !*open {
+                open = self.gate.1.wait(open).unwrap();
+            }
+            vec![(FreqRange::new(431.99e6, 432.02e6), 0.2)]
+        }
+    }
+
+    fn wait_until(what: &str, f: impl Fn() -> bool) {
+        let t0 = std::time::Instant::now();
+        while !f() {
+            assert!(t0.elapsed().as_secs() < 10, "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// T-128 review item 1: `publish_candidates` on the control path does no inventory I/O. Class
+    /// entropies come from a snapshot a worker thread refreshes; while that refresh is stuck in its
+    /// query, member evidence and publishing still return at once.
+    #[test]
+    fn attention_candidate_publish_does_no_db_io_on_the_control_path() {
+        let dir = std::env::temp_dir().join(format!("hk-t128-class-{}", SiteId::new()));
+        let s = service(&dir);
+        let src = Arc::new(GatedClasses {
+            gate: (Mutex::new(false), std::sync::Condvar::new()),
+            calls: AtomicU64::new(0),
+            threads: Mutex::new(Vec::new()),
+        });
+        s.set_class_source(src.clone());
+        let t0 = 7 * 86_400 * 1_000_000_000i64;
+        let member = |t_ns: i64, lo: f64| MemberEvidence {
+            f_lo_hz: lo,
+            f_hi_hz: lo + 10e3,
+            t_ns,
+            continues: false,
+            snr_db: Some(15.0),
+            suspect: false,
+        };
+        let track = TrackId::new();
+        s.on_track_member(track, &member(t0, 432.0e6));
+        s.on_track_confirmed(track, FreqRange::new(432.0e6, 432.01e6), false);
+        let start = std::time::Instant::now();
+        assert!(
+            s.publish_candidates(Timestamp::from_unix_nanos(t0), false)
+                .is_some()
+        );
+        let publish_ms = start.elapsed().as_secs_f64() * 1e3;
+        // The refresh is now blocked inside the query on the worker thread.
+        wait_until("the refresh to start", || {
+            src.calls.load(Ordering::SeqCst) == 1
+        });
+        let start = std::time::Instant::now();
+        let other = TrackId::new();
+        s.on_track_member(other, &member(t0 + 20_000_000_000, 433.0e6));
+        let member_ms = start.elapsed().as_secs_f64() * 1e3;
+        s.on_track_confirmed(other, FreqRange::new(433.0e6, 433.01e6), false);
+        let start = std::time::Instant::now();
+        assert!(
+            s.publish_candidates(Timestamp::from_unix_nanos(t0 + 20_000_000_000), false)
+                .is_some()
+        );
+        let blocked_publish_ms = start.elapsed().as_secs_f64() * 1e3;
+        let entropy = |s: &AttentionService| {
+            s.provider()
+                .snapshot()
+                .candidates
+                .iter()
+                .find(|c| c.subject == CandidateSubject::Track { id: track })
+                .map(|c| c.components.class_entropy)
+        };
+        assert_eq!(entropy(&s), Some(None), "no snapshot yet: unclassified");
+        assert_eq!(src.calls.load(Ordering::SeqCst), 1, "one refresh in flight");
+        // Release the query: the next pass reads the refreshed snapshot.
+        *lock(&src.gate.0) = true;
+        src.gate.1.notify_all();
+        wait_until("the refresh to land", || s.class_refreshes() >= 1);
+        assert!(
+            s.publish_candidates(Timestamp::from_unix_nanos(t0 + 25_000_000_000), true)
+                .is_some()
+        );
+        println!(
+            "T-128 class cache: publish {publish_ms:.3} ms, on_track_member during a stuck \
+             refresh {member_ms:.3} ms, publish during it {blocked_publish_ms:.3} ms; \
+             refreshes {} (calls {}), entropy after {:?}",
+            s.class_refreshes(),
+            src.calls.load(Ordering::SeqCst),
+            entropy(&s)
+        );
+        assert!(
+            entropy(&s).flatten().is_some(),
+            "classified from the snapshot"
+        );
+        let me = std::thread::current().id();
+        assert!(
+            lock(&src.threads).iter().all(|t| *t != me),
+            "the query never ran on the calling (control) thread"
+        );
+        assert!(member_ms < 50.0 && blocked_publish_ms < 50.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-128 review item 2: a 24 h report compares each 15-min row against its own slot and
+    /// combines the evidence, so an unchanged channel shows no change, and busier / quieter
+    /// channels are labelled by the sign.
+    #[test]
+    fn attention_compare_report_per_interval_over_24h() {
+        let dir = std::env::temp_dir().join(format!("hk-t128-cmp-{}", SiteId::new()));
+        let s = service(&dir);
+        let cur = s
+            .set_current_site(SiteSelect {
+                name: Some("home".into()),
+                ..SiteSelect::default()
+            })
+            .unwrap();
+        let id: SiteId = cur["record"]["id"].as_str().unwrap().parse().unwrap();
+        let site = SiteKey::Site(id);
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 69_000,
+            hi_cell: 69_004,
+        };
+        let subject = OccupancySubject::Channel { key };
+        // `k` of 12 revisits occupied.
+        let row = |q: i64, k: u64| {
+            let mut r = series_row(q, site, subject, k as f64 / 12.0);
+            r.n_occupied = k;
+            r
+        };
+        // 3 days learning: 1, 3, 5 of 12 (mean FCO 0.25, varying interval to interval).
+        for q in 0..288 {
+            s.ingest_occupancy(&row(q, [1, 3, 5][q as usize % 3]), 0);
+        }
+        let day = |cycle: [u64; 3]| -> Vec<OccupancyStat> {
+            (288..384)
+                .map(|q| row(q, cycle[(q as usize + 1) % 3]))
+                .collect()
+        };
+        let unchanged = s.compare_report(site, &day([5, 1, 3]));
+        let busier = s.compare_report(site, &day([5, 7, 9]));
+        let quieter = s.compare_report(site, &day([0, 0, 1]));
+        println!(
+            "T-128 compare 24 h: unchanged {:?}; busier {:?}; quieter {:?}",
+            unchanged.changes, busier.changes, quieter.changes
+        );
+        assert_eq!(unchanged.status, ComparisonStatus::Available);
+        assert!(unchanged.changes.is_empty(), "{:?}", unchanged.changes);
+        assert_eq!(busier.changes.len(), 1);
+        assert_eq!(busier.changes[0].kind, ChangeKind::BusierThanUsual);
+        assert!(busier.changes[0].z >= 3.0 && busier.changes[0].observed > 0.5);
+        assert_eq!(quieter.changes.len(), 1);
+        assert_eq!(quieter.changes[0].kind, ChangeKind::QuieterThanUsual);
+        assert!(quieter.changes[0].z <= -3.0 && quieter.changes[0].observed < 0.05);
+        // A span rollup row cannot be compared against one slot.
+        let rolled = crate::reports::roll_up(
+            &day([5, 7, 9]).iter().collect::<Vec<_>>(),
+            TimeRange::new(row(288, 0).interval.start, row(383, 0).interval.end),
+        )
+        .unwrap();
+        assert!(s.compare_report(site, &[rolled]).changes.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

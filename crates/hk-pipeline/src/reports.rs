@@ -30,11 +30,13 @@ use hk_context::report::{
     OccupancyProvider, OccupancyRows, Providers, RepoInventory, ReportRequest, report_chunks,
     report_csv, report_png,
 };
-use hk_model::attention::occupancy::{OccupancyStat, OccupancySubject};
+use hk_model::attention::occupancy::{
+    ConfidenceLevel, OccupancyStat, OccupancySubject, fraction_interval,
+};
 use hk_model::attention::report::{BaselineComparison, ReportOccupancy};
 use hk_store::occupancy::{OccupancyQuery, SeriesInterval};
 
-use crate::attention::AttentionService;
+use crate::attention::{AttentionService, represented_s};
 use crate::occupancy::OccupancyService;
 
 /// Most series rows one report reads.
@@ -195,12 +197,19 @@ impl ReportService {
         let series = self.occupancy.as_deref().map(|svc| SeriesOccupancy {
             svc,
             fallback: &tiles,
+            channel_rows: Mutex::new(None),
         });
         let occupancy: &dyn OccupancyProvider = match &series {
             Some(s) => s,
             None => &tiles,
         };
-        let baselines = self.attention.as_deref().map(AttentionBaselines);
+        let baselines = self
+            .attention
+            .as_deref()
+            .map(|attention| AttentionBaselines {
+                attention,
+                series: series.as_ref(),
+            });
         let baseline: &dyn BaselineProvider = match &baselines {
             Some(b) => b,
             None => &NoBaselines,
@@ -226,6 +235,9 @@ pub struct SeriesOccupancy<'a> {
     pub svc: &'a OccupancyService,
     /// Answers when the series holds nothing for the box.
     pub fallback: &'a dyn OccupancyProvider,
+    /// The per-interval channel rows the last `occupancy` call rolled up (`None` when it fell
+    /// back), for the per-interval baseline comparison.
+    pub channel_rows: Mutex<Option<Vec<OccupancyStat>>>,
 }
 
 /// Grouping key of a series row: channel cells, or a band's extent in Hz.
@@ -263,9 +275,12 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     Some(v[v.len() / 2])
 }
 
-/// One subject's 15-min rows rolled up over `span` (§2.8: counts summed, each fraction weighted by
-/// the counts it was computed over). The interval-level `confidence` and `fco_window` are dropped
-/// (they do not roll up); levels and floors are the rows' medians.
+/// One subject's 15-min rows rolled up over `span` (§2.8: counts summed; the confidence interval
+/// recomputed from the summed `n_eff`). `fco` and `fco_suspect_upper` are weighted by the time
+/// each row represents × its usable share (§2.5, as the baseline fold weighs a row), never by visit
+/// count, so intervals where the bandit thinned the sweep visits are not underweighted. `fbo`/`sro`
+/// weigh by observed time, `fco_all_visits` (information only) by all visits. `fco_window` is
+/// dropped; levels and floors are the rows' medians.
 pub fn roll_up(rows: &[&OccupancyStat], span: TimeRange) -> Option<OccupancyStat> {
     let first = rows.first()?;
     let mut out = (*first).clone();
@@ -277,9 +292,27 @@ pub fn roll_up(rows: &[&OccupancyStat], span: TimeRange) -> Option<OccupancyStat
     out.n_revisits_all = sum(|r| r.n_revisits_all);
     out.observed_s = rows.iter().map(|r| r.observed_s).sum();
     let usable = |r: &OccupancyStat| r.n_revisits.saturating_sub(r.n_suspect) as f64;
-    out.fco = weighted(rows, |r| r.fco, usable);
+    let time_usable = |r: &OccupancyStat| {
+        if r.n_revisits == 0 {
+            return 0.0;
+        }
+        represented_s(r) * usable(r) / r.n_revisits as f64
+    };
+    out.fco = weighted(rows, |r| r.fco, time_usable);
     out.fco_all_visits = weighted(rows, |r| r.fco_all_visits, |r| r.n_revisits_all as f64);
-    out.fco_suspect_upper = weighted(rows, |r| r.fco_suspect_upper, |r| r.n_revisits as f64);
+    out.fco_suspect_upper = weighted(rows, |r| r.fco_suspect_upper, represented_s);
+    // §2.8: the interval from the summed n_eff of the rows `fco` was computed from.
+    out.confidence = out.fco.and_then(|p| {
+        let with_fco = || rows.iter().filter(|r| r.fco.is_some());
+        let n_eff: f64 = with_fco()
+            .map(|r| r.confidence.map_or(usable(r), |c| c.n_eff))
+            .sum();
+        let level = with_fco()
+            .find_map(|r| r.confidence.map(|c| c.level))
+            .unwrap_or(ConfidenceLevel::P95);
+        let assumed = with_fco().any(|r| r.confidence.is_none_or(|c| c.independence_assumed));
+        fraction_interval(p, n_eff, level, assumed)
+    });
     out.fbo = weighted(rows, |r| r.fbo, |r| r.observed_s.max(1e-9));
     out.sro = weighted(rows, |r| r.sro, |r| r.observed_s.max(1e-9));
     out.revisit_max_s = rows.iter().filter_map(|r| r.revisit_max_s).reduce(f64::max);
@@ -288,7 +321,6 @@ pub fn roll_up(rows: &[&OccupancyStat], span: TimeRange) -> Option<OccupancyStat
         median(rows.iter().map(|r| r.threshold_db).collect()).unwrap_or(first.threshold_db);
     out.guard_clamped = rows.iter().any(|r| r.guard_clamped);
     out.revisit_biased = rows.iter().any(|r| r.revisit_biased);
-    out.confidence = None;
     out.fco_window = None;
     out.floor_db = median(rows.iter().filter_map(|r| r.floor_db).collect());
     out.floor_suspect = rows
@@ -358,6 +390,24 @@ impl OccupancyProvider for SeriesOccupancy<'_> {
         );
         let mut out = OccupancyRows::default();
         let n_rows: usize = groups.values().map(Vec::len).sum();
+        let in_region = |r: &OccupancyStat| match r.subject {
+            OccupancySubject::Channel { key } => {
+                let (lo, hi) = (key.lo_cell as f64 * f_cell, key.hi_cell as f64 * f_cell);
+                hi > req.region.lo_hz && lo < req.region.hi_hz
+            }
+            OccupancySubject::Band { .. } => false,
+        };
+        *self
+            .channel_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+            groups
+                .values()
+                .flatten()
+                .filter(|r| in_region(r))
+                .map(|r| (*r).clone())
+                .collect(),
+        );
         for rows in groups.values() {
             let Some(stat) = roll_up(rows, span) else {
                 continue;
@@ -384,8 +434,14 @@ impl OccupancyProvider for SeriesOccupancy<'_> {
     }
 }
 
-/// T-128: T-119's baselines as the report's change vs baseline.
-pub struct AttentionBaselines<'a>(pub &'a AttentionService);
+/// T-128: T-119's baselines as the report's change vs baseline, compared per 15-min series row
+/// (the rows [`SeriesOccupancy`] rolled up) rather than per span rollup.
+pub struct AttentionBaselines<'a> {
+    /// The run's attention service.
+    pub attention: &'a AttentionService,
+    /// The series provider whose per-interval rows are compared, when attached.
+    pub series: Option<&'a SeriesOccupancy<'a>>,
+}
 
 impl BaselineProvider for AttentionBaselines<'_> {
     fn compare(
@@ -393,7 +449,15 @@ impl BaselineProvider for AttentionBaselines<'_> {
         req: &ReportRequest,
         occupancy: &ReportOccupancy,
     ) -> Result<BaselineComparison, ReportError> {
-        Ok(self.0.compare_report(req.site, &occupancy.channels))
+        let rows = self.series.and_then(|s| {
+            s.channel_rows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        });
+        // Without series rows the channels are span rollups, which `compare_report` skips.
+        let rows = rows.as_deref().unwrap_or(&occupancy.channels);
+        Ok(self.attention.compare_report(req.site, rows))
     }
 }
 
@@ -454,10 +518,11 @@ mod tests {
         }
     }
 
-    /// T-128 item 5: series rows roll up by summing counts and weighting each FCO by its own
-    /// counts; a row that validates yields a validating span row.
+    /// T-128 item 5 (review): series rows roll up by summing counts and weighting each FCO by the
+    /// time it represents (§2.5), not by its visit count; the interval is recomputed from the
+    /// summed n_eff (§2.8); a row that validates yields a validating span row.
     #[test]
-    fn report_series_roll_up_weights_fco_by_counts() {
+    fn report_series_roll_up_weights_fco_by_time() {
         use hk_model::attention::occupancy::ChannelKey;
         let key = ChannelKey {
             scheme: 1,
@@ -467,16 +532,28 @@ mod tests {
         let subject = OccupancySubject::Channel { key };
         let mut a = crate::attention::tests::series_row(0, SiteKey::Unassigned, subject, 0.25);
         let b = crate::attention::tests::series_row(1, SiteKey::Unassigned, subject, 0.75);
+        // Both rows represent the whole 15 min; `a` was swept three times as often (25 s apart)
+        // while the bandit took most of `b`'s schedule (75 s apart).
         a.n_revisits = 36;
         a.n_revisits_all = 36;
         a.n_occupied = 9;
+        a.revisit_mean_s = Some(25.0);
         let span = TimeRange::new(a.interval.start, b.interval.end);
         let r = roll_up(&[&a, &b], span).expect("valid");
         assert_eq!((r.n_revisits, r.n_occupied, r.n_revisits_all), (48, 18, 48));
-        // (0.25·36 + 0.75·12) / 48
-        assert!((r.fco.unwrap() - 0.375).abs() < 1e-12, "{:?}", r.fco);
+        let count_weighted = (0.25 * 36.0 + 0.75 * 12.0) / 48.0;
+        let ci = r.confidence.expect("recomputed from summed n_eff");
+        println!(
+            "T-128 roll-up: time-weighted fco {:?} (count-weighted would be {count_weighted}); \
+             CI [{:.3}, {:.3}] n_eff {}",
+            r.fco, ci.lo, ci.hi, ci.n_eff
+        );
+        // (0.25·900 + 0.75·900) / 1800
+        assert!((r.fco.unwrap() - 0.5).abs() < 1e-12, "{:?}", r.fco);
         assert_eq!(r.interval, span);
-        assert!(r.confidence.is_none());
+        assert_eq!(ci.n_eff, 48.0);
+        assert!(ci.lo < 0.5 && ci.hi > 0.5 && ci.hi - ci.lo < 0.3);
+        r.validate().unwrap();
     }
 
     /// A report build releases the history lock between bounded chunks, so ingest (which only

@@ -55,6 +55,16 @@ pub(super) const EMITTER_REGION_SQL: &str = concat!(
      ORDER BY last_seen DESC, emitter_id"
 );
 
+/// [`EMITTER_REGION_SQL`] with a row limit (`?6`).
+const EMITTER_REGION_LIMIT_SQL: &str = concat!(
+    "SELECT ",
+    emitter_select!(),
+    " FROM emitter \
+     WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND last_seen >= ?4 AND first_seen <= ?5 \
+     AND merged_into IS NULL \
+     ORDER BY last_seen DESC, emitter_id LIMIT ?6"
+);
+
 type EmitterRaw = (
     [u8; 16],
     f64,
@@ -725,12 +735,29 @@ impl Repository {
     /// (docs/07 §4 step 3), most recently seen first. Identities gated at
     /// [`IdentityAccess::Standard`].
     pub fn emitters_in_region(&self, region: &Region) -> Result<Vec<Emitter>, RepoError> {
+        self.emitters_in_region_limited(region, None)
+    }
+
+    /// [`Self::emitters_in_region`], at most `limit` rows (the most recently seen) when given.
+    pub fn emitters_in_region_limited(
+        &self,
+        region: &Region,
+        limit: Option<usize>,
+    ) -> Result<Vec<Emitter>, RepoError> {
         let tx = self.read_tx()?;
         let b = region_bounds(&tx, "emitter", region)?;
-        let raws = {
-            let mut stmt = tx.prepare_cached(EMITTER_REGION_SQL)?;
-            stmt.query_map(params![b.f_lo_min, b.hi, b.lo, b.t0, b.t1], emitter_raw)?
-                .collect::<Result<Vec<_>, _>>()?
+        let raws = match limit {
+            None => {
+                let mut stmt = tx.prepare_cached(EMITTER_REGION_SQL)?;
+                stmt.query_map(params![b.f_lo_min, b.hi, b.lo, b.t0, b.t1], emitter_raw)?
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            Some(n) => {
+                let n = i64::try_from(n).unwrap_or(i64::MAX);
+                let mut stmt = tx.prepare_cached(EMITTER_REGION_LIMIT_SQL)?;
+                stmt.query_map(params![b.f_lo_min, b.hi, b.lo, b.t0, b.t1, n], emitter_raw)?
+                    .collect::<Result<Vec<_>, _>>()?
+            }
         };
         raws.into_iter()
             .map(|raw| {
