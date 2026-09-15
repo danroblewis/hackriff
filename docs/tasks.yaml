@@ -1970,6 +1970,20 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-125
+    milestone: M2
+    title: "Mock SDR + e2e harness: replay time-compressed occupancy scenes on their observation schedule with a simulated clock"
+    status: in-progress
+    deps: [T-117]
+    parallel_group: M2F
+    use_cases: [AWARE-042, AWARE-044]
+    found_by: "T-117 merge 2026-09-15: occupancy_markov_scene renders only short IQ windows plus an observation schedule; mock SDR/harness cannot yet present 48 h scenes as time-compressed observation windows"
+    acceptance: "mock SDR device presents a time-compressed scene: each rendered IQ window carries its simulated timestamp (the device interface timestamps reflect simulated time, not replay wall time), windows are delivered per the scene observation schedule or on demand when the scheduler tunes, gaps between windows are explicit (not continuous audio of silence); pipeline/history/inventory see simulated timestamps consistently; e2e harness helper to run a scene blind and read hidden truth only in asserts; test: 48 h scene replays in CI-scale wall time, history tiles and detections carry simulated times spanning 48 h, novelty emitter first detected after simulated hour 30; no change to existing fixture replay behaviour"
+    area: "crates/hk-core/src/source (mock SDR), tests/e2e/src (harness), py synth only if a small render hook is needed"
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
