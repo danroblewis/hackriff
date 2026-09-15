@@ -388,6 +388,9 @@ fn t057_scheduled_replay_keeps_every_frequency_truthful() {
     // with a measurable floor (the recording's own gain here), where it caught the edge folding.
     // The skip is guarded below: the skipped boxes back no inventory emitter or candidate, and no
     // occupancy row outside the recording holds occupied time (a failure there is a product bug).
+    // T-180: the mock now adds the receiver's own noise below the recording's gain, so that window
+    // is no longer quantisation-limited (85 % → 56 % zero codes) and the skip matched 0 boxes in 3
+    // runs. It stays as a no-op with its guards, for any window still served quantisation-limited.
     let repo = repo(&dir.0);
     let mut skipped: Vec<hk_model::DetectionId> = Vec::new();
     let phantoms: Vec<(f64, f64)> = repo
