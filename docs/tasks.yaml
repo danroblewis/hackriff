@@ -2968,3 +2968,33 @@ notes:
     model: sonnet
     effort: low
     core_interface: false
+  - id: T-188
+    milestone: M2-hardening
+    title: "Listen-centre flake under CPU load: acceptance_m0 listen.rs:224 listen channel at 101.352 MHz, >50 kHz from truth (2/10 burn runs in T-183)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPELINE
+    use_cases: []
+    found_by: "T-183 burn runs with 6 CPU burners (2026-09-15)"
+    acceptance: "root cause identified (listen channel centre chosen before refinement converges / sample-vs-wall timing); listen.rs passes 20/20 under 6 CPU burners without loosening the 50 kHz bound"
+    area: crates/hk-pipeline (listen), tests/e2e/tests/acceptance/listen.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-189
+    milestone: M2-hardening
+    title: "API inventory row classification field (hk-api query.rs:818) still shows latest emitter_classification row; align with T-183 family ranking (track-shape below demod/decoder/classifier)"
+    status: todo
+    priority: low
+    deps: [T-183]
+    parallel_group: API
+    use_cases: []
+    found_by: "T-183 report (2026-09-15)"
+    acceptance: "classification and family never disagree for the same entry; docs/api.md and api_contract tests updated together"
+    area: crates/hk-api/src/query.rs, docs/api.md, crates/hk-cli/tests/api_contract.rs
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false

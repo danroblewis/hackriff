@@ -2164,3 +2164,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.459 Full check green after the T-180 merge (95b567e).** Lint clean; 1371/1371 tests in 135 s; acceptance 28/28.
   - **T-186 launched** (Opus high, field-test Task B): per-stage detection→identification latency budget on the `fm_100p8M` capture. Target is ≤3 s sample-clock to family + top explanation, set a priori, without weakening trust. It likely overlaps T-183 in the hk-pipeline family/classifier code.
   - **Queue after this:** T-178 fix round, T-187, the remaining MUI API gaps, T-182.
+- **B0.460 T-183 root cause found (fix pending commit).** The signal_062 family label came from insert order across two pipeline threads, the detection writer and the analog chain.
+  - **Fix:** the family query ranks track-shape rows below demodulator, decoder and classifier rows. An order-independent test covers it.
+  - **Filed from its report:**
+    - T-188: listen-centre flake under load, 2 of 10 burn runs at 101.352 MHz.
+    - T-189: the API classification field should follow the same ranking.
+  - **Agents stopping early:** T-181, T-183 and T-184 each ended their turn "waiting" with no live background run. All three have been nudged to continue.
