@@ -252,7 +252,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use hk_api::stream::{GATED_SPECTRUM_MAX_ROW_RATE_HZ, Publisher, PublisherConfig};
+    use hk_api::stream::{Publisher, PublisherConfig};
     use hk_core::{HackRfDriver, SourceDriver};
 
     const TOKEN: &str = "t042-serve-empty-inventory-token-0123";

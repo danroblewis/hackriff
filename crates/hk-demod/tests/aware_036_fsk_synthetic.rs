@@ -26,8 +26,8 @@ use hk_estimate::SnippetRequest;
 use hk_estimate::framing::bits::{BitOrder, unpack};
 use hk_estimate::framing::{FramingConfig, FramingResult, Polarity, infer_framing};
 use hk_model::{
-    AnnotationKind, AnnotationTarget, ContentClass, CrcStatus, Identity, InventoryIdentity,
-    InventoryQuery, KnownStatus, Repository, StatusAuthor,
+    AnnotationKind, AnnotationTarget, ContentClass, CrcStatus, InventoryIdentity, InventoryQuery,
+    KnownStatus, Repository, StatusAuthor,
 };
 use num_complex::Complex;
 

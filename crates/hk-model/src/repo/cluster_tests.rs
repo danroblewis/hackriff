@@ -1,9 +1,6 @@
 //! Entity resolution and inventory query tests (T-018). Use-case ids are in the test names.
 
-use std::collections::HashMap;
-
 use rusqlite::params;
-use serde_json::json;
 
 use super::{RepoError, Repository, blob};
 use crate::cluster::*;

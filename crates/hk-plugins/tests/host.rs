@@ -1,8 +1,6 @@
 //! Plugin host tests (T-014, ADR-0003, docs/stream-contract.md §9), driving the real
 //! `hk-dummy-plugin` subprocess. Use case: SIGNAL-001.
 
-use std::io::Read;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -10,22 +8,20 @@ use std::time::{Duration, Instant};
 
 use hk_model::sigmf::Datatype;
 use hk_model::{
-    AnnotationTarget, ContentClass, CrcStatus, Decode, DecodedIdentity, EmitterId, FreqRange,
-    IdentityScheme, Region, Repository, SampleTime, TimeRange, Timestamp,
+    ContentClass, CrcStatus, Decode, DecodedIdentity, EmitterId, IdentityScheme, Repository,
+    SampleTime, Timestamp,
 };
 use hk_plugins::{
-    Charset, HostError, IdentitySpec, Ingest, InputStreamDesc, ManifestError, MetadataPolicy,
-    MetadataType, PluginContext, PluginInstance, PluginManifest, PluginState, PushOutcome,
-    RestartPolicy,
+    HostError, Ingest, InputStreamDesc, ManifestError, PluginContext, PluginInstance,
+    PluginManifest, PluginState, PushOutcome, RestartPolicy,
 };
 use hk_stream::{
-    BinaryRecord, ListenAddr, Listener, Publisher, PublisherConfig, Record, RecordFlags,
-    StreamHeader, StreamKind, StreamReader,
+    BinaryRecord, Listener, Publisher, PublisherConfig, Record, RecordFlags, StreamHeader,
+    StreamKind, StreamReader,
 };
 use serde_json::json;
 
 const DUMMY: &str = env!("CARGO_BIN_EXE_hk-dummy-plugin");
-const SENTINEL: &str = "SENTINEL-PAGER-TEXT-4c1d";
 const RATE: f64 = 250_000.0;
 const ANCHOR_NS: i64 = 1_757_000_000_000_000_000;
 const ICAOS: [&str; 4] = ["a1b2c0", "a1b2c1", "a1b2c2", "a1b2c3"];
@@ -126,12 +122,6 @@ fn temp_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-fn contains(haystack: &[u8], needle: &str) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|w| w == needle.as_bytes())
 }
 
 /// Dummy round trip: synthetic channel samples in, messages out, Decode rows in an in-memory

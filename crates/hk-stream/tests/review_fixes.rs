@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use hk_model::{ContentClass, Timestamp};
 use hk_stream::{
     BinaryRecord, CloseReason, ConsumerState, Declared, ListenAddr, Listener, MessageRecord,
-    Publisher, PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind,
-    StreamReader,
+    Publisher, PublisherConfig, Record, RecordFlags, StreamHeader, StreamKind, StreamReader,
 };
 use serde_json::json;
 

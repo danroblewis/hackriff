@@ -1,19 +1,17 @@
-//! T-022a WebSocket bridge (legal-guardrail egress path, docs/stream-contract.md §10):
-//! token auth, own-key refusal, consumer cap, a slow browser dropped without stalling the
-//! producer, 1:1 framing, and gated spectrum at the declared rate.
+//! T-022a WebSocket bridge (docs/stream-contract.md §10): token auth, consumer cap, a slow
+//! browser dropped without stalling the producer, and 1:1 framing.
 //!
 //! Use cases served: AWARE-042 and SPACE-050 are the history views this bridge feeds; the live
 //! waterfall is their live half (C39).
 
 use std::net::{SocketAddr, TcpStream};
-use std::os::unix::net::UnixStream;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use hk_api::stream::client::parse_record;
 use hk_api::stream::{
     BinaryRecord, CloseReason, ConsumerState, MessageRecord, Publisher, PublisherConfig, Record,
-    RecordFlags, StreamError, StreamHeader, StreamKind,
+    RecordFlags, StreamHeader, StreamKind,
 };
 use hk_api::{ApiState, Server, ServerConfig, StreamRegistry, Token};
 use hk_model::{ContentClass, Timestamp};
@@ -395,4 +393,3 @@ fn slow_browser_is_dropped_while_the_producer_keeps_rate() {
     );
     assert!(records >= N / 2, "the reading browser kept receiving");
 }
-

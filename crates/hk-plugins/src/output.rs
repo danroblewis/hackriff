@@ -270,15 +270,6 @@ mod tests {
         manifest(json!({"schema_id": "s/1", "content_class": "unrestricted"}))
     }
 
-    fn pager() -> PluginManifest {
-        manifest(json!({
-            "schema_id": "s/1", "content_class": "restricted-paging",
-            "metadata_keys": {"capcode": {"type": "digits", "max_len": 7}, "function": {"type": "integer"}},
-            "frame_models": ["pocsag"], "labels": ["pocsag"],
-            "identity": {"scheme": "other:pocsag-capcode", "charset": "digits", "max_len": 7}
-        }))
-    }
-
     #[test]
     fn decode_line_splits_metadata_and_content_and_restamps_time() {
         let m = open();

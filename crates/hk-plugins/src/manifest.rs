@@ -846,7 +846,7 @@ fn raw_output_lacks_keys(policy: &Option<MetadataPolicy>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hk_model::{DecodedIdentity, SampleTime, Timestamp};
+    use hk_model::{SampleTime, Timestamp};
     use serde_json::json;
 
     fn base() -> Value {
@@ -862,26 +862,6 @@ mod tests {
                       "center_hz": {"min": 1089e6, "max": 1091e6}},
             "output": {"format": "ndjson", "schema_id": "hackriff.adsb/1", "content_class": "unrestricted"}
         })
-    }
-
-    fn pager() -> Value {
-        let mut v = base();
-        v["output"] = json!({
-            "schema_id": "hackriff.pocsag/1",
-            "content_class": "restricted-paging",
-            "metadata_keys": {
-                "capcode": {"type": "digits", "max_len": 7},
-                "function": {"type": "integer"},
-                "baud": {"type": "number"},
-                "numeric": {"type": "boolean"},
-                "addr": {"type": "hex", "max_len": 6},
-                "encoding": {"type": "enum", "values": ["alpha", "numeric", "tone"]}
-            },
-            "frame_models": ["pocsag"],
-            "labels": ["pocsag"],
-            "identity": {"scheme": "other:pocsag-capcode", "charset": "digits", "max_len": 7}
-        });
-        v
     }
 
     fn parse(v: &Value) -> Result<PluginManifest, ManifestError> {

@@ -1,12 +1,10 @@
 //! Stream-output contract tests (T-016, ADR-0004, docs/stream-contract.md).
 //!
-//! - Gating: every ContentClass x every StreamKind, sentinel scan of the raw wire bytes.
 //! - Backpressure: a consumer that never reads is dropped and counted while a fast consumer gets
 //!   every record and the producer runs in bounded time.
 //! - SIGNAL-001: ADS-B-like Decode messages reach an external consumer as header + NDJSON.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,9 +16,8 @@ use hk_model::{
     Timestamp,
 };
 use hk_stream::{
-    BinaryRecord, Charset, CloseReason, ConsumerState, Declared, IdentitySpec, ListenAddr,
-    Listener, MessageRecord, MetadataPolicy, MetadataType, Publisher, PublisherConfig, Record,
-    RecordFlags, StreamError, StreamHeader, StreamKind, StreamReader,
+    BinaryRecord, CloseReason, ConsumerState, Declared, Listener, MessageRecord, Publisher,
+    PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind, StreamReader,
 };
 use serde_json::json;
 
@@ -99,47 +96,10 @@ fn message(record_class: ContentClass, icao: &str, emitter: Option<EmitterId>) -
     }
 }
 
-fn contains(haystack: &[u8], needle: &str) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|w| w == needle.as_bytes())
-}
-
 fn small_config() -> PublisherConfig {
     PublisherConfig {
         queue_bytes: 1024 * 1024,
         ..PublisherConfig::default()
-    }
-}
-
-/// What survives of the ADS-B-like test messages under a content-forbidding class.
-fn test_policy() -> MetadataPolicy {
-    MetadataPolicy {
-        keys: [
-            ("icao", MetadataType::Hex { max_len: 6 }),
-            ("df", MetadataType::Integer),
-            ("crc", MetadataType::Enum(vec!["ok".into()])),
-        ]
-        .into_iter()
-        .map(|(k, t)| (k.to_owned(), t))
-        .collect(),
-        frame_models: vec!["adsb-df17".into()],
-        labels: vec![],
-        identity: Some(IdentitySpec {
-            scheme: IdentityScheme::AdsbIcao,
-            charset: Charset::Hex,
-            max_len: 6,
-        }),
-    }
-}
-
-/// Messages publishers carry the test policy (required under content-forbidding classes).
-fn publisher_for(kind: StreamKind, class: ContentClass) -> Publisher {
-    let header = header_for(kind, class);
-    if kind == StreamKind::Messages {
-        Publisher::with_metadata_policy(header, small_config(), test_policy()).unwrap()
-    } else {
-        Publisher::new(header, small_config()).unwrap()
     }
 }
 

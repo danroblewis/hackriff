@@ -1013,17 +1013,6 @@ fn round2(v: f64) -> f64 {
 mod tests {
     use super::*;
 
-    const UNRESTRICTED: ContentClass = ContentClass::Unrestricted;
-    const METADATA: ContentClass = ContentClass::MetadataOnly;
-
-    fn rule(lo: f64, hi: f64) -> ClassRule {
-        ClassRule {
-            freq_hz: [lo, hi],
-            content_class: UNRESTRICTED,
-            by: "test: tries to open content".into(),
-        }
-    }
-
     #[test]
     fn replumbing_is_503_and_a_finished_run_is_410() {
         let r = segment_ended(true);

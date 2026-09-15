@@ -46,7 +46,7 @@ test-crate crate:
     cargo nextest run -p {{crate}}
 
 # Targeted run for one test by (substring) test-function name or test-file/binary name,
-# e.g. `just test-one retuning_into_paging` or `just test-one listen_retune`.
+# e.g. `just test-one replumbing_is_503` or `just test-one listen_lifecycle`.
 test-one name:
     cargo nextest run -E 'test({{name}}) or binary({{name}})'
 

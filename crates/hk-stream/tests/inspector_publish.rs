@@ -3,7 +3,6 @@
 //! reduced to the recipe's allowlist; status/edit records are metadata-only; and the published
 //! byte stream is itself a recorded decoded stream that `RecordedFrames` reads back (§14.7).
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,10 +12,7 @@ use hk_stream::inspector::{
     InspectorProfile, InspectorRecordType, InspectorSource, LayerNode, LayerTree, NodeType,
     RecordedFrames, byte_span,
 };
-use hk_stream::{
-    Declared, MetadataPolicy, MetadataType, Publisher, PublisherConfig, StreamError, StreamHeader,
-    StreamKind,
-};
+use hk_stream::{Declared, Publisher, PublisherConfig, StreamError, StreamHeader, StreamKind};
 use serde_json::json;
 
 const SECRET_HEX: &str = "c0ffee5ec2e7";
