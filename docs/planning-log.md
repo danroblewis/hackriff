@@ -1285,3 +1285,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Doc nits:** fixed.
   - **Tests:** hk-pipeline 23, hk-context 31, hk-model 3.
   - **Follow-up:** nextest LEAK warnings from the attention thread.
+- **B0.350 T-133 full check green; T-135 review MERGE; T-135 merged.**
+  - T-133 full check: lint clean; 1368/1368 tests; acceptance 32/32 (72 s).
+  - T-135 review verified: σ is clamped; in-place decay math is correct; the 2^24 limit is unreachable (the reference copy stops learning at maturity); byte accounting matches.
+  - T-135 review risks, moved to T-137:
+    - Fold CPU: about 8 slot walks per fold.
+    - f32 decay stalls for very long half-lives.
+    - Slower debug tests.
+  - Coordinator added `opt-level = 3` in the dev profile for hk-store and hk-context, following the hk-detect precedent, to keep `just test` time bounded.
+  - T-137 added. Full check started.

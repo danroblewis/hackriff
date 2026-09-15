@@ -18,6 +18,13 @@ publish = false
 # dev/test builds so CI stays modest. Debug assertions and overflow checks stay on.
 [profile.dev.package.hk-detect]
 opt-level = 3
+# T-135 review: baseline folds (packed f32 slot pools, week-long parked tests) are CPU-bound;
+# optimise the baseline crates in dev/test builds for the same reason.
+[profile.dev.package.hk-store]
+opt-level = 3
+
+[profile.dev.package.hk-context]
+opt-level = 3
 
 [workspace.dependencies]
 anyhow = "1.0"

@@ -2132,7 +2132,8 @@ tasks:
   - id: T-135
     milestone: M2
     title: "Full-week baseline memory: channel-pooled level stats (or cell-series compaction) so a parked week stays under the 256 MiB default cap"
-    status: review
+    status: done
+    commit: 2941ed4
     deps: [T-134]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2153,6 +2154,20 @@ tasks:
     found_by: "T-133 review 2026-09-15 (history thread calls site_at -> sites.tick mutates/persists site state ahead of the occupancy close) + T-131 follow-ups (site pin persistence, new-emitter alarms not fed)"
     acceptance: "history thread uses site_at_peek (no state change/persist; test: occupancy row before expiry keeps the pinned site); pin + site survive restart on the same DB (test); new-emitter Anomaly opens from first sightings with a mature baseline and is a counted suppression when immature (pipeline test); docs/api.md + ADR §6.3a note overflow origins count as unknown, FilterSummary tiles deduped across report chunks, provenance.origins cap wording"
     area: crates/hk-pipeline/src/{history,attention,alarms,occupancy}.rs, crates/hk-context/src/occupancy/{site,alarm}.rs, crates/hk-context/src/report/history.rs, docs/api.md, docs/adr/0012
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-137
+    milestone: M2
+    title: "Baseline fold CPU + decay precision: compute Reference pools once per fold, lazy f64 decay multiplier per series, field accessors, stronger golden re-encode check"
+    status: todo
+    deps: [T-135]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-135 review 2026-09-15: pools() walks every stored slot ~8x per fold (release est. 80-190 us/fold, 2-4 s CPU per 30-min boundary at 19.4k folds on Mac, more on Orin); f32 forgetting stalls when ln2*obs_s/(half_life*86400) < ~5e-8 (365 d half-life, obs_s < ~2 s); 48 h debug test 18 -> 60 s, week test 268 s"
+    acceptance: "per-fold release cost measured before/after (bench or timed test) and reduced >=2x; decay exact to f64 for long half-lives (test at 365 d with ~1 s folds); baseline/novelty/alarm tests unchanged; golden test compares re-encoded f64 fields within 1e-6 relative; week test runs < 60 s in the dev profile or moves to a slow step"
+    area: crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline
     needs: none
     model: opus
     effort: medium
