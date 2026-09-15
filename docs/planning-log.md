@@ -2322,3 +2322,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Legacy rank mapping:** decoder: prefix → 1, input_kind track → 4, everything else → 3, with SQL and Rust agreeing by test.
   - **Row semantics:** `classification` is the arbitrated row (agrees with family); a newer lower-ranked row shows as `latest_classification`.
   - **Filed T-218** for the deliberately omitted pieces, including the Fingerprint family_of gate, which would merge fsk/2fsk emitters and so must be checked against M2 acceptance first.
+- **B0.488 T-211 Opus review: MERGE.** No behaviour regression, and the rank change is inert today because no `decoder:` writer exists outside tests.
+  - **Verified:** track shape stays rank 4 (T-183 preserved) across 8 writers, both write orders and both merge directions, with SQL and Rust agreeing on 9 legacy cases; M2 attention still reads its own path; the migration is nullable-only and appended after 0006; `detail` is not exposed by the API.
+  - **Follow-ups folded into T-218:** user reclassification writes rank 3, the inventory N+1 query, a missing dedupe on record_classification, float_roundtrip, and latest_classification comparing content rather than row id.
+  - **Also committed:** T-193 (yellow confirmed boxes, 227440f) and T-159 (`/api/inventory/{id}/decode`, e5ba09c), both merging after the running check. T-159 narrowed a guard test for ungated getters, so verify at merge that a withheld identity still returns nothing.
+  - **T-188 launched** (Opus, listen-centre flake under load).
