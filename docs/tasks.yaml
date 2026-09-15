@@ -2116,7 +2116,8 @@ tasks:
   - id: T-134
     milestone: M2
     title: "Sparse baseline slots (Jetson memory): store only observed hour-of-week slots or pool cells into channels for level stats"
-    status: review
+    status: done
+    commit: 0a63d99
     deps: [T-132]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2130,7 +2131,7 @@ tasks:
   - id: T-135
     milestone: M2
     title: "Full-week baseline memory: channel-pooled level stats (or cell-series compaction) so a parked week stays under the 256 MiB default cap"
-    status: todo
+    status: in-progress
     deps: [T-134]
     parallel_group: M2B
     use_cases: [AWARE-042]

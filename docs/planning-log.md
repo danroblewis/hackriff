@@ -1248,3 +1248,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - `/api/history` and `/api/report` take `source`/`site` params; ADR §3.4 and §6.3a documented.
   - Tests: hk-store 80, hk-api 87, report 12, pipeline 8, api_contract 22.
   - Follow-ups: site-change provenance step, `import-sweep-csv --site`, inventory/anomalies not keyed by site, per-frame `site_at` mutex.
+- **B0.345 T-134 merged (fix round 0a63d99).**
+  - Refreeze recomputes engine bytes and syncs gauges.
+  - `growth_of` includes auto-refreeze growth.
+  - New test `baseline_refreeze_keeps_the_byte_count_exact` fails with either fix reverted (5424 vs 9400 B; 2072 B grown vs 1440 B estimated).
+  - `pools` uses plain loops.
+  - Tests: hk-context 26, hk-store 5, hk-pipeline 17.
+
+  Full check started. T-135 (full-week baseline memory) launched.
