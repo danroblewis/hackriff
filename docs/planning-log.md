@@ -603,3 +603,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Next:** the three tests are being re-run 3× to tell flakes from regressions; if deterministic, bisect against pre-T-084 main (3d2a3db^1) and fix or revert.
 - **B0.219 Reruns:** `signal_001_readsb` passed 3/3, so it's a flake; it gets a serial group and 1 retry in nextest. The `inventory_lifecycle` t078 (FM station 4× in inventory) and t082 (3× per station) failures are **deterministic**, 3/3. Bisecting at 3d2a3db (T-084 without T-098) and at pre-T-084 to find the culprit before fixing.
 - **B0.220 Bisect result:** `inventory_lifecycle` t078/t082 FAIL at 3d2a3db (T-084 merge) and PASS at 6700731 (its first parent), so T-084 caused the regression; T-098 did not. T-101 has been launched to fix the root cause (Opus medium) while keeping T-084's gate intent. T-085 M1-DESIGN has been delivered (ce464ca: ADR-0011, the new crates `hk-recipe` and `hk-blocks`, `hk-stream` inspector records, an RDS worked recipe and an ownership map). It is now in a timeboxed Opus review before merge.
+- **B0.221 T-085 review verdict: FIX-FIRST** (timeboxed, one round). Must-fix items:
+  1. ADS-B can't be built from the pinned ports: PPM chip-level preamble and frame boundaries, and variable-length framing (length from DF, ACARS ETX terminator).
+  2. Hot field-map edits can't be implemented: `update_params` can't receive a FieldMap, and EditPlan misses changes to a map's content.
+  3. POCSAG 4-bit BCD text, ACARS parity and integer scaling can't be expressed.
+  4. The ownership map misses shared files (hk-api lib.rs/http dispatch, Cargo deps, api_contract.rs, opener registration).
+  Real-time safety and gating reuse passed. A fresh Opus agent (the original was past 300k tokens) is making the fixes plus cheap nits in the T-085 worktree; merge follows unless a real correctness bug remains.
