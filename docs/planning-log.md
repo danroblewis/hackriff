@@ -577,3 +577,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.210 Full check after the T-081/T-053 merges and nextest config:** nextest 943 passed (5 skipped; the 179 tests missed earlier and the new retry both covered) and acceptance green. Lint failed only on rustfmt in T-053's `hil_hackrf.rs`; the coordinator ran `cargo fmt` and committed, and clippy is re-running. T-084 was told to merge main (it edits hil_hackrf.rs).
 - **B0.211 Main lint green again.** After the rustfmt fix (b863ee8), clippy flagged `needless_range_loop` in T-053's HIL survey centroid loop; it was rewritten as an iterator loop with identical behaviour (af4531f) and `just lint` passes. Tests were already green (943 passed, acceptance). Running: T-083, T-084 (offline).
 - **B0.212 T-083 merged (ui-only).** Sidebar lists sort by frequency ascending by default, and clickable headers toggle asc/desc (inventory: frequency, bandwidth, family, identity, count, recurrence, tags; selections: frequency). SNR and last-activity sorting are not possible: those fields aren't in inventory rows, and T-080 removed last-seen. UI tests pass on main. Running: T-084 (offline).
+- **B0.213 M1 is a go** (user-approved brief docs/13-m1-decoder-workbench.md). Decoders are built inside hackriff from generic blocks + declarative recipes + a declarative field-map parser + a Wireshark-style packet inspector, not per-protocol plugins. External decoders (rtl_433, readsb) are a long-tail escape hatch and test oracles.
+  - **Roadmap:** docs/11 M1 row replaced.
+  - **Tasks** (T-085..T-097):
+    - **Contract first:** T-085 M1-DESIGN (ADR-0011: block contract, recipe schema, parser field-map schema, inspector stream framing, worked RDS recipe; Opus high, reviewed) blocks the rest.
+    - **Parallel after T-085:** T-086 Blocks A (demod/symbol), T-087 Blocks B (framing/FEC), T-088 recipe runtime, T-089 parser + inspector API, T-091 authoring assist.
+    - **Later:** T-090 inspector UI (after T-089); T-092 decoded-stream capture and T-093 follow_hops (after T-088).
+    - **Tutorials:** T-094 RDS reference, then T-095 POCSAG, T-096 ACARS, T-097 ADS-B.
+  - **Blocker:** T-097's live HIL needs a **1090 MHz antenna** (user); the recorded/mock path is unblocked.
+  - **Now:** T-085 launched; the 4–6 agent fan-out follows its reviewed merge. T-083 already merged; T-084 (offline HIL fixes) continues in parallel.

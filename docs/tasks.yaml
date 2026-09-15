@@ -4,7 +4,7 @@
 # needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
 version: 1
-milestone: "M0 (first vertical slice) - COMPLETE locally 2026-09-13 (all M0 tasks done except T-026, blocked on Jetson; CI unverified, never pushed); current milestone M0b"
+milestone: "M0 (first vertical slice) - COMPLETE locally 2026-09-13 (all M0 tasks done except T-026, blocked on Jetson; CI unverified, never pushed); current milestone M0b (closing: T-084), M1 decoder workbench started 2026-09-15 (docs/13)"
 # M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
 spikes:
   run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
@@ -1427,6 +1427,171 @@ tasks:
     effort: medium
     core_interface: true
     hold: "offline reproduction can start any time; live HackRF re-run needs user/supervisor to free the device (demo stopped by T-053)"
+  - id: T-085
+    milestone: M1
+    title: "M1-DESIGN: decoder workbench contracts (block contract, recipe schema, parser field-map schema, inspector stream framing)"
+    status: in-progress
+    deps: [T-060, T-079]
+    parallel_group: M1D
+    use_cases: [SIGNAL-062]
+    acceptance: "one ADR (docs/adr/0011) fixing: block contract (typed inputs/outputs, parameters, status/quality readout, stage-output stream), recipe schema (named chain of blocks + params + field layout; hot-edit without stopping capture per ADR-0001; save/list/re-run on matching signals), parser field-map schema ({name, offset, length bytes|bits, type uint|int|enum|ascii|bitfield, endianness, condition}, nestable layers), inspector stream framing (one byte record per frame over the stream contract tcp/ws, with source channel, time, CRC status, layer annotations); worked RDS recipe expressed in the schema; Rust trait/type skeletons compiling in the right crates; reviewed before merge"
+    area: docs/adr/0011, crates/hk-dsp|hk-pipeline (block/recipe traits), docs/stream-contract.md, docs/api.md (inspector stream)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    review: "Opus review before merge (core interface)"
+  - id: T-086
+    milestone: M1
+    title: "M1 Blocks A: IQ/demod + symbol blocks to the block contract"
+    status: todo
+    deps: [T-085]
+    parallel_group: M1A
+    use_cases: [SIGNAL-062]
+    acceptance: "mix/lowpass/resample wrapped from hk-dsp; fm_demod, am_demod, fsk_demod, msk_demod, ppm_demod, subcarrier extraction; clock_recovery, slicer, diff_decode, nrzi, manchester - each implementing the block contract with params, status/quality and stage-output stream; unit tests per block on synthetic signals; real-time performance bench"
+    area: crates/hk-dsp (blocks), crates/hk-demod
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-087
+    milestone: M1
+    title: "M1 Blocks B: framing + error control blocks"
+    status: todo
+    deps: [T-085]
+    parallel_group: M1B
+    use_cases: [SIGNAL-062]
+    acceptance: "sync_search (sync word / offset words correlation), deframe (fixed and variable frames), interleave/deinterleave; crc (configurable poly/width/init/reflect/xorout), bch, parity, checksum - block contract, status/quality, stage outputs; unit tests incl. RDS offset words + CRC 0x5B9, POCSAG 0x7CD215D8 + BCH(31,21), CRC-16, CRC-24"
+    area: crates/hk-dsp or a new hk-blocks crate (per ADR-0011), crates/hk-estimate framing reuse
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-088
+    milestone: M1
+    title: "M1 Recipe runtime: load/run/hot-edit recipes as chains; save/list; serve records"
+    status: todo
+    deps: [T-085]
+    parallel_group: M1R
+    use_cases: [SIGNAL-062]
+    acceptance: "recipe loaded and run as a chain on a live/mock channel without stopping capture; hot-edit params/blocks/field map applies at a block boundary; save/list/re-run on matching signals via API; parallel pipelines; records served over the stream contract (tcp :8788, /ws) one per frame; mock-SDR tests"
+    area: crates/hk-pipeline (recipe runtime), crates/hk-api (recipe routes), docs/api.md
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-089
+    milestone: M1
+    title: "M1 Declarative parser + inspector API"
+    status: todo
+    deps: [T-085]
+    parallel_group: M1P
+    use_cases: [SIGNAL-062]
+    acceptance: "fields block evaluates a byte record against a nested field map (uint/int/enum/ascii/bitfield, endianness, bit/byte lengths, conditions); text block (character codings); inspector API serves frame lists, hex bytes and layer trees with field<->byte-range mapping; re-run a field map over a recorded stream instantly; docs/api.md + contract tests"
+    area: crates/hk-stream or hk-pipeline (parser), crates/hk-api (inspector routes), docs/api.md, crates/hk-cli tests
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-090
+    milestone: M1
+    title: "M1 Inspector UI (thin client): frame list, hex+ASCII, layer tree, linked selection"
+    status: todo
+    deps: [T-089]
+    parallel_group: M1U
+    use_cases: [SIGNAL-062]
+    acceptance: "ui renders the inspector over docs/api.md: frame list, hex+ASCII pane, layer tree; bidirectional linked selection (field -> bytes highlight, byte -> field); no signal logic client-side; UI tests; phone width works"
+    area: ui/
+    needs: none
+    model: sonnet
+    effort: medium
+  - id: T-091
+    milestone: M1
+    title: "M1 Parser-authoring assist: sync/period hunt, entropy field boundaries, CRC/BCH search"
+    status: todo
+    deps: [T-085]
+    parallel_group: M1S
+    use_cases: [SIGNAL-062, AWARE-036]
+    acceptance: "classical assist over recorded frames: sync-word and period hunting, entropy-based field-boundary suggestions, CRC/BCH parameter brute-force; suggestions with scores the user accepts/edits (never truth); API routes documented; tests recover known sync/CRC params on RDS/POCSAG/synthetic FSK recordings blind"
+    area: crates/hk-estimate, crates/hk-detect, crates/hk-api
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-092
+    milestone: M1
+    title: "M1 Always-on decoded-stream capture + scrubbable review"
+    status: todo
+    deps: [T-085, T-088]
+    parallel_group: M1C
+    use_cases: [SIGNAL-062]
+    acceptance: "every running pipeline's decoded bit/byte stream is recorded automatically (bounded, quota'd) with frame index/time; API to list and scrub recorded decoded streams and re-run a field map over them; UI scrub hooks; tests"
+    area: crates/hk-store, crates/hk-api, ui/ (hooks)
+    needs: none
+    model: opus
+    effort: medium
+  - id: T-093
+    milestone: M1
+    title: "M1 follow_hops: one pipeline spanning several channels"
+    status: todo
+    deps: [T-085, T-088]
+    parallel_group: M1H
+    use_cases: [SIGNAL-062]
+    acceptance: "follow_hops block/runtime runs one recipe across several channels (multi-channel pager net / hopper), tagging each frame with its source channel; frames ordered and deduplicated; mock-SDR multi-channel test"
+    area: crates/hk-core, crates/hk-pipeline
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-094
+    milestone: M1
+    title: "M1 Tutorial 1: RDS recipe (reference) + blind acceptance vs Rust RDS oracle"
+    status: todo
+    deps: [T-086, T-087, T-088, T-089]
+    parallel_group: M1T
+    use_cases: [SIGNAL-062]
+    acceptance: "saved RDS recipe: fm_demod -> 57 kHz subcarrier -> BPSK 1187.5 Bd -> diff_decode -> block sync (offset words A-D, CRC 0x5B9) -> fields (PS, RadioText, PI, PTY); blind acceptance through the mock SDR on fm_100p8M (hidden truth); fields match the existing Rust RDS decoder oracle; tutorial doc"
+    area: recipes/ (data), tests/e2e, docs/tutorials
+    needs: none
+    model: opus
+    effort: medium
+  - id: T-095
+    milestone: M1
+    title: "M1 Tutorial 2: POCSAG recipe with follow_hops + blind acceptance"
+    status: todo
+    deps: [T-094, T-093, T-087]
+    parallel_group: M1T
+    use_cases: [SIGNAL-062]
+    acceptance: "POCSAG recipe: 2-FSK 512/1200/2400 -> sync 0x7CD215D8 -> BCH(31,21)+parity -> fields (RIC, function, numeric/alphanumeric); follow_hops across a multi-channel pager net; blind acceptance via mock SDR on a public/user POCSAG SigMF fixture (licence not a gate); oracle where available (multimon-ng)"
+    area: recipes/, fixtures (POCSAG), tests/e2e
+    needs: none
+    model: sonnet
+    effort: medium
+  - id: T-096
+    milestone: M1
+    title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
+    status: todo
+    deps: [T-094, T-086, T-087]
+    parallel_group: M1T
+    use_cases: [SIGNAL-062]
+    acceptance: "ACARS recipe: AM -> MSK 2400 Bd -> SYN/STX framing -> CRC-16 -> fields (registration, label, block id, text); blind acceptance via mock SDR on an ACARS SigMF fixture; oracle where available (acarsdec)"
+    area: recipes/, fixtures (ACARS), tests/e2e
+    needs: none
+    model: sonnet
+    effort: medium
+  - id: T-097
+    milestone: M1
+    title: "M1 Tutorial 4: ADS-B recipe + blind acceptance vs readsb (live HIL deferred: 1090 MHz antenna)"
+    status: todo
+    deps: [T-094, T-086, T-087]
+    parallel_group: M1T
+    use_cases: [SIGNAL-001]
+    acceptance: "ADS-B recipe: PPM 1 Mbit/s -> preamble -> 56/112-bit frames -> CRC-24 -> fields (ICAO, position, velocity); blind acceptance via mock SDR on a recorded/synthetic 1090 MHz fixture; fields match readsb oracle; live HIL part deferred until the user has a 1090 MHz antenna"
+    area: recipes/, fixtures (ADS-B), tests/e2e
+    needs: none
+    model: sonnet
+    effort: medium
+    blocked_part: "live HIL on 1090 MHz needs an antenna (user blocker); recorded/mock path is not blocked"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
