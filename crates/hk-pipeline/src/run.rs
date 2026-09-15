@@ -1588,6 +1588,20 @@ impl PipelineHandle {
         ))
     }
 
+    /// Output recorders (T-061): record a selection's, emitter's or band's bits, symbols, audio
+    /// and IQ to files through the run's burst taps, Listen and ring. Create one per front end
+    /// and share it (sessions live in the instance; the quota is over `outputs/` on disk).
+    pub fn output_recorders(&self) -> Arc<crate::chains::outputs::OutputRecorders> {
+        let sup = Arc::clone(&self.sup);
+        Arc::new(crate::chains::outputs::OutputRecorders::new(
+            Arc::new(move || sup.lock().shared.clone()),
+            self.bits_service(),
+            self.symbols_service(),
+            self.listen_service(),
+            self.sup.common.data_dir.clone(),
+        ))
+    }
+
     /// The newest ring sample index.
     pub fn ring_position(&self) -> u64 {
         self.sup

@@ -14,6 +14,7 @@
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
+//! | `/api/outputs[/record/start\|/record/stop]`, `/api/outputs/<id>/files/<name>` | GET, POST | token (header only for mutating) | T-061 output recordings and downloads ([`crate::outputs`]) |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
@@ -95,6 +96,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/selections/{id}"),
     ("DELETE", "/api/selections/{id}"),
     ("POST", "/api/selections/{id}/links"),
+    ("GET", "/api/outputs"),
+    ("POST", "/api/outputs/record/start"),
+    ("POST", "/api/outputs/record/stop"),
+    ("GET", "/api/outputs/{id}/files/{name}"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
 ];
@@ -164,6 +169,8 @@ pub struct ApiState {
     pub audit: Option<Arc<AuditLog>>,
     /// On-demand streams served at `/ws/open/<name>` ([`crate::ondemand`]), e.g. `listen` (T-043).
     pub on_demand: hk_stream::OpenerRegistry,
+    /// Output recordings (T-061, [`crate::outputs`]); `None` answers 503.
+    pub outputs: Option<Arc<dyn crate::outputs::OutputControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -601,6 +608,21 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         }
         return websocket(stream, shared, &req, id);
     }
+    if let Some((id, name)) = req
+        .path
+        .strip_prefix("/api/outputs/")
+        .and_then(|rest| rest.split_once("/files/"))
+    {
+        if req.method != "GET" {
+            return respond_json_with(
+                &mut stream,
+                405,
+                &json!({ "error": "use GET" }),
+                "Allow: GET\r\n",
+            );
+        }
+        return output_file(&mut stream, state, id, name);
+    }
     let ctl = CtlRequest {
         method: &req.method,
         path: &req.path,
@@ -608,7 +630,10 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         content_type: req.header("content-type"),
         caller: caller(&stream, &req, token),
     };
-    if let Some(r) = control::route(state, &ctl).or_else(|| crate::selections::route(state, &ctl)) {
+    if let Some(r) = control::route(state, &ctl)
+        .or_else(|| crate::selections::route(state, &ctl))
+        .or_else(|| crate::outputs::route(state, &ctl))
+    {
         let allow = r
             .allow
             .map(|a| format!("Allow: {a}\r\n"))
@@ -654,6 +679,35 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     match result {
         Ok(v) => respond_json(&mut stream, 200, &v),
         Err(e) => respond_error(&mut stream, e.status, &e.message),
+    }
+}
+
+/// Streams an output file (T-061) without loading it into memory.
+fn output_file(stream: &mut TcpStream, state: &ApiState, id: &str, name: &str) {
+    let Some(outputs) = state.outputs.as_ref() else {
+        return respond_error(stream, 503, "no output recorder on this server");
+    };
+    let path = match outputs.file(id, name) {
+        Ok(p) => p,
+        Err(f) => return respond_error(stream, f.status, &f.message),
+    };
+    let Ok(file) = std::fs::File::open(&path) else {
+        return respond_error(stream, 404, "no such file");
+    };
+    let len = file.metadata().map_or(0, |m| m.len());
+    let content_type = match path.extension().and_then(|e| e.to_str()) {
+        Some("wav") => "audio/wav",
+        Some("json" | "sigmf-meta") => "application/json",
+        Some("jsonl") => "application/x-ndjson",
+        _ => "application/octet-stream",
+    };
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n\
+         Content-Disposition: attachment; filename=\"{name}\"\r\nConnection: close\r\n\
+         Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+    );
+    if stream.write_all(head.as_bytes()).is_ok() {
+        let _ = io::copy(&mut file.take(len), stream);
     }
 }
 

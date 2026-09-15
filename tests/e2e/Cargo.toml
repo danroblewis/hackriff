@@ -27,3 +27,5 @@ hk-store.workspace = true
 hk-stream.workspace = true
 # T-043 Listen acceptance: a WebSocket client for `/ws/open/listen` (already the hk-api dependency).
 tungstenite.workspace = true
+# T-061 output recordings: the composition's API adapter and the `hk record` client.
+hk-cli = { path = "../../crates/hk-cli" }

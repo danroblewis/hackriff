@@ -2,15 +2,20 @@
 //! API's traits (`hk_api::RunControl`, `hk_api::WindowRetuner`), T-050. hk-api does not depend on
 //! hk-pipeline; the binaries' composition joins them here.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use hk_api::live_control::AppliedWindow;
 use hk_api::{
-    DisplayState, DisplayUpdate, LiveControlError, RecordingState, RunControl, RunState,
-    WindowRetuner,
+    DisplayState, DisplayUpdate, LiveControlError, OutputControl, OutputFailure, OutputStart,
+    RecordingState, RunControl, RunState, WindowRetuner,
 };
 use hk_model::ContentClass;
 use hk_pipeline::{
-    ControlFailure, DisplayPatch, DisplaySettings, PipelineController, RecordingStatus,
+    ControlFailure, DisplayPatch, DisplaySettings, OutputError, OutputKind, OutputRecorders,
+    OutputRequest, OutputTarget, PipelineController, RecordingStatus,
 };
+use serde_json::Value;
 
 /// Display, pause and recording control over a running pipeline.
 pub struct PipelineRunControl(pub PipelineController);
@@ -122,5 +127,71 @@ impl WindowRetuner for PipelineRetuner {
             sample_rate_hz: s.sample_rate_hz,
             settling: s.replumbing,
         })
+    }
+}
+
+/// Output recordings (T-061) over the pipeline's recorders.
+pub struct PipelineOutputs(pub Arc<OutputRecorders>);
+
+fn output_failure(e: OutputError) -> OutputFailure {
+    OutputFailure {
+        status: e.http_status(),
+        code: e.code().to_owned(),
+        message: e.to_string(),
+    }
+}
+
+fn invalid(message: String) -> OutputFailure {
+    output_failure(OutputError::Invalid(message))
+}
+
+impl OutputControl for PipelineOutputs {
+    fn start(&self, request: &OutputStart) -> Result<Value, OutputFailure> {
+        let target = match &request.target {
+            hk_api::OutputTarget::Selection(id) => OutputTarget::Selection(
+                id.parse()
+                    .map_err(|_| invalid(format!("selection_id {id:?} is not an id")))?,
+            ),
+            hk_api::OutputTarget::Emitter(id) => OutputTarget::Emitter(
+                id.parse()
+                    .map_err(|_| invalid(format!("emitter_id {id:?} is not an id")))?,
+            ),
+            hk_api::OutputTarget::Band { f_lo_hz, f_hi_hz } => OutputTarget::Band {
+                f_lo_hz: *f_lo_hz,
+                f_hi_hz: *f_hi_hz,
+            },
+        };
+        let kinds = request
+            .kinds
+            .iter()
+            .map(|k| OutputKind::parse(k).ok_or_else(|| invalid(format!("unknown kind {k:?}"))))
+            .collect::<Result<Vec<_>, _>>()?;
+        let status = self
+            .0
+            .start(&OutputRequest {
+                target,
+                kinds,
+                max_s: request.max_s,
+                max_bytes: request.max_bytes,
+            })
+            .map_err(output_failure)?;
+        Ok(serde_json::to_value(status).unwrap_or_default())
+    }
+
+    fn stop(&self, id: &str) -> Result<Value, OutputFailure> {
+        let status = self.0.stop(id).map_err(output_failure)?;
+        Ok(serde_json::to_value(status).unwrap_or_default())
+    }
+
+    fn list(&self) -> Vec<Value> {
+        self.0
+            .list()
+            .into_iter()
+            .map(|s| serde_json::to_value(s).unwrap_or_default())
+            .collect()
+    }
+
+    fn file(&self, id: &str, name: &str) -> Result<PathBuf, OutputFailure> {
+        self.0.file(id, name).map_err(output_failure)
     }
 }

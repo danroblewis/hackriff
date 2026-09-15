@@ -664,6 +664,7 @@ name = "hk-e2e"
 version = "0.1.0"
 dependencies = [
  "hk-api",
+ "hk-cli",
  "hk-context",
  "hk-core",
  "hk-dsp",
@@ -749,6 +750,7 @@ dependencies = [
  "hk-e2e",
  "hk-model",
  "num-complex",
+ "serde",
  "serde_json",
  "thiserror",
 ]

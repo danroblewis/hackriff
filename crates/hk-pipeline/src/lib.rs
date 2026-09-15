@@ -53,6 +53,10 @@ mod spectrum;
 mod verify;
 
 pub use chains::listen::{ListenConfig, ListenManager, listen_class};
+pub use chains::outputs::{
+    OUTPUTS_DIR, OutputError, OutputFileStatus, OutputKind, OutputLimits, OutputRecorders,
+    OutputRequest, OutputStatus, OutputTarget,
+};
 pub use chains::spec::{
     ChainShape, ChainSpec, FmRegion, NodeSpec, Trigger, builtin_chains, builtin_chains_for,
 };

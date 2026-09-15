@@ -9,8 +9,10 @@
 //!   (docs/07 §4).
 //! - [`radiometry`]: the calibrated noise-floor product (T-021, SPACE-050): calibrated frames
 //!   folded into tiles and a floor-vs-time query with uncertainty and flags.
+//! - [`outputs`]: output files (T-061): WAV writer, SigMF-style JSON sidecars, output disk usage.
 
 pub mod history;
+pub mod outputs;
 pub mod radiometry;
 
 pub use history::{

@@ -12,7 +12,8 @@ import { Inspector, inspectHalfWidthHz } from "./inspect";
 import { InventoryTable } from "./inventory";
 import { installListen, strongestInView, type Extent, type PeakBox } from "./listen";
 import { SelectionPanel } from "./selection-panel";
-import { SelectionStore, apiBackend, demodSelection, inspectSelection, recordSelection, type NewSelection } from "./selections";
+import { SelectionStore, apiBackend, demodHook, inspectSelection, recordSelection, type NewSelection } from "./selections";
+import { OutputTracker, downloadHref } from "./outputs";
 import { MARK_DROP, MARK_GATED, Waterfall } from "./waterfall";
 
 export type Api = (path: string) => Promise<unknown>;
@@ -485,11 +486,16 @@ function main() {
   live.onPick = (hz) => controls.bookmarks.setPick(hz);
   live.onPanOverflow = (c, v) => controls.offerRetune(c, v);
   controls.start();
+  const outputs = new OutputTracker(client, {
+    onChange: (list) => selPanel.showOutputs(list),
+    onFinished: () => void selections.load(), // the server saved the files' rows on the links
+  });
   const selPanel: SelectionPanel = new SelectionPanel(selections, {
+    outputs: { stop: (id) => outputs.stop(id), href: (url) => downloadHref(url, token) },
     zoom: (s) => live.zoomTo(s.f_lo, s.f_hi),
     history: (s) => panel.selectWindow(s.f_lo, s.f_hi, s.t_lo, s.t_hi),
     bookmark: (s) => void controls.bookmarks.add(bookmarkFromSelection(s)),
-    // Stable hooks (selections.ts "Hook contract"); T-061 replaces demod and record.
+    // Stable hooks (selections.ts "Hook contract"); demod and record are T-061 output recordings.
     hooks: {
       inspect: async (s) => {
         const { outcome, report } = await inspectSelection(api, s);
@@ -497,8 +503,8 @@ function main() {
         return outcome;
       },
       listen: (s) => { listen.selection(s); return { status: "done", message: `listening to ${s.name} (mode estimated)` }; },
-      demod: demodSelection,
-      record: (s) => recordSelection(client, s),
+      demod: demodHook(client, (s) => listen.selection(s), { tracker: outputs }),
+      record: (s) => recordSelection(client, s, { tracker: outputs }),
     },
   });
   const inventory = new InventoryTable(api, panel, (lo, hi) => {
