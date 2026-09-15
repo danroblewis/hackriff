@@ -1,1 +1,20 @@
-/* dock area styles (ADR-0013 §5, §8). Owner: see §8. Scope every rule under the area's slot class; never change shared tokens or the grid. */
+/* dock area styles (ADR-0013 §5, §8). Owner: T-150. Scoped under `.dock`, the outputs slot's
+   container class (shared shell rules for `.dock` itself live in base.css). */
+.dock-label { display: flex; flex-direction: column; line-height: 1.15; white-space: nowrap; }
+.dock-label b { font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; }
+.dock-label small { color: var(--dim); font: 10.5px var(--mono); }
+.dock .outs { display: flex; gap: 8px; overflow-x: auto; min-width: 0; flex: 1; padding-block: 7px; }
+.dock .out { display: grid; grid-template-columns: auto auto auto; align-items: center; gap: 2px 10px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); white-space: nowrap; }
+.dock .out.pipe-out { border-color: rgba(82, 194, 174, 0.3); }
+.dock .out .t { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; font-weight: 500; }
+.dock .out .k { color: var(--dim); font-size: 11px; grid-column: 1; }
+.dock .out .ctl { grid-row: 1 / span 2; grid-column: 3; display: flex; gap: 4px; }
+.dock .out .vis { grid-row: 1 / span 2; grid-column: 2; }
+.dock .out.muted .t { color: var(--muted); }
+.dock .kind-dot { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.dock .kind-dot.audio { background: var(--amber); }
+.dock .kind-dot.bits { background: var(--teal); }
+.dock .meter { display: flex; gap: 2px; align-items: flex-end; height: 20px; }
+.dock .meter i { width: 3px; background: var(--amber); border-radius: 1px; display: block; }
+.dock .out.muted .meter i { background: var(--dim); }
+.dock .rate { font: 11px var(--mono); color: var(--teal); }
