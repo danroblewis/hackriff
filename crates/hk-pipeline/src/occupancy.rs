@@ -825,13 +825,21 @@ impl OccupancyService {
         }
         // T-128: the interval's own rows (not the hour rollup) fold into the baselines, the
         // inventory's first sightings feed the new-emitter rate, and candidates are re-scored.
-        // This thread never touches samples. Gain-state key 0 (single/unknown): levels are above
-        // the local floor, so a gain step moves floor and level together.
+        // This thread never touches samples. T-132: the gain-state key is the interval's dominant
+        // front-end gain state (from the history tiles its visits were read from).
         if let Some(a) = self.attention() {
             let own: Vec<OccupancyStat> =
                 rows.iter().filter(|r| r.interval == iv).cloned().collect();
             let k = self.first_sightings(inner, iv, &own);
-            a.ingest_interval(&own, k, iv.end, 0);
+            let (s0, s1) = (iv.start.as_unix_nanos(), iv.end.as_unix_nanos());
+            let gain = engine::dominant_gain_key(
+                inner
+                    .series
+                    .values()
+                    .flatten()
+                    .filter(|s| s.start_ns >= s0 && s.start_ns < s1),
+            );
+            a.ingest_interval(&own, k, iv.end, gain);
         }
         match inner.store.as_mut().map(|s| s.append(&rows)) {
             Some(Ok(n)) => inner.stats.rows_written += n as u64,

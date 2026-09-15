@@ -38,6 +38,21 @@ pub struct GainState {
     pub amp_on: bool,
 }
 
+impl GainState {
+    /// A stable non-zero 32-bit key of this gain state (FNV-1a of the settings), the baseline
+    /// gain-state key (T-132; 0 is reserved for unknown).
+    pub fn key(&self) -> u32 {
+        let mut b = [0u8; 9];
+        b[..4].copy_from_slice(&self.lna_db.to_bits().to_le_bytes());
+        b[4..8].copy_from_slice(&self.vga_db.to_bits().to_le_bytes());
+        b[8] = u8::from(self.amp_on);
+        let h = b.iter().fold(0x811c_9dc5_u32, |h, &x| {
+            (h ^ u32::from(x)).wrapping_mul(0x0100_0193)
+        });
+        h.max(1)
+    }
+}
+
 /// A short front-end filter or antenna-port name (at most 16 bytes, longer names truncated at a
 /// character boundary), so [`FrameInput`] stays `Copy`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]

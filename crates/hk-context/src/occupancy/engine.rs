@@ -433,6 +433,21 @@ pub struct VisitSample {
     pub floor_source: FloorSource,
     /// Most of the subject's columns have a suspect (dense) local floor.
     pub floor_suspect: bool,
+    /// Front-end gain-state key of the grid the visit was read from (the dominant gain state of
+    /// its tiles; 0 = unknown), T-132.
+    pub gain_key: u32,
+}
+
+/// The gain-state key most of `samples`' observed time was under (0 when none is known): an
+/// interval's baseline gain-state key (T-132).
+pub fn dominant_gain_key<'a>(samples: impl IntoIterator<Item = &'a VisitSample>) -> u32 {
+    let mut by: std::collections::BTreeMap<u32, i64> = std::collections::BTreeMap::new();
+    for s in samples {
+        if s.gain_key != 0 {
+            *by.entry(s.gain_key).or_default() += s.dur_ns.max(1);
+        }
+    }
+    by.into_iter().max_by_key(|(_, d)| *d).map_or(0, |(k, _)| k)
 }
 
 impl VisitSample {
@@ -579,6 +594,7 @@ pub fn evaluate(
             floor_db: thr.floor_db as f32,
             floor_source,
             floor_suspect,
+            gain_key: grid.provenance.dominant_gain_key(),
         });
     }
     (out, Some(thr))
@@ -1044,6 +1060,7 @@ mod tests {
             floor_db: -105.0,
             floor_source: FloorSource::History,
             floor_suspect: false,
+            gain_key: 0,
         }
     }
 

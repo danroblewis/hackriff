@@ -654,10 +654,11 @@ impl AttentionService {
         let Some(offset) = lock(&self.sites).site(id).map(|s| s.utc_offset_min) else {
             return empty(ComparisonStatus::NoBaseline);
         };
-        let mut b = lock(&self.baselines);
-        if b.load_site(id, offset).is_err() {
+        // T-132: disk reads outside the baselines lock.
+        if Baselines::load_site_outside_lock(&self.baselines, id, offset).is_err() {
             return empty(ComparisonStatus::Unavailable);
         }
+        let b = lock(&self.baselines);
         let z_min = NoveltyConfig::default().z_min;
         /// One subject's per-interval evidence.
         #[derive(Default)]
@@ -1051,9 +1052,10 @@ impl AttentionService {
         let (id, offset) = self.site_or_current(site)?;
         let now = (self.clock)();
         let slot = HourOfWeek::of(now, offset);
-        let mut b = lock(&self.baselines);
-        b.load_site(id, offset)
+        // T-132: disk reads outside the baselines lock.
+        Baselines::load_site_outside_lock(&self.baselines, id, offset)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
+        let b = lock(&self.baselines);
         let keys: Vec<Value> = b
             .engines()
             .filter(|e| e.state.key.site == id)
@@ -1101,9 +1103,10 @@ impl AttentionService {
     ) -> Result<Value, AttentionError> {
         let (id, offset) = self.site_or_current(site)?;
         let slot = slot.unwrap_or_else(|| HourOfWeek::of((self.clock)(), offset));
-        let mut b = lock(&self.baselines);
-        b.load_site(id, offset)
+        // T-132: disk reads outside the baselines lock.
+        Baselines::load_site_outside_lock(&self.baselines, id, offset)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
+        let b = lock(&self.baselines);
         let mut rows = Vec::new();
         let mut truncated = false;
         for e in b.engines().filter(|e| e.state.key.site == id) {
@@ -1175,9 +1178,10 @@ impl AttentionService {
         let (id, offset) = self.site_or_current(site)?;
         let t = (self.clock)();
         let (lo, hi) = (f_lo.unwrap_or(f64::MIN), f_hi.unwrap_or(f64::MAX));
-        let mut b = lock(&self.baselines);
-        b.load_site(id, offset)
+        // T-132: disk reads outside the baselines lock.
+        Baselines::load_site_outside_lock(&self.baselines, id, offset)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
+        let mut b = lock(&self.baselines);
         let mut n = 0;
         for e in b.engines_mut().filter(|e| e.state.key.site == id) {
             n += e.refreeze(t, |s| {

@@ -42,13 +42,41 @@
 //!    14-day half-life), so resolution coarsens and slots below hour-of-day maturity reopen
 //!    learning.
 //!
+//! # T-132 additions
+//! - **Level classes.** A fold with occupied weight is an *occupied* fold (level = occupied level
+//!   above the floor), otherwise *idle*; their levels pool apart ([`LevelClass`]), so a low-FCO
+//!   channel's pool is not bimodal. The adapter gives an occupied level only with at least
+//!   [`LEVEL_MIN_OCCUPIED`] occupied visits (fewer: occupancy only). An occupied fold with no
+//!   occupied level pool yet is compared with the idle pool (an emitter appearing on a quiet
+//!   channel is level novelty), but that cross-class level z does not keep it out of the
+//!   reference: learning then judges occupancy only.
+//! - **Gain states.** Levels are pooled per front-end gain-state key (the caller's key, e.g.
+//!   `hk_store::history::GainState::key`): a gain change starts a separate, immature level pool.
+//! - **Sequential learning test.** Every mature, clean fold feeds CUSUMs of its winsorised
+//!   (±`z_min`) level and occupancy z against the reference — the slot's own hour-of-day mean once
+//!   that holds [`SEQ_OWN_MIN_VISITS`] visits (so a daily pattern is not a shift), else the chosen
+//!   pool — subject-wide ([`SubjectBaseline::seq`]) and per hour of day
+//!   ([`SubjectBaseline::seq_hod`]). Either building (≥ h/2) stops reference learning; an
+//!   hour-of-day crossing h latches that hour. So a weak persistent interferer, below the novelty z
+//!   on every fold, stops entering the reference within a few folds instead of draining into it
+//!   until hour-of-day maturity.
+//! - **Per-slot latch.** A change point (or sequential crossing) latches reference learning off
+//!   for its **hour of day** only ([`SubjectBaseline::latched_hours`]); the subject-wide change-point
+//!   CUSUM blocks learning only while it builds before latching. Other hours keep learning unless
+//!   their own tests build. Re-freeze clears all of it.
+//! - **Memory cap** ([`Baselines::with_memory_cap`]): least recently visited engines are saved and
+//!   unloaded; a fold that would grow memory past the cap with only the active key loaded is
+//!   refused (counted in [`Baselines::refused_folds`]).
+//! - **Loading outside the lock** ([`Baselines::load_site_outside_lock`]).
+//!
 //! # Keys
 //! A new calibration is a new `BaselineKey` ([`Baselines::observe`]): it starts immature, so a cal
 //! step is never novelty. `Mobile` and `Unassigned` sites never create or update a baseline.
 //!
 //! All times are the sample clock (ADR-0012 §0).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, PoisonError};
 
 use hk_model::attention::baseline::{
     AdaptationPolicy, BaselineKey, BaselineResolution, CalKey, HourOfWeek, MATURITY_MIN_OBSERVED_S,
@@ -59,7 +87,8 @@ use hk_model::attention::score::NoveltyScore;
 use hk_model::time::Timestamp;
 use hk_store::baseline::{
     BaselineState, BaselineStore, BaselineStoreError, BaselineSubject, ChangePoint,
-    ChangeStatistic, DecayedStats, GainSeries, MAX_GAIN_STATES, SubjectBaseline,
+    ChangeStatistic, CusumState, DecayedStats, GainSeries, LevelClass, MAX_GAIN_STATES,
+    SubjectBaseline,
 };
 
 use super::novelty::{
@@ -73,6 +102,26 @@ pub const WINSOR_SIGMA: f64 = 3.0;
 /// Novelty below which a fold may still enter the reference while its hour-of-day pool is
 /// immature: the default alarm "on" level (ADR-0012 §7.2).
 pub const REFERENCE_LEARN_MAX_NOVELTY: f64 = 0.7;
+/// Occupied visits an interval needs before its occupied level is folded (T-132): one occupied
+/// visit on a quiet channel is occupancy evidence, not a level.
+pub const LEVEL_MIN_OCCUPIED: u64 = 3;
+/// Level visits the slot's own hour-of-day reference needs before the sequential test uses its
+/// mean (one parked day of 15-min folds).
+pub const SEQ_OWN_MIN_VISITS: f64 = 4.0;
+/// Observed seconds the own hour-of-day reference needs before the sequential occupancy test uses
+/// it.
+pub const SEQ_OWN_MIN_OBSERVED_S: f64 = 3600.0;
+
+fn cusum_max(c: &CusumState) -> f64 {
+    [c.level_pos, c.level_neg, c.occ_pos, c.occ_neg]
+        .into_iter()
+        .fold(0.0, f64::max)
+}
+
+/// Hour-of-day bit of `slot` in [`SubjectBaseline::latched_hours`].
+pub fn hour_bit(slot: HourOfWeek) -> u32 {
+    1 << (slot.index() % 24)
+}
 
 /// Reference observed time of `slot`'s hour-of-day pool (the 7 hour-of-week slots sharing its
 /// hour), over all gain states.
@@ -178,6 +227,15 @@ impl IntervalObservation {
         (self.weight_s > 0.0).then(|| (self.occupied_weight_s / self.weight_s).clamp(0.0, 1.0))
     }
 
+    /// The level pool this fold belongs to: occupied when it carries occupied weight (T-132).
+    pub fn level_class(&self) -> LevelClass {
+        if self.occupied_weight_s > 0.0 {
+            LevelClass::Occupied
+        } else {
+            LevelClass::Idle
+        }
+    }
+
     fn evidence(&self) -> Evidence {
         Evidence {
             level_db: self.level_db,
@@ -202,8 +260,9 @@ impl IntervalObservation {
 /// band subjects and rows without usable revisits.
 ///
 /// **Level (T-128)** is the channel's level **above its local noise floor**
-/// ([`channel_level_excess`]): the median occupied-visit level (`level_occupied_p50_db`) when any
-/// visit was occupied, else the median idle level (`level_idle_db`), minus `floor_db`; `max_db` is
+/// ([`channel_level_excess`]): the median occupied-visit level (`level_occupied_p50_db`) when at
+/// least [`LEVEL_MIN_OCCUPIED`] visits were occupied, the median idle level (`level_idle_db`) when
+/// none was, and no level (occupancy only) in between (T-132), minus `floor_db`; `max_db` is
 /// the 90th-percentile occupied level minus the floor. So an emitter appearing raises the level by
 /// its SNR (level novelty), while a noise-floor rise moves floor and levels together and leaves
 /// the excess unchanged (no level novelty, no level change point duplicating the noise-floor
@@ -211,7 +270,8 @@ impl IntervalObservation {
 /// without a floor, or whose floor may be signal (`floor_suspect`), folds occupancy only.
 ///
 /// The represented time is `min(interval, n_revisits_all × revisit_mean_s)` and the weight its
-/// non-suspect share.
+/// non-suspect share. `gain` is the interval's front-end gain-state key (T-132: e.g.
+/// `hk_context::occupancy::engine::dominant_gain_key` of its visits; 0 = unknown/single).
 pub fn from_occupancy_stat(
     stat: &OccupancyStat,
     gain: u32,
@@ -264,8 +324,12 @@ pub fn channel_level_excess(stat: &OccupancyStat) -> Option<(f64, Option<f64>)> 
     }
     let occupied = stat
         .level_occupied_p50_db
-        .filter(|l| l.is_finite() && stat.n_occupied > 0);
-    let level = occupied.or(stat.level_idle_db.filter(|l| l.is_finite()))?;
+        .filter(|l| l.is_finite() && stat.n_occupied >= LEVEL_MIN_OCCUPIED);
+    let level = match occupied {
+        Some(l) => l,
+        None if stat.n_occupied == 0 => stat.level_idle_db.filter(|l| l.is_finite())?,
+        None => return None,
+    };
     let max = stat
         .level_occupied_p90_db
         .filter(|l| l.is_finite() && occupied.is_some())
@@ -516,6 +580,8 @@ pub struct BaselineEngine {
     utc_offset_min: i16,
     cfg: BaselineConfig,
     dirty: bool,
+    /// Approximate heap bytes of `state` (maintained per fold).
+    bytes: usize,
 }
 
 fn secs(a: Timestamp, b: Timestamp) -> f64 {
@@ -535,12 +601,60 @@ fn winsorise(level: f64, pool: &PoolStats, cfg: &NoveltyConfig) -> f64 {
 impl BaselineEngine {
     /// Wraps (possibly loaded) `state`.
     pub fn new(state: BaselineState, utc_offset_min: i16, cfg: BaselineConfig) -> Self {
+        let bytes = state.approx_bytes();
         Self {
             state,
             utc_offset_min,
             cfg,
             dirty: false,
+            bytes,
         }
+    }
+
+    /// Approximate heap bytes of the state ([`BaselineState::approx_bytes`], kept per fold).
+    pub fn approx_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Upper bound of the bytes folding `obs` would add (a new subject, series or hour-of-day
+    /// accumulators; slots are dense, so an existing series never grows).
+    pub fn growth_of(&self, obs: &IntervalObservation) -> usize {
+        let series = std::mem::size_of::<GainSeries>();
+        let heap = hk_store::baseline::SLOT_PAIR_BYTES * HourOfWeek::SLOTS;
+        let hod = 24 * std::mem::size_of::<CusumState>();
+        let class = obs.level_class();
+        match self.state.subjects.get(&obs.subject) {
+            None => SubjectBaseline::new(obs.t).approx_bytes() + 4 * series + heap + hod,
+            Some(sub) => {
+                let hod = if sub.seq_hod.is_empty() { hod } else { 0 };
+                let full = sub.gains.iter().filter(|g| g.class == class).count() >= MAX_GAIN_STATES;
+                if gain_index(sub, obs.gain, class).is_some() || full {
+                    hod
+                } else {
+                    let cap = sub.gains.capacity();
+                    let grow = if sub.gains.len() == cap {
+                        cap.max(4)
+                    } else {
+                        0
+                    };
+                    hod + heap + grow * series
+                }
+            }
+        }
+    }
+
+    /// Folds one observation (steps 2–5 of the module docs), keeping the byte count.
+    pub fn observe(&mut self, obs: &IntervalObservation) -> FoldOutcome {
+        let size = |e: &Self| {
+            e.state
+                .subjects
+                .get(&obs.subject)
+                .map_or(0, SubjectBaseline::approx_bytes)
+        };
+        let before = size(self);
+        let out = self.fold(obs);
+        self.bytes = (self.bytes + size(self)).saturating_sub(before);
+        out
     }
 
     /// Changed since the last save.
@@ -562,43 +676,61 @@ impl BaselineEngine {
     pub fn novelty_of(&self, obs: &IntervalObservation) -> NoveltyScore {
         let slot = self.slot(obs.t);
         match self.state.subjects.get(&obs.subject) {
-            Some(sub) => self.evaluate(sub, slot, gain_index(sub, obs.gain), obs).0,
+            Some(sub) => {
+                self.evaluate(sub, slot, gain_index(sub, obs.gain, obs.level_class()), obs)
+                    .0
+            }
             None => FoldOutcome::none(obs, Maturity::Immature { observed_s: 0.0 }).novelty,
         }
     }
 
-    /// Returns the novelty and, when mature, the chosen resolution with its reference pools.
+    /// Returns the novelty, when mature the chosen resolution with its reference pools (the level
+    /// pool of the fold's own class), and the novelty that gates reference learning (without a
+    /// cross-class level z, T-132).
     fn evaluate(
         &self,
         sub: &SubjectBaseline,
         slot: HourOfWeek,
         gain: Option<usize>,
         obs: &IntervalObservation,
-    ) -> (NoveltyScore, Option<(usize, PoolStats, PoolStats)>) {
+    ) -> (NoveltyScore, Option<(usize, PoolStats, PoolStats)>, f64) {
         let (level, occ) = pools(sub, slot, gain, BaselineCopy::Reference);
         let m = Maturity::from_pools(occ.map(|p| p.observed_s));
         let cfg = &self.cfg.novelty;
         let Maturity::Mature { resolution } = m else {
-            return (FoldOutcome::none(obs, m).novelty, None);
+            return (FoldOutcome::none(obs, m).novelty, None, 0.0);
         };
         let r = res_index(resolution);
         let ev = obs.evidence();
-        let lz = level_z(&level[r], &ev, cfg);
+        // An occupied fold without an occupied level pool yet: compare with the idle pool.
+        let fallback = (level[r].n < 2.0 && obs.level_class() == LevelClass::Occupied)
+            .then(|| gain_index(sub, obs.gain, LevelClass::Idle))
+            .flatten()
+            .map(|ig| pools(sub, slot, Some(ig), BaselineCopy::Reference).0[r])
+            .filter(|p| p.n >= 2.0);
+        let lz = level_z(fallback.as_ref().unwrap_or(&level[r]), &ev, cfg);
         let oz = occupancy_z(&occ[r], &ev);
-        let n = combine(
-            m,
-            lz,
-            oz,
-            None,
-            obs.observed_s,
-            obs.provenance_explained,
-            cfg,
-        );
-        (n, Some((r, level[r], occ[r])))
+        let combined = |lz| {
+            combine(
+                m,
+                lz,
+                oz,
+                None,
+                obs.observed_s,
+                obs.provenance_explained,
+                cfg,
+            )
+        };
+        let n = combined(lz);
+        let learn = if fallback.is_some() {
+            combined(None).novelty
+        } else {
+            n.novelty
+        };
+        (n, Some((r, level[r], occ[r])), learn)
     }
 
-    /// Folds one observation (steps 2–5 of the module docs).
-    pub fn observe(&mut self, obs: &IntervalObservation) -> FoldOutcome {
+    fn fold(&mut self, obs: &IntervalObservation) -> FoldOutcome {
         if !obs.usable() {
             let m = self
                 .state
@@ -617,10 +749,11 @@ impl BaselineEngine {
             .subjects
             .entry(obs.subject)
             .or_insert_with(|| SubjectBaseline::new(obs.t));
-        let gain = match gain_index(sub, obs.gain) {
+        let class = obs.level_class();
+        let gain = match gain_index(sub, obs.gain, class) {
             Some(g) => Some(g),
-            None if sub.gains.len() < MAX_GAIN_STATES => {
-                sub.gains.push(GainSeries::new(obs.gain));
+            None if sub.gains.iter().filter(|g| g.class == class).count() < MAX_GAIN_STATES => {
+                sub.gains.push(GainSeries::with_class(obs.gain, class));
                 Some(sub.gains.len() - 1)
             }
             None => {
@@ -640,8 +773,9 @@ impl BaselineEngine {
             utc_offset_min: self.utc_offset_min,
             cfg: self.cfg,
             dirty: false,
+            bytes: 0,
         };
-        let (novelty, chosen) = engine.evaluate(sub_ref, slot, gain, obs);
+        let (novelty, chosen, learn_novelty) = engine.evaluate(sub_ref, slot, gain, obs);
         let sub = self
             .state
             .subjects
@@ -688,7 +822,60 @@ impl BaselineEngine {
                     cusum,
                 };
                 sub.change_point = Some(cp);
+                // Per-slot latch: the crossing's hour of day stops learning.
+                sub.latched_hours |= hour_bit(slot);
                 raised = Some(cp);
+            }
+        }
+
+        // T-132 sequential learning test (module docs).
+        let hod = slot.index() % 24;
+        if let (Some((_, ref_level, ref_occ)), true) = (chosen, clean) {
+            let (own_level, own_occ) = pools(sub, slot, gain, BaselineCopy::Reference);
+            let hr = res_index(BaselineResolution::HourOfDay);
+            let zc = ncfg.z_min;
+            let lz = obs.level_db.and_then(|l| {
+                let mean = if own_level[hr].n >= SEQ_OWN_MIN_VISITS {
+                    own_level[hr].mean_db()
+                } else {
+                    ref_level.mean_db()
+                }?;
+                let sigma = ref_level.std_db().unwrap_or(0.0).max(ncfg.sigma_floor_db);
+                Some(((l - mean) / sigma).clamp(-zc, zc))
+            });
+            let occ_pool = if own_occ[hr].observed_s >= SEQ_OWN_MIN_OBSERVED_S {
+                &own_occ[hr]
+            } else {
+                &ref_occ
+            };
+            // Unshrunk pool FCO as the mean (shrinkage towards ½ would bias a quiet channel's
+            // folds low against a small own-hour pool); the shrunk FCO only sizes σ.
+            let oz = match (obs.fco(), occ_pool.fco()) {
+                (Some(f), Some(p)) if obs.n_eff >= 1.0 && obs.weight_s > 0.0 => {
+                    shrunk_fco(occ_pool, obs.weight_s / obs.n_eff).map(|ps| {
+                        ((f - p) / occupancy_sigma(occ_pool, ps, obs.n_eff)).clamp(-zc, zc)
+                    })
+                }
+                _ => None,
+            };
+            if sub.seq_hod.len() != 24 {
+                sub.seq_hod = vec![CusumState::default(); 24];
+            }
+            let k = policy.cusum_k_sigma;
+            for c in [&mut sub.seq, &mut sub.seq_hod[hod]] {
+                if let Some(z) = lz {
+                    c.level_pos = (c.level_pos + z - k).max(0.0);
+                    c.level_neg = (c.level_neg - z - k).max(0.0);
+                }
+                if let Some(z) = oz {
+                    c.occ_pos = (c.occ_pos + z - k).max(0.0);
+                    c.occ_neg = (c.occ_neg - z - k).max(0.0);
+                }
+            }
+            // Latch only with a novel fold: a sustained sub-novelty shift is gated while it
+            // builds, but ordinary fat-tailed noise must not switch an hour off for good.
+            if cusum_max(&sub.seq_hod[hod]) >= policy.cusum_h_sigma && novelty.novelty > 0.0 {
+                sub.latched_hours |= hour_bit(slot);
             }
         }
 
@@ -736,8 +923,8 @@ impl BaselineEngine {
         let hod_immature = hour_of_day_observed_s(sub, slot) < MATURITY_MIN_OBSERVED_S;
         // Not novel, or (while the hour-of-day pool is immature, which learning requires anyway)
         // below the on level and consistent with the slot's own hour-of-day history.
-        let normal = novelty.novelty == 0.0
-            || (novelty.novelty < REFERENCE_LEARN_MAX_NOVELTY
+        let normal = learn_novelty == 0.0
+            || (learn_novelty < REFERENCE_LEARN_MAX_NOVELTY
                 && hod_immature
                 && consistent_with_own_hour(
                     sub,
@@ -748,16 +935,14 @@ impl BaselineEngine {
                     2.0 * policy.cusum_k_sigma,
                     chosen,
                 ));
-        let building = [
-            sub.cusum.level_pos,
-            sub.cusum.level_neg,
-            sub.cusum.occ_pos,
-            sub.cusum.occ_neg,
-        ]
-        .into_iter()
-        .fold(0.0, f64::max)
-            >= 0.5 * policy.cusum_h_sigma;
-        let accrue_ref = clean && normal && sub.change_point.is_none() && !building && hod_immature;
+        // The change-point CUSUM blocks every slot only while it builds towards a first crossing;
+        // once latched, the crossing's hour stays off and the sequential tests gate the others.
+        let h2 = 0.5 * policy.cusum_h_sigma;
+        let building = sub.change_point.is_none() && cusum_max(&sub.cusum) >= h2;
+        let seq_building =
+            cusum_max(&sub.seq) >= h2 || sub.seq_hod.get(hod).is_some_and(|c| cusum_max(c) >= h2);
+        let latched = sub.latched_hours & hour_bit(slot) != 0;
+        let accrue_ref = clean && normal && !latched && !building && !seq_building && hod_immature;
         if accrue_ref {
             let s = &mut sub.gains[gi].reference[slot_i];
             match level {
@@ -817,8 +1002,10 @@ impl BaselineEngine {
     }
 }
 
-fn gain_index(sub: &SubjectBaseline, gain: u32) -> Option<usize> {
-    sub.gains.iter().position(|g| g.gain == gain)
+fn gain_index(sub: &SubjectBaseline, gain: u32, class: LevelClass) -> Option<usize> {
+    sub.gains
+        .iter()
+        .position(|g| g.gain == gain && g.class == class)
 }
 
 fn refreeze_subject(sub: &mut SubjectBaseline, t: Timestamp) {
@@ -829,6 +1016,9 @@ fn refreeze_subject(sub: &mut SubjectBaseline, t: Timestamp) {
     }
     sub.cusum = Default::default();
     sub.change_point = None;
+    sub.seq = Default::default();
+    sub.seq_hod.iter_mut().for_each(|c| *c = Default::default());
+    sub.latched_hours = 0;
     sub.refrozen_at = Some(t);
 }
 
@@ -867,6 +1057,20 @@ pub struct Baselines {
     last_hour: Option<i64>,
     /// Site of the latest fold: protected from quota eviction.
     current: Option<hk_model::ids::SiteId>,
+    /// Memory cap, bytes (T-132; `None` = unbounded).
+    memory_cap: Option<usize>,
+    refused_folds: u64,
+    unloaded_engines: u64,
+}
+
+/// What [`Baselines::load_plan`] hands to the unlocked read: the store and the keys already in
+/// memory.
+#[derive(Clone, Debug)]
+pub struct LoadPlan {
+    /// Store to read.
+    pub store: BaselineStore,
+    /// Keys already loaded (not read again).
+    pub loaded: BTreeSet<BaselineKey>,
 }
 
 impl Baselines {
@@ -885,7 +1089,68 @@ impl Baselines {
             engines: BTreeMap::new(),
             last_hour: None,
             current: None,
+            memory_cap: None,
+            refused_folds: 0,
+            unloaded_engines: 0,
         }
+    }
+
+    /// Bounds the loaded engines to about `bytes` ([`BaselineState::approx_bytes`]): least
+    /// recently visited engines are saved and unloaded (reloaded on their next fold), and a fold
+    /// that would grow past the cap with nothing else to unload is refused. Without a store,
+    /// nothing is unloaded (it would be lost) and only growth is refused.
+    pub fn with_memory_cap(mut self, bytes: usize) -> Self {
+        self.memory_cap = Some(bytes);
+        self
+    }
+
+    /// Approximate heap bytes of the loaded engines.
+    pub fn memory_bytes(&self) -> usize {
+        self.engines
+            .values()
+            .map(BaselineEngine::approx_bytes)
+            .sum()
+    }
+
+    /// Folds refused by the memory cap.
+    pub fn refused_folds(&self) -> u64 {
+        self.refused_folds
+    }
+
+    /// Engines unloaded by the memory cap.
+    pub fn unloaded_engines(&self) -> u64 {
+        self.unloaded_engines
+    }
+
+    /// Saves and unloads least recently visited engines other than `keep` until within `cap`.
+    fn unload_to(
+        &mut self,
+        cap: usize,
+        keep: Option<BaselineKey>,
+    ) -> Result<(), BaselineStoreError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        while self.memory_bytes() > cap {
+            let Some(victim) = self
+                .engines
+                .iter()
+                .filter(|(k, _)| Some(**k) != keep)
+                .min_by_key(|(_, e)| e.state.last_visit)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            let e = self.engines.remove(&victim).expect("listed");
+            if e.is_dirty()
+                && let Err(err) = store.save(&e.state)
+            {
+                self.engines.insert(victim, e);
+                return Err(err);
+            }
+            self.unloaded_engines += 1;
+        }
+        Ok(())
     }
 
     /// The key a fold under `site`/`cal` goes to; `None` for sites that do not accrue.
@@ -935,7 +1200,24 @@ impl Baselines {
             ));
         };
         self.current = Some(key.site);
-        Ok(self.engine(key, utc_offset_min, obs.t)?.observe(obs))
+        self.engine(key, utc_offset_min, obs.t)?;
+        if let Some(cap) = self.memory_cap {
+            let growth = self.engines[&key].growth_of(obs);
+            self.unload_to(cap.saturating_sub(growth), Some(key))?;
+            let e = &self.engines[&key];
+            if growth > 0 && self.memory_bytes() + growth > cap {
+                self.refused_folds += 1;
+                let m = e
+                    .state
+                    .subjects
+                    .get(&obs.subject)
+                    .map_or(Maturity::Immature { observed_s: 0.0 }, |s| {
+                        maturity(s, e.slot(obs.t))
+                    });
+                return Ok(FoldOutcome::none(obs, m));
+            }
+        }
+        Ok(self.engines.get_mut(&key).expect("loaded").observe(obs))
     }
 
     /// Engines loaded or created.
@@ -948,7 +1230,84 @@ impl Baselines {
         self.engines.values_mut()
     }
 
-    /// Loads every stored key of `site` not yet in memory (API listing).
+    /// Phase 1 of [`Self::load_site_outside_lock`] (under the lock, no I/O): the store and the keys
+    /// in memory. `None` without a store.
+    pub fn load_plan(&self) -> Option<LoadPlan> {
+        Some(LoadPlan {
+            store: self.store.clone()?,
+            loaded: self.engines.keys().copied().collect(),
+        })
+    }
+
+    /// Phase 2 (no lock): reads `site`'s stored keys not in `plan.loaded` with `read`.
+    pub fn read_site(
+        plan: &LoadPlan,
+        site: hk_model::ids::SiteId,
+        mut read: impl FnMut(
+            &BaselineStore,
+            &BaselineKey,
+        ) -> Result<Option<BaselineState>, BaselineStoreError>,
+    ) -> Result<Vec<BaselineState>, BaselineStoreError> {
+        let mut out = Vec::new();
+        for (key, _, _) in plan.store.entries()? {
+            if key.site == site
+                && !plan.loaded.contains(&key)
+                && let Some(state) = read(&plan.store, &key)?
+            {
+                out.push(state);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Phase 3 (under the lock, no I/O): inserts the read states whose keys are still absent (a
+    /// fold may have loaded or created one meanwhile; memory is newer) and applies the memory cap.
+    pub fn insert_loaded(
+        &mut self,
+        states: Vec<BaselineState>,
+        utc_offset_min: i16,
+    ) -> Result<(), BaselineStoreError> {
+        for state in states {
+            self.engines
+                .entry(state.key)
+                .or_insert_with(|| BaselineEngine::new(state, utc_offset_min, self.cfg));
+        }
+        match self.memory_cap {
+            Some(cap) => self.unload_to(cap, None),
+            None => Ok(()),
+        }
+    }
+
+    /// Loads `site`'s stored keys with the disk reads **outside** `baselines`' lock (T-132): the
+    /// lock is taken briefly to plan and to insert, so concurrent folds are not blocked by I/O.
+    pub fn load_site_outside_lock(
+        baselines: &Mutex<Baselines>,
+        site: hk_model::ids::SiteId,
+        utc_offset_min: i16,
+    ) -> Result<(), BaselineStoreError> {
+        Self::load_site_outside_lock_with(baselines, site, utc_offset_min, BaselineStore::load)
+    }
+
+    /// [`Self::load_site_outside_lock`] with a custom reader (tests).
+    pub fn load_site_outside_lock_with(
+        baselines: &Mutex<Baselines>,
+        site: hk_model::ids::SiteId,
+        utc_offset_min: i16,
+        read: impl FnMut(
+            &BaselineStore,
+            &BaselineKey,
+        ) -> Result<Option<BaselineState>, BaselineStoreError>,
+    ) -> Result<(), BaselineStoreError> {
+        let lock = || baselines.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(plan) = lock().load_plan() else {
+            return Ok(());
+        };
+        let states = Self::read_site(&plan, site, read)?;
+        lock().insert_loaded(states, utc_offset_min)
+    }
+
+    /// Loads every stored key of `site` not yet in memory (API listing). Reads the disk under the
+    /// caller's lock; prefer [`Self::load_site_outside_lock`].
     pub fn load_site(
         &mut self,
         site: hk_model::ids::SiteId,
@@ -1723,7 +2082,10 @@ mod tests {
              adaptive {ad_fco:.3}",
             last_ref_h / 24.0
         );
-        assert!(accrued_day_23 > 0, "still learning before maturity");
+        // T-132: the sequential learning test notices the creep (+0.03 FCO against its own
+        // hour's reference by then) a little before hour-of-day maturity.
+        let _ = accrued_day_23;
+        assert!(last_ref_h > 20.0 * 24.0, "still learning for weeks");
         assert!(
             last_ref_h < 24.0 * 24.0,
             "learning ended at hour-of-day maturity"
@@ -1733,6 +2095,364 @@ mod tests {
 
     /// Flush enforces the store quota and drops evicted sites' engines so they are not written
     /// back.
+    /// The occupied-level series of `sub` under gain `gain`.
+    fn occupied_series(sub: &SubjectBaseline, gain: u32) -> usize {
+        gain_index(sub, gain, LevelClass::Occupied).expect("occupied series")
+    }
+
+    /// T-132 item 5: a front-end gain change starts a separate (immature) level pool instead of
+    /// reading as level novelty; the same step under one gain key is novel (control).
+    #[test]
+    fn baseline_gain_change_starts_a_separate_level_pool_not_novelty() {
+        let run = |gain_after: u32| {
+            let mut rng = Rng(0x1325);
+            let mut e = engine();
+            let (mut max_lz, mut subject) = (f64::NEG_INFINITY, None);
+            for q in 0..(24 * 4 * 4) {
+                let hours = f64::from(q) / 4.0;
+                let after = hours >= 72.0;
+                let (gain, occ) = if after {
+                    (gain_after, 18.0)
+                } else {
+                    (0x1234, 12.0)
+                };
+                let row = leveled_row(hours, 0.5, -100.0, 2.0, occ + 0.3 * rng.normal());
+                let (_, _, o) = from_occupancy_stat(&row, gain).unwrap();
+                subject = Some(o.subject);
+                let out = e.observe(&o);
+                if (72.0..78.0).contains(&hours) {
+                    max_lz = max_lz.max(out.novelty.level_z.unwrap_or(f64::NEG_INFINITY));
+                }
+            }
+            let sub = e.state.subjects[&subject.unwrap()].clone();
+            (max_lz, sub)
+        };
+        let (lz_new_gain, sub) = run(0xBEEF);
+        let (lz_same_gain, _) = run(0x1234);
+        println!(
+            "T-132 gain step (+6 dB excess): max level z after, new gain key {lz_new_gain}, \
+             same key {lz_same_gain}"
+        );
+        assert!(
+            lz_new_gain < 3.0,
+            "gain change is not level novelty: {lz_new_gain}"
+        );
+        assert!(
+            lz_same_gain >= 3.0,
+            "control: same key is novel: {lz_same_gain}"
+        );
+        let occ = occupied_series(&sub, 0xBEEF);
+        assert_ne!(occ, occupied_series(&sub, 0x1234), "separate level pools");
+    }
+
+    /// T-132 item 6: on a quiet channel one occupied visit in an interval is occupancy evidence,
+    /// not a level (the old adapter read its +20 dB as level novelty); a sustained real level rise
+    /// on a busy channel is still level novelty.
+    #[test]
+    fn baseline_low_fco_single_occupied_visit_is_not_level_novelty_but_a_rise_is() {
+        let mut rng = Rng(0x1326);
+        let mut e = engine();
+        let mut max_lz_single = f64::NEG_INFINITY;
+        for q in 0..(24 * 4 * 6) {
+            let hours = f64::from(q) / 4.0;
+            // Every 8th interval one of 12 visits is occupied, +20 dB above the floor.
+            let fco = if q % 8 == 0 { 1.0 / 12.0 } else { 0.0 };
+            let row = leveled_row(hours, fco, -100.0, 2.0 + 0.3 * rng.normal(), 20.0);
+            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let out = e.observe(&o);
+            if hours >= 24.0 && q % 8 == 0 {
+                assert_eq!(o.level_db, None, "one occupied visit folds occupancy only");
+                max_lz_single = max_lz_single.max(out.novelty.level_z.unwrap_or(f64::NEG_INFINITY));
+            }
+        }
+        // A busy channel (6 of 12 occupied) at +12 dB for 3 days, then +18 dB.
+        let mut e = engine();
+        let (mut first_rise, mut max_before) = (None, f64::NEG_INFINITY);
+        for q in 0..(24 * 4 * 4) {
+            let hours = f64::from(q) / 4.0;
+            let occ = if hours >= 72.0 { 18.0 } else { 12.0 } + 0.5 * rng.normal();
+            let row = leveled_row(hours, 0.5, -100.0, 2.0, occ);
+            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let out = e.observe(&o);
+            let lz = out.novelty.level_z.unwrap_or(f64::NEG_INFINITY);
+            if (24.0..72.0).contains(&hours) {
+                max_before = max_before.max(lz);
+            } else if hours >= 72.0 && lz >= 3.0 && first_rise.is_none() {
+                first_rise = Some(hours - 72.0);
+            }
+        }
+        println!(
+            "T-132 bimodality: single occupied visit max level z {max_lz_single}; busy channel \
+             max z before {max_before:.2}, +6 dB rise flagged after {first_rise:?} h"
+        );
+        assert!(max_lz_single < 3.0);
+        assert!(max_before < 3.0);
+        assert_eq!(
+            first_rise,
+            Some(0.0),
+            "sustained level rise is novel at once"
+        );
+    }
+
+    /// T-132 item 3: a change confined to one hour of day latches that hour only; the other hours
+    /// keep learning, including while a subject-wide change point is open.
+    #[test]
+    fn baseline_change_latches_its_hour_of_day_only() {
+        let mut rng = Rng(0x1323);
+        let mut e = engine();
+        let ch = channel(2);
+        let bad_bit = hour_bit(e.slot(at(72.0 + 14.0)));
+        let (mut other_accrued, mut bad_accrued) = (0, 0);
+        for q in 0..(24 * 4 * 7) {
+            let hours = f64::from(q) / 4.0;
+            let bad = hours >= 72.0 && (hours % 24.0).floor() == 14.0;
+            let (p, snr) = if bad { (0.8, 18.0) } else { (0.2, 10.0) };
+            let out = e.observe(&interval(ch, hours, p, snr, &mut rng));
+            if hours >= 96.0 {
+                if bad {
+                    bad_accrued += usize::from(out.accrued_reference);
+                } else {
+                    other_accrued += usize::from(out.accrued_reference);
+                }
+            }
+        }
+        let latched = e.state.subjects[&ch].latched_hours;
+        println!(
+            "T-132 hour-14 interferer: latched hours {latched:#x} (hour 14 = {bad_bit:#x}); \
+             reference folds after day 4: other hours {other_accrued}, hour 14 {bad_accrued}"
+        );
+        assert_eq!(latched, bad_bit);
+        assert_eq!(bad_accrued, 0);
+        assert!(
+            other_accrued > 50,
+            "other hours keep learning: {other_accrued}"
+        );
+        // An open subject-wide change point (latched at hour 14) no longer stops the others.
+        e.state.subjects.get_mut(&ch).unwrap().change_point = Some(ChangePoint {
+            t: at(86.0),
+            statistic: ChangeStatistic::Occupancy,
+            direction: 1,
+            cusum: 9.0,
+        });
+        let accrued = (0..16)
+            .filter(|i| {
+                let hours = 7.0 * 24.0 + 2.0 + f64::from(*i) / 4.0;
+                e.observe(&interval(ch, hours, 0.2, 10.0, &mut rng))
+                    .accrued_reference
+            })
+            .count();
+        assert!(accrued > 0, "learning continues outside the latched hour");
+    }
+
+    /// T-132 item 4: a weak persistent interferer (+1.5 dB on a channel whose occupied level
+    /// wanders by 1 dB, so z ≈ 1.5 < 3 on every fold: never novel) with real channel levels
+    /// through the adapter. The sequential learning test stops it entering the reference within
+    /// hours, so the frozen reference barely moves while the adaptive copy follows.
+    #[test]
+    fn baseline_weak_persistent_interferer_is_not_absorbed() {
+        const ONSET_H: f64 = 72.0;
+        let mut rng = Rng(0x1324);
+        let mut e = engine();
+        let (mut subject, mut ref_before) = (None, None);
+        let (mut stop_h, mut cp_h, mut novel, mut folds, mut absorbed) = (None, None, 0, 0, 0);
+        let mean_of = |e: &BaselineEngine, subject, copy| {
+            let sub = &e.state.subjects[&subject];
+            let gi = occupied_series(sub, 0);
+            pools(sub, e.slot(at(0.0)), Some(gi), copy).0[3]
+                .mean_db()
+                .unwrap()
+        };
+        for q in 0..(24 * 4 * 24) {
+            let hours = f64::from(q) / 4.0;
+            let weak = hours >= ONSET_H;
+            let occ = 12.0 + if weak { 1.5 } else { 0.0 } + rng.normal();
+            let row = leveled_row(hours, 0.5, -100.0, 2.0, occ);
+            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            if weak && ref_before.is_none() {
+                ref_before = Some(mean_of(&e, o.subject, BaselineCopy::Reference));
+            }
+            subject = Some(o.subject);
+            let out = e.observe(&o);
+            if weak {
+                folds += 1;
+                novel += usize::from(out.novelty.novelty > 0.0);
+                absorbed += usize::from(out.accrued_reference);
+                let sub = &e.state.subjects[&o.subject];
+                if stop_h.is_none() && cusum_max(&sub.seq) >= 4.0 {
+                    stop_h = Some(hours - ONSET_H);
+                }
+                if cp_h.is_none() && out.change_point.is_some() {
+                    cp_h = Some(hours - ONSET_H);
+                }
+            }
+        }
+        let subject = subject.unwrap();
+        let drift = mean_of(&e, subject, BaselineCopy::Reference) - ref_before.unwrap();
+        let adaptive = mean_of(&e, subject, BaselineCopy::Adaptive) - ref_before.unwrap();
+        println!(
+            "T-132 weak interferer +1.5 dB (σ 1 dB): novel folds {novel}/{folds}; learning stopped \
+             {stop_h:?} h after onset; {absorbed} folds absorbed in 21 days; reference drift \
+             {drift:.3} dB, adaptive copy +{adaptive:.3} dB; change point {cp_h:?} h after onset"
+        );
+        assert!(stop_h.is_some_and(|h| h <= 6.0), "stopped at {stop_h:?}");
+        assert!(drift.abs() < 0.15, "reference drift {drift}");
+        assert!(
+            adaptive > 3.0 * drift.abs().max(0.05),
+            "adaptive follows: {adaptive}"
+        );
+    }
+
+    /// T-132 item 2: a memory cap unloads (saves) least recently visited engines and loses no fold;
+    /// with only the active key loaded, growth past the cap is refused.
+    #[test]
+    fn baseline_memory_cap_unloads_idle_engines_and_bounds_growth() {
+        let root = std::env::temp_dir().join(format!("hk-bl-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = BaselineStore::open(&root).unwrap();
+        let mut rng = Rng(0x1322);
+        let one = {
+            let mut b = Baselines::new(BaselineConfig::default(), 1, 16, None);
+            b.observe(
+                SiteKey::Site(SiteId::new()),
+                0,
+                CalKey::Uncalibrated,
+                &occ_fold(channel(0), 0.0, 0.2, &mut rng),
+            )
+            .unwrap();
+            b.memory_bytes()
+        };
+        let cap = 10 * one;
+        let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(store.clone()))
+            .with_memory_cap(cap);
+        let sites: Vec<SiteId> = (0..6).map(|_| SiteId::new()).collect();
+        let mut max_seen = 0;
+        for round in 0..3 {
+            for (i, site) in sites.iter().enumerate() {
+                for c in 0..3 {
+                    let hours = f64::from(round) * 24.0 + i as f64 + c as f64 / 4.0;
+                    let o = occ_fold(channel(c), hours, 0.2, &mut rng);
+                    b.observe(SiteKey::Site(*site), 0, CalKey::Uncalibrated, &o)
+                        .unwrap();
+                    max_seen = max_seen.max(b.memory_bytes());
+                    assert!(b.memory_bytes() <= cap, "{} > {cap}", b.memory_bytes());
+                }
+            }
+        }
+        b.flush(at(100.0), true).unwrap();
+        println!(
+            "T-132 memory cap: {one} B for one subject with one dense series ({} B per slot pair); \
+             cap {cap} B, max loaded {max_seen} B, {} engines unloaded, {} folds refused",
+            hk_store::baseline::SLOT_PAIR_BYTES,
+            b.unloaded_engines(),
+            b.refused_folds()
+        );
+        assert!(b.unloaded_engines() > 0);
+        assert_eq!(b.refused_folds(), 0);
+        // Every fold survived unloading: each subject's reference holds 3 × 900 s.
+        let mut fresh = Baselines::new(BaselineConfig::default(), 1, 16, Some(store));
+        for site in &sites {
+            fresh.load_site(*site, 0).unwrap();
+        }
+        let observed: Vec<f64> = fresh
+            .engines()
+            .flat_map(|e| e.state.subjects.values())
+            .map(|s| {
+                s.gains
+                    .iter()
+                    .flat_map(|g| &g.reference)
+                    .map(|r| r.observed_s)
+                    .sum()
+            })
+            .collect();
+        assert_eq!(observed.len(), 18);
+        assert!(
+            observed.iter().all(|o| (*o - 2700.0).abs() < 1e-6),
+            "{observed:?}"
+        );
+        // Memory only, one key: growth past the cap is refused.
+        let mut b = Baselines::new(BaselineConfig::default(), 1, 16, None)
+            .with_memory_cap(2 * one + one / 2);
+        let site = SiteKey::Site(SiteId::new());
+        for c in 0..5 {
+            b.observe(
+                site,
+                0,
+                CalKey::Uncalibrated,
+                &occ_fold(channel(c), 0.0, 0.2, &mut rng),
+            )
+            .unwrap();
+            assert!(b.memory_bytes() <= 2 * one + one / 2);
+        }
+        assert_eq!(b.refused_folds(), 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// T-132 item 7: `load_site_outside_lock` reads the disk without holding the lock: a fold on
+    /// another site completes while the (blocked) read is in progress.
+    #[test]
+    fn baseline_load_site_reads_outside_the_lock() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let root = std::env::temp_dir().join(format!("hk-bl-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = BaselineStore::open(&root).unwrap();
+        let mut rng = Rng(0x1327);
+        let (a, other) = (SiteId::new(), SiteId::new());
+        {
+            let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(store.clone()));
+            b.observe(
+                SiteKey::Site(a),
+                0,
+                CalKey::Uncalibrated,
+                &occ_fold(channel(0), 0.0, 0.2, &mut rng),
+            )
+            .unwrap();
+            b.flush(at(1.0), true).unwrap();
+        }
+        let shared = Arc::new(Mutex::new(Baselines::new(
+            BaselineConfig::default(),
+            1,
+            16,
+            Some(store),
+        )));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let loader = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                Baselines::load_site_outside_lock_with(&shared, a, 0, |st, k| {
+                    started_tx.send(()).unwrap();
+                    go_rx
+                        .recv_timeout(Duration::from_secs(20))
+                        .expect("a concurrent fold completed during the slow read");
+                    st.load(k)
+                })
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(20)).unwrap();
+        let out = shared
+            .lock()
+            .unwrap()
+            .observe(
+                SiteKey::Site(other),
+                0,
+                CalKey::Uncalibrated,
+                &occ_fold(channel(1), 2.0, 0.2, &mut rng),
+            )
+            .unwrap();
+        assert!(out.accrued, "the fold ran while the read was blocked");
+        go_tx.send(()).unwrap();
+        loader.join().unwrap().unwrap();
+        let b = shared.lock().unwrap();
+        assert!(
+            b.engines().any(|e| e.state.key.site == a),
+            "loaded after the read"
+        );
+        assert!(b.engines().any(|e| e.state.key.site == other));
+        drop(b);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn baseline_flush_enforces_quota_and_drops_evicted_engines() {
         let tmp = |tag: &str| std::env::temp_dir().join(format!("hk-t119-{tag}-{}", SiteId::new()));
