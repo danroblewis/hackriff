@@ -193,6 +193,9 @@ impl PipelineSettings {
 /// Where new streams are offered (e.g. the hk-api bridge registry).
 pub type StreamSink = Arc<dyn Fn(&StreamHeader, PublisherHandle) + Send + Sync>;
 
+/// Where streams stop being offered, by `stream_id` (the counterpart of [`StreamSink`]).
+pub type StreamUnsink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// A run's configuration.
 #[derive(Clone)]
 pub struct PipelineConfig {
@@ -221,6 +224,8 @@ pub struct PipelineConfig {
     pub manifest_root: PathBuf,
     /// Stream registration hook.
     pub stream_sink: Option<StreamSink>,
+    /// Stream withdrawal hook (e.g. a stopped recipe pipeline's streams).
+    pub stream_unsink: Option<StreamUnsink>,
     /// Spectrum stream id.
     pub spectrum_stream_id: String,
     /// Calibration versions for in-pipeline calibrated floors (see the module docs).
@@ -386,6 +391,7 @@ impl PipelineConfig {
             plugin_dirs: exe_dirs,
             manifest_root: default_manifest_root(),
             stream_sink: None,
+            stream_unsink: None,
             spectrum_stream_id: "spectrum/live".into(),
             calibrations: Vec::new(),
             device_hw: None,

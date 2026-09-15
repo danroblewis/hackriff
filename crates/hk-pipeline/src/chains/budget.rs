@@ -29,6 +29,9 @@ pub enum ChainKind {
     Listen,
     /// A bits or symbols burst tap.
     Tap,
+    /// A decoder-workbench recipe pipeline (T-088, ADR-0011 §1.4 rule 5): counted in `chains`
+    /// and the CPU budget only.
+    Recipe,
 }
 
 /// The limits admission applies.
@@ -112,6 +115,7 @@ impl SlotInner {
                 sub(&lc.budget_used_mcores, m);
             }
             ChainKind::Tap => sub(&b.taps, 1),
+            ChainKind::Recipe => {}
         }
     }
 }
@@ -196,6 +200,7 @@ impl Slot {
             ChainKind::Tap => {
                 add(&b.taps, 1);
             }
+            ChainKind::Recipe => {}
         }
         Ok(Self(Arc::new(SlotInner {
             counters: Arc::clone(counters),

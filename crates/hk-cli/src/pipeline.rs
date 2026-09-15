@@ -335,6 +335,39 @@ pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     }
 }
 
+/// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`].
+struct PipelineRecipes(Arc<hk_pipeline::recipes::runtime::RecipeRuntime>);
+
+impl hk_api::recipes::RecipeControl for PipelineRecipes {
+    fn call(
+        &self,
+        call: hk_api::recipes::RecipeCall,
+    ) -> Result<serde_json::Value, hk_api::recipes::RecipeFail> {
+        use hk_api::recipes::RecipeCall as C;
+        let r = &self.0;
+        match call {
+            C::Blocks => Ok(r.blocks_json()),
+            C::ListRecipes => Ok(r.recipes_json()),
+            C::GetRecipe { id, version } => r.recipe_json(&id, version),
+            C::SaveRecipe(doc) => r.save_json(doc),
+            C::ValidateRecipe(doc) => Ok(r.validate_json(doc)),
+            C::DeleteRecipe(id) => r.delete_recipe_json(&id),
+            C::StartPipeline(body) => r.start_json(body),
+            C::ListPipelines => Ok(r.pipelines_json()),
+            C::GetPipeline(id) => r.pipeline_json(&id),
+            C::EditPipeline { id, recipe } => r.edit_json(&id, recipe),
+            C::SavePipeline(id) => r.save_pipeline_json(&id),
+            C::StopPipeline(id) => r.stop_json(&id),
+        }
+        .map_err(|e| hk_api::recipes::RecipeFail {
+            detail: e.detail(),
+            status: e.status,
+            code: e.code,
+            message: e.message,
+        })
+    }
+}
+
 /// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
 /// the pipeline writes, the control API (display, pause, recording and bookmarks, audited to
 /// `<data dir>/control-audit.jsonl`), and (live runs without the scheduler) the live control
@@ -362,10 +395,13 @@ pub fn serve_api(
     let controller = handle.controller();
     let status_ctl = controller.clone();
     // On-demand streams (T-043 listen, T-060 burst bits and symbols), over WebSocket and TCP.
+    let recipes = handle.recipe_runtime();
     let openers = hk_api::stream::OpenerRegistry::new()
         .with("listen", handle.listen_service())
         .with("bits", handle.bits_service())
-        .with("symbols", handle.symbols_service());
+        .with("symbols", handle.symbols_service())
+        .with("stage", recipes.stage_service()) // T-088
+        .with("inspector", recipes.inspector_service()); // T-088 (T-089/T-092 extend it)
     let tcp = start_stream_tcp(registry, &openers, &token)?;
     let state = ApiState {
         streams: registry.clone(),
@@ -388,6 +424,7 @@ pub fn serve_api(
         audit: Some(Arc::new(audit)),
         on_demand: openers,
         outputs: Some(Arc::new(PipelineOutputs(handle.output_recorders()))),
+        recipes: Some(Arc::new(PipelineRecipes(recipes))),
         // T-092 wires its decoded-capture store here.
         captures: None,
     };
@@ -463,6 +500,10 @@ pub(crate) fn config_for(
     let mut cfg = PipelineConfig::new(data_dir, plan)?;
     let reg = registry.clone();
     cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
+    let reg = registry.clone();
+    cfg.stream_unsink = Some(Arc::new(move |id| {
+        reg.unregister(id);
+    }));
     cfg.feeds_dir = feeds;
     if let Some(path) = calibration {
         cfg.calibrations = load_calibrations(path)?;
