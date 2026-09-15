@@ -43,7 +43,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         radio: &radio,
         caps: &caps,
     };
-    let registry = PolicyRegistry::baselines();
+    let mut registry = PolicyRegistry::baselines();
+    hk_sim::bandit::register(&mut registry);
     let names: Vec<String> = if args.policies.is_empty() {
         registry.names().into_iter().map(str::to_owned).collect()
     } else {
@@ -70,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("every class is reported");
         eprintln!(
             "{name:>18}: {:.2}s wall, {} steps, discovered {}/{}, bursts captured/h {:.0} ({:.1}%), \
-             ttfd median {:?}s, injected [{}], suspect dwell {:.0}s",
+             ttfd median {:?}s, injected [{}], suspect dwell {:.0}s (suspect-only {:.0}s)",
             started.elapsed().as_secs_f64(),
             r.time.steps,
             r.discovery.discovered,
@@ -80,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r.ttfd.median_s.map(|v| (v * 10.0).round() / 10.0),
             injected.join(", "),
             r.suspect.dwell_s_on_suspect_pois,
+            r.suspect.dwell_s_suspect_only,
         );
         policies.push(r);
     }
