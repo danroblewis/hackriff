@@ -178,6 +178,48 @@ fn adsb_request(seed: u64) -> SynthRequest {
         .param("messages_per_aircraft", 4)
 }
 
+/// T-223: the wrapper reports ready (the contract's `ready` line, §9.3) only once readsb's Beast
+/// connection is up and its pre-roll is written — everything it needs to give a message its own
+/// sample time. A chain that holds its first record until then never feeds a squitter that would
+/// decode before the connection exists and keep only the fallback stamp (under load the
+/// connection took 1.6 s, and the first squitter was stamped 158 ms late).
+///
+/// Nothing is pushed here: the wrapper feeds readsb its own silence while it waits, so readiness
+/// never depends on the chain's input — which is what lets the chain wait for it.
+#[test]
+fn ready_is_reported_only_after_readsbs_beast_connection_is_up() {
+    readsb_or_skip!();
+    let _guard = ENV_MUTEX.lock().unwrap();
+    let ingest = Arc::new(Mutex::new(Ingest::new(
+        Repository::open_in_memory().unwrap(),
+    )));
+    let inst = PluginInstance::spawn(
+        manifest(),
+        input(anchor()),
+        PluginContext::default(),
+        ingest,
+    )
+    .unwrap();
+    wait_running(&inst);
+    assert!(
+        inst.wait_ready(Duration::from_secs(60)),
+        "{:?} {:?}",
+        inst.stats(),
+        inst.monitor().log_tail()
+    );
+    let stats = inst.stats();
+    assert_eq!(
+        stats.records_offered_before_ready, 0,
+        "nothing was pushed: {stats:?}"
+    );
+    let tail = inst.monitor().log_tail();
+    assert!(
+        tail.lines.iter().any(|l| l.contains("Beast connected")),
+        "ready was reported before readsb's Beast connection: {tail:?}"
+    );
+    inst.shutdown();
+}
+
 fn assert_gone(pid: i32) {
     let deadline = Instant::now() + Duration::from_secs(5);
     // SAFETY: signal 0 only checks for existence.

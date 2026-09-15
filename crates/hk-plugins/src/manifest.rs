@@ -122,6 +122,10 @@ pub struct InputSpec {
     pub center_hz: Option<HzRange>,
     /// Accepted bandwidths.
     pub bandwidth_hz: Option<HzRange>,
+    /// The plugin emits a `ready` line (§9.3) once it can account for the input it is given.
+    /// A producer that can pause (a lossless replay) holds its first record until then, so no
+    /// input reaches a decoder that is still setting itself up (T-223).
+    pub ready_signal: bool,
 }
 
 /// Output declaration.
@@ -157,6 +161,10 @@ pub struct ResourceLimits {
     pub input_queue_bytes: usize,
     /// A plugin whose input queue stays full this long is killed (hang watchdog) and restarted.
     pub stall_timeout: Duration,
+    /// Longest a producer that cannot pause (a live chain) holds its first record waiting for
+    /// `input.ready_signal`; after it, input is offered anyway and the wait is counted. A
+    /// producer that can pause (a lossless replay) may wait longer.
+    pub ready_timeout: Duration,
     /// Longest accepted stdout line; longer lines are discarded and counted malformed.
     pub max_message_bytes: usize,
     /// Lines kept in the log ring.
@@ -261,6 +269,7 @@ struct RawInput {
     sample_rates_hz: Vec<f64>,
     center_hz: Option<RawRange>,
     bandwidth_hz: Option<RawRange>,
+    ready_signal: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -315,6 +324,7 @@ struct RawRestart {
 struct RawLimits {
     input_queue_bytes: Option<usize>,
     stall_timeout_ms: Option<u64>,
+    ready_timeout_ms: Option<u64>,
     max_message_bytes: Option<usize>,
     stderr_lines: Option<usize>,
     nice: Option<i32>,
@@ -662,6 +672,7 @@ impl PluginManifest {
             sample_rates_hz: raw_input.sample_rates_hz,
             center_hz: range(raw_input.center_hz, "input.center_hz")?,
             bandwidth_hz: range(raw_input.bandwidth_hz, "input.bandwidth_hz")?,
+            ready_signal: raw_input.ready_signal.unwrap_or(false),
         };
 
         let mut raw_output = raw.output.ok_or(ManifestError::Missing("output"))?;
@@ -711,6 +722,7 @@ impl PluginManifest {
         let limits = ResourceLimits {
             input_queue_bytes: raw.limits.input_queue_bytes.unwrap_or(8 * 1024 * 1024),
             stall_timeout: Duration::from_millis(raw.limits.stall_timeout_ms.unwrap_or(10_000)),
+            ready_timeout: Duration::from_millis(raw.limits.ready_timeout_ms.unwrap_or(5_000)),
             max_message_bytes: raw.limits.max_message_bytes.unwrap_or(1024 * 1024),
             stderr_lines: raw.limits.stderr_lines.unwrap_or(200),
             nice: raw.limits.nice,

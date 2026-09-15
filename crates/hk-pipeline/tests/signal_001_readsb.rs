@@ -136,6 +136,9 @@ fn signal_001_long_unpaced_replay_waits_for_readsb_instead_of_dropping() {
         "[{SIGNAL_001}] every sample reached readsb"
     );
     assert_eq!(s.counter("/chains/plugin_wait_timeouts"), 0);
+    // T-223: the chain holds its first record until the wrapper reports ready.
+    assert_eq!(s.counter("/chains/plugin_fed_before_ready"), 0);
+    assert_eq!(s.counter("/chains/plugin_ready_timeouts"), 0);
     assert_eq!(
         s.counter("/chains/plugin_decodes"),
         truth,

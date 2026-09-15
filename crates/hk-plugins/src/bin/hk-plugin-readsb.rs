@@ -432,7 +432,8 @@ fn pump_stderr(stderr: impl Read, clean_shutdown: &AtomicBool) {
 const BEAST_TICKS_PER_S: f64 = 12e6;
 /// How long after its preamble start readsb stamps a message (see the module doc, "Timestamps").
 const BEAST_STAMP_OFFSET_S: f64 = 200e-6;
-/// Silence written before the first real record, so readsb starts its main loop and connects.
+/// Silence written after readsb's Beast connection is up and before the first real record, so the
+/// blocks readsb decodes while it wires its new Beast client up carry no messages (T-223).
 /// readsb's `ifile` reader waits for full `--sdr-buffer-size` blocks (128 KiB = 65 536 `uc8`
 /// samples), and readsb 3.16 did not forward over Beast a message in its first few blocks even
 /// with the connection up (measured on the `adsb_squitter` synth: a 131 072-sample pre-roll lost
@@ -446,6 +447,10 @@ const PREROLL_SAMPLES: u64 = 1 << 20;
 /// input queue meanwhile (a lossless replay waits for room; a live chain drops and counts), so a
 /// longer wait loses nothing; it stays under the chain's 30 s lossless stall limit.
 const BEAST_CONNECT_WAIT: Duration = Duration::from_secs(20);
+/// Longest the main thread holds the contract's `ready` line (T-223) waiting for the writer
+/// thread's Beast connection and pre-roll. Past it the wrapper reports ready anyway and runs with
+/// fallback stamps, rather than leaving the host's chain waiting on it.
+const READY_WAIT: Duration = Duration::from_secs(25);
 /// Longest wait for the Beast frame of a raw line.
 const BEAST_MATCH_WAIT: Duration = Duration::from_millis(250);
 /// Unmatched Beast frames kept (frames of downlink formats this wrapper never emits).
@@ -727,6 +732,7 @@ fn feed_readsb(
     rx: mpsc::Receiver<(Vec<u8>, u64)>,
     timing: &Timing,
     wait_for_beast: bool,
+    ready: mpsc::Sender<()>,
 ) {
     // readsb's sample count so far (every byte written to its stdin, silence included).
     let mut written = 0u64;
@@ -742,11 +748,11 @@ fn feed_readsb(
         *written += (KEEPALIVE_CHUNK_BYTES / 2) as u64;
     };
     if wait_for_beast {
-        // Pre-roll, then hold real samples until readsb's Beast connection exists (module doc),
-        // keeping readsb fed meanwhile.
-        while written < PREROLL_SAMPLES {
-            send_silence(&mut readsb_stdin, &mut written);
-        }
+        // Hold real samples until readsb's Beast connection exists (module doc), keeping readsb
+        // fed meanwhile, and write the pre-roll *after* it: readsb does not forward a message
+        // decoded in its first blocks after the connector opens, so those blocks must be silence.
+        // Before T-223 the pre-roll came first and, under load, was long consumed by the time
+        // readsb connected 1.6 s later, which cost the chain's first squitter its Beast stamp.
         let started = Instant::now();
         let deadline = started + BEAST_CONNECT_WAIT;
         let mut connected = false;
@@ -767,7 +773,14 @@ fn feed_readsb(
                 "hk-plugin-readsb: no Beast connection after {BEAST_CONNECT_WAIT:?}; decode stamps fall back"
             );
         }
+        let preroll_to = written + PREROLL_SAMPLES;
+        while written < preroll_to {
+            send_silence(&mut readsb_stdin, &mut written);
+        }
     }
+    // Everything needed to stamp a message is in place (T-223): the main thread turns this into
+    // the contract's `ready` line, and the host starts feeding.
+    let _ = ready.send(());
     loop {
         match rx.recv_timeout(KEEPALIVE_INTERVAL) {
             Ok((chunk, first_index)) => {
@@ -844,9 +857,17 @@ fn main() {
         let t = Arc::clone(&timing);
         thread::spawn(move || pump_beast(listener, &t));
     }
+    let (ready_tx, ready_rx) = mpsc::channel::<()>();
     let timing_for_writer = Arc::clone(&timing);
-    let writer =
-        thread::spawn(move || feed_readsb(readsb_stdin, rx, &timing_for_writer, wait_for_beast));
+    let writer = thread::spawn(move || {
+        feed_readsb(
+            readsb_stdin,
+            rx,
+            &timing_for_writer,
+            wait_for_beast,
+            ready_tx,
+        )
+    });
 
     let waiter_clean = Arc::clone(&clean_shutdown);
     let waiter = thread::spawn(move || {
@@ -869,6 +890,14 @@ fn main() {
 
     let stderr_clean = Arc::clone(&clean_shutdown);
     let err_thread = thread::spawn(move || pump_stderr(readsb_stderr, &stderr_clean));
+
+    // The contract's readiness line (docs/stream-contract.md §9.3, T-223), written before the
+    // readsb reader thread takes stdout: the writer thread has readsb's Beast connection and its
+    // pre-roll in place, so every message from here on can carry its own sample time. The host
+    // holds the chain's first record until this line.
+    let _ = ready_rx.recv_timeout(READY_WAIT);
+    println!("{}", json!({"type": "ready"}));
+    let _ = io::stdout().flush();
 
     let timing_for_out = Arc::clone(&timing);
     let out_thread =
@@ -1271,8 +1300,15 @@ mod tests {
         drop(tx);
         let timing = Timing::new(2.4e6);
         let mut out = Vec::new();
-        feed_readsb(&mut out, rx, &timing, false);
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        feed_readsb(&mut out, rx, &timing, false, ready_tx);
         assert_eq!(out.len(), 4 * WRITER_BACKLOG_CHUNKS);
+        // Readiness (T-223) is reported before any real chunk is forwarded; without a Beast
+        // listener there is nothing to wait for, so it is immediate.
+        assert!(
+            ready_rx.try_recv().is_ok(),
+            "the writer never reported readiness"
+        );
         // Each 2-sample chunk's last sample is the fallback stamp.
         assert_eq!(
             timing.last_sample_index.load(Ordering::Relaxed),

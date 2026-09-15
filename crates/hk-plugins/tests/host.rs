@@ -124,6 +124,59 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// T-223 (readiness): a manifest that declares `input.ready_signal` is **not** ready when its
+/// process attaches, only when the plugin sends its `ready` line — the gap a decoder needs to set
+/// itself up (the readsb wrapper's Beast connection). The host counts the records offered before
+/// that line, so a producer can prove it held back. A manifest without the declaration is ready
+/// as soon as it is attached, and nothing waits.
+#[test]
+fn readiness_waits_for_the_plugin_ready_line_and_counts_records_offered_early() {
+    const SAMPLES: usize = 256;
+    let mut m = repo_manifest();
+    m.input.ready_signal = true;
+    add_args(&mut m, &["--ready-after-ms", "700"]);
+    let sink = shared_ingest(Repository::open_in_memory().unwrap());
+    let mut inst =
+        PluginInstance::spawn(m, input(), PluginContext::default(), Arc::clone(&sink)).unwrap();
+    wait_running(&inst);
+    assert!(
+        !inst.stats().ready,
+        "an attached process is not a ready decoder: {:?}",
+        inst.stats()
+    );
+    // A producer that cannot pause (a live chain past its bounded wait) offers a record anyway.
+    push(&mut inst, 0, &tone(0, SAMPLES), SAMPLES as u64);
+    assert!(
+        inst.wait_ready(Duration::from_secs(15)),
+        "{:?} {:?}",
+        inst.stats(),
+        inst.monitor().log_tail()
+    );
+    let stats = inst.stats();
+    assert!(stats.ready);
+    assert_eq!(
+        stats.records_offered_before_ready, 1,
+        "the record offered before the ready line is counted: {stats:?}"
+    );
+    inst.shutdown();
+
+    // No declaration: ready as soon as the process is attached, and `wait_ready` returns at once.
+    let mut plain = repo_manifest();
+    assert!(!plain.input.ready_signal);
+    add_args(&mut plain, &["--every", "1"]);
+    let inst = PluginInstance::spawn(
+        plain,
+        input(),
+        PluginContext::default(),
+        shared_ingest(Repository::open_in_memory().unwrap()),
+    )
+    .unwrap();
+    wait_running(&inst);
+    assert!(inst.wait_ready(Duration::from_secs(5)));
+    assert_eq!(inst.stats().records_offered_before_ready, 0);
+    inst.shutdown();
+}
+
 /// Dummy round trip: synthetic channel samples in, messages out, Decode rows in an in-memory
 /// repository with the metadata/content split, host-stamped time and manifest identity.
 #[test]

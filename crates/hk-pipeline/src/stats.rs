@@ -238,6 +238,11 @@ counter_group!(
         plugin_waits,
         /// Plugin backpressure waits abandoned (plugin failed or made no progress for 30 s).
         plugin_wait_timeouts,
+        /// Records offered to a plugin before it reported ready (T-223; 0 for a plugin that
+        /// declares no readiness signal).
+        plugin_fed_before_ready,
+        /// Readiness waits that timed out, so the chain fed the plugin anyway (T-223).
+        plugin_ready_timeouts,
         /// FSK bits records published (payload delivered).
         bits_records,
         /// FSK bits records published header-only because the class forbids content.

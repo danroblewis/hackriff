@@ -138,6 +138,11 @@ pub enum PushOutcome {
 pub struct PluginStats {
     /// Supervisor state.
     pub state: PluginState,
+    /// The plugin can account for the input it is given: it sent a `ready` line (T-223), or its
+    /// manifest declares no `input.ready_signal` and its process is attached ([`PluginState::Running`]).
+    pub ready: bool,
+    /// Records offered before the plugin's first `ready` line (0 without a readiness signal).
+    pub records_offered_before_ready: u64,
     /// Effective output ceiling (manifest class clamped to the input class).
     pub content_ceiling: ContentClass,
     /// Records pushed.
@@ -202,6 +207,7 @@ pub struct LogTail {
 #[derive(Default)]
 struct Counters {
     offered: AtomicU64,
+    offered_before_ready: AtomicU64,
     enqueued: AtomicU64,
     dropped_full: AtomicU64,
     dropped_detached: AtomicU64,
@@ -268,6 +274,8 @@ struct Shared {
     shutdown: AtomicBool,
     /// [`PluginInstance::finish`] ended the input: a process that exits is not restarted.
     finishing: AtomicBool,
+    /// The running process sent its `ready` line (T-223). Cleared at every (re)start.
+    ready: AtomicBool,
     /// The running process's input consumer (set while attached).
     consumer: Mutex<Option<ConsumerId>>,
     counters: Counters,
@@ -318,6 +326,12 @@ impl Shared {
         let proc = lock(&self.proc);
         PluginStats {
             state: proc.state,
+            ready: if self.manifest.input.ready_signal {
+                self.ready.load(Ordering::Acquire)
+            } else {
+                proc.state == PluginState::Running
+            },
+            records_offered_before_ready: get(&c.offered_before_ready),
             content_ceiling: self.ceiling,
             records_offered: get(&c.offered),
             records_enqueued: get(&c.enqueued),
@@ -446,6 +460,7 @@ impl PluginInstance {
             wake: Condvar::new(),
             shutdown: AtomicBool::new(false),
             finishing: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
             consumer: Mutex::new(None),
             counters: Counters::default(),
             log: Mutex::new(VecDeque::new()),
@@ -520,6 +535,22 @@ impl PluginInstance {
     /// Counters and state.
     pub fn stats(&self) -> PluginStats {
         self.shared.stats()
+    }
+
+    /// Waits up to `timeout` for the plugin to report itself ready (the `ready` line, T-223), and
+    /// returns whether it is. A producer that can pause should hold its first record until this
+    /// returns `true`: a decoder is attached (`Running`) as soon as its process reads stdin, but
+    /// may still be setting up what it needs to account for the input (the readsb wrapper's
+    /// Beast connection and pre-roll), and records offered before that are decoded without their
+    /// sample time. A manifest without `input.ready_signal` is ready as soon as it is attached.
+    /// The wait also ends when the plugin fails or stops; a producer that cannot pause (a live
+    /// chain) uses a bounded timeout and feeds anyway, counting what it did.
+    pub fn wait_ready(&self, timeout: Duration) -> bool {
+        let mon = self.monitor();
+        mon.wait_for(timeout, |s| {
+            s.ready || matches!(s.state, PluginState::Failed | PluginState::Stopped)
+        });
+        mon.stats().ready
     }
 
     /// Kills the plugin, stops supervising, and returns the final counters.
@@ -660,6 +691,8 @@ fn describe(status: &ExitStatus) -> String {
 /// Runs one process (group) to completion.
 fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, args: &[String]) {
     let c = &shared.counters;
+    // A restarted process has its own start-up: it is not ready until it says so again (T-223).
+    shared.ready.store(false, Ordering::Release);
     let spawned = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -891,6 +924,17 @@ fn read_stdout(shared: &Arc<Shared>, stdout: impl Read, abandon: &AtomicBool) {
                 .fetch_add(parsed.sanitized, Ordering::Relaxed);
             let ctx = &shared.context;
             let result = match parsed.output {
+                PluginOutput::Ready => {
+                    if !shared.ready.swap(true, Ordering::AcqRel) {
+                        let offered = c.offered.load(Ordering::Relaxed);
+                        c.offered_before_ready.fetch_max(offered, Ordering::Relaxed);
+                        shared.log(format!(
+                            "host: plugin reported ready; {offered} records had been offered"
+                        ));
+                    }
+                    shared.wake.notify_all();
+                    return;
+                }
                 PluginOutput::Log(msg) => {
                     let mut msg = msg;
                     let mut end = msg.len().min(4096);

@@ -10,6 +10,13 @@
 //! progress (a lossless replay allows at least [`PLUGIN_WAIT_STALL`]), so a slow-starting plugin
 //! is never cut off before it has read its input.
 //!
+//! **Start of input (T-223).** The mirror image: a plugin whose manifest declares
+//! `input.ready_signal` is not fed until it has sent its `ready` line, so no record reaches a
+//! decoder that is still setting up (the readsb wrapper's Beast connection took 1.6 s under load,
+//! and the squitters fed meanwhile decoded without their sample time). A lossless replay waits as
+//! long as a lossless push would; a live chain waits at most the manifest's `ready_timeout`, then
+//! feeds anyway and counts it (`plugin_ready_timeouts`, `plugin_fed_before_ready`).
+//!
 //! **Backpressure (lossless replay, T-037b).** Plugin input is drop-not-block, which is right for
 //! a live source but lost decodes when an unpaced recording outran the plugin (readsb's 8 MiB
 //! queue filled on long recordings). In lossless mode the chain waits for queue room before each
@@ -154,6 +161,8 @@ fn run_inner(
     let fs = shared.fs;
     let plugin_id = m.id.clone();
     let queue_bytes = m.limits.input_queue_bytes;
+    let ready_signal = m.input.ready_signal;
+    let ready_timeout = m.limits.ready_timeout;
     let lossless = shared.gate.enabled();
     let mut cr = ChainReader::new(Arc::clone(shared), cand.first_sample, cursor);
     let first = loop {
@@ -240,6 +249,25 @@ fn run_inner(
     }
 
     let c = &shared.counters.chains;
+    // Readiness (T-223): `Running` only means the process is attached. A decoder that declares
+    // `input.ready_signal` may still be setting up what it needs to account for input (the readsb
+    // wrapper's Beast connection and pre-roll), and records offered before that lose their sample
+    // time. A lossless replay waits as long as a lossless push would — its gate cursor holds
+    // capture, so nothing is lost. A live chain cannot be held back, so it waits at most the
+    // manifest's `ready_timeout` and then feeds anyway, counted and logged.
+    if ready_signal {
+        let wait = if lossless {
+            ready_timeout.max(PLUGIN_WAIT_STALL)
+        } else {
+            ready_timeout
+        };
+        if !inst.wait_ready(wait) {
+            inc(&c.plugin_ready_timeouts);
+            eprintln!(
+                "hk-pipeline: plugin {plugin_id} was not ready within {wait:?}; feeding anyway"
+            );
+        }
+    }
     let mut bytes = Vec::new();
     let mut out_index = first.time.sample_index;
     let mut push = |inst: &mut PluginInstance,
@@ -345,6 +373,10 @@ fn run_inner(
     });
     let mut ing = ingest.lock().unwrap_or_else(PoisonError::into_inner);
     add(&c.plugin_decodes, ing.stats().decodes_stored);
+    add(
+        &c.plugin_fed_before_ready,
+        stats.records_offered_before_ready,
+    );
     add(
         &c.plugin_dropped,
         stats.records_dropped_full + stats.records_dropped_detached,
