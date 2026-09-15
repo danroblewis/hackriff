@@ -15,11 +15,12 @@ use hk_model::attention::baseline::SiteKey;
 use hk_model::attention::report::{ExportFormat, SurveyReport};
 use hk_model::ids::SiteId;
 use hk_model::{FreqRange, TimeRange, Timestamp};
+use hk_store::history::OriginFilter;
 use serde_json::Value;
 
 use crate::control::{CtlRequest, CtlResponse};
 use crate::http::ApiState;
-use crate::query::{ApiError, Params, parse_region};
+use crate::query::{ApiError, Params, parse_origin_filter, parse_region};
 
 /// One report request.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,8 +29,11 @@ pub struct ReportQuery {
     pub region: FreqRange,
     /// Span (sample clock).
     pub span: TimeRange,
-    /// Site (`unassigned` when not given).
+    /// Site (`unassigned` when not given): the baseline and occupancy-series key.
     pub site: SiteKey,
+    /// T-133: the history source/site filter (`source` and an explicitly given `site`; no filter
+    /// when neither is given).
+    pub filter: OriginFilter,
 }
 
 /// A refused or failed report: HTTP status and message (never echoes values).
@@ -72,10 +76,11 @@ fn bad(message: &str) -> ApiError {
     ApiError::new(400, message)
 }
 
-/// Parses `site`: `unassigned` (default), `mobile` or a site id.
+/// Parses `site`: `unassigned` (default), `mobile` or a site id; `unknown` (T-133: history of
+/// unknown site) keys baselines as `unassigned`.
 pub fn parse_site(v: Option<&str>) -> Result<SiteKey, ApiError> {
     match v {
-        None | Some("unassigned") => Ok(SiteKey::Unassigned),
+        None | Some("unassigned") | Some("unknown") => Ok(SiteKey::Unassigned),
         Some("mobile") => Ok(SiteKey::Mobile),
         Some(id) => SiteId::from_str(id)
             .map(SiteKey::Site)
@@ -103,6 +108,7 @@ pub(crate) fn serve(state: &ApiState, q: &Params) -> Result<Served, ApiError> {
             Timestamp::from_unix_nanos(region.t1_ns),
         ),
         site: parse_site(param(q, "site"))?,
+        filter: parse_origin_filter(q)?,
     };
     let format = parse_format(param(q, "format"))?;
     let Some(ctl) = state.reports.as_ref() else {

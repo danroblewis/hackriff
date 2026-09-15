@@ -392,6 +392,48 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         &format!("/api/history?{region}&format=csv&stat=median"),
     );
     assert_eq!(st, 400, "unknown stat refused");
+    // T-133: provenance origins and the source/site filter.
+    assert!(is_array(&prov["origins"]), "{v}");
+    assert!(prov["other_origin_frames"].is_u64(), "{v}");
+    for o in prov["origins"].as_array().unwrap() {
+        assert!(
+            o["source"].is_null() || o["source"].as_str().unwrap().len() == 16,
+            "{o}"
+        );
+        assert!(o["site"].is_null() || o["site"].is_string(), "{o}");
+        assert!(o["frames"].is_u64(), "{o}");
+    }
+    let (st, unfiltered) = get(addr, &format!("/api/history?{region}"));
+    assert_eq!(st, 200);
+    assert!(unfiltered["filter"].is_null(), "{unfiltered}");
+    let (st, f) = get(
+        addr,
+        &format!("/api/history?{region}&site=unknown&source=00000000000000ff"),
+    );
+    assert_eq!(st, 200, "{f}");
+    assert_eq!(f["filter"]["site"], "unknown", "{f}");
+    assert_eq!(f["filter"]["source"], "00000000000000ff", "{f}");
+    for field in [
+        "tiles_matched",
+        "tiles_mixed",
+        "tiles_other",
+        "cells_excluded",
+        "cells_from_children",
+    ] {
+        assert!(f["filter"][field].is_u64(), "filter.{field}: {f}");
+    }
+    let (st, f) = get(addr, &format!("/api/history?{region}&site=mobile"));
+    assert_eq!(st, 200, "{f}");
+    assert!(f["filter"]["source"].is_null(), "{f}");
+    let (st, ct, _) = get_raw(
+        addr,
+        &format!("/api/history?{region}&site=mobile&format=csv"),
+    );
+    assert_eq!((st, ct.as_str()), (200, "text/csv; charset=utf-8"));
+    for bad in ["site=nowhere", "source=12", "source=zzzzzzzzzzzzzzzz"] {
+        let (st, _) = get(addr, &format!("/api/history?{region}&{bad}"));
+        assert_eq!(st, 400, "{bad} refused");
+    }
     let (st, _) = get(addr, "/api/history?f_lo=2&f_hi=1&t0=0&t1=1");
     assert_eq!(st, 400, "inverted region refused");
     let (st, _) = get(addr, "/api/history");
@@ -2282,9 +2324,37 @@ fn report_route_serves_document_and_exports() {
     assert_eq!((st, ct.as_str()), (200, "image/png"));
     assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
 
+    // T-133: an explicit site or a source filters the report's history, and says so.
+    let (st, v) = get(addr, &format!("/api/report?{region}&site=mobile"));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["site"]["kind"], "mobile", "{v}");
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap()
+            .contains("history tiles filtered to source any and site mobile")),
+        "{v}"
+    );
+    let (st, v) = get(
+        addr,
+        &format!("/api/report?{region}&source=unknown&format=csv"),
+    );
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = get(addr, &format!("/api/report?{region}"));
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        !v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("history tiles filtered")),
+        "no filter without site/source: {v}"
+    );
     for bad in [
         format!("/api/report?{region}&format=xml"),
         format!("/api/report?{region}&site=nowhere"),
+        format!("/api/report?{region}&source=nothex"),
         "/api/report?f_lo=2&f_hi=1&t0=0&t1=1".to_owned(),
         // Over the report grid budget even at the coarsest history level.
         "/api/report?f_lo=1&f_hi=1000000000000&t0=0&t1=172800".to_owned(),

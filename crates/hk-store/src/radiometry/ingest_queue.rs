@@ -18,7 +18,7 @@ use hk_dsp::SpectrumFrame;
 use hk_dsp::floor::FloorFrame;
 
 use super::product::{FloorIngest, FloorProduct};
-use crate::history::StoreError;
+use crate::history::{FrameOrigin, StoreError};
 
 /// Counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub struct QueuedIngest {
 /// Folds frames into a `Mutex<FloorProduct>` without waiting for its readers (module docs).
 #[derive(Debug)]
 pub struct FloorIngestQueue {
-    pending: VecDeque<(SpectrumFrame, FloorFrame)>,
+    pending: VecDeque<(SpectrumFrame, FloorFrame, FrameOrigin)>,
     capacity: usize,
     stats: IngestQueueStats,
 }
@@ -68,12 +68,25 @@ impl FloorIngestQueue {
         spectrum: &SpectrumFrame,
         floor: &FloorFrame,
     ) -> QueuedIngest {
+        self.ingest_from(product, spectrum, floor, FrameOrigin::default())
+    }
+
+    /// [`Self::ingest`] with the frame's source and site (T-133), kept with a deferred frame so
+    /// it is recorded as of the time the frame was taken.
+    pub fn ingest_from(
+        &mut self,
+        product: &Mutex<FloorProduct>,
+        spectrum: &SpectrumFrame,
+        floor: &FloorFrame,
+        origin: FrameOrigin,
+    ) -> QueuedIngest {
         let mut guard = match product.try_lock() {
             Ok(g) => g,
             Err(TryLockError::Poisoned(e)) => e.into_inner(),
             Err(TryLockError::WouldBlock) => {
                 self.stats.deferred += 1;
-                self.pending.push_back((spectrum.clone(), floor.clone()));
+                self.pending
+                    .push_back((spectrum.clone(), floor.clone(), origin));
                 let mut dropped = 0;
                 while self.pending.len() > self.capacity {
                     self.pending.pop_front();
@@ -88,7 +101,7 @@ impl FloorIngestQueue {
             }
         };
         let mut folded = self.drain(&mut guard);
-        folded.push(guard.ingest(spectrum, floor));
+        folded.push(guard.ingest_from(spectrum, floor, origin));
         QueuedIngest {
             folded,
             deferred: false,
@@ -99,9 +112,9 @@ impl FloorIngestQueue {
     /// Folds every queued pair into `product` (whose lock the caller holds), in order.
     pub fn drain(&mut self, product: &mut FloorProduct) -> Vec<Result<FloorIngest, StoreError>> {
         let mut out = Vec::with_capacity(self.pending.len() + 1);
-        for (s, f) in self.pending.drain(..) {
+        for (s, f, o) in self.pending.drain(..) {
             self.stats.folded_late += 1;
-            out.push(product.ingest(&s, &f));
+            out.push(product.ingest_from(&s, &f, o));
         }
         out
     }
