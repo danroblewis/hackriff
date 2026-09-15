@@ -393,3 +393,148 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 3. **Auto-analyze.** Should the attention scheduler eventually queue analyze jobs for unknown candidates by itself, or stay user-triggered only?
 4. **Discovered templates.** Keep them as local JSON files (proposed; exportable), or plan a share/export format now?
 5. **Generic PSK.** Include the `psk_demod`/Costas block (M-14) in MAUTO, or accept that PSK stops at `demodulated`?
+
+## 11. Amendment — a candidate **is** a decode pipeline (T-220, 2026-09-15, from the user)
+
+**Status:** PROVISIONAL, planning only, no code. Source: [docs/15 §10](../15-decoder-synthesis.md), written by the user after live testing. §§1–10 stand unchanged; this amendment changes *where the search's results live* and *what an inventory entry contains*. Task ids T-230+ are proposals for the coordinator, not entries in `tasks.yaml`.
+
+**The change in one line.** An Emitter stops being "a box with one family label" and becomes **an emission plus the competing decode hypotheses for it**, each hypothesis a runnable pipeline carrying its own evidence. Confirm-by-decode promotes the winner. §5.4's attach ("append an `emitter_synthesis` row") becomes one producer among several of the same object.
+
+### 11.1 The object: `CandidatePipeline`
+
+```jsonc
+{ "id": "cp_<uuidv7>", "emitter_id": "…",
+  "recipe": { "id": "rds", "version": 3, "hash": "…", "body": null },  // body inline for a synthesized prefix never saved to disk
+  "channel": { "center_hz": 100.8e6, "bandwidth_hz": 200e3, "sample_rate_hz": 240000 },
+  "stage_reached": "S5", "verdict": "solved",              // §3.4 vocabulary, unchanged
+  "evidence": { "bits": 88.0, "holdout_bits": 74.0, "prior_bits": -1.2,
+                "stages": [ { "stage": "S2", "node": "clock", "metric": "eye_open", "raw": 0.81, "n": 4096, "bits": 11.0, "quality": 0.75 } ],
+                "check": { "kind": "crc", "model": "CRC-16/IBM", "width": 16, "distinct_valid": 5, "corrected_excluded": 2 } },
+  "status": "proposed",            // proposed | running | superseded | promoted | rejected
+  "origin": "synthesis",           // detection | track | classification | template | synthesis | user | listen
+  "output_kind": "messages",       // messages | audio | inspector | none
+  "provenance": { "engine": "hk-synth@1", "job_id": "a17", "actor": "hk-pipeline/confirm-synth@1", "t": "…" },
+  "links": { "supersedes": [], "superseded_by": null, "pipeline_instance_id": null } }
+```
+
+- **A pipeline is a recipe, always.** Every row's `recipe` satisfies `Recipe::validate` (ADR-0011 §2.2) — a full document or a valid prefix (§1.2). Recipes live on **disk**, not in SQLite (`crates/hk-pipeline/src/recipes/store.rs`: built-ins `recipes/<id>.recipe.json`, user versions `<data dir>/recipes/<id>/<version>.json`, immutable, save = latest + 1), so the row stores `(id, version, hash)` for a saved recipe and an inline `body` for a synthesized prefix that was never saved. "Start this candidate" is the existing `RecipeRuntime::start(recipe, Target::Emitter)` behind `POST /api/pipelines`, with the instance id written back to `links.pipeline_instance_id`.
+- **Relation to Emitter.** One Emitter owns 0..N pipelines. The emitter's **measured** `f`/`BW` are never overwritten by a pipeline's `channel`: a pipeline may sit offset in the skirt and still decode (the observed FM case), and that offset is the hypothesis, not a correction to the measurement. The T-191 user band is unchanged.
+- **Relation to Classification (ADR-0016).** Two ladders, one displayed answer, no second arbitration: **Classification decides the displayed family; the top-ranked pipeline decides the displayed decode/output.** A pipeline never writes a family directly. Promotion emits an ordinary `ArbRank::Decoder` (rank 1), `Stage::Decoder` row through `Repository::record_classification` (`repo/classify.rs:168`), so a promoted pipeline wins the family *through* the existing rank (`effective_rank_sql!`, `repo/classify.rs:18`), not around it. An unpromoted or partial pipeline writes nothing to Classification — failing to decode is not evidence against a modulation (ADR-0016 §8). *(Honest note: `record_classification` has no production caller yet; today's families still arrive via `insert_classification_from`.)*
+- **Relation to Decode.** `decode` gains a nullable `candidate_pipeline_id`, so every decoded record is attributable to the hypothesis that produced it and a superseded hypothesis's records stay readable.
+- **Relation to Detection/Track/Emission.** Unchanged — the immutable measurement. A pipeline is interpretation: versioned, reversible (docs/07's first rule).
+- **Zero rows is legal** and is exactly today's behaviour: an emitter with no pipeline reads as an implicit `energy` hypothesis (S0, verdict `energy`). Rows are **materialised lazily** — on analyze, on Listen, on a user start, or as soon as a second hypothesis exists — so ordinary detection does not create a row per box. (Open question 1.)
+
+### 11.2 Where pipelines come from
+
+| Origin | Trigger | Initial content |
+|---|---|---|
+| `detection` / `track` | first materialisation of an emitter that has no pipeline | bare `energy@1` channel recipe, evidence = S0 only |
+| `classification` | M3 family + `SearchSeed` (ADR-0016 §8), on demand | one template-derived prefix per plausible family, `prior_bits` set, `evidence.bits` = 0 |
+| `template` | `GET /api/recipes/match`, or a `full`/`partial` SignatureMatch with a recipe binding | the bound recipe at the signature's parameter values |
+| `synthesis` | an `/api/analyze` job (§5.4) | each `PipelineResult` of rank ≤ 3, with its full stage ladder |
+| `user` | starting a recipe against the emitter, or hand-authoring one in the workbench | `status: running`; evidence filled from the live status ladder (§2.1 mirror) |
+| `listen` | the Listen action (T-221) | an audio-sink pipeline, `output_kind: audio` |
+
+Priors never create evidence: a `classification`- or `template`-origin row starts at zero bits and ranks last until it is run.
+
+### 11.3 Ranking, supersession, reversibility
+
+- **Rank key:** `(status_rank, stage_reached, holdout_bits, evidence_bits, −created)`, `status_rank` = promoted 0 > running 1 > proposed 2 > superseded 3 > rejected 4. **`prior_bits` is reported and never ranks** — §1.3's rule, carried into the inventory.
+- **Same-hypothesis test** (only same-hypothesis rows may supersede): same emitter, channel overlap ≥ 0.6 of the narrower bandwidth, and the same structural identity (recipe id, or skeleton + slot `choices`). Two *different* structures on one band (a WFM hypothesis and an FSK hypothesis) coexist as competitors and never supersede; they resolve only by promotion.
+- **Supersession margin:** A supersedes B when both are same-hypothesis and A's `holdout_bits` exceeds B's by ≥ 4 bits (16:1). Inside the margin both stay visible as ranked alternatives — "three competing WFM pipelines for one station" is a legal displayed state, not a bug.
+- **Reversible by construction.** `status` is a cached projection of an append-only `candidate_pipeline_event` log (`created`, `evidence`, `superseded`, `revived`, `promoted`, `unpromoted`, `rejected`, `user_*`), mirroring how `emitter_lifecycle` backs `emitter.lifecycle_state` (`repo/lifecycle.rs:172`). New evidence **revives** a superseded row rather than resurrecting deleted state. Promotion marks losers `superseded`, never `rejected`, so revoking a promotion restores the field. Nothing is deleted; only a user deletes.
+- **User authority** is rank 0 as in ADR-0016: a user promote/reject wins, is audited, and is not overridden by evidence — the contradicting evidence is still recorded and shown.
+
+### 11.4 Overlap resolution (the T-219 rules) in this model
+
+Three problems, one mechanism — **competition between hypotheses over a band** — differing only in the kind of evidence that binds them:
+
+1. **Duplicate boxes for one emission** (today's FM case: several offset candidates, each decoding adequately). End state: **one Emitter, N competing pipelines at different centres**, strongest first. `same_emission_score` / `same_emission_partners` / `merge_same_emission_rows` (`repo/cluster.rs:440/497/544`) already express half of this; what is missing is somewhere for the losers to live — the pipeline row.
+2. **A Confirmed signal suppresses overlapping candidates.** A new candidate contained in a Confirmed emitter's band with no distinguishing evidence is not a new emitter: it attaches to that emitter as another hypothesis (or, before the object exists, is suppressed with a recorded reason and a link). Suppression is append-only and reversible; raw detections, tracks and history are always kept.
+3. **Receiver artifacts are same-source duplicates** (user, 2026-09-15). A detection can be an artifact of another signal at a *deterministic, predictable* frequency: an **image** at `2·f_LO − f`, a **harmonic** at `n·f`, or **intermodulation** at `a·f1 ± b·f2` from strong confirmed emitters. Such a candidate is attributed to its source (`artifact_of {emitter_id, kind: image|harmonic|intermod, order, predicted_hz, error_hz}`) rather than treated as independent, and is hidden from the top-level inventory while its rows are kept. This is a *geometric* test — frequency arithmetic, relative level, co-onset/co-offset with the source — so it needs no decode and reuses the existing SpurMask / `image_candidate` / `suspect_imd` machinery (docs/07 §2.9).
+   - **Distinct from multipath** (T-222): multipath duplicates carry the **same decoded content**, a content-correlation test that requires a decode. Both land in the same "same-source duplicate" branch of the model, tagged `evidence_kind: geometric` versus `content`.
+
+**Guard case — two genuinely distinct adjacent stations must not merge.** Any *distinguishing* evidence blocks a merge, in this order: two different decoded identities (e.g. different RDS PI) always block — this is already `same_emission_score`'s "not both identified" gate; a `Fingerprint::compare` distance beyond `Tolerances` blocks (`crates/hk-model/src/cluster.rs:199/498`); non-overlapping −3 dB extents with centres separated by more than the summed measurement uncertainty blocks. Overlap alone is never sufficient to merge — only sufficient to make two rows *compete*.
+
+**What T-219 can build now** (no `candidate_pipeline` table, no evidence bits — `Block::evidence` is MAUTO work):
+- Confirmed-suppresses-overlapping, as an append-only suppression/link row with a reason, reversible, raw data kept (`emitter_link` is the existing precedent).
+- The extended overlap + guard rules on `same_emission_score` / `fingerprint_candidates` (`repo/cluster.rs:440/731`).
+- `duplicate_of` and `artifact_of` links, with the geometric image/harmonic/intermod predictor over confirmed strong emitters, as a **flag only** — never a delete.
+- A **duplicate group** ranked by a provisional proxy (SNR × duty × trust, explicitly *not* the bits ladder), so the strongest box is the one shown.
+
+**What needs the full model:** evidence in bits, promotion by decode, competing pipelines as first-class displayed alternatives, content-level multipath (T-222).
+
+**The constraint on T-219 so it doesn't fight this:** record grouping as **append-only rows keyed by emitter, carrying reason and score** — never by mutating or deleting the losing rows. A T-219 duplicate group then becomes, unchanged, the set of competing pipelines on one emitter (T-235).
+
+### 11.5 Confirm-by-decode via promotion
+
+- **Promotion is the lifecycle event.** `status → promoted` triggers the §5.5 `ConfirmPolicy.synthesized` check; if it passes and the emitter is a `candidate`, `change_emitter_lifecycle` (`repo/lifecycle.rs:172`) confirms it with a backend-rendered reason naming the pipeline. Thresholds unchanged: **hold-out evidence ≥ 64 bits after look-elsewhere, ≥ 3 distinct valid frames, check width ≥ 16** (or BCH ≥ 10 parity bits over ≥ 8 codewords), plus front-end trust.
+- **Corrected frames are never CRC-valid evidence (T-210).** An invariant on the evidence object: `check.distinct_valid` counts only frames valid **without** FEC correction. Corrected groups are counted separately as `corrected_excluded` for display and contribute **0 bits**. A pipeline whose only "valid" frames were corrected can never reach `solved`.
+- **One promoted row per `output_kind` per emitter.** A promoted `messages` pipeline and a promoted `audio` pipeline coexist (decode and Listen at once); promoting a second `messages` pipeline supersedes the first.
+- **No rule demotes** (docs/07 §2.11; `change_emitter_lifecycle` forbids a return to `candidate`). Unpromoting a pipeline leaves the emitter confirmed; only a user deletes an entry.
+- Single-burst behaviour is unchanged from §5.5: `verdict: solved` attaches and does not auto-confirm (§10 open question 1 still stands).
+
+### 11.6 Migration sketch
+
+- **Migration `0008_candidate_pipeline.sql`** (0007 is M3's classification migration; `MIGRATIONS` in `repo/mod.rs:117`), all additive:
+  - `candidate_pipeline` — the §11.1 row; `recipe_id`/`recipe_version`/`recipe_hash` plus nullable inline `recipe_body`; `status` as a cached projection.
+  - `candidate_pipeline_event` — append-only with a no-update trigger (the `emitter_lifecycle` pattern); the source of truth for `status` and reversibility.
+  - `candidate_pipeline_evidence` — append-only evidence snapshots (stage ladder as JSON), so re-evaluation appends rather than overwrites.
+  - `decode.candidate_pipeline_id` — nullable column, attribution only.
+  - The T-219 link/suppression rows (landed earlier) gain a nullable `candidate_pipeline_id` so they fold into the object.
+- **Existing rows are untouched and not backfilled.** An emitter with no `candidate_pipeline` row reads exactly as today. `emitter_classification` is unchanged — its append-only trigger, `effective_rank_sql!`, `FAMILY_ORDER` and every inventory reader keep working, because promotion writes an ordinary rank-1 decoder row rather than a new kind of family evidence. `emitter_synthesis` (§5.4) stays the job-level audit row and gains a pointer to the pipelines its job created.
+- **Staging, so nothing breaks in M0/M1/M2 acceptance:**
+  1. **T-219 (M3, now):** links, suppression, duplicate groups and artifact flags only; blind acceptance must not regress, and the adjacent-station guard is a new test.
+  2. **MAUTO wave 0 (T-230):** tables and read path land **inert** — no writer, no behaviour change, nothing reads them for a decision.
+  3. **T-232/T-233:** synthesis attaches pipelines; promotion drives `ConfirmPolicy`.
+  4. **T-235:** T-219's groups migrate onto the object (append-only row migration, no semantics change).
+  5. **T-221/T-236:** Listen becomes an audio-output pipeline. Listen is today its own chain type (`hk-pipeline/src/chains/listen.rs`, `ChainKind::Listen`) served through the generic on-demand opener (`OpenerRegistry::with("listen", …)`, `/ws/open/listen`), with **no** listen-specific hk-api route — so the opener name keeps working unchanged while the implementation moves onto a recipe.
+  6. **T-237:** the UI shows competitors and evidence ladders.
+- **Reversal cost** is low at every step: 2–4 are additive tables plus one nullable column; dropping the feature means ignoring the rows.
+
+### 11.7 docs/07 delta (sketch, applied by the implementing task)
+
+- **§2.11 Emitter:** an Emitter owns 0..N **candidate decode pipelines** (§2.28), ranked by evidence; its measured `f`/`BW` are never overwritten by a pipeline's channel; confirm-by-decode promotes a pipeline and confirms the emitter. Add the `duplicate_of` / `artifact_of` / `suppressed_by` links from §11.4.
+- **New §2.28 CandidatePipeline:** the §11.1 object — identity, append-only event lifecycle, ranking and supersession, relation to Recipe/Classification/Decode, retention (kept with the emitter; superseded rows summarised, never deleted), and tests.
+- **§2.15 Decode:** `candidate_pipeline_id`, and the T-210 rule that corrected frames are not CRC-valid evidence.
+- **§2.21 Classification:** one clarifying sentence — pipelines carry evidence, Classification carries family; a promoted pipeline writes a rank-1 `decoder` row and wins the family through the existing ladder, not around it.
+
+### 11.8 API deltas (listed, not implemented)
+
+| Method | Path | Delta |
+|---|---|---|
+| GET | `/api/inventory` | row gains `pipelines {count, top: {id, recipe, verdict, evidence_bits, status, output_kind}}` beside `classification` (`hk-api/src/query.rs:772`); `duplicate_of` / `artifact_of` / `suppressed_by` when applicable; filters `?duplicates=hidden\|all`, `?artifacts=hidden\|all` |
+| GET | `/api/inventory/{id}/pipelines` | ranked competing hypotheses with evidence ladders and supersession history |
+| POST | `/api/inventory/{id}/pipelines` | create a hypothesis from a recipe or template (user), audited |
+| POST | `/api/inventory/{id}/pipelines/{pid}/promote` \| `/reject` \| `/start` | promotion drives §11.5; `start` is the existing `POST /api/pipelines` with a back-link; all audited |
+| GET | `/api/inventory/{id}/decode` | gains `candidate_pipeline_id` |
+| GET | `/api/analyze/{id}` | each result gains `candidate_pipeline_id`; attach creates the rows |
+| — | stream `candidates` | ADR-0004 `messages`, metadata only: one record per change of top-ranked pipeline, status or suppression |
+
+`docs/api.md` and `crates/hk-cli/tests/api_contract.rs` move together (T-079 rule).
+
+### 11.9 Task graph (proposed ids T-230+; the coordinator applies them)
+
+| Id | Task | Deps | Model | Group |
+|---|---|---|---|---|
+| T-230 | `hk-model` candidate-pipeline types + migration 0008 + repo (append-only events, rank function), landed **inert** | T-219, this amendment reviewed | Opus, core_interface | CP-0 |
+| T-231 | Ranking + supersession engine: same-hypothesis test, 4-bit margin, revive-on-new-evidence; property tests for reversibility | T-230 | Opus | CP-R |
+| T-232 | Synthesis attach writes pipelines (replaces §5.4 attach-only); `decode.candidate_pipeline_id` | T-230, M-8, M-9 | Opus, core_interface | CP-W |
+| T-233 | Promotion → `ConfirmPolicy` wiring: hold-out rule, corrected-group exclusion (T-210), one promoted row per `output_kind` | T-232 | Opus, core_interface | CP-W |
+| T-234 | Routes (§11.8) + `docs/api.md` + contract tests | T-230 | Opus, core_interface | API |
+| T-235 | Fold T-219's duplicate groups, suppressions and artifact links onto the pipeline object | T-219, T-231 | Sonnet (Opus review) | CP-R |
+| T-236 | Listen as an audio-output pipeline, per T-221's plan, on this object | T-221, T-230, T-234 | Opus | CP-A |
+| T-237 | MUI: competing-pipeline list, evidence ladder, promote/reject, duplicate-group collapse, artifact badge | T-234 | Sonnet | MUI-X |
+| T-238 | Blind acceptance: one station → one emitter with N ranked pipelines; the adjacent-station guard case; artifact attribution; promotion confirms | T-233, T-235 | Opus | CP-E |
+
+**Waves** (≤ 4 Rust builders): (1) T-230; (2) T-231, T-232, T-234; (3) T-233, T-235, T-236; (4) T-237, T-238. No Fable tasks.
+
+### 11.10 Open questions (for the user)
+
+1. **Lazy or eager rows.** Materialise a bare `energy` pipeline only on demand (proposed), or give every emitter one from creation so the inventory is uniform, at the cost of a row per box?
+2. **Two promoted pipelines.** Is "one promoted decode plus one promoted audio pipeline per emitter" right, or should exactly one pipeline ever be promoted?
+3. **Artifact visibility.** Should image/harmonic/intermod-attributed candidates be hidden by default (proposed), or shown greyed under their source so you can see the front end misbehaving?
+4. **Supersession margin.** Is 4 bits (16:1) the right bar for one hypothesis to hide another, or should competitors always stay visible until promotion?
+5. **User versus decode.** A user-promoted pipeline versus a CRC-valid decode from a different pipeline — user wins (proposed, matching ADR-0016 rank 0), or the decode wins and the contradiction is flagged? Same call as ADR-0016 open question 3.
+
+*Unverified in this amendment: the 0.6 channel-overlap fraction, the 4-bit supersession margin, the SNR × duty × trust proxy for T-219, and the artifact-detection tolerances — all first guesses, to be measured against the real FM capture and the adjacent-station guard case.*
