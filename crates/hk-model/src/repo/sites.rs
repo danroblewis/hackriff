@@ -9,7 +9,7 @@
 use rusqlite::{OptionalExtension, params};
 
 use super::{RepoError, Repository, blob, bodies, body_by_id, enum_text};
-use crate::attention::baseline::SiteRecord;
+use crate::attention::baseline::{SiteAssignment, SiteRecord};
 use crate::attention::score::ScoreWeights;
 use crate::ids::SiteId;
 use crate::time::Timestamp;
@@ -92,6 +92,38 @@ impl Repository {
             "SELECT body FROM site ORDER BY first_seen, site_id LIMIT ?1",
             [SITES_MAX as i64],
         )
+    }
+
+    /// T-136: stores the site assignment in force (`None` clears it; migration 0004).
+    pub fn set_site_assignment(&self, a: Option<&SiteAssignment>) -> Result<(), RepoError> {
+        match a {
+            None => {
+                self.conn
+                    .prepare_cached("DELETE FROM site_assignment")?
+                    .execute([])?;
+            }
+            Some(a) => {
+                let body = serde_json::to_string(a)?;
+                self.conn
+                    .prepare_cached(
+                        "INSERT INTO site_assignment (singleton, site_id, body) VALUES (1, ?1, ?2) \
+                         ON CONFLICT (singleton) DO UPDATE SET site_id = excluded.site_id, \
+                         body = excluded.body",
+                    )?
+                    .execute(params![blob(a.site), body])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// T-136: the stored site assignment, if any.
+    pub fn site_assignment(&self) -> Result<Option<SiteAssignment>, RepoError> {
+        let body: Option<String> = self
+            .conn
+            .prepare_cached("SELECT body FROM site_assignment WHERE singleton = 1")?
+            .query_row([], |r| r.get(0))
+            .optional()?;
+        Ok(body.map(|b| serde_json::from_str(&b)).transpose()?)
     }
 
     /// The weights in force: the newest stored version, else the version-1 defaults.
@@ -214,6 +246,21 @@ mod tests {
             r.site(SiteId::new()),
             Err(RepoError::NotFound { .. })
         ));
+        // T-136: the assignment in force round-trips, is replaced, and clears.
+        use crate::attention::baseline::SiteAssignment;
+        assert_eq!(r.site_assignment().unwrap(), None);
+        let a = SiteAssignment {
+            site: home.id,
+            set_by: Some(SiteSource::User),
+            pinned: true,
+            last_in_site: Some(Timestamp::from_unix_nanos(10)),
+        };
+        r.set_site_assignment(Some(&a)).unwrap();
+        let b = SiteAssignment { pinned: false, ..a };
+        r.set_site_assignment(Some(&b)).unwrap();
+        assert_eq!(r.site_assignment().unwrap(), Some(b));
+        r.set_site_assignment(None).unwrap();
+        assert_eq!(r.site_assignment().unwrap(), None);
     }
 
     #[test]

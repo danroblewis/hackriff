@@ -166,6 +166,7 @@ impl HistoryTiles {
             grid.cells.extend_from_slice(&p.cells);
             grid.provenance.merge(&p.provenance);
             grid.tiles_read += p.tiles_read;
+            // Tile counts are per chunk read (`FilterSummary::merge`); cell counts are exact.
             match (&mut grid.filter, &p.filter) {
                 (Some(a), Some(b)) => a.merge(b),
                 (None, Some(b)) => grid.filter = Some(*b),
@@ -447,7 +448,8 @@ pub fn filter_warning(f: &FilterSummary) -> String {
     format!(
         "history tiles filtered to source {} and site {}: {} observed cells folded together with \
          other sources or sites are shown as unobserved, not quiet ({} cells kept from finer tiles; \
-         tiles {} matched, {} mixed, {} other); the observation log, inventory emitters and \
+         tile reads per history chunk {} matched, {} mixed, {} other); the observation log, \
+         inventory emitters and \
          anomalies are not keyed by source or site",
         field_text(f.filter.source, |k| format!("{k:016x}")),
         field_text(f.filter.site, site),

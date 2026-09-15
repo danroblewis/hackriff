@@ -50,6 +50,7 @@ use hk_context::occupancy::engine::{
     SubjectContext, VisitSample,
 };
 use hk_model::attention::ATTENTION_SCHEMA_VERSION;
+use hk_model::attention::baseline::SiteKey;
 use hk_model::attention::observation::{ObservationRecord, Tier};
 use hk_model::attention::occupancy::{Channel, ChannelKey, OccupancyStat, OccupancySubject};
 use hk_model::frames::PowerUnit;
@@ -61,6 +62,7 @@ use hk_store::occupancy::{
 use hk_store::{FloorProduct, RegionHistory};
 use serde::Serialize;
 
+use crate::attention::{AttentionService, FirstSighting};
 use crate::stats::Counters;
 
 const HOUR_NS: i64 = 3_600_000_000_000;
@@ -258,6 +260,21 @@ fn pick<'a>(
         (None, Some(l)) => Some(l),
         (None, None) => None,
     }
+}
+
+/// T-131/T-136: stamps `rows` with the site assigned at the close `t` and returns it with its
+/// geometry. The occupancy close is the only live caller that advances (and may persist) the site
+/// state machine; history frames, which run ahead of it, only peek ([`crate::history::frame_site`]).
+fn stamp_site(
+    a: &AttentionService,
+    rows: &mut [OccupancyStat],
+    t: Timestamp,
+) -> (SiteKey, Option<hk_context::geo::Site>) {
+    let (site, geo) = a.site_at(t);
+    for r in rows {
+        r.site = site;
+    }
+    (site, geo)
 }
 
 /// T-132: each channel's dominant gain-state key over its own visits starting in `iv` (gain tables
@@ -728,16 +745,20 @@ impl OccupancyService {
         })
     }
 
-    /// T-131: steps the alarm service with one close's folds.
+    /// T-131: steps the alarm service with one close's folds and (T-136) its new-emitter inputs
+    /// at `site`.
+    #[allow(clippy::too_many_arguments)]
     fn feed_alarms(
         &self,
         folds: &[crate::attention::IntervalFold],
+        new_emitters: &[crate::attention::NewEmitterInput],
+        site: SiteKey,
         rows: &[OccupancyStat],
         iv: TimeRange,
         f_cell: f64,
         geo: Option<hk_context::Site>,
     ) {
-        if folds.is_empty() {
+        if folds.is_empty() && new_emitters.is_empty() {
             return;
         }
         let guard = self.alarms.lock().unwrap_or_else(PoisonError::into_inner);
@@ -764,23 +785,29 @@ impl OccupancyService {
         });
         let service = Arc::clone(&slot.service);
         drop(guard);
-        service.observe_interval(folds, &steps);
+        service.observe_interval_with_new_emitters(folds, site, iv.end, new_emitters, &steps);
     }
 
-    /// Inventory emitters first seen inside `iv` within the observed bands of `rows`.
-    fn first_sightings(&self, inner: &mut Inner, iv: TimeRange, rows: &[OccupancyStat]) -> u64 {
+    /// Inventory emitters first seen inside `iv` within the observed bands of `rows`, each counted
+    /// once, with their measured extents (T-136: for the new-emitter alarms), lowest first.
+    fn first_sightings(
+        &self,
+        inner: &mut Inner,
+        iv: TimeRange,
+        rows: &[OccupancyStat],
+    ) -> Vec<FirstSighting> {
         if inner.repo.is_none() {
             inner.repo = Repository::open(&self.db_path).ok();
         }
         let Some(repo) = inner.repo.as_ref() else {
             inner.stats.errors += 1;
-            return 0;
+            return Vec::new();
         };
         // The window reaches back one interval: an emitter first seen in the previous interval
         // but written to the inventory after its close counts here, once (the previous window's
         // ids are remembered).
         let window = TimeRange::new(iv.start.saturating_add_nanos(-iv.duration_ns()), iv.end);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::HashMap::new();
         for r in rows {
             let OccupancySubject::Band { freq } = r.subject else {
                 continue;
@@ -789,13 +816,22 @@ impl OccupancyService {
                 Ok(es) => seen.extend(
                     es.iter()
                         .filter(|e| e.first_seen >= window.start && e.first_seen < window.end)
-                        .map(|e| e.id),
+                        .map(|e| (e.id, e.freq())),
                 ),
                 Err(_) => inner.stats.errors += 1,
             }
         }
-        let new = seen.difference(&inner.sighted).count() as u64;
-        inner.sighted = seen;
+        let mut new: Vec<FirstSighting> = seen
+            .iter()
+            .filter(|(id, _)| !inner.sighted.contains(*id))
+            .map(|(id, freq)| FirstSighting {
+                emitter: *id,
+                freq: *freq,
+                t: iv.end,
+            })
+            .collect();
+        new.sort_by(|a, b| a.freq.lo_hz.total_cmp(&b.freq.lo_hz));
+        inner.sighted = seen.into_keys().collect();
         new
     }
 
@@ -949,17 +985,18 @@ impl OccupancyService {
         // T-131: rows carry the site assigned at the close (a pinned or fixed site accrues
         // baselines; unassigned/mobile never do), and the folds step the novelty alarms with the
         // history's provenance steps around the interval.
+        // T-136: the close is the only live path that advances site state (history frames peek),
+        // and its first sightings feed the new-emitter alarms as well as the rate.
         if let Some(a) = self.attention() {
-            let (site, geo) = a.site_at(iv.end);
-            for r in &mut rows {
-                r.site = site;
-            }
+            let (site, geo) = stamp_site(&a, &mut rows, iv.end);
             let own: Vec<OccupancyStat> =
                 rows.iter().filter(|r| r.interval == iv).cloned().collect();
-            let k = self.first_sightings(inner, iv, &own);
+            let sightings = self.first_sightings(inner, iv, &own);
+            a.note_first_sightings(site, &sightings);
             let gains = channel_gain_keys(&inner.series, iv);
-            let folds = a.ingest_interval(&own, k, iv.end, gains);
-            self.feed_alarms(&folds, &own, iv, f_cell, geo);
+            let folds = a.ingest_interval(&own, sightings.len() as u64, iv.end, gains);
+            let new_emitters = a.new_emitter_inputs(site, iv.end);
+            self.feed_alarms(&folds, &new_emitters, site, &own, iv, f_cell, geo);
         }
         match inner.store.as_mut().map(|s| s.append(&rows)) {
             Some(Ok(n)) => inner.stats.rows_written += n as u64,
@@ -1116,6 +1153,53 @@ mod tests {
             keys.gain_key(&OccupancySubject::Channel { key: band_b })
         );
         assert_eq!(keys.gain_key(&OccupancySubject::Channel { key: key(9) }), 0);
+    }
+
+    /// T-136 (T-133 review): history frames run ahead of the occupancy close. Past a fixed site's
+    /// no-fix hold they only peek, so the close of the earlier interval still stamps its rows with
+    /// the fixed site (not `unassigned`); only the close advances (and persists) site state.
+    #[test]
+    fn occupancy_close_behind_history_frames_keeps_the_fixed_site() {
+        let a = AttentionService::in_memory().unwrap();
+        let t = |s: f64| Timestamp::from_unix_nanos(1_800_000_000_000_000_000 + (s * 1e9) as i64);
+        let fix = |s: f64| hk_context::occupancy::site::Fix {
+            t: t(s),
+            lat_deg: 51.5,
+            lon_deg: 0.0,
+            speed_m_s: Some(0.0),
+        };
+        a.on_fix(fix(0.0));
+        let key = a.on_fix(fix(70.0));
+        assert!(matches!(key, SiteKey::Site(_)), "a still fix founds a site");
+        // History frames up to 330 s past the 600 s hold after the last in-site fix (70 s).
+        assert_eq!(crate::history::frame_site(Some(&a), t(400.0)), key);
+        for s in [700.0, 900.0, 1000.0] {
+            assert_eq!(
+                crate::history::frame_site(Some(&a), t(s)),
+                SiteKey::Unassigned
+            );
+        }
+        assert_eq!(
+            crate::history::frame_site(None, t(400.0)),
+            SiteKey::Unassigned
+        );
+        // The close of the interval ending at 600 s, behind those frames.
+        let band = OccupancySubject::Band {
+            freq: FreqRange::new(431e6, 433e6),
+        };
+        let mut rows = vec![crate::attention::tests::series_row(
+            0,
+            SiteKey::Unassigned,
+            band,
+            0.1,
+        )];
+        let (site, _) = stamp_site(&a, &mut rows, t(600.0));
+        assert_eq!(site, key, "the close behind the frames sees the fixed site");
+        assert!(rows.iter().all(|r| r.site == key));
+        assert_eq!(a.current_site_json()["site"]["kind"], "site");
+        // The next close past the hold is what expires it.
+        assert_eq!(stamp_site(&a, &mut rows, t(900.0)).0, SiteKey::Unassigned);
+        assert_eq!(a.current_site_json()["site"]["kind"], "unassigned");
     }
 
     #[test]

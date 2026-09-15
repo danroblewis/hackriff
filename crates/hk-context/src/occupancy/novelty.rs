@@ -167,11 +167,20 @@ impl FirstSightingRate {
     /// Novelty of the window's sightings; `None` while immature.
     pub fn novelty(&self) -> Option<f64> {
         let rate = self.rate()?;
-        let (k, s) = self
-            .window
-            .iter()
-            .fold((0, 0.0), |(k, s), (_, dk, ds)| (k + dk, s + ds));
+        let (k, s) = self.window_totals();
         Some(new_emitter_novelty(k, rate, s))
+    }
+
+    /// First sightings and observed seconds in the sliding window.
+    pub fn window_totals(&self) -> (u64, f64) {
+        self.window
+            .iter()
+            .fold((0, 0.0), |(k, s), (_, dk, ds)| (k + dk, s + ds))
+    }
+
+    /// Observed seconds accrued to the baseline rate (mature at `MATURITY_MIN_OBSERVED_S`).
+    pub fn baseline_observed_s(&self) -> f64 {
+        self.baseline_observed_s
     }
 }
 
