@@ -832,7 +832,8 @@ fn flag_status_conflicts(ranked: &mut [Explanation], current: Option<&KnownStatu
 }
 
 /// `model_version` prefix of decoder evidence.
-pub const DECODER_EVIDENCE_PREFIX: &str = "decoder:";
+/// Shared with hk-model's arbitration rank, which ranks these rows as decoder evidence (T-211).
+pub const DECODER_EVIDENCE_PREFIX: &str = hk_model::classify::DECODER_RULES_PREFIX;
 
 /// The Classification recording that decoder `decoder_id` (a built-in decoder id or plugin
 /// manifest id) produced a valid decode at `t` with `confidence` (0–1): family = the id (lower

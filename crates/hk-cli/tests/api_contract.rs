@@ -7,7 +7,8 @@
 //! seconds, not instant).
 //!
 //! Coverage: `/api/streams`, `/api/history`, `/api/floor`, `/api/inventory` (including the T-078
-//! `state`/`lifecycle`/`recurrence` fields), `/api/inventory/{id}[/promote]` (T-078),
+//! `state`/`lifecycle`/`recurrence` fields), `/api/inventory/{id}[/promote\|/decode]` (T-078,
+//! T-159),
 //! `/api/analysis/strongest` (T-079), `/api/status`, `/api/control/*`, `/api/bookmarks[/<id>]`,
 //! `/api/selections[/<id>[/links]]`, `/api/outputs[...]`, `/ws/<id>` (spectrum header),
 //! `/ws/open/listen` (audio header + PCM data records on the 101.3 MHz station), and auth/CORS
@@ -554,6 +555,9 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         // T-158: measurement fields (present, possibly null).
         "snr_db",
         "peak_dbfs",
+        // T-211: arbitrated classification and a differing latest row (present, possibly null).
+        "classification",
+        "latest_classification",
     ] {
         assert!(
             row.get(field).is_some(),
@@ -561,6 +565,43 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         );
     }
     assert!(row["id"].is_string(), "{row}");
+    // T-211 (ADR-0016 §2): classification objects carry the M3 fields, nullable except the
+    // (stored or derived) stage and arbitration rank; the classification agrees with `family`.
+    for key in ["classification", "latest_classification"] {
+        let c = &row[key];
+        if c.is_null() {
+            continue;
+        }
+        for field in [
+            "family",
+            "confidence",
+            "open_set_score",
+            "model_version",
+            "t_s",
+            "taxonomy",
+            "stage",
+            "arb_rank",
+            "coarse",
+            "class",
+            "top",
+            "entropy_norm",
+            "flags",
+        ] {
+            assert!(c.get(field).is_some(), "{key} missing {field}: {row}");
+        }
+        assert!(c["stage"].is_string(), "{key}.stage: {row}");
+        assert!(
+            c["arb_rank"].as_u64().is_some_and(|r| r <= 4),
+            "{key}.arb_rank: {row}"
+        );
+        assert!(
+            c["taxonomy"].is_null() || c["taxonomy"].is_string(),
+            "{key}.taxonomy: {row}"
+        );
+    }
+    if !row["classification"].is_null() {
+        assert_eq!(row["classification"]["family"], row["family"], "{row}");
+    }
     // T-158: both are backend-derived numbers once a detection is linked, and null together
     // until then (never computed client-side, so the contract only pins their shape and pairing).
     assert!(
@@ -681,7 +722,13 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (st, row) = get(addr, &format!("/api/inventory/{id}"));
     assert_eq!(st, 200, "{row}");
     assert_eq!(row["id"], json!(id));
-    for field in ["state", "lifecycle", "recurrence"] {
+    for field in [
+        "state",
+        "lifecycle",
+        "recurrence",
+        "classification",
+        "latest_classification",
+    ] {
         assert!(
             row.get(field).is_some(),
             "inventory entry missing {field}: {row}"
@@ -689,6 +736,33 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     }
     let (st, v) = get(addr, "/api/inventory/not-a-uuid");
     assert_eq!(st, 404, "{v}");
+
+    // T-159: the emitter's latest decode fields. `hk serve`'s composed pipeline runs its
+    // built-in RDS decoder on every WFM station automatically (no recipe started here), so this
+    // station's row is often already populated by the time it is confirmed above; shape only
+    // (`decoder`/`frame_model`/`at`/`fields`/`crc`/`source_session`), since RDS lock timing on a
+    // fixture is not deterministic. Emptiness and per-frame-model grouping are covered against a
+    // controlled seeded repository in `crates/hk-api/tests/decode_api.rs`.
+    let (st, v) = get(addr, &format!("/api/inventory/{id}/decode"));
+    assert_eq!(st, 200, "{v}");
+    let decodes = v["decodes"].as_array().unwrap_or_else(|| panic!("{v}"));
+    for row in decodes {
+        assert!(row["decoder"].is_string(), "{row}");
+        assert!(row["frame_model"].is_string(), "{row}");
+        assert!(row["at"].is_f64(), "{row}");
+        assert!(row["fields"].is_object(), "{row}");
+        assert!(row["crc"]["valid"].is_boolean(), "{row}");
+        assert!(
+            row["recipe_id"].is_null() || row["recipe_id"].is_string(),
+            "{row}"
+        );
+        assert!(
+            row["source_session"].is_null() || row["source_session"].is_string(),
+            "{row}"
+        );
+    }
+    let (st, v) = get(addr, &format!("/api/inventory/{}/decode", EmitterId::new()));
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
 
     // Promote: candidate -> confirmed (idempotent: a second promote reports changed: false).
     let (st, v) = post(addr, &format!("/api/inventory/{id}/promote"), "{}");

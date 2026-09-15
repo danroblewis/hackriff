@@ -163,7 +163,7 @@ fn choose_level(
     }
 }
 
-fn ts_s(t: Timestamp) -> f64 {
+pub(crate) fn ts_s(t: Timestamp) -> f64 {
     t.as_unix_nanos() as f64 / 1e9
 }
 
@@ -741,6 +741,34 @@ pub(crate) fn user_band_json(b: &hk_model::UserBand, withheld: bool) -> Value {
     })
 }
 
+/// T-211 inventory `classification` object: the legacy fields, then the ADR-0016 fields. `stage`
+/// and `arb_rank` are stored, or derived for a pre-M3 row; `taxonomy`, `coarse`, `class`, `top`
+/// (≤ 5 posterior labels, `unknown` included), `entropy_norm` and `flags` are `null` on a pre-M3
+/// row. Never the input link, features or reasons (the per-emitter classification route, T-199).
+fn classification_json(r: &hk_model::RecordedClassification) -> Value {
+    let c = &r.classification;
+    let d = r.detail.as_ref();
+    json!({
+        "family": c.family,
+        "confidence": c.confidence,
+        "open_set_score": c.open_set_score,
+        "model_version": c.model_version,
+        "t_s": ts_s(c.t),
+        "taxonomy": r.taxonomy.as_ref().map(ToString::to_string),
+        "stage": r.stage,
+        "arb_rank": r.arb_rank,
+        "coarse": d.map(|d| d.coarse),
+        "class": d.and_then(|d| d.class.as_ref()).map(|k| json!({
+            "label": k.label,
+            "p": k.p,
+            "stage": k.stage,
+        })),
+        "top": d.map(|d| d.top(5)),
+        "entropy_norm": d.map(|d| d.entropy_norm),
+        "flags": d.map(|d| &d.flags),
+    })
+}
+
 pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result<Value, RepoError> {
     {
         let e = &entry.emitter;
@@ -811,6 +839,11 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
                 "duty_cycle": a.duty_cycle,
             })).collect::<Vec<_>>(),
         });
+        let current = repo.current_classification(e.id)?;
+        let latest_classification = match (&current, repo.latest_classification(e.id)?) {
+            (Some(c), Some(l)) if *c != l => Some(classification_json(&l)),
+            _ => None,
+        };
         let freq = e.freq();
         let mut row = json!({
             "state": entry.lifecycle,
@@ -832,13 +865,10 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             "tags": e.tags,
             "tags_withheld": entry.tags_withheld,
             "family": entry.family,
-            "classification": e.current_classification().map(|c| json!({
-                "family": c.family,
-                "confidence": c.confidence,
-                "open_set_score": c.open_set_score,
-                "model_version": c.model_version,
-                "t_s": ts_s(c.t),
-            })),
+            // T-211 (ADR-0016 §2): the classification that sets `family` (arbitration rank),
+            // and the latest row only when a newer, lower-ranked row differs from it.
+            "classification": current.as_ref().map(classification_json),
+            "latest_classification": latest_classification,
             "classifications": e.classifications.len(),
             "identity_scheme": scheme,
             "identity_class": class,

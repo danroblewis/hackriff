@@ -3368,7 +3368,8 @@ tasks:
   - id: T-211
     milestone: M3
     title: "M3 contracts skeleton per ADR-0016: taxonomy hk-mod@1, Classification types (posterior + likelihood distributions incl unknown, open-set score, entropy, deciding stage, provenance), emitter_classification nullable columns migration, current-family rank (user > decoder > lock-verified > classifier > track shape), API fields + docs/api.md"
-    status: in-progress
+    status: review
+    commit: cd82ab7
     priority: normal
     deps: [T-198]
     parallel_group: M3K
@@ -3471,6 +3472,23 @@ tasks:
     model: sonnet
     effort: low
     core_interface: false
+  - id: T-218
+    milestone: M3
+    title: "M3 contracts skeleton remainder that T-211 left out: fuse() + prior invariants, hk_model::signature module, hk-ml stub crate, EvalReport type, /api/taxonomy route, datasets migration, and the Fingerprint family_of gate (an M2 behaviour change: it would merge fsk/2fsk emitters)"
+    status: todo
+    priority: high
+    deps: [T-211]
+    parallel_group: M3K
+    use_cases: []
+    found_by: "T-211 report (2026-09-15): listed under T-211 in ADR-0016 but outside the brief"
+    acceptance: "each item landed or explicitly deferred with a reason; fuse() carries property tests for the three ADR-0016 prior rules; the Fingerprint family_of gate is evaluated against M2 acceptance before any change (blind tests must not regress) and deferred with a note if it would merge distinct emitters"
+    area: crates/hk-model (classify, signature), crates/hk-classify, crates/hk-ml, crates/hk-api, docs/api.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    review_followups: "from the T-211 Opus review (MERGE): (1) family::reclassify (crates/hk-pipeline/src/family.rs:877) still writes via append_classification, so a USER reclassification derives chain/rank 3 and will lose to rank 0-2 rows once decoders/classifiers write them - route it through record_classification(ArbRank::User, Stage::User); nits: hk-api/src/query.rs:843 N+1 (two extra queries per inventory row, rank ORDER BY defeats the index - batch per page); repo/classify.rs:180 record_classification lacks the dedupe insert_classification_from has (a retry appends a duplicate); enable serde_json float_roundtrip; query.rs:845 compares classification content not row id, so identical-content rows suppress latest_classification"
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

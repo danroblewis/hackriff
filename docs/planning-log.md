@@ -2316,3 +2316,18 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.486 Full check green after the T-209 merge (6ca23a8).** Lint clean; 1403/1403 tests; acceptance 29/29; acceptance_m2 8/8; 53 GB free.
   - **T-209 done;** worktree removed.
   - **T-187 launched** (Sonnet, candidate discard end-to-end, field-test Task C).
+- **B0.487 T-211 committed (cd82ab7): M3 contracts skeleton.** Merging with a full check; an Opus read-only review is running in parallel (core_interface).
+  - **Contracts** live in `hk_model::classify` (taxonomy, rank) to avoid a crate cycle; the new `hk-classify` crate re-exports them for T-199.
+  - **Migration 0007** adds nullable taxonomy/stage/arb_rank/detail.
+  - **Legacy rank mapping:** decoder: prefix → 1, input_kind track → 4, everything else → 3, with SQL and Rust agreeing by test.
+  - **Row semantics:** `classification` is the arbitrated row (agrees with family); a newer lower-ranked row shows as `latest_classification`.
+  - **Filed T-218** for the deliberately omitted pieces, including the Fingerprint family_of gate, which would merge fsk/2fsk emitters and so must be checked against M2 acceptance first.
+- **B0.488 T-211 Opus review: MERGE.** No behaviour regression, and the rank change is inert today because no `decoder:` writer exists outside tests.
+  - **Verified:** track shape stays rank 4 (T-183 preserved) across 8 writers, both write orders and both merge directions, with SQL and Rust agreeing on 9 legacy cases; M2 attention still reads its own path; the migration is nullable-only and appended after 0006; `detail` is not exposed by the API.
+  - **Follow-ups folded into T-218:** user reclassification writes rank 3, the inventory N+1 query, a missing dedupe on record_classification, float_roundtrip, and latest_classification comparing content rather than row id.
+  - **Also committed:** T-193 (yellow confirmed boxes, 227440f) and T-159 (`/api/inventory/{id}/decode`, e5ba09c), both merging after the running check. T-159 narrowed a guard test for ungated getters, so verify at merge that a withheld identity still returns nothing.
+  - **T-188 launched** (Opus, listen-centre flake under load).
+- **B0.489 Full check green after the T-211 merge (2cd31f6).** Lint clean; 1423/1423 tests; acceptance 29/29; acceptance_m2 8/8.
+  - **Disk down to 29 GB** with six worktrees live; merging three now to reclaim space.
+  - **Merging:** T-193 (yellow boxes), T-159 (decode fields), T-187 (candidate discard verified; optimistic UI delete).
+  - **T-199 launched** (Opus, classical feature-tree classifier, the first real M3 task).

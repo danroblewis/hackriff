@@ -2,13 +2,14 @@
 // pure helpers (query building, promote/delete, T-080's per-state split) where their shape still
 // fits, and adds the richer row fields docs/api.md `/api/inventory` serves — `classification`,
 // `explanations`, `refined` — that the old page's `Row` never needed.
-import { deleteEntry, inventoryQuery, promoteEntry, rowListenTarget, type ActionResult, type Filters, type InventoryClient, type Recurrence as BaseRecurrence, type Row as BaseRow } from "../../inventory";
+import { deleteEntry, inventoryQuery, promoteEntry, rowListenTarget, type ActionResult, type Filters, type InventoryClient, type Recurrence as BaseRecurrence, type Row as BaseRow, type UserBand } from "../../inventory";
 import type { AppContext } from "../context";
+import { apiErrorText } from "./format";
 import { setInventoryRows } from "./slice";
 import type { InventoryTab, InventorySortKey } from "./slice";
 
 export { promoteEntry, deleteEntry, rowListenTarget };
-export type { ActionResult, Filters };
+export type { ActionResult, Filters, UserBand };
 
 /** One `recurrence.recent[]` window (docs/api.md `/api/inventory`). */
 export interface RecurrenceAppearance { t_start_s: number; t_end_s: number; count: number; duty_cycle: number }
@@ -88,6 +89,37 @@ export async function loadInventoryRows(ctx: AppContext, onMore: (tab: Inventory
   const rows: Record<string, Row> = {};
   for (const r of [...confirmed.entries, ...candidate.entries]) rows[r.id] = r;
   ctx.store.set(setInventoryRows(rows, Date.now() / 1000));
+}
+
+// ---- user band (T-191 route, T-193 draggable box edges) ----
+
+/** The client surface [[setUserBand]]/[[clearUserBand]] need. */
+export interface BandClient { put<T = unknown>(path: string, body: unknown): Promise<T>; del<T = unknown>(path: string): Promise<T> }
+
+export type BandResult = { ok: true; entry: Row } | { ok: false; message: string };
+
+/** Sets (replaces) the user band override on `id` — a user's drag of a Confirmed signal's box
+ * edges, committed on release. `docs/api.md PUT /api/inventory/{id}/band`; `400 invalid` (e.g. too
+ * far from the measured band, or over the max width) reports the server's own message, never a
+ * client-invented one. */
+export async function setUserBand(client: BandClient, id: string, fLo: number, fHi: number): Promise<BandResult> {
+  try {
+    const r = await client.put<{ user_band: UserBand; entry: Row }>(`/api/inventory/${encodeURIComponent(id)}/band`, { f_lo: fLo, f_hi: fHi });
+    return { ok: true, entry: r.entry };
+  } catch (e) {
+    return { ok: false, message: apiErrorText(e) };
+  }
+}
+
+/** Clears the user band override, back to the measured band ("Reset band", the context menu).
+ * `docs/api.md DELETE /api/inventory/{id}/band`. */
+export async function clearUserBand(client: BandClient, id: string): Promise<BandResult> {
+  try {
+    const r = await client.del<{ cleared: boolean; entry: Row }>(`/api/inventory/${encodeURIComponent(id)}/band`);
+    return { ok: true, entry: r.entry };
+  } catch (e) {
+    return { ok: false, message: apiErrorText(e) };
+  }
 }
 
 // ---- sort ----

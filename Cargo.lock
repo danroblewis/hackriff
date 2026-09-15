@@ -585,6 +585,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-classify"
+version = "0.1.0"
+dependencies = [
+ "hk-model",
+]
+
+[[package]]
 name = "hk-cli"
 version = "0.1.0"
 dependencies = [

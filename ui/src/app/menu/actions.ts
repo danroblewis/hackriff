@@ -8,9 +8,9 @@ import type { AppContext } from "../context";
 import { startListen, stopOutput } from "../dock/api";
 import { apiErrorText } from "../explore/format";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip } from "../explore/focus";
-import { deleteEntry, loadInventoryRows, promoteEntry, type Row } from "../explore/inventory";
+import { clearUserBand, deleteEntry, loadInventoryRows, promoteEntry, type Row } from "../explore/inventory";
 import { listenAllTargets, recordSelectionClip, selectionStoreFor, type Selection } from "../explore/selections";
-import { focusSignal, removeInventoryRowLocal, restoreInventoryRowLocal } from "../explore/slice";
+import { focusSignal, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal } from "../explore/slice";
 import { setMode, toast } from "../state";
 import type { MenuItem } from "./model";
 
@@ -107,12 +107,25 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
     },
   });
   items.push({
-    id: "adjust-band", label: "Adjust band", hint: "draggable edges land in T-193",
+    id: "adjust-band", label: "Adjust band", hint: r.state === "confirmed" ? "drag the yellow box's edges" : "promote it first",
     onSelect: () => {
       ctx.store.set(focusSignal(r.id));
-      ctx.store.set(toast("Adjust band: focused — drag the box edges once T-193 lands."));
+      ctx.store.set(toast(r.state === "confirmed"
+        ? "Adjust band: focused — drag the yellow box's left/right edges on the live view."
+        : "Adjust band: promote this signal to confirmed to drag its box edges."));
     },
   });
+  if (r.user_band) {
+    items.push({
+      id: "reset-band", label: "Reset band", hint: "back to the measured extent",
+      onSelect: () => {
+        void clearUserBand(ctx.client, r.id).then((res) => {
+          if (res.ok) { ctx.store.set(patchInventoryRow(r.id, { user_band: res.entry.user_band })); ctx.store.set(toast("Band reset to the measured extent")); }
+          else ctx.store.set(toast(`Reset band: ${res.message}`));
+        });
+      },
+    });
+  }
   return items;
 }
 

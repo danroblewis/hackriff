@@ -1,17 +1,20 @@
 // T-152 (ADR-0013 §4.3, §8): MUI centre pure logic — bracket placement (Hz→%, clamping, narrow rule),
 // selection boxes, DC mask (GAP 10), hover readout, drag-to-select math, click target, axis ticks,
 // history grid → waterfall rows, the Go to decision, and the row-preparation cost of the waterfall.
+// T-193 (docs/14-ui-rewrite.md "Added scope from docs/15 §7"): the Confirmed-signal band box (one
+// per row, spanning both panes), its draggable-edge hit-testing and drag→band mapping.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as ax from "../src/axis";
 import { ControlError } from "../src/controls/client";
-import type { Row } from "../src/inventory";
+import type { Row, UserBand } from "../src/inventory";
 import { tickModel } from "../src/app/centre/axis-view";
 import { mounts } from "../src/app/centre";
 import {
-  DC_NOTCH_HALF_HZ, LABEL_MIN_PX, addModeActive, assumedDc, bracketLayout, clickTarget, dcFromHeader, dcFromObservations, dcQuery, dragSelection,
-  draftBox, hoverText, isDrag, levelU, placeExtent, regionName, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft, type RowClock,
+  DC_NOTCH_HALF_HZ, EDGE_HIT_PX, LABEL_MIN_PX, addModeActive, assumedDc, bandEdgeHit, bracketLayout, clickTarget, confirmedBands, confirmedEdgeAt,
+  dcFromHeader, dcFromObservations, dcQuery, dragBandEdge, dragSelection, draftBox, effectiveBand, hoverText, isDrag, levelU, minUserBandHz,
+  placeExtent, regionName, selectionBoxes, selectionLabel, snapFracToPixel, timeScaleText, tipOnLeft, type RowClock,
 } from "../src/app/centre/overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor, type HistoryGrid } from "../src/app/centre/review-render";
 import { centreInitial } from "../src/app/centre/slice";
@@ -21,10 +24,15 @@ import { UNOBSERVED_DB, decimateRow } from "../src/waterfall";
 const G: ax.Geometry = { centerHz: 100_000_000, bandwidthHz: 2_400_000, bins: 1024 };
 const V: ax.View = { loHz: 99_000_000, hiHz: 101_000_000 }; // 2 MHz view
 
-function row(id: string, lo: number, hi: number, state: Row["state"] = "confirmed", last = 1): Row {
+function userBand(fLo: number, fHi: number): UserBand {
+  return { f_lo: fLo, f_hi: fHi, set_at: 1, actor: "fp", reason: null, reason_withheld: false };
+}
+
+function row(id: string, lo: number, hi: number, state: Row["state"] = "confirmed", last = 1, ub: UserBand | null = null): Row {
   return {
     id, state, f_center_hz: (lo + hi) / 2, bandwidth_hz: hi - lo, f_lo_hz: lo, f_hi_hz: hi, first_seen_s: 0, last_seen_s: last, count: 1,
     known_status: "unknown", status: null, tags: [], family: null, identity_scheme: null, identity_class: null, withheld: false, recurrence: null,
+    user_band: ub,
   };
 }
 const near = (a: number, b: number, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≉ ${b}`);
@@ -40,23 +48,104 @@ test("placeExtent maps Hz to percent of the view, clamps to it, and widens to th
   near(m.widthPct, 1); near(m.leftPct, 99);
 });
 
-test("brackets: confirmed and candidate only, focused last, labels hidden when narrow", () => {
+test("brackets: candidate rows only (Confirmed rows get the T-193 band box instead), labels hidden when narrow", () => {
   const rows = [
-    row("a", 99_900_000, 100_100_000), // 200 kHz = 10 % of the view
+    row("a", 99_900_000, 100_100_000), // confirmed: 200 kHz = 10 % of the view — no bracket now
     row("b", 100_500_000, 100_510_000, "candidate"), // 10 kHz = 0.5 %
     row("d", 99_200_000, 99_300_000, "deleted"),
-    row("x", 105_000_000, 105_200_000), // out of view
+    row("x", 105_000_000, 105_200_000, "candidate"), // out of view
   ];
-  const wide = bracketLayout(rows, V, 1440, "a");
-  assert.deepEqual(wide.map((b) => b.id), ["b", "a"]);
-  const [b, a] = wide;
-  assert.equal(a.active, true); assert.equal(a.state, "confirmed"); assert.equal(a.narrow, false);
-  near(a.leftPct, 45); near(a.widthPct, 10);
-  assert.equal(a.label, "100.000");
-  assert.equal(b.state, "candidate"); assert.equal(b.narrow, true); // 0.5 % of 1440 px = 7 px
+  const wide = bracketLayout(rows, V, 1440, "b");
+  assert.deepEqual(wide.map((b) => b.id), ["b"]);
+  const [b] = wide;
+  assert.equal(b.active, true); assert.equal(b.state, "candidate"); assert.equal(b.narrow, true); // 0.5 % of 1440 px = 7 px
   const phone = bracketLayout(rows, V, 400, null);
-  assert.equal(phone.find((x) => x.id === "a")!.narrow, 0.1 * 400 < LABEL_MIN_PX);
+  assert.equal(phone.find((x) => x.id === "b")!.narrow, true);
   assert.ok(phone.every((x) => !x.active));
+});
+
+// ---- T-193: Confirmed-signal band box, its edges, and the drag → band mapping ----
+
+test("effectiveBand: the measured extent, or the user override's edges when set", () => {
+  const r = row("a", 100_000_000, 100_100_000);
+  assert.deepEqual(effectiveBand(r), { loHz: 100_000_000, hiHz: 100_100_000, hasUserBand: false });
+  const withUb = row("a", 100_000_000, 100_100_000, "confirmed", 1, userBand(99_990_000, 100_120_000));
+  assert.deepEqual(effectiveBand(withUb), { loHz: 99_990_000, hiHz: 100_120_000, hasUserBand: true });
+});
+
+test("confirmedBands: one box per Confirmed row, candidates/deleted excluded, focused last, measured-edge ticks when a user band moved off them", () => {
+  const rows = [
+    row("a", 99_900_000, 100_100_000), // confirmed, no override
+    row("b", 99_950_000, 100_050_000, "confirmed", 1, userBand(99_920_000, 100_010_000)), // moved both edges
+    row("c", 100_400_000, 100_410_000, "candidate"), // never a band box
+    row("d", 99_200_000, 99_300_000, "deleted"),
+  ];
+  const boxes = confirmedBands(rows, V, "a");
+  assert.deepEqual(boxes.map((x) => x.id), ["b", "a"]); // "a" focused, drawn last
+  const [b, a] = boxes;
+  assert.equal(a.active, true); assert.equal(a.hasUserBand, false);
+  assert.equal(a.measuredLeftPct, null); assert.equal(a.measuredRightPct, null);
+  near(a.leftPct, 45); near(a.widthPct, 10);
+  assert.equal(b.active, false); assert.equal(b.hasUserBand, true);
+  // The box is drawn at the user band's edges; the measured edges (99.95/100.05 MHz) get a tick.
+  near(b.leftPct, ax.hzToFrac(V, 99_920_000) * 100); near((b.leftPct + b.widthPct), ax.hzToFrac(V, 100_010_000) * 100);
+  near(b.measuredLeftPct!, ax.hzToFrac(V, 99_950_000) * 100);
+  near(b.measuredRightPct!, ax.hzToFrac(V, 100_050_000) * 100);
+});
+
+test("confirmedBands: an override (an in-progress drag) replaces the row's band and always counts as a user band", () => {
+  const rows = [row("a", 99_900_000, 100_100_000)];
+  const boxes = confirmedBands(rows, V, null, new Map([["a", { loHz: 99_950_000, hiHz: 100_050_000 }]]));
+  assert.equal(boxes.length, 1);
+  assert.equal(boxes[0].hasUserBand, true);
+  near(boxes[0].leftPct, 47.5); near(boxes[0].widthPct, 5);
+});
+
+test("bandEdgeHit: within EDGE_HIT_PX of the drawn left/right edge, else null", () => {
+  const box = { leftPct: 25, widthPct: 25 }; // 250..500 px of a 1000 px view
+  assert.equal(bandEdgeHit(250, box, 1000), "lo");
+  assert.equal(bandEdgeHit(250 + EDGE_HIT_PX, box, 1000), "lo");
+  assert.equal(bandEdgeHit(250 + EDGE_HIT_PX + 1, box, 1000), null);
+  assert.equal(bandEdgeHit(500, box, 1000), "hi");
+  assert.equal(bandEdgeHit(500 - EDGE_HIT_PX, box, 1000), "hi");
+  assert.equal(bandEdgeHit(375, box, 1000), null, "the interior is not a hit: region-select/click keep priority there");
+});
+
+test("confirmedEdgeAt: resolves the topmost (focused-first) Confirmed band's edge under the pointer", () => {
+  const rows = [row("a", 99_900_000, 100_100_000), row("b", 100_500_000, 100_700_000)];
+  // "b" is focused, so it draws last and wins a hit that lands on both.
+  const hitB = confirmedEdgeAt(rows, V, 1440, Math.round(ax.hzToFrac(V, 100_500_000) * 1440), "b");
+  assert.deepEqual(hitB, { id: "b", edge: "lo" });
+  const hitA = confirmedEdgeAt(rows, V, 1440, Math.round(ax.hzToFrac(V, 99_900_000) * 1440), "b");
+  assert.deepEqual(hitA, { id: "a", edge: "lo" });
+  assert.equal(confirmedEdgeAt(rows, V, 1440, 700, "b"), null, "mid-view, nowhere near an edge");
+});
+
+test("minUserBandHz / snapFracToPixel: a few pixels' worth of the view, and fraction rounded to a device pixel", () => {
+  const perPx = (V.hiHz - V.loHz) / 1440;
+  near(minUserBandHz(V, 1440), 4 * perPx);
+  near(minUserBandHz(V, 1440, 10), 10 * perPx);
+  assert.equal(minUserBandHz(V, 0), 1);
+  assert.equal(snapFracToPixel(0.50037, 1000), 0.5);
+  assert.equal(snapFracToPixel(0.5, 0), 0.5, "an unknown width leaves the fraction alone");
+});
+
+test("dragBandEdge: snaps to a pixel, clamps to the minimum width, never crosses 0 Hz", () => {
+  const lo = dragBandEdge(V, 1440, "lo", 99_950_000, 100_050_000, ax.hzToFrac(V, 99_970_000));
+  near(lo.hiHz, 100_050_000);
+  near(lo.loHz, ax.fracToHz(V, snapFracToPixel(ax.hzToFrac(V, 99_970_000), 1440)));
+  const hi = dragBandEdge(V, 1440, "hi", 99_950_000, 100_050_000, ax.hzToFrac(V, 100_070_000));
+  near(hi.loHz, 99_950_000);
+  near(hi.hiHz, ax.fracToHz(V, snapFracToPixel(ax.hzToFrac(V, 100_070_000), 1440)));
+  // Dragging the low edge past the high edge (minus the min width) clamps instead of inverting.
+  const clampedLo = dragBandEdge(V, 1440, "lo", 99_950_000, 100_050_000, ax.hzToFrac(V, 100_200_000));
+  const minW = minUserBandHz(V, 1440);
+  near(clampedLo.loHz, 100_050_000 - minW);
+  assert.ok(clampedLo.loHz < clampedLo.hiHz);
+  // A drag at/below 0 Hz never crosses it.
+  const low: ax.View = { loHz: -1_000_000, hiHz: 1_000_000 };
+  const atZero = dragBandEdge(low, 1440, "lo", 100_000, 500_000, 0);
+  assert.equal(atZero.loHz, 0);
 });
 
 test("selection boxes: in view, focused active, pending flagged", () => {

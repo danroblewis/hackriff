@@ -15,6 +15,11 @@
 .specwf .bk.narrow span { display: none; }
 .specwf .bk.active span, .specwf .bk:hover span { display: block; }
 
+.specwf .c-bands { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.specwf .c-band { position: absolute; top: 0; bottom: 0; box-sizing: border-box; border-left: 2px solid var(--yellow); border-right: 2px solid var(--yellow); background: var(--yellow-soft); }
+.specwf .c-band.active { border-left-width: 3px; border-right-width: 3px; box-shadow: inset 0 0 0 1px var(--yellow); }
+.specwf .c-band-tick { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed color-mix(in srgb, var(--yellow) 55%, transparent); opacity: 0.8; }
+
 .specwf .c-wf { position: absolute; left: 0; right: 0; top: 35%; bottom: 0; pointer-events: none; overflow: hidden; }
 .specwf .c-colhi { position: absolute; top: 0; bottom: 0; background: var(--amber-soft); border-left: 1px solid var(--amber); border-right: 1px solid var(--amber); }
 .specwf .c-dc { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ground) 0%, transparent) 0 4px, color-mix(in srgb, var(--ground) 60%, transparent) 4px 6px); }
