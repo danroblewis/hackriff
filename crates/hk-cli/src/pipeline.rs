@@ -395,7 +395,9 @@ impl hk_api::reports::ReportControl for PipelineReports {
         &self,
         q: &hk_api::reports::ReportQuery,
     ) -> Result<hk_model::attention::report::SurveyReport, hk_api::reports::ReportFail> {
-        self.0.report(q.region, q.span, q.site).map_err(report_fail)
+        self.0
+            .report_filtered(q.region, q.span, q.site, q.filter)
+            .map_err(report_fail)
     }
 
     fn export(
@@ -404,7 +406,7 @@ impl hk_api::reports::ReportControl for PipelineReports {
         format: hk_model::attention::report::ExportFormat,
     ) -> Result<(&'static str, Vec<u8>), hk_api::reports::ReportFail> {
         self.0
-            .export(q.region, q.span, q.site, format)
+            .export_filtered(q.region, q.span, q.site, q.filter, format)
             .map_err(report_fail)
     }
 }

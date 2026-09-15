@@ -13,7 +13,7 @@ use super::codec;
 use super::config::{Geometry, PyramidConfig, RetentionOverride};
 use super::frame::{FrameInput, NoiseShape, RegridPlan};
 use super::stats::{db, hist_percentile};
-use super::tile::{ColEntry, FrontEndState, ProvenanceStep, Tile};
+use super::tile::{ColEntry, FrontEndState, ProvenanceStep, ProvenanceSummary, Tile};
 
 /// Counters.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1142,6 +1142,28 @@ impl Pyramid {
     }
 
     /// Reads a sealed tile from disk; an invalid file is removed from the index.
+    /// The provenance summary of tile `(level, fb, tb)`, open or sealed (a sealed tile's header
+    /// only), `None` when there is no such tile (T-133 filtered queries).
+    pub(super) fn tile_provenance(
+        &self,
+        level: usize,
+        fb: i64,
+        tb: i64,
+    ) -> Result<Option<ProvenanceSummary>, StoreError> {
+        if let Some(t) = self.open[level].get(&(fb, tb)) {
+            return Ok(Some(t.prov.clone()));
+        }
+        if !self.sealed[level].contains_key(&(tb, fb)) {
+            return Ok(None);
+        }
+        let path = self.path(level, fb, tb);
+        match codec::read_header(&path) {
+            Ok(h) => Ok(h.map(|(h, _)| h.prov)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StoreError::Io { path, source: e }),
+        }
+    }
+
     pub(super) fn read_sealed(
         &self,
         level: usize,

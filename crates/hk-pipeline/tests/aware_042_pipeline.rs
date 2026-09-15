@@ -7,8 +7,9 @@ mod common;
 
 use common::*;
 use hk_e2e::{SynthRequest, synth_or_skip};
+use hk_model::attention::baseline::SiteKey;
 use hk_model::{FreqRange, InventoryQuery, Region, TimeRange, Timestamp};
-use hk_store::{RegionQuery, Resolution};
+use hk_store::{OriginField, OriginFilter, RegionQuery, Resolution};
 use serde_json::json;
 
 const AWARE_042: &str = "AWARE-042";
@@ -25,6 +26,7 @@ fn aware_042_occupancy_window_tracks_per_channel_and_history_query() {
     let fs = fx.sample_rate;
     let dir = TempDir::new("aware042");
     let (cfg, replay) = replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
+    let device_id = cfg.device_id.clone();
     let handle = start(cfg, replay);
     let product = handle.floor_product();
     let s = handle.wait().unwrap();
@@ -117,4 +119,56 @@ fn aware_042_occupancy_window_tracks_per_channel_and_history_query() {
         "[{AWARE_042}] history query has no observed cells"
     );
     assert!(s.counter("/history/tiles_written") > 0);
+
+    // T-133: the history thread stamps every frame with the run's source and its site (a replay
+    // has no site: unassigned), so the per-site query sees exactly the unfiltered cells and
+    // another site, or unknown origin, sees none.
+    let q = RegionQuery {
+        freq: FreqRange::new(446.0e6, 446.1e6),
+        time: TimeRange::new(t0, t0.saturating_add_nanos(2_000_000_000)),
+        resolution: Resolution::Level(0),
+    };
+    let source = hk_store::history::source_key(&device_id);
+    assert_eq!(
+        h.provenance
+            .origins
+            .iter()
+            .map(|(o, _)| *o)
+            .collect::<Vec<_>>(),
+        vec![hk_store::history::Origin {
+            source: Some(source),
+            site: Some(SiteKey::Unassigned),
+        }],
+        "[{AWARE_042}] tile origins"
+    );
+    let observed_with = |filter: OriginFilter| {
+        p.uncalibrated_pyramid()
+            .query_filtered(&q, &filter)
+            .unwrap()
+            .cells
+            .iter()
+            .filter(|c| c.observed())
+            .count()
+    };
+    let this_site = OriginFilter {
+        source: OriginField::Is(source),
+        site: OriginField::Is(SiteKey::Unassigned),
+    };
+    assert_eq!(observed_with(this_site), observed, "[{AWARE_042}] own site");
+    for other in [
+        OriginFilter {
+            site: OriginField::Is(SiteKey::Mobile),
+            ..OriginFilter::ANY
+        },
+        OriginFilter {
+            site: OriginField::Unknown,
+            ..OriginFilter::ANY
+        },
+        OriginFilter {
+            source: OriginField::Is(source ^ 1),
+            ..OriginFilter::ANY
+        },
+    ] {
+        assert_eq!(observed_with(other), 0, "[{AWARE_042}] {other:?}");
+    }
 }

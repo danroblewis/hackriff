@@ -11,6 +11,12 @@
 //! the lock: while a query holds it, frames are queued (up to [`HISTORY_QUEUE_FRAMES`], then the
 //! oldest are dropped and counted) and folded in order by the next frame that gets the lock
 //! (`frames_deferred`, `frames_dropped`).
+//!
+//! **Source and site (T-133).** Every frame is folded with its origin: the source key of the run's
+//! `device_id` and the site the attention service's site state machine gives at the frame's sample
+//! time ([`AttentionService::site_at`]; `unassigned` when the run has no attention service), so
+//! history tiles record where their frames came from and `/api/history` / `/api/report` can filter
+//! by source and site.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -20,9 +26,12 @@ use hk_core::ReadOutcome;
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker};
 use hk_dsp::{InputInfo, SpectrumFrame, StftConfig, WelchConfig};
 use hk_model::Timestamp;
+use hk_model::attention::baseline::SiteKey;
+use hk_store::history::{FrameOrigin, source_key};
 use hk_store::{FloorIngest, FloorIngestQueue, FloorProduct, IngestOutcome, StoreError};
 use num_complex::Complex;
 
+use crate::attention::AttentionService;
 use crate::compute::Reader;
 use crate::run::Shared;
 use crate::stats::{HistoryCounters, add, inc, set};
@@ -52,7 +61,12 @@ fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
 }
 
 /// Runs reader 2 until the ring closes.
-pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> anyhow::Result<()> {
+pub(crate) fn run(
+    shared: Arc<Shared>,
+    product: Arc<Mutex<FloorProduct>>,
+    attention: Option<Arc<AttentionService>>,
+) -> anyhow::Result<()> {
+    let source = source_key(&shared.cfg.device_id);
     let mut welch = WelchConfig::new(shared.fft_len);
     welch.holds = false;
     welch.spectral_kurtosis = false;
@@ -76,7 +90,14 @@ pub(crate) fn run(shared: Arc<Shared>, product: Arc<Mutex<FloorProduct>>) -> any
     let mut frames_since_update = 0u32;
     let mut on_frame = |frame: &SpectrumFrame| {
         let floor = tracker.update(frame, |_| {});
-        let r = queue.ingest(&product, frame, floor);
+        let site = attention
+            .as_ref()
+            .map_or(SiteKey::Unassigned, |a| a.site_at(frame.t.host_time).0);
+        let origin = FrameOrigin {
+            source,
+            site: Some(site),
+        };
+        let r = queue.ingest_from(&product, frame, floor, origin);
         if r.deferred {
             inc(&h.frames_deferred);
         }

@@ -17,8 +17,10 @@ use hk_model::attention::occupancy::{
 };
 use hk_model::attention::report::{ProvenanceStep as ReportStep, ProvenanceStepKind};
 use hk_model::{FreqRange, TimeRange, Timestamp};
-use hk_store::history::Geometry;
-use hk_store::history::{FrontEndState, GainState, ProvenanceStep, ProvenanceSummary};
+use hk_store::history::{
+    FilterSummary, FrontEndState, GainState, Geometry, OriginField, OriginFilter, ProvenanceStep,
+    ProvenanceSummary,
+};
 use hk_store::{Pyramid, RegionHistory, RegionQuery, Resolution};
 
 use super::{
@@ -118,19 +120,24 @@ pub struct HistoryTiles {
 }
 
 impl HistoryTiles {
-    /// Queries `p` over the box at `level` in one call (one lock scope for the caller). Callers
-    /// holding an ingest lock use [`report_chunks`] and [`Self::from_parts`] instead.
+    /// Queries `p` over the box at `level` in one call (one lock scope for the caller), keeping
+    /// only frames `filter` passes (T-133, [`Pyramid::query_filtered`]). Callers holding an ingest
+    /// lock use [`report_chunks`] and [`Self::from_parts`] instead.
     pub fn query_level(
         p: &Pyramid,
         region: FreqRange,
         span: TimeRange,
         level: usize,
+        filter: &OriginFilter,
     ) -> Result<RegionHistory, ReportError> {
-        p.query(&RegionQuery {
-            freq: region,
-            time: span,
-            resolution: Resolution::Level(u8::try_from(level).unwrap_or(u8::MAX)),
-        })
+        p.query_filtered(
+            &RegionQuery {
+                freq: region,
+                time: span,
+                resolution: Resolution::Level(u8::try_from(level).unwrap_or(u8::MAX)),
+            },
+            filter,
+        )
         .map_err(|e| ReportError::Provider(format!("history query failed: {e}")))
     }
 
@@ -159,6 +166,11 @@ impl HistoryTiles {
             grid.cells.extend_from_slice(&p.cells);
             grid.provenance.merge(&p.provenance);
             grid.tiles_read += p.tiles_read;
+            match (&mut grid.filter, &p.filter) {
+                (Some(a), Some(b)) => a.merge(b),
+                (None, Some(b)) => grid.filter = Some(*b),
+                _ => {}
+            }
         }
         // A coarser fallback tile read by two chunks lists its steps twice.
         grid.provenance.steps.sort_by_key(|s| s.t);
@@ -381,9 +393,10 @@ impl OccupancyProvider for HistoryTiles {
                 self.grid.f_cell_hz
             )],
         };
-        if matches!(req.site, SiteKey::Site(_)) {
+        if self.grid.filter.is_none() && matches!(req.site, SiteKey::Site(_)) {
             rows.warnings.push(
-                "history tiles are not keyed by site before T-119: rows include every site".into(),
+                "history-tile rows include every source and site (no site or source filter given)"
+                    .into(),
             );
         }
         for &ch in channels {
@@ -408,8 +421,42 @@ impl OccupancyProvider for HistoryTiles {
 
 impl ProvenanceProvider for HistoryTiles {
     fn steps(&self, req: &ReportRequest) -> Result<(Vec<ReportStep>, Vec<String>), ReportError> {
-        Ok(steps_from_summary(&self.grid.provenance, req.span))
+        let (steps, mut warnings) = steps_from_summary(&self.grid.provenance, req.span);
+        if let Some(f) = &self.grid.filter {
+            warnings.push(filter_warning(f));
+        }
+        Ok((steps, warnings))
     }
+}
+
+fn field_text<T: Copy>(f: OriginField<T>, text: impl Fn(T) -> String) -> String {
+    match f {
+        OriginField::Any => "any".into(),
+        OriginField::Unknown => "unknown".into(),
+        OriginField::Is(v) => text(v),
+    }
+}
+
+/// The report warning of a source/site-filtered history grid (T-133).
+pub fn filter_warning(f: &FilterSummary) -> String {
+    let site = |s: SiteKey| match s {
+        SiteKey::Unassigned => "unassigned".to_string(),
+        SiteKey::Mobile => "mobile".to_string(),
+        SiteKey::Site(id) => id.to_string(),
+    };
+    format!(
+        "history tiles filtered to source {} and site {}: {} observed cells folded together with \
+         other sources or sites are shown as unobserved, not quiet ({} cells kept from finer tiles; \
+         tiles {} matched, {} mixed, {} other); the observation log, inventory emitters and \
+         anomalies are not keyed by source or site",
+        field_text(f.filter.source, |k| format!("{k:016x}")),
+        field_text(f.filter.site, site),
+        f.cells_excluded,
+        f.cells_from_children,
+        f.tiles_matched,
+        f.tiles_mixed,
+        f.tiles_other,
+    )
 }
 
 fn gain_text(g: Option<GainState>) -> String {
