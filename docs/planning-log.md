@@ -2331,3 +2331,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Disk down to 29 GB** with six worktrees live; merging three now to reclaim space.
   - **Merging:** T-193 (yellow boxes), T-159 (decode fields), T-187 (candidate discard verified; optimistic UI delete).
   - **T-199 launched** (Opus, classical feature-tree classifier, the first real M3 task).
+- **B0.490 User added docs/15 section 10 (live testing).** Filed as:
+  - **T-219 (high, M3, buildable now):** a Confirmed signal suppresses overlapping candidates, and overlapping candidates compete by evidence, so one FM station stops producing several offset duplicates. A guard case keeps two genuinely distinct adjacent stations apart.
+  - **T-220 (MAUTO design):** an Emitter owns competing decode-pipeline hypotheses with evidence scores instead of one family label; confirm-by-decode promotes the winner. Amends ADR-0015 and docs/07.
+  - **T-221 (MAUTO design):** Listen becomes a decode pipeline with an audio sink, so audio and digital decoders share one model.
+  - **Hopping** stays deferred to M4.
+  - **Note:** T-219 waits for a Rust slot; T-210, T-188, T-199 and the full check hold all four.

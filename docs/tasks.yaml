@@ -3489,6 +3489,51 @@ tasks:
     core_interface: true
     review_followups: "from the T-211 Opus review (MERGE): (1) family::reclassify (crates/hk-pipeline/src/family.rs:877) still writes via append_classification, so a USER reclassification derives chain/rank 3 and will lose to rank 0-2 rows once decoders/classifiers write them - route it through record_classification(ArbRank::User, Stage::User); nits: hk-api/src/query.rs:843 N+1 (two extra queries per inventory row, rank ORDER BY defeats the index - batch per page); repo/classify.rs:180 record_classification lacks the dedupe insert_classification_from has (a retry appends a duplicate); enable serde_json float_roundtrip; query.rs:845 compares classification content not row id, so identical-content rows suppress latest_classification"
 
+  - id: T-219
+    milestone: M3
+    title: "Overlapping-candidate resolution: a Confirmed signal suppresses candidates overlapping its band, and overlapping candidates compete (merge or rank by evidence) so duplicate offset boxes collapse"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: DETECT
+    use_cases: [AWARE-053]
+    found_by: "user 2026-09-15, docs/15 section 10 (live testing)"
+    acceptance: "blind test through the mock SDR on the real FM capture: one physical station yields ONE candidate (or one ranked group), not several offset duplicates; a Confirmed entry suppresses new overlapping candidates (suppression recorded with a reason, raw detections/history kept); competing overlapping candidates are ranked by evidence with the weaker merged or marked superseded, reversible if evidence changes; a genuinely distinct adjacent emission (guard case, e.g. two real stations 200 kHz apart) is NOT merged; no M0/M1/M2 acceptance regression"
+    area: crates/hk-model (inventory/cluster), crates/hk-context (candidates), crates/hk-pipeline
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-220
+    milestone: MAUTO
+    title: "DESIGN: a candidate IS a decode pipeline - Emitter owns competing decode-pipeline hypotheses each with an evidence score, not one family label (amend ADR-0015 + docs/07; confirm-by-decode promotes the winning pipeline)"
+    status: todo
+    priority: normal
+    deps: [T-208]
+    parallel_group: MAUTOD
+    use_cases: []
+    found_by: "user 2026-09-15, docs/15 section 10 (live testing)"
+    acceptance: "ADR-0015 amendment plus a docs/07 sketch: Emitter owns 1..n candidate pipelines (recipe + params + evidence + status), how they are created (detection, classification seed, synthesis), ranked, superseded and promoted; migration sketch; how it subsumes the current single-family label and the T-219 competition rules; API deltas listed; no code"
+    area: docs/adr/0015-*.md, docs/07
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-221
+    milestone: MAUTO
+    title: "DESIGN: Listen as a decode pipeline with an audio sink (retire the special-cased Listen path; audio and digital decoders share one recipe/output model and one Outputs dock)"
+    status: todo
+    priority: normal
+    deps: [T-220]
+    parallel_group: MAUTOD
+    use_cases: [SIGNAL-062]
+    found_by: "user 2026-09-15, docs/15 section 10 (live testing)"
+    acceptance: "ADR-0011/ADR-0015 amendment: an audio-output sink block and stream type, how the existing Listen API maps onto starting an audio pipeline (compatibility or deprecation), retune/refine behaviour, per-signal audio panels (T-195); migration plan staged so Listen keeps working throughout; no code"
+    area: docs/adr/0011-*.md, docs/adr/0015-*.md, docs/api.md (plan only)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

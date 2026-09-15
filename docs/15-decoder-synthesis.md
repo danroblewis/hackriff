@@ -85,3 +85,15 @@ Design contract first (ADR-0015: pipeline/objective representation, evidence-met
 - Will not crack encrypted/proprietary formats — but converts them from mysteries into well-characterized candidates.
 - **Channel hopping is out of scope here** — defer until after trunking / multi-channel tracking (M4).
 - Compute-bounded per signal; heavier searches are opt-in and respect the device power/thermal budget (Jetson later).
+
+## 10. A candidate IS a decode pipeline; overlap resolution; Listen unified (2026-09-15, user)
+
+Refinements from live testing — architectural direction for MAUTO + the data model (docs/07) and MUI, not all buildable now:
+
+- **A candidate is a full decode path, not just a detection box.** An inventory entry (Emitter) carries one or more **candidate decode pipelines** ("this is the candidate decode"): e.g. several candidate WFM pipelines for one station. The pipeline + its evidence *is* the candidate's content; confirm-by-decode promotes the winning pipeline. This extends docs/07 Emitter: it owns competing pipeline hypotheses, each with an evidence score, not a single family label.
+- **Overlapping candidates for one physical signal must resolve.** Detection currently spawns several candidates for the same emission (FM especially — a reader offset into the skirt still decodes adequately, so multiple offset boxes appear). Rules to add:
+  - a **Confirmed** signal **suppresses candidates that overlap its band** (they're almost surely the same emission),
+  - **overlapping candidates compete** — merge or rank by evidence/probability so the strongest hypothesis wins and duplicates collapse.
+  This is partly a near-term detection/inventory quality fix (duplicate FM candidates clutter the list) and partly the general "competing hypotheses" model above. Whether more complex signals also over-split is unknown; the mechanism should be general.
+- **Listen is just a decode pipeline with an audio sink.** Replace the special-cased Listen with a decode pipeline whose **output type is an audio stream** instead of a digital-records sink. WFM/NBFM/AM "listening" becomes a pipeline like any other (demod → audio out), so audio and digital decoders share one model, one Outputs dock, one recipe representation. The UI "Listen" action just picks/starts the audio-output pipeline.
+- **Hopping** (a candidate/emitter that changes frequency over time) — defer until trunking / multi-channel tracking (M4); the candidate-as-pipeline model should later allow a pipeline whose input follows a hop set.
