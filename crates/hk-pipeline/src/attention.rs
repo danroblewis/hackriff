@@ -1572,6 +1572,74 @@ pub(crate) mod tests {
         );
     }
 
+    /// Where a baseline set's bytes go (T-135 measurement): subject nodes, `seq_hod`, the series
+    /// vectors, and each copy's stored slots (with growth slack) per level class.
+    fn baseline_breakdown(b: &Baselines) -> String {
+        use hk_store::baseline::{CusumState, GainSeries, LevelClass};
+        let subs: Vec<&SubjectBaseline> = b
+            .engines()
+            .flat_map(|e| e.state.subjects.values())
+            .collect();
+        let node = subs.len()
+            * (std::mem::size_of::<BaselineSubject>()
+                + std::mem::size_of::<SubjectBaseline>()
+                + 16);
+        let hod: usize = subs
+            .iter()
+            .map(|s| s.seq_hod.capacity() * std::mem::size_of::<CusumState>())
+            .sum();
+        let vecs: usize = subs
+            .iter()
+            .map(|s| s.gains.capacity() * std::mem::size_of::<GainSeries>())
+            .sum();
+        let mut out = format!(
+            "{} subjects: nodes {node} B, seq_hod {hod} B, series vecs {vecs} B",
+            subs.len()
+        );
+        for class in [LevelClass::Idle, LevelClass::Occupied] {
+            let gs: Vec<&GainSeries> = subs
+                .iter()
+                .flat_map(|s| &s.gains)
+                .filter(|g| g.class == class)
+                .collect();
+            let (rl, rh) = gs.iter().fold((0, 0), |(l, h), g| {
+                (l + g.reference.len(), h + g.reference.heap_bytes())
+            });
+            let (al, ah) = gs.iter().fold((0, 0), |(l, h), g| {
+                (l + g.adaptive.len(), h + g.adaptive.heap_bytes())
+            });
+            out += &format!(
+                "; {class:?}: {} series, reference {rl} slots {rh} B, adaptive {al} slots {ah} B",
+                gs.len()
+            );
+        }
+        out + &format!("; total {} B", b.memory_bytes())
+    }
+
+    /// T-135 (AWARE-042): a parked week (all 168 hour-of-week slots touched) at 9 700 cells × 2
+    /// gain states stays under the default cap: no fold is refused.
+    #[test]
+    fn attention_baseline_default_cap_does_not_refuse_a_parked_week_at_9700_cells() {
+        let (b, secs) = parked_cells_run(7 * 24, Some(DEFAULT_BASELINE_MEMORY_CAP_BYTES));
+        println!(
+            "T-135 parked 7 d, 9700 cells x 2 gain states: {} ({:.1} MiB), cap {} B, {} folds \
+             refused, {secs:.1} s",
+            baseline_breakdown(&b),
+            b.memory_bytes() as f64 / f64::from(1 << 20),
+            DEFAULT_BASELINE_MEMORY_CAP_BYTES,
+            b.refused_folds(),
+        );
+        let slots: usize = b
+            .engines()
+            .flat_map(|e| e.state.subjects.values())
+            .flat_map(|s| &s.gains)
+            .map(|g| g.adaptive.len())
+            .sum();
+        assert_eq!(slots, 9_700 * 2 * 168, "every slot of the week is stored");
+        assert_eq!(b.refused_folds(), 0, "the default cap refuses nothing");
+        assert!(b.memory_bytes() <= DEFAULT_BASELINE_MEMORY_CAP_BYTES);
+    }
+
     /// A 15-min T-118 row at `q` quarter-hours of `subject` under `site` (12 revisits, 75 s apart:
     /// 900 s represented) with FCO `fco`.
     pub(crate) fn series_row(

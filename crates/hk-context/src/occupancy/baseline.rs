@@ -71,7 +71,9 @@
 //!   refused (counted in [`Baselines::refused_folds`]). Slots are stored sparse (T-134,
 //!   [`hk_store::baseline::SlotSeries`]): a series grows with the hour-of-week slots it observes,
 //!   so a parked 48 h run holds 48 per series, not 168. Reads are the dense values, so pooling,
-//!   maturity, CUSUMs and novelty are unchanged.
+//!   maturity, CUSUMs and novelty are unchanged. Each stored slot is packed to f32 moments (T-135,
+//!   [`hk_store::baseline::PackedSlot`], 28 B per copy): a parked week at 9 700 cells fits the
+//!   default cap; every fold rounds the stored moments to f32 (tolerance documented there).
 //! - **Loading outside the lock** ([`Baselines::load_site_outside_lock`]).
 //!
 //! # Keys
@@ -506,12 +508,12 @@ pub fn pools(
         match copy {
             BaselineCopy::Reference => {
                 for (i, s) in g.reference.iter() {
-                    pool_slot(&mut level, &mut occ, i, &DecayedStats::from(s), slot, own);
+                    pool_slot(&mut level, &mut occ, i, &DecayedStats::from(&s), slot, own);
                 }
             }
             BaselineCopy::Adaptive => {
                 for (i, d) in g.adaptive.iter() {
-                    pool_slot(&mut level, &mut occ, i, d, slot, own);
+                    pool_slot(&mut level, &mut occ, i, &d, slot, own);
                 }
             }
         }
@@ -956,12 +958,9 @@ impl BaselineEngine {
         // Adaptive copy with forgetting over the subject's observed time.
         let factor = 0.5_f64.powf(obs.observed_s / (policy.half_life_days * 86_400.0));
         for g in &mut sub.gains {
-            for d in &mut g.adaptive {
-                d.scale(factor);
-            }
+            g.adaptive.scale(factor);
         }
-        let a = &mut sub.gains[gi].adaptive[slot_i];
-        match level {
+        sub.gains[gi].adaptive.update(slot_i, |a| match level {
             Some(l) => a.add(
                 l,
                 max_db,
@@ -974,7 +973,7 @@ impl BaselineEngine {
                 a.occupied_weight_s += obs.occupied_weight_s;
                 a.weight_s += obs.weight_s;
             }
-        }
+        });
 
         // Reference: normal folds only, until the slot's hour-of-day pool is mature.
         let hod_immature = hour_of_day_observed_s(sub, slot) < MATURITY_MIN_OBSERVED_S;
@@ -1001,23 +1000,24 @@ impl BaselineEngine {
         let latched = sub.latched_hours & hour_bit(slot) != 0;
         let accrue_ref = clean && normal && !latched && !building && !seq_building && hod_immature;
         if accrue_ref {
-            let s = &mut sub.gains[gi].reference[slot_i];
-            match level {
-                Some(l) => s.add(
-                    l,
-                    max_db,
-                    false,
-                    obs.weight_s - obs.occupied_weight_s,
-                    obs.observed_s,
-                ),
-                None => {
-                    s.observed_s += obs.observed_s;
-                    s.weight_s += obs.weight_s - obs.occupied_weight_s;
+            sub.gains[gi].reference.update(slot_i, |s| {
+                match level {
+                    Some(l) => s.add(
+                        l,
+                        max_db,
+                        false,
+                        obs.weight_s - obs.occupied_weight_s,
+                        obs.observed_s,
+                    ),
+                    None => {
+                        s.observed_s += obs.observed_s;
+                        s.weight_s += obs.weight_s - obs.occupied_weight_s;
+                    }
                 }
-            }
-            // `add` takes a boolean occupancy; fold the time-weighted part directly.
-            s.occupied_weight_s += obs.occupied_weight_s;
-            s.weight_s += obs.occupied_weight_s;
+                // `add` takes a boolean occupancy; fold the time-weighted part directly.
+                s.occupied_weight_s += obs.occupied_weight_s;
+                s.weight_s += obs.occupied_weight_s;
+            });
         }
         if sub.mature_at.is_none() && maturity(sub, slot).is_mature() {
             sub.mature_at = Some(obs.t);
@@ -2591,7 +2591,7 @@ mod tests {
             .map(|s| {
                 s.gains
                     .iter()
-                    .flat_map(|g| &g.reference)
+                    .flat_map(|g| g.reference.values())
                     .map(|r| r.observed_s)
                     .sum()
             })
@@ -2741,7 +2741,7 @@ mod tests {
                 e.state
                     .subjects
                     .values()
-                    .flat_map(|s| s.gains.iter().flat_map(|g| &g.reference))
+                    .flat_map(|s| s.gains.iter().flat_map(|g| g.reference.values()))
                     .map(|r| r.observed_s)
                     .sum()
             })

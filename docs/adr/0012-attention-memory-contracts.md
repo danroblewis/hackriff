@@ -191,7 +191,7 @@ hk-store `occupancy/` (T-118):
 - **Per cell and per learned channel, per slot:** mergeable `SlotStats`, with level statistics further split by gain state (at most 4 per slot; beyond that the cell reports `mixed`).
 - **Calibration:** dBFS baselines are keyed `uncalibrated`. A new CalibrationState starts a new key (C12 pitfall: calibration changes look like anomalies).
 
-Only observed cells, and within each series only observed hour-of-week slots (T-134), are stored, in memory and on disk. Size estimate: a 30–1000 MHz plan is ~9 700 cells × 168 × ~56 B ≈ 90 MB per site/cal for one copy, doubled with the frozen reference. Each gain state and level class is its own series, so a busy week can exceed that; a parked 48 h run touches 48 slots per series (T-134 measurement in `hk-pipeline` attention tests).
+Only observed cells, and within each series only observed hour-of-week slots (T-134), are stored, in memory and on disk. Size estimate: a 30–1000 MHz plan is ~9 700 cells × 168 × 28 B ≈ 46 MB per site/cal for one copy, doubled with the frozen reference; in memory each stored slot is packed to f32 moments (T-135; 56 B as f64). Each gain state and level class is its own series: a parked week under two gain states stores 9 700 × 2 × 168 slot pairs, ~194 MiB with overhead, under the 256 MiB default cap (T-134/T-135 measurements in `hk-pipeline` attention tests).
 
 ### 3.2 Maturity (decided; see open question 1)
 
@@ -213,7 +213,7 @@ Pools are sums of slots because `SlotStats` is additive. A literal "24 h in each
 - Σ weight·occupied and Σ weight (time-weighted FCO, §2.5);
 - `max_db` (raw).
 
-These give mean, standard deviation, FCO and max; merging equals sequential adding (tested). Percentiles are deliberately not kept per slot: 168 histograms per cell cost ~8× the storage. Low percentiles for the floor come from history tiles (C26), which already keep p10/p90.
+These give mean, standard deviation, FCO and max; merging equals sequential adding (tested). In memory (T-135) a slot stores them as f32: mean and centred Σ(level − mean)² instead of the two sums, so σ does not cancel. Each fold rounds the stored moments once (≤ 3·10⁻⁸ relative); files keep f64. Percentiles are deliberately not kept per slot: 168 histograms per cell cost ~8× the storage. Low percentiles for the floor come from history tiles (C26), which already keep p10/p90.
 
 ### 3.4 Frozen reference, slow adaptation, change points
 
