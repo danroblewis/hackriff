@@ -2252,3 +2252,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.475 T-192 committed (37d8d5b); merge to main blocked by a conflict.** T-192 (right-click context menu, focus panel freed, Analyze → /api/analyze with a not-implemented notice) collides with T-194 in live-spectrum.ts.
   - **Evidence so far:** 21/21 UI test files; 23.7 KB gz; smoke passed.
   - **Next:** merge aborted on main. A Sonnet agent is merging main into the T-192 worktree, keeping SelectionStore-based multi-band select plus the contextmenu hook, with a browser smoke.
+- **B0.476 T-185 committed (a61d910).** Merging to main with a full check.
+  - **Real-air acceptance:** CRC-valid 0.771, PI 1694 at share 1.0, complete PS "Unstoppa", 0 invalid groups carrying fields.
+  - **Block-sync false-lock fix:** lock needs 3 consecutive offset-consistent blocks and drops after 8 invalid. Random bits went from 9 false locks to 0, and fields skip invalid groups (live: 199 bad groups with fields → 0).
+  - **Weak signal:** at 14 dB, PI and complete PS decode, and the chain is at the hard-decision limit; no chain change helped.
+  - **Live copies:** still fail (RDS SNR −4.6 dB). PI decodes, PS does not.
+  - **Filed T-210** (blocked on the user): ≤2-bit correction with consensus.
+  - **User-visible now:** no false "sync" and no garbage fields.
