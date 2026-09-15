@@ -25,11 +25,15 @@ use hk_core::{
 };
 use hk_e2e::blind::{matching, strip_truth};
 use hk_e2e::{Fixture, TruthItem};
-use hk_model::{ContentClass, FreqRange, InventoryQuery, Region};
+use hk_model::attention::occupancy::OccupancySubject;
+use hk_model::{ContentClass, FreqRange, InventoryQuery, LinkTarget, Region};
 use hk_pipeline::class::band_class;
 use hk_pipeline::{
     Pipeline, PipelineConfig, PipelineHandle, RunSummary, SourceInfo, TrackInventory, explanations,
     open_mock_replay, replay_block_len, replay_plan,
+};
+use hk_store::occupancy::{
+    OccupancyQuery, OccupancyStore, OccupancyStoreConfig, SeriesInterval, SubjectKind,
 };
 use num_complex::{Complex, Complex32};
 
@@ -202,18 +206,28 @@ struct TruthfulIq {
     seen: Arc<Mutex<Truthfulness>>,
 }
 
-fn tone_power(x: &[Complex<i8>], f: f64, fs: f64) -> f64 {
-    let n = x.len();
-    let (mut acc, mut wsum) = (num_complex::Complex64::new(0.0, 0.0), 0.0);
-    for (i, z) in x.iter().enumerate() {
-        let w = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / n as f64).cos();
-        let z = num_complex::Complex64::new(f64::from(z.re), f64::from(z.im));
-        acc += z
-            * w
-            * num_complex::Complex64::from_polar(1.0, -std::f64::consts::TAU * f * i as f64 / fs);
-        wsum += w;
+/// Mean power of `x` around `f` Hz through a 3-stage moving-average low-pass whose first null is
+/// at ±250 kHz (−3 dB near ±65 kHz, first sidelobe −39 dB): one FM broadcast channel.
+fn band_power(x: &[Complex<i8>], f: f64, fs: f64) -> f64 {
+    let len = ((fs / 250e3).round() as usize).max(1);
+    let mut y: Vec<num_complex::Complex64> = x
+        .iter()
+        .enumerate()
+        .map(|(i, z)| {
+            num_complex::Complex64::new(f64::from(z.re), f64::from(z.im))
+                * num_complex::Complex64::from_polar(
+                    1.0,
+                    -std::f64::consts::TAU * f * i as f64 / fs,
+                )
+        })
+        .collect();
+    for _ in 0..3 {
+        y = y
+            .windows(len)
+            .map(|w| w.iter().sum::<num_complex::Complex64>() / len as f64)
+            .collect();
     }
-    (acc.norm() / wsum).powi(2)
+    y.iter().map(|z| z.norm_sqr()).sum::<f64>() / y.len() as f64
 }
 
 impl TruthfulIq {
@@ -232,20 +246,23 @@ impl TruthfulIq {
         if self.blocks % 16 != 0 || off.abs() > fs / 2.0 - 200e3 || x.len() < 4096 {
             return;
         }
-        let band = (-3..=3)
-            .map(|k| tone_power(x, off + 20e3 * f64::from(k), fs))
-            .sum::<f64>()
-            / 7.0;
+        // T-175: band power over the station's channel, not 7 narrow (≈ 250 Hz) spectral samples
+        // of it. Which 5 ms of FM programme a checked block holds depends on where the scheduler's
+        // retune landed in stream time (thread timing in an unpaced replay), and a block whose
+        // instantaneous deviation sat between the samples read as 3× floor while its neighbours
+        // read 10–200×. The floor is measured through the same filter.
+        let band = band_power(x, off, fs);
         let mut floor: Vec<f64> = (0..64)
-            .map(|k| tone_power(x, -0.4 * fs + 0.8 * fs * f64::from(k) / 63.0, fs))
+            .map(|k| band_power(x, -0.4 * fs + 0.8 * fs * f64::from(k) / 63.0, fs))
             .collect();
         floor.sort_by(f64::total_cmp);
         let median = floor[32];
         seen.checked += 1;
         if band < 4.0 * median {
             seen.failures.push(format!(
-                "block at centre {c} Hz: station band {band:.3e} vs floor {median:.3e} at offset \
-                 {off} Hz"
+                "block {} at centre {c} Hz, rate {fs} Hz: station band {band:.3e} vs floor \
+                 {median:.3e} at offset {off} Hz",
+                self.blocks
             ));
         }
     }
@@ -361,15 +378,89 @@ fn t057_scheduled_replay_keeps_every_frequency_truthful() {
         );
         assert!(*fm, "emitter at {f} Hz lacks FM broadcast in its top-k");
     }
-    // Nothing FM-wide in the noise-filled spectrum outside the recording.
+    // Nothing FM-wide in the noise-filled spectrum outside the recording: the mock serves no
+    // recorded content beyond its coverage. T-175: boxes from windows served quantisation-limited
+    // (provenance `quantisation_limited`, floor within 3 dB of the ADC rounding, docs/07) cannot
+    // speak to that. At LNA 24 / VGA 20, 29 dB under the recording's gain, the IQ is ≈ 85 % zero
+    // codes; one 128-bin frame's power then spreads far wider than the detector's Gaussian floor
+    // model, so single-frame whole-window boxes appear on pure noise fill, and the detector marks
+    // every box of such a segment `marginal`. The check stays on every window the scheduler served
+    // with a measurable floor (the recording's own gain here), where it caught the edge folding.
+    // The skip is guarded below: the skipped boxes back no inventory emitter or candidate, and no
+    // occupancy row outside the recording holds occupied time (a failure there is a product bug).
     let repo = repo(&dir.0);
+    let mut skipped: Vec<hk_model::DetectionId> = Vec::new();
     let phantoms: Vec<(f64, f64)> = repo
         .detections_in_region(&Region::new(FreqRange::new(0.0, 7.0e9), ever()))
         .unwrap()
         .into_iter()
         .filter(|d| (d.f_center_hz < lo || d.f_center_hz > hi) && d.obw_hz > 20e3)
+        .filter(|d| {
+            let ql = repo
+                .provenance(d.provenance_ref)
+                .unwrap()
+                .quantisation_limited;
+            if ql {
+                skipped.push(d.id);
+            }
+            !ql
+        })
         .map(|d| (d.f_center_hz, d.obw_hz))
         .collect();
+    // The skip is only sound while the product does not learn from those boxes: none of them backs
+    // an inventory emitter (confirmed or candidate), through a track or directly.
+    let mut learned = Vec::new();
+    for e in inventory(&repo, InventoryQuery::default()) {
+        for link in repo.emitter_links(e.emitter.id).unwrap() {
+            let dets = match link.target {
+                LinkTarget::Track(t) => repo.track_detections(t).unwrap(),
+                LinkTarget::Detection(d) => vec![d],
+                _ => Vec::new(),
+            };
+            if dets.iter().any(|d| skipped.contains(d)) {
+                learned.push((e.emitter.f_center_hz, e.emitter.bandwidth_hz));
+            }
+        }
+    }
+    // Nor does noise fill outside the recording add occupied time to any occupancy row (FCO counts
+    // level crossings over the floor; detections only mark crossings suspect).
+    let store =
+        OccupancyStore::open(dir.0.join("occupancy"), OccupancyStoreConfig::default()).unwrap();
+    let mut rows = 0usize;
+    let mut occupied = Vec::new();
+    for interval in [SeriesInterval::Min15, SeriesInterval::Hour1] {
+        let found = store
+            .query(&OccupancyQuery {
+                freq: FreqRange::new(0.0, 7.0e9),
+                span: ever(),
+                interval,
+                subject: Some(SubjectKind::Band),
+                f_cell_hz: 1_000.0,
+                limit: 100_000,
+            })
+            .unwrap();
+        for r in found.rows {
+            rows += 1;
+            if let OccupancySubject::Band { freq } = r.subject
+                && (freq.hi_hz <= lo || freq.lo_hz >= hi)
+                && r.n_occupied > 0
+            {
+                occupied.push((freq.lo_hz, freq.hi_hz, r.n_occupied, r.n_suspect));
+            }
+        }
+    }
+    eprintln!(
+        "{} out-of-band boxes from quantisation-limited windows; {rows} occupancy band rows",
+        skipped.len()
+    );
+    assert!(
+        learned.is_empty(),
+        "quantisation-limited out-of-band boxes back inventory emitters: {learned:?}"
+    );
+    assert!(
+        occupied.is_empty(),
+        "occupied time outside the recorded band (lo, hi, n_occupied, n_suspect): {occupied:?}"
+    );
     assert!(
         phantoms.is_empty(),
         "detections outside the recorded band {lo}..{hi} Hz: {phantoms:?}"
