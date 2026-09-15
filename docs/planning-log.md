@@ -2205,3 +2205,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.467 Main red after the T-181 merge.** The full check stopped at 1039/1374 on the follow_hops hop-set test.
   - **Cause:** a test race. The test waited for a frame from the added channel, then asserted frames from channels 0 and 1, which under load could arrive later. It passed 3/3 alone.
   - **Fix (test only):** wait until every channel has delivered a frame. No bound was loosened.
+- **B0.468 Full check green after the follow_hops test fix (0b393df).** Lint clean; 1374/1374 tests; acceptance 28/28; 61 GB free.
+  - **Main green with T-181 merged.**
+  - **T-178 fix round launched** (Opus, existing worktree). Scope: fsync-failure poison, background allocation, 20 Msps drop measurement, explicit test quotas, newer-version disable, locked status.
