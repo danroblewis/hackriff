@@ -1373,7 +1373,9 @@ tasks:
   - id: T-082
     milestone: M0b
     title: One inventory entry per physical emitter (merge track-based and decoder-based entries)
-    status: in-progress
+    status: done
+    commit: "56a6d09 (merge after the T-056 verification run)"
+    result: "cause: identity-carrying decoder sightings (RDS PI, FSK framer signature) created a new entry when no entry held that identity, never checking the same-emission track entry. Repository::same_emission: two live non-deleted entries are one emitter when detected/refined centres are within max(10 ppm*f, 0.25*BW, 500 Hz) and observations overlap in time; hop sets only link to hop sets; two identities never link; two track entries also need matching fingerprints (co-channel sensors stay apart); runs after every sighting/chain write within a run; never links ADS-B-style channel-sharing identities. Merge: survivor = confirmed, else first seen, else larger count; carries links, recurrence, tags, identity, refined tuning, classification history, decoder/classifier/user status (overlapping time not double-counted); confirmed beats candidate, survivor history gains 'merged from emitter'; deleted never merged; annotations include merged entries (RDS label kept). Tests: hk-model 5 new (97 pass); inventory_lifecycle.rs e2e 11/11 (FM once confirmed with track+RDS, FSK once, stations 300 kHz apart stay two, re-detection after deleting merged entry -> one new candidate); just test-one inventory 14/14; api_contract 10/10. signal_062 test picks the PI-carrying label; docs/07 2.11 linking and merge semantics added; /api/inventory JSON unchanged."
     deps: [T-078]
     parallel_group: W
     use_cases: [AWARE-053, SIGNAL-062]
