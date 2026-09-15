@@ -232,6 +232,7 @@ impl Policy for BanditPolicy {
 
     fn next_step(&mut self, now: Timestamp) -> ScheduleStep {
         self.clock.set(now);
+        self.sched.refresh_bandit();
         self.sched.next_step()
     }
 

@@ -2125,5 +2125,86 @@ fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
     stop_server(serving);
 }
 // T-120 scheduler
+// T-127 scheduler routes
+
+/// T-127: `/api/scheduler*` answer the documented shapes on a run without the scheduler
+/// (`hk serve`): reads say `"scheduler": null`, POI rows come from the observation log when a box
+/// is given (unobserved is a gap, never quiet; a bare read computes no POI), lease changes are
+/// refused with 409 (bad bodies and ids with 400), other methods with 405, and no token with 401.
+/// A full lease table (409 `table_full`) and a control-thread timeout (503 `busy`, cancelled)
+/// need a running scheduler: hk-api's `scheduler_failures_map_to_documented_statuses` and
+/// hk-pipeline's `a_lease_command_that_timed_out_never_applies` cover them.
+#[test]
+fn scheduler_routes_answer_as_documented_without_a_scheduler() {
+    let (serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    let auth = Some(bearer.as_str());
+
+    let (st, v) = call(addr, "GET", "/api/scheduler", auth, None);
+    assert_eq!(st, 200, "{v}");
+    assert!(v["scheduler"].is_null(), "{v}");
+    assert_eq!(v["leases"], json!([]));
+    assert_eq!(v["poi"], json!([]));
+    assert_eq!(v["observation_log"], json!(true));
+
+    let (t0, t1) = (unix_now() - 60.0, unix_now());
+    let path = format!("/api/scheduler?f_lo=100000000&f_hi=102000000&t0={t0}&t1={t1}&tau_s=0.1,1");
+    let (st, v) = call(addr, "GET", &path, auth, None);
+    assert_eq!(st, 200, "{v}");
+    let rows = v["poi"].as_array().expect("poi rows");
+    assert_eq!(rows.len(), 1, "{v}");
+    let row = &rows[0];
+    assert_eq!(row["f_lo"], 100_000_000.0);
+    assert_eq!(row["cells"], 2);
+    for key in [
+        "observed_cells",
+        "observed_fraction",
+        "gap_threshold_s",
+        "gaps_truncated",
+    ] {
+        assert!(!row[key].is_null(), "{key} in {row}");
+    }
+    let taus: Vec<f64> = row["poi"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            assert!(e["p_poi"].is_number() && e["p_poi_min"].is_number(), "{e}");
+            e["tau_s"].as_f64().unwrap()
+        })
+        .collect();
+    assert_eq!(taus, vec![0.1, 1.0]);
+    assert!(row["gaps"].is_array());
+    assert_eq!(v["poi_truncated"], json!(false));
+
+    let (st, v) = call(addr, "GET", "/api/scheduler?f_lo=5", auth, None);
+    assert_eq!(st, 400, "unpaired region refused: {v}");
+
+    let (st, v) = call(addr, "GET", "/api/scheduler/arms", auth, None);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (v["scheduler"].clone(), v["arms"].clone()),
+        (json!(false), json!([]))
+    );
+    let (st, v) = call(addr, "GET", "/api/scheduler/leases", auth, None);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["leases"], json!([]));
+
+    let (st, v) = call(addr, "POST", "/api/scheduler/leases", auth, Some("{}"));
+    assert_eq!(st, 400, "a lease needs center_hz: {v}");
+    let body = json!({ "center_hz": STATION_HZ, "kind": "user-pin", "duration_s": 5 }).to_string();
+    let (st, v) = call(addr, "POST", "/api/scheduler/leases", auth, Some(&body));
+    assert_eq!(st, 409, "no scheduler on this run: {v}");
+    let (st, v) = call(addr, "DELETE", "/api/scheduler/leases/abc", auth, None);
+    assert_eq!(st, 400, "{v}");
+    let (st, v) = call(addr, "DELETE", "/api/scheduler/leases/5", auth, None);
+    assert_eq!(st, 409, "{v}");
+
+    let (st, v) = call(addr, "POST", "/api/scheduler", auth, Some("{}"));
+    assert_eq!(st, 405, "{v}");
+    let (st, _) = call(addr, "GET", "/api/scheduler", None, None);
+    assert_eq!(st, 401);
+    stop_server(serving);
+}
 // T-121 reports
 // T-122 anomalies

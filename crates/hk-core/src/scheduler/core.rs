@@ -472,11 +472,6 @@ impl<C: Clock> Scheduler<C> {
         }
         self.leases
             .retain(|l| l.until.is_none_or(|until| now < until));
-        if let Some(b) = self.bandit.as_mut() {
-            if b.stale() {
-                b.repack(&self.plan, &self.cfg, &self.caps, now_ns);
-            }
-        }
         let t = if let Some(active) = self.intent {
             self.slot = None;
             self.intent_template(now, &active)
@@ -518,7 +513,10 @@ impl<C: Clock> Scheduler<C> {
             }
             _ => Share::Exploit,
         };
-        if share == Share::Other && !self.sweep_floor_met(now_ns) {
+        // Interactive intent holds the radio by right (§5.3): only leases and scheduled plans
+        // below the floor are violations.
+        let interactive = matches!(step.purpose, Purpose::UserIntent { .. });
+        if share == Share::Other && !interactive && !self.sweep_floor_met(now_ns) {
             self.stats.floor_violations += 1;
         }
         self.tiers.add(now_ns, step.duration_ns, share, 1);
@@ -583,9 +581,25 @@ impl<C: Clock> Scheduler<C> {
         total == 0 || t[Share::Discovery as usize] as f64 >= floor * total as f64
     }
 
+    /// Re-packs the bandit's arm table if the provider published a new snapshot version since the
+    /// last packing (ADR-0012 §5.1). Packing allocates, so it is **not** done in
+    /// [`Scheduler::next_step`]: the owner calls this at its decision boundaries (the pipeline's
+    /// control loop before each step, the simulator before each decision). Returns whether it
+    /// re-packed. Without the bandit, or with no new version, it is a cheap version compare.
+    pub fn refresh_bandit(&mut self) -> bool {
+        let now_ns = self.now().as_unix_nanos();
+        match self.bandit.as_mut() {
+            Some(b) if b.stale() => {
+                b.repack(&self.plan, &self.cfg, &self.caps, now_ns);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Enables the bandit revisit policy (ADR-0012 §5): dwell slots are chosen by the bandit over
     /// `provider`'s candidate snapshots instead of WRR over offered POIs, under the exploration
-    /// and sweep floors. Arms are packed at the next step.
+    /// and sweep floors. Arms are packed at the next [`Scheduler::refresh_bandit`].
     pub fn enable_bandit(
         &mut self,
         cfg: BanditConfig,
@@ -647,8 +661,18 @@ impl<C: Clock> Scheduler<C> {
             lease,
             until: lease.duration_ns.map(|ns| now.saturating_add_nanos(ns)),
         };
-        if let Some(l) = self.leases.iter_mut().find(|l| l.lease.id == lease.id) {
-            *l = entry;
+        if let Some(i) = self.leases.iter().position(|l| l.lease.id == lease.id) {
+            // An update that changes the lease (or ends it sooner) trims a running lease step,
+            // so the caller takes the next step with the new settings (T-127 review). A same
+            // update (a renewal that does not shorten it) leaves the running step alone.
+            let old = self.leases[i];
+            let shortens = entry
+                .until
+                .is_some_and(|u| old.until.is_none_or(|o| u < o) && u < self.current_end);
+            if self.intent.is_none() && (old.lease != lease || shortens) {
+                self.trim_running(now);
+            }
+            self.leases[i] = entry;
             return Ok(());
         }
         if self.leases.len() >= MAX_LEASES {
@@ -665,11 +689,18 @@ impl<C: Clock> Scheduler<C> {
             Some(i) => {
                 self.leases.remove(i);
                 let now = self.now();
-                self.current_end = self.current_end.min(now);
+                self.trim_running(now);
                 true
             }
             None => false,
         }
+    }
+
+    /// The running step's end: its planned end, or earlier once a lease/intent change cut or
+    /// trimmed it. A caller compares it across [`Self::add_lease`]/[`Self::release_lease`] to
+    /// know whether the running step was abandoned (T-127 review).
+    pub fn running_end(&self) -> Timestamp {
+        self.current_end
     }
 
     /// Active leases.
@@ -1081,7 +1112,7 @@ impl<C: Clock> Scheduler<C> {
         let had = self.intent.take().is_some();
         if had {
             let now = self.now();
-            self.current_end = self.current_end.min(now);
+            self.trim_running(now);
         }
         had
     }
@@ -1262,15 +1293,23 @@ impl<C: Clock> Scheduler<C> {
         }
     }
 
-    /// Rolls back the running slot if `now` is inside it or a verification group is unfinished.
-    fn cut(&mut self, now: Timestamp) {
+    /// Ends the running step at `now`: its unrun planned time leaves the sweep-floor window and
+    /// its coverage is cut (a released lease or intent, T-127; the first half of [`Self::cut`]).
+    fn trim_running(&mut self, now: Timestamp) {
         if now < self.current_end {
             let now_ns = now.as_unix_nanos();
             let rest = self.current_end.as_unix_nanos() - now_ns;
             self.tiers.add(now_ns, rest, self.current_share, -1);
             self.coverage.cut_last(self.current_visits, now);
         }
-        if now < self.current_end || self.verify.is_some() {
+        self.current_end = self.current_end.min(now);
+    }
+
+    /// Rolls back the running slot if `now` is inside it or a verification group is unfinished.
+    fn cut(&mut self, now: Timestamp) {
+        let running = now < self.current_end;
+        self.trim_running(now);
+        if running || self.verify.is_some() {
             if let Some(s) = self.slot.take() {
                 self.cursor = s.cursor;
                 if let (Some(u), Some(b)) = (s.bandit, self.bandit.as_mut()) {
@@ -1543,6 +1582,7 @@ impl Scheduler<SyntheticClock> {
     /// Emits `steps` steps, advancing the synthetic clock by each step's duration.
     pub fn run_synthetic(&mut self, steps: usize, out: &mut Vec<ScheduleStep>) {
         for _ in 0..steps {
+            self.refresh_bandit();
             let step = self.next_step();
             self.clock.advance_ns(step.duration_ns);
             out.push(step);

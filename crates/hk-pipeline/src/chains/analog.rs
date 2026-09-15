@@ -471,6 +471,9 @@ fn collect_and_write(
         Ok(written) => {
             inc(&c.demodulations);
             add(&c.decodes, written.decode_ids.len() as u64);
+            shared
+                .track_decodes
+                .add(cand.track, written.decode_ids.len() as u64);
             add(&c.emitters_created, u64::from(written.emitter_created));
             add(&c.labels, u64::from(written.label.is_some()));
             if let Some(e) = written.emitter_id {

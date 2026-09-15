@@ -48,6 +48,16 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
+/// Runs `f` with counting paused (inside [`counted`]): work the steady state is allowed to
+/// allocate, such as publishing a snapshot or re-packing arms off `next_step`.
+fn uncounted<R>(f: impl FnOnce() -> R) -> R {
+    let was = COUNTING.with(Cell::get);
+    COUNTING.with(|c| c.set(false));
+    let r = f();
+    COUNTING.with(|c| c.set(was));
+    r
+}
+
 fn counted<R>(f: impl FnOnce() -> R) -> (R, usize) {
     ALLOCATIONS.store(0, Ordering::Relaxed);
     COUNTING.with(|c| c.set(true));
@@ -196,6 +206,7 @@ fn the_bandit_steady_state_does_not_allocate() {
     );
     let mut applier = StepApplier::new(Arc::new(NullControl(SourceCapabilities::hackrf_one())));
     for _ in 0..3_000 {
+        s.refresh_bandit();
         let st = s.next_step();
         clk.advance_ns(st.duration_ns);
         applier.apply(&st).unwrap();
@@ -216,9 +227,32 @@ fn the_bandit_steady_state_does_not_allocate() {
         duration_ns: Some(S),
     };
     let before = s.stats();
+    let repacks_before = s.attention_status().bandit.unwrap().counters.repacks;
 
     let ((), allocations) = counted(|| {
         for i in 0..20_000u64 {
+            // T-127: a new provider version is published mid-loop; next_step keeps using the
+            // packed table (no allocation) until the owner re-packs off next_step.
+            if i % 2503 == 11 {
+                uncounted(|| {
+                    let f = 433.0 + (i % 7) as f64;
+                    publish_candidates(
+                        &provider,
+                        clk.now(),
+                        vec![
+                            candidate(1, f, 50.0, 0.9, false),
+                            candidate(2, 915.2, 50.0, 0.8, true),
+                            candidate(5, 905.0, 25.0, 0.6, false),
+                        ],
+                    );
+                });
+            }
+            if i % 2503 == 40 {
+                assert!(
+                    uncounted(|| s.refresh_bandit()),
+                    "the new version is packed"
+                );
+            }
             let st = s.next_step();
             applier.apply(&st).unwrap();
             clk.advance_ns(st.duration_ns);
@@ -256,6 +290,8 @@ fn the_bandit_steady_state_does_not_allocate() {
         }
     });
     assert_eq!(allocations, 0, "allocations in the bandit steady state");
+    let repacks = s.attention_status().bandit.unwrap().counters.repacks;
+    assert!(repacks >= repacks_before + 7, "{repacks} repacks");
     let stats = s.stats();
     assert!(stats.bandit_steps > before.bandit_steps, "{stats:?}");
     assert!(stats.lease_steps > 0 && stats.scheduled_steps > 0 && stats.intent_steps > 0);

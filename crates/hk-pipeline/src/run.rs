@@ -513,6 +513,8 @@ pub(crate) struct Shared {
     pub bursts: Arc<crate::chains::taps::BurstHub>,
     /// Which analog chain owns each emission (T-071 dedupe).
     pub claims: crate::chains::EmissionClaims,
+    /// Decodes written per track (T-127: a bandit dwell's `valid_decodes`).
+    pub track_decodes: Arc<crate::chains::TrackDecodes>,
     /// The run's compute providers (T-056): one registry shared by every segment.
     pub compute: hk_dsp::compute::Compute,
 }
@@ -649,6 +651,8 @@ struct Common {
     occupancy: Arc<crate::occupancy::OccupancyService>,
     /// T-115: the observation log (`None` when it could not be opened).
     observations: Option<crate::observe::ObservationLog>,
+    /// T-127: the scheduler as the API sees it (snapshot + lease commands), shared by segments.
+    scheduler: Arc<crate::control::SchedulerHub>,
 }
 
 impl Common {
@@ -787,6 +791,7 @@ impl Pipeline {
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             bursts: Arc::default(),
             // T-115: never fails the run; a log that cannot open is reported and skipped.
+            scheduler: Arc::new(crate::control::SchedulerHub::default()),
             observations: crate::observe::ObservationLog::open(
                 &cfg.data_dir,
                 cfg.stream_sink.as_ref(),
@@ -895,6 +900,10 @@ fn start_segment(
     } else {
         None
     };
+    // T-127: the scheduler publishes to the API hub and serves its lease commands.
+    if let Some(s) = sched.as_mut() {
+        s.attach_hub(Arc::clone(&common.scheduler));
+    }
     // T-115: the scheduler's observer. A source that cannot retune observes its own window.
     if let (Some(s), Some(log)) = (sched.as_mut(), &common.observations) {
         let fixed = (!common.switch.capabilities().controllable)
@@ -937,6 +946,7 @@ fn start_segment(
         continues: AtomicBool::new(false),
         bursts: Arc::clone(&common.bursts),
         claims: crate::chains::EmissionClaims::default(),
+        track_decodes: Arc::default(),
         compute: common.compute.clone(),
         cfg,
     });
@@ -1623,6 +1633,11 @@ impl PipelineHandle {
             .observations
             .as_ref()
             .map(crate::observe::ObservationLog::store)
+    }
+
+    /// The scheduler hub (T-127) for `/api/scheduler*`: empty when the run has no scheduler.
+    pub fn scheduler_hub(&self) -> Arc<crate::control::SchedulerHub> {
+        Arc::clone(&self.sup.common.scheduler)
     }
 
     /// The data directory (`hackriff.db`, `history/`, `recordings/`).

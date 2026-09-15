@@ -326,6 +326,8 @@ An arm is a candidate **window**: `ArmKey { rf_path, center_q = round(center / a
 4. Mark them packed; repeat.
 5. Add one exploration arm per discovery hop not already covered, with prior 0.
 
+**Where packing runs (amended by T-127).** Packing allocates, so it never runs inside `next_step`. The owner calls `Scheduler::refresh_bandit()` at its decision boundaries: the pipeline control loop before each step, the T-114 simulator before each decision. `next_step` keeps using the last packed table until then. `refresh_bandit` is a lock-free version compare when nothing new was published.
+
 ### 5.2 Reward per dwell-second
 
 `DwellOutcome { seq, arm, dwell_s, new_detections, bursts, novelty_sum, valid_decodes, suspect_detections }` reaches the scheduler once detection, C12 and decoders have processed the dwell. Raw r = (1·new + 1·Σnovelty + 0.5·decodes + 0.1·bursts)/dwell_s, squashed to u = r/(r + 0.1/s) ∈ [0, 1) (`DwellOutcome::reward`). Suspect detections earn nothing and accrue "dwell-seconds wasted on suspect" (the T-114 metric).
@@ -337,7 +339,8 @@ An arm is a candidate **window**: `ArmKey { rf_path, center_q = round(center / a
   - `ū` starts from the arm's best `score_norm` with 5 pseudo dwell-seconds.
   - Ties go to the lower `ArmKey`. No RNG.
 - **Exploration floor:** 15 % of bandit time goes to the stalest feasible arm.
-- **Starvation bound:** every feasible arm is revisited within `max_arm_staleness_s` (30 min).
+- **Starvation bound:** every feasible **candidate** arm is revisited within `max_arm_staleness_s` (30 min).
+  - **Hop exploration arms are exempt (amended by T-127).** Exploration arms (prior 0, one per uncovered discovery hop) are served by the exploration floor and UCB, not the bound: tiling 0–6 GHz with 8 s exploration dwells cannot meet 30 minutes. The background sweep's pass still covers those hops gap-free (§5.7).
 - **Sweep floor:** the background sweep keeps ≥ 25 % of radio time over any 10-min window unless interactive intent holds the radio, so discovery never starves. When leases make the floor unmeetable, that is recorded and disclosed (§5.5), not hidden.
 - **Suspects (C05):** a `needs_verification` candidate gets exactly one verification group, using the existing S4 gain-step/retune machinery.
   - Pass: C12 clears the flag.
@@ -374,7 +377,7 @@ T-120 uses `SharedInterestingness`. The simulator (T-114) and hk-core tests publ
 - **Gap-free discovery coverage:** pass geometry is unchanged. Bandit dwells occupy the slots `dwells_per_cycle` occupies today, and a pass interrupted by any tier resumes at its position.
 - **TX gated:** no tier or reason is a TX slot; `request_tx_slot` still returns `TxGated`.
 - **Determinism:** output depends on plan, config, capabilities, clock readings and the call sequence, where "call sequence" now includes each `snapshot()` taken (keyed by `version`) and each `record_outcome`. Floating-point ties break on `ArmKey`.
-- **Allocation:** `next_step` stays allocation-free. Packing happens when a new version is seen, into preallocated tables.
+- **Allocation:** `next_step` stays allocation-free, including after a new provider version is published. Packing happens in `refresh_bandit` (§5.1), off `next_step`, into preallocated tables.
 
 ### 5.8 Low-power modes
 

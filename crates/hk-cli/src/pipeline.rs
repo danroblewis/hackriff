@@ -335,6 +335,46 @@ pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     }
 }
 
+/// T-127: the pipeline's scheduler hub behind `/api/scheduler*`.
+pub struct PipelineScheduler(pub Arc<hk_pipeline::control::SchedulerHub>);
+
+impl hk_api::schedule::SchedulerControl for PipelineScheduler {
+    fn view(&self) -> Option<hk_api::schedule::SchedulerView> {
+        self.0.snapshot().map(|s| hk_api::schedule::SchedulerView {
+            status: s.status,
+            regions: s.regions.clone(),
+            leases: s.leases.clone(),
+            plan_version: s.plan_version,
+        })
+    }
+
+    fn arms(&self) -> Option<Vec<hk_core::scheduler::ArmStatus>> {
+        self.0.snapshot().map(|s| s.arms.clone())
+    }
+
+    fn add_lease(
+        &self,
+        lease: hk_core::scheduler::Lease,
+    ) -> Result<hk_core::scheduler::Lease, hk_api::schedule::SchedulerFail> {
+        self.0.add_lease(lease).map_err(scheduler_fail)
+    }
+
+    fn release_lease(&self, id: u64) -> Result<bool, hk_api::schedule::SchedulerFail> {
+        self.0.release_lease(id).map_err(scheduler_fail)
+    }
+}
+
+fn scheduler_fail(e: hk_pipeline::control::HubError) -> hk_api::schedule::SchedulerFail {
+    use hk_api::schedule::SchedulerFail as F;
+    use hk_pipeline::control::HubError as H;
+    match e {
+        H::NoScheduler => F::NoScheduler,
+        H::Busy => F::Busy,
+        H::Refused(m) => F::Refused(m),
+        H::TableFull(m) => F::TableFull(m),
+    }
+}
+
 /// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`] (public
 /// so acceptance tests wire the recipe routes exactly as `hk serve` does, T-094).
 /// The run's occupancy engine behind `/api/occupancy` and `/api/channels` (T-118).
@@ -593,6 +633,7 @@ pub fn serve_api(
         occupancy: Some(Arc::new(PipelineOccupancy(handle.occupancy()))), // T-118
         observations: handle.observation_store(),                         // T-115
         attention: Some(attention),                                       // T-119
+        scheduler: Some(Arc::new(PipelineScheduler(handle.scheduler_hub()))), // T-127
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
