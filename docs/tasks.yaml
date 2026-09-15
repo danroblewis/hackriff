@@ -2132,7 +2132,7 @@ tasks:
   - id: T-135
     milestone: M2
     title: "Full-week baseline memory: channel-pooled level stats (or cell-series compaction) so a parked week stays under the 256 MiB default cap"
-    status: in-progress
+    status: review
     deps: [T-134]
     parallel_group: M2B
     use_cases: [AWARE-042]

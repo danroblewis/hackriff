@@ -1272,3 +1272,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Lint clean; 1362/1362 nextest+UI tests; acceptance 32/32 (72 s).
   - T-133 merged cleanly (4ae8a1f); a full check has started.
   - Running: T-135, T-136, T-124.
+- **B0.348 T-135 committed (2941ed4); Opus review running.**
+  - **Change:** `SlotSeries` stores 7 f32 values per slot (28 B per copy); level moments are mean plus centred sum of squares; codec stays v2 with f64 on disk.
+  - **Memory:** a parked week at 9.7k cells drops from 372 MiB to 192.5 MiB, with 0 refusals under the 256 MiB cap.
+  - **Tests:** a 2,000-fold tolerance test checks mean within 1e-6 and σ within 1e-4. The T-134 golden-test assertion was relaxed to same length plus re-encode fixed point.
+  - **Regression:** debug fold CPU is about 3x (48 h test 18 s → 60 s; week test 268 s), because `pools()` unpacks every slot. The review must decide on a fix and on where the week test runs.
