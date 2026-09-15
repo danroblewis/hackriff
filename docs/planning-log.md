@@ -2342,3 +2342,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Content half:** filed as T-222 (deps T-201, T-219): same decoded identity means one emission, and the cross-correlation lag gives the path difference.
   - **Not built now** beyond the T-219 fold-in. T-220 told to number its task graph from T-230.
   - **Disk:** back to 37 GB after removing four merged worktrees.
+- **B0.492 T-210 committed (8a96c0d): RDS <=2-bit correction with the user's safeguards.**
+  - **Correction:** only while the crc block holds its own lattice sync (3 clean blocks to gain, 8 bad or a frame gap to lose); corrected frames get `CrcStatus::Corrected`, count as errors, never become messages rows, and are never identity or confirm-by-decode evidence.
+  - **Consensus:** a new generic `consensus` block commits a value at weight >=3 within the last 8 observations of its slot (clean 2, corrected 1), so two agreeing groups including one clean, or three corrected; PI gates every other field so a retune cannot mix stations.
+  - **Results:** 0 wrong values surfaced anywhere. At 14 dB, PI and a complete PS across all 3 seeds. Real-air acceptance unchanged (clean 0.769, PI, PS).
+  - **Live PS still not achieved:** block sync holds only in bursts on the live copies (PI commits, PS does not). Relaxing sync unlock tripled groups but produced no PS and one more false PI, so recipe sync parameters are unchanged.
+  - **Seeding fixed:** T-185's `seed | 1` had collapsed seeds 2 and 3; now splitmix64.
+  - **T-187 conflict resolved (7ad8498):** both feature sets kept, and deleting a row with a band override removes its yellow box, restoring it with the override intact if the delete fails.
+  - **Both merge after the running check. T-205 launched** (Sonnet, labelled-capture dataset export).

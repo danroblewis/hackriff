@@ -2998,7 +2998,8 @@ tasks:
   - id: T-187
     milestone: M1-fix
     title: "Verify candidate discard end-to-end: delete a candidate via UI/API -> leaves list; raw detections/history kept; later re-detection makes a new candidate; fix if not usable"
-    status: in-progress
+    status: review
+    commit: 7ad8498
     priority: normal
     deps: []
     parallel_group: FIELD
@@ -3274,7 +3275,7 @@ tasks:
   - id: T-205
     milestone: M3
     title: "Labelled-capture dataset path for fine-tuning: CRC-valid decoder labels and user labels become exportable training snippets with provenance"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-211]
     parallel_group: M3L
@@ -3352,7 +3353,8 @@ tasks:
   - id: T-210
     milestone: M1-fix
     title: "RDS block error correction (<=2-bit burst, redsea-style) for weak live reception, with corrected-group provenance and PI/PS consensus against false corrections"
-    status: in-progress
+    status: review
+    commit: 8a96c0d
     decision: "user 2026-09-15: allow <=2-bit correction with safeguards (only while block-synced; corrected groups flagged and never confirm-by-decode evidence; PI/PS/RT committed by multi-group consensus)"
     priority: high
     deps: [T-185]
@@ -3509,7 +3511,7 @@ tasks:
   - id: T-220
     milestone: MAUTO
     title: "DESIGN: a candidate IS a decode pipeline - Emitter owns competing decode-pipeline hypotheses each with an evidence score, not one family label (amend ADR-0015 + docs/07; confirm-by-decode promotes the winning pipeline)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-208]
     parallel_group: MAUTOD
