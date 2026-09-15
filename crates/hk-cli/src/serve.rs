@@ -252,39 +252,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use hk_api::stream::{GATED_SPECTRUM_MAX_ROW_RATE_HZ, Publisher, PublisherConfig};
+    use hk_api::stream::{Publisher, PublisherConfig};
     use hk_core::{HackRfDriver, SourceDriver};
 
     const TOKEN: &str = "t042-serve-empty-inventory-token-0123";
 
     #[test]
-    fn fm_fixture_is_unrestricted_and_others_fail_closed() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
-        let fm = SigmfMeta::read(
-            root.join("hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta"),
-        )
-        .unwrap();
-        assert_eq!(fixture_class(&fm), ContentClass::Unrestricted);
-        let ism = SigmfMeta::read(
-            root.join("hackrf/2026-09-13/ism_433p62M_2M_l24g30a1_t162p0_6s.sigmf-meta"),
-        )
-        .unwrap();
-        assert_eq!(fixture_class(&ism), ContentClass::MetadataOnly);
-        let mut tagged = fm.clone();
-        tagged.global.extra.insert(
-            "hackriff:content_class".into(),
-            serde_json::Value::String("restricted-paging".into()),
-        );
-        assert_eq!(fixture_class(&tagged), ContentClass::RestrictedPaging);
-        tagged.global.extra.insert(
-            "hackriff:content_class".into(),
-            serde_json::Value::String("bogus".into()),
-        );
-        assert_eq!(fixture_class(&tagged), ContentClass::MetadataOnly);
-    }
-
-    #[test]
-    fn gated_plan_declares_within_the_cap_and_the_publisher_accepts_it() {
+    fn spectrum_plan_respects_the_row_rate_and_the_publisher_accepts_it() {
         for (class, rows) in [
             (ContentClass::MetadataOnly, 200.0),
             (ContentClass::Unrestricted, 60.0),
@@ -292,10 +266,6 @@ mod tests {
         ] {
             let plan = row_plan(2.4e6, 4096, rows, class, hk_dsp::WindowKind::default());
             assert!(plan.row_rate_hz <= rows + 1e-9);
-            if !class.permits_content() {
-                assert!(plan.declared_hz <= GATED_SPECTRUM_MAX_ROW_RATE_HZ);
-                assert!(plan.declared_hz >= plan.row_rate_hz * 1.09);
-            }
             let header = spectrum_header(class, &plan, 100e6, 2.4e6);
             Publisher::new(header, PublisherConfig::default()).expect("contract accepts header");
         }

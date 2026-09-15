@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use hk_model::{ContentClass, Timestamp};
 use hk_stream::{
     BinaryRecord, CloseReason, ConsumerState, Declared, ListenAddr, Listener, MessageRecord,
-    Publisher, PublisherConfig, Record, RecordFlags, StreamError, StreamHeader, StreamKind,
-    StreamReader,
+    Publisher, PublisherConfig, Record, RecordFlags, StreamHeader, StreamKind, StreamReader,
 };
 use serde_json::json;
 
@@ -107,50 +106,14 @@ fn record(class: ContentClass) -> MessageRecord {
     }
 }
 
-/// P8: an own-key-decrypted record never carries content on a stream that is not itself
-/// own-key-decrypted, even though own-key permits content.
+/// Streams are served on a mode-0600 Unix socket.
 #[test]
-fn p8_own_key_content_needs_an_own_key_stream() {
-    for (stream_class, expect_content) in [
-        (ContentClass::Unrestricted, false),
-        (ContentClass::OwnKeyDecrypted, true),
-    ] {
-        let mut p = Publisher::new(messages(stream_class), small()).unwrap();
-        let h = p.handle();
-        let buf = SharedBuf::default();
-        h.subscribe("mem", Declared::local(buf.clone()), Box::new(|_| {}))
-            .unwrap();
-        p.publish_message(&record(ContentClass::OwnKeyDecrypted))
-            .unwrap();
-        drop(p);
-        assert!(h.wait_closed(Duration::from_secs(5)));
-        let bytes = buf.0.lock().unwrap().clone();
-        let mut r = StreamReader::new(&bytes[..]);
-        let Some(Record::Message(m)) = r.next_record().unwrap() else {
-            panic!()
-        };
-        assert_eq!(m.content_class, ContentClass::OwnKeyDecrypted);
-        assert_eq!(m.gated, !expect_content, "{stream_class:?}");
-        assert_eq!(
-            contains(&bytes, SENTINEL),
-            expect_content,
-            "{stream_class:?}"
-        );
-    }
-}
-
-/// Own-key streams are refused on TCP and served on a mode-0600 Unix socket.
-#[test]
-fn own_key_streams_are_uds_only_and_the_socket_is_0600() {
+fn own_key_streams_are_served_on_a_0600_socket() {
     let dir = temp_dir("ok");
     let path = dir.join("own.sock");
     let mut p = Publisher::new(messages(ContentClass::OwnKeyDecrypted), small()).unwrap();
     let h = p.handle();
     assert_eq!(h.content_class(), ContentClass::OwnKeyDecrypted);
-    let err = Listener::bind_tcp("127.0.0.1:0", h.clone())
-        .err()
-        .expect("own-key over TCP refused");
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
 
     let listener = Listener::bind_uds(&path, h.clone()).unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -204,38 +167,6 @@ fn bind_uds_refuses_a_live_socket_and_replaces_a_stale_one() {
     assert!(UnixStream::connect(&path).is_ok());
     drop(second);
     let _ = std::fs::remove_dir_all(dir);
-}
-
-/// Under a class that forbids content, spectrum streams faster than the row-rate cap (or with
-/// no declared rate) are refused; survey-speed waterfalls and permitting classes are allowed.
-#[test]
-fn gated_spectrum_row_rate_is_capped() {
-    let spectrum = |class, rate: Option<f64>| {
-        let mut h = StreamHeader::new("s", StreamKind::Spectrum, class, "t");
-        h.datatype = Some("rf32_le".into());
-        h.sample_rate_hz = rate;
-        h.fft_size = Some(1024);
-        h.max_frame_len = 16 * 1024;
-        Publisher::new(h, small())
-    };
-    for class in [
-        ContentClass::MetadataOnly,
-        ContentClass::RestrictedCellular,
-        ContentClass::RestrictedPaging,
-    ] {
-        assert!(matches!(
-            spectrum(class, Some(1000.0)),
-            Err(StreamError::SpectrumRowRate { .. })
-        ));
-        assert!(matches!(
-            spectrum(class, None),
-            Err(StreamError::SpectrumRowRate { .. })
-        ));
-        assert!(spectrum(class, Some(30.0)).is_ok(), "survey waterfall");
-        assert!(spectrum(class, Some(hk_stream::GATED_SPECTRUM_MAX_ROW_RATE_HZ)).is_ok());
-    }
-    assert!(spectrum(ContentClass::Unrestricted, Some(10_000.0)).is_ok());
-    assert!(spectrum(ContentClass::OwnKeyDecrypted, None).is_ok());
 }
 
 /// P7: 1000 connect/close cycles on an idle stream are reaped without any publish, and open

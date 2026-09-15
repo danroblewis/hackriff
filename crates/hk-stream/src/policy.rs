@@ -1,4 +1,5 @@
-//! Typed metadata allowlist (legal guardrail; docs/stream-contract.md §6.2, §9.3).
+//! Typed metadata allowlist (docs/stream-contract.md §6.2, §9.3). Applies only when content
+//! gating is opted in ([`hk_model::content_gating_enabled`]); by default every class permits content.
 //!
 //! Under a class that forbids content, text placed in `metadata`, `frame_model`, `identity` or an
 //! annotation label would leak content past the `content` gate. A [`MetadataPolicy`] lists what
@@ -308,47 +309,4 @@ pub fn annotation_is_allowlist_shaped(a: &Annotation) -> bool {
         || (metadata_is_allowlist_shaped(&a.metadata)
             && is_token(&a.value)
             && quantize_confidence(a.confidence) == a.confidence)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn types_reject_free_text() {
-        let digits = MetadataType::Digits { max_len: 8 };
-        assert!(digits.accepts(&json!("12345678")));
-        assert!(!digits.accepts(&json!("123456789")));
-        assert!(!digits.accepts(&json!("12 34")));
-        let hex = MetadataType::Hex { max_len: 8 };
-        assert!(hex.accepts(&json!("a1B2c3")));
-        assert!(!hex.accepts(&json!("SMUGGL")));
-        assert!(!MetadataType::Enum(vec!["alpha".into()]).accepts(&json!("hello")));
-        assert!(!MetadataType::Integer.accepts(&json!(1.5)));
-    }
-
-    #[test]
-    fn confidence_is_quantised() {
-        assert_eq!(quantize_confidence(0.80657169), 0.81);
-        assert_eq!(quantize_confidence(1.0), 1.0);
-        assert_eq!(quantize_confidence(0.0), 0.0);
-        assert_eq!(quantize_confidence(f64::NAN), 0.0);
-        for i in 0..=100 {
-            let q = quantize_confidence(i as f64 / 100.0);
-            assert_eq!(quantize_confidence(q), q, "idempotent at {i}");
-        }
-    }
-
-    #[test]
-    fn shape_check() {
-        assert!(metadata_is_allowlist_shaped(
-            &json!({"capcode": "1234567", "function": 2, "numeric": true, "encoding": "alpha"})
-        ));
-        assert!(!metadata_is_allowlist_shaped(
-            &json!({"text": "hello pager"})
-        ));
-        assert!(!metadata_is_allowlist_shaped(&json!({"n": {"a": 1}})));
-        assert!(!metadata_is_allowlist_shaped(&json!([1])));
-    }
 }

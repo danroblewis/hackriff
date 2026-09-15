@@ -1,11 +1,9 @@
 //! AWARE-036 (T4): an unknown ISM sensor. The `fsk_burst_train` synth (2-FSK 4800 Bd, ±9.6 kHz,
 //! preamble + sync 2DD4 + 48-bit payload + CRC-16/CCITT-FALSE, a burst every 120 ms ± 10 ms,
-//! 3 kHz CFO) replayed at 433.92 MHz, which is not an unrestricted band prior, so content fails
-//! closed until a user classification rule vouches for the emitter.
+//! 3 kHz CFO) replayed at 433.92 MHz.
 //!
 //! Unclassified run: every burst detected, one Track, one Emitter `known_status: unknown`, blind
-//! symbol rate within ±1 % and deviation within ±5 %, CRC-valid Decodes whose content is withheld
-//! (the gated getters also reduce their metadata to the fail-closed allowlist). Classified run:
+//! symbol rate within ±1 % and deviation within ±5 %, CRC-valid Decodes. Classified run:
 //! framing recovered on every CRC-valid Decode (sync 2DD4, CRC-16/CCITT-FALSE) plus the decoder's
 //! ground-truth label, the Decoder appends `known`, and the payloads are kept and match truth.
 
@@ -60,10 +58,9 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
             .any(|t| matches_truth(t, 0.0, f, bw, center_tol_hz(t)))
     };
 
-    // --- Unclassified: metadata flows, content withheld.
+    // --- Unclassified run.
     let dir = TempDir::new("a036");
     let (cfg, replay) = replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
-    assert_eq!(replay.class, hk_model::ContentClass::FAIL_CLOSED);
     let s = finish(start(cfg, replay));
     assert_eq!(s.always_on_lost_samples, 0);
     let repo = repo(&dir.0);
@@ -97,7 +94,7 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
     );
     assert_eq!(tracks.len(), 1, "[{AWARE_036}] one Track");
 
-    // One Emitter, unknown, reached through query_inventory (identity withheld: unclassified).
+    // One Emitter, unknown, reached through query_inventory.
     let emitters: Vec<_> = inventory(&repo, InventoryQuery::default())
         .into_iter()
         .filter(|e| {
@@ -137,7 +134,7 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
     assert!(rate_err.abs() <= 0.01, "[{AWARE_036}] symbol rate ±1 %");
     assert!(dev_err.abs() <= 0.05, "[{AWARE_036}] deviation ±5 %");
 
-    // Framing: CRC-valid Decodes carrying the recovered structure; content withheld.
+    // Framing: CRC-valid Decodes carrying the recovered structure.
     let decodes = decodes_of(&repo, e.emitter.id);
     let valid: Vec<&Decode> = decodes
         .iter()
@@ -153,24 +150,11 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
         "[{AWARE_036}] CRC-valid {} of {n}",
         valid.len()
     );
-    // Unclassified, the gated getters withhold content and reduce metadata to the fail-closed
-    // allowlist (the CRC status column still reads); framing structure is asserted on the
-    // classified run below.
-    for d in &valid {
-        assert!(
-            d.content.is_none(),
-            "[{AWARE_036}] unclassified content kept"
-        );
-    }
+    // Framing structure is asserted on the classified run below.
     eprintln!(
         "[{AWARE_036}] unclassified: decode metadata {} ; ground-truth labels {:?}",
         valid[0].metadata,
         ground_truth_labels(&repo, e.emitter.id)
-    );
-    assert_eq!(
-        count_found(&all_bytes(&dir.0), &sentinels(&payloads)),
-        0,
-        "[{AWARE_036}] payload stored without a classification"
     );
 
     // --- Classified by the user (own test sensor): CRC validates → known, payloads kept. The
@@ -263,7 +247,7 @@ fn aware_036_unknown_fsk_sensor_detected_tracked_estimated_framed_and_classified
     );
 }
 
-/// Values of the Emitter's ground-truth annotations (gated getter).
+/// Values of the Emitter's ground-truth annotations.
 fn ground_truth_labels(repo: &Repository, eid: hk_model::EmitterId) -> Vec<String> {
     repo.annotations_for(&AnnotationTarget::Emitter(eid))
         .unwrap()

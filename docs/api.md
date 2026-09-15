@@ -245,7 +245,7 @@ Device, display, recording and bookmark endpoints, all behind the bearer token, 
 
 `device.baseband_filter` (inside the `caps_json`, T-067) describes the selectable bandwidths: `{"min_hz", "max_hz"}` for a continuous range or `{"values_hz": [...]}` for a discrete list (e.g. the HackRF's MAX2837 filter steps), or `null` when the device has no selectable filter.
 
-**Legal gating lives in the pipeline and repository, not the API**: a retune re-derives the window's content class and re-plumbs at a block boundary; recordings are refused under a class that forbids content; the API never opens content itself (bookmarks are user metadata only). `transmit.available` is always `false`.
+**Content gating is off by default (T-143)** and lives in the pipeline and repository, not the API. Unless `HK_CONTENT_GATING=1` opts in, every class permits content: recordings, audio, chains, decodes and identities flow regardless of band, and `content_class`/`source_class` are informational. When opted in, a retune re-derives the window's content class and re-plumbs at a block boundary, and recordings are refused under a class that forbids content; the API never opens content itself (bookmarks are user metadata only). `transmit.available` is always `false`.
 
 ## Selections (T-052)
 

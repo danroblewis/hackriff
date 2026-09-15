@@ -139,10 +139,10 @@ fn gate_decode(
         Some(d) => {
             let class = decode_identity_class(conn, d)?;
             match (access.reveals(class), class) {
-                (true, Some(class)) => (
+                (true, class) => (
                     InventoryIdentity::Clear {
                         identity: d.clone(),
-                        class,
+                        class: class.unwrap_or(ContentClass::FAIL_CLOSED),
                     },
                     true,
                 ),
@@ -287,7 +287,7 @@ pub(super) fn check_tags(
     let Some((identity, class)) = identity else {
         return Ok(());
     };
-    if class == Some(ContentClass::Unrestricted) {
+    if class == Some(ContentClass::Unrestricted) || !crate::content::content_gating_enabled() {
         return Ok(());
     }
     if vocabulary_only(class) {
@@ -344,7 +344,7 @@ impl Repository {
 
     /// One decode as stored, identity and metadata in clear whatever the class. Crate-private:
     /// every path out of the process goes through a gated read.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn decode_ungated(&self, id: DecodeId) -> Result<Decode, RepoError> {
         body_by_id(
             &self.conn,
@@ -453,7 +453,8 @@ impl Repository {
         let Some(current) = current else {
             return Err(refused("an unclassified identity cannot be opened"));
         };
-        if ever_restricted || never_openable(current) {
+        if (ever_restricted && crate::content::content_gating_enabled()) || never_openable(current)
+        {
             return Err(refused(
                 "restricted-cellular and restricted-paging identities can never be opened",
             ));

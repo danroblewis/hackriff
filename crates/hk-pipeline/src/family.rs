@@ -1057,14 +1057,10 @@ mod tests {
     //! that address emitters only by the id the write returned (never by a frequency lookup).
 
     use super::*;
-    use crate::class::{band_class, classify_emitter};
     use hk_context::{Region, is_service_family};
     use hk_demod::AnalogMode;
     use hk_demod::fsk::FSK_FAMILY;
-    use hk_model::{
-        DecodedIdentity, Fingerprint, Identity, IdentityClaim, IdentityScheme, LinkTarget,
-        Sighting, TimeRange, TrackId,
-    };
+    use hk_model::{Fingerprint, LinkTarget, Sighting, TimeRange, TrackId};
 
     const FM_ROW: &str = "us-47cfr2106-compact:fm-broadcast";
     const AIRBAND_ROW: &str = "us-47cfr2106-compact:aviation-vhf-comm";
@@ -1481,52 +1477,5 @@ mod tests {
             repo.emitter(r.emitter_id).unwrap().known_status,
             KnownStatus::Known
         );
-    }
-
-    /// Legal guardrail: in the paging band a mapped family sets only a status and a metadata-only
-    /// explanation. The class stays restricted, and a restricted identity stays withheld.
-    #[test]
-    fn a_mapped_family_in_the_paging_band_opens_nothing() {
-        const FC: f64 = 930.5e6;
-        let source = band_class(&[FC], 2.4e6);
-        assert_eq!(source, ContentClass::RestrictedPaging);
-        let mut repo = Repository::open_in_memory().unwrap();
-        let mut s = sighting(FC, 230e3, "wfm");
-        s.identity = Some(IdentityClaim {
-            identity: DecodedIdentity {
-                scheme: IdentityScheme::RdsPi,
-                value: "BEEF".into(),
-            },
-            content_class: ContentClass::RestrictedPaging,
-        });
-        let table = table();
-        let r = repo.record_sighting(&s, None).unwrap();
-        let x = explain_emitter(&mut repo, &table, r.emitter_id).unwrap();
-        assert_eq!(x.explanations[0].service, "fm-broadcast");
-        let e = repo.emitter(r.emitter_id).unwrap();
-        assert_eq!(e.identity, Identity::Unknown, "identity withheld");
-        assert_ne!(e.known_status, KnownStatus::Known);
-        let notes = repo
-            .annotations_for(&AnnotationTarget::Emitter(r.emitter_id))
-            .unwrap();
-        assert!(!notes.is_empty());
-        for a in &notes {
-            assert!(a.content.is_none());
-            assert!(!a.content_class.permits_content());
-            assert!(!a.metadata.to_string().contains("BEEF"));
-        }
-        let rules = vec![crate::ClassRule {
-            freq_hz: [929e6, 932e6],
-            content_class: ContentClass::Unrestricted,
-            by: "test: tries to open".into(),
-        }];
-        for src in [
-            source,
-            ContentClass::MetadataOnly,
-            ContentClass::Unrestricted,
-        ] {
-            let (class, _) = classify_emitter(&rules, src, FC - 115e3, FC + 115e3).unwrap();
-            assert_eq!(class, ContentClass::RestrictedPaging);
-        }
     }
 }
