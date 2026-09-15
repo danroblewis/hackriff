@@ -6,7 +6,7 @@ import { fmtT } from "./history";
 import { type OutputSession, progressText } from "./outputs";
 import {
   type ActionId, type ActionOutcome, type InspectReport, MAX_NAME_LEN, SELECTION_ACTIONS, type Selection,
-  type SelectionActionHooks, type SelectionStore, runSelectionAction, syncText,
+  type SelectionActionHooks, type SelectionStore, runSelectionAction, sortSelections, syncText,
 } from "./selections";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -23,12 +23,19 @@ export interface SelectionActions {
 }
 
 export class SelectionPanel {
+  /** Frequency-ascending by default (T-083); kept across reloads (rename/remove/sync all re-render
+   * through [[render]] without touching this). */
+  private sortDir: 1 | -1 = 1;
+
   constructor(private store: SelectionStore, private actions: SelectionActions) {
     store.subscribe((list) => this.render(list));
     $("sel-clear").addEventListener("click", () => store.clear());
     $<HTMLInputElement>("sel-all").addEventListener("change", (e) => store.pickAll((e.target as HTMLInputElement).checked));
     $("sel-inspect-picked").addEventListener("click", () => void this.run("inspect", store.pickedList()));
     $("sel-delete-picked").addEventListener("click", () => { for (const s of store.pickedList()) store.remove(s.id); });
+    for (const th of $("sel-table").querySelectorAll<HTMLElement>("th[data-key]")) {
+      th.addEventListener("click", () => { this.sortDir = this.sortDir === 1 ? -1 : 1; this.render(this.store.list()); });
+    }
     this.render(store.list());
   }
 
@@ -117,7 +124,10 @@ export class SelectionPanel {
 
   private render(list: readonly Selection[]) {
     const picked = this.store.pickedList().length;
-    $("sel-body").replaceChildren(...list.map((s) => this.tr(s)));
+    const sorted = sortSelections(list, this.sortDir);
+    $("sel-body").replaceChildren(...sorted.map((s) => this.tr(s)));
+    const freqTh = $("sel-table").querySelector<HTMLElement>("th[data-key]");
+    freqTh?.setAttribute("aria-sort", this.sortDir > 0 ? "ascending" : "descending");
     $("sel-table").hidden = !list.length;
     $("sel-clear").hidden = !list.length;
     $("sel-bulk").hidden = !picked;

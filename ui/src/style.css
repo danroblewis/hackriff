@@ -75,10 +75,10 @@ table.grid .num { text-align: right; font-variant-numeric: tabular-nums; }
 .sel-report ul { margin: 0; padding-left: 1.2em; }
 .sel-report li { margin: 2px 0; overflow-wrap: anywhere; }
 #inventory h3 { margin: 10px 0 0; font-size: 13px; color: var(--dim); }
-#inventory table.grid th button { background: none; border: 0; padding: 0; color: var(--dim); font-size: 12px; }
-#inventory table.grid th[aria-sort] button { color: var(--fg); }
-#inventory table.grid th[aria-sort=ascending] button::after { content: " ▲"; }
-#inventory table.grid th[aria-sort=descending] button::after { content: " ▼"; }
+#inventory table.grid th button, #sel-table th button { background: none; border: 0; padding: 0; color: var(--dim); font: inherit; font-size: 12px; }
+#inventory table.grid th[aria-sort] button, #sel-table th[aria-sort] button { color: var(--fg); }
+#inventory table.grid th[aria-sort=ascending] button::after, #sel-table th[aria-sort=ascending] button::after { content: " ▲"; }
+#inventory table.grid th[aria-sort=descending] button::after, #sel-table th[aria-sort=descending] button::after { content: " ▼"; }
 #inventory table.grid tbody tr { cursor: pointer; }
 #inventory table.grid tbody tr:hover, #inventory table.grid tbody tr.sel { background: #1c2430; }
 .inv-actions { display: flex; gap: 4px; flex-wrap: wrap; white-space: normal; }

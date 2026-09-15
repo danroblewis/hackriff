@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { ControlClient, type FetchFn } from "../src/controls/client";
 import {
-  type Filters, type InventoryClient, type Row, deleteEntry, inventoryQuery, loadInventoryPage, promoteEntry,
+  type Filters, type InventoryClient, type Row, type SortState,
+  deleteEntry, inventoryQuery, loadInventoryPage, nextSort, promoteEntry, sortRows,
 } from "../src/inventory";
 
 // esbuild bundles this file to ui/node_modules/hk-ui-test/, so a URL relative to import.meta.url
@@ -119,6 +120,65 @@ test("a refused delete surfaces the server's {error, code} and does not reload",
   assert.equal(res.ok, false);
   assert.ok(!res.ok && res.message.includes("already deleted") && res.message.includes("conflict"), JSON.stringify(res));
   assert.equal(reloaded, 0);
+});
+
+// ---- sorting (T-083): default frequency ascending, header-click toggle, missing values last ----
+
+test("default order is frequency ascending", () => {
+  const rows = [
+    mkRow({ id: "a", state: "candidate", f_center_hz: 200e6 }),
+    mkRow({ id: "b", state: "candidate", f_center_hz: 50e6 }),
+    mkRow({ id: "c", state: "candidate", f_center_hz: 101e6 }),
+  ];
+  const sorted = sortRows(rows, "freq", 1);
+  assert.deepEqual(sorted.map((r) => r.id), ["b", "c", "a"]);
+});
+
+test("clicking a header sorts by it; clicking the same header again toggles direction", () => {
+  let sort: SortState = { key: "freq", dir: 1 };
+  sort = nextSort(sort, "family"); // a different column: starts ascending
+  assert.deepEqual(sort, { key: "family", dir: 1 });
+  sort = nextSort(sort, "family"); // same column again: toggles
+  assert.deepEqual(sort, { key: "family", dir: -1 });
+  sort = nextSort(sort, "family");
+  assert.deepEqual(sort, { key: "family", dir: 1 });
+});
+
+test("count and recurrence default to busiest-first on their first click", () => {
+  const fresh: SortState = { key: "freq", dir: 1 };
+  assert.deepEqual(nextSort(fresh, "count"), { key: "count", dir: -1 });
+  assert.deepEqual(nextSort(fresh, "recurrence"), { key: "recurrence", dir: -1 });
+});
+
+test("recurrence sorts by occurrences; rows with no recurrence data sort last in either direction", () => {
+  const rows = [
+    mkRow({ id: "none", state: "candidate", recurrence: null }),
+    mkRow({ id: "few", state: "candidate", recurrence: { occurrences: 2, appearances: 1, span_s: 10, on_air_s: 1, duty_cycle: 0.1 } }),
+    mkRow({ id: "many", state: "candidate", recurrence: { occurrences: 40, appearances: 5, span_s: 100, on_air_s: 80, duty_cycle: 0.8 } }),
+  ];
+  assert.deepEqual(sortRows(rows, "recurrence", -1).map((r) => r.id), ["many", "few", "none"]);
+  assert.deepEqual(sortRows(rows, "recurrence", 1).map((r) => r.id), ["few", "many", "none"]);
+});
+
+test("sort state (not reset by loading new rows) still orders a fresh page the same way", () => {
+  // Simulates a header click, then a reload (Promote/Delete) bringing in a different rows array;
+  // the sort key/direction is a list's own field, untouched by loading, so re-applying it to the
+  // new rows reproduces the chosen order.
+  let sort: SortState = { key: "freq", dir: 1 };
+  sort = nextSort(sort, "count");
+  const reloaded = [
+    mkRow({ id: "x", state: "candidate", count: 5 }),
+    mkRow({ id: "y", state: "candidate", count: 20 }),
+    mkRow({ id: "z", state: "candidate", count: 1 }),
+  ];
+  assert.deepEqual(sortRows(reloaded, sort.key, sort.dir).map((r) => r.id), ["y", "x", "z"]);
+});
+
+test("index.html: candidate/confirmed recurrence columns and the selections frequency column are sortable", () => {
+  assert.ok((html.match(/data-key="recurrence"/g) ?? []).length === 2, "both inventory tables sort by recurrence");
+  const selStart = html.indexOf('<table id="sel-table"');
+  const selEnd = html.indexOf("</table>", selStart);
+  assert.ok(/data-key="freq"/.test(html.slice(selStart, selEnd)), "selections table sorts by frequency");
 });
 
 // ---- layout: first/last-seen columns gone, sidebar present ----

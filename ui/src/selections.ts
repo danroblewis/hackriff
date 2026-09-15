@@ -79,6 +79,13 @@ export function validateSelection(s: NewSelection): string | null {
 
 const cleanName = (name: string) => Array.from(name.replace(/\s+/g, " ").trim()).slice(0, MAX_NAME_LEN).join("");
 
+/** Selections sorted by frequency (`f_lo`, the only field this presentation-only sort has to work
+ * with — a `Selection` carries no SNR/last-activity/recurrence). Pure so it's unit-tested without
+ * a DOM; T-083. */
+export function sortSelections(list: readonly Selection[], dir: 1 | -1 = 1): Selection[] {
+  return [...list].sort((a, b) => (a.f_lo - b.f_lo) * dir);
+}
+
 /** A random v4 UUID (getRandomValues works on plain-http LAN pages, randomUUID does not). */
 export function uuid4(): string {
   const b = new Uint8Array(16);
