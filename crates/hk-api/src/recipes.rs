@@ -16,13 +16,16 @@
 //! | POST | `/api/pipelines/{id}/save` | the running revision as the next version (201) |
 //!
 //! A validation failure answers `400 invalid` with `errors: [{path, message}]` and `warnings`.
-//! Mutating routes are audited like every other.
+//! Mutating routes are audited like every other; `POST /api/recipes/validate` saves nothing and
+//! is not audited.
 
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
-use crate::control::{Applied, CtlRequest, CtlResponse, Fail, dispatch, no_fields, refuse_route};
+use crate::control::{
+    Applied, CtlRequest, CtlResponse, Fail, dispatch, no_fields, parse_body, refuse_route,
+};
 use crate::http::ApiState;
 
 /// A request to the recipe runtime.
@@ -122,6 +125,7 @@ impl Action {
         !matches!(
             self,
             Self::Blocks
+                | Self::Validate
                 | Self::List
                 | Self::Get(_)
                 | Self::Version(..)
@@ -220,6 +224,19 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         Ok(a) => a,
         Err(allow) => return Some(refuse_route(state, req, allow)),
     };
+    if action == Action::Validate {
+        // Saves nothing: token-checked like every POST, but not an audited mutation.
+        return Some(
+            match parse_body(req).and_then(|body| apply(state, &action, &body)) {
+                Ok(a) => CtlResponse {
+                    status: a.status,
+                    body: a.body,
+                    allow: None,
+                },
+                Err(f) => f.response(),
+            },
+        );
+    }
     Some(dispatch(
         state,
         req,

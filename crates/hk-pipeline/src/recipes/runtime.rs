@@ -43,7 +43,7 @@ use hk_core::{Discontinuity, ReadChunk};
 use hk_dsp::{Ddc, DdcSpec, InputInfo};
 use hk_model::{ContentClass, EmitterId, SelectionId, Timestamp};
 use hk_recipe::{ChannelsSpec, Endpoint, OutputKind, PortType, RECIPE_SCHEMA, Recipe, RecipeError};
-use hk_stream::inspector::{EDIT_RECORD_TYPE, STATUS_RECORD_TYPE};
+use hk_stream::inspector::InspectorRecordType;
 use hk_stream::{OpenRefusal, PublisherHandle, StreamHeader};
 use serde_json::{Map, Value, json};
 
@@ -56,7 +56,7 @@ use crate::recipes::graph::{self, Graph, OutputBinding, Shape, Src, StageError, 
 use crate::recipes::store::{RecipeStore, StoreError};
 use crate::recipes::swap::{self, SwapReport};
 use crate::recipes::taps::{
-    FrameCtx, FrameSink, MessageFrameSink, OutputSink, StageTap, StreamCtx, TapPublisher,
+    FrameCtx, FrameSink, InspectorSink, OutputSink, StageTap, StreamCtx, TapPublisher,
     frames_header, inspector_policy, output_config, stage_header,
 };
 use crate::run::Shared;
@@ -373,10 +373,21 @@ pub(crate) struct PipelineCtl {
     pub edit_pending: AtomicBool,
     pub new_taps: Mutex<Vec<StageTap>>,
     pub taps_dirty: AtomicBool,
+    /// Closed or orphaned on-demand taps the pipeline thread handed back, dropped by the
+    /// control side ([`PipelineCtl::drop_retired_taps`]) so publisher teardown stays off it.
+    pub retired_taps: Mutex<Vec<StageTap>>,
     pub status: Mutex<Value>,
     pub streams: Mutex<Vec<StreamEntry>>,
     pub warnings: Mutex<Vec<RecipeError>>,
     pub stats: PipelineStats,
+}
+
+impl PipelineCtl {
+    /// Drops the taps the pipeline thread retired (outside the lock).
+    pub(crate) fn drop_retired_taps(&self) {
+        let retired = std::mem::take(&mut *lock(&self.retired_taps));
+        drop(retired);
+    }
 }
 
 /// Runs, edits, lists and stores recipes on a running pipeline run
@@ -389,6 +400,8 @@ pub struct RecipeRuntime {
     store: RecipeStore,
     pipelines: Mutex<BTreeMap<String, Arc<PipelineCtl>>>,
     next_id: AtomicU64,
+    /// How long an edit waits for a chunk boundary, ms ([`EDIT_TIMEOUT`] by default).
+    edit_timeout_ms: AtomicU64,
 }
 
 fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
@@ -479,10 +492,11 @@ fn pipeline_class(shared: &Shared, recipe: &Recipe, lo: f64, hi: f64) -> Content
     hk_stream::gate::clamp(source, recipe.output_policy.content_class)
 }
 
-/// Builds the stream of one recipe output and registers it with the run's stream registry.
+/// Builds the stream of one recipe output. It is not offered in the run's stream registry yet:
+/// [`offer_streams`] does that once the graph it serves is running, so a failed start or edit
+/// never replaces a running output's registry entry.
 fn build_sink(
     ctx: &StreamCtx,
-    shared: &Shared,
     recipe: &Recipe,
     b: &OutputBinding,
 ) -> Result<(OutputSink, Option<StreamEntry>), RuntimeError> {
@@ -494,9 +508,10 @@ fn build_sink(
                 ctx,
                 recipe,
                 format!("inspector/{}/{}", ctx.pipeline_id, b.spec.id),
+                &b.spec.id,
             );
             let policy = (!ctx.class.permits_content()).then(|| inspector_policy(recipe));
-            let s = MessageFrameSink::new(header.clone(), output_config(), policy).map_err(fail)?;
+            let s = InspectorSink::new(header.clone(), output_config(), policy).map_err(fail)?;
             let h = s.handle();
             (OutputSink::Frames(s), "inspector", header, h)
         }
@@ -505,6 +520,7 @@ fn build_sink(
                 ctx,
                 recipe,
                 format!("stage/{}/{}", ctx.pipeline_id, b.spec.id),
+                &b.spec.id,
                 b.ty,
                 b.rate_hz,
             );
@@ -523,9 +539,6 @@ fn build_sink(
             (OutputSink::Stage(tap), "stage", header, h)
         }
     };
-    if let Some(sink_fn) = &shared.cfg.stream_sink {
-        sink_fn(&header, handle.clone());
-    }
     Ok((
         sink,
         Some(StreamEntry {
@@ -536,6 +549,41 @@ fn build_sink(
             handle,
         }),
     ))
+}
+
+/// Offers `entries` in the run's stream registry (registering an id again replaces its entry).
+fn offer_streams<'a>(shared: &Shared, entries: impl IntoIterator<Item = &'a StreamEntry>) {
+    if let Some(sink) = &shared.cfg.stream_sink {
+        for e in entries {
+            sink(&e.header, e.handle.clone());
+        }
+    }
+}
+
+/// Stops offering the streams `ids` in the run's stream registry.
+fn withdraw_streams<'a>(shared: &Shared, ids: impl IntoIterator<Item = &'a str>) {
+    if let Some(unsink) = &shared.cfg.stream_unsink {
+        for id in ids {
+            unsink(id);
+        }
+    }
+}
+
+/// Moves the taps `gone` selects to [`PipelineCtl::retired_taps`], so the control side drops
+/// them rather than the pipeline thread.
+fn retire_taps(ctl: &PipelineCtl, taps: &mut Vec<StageTap>, gone: impl Fn(&StageTap) -> bool) {
+    if !taps.iter().any(&gone) {
+        return;
+    }
+    let mut retired = lock(&ctl.retired_taps);
+    let mut k = 0;
+    while k < taps.len() {
+        if gone(&taps[k]) {
+            retired.push(taps.swap_remove(k));
+        } else {
+            k += 1;
+        }
+    }
 }
 
 impl RecipeRuntime {
@@ -553,7 +601,14 @@ impl RecipeRuntime {
             store,
             pipelines: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
+            edit_timeout_ms: AtomicU64::new(EDIT_TIMEOUT.as_millis() as u64),
         }
+    }
+
+    /// Sets how long later edits wait for the pipeline thread's chunk boundary.
+    pub fn set_edit_timeout(&self, timeout: Duration) {
+        self.edit_timeout_ms
+            .store(timeout.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// The block catalogue recipes validate and build against.
@@ -786,7 +841,7 @@ impl RecipeRuntime {
         let mut sinks = Vec::with_capacity(g.outputs.len());
         let mut streams = Vec::new();
         for b in &g.outputs {
-            let (s, e) = build_sink(&streams_ctx, &shared, &recipe, b)?;
+            let (s, e) = build_sink(&streams_ctx, &recipe, b)?;
             sinks.push(s);
             streams.extend(e);
         }
@@ -821,6 +876,7 @@ impl RecipeRuntime {
             edit_pending: AtomicBool::new(false),
             new_taps: Mutex::new(Vec::new()),
             taps_dirty: AtomicBool::new(false),
+            retired_taps: Mutex::new(Vec::new()),
             status: Mutex::new(Value::Object(Map::new())),
             streams: Mutex::new(streams),
             warnings: Mutex::new(warnings),
@@ -847,6 +903,8 @@ impl RecipeRuntime {
             disc: true,
         };
         runner.retap();
+        // Held until the streams are offered, so an edit can't offer its streams first.
+        let _serial = lock(&ctl.edit_lock);
         lock(&self.pipelines).insert(id.clone(), Arc::clone(&ctl));
         if let Err(e) = thread::Builder::new()
             .name("hk-recipe".into())
@@ -855,6 +913,7 @@ impl RecipeRuntime {
             lock(&self.pipelines).remove(&id);
             return Err(RuntimeError::new(500, "failed", format!("spawn: {e}")));
         }
+        offer_streams(&shared, lock(&ctl.streams).iter());
         Ok(id)
     }
 
@@ -898,6 +957,7 @@ impl RecipeRuntime {
     }
 
     fn value_of(ctl: &PipelineCtl) -> Value {
+        ctl.drop_retired_taps();
         let cs = lock(&ctl.control).clone();
         let running = ctl.running.load(Ordering::SeqCst);
         json!({
@@ -1021,7 +1081,7 @@ impl RecipeRuntime {
                     entries.push(None);
                 }
                 None => {
-                    let (s, e) = build_sink(&ctl.streams_ctx, &shared, &recipe, b)?;
+                    let (s, e) = build_sink(&ctl.streams_ctx, &recipe, b)?;
                     plan.push(SinkSlot::New(Some(s)));
                     entries.push(e);
                 }
@@ -1051,11 +1111,18 @@ impl RecipeRuntime {
             edit: retired,
             report,
             applied_at_sample,
-        } = wait_edit(&ctl, &rx)?;
+        } = wait_edit(
+            &ctl,
+            &rx,
+            Duration::from_millis(self.edit_timeout_ms.load(Ordering::Relaxed)),
+        )?;
         // Retired instances and streams are dropped here, off the pipeline thread.
         drop(retired);
+        ctl.drop_retired_taps();
         let report = report.map_err(|m| RuntimeError::new(409, "conflict", m))?;
-        // Stream list: kept outputs keep their entries; new ones are added.
+        // Stream list: kept outputs keep their entries; new ones are added. Only now that the new
+        // graph runs are new streams offered (replacing a changed output's entry of the same id)
+        // and removed ones withdrawn; a failed edit left every running entry registered.
         {
             let mut streams = lock(&ctl.streams);
             let old: Vec<StreamEntry> = std::mem::take(&mut *streams);
@@ -1069,6 +1136,13 @@ impl RecipeRuntime {
                     }
                 }
             }
+            offer_streams(&shared, entries.iter().flatten());
+            withdraw_streams(
+                &shared,
+                old.iter()
+                    .filter(|o| !streams.iter().any(|s| s.stream_id == o.stream_id))
+                    .map(|o| o.stream_id.as_str()),
+            );
         }
         *lock(&ctl.control) = ControlState {
             recipe: Arc::clone(&recipe),
@@ -1104,7 +1178,8 @@ impl RecipeRuntime {
         Ok(json!({"id": saved.id, "version": saved.version, "pipeline_id": ctl.id}))
     }
 
-    /// `DELETE /api/pipelines/{id}`: stops it (its streams finish) and forgets it.
+    /// `DELETE /api/pipelines/{id}`: stops it (its streams finish and are no longer offered) and
+    /// forgets it.
     pub fn stop_json(&self, id: &str) -> Result<Value, RuntimeError> {
         let ctl = self.found(id)?;
         ctl.stop.store(true, Ordering::SeqCst);
@@ -1114,6 +1189,13 @@ impl RecipeRuntime {
         }
         let v = Self::value_of(&ctl);
         lock(&self.pipelines).remove(id);
+        if let Some(shared) = ctl.shared.upgrade() {
+            let _serial = lock(&ctl.edit_lock);
+            withdraw_streams(
+                &shared,
+                lock(&ctl.streams).iter().map(|s| s.stream_id.as_str()),
+            );
+        }
         Ok(json!({ "stopped": v }))
     }
 
@@ -1126,8 +1208,12 @@ impl RecipeRuntime {
     }
 }
 
-fn wait_edit(ctl: &PipelineCtl, rx: &Receiver<EditDone>) -> Result<EditDone, RuntimeError> {
-    let deadline = Instant::now() + EDIT_TIMEOUT;
+fn wait_edit(
+    ctl: &PipelineCtl,
+    rx: &Receiver<EditDone>,
+    timeout: Duration,
+) -> Result<EditDone, RuntimeError> {
+    let deadline = Instant::now() + timeout;
     loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(d) => return Ok(d),
@@ -1241,7 +1327,7 @@ impl Runner {
             self.retap();
         }
         if self.taps.iter().any(StageTap::is_closed) {
-            self.taps.retain(|t| !t.is_closed());
+            retire_taps(&self.ctl, &mut self.taps, StageTap::is_closed);
             self.retap();
         }
         if self.ctl.edit_pending.swap(false, Ordering::SeqCst) {
@@ -1285,7 +1371,7 @@ impl Runner {
                 self.graph.nodes[p].taps.0 |= 1 << k;
             }
         }
-        self.taps.retain(|t| t.at.is_some());
+        retire_taps(&self.ctl, &mut self.taps, |t| t.at.is_none());
     }
 
     fn apply_edit(&mut self, mut e: PipelineEdit) {
@@ -1340,7 +1426,7 @@ impl Runner {
             let t = Self::time_of(self.anchor, self.shared.fs, applied_at_sample as f64);
             for s in &mut self.sinks {
                 if let OutputSink::Frames(f) = s {
-                    let _ = f.record(t, EDIT_RECORD_TYPE, m.clone());
+                    let _ = f.record(t, InspectorRecordType::Edit, m.clone());
                 }
             }
         }
@@ -1494,7 +1580,7 @@ impl Runner {
         let t = Self::time_of(self.anchor, self.shared.fs, at as f64);
         for s in &mut self.sinks {
             if let OutputSink::Frames(f) = s {
-                let _ = f.record(t, STATUS_RECORD_TYPE, m.clone());
+                let _ = f.record(t, InspectorRecordType::Status, m.clone());
             }
         }
         inc(&self.ctl.stats.status_ticks);

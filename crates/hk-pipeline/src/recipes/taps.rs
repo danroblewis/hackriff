@@ -2,11 +2,9 @@
 //! contract §14; T-088).
 //!
 //! - **Frames** (`inspector` outputs, `frames` stage taps) go out through a [`FrameSink`]: one
-//!   record per frame, plus one `status` record per status tick and one `edit` record per applied
-//!   hot edit. Until T-089's `Publisher::publish_frame` lands, [`MessageFrameSink`] publishes them
-//!   as §6 message records (same gate, same allowlist reduction) whose `metadata.record` names
-//!   the §14 record type (`frame`, `status`, `edit`); swapping the sink to `publish_frame` is a
-//!   one-line change and nothing upstream moves.
+//!   §14.2 `frame` record per frame ([`Publisher::publish_frame`]), plus one §14.3 `status`
+//!   record per status tick and one `edit` record per applied hot edit
+//!   ([`Publisher::publish_record`]). Their headers carry the §14.1 `inspector` profile.
 //! - **Stage taps** ([`StageTap`]) publish an `iq`/`real`/`soft`/`bits` port's chunk as one binary
 //!   data record (§14.4): `iq` as `cf32_le`, `real` as `rf32_le` (audio kind), `soft` as
 //!   `rf32_le` (symbols), `bits` as `ru8`. A tap with no open consumer publishes nothing and
@@ -24,16 +22,14 @@ use hk_blocks::{ChunkFlags, FrameInfo, Output, PortVec};
 use hk_model::{ContentClass, EmitterId, Timestamp};
 use hk_recipe::{PortType, Recipe};
 use hk_stream::inspector::{
-    FRAME_RECORD_TYPE, FitStatus, FrameMetadata, INSPECTOR_MESSAGE_SCHEMA, to_hex,
+    ChannelInfo, FRAME_RECORD_TYPE, FitStatus, FrameContent, FrameMetadata, FrameRecord,
+    INSPECTOR_MESSAGE_SCHEMA, InspectorProfile, InspectorRecordType, InspectorSource, to_hex,
 };
 use hk_stream::{
-    BinaryRecord, MessageRecord, MetadataPolicy, MetadataType, Publisher, PublisherConfig,
-    PublisherHandle, RecordFlags, StreamError, StreamHeader, StreamKind,
+    BinaryRecord, MetadataPolicy, MetadataType, Publisher, PublisherConfig, PublisherHandle,
+    RecordFlags, StreamError, StreamHeader, StreamKind,
 };
 use serde_json::{Map, Value};
-
-/// `metadata` key naming the §14 record type while frames ride as message records.
-pub const RECORD_KEY: &str = "record";
 
 /// Most frame bytes a frame record serialises (bigger frames are cut; `bit_len` stays true).
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -54,7 +50,7 @@ pub struct FrameCtx<'a> {
     pub edit_rev: u32,
 }
 
-/// Where a pipeline's frames go (ADR-0011 §7: until `Publisher::publish_frame`).
+/// Where a pipeline's frames go.
 pub trait FrameSink: Send {
     /// Publishes one frame record.
     fn frame(
@@ -69,7 +65,7 @@ pub trait FrameSink: Send {
     fn record(
         &mut self,
         t: Timestamp,
-        record_type: &'static str,
+        record_type: InspectorRecordType,
         metadata: Map<String, Value>,
     ) -> Result<(), StreamError>;
 
@@ -80,14 +76,14 @@ pub trait FrameSink: Send {
     fn header(&self) -> &StreamHeader;
 }
 
-/// Frames as §6 message records through a gated [`Publisher`].
-pub struct MessageFrameSink {
+/// §14 inspector records through a gated [`Publisher`].
+pub struct InspectorSink {
     publisher: Publisher,
     handle: PublisherHandle,
     frames: u64,
 }
 
-impl MessageFrameSink {
+impl InspectorSink {
     /// A sink on a new messages publisher for `header`; `policy` is required when the header's
     /// class forbids content ([`inspector_policy`]).
     pub fn new(
@@ -107,7 +103,7 @@ impl MessageFrameSink {
     }
 }
 
-impl FrameSink for MessageFrameSink {
+impl FrameSink for InspectorSink {
     fn frame(
         &mut self,
         t: Timestamp,
@@ -117,74 +113,46 @@ impl FrameSink for MessageFrameSink {
     ) -> Result<(), StreamError> {
         let index = self.frames;
         self.frames += 1;
-        let md = FrameMetadata {
-            frame: Some(index),
-            sample_index: Some(info.source_index),
-            channel: Some(info.channel),
-            channel_hz: Some(ctx.channel_hz).filter(|f| f.is_finite()),
-            bit_len: Some(info.bit_len),
-            recipe_version: Some(ctx.recipe_version),
-            edit_rev: Some(ctx.edit_rev),
-            fec_corrected_bits: Some(info.corrected_bits),
-            fit: Some(info.layers.as_ref().map_or(FitStatus::None, |l| l.fit)),
-        };
-        let mut metadata = serde_json::to_value(md).unwrap_or_else(|_| Value::Object(Map::new()));
-        if let Value::Object(m) = &mut metadata {
-            m.insert(RECORD_KEY.into(), FRAME_RECORD_TYPE.into());
-        }
-        let mut content = Map::new();
-        content.insert(
-            "hex".into(),
-            to_hex(&bytes[..bytes.len().min(MAX_FRAME_BYTES)]).into(),
-        );
-        if let Some(l) = &info.layers {
-            content.insert(
-                "layers".into(),
-                serde_json::to_value(l.as_ref()).unwrap_or(Value::Null),
-            );
-        }
         let class = self.publisher.header().content_class;
-        self.publisher
-            .publish_message(&MessageRecord {
-                t,
-                emitter_id: ctx.emitter_id,
-                provenance_ref: None,
-                content_class: class,
-                decode_id: None,
-                annotation_id: None,
-                decoder: Some(ctx.decoder.to_owned()),
-                frame_model: Some(ctx.frame_model.to_owned()),
-                crc_status: Some(info.check),
-                identity: None,
-                metadata,
-                content: Some(Value::Object(content)),
-            })
-            .map(|_| ())
+        let rec = FrameRecord {
+            record_type: FRAME_RECORD_TYPE.into(),
+            seq: 0,
+            t: t.as_unix_nanos(),
+            content_class: class,
+            gated: false,
+            crc_status: Some(info.check),
+            decoder: Some(ctx.decoder.to_owned()),
+            frame_model: Some(ctx.frame_model.to_owned()),
+            emitter_id: ctx.emitter_id,
+            metadata: FrameMetadata {
+                frame: Some(index),
+                sample_index: Some(info.source_index),
+                channel: Some(info.channel),
+                channel_hz: Some(ctx.channel_hz).filter(|f| f.is_finite()),
+                bit_len: Some(info.bit_len),
+                recipe_version: Some(ctx.recipe_version),
+                edit_rev: Some(ctx.edit_rev),
+                fec_corrected_bits: Some(info.corrected_bits),
+                fit: Some(info.layers.as_ref().map_or(FitStatus::None, |l| l.fit)),
+            },
+            // The publisher withholds content under a class that forbids it; don't build it then.
+            content: class.permits_content().then(|| FrameContent {
+                hex: to_hex(&bytes[..bytes.len().min(MAX_FRAME_BYTES)]),
+                layers: info.layers.as_deref().cloned(),
+            }),
+        };
+        self.publisher.publish_frame(&rec).map(|_| ())
     }
 
     fn record(
         &mut self,
         t: Timestamp,
-        record_type: &'static str,
-        mut metadata: Map<String, Value>,
+        record_type: InspectorRecordType,
+        metadata: Map<String, Value>,
     ) -> Result<(), StreamError> {
-        metadata.insert(RECORD_KEY.into(), record_type.into());
         let class = self.publisher.header().content_class;
         self.publisher
-            .publish_message(&MessageRecord {
-                t,
-                emitter_id: None,
-                provenance_ref: None,
-                content_class: class,
-                decode_id: None,
-                annotation_id: None,
-                decoder: None,
-                frame_model: None,
-                crc_status: None,
-                identity: None,
-                metadata: Value::Object(metadata),
-                content: None,
-            })
+            .publish_record(record_type, t, class, &Value::Object(metadata))
             .map(|_| ())
     }
 
@@ -198,9 +166,9 @@ impl FrameSink for MessageFrameSink {
 }
 
 /// The metadata allowlist of a pipeline's frame streams under a class that forbids content: the
-/// §14.2 frame keys the recipe's `output_policy.metadata_keys` names (with fixed, text-free types)
-/// plus the host-generated `record` token. Status and edit metadata (`<node>.<metric>`) is not
-/// allowlisted, so it is withheld under such a class (fail closed).
+/// §14.2 frame keys the recipe's `output_policy.metadata_keys` names (with fixed, text-free types).
+/// `status` and `edit` records are metadata only and go through
+/// [`Publisher::publish_record`] as they are.
 pub fn inspector_policy(recipe: &Recipe) -> MetadataPolicy {
     let named = |k: &str| {
         recipe
@@ -233,10 +201,6 @@ pub fn inspector_policy(recipe: &Recipe) -> MetadataPolicy {
             keys.insert(k.to_owned(), t);
         }
     }
-    keys.insert(
-        RECORD_KEY.into(),
-        MetadataType::Enum(["frame", "status", "edit"].map(String::from).to_vec()),
-    );
     MetadataPolicy {
         keys,
         frame_models: recipe.output_policy.frame_models.clone(),
@@ -260,8 +224,14 @@ pub struct StreamCtx {
     pub emitter_id: Option<EmitterId>,
 }
 
-/// Header of a frames stream (inspector output or frames tap).
-pub fn frames_header(ctx: &StreamCtx, recipe: &Recipe, stream_id: String) -> StreamHeader {
+/// Header of a frames stream (inspector output `output_id`, or a frames tap named
+/// `<node>.<port>`), with the §14.1 `inspector` profile.
+pub fn frames_header(
+    ctx: &StreamCtx,
+    recipe: &Recipe,
+    stream_id: String,
+    output_id: &str,
+) -> StreamHeader {
     let mut h = StreamHeader::new(
         stream_id,
         StreamKind::Messages,
@@ -272,19 +242,32 @@ pub fn frames_header(ctx: &StreamCtx, recipe: &Recipe, stream_id: String) -> Str
     h.center_hz = Some(ctx.center_hz);
     h.bandwidth_hz = Some(ctx.bandwidth_hz);
     h.emitter_id = ctx.emitter_id;
+    h.inspector = Some(InspectorProfile {
+        pipeline_id: ctx.pipeline_id.clone(),
+        recipe_id: recipe.id.clone(),
+        recipe_version: recipe.version,
+        output_id: output_id.to_owned(),
+        source: InspectorSource::Live,
+        channels: vec![ChannelInfo {
+            index: 0,
+            center_hz: ctx.center_hz,
+            bandwidth_hz: ctx.bandwidth_hz,
+        }],
+    });
     h
 }
 
-/// Header of a stage stream on a port of type `ty` at `rate_hz` (§14.4 table).
+/// Header of a stage stream `output_id` on a port of type `ty` at `rate_hz` (§14.4 table).
 pub fn stage_header(
     ctx: &StreamCtx,
     recipe: &Recipe,
     stream_id: String,
+    output_id: &str,
     ty: PortType,
     rate_hz: f64,
 ) -> StreamHeader {
     if ty == PortType::Frames {
-        return frames_header(ctx, recipe, stream_id);
+        return frames_header(ctx, recipe, stream_id, output_id);
     }
     let (kind, datatype) = match ty {
         PortType::Iq => (StreamKind::Iq, "cf32_le"),
@@ -336,7 +319,7 @@ pub enum TapPublisher {
         scratch: Vec<u8>,
     },
     /// Frame records.
-    Frames(MessageFrameSink),
+    Frames(InspectorSink),
 }
 
 impl TapPublisher {
@@ -350,7 +333,7 @@ impl TapPublisher {
         if header.kind == StreamKind::Messages {
             let policy =
                 (!header.content_class.permits_content()).then(|| inspector_policy(recipe));
-            return MessageFrameSink::new(header, config, policy).map(TapPublisher::Frames);
+            return InspectorSink::new(header, config, policy).map(TapPublisher::Frames);
         }
         Ok(TapPublisher::Binary {
             publisher: Publisher::new(header, config)?,
@@ -504,7 +487,7 @@ pub fn encode(data: &PortVec, out: &mut Vec<u8>) {
 /// One recipe output's stream.
 pub enum OutputSink {
     /// An `inspector` output.
-    Frames(MessageFrameSink),
+    Frames(InspectorSink),
     /// A declared `stage` output (always on).
     Stage(StageTap),
     /// Nothing served (a `messages` output before T-089).
@@ -556,7 +539,7 @@ mod tests {
         }))
         .unwrap();
         let p = inspector_policy(&recipe);
-        assert!(p.keys.contains_key("bit_len") && p.keys.contains_key(RECORD_KEY));
-        assert!(!p.keys.contains_key("frame"));
+        assert!(p.keys.contains_key("bit_len"));
+        assert!(!p.keys.contains_key("frame") && !p.keys.contains_key("record"));
     }
 }

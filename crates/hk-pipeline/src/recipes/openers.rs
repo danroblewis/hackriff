@@ -55,6 +55,7 @@ impl RecipeRuntime {
         if !ctl.running.load(Ordering::SeqCst) {
             return Err(ended());
         }
+        ctl.drop_retired_taps();
         let (recipe, shape) = {
             let cs = ctl
                 .control
@@ -78,7 +79,15 @@ impl RecipeRuntime {
             "stage/{pid}/{node}.{port}/{}",
             TAP_SEQ.fetch_add(1, Ordering::Relaxed)
         );
-        let header = stage_header(&ctl.streams_ctx, &recipe, stream_id, info.ty, info.rate_hz);
+        let output_id = format!("{node}.{port}");
+        let header = stage_header(
+            &ctl.streams_ctx,
+            &recipe,
+            stream_id,
+            &output_id,
+            info.ty,
+            info.rate_hz,
+        );
         let publisher = TapPublisher::new(header.clone(), tap_config(), &recipe, info.max_items)
             .map_err(|e| OpenRefusal::new(500, "publisher", e.to_string()))?;
         let closed = Arc::new(AtomicBool::new(false));

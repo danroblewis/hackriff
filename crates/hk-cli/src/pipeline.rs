@@ -500,6 +500,10 @@ pub(crate) fn config_for(
     let mut cfg = PipelineConfig::new(data_dir, plan)?;
     let reg = registry.clone();
     cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
+    let reg = registry.clone();
+    cfg.stream_unsink = Some(Arc::new(move |id| {
+        reg.unregister(id);
+    }));
     cfg.feeds_dir = feeds;
     if let Some(path) = calibration {
         cfg.calibrations = load_calibrations(path)?;

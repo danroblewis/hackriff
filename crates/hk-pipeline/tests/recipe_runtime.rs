@@ -19,7 +19,7 @@ mod common;
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{TempDir, tone_recording, wait_guarded};
@@ -38,6 +38,7 @@ use hk_pipeline::{
     Pipeline, PipelineConfig, PipelineHandle, SourceInfo, TrackInventory, replay_plan,
 };
 use hk_recipe::{BlockDescriptor, ParamSchema, ParamType, Params, PortSpec, PortType};
+use hk_stream::inspector::InspectorSource;
 use hk_stream::{OpenerRegistry, Record, StreamKind, StreamReader};
 use serde_json::{Value, json};
 use tungstenite::Message;
@@ -84,10 +85,17 @@ impl BlockFactory for FramerFactory {
         Ok(Box::new(Framer {
             every: get(p, "every", 5000).max(1),
             tag: get(p, "tag", 1) as u8,
+            salt: get(p, "salt", 0),
             ..Framer::default()
         }))
     }
 }
+
+/// A framer whose `salt` equals this (non-zero) value blocks inside `process` until it is
+/// cleared, holding its pipeline thread away from the next chunk boundary.
+static STALLED_SALT: AtomicU64 = AtomicU64::new(0);
+/// Set by a framer once it is blocked by [`STALLED_SALT`].
+static STALL_ENTERED: AtomicBool = AtomicBool::new(false);
 
 fn get(p: &Params, k: &str, d: u64) -> u64 {
     p.get(k).and_then(Value::as_u64).unwrap_or(d)
@@ -97,6 +105,7 @@ fn get(p: &Params, k: &str, d: u64) -> u64 {
 struct Framer {
     every: u64,
     tag: u8,
+    salt: u64,
     phase: u64,
     frames: u64,
     discs: u64,
@@ -119,6 +128,10 @@ impl Block for Framer {
     }
 
     fn process(&mut self, io: &mut Io<'_>) -> Result<(), BlockError> {
+        while self.salt != 0 && STALLED_SALT.load(Ordering::SeqCst) == self.salt {
+            STALL_ENTERED.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let input = io.input(0)?;
         if input.meta.flags.contains(ChunkFlags::DISCONTINUITY) {
             self.discs += 1;
@@ -279,6 +292,10 @@ impl Run {
         let streams = StreamRegistry::new();
         let reg = streams.clone();
         cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
+        let reg = streams.clone();
+        cfg.stream_unsink = Some(Arc::new(move |id| {
+            reg.unregister(id);
+        }));
         let handle = Pipeline::start(
             cfg,
             Box::new(source),
@@ -354,19 +371,18 @@ fn open_tcp(addr: SocketAddr, line: &str) -> StreamReader<TcpStream> {
     StreamReader::new(s)
 }
 
-/// The §14 record type: `type` once T-089 frames them natively, `metadata.record` until then.
+/// The §14 record type (`frame`, `status`, `edit`).
 fn record_type(v: &Value) -> &str {
-    v["type"]
-        .as_str()
-        .filter(|t| *t != "message")
-        .or_else(|| v["metadata"]["record"].as_str())
-        .unwrap_or("")
+    v["type"].as_str().unwrap_or("")
 }
 
+/// The next NDJSON record (§14 records are not §6 `message` records, so the generic client
+/// hands them over as unknown JSON frames).
 fn next_message(r: &mut StreamReader<TcpStream>) -> Value {
     loop {
         match r.next_record().unwrap() {
             Some(Record::Message(m)) => return m.value,
+            Some(Record::Unknown(b)) => return serde_json::from_slice(&b).unwrap(),
             Some(_) => {}
             None => panic!("the stream ended"),
         }
@@ -400,6 +416,18 @@ fn a_recipe_runs_on_a_mock_channel_and_frame_records_arrive_over_tcp_and_ws() {
     assert_eq!(h.stream_id, format!("inspector/{id}/frames"));
     assert_eq!(h.message_schema.as_deref(), Some("hackriff.inspector/1"));
     assert_eq!(h.source, "hk-pipeline:recipe:tone@1");
+    let insp = h.inspector.as_ref().expect("the §14.1 inspector profile");
+    assert_eq!(
+        (
+            insp.pipeline_id.as_str(),
+            insp.recipe_id.as_str(),
+            insp.recipe_version,
+            insp.output_id.as_str()
+        ),
+        (id.as_str(), "tone", 1, "frames")
+    );
+    assert_eq!(insp.source, InspectorSource::Live);
+    assert_eq!(insp.channels.len(), 1);
     let (mut frames, mut status) = (Vec::new(), Vec::new());
     let deadline = Instant::now() + LIMIT;
     while frames.len() < 4 || status.is_empty() {
@@ -498,6 +526,126 @@ fn a_recipe_runs_on_a_mock_channel_and_frame_records_arrive_over_tcp_and_ws() {
     let counters = run.handle().counters().to_json();
     assert_eq!(counters["budget"]["chains"], json!(1), "a recipe chain");
     drop((tcp, http));
+    run.finish();
+}
+
+/// A failed edit that changes an output but keeps its id leaves the running output offered: its
+/// registry entry is replaced only after a successful swap. DELETE then withdraws the streams.
+#[test]
+fn a_failed_edit_leaves_the_running_output_offered_and_delete_withdraws_it() {
+    const SALT: u64 = 7;
+    let run = Run::start("t088-failed-edit");
+    run.rt.set_edit_timeout(Duration::from_millis(300));
+    let mut doc = recipe("stall", 1, 5000);
+    doc["nodes"][1]["params"]["salt"] = json!(SALT);
+    let id = run
+        .rt
+        .start(parse_recipe(doc.clone()).unwrap(), band())
+        .unwrap();
+    let (tcp, http) = serve(&run.rt, &run.streams);
+    let stream = format!("inspector/{id}/frames");
+    wait("frames", LIMIT, || run.frames(&id) > 0);
+    let running = run.streams.handle(&stream).expect("offered once running");
+    assert_eq!(running.open_consumers(), 0);
+
+    // Hold the pipeline thread inside the framer so the edit never reaches a chunk boundary.
+    STALL_ENTERED.store(false, Ordering::SeqCst);
+    STALLED_SALT.store(SALT, Ordering::SeqCst);
+    wait("the framer stalls", LIMIT, || {
+        STALL_ENTERED.load(Ordering::SeqCst)
+    });
+    let mut draft = doc.clone();
+    draft["outputs"][0]["from"] = json!("framer");
+    let err = run.rt.edit(&id, parse_recipe(draft).unwrap());
+    STALLED_SALT.store(0, Ordering::SeqCst);
+    let err = err.expect_err("the stalled pipeline can't take the edit");
+    assert_eq!((err.status, err.code), (504, "timeout"));
+
+    // `/ws/{stream_id}` still serves the running output (revision 0).
+    let (mut ws, _) = tungstenite::connect(format!(
+        "ws://{}/ws/{stream}?token={TOKEN}",
+        http.local_addr()
+    ))
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("the header comes first, as text")
+    };
+    let header: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(
+        header["stream_id"],
+        json!(stream),
+        "a header, not a refusal"
+    );
+    // The consumer attached to the running output's publisher, not a never-swapped-in one (which
+    // would never publish a frame).
+    wait("the consumer on the running publisher", LIMIT, || {
+        running.open_consumers() == 1
+    });
+    let deadline = Instant::now() + LIMIT;
+    loop {
+        assert!(Instant::now() < deadline, "a frame of the running output");
+        let body = match ws.read().unwrap() {
+            Message::Text(t) => t.as_str().as_bytes().to_vec(),
+            Message::Binary(b) => b.to_vec(),
+            _ => continue,
+        };
+        if let Ok(v) = serde_json::from_slice::<Value>(&body)
+            && record_type(&v) == "frame"
+        {
+            assert_eq!(rev(&v), 0, "{v}");
+            break;
+        }
+    }
+    let _ = ws.close(None);
+    assert_eq!(
+        run.rt.pipeline_json(&id).unwrap()["edit_rev"],
+        json!(0),
+        "nothing changed"
+    );
+
+    run.rt.stop_json(&id).unwrap();
+    assert!(run.streams.handle(&stream).is_none(), "DELETE withdraws it");
+    assert!(
+        run.streams
+            .handle(&format!("stage/{id}/baseband"))
+            .is_none()
+    );
+    drop((tcp, http));
+    run.finish();
+}
+
+/// The RDS worked recipe (`recipes/rds.recipe.json`) resolves every block in the built-in
+/// catalogue and runs as a pipeline on a mock channel (the tone recording carries no RDS, so no
+/// frame is expected: this checks the runtime, not the decoder).
+#[test]
+fn the_rds_recipe_runs_on_a_mock_channel() {
+    let run = Run::start("t088-rds");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../recipes/rds.recipe.json");
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let id = run
+        .rt
+        .start(
+            parse_recipe(doc).unwrap(),
+            Target::Band {
+                f_lo: CENTER_HZ - 100e3,
+                f_hi: CENTER_HZ + 100e3,
+            },
+        )
+        .unwrap_or_else(|e| panic!("start: {e:?}"));
+    wait("chunks and status ticks", LIMIT, || {
+        let s = run.rt.stats_json(&id).unwrap();
+        s["chunks"].as_u64().unwrap() >= 20 && s["status_ticks"].as_u64().unwrap() >= 2
+    });
+    let p = run.rt.pipeline_json(&id).unwrap();
+    assert_eq!(p["state"], json!("running"), "{p}");
+    assert!(
+        p["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["id"] == json!("groups") && o["kind"] == json!("inspector")),
+        "{p}"
+    );
     run.finish();
 }
 

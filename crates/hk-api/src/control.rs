@@ -639,7 +639,7 @@ impl Fail {
         Self::new(400, "invalid", message)
     }
 
-    fn response(&self) -> CtlResponse {
+    pub(crate) fn response(&self) -> CtlResponse {
         CtlResponse {
             status: self.status,
             body: json!({ "error": self.message, "code": self.code }),
@@ -932,7 +932,7 @@ pub(crate) fn dispatch(
     }
 }
 
-fn parse_body(req: &CtlRequest<'_>) -> Result<Map<String, Value>, Fail> {
+pub(crate) fn parse_body(req: &CtlRequest<'_>) -> Result<Map<String, Value>, Fail> {
     if req.body.iter().all(u8::is_ascii_whitespace) {
         return Ok(Map::new());
     }
