@@ -1800,3 +1800,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Launched:**
     - T-156: MUI finish (UI tests, phone width, retire the old layout; must move the old-UI `promoteEntry`/`deleteEntry` imports T-151 uses).
     - T-157: rolling IQ capture buffer, API gap 1, the Capture timeline's scrub/export (Opus high).
+- **B0.413 T-172 launched (Opus)** on the free Rust build slot: DC twin refutation hardening from the T-147 review.
+  - Time-indexed twin lookup, with a benchmark.
+  - Slack set to `t_cell_ns`.
+  - A twin must be off its own tuning's LO.
+  - ADR §2.6 wording.
+- **Status of other work:**
+  - The full check after the four MUI/API merges is past 1348 tests with no failures; acceptance is pending.
+  - T-169 is bisecting which opt-level=2 crate causes optimisation-only test failures.
+  - T-124, T-156 and T-157 are still running.
