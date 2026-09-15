@@ -388,6 +388,8 @@ pub fn serve_api(
         audit: Some(Arc::new(audit)),
         on_demand: openers,
         outputs: Some(Arc::new(PipelineOutputs(handle.output_recorders()))),
+        // T-092 wires its decoded-capture store here.
+        captures: None,
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

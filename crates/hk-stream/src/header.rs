@@ -13,7 +13,9 @@ pub const STREAM_SCHEMA: &str = "hackriff.stream";
 pub const STREAM_VERSION_MAJOR: u32 = 1;
 /// Contract minor version. Minor versions only add optional fields and record types.
 /// 1.1 (T-043): the optional header `audio` profile and the binary `status` record type (3).
-pub const STREAM_VERSION_MINOR: u32 = 1;
+/// 1.2 (T-089, ADR-0011): inspector streams: the optional header `inspector` profile and the
+/// `frame`, `status` and `edit` message record types (§14).
+pub const STREAM_VERSION_MINOR: u32 = 2;
 /// Default `max_frame_len` for new streams (1 MiB).
 pub const DEFAULT_MAX_FRAME_LEN: u32 = 1024 * 1024;
 
@@ -149,6 +151,10 @@ pub struct StreamHeader {
     /// for `audio` streams ([`crate::audio::AudioInfo`]). Metadata only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<crate::audio::AudioInfo>,
+    /// Inspector profile (contract 1.2, §14.1): the pipeline output or capture whose frame
+    /// records this stream carries. Metadata only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspector: Option<crate::inspector::InspectorProfile>,
     /// Largest record payload on this stream.
     pub max_frame_len: u32,
     /// Fixed binary record header length: 32 for binary kinds, 0 for messages.
@@ -196,6 +202,7 @@ impl StreamHeader {
             framing: None,
             message_schema: None,
             audio: None,
+            inspector: None,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             record_header_len: if kind.is_binary() {
                 BINARY_RECORD_HEADER_LEN as u32
