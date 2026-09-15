@@ -26,9 +26,10 @@
 //!   OBW ≥ 50 kHz, the envelope is constant and the trial discriminator finds the pilot; nothing
 //!   else puts a significant 19 kHz line in an FM discriminator's output.
 //! - **CW:** carrier-dominant, OBW ≤ 500 Hz (or unmeasurable) and either keyed on/off (with
-//!   in-phase sidebands), or an unmodulated carrier (no significant in-phase sidebands, sidebands
-//!   ≥ 20 dB below the carrier). The decision records the smallest AM depth the test could have
-//!   seen; AM shallower than that (10 % speech at 10 dB) reads as a carrier.
+//!   in-phase sidebands), or an unmodulated carrier (no significant in-phase sidebands, or an
+//!   in-phase residue under 1 % depth, which at high SNR is quantisation rather than AM (T-073);
+//!   sidebands ≥ 20 dB below the carrier). The decision records the smallest AM depth the test
+//!   could have seen; AM shallower than that (10 % speech at 10 dB) reads as a carrier.
 //! - **AM:** carrier-dominant with significant in-phase sidebands (t ≥ 6, balance ≥ 0.6, depth
 //!   ≥ 5 %). A constant-looking envelope does not veto it: 30 % voice AM has `κ − 1` ≈ 0.02.
 //! - **NBFM:** 500 Hz < OBW ≤ 25 kHz with a constant envelope and no in-phase sidebands, or a
@@ -48,7 +49,7 @@ use crate::dsp::Discriminator;
 use measure::{Band, Line};
 
 /// Rule-set id and version recorded with every decision.
-pub const MODE_RULES_VERSION: &str = "hk-demod/mode-rules@0.2.0";
+pub const MODE_RULES_VERSION: &str = "hk-demod/mode-rules@0.2.1";
 
 /// Analog demodulation modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -138,6 +139,10 @@ pub struct ModeConfig {
     pub carrier_max_sideband_db: f64,
     /// Largest in-phase sideband statistic of an unmodulated carrier.
     pub carrier_max_inphase_t: f64,
+    /// Largest in-phase residual (tone-equivalent AM depth) that still counts as an unmodulated
+    /// carrier, however significant its t-statistic: at high SNR the sideband test resolves
+    /// 8-bit quantisation and phase-noise residues far below any audible AM (T-073).
+    pub carrier_max_residual_depth: f64,
     /// Largest AM detection floor for a full-confidence unmodulated carrier.
     pub carrier_max_depth_floor: f64,
     /// Smallest keyed-off fraction for keyed CW.
@@ -177,6 +182,7 @@ impl Default for ModeConfig {
             fm_max_iq_balance: -0.3,
             carrier_max_sideband_db: -20.0,
             carrier_max_inphase_t: 3.0,
+            carrier_max_residual_depth: 0.01,
             carrier_max_depth_floor: 0.15,
             keyed_min_off_fraction: 0.25,
             keyed_min_on_snr_db: 6.0,
@@ -444,9 +450,13 @@ impl ModeSelector {
                 && k.am_depth >= c.am_min_depth;
             let quadrature =
                 k.inphase_t <= -c.am_min_inphase_t && k.iq_balance <= c.fm_max_iq_balance;
-            // No significant in-phase sidebands and little sideband power at all (residual phase
-            // noise stays far below the carrier).
-            let unmodulated = k.inphase_t < c.carrier_max_inphase_t
+            // No significant in-phase sidebands, or only a negligible residue (a significant
+            // t-statistic on a sub-percent depth is quantisation, not AM: without this a clean
+            // high-SNR carrier fell between the carrier and AM rules, T-073), and little sideband
+            // power at all (residual phase noise stays far below the carrier).
+            let residual =
+                k.inphase_t >= c.carrier_max_inphase_t && k.am_depth < c.carrier_max_residual_depth;
+            let unmodulated = (k.inphase_t < c.carrier_max_inphase_t || residual)
                 && k.sideband_to_carrier_db
                     .is_none_or(|d| d <= c.carrier_max_sideband_db);
             if keyed {
@@ -492,10 +502,19 @@ impl ModeSelector {
                     evidence: vec![
                         line_txt,
                         sb_txt,
-                        format!(
-                            "unmodulated carrier: not keyed, no AM deeper than {:.0} %",
-                            100.0 * k.am_depth_floor
-                        ),
+                        if residual {
+                            format!(
+                                "unmodulated carrier: not keyed, in-phase residue of {:.2} % \
+                                 depth (below {:.0} %: quantisation or phase noise, not AM)",
+                                100.0 * k.am_depth,
+                                100.0 * c.carrier_max_residual_depth
+                            )
+                        } else {
+                            format!(
+                                "unmodulated carrier: not keyed, no AM deeper than {:.0} %",
+                                100.0 * k.am_depth_floor
+                            )
+                        },
                         obw_txt.clone(),
                     ],
                 });
