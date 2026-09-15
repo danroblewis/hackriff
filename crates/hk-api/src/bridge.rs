@@ -60,6 +60,8 @@ pub struct StreamInfo {
     pub bandwidth_hz: Option<f64>,
     /// Header FFT size.
     pub fft_size: Option<u32>,
+    /// Header DC-notch half-width (ADR-0013 §4.9 gap 10).
+    pub dc_excluded_hz: Option<f64>,
 }
 
 impl StreamInfo {
@@ -74,6 +76,7 @@ impl StreamInfo {
             center_hz: header.center_hz,
             bandwidth_hz: header.bandwidth_hz,
             fft_size: header.fft_size,
+            dc_excluded_hz: header.dc_excluded_hz,
         }
     }
 }
@@ -142,6 +145,7 @@ impl StreamRegistry {
                     "center_hz": i.center_hz,
                     "bandwidth_hz": i.bandwidth_hz,
                     "fft_size": i.fft_size,
+                    "dc_excluded_hz": i.dc_excluded_hz,
                     "open_consumers": e.handle.open_consumers(),
                     "ws_path": format!("/ws/{}", i.stream_id),
                     "tcp_target": i.stream_id,
