@@ -1463,3 +1463,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Check `aware_036` acceptance.
     - Judge the `recovering_consumer_sees_exact_drop_markers` failure.
 - **T-141:** WIP commit f3eeac1, with its handoff pending a final test count.
+- **B0.376 T-141 WIP (f3eeac1): Gamma-mixture floor works, but the acceptance comparison fails.**
+  - **What works:**
+    - Gamma-mixture floor bias solved by bisection, cached by shape set.
+    - Tile format 4 adds per-shape counts; v1–v3 tiles are still readable.
+    - `scheduler_history`: 72/72 tiles have a floor (was 0).
+    - API provenance gains `cell_shapes`.
+  - **What fails:** the a-priori check of scheduler vs fixed-tune floor. The floors are −99.80 vs −100.81 dB, a 1.01 dB gap against the 0.5 dB limit.
+  - **Cause (not yet confirmed):** the gap is already in the uncorrected power mean, and a carrier reads 2.2 dB lower under the scheduler. So it sits upstream of the mixture model; the suspect is mock SDR resample/noise-fill level scaling or per-bin vs PSD normalisation across RBWs.
+  - **Next:** fresh Opus finisher launched to root-cause and fix at the source. The threshold stays unchanged.
