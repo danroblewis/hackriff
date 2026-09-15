@@ -211,6 +211,37 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
             .any(|r| r["path"] == "/api/control/center"),
         "{v}"
     );
+    assert!(
+        v["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["path"] == "/api/control/baseband_filter"),
+        "{v}"
+    );
+    // display_limits (T-067): the UI reads these instead of hard-coding hk-pipeline's DISPLAY_*.
+    let limits = &v["display_limits"];
+    for field in [
+        "fft_size_min",
+        "fft_size_max",
+        "averaging_max",
+        "rows_per_s_min",
+        "rows_per_s_max",
+        "windows",
+    ] {
+        assert!(limits.get(field).is_some(), "display_limits missing {field}: {v}");
+    }
+    assert!(
+        limits["fft_size_max"].as_u64().unwrap() >= limits["fft_size_min"].as_u64().unwrap(),
+        "{v}"
+    );
+    assert!(
+        is_array(&limits["windows"]) && limits["windows"].as_array().unwrap().contains(&json!("hann")),
+        "{v}"
+    );
+    // device.baseband_filter (T-067): the mock device inherits the HackRF's discrete filter list.
+    assert!(is_array(&v["device"]["baseband_filter"]["values_hz"]), "{v}");
+    assert!(v["tuning"]["baseband_filter_hz"].is_null(), "unset until requested: {v}");
 
     // /api/status: pipeline counters, never content.
     let (st, v) = get(addr, "/api/status");
@@ -524,7 +555,7 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["display"],
-        json!({"fft_size": 512, "averaging": 2, "rows_per_s": 10.0, "paused": false})
+        json!({"fft_size": 512, "averaging": 2, "rows_per_s": 10.0, "paused": false, "window": "hann"})
     );
     let (st, v) = post(addr, "/api/control/display", "{}");
     assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
@@ -533,7 +564,31 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
     let (st, v) = post(addr, "/api/control/resume", "{}");
     assert_eq!((st, &v["display"]["paused"]), (200, &json!(false)));
 
-    // Bookmarks: create (201), list, get, update, delete.
+    // Display window (T-067).
+    let (st, v) = post(
+        addr,
+        "/api/control/display",
+        r#"{"window": "blackman-harris"}"#,
+    );
+    assert_eq!((st, v["display"]["window"].as_str()), (200, Some("blackman-harris")), "{v}");
+    let (st, v) = post(addr, "/api/control/display", r#"{"window": "kaiser"}"#);
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    // Baseband filter (T-067): validated against device.baseband_filter's discrete list.
+    let (st, v) = post(
+        addr,
+        "/api/control/baseband_filter",
+        r#"{"bandwidth_hz": 7e6}"#,
+    );
+    assert_eq!((st, v["tuning"]["baseband_filter_hz"].as_f64()), (200, Some(7e6)), "{v}");
+    let (st, v) = post(
+        addr,
+        "/api/control/baseband_filter",
+        r#"{"bandwidth_hz": 9.5e6}"#,
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("out_of_range")), "{v}");
+
+    // Bookmarks: create (201), list, get, update (including rename), delete.
     let (st, bm) = post(
         addr,
         "/api/bookmarks",
