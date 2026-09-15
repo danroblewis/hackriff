@@ -332,6 +332,160 @@ fn discontinuities_reset_averaging() {
     assert_eq!(st.samples_dropped, 1050);
 }
 
+fn run_inputs(
+    config: StftConfig,
+    inputs: &[(BlockHeader, Vec<Complex32>)],
+) -> (Vec<SpectrumFrame>, hk_dsp::StftStats) {
+    let mut p = StftProcessor::new(config).unwrap();
+    let mut frames = Vec::new();
+    for (h, x) in inputs {
+        p.push(InputInfo::from(h), x, |f| frames.push(f.clone()));
+    }
+    p.flush(|f| frames.push(f.clone()));
+    (frames, p.stats())
+}
+
+fn history_like(n: usize, k: usize) -> StftConfig {
+    let mut w = cfg(n, 0, WindowKind::Hann);
+    w.holds = false;
+    w.spectral_kurtosis = false;
+    StftConfig::new(w, k)
+}
+
+/// T-139: once a retune arms the stream, each reset emits the averaging in progress (at least
+/// `min_segments`) with its true `n_avg`, span, time, tuning and flags; shorter pieces are still
+/// discarded.
+#[test]
+fn partial_frames_emit_short_steps_once_armed() {
+    let (fs, n, k) = (1e6, 256, 8);
+    let mut config = history_like(n, k);
+    config.partial = Some(hk_dsp::PartialFrames {
+        min_segments: 2,
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+    });
+    let mut rng = Rng::new(9);
+    let (prov_a, prov_b, prov_c) = (
+        provenance(100e6, fs),
+        provenance(101e6, fs),
+        provenance(102e6, fs),
+    );
+    let mut inputs = Vec::new();
+    // A: one full frame + 3 segments, loud.
+    let len_a = k * n + 3 * n;
+    inputs.push((
+        header(0, &prov_a, Discontinuity::STREAM_START),
+        synth::complex_noise(&mut rng, len_a, 0.1),
+    ));
+    // B: retuned, 5 segments + 10 samples, quiet.
+    let start_b = len_a as u64;
+    inputs.push((
+        header(start_b, &prov_b, Discontinuity::RETUNE),
+        synth::complex_noise(&mut rng, 5 * n + 10, 1e-4),
+    ));
+    // C: after a 100-sample gap, 2 segments.
+    let start_c = start_b + (5 * n + 10) as u64 + 100;
+    let mut hc = header(start_c, &prov_b, Discontinuity::GAP);
+    hc.dropped_before = 100;
+    inputs.push((hc, synth::complex_noise(&mut rng, 2 * n, 1e-4)));
+    // D: after another gap, 1 segment (below the minimum).
+    let start_d = start_c + (2 * n) as u64 + 100;
+    let mut hd = header(start_d, &prov_b, Discontinuity::GAP);
+    hd.dropped_before = 100;
+    inputs.push((hd, synth::complex_noise(&mut rng, n, 1e-4)));
+    // E: retuned, one full frame.
+    let start_e = start_d + n as u64;
+    inputs.push((
+        header(start_e, &prov_c, Discontinuity::RETUNE),
+        synth::complex_noise(&mut rng, k * n, 1e-4),
+    ));
+
+    let (frames, st) = run_inputs(config, &inputs);
+    let summary: Vec<(u64, u32, u64)> = frames
+        .iter()
+        .map(|f| {
+            (
+                f.t.sample_index,
+                f.spectrum.resolution.n_avg,
+                f.sample_count,
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (0, 8, (k * n) as u64),
+            ((k * n) as u64, 3, (3 * n) as u64),
+            (start_b, 5, (5 * n) as u64),
+            (start_c, 2, (2 * n) as u64),
+            (start_e, 8, (k * n) as u64),
+        ]
+    );
+    assert_eq!((st.frames, st.partial_frames), (5, 3));
+    assert_eq!(
+        st.segments_discarded, 1,
+        "D's lone segment is under the minimum"
+    );
+    let pa = &frames[1];
+    assert_eq!(
+        pa.provenance, prov_a,
+        "the partial keeps the tuning it measured"
+    );
+    assert_eq!(pa.spectrum.f_center_hz, 100e6);
+    assert!(pa.discontinuity.is_empty());
+    assert!((db(mean(&pa.spectrum.psd)) - db(0.1 / fs)).abs() < 0.5);
+    assert_eq!(pa.t.host_time.as_unix_nanos(), (k * n) as i64 * 1000);
+    let pb = &frames[2];
+    assert!(pb.discontinuity.contains(Discontinuity::RETUNE));
+    assert!(!pb.discontinuity.contains(Discontinuity::GAP));
+    assert!((db(mean(&pb.spectrum.psd)) - db(1e-4 / fs)).abs() < 0.5);
+    assert!(frames[3].discontinuity.contains(Discontinuity::GAP));
+    assert_eq!(frames[3].dropped_samples, 100);
+    let seqs: Vec<u64> = frames.iter().map(|f| f.seq).collect();
+    assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
+}
+
+/// T-139 no-regression: a stream that never retunes (stream start, gaps, a gain step) emits
+/// bit-identical frames with partial frames enabled, so fixed-tune history tiles are unchanged.
+#[test]
+fn partial_frames_never_armed_are_bit_identical() {
+    let (fs, n, k) = (1e6, 256, 8);
+    let mut rng = Rng::new(21);
+    let prov = provenance(100e6, fs);
+    let prov_gain = provenance_with(100e6, fs, 32.0);
+    let mut inputs = Vec::new();
+    let len_a = 2 * k * n + 3 * n + 100;
+    inputs.push((
+        header(0, &prov, Discontinuity::STREAM_START),
+        synth::complex_noise(&mut rng, len_a, 0.1),
+    ));
+    let start_b = len_a as u64 + 1000;
+    inputs.push((
+        header(start_b, &prov, Discontinuity::NONE),
+        synth::complex_noise(&mut rng, k * n + 5 * n, 1e-3),
+    ));
+    let start_c = start_b + (k * n + 5 * n) as u64 + 50;
+    let mut hc = header(start_c, &prov, Discontinuity::GAP);
+    hc.dropped_before = 50;
+    inputs.push((hc, synth::complex_noise(&mut rng, k * n + 4 * n, 1e-3)));
+    let start_d = start_c + (k * n + 4 * n) as u64;
+    inputs.push((
+        header(start_d, &prov_gain, Discontinuity::NONE),
+        synth::complex_noise(&mut rng, 2 * k * n, 4e-3),
+    ));
+
+    let mut on = history_like(n, k);
+    on.partial = Some(hk_dsp::PartialFrames {
+        min_segments: 1,
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+    });
+    let (a, sa) = run_inputs(history_like(n, k), &inputs);
+    let (b, sb) = run_inputs(on, &inputs);
+    assert!(sa.resets >= 3, "the stream resets: {sa:?}");
+    assert_eq!(a, b, "never-armed frames must be bit-identical");
+    assert_eq!(sb.partial_frames, 0);
+    assert_eq!(sa, sb);
+}
+
 #[test]
 fn spectral_kurtosis_noise_bursts_cw() {
     let fs = 1e6;
@@ -439,4 +593,64 @@ fn config_validation() {
     assert!(c.validate().is_err());
     let d = StftConfig::for_bin_width(20e6, 1000.0, 4);
     assert_eq!(d.welch.fft_len, 32768);
+}
+
+/// T-139 review: a full frame on unchanged tuning disarms partial frames, so a tune the scheduler
+/// left and then held emits no partial row at a later gap (e.g. a USB overrun); the next retune
+/// arms them again.
+#[test]
+fn partial_frames_disarm_after_a_full_frame_and_rearm_on_retune() {
+    let (fs, n, k) = (1e6, 256, 8);
+    let mut config = history_like(n, k);
+    config.partial = Some(hk_dsp::PartialFrames {
+        min_segments: 2,
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+    });
+    let mut rng = Rng::new(33);
+    let (prov_a, prov_b) = (provenance(100e6, fs), provenance(101e6, fs));
+    let mut inputs = Vec::new();
+    // A: 3 segments at the stream start.
+    inputs.push((
+        header(0, &prov_a, Discontinuity::STREAM_START),
+        synth::complex_noise(&mut rng, 3 * n, 1e-3),
+    ));
+    // B: retuned (armed, A's 3 segments emitted), then held for three full frames + 4 segments.
+    let start_b = (3 * n) as u64;
+    let len_b = 3 * k * n + 4 * n;
+    inputs.push((
+        header(start_b, &prov_b, Discontinuity::RETUNE),
+        synth::complex_noise(&mut rng, len_b, 1e-3),
+    ));
+    // C: an overrun gap on the held tune: B's 4 segments are discarded, not emitted.
+    let start_c = start_b + len_b as u64 + 500;
+    let mut hc = header(start_c, &prov_b, Discontinuity::GAP);
+    hc.dropped_before = 500;
+    inputs.push((hc, synth::complex_noise(&mut rng, 5 * n, 1e-3)));
+    // D: retuned back: armed again, C's 5 segments emitted.
+    let start_d = start_c + (5 * n) as u64;
+    inputs.push((
+        header(start_d, &prov_a, Discontinuity::RETUNE),
+        synth::complex_noise(&mut rng, k * n, 1e-3),
+    ));
+
+    let (frames, st) = run_inputs(config, &inputs);
+    let summary: Vec<(u64, u32)> = frames
+        .iter()
+        .map(|f| (f.t.sample_index, f.spectrum.resolution.n_avg))
+        .collect();
+    let kn = (k * n) as u64;
+    assert_eq!(
+        summary,
+        vec![
+            (0, 3),
+            (start_b, 8),
+            (start_b + kn, 8),
+            (start_b + 2 * kn, 8),
+            (start_c, 5),
+            (start_d, 8),
+        ],
+        "no partial row at the held tune's gap"
+    );
+    assert_eq!(st.partial_frames, 2);
+    assert_eq!(st.segments_discarded, 4, "B's tail at the gap");
 }

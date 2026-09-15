@@ -91,6 +91,9 @@ counter_group!(
         frames,
         /// STFT resets (discontinuities, gaps).
         stft_resets,
+        /// Frames emitted from a reset's partial averaging (T-139; history reader only, included
+        /// in `frames`).
+        partial_frames,
     }
 );
 

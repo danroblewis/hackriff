@@ -30,7 +30,7 @@ filter = 'package(hk-e2e)'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]
-filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream))'
+filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history))'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]

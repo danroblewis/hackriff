@@ -18,6 +18,17 @@
 //! [`SpectrumFrame::discontinuity`] carries the reasons and [`SpectrumFrame::dropped_samples`]
 //! the loss.
 //!
+//! **Partial frames (T-139, opt-in).** With [`StftConfig::partial`] set, a reset emits the
+//! averaging in progress as a frame instead of discarding it, once the stream is *armed* (an
+//! input carried one of [`PartialFrames::arm_on`], e.g. a retune, and no full frame has completed
+//! since) and at least
+//! [`PartialFrames::min_segments`] segments were averaged. The frame is the measurement before the
+//! reset: its tuning, time and flags; its [`Resolution::n_avg`](crate::spectrum::Resolution) is
+//! the segments actually averaged and its `sample_count` the samples they span, so reduced
+//! averaging is explicit. A stream that never arms (fixed tuning, gaps and gain changes only)
+//! emits exactly the frames it would without the option, and so does a tune held for a full frame
+//! after a retune (its later gaps discard the partial averaging, as without the option).
+//!
 //! **Compute providers (T-041).** The per-segment rows (window → FFT → `|X|²`) come from a
 //! [`SpectralBackend`]: the CPU reference by default, or a multi-threaded CPU, Accelerate or GPU
 //! provider chosen through [`crate::compute::Compute`]. `push` stages samples, submits every
@@ -119,6 +130,19 @@ pub struct StftConfig {
     pub persistence: Option<PersistenceConfig>,
     /// Discontinuity flags that reset averaging.
     pub reset_on: Discontinuity,
+    /// Emit a reset's partial frame (T-139; see the module docs). `None` (the default) discards
+    /// it.
+    pub partial: Option<PartialFrames>,
+}
+
+/// When a reset emits its partial frame instead of discarding it (T-139).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartialFrames {
+    /// Fewest averaged segments a partial frame needs (values below 1 count as 1).
+    pub min_segments: usize,
+    /// Input flags that arm partial frames. A full frame disarms them (the tuning held for a whole
+    /// frame) until the next such input; [`StftProcessor::reset`] disarms too.
+    pub arm_on: Discontinuity,
 }
 
 /// Flags that reset averaging by default.
@@ -145,6 +169,7 @@ impl StftConfig {
             averages,
             persistence: None,
             reset_on: DEFAULT_RESET_ON,
+            partial: None,
         }
     }
 
@@ -213,6 +238,8 @@ pub struct StftStats {
     pub resets: u64,
     /// Segments thrown away in partial frames at a reset.
     pub segments_discarded: u64,
+    /// Frames emitted from a reset's partial averaging (T-139; included in `frames`).
+    pub partial_frames: u64,
     /// Samples reported lost (gaps and overruns).
     pub samples_dropped: u64,
 }
@@ -247,6 +274,8 @@ struct Replay {
     persistence: Option<Persistence>,
     stats: StftStats,
     emitted: usize,
+    /// T-139: an input carried one of [`PartialFrames::arm_on`] and no full frame completed since.
+    partial_armed: bool,
 }
 
 impl Replay {
@@ -259,7 +288,7 @@ impl Replay {
     }
 
     /// Applies input events at the head of the queue (no rows are owed before them).
-    fn drain_inputs(&mut self) {
+    fn drain_inputs(&mut self, emit: &mut dyn FnMut(&SpectrumFrame)) {
         while matches!(self.events.front(), Some(Event::Input { .. })) {
             if let Some(Event::Input {
                 time,
@@ -270,11 +299,12 @@ impl Replay {
                 rate_changed,
             }) = self.events.pop_front()
             {
-                self.apply_input(time, flags, dropped, provenance, reset, rate_changed);
+                self.apply_input(time, flags, dropped, provenance, reset, rate_changed, emit);
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_input(
         &mut self,
         time: SampleTime,
@@ -283,7 +313,20 @@ impl Replay {
         prov: ProvenanceHandle,
         reset: bool,
         rate_changed: bool,
+        emit: &mut dyn FnMut(&SpectrumFrame),
     ) {
+        // T-139: in an armed stream a reset first emits the averaging in progress, before this
+        // input's provenance, anchor and flags apply (they belong to the next frame).
+        if reset && let Some(p) = self.config.partial {
+            if flags.bits() & p.arm_on.bits() != 0 {
+                self.partial_armed = true;
+            }
+            if self.partial_armed && self.acc.count() as usize >= p.min_segments.max(1) {
+                self.stats.partial_frames += 1;
+                self.emit_frame(emit);
+                self.emitted += 1;
+            }
+        }
         match &self.provenance {
             Some(old) if *old != prov => {
                 if self.acc.count() > 0 {
@@ -335,7 +378,7 @@ impl Replay {
         let hop = self.config.welch.hop() as u64;
         debug_assert_eq!(rows.len() % n, 0, "rows are not whole segments");
         for row in rows.chunks_exact(n) {
-            self.drain_inputs();
+            self.drain_inputs(emit);
             let start = match self.events.front_mut() {
                 Some(Event::Segments { first_start, count }) => {
                     let start = *first_start;
@@ -369,6 +412,9 @@ impl Replay {
         if self.acc.count() as usize == self.config.averages {
             self.emit_frame(emit);
             self.emitted += 1;
+            // T-139: a full frame on unchanged tuning disarms partial frames until the next
+            // arming input, so a held tune's later gaps (USB overruns) discard as before.
+            self.partial_armed = false;
         }
     }
 
@@ -382,7 +428,10 @@ impl Replay {
             sample_index: self.frame_start,
             host_time: self.anchor.time_of(self.frame_start, fs),
         };
-        frame.sample_count = self.config.frame_samples();
+        // `(count − 1)·hop + N`: `frame_samples()` for a full frame, less for a partial one.
+        let count = self.acc.count() as usize;
+        frame.sample_count =
+            (count.saturating_sub(1) * self.config.welch.hop() + self.config.welch.fft_len) as u64;
         frame.provenance_changed = self.frame_provenance_changed;
         frame.discontinuity = self.pending_flags;
         frame.dropped_samples = self.pending_dropped;
@@ -473,6 +522,7 @@ impl StftProcessor {
                 persistence: config.persistence.map(|p| Persistence::new(n, p, 0.0)),
                 stats: StftStats::default(),
                 emitted: 0,
+                partial_armed: false,
             },
         })
     }
@@ -532,7 +582,7 @@ impl StftProcessor {
         }
         self.staged.extend(samples.iter().map(|s| s.to_complex32()));
         self.run_segments(emit);
-        self.replay.drain_inputs();
+        self.replay.drain_inputs(emit);
         self.next_index = Some(first + samples.len() as u64);
         self.replay.emitted
     }
@@ -550,7 +600,7 @@ impl StftProcessor {
         let replay = &mut self.replay;
         self.backend
             .flush(&mut |rows| replay.consume_rows(rows, emit));
-        self.replay.drain_inputs();
+        self.replay.drain_inputs(emit);
         self.replay.emitted
     }
 
@@ -560,6 +610,7 @@ impl StftProcessor {
         self.backend.flush(&mut |_| {});
         self.replay.events.clear();
         self.replay.restart_averaging();
+        self.replay.partial_armed = false;
         self.staged.clear();
         self.next_index = None;
         self.seg_provenance = None;

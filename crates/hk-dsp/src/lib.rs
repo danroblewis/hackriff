@@ -63,8 +63,8 @@ pub use floor::{
 pub use persistence::{Persistence, PersistenceConfig};
 pub use spectrum::{Hold, HoldKind, PowerUnit, Resolution, Spectrum};
 pub use stft::{
-    DEFAULT_RESET_ON, DualResolution, InputInfo, IqSample, SpectrumFrame, StftConfig,
-    StftProcessor, StftStats, Tier,
+    DEFAULT_RESET_ON, DualResolution, InputInfo, IqSample, PartialFrames, SpectrumFrame,
+    StftConfig, StftProcessor, StftStats, Tier,
 };
 pub use welch::{Accumulators, ConfigError, SegmentEngine, WelchConfig, welch};
 pub use window::{Window, WindowKind, WindowMetrics};
