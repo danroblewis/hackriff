@@ -2327,3 +2327,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Follow-ups folded into T-218:** user reclassification writes rank 3, the inventory N+1 query, a missing dedupe on record_classification, float_roundtrip, and latest_classification comparing content rather than row id.
   - **Also committed:** T-193 (yellow confirmed boxes, 227440f) and T-159 (`/api/inventory/{id}/decode`, e5ba09c), both merging after the running check. T-159 narrowed a guard test for ungated getters, so verify at merge that a withheld identity still returns nothing.
   - **T-188 launched** (Opus, listen-centre flake under load).
+- **B0.489 Full check green after the T-211 merge (2cd31f6).** Lint clean; 1423/1423 tests; acceptance 29/29; acceptance_m2 8/8.
+  - **Disk down to 29 GB** with six worktrees live; merging three now to reclaim space.
+  - **Merging:** T-193 (yellow boxes), T-159 (decode fields), T-187 (candidate discard verified; optimistic UI delete).
+  - **T-199 launched** (Opus, classical feature-tree classifier, the first real M3 task).
