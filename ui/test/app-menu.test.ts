@@ -18,6 +18,7 @@ import { movedPastTolerance } from "../src/app/menu/trigger";
 import { analyzeTarget, selectionMenuItems, signalMenuItems } from "../src/app/menu/actions";
 import type { Row } from "../src/app/explore/inventory";
 import type { Selection } from "../src/app/explore/selections";
+import { setInventoryRows } from "../src/app/explore/slice";
 
 // ---- fixtures ----
 
@@ -191,6 +192,32 @@ test("signalMenuItems: Delete DELETEs the entry, then reloads both inventory tab
   assert.equal(calls[0], "DELETE /api/inventory/e7");
   assert.ok(calls.includes("GET /api/inventory?state=confirmed&limit=200"), calls.join(", "));
   assert.ok(calls.includes("GET /api/inventory?state=candidate&limit=200"), calls.join(", "));
+});
+
+test("signalMenuItems: Delete removes the row from the store immediately, before the DELETE resolves (T-187)", async () => {
+  let resolveDel: () => void = () => {};
+  const ctx = fakeCtx({
+    del: () => new Promise((res) => { resolveDel = () => res({}); }),
+    get: () => ({ entries: [], next_cursor: null }),
+  });
+  const row = makeRow({ id: "e7" });
+  ctx.store.set(setInventoryRows({ e7: row }, 1));
+  signalMenuItems(ctx, row).find((i) => i.id === "delete")!.onSelect();
+  assert.ok(!("e7" in ctx.store.get().inventory.rows), "gone from the store before the server replied");
+  resolveDel();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!("e7" in ctx.store.get().inventory.rows), "stays gone once the server confirms");
+});
+
+test("signalMenuItems: a refused Delete puts the row back and toasts the reason (T-187)", async () => {
+  const ctx = fakeCtx({ del: () => { throw new ControlError(404, "not_found", "no such inventory entry"); } });
+  const row = makeRow({ id: "e7" });
+  ctx.store.set(setInventoryRows({ e7: row }, 1));
+  signalMenuItems(ctx, row).find((i) => i.id === "delete")!.onSelect();
+  assert.ok(!("e7" in ctx.store.get().inventory.rows), "optimistically removed first");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(ctx.store.get().inventory.rows.e7, row, "put back after the refusal");
+  assert.match(ctx.store.get().toast.text, /delete e7/);
 });
 
 // ---- selection menu items ----
