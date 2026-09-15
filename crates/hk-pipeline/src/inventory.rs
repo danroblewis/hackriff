@@ -35,8 +35,20 @@
 //! Intermittent, weak or suspect emitters stay candidates until a user promotes them. No rule ever
 //! deletes; user deletion and the re-detection rule are the repository's (`hk_model` lifecycle).
 //!
+//! **One entry per physical emitter (T-082).** A chain's decoder output of an emission the tracker
+//! also followed (RDS PI on a WFM track, the blind framer's signature on an FSK sensor track) would
+//! otherwise be a second entry. After every sighting and chain write, [`TrackInventory`] merges
+//! the entry with its same-emission partners (`Repository::same_emission_partners`: overlapping
+//! centre or refined centre, overlapping time, hop compatibility; rules in `hk_model::cluster`)
+//! when both came from this run (the same capture), before explaining and reviewing the survivor.
+//! Entries carrying a channel-sharing transmitter identity (ADS-B ICAO, …: many transmitters per
+//! channel) are never linked to a channel entry; structural identities (`structural_schemes`)
+//! are.
+//!
 //! Another policy plugs in through [`Inventory`] without touching the composition. Reads go
 //! through `Repository::query_inventory` only (identities gated).
+
+use std::collections::{HashSet, VecDeque};
 
 use hk_context::{BandTable, Region as BandRegion};
 use hk_detect::TrackEvent;
@@ -44,7 +56,7 @@ use hk_detect::track::TrackSummary;
 use hk_detect::track::inventory::{hop_set_sighting, track_sighting};
 use hk_model::{
     EmitterId, IdentityScheme, LifecycleAuthor, LifecycleState, MeasurementKey, RepoError,
-    Repository, TrackId,
+    Repository, Tolerances, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +67,13 @@ pub const TRACK_PRODUCER: &str = "hk-track";
 
 /// Actor of automatic confirmations (rule id and version) in the lifecycle history.
 pub const CONFIRM_RULE: &str = "hk-pipeline/confirm@1";
+
+/// Reason of same-emission merges (T-082) in the merge record.
+pub const SAME_EMISSION_REASON: &str =
+    "same emission: track and decoder entries of one emitter (hk-pipeline/link@1)";
+
+/// Entries of the current run remembered for same-emission linking.
+const RUN_MEMORY: usize = 8192;
 
 /// Receives inventory-relevant results, under the repository lock.
 pub trait Inventory: Send {
@@ -205,12 +224,17 @@ pub struct TrackInventory {
     table: Option<BandTable>,
     capture: Option<String>,
     policy: ConfirmPolicy,
+    /// Entries this run's sightings and chains reached, oldest first (bounded).
+    run: VecDeque<EmitterId>,
+    run_set: HashSet<EmitterId>,
     /// Sightings recorded.
     pub sightings: u64,
     /// Emitters created by sightings.
     pub created: u64,
     /// Candidates confirmed by the rule.
     pub confirmed: u64,
+    /// Same-emission merges (T-082).
+    pub merged: u64,
 }
 
 impl Default for TrackInventory {
@@ -226,10 +250,67 @@ impl TrackInventory {
             table: BandTable::bundled(BandRegion::Us).ok(),
             capture: None,
             policy,
+            run: VecDeque::new(),
+            run_set: HashSet::new(),
             sightings: 0,
             created: 0,
             confirmed: 0,
+            merged: 0,
         }
+    }
+
+    /// Whether `id` may be linked to another entry of its emission: not when it carries a
+    /// channel-sharing transmitter identity (structural identities may).
+    fn linkable(&self, repo: &Repository, id: EmitterId) -> Result<bool, RepoError> {
+        Ok(match repo.identity_decode_evidence(id)? {
+            Some((scheme, _)) => {
+                !scheme.shares_channel()
+                    || self.policy.structural_schemes.contains(&scheme.as_string())
+            }
+            None => true,
+        })
+    }
+
+    fn remember(&mut self, id: EmitterId) {
+        if self.run_set.insert(id) {
+            self.run.push_back(id);
+            if self.run.len() > RUN_MEMORY
+                && let Some(old) = self.run.pop_front()
+            {
+                self.run_set.remove(&old);
+            }
+        }
+    }
+
+    /// T-082: merges `emitter` with this run's same-emission partners; returns the live survivor.
+    fn link(&mut self, repo: &mut Repository, emitter: EmitterId) -> Result<EmitterId, RepoError> {
+        let mut id = repo.live_emitter_id(emitter)?;
+        let tol = Tolerances::default();
+        for (partner, _) in repo.same_emission_partners(id, &tol)? {
+            if !self.run_set.contains(&partner) {
+                continue;
+            }
+            if !self.linkable(repo, id)? {
+                break;
+            }
+            if !self.linkable(repo, partner)? {
+                continue;
+            }
+            let t = repo
+                .emitter(id)?
+                .last_seen
+                .max(repo.emitter(partner)?.last_seen);
+            match repo.merge_same_emission(id, partner, t, SAME_EMISSION_REASON, &tol) {
+                Ok(Some(m)) => {
+                    id = m.into;
+                    self.merged += 1;
+                }
+                Ok(None) | Err(RepoError::IdentityConflict { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.remember(id);
+        Ok(id)
     }
 
     /// The confirmation policy in force.
@@ -310,10 +391,11 @@ impl Inventory for TrackInventory {
         };
         self.sightings += 1;
         self.created += u64::from(r.created);
+        let id = self.link(repo, r.emitter_id)?;
         if let Some(table) = &self.table {
-            explain_emitter(repo, table, r.emitter_id)?;
+            explain_emitter(repo, table, id)?;
         }
-        self.review(repo, r.emitter_id, trust)
+        self.review(repo, id, trust)
     }
 
     fn chain_emitter(
@@ -322,10 +404,11 @@ impl Inventory for TrackInventory {
         _track: Option<TrackId>,
         emitter: EmitterId,
     ) -> Result<(), RepoError> {
+        let id = self.link(repo, emitter)?;
         if let Some(table) = &self.table {
-            explain_emitter(repo, table, emitter)?;
+            explain_emitter(repo, table, id)?;
         }
-        self.review(repo, emitter, None)
+        self.review(repo, id, None)
     }
 }
 

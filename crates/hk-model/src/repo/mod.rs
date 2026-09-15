@@ -71,6 +71,8 @@ mod inventory;
 mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod same_emission_tests;
 mod measure;
 mod refined;
 mod selections;

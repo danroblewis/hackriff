@@ -20,7 +20,7 @@ use crate::cluster::{
 use crate::content::ContentClass;
 use crate::emitter::{
     Classification, DecodedIdentity, Emitter, EmitterLink, Identity, KnownStatus,
-    KnownStatusChange, StatusAuthor,
+    KnownStatusChange, LifecycleState, StatusAuthor,
 };
 use crate::ids::EmitterId;
 use crate::region::{FreqRange, Region, TimeRange};
@@ -314,13 +314,275 @@ fn conflict(emitters: Vec<EmitterId>, reason: ConflictReason) -> Option<Identity
     Some(IdentityConflictReport { emitters, reason })
 }
 
+/// T-082: what a merge carries besides counts, links, tags and identity.
+/// - The absorbed row's classification history, appended to the survivor with its inputs.
+/// - Its current known status when a decoder, classifier or user decided it, unless the survivor's
+///   current status is a user's.
+/// - Its lifecycle state: a confirmed row merged into a candidate confirms the survivor, and the
+///   survivor's history records it. Deleted rows never reach a merge.
+fn carry_evidence(
+    conn: &Connection,
+    from: EmitterId,
+    into: EmitterId,
+    t: Timestamp,
+) -> Result<(), RepoError> {
+    conn.prepare_cached(
+        "INSERT INTO emitter_classification (emitter_id, t, family, confidence, open_set_score, \
+         model_version, input_kind, input_id, feature_set_version) \
+         SELECT ?1, t, family, confidence, open_set_score, model_version, input_kind, input_id, \
+         feature_set_version FROM emitter_classification WHERE emitter_id = ?2 \
+         ORDER BY classification_id",
+    )?
+    .execute(params![blob(into), blob(from)])?;
+    let decided = |a: StatusAuthor| {
+        matches!(
+            a,
+            StatusAuthor::Decoder | StatusAuthor::Classifier | StatusAuthor::User
+        )
+    };
+    if let Some(theirs) = current_status(conn, from)?
+        && decided(theirs.author)
+        && current_status(conn, into)?.is_none_or(|ours| {
+            ours.author != StatusAuthor::User
+                && (ours.status != theirs.status || !decided(ours.author))
+        })
+    {
+        let why: String = conn
+            .prepare_cached(
+                "SELECT reason FROM emitter_status WHERE emitter_id = ?1 \
+                 ORDER BY status_id DESC LIMIT 1",
+            )?
+            .query_row([blob(from)], |r| r.get(0))?;
+        insert_status(
+            conn,
+            &KnownStatusChange {
+                emitter_id: into,
+                status: theirs.status,
+                prior_ref: theirs.prior_ref,
+                reason: format!("{why} (merged from emitter {from})"),
+                t,
+                author: theirs.author,
+            },
+        )?;
+    }
+    if lifecycle::state_of(conn, from)? == LifecycleState::Confirmed
+        && lifecycle::state_of(conn, into)? == LifecycleState::Candidate
+    {
+        lifecycle::carry_confirmation(conn, from, into, t)?;
+    }
+    Ok(())
+}
+
+/// One observation-ledger span of an emitter.
+#[derive(Clone, Copy)]
+struct Span {
+    track: bool,
+    t0: i64,
+    t1: i64,
+    count: i64,
+}
+
+/// An emitter's observation spans, by start.
+fn observation_spans(conn: &Connection, id: EmitterId) -> Result<Vec<Span>, RepoError> {
+    let mut spans: Vec<Span> = conn
+        .prepare_cached(
+            "SELECT source_kind = 'track', t_start, t_end, count FROM emitter_observation \
+             WHERE emitter_id = ?1",
+        )?
+        .query_map([blob(id)], |r| {
+            Ok(Span {
+                track: r.get(0)?,
+                t0: r.get(1)?,
+                t1: r.get(2)?,
+                count: r.get(3)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    spans.sort_by_key(|s| (s.t0, s.t1));
+    Ok(spans)
+}
+
+/// Some span of `a` overlaps some span of `b` in time (both sorted by start).
+fn spans_overlap(a: &[Span], b: &[Span]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].t1 < b[j].t0 {
+            i += 1;
+        } else if b[j].t1 < a[i].t0 {
+            j += 1;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+/// The latest refined centre of an emitter (its own refinements and those merged into it).
+fn refined_center(conn: &Connection, id: EmitterId) -> Result<Option<f64>, RepoError> {
+    Ok(conn
+        .prepare_cached(
+            "WITH RECURSIVE absorbed(id) AS ( \
+                 SELECT ?1 \
+                 UNION SELECT e.emitter_id FROM emitter e JOIN absorbed a ON e.merged_into = a.id \
+             ) \
+             SELECT f_center FROM emitter_refined_tuning WHERE emitter_id IN (SELECT id FROM absorbed) \
+             ORDER BY t DESC, refined_id DESC LIMIT 1",
+        )?
+        .query_row([blob(id)], |r| r.get(0))
+        .optional()?)
+}
+
+/// The same-emission rule ([`crate::cluster`], "Same emission"): `Some(score)` (smallest centre
+/// error over the centre tolerance; lower is closer) when live, listed emitters `a` and `b`
+/// observed the same emission.
+fn same_emission_score(
+    conn: &Connection,
+    a: EmitterId,
+    b: EmitterId,
+    tol: &Tolerances,
+) -> Result<Option<f64>, RepoError> {
+    if a == b {
+        return Ok(None);
+    }
+    let (ra, rb) = (load_row(conn, a)?, load_row(conn, b)?);
+    if ra.merged || rb.merged || ra.deleted || rb.deleted {
+        return Ok(None);
+    }
+    if ra.identity.is_some() && rb.identity.is_some() {
+        return Ok(None);
+    }
+    let hops = |r: &EmitterRow| {
+        r.fingerprint
+            .as_ref()
+            .is_some_and(|f| !f.hop_set_hz.is_empty())
+    };
+    if hops(&ra) != hops(&rb) {
+        return Ok(None);
+    }
+    let f_tol = Fingerprint::new(ra.f_center, ra.bandwidth)
+        .center_tolerance_hz(&Fingerprint::new(rb.f_center, rb.bandwidth), tol);
+    let ca = [Some(ra.f_center), refined_center(conn, a)?];
+    let cb = [Some(rb.f_center), refined_center(conn, b)?];
+    let err = ca
+        .iter()
+        .flatten()
+        .flat_map(|x| cb.iter().flatten().map(move |y| (x - y).abs()))
+        .fold(f64::INFINITY, f64::min);
+    if !(err <= f_tol) {
+        return Ok(None);
+    }
+    let (sa, sb) = (observation_spans(conn, a)?, observation_spans(conn, b)?);
+    if !spans_overlap(&sa, &sb) {
+        return Ok(None);
+    }
+    // Two track-based entries the fingerprint kept apart (another period, burst length, …) are
+    // two emitters sharing a channel, not one.
+    if sa.iter().any(|s| s.track)
+        && sb.iter().any(|s| s.track)
+        && let (Some(fa), Some(fb)) = (&ra.fingerprint, &rb.fingerprint)
+        && !fa.compare(fb, tol).within
+    {
+        return Ok(None);
+    }
+    Ok(Some(err / f_tol))
+}
+
+/// Live, listed emitters observing the same emission as `id`, closest first.
+fn same_emission_partners(
+    conn: &Connection,
+    id: EmitterId,
+    tol: &Tolerances,
+) -> Result<Vec<(EmitterId, f64)>, RepoError> {
+    let row = load_row(conn, id)?;
+    if row.merged || row.deleted {
+        return Ok(Vec::new());
+    }
+    let mut centres = vec![row.f_center];
+    centres.extend(refined_center(conn, id)?);
+    let mut ids: Vec<EmitterId> = Vec::new();
+    for c in centres {
+        // A partner within tolerance has a centre within max(ppm, min, frac·BW) of `c`, so its
+        // occupied band overlaps this window (as in `fingerprint_candidates`).
+        let reach = (tol.center_ppm * 1e-6 * c.abs())
+            .max(tol.center_min_hz)
+            .max(row.bandwidth / 2.0);
+        let region = Region::new(FreqRange::new(c - reach, c + reach), ANY_TIME);
+        let b = region_bounds(conn, "emitter", &region)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT emitter_id FROM emitter WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 \
+             AND merged_into IS NULL AND lifecycle_state != 'deleted' AND emitter_id != ?4",
+        )?;
+        let found = stmt
+            .query_map(params![b.f_lo_min, b.hi, b.lo, blob(id)], |r| {
+                r.get::<_, [u8; 16]>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for e in found.into_iter().map(eid) {
+            if !ids.contains(&e) {
+                ids.push(e);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for other in ids {
+        if let Some(score) = same_emission_score(conn, id, other, tol)? {
+            out.push((other, score));
+        }
+    }
+    out.sort_by(|x, y| x.1.total_cmp(&y.1).then(x.0.cmp(&y.0)));
+    Ok(out)
+}
+
+/// Merges two entries of one emission inside the caller's transaction (see
+/// [`Repository::merge_same_emission`]); `None` when they are not (or no longer) the same.
+fn merge_same_emission_rows(
+    conn: &Connection,
+    a: EmitterId,
+    b: EmitterId,
+    t: Timestamp,
+    reason: &str,
+    tol: &Tolerances,
+) -> Result<Option<EmitterMerge>, RepoError> {
+    let (Some(a), Some(b)) = (live_id(conn, a)?, live_id(conn, b)?) else {
+        return Ok(None);
+    };
+    if same_emission_score(conn, a, b, tol)?.is_none() {
+        return Ok(None);
+    }
+    // Survivor: confirmed before candidate (the entry a user or rule already accepted keeps its
+    // id), then the first seen, then the larger count.
+    let rank = |id: EmitterId| -> Result<_, RepoError> {
+        let r = load_row(conn, id)?;
+        let confirmed = lifecycle::state_of(conn, id)? == LifecycleState::Confirmed;
+        Ok((!confirmed, r.first, std::cmp::Reverse(r.count), id))
+    };
+    let (into, from) = if rank(a)? <= rank(b)? { (a, b) } else { (b, a) };
+    // Where the two overlap in time they counted the same bursts: that stretch counts once, as
+    // the larger of the two counts; the rest of `from` adds.
+    let (ours, theirs) = (observation_spans(conn, into)?, observation_spans(conn, from)?);
+    let overlapping = |a: &[Span], b: &[Span]| -> i64 {
+        a.iter()
+            .filter(|s| spans_overlap(b, std::slice::from_ref(*s)))
+            .map(|s| s.count.max(0))
+            .sum()
+    };
+    let (shared_from, shared_into) = (overlapping(&theirs, &ours), overlapping(&ours, &theirs));
+    let from_count = load_row(conn, from)?.count;
+    let add = from_count - shared_from + (shared_from - shared_into).max(0);
+    let m = merge_rows(conn, from, into, t, reason, Some(add))?;
+    super::gating::purge_withheld_tags(conn, into)?;
+    Ok(Some(m))
+}
+
 /// Merges `from` into `into` inside the caller's transaction. See [`Repository::merge_emitters`].
+/// `add` is what `from` adds to the survivor's count (`None`: its whole count).
 fn merge_rows(
     conn: &Connection,
     from: EmitterId,
     into: EmitterId,
     t: Timestamp,
     reason: &str,
+    add: Option<i64>,
 ) -> Result<EmitterMerge, RepoError> {
     if from == into {
         return Err(RepoError::Invalid(
@@ -346,6 +608,7 @@ fn merge_rows(
         });
     }
     let identity_moved = a.identity.is_some();
+    let add = add.map_or(a.count, |n| n.clamp(0, a.count.max(0)));
     let (f_center, bandwidth) = if a.last > b.last {
         (a.f_center, a.bandwidth)
     } else {
@@ -384,7 +647,7 @@ fn merge_rows(
          WHERE emitter_id = ?12",
     )?
     .execute(params![
-        a.count,
+        add,
         a.first,
         a.last,
         f_center,
@@ -434,6 +697,7 @@ fn merge_rows(
         a.count,
         identity_moved
     ])?;
+    carry_evidence(conn, from, into, t)?;
     bump_extent(conn, "emitter", freq.width_hz(), 0)?;
     Ok(EmitterMerge {
         from,
@@ -566,6 +830,7 @@ fn decide(
                         h,
                         s.seen.end,
                         "decoded identity observed on an unidentified context emitter",
+                        None,
                     )?);
                 }
                 (Some(h), Assignment::Identity)
@@ -1044,8 +1309,10 @@ impl Repository {
     /// Merges `from` into `into`: counts summed, seen spans widened, fingerprints folded, tags
     /// copied, the observation ledger and live links re-pointed (old links superseded, not
     /// deleted), an identity moved when only `from` has one, and `from.merged_into = into`
-    /// (chains flattened). Refused when both hold identities ([`RepoError::IdentityConflict`]) or
-    /// either is already merged.
+    /// (chains flattened). T-082: classification history appended to `into`, a decided known
+    /// status carried, and a confirmed `from` confirms a candidate `into` (recorded in its lifecycle
+    /// history). Refused when both hold identities ([`RepoError::IdentityConflict`]), either is
+    /// already merged, or either is deleted.
     pub fn merge_emitters(
         &mut self,
         from: EmitterId,
@@ -1053,10 +1320,57 @@ impl Repository {
         t: Timestamp,
         reason: &str,
     ) -> Result<EmitterMerge, RepoError> {
+        self.ensure_refined_table()?;
         let tx = self.write_tx()?;
-        let m = merge_rows(&tx, from, into, t, reason)?;
+        let m = merge_rows(&tx, from, into, t, reason, None)?;
         // T-040: onto a survivor whose identity no access level reveals, only vocabulary tags stay.
         super::gating::purge_withheld_tags(&tx, into)?;
+        tx.commit()?;
+        Ok(m)
+    }
+
+    /// T-082: whether emitters `a` and `b` (merged ids stand for their survivors) observed the
+    /// same emission ([`crate::cluster`], "Same emission"): `Some(score)`, lower is closer.
+    pub fn same_emission(
+        &self,
+        a: EmitterId,
+        b: EmitterId,
+        tol: &Tolerances,
+    ) -> Result<Option<f64>, RepoError> {
+        self.ensure_refined_table()?;
+        let (a, b) = (self.live_emitter_id(a)?, self.live_emitter_id(b)?);
+        let tx = self.read_tx()?;
+        same_emission_score(&tx, a, b, tol)
+    }
+
+    /// T-082: the live, listed emitters observing the same emission as `id`, closest first.
+    pub fn same_emission_partners(
+        &self,
+        id: EmitterId,
+        tol: &Tolerances,
+    ) -> Result<Vec<(EmitterId, f64)>, RepoError> {
+        self.ensure_refined_table()?;
+        let id = self.live_emitter_id(id)?;
+        let tx = self.read_tx()?;
+        same_emission_partners(&tx, id, tol)
+    }
+
+    /// T-082: merges two inventory entries of one emission into one ([`crate::cluster`], "Same
+    /// emission"). The survivor is the confirmed entry, else the first seen, else the larger
+    /// count; observations the survivor already covers in time are not counted again. Everything
+    /// else follows [`Self::merge_emitters`]. `Ok(None)` when the two are not the same emission
+    /// (including the same live emitter, a deleted entry, or two identities).
+    pub fn merge_same_emission(
+        &mut self,
+        a: EmitterId,
+        b: EmitterId,
+        t: Timestamp,
+        reason: &str,
+        tol: &Tolerances,
+    ) -> Result<Option<EmitterMerge>, RepoError> {
+        self.ensure_refined_table()?;
+        let tx = self.write_tx()?;
+        let m = merge_same_emission_rows(&tx, a, b, t, reason, tol)?;
         tx.commit()?;
         Ok(m)
     }
