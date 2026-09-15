@@ -46,7 +46,9 @@ fn row_id(row: &Value) -> EmitterId {
 fn assert_track_and_decoder_evidence(r: &Repository, row: &Value) {
     let links = r.emitter_links(row_id(row)).unwrap();
     assert!(
-        links.iter().any(|l| matches!(l.target, LinkTarget::Track(_))),
+        links
+            .iter()
+            .any(|l| matches!(l.target, LinkTarget::Track(_))),
         "[{T082}] track evidence on {row}"
     );
     assert!(
@@ -283,7 +285,11 @@ fn t082_two_nearby_fm_stations_stay_two_entries() {
             station.f_hi_hz / 1e6,
             matched
                 .iter()
-                .map(|r| (r["id"].clone(), r["f_center_hz"].clone(), r["state"].clone()))
+                .map(|r| (
+                    r["id"].clone(),
+                    r["f_center_hz"].clone(),
+                    r["state"].clone()
+                ))
                 .collect::<Vec<_>>()
         );
         assert_eq!(matched.len(), 1, "[{T082}] each station appears once");

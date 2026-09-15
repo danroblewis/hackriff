@@ -71,10 +71,10 @@ mod inventory;
 mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
-#[cfg(test)]
-mod same_emission_tests;
 mod measure;
 mod refined;
+#[cfg(test)]
+mod same_emission_tests;
 mod selections;
 #[cfg(test)]
 mod tests;

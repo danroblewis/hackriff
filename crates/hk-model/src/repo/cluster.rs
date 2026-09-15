@@ -559,7 +559,10 @@ fn merge_same_emission_rows(
     let (into, from) = if rank(a)? <= rank(b)? { (a, b) } else { (b, a) };
     // Where the two overlap in time they counted the same bursts: that stretch counts once, as
     // the larger of the two counts; the rest of `from` adds.
-    let (ours, theirs) = (observation_spans(conn, into)?, observation_spans(conn, from)?);
+    let (ours, theirs) = (
+        observation_spans(conn, into)?,
+        observation_spans(conn, from)?,
+    );
     let overlapping = |a: &[Span], b: &[Span]| -> i64 {
         a.iter()
             .filter(|s| spans_overlap(b, std::slice::from_ref(*s)))
