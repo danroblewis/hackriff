@@ -518,3 +518,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-079** (Sonnet medium): docs/api.md reference, HTTP contract tests on the mock device, UI decision logic moved into backend endpoints, CLAUDE.md thin-client rule. Next slot, after T-077.
   - **T-080** (Sonnet medium): left sidebar, first/last seen columns removed, Candidates/Confirmed with Promote/Delete. After T-078 and T-079, since both touch ui/src.
   - The user was asked to resend the truncated start.
+- **B0.180 Full user brief received** (supervisor file brief-ui-separation-inventory.md, 22:20). Replaces the truncated version.
+  - **UI direction:** the user will rewrite the web UI later as a one-screen exploratory UI; no redesign now. The backend owns all signal logic (recognition, analysis, classification, demod, decoding), and the UI is a thin client over a documented API.
+  - **T-078 corrected via message to the running agent:**
+    - query param `state`;
+    - recurrence stats on candidates;
+    - delete keeps detections/history, and re-detection creates a new candidate (the earlier "not recreated" was wrong);
+    - docs/07 §2.11 update.
+  - **T-079:** no dependency; next free slot.
+  - **T-080:** depends on T-078 only.
+  - **Priority:** all three ahead of T-053/T-056/T-067.

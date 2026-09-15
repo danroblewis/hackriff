@@ -878,6 +878,7 @@ tasks:
     milestone: M0b
     title: HIL - run the device-interface acceptance suite against the real HackRF (receive-only, manual/nightly)
     status: todo
+    priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     hold: "unblocked (T-047 merged); needs the HackRF (stop demo on :8899) and a slot"
     deps: [T-047, T-049, T-037]
     parallel_group: O
@@ -926,6 +927,7 @@ tasks:
     milestone: M0b
     title: Wire compute providers into the pipeline (ComputeOptions in pipeline settings; STFT/PFB via hk_dsp::compute)
     status: todo
+    priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-041, T-037]
     parallel_group: J
     use_cases: [SPACE-050, AWARE-042]
@@ -1113,6 +1115,7 @@ tasks:
     milestone: M0b
     title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
     status: todo
+    priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-051, T-062]
     parallel_group: P
     use_cases: [AWARE-042]
@@ -1298,13 +1301,13 @@ tasks:
     effort: medium
   - id: T-078
     milestone: M0b
-    title: Signal inventory lifecycle - candidates vs confirmed, auto-confirm rule, promote/delete API
+    title: Potential vs confirmed signal inventory (candidate/confirmed/deleted, auto-confirm, recurrence stats, promote/delete API)
     status: in-progress
     deps: [T-039, T-052]
     parallel_group: W
     use_cases: [AWARE-053, AWARE-042]
-    requested_by: user 2026-09-14 (start of message truncated; scope inferred from visible tests)
-    acceptance: "inventory entries carry status candidate/confirmed/deleted with who/when/reason; blind evidence-based auto-confirm rule (configurable, documented); /api/inventory status field + filter; authenticated audited POST /api/inventory/{id}/promote and DELETE /api/inventory/{id} (+ restore); mock-SDR tests: steady FM station auto-confirms, intermittent FSK emitter stays candidate until promoted, deleted entry leaves the list (not recreated by next sighting, kept in history), auth + audit"
+    requested_by: "user via supervisor 2026-09-14 22:20 (full brief: /private/tmp/claude-501/-Users-daniellewis-hackriff/573a0024-6d5e-4600-b164-feaca9d406c6/scratchpad/brief-ui-separation-inventory.md)"
+    acceptance: "emitters carry inventory state candidate/confirmed/deleted; auto-confirm strong unambiguous signals (e.g. trust-confirmed and continuous, or valid decode/identity); recurring intermittent signals stay candidates until user promotes, with recurrence stats (occurrences, duty cycle, recent appearances); POST /api/inventory/{id}/promote, DELETE /api/inventory/{id}, GET /api/inventory?state=candidate|confirmed (auth, audit, error pattern); delete removes the inventory entry but keeps raw detections/history, re-detection later creates a new candidate; docs/07 2.11 updated (user delete now allowed); mock-SDR tests: 101.3 MHz FM station auto-confirms, intermittent FSK emitter stays candidate until promoted, deleted entry leaves the list, re-detection creates a new candidate"
     area: crates/hk-model (inventory lifecycle, schema in place), crates/hk-pipeline/src/inventory.rs, crates/hk-api (inventory endpoints), docs/07
     needs: none
     model: opus
@@ -1314,24 +1317,24 @@ tasks:
     milestone: M0b
     title: API reference docs/api.md + HTTP contract tests on the mock device; move UI decision logic into backend; CLAUDE.md thin-client rule
     status: todo
-    deps: [T-078]
+    deps: []
     parallel_group: W
     use_cases: [AWARE-042]
-    requested_by: user 2026-09-14
-    acceptance: "docs/api.md documents every /api and /ws route (auth, request/response JSON, errors) and links docs/stream-contract.md; HTTP-level API contract tests against a real hk serve on the mock device cover each route so a rewritten UI can rely on them; ui/src audited and decision logic moved to backend endpoints (listed); CLAUDE.md rule: the UI is a thin client over docs/api.md"
+    requested_by: "user via supervisor 2026-09-14 22:20 (full brief)"
+    acceptance: "docs/api.md documents every /api and /ws route (auth, request/response JSON, errors), linked with docs/stream-contract.md; HTTP-level API contract tests against a real hk serve on the mock device so a rewritten UI can rely on them; ui/src audited and decision logic moved into backend endpoints (listed); CLAUDE.md rule: UI is a thin client over docs/api.md, all signal logic lives in the backend"
     area: docs/api.md, crates/hk-api tests (+ endpoints for moved logic), crates/hk-cli tests, ui/src (logic removal), CLAUDE.md
     needs: none
     model: sonnet
     effort: medium
-    hold: "launch when an agent slot frees (T-077 finishing); coordinate with T-078 endpoints (merge main after T-078 lands)"
+    hold: "after running T-077/T-064 (next free slot), ahead of T-053/T-056/T-067; merge main after T-078 lands so docs/tests include its endpoints"
   - id: T-080
     milestone: M0b
-    title: "UI tweaks (no redesign): left sidebar for Selections + Signal Inventory, drop first/last seen columns, inventory split Candidates/Confirmed with Promote and Delete"
+    title: "Small UI tweaks only, no redesign: Selections + Signal Inventory into a left sidebar, remove first/last seen columns, inventory split Candidates/Confirmed with Promote and Delete"
     status: todo
-    deps: [T-078, T-079]
+    deps: [T-078]
     parallel_group: N
     use_cases: [AWARE-042]
-    requested_by: user 2026-09-14
+    requested_by: "user via supervisor 2026-09-14 22:20 (full brief)"
     acceptance: "Selections and Signal Inventory panels move to a left sidebar; first/last seen columns removed; inventory shows Candidates and Confirmed lists with Promote and Delete buttons calling the T-078 endpoints; small tweaks only, no redesign; UI tests; works at phone width"
     area: ui/
     needs: none
