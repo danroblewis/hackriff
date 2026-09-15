@@ -1397,7 +1397,11 @@ tasks:
   - id: T-083
     milestone: M0b
     title: Sortable left-sidebar lists (inventory Candidates/Confirmed and Selections; frequency ascending default; clickable headers)
-    status: in-progress
+    status: done
+    commit: "515dddc (merged; ui-only)"
+    result: "Candidates/Confirmed sortable by status, frequency, bandwidth, family, identity, count, recurrence (occurrences, missing last), tags; default frequency ascending (was count desc); repeat click toggles with per-column default direction; sort state kept across reload via per-list ListState. Selections sortable by frequency (f_lo, the only orderable Selection field), default ascending, state kept across store re-renders. SNR and last activity not sortable: no inventory row field carries SNR (only the live listen status stream), and T-080 deliberately removed the last-seen column (test enforces it). Tests: ui/test/inventory.test.ts and selections.test.ts (default order, toggle, recurrence nulls last, state survives reload, header wiring)."
+    followups:
+      - "SNR / last-activity sorting needs API row fields (e.g. latest SNR, last_seen) - add in the UI rewrite or a small backend field task if the user wants them"
     deps: [T-080]
     parallel_group: N
     use_cases: [AWARE-042]
