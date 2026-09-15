@@ -1,8 +1,19 @@
 //! The v1 attention scheduler: fixed sweep/dwell alternation (ADR-0005 "first version"). See the
 //! [module docs](super) for the policy.
 
-use hk_model::{ScanPlan, Survey, SurveyId, SurveyState, SurveySummary, Timestamp};
+use std::sync::Arc;
 
+use hk_model::attention::schedule::{ArmKey, BanditConfig, DwellOutcome};
+use hk_model::attention::score::InterestingnessProvider;
+use hk_model::{
+    FreqRange, ScanPlan, Survey, SurveyId, SurveyState, SurveySummary, TimeRange, Timestamp,
+};
+
+use super::bandit::{
+    ArmStatus, AttentionStatus, Bandit, BanditKind, Choice, CoverageRing, CoverageVisit, Lease,
+    MAX_LEASES, MAX_SCHEDULED, RegionPoi, ScheduledDwell, Share, TierWindow, Undo, arm_key,
+    region_poi,
+};
 use super::clock::{Clock, SyntheticClock};
 use super::config::{MAX_GAIN_STEP_PAIRS, SchedulerConfig};
 use super::plan::{
@@ -167,6 +178,9 @@ pub enum SchedulerError {
     /// The survey log failed.
     #[error(transparent)]
     Log(#[from] hk_model::RepoError),
+    /// The lease or scheduled-dwell table is full.
+    #[error("the {0} table is full")]
+    TableFull(&'static str),
 }
 
 /// Counters since construction.
@@ -188,6 +202,15 @@ pub struct ScheduleStats {
     pub verifications_completed: u64,
     /// Slots cut by a preemption and rolled back (re-visited later).
     pub truncated_slots: u64,
+    /// Bandit dwells (T-120).
+    pub bandit_steps: u64,
+    /// Pinned-lease slices.
+    pub lease_steps: u64,
+    /// Scheduled-plan dwells.
+    pub scheduled_steps: u64,
+    /// Steps above the bandit tier emitted while discovery was below the sweep floor (bandit
+    /// enabled): the floor was unmeetable, disclosed rather than hidden.
+    pub floor_violations: u64,
 }
 
 /// A step minus its sequence number, start time and plan version.
@@ -240,6 +263,8 @@ struct Snapshot {
     cursor: Cursor,
     served: Option<(PoiKey, u64)>,
     verification: bool,
+    bandit: Option<Undo>,
+    scheduled: Option<(u32, i64, bool)>,
 }
 
 const MAX_STAGES: usize = 2 * MAX_GAIN_STEP_PAIRS as usize + 4;
@@ -249,6 +274,7 @@ struct VerifyState {
     key: PoiKey,
     stages: [Option<Template>; MAX_STAGES],
     next: usize,
+    bandit: bool,
 }
 
 impl VerifyState {
@@ -261,6 +287,34 @@ impl VerifyState {
 struct ActiveIntent {
     intent: UserIntent,
     until: Option<Timestamp>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveLease {
+    lease: Lease,
+    until: Option<Timestamp>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScheduledEntry {
+    dwell: ScheduledDwell,
+    due_ns: i64,
+    done: bool,
+}
+
+/// Coverage ring capacity (recent windows kept for in-memory POI accounting).
+const COVERAGE_VISITS: usize = 16_384;
+
+/// Sweep floor under the low-power profile (ADR-0012 §5.8).
+const LOW_POWER_SWEEP_FLOOR: f64 = 0.5;
+
+fn tier_window(cfg: &BanditConfig) -> TierWindow {
+    let window_ns = (cfg.sweep_floor_window_s * 1e9) as i64;
+    TierWindow::new(
+        window_ns,
+        (cfg.max_dwell_s.max(60.0) * 1e9) as i64,
+        window_ns / 60,
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -298,6 +352,15 @@ pub struct Scheduler<C: Clock> {
     last_now: Timestamp,
     stats: ScheduleStats,
     survey: Option<OpenSurvey>,
+    bandit: Option<Box<Bandit>>,
+    leases: Vec<ActiveLease>,
+    lease_rr: usize,
+    scheduled: Vec<ScheduledEntry>,
+    tiers: TierWindow,
+    current_share: Share,
+    current_visits: usize,
+    coverage: CoverageRing,
+    low_power: bool,
 }
 
 impl<C: Clock> Scheduler<C> {
@@ -327,6 +390,15 @@ impl<C: Clock> Scheduler<C> {
             last_now: now,
             stats: ScheduleStats::default(),
             survey: None,
+            bandit: None,
+            leases: Vec::with_capacity(MAX_LEASES),
+            lease_rr: 0,
+            scheduled: Vec::with_capacity(MAX_SCHEDULED),
+            tiers: tier_window(&BanditConfig::default()),
+            current_share: Share::Other,
+            current_visits: 0,
+            coverage: CoverageRing::new(COVERAGE_VISITS),
+            low_power: false,
         })
     }
 
@@ -386,21 +458,35 @@ impl<C: Clock> Scheduler<C> {
         now
     }
 
-    /// The next step, starting now. Order: user intent, then a running verification group, then
-    /// the sweep/dwell cycle.
+    /// The next step, starting now. Order (ADR-0012 §5.4): user intent, pinned leases, a running
+    /// verification group, due scheduled-plan dwells, then the sweep/dwell cycle (bandit or WRR
+    /// dwell slots and discovery).
     pub fn next_step(&mut self) -> ScheduleStep {
         let now = self.now();
+        let now_ns = now.as_unix_nanos();
         if self
             .intent
             .is_some_and(|a| a.until.is_some_and(|until| now >= until))
         {
             self.intent = None;
         }
+        self.leases
+            .retain(|l| l.until.is_none_or(|until| now < until));
+        if let Some(b) = self.bandit.as_mut() {
+            if b.stale() {
+                b.repack(&self.plan, &self.cfg, &self.caps, now_ns);
+            }
+        }
         let t = if let Some(active) = self.intent {
             self.slot = None;
             self.intent_template(now, &active)
+        } else if !self.leases.is_empty() {
+            self.slot = None;
+            self.lease_template(now)
         } else if self.verify.is_some() {
             self.verify_template()
+        } else if let Some(i) = self.due_scheduled(now_ns) {
+            self.scheduled_template(i, now_ns)
         } else {
             self.slot_template()
         };
@@ -421,6 +507,23 @@ impl<C: Clock> Scheduler<C> {
         };
         self.seq += 1;
         self.current_end = step.t_end();
+        let share = match step.purpose {
+            p if p.is_discovery() => Share::Discovery,
+            Purpose::Bandit {
+                kind: BanditKind::Explore,
+                ..
+            } => Share::Explore,
+            Purpose::UserIntent { .. } | Purpose::Lease { .. } | Purpose::Scheduled { .. } => {
+                Share::Other
+            }
+            _ => Share::Exploit,
+        };
+        if share == Share::Other && !self.sweep_floor_met(now_ns) {
+            self.stats.floor_violations += 1;
+        }
+        self.tiers.add(now_ns, step.duration_ns, share, 1);
+        self.current_share = share;
+        self.record_coverage(&step);
         let stats = &mut self.stats;
         stats.steps += 1;
         match step.purpose {
@@ -431,8 +534,437 @@ impl<C: Clock> Scheduler<C> {
                 stats.trust_steps += 1;
             }
             Purpose::UserIntent { .. } => stats.intent_steps += 1,
+            Purpose::Bandit { .. } => stats.bandit_steps += 1,
+            Purpose::Lease { .. } => stats.lease_steps += 1,
+            Purpose::Scheduled { .. } => stats.scheduled_steps += 1,
         }
         step
+    }
+
+    /// Covered extents of `step` (usable span; non-discovery windows minus the DC guard) into
+    /// the coverage ring.
+    fn record_coverage(&mut self, step: &ScheduleStep) {
+        let usable = (step.rate_hz * self.cfg.usable_fraction).min(self.cfg.max_span_hz);
+        let (lo, hi) = (step.center_hz - usable / 2.0, step.center_hz + usable / 2.0);
+        let time = TimeRange::new(step.t_start, step.t_end());
+        let guard = super::bandit::DC_GUARD_HZ;
+        if step.purpose.is_discovery() {
+            self.coverage.push(CoverageVisit {
+                covered: FreqRange::new(lo, hi),
+                time,
+            });
+            self.current_visits = 1;
+        } else {
+            for covered in [
+                FreqRange::new(lo, step.center_hz - guard),
+                FreqRange::new(step.center_hz + guard, hi),
+            ] {
+                self.coverage.push(CoverageVisit { covered, time });
+            }
+            self.current_visits = 2;
+        }
+    }
+
+    fn sweep_floor(&self) -> Option<f64> {
+        let floor = self.bandit.as_ref()?.cfg.sweep_floor;
+        Some(if self.low_power {
+            floor.max(LOW_POWER_SWEEP_FLOOR)
+        } else {
+            floor
+        })
+    }
+
+    fn sweep_floor_met(&self, now_ns: i64) -> bool {
+        let Some(floor) = self.sweep_floor() else {
+            return true;
+        };
+        let t = self.tiers.totals(now_ns);
+        let total: i64 = t.iter().sum();
+        total == 0 || t[Share::Discovery as usize] as f64 >= floor * total as f64
+    }
+
+    /// Enables the bandit revisit policy (ADR-0012 §5): dwell slots are chosen by the bandit over
+    /// `provider`'s candidate snapshots instead of WRR over offered POIs, under the exploration
+    /// and sweep floors. Arms are packed at the next step.
+    pub fn enable_bandit(
+        &mut self,
+        cfg: BanditConfig,
+        provider: Arc<dyn InterestingnessProvider>,
+    ) -> Result<(), SchedulerError> {
+        cfg.validate()
+            .map_err(|e| PlanError::InvalidConfig(format!("bandit: {e}")))?;
+        self.tiers = tier_window(&cfg);
+        self.bandit = Some(Box::new(Bandit::new(cfg, provider)));
+        Ok(())
+    }
+
+    /// The bandit is enabled.
+    pub fn bandit_enabled(&self) -> bool {
+        self.bandit.is_some()
+    }
+
+    /// The arm key of a step's window (the `arm` of its [`DwellOutcome`]).
+    pub fn arm_key_of(&self, step: &ScheduleStep) -> ArmKey {
+        let q = self.bandit.as_ref().map_or(1e6, |b| b.cfg.arm_quantum_hz);
+        arm_key(step.rf_path, step.center_hz, step.rate_hz, q)
+    }
+
+    /// Feeds a processed dwell's outcome (detection, C12 and decoders done) to the bandit.
+    /// Returns whether its arm is known. Allocation-free.
+    pub fn record_outcome(&mut self, outcome: &DwellOutcome) -> bool {
+        let now_ns = self.now().as_unix_nanos();
+        self.bandit
+            .as_mut()
+            .is_some_and(|b| b.record_outcome(outcome, now_ns))
+    }
+
+    /// A trust-test verdict for a suspect candidate's verification group (C05): pass lets it be
+    /// packed, fail bans it for `suspect_ban_s`. Returns whether the candidate was known.
+    pub fn report_verification(&mut self, key: PoiKey, passed: bool) -> bool {
+        let now_ns = self.now().as_unix_nanos();
+        self.bandit
+            .as_mut()
+            .is_some_and(|b| b.report_verification(key, passed, now_ns))
+    }
+
+    /// Adds or updates a pinned lease. It preempts scheduled plans, the bandit and the sweep from
+    /// the next step (a running slot is cut and rolled back, as for intent).
+    pub fn add_lease(&mut self, lease: Lease) -> Result<(), SchedulerError> {
+        self.check_window(
+            "lease",
+            lease.center_hz,
+            lease.rate_hz,
+            lease.gains.as_ref(),
+        )?;
+        if let Some(ns) = lease.duration_ns.filter(|&ns| ns <= 0) {
+            return Err(SchedulerError::OutOfCapability {
+                what: "lease duration (ns)",
+                value: ns as f64,
+            });
+        }
+        let now = self.now();
+        let entry = ActiveLease {
+            lease,
+            until: lease.duration_ns.map(|ns| now.saturating_add_nanos(ns)),
+        };
+        if let Some(l) = self.leases.iter_mut().find(|l| l.lease.id == lease.id) {
+            *l = entry;
+            return Ok(());
+        }
+        if self.leases.len() >= MAX_LEASES {
+            return Err(SchedulerError::TableFull("lease"));
+        }
+        self.cut(now);
+        self.leases.push(entry);
+        Ok(())
+    }
+
+    /// Releases a lease. Returns whether it was active.
+    pub fn release_lease(&mut self, id: u64) -> bool {
+        match self.leases.iter().position(|l| l.lease.id == id) {
+            Some(i) => {
+                self.leases.remove(i);
+                let now = self.now();
+                self.current_end = self.current_end.min(now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Active leases.
+    pub fn leases(&self) -> impl Iterator<Item = &Lease> {
+        self.leases.iter().map(|l| &l.lease)
+    }
+
+    /// Adds or replaces a scheduled-plan dwell.
+    pub fn schedule_dwell(&mut self, dwell: ScheduledDwell) -> Result<(), SchedulerError> {
+        self.check_window(
+            "scheduled dwell",
+            dwell.center_hz,
+            dwell.rate_hz,
+            dwell.gains.as_ref(),
+        )?;
+        if dwell.duration_ns <= 0 || dwell.every_ns.is_some_and(|ns| ns <= 0) {
+            return Err(SchedulerError::OutOfCapability {
+                what: "scheduled dwell duration or period (ns)",
+                value: dwell.duration_ns as f64,
+            });
+        }
+        let entry = ScheduledEntry {
+            dwell,
+            due_ns: dwell.due.as_unix_nanos(),
+            done: false,
+        };
+        self.scheduled.retain(|e| !e.done || e.dwell.id == dwell.id);
+        if let Some(e) = self.scheduled.iter_mut().find(|e| e.dwell.id == dwell.id) {
+            *e = entry;
+        } else if self.scheduled.len() >= MAX_SCHEDULED {
+            return Err(SchedulerError::TableFull("scheduled dwell"));
+        } else {
+            self.scheduled.push(entry);
+        }
+        Ok(())
+    }
+
+    /// Cancels a scheduled dwell. Returns whether it was pending.
+    pub fn cancel_scheduled(&mut self, id: u32) -> bool {
+        let before = self.scheduled.iter().filter(|e| !e.done).count();
+        self.scheduled.retain(|e| e.dwell.id != id);
+        self.scheduled.iter().filter(|e| !e.done).count() < before
+    }
+
+    /// Low-power profile (ADR-0012 §5.8): half the dwell slots per cycle and a sweep floor of at
+    /// least 50 % (sweeping needs no demodulation or classification).
+    pub fn set_low_power(&mut self, on: bool) {
+        self.low_power = on;
+    }
+
+    /// Tier shares over the sweep-floor window, floor status and the bandit summary.
+    pub fn attention_status(&self) -> AttentionStatus {
+        let now = self.last_now;
+        let now_ns = now.as_unix_nanos();
+        let t = self.tiers.totals(now_ns);
+        let s = |share: Share| t[share as usize] as f64 / 1e9;
+        AttentionStatus {
+            now,
+            window_s: self.tiers.window_ns() as f64 / 1e9,
+            discovery_s: s(Share::Discovery),
+            exploit_s: s(Share::Exploit),
+            explore_s: s(Share::Explore),
+            other_s: s(Share::Other),
+            sweep_floor: self.sweep_floor(),
+            sweep_floor_met: self.sweep_floor_met(now_ns),
+            floor_violations: self.stats.floor_violations,
+            interactive: self.intent.is_some(),
+            leases: self.leases.len(),
+            scheduled: self.scheduled.iter().filter(|e| !e.done).count(),
+            low_power: self.low_power,
+            bandit: self.bandit.as_ref().map(|b| b.status(now_ns)),
+        }
+    }
+
+    /// The bandit's arm table (empty without the bandit).
+    pub fn arm_table(&self) -> Vec<ArmStatus> {
+        self.bandit
+            .as_ref()
+            .map_or_else(Vec::new, |b| b.arm_table(self.last_now.as_unix_nanos()))
+    }
+
+    /// Recent planned windows (cut-corrected), oldest first: the in-memory coverage source.
+    pub fn coverage_visits(&self) -> Vec<CoverageVisit> {
+        self.coverage.to_vec()
+    }
+
+    /// Exact POI and coverage gaps of `region` over `span` from the recent windows (ADR-0012
+    /// §5.5; 1 MHz cells, gaps longer than twice the measured revisit).
+    pub fn region_poi(
+        &self,
+        region: FreqRange,
+        span: TimeRange,
+        taus_s: &[f64],
+        rate_hz: Option<f64>,
+    ) -> RegionPoi {
+        region_poi(
+            &self.coverage.to_vec(),
+            region,
+            span,
+            1e6,
+            taus_s,
+            rate_hz,
+            None,
+        )
+    }
+
+    fn check_window(
+        &self,
+        what: &'static str,
+        center_hz: f64,
+        rate_hz: f64,
+        gains: Option<&Gains>,
+    ) -> Result<(), SchedulerError> {
+        if !(center_hz.is_finite() && self.caps.supports_frequency(center_hz)) {
+            return Err(SchedulerError::OutOfCapability {
+                what,
+                value: center_hz,
+            });
+        }
+        if !(rate_hz.is_finite() && self.caps.sample_rates.supports(rate_hz)) {
+            return Err(SchedulerError::OutOfCapability {
+                what,
+                value: rate_hz,
+            });
+        }
+        if let Some(g) = gains {
+            check_gains(&self.caps, g).map_err(|reason| PlanError::InvalidGain {
+                index: None,
+                reason,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn window_template(
+        &self,
+        center_hz: f64,
+        rate_hz: f64,
+        gains: Option<Gains>,
+        duration_ns: i64,
+        purpose: Purpose,
+    ) -> Template {
+        let (table_gains, gain_entry, accessory) = self.plan.gains_at(center_hz);
+        Template {
+            duration_ns,
+            center_hz,
+            rate_hz,
+            baseband_filter_hz: pick_baseband_filter(&self.caps, rate_hz),
+            gains: gains.unwrap_or(table_gains),
+            gain_entry,
+            accessory,
+            rf_path: rf_path(self.cfg.rf_path_boundaries(&self.caps), center_hz),
+            purpose,
+            verification_group: None,
+        }
+    }
+
+    /// The next lease slice, round robin over active leases.
+    fn lease_template(&mut self, now: Timestamp) -> Template {
+        self.lease_rr = (self.lease_rr + 1) % self.leases.len();
+        let l = self.leases[self.lease_rr];
+        let slice = self.cfg.intent_slice_ns;
+        let duration_ns = l.until.map_or(slice, |until| {
+            (until.as_unix_nanos() - now.as_unix_nanos()).clamp(1, slice)
+        });
+        self.window_template(
+            l.lease.center_hz,
+            l.lease.rate_hz,
+            l.lease.gains,
+            duration_ns,
+            Purpose::Lease {
+                kind: l.lease.kind,
+                lease: l.lease.id,
+            },
+        )
+    }
+
+    fn due_scheduled(&self, now_ns: i64) -> Option<usize> {
+        self.scheduled
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.done && e.due_ns <= now_ns)
+            .min_by_key(|(_, e)| (e.due_ns, e.dwell.id))
+            .map(|(i, _)| i)
+    }
+
+    fn scheduled_template(&mut self, i: usize, now_ns: i64) -> Template {
+        let e = self.scheduled[i];
+        self.slot = Some(Snapshot {
+            cursor: self.cursor,
+            served: None,
+            verification: false,
+            bandit: None,
+            scheduled: Some((e.dwell.id, e.due_ns, e.done)),
+        });
+        let entry = &mut self.scheduled[i];
+        match e.dwell.every_ns {
+            Some(every) => {
+                while entry.due_ns <= now_ns {
+                    entry.due_ns = entry.due_ns.saturating_add(every);
+                }
+            }
+            None => entry.done = true,
+        }
+        let d = e.dwell;
+        self.window_template(
+            d.center_hz,
+            d.rate_hz,
+            d.gains,
+            d.duration_ns,
+            Purpose::Scheduled { target: d.id },
+        )
+    }
+
+    /// A bandit dwell slot: the bandit's choice unless it would push discovery below the sweep
+    /// floor (then `None`: the cycle sweeps on).
+    fn bandit_slot(&mut self) -> Option<Template> {
+        let now_ns = self.last_now.as_unix_nanos();
+        let shares = self.tiers.totals(now_ns);
+        let floor = self.sweep_floor()?;
+        let total: i64 = shares.iter().sum();
+        let discovery = shares[Share::Discovery as usize] as f64;
+        if discovery < floor * (total + self.cfg.dwell_min_ns) as f64 {
+            if let Some(b) = self.bandit.as_mut() {
+                b.counters.floor_deferrals += 1;
+            }
+            return None;
+        }
+        let choice = self.bandit.as_ref()?.pick(now_ns, &shares)?;
+        let (template, verify) = match choice {
+            Choice::Verify {
+                key,
+                center_hz,
+                bandwidth_hz,
+            } => {
+                let poi = Poi {
+                    key,
+                    center_hz,
+                    bandwidth_hz,
+                    interestingness: 1.0,
+                    burst_interval_ns: None,
+                    verify: true,
+                };
+                let base = dwell_template(&self.plan, &self.cfg, &self.caps, &poi);
+                let notes = poi_notes(&self.cfg, &self.caps, &poi, &base);
+                (None, Some(self.verification_for(&poi, base, notes, true)))
+            }
+            Choice::Dwell { arm, kind } => {
+                let a = self.bandit.as_ref()?.arm_view(arm);
+                let duration_ns = a
+                    .dwell_ns
+                    .min(self.plan.dwell_cap_ns)
+                    .max(self.cfg.dwell_min_ns);
+                let t = self.window_template(
+                    a.center_hz,
+                    a.rate_hz,
+                    None,
+                    duration_ns,
+                    Purpose::Bandit {
+                        arm: arm as u32,
+                        lead: a.lead,
+                        kind,
+                    },
+                );
+                (Some(t), None)
+            }
+        };
+        let duration_ns = match (&template, &verify) {
+            (Some(t), _) => t.duration_ns,
+            (None, Some(v)) => v.stages.iter().flatten().map(|s| s.duration_ns).sum(),
+            (None, None) => return None,
+        };
+        if discovery < floor * (total + duration_ns) as f64 {
+            if let Some(b) = self.bandit.as_mut() {
+                b.counters.floor_deferrals += 1;
+            }
+            return None;
+        }
+        let before = self.cursor;
+        self.cursor.dwells_in_cycle += 1;
+        let undo = self.bandit.as_mut()?.commit(choice, now_ns);
+        self.slot = Some(Snapshot {
+            cursor: before,
+            served: None,
+            verification: false,
+            bandit: Some(undo),
+            scheduled: None,
+        });
+        match (template, verify) {
+            (Some(t), _) => Some(t),
+            (None, v) => {
+                self.verify = v;
+                Some(self.verify_template())
+            }
+        }
     }
 
     /// Queues or updates a POI. Its dwell is sized now: rate ≥ `dwell_min_rate_hz` and wide
@@ -643,9 +1175,16 @@ impl<C: Clock> Scheduler<C> {
             None => None,
         };
         if let Some(open) = self.verify.take() {
-            if let Some(e) = self.pois.iter_mut().find(|e| e.poi.key == open.key) {
+            if open.bandit {
+                if let Some(b) = self.bandit.as_mut() {
+                    b.undo(Undo::Verify { key: open.key });
+                }
+            } else if let Some(e) = self.pois.iter_mut().find(|e| e.poi.key == open.key) {
                 e.verified = false;
             }
+        }
+        if let Some(b) = self.bandit.as_mut() {
+            b.invalidate();
         }
         let hop = self.resume_hop(&compiled);
         self.cfg = cfg;
@@ -725,9 +1264,24 @@ impl<C: Clock> Scheduler<C> {
 
     /// Rolls back the running slot if `now` is inside it or a verification group is unfinished.
     fn cut(&mut self, now: Timestamp) {
+        if now < self.current_end {
+            let now_ns = now.as_unix_nanos();
+            let rest = self.current_end.as_unix_nanos() - now_ns;
+            self.tiers.add(now_ns, rest, self.current_share, -1);
+            self.coverage.cut_last(self.current_visits, now);
+        }
         if now < self.current_end || self.verify.is_some() {
             if let Some(s) = self.slot.take() {
                 self.cursor = s.cursor;
+                if let (Some(u), Some(b)) = (s.bandit, self.bandit.as_mut()) {
+                    b.undo(u);
+                }
+                if let Some((id, due_ns, done)) = s.scheduled {
+                    if let Some(e) = self.scheduled.iter_mut().find(|e| e.dwell.id == id) {
+                        e.due_ns = due_ns;
+                        e.done = done;
+                    }
+                }
                 if let Some((key, served)) = s.served {
                     if let Some(e) = self.pois.iter_mut().find(|e| e.poi.key == key) {
                         e.served = served;
@@ -768,13 +1322,21 @@ impl<C: Clock> Scheduler<C> {
 
     fn slot_template(&mut self) -> Template {
         let sweeps = self.cfg.sweeps_per_cycle;
-        let dwells = if self.plan.pois_allowed() {
-            self.cfg.dwells_per_cycle
-        } else {
+        let dwells = if !self.plan.pois_allowed() {
             0
+        } else if self.low_power {
+            (self.cfg.dwells_per_cycle / 2)
+                .max(1)
+                .min(self.cfg.dwells_per_cycle)
+        } else {
+            self.cfg.dwells_per_cycle
         };
         if self.cursor.sweeps_in_cycle >= sweeps && self.cursor.dwells_in_cycle < dwells {
-            if let Some(i) = self.pick_poi() {
+            if self.bandit.is_some() {
+                if let Some(t) = self.bandit_slot() {
+                    return t;
+                }
+            } else if let Some(i) = self.pick_poi() {
                 let before = self.cursor;
                 self.cursor.dwells_in_cycle += 1;
                 let e = &mut self.pois[i];
@@ -783,10 +1345,13 @@ impl<C: Clock> Scheduler<C> {
                     cursor: before,
                     served: Some((e.poi.key, e.served)),
                     verification: starts_verification,
+                    bandit: None,
+                    scheduled: None,
                 });
                 e.served += 1;
                 if starts_verification {
-                    let v = self.verification_for(i);
+                    let e = &self.pois[i];
+                    let v = self.verification_for(&e.poi, e.dwell, e.notes, false);
                     if v.remaining() {
                         self.verify = Some(v);
                         return self.verify_template();
@@ -805,6 +1370,8 @@ impl<C: Clock> Scheduler<C> {
             cursor: self.cursor,
             served: None,
             verification: false,
+            bandit: None,
+            scheduled: None,
         });
         let index = self.cursor.hop;
         let t = Template::from_hop(index, &self.plan.hops[index]);
@@ -829,6 +1396,12 @@ impl<C: Clock> Scheduler<C> {
         v.next = index + 1;
         if v.remaining() {
             self.verify = Some(v);
+        } else if v.bandit {
+            let end_ns = self.last_now.as_unix_nanos().saturating_add(t.duration_ns);
+            if let Some(b) = self.bandit.as_mut() {
+                b.verification_finished(v.key, end_ns);
+            }
+            self.stats.verifications_completed += 1;
         } else if let Some(e) = self.pois.iter_mut().find(|e| e.poi.key == v.key) {
             e.verified = true;
             self.stats.verifications_completed += 1;
@@ -861,12 +1434,16 @@ impl<C: Clock> Scheduler<C> {
         best
     }
 
-    /// The verification stages for POI `i`; every stage carries the group id, the `seq` of the
-    /// group's first step (the step about to be emitted).
-    fn verification_for(&self, i: usize) -> VerifyState {
-        let e = &self.pois[i];
-        let key = e.poi.key;
-        let base = e.dwell;
+    /// The verification stages for `poi` around its dwell `base`; every stage carries the group
+    /// id, the `seq` of the group's first step (the step about to be emitted).
+    fn verification_for(
+        &self,
+        poi: &Poi,
+        base: Template,
+        notes: PoiNotes,
+        bandit: bool,
+    ) -> VerifyState {
+        let key = poi.key;
         let group = Some(self.seq);
         let mut stages = [None; MAX_STAGES];
         let mut n = 0;
@@ -900,7 +1477,7 @@ impl<C: Clock> Scheduler<C> {
                 ..base
             }),
         }
-        for delta_hz in e.notes.retunes.iter().filter_map(RetunePlan::delta_hz) {
+        for delta_hz in notes.retunes.iter().filter_map(RetunePlan::delta_hz) {
             push(Template {
                 duration_ns: self.cfg.retune_dwell_ns,
                 center_hz: base.center_hz + delta_hz,
@@ -909,7 +1486,7 @@ impl<C: Clock> Scheduler<C> {
             });
         }
         if self.cfg.rate_change {
-            if let Some(rate_hz) = self.alt_rate(e) {
+            if let Some(rate_hz) = self.alt_rate(poi, &base) {
                 push(Template {
                     duration_ns: self.cfg.retune_dwell_ns,
                     rate_hz,
@@ -926,6 +1503,7 @@ impl<C: Clock> Scheduler<C> {
             key,
             stages,
             next: 0,
+            bandit,
         }
     }
 
@@ -947,16 +1525,16 @@ impl<C: Clock> Scheduler<C> {
     }
 
     /// Another supported rate at which the emitter still fits the usable span.
-    fn alt_rate(&self, e: &PoiEntry) -> Option<f64> {
-        let base = e.dwell.rate_hz;
-        let offset = (e.poi.center_hz - e.dwell.center_hz).abs();
+    fn alt_rate(&self, poi: &Poi, dwell: &Template) -> Option<f64> {
+        let base = dwell.rate_hz;
+        let offset = (poi.center_hz - dwell.center_hz).abs();
         let f = self.cfg.rate_change_factor;
         [base * f, base / f]
             .into_iter()
             .map(|want| pick_rate(&self.caps, want, self.cfg.rate_quantum_hz))
             .find(|&rate| {
                 let usable = (rate * self.cfg.usable_fraction).min(self.cfg.max_span_hz);
-                (rate - base).abs() > 0.5 && offset + e.poi.bandwidth_hz / 2.0 <= usable / 2.0
+                (rate - base).abs() > 0.5 && offset + poi.bandwidth_hz / 2.0 <= usable / 2.0
             })
     }
 }

@@ -108,6 +108,7 @@ pub fn purpose_json(p: &Purpose) -> Value {
             json!({ "kind": "rate-change", "poi": poi, "base_rate_hz": base_rate_hz })
         }
         Purpose::UserIntent { intent } => json!({ "kind": "user-intent", "intent": intent }),
+        other => json!({ "kind": other.name() }),
     }
 }
 
@@ -206,4 +207,80 @@ pub fn check_golden(name: &str, s: &Scheduler<SyntheticClock>, steps: &[Schedule
             ),
         }
     }
+}
+
+/// T-120: a blind candidate in cell `cell` (score from SNR 20 dB, `novelty`, unknown class).
+#[allow(dead_code)]
+pub fn candidate(
+    cell: i64,
+    center_mhz: f64,
+    bw_khz: f64,
+    novelty: f64,
+    needs_verification: bool,
+) -> hk_model::attention::score::Candidate {
+    use hk_model::attention::baseline::{BaselineResolution, Maturity};
+    use hk_model::attention::score::{
+        Candidate, CandidateSubject, NoveltyScore, ScoreComponents, ScoreWeights, interestingness,
+        normalised,
+    };
+    let w = ScoreWeights::default();
+    let components = ScoreComponents {
+        snr_db: Some(20.0),
+        novelty,
+        class_entropy: None,
+        decoder_available: false,
+        periodicity: None,
+        boring_prior: 0.0,
+    };
+    let score = interestingness(&w, &components);
+    Candidate {
+        subject: CandidateSubject::Cells {
+            scheme: 7,
+            lo_cell: cell,
+            hi_cell: cell,
+        },
+        freq: FreqRange::centered(center_mhz * MHZ, bw_khz * 1e3),
+        score,
+        score_norm: normalised(&w, score),
+        components,
+        novelty: NoveltyScore {
+            novelty,
+            level_z: None,
+            occupancy_z: None,
+            new_emitter: Some(novelty),
+            observed_s: 60.0,
+            maturity: Maturity::Mature {
+                resolution: BaselineResolution::AllHours,
+            },
+            provenance_explained: false,
+        },
+        suspect_fraction: if needs_verification { 1.0 } else { 0.0 },
+        needs_verification,
+        expected_interval_s: None,
+        min_on_off_s: None,
+        next_burst_eta: None,
+    }
+}
+
+/// T-120: the scheduler key of [`candidate`]`(cell, ..)`.
+#[allow(dead_code)]
+pub fn candidate_key(cell: i64) -> u64 {
+    hk_core::scheduler::bandit::subject_key(&hk_model::attention::score::CandidateSubject::Cells {
+        scheme: 7,
+        lo_cell: cell,
+        hi_cell: cell,
+    })
+}
+
+/// T-120: publishes `candidates` (sorted by score) at `t`.
+#[allow(dead_code)]
+pub fn publish_candidates(
+    provider: &hk_model::attention::score::SharedInterestingness,
+    t: Timestamp,
+    mut candidates: Vec<hk_model::attention::score::Candidate>,
+) {
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut set = hk_model::attention::score::CandidateSet::empty(t);
+    set.candidates = candidates;
+    provider.publish(set).unwrap();
 }

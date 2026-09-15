@@ -16,6 +16,7 @@
 //!
 //! The `hk-sim` binary writes the comparison report.
 
+pub mod bandit;
 pub mod emitter;
 pub mod policy;
 pub mod radio;
