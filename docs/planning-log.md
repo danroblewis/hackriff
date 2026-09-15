@@ -862,3 +862,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   | WRR | 124/124 | 842 | 346 s | 2.7 s |
 
   WRR also wastes **6875 s of dwell on suspect ghosts**: that's the gap T-120 must close. POI matches the formula within statistical error. 9 tests; 1 simulated day × 3 policies takes 4.9 s in release. Not covered: preemption / 24 h baseline flag (needs T-120), replay.
+- **B0.282 Main 231cb74 after T-114: lint clean; hk-sim 8 passed, 1 skipped (release-only speed test).** T-114 and T-117 are additive (new crate, py scenario), so the next full check is batched with the T-113/T-116 merges. In flight: T-113 (M2-DESIGN), T-116 (history maturity).
