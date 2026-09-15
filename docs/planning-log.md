@@ -1581,3 +1581,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Worktrees:** both removed. Full check started.
   - **T-149 (MUI-DESIGN, Opus high)** launched on main (brief + mockup committed).
   - **T-147 (channel FCO under the scheduler)** launched now that T-141 is merged.
+- **B0.387 T-146 committed (9c1b596; merge of main 72a86d2). Opus review running.**
+  - **Sequential rule:** Stouffer run per (site, subject, cal, direction), p_seq=2k(k+1)·Q(S), z_eq=Q⁻¹(√p_seq).
+  - **Monte-Carlo null at z_on=2:** single-interval 9.92e-4 (limit 2Q²=1.04e-3); sequential raise 1.2e-5; combined 9.96e-4 (limit 1.31e-3).
+  - **Latency:** sparse onset raises at 13 (a-priori limit 14); dense at 2.
+  - **between_var:** sampling-noise correction, floored at 0.1× raw. Slot 28→32 B; baseline format v3. Parked week 218.8 MiB, 0 refusals.
+  - **Changed expectations:** 28 B size assert; golden v2 re-encode; hysteresis test moved to `LevelAboveBaseline`.
+  - **Tests:** 126 targeted green; lint clean.
+  - **T-124 knock-on:** its latency limit must come from the ADR §7.2 table (17@z3.0, 14@3.4, 8@4.7, 7@5.0) using the scene's re-derived z.
