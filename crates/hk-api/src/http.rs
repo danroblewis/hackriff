@@ -15,6 +15,7 @@
 //! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
 //! | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | GET | token | T-115 observation log records in a box ([`crate::observations`]) |
 //! | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | GET | token | T-115 observation totals, per-channel totals, gaps and POI ([`crate::observations`]) |
+//! | `/api/report?f_lo&f_hi&t0&t1[&site][&format]` | GET | token | T-121 survey report (`SurveyReport` JSON, or CSV/PNG export) with mandatory coverage and POI ([`crate::reports`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -148,6 +149,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-119 sites, baselines, candidates, weights
     // T-120 scheduler
     // T-121 reports
+    ("GET", "/api/report"),
     // T-122 anomalies
 ];
 
@@ -226,6 +228,8 @@ pub struct ApiState {
     /// T-115: the observation log for `/api/observations` ([`crate::observations`]); `None`
     /// answers 503.
     pub observations: Option<hk_store::observation::ObservationStore>,
+    /// T-121: survey reports for `/api/report` ([`crate::reports`]); `None` answers 503.
+    pub reports: Option<Arc<dyn crate::reports::ReportControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -717,6 +721,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/floor"
         | "/api/inventory"
         | "/api/analysis/strongest"
+        | "/api/report"
         | "/api/status"
             if !get =>
         {
@@ -737,6 +742,14 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
                 return respond(&mut stream, 200, content_type, "", &body);
             }
             Ok(None) => history(state, &req),
+            Err(e) => Err(e),
+        },
+        // T-121: the report document, or its CSV/PNG export.
+        "/api/report" => match crate::reports::serve(state, &req.query) {
+            Ok(crate::reports::Served::Export(content_type, body)) => {
+                return respond(&mut stream, 200, content_type, "", &body);
+            }
+            Ok(crate::reports::Served::Json(v)) => Ok(v),
             Err(e) => Err(e),
         },
         "/api/floor" => floor(state, &req),

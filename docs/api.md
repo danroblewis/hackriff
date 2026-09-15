@@ -537,6 +537,21 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 
 Stream `observations` (ADR-0004 `messages` kind, `message_schema` `hackriff.observation/1`, metadata only, listed by `GET /api/streams`): one message per record the log writes, published from the writer thread (a slow subscriber drops messages, never log records). `metadata.kind` is `dwell` (`reason_text`, `record`: the `DwellRecord`) or `sweep-summary` (`plan_version`, `geometry`, `t0_s`, `t1_s`, `visits`, `observed_s`, `f_lo_hz`/`f_hi_hz` of the visited hops, `preempted_hops`, `dropped_samples`, `overload_hops`). Geometry records are not streamed; read them from `GET /api/observations`.
 
+## Survey reports (T-121; ADR-0012 §6)
+
+`GET /api/report?f_lo&f_hi&t0&t1[&site][&format=json|csv|png]` (token): `report(region, span)`. `f_lo`/`f_hi` in Hz, `t0`/`t1` in Unix seconds on the sample clock (a replay or time-compressed scene reports its own time). `site` is `unassigned` (default), `mobile` or a site id. Schema: `hk_model::attention::report::SurveyReport` (wire structs reject unknown fields; every `Timestamp` is an integer of Unix **nanoseconds**, `FreqRange` is `{lo_hz, hi_hz}`, `TimeRange` is `{start, end}`).
+
+- **`format=json`** (default): the document `{schema, generated_at, region, span, site, occupancy {bands, channels, truncated}, top_emitters[], change_vs_baseline {status, baseline?, resolution?, changes[]}, coverage, provenance_steps[], anomalies[], warnings[]}`. `generated_at` is the stream time the history has reached (never the wall clock).
+- **Coverage is mandatory** (`coverage {observed_fraction, observed_s, gaps[{freq, time}], gaps_truncated, never_observed[], poi[{tau_s, p_poi}], statement}`): POI for τ = 5 ms, 100 ms, 1 s, 10 s; gaps are unobserved stretches longer than twice the measured mean revisit, coalesced across adjacent frequency cells, longest first (≤ 64); `statement` always says unobserved is not quiet. Coverage comes from the observation log (T-115) when it holds visits for the box, else from history-tile coverage (a replay without the scheduler logs nothing); `warnings` names the source. A server that cannot disclose coverage (no spectrum history) answers `404` instead of a report.
+- **Occupancy.** One band row for the region and channel rows (FCO descending, ≤ 64, `truncated`) over **blind** channel extents: the inventory emitters' measured extents in the box, overlapping extents merged. Until the occupancy engine (T-118) lands, rows come from history-tile occupancy (floor + the pyramid margin; `fco` = occupied grid rows / observed grid rows, `fbo` = coverage-weighted tile occupancy, `timing: unknown`), and `warnings` says so.
+- **Top emitters** (≤ 20, most sightings in the span first): `emitter_id`, measured `freq`, `first_seen`/`last_seen`, `sightings` in the span, `lifecycle` (`candidate`/`confirmed`), channel `fco`, `top_suggestion` (the top-ranked explanation's service label: a suggestion, never truth) and `new_in_span`.
+- **Change vs baseline.** `status` is `unavailable` until baselines (T-119) land; `changes` is non-empty only when `available`. A warning states that no comparison is implied.
+- **Provenance steps** (time order): `{t, kind, freq?, detail}` with `kind` `gain` (LNA/VGA/amp or gain table), `calibration`, `spur-mask`, `antenna-port`, `sample-drop`, … from the history tiles' provenance, e.g. `detail: "lna 32→24 dB"`. Overload share and mixed calibration appear in `warnings`.
+- **`format=csv`** (`text/csv; charset=utf-8`): `#` comment lines carrying the coverage statement, observed fraction, POI and baseline status; then `row,f_lo_hz,f_hi_hz,t0_s,t1_s,fco,fbo,n_revisits,n_occupied,observed_s` with `band` and `channel` rows, then `gap` and `never_observed` rows.
+- **`format=png`** (`image/png`): occupancy heatmap over the history grid (time down, frequency right; ≤ 2048 × 1024 cells), unobserved cells grey with a diagonal hatch.
+
+Errors: `400` (bad region/span, `site` or `format`), `404` (no coverage source), `405` (not GET), `500` (store failure), `503` (no report service on this server). The `/api/history` region filters (time and frequency) are unchanged; source and site filters are not served yet (history tiles are not keyed by source or site).
+
 ## Attention and memory (planned, M2; ADR-0012)
 
 **Planned, not served yet.** None of these routes are in `ROUTES` today, except the observation log's (above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
@@ -568,7 +583,6 @@ Conventions:
 | GET | `/api/scheduler/arms` | T-120 | Arm table: key, index, mean reward, dwell-seconds, staleness, banned |
 | POST | `/api/scheduler/leases` | T-120 | Create a user pin lease ("watch this") (audited) |
 | DELETE | `/api/scheduler/leases/{id}` | T-120 | Release a lease (audited) |
-| GET | `/api/report` | T-121 | `?f_lo&f_hi&t0&t1[&site][&format=json\|csv\|png]`: `SurveyReport` or its export |
 | GET | `/api/anomalies` | T-122 | `?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`: anomalies (all kinds, including novelty alarms) with top explanations |
 | GET | `/api/anomalies/{id}` | T-122 | One anomaly: `AlarmDetail`, ranked explanations, status history |
 | POST | `/api/anomalies/{id}/dismiss` | T-122 | Dismiss (audited) |

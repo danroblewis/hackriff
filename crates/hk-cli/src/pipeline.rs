@@ -39,6 +39,7 @@ use hk_core::{
 use hk_model::cluster::most_restrictive;
 use hk_model::{ContentClass, Repository, ScanPlan, Timestamp};
 use hk_pipeline::class::band_class;
+use hk_pipeline::reports::ReportService;
 use hk_pipeline::{
     PipelineConfig, PipelineHandle, RunSummary, SourceFactory, SourceInfo, TrackInventory,
     load_calibrations, open_mock_replay, open_replay, replay_plan,
@@ -335,6 +336,39 @@ pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     }
 }
 
+/// T-121: the run's survey reports behind the API's [`hk_api::reports::ReportControl`] (public so
+/// acceptance tests serve reports exactly as `hk serve` does).
+pub struct PipelineReports(pub ReportService);
+
+fn report_fail(e: hk_pipeline::reports::ReportError) -> hk_api::reports::ReportFail {
+    use hk_pipeline::reports::ReportError as E;
+    let (status, message) = match &e {
+        E::Invalid(m) => (400, (*m).to_owned()),
+        E::NoCoverage => (404, e.to_string()),
+        E::Provider(_) | E::Validation(_) => (500, e.to_string()),
+    };
+    hk_api::reports::ReportFail { status, message }
+}
+
+impl hk_api::reports::ReportControl for PipelineReports {
+    fn report(
+        &self,
+        q: &hk_api::reports::ReportQuery,
+    ) -> Result<hk_model::attention::report::SurveyReport, hk_api::reports::ReportFail> {
+        self.0.report(q.region, q.span, q.site).map_err(report_fail)
+    }
+
+    fn export(
+        &self,
+        q: &hk_api::reports::ReportQuery,
+        format: hk_model::attention::report::ExportFormat,
+    ) -> Result<(&'static str, Vec<u8>), hk_api::reports::ReportFail> {
+        self.0
+            .export(q.region, q.span, q.site, format)
+            .map_err(report_fail)
+    }
+}
+
 /// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`] (public
 /// so acceptance tests wire the recipe routes exactly as `hk serve` does, T-094).
 pub struct PipelineRecipes(pub Arc<hk_pipeline::recipes::runtime::RecipeRuntime>);
@@ -392,6 +426,7 @@ pub fn serve_api(
         Repository::open(handle.data_dir().join("hackriff.db"))
             .context("opening the inventory database for the API")?,
     ));
+    let report_db = Arc::clone(&db); // T-121
     let audit_path = handle.data_dir().join("control-audit.jsonl");
     let audit = AuditLog::open(&audit_path)
         .with_context(|| format!("opening the control audit log {}", audit_path.display()))?;
@@ -433,6 +468,12 @@ pub fn serve_api(
             .decoded_captures()
             .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
         observations: handle.observation_store(), // T-115
+        reports: Some(Arc::new(PipelineReports(ReportService::new(
+            None,
+            Some(handle.floor_product()),
+            handle.observation_store(),
+            Arc::clone(&report_db),
+        )))), // T-121
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
