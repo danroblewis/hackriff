@@ -264,6 +264,60 @@
     <canvas id="heat"></canvas>
     <canvas id="floor"></canvas>
   </section>
+
+  <section id="frame-inspector" class="panel">
+    <h2>Frame inspector <span id="fi-status" class="hint"></span></h2>
+    <form id="fi-capture-form" class="fi-row">
+      <label class="grow">Capture id <input id="fi-capture-id" type="text" autocomplete="off" placeholder="cap-1"></label>
+      <button>Load</button>
+    </form>
+    <p class="hint">Points at one recorded decoded stream (<code>POST /api/captures/{id}/parse</code>); the always-on capture
+      list arrives with T-092. Live streaming (<code>/ws/open/inspector</code>) is not served yet &mdash; TODO once T-088/T-092 land.</p>
+
+    <details id="fi-map-details">
+      <summary>Draft field map (JSON)</summary>
+      <label>Field map <textarea id="fi-field-map" rows="8" spellcheck="false" placeholder='{"unit":"bits","fields":[...]}'></textarea></label>
+      <div class="fi-row">
+        <button type="button" id="fi-map-apply">Re-parse capture with this map</button>
+      </div>
+      <p class="hint">Nothing is saved: this evaluates the draft map over the loaded capture page and its whole-recording fit
+        summary, so you can edit and re-parse instantly.</p>
+      <label>Paste frames (hex, one per line) <textarea id="fi-paste-frames" rows="4" spellcheck="false" placeholder="54a8…"></textarea></label>
+      <div class="fi-row">
+        <button type="button" id="fi-paste-parse">Parse pasted frames</button>
+      </div>
+      <p class="hint">Authoring without a capture yet (<code>POST /api/inspector/parse</code>): up to 500 frames, evaluated
+        against the field map above.</p>
+    </details>
+
+    <p id="fi-fit" class="hint"></p>
+    <p id="fi-error" class="hint bad"></p>
+
+    <div class="table-wrap">
+      <table id="fi-frame-table" class="grid" hidden>
+        <thead><tr><th class="num">#</th><th>time (UTC)</th><th class="num opt">channel</th><th class="num">bits</th><th>crc</th><th>fit</th></tr></thead>
+        <tbody id="fi-frame-body"></tbody>
+      </table>
+    </div>
+    <div class="fi-row">
+      <button type="button" id="fi-prev" disabled>Prev</button>
+      <span id="fi-page-info" class="hint"></span>
+      <button type="button" id="fi-next" disabled>Next</button>
+    </div>
+
+    <div class="fi-detail">
+      <div>
+        <h3>Hex + ASCII</h3>
+        <div id="fi-hex" class="fi-hex"></div>
+      </div>
+      <div>
+        <h3>Layer tree</h3>
+        <div id="fi-tree" class="fi-tree"></div>
+      </div>
+    </div>
+    <p class="hint">Click a tree field to highlight its bytes; click a byte to select its field (repeat clicks cycle through
+      overlapping fields). Byte ranges, values, units and fit/error status all come from the server.</p>
+  </section>
   </div>
  </div>
 </main>
