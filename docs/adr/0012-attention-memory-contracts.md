@@ -147,7 +147,12 @@ The bandit dwells where activity is, so counting its visits overstates FCO (C12 
 
 ### 2.6 Suspect and IMD detections
 
-A threshold crossing coincides with a suspect detection (flagged `clipped`, `suspect_imd`, `spur_candidate`, confirmed image, or `compressed`) when it lies in the visit window ± one time cell and inside the detection's extent widened by one level-0 cell. A revisit is **suspect** when it lies under `overload`, or when every above-threshold cell coincides with a suspect detection. One clean crossing makes the visit occupied and not suspect (T-129). **A DC spur flag is per tuning (T-147):** a detection flagged only as a DC spur (`spur_reason = dc`, no other suspect flag) is not suspect when a clean detection of the same emission (centres within half a level-0 cell plus half the narrower OBW) lies within one time cell, since that detection came from a tuning whose DC is elsewhere. A frequency stays a DC spur for masking and learning only while all its occupied observations sit at their own tuning's centre; a real DC spur moves with the LO, has no clean twin and stays suspect. A suspect revisit:
+A threshold crossing coincides with a suspect detection (flagged `clipped`, `suspect_imd`, `spur_candidate`, confirmed image, or `compressed`) when it lies in the visit window ± one time cell and inside the detection's extent widened by one level-0 cell. A revisit is **suspect** when it lies under `overload`, or when every above-threshold cell coincides with a suspect detection. One clean crossing makes the visit occupied and not suspect (T-129). **A DC spur flag is per tuning (T-147, T-172):** the rule is applied to each detection on its own, not to a frequency. A detection flagged only as a DC spur (`spur_reason = dc`, no other suspect flag) is not suspect when a **clean twin** exists:
+- a clean detection of the same emission (centres within half a level-0 cell plus half the narrower OBW),
+- overlapping it in time within ± one time cell (the grid's `t_cell_ns`, the same slack as the visit window),
+- whose own tuning centre (its Provenance `tune.center_hz`) lies more than the detector's DC tolerance (15 kHz) outside its extent, so it came from a tuning whose DC is elsewhere. A twin whose tuning is unknown refutes nothing, and an unflagged image or intermod sitting at its own LO is not a twin.
+
+Other DC flags at the same frequency with no twin in their own window stay suspect. A real DC spur moves with the LO, has no clean off-LO twin and stays suspect. A suspect revisit:
 - It is excluded from `fco`, as unobserved rather than unoccupied, and counted in `n_suspect`.
 - `fco_suspect_upper` counts it as occupied, so the pair brackets the truth.
 - Suspect crossings never create or widen a learned channel.
