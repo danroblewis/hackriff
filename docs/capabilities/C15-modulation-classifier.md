@@ -20,6 +20,14 @@ Assigns each emission a modulation family and class, with calibrated probabiliti
   - Never assign probability 1.
   - A CRC-valid decode overrides the classification and becomes a label (docs/04 §5.5).
 - **Config:** taxonomy version, per-family thresholds, SNR gate, per-family DL enable, open-set threshold.
+- **Decided in [ADR-0016](../adr/0016-classification-contracts.md) §1–§4 (PROVISIONAL):**
+  - **Taxonomy.** `hk-mod@1` is coarse → family → class. `unknown` is the global open-set outcome, not a leaf. The family set above keeps its names as `ook-ask`, `psk-qam` and `noise-like`.
+  - **Classification.** Posterior plus likelihood-only distributions (both include `unknown`), with an optional within-family `class`, `open_set_score`, `entropy_norm`, deciding `stage`, provenance (features@version, rules/model@version, SNR vs gate) and flags. It is stored additively on `emitter_classification`.
+  - **Current family.** Picked by arbitration rank: user > decoder > lock-verified > classifier > track shape.
+  - **Fusion.** Priors never scale `unknown`, and λ₀ ≥ 0.1. The evidence-dominance rule applies: likelihood ratio ≥ 10 keeps the likelihood top. Flags are `prior-tiebreak` and `prior-mismatch`.
+  - **Classical cascade.** Class-conditional densities give `p(x|c)`, and χ² gives the open-set score. The verifier runs post-sync only and can only re-rank.
+  - **DL.** Within-family class only, with an energy-score open set. It is enabled per family only on the a-priori dev margins (+5 points at every bin ≥ gate).
+  - **Gates.** `thresholds@1`, from S5: FSK/OOK 20 dB, PSK 15 dB; the others are unverified.
 
 ## Methods
 Cascade per docs/04 §5.5: features → per-family DL → open-set score → prior fusion → decoders arbitrate.

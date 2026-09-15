@@ -21,6 +21,11 @@ Maintains editable signatures built on the docs/04 §7.6 fingerprint. It matches
   - C22 pipeline binding.
   - Content-class tag (`metadata-only: encrypted`, `no-content: common-carrier paging`).
 - **Config:** clustering parameters, normalisation, match thresholds.
+- **Decided in [ADR-0016](../adr/0016-classification-contracts.md) §5 (PROVISIONAL):**
+  - **`EmissionFeatures` v1.** Per-field `{value, sigma, method, n}`, including spectral-shape fields for RFI combs and optional radar PRI/scan. Snapshots are append-only per emitter. `Fingerprint` v1 is a projection of it.
+  - **`Signature`.** Immutable `(id, version)` in SQLite. Bands are rank-only and never gate. It has a `min_discriminating` field count and is minted as `recipe-confirmed` after a CRC-valid decode on ≥ 3 frames.
+  - **`SignatureMatch`.** Outcomes are `full` (all required fields z ≤ 1, score ≥ 0.8), `partial`, or `none`, with top-5 candidates carrying agreement, missing and conflicting fields. A match **never** sets identity or status.
+  - **Clusters.** A cluster is a *type* above emitters. Online leader assignment uses the same tolerance-normalised distance (ε = 1), becomes visible at ≥ 3 members, and gets nightly DBSCAN repair with append-only merge/split events. Promotion turns a cluster into a Signature.
 
 ## Methods
 - **Schema** (docs/04 §7.6): band, raster, OBW, family, levels, deviation/constellation, symbol rate, line code, preamble, sync word, packet lengths, periodicity, TDMA period, CRC parameters, hop set.
