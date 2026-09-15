@@ -1374,3 +1374,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Lint clean; 1378/1378 tests; acceptance 32/32.
   - Disk recovered to 6.8 GB free after deleting the committed T-139 worktree target; launches stay paused below 20 GB.
   - The :8900 demo data dir is now growing slowly (~100 MB per 5 min of recordings).
+- **B0.363 T-138 merged (fix round 1e230cc).**
+  - Seen test uses overlap of first..last seen with the interval.
+  - Re-sighting must be at least one full interval after the first.
+  - One-shot after two confirmed closes.
+  - Churn guard: skip a new ID that overlaps an older emitter seen within 7 days.
+  - One inventory query per close; coverage counts only when RBW ≤ emitter bandwidth.
+  - ADR §7.1 reworded as a rate gate.
+  - Tests: 55/55 targeted.
+  - T-139 will conflict in `occupancy.rs`. Full check started.
