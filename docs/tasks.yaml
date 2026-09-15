@@ -1488,8 +1488,8 @@ tasks:
   - id: T-089
     milestone: M1
     title: "M1 Declarative parser + inspector API"
-    status: review
-    commit: 5324b42
+    status: done
+    commit: dc453ce
     deps: [T-085]
     parallel_group: M1P
     use_cases: [SIGNAL-062]
@@ -1502,7 +1502,7 @@ tasks:
   - id: T-090
     milestone: M1
     title: "M1 Inspector UI (thin client): frame list, hex+ASCII, layer tree, linked selection"
-    status: todo
+    status: in-progress
     deps: [T-089]
     parallel_group: M1U
     use_cases: [SIGNAL-062]
