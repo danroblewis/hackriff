@@ -1255,6 +1255,22 @@ tasks:
     effort: medium
     core_interface: true
     hold: "waiting for an agent slot (budget throttle)"
+  - id: T-076
+    milestone: M0b
+    title: "Regression: Listen sends no audio on live HackRF (squelch never opens, refined centre ~36 kHz off)"
+    status: in-progress
+    deps: [T-070, T-073, T-066]
+    parallel_group: U
+    use_cases: [SIGNAL-062]
+    found_by: supervisor live test 2026-09-14 (release build e95ec47 on 127.0.0.1:8900, HackRF 2.39 Msps, no overruns)
+    report: "/ws/open/listen?f_lo=100600000&f_hi=101000000 on the strong 100.8 MHz station returns only type-3 status records ~4/s: squelch_open false, frames 0, snr_db -0.1..2.3, level_dbfs ~-30, refined center ~100.8365 MHz; build 268fcd4 played real-time audio from the same station"
+    acceptance: "mock-SDR real-time looping test on fm_100p8M with f_lo=100.6e6/f_hi=101.0e6 (plus emitter-id and tight box) yields PCM data records within bounded time, squelch opens, SNR sane, refined centre within a few kHz, run > 15 s covering background re-refinement; introducing merge identified by bisect; root cause fixed (refinement never applied when quality drops; robust squelch SNR); T-070 refinement and T-065/T-073 sweep results kept; supervisor re-verifies live"
+    area: crates/hk-pipeline/src/chains/listen.rs, crates/hk-pipeline/src/refine.rs, crates/hk-demod/src/{refine.rs,audio.rs,mode.rs}, tests/e2e
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    priority: "ahead of queued work (user)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

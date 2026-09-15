@@ -482,3 +482,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Short-burst detector:** deferred to T-075.
   - **Verification:** the core ring change is on the real-time path, so full verification is running.
 - **B0.164 T-074 merged** (125c232, test-only). The test used `listen.active == 0` as a proxy for counted drops, but release runs just before drops are folded in; it now waits on `consumer_dropped` (20/20, and 3/3 under load). T-075 short-burst detector launches in the freed slot.
+- **B0.165 User/supervisor bug → T-076 launched ahead of the queue.**
+  - **Symptom:** Listen sends no audio on the live HackRF (release build e95ec47, :8900). Only status records arrive: squelch closed, 0 frames, SNR about 0–2 dB, refined centre 100.8365 MHz (about 36 kHz off). Build 268fcd4 played audio.
+  - **Suspects:** T-070 refinement centre, the squelch SNR measure, T-065/T-073 mode rules, T-066 lifecycle, the T-072 ring change.
+  - **T-076 does:** a mock-SDR real-time looping test with the exact request, a bisect over 268fcd4..e95ec47, and a root-cause fix. The supervisor re-verifies live.
+  - **Why the existing tests may have missed it:** they are unpaced, short, or request by emitter id.
