@@ -1542,7 +1542,8 @@ tasks:
   - id: T-093
     milestone: M1
     title: "M1 follow_hops: one pipeline spanning several channels"
-    status: in-progress
+    status: review
+    commit: 8f02471
     deps: [T-085, T-088]
     parallel_group: M1H
     use_cases: [SIGNAL-062]
@@ -1555,7 +1556,8 @@ tasks:
   - id: T-094
     milestone: M1
     title: "M1 Tutorial 1: RDS recipe (reference) + blind acceptance vs Rust RDS oracle"
-    status: in-progress
+    status: done
+    commit: 7a17979
     deps: [T-086, T-087, T-088, T-089]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1579,7 +1581,7 @@ tasks:
   - id: T-096
     milestone: M1
     title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
-    status: todo
+    status: in-progress
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1591,7 +1593,7 @@ tasks:
   - id: T-097
     milestone: M1
     title: "M1 Tutorial 4: ADS-B recipe + blind acceptance vs readsb (live HIL deferred: 1090 MHz antenna)"
-    status: todo
+    status: in-progress
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-001]
@@ -1704,6 +1706,19 @@ tasks:
     area: crates/hk-estimate/src/assist/codes.rs
     needs: none
     model: opus
+    effort: medium
+  - id: T-106
+    milestone: M1
+    title: "hk_demod RDS oracle bit/group positions count from pilot lock, not stream start (PS timestamps ~100 ms early)"
+    status: todo
+    deps: [T-094]
+    parallel_group: T106
+    use_cases: [SIGNAL-062]
+    found_by: "T-094 2026-09-15: WfmDemod feeds the RDS demod only after pilot PLL lock; positions 122 bits (102.7 ms) late on the FM capture; hk_demod::record PS decode timestamps likely early by that amount"
+    acceptance: "RDS group/bit positions and recorded decode timestamps reference the stream sample index (account for pre-lock samples); tutorial_rds oracle-agreement test no longer needs the constant-offset estimate; signal_062 tests unchanged"
+    area: crates/hk-demod (wfm.rs, rds, record)
+    needs: none
+    model: sonnet
     effort: medium
   - id: T-100
     milestone: M0b
