@@ -1074,3 +1074,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Worktrees cleaned. Full check of main running; T-122 and T-128 launch after it.
 - **B0.315 Launched T-122** (novelty alarms: adds a quieter-than-usual kind, device-first explanation, migration 0003), **T-128** (M2 integration: priorities are levels→baselines and real candidates→scheduler, then first sightings and report providers, then site/source tiles, memory bound, residuals and the full-path e2e) and **T-129** (FM-realistic channel learning). Ownership is split: T-129 owns `channels.rs`; T-128 owns the pipeline occupancy/attention wiring; T-122 owns the alarm files. Full check of main after the integration merge is running.
 - **B0.316 Main 578f8b6 (M2 integration) verified green.** First run: lint clean and acceptance 32/32 in 84 s, but `scheduler_bandit_e2e::bandit_on_attaches_dwells...` failed at load ~32: only 6.8 s of bandit dwell before the deadline, with 9 floor deferrals. It passed 3/3 alone, and a full rerun gave nextest + UI 1310/1310. The binary is now heavy-serial with 1 retry. Acceptance wall time is 84 s (scene, report and t118 e2es added); consider a separate `just acceptance-m2` step if it passes ~120 s. In flight: T-122, T-128, T-129.
+- **B0.317 T-129 delivered** (e0b7f35).
+  - **Root cause:** about 380 of 399 FM-fixture detections were threshold flicker (short, narrow, ~4.5 dB), so median-extent clustering shrank the station channel to 38 kHz and gap flicker created 7 idle channels.
+  - **Fixes:** T-101-style in-band fragment exclusion; a ≥7 dB mean-SNR confidence gate before a cluster becomes a channel; overlap split at the midpoint.
+  - **Suspect rule (engine.rs, outside ownership):** a visit is now suspect only if all above-threshold cells are suspect. Before, a spur or DC anywhere made every band visit suspect, which was why band fco was None.
+  - **FM fixture:** 2 channels. The 101.3 station channel is 344 kHz (measured OBW) with fco 1.0; band fco 1.0.
+  - **Dense synthetic scene:** one ~100 kHz channel per station; gaps idle.
+  - **t118 e2e:** identical.
+
+  Timeboxed Opus review running. Concerns: the **7 dB gate may suppress weak persistent unknown emitters** (exploration-first); the suspect-rule reading of ADR §2.6; whether the fragment rule absorbs weak in-skirt signals.

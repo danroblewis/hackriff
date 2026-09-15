@@ -2039,7 +2039,8 @@ tasks:
   - id: T-129
     milestone: M2
     title: "Occupancy channel learning on real dense FM: channels match station occupied bandwidth, not 13-44 kHz fragments"
-    status: in-progress
+    status: review
+    commit: e0b7f35
     deps: [T-118]
     parallel_group: M2O
     use_cases: [AWARE-042, SIGNAL-062]
