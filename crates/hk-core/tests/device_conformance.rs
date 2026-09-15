@@ -551,6 +551,64 @@ fn a_gain_increase_clips_at_8_bits_with_overload_provenance() {
     assert!(!h.provenance.overload, "a new gain state starts clean");
 }
 
+/// T-130: a recording without `hackriff:provenance` (unknown capture gains) is not boosted by the
+/// working gain: at the scheduler's default (LNA 24 / VGA 20) nothing clips; +12 dB saturates.
+#[test]
+fn an_unrecorded_gain_recording_clips_only_when_really_overdriven() {
+    let dir = Scratch::new("unrecorded-gain");
+    let meta = Synth::new(Datatype::Ci8).write(&dir.0, "tone");
+    let mut m = SigmfMeta::read(&meta).unwrap();
+    m.global.provenance = None;
+    m.write(&meta).unwrap();
+    let driver = MockSdrDriver::new(&meta, opts(8192)).unwrap();
+    let mut src = driver.open_mock(&driver.default_request()).unwrap();
+    let control = src.control();
+    assert!(!src.recording().gains_recorded);
+    let mut buf = Vec::new();
+    control
+        .set_gains(&hk_core::Gains {
+            lna_db: 24.0,
+            vga_db: 20.0,
+            amp_on: false,
+        })
+        .unwrap();
+    for _ in 0..20 {
+        let h = src.read_block_ci8(&mut buf).unwrap().unwrap();
+        assert!(!h.provenance.overload, "the working gain does not overload");
+    }
+    let clipped = |b: &[Complex<i8>]| {
+        b.iter()
+            .filter(|s| s.re == 127 || s.re == -128 || s.im == 127 || s.im == -128)
+            .count()
+    };
+    assert_eq!(clipped(&buf), 0);
+    assert_eq!(
+        driver
+            .last_control()
+            .unwrap()
+            .mock_stats()
+            .clipped_components,
+        0
+    );
+    // +24 dB: the 0.25 tone reaches ≈4 × full scale.
+    control
+        .set_gains(&hk_core::Gains {
+            lna_db: 40.0,
+            vga_db: 28.0,
+            amp_on: false,
+        })
+        .unwrap();
+    let h = read_until(&mut src, &mut buf, |h| h.provenance.overload);
+    assert_eq!(
+        (h.provenance.tune.lna_db, h.provenance.tune.vga_db),
+        (40.0, 28.0)
+    );
+    assert!(
+        clipped(&buf) > 0,
+        "≈4× overdrive saturates the 8-bit output"
+    );
+}
+
 #[test]
 fn a_gain_increase_clips_the_strong_fm_station() {
     let Some(meta) = fm_fixture() else { return };
