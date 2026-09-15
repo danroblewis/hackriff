@@ -1810,3 +1810,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - T-169 is bisecting which opt-level=2 crate causes optimisation-only test failures.
   - T-124, T-156 and T-157 are still running.
 - **B0.414 Full check green after the T-153/T-154/T-155/T-158+T-171 merges (e7a336f).** Lint clean; 1349/1349 nextest+UI; acceptance 28/28 (68 s). All six MUI panels plus the inventory API gaps are verified on main.
+- **B0.415 T-169 done: change reverted per the keep rule, but it found something important.**
+  - **Speed:** dev opt-level=2 on the 4 hot crates cut full nextest from 1496 s to 368 s (6 threads, ~4×). Build 50 s; acceptance 28/28 in 42 s.
+  - **Failures:** every crate deterministically broke tests (bisected, 1–3× reproductions), 6 in total:
+    - recipe_runtime hot_edits status Null vs "none" (hk-dsp)
+    - mock_device t057 scheduled replay (hk-core)
+    - follow_hops blind hop set (hk-demod)
+    - api_contract follow_hops shapes (hk-pipeline)
+    - recipe_runtime mock channel (hk-pipeline)
+    - follow_hops channel net (hk-pipeline)
+  - **Why it matters:** these are likely races or timing assumptions exposed by faster code. Release/Jetson builds run optimised, so they are latent bugs.
+  - **Baseline at 6 threads under load:** also showed 2 failures (`outputs_record` fsk_bits, `stream_external` fsk_bursts), probably load flakes.
+  - **Next:** T-175 (Opus high) launched to fix the races, then enable the opt-level overrides.

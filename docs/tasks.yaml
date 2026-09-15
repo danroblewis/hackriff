@@ -2683,7 +2683,8 @@ notes:
   - id: T-169
     milestone: M2
     title: "Test speed: dev-profile opt-level=2 for hk-dsp, hk-core, hk-pipeline, hk-demod (existing detect/store/context overrides untouched)"
-    status: in-progress
+    status: done
+    result: "reverted (keep rule): opt-level=2 cut nextest 1496 s -> 368 s (~4x) but each of hk-dsp/hk-core/hk-pipeline/hk-demod deterministically broke tests (6 total); follow-up T-175 fixes the exposed races then enables it"
     deps: [T-145]
     parallel_group: M2E
     use_cases: []
@@ -2766,4 +2767,18 @@ notes:
     needs: none
     model: opus
     effort: medium
+    core_interface: true
+  - id: T-175
+    milestone: M2
+    title: "Fix races/timing assumptions exposed by optimised builds (6 deterministic failures), then enable dev opt-level=2 for hk-dsp/hk-core/hk-pipeline/hk-demod (~4x faster nextest)"
+    status: in-progress
+    deps: [T-169]
+    parallel_group: M2E
+    use_cases: []
+    found_by: "T-169 bisection 2026-09-15: recipe_runtime hot_edits (hk-dsp), mock_device t057 scheduled replay (hk-core), follow_hops blind hop set (hk-demod), api_contract follow_hops shapes + recipe_runtime mock channel + follow_hops channel net (hk-pipeline)"
+    acceptance: "each failure root-caused (product race fixed or test sleep replaced by bounded condition wait, same assertion); tests pass with and without opt-level overrides; overrides enabled; full nextest wall recorded (target ~370 s vs ~1500 s at 6 threads) all green except documented load flakes; acceptance green; lint clean"
+    area: Cargo.toml, crates/hk-pipeline (recipe_runtime, follow_hops), crates/hk-core (mock/scheduler), crates/hk-dsp, crates/hk-demod
+    needs: none
+    model: opus
+    effort: high
     core_interface: true
