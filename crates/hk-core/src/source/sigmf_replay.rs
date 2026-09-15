@@ -389,6 +389,18 @@ impl<R: Read + Send> SigmfReplaySource<R> {
         &self.meta
     }
 
+    /// The recording's gaps, in order: `(data-file index of the first sample after the gap,
+    /// samples missing before it)` for every capture whose `core:global_index` jumps past the end
+    /// of the previous one. The replay reports each as the `dropped_before` of that capture's
+    /// first block; this lets a consumer that buffers ahead (the mock SDR) place the jump exactly.
+    pub fn recording_gaps(&self) -> Vec<(u64, u64)> {
+        self.segments
+            .iter()
+            .filter(|s| s.dropped_before > 0)
+            .map(|s| (s.file_start, s.dropped_before))
+            .collect()
+    }
+
     /// Samples in the data file, when known (always for [`SigmfReplaySource::open`]).
     pub fn total_samples(&self) -> Option<u64> {
         self.total_samples

@@ -36,6 +36,16 @@
 //!   as overruns; with real-time pacing, a reader later than [`MockOptions::queue_blocks`] loses
 //!   whole blocks as a radio's full queue would; a `core:global_index` gap in the recording is an
 //!   overrun of the same duration. Each is a `GAP` counted in `overruns` / `dropped_samples`.
+//! - **Time-compressed scenes (T-125):** a recording made of short IQ windows far apart in time
+//!   (one capture per window, `core:global_index` = window start × rate, e.g. a long simulated
+//!   occupancy scene rendered only at its observation schedule) is served window after window.
+//!   A block never spans a recording gap: the last block of a window ends at its last sample, and
+//!   the first block of the next carries `GAP` with `dropped_before` equal to the missing
+//!   duration (scaled to the tuned rate), so the counter and block times jump to the next
+//!   window's simulated time. Hours between windows are never synthesised, and real-time pacing
+//!   does not wait them out (device losses still pace). A retune inside a window serves that
+//!   window re-centred as for any recording; windows follow the recording's schedule, not the
+//!   tune calls.
 //! - **Pacing:** [`Pacing::RealTime`] (wall clock × speed, never pausable) or [`Pacing::Unpaced`]
 //!   (accelerated and lossless: [`Source::pausable`] is `true` only then).
 //! - **Time:** block times are an anchor plus the sample counter at the tuned rate (re-anchored on
@@ -64,6 +74,7 @@ mod dsp;
 
 pub use dsp::Coverage;
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -682,14 +693,27 @@ struct ReplayFeed {
     looping: bool,
     inner: SigmfReplaySource,
     buf: Vec<Complex32>,
-    first: bool,
     /// A splice happened since the last block.
     wrapped: bool,
-    /// Recording samples lost to `core:global_index` gaps since the last block.
-    gap_samples: u64,
+    /// Recording samples handed to the renderer so far (every pass): the renderer's input index.
+    fed: u64,
+    /// `core:global_index` gaps not yet reached: (renderer input index of the first sample after
+    /// the gap, recording samples missing before it), oldest first.
+    gaps: VecDeque<(u64, u64)>,
 }
 
 impl ReplayFeed {
+    /// Queues the current pass's recording gaps, positioned after everything already fed.
+    fn queue_gaps(&mut self) {
+        let base = self.fed;
+        self.gaps.extend(
+            self.inner
+                .recording_gaps()
+                .into_iter()
+                .map(|(at, n)| (base + at, n)),
+        );
+    }
+
     fn open(path: &Path) -> Result<SigmfReplaySource, SourceError> {
         SigmfReplaySource::open(
             path,
@@ -706,17 +730,14 @@ impl Feed for ReplayFeed {
         let mut reopened = false;
         loop {
             match self.inner.read_block(&mut self.buf)? {
-                Some(h) => {
-                    if !self.first {
-                        self.gap_samples += h.dropped_before;
-                    }
-                    self.first = false;
+                Some(_) => {
                     dst.extend_from_slice(&self.buf);
+                    self.fed += self.buf.len() as u64;
                     return Ok(true);
                 }
                 None if self.looping && !reopened => {
                     self.inner = Self::open(&self.path)?;
-                    self.first = true;
+                    self.queue_gaps();
                     self.wrapped = true;
                     reopened = true;
                 }
@@ -759,15 +780,16 @@ impl MockSdrSource {
         filter_explicit: bool,
         bias_tee: bool,
     ) -> Result<Self, SourceError> {
-        let feed = ReplayFeed {
+        let mut feed = ReplayFeed {
             path: recording.path.clone(),
             looping: options.end == MockEnd::Loop,
             inner: ReplayFeed::open(&recording.path)?,
             buf: Vec::new(),
-            first: true,
             wrapped: false,
-            gap_samples: 0,
+            fed: 0,
+            gaps: VecDeque::new(),
         };
+        feed.queue_gaps();
         let anchor = SampleTime {
             sample_index: 0,
             host_time: match options.clock {
@@ -970,23 +992,37 @@ impl MockSdrSource {
             c.overruns.fetch_add(1, Ordering::Relaxed);
             c.dropped.fetch_add(n, Ordering::Relaxed);
         }
-        // A gap in the recording: the counter jumps, the content is spliced.
-        if self.feed.gap_samples > 0 {
-            let n = ((self.feed.gap_samples as f64 * fs / self.recording.sample_rate_hz).round()
-                as u64)
-                .max(1);
-            self.feed.gap_samples = 0;
+        // Real-time pacing waits out device losses, never a recording gap (below): a scene
+        // recorded as short windows hours apart replays time-compressed.
+        self.due_s += gap as f64 / (fs * self.speed());
+        // Recording gaps reached by the next output sample: the counter, and with it stream time,
+        // jumps by the missing duration; the content is spliced.
+        let rec_fs = self.recording.sample_rate_hz;
+        let pos = self.render.pos();
+        let mut rec_gap = 0u64;
+        while let Some(&(at, n)) = self.feed.gaps.front() {
+            if at as f64 > pos {
+                break;
+            }
+            self.feed.gaps.pop_front();
+            rec_gap += n;
+        }
+        if rec_gap > 0 {
+            let n = ((rec_gap as f64 * fs / rec_fs).round() as u64).max(1);
             gap += n;
             c.overruns.fetch_add(1, Ordering::Relaxed);
             c.dropped.fetch_add(n, Ordering::Relaxed);
         }
         self.next_index += gap;
-        self.due_s += gap as f64 / (fs * self.speed());
+        // A block never spans a recording gap: it ends at the next one, so every sample keeps the
+        // time of its own window.
+        let len = match self.feed.gaps.front() {
+            Some(&(at, _)) => (((at as f64 - pos) * fs / rec_fs).ceil() as usize).clamp(1, block),
+            None => block,
+        };
 
         self.f32buf.clear();
-        let made = self
-            .render
-            .render(&mut self.feed, &mut self.f32buf, block)?;
+        let made = self.render.render(&mut self.feed, &mut self.f32buf, len)?;
         if made == 0 {
             self.finished = true;
             return Ok(None);

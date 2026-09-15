@@ -804,20 +804,23 @@ fn inventory(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
     query::inventory_json(&repo, &req.query)
 }
 
-/// `/api/analysis/strongest` (T-079): the same spectrum-history source as `/api/history`.
+/// `/api/analysis/strongest` (T-079): the same spectrum-history source as `/api/history`. The
+/// window ends at the stream time the history has reached (a replay or a time-compressed scene
+/// runs on its own clock, T-125); the wall clock only before any frame.
 fn strongest(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
-    let now = Timestamp::now();
+    let now = |p: &Pyramid| p.latest_frame_end().unwrap_or_else(Timestamp::now);
     if let Some(p) = &state.history {
         let p = p
             .lock()
             .map_err(|_| ApiError::new(500, "history store poisoned"))?;
-        return query::strongest_json(&p, &req.query, now);
+        return query::strongest_json(&p, &req.query, now(&p));
     }
     if let Some(f) = &state.floor {
         let f = f
             .lock()
             .map_err(|_| ApiError::new(500, "floor store poisoned"))?;
-        return query::strongest_json(f.uncalibrated_pyramid(), &req.query, now);
+        let p = f.uncalibrated_pyramid();
+        return query::strongest_json(p, &req.query, now(p));
     }
     Err(ApiError::new(404, "no spectrum history on this server"))
 }

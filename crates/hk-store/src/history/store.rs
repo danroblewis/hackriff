@@ -223,6 +223,13 @@ impl Pyramid {
         Timestamp::from_unix_nanos(self.watermark_ns)
     }
 
+    /// The stream time the history has reached: the end of the newest folded frame (on reopen,
+    /// the watermark), `None` before any. Replays and time-compressed scenes run on their own
+    /// clock, so "the last N seconds" means this, not the wall clock (T-125).
+    pub fn latest_frame_end(&self) -> Option<Timestamp> {
+        (self.latest_ns != i64::MIN).then(|| Timestamp::from_unix_nanos(self.latest_ns))
+    }
+
     /// Keys of the sealed tiles on disk at `level`, oldest first.
     pub fn sealed_keys(&self, level: usize) -> Vec<TileKey> {
         self.sealed.get(level).map_or_else(Vec::new, |m| {

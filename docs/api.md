@@ -155,7 +155,7 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
 
 ### `GET /api/analysis/strongest` — strongest signal in a band (T-079)
 
-Backend replacement for client-side peak-picking over a locally held spectrum row (see [UI decision logic moved server-side](#ui-decision-logic-moved-server-side-t-079) below): the strongest observed signal (max-hold, dB/Hz) in `[f_lo, f_hi)` over the last `window_s` seconds, read from the same spectrum-history pyramid as `/api/history`.
+Backend replacement for client-side peak-picking over a locally held spectrum row (see [UI decision logic moved server-side](#ui-decision-logic-moved-server-side-t-079) below): the strongest observed signal (max-hold, dB/Hz) in `[f_lo, f_hi)` over the last `window_s` seconds, read from the same spectrum-history pyramid as `/api/history`. The window ends at the stream time the history has reached (the end of its newest frame), not the wall clock, so a replay or a time-compressed scene (T-125) is queried on its own clock; before any frame it ends at the wall clock.
 
 ```jsonc
 { "found": true, "f_center_hz": 101300000.0, "f_lo_hz": 101200000.0, "f_hi_hz": 101400000.0, "max_db": -71.2 }

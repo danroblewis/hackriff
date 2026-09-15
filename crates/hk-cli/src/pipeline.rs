@@ -570,12 +570,29 @@ pub fn cli_mock_options() -> MockOptions {
     }
 }
 
+/// [`cli_mock_options`] for the recording at `path`. A time-compressed scene (captures leaving
+/// `core:global_index` gaps between them, T-125) keeps the recording's clock, so block times are
+/// the scene's simulated times, not the wall clock at open.
+pub fn cli_mock_options_for(path: &Path) -> MockOptions {
+    let scene = hk_core::SigmfReplaySource::open(path, hk_core::ReplayOptions::default())
+        .is_ok_and(|r| !r.recording_gaps().is_empty());
+    MockOptions {
+        clock: if scene {
+            MockClock::Recording
+        } else {
+            MockClock::Wall
+        },
+        ..cli_mock_options()
+    }
+}
+
 /// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One) or
 /// `mock:<file.sigmf-meta>` (the mock SDR, `None` if the recording cannot be opened; [`open_live`]
 /// reports why). SoapySDR plugs in here later behind the same `SourceDriver` contract.
 pub fn driver_for(spec: &str) -> Option<(Box<dyn SourceDriver>, Option<String>)> {
     if let Some(path) = mock_path(spec) {
-        let driver = MockSdrDriver::new(path, cli_mock_options()).ok()?;
+        let options = cli_mock_options_for(&path);
+        let driver = MockSdrDriver::new(path, options).ok()?;
         return Some((Box::new(driver), None));
     }
     hackrf_serial(spec).map(|serial| (Box::new(HackRfDriver) as Box<dyn SourceDriver>, serial))
@@ -677,10 +694,15 @@ pub struct LiveSource {
 
 /// Opens a live source (receive only) through its driver with `live`'s settings.
 pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
+    // The stream's start: the wall clock for a radio, the recording's clock for a scene (T-125).
+    let mut clock_start = None;
     let (driver, request): (Box<dyn SourceDriver>, OpenRequest) =
         if let Some(path) = mock_path(spec) {
-            let driver = MockSdrDriver::new(&path, cli_mock_options())
+            let driver = MockSdrDriver::new(&path, cli_mock_options_for(&path))
                 .with_context(|| format!("opening the mock device over {}", path.display()))?;
+            if driver.options().clock == MockClock::Recording {
+                clock_start = Some(driver.recording().start_time);
+            }
             let request = mock_request(live, &driver)?;
             (Box::new(driver), request)
         } else if let Some((driver, device)) = driver_for(spec) {
@@ -725,7 +747,7 @@ pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
         info: SourceInfo {
             sample_rate_hz: request.sample_rate_hz,
             center_hz: request.center_hz.round(),
-            start_time: Timestamp::now(),
+            start_time: clock_start.unwrap_or_else(Timestamp::now),
         },
         gains,
         device,
