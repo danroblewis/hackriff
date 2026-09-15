@@ -13,6 +13,7 @@
 //   changes stay in this page as pending, `sync()` says so, and `flush()` (retried by main.ts)
 //   sends them when the server is back. A 4xx refusal rolls the change back with a notice.
 // - **No backend** (tests, or a page without a token): client-only, like T-044.
+import { DEMOD_KINDS, type OutputKind, type OutputSession, type OutputsClient, RECORD_KINDS, startOutputs } from "./outputs";
 import { ControlError, reactionTo } from "./controls/client";
 
 export type LinkKind = "demodulation" | "recording" | "bitstream" | "inspection";
@@ -55,8 +56,8 @@ export interface SelectionPatch { name?: string; notes?: string | null; tags?: s
 export const SELECTION_ACTIONS = [
   { id: "inspect", label: "Inspect", title: "Region history plus the ranked explanations of the emitters inside" },
   { id: "listen", label: "Listen", title: "Demodulate the strongest signal in this region to audio (mode estimated, T-043)" },
-  { id: "demod", label: "Demod", title: "Demodulated outputs per selection (bits, symbols, WAV: T-061)" },
-  { id: "record", label: "Record", title: "Record this region (the tuned window now; band-limited outputs in T-061)" },
+  { id: "demod", label: "Demod", title: "Record this region's demodulated outputs to files (bits, symbols, WAV audio) and listen" },
+  { id: "record", label: "Record", title: "Record this region to files: IQ slice (tuned window, band annotated) plus bits, symbols and WAV audio" },
 ] as const;
 export type ActionId = (typeof SELECTION_ACTIONS)[number]["id"];
 
@@ -462,8 +463,7 @@ export function syncText(st: SyncState, count: number): string {
 
 // ---- actions ----
 //
-// Hook contract (stable for T-061, which replaces `demod` and `record` with per-selection output
-// chains; keep these signatures):
+// Hook contract (T-052; `demod` and `record` are T-061's per-selection output recordings):
 // - `inspect(s)`, `demod(s)`, `record(s)`: `Promise<ActionOutcome>`; a `link` in a "done" outcome
 //   is stored on the selection (`POST /api/selections/<id>/links`), e.g.
 //   `{ kind: "recording", target: <Recording id> }` or `{ kind: "bitstream", target: <Bitstream id> }`.
@@ -506,41 +506,39 @@ export async function runSelectionAction(action: ActionId, targets: readonly Sel
   return out;
 }
 
-interface RunState { center_hz: number; sample_rate_hz: number; recording?: { active: boolean } }
-
-/**
- * Record hook (until T-061): the manual recorder (`POST /api/control/record/start`, T-050) records
- * the whole tuned window, so it starts only when that window covers the selection; otherwise it
- * reports that band-limited recording is coming in T-061.
- */
-export async function recordSelection(client: Pick<ApiClient, "get" | "post">, s: Selection): Promise<ActionOutcome> {
-  let run: RunState | null;
-  try {
-    run = (await client.get<{ run: RunState | null }>("/api/control/state")).run;
-  } catch (e) {
-    return { status: "failed", message: `record: ${reactionTo(e).message}` };
-  }
-  if (!run) return { status: "unavailable", message: "record: no running pipeline on this server" };
-  const lo = run.center_hz - run.sample_rate_hz / 2, hi = run.center_hz + run.sample_rate_hz / 2;
-  if (s.f_lo < lo || s.f_hi > hi) {
-    return { status: "unavailable", message: `record "${s.name}": the tuned window ${(lo / 1e6).toFixed(3)}–${(hi / 1e6).toFixed(3)} MHz does not cover it; recording a band by itself is coming in T-061` };
-  }
-  const label = Array.from(`selection ${s.name}`).slice(0, 64).join("");
-  try {
-    const r = await client.post<{ recording: { id: string | null } }>("/api/control/record/start", { label });
-    return {
-      status: "done",
-      message: `recording the tuned window for "${s.name}" (stop it in Controls); per-selection outputs arrive in T-061`,
-      link: { kind: "recording", target: r.recording?.id ?? `manual:${label}`, note: "tuned window" },
-    };
-  } catch (e) {
-    return { status: "failed", message: `record "${s.name}": ${reactionTo(e).message}` };
-  }
+export interface OutputHookDeps {
+  /** Follows the started session (progress, stop, download links). */
+  tracker?: { track(s: OutputSession): void };
+  kinds?: readonly OutputKind[];
+  max_s?: number;
 }
 
-/** Demod hook (until T-061): per-selection demodulated outputs do not exist yet. */
-export async function demodSelection(s: Selection): Promise<ActionOutcome> {
-  return { status: "unavailable", message: `demod "${s.name}": bitstream, symbol and WAV outputs per selection are coming in T-061; Listen streams audio now` };
+/**
+ * Record hook (T-061): records the selection's IQ slice (tuned window, band annotated) plus its
+ * demodulated outputs to files on the server; progress and stop through `deps.tracker`.
+ */
+export async function recordSelection(client: OutputsClient, s: Selection, deps: OutputHookDeps = {}): Promise<ActionOutcome> {
+  const { outcome, session } = await startOutputs(client, s, deps.kinds ?? RECORD_KINDS, { max_s: deps.max_s, verb: "record" });
+  if (session) deps.tracker?.track(session);
+  return outcome;
+}
+
+/** Demod hook (T-061): records the selection's bits, symbols and WAV audio to files. */
+export async function demodSelection(client: OutputsClient, s: Selection, deps: OutputHookDeps = {}): Promise<ActionOutcome> {
+  const { outcome, session } = await startOutputs(client, s, deps.kinds ?? DEMOD_KINDS, { max_s: deps.max_s, verb: "demod" });
+  if (session) deps.tracker?.track(session);
+  return outcome;
+}
+
+/**
+ * The Demod hook as wired in the page: when audio is among the kinds, Listen starts synchronously
+ * (inside the click gesture, for the AudioContext) before the recording request.
+ */
+export function demodHook(client: OutputsClient, listen: (s: Selection) => void, deps: OutputHookDeps = {}): (s: Selection) => Promise<ActionOutcome> {
+  return (s) => {
+    if ((deps.kinds ?? DEMOD_KINDS).includes("audio")) listen(s);
+    return demodSelection(client, s, deps);
+  };
 }
 
 /** A ranked explanation (hk-pipeline `family::Explanation`, as `/api/inventory` serves it). */

@@ -92,6 +92,39 @@ enum Command {
     },
     /// Connect to a stream-output endpoint and print its header and records
     /// (docs/stream-contract.md).
+    /// Record a selection's, emitter's or band's outputs (bits, symbols, WAV audio, IQ slice with
+    /// SigMF-style sidecars) on a running `hk serve`, then download them into --out (T-061).
+    /// Ctrl-C stops the recording and still downloads what was written.
+    #[command(group(ArgGroup::new("target").required(true).args(["selection", "emitter", "band"])))]
+    Record {
+        /// Selection id.
+        #[arg(long)]
+        selection: Option<String>,
+        /// Emitter id.
+        #[arg(long)]
+        emitter: Option<String>,
+        /// Band LO:HI in Hz, e.g. 433.8e6:434.1e6.
+        #[arg(long)]
+        band: Option<String>,
+        /// Kinds: bits, symbols, audio, iq (comma separated).
+        #[arg(long, value_delimiter = ',', default_value = "bits,symbols,audio")]
+        kinds: Vec<String>,
+        /// Longest recording, s (server default 60).
+        #[arg(long)]
+        max_s: Option<f64>,
+        /// Largest recording (all files), bytes.
+        #[arg(long)]
+        max_bytes: Option<u64>,
+        /// Directory the files are downloaded into.
+        #[arg(long)]
+        out: PathBuf,
+        /// The `hk serve` API address.
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        server: SocketAddr,
+        /// API token (else HK_TOKEN, else the default token file).
+        #[arg(long)]
+        token: Option<String>,
+    },
     #[command(group(ArgGroup::new("endpoint").required(true).args(["uds", "tcp"])))]
     StreamTail {
         /// Unix-domain socket path.
@@ -273,6 +306,45 @@ fn main() -> anyhow::Result<()> {
                 token: None,
                 listen,
             })?;
+        }
+        Command::Record {
+            selection,
+            emitter,
+            band,
+            kinds,
+            max_s,
+            max_bytes,
+            out,
+            server,
+            token,
+        } => {
+            use hk_cli::record::{RecordOptions, RecordTarget, parse_band, run};
+            let target = match (selection, emitter, band) {
+                (Some(s), _, _) => RecordTarget::Selection(s),
+                (None, Some(e), _) => RecordTarget::Emitter(e),
+                (None, None, Some(b)) => {
+                    let (lo, hi) = parse_band(&b)?;
+                    RecordTarget::Band(lo, hi)
+                }
+                (None, None, None) => unreachable!("clap requires one target"),
+            };
+            let token = hk_cli::pipeline::token(token.as_deref())?;
+            hk_cli::signal::install()?;
+            let outcome = run(
+                &RecordOptions {
+                    server,
+                    token: token.expose().to_owned(),
+                    target,
+                    kinds,
+                    max_s,
+                    max_bytes,
+                    out,
+                },
+                hk_cli::signal::requested,
+            )?;
+            for f in &outcome.files {
+                println!("{}", f.display());
+            }
         }
         Command::StreamTail { uds, tcp, count } => {
             let stdout = io::stdout();

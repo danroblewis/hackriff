@@ -14,6 +14,8 @@
 //! - [`live_control`]: the device-generic live control handle behind the device endpoints.
 //! - [`bridge`]: the WebSocket bridge, mapping one stream 1:1 to one browser WebSocket as a
 //!   `Locality::Remote` consumer (legal-guardrail path).
+//! - [`outputs`]: output recordings (T-061): start/stop/list/download recorded bits, symbols, WAV
+//!   audio and IQ slices.
 //! - [`query`]: `/api/history` (T-017 region-over-time) and `/api/floor` (T-021 floor vs time).
 //! - [`tcp`]: the token-authenticated TCP stream server for external programs (T-060): one
 //!   handshake line, then the framed stream (or a refusal frame).
@@ -30,6 +32,7 @@ pub mod control;
 pub mod http;
 pub mod live_control;
 pub mod ondemand;
+pub mod outputs;
 pub mod query;
 pub mod selections;
 pub mod tcp;
@@ -45,6 +48,7 @@ pub use live_control::{
     LiveControl, LiveControlError, LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner,
     validate_gains,
 };
+pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
 
 #[cfg(test)]
 mod tests {

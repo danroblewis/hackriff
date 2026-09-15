@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { ControlClient, ControlError } from "../src/controls/client";
 import {
   SELECTION_ACTIONS, type NewLink, type Selection, type SelectionActionHooks, type SelectionBackend, SelectionStore,
-  apiBackend, demodSelection, inspectQuery, inspectRows, inspectSelection, recordSelection, runSelectionAction, syncText,
+  apiBackend, inspectQuery, inspectRows, inspectSelection, runSelectionAction, syncText,
   uuid4, validateSelection,
 } from "../src/selections";
 
@@ -243,7 +243,7 @@ test("apiBackend sends Bearer requests to /api/selections with the client id", a
   assert.deepEqual(seen[4].body, { kind: "recording", target: "r1" });
 });
 
-test("actions: dispatch stores links; listen is synchronous; demod waits for T-061", async () => {
+test("actions: dispatch stores links; listen is synchronous", async () => {
   assert.deepEqual(SELECTION_ACTIONS.map((a) => a.id), ["inspect", "listen", "demod", "record"]);
   const s = store();
   const a = s.add({ f_lo: 101.2e6, f_hi: 101.4e6, name: "FM" });
@@ -252,7 +252,7 @@ test("actions: dispatch stores links; listen is synchronous; demod waits for T-0
   const hooks: SelectionActionHooks = {
     inspect: async (x) => { log.push(`inspect ${x.name}`); return { status: "done", message: "ok", link: { kind: "inspection", target: "em-1" } }; },
     listen: (x) => { log.push(`listen ${x.name}`); },
-    demod: demodSelection,
+    demod: async () => ({ status: "unavailable", message: "no server" }),
     record: async (x) => { if (x.name === "pager") throw new Error("boom"); return { status: "done", message: "rec", link: { kind: "recording", target: "rec-9" } }; },
   };
   const p = runSelectionAction("listen", [a, b], s, hooks);
@@ -268,33 +268,6 @@ test("actions: dispatch stores links; listen is synchronous; demod waits for T-0
   assert.equal(s.get(b.id)!.links.filter((l) => l.kind === "recording").length, 0);
   const [d] = await runSelectionAction("demod", [a], s, hooks);
   assert.equal(d.status, "unavailable");
-  assert.match(d.message, /T-061/);
-});
-
-test("record hook: starts the manual recorder when the tuned window covers the selection, else T-061", async () => {
-  const posts: [string, unknown][] = [];
-  const client = (run: unknown, fail?: unknown) => ({
-    get: async <T,>(_p: string) => ({ run }) as T,
-    post: async <T,>(p: string, body?: unknown) => {
-      posts.push([p, body]);
-      if (fail) throw fail;
-      return { recording: { id: "0190-rec" } } as T;
-    },
-  });
-  const sel = { id: "s", name: "FM 101.3", f_lo: 101.2e6, f_hi: 101.4e6, tags: [], links: [], created: 1, updated: 1 };
-  const run = { center_hz: 100.8e6, sample_rate_hz: 2.4e6 };
-  const ok = await recordSelection(client(run), sel);
-  assert.equal(ok.status, "done");
-  assert.deepEqual(posts, [["/api/control/record/start", { label: "selection FM 101.3" }]]);
-  assert.deepEqual(ok.status === "done" && ok.link, { kind: "recording", target: "0190-rec", note: "tuned window" });
-  const outside = await recordSelection(client(run), { ...sel, f_lo: 930.4e6, f_hi: 930.6e6 });
-  assert.equal(outside.status, "unavailable");
-  assert.match(outside.message, /coming in T-061/);
-  assert.equal(posts.length, 1, "nothing started outside the window");
-  assert.equal((await recordSelection(client(null), sel)).status, "unavailable");
-  const refused = await recordSelection(client(run, new ControlError(409, "refused", "class forbids content")), sel);
-  assert.equal(refused.status, "failed");
-  assert.match(refused.message, /refused: class forbids content/);
 });
 
 test("inspect hook: emitters inside the selection, busiest first, with top-k explanations", async () => {

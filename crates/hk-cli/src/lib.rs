@@ -8,6 +8,7 @@
 
 pub mod control;
 pub mod pipeline;
+pub mod record;
 pub mod serve;
 pub mod signal;
 

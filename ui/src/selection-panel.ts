@@ -3,6 +3,7 @@
 // (Inspect, Listen, Demod, Record; hooks in selections.ts). Text via textContent.
 import { fmtBandwidth } from "./axis";
 import { fmtT } from "./history";
+import { type OutputSession, progressText } from "./outputs";
 import {
   type ActionId, type ActionOutcome, type InspectReport, MAX_NAME_LEN, SELECTION_ACTIONS, type Selection,
   type SelectionActionHooks, type SelectionStore, runSelectionAction, syncText,
@@ -17,6 +18,8 @@ export interface SelectionActions {
   hooks: SelectionActionHooks;
   /** Saves the selection's band as a server-side bookmark (T-051). */
   bookmark?: (s: Selection) => void;
+  /** Output recordings (T-061): stop control and download links (token appended). */
+  outputs?: { stop: (id: string) => Promise<string | null>; href: (url: string) => string };
 }
 
 export class SelectionPanel {
@@ -58,6 +61,45 @@ export class SelectionPanel {
     }
     box.append(ul);
     $("sel-report").replaceChildren(box);
+  }
+
+  /** Output recordings started here: progress, a Stop button while active, download links. */
+  showOutputs(list: readonly OutputSession[]) {
+    const box = $("sel-outputs");
+    const rows = list.map((o) => {
+      const row = document.createElement("div");
+      row.className = "sel-output";
+      const name = this.store.get(o.selection_id ?? "")?.name ?? `${(o.f_lo_hz / 1e6).toFixed(3)} MHz`;
+      const text = document.createElement("span");
+      text.textContent = `${name}: ${progressText(o)} `;
+      row.append(text);
+      const outs = this.actions.outputs;
+      if (o.active && outs) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = "Stop";
+        b.title = "Stop this recording (files are finalised)";
+        b.addEventListener("click", () => {
+          b.disabled = true;
+          void outs.stop(o.id).then((err) => { if (err) $("sel-status").textContent = `stop: ${err}`; });
+        });
+        row.append(b);
+      }
+      if (outs) {
+        for (const f of o.files.filter((x) => x.state !== "refused")) {
+          for (const [label, url] of [[f.file, f.url], [f.sidecar, f.sidecar_url]] as const) {
+            const a = document.createElement("a");
+            a.href = outs.href(url);
+            a.textContent = label;
+            a.setAttribute("download", label);
+            row.append(" ", a);
+          }
+        }
+      }
+      return row;
+    });
+    box.replaceChildren(...rows);
+    box.hidden = !rows.length;
   }
 
   private async run(action: ActionId, targets: readonly Selection[]) {
