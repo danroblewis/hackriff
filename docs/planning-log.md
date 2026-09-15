@@ -1667,3 +1667,23 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Tests:** 157 UI tests green.
   - **Gaps:** ADR gap 13 (inventory `total`) added as T-171.
   - **Panel fan-out:** T-150, T-151 and T-152 launched on main. T-153..T-155 follow when agent slots free.
+- **B0.397 T-146 fix round: review risk confirmed, fixes applied, not yet committed. The agent is at 304k tokens and was told to finish or WIP after its run.**
+  - **Pre-fix null budget ratios** (union-bound quantity ÷ Q²/2, production thresholds):
+
+    | Null | Busier ratio | Raises / 10⁶ intervals |
+    |---|---|---|
+    | binomial(2, 0.2) | 1.2·10⁶× | 0 |
+    | Markov duty 5%, mean busy 4 | 1.1·10²⁹× | 526 (~1 per 20 days) |
+    | Markov duty 50% | 2.6·10²⁴× | — |
+
+    The review's discrete/autocorrelation risk was real.
+  - **Fixes:**
+    - Look evidence = min(z, exact binomial-tail z).
+    - Lag-1 conditional "still occupied" rate from new per-subject lag-1 moments.
+    - Sign-reset slack |z| ≤ 1.
+    - Per-slot sampling variance.
+    - Revisit-relative gap max(2 h, 3× revisit).
+    - Gain-step-only reset.
+    - ADR wording.
+  - **Latency cost:** sparse-onset a-priori window is now intervals 17–23 (was 14). T-124 must re-derive its latency limit.
+  - **Also recorded:** T-147 fix committed 47dc746 (merge a05202c; lint green). Post-merge tests and the 46 h diagnostic are pending.
