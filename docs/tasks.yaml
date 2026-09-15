@@ -1597,9 +1597,8 @@ tasks:
   - id: T-097
     milestone: M1
     title: "M1 Tutorial 4: ADS-B recipe + blind acceptance vs readsb (live HIL deferred: 1090 MHz antenna)"
-    status: blocked
-    commit: 7fc75c9
-    blocked_by: T-110
+    status: done
+    commit: 98b07f0
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-001]
@@ -1776,13 +1775,28 @@ tasks:
   - id: T-110
     milestone: M1
     title: "ADS-B tutorial continuation: ppm_demod content-dependent decode failures (12/16), real readsb agreement, messages output sink"
-    status: in-progress
+    status: done
+    commit: 98b07f0
     deps: [T-097]
     parallel_group: M1T3
     use_cases: [SIGNAL-001]
     found_by: "T-097 (Sonnet, 480k tokens) 2026-09-15: fixed aircraft x message-kind pairs never decode (0/80), CRC valid 24%; acceptance weakened to >=12/16; readsb agreement skipped claiming readsb absent though /opt/homebrew/bin/readsb exists; OutputKind::Messages still Idle in recipe runtime"
     acceptance: "root cause of content-dependent ppm_demod failures fixed with a reproducing unit test (alloc-free kept); blind tutorial_adsb asserts all 16 distinct truth squitters with exact fields; readsb agreement actually run (recipe decodes >= readsb on the fixture, fields match); messages sink wired if small; tutorial numbers updated"
     area: crates/hk-blocks/src/blocks/iq/ppm.rs, tests/e2e/tests/acceptance/tutorial_adsb.rs, crates/hk-pipeline/src/recipes/runtime.rs, docs/tutorials/04-adsb.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-111
+    milestone: M1
+    title: "Recipe messages output ingests decodes into the Repository (like plugin decodes)"
+    status: in-progress
+    deps: [T-088, T-089]
+    parallel_group: M1R
+    use_cases: [SIGNAL-001, SIGNAL-062]
+    found_by: "T-097/T-110 2026-09-15: OutputKind::Messages is OutputSink::Idle in recipes/runtime.rs:514; recipe decodes never reach the Repository/inventory/family explanations"
+    acceptance: "recipe `messages` output maps parsed fields to decode rows (message type, identity field e.g. ICAO/RIC/PI/registration, sanitised summary) declared in the recipe schema; written by a writer off the real-time path via the existing decode ingestion used by plugin chains; decodes attach to the emitter and feed family explanations like plugin decodes; e2e through mock SDR for ADS-B and RDS recipes; docs/api.md + ADR-0011 updated"
+    area: crates/hk-pipeline/src/recipes (runtime, sinks), crates/hk-recipe (schema), crates/hk-model (decode rows), recipes/*.json, docs
     needs: none
     model: opus
     effort: medium

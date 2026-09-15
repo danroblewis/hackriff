@@ -783,3 +783,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Result:** blind tutorial_pocsag passes. 4/4 channels found; 16/16 CRC-valid pages match truth on the right lanes; simulcast deduped (`dups` 5, `late` 0); BCH 320 ok / 0 bad. multimon-ng per-channel oracle 4/4.
   - **Review:** both fixes are core interfaces, so a timeboxed Opus review is running. It checks real-hopper regressions and stale live rows after merge/split/fragment/hop-set changes.
   - **Limits:** single baud per recipe; about 4 min live latency for slow nets.
+- **B0.269 T-097/T-110 merged** (98b07f0). **Root cause** of the 'content-dependent' ADS-B failures: `ppm_demod` read chips at integer samples from an integer preamble start. With ~1 sample/chip, a squitter at a fixed sub-sample phase in the looping replay always sat on chip boundaries.
+  - **Fix:** fractional chip-centre interpolation, a 1/8-chip timing grid choosing max decision margin, and a half-sample preamble try. Bounded, alloc-free, chunk-invariant.
+  - **Recipe** moved to 2.4 Msps / 2 MHz.
+  - **Result:** blind 16/16 squitters (128/128 instances), 0 mismatches. readsb agreement 339/339 fields, covering every readsb (ICAO, TC).
+  - **Test bar** restored to 'none missing'.
+  - **T-097's readsb skip** was the unbuilt `hk-plugin-readsb`, not readsb itself.
+  - **Remaining:** 81% of emitted frames are noise-triggered preambles, rejected by CRC. Recipe `messages` outputs are still Idle, now **T-111** (launched).
+  All four M1 tutorials now have blind acceptance on main or in review (POCSAG in T-109 review). Full check running.
