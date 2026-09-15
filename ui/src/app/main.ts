@@ -1,21 +1,31 @@
-// MUI entry (ADR-0013, T-156): served at / (dist/index.html), also aliased at /app.html.
-// Builds the store and the shell, then mounts every area's `mounts` table (`<area>/index.ts`).
-// Panel tasks edit their own area's index.ts, never this file.
+// MUI entry (ADR-0013, T-156; T-179 code-splitting): served at / (dist/index.html), also aliased
+// at /app.html. Builds the store and the shell, then mounts every area's `mounts` table
+// (`<area>/index.ts`). Panel tasks edit their own area's index.ts, never this file.
+//
+// Bundle budget (ADR-0013 §1, ≤45 KB gzip): explore/centre/capture/dock mount eagerly, because
+// they're the initial Explore screen (must work with no network round-trip beyond the app itself).
+// decode and review are the two rarely-used areas (Decode workbench, Review drawer) — each is
+// loaded with a dynamic `import()` the first time it's needed (first switch to Decode mode, first
+// Review-drawer open) so esbuild's `--splitting` puts their code in separate chunks that never
+// load for a session that stays in Explore. `--format=esm` is required for splitting, so
+// `index.html`'s `<script>` is `type="module"`.
 import { ControlClient } from "../controls/client";
 import * as capture from "./capture";
 import * as centre from "./centre";
 import type { AppContext, AreaMounts } from "./context";
-import * as decode from "./decode";
 import * as dock from "./dock";
 import { slot } from "./dom";
 import * as explore from "./explore";
 import { forgetToken, takeToken } from "./net";
-import * as review from "./review";
 import { PREFS_KEY, mountShell } from "./shell";
 import { createStore } from "./store";
 import { initialState, parsePrefs } from "./state";
 
-const AREAS: readonly AreaMounts[] = [explore.mounts, centre.mounts, capture.mounts, decode.mounts, dock.mounts, review.mounts];
+const EAGER_AREAS: readonly AreaMounts[] = [explore.mounts, centre.mounts, capture.mounts, dock.mounts];
+
+function mountArea(area: AreaMounts, ctx: AppContext) {
+  for (const [name, mount] of Object.entries(area)) mount(slot(name), ctx);
+}
 
 function readPrefs(): string | null {
   try { return localStorage.getItem(PREFS_KEY); } catch { return null; }
@@ -31,9 +41,24 @@ function main() {
     store.set((s) => ({ conn: { ...s.conn, api: "unauthorized", message: "token needed" } }));
     return;
   }
-  for (const area of AREAS) {
-    for (const [name, mount] of Object.entries(area)) mount(slot(name), ctx);
-  }
+  for (const area of EAGER_AREAS) mountArea(area, ctx);
+
+  // Decode workbench: mounted on first switch to Decode mode (also fires immediately if a
+  // persisted pref restores `mode: "decode"`).
+  let decodeLoaded = false;
+  store.select((s) => s.mode, (mode) => {
+    if (mode !== "decode" || decodeLoaded) return;
+    decodeLoaded = true;
+    import("./decode").then((m) => mountArea(m.mounts, ctx));
+  }, { immediate: true });
+
+  // Review drawer: mounted on first open.
+  let reviewLoaded = false;
+  store.select((s) => s.review.open, (open) => {
+    if (!open || reviewLoaded) return;
+    reviewLoaded = true;
+    import("./review").then((m) => mountArea(m.mounts, ctx));
+  }, { immediate: true });
 }
 
 main();

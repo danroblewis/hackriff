@@ -64,7 +64,7 @@ All contract time comes from the **device/sample clock** (the `Timestamp` carrie
 ### 1.3 Sweep records
 
 Discovery hops run at ~20 steps/s (`sweep_step_ns` 50 ms), so per-hop rows would be ~1.7 M/day. Instead:
-- **`SweepGeometry`** (id = hash of the canonical hop windows, `plan_version`, `hops: Vec<ObservedWindow>`) is written once per geometry change.
+- **`SweepGeometry`** (id = hash of the canonical hop windows, `plan_version`, `hops: Vec<ObservedWindow>`) is written once per geometry change. A DC-dithered plan (T-173, ADR-0005) has two, one per pass parity. Each is written once, before the first record that uses it, and each pass's record references its parity's geometry. `HopVisit::hop` stays the plan's hop index.
 - **`SweepRecord`** covers at most one pass or 60 s, whichever ends first. It holds `geometry`, `span`, and `visits: Vec<HopVisit { hop, start_ms, observed_ms }>` in time order, plus `preempted_hops`, `dropped_samples` and `overload_hops`.
 
 At 400 hops per pass that is ~12 B per visit before compression, about 7 MB/day worst case.
@@ -152,7 +152,7 @@ A threshold crossing coincides with a suspect detection (flagged `clipped`, `sus
 - overlapping it in time within ± one time cell (the grid's `t_cell_ns`, the same slack as the visit window),
 - whose own tuning centre (its Provenance `tune.center_hz`) lies more than the detector's DC tolerance (15 kHz) outside its extent, so it came from a tuning whose DC is elsewhere. A twin whose tuning is unknown refutes nothing, and an unflagged image or intermod sitting at its own LO is not a twin.
 
-Other DC flags at the same frequency with no twin in their own window stay suspect. A real DC spur moves with the LO, has no clean off-LO twin and stays suspect. A suspect revisit:
+Other DC flags at the same frequency with no twin in their own window stay suspect. A real DC spur moves with the LO, has no clean off-LO twin and stays suspect. **The rule applies to live candidates too (T-174):** the detection reader refutes DC flags against its recent clean detections as they are emitted, so a refuted flag neither blocks the track's candidate nor counts toward the bandit's suspect fraction, suspect ban or suspect-only dwell. A suspect revisit:
 - It is excluded from `fco`, as unobserved rather than unoccupied, and counted in `n_suspect`.
 - `fco_suspect_upper` counts it as occupied, so the pair brackets the truth.
 - Suspect crossings never create or widen a learned channel.

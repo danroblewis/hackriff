@@ -473,6 +473,20 @@ pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
     rate.is_finite() && rate > 0.0 && lo >= center - 0.49 * rate && hi <= center + 0.49 * rate
 }
 
+/// The tune `(centre, rate)` to plan a channel at `center` for: the tune the capture thread last
+/// published, or — before it has published one (no block captured yet) — a provisional window
+/// centred on `center` at the run's rate. The pipeline thread re-plans for the tune its chunks
+/// carry (`Runner::chunk`, `Hops::apply_channels`) and refuses a channel outside it then.
+/// T-175: an optimised build serves a start and a channel change before the first block.
+pub(crate) fn planning_tune(shared: &crate::run::Shared, center: f64) -> (f64, f64) {
+    let tune = shared.counters.tune();
+    if tune.1.is_finite() && tune.1 > 0.0 {
+        tune
+    } else {
+        (center, shared.fs)
+    }
+}
+
 pub(crate) struct ChannelPlan {
     pub(crate) ddc: Ddc,
     pub(crate) tune: (f64, f64),
@@ -865,12 +879,7 @@ impl RecipeRuntime {
         }
         let (lo, hi, emitter) = self.resolve(&shared, &target)?;
         let center = 0.5 * (lo + hi);
-        let tune = shared.counters.tune();
-        let tune = if tune.1.is_finite() && tune.1 > 0.0 {
-            tune
-        } else {
-            (center, shared.fs)
-        };
+        let tune = planning_tune(&shared, center);
         // Follow-hops (T-093): per-channel lanes run everything upstream of the merge node; the
         // main graph is the merge node and downstream of it.
         let hop = match recipe.input.channels {

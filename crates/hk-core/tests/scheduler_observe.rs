@@ -104,16 +104,30 @@ fn scheduler_observe_records_one_sweep_record_per_pass_in_schedule_order() {
     let ObservationRecord::Geometry(g) = &out[0] else {
         panic!("geometry first: {:?}", out[0]);
     };
+    // T-173: odd passes tune the DC-dithered centres, recorded against their own geometry. Each
+    // geometry is written once, before the first record that uses it.
+    let geometries: Vec<_> = out
+        .iter()
+        .filter_map(|r| match r {
+            ObservationRecord::Geometry(g) => Some(g),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        out.iter()
-            .filter(|r| matches!(r, ObservationRecord::Geometry(_)))
-            .count(),
-        1,
-        "geometry written once"
+        geometries.len(),
+        2,
+        "each pass parity's geometry written once"
     );
-    for (hop, w) in s.plan().hops.iter().zip(&g.hops) {
-        assert_eq!(*w, RULE.window(hop.center_hz, hop.rate_hz));
+    for (pass, geometry) in geometries.iter().enumerate() {
+        assert_eq!(geometry.hops.len(), n);
+        for (hop, w) in s.plan().hops.iter().zip(&geometry.hops) {
+            assert_eq!(
+                *w,
+                RULE.window(hop.center_on_pass(pass as u64), hop.rate_hz)
+            );
+        }
     }
+    assert_ne!(geometries[0].id, geometries[1].id);
     let sweeps: Vec<_> = out
         .iter()
         .filter_map(|r| match r {
@@ -123,8 +137,9 @@ fn scheduler_observe_records_one_sweep_record_per_pass_in_schedule_order() {
         .collect();
     assert_eq!(sweeps.len(), 3, "one record per pass");
     let mut i = 0;
-    for sw in &sweeps {
-        assert_eq!(sw.geometry, g.id);
+    for (pass, sw) in sweeps.iter().enumerate() {
+        assert_eq!(sw.geometry, geometries[pass % 2].id);
+        assert_eq!(g.id, geometries[0].id);
         assert_eq!(sw.visits.len(), n);
         assert_eq!(sw.span.start, steps[i].t_start);
         for (k, v) in sw.visits.iter().enumerate() {
@@ -142,6 +157,89 @@ fn scheduler_observe_records_one_sweep_record_per_pass_in_schedule_order() {
             i += 1;
         }
         assert_eq!(sw.span.end, steps[i - 1].t_end());
+    }
+}
+
+/// T-181: a hop that can dither neither way (RF-path boundaries 50 kHz either side of its LO)
+/// warns `HopDcDitherDisabled`. As hop 0 its tuning matches both pass geometries, and the pass
+/// record still is not split at hop 1: the step's scheduled pass picks the geometry.
+#[test]
+fn scheduler_observe_an_undithered_hop_0_does_not_split_the_pass_record() {
+    use hk_core::SourceCapabilities;
+    use hk_core::scheduler::{PlanWarning, Scheduler, SchedulerConfig};
+    let p = plan(
+        "undithered",
+        1,
+        vec![
+            region(433.95, 434.05, 2.0, None),
+            region(433.0, 435.0, 1.0, None),
+        ],
+        ScanPolicy::SweepOnly,
+        vec![],
+        json!({}),
+    );
+    let mut cfg = SchedulerConfig::from_plan(&p).unwrap();
+    cfg.rf_path_boundaries_hz = vec![433.95 * MHZ, 434.05 * MHZ];
+    let mut s = Scheduler::new(&p, cfg, &SourceCapabilities::hackrf_one(), clock()).unwrap();
+    let compiled = s.plan().clone();
+    let n = compiled.hops.len();
+    assert_eq!(n, 3, "{:?}", compiled.hops);
+    let hop0 = compiled.hops[0];
+    assert_eq!(hop0.covers.center_hz(), hop0.center_hz);
+    assert!((hop0.center_hz - 434.0 * MHZ).abs() < 1.0);
+    assert_eq!(hop0.dither_hz, 0.0);
+    assert!(compiled.hops[1..].iter().all(|h| h.dither_hz.abs() == 80e3));
+    let disabled: Vec<_> = compiled
+        .warnings
+        .iter()
+        .filter(|w| matches!(w, PlanWarning::HopDcDitherDisabled { .. }))
+        .collect();
+    assert_eq!(
+        disabled,
+        [&PlanWarning::HopDcDitherDisabled {
+            hop: 0,
+            center_hz: hop0.center_hz,
+        }]
+    );
+
+    let steps = run(&mut s, 4 * n);
+    for (i, st) in steps.iter().enumerate() {
+        assert!(matches!(st.purpose, Purpose::Sweep { .. }));
+        assert_eq!(st.dither_pass, (i / n) % 2 == 1, "step {i}");
+    }
+    let mut rec = ObservationRecorder::new(&compiled, RULE, None, None);
+    let mut out = Vec::new();
+    for st in &steps {
+        rec.observe(&applied(st), &mut |r| out.push(r));
+    }
+    rec.flush(&mut |r| out.push(r));
+    let geometries: Vec<_> = out
+        .iter()
+        .filter_map(|r| match r {
+            ObservationRecord::Geometry(g) => Some(g),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        geometries.len(),
+        2,
+        "each pass parity's geometry written once"
+    );
+    assert_eq!(
+        geometries[0].hops[0], geometries[1].hops[0],
+        "hop 0 has one centre"
+    );
+    let sweeps: Vec<_> = out
+        .iter()
+        .filter_map(|r| match r {
+            ObservationRecord::Sweep(x) => Some(x),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sweeps.len(), 4, "one record per pass");
+    for (pass, sw) in sweeps.iter().enumerate() {
+        assert_eq!(sw.visits.len(), n, "pass {pass}");
+        assert_eq!(sw.geometry, geometries[pass % 2].id, "pass {pass}");
     }
 }
 

@@ -44,7 +44,7 @@ Never returns content, only stream *metadata*: every offered stream's header fie
       "stream_id": "spectrum/live", "kind": "spectrum", "content_class": "unrestricted",
       "content_permitted": true, "remote_permitted": true,
       "datatype": "rf32_le", "sample_rate_hz": 25.0, "center_hz": 100800000.0, "bandwidth_hz": 2400000.0,
-      "fft_size": 1024, "open_consumers": 0,
+      "fft_size": 1024, "dc_excluded_hz": 15000.0, "open_consumers": 0,
       "ws_path": "/ws/spectrum/live", "tcp_target": "spectrum/live",
       "format": { "framing": "u32-le length-prefixed frames; first frame is the JSON header",
                   "records": "32-byte binary record header + payload (type 1 data, 2 dropped, 3 status)",
@@ -66,6 +66,8 @@ Never returns content, only stream *metadata*: every offered stream's header fie
 ```
 
 `tcp` is `null` when no TCP stream server runs. See [Streams](#streams-websocket-tcp-and-on-demand-openers) below and `docs/stream-contract.md` §10/§12/§13 for what each named stream/opener actually carries.
+
+`dc_excluded_hz` (T-167, ADR-0013 §4.9 gap 10) is the half-width, Hz, of the DC/LO-leakage notch centred on `center_hz` that the producer's own detector excludes from analysis (the spectrum stream's `hk-pipeline` producer sets it from `hk_detect::DcRule::default().tolerance_hz`, the same value `GET /api/observations` `records[].window.dc_excluded` already reflects). It is additive on both `/api/streams` and the stream header itself (below) and `null` when a producer applies no DC mask to that stream — never a guess.
 
 ### `GET /api/history` — region-over-time grid (T-017, AWARE-042)
 

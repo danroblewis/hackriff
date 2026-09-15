@@ -43,7 +43,14 @@
 //!   [`MockOptions::overload_clip_fraction`] marks the tune state `overload` (sticky until the next
 //!   tune/gain change, a `PROVENANCE_CHANGE`), and a recording captured overloaded stays
 //!   overloaded wherever recorded IQ is served. `quantisation_limited` is set when the scaled
-//!   floor is under twice the rounding noise.
+//!   floor (with any receiver noise) is under twice the rounding noise.
+//! - **Receiver noise (T-180):** below the recording's gain a radio's own noise after its gain
+//!   stages does not drop with the gain, so the samples are never mostly zero codes. Served IQ
+//!   (passed through or rendered) at a gain under the recording's gets complex white Gaussian
+//!   noise before rounding: [`device_noise_codes2`] at the tuned VGA less the recording's own at
+//!   its VGA scaled by the gain change (≈ 0.30 code² per component at VGA 20), from a seeded
+//!   generator of its own. At or above the recording's gain nothing is added and the output is
+//!   unchanged (bit-exact passthrough at the recording's tune and gain).
 //! - **Settle:** every accepted control change skips [`MockOptions::settle_blocks`] blocks of
 //!   output (like the HackRF's discarded in-flight transfer): a `GAP` with exact `dropped_before`,
 //!   counted in `discarded_samples`. Stream time (and the recording) advance through it.
@@ -78,10 +85,15 @@
 //!
 //! Gain is digital scaling of what was recorded: raising it amplifies the recorded quantisation
 //! noise and cannot model the front end's noise figure, LNA compression or intermodulation;
-//! lowering it cannot undo clipping baked into the recording. The noise fill is white at the
+//! lowering it cannot undo clipping baked into the recording, and models the receiver's noise
+//! only through the two calibrated post-gain terms of [`device_noise_codes2`] (no DC offset or
+//! spurs, no amp-off mixer noise rise). The noise fill is white at the
 //! floor measured in the recording's central half, so spurs, DC and the baseband-filter roll-off
 //! are not synthesised outside coverage, and the floor dips ≈ 3 dB over the transition band at a
-//! coverage edge. The band-select filter (≈ 60 dB, transition 8 % of the output rate) adds about
+//! coverage edge. The band-select filter (≈ 60 dB, transition 8 % of the output rate) ends its
+//! roll-off half a transition inside any window edge the recording extends past (T-175: centred
+//! on ±rate/2 it folded recorded content just outside the window onto the opposite edge), so the
+//! outer 4 % of such a side is that dip, filled with the same noise. The filter adds about
 //! half its length in recording samples of latency after a retune. Multi-centre recordings are
 //! refused. The rounding-noise correction assumes the recording's rounding error is white and
 //! independent of the signal (true once its floor is ≳ 0.5 code rms). It needs ≈ 15 frames
@@ -105,7 +117,7 @@ use hk_model::sigmf::{Datatype, SigmfMeta};
 use hk_model::{Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
 use num_complex::{Complex, Complex32};
 
-use self::dsp::{Feed, Plan, Render, estimate_floor_power};
+use self::dsp::{Feed, Plan, Render, Rng, estimate_floor_power};
 use super::sigmf_replay::{Pacing, ReplayOptions, SigmfReplaySource};
 use super::{
     BasebandFilters, ControlMailbox, DeviceInfo, Duplex, FrequencyRange, Gains, NamedGain,
@@ -118,6 +130,40 @@ use crate::block::{BlockHeader, Discontinuity, ProvenanceHandle};
 pub const NAME: &str = "mock-sdr";
 /// Nominal HackRF RF amplifier gain used by the gain model, dB.
 pub const AMP_GAIN_DB: f64 = 11.0;
+/// T-180: receiver noise the HackRF adds after its VGA input (VGA output stage, ADC driver and ADC
+/// thermal noise), codes² per I/Q component at the ADC, before rounding. Gain-independent.
+pub const POST_VGA_NOISE_CODES2: f64 = 0.25;
+/// T-180: VGA input-referred noise (baseband filter output and VGA input stage), codes² per I/Q
+/// component at the ADC per unit of VGA power gain (`× 10^(VGA/10)`).
+pub const VGA_INPUT_NOISE_CODES2: f64 = 5.0e-4;
+
+/// T-180: the part of a HackRF One's own noise at the ADC that the RF gain stages do not scale,
+/// codes² per I/Q component (full scale 128 codes), at baseband gain `vga_db`.
+///
+/// # Model
+///
+/// The receive chain is RF amp (0/≈11 dB) → RFFC5072 mixer → MAX2837 LNA ("IF", 0–40 dB) →
+/// mixer → baseband filter → VGA ("baseband", 0–62 dB) → MAX5864 8-bit ADC ([GSG, "Setting Gain
+/// Controls for RX"](https://hackrf.readthedocs.io/en/latest/setting_gain.html); docs/02 §1.1
+/// "Hybrid"). Referred to the ADC, the floor is
+///
+/// `N(G) = (S_ant + N_front)·G_amp·G_lna·G_vga·k + N_vga_in·G_vga + N_post`
+///
+/// (Friis: each stage's noise is amplified only by the stages after it). The first term is what a
+/// recording holds and gain scaling reproduces. The last two do not scale with the amp or LNA,
+/// and `N_post` not with the VGA either, so the effective noise figure rises as gain falls: a
+/// window served 29 dB under the recording's gain gets `N_vga_in·G_vga + N_post` regardless.
+/// This function is those two terms. GSG publishes no HackRF One noise figure (docs/01 §1.3,
+/// unverified), so they are calibrated from the dev HackRF's own captures, on the spectrum outside
+/// the baseband filter where the first term is attenuated (Welch median, rounding 1/12 code²
+/// removed): `urban_98M_20M_l24g20a0` reads 0.38 code² at VGA 20 and `ism_915M_10M_l24g30a1`
+/// 0.83 at VGA 30, i.e. `N_post` ≈ 0.25 and `N_vga_in` ≈ 5·10⁻⁴ (0.30 / 0.75 code² at VGA 20 /
+/// 30). Unverified outside VGA 20–30 and until HIL (T5); the amp-off rise of the mixer's noise
+/// contribution is not modelled (the served floor stays a little optimistic there).
+pub fn device_noise_codes2(vga_db: f64) -> f64 {
+    POST_VGA_NOISE_CODES2 + VGA_INPUT_NOISE_CODES2 * 10f64.powf(vga_db / 10.0)
+}
+
 /// Gain reference for a recording without `hackriff:provenance` (unknown capture gains): a
 /// nominal HackRF working gain, the scheduler's default. The replay's synthesised 0 dB would make
 /// any working gain a full-gain boost that saturates the 8-bit output.
@@ -827,6 +873,8 @@ pub struct MockSdrSource {
     options: MockOptions,
     feed: ReplayFeed,
     render: Render,
+    /// T-180: receiver-noise generator (its own stream, so the render's noise fill is unchanged).
+    device_rng: Rng,
     tune: Tune,
     bias_tee: bool,
     filter_explicit: bool,
@@ -873,6 +921,7 @@ impl MockSdrSource {
         let plan = plan_for(&recording, &tune, options.transition);
         let mut source = Self {
             render: Render::new(plan, options.seed, recording.dequant.clone()),
+            device_rng: Rng::new(options.seed ^ 0x5431_3830_6e6f_6973),
             provenance: ProvenanceHandle::new(recording.provenance.clone()),
             control,
             recording,
@@ -925,11 +974,26 @@ impl MockSdrSource {
         10f64.powf((total_gain(&self.tune) - self.recording.gain_db()) / 20.0)
     }
 
+    /// T-180: receiver noise added before rounding, full scale² per complex sample: served below
+    /// the recording's gain, the device noise the scaled recording no longer carries
+    /// ([`device_noise_codes2`] at the tuned VGA, less the recording's own scaled by the gain
+    /// change). Nothing at or above the recording's gain.
+    fn receiver_noise_power(&self) -> f64 {
+        let g = self.gain_scale();
+        if g >= 1.0 {
+            return 0.0;
+        }
+        let rec_vga = self.recording.provenance.tune.vga_db;
+        let codes2 = device_noise_codes2(self.tune.vga_db) - device_noise_codes2(rec_vga) * g * g;
+        2.0 * codes2.max(0.0) / (128.0 * 128.0)
+    }
+
     fn record(&self) -> Provenance {
         let rec = &self.recording.provenance;
         let coverage = self.render.plan().coverage();
         let g = self.gain_scale();
-        let floor_psd = self.recording.floor_power * g * g / self.recording.sample_rate_hz;
+        let floor_psd = self.recording.floor_power * g * g / self.recording.sample_rate_hz
+            + self.receiver_noise_power() / self.tune.sample_rate_hz;
         let quant_psd = QUANTISATION_POWER / self.tune.sample_rate_hz;
         let (method, budget) = match self.options.clock {
             MockClock::Recording => (rec.timestamp_method, rec.timestamp_error_budget_ns),
@@ -1101,10 +1165,18 @@ impl MockSdrSource {
             return Ok(None);
         }
         let g = self.gain_scale() as f32 * 128.0;
+        // T-180: receiver noise in codes (none at or above the recording's gain, where the output
+        // is exactly what it was before the model).
+        let noise_var = self.receiver_noise_power() * 128.0 * 128.0;
+        let rng = &mut self.device_rng;
         let mut clipped = 0u64;
         out.extend(self.f32buf.iter().map(|z| {
-            let q = |x: f32| (x * g).round().clamp(-128.0, 127.0) as i8;
-            let s = Complex::new(q(z.re), q(z.im));
+            let mut y = z * g;
+            if noise_var > 0.0 {
+                y += rng.complex_gaussian(noise_var);
+            }
+            let q = |x: f32| x.round().clamp(-128.0, 127.0) as i8;
+            let s = Complex::new(q(y.re), q(y.im));
             clipped +=
                 u64::from(s.re == -128 || s.re == 127) + u64::from(s.im == -128 || s.im == 127);
             s

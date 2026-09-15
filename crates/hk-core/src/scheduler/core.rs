@@ -361,6 +361,8 @@ pub struct Scheduler<C: Clock> {
     current_visits: usize,
     coverage: CoverageRing,
     low_power: bool,
+    /// The discovery hop `slot_template` last emitted belongs to a DC-dithered pass (T-181).
+    hop_dithered: bool,
 }
 
 impl<C: Clock> Scheduler<C> {
@@ -382,6 +384,7 @@ impl<C: Clock> Scheduler<C> {
             plan: compiled,
             seq: 0,
             cursor: Cursor::default(),
+            hop_dithered: false,
             next_order: 0,
             verify: None,
             intent: None,
@@ -499,6 +502,8 @@ impl<C: Clock> Scheduler<C> {
             purpose: t.purpose,
             plan_version: self.plan.plan_version,
             verification_group: t.verification_group,
+            // Discovery templates come only from `slot_template`, which set `hop_dithered`.
+            dither_pass: t.purpose.is_discovery() && self.hop_dithered,
         };
         self.seq += 1;
         self.current_end = step.t_end();
@@ -1413,7 +1418,12 @@ impl<C: Clock> Scheduler<C> {
             scheduled: None,
         });
         let index = self.cursor.hop;
-        let t = Template::from_hop(index, &self.plan.hops[index]);
+        let hop = &self.plan.hops[index];
+        let mut t = Template::from_hop(index, hop);
+        // T-173: dithered passes tune the hop's DC-dithered centre (same slice, path and gains):
+        // alternate passes, or every `single_hop_dither_every`-th pass of a single-hop plan (T-181).
+        t.center_hz = hop.center_on_pass(self.cursor.passes);
+        self.hop_dithered = hop.dithered_on_pass(self.cursor.passes);
         self.cursor.hop += 1;
         if self.cursor.hop == self.plan.hops.len() {
             self.cursor.hop = 0;

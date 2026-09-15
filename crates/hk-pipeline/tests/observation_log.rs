@@ -118,26 +118,69 @@ fn observation_log_through_the_mock_sdr_matches_the_tuned_windows_and_the_schedu
         enbw_bins: HANN_ENBW_BINS,
     };
 
-    // Coverage is exactly the tuned windows: one geometry, hop for hop.
-    let [g] = page.geometries.as_slice() else {
-        panic!("one geometry: {:?}", page.geometries);
+    // Coverage is exactly the tuned windows: T-173 dithers odd passes by `dc_dither_hz`, so one
+    // geometry per pass parity, hop for hop, with the same hop count and widths.
+    assert!(expected.dc_dither_hz > 0.0);
+    assert!(
+        expected
+            .hops
+            .iter()
+            .all(|h| h.dither_hz.abs() == expected.dc_dither_hz)
+    );
+    let parity_windows = |pass: u64| -> Vec<_> {
+        expected
+            .hops
+            .iter()
+            .map(|hop| rule.window(hop.center_on_pass(pass), hop.rate_hz))
+            .collect()
     };
-    assert_eq!(g.hops.len(), n_hops);
-    for (hop, w) in expected.hops.iter().zip(&g.hops) {
-        assert_eq!(*w, rule.window(hop.center_hz, hop.rate_hz));
-        // The window around the tuned centre, less the DC notch.
-        let dc = w.dc_excluded.unwrap();
-        assert_eq!(dc.center_hz(), hop.center_hz);
-        assert!(w.usable.lo_hz < hop.covers.lo_hz && hop.covers.hi_hz < w.usable.hi_hz);
+    let [ga, gb] = page.geometries.as_slice() else {
+        panic!("one geometry per pass parity: {:?}", page.geometries);
+    };
+    let (g, g_odd) = if ga.hops == parity_windows(0) {
+        (ga, gb)
+    } else {
+        (gb, ga)
+    };
+    assert_ne!(g.id, g_odd.id);
+    for (pass, geometry) in [g, g_odd].into_iter().enumerate() {
+        assert_eq!(geometry.hops.len(), n_hops);
+        assert_eq!(
+            geometry.hops,
+            parity_windows(pass as u64),
+            "pass parity {pass}"
+        );
+        for (hop, w) in expected.hops.iter().zip(&geometry.hops) {
+            // The window around the tuned centre, less the DC notch.
+            let dc = w.dc_excluded.unwrap();
+            assert_eq!(dc.center_hz(), hop.center_on_pass(pass as u64));
+            assert!(w.usable.lo_hz < hop.covers.lo_hz && hop.covers.hi_hz < w.usable.hi_hz);
+        }
+    }
+    for (we, wo) in g.hops.iter().zip(&g_odd.hops) {
+        let width =
+            |w: &hk_model::attention::observation::ObservedWindow| w.usable.hi_hz - w.usable.lo_hz;
+        assert!((width(wo) - width(we)).abs() < 1e-3);
+        assert!(((wo.center_hz - we.center_hz).abs() - expected.dc_dither_hz).abs() < 1e-6);
     }
 
     let mut sweep_visits = Vec::new();
     let mut dwells = 0u64;
+    let mut pass = 0u64;
+    let mut last_hop: Option<usize> = None;
     for r in &page.records {
         r.validate().unwrap();
         match r {
             ObservationRecord::Sweep(s) => {
-                assert_eq!(s.geometry, g.id);
+                // Pass parity alternates as scheduled: a pass starts when the hop order wraps.
+                for v in &s.visits {
+                    if last_hop.is_some_and(|h| v.hop as usize <= h) {
+                        pass += 1;
+                    }
+                    last_hop = Some(v.hop as usize);
+                    let want = if pass % 2 == 0 { g.id } else { g_odd.id };
+                    assert_eq!(s.geometry, want, "pass {pass} hop {}", v.hop);
+                }
                 sweep_visits.extend(s.visits.iter().map(|v| (s.span.start, *v)));
             }
             ObservationRecord::Dwell(d) => {
@@ -170,18 +213,27 @@ fn observation_log_through_the_mock_sdr_matches_the_tuned_windows_and_the_schedu
     );
 
     // Revisit counts: a channel only hop 0 covers is visited once per hop-0 visit that settled.
-    let w0 = &g.hops[0];
+    // Hop 0's outer edge on both pass parities (the dithered window is shifted by 80 kHz).
+    let (w0, w0_odd) = (&g.hops[0], &g_odd.hops[0]);
     let edge = if expected.hops[1].center_hz > expected.hops[0].center_hz {
-        FreqRange::new(w0.usable.lo_hz + 1e3, w0.usable.lo_hz + 13.5e3)
+        let lo = w0.usable.lo_hz.max(w0_odd.usable.lo_hz);
+        FreqRange::new(lo + 1e3, lo + 13.5e3)
     } else {
-        FreqRange::new(w0.usable.hi_hz - 13.5e3, w0.usable.hi_hz - 1e3)
+        let hi = w0.usable.hi_hz.min(w0_odd.usable.hi_hz);
+        FreqRange::new(hi - 13.5e3, hi - 1e3)
     };
     let inside = |w: &hk_model::attention::observation::ObservedWindow| {
         w.covered()
             .iter()
             .any(|c| c.lo_hz <= edge.lo_hz && edge.hi_hz <= c.hi_hz)
     };
-    assert!(inside(w0) && g.hops[1..].iter().all(|w| !inside(w)));
+    assert!(inside(w0) && inside(w0_odd));
+    assert!(
+        g.hops[1..]
+            .iter()
+            .chain(&g_odd.hops[1..])
+            .all(|w| !inside(w))
+    );
     let hop0: Vec<Timestamp> = sweep_visits
         .iter()
         .filter(|v| v.1.hop == 0 && v.1.observed_ms > 0)

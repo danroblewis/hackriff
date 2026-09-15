@@ -1348,6 +1348,11 @@ impl AttentionService {
         lock(&self.cands).table.on_member(track, m)
     }
 
+    /// T-174: a suspect member of `track` had its DC flag refuted by a clean twin (§2.6).
+    pub fn on_track_member_refuted(&self, track: TrackId) {
+        lock(&self.cands).table.on_member_refuted(track);
+    }
+
     /// T-128: the detector confirmed `track`.
     pub fn on_track_confirmed(&self, track: TrackId, freq: FreqRange, recipe_match: bool) {
         lock(&self.cands)

@@ -66,14 +66,21 @@ pub enum HopKind {
 pub struct Hop {
     /// Sweep hop or dwell-only region window.
     pub kind: HopKind,
-    /// Tuned centre, Hz.
+    /// Tuned centre on even passes, Hz.
     pub center_hz: f64,
+    /// T-173: offset of the odd-pass centre from `center_hz`, Hz (± the plan's DC dither, or 0
+    /// when neither direction stays on the hop's RF path and inside the source's range). See
+    /// [`Hop::center_on_pass`].
+    pub dither_hz: f64,
+    /// T-181: passes per dithered pass ([`CompiledPlan::dither_every_passes`]; ≥ 2).
+    pub dither_every: u64,
     /// Sample rate, Hz.
     pub rate_hz: f64,
     /// Baseband filter, Hz.
     pub baseband_filter_hz: Option<f64>,
     /// The slice of the plan this hop is responsible for; inside the usable span around the
-    /// centre. Hops of one kind tile the merged regions without overlap.
+    /// even-pass centre (and the odd-pass one when the slice leaves room for the dither). Hops of
+    /// one kind tile the merged regions without overlap.
     pub covers: FreqRange,
     /// Gains.
     pub gains: Gains,
@@ -89,6 +96,25 @@ pub struct Hop {
     pub priority: f64,
     /// Planned duration, ns.
     pub duration_ns: i64,
+}
+
+impl Hop {
+    /// Tuned centre on discovery pass `pass` (counted from 0): `center_hz + dither_hz` on dithered
+    /// passes, else `center_hz` (T-173).
+    pub fn center_on_pass(&self, pass: u64) -> f64 {
+        if self.dithered_on_pass(pass) {
+            self.center_hz + self.dither_hz
+        } else {
+            self.center_hz
+        }
+    }
+
+    /// Discovery pass `pass` is a dithered one: the last of every `dither_every` passes (odd
+    /// passes in a multi-hop plan; T-181).
+    pub fn dithered_on_pass(&self, pass: u64) -> bool {
+        let every = self.dither_every.max(2);
+        pass % every == every - 1
+    }
 }
 
 /// A plan region after clipping to the source.
@@ -141,6 +167,23 @@ pub enum PlanWarning {
         /// Dwell cap, ns.
         cap_ns: i64,
     },
+    /// The usable span is below 4 × `dc_dither_hz`: hops are not dithered, so a cell near a hop's
+    /// LO may have no off-DC view (T-173).
+    DcDitherDisabled {
+        /// Configured dither, Hz.
+        dither_hz: f64,
+        /// Usable span, Hz.
+        usable_span_hz: f64,
+    },
+    /// The plan dithers, but neither dither direction keeps this hop on its RF path and inside
+    /// the source's range: it tunes one centre, so a cell near its LO may have no off-DC view
+    /// (T-181).
+    HopDcDitherDisabled {
+        /// Hop index in pass order.
+        hop: usize,
+        /// The hop's (only) centre, Hz.
+        center_hz: f64,
+    },
     /// A gain-table band uses an accessory/filter port: detection trust near its edges is
     /// pending T-028 (floor-step guard hardening).
     AccessoryTrustPending {
@@ -170,6 +213,12 @@ pub struct CompiledPlan {
     pub default_gains: Gains,
     /// Usable span of a discovery window, Hz.
     pub usable_span_hz: f64,
+    /// DC dither of odd passes, Hz (T-173; 0: none).
+    pub dc_dither_hz: f64,
+    /// T-181: passes per dithered pass. 2 (alternate passes) in a multi-hop plan, which retunes
+    /// every step anyway; `SchedulerConfig::single_hop_dither_every` in a single-hop plan, which
+    /// otherwise holds one tune.
+    pub dither_every_passes: u64,
     /// One discovery pass (all hops), ns.
     pub pass_ns: i64,
     /// POI dwell slots interleaved per pass.
@@ -205,7 +254,10 @@ impl CompiledPlan {
     /// Regions are clipped to the source's frequency ranges, merged where they overlap (per hop
     /// kind), cut at RF-path boundaries and gain-table band edges, and tiled with hops no wider
     /// than the usable span. A band narrower than half the usable span is offset-tuned so it
-    /// clears the DC spike.
+    /// clears the DC spike. Dithered passes tune each hop `dc_dither_hz` away from its even-pass
+    /// centre (T-173, see [`Hop::dither_hz`]), so every covered cell has an off-DC view within
+    /// [`CompiledPlan::dither_every_passes`] passes: two, or `single_hop_dither_every` for a
+    /// single-hop plan (T-181). A hop that cannot move warns [`PlanWarning::HopDcDitherDisabled`].
     pub fn compile(
         plan: &ScanPlan,
         cfg: &SchedulerConfig,
@@ -326,6 +378,16 @@ impl CompiledPlan {
         cuts.sort_by(f64::total_cmp);
         cuts.dedup();
 
+        let usable_span_hz = (cfg.sweep_rate_hz * cfg.usable_fraction).min(cfg.max_span_hz);
+        let dc_dither_hz = if cfg.dc_dither_hz > 0.0 && usable_span_hz < 4.0 * cfg.dc_dither_hz {
+            warnings.push(PlanWarning::DcDitherDisabled {
+                dither_hz: cfg.dc_dither_hz,
+                usable_span_hz,
+            });
+            0.0
+        } else {
+            cfg.dc_dither_hz
+        };
         let mut compiled = Self {
             plan_id: plan.id,
             plan_version: plan.version,
@@ -334,7 +396,9 @@ impl CompiledPlan {
             hops: Vec::new(),
             gain_table: plan.gain_table.clone(),
             default_gains: cfg.default_gains,
-            usable_span_hz: (cfg.sweep_rate_hz * cfg.usable_fraction).min(cfg.max_span_hz),
+            usable_span_hz,
+            dc_dither_hz,
+            dither_every_passes: 2,
             pass_ns: 0,
             dwell_slots_per_pass: 0,
             dwell_cap_ns: cfg.dwell_max_ns,
@@ -358,6 +422,24 @@ impl CompiledPlan {
                 .then(a.covers.lo_hz.total_cmp(&b.covers.lo_hz))
                 .then(a.kind.cmp(&b.kind))
         });
+        // T-181: a single-hop plan holds one tune between dithered passes, so it dithers only
+        // every `single_hop_dither_every`-th pass (each dithered pass costs two retunes and their
+        // settle loss on a live source). A multi-hop plan retunes every step anyway.
+        let every = if compiled.hops.len() == 1 {
+            u64::from(cfg.single_hop_dither_every)
+        } else {
+            2
+        };
+        compiled.dither_every_passes = every;
+        for (hop, h) in compiled.hops.iter_mut().enumerate() {
+            h.dither_every = every;
+            if compiled.dc_dither_hz > 0.0 && h.dither_hz == 0.0 {
+                compiled.warnings.push(PlanWarning::HopDcDitherDisabled {
+                    hop,
+                    center_hz: h.center_hz,
+                });
+            }
+        }
         compiled.finish_timing(cfg);
         Ok(compiled)
     }
@@ -415,6 +497,7 @@ impl CompiledPlan {
         caps: &SourceCapabilities,
     ) {
         let usable = self.usable_span_hz;
+        let dither = self.dc_dither_hz;
         let width = hi - lo;
         // Slices leave `seam_guard_fraction` of the span as guard, so seams avoid the roll-off.
         let slice = usable * (1.0 - cfg.seam_guard_fraction);
@@ -443,11 +526,36 @@ impl CompiledPlan {
                     center_hz = c;
                 }
             }
+            // T-173: the odd-pass tuning. A hop with room either side (slices of one band are
+            // equally wide, so all its hops or none) moves towards the middle of the band and keeps
+            // its slice inside the usable span. Otherwise every hop of the band moves up, so each
+            // seam stays inside the next-lower hop's odd window, and only the band's lowest
+            // `dither − room` Hz fall outside the usable span on odd passes (they are far from
+            // every LO on even passes). The other direction when that leaves the source's range
+            // or RF path; 0 when neither works.
+            let room = (usable - covers.width_hz()) / 2.0 >= dither - EDGE_HZ;
+            // "Above the middle": an offset-tuned hop's centre against its slice, else the slice
+            // against its band.
+            let above = if (center_hz - mid).abs() > EDGE_HZ {
+                center_hz > mid
+            } else {
+                mid > (lo + hi) / 2.0
+            };
+            let first = if room && above { -dither } else { dither };
+            let dither_hz = [first, -first]
+                .into_iter()
+                .find(|&d| {
+                    let c = center_hz + d;
+                    dither > 0.0 && caps.supports_frequency(c) && rf_path(bounds, c) == path
+                })
+                .unwrap_or(0.0);
             let (gains, gain_entry, accessory) = self.gains_at(mid);
             let (region, priority) = self.best_region(&covers, kind);
             self.hops.push(Hop {
                 kind,
                 center_hz,
+                dither_hz,
+                dither_every: 2,
                 rate_hz,
                 baseband_filter_hz,
                 covers,

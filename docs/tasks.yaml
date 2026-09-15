@@ -1970,9 +1970,8 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: blocked
-    blocked_on: "T-173 (off-DC view; explain/fix 433.375 MHz never learned); then rerun: (c),(h) should pass with T-176 merged, fix own (d) coverage derivation"
-    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
+    status: in-progress
+    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133, T-146, T-147, T-173, T-176]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
     acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s); from T-131 review: pre-mature the baseline (or run >=56 h scene with the channel learned before h24) and assert a busier-than-usual alarm on the injected channel with top explanations; assert new-emitter alarms once fed; assert a gain step yields provenance-explained not an alarm; assert a restart keeps the pinned site"
@@ -1981,6 +1980,8 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+    m2_exit: "M2 closes when T-124 passes all acceptance_m2 tests (a)-(j) with a-priori thresholds and the main full check is green; T-174/T-180/T-181 are post-M2 hardening"
+
   - id: T-125
     milestone: M2
     title: "Mock SDR + e2e harness: replay time-compressed occupancy scenes on their observation schedule with a simulated clock"
@@ -2655,7 +2656,8 @@ notes:
   - id: T-167
     milestone: MUI
     title: "MUI API gap 10: DC notch width in the spectrum stream header"
-    status: todo
+    status: done
+    commit: eb63567
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2747,7 +2749,8 @@ notes:
   - id: T-173
     milestone: M2
     title: "Scheduler hop placement: guarantee every frequency gets a view away from DC (hop overlap or dithered centres) so a carrier near one LO is not permanently suspect"
-    status: in-progress
+    status: done
+    commit: d313f56
     deps: [T-147]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2759,9 +2762,10 @@ notes:
     effort: medium
     core_interface: true
   - id: T-174
-    milestone: M2
+    milestone: M2-hardening
     title: "Live candidate path uses the per-tuning DC twin rule (detect.rs:458 still per-detection suspect)"
-    status: todo
+    status: done
+    commit: 9c58f81
     deps: [T-147]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2775,7 +2779,8 @@ notes:
   - id: T-175
     milestone: M2
     title: "Fix races/timing assumptions exposed by optimised builds (6 deterministic failures), then enable dev opt-level=2 for hk-dsp/hk-core/hk-pipeline/hk-demod (~4x faster nextest)"
-    status: in-progress
+    status: done
+    commit: c11f05a
     deps: [T-169]
     parallel_group: M2E
     use_cases: []
@@ -2819,7 +2824,8 @@ notes:
   - id: T-178
     milestone: MUI
     title: "IQ capture buffer as a PRE-ALLOCATED on-disk ring that survives restarts: allocate the full effective quota up front (fixed ring file or fixed set of fixed-size chunk files), overwrite oldest in place (no grow-and-delete), crash recovery re-reads ring + index on start; retention configurable via --iq-retention / --iq-buffer-max"
-    status: in-progress
+    status: review
+    commit: 34b8229
     deps: [T-157]
     parallel_group: MUI-API
     use_cases: []
@@ -2833,7 +2839,8 @@ notes:
   - id: T-179
     milestone: MUI
     title: "MUI JS bundle over ADR-0013 gzip budget (48.2 KB vs 45 KB): trim or code-split rarely used panels (Decode plots/params, Review tabs), or re-baseline the budget with justification"
-    status: todo
+    status: done
+    commit: 8d38d3b
     deps: [T-156]
     parallel_group: MUI-FINAL
     use_cases: []
@@ -2845,9 +2852,10 @@ notes:
     effort: low
     core_interface: false
   - id: T-180
-    milestone: M2
+    milestone: M2-hardening
     title: "Mock SDR device noise floor at low gain: re-rendered windows served far below the recording gain become quantisation-limited (85% zero codes) and produce whole-window marginal detections; model the receiver's own analog noise floor per gain state so low-gain windows look like a real HackRF"
-    status: todo
+    status: done
+    commit: b5826ad
     deps: [T-175]
     parallel_group: M2E
     use_cases: []
@@ -2856,5 +2864,230 @@ notes:
     area: crates/hk-core/src/source/mock
     needs: none
     model: opus
+    effort: medium
+    core_interface: false
+  - id: T-181
+    milestone: M2-hardening
+    title: "Sweep DC dither follow-ups: single-hop plans on a live radio now retune 75 kHz every step (dither single-hop plans only every Nth pass or disclose), pick SweepRecord geometry by pass parity not tuning match, per-hop DcDitherDisabled warning, off-DC test samples LO +-37.5 kHz (or 80 kHz dither), ADR-0005 wording on half-visit edge cells"
+    status: done
+    commit: fe2e6a6
+    deps: [T-173]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-173 review 2026-09-15 (MERGE) findings 1-5 (core.rs:1419 + apply.rs:84; observe.rs:296; plan.rs:503; scheduler.rs test; ADR-0005)"
+    acceptance: "single-hop live plans do not retune every step (documented cadence, test on StepApplier retune count); SweepRecords not split mid-pass when hop 0 has dither 0; warning emitted for dither-disabled hops; coverage test samples worst-case offsets; ADR-0005 states edge-cell visit halving"
+    area: crates/hk-core/src/scheduler, crates/hk-pipeline/src/observe.rs, docs/adr/0005
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-182
+    milestone: M2-hardening
+    title: "Deterministic decoded-capture roll/evict test: wait for the async recorder flush (or a synchronous flush hook) instead of reading the tail immediately"
+    status: todo
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "full check 2026-09-15: hk-store decoded::tests::rolls_segments_and_evicts_oldest_first_within_quota read last record 1566 vs 1999 under load (5.3 s); passes 3/3 alone in 0.1 s; pinned heavy-serial + retries=1 meanwhile"
+    acceptance: "test waits on an explicit flush/drain condition with a deadline; passes 20/20 under parallel load; nextest pin removed"
+    area: crates/hk-store/src/decoded.rs
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-183
+    milestone: M2-hardening
+    title: "acceptance signal_062 load flake: WFM emitter family label (auto classifier) missing under load; passes alone - check for a real race in when the family is assigned vs pipeline stop"
+    status: done
+    commit: c5e1b20
+    deps: []
+    parallel_group: M2E
+    use_cases: [SIGNAL-062]
+    found_by: "full check 2026-09-15 (a253b04): signal_062_fm_rds_auto_wfm_pilot_pi_label failed at signal_062.rs:190 (entry.family != wfm) under load ~12 with T-124/T-180 scenes running; passed 2/2 alone in 1.24 s; acceptance runs under cargo test with no retries"
+    acceptance: "root cause identified (family assignment ordering/async classifier vs run stop or inventory read); product race fixed or test waits on an explicit completion condition with the same assertion; 10 consecutive acceptance runs under parallel load green"
+    area: crates/hk-pipeline (family/classifier, run stop), tests/e2e/tests/acceptance/signal_062.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-184
+    milestone: M2
+    title: "Nondeterministic channel learning: 433.375 MHz (10% Markov, near hop-1 DC) learned in one M2 scene run, missing in the next (same code); make learning under DC twin refutation deterministic"
+    status: done
+    resolution: "no product bug: T-124 test centred its band on counters.tune() (the hop the device stopped on), cutting 433.375 or dropping boring; fix = FreqRange::centered(centre, 0.9*rate) in m2_scene.rs (applied in T-124). 5/5 passes with unchanged product code"
+    deps: [T-173, T-174, T-180]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-124 final round 2026-09-15: run 3 all 8 pass (433.375 learned FCO 0.084 vs 0.094), run 4 (a) fails (not in final channel plan; restart scene learned it); suspected channels.rs:217-255 DC-only refutation"
+    acceptance: "root cause file:line; product fix makes learning independent of thread timing; deterministic regression test fails before / passes after; M2 scene 5x (or reduced repro 10x) learns 433.375; DC-spur suppression and occupancy_sparse_visits unchanged green"
+    area: crates/hk-context/src/occupancy/channels.rs, crates/hk-pipeline/src/occupancy.rs
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-185
+    milestone: M1-fix
+    title: "RDS on REAL air fails past block sync: fm_100p8M capture reaches block sync but block/field stages yield no data and rare groups are all CRC-invalid (passes on synthetic T-094); fix and add a real-air RDS acceptance"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: FIELD
+    use_cases: [SIGNAL-062]
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "RDS recipe decodes CRC-valid groups (PI + PS + RadioText, high CRC-valid rate) on the real fixtures/hackrf/2026-09-13 fm_100p8M capture through the mock SDR; root cause identified (57 kHz carrier phase/lock, biphase polarity, differential decode direction, offset words A/B/C/C'/D, CRC-10 syndrome poly 0x5B9, timing); new real-air RDS acceptance test on that capture (blind: no PI/PS lookup; expected values only in assertions, from an independent oracle such as redsea or a manual decode); synthetic T-094 still green"
+    rescope_2026_09_15: "diagnosis (WIP e8f037f): recipe correct on the fixture (45/56 CRC-valid = oracle = rds_ref.py); live failure is weak reception (14 vs 18.2 dB RF SNR). Finish: real-air acceptance (CRC-valid>=0.7, PI, PS) + block-sync false-lock hardening + weak-signal robustness at 14 dB (runtime AWGN) without block error correction (user decision pending)"
+    area: crates/hk-blocks, crates/hk-recipe (RDS recipe), crates/hk-demod, tests/e2e/tests/acceptance
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-186
+    milestone: M2-fix
+    title: "Detection -> identification latency: a strong continuous WFM station takes too long to get family + top explanation"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: FIELD
+    use_cases: [SIGNAL-062]
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "per-stage latency budget measured (first detection -> track confirm -> candidate -> classification/family -> explanation ranking -> UI-visible) on the fm_100p8M capture via mock SDR; root causes (dwell/revisit, classification cadence, refinement iterations, ranking cadence); a strong continuous station classified (family + top explanation) within a few seconds of first detection, asserted in a test with an a-priori bound; report before/after budget"
+    area: crates/hk-pipeline (family/classifier, candidates, refine), crates/hk-context (explanations)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-187
+    milestone: M1-fix
+    title: "Verify candidate discard end-to-end: delete a candidate via UI/API -> leaves list; raw detections/history kept; later re-detection makes a new candidate; fix if not usable"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: FIELD
+    use_cases: []
+    found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
+    acceptance: "scripted check against hk serve (mock SDR, not the user's demo data) + the new MUI Explore Delete action: candidate removed from /api/inventory candidates; detections/history rows retained; re-detection after delete yields a new candidate id; any gap fixed with a test"
+    area: crates/hk-api (inventory delete), crates/hk-model, ui/src/app/explore
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-188
+    milestone: M2-hardening
+    title: "Listen-centre flake under CPU load: acceptance_m0 listen.rs:224 listen channel at 101.352 MHz, >50 kHz from truth (2/10 burn runs in T-183)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPELINE
+    use_cases: []
+    found_by: "T-183 burn runs with 6 CPU burners (2026-09-15)"
+    acceptance: "root cause identified (listen channel centre chosen before refinement converges / sample-vs-wall timing); listen.rs passes 20/20 under 6 CPU burners without loosening the 50 kHz bound"
+    area: crates/hk-pipeline (listen), tests/e2e/tests/acceptance/listen.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-189
+    milestone: M2-hardening
+    title: "API inventory row classification field (hk-api query.rs:818) still shows latest emitter_classification row; align with T-183 family ranking (track-shape below demod/decoder/classifier)"
+    status: todo
+    priority: low
+    deps: [T-183]
+    parallel_group: API
+    use_cases: []
+    found_by: "T-183 report (2026-09-15)"
+    acceptance: "classification and family never disagree for the same entry; docs/api.md and api_contract tests updated together"
+    area: crates/hk-api/src/query.rs, docs/api.md, crates/hk-cli/tests/api_contract.rs
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-190
+    milestone: MUI
+    title: "Analyze / synthesize decoder stub endpoint: POST /api/analyze on a selection, emitter or ad-hoc band (optional history window) validates the target and returns 501 not_implemented until MAUTO"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: API
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "POST /api/analyze {selection_id | emitter_id | {f_lo, f_hi, t_lo?, t_hi?}} (exactly one target form) through the control dispatcher with auth: 400 invalid on malformed or multiple targets, 404 not_found for an unknown selection/emitter, otherwise 501 {error, code: not_implemented}; new code documented in docs/api.md Conventions + route section (states the future contract is MAUTO, docs/15 section 8); api_contract tests cover 501/400/404/401; no engine code"
+    area: crates/hk-api (new analyze route), docs/api.md, crates/hk-cli/tests/api_contract.rs
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-191
+    milestone: MUI
+    title: "User-adjusted band edges on an inventory entry: set/clear f_lo/f_hi override with provenance and audit, measured band preserved"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: API
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "PUT /api/inventory/{id}/band {f_lo, f_hi, reason?} stores a user band override (validated f_lo<f_hi, within sane span), DELETE clears it; inventory rows expose both measured band and user_band {f_lo, f_hi, set_at, actor} (measured never overwritten; blind-first rule); audited (inventory_band); survives merge resolution like promote/delete; docs/api.md + api_contract tests together; hk-model repo test for override persistence and merge"
+    area: crates/hk-model (repo/migration), crates/hk-api/src/inventory.rs, docs/api.md, crates/hk-cli/tests/api_contract.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-192
+    milestone: MUI
+    title: "MUI right-click context menu on signals/boxes/inventory rows carrying the focus-bar actions (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete, Adjust band); right panel freed of controls"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MUI-X1
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "contextmenu on waterfall/spectrum signal brackets, inventory rows and selections opens an accessible menu (keyboard + long-press on touch, closes on Esc/outside click, stays in viewport at 400px); actions call the same API as today; Analyze calls POST /api/analyze and shows not-implemented-yet on 501 or 404 (T-190 may land later); the focus panel keeps measurements/explanations but no action buttons; UI unit tests; bundle within ADR-0013 budget"
+    area: ui/src/app (new menu module, explore/focus, centre/index hook)
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-193
+    milestone: MUI
+    title: "MUI Confirmed-signal yellow boxes spanning spectrum trace + waterfall with draggable left/right edges (sets user band via T-191)"
+    status: todo
+    priority: normal
+    deps: [T-191, T-194]
+    parallel_group: MUI-X2
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "every Confirmed signal renders one yellow box across both spectrum and waterfall panes aligned to the shared axis; edges draggable with snapping to pixels and a min width, commit on release via PUT /api/inventory/{id}/band, revert on error; user band vs measured band visually distinguishable; candidates keep brackets; works with pan/zoom and at 400px (touch drag); UI tests for axis mapping and drag state"
+    area: ui/src/app/centre (overlays, view), ui/src/app/explore
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-194
+    milestone: MUI
+    title: "MUI manual multi-band region select on the waterfall and time-window select on the history/capture timeline (selections with t_lo/t_hi)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MUI-X2
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "drag on waterfall adds a band selection (modifier or mode adds several without clearing); drag on the capture timeline / history view sets t_lo/t_hi on a new or current selection (existing POST/PUT /api/selections, no API change needed); selections render as bands on waterfall + timeline and appear in the Selections list; context-menu Analyze target works on them once T-192 lands; UI tests; 400px touch works"
+    area: ui/src/app/centre (view drag), ui/src/app/capture/timeline.ts, ui/src/app/explore/selections.ts
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-195
+    milestone: MUI
+    title: "MUI per-signal output panels in the freed right panel: packet inspector for digital, waveform/audio scope + RDS text for FM/AM; one panel per confirmed signal with an active output"
+    status: todo
+    priority: normal
+    deps: [T-192, T-159]
+    parallel_group: MUI-X1
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "focusing a signal with an active decode shows the inspector (reuse T-154 components) bound to its record stream; an audio output shows a scope rendered from the served audio stream plus RDS PS/RT fields from the backend (T-159); several panels stack/tab without page scroll; no decode/parse logic in UI; UI tests + playwright smoke screenshot at 1440 and 400px"
+    area: ui/src/app/explore (focus/output panels), ui/src/app/decode/inspector reuse
+    needs: none
+    model: sonnet
     effort: medium
     core_interface: false

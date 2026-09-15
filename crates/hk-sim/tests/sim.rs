@@ -205,9 +205,15 @@ fn round_robin_revisit_matches_its_schedule() {
             "region {}: mean {mean} vs pass {pass_s}",
             region.region
         );
+        // T-173: sweep plans dither hop centres on alternate passes (dc_dither_hz) so every cell gets
+        // an off-DC view. A cell near a hop boundary can then be served by hop k on even passes and
+        // hop k±1 on odd passes, so one interval may stretch by exactly one dwell. The mean stays one
+        // pass (asserted above); the max is still bounded, by one pass plus one dwell.
+        let dwell_s = dwell_ns as f64 / S as f64;
         assert!(
-            (max - pass_s).abs() <= first_window_s + 1e-9,
-            "region {}: max {max} vs pass {pass_s}",
+            max - pass_s <= first_window_s + dwell_s + 1e-9
+                && pass_s - max <= first_window_s + 1e-9,
+            "region {}: max {max} vs pass {pass_s} (+ one dwell {dwell_s})",
             region.region
         );
     }

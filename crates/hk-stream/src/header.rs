@@ -141,6 +141,13 @@ pub struct StreamHeader {
     /// FFT size (elements per row), for spectrum streams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fft_size: Option<u32>,
+    /// Half-width of the DC/LO-leakage notch centred on `center_hz`, Hz, for spectrum streams
+    /// (ADR-0013 §4.9 gap 10): the same tolerance the detector's DC rule excludes from detection
+    /// (`hk_detect::DcRule::tolerance_hz`). `None` when the producer applies no DC mask for this
+    /// stream (the field is additive; readers must treat a missing value as "no mask known", not
+    /// zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dc_excluded_hz: Option<f64>,
     /// Bit/symbol framing (docs/07 §2.16), for bits and symbols streams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framing: Option<Framing>,
@@ -199,6 +206,7 @@ impl StreamHeader {
             center_hz: None,
             bandwidth_hz: None,
             fft_size: None,
+            dc_excluded_hz: None,
             framing: None,
             message_schema: None,
             audio: None,

@@ -223,6 +223,21 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         },
     );
 
+    // dc_excluded_hz (T-167, ADR-0013 gap 10): the spectrum stream's DC-notch half-width, taken
+    // from the detector's own DC rule, not hardcoded on the wire.
+    let (_, v) = get(addr, "/api/streams");
+    let spectrum = v["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["stream_id"] == "spectrum/live")
+        .unwrap();
+    assert_eq!(
+        spectrum["dc_excluded_hz"],
+        json!(hk_pipeline::observe::DC_NOTCH_HALF_HZ),
+        "{spectrum}"
+    );
+
     // /api/control/state: device capabilities and tuning for a live source.
     let (st, v) = get(addr, "/api/control/state");
     assert_eq!(st, 200, "{v}");
@@ -1207,6 +1222,12 @@ fn ws_stream_header_matches_the_stream_contract() {
     assert_eq!(header["stream_id"], json!("spectrum/live"));
     assert_eq!(header["kind"], json!("spectrum"));
     assert!(header["content_class"].is_string(), "{header}");
+    // dc_excluded_hz (T-167, ADR-0013 gap 10): additive on the header itself, not just discovery.
+    assert_eq!(
+        header["dc_excluded_hz"],
+        json!(hk_pipeline::observe::DC_NOTCH_HALF_HZ),
+        "{header}"
+    );
     let _ = ws.close(None);
 
     // No token: refused before the upgrade.

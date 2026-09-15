@@ -923,11 +923,14 @@ pub(crate) fn set_channels(
                          "removed": [], "applied_at_sample": Value::Null}),
         );
     }
-    let tune = shared.counters.tune();
-    let slots = claim_extra(counters, cfg, add_hz.len(), tune.1)?;
+    // Before the first block has published the tune, each new lane is planned provisionally (as
+    // at start) and re-planned for the running tune at the swap (`Hops::apply_channels`).
+    let rate = super::runtime::planning_tune(&shared, want[0]).1;
+    let slots = claim_extra(counters, cfg, add_hz.len(), rate)?;
     let mut add = Vec::with_capacity(add_hz.len());
     let mut index = next;
     for f in add_hz {
+        let tune = super::runtime::planning_tune(&shared, f);
         let (lane, _, _) = build_lane(&up, registry, index, f, cbw, tune)?;
         if lane.graph.input != lane_input {
             return Err(unrealisable(
