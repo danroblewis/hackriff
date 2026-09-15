@@ -199,7 +199,8 @@
       "decode": {
         "frame_model": "rds-group",
         "identity": { "scheme": "rds-pi", "field": "pi", "format": "hex" },
-        "metadata": ["group_type", "version", "tp", "pty"]
+        "metadata": ["group_type", "version", "tp", "pty"],
+        "service": "rds"
       }
     },
     {
@@ -209,7 +210,8 @@
       "decode": {
         "frame_model": "rds-ps",
         "identity": { "scheme": "rds-pi", "field": "ps.key", "format": "hex" },
-        "content": ["ps.text"]
+        "content": ["ps.text"],
+        "service": "rds"
       }
     },
     {
@@ -219,7 +221,8 @@
       "decode": {
         "frame_model": "rds-rt",
         "identity": { "scheme": "rds-pi", "field": "radiotext.key", "format": "hex" },
-        "content": ["radiotext.text"]
+        "content": ["radiotext.text"],
+        "service": "rds"
       }
     },
     { "id": "mpx", "kind": "stage", "from": "fm", "view": "spectrum" },

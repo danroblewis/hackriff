@@ -32,6 +32,7 @@ pub use manifest::{
     Charset, EXAMPLE_RESTRICTED_PAGING_OUTPUT, HzRange, IdentitySpec, InputKind, InputSpec,
     MANIFEST_VERSION, MAX_ALLOWLIST_LEN, ManifestError, MetadataPolicy, MetadataType, OutputSpec,
     PluginManifest, RESTRICTED_DEFAULT_MAX_LEN, ResourceLimits, RestartPolicy,
+    output_metadata_policy,
 };
 pub use output::{
     Parsed, PluginOutput, SAMPLE_INDEX_OUT_OF_RANGE, parse_line, resolve_class, sanitize_metadata,

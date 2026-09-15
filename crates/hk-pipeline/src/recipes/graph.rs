@@ -13,8 +13,8 @@ use hk_blocks::{
     Registry, Status, TapMask,
 };
 use hk_recipe::{
-    Catalogue, EditPlan, Endpoint, NodeChange, NodeSpec, OutputKind, OutputSpec, Params, PortRef,
-    PortType, Recipe, RecipeError, StageView,
+    Catalogue, EditPlan, Endpoint, NodeChange, NodeSpec, OutputSpec, Params, PortRef, PortType,
+    Recipe, RecipeError, StageView,
 };
 use serde_json::{Map, Value, json};
 
@@ -406,13 +406,6 @@ pub fn stage(
             warnings.push(RecipeError {
                 path: format!("outputs[{k}].view"),
                 message: "spectrum view not served yet; the stage stream is raw".into(),
-            });
-        }
-        if o.kind == OutputKind::Messages {
-            warnings.push(RecipeError {
-                path: format!("outputs[{k}]"),
-                message: "messages outputs are served once field-map evaluation lands (T-089)"
-                    .into(),
             });
         }
         outputs.push(OutputBinding {

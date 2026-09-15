@@ -34,7 +34,7 @@ So the tutorial (and both acceptance tests) instead:
 
 On the synthetic fixture this reliably lands within tens of kHz of 1090.000 MHz, comfortably inside the FM/ADS-B band-plan prior's `unrestricted` window and the mock's tuned Nyquist.
 
-**Known gap (found by T-097, still open after T-110 — a runtime feature, not a block bug).** The recipe's `aircraft` output (`kind: "messages"`) is meant to ingest decodes into the Repository the way readsb's own decodes do, giving the recipe its own `/api/inventory` emitters once it starts decoding ICAOs. At runtime this is still a no-op: `hk-pipeline/src/recipes/runtime.rs`'s `build_sink` answers `OutputKind::Messages => Ok((OutputSink::Idle, None))`, and `recipes/graph.rs` still emits the warning "messages outputs are served once field-map evaluation lands (T-089)" even though T-089 (the field-map evaluator) has landed. So both acceptance tests below read the recipe's `frames` inspector stream directly, the same way Tutorial 1 reads `groups`.
+**Decode rows (T-111; the gap T-097 found).** The recipe's `aircraft` output (`kind: "messages"`) ingests decodes into the Repository the way readsb's own decodes do, so the recipe gets its own `/api/inventory` emitters once it decodes ICAOs. Each CRC-valid squitter with an `icao` becomes a `recipe:adsb` Decode row with identity `adsb-icao` and DF/TC/altitude/CPR/velocity metadata. The rows attach to that aircraft's emitter, and the mapping's `"service": "adsb"` makes ADS-B its top explanation (ADR-0011 §2.2, `docs/api.md` "Messages outputs"). The field checks in the acceptance tests still read the recipe's `frames` inspector stream, the same way Tutorial 1 reads `groups`; the blind test then checks the stored rows and explanations.
 
 ## 3. Run it (API)
 

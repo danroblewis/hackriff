@@ -11,6 +11,8 @@
 //!   record per frame plus one `status` record per ~250 ms tick and one `edit` record per applied
 //!   edit ([`crate::recipes::taps`]);
 //! - one always-on stage stream per declared `stage` output (`stage/<pipeline>/<output>`);
+//! - one Decode-row writer per `messages` output, republishing the stored rows on
+//!   `decodes/<pipeline>/<output>` ([`crate::recipes::messages`], T-111);
 //! - on-demand stage taps on any node port and the live inspector opener
 //!   ([`crate::recipes::openers`]).
 //!
@@ -54,6 +56,7 @@ use crate::class::{classify_emitter, is_restricted, restricted_band};
 use crate::config::ListenSettings;
 use crate::recipes::graph::{self, Graph, OutputBinding, Shape, Src, StageError, Staged};
 use crate::recipes::hops;
+use crate::recipes::messages::MessagesSink;
 use crate::recipes::store::{RecipeStore, StoreError};
 use crate::recipes::swap::{self, SwapReport};
 use crate::recipes::taps::{
@@ -279,6 +282,10 @@ pub struct PipelineStats {
     pub edits: AtomicU64,
     /// Status records published (ticks).
     pub status_ticks: AtomicU64,
+    /// Decode rows `messages` outputs stored (T-111).
+    pub decodes: AtomicU64,
+    /// Frames `messages` outputs dropped because their writer's queue was full (T-111).
+    pub decodes_dropped: AtomicU64,
 }
 
 impl PipelineStats {
@@ -294,6 +301,8 @@ impl PipelineStats {
             "skipped_samples": g(&self.skipped_samples),
             "edits": g(&self.edits),
             "status_ticks": g(&self.status_ticks),
+            "decodes": g(&self.decodes),
+            "decodes_dropped": g(&self.decodes_dropped),
         })
     }
 }
@@ -382,7 +391,7 @@ pub(crate) struct PipelineCtl {
     pub status: Mutex<Value>,
     pub streams: Mutex<Vec<StreamEntry>>,
     pub warnings: Mutex<Vec<RecipeError>>,
-    pub stats: PipelineStats,
+    pub stats: Arc<PipelineStats>,
     /// Follow-hops pipelines: channel set and per-channel sub-recipe (T-093).
     pub hops: Option<hops::HopsCtl>,
 }
@@ -505,13 +514,22 @@ fn pipeline_class(shared: &Shared, recipe: &Recipe, lo: f64, hi: f64) -> Content
 /// [`offer_streams`] does that once the graph it serves is running, so a failed start or edit
 /// never replaces a running output's registry entry.
 fn build_sink(
+    shared: &Arc<Shared>,
+    stats: &Arc<PipelineStats>,
     ctx: &StreamCtx,
     recipe: &Recipe,
     b: &OutputBinding,
 ) -> Result<(OutputSink, Option<StreamEntry>), RuntimeError> {
     let fail = |_| RuntimeError::new(500, "failed", "creating an output stream");
     let (sink, kind, header, handle) = match b.spec.kind {
-        OutputKind::Messages => return Ok((OutputSink::Idle, None)),
+        OutputKind::Messages => {
+            let (s, stream) = MessagesSink::spawn(shared, ctx, recipe, &b.spec, Arc::clone(stats))
+                .map_err(|m| RuntimeError::new(500, "failed", m))?;
+            let Some((header, handle)) = stream else {
+                return Ok((OutputSink::Messages(s), None));
+            };
+            (OutputSink::Messages(s), "messages", header, handle)
+        }
         OutputKind::Inspector => {
             let header = frames_header(
                 ctx,
@@ -874,10 +892,11 @@ impl RecipeRuntime {
             emitter_id: emitter,
             channels: hop.as_ref().map_or_else(Vec::new, |h| h.channel_infos()),
         };
+        let stats = Arc::new(PipelineStats::default());
         let mut sinks = Vec::with_capacity(g.outputs.len());
         let mut streams = Vec::new();
         for b in &g.outputs {
-            let (s, e) = build_sink(&streams_ctx, &recipe, b)?;
+            let (s, e) = build_sink(&shared, &stats, &streams_ctx, &recipe, b)?;
             sinks.push(s);
             streams.extend(e);
         }
@@ -923,7 +942,7 @@ impl RecipeRuntime {
             status: Mutex::new(Value::Object(Map::new())),
             streams: Mutex::new(streams),
             warnings: Mutex::new(warnings),
-            stats: PipelineStats::default(),
+            stats,
             hops: hops_ctl,
         });
         let mut runner = Runner {
@@ -1145,7 +1164,7 @@ impl RecipeRuntime {
                     entries.push(None);
                 }
                 None => {
-                    let (s, e) = build_sink(&ctl.streams_ctx, &recipe, b)?;
+                    let (s, e) = build_sink(&shared, &ctl.stats, &ctl.streams_ctx, &recipe, b)?;
                     plan.push(SinkSlot::New(Some(s)));
                     entries.push(e);
                 }

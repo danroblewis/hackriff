@@ -234,6 +234,12 @@ pub struct DecodeMapping {
     /// Emit only frames where every listed field is present (default: any mapped field).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require: Vec<String>,
+    /// Decoder evidence for the family step (T-111): a service family or decoder label the
+    /// family vocabulary maps (e.g. `adsb`, `fm-broadcast`, `rds`); the recipe id when absent.
+    /// Emitters the decodes' identities resolve to get the mapped family as a Classification,
+    /// exactly as plugin decodes do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
 }
 
 /// Identity from a field.
@@ -247,6 +253,18 @@ pub struct IdentityMapping {
     /// Rendering (`hex` or `dec`).
     #[serde(default = "dec")]
     pub format: Display,
+}
+
+impl IdentityMapping {
+    /// The Emitter identity scheme: a known scheme (`adsb-icao`, `rds-pi`, …, `other:<name>`),
+    /// or `other:<scheme>` for any other token-shaped name such as `pocsag-ric`; `None` when the
+    /// name is neither.
+    pub fn identity_scheme(&self) -> Option<hk_model::IdentityScheme> {
+        self.scheme.parse().ok().or_else(|| {
+            (hk_stream::policy::is_token(&self.scheme) && !self.scheme.contains(':'))
+                .then(|| hk_model::IdentityScheme::Other(self.scheme.clone()))
+        })
+    }
 }
 
 fn dec() -> Display {
@@ -540,6 +558,32 @@ impl Recipe {
                         if !is_field_path(p) {
                             e.push(format!("{path}.decode"), "field paths are dotted names");
                         }
+                    }
+                    if let Some(i) = &d.identity {
+                        if i.identity_scheme().is_none() {
+                            e.push(
+                                format!("{path}.decode.identity.scheme"),
+                                "identity scheme is a known scheme or a token",
+                            );
+                        }
+                        if !matches!(i.format, Display::Hex | Display::Dec) {
+                            e.push(
+                                format!("{path}.decode.identity.format"),
+                                "identity format is hex or dec",
+                            );
+                        }
+                    }
+                    if d.identity.is_none() && d.metadata.is_empty() && d.content.is_empty() {
+                        e.push(
+                            format!("{path}.decode"),
+                            "a decode mapping maps at least one field",
+                        );
+                    }
+                    if d.service
+                        .as_deref()
+                        .is_some_and(|s| !hk_stream::policy::is_token(s))
+                    {
+                        e.push(format!("{path}.decode.service"), "must be a token");
                     }
                 }
                 (None, OutputKind::Messages) => e.push(
@@ -891,5 +935,72 @@ mod tests {
                 .iter()
                 .any(|e| e.path == "output_policy.metadata_keys")
         );
+    }
+
+    /// T-111: the `messages` decode mapping (identity scheme, format, at least one field,
+    /// `service` token) is validated; unknown token schemes resolve to `other:<scheme>`.
+    #[test]
+    fn decode_mappings_are_validated() {
+        let with = |decode: Value| {
+            let mut v = minimal();
+            v["outputs"] = json!([{"id": "m", "kind": "messages", "from": "b", "decode": decode}]);
+            serde_json::from_value::<Recipe>(v).unwrap()
+        };
+        let paths = |r: &Recipe| -> Vec<String> {
+            r.validate_structure()
+                .err()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| e.path)
+                .collect()
+        };
+        let ok = with(json!({"frame_model": "adsb-es", "service": "adsb",
+            "identity": {"scheme": "adsb-icao", "field": "icao", "format": "hex"},
+            "metadata": ["df", "me.tc"], "require": ["icao"]}));
+        assert!(
+            !paths(&ok).iter().any(|p| p.starts_with("outputs")),
+            "{:?}",
+            paths(&ok)
+        );
+        let i = ok.outputs[0]
+            .decode
+            .as_ref()
+            .unwrap()
+            .identity
+            .clone()
+            .unwrap();
+        assert_eq!(
+            i.identity_scheme(),
+            Some(hk_model::IdentityScheme::AdsbIcao)
+        );
+        let ric = IdentityMapping {
+            scheme: "pocsag-ric".into(),
+            field: "ric".into(),
+            format: Display::Dec,
+        };
+        assert_eq!(
+            ric.identity_scheme(),
+            Some(hk_model::IdentityScheme::Other("pocsag-ric".into()))
+        );
+
+        let bad = with(json!({"frame_model": "x", "service": "not a token",
+            "identity": {"scheme": "bad scheme!", "field": "a", "format": "bin"}}));
+        let p = paths(&bad);
+        for want in [
+            "outputs[0].decode.service",
+            "outputs[0].decode.identity.scheme",
+            "outputs[0].decode.identity.format",
+        ] {
+            assert!(p.iter().any(|x| x == want), "{want} in {p:?}");
+        }
+        let empty = with(json!({"frame_model": "x", "require": ["a"]}));
+        assert!(paths(&empty).iter().any(|x| x == "outputs[0].decode"));
+        let unknown = serde_json::from_value::<Recipe>({
+            let mut v = minimal();
+            v["outputs"] = json!([{"id": "m", "kind": "messages", "from": "b",
+                "decode": {"frame_model": "x", "content": ["t"], "nope": 1}}]);
+            v
+        });
+        assert!(unknown.is_err(), "unknown mapping keys are errors");
     }
 }

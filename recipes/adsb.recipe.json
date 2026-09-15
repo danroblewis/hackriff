@@ -145,7 +145,8 @@
         "frame_model": "adsb-es",
         "identity": { "scheme": "adsb-icao", "field": "icao", "format": "hex" },
         "metadata": ["df", "me.tc", "me.airborne_position.altitude", "me.airborne_position.cpr_lat", "me.airborne_position.cpr_lon", "me.velocity.vew", "me.velocity.vns", "me.velocity.vertical_rate"],
-        "require": ["icao"]
+        "require": ["icao"],
+        "service": "adsb"
       }
     },
     { "id": "soft", "kind": "stage", "from": "ppm.soft" }

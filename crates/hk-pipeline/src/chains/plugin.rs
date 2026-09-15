@@ -355,18 +355,19 @@ fn run_inner(
     }
     let emitters = ing.emitters().to_vec();
     drop(ing);
-    classify_plugin_emitters(shared, &plugin_id, cand.track, &emitters, last_t);
+    classify_decoder_emitters(shared, &plugin_id, cand.track, &emitters, last_t);
     Ok(())
 }
 
-/// The T-039 family step for plugin decodes (T-037b). The plugin's manifest id is decoder
-/// evidence ([`crate::family`]: `readsb` → `adsb`, `rtl_433` → `ism`). Every emitter the plugin's
+/// The T-039 family step for decoder decodes (T-037b plugin chains; T-111 recipe `messages`
+/// outputs). The decoder evidence (a plugin's manifest id, a recipe decode mapping's `service`)
+/// maps through [`crate::family`]: `readsb` → `adsb`, `rtl_433` → `ism`. Every emitter the
 /// identity decodes resolved to gets that family as a Classification (only when it maps with
 /// confidence), then `Inventory::chain_emitter` ranks its explanations and sets its known status,
 /// as after the analog and FSK record writers. Legal guardrail: this writes a family label, a
 /// band-plan reference and a metadata-only annotation, never an identity or content; identities
 /// stay gated by their decodes' class.
-fn classify_plugin_emitters(
+pub(crate) fn classify_decoder_emitters(
     shared: &Shared,
     plugin_id: &str,
     track: Option<TrackId>,
