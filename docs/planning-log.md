@@ -594,3 +594,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **HIL test:** now centres the station.
   - **Next:** full check with acceptance (the hop-set gate may affect AWARE-036/042). The user is asked about the live re-run.
 - **B0.216 User deferred the T-084 live HackRF re-run.** T-084 closed on its offline fixes; the live run is now T-100 (deferred, needs exclusive HackRF). **T-098 merged:** synthetic POCSAG (3 channels, multimon-ng oracle decodes 3/3) and synthetic ACARS (self-consistent checker only); ADS-B uses the existing synthetic squitter plus readsb oracle; no recordings were found or captured. Full check of main (T-084 + T-098) follows. Running: T-085 M1-DESIGN.
+- **B0.217 T-099 launched** (dense-FM mode selection with strong adjacent channels, Opus medium), unblocked by T-084. Full check of main after the T-084 + T-098 merges is running; T-084's hop-set gate may touch AWARE-036/042. Running: T-085 (M1-DESIGN), T-099.

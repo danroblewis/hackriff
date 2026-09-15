@@ -1614,7 +1614,7 @@ tasks:
   - id: T-099
     milestone: M0b
     title: "Mode selection with strong adjacent channels (bandwidth unknown -> chain rejected in dense FM)"
-    status: todo
+    status: in-progress
     deps: [T-084]
     parallel_group: T
     use_cases: [SIGNAL-062]
