@@ -2365,3 +2365,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Migration 0008 sketched** (0007 is M3's), staged so nothing breaks.
   - **Task graph T-230..T-238 lives in the ADR; not filed** while MAUTO stays unscheduled.
   - **Open questions for the user:** lazy vs eager energy rows; one promoted pipeline or one per output kind; artifacts hidden or greyed under their source; is a 4-bit supersession margin right; does a user promotion outrank a conflicting CRC-valid decode (same call as ADR-0016 question 3).
+- **B0.495 Board reconciled (user spotted stale in-progress rows).**
+  - **Cause:** the batched merge chain hit the T-187 conflict and exited BEFORE its status-update step, so T-159, T-193 and T-211 kept stale statuses although all three were already merged. A merge script must update the board before, or independently of, later steps.
+  - **Corrected to done:** T-159 (e5ba09c), T-193 (227440f), T-211 (cd82ab7), and T-187 (7ad8498) plus T-210 (8a96c0d), both merged by the running chain.
+  - **Corrected to in-progress:** T-199, T-223, T-188, each with a live agent.
+  - **No agent was lost.** The two worktrees showing uncommitted work belong to the live T-199 and T-188 agents.
+  - **Worktrees removed** for the merged T-187 and T-210.

@@ -2565,7 +2565,8 @@ tasks:
   - id: T-159
     milestone: MUI
     title: "MUI API gap 3: an emitter's latest decode fields for the focus panel"
-    status: in-progress
+    status: done
+    commit: e5ba09c
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2998,7 +2999,7 @@ tasks:
   - id: T-187
     milestone: M1-fix
     title: "Verify candidate discard end-to-end: delete a candidate via UI/API -> leaves list; raw detections/history kept; later re-detection makes a new candidate; fix if not usable"
-    status: review
+    status: done
     commit: 7ad8498
     priority: normal
     deps: []
@@ -3014,7 +3015,7 @@ tasks:
   - id: T-188
     milestone: M2-hardening
     title: "Listen-centre flake under CPU load: acceptance_m0 listen.rs:224 listen channel at 101.352 MHz, >50 kHz from truth (2/10 burn runs in T-183)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: PIPELINE
@@ -3092,7 +3093,8 @@ tasks:
   - id: T-193
     milestone: MUI
     title: "MUI Confirmed-signal yellow boxes spanning spectrum trace + waterfall with draggable left/right edges (sets user band via T-191)"
-    status: in-progress
+    status: done
+    commit: 227440f
     priority: normal
     deps: [T-191, T-194]
     parallel_group: MUI-X2
@@ -3185,7 +3187,7 @@ tasks:
   - id: T-199
     milestone: M3
     title: "C15 classical feature-tree modulation-family classifier (cumulants, instantaneous amplitude/phase/frequency stats, cyclic features) with open-set unknown and C17 prior fusion"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-211]
     parallel_group: M3A
@@ -3353,7 +3355,7 @@ tasks:
   - id: T-210
     milestone: M1-fix
     title: "RDS block error correction (<=2-bit burst, redsea-style) for weak live reception, with corrected-group provenance and PI/PS consensus against false corrections"
-    status: review
+    status: done
     commit: 8a96c0d
     decision: "user 2026-09-15: allow <=2-bit correction with safeguards (only while block-synced; corrected groups flagged and never confirm-by-decode evidence; PI/PS/RT committed by multi-group consensus)"
     priority: high
@@ -3370,7 +3372,7 @@ tasks:
   - id: T-211
     milestone: M3
     title: "M3 contracts skeleton per ADR-0016: taxonomy hk-mod@1, Classification types (posterior + likelihood distributions incl unknown, open-set score, entropy, deciding stage, provenance), emitter_classification nullable columns migration, current-family rank (user > decoder > lock-verified > classifier > track shape), API fields + docs/api.md"
-    status: review
+    status: done
     commit: cd82ab7
     priority: normal
     deps: [T-198]
@@ -3558,7 +3560,7 @@ tasks:
   - id: T-223
     milestone: M2-hardening
     title: "signal_001 readsb plugin chain misses the earliest ADS-B emission when the acceptance suite runs in parallel under load (just acceptance uses cargo test, so nextest heavy-serial pinning does not apply)"
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: PLUGINS
