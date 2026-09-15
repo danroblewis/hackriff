@@ -1878,3 +1878,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - t0 overflow
   - **Product question:** chunks are deleted at run end and wiped on start, but the mockup shows "last 48 h kept". Asked the user.
   - **Next:** fix round launched (fresh Opus), excluding retention.
+- **B0.421 User decision: the IQ capture buffer survives restarts.** Tracked as T-178, after T-157 merges.
+  - Chunks and the segment index stay on disk within the quota, reload on start, and are recovered after a crash.
+  - The T-157 fix round keeps its scope: disk safety, 512 MiB/120 s defaults, exact clips, fs status fields, clip guard.
+- **T-175 progress: 5 of 6 optimisation-exposed failures fixed.**
+  - Four were test-side, now waiting for a fresh status tick.
+  - One is a frame-spacing tolerance limited to recording loop splices. The review must check this isn't bending.
+  - One was a product race: `hops.rs` `set_channels` refused with 409 before the first block. It now shares `planning_tune()` with pipeline start.
+  - Still open: t057 at block 928, after a retune to 100.041 MHz at 3 Msps, 241 kHz from the recorded band edge. Station/floor is 3.3 against the threshold of 4, and the agent is profiling for a mock render bug vs a recording dip.

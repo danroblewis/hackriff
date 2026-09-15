@@ -2813,3 +2813,17 @@ notes:
     model: sonnet
     effort: medium
     core_interface: false
+  - id: T-178
+    milestone: MUI
+    title: "IQ capture buffer survives restarts: keep chunks + segment index on disk within the quota, reload on start, recover/trim stale or partial chunks after a crash, no delete at run end"
+    status: todo
+    deps: [T-157]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "user decision 2026-09-15 (T-157 review product question): retention = survive restarts"
+    acceptance: "restart of hk serve on the same data dir reports the previous buffer span/segments in GET /api/iqbuffer and can export clips from before the restart (mock-SDR test with a restart); crash-recovery test (truncated last chunk, missing index entries) rebuilds a consistent index; quota/free-space floor enforced across restarts; docs/api.md + ADR-0013 timeline note updated"
+    area: crates/hk-store/src/iqbuffer.rs, crates/hk-pipeline/src/iqbuffer.rs, docs/api.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
