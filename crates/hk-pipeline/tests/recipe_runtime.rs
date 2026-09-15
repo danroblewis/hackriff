@@ -999,3 +999,173 @@ fn parallel_pipelines_run_at_once_within_the_chain_budget() {
     assert!(run.frames(&b) > 6, "b kept running");
     run.finish();
 }
+
+/// T-112: a malformed `output_policy` on a recipe with a `messages` output still fails closed at
+/// the writer, and is reported as a pipeline warning in the pipeline's status instead of being
+/// swallowed.
+#[test]
+fn a_malformed_output_policy_is_reported_as_a_pipeline_warning() {
+    let run = Run::start("t112-bad-policy");
+    let mut doc = recipe("badpolicy", 1, 5000);
+    doc["outputs"].as_array_mut().unwrap().push(json!({
+        "id": "decodes", "kind": "messages", "from": "post",
+        "decode": {"frame_model": "tone", "metadata": ["tag"]}
+    }));
+    // Manifest rules: an integer key takes no `values`.
+    doc["output_policy"]["metadata_keys"] = json!({"tag": {"type": "integer", "values": ["1"]}});
+    let id = run.rt.start(parse_recipe(doc).unwrap(), band()).unwrap();
+    let p = run.rt.pipeline_json(&id).unwrap();
+    let warned = p["warnings"]
+        .as_array()
+        .is_some_and(|w| w.iter().any(|w| w["path"] == "output_policy"));
+    assert!(warned, "{p}");
+    wait("frames", LIMIT, || run.frames(&id) > 0);
+    run.finish();
+}
+
+/// T-112 (SIGNAL-001): a dense ADS-B-like burst (1000 CRC-valid decodes/s over 400 aircraft)
+/// through a `messages` output's pipeline-side sink and SQLite writer is stored without dropping
+/// a decode: the writer batches what queued up into one transaction. Also prints the writer's
+/// unpaced throughput unbatched (one row per transaction, as before) and batched.
+#[test]
+fn a_dense_adsb_like_burst_is_stored_without_dropping_decodes() {
+    use hk_blocks::Output;
+    use hk_model::{ContentClass, CrcStatus, Timestamp};
+    use hk_pipeline::recipes::messages::{MAX_BATCH, MessagesSink};
+    use hk_pipeline::recipes::runtime::PipelineStats;
+    use hk_pipeline::recipes::taps::FrameCtx;
+    use hk_stream::inspector::{FitStatus, LayerNode, LayerTree, NodeType};
+
+    const AIRCRAFT: usize = 400;
+    const RATE: usize = 1000;
+    const TICK_MS: usize = 50;
+    const SECONDS: usize = 3;
+    const BURST: usize = 1000;
+    const BURSTS: usize = 4;
+
+    let recipe = parse_recipe(json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "adsb", "version": 1,
+        "name": "adsb", "input": {"port": "frames"},
+        "nodes": [{"id": "msg", "block": "identity"}],
+        "outputs": [{"id": "aircraft", "kind": "messages", "from": "msg", "decode": {
+            "frame_model": "adsb-es",
+            "identity": {"scheme": "adsb-icao", "field": "icao", "format": "hex"},
+            "metadata": ["df"], "require": ["icao"], "service": "adsb"}}],
+        "output_policy": {"content_class": "unrestricted"}
+    }))
+    .unwrap();
+    let node = |id: u32, path: &str, bits: u32, value: u32| LayerNode {
+        id,
+        parent: None,
+        name: path.into(),
+        path: path.into(),
+        ty: NodeType::Uint,
+        bits: [0, bits],
+        bytes: [0, bits.div_ceil(8)],
+        value: Some(json!(value)),
+        text: None,
+        label: None,
+        error: false,
+    };
+    let trees: Vec<Arc<LayerTree>> = (0..AIRCRAFT as u32)
+        .map(|i| {
+            Arc::new(LayerTree {
+                nodes: vec![node(0, "df", 5, 17), node(1, "icao", 24, 0x40_0000 + i)],
+                byte_index: Vec::new(),
+                fit: FitStatus::Ok,
+                errors: Vec::new(),
+            })
+        })
+        .collect();
+    let mut out = Output::for_port(&PortInfo {
+        ty: PortType::Frames,
+        rate_hz: 2e6,
+        max_items: BURST,
+        hold_items: 0,
+    });
+    let fill = |out: &mut Output, from: usize, n: usize| {
+        let PortVec::Frames(buf) = &mut out.data else {
+            unreachable!("a frames port")
+        };
+        buf.clear();
+        for i in from..from + n {
+            let mut info = FrameInfo::new(i as u64, 100 * i as u64, 0);
+            info.bit_len = 112;
+            info.check = CrcStatus::Valid;
+            info.layers = Some(Arc::clone(&trees[i % AIRCRAFT]));
+            buf.push(&[0x8d; 14], info);
+        }
+    };
+    let ctx = FrameCtx {
+        decoder: "recipe:adsb@1",
+        frame_model: "adsb-es",
+        emitter_id: None,
+        channel_hz: 1090e6,
+        channels_hz: &[],
+        recipe_version: 1,
+        edit_rev: 0,
+    };
+    let t_of = |s: f64| Timestamp::from_unix_nanos(1_700_000_000_000_000_000 + s as i64);
+
+    // (paced drops, emitters offered, unpaced rows/s)
+    let mut run = |max_batch: usize, tag: &str| -> (u64, u64, f64) {
+        let dir = TempDir::new(tag);
+        let db = dir.0.join("hk.sqlite");
+        drop(Repository::open(&db).unwrap());
+        let stats = Arc::new(PipelineStats::default());
+        let offered = Arc::new(AtomicU64::new(0));
+        let o = Arc::clone(&offered);
+        let mut sink = MessagesSink::spawn_standalone(
+            &db,
+            &recipe,
+            "aircraft",
+            ContentClass::Unrestricted,
+            max_batch,
+            Arc::clone(&stats),
+            move |e, _| {
+                o.fetch_add(e.len() as u64, Ordering::Relaxed);
+            },
+        )
+        .unwrap();
+        let stored = || stats.decodes.load(Ordering::Relaxed);
+
+        let per_tick = RATE * TICK_MS / 1000;
+        let start = Instant::now();
+        let mut sent = 0;
+        for tick in 0..SECONDS * 1000 / TICK_MS {
+            fill(&mut out, sent, per_tick);
+            sink.publish(&out, &ctx, &t_of);
+            sent += per_tick;
+            let next = start + Duration::from_millis(((tick + 1) * TICK_MS) as u64);
+            if let Some(d) = next.checked_duration_since(Instant::now()) {
+                std::thread::sleep(d);
+            }
+        }
+        let dropped = stats.decodes_dropped.load(Ordering::Relaxed);
+        let queued = sent as u64 - dropped;
+        wait("the paced decodes to be stored", LIMIT, || {
+            stored() == queued
+        });
+
+        let t0 = Instant::now();
+        for b in 0..BURSTS {
+            fill(&mut out, sent, BURST);
+            let q = sink.publish(&out, &ctx, &t_of);
+            assert_eq!(q, BURST as u64, "a burst fits the empty queue");
+            sent += BURST;
+            let want = queued + ((b + 1) * BURST) as u64;
+            wait("a burst to be stored", LIMIT, || stored() == want);
+        }
+        let rate = (BURSTS * BURST) as f64 / t0.elapsed().as_secs_f64();
+        drop(sink);
+        (dropped, offered.load(Ordering::Relaxed), rate)
+    };
+    let (dropped_1, _, rate_1) = run(1, "t112-burst-unbatched");
+    let (dropped, offered, rate) = run(MAX_BATCH, "t112-burst-batched");
+    println!(
+        "T-112 writer: paced {RATE}/s drops unbatched {dropped_1}, batched {dropped}; \
+         unpaced rows/s unbatched {rate_1:.0}, batched(max {MAX_BATCH}) {rate:.0}"
+    );
+    assert_eq!(dropped, 0, "no decode dropped at {RATE}/s");
+    assert_eq!(offered, AIRCRAFT as u64, "every aircraft offered once");
+}
