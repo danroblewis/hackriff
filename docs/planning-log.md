@@ -665,3 +665,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Field-boundary drafts:** a draft field map that passes validation.
 
   Blind recoveries: RDS 0x5B9 plus offset words, POCSAG sync/BCH(31,21)/parity, ADS-B CRC-24, ACARS CRC-16/KERMIT plus parity, and synthetic FSK layout and CRC. Routes `POST /api/assist/{sync,fields,crc}` have ops/bit/frame caps. A timeboxed Opus review is running; its focus is API thread starvation from CPU-heavy requests and noise-input scoring.
+- **B0.240 T-090 delivered** (0358d24, Sonnet, UI only). It adds a Frame inspector pane with:
+  - a frame table with paging;
+  - hex + ASCII view;
+  - a layer tree;
+  - linked selection via the backend's `bytes`/`byte_index`;
+  - a draft field map + pasted frames box using `/api/inspector/parse`.
+  26 UI tests, all green in `just test-ui`. Coordinator scan: the only client-side byte handling is hex→bytes for display, with no parsing or range math (thin-client rule OK). Missing API: a capture listing (T-092) and `/ws/open/inspector` (T-088 integration). It merges after the in-flight full check.
