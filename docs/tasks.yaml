@@ -2172,6 +2172,20 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-138
+    milestone: M2
+    title: "Single new emitter on a quiet mature site: ADR-0012 §7 rule so one genuinely new emitter can alarm (today novelty -log10(p)/6 with the prior needs ~1.8 years of observation)"
+    status: todo
+    deps: [T-136]
+    parallel_group: M2A
+    use_cases: [AWARE-044, AWARE-027]
+    found_by: "T-136 review 2026-09-15: new-emitter alarm needs novelty >= 0.7 for 2 intervals (hk-model attention/alarm.rs:270); one emitter reaches ~0.5, so a single new emitter never alarms"
+    acceptance: "ADR-0012 §7.1 rule for a mature site with expected new-emitter rate mu << 1: a single persistent first sighting (confirmed across >= 2 intervals, not suspect/spur/mobile) opens a new-emitter alarm; bounded false alarms on the M2 blind scene (T-124) and on busy sites; tests for quiet-site single emitter alarms, busy-site single emitter does not"
+    area: crates/hk-context/src/occupancy/{novelty,score,alarm}.rs, crates/hk-model/src/attention/alarm.rs, crates/hk-pipeline/src/{attention,alarms}.rs, docs/adr/0012
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
