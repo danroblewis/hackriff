@@ -1,7 +1,7 @@
 //! T-173: a carrier exactly at a default sweep hop's LO is learned through the mock SDR under a
 //! sweep-only schedule (no dwells, so no other tuning can rescue it; T-124's 433.375 MHz channel
 //! had only its hop's DC views and the other hop's edge zone). Even passes see it as a DC hit; odd
-//! passes tune the hop 75 kHz away (ADR-0005, `SchedulerConfig::dc_dither_hz`), so it gets clean
+//! passes tune the hop 80 kHz away (ADR-0005, `SchedulerConfig::dc_dither_hz`), so it gets clean
 //! views, a non-suspect FCO and a channel. T-147's sparse visit pattern (two 1 s IQ windows per
 //! 15-min interval, 6 h). Blind: the pipeline sees only the device; the hidden truth is read in
 //! assertions only.
@@ -98,7 +98,7 @@ fn occupancy_carrier_at_a_hop_lo_is_learned_with_a_clean_fco() {
         "hop LOs {:?}",
         expected.hops
     );
-    assert!(expected.hops.iter().all(|h| h.dither_hz.abs() == 75e3));
+    assert!(expected.hops.iter().all(|h| h.dither_hz.abs() == 80e3));
 
     let mut cfg = PipelineConfig::new(dir.0.join("data"), plan).unwrap();
     cfg.source_class = replay.class;
