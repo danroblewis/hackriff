@@ -12,8 +12,8 @@ use hk_model::CrcStatus;
 use hk_recipe::{Params, PortType};
 
 use super::common::{
-    P, bit, drops_history, extend_bits, frames_io, frames_port, one_input, push_value, read_bits,
-    update_hot,
+    FRAME_BITS_PER_ITEM, P, bit, drops_history, extend_bits, frames_io, frames_port, one_input,
+    push_value, read_bits, update_hot,
 };
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::buffer::{ChunkFlags, FrameBuf, FrameInfo};
@@ -236,10 +236,12 @@ impl Assemble {
 impl Block for Assemble {
     fn init(&mut self, inputs: &[PortInfo]) -> Result<Vec<PortInfo>, BlockError> {
         let input = one_input("assemble", inputs, &[PortType::Frames])?;
-        Ok(vec![frames_port(
-            input,
-            input.max_items.saturating_mul(8) + 1,
-        )])
+        // A message needs its own start word (idle-closed, max_words 1), plus the one carried
+        // open from the previous chunk: at most the chunk's words + 1.
+        let words = input
+            .max_items
+            .saturating_mul(FRAME_BITS_PER_ITEM / self.word_bits);
+        Ok(vec![frames_port(input, words.saturating_add(1))])
     }
 
     fn process(&mut self, io: &mut Io<'_>) -> Result<(), BlockError> {

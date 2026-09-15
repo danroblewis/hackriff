@@ -325,13 +325,17 @@ impl OffsetSearch {
             return Err(perr("sequence too long"));
         }
         let unlock_window = p.uint_or("unlock_window", 50)? as usize;
+        let unlock_errors = p.uint_or("unlock_errors", 20)?;
+        if unlock_errors as usize > unlock_window {
+            return Err(perr("unlock_errors must be at most unlock_window"));
+        }
         Ok(Self {
             block_bits,
             h,
             offsets,
             sequence,
             lock_blocks: p.uint_or("lock_blocks", 2)?.max(1),
-            unlock_errors: p.uint_or("unlock_errors", 20)?.clamp(1, 1024) as u16,
+            unlock_errors: unlock_errors.clamp(1, 1024) as u16,
             reg: 0,
             history: vec![0; frame_bits],
             scratch: Vec::with_capacity(frame_bits),

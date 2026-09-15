@@ -5,7 +5,7 @@ use hk_recipe::PortType;
 use serde_json::json;
 
 use crate::blocks::framing::common::testutil::{
-    Owned, bits_of, build, bytes_bits, noise, run_frames,
+    Owned, bits_of, build, bytes_bits, noise, run_frames, try_build,
 };
 
 fn frame(bits: &[u8]) -> Owned {
@@ -45,6 +45,65 @@ fn crc24_mode_s_known_frame_checks_and_corrects_one_bit() {
         assert_eq!(f.info.corrected_bits, 1);
         assert_eq!(f.bits, good);
     }
+}
+
+fn extra(b: &dyn crate::block::Block, key: &str) -> f64 {
+    b.status()
+        .extra
+        .iter()
+        .find(|e| e.0 == key)
+        .unwrap_or_else(|| panic!("{key}"))
+        .1
+}
+
+#[test]
+fn crc_burst_correction_never_manufactures_valid_frames_from_noise() {
+    // RDS blocks (10-bit check, two offsets at C/C′): rejected at any burst.
+    let rds = |burst: u32| {
+        json!({"width": 10, "poly": "0x5B9", "correct_burst_bits": burst,
+            "blocks": {"data_bits": 16, "check_bits": 10,
+                "offsets": [["0x0FC"], ["0x198"], ["0x168", "0x350"], ["0x1B4"]]}})
+    };
+    assert!(try_build("crc", rds(0), PortType::Frames).is_ok());
+    for burst in [1, 5] {
+        assert!(
+            try_build("crc", rds(burst), PortType::Frames).is_err(),
+            "burst {burst}"
+        );
+    }
+    // CRC-8 whole frame: even 1 bit over the check word alone is 8 / 256.
+    assert!(
+        try_build(
+            "crc",
+            json!({"width": 8, "poly": "0x07", "correct_burst_bits": 1}),
+            PortType::Frames
+        )
+        .is_err()
+    );
+
+    // CRC-24 Mode S, 1-bit correction: accepted; 112 / 2^24 ≈ 6.7e-6 per frame, so 4000 noise
+    // frames produce no valid frame.
+    let adsb = json!({"width": 24, "poly": "0xFFF409", "strip": false, "correct_burst_bits": 1});
+    let mut b = try_build("crc", adsb, PortType::Frames).unwrap();
+    let frames: Vec<Owned> = noise(112 * 4000, 7).chunks(112).map(frame).collect();
+    let out = run_frames(b.as_mut(), &frames, 64, false);
+    assert_eq!(out.len(), frames.len());
+    assert!(out.iter().all(|f| f.info.check == CrcStatus::Invalid));
+    assert_eq!(extra(b.as_ref(), "correction_skipped"), 0.0);
+
+    // CRC-16, 1 bit: accepted at build (short frames), refused at run time on 200-bit frames
+    // (200 / 2^16 ≈ 3e-3): no corrections, every failing frame counted as skipped.
+    let ccitt = json!({"width": 16, "poly": "0x1021", "strip": false, "correct_burst_bits": 1});
+    let mut b = try_build("crc", ccitt, PortType::Frames).unwrap();
+    let frames: Vec<Owned> = noise(200 * 1000, 11).chunks(200).map(frame).collect();
+    let out = run_frames(b.as_mut(), &frames, 64, false);
+    assert!(out.iter().all(|f| f.info.corrected_bits == 0));
+    let invalid = out
+        .iter()
+        .filter(|f| f.info.check == CrcStatus::Invalid)
+        .count();
+    assert!(invalid >= 998, "{invalid}");
+    assert_eq!(extra(b.as_ref(), "correction_skipped"), invalid as f64);
 }
 
 #[test]

@@ -68,6 +68,9 @@ impl FrameLength {
             None => None,
             Some(lf) => {
                 let bits = lf.req_uint("bits")? as usize;
+                if !(1..=32).contains(&bits) {
+                    return Err(perr("length_from.bits must be 1–32"));
+                }
                 let offset_bits = lf.req_uint("offset_bits")? as usize;
                 if offset_bits + bits > max_bits as usize {
                     return Err(perr("length_from field ends past frame_bits"));
@@ -75,13 +78,20 @@ impl FrameLength {
                 let cases = lf
                     .list("cases")
                     .iter()
-                    .filter_map(|c| c.as_object().map(P))
                     .map(|c| {
-                        Ok(Case {
+                        let c = c
+                            .as_object()
+                            .map(P)
+                            .ok_or_else(|| perr("length_from.cases entry must be an object"))?;
+                        let case = Case {
                             min: u64::from(c.req_uint("min")?),
                             max: u64::from(c.req_uint("max")?),
                             frame_bits: c.req_uint("frame_bits")?,
-                        })
+                        };
+                        if case.min > case.max {
+                            return Err(perr("length_from case needs min ≤ max"));
+                        }
+                        Ok(case)
                     })
                     .collect::<Result<Vec<_>, BlockError>>()?;
                 Some(LengthFrom {
@@ -164,8 +174,10 @@ impl FrameLength {
                 .find(|c| (c.min..=c.max).contains(&v))
                 .map(|c| i64::from(c.frame_bits))
                 .or_else(|| {
-                    (lf.scale > 0)
-                        .then(|| (v.saturating_mul(lf.scale) as i64).saturating_add(lf.add))
+                    (lf.scale > 0).then(|| {
+                        (i128::from(v) * i128::from(lf.scale) + i128::from(lf.add))
+                            .clamp(0, i128::from(i64::MAX)) as i64
+                    })
                 })
                 .or(lf.default_bits.map(i64::from))
                 .unwrap_or(i64::from(self.max_bits));
@@ -230,6 +242,28 @@ mod tests {
         let mut big = bits_of(0xAAFF, 16);
         big.resize(100, 0);
         assert_eq!(end_of(&scaled, &big), 64);
+    }
+
+    #[test]
+    fn length_from_rejects_bad_cases_and_scales_without_overflow() {
+        let bad = |v: serde_json::Value| FrameLength::from_params(v.as_object().unwrap(), 64);
+        assert!(
+            bad(json!({"length_from": {"offset_bits": 0, "bits": 8,
+            "cases": [{"min": 9, "max": 3, "frame_bits": 16}]}}))
+            .is_err()
+        );
+        assert!(bad(json!({"length_from": {"offset_bits": 0, "bits": 8, "cases": [7]}})).is_err());
+        // value × scale beyond i64 saturates to the maximum; a negative add floors at the field.
+        let huge = rules(
+            json!({"length_from": {"offset_bits": 0, "bits": 32, "scale": 4_294_967_295u32}}),
+            64,
+        );
+        assert_eq!(end_of(&huge, &[1; 100]), 64);
+        let neg = rules(
+            json!({"length_from": {"offset_bits": 0, "bits": 8, "scale": 1, "add": -100}}),
+            64,
+        );
+        assert_eq!(end_of(&neg, &bits_of(3, 8)), 8);
     }
 
     #[test]

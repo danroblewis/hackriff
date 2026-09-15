@@ -2,6 +2,11 @@
 //! block with offset words (`blocks`, RDS), optionally corrects error bursts by syndrome, strips
 //! the check bits and sets the frame's check status.
 //!
+//! **Correction bound.** Burst correction is refused wherever it would turn more than
+//! `MAX_FALSE_CORRECTION` of random blocks valid (`false_correction`): at build for block mode
+//! and the shortest span frame, and per span length at run time (`correction_skipped`). A
+//! 10-bit RDS check allows no correction; CRC-24 over a 112-bit Mode S frame allows bursts ≤ 5.
+//!
 //! **Check field.** Read MSB first from the frame, except a reflected (`refout`) whole-byte
 //! CRC, which is read as little-endian bytes: the order a LSB-first protocol sends it once the
 //! framing block has reversed its characters (ACARS CRC-16/KERMIT).
@@ -54,6 +59,15 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
     if burst * 2 > width {
         return Err(perr("correct_burst_bits must be at most width / 2"));
     }
+    let refuse = |len: usize, accepted: usize| {
+        let pf = false_correction(len, burst, accepted, width);
+        (pf > MAX_FALSE_CORRECTION).then(|| {
+            BlockError::Params(format!(
+                "correct_burst_bits {burst} would turn {pf:.1e} of random {len}-bit blocks valid \
+                 (limit {MAX_FALSE_CORRECTION:.0e}); lower it or use a wider CRC"
+            ))
+        })
+    };
     let mode = match (p.obj("span"), p.obj("blocks")) {
         (Some(_), Some(_)) => return Err(perr("span and blocks are exclusive")),
         (_, Some(b)) => {
@@ -81,13 +95,24 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
             if offsets.is_empty() {
                 return Err(perr("blocks.offsets is empty"));
             }
+            let accepted = offsets.iter().map(Vec::len).max().unwrap_or(1);
+            if let Some(e) = refuse(data + width, accepted) {
+                return Err(e);
+            }
             Mode::Blocks {
                 data,
                 units: units(&crc, data, width, le),
                 offsets,
             }
         }
-        _ => Mode::Span(Span::from_params(p)?),
+        _ => {
+            // The shortest frame (check word alone); longer frames are bounded per length in
+            // `check`.
+            if let Some(e) = refuse(width, 1) {
+                return Err(e);
+            }
+            Mode::Span(Span::from_params(p)?)
+        }
     };
     let window = match mode {
         Mode::Span(_) => 64,
@@ -110,8 +135,22 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         frames_bad: 0,
         blocks_bad: 0,
         corrected_bits: 0,
+        correction_skipped: 0,
         status: Status::default(),
     }))
+}
+
+/// Largest accepted chance that burst correction turns a random (garbage) block valid.
+const MAX_FALSE_CORRECTION: f64 = 1e-3;
+
+/// Upper bound on the chance that syndrome correction of bursts up to `burst` bits turns a
+/// uniformly random `len`-bit block (data + check) valid: correctable burst patterns (start,
+/// mask with both end bits set) × accepted syndromes (offset words) / 2^width.
+fn false_correction(len: usize, burst: usize, accepted: usize, width: usize) -> f64 {
+    let patterns: f64 = (1..=burst.min(len))
+        .map(|t| (len + 1 - t) as f64 * 2f64.powi(t.saturating_sub(2) as i32))
+        .sum();
+    patterns * accepted as f64 / 2f64.powi(width as i32)
 }
 
 /// The check field at `pos`.
@@ -182,12 +221,15 @@ pub struct Crc {
     burst: usize,
     bits: Vec<u8>,
     out: Vec<u8>,
-    cache: Vec<(usize, Vec<u32>)>,
+    /// Single-bit syndromes per span data length; `None` where correction at that length
+    /// exceeds `MAX_FALSE_CORRECTION`.
+    cache: Vec<(usize, Option<Vec<u32>>)>,
     meter: RateMeter,
     frames_ok: u64,
     frames_bad: u64,
     blocks_bad: u64,
     corrected_bits: u64,
+    correction_skipped: u64,
     status: Status,
 }
 
@@ -217,11 +259,21 @@ impl Crc {
                             if self.cache.len() == CACHE {
                                 self.cache.remove(0);
                             }
-                            self.cache.push((data, units(&self.crc, data, w, self.le)));
+                            let u = (false_correction(data + w, self.burst, 1, w)
+                                <= MAX_FALSE_CORRECTION)
+                                .then(|| units(&self.crc, data, w, self.le));
+                            self.cache.push((data, u));
                             self.cache.len() - 1
                         }
                     };
-                    if let Some((st, mask)) = find_burst(&self.cache[i].1, self.burst, |x| x == s) {
+                    let found = match &self.cache[i].1 {
+                        Some(u) => find_burst(u, self.burst, |x| x == s),
+                        None => {
+                            self.correction_skipped += 1;
+                            None
+                        }
+                    };
+                    if let Some((st, mask)) = found {
                         let mut m = mask;
                         while m != 0 {
                             let idx = st + m.trailing_zeros() as usize;
@@ -337,6 +389,9 @@ impl Block for Crc {
         s.extra.set("corrected_bits", self.corrected_bits as f64);
         if matches!(self.mode, Mode::Blocks { .. }) {
             s.extra.set("blocks_bad", self.blocks_bad as f64);
+        } else if self.burst > 0 {
+            s.extra
+                .set("correction_skipped", self.correction_skipped as f64);
         }
         Ok(())
     }

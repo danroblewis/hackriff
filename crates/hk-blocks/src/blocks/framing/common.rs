@@ -282,6 +282,12 @@ impl RateMeter {
     }
 }
 
+/// Bits per frame a frames chunk is sized for: `PortVec::with_capacity` pre-sizes a frames
+/// port's arena at 256 bytes per item, so a chunk of `max_items` frames carries at most
+/// `max_items × FRAME_BITS_PER_ITEM` bits without reallocating. Blocks that split frames
+/// bound their output count from it.
+pub(crate) const FRAME_BITS_PER_ITEM: usize = 256 * 8;
+
 /// Frame output port info for a frames → frames block.
 pub(crate) fn frames_port(input: PortInfo, max_items: usize) -> PortInfo {
     PortInfo {
@@ -324,6 +330,11 @@ pub(crate) mod testutil {
     use crate::registry::{BuildCtx, Registry};
 
     pub fn build(name: &str, params: Value, input: PortType) -> Box<dyn Block> {
+        try_build(name, params, input).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    /// `build`, returning the build error.
+    pub fn try_build(name: &str, params: Value, input: PortType) -> Result<Box<dyn Block>, String> {
         let maps = BTreeMap::new();
         let ctx = BuildCtx {
             field_maps: &maps,
@@ -332,7 +343,7 @@ pub(crate) mod testutil {
         let p: Params = params.as_object().cloned().unwrap_or_default();
         Registry::builtin()
             .build(name, &p, &ctx)
-            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .map_err(|e| e.to_string())
     }
 
     /// An owned frame.

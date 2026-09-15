@@ -5,7 +5,9 @@
 
 use hk_recipe::{Params, PortType};
 
-use super::common::{Clock, P, bit, drops_history, frames_io, one_input, update_hot};
+use super::common::{
+    Clock, FRAME_BITS_PER_ITEM, P, bit, drops_history, frames_io, one_input, update_hot,
+};
 use super::length::{FrameLength, LengthState};
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::buffer::{ChunkFlags, ChunkMeta, FrameInfo, PortSlice, PortVec};
@@ -184,7 +186,11 @@ impl Block for Deframe {
             _ => PortInfo {
                 ty: PortType::Frames,
                 rate_hz: input.rate_hz,
-                max_items: input.max_items.saturating_mul(4).max(1),
+                // Each sub-frame takes at least min_bits of the chunk's bits.
+                max_items: input
+                    .max_items
+                    .saturating_mul(FRAME_BITS_PER_ITEM / min)
+                    .max(1),
                 hold_items: 0,
             },
         }])

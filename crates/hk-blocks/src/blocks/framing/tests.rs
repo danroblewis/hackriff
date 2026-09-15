@@ -100,16 +100,16 @@ fn rds_offset_words_find_groups_and_crc_checks_and_corrects_them() {
     }
     assert_eq!(crc.status().error_rate, Some(2.0 / 24.0));
 
-    let mut fix = crc_params;
-    fix["correct_burst_bits"] = json!(5);
-    let mut crc = build("crc", fix, PortType::Frames);
-    let corrected = run_frames(crc.as_mut(), &frames, 6, false);
-    for (g, f) in corrected.iter().enumerate() {
-        assert_eq!(f.info.check, CrcStatus::Valid, "group {g}");
-        assert_eq!(f.bits, data(truth[g]), "group {g}");
+    // Burst correction on a 10-bit check would validate garbage (26 × 1 offset / 2^10 = 2.5 %
+    // at 1 bit, ~72 % bound at 5 bits with C/C′): refused, so groups 2 and 4 stay invalid.
+    for burst in [1, 5] {
+        let mut fix = crc_params.clone();
+        fix["correct_burst_bits"] = json!(burst);
+        let err = super::common::testutil::try_build("crc", fix, PortType::Frames)
+            .err()
+            .unwrap_or_else(|| panic!("RDS burst {burst} accepted"));
+        assert!(err.contains("correct_burst_bits"), "{err}");
     }
-    assert_eq!(corrected[2].info.corrected_bits, 1);
-    assert_eq!(corrected[4].info.corrected_bits, 2);
 }
 
 // ---- POCSAG: sync 0x7CD215D8 + BCH(31,21) + message assembly across batches ----

@@ -113,7 +113,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
                 param(
                     "correct_burst_bits",
                     int(0, 5),
-                    "Correct error bursts up to this length per block/frame.",
+                    "Correct error bursts up to this length per block/frame. Refused where it would turn more than 1e-3 of random blocks valid (burst patterns × allowed offsets / 2^width): at build for blocks and the shortest span frame, per frame length at run time (status correction_skipped). RDS's 10-bit check allows none; CRC-24 over 112-bit Mode S allows up to 5.",
                 )
                 .default_value(0),
             ],
@@ -149,7 +149,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
                 param(
                     "correct_bits",
                     int(0, 3),
-                    "Bit errors corrected per word (≤ the code's capacity: BCH(31,21) corrects 2); syndromes shared by two patterns of the lowest weight are refused.",
+                    "Bit errors corrected per word (≤ the code's capacity: BCH(31,21) corrects 2); syndromes shared by two patterns of the lowest weight are refused. With parity none, errors beyond the code's capacity (3 bits on BCH(31,21)) can miscorrect to a wrong codeword that is marked valid; the parity bit catches most of them.",
                 )
                 .default_value(1),
                 drop_invalid(),

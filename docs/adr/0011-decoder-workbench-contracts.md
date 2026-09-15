@@ -169,7 +169,7 @@ Blocks are **adapters over the existing kernels**, not rewrites:
 - **mix/lowpass/resample:** hk-dsp `filter::Nco`, `design_lowpass` + `kernels`, and the DDC's polyphase stage. hk-dsp's `Ddc` wants a `ProvenanceHandle`, which `ChunkMeta` doesn't carry, so T-086 may expose a provenance-free resampler additively.
 - **fm_demod/subcarrier/clock_recovery:** the hk-demod discriminator (`dsp`), `pilot::PilotPll` and `rds::demod`'s biphase timing.
 - **fsk_demod/slicer:** hk-demod `fsk`.
-- **sync_search:** hk-estimate `framing::sync` and hk-demod `rds::block` syndromes. **crc:** hk-estimate `framing::crc::CrcCore`.
+- **sync_search:** hk-estimate `framing::sync` and hk-demod `rds::block` syndromes. **crc:** hk-estimate `framing::crc::BitCrc` (the RevEng model over bit ranges; its whole-byte path is `CrcCore`).
 
 Rules:
 - The recipe runtime's **input stage** is the runtime's own DDC over ring chunks, which do carry provenance. Blocks after it see only `ChunkMeta`.
