@@ -430,6 +430,27 @@ impl Tile {
         self.col.clear();
     }
 
+    /// Clears frequency cell `f` over the whole tile (retention trim, T-126): every time cell of
+    /// the column reads unobserved and its histogram row empties. Returns whether it held data.
+    pub fn clear_freq(&mut self, f: usize) -> bool {
+        let row = f * self.bins..(f + 1) * self.bins;
+        let had = (0..self.nt).any(|t| self.count[t * self.nf + f] > 0)
+            || self.hist[row.clone()].iter().any(|&h| h > 0);
+        for t in 0..self.nt {
+            let i = t * self.nf + f;
+            self.count[i] = 0;
+            self.max[i] = f32::NEG_INFINITY;
+            self.sum_lin[i] = 0.0;
+            self.obs_s[i] = 0.0;
+            self.occ_s[i] = 0.0;
+            self.occ_max[i] = 0.0;
+            self.p_lo[i] = f32::NAN;
+            self.p_hi[i] = f32::NAN;
+        }
+        self.hist[row].fill(0);
+        had
+    }
+
     #[inline]
     pub fn hist_row(&self, f: usize) -> &[u32] {
         &self.hist[f * self.bins..(f + 1) * self.bins]

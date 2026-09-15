@@ -93,6 +93,8 @@ impl HistoryStat {
     }
 }
 
+use super::frame::NoiseShape;
+
 /// How to read a `hackrf_sweep` CSV.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SweepCsvOptions {
@@ -104,6 +106,11 @@ pub struct SweepCsvOptions {
     pub unit: PowerUnit,
     /// Gain state the capture used, if known (provenance).
     pub gain: Option<GainState>,
+    /// Gamma shape of each bin value when known (T-126); `None` estimates it from the first
+    /// [`SHAPE_ESTIMATE_SWEEPS`] sweeps ([`super::shape`]) so `floor_db` is available.
+    pub bin_shape: Option<f32>,
+    /// Source key of the capture ([`FrameInput::source`]; default `source_key("hackrf_sweep")`).
+    pub source: u64,
 }
 
 impl Default for SweepCsvOptions {
@@ -113,9 +120,16 @@ impl Default for SweepCsvOptions {
             utc_offset_s: 0,
             unit: PowerUnit::Dbfs,
             gain: None,
+            bin_shape: None,
+            source: super::frame::source_key("hackrf_sweep"),
         }
     }
 }
+
+/// Sweeps [`import_sweep_csv`] buffers to estimate the bin noise shape before folding (T-126).
+pub const SHAPE_ESTIMATE_SWEEPS: u32 = 16;
+/// Most dB values buffered for the estimate (the estimate is made early past this).
+const SHAPE_ESTIMATE_MAX_VALUES: usize = 1 << 23;
 
 /// What [`import_sweep_csv`] did.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -134,6 +148,9 @@ pub struct SweepCsvImport {
     pub first: Option<Timestamp>,
     /// Latest line time.
     pub last: Option<Timestamp>,
+    /// Bin noise shape used (given or estimated, T-126); `None` when too few rows or noise bins
+    /// were available, and `floor_db` reads NaN.
+    pub bin_shape: Option<f32>,
 }
 
 struct Row {
@@ -231,34 +248,83 @@ fn parse_row(line: &str, utc_offset_s: i32) -> Option<Row> {
     })
 }
 
+/// Revisit and noise shape of an import, decided from the buffered first rows.
+fn import_plan(
+    pending: &[Row],
+    est: &super::shape::NoiseShapeEstimator,
+    opts: &SweepCsvOptions,
+) -> (i64, NoiseShape) {
+    let rev = opts
+        .revisit
+        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX).max(1))
+        .or_else(|| {
+            let (lo, t0) = pending.first().map(|r| (r.hz_low, r.t_ns))?;
+            pending
+                .iter()
+                .find(|r| r.hz_low == lo && r.t_ns > t0)
+                .map(|r| r.t_ns - t0)
+        })
+        .unwrap_or_else(|| {
+            // A single sweep: its own span, at least a second.
+            let span = pending.iter().map(|r| r.t_ns).max().unwrap_or(0)
+                - pending.iter().map(|r| r.t_ns).min().unwrap_or(0);
+            span.max(NS)
+        });
+    let shape = opts
+        .bin_shape
+        .filter(|k| k.is_finite() && *k > 0.0)
+        .or_else(|| est.bin_shape())
+        .map_or(NoiseShape::Unknown, NoiseShape::BinShape);
+    (rev, shape)
+}
+
+fn emit_row(
+    p: &mut Pyramid,
+    opts: &SweepCsvOptions,
+    psd: &mut Vec<f32>,
+    row: &Row,
+    (rev, shape): (i64, NoiseShape),
+    out: &mut SweepCsvImport,
+) -> Result<(), StoreError> {
+    psd.clear();
+    psd.extend(row.db.iter().map(|&d| (undb(d) / row.bin_width) as f32));
+    let t = Timestamp::from_unix_nanos(row.t_ns);
+    let mut f = FrameInput::new(t, rev, row.hz_low, row.bin_width, opts.unit, psd);
+    f.gain = opts.gain;
+    f.noise_shape = shape;
+    f.source = opts.source;
+    match p.ingest(&f) {
+        Ok(IngestOutcome::Folded) => out.frames_folded += 1,
+        Ok(IngestOutcome::Late) => out.frames_late += 1,
+        Err(StoreError::BadFrame(_)) => out.rows_rejected += 1,
+        Err(e) => return Err(e),
+    }
+    out.first = Some(out.first.map_or(t, |x| x.min(t)));
+    out.last = Some(out.last.map_or(t, |x| x.max(t)));
+    Ok(())
+}
+
 /// Folds a `hackrf_sweep` CSV into `p` (see the [module docs](self)). Seal with
 /// [`Pyramid::seal_through`] afterwards to roll the last tiles up.
+///
+/// The first rows are buffered until the revisit time is known and, unless
+/// [`SweepCsvOptions::bin_shape`] is given, [`SHAPE_ESTIMATE_SWEEPS`] sweeps have been seen, so
+/// every row folds with the same estimated [`NoiseShape::BinShape`] (T-126).
 pub fn import_sweep_csv<R: BufRead>(
     p: &mut Pyramid,
     reader: R,
     opts: &SweepCsvOptions,
 ) -> Result<SweepCsvImport, StoreError> {
     let mut out = SweepCsvImport::default();
-    let mut revisit_ns = opts
-        .revisit
-        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX).max(1));
+    let mut est = super::shape::NoiseShapeEstimator::new();
     let mut pending: Vec<Row> = Vec::new();
+    let (mut sweeps, mut buffered) = (0u32, 0usize);
+    let mut plan: Option<(i64, NoiseShape)> = None;
     let mut psd: Vec<f32> = Vec::new();
-    let mut emit = |row: &Row, rev: i64, out: &mut SweepCsvImport| -> Result<(), StoreError> {
-        psd.clear();
-        psd.extend(row.db.iter().map(|&d| (undb(d) / row.bin_width) as f32));
-        let t = Timestamp::from_unix_nanos(row.t_ns);
-        let mut f = FrameInput::new(t, rev, row.hz_low, row.bin_width, opts.unit, &psd);
-        f.gain = opts.gain;
-        match p.ingest(&f) {
-            Ok(IngestOutcome::Folded) => out.frames_folded += 1,
-            Ok(IngestOutcome::Late) => out.frames_late += 1,
-            Err(StoreError::BadFrame(_)) => out.rows_rejected += 1,
-            Err(e) => return Err(e),
-        }
-        out.first = Some(out.first.map_or(t, |x| x.min(t)));
-        out.last = Some(out.last.map_or(t, |x| x.max(t)));
-        Ok(())
+    let need = match (opts.bin_shape.is_some(), opts.revisit.is_some()) {
+        (true, true) => 1,
+        (true, false) => 2,
+        (false, _) => SHAPE_ESTIMATE_SWEEPS,
     };
     for line in reader.lines() {
         let line = line.map_err(|source| StoreError::Io {
@@ -273,36 +339,35 @@ pub fn import_sweep_csv<R: BufRead>(
             out.rows_rejected += 1;
             continue;
         };
-        match revisit_ns {
-            Some(rev) => emit(&row, rev, &mut out)?,
-            None => {
-                let first = pending.first().map(|r| (r.hz_low, r.t_ns));
-                if let Some((lo, t0)) = first
-                    && row.hz_low == lo
-                    && row.t_ns > t0
-                {
-                    let rev = row.t_ns - t0;
-                    revisit_ns = Some(rev);
-                    for r in pending.drain(..) {
-                        emit(&r, rev, &mut out)?;
-                    }
-                    emit(&row, rev, &mut out)?;
-                } else {
-                    pending.push(row);
-                }
+        if let Some(pl) = plan {
+            emit_row(p, opts, &mut psd, &row, pl, &mut out)?;
+            continue;
+        }
+        if opts.bin_shape.is_none() {
+            est.observe(row.hz_low, &row.db);
+        }
+        if pending.first().is_none_or(|r| r.hz_low == row.hz_low) {
+            sweeps += 1;
+        }
+        buffered += row.db.len();
+        pending.push(row);
+        if sweeps >= need || buffered >= SHAPE_ESTIMATE_MAX_VALUES {
+            let pl = import_plan(&pending, &est, opts);
+            for r in pending.drain(..) {
+                emit_row(p, opts, &mut psd, &r, pl, &mut out)?;
             }
+            plan = Some(pl);
         }
     }
-    // A single sweep: its own span, at least a second.
-    let rev = revisit_ns.unwrap_or_else(|| {
-        let span = pending.iter().map(|r| r.t_ns).max().unwrap_or(0)
-            - pending.iter().map(|r| r.t_ns).min().unwrap_or(0);
-        span.max(NS)
-    });
+    let pl = plan.unwrap_or_else(|| import_plan(&pending, &est, opts));
     for r in pending.drain(..) {
-        emit(&r, rev, &mut out)?;
+        emit_row(p, opts, &mut psd, &r, pl, &mut out)?;
     }
-    out.revisit_ns = rev;
+    out.revisit_ns = pl.0;
+    out.bin_shape = match pl.1 {
+        NoiseShape::BinShape(k) => Some(k),
+        _ => None,
+    };
     Ok(out)
 }
 

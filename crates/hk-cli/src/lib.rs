@@ -4,9 +4,11 @@
 //! `hackriffd --source sigmf:<file>` runs it continuously with the scheduler and the API
 //! ([`pipeline`], T-027). `hk stream-tail` is the sample stream-output consumer (T-016): it
 //! prints a stream's header and records. `hk serve` ([`serve`]) replays a recording into the web
-//! UI through the hk-api bridge (T-022a demo composer).
+//! UI through the hk-api bridge (T-022a demo composer). `hk history import-sweep-csv` ([`history`],
+//! T-126) folds a `hackrf_sweep` CSV into a data directory's spectrum history.
 
 pub mod control;
+pub mod history;
 pub mod pipeline;
 pub mod record;
 pub mod serve;

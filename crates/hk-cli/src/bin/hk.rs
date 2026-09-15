@@ -129,6 +129,11 @@ enum Command {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Offline spectrum-history maintenance.
+    History {
+        #[command(subcommand)]
+        command: HistoryCommand,
+    },
     #[command(group(ArgGroup::new("endpoint").required(true).args(["uds", "tcp"])))]
     StreamTail {
         /// Unix-domain socket path.
@@ -184,6 +189,31 @@ enum Command {
         listen: hk_cli::pipeline::ListenArgs,
         #[command(flatten)]
         compute: hk_cli::pipeline::ComputeArgs,
+    },
+}
+
+#[derive(Subcommand)]
+enum HistoryCommand {
+    /// Import a `hackrf_sweep` CSV into the data directory's spectrum history (the uncalibrated
+    /// dBFS pyramid `hk run` / `hk serve` use). Run while no other process uses the directory.
+    ImportSweepCsv {
+        /// The CSV file.
+        file: PathBuf,
+        /// Data directory to import into.
+        #[arg(long)]
+        data_dir: PathBuf,
+        /// Offset of the file's (local) timestamps from UTC: `+02:00`, `-0500`, `Z` or seconds.
+        #[arg(long, default_value = "0", allow_hyphen_values = true)]
+        utc_offset: String,
+        /// Seconds each line represents. Default: the measured sweep revisit.
+        #[arg(long)]
+        revisit_s: Option<f64>,
+        /// Gamma shape (look count) of each bin value, if known. Default: estimated from the file.
+        #[arg(long)]
+        bin_shape: Option<f32>,
+        /// Source name (provenance step state is kept per source).
+        #[arg(long, default_value = "hackrf_sweep")]
+        source: String,
     },
 }
 
@@ -357,6 +387,30 @@ fn main() -> anyhow::Result<()> {
             for f in &outcome.files {
                 println!("{}", f.display());
             }
+        }
+        Command::History {
+            command:
+                HistoryCommand::ImportSweepCsv {
+                    file,
+                    data_dir,
+                    utc_offset,
+                    revisit_s,
+                    bin_shape,
+                    source,
+                },
+        } => {
+            use hk_cli::history::{
+                ImportSweepCsvArgs, import_summary, import_sweep_csv, parse_utc_offset,
+            };
+            let out = import_sweep_csv(&ImportSweepCsvArgs {
+                file,
+                data_dir,
+                utc_offset_s: parse_utc_offset(&utc_offset)?,
+                revisit_s,
+                bin_shape,
+                source,
+            })?;
+            print!("{}", import_summary(&out));
         }
         Command::StreamTail { uds, tcp, count } => {
             let stdout = io::stdout();
