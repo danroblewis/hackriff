@@ -838,3 +838,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **After design:** T-115 observation log → T-118 occupancy engine → T-119 baselines/novelty/score → T-122 alarms; T-120 bandit (needs T-114 sim); T-121 reports; T-123 UI hooks; T-124 acceptance.
 
   Launched 4 agents: T-113, T-114, T-116, T-117. Demo-relevant work stays mergeable per task. The UI rewrite and M1 review are pending with the user and don't block M2. Existing scheduler: WRR with a placeholder interestingness (hk-core scheduler/mod.rs); the bandit is an ADR TODO. No occupancy code exists yet.
+- **B0.279 Full check of main 17f7561 (T-112, end of M1): green.** Lint clean; nextest + UI 1138/1138 in 257 s; acceptance 29/29 (2 ignored HIL) in 61 s. M1 closes on a verified main.
