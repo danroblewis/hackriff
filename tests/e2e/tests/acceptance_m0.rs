@@ -55,3 +55,5 @@ mod tutorial_rds;
 
 #[path = "acceptance/tutorial_acars.rs"]
 mod tutorial_acars;
+#[path = "acceptance/tutorial_adsb.rs"]
+mod tutorial_adsb;
