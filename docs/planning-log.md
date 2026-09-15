@@ -1589,3 +1589,21 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Changed expectations:** 28 B size assert; golden v2 re-encode; hysteresis test moved to `LevelAboveBaseline`.
   - **Tests:** 126 targeted green; lint clean.
   - **T-124 knock-on:** its latency limit must come from the ADR §7.2 table (17@z3.0, 14@3.4, 8@4.7, 7@5.0) using the scene's re-derived z.
+- **B0.388 T-146 review (Opus): FIX-FIRST.**
+  - **Holds:**
+    - union-over-run-length bound
+    - one-sided factor
+    - √p_seq + hysteresis (conservative)
+    - between_var algebra
+    - decay scaling of the new moment
+    - v2 moment=0 (safe direction)
+    - run pruning
+    - new-emitter and quieter paths
+  - **Risks:**
+    - Budget proof assumes Gaussian i.i.d. z. Sparse discrete looks (n_eff=2) break it by about 3000×, and clustered traffic could alarm about monthly. Needs binomial and Markov Monte-Carlo at production thresholds, then a mid-p/continuity and/or autocorrelation deflation fix.
+    - Any opposite-sign z resets the run, so alarms flap. Flap coverage was lost when the hysteresis test changed kind.
+    - p̄(1−p̄) over-subtracts for patterned channels, inflating z by about 12% of τ².
+    - The 2 h wall-time gap blocks accumulation for subjects revisited less often than every 2 h.
+    - The run resets on every dominant gain-key flip.
+  - **Nits:** ADR wording on the 0.1× floor and on sequential vs combined budget; upgraded frozen references stay uncorrected.
+  - **Next:** fix round continued in the T-146 finisher (~159k).
