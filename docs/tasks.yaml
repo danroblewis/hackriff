@@ -3553,6 +3553,21 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+  - id: T-223
+    milestone: M2-hardening
+    title: "signal_001 readsb plugin chain misses the earliest ADS-B emission when the acceptance suite runs in parallel under load (just acceptance uses cargo test, so nextest heavy-serial pinning does not apply)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PLUGINS
+    use_cases: [SIGNAL-001]
+    found_by: "full check after the T-159/T-193 merges (2026-09-15): truth emission at t=0.0099 s missed, decodes start at 0.168 s; passes 3/3 alone via the same cargo test runner; nothing in hk-plugins/hk-stream/hk-model repo changed since"
+    acceptance: "root cause confirmed (plugin subprocess start-up: the chain feeds the replay before readsb has connected, so the first ~150 ms of records are lost under CPU contention); fix so the chain does not feed until the plugin reports ready, or the harness holds the replay until then - T-103 did this for EOF, do the same for start-up; acceptance_m0 passes 10/10 with 6 CPU burners; no truth tolerance loosened and no retry added"
+    area: crates/hk-plugins (host/readsb wrapper), crates/hk-pipeline (plugin chain), tests/e2e
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

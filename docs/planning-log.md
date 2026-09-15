@@ -2350,3 +2350,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Seeding fixed:** T-185's `seed | 1` had collapsed seeds 2 and 3; now splitmix64.
   - **T-187 conflict resolved (7ad8498):** both feature sets kept, and deleting a row with a band override removes its yellow box, restoring it with the override intact if the delete fails.
   - **Both merge after the running check. T-205 launched** (Sonnet, labelled-capture dataset export).
+- **B0.493 Acceptance red under load: signal_001 readsb plugin chain (filed T-223, high).**
+  - **Symptom:** the earliest truth emission (t=0.0099 s) is not decoded; decodes start at 0.168 s. It failed twice in a row while three build agents were running, at load about 14.
+  - **Not a regression:** passes 3/3 alone through the same `cargo test` runner, and nothing in hk-plugins, hk-stream or the hk-model repo has changed since 0bf1299; today's merges touched hk-api and the UI only.
+  - **Why the pins do not help:** `just acceptance` runs `cargo test`, so the nextest heavy-serial group does not apply, and the readsb subprocess starves at start-up.
+  - **Fix direction:** do not feed the replay until the plugin reports ready, mirroring what T-103 did for EOF. No tolerance loosening and no retries.
+  - **Meanwhile:** merging T-187 and T-210 with a full check; a signal_001 failure there is this known issue, not the merge.
