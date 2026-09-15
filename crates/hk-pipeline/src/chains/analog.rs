@@ -31,6 +31,15 @@
 //! channel is only here after a confirmed, trusted track and an accepted probe, an early write
 //! needs the whole leading window and a pilot lock, and lifecycle confirmation is unchanged (no
 //! identity or decode is written early).
+//!
+//! **One session, one write of each (T-209).** The early and the full window are one
+//! observation: the full window's PI sighting is offered as a re-measurement of the early
+//! sighting (`RecordContext::counted_as`), so the emitter's count grows by one per session, and
+//! the refined tuning the early write stored is not stored again. The leading window is
+//! demodulated without RDS (its decodes would be discarded). **Overload gate:** a window whose
+//! provenance is overloaded or whose samples clip beyond the detector's clip rule places no
+//! emitter from mode evidence (an intermodulation image can lock a pilot); a decoded identity
+//! still places one.
 
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -178,13 +187,15 @@ fn collect(cr: &mut ChainReader, rx: &Receiver<ChainMsg>, w: &mut Window, target
 }
 
 /// Demodulates the window's first `len` samples on the attach box, or on a `refined` tuning (its
-/// centre and WFM channel bandwidth, no further CFO correction).
+/// centre and WFM channel bandwidth, no further CFO correction). `rds: false` skips the RDS
+/// decoder (a session that is never written with its decodes).
 fn demodulate(
     w: &Window,
     len: usize,
     cand: &Candidate,
     bandwidth_hz: f64,
     refined: Option<&Tuning>,
+    rds: bool,
 ) -> Option<Result<AnalogSession, hk_demod::DemodError>> {
     let (time, prov) = w.head.as_ref()?;
     let info = InputInfo {
@@ -200,15 +211,32 @@ fn demodulate(
         center_offset_hz: center - prov.tune.center_hz,
         bandwidth_hz,
     };
-    let mut receiver = match refined {
-        Some(t) => AnalogReceiver::new(ReceiverConfig {
+    let mut config = match refined {
+        Some(t) => ReceiverConfig {
             wfm_channel_bandwidth_hz: t.bandwidth_hz,
             max_cfo_correction_hz: 0.0,
             ..ReceiverConfig::default()
-        }),
-        None => AnalogReceiver::default(),
+        },
+        None => ReceiverConfig::default(),
     };
-    Some(receiver.run(info, &w.iq[..len], &request))
+    if !rds {
+        config.wfm.rds = None;
+    }
+    Some(AnalogReceiver::new(config).run(info, &w.iq[..len], &request))
+}
+
+/// T-209: whether the window's front end was in compression over its first `len` samples: its
+/// provenance is overloaded, or its clipped-sample fraction exceeds the detector's clip rule
+/// (rule 8). A window is one provenance ([`collect`] ends it on a change).
+fn front_end_overloaded(w: &Window, len: usize) -> bool {
+    let Some((_, prov)) = w.head.as_ref() else {
+        return false;
+    };
+    let iq = &w.iq[..len.min(w.iq.len())];
+    prov.get().overload
+        || (!iq.is_empty()
+            && hk_detect::count_clipped_ci8(iq) as f64
+                > hk_detect::Rules::default().clip_fraction * iq.len() as f64)
 }
 
 fn mode_name(s: &AnalogSession) -> String {
@@ -245,7 +273,7 @@ pub(crate) fn run(
         if w.iq.len() < probe {
             return;
         }
-        let accepted = match demodulate(&w, probe, &cand, node.bandwidth_hz, None) {
+        let accepted = match demodulate(&w, probe, &cand, node.bandwidth_hz, None, false) {
             Some(Ok(s)) => {
                 let mode_ok =
                     node.accept_modes.is_empty() || node.accept_modes.contains(&mode_name(&s));
@@ -357,17 +385,20 @@ fn pilot_locked(session: &AnalogSession) -> bool {
 
 /// Outcome of [`identify`].
 enum Identified {
-    /// Written; the emitter it placed (none without pilot-locked mode evidence).
-    Written(Option<EmitterId>),
-    /// Not written (the leading window did not demodulate to pilot-locked evidence).
+    /// Written; the emitter it placed (none without pilot-locked mode evidence) and whether it
+    /// stored the refined tuning on it.
+    Written(Option<EmitterId>, bool),
+    /// Not written (the leading window did not demodulate to pilot-locked evidence, or its front
+    /// end was overloaded).
     Skipped,
     /// A neighbouring chain owns the emission.
     Preempted,
 }
 
-/// T-186: demodulates the leading window `w` (on `refined` when locked) and writes it without its
-/// RDS (the full window writes the decodes once): Demodulation, mode Classification on the emitter
-/// ([`mode_emitter`]), refined tuning, then `Inventory::chain_emitter` (explanations, review).
+/// T-186: demodulates the leading window `w` (on `refined` when locked) without RDS (the full
+/// window decodes and writes it once) and writes it: Demodulation, mode Classification on the
+/// emitter ([`mode_emitter`]), refined tuning, then `Inventory::chain_emitter` (explanations,
+/// review). T-209: an overloaded window writes nothing early.
 fn identify(
     shared: &Arc<Shared>,
     w: &Window,
@@ -376,12 +407,13 @@ fn identify(
     refined: Option<&RefinementOutcome>,
 ) -> Identified {
     let c = &shared.counters.chains;
-    let Some(Ok(mut session)) = demodulate(
+    let Some(Ok(session)) = demodulate(
         w,
         w.iq.len(),
         cand,
         node.bandwidth_hz,
         refined.map(|o| &o.tuning),
+        false,
     ) else {
         return Identified::Skipped;
     };
@@ -389,17 +421,19 @@ fn identify(
     if !mode_ok || !pilot_locked(&session) {
         return Identified::Skipped;
     }
+    if front_end_overloaded(w, w.iq.len()) {
+        inc(&c.mode_emitters_withheld);
+        return Identified::Skipped;
+    }
     if !shared.claims.commit(node.owner) {
         inc(&c.duplicate_emission);
         return Identified::Preempted;
-    }
-    if let Some(wfm) = session.wfm.as_mut() {
-        wfm.rds = None;
     }
     let ctx = RecordContext {
         recording_ref: None,
         detection_ref: super::stored_detection(shared, cand.detection),
         emitter_hint: None,
+        counted_as: None,
     };
     let mut repo = shared.repo();
     let emitter = match write_session(&mut repo, &session, &ctx)
@@ -409,7 +443,7 @@ fn identify(
         Err(err) => {
             inc(&c.errors);
             eprintln!("hk-pipeline: analog chain early identification write: {err}");
-            return Identified::Written(None);
+            return Identified::Written(None, false);
         }
     };
     inc(&c.identifications);
@@ -422,18 +456,22 @@ fn identify(
             session.mode.confidence,
         );
     }
+    let mut stored = false;
     if let Some(e) = emitter {
-        if let Some(o) = refined
-            && let Err(err) = crate::refine::persist(
+        if let Some(o) = refined {
+            match crate::refine::persist(
                 &mut repo,
                 e,
                 o,
                 SOURCE_ANALOG_CHAIN,
                 session.time_range().start,
-            )
-        {
-            inc(&c.errors);
-            eprintln!("hk-pipeline: analog chain refined tuning write: {err}");
+            ) {
+                Ok(row) => stored = row.is_some(),
+                Err(err) => {
+                    inc(&c.errors);
+                    eprintln!("hk-pipeline: analog chain refined tuning write: {err}");
+                }
+            }
         }
         let mut inv = shared
             .inventory
@@ -443,13 +481,14 @@ fn identify(
             inc(&c.errors);
         }
     }
-    Identified::Written(emitter)
+    Identified::Written(emitter, stored)
 }
 
 /// The emitter a written session belongs to: the one `write_session` resolved (decoded PI or the
 /// caller's hint), else — T-186 — for pilot-locked mode evidence over at least the leading
 /// window (`enough`), a sighting keyed by the Demodulation (no identity) carrying the mode
-/// Classification. `None` otherwise, as before.
+/// Classification. `None` otherwise, as before. T-209: callers pass `enough: false` for an
+/// overloaded window ([`front_end_overloaded`]), which places no emitter from mode evidence.
 fn mode_emitter(
     repo: &mut Repository,
     session: &AnalogSession,
@@ -607,8 +646,8 @@ fn collect_and_write(
             }
             match identify(shared, &w, cand, node, refined.as_ref()) {
                 Identified::Preempted => return,
-                Identified::Written(emitter) => early = Some((refined, emitter)),
-                Identified::Skipped => early = Some((refined, None)),
+                Identified::Written(emitter, stored) => early = Some((refined, emitter, stored)),
+                Identified::Skipped => early = Some((refined, None, false)),
             }
         }
     }
@@ -617,7 +656,7 @@ fn collect_and_write(
     if (w.iq.len() as f64) < 0.25 * fs {
         return;
     }
-    let (refined, hint) = match early {
+    let (refined, hint, refined_stored) = match early {
         // Same leading samples, so the same refinement, already claimed at its centre.
         Some(e) => e,
         None => {
@@ -629,7 +668,7 @@ fn collect_and_write(
             if !claim_emission(shared, node, channel_center, emission) {
                 return;
             }
-            (refined, None)
+            (refined, None, false)
         }
     };
     let session = match demodulate(
@@ -638,6 +677,7 @@ fn collect_and_write(
         cand,
         node.bandwidth_hz,
         refined.as_ref().map(|o| &o.tuning),
+        true,
     ) {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
@@ -667,6 +707,8 @@ fn collect_and_write(
         detection_ref: super::stored_detection(shared, cand.detection),
         // T-186: the emitter the early identification placed.
         emitter_hint: hint,
+        // T-209: its sighting already counted this session.
+        counted_as: hint.map(|_| SOURCE_ANALOG_CHAIN),
     };
     if !shared.claims.commit(node.owner) {
         // Preempted by the chain whose channel is nearer the emission.
@@ -674,6 +716,7 @@ fn collect_and_write(
         return;
     }
     let enough = w.iq.len() >= identify_samples;
+    let overloaded = front_end_overloaded(&w, w.iq.len());
     let mut repo = shared.repo();
     match write_session(&mut repo, &session, &ctx) {
         Ok(written) => {
@@ -684,14 +727,19 @@ fn collect_and_write(
                 .add(cand.track, written.decode_ids.len() as u64);
             add(&c.emitters_created, u64::from(written.emitter_created));
             add(&c.labels, u64::from(written.label.is_some()));
-            let emitter =
-                mode_emitter(&mut repo, &session, &written, enough).unwrap_or_else(|err| {
+            // T-209: no emitter from mode evidence alone on an overloaded front end.
+            if overloaded && enough && written.emitter_id.is_none() && pilot_locked(&session) {
+                inc(&c.mode_emitters_withheld);
+            }
+            let emitter = mode_emitter(&mut repo, &session, &written, enough && !overloaded)
+                .unwrap_or_else(|err| {
                     inc(&c.errors);
                     eprintln!("hk-pipeline: analog chain emitter write: {err}");
                     None
                 });
             if let Some(e) = emitter {
-                if let Some(o) = &refined
+                // T-209: the early identification already stored this refinement.
+                if let Some(o) = refined.as_ref().filter(|_| !refined_stored)
                     && let Err(err) = crate::refine::persist(
                         &mut repo,
                         e,

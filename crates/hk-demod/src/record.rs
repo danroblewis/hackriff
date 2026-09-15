@@ -41,6 +41,12 @@ pub struct RecordContext {
     /// Emitter the caller resolved the channel to (T-018). With a decoded PI the repository's
     /// identity match takes precedence.
     pub emitter_hint: Option<EmitterId>,
+    /// T-209: producer key of a sighting of this same session the caller already counted into
+    /// `emitter_hint` (e.g. an early write from the leading part of the window). The decoded PI's
+    /// sighting is then offered under that key, so it resolves as a re-measurement of that
+    /// sighting and adds no count, unless another emitter holds the PI (identity rule 2 applies
+    /// then, under the decoder's own key).
+    pub counted_as: Option<&'static str>,
 }
 
 /// What was written.
@@ -157,6 +163,22 @@ pub fn write_session(
     let mut emitter_id = ctx.emitter_hint;
     let mut emitter_created = false;
     if let Some(pi) = pi {
+        let identity = DecodedIdentity {
+            scheme: IdentityScheme::RdsPi,
+            value: pi.hex(),
+        };
+        let key = match (ctx.counted_as, ctx.emitter_hint) {
+            (Some(producer), Some(hint)) => {
+                let hint = repo.live_emitter_id(hint)?;
+                let holder = repo.emitter_by_identity(&identity)?.map(|e| e.id);
+                if holder.is_none_or(|h| h == hint) {
+                    producer
+                } else {
+                    RDS_DECODER_ID
+                }
+            }
+            _ => RDS_DECODER_ID,
+        };
         let bandwidth = session.params.obw99_hz.value().unwrap_or(200e3);
         let sighting = Sighting {
             source: LinkTarget::Demodulation(demod_id),
@@ -169,10 +191,7 @@ pub fn write_session(
                 ..Fingerprint::new(session.rf_center_hz, bandwidth)
             }),
             identity: Some(IdentityClaim {
-                identity: DecodedIdentity {
-                    scheme: IdentityScheme::RdsPi,
-                    value: pi.hex(),
-                },
+                identity,
                 // RDS is public broadcast.
                 content_class: ContentClass::Unrestricted,
             }),
@@ -180,8 +199,7 @@ pub fn write_session(
             classification: Some(classification.clone()),
             tags: Vec::new(),
         };
-        let r =
-            repo.record_sighting_measured(&sighting, &MeasurementKey::new(RDS_DECODER_ID), None)?;
+        let r = repo.record_sighting_measured(&sighting, &MeasurementKey::new(key), None)?;
         emitter_id = Some(r.emitter_id);
         emitter_created = r.created;
     }

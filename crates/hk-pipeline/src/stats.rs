@@ -250,6 +250,9 @@ counter_group!(
         /// T-186: analog chains that identified their emission (mode, pilot, refined tuning,
         /// family and explanations) from the leading refine window, before the full window.
         identifications,
+        /// T-209: pilot-locked analog sessions without a decoded identity whose emitter was not
+        /// placed because the window's front end was overloaded or clipping.
+        mode_emitters_withheld,
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,
