@@ -1950,3 +1950,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Tests:** a carrier sitting exactly at a hop LO must be learned. The task must also explain T-124's unlearned 433.375 MHz channel.
 - **T-179 added:** the MUI bundle is 48.2 KB gzip against a 45 KB budget (small, Sonnet).
 - **Screenshots:** T-177 screenshots were sent to the user.
+- **B0.430 T-172 full check green (18dec33).** Lint clean; 1351/1351 tests; acceptance 28/28.
+  - **Merged:** T-176 (gain-step false alarm fix) and T-177 (smoke script). Both worktrees removed.
+  - **T-124:** now blocked only on T-173 (off-DC coverage for 433.375 MHz). Its (c) and (h) should pass on rerun.
+  - **Next:** full check.
