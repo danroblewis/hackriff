@@ -25,7 +25,10 @@
 //!   frame past them (stops), and a restart after passing through or a dropped history re-seeds it from
 //!   the history window. The rounding noise is counted once and emissions keep their power,
 //!   including emissions that start or stop mid-recording: a retune at the recording's rate serves its floor PSD unchanged, and a
-//!   wider rate or higher gain shows the lower rounding density a radio would.
+//!   wider rate or higher gain shows the lower rounding density a radio would. A recording whose
+//!   floor is loud enough that rounding twice reads < 0.05 dB high (≥ 2.68 codes rms per ci8
+//!   component, estimated once at open) skips the subtraction (T-170: it is the cost of every
+//!   retuned window).
 //! - **Outside coverage (whole or part of the window, or a rate wider than the recording):** the
 //!   uncovered spectrum is complex white Gaussian noise at the recording's estimated floor PSD
 //!   less its rounding noise (Welch median, [`Recording::floor_power`]; the output rounding adds
@@ -251,12 +254,22 @@ pub struct Recording {
     /// Rounding noise of the recording's sample format (part of `floor_power`), full scale² per
     /// sample: 1/6 code² of ci8/cu8 or ci16, 0 for float recordings.
     pub quant_power: f64,
-    /// T-141: removes `quant_power` from rendered IQ (`None` when it is negligible).
+    /// T-141: removes `quant_power` from rendered IQ (`None` when it is negligible, or when the
+    /// floor is loud enough that rounding twice reads < 0.05 dB high: [`DEQUANT_BYPASS_RATIO`]).
     pub(crate) dequant: Option<Arc<dsp::Dequant>>,
 }
 
 /// Rounding noise of an 8-bit ADC, full scale² per complex sample (1/6 code²).
 const QUANTISATION_POWER: f64 = 1.0 / 6.0 / (128.0 * 128.0);
+
+/// T-170: largest `quant_power / floor_power` at which rendering skips the dequantiser. Rounding a
+/// re-rendered window again adds the recording's rounding noise a second time, reading the floor
+/// `10·log10(1 + quant_power / floor_power)` high at the recording's rate and gain (less at a wider
+/// rate or higher gain, and less again on an emission). This ratio keeps that below 0.05 dB
+/// (`10^0.005 − 1`): for int8 a floor of ≥ 2.68 codes rms per component (the recorded floor
+/// already includes its own rounding). Quieter, quantisation-limited recordings keep the
+/// dequantiser, whose STFT is the dominant cost of every retuned window.
+const DEQUANT_BYPASS_RATIO: f64 = 0.011_579;
 
 impl Recording {
     /// Reads the metadata, checks the recording has one centre, and estimates its floor.
@@ -305,7 +318,12 @@ impl Recording {
             Datatype::Ci16Le => 1.0 / 6.0 / (32_768.0 * 32_768.0),
             _ => 0.0,
         };
-        let dequant = dsp::Dequant::design(&samples, quant_power).map(Arc::new);
+        // T-170: the floor is estimated once, from the recording's first samples.
+        let dequant = if quant_power <= DEQUANT_BYPASS_RATIO * floor_power {
+            None
+        } else {
+            dsp::Dequant::design(&samples, quant_power).map(Arc::new)
+        };
         let gains_recorded = meta.global.provenance.is_some()
             || meta.captures.iter().any(|c| c.provenance.is_some());
         let mut provenance = first.provenance.get().clone();
