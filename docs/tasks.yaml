@@ -878,9 +878,9 @@ tasks:
   - id: T-053
     milestone: M0b
     title: HIL - run the device-interface acceptance suite against the real HackRF (receive-only, manual/nightly)
-    status: todo
+    status: in-progress
+    authorised: "user 2026-09-14 23:40: run now, stopping the supervisor live hk serve holding the HackRF; supervisor restarts the demo"
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
-    hold: "unblocked (T-047 merged); needs the HackRF (stop demo on :8899) and a slot"
     deps: [T-047, T-049, T-037]
     parallel_group: O
     use_cases: [SIGNAL-062, SPACE-050, AWARE-042]
