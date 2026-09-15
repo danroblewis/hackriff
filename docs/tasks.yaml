@@ -2457,7 +2457,7 @@ notes:
   - id: T-155
     milestone: MUI
     title: "MUI rehome M2 panels: alarms, survey reports, scheduler/attention status into their proper Explore/review places (not stacked at the bottom)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-REVIEW
     use_cases: []

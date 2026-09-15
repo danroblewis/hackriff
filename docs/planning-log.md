@@ -1755,3 +1755,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Post-merge tests:** hk-store 7, hk-model 6, hk-context 53, hk-pipeline 28, report scene 1. Lint clean.
   - **Merge queue after the T-170 full check:** T-147 (a05202c), T-146 (d110030), T-150 (7df8129), T-152 (9bbd85a). One combined full check follows, bisecting by merge if red.
   - **Then:** T-124 (M2 acceptance) resumes, with thresholds re-derived from the §7.2 latency tables.
+- **B0.405 T-155 launched (Sonnet).** It builds the Review drawer that rehomes alarms, survey reports, history, scheduler/attention and device status. With T-150 and T-152 committed, all six MUI panel tasks are now launched or done.
