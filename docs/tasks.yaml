@@ -3164,7 +3164,7 @@ tasks:
   - id: T-198
     milestone: M3
     title: "M3-DESIGN: ADR-0016 classification contracts (C15/C18/C38): Classification output with open-set unknown, taxonomy versioning, fusion with C17 priors, EmissionFeatures/Signature schema, ml-runtime interface (Mac-first), blind evaluation protocol; finalise M3 task graph"
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: M3D
@@ -3176,12 +3176,14 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+    commit: 451d0cb
+
   - id: T-199
     milestone: M3
     title: "C15 classical feature-tree modulation-family classifier (cumulants, instantaneous amplitude/phase/frequency stats, cyclic features) with open-set unknown and C17 prior fusion"
     status: todo
     priority: normal
-    deps: [T-198]
+    deps: [T-211]
     parallel_group: M3A
     use_cases: [SIGNAL-062]
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
@@ -3211,7 +3213,7 @@ tasks:
     title: "C18 fingerprint schema + editable signature database + matching (partial matches with ranked candidates)"
     status: todo
     priority: normal
-    deps: [T-198]
+    deps: [T-211]
     parallel_group: M3B
     use_cases: [AWARE-053]
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
@@ -3241,7 +3243,7 @@ tasks:
     title: "C38 ml-runtime Mac-first: model host with load/unload, batching, shadow mode and model@version provenance behind a conformance suite"
     status: todo
     priority: normal
-    deps: [T-198]
+    deps: [T-211]
     parallel_group: M3C
     use_cases: []
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
@@ -3256,7 +3258,7 @@ tasks:
     title: "C15 per-family DL stage with open-set (energy OOD or OpenMax), trained on synthetic impairments, inference via T-203 in shadow mode first"
     status: todo
     priority: normal
-    deps: [T-199, T-203]
+    deps: [T-199, T-203, T-213]
     parallel_group: M3C
     use_cases: []
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
@@ -3271,8 +3273,8 @@ tasks:
     title: "Labelled-capture dataset path for fine-tuning: CRC-valid decoder labels and user labels become exportable training snippets with provenance"
     status: todo
     priority: normal
-    deps: [T-198]
-    parallel_group: M3B
+    deps: [T-211]
+    parallel_group: M3L
     use_cases: []
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
     acceptance: "decoder-validated (CRC/BCH pass) and user-labelled emissions export normalised IQ snippets + labels + provenance (SigMF annotations); no fixture data committed; tests on synthetic"
@@ -3286,7 +3288,7 @@ tasks:
     title: "M3 blind acceptance through the mock SDR: family top-k and unknown rate vs hidden truth, signature match and unknown clustering, per-SNR conditions (M3 exit gate)"
     status: todo
     priority: normal
-    deps: [T-199, T-201, T-202, T-204]
+    deps: [T-199, T-200, T-201, T-202, T-204, T-212, T-213, T-215]
     parallel_group: M3E
     use_cases: [SIGNAL-062, AWARE-053]
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
@@ -3301,7 +3303,7 @@ tasks:
     title: "MUI: classification distribution, unknown score, signature match and cluster id in the focus panel and inventory"
     status: todo
     priority: normal
-    deps: [T-199, T-201]
+    deps: [T-199, T-201, T-202]
     parallel_group: MUI-X3
     use_cases: []
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
@@ -3314,7 +3316,7 @@ tasks:
   - id: T-208
     milestone: MAUTO
     title: "MAUTO-DESIGN (planning only): ADR-0015 decoder synthesis contracts - pipeline/objective representation, evidence-metric API, search strategy and budget, template format, region-analyze API (fills the T-190 stub), consumption of M3 Classification"
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: MAUTOD
@@ -3326,6 +3328,8 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+    commit: bf8cfa8
+
   - id: T-209
     milestone: M2-hardening
     title: "T-186 review follow-ups: early analog identification double-counts the emitter (SOURCE_ANALOG_CHAIN vs RDS_DECODER_ID sighting keys), pilot-locked no-PI emitters bypass the overload flag, duplicate refined-tuning rows, wasted RDS decode on the 1 s window"
@@ -3356,6 +3360,97 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: false
+  - id: T-211
+    milestone: M3
+    title: "M3 contracts skeleton per ADR-0016: taxonomy hk-mod@1, Classification types (posterior + likelihood distributions incl unknown, open-set score, entropy, deciding stage, provenance), emitter_classification nullable columns migration, current-family rank (user > decoder > lock-verified > classifier > track shape), API fields + docs/api.md"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3K
+    use_cases: []
+    found_by: "ADR-0016 M3 task graph (T-198, 2026-09-15)"
+    acceptance: "types and migration land with old rows still readable; FAMILY_ORDER generalised to the ADR rank with tests covering every pair; inventory/API expose the new fields (nullable) with docs/api.md + contract tests; no classifier logic; M0/M1/M2 acceptance unchanged"
+    area: crates/hk-model, new crate hk-classify (types only), crates/hk-api, docs/api.md, docs/07
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-212
+    milestone: M3
+    title: "C17 family priors for classification fusion per ADR-0016 (priors never scale unknown; lambda0 >= 0.1; 10:1 evidence cannot be flipped by priors)"
+    status: todo
+    priority: normal
+    deps: [T-211]
+    parallel_group: M3P
+    use_cases: []
+    found_by: "ADR-0016 M3 task graph (T-198, 2026-09-15)"
+    acceptance: "prior table per band/raster feeding P(c|f,l); fusion function with property tests for the three ADR rules; blind: priors reorder only within evidence ties"
+    area: crates/hk-context, crates/hk-classify
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-213
+    milestone: M3
+    title: "M3 evaluation harness: dev vs acceptance seed split, per-SNR accuracy/unknown-rate reports, OTA labels only from CRC-valid decodes"
+    status: todo
+    priority: normal
+    deps: [T-211]
+    parallel_group: M3V
+    use_cases: []
+    found_by: "ADR-0016 M3 task graph (T-198, 2026-09-15)"
+    acceptance: "harness runs a classifier over synthetic impairment sweeps and labelled fixtures, writes a per-condition report (JSON + markdown), enforces seed separation; used by T-199/T-204/T-206"
+    area: tests/e2e or crates/hk-classify/tests, py/ synth scenes if needed
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-214
+    milestone: M3
+    title: "C18 signature import from rtl_433 flex/device specs into immutable signature versions"
+    status: todo
+    priority: normal
+    deps: [T-201]
+    parallel_group: M3B
+    use_cases: []
+    found_by: "ADR-0016 M3 task graph (T-198, 2026-09-15)"
+    acceptance: "importer maps a documented subset of rtl_433 device specs to Signature versions with provenance; unsupported fields reported; tests on a small checked-in spec sample (text, not fixtures data)"
+    area: crates/hk-classify or hk-context, tools-free importer
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-215
+    milestone: M3
+    title: "MAUTO seed interface from M3 (ADR-0016 + ADR-0015): search ordering by posterior, pruning only on likelihood, >= max(p_unknown, 0.2) budget reserved for open search"
+    status: todo
+    priority: normal
+    deps: [T-199, T-201, T-202]
+    parallel_group: M3M
+    use_cases: []
+    found_by: "ADR-0016 M3 task graph (T-198, 2026-09-15)"
+    acceptance: "a seed API consumed by the future MAUTO engine returns ordered hypotheses with prune flags and reserved open-search share; property tests for the ordering/prune/reserve rules; no search engine"
+    area: crates/hk-classify
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-216
+    milestone: M3
+    title: "Jetson phase: TensorRT provider for hk-ml plus on-device fine-tuning from labelled captures"
+    status: blocked
+    priority: normal
+    deps: [T-203]
+    parallel_group: JET
+    use_cases: []
+    found_by: "ADR-0016 M3 task graph (T-198, 2026-09-15)"
+    blocked_on: "Jetson hardware (user purchase, S2/S6)"
+    acceptance: "TensorRT provider passes the hk-ml conformance suite on the Jetson; fine-tuning job from T-205 datasets; blocked until the Jetson is purchased"
+    area: crates/hk-ml (cuda feature)
+    needs: hardware
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

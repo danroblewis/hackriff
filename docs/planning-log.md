@@ -2265,3 +2265,22 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-185 merged (7e9d011).** Worktree removed; full check running.
   - **T-190 committed (5437f01),** merges after that check.
   - **T-191 launched** (Opus, band-edge override).
+- **B0.479 Full check green after the T-185 merge (7e9d011).** Lint clean; 1382/1382 tests; acceptance 29/29.
+- **B0.480 T-198 merged: ADR-0016 classification contracts (PROVISIONAL).** M3 task graph applied.
+  - **Renumbered:** the ADR's skeleton task became T-211, since T-210 is RDS correction.
+  - **New tasks:** T-211 (contracts skeleton, gates the fan-out), T-212 (priors), T-213 (eval harness), T-214 (rtl_433 import), T-215 (MAUTO seed), T-216 (Jetson TensorRT, blocked).
+  - **Rewired:** T-199..T-207 deps now per the ADR.
+  - **Key decisions:**
+    - taxonomy hk-mod@1 with a global unknown;
+    - rank: user > decoder > lock-verified > classifier > track shape;
+    - priors never scale unknown, and 10:1 evidence can't be flipped;
+    - classical cascade, then a re-rank-only verifier, then DL within a family at a +5-point a-priori margin;
+    - signatures are immutable versions, and a match never sets identity;
+    - ONNX runtime with a tract CPU reference; ort+CoreML only if the bake-off shows ≥2×.
+  - **Open questions for the user:**
+    1. Exit floors, and captures of an owned 433 MHz remote plus AIS/NOAA for OOK/PSK OTA labels.
+    2. tract in the default build?
+    3. Should user reclassification outrank a CRC-valid decode?
+    4. Should a new cluster type feed novelty (ADR-0012 §4.4)?
+    5. Signature export?
+  - **docs/15 note:** the user's untracked copy (differed only in ADR number) was backed up to the scratchpad before the committed copy replaced it.
