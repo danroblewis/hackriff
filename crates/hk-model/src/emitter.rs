@@ -174,6 +174,84 @@ pub struct KnownStatusChange {
     pub author: StatusAuthor,
 }
 
+/// Inventory lifecycle of an emitter (T-078, docs/07 §2.11).
+///
+/// Every emitter starts as a `Candidate`. An auto rule (strong, unambiguous evidence) or a user
+/// promotes it to `Confirmed`; a user deletes either. `Deleted` is final for that row: it leaves
+/// the inventory and entity resolution, and a later sighting of the same signal creates a new
+/// candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LifecycleState {
+    /// Seen, not (yet) confirmed: intermittent, weak or not yet enough evidence.
+    Candidate,
+    /// Confirmed by an auto rule or a user.
+    Confirmed,
+    /// Removed from the inventory by a user; row, links and history are kept.
+    Deleted,
+}
+
+/// Who changed an emitter's lifecycle state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LifecycleAuthor {
+    /// An automatic confirmation rule; `actor` names the rule and version.
+    Auto,
+    /// A person; `actor` names the credential (e.g. the API token fingerprint).
+    User,
+}
+
+/// One entry of an emitter's append-only lifecycle history.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LifecycleChange {
+    /// Emitter.
+    pub emitter_id: EmitterId,
+    /// New state.
+    pub state: LifecycleState,
+    /// State before.
+    pub previous: LifecycleState,
+    /// Who.
+    pub author: LifecycleAuthor,
+    /// Rule id (`Auto`) or credential fingerprint (`User`).
+    pub actor: String,
+    /// Why, in words (the rule's evidence, or the user's note).
+    pub reason: String,
+    /// When: data time for auto rules, wall time for users.
+    pub t: Timestamp,
+}
+
+/// One appearance of an emitter: a source observation counted into it (a track, or a decoder
+/// sighting when it has no tracks).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Appearance {
+    /// Time span.
+    pub time: TimeRange,
+    /// Sightings (bursts) it added.
+    pub count: u64,
+    /// Duty cycle within the span, when the tracker measured one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty_cycle: Option<f64>,
+}
+
+/// Recurrence statistics of an emitter (T-078), computed from its observation ledger.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Recurrence {
+    /// Sightings summed (the emitter's `count`: bursts for tracks).
+    pub occurrences: u64,
+    /// Appearances (track observations; decoder sightings when there are no tracks).
+    pub appearances: u64,
+    /// First to last appearance, s.
+    pub span_s: f64,
+    /// Time on air: Σ appearance span × duty cycle, s. An appearance without a measured duty
+    /// cycle adds nothing (unknown duty is not evidence of continuity).
+    pub on_air_s: f64,
+    /// `on_air_s / span_s` (≤ 1), `None` for a zero span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duty_cycle: Option<f64>,
+    /// The latest appearances, newest first.
+    pub recent: Vec<Appearance>,
+}
+
 /// One classifier result, appended to an emitter's history (never overwritten).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Classification {

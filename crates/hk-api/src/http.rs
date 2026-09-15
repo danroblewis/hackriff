@@ -10,7 +10,8 @@
 //! | `/api/streams` | GET | token | Discovery (T-060): offered streams (id, kind, class, geometry, format), on-demand openers, the TCP stream address. Never content. |
 //! | `/api/history?f_lo&f_hi&t0&t1[&max_cells]` | GET | token | T-017 region-over-time grid ([`crate::query`]) |
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | GET | token | T-021 floor vs time ([`crate::query`]) |
-//! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
+//! | `/api/inventory?[f_lo&f_hi][&t0&t1][&state][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]); `state` = T-078 lifecycle |
+//! | `/api/inventory/<id>[/promote]` | GET, POST, DELETE | token (header only for mutating) | T-078 one entry, promote a candidate, delete ([`crate::inventory`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -74,6 +75,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/history"),
     ("GET", "/api/floor"),
     ("GET", "/api/inventory"),
+    ("GET", "/api/inventory/{id}"),
+    ("POST", "/api/inventory/{id}/promote"),
+    ("DELETE", "/api/inventory/{id}"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -632,6 +636,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     };
     if let Some(r) = control::route(state, &ctl)
         .or_else(|| crate::selections::route(state, &ctl))
+        .or_else(|| crate::inventory::route(state, &ctl))
         .or_else(|| crate::outputs::route(state, &ctl))
     {
         let allow = r
