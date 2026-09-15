@@ -711,3 +711,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - A repeated-factor prior (2^−10 via gcd(g, g′)) demotes squared factors.
   - A new `ambiguous_with` API field is added.
   **Result over 200 seeds:** 8 frames 0 wrong (was 3 at 0.95); 3 frames 24 wrong at ≤0.07 (was 164 at ≤0.24). **Residual:** a truth generator without (x+1) remains indistinguishable at the inherent ~1/128 rate (8 frames: 1/200 at 0.94). This is inherent to frames-only evidence and accepted. Merge follows the in-flight full check.
+- **B0.253 T-092 delivered** (8866566). Contents:
+  - **Recording:** always-on decoded capture as a local consumer on each inspector publisher, never blocking; drops are counted.
+  - **Storage:** `.hks` holds the published stream bytes (layers stripped), `.idx` a 16-byte offset/time index, `.json` the catalogue.
+  - **Quotas:** 1 GiB total, 64 MiB per capture with segment roll, oldest evicted first.
+  - **API:** `CaptureSource` gains open_at/list/info/frame_at_time/delete; routes list/get/delete/frames (frame or time scrub); parse seeks via the index; `/ws/open/inspector?capture=` replay.
+  - **UI:** picker, slider and jump-to-time.
+  - **Tests:** mock-SDR e2e covering stored==live, scrub, replay re-parse, quota, stalled disk.
+  Timeboxed Opus review running; it checks crash consistency, eviction versus open readers, gating on replay, and the runtime.rs conflict with T-093.

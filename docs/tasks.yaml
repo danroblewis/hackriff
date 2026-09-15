@@ -1530,7 +1530,8 @@ tasks:
   - id: T-092
     milestone: M1
     title: "M1 Always-on decoded-stream capture + scrubbable review"
-    status: in-progress
+    status: review
+    commit: 8866566
     deps: [T-085, T-088]
     parallel_group: M1C
     use_cases: [SIGNAL-062]
