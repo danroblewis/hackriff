@@ -41,8 +41,8 @@ use hk_model::{
     SampleTime,
 };
 use hk_stream::{
-    BinaryRecord, DEFAULT_MAX_FRAME_LEN, DecoderFeed, FeedAttacher, PublisherConfig, StreamError,
-    StreamHeader, gate,
+    BinaryRecord, ConsumerId, DEFAULT_MAX_FRAME_LEN, DecoderFeed, FeedAttacher, PublisherConfig,
+    StreamError, StreamHeader, gate,
 };
 
 use crate::ingest::Ingest;
@@ -266,6 +266,10 @@ struct Shared {
     proc: Mutex<Proc>,
     wake: Condvar,
     shutdown: AtomicBool,
+    /// [`PluginInstance::finish`] ended the input: a process that exits is not restarted.
+    finishing: AtomicBool,
+    /// The running process's input consumer (set while attached).
+    consumer: Mutex<Option<ConsumerId>>,
     counters: Counters,
     log: Mutex<VecDeque<String>>,
     ingest: Arc<Mutex<Ingest>>,
@@ -441,6 +445,8 @@ impl PluginInstance {
             }),
             wake: Condvar::new(),
             shutdown: AtomicBool::new(false),
+            finishing: AtomicBool::new(false),
+            consumer: Mutex::new(None),
             counters: Counters::default(),
             log: Mutex::new(VecDeque::new()),
             ingest,
@@ -522,6 +528,55 @@ impl PluginInstance {
         self.shared.stats()
     }
 
+    /// Ends the input without losing any of it (T-103), then stops. Records already queued are
+    /// still delivered, then the plugin reads EOF (the contract's end of input) and the host
+    /// waits for it to flush and exit on its own; that exit is not restarted. A plugin still
+    /// starting up (not yet reading) is waited for too: the wait ends on the plugin's exit, or
+    /// after `idle` without progress (input consumed, lines stored, state), when it is killed.
+    /// Never touches capture: records are no longer pushed once this is called.
+    pub fn finish(mut self, idle: Duration) -> PluginStats {
+        self.shared.finishing.store(true, Ordering::Release);
+        self.shared.wake.notify_all();
+        let attacher = self.feed.attacher();
+        let mut input_ended = false;
+        let mut last = None;
+        let mut since = Instant::now();
+        loop {
+            let s = self.shared.stats();
+            if matches!(s.state, PluginState::Stopped | PluginState::Failed) {
+                break;
+            }
+            let consumer = *lock(&self.shared.consumer);
+            if let Some(id) = consumer
+                && !input_ended
+                && s.state == PluginState::Running
+            {
+                input_ended = attacher.finish_input(id);
+            }
+            let written = consumer
+                .and_then(|id| attacher.stats(id))
+                .map_or(0, |c| c.bytes_written);
+            let progress = (
+                s.decodes + s.annotations + s.malformed + s.store_errors,
+                written,
+                s.state,
+                s.starts,
+            );
+            if last != Some(progress) {
+                last = Some(progress);
+                since = Instant::now();
+            } else if since.elapsed() >= idle {
+                self.shared.log(format!(
+                    "host: no progress for {idle:?} after the input ended; stopping the plugin"
+                ));
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.stop();
+        self.shared.stats()
+    }
+
     fn stop(&mut self) {
         let Some(supervisor) = self.supervisor.take() else {
             return;
@@ -547,7 +602,8 @@ fn supervise(shared: Arc<Shared>, attacher: FeedAttacher, program: PathBuf, args
         shared.set_state(PluginState::Starting);
         let started = Instant::now();
         run_once(&shared, &attacher, &program, &args);
-        if shared.shutdown.load(Ordering::Acquire) {
+        // After `finish` ended the input, an exit is the end of the run, not a crash to restart.
+        if shared.shutdown.load(Ordering::Acquire) || shared.finishing.load(Ordering::Acquire) {
             break;
         }
         let now = Instant::now();
@@ -577,10 +633,13 @@ fn supervise(shared: Arc<Shared>, attacher: FeedAttacher, program: PathBuf, args
         };
         let (guard, _) = shared
             .wake
-            .wait_timeout_while(guard, backoff, |_| !shared.shutdown.load(Ordering::Acquire))
+            .wait_timeout_while(guard, backoff, |_| {
+                !shared.shutdown.load(Ordering::Acquire)
+                    && !shared.finishing.load(Ordering::Acquire)
+            })
             .unwrap_or_else(PoisonError::into_inner);
         drop(guard);
-        if shared.shutdown.load(Ordering::Acquire) {
+        if shared.shutdown.load(Ordering::Acquire) || shared.finishing.load(Ordering::Acquire) {
             break;
         }
         backoff = (backoff * 2).min(policy.backoff_max);
@@ -651,7 +710,10 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
     );
     match consumer {
         // Running means input is attached: pushes from now on reach this process.
-        Ok(_) => shared.set_state(PluginState::Running),
+        Ok(id) => {
+            *lock(&shared.consumer) = Some(id);
+            shared.set_state(PluginState::Running);
+        }
         Err(_) => shared.kill(),
     }
 
@@ -689,6 +751,7 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
     }
     let status = child.wait();
     if let Ok(id) = consumer {
+        *lock(&shared.consumer) = None;
         attacher.detach(id);
     }
     match done_rx.recv_timeout(READER_JOIN_TIMEOUT) {

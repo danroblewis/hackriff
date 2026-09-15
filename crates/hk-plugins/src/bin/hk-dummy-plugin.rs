@@ -9,6 +9,7 @@
 //! - `--stall`: never read stdin (hang watchdog, backpressure).
 //! - `--read-delay-us N`: sleep N µs after reading each record (a slow decoder that still makes
 //!   progress, for lossless backpressure tests).
+//! - `--start-delay-ms N`: sleep N ms before reading anything from stdin (a slow start-up, T-103).
 //! - `--claim-class C` / `--content TEXT`: claim a class and attach content (clamping, gating).
 //! - `--annotate`: also emit an `annotation` line per message.
 //! - `--datatype D`: exit with code 4 unless the header's datatype is D.
@@ -45,6 +46,7 @@ struct Args {
     orphan: bool,
     stall_child: bool,
     read_delay_us: u64,
+    start_delay_ms: u64,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -62,6 +64,7 @@ fn parse_args() -> Result<Args, String> {
         orphan: false,
         stall_child: false,
         read_delay_us: 0,
+        start_delay_ms: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -106,6 +109,11 @@ fn parse_args() -> Result<Args, String> {
                 args.read_delay_us = value()?
                     .parse()
                     .map_err(|e| format!("--read-delay-us: {e}"))?
+            }
+            "--start-delay-ms" => {
+                args.start_delay_ms = value()?
+                    .parse()
+                    .map_err(|e| format!("--start-delay-ms: {e}"))?
             }
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -313,6 +321,10 @@ fn main() {
         loop {
             std::thread::sleep(Duration::from_secs(3600));
         }
+    }
+    if args.start_delay_ms > 0 {
+        // A slow start-up (T-103): nothing is read from stdin until the delay has passed.
+        std::thread::sleep(Duration::from_millis(args.start_delay_ms));
     }
     match run(&args) {
         Ok(records) => eprintln!("hk-dummy-plugin: stdin closed after {records} records"),

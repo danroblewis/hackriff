@@ -99,7 +99,9 @@ pub enum NodeSpec {
         /// Zero samples pushed at detach so block-buffered decoders flush their tail.
         #[serde(default)]
         tail_pad_samples: usize,
-        /// Longest wait for decodes to settle at detach, s.
+        /// At detach the plugin's input ends (EOF) and the chain waits for it to exit; it is
+        /// stopped after this long without progress, s (T-103; lossless replays allow at least
+        /// 30 s).
         #[serde(default)]
         settle_s: f64,
     },

@@ -332,6 +332,7 @@ The N1 covert-channel regressions (hex text, packed integer, numeric page in cap
 - **Unblockable input:** the stdin pipe is non-blocking, and the writer polls it together with a wake socket; detaching a plugin (exit, stall, shutdown) abandons a blocked write.
 - **Bounded reader join:** output readers are joined for at most 2 s after the group kill. A descendant that escaped the group (e.g. `setsid`) cannot block restart or shutdown; its readers are abandoned (no further ingest) and counted (`readers_abandoned`).
 - **Shutdown** SIGKILLs the process group. A pgid is only killed while its leader is unreaped, which rules out reuse.
+- **End of input (T-103):** `PluginInstance::finish(idle)` ends a plugin's input without losing it. Records already queued are still written, then the plugin's stdin is closed (EOF), and the host waits for the plugin to flush and exit on its own; that exit is not restarted. A plugin still starting up (not yet reading stdin) is waited for as well. It is killed only after `idle` without progress (input consumed, lines stored, state change). A decoder must therefore flush its output and exit at stdin EOF. The pipeline's plugin chain calls it at detach instead of a fixed settle window after the last record, which cut off slow-starting plugins (0 decodes under load).
 - **Limits:** only `nice` (via `setpriority`), the queue size, message size and log ring are enforced. Memory and CPU caps are future work.
 
 ### 9.6 Fit for readsb (T-015)

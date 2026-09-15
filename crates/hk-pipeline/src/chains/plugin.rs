@@ -4,8 +4,11 @@
 //!
 //! The DDC is skipped when the channel is centred on the tuned centre at the input rate (the
 //! samples are passed through unchanged). The input channel class is the source class, a ceiling
-//! on the plugin's output. At detach, `tail_pad_samples` zeros flush block-buffered decoders and
-//! the chain waits up to `settle_s` for decodes to settle before stopping the plugin.
+//! on the plugin's output. At detach, `tail_pad_samples` zeros flush block-buffered decoders, then
+//! the plugin's input ends (queued records delivered, then EOF) and the chain waits for the plugin
+//! to flush and exit (`PluginInstance::finish`, T-103). It is stopped only after `settle_s` without
+//! progress (a lossless replay allows at least [`PLUGIN_WAIT_STALL`]), so a slow-starting plugin
+//! is never cut off before it has read its input.
 //!
 //! **Backpressure (lossless replay, T-037b).** Plugin input is drop-not-block, which is right for
 //! a live source but lost decodes when an unpaced recording outran the plugin (readsb's 8 MiB
@@ -329,22 +332,17 @@ fn run_inner(
             left -= n;
         }
     }
-    let mon = inst.monitor();
-    let deadline = Instant::now() + Duration::from_secs_f64(settle_s.max(0.0));
-    let mut last = mon.stats().decodes;
-    let mut since = Instant::now();
-    while Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(100));
-        let d = mon.stats().decodes;
-        if d != last {
-            last = d;
-            since = Instant::now();
-        } else if since.elapsed() >= Duration::from_secs(2) {
-            break;
-        }
-    }
-    drop(mon);
-    let stats = inst.shutdown();
+    // End of input (T-103): the plugin gets everything queued, then EOF, and the chain waits for
+    // it to flush and exit. The wait is on the plugin's progress, not a wall-clock settle window
+    // from the last push, which cut off a plugin still starting up (0 decodes under load). The
+    // ring is not held here: the chain's reader was dropped above. A lossless replay allows a
+    // stalled plugin as long as a lossless push would; a live chain allows `settle_s`.
+    let settle = Duration::from_secs_f64(settle_s.max(0.0));
+    let stats = inst.finish(if lossless {
+        settle.max(PLUGIN_WAIT_STALL)
+    } else {
+        settle
+    });
     let mut ing = ingest.lock().unwrap_or_else(PoisonError::into_inner);
     add(&c.plugin_decodes, ing.stats().decodes_stored);
     add(

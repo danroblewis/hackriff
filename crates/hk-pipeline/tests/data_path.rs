@@ -192,6 +192,73 @@ fn a_short_lossless_replay_attaches_its_coverage_chain_and_feeds_every_sample() 
     assert_eq!(s.counter("/source/coverage_wait_timeouts"), 0);
 }
 
+/// T-103: a plugin that takes longer to start reading than the old 2 s settle window (the flaky
+/// readsb chain under load, B0.206/B0.219) still decodes every record, the first included. Before
+/// the fix the chain stopped it after 2 s without a decode: 0 decodes, every time.
+#[test]
+fn a_slow_starting_plugin_decodes_every_record_from_the_first() {
+    let src = TempDir::new("slowstart-src");
+    let dir = TempDir::new("slowstart");
+    let Some(exe) = dummy_plugin(&dir.0) else {
+        return;
+    };
+    let meta = tone_recording(&src.0, "short", 2.4e6, 0.1, 1090e6, None);
+    let manifest = dummy_manifest(
+        &src.0,
+        &exe,
+        &[
+            "--every",
+            "1",
+            "--profile",
+            "adsb-like",
+            "--start-delay-ms",
+            "3000",
+        ],
+        8 << 20,
+    );
+    let (cfg, replay, _input) = blind_replay_config(
+        &dir.0,
+        &meta,
+        coverage_plan(1090e6, &manifest),
+        Pacing::Unpaced,
+    );
+    let (s, fired) = wait_guarded(start(cfg, replay), Duration::from_secs(120));
+    eprintln!("{}", s.to_text());
+    assert!(!fired, "the run did not finish; the watchdog stopped it");
+    assert!(s.errors.is_empty(), "{:?}", s.errors);
+    assert_eq!(s.counter("/chains/attached"), 1);
+    assert_eq!(s.counter("/chains/plugin_dropped"), 0);
+    assert_eq!(
+        s.counter("/chains/plugin_samples"),
+        s.counter("/source/samples")
+    );
+    // One decode per record (`--every 1`), each carrying how many records the plugin had read.
+    let repo = repo(&dir.0);
+    let mut records: Vec<u64> = ["a1b2c0", "a1b2c1", "a1b2c2", "a1b2c3"]
+        .iter()
+        .flat_map(|icao| {
+            repo.decodes_for_identity(&hk_model::DecodedIdentity {
+                scheme: IdentityScheme::AdsbIcao,
+                value: (*icao).to_owned(),
+            })
+            .unwrap()
+        })
+        .map(|d| d.metadata["records"].as_u64().unwrap())
+        .collect();
+    records.sort_unstable();
+    assert!(
+        s.counter("/chains/plugin_decodes") > 0,
+        "the slow-starting plugin decoded nothing"
+    );
+    assert_eq!(records.first(), Some(&1), "the first record was decoded");
+    assert_eq!(
+        records,
+        (1..=records.len() as u64).collect::<Vec<_>>(),
+        "every record the plugin read was decoded, none lost"
+    );
+    assert_eq!(s.counter("/chains/plugin_decodes"), records.len() as u64);
+}
+
 #[test]
 fn lossless_plugin_feeding_waits_for_a_slow_plugin_instead_of_dropping() {
     let src = TempDir::new("slow-src");
