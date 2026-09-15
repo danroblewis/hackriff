@@ -1756,3 +1756,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Merge queue after the T-170 full check:** T-147 (a05202c), T-146 (d110030), T-150 (7df8129), T-152 (9bbd85a). One combined full check follows, bisecting by merge if red.
   - **Then:** T-124 (M2 acceptance) resumes, with thresholds re-derived from the §7.2 latency tables.
 - **B0.405 T-155 launched (Sonnet).** It builds the Review drawer that rehomes alarms, survey reports, history, scheduler/attention and device status. With T-150 and T-152 committed, all six MUI panel tasks are now launched or done.
+- **B0.406 T-151 committed (7ad402a, Sonnet). Coordinator check: diff confined to `explore/*` plus 2 tests; npm test 178 passed / 0 failed.**
+  - Built the inventory tabs (sortable, wrap-layout Promote/Delete), selections and the focus panel (explanations labelled suggestions).
+  - Honest placeholders for gaps 2, 3 and 13 ("500+").
+  - Re-exports `promoteEntry`/`deleteEntry` from the old UI module. T-156 must move these before retiring the old UI.
+  - Merge queue after the T-170 full check: T-147, T-146, T-150, T-151, T-152, then one combined full check.

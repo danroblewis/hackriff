@@ -2396,7 +2396,8 @@ notes:
   - id: T-151
     milestone: MUI
     title: "MUI Explore sidebars: inventory Candidates/Confirmed (sortable, Promote/Delete reachable without horizontal scroll), Selections with actions, right focus panel (big frequency, refined-from-output note, measurements, ranked explanations as suggestions, actions Listen/Decode/Record-Export/Stream/Promote/Delete)"
-    status: in-progress
+    status: review
+    commit: 7ad402a
     deps: [T-149]
     parallel_group: MUI-EXPLORE
     use_cases: []
