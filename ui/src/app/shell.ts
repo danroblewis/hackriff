@@ -4,7 +4,7 @@
 import { formatFrequency, parseFrequency } from "../controls/freq";
 import type { ControlState } from "../controls/model";
 import type { AppContext } from "./context";
-import { byId } from "./dom";
+import { byId, h } from "./dom";
 import { apiConnFor, startPoll, storeToken } from "./net";
 import { cycleTheme, requestGoto, setMode, toast, toggleReview, type AppState, type Mode, type Prefs } from "./state";
 
@@ -71,6 +71,23 @@ export function mountShell(ctx: AppContext) {
     byId("ro-centre")!.textContent = d.centerHz === null ? "–" : formatFrequency(d.centerHz);
     byId("ro-span")!.textContent = d.sampleRateHz === null ? "–" : formatFrequency(d.sampleRateHz);
   }, { immediate: true });
+
+  // Recording pill (§4.1; API GAP 1: no always-on buffer status, so this shows only a manual
+  // recording in progress, from the same control-state poll as `device`).
+  store.select((s) => s.device.recording, (rec) => {
+    const el = byId("rec-pill")!;
+    el.hidden = !rec;
+    if (rec) el.replaceChildren(h("span", { class: "d", "aria-hidden": "true" }), document.createTextNode("Recording (manual)"));
+  }, { immediate: true });
+
+  // Review badge (§4.1): open anomaly count, polled independently of the drawer's own tabs (T-155).
+  store.select((s) => s.openAlarms, (n) => {
+    byId("review-btn")!.textContent = n > 0 ? `Review (${n > 99 ? "99+" : n})` : "Review";
+  }, { immediate: true });
+  startPoll(async () => {
+    const r = await client.get<{ anomalies: readonly unknown[] }>("/api/anomalies?status=open&limit=100");
+    store.set((s) => (s.openAlarms === r.anomalies.length ? {} : { openAlarms: r.anomalies.length }));
+  }, 30_000);
 
   store.select((s) => s.conn, (c) => {
     const el = byId("conn")!;

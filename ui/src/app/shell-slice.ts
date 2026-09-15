@@ -23,6 +23,8 @@ export interface NavSlice { gotoHz: number | null; seq: number }
 export interface ShellState {
   mode: Mode; theme: Theme; conn: ConnSlice; device: DeviceSlice; nav: NavSlice;
   toast: { text: string; seq: number };
+  /** Open anomaly count for the Review button's badge (`GET /api/anomalies?status=open`, §4.1). */
+  openAlarms: number;
 }
 
 /** Per-viewer preferences kept in localStorage (never state that must persist). */
@@ -48,6 +50,7 @@ export const shellInitial = (prefs: Prefs): ShellState => ({
   device: { loaded: false, live: false, finished: false, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false },
   nav: { gotoHz: null, seq: 0 },
   toast: { text: "", seq: 0 },
+  openAlarms: 0,
 });
 
 export const setMode = (mode: Mode) => (): Partial<AppState> => ({ mode });
