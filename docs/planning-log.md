@@ -1173,3 +1173,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.331 Full check of main f0f2aaf (integration 2): green.** Lint clean. nextest + UI 1340/1340 in 493 s under load from 3 agents; `scheduler_bandit_e2e::bandit_on…` failed on try 1 and passed on try 2, so it's flaky under load even though it's serialized. Acceptance 32/32 in 77 s. Watch the bandit-on flakiness; if it recurs outside heavy load, give the test more stream time or a less timing-sensitive assertion (T-131 is working in this area). In flight: T-123, T-131, T-132.
 - **B0.332 T-123 merged** (f243534; UI only, coordinator scan). Adds three thin-client panels: survey report (null `fco` shown as indicative/biased, coverage statement, suggestions, export links via GET `?token=` per the api.md convention), novelty alarms (list/detail/dismiss/reopen), and scheduler status/POI/arms. UI tests: report 10, alarms 16, scheduler 9. No API gaps found. `just test-ui` running on main.
 - **B0.333 Main c790365 (T-123): `just test-ui` green,** 0 failures across all suites (including report 10, alarms 16, scheduler 9). In flight: T-131, T-132. Remaining M2 after those: T-124 (blind acceptance).
+- **B0.334 T-131 delivered** (d6f397e, branch t-131-alarm-wiring).
+  - **Alarm service:** opened in run.rs and fed at every occupancy close (site-tagged rows, gain steps from history provenance, `set_context`, `observe_interval`). **Site-tagged rows fix a real gap:** rows were always Unassigned, so pipeline runs never built baselines.
+  - **Other wiring:** `ChangeKind` merged into `AlarmKind`; candidates published with the bandit off; `compare_report` status tests; http.rs route rows.
+  - **Suspect-ban test is now discriminating:** plan gain overdrive gives 3 bans, no overdrive gives 0. The bandit-on test is load-robust (20 s stream time, lease added after outcomes).
+  - **Full-path 48 h scene e2e** (29 s): 6 baselines, 4 mature; hour-30 emitter ranks 1/5 in candidates; report 6/6 true fco with baseline comparison available.
+  - **But no alarms raised and zero alarm inputs/suppressions counted.** The agent attributes this to the emitter's channel being immature; zero inputs with 4 mature subjects looks suspicious.
+  - **Not done:** new-emitter alarms aren't fed; the site pin isn't persisted.
+
+  Timeboxed Opus review running; it is investigating the zero-alarm-inputs question.
