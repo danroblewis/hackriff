@@ -1225,3 +1225,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Targeted tests: 119/119 green; clippy clean.
   - T-132 merges into main after the T-131 full check finishes.
   - T-133 (history source+site) and T-134 (sparse slots) launched on 77be712 with disjoint file areas.
+- **B0.340 T-131 full check green; T-132 merged.**
+  - T-131 full check on main (f81f566): lint clean; 1346/1346 nextest+UI tests (bandit e2e passed without a retry); acceptance 32/32, 79 s.
+  - T-132 merged (77be712); T-132 worktree removed; full check started.

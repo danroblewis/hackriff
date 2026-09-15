@@ -2087,8 +2087,8 @@ tasks:
   - id: T-132
     milestone: M2
     title: "M2 integration part 2b: history source+site tiles and filters; baseline memory bound, per-slot change-point latch, per-gain-state key, level-statistic bimodality, load_site outside lock, weak-interferer sequential test"
-    status: review
-    commit: b55b9ba
+    status: done
+    commit: 77be712
     deps: [T-128, T-116, T-126]
     parallel_group: M2B
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
