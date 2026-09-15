@@ -1420,3 +1420,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.369 Disk back to 93 GB free (freed outside this session). Launches resumed.**
   - T-140 (Sonnet, baseline hardening nits) and T-141 (Opus, Gamma-mixture floor for mixed tiles) launched in parallel with T-124.
   - The three agents edit disjoint areas: baseline, radiometry/history, tests/e2e.
+- **B0.370 Legal acceptance failure confirmed flaky.**
+  - Acceptance re-runs: 32/32 twice.
+  - Treated as green for the T-139 merge.
+  - T-142 added (Sonnet, test reliability only, no new legal checks): log match context and harden the sentinel byte search against coincidental UUID/timestamp matches. It launches after T-124, which edits tests/e2e.

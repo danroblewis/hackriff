@@ -2233,6 +2233,20 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-142
+    milestone: M2
+    title: "De-flake legal acceptance sentinel search: identity sentinels matched by chance in per-run UUIDs/timestamps (test reliability only, no new legal checks)"
+    status: todo
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "Full check after T-139 (aa41cbb) 2026-09-15: legal_untagged_recording_in_the_paging_band_yields_no_content_or_identity_anywhere failed at tests/e2e/tests/acceptance/legal.rs:346 once; passed in isolation and in 2 of 2 full acceptance re-runs"
+    acceptance: "identify which output/sentinel matched (log the match context on failure); make the byte search robust to coincidental matches (e.g. minimum sentinel length or delimiter-bounded match, excluding UUID/timestamp fields) without weakening detection of a real clear-identity leak (the tagged positive control still trips); 20 repeated runs green"
+    area: tests/e2e/tests/acceptance/{legal.rs,common.rs}
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
