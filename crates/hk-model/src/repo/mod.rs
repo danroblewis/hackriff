@@ -61,6 +61,9 @@
 
 pub mod alarms; // T-122
 mod bookmarks;
+mod classify; // T-211
+#[cfg(test)]
+mod classify_rank_tests;
 mod cluster;
 #[cfg(test)]
 mod cluster_tests;
@@ -118,6 +121,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0004_site_assignment.sql"), // T-136 persisted site assignment
     include_str!("migrations/0005_content_checks_optional.sql"), // T-143 gating opt-in
     include_str!("migrations/0006_user_band.sql"), // T-191 user band override
+    include_str!("migrations/0007_classification.sql"), // T-211 M3 classification columns
 ];
 
 /// Schema version this build creates and understands.

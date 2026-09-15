@@ -1030,6 +1030,14 @@ pub struct RecordedClassification {
     pub input: Option<LinkTarget>,
     /// Fingerprint feature-set version of the input, if recorded.
     pub feature_set_version: Option<u32>,
+    /// Taxonomy the row was written under (T-211; `None` for pre-M3 rows).
+    pub taxonomy: Option<crate::classify::TaxonomyRef>,
+    /// Deciding stage: stored, or derived for a pre-M3 row ([`crate::classify::ArbRank::legacy`]).
+    pub stage: crate::classify::Stage,
+    /// Arbitration rank: stored, or derived for a pre-M3 row.
+    pub arb_rank: crate::classify::ArbRank,
+    /// The full M3 classification (`None` for pre-M3 rows).
+    pub detail: Option<crate::classify::Classification>,
 }
 
 /// An emitter link with its supersession state.

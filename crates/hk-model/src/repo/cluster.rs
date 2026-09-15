@@ -4,6 +4,7 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use uuid::Uuid;
 
+use super::classify::FAMILY_ORDER;
 use super::inventory::{
     emitter_id_by_identity, identity_label, insert_status, link_kind, link_target,
 };
@@ -176,15 +177,7 @@ fn current_status(conn: &Connection, id: EmitterId) -> Result<Option<CurrentStat
     .transpose()
 }
 
-/// Order of an emitter's classifications for its current family (T-183): a family measured from a
-/// track's occupancy (input `track`: shape evidence only) never supersedes one from a
-/// demodulation, decoder or classifier; among equals the latest wins. Insert order alone made the
-/// family depend on which pipeline thread (detection writer or chain) wrote last, and on merge
-/// direction.
-const FAMILY_ORDER: &str =
-    "ORDER BY (c.input_kind IS 'track') ASC, c.classification_id DESC LIMIT 1";
-
-/// Current family (see [`FAMILY_ORDER`]), else the fingerprint family.
+/// Current family (arbitration rank, [`FAMILY_ORDER`]), else the fingerprint family.
 fn current_family(conn: &Connection, id: EmitterId) -> Result<Option<String>, RepoError> {
     let family: Option<String> = conn
         .prepare_cached(&format!(
@@ -336,10 +329,11 @@ fn carry_evidence(
 ) -> Result<(), RepoError> {
     conn.prepare_cached(
         "INSERT INTO emitter_classification (emitter_id, t, family, confidence, open_set_score, \
-         model_version, input_kind, input_id, feature_set_version) \
+         model_version, input_kind, input_id, feature_set_version, taxonomy, stage, arb_rank, \
+         detail) \
          SELECT ?1, t, family, confidence, open_set_score, model_version, input_kind, input_id, \
-         feature_set_version FROM emitter_classification WHERE emitter_id = ?2 \
-         ORDER BY classification_id",
+         feature_set_version, taxonomy, stage, arb_rank, detail FROM emitter_classification \
+         WHERE emitter_id = ?2 ORDER BY classification_id",
     )?
     .execute(params![blob(into), blob(from)])?;
     let decided = |a: StatusAuthor| {
@@ -1453,56 +1447,7 @@ impl Repository {
         &self,
         id: EmitterId,
     ) -> Result<Vec<RecordedClassification>, RepoError> {
-        type Raw = (
-            i64,
-            String,
-            f64,
-            f64,
-            String,
-            Option<String>,
-            Option<[u8; 16]>,
-            Option<i64>,
-        );
-        let rows: Vec<Raw> = {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT t, family, confidence, open_set_score, model_version, input_kind, input_id, \
-                 feature_set_version FROM emitter_classification WHERE emitter_id = ?1 \
-                 ORDER BY classification_id",
-            )?;
-            stmt.query_map([blob(id)], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?
-        };
-        rows.into_iter()
-            .map(
-                |(t, family, confidence, open_set_score, model_version, kind, input, v)| {
-                    Ok(RecordedClassification {
-                        classification: Classification {
-                            t: Timestamp::from_unix_nanos(t),
-                            family,
-                            confidence,
-                            open_set_score,
-                            model_version,
-                        },
-                        input: match (kind, input) {
-                            (Some(k), Some(i)) => Some(link_target(&k, Uuid::from_bytes(i))?),
-                            _ => None,
-                        },
-                        feature_set_version: v.map(|v| v as u32),
-                    })
-                },
-            )
-            .collect()
+        super::classify::history(&self.conn, id)
     }
 
     /// An emitter's stored fingerprint (current feature set only).

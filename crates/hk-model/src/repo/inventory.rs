@@ -255,7 +255,7 @@ pub(super) fn append_track_segments_on(
     Ok(())
 }
 
-fn emitter_exists(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
+pub(super) fn emitter_exists(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
     Ok(conn
         .prepare_cached("SELECT 1 FROM emitter WHERE emitter_id = ?1")?
         .query_row([blob(id)], |_| Ok(()))

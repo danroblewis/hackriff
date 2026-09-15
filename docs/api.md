@@ -163,7 +163,10 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
                   "reason": "on FM broadcast allocation", "prior_ref": "band-plan/us-fm@1", "reason_withheld": false },
       "tags": [], "tags_withheld": false, "family": "wfm-broadcast",
       "classification": { "family": "wfm-broadcast", "confidence": 0.9, "open_set_score": 0.1,
-                           "model_version": "…", "t_s": 1789300820.0 },
+                           "model_version": "…", "t_s": 1789300820.0,
+                           "taxonomy": null, "stage": "chain", "arb_rank": 3, "coarse": null,
+                           "class": null, "top": null, "entropy_norm": null, "flags": null },
+      "latest_classification": null,
       "classifications": 3,
       "identity_scheme": "rds-pi", "identity_class": "unrestricted", "withheld": false,
       "identity_value": "A1B2",
@@ -177,6 +180,13 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
 `identity_value` is present only when the row's identity is in clear (`withheld: false`); on a withheld row a status/lifecycle reason from an author who may have seen the identity is itself withheld (`reason_withheld: true`, `reason: null`). Never included: decode content, fingerprints, links. No frequency lookup ever runs before detection — the inventory is populated purely from blind measurement (vision step 4); the band-plan/licence database only supplies `explanations` and `status`, ranked, never a starting point.
 
 **`snr_db` / `peak_dbfs` (T-158).** The emitter's latest measurement: the peak SNR (`snr_peak_db`) and absolute peak level (`peak_level_dbfs`) of the newest (highest start time) detection linked to it, read directly off the stored `Detection` — no separate computation. "Linked" follows the same track a row's sighting created: a detection counted through one of the emitter's currently-linked tracks (the common case — sightings are almost always offered as tracks), or linked to the emitter directly. Both fields are `null` together when the emitter has no linked detection yet (e.g. an identity-only sighting from a decode, or a brand-new candidate before its track is offered). They are never derived from `recurrence` or any other summary field.
+
+**`classification` / `latest_classification` (T-211, ADR-0016 §2).** `classification` is the classification that sets `family`: the lowest **arbitration rank** (`arb_rank` 0 user > 1 decoder > 2 lock-verified > 3 classifier > 4 track shape), latest among equals, so `family`, `classification.family` and the `family` filter always agree. `latest_classification` is the most recently appended row when that is a different row (e.g. a later rank-3 `unknown` under a rank-2 lock-verified label), else `null`. Both have the same shape, or are `null` when the emitter has no classification:
+- `family`, `confidence`, `open_set_score`, `model_version`, `t_s`: as before.
+- `stage` (`feature-tree` / `verifier` / `dl` / `decoder` / `user` / `chain` / `track-shape`) and `arb_rank` (0–4). They are always set: a row written before M3 derives them. A `model_version` starting `decoder:` gives `decoder`/1, a track input gives `track-shape`/4, and anything else gives `chain`/3.
+- `taxonomy` (e.g. `"hk-mod@1"`), `coarse` (`analog` / `digital` / `noise-like` / `unknown`), `class` (`{label, p, stage}` within the family, or `null` below its gate), `top` (≤ 5 posterior labels `{label, p}`, highest first, `unknown` included), `entropy_norm` (0–1) and `flags` (`prior-tiebreak`, `prior-mismatch`, `below-gate`, `suspect-input`, `dl-shadow-disagrees`). All are `null` on a row written before M3 or by a pre-M3 writer.
+
+The full classification (likelihood, prior, provenance, reasons) is not on the row; it is served per emitter by the planned `/api/inventory/{id}/classification` (T-199). `family` values on M3 rows are `hk-mod@1` families (`analog`, `fsk`, `psk-qam`, …, or `unknown`); pre-M3 rows keep their labels (`wfm`, `2fsk`, decoder and service ids).
 
 **`total` (T-171).** The number of rows the query's filters match, ignoring `cursor`/`limit`, so a UI can show a count past one page (e.g. "512 confirmed" instead of capping at "500+"). It is computed with the same filters as the list, as a single indexed `COUNT(*)` — except a `tag` filter naming a label outside the controlled vocabulary (gating hides such tags on a withheld-identity row, so matching them needs per-row checks SQL alone can't do): that path scans and gates up to 5 000 candidate rows and reports the match count found within that scan, a lower bound past the cap. That combination (a non-vocabulary tag filter over a very large inventory) is rare.
 
