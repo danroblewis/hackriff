@@ -1446,3 +1446,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **sccache:** stays on (~44% hit rate).
   - **Where recorded:** CLAUDE.md Coordination and memory. This supersedes the 2026-09-14 "no target seeding" note.
   - **Running agents:** T-143, T-124 and T-141 were messaged to apply the caps from their next command (3 building agents, under the cap).
+- **B0.374 T-145 launched (Opus): build/test speed (user request; the user's "T-144" was renumbered because that ID is taken).**
+  - Work items, biggest lever first:
+    1. Mock SDR tests from RealTime to Unpaced, except tests of pacing, backpressure or real-time listen.
+    2. lld linker.
+    3. Cranelift experiment.
+  - Before/after nextest wall times are to be measured.
+  - Four building agents now: T-143, T-124, T-141, T-145 (at the cap).

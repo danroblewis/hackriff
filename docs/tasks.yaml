@@ -2277,6 +2277,20 @@ tasks:
     model: opus
     effort: low
     core_interface: false
+  - id: T-145
+    milestone: M2
+    title: "Build/test speed: mock SDR Pacing::RealTime -> Unpaced except pacing/backpressure/real-time listen tests; lld linker if faster; cranelift dev/test experiment; measure nextest wall before/after"
+    status: in-progress
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "user 2026-09-15: make compile+test runs themselves faster (not just scheduling); user called it T-144 but that ID was the build-CPU tuning task"
+    acceptance: "before/after nextest total wall and just acceptance wall recorded with load averages; RealTime kept only where pacing is the property under test (named, reasoned); lld kept only if all links succeed and faster; cranelift kept only if faster and all green; opt-level=3 dev-package overrides untouched; all tests green"
+    area: crates/hk-core/src/source/mock, tests using the mock SDR (crates/*/tests, tests/e2e), .cargo/config.toml
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
