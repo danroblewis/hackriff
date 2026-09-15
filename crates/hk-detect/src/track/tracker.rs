@@ -93,6 +93,9 @@ struct Part {
     t1: i64,
     lo: f64,
     hi: f64,
+    /// The detection's threshold-crossing (pixel) box, containing `lo..hi` (T-102).
+    px_lo: f64,
+    px_hi: f64,
     bin_hz: f64,
     frame_ns: i64,
     close: CloseReason,
@@ -117,6 +120,8 @@ struct Group {
     t1: i64,
     lo: f64,
     hi: f64,
+    px_lo: f64,
+    px_hi: f64,
     bin_hz: f64,
     frame_ns: i64,
     segment: u64,
@@ -135,6 +140,8 @@ impl Group {
             t1: p.t1,
             lo: p.lo,
             hi: p.hi,
+            px_lo: p.px_lo,
+            px_hi: p.px_hi,
             bin_hz: p.bin_hz,
             frame_ns: p.frame_ns,
             segment: p.segment,
@@ -150,6 +157,8 @@ impl Group {
             g.t1 = g.t1.max(p.t1);
             g.lo = g.lo.min(p.lo);
             g.hi = g.hi.max(p.hi);
+            g.px_lo = g.px_lo.min(p.px_lo);
+            g.px_hi = g.px_hi.max(p.px_hi);
             g.bin_hz = g.bin_hz.max(p.bin_hz);
             g.frame_ns = g.frame_ns.max(p.frame_ns);
             g.continues += u32::from(p.continues);
@@ -197,6 +206,10 @@ struct Slot {
     seq: u64,
     fc: f64,
     bw: f64,
+    /// Pixel-box edges' offsets below / above the linked groups' centres, Hz, averaged like `bw`
+    /// (T-102): how far the emission's threshold-crossing skirts reach past its OBW.
+    px_lo_off: f64,
+    px_hi_off: f64,
     shape_n: u64,
     bin_hz: f64,
     t_first: i64,
@@ -247,6 +260,8 @@ impl Slot {
             seq,
             fc: g.fc(),
             bw: g.bw(),
+            px_lo_off: g.fc() - g.px_lo,
+            px_hi_off: g.px_hi - g.fc(),
             shape_n: 0,
             bin_hz: g.bin_hz,
             t_first: g.t0,
@@ -302,10 +317,6 @@ struct SplitEntry {
 const CLOSED_HOSTS: usize = 32;
 /// On-air share of its observed span a track needs to host in-band fragments (T-101).
 const HOST_DUTY: f64 = 0.9;
-/// A host's band is widened by this share of its width on each side (T-101): a wideband
-/// modulated emission's detected core (e.g. ~100 kHz of a 200 kHz WFM channel on a clean signal)
-/// is narrower than its occupied band, whose skirts flicker.
-const HOST_SKIRT_FRACTION: f64 = 0.5;
 /// A fragment's mean detection SNR is at least this far below its host's, dB (T-101): skirt
 /// flicker sits near threshold, while a neighbouring emitter of comparable strength stays its own.
 const FRAGMENT_SNR_MARGIN_DB: f64 = 6.0;
@@ -669,6 +680,8 @@ impl Tracker {
             t1,
             lo,
             hi,
+            px_lo: r.f_lo_hz.min(r.f_hi_hz).min(lo),
+            px_hi: r.f_hi_hz.max(r.f_lo_hz).max(hi),
             bin_hz,
             frame_ns,
             close: r.close,
@@ -822,8 +835,19 @@ impl Tracker {
     ) -> [Option<DetectionId>; 2] {
         let mut out = [None; 2];
         let mut n = 0;
+        // T-102: the detector's continuation of a max-duration split can re-open on the split
+        // record's last frame or two (1..470 then 469..938 on a real WFM station), not only on
+        // the frame after it. An exact-adjacency match missed those, the continuation looked like
+        // a natural start, and tone-lobe aggregation fused it with co-timed neighbour stations
+        // (a 333 kHz station track grew to 410 kHz).
+        let overlap = self.cfg.coincidence_frames.max(0.0).ceil() as u64;
         for e in self.splits.iter().flatten() {
-            if e.segment == segment && e.frames_end == frames_start && e.lo < hi && lo < e.hi {
+            if e.segment == segment
+                && frames_start <= e.frames_end
+                && frames_start + overlap >= e.frames_end
+                && e.lo < hi
+                && lo < e.hi
+            {
                 out[n] = Some(e.detection);
                 n += 1;
                 if n == 2 {
@@ -1128,9 +1152,12 @@ impl Tracker {
         }
     }
 
-    /// T-101: closing track `i` is an in-band fragment — its band lies inside a continuous track's
-    /// (duty ≥ [`HOST_DUTY`]) band widened by [`HOST_SKIRT_FRACTION`] of its width on each side,
-    /// that track is at least [`TrackerConfig::inband_fragment_bw_ratio`] times wider and
+    /// T-101: closing track `i` is an in-band fragment — its centre lies inside a continuous
+    /// track's (duty ≥ [`HOST_DUTY`]) detected extent (T-102: the wider of its OBW and its
+    /// detections' threshold-crossing boxes, plus the frequency tolerance; skirt flicker is
+    /// centred where the host itself crosses threshold and may straddle that edge by half its own
+    /// width, while a weak emitter one channel off is centred beyond it),
+    /// that extent is at least [`TrackerConfig::inband_fragment_bw_ratio`] times wider and
     /// [`FRAGMENT_SNR_MARGIN_DB`] stronger (mean detection SNR), and `i`'s whole observed life lies
     /// inside the track's. The host is live or among the recently closed continuous tracks.
     fn inband_fragment(&self, i: usize) -> bool {
@@ -1139,15 +1166,13 @@ impl Tracker {
         if ratio <= 0.0 || s.bursts == 0 {
             return false;
         }
-        let (lo, hi) = (s.fc - 0.5 * s.bw, s.fc + 0.5 * s.bw);
         let Some(s_snr) = slot_snr(s) else {
             return false;
         };
         let fits = |h: &HostSpan| {
-            let skirt = HOST_SKIRT_FRACTION * h.bw;
             h.bw >= ratio * s.bw
-                && h.lo - skirt <= lo
-                && hi <= h.hi + skirt
+                && h.lo <= s.fc
+                && s.fc <= h.hi
                 && h.snr_db >= s_snr + FRAGMENT_SNR_MARGIN_DB
                 && h.t_first <= s.t_first
                 && h.t_last_end >= s.t_last_end
@@ -1170,10 +1195,12 @@ impl Tracker {
         };
         let span = (end - h.t_first).max(1);
         let snr_db = slot_snr(h)?;
+        let tol = self.cfg.freq_tolerance_bins * h.bin_hz;
+        let (below, above) = (h.px_lo_off.max(0.5 * h.bw), h.px_hi_off.max(0.5 * h.bw));
         (h.on_ns as f64 >= HOST_DUTY * span as f64).then_some(HostSpan {
-            lo: h.fc - 0.5 * h.bw,
-            hi: h.fc + 0.5 * h.bw,
-            bw: h.bw,
+            lo: h.fc - below - tol,
+            hi: h.fc + above + tol,
+            bw: below + above,
             snr_db,
             t_first: h.t_first,
             t_last_end: end,
@@ -1354,12 +1381,17 @@ impl Tracker {
         s.t_last_end = s.t_last_end.max(g.t1);
         if mode == Mode::Normal && link {
             let n = s.shape_n as f64;
+            let (lo_off, hi_off) = (g.fc() - g.px_lo, g.px_hi - g.fc());
             if s.shape_n < 8 {
                 s.fc = (s.fc * n + g.fc()) / (n + 1.0);
                 s.bw = (s.bw * n + g.bw()) / (n + 1.0);
+                s.px_lo_off = (s.px_lo_off * n + lo_off) / (n + 1.0);
+                s.px_hi_off = (s.px_hi_off * n + hi_off) / (n + 1.0);
             } else {
                 s.fc += (g.fc() - s.fc) / 8.0;
                 s.bw += (g.bw() - s.bw) / 8.0;
+                s.px_lo_off += (lo_off - s.px_lo_off) / 8.0;
+                s.px_hi_off += (hi_off - s.px_hi_off) / 8.0;
             }
             s.shape_n += 1;
             s.bin_hz = s.bin_hz.min(g.bin_hz);
@@ -2030,6 +2062,9 @@ impl Tracker {
             let s = &mut self.slots[i];
             s.fc = par_fc;
             s.bw = par_bw;
+            // The shapes keep no pixel extent: the parent's skirt is re-measured from here.
+            s.px_lo_off = 0.5 * par_bw;
+            s.px_hi_off = 0.5 * par_bw;
             s.shape_len = 0;
             s.shape_head = 0;
             let mut buf = [0i64; START_RING];
@@ -2052,6 +2087,8 @@ impl Tracker {
             t1: self.now,
             lo: ch_fc - 0.5 * ch_bw,
             hi: ch_fc + 0.5 * ch_bw,
+            px_lo: ch_fc - 0.5 * ch_bw,
+            px_hi: ch_fc + 0.5 * ch_bw,
             bin_hz: parent.bin_hz,
             frame_ns: parent.last.map_or(1, |l| l.frame_ns),
             segment: parent.segment,
@@ -2134,6 +2171,8 @@ impl Tracker {
             let (nt, nf) = (t.bursts.max(1) as f64, f.bursts.max(1) as f64);
             t.fc = (t.fc * nt + f.fc * nf) / (nt + nf);
             t.bw = (t.bw * nt + f.bw * nf) / (nt + nf);
+            t.px_lo_off = (t.px_lo_off * nt + f.px_lo_off * nf) / (nt + nf);
+            t.px_hi_off = (t.px_hi_off * nt + f.px_hi_off * nf) / (nt + nf);
             t.detections += f.detections;
             t.bursts += f.bursts;
             t.on_ns += f.on_ns;
