@@ -1809,3 +1809,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - The full check after the four MUI/API merges is past 1348 tests with no failures; acceptance is pending.
   - T-169 is bisecting which opt-level=2 crate causes optimisation-only test failures.
   - T-124, T-156 and T-157 are still running.
+- **B0.414 Full check green after the T-153/T-154/T-155/T-158+T-171 merges (e7a336f).** Lint clean; 1349/1349 nextest+UI; acceptance 28/28 (68 s). All six MUI panels plus the inventory API gaps are verified on main.
