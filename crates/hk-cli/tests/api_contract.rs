@@ -1804,6 +1804,134 @@ fn follow_hops_channel_routes_match_the_documented_shapes() {
 
 // Attention + memory (ADR-0012 §11): each M2 task appends its contract tests under its marker.
 // T-115 observations
+
+/// T-115 review: a live `hk serve` without `--schedule` logs its tuning as interactive dwell
+/// records, and `/api/observations/coverage` reports them: observed seconds at the interactive
+/// tier, never activity-independent visits.
+#[test]
+fn observation_coverage_reports_interactive_tuning_without_a_scheduler() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (serving, addr) = start_server();
+    let counters = serving.handle.counters();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let wait = |f: &dyn Fn() -> bool| {
+        while !f() {
+            assert!(Instant::now() < deadline, "the mock never streamed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait(&|| counters.stream_time_ns.load(Relaxed) > 0);
+    let first = counters.stream_time_ns.load(Relaxed);
+    wait(&|| counters.stream_time_ns.load(Relaxed) >= first + 500_000_000);
+    let center = f64::from_bits(counters.tune_center_bits.load(Relaxed));
+    // The run ends: its open interactive record closes; the API keeps serving the log.
+    let Serving { server, handle, .. } = serving;
+    handle.stop();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(handle.wait());
+    });
+    rx.recv_timeout(Duration::from_secs(30))
+        .expect("the run stopped")
+        .expect("the run finished cleanly");
+    let end = counters.stream_time_ns.load(Relaxed);
+    let q = format!(
+        "f_lo={}&f_hi={}&t0={}&t1={}",
+        center + 100e3,
+        center + 112.5e3,
+        first as f64 * 1e-9 - 1.0,
+        end as f64 * 1e-9 + 1.0
+    );
+    let (status, v) = get(
+        addr,
+        &format!("/api/observations/coverage?{q}&channel_hz=12500&tau_s=0.1&min_gap_s=1"),
+    );
+    assert_eq!(status, 200, "{v}");
+    let totals = &v["totals"];
+    assert!(totals["n_visits"].as_u64().unwrap() >= 1, "{v}");
+    assert_eq!(totals["n_visits_activity_independent"], 0, "{v}");
+    assert!(
+        totals["observed_s"]["interactive"].as_f64().unwrap() >= 0.4,
+        "{v}"
+    );
+    let (status, v) = get(addr, &format!("/api/observations?{q}&tier=interactive"));
+    assert_eq!(status, 200, "{v}");
+    assert!(!v["records"].as_array().unwrap().is_empty(), "{v}");
+    drop(server);
+}
+
+/// T-115: `GET /api/observations` and `/api/observations/coverage` answer the documented shapes
+/// (the contract server runs without the scheduler, so the log is empty: unobserved is reported
+/// as a gap over the whole span, never as quiet), refuse bad boxes and other methods, and the
+/// `observations` stream is offered.
+#[test]
+fn observation_log_routes_answer_as_documented() {
+    let (serving, addr) = start_server();
+    let (t0, t1) = (unix_now() - 60.0, unix_now());
+    let q = format!("f_lo=100000000&f_hi=101000000&t0={t0}&t1={t1}");
+
+    let (status, v) = get(addr, &format!("/api/observations?{q}&tier=bandit&limit=5"));
+    assert_eq!(status, 200, "{v}");
+    assert!(is_array(&v["records"]) && is_array(&v["geometries"]), "{v}");
+    assert!(v["next_cursor"].is_null());
+    assert_eq!(v["truncated"], false);
+    assert_eq!(v["f_lo"], 100_000_000.0);
+    for key in [
+        "offered",
+        "dropped",
+        "written",
+        "flushes",
+        "sealed",
+        "write_errors",
+        "segments_deleted",
+        "bytes",
+    ] {
+        assert!(v["log"][key].is_u64(), "log.{key}: {v}");
+    }
+
+    let (status, v) = get(
+        addr,
+        &format!("/api/observations/coverage?{q}&channel_hz=250000&tau_s=0.01,0.1&min_gap_s=1"),
+    );
+    assert_eq!(status, 200, "{v}");
+    let totals = &v["totals"];
+    assert_eq!(totals["n_visits"], 0);
+    assert_eq!(totals["n_visits_activity_independent"], 0);
+    assert!(is_object(&totals["observed_s"]) && is_object(&totals["freq"]));
+    assert!(
+        (totals["max_gap_s"].as_f64().unwrap() - 60.0).abs() < 1e-3,
+        "{v}"
+    );
+    assert!(totals.get("mean_revisit_s").is_none());
+    assert_eq!(v["channels"].as_array().map(Vec::len), Some(4));
+    assert_eq!(v["gaps"].as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(v["gaps_truncated"], false);
+    let poi = v["poi"].as_array().unwrap();
+    assert_eq!(poi.len(), 2);
+    assert_eq!(poi[0]["tau_s"], 0.01);
+    assert_eq!(poi[0]["p_poi"], 0.0);
+
+    for bad in [
+        "/api/observations?f_lo=1&t0=0&t1=1".to_string(),
+        format!("/api/observations?{q}&tier=loud"),
+        format!("/api/observations/coverage?f_lo=2&f_hi=1&t0={t0}&t1={t1}"),
+        format!("/api/observations/coverage?{q}&tau_s=x"),
+    ] {
+        let (status, v) = get(addr, &bad);
+        assert_eq!(status, 400, "{bad}: {v}");
+        assert_eq!(v["code"], "invalid", "{bad}: {v}");
+    }
+    let (status, _) = post(addr, &format!("/api/observations?{q}"), "{}");
+    assert_eq!(status, 405);
+
+    let (status, streams) = get(addr, "/api/streams");
+    assert_eq!(status, 200);
+    assert!(
+        streams.to_string().contains("\"observations\""),
+        "observations stream offered: {streams}"
+    );
+    stop_server(serving);
+}
 // T-118 occupancy
 // T-119 sites, baselines, candidates, weights
 // T-120 scheduler

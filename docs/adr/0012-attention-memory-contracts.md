@@ -81,6 +81,8 @@ A range counts as observed at an instant only when it lies **entirely** inside a
 
 **Alignment rule.** `ObservedWindow::usable` uses the same usable-span rule the history ingest applies to frames, so the level-0 tile coverage (T-116's mask) and the log describe the same cells. Tiles keep their own coverage fraction (display, "not observed ≠ quiet"). The log adds what tiles cannot: revisit counts, gaps shorter than a cell, reasons and tiers. T-115's e2e asserts log coverage equals the tuned windows exactly; T-124 asserts log and tile coverage agree to within one level-0 cell.
 
+*Note (T-115 review):* the usable span currently follows the history level-0 fold extent (the analysed frame's first-bin lower edge to last-bin upper edge, clipped to the sampled band) less the ±15 kHz DC notch, so log and tiles align cell for cell. A shared roll-off trim (the scheduler's `usable_fraction`) applied to both history and the log is a follow-up; until then both include the anti-alias roll-off edges.
+
 ### 1.5 Persistence and retention
 
 The log lives in hk-store `observation/` (T-115):
