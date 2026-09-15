@@ -18,8 +18,6 @@ pub(crate) mod testkit;
 #[cfg(test)]
 mod tests;
 
-pub use ppm::LengthFrom;
-
 /// Pinned descriptors of this group.
 pub fn planned() -> Vec<BlockDescriptor> {
     let io = |t_in, t_out| {

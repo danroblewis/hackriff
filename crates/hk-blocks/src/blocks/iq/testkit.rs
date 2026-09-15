@@ -49,12 +49,15 @@ pub(crate) struct Collected {
     pub frames: Vec<(Vec<u8>, FrameInfo)>,
     /// Chunk metadata of every non-empty output chunk.
     pub metas: Vec<ChunkMeta>,
+    /// Item count of every non-empty output chunk (parallel to `metas`).
+    pub lens: Vec<usize>,
 }
 
 impl Collected {
     fn append(&mut self, out: &Output) {
         if !out.data.is_empty() {
             self.metas.push(out.meta);
+            self.lens.push(out.data.len());
         }
         match &out.data {
             PortVec::Iq(v) => self.iq.extend_from_slice(v),

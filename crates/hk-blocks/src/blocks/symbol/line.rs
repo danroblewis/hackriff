@@ -184,6 +184,8 @@ const VIOLATION_ALPHA: f64 = 1.0 / 32.0;
 const ALIGN_MIN_PAIRS: u64 = 16;
 /// How much lower the other alignment's violation average must be to re-pair.
 const ALIGN_MARGIN: f64 = 0.2;
+/// Most output segments (runs of items with one pair alignment) held at once.
+const MAX_SEGMENTS: usize = 4;
 
 pub(crate) fn build_manchester(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, BlockError> {
     let mut b = Manchester {
@@ -194,12 +196,33 @@ pub(crate) fn build_manchester(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn B
         chip: 0,
         viol: [0.0; 2],
         pairs: [0; 2],
+        held: Vec::new(),
+        cap: 0,
+        segments: [Segment::default(); MAX_SEGMENTS],
+        n_segments: 0,
+        open: false,
+        dropped: 0,
         status: Status::default(),
     };
     b.apply(p);
     Ok(Box::new(b))
 }
 
+/// A run of held items spaced exactly two chips apart.
+#[derive(Clone, Copy, Debug, Default)]
+struct Segment {
+    /// Offset of its first held item in `held`.
+    start: usize,
+    /// Source index of its first held item (its pair's first chip).
+    source: f64,
+    /// Source samples per item.
+    per_item: f64,
+}
+
+/// Chip-pair decoder. A realignment shifts the pairs by one chip, so items after it are not
+/// on the previous items' two-chip grid. Decoded bits therefore go through `held` in
+/// segments of one alignment, and each chunk emits one segment (oldest first) with its own
+/// exact time map; items after a mid-chunk realignment follow in the next chunk.
 struct Manchester {
     ieee: u8,
     auto: bool,
@@ -211,6 +234,16 @@ struct Manchester {
     /// Violation averages: [current alignment, other alignment].
     viol: [f64; 2],
     pairs: [u64; 2],
+    /// Decoded bits not yet emitted, oldest first (at most `cap`).
+    held: Vec<u8>,
+    cap: usize,
+    segments: [Segment; MAX_SEGMENTS],
+    n_segments: usize,
+    /// Whether the last segment continues with the current alignment.
+    open: bool,
+    /// Bits dropped: held at a restart, or beyond `cap`/`MAX_SEGMENTS` (realigning on nearly
+    /// every chunk).
+    dropped: u64,
     status: Status,
 }
 
@@ -226,17 +259,83 @@ impl Manchester {
         self.chip = 0;
         self.viol = [0.0; 2];
         self.pairs = [0; 2];
+        self.dropped += self.held.len() as u64;
+        self.held.clear();
+        self.n_segments = 0;
+        self.open = false;
+    }
+
+    /// Held items of the oldest segment.
+    fn oldest_len(&self) -> usize {
+        if self.n_segments > 1 {
+            self.segments[1].start
+        } else {
+            self.held.len()
+        }
+    }
+
+    /// Removes the first `n` held items (`n ≤ oldest_len()`; all of it for a closed segment).
+    fn consume(&mut self, n: usize) {
+        self.held.drain(..n);
+        if self.n_segments > 1 && self.segments[1].start == n {
+            self.segments.copy_within(1..self.n_segments, 0);
+            self.n_segments -= 1;
+            for s in &mut self.segments[..self.n_segments] {
+                s.start -= n;
+            }
+        } else if self.n_segments > 0 {
+            let s = &mut self.segments[0];
+            s.source += n as f64 * s.per_item;
+            s.start = 0;
+        }
+    }
+
+    fn drop_oldest(&mut self) {
+        let n = self.oldest_len();
+        self.dropped += n as u64;
+        self.consume(n);
+    }
+
+    /// Holds one decoded bit whose pair starts at `source`.
+    #[inline]
+    fn hold(&mut self, bit: u8, source: f64, per_item: f64) {
+        if !self.open || self.n_segments == 0 {
+            if self.n_segments > 0 && self.segments[self.n_segments - 1].start == self.held.len() {
+                // The last segment is empty: reuse its slot.
+                self.n_segments -= 1;
+            } else if self.n_segments == MAX_SEGMENTS {
+                self.drop_oldest();
+            }
+            self.segments[self.n_segments] = Segment {
+                start: self.held.len(),
+                source,
+                per_item,
+            };
+            self.n_segments += 1;
+            self.open = true;
+        }
+        if self.held.len() == self.cap {
+            // Only with several segments held (one is emptied every chunk).
+            self.drop_oldest();
+        }
+        self.held.push(bit);
     }
 }
 
 impl Block for Manchester {
     fn init(&mut self, inputs: &[PortInfo]) -> Result<Vec<PortInfo>, BlockError> {
         let input = single_input(inputs, "manchester", &[PortType::Soft, PortType::Bits])?;
+        let per_chunk = input.max_items / 2 + 1;
+        // Room for a few segments; an output chunk carries at most one of them.
+        self.cap = MAX_SEGMENTS * per_chunk;
+        self.held = Vec::with_capacity(self.cap);
+        self.clear();
+        self.dropped = 0;
         Ok(vec![PortInfo {
             ty: PortType::Bits,
             rate_hz: input.rate_hz / 2.0,
-            max_items: input.max_items / 2 + 1,
-            hold_items: 2,
+            max_items: self.cap,
+            hold_items: per_chunk + 2,
         }])
     }
 
@@ -263,10 +362,7 @@ impl Block for Manchester {
         if !matches!(input.data, PortSlice::Soft(_) | PortSlice::Bits(_)) {
             return Err(mismatch(0, PortType::Soft, input.data.port_type()));
         }
-        let out = io.output(0)?;
-        let y = bits_out(out)?;
-        let before = y.len();
-        let mut first_pair: Option<usize> = None;
+        let per_item = 2.0 * m.source_per_item;
         for i in 0..n {
             let c = chip_at(i);
             if let Some(p) = self.prev {
@@ -278,8 +374,9 @@ impl Block for Manchester {
                     VIOLATION_ALPHA.max(1.0 / (self.pairs[k] + 1) as f64) * (v - self.viol[k]);
                 self.pairs[k] += 1;
                 if aligned {
-                    first_pair.get_or_insert(i);
-                    y.push(u8::from(p > c) ^ self.ieee);
+                    // The pair's first chip is input item index + i − 1.
+                    let source = source_at(&m, (m.index + i as u64) as f64 - 1.0);
+                    self.hold(u8::from(p > c) ^ self.ieee, source, per_item);
                 }
                 if self.auto
                     && self.pairs[0] >= ALIGN_MIN_PAIRS
@@ -289,21 +386,26 @@ impl Block for Manchester {
                     self.phase ^= 1;
                     self.viol.swap(0, 1);
                     self.pairs.swap(0, 1);
+                    self.open = false;
                     self.status.extra.set("realigned", 1.0);
                 }
             }
             self.prev = Some(c);
             self.chip += 1;
         }
-        let produced = y.len() - before;
-        // Output item k is the pair whose second chip is input item first_pair + 2k.
-        let second = first_pair.map_or(m.index as f64 + 1.0, |i| (m.index + i as u64) as f64);
-        set_meta(
-            out,
-            &m,
-            source_at(&m, second - 1.0),
-            2.0 * m.source_per_item,
-        );
+        // Emit the oldest segment: its items are exactly two chips apart.
+        let (source, per) = match self.segments[..self.n_segments].first() {
+            Some(s) => (s.source, s.per_item),
+            None => (m.source_index, per_item),
+        };
+        let produced = self.oldest_len();
+        let out = io.output(0)?;
+        set_meta(out, &m, source, per);
+        bits_out(out)?.extend_from_slice(&self.held[..produced]);
+        self.consume(produced);
+        if self.dropped > 0 {
+            self.status.extra.set("dropped_bits", self.dropped as f64);
+        }
         self.status.items_in += n as u64;
         self.status.items_out += produced as u64;
         self.status.error_rate = Some(self.viol[0] as f32);
@@ -451,5 +553,55 @@ mod tests {
         let inverted: Vec<u8> = truth.iter().map(|b| b ^ 1).collect();
         let (errs, _) = bit_errors(&inverted, &c.out(0, 0).bits, 60, 40);
         assert_eq!(errs, 0);
+    }
+
+    #[test]
+    fn manchester_time_map_stays_exact_across_mid_chunk_realignment() {
+        let mut rng = Lcg::new(33);
+        // Hard chips with a stray chip first and another mid-stream: two realignments.
+        // Long enough after the second one for held segments to drain before END.
+        let mut chips = vec![1u8];
+        for k in 0..2_100 {
+            if k == 300 {
+                chips.push(0);
+            }
+            chips.extend(if rng.bit() == 1 { [1, 0] } else { [0, 1] });
+        }
+        let data = PortVec::Bits(chips.clone());
+        let make = || vec![build("manchester", json!({}), PortType::Bits)];
+        let mut outputs = Vec::new();
+        for chunk in [1_000usize, 97, 8] {
+            let c = assert_chunk_invariant(make, PortType::Bits, 2400.0, &data, &[chunk]);
+            let out = c.out(0, 0).clone();
+            // Every item decodes exactly the chip pair its time map points at (a one-chip
+            // error would decide the neighbouring, straddling pair).
+            let mut k0 = 0;
+            for (meta, &len) in out.metas.iter().zip(&out.lens) {
+                for j in 0..len {
+                    let s = meta.source_index + j as f64 * meta.source_per_item;
+                    assert_eq!(s.fract(), 0.0, "chunk {chunk}");
+                    let s = s as usize;
+                    let want = u8::from(chips[s] > chips[s + 1]);
+                    assert_eq!(
+                        out.bits[k0 + j],
+                        want,
+                        "chunk {chunk} item {} chip {s}",
+                        k0 + j
+                    );
+                }
+                k0 += len;
+            }
+            assert_eq!(k0, out.bits.len());
+            assert!(out.bits.len() > 2_050, "chunk {chunk}: {}", out.bits.len());
+            outputs.push(out.bits);
+        }
+        assert!(outputs.iter().all(|b| *b == outputs[0]));
+        // Both realignments happened: the tail decodes the true bits on the true pairs.
+        let tail = &outputs[0][outputs[0].len() - 200..];
+        let n = chips.len();
+        let truth: Vec<u8> = (0..200)
+            .map(|k| u8::from(chips[n - 400 + 2 * k] > chips[n - 399 + 2 * k]))
+            .collect();
+        assert_eq!(tail, &truth[..]);
     }
 }
