@@ -1503,7 +1503,7 @@ tasks:
   - id: T-090
     milestone: M1
     title: "M1 Inspector UI (thin client): frame list, hex+ASCII, layer tree, linked selection"
-    status: review
+    status: done
     commit: 0358d24
     deps: [T-089]
     parallel_group: M1U
