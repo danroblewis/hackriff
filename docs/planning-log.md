@@ -1072,3 +1072,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Reports** still use the tile stand-in rather than the T-118 engine; that's T-128.
 
   Worktrees cleaned. Full check of main running; T-122 and T-128 launch after it.
+- **B0.315 Launched T-122** (novelty alarms: adds a quieter-than-usual kind, device-first explanation, migration 0003), **T-128** (M2 integration: priorities are levels→baselines and real candidates→scheduler, then first sightings and report providers, then site/source tiles, memory bound, residuals and the full-path e2e) and **T-129** (FM-realistic channel learning). Ownership is split: T-129 owns `channels.rs`; T-128 owns the pipeline occupancy/attention wiring; T-122 owns the alarm files. Full check of main after the integration merge is running.

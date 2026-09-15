@@ -1943,7 +1943,7 @@ tasks:
   - id: T-122
     milestone: M2
     title: "Novelty alarms + what-changed event feed (AWARE-044) into anomaly correlation"
-    status: todo
+    status: in-progress
     deps: [T-119]
     parallel_group: M2A
     use_cases: [AWARE-044, AWARE-012, AWARE-019]
@@ -2025,7 +2025,7 @@ tasks:
   - id: T-128
     milestone: M2
     title: "M2 integration: wire occupancy levels into baselines, real providers into reports, candidates from inventory, first sightings, site/source history filters"
-    status: todo
+    status: in-progress
     deps: [T-118, T-119, T-121, T-127]
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
@@ -2039,7 +2039,7 @@ tasks:
   - id: T-129
     milestone: M2
     title: "Occupancy channel learning on real dense FM: channels match station occupied bandwidth, not 13-44 kHz fragments"
-    status: todo
+    status: in-progress
     deps: [T-118]
     parallel_group: M2O
     use_cases: [AWARE-042, SIGNAL-062]
