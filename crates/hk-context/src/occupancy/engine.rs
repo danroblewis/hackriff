@@ -1625,7 +1625,8 @@ mod tests {
     #[test]
     fn occupancy_dc_flag_is_per_tuning_and_a_true_dc_spur_stays_suspect() {
         use super::super::channels::{
-            ChannelPlan, LearnConfig, dc_only_suspect, refute_dc_suspects,
+            ChannelPlan, DC_TWIN_LO_TOLERANCE_HZ, DcTwinRule, LearnConfig, dc_only_suspect,
+            refute_dc_suspects,
         };
         use hk_model::DetectionFlags;
         use hk_model::detection::SpurReason;
@@ -1682,7 +1683,19 @@ mod tests {
             dc.push(false);
         }
         let raw = dets.clone();
-        refute_dc_suspects(&mut dets, &dc, 6250.0);
+        // Each detection's own LO: hop A's, hop A's, hop B's, hop B's per row.
+        let lo: Vec<f64> = (0..nt)
+            .flat_map(|t| {
+                let (a, b) = (cell_centre(lo_a(t)), cell_centre(20));
+                [a, a, b, b]
+            })
+            .collect();
+        let rule = DcTwinRule {
+            f_cell_hz: 6250.0,
+            slack_ns: g.t_cell_ns,
+            lo_tolerance_hz: DC_TWIN_LO_TOLERANCE_HZ,
+        };
+        refute_dc_suspects(&mut dets, &dc, rule, |j| Some(lo[j]));
         for (i, (d, r)) in dets.iter().zip(&raw).enumerate() {
             let carrier = (d.freq.lo_hz + d.freq.hi_hz) / 2.0 == cell_centre(152);
             assert_eq!(d.suspect, !carrier && r.suspect, "detection {i}: {d:?}");
