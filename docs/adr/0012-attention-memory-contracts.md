@@ -39,6 +39,10 @@ Constraints carried in:
 | Alarms | Stored as `Anomaly` rows (kinds `level-above-baseline`, `new-emitter`, `busier-than-baseline`, `change-point`) with a parseable `baseline_ref` dedupe key and an `AlarmDetail`; 2-on/3-off hysteresis, 1 h reopen cooldown; suppressed when mobile/unassigned/immature; provenance explained first. |
 | Storage | Series in **hk-store files** (observation log, occupancy series, baselines); **SQLite** for sites, weights and alarms (joins with Explanations). Append in batches (≤ 1/min), atomic rewrites at slot close. |
 
+## 0. Time base (applies to every section)
+
+All contract time comes from the **device/sample clock** (the `Timestamp` carried by captured blocks, as the pipeline scheduler's `SyntheticClock` already does), never from wall time. This covers: observation record times and hourly segment naming; retention ages; occupancy intervals and rollups; hour-of-week slots, 24 h maturity and the 14-day / 6 h half-lives; `no_fix_hold_s` and `mobile_window_s`; bandit discounting, the 10-min sweep-floor window, 10 s re-scoring and the 30-min maximum revisit; alarm hysteresis intervals, the 1 h re-raise cooldown and the 7-day dismissal expiry. Only I/O flush cadence (e.g. "flush at most once a minute") may use wall time. Rationale: time-compressed replay (T-125) and blind acceptance (T-124) run 48 h scenes in minutes; wall-clock cooldowns or retention would never expire or would key on replay time. Implementations must not call `SystemTime::now` on these paths.
+
 ## 1. Observation / revisit log (C04 → C12 input)
 
 ### 1.1 Dwell records
@@ -128,7 +132,7 @@ The bandit dwells where activity is, so counting its visits overstates FCO (C12 
 1. **`fco` uses activity-independent visits only** (`Tier::activity_independent`: background sweep, scheduled plan). Their timing does not depend on what was measured, so they carry no selection bias.
 2. **Each visit is weighted by the time it represents:** half the gap to the previous visit plus half to the next, capped at `2 × nominal T_R`. A longer gap is unobserved, not interpolated.
 3. **`fco_all_visits` stratifies:** within each 1-minute stratum, the time fraction occupied from all visits; strata then weighted by their observed duration. Reported for information.
-4. **Fallback:** with fewer than 30 activity-independent visits in the interval, `fco` falls back to `fco_all_visits` and sets `revisit_biased`.
+4. **Too few visits: widen, never substitute.** With fewer than 30 activity-independent visits in an interval, `fco` for that interval is computed over the smallest enclosing rollup window (15 min → 1 h → 6 h → 24 h → whole span) that reaches 30, and the window used is recorded with the stat. If no window reaches 30, `fco` stays activity-independent with its (wide) Wilson interval. `fco_all_visits` is never substituted for `fco`; `revisit_biased` is set only when a caller explicitly asks for the all-visits estimate. Rationale: at the 25 % sweep floor a 20 s pass revisits a channel about every 80 s (~11 visits per 15 min), so a per-interval fallback would always return the biased value exactly when the bandit dominates; over 48 h there are ~2 000 activity-independent visits, so hourly and longer windows are unbiased and usable.
 
 ### 2.6 Suspect and IMD detections
 
@@ -502,7 +506,7 @@ T-113 **pre-added** the shared declarations: `pub mod` lines, empty stub modules
 | **T-114** simulator (running) | `crates/hk-sim/**` (or its feature module) | `attention::schedule` (POI, reward), `SharedInterestingness` | Report JSON uses the §5 metric names. |
 | **T-115** observation log | `hk-core/src/scheduler/observe.rs`; `hk-store/src/observation/**`; `hk-pipeline/src/observe.rs` + **the single observer call site** in `hk-pipeline/src/control.rs` (`SchedState::new`/`tick`); `hk-api/src/observations.rs`; `observations` stream | `attention::observation`, `Purpose::reason` | Merges before T-120 touches `control.rs`; T-120 rebases over the one call. |
 | **T-116** history maturity (running) | `hk-store/src/history/**`, history routes | §1.4 alignment rule | Coverage mask uses the same usable-span rule as `ObservedWindow::usable`. Additive site/source filters for T-121 go in `history/query.rs`. |
-| **T-117** synthetic scenes (running) | `py/hkpy/synth/…`, `py/tests` | §2 names | Truth file fields named `fco`, `injection_t`, `min_on_off_s`. |
+| **T-117** synthetic scenes (running) | `py/hkpy/synth/…`, `py/tests` | §2 names | Truth file (`schedule.json`, merged 4a34de5) fields: `channels[].target_fco`, `stats.per_channel[].fco_realized` and `hour_of_week`, `novelty.start_hour`/`start_s`, `observation_schedule.times_s`, `sampled_fco.by_channel` (`n_revisits`, `n_occupied`, `fco`, Wilson CI). |
 | **T-118** occupancy engine | `hk-context/src/occupancy/{engine,channels,threshold}.rs`; `hk-store/src/occupancy/**`; `hk-pipeline/src/occupancy.rs`; `hk-api/src/occupancy.rs` | `attention::{occupancy, observation}` | May amend `effective_samples` (§2.4) with evidence. |
 | **T-119** baselines + novelty + score | `hk-context/src/occupancy/{baseline,novelty,score,site}.rs`; `hk-store/src/baseline/**`; `hk-model/src/repo/sites.rs` + `migrations/0002_attention.sql` (`site`, `attention_weights`); `hk-pipeline/src/attention.rs`; `hk-api/src/attention.rs` | `attention::{baseline, score}` | Publishes through `SharedInterestingness`. |
 | **T-120** bandit scheduler | `hk-core/src/scheduler/bandit/**`, `scheduler/{core,step,config,plan}.rs` and the scheduler module docs; `hk-pipeline/src/control.rs` (except T-115's call site); `hk-sim` policy registration; `hk-api/src/schedule.rs` | `attention::{schedule, score, observation}` | Adds `Purpose` variants + their `reason()` arms. |
