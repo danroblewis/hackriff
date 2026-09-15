@@ -72,7 +72,6 @@ fn pocsag_assembles_messages_per_channel_before_following_hops() {
     // Assembly is upstream of the merge, so messages never mix channels.
     let pos = |id: &str| r.nodes.iter().position(|n| n.id == id).unwrap();
     assert!(pos("msg") < pos("hops"));
-    assert!(!r.output_policy.content_class.permits_content());
 }
 
 #[test]

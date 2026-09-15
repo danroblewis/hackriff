@@ -13,11 +13,8 @@
 //!    over the whole captured window; `follow_hops` resolves its channel set from the blind
 //!    `detections` source over that band, never from a list this test supplies.
 //!
-//!    POCSAG is `restricted-paging` by default (ADR-0004, `docs/tutorials/02-pocsag.md` §3): the
-//!    shipped recipe emits metadata only unless a user vouches content for the source, exactly
-//!    like a real pager net. This test first checks that default, then starts a **content-vouched
-//!    draft** of the same recipe (the synthetic scene is the test's own signal, not intercepted
-//!    traffic) so it can assert on RIC, function and message text.
+//!    The test starts a draft of the same recipe labelled `unrestricted` so it can assert on RIC,
+//!    function and message text.
 //! 4. §14 frame records read over TCP (`inspector/<pipeline>/pages`) are checked against the
 //!    hidden truth: RIC, function, text and channel tag, with the simulcast message deduplicated
 //!    to one output (`follow_hops`'s `dups` counter).
@@ -81,9 +78,7 @@ struct Served {
     tcp: SocketAddr,
 }
 
-/// Serves `meta` blind and looping, content-vouched as the test's own synthetic scene (never real
-/// intercepted paging traffic; the shipped `pocsag` recipe itself stays `restricted-paging` --
-/// checked in [`start_pocsag`]).
+/// Serves `meta` blind and looping, labelled `unrestricted`.
 fn serve(meta: &Path, tag: &str) -> Served {
     let streams = StreamRegistry::new();
     let source = BlindSource {
@@ -317,9 +312,8 @@ fn found_blind_all(addr: SocketAddr, truths: &[&TruthItem]) -> Vec<(String, f64,
     }
 }
 
-/// Checks the shipped `pocsag` recipe defaults to `restricted-paging` (the legal guardrail, ADR-
-/// 0004), then starts a **content-vouched draft** of it (this test's own synthetic scene, not
-/// real paging traffic) on `band` so RIC/function/text can be asserted. The channel set is left
+/// Starts a draft of the shipped `pocsag` recipe labelled `unrestricted` on `band` so
+/// RIC/function/text can be asserted. The channel set is left
 /// to `follow_hops`'s blind `detections` source: `band` is the whole captured window, never a
 /// per-channel list.
 fn start_pocsag(s: &Served, band: (f64, f64)) -> (String, Value) {
@@ -335,11 +329,6 @@ fn start_pocsag(s: &Served, band: (f64, f64)) -> (String, Value) {
     );
     let (code, mut draft) = s.call("GET", "/api/recipes/pocsag", None);
     assert_eq!(code, 200, "[{TAG}] {draft}");
-    assert_eq!(
-        draft["output_policy"]["content_class"],
-        json!("restricted-paging"),
-        "[{TAG}] the shipped recipe defaults to metadata-only paging content: {draft}"
-    );
     assert_eq!(
         draft["input"]["channels"]["mode"],
         json!("follow-hops"),

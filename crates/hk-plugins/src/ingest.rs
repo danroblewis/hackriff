@@ -392,16 +392,11 @@ mod tests {
         assert_eq!(all.iter().collect::<HashSet<_>>().len(), all.len());
     }
 
-    /// Rows stored in one batch commit together with their sightings, each row keeps its own gate,
-    /// and a batch leaves the connection usable for ordinary writes.
+    /// Rows stored in one batch commit together with their sightings, and a batch leaves the
+    /// connection usable for ordinary writes.
     #[test]
-    fn a_batch_stores_rows_and_sightings_in_one_transaction_with_per_row_gating() {
+    fn a_batch_stores_rows_and_sightings_in_one_transaction() {
         let mut ing = Ingest::new(Repository::open_in_memory().unwrap());
-        let mut gated = aircraft(7);
-        gated.content_class = ContentClass::RestrictedPaging;
-        gated.content = Some(serde_json::json!({"text": "refused"}));
-        gated.identity = None;
-        let gated_id = gated.id;
         let ids = ing
             .batch(|ing| {
                 let mut ids = Vec::new();
@@ -410,24 +405,17 @@ mod tests {
                     ids.push(d.id);
                     ing.store_decode(d, None, None, None, None).unwrap();
                 }
-                let stored = ing.store_decode(gated, None, None, None, None).unwrap();
-                assert!(stored.content_gated, "the gate still applies per row");
                 ids
             })
             .unwrap();
         assert_eq!(ing.take_new_emitters().len(), 10);
         let s = ing.stats();
-        assert_eq!((s.decodes_stored, s.content_gated), (11, 1));
+        assert_eq!(s.decodes_stored, 10);
         for id in ids {
             ing.repo()
                 .decode_with_access(id, IdentityAccess::Standard)
                 .unwrap();
         }
-        let g = ing
-            .repo()
-            .decode_with_access(gated_id, IdentityAccess::Standard)
-            .unwrap();
-        assert!(g.decode.content.is_none());
         store(&mut ing, 99);
         assert!(ing.repo_mut().commit_write_batch().is_err(), "batch closed");
     }

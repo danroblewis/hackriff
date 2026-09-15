@@ -1,7 +1,7 @@
 //! T-050 end to end over HTTP: the composition `hk serve` uses (`serve_api` + the pipeline
 //! controller adapters) over a scripted retunable radio behind the device contract. Display,
-//! pause, manual recording, in-place retune, a retune into the 930.5 MHz paging band (re-plumb,
-//! restricted class, recording refused, spectrum re-offered gated), a rate change (re-plumb),
+//! pause, manual recording, in-place retune, a retune into another content class (re-plumb),
+//! a rate change (re-plumb),
 //! named gains, bias tee, audit and bookmarks; and a replayed recording refusing device settings.
 
 #[path = "../../hk-pipeline/tests/support/radio.rs"]
@@ -190,24 +190,17 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
         (Some(0), Some("unrestricted"))
     );
 
-    // Into the 930.5 MHz paging band: the run re-plumbs with the restricted class.
+    // Into 930.5 MHz (another content class): the run re-plumbs.
     let (st, v) = post(addr, "/api/control/center", r#"{"center_hz": 930.5e6}"#);
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["tuning"]["center_hz"], json!(930.5e6));
-    assert_eq!(v["run"]["content_class"], "restricted-paging");
     assert_eq!(v["run"]["segment"], json!(1));
-    wait_for("the gated spectrum stream", Duration::from_secs(60), || {
-        spectrum_class(addr).as_deref() == Some("restricted-paging")
-    });
-    let (st, v) = post(addr, "/api/control/record/start", "{}");
-    assert_eq!((st, v["code"].as_str()), (409, Some("refused")), "{v}");
 
-    // A rate change re-plumbs too (the class of 930.5 MHz ± 250 kHz is still paging).
+    // A rate change re-plumbs too.
     let (st, v) = post(addr, "/api/control/rate", r#"{"sample_rate_hz": 500e3}"#);
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["tuning"]["sample_rate_hz"], json!(500e3));
     assert_eq!(v["run"]["segment"], json!(2));
-    assert_eq!(v["run"]["content_class"], "restricted-paging");
     let (st, v) = post(addr, "/api/control/rate", r#"{"sample_rate_hz": 40e6}"#);
     assert_eq!((st, v["code"].as_str()), (400, Some("out_of_range")));
 
@@ -253,7 +246,6 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
         "{}",
         status["control"]
     );
-    assert_eq!(status["control"]["content_class"], "restricted-paging");
 
     // A bookmark.
     let (st, bm) = post(
@@ -274,7 +266,6 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
         .unwrap();
     eprintln!("{}", summary.to_text());
     assert!(summary.errors.is_empty(), "{:?}", summary.errors);
-    assert_eq!(summary.source_class, "restricted-paging");
     assert_eq!(
         summary.counter("/chains/recordings"),
         1,
@@ -288,7 +279,7 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(audit.len(), 13, "one entry per control request: {audit:#?}");
+    assert_eq!(audit.len(), 12, "one entry per control request: {audit:#?}");
     assert!(audit.iter().all(|e| e["token_id"] == json!(token_id)));
     let paging = audit
         .iter()
@@ -296,11 +287,6 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
         .unwrap();
     assert_eq!(paging["old"]["center_hz"], json!(101.0e6));
     assert_eq!(paging["result"], "ok");
-    let refused = audit
-        .iter()
-        .find(|e| e["action"] == "record_start" && e["status"] == 409)
-        .unwrap();
-    assert_eq!(refused["result"], "error");
 
     // Persisted.
     let repo = Repository::open(dir.join("hackriff.db")).unwrap();

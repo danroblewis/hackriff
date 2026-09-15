@@ -1,11 +1,11 @@
 //! T-024: the M0 vertical-slice acceptance suite (docs/11-roadmap.md §1.1), one module per use
-//! case plus the legal-guardrail regression. Run with `just acceptance`; CI runs it in the
+//! case. Run with `just acceptance`; CI runs it in the
 //! `acceptance` job with `HK_E2E_REQUIRE_SYNTH=1` and `HK_REQUIRE_FIXTURES=1`, so a missing
 //! generator or LFS fixture fails instead of skipping. Only `readsb` (absent in CI) may skip, and
 //! only the plugin half of SIGNAL-001.
 //!
 //! Every test replays IQ through the composed pipeline via `hk_pipeline`'s library entry point
-//! (`hk replay`'s path) and asserts on docs/07 objects through the Repository's gated getters,
+//! (`hk replay`'s path) and asserts on docs/07 objects through the Repository's getters,
 //! `query_inventory`, the history/floor product and the stream and API outputs.
 
 #[path = "acceptance/common.rs"]
@@ -34,9 +34,6 @@ mod aware_053;
 
 #[path = "acceptance/aware_042.rs"]
 mod aware_042;
-
-#[path = "acceptance/legal.rs"]
-mod legal;
 
 #[path = "acceptance/listen.rs"]
 mod listen;

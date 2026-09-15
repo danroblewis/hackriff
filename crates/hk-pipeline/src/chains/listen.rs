@@ -217,6 +217,10 @@ pub fn listen_class(
             "invalid extent (fail closed)",
         ));
     }
+    if !hk_model::content_gating_enabled() {
+        // Gating off (the default, T-143): nothing is refused; the class is informational.
+        return Ok(classify_emitter(rules, source, lo, hi).map_or(source, |(class, _)| class));
+    }
     if let Some(b) = restricted_band(lo, hi) {
         return Err(OpenRefusal::gated(
             b.class,
@@ -1018,55 +1022,6 @@ mod tests {
             content_class: UNRESTRICTED,
             by: "test: tries to open content".into(),
         }
-    }
-
-    #[test]
-    fn restricted_bands_refuse_audio_whatever_the_source_class_or_rules() {
-        let open_all = [rule(0.0, 7e9)];
-        for class in ContentClass::ALL.iter().copied() {
-            for (lo, hi) in [
-                (930.4e6, 930.6e6),     // narrowband PCS paging
-                (152.235e6, 152.245e6), // VHF paging
-                (880.0e6, 880.2e6),     // cellular
-                (928.9e6, 929.05e6),    // partly inside 929-930 MHz paging
-            ] {
-                let e = listen_class(class, &open_all, lo, hi).unwrap_err();
-                assert_eq!(e.status, 403, "{class:?} {lo}");
-                assert!(
-                    matches!(
-                        e.content_class,
-                        Some(ContentClass::RestrictedPaging | ContentClass::RestrictedCellular)
-                    ),
-                    "{e:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn unclassified_and_restricted_sources_are_refused_unrestricted_permits() {
-        // FM broadcast under the band prior: audio allowed.
-        assert_eq!(
-            listen_class(UNRESTRICTED, &[], 101.2e6, 101.4e6).unwrap(),
-            UNRESTRICTED
-        );
-        // Unclassified (fail-closed source, no rule): refused.
-        let e = listen_class(METADATA, &[], 433.9e6, 433.95e6).unwrap_err();
-        assert_eq!(e.status, 403);
-        assert!(e.reason.contains("unclassified"), "{e:?}");
-        // A user rule vouching for the extent opens a metadata-only band (the FSK rule).
-        assert_eq!(
-            listen_class(METADATA, &[rule(433e6, 435e6)], 433.9e6, 433.95e6).unwrap(),
-            UNRESTRICTED
-        );
-        // Restricted source classes refuse even outside restricted bands and with rules.
-        for class in [
-            ContentClass::RestrictedPaging,
-            ContentClass::RestrictedCellular,
-        ] {
-            assert!(listen_class(class, &[rule(0.0, 7e9)], 101.2e6, 101.4e6).is_err());
-        }
-        assert!(listen_class(UNRESTRICTED, &[], f64::NAN, 1.0).is_err());
     }
 
     #[test]

@@ -1797,21 +1797,6 @@ mod tests {
         assert_eq!(hackrf_serial("hackrf:abc"), Some(Some("abc".into())));
         assert_eq!(hackrf_serial("hackrf:"), None);
         assert_eq!(hackrf_serial("sigmf:x"), None);
-        let fm = replay_plan(100.8e6, 2.4e6, Timestamp::UNIX_EPOCH);
-        assert_eq!(plan_class(&fm, 2.4e6), ContentClass::Unrestricted);
-        let mut wide = replay_plan(915e6, 2e6, Timestamp::UNIX_EPOCH);
-        wide.regions[0].freq = hk_model::FreqRange::new(900e6, 940e6);
-        // 900-940 MHz reaches restricted allocations (the cellular band below 902 MHz comes
-        // first, then 929-932 MHz paging): the whole plan is restricted.
-        let class = plan_class(&wide, 2e6);
-        assert!(
-            matches!(
-                class,
-                ContentClass::RestrictedPaging | ContentClass::RestrictedCellular
-            ),
-            "{class:?}"
-        );
-        assert!(!class.permits_content());
     }
 
     /// Waits (bounded) until the pipeline has taken samples.
@@ -1883,7 +1868,6 @@ mod tests {
             &StreamRegistry::new(),
         )
         .unwrap();
-        assert_eq!(lp.class, ContentClass::RestrictedPaging);
         let lc = lp.live_control.clone().expect("live control over the mock");
         wait_for_samples(&lp.handle);
         // A retune into another class re-plumbs the run into the window's class (T-050), exactly

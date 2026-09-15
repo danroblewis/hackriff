@@ -230,9 +230,9 @@ pub(super) fn gate_entry(
                 None => derived_identity_class(conn, id, d)?,
             };
             match (access.reveals(class), class) {
-                (true, Some(class)) => InventoryIdentity::Clear {
+                (true, class) => InventoryIdentity::Clear {
                     identity: d.clone(),
-                    class,
+                    class: class.unwrap_or(ContentClass::FAIL_CLOSED),
                 },
                 _ => InventoryIdentity::Withheld {
                     scheme: d.scheme.clone(),

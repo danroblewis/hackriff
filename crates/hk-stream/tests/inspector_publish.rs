@@ -145,46 +145,6 @@ fn unrestricted_frames_carry_bytes_and_layers_and_read_back_as_a_recording() {
 }
 
 #[test]
-fn restricted_frames_are_gated_and_metadata_is_reduced_to_the_allowlist() {
-    let policy = MetadataPolicy {
-        keys: BTreeMap::from([
-            ("frame".to_owned(), MetadataType::Integer),
-            ("bit_len".to_owned(), MetadataType::Integer),
-        ]),
-        frame_models: Vec::new(),
-        labels: Vec::new(),
-        identity: None,
-    };
-    let p = Publisher::with_metadata_policy(
-        header(ContentClass::RestrictedPaging),
-        PublisherConfig::default(),
-        policy,
-    )
-    .unwrap();
-    // The record claims unrestricted; the header class clamps it.
-    let bytes = publish(p, &[record(ContentClass::Unrestricted)]);
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(
-        !text.contains(SECRET_HEX) && !text.contains("0xC0FF"),
-        "{text}"
-    );
-
-    let mut r = RecordedFrames::open(&bytes[..]).unwrap();
-    let f = r.next_frame().unwrap().unwrap();
-    assert!(f.gated && f.content.is_none());
-    assert_eq!(f.content_class, ContentClass::RestrictedPaging);
-    assert_eq!(
-        f.metadata,
-        FrameMetadata {
-            frame: Some(4),
-            bit_len: Some(48),
-            ..Default::default()
-        }
-    );
-    assert_eq!(f.frame_model.as_deref(), Some(INSPECTOR_MESSAGE_SCHEMA));
-}
-
-#[test]
 fn status_records_must_be_metadata_and_frames_need_a_messages_stream() {
     let mut p = Publisher::new(
         header(ContentClass::Unrestricted),

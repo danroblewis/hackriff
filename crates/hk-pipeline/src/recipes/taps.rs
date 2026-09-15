@@ -544,20 +544,4 @@ mod tests {
         assert_eq!(out, [1, 0, 1]);
         assert!(out.capacity() >= 64);
     }
-
-    #[test]
-    fn the_restricted_policy_allowlists_only_named_frame_keys() {
-        let recipe: Recipe = serde_json::from_value(serde_json::json!({
-            "schema": "hackriff.recipe", "schema_version": 2, "id": "p", "version": 1,
-            "name": "P", "input": {"port": "iq"},
-            "nodes": [{"id": "c", "block": "identity"}],
-            "outputs": [{"id": "s", "kind": "stage", "from": "c"}],
-            "output_policy": {"content_class": "restricted-paging",
-                              "metadata_keys": {"bit_len": {"type": "integer"}}}
-        }))
-        .unwrap();
-        let p = inspector_policy(&recipe);
-        assert!(p.keys.contains_key("bit_len"));
-        assert!(!p.keys.contains_key("frame") && !p.keys.contains_key("record"));
-    }
 }

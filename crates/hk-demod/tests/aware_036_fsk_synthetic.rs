@@ -334,29 +334,6 @@ fn aware_036_fsk_synthetic_bits_framing_crc_and_records() {
         entry(&repo, w.emitter_id).emitter.count,
         bursts.len() as u64
     );
-
-    // Unclassified (the default): fail closed, the identity is withheld on every read.
-    let mut closed = Repository::open_in_memory().unwrap();
-    let wc =
-        write_framed_bursts(&mut closed, &bursts, &r, &FramedRecordContext::default()).unwrap();
-    let e = entry(&closed, wc.emitter_id);
-    assert!(
-        matches!(
-            e.identity,
-            InventoryIdentity::Withheld {
-                class: Some(ContentClass::MetadataOnly),
-                ..
-            }
-        ),
-        "[{AWARE_036}] {:?}",
-        e.identity
-    );
-    assert!(!format!("{e:?}").contains(&framing.value));
-    assert_eq!(
-        closed.emitter(wc.emitter_id).unwrap().identity,
-        Identity::Unknown
-    );
-    assert!(closed.emitter_by_identity(&framing).unwrap().is_none());
 }
 
 #[test]

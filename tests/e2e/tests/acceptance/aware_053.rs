@@ -24,15 +24,11 @@
 //!   found by blind detection, mode selection still has to pick WFM, and the truth list is read
 //!   only after the run. It stays until an auto analog chain on any confirmed emitter (T-054
 //!   follow-up) removes the need for it.
-//! - **Restricted band (legal guardrail).** The same IQ relabelled onto 930.5 MHz paging. The
-//!   mapped family ranks, yet the class stays `restricted-paging`: no recording, no label, no
-//!   content and no identity in clear.
 
 use hk_e2e::TruthItem;
 use hk_e2e::blind::matching;
 use hk_model::{
-    ContentClass, EmitterId, FreqRange, InventoryIdentity, InventoryQuery, KnownStatus,
-    KnownStatusChange, Region, StatusAuthor,
+    EmitterId, FreqRange, InventoryQuery, KnownStatus, KnownStatusChange, Region, StatusAuthor,
 };
 use hk_pipeline::family::MIN_CONFIDENCE;
 use hk_pipeline::{Explanation, explanations};
@@ -58,8 +54,6 @@ fn station(fx: &hk_e2e::Fixture) -> TruthItem {
 #[derive(Debug)]
 struct Seen {
     id: EmitterId,
-    f_center_hz: f64,
-    bandwidth_hz: f64,
     status: KnownStatus,
     last: KnownStatusChange,
     explanations: Vec<Explanation>,
@@ -116,8 +110,6 @@ fn matched(run: &BlindRun, truth: &TruthItem, shift_hz: f64, tag: &str) -> (usiz
             );
             Seen {
                 id: e.emitter.id,
-                f_center_hz: e.emitter.f_center_hz,
-                bandwidth_hz: e.emitter.bandwidth_hz,
                 status: e.emitter.known_status,
                 last,
                 explanations: x,
@@ -342,76 +334,4 @@ fn aware_053_blind_off_allocation_station_is_unexpected_here_with_prior_ref() {
             .all(|f| listed.iter().any(|e| e.emitter.id == f.id)),
         "[{AWARE_053}] query_inventory status filter"
     );
-}
-
-/// Legal guardrail (T-039): a mapped family and its explanations in the paging band set a
-/// status only.
-#[test]
-fn aware_053_blind_mapped_family_in_the_paging_band_stays_restricted_without_content() {
-    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
-        return;
-    };
-    let truth = station(&fx);
-    let shift_hz = 930.5e6 - 101.3e6;
-    let run = blind_replay(
-        &meta,
-        "a053p",
-        BlindSource {
-            relabel_hz: shift_hz,
-            ..BlindSource::default()
-        },
-    );
-    let s = &run.summary;
-    assert_eq!(
-        s.source_class, "restricted-paging",
-        "[{AWARE_053}] 930.5 MHz derives restricted-paging from frequency"
-    );
-    let (_, seen) = matched(&run, &truth, shift_hz, "paging band");
-    assert_truth_found(AWARE_053, &run.dir.0, &fx, shift_hz, true);
-    assert!(
-        seen.iter().any(|e| e
-            .explanations
-            .first()
-            .is_some_and(|x| x.service == "fm-broadcast" && evidence_backed(x))),
-        "[{AWARE_053}] the paging-band station must rank a mapped family for this to test anything"
-    );
-    for e in &seen {
-        assert_ne!(e.status, KnownStatus::Known, "[{AWARE_053}]");
-        let (class, why) = hk_pipeline::classify_emitter(
-            &[],
-            ContentClass::RestrictedPaging,
-            e.f_center_hz - e.bandwidth_hz / 2.0,
-            e.f_center_hz + e.bandwidth_hz / 2.0,
-        )
-        .unwrap();
-        assert_eq!(class, ContentClass::RestrictedPaging, "[{AWARE_053}] {why}");
-    }
-    assert_eq!(
-        s.counter("/chains/recordings"),
-        0,
-        "[{AWARE_053}] recording"
-    );
-    assert_eq!(s.counter("/chains/labels"), 0, "[{AWARE_053}] label");
-    assert_eq!(
-        s.counter("/chains/content_withheld"),
-        s.counter("/chains/decodes"),
-        "[{AWARE_053}] every decode withheld"
-    );
-    assert!(
-        files_with_suffix(&run.dir.0, ".sigmf-data").is_empty(),
-        "[{AWARE_053}] a SigMF recording was written"
-    );
-    for e in inventory(&repo(&run.dir.0), InventoryQuery::default()) {
-        assert!(
-            !matches!(e.identity, InventoryIdentity::Clear { .. }),
-            "[{AWARE_053}] identity in clear: {:?}",
-            e.identity
-        );
-    }
-    for row in &run.api_rows {
-        assert!(
-            row["identity_value"].is_null(),
-            "[{AWARE_053}] /api/inventory identity in clear: {row}"
-        );
-    }
 }

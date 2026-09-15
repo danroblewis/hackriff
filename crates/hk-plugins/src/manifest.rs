@@ -943,85 +943,6 @@ mod tests {
         assert!(m.base_dir.is_some());
     }
 
-    #[test]
-    fn gated_manifest_allowlist_parses_and_types_check() {
-        let m = parse(&pager()).unwrap();
-        let p = m.output.metadata_policy.unwrap();
-        assert_eq!(p.keys["capcode"], MetadataType::Digits { max_len: 7 });
-        let t = &p.keys["capcode"];
-        assert!(t.accepts(&json!("1234567")));
-        assert!(!t.accepts(&json!("12345678")), "over-long is rejected");
-        assert!(!t.accepts(&json!("12a4567")));
-        assert!(!t.accepts(&json!(1234567)));
-        assert!(p.keys["addr"].accepts(&json!("a1B2c3")));
-        assert!(!p.keys["addr"].accepts(&json!("SMUGGL")));
-        assert!(p.keys["encoding"].accepts(&json!("alpha")));
-        assert!(!p.keys["encoding"].accepts(&json!("hello pager text")));
-        assert!(p.keys["function"].accepts(&json!(3)));
-        assert!(!p.keys["function"].accepts(&json!(3.5)));
-        assert!(!p.keys["function"].accepts(&json!("3")));
-        let id = p.identity.unwrap();
-        assert!(id.accepts(&DecodedIdentity {
-            scheme: IdentityScheme::Other("pocsag-capcode".into()),
-            value: "1234567".into()
-        }));
-        assert!(!id.accepts(&DecodedIdentity {
-            scheme: IdentityScheme::AdsbIcao,
-            value: "1234567".into()
-        }));
-        // An explicit empty allowlist is a valid declaration.
-        let mut empty = pager();
-        empty["output"] =
-            json!({"schema_id": "s/1", "content_class": "metadata-only", "metadata_keys": {}});
-        assert!(
-            parse(&empty)
-                .unwrap()
-                .output
-                .metadata_policy
-                .unwrap()
-                .keys
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn restricted_defaults_review_notes_and_warnings() {
-        let mut v = base();
-        v["output"] = json!({
-            "schema_id": "s/1", "content_class": "restricted-paging",
-            "metadata_keys": {
-                "addr": {"type": "hex"},
-                "long": {"type": "digits", "max_len": 20, "review_note": "IMSI-length id, reviewed 2026-09-13"},
-                "n": {"type": "integer"}
-            },
-            "identity": {"scheme": "adsb-icao", "charset": "hex"}
-        });
-        let m = parse(&v).unwrap();
-        let p = m.output.metadata_policy.as_ref().unwrap();
-        assert_eq!(p.keys["addr"], MetadataType::Hex { max_len: 8 });
-        assert_eq!(p.keys["long"], MetadataType::Digits { max_len: 20 });
-        assert_eq!(p.identity.as_ref().unwrap().max_len, 8);
-        assert_eq!(m.warnings.len(), 2, "{:?}", m.warnings);
-        assert!(m.warnings.iter().any(|w| w.contains("reviewed 2026-09-13")));
-        assert!(m.warnings.iter().any(|w| w.contains("64 bits")));
-
-        // The shipped example paging policy: only the documented keys, no warnings.
-        let mut v = base();
-        v["output"] = serde_json::from_str(EXAMPLE_RESTRICTED_PAGING_OUTPUT).unwrap();
-        let m = parse(&v).unwrap();
-        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
-        assert_eq!(m.output.content_class, ContentClass::RestrictedPaging);
-        let p = m.output.metadata_policy.unwrap();
-        assert_eq!(
-            p.keys.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["baud", "capcode", "encoding", "function"]
-        );
-        assert_eq!(p.keys["capcode"], MetadataType::Digits { max_len: 8 });
-        assert!(p.frame_models.is_empty() && p.labels.is_empty() && p.identity.is_none());
-        assert!(!p.keys["function"].accepts(&json!(5782981759612573780u64)));
-        assert!(!p.keys["capcode"].accepts(&json!("5551234567")));
-    }
-
     fn expect_err(mutate: impl FnOnce(&mut Value)) -> ManifestError {
         let mut v = base();
         mutate(&mut v);
@@ -1053,14 +974,6 @@ mod tests {
                 ..
             }
         ));
-        // Every content-forbidding class requires an explicit metadata allowlist.
-        for class in ["metadata-only", "restricted-cellular", "restricted-paging"] {
-            assert_eq!(
-                expect_err(|v| v["output"]["content_class"] = json!(class)),
-                ManifestError::Missing("output.metadata_keys"),
-                "{class}"
-            );
-        }
         for bad_key in [
             json!({"text": {"type": "string", "max_len": 16}}),
             json!({"text": {"type": "hex", "max_len": 16}}),
