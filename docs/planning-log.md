@@ -1065,3 +1065,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Nits:** duration-weighted `fco_all_visits`; `idle_fraction` doc corrected.
 
   The t118 e2e is unchanged (6/6 inside CI). Not run yet: the FM fixture sanity check (ignored); bias-model suspect rule. **Merge chain T-118 → T-119 → T-127 → T-121** delegated to one Opus integration agent on a branch (conflict resolution, api_contract after each merge, the FM sanity run, t118/report/scene e2es); the coordinator then fast-forwards main and runs the full check.
+- **B0.314 M2 integration merged** (integration branch a5b8b36 → main). Merges: T-118 eac654e, T-119 eda63e9, T-127 ae10b77, T-121 3832609.
+  - **Semantic conflict fixed during integration:** T-121's `ThresholdMethod::HistoryTile` versus T-118's exhaustive matches and new `OccupancyStat` fields.
+  - **Tests after each merge:** api_contract 18/18 each time; targeted suites 23/168/44/68 green; lint clean; e2es t118 / report_over_48h / scene_48h pass.
+  - **FM fixture sanity:** passes. Local floors (−85.8…−78.9 dB) mark 14% of columns occupied vs 18% whole-band, 0% suspect. **Finding:** learned channels are only 13–44 kHz wide and only 2 of 9 align with stations; the band row fco is None. Added **T-129** (FM-realistic channel learning, demo-relevant).
+  - **Reports** still use the tile stand-in rather than the T-118 engine; that's T-128.
+
+  Worktrees cleaned. Full check of main running; T-122 and T-128 launch after it.

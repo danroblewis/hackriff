@@ -1886,7 +1886,7 @@ tasks:
   - id: T-118
     milestone: M2
     title: "Occupancy engine (C12): FCO/FBO/SRO per channel/band with thresholds, RBW correction, SM.2256 confidence"
-    status: review
+    status: done
     commit: e8e238d
     deps: [T-113, T-115, T-117]
     parallel_group: M2O
@@ -1901,7 +1901,7 @@ tasks:
   - id: T-119
     milestone: M2
     title: "Baselines + novelty + interestingness score (C12)"
-    status: review
+    status: done
     commit: 06d4498
     deps: [T-118]
     parallel_group: M2O
@@ -1929,7 +1929,7 @@ tasks:
   - id: T-121
     milestone: M2
     title: "Survey reports + richer history queries (C26/C39): report(region, span)"
-    status: review
+    status: done
     commit: c732f17
     deps: [T-113, T-116, T-118]
     parallel_group: M2R
@@ -2010,7 +2010,7 @@ tasks:
   - id: T-127
     milestone: M2
     title: "Bandit pipeline wiring + scheduler routes + POI from the observation log"
-    status: review
+    status: done
     commit: f366619
     deps: [T-115, T-120]
     parallel_group: M2Q
@@ -2035,6 +2035,20 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: true
+  - id: T-129
+    milestone: M2
+    title: "Occupancy channel learning on real dense FM: channels match station occupied bandwidth, not 13-44 kHz fragments"
+    status: todo
+    deps: [T-118]
+    parallel_group: M2O
+    use_cases: [AWARE-042, SIGNAL-062]
+    found_by: "M2 integration FM fixture sanity 2026-09-15: learned channels 13-44 kHz wide; only 2 of 9 align with stations; band row fco None"
+    acceptance: "on the FM fixture (and T-099 dense-FM synthetic scene) learned channels cover each station's occupied band (from detection OBW / T-102 occupied_box, merging in-band fragments per T-101 rule), one channel per station, blind (no raster); stations read occupied and inter-station gaps idle; band row carries fco/fco_all_visits consistently; t118 48h e2e unchanged; test asserts channel count and widths vs hidden truth"
+    area: crates/hk-context/src/occupancy/channels.rs, crates/hk-pipeline/src/occupancy.rs
+    needs: none
+    model: opus
+    effort: medium
     core_interface: true
   - id: T-100
     milestone: M0b
