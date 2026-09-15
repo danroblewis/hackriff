@@ -139,7 +139,7 @@ struct Lowpass {
     cutoff: f64,
     transition: f64,
     stopband_db: f64,
-    fir: Option<(Fir, Vec<f32>)>,
+    fir: Option<Fir>,
     delay: f64,
     status: Status,
 }
@@ -154,16 +154,26 @@ impl Block for Lowpass {
                 "lowpass cutoff + transition beyond the input Nyquist frequency".into(),
             ));
         }
-        let design = design_lowpass(LowpassSpec::new(fs, self.cutoff, stop, self.stopband_db))
-            .map_err(|e| BlockError::Unrealisable(e.to_string()))?;
+        let spec = LowpassSpec::new(fs, self.cutoff, stop, self.stopband_db);
+        let estimate = spec.estimate_taps();
+        if estimate > MAX_TAPS {
+            return Err(BlockError::Params(format!(
+                "lowpass needs about {estimate} taps (limit {MAX_TAPS}): widen transition_hz"
+            )));
+        }
+        let design = design_lowpass(spec).map_err(|e| BlockError::Unrealisable(e.to_string()))?;
         let taps = design.taps;
-        self.delay = (taps.len() as f64 - 1.0) / 2.0;
-        let fir = match input.ty {
-            PortType::Iq => Fir::Iq(FirDecimator::new(taps.clone(), 1)),
-            _ => Fir::Real(FirDecimator::new(taps.clone(), 1)),
-        };
         let hold = taps.len();
-        self.fir = Some((fir, taps));
+        if hold > MAX_TAPS {
+            return Err(BlockError::Params(format!(
+                "lowpass needs {hold} taps (limit {MAX_TAPS}): widen transition_hz"
+            )));
+        }
+        self.delay = (hold as f64 - 1.0) / 2.0;
+        self.fir = Some(match input.ty {
+            PortType::Iq => Fir::Iq(FirDecimator::new(taps, 1)),
+            _ => Fir::Real(FirDecimator::new(taps, 1)),
+        });
         self.status.extra.set("taps", hold as f64);
         Ok(vec![PortInfo {
             hold_items: hold,
@@ -176,7 +186,7 @@ impl Block for Lowpass {
         if restarts(input.meta.flags) {
             self.reset();
         }
-        let Some((fir, _)) = &mut self.fir else {
+        let Some(fir) = &mut self.fir else {
             return Err(BlockError::Ports("lowpass not initialised".into()));
         };
         let out = io.output(0)?;
@@ -205,11 +215,10 @@ impl Block for Lowpass {
     }
 
     fn reset(&mut self) {
-        if let Some((fir, taps)) = &mut self.fir {
-            *fir = match fir {
-                Fir::Iq(_) => Fir::Iq(FirDecimator::new(taps.clone(), 1)),
-                Fir::Real(_) => Fir::Real(FirDecimator::new(taps.clone(), 1)),
-            };
+        match &mut self.fir {
+            Some(Fir::Iq(f)) => f.clear(),
+            Some(Fir::Real(f)) => f.clear(),
+            None => {}
         }
     }
 

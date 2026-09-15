@@ -80,9 +80,11 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         max_dev: f64_or(p, "max_deviation_ppm", 500.0) * 1e-6,
         k1: 0.0,
         k2: 0.0,
+        sized_k1: 0.0,
+        min_step: 0.5,
         fs: 0.0,
         sps: 1.0,
-        rrc_taps: Vec::new(),
+        rrc_len: 0,
         rrc: None,
         rrc_delay: 0.0,
         acc: Vec::new(),
@@ -106,9 +108,11 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         eye_sq: 0.0,
         first: None,
         diag: Vec::new(),
+        non_finite: 0,
         status: Status::default(),
     };
     b.set_loop(f64_or(p, "loop_bandwidth", 0.01));
+    b.sized_k1 = b.k1;
     Ok(Box::new(b))
 }
 
@@ -122,10 +126,14 @@ struct Clock {
     max_dev: f64,
     k1: f64,
     k2: f64,
+    /// `k1` the outputs were sized for: a hot change to a larger one is a rebuild.
+    sized_k1: f64,
+    /// Shortest loop step, as a fraction of the nominal period (the output bound's basis).
+    min_step: f64,
     fs: f64,
     /// Samples per symbol.
     sps: f64,
-    rrc_taps: Vec<f32>,
+    rrc_len: usize,
     rrc: Option<FirDecimator<f32>>,
     rrc_delay: f64,
     /// Integrating pulses: prefix sums (`acc[k]` = sum of samples `acc_base..acc_base+k`).
@@ -157,7 +165,21 @@ struct Clock {
     /// Position of the first symbol emitted in the current chunk.
     first: Option<f64>,
     diag: Vec<f32>,
+    non_finite: u64,
     status: Status,
+}
+
+/// Loop gains `(k1, k2)` for `algo` at normalised bandwidth `bw`.
+fn loop_gains(algo: Algo, bw: f64) -> (f64, f64) {
+    // Detector gain after normalisation: ≈ 2 per symbol fraction for Gardner and the
+    // early–late gate, ≈ 1 for Mueller–Müller.
+    let kd = match algo {
+        Algo::MuellerMuller => 1.0,
+        _ => 2.0,
+    };
+    let theta = bw / (DAMPING + 1.0 / (4.0 * DAMPING));
+    let d = 1.0 + 2.0 * DAMPING * theta + theta * theta;
+    (4.0 * DAMPING * theta / d / kd, 4.0 * theta * theta / d / kd)
 }
 
 /// Root-raised-cosine impulse response at `t` symbols.
@@ -177,16 +199,18 @@ fn rrc(t: f64, a: f64) -> f64 {
 impl Clock {
     fn set_loop(&mut self, bw: f64) {
         self.loop_bw = bw;
-        // Detector gain after normalisation: ≈ 2 per symbol fraction for Gardner and the
-        // early–late gate, ≈ 1 for Mueller–Müller.
-        let kd = match self.algo {
-            Algo::MuellerMuller => 1.0,
-            _ => 2.0,
-        };
-        let theta = bw / (DAMPING + 1.0 / (4.0 * DAMPING));
-        let d = 1.0 + 2.0 * DAMPING * theta + theta * theta;
-        self.k1 = 4.0 * DAMPING * theta / d / kd;
-        self.k2 = 4.0 * theta * theta / d / kd;
+        (self.k1, self.k2) = loop_gains(self.algo, bw);
+    }
+
+    /// Shortest spacing of two emitted symbols, as a fraction of the nominal period.
+    /// - Loops: the step `1 + freq + k1·e` with `|freq| ≤ max_dev`, `|e| ≤ 1` (and clamped to
+    ///   this in `run_loop`).
+    /// - Max-contrast: a fixed grid plus at most one half-period step per 16-symbol window.
+    fn shortest_step(&self) -> f64 {
+        match self.algo {
+            Algo::MaxContrast => WINDOW_SYMBOLS as f64 / (WINDOW_SYMBOLS + 1) as f64,
+            _ => (1.0 - self.max_dev - self.k1).max(0.25),
+        }
     }
 
     fn integrating(&self) -> bool {
@@ -200,8 +224,8 @@ impl Clock {
         self.samples = 0;
         if self.integrating() {
             self.acc.push(0.0);
-        } else if !self.rrc_taps.is_empty() {
-            self.rrc = Some(FirDecimator::new(self.rrc_taps.clone(), 1));
+        } else if let Some(f) = &mut self.rrc {
+            f.clear();
         }
         self.next = self.sps;
         self.freq = 0.0;
@@ -222,6 +246,8 @@ impl Clock {
 
     #[inline]
     fn append(&mut self, v: f32) {
+        // A NaN/inf in the prefix sum would poison every later statistic.
+        let v = finite_or_zero(v, &mut self.non_finite);
         if self.integrating() {
             let last = *self.acc.last().unwrap_or(&0.0);
             self.acc.push(last + f64::from(v));
@@ -329,7 +355,7 @@ impl Clock {
             let e = e.clamp(-1.0, 1.0);
             self.emit(s, y, e, out, tapped);
             self.freq = (self.freq + self.k2 * e).clamp(-self.max_dev, self.max_dev);
-            self.next = s + t * (1.0 + self.freq + self.k1 * e);
+            self.next = s + t * (1.0 + self.freq + self.k1 * e).max(self.min_step);
             self.y_prev = y;
             self.have_prev = true;
         }
@@ -445,23 +471,42 @@ impl Block for Clock {
                 "clock_recovery needs at least {min_sps} samples per symbol"
             )));
         }
+        if self.sps > MAX_SAMPLES_PER_SYMBOL {
+            return Err(BlockError::Params(format!(
+                "clock_recovery: {:.0} samples per symbol (limit {MAX_SAMPLES_PER_SYMBOL}): raise symbol_rate_bd or resample first",
+                self.sps
+            )));
+        }
+        self.rrc = None;
+        self.rrc_len = 0;
         if self.pulse == Pulse::Rrc {
             let len = ((RRC_SPAN_SYMBOLS * self.sps).round() as usize) | 1;
+            if len > MAX_TAPS {
+                return Err(BlockError::Params(format!(
+                    "clock_recovery: the rrc matched filter needs {len} taps (limit {MAX_TAPS}): resample first"
+                )));
+            }
             let mid = (len - 1) as f64 / 2.0;
             let raw: Vec<f64> = (0..len)
                 .map(|i| rrc((i as f64 - mid) / self.sps, RRC_ROLLOFF))
                 .collect();
             let sum: f64 = raw.iter().sum();
-            self.rrc_taps = raw.iter().map(|v| (v / sum) as f32).collect();
+            let taps = raw.iter().map(|v| (v / sum) as f32).collect();
+            self.rrc = Some(FirDecimator::new(taps, 1));
+            self.rrc_len = len;
             self.rrc_delay = mid;
         }
         let hold = match self.algo {
             Algo::MaxContrast => ((WINDOW_SYMBOLS + 3) as f64 * self.sps) as usize,
             _ => (3.0 * self.sps) as usize,
-        } + self.rrc_taps.len();
+        } + self.rrc_len;
         let n = input.max_items;
         self.acc = Vec::with_capacity(n + hold + 64);
-        let max_out = ((n + hold) as f64 / self.sps) as usize + 4;
+        // Symbols of one chunk lie within its samples plus the history held (`hold`), spaced
+        // at least the shortest step apart.
+        self.sized_k1 = self.k1;
+        self.min_step = self.shortest_step();
+        let max_out = ((n + hold + 8) as f64 / (self.sps * self.min_step)).ceil() as usize + 4;
         self.diag = Vec::with_capacity(max_out);
         self.restart(0);
         Ok(vec![
@@ -553,6 +598,7 @@ impl Block for Clock {
                 self.status.extra.set("rate_ppm", -self.freq * 1e6);
             }
         }
+        report_non_finite(&mut self.status, self.non_finite);
         Ok(())
     }
 
@@ -564,12 +610,217 @@ impl Block for Clock {
         if !cold_equal(HOT, &self.params, p) {
             return Ok(ParamUpdate::Rebuild);
         }
-        self.set_loop(f64_or(p, "loop_bandwidth", 0.01));
+        let bw = f64_or(p, "loop_bandwidth", 0.01);
+        if self.algo != Algo::MaxContrast && loop_gains(self.algo, bw).0 > self.sized_k1 {
+            // A wider loop can space symbols closer than the outputs were sized for.
+            return Ok(ParamUpdate::Rebuild);
+        }
+        self.set_loop(bw);
         self.params = p.clone();
         Ok(ParamUpdate::Applied)
     }
 
     fn status(&self) -> Status {
         self.status
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hk_recipe::PortType;
+    use serde_json::json;
+
+    use crate::block::{Block, Io, ParamUpdate, PortInfo, TapMask};
+    use crate::blocks::iq::testkit::*;
+    use crate::buffer::{ChunkFlags, ChunkMeta, Input, Output, PortSlice, PortVec};
+
+    fn real_info(fs: f64, max_items: usize) -> PortInfo {
+        PortInfo {
+            ty: PortType::Real,
+            rate_hz: fs,
+            max_items,
+            hold_items: 0,
+        }
+    }
+
+    /// Runs `block` over `x` in chunks cycling through `chunks` (each ≤ `info.max_items`),
+    /// asserting every output chunk fits its declared `max_items`. Returns the symbol count.
+    fn run_bounded(block: &mut dyn Block, info: PortInfo, x: &[f32], chunks: &[usize]) -> usize {
+        let outs = block.init(&[info]).unwrap();
+        let mut outputs: Vec<Output> = outs.iter().map(Output::for_port).collect();
+        let (mut k, mut c, mut symbols) = (0, 0, 0);
+        while k < x.len() {
+            let e = (k + chunks[c % chunks.len()]).min(x.len());
+            c += 1;
+            let meta = ChunkMeta {
+                index: k as u64,
+                source_index: k as f64,
+                source_per_item: 1.0,
+                rate_hz: info.rate_hz,
+                channel: 0,
+                flags: if k == 0 {
+                    ChunkFlags::DISCONTINUITY
+                } else {
+                    ChunkFlags::NONE
+                },
+            };
+            for o in &mut outputs {
+                o.begin_chunk();
+            }
+            let inputs = [Input {
+                meta,
+                data: PortSlice::Real(&x[k..e]),
+            }];
+            block
+                .process(&mut Io::new(&inputs, &mut outputs).with_taps(TapMask(u32::MAX)))
+                .unwrap();
+            for (o, declared) in outputs.iter().zip(&outs) {
+                assert!(
+                    o.data.len() <= declared.max_items,
+                    "{} items > declared {} at sample {k}",
+                    o.data.len(),
+                    declared.max_items
+                );
+            }
+            symbols += outputs[0].data.len();
+            k = e;
+        }
+        symbols
+    }
+
+    #[test]
+    fn output_count_stays_within_the_declared_bound_at_max_loop_bandwidth() {
+        let fs = 9_600.0;
+        let mut rng = Lcg::new(42);
+        let x: Vec<f32> = (0..200_000).map(|_| rng.gauss() as f32).collect();
+        for (algo, pulse, rate) in [
+            ("mueller-muller", "nrz", 4_800.0),
+            ("mueller-muller", "rrc", 4_800.0),
+            ("gardner", "nrz", 4_800.0),
+            ("gardner", "rrc", 4_800.0),
+            ("gardner", "biphase", 2_400.0),
+            ("max-contrast", "biphase", 2_400.0),
+        ] {
+            let p = json!({"symbol_rate_bd": rate, "pulse": pulse, "algorithm": algo,
+                           "loop_bandwidth": 0.25, "max_deviation_ppm": 20_000});
+            let mut b = build("clock_recovery", p, PortType::Real);
+            let n = run_bounded(b.as_mut(), real_info(fs, 64), &x, &[64, 1, 17, 64, 3, 40]);
+            assert!(n > 0, "{algo} {pulse}");
+        }
+        // The bound holds even if every step is the shortest the loop allows (k1 ≈ 0.48,
+        // max deviation 2 %): at 2 samples per symbol, one symbol per sample.
+        let mut b = build(
+            "clock_recovery",
+            json!({"symbol_rate_bd": 4_800, "algorithm": "mueller-muller",
+                   "loop_bandwidth": 0.25, "max_deviation_ppm": 20_000}),
+            PortType::Real,
+        );
+        let outs = b.init(&[real_info(fs, 128)]).unwrap();
+        assert!(outs[0].max_items >= 128, "{}", outs[0].max_items);
+    }
+
+    #[test]
+    fn a_hot_loop_bandwidth_needing_more_output_is_a_rebuild() {
+        let with_bw = |bw: f64| json!({"symbol_rate_bd": 1_200, "loop_bandwidth": bw});
+        let mut b = build("clock_recovery", with_bw(0.01), PortType::Real);
+        b.init(&[real_info(9_600.0, 256)]).unwrap();
+        assert_eq!(
+            update(b.as_mut(), with_bw(0.005), PortType::Real),
+            ParamUpdate::Applied
+        );
+        assert_eq!(
+            update(b.as_mut(), with_bw(0.01), PortType::Real),
+            ParamUpdate::Applied
+        );
+        assert_eq!(
+            update(b.as_mut(), with_bw(0.25), PortType::Real),
+            ParamUpdate::Rebuild
+        );
+        // Max-contrast spacing does not depend on the bandwidth.
+        let mc = |bw: f64| {
+            json!({"symbol_rate_bd": 1_200, "pulse": "biphase", "algorithm": "max-contrast",
+                   "loop_bandwidth": bw})
+        };
+        let mut b = build("clock_recovery", mc(0.01), PortType::Real);
+        b.init(&[real_info(9_600.0, 256)]).unwrap();
+        assert_eq!(
+            update(b.as_mut(), mc(0.25), PortType::Real),
+            ParamUpdate::Applied
+        );
+    }
+
+    #[test]
+    fn extreme_symbol_rates_are_rejected_at_init() {
+        let mut b = build(
+            "clock_recovery",
+            json!({"symbol_rate_bd": 0.01}),
+            PortType::Real,
+        );
+        let e = b
+            .init(&[real_info(48_000.0, 4_096)])
+            .expect_err("rejected")
+            .to_string();
+        assert!(e.contains("samples per symbol"), "{e}");
+        let mut b = build(
+            "clock_recovery",
+            json!({"symbol_rate_bd": 3, "pulse": "rrc"}),
+            PortType::Real,
+        );
+        let e = b
+            .init(&[real_info(48_000.0, 4_096)])
+            .expect_err("rejected")
+            .to_string();
+        assert!(e.contains("taps"), "{e}");
+    }
+
+    #[test]
+    fn non_finite_input_does_not_poison_the_prefix_sum() {
+        let fs = 9_600.0;
+        let mut rng = Lcg::new(3);
+        let bits: Vec<u8> = (0..2_000).map(|_| rng.bit()).collect();
+        let clean: Vec<f32> = (0..bits.len() * 8)
+            .map(|i| f32::from(bits[i / 8]) * 2.0 - 1.0 + 0.05 * rng.gauss() as f32)
+            .collect();
+        let (mut bad, mut zeroed) = (clean.clone(), clean);
+        for i in [100, 101, 5_000, 9_999] {
+            bad[i] = f32::NAN;
+            zeroed[i] = 0.0;
+        }
+        bad[7_000] = f32::INFINITY;
+        zeroed[7_000] = 0.0;
+        for pulse in ["nrz", "rrc"] {
+            let make = || {
+                vec![build(
+                    "clock_recovery",
+                    json!({"symbol_rate_bd": 1_200, "pulse": pulse}),
+                    PortType::Real,
+                )]
+            };
+            let got = assert_chunk_invariant(
+                make,
+                PortType::Real,
+                fs,
+                &PortVec::Real(bad.clone()),
+                &[512, 77],
+            );
+            let want = assert_chunk_invariant(
+                make,
+                PortType::Real,
+                fs,
+                &PortVec::Real(zeroed.clone()),
+                &[512],
+            );
+            let y = &got.out(0, 0).real;
+            assert_eq!(y, &want.out(0, 0).real, "{pulse}");
+            assert!(
+                y.len() > 1_900 && y.iter().all(|v| v.is_finite()),
+                "{pulse}"
+            );
+            let st = got.block(0).status();
+            assert_eq!(
+                st.extra.iter().find(|e| e.0 == "non_finite").map(|e| e.1),
+                Some(5.0)
+            );
+        }
     }
 }

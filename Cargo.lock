@@ -555,6 +555,7 @@ version = "0.1.0"
 dependencies = [
  "hk-core",
  "hk-dsp",
+ "hk-estimate",
  "hk-model",
  "hk-recipe",
  "hk-store",
@@ -684,6 +685,7 @@ dependencies = [
  "hk-cli",
  "hk-context",
  "hk-core",
+ "hk-demod",
  "hk-dsp",
  "hk-model",
  "hk-pipeline",

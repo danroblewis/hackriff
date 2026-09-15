@@ -1516,8 +1516,8 @@ tasks:
   - id: T-091
     milestone: M1
     title: "M1 Parser-authoring assist: sync/period hunt, entropy field boundaries, CRC/BCH search"
-    status: review
-    commit: 85f813d
+    status: done
+    commit: 391968d
     deps: [T-085]
     parallel_group: M1S
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1530,7 +1530,8 @@ tasks:
   - id: T-092
     milestone: M1
     title: "M1 Always-on decoded-stream capture + scrubbable review"
-    status: in-progress
+    status: review
+    commit: 8866566
     deps: [T-085, T-088]
     parallel_group: M1C
     use_cases: [SIGNAL-062]
@@ -1542,7 +1543,8 @@ tasks:
   - id: T-093
     milestone: M1
     title: "M1 follow_hops: one pipeline spanning several channels"
-    status: in-progress
+    status: done
+    commit: 8f02471
     deps: [T-085, T-088]
     parallel_group: M1H
     use_cases: [SIGNAL-062]
@@ -1555,7 +1557,8 @@ tasks:
   - id: T-094
     milestone: M1
     title: "M1 Tutorial 1: RDS recipe (reference) + blind acceptance vs Rust RDS oracle"
-    status: in-progress
+    status: done
+    commit: 7a17979
     deps: [T-086, T-087, T-088, T-089]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1567,7 +1570,7 @@ tasks:
   - id: T-095
     milestone: M1
     title: "M1 Tutorial 2: POCSAG recipe with follow_hops + blind acceptance"
-    status: todo
+    status: in-progress
     deps: [T-098, T-094, T-093, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1579,7 +1582,7 @@ tasks:
   - id: T-096
     milestone: M1
     title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
-    status: todo
+    status: in-progress
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1591,7 +1594,7 @@ tasks:
   - id: T-097
     milestone: M1
     title: "M1 Tutorial 4: ADS-B recipe + blind acceptance vs readsb (live HIL deferred: 1090 MHz antenna)"
-    status: todo
+    status: in-progress
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-001]
@@ -1680,13 +1683,55 @@ tasks:
   - id: T-104
     milestone: M1
     title: "Blocks A hardening (T-086 review follow-ups)"
-    status: in-progress
+    status: done
+    commit: 514b17c
     deps: [T-086, T-087]
     parallel_group: M1A
     use_cases: [SIGNAL-062]
     found_by: "T-086 review 2026-09-15"
     acceptance: "ppm_demod uses T-087 framing::length::FrameLength and iq::LengthFrom removed; clock_recovery output sizing bounded by the shortest loop period (clock.rs:464) incl. hot loop_bandwidth changes; restart paths (lowpass filter.rs:207, clock_recovery clock.rs:204) clear state without allocating (FirDecimator::clear); samples-per-symbol / tap-count caps on extreme params (symbol_rate_bd); NaN input does not poison running averages or pass the ppm preamble check; manchester mid-chunk realignment keeps the time map exact (line.rs:300); allocation-counting test over process() for all Blocks A; tests per item"
     area: "crates/hk-blocks/src/blocks/{iq,symbol}/**, crates/hk-demod dsp (additive)"
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-105
+    milestone: M1
+    title: "Assist CRC search: confident wrong generator in rare cases at >=8 frames; near-tie ordering at 3 frames"
+    status: done
+    commit: 52bd4fe
+    deps: [T-091]
+    parallel_group: M1S
+    use_cases: [SIGNAL-062, AWARE-036]
+    found_by: "T-091 fix round 2026-09-15: 200 Mode-S CRC-24 seeds, 8 frames -> 3 wrong tops at score ~0.95; 3 frames -> wrong top 164/200 but all low score"
+    acceptance: "with >=8 distinct frames a wrong CRC generator never scores >=0.5 (200-seed test); at 3-4 frames near-tie alternatives rank the smallest validating generator first or are reported as an explicit ambiguous group; existing blind recoveries unchanged"
+    area: crates/hk-estimate/src/assist/codes.rs
+    needs: none
+    model: opus
+    effort: medium
+  - id: T-106
+    milestone: M1
+    title: "hk_demod RDS oracle bit/group positions count from pilot lock, not stream start (PS timestamps ~100 ms early)"
+    status: in-progress
+    deps: [T-094]
+    parallel_group: T106
+    use_cases: [SIGNAL-062]
+    found_by: "T-094 2026-09-15: WfmDemod feeds the RDS demod only after pilot PLL lock; positions 122 bits (102.7 ms) late on the FM capture; hk_demod::record PS decode timestamps likely early by that amount"
+    acceptance: "RDS group/bit positions and recorded decode timestamps reference the stream sample index (account for pre-lock samples); tutorial_rds oracle-agreement test no longer needs the constant-offset estimate; signal_062 tests unchanged"
+    area: crates/hk-demod (wfm.rs, rds, record)
+    needs: none
+    model: sonnet
+    effort: medium
+  - id: T-107
+    milestone: M1
+    title: "follow_hops hardening (T-093 review follow-ups)"
+    status: todo
+    deps: [T-093]
+    parallel_group: M1H
+    use_cases: [SIGNAL-062]
+    found_by: "T-093 review 2026-09-15"
+    acceptance: "per-channel tune stored and added channels re-planned at apply time so a same-rate retune racing set_channels never decodes the wrong frequency (hops.rs:900, test); a channel whose DDC yields no samples on a chunk still carries the pipeline DISCONTINUITY flag (hops.rs:566, test); ordering window handles frames longer than order_window_s (e.g. multi-batch POCSAG) without spurious late counts (by frame end or per-frame hold); tests for the detections channel source and for a hop set found by the tracker from IQ (not inserted); HTTP routes for set_channels/refresh_channels with docs/api.md + contract tests"
+    area: crates/hk-pipeline/src/recipes/hops.rs, crates/hk-blocks/src/blocks/multi, crates/hk-api
     needs: none
     model: opus
     effort: medium

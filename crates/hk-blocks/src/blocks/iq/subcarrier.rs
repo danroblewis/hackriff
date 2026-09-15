@@ -81,6 +81,7 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         psi: 0.0,
         n_z: 0,
         alpha: 1.0,
+        non_finite: 0,
         status: Status::default(),
     }))
 }
@@ -98,6 +99,7 @@ struct Subcarrier {
     psi: f64,
     n_z: u64,
     alpha: f64,
+    non_finite: u64,
     status: Status,
 }
 
@@ -193,11 +195,14 @@ impl Block for Subcarrier {
         }
         let first = self.rate.next_source(&m);
         let per = self.rate.per_item(&m);
+        // Bad samples are zeroed before the PLL and the phase averages see them.
+        let bad = &mut self.non_finite;
         match (&mut self.pll, self.reference) {
             (Some(pll), Some(r)) => {
                 self.rate.scratch_in.clear();
                 let k = f64::from(r.multiple);
                 for &s in x {
+                    let s = finite_or_zero(s, bad);
                     let th = pll.step(s);
                     let (sn, c) = (-k * th).sin_cos();
                     self.rate
@@ -205,7 +210,13 @@ impl Block for Subcarrier {
                         .push(Complex32::new(s * c as f32, s * sn as f32));
                 }
             }
-            _ => real_to_complex(x, &mut self.rate.scratch_in),
+            _ => {
+                self.rate.scratch_in.clear();
+                self.rate.scratch_in.extend(
+                    x.iter()
+                        .map(|&s| Complex32::new(finite_or_zero(s, bad), 0.0)),
+                );
+            }
         }
         self.rate.run();
         let out = io.output(0)?;
@@ -233,6 +244,7 @@ impl Block for Subcarrier {
             self.status.quality = Some((self.z2.norm() / self.power).min(1.0) as f32);
             self.status.extra.set("phase_rad", self.psi);
         }
+        report_non_finite(&mut self.status, self.non_finite);
         Ok(())
     }
 

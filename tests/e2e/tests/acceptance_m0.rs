@@ -49,3 +49,6 @@ mod inventory_lifecycle;
 
 #[path = "acceptance/hil_hackrf.rs"]
 mod hil_hackrf;
+
+#[path = "acceptance/tutorial_rds.rs"]
+mod tutorial_rds;

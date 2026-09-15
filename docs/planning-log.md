@@ -686,3 +686,43 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   A fresh Opus fix round is running in the T-091 worktree.
 - **B0.244 Disk cleanup** (supervisor: disk at 20 GB). Merged M1 worktrees were already removed at merge; `git worktree prune` found nothing stale. The remaining worktrees are all active (T-088, T-091, T-104). Removed coordinator scratchpad leftovers: the bisect `target-verify` (7.7 GB) and old hkdata/long/wgpu-probe outputs (~1 GB).
 - **B0.245 T-088 merged** (fix/integration 75c399d). Fixes: §14 framing via publish_frame/publish_record with the header inspector profile; streams registered only after a successful swap/spawn (tested: a failed edit keeps the running output served); closed taps dropped off the RT thread; DELETE unregisters streams; validate isn't audited. `recipes/rds.recipe.json` runs on a mock channel (all blocks resolve; the tone fixture has no RDS). Follow-up note: the generic `StreamReader` returns §14 records as Unknown. **Launched:** T-092 (decoded capture + scrub), T-093 (follow_hops), T-094 (RDS tutorial). Full check of main running.
+- **B0.246 T-104 delivered** (514b17c); all 7 review items have tests. Changes:
+  - ppm_demod now uses the shared FrameLength; LengthFrom removed.
+  - clock_recovery output is bounded by the shortest spacing, and the step is clamped. A hot bandwidth increase triggers a Rebuild.
+  - `FirDecimator::clear` gives allocation-free restarts.
+  - Caps at init: 65,536 samples per symbol, 65,536 taps, 2^22-sample ppm window.
+  - NaN/infinite input is zeroed and counted as `non_finite`.
+  - manchester: realignment holds later bits for the next chunk so the time map stays exact. Declared max_items grows by about one chunk of latency. Held bits are lost uncounted at END (minor, noted).
+  - Counting-allocator test: zero allocations across 14 blocks × 24 configs, including restarts.
+  hk-blocks 61/61, lint clean. Merge follows the in-flight full check (follow-up to reviewed work, per-item tests).
+- **B0.247 Full check of main a02e66f (T-088): green.** Lint clean; nextest + UI 1058/1058 in 228 s; acceptance 23/23. **T-104 merged** (514b17c). Full check covering T-104 running.
+- **B0.248 Full check of main 1183760 (T-104): green.** Lint clean; nextest + UI 1068/1068 in 223 s; acceptance 23/23. M1 merged so far: T-085, T-086, T-087, T-088, T-089, T-090 and T-104. In flight: the T-091 fix round, T-092, T-093 and T-094.
+- **B0.249 T-091 merged** (626a5dd; fix round 391968d). Changes:
+  - Assist is single-flight: a concurrent call gets 503 busy.
+  - Op counts recalibrated to ~0.5–1.6 ns/op, since some paths were ~25× under. Default budget 5e8 (≤0.76 s in release), max 1.5e9 (≤2.4 s).
+  - CRC scores are discounted by the chance of a shared extra factor.
+  - Sync score is absolute, significance-based; the old relative score is kept as `relative_score` (API meaning change, documented).
+  - Evidence is counted over distinct frames and non-periodic differences.
+  Noise now gives a top sync score of 0.0 and no code from duplicate or alternating frames. Residual accepted under the timebox and filed as **T-105**: 3/200 wrong CRC tops at ~0.95 with 8 frames, and near-tie ordering at 3 frames (all scored low). Full check of main running.
+- **B0.250 Full check of main 626a5dd (T-091): green.** Lint clean; nextest + UI 1086/1086 in 237 s; acceptance 23/23. In flight: T-092, T-093, T-094, T-105.
+- **B0.251 T-094 merged** (7a17979), coordinator stat review. `recipes/rds.recipe.json` decodes the real FM capture unchanged. The station is found blind at 101.3022 MHz. PI 0x1694, PTY 7 and PS match the hidden truth and the oracle. 78% of groups are CRC-valid, which is the capture's limit (the oracle sees 8.7% block errors). All 44 oracle-valid groups match exactly, with 0 conflicts. RT is decoded after a hot edit to on-change. Synthetic RT case is exact. `docs/tutorials/01-rds.md` added. Follow-up **T-106**: oracle RDS positions count from pilot lock, ~103 ms late. **T-093 delivered** (8f02471): the recipe splits at the follow_hops node into per-channel upstream instances and a single downstream. Channel sets come from a static list, a blind hop-set fingerprint, or blind detections. Budget is N chains. Merge orders within a bounded window and dedupes by bytes across channels, keeping the best copy. `set_channels`/`refresh_channels` swap at a boundary. 4-channel mock-SDR test plus a hop-set refresh test. Timeboxed Opus review running. **Launched:** T-096 ACARS tutorial and T-097 ADS-B tutorial (recorded/synthetic; live 1090 MHz deferred on the antenna). Full check covering T-094 running.
+- **B0.252 T-105 delivered** (52bd4fe). **Root cause:** all 3 confident wrong tops at 8 frames were (x+1)·CRC-24/Mode-S. The Mode-S generator already contains (x+1), so a 1-in-128 extra (x+1) across all differences can't be distinguished by divisibility. **Fix:**
+  - Generators fitting one hypothesis share a posterior weighted 2^((k−1)·width).
+  - A repeated-factor prior (2^−10 via gcd(g, g′)) demotes squared factors.
+  - A new `ambiguous_with` API field is added.
+  **Result over 200 seeds:** 8 frames 0 wrong (was 3 at 0.95); 3 frames 24 wrong at ≤0.07 (was 164 at ≤0.24). **Residual:** a truth generator without (x+1) remains indistinguishable at the inherent ~1/128 rate (8 frames: 1/200 at 0.94). This is inherent to frames-only evidence and accepted. Merge follows the in-flight full check.
+- **B0.253 T-092 delivered** (8866566). Contents:
+  - **Recording:** always-on decoded capture as a local consumer on each inspector publisher, never blocking; drops are counted.
+  - **Storage:** `.hks` holds the published stream bytes (layers stripped), `.idx` a 16-byte offset/time index, `.json` the catalogue.
+  - **Quotas:** 1 GiB total, 64 MiB per capture with segment roll, oldest evicted first.
+  - **API:** `CaptureSource` gains open_at/list/info/frame_at_time/delete; routes list/get/delete/frames (frame or time scrub); parse seeks via the index; `/ws/open/inspector?capture=` replay.
+  - **UI:** picker, slider and jump-to-time.
+  - **Tests:** mock-SDR e2e covering stored==live, scrub, replay re-parse, quota, stalled disk.
+  Timeboxed Opus review running; it checks crash consistency, eviction versus open readers, gating on replay, and the runtime.rs conflict with T-093.
+- **B0.254 T-093 review: MERGE.** The review confirmed:
+  - budget claims N−1 extra slots; overrun is marked as a discontinuity;
+  - the merge buffer is sized and allocation-free; swaps are atomic across channels at a boundary and retired instances are dropped off the RT thread;
+  - the watermark advances per chunk; `graph.rs` only affects frames-input graphs (follow-hops downstream);
+  - merge-tree against main is clean.
+  Nits filed as **T-107**: stale-tune race in set_channels; a lost DISCONTINUITY on an empty DDC chunk; ordering of long frames (relevant to T-095 POCSAG); detections-source and tracker-found hop-set tests; set_channels routes. T-093 and T-105 merge after the in-flight full check; the T-092 vs T-093 runtime.rs conflict is expected and resolvable.
+- **B0.255 Full check of main 315aaf3 (T-094): green.** Lint clean; nextest + UI 1086/1086; acceptance 25/25 (tutorial_rds included). **T-093 and T-105 merged.** **Launched:** T-095 POCSAG tutorial (with follow_hops; long-frame ordering caveat from T-107) and T-106 (RDS oracle timestamp offset). T-107 is held until T-092 merges, since both touch the recipe runtime. Full check covering T-093 + T-105 running.

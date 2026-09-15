@@ -209,6 +209,46 @@ pub(crate) fn bits_out(out: &mut Output) -> Result<&mut Vec<u8>, BlockError> {
     }
 }
 
+/// Most FIR taps a block designs, so its per-sample cost and history stay bounded.
+pub(crate) const MAX_TAPS: usize = 1 << 16;
+
+/// Most input samples per symbol (or chip) a timing block buffers, so extreme rates are
+/// rejected at init instead of allocating gigabytes.
+pub(crate) const MAX_SAMPLES_PER_SYMBOL: f64 = 65_536.0;
+
+/// Status key counting non-finite input samples replaced by 0.
+pub(crate) const NON_FINITE: &str = "non_finite";
+
+/// `x`, or 0 when it is NaN/±inf (counted in `bad`), so a bad sample never enters running
+/// state (averages, prefix sums, loop filters).
+#[inline]
+pub(crate) fn finite_or_zero(x: f32, bad: &mut u64) -> f32 {
+    if x.is_finite() {
+        x
+    } else {
+        *bad += 1;
+        0.0
+    }
+}
+
+/// [`finite_or_zero`] for complex samples (either part non-finite zeroes both).
+#[inline]
+pub(crate) fn finite_iq(z: Complex32, bad: &mut u64) -> Complex32 {
+    if z.re.is_finite() && z.im.is_finite() {
+        z
+    } else {
+        *bad += 1;
+        Complex32::new(0.0, 0.0)
+    }
+}
+
+/// Reports the non-finite sample count once any was seen.
+pub(crate) fn report_non_finite(status: &mut crate::status::Status, bad: u64) {
+    if bad > 0 {
+        status.extra.set(NON_FINITE, bad as f64);
+    }
+}
+
 /// Exponential-average coefficient for time constant `tau_s` at `rate_hz` (1 = no memory).
 pub(crate) fn ema_alpha(tau_s: f64, rate_hz: f64) -> f64 {
     if tau_s > 0.0 {
