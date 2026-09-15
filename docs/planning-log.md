@@ -704,3 +704,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Sync score is absolute, significance-based; the old relative score is kept as `relative_score` (API meaning change, documented).
   - Evidence is counted over distinct frames and non-periodic differences.
   Noise now gives a top sync score of 0.0 and no code from duplicate or alternating frames. Residual accepted under the timebox and filed as **T-105**: 3/200 wrong CRC tops at ~0.95 with 8 frames, and near-tie ordering at 3 frames (all scored low). Full check of main running.
+- **B0.250 Full check of main 626a5dd (T-091): green.** Lint clean; nextest + UI 1086/1086 in 237 s; acceptance 23/23. In flight: T-092, T-093, T-094, T-105.
