@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hk_cli::pipeline::{LiveArgs, temp_data_dir};
 use hk_cli::serve::{ServeOptions, ServeSource, Serving, start};
+use hk_model::{EmitterId, SelectionId};
 use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
@@ -903,6 +904,137 @@ fn outputs_list_and_unknown_file_answer_as_documented() {
     assert_eq!(st, 404, "{v}");
     let (st, v) = post(addr, "/api/outputs/record/start", r#"{"kinds": ["bits"]}"#);
     assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    stop_server(serving);
+}
+
+/// T-190: `POST /api/analyze` (the MUI "Analyze / synthesize decoder" stub, docs/15 §7)
+/// validates its target — a selection, an inventory emitter (merged ids resolve to the live
+/// entity like `/api/inventory/{id}`), or an ad-hoc band — and answers `501 not_implemented`
+/// once the target is known to exist; the engine itself is MAUTO's (docs/15 §8), not built yet.
+#[test]
+fn analyze_stub_validates_targets_and_answers_not_implemented() {
+    let (serving, addr) = start_server();
+
+    // A valid band target: 501 not_implemented once it validates. No engine runs.
+    let (st, v) = post(
+        addr,
+        "/api/analyze",
+        r#"{"band": {"f_lo": 101.2e6, "f_hi": 101.4e6}}"#,
+    );
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (501, Some("not_implemented")),
+        "{v}"
+    );
+    assert_eq!(v["error"], json!("analyze is not implemented yet"), "{v}");
+
+    // A band target with a history time window: still just a stub answer.
+    let (st, v) = post(
+        addr,
+        "/api/analyze",
+        r#"{"band": {"f_lo": 101.2e6, "f_hi": 101.4e6, "t_lo": 0.0, "t_hi": 10.0}}"#,
+    );
+    assert_eq!((st, v["code"].as_str()), (501, Some("not_implemented")));
+
+    // A valid selection target: also 501, not a validation error.
+    let (st, s) = post(
+        addr,
+        "/api/selections",
+        r#"{"name": "analyze target", "f_lo": 101.2e6, "f_hi": 101.4e6}"#,
+    );
+    assert_eq!(st, 201, "{s}");
+    let selection_id = s["id"].as_str().unwrap().to_owned();
+    let (st, v) = post(
+        addr,
+        "/api/analyze",
+        &json!({ "selection_id": selection_id }).to_string(),
+    );
+    assert_eq!((st, v["code"].as_str()), (501, Some("not_implemented")));
+
+    // A valid emitter target (the blind-detected station, no frequency lookup): also 501.
+    let emitter_id = {
+        let mut found = None;
+        wait_for(
+            "the 101.3 MHz station to appear so its emitter id is known",
+            Duration::from_secs(60),
+            || {
+                let (st, v) = get(addr, "/api/inventory");
+                if st != 200 {
+                    return false;
+                }
+                found = v["entries"]
+                    .as_array()
+                    .and_then(|a| {
+                        a.iter().find(|e| {
+                            e["f_center_hz"]
+                                .as_f64()
+                                .is_some_and(|f| (f - STATION_HZ).abs() < 50e3)
+                        })
+                    })
+                    .and_then(|e| e["id"].as_str())
+                    .map(str::to_owned);
+                found.is_some()
+            },
+        );
+        found.unwrap()
+    };
+    let (st, v) = post(
+        addr,
+        "/api/analyze",
+        &json!({ "emitter_id": emitter_id }).to_string(),
+    );
+    assert_eq!((st, v["code"].as_str()), (501, Some("not_implemented")));
+
+    // 400 invalid: zero target forms, several target forms, an unknown field, a malformed band,
+    // f_lo >= f_hi.
+    for bad in [
+        r#"{}"#,
+        r#"{"band": {"f_lo": 1e6, "f_hi": 2e6}, "emitter_id": "x"}"#,
+        r#"{"selection_id": "x", "extra": 1}"#,
+        r#"{"band": {"f_lo": 2e6, "f_hi": 1e6}}"#,
+        r#"{"band": {"f_lo": 1e6, "f_hi": 1e6}}"#,
+        r#"{"band": {"f_hi": 1e6}}"#,
+        r#"{"band": {"f_lo": 1e6, "f_hi": 2e6, "extra": 1}}"#,
+        r#"{"band": "nope"}"#,
+    ] {
+        let (st, v) = post(addr, "/api/analyze", bad);
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (400, Some("invalid")),
+            "{bad}: {v}"
+        );
+    }
+
+    // 404 not_found: an unknown (but well-formed) selection/emitter id, and a malformed one (the
+    // same shape a malformed `/api/inventory/{id}` path answers with).
+    for bad in [
+        json!({ "selection_id": SelectionId::new().to_string() }),
+        json!({ "emitter_id": EmitterId::new().to_string() }),
+        json!({ "selection_id": "not-a-uuid" }),
+        json!({ "emitter_id": "not-a-uuid" }),
+    ] {
+        let (st, v) = post(addr, "/api/analyze", &bad.to_string());
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (404, Some("not_found")),
+            "{bad}: {v}"
+        );
+    }
+
+    // 401: no token, and the query-string token (mutating requests need the header).
+    let (st, v) = call(
+        addr,
+        "POST",
+        "/api/analyze",
+        None,
+        Some(r#"{"band": {"f_lo": 1e6, "f_hi": 2e6}}"#),
+    );
+    assert_eq!(st, 401, "{v}");
+
+    // Wrong method: 405 with Allow.
+    let (st, v) = get(addr, "/api/analyze");
+    assert_eq!(st, 405, "{v}");
 
     stop_server(serving);
 }
