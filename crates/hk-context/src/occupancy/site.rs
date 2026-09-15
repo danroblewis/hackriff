@@ -33,7 +33,9 @@ use crate::geo::haversine_km;
 pub const STILL_MIN_S: f64 = 60.0;
 
 /// Least advance of the last in-site time that counts as an assignment change to persist, s (so a
-/// fix stream does not write every fix).
+/// fix stream does not write every fix). Only that advance is coalesced: a site, pin or source
+/// change (a pin, an unpin, a new site) persists at once, so after a restart the stored
+/// `last_in_site` lags by less than this and the no-fix hold can end at most this much early.
 pub const ASSIGNMENT_PERSIST_S: f64 = 60.0;
 
 /// One position fix (C06).

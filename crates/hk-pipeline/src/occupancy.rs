@@ -751,7 +751,7 @@ impl OccupancyService {
     fn feed_alarms(
         &self,
         folds: &[crate::attention::IntervalFold],
-        new_emitters: &[hk_context::occupancy::alarm::AlarmInput],
+        new_emitters: &[crate::attention::NewEmitterInput],
         site: SiteKey,
         rows: &[OccupancyStat],
         iv: TimeRange,
@@ -992,7 +992,7 @@ impl OccupancyService {
             let own: Vec<OccupancyStat> =
                 rows.iter().filter(|r| r.interval == iv).cloned().collect();
             let sightings = self.first_sightings(inner, iv, &own);
-            a.note_first_sightings(&sightings);
+            a.note_first_sightings(site, &sightings);
             let gains = channel_gain_keys(&inner.series, iv);
             let folds = a.ingest_interval(&own, sightings.len() as u64, iv.end, gains);
             let new_emitters = a.new_emitter_inputs(site, iv.end);

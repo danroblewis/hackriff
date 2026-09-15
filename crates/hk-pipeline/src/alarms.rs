@@ -212,15 +212,16 @@ impl AlarmService {
     }
 
     /// T-136: [`Self::observe_interval`] plus the close's new-emitter inputs
-    /// (`AttentionService::new_emitter_inputs`) observed at `site` at `t`. They join that site's
-    /// fold snapshot, so a gain step is judged across both (§7.4); immature ones are counted as
-    /// suppressions by the engine, never raised (§7.3).
+    /// (`AttentionService::new_emitter_inputs`) observed at `site` at `t`. The mature ones join that
+    /// site's fold snapshot, so a gain step is judged across both (§7.4); immature ones are
+    /// counted as suppressions, never raised (§7.3). Each sighting is counted (observed, mature,
+    /// suppressed) once, at the close where it is `fresh`; later closes re-feed it uncounted.
     pub fn observe_interval_with_new_emitters(
         &self,
         folds: &[crate::attention::IntervalFold],
         site: SiteKey,
         t: Timestamp,
-        new_emitters: &[AlarmInput],
+        new_emitters: &[crate::attention::NewEmitterInput],
         steps: &[DeviceStep],
     ) -> Vec<AlarmEvent> {
         let mut by_site: BTreeMap<SiteKey, (Timestamp, Vec<_>)> = BTreeMap::new();
@@ -231,14 +232,23 @@ impl AlarmService {
             e.1.extend(inputs);
         }
         if !new_emitters.is_empty() {
-            let (mature, immature): (Vec<AlarmInput>, Vec<AlarmInput>) =
-                new_emitters.iter().partition(|i| i.maturity.is_mature());
+            type Ne<'a> = Vec<&'a crate::attention::NewEmitterInput>;
+            let (mature, immature): (Ne<'_>, Ne<'_>) = new_emitters
+                .iter()
+                .partition(|n| n.input.maturity.is_mature());
+            let fresh_mature = mature.iter().filter(|n| n.fresh).count() as u64;
+            let immature: Vec<AlarmInput> = immature
+                .into_iter()
+                .filter(|n| n.fresh)
+                .map(|n| n.input)
+                .collect();
+            let mature: Vec<AlarmInput> = mature.into_iter().map(|n| n.input).collect();
             self.inputs_observed
-                .fetch_add(new_emitters.len() as u64, Ordering::Relaxed);
+                .fetch_add(fresh_mature + immature.len() as u64, Ordering::Relaxed);
             self.inputs_mature
-                .fetch_add(mature.len() as u64, Ordering::Relaxed);
+                .fetch_add(fresh_mature, Ordering::Relaxed);
             // An immature rate scores nothing (novelty 0): the engine would drop such cold cells
-            // before counting them, so they are counted here, one per emitter, never raised.
+            // before counting them, so they are counted here, one per new sighting, never raised.
             if !immature.is_empty() {
                 let mut engine = lock(&self.engine);
                 for i in &immature {
@@ -715,6 +725,14 @@ mod tests {
                             t: t_end,
                         })
                         .collect()
+                } else if q == burst_q + 1 {
+                    // An ordinary sighting on another channel inside the burst's hour: its own
+                    // group holds one sighting, so it must not alarm on the burst's count.
+                    vec![FirstSighting {
+                        emitter: EmitterId::new(),
+                        freq: FreqRange::centered(431.5e6, 10e3),
+                        t: t_end,
+                    }]
                 } else if q % 48 == 0 {
                     // The usual rate, elsewhere in the band.
                     vec![FirstSighting {
@@ -725,7 +743,7 @@ mod tests {
                 } else {
                     Vec::new()
                 };
-                attention.note_first_sightings(&sightings);
+                attention.note_first_sightings(site, &sightings);
                 let folds = attention.ingest_interval(
                     std::slice::from_ref(&row),
                     sightings.len() as u64,
@@ -766,6 +784,12 @@ mod tests {
         );
         assert_eq!(e.row.detail.observed, 6.0);
         assert!(
+            !events
+                .iter()
+                .any(|c| c.row.freq.lo_hz <= 431.5e6 && c.row.freq.hi_hz >= 431.5e6),
+            "the ordinary sighting beside the burst stays quiet: {events:#?}"
+        );
+        assert!(
             events
                 .iter()
                 .any(|c| c.transition == AlarmLifecycle::Cleared
@@ -783,8 +807,10 @@ mod tests {
         let (_, alarms, events) = run(10);
         assert!(events.is_empty(), "immature rate: {events:#?}");
         let s = alarms.suppressions();
-        assert!(
-            s["new-emitter"]["immature-baseline"].as_u64().unwrap() >= 6,
+        // Counted once per sighting at its own close: q=0 (1), the burst (6), the ordinary one (1).
+        assert_eq!(
+            s["new-emitter"]["immature-baseline"].as_u64().unwrap(),
+            8,
             "{s}"
         );
         assert_eq!(alarms.status_json()["inputs_mature"], 0);

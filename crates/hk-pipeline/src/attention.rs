@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use hk_context::occupancy::alarm::{AlarmInput, PoolContext, new_emitter_input};
+use hk_context::occupancy::alarm::{AlarmConfig, AlarmInput, PoolContext, new_emitter_input};
 use hk_context::occupancy::baseline::{
     BaselineConfig, BaselineCopy, Baselines, FoldOutcome, IntervalObservation, PoolStats,
     from_occupancy_stat, in_pool, maturity, pools,
@@ -301,10 +301,41 @@ struct CandidateState {
     table: CandidateTable,
     /// Latest fold per learned channel: extent and context.
     channels: BTreeMap<ChannelKey, (FreqRange, ChannelContext)>,
-    sightings: FirstSightingRate,
-    /// T-136: the emitters behind the recent first sightings (new-emitter alarm inputs).
-    recent_sightings: VecDeque<FirstSighting>,
+    /// T-136: first-sighting state per site, so another site's sightings never score or alarm
+    /// under the site in force.
+    sightings: BTreeMap<SiteKey, SiteSightings>,
+    /// The site of the latest closed interval (whose new-emitter novelty the candidates read).
+    sighting_site: Option<SiteKey>,
     decodes: Option<Arc<TrackDecodes>>,
+}
+
+impl CandidateState {
+    /// The new-emitter novelty of the latest close's site (`None` while immature).
+    fn current_new_emitter(&self) -> Option<f64> {
+        self.sighting_site
+            .and_then(|s| self.sightings.get(&s))
+            .and_then(|s| s.rate.novelty())
+    }
+}
+
+/// T-136: one site's first sightings.
+#[derive(Default)]
+struct SiteSightings {
+    rate: FirstSightingRate,
+    /// The emitters behind the recent first sightings (new-emitter alarm inputs).
+    recent: VecDeque<FirstSighting>,
+    /// End of the last close that built new-emitter inputs: sightings after it are fresh.
+    last_inputs_end: Option<Timestamp>,
+}
+
+/// T-136: one new-emitter alarm input and whether its sighting is new at this close (counted
+/// once; an input still in the window is re-fed at later closes for hysteresis, uncounted).
+#[derive(Clone, Copy, Debug)]
+pub struct NewEmitterInput {
+    /// The input.
+    pub input: AlarmInput,
+    /// The sighting was first recorded in the interval this close ends.
+    pub fresh: bool,
 }
 
 /// T-136: one inventory emitter first seen in a closed occupancy interval.
@@ -513,8 +544,14 @@ impl AttentionService {
         let class_tx = Mutex::new(classes.spawn_worker());
         // T-136: the stored assignment (a pin, or a fixed site within its hold) survives a restart.
         let mut assigner = SiteAssigner::new(SiteConfig::default(), sites);
-        if let Ok(Some(a)) = lock(&repo).site_assignment() {
-            let _ = assigner.restore(a);
+        {
+            let r = lock(&repo);
+            // A stored assignment whose site row is gone is stale: drop it.
+            if let Ok(Some(a)) = r.site_assignment()
+                && assigner.restore(a).is_err()
+            {
+                let _ = r.set_site_assignment(None);
+            }
         }
         Self {
             classes,
@@ -771,12 +808,13 @@ impl AttentionService {
         gain: impl SubjectGainKeys,
     ) -> Vec<IntervalFold> {
         let mut folded = Vec::new();
-        let (mut observed_s, mut accrues) = (0.0_f64, false);
+        let (mut observed_s, mut accrues, mut site) = (0.0_f64, false, None);
         for r in rows {
             match r.subject {
                 OccupancySubject::Band { .. } => {
                     observed_s = observed_s.max(represented_s(r));
                     accrues |= r.site.accrues_baseline();
+                    site.get_or_insert(r.site);
                 }
                 OccupancySubject::Channel { .. } => {
                     if let Some(f) = self.fold_row(r, gain.gain_key(&r.subject)) {
@@ -785,14 +823,17 @@ impl AttentionService {
                 }
             }
         }
-        if observed_s > 0.0 {
+        if let Some(site) = site
+            && observed_s > 0.0
+        {
             let mut c = lock(&self.cands);
-            let novel = c.sightings.rate().is_some_and(|rate| {
+            c.sighting_site = Some(site);
+            let s = &mut c.sightings.entry(site).or_default().rate;
+            let novel = s.rate().is_some_and(|rate| {
                 new_emitter_novelty(first_sightings, rate, observed_s)
                     >= REFERENCE_LEARN_MAX_NOVELTY
             });
-            c.sightings
-                .record(t_end, first_sightings, observed_s, accrues && !novel);
+            s.record(t_end, first_sightings, observed_s, accrues && !novel);
         }
         self.publish_candidates(t_end, true);
         folded
@@ -931,57 +972,97 @@ impl AttentionService {
         }
     }
 
-    /// T-128: the site's current new-emitter novelty (`None` while the rate is immature).
+    /// T-128: the current site's new-emitter novelty (the site of the latest closed interval;
+    /// `None` while its rate is immature).
     pub fn new_emitter_novelty(&self) -> Option<f64> {
-        lock(&self.cands).sightings.novelty()
+        lock(&self.cands).current_new_emitter()
     }
 
-    /// T-136: the emitters behind a close's first sightings (their count goes to
+    /// T-136: the emitters behind a close's first sightings under `site` (their count goes to
     /// [`Self::ingest_interval`]); [`Self::new_emitter_inputs`] turns them into alarm inputs.
-    pub fn note_first_sightings(&self, sightings: &[FirstSighting]) {
+    pub fn note_first_sightings(&self, site: SiteKey, sightings: &[FirstSighting]) {
+        if sightings.is_empty() {
+            return;
+        }
         lock(&self.cands)
-            .recent_sightings
+            .sightings
+            .entry(site)
+            .or_default()
+            .recent
             .extend(sightings.iter().copied());
     }
 
     /// T-136 (ADR-0012 §7.1): the new-emitter alarm inputs at a close ending `t_end` under `site`,
-    /// after [`Self::ingest_interval`] recorded its first sightings. Every emitter first seen within
-    /// the rate's sliding window ([`FirstSightingRate::WINDOW_S`]) carries the window's new-emitter
-    /// novelty (the Poisson tail of its first sightings against the site's usual rate); once it
-    /// leaves the window it is fed for one more window with novelty 0 so an open alarm clears. The
-    /// subject is the emitter's measured extent as scheme-1 level-0 cells, so the engine merges a
-    /// burst of first sightings on one channel into one alarm. While the rate is immature the
-    /// inputs are immature: counted as `immature-baseline` suppressions, never raised (§7.3).
-    pub fn new_emitter_inputs(&self, site: SiteKey, t_end: Timestamp) -> Vec<AlarmInput> {
+    /// after [`Self::ingest_interval`] recorded its first sightings. Only `site`'s own sightings
+    /// are read. The emitters seen within two windows ([`FirstSightingRate::WINDOW_S`]) are
+    /// grouped as the alarm engine merges cells (extents within its merge gap); each group is
+    /// scored on its **own** first sightings in the window, as the Poisson tail against the count
+    /// the site's usual rate expects in the window (the whole site's expectation, so a group is
+    /// never more novel than the site and a lone sighting scores as before). Every emitter in the
+    /// window carries its group's novelty; once it leaves the window it is fed for one more
+    /// window with novelty 0 so an open alarm clears. The subject is the emitter's measured extent
+    /// as scheme-1 level-0 cells, so the engine merges a burst on one channel into one alarm.
+    /// `fresh` marks sightings from the interval this close ends (counted once); while the rate is
+    /// immature only fresh inputs are returned: counted as `immature-baseline` suppressions,
+    /// never raised (§7.3).
+    pub fn new_emitter_inputs(&self, site: SiteKey, t_end: Timestamp) -> Vec<NewEmitterInput> {
         let offset = lock(&self.sites).utc_offset_min(site);
         let mut c = lock(&self.cands);
+        let Some(st) = c.sightings.get_mut(&site) else {
+            return Vec::new();
+        };
         let window_ns = (FirstSightingRate::WINDOW_S * 1e9) as i64;
         let end = t_end.as_unix_nanos();
-        c.recent_sightings
+        let since = st.last_inputs_end.replace(t_end).map(|t| t.as_unix_nanos());
+        st.recent
             .retain(|s| s.t.as_unix_nanos() > end.saturating_sub(2 * window_ns));
-        if c.recent_sightings.is_empty() {
+        if st.recent.is_empty() {
             return Vec::new();
         }
-        let rate = c.sightings.rate();
-        let (k, window_s) = c.sightings.window_totals();
-        let novelty = c.sightings.novelty().unwrap_or(0.0);
+        let rate = st.rate.rate();
+        let (_, window_s) = st.rate.window_totals();
         let maturity = match rate {
             Some(_) => Maturity::Mature {
                 resolution: BaselineResolution::AllHours,
             },
             None => Maturity::Immature {
-                observed_s: c.sightings.baseline_observed_s(),
+                observed_s: st.rate.baseline_observed_s(),
             },
         };
         let expected = rate.map_or(0.0, |r| r * window_s);
         let slot = HourOfWeek::of(t_end, offset);
-        c.recent_sightings
+        let in_window = |s: &FirstSighting| s.t.as_unix_nanos() > end.saturating_sub(window_ns);
+        let mut cells: Vec<(i64, i64, FirstSighting)> = st
+            .recent
             .iter()
-            .filter_map(|s| {
-                let in_window = s.t.as_unix_nanos() > end.saturating_sub(window_ns);
-                // Out of the window only to clear an alarm, which an immature rate never raised.
-                if !in_window && rate.is_none() {
-                    return None;
+            .map(|s| {
+                let lo = (s.freq.lo_hz / SCHEME_1_CELL_HZ).floor() as i64;
+                let hi = ((s.freq.hi_hz / SCHEME_1_CELL_HZ).ceil() as i64).max(lo + 1);
+                (lo, hi, *s)
+            })
+            .collect();
+        cells.sort_by_key(|c| (c.0, c.1));
+        let cfg = AlarmConfig::default();
+        let gap = cfg.merge_gap_cells * cfg.cell_factor;
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < cells.len() {
+            let (mut j, mut group_hi) = (i + 1, cells[i].1);
+            while j < cells.len() && cells[j].0 - group_hi <= gap {
+                group_hi = group_hi.max(cells[j].1);
+                j += 1;
+            }
+            let group = &cells[i..j];
+            let k = group.iter().filter(|c| in_window(&c.2)).count() as u64;
+            let novelty = rate.map_or(0.0, |r| new_emitter_novelty(k, r, window_s));
+            for &(lo, hi, s) in group {
+                let live = in_window(&s);
+                let t = s.t.as_unix_nanos();
+                let fresh = since.is_none_or(|p| t > p) && t <= end;
+                // An immature rate never raises: its inputs are only counted, once, when fresh
+                // (so out of the window there is nothing to clear either).
+                if rate.is_none() && !(live && fresh) {
+                    continue;
                 }
                 let mut input = new_emitter_input(
                     s.emitter,
@@ -991,19 +1072,19 @@ impl AttentionService {
                     maturity,
                     k,
                     expected,
-                    if in_window { novelty } else { 0.0 },
+                    if live { novelty } else { 0.0 },
                     window_s,
                 );
-                let lo = (s.freq.lo_hz / SCHEME_1_CELL_HZ).floor() as i64;
-                let hi = ((s.freq.hi_hz / SCHEME_1_CELL_HZ).ceil() as i64).max(lo + 1);
                 input.subject = AlarmSubject::Cells {
                     scheme: 1,
                     lo_cell: lo,
                     hi_cell: hi,
                 };
-                Some(input)
-            })
-            .collect()
+                out.push(NewEmitterInput { input, fresh });
+            }
+            i = j;
+        }
+        out
     }
 
     /// T-128: a member detection of `track` (control thread). Returns whether the track is new
@@ -1059,7 +1140,7 @@ impl AttentionService {
             self.request_class_refresh(&tracks, t);
             let snapshot = Arc::clone(&*lock(&self.classes.snapshot));
             let entropy = class_entropies(&snapshot, &tracks);
-            let new_emitter = c.sightings.novelty();
+            let new_emitter = c.current_new_emitter();
             let CandidateState {
                 table,
                 channels,
@@ -1788,6 +1869,56 @@ pub(crate) mod tests {
         assert!(c.components.class_entropy.is_none(), "unclassified");
         set.validate().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-136 review: first-sighting state is per site. After a site change the previous site's
+    /// sightings neither feed the new site's new-emitter inputs nor its count, and they are kept
+    /// under their own site for when it is back.
+    #[test]
+    fn attention_first_sightings_are_per_site() {
+        let s = AttentionService::in_memory().unwrap();
+        let pin = |name: &str| {
+            let cur = s
+                .set_current_site(SiteSelect {
+                    name: Some(name.into()),
+                    ..SiteSelect::default()
+                })
+                .unwrap();
+            SiteKey::Site(cur["record"]["id"].as_str().unwrap().parse().unwrap())
+        };
+        let band = OccupancySubject::Band {
+            freq: FreqRange::new(431e6, 433e6),
+        };
+        let feed = |site: SiteKey, q: i64, k: u32| {
+            let row = series_row(q, site, band, 0.1);
+            let t = row.interval.end;
+            let sightings: Vec<FirstSighting> = (0..k)
+                .map(|i| FirstSighting {
+                    emitter: EmitterId::new(),
+                    freq: FreqRange::centered(432.00625e6 + f64::from(i) * 100.0, 10e3),
+                    t,
+                })
+                .collect();
+            s.note_first_sightings(site, &sightings);
+            s.ingest_interval(std::slice::from_ref(&row), u64::from(k), t, 0);
+            s.new_emitter_inputs(site, t)
+        };
+        let home = pin("home");
+        let at_home = feed(home, 0, 6);
+        assert_eq!(at_home.len(), 6);
+        assert!(at_home.iter().all(|n| n.fresh && n.input.observed == 6.0));
+        let away = pin("away");
+        let at_away = feed(away, 1, 1);
+        assert_eq!(at_away.len(), 1, "only the away site's own sighting");
+        assert!(at_away[0].fresh);
+        assert_eq!(
+            at_away[0].input.observed, 1.0,
+            "home's burst is not counted"
+        );
+        let c = lock(&s.cands);
+        assert_eq!(c.sighting_site, Some(away));
+        assert_eq!(c.sightings[&home].recent.len(), 6, "home keeps its own");
+        assert_eq!(c.sightings[&away].recent.len(), 1);
     }
 
     /// A class source that blocks in its "query" until released, recording the calling threads.

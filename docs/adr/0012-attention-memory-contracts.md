@@ -470,7 +470,7 @@ In a filtered report:
 | `AlarmKind` | Stored `AnomalyKind` | Trigger | Unit |
 |---|---|---|---|
 | `level-above-baseline` | `level-above-baseline` (new) | `level_z` novelty on merged adjacent cells | dB |
-| `new-emitter` | `new-emitter` | a new inventory emitter with `new_emitter` novelty ≥ on (T-136: each emitter first seen within the rate's 1 h window carries the window's novelty; subject = its extent as scheme-1 cells, merged like other cells, so a burst on one channel is one alarm) | count |
+| `new-emitter` | `new-emitter` | a new inventory emitter with `new_emitter` novelty ≥ on (T-136: first sightings within the rate's 1 h window are grouped by the engine's cell-merge gap, and each group is scored on its own count against the site's expected count for the window, so an ordinary sighting beside a burst stays quiet; each emitter carries its group's novelty; subject = its extent as scheme-1 cells, merged like other cells, so a burst on one channel is one alarm; state is per site; each sighting is counted once, at the close that first sees it) | count |
 | `busier-than-usual` | `busier-than-baseline` | `occupancy_z` novelty on a channel/band, z > 0 | fraction |
 | `quieter-than-usual` | `quieter-than-baseline` (new, T-122) | `occupancy_z` novelty on a channel/band, z < 0 | fraction |
 | `change-point` | `change-point` (new) | CUSUM (§3.4) | dB or fraction |
