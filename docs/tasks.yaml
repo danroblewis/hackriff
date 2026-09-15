@@ -2493,8 +2493,8 @@ notes:
   - id: T-157
     milestone: MUI
     title: "MUI API gap 1: rolling IQ buffer (always-on capture) with status + clip export for the Capture timeline"
-    status: review
-    commit: f08aa57
+    status: done
+    commit: a4b5784
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2819,7 +2819,7 @@ notes:
   - id: T-178
     milestone: MUI
     title: "IQ capture buffer as a PRE-ALLOCATED on-disk ring that survives restarts: allocate the full effective quota up front (fixed ring file or fixed set of fixed-size chunk files), overwrite oldest in place (no grow-and-delete), crash recovery re-reads ring + index on start; retention configurable via --iq-retention / --iq-buffer-max"
-    status: todo
+    status: in-progress
     deps: [T-157]
     parallel_group: MUI-API
     use_cases: []

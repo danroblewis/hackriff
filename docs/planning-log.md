@@ -1964,3 +1964,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.432 Full check green after the T-176 + T-177 merges (220acec).**
   - Lint clean; 1352/1352 tests; acceptance 28/28 (65 s).
   - T-157 finishing: its targeted tests pass (hk-store/hk-api 7, hk-pipeline 13, hk-cli 24 including the flag parse test). The coordinator fixed the last clippy `needless_borrow` (`hk-cli` `pipeline.rs:1210`); lint and the final commit are running. T-157 merges next.
+- **B0.433 T-157 merged (a4b5784).**
+  - **Fix round:**
+    - Full-disk-safe chunking with a free-space floor (10% of disk, clamped to 2–8 GiB).
+    - Exact sample-index clips: fixed-tune clip 300000 samples; retune clip 300000+300000, byte-compared per segment.
+    - Status fields for fs free/total, pause state and retention/quota.
+    - Clip cap 256 MiB with a free-space pre-check.
+    - Overflow validation.
+  - **Flags:** `hk serve` / hackriffd `--iq-retention` (default 2m) and `--iq-buffer-max`.
+  - **Coordinator:** fixed the final clippy/fmt issue.
+  - **Tests:** hk-store/hk-api 7, hk-pipeline 13, hk-cli 24; lint clean.
+  - **Next:** worktree removed; full check next. T-178 (pre-allocated persistent ring) launched.
