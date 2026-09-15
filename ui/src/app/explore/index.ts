@@ -1,18 +1,18 @@
 // Explore sidebar (inventory, selections) and focus panel mounts (ADR-0013 §8, T-151). Renders
 // only what the API served; explanations are always shown as ranked suggestions, never as truth
 // (CLAUDE.md "Product vision" §4).
-import { toast, setMode } from "../state";
+import { toast } from "../state";
 import type { AppContext, AreaMounts, MountFn } from "../context";
 import { h } from "../dom";
-import { startListen, stopOutput } from "../dock/api";
+import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
 import { startPoll } from "../net";
 import { apiErrorText, explanationWhy, fmtBandwidth, fmtMHz, rasterText, refinedNote } from "./format";
-import { decodeActionLabel, emitterStreamAddress, recordEmitterClip, selectionSummary } from "./focus";
+import { selectionSummary } from "./focus";
 import {
   deleteEntry, loadInventoryRows, nextInventorySort, promoteEntry, recurrenceDots, rowChips,
   rowSeenText, sortInventoryRows, type Row,
 } from "./inventory";
-import { foundInside, listenAllTargets, recordSelectionClip, selectionStoreFor, sortSelections, type Selection } from "./selections";
+import { foundInside, selectionStoreFor, sortSelections, type Selection } from "./selections";
 import { focusSelection, focusSignal, setInventorySort, setInventoryTab, type InventorySortKey, type InventoryTab } from "./slice";
 
 const SORT_LABEL: Record<InventorySortKey, string> = { freq: "Freq", last_seen: "Last seen", count: "Count", bandwidth: "Bandwidth" };
@@ -42,6 +42,11 @@ const mountInventory: MountFn = (el, ctx) => {
     }, SORT_LABEL[k])));
   const list = h("div", { class: "list", role: "list" });
   el.replaceChildren(h("div", { class: "side-head" }, heading, tabs, note, sortRow), list);
+  bindContextTrigger(list, (x, y, target) => {
+    const rowEl = target.closest<HTMLElement>(".row[data-id]");
+    const r = rowEl?.dataset.id ? ctx.store.get().inventory.rows[rowEl.dataset.id] : undefined;
+    if (r) openSignalMenu(ctx, r, x, y);
+  });
 
   function actionButtons(r: Row): HTMLElement {
     const busy = { promoting: false, deleting: false };
@@ -115,6 +120,11 @@ const mountSelections: MountFn = (el, ctx) => {
   const head = h("div", { class: "side-sel-head" }, h("div", { class: "h" }, "Selections ", h("em", {}, "drag on the waterfall")));
   const list = h("div", { class: "sel-list" });
   el.replaceChildren(head, list);
+  bindContextTrigger(list, (x, y, target) => {
+    const selEl = target.closest<HTMLElement>(".sel[data-sel]");
+    const sel = selEl?.dataset.sel ? ctx.store.get().selections.list.find((s) => s.id === selEl.dataset.sel) : undefined;
+    if (sel) openSelectionMenu(ctx, sel, x, y);
+  });
 
   function renderRow(s: Selection): HTMLElement {
     const focus = ctx.store.get().focus;
@@ -143,7 +153,6 @@ function renderSignalFocus(ctx: AppContext, r: Row): HTMLElement {
   const flags = r.explanations[0]?.flags ?? [];
   const centerHz = r.refined?.center_hz ?? r.f_center_hz;
   const bwHz = r.refined?.bandwidth_hz ?? r.bandwidth_hz;
-  const onId = isOn(ctx, r.id);
 
   const kv = h("dl", { class: "kv" },
     h("dt", {}, "Bandwidth"), h("dd", {}, fmtBandwidth(bwHz)),
@@ -157,33 +166,6 @@ function renderSignalFocus(ctx: AppContext, r: Row): HTMLElement {
     h("div", { class: "why" }, explanationWhy(e.evidence)),
   )));
 
-  const listenBtn = h("button", { class: "act primary", type: "button", "aria-pressed": onId ? "true" : "false", onclick: () => {
-    if (onId) stopOutput(ctx, onId);
-    else startListen(ctx, { kind: "emitter", emitterId: r.id, label: `${fmtMHz(r.f_center_hz)} MHz` });
-  } }, h("b", {}, onId ? "Stop listening" : "Listen"), h("small", {}, onId ? "removes from Outputs" : "adds to Outputs"));
-
-  const decodeBtn = h("button", { class: "act", type: "button", onclick: () => ctx.store.set(setMode("decode")) },
-    h("b", {}, decodeActionLabel(r)), h("small", {}, "build a pipeline"));
-
-  const exportBtn = h("button", { class: "act", type: "button", onclick: () => {
-    void recordEmitterClip(ctx.client, r.id).then((res) => ctx.store.set(toast(res.ok ? `recording ${res.kinds.join(", ")}` : `export: ${res.message}`)));
-  } }, h("b", {}, "Export clip"), h("small", {}, "from the buffer"));
-
-  const streamBtn = h("button", { class: "act", type: "button", onclick: () => {
-    void emitterStreamAddress(ctx.client, r.id).then((addr) => {
-      if (!addr) { ctx.store.set(toast("stream out: not offered by this server")); return; }
-      navigator.clipboard?.writeText(addr).catch(() => {});
-      ctx.store.set(toast(`copied ${addr}`));
-    });
-  } }, h("b", {}, "Stream out"), h("small", {}, "audio"));
-
-  const lifecycleBtns = r.state === "candidate"
-    ? [
-        h("button", { class: "act promote", type: "button", onclick: () => void promoteEntry(ctx.client, r.id, () => loadInventoryRows(ctx, () => {})) }, h("b", {}, "Promote"), h("small", {}, "to confirmed")),
-        h("button", { class: "act danger", type: "button", onclick: () => void deleteEntry(ctx.client, r.id, () => loadInventoryRows(ctx, () => {})) }, h("b", {}, "Delete"), h("small", {}, "detections kept")),
-      ]
-    : [h("button", { class: "act danger wide", type: "button", onclick: () => void deleteEntry(ctx.client, r.id, () => loadInventoryRows(ctx, () => {})) }, h("b", {}, "Delete from inventory"), h("small", {}, "raw detections and history kept"))];
-
   // GAP 3: only the identity (not the latest decoded fields, e.g. RDS PS/PTY) is on the row, so
   // this shows only what's actually served — no invented decode summary.
   const identityBox = r.identity_scheme
@@ -192,11 +174,14 @@ function renderSignalFocus(ctx: AppContext, r: Row): HTMLElement {
         h("dl", { class: "kv" }, h("dt", {}, r.identity_scheme), h("dd", {}, r.identity_value ?? (r.withheld ? "withheld" : "—"))))
     : null;
 
+  // Actions (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete, Adjust band)
+  // moved to the right-click/long-press context menu (T-192); this panel keeps only measurements
+  // and explanations, freeing the space for per-signal output panels (T-195).
   return h("div", {},
     h("div", {}, h("div", { class: "eyebrow" }, ...chips), h("div", { class: "bigf" }, fmtMHz(centerHz), h("small", {}, " MHz")), h("div", { class: "sub" }, refinedNote(r.refined))),
     kv,
     h("div", {}, h("div", { class: "section-h" }, "Possible explanations ", h("em", {}, "ranked suggestions")), explanations),
-    h("div", {}, h("div", { class: "section-h" }, "Actions"), h("div", { class: "actions" }, listenBtn, decodeBtn, exportBtn, streamBtn, ...lifecycleBtns)),
+    h("div", { class: "hint" }, "Right-click or long-press the signal for actions: Listen, Decode, Analyze, Export clip, Stream out, Promote, Delete, Adjust band."),
     identityBox,
   );
 }
@@ -209,21 +194,14 @@ function renderSelectionFocus(ctx: AppContext, s: Selection): HTMLElement {
   }, h("div", { class: "f" }, fmtMHz(r.f_center_hz), h("small", {}, " MHz")), h("div", {}),
      h("div", { class: "meta" }, stateBadge(r.state), h("span", {}, rowSeenText(r))))) : [h("div", { class: "empty" }, "No detections here yet.")]));
 
-  const listenAll = h("button", { class: "act primary", type: "button", onclick: () => {
-    for (const t of listenAllTargets(rows)) startListen(ctx, t);
-  } }, h("b", {}, "Listen to all"), h("small", {}, `${rows.length} stream${rows.length === 1 ? "" : "s"} at once`));
-  const exportBtn = h("button", { class: "act", type: "button", onclick: () => {
-    void recordSelectionClip(ctx.client, s).then((res) => ctx.store.set(toast(res.ok ? `recording ${res.kinds.join(", ")}` : `export: ${res.message}`)));
-  } }, h("b", {}, "Export clip"), h("small", {}, "from the buffer"));
-  const deleteBtn = h("button", { class: "act danger wide", type: "button", onclick: () => selectionStoreFor(ctx).remove(s.id) },
-    h("b", {}, "Delete selection"), h("small", {}, "detections kept"));
-
+  // Actions (Listen to all, Analyze, Export clip, Delete) moved to the right-click/long-press
+  // context menu (T-192); see renderSignalFocus's comment.
   return h("div", {},
     h("div", {}, h("div", { class: "eyebrow" }, stateBadge("selection"), h("span", { class: "chip" }, s.name)),
       h("div", { class: "bigf" }, `${fmtMHz(s.f_lo, 2)}–${fmtMHz(s.f_hi, 2)}`, h("small", {}, " MHz")),
       h("div", { class: "sub" }, selectionSummary(s, rows.length))),
     h("div", {}, h("div", { class: "section-h" }, "Found inside ", h("em", {}, "strongest first")), inside),
-    h("div", {}, h("div", { class: "section-h" }, "Actions"), h("div", { class: "actions" }, listenAll, exportBtn, deleteBtn)),
+    h("div", { class: "hint" }, "Right-click or long-press the selection for actions: Listen to all, Analyze, Export clip, Delete."),
   );
 }
 

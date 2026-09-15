@@ -20,6 +20,7 @@ import type { AppContext } from "../context";
 import { h } from "../dom";
 import { selectionStoreFor } from "../explore/selections";
 import { focusSelection, focusSignal } from "../explore/slice";
+import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
 import { toast } from "../shell-slice";
 import {
@@ -134,8 +135,10 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       place(e, m);
       layer.push(e);
     }
+    // Selections come straight from the shared SelectionStore (T-194); `data-id` (T-192) lets the
+    // context menu (menu/) resolve which selection a right-click/long-press landed on.
     for (const b of selectionBoxes(s.selections.list, v, focusSel)) {
-      const e = h("div", { class: `c-sel${b.active ? " active" : ""}${b.pending ? " pending" : ""}` });
+      const e = h("div", { class: `c-sel${b.active ? " active" : ""}${b.pending ? " pending" : ""}`, "data-id": b.id });
       place(e, b);
       layer.push(e);
     }
@@ -260,6 +263,25 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   el.addEventListener("pointercancel", end);
   el.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse" && !drag) hideHover(); });
   attachWheelZoom(el, viewHooks(ctx));
+
+  // Right-click / long-press on a confirmed/candidate bracket or a selection box opens the
+  // T-192 context menu (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete,
+  // Adjust band); empty waterfall/spectrum space opens nothing.
+  bindContextTrigger(el, (mx, my, target) => {
+    drag = null; // a long-press or right-click never also starts/finishes a drag-select
+    draft.hidden = true;
+    const bk = target.closest<HTMLElement>(".bk");
+    if (bk?.dataset.id) {
+      const r = store.get().inventory.rows[bk.dataset.id];
+      if (r) openSignalMenu(ctx, r, mx, my);
+      return;
+    }
+    const box = target.closest<HTMLElement>(".c-sel");
+    if (box?.dataset.id) {
+      const sel = store.get().selections.list.find((x) => x.id === box.dataset.id);
+      if (sel) openSelectionMenu(ctx, sel, mx, my);
+    }
+  });
 
   // ---- spectrum stream ----
 

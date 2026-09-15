@@ -20,7 +20,7 @@
 .specwf .c-dc { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ground) 0%, transparent) 0 4px, color-mix(in srgb, var(--ground) 60%, transparent) 4px 6px); }
 .specwf .c-dc.assumed { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ground) 0%, transparent) 0 6px, color-mix(in srgb, var(--ground) 45%, transparent) 6px 8px); }
 .specwf .c-dc span { position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%); font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 1px 4px; border-radius: 3px; white-space: nowrap; }
-.specwf .c-sel { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--amber); border-right: 1px dashed var(--amber); opacity: 0.6; }
+.specwf .c-sel { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--amber); border-right: 1px dashed var(--amber); opacity: 0.6; pointer-events: auto; }
 .specwf .c-sel.active { background: var(--amber-soft); opacity: 1; }
 .specwf .c-sel.pending { border-style: dotted; }
 .specwf .c-drag { position: absolute; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
