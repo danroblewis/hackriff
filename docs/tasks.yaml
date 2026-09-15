@@ -1943,7 +1943,8 @@ tasks:
   - id: T-122
     milestone: M2
     title: "Novelty alarms + what-changed event feed (AWARE-044) into anomaly correlation"
-    status: in-progress
+    status: review
+    commit: a56ee77
     deps: [T-119]
     parallel_group: M2A
     use_cases: [AWARE-044, AWARE-012, AWARE-019]

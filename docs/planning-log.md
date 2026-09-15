@@ -1091,3 +1091,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Coordinator decision:** publish channels that are **confident OR persistent** (≥3 intervals, stable centre, ≥0.5 s); persistent clusters are never fragments; fragments must overlap the host in time; published channels are never absorbed.
   - **Suspect rule judged sound;** widen suspect extents ±1 cell.
   - **ADR §2.6/§2.7 amendment texts** are adopted in the fix round. Fix round running.
+- **B0.319 T-122 delivered** (a56ee77). Key points:
+  - **Alarm engine:** kinds include a new `quieter-than-usual`. Hysteresis and dedupe follow §7.2 with adjacent-cell merge, reopen within 1 h, and dismissal lasting 7 d on the sample clock.
+  - **Suppression:** mobile, unassigned, immature and dismissed alarms are held back.
+  - **Device first:** gain, cal and front-end steps explain a change as self-inflicted.
+  - **Explanations:** from the existing correlator via `CORRELATED_KINDS`; `unexplained` is ranked on 1 − best external score.
+  - **Storage:** migration 0003 `anomaly_detail`.
+  - **API:** routes list/get/dismiss/reopen plus the `anomalies` stream.
+  - **Tests:** 46 targeted, api_contract 22.
+
+  Not wired into the pipeline yet (the `observe_fold` hook is for T-128 or a follow-up); the e2e goes to T-124. Timeboxed Opus review is running. Focus: could device-first explanations hide a real emitter that coincides with a gain change; adjacent-cell merge gluing emitters together; migration and append-only rules; backward-compatibility of `/api/anomalies`.
