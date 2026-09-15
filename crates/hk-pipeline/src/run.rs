@@ -755,7 +755,11 @@ impl Pipeline {
         store_calibrations(&mut repo, &cfg.calibrations)?;
         let product = FloorProduct::open(
             cfg.data_dir.join("history"),
-            FloorProductConfig::default(),
+            // T-139: scheduler short-step rows (fewer averages) fold instead of being rejected.
+            FloorProductConfig {
+                mixed_shapes: true,
+                ..FloorProductConfig::default()
+            },
             PowerCalibrations::from_states(&cfg.calibrations, None),
         )
         .map_err(|e| anyhow::anyhow!("opening history: {e}"))?;

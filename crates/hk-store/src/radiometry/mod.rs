@@ -17,7 +17,10 @@
 //!   frame; gain-segment boundaries come from its segment reset (GainKey), not from episodes.
 //! - **Cell shape** `n_c` ([`hk_dsp::radiometry::cell_value_shape`]) is fixed per product by
 //!   the first frame's spectral geometry and persisted in `product.txt`; frames of another
-//!   geometry are rejected (use a separate product per STFT configuration).
+//!   geometry are rejected (use a separate product per STFT configuration), unless
+//!   `FloorProductConfig::mixed_shapes` (T-139: the pipeline's history, whose scheduler short-step
+//!   rows average fewer segments). Those are folded and counted, and the floor then uses each
+//!   cell's own tile-shape `floor_db`, skipping mixed-shape cells.
 //!
 //! # Estimator: bias-corrected p10, not the power mean
 //!

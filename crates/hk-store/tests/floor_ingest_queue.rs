@@ -36,6 +36,11 @@ impl Drop for TempDir {
 
 /// `seconds` of noise → STFT → floor tracker: the frame pairs the history reader ingests.
 fn frames(seconds: f64) -> Vec<(SpectrumFrame, FloorFrame)> {
+    frames_k(seconds, 8, 0)
+}
+
+/// [`frames`] averaging `k` segments per frame, starting `offset_ns` after `T0`.
+fn frames_k(seconds: f64, k: usize, offset_ns: i64) -> Vec<(SpectrumFrame, FloorFrame)> {
     let prov: Provenance = serde_json::from_value(serde_json::json!({
         "device_id": "synthetic:t-037b",
         "tune": {"center_hz": 100e6, "sample_rate_hz": FS, "lna_db": 24.0, "vga_db": 20.0,
@@ -45,7 +50,7 @@ fn frames(seconds: f64) -> Vec<(SpectrumFrame, FloorFrame)> {
     }))
     .unwrap();
     let prov = ProvenanceHandle::new(prov);
-    let mut stft = StftProcessor::new(StftConfig::new(WelchConfig::new(1024), 8)).unwrap();
+    let mut stft = StftProcessor::new(StftConfig::new(WelchConfig::new(1024), k)).unwrap();
     let mut tracker = NoiseFloorTracker::new(FloorConfig::default()).unwrap();
     let mut rng = Rng::new(0x037b);
     let mut out = Vec::new();
@@ -57,7 +62,9 @@ fn frames(seconds: f64) -> Vec<(SpectrumFrame, FloorFrame)> {
         let info = InputInfo {
             time: SampleTime {
                 sample_index: index,
-                host_time: Timestamp::from_unix_nanos(T0 + (index as f64 * 1e9 / FS) as i64),
+                host_time: Timestamp::from_unix_nanos(
+                    T0 + offset_ns + (index as f64 * 1e9 / FS) as i64,
+                ),
             },
             discontinuity: std::mem::replace(&mut disc, Discontinuity::NONE),
             dropped_before: 0,
@@ -153,4 +160,90 @@ fn ingest_never_waits_for_a_query_holding_the_floor_product() {
     let folded = small.drain(&mut product.lock().unwrap());
     assert_eq!(folded.len(), 4);
     assert!(folded.iter().all(Result::is_ok));
+}
+
+/// T-139: frames averaging fewer segments (another cell shape) are rejected by default and folded
+/// and counted with `mixed_shapes`; the floor then still answers from the cells' own shapes.
+#[test]
+fn mixed_shapes_fold_short_rows_instead_of_rejecting_them() {
+    let full = frames_k(2.0, 8, 0);
+    // K = 3: a partial row's geometry, 120 s later (its own 60-s level-0 tile, uniform shape).
+    let short = frames_k(2.0, 3, 120_000_000_000);
+    // And the same geometry inside the full rows' tile (30 s in): that tile's shape is mixed.
+    let shared = frames_k(2.0, 3, 30_000_000_000);
+    let open = |tag: &str, mixed: bool| {
+        let dir = TempDir::new(tag);
+        let p = FloorProduct::open(
+            &dir.0,
+            FloorProductConfig {
+                mixed_shapes: mixed,
+                ..FloorProductConfig::default()
+            },
+            PowerCalibrations::new(),
+        )
+        .unwrap();
+        (dir, p)
+    };
+    let ingest = |p: &mut FloorProduct| {
+        for (s, f) in full.iter().chain(&short) {
+            let _ = p.ingest(s, f);
+        }
+    };
+
+    let (_d0, mut strict) = open("shape-strict", false);
+    ingest(&mut strict);
+    let st = strict.stats();
+    assert_eq!(st.rejected_frames, short.len() as u64, "{st:?}");
+    assert_eq!(st.mixed_shape_frames, 0);
+
+    let (_d1, mut mixed) = open("shape-mixed", true);
+    ingest(&mut mixed);
+    let st = mixed.stats();
+    assert_eq!(st.rejected_frames, 0, "{st:?}");
+    assert_eq!(st.mixed_shape_frames, short.len() as u64);
+    assert_eq!(st.uncalibrated_frames, (full.len() + short.len()) as u64);
+    mixed
+        .seal_through(Timestamp::from_unix_nanos(T0 + 3_600_000_000_000))
+        .unwrap();
+    let floor = |p: &FloorProduct, s0: i64, s1: i64| -> Vec<f64> {
+        p.floor_vs_time(
+            hk_model::FreqRange::centered(100e6, 0.5 * FS),
+            Timestamp::from_unix_nanos(T0 + s0 * 1_000_000_000),
+            Timestamp::from_unix_nanos(T0 + s1 * 1_000_000_000),
+            hk_store::Resolution::Level(0),
+        )
+        .unwrap()
+        .steps
+        .iter()
+        .filter_map(|s| s.value_db_per_hz)
+        .collect()
+    };
+    let (v_full, v_short) = (floor(&mixed, 0, 3), floor(&mixed, 120, 123));
+    assert!(
+        !v_full.is_empty() && !v_short.is_empty(),
+        "each uniform tile has a floor: {v_full:?} {v_short:?}"
+    );
+    let values: Vec<f64> = v_full.iter().chain(&v_short).copied().collect();
+    // Both geometries measure the same noise (same seed): bias-corrected floors agree within 2 dB
+    // (0.5 dB histogram step; the Gamma bias model is looser at K = 3, measured 1.6 dB worst cell).
+    let (lo, hi) = values
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |a, v| {
+            (a.0.min(*v), a.1.max(*v))
+        });
+    assert!(hi - lo < 2.0, "floors {values:?}");
+
+    // A tile holding both geometries has no single shape: no bias-corrected floor, never a
+    // wrong one.
+    let (_d2, mut both) = open("shape-both", true);
+    for (s, f) in full.iter().chain(&shared) {
+        both.ingest(s, f).unwrap();
+    }
+    both.seal_through(Timestamp::from_unix_nanos(T0 + 3_600_000_000_000))
+        .unwrap();
+    assert!(both.stats().mixed_shape_frames > 0);
+    assert!(
+        floor(&both, 0, 60).is_empty(),
+        "a mixed-shape tile reports no floor"
+    );
 }

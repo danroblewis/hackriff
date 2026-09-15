@@ -19,14 +19,24 @@
 //! site. **T-136:** frames run ahead of the occupancy close, so this thread only *peeks*
 //! ([`AttentionService::site_at_peek`]): it never expires, clears or persists site state (that
 //! would stamp the close's rows `unassigned` and block frames on a database write).
+//!
+//! **Short scheduler steps (T-139, ADR-0012 §2.10).** A row needs `K` segments (0.1 s at the run's
+//! opening rate) of unchanged tuning, and every retune or gap resets the STFT. A scheduler sweep
+//! hop (50 ms) is shorter, so without help a scheduler-driven run folded no history at all. Once
+//! the stream has retuned (or changed rate), a reset emits the averaging in progress as a row when
+//! it holds at least `K / 10` segments ([`hk_dsp::PartialFrames`]): its resolution's `n_avg` and
+//! `sample_count` are what was actually averaged, so the pyramid's per-cell noise shape and
+//! observed duration stay honest. A stream that never retunes (fixed tuning; gaps and gain steps
+//! only) folds exactly the frames it did before. Rows are one per step at most beyond the full
+//! rows, so the reader's per-block cost is unchanged.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use hk_core::ReadOutcome;
+use hk_core::{Discontinuity, ReadOutcome};
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker};
-use hk_dsp::{InputInfo, SpectrumFrame, StftConfig, WelchConfig};
+use hk_dsp::{InputInfo, PartialFrames, SpectrumFrame, StftConfig, WelchConfig};
 use hk_model::Timestamp;
 use hk_model::attention::baseline::SiteKey;
 use hk_store::history::{FrameOrigin, source_key};
@@ -40,6 +50,9 @@ use crate::stats::{HistoryCounters, add, inc, set};
 
 /// Frames queued while a query holds the product (about a minute at 10 rows/s).
 pub(crate) const HISTORY_QUEUE_FRAMES: usize = 600;
+
+/// T-139: a partial row needs at least `K / PARTIAL_MIN_DIVISOR` segments (10 ms at 10 rows/s).
+pub(crate) const PARTIAL_MIN_DIVISOR: usize = 10;
 
 /// Updates the tile counters from the product.
 pub(crate) fn update_tiles(shared: &Shared, product: &FloorProduct) {
@@ -81,11 +94,17 @@ pub(crate) fn run(
     welch.spectral_kurtosis = false;
     let rows = shared.cfg.settings.history_rows_per_s.max(0.01);
     let k = ((shared.fs / (welch.hop() as f64 * rows)).round() as usize).max(1);
+    let mut stft_cfg = StftConfig::new(welch, k);
+    // T-139: scheduler steps shorter than a row still leave a (reduced-averaging) row.
+    stft_cfg.partial = Some(PartialFrames {
+        min_segments: k.div_ceil(PARTIAL_MIN_DIVISOR),
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+    });
     let mut stft = crate::compute::stft(
         &shared.compute,
         &shared.counters.compute,
         Reader::History,
-        StftConfig::new(welch, k),
+        stft_cfg,
     )?;
     let mut tracker = NoiseFloorTracker::new(FloorConfig::default())
         .map_err(|e| anyhow::anyhow!("history floor tracker: {e:?}"))?;
@@ -140,12 +159,14 @@ pub(crate) fn run(
         let st = stft.stats();
         set(&rc.frames, st.frames);
         set(&rc.stft_resets, st.resets);
+        set(&rc.partial_frames, st.partial_frames);
     }
     // Stream end or detach: frames still in flight are folded in before the queue drains.
     stft.flush(&mut on_frame);
     let st = stft.stats();
     set(&rc.frames, st.frames);
     set(&rc.stft_resets, st.resets);
+    set(&rc.partial_frames, st.partial_frames);
     drop(cursor);
     let mut p = product.lock().unwrap_or_else(PoisonError::into_inner);
     tally(h, &queue.drain(&mut p));

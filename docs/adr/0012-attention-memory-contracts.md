@@ -181,6 +181,33 @@ hk-store `occupancy/` (T-118):
 - **Channel plan:** `channels.json` (versioned), rewritten atomically on change.
 - **Retention:** 15-min rows 90 days, 1-h rows 2 years, quota 256 MiB.
 
+### 2.10 History rows from short scheduler steps (T-139, decided)
+
+**Problem.** Occupancy measures levels on the history level-0 grid, and the history reader made a row only from `K` STFT segments of unchanged tuning (0.1 s at the run's opening rate, 10 rows/s). Every retune, rate change or gap reset the STFT and discarded the partial row. Discovery hops are 50 ms (§1.3), so a run under the default scheduler folded **no** history: no tiles, OccupancyStat rows, baselines or alarm inputs (T-124: 56 h scene, 95.6 M samples read, 0 frames).
+
+**Decision: emit rows from short steps; visits keep coming from the observation log.** The alternative, occupancy from the §1 log alone, was rejected: the log says when and where the radio looked, not what level it measured, so it cannot decide occupied.
+- Once the stream has retuned or changed rate, the history reader's STFT emits the averaging in progress at each reset, provided it holds at least `K/10` segments (`hk_dsp::PartialFrames`). Shorter pieces are still discarded.
+- The row is the measurement before the reset: its tuning, gains, time and flags.
+- **Provenance stays honest:**
+  - its `Resolution::n_avg` is the segments actually averaged, and its `sample_count` and duration are the samples they span;
+  - the pyramid derives each cell's noise shape (bias-corrected floor) from that resolution, and its observed duration from that span;
+  - `readers.history.partial_frames` counts these rows.
+- **Activity independence is unchanged.**
+  - A row exists because a step ended, never because of what it measured.
+  - Visits, tiers and weights still come from the log (§2.5). Sweep-hop visits stay activity independent and bandit dwells do not, whatever row geometry backs them.
+  - Reduced averaging changes the per-cell level variance, not `n_eff`. `n_eff` counts visits (§2.4), and the 5 dB guard (§2.2) is several standard deviations of a `K/10` average.
+- **Mixed cell shapes are recorded, not rejected.**
+  - A partial row's per-cell Gamma shape differs from a full row's.
+  - The pipeline's `FloorProduct` therefore sets `mixed_shapes`: such frames fold and are counted (`mixed_shape_frames`) instead of being rejected.
+  - Tiles already mark a mixed shape and then give no bias-corrected `floor_db`, so occupancy's local floors fall back to the §2.2 80 % method.
+  - Once a mixed frame has folded, `floor_vs_time` uses each cell's own tile-shape `floor_db`.
+- **Fixed tuning is untouched.** A stream that never retunes emits bit-identical frames, and so bit-identical tiles: gaps and gain steps alone never arm partial rows (`hk-dsp` `partial_frames_never_armed_are_bit_identical`). With no mixed frame the floor product computes exactly as before.
+- *Measured (T-139, `hk-pipeline` `scheduler_history`).* The scene is 2 h, time-compressed, 60 s mean gap, 0.13 s windows, default scheduler plus bandit.
+  - Before T-139: 0 history frames.
+  - After: 323 rows (all partial), 82 tiles, 66 OccupancyStat rows over 8 intervals, 36 baseline folds, 78 alarm inputs.
+- **Per-block cost is unchanged.** There is at most one extra `finish_into` plus floor update and ingest per step, and no new lock.
+- The spectrum/waterfall and detection readers keep discarding partials.
+
 ## 3. Baseline (C12)
 
 ### 3.1 Key and slots

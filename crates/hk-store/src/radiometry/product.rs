@@ -53,8 +53,14 @@ pub struct FloorProductConfig {
     /// Frames further apart than this many periods break a run (1.5).
     pub gap_factor: f64,
     /// Frames whose cell shape differs from the product's by more than this fraction are
-    /// rejected (0.05).
+    /// rejected (0.05), unless `mixed_shapes`.
     pub shape_tolerance: f64,
+    /// T-139: fold frames of another cell shape (e.g. a scheduler's short-step history rows with
+    /// fewer averages) instead of rejecting them (false). Tiles record whether their shape is
+    /// uniform; once such a frame was folded, [`FloorProduct::floor_vs_time`] takes each cell's own
+    /// bias-corrected `floor_db` (tile shape) and skips mixed-shape cells instead of applying the
+    /// product's shape.
+    pub mixed_shapes: bool,
 }
 
 impl Default for FloorProductConfig {
@@ -65,6 +71,7 @@ impl Default for FloorProductConfig {
             max_run: Duration::from_secs(60),
             gap_factor: 1.5,
             shape_tolerance: 0.05,
+            mixed_shapes: false,
         }
     }
 }
@@ -80,6 +87,8 @@ pub struct FloorProductStats {
     pub late_frames: u64,
     /// Frames rejected (mismatched floor frame, geometry, or malformed).
     pub rejected_frames: u64,
+    /// T-139: frames folded with a cell shape other than the product's (`mixed_shapes`).
+    pub mixed_shape_frames: u64,
 }
 
 /// What [`FloorProduct::ingest`] did.
@@ -364,6 +373,9 @@ impl FloorProduct {
                 write_meta(&self.dir, s)?;
                 self.shape = Some(s);
             }
+            Some(p) if (s / p - 1.0).abs() > self.cfg.shape_tolerance && self.cfg.mixed_shapes => {
+                self.stats.mixed_shape_frames += 1;
+            }
             Some(p) if (s / p - 1.0).abs() > self.cfg.shape_tolerance => {
                 self.stats.rejected_frames += 1;
                 return Err(StoreError::BadFrame(
@@ -534,25 +546,32 @@ impl FloorProduct {
         cache: &mut HashMap<(bool, u32), f64>,
     ) -> Option<RowStats> {
         let shape = self.shape?;
+        // T-139: with frames of other shapes folded, only a cell's own tile shape is right.
+        let per_cell = self.stats.mixed_shape_frames > 0;
         let (mut corr, mut raw, mut mean, mut bias) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let (mut coverage, mut level, mut rolled_up) = (0f32, u8::MAX, false);
         for c in cells
             .iter()
             .filter(|c| c.observed() && c.p_low_db.is_finite())
+            .filter(|c| !per_cell || c.floor_db.is_finite())
         {
             let exact = c.level == 0;
             rolled_up |= !exact;
-            let b = *cache
-                .entry((exact, if exact { c.frames } else { 0 }))
-                .or_insert_with(|| {
-                    let p = if exact {
-                        exact_percentile_probability(q, c.frames)
-                    } else {
-                        q / 100.0
-                    };
-                    percentile_bias_db(shape, p)
-                });
+            let b = if per_cell {
+                f64::from(c.p_low_db) - f64::from(c.floor_db)
+            } else {
+                *cache
+                    .entry((exact, if exact { c.frames } else { 0 }))
+                    .or_insert_with(|| {
+                        let p = if exact {
+                            exact_percentile_probability(q, c.frames)
+                        } else {
+                            q / 100.0
+                        };
+                        percentile_bias_db(shape, p)
+                    })
+            };
             let p_low = f64::from(c.p_low_db);
             corr.push(p_low - b);
             raw.push(p_low);
