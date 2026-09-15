@@ -2656,7 +2656,7 @@ notes:
   - id: T-167
     milestone: MUI
     title: "MUI API gap 10: DC notch width in the spectrum stream header"
-    status: review
+    status: done
     commit: eb63567
     deps: [T-149]
     parallel_group: MUI-API
@@ -2764,7 +2764,7 @@ notes:
   - id: T-174
     milestone: M2-hardening
     title: "Live candidate path uses the per-tuning DC twin rule (detect.rs:458 still per-detection suspect)"
-    status: review
+    status: done
     commit: 9c58f81
     deps: [T-147]
     parallel_group: M2B
@@ -2892,4 +2892,18 @@ notes:
     needs: none
     model: sonnet
     effort: low
+    core_interface: false
+  - id: T-183
+    milestone: M2-hardening
+    title: "acceptance signal_062 load flake: WFM emitter family label (auto classifier) missing under load; passes alone - check for a real race in when the family is assigned vs pipeline stop"
+    status: todo
+    deps: []
+    parallel_group: M2E
+    use_cases: [SIGNAL-062]
+    found_by: "full check 2026-09-15 (a253b04): signal_062_fm_rds_auto_wfm_pilot_pi_label failed at signal_062.rs:190 (entry.family != wfm) under load ~12 with T-124/T-180 scenes running; passed 2/2 alone in 1.24 s; acceptance runs under cargo test with no retries"
+    acceptance: "root cause identified (family assignment ordering/async classifier vs run stop or inventory read); product race fixed or test waits on an explicit completion condition with the same assertion; 10 consecutive acceptance runs under parallel load green"
+    area: crates/hk-pipeline (family/classifier, run stop), tests/e2e/tests/acceptance/signal_062.rs
+    needs: none
+    model: opus
+    effort: medium
     core_interface: false

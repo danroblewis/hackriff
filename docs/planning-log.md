@@ -2098,3 +2098,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **ADR-0014 (PROVISIONAL).**
   - **Tests:** hk-store 10, hk-pipeline 5 (restart clip byte-identical), hk-api/hk-cli 25; lint clean.
   - **Concern for review:** `.config/nextest.toml` now enables nextest EXPERIMENTAL setup scripts to cap the ring at 16 MiB in tests. That conflicts with main's nextest pins and may be fragile.
+- **B0.452 Re-run full check (a253b04): nextest 1365/1365 in 138 s; acceptance 27/28.**
+  - **Failure:** `signal_062_fm_rds_auto_wfm_pilot_pi_label` at `signal_062.rs:190` (WFM family label missing). It passes 2/2 alone, so this is a load flake while other scenes run. Tracked as T-183 (possible real family-assignment race).
+  - **Status:** main treated as green.
+  - **Merged:** T-174 (live-candidate DC twin) and T-167 (`dc_excluded_hz` header). Both worktrees removed.
+  - **Next:** full check.
