@@ -762,3 +762,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Blind detections-source and tracker-found hop-set tests run through the mock SDR.
   - New routes `PUT /api/pipelines/{id}/channels` and `POST .../channels/refresh`, with contract tests.
   Tests: hk-blocks 69, follow_hops 4/4, runtime/alloc/capture 10/10, hk-api 82, api_contract 15, lint clean. Full check running.
+- **B0.264 Full check of main b8e118a (T-107): green.** Lint clean; nextest + UI 1118/1118 in 241 s; acceptance 25/25. In flight: T-097 (ADS-B tutorial), T-108 (ACARS: re-running with a vouched content class; check the gating interaction on report), T-109 (POCSAG channel separation).
