@@ -174,6 +174,10 @@ pub(crate) enum Undo {
         arm: usize,
         last_visit_ns: Option<i64>,
         visits: u64,
+        /// The dwell counter the commit bumped (rolled back with it, T-127).
+        kind: BanditKind,
+        /// The commit also counted a starvation-forced visit.
+        stale_forced: bool,
     },
     Verify {
         key: u64,
@@ -254,6 +258,9 @@ pub struct BanditCounters {
     pub beacon_dwells: u64,
     /// Verification groups started.
     pub verifications_started: u64,
+    /// Suspect candidates not given a verification record because all
+    /// [`MAX_VERIFICATIONS`] slots were in use (T-127).
+    pub verifications_dropped: u64,
     /// Passed.
     pub verifications_passed: u64,
     /// Failed (banned).
@@ -346,7 +353,13 @@ impl Bandit {
     fn index(&self, a: &Arm, now_ns: i64) -> f64 {
         let (mean, n) = self.mean_and_dwell(a, now_ns);
         let total = self.total_dwell_s * self.decay(self.total_t_ns, now_ns) + n;
-        ucb_index(mean, n, total, self.cfg.ucb_c) * (1.0 - a.suspect_fraction)
+        let keep = 1.0 - a.suspect_fraction;
+        // T-127: an unvisited arm with no pseudo-dwell has an infinite index; a fully suspect arm
+        // scales it by 0, which must be 0, not NaN.
+        if keep.is_nan() || keep <= 0.0 {
+            return 0.0;
+        }
+        ucb_index(mean, n, total, self.cfg.ucb_c) * keep
     }
 
     fn since_ns(a: &Arm, now_ns: i64) -> i64 {
@@ -477,25 +490,41 @@ impl Bandit {
             Choice::Dwell { arm, kind } => {
                 let limit = (self.cfg.max_arm_staleness_s * NS) as i64;
                 let a = &mut self.arms[arm];
+                let stale_forced = matches!(kind, BanditKind::Explore)
+                    && !a.exploration
+                    && Self::since_ns(a, now_ns) >= limit;
                 let undo = Undo::Arm {
                     arm,
                     last_visit_ns: a.last_visit_ns,
                     visits: a.visits,
+                    kind,
+                    stale_forced,
                 };
-                match kind {
-                    BanditKind::Exploit { .. } => self.counters.exploit_dwells += 1,
-                    BanditKind::Explore => {
-                        self.counters.explore_dwells += 1;
-                        if !a.exploration && Self::since_ns(a, now_ns) >= limit {
-                            self.counters.stale_forced += 1;
-                        }
-                    }
-                    BanditKind::BeaconDue { .. } => self.counters.beacon_dwells += 1,
-                }
                 a.last_visit_ns = Some(now_ns);
                 a.visits += 1;
+                self.count_dwell(kind, stale_forced, 1);
                 undo
             }
+        }
+    }
+
+    /// Adds (`sign` 1) or rolls back (`sign` −1) a dwell's counters.
+    fn count_dwell(&mut self, kind: BanditKind, stale_forced: bool, sign: i8) {
+        let c = &mut self.counters;
+        let bump = |x: &mut u64| {
+            *x = if sign > 0 {
+                *x + 1
+            } else {
+                x.saturating_sub(1)
+            }
+        };
+        match kind {
+            BanditKind::Exploit { .. } => bump(&mut c.exploit_dwells),
+            BanditKind::Explore => bump(&mut c.explore_dwells),
+            BanditKind::BeaconDue { .. } => bump(&mut c.beacon_dwells),
+        }
+        if stale_forced {
+            bump(&mut c.stale_forced);
         }
     }
 
@@ -514,11 +543,14 @@ impl Bandit {
                 arm,
                 last_visit_ns,
                 visits,
+                kind,
+                stale_forced,
             } => {
                 if let Some(a) = self.arms.get_mut(arm) {
                     a.last_visit_ns = last_visit_ns;
                     a.visits = visits;
                 }
+                self.count_dwell(kind, stale_forced, -1);
             }
         }
     }
@@ -646,6 +678,8 @@ impl Bandit {
                             state: VerifyState::Pending,
                             seen: true,
                         });
+                    } else {
+                        self.counters.verifications_dropped += 1;
                     }
                     continue;
                 }

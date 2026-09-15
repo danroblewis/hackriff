@@ -15,6 +15,8 @@
 //! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
 //! | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | GET | token | T-115 observation log records in a box ([`crate::observations`]) |
 //! | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | GET | token | T-115 observation totals, per-channel totals, gaps and POI ([`crate::observations`]) |
+//! | `/api/scheduler[?f_lo&f_hi][&t0&t1][&tau_s]` | GET | token | T-127 tier shares, sweep floor, bandit summary, leases, POI + gaps from the observation log ([`crate::schedule`]) |
+//! | `/api/scheduler/arms`, `/api/scheduler/leases[/<id>]` | GET, POST, DELETE | token (header only for mutating) | T-127 bandit arm table; lease list, create, release ([`crate::schedule`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -147,6 +149,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-118 occupancy
     // T-119 sites, baselines, candidates, weights
     // T-120 scheduler
+    // T-127 scheduler routes
+    ("GET", "/api/scheduler"),
+    ("GET", "/api/scheduler/arms"),
+    ("GET", "/api/scheduler/leases"),
+    ("POST", "/api/scheduler/leases"),
+    ("DELETE", "/api/scheduler/leases/{id}"),
     // T-121 reports
     // T-122 anomalies
 ];
@@ -226,6 +234,9 @@ pub struct ApiState {
     /// T-115: the observation log for `/api/observations` ([`crate::observations`]); `None`
     /// answers 503.
     pub observations: Option<hk_store::observation::ObservationStore>,
+    /// T-127: the run's scheduler for `/api/scheduler*` ([`crate::schedule`]); `None` answers
+    /// reads with `"scheduler": null` and refuses lease changes.
+    pub scheduler: Option<Arc<dyn crate::schedule::SchedulerControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

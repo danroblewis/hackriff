@@ -537,9 +537,75 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 
 Stream `observations` (ADR-0004 `messages` kind, `message_schema` `hackriff.observation/1`, metadata only, listed by `GET /api/streams`): one message per record the log writes, published from the writer thread (a slow subscriber drops messages, never log records). `metadata.kind` is `dwell` (`reason_text`, `record`: the `DwellRecord`) or `sweep-summary` (`plan_version`, `geometry`, `t0_s`, `t1_s`, `visits`, `observed_s`, `f_lo_hz`/`f_hi_hz` of the visited hops, `preempted_hops`, `dropped_samples`, `overload_hops`). Geometry records are not streamed; read them from `GET /api/observations`.
 
+## Attention scheduler (T-127; ADR-0012 §5)
+
+The scheduler of a scheduler-driven run (`hackriffd`, `hk run --schedule`, `hk replay --schedule`): tier shares, the sweep floor, the bandit and pinned leases. A run without the scheduler (`hk serve`) answers the reads with `"scheduler": null` and refuses lease changes with 409. Frequencies in Hz; times in Unix seconds on the scheduler's sample clock.
+
+**Enabling the bandit.** Off by default. A ScanPlan enables it with `extra.bandit`: `true` for the defaults, or an object overriding `BanditConfig` fields (`ucb_c`, `discount_half_life_s`, `exploration_floor`, `sweep_floor`, `sweep_floor_window_s`, `max_arm_staleness_s`, `min_dwell_s`, `max_dwell_s`, `dwell_periods`, `prior_pseudo_dwell_s`, `arm_quantum_hz`, `max_arms`, `suspect_ban_s`, `reward`). Unknown or out-of-range fields fail the run at start. Until T-119 lands, the candidates the bandit packs come from a minimal stub scorer over confirmed tracks (novelty from first sighting, no SNR); T-119 replaces the publisher, not these routes.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/scheduler[?f_lo&f_hi][&t0&t1][&tau_s]` | token | Status, leases, and POI + coverage gaps from the observation log |
+| GET | `/api/scheduler/arms` | token | Bandit arm table |
+| GET | `/api/scheduler/leases` | token | Active leases |
+| POST | `/api/scheduler/leases` | token (header) | Create or update a lease (audited as `scheduler_lease_create`) |
+| DELETE | `/api/scheduler/leases/{id}` | token (header) | Release a lease (audited as `scheduler_lease_release`) |
+
+**`GET /api/scheduler`.** POI is computed from the observation log (T-115) with the same exact union-of-windows rule as ADR-0012 §5.5 (1 MHz cells), never from the scheduler's plan.
+- `f_lo`/`f_hi` pick one region (default: the plan's regions, at most 16).
+- `t0`/`t1` pick the span (default: the hour before the scheduler's now; without a scheduler and without a span, `poi` is empty).
+- `tau_s` is a comma-separated list of burst durations (default `0.005,0.1,1,10`; at most 16).
+
+```json
+{
+  "scheduler": {
+    "now": 1789300000.5, "plan_version": 1, "window_s": 600,
+    "shares_s": { "discovery": 150.2, "exploit": 40.1, "explore": 8.3, "other": 0 },
+    "sweep_floor": 0.25, "sweep_floor_met": true, "floor_violations": 0,
+    "interactive": false, "leases": 0, "scheduled": 0, "low_power": false,
+    "bandit": {
+      "provider_version": 7, "arms": 12, "active_arms": 9, "pending_verifications": 0,
+      "banned": 0, "total_dwell_s": 48.4, "config": { "ucb_c": 0.5, "...": "BanditConfig" },
+      "counters": { "repacks": 7, "outcomes": 31, "outcomes_unmatched": 0, "exploit_dwells": 20,
+        "explore_dwells": 9, "stale_forced": 0, "beacon_dwells": 2, "verifications_started": 0,
+        "verifications_dropped": 0, "verifications_passed": 0, "verifications_failed": 0,
+        "floor_deferrals": 3, "arms_dropped": 0, "suspect_wasted_s": 0 }
+    }
+  },
+  "leases": [ { "id": 1, "kind": "user-pin", "center_hz": 433920000, "rate_hz": 2000000, "duration_s": null } ],
+  "observation_log": true,
+  "span": { "t0": 1789296400.5, "t1": 1789300000.5 },
+  "poi": [ {
+    "f_lo": 433000000, "f_hi": 435000000, "cell_hz": 1000000, "cells": 2, "observed_cells": 2,
+    "observed_fraction": 0.31, "mean_revisit_s": 1.9,
+    "poi": [ { "tau_s": 0.1, "p_poi": 0.36, "p_poi_min": 0.34 } ],
+    "gap_threshold_s": 3.8,
+    "gaps": [ { "f_lo": 433000000, "f_hi": 434000000, "t0": 1789296400.5, "t1": 1789296900 } ],
+    "gaps_truncated": false
+  } ],
+  "poi_truncated": false
+}
+```
+
+`bandit` is `null` when the plan does not enable it. `poi_truncated` is set when more than 200 000 records overlapped (POI then covers the first ones). Bad numbers or unpaired `f_lo`/`f_hi`, `t0`/`t1` answer 400.
+
+**`GET /api/scheduler/arms`** returns `{ "scheduler": bool, "bandit": bool, "arms": [...] }`. Each arm: `index` (the `arm` of bandit dwell reasons), `key` (`rf_path`, `center_q`, `rate_hz`), `center_hz`, `rate_hz`, `active`, `exploration` (a hop exploration arm), `on_dc`, `prior`, `mean_reward`, `dwell_s`, `ucb` (a number, or `"inf"` for an unvisited arm without pseudo-dwell), `visits`, `staleness_s`, `suspect_fraction`, `lead` (16-hex-digit candidate key or null), `members`, `dwell_planned_s`, `required_revisit_s`, `complete_capture`, `last_reward`.
+
+**`POST /api/scheduler/leases`** takes `{ "center_hz": 433920000, "kind": "user-pin", "duration_s": 60, "id": 3 }`.
+- Only `center_hz` is required.
+- `kind` is one of `user-pin` (default), `decoder`, `trunking`, `pass`, `launch`.
+- `duration_s` absent means the lease holds until released.
+- `id` absent assigns the next free id; the same `id` again updates that lease.
+- The lease runs at the pipeline's sample rate.
+- Answers 201 `{ "lease": {...} }` (200 on update); 400 for bad fields or a centre outside the device's range; 409 without a scheduler; 503 if the control thread does not answer within 2 s.
+
+A lease preempts scheduled plans, the bandit and the sweep from the next step; the sweep floor is not enforced against it (shortfalls count as `floor_violations`).
+
+**`DELETE /api/scheduler/leases/{id}`** answers `{ "released": id }`, 404 when no such lease is active, 400 for a non-numeric id, 409 without a scheduler. The lease's unrun planned time leaves the sweep-floor window.
+
 ## Attention and memory (planned, M2; ADR-0012)
 
-**Planned, not served yet.** None of these routes are in `ROUTES` today, except the observation log's (above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+**Planned, not served yet.** None of these routes are in `ROUTES` today, except the observation log's and the attention scheduler's (above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
 - **Contracts:** [ADR-0012](adr/0012-attention-memory-contracts.md).
 - **Schemas:** `hk_model::attention` (observation records, `OccupancyStat`, baselines, `CandidateSet`, `SurveyReport`, alarm detail).
 
@@ -564,10 +630,6 @@ Conventions:
 | GET | `/api/candidates` | T-119 | `?[f_lo&f_hi][&limit]`: latest ranked `CandidateSet` slice with score components |
 | GET | `/api/attention/weights` | T-119 | Current score weights and version |
 | PUT | `/api/attention/weights` | T-119 | New weights version (audited) |
-| GET | `/api/scheduler` | T-120 | Tier shares over the floor window, sweep-floor status, provider version, POI per region |
-| GET | `/api/scheduler/arms` | T-120 | Arm table: key, index, mean reward, dwell-seconds, staleness, banned |
-| POST | `/api/scheduler/leases` | T-120 | Create a user pin lease ("watch this") (audited) |
-| DELETE | `/api/scheduler/leases/{id}` | T-120 | Release a lease (audited) |
 | GET | `/api/report` | T-121 | `?f_lo&f_hi&t0&t1[&site][&format=json\|csv\|png]`: `SurveyReport` or its export |
 | GET | `/api/anomalies` | T-122 | `?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`: anomalies (all kinds, including novelty alarms) with top explanations |
 | GET | `/api/anomalies/{id}` | T-122 | One anomaly: `AlarmDetail`, ranked explanations, status history |
