@@ -103,6 +103,23 @@ impl SiteRecord {
     }
 }
 
+/// The site assignment in force (T-136, §3.5), persisted so a restart on the same database keeps
+/// a pinned site, and a fixed site within its no-fix hold, instead of starting `Unassigned`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiteAssignment {
+    /// The discrete site.
+    pub site: SiteId,
+    /// How it was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_by: Option<SiteSource>,
+    /// Pinned by config or the user (fixes do not move it).
+    pub pinned: bool,
+    /// Last in-site time (sample clock): a pin's time, else the last in-site fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_in_site: Option<Timestamp>,
+}
+
 /// Site assignment settings (§3.5).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

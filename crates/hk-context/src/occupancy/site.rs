@@ -13,10 +13,17 @@
 //!
 //! Only `Site` keys accrue baselines (`SiteKey::accrues_baseline`). All times are the sample clock
 //! (ADR-0012 §0). Distances are great-circle ([`crate::geo::haversine_km`]).
+//!
+//! **Readers and restarts (T-136).** [`SiteAssigner::tick`] is irreversible (expiry clears the
+//! fixes), so readers that run ahead of the occupancy close (history frames) use
+//! [`SiteAssigner::peek`], which never changes state. The assignment in force
+//! ([`SiteAssigner::assignment`]) is persisted by the owner when
+//! [`SiteAssigner::take_assignment_change`] reports a change and [`SiteAssigner::restore`]d on
+//! start, so a pinned site survives a restart and a fixed site keeps its no-fix hold.
 
 use std::collections::VecDeque;
 
-use hk_model::attention::baseline::{SiteConfig, SiteKey, SiteRecord, SiteSource};
+use hk_model::attention::baseline::{SiteAssignment, SiteConfig, SiteKey, SiteRecord, SiteSource};
 use hk_model::ids::SiteId;
 use hk_model::time::Timestamp;
 
@@ -24,6 +31,10 @@ use crate::geo::haversine_km;
 
 /// Stillness needed before joining or founding a site, s (capped at `mobile_window_s`).
 pub const STILL_MIN_S: f64 = 60.0;
+
+/// Least advance of the last in-site time that counts as an assignment change to persist, s (so a
+/// fix stream does not write every fix).
+pub const ASSIGNMENT_PERSIST_S: f64 = 60.0;
 
 /// One position fix (C06).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,6 +75,8 @@ pub struct SiteAssigner {
     pinned: bool,
     last_in_site: Option<Timestamp>,
     dirty: Vec<SiteId>,
+    /// The assignment last reported by `take_assignment_change` (`None` = never reported).
+    persisted: Option<Option<SiteAssignment>>,
 }
 
 impl SiteAssigner {
@@ -78,7 +91,60 @@ impl SiteAssigner {
             pinned: false,
             last_in_site: None,
             dirty: Vec::new(),
+            persisted: None,
         }
+    }
+
+    /// The discrete-site assignment in force (`None` when mobile or unassigned).
+    pub fn assignment(&self) -> Option<SiteAssignment> {
+        let SiteKey::Site(site) = self.current else {
+            return None;
+        };
+        Some(SiteAssignment {
+            site,
+            set_by: self.set_by,
+            pinned: self.pinned,
+            last_in_site: self.last_in_site,
+        })
+    }
+
+    /// Restores a persisted assignment (start-up). An unpinned site then keeps its no-fix hold
+    /// from `last_in_site` on the sample clock, exactly as before the restart.
+    pub fn restore(&mut self, a: SiteAssignment) -> Result<(), SiteError> {
+        if self.site(a.site).is_none() {
+            return Err(SiteError::NotFound);
+        }
+        self.current = SiteKey::Site(a.site);
+        self.set_by = a.set_by;
+        self.pinned = a.pinned;
+        self.last_in_site = a.last_in_site;
+        self.persisted = Some(Some(a));
+        Ok(())
+    }
+
+    /// The assignment to persist when it changed since the last call: another site or none, a
+    /// pin or source change, or the last in-site time moved by at least
+    /// [`ASSIGNMENT_PERSIST_S`]. `Some(None)` clears the stored assignment.
+    pub fn take_assignment_change(&mut self) -> Option<Option<SiteAssignment>> {
+        let now = self.assignment();
+        let changed = match (self.persisted, now) {
+            (Some(None), None) => false,
+            (Some(Some(old)), Some(new)) => {
+                old.site != new.site
+                    || old.set_by != new.set_by
+                    || old.pinned != new.pinned
+                    || match (old.last_in_site, new.last_in_site) {
+                        (Some(a), Some(b)) => secs_between(a, b).abs() >= ASSIGNMENT_PERSIST_S,
+                        (a, b) => a != b,
+                    }
+            }
+            _ => true,
+        };
+        if !changed {
+            return None;
+        }
+        self.persisted = Some(now);
+        Some(now)
     }
 
     /// Current key.
@@ -244,24 +310,37 @@ impl SiteAssigner {
     /// Advances time without a fix: after `no_fix_hold_s` since the last in-site fix, an unpinned
     /// site (or mobile state) becomes `Unassigned`.
     pub fn tick(&mut self, t: Timestamp) -> SiteKey {
-        if self.pinned {
-            return self.current;
-        }
-        let last_fix = self.fixes.back().map(|f| f.t);
-        let stale = |since: Option<Timestamp>| {
-            since.is_none_or(|s| secs_between(s, t) > self.cfg.no_fix_hold_s)
-        };
-        let expire = match self.current {
-            SiteKey::Site(_) => stale(self.last_in_site) && stale(last_fix),
-            SiteKey::Mobile => stale(last_fix),
-            SiteKey::Unassigned => false,
-        };
-        if expire {
+        if self.expired_at(t) {
             self.current = SiteKey::Unassigned;
             self.set_by = None;
             self.fixes.clear();
         }
         self.current
+    }
+
+    /// The key [`tick`](Self::tick) would return at `t`, without changing any state (T-136: for
+    /// readers that may run ahead of the owner's clock, e.g. history frames).
+    pub fn peek(&self, t: Timestamp) -> SiteKey {
+        if self.expired_at(t) {
+            SiteKey::Unassigned
+        } else {
+            self.current
+        }
+    }
+
+    fn expired_at(&self, t: Timestamp) -> bool {
+        if self.pinned {
+            return false;
+        }
+        let last_fix = self.fixes.back().map(|f| f.t);
+        let stale = |since: Option<Timestamp>| {
+            since.is_none_or(|s| secs_between(s, t) > self.cfg.no_fix_hold_s)
+        };
+        match self.current {
+            SiteKey::Site(_) => stale(self.last_in_site) && stale(last_fix),
+            SiteKey::Mobile => stale(last_fix),
+            SiteKey::Unassigned => false,
+        }
     }
 
     /// Accounts `observed_s` of observation ending at `t` to the current site.
@@ -380,5 +459,49 @@ mod tests {
         assert_eq!(a.utc_offset_min(a.current()), 120);
         a.record_observation(t(10.0), 900.0);
         assert_eq!(a.take_dirty()[0].observed_s, 900.0);
+    }
+
+    /// T-136: `peek` never changes state (a reader ahead of the hold does not expire the site),
+    /// and a persisted assignment restores a pin, and a fixed site with its hold, after a restart.
+    #[test]
+    fn site_peek_is_pure_and_assignment_restores() {
+        let mut a = SiteAssigner::new(SiteConfig::default(), Vec::new());
+        a.on_fix(fix(0.0, 0.0, None));
+        let key = a.on_fix(fix(70.0, 0.0, None));
+        let SiteKey::Site(home) = key else {
+            panic!("founded");
+        };
+        assert_eq!(a.peek(t(900.0)), SiteKey::Unassigned, "past the hold");
+        assert_eq!(a.current(), key, "peek changed nothing");
+        assert_eq!(a.tick(t(600.0)), key, "an earlier tick still sees the site");
+        // Assignment changes are reported once, then only on a real change.
+        let stored = a.take_assignment_change().expect("first report").unwrap();
+        assert_eq!((stored.site, stored.pinned), (home, false));
+        assert_eq!(a.take_assignment_change(), None);
+        a.on_fix(fix(90.0, 1.0, None));
+        assert_eq!(
+            a.take_assignment_change(),
+            None,
+            "last in-site moved < 60 s"
+        );
+        a.on_fix(fix(140.0, 1.0, None));
+        let stored = a.take_assignment_change().unwrap().unwrap();
+        // Restart: the fixed site is kept within its hold from the stored in-site time.
+        let mut b = SiteAssigner::new(SiteConfig::default(), a.sites().to_vec());
+        b.restore(stored).unwrap();
+        assert_eq!(b.take_assignment_change(), None, "restored = persisted");
+        assert_eq!(b.tick(t(700.0)), key);
+        assert_eq!(b.tick(t(741.0)), SiteKey::Unassigned);
+        assert_eq!(b.take_assignment_change(), Some(None), "expiry clears it");
+        // A pin is kept whatever the time.
+        b.pin(home, SiteSource::User, t(800.0)).unwrap();
+        let pinned = b.take_assignment_change().unwrap().unwrap();
+        let mut c = SiteAssigner::new(SiteConfig::default(), b.sites().to_vec());
+        c.restore(pinned).unwrap();
+        assert_eq!(c.tick(t(1e6)), key);
+        assert!(c.is_pinned());
+        assert_eq!(c.set_by(), Some(SiteSource::User));
+        let mut empty = SiteAssigner::new(SiteConfig::default(), Vec::new());
+        assert_eq!(empty.restore(pinned), Err(SiteError::NotFound));
     }
 }
