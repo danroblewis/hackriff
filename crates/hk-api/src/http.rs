@@ -141,6 +141,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     // Attention + memory (ADR-0012 §11): each M2 task appends its rows under its own marker.
     // T-115 observations
     // T-118 occupancy
+    ("GET", "/api/occupancy"),
+    ("GET", "/api/channels"),
     // T-119 sites, baselines, candidates, weights
     // T-120 scheduler
     // T-121 reports
@@ -219,6 +221,8 @@ pub struct ApiState {
     pub captures: Option<Arc<dyn hk_stream::inspector::CaptureSource>>,
     /// Decoder-workbench recipe runtime (T-088, [`crate::recipes`]); `None` answers 503.
     pub recipes: Option<Arc<dyn crate::recipes::RecipeControl>>,
+    /// Occupancy engine (T-118, [`crate::occupancy`]); `None` answers 503.
+    pub occupancy: Option<Arc<dyn crate::occupancy::OccupancyControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

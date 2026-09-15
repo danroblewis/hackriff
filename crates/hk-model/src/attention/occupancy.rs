@@ -380,6 +380,11 @@ pub struct OccupancyStat {
     pub confidence: Option<ConfidenceInterval>,
     /// Too few activity-independent revisits: `fco` fell back to `fco_all_visits`.
     pub revisit_biased: bool,
+    /// The window `fco`, its counts and `confidence` were computed over (§2.5 "widen, never
+    /// substitute"; additive, T-118). Equals `interval` unless that held fewer than 30
+    /// activity-independent visits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fco_window: Option<TimeRange>,
 }
 
 impl OccupancyStat {
@@ -570,6 +575,7 @@ mod tests {
             calibration: None,
             confidence: Some(ci),
             revisit_biased: false,
+            fco_window: None,
         };
         s.validate().unwrap();
         let json = serde_json::to_string(&s).unwrap();

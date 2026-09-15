@@ -645,6 +645,8 @@ struct Common {
     bursts: Arc<crate::chains::taps::BurstHub>,
     /// Compute providers (T-056): built once per run, so no segment changes provider.
     compute: hk_dsp::compute::Compute,
+    /// Occupancy engine and series (T-118), closed when the run ends.
+    occupancy: Arc<crate::occupancy::OccupancyService>,
 }
 
 impl Common {
@@ -752,13 +754,23 @@ impl Pipeline {
         let (compute, compute_options) =
             crate::compute::for_run(&cfg.settings.compute, &counters.compute)?;
         cfg.settings.compute = compute_options;
+        let product = Arc::new(Mutex::new(product));
+        // T-118: the occupancy engine reads history and detections off the real-time path.
+        let occupancy = crate::occupancy::OccupancyService::open(
+            cfg.data_dir.join("occupancy"),
+            Arc::clone(&product),
+            db_path.clone(),
+            Arc::clone(&counters),
+            crate::occupancy::OccupancyConfig::default(),
+        );
         let common = Common {
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
             counters,
             compute,
-            product: Arc::new(Mutex::new(product)),
+            occupancy,
+            product,
             display: Arc::new(DisplayControl::new(DisplaySettings::from_settings(
                 &cfg.settings,
             ))),
@@ -773,6 +785,7 @@ impl Pipeline {
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             bursts: Arc::default(),
         };
+        common.occupancy.start(); // T-118
         // T-071: the on-demand chain budget is reported from the start of the run.
         crate::chains::listen::publish_limits(
             &common.counters,
@@ -966,12 +979,14 @@ fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
         join_workers(&mut workers, &mut errors);
         let mut st = sup.lock();
         let Some(req) = st.request.take() else {
+            sup.common.occupancy.finish(); // T-118: close the last interval after the readers drain
             st.finished = true;
             sup.cv.notify_all();
             return Finished { errors };
         };
         if sup.common.user_stop.load(Ordering::SeqCst) {
             st.result = Some(Err(ControlFailure::Finished("the run is stopping".into())));
+            sup.common.occupancy.finish(); // T-118
             st.finished = true;
             sup.cv.notify_all();
             return Finished { errors };
@@ -1556,6 +1571,11 @@ impl PipelineHandle {
     /// The floor product (history), shared with `/api/history` and `/api/floor`.
     pub fn floor_product(&self) -> Arc<Mutex<FloorProduct>> {
         Arc::clone(&self.sup.common.product)
+    }
+
+    /// The occupancy engine, series and learned channel plan (T-118).
+    pub fn occupancy(&self) -> Arc<crate::occupancy::OccupancyService> {
+        Arc::clone(&self.sup.common.occupancy)
     }
 
     /// The data directory (`hackriff.db`, `history/`, `recordings/`).
