@@ -14,7 +14,7 @@
   "input": {
     "port": "iq",
     "sample_rate_hz": 2000000,
-    "bandwidth_hz": 2000000
+    "bandwidth_hz": 1600000
   },
   "nodes": [
     {
@@ -26,6 +26,7 @@
         "chips_per_bit": 2,
         "preamble": "0xA140",
         "preamble_chips": 16,
+        "min_snr_db": 9,
         "frame_bits": 112,
         "length_from": {
           "offset_bits": 0,
