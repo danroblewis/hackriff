@@ -2017,3 +2017,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Next:** merges after the T-157 full check; the post-merge check measures the opt-level speed-up.
 - **B0.439 T-157 full check green (3ee5ec1).** Lint clean; 1362/1362 tests; acceptance 28/28. The `--iq-retention` and `--iq-buffer-max` flags are usable on main; storage is still the grow-and-delete kind until T-178.
 - **T-175 merged (c11f05a).** Dev opt-level=2 is now active for hk-dsp, hk-core, hk-pipeline and hk-demod. The next full check measures the speed-up.
+- **B0.440 Timed full check started on main after the T-175 merge (bf65fb0),** to measure the opt-level=2 speed-up.
+- **T-174 launched (Opus): the live candidate path now uses the per-tuning DC twin rule.**
+  - Reuses the T-172 helper, with a small per-cell recent-clean index.
+  - Refuted DC flags don't count toward bandit suspect bans.
