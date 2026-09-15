@@ -55,6 +55,27 @@ pub(super) const EMITTER_REGION_SQL: &str = concat!(
      ORDER BY last_seen DESC, emitter_id"
 );
 
+/// T-158: `(snr_peak_db, peak_level_dbfs)` of the most recently started [`crate::Detection`]
+/// reachable from an emitter — directly linked, or through one of its currently-linked
+/// [`crate::detection::Track`]s (`emitter_link.superseded_by IS NULL`; a merge re-points links to
+/// the survivor, so a merged-away emitter id contributes nothing here). Both current-link paths
+/// use the `emitter_link` primary key (`emitter_id, target_kind, target_id`) and the
+/// `track_detection`/`detection` primary keys, so this is index-only, no table scan. Parameter
+/// `?1` is the emitter id, given twice (once per source path).
+const EMITTER_LATEST_DETECTION_SQL: &str = "\
+     SELECT snr_peak, peak_dbfs FROM ( \
+       SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN track_detection td ON td.track_id = el.target_id \
+       JOIN detection d ON d.detection_id = td.detection_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
+       UNION ALL \
+       SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN detection d ON d.detection_id = el.target_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
+     ) ORDER BY t_start DESC LIMIT 1";
+
 /// [`EMITTER_REGION_SQL`] with a row limit (`?6`).
 const EMITTER_REGION_LIMIT_SQL: &str = concat!(
     "SELECT ",
@@ -907,5 +928,22 @@ impl Repository {
                 })
             })
             .collect()
+    }
+
+    /// T-158: `(snr_peak_db, peak_level_dbfs)` of the emitter's latest (highest `t_start`) linked
+    /// detection, `None` when it has none (e.g. an emitter seen only through a decode sighting, or
+    /// a candidate whose track has not yet been offered as a sighting). See
+    /// [`EMITTER_LATEST_DETECTION_SQL`] for how "linked" is reached.
+    pub fn emitter_latest_measurement(
+        &self,
+        emitter_id: EmitterId,
+    ) -> Result<Option<(f64, f64)>, RepoError> {
+        Ok(self
+            .conn
+            .prepare_cached(EMITTER_LATEST_DETECTION_SQL)?
+            .query_row([blob(emitter_id)], |r| {
+                Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?))
+            })
+            .optional()?)
     }
 }
