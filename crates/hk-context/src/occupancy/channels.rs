@@ -41,6 +41,8 @@
 //!
 //! **Suspects never create or widen a channel** (§2.6): detections flagged `clipped`,
 //! `suspect_imd`, `spur_candidate`, a retune-confirmed image, or `compressed` are ignored here.
+//! A DC spur flag is per tuning (T-147): [`extents_of`] clears it when a clean detection of the
+//! same emission from another tuning is near in time.
 //!
 //! **Rasters are hints.** [`ChannelPlan::suggest_raster`] attaches a `RasterHint` (spacing, the
 //! channel centre's offset from the nearest raster point, source) to channels inside a range. It
@@ -51,6 +53,7 @@ use std::collections::VecDeque;
 use hk_model::attention::occupancy::{
     Channel, ChannelEvidence, ChannelKey, ChannelSource, RasterHint,
 };
+use hk_model::detection::SpurReason;
 use hk_model::{Detection, DetectionFlags, FreqRange, TimeRange, Timestamp};
 
 /// The §2.6 suspect rule for a detection's flags.
@@ -92,6 +95,80 @@ impl DetectionExtent {
             },
             suspect: detection_is_suspect(&d.flags),
         }
+    }
+}
+
+/// A detection is suspect only for its DC (tuned-centre) spur flag: `spur_reason = Dc` with no
+/// other §2.6 suspect flag.
+pub fn dc_only_suspect(f: &DetectionFlags) -> bool {
+    f.spur_candidate
+        && matches!(f.spur_reason, Some(SpurReason::Dc))
+        && !(f.clipped || f.suspect_imd || f.image_retune_confirmed || f.compressed)
+}
+
+/// Time slack within which a clean twin refutes a DC flag (T-147): one level-0 time cell, the
+/// engine's visit-window slack.
+pub const DC_TWIN_SLACK_NS: i64 = 1_000_000_000;
+
+/// §2.6 extents of stored detections with DC flags checked across tunings
+/// ([`refute_dc_suspects`]).
+pub fn extents_of(detections: &[Detection], f_cell_hz: f64) -> Vec<DetectionExtent> {
+    let mut out: Vec<DetectionExtent> = detections.iter().map(DetectionExtent::of).collect();
+    let dc: Vec<bool> = detections
+        .iter()
+        .map(|d| dc_only_suspect(&d.flags))
+        .collect();
+    refute_dc_suspects(&mut out, &dc, f_cell_hz);
+    out
+}
+
+/// T-147 (§2.6): DC-ness belongs to a tuning, not to a frequency. A DC flag (`dc_only[i]`) is a
+/// hypothesis about the capture whose LO sat there; it is refuted, and `extents[i]` made
+/// non-suspect, when a clean (non-suspect, so not itself DC-flagged) detection of the same
+/// emission exists within [`DC_TWIN_SLACK_NS`]: centres within half a level-0 cell plus half the
+/// narrower OBW of each other, so each centre lies in the other's extent widened by half a cell.
+/// That twin came from a tuning whose DC is elsewhere. A true DC spur moves with the tuning, has
+/// no such twin and stays suspect; a real carrier 2 cells away does not refute it.
+pub fn refute_dc_suspects(extents: &mut [DetectionExtent], dc_only: &[bool], f_cell_hz: f64) {
+    let centre = |e: &DetectionExtent| 0.5 * (e.freq.lo_hz + e.freq.hi_hz);
+    let mut clean: Vec<(f64, usize)> = extents
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !e.suspect && centre(e).is_finite())
+        .map(|(i, e)| (centre(e), i))
+        .collect();
+    if clean.is_empty() {
+        return;
+    }
+    clean.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let half = 0.5 * f_cell_hz.max(0.0);
+    let mut refuted = Vec::new();
+    for (i, e) in extents.iter().enumerate() {
+        if !(e.suspect && dc_only.get(i).copied().unwrap_or(false)) {
+            continue;
+        }
+        let c = centre(e);
+        if !c.is_finite() {
+            continue;
+        }
+        let (s, t) = (e.time.start.as_unix_nanos(), e.time.end.as_unix_nanos());
+        let reach = half + 0.5 * e.obw_hz;
+        let from = clean.partition_point(|x| x.0 < c - reach);
+        let twin = clean[from..]
+            .iter()
+            .take_while(|x| x.0 <= c + reach)
+            .any(|&(fc, j)| {
+                let w = &extents[j];
+                (fc - c).abs() <= half + 0.5 * w.obw_hz.min(e.obw_hz)
+                    && w.time.start.as_unix_nanos() <= t.saturating_add(DC_TWIN_SLACK_NS)
+                    && w.time.end.as_unix_nanos().saturating_add(DC_TWIN_SLACK_NS) >= s
+            });
+        if twin {
+            refuted.push(i);
+        }
+    }
+    for i in refuted {
+        extents[i].suspect = false;
     }
 }
 

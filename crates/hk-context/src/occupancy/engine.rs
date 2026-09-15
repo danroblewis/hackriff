@@ -1617,6 +1617,123 @@ mod tests {
         assert!(run(&[old]).iter().all(|v| v.occupied && !v.suspect));
     }
 
+    /// T-147 (§2.6): a DC flag is per tuning. Hop A's LO carries a true DC spur that moves with
+    /// it (cell 150, retuned to cell 100 at row 5); hop B's LO carries one at cell 20. A real
+    /// carrier 2 cells from hop A's first LO is DC-flagged by hop A and clean from hop B 55 ms
+    /// later. The carrier's DC flags are refuted, so its visits count; the spurs stay suspect,
+    /// never reach FCO and never become a channel.
+    #[test]
+    fn occupancy_dc_flag_is_per_tuning_and_a_true_dc_spur_stays_suspect() {
+        use super::super::channels::{
+            ChannelPlan, LearnConfig, dc_only_suspect, refute_dc_suspects,
+        };
+        use hk_model::DetectionFlags;
+        use hk_model::detection::SpurReason;
+
+        let dc_flags = DetectionFlags {
+            spur_candidate: true,
+            spur_reason: Some(SpurReason::Dc),
+            ..Default::default()
+        };
+        assert!(dc_only_suspect(&dc_flags));
+        assert!(!dc_only_suspect(&DetectionFlags {
+            clipped: true,
+            ..dc_flags
+        }));
+        assert!(!dc_only_suspect(&DetectionFlags {
+            spur_reason: Some(SpurReason::RefHarmonic),
+            ..dc_flags
+        }));
+
+        let (nt, nf) = (10usize, 200usize);
+        let cfg = EngineConfig::default();
+        let lo_a = |t: usize| if t < 5 { 150 } else { 100 };
+        let g = grid(nt, nf, |t, f| {
+            if f == lo_a(t) || f == 20 || f == 152 {
+                (-80.0, -80.0, 1.0)
+            } else {
+                (-99.0, -100.0, 0.0)
+            }
+        });
+        let (_, iv) = whole(&g);
+        let fl = cfg.local_floors(&g);
+        let cell_centre = |f: usize| (F_FIRST_CELL + f as i64) as f64 * 6250.0 + 3125.0;
+        let cell_band = |f: usize| FreqRange::centered(cell_centre(f), 6250.0);
+        let at = |f: usize, obw: f64, from: f64, to: f64, suspect: bool| DetectionExtent {
+            time: span(from, to),
+            freq: FreqRange::centered(cell_centre(f), obw),
+            obw_hz: obw,
+            snr_db: 20.0,
+            suspect,
+        };
+        let (mut dets, mut dc) = (Vec::new(), Vec::new());
+        for t in 0..nt {
+            let row = 1e6 + t as f64;
+            // Hop A (10–50 ms): its own DC spur, and the carrier when it sits within DC reach.
+            dets.push(at(lo_a(t), 200.0, row + 0.01, row + 0.05, true));
+            dc.push(true);
+            let near = t < 5;
+            dets.push(at(152, 3000.0, row + 0.01, row + 0.05, near));
+            dc.push(near);
+            // Hop B (65–100 ms): its own DC spur at cell 20, the carrier clean.
+            dets.push(at(20, 200.0, row + 0.065, row + 0.1, true));
+            dc.push(true);
+            dets.push(at(152, 3000.0, row + 0.065, row + 0.1, false));
+            dc.push(false);
+        }
+        let raw = dets.clone();
+        refute_dc_suspects(&mut dets, &dc, 6250.0);
+        for (i, (d, r)) in dets.iter().zip(&raw).enumerate() {
+            let carrier = (d.freq.lo_hz + d.freq.hi_hz) / 2.0 == cell_centre(152);
+            assert_eq!(d.suspect, !carrier && r.suspect, "detection {i}: {d:?}");
+        }
+
+        let visits = coverage_visits(&g, whole(&g).0, Tier::ScheduledPlan);
+        let run = |band: FreqRange, dets: &[DetectionExtent]| {
+            let input = EvalInput {
+                grid: &g,
+                visits: &visits,
+                detections: dets,
+                floors: &fl,
+            };
+            evaluate(&cfg.threshold, band, 3000.0, input).0
+        };
+        // Before the fix the carrier's hop-A rows were suspect; now every visit counts.
+        let before = run(cell_band(152), &raw);
+        assert!((0..5).all(|t| before[t].suspect), "{before:?}");
+        let carrier = run(cell_band(152), &dets);
+        assert_eq!(carrier.len(), nt);
+        assert!(
+            carrier.iter().all(|v| v.occupied && !v.suspect),
+            "{carrier:?}"
+        );
+        let e = estimate(&carrier, iv, ConfidenceLevel::P95);
+        assert_eq!((e.fco, e.n_suspect), (Some(1.0), 0));
+        // The spurs: every occupied visit suspect, none occupied in FCO.
+        for (cell, rows) in [(150, 0..5), (100, 5..10), (20, 0..10)] {
+            let s = run(cell_band(cell), &dets);
+            for (t, v) in s.iter().enumerate() {
+                assert_eq!(v.occupied, rows.contains(&t), "cell {cell} row {t}: {v:?}");
+                assert_eq!(v.suspect, v.occupied, "cell {cell} row {t}: {v:?}");
+            }
+            let e = estimate(&s, iv, ConfidenceLevel::P95);
+            assert_eq!(e.n_occupied, 0, "cell {cell}: {e:?}");
+            assert_eq!(e.n_suspect, rows.len() as u64, "cell {cell}: {e:?}");
+        }
+        // Learning: the carrier is a channel, no spur is.
+        let mut plan = ChannelPlan::new(1, 6250.0, LearnConfig::default());
+        plan.learn(&dets);
+        let ch = plan.channels();
+        assert_eq!(ch.len(), 1, "{ch:?}");
+        let k = ch[0].key.freq(6250.0);
+        assert!(
+            k.lo_hz <= cell_centre(152) && cell_centre(152) <= k.hi_hz,
+            "{ch:?}"
+        );
+        // Hop A's 10 (5 refuted DC flags) and hop B's 10.
+        assert_eq!(ch[0].evidence, 20);
+    }
+
     #[test]
     fn occupancy_dense_band_flags_its_local_floor_suspect() {
         let (nt, nf) = (20usize, 800usize);
