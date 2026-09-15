@@ -79,3 +79,45 @@ export function currentSpan(input: {
   if (centerHz === null || sampleRateHz === null) return null;
   return { loHz: centerHz - sampleRateHz / 2, hiHz: centerHz + sampleRateHz / 2 };
 }
+
+// ---- time-window select (T-194) ----
+
+/** Pointer travel (px) that turns a scrub into a deliberate time-window drag (mirrors the live
+ * view's DRAG_PX rule, ADR-0013 §5, centre/overlays.ts). */
+export const DRAG_PX = 6;
+
+export interface TimeWindow { t_lo: number; t_hi: number }
+
+/**
+ * The `[t_lo, t_hi]` a drag from percent `pctA` to `pctB` along the band selects, chronologically
+ * ordered (through `scrubToTime`'s mapping, so the LIVE edge resolves to `nowS`); null when it has
+ * no width (both ends resolved to the same instant — e.g. both past the LIVE threshold).
+ */
+export function timeWindowFromScrub(pctA: number, pctB: number, nowS: number, windowS: number = WINDOW_S): TimeWindow | null {
+  const a = scrubToTime(pctA, nowS, windowS), b = scrubToTime(pctB, nowS, windowS);
+  const t_lo = Math.min(a.tS, b.tS), t_hi = Math.max(a.tS, b.tS);
+  return t_hi > t_lo ? { t_lo, t_hi } : null;
+}
+
+/** A default name for a time-window selection: its UTC wall-clock span, to the second. */
+export function timeRegionName(t_lo: number, t_hi: number): string {
+  const f = (t: number) => `${new Date(t * 1000).toISOString().slice(11, 19)}Z`;
+  return `${f(t_lo)}–${f(t_hi)}`;
+}
+
+export interface SelSpan { id: string; leftPct: number; widthPct: number }
+
+/**
+ * Time-windowed selections placed on the retained band (the inverse of `scrubToTime`, via
+ * `pctForAgo`). A selection with no time window, or whose window falls wholly outside the
+ * retained window, is omitted.
+ */
+export function selectionSpans(list: readonly { id: string; t_lo?: number; t_hi?: number }[], nowS: number, windowS: number = WINDOW_S): SelSpan[] {
+  const out: SelSpan[] = [];
+  for (const s of list) {
+    if (s.t_lo === undefined || s.t_hi === undefined) continue;
+    const leftPct = pctForAgo(nowS - s.t_lo, windowS), rightPct = pctForAgo(nowS - s.t_hi, windowS);
+    if (rightPct > leftPct) out.push({ id: s.id, leftPct, widthPct: rightPct - leftPct });
+  }
+  return out;
+}

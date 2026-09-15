@@ -126,6 +126,15 @@ export const tipOnLeft = (x: number) => x > 0.6;
 
 export const isDrag = (dxPx: number, dyPx: number) => Math.hypot(dxPx, dyPx) >= DRAG_PX;
 
+/**
+ * T-194: whether a completed waterfall drag is in "add" mode — the add-mode toggle (reachable on
+ * touch), or Shift held for this drag (desktop). Add mode keeps every earlier selection made here;
+ * a plain drag replaces only the one selection this tool itself last made (never one built in add
+ * mode, and never anything the user made another way), so casual re-dragging doesn't clutter the
+ * selections list while deliberately marking several regions still works.
+ */
+export const addModeActive = (toggleOn: boolean, shiftKey: boolean): boolean => toggleOn || shiftKey;
+
 /** A pointer position as fractions (0..1) of the live element. */
 export interface DragPoint { x: number; y: number }
 

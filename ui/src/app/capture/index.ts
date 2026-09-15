@@ -6,8 +6,13 @@
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { startPoll } from "../net";
+import { selectionStoreFor } from "../explore/selections";
+import { focusSelection } from "../explore/slice";
 import { goLive, reviewAt, toast, type AppState } from "../state";
-import { WINDOW_S, agoText, coverageText, currentSpan, pctForAgo, reduceActivity, scrubToTime, type HistoryGrid } from "./timeline";
+import {
+  DRAG_PX, WINDOW_S, agoText, coverageText, currentSpan, pctForAgo, reduceActivity, scrubToTime, selectionSpans, timeRegionName,
+  timeWindowFromScrub, type HistoryGrid,
+} from "./timeline";
 
 const COLUMNS = 96;
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -33,14 +38,15 @@ function mount(el: HTMLElement, ctx: AppContext) {
   svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", "Activity over the retained history");
+  const selLayer = h("div", { class: "cap-sel-layer" });
   const playhead = h("div", { class: "playhead" });
   const livePill = h("button", { class: "live-pill", type: "button" }, "● LIVE");
-  const band = h("div", { class: "cap-band" }, svg, playhead, livePill);
+  const band = h("div", { class: "cap-band" }, svg, selLayer, playhead, livePill);
 
   el.replaceChildren(head, band);
 
   // ---- scrub / LIVE ----
-  let dragging = false;
+  let dragging = false, downX = 0, downPct = 0;
   const pctFromEvent = (e: PointerEvent) => {
     const r = band.getBoundingClientRect();
     return r.width > 0 ? ((e.clientX - r.left) / r.width) * 100 : 100;
@@ -52,12 +58,48 @@ function mount(el: HTMLElement, ctx: AppContext) {
   band.addEventListener("pointerdown", (e) => {
     if (e.target === livePill) return;
     dragging = true;
+    downX = e.clientX;
+    downPct = pctFromEvent(e);
     band.setPointerCapture(e.pointerId);
     scrub(e);
   });
   band.addEventListener("pointermove", (e) => { if (dragging) scrub(e); });
-  band.addEventListener("pointerup", () => { dragging = false; });
+  band.addEventListener("pointerup", (e) => {
+    if (dragging && Math.abs(e.clientX - downX) >= DRAG_PX) commitTimeWindow(downPct, pctFromEvent(e));
+    dragging = false;
+  });
   livePill.addEventListener("click", () => { store.set(goLive); store.set(toast("Back to live.")); });
+
+  // ---- time-window select (T-194): a deliberate drag sets t_lo/t_hi on the focused selection, or
+  // makes a new one over the current view span. ----
+  function commitTimeWindow(pctA: number, pctB: number) {
+    const w = timeWindowFromScrub(pctA, pctB, Date.now() / 1000);
+    if (!w) return;
+    const shared = selectionStoreFor(ctx);
+    const focus = store.get().focus;
+    const cur = focus.kind === "selection" ? shared.get(focus.id) : undefined;
+    if (cur) {
+      if (shared.setExtent(cur.id, { t_lo: w.t_lo, t_hi: w.t_hi })) store.set(toast(`Time window set on ${cur.name}`));
+      return;
+    }
+    const span = spanOf(store.get());
+    if (!span) { store.set(toast("No tuned span to select yet.")); return; }
+    const sel = shared.add({ name: timeRegionName(w.t_lo, w.t_hi), f_lo: span.loHz, f_hi: span.hiHz, t_lo: w.t_lo, t_hi: w.t_hi });
+    store.set(focusSelection(sel.id));
+    store.set(toast(`Selected ${sel.name}`));
+  }
+
+  const renderSelSpans = () => {
+    const now = Date.now() / 1000, focus = store.get().focus;
+    selLayer.replaceChildren(...selectionSpans(store.get().selections.list, now).map((sp) => {
+      const e = h("div", { class: `cap-sel${focus.kind === "selection" && focus.id === sp.id ? " active" : ""}` });
+      e.style.left = `${sp.leftPct}%`;
+      e.style.width = `${sp.widthPct}%`;
+      return e;
+    }));
+  };
+  store.select((s) => s.selections.list, renderSelSpans, { immediate: true });
+  store.select((s) => s.focus, renderSelSpans);
 
   let coverageFraction: number | null = null;
   const renderNote = () => {
@@ -103,6 +145,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderBand(grid);
     coverageFraction = grid.coverage_summary?.observed_fraction ?? null;
     renderNote();
+    renderSelSpans();
   }, 60_000);
 
   // ---- Record IQ (GAP 1 interim for "Export clip from the buffer") ----

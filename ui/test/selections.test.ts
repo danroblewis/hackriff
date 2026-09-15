@@ -42,6 +42,20 @@ test("rename trims, refuses empty names and unknown ids", () => {
   assert.deepEqual({ notes: s.get(a.id)!.notes, tags: s.get(a.id)!.tags }, { notes: "RDS", tags: ["fm"] });
 });
 
+test("setExtent (T-194): changes the band and/or time window, refuses an invalid result or an unknown id", () => {
+  const s = store();
+  const a = s.add({ f_lo: 1, f_hi: 2 });
+  assert.equal(s.setExtent(a.id, { t_lo: 10, t_hi: 12.5 }), true);
+  assert.deepEqual({ f_lo: s.get(a.id)!.f_lo, f_hi: s.get(a.id)!.f_hi, t_lo: s.get(a.id)!.t_lo, t_hi: s.get(a.id)!.t_hi }, { f_lo: 1, f_hi: 2, t_lo: 10, t_hi: 12.5 });
+  assert.equal(s.setExtent(a.id, { f_lo: 5, f_hi: 9 }), true);
+  assert.deepEqual({ f_lo: s.get(a.id)!.f_lo, f_hi: s.get(a.id)!.f_hi, t_lo: s.get(a.id)!.t_lo, t_hi: s.get(a.id)!.t_hi }, { f_lo: 5, f_hi: 9, t_lo: 10, t_hi: 12.5 });
+  assert.equal(s.setExtent(a.id, { t_lo: null, t_hi: null }), true);
+  assert.equal("t_lo" in s.get(a.id)!, false, "null clears the time window");
+  assert.equal(s.setExtent(a.id, { f_lo: 9, f_hi: 9 }), false, "f_lo < f_hi is enforced");
+  assert.equal(s.get(a.id)!.f_lo, 5, "refused: unchanged");
+  assert.equal(s.setExtent("nope", { t_lo: 1, t_hi: 2 }), false);
+});
+
 test("delete, clear and multi-select; subscribers see every change and can unsubscribe", () => {
   const s = store();
   const seen: number[] = [];

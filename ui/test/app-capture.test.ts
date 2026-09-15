@@ -4,7 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  WINDOW_S, agoText, coverageText, currentSpan, pctForAgo, reduceActivity, scrubToTime, type HistoryGrid,
+  DRAG_PX, WINDOW_S, agoText, coverageText, currentSpan, pctForAgo, reduceActivity, scrubToTime, selectionSpans, timeRegionName,
+  timeWindowFromScrub, type HistoryGrid,
 } from "../src/app/capture/timeline";
 
 test("reduceActivity: empty grid and an all-gap grid are every column null", () => {
@@ -70,6 +71,33 @@ test("currentSpan prefers the live geometry, falls back to the tuned device span
     { loHz: 99_600_000, hiHz: 102_000_000 },
   );
   assert.equal(currentSpan({ live: null, device: { centerHz: null, sampleRateHz: null } }), null);
+});
+
+// ---- time-window select (T-194) ----
+
+test("timeWindowFromScrub: chronologically ordered, null when both ends resolve to the same instant", () => {
+  const now = 1_800_000_000;
+  assert.deepEqual(timeWindowFromScrub(80, 50, now, 100), { t_lo: now - 50, t_hi: now - 20 });
+  assert.deepEqual(timeWindowFromScrub(50, 80, now, 100), { t_lo: now - 50, t_hi: now - 20 }, "order-independent");
+  assert.equal(timeWindowFromScrub(99, 100, now, 100), null, "both past the LIVE threshold");
+  assert.equal(timeWindowFromScrub(40, 40, now, 100), null, "no width");
+  assert.equal(DRAG_PX, 6);
+});
+
+test("timeRegionName: the UTC wall-clock span, to the second", () => {
+  const t0 = Date.UTC(2026, 8, 15, 12, 34, 56) / 1000, t1 = Date.UTC(2026, 8, 15, 12, 35, 10) / 1000;
+  assert.equal(timeRegionName(t0, t1), "12:34:56Z–12:35:10Z");
+});
+
+test("selectionSpans: placed by the inverse of scrubToTime; no window, or wholly outside, is omitted", () => {
+  const list = [
+    { id: "recent", t_lo: 900, t_hi: 950 }, // 100..50 s ago
+    { id: "no-window" },
+    { id: "future", t_lo: 1000, t_hi: 1010 }, // clamps to a single point at the LIVE edge
+    { id: "too-old", t_lo: 800, t_hi: 850 }, // 200..150 s ago, past the retained window
+  ];
+  const spans = selectionSpans(list, 1000, 100);
+  assert.deepEqual(spans, [{ id: "recent", leftPct: 0, widthPct: 50 }]);
 });
 
 // ---- layout: the scrubbable band stays touch-usable and full-width at narrow widths ----
