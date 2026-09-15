@@ -1,61 +1,102 @@
 # Tutorial 3: ACARS from blocks
 
-M1, T-096; [docs/13](../13-m1-decoder-workbench.md), [ADR-0011](../adr/0011-decoder-workbench-contracts.md) §5.1. ACARS (ARINC 618 VHF downlink) decoded from built-in blocks by [`recipes/acars.recipe.json`](../../recipes/acars.recipe.json): AM carrier → MSK 2400 Bd on an 1800 Hz subcarrier → SYN/SOH..ETX framing → CRC-16 block check → fields (registration, label, block id, text).
+M1, T-096/T-108; [docs/13](../13-m1-decoder-workbench.md), [ADR-0011](../adr/0011-decoder-workbench-contracts.md) §5.1. ACARS (ARINC 618 VHF) decoded from built-in blocks by [`recipes/acars.recipe.json`](../../recipes/acars.recipe.json): AM carrier → MSK 2400 Bd on an 1800 Hz subcarrier → MSK chips → `+* SYN SYN SOH`..ETX framing → CRC-16/KERMIT → fields (registration, label, block id, text).
 
-**Status: the chain is verified correct offline; blind acceptance through the mock SDR is not yet green.** There is no real ACARS recording and no `acarsdec` oracle (T-098: not cheaply installable, and none was found in this environment either — `which acarsdec` fails). The only fixture is T-098's synthetic `acars_message` scene. This tutorial's blind-acceptance test currently fails, not on decoding, but earlier: the general blind detection/tracking pipeline never registers an inventory entry for the synthetic AM+MSK burst, so `POST /api/pipelines` never has a target to attach the recipe to. That's outside T-096's scope (recipe/block correctness) and is left for a follow-up task.
+**Status (T-108):** the recipe, the synthetic fixture and its reference decoder follow the conventions read from acarsdec's receiver source (§1). The blind acceptance test `tests/e2e/tests/acceptance/tutorial_acars.rs` runs and passes (§4). Unverified: no real ACARS capture yet, and `acarsdec` isn't installed here, so the oracle branch is still skipped.
 
-## 1. What was wrong with the recipe skeleton, and how it was found
+## 1. The real convention, from acarsdec's source
 
-The skeleton (`recipes/acars.recipe.json` before T-096) assumed real ACARS conventions that don't match T-098's synthetic generator (`py/hkpy/synth/acars.py`), which documents itself as "this project's own best-effort reading… not verified against a third-party decoder":
+T-096 had bent the recipe to match T-098's synthetic generator: MSB-first characters, direct mark/space bits, CRC-16/XMODEM over parity-zeroed characters, plus a new `parity` `zero` mode. The generator itself said it was "not verified against a third-party decoder", and it was wrong. T-108 took the conventions from **acarsdec** ([github.com/TLeconte/acarsdec](https://github.com/TLeconte/acarsdec), commit `339f63e`), the reference open-source receiver:
 
-| Assumption in the skeleton | What the synthetic fixture actually sends | Fix |
+| Question | acarsdec source | Convention |
 |---|---|---|
-| Differential decoding (`diff_decode`, MSK "bits are differential") | Mark/space tone maps straight to bit 1/0 — no differential coding. Verified bit-exact by the existing T-086 unit test `acars_path_am_subcarrier_msk_recovers_hidden_bits`, which recovers the hidden bits with **no** `diff_decode` step. | Dropped the node. |
-| Sync word `'+' '*' SYN SYN SOH` = `0xD554686880` (40 bits), `bit_order: lsb` | No `+*` preamble; framing is 32 alternating clock-sync bits, then `SYN SYN SOH` = `0x16 0x16 0x01` raw, each character (including the parity-bearing ones after SOH) sent **parity bit first, then the 7 data bits MSB→LSB** — not LSB-first. | Sync word `0x160116` over 24 bits, no `bit_order`. |
-| CRC-16/KERMIT (`refin`/`refout` true) | `py/hkpy/synth/acars.py`'s `crc16_acars` is CRC-16/**XMODEM** (poly `0x1021`, init 0, **not** reflected) — confirmed against `hk-estimate`'s CRC catalogue. | `refin`/`refout` false. |
-| — (unnoticed) | The block check is computed over the **pre-parity** 7-bit values, each padded back to 8 bits with the parity position forced to **0** — not over the as-sent bytes (their real parity bit) and not over a parity-stripped, narrower, byte-misaligned repacking. Checked numerically against the generator (`py3 -c 'from hkpy.synth import acars…'`): only the zero-padded convention reproduces the transmitted CRC trailer. | New `parity` block mode, `zero: true` (below). |
+| Bit order in a character | [`msk.c` L53–63](https://github.com/TLeconte/acarsdec/blob/339f63eb91a890cfe5b199ad70814cfe86702d1e/msk.c#L53-L63) `putbit`: `outbits >>= 1; if (v > 0) outbits \|= 0x80;` | Each new bit enters at the top, so the first bit on air ends as the LSB. **Characters are sent LSB first**, with the parity bit (bit 7) last. |
+| MSK bits | [`msk.c` L74–131](https://github.com/TLeconte/acarsdec/blob/339f63eb91a890cfe5b199ad70814cfe86702d1e/msk.c#L74-L131) `demodMSK`: VCO at 1800 Hz advancing 3π/2 per bit, half-sine matched filter, decisions alternating `Re`, `Im`, `−Re`, `−Im` (`MskS`) | Coherent (offset-QPSK) MSK: **the decisions are the chips, and the chips are the data**. Relative to the VCO the phase moves +π/2 per bit (2400 Hz) when a chip equals the previous one and −π/2 (1200 Hz) when it changes. The tone therefore marks chip *transitions*; the [WAVECOM summary](https://cartoonman.github.io/WAVECOM/wavecomhtm/acars.htm) calls this "NRZI coded coherent … MSK". |
+| Polarity | [`acars.c` L252–277](https://github.com/TLeconte/acarsdec/blob/339f63eb91a890cfe5b199ad70814cfe86702d1e/acars.c#L252-L277): SYN or `~SYN` (then `MskS ^= 2`) | Chip polarity is ambiguous, so the receiver accepts either. |
+| Sync / preamble | [`acars.c` L22–27, L252–300](https://github.com/TLeconte/acarsdec/blob/339f63eb91a890cfe5b199ad70814cfe86702d1e/acars.c#L22-L27): sliding bit-by-bit search for SYN (0x16), SYN, then SOH (0x01) | `SYN SYN SOH`. ARINC 618 (WAVECOM summary) puts a pre-key (16 characters of ones) and bit sync `+ *` before it, and a DEL after the BCS. |
+| Frame end | [`acars.c` L303–349](https://github.com/TLeconte/acarsdec/blob/339f63eb91a890cfe5b199ad70814cfe86702d1e/acars.c#L303-L349): characters after SOH are stored *as received* until `ETX 0x83` / `ETB 0x97`, then two BCS bytes | The terminators are the parity-bearing values (0x03 and 0x17 with odd parity). |
+| CRC variant | [`syndrom.h` L15–49](https://github.com/TLeconte/acarsdec/blob/339f63eb91a890cfe5b199ad70814cfe86702d1e/syndrom.h#L15-L49): `crc_ccitt_table[1] = 0x1189`; `update_crc(crc,c) crc = (crc>>8) ^ table[(crc^c)&0xff]` | Reflected table for poly 0x1021 (0x8408), init 0, xorout 0: **CRC-16/KERMIT**. |
+| CRC span and parity | [`acars.c` L158–165](https://github.com/TLeconte/acarsdec/blob/339f63eb91a890cfe5b199ad70814cfe86702d1e/acars.c#L158-L165): `crc = 0`, then `update_crc` over every `txt[i]`, then `crc[0]`, `crc[1]`; zero = valid | The span is the characters after SOH through ETX/ETB, **parity bits included** (parity is only stripped afterwards, L194–200). The zero residue means the **BCS is sent low byte first**. |
 
-Empirical check (not guesswork): computing the CRC three ways over one built frame — (a) python's own zero-padded body, (b) the as-transmitted bytes with real parity, (c) parity-stripped and repacked with no padding — only (a) reproduced the transmitted trailer (`0x9435` for the worked example); (b) gave `0x63ab`, (c) gave `0x784f`.
+## 2. What changed
 
-## 2. A new `parity` mode: `zero`
+- **Synth** (`py/hkpy/synth/acars.py`):
+  - LSB-first characters.
+  - Pre-key of 128 one-chips, then `+ * SYN SYN SOH`.
+  - CRC-16/KERMIT over the parity-bearing characters, BCS low byte first, then DEL.
+  - MSK tones from chip transitions (`msk_tones`).
+- **Scene** (`acars_message` in `scenarios.py`): the emission moved off the tuned centre (`channel_offset_hz` 50 kHz, 192 kS/s) and repeats (`n_bursts`, `period_s`); see §3.
+- **Reference decoder** (`py/tests/test_synth.py`): a port of acarsdec's chip decisions (1800 Hz mix, half-sine matched filter, `Re/Im/−Re/−Im`, either polarity) and its table-driven CRC residue check, independent of the generator's tone mapping. A generator that got the tone mapping, bit order or CRC wrong would fail it.
+- **Blocks**, both needed for real ACARS, not for a synth quirk:
+  - `nrzi` gains `direction: encode`: a running level, so a non-coherent discriminator's tone bits integrate back to chips.
+  - `sync_search` gains `polarity: either`: the complemented word also syncs and complements its frame, like acarsdec's `~SYN`.
+  - T-096's `parity` `zero` mode and its test are removed.
+- **Recipe**: `… slicer → chips (nrzi encode, transition-is-0) → sync (0xD554686880, 40 bits, lsb, either) → crc (CRC-16/KERMIT) → msg (fields)`.
 
-`fields` needs each character's **real** parity bit (it does its own per-character odd-parity check, `crates/hk-recipe/src/fields/eval.rs`); the block check needs it **replaced with a constant 0**, width unchanged, so the two can't share one transform. `parity` (`crates/hk-blocks/src/blocks/fec/parity.rs`) already had `strip` (remove the parity bit, narrowing the frame); T-096 added `zero` (replace it in place, same width), exclusive with `strip`. Unit test: `crates/hk-blocks/src/blocks/fec/tests.rs::parity_zero_then_crc_matches_pre_parity_check_t096` — parity-zeroes a real captured body-with-parity vector, then CRC-16/XMODEM-checks it and asserts `Valid` and byte-for-byte agreement with the pre-parity body.
+## 3. Why blind detection never found the burst
 
-## 3. The chain, stage by stage
+The T-098 scene put the ACARS emission at **channel offset 0**, exactly on the recording's tuned centre. A ~5 kHz emission there fits the detector's DC rule: rule 2 `dc_hit` in `crates/hk-detect/src/rules.rs`, which flags anything ≤ 40 kHz wide within 15 kHz of the centre. On a HackRF that spot is LO leakage, so every detection was rejected as a DC spur and `/api/inventory` stayed empty. The rule is right and the scene was wrong: nobody tunes an SDR's centre onto the channel they want. Burst length, the short-burst profile and SNR were not the problem.
+
+The scene now:
+- sits 50 kHz off centre at 192 kS/s, like `fsk_burst_train`'s 50 kHz offset;
+- sends the block three times, 0.6 s apart, with the carrier off between, as a station repeating a block would.
+
+No detection threshold changed.
+
+## 4. The chain, stage by stage
 
 ```text
-input(iq, 24 kS/s) → am → tone → msk → clock → slice → sync ─┬→ unwrap → msg
-                     iq   real   iq    real   soft  bits     └→ pz → crc
+input(iq, 24 kS/s) → am → tone → msk → clock → slice → chips → sync → crc → msg
+                     iq   real   iq    real   soft   bits   bits   frames frames
 ```
-
-`sync` (bits → frames) feeds two branches:
-- `unwrap` (`crc`, real parity bits kept) → `msg` (`fields`): the block-check width is stripped either way, so `msg` sees the correct body regardless of whether the check validates.
-- `pz` (`parity`, `zero: true`) → `crc`: the block-check status the recipe's `refine` objective (`crc.error_rate`, minimise over `center_hz`) and this tutorial's CRC-valid rate read from.
 
 | Node | Block | What it does |
 |---|---|---|
 | `am` | `am_demod` | Envelope detector: IQ → AM audio. |
-| `tone` | `subcarrier` (1800 Hz, 2.4 kHz wide, 12 kS/s out) | Mixes the 1800 Hz tone band down to baseband. |
-| `msk` | `msk_demod` (2400 Bd) | Non-coherent discriminator, deviation = symbol_rate/4 = 600 Hz: mark (2400 Hz) → +1, space (1200 Hz) → −1. |
+| `tone` | `subcarrier` (1800 Hz, 2.4 kHz wide, 12 kS/s out) | Mixes the MSK tone band down to baseband. |
+| `msk` | `msk_demod` (2400 Bd) | Non-coherent discriminator, deviation 600 Hz: 2400 Hz → +1, 1200 Hz → −1. |
 | `clock` | `clock_recovery` (2400 Bd, `nrz`, `gardner`) | Symbol timing. |
-| `slice` | `slicer` (threshold 0) | Soft symbols → hard bits, straight (no inversion, no differential decode). |
-| `sync` | `sync_search` (`0x160116`, 24 bits, terminator ETX `0x83`/ETB `0x97` + 16 trailer bits) | Finds `SYN SYN SOH`, cuts the frame at the first parity-coded ETX/ETB plus the 16-bit check. |
-| `unwrap` | `crc` (CRC-16/XMODEM, `strip`) | Strips the trailer unconditionally (its own `ok` flag is not meaningful here — the *real* parity bits don't satisfy the zero-padded convention). |
-| `msg` | `fields` (`acars_block` map) | mode, registration, ack, label, block id, stx/etx, text — each field its own 7-bit-+-odd-parity ASCII characters. |
-| `pz` | `parity` (`zero: true`, `position: first`, trim 16 trailer bits) | Replaces each character's parity bit with 0 in place. |
-| `crc` | `crc` (CRC-16/XMODEM, `strip`) | The real block-check status. |
+| `slice` | `slicer` | Soft → hard: 1 = mark. |
+| `chips` | `nrzi` (`direction: encode`, `transition-is-0`) | Mark = unchanged chip, so `level ⊕= NOT tone`: the coherent chips, up to polarity. A tone error flips the rest of that frame, the price of a non-coherent receiver. |
+| `sync` | `sync_search` (`+* SYN SYN SOH` = `0xD554686880`, 40 bits, ≤ 2 errors, `polarity: either`, `bit_order: lsb`, terminator ETX `0x83` / ETB `0x97` + 16 trailer bits) | Frames from the mode character through the BCS, characters packed with parity in the top bit. |
+| `crc` | `crc` (CRC-16/KERMIT, `strip`) | Checks the BCS over the parity-bearing characters, reading it little-endian; sets the frame's check status (the `refine` objective). |
+| `msg` | `fields` (`acars_block`) | mode, registration, ack, label, block id, STX, text: each a 7-bit + odd-parity ASCII character. |
 
-## 4. What is verified, and how
+## 5. What is verified, and how
 
-- **Structural**: `crates/hk-blocks/tests/acars_recipe.rs` validates the recipe against the pinned M1 block catalogue (every block, parameter, port type) and checks the sync word, CRC parameters and `parity`/`zero` wiring match the synthetic generator's constants — both pass.
-- **Bit-level**: `crates/hk-blocks/src/blocks/fec/tests.rs::parity_zero_then_crc_matches_pre_parity_check_t096` checks the `parity`(`zero`) → `crc` combination against a hand-computed vector from the actual generator (§1); `crates/hk-blocks/src/blocks/iq/tests.rs::acars_path_am_subcarrier_msk_recovers_hidden_bits` (T-086, unchanged) already covers `am_demod → subcarrier → msk_demod → clock_recovery → slicer` end to end with hidden random bits.
-- **Not yet verified**: the full recipe through the mock SDR. `tests/e2e/tests/acceptance/tutorial_acars.rs` (`#[ignore]`, reason logged in the test) drives the T-098 `acars_message` synthetic scene through `hk serve`-style API wiring exactly as [Tutorial 1](01-rds.md) does, but `found_blind` — matching `/api/inventory` against the fixture's hidden truth — times out with an **empty** inventory after looping the (short, bursty) recording for 240s. This is upstream of the recipe: detection/tracking never creates an emitter for this burst at all, so there is nothing to `POST /api/pipelines` against. Candidates for the follow-up: the burst may be too short relative to the tracker's dwell/confidence window, or 131.55 MHz / the `am` family may not be covered by whatever chain set the mock's default `ScanPlan` instantiates. Worth checking against the ADS-B tutorial's (T-097) detection path, which also has a bursty, non-continuous signal.
+- **Convention**: `py/tests/test_synth.py::test_acars_message_demodulates_with_valid_crc` decodes every synthetic burst with the acarsdec-style chip decoder and a KERMIT residue check. `test_acars_crc_is_kermit_over_parity_bearing_chars` checks the CRC catalogue value (`"123456789"` → 0x2189) and the residue.
+- **Blocks**:
+  - `crates/hk-blocks/src/blocks/framing/tests.rs::acars_terminator_lsb_characters_and_crc16_kermit` feeds the recipe's `sync` and `crc` nodes a hand-built frame, in both polarities after tone integration.
+  - `symbol/line.rs::diff_decode_and_nrzi_recover_encoded_bits` shows `nrzi` encode inverts decode.
+  - `crates/hk-blocks/tests/acars_recipe.rs` validates the recipe against the pinned catalogue and asserts the conventions above.
+- **Blind acceptance**: `tests/e2e/tests/acceptance/tutorial_acars.rs` replays the scene through the mock SDR with truth hidden, finds the emitter from `/api/inventory`, attaches the recipe by emitter id, and compares the decoded fields with the hidden truth. Results in §6.
 
 ```sh
-# Passing today:
-cargo nextest run -p hk-blocks --test acars_recipe
-cargo nextest run -p hk-blocks -E 'test(parity_zero_then_crc_matches_pre_parity_check_t096)'
-
-# Currently #[ignore]d (blind detection doesn't find the emitter; see §4):
-HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo test -p hk-e2e --test acceptance_m0 tutorial_acars -- --ignored --nocapture
+cargo nextest run -p hk-blocks
+(cd py && uv run pytest tests/test_synth.py -k acars)
+HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo test -p hk-e2e --test acceptance_m0 tutorial_acars -- --nocapture
 ```
+
+## 6. Results
+
+Blind run through the mock SDR (`tutorial_acars`, seed 96, 3 bursts per loop, 25 dB SNR), 2026-09-15:
+
+| | Decoded (majority, share) | Hidden truth |
+|---|---|---|
+| Inventory | 1 of 1 rows match; emitter at 131.5493 MHz, 5 kHz | 131.550 MHz |
+| mode | `2` (1.00) | `2` |
+| registration | `.HKRF01` (1.00) | `.HKRF01` |
+| label | `H1` (1.00) | `H1` |
+| block id | `1` (1.00) | `1` |
+| text | `HACKRIFF T096 TUTORIAL 3` (1.00, closing ETX stripped) | same |
+
+- 25 block frames were streamed.
+- CRC-valid rate (CRC-16/KERMIT, pipeline status): **19/19 = 1.000**.
+
+**Content class.** 118–137 MHz has no content rule, so a frequency-derived class of `metadata-only` would gate the fields. The test vouches the recording `unrestricted` (`BlindSource.vouched_class`, user configuration, as in the listen/AWARE-053 tests). An aeronautical-VHF band prior is a possible follow-up.
+
+## 7. Still open
+
+- **Real signal.** No real ACARS capture has been decoded. A 131.550 MHz capture (antenna permitting) is the next check.
+- **Oracle.** acarsdec isn't installed; the py decoder ports only its chip decisions and CRC.
+- **Non-coherent vs coherent.** A tone error flips the rest of a frame after integration. A coherent MSK/OQPSK demodulator block would behave like acarsdec (one chip error, one bit error) if real captures need it.

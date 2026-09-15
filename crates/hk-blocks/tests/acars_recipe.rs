@@ -1,10 +1,13 @@
-//! T-096: the worked ACARS recipe validates against the pinned M1 block catalogue (every block,
-//! parameter and port type checked) and its bit-level constants (sync word, block-check
-//! convention) reproduce py/hkpy/synth/acars.py's framing (checked bit-for-bit in
-//! crates/hk-blocks/src/blocks/fec/tests.rs::parity_zero_then_crc_matches_pre_parity_check_t096).
+//! T-096/T-108: the worked ACARS recipe validates against the pinned M1 block catalogue (every
+//! block, parameter and port type checked) and carries the real ARINC 618 conventions, as
+//! acarsdec's receiver fixes them (docs/tutorials/03-acars.md §1): tones integrated to MSK
+//! chips, either polarity, LSB-first characters, CRC-16/KERMIT over the parity-bearing
+//! characters. The bit-level chain is checked in
+//! crates/hk-blocks/src/blocks/framing/tests.rs::acars_terminator_lsb_characters_and_crc16_kermit.
 
 use hk_blocks::catalogue;
 use hk_recipe::{PortType, Recipe, parse_hex};
+use serde_json::json;
 
 fn load() -> Recipe {
     let path = concat!(
@@ -29,53 +32,41 @@ fn acars_recipe_validates_against_the_pinned_catalogue() {
         ("msk", Iq),
         ("clock", Real),
         ("slice", Soft),
+        ("chips", Bits),
         ("sync", Bits),
-        ("unwrap", Frames),
-        ("msg", Frames),
-        ("pz", Frames),
         ("crc", Frames),
+        ("msg", Frames),
     ] {
         assert_eq!(into(node), ty, "{node}");
     }
 }
 
-/// SYN SYN SOH (0x16 0x16 0x01), the framing preceding the ACARS block (no differential
-/// decoding: this recipe drops `diff_decode`, matching T-086's
-/// `acars_path_am_subcarrier_msk_recovers_hidden_bits`, which recovers the hidden bits directly
-/// off `slicer`).
-const SYN_SYN_SOH: u64 = 0x160116;
+/// `+ * SYN SYN SOH` with odd parity, each character LSB first on air.
+const PLUS_STAR_SYN_SYN_SOH: u64 = 0xD5_5468_6880;
 
 #[test]
-fn acars_recipe_sync_word_and_block_check_match_the_synthetic_generator() {
+fn acars_recipe_uses_the_arinc_618_conventions() {
     let r = load();
     let node = |id: &str| &r.nodes.iter().find(|n| n.id == id).unwrap().params;
     let hex = |v: &serde_json::Value| parse_hex(v.as_str().unwrap()).unwrap();
 
-    assert!(
-        r.nodes.iter().all(|n| n.block != "diff_decode"),
-        "MSK mark/space maps straight to bit 1/0: no differential decoding step"
-    );
+    let chips = node("chips");
+    assert_eq!(chips["mode"], json!("transition-is-0"));
+    assert_eq!(chips["direction"], json!("encode"));
 
     let sync = node("sync");
-    assert_eq!(hex(&sync["sync_word"]), SYN_SYN_SOH);
-    assert_eq!(sync["sync_bits"].as_u64().unwrap(), 24);
-    assert_eq!(sync["include_sync"], serde_json::json!(false));
-    assert_ne!(
-        sync.get("bit_order"),
-        Some(&serde_json::json!("lsb")),
-        "the synthetic fixture sends each character MSB (parity) first, not LSB-first"
-    );
+    assert_eq!(hex(&sync["sync_word"]), PLUS_STAR_SYN_SYN_SOH);
+    assert_eq!(sync["sync_bits"].as_u64().unwrap(), 40);
+    assert_eq!(sync["bit_order"], json!("lsb"));
+    assert_eq!(sync["polarity"], json!("either"));
+    assert_eq!(sync["include_sync"], json!(false));
 
-    // `unwrap` (real parity bits, feeds `fields`) and `crc` (zeroed parity bits, block-check
-    // status) both check CRC-16/XMODEM: poly 0x1021, init 0, not reflected.
-    for id in ["unwrap", "crc"] {
-        let n = node(id);
-        assert_eq!(hex(&n["poly"]), 0x1021);
-        assert_eq!(n["refin"], serde_json::json!(false));
-        assert_eq!(n["refout"], serde_json::json!(false));
-    }
-    let pz = node("pz");
-    assert_eq!(pz["zero"], serde_json::json!(true));
-    assert_eq!(pz["position"], serde_json::json!("first"));
-    assert_eq!(pz["span"]["end_trim_bits"].as_u64().unwrap(), 16);
+    let crc = node("crc");
+    assert_eq!(hex(&crc["poly"]), 0x1021);
+    assert_eq!(crc["refin"], json!(true));
+    assert_eq!(crc["refout"], json!(true));
+    assert!(
+        r.nodes.iter().all(|n| n.block != "parity"),
+        "the block check covers the parity bits: no parity rewrite before it"
+    );
 }

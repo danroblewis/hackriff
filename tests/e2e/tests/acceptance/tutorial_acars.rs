@@ -1,11 +1,12 @@
-//! T-096, M1 Tutorial 3 (docs/tutorials/03-acars.md): the ACARS worked recipe
+//! T-096/T-108, M1 Tutorial 3 (docs/tutorials/03-acars.md): the ACARS worked recipe
 //! (`recipes/acars.recipe.json`) decodes an ACARS downlink block **blind, through the mock SDR
-//! and the API**: AM → MSK 2400 Bd → SYN/SOH..ETX framing → CRC-16 → fields (registration,
-//! label, block id, text).
+//! and the API**: AM → MSK 2400 Bd → chips → `+* SYN SYN SOH`..ETX framing → CRC-16/KERMIT →
+//! fields (registration, label, block id, text).
 //!
 //! Shape, as a user driving `hk serve`:
 //! 1. The synthetic ACARS recording (T-098, `py/hkpy/synth/acars.py`'s `acars_message` scenario;
-//!    no real recording or `acarsdec` oracle exists yet — see docs/tutorials/03-acars.md) replays
+//!    conventions from acarsdec's receiver source, T-108; no real recording or installed
+//!    `acarsdec` yet — see docs/tutorials/03-acars.md) replays
 //!    in a loop through the mock SDR with its truth stripped ([`crate::blind::blind_live_streams`]).
 //! 2. The emitter is found by matching `/api/inventory` against the private truth
 //!    ([`found_blind`]); `POST /api/pipelines {recipe_id: "acars", target: {emitter_id}}` attaches
@@ -54,7 +55,14 @@ struct Served {
 
 fn serve(meta: &Path, tag: &str) -> Served {
     let streams = StreamRegistry::new();
-    let live = blind_live_streams(meta, tag, BlindSource::default(), &streams);
+    // The user vouches the recording's content class, as for any band without a content rule
+    // (118–137 MHz has none, so frequency alone yields `metadata-only` and gates the fields):
+    // user configuration, not truth.
+    let source = BlindSource {
+        vouched_class: Some("unrestricted"),
+        ..BlindSource::default()
+    };
+    let live = blind_live_streams(meta, tag, source, &streams);
     let rt = live.handle.recipe_runtime();
     let openers = OpenerRegistry::new()
         .with("stage", rt.stage_service())
@@ -170,10 +178,7 @@ impl Tail {
     }
 }
 
-/// A §14.2 frame record, flattened: leaf values by path. `unwrap`'s own CRC check (kept as the
-/// as-received parity bits, feeding `fields`) doesn't match the block-check convention (see the
-/// module docs), so `crc_status` here is not meaningful; the recipe's real, correctly-converted
-/// check is the separate `pz` → `crc` branch, read from the pipeline status (`crc_valid_rate`).
+/// A §14.2 frame record, flattened: leaf values by path.
 #[derive(Debug)]
 struct Frame {
     values: BTreeMap<String, Value>,
@@ -271,12 +276,6 @@ fn acarsdec_available() -> bool {
 // --- Synthetic: blind acceptance -----------------------------------------------------------------
 
 #[test]
-#[ignore = "T-096 follow-up: the blind detection/tracking pipeline never registers an inventory \
-            entry for the acars_message synthetic scene (found_blind times out with an empty \
-            inventory after looping the recording for 240s) even though the recipe itself is \
-            verified correct offline (crates/hk-blocks/tests/acars_recipe.rs, \
-            crates/hk-blocks/src/blocks/fec/tests.rs::parity_zero_then_crc_matches_pre_parity_check_t096); \
-            see docs/tutorials/03-acars.md"]
 fn signal_062_acars_recipe_decodes_blind_through_the_mock_sdr() {
     if acarsdec_available() {
         eprintln!(
@@ -294,6 +293,7 @@ fn signal_062_acars_recipe_decodes_blind_through_the_mock_sdr() {
         .seed(96)
         .param("prekey_s", 0.02)
         .param("text", "HACKRIFF T096 TUTORIAL 3")
+        .param("n_bursts", 3)
         .generate()
     {
         Ok(out) => out.fixture(0).unwrap(),
@@ -310,14 +310,14 @@ fn signal_062_acars_recipe_decodes_blind_through_the_mock_sdr() {
     let id = start_acars(&s, &emitter);
     let blocks = tail(s.tcp, &format!("inspector/{id}/blocks"));
 
-    // Several loops of this short recording: the burst is decoded at least a few times.
+    // Several loops of this recording (three bursts each): the block is decoded many times.
     let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
     s.wait_samples(&id, start + 8 * n);
     let status = s.pipeline(&id)["status"].clone();
     let all = frames(&blocks.finish());
     let (ok, bad, crc_rate) = crc_valid_rate(&status);
     eprintln!(
-        "[{TAG}] CRC-valid (pre-parity block check, CRC-16/XMODEM) {ok}/{} = {crc_rate:.3}",
+        "[{TAG}] CRC-valid (CRC-16/KERMIT block check) {ok}/{} = {crc_rate:.3}",
         ok + bad
     );
 
@@ -325,7 +325,10 @@ fn signal_062_acars_recipe_decodes_blind_through_the_mock_sdr() {
     let registration = majority(all.iter().filter_map(|f| field(f, "registration")));
     let label = majority(all.iter().filter_map(|f| field(f, "label")));
     let block_id = majority(all.iter().filter_map(|f| field(f, "block_id")));
-    let text = majority(all.iter().filter_map(|f| field(f, "text")));
+    // The map keeps the closing ETX/ETB in `text` (rendered as an escape); the message is before it.
+    let text = majority(all.iter().filter_map(|f| {
+        field(f, "text").map(|t| t.trim_end_matches("\\x03").trim_end_matches("\\x17"))
+    }));
     let mode = majority(all.iter().filter_map(|f| field(f, "mode")));
 
     let truth_reg = truth.str("/fields/reg").expect("truth registration");
@@ -360,9 +363,9 @@ fn signal_062_acars_recipe_decodes_blind_through_the_mock_sdr() {
     assert_eq!(text_v, truth_text, "[{TAG}] text");
     assert!(text_share > 0.5, "[{TAG}] text share {text_share}");
 
-    // The block check: CRC-16/XMODEM over the pre-parity body (fec/tests.rs
-    // `parity_zero_then_crc_matches_pre_parity_check_t096` checks the convention bit-for-bit); a
-    // noiseless synthetic recording should validate on every decode once framing locks on.
+    // The block check: CRC-16/KERMIT over the parity-bearing characters, as acarsdec checks it
+    // (framing/tests.rs `acars_terminator_lsb_characters_and_crc16_kermit`); a 25 dB synthetic
+    // recording should validate on nearly every decode once framing locks on.
     assert!(ok >= 3.0, "[{TAG}] too few CRC-valid blocks: {ok}");
     assert!(crc_rate >= 0.5, "[{TAG}] CRC-valid rate {crc_rate:.3}");
 

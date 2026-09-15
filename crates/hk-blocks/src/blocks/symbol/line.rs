@@ -97,8 +97,14 @@ pub(crate) fn build_nrzi(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>,
 
 /// `out[n] = in[n] ⊕ in[n−1] ⊕ complement`: diff_decode (xor / xnor) and NRZI
 /// (transition-is-1 / transition-is-0). The first bit after a reset is only the reference.
+///
+/// NRZI `direction: encode` is the inverse, a running level: `level ⊕= in[n] ⊕ complement`, one
+/// output per input, level 1 after a reset. A non-coherent MSK receiver needs it where the data
+/// are the coherent chips and the tone marks chip transitions (ACARS: acarsdec `msk.c`); the
+/// level's polarity is arbitrary, so the sync search takes either polarity.
 struct Differential {
     nrzi: bool,
+    encode: bool,
     complement: u8,
     prev: Option<u8>,
     status: Status,
@@ -108,6 +114,7 @@ impl Differential {
     fn new(nrzi: bool) -> Self {
         Self {
             nrzi,
+            encode: false,
             complement: 0,
             prev: None,
             status: Status::default(),
@@ -115,6 +122,7 @@ impl Differential {
     }
 
     fn apply(&mut self, p: &Params) {
+        self.encode = self.nrzi && str_or(p, "direction", "decode") == "encode";
         self.complement = if self.nrzi {
             u8::from(str_or(p, "mode", "transition-is-0") == "transition-is-0")
         } else {
@@ -128,7 +136,7 @@ impl Block for Differential {
         let name = if self.nrzi { "nrzi" } else { "diff_decode" };
         let input = single_input(inputs, name, &[PortType::Bits])?;
         Ok(vec![PortInfo {
-            hold_items: 1,
+            hold_items: usize::from(!self.encode),
             ..input
         }])
     }
@@ -140,7 +148,7 @@ impl Block for Differential {
         if restarts(m.flags) {
             self.prev = None;
         }
-        let skip = usize::from(self.prev.is_none());
+        let skip = usize::from(self.prev.is_none() && !self.encode);
         let out = io.output(0)?;
         set_meta(
             out,
@@ -150,12 +158,21 @@ impl Block for Differential {
         );
         let y = bits_out(out)?;
         let before = y.len();
-        for &b in x {
-            let b = b & 1;
-            if let Some(p) = self.prev {
-                y.push(b ^ p ^ self.complement);
+        if self.encode {
+            let mut level = self.prev.unwrap_or(1);
+            for &b in x {
+                level ^= (b & 1) ^ self.complement;
+                y.push(level);
             }
-            self.prev = Some(b);
+            self.prev = Some(level);
+        } else {
+            for &b in x {
+                let b = b & 1;
+                if let Some(p) = self.prev {
+                    y.push(b ^ p ^ self.complement);
+                }
+                self.prev = Some(b);
+            }
         }
         self.status.items_in += x.len() as u64;
         self.status.items_out += (y.len() - before) as u64;
@@ -167,6 +184,9 @@ impl Block for Differential {
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {
+        if self.nrzi && (str_or(p, "direction", "decode") == "encode") != self.encode {
+            return Ok(ParamUpdate::Rebuild);
+        }
         self.apply(p);
         Ok(ParamUpdate::Applied)
     }
@@ -493,6 +513,27 @@ mod tests {
             &[64, 3],
         );
         assert_eq!(c.out(0, 0).bits, truth);
+        // NRZI encode (the running level) inverts NRZI decode: level 1 after a reset.
+        let enc = assert_chunk_invariant(
+            || {
+                vec![
+                    build("nrzi", json!({"direction": "encode"}), PortType::Bits),
+                    build("nrzi", json!({}), PortType::Bits),
+                ]
+            },
+            PortType::Bits,
+            1200.0,
+            &PortVec::Bits(truth.clone()),
+            &[64, 5, 1],
+        );
+        assert_eq!(enc.out(0, 0).bits.len(), truth.len());
+        assert_eq!(enc.out(0, 0).bits[0], 1 ^ truth[0] ^ 1);
+        assert_eq!(enc.out(1, 0).bits, truth[1..]);
+        let mut b = build("nrzi", json!({}), PortType::Bits);
+        assert_eq!(
+            update(b.as_mut(), json!({"direction": "encode"}), PortType::Bits),
+            crate::ParamUpdate::Rebuild
+        );
         let xnor = assert_chunk_invariant(
             || {
                 vec![build(

@@ -4,7 +4,7 @@
   "id": "acars",
   "version": 1,
   "name": "ACARS: aircraft messages",
-  "description": "Tutorial 3 (ADR-0011 §5.1; T-096 tuned against the T-098 synthetic ACARS fixture — no acarsdec oracle was available, docs/tutorials/03-acars.md records what's still unverified against a real signal). AM carrier, MSK at 2400 Bd on an 1800 Hz audio subcarrier (non-coherent FSK/MSK discriminator, no differential decoding needed — mark/space map straight to bit 1/0). Frames start after SYN SYN SOH (0x16 0x16 0x01) and end at ETX/ETB plus the 16-bit block check, then mode, registration, acknowledgement, label, block id and text, each an 8-bit character: 7 data bits then an odd-parity bit, MSB (parity) first. The block check is CRC-16/XMODEM (poly 0x1021, init 0, not reflected) computed over the pre-parity 7-bit values padded back to 8 bits with the parity position forced to 0, not over the as-sent bytes: `unwrap` keeps the real parity bits for `fields`; a separate `pz`→`crc` branch zeroes them (parity block, `zero`) for the block-check status and the refinement objective.",
+  "description": "Tutorial 3 (ADR-0011 §5.1; conventions from acarsdec, T-108, see docs/tutorials/03-acars.md). AM carrier, MSK at 2400 Bd on an 1800 Hz audio subcarrier. ACARS data are the coherent MSK chips, and the tone marks a chip transition (2400 Hz = same chip, 1200 Hz = changed), so the non-coherent discriminator's bits are integrated back to chips (`nrzi`, encode, transition-is-0) and the sync search takes either polarity. Characters are 7-bit ASCII + odd parity, sent LSB first. Frames start after '+' '*' SYN SYN SOH (air order 0xD554686880) and end at ETX/ETB plus the 16-bit block check: CRC-16/KERMIT over the transmitted characters after SOH (parity bits included), sent low byte first. Then mode, registration, acknowledgement, label, block id and text.",
   "match": {
     "families": ["am"],
     "freq_hz": [[129000000, 137000000]],
@@ -25,12 +25,7 @@
       "label": "1800 Hz MSK subcarrier → baseband",
       "params": { "carrier_hz": 1800, "bandwidth_hz": 2400, "output_rate_hz": 12000 }
     },
-    {
-      "id": "msk",
-      "block": "msk_demod",
-      "label": "MSK discriminator",
-      "params": { "symbol_rate_bd": 2400 }
-    },
+    { "id": "msk", "block": "msk_demod", "label": "MSK discriminator (mark +, space −)", "params": { "symbol_rate_bd": 2400 } },
     {
       "id": "clock",
       "block": "clock_recovery",
@@ -39,46 +34,34 @@
     },
     { "id": "slice", "block": "slicer" },
     {
+      "id": "chips",
+      "block": "nrzi",
+      "label": "Tones → MSK chips (mark = no chip change)",
+      "params": { "mode": "transition-is-0", "direction": "encode" }
+    },
+    {
       "id": "sync",
       "block": "sync_search",
-      "label": "SYN SYN SOH … ETX/ETB + block check",
+      "label": "+* SYN SYN SOH … ETX/ETB + BCS",
       "params": {
         "mode": "sync-word",
-        "sync_word": "0x160116",
-        "sync_bits": 24,
+        "sync_word": "0xD554686880",
+        "sync_bits": 40,
         "max_errors": 2,
+        "polarity": "either",
         "frame_bits": 2048,
         "include_sync": false,
+        "bit_order": "lsb",
         "terminator": { "words": ["0x83", "0x97"], "bits": 8, "step_bits": 8, "trailer_bits": 16 }
-      }
-    },
-    {
-      "id": "unwrap",
-      "block": "crc",
-      "label": "Strip the block check (real parity bits kept for fields)",
-      "params": { "width": 16, "poly": "0x1021", "refin": false, "refout": false, "strip": true }
-    },
-    { "id": "msg", "block": "fields", "label": "ACARS block fields", "params": { "map": "acars_block" } },
-    {
-      "id": "pz",
-      "block": "parity",
-      "label": "Zero each character's parity bit (block-check convention)",
-      "inputs": { "in": "sync" },
-      "params": {
-        "unit_bits": 8,
-        "parity": "odd",
-        "position": "first",
-        "zero": true,
-        "span": { "end_trim_bits": 16 }
       }
     },
     {
       "id": "crc",
       "block": "crc",
-      "label": "CRC-16/XMODEM block check (status only)",
-      "inputs": { "in": "pz" },
-      "params": { "width": 16, "poly": "0x1021", "refin": false, "refout": false, "strip": true }
-    }
+      "label": "CRC-16/KERMIT block check",
+      "params": { "width": 16, "poly": "0x1021", "refin": true, "refout": true, "strip": true }
+    },
+    { "id": "msg", "block": "fields", "label": "ACARS block fields", "params": { "map": "acars_block" } }
   ],
   "field_maps": {
     "acars_block": {
