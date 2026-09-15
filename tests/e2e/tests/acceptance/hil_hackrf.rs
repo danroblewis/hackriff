@@ -430,6 +430,7 @@ fn hil_blind_fm_survey_on_the_hackrf() {
         token: Some(API_TOKEN.into()),
         listen: Default::default(),
         compute: Default::default(),
+        iq_buffer: Default::default(),
     })
     .expect("start hk serve over the HackRF");
     let addr = server.local_addr();

@@ -9,9 +9,13 @@
 //!   the next segment). Only a lossless replay that opts in (`HK_IQ_BUFFER=1`) registers a flow-gate
 //!   cursor, like every other reader of an unpaced replay.
 //! - **Default.** On for every run that is not a lossless (unpaced) replay, which is a recording
-//!   already: 2 GiB or 10 min of sample clock, whichever is reached first
-//!   ([`hk_store::iqbuffer::IqBufferConfig`], `HK_IQ_BUFFER`, `HK_IQ_BUFFER_BYTES`,
-//!   `HK_IQ_BUFFER_S`).
+//!   already: a 2 min retention window on the sample clock, the disk quota `min(retention ×
+//!   the device's highest rate × 2 bytes, --iq-buffer-max)`, and never below the free-space floor
+//!   ([`hk_store::iqbuffer::IqBufferConfig`]; `hk serve --iq-retention/--iq-buffer-max`,
+//!   `HK_IQ_RETENTION`, `HK_IQ_BUFFER_MAX`, `HK_IQ_BUFFER`).
+//! - **Clip guard.** A clip is sized before anything is written: over `max_clip_bytes` (256 MiB
+//!   by default) it is refused, and so is one the recordings filesystem cannot hold above the
+//!   free-space floor.
 //! - **Content rule.** A block whose tuned window's class forbids content is never stored
 //!   (`gated_samples`), exactly as the manual recorder refuses it (only when `HK_CONTENT_GATING=1`).
 //! - **Clips.** `[t0, t1)` on the sample clock, optionally only the segments whose tuned window
@@ -34,8 +38,9 @@ use hk_model::{
     ContentClass, ProvenanceId, Recording, RecordingId, RecordingKind, RecordingTrigger,
     RetentionClass, TimeRange, Timestamp,
 };
+pub use hk_store::iqbuffer::ClipRange;
 use hk_store::iqbuffer::{
-    ClipError, IqBuffer, IqBufferConfig, IqBufferStatus, IqBufferWriter, SegmentStart,
+    ClipError, IqBuffer, IqBufferConfig, IqBufferStatus, IqBufferWriter, OsHooks, SegmentStart,
 };
 use num_complex::Complex;
 use serde::Serialize;
@@ -47,13 +52,11 @@ use crate::gate::GateCursor;
 use crate::recorder::{RECORDING_LABEL_MAX, RECORDING_MAX_BYTES};
 use crate::run::Shared;
 
-/// A clip export request (times Unix s on the sample clock, frequencies Hz).
+/// A clip export request (frequencies Hz).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipRequest {
-    /// Start (inclusive).
-    pub t0_s: f64,
-    /// End (exclusive).
-    pub t1_s: f64,
+    /// The samples: sample-clock ns or stream indices (exact).
+    pub range: ClipRange,
     /// Only segments whose tuned window overlaps `(f_lo, f_hi)`.
     pub band: Option<(f64, f64)>,
     /// User label.
@@ -71,8 +74,10 @@ pub enum ClipFailure {
     NotFound(String),
     /// The range spans a sample-rate change.
     Conflict(String),
-    /// Too large for one recording.
+    /// Larger than the clip cap.
     TooLarge(String),
+    /// The recordings filesystem cannot hold it above the free-space floor.
+    NoSpace(String),
     /// Storage failed.
     Failed(String),
 }
@@ -85,6 +90,7 @@ impl std::fmt::Display for ClipFailure {
             | Self::NotFound(m)
             | Self::Conflict(m)
             | Self::TooLarge(m)
+            | Self::NoSpace(m)
             | Self::Failed(m) => f.write_str(m),
         }
     }
@@ -101,6 +107,8 @@ pub struct ClipCaptureInfo {
     pub global_index: u64,
     /// Time of the first sample, Unix s.
     pub t0: f64,
+    /// `t0` exactly, Unix ns.
+    pub t0_ns: i64,
     /// Buffer segment id.
     pub segment: u64,
     /// Tuned centre, Hz.
@@ -138,6 +146,10 @@ pub struct ClipExported {
     pub t0: f64,
     /// End of the last sample, Unix s.
     pub t1: f64,
+    /// `t0` exactly, Unix ns.
+    pub t0_ns: i64,
+    /// `t1` exactly, Unix ns.
+    pub t1_ns: i64,
     /// Samples.
     pub samples: u64,
     /// Data bytes (ci8).
@@ -173,7 +185,11 @@ impl IqBufferService {
         let bc = cfg.iq_buffer;
         let (buffer, writer, reason) = if bc.active(cfg.lossless) {
             let dir = cfg.data_dir.join(hk_store::iqbuffer::DIR_NAME);
-            match IqBuffer::open(&dir, bc) {
+            let hooks = cfg
+                .iq_buffer_hooks
+                .clone()
+                .unwrap_or_else(|| Arc::new(OsHooks));
+            match IqBuffer::open_with(&dir, bc, hooks) {
                 Ok((b, w)) => (Some(b), Some(w), None),
                 Err(e) => {
                     eprintln!("IQ capture buffer disabled: opening {}: {e}", dir.display());
@@ -181,8 +197,12 @@ impl IqBufferService {
                 }
             }
         } else {
-            let why = if bc.enabled == Some(false) || bc.max_bytes == 0 || bc.max_s <= 0.0 {
-                "disabled by configuration (HK_IQ_BUFFER / quota)"
+            let why = if bc.enabled == Some(false)
+                || bc.max_bytes == Some(0)
+                || bc.retention_s <= 0.0
+            {
+                "disabled by configuration (--iq-retention off, HK_IQ_RETENTION, HK_IQ_BUFFER=0 or a \
+                 zero --iq-buffer-max)"
             } else {
                 "off for a lossless replay (the recording is the history); HK_IQ_BUFFER=1 forces it"
             };
@@ -222,16 +242,19 @@ impl IqBufferService {
                 self.reason.clone().unwrap_or_default()
             ))
         })?;
-        let ClipRequest {
-            t0_s,
-            t1_s,
-            band,
-            label,
-        } = request;
-        if !(t0_s.is_finite() && t1_s.is_finite() && t0_s < t1_s && t0_s.abs() < 9.0e9) {
-            return Err(ClipFailure::Invalid(
-                "t0 and t1 are Unix seconds with t0 < t1".into(),
-            ));
+        let ClipRequest { range, band, label } = request;
+        match *range {
+            ClipRange::Time { t0_ns, t1_ns } if !(0 <= t0_ns && t0_ns < t1_ns) => {
+                return Err(ClipFailure::Invalid(
+                    "the range needs 0 ≤ t0 < t1 on the sample clock".into(),
+                ));
+            }
+            ClipRange::Index { start, end } if start >= end => {
+                return Err(ClipFailure::Invalid(
+                    "the range needs at least one sample".into(),
+                ));
+            }
+            _ => {}
         }
         if let Some((lo, hi)) = band {
             if !(lo.is_finite() && hi.is_finite() && lo < hi) {
@@ -250,9 +273,36 @@ impl IqBufferService {
             Some(l) => Some(l.to_owned()),
         };
         let _one = self.exports.lock().unwrap_or_else(PoisonError::into_inner);
-        let id = RecordingId::new();
+        let failure = |e: ClipError| match e {
+            ClipError::Empty => ClipFailure::NotFound(e.to_string()),
+            ClipError::MixedRates { .. } => ClipFailure::Conflict(e.to_string()),
+            ClipError::TooLarge { .. } => ClipFailure::TooLarge(e.to_string()),
+            ClipError::Io(_) => ClipFailure::Failed(format!("exporting the clip: {e}")),
+        };
+        // Sized before anything is written.
+        let plan = buffer.plan_clip(*range, *band).map_err(failure)?;
+        let cap = self.cfg.max_clip_bytes.min(RECORDING_MAX_BYTES);
+        if plan.bytes() > cap {
+            return Err(ClipFailure::TooLarge(format!(
+                "the clip would be {} bytes; a clip holds at most {cap} bytes \
+                 (HK_IQ_BUFFER_CLIP_MAX): export a shorter range",
+                plan.bytes()
+            )));
+        }
         let dir = self.data_dir.join("recordings");
         std::fs::create_dir_all(&dir).map_err(|e| ClipFailure::Failed(e.to_string()))?;
+        if let Ok(space) = buffer.space_at(&dir) {
+            let floor = self.cfg.free_floor(space.total);
+            if space.free < plan.bytes().saturating_add(floor) {
+                return Err(ClipFailure::NoSpace(format!(
+                    "not enough free space for the clip: it needs {} bytes above the {floor}-byte \
+                     free-space floor and {} bytes are free",
+                    plan.bytes(),
+                    space.free
+                )));
+            }
+        }
+        let id = RecordingId::new();
         let stem = id.to_string();
         let data_path = dir.join(format!("{stem}.sigmf-data"));
         let meta_path = dir.join(format!("{stem}.sigmf-meta"));
@@ -262,28 +312,12 @@ impl IqBufferService {
         };
         let clip = File::create(&data_path)
             .map_err(ClipError::Io)
-            .and_then(|f| {
-                let mut out = BufWriter::new(f);
-                buffer.export_clip(
-                    (t0_s * 1e9).round() as i64,
-                    (t1_s * 1e9).round() as i64,
-                    *band,
-                    RECORDING_MAX_BYTES,
-                    &mut out,
-                )
-            });
+            .and_then(|f| plan.write(&mut BufWriter::new(f)));
         let clip = match clip {
             Ok(c) => c,
             Err(e) => {
                 cleanup();
-                return Err(match e {
-                    ClipError::Empty => ClipFailure::NotFound(e.to_string()),
-                    ClipError::MixedRates { .. } => ClipFailure::Conflict(e.to_string()),
-                    ClipError::TooLarge { .. } => ClipFailure::TooLarge(format!(
-                        "{e}; one recording holds at most {RECORDING_MAX_BYTES} bytes"
-                    )),
-                    ClipError::Io(_) => ClipFailure::Failed(format!("exporting the clip: {e}")),
-                });
+                return Err(failure(e));
             }
         };
         let r = self.store(id, label.as_deref(), *band, &clip, &meta_path, &data_path);
@@ -388,6 +422,8 @@ impl IqBufferService {
             data_path: data_path.display().to_string(),
             t0: s(clip.t0_ns),
             t1: s(clip.t1_ns),
+            t0_ns: clip.t0_ns,
+            t1_ns: clip.t1_ns,
             samples: clip.samples,
             bytes: 2 * clip.samples,
             sample_rate_hz: clip.sample_rate_hz,
@@ -402,6 +438,7 @@ impl IqBufferService {
                     samples: p.samples,
                     global_index: p.global_index,
                     t0: s(p.t_ns),
+                    t0_ns: p.t_ns,
                     segment: p.segment,
                     center_hz: p.provenance.tune.center_hz,
                     sample_rate_hz: p.provenance.tune.sample_rate_hz,

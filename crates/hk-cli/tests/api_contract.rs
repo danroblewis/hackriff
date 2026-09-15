@@ -64,6 +64,7 @@ fn start_server() -> (Serving, SocketAddr) {
         token: Some(TOKEN.into()),
         listen: Default::default(),
         compute: Default::default(),
+        iq_buffer: Default::default(),
     })
     .unwrap();
     let addr = serving.server.local_addr();
@@ -899,20 +900,35 @@ fn outputs_list_and_unknown_file_answer_as_documented() {
 #[test]
 fn iq_buffer_status_and_clip_export_answer_as_documented() {
     let (serving, addr) = start_server();
+    const CLIP_SAMPLES: u64 = 240_000; // 0.1 s at 2.4 Msps
     let mut status = Value::Null;
-    wait_for("0.5 s of buffered IQ", Duration::from_secs(60), || {
-        let (st, v) = get(addr, "/api/iqbuffer");
-        assert_eq!(st, 200, "{v}");
-        status = v;
-        status["span_s"].as_f64().unwrap_or(0.0) >= 0.5
-    });
+    wait_for(
+        "a buffered segment of 0.1 s",
+        Duration::from_secs(60),
+        || {
+            let (st, v) = get(addr, "/api/iqbuffer");
+            assert_eq!(st, 200, "{v}");
+            status = v;
+            status["segments"].as_array().is_some_and(|s| {
+                s.iter()
+                    .any(|g| g["samples"].as_u64().unwrap_or(0) >= CLIP_SAMPLES)
+            })
+        },
+    );
     let v = &status;
     assert_eq!(v["enabled"], json!(true), "{v}");
     assert!(v["reason"].is_null(), "{v}");
     assert!(v["dir"].is_string(), "{v}");
     for k in [
-        "max_bytes",
+        "quota_bytes",
+        "max_clip_bytes",
         "chunk_bytes",
+        "chunk_files",
+        "fs_free_bytes",
+        "fs_total_bytes",
+        "min_free_bytes",
+        "pauses",
+        "paused_samples",
         "bytes",
         "disk_bytes",
         "samples",
@@ -921,12 +937,23 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
         "dropped_samples",
         "gated_samples",
         "write_errors",
+        "failed_samples",
     ] {
         assert!(v[k].is_u64(), "{k}: {v}");
     }
-    for k in ["max_s", "t0", "t1", "span_s"] {
+    for k in ["retention_s", "t0", "t1", "span_s"] {
         assert!(v[k].is_f64(), "{k}: {v}");
     }
+    assert_eq!(v["paused"], json!(false), "{v}");
+    assert!(
+        v["fs_free_bytes"].as_u64() <= v["fs_total_bytes"].as_u64(),
+        "{v}"
+    );
+    // The quota: min(retention × the mock's highest rate (20 Msps) × 2 bytes, max_bytes).
+    let implied = (v["retention_s"].as_f64().unwrap() * 20e6).ceil() as u64 * 2;
+    let quota = v["max_bytes"].as_u64().map_or(implied, |m| m.min(implied));
+    assert!(v["max_bytes"].is_null() || v["max_bytes"].is_u64(), "{v}");
+    assert_eq!(v["quota_bytes"].as_u64(), Some(quota), "{v}");
     assert_eq!(v["bytes"].as_u64(), v["samples"].as_u64().map(|n| 2 * n));
     assert!(v["disk_bytes"].as_u64() >= v["bytes"].as_u64(), "{v}");
     assert!(v["error"].is_null(), "{v}");
@@ -936,10 +963,15 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
     }
     assert!(is_array(&v["gaps"]), "{v}");
     let segs = v["segments"].as_array().expect("segments");
-    assert!(!segs.is_empty(), "{v}");
-    let seg = &segs[0];
+    let seg = segs
+        .iter()
+        .find(|g| g["samples"].as_u64().unwrap_or(0) >= CLIP_SAMPLES)
+        .expect("a segment of 0.1 s");
     for k in ["id", "samples", "global_index", "dropped_before"] {
         assert!(seg[k].is_u64(), "segment {k}: {seg}");
+    }
+    for k in ["t0_ns", "t1_ns"] {
+        assert!(seg[k].is_i64(), "segment {k}: {seg}");
     }
     for k in [
         "t0",
@@ -966,15 +998,22 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
     let (st, v) = get(addr, "/api/iqbuffer?limit=1");
     assert_eq!(st, 200, "{v}");
     assert!(v["segments"].as_array().unwrap().len() <= 1, "{v}");
-    for q in ["bogus=1", "limit=0", "limit=x", "t0=5&t1=4", "t0=abc"] {
+    for q in [
+        "bogus=1",
+        "limit=0",
+        "limit=x",
+        "t0=5&t1=4",
+        "t0=abc",
+        "t0=-5",
+    ] {
         let (st, v) = get(addr, &format!("/api/iqbuffer?{q}"));
         assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{q}: {v}");
     }
 
-    // Export the first 0.1 s of the oldest segment.
-    let t0 = seg["t0"].as_f64().unwrap();
-    let t1 = (t0 + 0.1).min(seg["t1"].as_f64().unwrap());
-    let body = json!({ "t0": t0, "t1": t1, "label": "contract" }).to_string();
+    // Export the first 0.1 s of a segment by stream index: exactly 240 000 samples.
+    let g0 = seg["global_index"].as_u64().unwrap();
+    let body =
+        json!({ "global_index": g0, "samples": CLIP_SAMPLES, "label": "contract" }).to_string();
     let (st, _) = call(addr, "POST", "/api/iqbuffer/clip", None, Some(&body));
     assert_eq!(st, 401, "the clip needs the token");
     let (st, v) = post(addr, "/api/iqbuffer/clip", &body);
@@ -983,9 +1022,30 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
     assert!(r["id"].is_string(), "{r}");
     assert_eq!(r["label"], json!("contract"), "{r}");
     let n = r["samples"].as_u64().unwrap();
-    let want = ((t1 - t0) * 2.4e6).round() as u64;
-    assert!(n.abs_diff(want) <= 1, "{n} vs {want}: {r}");
+    assert_eq!(n, CLIP_SAMPLES, "{r}");
+    assert_eq!(r["captures"][0]["global_index"].as_u64(), Some(g0), "{r}");
     assert_eq!(r["bytes"].as_u64(), Some(2 * n), "{r}");
+    // The same span in exact ns selects exactly the same samples.
+    let t0_ns = seg["t0_ns"].as_i64().unwrap();
+    assert_eq!(r["t0_ns"].as_i64(), Some(t0_ns), "{r}");
+    assert_eq!(r["t1_ns"].as_i64(), Some(t0_ns + 100_000_000), "{r}");
+    let by_ns = json!({ "t0_ns": t0_ns, "t1_ns": t0_ns + 100_000_000 }).to_string();
+    let (st, v2) = post(addr, "/api/iqbuffer/clip", &by_ns);
+    assert_eq!(st, 200, "{v2}");
+    assert_eq!(
+        v2["recording"]["samples"].as_u64(),
+        Some(CLIP_SAMPLES),
+        "{v2}"
+    );
+    assert_eq!(
+        v2["recording"]["captures"][0]["global_index"].as_u64(),
+        Some(g0),
+        "{v2}"
+    );
+    let (t0, t1) = (
+        seg["t0"].as_f64().unwrap(),
+        seg["t0"].as_f64().unwrap() + 0.1,
+    );
     assert_eq!(r["sample_rate_hz"], json!(2.4e6), "{r}");
     assert_eq!(r["center_hz"], json!(100.8e6), "{r}");
     assert!(r["band"].is_null() && r["content_class"].is_string(), "{r}");
@@ -1011,6 +1071,7 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
     for k in [
         "global_index",
         "t0",
+        "t0_ns",
         "center_hz",
         "sample_rate_hz",
         "bandwidth_hz",
@@ -1042,6 +1103,13 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
     for bad in [
         json!({ "t0": t1, "t1": t0 }),
         json!({ "t0": t0 }),
+        json!({ "t0": -8.9e9, "t1": t1 }),
+        json!({ "t0_ns": 5, "t1_ns": 4 }),
+        json!({ "t0_ns": -5, "t1_ns": 4 }),
+        json!({ "global_index": 0, "samples": 0 }),
+        json!({ "global_index": u64::MAX, "samples": 2 }),
+        json!({ "t0": t0, "t1": t1, "global_index": 0, "samples": 5 }),
+        json!({ "label": "no range" }),
         json!({ "t0": t0, "t1": t1, "extra": 1 }),
         json!({ "t0": t0, "t1": t1, "band": { "f_lo": 2.0, "f_hi": 1.0 } }),
         json!({ "t0": t0, "t1": t1, "label": 5 }),

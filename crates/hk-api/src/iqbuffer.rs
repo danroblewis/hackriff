@@ -6,7 +6,7 @@
 //! | Method | Path | Body / query | Answers |
 //! |---|---|---|---|
 //! | GET | `/api/iqbuffer` | `?[t0=<unix s>][&t1=<unix s>][&limit=1..10000, default 1000]` | the buffer status (span, bytes and quota, segments with tuning and gain, gaps, eviction counts, drops) |
-//! | POST | `/api/iqbuffer/clip` | `{"t0", "t1", "band"?: {"f_lo", "f_hi"}, "label"?}` | `{"recording": clip}`; 404 `not_found` (nothing buffered there), 409 `conflict` (spans a sample-rate change), 503 `unavailable` (no buffer) |
+//! | POST | `/api/iqbuffer/clip` | one range of `{"t0", "t1"}` (Unix s), `{"t0_ns", "t1_ns"}` or `{"global_index", "samples"}`, plus `"band"?: {"f_lo", "f_hi"}, "label"?` | `{"recording": clip}`; 404 `not_found` (nothing buffered there), 409 `conflict` (spans a sample-rate change), 503 `unavailable` (no buffer), 507 `insufficient_storage` (no room above the free-space floor) |
 //!
 //! The clip export writes a file and a `Recording` row, so it needs `Authorization: Bearer` and is
 //! audited as `iqbuffer_clip`.
@@ -37,10 +37,9 @@ pub struct IqBufferQuery {
 /// A validated clip request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipStart {
-    /// Start, Unix s (inclusive).
-    pub t0: f64,
-    /// End, Unix s (exclusive).
-    pub t1: f64,
+    /// The samples: `{t0, t1}` Unix s (converted once to ns), `{t0_ns, t1_ns}` or
+    /// `{global_index, samples}`.
+    pub range: hk_store::iqbuffer::ClipRange,
     /// Only segments whose tuned window overlaps `(f_lo, f_hi)`, Hz.
     pub band: Option<(f64, f64)>,
     /// User label.
@@ -130,7 +129,7 @@ fn time_s(q: &[(String, String)], key: &str) -> Result<Option<f64>, Fail> {
         .map(|v| {
             v.parse::<f64>()
                 .ok()
-                .filter(|s| s.is_finite() && s.abs() < 9.0e9)
+                .filter(|s| s.is_finite() && (0.0..9.2e9).contains(s))
                 .ok_or_else(|| Fail::invalid(format!("{key} is a time in Unix seconds")))
         })
         .transpose()
@@ -165,14 +164,75 @@ fn status(state: &ApiState, q: &[(String, String)]) -> Result<Value, Fail> {
 }
 
 fn clip(state: &ApiState, body: &Map<String, Value>) -> Result<Applied, Fail> {
-    only(body, &["t0", "t1", "band", "label"])?;
-    let required = |k: &str| {
-        number(body, k)?.ok_or_else(|| Fail::invalid(format!("{k} (Unix seconds) is required")))
+    use hk_store::iqbuffer::ClipRange;
+    only(
+        body,
+        &[
+            "t0",
+            "t1",
+            "t0_ns",
+            "t1_ns",
+            "global_index",
+            "samples",
+            "band",
+            "label",
+        ],
+    )?;
+    let given = |keys: [&str; 2]| {
+        keys.iter()
+            .any(|k| body.get(*k).is_some_and(|v| !v.is_null()))
     };
-    let (t0, t1) = (required("t0")?, required("t1")?);
-    if !(t0 < t1 && t0.abs() < 9.0e9 && t1.abs() < 9.0e9) {
-        return Err(Fail::invalid("t0 and t1 are Unix seconds with t0 < t1"));
-    }
+    let range = match (
+        given(["t0", "t1"]),
+        given(["t0_ns", "t1_ns"]),
+        given(["global_index", "samples"]),
+    ) {
+        (true, false, false) => {
+            let required = |k: &str| {
+                number(body, k)?
+                    .ok_or_else(|| Fail::invalid(format!("{k} (Unix seconds) is required")))
+            };
+            let (t0, t1) = (required("t0")?, required("t1")?);
+            ClipRange::from_unix_s(t0, t1)
+                .ok_or_else(|| Fail::invalid("t0 and t1 are Unix seconds with 0 ≤ t0 < t1"))?
+        }
+        (false, true, false) => {
+            let ns = |k: &str| {
+                body.get(k)
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| Fail::invalid(format!("{k} (integer Unix ns) is required")))
+            };
+            let (t0_ns, t1_ns) = (ns("t0_ns")?, ns("t1_ns")?);
+            if !(0 <= t0_ns && t0_ns < t1_ns) {
+                return Err(Fail::invalid(
+                    "t0_ns and t1_ns are integer Unix ns with 0 ≤ t0_ns < t1_ns",
+                ));
+            }
+            ClipRange::Time { t0_ns, t1_ns }
+        }
+        (false, false, true) => {
+            let int = |k: &str| {
+                body.get(k).and_then(Value::as_u64).ok_or_else(|| {
+                    Fail::invalid(format!("{k} (a non-negative integer) is required"))
+                })
+            };
+            let (start, n) = (int("global_index")?, int("samples")?);
+            match start.checked_add(n) {
+                Some(end) if n > 0 => ClipRange::Index { start, end },
+                _ => {
+                    return Err(Fail::invalid(
+                        "samples must be at least 1 and global_index + samples an index",
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(Fail::invalid(
+                "give exactly one range: {t0, t1} (Unix s), {t0_ns, t1_ns} (Unix ns) or \
+                 {global_index, samples}",
+            ));
+        }
+    };
     let band = match body.get("band") {
         None | Some(Value::Null) => None,
         Some(Value::Object(b)) => {
@@ -193,18 +253,14 @@ fn clip(state: &ApiState, body: &Map<String, Value>) -> Result<Applied, Fail> {
         Some(Value::String(s)) => Some(s.clone()),
         Some(_) => return Err(Fail::invalid("label is a string")),
     };
-    let request = ClipStart {
-        t0,
-        t1,
-        band,
-        label,
-    };
+    let request = ClipStart { range, band, label };
     let recording = control(state)?.clip(&request).map_err(|f| {
         let code = match f.code.as_str() {
             "invalid" => "invalid",
             "not_found" => "not_found",
             "conflict" => "conflict",
             "unavailable" => "unavailable",
+            "insufficient_storage" => "insufficient_storage",
             _ => "failed",
         };
         Fail::new(f.status, code, f.message)

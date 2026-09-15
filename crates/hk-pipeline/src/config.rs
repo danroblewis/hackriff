@@ -239,8 +239,12 @@ pub struct PipelineConfig {
     /// and scheduler-driven runs (their class covers every window they visit).
     pub live_window_class: bool,
     /// Rolling IQ capture buffer (T-157, [`crate::iqbuffer`]): on by default for every run that
-    /// is not a lossless replay, 2 GiB or 10 min; `HK_IQ_BUFFER*` override it.
+    /// is not a lossless replay, a 2 min retention window; `HK_IQ_RETENTION`, `HK_IQ_BUFFER_MAX`
+    /// and `HK_IQ_BUFFER` override it (`hk serve --iq-retention/--iq-buffer-max` on top).
     pub iq_buffer: hk_store::iqbuffer::IqBufferConfig,
+    /// Filesystem probes of the IQ capture buffer (`None`: the real filesystem); tests inject a
+    /// full disk or a slow writer.
+    pub iq_buffer_hooks: Option<Arc<dyn hk_store::iqbuffer::IqBufferHooks>>,
 }
 
 /// Smallest display FFT size.
@@ -400,6 +404,7 @@ impl PipelineConfig {
             device_hw: None,
             live_window_class: false,
             iq_buffer: hk_store::iqbuffer::IqBufferConfig::from_env(),
+            iq_buffer_hooks: None,
         })
     }
 }

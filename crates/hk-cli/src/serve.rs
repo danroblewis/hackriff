@@ -87,6 +87,8 @@ pub struct ServeOptions {
     pub listen: crate::pipeline::ListenArgs,
     /// Compute provider (T-056).
     pub compute: crate::pipeline::ComputeArgs,
+    /// Rolling IQ capture buffer retention and cap (T-157).
+    pub iq_buffer: crate::pipeline::IqBufferArgs,
 }
 
 /// The stream class for a recording (`hk_pipeline::class`).
@@ -138,6 +140,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                     spectrum_fft_len: Some(opts.fft_len),
                     spectrum_rows_per_s: Some(opts.rows_per_s),
                     compute: opts.compute.clone(),
+                    iq_buffer: opts.iq_buffer.clone(),
                 },
                 &registry,
             )?;
@@ -181,6 +184,8 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
             cfg.settings.spectrum_fft_len = opts.fft_len;
             cfg.settings.spectrum_rows_per_s = opts.rows_per_s;
             opts.compute.apply(&mut cfg.settings);
+            opts.iq_buffer
+                .apply(&mut cfg.iq_buffer, Some(replay.info.sample_rate_hz));
             cfg.source_class = replay.class;
             cfg.lossless = !*realtime;
             if let Some(hw) = &replay.meta.global.hw {
@@ -333,6 +338,7 @@ mod tests {
             token: Some(TOKEN.into()),
             listen: Default::default(),
             compute: Default::default(),
+            iq_buffer: Default::default(),
         })
         .unwrap();
         assert!(live_control.is_none(), "no live control over a recording");
@@ -379,6 +385,7 @@ mod tests {
             token: Some(TOKEN.into()),
             listen: Default::default(),
             compute: Default::default(),
+            iq_buffer: Default::default(),
         })
         .err()
         .expect("no driver in this build");

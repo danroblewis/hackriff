@@ -47,6 +47,8 @@ struct Args {
     listen: hk_cli::pipeline::ListenArgs,
     #[command(flatten)]
     compute: hk_cli::pipeline::ComputeArgs,
+    #[command(flatten)]
+    iq_buffer: hk_cli::pipeline::IqBufferArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -74,5 +76,6 @@ fn main() -> anyhow::Result<()> {
         calibration: a.calibration,
         listen: a.listen,
         compute: a.compute,
+        iq_buffer: a.iq_buffer,
     })
 }

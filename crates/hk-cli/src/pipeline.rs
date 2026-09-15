@@ -208,6 +208,8 @@ pub struct DaemonArgs {
     pub listen: ListenArgs,
     /// Compute provider (T-056).
     pub compute: ComputeArgs,
+    /// Rolling IQ capture buffer retention and cap (T-157).
+    pub iq_buffer: IqBufferArgs,
 }
 
 /// Listen limits (T-066) for `hk serve` and `hackriffd`. Unset flags keep the plan's
@@ -275,6 +277,53 @@ impl ComputeArgs {
             settings.compute.stft = None;
             settings.compute.pfb = None;
         }
+    }
+}
+
+/// Rolling IQ capture buffer (T-157) for `hk serve` and `hackriffd`. Unset flags keep
+/// `HK_IQ_RETENTION` / `HK_IQ_BUFFER_MAX` or the defaults.
+#[derive(clap::Args, Clone, Debug, Default, PartialEq)]
+pub struct IqBufferArgs {
+    /// Rolling IQ capture buffer retention window, e.g. 90s, 2m, 1h (default 2m;
+    /// HK_IQ_RETENTION). 0 or off disables the buffer.
+    #[arg(
+        long = "iq-retention",
+        value_name = "DURATION",
+        value_parser = hk_store::iqbuffer::parse_duration_s
+    )]
+    pub retention_s: Option<f64>,
+    /// Hard size cap of the IQ capture buffer, e.g. 512MiB, 8GiB (HK_IQ_BUFFER_MAX). The quota
+    /// is retention x the device's highest sample rate x 2 bytes/sample, or this cap if smaller.
+    #[arg(
+        long = "iq-buffer-max",
+        value_name = "SIZE",
+        value_parser = hk_store::iqbuffer::parse_size_bytes
+    )]
+    pub max_bytes: Option<u64>,
+}
+
+impl IqBufferArgs {
+    /// Applies the flags over `cfg` (which already carries the environment) and sizes the implied
+    /// quota by `max_rate_hz`, the device's highest configurable sample rate.
+    pub fn apply(&self, cfg: &mut hk_store::iqbuffer::IqBufferConfig, max_rate_hz: Option<f64>) {
+        if let Some(s) = self.retention_s {
+            cfg.retention_s = s;
+        }
+        if let Some(b) = self.max_bytes {
+            cfg.max_bytes = Some(b);
+        }
+        if max_rate_hz.is_some() {
+            cfg.max_rate_hz = max_rate_hz;
+        }
+    }
+}
+
+/// The highest sample rate a device can be configured to, Hz.
+pub fn max_rate_hz(caps: &SourceCapabilities) -> Option<f64> {
+    use hk_core::source::SampleRates;
+    match &caps.sample_rates {
+        SampleRates::Continuous { max_hz, .. } => Some(*max_hz),
+        SampleRates::Discrete(rates) => rates.iter().copied().reduce(f64::max),
     }
 }
 
@@ -1114,6 +1163,8 @@ pub struct LiveOptions {
     pub spectrum_rows_per_s: Option<f64>,
     /// Compute provider (T-056).
     pub compute: ComputeArgs,
+    /// Rolling IQ capture buffer retention and cap (T-157).
+    pub iq_buffer: IqBufferArgs,
 }
 
 /// A running live pipeline.
@@ -1154,6 +1205,10 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
         cfg.settings.spectrum_rows_per_s = r;
     }
     opts.compute.apply(&mut cfg.settings);
+    opts.iq_buffer.apply(
+        &mut cfg.iq_buffer,
+        max_rate_hz(&live.control.capabilities()),
+    );
     cfg.source_class = class;
     // A radio cannot pause: never lossless (Pipeline::start would refuse it anyway).
     cfg.lossless = false;
@@ -1274,6 +1329,7 @@ pub fn run_live(args: &RunArgs) -> anyhow::Result<RunSummary> {
             spectrum_fft_len: None,
             spectrum_rows_per_s: None,
             compute: args.compute.clone(),
+            iq_buffer: IqBufferArgs::default(),
         },
         &registry,
     )?;
@@ -1344,6 +1400,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
                 spectrum_fft_len: None,
                 spectrum_rows_per_s: None,
                 compute: args.compute.clone(),
+                iq_buffer: args.iq_buffer.clone(),
             },
             &registry,
         )?;
@@ -1396,6 +1453,8 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
         args.calibration.as_deref(),
     )?;
     args.compute.apply(&mut cfg.settings);
+    args.iq_buffer
+        .apply(&mut cfg.iq_buffer, Some(rec.info.sample_rate_hz));
     cfg.source_class = class;
     // Explicit opt-in, as for `hk replay` (a live source leaves this off).
     cfg.lossless = args.unpaced;
@@ -1539,7 +1598,53 @@ mod tests {
             calibration: None,
             listen: ListenArgs::default(),
             compute: ComputeArgs::default(),
+            iq_buffer: IqBufferArgs::default(),
         }
+    }
+
+    #[test]
+    fn the_iq_buffer_flags_parse_and_set_retention_and_quota() {
+        use clap::Parser;
+        use hk_store::iqbuffer::IqBufferConfig;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            iq: IqBufferArgs,
+        }
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("hk").chain(args.iter().copied())).map(|c| c.iq)
+        };
+        assert_eq!(parse(&[]).unwrap(), IqBufferArgs::default());
+        let a = parse(&["--iq-retention", "90s", "--iq-buffer-max", "512MiB"]).unwrap();
+        assert_eq!((a.retention_s, a.max_bytes), (Some(90.0), Some(512 << 20)));
+        for (text, s) in [("2m", 120.0), ("1h", 3600.0), ("0", 0.0), ("off", 0.0)] {
+            let r = parse(&["--iq-retention", text]).unwrap().retention_s;
+            assert_eq!(r, Some(s), "{text}");
+        }
+        let m = parse(&["--iq-buffer-max", "8GiB"]).unwrap().max_bytes;
+        assert_eq!(m, Some(8 << 30));
+        assert!(parse(&["--iq-retention", "soon"]).is_err());
+        assert!(parse(&["--iq-buffer-max", "lots"]).is_err());
+        // quota = min(retention x highest rate x 2 bytes/sample, max).
+        let mut cfg = IqBufferConfig::default();
+        a.apply(&mut cfg, Some(20e6));
+        assert_eq!(
+            (cfg.retention_s, cfg.max_bytes, cfg.quota_bytes()),
+            (90.0, Some(512 << 20), 512 << 20)
+        );
+        let mut cfg = IqBufferConfig::default();
+        parse(&["--iq-retention", "1m"])
+            .unwrap()
+            .apply(&mut cfg, Some(2.4e6));
+        assert_eq!(
+            (cfg.max_bytes, cfg.quota_bytes()),
+            (None, 60 * 2_400_000 * 2)
+        );
+        let mut cfg = IqBufferConfig::default();
+        parse(&["--iq-retention", "off"])
+            .unwrap()
+            .apply(&mut cfg, Some(20e6));
+        assert!(!cfg.active(false));
     }
 
     #[test]
@@ -1865,6 +1970,7 @@ mod tests {
                 spectrum_fft_len: Some(1024),
                 spectrum_rows_per_s: None,
                 compute: ComputeArgs::default(),
+                iq_buffer: IqBufferArgs::default(),
             },
             &StreamRegistry::new(),
         )

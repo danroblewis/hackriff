@@ -180,8 +180,7 @@ impl hk_api::IqBufferControl for PipelineIqBuffer {
         use hk_pipeline::iqbuffer::{ClipFailure, ClipRequest};
         self.0
             .export_clip(&ClipRequest {
-                t0_s: r.t0,
-                t1_s: r.t1,
+                range: r.range,
                 band: r.band,
                 label: r.label.clone(),
             })
@@ -192,6 +191,7 @@ impl hk_api::IqBufferControl for PipelineIqBuffer {
                     ClipFailure::Invalid(_) | ClipFailure::TooLarge(_) => (400, "invalid"),
                     ClipFailure::NotFound(_) => (404, "not_found"),
                     ClipFailure::Conflict(_) => (409, "conflict"),
+                    ClipFailure::NoSpace(_) => (507, "insufficient_storage"),
                     ClipFailure::Failed(_) => (500, "failed"),
                 };
                 hk_api::IqBufferFailure {
