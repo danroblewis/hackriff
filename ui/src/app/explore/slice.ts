@@ -1,8 +1,11 @@
 // Explore sidebar and focus state (ADR-0013 §3.1). Owner: T-151. Top-level keys: focus, inventory,
 // selections.
-import type { Row as InventoryRow } from "../../inventory";
 import type { Selection } from "../../selections";
 import type { AppState } from "../state";
+// `./inventory` (the richer `/api/inventory` row shape) imports `InventoryTab`/`InventorySortKey`
+// from this file as types only, so this reverse import is also type-only: nothing here runs before
+// the other module is initialised.
+import type { Row as InventoryRow } from "./inventory";
 
 /** What the right focus panel shows (Explore). */
 export type Focus = { kind: "none" } | { kind: "signal"; id: string } | { kind: "selection"; id: string };
@@ -36,3 +39,18 @@ export const focusSignal = (id: string) => (s: AppState): Partial<AppState> => {
 };
 
 export const focusSelection = (id: string) => (): Partial<AppState> => ({ focus: { kind: "selection", id } });
+
+export const setInventoryTab = (tab: InventoryTab) => (s: AppState): Partial<AppState> => ({ inventory: { ...s.inventory, tab } });
+
+export const setInventorySort = (sort: InventorySlice["sort"]) => (s: AppState): Partial<AppState> => ({ inventory: { ...s.inventory, sort } });
+
+/** Replaces the loaded rows (a fresh poll or post-action reload); clears any poll error. */
+export const setInventoryRows = (rows: Readonly<Record<string, InventoryRow>>, loadedAtS: number) => (s: AppState): Partial<AppState> => ({
+  inventory: { ...s.inventory, rows, loadedAtS, error: null },
+});
+
+export const setInventoryError = (error: string) => (s: AppState): Partial<AppState> => ({ inventory: { ...s.inventory, error } });
+
+/** Mirrors `SelectionStore`'s list into the store (§3.2); `sync` is a short status string
+ * (`selections.ts` `syncText`). */
+export const setSelections = (list: readonly Selection[], sync: string): Partial<AppState> => ({ selections: { list, sync } });
