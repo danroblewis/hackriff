@@ -23,7 +23,8 @@
 //!   change is a `PROVENANCE_CHANGE`, and [`MockStats::uncovered_samples`] counts noise-filled
 //!   output.
 //! - **Gain:** output = served IQ × 10^((G − G_rec)/20), G = LNA + VGA + 11 dB when the amp is on
-//!   (G_rec from the recording's provenance; unknown gains read as 0 dB), then rounded to int8
+//!   (G_rec from the recording's provenance; a recording without one is taken as captured at
+//!   [`UNRECORDED_GAINS`], LNA 24 / VGA 20 / amp off, and opens there), then rounded to int8
 //!   with saturation like the HackRF ADC. A block whose clipped components (codes −128/127) exceed
 //!   [`MockOptions::overload_clip_fraction`] marks the tune state `overload` (sticky until the next
 //!   tune/gain change, a `PROVENANCE_CHANGE`), and a recording captured overloaded stays
@@ -97,6 +98,14 @@ use crate::block::{BlockHeader, Discontinuity, ProvenanceHandle};
 pub const NAME: &str = "mock-sdr";
 /// Nominal HackRF RF amplifier gain used by the gain model, dB.
 pub const AMP_GAIN_DB: f64 = 11.0;
+/// Gain reference for a recording without `hackriff:provenance` (unknown capture gains): a
+/// nominal HackRF working gain, the scheduler's default. The replay's synthesised 0 dB would make
+/// any working gain a full-gain boost that saturates the 8-bit output.
+pub const UNRECORDED_GAINS: Gains = Gains {
+    lna_db: 24.0,
+    vga_db: 20.0,
+    amp_on: false,
+};
 
 impl Coverage {
     /// The provenance `antenna_port` naming this coverage.
@@ -213,7 +222,10 @@ pub struct Recording {
     pub center_hz: f64,
     /// Recorded rate, Hz.
     pub sample_rate_hz: f64,
-    /// The recording's provenance (replay rules: capture, global or synthesised).
+    /// Whether the recording carries `hackriff:provenance` (so its capture gains are known).
+    pub gains_recorded: bool,
+    /// The recording's provenance (replay rules: capture, global or synthesised; gains
+    /// [`UNRECORDED_GAINS`] when not recorded).
     pub provenance: Provenance,
     /// Time of the first recorded sample.
     pub start_time: Timestamp,
@@ -266,12 +278,25 @@ impl Recording {
         let floor_power = estimate_floor_power(&samples)
             .filter(|p| p.is_finite() && *p > 0.0)
             .unwrap_or(QUANTISATION_POWER);
+        let gains_recorded = meta.global.provenance.is_some()
+            || meta.captures.iter().any(|c| c.provenance.is_some());
+        let mut provenance = first.provenance.get().clone();
+        if !gains_recorded {
+            // The replay synthesises 0 dB gains for a recording without `hackriff:provenance`.
+            // Taken as the gain reference, any working gain would scale it by that whole gain
+            // (44 dB at the scheduler's defaults: ×158, saturating every sample), so an unknown
+            // capture gain is the nominal working gain instead.
+            provenance.tune.lna_db = UNRECORDED_GAINS.lna_db;
+            provenance.tune.vga_db = UNRECORDED_GAINS.vga_db;
+            provenance.tune.amp_on = UNRECORDED_GAINS.amp_on;
+        }
         Ok(Self {
             path,
             meta,
             center_hz: first.provenance.tune.center_hz,
             sample_rate_hz,
-            provenance: first.provenance.get().clone(),
+            gains_recorded,
+            provenance,
             start_time: first.time.host_time,
             floor_power,
         })

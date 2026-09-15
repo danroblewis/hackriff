@@ -2,7 +2,8 @@
 //!
 //! # Rule `gnss-cell` (this slice)
 //!
-//! Applies to `noise-floor-rise` anomalies and events from [`CorrelatorConfig::sources`]
+//! Applies to `noise-floor-rise` anomalies and the novelty alarm kinds ([`CORRELATED_KINDS`],
+//! T-122), and events from [`CorrelatorConfig::sources`]
 //! (default `gpsjam`). A candidate must pass every gate; its score is a product, so any factor at
 //! 0 removes it:
 //!
@@ -52,6 +53,17 @@ use crate::geo::{Site, distance_km};
 
 /// Rule set id and version written to `Explanation::rule_version`.
 pub const RULE_VERSION: &str = "hk-context.gnss-cell@1";
+/// Anomaly kinds the rules apply to: floor rises (C08) and the C12 novelty alarm kinds (T-122,
+/// ADR-0012 §7.4 stages 2–3; the band gate keeps an event from explaining an anomaly outside its
+/// bands). Open-set `novelty` has no rule.
+pub const CORRELATED_KINDS: [AnomalyKind; 6] = [
+    AnomalyKind::NoiseFloorRise,
+    AnomalyKind::LevelAboveBaseline,
+    AnomalyKind::BusierThanBaseline,
+    AnomalyKind::QuieterThanBaseline,
+    AnomalyKind::ChangePoint,
+    AnomalyKind::NewEmitter,
+];
 /// Ranking/writing attempts before [`CorrelateError::Unsettled`].
 pub const MAX_ATTEMPTS: usize = 3;
 
@@ -259,7 +271,7 @@ impl Correlator {
         feed_states: &BTreeMap<String, FeedState>,
         now: Timestamp,
     ) -> Result<Vec<Candidate>, CorrelateError> {
-        if anomaly.kind != AnomalyKind::NoiseFloorRise {
+        if !CORRELATED_KINDS.contains(&anomaly.kind) {
             return Ok(Vec::new());
         }
         if let Some(s) = site {

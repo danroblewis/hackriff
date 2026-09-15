@@ -142,6 +142,8 @@ struct Inner {
     next_close_ns: Option<i64>,
     first_ns: Option<i64>,
     det_cursor_ns: i64,
+    /// Emitters counted as first sightings over the last close's window.
+    sighted: std::collections::HashSet<hk_model::ids::EmitterId>,
     repo: Option<Repository>,
     unit: PowerUnit,
     stats: OccupancyServiceStats,
@@ -170,6 +172,8 @@ pub struct OccupancyService {
     store_log: Mutex<Option<ObservationStore>>,
     stop: AtomicBool,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// T-128: the run's attention service, fed at each close.
+    attention: Mutex<Option<Arc<crate::attention::AttentionService>>>,
 }
 
 /// The T-115 observation log as a visit source (overload is not in its visits; §2.6 suspect
@@ -503,6 +507,7 @@ impl OccupancyService {
                 next_close_ns: None,
                 first_ns: None,
                 det_cursor_ns: i64::MIN,
+                sighted: std::collections::HashSet::new(),
                 repo: None,
                 unit: PowerUnit::Dbfs,
                 stats,
@@ -512,6 +517,7 @@ impl OccupancyService {
             store_log: Mutex::new(None),
             stop: AtomicBool::new(false),
             thread: Mutex::new(None),
+            attention: Mutex::new(None),
         })
     }
 
@@ -625,6 +631,53 @@ impl OccupancyService {
             .stream_time_ns
             .load(std::sync::atomic::Ordering::Relaxed);
         (t > 0).then_some(t)
+    }
+
+    /// T-128: feeds each close to `attention` (baselines, first sightings, candidates).
+    pub fn set_attention(&self, attention: Option<Arc<crate::attention::AttentionService>>) {
+        *self
+            .attention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = attention;
+    }
+
+    fn attention(&self) -> Option<Arc<crate::attention::AttentionService>> {
+        self.attention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Inventory emitters first seen inside `iv` within the observed bands of `rows`.
+    fn first_sightings(&self, inner: &mut Inner, iv: TimeRange, rows: &[OccupancyStat]) -> u64 {
+        if inner.repo.is_none() {
+            inner.repo = Repository::open(&self.db_path).ok();
+        }
+        let Some(repo) = inner.repo.as_ref() else {
+            inner.stats.errors += 1;
+            return 0;
+        };
+        // The window reaches back one interval: an emitter first seen in the previous interval
+        // but written to the inventory after its close counts here, once (the previous window's
+        // ids are remembered).
+        let window = TimeRange::new(iv.start.saturating_add_nanos(-iv.duration_ns()), iv.end);
+        let mut seen = std::collections::HashSet::new();
+        for r in rows {
+            let OccupancySubject::Band { freq } = r.subject else {
+                continue;
+            };
+            match repo.emitters_in_region(&Region::new(freq, window)) {
+                Ok(es) => seen.extend(
+                    es.iter()
+                        .filter(|e| e.first_seen >= window.start && e.first_seen < window.end)
+                        .map(|e| e.id),
+                ),
+                Err(_) => inner.stats.errors += 1,
+            }
+        }
+        let new = seen.difference(&inner.sighted).count() as u64;
+        inner.sighted = seen;
+        new
     }
 
     fn detections(&self, inner: &mut Inner, span: TimeRange) -> Vec<DetectionExtent> {
@@ -769,6 +822,16 @@ impl OccupancyService {
         inner.stats.intervals_closed += 1;
         if rows.is_empty() {
             return;
+        }
+        // T-128: the interval's own rows (not the hour rollup) fold into the baselines, the
+        // inventory's first sightings feed the new-emitter rate, and candidates are re-scored.
+        // This thread never touches samples. Gain-state key 0 (single/unknown): levels are above
+        // the local floor, so a gain step moves floor and level together.
+        if let Some(a) = self.attention() {
+            let own: Vec<OccupancyStat> =
+                rows.iter().filter(|r| r.interval == iv).cloned().collect();
+            let k = self.first_sightings(inner, iv, &own);
+            a.ingest_interval(&own, k, iv.end, 0);
         }
         match inner.store.as_mut().map(|s| s.append(&rows)) {
             Some(Ok(n)) => inner.stats.rows_written += n as u64,

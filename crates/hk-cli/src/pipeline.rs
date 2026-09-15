@@ -506,12 +506,93 @@ impl hk_api::recipes::RecipeControl for PipelineRecipes {
 /// `AttentionService` (`hk_pipeline::attention`).
 pub struct PipelineAttention(pub Arc<hk_pipeline::attention::AttentionService>);
 
+/// T-122: the run's novelty alarm service behind `/api/anomalies*`, offering the `anomalies`
+/// stream. Dismissals use the engine's sample clock (stream time before any snapshot). T-128 moves
+/// construction next to the attention loop that calls `AlarmService::observe`.
+fn alarm_control(
+    handle: &PipelineHandle,
+    registry: &StreamRegistry,
+    db: &Arc<Mutex<Repository>>,
+) -> anyhow::Result<Arc<hk_pipeline::alarms::AlarmService>> {
+    let counters = handle.counters();
+    let clock = Arc::new(move || {
+        let ns = counters
+            .stream_time_ns
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if ns > 0 {
+            hk_model::Timestamp::from_unix_nanos(ns)
+        } else {
+            hk_model::Timestamp::now()
+        }
+    });
+    let reg = registry.clone();
+    let sink: hk_pipeline::StreamSink = Arc::new(move |h, p| reg.register(h, p));
+    let service = hk_pipeline::alarms::AlarmService::open(Arc::clone(db), Some(&sink), clock)
+        .context("opening the novelty alarm service (T-122)")?;
+    Ok(Arc::new(service))
+}
+
+/// T-122: the novelty alarm service behind the API's [`hk_api::anomalies::AnomalyControl`].
+pub struct PipelineAnomalies(pub Arc<hk_pipeline::alarms::AlarmService>);
+
+fn anomaly_fail(e: hk_pipeline::alarms::AlarmFail) -> hk_api::anomalies::AnomalyFail {
+    use hk_api::anomalies::AnomalyFail as A;
+    use hk_pipeline::alarms::AlarmFail as P;
+    match e {
+        P::NotFound => A::NotFound,
+        P::Conflict(m) => A::Conflict(m),
+        P::Failed(m) => A::Failed(m),
+    }
+}
+
+impl hk_api::anomalies::AnomalyControl for PipelineAnomalies {
+    fn list(
+        &self,
+        q: &hk_model::repo::alarms::AnomalyQuery,
+    ) -> Result<
+        (Vec<hk_model::repo::alarms::AnomalyView>, Option<usize>),
+        hk_api::anomalies::AnomalyFail,
+    > {
+        self.0.list(q).map_err(anomaly_fail)
+    }
+
+    fn get(
+        &self,
+        id: hk_model::AnomalyId,
+    ) -> Result<hk_model::repo::alarms::AnomalyView, hk_api::anomalies::AnomalyFail> {
+        self.0.get(id).map_err(anomaly_fail)
+    }
+
+    fn dismiss(
+        &self,
+        id: hk_model::AnomalyId,
+        note: Option<String>,
+    ) -> Result<hk_model::repo::alarms::AnomalyView, hk_api::anomalies::AnomalyFail> {
+        self.0.dismiss(id, note).map_err(anomaly_fail)
+    }
+
+    fn reopen(
+        &self,
+        id: hk_model::AnomalyId,
+    ) -> Result<hk_model::repo::alarms::AnomalyView, hk_api::anomalies::AnomalyFail> {
+        self.0.reopen(id).map_err(anomaly_fail)
+    }
+
+    fn suppressions(&self) -> serde_json::Value {
+        self.0.suppressions()
+    }
+}
+
 /// T-119: opens the run's attention service over its database and data directory. Stamps
 /// API-created sites and weight rows with stream time (the wall clock before any frame).
 fn attention_control(
     handle: &PipelineHandle,
     db: &Arc<Mutex<Repository>>,
 ) -> anyhow::Result<Arc<dyn hk_api::attention::AttentionControl>> {
+    // T-128: the run's own service (fed by occupancy and the scheduler) when it opened.
+    if let Some(service) = handle.attention() {
+        return Ok(Arc::new(PipelineAttention(service)));
+    }
     let counters = handle.counters();
     let clock_counters = Arc::clone(&counters);
     let clock = Arc::new(move || {
@@ -639,6 +720,7 @@ pub fn serve_api(
         .with("inspector", recipes.inspector_service()); // T-088 (T-089/T-092 extend it)
     let tcp = start_stream_tcp(registry, &openers, &token)?;
     let attention = attention_control(handle, &db)?; // T-119
+    let alarms = alarm_control(handle, registry, &db)?; // T-122
     let state = ApiState {
         streams: registry.clone(),
         history: None,
@@ -669,12 +751,16 @@ pub fn serve_api(
         observations: handle.observation_store(),                         // T-115
         attention: Some(attention),                                       // T-119
         scheduler: Some(Arc::new(PipelineScheduler(handle.scheduler_hub()))), // T-127
-        reports: Some(Arc::new(PipelineReports(ReportService::new(
-            None,
-            Some(handle.floor_product()),
-            handle.observation_store(),
-            Arc::clone(&report_db),
-        )))), // T-121
+        reports: Some(Arc::new(PipelineReports(
+            ReportService::new(
+                None,
+                Some(handle.floor_product()),
+                handle.observation_store(),
+                Arc::clone(&report_db),
+            )
+            .with_attention(Some(handle.occupancy()), handle.attention()), // T-128
+        ))), // T-121
+        anomalies: Some(Arc::new(PipelineAnomalies(alarms))),             // T-122
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

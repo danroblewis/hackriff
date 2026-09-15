@@ -109,6 +109,8 @@ pub enum AnomalyKind {
     LevelAboveBaseline,
     /// The adaptive baseline diverged from its frozen reference (C12 change point, ADR-0012 §7).
     ChangePoint,
+    /// Occupancy below the learned baseline: a usual transmitter went quiet (T-122, ADR-0012 §7.1).
+    QuieterThanBaseline,
 }
 
 /// What an anomaly is about.

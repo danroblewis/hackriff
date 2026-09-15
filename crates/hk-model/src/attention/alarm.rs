@@ -25,6 +25,9 @@ pub enum AlarmKind {
     NewEmitter,
     /// FCO above the baseline pool ("busier than usual").
     BusierThanUsual,
+    /// FCO below the baseline pool ("quieter than usual": a usual transmitter went silent).
+    /// Additive (T-122): occupancy novelty is two-sided, so the sign picks the kind.
+    QuieterThanUsual,
     /// The adaptive baseline diverged from the frozen reference (CUSUM).
     ChangePoint,
 }
@@ -36,6 +39,7 @@ impl AlarmKind {
             AlarmKind::LevelAboveBaseline => AnomalyKind::LevelAboveBaseline,
             AlarmKind::NewEmitter => AnomalyKind::NewEmitter,
             AlarmKind::BusierThanUsual => AnomalyKind::BusierThanBaseline,
+            AlarmKind::QuieterThanUsual => AnomalyKind::QuieterThanBaseline,
             AlarmKind::ChangePoint => AnomalyKind::ChangePoint,
         }
     }
@@ -46,19 +50,23 @@ impl AlarmKind {
             AlarmKind::LevelAboveBaseline => "level-above-baseline",
             AlarmKind::NewEmitter => "new-emitter",
             AlarmKind::BusierThanUsual => "busier-than-usual",
+            AlarmKind::QuieterThanUsual => "quieter-than-usual",
             AlarmKind::ChangePoint => "change-point",
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
-        [
-            AlarmKind::LevelAboveBaseline,
-            AlarmKind::NewEmitter,
-            AlarmKind::BusierThanUsual,
-            AlarmKind::ChangePoint,
-        ]
-        .into_iter()
-        .find(|k| k.as_str() == s)
+    /// Every kind.
+    pub const ALL: [AlarmKind; 5] = [
+        AlarmKind::LevelAboveBaseline,
+        AlarmKind::NewEmitter,
+        AlarmKind::BusierThanUsual,
+        AlarmKind::QuieterThanUsual,
+        AlarmKind::ChangePoint,
+    ];
+
+    /// Parses [`AlarmKind::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
     }
 }
 
@@ -318,6 +326,21 @@ pub struct HysteresisState {
 }
 
 impl HysteresisState {
+    /// State rebuilt from the repository on resume (T-122): open or not, and the last clear.
+    pub fn restored(open: bool, last_cleared: Option<Timestamp>) -> Self {
+        Self {
+            above: 0,
+            below: 0,
+            open,
+            last_cleared,
+        }
+    }
+
+    /// When the key last cleared.
+    pub fn last_cleared(&self) -> Option<Timestamp> {
+        self.last_cleared
+    }
+
     /// Whether an alarm is open for this key.
     pub fn is_open(&self) -> bool {
         self.open

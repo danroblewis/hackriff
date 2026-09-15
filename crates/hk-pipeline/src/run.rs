@@ -649,6 +649,9 @@ struct Common {
     compute: hk_dsp::compute::Compute,
     /// Occupancy engine and series (T-118), closed when the run ends.
     occupancy: Arc<crate::occupancy::OccupancyService>,
+    /// T-128: the run's C12 attention service (baselines, candidates), fed by the occupancy
+    /// thread and the scheduler; `None` when it could not open.
+    attention: Option<Arc<crate::attention::AttentionService>>,
     /// T-115: the observation log (`None` when it could not be opened).
     observations: Option<crate::observe::ObservationLog>,
     /// T-127: the scheduler as the API sees it (snapshot + lease commands), shared by segments.
@@ -769,6 +772,16 @@ impl Pipeline {
             Arc::clone(&counters),
             crate::occupancy::OccupancyConfig::default(),
         );
+        // T-128: one attention service for the run; never fails the run.
+        let attention = crate::attention::AttentionService::open_for_run(
+            &cfg.data_dir,
+            &db_path,
+            Arc::clone(&counters),
+        )
+        .map_err(|e| eprintln!("attention service disabled: {e:#}"))
+        .ok()
+        .map(Arc::new);
+        occupancy.set_attention(attention.clone());
         let common = Common {
             data_dir: cfg.data_dir.clone(),
             db_path,
@@ -776,6 +789,7 @@ impl Pipeline {
             counters,
             compute,
             occupancy,
+            attention,
             product,
             display: Arc::new(DisplayControl::new(DisplaySettings::from_settings(
                 &cfg.settings,
@@ -896,6 +910,7 @@ fn start_segment(
             info.start_time,
             Arc::clone(&common.counters),
             cfg.settings.verify_pois,
+            common.attention.clone(),
         )?)
     } else {
         None
@@ -1623,6 +1638,12 @@ impl PipelineHandle {
     /// The occupancy engine, series and learned channel plan (T-118).
     pub fn occupancy(&self) -> Arc<crate::occupancy::OccupancyService> {
         Arc::clone(&self.sup.common.occupancy)
+    }
+
+    /// The run's attention service (T-128): baselines, candidates, sites; `None` when it could
+    /// not open.
+    pub fn attention(&self) -> Option<Arc<crate::attention::AttentionService>> {
+        self.sup.common.attention.clone()
     }
 
     /// The observation log (T-115), shared with `/api/observations`; `None` when it could not be

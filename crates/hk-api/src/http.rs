@@ -18,6 +18,7 @@
 //! | `/api/scheduler[?f_lo&f_hi][&t0&t1][&tau_s]` | GET | token | T-127 tier shares, sweep floor, bandit summary, leases, POI + gaps from the observation log ([`crate::schedule`]) |
 //! | `/api/scheduler/arms`, `/api/scheduler/leases[/<id>]` | GET, POST, DELETE | token (header only for mutating) | T-127 bandit arm table; lease list, create, release ([`crate::schedule`]) |
 //! | `/api/report?f_lo&f_hi&t0&t1[&site][&format]` | GET | token | T-121 survey report (`SurveyReport` JSON, or CSV/PNG export) with mandatory coverage and POI ([`crate::reports`]) |
+//! | `/api/anomalies[?f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`, `/api/anomalies/<id>[/dismiss\|/reopen]` | GET, POST | token (header only for mutating) | T-122 anomalies and novelty alarms with explanations; dismiss/reopen ([`crate::anomalies`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -171,6 +172,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-121 reports
     ("GET", "/api/report"),
     // T-122 anomalies
+    ("GET", "/api/anomalies"),
+    ("GET", "/api/anomalies/{id}"),
+    ("POST", "/api/anomalies/{id}/dismiss"),
+    ("POST", "/api/anomalies/{id}/reopen"),
 ];
 
 /// Server settings.
@@ -258,6 +263,9 @@ pub struct ApiState {
     pub scheduler: Option<Arc<dyn crate::schedule::SchedulerControl>>,
     /// T-121: survey reports for `/api/report` ([`crate::reports`]); `None` answers 503.
     pub reports: Option<Arc<dyn crate::reports::ReportControl>>,
+    /// T-122: anomalies and novelty alarms for `/api/anomalies*` ([`crate::anomalies`]); `None`
+    /// answers 503.
+    pub anomalies: Option<Arc<dyn crate::anomalies::AnomalyControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

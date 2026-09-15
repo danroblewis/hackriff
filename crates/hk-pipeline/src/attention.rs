@@ -11,34 +11,190 @@
 //! **Inputs.** [`AttentionService::ingest_occupancy`] is the thin adapter for T-118's
 //! `OccupancyStat` rows (called once per interval close); [`AttentionService::observe`] takes a
 //! prepared fold (history cells, tests); [`AttentionService::on_fix`] takes C06 fixes;
-//! [`AttentionService::score`] ranks measured candidates. Until T-118 lands nothing in the
-//! pipeline calls the inputs, so a served run has sites, weights and empty baselines/candidates.
+//! [`AttentionService::score`] ranks measured candidates.
+//!
+//! **Pipeline wiring (T-128).** The run opens one service ([`AttentionService::open_for_run`]).
+//! T-118's occupancy thread calls [`AttentionService::ingest_interval`] at each 15-min close: the
+//! channel rows fold into the baselines (with real levels above the floor), the inventory's first
+//! sightings in the interval feed the site's [`FirstSightingRate`] (new-emitter novelty), and the
+//! candidates are re-scored. The control thread feeds the candidate table (confirmed tracks,
+//! members with SNR and suspect flags, recipe matches, trust verdicts;
+//! [`crate::candidates`]) and calls [`AttentionService::publish_candidates`] each step boundary;
+//! the scheduler's bandit reads [`AttentionService::provider`]. Neither thread is the sample path.
 //!
 //! All contract time is the sample clock handed in by the caller (ADR-0012 §0); the service's
 //! `clock` (stream time) is used only to stamp API-created sites and weight rows.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use hk_context::occupancy::baseline::{
     BaselineConfig, BaselineCopy, Baselines, FoldOutcome, IntervalObservation, PoolStats,
     from_occupancy_stat, in_pool, maturity, pools,
 };
+use hk_context::occupancy::baseline::{REFERENCE_LEARN_MAX_NOVELTY, res_index};
+use hk_context::occupancy::novelty::FirstSightingRate;
+use hk_context::occupancy::novelty::NoveltyConfig;
 use hk_context::occupancy::score::{CandidateInput, Scorer};
 use hk_context::occupancy::site::{Fix, SiteAssigner};
 use hk_model::Repository;
+use hk_model::attention::baseline::MATURITY_MIN_OBSERVED_S;
 use hk_model::attention::baseline::{
     BaselineResolution, CalKey, HourOfWeek, Maturity, SiteConfig, SiteKey, SiteRecord, SiteSource,
 };
-use hk_model::attention::occupancy::OccupancyStat;
+use hk_model::attention::occupancy::{ChannelKey, OccupancyStat, OccupancySubject};
+use hk_model::attention::report::{BaselineComparison, ChangeEntry, ChangeKind, ComparisonStatus};
+use hk_model::attention::score::new_emitter_novelty;
 use hk_model::attention::score::{InterestingnessProvider, ScoreWeights, SharedInterestingness};
 use hk_model::ids::SiteId;
 use hk_model::time::Timestamp;
-use hk_store::baseline::{BaselineStore, BaselineSubject};
+use hk_model::{FreqRange, Region, TimeRange, TrackId};
+use hk_store::baseline::{BaselineStore, BaselineSubject, SubjectBaseline};
 use serde_json::{Value, json};
 
+use crate::candidates::{
+    CandidateTable, ChannelContext, EvidenceSource, MemberEvidence, class_entropy,
+};
+use crate::chains::TrackDecodes;
 use crate::stats::Counters;
+
+/// How far back scoring looks for an inventory classification of a track, ns.
+const CLASS_LOOKBACK_NS: i64 = 24 * 3_600_000_000_000;
+/// Minimum sample-clock gap between class-entropy snapshot refreshes, ns.
+const CLASS_REFRESH_NS: i64 = 10_000_000_000;
+/// Most inventory emitters one class-entropy refresh reads (the most recently seen).
+pub const CLASS_ROWS_MAX: usize = 2_000;
+/// Longest row `compare_report` compares against a single hour-of-week slot, ns.
+const COMPARE_ROW_MAX_NS: i64 = 3_600_000_000_000;
+
+/// Classified inventory emitters for class entropy: extent and entropy of the latest
+/// classification. Read only by the class-entropy worker thread, never by the control thread.
+pub trait ClassSource: Send + Sync {
+    /// Classified emitters overlapping `region` (at most `limit`, most recently seen first).
+    fn classified(&self, region: &Region, limit: usize) -> Vec<(FreqRange, f64)>;
+}
+
+/// [`ClassSource`] over the run's inventory database.
+struct RepoClasses(Arc<Mutex<Repository>>);
+
+impl ClassSource for RepoClasses {
+    fn classified(&self, region: &Region, limit: usize) -> Vec<(FreqRange, f64)> {
+        let Ok(emitters) = lock(&self.0).emitters_in_region_limited(region, Some(limit)) else {
+            return Vec::new();
+        };
+        emitters
+            .iter()
+            .filter_map(|e| {
+                e.classifications.last().map(|c| {
+                    (
+                        e.freq(),
+                        class_entropy(&c.family, c.confidence, c.open_set_score),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+/// T-128 review: the class-entropy snapshot scoring reads. A worker thread refreshes it; the
+/// control thread only swaps an `Arc` out (no DB I/O, no waiting on a query).
+struct ClassCache {
+    source: Mutex<Arc<dyn ClassSource>>,
+    snapshot: Mutex<Arc<Vec<(FreqRange, f64)>>>,
+    in_flight: AtomicBool,
+    last_request_ns: AtomicI64,
+    refreshes: AtomicU64,
+}
+
+impl ClassCache {
+    fn new(source: Arc<dyn ClassSource>) -> Self {
+        Self {
+            source: Mutex::new(source),
+            snapshot: Mutex::new(Arc::new(Vec::new())),
+            in_flight: AtomicBool::new(false),
+            last_request_ns: AtomicI64::new(i64::MIN),
+            refreshes: AtomicU64::new(0),
+        }
+    }
+
+    /// Spawns the refresh worker; it exits when the returned sender drops (with the service).
+    fn spawn_worker(self: &Arc<Self>) -> Option<SyncSender<Region>> {
+        let (tx, rx) = sync_channel::<Region>(1);
+        let cache = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("hk-attn-class".into())
+            .spawn(move || {
+                while let Ok(region) = rx.recv() {
+                    let source = Arc::clone(&*lock(&cache.source));
+                    let v = Arc::new(source.classified(&region, CLASS_ROWS_MAX));
+                    *lock(&cache.snapshot) = v;
+                    cache.refreshes.fetch_add(1, Ordering::Relaxed);
+                    cache.in_flight.store(false, Ordering::Release);
+                }
+            })
+            .ok()?;
+        Some(tx)
+    }
+}
+
+/// Class entropy of each track from the snapshot emitter covering most of its extent (≥ ½).
+/// Tracks without one are unclassified.
+fn class_entropies(
+    classified: &[(FreqRange, f64)],
+    tracks: &[(TrackId, FreqRange)],
+) -> HashMap<TrackId, f64> {
+    let mut out = HashMap::new();
+    if classified.is_empty() {
+        return out;
+    }
+    for (id, f) in tracks {
+        let best = classified
+            .iter()
+            .map(|(ef, h)| {
+                let overlap = (ef.hi_hz.min(f.hi_hz) - ef.lo_hz.max(f.lo_hz)).max(0.0);
+                (overlap / f.width_hz().max(1.0), *h)
+            })
+            .filter(|(share, _)| *share >= 0.5)
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, h)) = best {
+            out.insert(*id, h);
+        }
+    }
+    out
+}
+
+/// Stouffer combination of per-interval z-scores with weights `w` (`Σ wᵢzᵢ / √Σ wᵢ²`): N(0, 1)
+/// under no change when the intervals are independent.
+fn stouffer(zw: &[(f64, f64)]) -> Option<f64> {
+    let (num, den) = zw
+        .iter()
+        .filter(|(z, w)| z.is_finite() && w.is_finite() && *w > 0.0)
+        .fold((0.0, 0.0), |(n, d), (z, w)| (n + w * z, d + w * w));
+    (den > 0.0).then(|| num / den.sqrt())
+}
+
+/// FCO of each mature reference occupancy pool of `sub` at `slot`.
+fn mature_pool_fcos(sub: &SubjectBaseline, slot: HourOfWeek) -> Vec<f64> {
+    let (_, occ) = pools(sub, slot, None, BaselineCopy::Reference);
+    occ.iter()
+        .filter(|p| p.observed_s >= MATURITY_MIN_OBSERVED_S)
+        .filter_map(PoolStats::fco)
+        .collect()
+}
+
+/// The time a row's visits represent, s (as [`from_occupancy_stat`] weighs a fold).
+pub(crate) fn represented_s(stat: &OccupancyStat) -> f64 {
+    let interval_s = stat.interval.duration_ns() as f64 / 1e9;
+    if stat.n_revisits_all == 0 {
+        return 0.0;
+    }
+    stat.revisit_mean_s
+        .map_or(interval_s, |m| m * stat.n_revisits_all as f64)
+        .min(interval_s)
+}
 
 /// Level-0 cell width of history scheme 1, Hz.
 pub const SCHEME_1_CELL_HZ: f64 = 6250.0;
@@ -109,6 +265,53 @@ pub struct AttentionService {
     provider: Arc<SharedInterestingness>,
     counters: Option<Arc<Counters>>,
     clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
+    /// T-128: candidate evidence, channel novelty and the site's first-sighting rate.
+    cands: Mutex<CandidateState>,
+    /// Class-entropy snapshot, refreshed off the control thread.
+    classes: Arc<ClassCache>,
+    class_tx: Mutex<Option<SyncSender<Region>>>,
+}
+
+/// T-128: what scoring reads besides the baselines.
+#[derive(Default)]
+struct CandidateState {
+    table: CandidateTable,
+    /// Latest fold per learned channel: extent and context.
+    channels: BTreeMap<ChannelKey, (FreqRange, ChannelContext)>,
+    sightings: FirstSightingRate,
+    decodes: Option<Arc<TrackDecodes>>,
+}
+
+/// The evidence one scoring pass reads.
+struct PassEvidence<'a> {
+    channels: &'a BTreeMap<ChannelKey, (FreqRange, ChannelContext)>,
+    new_emitter: Option<f64>,
+    decodes: Option<&'a TrackDecodes>,
+    entropy: HashMap<TrackId, f64>,
+}
+
+impl EvidenceSource for PassEvidence<'_> {
+    fn channel(&self, freq: FreqRange) -> Option<ChannelContext> {
+        // The learned channel overlapping the track most (its share of the track's extent ≥ ½).
+        self.channels
+            .values()
+            .map(|(f, c)| {
+                let overlap = (f.hi_hz.min(freq.hi_hz) - f.lo_hz.max(freq.lo_hz)).max(0.0);
+                (overlap / freq.width_hz().max(1.0), c)
+            })
+            .filter(|(share, _)| *share >= 0.5)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, c)| c.clone())
+    }
+    fn new_emitter(&self) -> Option<f64> {
+        self.new_emitter
+    }
+    fn decodes(&self, track: TrackId) -> u64 {
+        self.decodes.map_or(0, |d| d.get(track))
+    }
+    fn class_entropy(&self, track: TrackId) -> Option<f64> {
+        self.entropy.get(&track).copied()
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -177,21 +380,82 @@ impl AttentionService {
             (r.sites()?, r.score_weights()?)
         };
         let store = BaselineStore::open(data_dir.join("baselines"))?;
-        Ok(Self {
+        Ok(Self::with_store(
+            repo,
+            sites,
+            weights,
+            Some(store),
+            counters,
+            clock,
+        ))
+    }
+
+    /// T-128: the run's service over `data_dir` and its own connection to `db_path`, stamped with
+    /// the run's stream time (the wall clock before any frame).
+    pub fn open_for_run(
+        data_dir: &Path,
+        db_path: &Path,
+        counters: Arc<Counters>,
+    ) -> anyhow::Result<Self> {
+        let repo = Arc::new(Mutex::new(Repository::open(db_path)?));
+        let clock_counters = Arc::clone(&counters);
+        let clock = Arc::new(move || {
+            let ns = clock_counters.stream_time_ns.load(Ordering::Relaxed);
+            if ns > 0 {
+                Timestamp::from_unix_nanos(ns)
+            } else {
+                Timestamp::now()
+            }
+        });
+        Self::open(data_dir, repo, Some(counters), clock)
+    }
+
+    /// T-128: a memory-only service (no baseline store, in-memory database), for a scheduler
+    /// driven without a run (tests).
+    pub fn in_memory() -> anyhow::Result<Self> {
+        let repo = Arc::new(Mutex::new(Repository::open_in_memory()?));
+        let (sites, weights) = {
+            let r = lock(&repo);
+            (r.sites()?, r.score_weights()?)
+        };
+        Ok(Self::with_store(
+            repo,
+            sites,
+            weights,
+            None,
+            None,
+            Arc::new(|| Timestamp::from_unix_nanos(0)),
+        ))
+    }
+
+    fn with_store(
+        repo: Arc<Mutex<Repository>>,
+        sites: Vec<SiteRecord>,
+        weights: ScoreWeights,
+        store: Option<BaselineStore>,
+        counters: Option<Arc<Counters>>,
+        clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
+    ) -> Self {
+        let classes = Arc::new(ClassCache::new(Arc::new(RepoClasses(Arc::clone(&repo)))));
+        let class_tx = Mutex::new(classes.spawn_worker());
+        Self {
+            classes,
+            class_tx,
             repo,
             sites: Mutex::new(SiteAssigner::new(SiteConfig::default(), sites)),
             baselines: Mutex::new(Baselines::new(
                 BaselineConfig::default(),
                 1,
                 CELL_FACTOR,
-                Some(store),
+                store,
             )),
             scorer: Mutex::new(Scorer::default()),
             weights: Mutex::new(weights),
             provider: Arc::new(SharedInterestingness::default()),
             counters,
             clock,
-        })
+            cands: Mutex::new(CandidateState::default()),
+        }
     }
 
     /// The provider the scheduler reads (T-120).
@@ -279,10 +543,347 @@ impl AttentionService {
     pub fn ingest_occupancy(&self, stat: &OccupancyStat, gain: u32) -> Option<FoldOutcome> {
         let (site, cal, obs) = from_occupancy_stat(stat, gain)?;
         let offset = lock(&self.sites).utc_offset_min(site);
+        let (out, pool_fcos) = {
+            let mut b = lock(&self.baselines);
+            let out = b.observe(site, offset, cal, &obs).ok();
+            let pool_fcos = b
+                .key(site, cal)
+                .and_then(|key| b.engines().find(|e| e.state.key == key))
+                .and_then(|e| e.state.subjects.get(&obs.subject))
+                .map(|sub| mature_pool_fcos(sub, HourOfWeek::of(obs.t, offset)))
+                .unwrap_or_default();
+            if let Ok(n) = b.flush(obs.t, false) {
+                self.bump(|c| {
+                    c.attention
+                        .baseline_writes
+                        .fetch_add(n as u64, Ordering::Relaxed);
+                });
+            }
+            (out, pool_fcos)
+        };
+        let o = out?;
+        self.bump(|c| {
+            c.attention.folds.fetch_add(1, Ordering::Relaxed);
+            if o.novelty.novelty > 0.0 {
+                c.attention.novel_folds.fetch_add(1, Ordering::Relaxed);
+            }
+            if o.change_point.is_some() {
+                c.attention.change_points.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        // T-128: the channel's latest novelty and mature pools, for the candidates over it.
+        if let BaselineSubject::Channel { key } = obs.subject {
+            let (lo, hi) = subject_extent(&obs.subject);
+            lock(&self.cands).channels.insert(
+                key,
+                (
+                    FreqRange::new(lo, hi),
+                    ChannelContext {
+                        novelty: o.novelty,
+                        pool_fcos,
+                    },
+                ),
+            );
+        }
+        Some(o)
+    }
+
+    /// T-128: one closed occupancy interval from T-118's occupancy thread. Folds its channel rows
+    /// ([`Self::ingest_occupancy`]), records `first_sightings` (inventory emitters first seen in
+    /// the interval) over the interval's represented observation time into the site's
+    /// first-sighting rate, and re-scores the candidates. The sightings accrue to the baseline
+    /// rate only under a site that accrues baselines and when they are not themselves novel
+    /// (< the alarm "on" level), so a burst of new emitters does not teach the rate. Returns the
+    /// channel rows' fold outcomes (for T-131's alarm service).
+    pub fn ingest_interval(
+        &self,
+        rows: &[OccupancyStat],
+        first_sightings: u64,
+        t_end: Timestamp,
+        gain: u32,
+    ) -> Vec<(OccupancySubject, FoldOutcome)> {
+        let mut folded = Vec::new();
+        let (mut observed_s, mut accrues) = (0.0_f64, false);
+        for r in rows {
+            match r.subject {
+                OccupancySubject::Band { .. } => {
+                    observed_s = observed_s.max(represented_s(r));
+                    accrues |= r.site.accrues_baseline();
+                }
+                OccupancySubject::Channel { .. } => {
+                    if let Some(o) = self.ingest_occupancy(r, gain) {
+                        folded.push((r.subject, o));
+                    }
+                }
+            }
+        }
+        if observed_s > 0.0 {
+            let mut c = lock(&self.cands);
+            let novel = c.sightings.rate().is_some_and(|rate| {
+                new_emitter_novelty(first_sightings, rate, observed_s)
+                    >= REFERENCE_LEARN_MAX_NOVELTY
+            });
+            c.sightings
+                .record(t_end, first_sightings, observed_s, accrues && !novel);
+        }
+        self.publish_candidates(t_end, true);
+        folded
+    }
+
+    /// T-128: a survey report's change vs baseline (ADR-0012 §6.1). Each channel's 15-min (or
+    /// hourly) rows are compared one by one against the reference pool of the row's **own**
+    /// hour-of-week slot under `site` and the row's calibration (finest mature pool), and the
+    /// per-interval z-scores are combined per subject (Stouffer: occupancy weighted by √n_eff,
+    /// level equally), so a long span neither shrinks the variance nor collapses onto one slot.
+    /// Rows longer than 1 h (a span rollup) are not comparable and are skipped. `no-baseline` for
+    /// mobile/unassigned sites or when no row has a baseline subject; `immature` when subjects exist
+    /// but none is mature; otherwise `available` with every level change (`level-above-baseline`,
+    /// combined z ≥ 3, dB above the floor) and occupancy change with |combined z| ≥ 3
+    /// (`busier-than-usual` when positive, `quieter-than-usual` when negative; FCO means weighted
+    /// by the rows' observation weight), largest |z| first.
+    pub fn compare_report(&self, site: SiteKey, rows: &[OccupancyStat]) -> BaselineComparison {
+        let empty = |status| BaselineComparison {
+            status,
+            baseline: None,
+            resolution: None,
+            changes: Vec::new(),
+        };
+        let SiteKey::Site(id) = site else {
+            return empty(ComparisonStatus::NoBaseline);
+        };
+        let Some(offset) = lock(&self.sites).site(id).map(|s| s.utc_offset_min) else {
+            return empty(ComparisonStatus::NoBaseline);
+        };
         let mut b = lock(&self.baselines);
-        let out = b.observe(site, offset, cal, &obs).ok();
-        let _ = b.flush(obs.t, false);
-        out
+        if b.load_site(id, offset).is_err() {
+            return empty(ComparisonStatus::Unavailable);
+        }
+        let z_min = NoveltyConfig::default().z_min;
+        /// One subject's per-interval evidence.
+        #[derive(Default)]
+        struct Acc {
+            subject: Option<OccupancySubject>,
+            occ_zw: Vec<(f64, f64)>,
+            occ_base: f64,
+            occ_obs: f64,
+            occ_w: f64,
+            lvl_zw: Vec<(f64, f64)>,
+            lvl_base: f64,
+            lvl_obs: f64,
+        }
+        let (mut key_used, mut finest) = (None, None);
+        let mut subjects: BTreeMap<BaselineSubject, Acc> = BTreeMap::new();
+        for r in rows {
+            if r.interval.duration_ns() > COMPARE_ROW_MAX_NS {
+                continue;
+            }
+            let Some((_, cal, obs)) = from_occupancy_stat(r, 0) else {
+                continue;
+            };
+            let Some(key) = b.key(site, cal) else {
+                continue;
+            };
+            let Some(e) = b.engines().find(|e| e.state.key == key) else {
+                continue;
+            };
+            let Some(sub) = e.state.subjects.get(&obs.subject) else {
+                continue;
+            };
+            key_used.get_or_insert(key);
+            let n = e.novelty_of(&obs);
+            let Maturity::Mature { resolution } = n.maturity else {
+                continue;
+            };
+            finest = Some(finest.map_or(resolution, |f: BaselineResolution| f.min(resolution)));
+            let (level, occ) = pools(sub, e.slot(obs.t), None, BaselineCopy::Reference);
+            let ri = res_index(resolution);
+            let acc = subjects.entry(obs.subject).or_default();
+            acc.subject.get_or_insert(r.subject);
+            if let (Some(z), Some(l), Some(m)) = (n.level_z, obs.level_db, level[ri].mean_db()) {
+                acc.lvl_zw.push((z, 1.0));
+                acc.lvl_base += m;
+                acc.lvl_obs += l;
+            }
+            if let (Some(z), Some(f), Some(p)) = (n.occupancy_z, obs.fco(), occ[ri].fco()) {
+                acc.occ_zw.push((z, obs.n_eff.max(0.0).sqrt()));
+                acc.occ_base += p * obs.weight_s;
+                acc.occ_obs += f * obs.weight_s;
+                acc.occ_w += obs.weight_s;
+            }
+        }
+        let mut changes = Vec::new();
+        for acc in subjects.values() {
+            let Some(subject) = acc.subject else {
+                continue;
+            };
+            if let Some(z) = stouffer(&acc.lvl_zw)
+                && z >= z_min
+            {
+                let k = acc.lvl_zw.len() as f64;
+                changes.push(ChangeEntry {
+                    subject,
+                    kind: ChangeKind::LevelAboveBaseline,
+                    baseline: acc.lvl_base / k,
+                    observed: acc.lvl_obs / k,
+                    z,
+                });
+            }
+            if let Some(z) = stouffer(&acc.occ_zw)
+                && z.abs() >= z_min
+                && acc.occ_w > 0.0
+            {
+                changes.push(ChangeEntry {
+                    subject,
+                    kind: if z > 0.0 {
+                        ChangeKind::BusierThanUsual
+                    } else {
+                        ChangeKind::QuieterThanUsual
+                    },
+                    baseline: acc.occ_base / acc.occ_w,
+                    observed: acc.occ_obs / acc.occ_w,
+                    z,
+                });
+            }
+        }
+        changes.sort_by(|a, b| b.z.abs().total_cmp(&a.z.abs()));
+        let status = match (finest, key_used) {
+            (Some(_), _) => ComparisonStatus::Available,
+            (None, Some(_)) => ComparisonStatus::Immature,
+            (None, None) => ComparisonStatus::NoBaseline,
+        };
+        if status != ComparisonStatus::Available {
+            changes.clear();
+        }
+        BaselineComparison {
+            status,
+            baseline: key_used,
+            resolution: finest,
+            changes,
+        }
+    }
+
+    /// T-128: the site's current new-emitter novelty (`None` while the rate is immature).
+    pub fn new_emitter_novelty(&self) -> Option<f64> {
+        lock(&self.cands).sightings.novelty()
+    }
+
+    /// T-128: a member detection of `track` (control thread). Returns whether the track is new
+    /// and its latest scored novelty.
+    pub fn on_track_member(&self, track: TrackId, m: &MemberEvidence) -> (bool, f64) {
+        lock(&self.cands).table.on_member(track, m)
+    }
+
+    /// T-128: the detector confirmed `track`.
+    pub fn on_track_confirmed(&self, track: TrackId, freq: FreqRange, recipe_match: bool) {
+        lock(&self.cands)
+            .table
+            .on_confirmed(track, freq, recipe_match);
+    }
+
+    /// T-128: a verification group ended (any verdict): the next pass publishes, so the bandit
+    /// sees whether the candidate is still flagged (ban) or was cleared.
+    pub fn request_publish(&self) {
+        lock(&self.cands).table.mark_changed();
+    }
+
+    /// T-128: `track` closed.
+    pub fn on_track_closed(&self, track: TrackId) {
+        lock(&self.cands).table.on_closed(track);
+    }
+
+    /// T-128: a trust-test verdict reached the candidate with bandit key `key`.
+    pub fn on_trust_tested(&self, key: u64) -> Option<TrackId> {
+        lock(&self.cands).table.on_trust_tested(key)
+    }
+
+    /// T-128: decodes per track (the segment's table).
+    pub(crate) fn set_track_decodes(&self, decodes: Arc<TrackDecodes>) {
+        lock(&self.cands).decodes = Some(decodes);
+    }
+
+    /// T-128: builds the candidates from the table and publishes them through [`Self::score`] when
+    /// a pass is due (every 10 s of sample clock), at once when a confirmed track appeared or
+    /// closed or when `force`. Returns the published version.
+    pub fn publish_candidates(&self, t: Timestamp, force: bool) -> Option<u64> {
+        let inputs = {
+            let mut c = lock(&self.cands);
+            let urgent = c.table.take_changed() || force;
+            {
+                let mut s = lock(&self.scorer);
+                if urgent {
+                    s.expire();
+                } else if !s.due(t, false) {
+                    return None;
+                }
+            }
+            let tracks = c.table.confirmed();
+            self.request_class_refresh(&tracks, t);
+            let snapshot = Arc::clone(&*lock(&self.classes.snapshot));
+            let entropy = class_entropies(&snapshot, &tracks);
+            let new_emitter = c.sightings.novelty();
+            let CandidateState {
+                table,
+                channels,
+                decodes,
+                ..
+            } = &mut *c;
+            let src = PassEvidence {
+                channels,
+                new_emitter,
+                decodes: decodes.as_deref(),
+                entropy,
+            };
+            table.inputs(t.as_unix_nanos(), &src)
+        };
+        self.score(t, false, &inputs)
+    }
+
+    /// Asks the class-entropy worker for a fresh snapshot over the confirmed tracks' extent (the
+    /// last day's classified emitters) when none is in flight and the last request is at least
+    /// [`CLASS_REFRESH_NS`] of sample clock old. Never blocks: a full queue drops the request.
+    fn request_class_refresh(&self, tracks: &[(TrackId, FreqRange)], t: Timestamp) {
+        if tracks.is_empty() {
+            return;
+        }
+        let now = t.as_unix_nanos();
+        let last = self.classes.last_request_ns.load(Ordering::Relaxed);
+        if last != i64::MIN && now >= last && now - last < CLASS_REFRESH_NS {
+            return;
+        }
+        if self.classes.in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let lo = tracks
+            .iter()
+            .map(|x| x.1.lo_hz)
+            .fold(f64::INFINITY, f64::min);
+        let hi = tracks
+            .iter()
+            .map(|x| x.1.hi_hz)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let span = TimeRange::new(
+            t.saturating_add_nanos(-CLASS_LOOKBACK_NS),
+            t.saturating_add_nanos(1),
+        );
+        let region = Region::new(FreqRange::new(lo, hi), span);
+        let sent = lock(&self.class_tx)
+            .as_ref()
+            .is_some_and(|tx| tx.try_send(region).is_ok());
+        if sent {
+            self.classes.last_request_ns.store(now, Ordering::Relaxed);
+        } else {
+            self.classes.in_flight.store(false, Ordering::Release);
+        }
+    }
+
+    /// Class-entropy snapshot refreshes completed (tests, diagnostics).
+    pub fn class_refreshes(&self) -> u64 {
+        self.classes.refreshes.load(Ordering::Relaxed)
+    }
+
+    /// Replaces the class-entropy source (tests).
+    pub fn set_class_source(&self, source: Arc<dyn ClassSource>) {
+        *lock(&self.classes.source) = source;
     }
 
     /// Scores `inputs` at `t` and publishes when due and changed.
@@ -656,9 +1257,10 @@ impl AttentionService {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use hk_context::occupancy::score::BoringEvidence;
     use hk_model::attention::baseline::BaselineResolution;
+    use hk_model::attention::score::InterestingnessProvider as _;
     use hk_model::attention::score::{CandidateSubject, NoveltyScore};
     use hk_model::region::FreqRange;
     use hk_store::baseline::BaselineSubject;
@@ -674,6 +1276,294 @@ mod tests {
             Arc::new(|| Timestamp::from_unix_nanos(7 * 86_400 * 1_000_000_000)),
         )
         .unwrap()
+    }
+
+    /// A 15-min T-118 row at `q` quarter-hours of `subject` under `site` (12 revisits, 75 s apart:
+    /// 900 s represented) with FCO `fco`.
+    pub(crate) fn series_row(
+        q: i64,
+        site: SiteKey,
+        subject: OccupancySubject,
+        fco: f64,
+    ) -> OccupancyStat {
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 69_000,
+            hi_cell: 69_004,
+        };
+        let t0 = 7 * 86_400 * 1_000_000_000i64;
+        let q_ns = 900 * 1_000_000_000i64;
+        let json = serde_json::json!({
+            "schema": 1,
+            "site": {"kind": "mobile"},
+            "subject": {"kind": "channel", "key": key},
+            "interval": TimeRange::new(
+                Timestamp::from_unix_nanos(t0 + q * q_ns),
+                Timestamp::from_unix_nanos(t0 + (q + 1) * q_ns),
+            ),
+            "fco": fco, "fco_all_visits": fco,
+            "n_revisits": 12, "n_occupied": (fco * 12.0).round() as u64, "n_suspect": 0,
+            "n_revisits_all": 12, "observed_s": 6.0, "revisit_mean_s": 75.0,
+            "timing": "statistical",
+            "threshold": serde_json::to_value(
+                hk_model::attention::occupancy::ThresholdSpec::default()
+            ).unwrap(),
+            "threshold_db": -95.0, "guard_clamped": false, "rbw_hz": 6250.0,
+            "unit": "dbfs", "revisit_biased": false,
+        });
+        let mut r: OccupancyStat = serde_json::from_value(json).expect("OccupancyStat shape");
+        r.site = site;
+        r.subject = subject;
+        if matches!(subject, OccupancySubject::Band { .. }) {
+            r.fbo = Some(fco);
+            r.sro = Some(fco);
+        }
+        r
+    }
+
+    /// T-128 item 4: inventory first sightings reach `FirstSightingRate` through the occupancy
+    /// close (`ingest_interval`), so new-emitter novelty is produced, and a track first seen in
+    /// the window carries it into the published candidates.
+    #[test]
+    fn attention_first_sightings_produce_new_emitter_novelty_for_recent_tracks() {
+        let dir = std::env::temp_dir().join(format!("hk-t128-sight-{}", SiteId::new()));
+        let s = service(&dir);
+        let cur = s
+            .set_current_site(SiteSelect {
+                name: Some("home".into()),
+                ..SiteSelect::default()
+            })
+            .unwrap();
+        let id: SiteId = cur["record"]["id"].as_str().unwrap().parse().unwrap();
+        let site = SiteKey::Site(id);
+        let band = OccupancySubject::Band {
+            freq: FreqRange::new(431e6, 433e6),
+        };
+        let t_end = |q: i64| {
+            Timestamp::from_unix_nanos(7 * 86_400 * 1_000_000_000 + (q + 1) * 900_000_000_000)
+        };
+        // 30 h: one new emitter every 12 h is the site's usual rate.
+        let mut before = None;
+        for q in 0..120 {
+            let k = u64::from(q % 48 == 0);
+            s.ingest_interval(&[series_row(q, site, band, 0.1)], k, t_end(q), 0);
+            if q < 90 {
+                assert_eq!(
+                    s.new_emitter_novelty(),
+                    None,
+                    "immature before 24 h at q={q}"
+                );
+            }
+            before = s.new_emitter_novelty();
+        }
+        let before = before.expect("mature after 30 h");
+        // A track is seen and confirmed, then six new emitters appear in the next interval.
+        let track = TrackId::new();
+        let t_track = t_end(120).as_unix_nanos() - 60_000_000_000;
+        s.on_track_member(
+            track,
+            &MemberEvidence {
+                f_lo_hz: 432.0e6,
+                f_hi_hz: 432.01e6,
+                t_ns: t_track,
+                continues: false,
+                snr_db: Some(15.0),
+                suspect: false,
+            },
+        );
+        s.on_track_confirmed(track, FreqRange::new(432.0e6, 432.01e6), false);
+        s.ingest_interval(&[series_row(120, site, band, 0.1)], 6, t_end(120), 0);
+        let after = s.new_emitter_novelty().unwrap();
+        let set = s.provider().snapshot();
+        let c = set
+            .candidates
+            .iter()
+            .find(|c| c.subject == CandidateSubject::Track { id: track })
+            .expect("the confirmed track is a candidate");
+        println!(
+            "T-128 first sightings: usual-rate novelty {before:.3}, after 6 new emitters              {after:.3}; candidate novelty {:.3} (new_emitter {:?})",
+            c.novelty.novelty, c.novelty.new_emitter
+        );
+        assert!(before < 0.1, "the usual rate is not novel: {before}");
+        assert!(after > 0.9, "six new emitters in 15 min are: {after}");
+        assert!(c.novelty.novelty > 0.9 && c.novelty.new_emitter == Some(after));
+        assert!(c.components.class_entropy.is_none(), "unclassified");
+        set.validate().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A class source that blocks in its "query" until released, recording the calling threads.
+    struct GatedClasses {
+        gate: (Mutex<bool>, std::sync::Condvar),
+        calls: AtomicU64,
+        threads: Mutex<Vec<std::thread::ThreadId>>,
+    }
+
+    impl ClassSource for GatedClasses {
+        fn classified(&self, _region: &Region, limit: usize) -> Vec<(FreqRange, f64)> {
+            assert!(limit <= CLASS_ROWS_MAX);
+            lock(&self.threads).push(std::thread::current().id());
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut open = lock(&self.gate.0);
+            while !*open {
+                open = self.gate.1.wait(open).unwrap();
+            }
+            vec![(FreqRange::new(431.99e6, 432.02e6), 0.2)]
+        }
+    }
+
+    fn wait_until(what: &str, f: impl Fn() -> bool) {
+        let t0 = std::time::Instant::now();
+        while !f() {
+            assert!(t0.elapsed().as_secs() < 10, "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// T-128 review item 1: `publish_candidates` on the control path does no inventory I/O. Class
+    /// entropies come from a snapshot a worker thread refreshes; while that refresh is stuck in its
+    /// query, member evidence and publishing still return at once.
+    #[test]
+    fn attention_candidate_publish_does_no_db_io_on_the_control_path() {
+        let dir = std::env::temp_dir().join(format!("hk-t128-class-{}", SiteId::new()));
+        let s = service(&dir);
+        let src = Arc::new(GatedClasses {
+            gate: (Mutex::new(false), std::sync::Condvar::new()),
+            calls: AtomicU64::new(0),
+            threads: Mutex::new(Vec::new()),
+        });
+        s.set_class_source(src.clone());
+        let t0 = 7 * 86_400 * 1_000_000_000i64;
+        let member = |t_ns: i64, lo: f64| MemberEvidence {
+            f_lo_hz: lo,
+            f_hi_hz: lo + 10e3,
+            t_ns,
+            continues: false,
+            snr_db: Some(15.0),
+            suspect: false,
+        };
+        let track = TrackId::new();
+        s.on_track_member(track, &member(t0, 432.0e6));
+        s.on_track_confirmed(track, FreqRange::new(432.0e6, 432.01e6), false);
+        let start = std::time::Instant::now();
+        assert!(
+            s.publish_candidates(Timestamp::from_unix_nanos(t0), false)
+                .is_some()
+        );
+        let publish_ms = start.elapsed().as_secs_f64() * 1e3;
+        // The refresh is now blocked inside the query on the worker thread.
+        wait_until("the refresh to start", || {
+            src.calls.load(Ordering::SeqCst) == 1
+        });
+        let start = std::time::Instant::now();
+        let other = TrackId::new();
+        s.on_track_member(other, &member(t0 + 20_000_000_000, 433.0e6));
+        let member_ms = start.elapsed().as_secs_f64() * 1e3;
+        s.on_track_confirmed(other, FreqRange::new(433.0e6, 433.01e6), false);
+        let start = std::time::Instant::now();
+        assert!(
+            s.publish_candidates(Timestamp::from_unix_nanos(t0 + 20_000_000_000), false)
+                .is_some()
+        );
+        let blocked_publish_ms = start.elapsed().as_secs_f64() * 1e3;
+        let entropy = |s: &AttentionService| {
+            s.provider()
+                .snapshot()
+                .candidates
+                .iter()
+                .find(|c| c.subject == CandidateSubject::Track { id: track })
+                .map(|c| c.components.class_entropy)
+        };
+        assert_eq!(entropy(&s), Some(None), "no snapshot yet: unclassified");
+        assert_eq!(src.calls.load(Ordering::SeqCst), 1, "one refresh in flight");
+        // Release the query: the next pass reads the refreshed snapshot.
+        *lock(&src.gate.0) = true;
+        src.gate.1.notify_all();
+        wait_until("the refresh to land", || s.class_refreshes() >= 1);
+        assert!(
+            s.publish_candidates(Timestamp::from_unix_nanos(t0 + 25_000_000_000), true)
+                .is_some()
+        );
+        println!(
+            "T-128 class cache: publish {publish_ms:.3} ms, on_track_member during a stuck \
+             refresh {member_ms:.3} ms, publish during it {blocked_publish_ms:.3} ms; \
+             refreshes {} (calls {}), entropy after {:?}",
+            s.class_refreshes(),
+            src.calls.load(Ordering::SeqCst),
+            entropy(&s)
+        );
+        assert!(
+            entropy(&s).flatten().is_some(),
+            "classified from the snapshot"
+        );
+        let me = std::thread::current().id();
+        assert!(
+            lock(&src.threads).iter().all(|t| *t != me),
+            "the query never ran on the calling (control) thread"
+        );
+        assert!(member_ms < 50.0 && blocked_publish_ms < 50.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-128 review item 2: a 24 h report compares each 15-min row against its own slot and
+    /// combines the evidence, so an unchanged channel shows no change, and busier / quieter
+    /// channels are labelled by the sign.
+    #[test]
+    fn attention_compare_report_per_interval_over_24h() {
+        let dir = std::env::temp_dir().join(format!("hk-t128-cmp-{}", SiteId::new()));
+        let s = service(&dir);
+        let cur = s
+            .set_current_site(SiteSelect {
+                name: Some("home".into()),
+                ..SiteSelect::default()
+            })
+            .unwrap();
+        let id: SiteId = cur["record"]["id"].as_str().unwrap().parse().unwrap();
+        let site = SiteKey::Site(id);
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 69_000,
+            hi_cell: 69_004,
+        };
+        let subject = OccupancySubject::Channel { key };
+        // `k` of 12 revisits occupied.
+        let row = |q: i64, k: u64| {
+            let mut r = series_row(q, site, subject, k as f64 / 12.0);
+            r.n_occupied = k;
+            r
+        };
+        // 3 days learning: 1, 3, 5 of 12 (mean FCO 0.25, varying interval to interval).
+        for q in 0..288 {
+            s.ingest_occupancy(&row(q, [1, 3, 5][q as usize % 3]), 0);
+        }
+        let day = |cycle: [u64; 3]| -> Vec<OccupancyStat> {
+            (288..384)
+                .map(|q| row(q, cycle[(q as usize + 1) % 3]))
+                .collect()
+        };
+        let unchanged = s.compare_report(site, &day([5, 1, 3]));
+        let busier = s.compare_report(site, &day([5, 7, 9]));
+        let quieter = s.compare_report(site, &day([0, 0, 1]));
+        println!(
+            "T-128 compare 24 h: unchanged {:?}; busier {:?}; quieter {:?}",
+            unchanged.changes, busier.changes, quieter.changes
+        );
+        assert_eq!(unchanged.status, ComparisonStatus::Available);
+        assert!(unchanged.changes.is_empty(), "{:?}", unchanged.changes);
+        assert_eq!(busier.changes.len(), 1);
+        assert_eq!(busier.changes[0].kind, ChangeKind::BusierThanUsual);
+        assert!(busier.changes[0].z >= 3.0 && busier.changes[0].observed > 0.5);
+        assert_eq!(quieter.changes.len(), 1);
+        assert_eq!(quieter.changes[0].kind, ChangeKind::QuieterThanUsual);
+        assert!(quieter.changes[0].z <= -3.0 && quieter.changes[0].observed < 0.05);
+        // A span rollup row cannot be compared against one slot.
+        let rolled = crate::reports::roll_up(
+            &day([5, 7, 9]).iter().collect::<Vec<_>>(),
+            TimeRange::new(row(288, 0).interval.start, row(383, 0).interval.end),
+        )
+        .unwrap();
+        assert!(s.compare_report(site, &[rolled]).changes.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
