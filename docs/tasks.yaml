@@ -1695,7 +1695,7 @@ tasks:
   - id: T-105
     milestone: M1
     title: "Assist CRC search: confident wrong generator in rare cases at >=8 frames; near-tie ordering at 3 frames"
-    status: todo
+    status: in-progress
     deps: [T-091]
     parallel_group: M1S
     use_cases: [SIGNAL-062, AWARE-036]
