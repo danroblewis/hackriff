@@ -1432,7 +1432,7 @@ tasks:
   - id: T-085
     milestone: M1
     title: "M1-DESIGN: decoder workbench contracts (block contract, recipe schema, parser field-map schema, inspector stream framing)"
-    status: in-progress
+    status: review
     deps: [T-060, T-079]
     parallel_group: M1D
     use_cases: [SIGNAL-062]
@@ -1621,6 +1621,20 @@ tasks:
     found_by: T-084 offline repro 2026-09-15
     acceptance: "when neighbours 200 kHz away are as strong as the target station, mode selection still measures bandwidth (e.g. channel-limited OBW, adjacent-channel-aware measure, or refinement-driven box) and does not reject the WFM chain; synthetic dense FM scene test passes with RDS PI decoded; T-065/T-073 sweep unchanged"
     area: crates/hk-demod (mode selection/measure), crates/hk-pipeline chains (probe box)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-101
+    milestone: M0b
+    title: "Fix inventory duplicate regression from T-084 (steady FM station 4x, nearby stations 3x in inventory)"
+    status: in-progress
+    deps: [T-084]
+    parallel_group: T101
+    use_cases: [AWARE-053]
+    found_by: "post-merge full check 2026-09-15; bisected: fails at 3d2a3db (T-084 merge), passes at 6700731"
+    acceptance: "acceptance_m0 inventory_lifecycle t078 + t082 pass (each station appears once) without weakening assertions; T-084 hop-set gate tests stay green; just lint clean"
+    area: crates/hk-detect (hop sets), crates/hk-model (same_emission), crates/hk-pipeline (inventory)
     needs: none
     model: opus
     effort: medium
