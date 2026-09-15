@@ -112,6 +112,86 @@ fn rds_offset_words_find_groups_and_crc_checks_and_corrects_them() {
     }
 }
 
+/// T-185: block sync never locks on chance syndrome matches. 2^20 random bits (~15 min of RDS
+/// bit rate): the recipe (three consecutive offset-consistent blocks) acquires nothing, where a
+/// two-block chain acquires on chance (a match per position ≈ 1/1024, a chained pair ≈ 6e-6 per
+/// bit, so ~6 expected).
+#[test]
+fn rds_sync_does_not_lock_on_random_bits() {
+    let bits = noise(1 << 20, 185);
+    let recipe = recipe_node("rds", "sync");
+    let mut sync = build("sync_search", recipe.clone(), PortType::Bits);
+    let frames = run_bits(sync.as_mut(), &bits, 4096, false);
+    let st = sync.status();
+    let mut two = recipe;
+    two["lock_blocks"] = json!(2);
+    let mut loose = build("sync_search", two, PortType::Bits);
+    let loose_frames = run_bits(loose.as_mut(), &bits, 4096, false);
+    let loose_acq = extra(loose.status(), "acquisitions");
+    eprintln!(
+        "random bits: recipe acquisitions {} frames {}; lock_blocks 2 acquisitions {loose_acq} frames {}",
+        extra(st, "acquisitions"),
+        frames.len(),
+        loose_frames.len()
+    );
+    assert_eq!(extra(st, "acquisitions"), 0.0);
+    assert!(frames.is_empty());
+    assert_eq!(st.lock, Lock::Searching);
+    assert!(
+        loose_acq >= 1.0,
+        "the two-block chain is the chance-lock baseline"
+    );
+}
+
+/// T-185: lock needs three consecutive offset-consistent blocks, and a run of eight invalid
+/// blocks drops it (well before the 20-in-50 window would).
+#[test]
+fn rds_sync_locks_on_three_blocks_and_drops_after_an_invalid_run() {
+    let block = |info: u16, off: Offset| bits_of(u64::from(encode_block(info, off)), 26);
+    let group = |g: u16| -> Vec<u8> {
+        [Offset::A, Offset::B, Offset::C, Offset::D]
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, off)| block(g * 7 + i as u16, off))
+            .collect()
+    };
+    let params = recipe_node("rds", "sync");
+    // A, B then garbage: two hits only, no lock.
+    let mut stream = noise(40, 9);
+    stream.extend(block(1, Offset::A));
+    stream.extend(block(2, Offset::B));
+    stream.extend(noise(26 * 12, 10));
+    let mut s = build("sync_search", params.clone(), PortType::Bits);
+    assert!(run_bits(s.as_mut(), &stream, 64, false).is_empty());
+    assert_eq!(extra(s.status(), "acquisitions"), 0.0);
+
+    // Two clean groups lock (at block C of the first) and emit both; then garbage: after eight
+    // invalid blocks the lock is gone.
+    let mut stream = noise(40, 9);
+    stream.extend(group(1));
+    stream.extend(group(2));
+    let locked_len = stream.len();
+    stream.extend(noise(26 * 7 + 5, 11));
+    let mut s = build("sync_search", params.clone(), PortType::Bits);
+    let frames = run_bits(s.as_mut(), &stream, 64, false);
+    assert_eq!(
+        frames.len(),
+        3,
+        "two groups and one garbage group while still locked"
+    );
+    assert_eq!(s.status().lock, Lock::Locked, "7 invalid blocks keep lock");
+    assert_eq!(extra(s.status(), "acquisitions"), 1.0);
+    stream.truncate(locked_len);
+    stream.extend(noise(26 * 8 + 5, 11));
+    let mut s = build("sync_search", params, PortType::Bits);
+    run_bits(s.as_mut(), &stream, 64, false);
+    assert_eq!(
+        s.status().lock,
+        Lock::Searching,
+        "8 invalid blocks drop lock"
+    );
+}
+
 // ---- POCSAG: sync 0x7CD215D8 + BCH(31,21) + message assembly across batches ----
 
 const IDLE: u32 = 0x7A89_C197;

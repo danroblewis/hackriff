@@ -7,7 +7,7 @@ use hk_recipe::PortType::Frames;
 use hk_recipe::{BlockDescriptor, ParamType, PortSpec};
 
 use crate::Registry;
-use crate::schema::{ParamExt, descriptor, hex, int, list, one_of, param, string};
+use crate::schema::{ParamExt, boolean, descriptor, hex, int, list, one_of, param, string};
 
 pub mod fields;
 pub mod text;
@@ -41,6 +41,13 @@ pub fn planned() -> Vec<BlockDescriptor> {
                 param("map", ParamType::FieldMap, "Field map id in the recipe.")
                     .required()
                     .hot(),
+                param(
+                    "skip_invalid",
+                    boolean(),
+                    "Frames whose check is invalid pass through without a layer tree (no fields from corrupt data); false parses them too (a protocol whose check fails by design, e.g. Mode S address/parity overlay).",
+                )
+                .default_value(false)
+                .hot(),
             ],
             true,
         ),

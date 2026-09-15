@@ -133,9 +133,15 @@ pub fn planned() -> Vec<BlockDescriptor> {
                 param(
                     "lock_blocks",
                     int(1, 64),
-                    "offset-words: consecutive valid blocks to lock.",
+                    "offset-words: syndrome matches to lock, all on one block lattice with their offset words in sequence order (a chance match on noise cannot chain).",
                 )
                 .default_value(2),
+                param(
+                    "lock_gap_blocks",
+                    int(1, 16),
+                    "offset-words: most blocks between two successive matches of a locking chain (1: consecutive blocks).",
+                )
+                .default_value(1),
                 param(
                     "unlock_errors",
                     int(1, 1_000),
@@ -148,6 +154,12 @@ pub fn planned() -> Vec<BlockDescriptor> {
                     "offset-words: window for unlock_errors, blocks.",
                 )
                 .default_value(50),
+                param(
+                    "unlock_run",
+                    int(0, 1_000),
+                    "offset-words: consecutive invalid blocks that drop lock (0: off).",
+                )
+                .default_value(0),
             ]
             .into_iter()
             .chain(frame_length())
