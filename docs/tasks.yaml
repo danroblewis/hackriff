@@ -2844,3 +2844,17 @@ notes:
     model: sonnet
     effort: low
     core_interface: false
+  - id: T-180
+    milestone: M2
+    title: "Mock SDR device noise floor at low gain: re-rendered windows served far below the recording gain become quantisation-limited (85% zero codes) and produce whole-window marginal detections; model the receiver's own analog noise floor per gain state so low-gain windows look like a real HackRF"
+    status: todo
+    deps: [T-175]
+    parallel_group: M2E
+    use_cases: []
+    found_by: "T-175 finisher 2026-09-15: t057 window at 99.33 MHz served at LNA 24/VGA 20 (29 dB below the recording's l32g30a1), IQ 85% zero codes, quantisation_limited provenance, frame-to-frame 2-3 dB spread fires marginal detections"
+    acceptance: "mock adds a gain-dependent device noise floor (documented model, e.g. HackRF NF vs LNA/VGA) before int8 quantisation when rendering below the recording gain; low-gain windows no longer quantisation-limited at realistic settings; t057 quantisation-limited skip can be removed or shown unused; T-141/T-170 fidelity tests and scheduler_history floor check unchanged"
+    area: crates/hk-core/src/source/mock
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false

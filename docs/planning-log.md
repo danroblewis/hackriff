@@ -1954,3 +1954,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Merged:** T-176 (gain-step false alarm fix) and T-177 (smoke script). Both worktrees removed.
   - **T-124:** now blocked only on T-173 (off-DC coverage for 433.375 MHz). Its (c) and (h) should pass on rerun.
   - **Next:** full check.
+- **B0.431 T-175 finisher progress (uncommitted, on 00691e3).**
+  - **t057 edge phantom — real mock bug, fixed.** `Render::retarget` built its band-select kernel from `Plan::overlap()`; with a clipped side, the transition sat on Nyquist and folded the 101.3 MHz sideband to the opposite edge (+4.1 dB).
+    - New `Plan::served()` pulls clipped sides in by half the transition and noise-fills the strip.
+    - Unit test added; mock Limits doc updated.
+  - **Whole-window one-frame detections — not a render bug.** The scheduler served that window 29 dB below the recording gain, leaving IQ 85% zero codes (`quantisation_limited` provenance). The resulting 2–3 dB spread fires marginal detections.
+  - **Coordinator decision:** accept the test skipping quantisation-limited provenance in the out-of-band check, only with a guard assertion that such detections never become inventory emitters/candidates or add FCO occupied time. If the guard fails, fix the product instead of skipping.
+  - **Follow-up:** T-180 models a device noise floor at low gain in the mock.
