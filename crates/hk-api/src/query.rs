@@ -31,6 +31,15 @@ fn param<'a>(q: &'a Params, key: &str) -> Option<&'a str> {
 }
 use serde_json::{Value, json};
 
+/// Default recent window `/api/analysis/strongest` looks over, s.
+pub const DEFAULT_STRONGEST_WINDOW_S: f64 = 5.0;
+/// Largest window `/api/analysis/strongest` accepts, s.
+pub const MAX_STRONGEST_WINDOW_S: f64 = 300.0;
+/// Half-width of the frequency box `/api/analysis/strongest` reports around the strongest cell's
+/// centre, Hz (spectrum-history cells carry no per-bin skirt to fit, unlike a live FFT row, so this
+/// is fixed rather than measured).
+pub const STRONGEST_BOX_HALF_HZ: f64 = 100_000.0;
+
 /// Default cell budget of `/api/history`.
 pub const DEFAULT_MAX_CELLS: usize = 100_000;
 /// Largest cell budget `/api/history` accepts (bounds response size).
@@ -295,6 +304,72 @@ pub fn floor_json(product: &FloorProduct, q: &Params) -> Result<Value, ApiError>
         )
         .map_err(|_| ApiError::new(400, "floor query refused"))?;
     Ok(floor_vs_time_json(&f))
+}
+
+/// `/api/analysis/strongest?f_lo&f_hi[&window_s]`: the strongest observed signal (max-hold dB/Hz)
+/// in `[f_lo, f_hi)` over the last `window_s` seconds (default [`DEFAULT_STRONGEST_WINDOW_S`], at
+/// most [`MAX_STRONGEST_WINDOW_S`]), read from the spectrum-history pyramid ([`Pyramid::query`]).
+///
+/// Backend replacement (T-079) for client-side peak-picking over a locally held spectrum row: the
+/// UI no longer inspects raw FFT bins itself, only asks what the strongest thing in view is. Unlike
+/// a live row, history cells carry no per-bin skirt to fit a box to, so the reported box is a fixed
+/// [`STRONGEST_BOX_HALF_HZ`] half-width around the strongest cell's centre, clamped to
+/// `[f_lo, f_hi)`. `{"found": false}` when nothing was observed in the window.
+pub fn strongest_json(p: &Pyramid, q: &Params, now: Timestamp) -> Result<Value, ApiError> {
+    let (f_lo, f_hi) = (num(q, "f_lo")?, num(q, "f_hi")?);
+    if !(f_lo >= 0.0 && f_hi > f_lo && f_hi <= 1e12) {
+        return Err(bad("need 0 <= f_lo < f_hi"));
+    }
+    let window_s = match param(q, "window_s") {
+        None => DEFAULT_STRONGEST_WINDOW_S,
+        Some(v) => v
+            .parse::<f64>()
+            .ok()
+            .filter(|w| w.is_finite() && *w > 0.0 && *w <= MAX_STRONGEST_WINDOW_S)
+            .ok_or_else(|| bad("window_s must be a finite number of seconds in (0, 300]"))?,
+    };
+    let t1_ns = now.as_unix_nanos();
+    let t0_ns = t1_ns - (window_s * 1e9) as i64;
+    let r = Region {
+        freq: FreqRange::new(f_lo, f_hi),
+        t0_ns,
+        t1_ns,
+    };
+    let level = choose_level(p.geometry(), &r, |nt, nf| {
+        nt * nf <= DEFAULT_MAX_CELLS as f64
+    })?;
+    let h = p
+        .query(&RegionQuery {
+            freq: r.freq,
+            time: TimeRange::new(
+                Timestamp::from_unix_nanos(t0_ns),
+                Timestamp::from_unix_nanos(t1_ns),
+            ),
+            resolution: Resolution::Level(level),
+        })
+        .map_err(|_| ApiError::new(400, "history query refused"))?;
+    let mut best: Option<(f32, usize)> = None;
+    for (i, c) in h.cells.iter().enumerate() {
+        if c.observed() && best.is_none_or(|(bv, _)| c.max_db > bv) {
+            best = Some((c.max_db, i % h.nf));
+        }
+    }
+    Ok(match best {
+        None => json!({ "found": false }),
+        Some((max_db, f)) => {
+            let freq = h.freq_of(f);
+            let center = 0.5 * (freq.lo_hz + freq.hi_hz);
+            let lo = (center - STRONGEST_BOX_HALF_HZ).max(f_lo);
+            let hi = (center + STRONGEST_BOX_HALF_HZ).min(f_hi);
+            json!({
+                "found": true,
+                "f_center_hz": center,
+                "f_lo_hz": lo,
+                "f_hi_hz": hi,
+                "max_db": max_db,
+            })
+        }
+    })
 }
 
 /// Default page size of `/api/inventory`.

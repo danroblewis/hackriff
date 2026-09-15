@@ -59,38 +59,10 @@ export function selectionTarget(s: { f_lo: number; f_hi: number }, maxSpanHz = 1
   return { f_lo: c - maxSpanHz / 2, f_hi: c + maxSpanHz / 2 };
 }
 
-/** The bin with the highest finite value inside [loHz, hiHz] of a row spanning [fullLoHz, fullHiHz]; null if none. */
-export function peakBinIndex(row: ArrayLike<number>, fullLoHz: number, fullHiHz: number, loHz: number, hiHz: number): number | null {
-  const n = row.length;
-  if (!(n > 0) || !(fullHiHz > fullLoHz)) return null;
-  const toIdx = (hz: number) => ((hz - fullLoHz) / (fullHiHz - fullLoHz)) * n;
-  const i0 = Math.max(0, Math.floor(toIdx(Math.min(loHz, hiHz)))), i1 = Math.min(n - 1, Math.ceil(toIdx(Math.max(loHz, hiHz))));
-  let best = -1, bestV = -Infinity;
-  for (let i = i0; i <= i1; i++) {
-    const v = row[i];
-    if (Number.isFinite(v) && v > bestV) { bestV = v; best = i; }
-  }
-  return best < 0 ? null : best;
-}
-
-/**
- * The strongest signal in view: the peak bin of the latest spectrum row within [loHz, hiHz] of a
- * row spanning [fullLoHz, fullHiHz], then a box from its local `dropDb` width, at most
- * `maxHalfHz` either side of the peak (200 kHz total by default).
- */
-export function strongestInView(row: ArrayLike<number>, fullLoHz: number, fullHiHz: number, loHz: number, hiHz: number,
-  dropDb = 10, maxHalfHz = 100_000): PeakBox | null {
-  const peak = peakBinIndex(row, fullLoHz, fullHiHz, loHz, hiHz);
-  if (peak === null) return null;
-  const n = row.length, df = (fullHiHz - fullLoHz) / n, peakDb = row[peak];
-  const maxSteps = Math.max(1, Math.ceil(maxHalfHz / df));
-  let lo = peak, hi = peak;
-  while (lo > 0 && peak - lo < maxSteps && Number.isFinite(row[lo - 1]) && row[lo - 1] >= peakDb - dropDb) lo--;
-  while (hi < n - 1 && hi - peak < maxSteps && Number.isFinite(row[hi + 1]) && row[hi + 1] >= peakDb - dropDb) hi++;
-  const hz = fullLoHz + (peak + 0.5) * df;
-  const half = Math.min(maxHalfHz, Math.max(hz - (fullLoHz + lo * df), fullLoHz + (hi + 1) * df - hz, df / 2));
-  return { hz, f_lo: Math.max(fullLoHz, hz - half), f_hi: Math.min(fullHiHz, hz + half) };
-}
+// Peak-picking over the spectrum ("what's the strongest signal in view") moved server-side in
+// T-079 (`GET /api/analysis/strongest?f_lo&f_hi`, `hk_api::query::strongest_json`): it is signal
+// analysis, not presentation, and the backend can look at its own measured history rather than
+// just the one row the client happens to have decoded. See `Live.strongestSignal` in main.ts.
 
 export type TargetSource = "clicked" | "selection" | "strongest";
 export type ResolvedTarget = ListenTarget & { source: TargetSource };
@@ -328,8 +300,9 @@ export interface ListenHooks {
   selections: SelectionStore;
   /** The current view (Hz), or null before the first stream header. */
   view: () => Extent | null;
-  /** The strongest signal in the current view, from the client-side spectrum row; null if none. */
-  strongest: () => PeakBox | null;
+  /** The strongest signal in the current view, from the backend's spectrum-history analysis
+   * (`GET /api/analysis/strongest`, T-079); null if none or the request fails. */
+  strongest: () => Promise<PeakBox | null>;
 }
 
 /**
@@ -341,6 +314,10 @@ export function installListen(token: string, hooks: ListenHooks) {
   const listener = new Listener(token);
   closeOnPageExit(listener, window, document); // T-066
   let click: ClickState | null = null;
+  // Polled from the backend (below), not fetched inline: `listener.start()` must run synchronously
+  // inside the click handler to unlock audio on mobile browsers, so `resolve()` stays synchronous
+  // and reads the last poll instead of awaiting a fetch.
+  let cachedStrongest: PeakBox | null = null;
 
   // The inspect panel's own button: listens to exactly what's shown there.
   let inspectTarget: ListenTarget | null = null;
@@ -351,7 +328,7 @@ export function installListen(token: string, hooks: ListenHooks) {
   const goButton = $<HTMLButtonElement>("listen-go");
   const targetLabel = $("player-target");
   const hint = $("listen-hint");
-  const resolve = () => resolveTarget({ click, selections: hooks.selections.list(), view: hooks.view(), strongest: hooks.strongest });
+  const resolve = () => resolveTarget({ click, selections: hooks.selections.list(), view: hooks.view(), strongest: () => cachedStrongest });
 
   const refreshLabel = () => {
     if (listener.active) return; // playing: start() already set the label to the locked-in target
@@ -359,6 +336,13 @@ export function installListen(token: string, hooks: ListenHooks) {
     targetLabel.textContent = t ? t.label : "no signal chosen";
     goButton.textContent = "Listen";
     goButton.disabled = !t;
+  };
+
+  // Only asked when it could matter: resolveTarget short-circuits on a click or selection before
+  // ever reaching `strongest`, so there is no point polling the endpoint while either is set.
+  const refreshStrongest = () => {
+    if (click || hooks.selections.list().length) return;
+    void hooks.strongest().then((p) => { cachedStrongest = p; refreshLabel(); }).catch(() => { cachedStrongest = null; });
   };
 
   goButton.addEventListener("click", () => {
@@ -376,7 +360,8 @@ export function installListen(token: string, hooks: ListenHooks) {
 
   hooks.selections.subscribe(refreshLabel);
   refreshLabel();
-  window.setInterval(refreshLabel, 1000); // catches the view panning/zooming while idle
+  refreshStrongest();
+  window.setInterval(() => { refreshStrongest(); refreshLabel(); }, 1000); // catches panning/zooming while idle
 
   return {
     /** From the inspect panel (T-044 click-to-inspect, plus T-069 inventory-row inspect): the
