@@ -1271,6 +1271,19 @@ tasks:
     effort: high
     core_interface: true
     priority: "ahead of queued work (user)"
+  - id: T-077
+    milestone: M0b
+    title: Parallel test runner with serial groups for heavy suites (flake-free), faster than the 914 s sequential baseline
+    status: in-progress
+    deps: []
+    parallel_group: V
+    use_cases: []
+    requested_by: user 2026-09-14 (start of message truncated; scope inferred from visible part)
+    acceptance: "parallel runner (cargo-nextest preferred, pinned) with serial/limited groups for tests/e2e, hk-pipeline listen/refine/stream tests, hk-api/hk-cli server tests and acceptance; doctests still run; just test-seq fallback; CI updated; CLAUDE.md Build/test/run updated; wall time vs 914 s sequential cargo test baseline reported with load; heavy groups 5x flake check clean (retries only for documented timing-sensitive tests, reported)"
+    area: .config/nextest.toml, justfile, .github/workflows/ci.yml, CLAUDE.md (Build/test/run)
+    needs: none
+    model: sonnet
+    effort: medium
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
