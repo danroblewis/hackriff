@@ -2715,3 +2715,45 @@ notes:
     effort: low
     core_interface: false
     size: small
+  - id: T-172
+    milestone: M2
+    title: "DC twin refutation hardening: time-bounded twin search (sort by cell+start, binary-search +-slack), slack from grid t_cell_ns not hardcoded 1 s, twin must be off its own tuning DC (tuning centre from provenance_ref), ADR-0012 §2.6 wording per-detection"
+    status: todo
+    deps: [T-147]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-147 review 2026-09-15 findings 1-3,5 (channels.rs:109,125,157-166)"
+    acceptance: "O(log n) twin lookup with a benchmark at multi-day spans; slack == t_cell_ns; an unflagged image at another tuning LO-adjacent does not clear a DC flag (test); ADR wording matches code; occupancy_sparse_visits unchanged green"
+    area: crates/hk-context/src/occupancy/channels.rs, crates/hk-pipeline/src/occupancy.rs, docs/adr/0012
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-173
+    milestone: M2
+    title: "Scheduler hop placement: guarantee every frequency gets a view away from DC (hop overlap or dithered centres) so a carrier near one LO is not permanently suspect"
+    status: todo
+    deps: [T-147]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-147 review 2026-09-15 finding 4 (refutation needs another tuning within 1 s)"
+    acceptance: "sweep plans overlap or dither so each cell has at least one off-DC observation per revisit cycle; scheduler tests + occupancy_sparse_visits green; no regression in sweep floor/coverage"
+    area: crates/hk-core/src/scheduler
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-174
+    milestone: M2
+    title: "Live candidate path uses the per-tuning DC twin rule (detect.rs:458 still per-detection suspect)"
+    status: todo
+    deps: [T-147]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-147 finisher report 2026-09-15"
+    acceptance: "candidates from the live path apply the same DC twin refutation as occupancy/learning; test with a carrier near one hop LO seen clean elsewhere becomes a non-suspect candidate"
+    area: crates/hk-pipeline/src/detect.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true

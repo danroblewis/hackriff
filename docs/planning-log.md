@@ -1716,3 +1716,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - The 46 h run learns all channels.
     - The Wilson interval edge now returns exactly 1/0.
   - **T-147 follow-up:** the live candidate path (`detect.rs:458`) still uses the per-detection suspect rule. Record it after review.
+- **B0.401 T-147 review (Opus): MERGE.** It merges after the T-170 full check.
+  - **Verified:**
+    - The per-tuning rule can't self-clear. A DC-flag tolerance of 15 kHz against a twin tolerance of ~3.2 kHz means any near-LO twin is itself flagged. Twins are compared against pre-refutation flags.
+    - The ±1 s window is bounded, and the 5 s close settle covers it.
+    - The n_eff → n_revisits change is justified: §2.5 counts visits, while the CI comes from n_eff 13.5 and is honestly wide. The test still asserts truth in the CI, and pre-fix values fail it.
+    - Blind rules held. Bandit dwells sit off-centre. No tests weakened. The Wilson edge fix is exact.
+  - **Follow-ups:**
+    - T-172: twin search O(DC × clean) → time-bounded; slack from `t_cell_ns`; twin must be off its own tuning's DC; ADR wording.
+    - T-173: scheduler hops guarantee an off-DC view.
+    - T-174: the live candidate path (`detect.rs:458`) uses the twin rule.
