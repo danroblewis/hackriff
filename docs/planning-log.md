@@ -1219,3 +1219,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Follow-ups (for T-124/T-133):** drops with timestamps, mid-interval site changes, new-emitter alarms from first sightings, site pin persistence, `slots_json` clock.
 
   Full check running. The T-132 fix round is still going and will merge with its one occupancy.rs conflict resolved.
+- **B0.339 T-132 fix round done (b4dd277); T-131 conflict resolved in the T-132 worktree (77be712).**
+  - Fix round: 256 MiB default cap with refused folds still scoring novelty; generation-checked outside-lock loads; per-subject gain keys quantised to whole dB; CUSUM with a 16-visit minimum and slack k + 1/√n. The 30-day stationary test matures 24/24 hours on 4 seeds.
+  - Merge resolution: `fold_row` keeps T-131 alarm context plus T-132 gauges; `ingest_interval` takes `SubjectGainKeys` and returns `IntervalFold`; `baselines_json` loads outside the lock and uses the sample clock.
+  - Targeted tests: 119/119 green; clippy clean.
+  - T-132 merges into main after the T-131 full check finishes.
+  - T-133 (history source+site) and T-134 (sparse slots) launched on 77be712 with disjoint file areas.
