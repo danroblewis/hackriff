@@ -614,3 +614,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - sweep unchanged (111/114 at ≥10 dB);
   - hk-demod 33/33; analog/listen_retune/lossless/signal_062/refine pass.
   The full check is deferred until T-101 merges, so one run covers both; main still has the known T-084 inventory regression.
+- **B0.223 T-101 root cause.** A WFM station's weak, narrow edge flicker used to hide inside chance hop sets. T-084's 8 dB gate correctly stopped those hop sets forming, so each flicker now becomes its own inventory candidate. The fix in progress marks in-band fragments of a wider, stronger continuous host track. t078 now passes; t082 still has a residual at 101.6749 MHz. Follow-up **T-102** is added (serialised behind T-101 on hk-detect): the station's own track is 407.8 kHz, over the 400 kHz wfm-rds cap, so its chain attaches only through a fragment.
