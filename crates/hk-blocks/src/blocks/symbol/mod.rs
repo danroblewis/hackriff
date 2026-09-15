@@ -108,6 +108,12 @@ pub fn planned() -> Vec<BlockDescriptor> {
                 )
                 .default_value("transition-is-0")
                 .hot(),
+                param(
+                    "direction",
+                    one_of(&["decode", "encode"]),
+                    "decode: levels → data. encode: data → levels, a running level starting at 1 after a reset (one output per input). Non-coherent MSK uses it where the data are the coherent chips and a tone marks a chip transition (ACARS).",
+                )
+                .default_value("decode"),
             ],
             true,
         ),

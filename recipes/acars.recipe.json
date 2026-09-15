@@ -4,7 +4,7 @@
   "id": "acars",
   "version": 1,
   "name": "ACARS: aircraft messages",
-  "description": "Tutorial 3 skeleton (ADR-0011 §5.1; T-096 tunes it, including the MSK bit polarity and differential step). AM carrier, MSK at 2400 Bd on a 1800 Hz audio subcarrier, characters of 7-bit ASCII + odd parity sent LSB first. Frames start after '+' '*' SYN SYN SOH (air order 0xD554686880) and end at ETX/ETB plus the 16-bit block check (CRC-16/KERMIT), then mode, registration, acknowledgement, label, block id and text.",
+  "description": "Tutorial 3 (ADR-0011 §5.1; conventions from acarsdec, T-108, see docs/tutorials/03-acars.md). AM carrier, MSK at 2400 Bd on an 1800 Hz audio subcarrier. ACARS data are the coherent MSK chips, and the tone marks a chip transition (2400 Hz = same chip, 1200 Hz = changed), so the non-coherent discriminator's bits are integrated back to chips (`nrzi`, encode, transition-is-0) and the sync search takes either polarity. Characters are 7-bit ASCII + odd parity, sent LSB first. Frames start after '+' '*' SYN SYN SOH (air order 0xD554686880) and end at ETX/ETB plus the 16-bit block check: CRC-16/KERMIT over the transmitted characters after SOH (parity bits included), sent low byte first. Then mode, registration, acknowledgement, label, block id and text.",
   "match": {
     "families": ["am"],
     "freq_hz": [[129000000, 137000000]],
@@ -25,7 +25,7 @@
       "label": "1800 Hz MSK subcarrier → baseband",
       "params": { "carrier_hz": 1800, "bandwidth_hz": 2400, "output_rate_hz": 12000 }
     },
-    { "id": "msk", "block": "msk_demod", "label": "MSK discriminator" },
+    { "id": "msk", "block": "msk_demod", "label": "MSK discriminator (mark +, space −)", "params": { "symbol_rate_bd": 2400 } },
     {
       "id": "clock",
       "block": "clock_recovery",
@@ -33,7 +33,12 @@
       "params": { "symbol_rate_bd": 2400, "pulse": "nrz", "algorithm": "gardner" }
     },
     { "id": "slice", "block": "slicer" },
-    { "id": "diff", "block": "diff_decode", "label": "MSK bits are differential", "params": { "mode": "xor" } },
+    {
+      "id": "chips",
+      "block": "nrzi",
+      "label": "Tones → MSK chips (mark = no chip change)",
+      "params": { "mode": "transition-is-0", "direction": "encode" }
+    },
     {
       "id": "sync",
       "block": "sync_search",
@@ -43,6 +48,7 @@
         "sync_word": "0xD554686880",
         "sync_bits": 40,
         "max_errors": 2,
+        "polarity": "either",
         "frame_bits": 2048,
         "include_sync": false,
         "bit_order": "lsb",

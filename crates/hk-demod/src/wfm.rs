@@ -102,6 +102,12 @@ pub struct WfmDemod {
     audio_fir: FirDecimator<f32>,
     deemph: Deemphasis,
     rds: Option<(RdsDemod, RdsDecoder)>,
+    /// MPX sample index (from the start of the stream, i.e. `n` at the sample) of the first
+    /// sample fed to the RDS demodulator — `None` before the pilot PLL first locks. RDS only
+    /// runs once locked (`PilotPll::ever_locked`), so its own bit/group positions start counting
+    /// from that first sample, not from stream start; this offset is added back so positions and
+    /// timestamps read from the stream's true start (see [`Self::take_rds_groups`]).
+    rds_start: Option<u64>,
     audio: Vec<f32>,
     n: u64,
     mean_sum: f64,
@@ -135,6 +141,7 @@ impl WfmDemod {
             audio_fir: FirDecimator::new(taps, dec),
             deemph: Deemphasis::new(config.deemphasis_tau_s, audio_rate),
             rds,
+            rds_start: None,
             audio: Vec::new(),
             n: 0,
             mean_sum: 0.0,
@@ -161,13 +168,14 @@ impl WfmDemod {
         let scale = (1.0 / self.config.full_scale_deviation_hz) as f32;
         let mean = self.mean_prev as f32;
         let run_rds = self.rds.is_some();
-        for &x in iq {
+        for (i, &x) in iq.iter().enumerate() {
             let f = self.disc.push(x);
             let theta = self.pll.step(f);
             if run_rds
                 && self.pll.ever_locked()
                 && let Some((demod, _)) = self.rds.as_mut()
             {
+                self.rds_start.get_or_insert(self.n + i as u64);
                 demod.push(f, theta);
             }
             if let Some(a) = self.audio_fir.push(f) {
@@ -182,8 +190,11 @@ impl WfmDemod {
             self.mean_prev = self.mean_sum / self.n as f64;
         }
         if let Some((demod, dec)) = self.rds.as_mut() {
+            // `demod`'s own positions count from its first sample (`rds_start`, set above),
+            // not from the MPX stream's start; shift them back onto the stream's timeline.
+            let offset = self.rds_start.unwrap_or(0) as f64;
             for b in demod.take_bits() {
-                dec.push_bit(b.bit, b.position);
+                dec.push_bit(b.bit, b.position + offset);
             }
         }
     }
@@ -194,7 +205,9 @@ impl WfmDemod {
     }
 
     /// RDS groups parsed since the last call (drains the decoder's buffer; empty without RDS).
-    /// Positions are MPX sample indexes. The report's totals are unaffected.
+    /// Positions are MPX sample indexes from the start of the stream fed to [`Self::process`]
+    /// (not from pilot lock, even though RDS only runs once locked). The report's totals are
+    /// unaffected.
     pub fn take_rds_groups(&mut self) -> Vec<crate::rds::RdsGroup> {
         self.rds
             .as_mut()
@@ -236,8 +249,126 @@ impl WfmDemod {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::TAU;
+
     use super::*;
+    use crate::rds::RDS_BITRATE_BD;
+    use crate::rds::group::tests::group_0a_bits;
     use hk_dsp::synth::{Rng, complex_noise};
+
+    /// T-106: `RdsGroup`/`RdsBit` positions must count MPX samples from the start of the stream
+    /// fed to [`WfmDemod::process`], not from the sample the pilot PLL first locked (RDS only
+    /// runs once locked). Builds a synthetic MPX signal with a silent prefix (no pilot, so RDS
+    /// stays off for a while) followed by a real pilot + biphase-modulated RDS subcarrier, FM
+    /// modulates it to complex baseband, and checks each decoded group's position lands within a
+    /// few symbols of where its first bit was actually transmitted — `prefix_samples +
+    /// (bit_index + 1) * sps` — regardless of how long the pilot took to lock.
+    #[test]
+    fn rds_positions_count_from_stream_start_not_pilot_lock() {
+        let fs = MPX_RATE_HZ;
+        let pi = 0xC0DEu16;
+        let ps = b"HACKRIFF";
+        let pty = 10u16;
+        let tp = true;
+
+        // Message bits: repeated 0A group cycles (4 PS segments each).
+        let repeats = 16;
+        let mut bits = Vec::new();
+        for _ in 0..repeats {
+            for seg in 0..4 {
+                bits.extend(group_0a_bits(pi, ps, seg, pty, tp));
+            }
+        }
+
+        // Differential encoding for transmission: d[0] is an arbitrary reference symbol, then
+        // d[k] = d[k-1] ^ bits[k-1] (inverse of the decoder's `b[k] = d[k] ⊕ d[k-1]`).
+        let mut d = false;
+        let mut symbols = Vec::with_capacity(bits.len() + 1);
+        symbols.push(if d { 1.0 } else { -1.0 });
+        for &b in &bits {
+            d ^= b != 0;
+            symbols.push(if d { 1.0 } else { -1.0 });
+        }
+
+        let sps = fs / RDS_BITRATE_BD;
+        let pilot_hz = 19_000.0_f64;
+        let pilot_dev_hz = 6_750.0_f64;
+        let sub_hz = 3.0 * pilot_hz;
+        let sub_dev_hz = 3_000.0_f64;
+
+        // A silent prefix (no pilot: RDS can't run yet) long enough that pilot lock is clearly
+        // not at the stream's start, then the pilot + RDS for as long as it takes to send every
+        // symbol plus settling margin.
+        let prefix_samples = (0.3 * fs).round() as usize;
+        let active_samples = (symbols.len() as f64 * sps).ceil() as usize + fs as usize;
+
+        let mut phase = 0.0_f64;
+        let mut iq = Vec::with_capacity(prefix_samples + active_samples);
+        for _ in 0..prefix_samples {
+            iq.push(Complex32::new(phase.cos() as f32, phase.sin() as f32));
+        }
+        for n in 0..active_samples {
+            let t = n as f64 / fs;
+            let sym_f = n as f64 / sps;
+            let k = sym_f.floor();
+            let frac = sym_f - k;
+            let sym = symbols.get(k as usize).copied().unwrap_or(0.0);
+            let half = if frac < 0.5 { 1.0 } else { -1.0 };
+            let mpx = pilot_dev_hz * (TAU * pilot_hz * t).cos()
+                + sub_dev_hz * sym * half * (TAU * sub_hz * t).cos();
+            phase += TAU * mpx / fs;
+            iq.push(Complex32::new(phase.cos() as f32, phase.sin() as f32));
+        }
+
+        let mut wfm = WfmDemod::new(WfmConfig::default(), fs).unwrap();
+        let mut groups = Vec::new();
+        for chunk in iq.chunks(1 << 15) {
+            wfm.process(chunk);
+            groups.extend(wfm.take_rds_groups());
+        }
+
+        let report = wfm.report();
+        let first_lock_samples = report.pilot.first_lock_s.expect("pilot locked") * fs;
+        // The lock really did happen well after stream start: otherwise this synthetic signal
+        // isn't exercising the bug (pre-fix, positions counted from that lock sample).
+        assert!(
+            first_lock_samples > prefix_samples as f64 + 500.0,
+            "pilot locked implausibly early ({first_lock_samples} samples); test not exercising \
+             the pre-lock gap"
+        );
+
+        let valid: Vec<_> = groups
+            .iter()
+            .filter(|g| g.pi == Some(pi) && g.blocks_ok.iter().all(|&ok| ok))
+            .collect();
+        assert!(
+            valid.len() >= 10,
+            "{} CRC-valid groups: {groups:?}",
+            valid.len()
+        );
+
+        // Group k's first bit is message bit 104k, transmitted (symbol index 104k + 1, the +1
+        // for the differential reference symbol) at local sample (104k + 1) * sps.
+        let tol = 20.0 * sps;
+        for g in &valid {
+            let bit0 = (g.position - prefix_samples as f64) / sps - 1.0;
+            let k = (bit0 / 104.0).round();
+            assert!(
+                k >= 0.0 && k < repeats as f64 * 4.0,
+                "group position {} (bit0 {bit0}, k {k}) outside the transmitted stream \
+                 (pilot locked at {first_lock_samples} samples)",
+                g.position
+            );
+            let expected = prefix_samples as f64 + (104.0 * k + 1.0) * sps;
+            assert!(
+                (g.position - expected).abs() <= tol,
+                "group position {} expected within {tol} of {expected} (k {k}); pilot locked at \
+                 {first_lock_samples} samples — positions should count from stream start, not \
+                 pilot lock",
+                g.position
+            );
+        }
+    }
 
     #[test]
     fn noise_gives_no_pilot_and_no_pi() {

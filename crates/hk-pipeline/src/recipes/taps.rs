@@ -44,6 +44,9 @@ pub struct FrameCtx<'a> {
     pub emitter_id: Option<EmitterId>,
     /// Channel centre, Hz.
     pub channel_hz: f64,
+    /// Follow-hops: channel centre by channel index (`FrameInfo::channel`), Hz; empty for a
+    /// single-channel pipeline (every frame is at `channel_hz`).
+    pub channels_hz: &'a [f64],
     /// Saved recipe version.
     pub recipe_version: u32,
     /// Live edit revision.
@@ -128,7 +131,13 @@ impl FrameSink for InspectorSink {
                 frame: Some(index),
                 sample_index: Some(info.source_index),
                 channel: Some(info.channel),
-                channel_hz: Some(ctx.channel_hz).filter(|f| f.is_finite()),
+                channel_hz: Some(
+                    ctx.channels_hz
+                        .get(usize::from(info.channel))
+                        .copied()
+                        .unwrap_or(ctx.channel_hz),
+                )
+                .filter(|f| f.is_finite()),
                 bit_len: Some(info.bit_len),
                 recipe_version: Some(ctx.recipe_version),
                 edit_rev: Some(ctx.edit_rev),
@@ -222,6 +231,8 @@ pub struct StreamCtx {
     pub bandwidth_hz: f64,
     /// Target emitter.
     pub emitter_id: Option<EmitterId>,
+    /// Follow-hops: the channels known at open (empty: the one channel above).
+    pub channels: Vec<ChannelInfo>,
 }
 
 /// Header of a frames stream (inspector output `output_id`, or a frames tap named
@@ -248,11 +259,15 @@ pub fn frames_header(
         recipe_version: recipe.version,
         output_id: output_id.to_owned(),
         source: InspectorSource::Live,
-        channels: vec![ChannelInfo {
-            index: 0,
-            center_hz: ctx.center_hz,
-            bandwidth_hz: ctx.bandwidth_hz,
-        }],
+        channels: if ctx.channels.is_empty() {
+            vec![ChannelInfo {
+                index: 0,
+                center_hz: ctx.center_hz,
+                bandwidth_hz: ctx.bandwidth_hz,
+            }]
+        } else {
+            ctx.channels.clone()
+        },
     });
     h
 }

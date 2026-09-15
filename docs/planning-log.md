@@ -706,3 +706,71 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Noise now gives a top sync score of 0.0 and no code from duplicate or alternating frames. Residual accepted under the timebox and filed as **T-105**: 3/200 wrong CRC tops at ~0.95 with 8 frames, and near-tie ordering at 3 frames (all scored low). Full check of main running.
 - **B0.250 Full check of main 626a5dd (T-091): green.** Lint clean; nextest + UI 1086/1086 in 237 s; acceptance 23/23. In flight: T-092, T-093, T-094, T-105.
 - **B0.251 T-094 merged** (7a17979), coordinator stat review. `recipes/rds.recipe.json` decodes the real FM capture unchanged. The station is found blind at 101.3022 MHz. PI 0x1694, PTY 7 and PS match the hidden truth and the oracle. 78% of groups are CRC-valid, which is the capture's limit (the oracle sees 8.7% block errors). All 44 oracle-valid groups match exactly, with 0 conflicts. RT is decoded after a hot edit to on-change. Synthetic RT case is exact. `docs/tutorials/01-rds.md` added. Follow-up **T-106**: oracle RDS positions count from pilot lock, ~103 ms late. **T-093 delivered** (8f02471): the recipe splits at the follow_hops node into per-channel upstream instances and a single downstream. Channel sets come from a static list, a blind hop-set fingerprint, or blind detections. Budget is N chains. Merge orders within a bounded window and dedupes by bytes across channels, keeping the best copy. `set_channels`/`refresh_channels` swap at a boundary. 4-channel mock-SDR test plus a hop-set refresh test. Timeboxed Opus review running. **Launched:** T-096 ACARS tutorial and T-097 ADS-B tutorial (recorded/synthetic; live 1090 MHz deferred on the antenna). Full check covering T-094 running.
+- **B0.252 T-105 delivered** (52bd4fe). **Root cause:** all 3 confident wrong tops at 8 frames were (x+1)·CRC-24/Mode-S. The Mode-S generator already contains (x+1), so a 1-in-128 extra (x+1) across all differences can't be distinguished by divisibility. **Fix:**
+  - Generators fitting one hypothesis share a posterior weighted 2^((k−1)·width).
+  - A repeated-factor prior (2^−10 via gcd(g, g′)) demotes squared factors.
+  - A new `ambiguous_with` API field is added.
+  **Result over 200 seeds:** 8 frames 0 wrong (was 3 at 0.95); 3 frames 24 wrong at ≤0.07 (was 164 at ≤0.24). **Residual:** a truth generator without (x+1) remains indistinguishable at the inherent ~1/128 rate (8 frames: 1/200 at 0.94). This is inherent to frames-only evidence and accepted. Merge follows the in-flight full check.
+- **B0.253 T-092 delivered** (8866566). Contents:
+  - **Recording:** always-on decoded capture as a local consumer on each inspector publisher, never blocking; drops are counted.
+  - **Storage:** `.hks` holds the published stream bytes (layers stripped), `.idx` a 16-byte offset/time index, `.json` the catalogue.
+  - **Quotas:** 1 GiB total, 64 MiB per capture with segment roll, oldest evicted first.
+  - **API:** `CaptureSource` gains open_at/list/info/frame_at_time/delete; routes list/get/delete/frames (frame or time scrub); parse seeks via the index; `/ws/open/inspector?capture=` replay.
+  - **UI:** picker, slider and jump-to-time.
+  - **Tests:** mock-SDR e2e covering stored==live, scrub, replay re-parse, quota, stalled disk.
+  Timeboxed Opus review running; it checks crash consistency, eviction versus open readers, gating on replay, and the runtime.rs conflict with T-093.
+- **B0.254 T-093 review: MERGE.** The review confirmed:
+  - budget claims N−1 extra slots; overrun is marked as a discontinuity;
+  - the merge buffer is sized and allocation-free; swaps are atomic across channels at a boundary and retired instances are dropped off the RT thread;
+  - the watermark advances per chunk; `graph.rs` only affects frames-input graphs (follow-hops downstream);
+  - merge-tree against main is clean.
+  Nits filed as **T-107**: stale-tune race in set_channels; a lost DISCONTINUITY on an empty DDC chunk; ordering of long frames (relevant to T-095 POCSAG); detections-source and tracker-found hop-set tests; set_channels routes. T-093 and T-105 merge after the in-flight full check; the T-092 vs T-093 runtime.rs conflict is expected and resolvable.
+- **B0.255 Full check of main 315aaf3 (T-094): green.** Lint clean; nextest + UI 1086/1086; acceptance 25/25 (tutorial_rds included). **T-093 and T-105 merged.** **Launched:** T-095 POCSAG tutorial (with follow_hops; long-frame ordering caveat from T-107) and T-106 (RDS oracle timestamp offset). T-107 is held until T-092 merges, since both touch the recipe runtime. Full check covering T-093 + T-105 running.
+- **B0.256 T-092 review: FIX-FIRST** (timeboxed). Real-time safety, gating on store/replay, ids, 409 races and input validation are fine. Must-fix:
+  1. Merging with main breaks the build: T-091's assist test builds `CtlRequest` without the new `query` field. There's also an api.md text conflict.
+  2. A disk stall over 5 s trips the publisher slow-consumer disconnect and permanently stops the always-on recorder.
+  3. Interrupted-capture recovery doesn't validate the tail record, so the last /frames page returns 422 forever.
+  Promoted from nit: a partial-write retry duplicates bytes or misaligns the index. A fresh Opus fix and integration round is running in the T-092 worktree; T-107 follows after it merges.
+- **B0.257 Full check of main 415f112 (T-093 + T-105): green.** Lint clean; nextest + UI 1099/1099 in 239 s; acceptance 25/25. M1 on main: T-085–T-091, T-093, T-094, T-104, T-105. In flight: T-092 fix/integration, T-095, T-096, T-097, T-106. Held: T-107 (after T-092).
+- **B0.258 T-106 merged** (acb1552; coordinator diff review). `WfmDemod` records the MPX index of the first sample fed to the RDS demod after pilot lock and adds it to bit positions. Group, PS and record timestamps are now stream-absolute (previously 122 bits / 102.7 ms late). tutorial_rds dropped its offset estimate: direct agreement is 43/44 oracle-valid groups (0.977, 0 conflicts, 1 missing). New unit test with a 0.3 s pre-lock prefix: positions land within ~17 ms of truth. hk-demod 35/35, acceptance tutorial_rds + signal_062 4/4. Full check is batched with the T-092 merge (imminent).
+- **B0.259 T-092 merged** (fix/integration 082a745). Changes:
+  - The recorder subscribes via `subscribe_recorder`, which is exempt from the slow-consumer close; it keeps dropping with drop markers. Tested with a 600 ms stall against a 100 ms policy.
+  - Interrupted captures are walked and truncated to the last complete indexed record.
+  - A partial write retries only the remainder, and on failure cuts back to the last good commit.
+  - Replay is capped at 4 (503 busy).
+  - The `CtlRequest.query` compile break is fixed and the api.md sections are merged.
+  **T-107** (follow_hops hardening) launched now that the runtime is stable. Full check covering T-106 + T-092 running.
+- **B0.260 Full check of main f2561b1 (T-106 + T-092): green.** Lint clean; nextest + UI 1112/1112 in 262 s; acceptance 25/25. In flight: T-107, T-095 and T-096 (both wrapping up past budget, nudged off Monitor waits), T-097.
+- **B0.261 T-096 (ACARS tutorial, Sonnet) ended over budget at ec7adcb; not merged.**
+  - The recipe was fitted to the py synth: SYN SYN SOH sync, CRC-16/XMODEM over parity-zeroed characters, and a new `zero` mode in the pinned parity block.
+  - The coordinator is concerned the synth is non-standard. The T-087 review said acarsdec uses KERMIT over bytes including parity.
+  - The blind acceptance test is `#[ignore]` because detection never registers the synthetic burst (inventory empty after 240 s).
+  - acarsdec is absent.
+
+  **T-108** (fresh Opus agent, same worktree) takes over:
+  - establish the convention from acarsdec source;
+  - correct the synth, recipe and block;
+  - fix the blind detection root cause;
+  - un-ignore the test.
+
+  Lesson: the Sonnet tutorial agents stalled on Monitor waits and overran budget; future tutorial briefs say so explicitly.
+- **B0.262 T-095 (POCSAG tutorial, Sonnet) ended over budget at 7898e56; not merged.** The recipe is unmodified and validates, and a 4-channel synthetic pager scene was built. The blind acceptance test is `#[ignore]`: the inventory resolved only 1 of 4 channels (the others merged into 118 kHz / 49 kHz clusters), so follow_hops never got a channel set. **T-109** (fresh Opus, same worktree) takes over: find the merge stage, fix it blind, un-ignore. Pattern: both the ACARS (T-108) and POCSAG (T-109) tutorials hit **blind-detection gaps for bursty narrowband signals**, not decoder gaps. That's a real exploration-quality finding; T-108 and T-109 were told to keep hk-detect edits localised to avoid colliding. Multi-baud per-channel follow_hops is noted as an architecture limit.
+- **B0.263 T-107 merged** (74c9a9e). Changes:
+  - Per-channel tune re-plan at apply time. A channel outside the window is refused with 409 `outside_window`; a race test covers it.
+  - DISCONTINUITY is held until a channel's DDC yields samples.
+  - **The merge now orders by frame end**, not start. Coordinator decision: accepted, because it keeps the `order_window_s` latency bound for long frames. ADR-0011 is updated, noting that `sample_index` is non-monotonic across channels.
+  - Blind detections-source and tracker-found hop-set tests run through the mock SDR.
+  - New routes `PUT /api/pipelines/{id}/channels` and `POST .../channels/refresh`, with contract tests.
+  Tests: hk-blocks 69, follow_hops 4/4, runtime/alloc/capture 10/10, hk-api 82, api_contract 15, lint clean. Full check running.
+- **B0.264 Full check of main b8e118a (T-107): green.** Lint clean; nextest + UI 1118/1118 in 241 s; acceptance 25/25. In flight: T-097 (ADS-B tutorial), T-108 (ACARS: re-running with a vouched content class; check the gating interaction on report), T-109 (POCSAG channel separation).
+- **B0.265 T-096/T-108 merged** (6cfa144). The ACARS convention now comes from acarsdec source (TLeconte/acarsdec@339f63e, cited in the tutorial):
+  - LSB first, parity last;
+  - coherent MSK chips (tone marks a chip change);
+  - SYN SYN SOH, inverted accepted;
+  - CRC-16/KERMIT over the transmitted chars including parity, BCS low byte first.
+
+  **The T-098/T-096 synth was non-standard** (the coordinator's suspicion was confirmed). The synth was rewritten, with a py test decoder ported from acarsdec. Recipe: slicer → nrzi(encode) → sync_search (lsb, polarity either) → crc KERMIT → fields. The parity `zero` mode was removed; the new pinned params `nrzi.direction` and `sync_search.polarity` are both real-ACARS needs, and ADR-0011 is updated.
+
+  **Detection root cause:** the scene sat on the tuned centre, and the DC/LO-leakage rule correctly rejected it. The scene is now 50 kHz off centre with repeated blocks; no thresholds changed. The 118–137 MHz content class is gated metadata-only, so the test vouches the recording unrestricted, per the existing pattern. No new gating rule was added (user policy).
+
+  **Blind e2e:** mode/registration/label/block id/text match truth on 100% of frames; CRC-valid 19/19. hk-blocks 70, py synth 15. Remaining: a real 131.55 MHz capture plus the acarsdec oracle (not installed); tone→chip conversion propagates errors (a coherent MSK block if real captures need one). Full check running.

@@ -27,10 +27,13 @@
 //!    random multiples of the generator) are ≥ 2, `validated / tested ≥ 0.5` and the evidence
 //!    `w·D − log2(hypotheses)` is ≥ 16 bits.
 //! 6. Ambiguity: every divisor of a fitting generator fits too, and with few differences the GCD
-//!    carries chance factors (3 Mode-S frames: CRC-24 × a small factor fits). The largest
-//!    fitting generator is kept with its score scaled by `exp(−6·P)`, `P` the chance that `D`
-//!    random differences share an extra irreducible factor; a divisor stays listed as an
-//!    alternative, scored by `2^(d−1−d·D)`, while that is ≥ 0.05 of its base score.
+//!    carries chance factors (3 Mode-S frames: CRC-24 × a small factor fits). The fits of one
+//!    cell compete: each gets its posterior share (weight `2^((D−1)·w)`, the odds of a multiple
+//!    against its divisor when every difference must carry the extra factor; a generator with a
+//!    repeated factor pays 10 bits, since a chance factor already in the true generator squares
+//!    it) times `exp(−6·P)`, `P` the chance that `D` random differences share an extra
+//!    irreducible factor. Fits holding ≥ 0.05 of the posterior are listed and name each other in
+//!    `ambiguous_with`.
 //!
 //! A generator whose order `n` (of `x`) equals the covered length is a cyclic `(n, n−w)` code
 //! and is labelled `bch` (named when it is a textbook BCH generator); a shorter coverage is a
@@ -44,7 +47,9 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::gf2::{Poly, clmul, divrem_small, gcd, mod_small, order_of_x, reflect, solve, xpow_mod};
+use super::gf2::{
+    Poly, clmul, divrem_small, gcd, mod_small, order_of_x, reflect, repeated_part, solve, xpow_mod,
+};
 use super::{
     BchFragment, BlockFragment, Budget, CrcBlocks, CrcFragment, CrcSpan, FragmentParams, Meter,
     ParityFragment, WorkReport, hex_bits,
@@ -191,11 +196,17 @@ pub struct CodeSuggestion {
     pub differences: usize,
     /// `w·differences − log2(hypotheses)`.
     pub evidence_bits: f64,
-    /// 0–1, absolute: validated share × `(1 − e^(−evidence/16))` × a generator confidence,
-    /// `exp(−6·Σ_k I_k·2^(−k·differences))` for the largest generator that fits (the chance
-    /// that the differences share a chance factor, `I_k` irreducible polynomials of degree `k`)
-    /// or `2^(d−1−d·differences)` for a divisor listed as an alternative (`d` = degree gap).
+    /// 0–1, absolute: validated share × `(1 − e^(−evidence/16))` × the posterior share among
+    /// the generators that fit the same hypothesis (weight `2^((k−1)·width)`, `k` = the fewest
+    /// differences among them, `2^−10` for a repeated factor) × `exp(−6·Σ_j I_j·2^(−j·k))` (the
+    /// chance that the differences share a chance factor, `I_j` irreducible polynomials of
+    /// degree `j`).
     pub score: f64,
+    /// Generators (full form) of the same hypothesis (start, tail, bit order, classes) that fit
+    /// the same frames and are listed too: an explicit ambiguous group. Empty when this one holds
+    /// the whole posterior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambiguous_with: Vec<u64>,
     /// Human-readable reasons.
     pub reasons: Vec<String>,
     /// Recipe fragment (`crc` or `bch`).
@@ -385,6 +396,7 @@ pub(crate) fn search_indexed(
         b.score
             .total_cmp(&a.score)
             .then(b.evidence_bits.total_cmp(&a.evidence_bits))
+            .then(a.generator.cmp(&b.generator))
     });
     for code in &mut found {
         attach_parity(code, &parity);
@@ -431,6 +443,13 @@ pub(crate) fn spurious_factor_chance(d: usize) -> f64 {
 /// Multiplier of [`spurious_factor_chance`] in the confidence `exp(−k · chance)`: conservative,
 /// because the prior over real generators is unknown.
 const AMBIGUITY_WEIGHT: f64 = 6.0;
+
+/// Prior penalty (bits) of a generator with a repeated irreducible factor (see
+/// [`fit_log_weight`]).
+const REPEATED_FACTOR_PRIOR_BITS: f64 = 10.0;
+
+/// Posterior share of the fits of one cell below which an alternative is not listed.
+const MIN_ALTERNATIVE_SHARE: f64 = 0.05;
 
 /// Periods (bits) up to which a frame difference counts as structured rather than random.
 const MAX_STRUCTURED_PERIOD: usize = 16;
@@ -516,59 +535,113 @@ fn search_cell(
             }
         }
     }
-    // Every divisor of a validating generator validates too, and with few frame differences
-    // the GCD can carry a chance factor: the largest generator is the best single guess, but
-    // its confidence falls with the chance of a spurious factor, and a divisor stays listed
-    // (with a low score) while that chance is real.
-    for (i, f) in fits.iter().enumerate() {
-        let parent = fits
-            .iter()
-            .enumerate()
-            .filter(|(j, p)| *j != i && p.w > f.w && divrem_small(p.gen_full, f.gen_full).1 == 0)
-            .min_by_key(|(_, p)| p.w)
-            .map(|(_, p)| p);
-        let base = (f.validated as f64 / f.tested as f64) * (1.0 - (-f.evidence / 16.0).exp());
-        let (confidence, note) = match parent {
-            None => {
-                let chance = spurious_factor_chance(f.differences);
-                let c = (-AMBIGUITY_WEIGHT * chance).exp();
-                let note = (c < 0.9).then(|| {
-                    format!(
-                        "only {} independent frame differences: the generator may carry a chance \
-                         factor (confidence {c:.2}); more distinct frames settle it",
-                        f.differences
-                    )
-                });
-                (c, note)
-            }
-            Some(p) => {
-                let d = p.w - f.w;
-                let dd = p.differences.min(f.differences);
-                let c = 2f64.powf((d as f64 - 1.0) - (d * dd) as f64).min(1.0);
-                let note = format!(
-                    "divides {} (width {}), which also fits: with {dd} frame differences the extra \
-                     degree-{d} factor may be chance, so this one is an alternative",
-                    hex_bits(p.gen_full, p.w + 1),
-                    p.w
-                );
-                (c, Some(note))
-            }
-        };
-        let score = base * confidence;
-        if parent.is_some() && score < 0.05 {
-            continue; // a sub-code of a well-supported generator
-        }
-        found.push(build(
-            frames,
-            &covered,
-            cell,
-            f,
-            cross_length,
-            score,
-            note,
-            meter,
-        ));
+    if fits.is_empty() {
+        return;
     }
+    // Every divisor of a validating generator validates too, and with few frame differences
+    // the GCD carries chance factors, so the fits of one cell are competing explanations of the
+    // same frames. Each gets its share of a posterior over the fits (see
+    // [`fit_log_weight`]); the listed ones name each other in `ambiguous_with`.
+    let k = fits.iter().map(|f| f.differences).min().unwrap_or(2);
+    let chance_conf = (-AMBIGUITY_WEIGHT * spurious_factor_chance(k)).exp();
+    let repeated: Vec<u64> = fits
+        .iter()
+        .map(|f| {
+            let (r, ops) = repeated_part(f.gen_full);
+            meter.charge(ops);
+            r
+        })
+        .collect();
+    let log_w: Vec<f64> = fits
+        .iter()
+        .zip(&repeated)
+        .map(|(f, &r)| fit_log_weight(k, f.w, r != 1))
+        .collect();
+    let top = log_w.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let total: f64 = log_w.iter().map(|l| 2f64.powf(l - top)).sum();
+    let share: Vec<f64> = log_w.iter().map(|l| 2f64.powf(l - top) / total).collect();
+    let best = share
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(&a.0)))
+        .map_or(0, |(i, _)| i);
+    let listed: Vec<usize> = (0..fits.len())
+        .filter(|&i| i == best || share[i] >= MIN_ALTERNATIVE_SHARE)
+        .collect();
+    meter.charge(fits.len() as u64 * 4 + 8);
+    for &i in &listed {
+        let f = &fits[i];
+        let base = (f.validated as f64 / f.tested as f64) * (1.0 - (-f.evidence / 16.0).exp());
+        let mut notes = Vec::new();
+        if chance_conf < 0.9 {
+            notes.push(format!(
+                "only {k} independent frame differences: the generator may carry a chance factor \
+                 (confidence {chance_conf:.2}); more distinct frames settle it"
+            ));
+        }
+        if repeated[i] != 1 {
+            notes.push(format!(
+                "has a repeated factor (gcd with its derivative {}): rare in designed generators, \
+                 so it needs {REPEATED_FACTOR_PRIOR_BITS} more bits of evidence",
+                hex_bits(repeated[i], 64 - repeated[i].leading_zeros() as usize)
+            ));
+        }
+        if listed.len() > 1 {
+            if i == best {
+                notes.push(format!(
+                    "{} other generator{} of this hypothesis fit the same frames (ambiguous_with); \
+                     this one holds {:.2} of the posterior",
+                    listed.len() - 1,
+                    if listed.len() == 2 { "" } else { "s" },
+                    share[i]
+                ));
+            } else {
+                let b = &fits[best];
+                let relation = if b.w > f.w && divrem_small(b.gen_full, f.gen_full).1 == 0 {
+                    "divides"
+                } else if f.w > b.w && divrem_small(f.gen_full, b.gen_full).1 == 0 {
+                    "is a multiple of"
+                } else {
+                    "competes with"
+                };
+                notes.push(format!(
+                    "{relation} {} (width {}), which also fits: with {k} frame differences the \
+                     factors between them may be chance, so this one is an alternative (posterior \
+                     share {:.2})",
+                    hex_bits(b.gen_full, b.w + 1),
+                    b.w,
+                    share[i]
+                ));
+            }
+        }
+        meter.charge(64);
+        let score = base * share[i] * chance_conf;
+        let mut s = build(frames, &covered, cell, f, cross_length, score, notes, meter);
+        s.ambiguous_with = listed
+            .iter()
+            .filter(|&&j| j != i)
+            .map(|&j| fits[j].gen_full)
+            .collect();
+        found.push(s);
+    }
+}
+
+/// Log2 posterior weight of a fitting generator of width `w` among the fits of one cell, from
+/// `k` independent frame differences. Against a uniform prior of `2^−(w−1)` per degree-`w`
+/// generator, a fit `T` of width `w + d` that is a multiple of another fit `C` needs every one
+/// of the `k` difference quotients to carry the extra degree-`d` factor (chance `2^−d` each):
+/// the odds `T : C` are `2^(d·(k−1))`, hence the weight `(k − 1)·w`. A generator with a repeated
+/// irreducible factor pays [`REPEATED_FACTOR_PRIOR_BITS`]: designed generators are squarefree (a
+/// BCH generator is a product of distinct minimal polynomials) while a chance factor that is
+/// already in the true generator squares it (CRC-24/Mode-S = (x+1)·…, with 8 frames
+/// (x+1)²·… fits in 1 of 128 draws).
+fn fit_log_weight(k: usize, w: usize, repeated_factor: bool) -> f64 {
+    (k.saturating_sub(1) * w) as f64
+        - if repeated_factor {
+            REPEATED_FACTOR_PRIOR_BITS
+        } else {
+            0.0
+        }
 }
 
 /// Per covered frame: its difference from the first frame of its group repeats with a short
@@ -822,7 +895,7 @@ fn build(
     fit: &Fit,
     cross_length: bool,
     score: f64,
-    note: Option<String>,
+    notes: Vec<String>,
     meter: &mut Meter,
 ) -> CodeSuggestion {
     let Fit {
@@ -907,7 +980,7 @@ fn build(
         n_consts,
         if n_consts == 1 { "" } else { "s" }
     ));
-    reasons.extend(note);
+    reasons.extend(notes);
     let reveng = if classes == 1 {
         reveng_match(frames, cell, gen_full, w, init, xorout, meter)
     } else {
@@ -993,6 +1066,7 @@ fn build(
         differences,
         evidence_bits: evidence,
         score,
+        ambiguous_with: Vec::new(),
         reasons,
         fragment,
     }

@@ -150,9 +150,9 @@ A test (`implemented_blocks_match_their_pinned_descriptors`) fails if an impleme
 | symbol | `clock_recovery` | iq\|real → soft (+ diagnostic `timing_error` real) | pinned: `symbol_rate_bd`, `pulse`, `algorithm`, `soft_from`, `loop_bandwidth` (hot), `max_deviation_ppm` |
 | symbol | `slicer` | soft → bits | pinned: `threshold` (hot), `invert` (hot) |
 | symbol | `diff_decode` | bits → bits | pinned: `mode` (hot) |
-| symbol | `nrzi` | bits → bits | pinned (T-086): `mode` (`transition-is-0`/`transition-is-1`, hot) |
+| symbol | `nrzi` | bits → bits | pinned (T-086; `direction` T-108): `mode` (`transition-is-0`/`transition-is-1`, hot), `direction` (`decode`/`encode`: the running level, for MSK whose data are the coherent chips, ACARS) |
 | symbol | `manchester` | soft\|bits → bits | pinned (T-086): `convention` (`thomas`/`ieee`, hot), `align` (`auto`/`fixed`, hot) |
-| framing | `sync_search` | bits → frames | pinned: `mode` (`sync-word`/`offset-words`) + per-mode keys; sync-word: `frame_bits` (fixed, or the maximum), `bit_order` (`lsb` reverses 8-bit characters), `length_from`, `terminator` |
+| framing | `sync_search` | bits → frames | pinned: `mode` (`sync-word`/`offset-words`) + per-mode keys; sync-word: `frame_bits` (fixed, or the maximum), `bit_order` (`lsb` reverses 8-bit characters), `polarity` (`normal`/`either`: the complemented word also syncs and complements its frame; T-108), `length_from`, `terminator` |
 | framing | `assemble` | frames → frames | pinned: `word_bits`, `start {bit, value}`, `idle_words`, `header`, `slot`, `payload`, `max_words`, `span_frames` (POCSAG address + message codewords → one message, across batches) |
 | framing | `deframe` | bits\|frames → frames | pinned (T-087): `frame_bits` (fixed, or the maximum), `offset_bits`, `length_from`, `terminator` |
 | framing | `interleave`, `deinterleave` | frames → frames | pinned (T-087): `depth` (column interleaver) or `permutation` (per period) |
@@ -273,7 +273,7 @@ Hot edits don't save. `POST /api/pipelines/{id}/save` writes the running revisio
 - **`follow_hops`** (one pipeline spanning several channels):
   - The recipe declares `input.channels = {mode: "follow-hops", channel_bandwidth_hz, max_channels, band_hz?, list_hz?}` and contains exactly one `follow_hops` node, whose input is `frames`.
   - The runtime instantiates **every node upstream of `follow_hops`** once per channel (per-channel state, its own DDC). Each instance stamps `ChunkMeta::channel`/`FrameInfo::channel`.
-  - All instances feed the single `follow_hops` node, which merges frames in source-time order within `order_window_s` and drops duplicates within `dedupe_s`. Everything downstream runs once.
+  - All instances feed the single `follow_hops` node, which merges frames in frame-end order (the watermark of the chunk a frame completes in; ties by start then channel) within `order_window_s` and drops duplicates within `dedupe_s`. End order (T-107) keeps the `order_window_s` bound for frames longer than the window (e.g. multi-batch POCSAG); consequently `sample_index` (frame start) need not increase across channels when a long frame overlaps short ones. Everything downstream runs once.
   - Channels come from blind detections in the band (default) or `list_hz`; `max_channels` bounds them.
   - Every frame record carries `channel` and `channel_hz`, and the header lists channels known at open.
   - Cross-channel **fusion** (decoding one stream to steer another, e.g. trunking) is M4, not this.
@@ -398,7 +398,7 @@ Specified in [`docs/stream-contract.md` §14](../stream-contract.md) (1.2 draft)
 
 `recipes/{pocsag,acars,adsb}.recipe.json` prove the contracts express the other three tutorials; `crates/hk-blocks/tests/m1_recipes.rs` validates them against the pinned catalogue (placeholder blocks may warn, nothing errors). Their tutorial tasks (T-095…T-097) tune them.
 - **POCSAG** (follow-hops): `fsk_demod` → `clock_recovery` 1200 Bd → `slicer` → `sync_search` (0x7CD215D8, 512-bit batches) → `bch` → `assemble` (32-bit words; start = bit 0 is 0; idle 0x7A89C197; header 20 bits, 3-bit slot, 20 payload bits per word; across batches) → `follow_hops` → `fields`. Assembly sits upstream of the merge, so a message never mixes channels. The map reads `ric` (23 bits, `skip_bits` [18, 19]), `function`, then `numeric` (`pocsag-bcd`, LSB first) or `alpha` (7-bit, LSB first). `restricted-paging` with the paging allowlist.
-- **ACARS**: `am_demod` → `subcarrier` (1800 Hz) → `msk_demod` → `clock_recovery` 2400 Bd → `slicer` → `diff_decode` → `sync_search` (`+* SYN SYN SOH` = 0xD554686880 in air order, `bit_order: lsb`, terminator ETX 0x83 / ETB 0x97 at 8-bit steps + 16 trailer bits) → `crc` (CRC-16/KERMIT) → `fields` (7-bit + odd parity characters).
+- **ACARS** (conventions from acarsdec's receiver source, T-108; see [docs/tutorials/03-acars.md](../tutorials/03-acars.md)): `am_demod` → `subcarrier` (1800 Hz) → `msk_demod` → `clock_recovery` 2400 Bd → `slicer` → `nrzi` (`direction: encode`, transition-is-0: the data are the coherent MSK chips and a 2400 Hz tone means an unchanged chip) → `sync_search` (`+* SYN SYN SOH` = 0xD554686880 in air order, `polarity: either`, `bit_order: lsb`, terminator ETX 0x83 / ETB 0x97 at 8-bit steps + 16 trailer bits) → `crc` (CRC-16/KERMIT over the parity-bearing characters after SOH, BCS low byte first) → `fields` (7-bit + odd parity characters).
 - **ADS-B**: `ppm_demod` (2 Msps, preamble 0xA140 over 16 chips, `length_from` DF → 56/112) → `crc` (CRC-24 0xFFF409 over the frame) → `fields` (DF, ICAO, ME: identification, airborne position with altitude = AC12 without Q × 25 − 1000 ft, velocity in kt and ft/min).
 
 ## 6. Crate placement

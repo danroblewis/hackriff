@@ -1206,8 +1206,9 @@ fn inspector_parse_answers_as_documented() {
     assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
     assert!(v["errors"].as_array().is_some_and(|e| !e.is_empty()), "{v}");
 
+    // T-092: `hk serve` has a capture store, so an unknown capture is 404 (503 = no store).
     let (st, v) = post(addr, "/api/captures/any/parse", "{}");
-    assert_eq!((st, v["code"].as_str()), (503, Some("unavailable")), "{v}");
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
     let (st, _) = call(addr, "POST", "/api/inspector/parse", None, Some("{}"));
     assert_eq!(st, 401);
     let (st, _) = get(addr, "/api/inspector/parse");
@@ -1280,6 +1281,8 @@ fn assist_routes_answer_suggestions_as_documented() {
     assert!(code["score"].is_f64() && is_array(&code["reasons"]), "{v}");
     assert!(code["differences"].as_u64().is_some_and(|d| d >= 20), "{v}");
     assert!(code["score"].as_f64().is_some_and(|s| s > 0.9), "{v}");
+    // T-105: 23 differences leave no competing generator, so no ambiguous group.
+    assert!(code.get("ambiguous_with").is_none(), "{v}");
 
     let (st, v) = post(
         addr,
@@ -1353,6 +1356,230 @@ fn assist_routes_answer_suggestions_as_documented() {
 
 // T-092 captures
 
+/// T-092: a running pipeline's inspector output is recorded with no request. `GET /api/captures`
+/// lists it; `/frames` scrubs by frame and by time through the index; `POST .../parse` re-parses
+/// it with a draft field map; `DELETE` refuses a recording capture and deletes a finished one;
+/// `/ws/open/inspector?capture=` replays it. All as `docs/api.md` "Decoded captures" documents,
+/// on the mock device's FM window. The recipe (FM discriminator, clock recovery, slicer, 32-bit
+/// deframe) yields frames from any signal, so the test does not depend on a decoder's lock.
+/// The documented replay cap (503 `busy` beyond 4 at once) is exercised in hk-pipeline's
+/// `decoded_capture` test, which can hold replays open without a WebSocket client.
+#[test]
+fn decoded_captures_are_recorded_listed_scrubbed_reparsed_and_replayed_as_documented() {
+    let (serving, addr) = start_server();
+    let (st, v) = get(addr, "/api/captures");
+    assert_eq!(st, 200, "{v}");
+    assert!(is_array(&v["captures"]), "{v}");
+
+    let doc = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "t092-contract", "version": 1,
+        "name": "T-092 contract",
+        "input": {"port": "iq", "sample_rate_hz": 48000.0, "bandwidth_hz": 40000.0},
+        "nodes": [
+            {"id": "fm", "block": "fm_demod", "params": {"deviation_hz": 5000}},
+            {"id": "clock", "block": "clock_recovery", "params": {"symbol_rate_bd": 1000.0}},
+            {"id": "bits", "block": "slicer"},
+            {"id": "words", "block": "deframe", "params": {"frame_bits": 32}}
+        ],
+        "outputs": [{"id": "words", "kind": "inspector", "from": "words"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let (st, v) = post(addr, "/api/recipes/validate", &doc.to_string());
+    assert_eq!((st, &v["valid"]), (200, &json!(true)), "{v}");
+    let target = json!({"band": {"f_lo": STATION_HZ - 20e3, "f_hi": STATION_HZ + 20e3}});
+    let (st, v) = post(
+        addr,
+        "/api/pipelines",
+        &json!({"recipe": doc, "target": target}).to_string(),
+    );
+    assert_eq!(st, 201, "{v}");
+    let pid = v["id"].as_str().unwrap().to_owned();
+
+    // Recorded automatically, listed while recording.
+    let mut cap = Value::Null;
+    wait_for(
+        "a recorded capture with frames",
+        Duration::from_secs(90),
+        || {
+            let (_, v) = get(addr, "/api/captures");
+            cap = v["captures"]
+                .as_array()
+                .and_then(|a| a.iter().find(|c| c["pipeline_id"] == json!(pid)).cloned())
+                .unwrap_or(Value::Null);
+            cap["frames"].as_u64().is_some_and(|n| n >= 20)
+        },
+    );
+    for k in [
+        "id",
+        "pipeline_id",
+        "recipe_id",
+        "recipe_version",
+        "output_id",
+        "stream_id",
+        "content_class",
+        "segment",
+        "started",
+        "ended",
+        "t_first",
+        "t_last",
+        "frames",
+        "bytes",
+        "dropped_records",
+        "recording",
+        "end_reason",
+    ] {
+        assert!(cap.get(k).is_some(), "Capture lacks {k}: {cap}");
+    }
+    assert_eq!(cap["recording"], json!(true), "{cap}");
+    assert_eq!(
+        (&cap["recipe_id"], &cap["output_id"], &cap["stream_id"]),
+        (
+            &json!("t092-contract"),
+            &json!("words"),
+            &json!(format!("inspector/{pid}/words"))
+        )
+    );
+    let cid = cap["id"].as_str().unwrap().to_owned();
+    let (st, v) = get(addr, &format!("/api/captures/{cid}"));
+    assert_eq!((st, &v["id"]), (200, &json!(cid)), "{v}");
+    let (st, v) = delete(addr, &format!("/api/captures/{cid}"));
+    assert_eq!((st, v["code"].as_str()), (409, Some("conflict")), "{v}");
+
+    // Stop the pipeline: the capture finishes.
+    let (st, v) = delete(addr, &format!("/api/pipelines/{pid}"));
+    assert_eq!(st, 200, "{v}");
+    wait_for("the capture to finish", Duration::from_secs(30), || {
+        get(addr, &format!("/api/captures/{cid}")).1["recording"] == json!(false)
+    });
+    let (_, cap) = get(addr, &format!("/api/captures/{cid}"));
+    let total = cap["frames"].as_u64().unwrap();
+    assert_eq!(cap["end_reason"], json!("finished"), "{cap}");
+
+    // Frame scrub.
+    let (st, all) = get(addr, &format!("/api/captures/{cid}/frames?limit=500"));
+    assert_eq!(st, 200, "{all}");
+    assert_eq!(all["total_frames"], json!(total));
+    let frames = all["frames"].as_array().unwrap().clone();
+    assert!(frames.len() >= 20, "{all}");
+    let (st, v) = get(
+        addr,
+        &format!("/api/captures/{cid}/frames?from_frame=3&limit=2"),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!((&v["from_frame"], &v["limit"]), (&json!(3), &json!(2)));
+    assert_eq!(v["frames"].as_array().unwrap().as_slice(), &frames[3..5]);
+    assert_eq!(v["next_from_frame"], json!(5));
+    assert_eq!(v["capture"]["id"], json!(cid));
+    assert_eq!(
+        v["stream"]["inspector"]["source"],
+        json!({"kind": "capture", "capture_id": cid, "reparse": false})
+    );
+    assert_eq!(frames[3]["type"], json!("frame"));
+    assert_eq!(frames[3]["content"]["hex"].as_str().unwrap().len(), 8);
+
+    // Time scrub: from_t resolves to a frame; to_t ends the page.
+    let t = |k: usize| frames[k]["t"].as_i64().unwrap();
+    let secs = |ns: i64| format!("{:.6}", ns as f64 / 1e9);
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/captures/{cid}/frames?from_t={}&limit=1",
+            secs(t(5) - 1_000_000)
+        ),
+    );
+    assert_eq!((st, &v["from_frame"]), (200, &json!(5)), "{v}");
+    assert_eq!(v["frames"][0], frames[5]);
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/captures/{cid}/frames?from_frame=5&to_t={}",
+            secs(t(7) + 1_000_000)
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["frames"].as_array().unwrap().as_slice(), &frames[5..8]);
+    assert!(v["next_from_frame"].is_null(), "{v}");
+
+    // Re-parse over the whole recording with a draft field map.
+    let map = json!({"unit": "bits", "fields": [
+        {"name": "hi", "type": "uint", "length": 16},
+        {"name": "lo", "type": "uint", "length": 16}
+    ]});
+    let (st, v) = post(
+        addr,
+        &format!("/api/captures/{cid}/parse"),
+        &json!({"field_map": map, "from_frame": 3, "limit": 2}).to_string(),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (&v["total_frames"], &v["fit"]["frames"], &v["fit"]["ok"]),
+        (&json!(total), &json!(total), &json!(total)),
+        "{v}"
+    );
+    assert_eq!(
+        v["frames"][0]["content"]["hex"],
+        frames[3]["content"]["hex"]
+    );
+    assert_eq!(v["frames"][0]["content"]["layers"]["fit"], json!("ok"));
+
+    // Replay stream from frame 3.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/inspector?capture={cid}&from_frame=3&token={TOKEN}"),
+    )
+    .unwrap();
+    let Message::Text(text) = ws.read().unwrap() else {
+        panic!("first message must be the header (text)")
+    };
+    let h: Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(h["stream_id"], json!(format!("capture/{cid}")));
+    assert_eq!(
+        h["inspector"]["source"],
+        json!({"kind": "capture", "capture_id": cid, "reparse": false})
+    );
+    let Message::Text(text) = ws.read().unwrap() else {
+        panic!("frame records are text messages")
+    };
+    let rec: Value = serde_json::from_str(text.as_str().trim()).unwrap();
+    assert_eq!(
+        // `seq` is the replay stream's own; `t`, metadata and content are the recording's.
+        (
+            &rec["type"],
+            &rec["t"],
+            &rec["metadata"],
+            &rec["content"]["hex"]
+        ),
+        (
+            &frames[3]["type"],
+            &frames[3]["t"],
+            &frames[3]["metadata"],
+            &frames[3]["content"]["hex"]
+        )
+    );
+    let _ = ws.close(None);
+
+    // Refusals.
+    let (st, v) = get(addr, &format!("/api/captures/{cid}/frames?bogus=1"));
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+    let (st, v) = get(
+        addr,
+        &format!("/api/captures/{cid}/frames?from_frame=1&from_t=2"),
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+    let (st, _) = put(addr, &format!("/api/captures/{cid}"), "{}");
+    assert_eq!(st, 405);
+    let (st, v) = get(addr, "/api/captures/no-such-capture");
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+
+    // Delete a finished capture.
+    let (st, v) = delete(addr, &format!("/api/captures/{cid}"));
+    assert_eq!((st, &v["deleted"]["id"]), (200, &json!(cid)), "{v}");
+    let (st, _) = get(addr, &format!("/api/captures/{cid}"));
+    assert_eq!(st, 404);
+
+    stop_server(serving);
+}
+
 // --- Route-table / docs consistency ---------------------------------------------------------------
 
 /// T-079: every route in [`hk_api::ROUTES`] must appear (method and path on the same line) in
@@ -1375,4 +1602,114 @@ fn every_route_in_the_route_table_is_documented() {
         missing.is_empty(),
         "routes missing from docs/api.md: {missing:#?}"
     );
+}
+
+/// T-107: `PUT /api/pipelines/{id}/channels` and `POST /api/pipelines/{id}/channels/refresh` on a
+/// follow-hops pipeline over the mock device's FM window, as `docs/api.md` documents them: the
+/// answer shape, a no-op change, `400 invalid` bodies, the refresh back to the recipe's
+/// `list_hz`, and `503 busy` (nothing changed) when the added channels exceed the chain budget.
+#[test]
+fn follow_hops_channel_routes_match_the_documented_shapes() {
+    let (serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    let (a, b) = (STATION_HZ - 200e3, STATION_HZ + 200e3);
+    let draft = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "t107-channels", "version": 1,
+        "name": "T-107 channel routes",
+        "input": {"port": "iq", "sample_rate_hz": 24000.0, "bandwidth_hz": 16000.0,
+                  "channels": {"mode": "follow-hops", "channel_bandwidth_hz": 12500.0,
+                               "max_channels": 64, "list_hz": [a]}},
+        "nodes": [
+            {"id": "fsk", "block": "fsk_demod"},
+            {"id": "clock", "block": "clock_recovery",
+             "params": {"symbol_rate_bd": 1200, "pulse": "nrz", "algorithm": "gardner"}},
+            {"id": "slice", "block": "slicer", "params": {"threshold": 0.0}},
+            {"id": "sync", "block": "sync_search",
+             "params": {"mode": "sync-word", "sync_word": "0x7CD215D8", "sync_bits": 32,
+                        "max_errors": 2, "frame_bits": 512, "include_sync": false}},
+            {"id": "hops", "block": "follow_hops"}
+        ],
+        "outputs": [{"id": "frames", "kind": "inspector", "from": "hops"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let start = json!({"recipe": draft,
+        "target": {"band": {"f_lo": a - 10e3, "f_hi": a + 10e3}}});
+    let (st, p) = post(addr, "/api/pipelines", &start.to_string());
+    assert_eq!(st, 201, "{p}");
+    let pid = p["id"].as_str().unwrap().to_owned();
+    assert_eq!(p["follow_hops"]["channel_source"], json!("list"), "{p}");
+    let path = format!("/api/pipelines/{pid}/channels");
+    let centers = |v: &Value| -> Vec<f64> {
+        v["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["center_hz"].as_f64().unwrap())
+            .collect()
+    };
+
+    // A channel added: the documented answer.
+    let (st, v) = put(addr, &path, &json!({"channels_hz": [a, b]}).to_string());
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["id"], json!(pid));
+    assert_eq!(centers(&v), [a, b], "{v}");
+    for k in ["index", "center_hz", "bandwidth_hz"] {
+        assert!(!v["channels"][1][k].is_null(), "{k}: {v}");
+    }
+    assert_eq!(v["added"][0]["index"], json!(1), "{v}");
+    assert_eq!(v["removed"], json!([]));
+    assert!(v["applied_at_sample"].is_u64(), "{v}");
+    let (_, p) = get(addr, &format!("/api/pipelines/{pid}"));
+    assert_eq!(centers(&p["follow_hops"]), [a, b], "{p}");
+
+    // The same set again: nothing changes.
+    let (st, v) = put(addr, &path, &json!({"channels_hz": [b, a]}).to_string());
+    assert_eq!(
+        (st, &v["added"], &v["applied_at_sample"]),
+        (200, &json!([]), &Value::Null),
+        "{v}"
+    );
+
+    // Invalid bodies.
+    for bad in [
+        json!({"channels_hz": "101.1e6"}),
+        json!({"channels_hz": [a, -1.0]}),
+        json!({"channels_hz": [a], "extra": 1}),
+        json!({}),
+    ] {
+        let (st, v) = put(addr, &path, &bad.to_string());
+        assert_eq!((st, &v["code"]), (400, &json!("invalid")), "{bad}: {v}");
+    }
+    let (st, v) = post(addr, &path, "{}");
+    assert_eq!(st, 405, "{v}");
+
+    // Refresh re-resolves the recipe's list: back to one channel.
+    let (st, v) = post(addr, &format!("{path}/refresh"), "");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["removed"], json!([1]), "{v}");
+    assert_eq!(centers(&v), [a]);
+
+    // 64 channels at 25 kHz: each added one claims a chain; beyond the budget, 503 busy and the
+    // running channel set is untouched.
+    let many: Vec<f64> = (0..64).map(|k| 100.0e6 + f64::from(k) * 25e3).collect();
+    let (st, v) = put(addr, &path, &json!({"channels_hz": many}).to_string());
+    assert_eq!((st, &v["code"]), (503, &json!("busy")), "{v}");
+    let (_, p) = get(addr, &format!("/api/pipelines/{pid}"));
+    assert_eq!(centers(&p["follow_hops"]), [a], "{p}");
+    let (st, v) = put(
+        addr,
+        "/api/pipelines/p999/channels",
+        &json!({"channels_hz": [a]}).to_string(),
+    );
+    assert_eq!(st, 404, "{v}");
+
+    let (st, v) = call(
+        addr,
+        "DELETE",
+        &format!("/api/pipelines/{pid}"),
+        Some(&bearer),
+        None,
+    );
+    assert_eq!(st, 200, "{v}");
+    stop_server(serving);
 }

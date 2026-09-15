@@ -1530,7 +1530,8 @@ tasks:
   - id: T-092
     milestone: M1
     title: "M1 Always-on decoded-stream capture + scrubbable review"
-    status: in-progress
+    status: done
+    commit: 082a745
     deps: [T-085, T-088]
     parallel_group: M1C
     use_cases: [SIGNAL-062]
@@ -1542,7 +1543,7 @@ tasks:
   - id: T-093
     milestone: M1
     title: "M1 follow_hops: one pipeline spanning several channels"
-    status: review
+    status: done
     commit: 8f02471
     deps: [T-085, T-088]
     parallel_group: M1H
@@ -1569,7 +1570,9 @@ tasks:
   - id: T-095
     milestone: M1
     title: "M1 Tutorial 2: POCSAG recipe with follow_hops + blind acceptance"
-    status: todo
+    status: blocked
+    commit: 7898e56
+    blocked_by: T-109
     deps: [T-098, T-094, T-093, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1581,7 +1584,8 @@ tasks:
   - id: T-096
     milestone: M1
     title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
-    status: in-progress
+    status: done
+    commit: 6cfa144
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1697,7 +1701,8 @@ tasks:
   - id: T-105
     milestone: M1
     title: "Assist CRC search: confident wrong generator in rare cases at >=8 frames; near-tie ordering at 3 frames"
-    status: in-progress
+    status: done
+    commit: 52bd4fe
     deps: [T-091]
     parallel_group: M1S
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1710,7 +1715,8 @@ tasks:
   - id: T-106
     milestone: M1
     title: "hk_demod RDS oracle bit/group positions count from pilot lock, not stream start (PS timestamps ~100 ms early)"
-    status: todo
+    status: done
+    commit: acb1552
     deps: [T-094]
     parallel_group: T106
     use_cases: [SIGNAL-062]
@@ -1720,6 +1726,50 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
+  - id: T-107
+    milestone: M1
+    title: "follow_hops hardening (T-093 review follow-ups)"
+    status: done
+    commit: 74c9a9e
+    deps: [T-093]
+    parallel_group: M1H
+    use_cases: [SIGNAL-062]
+    found_by: "T-093 review 2026-09-15"
+    acceptance: "per-channel tune stored and added channels re-planned at apply time so a same-rate retune racing set_channels never decodes the wrong frequency (hops.rs:900, test); a channel whose DDC yields no samples on a chunk still carries the pipeline DISCONTINUITY flag (hops.rs:566, test); ordering window handles frames longer than order_window_s (e.g. multi-batch POCSAG) without spurious late counts (by frame end or per-frame hold); tests for the detections channel source and for a hop set found by the tracker from IQ (not inserted); HTTP routes for set_channels/refresh_channels with docs/api.md + contract tests"
+    area: crates/hk-pipeline/src/recipes/hops.rs, crates/hk-blocks/src/blocks/multi, crates/hk-api
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-108
+    milestone: M1
+    title: "ACARS tutorial continuation: real ACARS CRC/parity convention from primary source; blind detection of synthetic ACARS bursts; un-ignore tutorial_acars"
+    status: done
+    commit: 6cfa144
+    deps: [T-096]
+    parallel_group: M1T
+    use_cases: [SIGNAL-062]
+    found_by: "T-096 (Sonnet, out of budget) 2026-09-15: recipe fitted to py synth (CRC-16/XMODEM over parity-zeroed chars, new pinned parity zero mode) - possibly non-standard vs acarsdec (KERMIT over bytes incl parity); blind detection never registers the synthetic AM+MSK burst (inventory empty 240 s)"
+    acceptance: "ACARS sync/CRC/parity convention established from acarsdec source or ARINC 618 (cited); synth + recipe match it; parity zero mode removed unless real ACARS needs it; root cause of missing blind detection fixed (no global threshold weakening, no frequency lookup); tutorial_acars un-ignored and passing blind with registration/label/block id/text vs hidden truth"
+    area: recipes/acars.recipe.json, py/hkpy/synth/acars.py, crates/hk-blocks (fec/parity), crates/hk-detect or hk-pipeline (if detection defect), tests/e2e
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-109
+    milestone: M1
+    title: "POCSAG tutorial continuation: blind detection merges close-packed simultaneous narrowband channels; un-ignore tutorial_pocsag"
+    status: in-progress
+    deps: [T-095]
+    parallel_group: M1T2
+    use_cases: [SIGNAL-062, AWARE-053]
+    found_by: "T-095 (Sonnet, out of budget) 2026-09-15: 4-channel pager scene (~10 kHz channels, 35-38 kHz apart) -> inventory shows 1 of 4 distinct; others merged into 118 kHz and 49 kHz clusters; follow_hops detections source never resolves the set"
+    acceptance: "stage where channels merge measured and root cause fixed blind (no raster/lookups), with a component test that close-packed simultaneous narrowband bursts stay separate; hk-detect hop-set/fragment/915 tests green; tutorial_pocsag un-ignored and passing blind (pages vs hidden truth, channel tags, simulcast once); tutorial doc numbers filled"
+    area: crates/hk-detect (grouping/merge), crates/hk-pipeline (detect), py synth scene, tests/e2e, docs/tutorials/02-pocsag.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"

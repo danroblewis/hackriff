@@ -559,7 +559,10 @@ impl Graph {
                         }
                     }
                 };
-                items |= !inp.data.is_empty();
+                // A frames recipe input (a follow-hops merge, T-093) runs its reader every chunk:
+                // frames carry their own time, and an empty chunk still advances the watermark.
+                items |= !inp.data.is_empty()
+                    || (matches!(src, Src::Input) && matches!(inp.data, PortSlice::Frames(_)));
                 arrived |= inp.meta.flags;
                 ins[k] = inp;
             }

@@ -223,11 +223,11 @@ fn parse_frames(body: &Map<String, Value>) -> Result<Value, CtlResponse> {
 
 /// Whether frame content may be served over HTTP: the class permits content and is not
 /// local-only (`own-key-decrypted` is served to Unix-socket consumers only, contract §2).
-fn servable(class: ContentClass) -> bool {
+pub(crate) fn servable(class: ContentClass) -> bool {
     class.permits_content() && class != ContentClass::OwnKeyDecrypted
 }
 
-fn is_capture_id(id: &str) -> bool {
+pub(crate) fn is_capture_id(id: &str) -> bool {
     id.len() <= 128
         && id
             .bytes()
@@ -264,10 +264,12 @@ fn parse_capture(
             "no decoded-stream capture store on this server",
         )
     })?;
-    let reader = source
-        .open(id)
-        .map_err(|_| fail(500, "unreadable", "the capture could not be opened"))?
-        .ok_or_else(|| fail(404, "not_found", "no such capture"))?;
+    let open_at = |at: u64| {
+        source
+            .open_at(id, at)
+            .map_err(|_| fail(500, "unreadable", "the capture could not be opened"))?
+            .ok_or_else(|| fail(404, "not_found", "no such capture"))
+    };
     let unreadable = |_| {
         fail(
             422,
@@ -275,23 +277,75 @@ fn parse_capture(
             "the capture is not a readable inspector stream",
         )
     };
-    let mut frames = RecordedFrames::open(reader).map_err(unreadable)?;
+    // T-092: a store with a frame index seeks. Without a field map only the page is read; with
+    // one, the fit pass reads the first MAX_FIT_FRAMES and a page past them is a second seek.
+    let cursor = open_at(if ev.is_some() { 0 } else { from })?;
+    let known_total = cursor.total_frames;
+    let first = cursor.first_frame;
+    let mut frames = RecordedFrames::open(cursor.reader).map_err(unreadable)?;
     let header = frames.header().clone();
-    let scan =
-        reparse(&mut frames, ev.as_ref(), from, limit, MAX_FIT_FRAMES).map_err(unreadable)?;
+    let scan = match known_total {
+        None => {
+            let pass = scan_frames(
+                &mut frames,
+                first,
+                ev.as_ref(),
+                from,
+                limit,
+                MAX_FIT_FRAMES,
+                u64::MAX,
+            )
+            .map_err(unreadable)?;
+            Scan {
+                fit: fit_json(ev.as_ref(), pass.fit, pass.end, MAX_FIT_FRAMES),
+                page: pass.page,
+                total: pass.end,
+            }
+        }
+        Some(total) => {
+            let page_end = total.min(from.saturating_add(limit));
+            let stop = if ev.is_some() {
+                total.min(MAX_FIT_FRAMES)
+            } else {
+                page_end
+            };
+            let mut pass = scan_frames(
+                &mut frames,
+                first,
+                ev.as_ref(),
+                from,
+                limit,
+                MAX_FIT_FRAMES,
+                stop,
+            )
+            .map_err(unreadable)?;
+            if pass.end < page_end {
+                let c = open_at(from.max(pass.end))?;
+                let start = c.first_frame;
+                let mut rest = RecordedFrames::open(c.reader).map_err(unreadable)?;
+                let more = scan_frames(
+                    &mut rest,
+                    start,
+                    ev.as_ref(),
+                    from,
+                    limit,
+                    MAX_FIT_FRAMES,
+                    page_end,
+                )
+                .map_err(unreadable)?;
+                // Page frames below the first pass's end were already served by it.
+                let skip = pass.end.saturating_sub(from.max(start)) as usize;
+                pass.page.extend(more.page.into_iter().skip(skip));
+            }
+            Scan {
+                fit: fit_json(ev.as_ref(), pass.fit, total, MAX_FIT_FRAMES),
+                page: pass.page,
+                total,
+            }
+        }
+    };
     let total = scan.total;
-    let mut stream = json!({
-        "stream_id": header.stream_id,
-        "content_class": header.content_class,
-        "message_schema": header.message_schema,
-    });
-    if let Some(mut profile) = header.inspector {
-        profile.source = InspectorSource::Capture {
-            capture_id: id.to_owned(),
-            reparse: ev.is_some(),
-        };
-        stream["inspector"] = json!(profile);
-    }
+    let stream = stream_json(header, id, ev.is_some());
     let next = from.saturating_add(limit);
     Ok(json!({
         "capture_id": id,
@@ -312,8 +366,35 @@ struct Scan {
     total: u64,
 }
 
+/// The `stream` object of a capture response: header identity with `inspector.source` set to
+/// the capture.
+pub(crate) fn stream_json(header: hk_stream::StreamHeader, id: &str, reparse: bool) -> Value {
+    let mut stream = json!({
+        "stream_id": header.stream_id,
+        "content_class": header.content_class,
+        "message_schema": header.message_schema,
+    });
+    if let Some(mut profile) = header.inspector {
+        profile.source = InspectorSource::Capture {
+            capture_id: id.to_owned(),
+            reparse,
+        };
+        stream["inspector"] = json!(profile);
+    }
+    stream
+}
+
+fn fit_json(ev: Option<&Evaluator>, fit: FitSummary, total: u64, fit_cap: u64) -> Option<Value> {
+    ev.map(|_| {
+        let mut v = json!(fit);
+        v["truncated"] = json!(total > fit_cap);
+        v
+    })
+}
+
 /// Reads every frame record: serves `[from, from + limit)` and, with a field map, sums the fit
 /// of the first `fit_cap` frames.
+#[cfg(test)]
 fn reparse<R: std::io::Read>(
     frames: &mut RecordedFrames<R>,
     ev: Option<&Evaluator>,
@@ -321,11 +402,40 @@ fn reparse<R: std::io::Read>(
     limit: u64,
     fit_cap: u64,
 ) -> Result<Scan, hk_stream::ClientError> {
+    let pass = scan_frames(frames, 0, ev, from, limit, fit_cap, u64::MAX)?;
+    Ok(Scan {
+        fit: fit_json(ev, pass.fit, pass.end, fit_cap),
+        page: pass.page,
+        total: pass.end,
+    })
+}
+
+struct Pass {
+    page: Vec<Value>,
+    fit: FitSummary,
+    /// Index after the last frame record read.
+    end: u64,
+}
+
+/// Reads frame records numbered from `first` until index `stop` (or the end): serves those in
+/// `[from, from + limit)` and, with a field map, sums the fit of those below `fit_cap`.
+fn scan_frames<R: std::io::Read>(
+    frames: &mut RecordedFrames<R>,
+    first: u64,
+    ev: Option<&Evaluator>,
+    from: u64,
+    limit: u64,
+    fit_cap: u64,
+    stop: u64,
+) -> Result<Pass, hk_stream::ClientError> {
     let stream_servable = servable(frames.header().content_class);
     let mut fit = FitSummary::default();
     let mut page = Vec::new();
-    let mut total = 0u64;
-    while let Some(rec) = frames.next_frame()? {
+    let mut total = first;
+    while total < stop {
+        let Some(rec) = frames.next_frame()? else {
+            break;
+        };
         let index = total;
         total += 1;
         let in_page = index >= from && index - from < limit;
@@ -345,17 +455,16 @@ fn reparse<R: std::io::Read>(
             page.push(serve_record(rec, parseable, tree));
         }
     }
-    let fit = ev.map(|_| {
-        let mut v = json!(fit);
-        v["truncated"] = json!(total > fit_cap);
-        v
-    });
-    Ok(Scan { page, fit, total })
+    Ok(Pass {
+        page,
+        fit,
+        end: total,
+    })
 }
 
 /// A stored frame record as served: content withheld when not servable (fail closed), layers
 /// from the re-parse when one ran.
-fn serve_record(
+pub(crate) fn serve_record(
     mut rec: FrameRecord,
     parseable: bool,
     tree: Option<hk_stream::inspector::LayerTree>,

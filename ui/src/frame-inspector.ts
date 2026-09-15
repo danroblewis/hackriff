@@ -262,6 +262,78 @@ export async function parseInlineFrames(client: InspectorClient, fieldMap: unkno
   return client.post<InlineParseResponse>("/api/inspector/parse", { field_map: fieldMap, frames });
 }
 
+// ---- Decoded captures (T-092, docs/api.md "Decoded captures"): list + frame/time scrub ----
+
+/** One always-on recording of a pipeline's decoded stream (`GET /api/captures`). */
+export interface CaptureInfoDto {
+  id: string;
+  pipeline_id: string;
+  recipe_id: string;
+  recipe_version: number;
+  output_id: string;
+  stream_id: string;
+  content_class: string;
+  segment: number;
+  started: number;
+  ended: number | null;
+  t_first: number | null;
+  t_last: number | null;
+  frames: number;
+  bytes: number;
+  dropped_records: number;
+  recording: boolean;
+  end_reason: string | null;
+}
+
+/** `GET /api/captures/{id}/frames` page. */
+export interface CaptureFramesResponse {
+  capture_id: string;
+  total_frames: number;
+  from_frame: number;
+  limit: number;
+  next_from_frame: number | null;
+  frames: FrameRecordDto[];
+}
+
+export interface CaptureListClient {
+  get<T = unknown>(path: string): Promise<T>;
+}
+
+export async function listCaptures(client: CaptureListClient): Promise<CaptureInfoDto[]> {
+  const r = await client.get<{ captures?: CaptureInfoDto[] }>("/api/captures");
+  return r.captures ?? [];
+}
+
+export function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/** Picker label: recipe revision, pipeline/output, segment, size, and whether it still records. */
+export function captureLabel(c: CaptureInfoDto): string {
+  const seg = c.segment ? ` #${c.segment}` : "";
+  const live = c.recording ? " · recording" : "";
+  return `${c.recipe_id}@${c.recipe_version} · ${c.pipeline_id}/${c.output_id}${seg} · ${c.frames} frames · ${fmtBytes(c.bytes)}${live}`;
+}
+
+/** The page start for a scrub-slider position: the scrubbed frame, clamped into the recording. */
+export function scrubPageStart(frame: number, total: number): number {
+  if (!Number.isFinite(frame) || total <= 0) return 0;
+  return Math.min(Math.max(0, Math.floor(frame)), total - 1);
+}
+
+/** Unix seconds for an offset from the capture's first frame (its start when it has none). */
+export function seekTimeS(c: Pick<CaptureInfoDto, "t_first" | "started">, offsetS: number): number {
+  return (c.t_first ?? c.started) + Math.max(0, Number.isFinite(offsetS) ? offsetS : 0);
+}
+
+/** The first frame at or after `tS` (Unix seconds): the server searches the capture's frame index. */
+export async function frameAtTime(client: CaptureListClient, captureId: string, tS: number): Promise<number> {
+  const r = await client.get<CaptureFramesResponse>(`/api/captures/${encodeURIComponent(captureId)}/frames?from_t=${tS}&limit=1`);
+  return r.from_frame;
+}
+
 // ---- DOM wiring (untested under node:test, like the rest of ui/src's panels: see ui/test's own
 // note in inventory.test.ts. Only pure functions above are imported by tests). ----
 
@@ -291,9 +363,25 @@ export class FrameInspectorPanel {
   private selectedNodeId: number | null = null;
   private byteCycle: { byte: number; id: number } | null = null;
   private nodeRows = new Map<number, HTMLElement>();
+  private captures = new Map<string, CaptureInfoDto>();
+  private total = 0;
 
-  constructor(private client: InspectorClient) {
+  constructor(private client: InspectorClient & CaptureListClient) {
     $("fi-capture-form").addEventListener("submit", (e) => { e.preventDefault(); this.fromFrame = 0; void this.loadCapture(); });
+    // T-092: pick a recorded stream, scrub by frame, or jump to a time (the server searches its index).
+    $("fi-capture-refresh").addEventListener("click", () => void this.refreshCaptures());
+    $<HTMLSelectElement>("fi-capture-list").addEventListener("change", (e) => {
+      const id = (e.target as HTMLSelectElement).value;
+      if (!id) return;
+      $<HTMLInputElement>("fi-capture-id").value = id;
+      this.fromFrame = 0;
+      void this.loadCapture();
+    });
+    const scrub = $<HTMLInputElement>("fi-scrub");
+    scrub.addEventListener("input", () => { $("fi-scrub-info").textContent = `frame ${scrub.value} of ${this.total}`; });
+    scrub.addEventListener("change", () => { this.fromFrame = scrubPageStart(Number(scrub.value), this.total); void this.loadCapture(); });
+    $("fi-seek-form").addEventListener("submit", (e) => { e.preventDefault(); void this.seek(); });
+    void this.refreshCaptures();
     $("fi-prev").addEventListener("click", () => { this.fromFrame = pagePrevFrom(this.fromFrame, PAGE_LIMIT); void this.loadCapture(); });
     $("fi-next").addEventListener("click", () => {
       const p = this.page as CaptureParseResponse | null;
@@ -329,11 +417,57 @@ export class FrameInspectorPanel {
       $<HTMLButtonElement>("fi-prev").disabled = this.fromFrame <= 0;
       $<HTMLButtonElement>("fi-next").disabled = page.next_from_frame === null;
       $("fi-page-info").textContent = `frames ${page.from_frame}–${page.from_frame + page.frames.length - 1} of ${page.total_frames}`;
+      this.total = page.total_frames;
+      const scrub = $<HTMLInputElement>("fi-scrub");
+      scrub.max = String(Math.max(0, page.total_frames - 1));
+      scrub.value = String(page.from_frame);
+      scrub.disabled = page.total_frames <= 0;
+      $("fi-scrub-info").textContent = `frame ${page.from_frame} of ${page.total_frames}`;
+      $<HTMLButtonElement>("fi-seek-go").disabled = page.total_frames <= 0;
       this.renderFrameList();
       this.selectFrame(this.views[0] ?? null);
     } catch (e) {
       this.setError(errText(e));
       $("fi-status").textContent = "";
+    }
+  }
+
+  /** Refills the recorded-stream picker from `GET /api/captures` (newest first). */
+  private async refreshCaptures() {
+    try {
+      const list = await listCaptures(this.client);
+      this.captures = new Map(list.map((c) => [c.id, c]));
+      const sel = $<HTMLSelectElement>("fi-capture-list");
+      const keep = sel.value || this.captureId;
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = list.length ? "(pick a recording)" : "(no recordings yet)";
+      sel.replaceChildren(none, ...list.map((c) => {
+        const o = document.createElement("option");
+        o.value = c.id;
+        o.textContent = captureLabel(c);
+        return o;
+      }));
+      sel.value = keep && this.captures.has(keep) ? keep : "";
+    } catch (e) {
+      this.setError(errText(e));
+    }
+  }
+
+  /** Jumps the page to the first frame at or after "seconds from capture start". */
+  private async seek() {
+    this.setError("");
+    const id = this.captureId;
+    if (!id) { this.setError("load a capture first"); return; }
+    let c = this.captures.get(id);
+    if (!c) { await this.refreshCaptures(); c = this.captures.get(id); }
+    if (!c) { this.setError("that capture is not in the recorded list"); return; }
+    try {
+      const offset = Number($<HTMLInputElement>("fi-seek-s").value);
+      this.fromFrame = await frameAtTime(this.client, id, seekTimeS(c, offset));
+      await this.loadCapture();
+    } catch (e) {
+      this.setError(errText(e));
     }
   }
 

@@ -314,6 +314,38 @@ fn acars_terminator_lsb_characters_and_crc16_kermit() {
             "chunk {chunk}"
         );
     }
+
+    // T-108: a non-coherent MSK receiver sees tones (mark = chip unchanged) and the recipe's
+    // `chips` node integrates them back to chips with an arbitrary start level, so the frame
+    // arrives in either polarity (acarsdec `acars.c` also accepts ~SYN).
+    assert_eq!(
+        recipe_node("acars", "chips"),
+        json!({"mode": "transition-is-0", "direction": "encode"})
+    );
+    let tones: Vec<u8> = std::iter::once(1)
+        .chain(stream.windows(2).map(|w| u8::from(w[0] == w[1])))
+        .collect();
+    let integrate = |start: u8| -> Vec<u8> {
+        let mut level = start;
+        tones
+            .iter()
+            .map(|&t| {
+                level ^= t ^ 1;
+                level
+            })
+            .collect()
+    };
+    let noise: Vec<u8> = (0..200u32)
+        .map(|k| (k.wrapping_mul(2_654_435_761) >> 31) as u8)
+        .collect();
+    for start in [0u8, 1] {
+        let mut chips = noise.clone();
+        chips.extend(integrate(start));
+        let mut s = build("sync_search", sync_params.clone(), PortType::Bits);
+        let got = run_bits(s.as_mut(), &chips, 13, false);
+        assert_eq!(got.len(), 1, "start level {start}");
+        assert_eq!(got[0].bits, frames[0].bits, "start level {start}");
+    }
 }
 
 // ---- length_from: ADS-B DF decides 56/112 ----
