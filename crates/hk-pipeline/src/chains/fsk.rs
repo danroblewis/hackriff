@@ -252,6 +252,9 @@ pub(crate) fn run(
             Ok(w) => {
                 add(&c.demodulations, w.demodulation_ids.len() as u64);
                 add(&c.decodes, w.decode_ids.len() as u64);
+                shared
+                    .track_decodes
+                    .add(cand.track, w.decode_ids.len() as u64);
                 add(&c.content_withheld, w.content_withheld as u64);
                 add(&c.emitters_created, u64::from(w.emitter_created));
                 let mut inv = shared

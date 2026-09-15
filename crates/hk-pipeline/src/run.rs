@@ -513,6 +513,8 @@ pub(crate) struct Shared {
     pub bursts: Arc<crate::chains::taps::BurstHub>,
     /// Which analog chain owns each emission (T-071 dedupe).
     pub claims: crate::chains::EmissionClaims,
+    /// Decodes written per track (T-127: a bandit dwell's `valid_decodes`).
+    pub track_decodes: Arc<crate::chains::TrackDecodes>,
     /// The run's compute providers (T-056): one registry shared by every segment.
     pub compute: hk_dsp::compute::Compute,
 }
@@ -927,6 +929,7 @@ fn start_segment(
         continues: AtomicBool::new(false),
         bursts: Arc::clone(&common.bursts),
         claims: crate::chains::EmissionClaims::default(),
+        track_decodes: Arc::default(),
         compute: common.compute.clone(),
         cfg,
     });

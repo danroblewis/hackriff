@@ -1939,8 +1939,11 @@ fn observation_log_routes_answer_as_documented() {
 
 /// T-127: `/api/scheduler*` answer the documented shapes on a run without the scheduler
 /// (`hk serve`): reads say `"scheduler": null`, POI rows come from the observation log when a box
-/// is given (unobserved is a gap, never quiet), lease changes are refused with 409 (bad bodies and
-/// ids with 400), other methods with 405, and no token with 401.
+/// is given (unobserved is a gap, never quiet; a bare read computes no POI), lease changes are
+/// refused with 409 (bad bodies and ids with 400), other methods with 405, and no token with 401.
+/// A full lease table (409 `table_full`) and a control-thread timeout (503 `busy`, cancelled)
+/// need a running scheduler: hk-api's `scheduler_failures_map_to_documented_statuses` and
+/// hk-pipeline's `a_lease_command_that_timed_out_never_applies` cover them.
 #[test]
 fn scheduler_routes_answer_as_documented_without_a_scheduler() {
     let (serving, addr) = start_server();

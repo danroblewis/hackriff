@@ -335,8 +335,6 @@ pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     }
 }
 
-/// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`] (public
-/// so acceptance tests wire the recipe routes exactly as `hk serve` does, T-094).
 /// T-127: the pipeline's scheduler hub behind `/api/scheduler*`.
 pub struct PipelineScheduler(pub Arc<hk_pipeline::control::SchedulerHub>);
 
@@ -373,9 +371,12 @@ fn scheduler_fail(e: hk_pipeline::control::HubError) -> hk_api::schedule::Schedu
         H::NoScheduler => F::NoScheduler,
         H::Busy => F::Busy,
         H::Refused(m) => F::Refused(m),
+        H::TableFull(m) => F::TableFull(m),
     }
 }
 
+/// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`] (public
+/// so acceptance tests wire the recipe routes exactly as `hk serve` does, T-094).
 pub struct PipelineRecipes(pub Arc<hk_pipeline::recipes::runtime::RecipeRuntime>);
 
 impl hk_api::recipes::RecipeControl for PipelineRecipes {

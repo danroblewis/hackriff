@@ -2,8 +2,9 @@
 //! attaches bandit dwells to a detected bursty emitter (an active candidate arm over it, visited,
 //! with outcomes recorded), keeps the sweep floor, publishes the scheduler to the API hub (lease
 //! create and release served by the control thread), and the observation log records
-//! bandit-tier dwells with bandit reasons. With the flag absent the same run has no bandit and no
-//! bandit records (the default path is unchanged).
+//! bandit-tier dwells with bandit reasons. With the flag absent the same run has no bandit and
+//! logs no dwells with bandit reasons (v1 WRR POI dwells may still log in the bandit tier; the
+//! default path is unchanged).
 
 mod common;
 

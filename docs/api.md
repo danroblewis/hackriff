@@ -553,7 +553,7 @@ The scheduler of a scheduler-driven run (`hackriffd`, `hk run --schedule`, `hk r
 
 **`GET /api/scheduler`.** POI is computed from the observation log (T-115) with the same exact union-of-windows rule as ADR-0012 §5.5 (1 MHz cells), never from the scheduler's plan.
 - `f_lo`/`f_hi` pick one region (default: the plan's regions, at most 16).
-- `t0`/`t1` pick the span (default: the hour before the scheduler's now; without a scheduler and without a span, `poi` is empty).
+- `t0`/`t1` pick the span. POI is computed only when a span is given: without `t0`/`t1`, `poi` is empty and `span` is null, so a bare status poll never scans the observation log.
 - `tau_s` is a comma-separated list of burst durations (default `0.005,0.1,1,10`; at most 16).
 
 ```json
@@ -597,11 +597,12 @@ The scheduler of a scheduler-driven run (`hackriffd`, `hk run --schedule`, `hk r
 - `duration_s` absent means the lease holds until released.
 - `id` absent assigns the next free id; the same `id` again updates that lease.
 - The lease runs at the pipeline's sample rate.
-- Answers 201 `{ "lease": {...} }` (200 on update); 400 for bad fields or a centre outside the device's range; 409 without a scheduler; 503 if the control thread does not answer within 2 s.
+- Answers 201 `{ "lease": {...} }` (200 on update); 400 for bad fields or a centre outside the device's range; 409 `no_scheduler` without a scheduler; 409 `table_full` when the lease table is full; 503 `busy` if the control thread does not answer within 2 s (the command is then cancelled and never takes effect).
+- An update that changes the lease cuts its running step; an unchanged renewal, a refused create or an unknown release leaves the running step alone.
 
 A lease preempts scheduled plans, the bandit and the sweep from the next step; the sweep floor is not enforced against it (shortfalls count as `floor_violations`).
 
-**`DELETE /api/scheduler/leases/{id}`** answers `{ "released": id }`, 404 when no such lease is active, 400 for a non-numeric id, 409 without a scheduler. The lease's unrun planned time leaves the sweep-floor window.
+**`DELETE /api/scheduler/leases/{id}`** answers `{ "released": id }`, 404 when no such lease is active, 400 for a non-numeric id, 409 without a scheduler, 503 `busy` as for create. The lease's unrun planned time leaves the sweep-floor window.
 
 ## Attention and memory (planned, M2; ADR-0012)
 

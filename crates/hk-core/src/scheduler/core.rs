@@ -661,8 +661,18 @@ impl<C: Clock> Scheduler<C> {
             lease,
             until: lease.duration_ns.map(|ns| now.saturating_add_nanos(ns)),
         };
-        if let Some(l) = self.leases.iter_mut().find(|l| l.lease.id == lease.id) {
-            *l = entry;
+        if let Some(i) = self.leases.iter().position(|l| l.lease.id == lease.id) {
+            // An update that changes the lease (or ends it sooner) trims a running lease step,
+            // so the caller takes the next step with the new settings (T-127 review). A same
+            // update (a renewal that does not shorten it) leaves the running step alone.
+            let old = self.leases[i];
+            let shortens = entry
+                .until
+                .is_some_and(|u| old.until.is_none_or(|o| u < o) && u < self.current_end);
+            if self.intent.is_none() && (old.lease != lease || shortens) {
+                self.trim_running(now);
+            }
+            self.leases[i] = entry;
             return Ok(());
         }
         if self.leases.len() >= MAX_LEASES {
@@ -684,6 +694,13 @@ impl<C: Clock> Scheduler<C> {
             }
             None => false,
         }
+    }
+
+    /// The running step's end: its planned end, or earlier once a lease/intent change cut or
+    /// trimmed it. A caller compares it across [`Self::add_lease`]/[`Self::release_lease`] to
+    /// know whether the running step was abandoned (T-127 review).
+    pub fn running_end(&self) -> Timestamp {
+        self.current_end
     }
 
     /// Active leases.

@@ -22,7 +22,7 @@
 //!   object overriding [`BanditConfig`] fields) enables the bandit revisit policy. Confirmed tracks
 //!   then feed an interestingness provider ([`SharedInterestingness`]) instead of WRR POIs; each
 //!   bandit dwell's outcome (new tracks, bursts and novelty of member detections inside its window
-//!   and time, decode rows written meanwhile) reaches `record_outcome` once detection has caught
+//!   and time, decodes written for those tracks) reaches `record_outcome` once detection has caught
 //!   up; a verification group's trust-test verdict reaches `report_verification`; arms are
 //!   re-packed off `next_step` (`refresh_bandit`) at each step boundary. The provider is a
 //!   **minimal stub** until T-119's C12 scorer publishes through the same handle.
@@ -34,14 +34,14 @@
 //!   filter steps keep applying after every restart.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use hk_core::scheduler::{
     ArmStatus, AttentionStatus, Lease, Poi, PoiKey, Purpose, ScheduleStep, Scheduler,
-    SchedulerConfig, StepApplier, SyntheticClock, Verification,
+    SchedulerConfig, SchedulerError, StepApplier, SyntheticClock, Verification,
 };
 use hk_core::{
     DeviceInfo, Gains, SourceCapabilities, SourceControl, SourceError, SourceStats,
@@ -57,7 +57,7 @@ use hk_model::attention::score::{
 };
 use hk_model::{ScanPlan, Timestamp, TrackId};
 
-use crate::chains::ChainManager;
+use crate::chains::{ChainManager, TrackDecodes};
 use crate::events::{Candidate, ControlEvent, MemberBox};
 use crate::run::Shared;
 use crate::stats::{Counters, add, inc};
@@ -239,6 +239,8 @@ pub(crate) struct SchedState {
     bandit: Option<BanditWiring>,
     /// T-127: the API hub.
     hub: Option<Arc<SchedulerHub>>,
+    /// T-127: decodes per track (the segment's [`Shared::track_decodes`], set by [`run`]).
+    track_decodes: Arc<TrackDecodes>,
     /// The pipeline's rate (every step's, leases included).
     fs: f64,
     regions: Vec<FreqRange>,
@@ -300,6 +302,7 @@ impl SchedState {
             observer: None,
             bandit,
             hub: None,
+            track_decodes: Arc::default(),
             fs,
             regions: plan.regions.iter().map(|r| r.freq).collect(),
         })
@@ -323,16 +326,25 @@ impl SchedState {
         *hub.snapshot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(snap));
     }
 
-    /// Serves queued lease commands. Returns whether there were any.
+    /// Serves queued lease commands, skipping any whose API call already gave up (503). Returns
+    /// whether the scheduler cut or trimmed the running step, so the caller takes the next step
+    /// now. A refused add, an unknown release or an unchanged renewal leave the running step and
+    /// its accounting (sweep-floor window, coverage, bandit visits) alone (T-127 review).
     fn serve_hub(&mut self) -> bool {
         let Some(hub) = self.hub.clone() else {
             return false;
         };
         let cmds = std::mem::take(&mut *hub.inbox.lock().unwrap_or_else(PoisonError::into_inner));
-        let changed = !cmds.is_empty();
+        if cmds.is_empty() {
+            return false;
+        }
+        let before = self.scheduler.running_end();
         for cmd in cmds {
-            match cmd {
-                HubCmd::Add(mut lease, reply) => {
+            if !cmd.take() {
+                continue;
+            }
+            match cmd.op {
+                HubOp::Add(mut lease, reply) => {
                     if lease.id == 0 {
                         lease.id = self.scheduler.leases().map(|l| l.id).max().unwrap_or(0) + 1;
                     }
@@ -341,44 +353,68 @@ impl SchedState {
                         .scheduler
                         .add_lease(lease)
                         .map(|()| lease)
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| match e {
+                            SchedulerError::TableFull(_) => HubError::TableFull(e.to_string()),
+                            e => HubError::Refused(e.to_string()),
+                        });
                     let _ = reply.try_send(r);
                 }
-                HubCmd::Release(id, reply) => {
+                HubOp::Release(id, reply) => {
                     let _ = reply.try_send(self.scheduler.release_lease(id));
                 }
             }
         }
-        if changed {
-            self.publish_hub();
+        self.publish_hub();
+        let cut = self.scheduler.running_end() < before;
+        if cut {
+            // A cut bandit dwell had its visit rolled back by the scheduler: drop its outcome too.
+            if let (Some(step), Some(b)) = (self.recent.back(), self.bandit.as_mut()) {
+                b.pending.retain(|p| p.step.seq != step.seq);
+            }
         }
-        changed
+        cut
     }
 
     /// T-127: a member detection feeds the stub scorer and the outcome of the bandit dwell whose
-    /// window and time contain it.
+    /// window and time contain it. A dwell cut by a lease never reaches here with its planned
+    /// end: [`Self::serve_hub`] drops its outcome.
+    ///
+    /// Decode credit (T-127 review): a dwell counts the decodes written for the tracks it saw,
+    /// from the track's first member in the dwell until its first member after the dwell (sample
+    /// clock), or until the flush when no later member arrives. Limitation: decodes a chain
+    /// writes after that later member for bursts inside the dwell are not credited.
     fn on_member(&mut self, track: TrackId, member: &MemberBox) {
         let usable = self.scheduler.config().usable_fraction;
         let Some(b) = self.bandit.as_mut() else {
             return;
         };
+        let decodes = &self.track_decodes;
         let t = member.t_start.as_unix_nanos();
         let (new_track, novelty) = b.stub.on_member(track, member);
         let center = 0.5 * (member.f_lo_hz + member.f_hi_hz);
         for p in &mut b.pending {
             let st = &p.step;
+            let end = st.t_end().as_unix_nanos();
+            if let Some(m) = p.tracks.iter_mut().find(|m| m.track == track) {
+                if t >= end && m.frozen.is_none() {
+                    m.frozen = Some(decodes.get(track));
+                }
+            }
             let half = 0.5 * st.rate_hz * usable;
-            let inside = st.t_start.as_unix_nanos() <= t
-                && t < st.t_end().as_unix_nanos()
-                && (center - st.center_hz).abs() <= half;
+            let inside =
+                st.t_start.as_unix_nanos() <= t && t < end && (center - st.center_hz).abs() <= half;
             if !inside {
                 continue;
             }
             if !member.continues {
                 p.outcome.bursts += 1;
             }
-            if !p.tracks.contains(&track) {
-                p.tracks.push(track);
+            if !p.tracks.iter().any(|m| m.track == track) {
+                p.tracks.push(TrackMark {
+                    track,
+                    base: decodes.get(track),
+                    frozen: None,
+                });
                 p.outcome.novelty_sum += novelty;
                 if new_track {
                     p.outcome.new_detections += 1;
@@ -389,7 +425,7 @@ impl SchedState {
 
     /// T-127: bandit dwells detection has caught up with go to `record_outcome`.
     fn flush_outcomes(&mut self, now_ns: i64, force: bool) {
-        let decodes = self.counters.chains.decodes.load(Ordering::Relaxed);
+        let decodes = &self.track_decodes;
         let Some(b) = self.bandit.as_mut() else {
             return;
         };
@@ -412,7 +448,7 @@ impl SchedState {
             };
             p.outcome.dwell_s = (end - p.step.t_start.as_unix_nanos()).max(0) as f64 / 1e9;
             p.outcome.valid_decodes =
-                u32::try_from(decodes.saturating_sub(p.decodes_at_start)).unwrap_or(u32::MAX);
+                u32::try_from(p.credited_decodes(decodes)).unwrap_or(u32::MAX);
             self.scheduler.record_outcome(&p.outcome);
         }
     }
@@ -572,7 +608,6 @@ impl SchedState {
         self.recent.push_back(step);
         if let (Purpose::Bandit { .. }, true) = (step.purpose, self.bandit.is_some()) {
             let arm = self.scheduler.arm_key_of(&step);
-            let decodes_at_start = counters.chains.decodes.load(Ordering::Relaxed);
             if self
                 .bandit
                 .as_ref()
@@ -584,7 +619,6 @@ impl SchedState {
                 b.pending.push_back(PendingOutcome {
                     step,
                     tracks: Vec::new(),
-                    decodes_at_start,
                     outcome: DwellOutcome {
                         seq: step.seq,
                         arm,
@@ -645,9 +679,31 @@ struct BanditWiring {
 
 struct PendingOutcome {
     step: ScheduleStep,
-    tracks: Vec<TrackId>,
-    decodes_at_start: u64,
+    tracks: Vec<TrackMark>,
     outcome: DwellOutcome,
+}
+
+impl PendingOutcome {
+    /// Decodes written for the dwell's own tracks over their credit windows (see
+    /// [`SchedState::on_member`]); decodes on any other track never count.
+    fn credited_decodes(&self, decodes: &TrackDecodes) -> u64 {
+        self.tracks
+            .iter()
+            .map(|m| {
+                m.frozen
+                    .unwrap_or_else(|| decodes.get(m.track))
+                    .saturating_sub(m.base)
+            })
+            .sum()
+    }
+}
+
+/// A track a pending dwell saw, with its decode count when the dwell first saw it and when a
+/// later member (after the dwell) arrived.
+struct TrackMark {
+    track: TrackId,
+    base: u64,
+    frozen: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -815,7 +871,11 @@ impl StubInterestingness {
 // ---------------------------------------------------------------------------------------------
 
 /// How long an API lease command waits for the control thread.
-const HUB_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+const HUB_REPLY_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(2)
+};
 
 /// The scheduler as the API sees it: the control thread's latest snapshot and a lease command
 /// inbox it serves at each tick. Empty (no snapshot) when the run has no scheduler.
@@ -845,15 +905,37 @@ pub struct HubSnapshot {
 pub enum HubError {
     /// This run has no scheduler.
     NoScheduler,
-    /// The control thread did not answer in time.
+    /// The control thread did not answer in time. The command was cancelled: it never applies.
     Busy,
     /// The scheduler refused it.
     Refused(String),
+    /// The lease table is full.
+    TableFull(String),
 }
 
-enum HubCmd {
-    Add(Lease, SyncSender<Result<Lease, String>>),
+/// A queued command and its hand-off state ([`CMD_QUEUED`] → taken by the control thread, or
+/// cancelled by an API call that gave up).
+struct HubCmd {
+    op: HubOp,
+    state: Arc<AtomicU8>,
+}
+
+enum HubOp {
+    Add(Lease, SyncSender<Result<Lease, HubError>>),
     Release(u64, SyncSender<bool>),
+}
+
+const CMD_QUEUED: u8 = 0;
+const CMD_TAKEN: u8 = 1;
+const CMD_CANCELLED: u8 = 2;
+
+impl HubCmd {
+    /// Claims the command for the control thread; false when its caller already gave up.
+    fn take(&self) -> bool {
+        self.state
+            .compare_exchange(CMD_QUEUED, CMD_TAKEN, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
 }
 
 impl SchedulerHub {
@@ -865,28 +947,48 @@ impl SchedulerHub {
             .clone()
     }
 
-    fn send<T>(&self, make: impl FnOnce(SyncSender<T>) -> HubCmd) -> Result<T, HubError> {
+    /// Queues a command and waits for its answer. On timeout the command is cancelled, so an
+    /// API call that answered 503 never takes effect later (before the first sample, too); if the
+    /// control thread took it at that moment, its answer is awaited instead.
+    fn send<T>(&self, make: impl FnOnce(SyncSender<T>) -> HubOp) -> Result<T, HubError> {
         if self.snapshot().is_none() {
             return Err(HubError::NoScheduler);
         }
         let (tx, rx) = sync_channel(1);
+        let state = Arc::new(AtomicU8::new(CMD_QUEUED));
         self.inbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(make(tx));
-        rx.recv_timeout(HUB_REPLY_TIMEOUT)
-            .map_err(|_| HubError::Busy)
+            .push(HubCmd {
+                op: make(tx),
+                state: Arc::clone(&state),
+            });
+        match rx.recv_timeout(HUB_REPLY_TIMEOUT) {
+            Ok(v) => Ok(v),
+            Err(_)
+                if state
+                    .compare_exchange(
+                        CMD_QUEUED,
+                        CMD_CANCELLED,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_ok() =>
+            {
+                Err(HubError::Busy)
+            }
+            Err(_) => rx.recv().map_err(|_| HubError::Busy),
+        }
     }
 
     /// Adds or updates a lease (`id` 0 assigns the next free id; the rate is the pipeline's).
     pub fn add_lease(&self, lease: Lease) -> Result<Lease, HubError> {
-        self.send(|tx| HubCmd::Add(lease, tx))?
-            .map_err(HubError::Refused)
+        self.send(|tx| HubOp::Add(lease, tx))?
     }
 
     /// Releases a lease. Returns whether it was active.
     pub fn release_lease(&self, id: u64) -> Result<bool, HubError> {
-        self.send(|tx| HubCmd::Release(id, tx))
+        self.send(|tx| HubOp::Release(id, tx))
     }
 }
 
@@ -898,6 +1000,9 @@ pub(crate) fn run(
     mut interactive: Option<crate::observe::InteractiveObserver>,
 ) -> anyhow::Result<()> {
     let mut chains = ChainManager::new(Arc::clone(&shared));
+    if let Some(s) = sched.as_mut() {
+        s.track_decodes = Arc::clone(&shared.track_decodes);
+    }
     let mut detect_done = false;
     loop {
         match rx.recv_timeout(Duration::from_millis(2)) {
@@ -1040,6 +1145,166 @@ mod tests {
         fn stop(&self) -> Result<(), SourceError> {
             self.log("stop")
         }
+    }
+
+    const CENTER: f64 = 433.5e6;
+
+    /// A replay-like scheduler (`bandit` sets `extra.bandit`) with a hub attached; its t0 in ns.
+    fn sched_with_hub(bandit: bool) -> (SchedState, Arc<SchedulerHub>, Arc<Counters>, i64) {
+        let fs = 250e3;
+        let t0 = Timestamp::from_unix_nanos(1_789_297_800_000_000_000);
+        let switch = Arc::new(SwitchableControl::new(
+            Recorder::new(CENTER, fs) as Arc<dyn SourceControl>
+        ));
+        let counters = Arc::new(Counters::default());
+        let mut plan = replay_plan(CENTER, fs, t0);
+        if bandit {
+            plan.extra["bandit"] = serde_json::Value::Bool(true);
+        }
+        let mut s = SchedState::new(&plan, switch, fs, t0, Arc::clone(&counters), false).unwrap();
+        let hub = Arc::new(SchedulerHub::default());
+        s.attach_hub(Arc::clone(&hub));
+        (s, hub, counters, t0.as_unix_nanos())
+    }
+
+    /// Queues a command as the API would, without blocking on its answer.
+    fn queue(hub: &SchedulerHub, op: HubOp) {
+        hub.inbox.lock().unwrap().push(HubCmd {
+            op,
+            state: Arc::new(AtomicU8::new(CMD_QUEUED)),
+        });
+    }
+
+    fn pin(duration_ns: Option<i64>) -> Lease {
+        Lease {
+            id: 0,
+            kind: hk_model::attention::observation::LeaseKind::UserPin,
+            center_hz: CENTER,
+            rate_hz: 0.0,
+            gains: None,
+            duration_ns,
+        }
+    }
+
+    fn not_other_s(st: &AttentionStatus) -> f64 {
+        st.discovery_s + st.exploit_s + st.explore_s
+    }
+
+    /// T-127 review: a refused POST and a DELETE of an unknown lease leave the running step and
+    /// its accounting unchanged (no new step is taken early).
+    #[test]
+    fn refused_or_unknown_lease_commands_leave_the_running_step_alone() {
+        let (mut s, hub, counters, t) = sched_with_hub(false);
+        s.tick(t + 1);
+        let end = s.step_end_ns.expect("a running step");
+        assert!(end > t + 4);
+        let steps = counters.scheduler.steps.load(Ordering::Relaxed);
+        let before = s.scheduler.attention_status();
+        let (add_tx, add_rx) = sync_channel(1);
+        queue(&hub, HubOp::Add(pin(Some(0)), add_tx));
+        let (rel_tx, rel_rx) = sync_channel(1);
+        queue(&hub, HubOp::Release(99, rel_tx));
+        s.tick(t + 2);
+        assert!(matches!(add_rx.try_recv(), Ok(Err(HubError::Refused(_)))));
+        assert_eq!(rel_rx.try_recv(), Ok(false));
+        assert_eq!(s.step_end_ns, Some(end));
+        assert_eq!(s.scheduler.running_end().as_unix_nanos(), end);
+        assert_eq!(counters.scheduler.steps.load(Ordering::Relaxed), steps);
+        let after = s.scheduler.attention_status();
+        assert_eq!(not_other_s(&after), not_other_s(&before));
+        assert_eq!(after.other_s, before.other_s);
+    }
+
+    /// T-127 review: an accepted lease cuts the running step at once, and its accounting keeps
+    /// only the time it actually observed.
+    #[test]
+    fn an_accepted_lease_trims_the_running_step_to_its_observed_time() {
+        let (mut s, hub, counters, t) = sched_with_hub(false);
+        s.tick(t + 1);
+        let end = s.step_end_ns.expect("a running step");
+        let before = not_other_s(&s.scheduler.attention_status());
+        let mid = t + 1 + (end - t - 1) / 2;
+        let (tx, rx) = sync_channel(1);
+        queue(&hub, HubOp::Add(pin(None), tx));
+        s.tick(mid);
+        let lease = rx.try_recv().unwrap().unwrap();
+        assert!(lease.id >= 1);
+        let unrun = (end - mid) as f64 / 1e9;
+        let after = not_other_s(&s.scheduler.attention_status());
+        assert!(
+            (before - after - unrun).abs() < 1e-6,
+            "{before} {after} {unrun}"
+        );
+        let step = s.recent.back().unwrap();
+        assert!(matches!(step.purpose, Purpose::Lease { .. }), "{step:?}");
+        assert_eq!(step.t_start.as_unix_nanos(), mid);
+        assert_eq!(counters.scheduler.steps.load(Ordering::Relaxed), 2);
+    }
+
+    /// T-127 review: a command whose API call timed out (503) never applies later, including one
+    /// sent before the first sample.
+    #[test]
+    fn a_lease_command_that_timed_out_never_applies() {
+        let (mut s, hub, _counters, t) = sched_with_hub(false);
+        assert_eq!(hub.add_lease(pin(None)), Err(HubError::Busy));
+        s.tick(t + 1);
+        assert_eq!(s.scheduler.leases().count(), 0);
+        assert!(!matches!(
+            s.recent.back().map(|st| st.purpose),
+            Some(Purpose::Lease { .. })
+        ));
+    }
+
+    /// T-127 review: continuous decodes on an unrelated track, and decodes on the dwell's own
+    /// track after its next member past the dwell, never raise the dwell's `valid_decodes`.
+    #[test]
+    fn unrelated_track_decodes_do_not_reward_a_dwell() {
+        let (mut s, _hub, _counters, t) = sched_with_hub(true);
+        s.tick(t + 1);
+        let step = *s.recent.back().unwrap();
+        let end = step.t_end().as_unix_nanos();
+        assert!(end > t + 3);
+        let arm = s.scheduler.arm_key_of(&step);
+        let b = s.bandit.as_mut().expect("the bandit is on");
+        b.pending.clear();
+        b.pending.push_back(PendingOutcome {
+            step,
+            tracks: Vec::new(),
+            outcome: DwellOutcome {
+                seq: step.seq,
+                arm,
+                dwell_s: 0.0,
+                new_detections: 0,
+                bursts: 0,
+                novelty_sum: 0.0,
+                valid_decodes: 0,
+                suspect_detections: 0,
+            },
+        });
+        let member = |t_ns: i64, center: f64| MemberBox {
+            detection: hk_model::DetectionId::new(),
+            samples: 0..1,
+            f_lo_hz: center - 1e3,
+            f_hi_hz: center + 1e3,
+            t_start: Timestamp::from_unix_nanos(t_ns),
+            continues: false,
+        };
+        let (ours, other) = (TrackId::new(), TrackId::new());
+        let decodes = Arc::clone(&s.track_decodes);
+        decodes.add(Some(ours), 3);
+        decodes.add(Some(other), 7);
+        s.on_member(ours, &member(t + 2, step.center_hz));
+        // The unrelated track is outside the dwell's window; it decodes continuously.
+        s.on_member(other, &member(t + 2, step.center_hz + step.rate_hz));
+        decodes.add(Some(other), 100);
+        decodes.add(Some(ours), 2);
+        // The dwell's track shows up again after the dwell: later decodes are a later look's.
+        s.on_member(ours, &member(end + 10, step.center_hz));
+        decodes.add(Some(ours), 50);
+        decodes.add(Some(other), 100);
+        let p = &s.bandit.as_ref().unwrap().pending[0];
+        assert_eq!(p.tracks.len(), 1);
+        assert_eq!(p.credited_decodes(&decodes), 2);
     }
 
     /// T-037a item 3: after `--loop` reopens the source, the scheduler's commands reach the new

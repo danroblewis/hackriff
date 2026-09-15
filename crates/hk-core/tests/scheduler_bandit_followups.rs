@@ -108,6 +108,50 @@ fn a_fully_suspect_arm_without_pseudo_dwell_has_index_zero_not_nan() {
     assert!(s.arm_table().iter().all(|a| !a.ucb.is_nan()));
 }
 
+/// T-127 review: updating a lease trims its running step when the lease changes; renewing it
+/// unchanged leaves the running step (and its accounting) alone.
+#[test]
+fn a_changed_lease_update_trims_its_running_step_and_a_renewal_does_not() {
+    let (mut s, _p) = sched(BanditConfig::default());
+    for _ in 0..20 {
+        step(&mut s);
+    }
+    let lease = Lease {
+        id: 1,
+        kind: LeaseKind::UserPin,
+        center_hz: 915e6,
+        rate_hz: 10e6,
+        gains: None,
+        duration_ns: None,
+    };
+    s.add_lease(lease).unwrap();
+    s.refresh_bandit();
+    let st = s.next_step();
+    assert!(matches!(st.purpose, Purpose::Lease { .. }));
+    s.clock().advance_ns(st.duration_ns / 4);
+    let before = s.attention_status().other_s;
+    s.add_lease(lease).unwrap();
+    assert_eq!(
+        s.running_end(),
+        st.t_end(),
+        "a renewal keeps the running step"
+    );
+    assert_eq!(s.attention_status().other_s, before);
+
+    s.add_lease(Lease {
+        center_hz: 916e6,
+        ..lease
+    })
+    .unwrap();
+    assert_eq!(s.running_end(), s.clock().now(), "a changed lease trims it");
+    let after = s.attention_status().other_s;
+    let unrun = (st.duration_ns - st.duration_ns / 4) as f64 / 1e9;
+    assert!(
+        (before - after - unrun).abs() < 1e-6,
+        "{before} {after} {unrun}"
+    );
+}
+
 #[test]
 fn released_leases_and_intent_take_their_unrun_time_out_of_the_floor_window() {
     let (mut s, _p) = sched(BanditConfig::default());

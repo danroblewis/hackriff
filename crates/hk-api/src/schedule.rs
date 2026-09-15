@@ -4,8 +4,8 @@
 //! - `GET /api/scheduler[?f_lo&f_hi][&t0&t1][&tau_s]`: tier shares over the sweep-floor window,
 //!   floor status, the bandit summary (provider version, counters, settings), active leases, and
 //!   POI + coverage gaps per region computed from the **observation log** (T-115) through
-//!   `visits_from_records`. Regions default to the plan's; the span defaults to the hour before the
-//!   scheduler's sample-clock now.
+//!   `visits_from_records`. Regions default to the plan's. POI is computed only when a span
+//!   (`t0`/`t1`) is given: a bare status read never scans the log (T-127 review, cost).
 //! - `GET /api/scheduler/arms`: the bandit arm table.
 //! - `GET /api/scheduler/leases`, `POST /api/scheduler/leases` (create or update a pin),
 //!   `DELETE /api/scheduler/leases/<id>` (release). Mutations are audited.
@@ -33,8 +33,6 @@ pub const MAX_POI_REGIONS: usize = 16;
 pub const MAX_POI_TAUS: usize = 16;
 /// Most observation records read for one POI computation (`poi_truncated` beyond).
 pub const MAX_POI_RECORDS: usize = 200_000;
-/// Default POI span before the scheduler's now, s.
-pub const DEFAULT_POI_SPAN_S: f64 = 3600.0;
 /// POI cell width, Hz.
 pub const POI_CELL_HZ: f64 = 1e6;
 
@@ -58,8 +56,10 @@ pub enum SchedulerFail {
     NoScheduler,
     /// The control thread did not answer in time.
     Busy,
-    /// The scheduler refused it (capability, table full).
+    /// The scheduler refused it (capability, bad duration).
     Refused(String),
+    /// The lease table is full (409 `table_full`).
+    TableFull(String),
 }
 
 /// The pipeline's scheduler as the API sees it (implemented over the control thread's hub).
@@ -182,6 +182,7 @@ fn fail(e: SchedulerFail) -> Fail {
         SchedulerFail::NoScheduler => Fail::new(409, "no_scheduler", "this run has no scheduler"),
         SchedulerFail::Busy => Fail::new(503, "busy", "the scheduler did not answer in time"),
         SchedulerFail::Refused(m) => Fail::invalid(m),
+        SchedulerFail::TableFull(m) => Fail::new(409, "table_full", m),
     }
 }
 
@@ -335,16 +336,8 @@ fn status(state: &ApiState, req: &CtlRequest<'_>) -> Result<Value, Fail> {
         (None, Some(v)) => v.regions.iter().take(MAX_POI_REGIONS).copied().collect(),
         (None, None) => Vec::new(),
     };
-    let span = match (span, &v) {
-        (Some((a, b)), _) => Some(TimeRange::new(ts(a), ts(b))),
-        (None, Some(v)) => Some(TimeRange::new(
-            v.status
-                .now
-                .saturating_add_nanos(-(DEFAULT_POI_SPAN_S * 1e9) as i64),
-            v.status.now,
-        )),
-        (None, None) => None,
-    };
+    // POI only for an explicit span: a bare status read (the UI's poll) never scans the log.
+    let span = span.map(|(a, b)| TimeRange::new(ts(a), ts(b)));
     let (poi, log, truncated) = match (&state.observations, span) {
         (Some(store), Some(span)) if !regions.is_empty() => {
             let (records, truncated) = records_in(store, &regions, span);
@@ -558,5 +551,26 @@ mod tests {
             Some(Err(Some("DELETE")))
         );
         assert_eq!(resolve("GET", "/api/schedulers"), None);
+    }
+
+    /// T-127 review: a full lease table is a conflict (409 `table_full`), not a bad request.
+    #[test]
+    fn scheduler_failures_map_to_documented_statuses() {
+        let status = |e| {
+            let r = fail(e).response();
+            (
+                r.status,
+                r.body["code"].as_str().unwrap_or_default().to_owned(),
+            )
+        };
+        let full = SchedulerFail::TableFull("lease".into());
+        assert_eq!(status(full), (409, "table_full".to_owned()));
+        assert_eq!(status(SchedulerFail::Busy), (503, "busy".to_owned()));
+        assert_eq!(
+            status(SchedulerFail::NoScheduler),
+            (409, "no_scheduler".to_owned())
+        );
+        let refused = SchedulerFail::Refused("x".into());
+        assert_eq!(status(refused), (400, "invalid".to_owned()));
     }
 }
