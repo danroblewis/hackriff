@@ -9,17 +9,24 @@
 //!    baseline, `occupancy_z` > 0 → busier, < 0 → **quieter than usual**, a latched change point
 //!    → change point); [`new_emitter_input`] builds one from `new_emitter` novelty.
 //! 2. **Merge.** Hot adjacent `Cells` inputs of one kind (novelty ≥ `off`, gap ≤
-//!    `merge_gap_cells` baseline cells) merge into one subject; a group overlapping a tracked key
-//!    of that kind reuses its key, so an open alarm is extended, never duplicated (§7.2).
+//!    `merge_gap_cells` baseline cells) merge into one subject; a group that really overlaps a
+//!    tracked key of that kind reuses the best-overlapping key, so an open alarm is extended,
+//!    never duplicated (§7.2). A dismissed key takes only a group inside its own extent, so a new
+//!    neighbour or a wideband emitter over it is new activity. Idle keys are evicted after the
+//!    cooldown.
 //! 3. **Suppress** in the §7.3 order: mobile, unassigned, provenance-explained, immature,
 //!    dismissed. Every suppression is counted per kind ([`SuppressionCounts`]).
-//!    - **Explain the device first (§7.4).** A step in `[t − lookback, t + observed_s]` over the
-//!      subject whose direction and size fit the change (a gain step of Δ dB explains a level
-//!      shift within `max(gain_tolerance_db, ½|Δ|)` of Δ; a gain increase explains busier/new
-//!      emitter, a decrease quieter; calibration, spur-mask, antenna, overload, restart, drop and
-//!      site steps explain any change) makes the change self-inflicted: once per key and step,
-//!      when its raw novelty reaches `on`, an [`AlarmAction::Explained`] anomaly is written with a
-//!      top `self-inflicted` Explanation, and no novelty alarm is raised.
+//!    - **Explain the device first, never explain an emitter away (§7.4).** Calibration,
+//!      spur-mask, antenna, overload, restart, drop and site steps in
+//!      `[t − lookback, t + observed_s]` over the subject explain the change. A gain step explains
+//!      it only with a known Δ, when at least `gain_breadth` (70 %) of at least
+//!      `gain_breadth_min_subjects` observed subjects under it moved with Δ in the same snapshot
+//!      (levels within ± `gain_tolerance_db` of Δ; occupancy hot in Δ's direction), and when the
+//!      subject's own level cells shift by Δ ± tolerance (no residual). An explained change is
+//!      self-inflicted: once per key and step, when its raw novelty reaches `on`, an
+//!      [`AlarmAction::Explained`] anomaly is written with a top `self-inflicted` Explanation, and
+//!      no novelty alarm is raised. A gain step that does not fit (unknown Δ, isolated group,
+//!      residual) still lets the alarm raise and is written as a low-score `possible contributor`.
 //! 4. **Hysteresis** ([`HysteresisState::step`] on the component novelty): raise → a new
 //!    anomaly; reopen (re-raise within the 1 h cooldown, sample clock) → the same anomaly; hold →
 //!    extend; clear. A subject not observed in an interval is not stepped (unobserved is not
@@ -78,8 +85,14 @@ pub struct AlarmConfig {
     pub merge_gap_cells: i64,
     /// Level-0 cells per baseline cell (16).
     pub cell_factor: i64,
-    /// A gain step explains a level shift within max(this, ½|Δ|) of Δ, dB (3).
+    /// A gain step explains a level shift within ± this of Δ, dB (3, fixed, never scaled by Δ).
     pub gain_tolerance_db: f64,
+    /// A gain step explains a subject only when at least this fraction of the snapshot's observed
+    /// subjects under the step moved with it (0.7): a broadband shift, not an isolated group.
+    pub gain_breadth: f64,
+    /// ... and at least this many subjects were observed under the step (4). A snapshot with fewer
+    /// cannot show a broadband shift, so a gain step never explains it away.
+    pub gain_breadth_min_subjects: usize,
 }
 
 impl Default for AlarmConfig {
@@ -92,6 +105,8 @@ impl Default for AlarmConfig {
             merge_gap_cells: 2,
             cell_factor: 16,
             gain_tolerance_db: 3.0,
+            gain_breadth: 0.7,
+            gain_breadth_min_subjects: 4,
         }
     }
 }
@@ -113,16 +128,33 @@ pub struct DeviceStep {
 }
 
 impl DeviceStep {
-    /// From a report provenance step (no gain delta).
+    /// From a report provenance step. A gain step's delta is summed from its detail
+    /// (`lna 16→32 dB, vga 20→24 dB` → +20 dB); any part without a dB size (amp, gain table, an
+    /// unknown state) leaves it unknown, and an unknown delta never explains a change away.
     pub fn from_report(s: &hk_model::attention::report::ProvenanceStep) -> Self {
         Self {
             t: s.t,
             kind: s.kind,
             freq: s.freq,
-            gain_delta_db: None,
+            gain_delta_db: (s.kind == ProvenanceStepKind::Gain)
+                .then(|| gain_delta_from_detail(&s.detail))
+                .flatten(),
             detail: s.detail.clone(),
         }
     }
+}
+
+/// Net dB change of a report gain detail, `None` unless every part is `name a→b dB`.
+fn gain_delta_from_detail(detail: &str) -> Option<f64> {
+    let mut sum = 0.0;
+    for part in detail.split(',').map(str::trim) {
+        let body = part.strip_suffix(" dB")?;
+        let (_, range) = body.rsplit_once(' ')?;
+        let (a, b) = range.split_once('→')?;
+        let (a, b): (f64, f64) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+        sum += b - a;
+    }
+    sum.is_finite().then_some(sum)
 }
 
 /// One subject's scored interval for one alarm kind.
@@ -231,6 +263,9 @@ pub enum AlarmAction {
         input: AlarmInput,
         /// Intervals at or above `on`.
         intervals_above: u32,
+        /// Device steps that coincide but do not account for the change (an unknown-size gain
+        /// step, a gain step without a broad matching shift): annotated, never suppressing.
+        contributors: Vec<DeviceStep>,
     },
     /// Re-open the key's last anomaly (cleared within the cooldown).
     Reopen {
@@ -280,6 +315,8 @@ struct KeyState {
     /// The last input for this key was provenance-explained (a persistent gain split writes one
     /// self-inflicted anomaly, not one per interval).
     explained_active: bool,
+    /// Last snapshot that stepped this key (eviction of idle explained keys).
+    last_seen: Option<Timestamp>,
 }
 
 /// Per-key alarm state machine (pure).
@@ -308,32 +345,127 @@ fn raw_novelty(input: &AlarmInput, cfg: &NoveltyConfig) -> f64 {
     input.novelty.max(from_z).clamp(0.0, 1.0)
 }
 
-fn step_explains(input: &AlarmInput, step: &DeviceStep, t: Timestamp, cfg: &AlarmConfig) -> bool {
+/// How a provenance step relates to one input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepFit {
+    /// The step accounts for the change: self-inflicted, not novel.
+    Explains,
+    /// The step coincides but does not account for the change: the alarm still raises, and the
+    /// step is annotated as a possible contributor.
+    Contributes,
+    /// Outside the step's time window or extent.
+    Unrelated,
+}
+
+/// Whether `step` applies to `input` at `t` (lookback window and extent).
+fn step_applies(input: &AlarmInput, step: &DeviceStep, t: Timestamp, cfg: &AlarmConfig) -> bool {
     let lo = add_s(t, -cfg.provenance_lookback_s);
     let hi = add_s(t, input.observed_s.max(0.0));
-    if step.t < lo || step.t > hi {
-        return false;
+    step.t >= lo && step.t <= hi && step.freq.is_none_or(|f| f.overlaps(&input.freq))
+}
+
+fn is_level(i: &AlarmInput) -> bool {
+    i.kind == AlarmKind::LevelAboveBaseline && i.unit == AlarmUnit::Db
+}
+
+fn is_occupancy(i: &AlarmInput) -> bool {
+    matches!(
+        i.kind,
+        AlarmKind::BusierThanUsual | AlarmKind::QuieterThanUsual
+    )
+}
+
+/// A dB input whose shift from its baseline is Δ within the fixed tolerance.
+fn level_matches(i: &AlarmInput, delta: f64, cfg: &AlarmConfig) -> bool {
+    let shift = i.observed - i.baseline_mean;
+    shift.signum() == delta.signum() && (shift - delta).abs() <= cfg.gain_tolerance_db
+}
+
+/// An occupancy input that moved (hot) in Δ's direction.
+fn occupancy_moved(i: &AlarmInput, delta: f64, cfg: &AlarmConfig) -> bool {
+    i.z.signum() == delta.signum() && raw_novelty(i, &cfg.novelty) >= cfg.hysteresis.off
+}
+
+type Member = fn(&AlarmInput) -> bool;
+type Moved = fn(&AlarmInput, f64, &AlarmConfig) -> bool;
+
+/// §7.4 "a broadband shift ≈ the gain delta across cells under that gain state": at least
+/// `gain_breadth` of the snapshot's observed `member` subjects under the step moved with Δ (quiet
+/// subjects count in the denominator), and at least `gain_breadth_min_subjects` were observed.
+fn broad(
+    snap: &NoveltySnapshot,
+    step: &DeviceStep,
+    delta: f64,
+    cfg: &AlarmConfig,
+    member: Member,
+    moved: Moved,
+) -> bool {
+    let (mut n, mut m) = (0usize, 0usize);
+    for i in snap
+        .inputs
+        .iter()
+        .filter(|i| member(i) && step_applies(i, step, snap.t, cfg))
+    {
+        n += 1;
+        m += usize::from(moved(i, delta, cfg));
     }
-    if step.freq.is_some_and(|f| !f.overlaps(&input.freq)) {
-        return false;
+    n >= cfg.gain_breadth_min_subjects.max(1) && m as f64 >= cfg.gain_breadth * n as f64
+}
+
+/// Explain the device first, without explaining a real emitter away: a non-gain step in the
+/// window explains the change; a gain step explains it only with a known Δ, a broad matching shift
+/// across the snapshot, and no level residual beyond Δ ± tolerance on the subject's own cells.
+fn step_fit(
+    input: &AlarmInput,
+    step: &DeviceStep,
+    snap: &NoveltySnapshot,
+    cfg: &AlarmConfig,
+) -> StepFit {
+    if !step_applies(input, step, snap.t, cfg) {
+        return StepFit::Unrelated;
     }
     if step.kind != ProvenanceStepKind::Gain {
-        return true;
+        return StepFit::Explains;
     }
-    let Some(delta) = step.gain_delta_db.filter(|d| d.is_finite()) else {
-        // A gain step of unknown size: conservatively the device's doing.
-        return true;
+    let Some(delta) = step.gain_delta_db.filter(|d| d.is_finite() && *d != 0.0) else {
+        // Unknown size: never explains activity away, only a possible contributor.
+        return StepFit::Contributes;
     };
-    match input.kind {
-        AlarmKind::LevelAboveBaseline | AlarmKind::ChangePoint if input.unit == AlarmUnit::Db => {
-            let shift = input.observed - input.baseline_mean;
-            let tol = cfg.gain_tolerance_db.max(0.5 * delta.abs());
-            delta != 0.0 && shift.signum() == delta.signum() && (shift - delta).abs() <= tol
-        }
-        AlarmKind::BusierThanUsual | AlarmKind::NewEmitter => delta > 0.0,
-        AlarmKind::QuieterThanUsual => delta < 0.0,
-        // A fraction change point: the direction is in the z sign.
-        _ => input.z.signum() == delta.signum(),
+    // Gain compensation: every level cell under the step overlapping this subject must shift by
+    // ≈ Δ. A residual far beyond Δ, or a cell that stays idle once Δ is removed, is not the gain.
+    let levels: Vec<&AlarmInput> = snap
+        .inputs
+        .iter()
+        .filter(|i| is_level(i) && i.freq.overlaps(&input.freq))
+        .filter(|i| step_applies(i, step, snap.t, cfg))
+        .collect();
+    let compensated = levels.iter().all(|i| level_matches(i, delta, cfg));
+    let fits = compensated
+        && match input.kind {
+            AlarmKind::LevelAboveBaseline | AlarmKind::ChangePoint
+                if input.unit == AlarmUnit::Db =>
+            {
+                level_matches(input, delta, cfg)
+                    && broad(snap, step, delta, cfg, is_level, level_matches)
+            }
+            // A new emitter needs its own cells to show the gain shift, and a broadband one.
+            AlarmKind::NewEmitter => {
+                !levels.is_empty() && broad(snap, step, delta, cfg, is_level, level_matches)
+            }
+            kind => {
+                let direction = match kind {
+                    AlarmKind::BusierThanUsual => delta > 0.0,
+                    AlarmKind::QuieterThanUsual => delta < 0.0,
+                    // A fraction change point: the direction is in the z sign.
+                    _ => input.z.signum() == delta.signum(),
+                };
+                direction && broad(snap, step, delta, cfg, is_occupancy, occupancy_moved)
+            }
+        };
+    if fits {
+        StepFit::Explains
+    } else {
+        StepFit::Contributes
     }
 }
 
@@ -378,9 +510,11 @@ impl AlarmEngine {
                 .dismissed_until
                 .filter(|_| row.state == AlarmState::Dismissed);
             if row.state == AlarmState::Explained {
-                st.explained_step = Some(row.raised_at);
+                // The step time, so the same step never writes a second self-inflicted row.
+                st.explained_step = Some(row.explained_step_t.unwrap_or(row.raised_at));
                 st.explained_active = true;
             }
+            st.last_seen = Some(row.last_t);
             e.now = e.now.max(Some(row.last_t));
         }
         Ok(e)
@@ -434,6 +568,7 @@ impl AlarmEngine {
         &self,
         site: hk_model::ids::SiteId,
         inputs: &[AlarmInput],
+        t: Timestamp,
     ) -> Vec<(AlarmKey, AlarmInput)> {
         let gap = self.cfg.merge_gap_cells * self.cfg.cell_factor;
         let hot = |i: &AlarmInput| raw_novelty(i, &self.cfg.novelty) >= self.cfg.hysteresis.off;
@@ -490,13 +625,33 @@ impl AlarmEngine {
                         .map(|c| (*k, c.1, c.2))
                 })
                 .collect();
-            let near = |lo: i64, hi: i64, a: i64, b: i64| lo - b <= gap && a - hi <= gap;
+            let dismissed = |k: &AlarmKey| {
+                self.keys
+                    .get(k)
+                    .and_then(|s| s.dismissed_until)
+                    .is_some_and(|u| t < u)
+            };
             let mut used: Vec<AlarmKey> = Vec::new();
             for (lo, hi, mut input) in groups {
+                // A key is reused only on real overlap, the best (overlap / union) winning. A
+                // dismissed key takes only a group inside its extent: a new neighbour or a wideband
+                // emitter over it is new activity, never swallowed by the dismissal.
                 let key = tracked
                     .iter()
-                    .find(|(k, a, b)| near(lo, hi, *a, *b) && !used.contains(k))
-                    .map(|(k, _, _)| *k)
+                    .filter(|(k, _, _)| !used.contains(k))
+                    .filter_map(|(k, a, b)| {
+                        let overlap = hi.min(*b) - lo.max(*a);
+                        if overlap <= 0 || (dismissed(k) && (lo < *a || hi > *b)) {
+                            return None;
+                        }
+                        let union = (hi.max(*b) - lo.min(*a)).max(1);
+                        Some((overlap as f64 / union as f64, *k))
+                    })
+                    .fold(None::<(f64, AlarmKey)>, |best, c| match best {
+                        Some(b) if b.0 >= c.0 => Some(b),
+                        _ => Some(c),
+                    })
+                    .map(|(_, k)| k)
                     .unwrap_or(AlarmKey {
                         kind,
                         site,
@@ -546,10 +701,12 @@ impl AlarmEngine {
         };
         let mut actions = Vec::new();
         let hcfg = self.cfg.hysteresis;
-        for (key, input) in self.keyed(site, &snap.inputs) {
+        for (key, input) in self.keyed(site, &snap.inputs, t) {
             let raw = raw_novelty(&input, &self.cfg.novelty);
             let real_step = !input.provenance_explained;
+            let mut contributors: Vec<DeviceStep> = Vec::new();
             let explaining = if input.provenance_explained {
+                // T-119 already compared against a new gain state (its per-state split).
                 Some(DeviceStep {
                     t,
                     kind: ProvenanceStepKind::Gain,
@@ -558,16 +715,25 @@ impl AlarmEngine {
                     detail: "front-end state changed (new baseline gain state)".into(),
                 })
             } else {
-                snap.steps
-                    .iter()
-                    .filter(|s| step_explains(&input, s, t, &self.cfg))
-                    .max_by_key(|s| s.t)
-                    .cloned()
+                let mut best: Option<&DeviceStep> = None;
+                for s in &snap.steps {
+                    match step_fit(&input, s, snap, &self.cfg) {
+                        StepFit::Explains => {
+                            if best.is_none_or(|b| s.t >= b.t) {
+                                best = Some(s);
+                            }
+                        }
+                        StepFit::Contributes => contributors.push(s.clone()),
+                        StepFit::Unrelated => {}
+                    }
+                }
+                best.cloned()
             };
             if let Some(sup) = suppression(snap.site, input.maturity, explaining.is_some()) {
                 self.counts.bump(input.kind, sup);
                 if let (Suppression::ProvenanceExplained, Some(step)) = (sup, explaining) {
                     let st = self.keys.entry(key).or_default();
+                    st.last_seen = Some(t);
                     let fresh =
                         !st.explained_active || (real_step && st.explained_step != Some(step.t));
                     if raw >= hcfg.on && fresh {
@@ -588,6 +754,7 @@ impl AlarmEngine {
             }
             let st = self.keys.entry(key).or_default();
             st.explained_active = false;
+            st.last_seen = Some(t);
             if let Some(until) = st.dismissed_until {
                 if t < until {
                     self.counts.bump(input.kind, Suppression::Dismissed);
@@ -607,6 +774,7 @@ impl AlarmEngine {
                         anomaly,
                         input,
                         intervals_above: st.above.max(hcfg.on_intervals),
+                        contributors,
                     });
                     st.above = 0;
                 }
@@ -624,6 +792,7 @@ impl AlarmEngine {
                             anomaly,
                             input,
                             intervals_above: hcfg.on_intervals,
+                            contributors,
                         });
                     }
                 },
@@ -643,7 +812,24 @@ impl AlarmEngine {
                 }
             }
         }
+        self.evict(t);
         actions
+    }
+
+    /// Drops keys with nothing left to remember, bounding memory: not open, not building toward a
+    /// raise, no live dismissal, cleared longer ago than the re-raise cooldown, and (explained
+    /// keys) not seen within the cooldown. A later raise on an evicted key is a new alarm, as it
+    /// would be after the cooldown anyway.
+    fn evict(&mut self, now: Timestamp) {
+        let cooldown = self.cfg.hysteresis.cooldown_s;
+        let recent = |t: Option<Timestamp>| t.is_some_and(|t| secs_between(t, now) < cooldown);
+        self.keys.retain(|_, st| {
+            st.hyst.is_open()
+                || st.above > 0
+                || st.dismissed_until.is_some_and(|u| now < u)
+                || recent(st.hyst.last_cleared())
+                || (st.explained_active && recent(st.last_seen))
+        });
     }
 }
 
@@ -908,12 +1094,13 @@ impl AlarmWriter {
                     anomaly,
                     input,
                     intervals_above,
+                    contributors,
                 } => self.raise(
                     repo,
                     *key,
                     *anomaly,
                     input,
-                    *intervals_above,
+                    (*intervals_above, contributors),
                     t,
                     feed_states,
                     site,
@@ -995,7 +1182,7 @@ impl AlarmWriter {
         key: AlarmKey,
         id: AnomalyId,
         input: &AlarmInput,
-        intervals_above: u32,
+        (intervals_above, contributors): (u32, &Vec<DeviceStep>),
         t: Timestamp,
         feed_states: &BTreeMap<String, FeedState>,
         site: Option<&Site>,
@@ -1013,6 +1200,7 @@ impl AlarmWriter {
             dismissed_until: None,
             freq: input.freq,
             detail: detail_of(key, input, intervals_above, &ExplanationStage::ORDER),
+            explained_step_t: None,
         };
         repo.insert_alarm(
             &anomaly,
@@ -1053,6 +1241,39 @@ impl AlarmWriter {
             rule_version: RULE_VERSION.into(),
             t,
         })?;
+        // Device steps that coincided without accounting for the change: a possible contributor,
+        // ranked well below `unexplained`, never a resolution.
+        for step in contributors {
+            let kind = serde_json::to_value(step.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let mut evidence = vec![value("step_lag_s", secs_between(step.t, t))];
+            if let Some(d) = step.gain_delta_db {
+                evidence.push(value("gain_delta_db", d));
+            }
+            evidence.push(value(
+                "observed_shift",
+                input.observed - input.baseline_mean,
+            ));
+            repo.insert_explanation(&Explanation {
+                id: ExplanationId::new(),
+                anomaly_ref: id,
+                cause: Cause::SelfInflicted {
+                    reason: format!(
+                        "possible contributor, {kind}: {} (does not account for the change)",
+                        step.detail
+                    ),
+                },
+                correlation_type: CorrelationType::TimeCoincidence,
+                score: (0.5 * (1.0 - best)).clamp(0.0, 0.2),
+                evidence,
+                supersedes: None,
+                provisional: true,
+                rule_version: RULE_VERSION.into(),
+                t,
+            })?;
+        }
         self.event(repo, AlarmLifecycle::Raised, anomaly, row)
     }
 
@@ -1081,6 +1302,7 @@ impl AlarmWriter {
             dismissed_until: None,
             freq: input.freq,
             detail,
+            explained_step_t: Some(step.t),
         };
         repo.insert_alarm(
             &anomaly,

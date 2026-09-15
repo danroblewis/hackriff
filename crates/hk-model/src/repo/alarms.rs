@@ -94,6 +94,10 @@ pub struct AlarmRow {
     pub freq: FreqRange,
     /// Evidence at the latest raise/reopen/hold.
     pub detail: AlarmDetail,
+    /// When the explaining device step happened (sample clock; `explained` rows). The engine
+    /// resumes its one-row-per-step dedupe from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explained_step_t: Option<Timestamp>,
 }
 
 /// The dedupe key as stored text: `kind=…;site=…;subject=…`.
@@ -368,7 +372,7 @@ impl Repository {
         let mut stmt = self.conn.prepare_cached(
             "SELECT d.body FROM anomaly_detail d WHERE d.raised_at = \
              (SELECT MAX(raised_at) FROM anomaly_detail e WHERE e.alarm_key = d.alarm_key) \
-             ORDER BY d.raised_at LIMIT ?1",
+             ORDER BY d.raised_at DESC LIMIT ?1",
         )?;
         let bodies: Vec<String> = stmt
             .query_map([ALARM_RESUME_MAX as i64], |r| r.get(0))?
@@ -540,6 +544,7 @@ mod tests {
             dismissed_until: None,
             freq,
             detail,
+            explained_step_t: None,
         };
         (a, r)
     }

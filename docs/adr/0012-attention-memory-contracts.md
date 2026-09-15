@@ -494,6 +494,8 @@ Streams (ADR-0004 `messages` kind, metadata only, never content):
 | Sites, weights | hk-model SQLite (migration 0002, T-119) | rows | on change | kept (user metadata) |
 | Alarms | hk-model SQLite `anomaly`/`anomaly_status`/`explanation` + `anomaly_detail` (migration 0003, T-122) | rows | per transition, batched with correlation writes | ADR-0006 retention object |
 
+**Alarm retention caveat.** Migration 0003 puts a no-delete trigger (`anomaly_detail_no_delete`) on `anomaly_detail`, and `anomaly_detail.anomaly_id` references `anomaly`. Any future retention job that ages out alarm anomalies must handle that trigger explicitly: it deletes the child rows first (`anomaly_detail`, then `explanation`/`anomaly_status`, then `anomaly`), dropping or bypassing the trigger inside the retention transaction. It must never delete the parent alone.
+
 Why files for the series: they are rebuildable aggregates with steady append rates, and the same pattern already serves history tiles, radiometry and decoded captures. Keeping them out of SQLite avoids WAL churn and write-lock contention with detection/inventory writes (T-112 batching), and limits flash wear to ≤ 1 append per minute per store. SQLite holds what must join with Explanations or be edited by the user.
 
 Low-power mode stretches every flush to 5 min. Shutdown and low battery flush all writers (the `checkpoint` path).

@@ -529,3 +529,245 @@ fn alarm_dismissal_expires_on_sample_clock() {
         "{after:?}"
     );
 }
+
+fn explained_count(actions: &[AlarmAction]) -> usize {
+    actions
+        .iter()
+        .filter(|a| matches!(a, AlarmAction::Explained { .. }))
+        .count()
+}
+
+fn gain_step(t: Timestamp, delta: Option<f64>) -> DeviceStep {
+    DeviceStep {
+        t,
+        kind: ProvenanceStepKind::Gain,
+        freq: None,
+        gain_delta_db: delta,
+        detail: "lna 16→36 dB".into(),
+    }
+}
+
+/// Level-0 cell of baseline cell `cell` at 100 MHz (as `input` lays them out).
+fn cell0(f0_hz: f64, cell: i64) -> i64 {
+    (f0_hz / CELL_HZ).round() as i64 + cell * 16
+}
+
+/// A +20 dB gain step while a single-channel emitter keys up: the broadband shift (20 cells at
+/// +20 dB) is self-inflicted, the emitter (+45 dB, a residual 25 dB beyond Δ) still raises exactly
+/// one novelty alarm, annotated with the step. An isolated group shifting by Δ is not broadband.
+#[test]
+fn alarm_gain_step_does_not_explain_away_coincident_emitter() {
+    let mut rig = Rig::new();
+    let step = gain_step(add_s(at(2), 60.0), Some(20.0));
+    let mut acts = Vec::new();
+    for i in 0..6 {
+        let n = if i >= 2 { 1.0 } else { 0.0 };
+        let mut inputs: Vec<AlarmInput> = (0..20)
+            .map(|c| {
+                let mut x = input(AlarmKind::LevelAboveBaseline, 2e8, c * 4, n);
+                if i < 2 {
+                    x.observed = x.baseline_mean;
+                }
+                // Past the lookback, T-119's per-gain-state split flags the new state.
+                x.provenance_explained = i >= 4;
+                x
+            })
+            .collect();
+        let mut emitter = input(AlarmKind::LevelAboveBaseline, 2e8, 200, n);
+        emitter.observed = emitter.baseline_mean + if i >= 2 { 45.0 } else { 0.0 };
+        inputs.push(emitter);
+        let mut s = snap(rig.site, i, inputs);
+        s.steps = vec![step.clone()];
+        acts.extend(rig.run(&s, None));
+    }
+    assert_eq!(
+        explained_count(&acts),
+        20,
+        "broadband shift self-inflicted once"
+    );
+    assert_eq!(raises(&acts), 1, "{acts:?}");
+    let (key, contributors) = acts
+        .iter()
+        .find_map(|a| match a {
+            AlarmAction::Raise {
+                key, contributors, ..
+            } => Some((*key, contributors.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        matches!(key.subject, AlarmSubject::Cells { lo_cell, .. } if lo_cell == cell0(2e8, 200))
+    );
+    assert_eq!(contributors, vec![step.clone()]);
+    let row = rig
+        .alarms()
+        .into_iter()
+        .find(|r| r.alarm.as_ref().unwrap().state == AlarmState::Open)
+        .unwrap();
+    let ex = latest_explanations(&rig.repo, row.anomaly.id).unwrap();
+    assert!(matches!(ex[0].cause, Cause::Unexplained), "{ex:?}");
+    assert!(ex.iter().any(|e| matches!(&e.cause,
+        Cause::SelfInflicted { reason } if reason.starts_with("possible contributor"))));
+
+    // An isolated two-cell group shifting by exactly Δ among 10 quiet cells: 2/12 moved, novel.
+    let mut other = Rig::new();
+    let step = gain_step(add_s(at(1), 60.0), Some(20.0));
+    let mut acts = Vec::new();
+    for i in 0..4 {
+        let mut inputs: Vec<AlarmInput> = (0..10)
+            .map(|c| {
+                let mut x = input(AlarmKind::LevelAboveBaseline, 2e8, c * 4, 0.0);
+                x.observed = x.baseline_mean;
+                x
+            })
+            .collect();
+        inputs.extend((100..102).map(|c| input(AlarmKind::LevelAboveBaseline, 2e8, c, 1.0)));
+        let mut s = snap(other.site, i, inputs);
+        s.steps = vec![step.clone()];
+        acts.extend(other.run(&s, None));
+    }
+    assert_eq!((raises(&acts), explained_count(&acts)), (1, 0), "{acts:?}");
+}
+
+/// A gain step of unknown size never suppresses activity: a new emitter and a busier channel
+/// both raise. Report steps carry Δ only when every part has a dB size.
+#[test]
+fn alarm_gain_step_without_delta_does_not_suppress_new_emitter() {
+    use hk_model::attention::report::ProvenanceStep;
+    let report = |detail: &str| {
+        DeviceStep::from_report(&ProvenanceStep {
+            t: at(0),
+            kind: ProvenanceStepKind::Gain,
+            freq: None,
+            detail: detail.into(),
+        })
+        .gain_delta_db
+    };
+    assert_eq!(report("lna 16→32 dB, vga 20→24 dB"), Some(20.0));
+    assert_eq!(report("lna 32→24 dB"), Some(-8.0));
+    assert_eq!(report("lna 16→32 dB, amp false→true"), None);
+    assert_eq!(report("gain table 1→2"), None);
+
+    let mut rig = Rig::new();
+    let id = EmitterId::new();
+    let step = gain_step(add_s(at(0), 60.0), None);
+    let mut acts = Vec::new();
+    for i in 0..3 {
+        let mut inputs = vec![new_emitter_input(
+            id,
+            FreqRange::new(868.0e6, 868.1e6),
+            CalKey::Uncalibrated,
+            HourOfWeek::of(at(i), 0),
+            mature(),
+            1,
+            0.001,
+            0.95,
+            900.0,
+        )];
+        inputs.extend((0..6).map(|c| input(AlarmKind::BusierThanUsual, 1e8, c * 4, 1.0)));
+        let mut s = snap(rig.site, i, inputs);
+        s.steps = vec![step.clone()];
+        acts.extend(rig.run(&s, None));
+    }
+    assert_eq!(explained_count(&acts), 0, "{acts:?}");
+    assert_eq!(raises(&acts), 7, "the emitter and all six busier cells");
+    assert_eq!(
+        rig.engine
+            .suppressions()
+            .total(Suppression::ProvenanceExplained),
+        0
+    );
+    let emitter = rig
+        .alarms()
+        .into_iter()
+        .find(|r| r.anomaly.kind == AnomalyKind::NewEmitter)
+        .unwrap();
+    let ex = latest_explanations(&rig.repo, emitter.anomaly.id).unwrap();
+    assert!(matches!(ex[0].cause, Cause::Unexplained), "{ex:?}");
+}
+
+fn busier(cells: std::ops::Range<i64>) -> Vec<AlarmInput> {
+    cells
+        .map(|c| input(AlarmKind::BusierThanUsual, 1e8, c, 1.0))
+        .collect()
+}
+
+fn raised_keys(actions: &[AlarmAction]) -> Vec<AlarmKey> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            AlarmAction::Raise { key, .. } => Some(*key),
+            _ => None,
+        })
+        .collect()
+}
+
+fn cells_of(key: &AlarmKey) -> (i64, i64) {
+    let (_, lo, hi) = cells(&key.subject).unwrap();
+    (lo, hi)
+}
+
+/// Raises [100,104), dismisses it at `at(1)`, and checks it stays suppressed inside its extent.
+fn dismissed_rig() -> (Rig, AlarmKey) {
+    let mut rig = Rig::new();
+    let mut acts = Vec::new();
+    for i in 0..2 {
+        acts.extend(rig.run(&snap(rig.site, i, busier(100..104)), None));
+    }
+    assert_eq!(raises(&acts), 1);
+    let (key, _) = rig.engine.open_alarms()[0];
+    rig.engine.dismiss(key, at(1));
+    for i in 2..4 {
+        let acts = rig.run(&snap(rig.site, i, busier(100..104)), None);
+        assert!(acts.is_empty(), "{acts:?}");
+    }
+    (rig, key)
+}
+
+/// A dismissed key never absorbs a distinct neighbour or a wideband emitter spanning it, and
+/// expired keys are evicted; an open key's new neighbour only extends it (§7.2).
+#[test]
+fn alarm_dismissed_key_does_not_swallow_neighbours() {
+    // A distinct emitter at [105,108), one cell past the dismissed extent: its own alarm.
+    let (mut rig, dismissed) = dismissed_rig();
+    let mut acts = Vec::new();
+    for i in 4..6 {
+        acts.extend(rig.run(&snap(rig.site, i, busier(105..108)), None));
+    }
+    let keys = raised_keys(&acts);
+    assert_eq!(keys.len(), 1, "{acts:?}");
+    assert_ne!(keys[0], dismissed);
+    assert_eq!(cells_of(&keys[0]), (cell0(1e8, 105), cell0(1e8, 108)));
+    // Past the dismissal and the cooldown the dismissed key is evicted; the open one stays.
+    let later = (8.0 * 86_400.0 / INTERVAL_S) as i64;
+    rig.run(&snap(rig.site, later, Vec::new()), None);
+    assert!(!rig.engine.keys.contains_key(&dismissed));
+    assert!(rig.engine.keys.contains_key(&keys[0]));
+
+    // A wideband emitter spanning the dismissed extent raises.
+    let (mut rig, dismissed) = dismissed_rig();
+    let mut acts = Vec::new();
+    for i in 4..6 {
+        acts.extend(rig.run(&snap(rig.site, i, busier(96..112)), None));
+    }
+    let keys = raised_keys(&acts);
+    assert_eq!(keys.len(), 1, "{acts:?}");
+    assert_ne!(keys[0], dismissed);
+    assert_eq!(cells_of(&keys[0]), (cell0(1e8, 96), cell0(1e8, 112)));
+
+    // An open key's new neighbour holds and extends it, never a second alarm.
+    let mut rig = Rig::new();
+    let mut acts = Vec::new();
+    for i in 0..2 {
+        acts.extend(rig.run(&snap(rig.site, i, busier(100..104)), None));
+    }
+    let (open, anomaly) = rig.engine.open_alarms()[0];
+    let mut both = busier(100..104);
+    both.extend(busier(105..108));
+    let acts = rig.run(&snap(rig.site, 2, both), None);
+    assert_eq!(raises(&acts), 0, "{acts:?}");
+    assert!(acts.iter().any(|a| matches!(a,
+        AlarmAction::Hold { key, anomaly: held, .. } if *key == open && *held == anomaly)));
+    let hull = rig.alarms()[0].alarm.as_ref().unwrap().freq;
+    assert!(hull.hi_hz >= cell0(1e8, 108) as f64 * CELL_HZ, "{hull:?}");
+}

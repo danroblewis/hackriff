@@ -682,14 +682,14 @@ Every anomaly the run recorded (noise-floor episodes and C12 novelty alarms), wi
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/anomalies?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]` | Newest first. `kind`: `new-emitter`, `busier-than-baseline`, `quieter-than-baseline`, `noise-floor-rise`, `novelty`, `level-above-baseline`, `change-point`; `status`: `open`, `resolved`, `dismissed`; `limit` default 100, max 1000 |
+| GET | `/api/anomalies?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]` | Newest first. `kind` (the anomaly kind): `new-emitter`, `busier-than-baseline`, `quieter-than-baseline`, `noise-floor-rise`, `novelty`, `level-above-baseline`, `change-point`. The alarm key's `kind` names two of these differently: alarm `busier-than-usual` is anomaly `busier-than-baseline`, and alarm `quieter-than-usual` is anomaly `quieter-than-baseline`; filter by the anomaly name. `status`: `open`, `resolved`, `dismissed`; `limit` default 100, max 1000 |
 | GET | `/api/anomalies/{id}` | One anomaly with every current explanation (best first) and `history` |
 | POST | `/api/anomalies/{id}/dismiss` | `{"note"?}`: dismiss a novelty alarm; its key is suppressed for 7 days of sample time, then must re-raise (audited) |
 | POST | `/api/anomalies/{id}/reopen` | `{}`: lift a dismissal, or re-open a cleared alarm (audited) |
 
 - **List:** `{anomalies[], next_cursor, truncated, suppressions}`. `suppressions` is `{<alarm kind>: {<mobile-site / unassigned-site / provenance-explained / immature-baseline / dismissed>: count}}` since the service started.
 - **Anomaly:** `{id, kind, subject, f_lo, f_hi, t0, t1, t, score, baseline_ref, detector_version, status, alarm, explanations[], history[]}`. Lists and stream messages carry the top 3 explanations and no `history`. `explanations[]` is `{id, cause, correlation_type, score, provisional, rule_version, t, evidence}`; `cause.kind` is `external-event`, `emitter`, `own-history`, `self-inflicted` (with `reason`) or `unexplained`. `history[]` is `{status, t, note}` with notes `raised`, `cleared`, `reopened`, `reopened-by-user`, `dismissed;until_ns=…[;note=…]`, `explained`, `self-inflicted`.
-- **`alarm`** (novelty alarms; `null` otherwise): `{key {kind, site, subject}, state (open, cleared, dismissed, explained), last_transition (raised, held, reopened, cleared, dismissed, undismissed, explained), raised_at, last_t, reopen_count, cleared_at, dismissed_until, f_lo, f_hi, detail}`. `f_lo`/`f_hi` is the hull while open (the anomaly row keeps the extent at raise). `detail` is `AlarmDetail` (`observed`, `baseline_mean`, `baseline_spread`, `z`, `novelty`, `intervals_above`, `observed_s`, `unit`, `cal`, `resolution`, `slot`, `stages_applied`).
+- **`alarm`** (novelty alarms; `null` otherwise): `{key {kind, site, subject}, state (open, cleared, dismissed, explained), last_transition (raised, held, reopened, cleared, dismissed, undismissed, explained), raised_at, last_t, reopen_count, cleared_at, dismissed_until, f_lo, f_hi, detail, explained_step_t?}`. `explained_step_t` (explained rows only) is when the explaining device step happened. `f_lo`/`f_hi` is the hull while open (the anomaly row keeps the extent at raise). `detail` is `AlarmDetail` (`observed`, `baseline_mean`, `baseline_spread`, `z`, `novelty`, `intervals_above`, `observed_s`, `unit`, `cal`, `resolution`, `slot`, `stages_applied`).
 - **Stream `anomalies`** (ADR-0004 `messages`, schema `hackriff.anomaly/1`, metadata only): one message per transition (`raised`, `held`, `reopened`, `cleared`, `explained`, `dismissed`) with `metadata {kind: "anomaly", transition, anomaly}` in the list row shape.
 
 Errors: `400` (bad id, region, span, kind, status, cursor/limit or body field), `404` (no such anomaly), `405`, `409` (dismissing a floor episode or a self-inflicted anomaly; reopening an open alarm), `500`, `503` (no anomaly service).
@@ -707,8 +707,7 @@ Conventions:
 - **Audit.** Mutating routes are audited like every other.
 - **Content.** Streams are metadata only.
 
-| Method | Path | Owner | Purpose |
-|---|---|---|---|
+No planned routes remain in this section.
 
 Streams: the `observations` stream (T-115) and the `anomalies` stream (T-122) are served; see "Observation log" and "Anomalies and novelty alarms" above.
 
