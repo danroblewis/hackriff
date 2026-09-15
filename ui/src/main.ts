@@ -7,6 +7,7 @@ import { type Bookmark, bookmarkFromSelection } from "./controls/bookmarks";
 import { ControlClient, ControlError } from "./controls/client";
 import { attachAxisGestures, attachWheelZoom, type ViewHooks } from "./controls/gestures";
 import { ControlPanel } from "./controls/panel";
+import { FrameInspectorPanel } from "./frame-inspector";
 import { HistoryPanel } from "./history";
 import { Inspector, inspectHalfWidthHz } from "./inspect";
 import { InventoryTable } from "./inventory";
@@ -520,6 +521,7 @@ function main() {
   }, (r) => inspector.showKnown(r), listen.rowListen);
   void live.start();
   void inventory.load();
+  new FrameInspectorPanel(client); // T-090: capture id entered by hand until T-092's capture list
 }
 
 main();
