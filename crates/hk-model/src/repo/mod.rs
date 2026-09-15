@@ -68,6 +68,9 @@ mod gating;
 mod gating_tests;
 mod interpret;
 mod inventory;
+mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 mod measure;
 mod refined;
 mod selections;
@@ -94,6 +97,7 @@ use crate::time::Timestamp;
 
 pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind};
 pub use inventory::EmitterUpsert;
+pub use lifecycle::LIFECYCLE_TEXT_MAX;
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
 pub use selections::{
     SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
@@ -231,6 +235,7 @@ impl Repository {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&mut conn)?;
+        lifecycle::ensure_schema(&conn)?;
         Ok(Self { conn })
     }
 

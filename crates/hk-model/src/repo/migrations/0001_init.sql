@@ -156,6 +156,10 @@ CREATE TABLE emitter (
                          'restricted-cellular', 'restricted-paging', 'own-key-decrypted')),
     -- T-018: the emitter this one was merged into (never deleted; queries skip merged rows).
     merged_into      BLOB    REFERENCES emitter (emitter_id),
+    -- T-078: inventory lifecycle, the latest emitter_lifecycle row (candidate when there is none).
+    -- Deleted rows are hidden from the inventory and invisible to entity resolution, but kept.
+    lifecycle_state  TEXT    NOT NULL DEFAULT 'candidate'
+                         CHECK (lifecycle_state IN ('candidate', 'confirmed', 'deleted')),
     CHECK ((identity_scheme IS NULL) = (identity_value IS NULL)),
     CHECK (merged_into IS NULL OR merged_into != emitter_id)
 );
@@ -177,6 +181,22 @@ CREATE TABLE emitter_status (
                     'clusterer'))
 );
 CREATE INDEX idx_emitter_status_emitter ON emitter_status (emitter_id, status_id, status);
+
+-- T-078: append-only inventory lifecycle history (who or what changed state, when, why).
+-- Repeated in repo/lifecycle.rs for databases created before it.
+CREATE TABLE emitter_lifecycle (
+    lifecycle_id  INTEGER PRIMARY KEY,
+    emitter_id    BLOB    NOT NULL REFERENCES emitter (emitter_id),
+    state         TEXT    NOT NULL CHECK (state IN ('confirmed', 'deleted')),
+    previous      TEXT    NOT NULL CHECK (previous IN ('candidate', 'confirmed')),
+    author        TEXT    NOT NULL CHECK (author IN ('auto', 'user')),
+    actor         TEXT    NOT NULL CHECK (length(actor) > 0),
+    reason        TEXT    NOT NULL CHECK (length(reason) > 0),
+    t             INTEGER NOT NULL
+);
+CREATE INDEX idx_emitter_lifecycle_emitter ON emitter_lifecycle (emitter_id, lifecycle_id);
+CREATE TRIGGER emitter_lifecycle_append_only BEFORE UPDATE ON emitter_lifecycle
+    BEGIN SELECT RAISE(ABORT, 'lifecycle history is append-only'); END;
 
 CREATE TABLE emitter_classification (
     classification_id  INTEGER PRIMARY KEY,
