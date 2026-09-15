@@ -1453,3 +1453,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     3. Cranelift experiment.
   - Before/after nextest wall times are to be measured.
   - Four building agents now: T-143, T-124, T-141, T-145 (at the cap).
+- **B0.375 T-143 committed unverified (0170803).** The agent was at 277k tokens and stopped on instruction; handoff is in the scratchpad.
+  - **Deleted:** four hk-pipeline legal test files, acceptance `legal.rs`, `gating_tests.rs`, and two `egress_gaps.rs` files. Acceptance goes from 38 to 35.
+  - **Gating:** off by default; opt in with `HK_CONTENT_GATING=1` or `set_content_gating(true)`.
+  - **Migration 0005:** drops the DB content checks.
+  - **Finisher launched (fresh Opus):**
+    - Audit that the deleted files were legal-only.
+    - Build, run nextest on the affected crates, run acceptance and lint, and fix what fails.
+    - Check `aware_036` acceptance.
+    - Judge the `recovering_consumer_sees_exact_drop_markers` failure.
+- **T-141:** WIP commit f3eeac1, with its handoff pending a final test count.
