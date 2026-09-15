@@ -511,6 +511,8 @@ pub(crate) struct Shared {
     pub continues: AtomicBool,
     /// Burst taps of the run (T-060).
     pub bursts: Arc<crate::chains::taps::BurstHub>,
+    /// Which analog chain owns each emission (T-071 dedupe).
+    pub claims: crate::chains::EmissionClaims,
 }
 
 impl Shared {
@@ -760,6 +762,11 @@ impl Pipeline {
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             bursts: Arc::default(),
         };
+        // T-071: the on-demand chain budget is reported from the start of the run.
+        crate::chains::listen::publish_limits(
+            &common.counters,
+            &crate::chains::listen::ListenConfig::from_settings(&cfg.settings.listen),
+        );
         let class = cfg.source_class;
         let window = (info.center_hz, info.sample_rate_hz);
         let Started {
@@ -867,6 +874,7 @@ fn start_segment(
         display: Arc::clone(&common.display),
         continues: AtomicBool::new(false),
         bursts: Arc::clone(&common.bursts),
+        claims: crate::chains::EmissionClaims::default(),
         cfg,
     });
     inc(&common.stats.segments);
@@ -1620,6 +1628,7 @@ impl PipelineHandle {
             Arc::clone(&self.sup.common.bursts),
             Arc::clone(&self.sup.common.counters),
             Arc::new(move || sup.lock().shared.clone()),
+            Arc::clone(&self.sup.common.listen),
         ))
     }
 

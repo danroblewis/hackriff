@@ -114,6 +114,14 @@ pub struct ListenSettings {
     pub idle_timeout_s: f64,
     /// A chain that published no audio (squelch closed) for this long ends, s (600; 0 never).
     pub squelch_timeout_s: f64,
+    /// Most on-demand chains at once, Listen chains and burst taps together (16; T-071). One
+    /// per-run budget: a per-kind limit larger than this raises it.
+    pub max_chains: usize,
+    /// Most burst taps (bits/symbols streams) at once (8; T-060's cap).
+    pub max_taps: usize,
+    /// Estimated cost of one burst tap, cores (0.01): taps read no samples; they cost the
+    /// publishing of bursts FSK chains already demodulate.
+    pub tap_cores: f64,
 }
 
 impl Default for ListenSettings {
@@ -125,6 +133,9 @@ impl Default for ListenSettings {
             narrow_cores_per_msps: 0.04,
             idle_timeout_s: 10.0,
             squelch_timeout_s: 600.0,
+            max_chains: 16,
+            max_taps: 8,
+            tap_cores: 0.01,
         }
     }
 }

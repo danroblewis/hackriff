@@ -215,6 +215,9 @@ counter_group!(
         bits_gated,
         /// Raster-channel attaches skipped while the channel cools down after a finished chain.
         channel_cooldown,
+        /// Analog chains that stopped because a neighbouring chain already owns the emission they
+        /// refined to (T-071 dedupe, [`crate::chains::EmissionClaims`]).
+        duplicate_emission,
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,
@@ -384,6 +387,310 @@ counter_group!(
     }
 );
 
+counter_group!(
+    /// The run's on-demand chain budget (T-071, [`crate::chains::budget`]): Listen chains and
+    /// burst taps admitted against one count limit and one estimated CPU budget.
+    BudgetCounters {
+        /// On-demand chains admitted now (listeners + taps).
+        chains,
+        /// Listen chains admitted now.
+        listeners,
+        /// Burst taps admitted now.
+        taps,
+        /// Estimated millicores of the admitted chains.
+        used_mcores,
+        /// Most on-demand chains at once (effective).
+        limit_chains,
+        /// Most Listen chains at once.
+        limit_listeners,
+        /// Most burst taps at once.
+        limit_taps,
+        /// CPU budget, millicores.
+        budget_mcores,
+        /// Requests refused by the budget (count or CPU).
+        refused_busy,
+    }
+);
+
+impl BudgetCounters {
+    /// What `/api/status` reports as `budget`.
+    pub fn status_json(&self) -> Value {
+        let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        json!({
+            "max_chains": l(&self.limit_chains),
+            "chains": l(&self.chains),
+            "max_listeners": l(&self.limit_listeners),
+            "listeners": l(&self.listeners),
+            "max_taps": l(&self.limit_taps),
+            "taps": l(&self.taps),
+            "cores": l(&self.budget_mcores) as f64 / 1e3,
+            "used_cores": l(&self.used_mcores) as f64 / 1e3,
+            "refused_busy": l(&self.refused_busy),
+        })
+    }
+}
+
+/// CPU time of the calling thread, ns (0 where the clock is unavailable).
+pub fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec; the call only writes it.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut ts) };
+    if rc != 0 {
+        return 0;
+    }
+    (ts.tv_sec as u64).saturating_mul(1_000_000_000) + ts.tv_nsec as u64
+}
+
+/// Accounts one chain's CPU time across the threads it runs on (T-071): the time on earlier
+/// threads is kept as a base when the chain moves (a Listen probe on the opener thread, then its
+/// own thread).
+#[derive(Debug)]
+pub struct CpuClock {
+    thread: Option<std::thread::ThreadId>,
+    thread_start_ns: u64,
+    base_ns: u64,
+}
+
+impl CpuClock {
+    /// A clock that starts on the first [`ChainStat::account_cpu`].
+    pub fn new() -> Self {
+        Self {
+            thread: None,
+            thread_start_ns: 0,
+            base_ns: 0,
+        }
+    }
+}
+
+impl Default for CpuClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One running chain's own counters (T-071): each chain writes only its own entry, so chains
+/// share nothing mutable but the ring. Registered in [`ChainTable`] while it lives.
+pub struct ChainStat {
+    /// Run-unique id.
+    pub id: u64,
+    /// `listen`, `bits-tap`, `symbols-tap` or the chain spec id.
+    pub kind: String,
+    started: std::time::Instant,
+    center_bits: AtomicU64,
+    bandwidth_bits: AtomicU64,
+    stream_id: std::sync::Mutex<Option<String>>,
+    handle: std::sync::Mutex<Option<hk_stream::PublisherHandle>>,
+    /// Samples read.
+    pub samples: AtomicU64,
+    /// Ring samples lost (overruns) or skipped to stay live.
+    pub lost_samples: AtomicU64,
+    /// CPU time, ns.
+    pub cpu_ns: AtomicU64,
+    /// Newest processing latency (read to publish), µs.
+    pub latency_us_last: AtomicU64,
+    /// Largest processing latency, µs.
+    pub latency_us_max: AtomicU64,
+    /// Newest backlog behind the ring writer, µs of stream time.
+    pub backlog_us: AtomicU64,
+    /// Records published (audio frames, bursts).
+    pub records: AtomicU64,
+}
+
+impl std::fmt::Debug for ChainStat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChainStat")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChainStat {
+    /// The channel the chain demodulates, Hz.
+    pub fn set_channel(&self, center_hz: f64, bandwidth_hz: f64) {
+        self.center_bits
+            .store(center_hz.to_bits(), Ordering::Relaxed);
+        self.bandwidth_bits
+            .store(bandwidth_hz.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The chain's output stream (its drop counters are read from `handle`).
+    pub fn set_stream(&self, stream_id: &str, handle: hk_stream::PublisherHandle) {
+        *self
+            .stream_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stream_id.to_owned());
+        *self
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    /// Stores the chain's CPU time as of now (call on the chain's thread).
+    pub fn account_cpu(&self, clock: &mut CpuClock) {
+        let me = std::thread::current().id();
+        if clock.thread != Some(me) {
+            clock.base_ns = self.cpu_ns.load(Ordering::Relaxed);
+            clock.thread = Some(me);
+            clock.thread_start_ns = thread_cpu_ns();
+        }
+        let on_thread = thread_cpu_ns().saturating_sub(clock.thread_start_ns);
+        self.cpu_ns
+            .store(clock.base_ns + on_thread, Ordering::Relaxed);
+    }
+
+    /// One processing latency sample, µs.
+    pub fn latency(&self, us: u64) {
+        self.latency_us_last.store(us, Ordering::Relaxed);
+        self.latency_us_max.fetch_max(us, Ordering::Relaxed);
+    }
+
+    /// A JSON snapshot: the stream's records dropped for its consumers come from its publisher.
+    pub fn to_json(&self) -> Value {
+        let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let age_s = self.started.elapsed().as_secs_f64();
+        let cpu_s = l(&self.cpu_ns) as f64 / 1e9;
+        let handle = self
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (consumers, dropped) = handle.map_or((0, 0), |h| {
+            let s = h.consumer_stats();
+            (
+                h.open_consumers(),
+                s.iter().map(|c| c.records_dropped).sum::<u64>(),
+            )
+        });
+        let f = |b: &AtomicU64| {
+            let v = f64::from_bits(b.load(Ordering::Relaxed));
+            if v.is_finite() && v != 0.0 {
+                json!(v)
+            } else {
+                Value::Null
+            }
+        };
+        json!({
+            "id": self.id,
+            "kind": self.kind,
+            "stream_id": self
+                .stream_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            "center_hz": f(&self.center_bits),
+            "bandwidth_hz": f(&self.bandwidth_bits),
+            "age_s": (age_s * 1e3).round() / 1e3,
+            "samples": l(&self.samples),
+            "lost_samples": l(&self.lost_samples),
+            "cpu_s": (cpu_s * 1e3).round() / 1e3,
+            "cpu_load": if age_s > 0.0 { ((cpu_s / age_s) * 1e3).round() / 1e3 } else { 0.0 },
+            "latency_ms_last": l(&self.latency_us_last) as f64 / 1e3,
+            "latency_ms_max": l(&self.latency_us_max) as f64 / 1e3,
+            "backlog_ms": l(&self.backlog_us) as f64 / 1e3,
+            "records": l(&self.records),
+            "consumers": consumers,
+            "dropped": dropped,
+        })
+    }
+}
+
+/// The run's running chains, each with its own [`ChainStat`] (`/api/status` `chain_stats`).
+#[derive(Default)]
+pub struct ChainTable {
+    next: AtomicU64,
+    list: std::sync::Mutex<Vec<std::sync::Arc<ChainStat>>>,
+}
+
+impl std::fmt::Debug for ChainTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChainTable")
+            .field("running", &self.len())
+            .finish()
+    }
+}
+
+impl ChainTable {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<std::sync::Arc<ChainStat>>> {
+        self.list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Registers a chain of `kind`; the entry leaves the table when the guard drops.
+    pub fn register(self: &std::sync::Arc<Self>, kind: &str) -> ChainStatGuard {
+        let stat = std::sync::Arc::new(ChainStat {
+            id: self.next.fetch_add(1, Ordering::Relaxed),
+            kind: kind.to_owned(),
+            started: std::time::Instant::now(),
+            center_bits: AtomicU64::new(0),
+            bandwidth_bits: AtomicU64::new(0),
+            stream_id: std::sync::Mutex::new(None),
+            handle: std::sync::Mutex::new(None),
+            samples: AtomicU64::new(0),
+            lost_samples: AtomicU64::new(0),
+            cpu_ns: AtomicU64::new(0),
+            latency_us_last: AtomicU64::new(0),
+            latency_us_max: AtomicU64::new(0),
+            backlog_us: AtomicU64::new(0),
+            records: AtomicU64::new(0),
+        });
+        self.lock().push(std::sync::Arc::clone(&stat));
+        ChainStatGuard {
+            stat,
+            table: std::sync::Arc::clone(self),
+        }
+    }
+
+    /// Running chains.
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// No chain is running.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Snapshots of the running chains.
+    pub fn to_json(&self) -> Value {
+        let list: Vec<std::sync::Arc<ChainStat>> = self.lock().clone();
+        Value::Array(list.iter().map(|s| s.to_json()).collect())
+    }
+}
+
+/// A registered chain's stats; dropping it removes the entry.
+#[derive(Debug)]
+pub struct ChainStatGuard {
+    stat: std::sync::Arc<ChainStat>,
+    table: std::sync::Arc<ChainTable>,
+}
+
+impl std::ops::Deref for ChainStatGuard {
+    type Target = ChainStat;
+    fn deref(&self) -> &ChainStat {
+        &self.stat
+    }
+}
+
+impl ChainStatGuard {
+    /// The shared entry (for a reader that updates it).
+    pub fn stat(&self) -> std::sync::Arc<ChainStat> {
+        std::sync::Arc::clone(&self.stat)
+    }
+}
+
+impl Drop for ChainStatGuard {
+    fn drop(&mut self) {
+        self.table
+            .lock()
+            .retain(|s| !std::sync::Arc::ptr_eq(s, &self.stat));
+    }
+}
+
 /// All counters of one run.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -407,6 +714,12 @@ pub struct Counters {
     pub listen: ListenCounters,
     /// Burst taps (T-060).
     pub taps: TapCounters,
+    /// The on-demand chain budget (T-071).
+    pub budget: BudgetCounters,
+    /// Serialises admission against the budget (control plane, never the sample path).
+    pub admission: std::sync::Mutex<()>,
+    /// Per-chain CPU, latency and drop counters of the running chains (T-071).
+    pub chain_stats: std::sync::Arc<ChainTable>,
     /// Scheduler.
     pub scheduler: SchedulerCounters,
     /// Stream time of the newest block end, ns.
@@ -437,7 +750,12 @@ impl Counters {
         let (center, rate) = self.tune();
         // Both on-demand caps side by side: `listen.budget` (T-066) and `taps.max_taps` (T-060).
         let mut taps = self.taps.to_json();
-        taps["max_taps"] = json!(crate::chains::taps::MAX_TAPS);
+        let max_taps = self.budget.limit_taps.load(Ordering::Relaxed);
+        taps["max_taps"] = json!(if max_taps > 0 {
+            max_taps
+        } else {
+            crate::chains::taps::MAX_TAPS as u64
+        });
         json!({
             "source": self.source.to_json(),
             "readers": {
@@ -451,6 +769,8 @@ impl Counters {
             "chains": self.chains.to_json(),
             "listen": self.listen.status_json(),
             "taps": taps,
+            "budget": self.budget.status_json(),
+            "chain_stats": self.chain_stats.to_json(),
             "scheduler": self.scheduler.to_json(),
             "stream_time_ns": self.stream_time_ns.load(Ordering::Relaxed),
             "tune": { "center_hz": center, "sample_rate_hz": rate },
