@@ -1743,3 +1743,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Needs user attention:** T-152 calls `POST /api/control/center` (click to tune). This is a control action through the authenticated API.
   - **Merges:** T-147, T-150 and T-152 merge after the T-170 full check.
   - **T-154** (packet inspector rehome, Sonnet) launched.
+- **B0.404 T-146 finished (5739fde; merge with main d110030); merges after the full check.**
+  - **The two failing tests were test-side; code unchanged.**
+    - The run-restart test now follows the documented rule: a new k=1 run starts from a positive look.
+    - The sparse-onset loop now extends to N=23. It raises at 22, inside the unchanged a-priori window 17–23.
+  - **ADR §7.2 tables**
+    - Budget: every null case (binomial p 0.05 / 0.2 / 0.5, Markov duty 0.05 / 0.5) is now within budget.
+    - Coverage is stated as i.i.d. binomial plus lag-1 Markov only.
+    - Latency: dense z 3/4/6 raises at 17/10/5; sparse pool FCO 0.02/0.05/0.1/0.2 raises at 14/20/28/49.
+  - **Parked week:** 229.9 MB, 0 refusals.
+  - **Post-merge tests:** hk-store 7, hk-model 6, hk-context 53, hk-pipeline 28, report scene 1. Lint clean.
+  - **Merge queue after the T-170 full check:** T-147 (a05202c), T-146 (d110030), T-150 (7df8129), T-152 (9bbd85a). One combined full check follows, bisecting by merge if red.
+  - **Then:** T-124 (M2 acceptance) resumes, with thresholds re-derived from the §7.2 latency tables.

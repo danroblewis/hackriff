@@ -2299,6 +2299,7 @@ tasks:
     milestone: M2
     title: "Alarm path vs survey report disagree on baseline maturity: AlarmService suppresses every busier/level input as immature-baseline while the report shows the baseline available (injected channel busier z 11.4)"
     status: review
+    commit: 5739fde
     decision: "user 2026-09-15: accumulate busier/quieter alarm evidence across consecutive intervals (sequential/Stouffer like the report) AND correct between_var for expected binomial sampling noise; ADR-0012 §3.4/§7.2 amended, false-alarm budget kept. Gain step: pass = no alarm + step disclosed in provenance (no explained-anomaly row)"
     deps: []
     parallel_group: M2A
