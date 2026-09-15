@@ -795,3 +795,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Checked OK: no double counting (ledger keyed by source track); FM stations not duplicated; DB writes on the writer thread; the hop veto is bounded and passes the 915/hopper tests.
   Fix round launched (fresh Opus, T-109 worktree): merge main; offer only settled tracks plus retract rows created solely by a live offer (never user-confirmed rows); veto uses `gap_tol`; reuse the summaries buffer.
 - **B0.271 Full check of main 5c518d8 (ADS-B tutorial): green.** Lint clean; nextest + UI 1121/1121 in 242 s; acceptance 28/28 (2 ignored: HIL HackRF, HIL 1090 MHz) in 100 s, including tutorial_rds, tutorial_acars and tutorial_adsb with readsb. In flight: T-109 fix round, T-111.
+- **B0.272 T-111 delivered** (dc8be90). Recipe `messages` outputs now feed the Repository through the plugin Ingest path:
+  - **Mapping:** declarative decode mapping plus `service`. A bounded 1024-entry try_send queue on the RT thread feeds a writer thread per output via `Ingest::store_decode`, which covers gate, identity sighting and republish.
+  - **Shared code:** family classification shared with plugin chains.
+  - **Stats:** new `decodes` and `decodes_dropped`.
+  - **E2E:** ADS-B rows `recipe:adsb` are linked to every truth ICAO emitter; the RDS PI row is attached to the station. The alloc-free queue test passes.
+
+  Timeboxed Opus review running. Focus: identity canonical-form compatibility with readsb/RDS (to avoid duplicate emitters), per-output SQLite writer contention, and collision with T-109.
