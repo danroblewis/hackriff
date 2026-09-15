@@ -59,7 +59,10 @@ fn pipeline_display_limits() -> DisplayLimits {
         averaging_max: DISPLAY_AVERAGING_MAX,
         rows_per_s_min: DISPLAY_ROWS_MIN,
         rows_per_s_max: DISPLAY_ROWS_MAX,
-        windows: WindowKind::ALL.iter().map(|w| w.name().to_owned()).collect(),
+        windows: WindowKind::ALL
+            .iter()
+            .map(|w| w.name().to_owned())
+            .collect(),
     }
 }
 

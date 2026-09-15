@@ -514,7 +514,10 @@ mod tests {
         let t = lc.set_bias_tee(true).unwrap();
         assert_eq!(t.bias_tee, Some(true));
         assert_eq!(lc.tuning(), t);
-        assert_eq!(lc.set_baseband_filter(9.5e6).unwrap_err().http_status(), 400);
+        assert_eq!(
+            lc.set_baseband_filter(9.5e6).unwrap_err().http_status(),
+            400
+        );
         let t = lc.set_baseband_filter(7.0e6).unwrap();
         assert_eq!(t.baseband_filter_hz, Some(7.0e6));
         assert_eq!(

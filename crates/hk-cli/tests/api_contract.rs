@@ -229,19 +229,32 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         "rows_per_s_max",
         "windows",
     ] {
-        assert!(limits.get(field).is_some(), "display_limits missing {field}: {v}");
+        assert!(
+            limits.get(field).is_some(),
+            "display_limits missing {field}: {v}"
+        );
     }
     assert!(
         limits["fft_size_max"].as_u64().unwrap() >= limits["fft_size_min"].as_u64().unwrap(),
         "{v}"
     );
     assert!(
-        is_array(&limits["windows"]) && limits["windows"].as_array().unwrap().contains(&json!("hann")),
+        is_array(&limits["windows"])
+            && limits["windows"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("hann")),
         "{v}"
     );
     // device.baseband_filter (T-067): the mock device inherits the HackRF's discrete filter list.
-    assert!(is_array(&v["device"]["baseband_filter"]["values_hz"]), "{v}");
-    assert!(v["tuning"]["baseband_filter_hz"].is_null(), "unset until requested: {v}");
+    assert!(
+        is_array(&v["device"]["baseband_filter"]["values_hz"]),
+        "{v}"
+    );
+    assert!(
+        v["tuning"]["baseband_filter_hz"].is_null(),
+        "unset until requested: {v}"
+    );
 
     // /api/status: pipeline counters, never content.
     let (st, v) = get(addr, "/api/status");
@@ -570,7 +583,11 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
         "/api/control/display",
         r#"{"window": "blackman-harris"}"#,
     );
-    assert_eq!((st, v["display"]["window"].as_str()), (200, Some("blackman-harris")), "{v}");
+    assert_eq!(
+        (st, v["display"]["window"].as_str()),
+        (200, Some("blackman-harris")),
+        "{v}"
+    );
     let (st, v) = post(addr, "/api/control/display", r#"{"window": "kaiser"}"#);
     assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
 
@@ -580,7 +597,11 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
         "/api/control/baseband_filter",
         r#"{"bandwidth_hz": 7e6}"#,
     );
-    assert_eq!((st, v["tuning"]["baseband_filter_hz"].as_f64()), (200, Some(7e6)), "{v}");
+    assert_eq!(
+        (st, v["tuning"]["baseband_filter_hz"].as_f64()),
+        (200, Some(7e6)),
+        "{v}"
+    );
     let (st, v) = post(
         addr,
         "/api/control/baseband_filter",

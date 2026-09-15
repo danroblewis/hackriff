@@ -1120,7 +1120,9 @@ fn tuning_json(t: &LiveTuning) -> Value {
 
 fn baseband_filter_json(f: &BasebandFilters) -> Value {
     match f {
-        BasebandFilters::Continuous { min_hz, max_hz } => json!({ "min_hz": min_hz, "max_hz": max_hz }),
+        BasebandFilters::Continuous { min_hz, max_hz } => {
+            json!({ "min_hz": min_hz, "max_hz": max_hz })
+        }
         BasebandFilters::Discrete(v) => json!({ "values_hz": v }),
     }
 }

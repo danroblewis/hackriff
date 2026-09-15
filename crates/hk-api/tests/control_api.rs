@@ -1190,10 +1190,7 @@ fn replayed_recordings_refuse_device_settings_and_accept_display_settings() {
         ("/api/control/rate", r#"{"sample_rate_hz": 10e6}"#),
         ("/api/control/gains", r#"{"gains": {"lna": 24}}"#),
         ("/api/control/bias_tee", r#"{"enabled": true}"#),
-        (
-            "/api/control/baseband_filter",
-            r#"{"bandwidth_hz": 7e6}"#,
-        ),
+        ("/api/control/baseband_filter", r#"{"bandwidth_hz": 7e6}"#),
     ] {
         let rep = authed(addr, "POST", path, Some(body));
         assert_eq!(rep.status, 409, "{path}: {}", rep.body);

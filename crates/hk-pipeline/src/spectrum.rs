@@ -267,7 +267,13 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
     let mut seen = display.generation();
     let mut settings = display.get();
     let mut fs = shared.fs;
-    let plan = row_plan(fs, settings.fft_size, settings.rows_per_s, class, settings.window);
+    let plan = row_plan(
+        fs,
+        settings.fft_size,
+        settings.rows_per_s,
+        class,
+        settings.window,
+    );
     let mut stft = stft_for(&shared, &plan)?;
     let mut out = Output::new(&shared, plan, settings);
     let mut reader = shared.ring.reader_at(0);
@@ -286,7 +292,13 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
             settings = next;
             out.settings = next;
             if geometry {
-                let plan = row_plan(fs, settings.fft_size, settings.rows_per_s, class, settings.window);
+                let plan = row_plan(
+                    fs,
+                    settings.fft_size,
+                    settings.rows_per_s,
+                    class,
+                    settings.window,
+                );
                 rebuild(&shared, plan, &mut stft, &mut out, &mut bases)?;
             }
         }
@@ -295,7 +307,13 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
                 let rate = chunk.provenance.tune.sample_rate_hz;
                 if rate.is_finite() && rate > 0.0 && rate != fs {
                     fs = rate;
-                    let plan = row_plan(fs, settings.fft_size, settings.rows_per_s, class, settings.window);
+                    let plan = row_plan(
+                        fs,
+                        settings.fft_size,
+                        settings.rows_per_s,
+                        class,
+                        settings.window,
+                    );
                     rebuild(&shared, plan, &mut stft, &mut out, &mut bases)?;
                 }
                 if out.publisher.is_none() {
