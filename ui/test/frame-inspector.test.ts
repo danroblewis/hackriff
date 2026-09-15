@@ -10,9 +10,63 @@ import {
   type CaptureParseResponse, type FitSummary, type InspectorClient, type LayerTree,
   buildTree, cycleLeafAt, errorsByPath, fitClass, fitSummaryText, frameViewFromCapture, frameViewFromInline,
   hexBytes, asciiChar, loadCapturePage, nodeById, pagePrevFrom, parseFieldMapInput, parseInlineFrames, parsePastedFrames,
+  type CaptureInfoDto, type CaptureListClient, captureLabel, frameAtTime, listCaptures, scrubPageStart, seekTimeS,
 } from "../src/frame-inspector";
 
 const html = readFileSync("src/index.html", "utf8");
+
+// ---- T-092 decoded captures: list, labels, scrub and time seek (shapes from docs/api.md "Decoded captures") ----
+
+const captureFixture: CaptureInfoDto = {
+  id: "dc1789300800123-00000001-p1-frames", pipeline_id: "p1", recipe_id: "rds", recipe_version: 2, output_id: "frames",
+  stream_id: "inspector/p1/frames", content_class: "unrestricted", segment: 1, started: 1789300800.1, ended: null,
+  t_first: 1789300800.5, t_last: 1789300860.5, frames: 640, bytes: 190_000, dropped_records: 0, recording: true, end_reason: null,
+};
+
+function mkGetClient(respond: (path: string) => unknown) {
+  const paths: string[] = [];
+  const client: CaptureListClient = { get: async <T>(path: string) => { paths.push(path); return respond(path) as T; } };
+  return { client, paths };
+}
+
+test("listCaptures GETs /api/captures and tolerates a missing list", async () => {
+  const { client, paths } = mkGetClient(() => ({ captures: [captureFixture] }));
+  assert.deepEqual(await listCaptures(client), [captureFixture]);
+  assert.deepEqual(paths, ["/api/captures"]);
+  const empty = mkGetClient(() => ({}));
+  assert.deepEqual(await listCaptures(empty.client), []);
+});
+
+test("captureLabel names recipe revision, pipeline/output, segment, size and recording state", () => {
+  assert.equal(captureLabel(captureFixture), "rds@2 · p1/frames #1 · 640 frames · 185.5 KiB · recording");
+  assert.equal(captureLabel({ ...captureFixture, segment: 0, recording: false, bytes: 900 }), "rds@2 · p1/frames · 640 frames · 900 B");
+});
+
+test("scrubPageStart clamps the slider into the recording", () => {
+  assert.equal(scrubPageStart(120, 640), 120);
+  assert.equal(scrubPageStart(-3, 640), 0);
+  assert.equal(scrubPageStart(9999, 640), 639);
+  assert.equal(scrubPageStart(5, 0), 0);
+  assert.equal(scrubPageStart(Number.NaN, 10), 0);
+});
+
+test("seekTimeS offsets from the first frame, else the capture start", () => {
+  assert.equal(seekTimeS(captureFixture, 10), 1789300810.5);
+  assert.equal(seekTimeS({ t_first: null, started: 100 }, -5), 100);
+});
+
+test("frameAtTime asks the frames route for from_t and returns the server's frame", async () => {
+  const { client, paths } = mkGetClient(() => ({ capture_id: "a/b", total_frames: 640, from_frame: 321, limit: 1, next_from_frame: 322, frames: [] }));
+  assert.equal(await frameAtTime(client, "a/b", 1789300830.25), 321);
+  assert.equal(paths[0], "/api/captures/a%2Fb/frames?from_t=1789300830.25&limit=1");
+});
+
+test("index.html declares the T-092 capture picker and scrub controls", () => {
+  for (const id of ["fi-capture-list", "fi-capture-refresh", "fi-scrub", "fi-scrub-info", "fi-seek-form", "fi-seek-s", "fi-seek-go"]) {
+    const matches = html.match(new RegExp(`id="${id}"`, "g")) ?? [];
+    assert.equal(matches.length, 1, `expected exactly one id="${id}" in index.html`);
+  }
+});
 
 // ---- fixture: kind/len/payload field map over frame 5 of a 27-frame recording
 // (crates/hk-api/tests/inspector_api.rs `draft_map`/`captures`/`capture_reparse_pages_frames_...`) ----

@@ -546,7 +546,8 @@ fn a_failed_edit_leaves_the_running_output_offered_and_delete_withdraws_it() {
     let stream = format!("inspector/{id}/frames");
     wait("frames", LIMIT, || run.frames(&id) > 0);
     let running = run.streams.handle(&stream).expect("offered once running");
-    assert_eq!(running.open_consumers(), 0);
+    // One consumer: the always-on decoded-stream recorder (T-092).
+    assert_eq!(running.open_consumers(), 1);
 
     // Hold the pipeline thread inside the framer so the edit never reaches a chunk boundary.
     STALL_ENTERED.store(false, Ordering::SeqCst);
@@ -579,7 +580,7 @@ fn a_failed_edit_leaves_the_running_output_offered_and_delete_withdraws_it() {
     // The consumer attached to the running output's publisher, not a never-swapped-in one (which
     // would never publish a frame).
     wait("the consumer on the running publisher", LIMIT, || {
-        running.open_consumers() == 1
+        running.open_consumers() == 2 // the recorder (T-092) and this TCP consumer
     });
     let deadline = Instant::now() + LIMIT;
     loop {

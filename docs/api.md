@@ -300,7 +300,7 @@ The declarative parser's routes (ADR-0011 §3–4). They evaluate a **draft** fi
 - `stream`: `{stream_id, content_class, message_schema, inspector?}`; `inspector.source` is `{kind: "capture", capture_id, reparse}`.
 - **Gating (fail closed):** a record whose class, or whose stream's class, forbids content, or that is `own-key-decrypted` (local consumers only), is returned with `gated: true` and no `content`, is never parsed, and counts as `unparsed`.
 
-Errors are `{"error", "code"}`: `400 invalid` (bad body; an invalid field map adds `errors: [{path, message}]` with dotted field paths, as `FieldMap::validate` reports them), `404 not_found` (no such capture), `405` (not POST), `413` (body over the 64 KiB cap; answered by the HTTP layer before routing, as `{"error": "Payload Too Large"}` without a `code`), `415 unsupported_media_type`, `422 unreadable` (the capture opened but is not a readable inspector stream: bad header or framing), `500 unreadable` (the capture store failed to open it: a server-side I/O error, not the recording's fault), `503 unavailable` (this server has no capture store; `hk serve` answers this until T-092 wires one). Messages never echo values. These routes only read: they need the token in the header like every POST, but are not audited.
+Errors are `{"error", "code"}`: `400 invalid` (bad body; an invalid field map adds `errors: [{path, message}]` with dotted field paths, as `FieldMap::validate` reports them), `404 not_found` (no such capture), `405` (not POST), `413` (body over the 64 KiB cap; answered by the HTTP layer before routing, as `{"error": "Payload Too Large"}` without a `code`), `415 unsupported_media_type`, `422 unreadable` (the capture opened but is not a readable inspector stream: bad header or framing), `500 unreadable` (the capture store failed to open it: a server-side I/O error, not the recording's fault), `503 unavailable` (this server has no capture store; `hk serve` has one since T-092, see "Decoded captures"). Messages never echo values. These routes only read: they need the token in the header like every POST, but are not audited.
 
 ## Recipes and pipelines (T-088, M1; ADR-0011 §2.3–§2.5)
 
@@ -363,14 +363,54 @@ Conventions:
 | Method | Path | Owner | Purpose |
 |---|---|---|---|
 | GET | `/api/recipes/match` | T-088 | `?emitter=<id>`: recipes ranked against the emitter's measured family, bandwidth, symbol rate, burstiness and features, with reasons |
-| GET | `/api/captures` | T-092 | Recorded decoded streams: pipeline, recipe revision, output, span, frames, bytes |
-| GET | `/api/captures/{id}/frames` | T-092 | `?from_frame&limit` (≤ 500): stored frame records |
 | POST | `/api/assist/sync` | T-091 | Sync-word and period suggestions over a capture's frames or bits, scored |
 | POST | `/api/assist/fields` | T-091 | Entropy-based field-boundary suggestions as field-map fragments, scored |
 | POST | `/api/assist/crc` | T-091 | CRC/BCH parameter search over a capture's frames → `crc`/`bch` parameter objects, scored |
-| GET | `/ws/open/inspector` | T-092 | `?capture=<id>[&from_frame][&field_map=<recipe_id>@<version>:<map_id>]`: a recorded inspector stream (§14.8). TCP: `open/inspector?…`. The `?pipeline=<id>` form is served (see "Recipes and pipelines"). |
 
 Assist suggestions are never applied automatically: the user accepts or edits them into a recipe, which then goes through `POST /api/recipes/validate`.
+
+## Decoded captures (T-092, M1; ADR-0011 §4, stream contract §14.7)
+
+**Every running pipeline's inspector output is recorded automatically** ("always recorded", docs/13 layer 4), so a parser can be authored and re-run over what was actually decoded. Recording, index and quota live in `hk_store::decoded`; `hk_pipeline::recipes::capture` tees each inspector stream in when a pipeline starts or a hot edit adds an output; these routes only route, audit and shape errors (`crates/hk-api/src/captures.rs`).
+
+- **Storage** (`<data dir>/captures/`). `<id>.hks` is the §3 byte stream itself: the header frame, then the records as published. Frame records are stored without `content.layers` (derived; re-parse recomputes them). `<id>.idx` is the frame index: one 16-byte little-endian entry per frame record, `u64` byte offset + `i64` `t` (Unix ns), so frame and time scrubs seek. `<id>.json` is the catalogue entry.
+- **Never blocks capture.** The recorder is a local consumer of the stream's publisher, with a bounded queue (4 MiB) and its own writer thread. A slow disk makes the publisher drop records; drops are counted in `dropped_records`, and the pipeline never waits.
+- **Content rule.** The §6 gate runs before storage. A frame whose class forbids content is stored metadata-only and can never be re-parsed.
+- **Quota.** Defaults: 1 GiB total (`$HK_DECODED_CAPTURE_TOTAL_BYTES`) and 64 MiB per capture (`$HK_DECODED_CAPTURE_BYTES`, clamped to at most a quarter of the total).
+  - At the per-capture size a recording **rolls** to a new capture: a new id, `segment + 1` and the same header.
+  - Past the total, the **oldest finished captures are evicted first**. If only recording captures remain, their segments roll and new records are dropped and counted until the store is back under quota.
+  - A capture that ends with no frame records is deleted.
+  - When `hk serve` starts, captures a previous process left recording are closed with `end_reason: "interrupted"`.
+
+| Method | Path | Auth | Answers |
+|---|---|---|---|
+| GET | `/api/captures` | token | `{"captures": [Capture]}`, newest first |
+| GET | `/api/captures/{id}` | token | `Capture`; 404 `not_found` |
+| DELETE | `/api/captures/{id}` | token (audited `capture_delete`) | `{"deleted": Capture}`; 409 `conflict` while it is still recording; 404 `not_found` |
+| GET | `/api/captures/{id}/frames` | token | `?[from_frame=<n> \| from_t=<unix s>][&to_t=<unix s>][&limit=1..500, default 100]` → `{capture_id, capture, stream, total_frames, from_frame, limit, next_from_frame, frames}` |
+
+**`Capture`** fields:
+- `id` (`[A-Za-z0-9_.:-]{1,128}`), `pipeline_id`, `recipe_id`, `recipe_version` (at the capture's start; frames carry their own `metadata.recipe_version`/`edit_rev`), `output_id`, `stream_id`, `content_class`, `segment`.
+- `started`, `ended` (`null` while recording), `t_first`, `t_last` (first and last frame `t`), all Unix s.
+- `frames` (frame records stored), `bytes` (stream bytes stored), `dropped_records`, `recording`.
+- `end_reason`: `finished`, `rolled`, `slow-consumer`, `write-failed`, `drain-timeout`, `detached` or `interrupted`.
+
+**Scrubbing** (`/frames`):
+- `from_t` resolves through the index to the first frame at or after that time. The response's `from_frame` says which frame that is, so a time scrub is also a frame position.
+- `to_t` ends the page at the first frame after it (`next_from_frame: null`). Give `from_frame` or `from_t`, not both.
+- `frames` are the stored frame records in order, served fail closed like the parse route: a record whose class (or the stream's) forbids content, or that is `own-key-decrypted`, is `gated: true` without `content`.
+- `stream` is as in the parse route, with `inspector.source: {kind: "capture", capture_id, reparse: false}`.
+
+**Re-parse** with a draft field map is `POST /api/captures/{id}/parse` ("Inspector" above). It uses the index too: without a field map only the requested page is read; with one, the fit pass reads the first 100 000 frames and a page past them is a second seek.
+
+**Replay stream**: `GET /ws/open/inspector?capture=<id>[&from_frame=<n>][&field_map=<recipe_id>@<version>:<map_id>]` (TCP `open/inspector?capture=…&token=…`).
+- It replays the stored frame records from frame `n` (an index seek). With `field_map` (a saved recipe version's map), each record is re-parsed: `content.layers` and `metadata.fit` are added.
+- The header is the recording's, with `stream_id: capture/<id>` and `inspector.source: {kind: "capture", capture_id, reparse}`. The §6 gate runs again.
+- `seq` is the replay stream's own (from 0, for its drop detection). `t`, `metadata` (`frame`, `sample_index`, `recipe_version`, `edit_rev`, ...) and `content` are the recording's.
+- Records are paced to the consumer rather than dropped. The stream finishes after the last frame stored when it opened. Only frame records are replayed (not `status`/`edit`).
+- Refusals: 400 `bad-request` (bad `capture`, `from_frame` or `field_map` syntax), 404 `not-found` (capture, recipe version or map), 422 `unreadable`/`invalid`.
+
+Errors are `{"error", "code"}`: `400 invalid` (bad id or query, messages never echo values), `404 not_found`, `405` (with `Allow`), `409 conflict`, `422 unreadable` (not a readable inspector stream), `500 unreadable` (store I/O), `503 unavailable` (no capture store on this server).
 
 ## UI decision logic moved server-side (T-079)
 

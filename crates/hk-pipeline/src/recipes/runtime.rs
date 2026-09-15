@@ -402,6 +402,8 @@ pub struct RecipeRuntime {
     next_id: AtomicU64,
     /// How long an edit waits for a chunk boundary, ms ([`EDIT_TIMEOUT`] by default).
     edit_timeout_ms: AtomicU64,
+    /// Always-on decoded-stream capture (T-092, [`crate::recipes::capture`]).
+    pub(crate) captures: std::sync::OnceLock<hk_store::decoded::DecodedCaptures>,
 }
 
 fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
@@ -602,6 +604,7 @@ impl RecipeRuntime {
             pipelines: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             edit_timeout_ms: AtomicU64::new(EDIT_TIMEOUT.as_millis() as u64),
+            captures: std::sync::OnceLock::new(),
         }
     }
 
@@ -906,6 +909,8 @@ impl RecipeRuntime {
         // Held until the streams are offered, so an edit can't offer its streams first.
         let _serial = lock(&ctl.edit_lock);
         lock(&self.pipelines).insert(id.clone(), Arc::clone(&ctl));
+        // T-092: recorded from the first frame (a failed spawn leaves no frames, so no capture).
+        crate::recipes::capture::tee_streams(self, lock(&ctl.streams).iter());
         if let Err(e) = thread::Builder::new()
             .name("hk-recipe".into())
             .spawn(move || runner.run())
@@ -1137,6 +1142,7 @@ impl RecipeRuntime {
                 }
             }
             offer_streams(&shared, entries.iter().flatten());
+            crate::recipes::capture::tee_streams(self, entries.iter().flatten()); // T-092
             withdraw_streams(
                 &shared,
                 old.iter()
