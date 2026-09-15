@@ -1983,3 +1983,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Build:** opt-level=2 overrides added.
   - **Results:** hk-core 138; t057 5/5 guarded, but the ~9.8 s failing schedule never reproduced, so the guard was vacuous. Lint green.
   - **Timing:** the post-merge full check measures real nextest time with the overrides.
+- **B0.435 T-175 review (Opus): FIX-FIRST, test-only.**
+  - **Product changes are fine:**
+    - `planning_tune`: `apply_channels` re-plans on the pipeline thread; no stale lanes.
+    - `Plan::served()`: math is sound, noise is seeded, T-141 central-half checks are unaffected.
+    - Fresh-status waits assert the same things as before.
+    - Band-power station check still fails when the station is missing.
+    - Opt-level overrides are placed correctly.
+  - **Tighten:**
+    - The t057 occupancy guard can't see the quantisation-limited windows, which overlap the recording. Check that no learned channel or inventory emitter is centred outside the band.
+    - Skip only detections that are both marginal and quantisation-limited.
+    - Bound the recipe_runtime splice exemption to less than 2 frames.
+  - **Merge risk:** the mock rendering change may shift other retuned-mock tests (occupancy_retune, bandit e2e, stream_external). The post-merge full check covers this.
+  - **Next:** fix round launched (fresh Opus, test files only).
