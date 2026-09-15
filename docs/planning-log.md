@@ -2356,3 +2356,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Why the pins do not help:** `just acceptance` runs `cargo test`, so the nextest heavy-serial group does not apply, and the readsb subprocess starves at start-up.
   - **Fix direction:** do not feed the replay until the plugin reports ready, mirroring what T-103 did for EOF. No tolerance loosening and no retries.
   - **Meanwhile:** merging T-187 and T-210 with a full check; a signal_001 failure there is this known issue, not the merge.
+- **B0.494 T-220 merged (91b0760): ADR-0015 section 11, a candidate is a decode pipeline.**
+  - **Model:** an Emitter owns 0..N CandidatePipelines (recipe reference + channel + evidence in bits + status + origin + output kind); zero rows means today's behaviour, so nothing changes until rows exist.
+  - **Ranking:** status, stage, hold-out bits, then evidence bits. Priors never rank. Only same-hypothesis rows supersede, at a 4-bit margin, over an append-only event log, so evidence can revive a superseded row.
+  - **Division:** Classification still owns the displayed family; the top pipeline owns the displayed decode. Promotion writes an ordinary decoder-rank row, so it wins the family through the ADR-0016 ladder rather than around it.
+  - **Confirm-by-decode:** at least 64 hold-out bits, 3 distinct valid frames, check width at least 16; T-210 corrected frames score 0 bits.
+  - **T-219 constraint recorded:** append-only duplicate/artifact groups, never delete losers, with a guard that any distinguishing evidence blocks a merge.
+  - **Migration 0008 sketched** (0007 is M3's), staged so nothing breaks.
+  - **Task graph T-230..T-238 lives in the ADR; not filed** while MAUTO stays unscheduled.
+  - **Open questions for the user:** lazy vs eager energy rows; one promoted pipeline or one per output kind; artifacts hidden or greyed under their source; is a 4-bit supersession margin right; does a user promotion outrank a conflicting CRC-valid decode (same call as ADR-0016 question 3).
