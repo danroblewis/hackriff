@@ -22,7 +22,7 @@ import { focusSelection, focusSignal } from "../explore/slice";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
 import { toast } from "../shell-slice";
 import {
-  MIN_BRACKET_FRAC, assumedDc, bracketLayout, clickTarget, dcFromObservations, dcQuery, dragSelection, draftBox, hoverText,
+  MIN_BRACKET_FRAC, assumedDc, bracketLayout, clickTarget, dcFromHeader, dcFromObservations, dcQuery, dragSelection, draftBox, hoverText,
   isDrag, levelU, placeExtent, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft,
   type DcMask, type DragPoint, type RowClock, type Span,
 } from "./overlays";
@@ -287,8 +287,14 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     }));
     wf.setView(...ax.textureWindow(g, store.get().live.view ?? ax.fullView(g)));
     if (retuned) {
-      dc = assumedDc(g);
-      dcAsk = true;
+      const fromHeader = dcFromHeader(hd, g);
+      if (fromHeader) {
+        dc = fromHeader;
+        dcAsk = false; // the header is authoritative: no need to poll the observation log
+      } else {
+        dc = assumedDc(g);
+        dcAsk = true;
+      }
       if (!fresh) wf.reset(); // rows of the previous tune don't line up with the new axis
     }
     if (!store.get().time.live && (retuned || fresh)) queueReview();

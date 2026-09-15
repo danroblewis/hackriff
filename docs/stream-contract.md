@@ -72,6 +72,7 @@ frame := u32 length (little-endian) || payload[length]
 | `sample_rate_hz` | number | iq/audio | Sample, symbol or spectrum-row rate |
 | `center_hz`, `bandwidth_hz` | number | no | RF centre and bandwidth |
 | `fft_size` | integer | no | For spectrum streams |
+| `dc_excluded_hz` | number | no (T-167) | For spectrum streams: half-width, Hz, of the DC/LO-leakage notch centred on `center_hz` that the producer's detector excludes (the same tolerance `GET /api/observations` `records[].window.dc_excluded` reflects). `null`/absent when the producer applies no DC mask to this stream — additive, never a guess. |
 | `framing` | object | no | docs/07 `Framing` (`payload`, `bits_per_symbol`, `symbol_rate_hz`, `schema_id`, `sync_word_hex`), for bits and symbols streams |
 | `message_schema` | string | no | Schema id of message `metadata`/`content`, e.g. `hackriff.decode/1` |
 | `audio` | object | no (1.1) | Audio profile for `audio` streams: mode chosen automatically, estimated parameters, squelch, AGC (§12). Metadata only; invalid on other kinds. |

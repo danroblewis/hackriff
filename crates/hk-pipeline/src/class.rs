@@ -368,6 +368,12 @@ pub fn spectrum_header(
     h.sample_rate_hz = Some(plan.declared_hz);
     h.center_hz = Some(center_hz);
     h.bandwidth_hz = Some(fs);
+    // ADR-0013 §4.9 gap 10: the same DC-notch half-width the observation log excludes from
+    // analysed extent (`crate::observe::DC_NOTCH_HALF_HZ`), which tracks the detector's own DC
+    // rule (`hk_detect::DcRule::default().tolerance_hz`). Every spectrum stream from this pipeline
+    // shares one detector config, so the value is the same for all of them; a producer with no DC
+    // mask for its stream would leave this `None`.
+    h.dc_excluded_hz = Some(crate::observe::DC_NOTCH_HALF_HZ);
     h.max_frame_len = (hk_stream::BINARY_RECORD_HEADER_LEN + 4 * bins) as u32;
     h
 }
