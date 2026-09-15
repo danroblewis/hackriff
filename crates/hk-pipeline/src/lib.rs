@@ -57,6 +57,7 @@ pub mod reports; // T-121
 mod capture;
 mod detect;
 mod history;
+pub mod iqbuffer; // T-157
 mod recorder;
 mod run;
 mod spectrum;

@@ -659,6 +659,8 @@ struct Common {
     observations: Option<crate::observe::ObservationLog>,
     /// T-127: the scheduler as the API sees it (snapshot + lease commands), shared by segments.
     scheduler: Arc<crate::control::SchedulerHub>,
+    /// T-157: the rolling IQ capture buffer, fed by every segment's `hk-iqbuffer` reader.
+    iq_buffer: Arc<crate::iqbuffer::IqBufferService>,
 }
 
 impl Common {
@@ -816,7 +818,12 @@ impl Pipeline {
                 .map(Arc::new)
         };
         occupancy.set_alarms(alarms.clone(), cfg.feeds_dir.as_deref());
+        let iq_buffer = Arc::new(crate::iqbuffer::IqBufferService::open(
+            &cfg,
+            db_path.clone(),
+        ));
         let common = Common {
+            iq_buffer,
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
@@ -1025,6 +1032,16 @@ fn start_segment(
         workers.push(spawn(
             "hk-history",
             Box::new(move || crate::history::run(s, p, a)),
+        )?);
+    }
+    if common.iq_buffer.enabled() {
+        // T-157: positioned before the capture thread starts, so the first block is buffered.
+        let (s, b) = (Arc::clone(&shared), Arc::clone(&common.iq_buffer));
+        let reader = shared.ring.reader_at(0);
+        let cursor = shared.gate.register(0);
+        workers.push(spawn(
+            "hk-iqbuffer",
+            Box::new(move || b.feed(s, reader, cursor)),
         )?);
     }
     {
@@ -1863,6 +1880,11 @@ impl PipelineHandle {
     /// recorded there, quota-managed. `None` when the store could not be opened.
     pub fn decoded_captures(&self) -> Option<hk_store::decoded::DecodedCaptures> {
         self.recipe_runtime().capture_store().cloned()
+    }
+
+    /// The run's rolling IQ capture buffer (T-157): status and clip export.
+    pub fn iq_buffer(&self) -> Arc<crate::iqbuffer::IqBufferService> {
+        Arc::clone(&self.sup.common.iq_buffer)
     }
 
     /// The newest ring sample index.
