@@ -193,6 +193,15 @@ impl WfmDemod {
         std::mem::take(&mut self.audio)
     }
 
+    /// RDS groups parsed since the last call (drains the decoder's buffer; empty without RDS).
+    /// Positions are MPX sample indexes. The report's totals are unaffected.
+    pub fn take_rds_groups(&mut self) -> Vec<crate::rds::RdsGroup> {
+        self.rds
+            .as_mut()
+            .map(|(_, dec)| dec.take_groups())
+            .unwrap_or_default()
+    }
+
     /// Results so far.
     pub fn report(&self) -> WfmReport {
         let total: u64 = self.dev_hist.iter().sum();

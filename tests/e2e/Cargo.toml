@@ -29,3 +29,5 @@ hk-stream.workspace = true
 tungstenite.workspace = true
 # T-061 output recordings: the composition's API adapter and the `hk record` client.
 hk-cli = { path = "../../crates/hk-cli" }
+# T-094 RDS recipe tutorial acceptance: the existing RDS decoder is the oracle.
+hk-demod.workspace = true

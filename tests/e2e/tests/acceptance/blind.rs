@@ -663,6 +663,31 @@ pub fn blind_live_paced(meta: &Path, tag: &str, source: BlindSource, pacing: Pac
     }
 }
 
+/// [`blind_live`] with the run's streams registered in `streams`, as `hk serve` wires them, so
+/// recipe pipelines (T-088) serve their inspector and stage streams over the API (T-094).
+pub fn blind_live_streams(
+    meta: &Path,
+    tag: &str,
+    source: BlindSource,
+    streams: &hk_api::StreamRegistry,
+) -> BlindLive {
+    let BlindConfig {
+        dir,
+        mut cfg,
+        replay,
+    } = configure(meta, tag, source, json!({}), MockEnd::Loop, Pacing::Unpaced);
+    let reg = streams.clone();
+    cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
+    let reg = streams.clone();
+    cfg.stream_unsink = Some(Arc::new(move |id| {
+        reg.unregister(id);
+    }));
+    BlindLive {
+        dir,
+        handle: start(cfg, replay),
+    }
+}
+
 /// A finished blind run.
 pub struct BlindRun {
     /// Data directory (SQLite, tiles).

@@ -50,6 +50,24 @@ def group_0a(pi: int, ps: str, segment: int, *, pty: int, tp: bool, ta: bool, mu
     return [block(pi, "A"), block(b2, "B"), block(b3, "C"), block(b4, "D")]
 
 
+def radiotext_codes(text: str) -> list[int]:
+    """RadioText as sent: up to 64 ASCII characters, a 0x0D end marker when shorter, padded with
+    spaces to whole 4-character segments."""
+    codes = list(text[:64].encode("ascii"))
+    if len(codes) < 64:
+        codes.append(0x0D)
+    return codes + [0x20] * (-len(codes) % 4)
+
+
+def group_2a(pi: int, text: str, segment: int, *, pty: int, tp: bool, ab: int = 0) -> list[int]:
+    """Four 26-bit blocks of a type 2A group carrying RadioText segment ``segment``: four
+    characters of :func:`radiotext_codes` in blocks C and D."""
+    c = radiotext_codes(text)[4 * segment:4 * segment + 4]
+    b2 = (2 << 12) | (0 << 11) | (int(tp) << 10) | (pty << 5) | ((ab & 1) << 4) | segment
+    return [block(pi, "A"), block(b2, "B"), block((c[0] << 8) | c[1], "C"),
+            block((c[2] << 8) | c[3], "D")]
+
+
 def blocks_to_bits(blocks: list[int]) -> np.ndarray:
     return np.array([(b >> (25 - i)) & 1 for b in blocks for i in range(26)], dtype=np.uint8)
 
