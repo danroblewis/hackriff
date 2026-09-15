@@ -1344,7 +1344,7 @@ tasks:
   - id: T-080
     milestone: M0b
     title: "Small UI tweaks only, no redesign: Selections + Signal Inventory into a left sidebar, remove first/last seen columns, inventory split Candidates/Confirmed with Promote and Delete"
-    status: todo
+    status: in-progress
     deps: [T-078]
     parallel_group: N
     use_cases: [AWARE-042]
@@ -1354,7 +1354,6 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
-    hold: "after T-078 (endpoints) and T-079 (ui/src logic audit, to avoid ui conflicts)"
   - id: T-081
     milestone: M0b
     title: "Chain parameter estimation cost: ParamEstimator::estimate -> ChannelFilter::apply dominates the WFM/RDS chain (whole-pipeline bottleneck)"
