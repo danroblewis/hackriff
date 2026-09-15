@@ -864,3 +864,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   WRR also wastes **6875 s of dwell on suspect ghosts**: that's the gap T-120 must close. POI matches the formula within statistical error. 9 tests; 1 simulated day × 3 policies takes 4.9 s in release. Not covered: preemption / 24 h baseline flag (needs T-120), replay.
 - **B0.282 Main 231cb74 after T-114: lint clean; hk-sim 8 passed, 1 skipped (release-only speed test).** T-114 and T-117 are additive (new crate, py scenario), so the next full check is batched with the T-113/T-116 merges. In flight: T-113 (M2-DESIGN), T-116 (history maturity).
 - **B0.283 T-125 added and launched** (unblocked while T-113 runs): mock SDR/e2e harness support for replaying time-compressed occupancy scenes on their observation schedule with simulated timestamps. T-118 and T-124 need it.
+- **B0.284 T-116 merged** (4399a60; coordinator report review, not core).
+  - **Tile format v2:** columnar zstd, 2.86× (L0 ~57 MB/h at a 20 MHz dwell); v1 still readable.
+  - **Coverage:** mask plus per-cell coverage fraction and `coverage_summary`.
+  - **Provenance:** gain/filter/spur-mask/noise-shape steps that survive rollup.
+  - **Retention:** per-tier age + quota + region overrides, children-first.
+  - **p10 bias:** fixed via a corrected `floor_db` (1 h: −100.02 vs −100 injected); burst survival passes.
+  - **Sweep CSV:** import/export plus PNG waterfall.
+  - **API:** additive `/api/history` (floor_db, coverage, provenance steps, format=csv|png).
+  - **Contract test:** its CSV check now accepts zero lines (empty server history); shape is still checked, and values are covered in hk-store tests.
+
+  Follow-ups filed as **T-126**. Note for T-118: the occupancy threshold should use the corrected floor. Full check covering T-114/T-116/T-117 running.

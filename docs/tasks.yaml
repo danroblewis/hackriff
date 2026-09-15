@@ -1858,7 +1858,8 @@ tasks:
   - id: T-116
     milestone: M2
     title: "History maturity (C26): coverage mask, per-tile provenance, zstd tiles, tiered retention + per-region overrides, hackrf_sweep CSV import/export"
-    status: in-progress
+    status: done
+    commit: 4399a60
     deps: [T-112]
     parallel_group: M2H
     use_cases: [AWARE-031, AWARE-033, RESEARCH-050]
@@ -1984,6 +1985,19 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-126
+    milestone: M2
+    title: "History follow-ups (T-116): floor for sweep/CSV frames, CLI CSV import, provenance step state across restart, region-precise overrides"
+    status: todo
+    deps: [T-116]
+    parallel_group: M2H
+    use_cases: [AWARE-031, AWARE-033]
+    found_by: "T-116 report 2026-09-15"
+    acceptance: "floor_db available for sweep frames and hackrf_sweep CSV imports (noise-shape estimate documented); `hk` CLI command to import hackrf_sweep CSV into history; last front-end state persisted so step detection survives restart and multi-source stores do not show alternating false steps (key by source); region override protects only overlapping cells (or documents tile granularity with a finer protection index); retention scan cost bounded with many protected tiles; tests per item"
+    area: crates/hk-store/src/history, crates/hk-cli
+    needs: none
+    model: opus
+    effort: medium
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
