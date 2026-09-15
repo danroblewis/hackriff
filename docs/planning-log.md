@@ -1626,3 +1626,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - ADR-0012 §2.6 amendment.
     - Real-DC-spur suppression test.
     - A priori Wilson CI checks.
+- **B0.391 T-149 MUI-DESIGN done (80aa73b skeleton, 9509424 ADR-0013). Opus review running in parallel with the first panel fan-out.**
+  - **Framework:** vanilla TS plus a ~60-line store, no runtime dependencies. Budget: app.js ≤150 KB min / 45 KB gz (skeleton is 24 / 9.4 KB).
+  - **Skeleton:** served at `/app.html` next to the old UI, with the waterfall live and store/shell tests (10 + 7).
+  - **File ownership:** T-150 shell/dock/capture; T-151 explore; T-152 centre + waterfall.ts; T-153 decode pipelines/stages/plots/params; T-154 decode inspector; T-155 review drawer.
+  - **API gaps:** 12, recorded as T-157..T-168 (group MUI-API; large ones on Opus). Not launched yet; they follow the M2 tail.
+  - **Launched now:** T-150, T-151, T-152, based on 9509424. T-153..T-155 follow as agent slots free (agent throttle).
+  - **T-145:** Cranelift dropped (tests slower at 1367 s vs 1293 s, with 3 failures; compile ~20 s vs 31 s). lld and the pacing change also gave no gain. The bandit timing reference is running.
+  - **T-147:** diag3 confirmed DC-suspect poisoning (274 DC-flagged vs 273 clean detections; the suspect-inclusive FCO bound 0.586 matches truth 0.570). The finisher is also asked why the 10% channel was learned in the 6 h run but not in the 46 h one.

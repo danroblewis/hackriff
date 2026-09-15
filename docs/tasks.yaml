@@ -2362,7 +2362,8 @@ notes:
   - id: T-149
     milestone: MUI
     title: "MUI-DESIGN: ADR-0013 UI component + state-store structure, frontend-to-API mapping for every mockup panel, build setup, dependency-light framework decision (vanilla TS + small reactive store, or lit/Preact, justified), reuse existing WebGL waterfall"
-    status: in-progress
+    status: review
+    commit: 9509424
     deps: []
     parallel_group: MUI-D
     use_cases: []
@@ -2377,7 +2378,7 @@ notes:
   - id: T-150
     milestone: MUI
     title: "MUI shell: top bar with Explore/Decode mode toggle, layout grid, Outputs dock (live audio + record streams: meter/rate, mute, copy address, stop; Listen adds a stream) and always-on Capture timeline (scrub, reviewing N ago / LIVE)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-SHELL
     use_cases: []
@@ -2392,7 +2393,7 @@ notes:
   - id: T-151
     milestone: MUI
     title: "MUI Explore sidebars: inventory Candidates/Confirmed (sortable, Promote/Delete reachable without horizontal scroll), Selections with actions, right focus panel (big frequency, refined-from-output note, measurements, ranked explanations as suggestions, actions Listen/Decode/Record-Export/Stream/Promote/Delete)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-EXPLORE
     use_cases: []
@@ -2407,7 +2408,7 @@ notes:
   - id: T-152
     milestone: MUI
     title: "MUI centre: spectrum trace + existing WebGL waterfall rehomed, brackets for confirmed/candidate/focused signals, DC mask, drag region select, hover readout, capture-timeline time cursor"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-CENTRE
     use_cases: []
@@ -2478,3 +2479,194 @@ notes:
     model: sonnet
     effort: medium
     core_interface: false
+  - id: T-157
+    milestone: MUI
+    title: "MUI API gap 1: rolling IQ buffer (always-on capture) with status + clip export for the Capture timeline"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-store, hk-pipeline, hk-api
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    size: large
+
+  - id: T-158
+    milestone: MUI
+    title: "MUI API gap 2: SNR + peak level on /api/inventory rows"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-api, hk-pipeline
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-159
+    milestone: MUI
+    title: "MUI API gap 3: an emitter's latest decode fields for the focus panel"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-api, hk-model
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-160
+    milestone: MUI
+    title: "MUI API gap 4: stage tap view=spectrum for MPX/subcarrier plots"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-pipeline, hk-api
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-161
+    milestone: MUI
+    title: "MUI API gap 5: eye/timing diagram data (stream-contract change)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-stream, hk-pipeline, hk-api
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    size: large
+
+  - id: T-162
+    milestone: MUI
+    title: "MUI API gap 6: sync_search diagnostic port for the Decode sync-search plot"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-pipeline, hk-blocks
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-163
+    milestone: MUI
+    title: "MUI API gap 7a: blind estimated params on inventory rows (stage parameter Use suggestions)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-api, hk-pipeline
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-164
+    milestone: MUI
+    title: "MUI API gap 7b: /api/recipes/match (suggest recipes for a signal)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-recipe, hk-api
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    size: large
+
+  - id: T-165
+    milestone: MUI
+    title: "MUI API gap 8: open/iq stream opener for Stream out"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-stream, hk-api
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-166
+    milestone: MUI
+    title: "MUI API gap 9: region Watch alerts"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-pipeline, hk-api, hk-context
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    size: large
+
+  - id: T-167
+    milestone: MUI
+    title: "MUI API gap 10: DC notch width in the spectrum stream header"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-pipeline, hk-api
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-168
+    milestone: MUI
+    title: "MUI API gap 11-12: document follow_hops in docs/api.md; per-node recipe docs for the Decode step guide"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: docs/api.md, hk-recipe
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
