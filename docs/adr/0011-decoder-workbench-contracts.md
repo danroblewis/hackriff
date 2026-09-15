@@ -139,17 +139,19 @@ A test (`implemented_blocks_match_their_pinned_descriptors`) fails if an impleme
 
 | Group | Block | Ports | Params |
 |---|---|---|---|
-| iq | `mix` | iq → iq | placeholder |
-| iq | `lowpass`, `resample` | iq\|real → same | placeholder |
+| iq | `mix` | iq → iq | pinned (T-086): `offset_hz` (hot) |
+| iq | `lowpass` | iq\|real → same | pinned (T-086): `cutoff_hz`, `transition_hz`, `stopband_db` |
+| iq | `resample` | iq\|real → same | pinned (T-086): `output_rate_hz` (≤ input rate: decimation only, the DDC stages), `bandwidth_hz`, `stopband_db` |
 | iq | `fm_demod` | iq → real | pinned: `deviation_hz` (hot), `output_rate_hz`, `deemphasis_s` |
-| iq | `am_demod`, `fsk_demod`, `msk_demod` | iq → real | placeholder |
+| iq | `am_demod` | iq → real | pinned (T-086): `mode` (`normalized`/`envelope`, hot), `time_constant_s` (hot) |
+| iq | `fsk_demod`, `msk_demod` | iq → real | pinned (T-086): `deviation_hz` (fsk) or `symbol_rate_bd` (msk, deviation = rate/4), `offset_hz`, `offset_tracking_s`, all hot |
 | iq | `ppm_demod` | iq → frames (+ diagnostic `soft` soft) | pinned: `bit_rate_bd`, `chips_per_bit`, `preamble` + `preamble_chips` (chip pattern), `min_snr_db` (hot), `frame_bits` (max), `length_from` |
 | iq | `subcarrier` | real → iq | pinned: `carrier_hz`, `bandwidth_hz`, `output_rate_hz`, `reference {pilot_hz, multiple, pll_bandwidth_hz}`, `phase_tracking` (hot) |
 | symbol | `clock_recovery` | iq\|real → soft (+ diagnostic `timing_error` real) | pinned: `symbol_rate_bd`, `pulse`, `algorithm`, `soft_from`, `loop_bandwidth` (hot), `max_deviation_ppm` |
 | symbol | `slicer` | soft → bits | pinned: `threshold` (hot), `invert` (hot) |
 | symbol | `diff_decode` | bits → bits | pinned: `mode` (hot) |
-| symbol | `nrzi` | bits → bits | placeholder |
-| symbol | `manchester` | soft\|bits → bits | placeholder |
+| symbol | `nrzi` | bits → bits | pinned (T-086): `mode` (`transition-is-0`/`transition-is-1`, hot) |
+| symbol | `manchester` | soft\|bits → bits | pinned (T-086): `convention` (`thomas`/`ieee`, hot), `align` (`auto`/`fixed`, hot) |
 | framing | `sync_search` | bits → frames | pinned: `mode` (`sync-word`/`offset-words`) + per-mode keys; sync-word: `frame_bits` (fixed, or the maximum), `bit_order` (`lsb` reverses 8-bit characters), `length_from`, `terminator` |
 | framing | `assemble` | frames → frames | pinned: `word_bits`, `start {bit, value}`, `idle_words`, `header`, `slot`, `payload`, `max_words`, `span_frames` (POCSAG address + message codewords → one message, across batches) |
 | framing | `deframe` | bits\|frames → frames | placeholder |

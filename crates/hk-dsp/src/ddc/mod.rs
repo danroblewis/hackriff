@@ -211,3 +211,82 @@ impl Ddc {
         })
     }
 }
+
+/// The DDC's filter stages without stream tracking or provenance (ADR-0011 §1.6): mix, low-pass
+/// and resample contiguous samples whose caller keeps its own time map (the decoder-workbench
+/// blocks, whose chunks carry `ChunkMeta` instead of a `ReadChunk`). Same plan, stages and
+/// chunking invariance as [`Ddc`]; the NCO phase is referenced to the first sample after
+/// construction or [`DdcKernel::reset`].
+pub struct DdcKernel {
+    plan: DdcPlan,
+    xlate: Xlating,
+    resample: Option<Polyphase>,
+}
+
+impl DdcKernel {
+    /// Plans and builds the stages for inputs at `input_rate_hz` (allocates, designs filters).
+    pub fn new(spec: &DdcSpec, input_rate_hz: f64) -> Result<Self, DdcError> {
+        let plan = DdcPlan::new(spec, input_rate_hz)?;
+        let xlate = Xlating::new(
+            &plan.xlate,
+            plan.xlate_decimation,
+            plan.center_offset_hz,
+            plan.input_rate_hz,
+        );
+        let resample = plan.resample.as_ref().map(Polyphase::new);
+        Ok(Self {
+            plan,
+            xlate,
+            resample,
+        })
+    }
+
+    /// The plan.
+    pub fn plan(&self) -> &DdcPlan {
+        &self.plan
+    }
+
+    /// Clears filter history; the next sample is input position 0 again.
+    pub fn reset(&mut self) {
+        self.xlate.restart(0);
+        if let Some(r) = &mut self.resample {
+            r.restart();
+        }
+    }
+
+    /// Input position (samples since the last reset, fractional) that the next output
+    /// represents, filter delay included.
+    pub fn next_input_position(&self) -> f64 {
+        match &self.resample {
+            None => self.xlate.source_index_of(self.xlate.count() as f64),
+            Some(r) => self.xlate.source_index_of(r.next_position()),
+        }
+    }
+
+    /// Most outputs a call with `n` input samples can append.
+    pub fn max_outputs(&self, n: usize) -> usize {
+        n / self.plan.xlate_decimation + 2
+    }
+
+    /// Filter span in input samples (history needed before an output reflects an input).
+    pub fn span_samples(&self) -> usize {
+        self.plan.xlate.len()
+            + self
+                .plan
+                .resample
+                .as_ref()
+                .map_or(0, |r| r.taps_per_phase * self.plan.xlate_decimation)
+    }
+
+    /// Filters `samples`, appending outputs to `out` (no allocation when `out` has
+    /// [`DdcKernel::max_outputs`] spare capacity).
+    pub fn process(&mut self, samples: &[Complex32], out: &mut Vec<Complex32>) {
+        match &mut self.resample {
+            None => self.xlate.push(samples, |y| out.push(y)),
+            Some(r) => {
+                let mut sink = |z| out.push(z);
+                self.xlate.push(samples, |y| r.push_one(y, &mut sink));
+            }
+        }
+    }
+}
