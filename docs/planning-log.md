@@ -1472,3 +1472,17 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **What fails:** the a-priori check of scheduler vs fixed-tune floor. The floors are −99.80 vs −100.81 dB, a 1.01 dB gap against the 0.5 dB limit.
   - **Cause (not yet confirmed):** the gap is already in the uncorrected power mean, and a carrier reads 2.2 dB lower under the scheduler. So it sits upstream of the mixture model; the suspect is mock SDR resample/noise-fill level scaling or per-bin vs PSD normalisation across RBWs.
   - **Next:** fresh Opus finisher launched to root-cause and fix at the source. The threshold stays unchanged.
+- **B0.377 T-124 WIP (c0ab427): 3/8 green.** Handoff: scratchpad `t124b-handoff.md`.
+  - **Scenes:** main 46 h with 2 × 1 s windows per 15-min interval (413 s run); new-emitter scene 9 d; restart scene 3 h.
+  - **Pass:**
+    - (e) simulator comparison.
+    - (j) restart keeps the pinned site.
+    - (c) false alarms: 0 against a bound of 1. Weak evidence, since no alarm could raise.
+  - **Product bugs:**
+    - (b/g/h): the alarm path marks every input immature-baseline (815) while the report shows the baseline available with z 11.4. → T-146, launched.
+    - (a): the 50% channel reads FCO 0 against truth 0.494, and a 10% channel is never learned. → T-147, after T-141.
+  - **Test issues, fixed in the next T-124 round:**
+    - (d): the coverage bound was mis-derived. The report takes coverage from history, which records ~0.49 s of each 1 s window.
+    - (i): the span query hit its 7 d cap. A fix is committed but not yet re-run.
+  - **Also noted:** 3 bandit dwells in the main scene; a dwell near a replay window's end claims 2 s past its last sample (replay effect).
+  - **Status:** T-124 blocked on T-146 and T-147.
