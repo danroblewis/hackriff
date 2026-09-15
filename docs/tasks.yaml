@@ -2854,7 +2854,7 @@ notes:
   - id: T-180
     milestone: M2-hardening
     title: "Mock SDR device noise floor at low gain: re-rendered windows served far below the recording gain become quantisation-limited (85% zero codes) and produce whole-window marginal detections; model the receiver's own analog noise floor per gain state so low-gain windows look like a real HackRF"
-    status: review
+    status: done
     commit: b5826ad
     deps: [T-175]
     parallel_group: M2E

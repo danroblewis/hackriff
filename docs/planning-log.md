@@ -2135,3 +2135,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - A newer ring version gets wiped; disable it instead.
     - A second instance should show `allocation: locked`.
   - **Next:** a fix round launches when a Rust slot frees (T-124 is finishing).
+- **B0.456 Full check green after the T-174 + T-167 merges (5051afe).** Lint clean; 1370/1370 tests in 143 s; acceptance 28/28 in 12 s, including signal_062.
+  - **T-180 merged** (b5826ad); its worktree removed.
+  - **Next:** full check.
