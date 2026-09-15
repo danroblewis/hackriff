@@ -1411,3 +1411,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Untouched:** the :8900 demo data dir (~10 GB, not ours), the npm cache (3 GB) and the other session's :8789 `hk serve`. That serve is still running, but its `target/debug/hk` binary was removed by the clean, so a restart of it needs a rebuild.
   - **Launch policy:** no new agent launches; the post-T-139 full check re-runs first (rebuild), then T-124 only if disk stays above 20 GB.
   - **Lesson:** check the sccache cache (8 GiB cap) and stale main-target artifacts before disk gets low; a periodic `cargo clean` between merges is cheap relative to disk.
+- **B0.368 Full check after T-139 (aa41cbb): lint clean; 1387/1387 tests; acceptance 31/32.**
+  - **Failure:** `legal_untagged_recording_in_the_paging_band_yields_no_content_or_identity_anywhere` at `legal.rs:346` (identity sentinel byte search).
+  - **In isolation it passes:** 10/10 decodes withheld, 0 recordings. Suspected cause: a coincidental substring match in per-run UUIDs/timestamps in streams or `/api/status`, not a leak. Acceptance is re-running twice to confirm.
+  - **Policy:** the user said no legal extensions, so this is a flaky pre-existing test to harden, not a new legal check.
+  - **Disk:** 29 GB free.
+  - **T-124 resumed** on main (T-139 included), merging `t-124-wip`: default scheduler settings, windows ≥ dwell minimum, thresholds derived a priori, plus new-emitter and restart-site tests.

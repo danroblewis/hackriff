@@ -1970,7 +1970,7 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: todo
+    status: in-progress
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
