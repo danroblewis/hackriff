@@ -2316,3 +2316,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.486 Full check green after the T-209 merge (6ca23a8).** Lint clean; 1403/1403 tests; acceptance 29/29; acceptance_m2 8/8; 53 GB free.
   - **T-209 done;** worktree removed.
   - **T-187 launched** (Sonnet, candidate discard end-to-end, field-test Task C).
+- **B0.487 T-211 committed (cd82ab7): M3 contracts skeleton.** Merging with a full check; an Opus read-only review is running in parallel (core_interface).
+  - **Contracts** live in `hk_model::classify` (taxonomy, rank) to avoid a crate cycle; the new `hk-classify` crate re-exports them for T-199.
+  - **Migration 0007** adds nullable taxonomy/stage/arb_rank/detail.
+  - **Legacy rank mapping:** decoder: prefix → 1, input_kind track → 4, everything else → 3, with SQL and Rust agreeing by test.
+  - **Row semantics:** `classification` is the arbitrated row (agrees with family); a newer lower-ranked row shows as `latest_classification`.
+  - **Filed T-218** for the deliberately omitted pieces, including the Fingerprint family_of gate, which would merge fsk/2fsk emitters and so must be checked against M2 acceptance first.
