@@ -12,8 +12,8 @@
 //!   Provenance; the noise-filled spectrum yields no FM-wide detection or emitter (no phantoms).
 //!   Detections in the recorded window before the retunes (including real stations between the
 //!   baseband filter edge and the recorded rate) are not phantoms.
-//! - **HIL switch:** `HK_DEVICE=hackrf` would run these against the real radio (T-053); ignored by
-//!   default and never opens the device.
+//! - **HIL:** under `HK_DEVICE=hackrf` these fixture variants skip; the live-air HackRF run
+//!   (survey truth, detection, Listen, floor, occupancy, retune) is `hil_hackrf.rs` (T-053).
 
 use hk_core::Coverage;
 use hk_e2e::TruthItem;
@@ -227,17 +227,4 @@ fn device_retune_outside_coverage_serves_noise_flagged_and_yields_no_phantoms() 
         phantom_emitters.is_empty(),
         "[{TAG}] emitters in the noise outside the recording: {phantom_emitters:?}"
     );
-}
-
-/// The HIL switch (T-053): the same blind device tests against the real HackRF, with truth from a
-/// live survey of an always-occupied band. Only the switch exists; the device is never opened.
-#[test]
-#[ignore = "HIL (T-053): run with HK_DEVICE=hackrf on the bench rig, receive-only"]
-fn hil_blind_fm_survey_on_the_hackrf() {
-    if !hardware_skip("hil_blind_fm_survey_on_the_hackrf") {
-        eprintln!(
-            "SKIP hil_blind_fm_survey_on_the_hackrf: set HK_DEVICE=hackrf to select the real \
-             HackRF (T-053)"
-        );
-    }
 }
