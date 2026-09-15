@@ -190,7 +190,6 @@ pub fn run(dir: &Path, meta: &Path, extra: serde_json::Value) -> RunSummary {
     summary
 }
 
-/// The run's repository.
 /// `(center_hz, bandwidth_hz)` of every `role: emission` truth annotation of `meta`: the test's
 /// private truth, never shown to the pipeline.
 pub fn emission_truth(meta: &Path) -> Vec<(f64, f64)> {
@@ -259,6 +258,7 @@ pub fn assert_station_channels(
     }
 }
 
+/// The run's repository.
 pub fn repo(dir: &Path) -> Repository {
     Repository::open(dir.join("hackriff.db")).unwrap()
 }

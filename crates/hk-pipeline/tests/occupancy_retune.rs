@@ -125,7 +125,7 @@ fn occupancy_rows_cover_every_band_retuned_within_one_interval() {
 /// T-118 sanity print over the real FM fixture (local floors, occupied runs); T-129 asserts the
 /// learned channels against the fixture's station truth and the band row's `fco`.
 #[test]
-fn occupancy_fm_fixture_local_floor_sanity() {
+fn occupancy_fm_fixture_learns_one_channel_per_station() {
     let Some(meta) = real_fixture("fm_100p8M_2p4M_l32g30a1_t1p5_5s") else {
         return;
     };

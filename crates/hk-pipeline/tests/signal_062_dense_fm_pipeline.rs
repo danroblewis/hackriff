@@ -31,11 +31,11 @@ const FS: f64 = 1.2e6;
 const CENTER_HZ: f64 = 99.4e6;
 const SPACING_HZ: f64 = 200e3;
 
-/// The dense scene quantised as the capture thread does, and its private station truth
-/// `(center_hz, bandwidth_hz)` from the synthesiser's annotations.
 /// Station truth `(center_hz, bandwidth_hz)`.
 type Truth = Vec<(f64, f64)>;
 
+/// The dense scene quantised as the capture thread does, and its private station truth
+/// `(center_hz, bandwidth_hz)` from the synthesiser's annotations.
 fn scene_iq(scene: &[(f64, &str, u64)]) -> Option<(Vec<Complex<i8>>, Truth)> {
     let mut sum: Vec<Complex<f32>> = Vec::new();
     let mut truth = Vec::new();

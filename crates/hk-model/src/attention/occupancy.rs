@@ -322,6 +322,30 @@ pub struct Channel {
     pub raster_hint: Option<RasterHint>,
 }
 
+/// The learning evidence behind one published channel, persisted with the plan so a restart keeps
+/// its publication and host state (T-129, ADR-0012 §2.7). Additive: a plan without it restores
+/// its channels as confident.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelEvidence {
+    /// The channel it belongs to.
+    pub key: ChannelKey,
+    /// Median centre of the sample window, Hz.
+    pub center_hz: f64,
+    /// Median SNR of the window's non-fragment detections, dB (none when all were fragments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snr_db: Option<f64>,
+    /// Non-fragment detections.
+    pub clean: u64,
+    /// Separated intervals with a detection at the stable centre.
+    pub intervals: u32,
+    /// The newest of those intervals (interval indices).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_intervals: Vec<i64>,
+    /// Cumulative detected duration at the stable centre, ns.
+    pub detected_ns: i64,
+}
+
 /// What an [`OccupancyStat`] is about.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
