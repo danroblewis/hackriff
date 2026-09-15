@@ -726,3 +726,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - merge-tree against main is clean.
   Nits filed as **T-107**: stale-tune race in set_channels; a lost DISCONTINUITY on an empty DDC chunk; ordering of long frames (relevant to T-095 POCSAG); detections-source and tracker-found hop-set tests; set_channels routes. T-093 and T-105 merge after the in-flight full check; the T-092 vs T-093 runtime.rs conflict is expected and resolvable.
 - **B0.255 Full check of main 315aaf3 (T-094): green.** Lint clean; nextest + UI 1086/1086; acceptance 25/25 (tutorial_rds included). **T-093 and T-105 merged.** **Launched:** T-095 POCSAG tutorial (with follow_hops; long-frame ordering caveat from T-107) and T-106 (RDS oracle timestamp offset). T-107 is held until T-092 merges, since both touch the recipe runtime. Full check covering T-093 + T-105 running.
+- **B0.256 T-092 review: FIX-FIRST** (timeboxed). Real-time safety, gating on store/replay, ids, 409 races and input validation are fine. Must-fix:
+  1. Merging with main breaks the build: T-091's assist test builds `CtlRequest` without the new `query` field. There's also an api.md text conflict.
+  2. A disk stall over 5 s trips the publisher slow-consumer disconnect and permanently stops the always-on recorder.
+  3. Interrupted-capture recovery doesn't validate the tail record, so the last /frames page returns 422 forever.
+  Promoted from nit: a partial-write retry duplicates bytes or misaligns the index. A fresh Opus fix and integration round is running in the T-092 worktree; T-107 follows after it merges.
