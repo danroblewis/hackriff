@@ -815,4 +815,296 @@ mod tests {
         );
         assert_eq!(alarms.status_json()["inputs_mature"], 0);
     }
+
+    /// T-138 (ADR-0012 §7.1 rule "single persistent new emitter"; AWARE-044, AWARE-027): one new
+    /// emitter on a quiet mature site (no new emitters for 10 days, P(≥1 new emitter in the hour |
+    /// μ) ≤ α) opens exactly one `new-emitter` alarm once it is seen in two consecutive closes, or
+    /// again on the next visit. The same emitter on a busy site, a one-off transient, a suspect
+    /// emitter and an immature site raise nothing (the immature one is counted).
+    #[test]
+    fn alarm_service_single_persistent_new_emitter_rule() {
+        use crate::attention::tests::series_row;
+        use crate::attention::{
+            AttentionService, EmitterSeen, FirstSighting, ObservedBand, SiteSelect,
+        };
+        use hk_context::occupancy::novelty::persistent_single_alpha;
+        use hk_model::attention::occupancy::OccupancySubject;
+        use hk_model::ids::EmitterId;
+
+        const S: i64 = 1_000_000_000;
+        let channel = FreqRange::new(432.0e6, 432.0125e6);
+        let emitter_freq = FreqRange::centered(432.00625e6, 10e3);
+        /// `build` closes before the sighting; ordinary one-off sightings every `busy` closes; the
+        /// emitter seen at `seen_at` offsets from its sighting close (sorted); no closes in `gap`;
+        /// `churned` flags it as churn at its sighting; `coarse` offsets observe the band at a
+        /// 100 kHz RBW; `tx` fixes its inventory first/last seen (s from the sighting close end).
+        #[derive(Clone, Copy, Default)]
+        struct Case<'a> {
+            build: i64,
+            busy: Option<i64>,
+            seen_at: &'a [i64],
+            gap: (i64, i64),
+            suspect: bool,
+            churned: bool,
+            coarse: &'a [i64],
+            tx: Option<(i64, i64)>,
+        }
+        let run = |c: Case<'_>| {
+            let Case {
+                build,
+                busy,
+                seen_at,
+                gap,
+                suspect,
+                churned,
+                coarse,
+                tx,
+            } = c;
+            let attention = AttentionService::in_memory().unwrap();
+            let cur = attention
+                .set_current_site(SiteSelect {
+                    name: Some("home".into()),
+                    ..SiteSelect::default()
+                })
+                .unwrap();
+            let id: SiteId = cur["record"]["id"].as_str().unwrap().parse().unwrap();
+            let site = SiteKey::Site(id);
+            let alarms = AlarmService::open(
+                Arc::new(Mutex::new(Repository::open_in_memory().unwrap())),
+                None,
+                Arc::new(|| Timestamp::from_unix_nanos(0)),
+            )
+            .unwrap();
+            let band = FreqRange::new(431e6, 433e6);
+            let emitter = EmitterId::new();
+            let mut events = Vec::new();
+            let mut at_sighting = None;
+            let first_seen = series_row(build, site, OccupancySubject::Band { freq: band }, 0.1)
+                .interval
+                .start
+                .saturating_add_nanos(60 * S);
+            for q in 0..=build + seen_at.last().copied().unwrap_or(0) + 6 {
+                if (gap.0..gap.1).contains(&(q - build)) {
+                    continue;
+                }
+                let row = series_row(q, site, OccupancySubject::Band { freq: band }, 0.1);
+                let t_end = row.interval.end;
+                let mut sightings = Vec::new();
+                let mut seen = Vec::new();
+                if q == build {
+                    sightings.push(FirstSighting {
+                        emitter,
+                        freq: emitter_freq,
+                        t: t_end,
+                    });
+                } else if busy.is_some_and(|n| q % n == 0) {
+                    let other = EmitterId::new();
+                    let freq = FreqRange::centered(431.2e6 + (q % 40) as f64 * 5e3, 10e3);
+                    sightings.push(FirstSighting {
+                        emitter: other,
+                        freq,
+                        t: t_end,
+                    });
+                    seen.push(EmitterSeen {
+                        emitter: other,
+                        freq,
+                        first_seen: t_end.saturating_add_nanos(-120 * S),
+                        last_seen: t_end.saturating_add_nanos(-100 * S),
+                        suspect: false,
+                    });
+                }
+                if q >= build && seen_at.contains(&(q - build)) {
+                    let build_end = t_end.saturating_add_nanos(-(q - build) * 900 * S);
+                    let (first_seen, last_seen) = tx.map_or(
+                        (first_seen, t_end.saturating_add_nanos(-30 * S)),
+                        |(f, l)| {
+                            (
+                                build_end.saturating_add_nanos(f * S),
+                                build_end.saturating_add_nanos(l * S),
+                            )
+                        },
+                    );
+                    seen.push(EmitterSeen {
+                        emitter,
+                        freq: emitter_freq,
+                        first_seen,
+                        last_seen,
+                        suspect,
+                    });
+                }
+                attention.note_first_sightings(site, &sightings);
+                let rbw_hz = if q >= build && coarse.contains(&(q - build)) {
+                    100e3
+                } else {
+                    6250.0
+                };
+                let churn = if churned && q == build {
+                    vec![emitter]
+                } else {
+                    Vec::new()
+                };
+                attention.note_emitters_seen(
+                    site,
+                    row.interval,
+                    &[ObservedBand { freq: band, rbw_hz }],
+                    &seen,
+                    &churn,
+                );
+                let folds = attention.ingest_interval(
+                    std::slice::from_ref(&row),
+                    sightings.len() as u64,
+                    t_end,
+                    0,
+                );
+                let inputs = attention.new_emitter_inputs(site, t_end);
+                if q == build {
+                    at_sighting = inputs
+                        .iter()
+                        .find(|n| n.input.freq.lo_hz <= emitter_freq.center_hz())
+                        .filter(|n| n.input.freq.hi_hz >= emitter_freq.center_hz())
+                        .map(|n| (n.input.novelty, n.input.baseline_mean));
+                }
+                events.extend(alarms.observe_interval_with_new_emitters(
+                    &folds,
+                    site,
+                    t_end,
+                    &inputs,
+                    &[],
+                ));
+            }
+            (id, alarms, events, at_sighting)
+        };
+        let alpha = persistent_single_alpha(0.7);
+        let raised = |events: &[AlarmEvent]| -> Vec<AlarmEvent> {
+            events
+                .iter()
+                .filter(|e| e.transition == AlarmLifecycle::Raised)
+                .cloned()
+                .collect()
+        };
+        let count = |events: &[AlarmEvent], t: AlarmLifecycle| {
+            events.iter().filter(|e| e.transition == t).count()
+        };
+        // 10 days of 15-min closes without a new emitter.
+        let quiet = Case {
+            build: 960,
+            seen_at: &[0, 1, 2, 3],
+            ..Case::default()
+        };
+
+        // Quiet mature site, persistent emitter: exactly one alarm with channel, site, explanation.
+        let (id, alarms, events, at) = run(quiet);
+        let (novelty, mu) = at.expect("scored at its sighting close");
+        let p1 = -(-mu).exp_m1();
+        eprintln!("quiet: novelty {novelty:.3}, μ {mu:.5}, P(≥1) {p1:.5}, α {alpha:.5}");
+        assert!(novelty >= 0.7 && p1 <= alpha, "novelty {novelty}, P {p1}");
+        let r = raised(&events);
+        assert_eq!(r.len(), 1, "{events:#?}");
+        let e = &r[0];
+        assert_eq!(e.row.key.kind, AlarmKind::NewEmitter);
+        assert_eq!(e.anomaly.kind, hk_model::AnomalyKind::NewEmitter);
+        assert_eq!(e.row.key.site, id);
+        assert!(
+            e.row.freq.lo_hz >= channel.lo_hz - 6250.0
+                && e.row.freq.hi_hz <= channel.hi_hz + 6250.0,
+            "the channel's extent: {:?}",
+            e.row.freq
+        );
+        assert_eq!(e.row.detail.observed, 1.0, "one new emitter");
+        assert_eq!(e.row.detail.intervals_above, 2);
+        assert!(!e.explanations.is_empty(), "explained (unexplained ranked)");
+        let (listed, _) = alarms
+            .list(&AnomalyQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+
+        // Re-seen on a later visit (no closes at the site for 2 days in between): one alarm.
+        let (_, _, events, _) = run(Case {
+            seen_at: &[0, 192],
+            gap: (1, 192),
+            ..quiet
+        });
+        assert_eq!(raised(&events).len(), 1, "later visit: {events:#?}");
+
+        // T-138 review: one 10-min transmission straddling the sighting close's end shows at two
+        // closes but is never a full interval long: no alarm.
+        let (_, _, events, _) = run(Case {
+            seen_at: &[0, 1],
+            tx: Some((-300, 300)),
+            ..quiet
+        });
+        assert!(raised(&events).is_empty(), "straddle: {events:#?}");
+
+        // T-138 review: one-shot. An intermittent repeater (on for 3 h, back 7 h later for 45 min)
+        // raises once and is never re-raised or re-opened.
+        let (_, _, events, _) = run(Case {
+            seen_at: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 40, 41, 42],
+            ..quiet
+        });
+        assert_eq!(count(&events, AlarmLifecycle::Raised), 1, "{events:#?}");
+        assert_eq!(count(&events, AlarmLifecycle::Reopened), 0, "{events:#?}");
+        assert_eq!(count(&events, AlarmLifecycle::Cleared), 1, "{events:#?}");
+
+        // T-138 review: churn (a new id over an emitter seen within the horizon) never scores.
+        let (_, _, events, _) = run(Case {
+            churned: true,
+            ..quiet
+        });
+        assert!(events.is_empty(), "churn: {events:#?}");
+
+        // T-138 review: a coarse sweep row (100 kHz bins over a 10 kHz emitter) between two
+        // sightings neither resets nor confirms; a resolving row without it resets the streak.
+        let coarse_between = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11];
+        let (_, _, events, _) = run(Case {
+            seen_at: &[0, 10, 12],
+            coarse: &coarse_between,
+            ..quiet
+        });
+        assert_eq!(raised(&events).len(), 1, "coarse gap: {events:#?}");
+        let (_, _, events, _) = run(Case {
+            seen_at: &[0, 10, 12],
+            coarse: &coarse_between[..9],
+            ..quiet
+        });
+        assert!(raised(&events).is_empty(), "resolved gap: {events:#?}");
+
+        // Busy site (a new emitter every 2 h): the same persistent emitter does not alarm.
+        let (_, _, events, at) = run(Case {
+            busy: Some(8),
+            ..quiet
+        });
+        let (novelty, mu) = at.unwrap();
+        let p1 = -(-mu).exp_m1();
+        eprintln!("busy: novelty {novelty:.3}, μ {mu:.5}, P(≥1) {p1:.5}");
+        assert!(novelty < 0.7 && p1 > alpha);
+        assert!(events.is_empty(), "busy: {events:#?}");
+
+        // One-off transient on the quiet site: seen at its sighting close only.
+        let (_, _, events, at) = run(Case {
+            seen_at: &[0],
+            ..quiet
+        });
+        assert!(at.unwrap().0 >= 0.7, "scored once, not confirmed");
+        assert!(events.is_empty(), "transient: {events:#?}");
+
+        // Suspect (e.g. spur/IMD) sightings never score.
+        let (_, _, events, _) = run(Case {
+            suspect: true,
+            ..quiet
+        });
+        assert!(events.is_empty(), "suspect: {events:#?}");
+
+        // Immature baseline: no alarm, the sighting counted once as `immature-baseline`.
+        let (_, alarms, events, _) = run(Case { build: 10, ..quiet });
+        assert!(events.is_empty(), "immature: {events:#?}");
+        let s = alarms.suppressions();
+        assert_eq!(
+            s["new-emitter"]["immature-baseline"].as_u64().unwrap(),
+            1,
+            "{s}"
+        );
+    }
 }

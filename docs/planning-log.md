@@ -1324,3 +1324,75 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - T-136 merged cleanly (f0b963b).
   - T-124 WIP is kept on branch `t-124-wip` (d46cb65); its handoff is in the coordinator scratchpad, `t124-handoff.keep.md`. Diagnostics with 0.5 s sweep steps at 1 M/500 k gave 108 frames, 105 tiles and 133 alarm inputs (all immature) over 3.8 h. Root cause: `history.rs:73-80` row length; `stft.rs:125-128,:314` drop partial rows on retune; `scheduler/config.rs:91-94` sets 50 ms hops.
   - T-139 launched (Opus, high effort). Full check started.
+- **B0.356 T-137 committed (c1dd979); Opus review running.**
+  - Fold cost: 7.5 → 1.15 µs (single Reference read, direct slot lookups).
+  - Decay: lazy f64 multiplier per `SlotSeries`; a 365 d half-life with 1 s folds matches f64 to 2.6e-7.
+  - Golden test compares re-encoded f64 fields within 1e-6.
+  - Parked week: 193.1 MiB, 0 refusals; week test 14.9 → 9.6 s.
+  - Tests: hk-store 7, hk-context 39, hk-pipeline 18.
+- **B0.357 T-138 committed (64972b7, on f0b963b); Opus review running.**
+  - **Rule:** a persistence-confirmed single new emitter is scored as `new_emitter_novelty(2, rate, 1 h)`, which reaches 0.7 when P(≥1 new emitter/h | μ) ≤ α ≈ 0.0112.
+  - **Persistence:** the re-sighting must come ≥300 s after first sighting, at consecutive closes.
+  - **Gates:** a suspect sighting disqualifies; only named, mature sites qualify; pending sightings kept 7 days, max 512.
+  - **Tests:** quiet site alarms (novelty 0.744); busy site (0.067), transient and suspect do not; immature is counted.
+  - **Merge risk:** T-138 touches `occupancy.rs`, so expect a conflict with T-139.
+- **B0.358 T-136 full check green; T-137 merged.**
+  - **T-136 full check:** lint clean, 1375/1375 tests, acceptance 32/32 (67 s).
+  - **T-137 review: MERGE, no bugs.**
+    - Single Reference read is correct: auto-refreeze runs before the read, and accrue after it.
+    - Pool spans match `in_pool` in the same order.
+    - The lazy multiplier is applied on every read and encode path; byte accounting is unaffected.
+    - The timing test is print-only.
+  - **Nits → T-140 (Sonnet, reviewed by the coordinator):** public packed accessors skip the multiplier; the equivalence fingerprint is printed rather than asserted; no NaN guard; duplicated helpers.
+  - T-137 merged; full check started.
+- **B0.359 T-138 review (Opus): FIX-FIRST.**
+  - **Bugs**
+    - `emitters_seen` checks `last_seen <= iv.end`, which excludes carriers that stay on.
+    - A 300 s persistence span lets one 6–14 min transmission straddling a boundary alarm.
+  - **Risks**
+    - The rule is not one-shot, so a repeater re-raises for 7 days.
+    - Inventory ID churn can create false new emitters.
+    - One DB query per row under the lock; coarse sweeps count as coverage (T-139 interaction).
+  - **Nit:** ADR wording should call it a rate gate.
+  - **Verified:** no double alarms (engine `keyed()` plus max); fresh counting holds; uncovered closes are skipped; memory cap and pruning are OK.
+  - **Next:** one fix round, continued in the original agent (~180k tokens).
+- **B0.360 DISK LOW: 6.4 GB free (was 23 GB about an hour earlier).**
+  - **Cause:** the user's demo `hk serve` on 127.0.0.1:8900 (another session's scratchpad, `573a0024…/scratchpad/hk-data`) holds 10 GB: `hackriff.db` 6.4 GB and `recordings` 3.8 GB. The process started about 1.5 h ago.
+  - **Not touched:** it is not the coordinator's process, so it was left alone and the user was notified.
+  - **Freed:** 0.5 GB of the coordinator's own old scratch data.
+  - **Launches paused:** T-140 and anything else, until the user decides or space returns.
+  - **T-139 progress:** the history STFT now emits partial rows after a retune (true n_avg), and the floor product folds mixed shapes (ADR §2.10). A 2 h default-scheduler scene gives 323 rows, 82 tiles, 66 OccupancyStat rows, 36 baseline folds and 78 alarm inputs (was 0); fixed-tune frames are bit-identical. Final targeted runs are still going.
+- **B0.361 T-139 committed (dbf6776); Opus review running.**
+  - **Change:** after a retune the history STFT emits partial rows (n_avg ≥ K/10, true n_avg and span). `FloorProduct` folds them; a mixed tile reports no floor. ADR §2.10.
+  - **Scheduler test (2 h):** 0 → 323 rows / 82 tiles / 66 OccupancyStat rows / 36 folds / 78 alarm inputs. Fixed-tune frames are bit-identical.
+  - **Tests:** hk-pipeline 24, hk-store 58, hk-context 64, hk-dsp 10.
+  - **Concerns for review:**
+    - A hk-store test tolerance of 2 dB, because full vs short row floors differ by 1.6 dB (possible log-bias correction bug).
+    - T-124 thresholds must be set a priori, not calibrated on the first green run.
+    - Bandit dwells never happened in a 3.8 h scene.
+- **B0.362 Full check green after the T-137 merge (f092aa4).**
+  - Lint clean; 1378/1378 tests; acceptance 32/32.
+  - Disk recovered to 6.8 GB free after deleting the committed T-139 worktree target; launches stay paused below 20 GB.
+  - The :8900 demo data dir is now growing slowly (~100 MB per 5 min of recordings).
+- **B0.363 T-138 merged (fix round 1e230cc).**
+  - Seen test uses overlap of first..last seen with the interval.
+  - Re-sighting must be at least one full interval after the first.
+  - One-shot after two confirmed closes.
+  - Churn guard: skip a new ID that overlaps an older emitter seen within 7 days.
+  - One inventory query per close; coverage counts only when RBW ≤ emitter bandwidth.
+  - ADR §7.1 reworded as a rate gate.
+  - Tests: 55/55 targeted.
+  - T-139 will conflict in `occupancy.rs`. Full check started.
+- **B0.364 T-139 review (Opus): FIX-FIRST.**
+  - **Bug:** the mixed-shape decision is memory-only, so after a restart `/api/floor` bias-corrects mixed tiles with the first-frame shape.
+  - **Risks:**
+    - Partial-row arming is sticky, so overrun gaps on a later fixed tune mark tiles mixed.
+    - Most scheduler tiles are mixed, so `floor_db` is absent (untested).
+  - **Nits:** the 2 dB range check neither hides nor catches bias (use a median diff); per-n_avg shape recompute; `mean_db` is not span-weighted.
+  - **Verified:** the tracker uses each row's n_avg; no FCO inflation (n_c ≳ 100, SD ~0.4 dB); spans don't overlap; spectrum/detect streams unchanged; fixed-tune floor math unchanged.
+  - **Bandit dwells missing in T-124 diagnostics:** a scene artifact (0.13 s windows vs `min_dwell_s` 0.5 s; `core.rs:926`), not a scheduler bug. T-124 must use windows ≥ the dwell minimum.
+  - **Next:** fix round launched as a fresh Opus agent (the original was at 288k), including merging main (T-137/T-138) into T-139.
+- **B0.365 Full check green after the T-138 merge (672e606).**
+  - Lint clean, 1381/1381 tests, acceptance 32/32 (66 s).
+  - Disk 8.6 GB free; launches paused below 20 GB (T-140 waiting).
+  - T-139 fix round and main merge in progress.

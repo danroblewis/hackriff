@@ -87,7 +87,7 @@ use std::sync::{Mutex, PoisonError};
 
 use hk_model::attention::baseline::{
     AdaptationPolicy, BaselineKey, BaselineResolution, CalKey, HourOfWeek, MATURITY_MIN_OBSERVED_S,
-    Maturity, SiteKey,
+    Maturity, SiteKey, SlotStats,
 };
 use hk_model::attention::occupancy::{OccupancyStat, OccupancySubject};
 use hk_model::attention::score::NoveltyScore;
@@ -95,7 +95,7 @@ use hk_model::time::Timestamp;
 use hk_store::baseline::{
     BaselineState, BaselineStore, BaselineStoreError, BaselineSubject, ChangePoint,
     ChangeStatistic, CusumState, DecayedStats, GainSeries, LevelClass, MAX_GAIN_STATES,
-    SubjectBaseline,
+    PackedMoments, SlotSeries, SlotValue, SubjectBaseline,
 };
 
 use super::novelty::{
@@ -133,14 +133,15 @@ pub fn hour_bit(slot: HourOfWeek) -> u32 {
 }
 
 /// Reference observed time of `slot`'s hour-of-day pool (the 7 hour-of-week slots sharing its
-/// hour), over all gain states.
+/// hour), over all gain states. A fold reads it from its reference [`pools`] (T-137).
+#[cfg(test)]
 fn hour_of_day_observed_s(sub: &SubjectBaseline, slot: HourOfWeek) -> f64 {
     let h = slot.index() % 24;
     sub.gains
         .iter()
-        .flat_map(|g| g.reference.iter())
+        .flat_map(|g| g.reference.packed())
         .filter(|(i, _)| i % 24 == h)
-        .map(|(_, r)| r.observed_s)
+        .map(|(_, p)| p.observed_s())
         .sum()
 }
 
@@ -153,6 +154,10 @@ fn hour_of_day_observed_s(sub: &SubjectBaseline, slot: HourOfWeek) -> f64 {
 ///   change cannot drain into the reference by dragging it along fold by fold. A reference that
 ///   tracks a change stays about `max_drift_sigma` behind, above the CUSUM slack, so the CUSUM
 ///   builds and stops learning.
+///
+/// `own_hour` is the fold's hour-of-day reference level and occupancy pools (the adaptive pools
+/// are read here, after the fold entered the adaptive copy).
+#[allow(clippy::too_many_arguments)]
 fn consistent_with_own_hour(
     sub: &SubjectBaseline,
     slot: HourOfWeek,
@@ -161,21 +166,21 @@ fn consistent_with_own_hour(
     cfg: &NoveltyConfig,
     max_drift_sigma: f64,
     chosen: Option<(usize, PoolStats, PoolStats)>,
+    own_hour: Option<(PoolStats, PoolStats)>,
 ) -> bool {
-    let Some((_, chosen_level, chosen_occ)) = chosen else {
+    let (Some((_, chosen_level, chosen_occ)), Some((level, occ))) = (chosen, own_hour) else {
         return false;
     };
-    let (level, occ) = pools(sub, slot, gain, BaselineCopy::Reference);
     let r = res_index(BaselineResolution::HourOfDay);
-    if occ[r].observed_s <= 0.0 {
+    if occ.observed_s <= 0.0 {
         return false;
     }
     let ev = obs.evidence();
     // Established pattern: the slot's own history is itself novel against the coarse pool, so
     // that pool (not a change) explains the fold's novelty.
     let own = Evidence {
-        level_db: level[r].mean_db(),
-        fco: occ[r].fco(),
+        level_db: level.mean_db(),
+        fco: occ.fco(),
         ..ev
     };
     let established = level_z(&chosen_level, &own, cfg).is_some_and(|z| z >= cfg.z_min)
@@ -183,21 +188,19 @@ fn consistent_with_own_hour(
     if !established {
         return false;
     }
-    let fold_ok = level_z(&level[r], &ev, cfg).is_none_or(|z| z < cfg.z_min)
-        && occupancy_z(&occ[r], &ev).is_none_or(|z| z.abs() < cfg.z_min);
+    let fold_ok = level_z(&level, &ev, cfg).is_none_or(|z| z < cfg.z_min)
+        && occupancy_z(&occ, &ev).is_none_or(|z| z.abs() < cfg.z_min);
     if !fold_ok {
         return false;
     }
-    let (ad_level, ad_occ) = pools(sub, slot, gain, BaselineCopy::Adaptive);
-    let level_drift = match (ad_level[r].mean_db(), level[r].mean_db()) {
-        (Some(a), Some(m)) => {
-            (a - m).abs() / level[r].std_db().unwrap_or(0.0).max(cfg.sigma_floor_db)
-        }
+    let (ad_level, ad_occ) = pool_at(sub, slot, gain, BaselineCopy::Adaptive, r);
+    let level_drift = match (ad_level.mean_db(), level.mean_db()) {
+        (Some(a), Some(m)) => (a - m).abs() / level.std_db().unwrap_or(0.0).max(cfg.sigma_floor_db),
         _ => 0.0,
     };
-    let occ_drift = match (ad_occ[r].fco(), obs.weight_s > 0.0 && obs.n_eff >= 1.0) {
-        (Some(af), true) => shrunk_fco(&occ[r], obs.weight_s / obs.n_eff).map_or(0.0, |p| {
-            (af - p).abs() / occupancy_sigma(&occ[r], p, obs.n_eff)
+    let occ_drift = match (ad_occ.fco(), obs.weight_s > 0.0 && obs.n_eff >= 1.0) {
+        (Some(af), true) => shrunk_fco(&occ, obs.weight_s / obs.n_eff).map_or(0.0, |p| {
+            (af - p).abs() / occupancy_sigma(&occ, p, obs.n_eff)
         }),
         _ => 0.0,
     };
@@ -492,6 +495,9 @@ pub enum BaselineCopy {
     Adaptive,
 }
 
+/// Level and occupancy pools at the four resolutions, finest first ([`pools`]).
+pub type Pools = ([PoolStats; 4], [PoolStats; 4]);
+
 /// Level (one gain state) and occupancy (all gain states) pools of `sub` for `slot`, at all four
 /// resolutions (finest first).
 pub fn pools(
@@ -499,21 +505,105 @@ pub fn pools(
     slot: HourOfWeek,
     gain: Option<usize>,
     copy: BaselineCopy,
-) -> ([PoolStats; 4], [PoolStats; 4]) {
+) -> Pools {
+    pools_where(sub, slot, gain, copy, None)
+}
+
+/// The level and occupancy pools of [`pools`] at resolution index `r` only (T-137): visits only
+/// that pool's slots (1, 7, 42 or all per series), in the same order, so the moments are equal.
+pub fn pool_at(
+    sub: &SubjectBaseline,
+    slot: HourOfWeek,
+    gain: Option<usize>,
+    copy: BaselineCopy,
+    r: usize,
+) -> (PoolStats, PoolStats) {
+    let (level, occ) = pools_where(sub, slot, gain, copy, Some(r));
+    (level[r], occ[r])
+}
+
+/// Stored slots of `series` in slot order: all, or those of `span` = (days, first hour, hours).
+fn stored_slots<T: SlotValue>(
+    series: &SlotSeries<T>,
+    span: Option<(usize, usize, usize)>,
+) -> impl Iterator<Item = (usize, &T::Packed)> {
+    let (days, h0, hours) = span.unwrap_or((0, 0, 0));
+    let all = span
+        .is_none()
+        .then(|| series.packed())
+        .into_iter()
+        .flatten();
+    let some = (0..days)
+        .flat_map(move |d| (h0..h0 + hours).map(move |h| d * 24 + h))
+        .filter_map(move |i| series.packed_at(i).map(|p| (i, p)));
+    all.chain(some)
+}
+
+/// [`pools`] at every resolution (`only` = None) or at resolution index `only`.
+fn pools_where(
+    sub: &SubjectBaseline,
+    slot: HourOfWeek,
+    gain: Option<usize>,
+    copy: BaselineCopy,
+    only: Option<usize>,
+) -> Pools {
     let mut level = [PoolStats::default(); 4];
     let mut occ = [PoolStats::default(); 4];
+    let s = slot.index();
+    let sh = s % 24;
+    // [`in_pool`]'s slots at `only`, as (days, first hour, hours); all hours walk every slot.
+    let span = match only {
+        Some(0) => Some((1, s, 1)),
+        Some(1) => Some((7, sh, 1)),
+        Some(2) => Some((7, sh / 6 * 6, 6)),
+        _ => None,
+    };
     for (gi, g) in sub.gains.iter().enumerate() {
         // Stored slots only, in slot order (T-134): an untouched slot is empty and was skipped.
+        // The level series unpacks its slots; the others read their occupancy fields (T-137).
         let own = Some(gi) == gain;
         match copy {
             BaselineCopy::Reference => {
-                for (i, s) in g.reference.iter() {
-                    pool_slot(&mut level, &mut occ, i, &DecayedStats::from(&s), slot, own);
+                for (i, p) in stored_slots(&g.reference, span) {
+                    let (o, d) = if own {
+                        let d = DecayedStats::from(&SlotStats::unpack(p));
+                        (SlotOccupancy::of(&d), Some(d))
+                    } else {
+                        let n = p.n();
+                        let o = SlotOccupancy {
+                            n,
+                            observed_s: p.observed_s(),
+                            occupied_weight_s: p.occupied_weight_s(),
+                            weight_s: p.weight_s(),
+                            // As `DecayedStats::from(&SlotStats)`.
+                            max_db: if n == 0.0 {
+                                f64::NEG_INFINITY
+                            } else {
+                                p.max_db()
+                            },
+                        };
+                        (o, None)
+                    };
+                    pool_slot(&mut level, &mut occ, (i, s), o, d.as_ref(), only);
                 }
             }
             BaselineCopy::Adaptive => {
-                for (i, d) in g.adaptive.iter() {
-                    pool_slot(&mut level, &mut occ, i, &d, slot, own);
+                let m = g.adaptive.decay();
+                for (i, p) in stored_slots(&g.adaptive, span) {
+                    let (o, d) = if own {
+                        let d = DecayedStats::unpack_scaled(p, m);
+                        (SlotOccupancy::of(&d), Some(d))
+                    } else {
+                        let o = SlotOccupancy {
+                            n: p.n() * m,
+                            observed_s: p.observed_s() * m,
+                            occupied_weight_s: p.occupied_weight_s() * m,
+                            weight_s: p.weight_s() * m,
+                            max_db: p.max_db(),
+                        };
+                        (o, None)
+                    };
+                    pool_slot(&mut level, &mut occ, (i, s), o, d.as_ref(), only);
                 }
             }
         }
@@ -521,43 +611,97 @@ pub fn pools(
     (level, occ)
 }
 
-/// Adds stored slot `i` (`d`) to the pools of `slot` it belongs to; `own` = the level series.
+/// Reference observed seconds of `slot`'s pools over all gain states, finest first: the
+/// occupancy pools' `observed_s` of [`pools`], read from one field per stored slot (T-137).
+fn observed_pools(sub: &SubjectBaseline, slot: HourOfWeek) -> [f64; 4] {
+    let s = slot.index();
+    let sh = s % 24;
+    let mut out = [0.0; 4];
+    for g in &sub.gains {
+        for (i, p) in g.reference.packed() {
+            let observed_s = p.observed_s();
+            // `pool_slot`'s skip.
+            if p.n() <= 0.0 && p.weight_s() <= 0.0 && observed_s <= 0.0 {
+                continue;
+            }
+            let ih = i % 24;
+            for (o, member) in out
+                .iter_mut()
+                .zip([i == s, ih == sh, ih / 6 == sh / 6, true])
+            {
+                if member {
+                    *o += observed_s;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The moments of a stored slot that occupancy pools read.
+#[derive(Clone, Copy)]
+struct SlotOccupancy {
+    n: f64,
+    observed_s: f64,
+    occupied_weight_s: f64,
+    weight_s: f64,
+    max_db: f64,
+}
+
+impl SlotOccupancy {
+    fn of(d: &DecayedStats) -> Self {
+        Self {
+            n: d.n,
+            observed_s: d.observed_s,
+            occupied_weight_s: d.occupied_weight_s,
+            weight_s: d.weight_s,
+            max_db: d.max_db,
+        }
+    }
+}
+
+/// Adds stored slot `i` (`o`; `own`: the level series' full moments) to the pools of slot `s` it
+/// belongs to (at resolution index `only`, when given).
 fn pool_slot(
     level: &mut [PoolStats; 4],
     occ: &mut [PoolStats; 4],
-    i: usize,
-    d: &DecayedStats,
-    slot: HourOfWeek,
-    own: bool,
+    (i, s): (usize, usize),
+    o: SlotOccupancy,
+    own: Option<&DecayedStats>,
+    only: Option<usize>,
 ) {
-    if d.is_empty() && d.weight_s <= 0.0 && d.observed_s <= 0.0 {
+    if o.n <= 0.0 && o.weight_s <= 0.0 && o.observed_s <= 0.0 {
         return;
     }
-    for res in BaselineResolution::FINEST_FIRST {
-        if !in_pool(i, slot, res) {
-            continue;
-        }
-        let r = res_index(res);
+    let (ih, sh) = (i % 24, s % 24);
+    // [`in_pool`] at each resolution, in `BaselineResolution::FINEST_FIRST` order.
+    let member = [i == s, ih == sh, ih / 6 == sh / 6, true];
+    for (_, ((occ, level), _)) in occ
+        .iter_mut()
+        .zip(level.iter_mut())
+        .zip(member)
+        .enumerate()
+        .filter(|(r, (_, m))| *m && only.is_none_or(|o| o == *r))
+    {
         // Occupancy only (no level moments) so each slot's FCO enters the spread once.
-        occ[r].add(
+        occ.add(
             0.0,
-            d.observed_s,
+            o.observed_s,
             0.0,
             0.0,
-            d.occupied_weight_s,
-            d.weight_s,
-            d.max_db,
+            o.occupied_weight_s,
+            o.weight_s,
+            o.max_db,
         );
-        if own {
-            level[r].add_decayed(d);
+        if let Some(d) = own {
+            level.add_decayed(d);
         }
     }
 }
 
 /// Maturity of `sub`'s reference for `slot`.
 pub fn maturity(sub: &SubjectBaseline, slot: HourOfWeek) -> Maturity {
-    let (_, occ) = pools(sub, slot, None, BaselineCopy::Reference);
-    Maturity::from_pools(occ.map(|p| p.observed_s))
+    Maturity::from_pools(observed_pools(sub, slot))
 }
 
 /// Baseline settings.
@@ -734,8 +878,9 @@ impl BaselineEngine {
         let slot = self.slot(obs.t);
         match self.state.subjects.get(&obs.subject) {
             Some(sub) => {
-                self.evaluate(sub, slot, gain_index(sub, obs.gain, obs.level_class()), obs)
-                    .0
+                let gain = gain_index(sub, obs.gain, obs.level_class());
+                let observed = observed_pools(sub, slot);
+                Self::evaluate(sub, slot, gain, obs, &self.cfg.novelty, observed).0
             }
             None => FoldOutcome::none(obs, Maturity::Immature { observed_s: 0.0 }).novelty,
         }
@@ -743,30 +888,31 @@ impl BaselineEngine {
 
     /// Returns the novelty, when mature the chosen resolution with its reference pools (the level
     /// pool of the fold's own class), and the novelty that gates reference learning (without a
-    /// cross-class level z, T-132).
+    /// cross-class level z, T-132). `observed` is [`observed_pools`] of `sub` and `slot`; only the
+    /// chosen resolution's reference pools are computed (T-137).
     fn evaluate(
-        &self,
         sub: &SubjectBaseline,
         slot: HourOfWeek,
         gain: Option<usize>,
         obs: &IntervalObservation,
+        cfg: &NoveltyConfig,
+        observed: [f64; 4],
     ) -> (NoveltyScore, Option<(usize, PoolStats, PoolStats)>, f64) {
-        let (level, occ) = pools(sub, slot, gain, BaselineCopy::Reference);
-        let m = Maturity::from_pools(occ.map(|p| p.observed_s));
-        let cfg = &self.cfg.novelty;
+        let m = Maturity::from_pools(observed);
         let Maturity::Mature { resolution } = m else {
             return (FoldOutcome::none(obs, m).novelty, None, 0.0);
         };
         let r = res_index(resolution);
+        let (level, occ) = pool_at(sub, slot, gain, BaselineCopy::Reference, r);
         let ev = obs.evidence();
         // An occupied fold without an occupied level pool yet: compare with the idle pool.
-        let fallback = (level[r].n < 2.0 && obs.level_class() == LevelClass::Occupied)
+        let fallback = (level.n < 2.0 && obs.level_class() == LevelClass::Occupied)
             .then(|| gain_index(sub, obs.gain, LevelClass::Idle))
             .flatten()
-            .map(|ig| pools(sub, slot, Some(ig), BaselineCopy::Reference).0[r])
+            .map(|ig| pool_at(sub, slot, Some(ig), BaselineCopy::Reference, r).0)
             .filter(|p| p.n >= 2.0);
-        let lz = level_z(fallback.as_ref().unwrap_or(&level[r]), &ev, cfg);
-        let oz = occupancy_z(&occ[r], &ev);
+        let lz = level_z(fallback.as_ref().unwrap_or(&level), &ev, cfg);
+        let oz = occupancy_z(&occ, &ev);
         let combined = |lz| {
             combine(
                 m,
@@ -784,7 +930,7 @@ impl BaselineEngine {
         } else {
             n.novelty
         };
-        (n, Some((r, level[r], occ[r])), learn)
+        (n, Some((r, level, occ)), learn)
     }
 
     fn fold(&mut self, obs: &IntervalObservation) -> FoldOutcome {
@@ -822,30 +968,30 @@ impl BaselineEngine {
         if auto_refreezes(&policy, sub, obs.t) {
             refreeze_subject(sub, obs.t);
         }
-        let sub_ref: &SubjectBaseline = sub;
-        let engine = Self {
-            state: BaselineState::new(self.state.key, obs.t),
-            utc_offset_min: self.utc_offset_min,
-            cfg: self.cfg,
-            dirty: false,
-            bytes: 0,
-        };
-        let (novelty, chosen, learn_novelty) = engine.evaluate(sub_ref, slot, gain, obs);
-        let sub = self
-            .state
-            .subjects
-            .get_mut(&obs.subject)
-            .expect("inserted above");
+        // Reference pools once per fold, at the resolutions read (T-137): the reference does not
+        // change before step 5.
+        let observed = observed_pools(sub, slot);
+        let (novelty, chosen, learn_novelty) =
+            Self::evaluate(sub, slot, gain, obs, &ncfg, observed);
+        let hr = res_index(BaselineResolution::HourOfDay);
+        // The slot's own hour-of-day reference pools (sequential test, learning), when mature.
+        let own_hour = chosen.map(|(r, level, occ)| {
+            if r == hr {
+                (level, occ)
+            } else {
+                pool_at(sub, slot, gain, BaselineCopy::Reference, hr)
+            }
+        });
         let clean = !obs.provenance_explained && obs.suspect_fraction < SUSPECT_MAX_FRACTION;
 
         // CUSUM of adaptive vs reference at the chosen pool.
         let mut raised = None;
         if let (Some((r, ref_level, ref_occ)), true) = (chosen, clean) {
-            let (ad_level, ad_occ) = pools(sub, slot, gain, BaselineCopy::Adaptive);
+            let (ad_level, ad_occ) = pool_at(sub, slot, gain, BaselineCopy::Adaptive, r);
             let k = policy.cusum_k_sigma;
             let c = &mut sub.cusum;
             let mut crossed: Option<(ChangeStatistic, i8, f64)> = None;
-            if let (Some(am), Some(rm)) = (ad_level[r].mean_db(), ref_level.mean_db()) {
+            if let (Some(am), Some(rm)) = (ad_level.mean_db(), ref_level.mean_db()) {
                 let x = (am - rm) / ref_level.std_db().unwrap_or(0.0).max(ncfg.sigma_floor_db);
                 c.level_pos = (c.level_pos + x - k).max(0.0);
                 c.level_neg = (c.level_neg - x - k).max(0.0);
@@ -855,7 +1001,7 @@ impl BaselineEngine {
                     }
                 }
             }
-            if let (Some(af), true) = (ad_occ[r].fco(), obs.weight_s > 0.0 && obs.n_eff >= 1.0)
+            if let (Some(af), true) = (ad_occ.fco(), obs.weight_s > 0.0 && obs.n_eff >= 1.0)
                 && let Some(p) = shrunk_fco(&ref_occ, obs.weight_s / obs.n_eff)
             {
                 let x = (af - p) / occupancy_sigma(&ref_occ, p, obs.n_eff);
@@ -885,14 +1031,14 @@ impl BaselineEngine {
 
         // T-132 sequential learning test (module docs).
         let hod = slot.index() % 24;
-        if let (Some((_, ref_level, ref_occ)), true) = (chosen, clean) {
-            let (own_level, own_occ) = pools(sub, slot, gain, BaselineCopy::Reference);
-            let hr = res_index(BaselineResolution::HourOfDay);
+        if let (Some((_, ref_level, ref_occ)), Some((own_level, own_occ)), true) =
+            (chosen, own_hour, clean)
+        {
             let zc = ncfg.z_min;
             // The pool mean is itself uncertain (standard error σ/√n): the level slack is widened
             // by it, so an unchanged channel's biased own-hour mean does not drift the test up.
-            let level_pool = if own_level[hr].n >= SEQ_OWN_MIN_VISITS {
-                own_level[hr]
+            let level_pool = if own_level.n >= SEQ_OWN_MIN_VISITS {
+                own_level
             } else {
                 ref_level
             };
@@ -902,8 +1048,8 @@ impl BaselineEngine {
                 let sigma = ref_level.std_db().unwrap_or(0.0).max(ncfg.sigma_floor_db);
                 Some(((l - mean) / sigma).clamp(-zc, zc))
             });
-            let occ_pool = if own_occ[hr].observed_s >= SEQ_OWN_MIN_OBSERVED_S {
-                &own_occ[hr]
+            let occ_pool = if own_occ.observed_s >= SEQ_OWN_MIN_OBSERVED_S {
+                &own_occ
             } else {
                 &ref_occ
             };
@@ -976,7 +1122,8 @@ impl BaselineEngine {
         });
 
         // Reference: normal folds only, until the slot's hour-of-day pool is mature.
-        let hod_immature = hour_of_day_observed_s(sub, slot) < MATURITY_MIN_OBSERVED_S;
+        // Its reference seconds over all gain states: the fold's occupancy pool (unchanged since).
+        let hod_immature = observed[hr] < MATURITY_MIN_OBSERVED_S;
         // Not novel, or (while the hour-of-day pool is immature, which learning requires anyway)
         // below the on level and consistent with the slot's own hour-of-day history.
         let normal = learn_novelty == 0.0
@@ -990,6 +1137,7 @@ impl BaselineEngine {
                     &ncfg,
                     2.0 * policy.cusum_k_sigma,
                     chosen,
+                    own_hour,
                 ));
         // The change-point CUSUM blocks every slot only while it builds towards a first crossing;
         // once latched, the crossing's hour stays off and the sequential tests gate the others.
@@ -1019,8 +1167,16 @@ impl BaselineEngine {
                 s.weight_s += obs.occupied_weight_s;
             });
         }
-        if sub.mature_at.is_none() && maturity(sub, slot).is_mature() {
-            sub.mature_at = Some(obs.t);
+        if sub.mature_at.is_none() {
+            // The fold's reference pools, unless this fold entered the reference.
+            let m = if accrue_ref {
+                maturity(sub, slot)
+            } else {
+                Maturity::from_pools(observed)
+            };
+            if m.is_mature() {
+                sub.mature_at = Some(obs.t);
+            }
         }
         sub.last_seen = sub.last_seen.max(obs.t);
         self.state.last_visit = self.state.last_visit.max(obs.t);
@@ -2856,5 +3012,155 @@ mod tests {
         let on_disk: Vec<_> = store.entries().unwrap().iter().map(|e| e.0.site).collect();
         assert_eq!(on_disk, vec![bsite]);
         let _ = std::fs::remove_dir_all(d2);
+    }
+
+    /// T-137 (AWARE-042): a 365-day half-life over 1-s folds (forgetting factors within 2.2·10⁻⁸
+    /// of 1, where per-slot f32 forgetting stalls, leaving every slot ~2·10⁻⁴ high here) matches an
+    /// f64 model of the adaptive copy.
+    #[test]
+    fn baseline_long_half_life_forgetting_matches_f64_over_1s_folds() {
+        let cfg = BaselineConfig {
+            policy: AdaptationPolicy {
+                half_life_days: 365.0,
+                ..AdaptationPolicy::default()
+            },
+            ..BaselineConfig::default()
+        };
+        let mut e = BaselineEngine::new(BaselineState::new(site_key(), at(0.0)), 0, cfg);
+        let subject = channel(0);
+        let factor = 0.5_f64.powf(1.0 / (365.0 * 86_400.0));
+        assert_eq!((f64::from(119.0_f32) * factor) as f32, 119.0, "f32 stalls");
+        let mut model = [DecayedStats::EMPTY; HourOfWeek::SLOTS];
+        // One fold per hour-of-week slot in turn: ~119 visits per slot, 20 000 s observed (the
+        // subject stays immature, so levels are not winsorised).
+        for k in 0..20_000_u32 {
+            let level = 5.0 + f64::from(k % 13) * 0.05;
+            let obs = IntervalObservation {
+                subject,
+                t: at(f64::from(k)),
+                gain: 0,
+                level_db: Some(level),
+                max_db: None,
+                occupied_weight_s: 0.0,
+                weight_s: 1.0,
+                observed_s: 1.0,
+                n_eff: 1.0,
+                suspect_fraction: 0.0,
+                provenance_explained: false,
+            };
+            let slot = e.slot(obs.t).index();
+            assert!(e.observe(&obs).accrued);
+            for m in &mut model {
+                m.scale(factor);
+            }
+            model[slot].add(level, level, 0.0, 1.0, 1.0);
+        }
+        let g = &e.state.subjects[&subject].gains[0];
+        assert_eq!(g.adaptive.len(), HourOfWeek::SLOTS);
+        let rel = |a: f64, b: f64| if a == b { 0.0 } else { ((a - b) / b).abs() };
+        let mut worst = 0.0_f64;
+        for (i, m) in model.iter().enumerate() {
+            let d = g.adaptive.value(i);
+            for (a, b) in [
+                (d.n, m.n),
+                (d.observed_s, m.observed_s),
+                (d.weight_s, m.weight_s),
+                (d.sum_db / d.n, m.sum_db / m.n),
+            ] {
+                worst = worst.max(rel(a, b));
+            }
+        }
+        println!(
+            "T-137 365-day half-life, 20 000 1-s folds: worst relative error vs f64 {worst:.2e}, \
+             decay multiplier {:.9}",
+            g.adaptive.decay()
+        );
+        assert!(worst < 1e-5, "worst relative error {worst:e}");
+    }
+
+    /// T-137: per-fold CPU at a realistic series size: a mature cell with 168 stored slots in both
+    /// copies under 2 gain states, folded every half hour. Prints µs per fold (best of 5 blocks;
+    /// run with the optimised dev profile or `--release`) and a fingerprint of the outcomes, for a
+    /// quiet cell (folds match the reference) and a changed one (occupancy gone: novel folds, a
+    /// latched change point).
+    #[test]
+    fn baseline_fold_cost_at_168_slots_and_2_gain_states() {
+        fold_cost(true);
+        fold_cost(false);
+    }
+
+    fn fold_cost(quiet: bool) {
+        let subject = BaselineSubject::Cell { index: 1 };
+        let mut sub = SubjectBaseline::new(at(0.0));
+        let occ_of = |i: usize| match (quiet, (8..20).contains(&(i % 24))) {
+            (true, _) => 0.0,
+            (false, true) => 0.3,
+            (false, false) => 0.05,
+        };
+        for gain in [0xA_u32, 0xB] {
+            let mut g = GainSeries::new(gain);
+            for i in 0..HourOfWeek::SLOTS {
+                let occ = occ_of(i);
+                for k in 0..8 {
+                    let l = 2.0 + 0.1 * ((i + k) % 5) as f64;
+                    g.reference.update(i, |s| {
+                        s.add(l, l + 1.0, false, 1800.0 * (1.0 - occ), 1800.0);
+                        s.occupied_weight_s += 1800.0 * occ;
+                        s.weight_s += 1800.0 * occ;
+                    });
+                    g.adaptive
+                        .update(i, |d| d.add(l, l + 1.0, 1800.0 * occ, 1800.0, 1800.0));
+                }
+            }
+            sub.gains.push(g);
+        }
+        let mut state = BaselineState::new(site_key(), at(0.0));
+        state.subjects.insert(subject, sub);
+        let mut e = BaselineEngine::new(state, 0, BaselineConfig::default());
+        let (blocks, per_block) = (5, 2_000_u32);
+        let (mut best, mut novelty, mut learnt) = (f64::INFINITY, 0.0, 0);
+        let mut k = 0_u32;
+        for _ in 0..blocks {
+            let started = std::time::Instant::now();
+            for _ in 0..per_block {
+                let hours = f64::from(k) * 0.5;
+                let i = HourOfWeek::of(at(hours), 0).index();
+                let jitter = f64::from((k * 7) % 11) * 0.02 - 0.1;
+                let occ = if quiet { 0.0 } else { occ_of(i) };
+                let obs = IntervalObservation {
+                    subject,
+                    t: at(hours),
+                    gain: if k % 2 == 0 { 0xA } else { 0xB },
+                    level_db: Some(2.2 + jitter),
+                    max_db: None,
+                    occupied_weight_s: 0.0,
+                    weight_s: 1800.0 * (1.0 - occ),
+                    observed_s: 1800.0,
+                    n_eff: 24.0,
+                    suspect_fraction: 0.0,
+                    provenance_explained: false,
+                };
+                let out = e.observe(&obs);
+                novelty += out.novelty.novelty;
+                learnt += usize::from(out.accrued_reference);
+                k += 1;
+            }
+            best = best.min(started.elapsed().as_secs_f64() / f64::from(per_block));
+        }
+        let sub = &e.state.subjects[&subject];
+        assert_eq!(sub.gains.len(), 2);
+        assert!(sub.gains.iter().all(|g| g.adaptive.len() == 168));
+        let a = sub.gains[0].adaptive.value(30);
+        println!(
+            "T-137 fold cost at 168 slots x 2 gain states (quiet {quiet}): {:.1} µs per fold; novelty sum \
+             {novelty:.6}, reference folds {learnt}, cusum {:?}, seq {:?}, adaptive[30] n {:.9} \
+             mean {:.9} weight {:.6}",
+            best * 1e6,
+            sub.cusum,
+            sub.seq,
+            a.n,
+            a.sum_db / a.n,
+            a.weight_s,
+        );
     }
 }

@@ -62,8 +62,9 @@ use hk_store::occupancy::{
 use hk_store::{FloorProduct, RegionHistory};
 use serde::Serialize;
 
-use crate::attention::{AttentionService, FirstSighting};
+use crate::attention::{AttentionService, EmitterSeen, FirstSighting, ObservedBand};
 use crate::stats::Counters;
+use hk_model::emitter::Emitter;
 
 const HOUR_NS: i64 = 3_600_000_000_000;
 /// Longest span `span_stats` computes.
@@ -503,6 +504,51 @@ fn ts(ns: i64) -> Timestamp {
     Timestamp::from_unix_nanos(ns)
 }
 
+/// T-138: the observed bands of `rows` (with their bin widths) and the close's inventory
+/// `emitters` ([`OccupancyService::inventory_at_close`]) seen in `iv`: first..last seen overlapping
+/// the interval (a carrier still on has `last_seen` past `iv.end` by the time the close runs). An
+/// emitter is suspect when the interval's detections over its extent are all suspect (§2.6); with
+/// none read (inventory lag) it is not. No inventory query.
+fn emitters_seen(
+    iv: TimeRange,
+    rows: &[OccupancyStat],
+    dets: &[DetectionExtent],
+    emitters: &[Emitter],
+) -> (Vec<ObservedBand>, Vec<EmitterSeen>) {
+    let observed = rows
+        .iter()
+        .filter_map(|r| match r.subject {
+            OccupancySubject::Band { freq } => Some(ObservedBand {
+                freq,
+                rbw_hz: r.rbw_hz,
+            }),
+            OccupancySubject::Channel { .. } => None,
+        })
+        .collect();
+    let seen = emitters
+        .iter()
+        .filter(|e| e.first_seen <= iv.end && e.last_seen >= iv.start)
+        .map(|e| {
+            let freq = e.freq();
+            let mut over = dets.iter().filter(|d| {
+                d.freq.lo_hz < freq.hi_hz
+                    && d.freq.hi_hz > freq.lo_hz
+                    && d.time.end >= iv.start
+                    && d.time.start <= iv.end
+            });
+            let first = over.next();
+            EmitterSeen {
+                emitter: e.id,
+                freq,
+                first_seen: e.first_seen,
+                last_seen: e.last_seen,
+                suspect: first.is_some_and(|d| d.suspect) && over.all(|d| d.suspect),
+            }
+        })
+        .collect();
+    (observed, seen)
+}
+
 impl OccupancyService {
     /// Opens the series store under `dir` and restores the saved plan.
     pub fn open(
@@ -788,14 +834,29 @@ impl OccupancyService {
         service.observe_interval_with_new_emitters(folds, site, iv.end, new_emitters, &steps);
     }
 
-    /// Inventory emitters first seen inside `iv` within the observed bands of `rows`, each counted
-    /// once, with their measured extents (T-136: for the new-emitter alarms), lowest first.
-    fn first_sightings(
+    /// T-138 review: the close's one inventory read. Emitters seen (first..last overlapping) in
+    /// the close's look-back window (the previous interval and this one) over the observed bands
+    /// of `rows`: a single query over the bands' hull, filtered to the bands in memory.
+    fn inventory_at_close(
         &self,
         inner: &mut Inner,
         iv: TimeRange,
         rows: &[OccupancyStat],
-    ) -> Vec<FirstSighting> {
+    ) -> Vec<Emitter> {
+        let bands: Vec<FreqRange> = rows
+            .iter()
+            .filter_map(|r| match r.subject {
+                OccupancySubject::Band { freq } => Some(freq),
+                OccupancySubject::Channel { .. } => None,
+            })
+            .collect();
+        let Some(hull) = bands
+            .iter()
+            .copied()
+            .reduce(|a, b| FreqRange::new(a.lo_hz.min(b.lo_hz), a.hi_hz.max(b.hi_hz)))
+        else {
+            return Vec::new();
+        };
         if inner.repo.is_none() {
             inner.repo = Repository::open(&self.db_path).ok();
         }
@@ -803,24 +864,96 @@ impl OccupancyService {
             inner.stats.errors += 1;
             return Vec::new();
         };
+        let window = TimeRange::new(iv.start.saturating_add_nanos(-iv.duration_ns()), iv.end);
+        match repo.emitters_in_region(&Region::new(hull, window)) {
+            Ok(es) => es
+                .into_iter()
+                .filter(|e| {
+                    let f = e.freq();
+                    bands
+                        .iter()
+                        .any(|b| f.lo_hz <= b.hi_hz && f.hi_hz >= b.lo_hz)
+                })
+                .collect(),
+            Err(_) => {
+                inner.stats.errors += 1;
+                Vec::new()
+            }
+        }
+    }
+
+    /// T-138: the new sightings among `sightings` whose extent overlaps another inventory emitter
+    /// first seen before them and last seen within [`PERSIST_HORIZON_S`] of their first sighting
+    /// (a track split or drift re-identified as new). One query over the sightings' hull; the
+    /// close runs it only on a sighting close while the persistent rule is active.
+    fn churned(
+        &self,
+        inner: &mut Inner,
+        iv: TimeRange,
+        sightings: &[FirstSighting],
+        emitters: &[Emitter],
+    ) -> Vec<hk_model::ids::EmitterId> {
+        let Some(hull) = sightings
+            .iter()
+            .map(|s| s.freq)
+            .reduce(|a, b| FreqRange::new(a.lo_hz.min(b.lo_hz), a.hi_hz.max(b.hi_hz)))
+        else {
+            return Vec::new();
+        };
+        let Some(repo) = inner.repo.as_ref() else {
+            return Vec::new();
+        };
+        let horizon_ns = (crate::attention::PERSIST_HORIZON_S * 1e9) as i64;
+        let span = TimeRange::new(iv.start.saturating_add_nanos(-horizon_ns), iv.end);
+        let known = match repo.emitters_in_region(&Region::new(hull, span)) {
+            Ok(k) => k,
+            Err(_) => {
+                inner.stats.errors += 1;
+                return Vec::new();
+            }
+        };
+        sightings
+            .iter()
+            .filter(|s| {
+                let Some(first) = emitters
+                    .iter()
+                    .find(|e| e.id == s.emitter)
+                    .map(|e| e.first_seen)
+                else {
+                    return false;
+                };
+                let since = first.saturating_add_nanos(-horizon_ns);
+                known.iter().any(|k| {
+                    let f = k.freq();
+                    k.id != s.emitter
+                        && k.first_seen < first
+                        && k.last_seen >= since
+                        && f.lo_hz < s.freq.hi_hz
+                        && f.hi_hz > s.freq.lo_hz
+                })
+            })
+            .map(|s| s.emitter)
+            .collect()
+    }
+
+    /// Inventory emitters first seen inside `iv` (or the previous interval, see below) among the
+    /// close's `emitters` ([`Self::inventory_at_close`]), each counted once, with their measured
+    /// extents (T-136: for the new-emitter alarms), lowest first.
+    fn first_sightings(
+        &self,
+        inner: &mut Inner,
+        iv: TimeRange,
+        emitters: &[Emitter],
+    ) -> Vec<FirstSighting> {
         // The window reaches back one interval: an emitter first seen in the previous interval
         // but written to the inventory after its close counts here, once (the previous window's
         // ids are remembered).
         let window = TimeRange::new(iv.start.saturating_add_nanos(-iv.duration_ns()), iv.end);
-        let mut seen = std::collections::HashMap::new();
-        for r in rows {
-            let OccupancySubject::Band { freq } = r.subject else {
-                continue;
-            };
-            match repo.emitters_in_region(&Region::new(freq, window)) {
-                Ok(es) => seen.extend(
-                    es.iter()
-                        .filter(|e| e.first_seen >= window.start && e.first_seen < window.end)
-                        .map(|e| (e.id, e.freq())),
-                ),
-                Err(_) => inner.stats.errors += 1,
-            }
-        }
+        let seen: std::collections::HashMap<_, _> = emitters
+            .iter()
+            .filter(|e| e.first_seen >= window.start && e.first_seen < window.end)
+            .map(|e| (e.id, e.freq()))
+            .collect();
         let mut new: Vec<FirstSighting> = seen
             .iter()
             .filter(|(id, _)| !inner.sighted.contains(*id))
@@ -991,8 +1124,20 @@ impl OccupancyService {
             let (site, geo) = stamp_site(&a, &mut rows, iv.end);
             let own: Vec<OccupancyStat> =
                 rows.iter().filter(|r| r.interval == iv).cloned().collect();
-            let sightings = self.first_sightings(inner, iv, &own);
+            // T-138: one inventory read serves the first sightings and what the interval saw.
+            let emitters = self.inventory_at_close(inner, iv, &own);
+            let sightings = self.first_sightings(inner, iv, &emitters);
             a.note_first_sightings(site, &sightings);
+            if a.has_pending_sightings(site) {
+                // The churn look-back runs only on a sighting close while the rule can score.
+                let churned = if sightings.is_empty() || !a.persistent_rule_active(site) {
+                    Vec::new()
+                } else {
+                    self.churned(inner, iv, &sightings, &emitters)
+                };
+                let (observed, seen) = emitters_seen(iv, &own, &dets, &emitters);
+                a.note_emitters_seen(site, iv, &observed, &seen, &churned);
+            }
             let gains = channel_gain_keys(&inner.series, iv);
             let folds = a.ingest_interval(&own, sightings.len() as u64, iv.end, gains);
             let new_emitters = a.new_emitter_inputs(site, iv.end);
@@ -1200,6 +1345,111 @@ mod tests {
         // The next close past the hold is what expires it.
         assert_eq!(stamp_site(&a, &mut rows, t(900.0)).0, SiteKey::Unassigned);
         assert_eq!(a.current_site_json()["site"]["kind"], "unassigned");
+    }
+
+    /// T-138 review: a close's inventory read (one query) against a real repository whose
+    /// inventory was updated past the interval's end. The carrier still on is a first sighting
+    /// and seen (overlap, not `last_seen <= iv.end`); an emitter whose detections are all suspect
+    /// is suspect; one last seen before the look-back is neither; the carrier's new id over the
+    /// same channel's emitter seen yesterday is churn.
+    #[test]
+    fn occupancy_close_inventory_seen_overlap_and_churn() {
+        use hk_model::emitter::EmitterObservation;
+        use hk_model::ids::EmitterId;
+        let dir = std::env::temp_dir().join(format!("hk-t138-occ-{}", EmitterId::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("hk.db");
+        let product = hk_store::FloorProduct::open(
+            dir.join("history"),
+            hk_store::FloorProductConfig::default(),
+            hk_dsp::radiometry::PowerCalibrations::from_states(&[], None),
+        )
+        .unwrap();
+        let svc = OccupancyService::open(
+            dir.join("occupancy"),
+            Arc::new(Mutex::new(product)),
+            db.clone(),
+            Arc::new(Counters::default()),
+            OccupancyConfig::default(),
+        );
+        let band = FreqRange::new(431e6, 433e6);
+        let site = SiteKey::Site(hk_model::ids::SiteId::new());
+        let rows = vec![crate::attention::tests::series_row(
+            1,
+            site,
+            OccupancySubject::Band { freq: band },
+            0.1,
+        )];
+        let iv = rows[0].interval;
+        let at = |s: i64| iv.start.saturating_add_nanos(s * 1_000_000_000);
+        let (old, carrier, spur, gone) = (
+            EmitterId::new(),
+            EmitterId::new(),
+            EmitterId::new(),
+            EmitterId::new(),
+        );
+        {
+            let mut repo = Repository::open(&db).unwrap();
+            let mut observe = |id, from: i64, to: i64, f: f64| {
+                repo.upsert_emitter_observation(&EmitterObservation {
+                    emitter_id: id,
+                    seen: TimeRange::new(at(from), at(to)),
+                    count: 1,
+                    f_center_hz: f,
+                    bandwidth_hz: 10e3,
+                    identity: None,
+                })
+                .unwrap();
+            };
+            observe(old, -3 * 86_400, -86_400, 432.00625e6);
+            observe(carrier, 600, 800, 432.00625e6);
+            // Still on: the inventory is updated past the interval end (900 s) before the close.
+            observe(carrier, 800, 960, 432.00625e6);
+            observe(spur, 100, 200, 431.5e6);
+            observe(gone, -2000, -1900, 431.7e6);
+        }
+        let det = |from: i64, to: i64, f: f64, suspect| DetectionExtent {
+            time: TimeRange::new(at(from), at(to)),
+            freq: FreqRange::centered(f, 10e3),
+            obw_hz: 10e3,
+            snr_db: 20.0,
+            suspect,
+        };
+        let dets = vec![
+            det(600, 960, 432.00625e6, false),
+            det(100, 200, 431.5e6, true),
+        ];
+        let mut inner = svc.lock();
+        let emitters = svc.inventory_at_close(&mut inner, iv, &rows);
+        let sightings = svc.first_sightings(&mut inner, iv, &emitters);
+        assert_eq!(sightings.len(), 2, "{sightings:?}");
+        assert!(
+            sightings
+                .iter()
+                .all(|s| s.emitter == carrier || s.emitter == spur)
+        );
+        let (observed, seen) = emitters_seen(iv, &rows, &dets, &emitters);
+        assert_eq!(
+            observed,
+            vec![ObservedBand {
+                freq: band,
+                rbw_hz: 6250.0
+            }]
+        );
+        let c = seen
+            .iter()
+            .find(|e| e.emitter == carrier)
+            .expect("the carrier updated past the interval end is seen");
+        assert!(c.last_seen > iv.end && !c.suspect, "{c:?}");
+        assert!(seen.iter().find(|e| e.emitter == spur).unwrap().suspect);
+        assert!(!seen.iter().any(|e| e.emitter == old || e.emitter == gone));
+        assert_eq!(
+            svc.churned(&mut inner, iv, &sightings, &emitters),
+            vec![carrier],
+            "a new id over the channel's emitter seen yesterday"
+        );
+        drop(inner);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -37,8 +37,8 @@ use hk_context::occupancy::baseline::{
     from_occupancy_stat, in_pool, maturity, pools,
 };
 use hk_context::occupancy::baseline::{REFERENCE_LEARN_MAX_NOVELTY, res_index};
-use hk_context::occupancy::novelty::FirstSightingRate;
 use hk_context::occupancy::novelty::NoveltyConfig;
+use hk_context::occupancy::novelty::{FirstSightingRate, persistent_single_novelty};
 use hk_context::occupancy::score::{CandidateInput, Scorer};
 use hk_context::occupancy::site::{Fix, SiteAssigner};
 use hk_model::Repository;
@@ -326,6 +326,73 @@ struct SiteSightings {
     recent: VecDeque<FirstSighting>,
     /// End of the last close that built new-emitter inputs: sightings after it are fresh.
     last_inputs_end: Option<Timestamp>,
+    /// T-138: first sightings waiting for (or holding) the persistent single-emitter rule, by
+    /// emitter; bounded by [`PERSIST_HORIZON_S`] and [`PERSIST_MAX_PENDING`].
+    pending: BTreeMap<EmitterId, PendingEmitter>,
+    /// T-138: what the latest close observed (`note_emitters_seen`).
+    seen: Option<SeenAtClose>,
+}
+
+/// T-138: what one close observed, for the persistent single-emitter rule.
+struct SeenAtClose {
+    iv: TimeRange,
+    observed: Vec<ObservedBand>,
+    seen: Vec<EmitterSeen>,
+    churned: Vec<EmitterId>,
+}
+
+/// T-138: how long after its first sighting a new emitter can still be confirmed (a later visit);
+/// also the churn look-back (another emitter over its extent seen this recently).
+pub const PERSIST_HORIZON_S: f64 = 7.0 * 86_400.0;
+/// T-138: pending first sightings kept per site (oldest dropped first).
+pub const PERSIST_MAX_PENDING: usize = 512;
+/// T-138: an observed band "covers" a pending emitter (so its absence feeds 0) only when the
+/// band's bin width is at most this multiple of the emitter's bandwidth: a coarse sweep that
+/// cannot resolve it neither confirms nor resets.
+pub const PERSIST_COVER_MAX_RBW_RATIO: f64 = 1.0;
+
+/// T-138: one band a close observed, with the bin width it was measured at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ObservedBand {
+    /// Extent.
+    pub freq: FreqRange,
+    /// Resolution bandwidth of its occupancy row, Hz.
+    pub rbw_hz: f64,
+}
+
+/// T-138: one first sighting tracked by the persistent single-emitter rule.
+#[derive(Clone, Copy, Debug)]
+struct PendingEmitter {
+    /// Extent at first sighting (the alarm subject, stable across closes).
+    freq: FreqRange,
+    /// Close that counted the first sighting.
+    sighted: Timestamp,
+    /// Seen suspect (spur, IMD, image, clipped/compressed…): never scored by the rule.
+    disqualified: bool,
+    /// Fed a rule score at least once (so observed closes without it feed 0 to reset or clear).
+    armed: bool,
+    /// Consecutive zero inputs fed since last scored.
+    zeros: u32,
+    /// Consecutive closes scored at or above `on` (mirrors the engine's raise streak).
+    streak: u32,
+    /// One-shot: the streak reached the raise count, so the rule never scores it again.
+    spent: bool,
+}
+
+/// T-138: an inventory emitter seen in a closed interval, for the persistent single-emitter rule.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmitterSeen {
+    /// The emitter.
+    pub emitter: EmitterId,
+    /// Its current extent.
+    pub freq: FreqRange,
+    /// Inventory first sighting.
+    pub first_seen: Timestamp,
+    /// Inventory latest sighting (may already be past the interval's end when the close runs).
+    pub last_seen: Timestamp,
+    /// Its detections in the interval are all suspect (§2.6: spur, IMD, image, clipped,
+    /// compressed…), so the sighting cannot confirm anything.
+    pub suspect: bool,
 }
 
 /// T-136: one new-emitter alarm input and whether its sighting is new at this close (counted
@@ -984,12 +1051,85 @@ impl AttentionService {
         if sightings.is_empty() {
             return;
         }
+        let mut c = lock(&self.cands);
+        let st = c.sightings.entry(site).or_default();
+        st.recent.extend(sightings.iter().copied());
+        // T-138: only a discrete site can hold the persistent single-emitter rule (§7.3: mobile and
+        // unassigned sites never alarm).
+        if matches!(site, SiteKey::Site(_)) {
+            for s in sightings {
+                st.pending.entry(s.emitter).or_insert(PendingEmitter {
+                    freq: s.freq,
+                    sighted: s.t,
+                    disqualified: false,
+                    armed: false,
+                    zeros: 0,
+                    streak: 0,
+                    spent: false,
+                });
+            }
+            while st.pending.len() > PERSIST_MAX_PENDING {
+                // The oldest unarmed sighting first (an armed one may still have to clear).
+                let Some(id) = st
+                    .pending
+                    .iter()
+                    .min_by_key(|(_, p)| (p.armed, p.sighted))
+                    .map(|(id, _)| *id)
+                else {
+                    break;
+                };
+                st.pending.remove(&id);
+            }
+        }
+    }
+
+    /// T-138: whether `site` holds first sightings the persistent single-emitter rule still tracks
+    /// (the close then reports [`Self::note_emitters_seen`]).
+    pub fn has_pending_sightings(&self, site: SiteKey) -> bool {
         lock(&self.cands)
             .sightings
-            .entry(site)
-            .or_default()
-            .recent
-            .extend(sightings.iter().copied());
+            .get(&site)
+            .is_some_and(|s| !s.pending.is_empty())
+    }
+
+    /// T-138: whether the persistent single-emitter rule can score at `site` now (a discrete site
+    /// whose mature rate puts the rule score at or above the alarm off level). The close runs its
+    /// churn look-back only then.
+    pub fn persistent_rule_active(&self, site: SiteKey) -> bool {
+        matches!(site, SiteKey::Site(_))
+            && lock(&self.cands)
+                .sightings
+                .get(&site)
+                .and_then(|s| s.rate.rate())
+                .is_some_and(|r| {
+                    persistent_single_novelty(r) >= AlarmConfig::default().hysteresis.off
+                })
+    }
+
+    /// T-138: what the close of `iv` under `site` observed, for the persistent single-emitter rule
+    /// in [`Self::new_emitter_inputs`] at the same close: the observed bands (with their bin
+    /// widths), the inventory emitters seen in the interval (with their suspect state) and the
+    /// first sightings that are churn (their extent overlaps another emitter seen within
+    /// [`PERSIST_HORIZON_S`]: a track split or drift, never scored).
+    pub fn note_emitters_seen(
+        &self,
+        site: SiteKey,
+        iv: TimeRange,
+        observed: &[ObservedBand],
+        seen: &[EmitterSeen],
+        churned: &[EmitterId],
+    ) {
+        let mut c = lock(&self.cands);
+        if let Some(st) = c.sightings.get_mut(&site)
+            && !st.pending.is_empty()
+        {
+            st.seen = Some(SeenAtClose {
+                iv,
+                observed: observed.to_vec(),
+                seen: seen.to_vec(),
+                churned: churned.to_vec(),
+            });
+        }
     }
 
     /// T-136 (ADR-0012 §7.1): the new-emitter alarm inputs at a close ending `t_end` under `site`,
@@ -1005,6 +1145,18 @@ impl AttentionService {
     /// `fresh` marks sightings from the interval this close ends (counted once); while the rate is
     /// immature only fresh inputs are returned: counted as `immature-baseline` suppressions,
     /// never raised (§7.3).
+    ///
+    /// T-138 (§7.1 rule "single persistent new emitter"): on a discrete site with a mature rate,
+    /// a first sighting tracked for [`PERSIST_HORIZON_S`] scores [`persistent_single_novelty`] at
+    /// closes that saw it clean ([`Self::note_emitters_seen`]: its sighting close, or a later close
+    /// once the inventory has seen it at least one full interval after its first sighting), and 0
+    /// at a close whose band resolves it ([`PERSIST_COVER_MAX_RBW_RATIO`]) without it once scored.
+    /// The usual 2-interval hysteresis then raises only when it was seen in two consecutive closes
+    /// of the site (the same visit, or the next visit's first close), so a one-off transient or
+    /// one transmission shorter than an interval never raises, and a busy site (P(≥1 | μ) > α)
+    /// never reaches the on level. One-shot: once its streak reaches the raise count it is never
+    /// scored again (zeros clear the alarm). Suspect and churn sightings are never scored. The
+    /// emitter's input takes the larger of the two scores.
     pub fn new_emitter_inputs(&self, site: SiteKey, t_end: Timestamp) -> Vec<NewEmitterInput> {
         let offset = lock(&self.sites).utc_offset_min(site);
         let mut c = lock(&self.cands);
@@ -1016,7 +1168,8 @@ impl AttentionService {
         let since = st.last_inputs_end.replace(t_end).map(|t| t.as_unix_nanos());
         st.recent
             .retain(|s| s.t.as_unix_nanos() > end.saturating_sub(2 * window_ns));
-        if st.recent.is_empty() {
+        let seen = st.seen.take().filter(|s| s.iv.end == t_end);
+        if st.recent.is_empty() && st.pending.is_empty() {
             return Vec::new();
         }
         let rate = st.rate.rate();
@@ -1045,6 +1198,8 @@ impl AttentionService {
         let cfg = AlarmConfig::default();
         let gap = cfg.merge_gap_cells * cfg.cell_factor;
         let mut out = Vec::new();
+        // T-138: the input index of each emitter fed by the group rule.
+        let mut by_emitter: HashMap<EmitterId, usize> = HashMap::new();
         let mut i = 0;
         while i < cells.len() {
             let (mut j, mut group_hi) = (i + 1, cells[i].1);
@@ -1080,10 +1235,110 @@ impl AttentionService {
                     lo_cell: lo,
                     hi_cell: hi,
                 };
+                by_emitter.insert(s.emitter, out.len());
                 out.push(NewEmitterInput { input, fresh });
             }
             i = j;
         }
+        // T-138: the persistent single-emitter rule.
+        let (interval_ns, observed, seen, churned) = seen
+            .map_or((i64::MAX, Vec::new(), Vec::new(), Vec::new()), |s| {
+                (s.iv.duration_ns().max(1), s.observed, s.seen, s.churned)
+            });
+        let score = rate
+            .filter(|_| matches!(site, SiteKey::Site(_)))
+            .map(persistent_single_novelty);
+        let mu = rate.map_or(0.0, |r| r * FirstSightingRate::WINDOW_S);
+        let horizon_ns = (PERSIST_HORIZON_S * 1e9) as i64;
+        let hcfg = cfg.hysteresis;
+        let clear_after = hcfg.off_intervals;
+        st.pending.retain(|id, p| {
+            let expired = end.saturating_sub(p.sighted.as_unix_nanos()) > horizon_ns;
+            let here = seen.iter().find(|e| e.emitter == *id);
+            if here.is_some_and(|e| e.suspect) || churned.contains(id) {
+                p.disqualified = true;
+            }
+            // Its sighting close, or a later close once the inventory saw it a full interval after
+            // its first sighting: one transmission shorter than an interval that straddles a
+            // boundary shows at two closes but never confirms at the second.
+            let confirms = here.is_some_and(|e| {
+                !e.suspect
+                    && (p.sighted == t_end
+                        || e.last_seen
+                            .as_unix_nanos()
+                            .saturating_sub(e.first_seen.as_unix_nanos())
+                            >= interval_ns)
+            });
+            let width = p.freq.hi_hz - p.freq.lo_hz;
+            let covered = here.is_some()
+                || observed.iter().any(|b| {
+                    b.freq.lo_hz < p.freq.hi_hz
+                        && b.freq.hi_hz > p.freq.lo_hz
+                        && b.rbw_hz <= PERSIST_COVER_MAX_RBW_RATIO * width
+                });
+            let value = match score {
+                // A score below `off` is cold: it could neither raise nor hold, so it arms nothing
+                // (a busy site's sightings feed no zero inputs later).
+                Some(n) if confirms && !p.disqualified && !p.spent && !expired && n >= hcfg.off => {
+                    p.armed = true;
+                    p.zeros = 0;
+                    if n >= hcfg.on {
+                        p.streak += 1;
+                        p.spent = p.streak >= hcfg.on_intervals;
+                    } else {
+                        p.streak = 0;
+                    }
+                    Some(n)
+                }
+                _ if p.armed && covered && p.zeros < clear_after => {
+                    p.zeros = p.zeros.saturating_add(1);
+                    p.streak = 0;
+                    Some(0.0)
+                }
+                _ => {
+                    // The group rule's own (sub-on) input steps the key: the engine's streak resets.
+                    if by_emitter.contains_key(id) {
+                        p.streak = 0;
+                    }
+                    None
+                }
+            };
+            if let Some(v) = value {
+                match by_emitter.get(id) {
+                    Some(&i) => {
+                        let input = &mut out[i].input;
+                        input.novelty = input.novelty.max(v);
+                    }
+                    None => {
+                        let lo = (p.freq.lo_hz / SCHEME_1_CELL_HZ).floor() as i64;
+                        let hi = ((p.freq.hi_hz / SCHEME_1_CELL_HZ).ceil() as i64).max(lo + 1);
+                        let mut input = new_emitter_input(
+                            *id,
+                            p.freq,
+                            CalKey::Uncalibrated,
+                            slot,
+                            maturity,
+                            1,
+                            mu,
+                            v,
+                            FirstSightingRate::WINDOW_S,
+                        );
+                        input.subject = AlarmSubject::Cells {
+                            scheme: 1,
+                            lo_cell: lo,
+                            hi_cell: hi,
+                        };
+                        out.push(NewEmitterInput {
+                            input,
+                            fresh: false,
+                        });
+                    }
+                }
+            }
+            // Kept while it can still confirm, and an armed one until it has fed enough zeros to
+            // clear an open alarm.
+            (!expired && !p.disqualified && !p.spent) || (p.armed && p.zeros < clear_after)
+        });
         out
     }
 

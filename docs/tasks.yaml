@@ -2162,7 +2162,8 @@ tasks:
   - id: T-137
     milestone: M2
     title: "Baseline fold CPU + decay precision: compute Reference pools once per fold, lazy f64 decay multiplier per series, field accessors, stronger golden re-encode check"
-    status: in-progress
+    status: done
+    commit: c1dd979
     deps: [T-135]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2176,7 +2177,8 @@ tasks:
   - id: T-138
     milestone: M2
     title: "Single new emitter on a quiet mature site: ADR-0012 §7 rule so one genuinely new emitter can alarm (today novelty -log10(p)/6 with the prior needs ~1.8 years of observation)"
-    status: in-progress
+    status: done
+    commit: 1e230cc
     deps: [T-136]
     parallel_group: M2A
     use_cases: [AWARE-044, AWARE-027]
@@ -2190,7 +2192,7 @@ tasks:
   - id: T-139
     milestone: M2
     title: "Occupancy/history under the scheduler: short sweep hops and bandit dwells currently yield 0 history frames (partial rows discarded on every retune), so no occupancy rows, baselines or alarms while the scheduler runs"
-    status: in-progress
+    status: review
     deps: [T-136]
     parallel_group: M2A
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2201,6 +2203,21 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+  - id: T-140
+    milestone: M2
+    title: "Baseline hardening nits: SlotSeries packed()/packed_at() not public without the decay multiplier, assert the fold-equivalence fingerprint (reference-fold count exact, novelty sum 1e-9), debug_assert finite decay factor, share pool membership helper"
+    status: todo
+    deps: [T-137]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-137 review 2026-09-15 (MERGE): hk-store baseline/mod.rs:482-491 public packed moments skip the lazy multiplier; baseline.rs:3082-3166 equivalence only printed; mod.rs:533-547 NaN factor; baseline.rs:622-684 duplicated skip/membership"
+    acceptance: "packed accessors pub(crate) or multiplier-applying; fingerprint asserted for quiet and changed cells; debug_assert on factor; one membership helper; baseline tests green"
+    area: crates/hk-context/src/occupancy/baseline.rs, crates/hk-store/src/baseline
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
