@@ -551,6 +551,72 @@ fn a_gain_increase_clips_at_8_bits_with_overload_provenance() {
     assert!(!h.provenance.overload, "a new gain state starts clean");
 }
 
+/// T-180: served far below the recording's gain, the mock carries the receiver's own noise
+/// (`device_noise_codes2`) instead of rounding the scaled recording to mostly zero codes, and is
+/// not quantisation-limited; the noise is deterministic for a seed.
+#[test]
+fn a_window_served_below_the_recording_gain_carries_receiver_noise() {
+    let dir = Scratch::new("receiver-noise");
+    let meta = Synth {
+        tones: Vec::new(),
+        ..Synth::new(Datatype::Ci8)
+    }
+    .write(&dir.0, "floor");
+    let serve = || {
+        let driver = MockSdrDriver::new(&meta, opts(8192)).unwrap();
+        let mut src = driver.open_mock(&driver.default_request()).unwrap();
+        let control = src.control();
+        // LNA 16 / VGA 20 → LNA 0 / VGA 0: 36 dB under the recording.
+        control
+            .set_gains(&hk_core::Gains {
+                lna_db: 0.0,
+                vga_db: 0.0,
+                amp_on: false,
+            })
+            .unwrap();
+        let mut buf = Vec::new();
+        let h = read_until(&mut src, &mut buf, |h| {
+            h.discontinuity.contains(Discontinuity::GAIN_CHANGE)
+        });
+        let mut all = buf.clone();
+        for _ in 0..8 {
+            src.read_block_ci8(&mut buf).unwrap().unwrap();
+            all.extend_from_slice(&buf);
+        }
+        (h, all)
+    };
+    let (h, iq) = serve();
+    assert!(
+        !h.provenance.quantisation_limited,
+        "receiver noise is a measurable floor"
+    );
+    let n = 2 * iq.len();
+    let codes2 = iq
+        .iter()
+        .map(|s| f64::from(s.re).powi(2) + f64::from(s.im).powi(2))
+        .sum::<f64>()
+        / n as f64;
+    // Recording 0.001 full scale² per component, scaled by −36 dB (≈ 0.004 code²), plus receiver
+    // noise at VGA 0 less the recording's VGA 20 share (≈ 0.25 code²), plus rounding (1/12).
+    let g2 = 10f64.powf(-3.6);
+    let expected = 0.001 * 128.0 * 128.0 * g2 + hk_core::source::mock::device_noise_codes2(0.0)
+        - hk_core::source::mock::device_noise_codes2(20.0) * g2
+        + 1.0 / 12.0;
+    assert!(
+        (codes2 / expected - 1.0).abs() < 0.2,
+        "{codes2:.3} code² per component, expected {expected:.3}"
+    );
+    let zeros = iq
+        .iter()
+        .map(|s| u64::from(s.re == 0) + u64::from(s.im == 0))
+        .sum::<u64>();
+    assert!(
+        (zeros as f64) < 0.75 * n as f64,
+        "{zeros} of {n} components are zero codes"
+    );
+    assert_eq!(serve().1, iq, "the receiver noise is seeded");
+}
+
 /// T-130: a recording without `hackriff:provenance` (unknown capture gains) is not boosted by the
 /// working gain: at the scheduler's default (LNA 24 / VGA 20) nothing clips; +12 dB saturates.
 #[test]
