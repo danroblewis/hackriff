@@ -902,3 +902,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - §11: T-117 truth field names corrected.
 
   Reviewer view on the 5 open questions: Q1/Q2/Q3/Q5 are safe defaults; Q4 (walk-survey alarms, 250 m radius) is worth asking the user, with alarms suppressed while moving as the safe default. tasks.yaml T-121/T-122 areas were aligned to the ADR §11 ownership map. Deferred nit: `SharedInterestingness::publish` validates under the lock. Merge order per ADR: T-115 → T-118 → T-119 → T-122; T-115 before T-120 touches control.rs. **Disk at 20 GB floor**; worktrees are being cleaned before the next launches.
+- **B0.287 Launched T-115** (observation log) **and T-120** (bandit scheduler; scheduler and sim work first, control.rs wiring after T-115 per the ADR merge order). Main build dir removed to free disk (21 → ~35 GB). Full check of main after T-113 running. Running: T-115, T-120, T-125, T-126.

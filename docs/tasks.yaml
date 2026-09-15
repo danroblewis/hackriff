@@ -1846,7 +1846,7 @@ tasks:
   - id: T-115
     milestone: M2
     title: "Observation/revisit log: record where and when the radio actually observed (C04->C12 input)"
-    status: todo
+    status: in-progress
     deps: [T-113]
     parallel_group: M2O
     use_cases: [AWARE-042, AWARE-027]
@@ -1911,7 +1911,7 @@ tasks:
   - id: T-120
     milestone: M2
     title: "Bandit revisit scheduler (C04 full): UCB on C12 interestingness, exploration floor, preemption, POI accounting"
-    status: todo
+    status: in-progress
     deps: [T-113, T-114]
     parallel_group: M2Q
     use_cases: [AWARE-027, SIGNAL-027, SIGNAL-028, AWARE-057]
