@@ -2249,3 +2249,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.474 T-194 merged (d02117a).** UI checks green: typecheck clean, 20/20 test files, build ok; `just lint` clean.
   - **Worktree** removed.
   - **T-193 still waits on T-191,** which is queued behind the 4 Rust slots (T-185, T-178, T-190, T-209).
+- **B0.475 T-192 committed (37d8d5b); merge to main blocked by a conflict.** T-192 (right-click context menu, focus panel freed, Analyze → /api/analyze with a not-implemented notice) collides with T-194 in live-spectrum.ts.
+  - **Evidence so far:** 21/21 UI test files; 23.7 KB gz; smoke passed.
+  - **Next:** merge aborted on main. A Sonnet agent is merging main into the T-192 worktree, keeping SelectionStore-based multi-band select plus the contextmenu hook, with a browser smoke.
