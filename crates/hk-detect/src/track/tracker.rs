@@ -328,10 +328,12 @@ struct HopMember {
 }
 
 impl HopMember {
-    /// Counts towards a hop set: enough links, on enough of its bursts.
+    /// Counts towards a hop set: enough links, on enough of its bursts, clearly above the floor
+    /// (T-084: `min_channel_snr_db`).
     fn qualifies(&self, h: &super::config::HopConfig) -> bool {
         self.links >= h.min_links_per_channel
             && f64::from(self.links) >= h.min_link_fraction * self.bursts as f64
+            && self.snr_db >= h.min_channel_snr_db
     }
 }
 

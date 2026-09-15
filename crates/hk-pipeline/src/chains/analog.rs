@@ -252,13 +252,15 @@ pub(crate) fn run(
                 }
                 if crate::debug_enabled() {
                     eprintln!(
-                        "hk-pipeline: analog probe {:.4} MHz (channel {:.4}): mode {} ({:.2}), pilot {:?} → {}",
+                        "hk-pipeline: analog probe {:.4} MHz (channel {:.4}): mode {} ({:.2}), pilot {:?} → {} (OBW99 {:?} Hz, {:?})",
                         s.rf_center_hz / 1e6,
                         channel_center / 1e6,
                         mode_name(&s),
                         s.mode.confidence,
                         s.mode.features.pilot.as_ref().map(|p| p.found),
-                        if accepted { "continue" } else { "stop" }
+                        if accepted { "continue" } else { "stop" },
+                        s.mode.features.obw99_hz,
+                        s.mode.reason
                     );
                 }
                 if accepted {

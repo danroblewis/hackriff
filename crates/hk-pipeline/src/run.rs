@@ -1387,7 +1387,11 @@ pub struct RunSummary {
     pub resolution: ResolutionSummary,
     /// Detection rows in the database.
     pub detections_stored: u64,
-    /// Live emitters in the inventory (`query_inventory`).
+    /// Live emitters in the inventory (`query_inventory`, default states candidate + confirmed)
+    /// **after the run stopped**: every open track closed at stop and entered the inventory then.
+    /// During a live run `/api/inventory` holds only closed tracks, formed hop sets and chain
+    /// (demod/decoder) entries, so a station tracked continuously appears mid-run only through
+    /// its chain entry (T-084: a live run's inventory listed 1 row while this counted 6).
     pub emitters: u64,
     /// Samples the always-on readers lost to ring overruns.
     pub always_on_lost_samples: u64,
@@ -1511,7 +1515,7 @@ impl RunSummary {
             c("/chains/fsk_boxes_missed")
         ));
         line(format!(
-            "emitters:    {} in inventory, {} labels; recordings {}",
+            "emitters:    {} in inventory at stop (open tracks closed), {} labels; recordings {}",
             self.emitters,
             c("/chains/labels"),
             c("/chains/recordings")

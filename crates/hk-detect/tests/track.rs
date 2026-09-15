@@ -497,6 +497,19 @@ fn run_packets_with(
     duration_s: f64,
     seed: u64,
 ) -> (Tracker, Out) {
+    run_packets_at(cfg, 15.0, fc, chans, packets, duration_s, seed)
+}
+
+/// [`run_packets_with`] with the packets `snr_db` above the floor.
+fn run_packets_at(
+    cfg: TrackerConfig,
+    snr_db: f64,
+    fc: f64,
+    chans: &[f64],
+    packets: &[(f64, f64, usize)],
+    duration_s: f64,
+    seed: u64,
+) -> (Tracker, Out) {
     let mut s = Scene::new(
         DetectorConfig::new(SurveyId::new()),
         GammaFrames::new(BINS, N_AVG, provenance(fc, FS, 24.0), seed),
@@ -513,7 +526,7 @@ fn run_packets_with(
         let mut p = flat(BINS);
         for &(t0, len, c) in packets {
             if t >= t0 && t < t0 + len {
-                add_line(&mut p, bins[c], 10, 15.0);
+                add_line(&mut p, bins[c], 10, snr_db);
             }
         }
         step(&mut s, &mut tr, &mut out, &p, Discontinuity::NONE);
@@ -570,6 +583,63 @@ fn bursty_hopper_packets_separated_by_silence_form_one_hop_set() {
     let rate = h.hop_rate_hz.unwrap();
     assert!((rate * mean_gap - 1.0).abs() <= 0.2, "hop rate {rate}");
     assert!(tr.stats().bursty_hop_links >= 10);
+}
+
+/// T-084 (live HackRF, FM band): near-threshold flicker inside weak FM channels (narrow bursts at
+/// 4–7 dB mean SNR, at random times) was chance-linked into a bursty "hop set" whose channel span
+/// (1.1 MHz) became one wide inventory row over the stations. The same bursty scene at a
+/// near-threshold level forms a hop set only when the channel-SNR gate is off; with the default
+/// gate the channels stay channel tracks. (The 15 dB hopper above still forms one.)
+#[test]
+fn near_threshold_bursty_flicker_does_not_form_a_hop_set() {
+    let fc = 915e6;
+    let (chans, packets) = bursty_packets();
+    let formed = |out: &Out| {
+        out.events
+            .iter()
+            .filter(|e| matches!(e, TrackEvent::HopSetFormed(_)))
+            .count()
+    };
+    let snr_db = 6.0;
+    let mut ungated = TrackerConfig::default();
+    ungated.hop.min_channel_snr_db = f64::NEG_INFINITY;
+    let (tr_old, before) = run_packets_at(ungated, snr_db, fc, &chans, &packets, 8.0, 13);
+    let (tr, after) = run_packets_at(
+        TrackerConfig::default(),
+        snr_db,
+        fc,
+        &chans,
+        &packets,
+        8.0,
+        13,
+    );
+    let snr: Vec<f64> = after
+        .records
+        .iter()
+        .map(|r| r.detection.snr_mean_db)
+        .collect();
+    let mean_snr = snr.iter().sum::<f64>() / snr.len().max(1) as f64;
+    eprintln!(
+        "flicker @ {snr_db} dB: {} records (mean snr_mean {mean_snr:.1} dB); ungated {} hop sets \
+         (stats {:?}); gated {} (stats {:?})",
+        after.records.len(),
+        formed(&before),
+        tr_old.stats(),
+        formed(&after),
+        tr.stats()
+    );
+    assert!(
+        !after.records.is_empty() && mean_snr < TrackerConfig::default().hop.min_channel_snr_db,
+        "the scene is near threshold: {} records at mean snr_mean {mean_snr:.1} dB",
+        after.records.len()
+    );
+    assert!(
+        formed(&before) >= 1,
+        "without the gate the near-threshold bursts link into a hop set (the T-084 failure)"
+    );
+    assert_eq!(formed(&after), 0, "no hop set from near-threshold channels");
+    assert!(after.hop_sets_closed().is_empty());
+    assert!(after.closed().iter().all(|t| t.hop_set.is_none()));
 }
 
 // ---- T-064: hop-set scaling (bounded membership, raster refit on channel-set change) ----
