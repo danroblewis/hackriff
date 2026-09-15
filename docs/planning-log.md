@@ -1108,3 +1108,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Checked OK:** cooldown/reopen across resume; anomaly_detail uses UPDATE and never INSERT OR REPLACE; migration 0003 numbering; no UI consumers of the old anomalies stub; audited dismiss/reopen.
   - **Fix round running:** gain step explains only broad matching shifts within a fixed tolerance, never with no delta; dismissed keys absorb only groups inside their extent; key eviction.
   - **Merge order:** T-129 → T-122 → T-128 (rebase; trivial ApiState hunk). T-128 then wires `observe_fold` with gain deltas.
+- **B0.321 T-128 items 1–5 delivered** (0e2ce73). What landed:
+  - **Level novelty:** the adapter uses level above local floor (emitter z=23; floor rise → 0).
+  - **Attention wiring:** attention service wired at occupancy closes.
+  - **Candidates:** real candidates (SNR, suspect, periodicity, recipe, class entropy, novelty) replace T-127's stub.
+  - **First sightings:** `FirstSightingRate` is fed, so new-emitter novelty works.
+  - **Reports:** report occupancy comes from the T-118 series, and the baseline comparison from T-119.
+
+  **Important finding:** every detection in T-127's unclipped bursty replay is `clipped:true`. With real suspect flags the bandit bans all candidates, so T-127's bandit-on e2e fails; T-128 `#[ignore]`d it. Opened **T-130** to root-cause the spurious clip flag (detector provenance), running now. Items 6–9 plus the T-122 alarm hook become **T-131** (after T-128/T-122/T-129/T-130). T-124 depends on T-131. Timeboxed Opus review of T-128 is running; it recommends whether to gate suspect-driven banning until T-130.

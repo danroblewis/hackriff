@@ -1970,7 +1970,7 @@ tasks:
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
     status: todo
-    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128]
+    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
     acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s)"
@@ -2026,7 +2026,8 @@ tasks:
   - id: T-128
     milestone: M2
     title: "M2 integration: wire occupancy levels into baselines, real providers into reports, candidates from inventory, first sightings, site/source history filters"
-    status: in-progress
+    status: review
+    commit: 0e2ce73
     deps: [T-118, T-119, T-121, T-127]
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
@@ -2051,6 +2052,34 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: true
+  - id: T-130
+    milestone: M2
+    title: "Spurious clipped:true flags on detections in unclipped replays (all 153 in the bandit bursty replay)"
+    status: in-progress
+    deps: []
+    parallel_group: M2X
+    use_cases: [AWARE-027, AWARE-042]
+    found_by: "T-128 2026-09-15: real candidates feed suspect flags to the bandit; every detection in T-127's unclipped bursty replay is clipped:true, so all candidates are verified+banned and the bandit-on e2e fails"
+    acceptance: "root cause found (likely detector.rs clip comparison / provenance.overload); clipping flagged only for real full-scale saturation; unclipped IQ -> clipped:false and 4x overdriven IQ -> clipped:true through device+ring path; trust/suspect/overload tests green; bandit-on e2e passes with real candidates after T-128 merge"
+    area: crates/hk-detect (detector), crates/hk-core (source/mock provenance)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-131
+    milestone: M2
+    title: "M2 integration part 2 (T-128 items 6-9): history source/site tiles + filters, baseline memory bound, T-119 residuals, full-path e2e, alarm hook"
+    status: todo
+    deps: [T-128, T-122, T-129, T-130]
+    parallel_group: M2I
+    use_cases: [AWARE-042, AWARE-044, AWARE-033]
+    found_by: "T-128 report 2026-09-15"
+    acceptance: "history tiles record source+site (versioned, v1/v2 readable) with report/history filters + api.md/api_contract; GainSeries memory bounded with measured bound; per-slot change-point latch or documented auto re-freeze + test; sequential weak-interferer reference test with real levels; http.rs module-doc route rows; AlarmService::observe_fold called after ingest_occupancy with device steps carrying gain deltas; T-127 bandit-on e2e un-ignored; full e2e on occupancy_markov_scene via blind_scene: baselines+candidates populate, hour-30 emitter ranks high, report carries true fco and baseline comparison, alarms raise for the injected emitter; report_scene.rs updated; compare_report direct test"
+    area: crates/hk-store/src/history, crates/hk-context/src/occupancy/baseline.rs, crates/hk-pipeline (attention/alarms wiring), tests/e2e
+    needs: none
+    model: opus
+    effort: high
     core_interface: true
   - id: T-100
     milestone: M0b
