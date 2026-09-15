@@ -1970,7 +1970,7 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: in-progress
+    status: blocked
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -2185,6 +2185,20 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: true
+  - id: T-139
+    milestone: M2
+    title: "Occupancy/history under the scheduler: short sweep hops and bandit dwells currently yield 0 history frames (partial rows discarded on every retune), so no occupancy rows, baselines or alarms while the scheduler runs"
+    status: todo
+    deps: [T-136]
+    parallel_group: M2A
+    use_cases: [AWARE-042, AWARE-044, AWARE-027]
+    found_by: "T-124 2026-09-15: 56 h blind scene through the mock SDR under the bandit scheduler, reader history 95.6M samples -> 0 frames, 0 tiles; a history row needs 0.1 s of unchanged tuning at 10 rows/s but sweep hops are 50 ms at 20 Msps and every tune/rate change flags the stream and drops the partial row. Earlier non-scheduler tests (T-118/T-121) never hit it; the bandit e2e asserts dwell logs only"
+    acceptance: "with DEFAULT scheduler settings (sweep + bandit dwells) through the mock SDR, visits produce history/occupancy input: either rows emitted from short steps with their actual n_eff/averages recorded (provenance honest, ADR-0012 §2 activity-independent visits), or occupancy fed from the DwellRecord/SweepRecord observation log per ADR-0012 §2; choose per the ADR and document; OccupancyStat rows, baselines and alarm inputs > 0 in a scheduler-driven pipeline test (hk-pipeline, time-compressed); no regression for the fixed-tune path (history tiles bit-identical for unchanged tuning); T-124 then runs its scene with default scheduler settings"
+    area: crates/hk-pipeline/src/{history,occupancy,observe}.rs, crates/hk-store/src/history, crates/hk-context/src/occupancy/engine.rs, docs/adr/0012
+    needs: none
+    model: opus
+    effort: high
     core_interface: true
   - id: T-100
     milestone: M0b

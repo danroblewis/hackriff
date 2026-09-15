@@ -1313,3 +1313,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Tests: hk-pipeline 24, hk-context 29.
   - T-136 merges after the T-135 full check.
   - T-138 (single-emitter rule) launched on f0b963b.
+- **B0.354 PRODUCT GAP found by T-124: default scheduler settings produce 0 history frames.**
+  - **Symptom:** a 56 h blind scene through the mock SDR under the bandit scheduler gave 95.6M samples to the history reader and 0 frames / 0 tiles. So there were no occupancy rows, baselines or alarms; the whole M2 memory chain is dark while the scheduler runs.
+  - **Cause:** a row needs 0.1 s of unchanged tuning, but sweep hops are 50 ms and every retune drops the partial row.
+  - **Why earlier tests missed it:** the non-scheduler tests (T-118/T-121) never retune, and the bandit e2e only checks dwell logs.
+  - **Decision:** do not bend the scene to slow scheduler settings. T-139 (Opus, high effort) fixes the product; T-124 is blocked on it.
+  - **T-124 handoff:** the agent is at 293k tokens; it will write a handoff note and commit WIP. The simulator comparison passed: bandit 124/124 emitters vs round-robin 101/124; median time to first detection 152 s vs 833 s.
