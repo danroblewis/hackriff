@@ -468,7 +468,11 @@ fn same_emission_score(
         .flatten()
         .flat_map(|x| cb.iter().flatten().map(move |y| (x - y).abs()))
         .fold(f64::INFINITY, f64::min);
-    if !(err <= f_tol) {
+    // NaN (incomparable) counts as out of tolerance.
+    if !matches!(
+        err.partial_cmp(&f_tol),
+        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+    ) {
         return Ok(None);
     }
     let (sa, sb) = (observation_spans(conn, a)?, observation_spans(conn, b)?);
