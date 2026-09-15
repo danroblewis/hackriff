@@ -1345,3 +1345,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - The timing test is print-only.
   - **Nits → T-140 (Sonnet, reviewed by the coordinator):** public packed accessors skip the multiplier; the equivalence fingerprint is printed rather than asserted; no NaN guard; duplicated helpers.
   - T-137 merged; full check started.
+- **B0.359 T-138 review (Opus): FIX-FIRST.**
+  - **Bugs**
+    - `emitters_seen` checks `last_seen <= iv.end`, which excludes carriers that stay on.
+    - A 300 s persistence span lets one 6–14 min transmission straddling a boundary alarm.
+  - **Risks**
+    - The rule is not one-shot, so a repeater re-raises for 7 days.
+    - Inventory ID churn can create false new emitters.
+    - One DB query per row under the lock; coarse sweeps count as coverage (T-139 interaction).
+  - **Nit:** ADR wording should call it a rate gate.
+  - **Verified:** no double alarms (engine `keyed()` plus max); fresh counting holds; uncovered closes are skipped; memory cap and pruning are OK.
+  - **Next:** one fix round, continued in the original agent (~180k tokens).
