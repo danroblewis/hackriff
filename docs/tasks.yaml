@@ -1208,7 +1208,7 @@ tasks:
     milestone: M0b
     title: "Regression: intermittent Listen refusal no-analog-mode after mode selector 0.2.0 (listen_retune 1/3 flaky)"
     status: done
-    commit: "b4670e8 (merged)"
+    commit: "b4670e8 (merged cd4d161; verified: lint, hk-demod, listen_retune 5/5, acceptance green)"
     result: "root cause: listen_retune's scripted radio sends a clean i8 carrier; 8-bit quantisation leaves ~0.2 % in-phase AM residue scoring t = 3.1-3.7 at 61 dB SNR, above the unmodulated-carrier limit (3) but far below AM's 5 % rule, so no rule matched and Listen refused. Fix (mode rules 0.2.1, mode.rs only): carrier with in-phase residue < 1 % depth counts as unmodulated regardless of t (carrier_max_residual_depth), still requiring narrow + sidebands >= 20 dB down, residue named in evidence. T-070 refinement did not fix it (2/10 failures on merged tree). Sweep unchanged (128/152, >=10 dB 111/114, carriers 8/8 CW, FM fixture WFM). Flake 2/6 -> 20/20. Regression test signal_062_probe_placement.rs (4 failing + 2 passing probe positions, CW confidence >= 0.5)."
     deps: [T-065]
     parallel_group: T
