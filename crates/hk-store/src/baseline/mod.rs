@@ -220,6 +220,46 @@ pub trait PackedMoments {
     fn max_db(&self) -> f64;
 }
 
+/// A stored slot's packed form ([`SlotSeries::packed`], [`SlotSeries::packed_at`], T-140) paired
+/// with a series' pending forgetting multiplier: [`PackedMoments`] on `Self` applies it to the
+/// additive fields (the max level is never forgotten, so it reads as stored). [`Self::raw`] and
+/// [`Self::m`] recover the two separately, e.g. to call [`SlotValue::unpack_scaled`].
+#[derive(Clone, Copy, Debug)]
+pub struct ScaledMoments<'a, P> {
+    p: &'a P,
+    m: f64,
+}
+
+impl<'a, P> ScaledMoments<'a, P> {
+    /// The stored value, before the multiplier.
+    pub fn raw(&self) -> &'a P {
+        self.p
+    }
+
+    /// The pending forgetting multiplier (1 unless forgotten).
+    pub fn m(&self) -> f64 {
+        self.m
+    }
+}
+
+impl<P: PackedMoments> PackedMoments for ScaledMoments<'_, P> {
+    fn n(&self) -> f64 {
+        self.p.n() * self.m
+    }
+    fn observed_s(&self) -> f64 {
+        self.p.observed_s() * self.m
+    }
+    fn occupied_weight_s(&self) -> f64 {
+        self.p.occupied_weight_s() * self.m
+    }
+    fn weight_s(&self) -> f64 {
+        self.p.weight_s() * self.m
+    }
+    fn max_db(&self) -> f64 {
+        self.p.max_db()
+    }
+}
+
 /// One stored slot in 28 B (T-135; the f64 statistics are 56 B): every moment as f32, the level
 /// moments as mean and centred Σ(level − mean)² rather than Σ level and Σ level², so the spread
 /// keeps f32 relative precision instead of cancelling (Σ level² − n·mean² in f32 would lose most
@@ -480,14 +520,22 @@ impl<T: SlotValue> SlotSeries<T> {
     }
 
     /// Stored slots' packed form with their index, in slot order (field accessors,
-    /// [`PackedMoments`], T-137): additive moments read × [`Self::decay`].
-    pub fn packed(&self) -> impl Iterator<Item = (usize, &T::Packed)> + '_ {
-        self.indices().zip(self.values.iter())
+    /// [`PackedMoments`], T-137): the pending forgetting multiplier ([`Self::decay`]) is already
+    /// applied to the additive moments (T-140), so a caller summing across slots reads correctly
+    /// by default. [`ScaledMoments::raw`] and [`ScaledMoments::m`] recover the stored value and
+    /// multiplier separately (e.g. for [`SlotValue::unpack_scaled`]).
+    pub fn packed(&self) -> impl Iterator<Item = (usize, ScaledMoments<'_, T::Packed>)> + '_ {
+        let m = self.decay;
+        self.indices()
+            .zip(self.values.iter().map(move |p| ScaledMoments { p, m }))
     }
 
     /// Slot `i`'s packed form when stored (a field accessor, as [`Self::packed`]).
-    pub fn packed_at(&self, i: usize) -> Option<&T::Packed> {
-        (i < HourOfWeek::SLOTS && self.present(i)).then(|| &self.values[self.rank(i)])
+    pub fn packed_at(&self, i: usize) -> Option<ScaledMoments<'_, T::Packed>> {
+        (i < HourOfWeek::SLOTS && self.present(i)).then(|| ScaledMoments {
+            p: &self.values[self.rank(i)],
+            m: self.decay,
+        })
     }
 
     /// Pending forgetting multiplier of the stored additive moments (1 unless forgotten, T-137).
@@ -531,6 +579,10 @@ impl SlotSeries<DecayedStats> {
     /// f64 [`Self::decay`], so it is O(1) and exact however close to 1; the multiplier is folded
     /// into the stored slots (one f32 rounding) only once it falls below 10⁻³.
     pub fn scale(&mut self, factor: f64) {
+        debug_assert!(
+            factor.is_finite() && factor >= 0.0,
+            "non-finite decay factor {factor}"
+        );
         self.decay *= factor;
         if self.decay >= DECAY_FOLD_BELOW {
             return;
