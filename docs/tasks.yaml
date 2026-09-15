@@ -1367,7 +1367,7 @@ tasks:
   - id: T-082
     milestone: M0b
     title: One inventory entry per physical emitter (merge track-based and decoder-based entries)
-    status: todo
+    status: in-progress
     deps: [T-078]
     parallel_group: W
     use_cases: [AWARE-053, SIGNAL-062]
