@@ -648,3 +648,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - manchester time map;
   - allocation-counting test.
   Also noted for T-088: the runtime must set RESET on a rebuilt node's first chunk. Full check deferred until the T-087/T-089 merges, so one run covers all three.
+- **B0.235 T-087 review: FIX-FIRST** (timeboxed). One must-fix: CRC burst correction manufactures valid frames on narrow CRCs. RDS 10-bit at burst 5 turns 36% of garbage blocks Valid; burst 1 turns 2.5–5%. Also real-time nits: assemble/deframe under-declare output counts, so FrameBuf reallocates on the RT thread. Checked OK: bch 3-bit refusal guaranteed with parity, ACARS CRC-16/KERMIT span and sync, blind tests, clean merge-tree with T-086. Keep `FrameLength` as the shared length evaluator; porting ppm_demod goes to T-104. Fix round running.
