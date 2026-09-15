@@ -39,6 +39,7 @@ use hk_core::{
 use hk_model::cluster::most_restrictive;
 use hk_model::{ContentClass, Repository, ScanPlan, Timestamp};
 use hk_pipeline::class::band_class;
+use hk_pipeline::reports::ReportService;
 use hk_pipeline::{
     PipelineConfig, PipelineHandle, RunSummary, SourceFactory, SourceInfo, TrackInventory,
     load_calibrations, open_mock_replay, open_replay, replay_plan,
@@ -335,8 +336,138 @@ pub fn token(configured: Option<&str>) -> anyhow::Result<Token> {
     }
 }
 
+/// T-127: the pipeline's scheduler hub behind `/api/scheduler*`.
+pub struct PipelineScheduler(pub Arc<hk_pipeline::control::SchedulerHub>);
+
+impl hk_api::schedule::SchedulerControl for PipelineScheduler {
+    fn view(&self) -> Option<hk_api::schedule::SchedulerView> {
+        self.0.snapshot().map(|s| hk_api::schedule::SchedulerView {
+            status: s.status,
+            regions: s.regions.clone(),
+            leases: s.leases.clone(),
+            plan_version: s.plan_version,
+        })
+    }
+
+    fn arms(&self) -> Option<Vec<hk_core::scheduler::ArmStatus>> {
+        self.0.snapshot().map(|s| s.arms.clone())
+    }
+
+    fn add_lease(
+        &self,
+        lease: hk_core::scheduler::Lease,
+    ) -> Result<hk_core::scheduler::Lease, hk_api::schedule::SchedulerFail> {
+        self.0.add_lease(lease).map_err(scheduler_fail)
+    }
+
+    fn release_lease(&self, id: u64) -> Result<bool, hk_api::schedule::SchedulerFail> {
+        self.0.release_lease(id).map_err(scheduler_fail)
+    }
+}
+
+fn scheduler_fail(e: hk_pipeline::control::HubError) -> hk_api::schedule::SchedulerFail {
+    use hk_api::schedule::SchedulerFail as F;
+    use hk_pipeline::control::HubError as H;
+    match e {
+        H::NoScheduler => F::NoScheduler,
+        H::Busy => F::Busy,
+        H::Refused(m) => F::Refused(m),
+        H::TableFull(m) => F::TableFull(m),
+    }
+}
+
+/// T-121: the run's survey reports behind the API's [`hk_api::reports::ReportControl`] (public so
+/// acceptance tests serve reports exactly as `hk serve` does).
+pub struct PipelineReports(pub ReportService);
+
+fn report_fail(e: hk_pipeline::reports::ReportError) -> hk_api::reports::ReportFail {
+    use hk_pipeline::reports::ReportError as E;
+    let (status, message) = match &e {
+        E::Invalid(m) => (400, (*m).to_owned()),
+        E::NoCoverage => (404, e.to_string()),
+        E::Provider(_) | E::Validation(_) => (500, e.to_string()),
+    };
+    hk_api::reports::ReportFail { status, message }
+}
+
+impl hk_api::reports::ReportControl for PipelineReports {
+    fn report(
+        &self,
+        q: &hk_api::reports::ReportQuery,
+    ) -> Result<hk_model::attention::report::SurveyReport, hk_api::reports::ReportFail> {
+        self.0.report(q.region, q.span, q.site).map_err(report_fail)
+    }
+
+    fn export(
+        &self,
+        q: &hk_api::reports::ReportQuery,
+        format: hk_model::attention::report::ExportFormat,
+    ) -> Result<(&'static str, Vec<u8>), hk_api::reports::ReportFail> {
+        self.0
+            .export(q.region, q.span, q.site, format)
+            .map_err(report_fail)
+    }
+}
+
 /// T-088: the run's recipe runtime behind the API's [`hk_api::recipes::RecipeControl`] (public
 /// so acceptance tests wire the recipe routes exactly as `hk serve` does, T-094).
+/// The run's occupancy engine behind `/api/occupancy` and `/api/channels` (T-118).
+pub struct PipelineOccupancy(pub Arc<hk_pipeline::occupancy::OccupancyService>);
+
+impl hk_api::occupancy::OccupancyControl for PipelineOccupancy {
+    fn occupancy(
+        &self,
+        req: &hk_api::occupancy::OccupancyRequest,
+    ) -> Result<hk_api::occupancy::OccupancyAnswer, String> {
+        use hk_api::occupancy::OccupancyInterval as I;
+        let (plan_version, f_cell_hz) = self.0.plan_info();
+        let kind_ok = |r: &hk_model::attention::occupancy::OccupancyStat| {
+            use hk_model::attention::occupancy::OccupancySubject as S;
+            use hk_store::occupancy::SubjectKind as K;
+            matches!(
+                (req.subject, r.subject),
+                (None, _) | (Some(K::Channel), S::Channel { .. }) | (Some(K::Band), S::Band { .. })
+            )
+        };
+        let (rows, truncated) = match req.interval {
+            I::Span => {
+                let mut rows = self.0.span_stats(req.freq, req.span)?;
+                rows.retain(kind_ok);
+                let t = rows.len() > req.limit;
+                rows.truncate(req.limit);
+                (rows, t)
+            }
+            I::Series(interval) => {
+                let r = self.0.query(&hk_store::occupancy::OccupancyQuery {
+                    freq: req.freq,
+                    span: req.span,
+                    interval,
+                    subject: req.subject,
+                    f_cell_hz,
+                    limit: req.limit,
+                })?;
+                (r.rows, r.truncated)
+            }
+        };
+        Ok(hk_api::occupancy::OccupancyAnswer {
+            rows,
+            truncated,
+            f_cell_hz,
+            plan_version,
+        })
+    }
+
+    fn channels(&self, freq: hk_model::FreqRange) -> hk_api::occupancy::ChannelPlanAnswer {
+        let (version, scheme, f_cell_hz, channels) = self.0.channels(freq);
+        hk_api::occupancy::ChannelPlanAnswer {
+            version,
+            scheme,
+            f_cell_hz,
+            channels,
+        }
+    }
+}
+
 pub struct PipelineRecipes(pub Arc<hk_pipeline::recipes::runtime::RecipeRuntime>);
 
 impl hk_api::recipes::RecipeControl for PipelineRecipes {
@@ -371,6 +502,106 @@ impl hk_api::recipes::RecipeControl for PipelineRecipes {
     }
 }
 
+/// T-119: the attention routes (sites, baselines, candidates, score weights) over the run's
+/// `AttentionService` (`hk_pipeline::attention`).
+pub struct PipelineAttention(pub Arc<hk_pipeline::attention::AttentionService>);
+
+/// T-119: opens the run's attention service over its database and data directory. Stamps
+/// API-created sites and weight rows with stream time (the wall clock before any frame).
+fn attention_control(
+    handle: &PipelineHandle,
+    db: &Arc<Mutex<Repository>>,
+) -> anyhow::Result<Arc<dyn hk_api::attention::AttentionControl>> {
+    let counters = handle.counters();
+    let clock_counters = Arc::clone(&counters);
+    let clock = Arc::new(move || {
+        let ns = clock_counters
+            .stream_time_ns
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if ns > 0 {
+            hk_model::Timestamp::from_unix_nanos(ns)
+        } else {
+            hk_model::Timestamp::now()
+        }
+    });
+    let service = hk_pipeline::attention::AttentionService::open(
+        handle.data_dir(),
+        Arc::clone(db),
+        Some(counters),
+        clock,
+    )
+    .context("opening the attention service (T-119)")?;
+    Ok(Arc::new(PipelineAttention(Arc::new(service))))
+}
+
+impl hk_api::attention::AttentionControl for PipelineAttention {
+    fn call(
+        &self,
+        call: hk_api::attention::AttentionCall,
+    ) -> Result<hk_api::attention::AttentionAnswer, hk_api::attention::AttentionFail> {
+        use hk_api::attention::{AttentionAnswer as A, AttentionCall as C};
+        let s = &self.0;
+        let changed = |old: serde_json::Value, new: serde_json::Value| A {
+            body: new.clone(),
+            old,
+            new,
+        };
+        match call {
+            C::Sites => Ok(A::read(s.sites_json())),
+            C::CurrentSite => Ok(A::read(s.current_site_json())),
+            C::SelectSite(b) => {
+                let old = s.current_site_json();
+                s.set_current_site(hk_pipeline::attention::SiteSelect {
+                    id: b.id,
+                    name: b.name,
+                    lat_deg: b.lat_deg,
+                    lon_deg: b.lon_deg,
+                    radius_m: b.radius_m,
+                    utc_offset_min: b.utc_offset_min,
+                    release: b.release,
+                })
+                .map(|new| changed(old, new))
+            }
+            C::UpdateSite {
+                id,
+                name,
+                utc_offset_min,
+            } => s
+                .update_site(id, name, utc_offset_min)
+                .map(|(old, new)| changed(old, new)),
+            C::Baselines { site } => s.baselines_json(site).map(A::read),
+            C::Slots {
+                site,
+                f_lo,
+                f_hi,
+                slot,
+                resolution,
+            } => s
+                .slots_json(site, f_lo, f_hi, slot, resolution)
+                .map(A::read),
+            C::Refreeze { site, f_lo, f_hi } => s
+                .refreeze(site, f_lo, f_hi)
+                .map(|v| changed(serde_json::Value::Null, v)),
+            C::Candidates { f_lo, f_hi, limit } => {
+                Ok(A::read(s.candidates_json(f_lo, f_hi, limit)))
+            }
+            C::Weights => s.weights_json().map(A::read),
+            C::SetWeights { weights, author } => {
+                s.set_weights(weights, &author).map(|(old, new)| A {
+                    body: serde_json::json!({ "weights": new }),
+                    old: serde_json::json!(old),
+                    new: serde_json::json!(new),
+                })
+            }
+        }
+        .map_err(|e| hk_api::attention::AttentionFail {
+            status: e.status,
+            code: e.code,
+            message: e.message,
+        })
+    }
+}
+
 /// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
 /// the pipeline writes, the control API (display, pause, recording and bookmarks, audited to
 /// `<data dir>/control-audit.jsonl`), and (live runs without the scheduler) the live control
@@ -392,6 +623,7 @@ pub fn serve_api(
         Repository::open(handle.data_dir().join("hackriff.db"))
             .context("opening the inventory database for the API")?,
     ));
+    let report_db = Arc::clone(&db); // T-121
     let audit_path = handle.data_dir().join("control-audit.jsonl");
     let audit = AuditLog::open(&audit_path)
         .with_context(|| format!("opening the control audit log {}", audit_path.display()))?;
@@ -406,6 +638,7 @@ pub fn serve_api(
         .with("stage", recipes.stage_service()) // T-088
         .with("inspector", recipes.inspector_service()); // T-088 (T-089/T-092 extend it)
     let tcp = start_stream_tcp(registry, &openers, &token)?;
+    let attention = attention_control(handle, &db)?; // T-119
     let state = ApiState {
         streams: registry.clone(),
         history: None,
@@ -432,7 +665,16 @@ pub fn serve_api(
         captures: handle
             .decoded_captures()
             .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
-        observations: handle.observation_store(), // T-115
+        occupancy: Some(Arc::new(PipelineOccupancy(handle.occupancy()))), // T-118
+        observations: handle.observation_store(),                         // T-115
+        attention: Some(attention),                                       // T-119
+        scheduler: Some(Arc::new(PipelineScheduler(handle.scheduler_hub()))), // T-127
+        reports: Some(Arc::new(PipelineReports(ReportService::new(
+            None,
+            Some(handle.floor_product()),
+            handle.observation_store(),
+            Arc::clone(&report_db),
+        )))), // T-121
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

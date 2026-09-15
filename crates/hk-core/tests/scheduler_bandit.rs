@@ -38,6 +38,7 @@ fn bandit_sched() -> (Scheduler<SyntheticClock>, Arc<SharedInterestingness>) {
 }
 
 fn step(s: &mut Scheduler<SyntheticClock>) -> ScheduleStep {
+    s.refresh_bandit();
     let st = s.next_step();
     s.clock().advance_ns(st.duration_ns);
     st
@@ -85,6 +86,7 @@ fn preemption_order_is_interactive_then_leases_then_scheduled_then_bandit_then_s
         every_ns: None,
     })
     .unwrap();
+    s.refresh_bandit();
     let st = s.next_step();
     assert_eq!(
         (st.purpose, st.purpose.tier()),
@@ -101,6 +103,7 @@ fn preemption_order_is_interactive_then_leases_then_scheduled_then_bandit_then_s
         duration_ns: None,
     };
     s.add_lease(lease).unwrap();
+    s.refresh_bandit();
     let st = s.next_step();
     assert_eq!(st.purpose.tier(), Tier::PinnedLease);
     assert_eq!(

@@ -32,7 +32,7 @@ pub mod spec;
 pub mod taps;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -224,6 +224,48 @@ impl ChannelMemory {
 ///   that finishes later on the same window does not write the station again.
 ///
 /// Per segment ([`Shared::claims`]); only the claim table is shared, never chain state.
+/// CRC-valid-or-not decodes written per track (T-127 review): the scheduler credits a bandit
+/// dwell with the decodes of the tracks it saw, never the run-wide counter. Keeps the most recent
+/// [`TRACK_DECODES_MAX`] tracks; an evicted track reads 0 (its later count restarts, so a dwell
+/// holding an older base saturates to 0 rather than over-crediting). Decodes a chain writes for
+/// a track merged into another stay on the chain's own track id.
+#[derive(Debug, Default)]
+pub(crate) struct TrackDecodes {
+    inner: Mutex<(HashMap<TrackId, u64>, VecDeque<TrackId>)>,
+}
+
+/// Tracks [`TrackDecodes`] remembers.
+const TRACK_DECODES_MAX: usize = 4096;
+
+impl TrackDecodes {
+    /// Adds `n` decodes written for `track` (none for a track-less chain).
+    pub fn add(&self, track: Option<TrackId>, n: u64) {
+        let (Some(track), true) = (track, n > 0) else {
+            return;
+        };
+        let mut g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let (counts, order) = &mut *g;
+        match counts.get_mut(&track) {
+            Some(c) => *c += n,
+            None => {
+                if order.len() >= TRACK_DECODES_MAX {
+                    if let Some(old) = order.pop_front() {
+                        counts.remove(&old);
+                    }
+                }
+                counts.insert(track, n);
+                order.push_back(track);
+            }
+        }
+    }
+
+    /// Decodes written for `track` so far.
+    pub fn get(&self, track: TrackId) -> u64 {
+        let g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        g.0.get(&track).copied().unwrap_or(0)
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct EmissionClaims {
     claims: Mutex<Vec<Claim>>,

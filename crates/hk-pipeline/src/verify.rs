@@ -158,6 +158,8 @@ pub(crate) struct TrustEval<'a> {
     outbox: &'a VerdictOutbox,
     track: Option<TrackId>,
     t: Timestamp,
+    /// T-127: the group's overall verdict so far (see [`TrustEval::verdict`]).
+    verdict: std::cell::Cell<Option<bool>>,
 }
 
 impl<'a> TrustEval<'a> {
@@ -173,10 +175,25 @@ impl<'a> TrustEval<'a> {
             outbox,
             track,
             t,
+            verdict: std::cell::Cell::new(None),
         }
     }
 
+    /// T-127: the verification group's verdict for the bandit (`report_verification`): `false`
+    /// when any test labelled the emitter a front-end artefact (IMD, compression, LO-following or
+    /// image motion, clock harmonic), else `true` when a test confirmed it (linear, stays), else
+    /// `None` (only inconclusive or skipped rows).
+    pub fn verdict(&self) -> Option<bool> {
+        self.verdict.get()
+    }
+
     fn row(&self, test: TrustTest, label: &str, freq: FreqRange, detail: Value) -> PendingVerdict {
+        match label {
+            "suspect-imd" | "compressed" | "moves-with-lo" | "moves-against-lo" | "image-moves"
+            | "clock-harmonic" | "scales-with-rate" => self.verdict.set(Some(false)),
+            "linear" | "stays" if self.verdict.get().is_none() => self.verdict.set(Some(true)),
+            _ => {}
+        }
         PendingVerdict {
             track: self.track,
             test,

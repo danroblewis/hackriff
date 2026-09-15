@@ -513,6 +513,8 @@ pub(crate) struct Shared {
     pub bursts: Arc<crate::chains::taps::BurstHub>,
     /// Which analog chain owns each emission (T-071 dedupe).
     pub claims: crate::chains::EmissionClaims,
+    /// Decodes written per track (T-127: a bandit dwell's `valid_decodes`).
+    pub track_decodes: Arc<crate::chains::TrackDecodes>,
     /// The run's compute providers (T-056): one registry shared by every segment.
     pub compute: hk_dsp::compute::Compute,
 }
@@ -645,8 +647,12 @@ struct Common {
     bursts: Arc<crate::chains::taps::BurstHub>,
     /// Compute providers (T-056): built once per run, so no segment changes provider.
     compute: hk_dsp::compute::Compute,
+    /// Occupancy engine and series (T-118), closed when the run ends.
+    occupancy: Arc<crate::occupancy::OccupancyService>,
     /// T-115: the observation log (`None` when it could not be opened).
     observations: Option<crate::observe::ObservationLog>,
+    /// T-127: the scheduler as the API sees it (snapshot + lease commands), shared by segments.
+    scheduler: Arc<crate::control::SchedulerHub>,
 }
 
 impl Common {
@@ -754,13 +760,23 @@ impl Pipeline {
         let (compute, compute_options) =
             crate::compute::for_run(&cfg.settings.compute, &counters.compute)?;
         cfg.settings.compute = compute_options;
+        let product = Arc::new(Mutex::new(product));
+        // T-118: the occupancy engine reads history and detections off the real-time path.
+        let occupancy = crate::occupancy::OccupancyService::open(
+            cfg.data_dir.join("occupancy"),
+            Arc::clone(&product),
+            db_path.clone(),
+            Arc::clone(&counters),
+            crate::occupancy::OccupancyConfig::default(),
+        );
         let common = Common {
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
             counters,
             compute,
-            product: Arc::new(Mutex::new(product)),
+            occupancy,
+            product,
             display: Arc::new(DisplayControl::new(DisplaySettings::from_settings(
                 &cfg.settings,
             ))),
@@ -775,6 +791,7 @@ impl Pipeline {
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             bursts: Arc::default(),
             // T-115: never fails the run; a log that cannot open is reported and skipped.
+            scheduler: Arc::new(crate::control::SchedulerHub::default()),
             observations: crate::observe::ObservationLog::open(
                 &cfg.data_dir,
                 cfg.stream_sink.as_ref(),
@@ -782,6 +799,11 @@ impl Pipeline {
             .map_err(|e| eprintln!("observation log disabled: {e:#}"))
             .ok(),
         };
+        // T-118: visits and tiers from the T-115 log when it opened.
+        if let Some(log) = &common.observations {
+            common.occupancy.set_observation_store(log.store());
+        }
+        common.occupancy.start();
         // T-071: the on-demand chain budget is reported from the start of the run.
         crate::chains::listen::publish_limits(
             &common.counters,
@@ -878,6 +900,10 @@ fn start_segment(
     } else {
         None
     };
+    // T-127: the scheduler publishes to the API hub and serves its lease commands.
+    if let Some(s) = sched.as_mut() {
+        s.attach_hub(Arc::clone(&common.scheduler));
+    }
     // T-115: the scheduler's observer. A source that cannot retune observes its own window.
     if let (Some(s), Some(log)) = (sched.as_mut(), &common.observations) {
         let fixed = (!common.switch.capabilities().controllable)
@@ -920,6 +946,7 @@ fn start_segment(
         continues: AtomicBool::new(false),
         bursts: Arc::clone(&common.bursts),
         claims: crate::chains::EmissionClaims::default(),
+        track_decodes: Arc::default(),
         compute: common.compute.clone(),
         cfg,
     });
@@ -999,12 +1026,14 @@ fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
         join_workers(&mut workers, &mut errors);
         let mut st = sup.lock();
         let Some(req) = st.request.take() else {
+            sup.common.occupancy.finish(); // T-118: close the last interval after the readers drain
             st.finished = true;
             sup.cv.notify_all();
             return Finished { errors };
         };
         if sup.common.user_stop.load(Ordering::SeqCst) {
             st.result = Some(Err(ControlFailure::Finished("the run is stopping".into())));
+            sup.common.occupancy.finish(); // T-118
             st.finished = true;
             sup.cv.notify_all();
             return Finished { errors };
@@ -1591,6 +1620,11 @@ impl PipelineHandle {
         Arc::clone(&self.sup.common.product)
     }
 
+    /// The occupancy engine, series and learned channel plan (T-118).
+    pub fn occupancy(&self) -> Arc<crate::occupancy::OccupancyService> {
+        Arc::clone(&self.sup.common.occupancy)
+    }
+
     /// The observation log (T-115), shared with `/api/observations`; `None` when it could not be
     /// opened.
     pub fn observation_store(&self) -> Option<hk_store::observation::ObservationStore> {
@@ -1599,6 +1633,11 @@ impl PipelineHandle {
             .observations
             .as_ref()
             .map(crate::observe::ObservationLog::store)
+    }
+
+    /// The scheduler hub (T-127) for `/api/scheduler*`: empty when the run has no scheduler.
+    pub fn scheduler_hub(&self) -> Arc<crate::control::SchedulerHub> {
+        Arc::clone(&self.sup.common.scheduler)
     }
 
     /// The data directory (`hackriff.db`, `history/`, `recordings/`).

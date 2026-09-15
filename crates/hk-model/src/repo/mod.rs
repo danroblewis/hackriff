@@ -76,6 +76,7 @@ mod refined;
 #[cfg(test)]
 mod same_emission_tests;
 mod selections;
+pub mod sites; // T-119
 #[cfg(test)]
 mod tests;
 mod verification;
@@ -109,7 +110,10 @@ pub use selections::{
 pub use verification::{TrustTest, TrustVerdict};
 
 /// Embedded migrations, applied in order.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_attention.sql"), // T-119 sites, attention_weights
+];
 
 /// Schema version this build creates and understands.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;

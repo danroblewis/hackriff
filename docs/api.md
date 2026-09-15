@@ -537,9 +537,148 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 
 Stream `observations` (ADR-0004 `messages` kind, `message_schema` `hackriff.observation/1`, metadata only, listed by `GET /api/streams`): one message per record the log writes, published from the writer thread (a slow subscriber drops messages, never log records). `metadata.kind` is `dwell` (`reason_text`, `record`: the `DwellRecord`) or `sweep-summary` (`plan_version`, `geometry`, `t0_s`, `t1_s`, `visits`, `observed_s`, `f_lo_hz`/`f_hi_hz` of the visited hops, `preempted_hops`, `dropped_samples`, `overload_hops`). Geometry records are not streamed; read them from `GET /api/observations`.
 
+## Occupancy (T-118; ADR-0012 §2)
+
+ITU-R SM.1880 / SM.2256 occupancy per learned channel and per band, computed in the backend (`hk_context::occupancy`) from the level-0 spectrum history, the run's detections and the observation log. Channels are learned blind from detections; band rasters appear only as `raster_hint` suggestions.
+
+| Method | Path | Auth | Returns |
+|---|---|---|---|
+| GET | `/api/occupancy?f_lo&f_hi&t0&t1[&subject=channel\|band][&interval=15m\|1h\|span][&site]` | token | `OccupancyStat` rows overlapping the box |
+| GET | `/api/channels?f_lo&f_hi[&site]` | token | The learned channel plan overlapping `f_lo..f_hi` |
+
+`GET /api/occupancy` → `200`:
+
+```json
+{"interval": "15m", "f_cell_hz": 6250.0, "plan_version": 3, "truncated": false,
+ "rows": [{"schema": 1, "site": {"kind": "unassigned"}, "subject": {"kind": "channel", "key": {"scheme": 1, "lo_cell": 69358, "hi_cell": 69362}},
+           "interval": {"start": "…", "end": "…"}, "fco": 0.12, "fco_all_visits": 0.31, "fco_suspect_upper": 0.13, "fbo": 0.08,
+           "n_revisits": 64, "n_occupied": 8, "n_suspect": 1, "n_revisits_all": 120, "observed_s": 61.5, "revisit_max_s": 41.0, "revisit_mean_s": 14.1,
+           "timing": "unknown", "threshold": {"method": {"method": "dynamic", "idle_fraction": 0.8}, "guard_db": 5.0, "rbw_correction": true},
+           "threshold_db": -121.4, "guard_clamped": true, "rbw_hz": 6250.0, "obw_hz": 15000.0, "unit": "…",
+           "confidence": {"lo": 0.06, "hi": 0.22, "level": "p95", "n_eff": 58.3, "independence_assumed": false},
+           "revisit_biased": false, "fco_window": {"start": "…", "end": "…"}, "subject_extent": {"f_lo_hz": 433475000.0, "f_hi_hz": 433500000.0}}],
+ "coverage": {"rows": 1, "rows_with_fco": 1, "observed_s": 61.5, "unobserved_is_not_quiet": true}}
+```
+
+- **Rows** follow ADR-0012 §2.1 (`OccupancyStat`, `hk_model::attention::occupancy`) plus `subject_extent` (the subject's frequency extent in Hz). `sro` is present on band rows only. Absent optional fields are omitted.
+- **`interval`:** `15m` (default) and `1h` read the persisted series (closed every 15 min of stream time; `1h` rows at hour boundaries); `span` computes one row per subject over exactly `[t0, t1]` from the history, the final channel plan and the detections (band ≤ 20 MHz, span ≤ 7 days, band × span ≤ 120 MHz·h, at most 2 M visit samples; the history is read in bounded chunks). Series closes evaluate every band observed in the interval (each dwell window and sweep hop of the observation log), so a retune inside an interval keeps both bands.
+- **Floor and level fields** (additive, optional): `floor_db` (median floor under the thresholds; each cell is compared with its column's local floor within ±1 MHz), `floor_source` (`history` \| `eighty-percent` \| `assumed`), `floor_suspect` (the neighbourhood is mostly occupied, so the floor may be signal and `fco` low), `level_occupied_p50_db` / `level_occupied_p90_db` / `level_idle_db` (visit levels of the `fco` visits).
+- **`fco`** uses activity-independent visits only (background sweep, scheduled plan; an unlogged run's own ScanPlan rows count as scheduled), time-weighted; suspect crossings (§2.6) are excluded and bounded by `fco_suspect_upper`. With fewer than 30 such visits the estimate widens to the enclosing 1 h / 6 h / 24 h window or the data span, reported in `fco_window`; `fco_all_visits` is information only and never replaces `fco`. Interactive-only observation gives `fco` absent.
+- **Coverage.** Rows exist only where something was observed: a subject or interval without a row was not observed, not quiet.
+- `400 invalid` for a missing or bad `f_lo`/`f_hi`/`t0`/`t1` (`f_hi > f_lo ≥ 0`, `t1 > t0`), `subject`, `interval`, `site`, or a `span` request over the limits; `500 failed` for a store error; `503 unavailable` without an occupancy engine; `405` for other methods.
+
+`GET /api/channels` → `200`: `{"plan_version", "scheme", "f_cell_hz", "source": "learned-from-detections", "channels": [{"key": {"scheme", "lo_cell", "hi_cell"}, "source": "learned", "plan_version", "first_learned", "evidence", "obw_hz", "raster_hint"?: {"spacing_hz", "offset_hz", "source"}, "f_lo_hz", "f_hi_hz"}]}`. Keys are level-0 history cells snapped outward from the median detected extent; any change of the key set bumps `plan_version`. `400 invalid` for a bad range, `503`, `405` as above.
+
+## Sites, baselines, candidates and score weights (T-119)
+
+C12 baselines, novelty and the interestingness score ([ADR-0012](adr/0012-attention-memory-contracts.md) §3–§4; `crates/hk-api/src/attention.rs` over `hk_pipeline::attention::AttentionService`). Blind-first: baselines and candidates are built from measurements only; nothing here looks a frequency up. Times are Unix seconds (floats) on the stream's clock; frequencies Hz. Mutating calls need the bearer token and are audited (`site_select`, `site_update`, `baseline_refreeze`, `weights_update`). Errors: `400 invalid` (unknown field or query parameter, malformed value), `404 not_found`, `405`, `409 conflict`, `500 failed` (store I/O), `503 unavailable` (no attention service).
+
+| Method | Path | Auth | Parameters / body | Answer |
+|---|---|---|---|---|
+| GET | `/api/sites` | token | – | `{"sites": [site], "current": site_key}` |
+| GET | `/api/sites/current` | token | – | `{"site": site_key, "set_by": "config"\|"user"\|"gnss"\|null, "pinned", "accrues_baseline", "record": site\|null}` |
+| PUT | `/api/sites/current` | token | exactly one of `{"id"}` (a known site), `{"name", "lat_deg"?, "lon_deg"?, "radius_m"?, "utc_offset_min"?}` (select by name, or create a `user` site), `{"release": true}` (unpin: fixes decide again) | as GET current; 404 unknown id |
+| PUT | `/api/sites/{id}` | token | `{"name"?: string\|null, "utc_offset_min"?: integer ±840}` (at least one) | the site; 404 unknown, 409 name taken |
+| GET | `/api/baselines` | token | `site`? (default current; 409 when mobile/unassigned) | `{"site", "slot", "baselines": [{"site", "cal": {"kind": "uncalibrated"\|"calibrated", "id"?}, "scheme", "cell_factor", "subjects", "mature_subjects", "finest_resolution"\|null, "last_visit", "change_points": [{"subject", "f_lo", "f_hi", "t", "statistic": "level"\|"occupancy", "direction": 1\|-1, "cusum"}]}]}` |
+| GET | `/api/baselines/slots` | token | `f_lo`, `f_hi` (required), `site`?, `slot`? (0–167 hour-of-week; default now at the site), `resolution`? (`hour-of-week`, `hour-of-day`, `day-part`, `all-hours`; default the finest mature) | `{"site", "slot", "subjects": [{"subject": {"kind": "cell", "index"}\|{"kind": "channel", "key"}, "f_lo", "f_hi", "cal", "maturity": {"state": "mature", "resolution"}\|{"state": "immature", "observed_s"}, "mixed", "gain_states", "reference": pool, "adaptive": pool, "change_point"\|null, "refrozen_at"\|null}], "truncated"}` (at most 2 000 subjects) |
+| POST | `/api/baselines/refreeze` | token | `{"site"?, "f_lo"?, "f_hi"?}` (both edges or neither) | `{"site", "refrozen": n}`: adaptive copy → frozen reference, change points cleared |
+| GET | `/api/candidates` | token | `f_lo`?, `f_hi`?, `limit`? (1–1000, default 100) | `{"version", "t", "site": site_key, "weights", "candidates": [Candidate], "truncated"}`: the latest published `CandidateSet`, `score` descending |
+| GET | `/api/attention/weights` | token | – | `{"weights": {"version", "snr", "novelty", "class_entropy", "decoder", "periodicity", "boring"}, "defaults": weights, "history": [{"version", "created", "author"}]}` (newest first; version 1 = defaults, never stored) |
+| PUT | `/api/attention/weights` | token | all six weights, each in [0, 10], at least one positive term | `{"weights"}` with the next version; takes effect at the next scoring pass, never retroactively |
+
+- **site** = `{"id", "name"|null, "lat_deg"|null, "lon_deg"|null, "radius_m", "utc_offset_min", "source": "config"|"user"|"gnss", "first_seen", "last_seen", "observed_s"}`; **site_key** = `{"kind": "site", "id"}`, `{"kind": "mobile"}` or `{"kind": "unassigned"}`. Only `site` keys build baselines; mobile and unassigned folds are kept as occupancy but never accrue (ADR-0012 §3.5).
+- **pool** = `{"resolution", "n", "observed_s", "mean_db"|null, "std_db"|null, "fco"|null, "max_db"|null}`: the slot's pool at that resolution (levels from the most-visited gain state, occupancy over all).
+- **Maturity** needs ≥ 24 h of observation in the pool; hour-of-week falls back to hour-of-day, day part, then all hours, and the resolution used is always disclosed. Immature pools give novelty 0.
+- **Calibration** is part of the baseline key: a new calibration starts a new, immature baseline, so a calibration step is never novelty.
+- **Candidate** is `hk_model::attention::score::Candidate` as JSON (`subject`, `freq {lo_hz, hi_hz}`, `score`, `score_norm`, `components {snr_db?, novelty, class_entropy?, decoder_available, periodicity?, boring_prior}`, `novelty {novelty, level_z?, occupancy_z?, new_emitter?, observed_s, maturity, provenance_explained}`, `suspect_fraction`, `needs_verification`, `expected_interval_s?`, `min_on_off_s?`, `next_burst_eta?` (Unix s)). `class_entropy` absent means never classified and scores as maximal uncertainty.
+
+## Attention scheduler (T-127; ADR-0012 §5)
+
+The scheduler of a scheduler-driven run (`hackriffd`, `hk run --schedule`, `hk replay --schedule`): tier shares, the sweep floor, the bandit and pinned leases. A run without the scheduler (`hk serve`) answers the reads with `"scheduler": null` and refuses lease changes with 409. Frequencies in Hz; times in Unix seconds on the scheduler's sample clock.
+
+**Enabling the bandit.** Off by default. A ScanPlan enables it with `extra.bandit`: `true` for the defaults, or an object overriding `BanditConfig` fields (`ucb_c`, `discount_half_life_s`, `exploration_floor`, `sweep_floor`, `sweep_floor_window_s`, `max_arm_staleness_s`, `min_dwell_s`, `max_dwell_s`, `dwell_periods`, `prior_pseudo_dwell_s`, `arm_quantum_hz`, `max_arms`, `suspect_ban_s`, `reward`). Unknown or out-of-range fields fail the run at start. Until T-119 lands, the candidates the bandit packs come from a minimal stub scorer over confirmed tracks (novelty from first sighting, no SNR); T-119 replaces the publisher, not these routes.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/scheduler[?f_lo&f_hi][&t0&t1][&tau_s]` | token | Status, leases, and POI + coverage gaps from the observation log |
+| GET | `/api/scheduler/arms` | token | Bandit arm table |
+| GET | `/api/scheduler/leases` | token | Active leases |
+| POST | `/api/scheduler/leases` | token (header) | Create or update a lease (audited as `scheduler_lease_create`) |
+| DELETE | `/api/scheduler/leases/{id}` | token (header) | Release a lease (audited as `scheduler_lease_release`) |
+
+**`GET /api/scheduler`.** POI is computed from the observation log (T-115) with the same exact union-of-windows rule as ADR-0012 §5.5 (1 MHz cells), never from the scheduler's plan.
+- `f_lo`/`f_hi` pick one region (default: the plan's regions, at most 16).
+- `t0`/`t1` pick the span. POI is computed only when a span is given: without `t0`/`t1`, `poi` is empty and `span` is null, so a bare status poll never scans the observation log.
+- `tau_s` is a comma-separated list of burst durations (default `0.005,0.1,1,10`; at most 16).
+
+```json
+{
+  "scheduler": {
+    "now": 1789300000.5, "plan_version": 1, "window_s": 600,
+    "shares_s": { "discovery": 150.2, "exploit": 40.1, "explore": 8.3, "other": 0 },
+    "sweep_floor": 0.25, "sweep_floor_met": true, "floor_violations": 0,
+    "interactive": false, "leases": 0, "scheduled": 0, "low_power": false,
+    "bandit": {
+      "provider_version": 7, "arms": 12, "active_arms": 9, "pending_verifications": 0,
+      "banned": 0, "total_dwell_s": 48.4, "config": { "ucb_c": 0.5, "...": "BanditConfig" },
+      "counters": { "repacks": 7, "outcomes": 31, "outcomes_unmatched": 0, "exploit_dwells": 20,
+        "explore_dwells": 9, "stale_forced": 0, "beacon_dwells": 2, "verifications_started": 0,
+        "verifications_dropped": 0, "verifications_passed": 0, "verifications_failed": 0,
+        "floor_deferrals": 3, "arms_dropped": 0, "suspect_wasted_s": 0 }
+    }
+  },
+  "leases": [ { "id": 1, "kind": "user-pin", "center_hz": 433920000, "rate_hz": 2000000, "duration_s": null } ],
+  "observation_log": true,
+  "span": { "t0": 1789296400.5, "t1": 1789300000.5 },
+  "poi": [ {
+    "f_lo": 433000000, "f_hi": 435000000, "cell_hz": 1000000, "cells": 2, "observed_cells": 2,
+    "observed_fraction": 0.31, "mean_revisit_s": 1.9,
+    "poi": [ { "tau_s": 0.1, "p_poi": 0.36, "p_poi_min": 0.34 } ],
+    "gap_threshold_s": 3.8,
+    "gaps": [ { "f_lo": 433000000, "f_hi": 434000000, "t0": 1789296400.5, "t1": 1789296900 } ],
+    "gaps_truncated": false
+  } ],
+  "poi_truncated": false
+}
+```
+
+`bandit` is `null` when the plan does not enable it. `poi_truncated` is set when more than 200 000 records overlapped (POI then covers the first ones). Bad numbers or unpaired `f_lo`/`f_hi`, `t0`/`t1` answer 400.
+
+**`GET /api/scheduler/arms`** returns `{ "scheduler": bool, "bandit": bool, "arms": [...] }`. Each arm: `index` (the `arm` of bandit dwell reasons), `key` (`rf_path`, `center_q`, `rate_hz`), `center_hz`, `rate_hz`, `active`, `exploration` (a hop exploration arm), `on_dc`, `prior`, `mean_reward`, `dwell_s`, `ucb` (a number, or `"inf"` for an unvisited arm without pseudo-dwell), `visits`, `staleness_s`, `suspect_fraction`, `lead` (16-hex-digit candidate key or null), `members`, `dwell_planned_s`, `required_revisit_s`, `complete_capture`, `last_reward`.
+
+**`POST /api/scheduler/leases`** takes `{ "center_hz": 433920000, "kind": "user-pin", "duration_s": 60, "id": 3 }`.
+- Only `center_hz` is required.
+- `kind` is one of `user-pin` (default), `decoder`, `trunking`, `pass`, `launch`.
+- `duration_s` absent means the lease holds until released.
+- `id` absent assigns the next free id; the same `id` again updates that lease.
+- The lease runs at the pipeline's sample rate.
+- Answers 201 `{ "lease": {...} }` (200 on update); 400 for bad fields or a centre outside the device's range; 409 `no_scheduler` without a scheduler; 409 `table_full` when the lease table is full; 503 `busy` if the control thread does not answer within 2 s (the command is then cancelled and never takes effect).
+- An update that changes the lease cuts its running step; an unchanged renewal, a refused create or an unknown release leaves the running step alone.
+
+A lease preempts scheduled plans, the bandit and the sweep from the next step; the sweep floor is not enforced against it (shortfalls count as `floor_violations`).
+
+**`DELETE /api/scheduler/leases/{id}`** answers `{ "released": id }`, 404 when no such lease is active, 400 for a non-numeric id, 409 without a scheduler, 503 `busy` as for create. The lease's unrun planned time leaves the sweep-floor window.
+
+## Survey reports (T-121; ADR-0012 §6)
+
+`GET /api/report?f_lo&f_hi&t0&t1[&site][&format=json|csv|png]` (token): `report(region, span)`. `f_lo`/`f_hi` in Hz, `t0`/`t1` in Unix seconds on the sample clock (a replay or time-compressed scene reports its own time). `site` is `unassigned` (default), `mobile` or a site id. Schema: `hk_model::attention::report::SurveyReport` (wire structs reject unknown fields; every `Timestamp` is an integer of Unix **nanoseconds**, `FreqRange` is `{lo_hz, hi_hz}`, `TimeRange` is `{start, end}`).
+
+- **`format=json`** (default): the document `{schema, generated_at, region, span, site, occupancy {bands, channels, truncated}, top_emitters[], change_vs_baseline {status, baseline?, resolution?, changes[]}, coverage, provenance_steps[], anomalies[], warnings[]}`. `generated_at` is the stream time the history has reached (never the wall clock).
+- **Coverage is mandatory** (`coverage {observed_fraction, observed_s, gaps[{freq, time}], gaps_truncated, never_observed[], poi[{tau_s, p_poi}], statement}`): POI for τ = 5 ms, 100 ms, 1 s, 10 s; gaps are unobserved stretches longer than twice the measured mean revisit, coalesced across adjacent frequency cells, longest first (≤ 64); `statement` always says unobserved is not quiet. Coverage comes from the observation log (T-115) when it holds visits for the box, else from history-tile coverage (a replay without the scheduler logs nothing); `warnings` names the source and, when it holds nothing for the box before some time inside the span (e.g. the log started mid-span), says that time is shown as unobserved, not quiet. A server that cannot disclose coverage (no spectrum history) answers `404` instead of a report.
+- **Occupancy.** One band row for the region and channel rows (FCO descending, ≤ 64, `truncated`) over **blind** channel extents: the inventory emitters' measured extents in the box, overlapping extents merged. `fco` is the unbiased figure from activity-independent visits only (ADR-0012 §2.5) and is never substituted: it is absent when the source cannot give it. Until the occupancy engine (T-118) lands, rows come from history-tile occupancy (floor + the pyramid margin), which mixes activity-driven dwells, so rows carry **no `fco`**: `fco_all_visits` = occupied grid rows / observed grid rows, `n_revisits_all` = observed grid rows (`n_revisits`/`n_occupied` 0), `revisit_biased: true`, `threshold.method: history-tile` with the pyramid `margin_db`, `fbo` = coverage-weighted tile occupancy, `timing: unknown`; channel rows sort by `fco`, then `fco_all_visits`; `warnings` says so.
+- **Top emitters** (≤ 20, most sightings in the span first): `emitter_id`, measured `freq`, `first_seen`/`last_seen`, `sightings` in the span, `lifecycle` (`candidate`/`confirmed`), channel `fco` and `fco_all_visits` (each copied from its channel row, so no `fco` from the tile stand-in), `top_suggestion` (the top-ranked explanation's service label: a suggestion, never truth) and `new_in_span`.
+- **Change vs baseline.** `status` is `unavailable` until baselines (T-119) land; `changes` is non-empty only when `available`. A warning states that no comparison is implied.
+- **Provenance steps** (time order): `{t, kind, freq?, detail}` with `kind` `gain` (LNA/VGA/amp or gain table), `calibration`, `spur-mask`, `antenna-port`, `sample-drop`, … from the history tiles' provenance, e.g. `detail: "lna 32→24 dB"`. Overload share and mixed calibration appear in `warnings`.
+- **`format=csv`** (`text/csv; charset=utf-8`): `#` comment lines carrying the coverage statement, observed fraction, POI and baseline status; then `row,f_lo_hz,f_hi_hz,t0_s,t1_s,fco,fco_all_visits,fbo,n_revisits,n_occupied,n_revisits_all,observed_s,revisit_biased` (`fco` empty when unavailable) with `band` and `channel` rows, then `gap` and `never_observed` rows.
+- **`format=png`** (`image/png`): tile-occupancy heatmap over the report's own history grid (time down, frequency right; one pixel per cell, the same grid the JSON/CSV use), unobserved cells grey with a diagonal hatch.
+
+**Grid budget.** The report reads the finest history level within 4096 time rows × 1024 frequency columns and 500 000 cells (the `/api/history` `MAX_API_CELLS` budget), else the top level if it fits 500 000 cells; a box larger than that even at the top level is `400`. The grid is read in ≤ 256-row chunks, each under its own short history lock, so a report never locks ingest out for its whole build; e.g. 48 h × 20 MHz on the default ladder is 192 × 800 cells (15 min × 25 kHz).
+
+Errors: `400` (bad region/span, a box over the grid budget, `site` or `format`), `404` (no coverage source), `405` (not GET), `500` (store failure), `503` (no report service on this server). The `/api/history` region filters (time and frequency) are unchanged; source and site filters are not served yet (history tiles are not keyed by source or site).
+
 ## Attention and memory (planned, M2; ADR-0012)
 
-**Planned, not served yet.** None of these routes are in `ROUTES` today, except the observation log's (above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+**Planned, not served yet.** None of the routes below are in `ROUTES` today (the observation log's, occupancy's, T-119's sites, baselines, candidates and weights, the attention scheduler's, and the survey report's have landed and moved to their own sections above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
 - **Contracts:** [ADR-0012](adr/0012-attention-memory-contracts.md).
 - **Schemas:** `hk_model::attention` (observation records, `OccupancyStat`, baselines, `CandidateSet`, `SurveyReport`, alarm detail).
 
@@ -552,23 +691,6 @@ Conventions:
 
 | Method | Path | Owner | Purpose |
 |---|---|---|---|
-| GET | `/api/occupancy` | T-118 | `?f_lo&f_hi&t0&t1[&subject=channel\|band][&interval=15m\|1h][&site]`: `OccupancyStat` rows |
-| GET | `/api/channels` | T-118 | `?f_lo&f_hi[&site]`: the learned channel plan (with raster suggestions) |
-| GET | `/api/sites` | T-119 | Known sites |
-| GET | `/api/sites/current` | T-119 | Current `SiteKey` and how it was set |
-| PUT | `/api/sites/current` | T-119 | Set or confirm the current site (audited) |
-| PUT | `/api/sites/{id}` | T-119 | Rename a site or set its UTC offset (audited) |
-| GET | `/api/baselines` | T-119 | `?site`: baseline keys, maturity per pool, frozen time, change points |
-| GET | `/api/baselines/slots` | T-119 | `?site&f_lo&f_hi[&slot][&resolution]`: slot statistics for plotting |
-| POST | `/api/baselines/refreeze` | T-119 | Re-freeze the reference for a site/region (audited) |
-| GET | `/api/candidates` | T-119 | `?[f_lo&f_hi][&limit]`: latest ranked `CandidateSet` slice with score components |
-| GET | `/api/attention/weights` | T-119 | Current score weights and version |
-| PUT | `/api/attention/weights` | T-119 | New weights version (audited) |
-| GET | `/api/scheduler` | T-120 | Tier shares over the floor window, sweep-floor status, provider version, POI per region |
-| GET | `/api/scheduler/arms` | T-120 | Arm table: key, index, mean reward, dwell-seconds, staleness, banned |
-| POST | `/api/scheduler/leases` | T-120 | Create a user pin lease ("watch this") (audited) |
-| DELETE | `/api/scheduler/leases/{id}` | T-120 | Release a lease (audited) |
-| GET | `/api/report` | T-121 | `?f_lo&f_hi&t0&t1[&site][&format=json\|csv\|png]`: `SurveyReport` or its export |
 | GET | `/api/anomalies` | T-122 | `?[f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`: anomalies (all kinds, including novelty alarms) with top explanations |
 | GET | `/api/anomalies/{id}` | T-122 | One anomaly: `AlarmDetail`, ranked explanations, status history |
 | POST | `/api/anomalies/{id}/dismiss` | T-122 | Dismiss (audited) |

@@ -1933,7 +1933,363 @@ fn observation_log_routes_answer_as_documented() {
     stop_server(serving);
 }
 // T-118 occupancy
+
+/// T-118: `/api/channels` and `/api/occupancy` (series and span) answer the documented shapes;
+/// bad queries are 400 and other methods 405.
+#[test]
+fn occupancy_and_channel_routes_answer_as_documented() {
+    let (serving, addr) = start_server();
+    let (t0, t1) = (unix_now() - 600.0, unix_now() + 5.0);
+    let q = format!("f_lo=100000000&f_hi=101600000&t0={t0}&t1={t1}");
+
+    let (status, v) = get(addr, "/api/channels?f_lo=100000000&f_hi=101600000");
+    assert_eq!(status, 200, "{v}");
+    assert!(v["plan_version"].is_u64() && v["scheme"].is_u64(), "{v}");
+    assert!(v["f_cell_hz"].as_f64().is_some_and(|f| f > 0.0), "{v}");
+    assert_eq!(v["source"], "learned-from-detections");
+    for c in v["channels"].as_array().expect("channels array") {
+        assert!(
+            is_object(&c["key"]) && c["f_lo_hz"].is_f64() && c["obw_hz"].is_f64(),
+            "{c}"
+        );
+    }
+
+    for interval in ["15m", "1h", "span"] {
+        let (status, v) = get(addr, &format!("/api/occupancy?{q}&interval={interval}"));
+        assert_eq!(status, 200, "{interval}: {v}");
+        assert_eq!(v["interval"], interval);
+        assert!(is_array(&v["rows"]), "{v}");
+        assert_eq!(v["truncated"], false);
+        assert!(v["plan_version"].is_u64() && v["f_cell_hz"].is_f64(), "{v}");
+        assert_eq!(v["coverage"]["unobserved_is_not_quiet"], true);
+        assert!(v["coverage"]["rows"].is_u64() && v["coverage"]["rows_with_fco"].is_u64());
+        for r in v["rows"].as_array().unwrap() {
+            assert!(is_object(&r["subject"]) && !r["interval"].is_null(), "{r}");
+            assert!(
+                r["subject_extent"]["f_lo_hz"].is_f64() && r["n_revisits"].is_u64(),
+                "{r}"
+            );
+            assert_eq!(r["revisit_biased"], false);
+        }
+    }
+    let (status, v) = get(
+        addr,
+        &format!("/api/occupancy?{q}&subject=band&interval=span"),
+    );
+    assert_eq!(status, 200, "{v}");
+    for r in v["rows"].as_array().unwrap() {
+        assert_eq!(r["subject"]["kind"], "band", "{r}");
+    }
+
+    for bad in [
+        "/api/channels?f_lo=2&f_hi=1".to_string(),
+        format!("/api/occupancy?f_lo=1&t0={t0}&t1={t1}"),
+        format!("/api/occupancy?{q}&interval=2h"),
+        format!("/api/occupancy?{q}&subject=cell"),
+        format!("/api/occupancy?f_lo=1&f_hi=2&t0={t1}&t1={t0}"),
+        format!("/api/occupancy?f_lo=0&f_hi=1000000000&t0={t0}&t1={t1}&interval=span"),
+    ] {
+        let (status, v) = get(addr, &bad);
+        assert_eq!(status, 400, "{bad}: {v}");
+        assert_eq!(v["code"], "invalid", "{bad}: {v}");
+    }
+    let (status, _) = post(addr, &format!("/api/occupancy?{q}"), "{}");
+    assert_eq!(status, 405);
+    let (status, _) = post(addr, "/api/channels?f_lo=1&f_hi=2", "{}");
+    assert_eq!(status, 405);
+    stop_server(serving);
+}
 // T-119 sites, baselines, candidates, weights
+
+/// T-119: `/api/sites[...]`, `/api/baselines[...]`, `/api/candidates` and
+/// `/api/attention/weights` answer with the documented shapes: unassigned start (baselines 409),
+/// a user site pinned by name, rename, empty baselines/slots/refreeze on a fresh site, an empty
+/// version-0 candidate set, versioned weights (v1 defaults → v2), and 400/404/405/401 refusals.
+#[test]
+fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
+    let (serving, addr) = start_server();
+
+    let (st, v) = get(addr, "/api/sites");
+    assert_eq!(st, 200, "{v}");
+    assert!(is_array(&v["sites"]), "{v}");
+    assert_eq!(v["current"]["kind"], "unassigned", "{v}");
+    let (st, v) = get(addr, "/api/baselines");
+    assert_eq!((st, &v["code"]), (409, &json!("conflict")), "{v}");
+
+    let (st, v) = put(
+        addr,
+        "/api/sites/current",
+        &json!({"name": "contract-home", "utc_offset_min": 60}).to_string(),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (&v["site"]["kind"], &v["set_by"], &v["pinned"]),
+        (&json!("site"), &json!("user"), &json!(true)),
+        "{v}"
+    );
+    let id = v["record"]["id"].as_str().unwrap().to_owned();
+    for key in [
+        "name",
+        "radius_m",
+        "utc_offset_min",
+        "source",
+        "first_seen",
+        "last_seen",
+    ] {
+        assert!(!v["record"][key].is_null(), "{key}: {v}");
+    }
+    let (st, v) = get(addr, "/api/sites/current");
+    assert_eq!(
+        (st, v["site"]["id"].as_str()),
+        (200, Some(id.as_str())),
+        "{v}"
+    );
+    let (st, v) = put(addr, "/api/sites/current", "{}");
+    assert_eq!((st, &v["code"]), (400, &json!("invalid")), "{v}");
+
+    let (st, v) = put(
+        addr,
+        &format!("/api/sites/{id}"),
+        &json!({"name": "contract-home-2"}).to_string(),
+    );
+    assert_eq!((st, &v["name"]), (200, &json!("contract-home-2")), "{v}");
+    let (st, v) = put(
+        addr,
+        &format!("/api/sites/{id}"),
+        &json!({"x": 1}).to_string(),
+    );
+    assert_eq!(st, 400, "{v}");
+    let (st, v) = put(
+        addr,
+        "/api/sites/00000000-0000-7000-8000-000000000000",
+        &json!({"name": "nobody"}).to_string(),
+    );
+    assert_eq!((st, &v["code"]), (404, &json!("not_found")), "{v}");
+
+    let (st, v) = get(addr, "/api/baselines");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["site"].as_str(), Some(id.as_str()), "{v}");
+    assert!(is_array(&v["baselines"]) && v["slot"].is_u64(), "{v}");
+    let (st, v) = get(
+        addr,
+        "/api/baselines/slots?f_lo=100000000&f_hi=101000000&resolution=all-hours",
+    );
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        is_array(&v["subjects"]) && v["truncated"] == json!(false),
+        "{v}"
+    );
+    let (st, _) = get(addr, "/api/baselines/slots?f_lo=100000000");
+    assert_eq!(st, 400);
+    let (st, v) = post(addr, "/api/baselines/refreeze", "{}");
+    assert_eq!((st, &v["refrozen"]), (200, &json!(0)), "{v}");
+
+    let (st, v) = get(addr, "/api/candidates?limit=10");
+    assert_eq!(st, 200, "{v}");
+    assert!(v["version"].is_u64() && is_array(&v["candidates"]), "{v}");
+    assert_eq!(v["truncated"], json!(false), "{v}");
+    assert!(is_object(&v["weights"]) && !v["site"].is_null(), "{v}");
+    let (st, _) = get(addr, "/api/candidates?limit=0");
+    assert_eq!(st, 400);
+
+    let (st, v) = get(addr, "/api/attention/weights");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (&v["weights"]["version"], &v["weights"]["novelty"]),
+        (&json!(1), &json!(2.0))
+    );
+    assert!(is_array(&v["history"]) && is_object(&v["defaults"]), "{v}");
+    let w = json!({"snr": 1, "novelty": 3, "class_entropy": 1, "decoder": 0.5,
+        "periodicity": 0.5, "boring": 1});
+    let (st, v) = put(addr, "/api/attention/weights", &w.to_string());
+    assert_eq!((st, &v["weights"]["version"]), (200, &json!(2)), "{v}");
+    let (_, v) = get(addr, "/api/attention/weights");
+    assert_eq!(
+        (&v["weights"]["version"], &v["history"][0]["version"]),
+        (&json!(2), &json!(2))
+    );
+    let mut bad = w.clone();
+    bad["snr"] = json!(11);
+    let (st, v) = put(addr, "/api/attention/weights", &bad.to_string());
+    assert_eq!((st, &v["code"]), (400, &json!("invalid")), "{v}");
+    let (st, _) = call(
+        addr,
+        "PUT",
+        "/api/attention/weights",
+        None,
+        Some(&w.to_string()),
+    );
+    assert_eq!(st, 401);
+    let (st, _) = delete(addr, "/api/attention/weights");
+    assert_eq!(st, 405);
+    stop_server(serving);
+}
 // T-120 scheduler
+// T-127 scheduler routes
+
+/// T-127: `/api/scheduler*` answer the documented shapes on a run without the scheduler
+/// (`hk serve`): reads say `"scheduler": null`, POI rows come from the observation log when a box
+/// is given (unobserved is a gap, never quiet; a bare read computes no POI), lease changes are
+/// refused with 409 (bad bodies and ids with 400), other methods with 405, and no token with 401.
+/// A full lease table (409 `table_full`) and a control-thread timeout (503 `busy`, cancelled)
+/// need a running scheduler: hk-api's `scheduler_failures_map_to_documented_statuses` and
+/// hk-pipeline's `a_lease_command_that_timed_out_never_applies` cover them.
+#[test]
+fn scheduler_routes_answer_as_documented_without_a_scheduler() {
+    let (serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    let auth = Some(bearer.as_str());
+
+    let (st, v) = call(addr, "GET", "/api/scheduler", auth, None);
+    assert_eq!(st, 200, "{v}");
+    assert!(v["scheduler"].is_null(), "{v}");
+    assert_eq!(v["leases"], json!([]));
+    assert_eq!(v["poi"], json!([]));
+    assert_eq!(v["observation_log"], json!(true));
+
+    let (t0, t1) = (unix_now() - 60.0, unix_now());
+    let path = format!("/api/scheduler?f_lo=100000000&f_hi=102000000&t0={t0}&t1={t1}&tau_s=0.1,1");
+    let (st, v) = call(addr, "GET", &path, auth, None);
+    assert_eq!(st, 200, "{v}");
+    let rows = v["poi"].as_array().expect("poi rows");
+    assert_eq!(rows.len(), 1, "{v}");
+    let row = &rows[0];
+    assert_eq!(row["f_lo"], 100_000_000.0);
+    assert_eq!(row["cells"], 2);
+    for key in [
+        "observed_cells",
+        "observed_fraction",
+        "gap_threshold_s",
+        "gaps_truncated",
+    ] {
+        assert!(!row[key].is_null(), "{key} in {row}");
+    }
+    let taus: Vec<f64> = row["poi"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            assert!(e["p_poi"].is_number() && e["p_poi_min"].is_number(), "{e}");
+            e["tau_s"].as_f64().unwrap()
+        })
+        .collect();
+    assert_eq!(taus, vec![0.1, 1.0]);
+    assert!(row["gaps"].is_array());
+    assert_eq!(v["poi_truncated"], json!(false));
+
+    let (st, v) = call(addr, "GET", "/api/scheduler?f_lo=5", auth, None);
+    assert_eq!(st, 400, "unpaired region refused: {v}");
+
+    let (st, v) = call(addr, "GET", "/api/scheduler/arms", auth, None);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (v["scheduler"].clone(), v["arms"].clone()),
+        (json!(false), json!([]))
+    );
+    let (st, v) = call(addr, "GET", "/api/scheduler/leases", auth, None);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["leases"], json!([]));
+
+    let (st, v) = call(addr, "POST", "/api/scheduler/leases", auth, Some("{}"));
+    assert_eq!(st, 400, "a lease needs center_hz: {v}");
+    let body = json!({ "center_hz": STATION_HZ, "kind": "user-pin", "duration_s": 5 }).to_string();
+    let (st, v) = call(addr, "POST", "/api/scheduler/leases", auth, Some(&body));
+    assert_eq!(st, 409, "no scheduler on this run: {v}");
+    let (st, v) = call(addr, "DELETE", "/api/scheduler/leases/abc", auth, None);
+    assert_eq!(st, 400, "{v}");
+    let (st, v) = call(addr, "DELETE", "/api/scheduler/leases/5", auth, None);
+    assert_eq!(st, 409, "{v}");
+
+    let (st, v) = call(addr, "POST", "/api/scheduler", auth, Some("{}"));
+    assert_eq!(st, 405, "{v}");
+    let (st, _) = call(addr, "GET", "/api/scheduler", None, None);
+    assert_eq!(st, 401);
+    stop_server(serving);
+}
 // T-121 reports
+
+/// T-121: `/api/report` answers a `SurveyReport` (coverage and POI always disclosed, baseline
+/// comparison explicitly unavailable) and backend-rendered CSV/PNG exports.
+#[test]
+fn report_route_serves_document_and_exports() {
+    let (serving, addr) = start_server();
+    let now = unix_now();
+    let region = format!(
+        "f_lo={}&f_hi={}&t0={}&t1={}",
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+        now - 7.0 * 86_400.0,
+        now + 60.0
+    );
+    let (st, v) = get(addr, &format!("/api/report?{region}"));
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "schema",
+        "generated_at",
+        "region",
+        "span",
+        "site",
+        "occupancy",
+        "top_emitters",
+        "change_vs_baseline",
+        "coverage",
+        "provenance_steps",
+        "anomalies",
+        "warnings",
+    ] {
+        assert!(v.get(field).is_some(), "report missing {field}: {v}");
+    }
+    let c = &v["coverage"];
+    for field in [
+        "observed_fraction",
+        "observed_s",
+        "gaps",
+        "gaps_truncated",
+        "never_observed",
+        "poi",
+        "statement",
+    ] {
+        assert!(c.get(field).is_some(), "coverage missing {field}: {v}");
+    }
+    assert_eq!(c["poi"].as_array().map(Vec::len), Some(4), "{v}");
+    assert!(
+        c["statement"].as_str().unwrap().contains("not quiet"),
+        "{v}"
+    );
+    assert_eq!(v["change_vs_baseline"]["status"], "unavailable", "{v}");
+    assert!(is_array(&v["occupancy"]["channels"]) && is_array(&v["top_emitters"]));
+
+    let (st, ct, body) = get_raw(addr, &format!("/api/report?{region}&format=csv"));
+    assert_eq!((st, ct.as_str()), (200, "text/csv; charset=utf-8"));
+    let text = String::from_utf8(body).unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("# coverage:") && l.contains("not quiet")),
+        "{text}"
+    );
+    assert!(text.lines().any(|l| l.starts_with("row,f_lo_hz,f_hi_hz")));
+    let (st, ct, body) = get_raw(addr, &format!("/api/report?{region}&format=png"));
+    assert_eq!((st, ct.as_str()), (200, "image/png"));
+    assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+    for bad in [
+        format!("/api/report?{region}&format=xml"),
+        format!("/api/report?{region}&site=nowhere"),
+        "/api/report?f_lo=2&f_hi=1&t0=0&t1=1".to_owned(),
+        // Over the report grid budget even at the coarsest history level.
+        "/api/report?f_lo=1&f_hi=1000000000000&t0=0&t1=172800".to_owned(),
+    ] {
+        let (st, v) = get(addr, &bad);
+        assert_eq!(st, 400, "{bad}: {v}");
+    }
+    let (st, _) = call(
+        addr,
+        "POST",
+        &format!("/api/report?{region}"),
+        Some(&format!("Bearer {TOKEN}")),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
+    stop_server(serving);
+}
 // T-122 anomalies

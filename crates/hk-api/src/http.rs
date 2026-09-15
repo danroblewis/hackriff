@@ -15,6 +15,9 @@
 //! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
 //! | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | GET | token | T-115 observation log records in a box ([`crate::observations`]) |
 //! | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | GET | token | T-115 observation totals, per-channel totals, gaps and POI ([`crate::observations`]) |
+//! | `/api/scheduler[?f_lo&f_hi][&t0&t1][&tau_s]` | GET | token | T-127 tier shares, sweep floor, bandit summary, leases, POI + gaps from the observation log ([`crate::schedule`]) |
+//! | `/api/scheduler/arms`, `/api/scheduler/leases[/<id>]` | GET, POST, DELETE | token (header only for mutating) | T-127 bandit arm table; lease list, create, release ([`crate::schedule`]) |
+//! | `/api/report?f_lo&f_hi&t0&t1[&site][&format]` | GET | token | T-121 survey report (`SurveyReport` JSON, or CSV/PNG export) with mandatory coverage and POI ([`crate::reports`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
@@ -145,9 +148,28 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/observations"),
     ("GET", "/api/observations/coverage"),
     // T-118 occupancy
+    ("GET", "/api/occupancy"),
+    ("GET", "/api/channels"),
     // T-119 sites, baselines, candidates, weights
+    ("GET", "/api/sites"),
+    ("GET", "/api/sites/current"),
+    ("PUT", "/api/sites/current"),
+    ("PUT", "/api/sites/{id}"),
+    ("GET", "/api/baselines"),
+    ("GET", "/api/baselines/slots"),
+    ("POST", "/api/baselines/refreeze"),
+    ("GET", "/api/candidates"),
+    ("GET", "/api/attention/weights"),
+    ("PUT", "/api/attention/weights"),
     // T-120 scheduler
+    // T-127 scheduler routes
+    ("GET", "/api/scheduler"),
+    ("GET", "/api/scheduler/arms"),
+    ("GET", "/api/scheduler/leases"),
+    ("POST", "/api/scheduler/leases"),
+    ("DELETE", "/api/scheduler/leases/{id}"),
     // T-121 reports
+    ("GET", "/api/report"),
     // T-122 anomalies
 ];
 
@@ -223,9 +245,19 @@ pub struct ApiState {
     pub captures: Option<Arc<dyn hk_stream::inspector::CaptureSource>>,
     /// Decoder-workbench recipe runtime (T-088, [`crate::recipes`]); `None` answers 503.
     pub recipes: Option<Arc<dyn crate::recipes::RecipeControl>>,
+    /// Occupancy engine (T-118, [`crate::occupancy`]); `None` answers 503.
+    pub occupancy: Option<Arc<dyn crate::occupancy::OccupancyControl>>,
     /// T-115: the observation log for `/api/observations` ([`crate::observations`]); `None`
     /// answers 503.
     pub observations: Option<hk_store::observation::ObservationStore>,
+    /// T-119: sites, baselines, candidates and score weights ([`crate::attention`]); `None`
+    /// answers 503.
+    pub attention: Option<Arc<dyn crate::attention::AttentionControl>>,
+    /// T-127: the run's scheduler for `/api/scheduler*` ([`crate::schedule`]); `None` answers
+    /// reads with `"scheduler": null` and refuses lease changes.
+    pub scheduler: Option<Arc<dyn crate::schedule::SchedulerControl>>,
+    /// T-121: survey reports for `/api/report` ([`crate::reports`]); `None` answers 503.
+    pub reports: Option<Arc<dyn crate::reports::ReportControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -717,6 +749,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/floor"
         | "/api/inventory"
         | "/api/analysis/strongest"
+        | "/api/report"
         | "/api/status"
             if !get =>
         {
@@ -737,6 +770,14 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
                 return respond(&mut stream, 200, content_type, "", &body);
             }
             Ok(None) => history(state, &req),
+            Err(e) => Err(e),
+        },
+        // T-121: the report document, or its CSV/PNG export.
+        "/api/report" => match crate::reports::serve(state, &req.query) {
+            Ok(crate::reports::Served::Export(content_type, body)) => {
+                return respond(&mut stream, 200, content_type, "", &body);
+            }
+            Ok(crate::reports::Served::Json(v)) => Ok(v),
             Err(e) => Err(e),
         },
         "/api/floor" => floor(state, &req),

@@ -50,6 +50,11 @@ mod inventory_lifecycle;
 #[path = "acceptance/scene_48h.rs"]
 mod scene_48h;
 
+#[path = "acceptance/report_scene.rs"]
+mod report_scene;
+#[path = "acceptance/t118_occupancy.rs"]
+mod t118_occupancy;
+
 #[path = "acceptance/hil_hackrf.rs"]
 mod hil_hackrf;
 

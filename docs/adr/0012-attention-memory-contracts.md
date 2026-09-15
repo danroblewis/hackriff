@@ -114,7 +114,7 @@ The log lives in hk-store `observation/` (T-115):
 - **`dynamic`** (default): the floor is estimated from the lowest `idle_fraction` (0.8, the "80 % method") of the channel's per-revisit levels over the interval, then `guard_db` (default 5, allowed 3–20) is added.
 - **`pre-set`:** `level_db` is receiver sensitivity plus the service's required S/N.
 
-The floor used by `dynamic` may also be the C08 tracker floor when present. The exact 80 % procedure is to be checked against SM.2256 by T-118 (**unverified**: this ADR restates docs/04 §3.9, not the Report text).
+The floor used by `dynamic` may also be the C08 tracker floor when present. **Verified by T-118 against the Report SM.2256-1 text ("Calculated threshold", citing SM.1753):** the 80 % method discards the highest 80 % of the samples and **linearly averages the remaining lowest 20 %**; the threshold is then 3–5 dB above that noise level. The Report recommends recomputing it per scan and notes it only works over a band or several equal-bandwidth channels (a busy channel raises its own floor). `idle_fraction` is therefore the *discarded* share. T-118 prefers the history's bias-corrected `floor_db` (T-116, the C08/C26 floor) and falls back to the 80 % method pooled over the band's cells.
 
 ### 2.3 RBW < OBW correction
 
@@ -126,7 +126,16 @@ The Annex treats the FCO estimate as approximately normal, with error shrinking 
 - **Effective samples:** `n_eff = n·(1−ρ)/(1+ρ)` with ρ = exp(−T̄_R/τ_c) and τ_c = T_on·T_off/(T_on+T_off) from C10 timing (a two-state on/off process sampled every T̄_R). Unknown τ_c gives `n_eff = n`, flagged `independence_assumed`.
 - **Interval:** Wilson score at 90/95/99 % (`fraction_interval`), which is the normal approximation made well-behaved at FCO 0 and 1.
 
-T-118's blind test asserts FCO error falls inside this interval on T-117 Markov scenes. If it doesn't, T-118 changes `effective_samples` and amends this section. Whether this is the Annex's exact formula is **unverified**.
+T-118's blind test asserts FCO error falls inside this interval on T-117 Markov scenes. If it doesn't, T-118 changes `effective_samples` and amends this section.
+
+**T-118 amendment (ρ measured, formula unchanged).** A blind engine rarely has C10 on/off timing, so T-118 measures ρ as the lag-1 autocorrelation of the activity-independent visit states and passes τ_c = −T̄_R/ln ρ to `effective_samples`; ρ ≤ 0 gives `n_eff = n` (measured), a constant sequence leaves `independence_assumed` set.
+
+**What SM.2256-1 Annex 1 says (verified by T-118 from the Report text).** The Annex does not define an interval formula; it gives sample-size rules for an absolute error ΔSO at confidence P_SOC:
+- **Pulsed signals** (A18/A19): J_min = SO(1−SO)(x_p/ΔSO)², the binomial normal approximation; Wilson is its well-behaved form (Table A2 reproduced in a unit test).
+- **Lengthy signals** (A12/A16): J_min = x_p/(2ΔSO)·√(V_avr(1.06+δT²)), driven by the number of state changes V rather than by SO (Table A1 reproduced with the A16 constant 194.2; the A12 layout is inferred from A16 and Table A1 because the PDF text extraction garbles it).
+- **Unstable revisit times** (A5.1.2, δT > 10 %): accumulate T_AI += T_Rj and T_O += T_Rj (both ends occupied) or T_Rj/2 (a change), SOCR = T_O/T_AI, which is exactly §2.5's half-gap weighting.
+
+**`fco_window` (additive, T-118).** §2.5 rule 4 records the window used in `OccupancyStat::fco_window`.
 
 ### 2.5 Observation-time weighting against revisit bias
 
@@ -205,6 +214,9 @@ These give mean, standard deviation, FCO and max; merging equals sequential addi
 - **Adaptive copy:** the same statistics with exponential forgetting (`half_life_days` 14, in observed days).
 - **Change point:** a per-cell/channel CUSUM of (adaptive − reference)/σ_ref with slack `cusum_k_sigma` 0.5 and threshold `cusum_h_sigma` 8. Crossing raises a `change-point` alarm (§7).
 - **Re-freeze:** only by `POST /api/baselines/refreeze` (user), or after `auto_refreeze_days` if configured (default off).
+  - It copies the **decayed** adaptive statistics into the reference. With a 14-day half-life, a parked device's adaptive copy holds only a few hours (~3 h) of effective observed time per hour-of-week slot, so no slot is mature on its own. Resolution coarsens to the finest pool that is still ≥ 24 h, and slots below their hour-of-day maturity reopen reference learning.
+- **Reference learning (T-119):** a fold enters the reference only if it is clean, not provenance-explained, no change point is open or building (every CUSUM < h/2), and its slot's **hour-of-day pool is immature** (< 24 h). Learning therefore stops after ~24 parked days, which bounds slow-leak poisoning.
+  - The fold must also be not novel (novelty 0), **or** its novelty must be below the alarm "on" level (0.7, §7.2) while that hour-of-day pool is immature **and** it must not be novel (all z < 3) against the slot's own immature hour-of-day reference, whose adaptive copy must be within 2·`cusum_k_sigma` σ of it (no drift), and which must itself be novel against the coarse pool (an established pattern, not a change, explains the fold's novelty). Novelty is judged at the finest mature pool, which may be coarser than the slot's pattern. Without this exception, a sharply patterned channel (e.g. one busy hour a day) would stay novel against the all-hours pool and never accrue. Without the own-hour checks, a moderate new interferer would drain into the immature pool fold by fold, dragging the reference along, instead of raising a change point.
 
 A persistent new interferer thus becomes "normal" in the adaptive copy but stays flagged against the reference until the user accepts it (C12 pitfall: baseline poisoning).
 
@@ -314,6 +326,8 @@ An arm is a candidate **window**: `ArmKey { rf_path, center_q = round(center / a
 4. Mark them packed; repeat.
 5. Add one exploration arm per discovery hop not already covered, with prior 0.
 
+**Where packing runs (amended by T-127).** Packing allocates, so it never runs inside `next_step`. The owner calls `Scheduler::refresh_bandit()` at its decision boundaries: the pipeline control loop before each step, the T-114 simulator before each decision. `next_step` keeps using the last packed table until then. `refresh_bandit` is a lock-free version compare when nothing new was published.
+
 ### 5.2 Reward per dwell-second
 
 `DwellOutcome { seq, arm, dwell_s, new_detections, bursts, novelty_sum, valid_decodes, suspect_detections }` reaches the scheduler once detection, C12 and decoders have processed the dwell. Raw r = (1·new + 1·Σnovelty + 0.5·decodes + 0.1·bursts)/dwell_s, squashed to u = r/(r + 0.1/s) ∈ [0, 1) (`DwellOutcome::reward`). Suspect detections earn nothing and accrue "dwell-seconds wasted on suspect" (the T-114 metric).
@@ -325,7 +339,8 @@ An arm is a candidate **window**: `ArmKey { rf_path, center_q = round(center / a
   - `ū` starts from the arm's best `score_norm` with 5 pseudo dwell-seconds.
   - Ties go to the lower `ArmKey`. No RNG.
 - **Exploration floor:** 15 % of bandit time goes to the stalest feasible arm.
-- **Starvation bound:** every feasible arm is revisited within `max_arm_staleness_s` (30 min).
+- **Starvation bound:** every feasible **candidate** arm is revisited within `max_arm_staleness_s` (30 min).
+  - **Hop exploration arms are exempt (amended by T-127).** Exploration arms (prior 0, one per uncovered discovery hop) are served by the exploration floor and UCB, not the bound: tiling 0–6 GHz with 8 s exploration dwells cannot meet 30 minutes. The background sweep's pass still covers those hops gap-free (§5.7).
 - **Sweep floor:** the background sweep keeps ≥ 25 % of radio time over any 10-min window unless interactive intent holds the radio, so discovery never starves. When leases make the floor unmeetable, that is recorded and disclosed (§5.5), not hidden.
 - **Suspects (C05):** a `needs_verification` candidate gets exactly one verification group, using the existing S4 gain-step/retune machinery.
   - Pass: C12 clears the flag.
@@ -362,7 +377,7 @@ T-120 uses `SharedInterestingness`. The simulator (T-114) and hk-core tests publ
 - **Gap-free discovery coverage:** pass geometry is unchanged. Bandit dwells occupy the slots `dwells_per_cycle` occupies today, and a pass interrupted by any tier resumes at its position.
 - **TX gated:** no tier or reason is a TX slot; `request_tx_slot` still returns `TxGated`.
 - **Determinism:** output depends on plan, config, capabilities, clock readings and the call sequence, where "call sequence" now includes each `snapshot()` taken (keyed by `version`) and each `record_outcome`. Floating-point ties break on `ArmKey`.
-- **Allocation:** `next_step` stays allocation-free. Packing happens when a new version is seen, into preallocated tables.
+- **Allocation:** `next_step` stays allocation-free, including after a new provider version is published. Packing happens in `refresh_bandit` (§5.1), off `next_step`, into preallocated tables.
 
 ### 5.8 Low-power modes
 
