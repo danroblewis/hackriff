@@ -1551,20 +1551,25 @@ fn a_seam_guard_keeps_hop_seams_inside_the_passband() {
     ));
 }
 
-/// T-173 (a priori): every covered cell has, within two discovery passes, a sweep step whose
-/// usable span contains it and whose LO lies outside the detector's DC rule for a 45 kHz extent
-/// around it (`hk_detect::DcRule`: 15 kHz tolerance, 40 kHz widest flagged, plus 5 kHz of bin
-/// margin). Checked on a 5 kHz grid plus the points at and beside every LO, for a narrow 2 Msps
-/// band (the T-124 shape: cells at a hop's LO), SPACE-050's bands with RF-path cuts and an
-/// offset-tuned narrow band, and a band an exact multiple of the usable span (no room either
-/// side). The dither costs no revisit time: hop count, slices, even-pass centres and pass length
-/// equal the undithered plan's. Without it the narrow band has DC-only cells.
+/// T-173 (a priori): every covered cell has, within the plan's dither cadence (two discovery
+/// passes; T-181: eight for a single-hop plan), a sweep step whose usable span contains it and
+/// whose LO lies outside the detector's DC rule for a 45 kHz extent around it
+/// (`hk_detect::DcRule`: 15 kHz tolerance, 40 kHz widest flagged, plus 5 kHz of bin margin).
+/// Checked on a 5 kHz grid plus the points at and beside every LO and the worst-case points
+/// LO ± 40 kHz and ± 37.5 kHz (half the dither, and half T-173's 75 kHz; T-181), for a narrow 2 Msps band (the T-124 shape: cells at a
+/// hop's LO), SPACE-050's bands with RF-path cuts and an offset-tuned narrow band, a band an exact
+/// multiple of the usable span (no room either side), and a single-hop band. The dither costs no
+/// revisit time: hop count, slices, even-pass centres and pass length equal the undithered plan's.
+/// Without it the narrow and single-hop bands have DC-only cells, and so does the single-hop
+/// band over its first seven passes.
 #[test]
-fn every_covered_cell_has_an_off_dc_view_within_two_passes() {
+fn every_covered_cell_has_an_off_dc_view_within_its_dither_cadence() {
     use hk_detect::DcRule;
     use hk_detect::rules::dc_hit;
     const EXTENT_HZ: f64 = 45e3;
     const GRID_HZ: f64 = 5e3;
+    const MIDPOINT_HZ: f64 = 40e3;
+    const OLD_MIDPOINT_HZ: f64 = 37.5e3;
     let rule = DcRule::default();
     let mk = |regions, settings: Value| {
         plan(
@@ -1578,11 +1583,13 @@ fn every_covered_cell_has_an_off_dc_view_within_two_passes() {
     };
     // (cells, cells with no off-DC view, cells outside every step's usable span on even / odd
     // passes)
-    let views = |p: &hk_model::ScanPlan| {
+    // `passes`: discovery passes to run (default: the plan's dither cadence).
+    let views = |p: &hk_model::ScanPlan, passes: Option<usize>| {
         let mut s = hackrf(p);
         let compiled = s.plan().clone();
         let n = compiled.hops.len();
-        let steps = run(&mut s, 2 * n);
+        let every = compiled.dither_every_passes as usize;
+        let steps = run(&mut s, passes.unwrap_or(every) * n);
         assert!(steps.iter().all(|st| st.purpose.is_discovery()));
         let half = compiled.usable_span_hz / 2.0;
         let mut cells = Vec::new();
@@ -1590,8 +1597,18 @@ fn every_covered_cell_has_an_off_dc_view_within_two_passes() {
             let k = (h.covers.width_hz() / GRID_HZ).ceil() as usize;
             cells
                 .extend((0..=k).map(|i| (h.covers.lo_hz + i as f64 * GRID_HZ).min(h.covers.hi_hz)));
-            for lo in [h.center_on_pass(0), h.center_on_pass(1)] {
-                for d in [-EXTENT_HZ, -1.0, 0.0, 1.0, EXTENT_HZ] {
+            for lo in [h.center_on_pass(0), h.center_on_pass(every as u64 - 1)] {
+                for d in [
+                    -EXTENT_HZ,
+                    -MIDPOINT_HZ,
+                    -OLD_MIDPOINT_HZ,
+                    -1.0,
+                    0.0,
+                    1.0,
+                    OLD_MIDPOINT_HZ,
+                    MIDPOINT_HZ,
+                    EXTENT_HZ,
+                ] {
                     cells.push((lo + d).clamp(h.covers.lo_hz, h.covers.hi_hz));
                 }
             }
@@ -1620,7 +1637,12 @@ fn every_covered_cell_has_an_off_dc_view_within_two_passes() {
                 .filter(|&f| !pass.iter().any(|st| seen(f, st)))
                 .collect()
         };
-        let (even, odd) = (unseen(&steps[..n]), unseen(&steps[n..]));
+        // The first pass is undithered, the cadence's last one dithered.
+        let even = unseen(&steps[..n]);
+        let odd = steps
+            .get((every - 1) * n..every * n)
+            .map(unseen)
+            .unwrap_or_default();
         (compiled, cells.len(), no_off_dc, even, odd)
     };
     let narrow = || vec![region(433.0, 436.0, 1.0, None)];
@@ -1635,16 +1657,25 @@ fn every_covered_cell_has_an_off_dc_view_within_two_passes() {
         ]
     };
     let exact = || vec![region(100.0, 190.0, 1.0, None)];
+    let single = || vec![region(433.0, 434.2, 1.0, None)];
     for (name, regions, settings) in [
         ("narrow 2 Msps", narrow(), rate_2m.clone()),
         ("SPACE-050 + offset-tuned", space_050(), json!({})),
         ("exact multiple", exact(), json!({})),
+        ("single hop", single(), rate_2m.clone()),
     ] {
         let (compiled, n_cells, no_off_dc, even, odd) =
-            views(&mk(regions.clone(), settings.clone()));
-        assert_eq!(compiled.dc_dither_hz, 75e3, "{name}");
+            views(&mk(regions.clone(), settings.clone()), None);
+        assert_eq!(compiled.dc_dither_hz, 80e3, "{name}");
+        let single_hop = name == "single hop";
+        assert_eq!(compiled.hops.len() == 1, single_hop, "{name}");
+        assert_eq!(
+            compiled.dither_every_passes,
+            if single_hop { 8 } else { 2 },
+            "{name}"
+        );
         assert!(
-            compiled.hops.iter().all(|h| h.dither_hz.abs() == 75e3),
+            compiled.hops.iter().all(|h| h.dither_hz.abs() == 80e3),
             "{name}"
         );
         assert!(n_cells > 100, "{name}: {n_cells} cells");
@@ -1652,14 +1683,14 @@ fn every_covered_cell_has_an_off_dc_view_within_two_passes() {
             no_off_dc.is_empty(),
             "{name}: no off-DC view at {no_off_dc:?}"
         );
-        // Even passes see every cell; odd passes miss at most the lowest 75 kHz of a band whose
+        // Even passes see every cell; odd passes miss at most the lowest 80 kHz of a band whose
         // slices leave no room for the dither.
         assert!(even.is_empty(), "{name}: even pass misses {even:?}");
         for f in &odd {
             assert!(
                 compiled.hops.iter().any(|h| {
                     h.covers.lo_hz <= *f
-                        && *f <= h.covers.lo_hz + 75e3
+                        && *f <= h.covers.lo_hz + 80e3
                         && !compiled
                             .hops
                             .iter()
@@ -1671,16 +1702,30 @@ fn every_covered_cell_has_an_off_dc_view_within_two_passes() {
         // No revisit cost: the undithered plan has the same hops and pass length.
         let mut undithered = settings.clone();
         undithered["dc_dither_hz"] = json!(0.0);
-        let (plain, _, plain_no_off_dc, _, _) = views(&mk(regions, undithered));
+        let (plain, _, plain_no_off_dc, _, _) = views(&mk(regions.clone(), undithered), None);
         assert_eq!(plain.pass_ns, compiled.pass_ns, "{name}");
         assert_eq!(plain.hops.len(), compiled.hops.len(), "{name}");
         for (a, b) in plain.hops.iter().zip(&compiled.hops) {
             assert_eq!((a.center_hz, a.covers), (b.center_hz, b.covers), "{name}");
         }
-        if name == "narrow 2 Msps" {
-            assert!(!plain_no_off_dc.is_empty(), "the control has DC-only cells");
+        if name == "narrow 2 Msps" || single_hop {
+            assert!(
+                !plain_no_off_dc.is_empty(),
+                "{name}: the control has DC-only cells"
+            );
+        }
+        if single_hop {
+            // The cadence is what delivers the view: seven undithered passes leave DC-only cells.
+            let (_, _, short_no_off_dc, _, _) = views(&mk(regions, settings), Some(7));
+            assert!(!short_no_off_dc.is_empty(), "DC-only cells before pass 8");
         }
     }
+    // T-181: T-173's 75 kHz (= 2 × 15 kHz + 45 kHz) left zero margin: the inclusive DC rule flags
+    // the cells midway between the two LOs at both tunings. Hence 80 kHz.
+    let mut at_75k = rate_2m.clone();
+    at_75k["dc_dither_hz"] = json!(75e3);
+    let (_, _, zero_margin, _, _) = views(&mk(narrow(), at_75k), None);
+    assert!(!zero_margin.is_empty(), "75 kHz has DC-only midpoint cells");
     // Too narrow a usable span to dither: disclosed, not silently weakened.
     let mut tiny = rate_2m;
     tiny["usable_fraction"] = json!(0.1);
@@ -1688,9 +1733,111 @@ fn every_covered_cell_has_an_off_dc_view_within_two_passes() {
     assert_eq!(compiled.dc_dither_hz, 0.0);
     assert!(compiled.hops.iter().all(|h| h.dither_hz == 0.0));
     assert!(compiled.warnings.contains(&PlanWarning::DcDitherDisabled {
-        dither_hz: 75e3,
+        dither_hz: 80e3,
         usable_span_hz: 200e3,
     }));
+}
+
+/// T-181: a single-hop plan holds its tune between dithered passes. Over 32 passes a StepApplier
+/// tunes 8 times (the first step, away and back on passes 7, 15 and 23, away on 31) where
+/// alternate-pass dither (`single_hop_dither_every: 2`, T-173's behaviour) tunes on all 32 steps.
+/// A multi-hop plan keeps alternate-pass dither. A cadence below 2 is refused.
+#[test]
+fn single_hop_plans_dither_every_eighth_pass_and_hold_their_tune() {
+    use hk_core::scheduler::StepApplier;
+    use hk_core::{Gains, SourceControl, SourceError};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts tunes; accepts every other control.
+    struct Tunes(SourceCapabilities, AtomicUsize);
+    impl SourceControl for Tunes {
+        fn capabilities(&self) -> &SourceCapabilities {
+            &self.0
+        }
+        fn tune(&self, _: f64) -> Result<(), SourceError> {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn set_sample_rate(&self, _: f64) -> Result<(), SourceError> {
+            Ok(())
+        }
+        fn set_gains(&self, _: &Gains) -> Result<(), SourceError> {
+            Ok(())
+        }
+        fn set_baseband_filter(&self, _: f64) -> Result<(), SourceError> {
+            Ok(())
+        }
+        fn set_bias_tee(&self, _: bool) -> Result<(), SourceError> {
+            Ok(())
+        }
+        fn start(&self) -> Result<(), SourceError> {
+            Ok(())
+        }
+        fn stop(&self) -> Result<(), SourceError> {
+            Ok(())
+        }
+    }
+    const PASSES: usize = 32;
+    let mk = |lo_mhz, hi_mhz, settings: Value| {
+        plan(
+            "t181",
+            1,
+            vec![region(lo_mhz, hi_mhz, 1.0, None)],
+            ScanPolicy::SweepOnly,
+            vec![],
+            json!({ "scheduler": settings }),
+        )
+    };
+    // (tunes applied, compiled plan, steps) over PASSES discovery passes.
+    let tunes = |p: &hk_model::ScanPlan| {
+        let mut s = hackrf(p);
+        let compiled = s.plan().clone();
+        let steps = run(&mut s, PASSES * compiled.hops.len());
+        assert!(steps.iter().all(|st| st.purpose.is_discovery()));
+        let control = Arc::new(Tunes(SourceCapabilities::hackrf_one(), AtomicUsize::new(0)));
+        let mut applier = StepApplier::new(control.clone());
+        for st in &steps {
+            applier.apply(st).unwrap();
+        }
+        (control.1.load(Ordering::Relaxed), compiled, steps)
+    };
+
+    let (n_tunes, compiled, steps) = tunes(&mk(433.0, 435.0, json!({})));
+    assert_eq!(compiled.hops.len(), 1);
+    assert_eq!(compiled.dither_every_passes, 8);
+    let hop = compiled.hops[0];
+    assert_eq!(hop.dither_hz.abs(), 80e3);
+    let dithered: Vec<usize> = (0..PASSES).filter(|&i| steps[i].dither_pass).collect();
+    assert_eq!(dithered, [7, 15, 23, 31]);
+    for (i, st) in steps.iter().enumerate() {
+        let want = if st.dither_pass {
+            hop.center_hz + hop.dither_hz
+        } else {
+            hop.center_hz
+        };
+        assert_eq!(st.center_hz, want, "pass {i}");
+        assert_eq!(st.center_hz, hop.center_on_pass(i as u64), "pass {i}");
+    }
+    assert_eq!(n_tunes, 8, "single hop, default cadence");
+
+    let (n_tunes, compiled, _) = tunes(&mk(433.0, 435.0, json!({ "single_hop_dither_every": 2 })));
+    assert_eq!(compiled.dither_every_passes, 2);
+    assert_eq!(n_tunes, PASSES, "alternate-pass dither retunes every step");
+
+    let (_, compiled, steps) = tunes(&mk(400.0, 460.0, json!({})));
+    let n = compiled.hops.len();
+    assert!(n > 1);
+    assert_eq!(compiled.dither_every_passes, 2);
+    for (i, st) in steps.iter().enumerate() {
+        assert_eq!(st.dither_pass, (i / n) % 2 == 1, "step {i}");
+    }
+
+    let refused =
+        SchedulerConfig::from_plan(&mk(433.0, 435.0, json!({ "single_hop_dither_every": 1 })))
+            .unwrap()
+            .validate(&SourceCapabilities::hackrf_one());
+    assert!(matches!(refused, Err(PlanError::InvalidConfig(_))));
 }
 
 #[test]

@@ -13,9 +13,10 @@
 //!   default), less `seam_guard_fraction` so seams can sit inside the filter passband (default 0:
 //!   seams at ±7.5 MHz in the roll-off; see [`SchedulerConfig::seam_guard_fraction`] for the
 //!   sensitivity vs pass-length trade-off). Bands narrower than half a span are offset-tuned off
-//!   DC. Odd passes tune every hop `dc_dither_hz` (75 kHz) from its even-pass centre (T-173), so
+//!   DC. Odd passes tune every hop `dc_dither_hz` (80 kHz) from its even-pass centre (T-173), so
 //!   a cell inside one tuning's DC rule is observed off DC at the other within two passes, at no
-//!   extra hops. Dwell-only regions contribute long region windows instead of sweep hops. The pass visits
+//!   extra hops; a single-hop plan dithers every `single_hop_dither_every` (8) passes instead, so
+//!   it keeps holding one tune (T-181). Dwell-only regions contribute long region windows instead of sweep hops. The pass visits
 //!   hops by region priority, then frequency, and repeats; a plan update resumes at the
 //!   equivalent position instead of restarting.
 //! - **Alternation:** `sweeps_per_cycle` discovery steps, then up to `dwells_per_cycle` POI dwell

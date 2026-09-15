@@ -208,6 +208,10 @@ pub struct ScheduleStep {
     /// A cut or plan update restarts a group under a new (larger) id, so captures of different
     /// groups never pair ([`super::Verification`]). `None` outside verification groups.
     pub verification_group: Option<u64>,
+    /// T-181: a discovery step of a DC-dithered pass ([`super::Hop::dithered_on_pass`]), whether
+    /// or not its own hop could move. Observation records pick the pass geometry by it, so a hop
+    /// left undithered never splits a pass's record. `false` for every other purpose.
+    pub dither_pass: bool,
 }
 
 impl ScheduleStep {

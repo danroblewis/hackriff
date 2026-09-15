@@ -213,7 +213,7 @@ fn observation_log_through_the_mock_sdr_matches_the_tuned_windows_and_the_schedu
     );
 
     // Revisit counts: a channel only hop 0 covers is visited once per hop-0 visit that settled.
-    // Hop 0's outer edge on both pass parities (the dithered window is shifted by 75 kHz).
+    // Hop 0's outer edge on both pass parities (the dithered window is shifted by 80 kHz).
     let (w0, w0_odd) = (&g.hops[0], &g_odd.hops[0]);
     let edge = if expected.hops[1].center_hz > expected.hops[0].center_hz {
         let lo = w0.usable.lo_hz.max(w0_odd.usable.lo_hz);
