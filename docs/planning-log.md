@@ -2089,3 +2089,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Cost:** nextest fail-fast stopped at 1264/1365; acceptance passed 28/28.
   - **Fix:** pinned the test to heavy-serial with one retry; T-182 will make it deterministic.
   - **Next:** full check re-running.
+- **B0.451 T-178 committed (34b8229; coordinator ran final lint and amended the WIP). Opus review launched.**
+  - **Ring:** `ring.ci8` with fixed slots pre-allocated via `F_PREALLOCATE`/`fallocate` (8 GiB in 269 ms); oldest slot overwritten in place.
+  - **Journal:** `ring.journal` CRC-framed records; `ring.lock` ensures one run owns the ring.
+  - **Recovery:** stops at the first torn record and keeps only sealed slots, with CRC checks on the newest slots.
+  - **Quota handling:** a quota change keeps whatever still fits. Low space shrinks the ring or refuses below 2 slots.
+  - **Runs and flags:** segments carry `run`; flags unchanged.
+  - **ADR-0014 (PROVISIONAL).**
+  - **Tests:** hk-store 10, hk-pipeline 5 (restart clip byte-identical), hk-api/hk-cli 25; lint clean.
+  - **Concern for review:** `.config/nextest.toml` now enables nextest EXPERIMENTAL setup scripts to cap the ring at 16 MiB in tests. That conflicts with main's nextest pins and may be fragile.

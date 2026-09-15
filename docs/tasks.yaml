@@ -2824,7 +2824,8 @@ notes:
   - id: T-178
     milestone: MUI
     title: "IQ capture buffer as a PRE-ALLOCATED on-disk ring that survives restarts: allocate the full effective quota up front (fixed ring file or fixed set of fixed-size chunk files), overwrite oldest in place (no grow-and-delete), crash recovery re-reads ring + index on start; retention configurable via --iq-retention / --iq-buffer-max"
-    status: in-progress
+    status: review
+    commit: 34b8229
     deps: [T-157]
     parallel_group: MUI-API
     use_cases: []
