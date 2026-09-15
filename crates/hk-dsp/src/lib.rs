@@ -53,7 +53,7 @@ pub use channelizer::{
     ChannelHeader, ChannelSamples, ChannelTime, ChannelizerError, DEFAULT_CHANNEL_RESET_ON, Pfb,
     PfbBackend, PfbConfig, PfbOutput,
 };
-pub use ddc::{Ddc, DdcBlock, DdcError, DdcPlan, DdcSpec, ResampleKind};
+pub use ddc::{Ddc, DdcBlock, DdcError, DdcKernel, DdcPlan, DdcSpec, ResampleKind};
 pub use fft::{CpuFft, FftBackend};
 pub use filter::{DesignError, FirDesign, LowpassSpec, design_lowpass, pfb_prototype};
 pub use floor::{
