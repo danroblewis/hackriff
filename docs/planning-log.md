@@ -2021,3 +2021,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **T-174 launched (Opus): the live candidate path now uses the per-tuning DC twin rule.**
   - Reuses the T-172 helper, with a small per-cell recent-clean index.
   - Refuted DC flags don't count toward bandit suspect bans.
+- **B0.441 T-179 committed (8d38d3b, Sonnet): MUI bundle within budget via code splitting.**
+  - Build: esbuild `--splitting` ESM; `index.html` loads the entry as a module.
+  - Decode and Review load lazily on first use.
+  - Initial load: 78.1 KB min / 29.3 KB gzip (was 140.2 / 48.2). Lazy chunks: decode 10.0 KB gz, review 11.3 KB gz. CSS unchanged at 32.3 KB.
+  - No Rust change. npm test 20/20. Smoke: 20/20 checks at both viewports, including lazy Decode and Review.
+  - Merges after the timed T-175 full check.

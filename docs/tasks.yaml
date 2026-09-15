@@ -2834,7 +2834,8 @@ notes:
   - id: T-179
     milestone: MUI
     title: "MUI JS bundle over ADR-0013 gzip budget (48.2 KB vs 45 KB): trim or code-split rarely used panels (Decode plots/params, Review tabs), or re-baseline the budget with justification"
-    status: in-progress
+    status: review
+    commit: 8d38d3b
     deps: [T-156]
     parallel_group: MUI-FINAL
     use_cases: []
