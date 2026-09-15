@@ -513,3 +513,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.176 T-076 done** (526dc08, test-only). Adds a real-time paced listen_live test (PCM, squelch open, SNR ≥ 15 dB, refined centre within 5 kHz) and blind_live_paced; the targeted suite passes on the merged tree. T-075 and T-076 merge together after the T-071 verification (114 Rust test groups green so far), then one full check.
 - **B0.177 T-071 merge verified** (lint, 152 Rust test groups, py, ui, acceptance green). T-075 (short-burst detector) and T-076 (real-time paced Listen test) merged; worktrees removed (T-076's uncommitted copied fixture data discarded with it). One full check running.
 - **B0.178 T-064 hop-set tracker scaling launched** (Opus high, real-time path; background runs, targeted tests per budget rules). Running: T-077 (waiting on its timing job, told to merge main and group listen_live/concurrent_demod as serial) and T-064. Full check of main after the T-075/T-076 merges is running.
+- **B0.179 User request (start of message truncated) → T-078/T-079/T-080.**
+  - **T-078** (inferred scope): inventory candidates vs confirmed, blind auto-confirm rule, promote/delete API. Visible tests: FM station auto-confirms; intermittent FSK stays a candidate until promoted; a deleted entry leaves the list. Launched now (Opus medium, core interface).
+  - **T-079** (Sonnet medium): docs/api.md reference, HTTP contract tests on the mock device, UI decision logic moved into backend endpoints, CLAUDE.md thin-client rule. Next slot, after T-077.
+  - **T-080** (Sonnet medium): left sidebar, first/last seen columns removed, Candidates/Confirmed with Promote/Delete. After T-078 and T-079, since both touch ui/src.
+  - The user was asked to resend the truncated start.
