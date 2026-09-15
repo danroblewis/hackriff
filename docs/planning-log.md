@@ -1499,3 +1499,17 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Alarm evidence accumulation across intervals, CUSUM on per-interval z, and/or correcting `between_var` for sampling noise, versus denser scene visits.
     - What test (h) should expect.
   - **Artifacts:** diagnostic patch and logs in scratchpad `t146-*`. T-146 worktree removed; no commit.
+- **B0.379 User decisions and merges.**
+  - **Alarm evidence (user chose "accumulate + fix variance"):** the alarm path pools per-interval evidence across consecutive intervals, and `between_var` subtracts the expected binomial sampling noise. ADR-0012 §3.4/§7.2 amended; false-alarm budget kept. → T-146 re-scoped to implement it.
+  - **Gain step (user chose "no alarm + step disclosed"):** T-124 (h) passes when no alarm is raised and the step is disclosed in provenance.
+  - **T-143 merged (4b40f59):**
+    - Build and lint green; targeted nextest 641 run, 640 passed plus the fixed `stream_tail` test; acceptance 28 + 2 hardware-ignored.
+    - `listen_retune`'s non-legal coverage remains in `listen_lifecycle`.
+    - The drop-markers failure is an unrelated load flake (10/10 in isolation).
+  - **T-140 merged (3828015).** Both worktrees removed; full check started.
+  - **T-141 WIP (e1a3ade), root cause found:** the mock SDR re-rounds re-rendered scheduler hops to int8 a second time.
+    - The scene is quantisation-limited (noise ~0.5 code rms): single rounding predicts −100.77 dBFS/Hz against −100.81 measured; double rounding predicts −99.84 against −99.86 measured.
+    - Pipeline normalisation and gains are correct.
+    - Its fixed dequant filter narrows the gap to 0.62 dB, but attenuates later emitters by up to 1.2 dB, so it is not acceptable as is.
+    - Second finisher launched.
+  - **T-145 progress:** most slow tests are already unpaced (CPU-bound serial tests dominate). Only 2 tests switched; `api_contract` via `hk serve --device mock:` is still to judge. lld and cranelift are installed.

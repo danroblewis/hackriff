@@ -2207,7 +2207,8 @@ tasks:
   - id: T-140
     milestone: M2
     title: "Baseline hardening nits: SlotSeries packed()/packed_at() not public without the decay multiplier, assert the fold-equivalence fingerprint (reference-fold count exact, novelty sum 1e-9), debug_assert finite decay factor, share pool membership helper"
-    status: review
+    status: done
+    commit: 3828015
     deps: [T-137]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2251,7 +2252,8 @@ tasks:
   - id: T-143
     milestone: M2
     title: "Remove all legal/licensing tests (dedicated files, acceptance legal cases, legal sentinel assertions); runtime content gating stays but default-permissive, opt-in only, untested"
-    status: in-progress
+    status: done
+    commit: 4b40f59
     deps: []
     parallel_group: M2E
     use_cases: []
@@ -2294,8 +2296,8 @@ tasks:
   - id: T-146
     milestone: M2
     title: "Alarm path vs survey report disagree on baseline maturity: AlarmService suppresses every busier/level input as immature-baseline while the report shows the baseline available (injected channel busier z 11.4)"
-    status: blocked
-    blocked_on: "user decision: busier/quieter alarm evidence accumulation across intervals (ADR-0012 §3.4/§7.2) and gain-step expectation (§7.4)"
+    status: in-progress
+    decision: "user 2026-09-15: accumulate busier/quieter alarm evidence across consecutive intervals (sequential/Stouffer like the report) AND correct between_var for expected binomial sampling noise; ADR-0012 §3.4/§7.2 amended, false-alarm budget kept. Gain step: pass = no alarm + step disclosed in provenance (no explained-anomaly row)"
     deps: []
     parallel_group: M2A
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
