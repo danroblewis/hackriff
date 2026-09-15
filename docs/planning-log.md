@@ -539,3 +539,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.189 T-082 launched** after the T-078 merge (Opus medium): link decoder evidence to the track's emitter and merge existing duplicates. T-079 told the inventory routes are on main. Full check of main after T-078 is running with the nextest `just test` for the first time. Running: T-079, T-056, T-067, T-082. T-080 follows T-082; T-081 after T-080.
 - **B0.190 T-078 merge verified**, the first coordinator check on the nextest `just test`. 917 tests passed (5 skipped) in 126.9 s; the whole `just test` including doctests, Python and UI took 180.5 s against the old 914 s. Lint green; acceptance 22 passed, 1 ignored. Running: T-079, T-056, T-067, T-082.
 - **B0.191 Supervisor: M1 is being re-scoped by the user.** Decoders will be built inside hackriff from reusable blocks, not as per-protocol plugins. No M1 tasks are added until the M1 brief arrives; work continues on M0b (T-079, T-056, T-067, T-082 running; T-080, T-081, T-053 queued).
+- **B0.192 T-079 merged** (fc80c41).
+  - **API reference:** docs/api.md covers all 36 routes plus TCP and on-demand openers; a test keeps routes and docs in sync.
+  - **Contract tests:** 10 HTTP contract tests against a real `hk serve` on the mock device.
+  - **Logic moved:** peak picking is now backend `GET /api/analysis/strongest`.
+  - **CLAUDE.md:** thin-client rule added.
+  - **T-067:** told its new routes must be documented in docs/api.md (the sync test enforces it).
+  - **Next:** full check running.
