@@ -2213,3 +2213,20 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Fix:** an early pilot-locked write from the first 1 s, with RDS deferred to the full window. Test: signal_062_identify_latency.
   - **Watch:** concurrent_demod failed once under load.
   - **T-190 launched** (Sonnet) into the freed Rust slot. T-192 and T-194 marked in-progress.
+- **B0.470 T-124 green (00cbaf9) and merged to main.** acceptance_m2 passed 8/8 in 3 consecutive runs (75–87 s wall), thresholds unchanged. The only change: the band is built from the fixed scene centre.
+  - **Letter mapping, from T-124 acceptance order:**
+    - (a) FCO per channel (Wilson 95%, ≤2 of 7 outside, set a priori); every run learned 433.375 with 0 outside.
+    - (b)/(g) busier-than-usual alarm on the matured injected channel.
+    - (c) false-alarm bounds.
+    - (d) report coverage/POI.
+    - (e) simulator bandit vs round-robin.
+    - (f) wall time: kept in its own `just acceptance-m2` step.
+    - (h) gain step: no alarm, and disclosed as a provenance step.
+    - (i) new-emitter alarm.
+    - (j) restart keeps the pinned site.
+  - **M2 exit** pending the main full check plus acceptance-m2, now running.
+  - **Noted, not loosened:**
+    - (b) top explanation is `Unexplained`; the test only requires that the top cause isn't the device.
+    - (h) gain step shows 0 provenance-explained suppressions; the evidence is no alarm plus the disclosure.
+    - The bandit made only 4 dwells per run, a scene-design artefact.
+  - **Filed T-196:** span_stats FCO depends on the query band (433.475: 0.073 vs 0.296).

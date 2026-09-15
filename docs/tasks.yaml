@@ -1970,7 +1970,8 @@ tasks:
   - id: T-124
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
-    status: in-progress
+    status: review
+    commit: 00cbaf9
     deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128, T-129, T-130, T-131, T-132, T-133, T-146, T-147, T-173, T-176]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
@@ -3090,5 +3091,20 @@ notes:
     area: ui/src/app/explore (focus/output panels), ui/src/app/decode/inspector reuse
     needs: none
     model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-196
+    milestone: M2-hardening
+    title: "Occupancy span_stats FCO for a channel depends on the query band: 433.475 MHz lay inside both bands yet reported 0.073 (old band 433.2375-433.6875) vs 0.296 (fixed band 433.275-433.725), truth 0.258"
+    status: todo
+    priority: normal
+    deps: [T-124]
+    parallel_group: CONTEXT
+    use_cases: [AWARE-042]
+    found_by: "T-124 finisher report (2026-09-15), from T-184 repro runs"
+    acceptance: "root cause found (band-edge cell/hop coverage normalisation, channel extent clipping, or per-band denominator); a channel fully inside two query bands reports the same FCO and interval from both (hk-context test on a fixed observation log); no acceptance threshold changed"
+    area: crates/hk-context (occupancy span_stats), crates/hk-store radiometry if relevant
+    needs: none
+    model: opus
     effort: medium
     core_interface: false
