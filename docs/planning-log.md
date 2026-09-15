@@ -1886,3 +1886,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - One is a frame-spacing tolerance limited to recording loop splices. The review must check this isn't bending.
   - One was a product race: `hops.rs` `set_channels` refused with 409 before the first block. It now shares `planning_tune()` with pipeline start.
   - Still open: t057 at block 928, after a retune to 100.041 MHz at 3 Msps, 241 kHz from the recorded band edge. Station/floor is 3.3 against the threshold of 4, and the agent is profiling for a mock render bug vs a recording dip.
+- **B0.422 T-124 WIP (d610360, on merge 2752ad4): 4/8 pass.**
+  - **Passing:**
+    - (b/g) busier alarm: 2 revisits, z 8.51, against an a-priori limit of ≤63 (ADR §7.2 rule applied to the truth window).
+    - (i) new emitter: 4 revisits, one-shot, against ≤7.
+    - (e) and (j).
+  - **Failing:**
+    - (c) false alarms: 1 against a budget of 0.
+    - (h) gain step: disclosed, but 1 unexplained alarm follows it.
+    - Both come from **Bug 1, confirmed.** `baseline.rs:983-988`: the empty occupied pool falls back to idle (30.6 dB observed vs 0.47 dB baseline), 3.75 h after the VGA step. T-176 is already fixing it.
+    - (d) coverage: a T-124 test bug; its log-coverage count omitted sweep visits (4.15 s vs the report's 180.75 s).
+    - (a) per-channel FCO: 433.375 MHz (FCO 0.094) is never learned, although 0 of 5 matched channels fall outside their CI. **Bug 2 is unconfirmed:** 433.400 sits in a similar DC/edge spot and is learned.
+  - **Also noted:** only 3 bandit dwells (4.47 s) in the 46 h scene; check this isn't hiding an issue. Scenes run 546 s and 644 s.
+  - **Status:** T-124 is blocked on T-176. Its next round fixes (d), investigates (a) with T-172's twin LO rule in place, and re-checks bandit dwells.
