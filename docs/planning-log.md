@@ -955,3 +955,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Geometries written before their first referencing sweep in each segment.
 
   Tests: hk-core 6, hk-store 7, pipeline 4, api_contract 17, lint clean. **T-127 launched** (bandit wiring, routes, POI from the log, plus T-120 review follow-ups). T-118 and T-121 can now replace their observation stand-in providers with the T-115 store adapter. Full check running.
+- **B0.301 Full check of main d78142e (T-115): green.** Lint clean; nextest + UI 1227/1227 in 270 s; acceptance 30/30 (2 ignored HIL) in 60 s. M2 on main: T-113, T-114, T-115, T-116, T-117, T-120, T-125, T-126. In flight: T-118, T-119, T-121, T-127.
