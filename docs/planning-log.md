@@ -755,3 +755,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
   Lesson: the Sonnet tutorial agents stalled on Monitor waits and overran budget; future tutorial briefs say so explicitly.
 - **B0.262 T-095 (POCSAG tutorial, Sonnet) ended over budget at 7898e56; not merged.** The recipe is unmodified and validates, and a 4-channel synthetic pager scene was built. The blind acceptance test is `#[ignore]`: the inventory resolved only 1 of 4 channels (the others merged into 118 kHz / 49 kHz clusters), so follow_hops never got a channel set. **T-109** (fresh Opus, same worktree) takes over: find the merge stage, fix it blind, un-ignore. Pattern: both the ACARS (T-108) and POCSAG (T-109) tutorials hit **blind-detection gaps for bursty narrowband signals**, not decoder gaps. That's a real exploration-quality finding; T-108 and T-109 were told to keep hk-detect edits localised to avoid colliding. Multi-baud per-channel follow_hops is noted as an architecture limit.
+- **B0.263 T-107 merged** (74c9a9e). Changes:
+  - Per-channel tune re-plan at apply time. A channel outside the window is refused with 409 `outside_window`; a race test covers it.
+  - DISCONTINUITY is held until a channel's DDC yields samples.
+  - **The merge now orders by frame end**, not start. Coordinator decision: accepted, because it keeps the `order_window_s` latency bound for long frames. ADR-0011 is updated, noting that `sample_index` is non-monotonic across channels.
+  - Blind detections-source and tracker-found hop-set tests run through the mock SDR.
+  - New routes `PUT /api/pipelines/{id}/channels` and `POST .../channels/refresh`, with contract tests.
+  Tests: hk-blocks 69, follow_hops 4/4, runtime/alloc/capture 10/10, hk-api 82, api_contract 15, lint clean. Full check running.

@@ -1730,7 +1730,8 @@ tasks:
   - id: T-107
     milestone: M1
     title: "follow_hops hardening (T-093 review follow-ups)"
-    status: in-progress
+    status: done
+    commit: 74c9a9e
     deps: [T-093]
     parallel_group: M1H
     use_cases: [SIGNAL-062]
