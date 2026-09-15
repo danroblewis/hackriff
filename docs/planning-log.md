@@ -1383,3 +1383,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - ADR §7.1 reworded as a rate gate.
   - Tests: 55/55 targeted.
   - T-139 will conflict in `occupancy.rs`. Full check started.
+- **B0.364 T-139 review (Opus): FIX-FIRST.**
+  - **Bug:** the mixed-shape decision is memory-only, so after a restart `/api/floor` bias-corrects mixed tiles with the first-frame shape.
+  - **Risks:**
+    - Partial-row arming is sticky, so overrun gaps on a later fixed tune mark tiles mixed.
+    - Most scheduler tiles are mixed, so `floor_db` is absent (untested).
+  - **Nits:** the 2 dB range check neither hides nor catches bias (use a median diff); per-n_avg shape recompute; `mean_db` is not span-weighted.
+  - **Verified:** the tracker uses each row's n_avg; no FCO inflation (n_c ≳ 100, SD ~0.4 dB); spans don't overlap; spectrum/detect streams unchanged; fixed-tune floor math unchanged.
+  - **Bandit dwells missing in T-124 diagnostics:** a scene artifact (0.13 s windows vs `min_dwell_s` 0.5 s; `core.rs:926`), not a scheduler bug. T-124 must use windows ≥ the dwell minimum.
+  - **Next:** fix round launched as a fresh Opus agent (the original was at 288k), including merging main (T-137/T-138) into T-139.
