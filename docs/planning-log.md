@@ -677,3 +677,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   2. The stream registry is overwritten while staging an edit that keeps an output id, so a failed edit leaves the running output unreachable; `start()` has the same problem.
   Held up: RT path (retired graph dropped on the control thread), edit races serialised, store path safety, and zero loss across 4 hot edits (5/5 tests). merge-tree conflicts: http.rs, cli pipeline.rs, api.md. A fresh Opus agent is merging main into the branch, then fixing both and running the RDS recipe through the runtime.
 - **B0.242 Full check of main 4f7336b (T-087 + T-103): green.** Lint clean; nextest 1044/1044 in 231 s, no retries needed; acceptance 23/23. **T-090 merged** (0358d24). It's UI-only, so the check is `just test-ui` on main.
+- **B0.243 T-090 on main: `just test-ui` green** (26 inspector plus existing suites).
+- **T-091 review: FIX-FIRST** (timeboxed). The GF(2) math and garbage-input robustness are solid, and it merges clean with main. Must-fix:
+  1. Assist routes run CPU-heavy search on HTTP connection threads with no concurrency cap, and op counts are ~3× low (9.2 s measured). A few calls can starve the control API.
+  2. With 3–4 frames, a wrong CRC generator (the true one times an extra factor) wins at score ~0.9 in 15–26% of trials.
+  3. Random frames yield a sync word scored 1.0.
+  4. Duplicate frames inflate evidence (alternating zeros/ones → BCH at 0.97).
+  A fresh Opus fix round is running in the T-091 worktree.
