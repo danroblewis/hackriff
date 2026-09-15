@@ -697,3 +697,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   hk-blocks 61/61, lint clean. Merge follows the in-flight full check (follow-up to reviewed work, per-item tests).
 - **B0.247 Full check of main a02e66f (T-088): green.** Lint clean; nextest + UI 1058/1058 in 228 s; acceptance 23/23. **T-104 merged** (514b17c). Full check covering T-104 running.
 - **B0.248 Full check of main 1183760 (T-104): green.** Lint clean; nextest + UI 1068/1068 in 223 s; acceptance 23/23. M1 merged so far: T-085, T-086, T-087, T-088, T-089, T-090 and T-104. In flight: the T-091 fix round, T-092, T-093 and T-094.
+- **B0.249 T-091 merged** (626a5dd; fix round 391968d). Changes:
+  - Assist is single-flight: a concurrent call gets 503 busy.
+  - Op counts recalibrated to ~0.5–1.6 ns/op, since some paths were ~25× under. Default budget 5e8 (≤0.76 s in release), max 1.5e9 (≤2.4 s).
+  - CRC scores are discounted by the chance of a shared extra factor.
+  - Sync score is absolute, significance-based; the old relative score is kept as `relative_score` (API meaning change, documented).
+  - Evidence is counted over distinct frames and non-periodic differences.
+  Noise now gives a top sync score of 0.0 and no code from duplicate or alternating frames. Residual accepted under the timebox and filed as **T-105**: 3/200 wrong CRC tops at ~0.95 with 8 frames, and near-tie ordering at 3 frames (all scored low). Full check of main running.

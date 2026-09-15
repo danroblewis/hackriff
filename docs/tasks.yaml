@@ -1516,8 +1516,8 @@ tasks:
   - id: T-091
     milestone: M1
     title: "M1 Parser-authoring assist: sync/period hunt, entropy field boundaries, CRC/BCH search"
-    status: review
-    commit: 85f813d
+    status: done
+    commit: 391968d
     deps: [T-085]
     parallel_group: M1S
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1692,6 +1692,19 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-105
+    milestone: M1
+    title: "Assist CRC search: confident wrong generator in rare cases at >=8 frames; near-tie ordering at 3 frames"
+    status: todo
+    deps: [T-091]
+    parallel_group: M1S
+    use_cases: [SIGNAL-062, AWARE-036]
+    found_by: "T-091 fix round 2026-09-15: 200 Mode-S CRC-24 seeds, 8 frames -> 3 wrong tops at score ~0.95; 3 frames -> wrong top 164/200 but all low score"
+    acceptance: "with >=8 distinct frames a wrong CRC generator never scores >=0.5 (200-seed test); at 3-4 frames near-tie alternatives rank the smallest validating generator first or are reported as an explicit ambiguous group; existing blind recoveries unchanged"
+    area: crates/hk-estimate/src/assist/codes.rs
+    needs: none
+    model: opus
+    effort: medium
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
