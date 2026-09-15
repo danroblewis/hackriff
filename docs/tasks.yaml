@@ -1712,7 +1712,8 @@ tasks:
   - id: T-106
     milestone: M1
     title: "hk_demod RDS oracle bit/group positions count from pilot lock, not stream start (PS timestamps ~100 ms early)"
-    status: in-progress
+    status: done
+    commit: acb1552
     deps: [T-094]
     parallel_group: T106
     use_cases: [SIGNAL-062]
