@@ -20,6 +20,8 @@ hk-model.workspace = true
 hk-plugins.workspace = true
 hk-store.workspace = true
 hk-stream.workspace = true
+# T-071: per-chain thread CPU time (clock_gettime CLOCK_THREAD_CPUTIME_ID).
+libc.workspace = true
 num-complex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

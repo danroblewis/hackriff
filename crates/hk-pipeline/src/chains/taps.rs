@@ -39,11 +39,14 @@ use hk_stream::{
 };
 use serde_json::{Value, json};
 
-use super::listen::SegmentFn;
+use super::budget::{ChainKind, Slot, mcores};
+use super::listen::{ListenConfig, SegmentFn};
 use crate::class::{classify_emitter, is_restricted};
-use crate::stats::{Counters, inc, set};
+use crate::config::ListenSettings;
+use crate::stats::{ChainStatGuard, Counters, inc, set};
 
-/// Most taps open at once; further requests are refused (503).
+/// Default most taps open at once (`ListenSettings::max_taps`); further requests are refused
+/// (503). Admission is the run's on-demand chain budget (T-071, [`super::budget`]).
 pub const MAX_TAPS: usize = 8;
 /// Shortest interval between framing inferences for live tap output.
 pub const STREAM_INFER_INTERVAL: Duration = Duration::from_millis(500);
@@ -76,6 +79,8 @@ struct Tap {
     class: ContentClass,
     publisher: Mutex<Publisher>,
     bursts: AtomicU64,
+    /// The tap's own counters (T-071).
+    stat: ChainStatGuard,
 }
 
 /// A demodulated burst ready to publish.
@@ -165,7 +170,9 @@ impl BurstHub {
                 .iter()
                 .filter(|t| t.matches(p.extent.0, p.extent.1, emitter))
             {
+                let t0 = std::time::Instant::now();
                 tap.publish(counters, &p, class, emitter);
+                tap.stat.latency(t0.elapsed().as_micros() as u64);
             }
         }
     }
@@ -226,7 +233,10 @@ impl Tap {
             flags: RecordFlags::BURST_START.with(RecordFlags::BURST_END),
             payload,
         }) {
-            Ok(_) => inc(&c.records),
+            Ok(_) => {
+                inc(&c.records);
+                inc(&self.stat.records);
+            }
             Err(StreamError::ContentGated { .. }) => inc(&c.gated),
             Err(_) => inc(&c.errors),
         }
@@ -319,6 +329,8 @@ struct TapSession {
     hub: Arc<BurstHub>,
     id: u64,
     counters: Arc<Counters>,
+    /// The tap's share of the run's chain budget, released when the consumer goes.
+    _slot: Slot,
 }
 
 impl Drop for TapSession {
@@ -337,6 +349,8 @@ pub struct BurstTapOpener {
     hub: Arc<BurstHub>,
     counters: Arc<Counters>,
     segment: SegmentFn,
+    /// The run's on-demand limits (T-071 budget), read at each request.
+    settings: Arc<Mutex<ListenSettings>>,
 }
 
 impl BurstTapOpener {
@@ -345,12 +359,14 @@ impl BurstTapOpener {
         hub: Arc<BurstHub>,
         counters: Arc<Counters>,
         segment: SegmentFn,
+        settings: Arc<Mutex<ListenSettings>>,
     ) -> Self {
         Self {
             kind,
             hub,
             counters,
             segment,
+            settings,
         }
     }
 
@@ -397,13 +413,16 @@ impl BurstTapOpener {
             None => source,
         };
         drop(shared);
-        if self.hub.taps() >= MAX_TAPS {
-            return Err(OpenRefusal::new(
-                503,
-                "busy",
-                format!("{MAX_TAPS} burst taps already open"),
-            ));
-        }
+        let cfg = ListenConfig::from_settings(
+            &self.settings.lock().unwrap_or_else(PoisonError::into_inner),
+        );
+        let slot = Slot::claim(
+            &self.counters,
+            &cfg.limits(),
+            ChainKind::Tap,
+            mcores(cfg.tap_cores),
+            0.0,
+        )?;
         let id = self.hub.next.fetch_add(1, Ordering::Relaxed);
         let (kind, datatype, payload) = match self.kind {
             TapKind::Bits => (StreamKind::Bits, BITS_DATATYPE, BitstreamPayload::HardBits),
@@ -445,6 +464,14 @@ impl BurstTapOpener {
         )
         .map_err(|e| OpenRefusal::new(500, "publisher", e.to_string()))?;
         let handle = publisher.handle();
+        let stat = self
+            .counters
+            .chain_stats
+            .register(&format!("{}-tap", self.kind.name()));
+        stat.set_stream(&header.stream_id, handle.clone());
+        if let Some((lo, hi)) = extent {
+            stat.set_channel(0.5 * (lo + hi), hi - lo);
+        }
         let tap = Arc::new(Tap {
             id,
             kind: self.kind,
@@ -453,6 +480,7 @@ impl BurstTapOpener {
             class,
             publisher: Mutex::new(publisher),
             bursts: AtomicU64::new(0),
+            stat,
         });
         if !self.hub.add(tap) {
             return Err(OpenRefusal::new(410, "source-ended", "the run has ended"));
@@ -466,6 +494,7 @@ impl BurstTapOpener {
                 hub: Arc::clone(&self.hub),
                 id,
                 counters: Arc::clone(&self.counters),
+                _slot: slot,
             }),
         })
     }

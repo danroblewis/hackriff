@@ -67,12 +67,13 @@ use hk_stream::{
 };
 use num_complex::Complex;
 
+use super::budget::{self, BudgetLimits, ChainKind, Slot, mcores};
 use super::{ChainReader, Next};
 use crate::class::{ClassRule, class_name, classify_emitter, is_restricted, restricted_band};
 use crate::config::ListenSettings;
 use crate::refine::{ListenProbe, LiveRefiner, RefineSettings, SOURCE_LISTEN, listen_probe};
 use crate::run::Shared;
-use crate::stats::{Counters, ListenCounters, add, inc};
+use crate::stats::{ChainStatGuard, Counters, ListenCounters, add, inc};
 
 /// Listen settings.
 #[derive(Clone, Debug)]
@@ -107,6 +108,12 @@ pub struct ListenConfig {
     pub audio: AudioConfig,
     /// Output-driven refinement of the channel (T-070, [`crate::refine`]).
     pub refine: RefineSettings,
+    /// Most on-demand chains (listeners and burst taps) at once (T-071 budget).
+    pub max_chains: usize,
+    /// Most burst taps at once (T-071 budget).
+    pub max_taps: usize,
+    /// Estimated cost of one burst tap, cores.
+    pub tap_cores: f64,
 }
 
 impl Default for ListenConfig {
@@ -127,6 +134,9 @@ impl Default for ListenConfig {
             queue_bytes: 64 * 1024,
             audio: AudioConfig::default(),
             refine: RefineSettings::default(),
+            max_chains: 0,
+            max_taps: 0,
+            tap_cores: 0.0,
         };
         c.apply(&ListenSettings::default());
         c
@@ -149,6 +159,19 @@ impl ListenConfig {
         self.narrow_cores_per_msps = s.narrow_cores_per_msps;
         self.idle_timeout = seconds(s.idle_timeout_s).unwrap_or(Duration::from_secs(10));
         self.squelch_timeout = seconds(s.squelch_timeout_s);
+        self.max_chains = s.max_chains;
+        self.max_taps = s.max_taps;
+        self.tap_cores = s.tap_cores;
+    }
+
+    /// The run's on-demand chain budget these settings give (T-071).
+    pub fn limits(&self) -> BudgetLimits {
+        BudgetLimits {
+            max_chains: self.max_chains,
+            max_listeners: self.max_listeners,
+            max_taps: self.max_taps,
+            budget_mcores: self.budget_mcores(),
+        }
     }
 
     /// The admission budget, millicores: `cpu_fraction` of the cores.
@@ -175,25 +198,9 @@ fn seconds(s: f64) -> Option<Duration> {
     (s.is_finite() && s > 0.0).then(|| Duration::from_secs_f64(s))
 }
 
-fn mcores(cores: f64) -> u64 {
-    if cores.is_finite() && cores > 0.0 {
-        (cores * 1e3).round() as u64
-    } else {
-        0
-    }
-}
-
-fn cores(mcores: u64) -> f64 {
-    mcores as f64 / 1e3
-}
-
 /// Publishes `config`'s admission limits into the run's counters (`/api/status`).
 pub(crate) fn publish_limits(counters: &Counters, config: &ListenConfig) {
-    let lc = &counters.listen;
-    lc.limit_listeners
-        .store(config.max_listeners as u64, Ordering::Relaxed);
-    lc.budget_mcores
-        .store(config.budget_mcores(), Ordering::Relaxed);
+    budget::publish(counters, &config.limits());
 }
 
 /// The class audio over `[lo, hi]` would carry under `source` and the user's classification
@@ -260,128 +267,6 @@ pub struct ListenManager {
 }
 
 static STREAM_SEQ: AtomicU64 = AtomicU64::new(1);
-
-/// One admitted chain's share of the listener cap and the CPU budget (T-066). Released once, by
-/// whichever comes first: the session guard dropping (the client left) or the chain ending, so a
-/// client that stops and immediately listens again is never refused by its own old chain. Holds
-/// the run's counters only, never a segment.
-struct SlotInner {
-    counters: Arc<Counters>,
-    mcores: AtomicU64,
-    released: AtomicBool,
-}
-
-impl SlotInner {
-    fn release(&self) {
-        if self.released.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let lc = &self.counters.listen;
-        lc.active.fetch_sub(1, Ordering::SeqCst);
-        let m = self.mcores.load(Ordering::SeqCst);
-        let _ = lc
-            .budget_used_mcores
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |u| {
-                Some(u.saturating_sub(m))
-            });
-    }
-}
-
-impl Drop for SlotInner {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-#[derive(Clone)]
-struct Slot(Arc<SlotInner>);
-
-impl Slot {
-    /// Admits one chain estimated at `need` millicores on a source at `rate_hz`, or refuses with
-    /// 503 `busy` naming both the listener count and the CPU budget.
-    fn claim(
-        counters: &Arc<Counters>,
-        cfg: &ListenConfig,
-        need: u64,
-        rate_hz: f64,
-    ) -> Result<Self, OpenRefusal> {
-        let lc = &counters.listen;
-        let max = cfg.max_listeners as u64;
-        let budget = cfg.budget_mcores();
-        let mut running = lc.active.load(Ordering::SeqCst);
-        loop {
-            if running >= max {
-                return Err(OpenRefusal::new(
-                    503,
-                    "busy",
-                    format!(
-                        "listener limit: {running} of {max} listeners running ({:.2} of {:.2} \
-                         CPU cores in use); stop one and try again",
-                        cores(lc.budget_used_mcores.load(Ordering::SeqCst)),
-                        cores(budget)
-                    ),
-                ));
-            }
-            match lc.active.compare_exchange(
-                running,
-                running + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(now) => running = now,
-            }
-        }
-        // The first chain is always admitted: a small device can still listen at a high rate.
-        let mut used = lc.budget_used_mcores.load(Ordering::SeqCst);
-        loop {
-            if running > 0 && used + need > budget {
-                lc.active.fetch_sub(1, Ordering::SeqCst);
-                return Err(OpenRefusal::new(
-                    503,
-                    "busy",
-                    format!(
-                        "CPU budget: this chain needs about {:.2} cores at {:.2} Msps; {:.2} of \
-                         {:.2} cores in use by {running} of {max} listeners; stop one and try \
-                         again",
-                        cores(need),
-                        rate_hz / 1e6,
-                        cores(used),
-                        cores(budget)
-                    ),
-                ));
-            }
-            match lc.budget_used_mcores.compare_exchange(
-                used,
-                used + need,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(now) => used = now,
-            }
-        }
-        Ok(Self(Arc::new(SlotInner {
-            counters: Arc::clone(counters),
-            mcores: AtomicU64::new(need),
-            released: AtomicBool::new(false),
-        })))
-    }
-
-    /// Re-costs the chain once its mode is known (before the chain starts, so no release races).
-    fn set_mcores(&self, need: u64) {
-        let old = self.0.mcores.swap(need, Ordering::SeqCst);
-        let _ = self.0.counters.listen.budget_used_mcores.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |u| Some((u + need).saturating_sub(old)),
-        );
-    }
-
-    fn release(&self) {
-        self.0.release();
-    }
-}
 
 /// The session guard: dropping it (the client went away or stopped) stops the chain and frees
 /// its slot at once.
@@ -539,10 +424,13 @@ impl ListenManager {
             .unwrap_or(shared.fs);
         let slot = Slot::claim(
             &self.counters,
-            cfg,
+            &cfg.limits(),
+            ChainKind::Listen,
             cfg.chain_mcores(rate_now, None),
             rate_now,
         )?;
+        // T-071: the chain's own counters, from its probe on.
+        let stat = self.counters.chain_stats.register("listen");
         let fc = 0.5 * (lo + hi);
         let probe_bw = (2.0 * (hi - lo)).clamp(cfg.probe_bandwidth_hz.0, cfg.probe_bandwidth_hz.1);
         let (plo, phi) = (fc - 0.5 * probe_bw, fc + 0.5 * probe_bw);
@@ -561,7 +449,7 @@ impl ListenManager {
         let fs = shared.fs;
         let start = shared.ring.next_sample().unwrap_or(0);
         let cursor = shared.gate.register(start);
-        let mut reader = ChainReader::new(Arc::clone(shared), start, cursor);
+        let mut reader = ChainReader::new(Arc::clone(shared), start, cursor).with_stat(stat.stat());
         let probe_len = ((cfg.probe_s * fs) as usize).max(1);
         // T-070: refinement measures on a longer window than the mode probe.
         let want = if cfg.refine.enabled {
@@ -744,6 +632,8 @@ impl ListenManager {
         )
         .map_err(|e| OpenRefusal::new(500, "publisher", e.to_string()))?;
         let handle = publisher.handle();
+        stat.set_channel(plan.channel_center_hz, plan.channel_bandwidth_hz);
+        stat.set_stream(&header.stream_id, handle.clone());
         let stop = Arc::new(AtomicBool::new(false));
         // T-070: the refined tuning goes on the target emitter (or the inventory emitter at the
         // refined channel) and keeps being refined in the background while streaming.
@@ -768,6 +658,7 @@ impl ListenManager {
             refine_emitter: refine_emitter.or(emitter),
             refined: refined_tuning,
             _slot: slot.clone(),
+            stat,
         };
         inc(&shared.counters.listen.running);
         if let Err(e) = thread::Builder::new()
@@ -843,6 +734,8 @@ struct Session {
     /// Refined centre and bandwidth in force.
     refined: Option<(f64, f64)>,
     _slot: Slot,
+    /// The chain's own counters (T-071).
+    stat: ChainStatGuard,
 }
 
 impl Session {
@@ -894,6 +787,8 @@ impl Session {
             .unwrap_or_else(Instant::now);
         let lost_before = counters.chains.lost_samples.load(Ordering::Relaxed);
         let mut last_audio = Instant::now();
+        // Readers re-created on this thread (skips to the live edge) account to the same stat.
+        super::set_thread_stat(Some(self.stat.stat()));
         let end = loop {
             if self.stop.load(Ordering::SeqCst) {
                 break End::Client;
@@ -945,6 +840,7 @@ impl Session {
                         backlog_s = behind as f64 / fs;
                         if backlog_s > self.config.max_backlog_s {
                             add(&lc.skipped_samples, behind);
+                            add(&self.stat.lost_samples, behind);
                             lost += behind;
                             let cursor = self.shared.gate.register(head);
                             self.reader = ChainReader::new(Arc::clone(&self.shared), head, cursor);
@@ -1017,6 +913,8 @@ impl Session {
                                 latency_ms = us as f64 / 1e3;
                                 lc.latency_us_last.store(us, Ordering::Relaxed);
                                 lc.latency_us_max.fetch_max(us, Ordering::Relaxed);
+                                self.stat.latency(us);
+                                inc(&self.stat.records);
                             }
                             // Fail closed: a gated audio record means the class check was
                             // bypassed somewhere; stop the chain.
@@ -1078,6 +976,7 @@ impl Session {
         };
         // Free the slot now, even while a (local) consumer still holds the session guard.
         self._slot.release();
+        super::set_thread_stat(None);
         let dropped: u64 = self
             .handle
             .consumer_stats()
@@ -1216,15 +1115,17 @@ mod tests {
             max_listeners: 3,
             ..ListenConfig::default()
         };
-        let a = Slot::claim(&counters, &cfg, 600, 12e6).unwrap();
-        let e = Slot::claim(&counters, &cfg, 600, 12e6).err().unwrap();
+        let claim =
+            |need, rate| Slot::claim(&counters, &cfg.limits(), ChainKind::Listen, need, rate);
+        let a = claim(600, 12e6).unwrap();
+        let e = claim(600, 12e6).err().unwrap();
         assert_eq!((e.status, e.code.as_str()), (503, "busy"));
         assert!(e.reason.contains("CPU budget"), "{e}");
         assert!(e.reason.contains("1 of 3 listeners"), "{e}");
         a.set_mcores(300);
-        let b = Slot::claim(&counters, &cfg, 600, 12e6).unwrap();
-        let c = Slot::claim(&counters, &cfg, 100, 1e6).unwrap();
-        let e = Slot::claim(&counters, &cfg, 0, 1e6).err().unwrap();
+        let b = claim(600, 12e6).unwrap();
+        let c = claim(100, 1e6).unwrap();
+        let e = claim(0, 1e6).err().unwrap();
         assert!(e.reason.contains("3 of 3 listeners"), "{e}");
         let lc = &counters.listen;
         assert_eq!(lc.budget_used_mcores.load(Ordering::SeqCst), 1000);

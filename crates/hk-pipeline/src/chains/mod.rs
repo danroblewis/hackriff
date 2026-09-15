@@ -22,6 +22,7 @@
 //! new demodulation) for every fragment.
 
 pub(crate) mod analog;
+pub mod budget;
 pub(crate) mod fsk;
 pub mod listen;
 pub mod outputs;
@@ -30,10 +31,11 @@ pub(crate) mod record;
 pub mod spec;
 pub mod taps;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -44,7 +46,7 @@ use num_complex::Complex;
 use crate::events::{Candidate, MemberBox};
 use crate::gate::GateCursor;
 use crate::run::Shared;
-use crate::stats::{add, inc};
+use crate::stats::{ChainStat, CpuClock, add, inc};
 use spec::{ChainShape, ChainSpec, Trigger, select_for_track};
 
 /// Messages to a running chain.
@@ -62,6 +64,18 @@ pub(crate) struct ChainReader {
     reader: RingReader<Complex<i8>>,
     cursor: GateCursor,
     pub buf: Vec<Complex<i8>>,
+    /// The chain's own counters (T-071), from [`set_thread_stat`] or [`Self::with_stat`].
+    stat: Option<Arc<ChainStat>>,
+    clock: CpuClock,
+}
+
+thread_local! {
+    static THREAD_STAT: RefCell<Option<Arc<ChainStat>>> = const { RefCell::new(None) };
+}
+
+/// The chain running on this thread: readers created on it account to `stat` (T-071).
+pub(crate) fn set_thread_stat(stat: Option<Arc<ChainStat>>) {
+    THREAD_STAT.with(|t| *t.borrow_mut() = stat);
 }
 
 /// One read.
@@ -87,7 +101,16 @@ impl ChainReader {
             reader,
             cursor,
             buf: vec![Complex::default(); 1 << 16],
+            stat: THREAD_STAT.with(|t| t.borrow().clone()),
+            clock: CpuClock::new(),
         }
+    }
+
+    /// Accounts this reader's samples, CPU time and backlog to `stat`.
+    #[must_use]
+    pub fn with_stat(mut self, stat: Arc<ChainStat>) -> Self {
+        self.stat = Some(stat);
+        self
     }
 
     /// Reads the next chunk into `buf` (waits up to 20 ms).
@@ -99,10 +122,23 @@ impl ChainReader {
         {
             ReadOutcome::Data(chunk) => {
                 add(&c.samples, chunk.len as u64);
+                if let Some(s) = &self.stat {
+                    add(&s.samples, chunk.len as u64);
+                    let head = self.shared.ring.next_sample().unwrap_or(0);
+                    let behind = head.saturating_sub(chunk.end_sample()) as f64;
+                    s.backlog_us.store(
+                        (behind / self.shared.fs * 1e6) as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    s.account_cpu(&mut self.clock);
+                }
                 Next::Data(chunk)
             }
             ReadOutcome::Overrun { lost_samples, .. } => {
                 add(&c.lost_samples, lost_samples);
+                if let Some(s) = &self.stat {
+                    add(&s.lost_samples, lost_samples);
+                }
                 Next::Lost
             }
             ReadOutcome::Empty => Next::Idle,
@@ -171,6 +207,94 @@ impl ChannelMemory {
         self.until.insert(key, now.saturating_add(cooldown));
         if self.until.len() > 4096 {
             self.until.retain(|_, u| *u > now);
+        }
+    }
+}
+
+/// Which analog chain owns an emission (T-071). T-070 lets a raster chain take an off-raster
+/// station beside its channel, so two neighbouring chains can refine to the same station; the
+/// emission is demodulated and written by exactly one of them.
+///
+/// - A chain **claims** the centre it refined to, with a half-width and a rank (its distance from
+///   its own channel centre; lower is better) before demodulating the full window.
+/// - An overlapping claim held by another chain refuses the new one when that claim is committed
+///   or ranks no worse; otherwise the better-ranked new claim **preempts** it.
+/// - The chain **commits** just before writing; a preempted chain finds its claim gone and stops.
+/// - A released committed claim is kept for [`CHANNEL_COOLDOWN_S`] of stream time, so a chain
+///   that finishes later on the same window does not write the station again.
+///
+/// Per segment ([`Shared::claims`]); only the claim table is shared, never chain state.
+#[derive(Debug, Default)]
+pub(crate) struct EmissionClaims {
+    claims: Mutex<Vec<Claim>>,
+}
+
+#[derive(Debug, Clone)]
+struct Claim {
+    owner: u64,
+    center_hz: f64,
+    half_hz: f64,
+    rank: f64,
+    committed: bool,
+    /// Released: kept until this stream sample.
+    until: Option<u64>,
+}
+
+impl EmissionClaims {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Claim>> {
+        self.claims.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Claims the emission at `center_hz` (± `half_hz`) for `owner` ranked `rank`; `false` when
+    /// another chain owns it.
+    pub fn claim(&self, owner: u64, center_hz: f64, half_hz: f64, rank: f64, now: u64) -> bool {
+        let mut claims = self.lock();
+        claims.retain(|c| c.until.is_none_or(|u| now < u));
+        let overlaps = |c: &Claim| {
+            c.owner != owner && (c.center_hz - center_hz).abs() < c.half_hz.max(half_hz)
+        };
+        if claims
+            .iter()
+            .any(|c| overlaps(c) && (c.committed || c.until.is_some() || c.rank <= rank))
+        {
+            return false;
+        }
+        claims.retain(|c| !overlaps(c) && c.owner != owner);
+        claims.push(Claim {
+            owner,
+            center_hz,
+            half_hz,
+            rank,
+            committed: false,
+            until: None,
+        });
+        true
+    }
+
+    /// Commits `owner`'s claim before it writes; `false` when it was preempted.
+    pub fn commit(&self, owner: u64) -> bool {
+        let mut claims = self.lock();
+        match claims
+            .iter_mut()
+            .find(|c| c.owner == owner && c.until.is_none())
+        {
+            Some(c) => {
+                c.committed = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `owner` finished at `now`: a committed claim is kept for `hold` samples, others dropped.
+    pub fn release(&self, owner: u64, now: u64, hold: u64) {
+        let mut claims = self.lock();
+        claims.retain(|c| c.owner != owner || c.committed);
+        for c in claims
+            .iter_mut()
+            .filter(|c| c.owner == owner && c.until.is_none())
+        {
+            c.until = Some(now.saturating_add(hold));
         }
     }
 }
@@ -310,6 +434,12 @@ impl ChainManager {
         let id = self.next_id;
         self.next_id += 1;
         let spec_id = spec.id.clone();
+        // T-071: the chain's own counters, registered while its thread runs.
+        let stat = self.shared.counters.chain_stats.register(&spec.id);
+        stat.set_channel(
+            0.5 * (cand.f_lo_hz + cand.f_hi_hz),
+            cand.f_hi_hz - cand.f_lo_hz,
+        );
         let cursor = self
             .shared
             .gate
@@ -318,54 +448,62 @@ impl ChainManager {
         let channel_tolerance_hz = spec.raster_hz.map_or(f64::INFINITY, |r| 0.5 * r);
         let spawned = thread::Builder::new()
             .name(format!("hk-chain-{}-{id}", spec.id))
-            .spawn(move || match shape {
-                ChainShape::Analog {
-                    pre_s,
-                    window_s,
-                    bandwidth_hz,
-                    probe_s,
-                    accept_modes,
-                    require_pilot,
-                } => analog::run(
-                    shared,
-                    rx,
-                    cand,
-                    analog::AnalogNode {
+            .spawn(move || {
+                let mut clock = CpuClock::new();
+                stat.account_cpu(&mut clock);
+                set_thread_stat(Some(stat.stat()));
+                match shape {
+                    ChainShape::Analog {
                         pre_s,
                         window_s,
                         bandwidth_hz,
                         probe_s,
                         accept_modes,
                         require_pilot,
-                        channel_tolerance_hz,
-                        record: analog_record,
-                    },
-                    cursor,
-                ),
-                ChainShape::Fsk {
-                    pad_s,
-                    retain_s,
-                    min_bursts,
-                    max_bursts,
-                } => fsk::run(
-                    shared, rx, cand, pad_s, retain_s, min_bursts, max_bursts, cursor,
-                ),
-                ChainShape::Plugin {
-                    ddc,
-                    manifest,
-                    tail_pad_samples,
-                    settle_s,
-                } => plugin::run(
-                    shared,
-                    rx,
-                    cand,
-                    &spec_id,
-                    ddc,
-                    &manifest,
-                    tail_pad_samples,
-                    settle_s,
-                    cursor,
-                ),
+                    } => analog::run(
+                        shared,
+                        rx,
+                        cand,
+                        analog::AnalogNode {
+                            pre_s,
+                            window_s,
+                            bandwidth_hz,
+                            probe_s,
+                            accept_modes,
+                            require_pilot,
+                            channel_tolerance_hz,
+                            record: analog_record,
+                            owner: id,
+                        },
+                        cursor,
+                    ),
+                    ChainShape::Fsk {
+                        pad_s,
+                        retain_s,
+                        min_bursts,
+                        max_bursts,
+                    } => fsk::run(
+                        shared, rx, cand, pad_s, retain_s, min_bursts, max_bursts, cursor,
+                    ),
+                    ChainShape::Plugin {
+                        ddc,
+                        manifest,
+                        tail_pad_samples,
+                        settle_s,
+                    } => plugin::run(
+                        shared,
+                        rx,
+                        cand,
+                        &spec_id,
+                        ddc,
+                        &manifest,
+                        tail_pad_samples,
+                        settle_s,
+                        cursor,
+                    ),
+                }
+                stat.account_cpu(&mut clock);
+                set_thread_stat(None);
             });
         match spawned {
             Ok(join) => {
@@ -663,6 +801,29 @@ mod tests {
             m.finished(("x".to_owned(), i), 2_000 + i as u64, 1);
         }
         assert!(m.until.len() <= 4097, "expired channels are pruned");
+    }
+
+    #[test]
+    fn exactly_one_chain_owns_an_emission_and_the_nearer_channel_preempts() {
+        let c = EmissionClaims::default();
+        let station = 101.4495e6;
+        // The beside chain (101.3 MHz channel, 149.5 kHz away) claims first.
+        assert!(c.claim(1, station, 100e3, 149.5e3, 0));
+        // The in-channel chain (101.5 MHz, 50.5 kHz away) preempts it before it wrote.
+        assert!(c.claim(2, station + 300.0, 100e3, 50.5e3, 10));
+        assert!(!c.commit(1), "preempted");
+        assert!(c.commit(2));
+        // A third claimant, even a nearer one, is refused once the owner committed.
+        assert!(!c.claim(3, station, 100e3, 0.0, 20));
+        // Other stations are unaffected.
+        assert!(c.claim(4, 101.7e6, 100e3, 0.0, 20));
+        // Released: held for the cooldown, then free.
+        c.release(2, 1_000, 500);
+        c.release(1, 1_000, 500);
+        assert!(!c.claim(5, station, 100e3, 0.0, 1_499));
+        assert!(c.claim(5, station, 100e3, 0.0, 1_500));
+        // A worse-ranked late claimant is refused by an uncommitted better claim.
+        assert!(!c.claim(6, station, 100e3, 1.0, 1_600));
     }
 
     #[test]

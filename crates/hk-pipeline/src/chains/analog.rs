@@ -54,6 +54,50 @@ pub(crate) struct AnalogNode {
     pub channel_tolerance_hz: f64,
     /// The spec's record node, run once the probe accepts the channel.
     pub record: Option<RecordAfterProbe>,
+    /// The chain's id: its claims on emissions ([`super::EmissionClaims`], T-071).
+    pub owner: u64,
+}
+
+/// Releases the chain's emission claim when it finishes (T-071).
+struct ClaimRelease<'a> {
+    shared: &'a Shared,
+    owner: u64,
+}
+
+impl Drop for ClaimRelease<'_> {
+    fn drop(&mut self) {
+        self.shared.claims.release(
+            self.owner,
+            self.shared.ring.next_sample().unwrap_or(0),
+            (super::CHANNEL_COOLDOWN_S * self.shared.fs) as u64,
+        );
+    }
+}
+
+/// Claims the emission at `center_hz` for this chain (T-071 dedupe): ranked by its distance from
+/// the chain's channel, so the nearer channel's chain owns a station both neighbours refined to.
+fn claim_emission(shared: &Shared, node: &AnalogNode, channel_center: f64, center_hz: f64) -> bool {
+    let half = (0.5 * node.bandwidth_hz).min(node.channel_tolerance_hz);
+    let ok = shared.claims.claim(
+        node.owner,
+        center_hz,
+        half,
+        (center_hz - channel_center).abs(),
+        shared.ring.next_sample().unwrap_or(0),
+    );
+    if !ok {
+        inc(&shared.counters.chains.duplicate_emission);
+        if crate::debug_enabled() {
+            eprintln!(
+                "hk-pipeline: analog chain {} (channel {:.4} MHz): {:.4} MHz is owned by a \
+                 neighbouring chain",
+                node.owner,
+                channel_center / 1e6,
+                center_hz / 1e6
+            );
+        }
+    }
+    ok
 }
 
 /// A deferred pre-trigger recording.
@@ -162,6 +206,10 @@ pub(crate) fn run(
 ) {
     let fs = shared.fs;
     let c = &shared.counters.chains;
+    let _claim = ClaimRelease {
+        shared: &shared,
+        owner: node.owner,
+    };
     let start = cand.first_sample.saturating_sub((node.pre_s * fs) as u64);
     let want = (node.window_s * fs) as usize;
     let probe = ((node.probe_s * fs) as usize).min(want);
@@ -198,7 +246,9 @@ pub(crate) fn run(
                     probe_refined =
                         refine_window(&w, probe, s.rf_center_hz, node.bandwidth_hz, s.mode.mode)
                             .filter(|o| owns(&node, channel_center, o.tuning.center_hz));
-                    accepted = probe_refined.is_some();
+                    accepted = probe_refined.as_ref().is_some_and(|o| {
+                        claim_emission(&shared, &node, channel_center, o.tuning.center_hz)
+                    });
                 }
                 if crate::debug_enabled() {
                     eprintln!(
@@ -367,6 +417,13 @@ fn collect_and_write(
             refine_window(&w, w.iq.len(), start, width, m).or_else(|| probe_refined.clone())
         })
         .filter(|o| owns(node, channel_center, o.tuning.center_hz));
+    // T-071: one chain per emission, even when a neighbour's chain refined to it too.
+    let emission = refined
+        .as_ref()
+        .map_or(channel_center, |o| o.tuning.center_hz);
+    if !claim_emission(shared, node, channel_center, emission) {
+        return;
+    }
     let session = match demodulate(
         &w,
         w.iq.len(),
@@ -402,6 +459,11 @@ fn collect_and_write(
         detection_ref: super::stored_detection(shared, cand.detection),
         emitter_hint: None,
     };
+    if !shared.claims.commit(node.owner) {
+        // Preempted by the chain whose channel is nearer the emission.
+        inc(&c.duplicate_emission);
+        return;
+    }
     let mut repo = shared.repo();
     match write_session(&mut repo, &session, &ctx) {
         Ok(written) => {
@@ -452,6 +514,7 @@ mod tests {
             require_pilot: false,
             channel_tolerance_hz: 0.5 * raster_hz,
             record: None,
+            owner: 0,
         }
     }
 
