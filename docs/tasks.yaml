@@ -3001,3 +3001,93 @@ notes:
     model: sonnet
     effort: low
     core_interface: false
+  - id: T-190
+    milestone: MUI
+    title: "Analyze / synthesize decoder stub endpoint: POST /api/analyze on a selection, emitter or ad-hoc band (optional history window) validates the target and returns 501 not_implemented until MAUTO"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: API
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "POST /api/analyze {selection_id | emitter_id | {f_lo, f_hi, t_lo?, t_hi?}} (exactly one target form) through the control dispatcher with auth: 400 invalid on malformed or multiple targets, 404 not_found for an unknown selection/emitter, otherwise 501 {error, code: not_implemented}; new code documented in docs/api.md Conventions + route section (states the future contract is MAUTO, docs/15 section 8); api_contract tests cover 501/400/404/401; no engine code"
+    area: crates/hk-api (new analyze route), docs/api.md, crates/hk-cli/tests/api_contract.rs
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-191
+    milestone: MUI
+    title: "User-adjusted band edges on an inventory entry: set/clear f_lo/f_hi override with provenance and audit, measured band preserved"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: API
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "PUT /api/inventory/{id}/band {f_lo, f_hi, reason?} stores a user band override (validated f_lo<f_hi, within sane span), DELETE clears it; inventory rows expose both measured band and user_band {f_lo, f_hi, set_at, actor} (measured never overwritten; blind-first rule); audited (inventory_band); survives merge resolution like promote/delete; docs/api.md + api_contract tests together; hk-model repo test for override persistence and merge"
+    area: crates/hk-model (repo/migration), crates/hk-api/src/inventory.rs, docs/api.md, crates/hk-cli/tests/api_contract.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-192
+    milestone: MUI
+    title: "MUI right-click context menu on signals/boxes/inventory rows carrying the focus-bar actions (Listen, Decode, Analyze, Record/Export, Stream out, Promote, Delete, Adjust band); right panel freed of controls"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MUI-X1
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "contextmenu on waterfall/spectrum signal brackets, inventory rows and selections opens an accessible menu (keyboard + long-press on touch, closes on Esc/outside click, stays in viewport at 400px); actions call the same API as today; Analyze calls POST /api/analyze and shows not-implemented-yet on 501 or 404 (T-190 may land later); the focus panel keeps measurements/explanations but no action buttons; UI unit tests; bundle within ADR-0013 budget"
+    area: ui/src/app (new menu module, explore/focus, centre/index hook)
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-193
+    milestone: MUI
+    title: "MUI Confirmed-signal yellow boxes spanning spectrum trace + waterfall with draggable left/right edges (sets user band via T-191)"
+    status: todo
+    priority: normal
+    deps: [T-191, T-194]
+    parallel_group: MUI-X2
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "every Confirmed signal renders one yellow box across both spectrum and waterfall panes aligned to the shared axis; edges draggable with snapping to pixels and a min width, commit on release via PUT /api/inventory/{id}/band, revert on error; user band vs measured band visually distinguishable; candidates keep brackets; works with pan/zoom and at 400px (touch drag); UI tests for axis mapping and drag state"
+    area: ui/src/app/centre (overlays, view), ui/src/app/explore
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-194
+    milestone: MUI
+    title: "MUI manual multi-band region select on the waterfall and time-window select on the history/capture timeline (selections with t_lo/t_hi)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MUI-X2
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "drag on waterfall adds a band selection (modifier or mode adds several without clearing); drag on the capture timeline / history view sets t_lo/t_hi on a new or current selection (existing POST/PUT /api/selections, no API change needed); selections render as bands on waterfall + timeline and appear in the Selections list; context-menu Analyze target works on them once T-192 lands; UI tests; 400px touch works"
+    area: ui/src/app/centre (view drag), ui/src/app/capture/timeline.ts, ui/src/app/explore/selections.ts
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-195
+    milestone: MUI
+    title: "MUI per-signal output panels in the freed right panel: packet inspector for digital, waveform/audio scope + RDS text for FM/AM; one panel per confirmed signal with an active output"
+    status: todo
+    priority: normal
+    deps: [T-192, T-159]
+    parallel_group: MUI-X1
+    use_cases: []
+    found_by: "user 2026-09-15: docs/15-decoder-synthesis.md section 7 (general UI features into MUI now; MAUTO unscheduled)"
+    acceptance: "focusing a signal with an active decode shows the inspector (reuse T-154 components) bound to its record stream; an audio output shows a scope rendered from the served audio stream plus RDS PS/RT fields from the backend (T-159); several panels stack/tab without page scroll; no decode/parse logic in UI; UI tests + playwright smoke screenshot at 1440 and 400px"
+    area: ui/src/app/explore (focus/output panels), ui/src/app/decode/inspector reuse
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false

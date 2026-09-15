@@ -2192,3 +2192,13 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Learning was identical in passing and failing runs:** 363 detections, 33.8 dB SNR, published.
   - **Fix:** centre on the fixed scene centre. With product code unchanged, 5/5 passes.
   - **T-124 unblocked; finisher launched (Opus).** It merges main, applies the band fix, runs acceptance_m2 (a)–(j) three times, and checks a possible unasserted per-channel FCO gap (433.475 measured 0.073 vs truth 0.258, yet the test passed).
+- **B0.466 docs/15 §7 UI features added to MUI scope** (user request; docs/14 updated; MAUTO stays unscheduled).
+  - **Tasks filed:**
+    - T-190: POST /api/analyze stub returning 501 not_implemented.
+    - T-191: user band-edge override with measured band preserved (Opus, core_interface).
+    - T-192: right-click context menu that frees the right panel.
+    - T-193: yellow Confirmed boxes across spectrum and waterfall with draggable edges (deps T-191, T-194).
+    - T-194: multi-band waterfall select plus timeline time-window select, on the existing selections API, which already has t_lo/t_hi.
+    - T-195: per-signal output panels (deps T-192, T-159).
+  - **Launch plan:** UI-only T-192 and T-194 launch now; they build no Rust, so they don't count toward the 4-agent cap. Rust T-190 and T-191 queue behind the cap.
+  - **Not committed:** docs/15 is left for the user to commit.
