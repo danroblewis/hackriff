@@ -1242,3 +1242,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Lint clean.
   - Tests: 1358/1358 nextest+UI, no retries.
   - Acceptance: 32/32, 75 s.
+- **B0.344 T-133 committed (4ae8a1f, on 77be712); Opus review running.**
+  - History tile v3 stores per-origin (source, site) frame counts; v1/v2 tiles read as unknown origin.
+  - `query_filtered`: a mixed tile's cells are unobserved unless a fully matching finer tile exists; unknown origin matches only unfiltered queries or an explicit `unknown`.
+  - `/api/history` and `/api/report` take `source`/`site` params; ADR §3.4 and §6.3a documented.
+  - Tests: hk-store 80, hk-api 87, report 12, pipeline 8, api_contract 22.
+  - Follow-ups: site-change provenance step, `import-sweep-csv --site`, inventory/anomalies not keyed by site, per-frame `site_at` mutex.
