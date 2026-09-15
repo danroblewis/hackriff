@@ -1555,3 +1555,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Conflict with T-140 accessors when merging main.
   - **T-124 knock-on:** its busier-alarm latency limit must be re-derived from the new rule (14-interval sparse bound) before its next run.
 - **B0.384 T-148 launched (Sonnet, user request).** Sidebar Selections/Inventory rows overflow sideways, pushing the action buttons off-screen. The fix wraps rows so the buttons are always reachable. It is a thin-client CSS tweak separate from the UI rewrite, and not a Rust build.
+- **B0.385 MUI milestone approved by the user (exploratory UI rewrite).**
+  - **Inputs:** brief docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html. Both were untracked, so they are committed now so agent worktrees see them.
+  - **Roadmap:** MUI row added to docs/11.
+  - **Tasks:** T-149..T-156.
+    - T-149 MUI-DESIGN (Opus high, core; ADR-0013, blocks the rest).
+    - Then in parallel: T-150 shell + Outputs dock + Capture timeline (Sonnet), T-151 Explore sidebars + focus (Sonnet), T-152 centre spectrum/WebGL waterfall/brackets (Opus), T-153 Decode workbench (Sonnet), T-154 packet inspector rehome (Sonnet), T-155 alarms/reports/scheduler rehome (Sonnet).
+    - T-156 finish/tests/phone-width/retire old layout (Sonnet).
+  - **API gaps:** gaps found by the design (e.g. capture timeline scrub) become backend tasks.
+  - **Constraints:**
+    - The thin-client rule already exists in CLAUDE.md.
+    - MUI runs in parallel with the M2 tail.
+    - UI agents don't count toward the 4 Rust-building-agent cap unless they build Rust.
+  - **T-148** (current-UI sidebar fix) lands separately.

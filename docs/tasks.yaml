@@ -2357,3 +2357,122 @@ notes:
   - "Parallel groups can run in separate worktrees; groups sharing a crate (group C on hk-dsp/hk-detect, group E on hk-store/hk-model/hk-core) serialise on that crate or coordinate file ownership."
   - T-011/T-013 gated on spike S5; T-022 gated on S3. If a gate fails, see docs/12 1 for the fallback.
   - T-025 needs the HackRF + the user; keep it with the coordinator, not a background agent.
+  - id: T-149
+    milestone: MUI
+    title: "MUI-DESIGN: ADR-0013 UI component + state-store structure, frontend-to-API mapping for every mockup panel, build setup, dependency-light framework decision (vanilla TS + small reactive store, or lit/Preact, justified), reuse existing WebGL waterfall"
+    status: todo
+    deps: []
+    parallel_group: MUI-D
+    use_cases: []
+    found_by: "user 2026-09-15: MUI approved (docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html)"
+    acceptance: "docs/adr/0013-ui-architecture.md: framework decision with justification and bundle/dep budget; component tree and state store (modes Explore/Decode, focus, selections, streams, capture time cursor); per-panel mapping of every mockup element to docs/api.md routes/streams (and a list of API GAPS with proposed backend tasks, not implemented here); build/dev setup and test approach; migration plan retiring the stacked layout; skeleton app shell committed that builds and renders the empty layout with the existing WebGL waterfall mounted; per-panel task briefs refined in the ADR"
+    area: docs/adr/0013, ui/ (skeleton, build config), docs/11 §MUI
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+
+  - id: T-150
+    milestone: MUI
+    title: "MUI shell: top bar with Explore/Decode mode toggle, layout grid, Outputs dock (live audio + record streams: meter/rate, mute, copy address, stop; Listen adds a stream) and always-on Capture timeline (scrub, reviewing N ago / LIVE)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-SHELL
+    use_cases: []
+    found_by: "user 2026-09-15: MUI approved (docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html)"
+    acceptance: "thin client only (no signal logic in ui/src; all via docs/api.md); matches ui/mockups/explorer-v3.html layout+interactions on live API data; responsive to ~400px, theme-aware, no full-page horizontal scroll; UI unit tests for new components; build/typecheck green"
+    area: ui/src (shell, dock, timeline)
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+
+  - id: T-151
+    milestone: MUI
+    title: "MUI Explore sidebars: inventory Candidates/Confirmed (sortable, Promote/Delete reachable without horizontal scroll), Selections with actions, right focus panel (big frequency, refined-from-output note, measurements, ranked explanations as suggestions, actions Listen/Decode/Record-Export/Stream/Promote/Delete)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-EXPLORE
+    use_cases: []
+    found_by: "user 2026-09-15: MUI approved (docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html)"
+    acceptance: "thin client only (no signal logic in ui/src; all via docs/api.md); matches ui/mockups/explorer-v3.html layout+interactions on live API data; responsive to ~400px, theme-aware, no full-page horizontal scroll; UI unit tests for new components; build/typecheck green"
+    area: ui/src (explore sidebar, focus panel)
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+
+  - id: T-152
+    milestone: MUI
+    title: "MUI centre: spectrum trace + existing WebGL waterfall rehomed, brackets for confirmed/candidate/focused signals, DC mask, drag region select, hover readout, capture-timeline time cursor"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-CENTRE
+    use_cases: []
+    found_by: "user 2026-09-15: MUI approved (docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html)"
+    acceptance: "thin client only (no signal logic in ui/src; all via docs/api.md); matches ui/mockups/explorer-v3.html layout+interactions on live API data; responsive to ~400px, theme-aware, no full-page horizontal scroll; UI unit tests for new components; build/typecheck green; waterfall frame rate not regressed"
+    area: ui/src (spectrum, waterfall, overlays)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+
+  - id: T-153
+    milestone: MUI
+    title: "MUI Decode workbench: pipelines list (parallel, hop-following), selected recipe stages, blocks palette, per-stage plots (MPX/subcarrier, eye, timing, constellation, sync search, group/frame counts, channel map), stage parameters with blind-estimate Use suggestions and live quality"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-DECODE
+    use_cases: []
+    found_by: "user 2026-09-15: MUI approved (docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html)"
+    acceptance: "thin client only (no signal logic in ui/src; all via docs/api.md); matches ui/mockups/explorer-v3.html layout+interactions on live API data; responsive to ~400px, theme-aware, no full-page horizontal scroll; UI unit tests for new components; build/typecheck green"
+    area: ui/src (decode workbench)
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+
+  - id: T-154
+    milestone: MUI
+    title: "MUI packet inspector rehomed into Decode: frame list -> hex+ASCII -> layer tree with linked selection both ways, served byte-record and TCP address (reuse T-090 inspector logic-free rendering)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-INSPECT
+    use_cases: []
+    found_by: "user 2026-09-15: MUI approved (docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html)"
+    acceptance: "thin client only (no signal logic in ui/src; all via docs/api.md); matches ui/mockups/explorer-v3.html layout+interactions on live API data; responsive to ~400px, theme-aware, no full-page horizontal scroll; UI unit tests for new components; build/typecheck green"
+    area: ui/src (inspector)
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+
+  - id: T-155
+    milestone: MUI
+    title: "MUI rehome M2 panels: alarms, survey reports, scheduler/attention status into their proper Explore/review places (not stacked at the bottom)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-REVIEW
+    use_cases: []
+    found_by: "user 2026-09-15: MUI approved (docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html)"
+    acceptance: "thin client only (no signal logic in ui/src; all via docs/api.md); matches ui/mockups/explorer-v3.html layout+interactions on live API data; responsive to ~400px, theme-aware, no full-page horizontal scroll; UI unit tests for new components; build/typecheck green"
+    area: ui/src (alarms, reports, scheduler)
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+
+  - id: T-156
+    milestone: MUI
+    title: "MUI finish: UI tests for all panels, phone-width (~400px) pass, theme pass, retire the old stacked layout and dead code, demo mergeable"
+    status: todo
+    deps: [T-150, T-151, T-152, T-153, T-154, T-155]
+    parallel_group: MUI-FINAL
+    use_cases: []
+    found_by: "user 2026-09-15: MUI approved (docs/14-ui-rewrite.md; spec ui/mockups/explorer-v3.html)"
+    acceptance: "thin client only (no signal logic in ui/src; all via docs/api.md); matches ui/mockups/explorer-v3.html layout+interactions on live API data; responsive to ~400px, theme-aware, no full-page horizontal scroll; UI unit tests for new components; build/typecheck green; old stacked layout removed; no dead ui/src modules"
+    area: ui/
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
