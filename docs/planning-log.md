@@ -1417,3 +1417,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Policy:** the user said no legal extensions, so this is a flaky pre-existing test to harden, not a new legal check.
   - **Disk:** 29 GB free.
   - **T-124 resumed** on main (T-139 included), merging `t-124-wip`: default scheduler settings, windows ≥ dwell minimum, thresholds derived a priori, plus new-emitter and restart-site tests.
+- **B0.369 Disk back to 93 GB free (freed outside this session). Launches resumed.**
+  - T-140 (Sonnet, baseline hardening nits) and T-141 (Opus, Gamma-mixture floor for mixed tiles) launched in parallel with T-124.
+  - The three agents edit disjoint areas: baseline, radiometry/history, tests/e2e.

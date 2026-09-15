@@ -2207,7 +2207,7 @@ tasks:
   - id: T-140
     milestone: M2
     title: "Baseline hardening nits: SlotSeries packed()/packed_at() not public without the decay multiplier, assert the fold-equivalence fingerprint (reference-fold count exact, novelty sum 1e-9), debug_assert finite decay factor, share pool membership helper"
-    status: todo
+    status: in-progress
     deps: [T-137]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2222,7 +2222,7 @@ tasks:
   - id: T-141
     milestone: M2
     title: "Bias-corrected floor for mixed-shape tiles (Gamma-mixture log-bias model) so scheduler-driven tiles report floor_db"
-    status: todo
+    status: in-progress
     deps: [T-139]
     parallel_group: M2B
     use_cases: [AWARE-042, SPACE-001]
