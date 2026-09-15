@@ -1789,3 +1789,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **List response:** gains `total`, a COUNT sharing the `inventory_where` predicate; a non-vocabulary tag filter scans at most 5,000 rows and returns a lower bound beyond that.
   - **Checks:** docs and contract updated; hk-model 3, hk-api 83, api_contract 22 passing; lint clean.
 - **Merge queue after the combined check:** T-153, T-154, T-155, T-158/171. T-156 (MUI finish) launches once those are on main.
+- **B0.412 Combined full check green (0c596a5).** Lint clean; 1347/1347 tests; acceptance 28/28.
+  - **Merged in sequence, no conflicts:**
+    - T-153 (a0cd045)
+    - T-154 (aecd385)
+    - T-155 (9c22276)
+    - T-158+T-171 (e7a336f)
+  - **MUI panels T-150..T-155:** all on main.
+  - **Worktrees:** removed. Full check started.
+  - **Launched:**
+    - T-156: MUI finish (UI tests, phone width, retire the old layout; must move the old-UI `promoteEntry`/`deleteEntry` imports T-151 uses).
+    - T-157: rolling IQ capture buffer, API gap 1, the Capture timeline's scrub/export (Opus high).

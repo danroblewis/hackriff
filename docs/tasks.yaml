@@ -2429,7 +2429,7 @@ notes:
   - id: T-153
     milestone: MUI
     title: "MUI Decode workbench: pipelines list (parallel, hop-following), selected recipe stages, blocks palette, per-stage plots (MPX/subcarrier, eye, timing, constellation, sync search, group/frame counts, channel map), stage parameters with blind-estimate Use suggestions and live quality"
-    status: review
+    status: done
     commit: c66d538
     deps: [T-149]
     parallel_group: MUI-DECODE
@@ -2445,7 +2445,7 @@ notes:
   - id: T-154
     milestone: MUI
     title: "MUI packet inspector rehomed into Decode: frame list -> hex+ASCII -> layer tree with linked selection both ways, served byte-record and TCP address (reuse T-090 inspector logic-free rendering)"
-    status: review
+    status: done
     commit: e12b895
     deps: [T-149]
     parallel_group: MUI-INSPECT
@@ -2461,7 +2461,7 @@ notes:
   - id: T-155
     milestone: MUI
     title: "MUI rehome M2 panels: alarms, survey reports, scheduler/attention status into their proper Explore/review places (not stacked at the bottom)"
-    status: review
+    status: done
     commit: 35f9190
     deps: [T-149]
     parallel_group: MUI-REVIEW
@@ -2477,7 +2477,7 @@ notes:
   - id: T-156
     milestone: MUI
     title: "MUI finish: UI tests for all panels, phone-width (~400px) pass, theme pass, retire the old stacked layout and dead code, demo mergeable"
-    status: todo
+    status: in-progress
     deps: [T-150, T-151, T-152, T-153, T-154, T-155]
     parallel_group: MUI-FINAL
     use_cases: []
@@ -2491,7 +2491,7 @@ notes:
   - id: T-157
     milestone: MUI
     title: "MUI API gap 1: rolling IQ buffer (always-on capture) with status + clip export for the Capture timeline"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2507,7 +2507,7 @@ notes:
   - id: T-158
     milestone: MUI
     title: "MUI API gap 2: SNR + peak level on /api/inventory rows"
-    status: review
+    status: done
     commit: f7f841c
     deps: [T-149]
     parallel_group: MUI-API
@@ -2712,7 +2712,7 @@ notes:
   - id: T-171
     milestone: MUI
     title: "MUI API gap 13: /api/inventory total count (tab counts and Review badge; UI labels 500+ until served)"
-    status: review
+    status: done
     commit: f7f841c
     deps: [T-149]
     parallel_group: MUI-API
