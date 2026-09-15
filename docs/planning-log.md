@@ -1057,3 +1057,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Docs:** doc comments fixed.
 
   Tests: hk-core 28, hk-api 2, pipeline 18 (3 nextest-leaky, to be checked in the full check), api_contract 18. Waiting to merge after T-118 and T-119.
+- **B0.313 T-118 fix round done** (e8e238d). Changes:
+  - **All observed bands** in an interval are evaluated, taken from observation-log dwell and sweep windows. Retune test: both bands produce rows.
+  - **Span queries** are chunked at ≤1 M cells, with the lock held per chunk, a peak of ~40 MB grid + 80 MB samples, and a band×span cap of 120 MHz·h.
+  - **Local floor:** each column gets its own 80% floor, clamped to a split-side 20th-percentile reference within 1 MHz. On a ripple test it stays within 1 dB, where the old whole-band floor gave 25,593 phantom cells. A **suspect** flag is set when local occupancy exceeds 80%.
+  - **New level fields:** `VisitSample.level_db` and six optional `OccupancyStat` fields (floor/source/suspect, occupied p50/p90, idle level).
+  - **Nits:** duration-weighted `fco_all_visits`; `idle_fraction` doc corrected.
+
+  The t118 e2e is unchanged (6/6 inside CI). Not run yet: the FM fixture sanity check (ignored); bias-model suspect rule. **Merge chain T-118 → T-119 → T-127 → T-121** delegated to one Opus integration agent on a branch (conflict resolution, api_contract after each merge, the FM sanity run, t118/report/scene e2es); the coordinator then fast-forwards main and runs the full check.
