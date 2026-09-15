@@ -345,7 +345,6 @@ fn run_device(dir: &Path, meta: &Path, gain_at: Option<Timestamp>, pin: bool) ->
     let occupancy = handle.occupancy();
     let product = handle.floor_product();
     let observations = handle.observation_store();
-    let counters = handle.counters();
     // The scheduler hub, polled as the API does: the bandit's outcome counter.
     let hub = handle.scheduler_hub();
     let stop = Arc::new(AtomicBool::new(false));
@@ -385,8 +384,10 @@ fn run_device(dir: &Path, meta: &Path, gain_at: Option<Timestamp>, pin: bool) ->
         .uncalibrated_pyramid()
         .latest_frame_end()
         .expect("[T-124] history holds frames");
-    let (tuned, tuned_rate) = counters.tune();
-    let band = FreqRange::centered(tuned, 0.9 * tuned_rate);
+    // The band is the recording's fixed span (its centre and rate), not wherever the scheduler
+    // happened to leave the device tuned at stop: a stop-hop-centred band cut or dropped channels
+    // depending on the last hop (T-184).
+    let band = FreqRange::centered(centre, 0.9 * rate);
     let span = TimeRange::new(t_first, t_end.saturating_add_nanos(1_000_000_000));
     // `span_stats` answers at most 7 days (the API's cap); the 9-day scene asks for its last 7.
     let week_ns = 7 * 24 * HOUR_NS;
