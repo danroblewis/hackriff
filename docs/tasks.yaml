@@ -1929,7 +1929,8 @@ tasks:
   - id: T-121
     milestone: M2
     title: "Survey reports + richer history queries (C26/C39): report(region, span)"
-    status: in-progress
+    status: review
+    commit: b41fbdd
     deps: [T-113, T-116, T-118]
     parallel_group: M2R
     use_cases: [AWARE-033, RESEARCH-050, AWARE-042]
@@ -1968,7 +1969,7 @@ tasks:
     milestone: M2
     title: "M2 blind acceptance through the mock SDR"
     status: todo
-    deps: [T-118, T-119, T-120, T-121, T-122]
+    deps: [T-118, T-119, T-120, T-121, T-122, T-127, T-128]
     parallel_group: M2E
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
     acceptance: "acceptance suite additions: fast-forwarded 48 h synthetic scene via mock SDR under the bandit scheduler: per-channel FCO within CI of hidden truth; injected emitter alarmed within N revisits with sensible explanation; false alarms bounded; survey report discloses coverage/POI; simulator comparison bandit vs round-robin recorded; acceptance wall time kept reasonable (separate just step if >60 s)"
@@ -2019,6 +2020,20 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: true
+  - id: T-128
+    milestone: M2
+    title: "M2 integration: wire occupancy levels into baselines, real providers into reports, candidates from inventory, first sightings, site/source history filters"
+    status: todo
+    deps: [T-118, T-119, T-121, T-127]
+    parallel_group: M2I
+    use_cases: [AWARE-042, AWARE-044, AWARE-033]
+    found_by: "T-118/T-119/T-121/T-127 reports + reviews 2026-09-15"
+    acceptance: "T-119 adapter uses T-118 OccupancyStat level fields (level_occupied_p50/p90, level_idle, floor) so level novelty is real (test: emitter appearing raises level novelty, floor rise does not); pipeline calls AttentionService ingest_occupancy/score from T-118's occupancy thread; candidates assembled from inventory/tracks (SNR, class entropy, recipe match, periodicity, boring evidence) and published to the scheduler's InterestingnessProvider (replacing T-127's stub); FirstSightingRate fed from inventory first sightings (new-emitter novelty produced); T-121 report slots use T-118 occupancy series and T-119 baseline comparison; history tiles record source + site so report/history filters by source/site work (tile format additive, versioned); T-119 GainSeries memory bounded (sparse or unload idle engines) with a measured bound; all through mock SDR on the time-compressed scene"
+    area: "crates/hk-pipeline (attention, occupancy, reports wiring), crates/hk-context/src/occupancy/baseline.rs (adapter), crates/hk-store/src/history (source/site), crates/hk-cli (serve wiring)"
+    needs: none
+    model: opus
+    effort: high
     core_interface: true
   - id: T-100
     milestone: M0b
