@@ -15,20 +15,19 @@ impl CoverageProvider for ObservationCoverage<'_> {
         "the observation log"
     }
 
+    /// One pass over the log's segments for all cells.
     fn observed(
         &self,
         cells: &[FreqRange],
         span: TimeRange,
     ) -> Result<Option<Vec<Vec<TimeRange>>>, ReportError> {
-        let mut any = false;
-        let out: Vec<Vec<TimeRange>> = cells
-            .iter()
-            .map(|&cell| {
-                let visits = self.0.observations_of(cell, span);
-                any |= !visits.is_empty();
-                visits.iter().map(|v| v.observed).collect()
-            })
-            .collect();
-        Ok(any.then_some(out))
+        let visits = self.0.observations_of_each(cells, span);
+        let any = visits.iter().any(|v| !v.is_empty());
+        Ok(any.then(|| {
+            visits
+                .iter()
+                .map(|v| v.iter().map(|x| x.observed).collect())
+                .collect()
+        }))
     }
 }

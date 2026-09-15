@@ -139,6 +139,7 @@ fn emitter(center_mhz: f64, sightings: u64) -> ReportEmitter {
         sightings,
         lifecycle: "candidate".into(),
         fco: None,
+        fco_all_visits: None,
         top_suggestion: Some("land-mobile".into()),
         new_in_span: true,
     }
@@ -366,7 +367,16 @@ fn report_from_history_tiles_and_exports() {
     assert!(r.warnings.iter().any(|w| w.contains("history tiles")));
     assert_eq!(r.provenance_steps[0].kind, ProvenanceStepKind::Gain);
     let band = &r.occupancy.bands[0];
-    assert_eq!((band.n_revisits, band.n_occupied), (8, 8));
+    // Tile rows are all-visits: 8 observed rows, all occupied, and no unbiased figure.
+    assert_eq!(
+        (
+            band.n_revisits_all,
+            band.n_revisits,
+            band.fco,
+            band.fco_all_visits
+        ),
+        (8, 0, None, Some(1.0))
+    );
     assert_eq!(r.occupancy.channels.len(), 1);
 
     let csv = report_csv(&r, 4.0 * MHZ);
@@ -385,4 +395,146 @@ fn report_from_history_tiles_and_exports() {
     let png = report_png(tiles.grid());
     assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     assert!(png.len() > 60);
+}
+
+/// ADR-0012 §2.5: the history-tile stand-in reports its ratio as `fco_all_visits` only, never as
+/// unbiased `fco`, in the occupancy rows, the top emitters and the CSV.
+#[test]
+fn report_tile_stand_in_never_carries_unbiased_fco() {
+    let tiles = HistoryTiles::from_grid(grid(), 4.0 * MHZ, 6.0);
+    let inv = FakeInventory(vec![emitter(101.0, 4), emitter(109.0, 2)]);
+    let r = assemble(
+        &request(),
+        &Providers {
+            coverage: vec![&tiles],
+            occupancy: &tiles,
+            inventory: &inv,
+            baseline: &NoBaselines,
+            provenance: &tiles,
+        },
+    )
+    .unwrap();
+    let rows: Vec<&OccupancyStat> = r
+        .occupancy
+        .bands
+        .iter()
+        .chain(&r.occupancy.channels)
+        .collect();
+    assert_eq!(rows.len(), 3);
+    for s in rows {
+        assert_eq!(s.fco, None, "{s:?}");
+        assert!(s.fco_all_visits.is_some() && s.revisit_biased, "{s:?}");
+        assert!(
+            matches!(
+                s.threshold.method,
+                hk_model::attention::occupancy::ThresholdMethod::HistoryTile { margin_db } if margin_db == 6.0
+            ),
+            "{:?}",
+            s.threshold
+        );
+    }
+    assert!(!r.top_emitters.is_empty());
+    for e in &r.top_emitters {
+        assert_eq!(e.fco, None, "{e:?}");
+        assert!(e.fco_all_visits.is_some(), "{e:?}");
+    }
+    assert!(r.warnings.iter().any(|w| w.contains("no unbiased fco")));
+    let csv = report_csv(&r, 4.0 * MHZ);
+    let header = csv.lines().find(|l| l.starts_with("row,")).unwrap();
+    assert!(header.contains(",fco,fco_all_visits,"), "{header}");
+    let band = csv.lines().find(|l| l.starts_with("band,")).unwrap();
+    let cols: Vec<&str> = band.split(',').collect();
+    assert_eq!(cols.len(), header.split(',').count(), "{band}");
+    assert_eq!(
+        (cols[5], cols[6], cols[12]),
+        ("", "1.000000", "true"),
+        "{band}"
+    );
+}
+
+/// A coverage source that starts mid-span says the time before it is shown as unobserved.
+#[test]
+fn report_partial_log_warns_time_before_is_unobserved() {
+    let late: Vec<_> = visits_with_gap()
+        .into_iter()
+        .filter(|&(_, s, _)| s >= 2400.0)
+        .collect();
+    let r = build(FakeCoverage(Some(late)), vec![emitter(101.0, 4)]).unwrap();
+    let w = r
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("coverage and POI from fake"))
+        .unwrap();
+    assert!(
+        w.contains("before 2400.000 s") && w.contains("shown as unobserved, not quiet"),
+        "{w}"
+    );
+    let full = build(FakeCoverage(Some(visits_with_gap())), vec![]).unwrap();
+    assert!(
+        full.warnings
+            .iter()
+            .any(|w| w == "coverage and POI from fake")
+    );
+}
+
+fn hours(h: i64) -> TimeRange {
+    // On a whole hour (so on every finer level's cell edge).
+    let t0 = 1_699_999_200_000_000_000i64;
+    TimeRange::new(
+        Timestamp::from_unix_nanos(t0),
+        Timestamp::from_unix_nanos(t0 + h * 3_600_000_000_000),
+    )
+}
+
+/// A normal 48 h × 20 MHz report on the default history ladder is a bounded grid: level 2
+/// (15 min × 25 kHz), 192 × 800 = 153 600 cells (≤ 200 000), read in one lock chunk.
+#[test]
+fn report_grid_48h_20mhz_is_bounded() {
+    let geom = hk_store::PyramidConfig::default().geometry().unwrap();
+    let (region, span) = (FreqRange::new(90.0 * MHZ, 110.0 * MHZ), hours(48));
+    let (level, chunks) = report_chunks(&geom, region, span).unwrap();
+    let (nt, nf) = report_grid_dims(&geom, level, region, span);
+    assert_eq!((level, nt, nf), (2, 192.0, 800.0));
+    assert!(nt * nf <= 200_000.0 && nt * nf <= REPORT_MAX_CELLS as f64);
+    assert_eq!(chunks.len(), 1);
+}
+
+#[test]
+fn report_oversized_box_is_invalid() {
+    let geom = hk_store::PyramidConfig::default().geometry().unwrap();
+    for (region, span) in [
+        (FreqRange::new(1.0, 1e12), hours(48)),
+        (FreqRange::new(1.0 * MHZ, 6000.0 * MHZ), hours(24 * 3650)),
+        (FreqRange::new(2.0, 1.0), hours(1)),
+    ] {
+        assert!(
+            matches!(
+                report_chunks(&geom, region, span),
+                Err(ReportError::Invalid(_))
+            ),
+            "{region:?} {span:?}"
+        );
+    }
+}
+
+/// Lock chunks tile the span without gaps or overlap, on whole tiles of the chosen level.
+#[test]
+fn report_chunks_tile_the_span() {
+    let geom = hk_store::PyramidConfig::default().geometry().unwrap();
+    let base = hours(240);
+    let span = TimeRange::new(base.start.saturating_add_nanos(123_456_789), base.end);
+    let (level, chunks) =
+        report_chunks(&geom, FreqRange::new(100.0 * MHZ, 100.1 * MHZ), span).unwrap();
+    let g = geom.levels[level];
+    assert!(chunks.len() >= 3, "{}", chunks.len());
+    assert_eq!(chunks[0].start, span.start);
+    assert_eq!(chunks.last().unwrap().end, span.end);
+    for w in chunks.windows(2) {
+        assert_eq!(w[0].end, w[1].start);
+        assert_eq!(w[0].end.as_unix_nanos() % g.t_block_ns(), 0);
+    }
+    assert!(
+        chunks.iter().all(|c| c.duration_ns()
+            <= (REPORT_LOCK_CHUNK_ROWS.div_ceil(g.nt) * g.nt) as i64 * g.t_cell_ns)
+    );
 }

@@ -42,9 +42,13 @@ pub struct ReportEmitter {
     pub sightings: u64,
     /// Lifecycle state (candidate/confirmed), as the inventory names it.
     pub lifecycle: String,
-    /// FCO of its channel over the span.
+    /// Unbiased FCO of its channel over the span (activity-independent visits only, ADR-0012
+    /// §2.5); `None` when the occupancy provider cannot give it (never substituted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fco: Option<f64>,
+    /// Its channel's all-visits FCO (`OccupancyStat::fco_all_visits`), for information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fco_all_visits: Option<f64>,
     /// Top-ranked explanation label (a suggestion, never truth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_suggestion: Option<String>,
@@ -262,6 +266,7 @@ impl SurveyReport {
         }
         for e in &self.top_emitters {
             ensure_opt_in(e.fco, 0.0, 1.0, "top_emitters.fco")?;
+            ensure_opt_in(e.fco_all_visits, 0.0, 1.0, "top_emitters.fco_all_visits")?;
         }
         ensure(
             self.provenance_steps.windows(2).all(|w| w[0].t <= w[1].t),

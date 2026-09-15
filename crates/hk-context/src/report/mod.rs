@@ -36,7 +36,10 @@ use hk_model::attention::schedule::{PoiEntry, poi_fraction};
 use hk_model::{AnomalyId, FreqRange, TimeRange, Timestamp};
 
 pub use export::{report_csv, report_png};
-pub use history::{HistoryTiles, REPORT_MAX_FREQ_CELLS, REPORT_MAX_TIME_CELLS, steps_from_summary};
+pub use history::{
+    HistoryTiles, REPORT_LOCK_CHUNK_ROWS, REPORT_MAX_CELLS, REPORT_MAX_FREQ_CELLS,
+    REPORT_MAX_TIME_CELLS, report_chunks, report_grid_dims, steps_from_summary,
+};
 pub use inventory::{EXPLANATIONS_AUTHOR_REF, RepoInventory};
 pub use observation::ObservationCoverage;
 
@@ -191,21 +194,37 @@ pub struct Providers<'a> {
     pub provenance: &'a dyn ProvenanceProvider,
 }
 
-/// Builds and validates `report(region, span)`.
-pub fn assemble(req: &ReportRequest, p: &Providers<'_>) -> Result<SurveyReport, ReportError> {
-    if !(req.region.lo_hz.is_finite() && req.region.hi_hz > req.region.lo_hz) {
+/// The one region/span check every report path runs before reading a store.
+pub fn check_box(region: FreqRange, span: TimeRange) -> Result<(), ReportError> {
+    if !(region.lo_hz.is_finite() && region.hi_hz.is_finite() && region.hi_hz > region.lo_hz) {
         return Err(ReportError::Invalid("region must be a positive extent"));
     }
-    if req.span.end <= req.span.start {
+    if span.end <= span.start {
         return Err(ReportError::Invalid("span must be positive"));
     }
+    Ok(())
+}
+
+/// Builds and validates `report(region, span)`.
+pub fn assemble(req: &ReportRequest, p: &Providers<'_>) -> Result<SurveyReport, ReportError> {
+    check_box(req.region, req.span)?;
     let mut warnings = Vec::new();
 
     let cells = coverage_cells(req.region, MAX_COVERAGE_CELLS);
     let mut coverage = None;
     for c in &p.coverage {
         if let Some(observed) = c.observed(&cells, req.span)? {
-            warnings.push(format!("coverage and POI from {}", c.name()));
+            let first = observed.iter().flatten().map(|r| r.start).min();
+            match first {
+                Some(first) if first > req.span.start => warnings.push(format!(
+                    "coverage and POI from {}, which holds nothing for this region before {:.3} s \
+                     ({:.2} h into the span): time before it is shown as unobserved, not quiet",
+                    c.name(),
+                    first.as_unix_nanos() as f64 / 1e9,
+                    (first.as_unix_nanos() - req.span.start.as_unix_nanos()) as f64 / 3.6e12
+                )),
+                _ => warnings.push(format!("coverage and POI from {}", c.name())),
+            }
             coverage = Some(disclose(
                 req.region,
                 req.span,
@@ -224,18 +243,21 @@ pub fn assemble(req: &ReportRequest, p: &Providers<'_>) -> Result<SurveyReport, 
     warnings.extend(rows.warnings);
     for e in &mut emitters {
         let centre = e.freq.center_hz();
-        e.fco = rows
+        // The channel row's own figures: unbiased `fco` only when the provider has it.
+        let row = rows
             .channels
             .iter()
-            .find(|(f, _)| f.lo_hz <= centre && centre < f.hi_hz)
-            .and_then(|(_, s)| s.fco);
+            .find(|(f, _)| f.lo_hz <= centre && centre < f.hi_hz);
+        e.fco = row.and_then(|(_, s)| s.fco);
+        e.fco_all_visits = row.and_then(|(_, s)| s.fco_all_visits);
     }
     emitters.truncate(req.max_emitters);
     let mut channel_rows: Vec<OccupancyStat> = rows.channels.into_iter().map(|(_, s)| s).collect();
+    let key = |s: &OccupancyStat| (s.fco.unwrap_or(-1.0), s.fco_all_visits.unwrap_or(-1.0));
     channel_rows.sort_by(|a, b| {
-        b.fco
-            .unwrap_or(-1.0)
-            .total_cmp(&a.fco.unwrap_or(-1.0))
+        let (ka, kb) = (key(a), key(b));
+        kb.0.total_cmp(&ka.0)
+            .then(kb.1.total_cmp(&ka.1))
             .then(b.observed_s.total_cmp(&a.observed_s))
     });
     let truncated = channel_rows.len() > req.max_channels;

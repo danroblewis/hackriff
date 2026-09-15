@@ -21,16 +21,19 @@ fn opt(v: Option<f64>) -> String {
 fn stat_row(out: &mut String, row: &str, freq: FreqRange, s: &OccupancyStat) {
     let _ = writeln!(
         out,
-        "{row},{:.0},{:.0},{:.3},{:.3},{},{},{},{},{:.3}",
+        "{row},{:.0},{:.0},{:.3},{:.3},{},{},{},{},{},{},{:.3},{}",
         freq.lo_hz,
         freq.hi_hz,
         ts(s.interval.start),
         ts(s.interval.end),
         opt(s.fco),
+        opt(s.fco_all_visits),
         opt(s.fbo),
         s.n_revisits,
         s.n_occupied,
-        s.observed_s
+        s.n_revisits_all,
+        s.observed_s,
+        s.revisit_biased
     );
 }
 
@@ -74,7 +77,13 @@ pub fn report_csv(r: &SurveyReport, level0_f_cell_hz: f64) -> String {
     let _ = writeln!(out, "# change_vs_baseline: {status}");
     let _ = writeln!(
         out,
-        "row,f_lo_hz,f_hi_hz,t0_s,t1_s,fco,fbo,n_revisits,n_occupied,observed_s"
+        "# fco is activity-independent (empty when unavailable, never substituted); \
+         fco_all_visits includes activity-driven dwells"
+    );
+    let _ = writeln!(
+        out,
+        "row,f_lo_hz,f_hi_hz,t0_s,t1_s,fco,fco_all_visits,fbo,n_revisits,n_occupied,\
+         n_revisits_all,observed_s,revisit_biased"
     );
     for s in &r.occupancy.bands {
         let freq = match s.subject {
@@ -93,7 +102,7 @@ pub fn report_csv(r: &SurveyReport, level0_f_cell_hz: f64) -> String {
     for g in &c.gaps {
         let _ = writeln!(
             out,
-            "gap,{:.0},{:.0},{:.3},{:.3},,,,,",
+            "gap,{:.0},{:.0},{:.3},{:.3},,,,,,,,",
             g.freq.lo_hz,
             g.freq.hi_hz,
             ts(g.time.start),
@@ -103,7 +112,7 @@ pub fn report_csv(r: &SurveyReport, level0_f_cell_hz: f64) -> String {
     for f in &c.never_observed {
         let _ = writeln!(
             out,
-            "never_observed,{:.0},{:.0},{:.3},{:.3},,,,,",
+            "never_observed,{:.0},{:.0},{:.3},{:.3},,,,,,,,",
             f.lo_hz,
             f.hi_hz,
             ts(r.span.start),

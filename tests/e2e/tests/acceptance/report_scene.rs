@@ -12,6 +12,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use hk_context::report::DEFAULT_MAX_EMITTERS;
 use hk_e2e::scene::SceneTruth;
 use hk_e2e::{SynthRequest, synth_or_skip};
 use hk_model::attention::baseline::SiteKey;
@@ -179,7 +180,7 @@ fn report_over_48h_scene_discloses_longest_gap_and_blind_top_emitters() {
             .map(|e| (
                 (e.freq.center_hz() / 1e3).round(),
                 e.sightings,
-                e.fco.map(|f| (f * 1000.0).round() / 1000.0),
+                e.fco_all_visits.map(|f| (f * 1000.0).round() / 1000.0),
                 e.top_suggestion.clone()
             ))
             .collect::<Vec<_>>()
@@ -189,19 +190,38 @@ fn report_over_48h_scene_discloses_longest_gap_and_blind_top_emitters() {
         !report.top_emitters.is_empty() && report.top_emitters.iter().all(|e| e.sightings > 0),
         "[{T121}] top emitters"
     );
-    if found.len() <= report.top_emitters.len() || report.top_emitters.len() < 20 {
-        for ch in &found {
-            assert!(
-                listed(ch),
-                "[{T121}] {} channel at {:.4} MHz was found blind but is not a top emitter",
-                ch.kind,
-                ch.center_hz / 1e6
-            );
-        }
+    assert!(
+        found.len() <= DEFAULT_MAX_EMITTERS,
+        "[{T121}] cannot evaluate the blind top-emitter assertion: {} scene channels found blind \
+         exceed the {DEFAULT_MAX_EMITTERS}-emitter cap (shrink the scene)",
+        found.len()
+    );
+    for ch in &found {
+        assert!(
+            listed(ch),
+            "[{T121}] {} channel at {:.4} MHz was found blind but is not a top emitter",
+            ch.kind,
+            ch.center_hz / 1e6
+        );
     }
     assert!(
-        report.occupancy.channels.iter().any(|s| s.fco.is_some()),
+        report
+            .occupancy
+            .channels
+            .iter()
+            .any(|s| s.fco_all_visits.is_some()),
         "[{T121}] channel occupancy rows"
+    );
+    // The history-tile stand-in never presents its all-visits figure as unbiased `fco` (§2.5).
+    assert!(
+        report
+            .occupancy
+            .bands
+            .iter()
+            .chain(&report.occupancy.channels)
+            .all(|s| s.fco.is_none() && s.revisit_biased)
+            && report.top_emitters.iter().all(|e| e.fco.is_none()),
+        "[{T121}] stand-in occupancy carries an unbiased fco"
     );
 
     // ---- Exports render in the backend. ----

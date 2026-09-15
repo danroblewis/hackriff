@@ -86,6 +86,7 @@ impl InventoryProvider for RepoInventory<'_> {
                 sightings,
                 lifecycle,
                 fco: None,
+                fco_all_visits: None,
                 top_suggestion: self.top_suggestion(e.id)?,
                 new_in_span: e.first_seen >= req.span.start && e.first_seen <= req.span.end,
             });

@@ -36,6 +36,13 @@ pub enum ThresholdMethod {
         /// Fraction of samples treated as idle, (0, 1); 0.8 by default.
         idle_fraction: f64,
     },
+    /// Interim stand-in, not an SM.1880 method: the spectrum-history pyramid's tile occupancy
+    /// (fraction of frame time above the tile floor + `margin_db`), read per grid row. Rows built
+    /// this way carry no activity-independent `fco` (ADR-0012 §2.5).
+    HistoryTile {
+        /// The pyramid's occupancy margin above its floor, dB.
+        margin_db: f64,
+    },
 }
 
 /// Threshold configuration of an occupancy computation.
@@ -74,6 +81,9 @@ impl ThresholdSpec {
                 "threshold.idle_fraction",
                 "must be in (0, 1)",
             ),
+            ThresholdMethod::HistoryTile { margin_db } => {
+                ensure_in(margin_db, 0.0, 60.0, "threshold.margin_db")
+            }
         }
     }
 
@@ -86,6 +96,7 @@ impl ThresholdSpec {
         let base = match self.method {
             ThresholdMethod::PreSet { level_db } => level_db,
             ThresholdMethod::Dynamic { .. } => floor_db + self.guard_db,
+            ThresholdMethod::HistoryTile { margin_db } => floor_db + margin_db,
         };
         let corrected = if self.rbw_correction {
             base - rbw_correction_db(obw_hz, rbw_hz)

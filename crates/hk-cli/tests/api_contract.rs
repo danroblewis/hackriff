@@ -2005,6 +2005,8 @@ fn report_route_serves_document_and_exports() {
         format!("/api/report?{region}&format=xml"),
         format!("/api/report?{region}&site=nowhere"),
         "/api/report?f_lo=2&f_hi=1&t0=0&t1=1".to_owned(),
+        // Over the report grid budget even at the coarsest history level.
+        "/api/report?f_lo=1&f_hi=1000000000000&t0=0&t1=172800".to_owned(),
     ] {
         let (st, v) = get(addr, &bad);
         assert_eq!(st, 400, "{bad}: {v}");

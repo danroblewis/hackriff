@@ -155,6 +155,12 @@ impl ObservationStore {
             .unwrap_or_default()
     }
 
+    /// [`Self::observations_of`] for each range in `freqs` (one pass over the log's segments).
+    pub fn observations_of_each(&self, freqs: &[FreqRange], span: TimeRange) -> Vec<Vec<Visit>> {
+        let loaded = self.load(span);
+        observations_in(&loaded, freqs, span)
+    }
+
     /// [`ObservationTotals`] of each range in `freqs` over `span` (one pass over the log; the
     /// C12 occupancy weighting input).
     pub fn totals(&self, freqs: &[FreqRange], span: TimeRange) -> Vec<ObservationTotals> {
