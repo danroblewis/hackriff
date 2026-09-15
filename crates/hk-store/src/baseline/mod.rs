@@ -14,6 +14,9 @@
 //! - a zstd frame of the little-endian body, sparse by slot (empty slots are not written);
 //! - an FNV-1a 64 checksum of the uncompressed body. A mismatch reads as corrupt, never as data.
 //!
+//! In memory the slots are sparse too ([`SlotSeries`], T-134): a series holds only the
+//! hour-of-week slots it has observed. The file format is unchanged by that (version 2).
+//!
 //! All times are the device/sample clock (ADR-0012 §0).
 
 use std::collections::BTreeMap;
@@ -176,6 +179,191 @@ pub enum LevelClass {
     Occupied,
 }
 
+/// A per-slot statistic with an empty value (what an untouched slot reads as).
+pub trait SlotValue: Copy {
+    /// The untouched slot.
+    const EMPTY: Self;
+}
+
+impl SlotValue for SlotStats {
+    const EMPTY: Self = SlotStats::EMPTY;
+}
+
+impl SlotValue for DecayedStats {
+    const EMPTY: Self = DecayedStats::EMPTY;
+}
+
+/// Minimum and maximum slots a full [`SlotSeries`] grows by (a parked day adds 24).
+const SLOT_GROWTH: (usize, usize) = (4, 12);
+
+/// Hour-of-week slots of one statistic, **sparse** (T-134): only touched slots are stored, in slot
+/// order, behind a 168-bit presence mask. An untouched slot reads as [`SlotValue::EMPTY`]
+/// (`series[i]`), and indexing mutably (`&mut series[i]`) stores it. So the memory of a series
+/// follows the slots observed (48 after a parked 48 h run), not all [`HourOfWeek::SLOTS`], and
+/// every read is the dense value: this is a representation, not a behaviour.
+#[derive(Clone, Debug)]
+pub struct SlotSeries<T> {
+    mask: [u64; 3],
+    values: Vec<T>,
+}
+
+impl<T: SlotValue> Default for SlotSeries<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: SlotValue> SlotSeries<T> {
+    /// No slot touched.
+    pub const fn new() -> Self {
+        Self {
+            mask: [0; 3],
+            values: Vec::new(),
+        }
+    }
+
+    fn present(&self, i: usize) -> bool {
+        (self.mask[i / 64] >> (i % 64)) & 1 == 1
+    }
+
+    /// Stored slots below `i`.
+    fn rank(&self, i: usize) -> usize {
+        let w = i / 64;
+        let below: u32 = self.mask[..w].iter().map(|m| m.count_ones()).sum();
+        (below + (self.mask[w] & ((1_u64 << (i % 64)) - 1)).count_ones()) as usize
+    }
+
+    /// Slot `i` when stored.
+    pub fn get(&self, i: usize) -> Option<&T> {
+        (i < HourOfWeek::SLOTS && self.present(i)).then(|| &self.values[self.rank(i)])
+    }
+
+    /// Slot `i`'s value (`EMPTY` when untouched).
+    pub fn value(&self, i: usize) -> T {
+        self.get(i).copied().unwrap_or(T::EMPTY)
+    }
+
+    /// Slot `i`, stored (as `EMPTY`) if untouched. Panics when `i` ≥ [`HourOfWeek::SLOTS`].
+    pub fn slot_mut(&mut self, i: usize) -> &mut T {
+        assert!(i < HourOfWeek::SLOTS, "slot {i} out of range");
+        let r = self.rank(i);
+        if !self.present(i) {
+            if self.values.len() == self.values.capacity() {
+                let grow = self.values.len().clamp(SLOT_GROWTH.0, SLOT_GROWTH.1);
+                self.values.reserve_exact(grow);
+            }
+            self.values.insert(r, T::EMPTY);
+            self.mask[i / 64] |= 1 << (i % 64);
+        }
+        &mut self.values[r]
+    }
+
+    /// Heap bytes [`Self::slot_mut`]`(i)` would add (0 when stored or with spare capacity).
+    pub fn growth_of(&self, i: usize) -> usize {
+        if (i < HourOfWeek::SLOTS && self.present(i)) || self.values.len() < self.values.capacity()
+        {
+            0
+        } else {
+            self.values.len().clamp(SLOT_GROWTH.0, SLOT_GROWTH.1) * std::mem::size_of::<T>()
+        }
+    }
+
+    /// Stored slots with their index, in slot order.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &T)> + '_ {
+        let mask = self.mask;
+        (0..3)
+            .flat_map(move |w| {
+                let mut m = mask[w];
+                std::iter::from_fn(move || {
+                    (m != 0).then(|| {
+                        let b = m.trailing_zeros() as usize;
+                        m &= m - 1;
+                        w * 64 + b
+                    })
+                })
+            })
+            .zip(&self.values)
+    }
+
+    /// Stored slots.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// No slot stored.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Heap bytes (capacity).
+    pub fn heap_bytes(&self) -> usize {
+        self.values.capacity() * std::mem::size_of::<T>()
+    }
+
+    /// Drops spare capacity (after a load).
+    pub fn shrink_to_fit(&mut self) {
+        self.values.shrink_to_fit();
+    }
+
+    /// The same slots mapped by `f` (untouched slots stay untouched).
+    pub fn map<U: SlotValue>(&self, f: impl FnMut(&T) -> U) -> SlotSeries<U> {
+        SlotSeries {
+            mask: self.mask,
+            values: self.values.iter().map(f).collect(),
+        }
+    }
+}
+
+/// Equal when every slot reads equal (stored-as-`EMPTY` equals untouched).
+impl<T: SlotValue + PartialEq> PartialEq for SlotSeries<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (0..HourOfWeek::SLOTS).all(|i| self.value(i) == other.value(i))
+    }
+}
+
+impl std::ops::Index<usize> for SlotSeries<SlotStats> {
+    type Output = SlotStats;
+    fn index(&self, i: usize) -> &SlotStats {
+        assert!(i < HourOfWeek::SLOTS, "slot {i} out of range");
+        self.get(i).unwrap_or(&SlotStats::EMPTY)
+    }
+}
+
+impl std::ops::Index<usize> for SlotSeries<DecayedStats> {
+    type Output = DecayedStats;
+    fn index(&self, i: usize) -> &DecayedStats {
+        assert!(i < HourOfWeek::SLOTS, "slot {i} out of range");
+        self.get(i).unwrap_or(&DecayedStats::EMPTY)
+    }
+}
+
+impl<T: SlotValue> std::ops::IndexMut<usize> for SlotSeries<T>
+where
+    Self: std::ops::Index<usize, Output = T>,
+{
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        self.slot_mut(i)
+    }
+}
+
+/// The stored slots' values, in slot order (untouched slots contribute nothing to a sum).
+impl<'a, T> IntoIterator for &'a SlotSeries<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+
+/// The stored slots' values, mutably (forgetting leaves untouched slots empty).
+impl<'a, T> IntoIterator for &'a mut SlotSeries<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter_mut()
+    }
+}
+
 /// Reference and adaptive slots of one subject under one gain state and level class.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GainSeries {
@@ -183,10 +371,10 @@ pub struct GainSeries {
     pub gain: u32,
     /// Level class (T-132).
     pub class: LevelClass,
-    /// Frozen reference, [`HourOfWeek::SLOTS`] slots.
-    pub reference: Vec<SlotStats>,
-    /// Adaptive copy, [`HourOfWeek::SLOTS`] slots.
-    pub adaptive: Vec<DecayedStats>,
+    /// Frozen reference over [`HourOfWeek::SLOTS`] slots, sparse (T-134).
+    pub reference: SlotSeries<SlotStats>,
+    /// Adaptive copy over [`HourOfWeek::SLOTS`] slots, sparse (T-134).
+    pub adaptive: SlotSeries<DecayedStats>,
 }
 
 impl GainSeries {
@@ -200,9 +388,19 @@ impl GainSeries {
         Self {
             gain,
             class,
-            reference: vec![SlotStats::EMPTY; HourOfWeek::SLOTS],
-            adaptive: vec![DecayedStats::EMPTY; HourOfWeek::SLOTS],
+            reference: SlotSeries::new(),
+            adaptive: SlotSeries::new(),
         }
+    }
+
+    /// Heap bytes of both copies' stored slots.
+    pub fn heap_bytes(&self) -> usize {
+        self.reference.heap_bytes() + self.adaptive.heap_bytes()
+    }
+
+    /// Heap bytes storing slot `i` in both copies would add.
+    pub fn growth_of(&self, i: usize) -> usize {
+        self.reference.growth_of(i) + self.adaptive.growth_of(i)
     }
 }
 
@@ -303,23 +501,17 @@ pub struct BaselineState {
     pub subjects: BTreeMap<BaselineSubject, SubjectBaseline>,
 }
 
-/// Approximate heap bytes of one slot pair (reference + adaptive).
+/// Approximate heap bytes of one stored slot pair (reference + adaptive).
 pub const SLOT_PAIR_BYTES: usize =
     std::mem::size_of::<SlotStats>() + std::mem::size_of::<DecayedStats>();
 
 impl SubjectBaseline {
-    /// Approximate heap bytes (the subject, its map node and its series; T-132 memory cap).
+    /// Approximate heap bytes (the subject, its map node and its series' stored slots; T-132
+    /// memory cap).
     pub fn approx_bytes(&self) -> usize {
         let node = std::mem::size_of::<BaselineSubject>() + std::mem::size_of::<Self>() + 16;
         let series = self.gains.capacity() * std::mem::size_of::<GainSeries>()
-            + self
-                .gains
-                .iter()
-                .map(|g| {
-                    g.reference.capacity() * std::mem::size_of::<SlotStats>()
-                        + g.adaptive.capacity() * std::mem::size_of::<DecayedStats>()
-                })
-                .sum::<usize>();
+            + self.gains.iter().map(GainSeries::heap_bytes).sum::<usize>();
         node + series + self.seq_hod.capacity() * std::mem::size_of::<CusumState>()
     }
 }
@@ -540,7 +732,6 @@ fn encode_body(state: &BaselineState, version: u16) -> Vec<u8> {
             let refs: Vec<_> = g
                 .reference
                 .iter()
-                .enumerate()
                 // T-132: occupancy-only slots (no level visit) are data too.
                 .filter(|(_, x)| x.n_visits > 0 || x.observed_s > 0.0 || x.weight_s > 0.0)
                 .collect();
@@ -562,7 +753,6 @@ fn encode_body(state: &BaselineState, version: u16) -> Vec<u8> {
             let ads: Vec<_> = g
                 .adaptive
                 .iter()
-                .enumerate()
                 .filter(|(_, x)| !x.is_empty() || x.observed_s > 0.0 || x.weight_s > 0.0)
                 .collect();
             w.u8(ads.len() as u8);
@@ -696,6 +886,8 @@ fn decode_body(
                     max_db: r.f64()?,
                 };
             }
+            g.reference.shrink_to_fit();
+            g.adaptive.shrink_to_fit();
             gains.push(g);
         }
         state.subjects.insert(
@@ -998,6 +1190,145 @@ mod tests {
         let mut magic = bytes;
         magic[0] = b'X';
         assert_eq!(decode(&magic).unwrap_err(), "bad magic");
+    }
+
+    /// A deterministic state touching every v2 field: two subjects, idle and occupied series,
+    /// occupancy-only and level slots, sequential accumulators, latched hours.
+    fn golden_state() -> BaselineState {
+        let key = BaselineKey {
+            site: "6f1c2a9e-3b4d-4e5f-8a6b-7c8d9e0f1a2b".parse().unwrap(),
+            cal: CalKey::Calibrated("0a1b2c3d-4e5f-4a6b-9c7d-8e9f0a1b2c3d".parse().unwrap()),
+            scheme: 1,
+            cell_factor: 16,
+        };
+        let t = |s: i64| Timestamp::from_unix_nanos(s * 1_000_000_000);
+        let mut s = BaselineState::new(key, t(1_000_000));
+        let mut sub = SubjectBaseline::new(t(999_000));
+        let mut idle = GainSeries::new(0xA);
+        idle.reference[0].add(2.0, 3.5, false, 1800.0, 1800.0);
+        idle.reference[25].add(2.5, 2.5, false, 900.0, 1800.0);
+        idle.reference[167].observed_s = 600.0;
+        idle.reference[167].weight_s = 600.0;
+        idle.adaptive[0].add(2.1, 3.5, 0.0, 1800.0, 1800.0);
+        idle.adaptive[0].scale(0.75);
+        idle.adaptive[100].observed_s = 42.0;
+        let mut occ = GainSeries::with_class(0xB, LevelClass::Occupied);
+        occ.reference[12].add(15.0, 18.0, true, 1800.0, 1800.0);
+        occ.adaptive[12].add(15.5, 18.0, 900.0, 1800.0, 1800.0);
+        occ.adaptive[13].add(14.5, 16.0, 450.0, 1800.0, 1800.0);
+        sub.gains = vec![idle, occ];
+        sub.cusum.level_pos = 1.25;
+        sub.seq.occ_neg = 0.5;
+        sub.seq_hod = vec![CusumState::default(); 24];
+        sub.seq_hod[12].level_pos = 3.0;
+        sub.latched_hours = 1 << 12;
+        sub.change_point = Some(ChangePoint {
+            t: t(999_500),
+            statistic: ChangeStatistic::Level,
+            direction: 1,
+            cusum: 8.5,
+        });
+        sub.mature_at = Some(t(990_000));
+        s.subjects
+            .insert(BaselineSubject::Cell { index: 7 }, sub.clone());
+        sub.gains.truncate(1);
+        sub.seq_hod.clear();
+        sub.change_point = None;
+        s.subjects.insert(
+            BaselineSubject::Channel {
+                key: ChannelKey {
+                    scheme: 1,
+                    lo_cell: 69_000,
+                    hi_cell: 69_004,
+                },
+            },
+            sub,
+        );
+        s
+    }
+
+    /// [`golden_state`] as written by the dense-slot encoder before T-134 (version 2).
+    const GOLDEN_V2_DENSE_HEX: &str = concat!(
+        "484b424c020036663163326139652d336234642d346535662d386136622d376338643965306631613262013061316232",
+        "6333642d346535662d346136622d396337642d386539663061316232633364010010000080c6a47e8d030028b52ffd00",
+        "583d08007209243070c7690c3c86a2285c5421402050702f410941a9d0fdef062f2116c03b0f5f6767b6faff444b5446",
+        "51dbe560766f9902517f7a299302565d87072359488b69a0c6e43e7a8b9db11891ea9fe8b8c85b346a63e760a0a25898",
+        "0d524a291fab5133e175dcc7a020b3aa83561bedb40416fc8fefa717daa6869986706d7e0870a14cb675aff5a1408470",
+        "18d6a7c288ff1739203003199136071c4628b86a199951c913acd206bb3e787630fd66cc8139b7b233a200480266e0ea",
+        "e02efb08595d913048c0813b307745e0e5b6e4eda5f46c9f705b661f0a1348284bfce2e20e5d10392edf6a662e960205",
+        "1a0a709007bb4c7a0ebb1481eaaab35654082fd7db0a693d8e60045c2c5ae2f4bf7309",
+    );
+
+    /// T-134: a version-2 file written with dense in-memory slots loads into the sparse series
+    /// unchanged, stores only its touched slots, and re-encodes to the same body (the format did
+    /// not change, so the version stays 2).
+    #[test]
+    fn baseline_codec_reads_v2_files_written_by_the_dense_layout() {
+        let bytes: Vec<u8> = (0..GOLDEN_V2_DENSE_HEX.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&GOLDEN_V2_DENSE_HEX[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(BASELINE_FORMAT_VERSION, 2);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded, golden_state());
+        let sub = &decoded.subjects[&BaselineSubject::Cell { index: 7 }];
+        let stored: Vec<(Vec<usize>, Vec<usize>)> = sub
+            .gains
+            .iter()
+            .map(|g| {
+                (
+                    g.reference.iter().map(|(i, _)| i).collect(),
+                    g.adaptive.iter().map(|(i, _)| i).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            stored,
+            vec![(vec![0, 25, 167], vec![0, 100]), (vec![12], vec![12, 13])]
+        );
+        let body = |b: &[u8]| zstd::decode_all(&b[HEADER_LEN..b.len() - 8]).unwrap();
+        assert_eq!(body(&encode(&decoded).unwrap()), body(&bytes));
+    }
+
+    /// T-134: sparse slots read as the dense values, store only what is touched, and grow in
+    /// bounded steps.
+    #[test]
+    fn baseline_slot_series_reads_dense_and_stores_sparse() {
+        let mut s: SlotSeries<DecayedStats> = SlotSeries::new();
+        assert_eq!(s[5], DecayedStats::EMPTY);
+        assert!(s.is_empty() && s.heap_bytes() == 0);
+        let one = std::mem::size_of::<DecayedStats>();
+        assert_eq!(s.growth_of(100), 4 * one);
+        for i in [100, 3, 167, 64, 63] {
+            s[i].add(f64::from(i as u32), 0.0, 0.0, 1.0, 1.0);
+        }
+        assert_eq!(s.growth_of(3), 0, "stored");
+        assert_eq!(s.growth_of(4), 0, "full at 4, grew by 4: spare capacity");
+        s[4].n = 0.0;
+        assert_eq!((s.len(), s.heap_bytes()), (6, 8 * one));
+        let order: Vec<usize> = s.iter().map(|(i, _)| i).collect();
+        assert_eq!(order, vec![3, 4, 63, 64, 100, 167]);
+        for i in [3, 63, 64, 100, 167] {
+            assert_eq!(s[i].sum_db, f64::from(i as u32));
+        }
+        s[5].n = 0.0;
+        s[6].n = 0.0;
+        assert_eq!(s.growth_of(7), 8 * one, "full at 8, grows by 8");
+        s[5] = DecayedStats::EMPTY;
+        s[6] = DecayedStats::EMPTY;
+        // Stored-as-empty equals untouched.
+        let mut t = s.clone();
+        let _ = &mut t[20];
+        t[4] = DecayedStats::EMPTY;
+        s[4] = DecayedStats::EMPTY;
+        assert_eq!(s, t);
+        let sum: f64 = (&s).into_iter().map(|d| d.sum_db).sum();
+        assert_eq!(sum, 3.0 + 63.0 + 64.0 + 100.0 + 167.0);
+        let mapped = s.map(|d| SlotStats {
+            n_visits: d.n as u64,
+            ..SlotStats::EMPTY
+        });
+        assert_eq!(mapped.len(), s.len());
     }
 
     #[test]

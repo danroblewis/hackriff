@@ -68,7 +68,10 @@
 //!   their own tests build. Re-freeze clears all of it.
 //! - **Memory cap** ([`Baselines::with_memory_cap`]): least recently visited engines are saved and
 //!   unloaded; a fold that would grow memory past the cap with only the active key loaded is
-//!   refused (counted in [`Baselines::refused_folds`]).
+//!   refused (counted in [`Baselines::refused_folds`]). Slots are stored sparse (T-134,
+//!   [`hk_store::baseline::SlotSeries`]): a series grows with the hour-of-week slots it observes,
+//!   so a parked 48 h run holds 48 per series, not 168. Reads are the dense values, so pooling,
+//!   maturity, CUSUMs and novelty are unchanged.
 //! - **Loading outside the lock** ([`Baselines::load_site_outside_lock`]).
 //!
 //! # Keys
@@ -130,11 +133,12 @@ pub fn hour_bit(slot: HourOfWeek) -> u32 {
 /// Reference observed time of `slot`'s hour-of-day pool (the 7 hour-of-week slots sharing its
 /// hour), over all gain states.
 fn hour_of_day_observed_s(sub: &SubjectBaseline, slot: HourOfWeek) -> f64 {
-    let s = slot.index();
+    let h = slot.index() % 24;
     sub.gains
         .iter()
-        .flat_map(|g| g.reference.iter().skip(s % 24).step_by(24))
-        .map(|r| r.observed_s)
+        .flat_map(|g| g.reference.iter())
+        .filter(|(i, _)| i % 24 == h)
+        .map(|(_, r)| r.observed_s)
         .sum()
 }
 
@@ -497,36 +501,55 @@ pub fn pools(
     let mut level = [PoolStats::default(); 4];
     let mut occ = [PoolStats::default(); 4];
     for (gi, g) in sub.gains.iter().enumerate() {
-        for i in 0..HourOfWeek::SLOTS {
-            let d = match copy {
-                BaselineCopy::Reference => DecayedStats::from(&g.reference[i]),
-                BaselineCopy::Adaptive => g.adaptive[i],
-            };
-            if d.is_empty() && d.weight_s <= 0.0 && d.observed_s <= 0.0 {
-                continue;
-            }
-            for res in BaselineResolution::FINEST_FIRST {
-                if !in_pool(i, slot, res) {
-                    continue;
+        // Stored slots only, in slot order (T-134): an untouched slot is empty and was skipped.
+        let own = Some(gi) == gain;
+        match copy {
+            BaselineCopy::Reference => {
+                for (i, s) in g.reference.iter() {
+                    pool_slot(&mut level, &mut occ, i, &DecayedStats::from(s), slot, own);
                 }
-                let r = res_index(res);
-                // Occupancy only (no level moments) so each slot's FCO enters the spread once.
-                occ[r].add(
-                    0.0,
-                    d.observed_s,
-                    0.0,
-                    0.0,
-                    d.occupied_weight_s,
-                    d.weight_s,
-                    d.max_db,
-                );
-                if Some(gi) == gain {
-                    level[r].add_decayed(&d);
+            }
+            BaselineCopy::Adaptive => {
+                for (i, d) in g.adaptive.iter() {
+                    pool_slot(&mut level, &mut occ, i, d, slot, own);
                 }
             }
         }
     }
     (level, occ)
+}
+
+/// Adds stored slot `i` (`d`) to the pools of `slot` it belongs to; `own` = the level series.
+fn pool_slot(
+    level: &mut [PoolStats; 4],
+    occ: &mut [PoolStats; 4],
+    i: usize,
+    d: &DecayedStats,
+    slot: HourOfWeek,
+    own: bool,
+) {
+    if d.is_empty() && d.weight_s <= 0.0 && d.observed_s <= 0.0 {
+        return;
+    }
+    for res in BaselineResolution::FINEST_FIRST {
+        if !in_pool(i, slot, res) {
+            continue;
+        }
+        let r = res_index(res);
+        // Occupancy only (no level moments) so each slot's FCO enters the spread once.
+        occ[r].add(
+            0.0,
+            d.observed_s,
+            0.0,
+            0.0,
+            d.occupied_weight_s,
+            d.weight_s,
+            d.max_db,
+        );
+        if own {
+            level[r].add_decayed(d);
+        }
+    }
 }
 
 /// Maturity of `sub`'s reference for `slot`.
@@ -620,19 +643,47 @@ impl BaselineEngine {
         self.bytes
     }
 
-    /// Upper bound of the bytes folding `obs` would add (a new subject, series or hour-of-day
-    /// accumulators; slots are dense, so an existing series never grows).
+    /// Upper bound of the bytes folding `obs` would add: a new subject, series, stored slot
+    /// (slots are sparse, T-134) or hour-of-day accumulators.
     pub fn growth_of(&self, obs: &IntervalObservation) -> usize {
         let series = std::mem::size_of::<GainSeries>();
-        let heap = hk_store::baseline::SLOT_PAIR_BYTES * HourOfWeek::SLOTS;
+        let slot = self.slot(obs.t).index();
+        let heap = GainSeries::new(0).growth_of(slot);
         let hod = 24 * std::mem::size_of::<CusumState>();
         let class = obs.level_class();
         match self.state.subjects.get(&obs.subject) {
-            None => SubjectBaseline::new(obs.t).approx_bytes() + 4 * series + heap + hod,
+            // A new subject has no reference, so it is immature: no hour-of-day accumulators yet.
+            None => SubjectBaseline::new(obs.t).approx_bytes() + 4 * series + heap,
             Some(sub) => {
                 let hod = if sub.seq_hod.is_empty() { hod } else { 0 };
                 let full = sub.gains.iter().filter(|g| g.class == class).count() >= MAX_GAIN_STATES;
-                if gain_index(sub, obs.gain, class).is_some() || full {
+                // An auto re-freeze inside `fold` replaces every reference with a copy of its
+                // adaptive slots, which may hold many more slots (T-134). Rare: the re-frozen
+                // copies are built to size it exactly.
+                let refreeze = self.auto_refreezes(sub, obs.t);
+                let refrozen = |g: &GainSeries| g.adaptive.map(to_slot_stats);
+                let hod = hod
+                    + if refreeze {
+                        sub.gains
+                            .iter()
+                            .map(|g| {
+                                refrozen(g)
+                                    .heap_bytes()
+                                    .saturating_sub(g.reference.heap_bytes())
+                            })
+                            .sum()
+                    } else {
+                        0
+                    };
+                if let Some(gi) = gain_index(sub, obs.gain, class) {
+                    let g = &sub.gains[gi];
+                    let reference = if refreeze {
+                        refrozen(g).growth_of(slot)
+                    } else {
+                        g.reference.growth_of(slot)
+                    };
+                    hod + reference + g.adaptive.growth_of(slot)
+                } else if full {
                     hod
                 } else {
                     let cap = sub.gains.capacity();
@@ -766,9 +817,7 @@ impl BaselineEngine {
             }
         };
         // Auto re-freeze an unanswered change point.
-        if let (Some(days), Some(cp)) = (policy.auto_refreeze_days, sub.change_point)
-            && secs(cp.t, obs.t) >= days * 86_400.0
-        {
+        if auto_refreezes(&policy, sub, obs.t) {
             refreeze_subject(sub, obs.t);
         }
         let sub_ref: &SubjectBaseline = sub;
@@ -1005,9 +1054,23 @@ impl BaselineEngine {
         }
         if n > 0 {
             self.dirty = true;
+            // The re-frozen references hold the adaptive slots (T-134: possibly many more).
+            self.bytes = self.state.approx_bytes();
         }
         n
     }
+
+    fn auto_refreezes(&self, sub: &SubjectBaseline, t: Timestamp) -> bool {
+        auto_refreezes(&self.cfg.policy, sub, t)
+    }
+}
+
+/// A fold at `t` auto re-freezes `sub` (an unanswered change point `auto_refreeze_days` old).
+fn auto_refreezes(policy: &AdaptationPolicy, sub: &SubjectBaseline, t: Timestamp) -> bool {
+    matches!(
+        (policy.auto_refreeze_days, sub.change_point),
+        (Some(days), Some(cp)) if secs(cp.t, t) >= days * 86_400.0
+    )
 }
 
 fn gain_index(sub: &SubjectBaseline, gain: u32, class: LevelClass) -> Option<usize> {
@@ -1018,9 +1081,8 @@ fn gain_index(sub: &SubjectBaseline, gain: u32, class: LevelClass) -> Option<usi
 
 fn refreeze_subject(sub: &mut SubjectBaseline, t: Timestamp) {
     for g in &mut sub.gains {
-        for (r, a) in g.reference.iter_mut().zip(&g.adaptive) {
-            *r = to_slot_stats(a);
-        }
+        // Every slot: untouched adaptive slots re-freeze to untouched (empty) reference slots.
+        g.reference = g.adaptive.map(to_slot_stats);
     }
     sub.cusum = Default::default();
     sub.change_point = None;
@@ -1669,6 +1731,78 @@ mod tests {
         let out = e.observe(&interval(ch, 600.25, 0.6, 16.0, &mut rng));
         assert_eq!(out.novelty.novelty, 0.0);
         assert!(e.state.subjects[&ch].change_point.is_none());
+    }
+
+    /// T-134 review: a re-freeze (user or auto) copies adaptive → reference, which with sparse
+    /// slots can store many more reference slots. The kept byte count must follow it, and the
+    /// memory cap's growth estimate must cover an auto re-freeze inside the fold.
+    #[test]
+    fn baseline_refreeze_keeps_the_byte_count_exact() {
+        let mut rng = Rng(0x134);
+        let cfg = BaselineConfig {
+            policy: AdaptationPolicy {
+                auto_refreeze_days: Some(1.0),
+                ..AdaptationPolicy::default()
+            },
+            ..BaselineConfig::default()
+        };
+        let mut e = BaselineEngine::new(BaselineState::new(site_key(), at(0.0)), 0, cfg);
+        let ch = channel(0);
+        let exact = |e: &BaselineEngine| assert_eq!(e.approx_bytes(), e.state.approx_bytes());
+        let slots = |e: &BaselineEngine| {
+            let gains = &e.state.subjects[&ch].gains;
+            (
+                gains.iter().map(|g| g.reference.len()).sum::<usize>(),
+                gains.iter().map(|g| g.adaptive.len()).sum::<usize>(),
+            )
+        };
+        // Clean folds in hour 0 enter both copies; provenance-explained folds after it only the
+        // adaptive copy, so the adaptive copy stores many more slots than the reference.
+        let fold = |e: &mut BaselineEngine, rng: &mut Rng, hours: f64| {
+            let mut o = interval(ch, hours, 0.2, 10.0, rng);
+            o.provenance_explained = hours >= 1.0;
+            e.observe(&o)
+        };
+        for q in 0..(48 * 4) {
+            fold(&mut e, &mut rng, f64::from(q) / 4.0);
+        }
+        exact(&e);
+        let (reference, adaptive) = slots(&e);
+        assert!(reference * 4 < adaptive, "{reference} vs {adaptive} slots");
+
+        // User re-freeze.
+        assert_eq!(e.refreeze(at(48.0), |s| *s == ch), 1);
+        assert_eq!(slots(&e).0, adaptive);
+        exact(&e);
+
+        // Auto re-freeze, a day after an unanswered change point, with the adaptive copy grown
+        // by another day of slots.
+        for q in (48 * 4)..(72 * 4) {
+            fold(&mut e, &mut rng, f64::from(q) / 4.0);
+        }
+        e.state.subjects.get_mut(&ch).unwrap().change_point = Some(ChangePoint {
+            t: at(48.0),
+            statistic: ChangeStatistic::Occupancy,
+            direction: 1,
+            cusum: 9.0,
+        });
+        let o = {
+            let mut o = interval(ch, 72.0, 0.2, 10.0, &mut rng);
+            o.provenance_explained = true;
+            o
+        };
+        let (before, predicted) = (e.approx_bytes(), e.growth_of(&o));
+        e.observe(&o);
+        let sub = &e.state.subjects[&ch];
+        assert_eq!(sub.refrozen_at, Some(at(72.0)), "auto re-froze");
+        assert!(sub.change_point.is_none());
+        assert!(slots(&e).0 > adaptive, "the reference grew");
+        exact(&e);
+        let grown = e.approx_bytes() - before;
+        assert!(
+            grown <= predicted,
+            "grew {grown} B, estimated {predicted} B"
+        );
     }
 
     #[test]

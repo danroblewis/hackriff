@@ -1274,7 +1274,6 @@ impl AttentionService {
                     sub.gains[*gi]
                         .reference
                         .iter()
-                        .enumerate()
                         .filter(|(i, _)| in_pool(*i, slot, res))
                         .map(|(_, s)| s.n_visits)
                         .sum::<u64>()
@@ -1330,6 +1329,8 @@ impl AttentionService {
                 z > lo && a < hi
             });
         }
+        // T-134: a re-freeze can grow the references (sparse slots).
+        self.sync_baseline_gauges(&b);
         b.flush(t, true)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
         Ok(json!({ "site": id.to_string(), "refrozen": n }))
@@ -1479,6 +1480,96 @@ pub(crate) mod tests {
             assert!(a[field].is_u64(), "{field}: {a}");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A parked run of `hours` over 9 700 baseline cells (a 30–1000 MHz plan, ADR-0012 §3.1)
+    /// under two front-end gain states, time-compressed to one 30-min fold per cell per gain state
+    /// (memory depends on the slots touched, not the fold count). 30 % of the cells carry a
+    /// daytime intermittent emitter, so they hold idle and occupied level series under both gain
+    /// states (4 series), the rest idle only (2 series). Memory only: nothing can be unloaded, so
+    /// the cap refuses growth. Returns the set and wall-clock seconds.
+    fn parked_cells_run(hours: i64, cap: Option<usize>) -> (Baselines, f64) {
+        const CELLS: i64 = 9_700;
+        // Monday 00:00 UTC (1970-01-05) + 52 weeks.
+        const T0_NS: i64 = (4 + 364) * 86_400 * 1_000_000_000;
+        let site = SiteKey::Site(SiteId::new());
+        let mut b = Baselines::new(BaselineConfig::default(), 1, 16, None);
+        b.set_memory_cap(cap);
+        let started = std::time::Instant::now();
+        for h in 0..hours {
+            for (half, gain) in [(0_i64, 0xA_u32), (1, 0xB)] {
+                let t =
+                    Timestamp::from_unix_nanos(T0_NS + (h * 3600 + half * 1800) * 1_000_000_000);
+                for c in 0..CELLS {
+                    let busy = c % 10 < 3;
+                    let on = busy && (8..20).contains(&(h % 24)) && (c + h) % 3 != 0;
+                    let jitter = ((c * 7 + h * 13 + half) % 11) as f64 * 0.1 - 0.5;
+                    let obs = IntervalObservation {
+                        subject: BaselineSubject::Cell { index: c },
+                        t,
+                        gain,
+                        level_db: Some(if on { 15.0 } else { 2.0 } + jitter),
+                        max_db: None,
+                        occupied_weight_s: if on { 900.0 } else { 0.0 },
+                        weight_s: 1800.0,
+                        observed_s: 1800.0,
+                        n_eff: 24.0,
+                        suspect_fraction: 0.0,
+                        provenance_explained: false,
+                    };
+                    b.observe(site, 0, CalKey::Uncalibrated, &obs).unwrap();
+                }
+            }
+        }
+        (b, started.elapsed().as_secs_f64())
+    }
+
+    /// T-134 (AWARE-042): baseline memory per key at 9 700 cells × 2 gain states, and the default
+    /// memory cap on a parked 48 h run. Dense slots (T-132) held 369 453 672 B for the 2-series
+    /// cells alone (measured with this generator at 2 h, when dense memory is already final), past
+    /// the 256 MiB cap; sparse slots hold only the 48 observed hour-of-week slots per series.
+    #[test]
+    fn attention_baseline_default_cap_does_not_refuse_a_parked_48h_run_at_9700_cells() {
+        let (b, secs) = parked_cells_run(48, Some(DEFAULT_BASELINE_MEMORY_CAP_BYTES));
+        let subs: Vec<&SubjectBaseline> = b
+            .engines()
+            .flat_map(|e| e.state.subjects.values())
+            .collect();
+        let series: usize = subs.iter().map(|s| s.gains.len()).sum();
+        let slots: usize = subs
+            .iter()
+            .flat_map(|s| &s.gains)
+            .map(|g| g.adaptive.len())
+            .sum();
+        let per_key = b.memory_bytes();
+        // ADR-0012 §3.1: ~56 B per copy per observed slot (both copies 112 B) for 9 700 cells
+        // over all 168 hour-of-week slots.
+        let adr_week_budget = 9_700 * HourOfWeek::SLOTS * 2 * 56;
+        println!(
+            "T-134 parked 48 h, 9700 cells x 2 gain states: {per_key} B per key ({:.1} MiB), \
+             {series} series, {slots} stored slots ({:.1} B per stored slot incl. overhead), cap \
+             {} B, {} folds refused, ADR full-week budget {adr_week_budget} B, {secs:.1} s",
+            per_key as f64 / f64::from(1 << 20),
+            per_key as f64 / slots as f64,
+            DEFAULT_BASELINE_MEMORY_CAP_BYTES,
+            b.refused_folds(),
+        );
+        assert_eq!(subs.len(), 9_700);
+        assert_eq!(
+            series,
+            9_700 * 2 + 2_910 * 2,
+            "idle A/B + busy occupied A/B"
+        );
+        assert_eq!(
+            slots,
+            9_700 * 2 * 48,
+            "each cell × gain state × hour folds into one class series: 48 stored slots"
+        );
+        assert_eq!(b.refused_folds(), 0, "the default cap refuses nothing");
+        assert!(
+            per_key <= adr_week_budget,
+            "{per_key} B > {adr_week_budget} B"
+        );
     }
 
     /// A 15-min T-118 row at `q` quarter-hours of `subject` under `site` (12 revisits, 75 s apart:
