@@ -453,6 +453,11 @@ impl DetectNode {
                             f_hi_hz,
                             t_start: t,
                             continues: r.continues,
+                            snr_db: r.detection.snr_mean_db,
+                            // The occupancy engine's §2.6 rule, so candidates and FCO agree.
+                            suspect: hk_context::occupancy::channels::detection_is_suspect(
+                                &r.detection.flags,
+                            ),
                         },
                     );
                     self.order.push_back((t.as_unix_nanos(), id));

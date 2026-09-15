@@ -4,23 +4,41 @@
 //! [`ReportService`] reads the spectrum history (the history store, else the floor product's
 //! uncalibrated pyramid, as `/api/history` does), the observation log (T-115) and the inventory
 //! database, and assembles `report(region, span)` through `hk_context::report`. Coverage comes
-//! from the observation log when it holds visits for the box, else from history tiles. Occupancy
-//! is the interim history-tile provider (`fco_all_visits` only, never `fco`) until T-118 lands;
-//! baselines are `unavailable` until T-119 lands (swap the providers in [`ReportService::build`],
-//! nothing else changes).
+//! from the observation log when it holds visits for the box, else from history tiles.
+//!
+//! **Occupancy and baselines (T-128).** With the run's occupancy engine attached
+//! ([`ReportService::with_attention`]), occupancy comes from T-118's stored 15-min series
+//! ([`SeriesOccupancy`]): rows overlapping the span (whole rows), of the report's site when it is
+//! a site, rolled up per subject by summing counts and weighting each FCO by its own visit counts
+//! (§2.8), so channel rows carry the true `fco` (activity-independent, suspect excluded) where the
+//! engine had such visits. Without series rows for the box the history-tile stand-in answers
+//! (`fco_all_visits` only) with a warning. With the attention service attached the change vs
+//! baseline is T-119's comparison ([`AttentionService::compare_report`]); otherwise it stays
+//! `unavailable`.
 //!
 //! **Ingest lock.** The history writer only `try_lock`s its store and drops frames while the lock
 //! is held, so the report grid is bounded ([`report_chunks`]: ≤ `REPORT_MAX_CELLS`, else 400) and
 //! read in chunks of ≤ `REPORT_LOCK_CHUNK_ROWS` rows, each under its own short lock scope. One grid
 //! serves JSON, CSV and PNG; assembly runs with the history lock released.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 pub use hk_context::report::ReportError;
 use hk_context::report::{
-    self, CoverageProvider, HistoryTiles, NoBaselines, ObservationCoverage, Providers,
-    RepoInventory, ReportRequest, report_chunks, report_csv, report_png,
+    self, BaselineProvider, CoverageProvider, HistoryTiles, NoBaselines, ObservationCoverage,
+    OccupancyProvider, OccupancyRows, Providers, RepoInventory, ReportRequest, report_chunks,
+    report_csv, report_png,
 };
+use hk_model::attention::occupancy::{OccupancyStat, OccupancySubject};
+use hk_model::attention::report::{BaselineComparison, ReportOccupancy};
+use hk_store::occupancy::{OccupancyQuery, SeriesInterval};
+
+use crate::attention::AttentionService;
+use crate::occupancy::OccupancyService;
+
+/// Most series rows one report reads.
+pub const REPORT_MAX_SERIES_ROWS: usize = 200_000;
 use hk_model::attention::baseline::SiteKey;
 use hk_model::attention::report::{ExportFormat, SurveyReport};
 use hk_model::{FreqRange, Repository, TimeRange, Timestamp};
@@ -34,6 +52,8 @@ pub struct ReportService {
     floor: Option<Arc<Mutex<FloorProduct>>>,
     observations: Option<ObservationStore>,
     inventory: Arc<Mutex<Repository>>,
+    occupancy: Option<Arc<OccupancyService>>,
+    attention: Option<Arc<AttentionService>>,
 }
 
 impl ReportService {
@@ -50,7 +70,21 @@ impl ReportService {
             floor,
             observations,
             inventory,
+            occupancy: None,
+            attention: None,
         }
+    }
+
+    /// T-128: the run's occupancy engine (series rows, true `fco`) and attention service
+    /// (baseline comparison) as the report's occupancy and baseline providers.
+    pub fn with_attention(
+        mut self,
+        occupancy: Option<Arc<OccupancyService>>,
+        attention: Option<Arc<AttentionService>>,
+    ) -> Self {
+        self.occupancy = occupancy;
+        self.attention = attention;
+        self
     }
 
     /// Runs `f` under one short history-lock scope.
@@ -157,20 +191,209 @@ impl ReportService {
         coverage.push(&tiles);
         let mut req = ReportRequest::new(region, span, generated_at);
         req.site = site;
+        // T-128: T-118's series and T-119's comparison when the run attached them.
+        let series = self.occupancy.as_deref().map(|svc| SeriesOccupancy {
+            svc,
+            fallback: &tiles,
+        });
+        let occupancy: &dyn OccupancyProvider = match &series {
+            Some(s) => s,
+            None => &tiles,
+        };
+        let baselines = self.attention.as_deref().map(AttentionBaselines);
+        let baseline: &dyn BaselineProvider = match &baselines {
+            Some(b) => b,
+            None => &NoBaselines,
+        };
         let r = report::assemble(
             &req,
             &Providers {
                 coverage,
-                // T-118 adapter slot: the OccupancyStat series (true `fco`) replaces tiles here.
-                occupancy: &tiles,
+                occupancy,
                 inventory: &inventory,
-                // T-119 adapter slot: the baseline comparison replaces `NoBaselines` here.
-                baseline: &NoBaselines,
+                baseline,
                 provenance: &tiles,
             },
         )?;
         drop(repo);
         Ok((r, tiles))
+    }
+}
+
+/// T-128: the occupancy engine's stored 15-min series as the report's occupancy.
+pub struct SeriesOccupancy<'a> {
+    /// The run's occupancy engine.
+    pub svc: &'a OccupancyService,
+    /// Answers when the series holds nothing for the box.
+    pub fallback: &'a dyn OccupancyProvider,
+}
+
+/// Grouping key of a series row: channel cells, or a band's extent in Hz.
+fn subject_group(s: &OccupancySubject) -> (u8, i64, i64) {
+    match s {
+        OccupancySubject::Channel { key } => (0, key.lo_cell, key.hi_cell),
+        OccupancySubject::Band { freq } => {
+            (1, freq.lo_hz.round() as i64, freq.hi_hz.round() as i64)
+        }
+    }
+}
+
+fn weighted(
+    rows: &[&OccupancyStat],
+    v: impl Fn(&OccupancyStat) -> Option<f64>,
+    w: impl Fn(&OccupancyStat) -> f64,
+) -> Option<f64> {
+    let (mut sw, mut sv) = (0.0, 0.0);
+    for r in rows {
+        if let Some(x) = v(r).filter(|x| x.is_finite()) {
+            let k = w(r);
+            sw += k;
+            sv += k * x;
+        }
+    }
+    (sw > 0.0).then(|| sv / sw)
+}
+
+fn median(mut v: Vec<f64>) -> Option<f64> {
+    v.retain(|x| x.is_finite());
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    Some(v[v.len() / 2])
+}
+
+/// One subject's 15-min rows rolled up over `span` (§2.8: counts summed, each fraction weighted by
+/// the counts it was computed over). The interval-level `confidence` and `fco_window` are dropped
+/// (they do not roll up); levels and floors are the rows' medians.
+pub fn roll_up(rows: &[&OccupancyStat], span: TimeRange) -> Option<OccupancyStat> {
+    let first = rows.first()?;
+    let mut out = (*first).clone();
+    let sum = |f: fn(&OccupancyStat) -> u64| rows.iter().map(|r| f(r)).sum::<u64>();
+    out.interval = span;
+    out.n_revisits = sum(|r| r.n_revisits);
+    out.n_occupied = sum(|r| r.n_occupied);
+    out.n_suspect = sum(|r| r.n_suspect);
+    out.n_revisits_all = sum(|r| r.n_revisits_all);
+    out.observed_s = rows.iter().map(|r| r.observed_s).sum();
+    let usable = |r: &OccupancyStat| r.n_revisits.saturating_sub(r.n_suspect) as f64;
+    out.fco = weighted(rows, |r| r.fco, usable);
+    out.fco_all_visits = weighted(rows, |r| r.fco_all_visits, |r| r.n_revisits_all as f64);
+    out.fco_suspect_upper = weighted(rows, |r| r.fco_suspect_upper, |r| r.n_revisits as f64);
+    out.fbo = weighted(rows, |r| r.fbo, |r| r.observed_s.max(1e-9));
+    out.sro = weighted(rows, |r| r.sro, |r| r.observed_s.max(1e-9));
+    out.revisit_max_s = rows.iter().filter_map(|r| r.revisit_max_s).reduce(f64::max);
+    out.revisit_mean_s = weighted(rows, |r| r.revisit_mean_s, |r| r.n_revisits_all as f64);
+    out.threshold_db =
+        median(rows.iter().map(|r| r.threshold_db).collect()).unwrap_or(first.threshold_db);
+    out.guard_clamped = rows.iter().any(|r| r.guard_clamped);
+    out.revisit_biased = rows.iter().any(|r| r.revisit_biased);
+    out.confidence = None;
+    out.fco_window = None;
+    out.floor_db = median(rows.iter().filter_map(|r| r.floor_db).collect());
+    out.floor_suspect = rows
+        .iter()
+        .filter_map(|r| r.floor_suspect)
+        .reduce(|a, b| a || b);
+    out.level_occupied_p50_db = median(
+        rows.iter()
+            .filter_map(|r| r.level_occupied_p50_db)
+            .collect(),
+    );
+    out.level_occupied_p90_db = median(
+        rows.iter()
+            .filter_map(|r| r.level_occupied_p90_db)
+            .collect(),
+    );
+    out.level_idle_db = median(rows.iter().filter_map(|r| r.level_idle_db).collect());
+    out.validate().ok()?;
+    Some(out)
+}
+
+impl OccupancyProvider for SeriesOccupancy<'_> {
+    fn occupancy(
+        &self,
+        req: &ReportRequest,
+        channels: &[FreqRange],
+    ) -> Result<OccupancyRows, ReportError> {
+        let (_, f_cell) = self.svc.plan_info();
+        let q = OccupancyQuery {
+            freq: req.region,
+            span: req.span,
+            interval: SeriesInterval::Min15,
+            subject: None,
+            f_cell_hz: f_cell,
+            limit: REPORT_MAX_SERIES_ROWS,
+        };
+        let stored = self.svc.query(&q).unwrap_or_default();
+        let by_site = matches!(req.site, SiteKey::Site(_));
+        let mut groups: BTreeMap<(u8, i64, i64), Vec<&OccupancyStat>> = BTreeMap::new();
+        for r in &stored.rows {
+            let overlaps = r.interval.start < req.span.end && r.interval.end > req.span.start;
+            if overlaps && (!by_site || r.site == req.site) {
+                groups.entry(subject_group(&r.subject)).or_default().push(r);
+            }
+        }
+        if groups.is_empty() {
+            let mut rows = self.fallback.occupancy(req, channels)?;
+            rows.warnings.push(
+                "the occupancy engine holds no series rows for this box yet: history-tile                  stand-in"
+                    .into(),
+            );
+            return Ok(rows);
+        }
+        let span = TimeRange::new(
+            groups
+                .values()
+                .flatten()
+                .map(|r| r.interval.start)
+                .min()
+                .unwrap_or(req.span.start),
+            groups
+                .values()
+                .flatten()
+                .map(|r| r.interval.end)
+                .max()
+                .unwrap_or(req.span.end),
+        );
+        let mut out = OccupancyRows::default();
+        let n_rows: usize = groups.values().map(Vec::len).sum();
+        for rows in groups.values() {
+            let Some(stat) = roll_up(rows, span) else {
+                continue;
+            };
+            match stat.subject {
+                OccupancySubject::Band { .. } => out.bands.push(stat),
+                OccupancySubject::Channel { key } => {
+                    let f =
+                        FreqRange::new(key.lo_cell as f64 * f_cell, key.hi_cell as f64 * f_cell);
+                    if f.hi_hz > req.region.lo_hz && f.lo_hz < req.region.hi_hz {
+                        out.channels.push((f, stat));
+                    }
+                }
+            }
+        }
+        out.warnings.push(format!(
+            "occupancy from the occupancy engine's 15-min series: {n_rows} rows over {} subjects              rolled up over {:.2} h (whole rows overlapping the span); fco counts              activity-independent visits only, suspect excluded{}{}",
+            groups.len(),
+            span.duration_ns() as f64 / 3.6e12,
+            if stored.truncated { "; series truncated" } else { "" },
+            if by_site { "" } else { "; rows of every site" },
+        ));
+        Ok(out)
+    }
+}
+
+/// T-128: T-119's baselines as the report's change vs baseline.
+pub struct AttentionBaselines<'a>(pub &'a AttentionService);
+
+impl BaselineProvider for AttentionBaselines<'_> {
+    fn compare(
+        &self,
+        req: &ReportRequest,
+        occupancy: &ReportOccupancy,
+    ) -> Result<BaselineComparison, ReportError> {
+        Ok(self.0.compare_report(req.site, &occupancy.channels))
     }
 }
 
@@ -229,6 +452,31 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(e, ReportError::Invalid(_)), "{e:?}");
         }
+    }
+
+    /// T-128 item 5: series rows roll up by summing counts and weighting each FCO by its own
+    /// counts; a row that validates yields a validating span row.
+    #[test]
+    fn report_series_roll_up_weights_fco_by_counts() {
+        use hk_model::attention::occupancy::ChannelKey;
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: 69_000,
+            hi_cell: 69_004,
+        };
+        let subject = OccupancySubject::Channel { key };
+        let mut a = crate::attention::tests::series_row(0, SiteKey::Unassigned, subject, 0.25);
+        let b = crate::attention::tests::series_row(1, SiteKey::Unassigned, subject, 0.75);
+        a.n_revisits = 36;
+        a.n_revisits_all = 36;
+        a.n_occupied = 9;
+        let span = TimeRange::new(a.interval.start, b.interval.end);
+        let r = roll_up(&[&a, &b], span).expect("valid");
+        assert_eq!((r.n_revisits, r.n_occupied, r.n_revisits_all), (48, 18, 48));
+        // (0.25·36 + 0.75·12) / 48
+        assert!((r.fco.unwrap() - 0.375).abs() < 1e-12, "{:?}", r.fco);
+        assert_eq!(r.interval, span);
+        assert!(r.confidence.is_none());
     }
 
     /// A report build releases the history lock between bounded chunks, so ingest (which only

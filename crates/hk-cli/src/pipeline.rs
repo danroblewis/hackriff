@@ -512,6 +512,10 @@ fn attention_control(
     handle: &PipelineHandle,
     db: &Arc<Mutex<Repository>>,
 ) -> anyhow::Result<Arc<dyn hk_api::attention::AttentionControl>> {
+    // T-128: the run's own service (fed by occupancy and the scheduler) when it opened.
+    if let Some(service) = handle.attention() {
+        return Ok(Arc::new(PipelineAttention(service)));
+    }
     let counters = handle.counters();
     let clock_counters = Arc::clone(&counters);
     let clock = Arc::new(move || {
@@ -669,12 +673,15 @@ pub fn serve_api(
         observations: handle.observation_store(),                         // T-115
         attention: Some(attention),                                       // T-119
         scheduler: Some(Arc::new(PipelineScheduler(handle.scheduler_hub()))), // T-127
-        reports: Some(Arc::new(PipelineReports(ReportService::new(
-            None,
-            Some(handle.floor_product()),
-            handle.observation_store(),
-            Arc::clone(&report_db),
-        )))), // T-121
+        reports: Some(Arc::new(PipelineReports(
+            ReportService::new(
+                None,
+                Some(handle.floor_product()),
+                handle.observation_store(),
+                Arc::clone(&report_db),
+            )
+            .with_attention(Some(handle.occupancy()), handle.attention()), // T-128
+        ))), // T-121
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

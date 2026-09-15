@@ -24,8 +24,11 @@
 //!   bandit dwell's outcome (new tracks, bursts and novelty of member detections inside its window
 //!   and time, decodes written for those tracks) reaches `record_outcome` once detection has caught
 //!   up; a verification group's trust-test verdict reaches `report_verification`; arms are
-//!   re-packed off `next_step` (`refresh_bandit`) at each step boundary. The provider is a
-//!   **minimal stub** until T-119's C12 scorer publishes through the same handle.
+//!   re-packed off `next_step` (`refresh_bandit`) at each step boundary. The provider is the run's
+//!   C12 scorer (T-128, [`crate::attention::AttentionService`]): confirmed tracks, their members
+//!   (SNR, suspect flags, bursts) and recipe matches feed its candidate table, a verification
+//!   verdict marks the candidate trust-tested, and member suspect flags count in the dwell's
+//!   `suspect_detections`.
 //! - **API hub (T-127):** each step publishes a [`SchedulerHub`] snapshot (tier shares, arms,
 //!   leases) and serves lease create/release commands for `/api/scheduler*`.
 //! - **Source restarts** (`--loop`, T-037a): the scheduler controls the source through a
@@ -49,12 +52,7 @@ use hk_core::{
 };
 use hk_detect::CaptureResult;
 use hk_model::FreqRange;
-use hk_model::attention::baseline::{BaselineResolution, Maturity};
 use hk_model::attention::schedule::{BanditConfig, DwellOutcome};
-use hk_model::attention::score::{
-    Candidate as Scored, CandidateSet, CandidateSubject, NoveltyScore, ScoreComponents,
-    ScoreWeights, SharedInterestingness, interestingness, normalised,
-};
 use hk_model::{ScanPlan, Timestamp, TrackId};
 
 use crate::chains::{ChainManager, TrackDecodes};
@@ -257,6 +255,7 @@ impl SchedState {
         t0: Timestamp,
         counters: Arc<Counters>,
         verify: bool,
+        attention: Option<Arc<crate::attention::AttentionService>>,
     ) -> anyhow::Result<Self> {
         let caps = switch.capabilities().clone();
         let mut cfg = SchedulerConfig::from_plan(plan)?;
@@ -275,12 +274,16 @@ impl SchedState {
         let mut scheduler = Scheduler::new(plan, cfg, &caps, SyntheticClock::new(t0))?;
         let bandit = match bandit_config(plan)? {
             Some(bcfg) => {
-                let provider = Arc::new(SharedInterestingness::default());
+                // T-128: the run's C12 scorer (a memory-only one without a run).
+                let attention = match attention {
+                    Some(a) => a,
+                    None => Arc::new(crate::attention::AttentionService::in_memory()?),
+                };
                 scheduler
-                    .enable_bandit(bcfg, Arc::clone(&provider) as _)
+                    .enable_bandit(bcfg, attention.provider() as _)
                     .map_err(|e| anyhow::anyhow!("extra.bandit: {e}"))?;
                 Some(BanditWiring {
-                    stub: StubInterestingness::new(provider),
+                    attention,
                     pending: VecDeque::with_capacity(MAX_PENDING_OUTCOMES),
                 })
             }
@@ -375,7 +378,7 @@ impl SchedState {
         cut
     }
 
-    /// T-127: a member detection feeds the stub scorer and the outcome of the bandit dwell whose
+    /// T-127/T-128: a member detection feeds the C12 candidate table and the outcome of the bandit dwell whose
     /// window and time contain it. A dwell cut by a lease never reaches here with its planned
     /// end: [`Self::serve_hub`] drops its outcome.
     ///
@@ -390,7 +393,7 @@ impl SchedState {
         };
         let decodes = &self.track_decodes;
         let t = member.t_start.as_unix_nanos();
-        let (new_track, novelty) = b.stub.on_member(track, member);
+        let (new_track, novelty) = b.attention.on_track_member(track, &member_evidence(member));
         let center = 0.5 * (member.f_lo_hz + member.f_hi_hz);
         for p in &mut b.pending {
             let st = &p.step;
@@ -408,6 +411,9 @@ impl SchedState {
             }
             if !member.continues {
                 p.outcome.bursts += 1;
+            }
+            if member.suspect {
+                p.outcome.suspect_detections += 1;
             }
             if !p.tracks.iter().any(|m| m.track == track) {
                 p.tracks.push(TrackMark {
@@ -453,10 +459,12 @@ impl SchedState {
         }
     }
 
-    fn offer(&mut self, cand: &Candidate) {
+    /// A confirmed track: a bandit candidate (with whether a chain recipe matches it) or a WRR POI.
+    fn offer(&mut self, cand: &Candidate, recipe_match: bool) {
         if let Some(b) = self.bandit.as_mut() {
             if let Some(track) = cand.track {
-                b.stub.on_confirmed(track, cand);
+                let freq = FreqRange::new(cand.f_lo_hz, cand.f_hi_hz.max(cand.f_lo_hz + 1.0));
+                b.attention.on_track_confirmed(track, freq, recipe_match);
             }
             return;
         }
@@ -483,7 +491,7 @@ impl SchedState {
 
     fn remove(&mut self, track: TrackId) {
         if let Some(b) = self.bandit.as_mut() {
-            b.stub.on_closed(track);
+            b.attention.on_track_closed(track);
         }
         if let Some(key) = self.keys.remove(&track) {
             self.scheduler.remove_poi(key);
@@ -548,8 +556,9 @@ impl SchedState {
         if self.step_end_ns.is_some_and(|end| now_ns < end) {
             return;
         }
-        if let Some(b) = self.bandit.as_mut() {
-            b.stub.maybe_publish(now_ns);
+        if let Some(b) = self.bandit.as_ref() {
+            b.attention
+                .publish_candidates(Timestamp::from_unix_nanos(now_ns), false);
         }
         // Packing allocates, so it happens here, off `next_step` (ADR-0012 §5.1).
         self.scheduler.refresh_bandit();
@@ -574,8 +583,13 @@ impl SchedState {
                 let mut eval = TrustEval::new(c, &counters.verdicts, track, t);
                 let report = v.evaluate(&mut eval);
                 // T-127: the bandit's suspect candidates learn their trust-test verdict.
-                if let (Some(pass), true) = (eval.verdict(), self.bandit.is_some()) {
-                    self.scheduler.report_verification(k, pass);
+                if let Some(b) = self.bandit.as_ref() {
+                    if let Some(pass) = eval.verdict() {
+                        self.scheduler.report_verification(k, pass);
+                        b.attention.on_trust_tested(k);
+                    }
+                    // T-128: republish so a still-suspect candidate is banned (§5.3).
+                    b.attention.request_publish();
                 }
                 add(
                     &c.gain_pairs_skipped_clipped,
@@ -673,7 +687,7 @@ const MAX_PENDING_OUTCOMES: usize = 32;
 const OUTCOME_GRACE_NS: i64 = 1_000_000_000;
 
 struct BanditWiring {
-    stub: StubInterestingness,
+    attention: Arc<crate::attention::AttentionService>,
     pending: VecDeque<PendingOutcome>,
 }
 
@@ -706,163 +720,15 @@ struct TrackMark {
     frozen: Option<u64>,
 }
 
-// ---------------------------------------------------------------------------------------------
-// T-127 STUB interestingness provider (ADR-0012 §5.6). T-119 replaces this publisher with the
-// C12 scorer (baselines, novelty, occupancy); the scheduler keeps the same
-// `SharedInterestingness` handle. Deliberately tiny: blind confirmed tracks only, novelty from
-// "first seen within the last hour", no SNR, never suspect.
-// ---------------------------------------------------------------------------------------------
-
-/// Re-scoring interval for member-only changes, ns (ADR-0012 §0 "10 s re-scoring").
-const STUB_RESCORE_NS: i64 = 10_000_000_000;
-/// Novelty fades to 0 over this age, s.
-const STUB_NOVELTY_WINDOW_S: f64 = 3600.0;
-
-struct StubTrack {
-    f_lo_hz: f64,
-    f_hi_hz: f64,
-    first_ns: i64,
-    last_ns: i64,
-    bursts: u32,
-    confirmed: bool,
-}
-
-struct StubInterestingness {
-    provider: Arc<SharedInterestingness>,
-    tracks: HashMap<TrackId, StubTrack>,
-    /// A track was confirmed or closed since the last publish (publish at once).
-    changed: bool,
-    /// Members of confirmed tracks updated since the last publish (publish at the re-scoring
-    /// interval).
-    dirty: bool,
-    last_publish_ns: i64,
-    now_ns: i64,
-}
-
-impl StubInterestingness {
-    fn new(provider: Arc<SharedInterestingness>) -> Self {
-        Self {
-            provider,
-            tracks: HashMap::new(),
-            changed: false,
-            dirty: false,
-            last_publish_ns: i64::MIN / 2,
-            now_ns: 0,
-        }
-    }
-
-    fn novelty(&self, t: &StubTrack) -> f64 {
-        let age_s = (self.now_ns - t.first_ns).max(0) as f64 / 1e9;
-        (1.0 - age_s / STUB_NOVELTY_WINDOW_S).clamp(0.0, 1.0)
-    }
-
-    /// Returns whether the track is new to the stub, and its novelty.
-    fn on_member(&mut self, track: TrackId, m: &MemberBox) -> (bool, f64) {
-        let t = m.t_start.as_unix_nanos();
-        self.now_ns = self.now_ns.max(t);
-        let fresh = !self.tracks.contains_key(&track);
-        let e = self.tracks.entry(track).or_insert(StubTrack {
-            f_lo_hz: m.f_lo_hz,
-            f_hi_hz: m.f_hi_hz,
-            first_ns: t,
-            last_ns: t,
-            bursts: 0,
-            confirmed: false,
-        });
-        e.f_lo_hz = e.f_lo_hz.min(m.f_lo_hz);
-        e.f_hi_hz = e.f_hi_hz.max(m.f_hi_hz);
-        e.first_ns = e.first_ns.min(t);
-        e.last_ns = e.last_ns.max(t);
-        if !m.continues {
-            e.bursts += 1;
-        }
-        self.dirty |= e.confirmed;
-        let novelty = self.tracks.get(&track).map_or(0.0, |e| self.novelty(e));
-        (fresh, novelty)
-    }
-
-    fn on_confirmed(&mut self, track: TrackId, c: &Candidate) {
-        let now = self.now_ns;
-        let e = self.tracks.entry(track).or_insert(StubTrack {
-            f_lo_hz: c.f_lo_hz,
-            f_hi_hz: c.f_hi_hz,
-            first_ns: now,
-            last_ns: now,
-            bursts: 0,
-            confirmed: false,
-        });
-        e.confirmed = true;
-        self.changed = true;
-    }
-
-    fn on_closed(&mut self, track: TrackId) {
-        if self.tracks.remove(&track).is_some_and(|t| t.confirmed) {
-            self.changed = true;
-        }
-    }
-
-    fn maybe_publish(&mut self, now_ns: i64) {
-        self.now_ns = self.now_ns.max(now_ns);
-        let due = self.dirty && now_ns.saturating_sub(self.last_publish_ns) >= STUB_RESCORE_NS;
-        if !(self.changed || due) {
-            return;
-        }
-        let weights = ScoreWeights::default();
-        let mut candidates: Vec<Scored> = self
-            .tracks
-            .iter()
-            .filter(|(_, t)| t.confirmed)
-            .map(|(id, t)| {
-                let novelty = self.novelty(t);
-                let components = ScoreComponents {
-                    snr_db: None,
-                    novelty,
-                    class_entropy: None,
-                    decoder_available: false,
-                    periodicity: None,
-                    boring_prior: 0.0,
-                };
-                let score = interestingness(&weights, &components);
-                let span_s = (t.last_ns - t.first_ns).max(0) as f64 / 1e9;
-                Scored {
-                    subject: CandidateSubject::Track { id: *id },
-                    freq: FreqRange::new(t.f_lo_hz, t.f_hi_hz.max(t.f_lo_hz + 1.0)),
-                    score,
-                    score_norm: normalised(&weights, score),
-                    components,
-                    novelty: NoveltyScore {
-                        novelty,
-                        level_z: None,
-                        occupancy_z: None,
-                        new_emitter: Some(novelty),
-                        observed_s: span_s,
-                        maturity: Maturity::Mature {
-                            resolution: BaselineResolution::AllHours,
-                        },
-                        provenance_explained: false,
-                    },
-                    suspect_fraction: 0.0,
-                    needs_verification: false,
-                    expected_interval_s: (t.bursts >= 2 && span_s > 0.0)
-                        .then(|| span_s / f64::from(t.bursts - 1)),
-                    min_on_off_s: None,
-                    next_burst_eta: None,
-                }
-            })
-            .collect();
-        candidates.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then(a.freq.lo_hz.total_cmp(&b.freq.lo_hz))
-        });
-        let mut set = CandidateSet::empty(Timestamp::from_unix_nanos(self.now_ns));
-        set.weights = weights;
-        set.candidates = candidates;
-        // A stub set that fails validation is not published (the bandit keeps the last one).
-        let _ = self.provider.publish(set);
-        self.changed = false;
-        self.dirty = false;
-        self.last_publish_ns = now_ns;
+/// A member box as C12 candidate evidence (T-128).
+fn member_evidence(m: &MemberBox) -> crate::candidates::MemberEvidence {
+    crate::candidates::MemberEvidence {
+        f_lo_hz: m.f_lo_hz,
+        f_hi_hz: m.f_hi_hz,
+        t_ns: m.t_start.as_unix_nanos(),
+        continues: m.continues,
+        snr_db: Some(m.snr_db).filter(|s| s.is_finite()),
+        suspect: m.suspect,
     }
 }
 
@@ -1002,6 +868,10 @@ pub(crate) fn run(
     let mut chains = ChainManager::new(Arc::clone(&shared));
     if let Some(s) = sched.as_mut() {
         s.track_decodes = Arc::clone(&shared.track_decodes);
+        if let Some(b) = s.bandit.as_ref() {
+            b.attention
+                .set_track_decodes(Arc::clone(&shared.track_decodes));
+        }
     }
     let mut detect_done = false;
     loop {
@@ -1009,7 +879,14 @@ pub(crate) fn run(
             Ok(ev) => match ev {
                 ControlEvent::TrackConfirmed(cand) => {
                     if let Some(s) = sched.as_mut() {
-                        s.offer(&cand);
+                        let recipe = crate::chains::spec::select_for_track(
+                            &shared.specs,
+                            cand.f_lo_hz,
+                            cand.f_hi_hz,
+                            cand.bursty,
+                        )
+                        .is_some();
+                        s.offer(&cand, recipe);
                     }
                     chains.on_confirmed(cand);
                 }
@@ -1161,7 +1038,8 @@ mod tests {
         if bandit {
             plan.extra["bandit"] = serde_json::Value::Bool(true);
         }
-        let mut s = SchedState::new(&plan, switch, fs, t0, Arc::clone(&counters), false).unwrap();
+        let mut s =
+            SchedState::new(&plan, switch, fs, t0, Arc::clone(&counters), false, None).unwrap();
         let hub = Arc::new(SchedulerHub::default());
         s.attach_hub(Arc::clone(&hub));
         (s, hub, counters, t0.as_unix_nanos())
@@ -1288,6 +1166,8 @@ mod tests {
             f_hi_hz: center + 1e3,
             t_start: Timestamp::from_unix_nanos(t_ns),
             continues: false,
+            snr_db: 20.0,
+            suspect: false,
         };
         let (ours, other) = (TrackId::new(), TrackId::new());
         let decodes = Arc::clone(&s.track_decodes);
@@ -1326,6 +1206,7 @@ mod tests {
             t0,
             Arc::clone(&counters),
             false,
+            None,
         )
         .unwrap();
         let t = t0.as_unix_nanos();

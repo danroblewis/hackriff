@@ -201,13 +201,17 @@ impl IntervalObservation {
 /// T-118 adapter: an `OccupancyStat` row as a fold, with its site and calibration keys. `None` for
 /// band subjects and rows without usable revisits.
 ///
-/// **Occupancy only** (`level_db: None`): the row's `threshold_db` follows the noise floor, not the
-/// emitter, so using it as the level would miss an emitter appearing and turn every floor rise into
-/// level novelty plus a level change point duplicating the noise-floor anomalies. Level novelty
-/// stays off on this path until T-118 exposes a real channel level (follow-up).
+/// **Level (T-128)** is the channel's level **above its local noise floor**
+/// ([`channel_level_excess`]): the median occupied-visit level (`level_occupied_p50_db`) when any
+/// visit was occupied, else the median idle level (`level_idle_db`), minus `floor_db`; `max_db` is
+/// the 90th-percentile occupied level minus the floor. So an emitter appearing raises the level by
+/// its SNR (level novelty), while a noise-floor rise moves floor and levels together and leaves
+/// the excess unchanged (no level novelty, no level change point duplicating the noise-floor
+/// anomalies). The row's `threshold_db` is never used as a level (it follows the floor). A row
+/// without a floor, or whose floor may be signal (`floor_suspect`), folds occupancy only.
 ///
-/// Provisional until T-118 exposes channel levels and per-visit weights: the represented time is
-/// `min(interval, n_revisits_all × revisit_mean_s)` and the weight its non-suspect share.
+/// The represented time is `min(interval, n_revisits_all × revisit_mean_s)` and the weight its
+/// non-suspect share.
 pub fn from_occupancy_stat(
     stat: &OccupancyStat,
     gain: u32,
@@ -227,12 +231,13 @@ pub fn from_occupancy_stat(
     let usable = stat.n_revisits.saturating_sub(stat.n_suspect);
     let weight = represented * usable as f64 / stat.n_revisits as f64;
     let fco = stat.fco.unwrap_or(0.0);
+    let (level_db, max_db) = channel_level_excess(stat).unzip();
     let obs = IntervalObservation {
         subject: BaselineSubject::Channel { key },
         t: stat.interval.start,
         gain,
-        level_db: None,
-        max_db: None,
+        level_db,
+        max_db: max_db.flatten(),
         occupied_weight_s: if stat.fco.is_some() {
             fco * weight
         } else {
@@ -248,6 +253,24 @@ pub fn from_occupancy_stat(
         .calibration
         .map_or(CalKey::Uncalibrated, CalKey::Calibrated);
     Some((stat.site, cal, obs))
+}
+
+/// A channel row's representative level and max level above its local floor, dB
+/// (see [`from_occupancy_stat`]). `None` without a trustworthy floor or any level.
+pub fn channel_level_excess(stat: &OccupancyStat) -> Option<(f64, Option<f64>)> {
+    let floor = stat.floor_db.filter(|f| f.is_finite())?;
+    if stat.floor_suspect == Some(true) {
+        return None;
+    }
+    let occupied = stat
+        .level_occupied_p50_db
+        .filter(|l| l.is_finite() && stat.n_occupied > 0);
+    let level = occupied.or(stat.level_idle_db.filter(|l| l.is_finite()))?;
+    let max = stat
+        .level_occupied_p90_db
+        .filter(|l| l.is_finite() && occupied.is_some())
+        .map_or(level, |p90| p90.max(level));
+    Some((level - floor, Some(max - floor)))
 }
 
 /// Pooled moments over a set of slots (real-valued counts, so both copies pool alike), with the
@@ -378,7 +401,8 @@ pub fn in_pool(i: usize, slot: HourOfWeek, res: BaselineResolution) -> bool {
     }
 }
 
-fn res_index(res: BaselineResolution) -> usize {
+/// Index of `res` in the pool arrays [`pools`] returns (finest first).
+pub fn res_index(res: BaselineResolution) -> usize {
     BaselineResolution::FINEST_FIRST
         .iter()
         .position(|r| *r == res)
@@ -1468,6 +1492,54 @@ mod tests {
         );
     }
 
+    /// [`occupancy_row`] with T-118's floor and levels: floor `floor_db`, idle visits
+    /// `idle_excess` dB above it, occupied visits `occ_excess` dB above it (p90 +2 dB).
+    fn leveled_row(
+        hours: f64,
+        fco: f64,
+        floor_db: f64,
+        idle_excess: f64,
+        occ_excess: f64,
+    ) -> OccupancyStat {
+        let mut r = occupancy_row(hours, fco, floor_db + 6.0).expect("OccupancyStat shape");
+        r.floor_db = Some(floor_db);
+        r.floor_suspect = Some(false);
+        r.level_idle_db = Some(floor_db + idle_excess);
+        if r.n_occupied > 0 {
+            r.level_occupied_p50_db = Some(floor_db + occ_excess);
+            r.level_occupied_p90_db = Some(floor_db + occ_excess + 2.0);
+        }
+        r
+    }
+
+    /// T-128: an emitter appearing on a quiet channel raises level novelty through the adapter
+    /// (its level above the floor jumps by its SNR).
+    #[test]
+    fn baseline_adapter_emitter_appearing_raises_level_novelty() {
+        let mut e = engine();
+        let (mut before, mut after_z) = (0.0_f64, f64::NEG_INFINITY);
+        // 3 days quiet (idle 2 dB above a −100 dB floor), then an emitter 25 dB above it.
+        for q in 0..(24 * 4 * 4) {
+            let hours = f64::from(q) / 4.0;
+            let row = if hours >= 72.0 {
+                leveled_row(hours, 0.8, -100.0, 2.0, 25.0)
+            } else {
+                leveled_row(hours, 0.0, -100.0, 2.0 + 0.3 * ((q % 5) as f64 - 2.0), 25.0)
+            };
+            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            assert!(o.level_db.is_some(), "a level from T-118 fields");
+            let out = e.observe(&o);
+            if hours < 72.0 {
+                before = before.max(out.novelty.novelty);
+            } else if hours < 73.0 {
+                after_z = after_z.max(out.novelty.level_z.unwrap_or(f64::NEG_INFINITY));
+            }
+        }
+        println!("T-128 emitter appears: novelty before {before}, level z after {after_z}");
+        assert!(before < 0.1, "quiet channel not novel: {before}");
+        assert!(after_z >= 10.0, "level novelty saturates: z={after_z}");
+    }
+
     /// A T-118 channel row at `hours` (15 min) with FCO `fco` and applied threshold `threshold_db`.
     fn occupancy_row(hours: f64, fco: f64, threshold_db: f64) -> Option<OccupancyStat> {
         use hk_model::attention::occupancy::{ThresholdSpec, TimingRegime};
@@ -1503,14 +1575,21 @@ mod tests {
         );
         let mut e = engine();
         let (mut level_cps, mut max_after) = (0, 0.0_f64);
-        // 3 days at a −95 dB threshold, then 3 days with the floor (and threshold) 10 dB higher.
+        // 3 days at a −101 dB floor, then 3 days with the floor (threshold, idle and occupied
+        // levels with it) 10 dB higher. T-128: the adapter now folds real levels (above the floor).
         for q in 0..(24 * 4 * 6) {
             let hours = f64::from(q) / 4.0;
-            let thr = if hours >= 72.0 { -85.0 } else { -95.0 };
-            let row = occupancy_row(hours, 0.3, thr).unwrap();
+            let floor = if hours >= 72.0 { -91.0 } else { -101.0 };
+            let wobble = 0.3 * ((q % 5) as f64 - 2.0);
+            let row = leveled_row(hours, 0.3, floor, 2.0 + wobble, 20.0 + wobble);
             let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
             let out = e.observe(&o);
-            assert_eq!(out.novelty.level_z, None, "no level z at {hours} h");
+            assert!(o.level_db.is_some(), "a real level at {hours} h");
+            assert!(
+                out.novelty.level_z.is_none_or(|z| z < 3.0),
+                "no level novelty at {hours} h: {:?}",
+                out.novelty.level_z
+            );
             level_cps += usize::from(
                 out.change_point
                     .is_some_and(|c| c.statistic == ChangeStatistic::Level),

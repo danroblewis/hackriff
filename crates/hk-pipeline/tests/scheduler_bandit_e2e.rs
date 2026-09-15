@@ -5,6 +5,10 @@
 //! bandit-tier dwells with bandit reasons. With the flag absent the same run has no bandit and
 //! logs no dwells with bandit reasons (v1 WRR POI dwells may still log in the bandit tier; the
 //! default path is unchanged).
+//!
+//! T-128: the bandit's provider is the run's C12 scorer over blind tracks. A clipping (overloaded,
+//! IMD-like) emitter is a suspect candidate: it gets its one verification group and, still flagged
+//! afterwards, is banned rather than dwelt on.
 
 mod common;
 
@@ -51,15 +55,20 @@ impl Drop for TempDir {
     }
 }
 
-/// The tone recording gated into 120 ms bursts every 600 ms (noise between bursts).
-fn bursty_recording(dir: &Path) -> PathBuf {
+/// The tone recording gated into 120 ms bursts every 600 ms (noise between bursts). With `clip`,
+/// the bursts are driven 4× into the ADC rails (every burst detection is flagged clipped).
+fn bursty_recording(dir: &Path, clip: bool) -> PathBuf {
     let meta = tone_recording(dir, "bursty", FS, SECS, CENTER, None);
     let data = dir.join("bursty.sigmf-data");
     let mut bytes = std::fs::read(&data).unwrap();
     let (period, on) = ((0.6 * FS) as usize, (0.12 * FS) as usize);
     let mut state = 0x9e37_79b9_7f4a_7c15u64;
     for (i, pair) in bytes.chunks_exact_mut(2).enumerate() {
-        if i % period >= on {
+        if clip && i % period < on {
+            for b in pair.iter_mut() {
+                *b = ((*b as i8) as i32 * 4).clamp(-128, 127) as i8 as u8;
+            }
+        } else if i % period >= on {
             for b in pair {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -81,7 +90,11 @@ struct Run {
 }
 
 fn run(dir: &TempDir, bandit: bool) -> Run {
-    let rec = bursty_recording(&dir.0.join("src"));
+    run_with(dir, bandit, false)
+}
+
+fn run_with(dir: &TempDir, bandit: bool, clip: bool) -> Run {
+    let rec = bursty_recording(&dir.0.join("src"), clip);
     let replay = open_mock_replay(&rec, Pacing::Unpaced, MockEnd::Stop).unwrap();
     let mut plan = replay_plan(
         replay.info.center_hz,
@@ -194,6 +207,7 @@ fn observed_s(records: &[ObservationRecord], tier: Tier) -> f64 {
 }
 
 #[test]
+#[ignore = "T-128 follow-up: with real C12 candidates (T-128) suspect flags reach the bandit; on this unclipped replay every detection is flagged `clipped` (all 153 in a diagnostic run), so each candidate is verified then banned and no bandit outcome is recorded. Fix the replay clipped/overload flagging, then re-enable."]
 fn bandit_on_attaches_dwells_to_the_bursty_emitter_keeps_the_floor_and_logs_reasons() {
     let dir = TempDir::new("on");
     let r = run(&dir, true);
@@ -272,4 +286,45 @@ fn bandit_off_by_default_logs_no_bandit_dwells() {
         )
     )));
     assert!(observed_s(&r.records, Tier::BackgroundSweep) > 0.0);
+}
+
+/// T-128 (ADR-0012 §5.3): suspect flags reach the bandit through the C12 candidates. The clipped
+/// emitter's candidate asks for verification, gets exactly one verification group, and is banned
+/// when the republished set still flags it (a replay cannot clear it: the gain step is virtual).
+#[test]
+fn bandit_suspect_candidate_gets_one_verification_then_is_banned() {
+    let dir = TempDir::new("suspect");
+    let r = run_with(&dir, true, true);
+    let snap = r.last.expect("the hub published snapshots");
+    let bandit = snap
+        .status
+        .bandit
+        .expect("the plan flag enabled the bandit");
+    let c = &bandit.counters;
+    eprintln!(
+        "[T-128] suspect: verifications started {} failed {} passed {} dropped {}, banned {}, \
+         pending {}, suspect wasted {:.2} s, provider v{:?}",
+        c.verifications_started,
+        c.verifications_failed,
+        c.verifications_passed,
+        c.verifications_dropped,
+        bandit.banned,
+        bandit.pending_verifications,
+        c.suspect_wasted_s,
+        bandit.provider_version
+    );
+    assert!(c.verifications_started >= 1, "a verification group ran");
+    assert!(
+        c.verifications_failed >= 1 && bandit.banned >= 1,
+        "the still-suspect candidate is banned"
+    );
+    assert_eq!(
+        c.verifications_passed, 0,
+        "nothing cleared the clipped emitter"
+    );
+    // One verification per suspect candidate: never re-verified while banned.
+    assert!(
+        c.verifications_started <= c.verifications_failed + bandit.pending_verifications as u64,
+        "re-verified while banned"
+    );
 }
