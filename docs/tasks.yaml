@@ -1943,7 +1943,7 @@ tasks:
   - id: T-122
     milestone: M2
     title: "Novelty alarms + what-changed event feed (AWARE-044) into anomaly correlation"
-    status: review
+    status: done
     commit: dcd4135
     deps: [T-119]
     parallel_group: M2A
@@ -2026,7 +2026,7 @@ tasks:
   - id: T-128
     milestone: M2
     title: "M2 integration: wire occupancy levels into baselines, real providers into reports, candidates from inventory, first sightings, site/source history filters"
-    status: review
+    status: done
     commit: 1c7256c
     deps: [T-118, T-119, T-121, T-127]
     parallel_group: M2I
@@ -2056,7 +2056,7 @@ tasks:
   - id: T-130
     milestone: M2
     title: "Spurious clipped:true flags on detections in unclipped replays (all 153 in the bandit bursty replay)"
-    status: review
+    status: done
     commit: ca3ed0c
     deps: []
     parallel_group: M2X
@@ -2071,7 +2071,7 @@ tasks:
   - id: T-131
     milestone: M2
     title: "M2 integration part 2 (T-128 items 6-9): history source/site tiles + filters, baseline memory bound, T-119 residuals, full-path e2e, alarm hook"
-    status: todo
+    status: in-progress
     deps: [T-128, T-122, T-129, T-130]
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
