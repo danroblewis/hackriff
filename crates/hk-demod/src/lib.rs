@@ -44,8 +44,8 @@ pub mod refine;
 pub mod wfm;
 
 pub use mode::{
-    AnalogMode, MODE_RULES_VERSION, ModeCandidate, ModeConfig, ModeDecision, ModeFeatures,
-    ModeSelector, PilotCheck,
+    AdjacentChannels, AnalogMode, MODE_RULES_VERSION, ModeCandidate, ModeConfig, ModeDecision,
+    ModeFeatures, ModeSelector, PilotCheck,
 };
 pub use pilot::{PilotConfig, PilotPll, PilotReport};
 pub use rds::{RdsConfig, RdsDecoder, RdsDemod, RdsReport};

@@ -81,6 +81,8 @@ pub(super) struct Band {
     pub cfo_hz: f64,
     /// Noise density, FS²/Hz.
     pub n0: f64,
+    /// Largest channel half-width, Hz (keeps adjacent emissions out, T-099).
+    pub max_half_hz: Option<f64>,
 }
 
 /// All measurements.
@@ -100,7 +102,12 @@ pub(super) fn measure(
     band: Band,
     config: &ModeConfig,
 ) -> Measured {
-    let Band { obw_hz, cfo_hz, n0 } = band;
+    let Band {
+        obw_hz,
+        cfo_hz,
+        n0,
+        max_half_hz,
+    } = band;
     let mut out = Measured::default();
     if n0.is_nan() || n0 <= 0.0 || x.len() < 1024 {
         return out;
@@ -111,7 +118,8 @@ pub(super) fn measure(
     let half = (0.6 * obw_hz.unwrap_or(0.0))
         .max(MIN_HALF_WIDTH_HZ)
         .min(0.5 * box_bw_hz.max(2.0 * MIN_HALF_WIDTH_HZ))
-        .min(0.4 * fs);
+        .min(0.4 * fs)
+        .min(max_half_hz.unwrap_or(f64::INFINITY));
     out.half_width_hz = Some(half);
     let Some((w, rate, noise)) = channel(x, fs, centre, half, n0) else {
         return out;
@@ -123,8 +131,10 @@ pub(super) fn measure(
     out
 }
 
-fn line(x: &[Complex32], fs: f64, box_bw_hz: f64, n0: f64) -> Option<Line> {
-    let target = (fs / TARGET_BIN_HZ).max(256.0) as usize;
+/// Welch PSD of `x` (Hann, 50 % overlap), FS²/Hz in FFT bin order, with bins of about
+/// `target_bin_hz` (256–16 384 bins, at least 4 segments' worth of samples when it can).
+fn welch(x: &[Complex32], fs: f64, target_bin_hz: f64) -> Option<Vec<f64>> {
+    let target = (fs / target_bin_hz).max(256.0) as usize;
     let mut nfft = target.next_power_of_two().min(16_384);
     while nfft > 256 && nfft * 4 > x.len() {
         nfft /= 2;
@@ -152,11 +162,18 @@ fn line(x: &[Complex32], fs: f64, box_bw_hz: f64, n0: f64) -> Option<Line> {
         segs += 1;
         start += nfft / 2;
     }
-    let df = fs / nfft as f64;
     let scale = 1.0 / (segs as f64 * fs * w2);
+    psd.iter_mut().for_each(|p| *p *= scale);
+    Some(psd)
+}
+
+fn line(x: &[Complex32], fs: f64, box_bw_hz: f64, n0: f64) -> Option<Line> {
+    let psd = welch(x, fs, TARGET_BIN_HZ)?;
+    let nfft = psd.len();
+    let df = fs / nfft as f64;
     // Box bins in ascending frequency: k ∈ [−kb, kb].
     let kb = ((0.5 * box_bw_hz / df).floor() as i64).min(nfft as i64 / 2 - 1);
-    let at = |k: i64| psd[k.rem_euclid(nfft as i64) as usize] * scale;
+    let at = |k: i64| psd[k.rem_euclid(nfft as i64) as usize];
     let (mut total, mut best, mut kbest) = (0.0, f64::MIN, 0i64);
     for k in -kb..=kb {
         let p = at(k);
@@ -183,6 +200,179 @@ fn line(x: &[Complex32], fs: f64, box_bw_hz: f64, n0: f64) -> Option<Line> {
         snr_db: 10.0 * (lp / noise).log10(),
         fraction: if total > 0.0 { lp / total } else { 0.0 },
     })
+}
+
+/// The emission at the box centre measured between adjacent emissions (T-099).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Adjacent {
+    /// OBW99 inside the channel limits, Hz.
+    pub obw_hz: f64,
+    /// Mid-point of that band relative to the box centre, Hz.
+    pub center_hz: f64,
+    /// Lower channel limit (the valley before the lower neighbour, or the analysed band's edge),
+    /// relative to the box centre, Hz.
+    pub lower_hz: f64,
+    /// Upper channel limit, relative to the box centre, Hz.
+    pub upper_hz: f64,
+    /// A neighbour rises beyond the lower limit.
+    pub lower_neighbour: bool,
+    /// A neighbour rises beyond the upper limit.
+    pub upper_neighbour: bool,
+    /// Shallowest neighbour valley below the emission's peak density, dB.
+    pub valley_db: f64,
+    /// Lowest smoothed density in the analysed band (a noise upper bound), FS²/Hz.
+    pub floor: f64,
+}
+
+/// A dip this far below the emission's peak (smoothed density), followed by a rise this far above
+/// the dip, separates two emissions, dB.
+const ADJACENT_VALLEY_DB: f64 = 10.0;
+/// The emission's (and a neighbour's) smoothed peak over the band's lowest density, dB.
+const ADJACENT_MIN_PEAK_DB: f64 = 10.0;
+/// OBW fraction (as C13).
+const OBW_FRACTION: f64 = 0.99;
+
+/// OBW99 of the emission at the box centre, limited to the spectral valleys that separate it from
+/// adjacent emissions (T-099). For when C13 abstains because strong neighbours fill the snippet
+/// (their power inflates its noise reference or its band reaches the snippet edge).
+///
+/// The snippet's passband PSD is smoothed over a twentieth of the box. The emission's peak is the
+/// highest density within a quarter box of the centre; walking outward, a side ends at a
+/// **neighbour** when the density dips [`ADJACENT_VALLEY_DB`] below the emission's peak and then
+/// rises the same amount above the dip's minimum (the limit is that minimum), or is **clear** when
+/// it dips and never rises again. A side that never dips (the emission reaches the band edge)
+/// abstains, and so does a scene with no neighbour on either side (C13's own measure covers an
+/// isolated emission). OBW99 is taken inside the limits over the density above the band's lowest
+/// smoothed density. Blind: no raster or channel plan.
+pub(super) fn adjacent_obw(
+    x: &[Complex32],
+    fs: f64,
+    passband_hz: f64,
+    box_bw_hz: f64,
+) -> Option<Adjacent> {
+    if !(box_bw_hz > 0.0 && passband_hz > 0.0) {
+        return None;
+    }
+    let psd = welch(x, fs, (box_bw_hz / 200.0).max(TARGET_BIN_HZ))?;
+    let nfft = psd.len() as i64;
+    let df = fs / nfft as f64;
+    let kp = ((0.98 * passband_hz / df).floor() as i64).min(nfft / 2 - 1);
+    if kp < 16 {
+        return None;
+    }
+    let raw: Vec<f64> = (-kp..=kp)
+        .map(|k| psd[k.rem_euclid(nfft) as usize])
+        .collect();
+    let m = raw.len();
+    let h = ((0.025 * box_bw_hz / df).round() as usize).max(2);
+    let mut prefix = Vec::with_capacity(m + 1);
+    prefix.push(0.0);
+    for v in &raw {
+        prefix.push(prefix.last().copied().unwrap_or(0.0) + v);
+    }
+    let d: Vec<f64> = (0..m)
+        .map(|i| {
+            let (a, b) = (i.saturating_sub(h), (i + h + 1).min(m));
+            (prefix[b] - prefix[a]) / (b - a) as f64
+        })
+        .collect();
+    let floor = d.iter().copied().fold(f64::INFINITY, f64::min);
+    if !(floor.is_finite() && floor > 0.0) {
+        return None;
+    }
+    let lin = |db: f64| 10f64.powf(db / 10.0);
+    let centre = kp as usize;
+    let reach = ((0.25 * box_bw_hz / df).round() as usize).clamp(1, centre);
+    let k0 = (centre - reach..=centre + reach).max_by(|&a, &b| d[a].total_cmp(&d[b]))?;
+    let peak = d[k0];
+    if peak < floor * lin(ADJACENT_MIN_PEAK_DB) {
+        return None;
+    }
+    // (limit index, neighbour beyond it, depth below the emission peak in dB)
+    let walk = |step: isize| -> Option<(usize, bool, f64)> {
+        let (mut i, mut top, mut valley) = (k0, peak, None::<usize>);
+        loop {
+            let next = i as isize + step;
+            if next < 0 || next >= m as isize {
+                break;
+            }
+            i = next as usize;
+            match valley {
+                None => {
+                    top = top.max(d[i]);
+                    if d[i] <= top / lin(ADJACENT_VALLEY_DB) {
+                        valley = Some(i);
+                    }
+                }
+                Some(v) if d[i] < d[v] => valley = Some(i),
+                Some(v) => {
+                    if d[i] >= d[v] * lin(ADJACENT_VALLEY_DB)
+                        && d[i] >= floor * lin(ADJACENT_MIN_PEAK_DB)
+                    {
+                        return Some((v, true, 10.0 * (top / d[v]).log10()));
+                    }
+                }
+            }
+        }
+        valley.map(|_| (if step < 0 { 0 } else { m - 1 }, false, f64::INFINITY))
+    };
+    let (lo, lower_neighbour, lo_db) = walk(-1)?;
+    let (hi, upper_neighbour, hi_db) = walk(1)?;
+    if !(lower_neighbour || upper_neighbour) {
+        return None;
+    }
+    let excess: Vec<f64> = raw[lo..=hi].iter().map(|v| (v - floor).max(0.0)).collect();
+    let total: f64 = excess.iter().sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let tail = 0.5 * (1.0 - OBW_FRACTION) * total;
+    let mut acc = 0.0;
+    let mut first = 0;
+    for (j, e) in excess.iter().enumerate() {
+        acc += e;
+        if acc >= tail {
+            first = j;
+            break;
+        }
+    }
+    acc = 0.0;
+    let mut last = excess.len() - 1;
+    for (j, e) in excess.iter().enumerate().rev() {
+        acc += e;
+        if acc >= tail {
+            last = j;
+            break;
+        }
+    }
+    let rel = |j: usize| (j as f64 - kp as f64) * df;
+    let (a, b) = (lo + first, lo + last.max(first));
+    Some(Adjacent {
+        obw_hz: (b - a + 1) as f64 * df,
+        center_hz: 0.5 * (rel(a) + rel(b)),
+        lower_hz: rel(lo),
+        upper_hz: rel(hi),
+        lower_neighbour,
+        upper_neighbour,
+        valley_db: lo_db.min(hi_db),
+        floor,
+    })
+}
+
+/// [`channel`] as `Complex32`, with its output rate.
+pub(super) fn channel32(
+    x: &[Complex32],
+    fs: f64,
+    centre: f64,
+    half: f64,
+) -> Option<(Vec<Complex32>, f64)> {
+    let (w, rate, _) = channel(x, fs, centre, half, 1.0)?;
+    Some((
+        w.iter()
+            .map(|z| Complex32::new(z.re as f32, z.im as f32))
+            .collect(),
+        rate,
+    ))
 }
 
 /// `x` mixed down by `centre`, low-passed to ±`half` and decimated; with the output rate and
