@@ -1886,7 +1886,8 @@ tasks:
   - id: T-118
     milestone: M2
     title: "Occupancy engine (C12): FCO/FBO/SRO per channel/band with thresholds, RBW correction, SM.2256 confidence"
-    status: in-progress
+    status: review
+    commit: 3259c7b
     deps: [T-113, T-115, T-117]
     parallel_group: M2O
     use_cases: [AWARE-042, PROP-023]

@@ -968,3 +968,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Results on a synthetic 48 h scene: injected emitter detected in 3 intervals (45 min); false alarms 0.05%; a persistent interferer becomes a change point at 45.5 h without poisoning the reference.
 
   **Not wired:** no pipeline `ingest_occupancy` call and no candidate assembly from inventory. The `OccupancyStat` adapter is provisional (threshold used as level). Timeboxed Opus review running; it checks reference gating, rise-only level novelty (a silenced transmitter) and the adapter's level source.
+- **B0.303 T-118 delivered** (3259c7b; includes main + T-115). Engine details:
+  - **Visits:** from the T-115 log, falling back to the history coverage mask.
+  - **Occupied:** a visit counts as occupied when the channel's max L0 cell mean is above threshold.
+  - **FCO:** half-gap weighting over activity-independent visits, with widening.
+  - **Threshold:** band floor from the 80% method over `floor_db`. The agent says ADR §2.2 described the 80% method backwards and corrected it against the SM.2256 text.
+  - **Confidence interval:** Wilson on n_eff using lag-1 visit-state autocorrelation. Annex 1 is sample-size rules, and tests reproduce tables A1/A2.
+  - **Channels:** learned blind.
+  - **Storage:** CRC log store.
+  - **Threading:** runs on its own thread on the history clock.
+  - **API:** `/api/occupancy` and `/api/channels`.
+
+  **Blind 48 h e2e:** 6/6 learned channels' realized FCO lies inside the 95% CI (10/50/100% Markov, diurnal, novelty, boring); the 1% channel and the event aren't learned (<5%, allowed); no phantoms. The first run failed 4/6 because of a per-channel self-floor, fixed with the band floor. Timeboxed Opus review running. Focus areas: 80% correction; dense-band floor (FM); n_eff bounds; exposing a channel level for T-119 level novelty.
