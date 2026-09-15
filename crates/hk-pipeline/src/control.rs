@@ -216,6 +216,8 @@ pub(crate) struct SchedState {
     next_key: PoiKey,
     pairs: u8,
     verify: bool,
+    /// T-115: records what each applied step observed (ADR-0012 §1).
+    pub(crate) observer: Option<crate::observe::Observer>,
 }
 
 impl SchedState {
@@ -258,6 +260,7 @@ impl SchedState {
             next_key: 1,
             pairs,
             verify,
+            observer: None,
         })
     }
 
@@ -309,9 +312,19 @@ impl SchedState {
         }
     }
 
+    /// The compiled plan (T-115: the observer's hop geometry).
+    pub(crate) fn plan(&self) -> &hk_core::scheduler::CompiledPlan {
+        self.scheduler.plan()
+    }
+
     fn tick(&mut self, now_ns: i64) {
         if now_ns <= 0 {
             return;
+        }
+        // T-115: the single observer call (ADR-0012 §11): closes the previous step's record when
+        // a new step was applied, and tracks the current step's settle.
+        if let Some(o) = self.observer.as_mut() {
+            o.tick(now_ns, self.recent.back());
         }
         self.scheduler
             .clock()

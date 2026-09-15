@@ -691,6 +691,16 @@ impl Drop for ChainStatGuard {
     }
 }
 
+counter_group!(
+    /// Observation log producers (T-115; the writer's own counters are on the store).
+    ObservationCounters {
+        /// Records offered to the writer queue.
+        records_offered,
+        /// Records dropped because the writer queue was full.
+        records_dropped,
+    }
+);
+
 /// All counters of one run.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -736,6 +746,8 @@ pub struct Counters {
     pub verdicts: crate::verify::VerdictOutbox,
     /// Compute provider selections of the run (T-056).
     pub compute: crate::compute::ComputeReport,
+    /// Observation log producers (T-115).
+    pub observations: ObservationCounters,
 }
 
 impl Counters {
@@ -777,6 +789,7 @@ impl Counters {
             "stream_time_ns": self.stream_time_ns.load(Ordering::Relaxed),
             "tune": { "center_hz": center, "sample_rate_hz": rate },
             "compute": self.compute.to_json(),
+            "observations": self.observations.to_json(),
         })
     }
 

@@ -645,6 +645,8 @@ struct Common {
     bursts: Arc<crate::chains::taps::BurstHub>,
     /// Compute providers (T-056): built once per run, so no segment changes provider.
     compute: hk_dsp::compute::Compute,
+    /// T-115: the observation log (`None` when it could not be opened).
+    observations: Option<crate::observe::ObservationLog>,
 }
 
 impl Common {
@@ -772,6 +774,13 @@ impl Pipeline {
             last_recording: Mutex::new(RecordingStatus::default()),
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
             bursts: Arc::default(),
+            // T-115: never fails the run; a log that cannot open is reported and skipped.
+            observations: crate::observe::ObservationLog::open(
+                &cfg.data_dir,
+                cfg.stream_sink.as_ref(),
+            )
+            .map_err(|e| eprintln!("observation log disabled: {e:#}"))
+            .ok(),
         };
         // T-071: the on-demand chain budget is reported from the start of the run.
         crate::chains::listen::publish_limits(
@@ -857,7 +866,7 @@ fn start_segment(
             Ok(Calibrated::wrap(Lent::wrap(s, &slot), &pins))
         }) as SourceFactory
     });
-    let sched = if cfg.drive_scheduler {
+    let mut sched = if cfg.drive_scheduler {
         Some(SchedState::new(
             &cfg.plan,
             Arc::clone(&common.switch),
@@ -869,6 +878,18 @@ fn start_segment(
     } else {
         None
     };
+    // T-115: the scheduler's observer. A source that cannot retune observes its own window.
+    if let (Some(s), Some(log)) = (sched.as_mut(), &common.observations) {
+        let fixed = (!common.switch.capabilities().controllable)
+            .then_some((info.center_hz, info.sample_rate_hz));
+        s.observer = Some(log.observer(
+            s.plan(),
+            fft_len,
+            fixed,
+            Some(common.survey_id),
+            Arc::clone(&common.counters),
+        ));
+    }
     let specs = cfg.settings.chain_specs();
     let shared = Arc::new(Shared {
         counters: Arc::clone(&common.counters),
@@ -1556,6 +1577,16 @@ impl PipelineHandle {
     /// The floor product (history), shared with `/api/history` and `/api/floor`.
     pub fn floor_product(&self) -> Arc<Mutex<FloorProduct>> {
         Arc::clone(&self.sup.common.product)
+    }
+
+    /// The observation log (T-115), shared with `/api/observations`; `None` when it could not be
+    /// opened.
+    pub fn observation_store(&self) -> Option<hk_store::observation::ObservationStore> {
+        self.sup
+            .common
+            .observations
+            .as_ref()
+            .map(crate::observe::ObservationLog::store)
     }
 
     /// The data directory (`hackriff.db`, `history/`, `recordings/`).

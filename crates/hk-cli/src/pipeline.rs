@@ -432,6 +432,7 @@ pub fn serve_api(
         captures: handle
             .decoded_captures()
             .map(|c| Arc::new(c) as Arc<dyn hk_api::stream::inspector::CaptureSource>),
+        observations: handle.observation_store(), // T-115
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
