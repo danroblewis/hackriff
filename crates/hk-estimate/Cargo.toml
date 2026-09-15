@@ -18,3 +18,8 @@ serde.workspace = true
 serde_json.workspace = true
 # T-010: synthetic scenarios and fixture truth for the AWARE-036 / SIGNAL-062 acceptance tests.
 hk-e2e = { path = "../../tests/e2e" }
+
+# T-081: cost of one estimate call on the analog chain's probe.
+[[bench]]
+name = "estimate"
+harness = false
