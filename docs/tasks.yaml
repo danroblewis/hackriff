@@ -1900,7 +1900,8 @@ tasks:
   - id: T-119
     milestone: M2
     title: "Baselines + novelty + interestingness score (C12)"
-    status: in-progress
+    status: review
+    commit: bb48dd2
     deps: [T-118]
     parallel_group: M2O
     use_cases: [AWARE-044, AWARE-011, AWARE-060]

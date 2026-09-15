@@ -956,3 +956,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
   Tests: hk-core 6, hk-store 7, pipeline 4, api_contract 17, lint clean. **T-127 launched** (bandit wiring, routes, POI from the log, plus T-120 review follow-ups). T-118 and T-121 can now replace their observation stand-in providers with the T-115 store adapter. Full check running.
 - **B0.301 Full check of main d78142e (T-115): green.** Lint clean; nextest + UI 1227/1227 in 270 s; acceptance 30/30 (2 ignored HIL) in 60 s. M2 on main: T-113, T-114, T-115, T-116, T-117, T-120, T-125, T-126. In flight: T-118, T-119, T-121, T-127.
+- **B0.302 T-119 delivered** (bb48dd2). Contents:
+  - **Baselines:** per-key zstd store, atomic writes, 1 GiB LRU-site quota. Frozen reference with gated learning (the agent's reading of §3.4, flagged for review). Adaptive copy with 14-day half-life and ±3σ clip. CUSUM change points latch until re-freeze.
+  - **Maturity:** pooled; levels kept per gain state; a new calibration starts a new key.
+  - **Novelty:** rise-only level novelty; FCO novelty with a combined-spread z; Poisson first-sighting novelty.
+  - **Score S:** boring prior with band plan ≤0.3, applied only after blind characterisation.
+  - **Sites:** mobile, stationary join/create within 250 m, unassigned.
+  - **Weights:** migration 0002 (site, attention_weights); append-only weights.
+  - **API routes:** sites, baselines, refreeze, candidates, weights.
+
+  Results on a synthetic 48 h scene: injected emitter detected in 3 intervals (45 min); false alarms 0.05%; a persistent interferer becomes a change point at 45.5 h without poisoning the reference.
+
+  **Not wired:** no pipeline `ingest_occupancy` call and no candidate assembly from inventory. The `OccupancyStat` adapter is provisional (threshold used as level). Timeboxed Opus review running; it checks reference gating, rise-only level novelty (a silenced transmitter) and the adapter's level source.
