@@ -1362,3 +1362,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Freed:** 0.5 GB of the coordinator's own old scratch data.
   - **Launches paused:** T-140 and anything else, until the user decides or space returns.
   - **T-139 progress:** the history STFT now emits partial rows after a retune (true n_avg), and the floor product folds mixed shapes (ADR §2.10). A 2 h default-scheduler scene gives 323 rows, 82 tiles, 66 OccupancyStat rows, 36 baseline folds and 78 alarm inputs (was 0); fixed-tune frames are bit-identical. Final targeted runs are still going.
+- **B0.361 T-139 committed (dbf6776); Opus review running.**
+  - **Change:** after a retune the history STFT emits partial rows (n_avg ≥ K/10, true n_avg and span). `FloorProduct` folds them; a mixed tile reports no floor. ADR §2.10.
+  - **Scheduler test (2 h):** 0 → 323 rows / 82 tiles / 66 OccupancyStat rows / 36 folds / 78 alarm inputs. Fixed-tune frames are bit-identical.
+  - **Tests:** hk-pipeline 24, hk-store 58, hk-context 64, hk-dsp 10.
+  - **Concerns for review:**
+    - A hk-store test tolerance of 2 dB, because full vs short row floors differ by 1.6 dB (possible log-bias correction bug).
+    - T-124 thresholds must be set a priori, not calibrated on the first green run.
+    - Bandit dwells never happened in a 3.8 h scene.

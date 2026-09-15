@@ -2191,7 +2191,7 @@ tasks:
   - id: T-139
     milestone: M2
     title: "Occupancy/history under the scheduler: short sweep hops and bandit dwells currently yield 0 history frames (partial rows discarded on every retune), so no occupancy rows, baselines or alarms while the scheduler runs"
-    status: in-progress
+    status: review
     deps: [T-136]
     parallel_group: M2A
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
