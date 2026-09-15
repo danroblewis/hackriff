@@ -1781,3 +1781,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Params: hot-edit through `validate` then `PUT` recipe; Suggest/Use via `/api/assist`.
     - `status-feed.ts` implemented to T-154's contract: one ref-counted inspector socket per pipeline, reconnecting with backoff.
   - **Merge queue** (after the combined full check): T-153, T-154.
+- **B0.411 T-155 committed (35f9190, Sonnet).** Coordinator check: diff limited to `review/*` plus one test; npm test 175 passed / 0 failed.
+  - **Review drawer tabs:** alarms, report (with source filter), history/floor, scheduler/arms, device via `controls/model.ts` `panelModel`, bookmarks.
+  - **Gaps:** none needed; every route is already served.
+- **T-158+T-171 committed (f7f841c, Sonnet; over budget at 240k).**
+  - **Inventory rows:** gain `snr_db`/`peak_dbfs` from the newest linked detection, via index lookups.
+  - **List response:** gains `total`, a COUNT sharing the `inventory_where` predicate; a non-vocabulary tag filter scans at most 5,000 rows and returns a lower bound beyond that.
+  - **Checks:** docs and contract updated; hk-model 3, hk-api 83, api_contract 22 passing; lint clean.
+- **Merge queue after the combined check:** T-153, T-154, T-155, T-158/171. T-156 (MUI finish) launches once those are on main.
