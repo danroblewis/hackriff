@@ -1083,3 +1083,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **t118 e2e:** identical.
 
   Timeboxed Opus review running. Concerns: the **7 dB gate may suppress weak persistent unknown emitters** (exploration-first); the suspect-rule reading of ADR §2.6; whether the fragment rule absorbs weak in-skirt signals.
+- **B0.318 T-129 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. The 7 dB all-time-max SNR gate suppresses weak persistent unknowns yet permanently publishes any single ≥7 dB flicker (against exploration-first).
+    2. Restore seeds SNR 7 dB, so fragments rejoin and the station channel collapses again.
+    3. The fragment rule has no time-overlap or persistence check, so a weaker station at +100 kHz or a narrow skirt unknown is dropped forever.
+  - **Coordinator decision:** publish channels that are **confident OR persistent** (≥3 intervals, stable centre, ≥0.5 s); persistent clusters are never fragments; fragments must overlap the host in time; published channels are never absorbed.
+  - **Suspect rule judged sound;** widen suspect extents ±1 cell.
+  - **ADR §2.6/§2.7 amendment texts** are adopted in the fix round. Fix round running.
