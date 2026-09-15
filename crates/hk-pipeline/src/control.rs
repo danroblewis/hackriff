@@ -403,10 +403,7 @@ impl SchedState {
                     m.frozen = Some(decodes.get(track));
                 }
             }
-            let half = 0.5 * st.rate_hz * usable;
-            let inside =
-                st.t_start.as_unix_nanos() <= t && t < end && (center - st.center_hz).abs() <= half;
-            if !inside {
+            if !dwell_contains(st, usable, t, center) {
                 continue;
             }
             if !member.continues {
@@ -425,6 +422,25 @@ impl SchedState {
                 if new_track {
                     p.outcome.new_detections += 1;
                 }
+            }
+        }
+    }
+
+    /// T-174 (ADR-0012 §2.6): a member [`Self::on_member`] counted as suspect had its DC flag
+    /// refuted by a clean twin from another tuning. It leaves the candidate's suspect members and
+    /// the suspect detections of the pending dwell that contains it, so it counts toward neither a
+    /// suspect ban nor a suspect-only dwell. A dwell whose outcome was already recorded keeps it.
+    fn on_member_refuted(&mut self, track: TrackId, member: &MemberBox) {
+        let usable = self.scheduler.config().usable_fraction;
+        let Some(b) = self.bandit.as_mut() else {
+            return;
+        };
+        b.attention.on_track_member_refuted(track);
+        let t = member.t_start.as_unix_nanos();
+        let center = 0.5 * (member.f_lo_hz + member.f_hi_hz);
+        for p in &mut b.pending {
+            if dwell_contains(&p.step, usable, t, center) {
+                p.outcome.suspect_detections = p.outcome.suspect_detections.saturating_sub(1);
             }
         }
     }
@@ -720,6 +736,15 @@ struct TrackMark {
     frozen: Option<u64>,
 }
 
+/// A member at `t_ns` centred on `center_hz` falls inside the dwell `st` (its time and usable
+/// window).
+fn dwell_contains(st: &ScheduleStep, usable: f64, t_ns: i64, center_hz: f64) -> bool {
+    let half = 0.5 * st.rate_hz * usable;
+    st.t_start.as_unix_nanos() <= t_ns
+        && t_ns < st.t_end().as_unix_nanos()
+        && (center_hz - st.center_hz).abs() <= half
+}
+
 /// A member box as C12 candidate evidence (T-128).
 fn member_evidence(m: &MemberBox) -> crate::candidates::MemberEvidence {
     crate::candidates::MemberEvidence {
@@ -912,6 +937,14 @@ pub(crate) fn run(
                         a.on_track_member(track, &member_evidence(&member));
                     }
                     chains.on_member(track, member);
+                }
+                ControlEvent::MemberRefuted { track, member } => {
+                    if let Some(s) = sched.as_mut() {
+                        s.on_member_refuted(track, &member);
+                    }
+                    if let Some(a) = &passive {
+                        a.on_track_member_refuted(track);
+                    }
                 }
                 ControlEvent::TrackClosed { track, .. } => {
                     if let Some(s) = sched.as_mut() {

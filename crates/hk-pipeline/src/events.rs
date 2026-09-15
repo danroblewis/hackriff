@@ -60,6 +60,14 @@ pub enum ControlEvent {
         /// Box.
         member: MemberBox,
     },
+    /// T-174 (ADR-0012 §2.6): a member already sent as suspect only for its DC flag was refuted by
+    /// a clean twin from another tuning; `member` is the box with `suspect` cleared.
+    MemberRefuted {
+        /// Track.
+        track: TrackId,
+        /// Box.
+        member: MemberBox,
+    },
     /// A track closed.
     TrackClosed {
         /// Track.

@@ -55,6 +55,7 @@ pub mod occupancy; // T-118
 pub mod reports; // T-121
 
 mod capture;
+mod dc_twin; // T-174
 mod detect;
 mod history;
 pub mod iqbuffer; // T-157

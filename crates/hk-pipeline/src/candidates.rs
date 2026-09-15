@@ -265,6 +265,14 @@ impl CandidateTable {
         (fresh, e.last_novelty)
     }
 
+    /// T-174 (ADR-0012 §2.6): a member folded as suspect only for its DC flag was refuted by a
+    /// clean twin from another tuning, so it no longer counts as suspect.
+    pub fn on_member_refuted(&mut self, track: TrackId) {
+        if let Some(e) = self.tracks.get_mut(&track) {
+            e.suspect_members = e.suspect_members.saturating_sub(1);
+        }
+    }
+
     /// Confirmed tracks and their extents.
     pub fn confirmed(&self) -> Vec<(TrackId, FreqRange)> {
         self.tracks
@@ -464,6 +472,39 @@ mod tests {
             decodes: 0,
             entropy: None,
         }
+    }
+
+    /// T-174: a member refuted by a DC twin leaves the suspect count (never below zero); a
+    /// twinless LO leak's members stay suspect.
+    #[test]
+    fn candidates_suspect_members_drop_when_a_dc_flag_is_refuted() {
+        let (carrier, leak) = (TrackId::new(), TrackId::new());
+        let mut t = CandidateTable::default();
+        for k in 0..4 {
+            t.on_member(carrier, &member(f64::from(k), true));
+            t.on_member(leak, &member(f64::from(k), true));
+        }
+        t.on_confirmed(carrier, FreqRange::new(433.9e6, 433.91e6), false);
+        t.on_confirmed(leak, FreqRange::new(433.9e6, 433.91e6), false);
+        for _ in 0..5 {
+            t.on_member_refuted(carrier);
+        }
+        t.on_member_refuted(TrackId::new());
+        assert_eq!(t.get(carrier).unwrap().suspect_fraction(), 0.0);
+        assert_eq!(t.get(leak).unwrap().suspect_fraction(), 1.0);
+        let inputs = t.inputs(ns_of(5.0), &none());
+        let frac = |id| {
+            inputs
+                .iter()
+                .find(|c| c.subject == CandidateSubject::Track { id })
+                .unwrap()
+                .suspect_fraction
+        };
+        assert_eq!((frac(carrier), frac(leak)), (0.0, 1.0));
+    }
+
+    fn ns_of(s: f64) -> i64 {
+        (s * 1e9) as i64
     }
 
     #[test]
