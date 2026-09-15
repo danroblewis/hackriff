@@ -624,3 +624,51 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - worked recipes for RDS, ADS-B, POCSAG and ACARS (the last three unverified starting points);
   - ownership stubs: deps pre-added and per-task module stubs wired into hk-api dispatch; ROUTES, api_contract.rs and opener registration are shared append-only.
   The full check started for T-099+T-101 was stopped and restarted to cover T-085 too. **M1 fan-out:** T-086 Blocks A, T-087 Blocks B, T-088 recipe runtime, T-089 parser+inspector API and T-091 authoring assist launched, alongside the running T-102 (6 agents). T-090, T-092 and T-093 wait on T-088/T-089.
+- **B0.226 Full check of main 5d48c0e (T-099 + T-101 + T-085).** Lint green; nextest 979/979 in 238 s. Acceptance 22/23: `inventory_lifecycle` t078/t082 now pass (T-101 fixed the regression). New failure: `signal_001::signal_001_adsb_readsb_plugin_chain` (blind.rs:798), under load from 6 concurrent agent builds. It's the same readsb plugin-startup family as the earlier nextest flake. Rerunning 3× to classify.
+- **B0.227** `signal_001_adsb_readsb_plugin_chain` passed 3/3 on rerun, so it's a flake: 15/16 decoded, and only the first squitter at t=9.9 ms was missed while load was ~24. This is the third instance of plugin startup racing the stream start, so a real lossless-start fix is filed as **T-103** instead of another retry. It's queued behind the 6 running M1/T-102 agents (throttle, 25 GB disk). Main is otherwise verified green at 5d48c0e.
+- **B0.228 T-102 merged** (be5934c). Coordinator reviewed. Changes:
+  - (1) `hk-pipeline` detect.rs `occupied_box`: the chain candidate box is now the OBW about the centre, clamped inside the pixel box. The pixel box (the union of threshold bins over 1 s) inflated a WFM station to 408 kHz vs 333 kHz OBW.
+  - (2) tracker `split_preds` accepts a continuation starting up to `coincidence_frames` (2) early. The real fixture restarts 1–2 frames early, which had merged station 1 with station 2 into 410 kHz.
+  - (3) `HOST_SKIRT_FRACTION` removed. A fragment host is now its measured pixel extent (≥ OBW) + 2 bins, and fragments must be centred inside it. This unhid the real ~101.70 MHz weak emitter.
+  Result: the station attaches wfm-rds directly (PI 1694). New test: weak narrowband emitters 230–280 kHz off a station keep their entries. hk-detect 122, acceptance inventory/signal_062 5/5, pipeline 42, lint clean. T-103 (lossless plugin start) launched into the freed slot; full check of main running.
+- **B0.229 T-089 delivered** (5324b42): field-map `Evaluator` (compiled once; layer tree with bit/byte ranges and a per-byte leaf index; fit status), `fields`/`text` blocks, gated `publish_frame`/`publish_record` (stream contract 1.2), routes `POST /api/inspector/parse` and `POST /api/captures/{id}/parse`, and a `CaptureSource` reader trait for T-092. RDS/ADS-B/POCSAG/misfit tests pass; a 10k-frame re-parse takes 185 ms in debug. It made small edits outside its ownership (`ApiState.captures`, cli pipeline `None`, the ondemand version test). A timeboxed Opus review is running; the merge waits on it and on the in-flight full check. T-090 (inspector UI) launches after merge.
+- **B0.230 T-086 delivered** (691ef04). It adds 14 IQ/demod/symbol blocks to the block contract. Blind bit-recovery tests pass for FM, AM, 2-FSK (150 ppm rate error), MSK, the ACARS path, ADS-B PPM 56/112 and RDS, and outputs are chunk-invariant. Release bench: the slowest block (lowpass) runs at 9.5e6 samples/s. Additive changes: `DdcKernel` in hk-dsp, and `hk-demod::dsp` made pub. Params for its blocks are pinned in ADR §1.5/`planned()`, which may conflict with T-087 at merge. Known limits: resample only decimates; rrc roll-off fixed at 0.35; ppm_demod skips over decoded frames. A timeboxed Opus review is running.
+- **B0.231 T-087 delivered** (0979e48). Blocks: sync_search (sync-word + RDS offset-word), assemble (POCSAG), deframe, (de)interleave, crc (burst correction), bch, parity, checksum. Tests pass for RDS, POCSAG BCH, ACARS CRC-16/KERMIT and ADS-B CRC-24 vectors: hk-blocks + hk-estimate 96/96. Gaps: per-word check status is lost in assemble, and offset-word sync has no bit-slip search. A timeboxed Opus review is running; it includes a trial merge against T-086, since both edit ADR §1.5/`planned()` and duplicate the length logic.
+- **B0.232 Full check of main 81d382d (after T-102): fully green.** Lint clean; nextest 980/980 in 254 s; acceptance 23/23. Main is verified. T-086, T-087 and T-089 are in timeboxed Opus review; T-088, T-091 and T-103 are running.
+- **B0.233 T-089 review: FIX-FIRST** (timeboxed). Two must-fixes:
+  1. The evaluator's length arithmetic overflows on over-the-air data. A 64-bit length field panics in debug, and in release it wraps into a capacity-overflow abort (eval.rs:414/445/454/515).
+  2. `tests/e2e/tests/stream_external.rs:263` still asserts stream version 1.1.
+  Everything else checked out: gating, API limits, 1.2 back-compat, bounded allocation, and no painful collisions with T-088/T-091. A fix round is running in the T-089 worktree, plus docs error codes and a frame cap on capture re-parse.
+- **B0.234 T-086 merged** (691ef04). Opus review: MERGE. Real-time safety, state carried across chunks, time maps, the ADS-B DF length rule, blind tests and trial merges against T-087/T-089 all check out clean. Nits filed as **T-104** (Blocks A hardening):
+  - dedupe LengthFrom→FrameLength after T-087;
+  - clock_recovery output bound;
+  - allocation-free restarts;
+  - extreme-param caps;
+  - NaN poisoning;
+  - manchester time map;
+  - allocation-counting test.
+  Also noted for T-088: the runtime must set RESET on a rebuilt node's first chunk. Full check deferred until the T-087/T-089 merges, so one run covers all three.
+- **B0.235 T-087 review: FIX-FIRST** (timeboxed). One must-fix: CRC burst correction manufactures valid frames on narrow CRCs. RDS 10-bit at burst 5 turns 36% of garbage blocks Valid; burst 1 turns 2.5–5%. Also real-time nits: assemble/deframe under-declare output counts, so FrameBuf reallocates on the RT thread. Checked OK: bch 3-bit refusal guaranteed with parity, ACARS CRC-16/KERMIT span and sync, blind tests, clean merge-tree with T-086. Keep `FrameLength` as the shared length evaluator; porting ppm_demod goes to T-104. Fix round running.
+- **B0.236 T-089 merged** (5b578ec; fix round dc453ce). Fixes: checked/saturating length arithmetic, with tests near u64::MAX for bytes/ascii/repeats; stream_external version test now uses constants; capture re-parse fit capped at 100k frames with a `truncated` flag; api.md 413/422/500 documented. **T-090 inspector UI** launched (Sonnet, thin client over docs/api.md; merge after coordinator review). Full check of main covering T-086 + T-089 is running.
+- **B0.237 T-088 delivered** (0a256ac). What landed:
+  - recipe chains (ring→DDC→graph) under the chain budget;
+  - off-thread build with swap at a chunk boundary, RESET on rebuilt nodes, zero sample loss across 4 hot edits;
+  - file-backed versioned recipe store;
+  - routes /api/blocks, /api/recipes*, /api/pipelines* (PUT hot-edit, save);
+  - stage and inspector streams (interim §6 message framing), with openers registered;
+  - mock-SDR e2e and allocation-free tests.
+  Not yet: messages outputs (needs T-089 eval), follow-hops (T-093), capture targets (T-092), and `/api/recipes/match`. The branch predates the T-086/T-089 merges, so integration is needed. A timeboxed Opus review is running, including a merge-tree against main. **T-087 fix round done** (40ecd1a: CRC false-correction bound ≤1e-3 means no RDS correction and CRC-24 1-bit OK; output bounds; FrameLength validation). It merges after the current full check. The T-088 agent ran to ~444k tokens, past the 300k guideline; fix rounds go to a fresh agent.
+- **B0.238 Full check of main e9dbaa0 (T-086 + T-089): green.** Lint clean; nextest 1023/1023 in 256 s; acceptance 23/23. **T-087 merged** (fix round 40ecd1a). **T-103 merged** (071fb12). Coordinator reviewed T-103. Two root causes: (a) the chain's fixed 2 s settle window killed a still-starting plugin, giving 0 decodes; (b) the readsb wrapper's 2 s Beast connect wait gave the first squitter a fallback stamp. Fix: `PluginInstance::finish` delivers queued input, then EOF, and waits on plugin progress (a lossless replay stalls out at ≥30 s, live at `settle_s`); the ring reader is dropped first; Beast wait raised to 20 s. Both regression tests failed on the old code. nextest retries removed; the serial groups stay for CPU. Watch: `readsb_wedge_message_ends_the_wrapper_without_waiting_for_the_child` hit 10.3 s against its 10 s bound once, at load 39. **T-104** (Blocks A hardening) launched; a full check covering T-087 + T-103 is running.
+- **B0.239 T-091 delivered** (85f813d). Three assists:
+  - **Sync/period hunt:** autocorrelation plus block-code linear dependence.
+  - **CRC/BCH search:** the generator comes from the GCD of frame-difference polynomials, which makes the search exhaustive for widths 3–32 without enumerating polys. Init/xorout are solved and RDS offset words are grouped.
+  - **Field-boundary drafts:** a draft field map that passes validation.
+
+  Blind recoveries: RDS 0x5B9 plus offset words, POCSAG sync/BCH(31,21)/parity, ADS-B CRC-24, ACARS CRC-16/KERMIT plus parity, and synthetic FSK layout and CRC. Routes `POST /api/assist/{sync,fields,crc}` have ops/bit/frame caps. A timeboxed Opus review is running; its focus is API thread starvation from CPU-heavy requests and noise-input scoring.
+- **B0.240 T-090 delivered** (0358d24, Sonnet, UI only). It adds a Frame inspector pane with:
+  - a frame table with paging;
+  - hex + ASCII view;
+  - a layer tree;
+  - linked selection via the backend's `bytes`/`byte_index`;
+  - a draft field map + pasted frames box using `/api/inspector/parse`.
+  26 UI tests, all green in `just test-ui`. Coordinator scan: the only client-side byte handling is hex→bytes for display, with no parsing or range math (thin-client rule OK). Missing API: a capture listing (T-092) and `/ws/open/inspector` (T-088 integration). It merges after the in-flight full check.

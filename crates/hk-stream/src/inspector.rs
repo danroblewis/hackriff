@@ -9,13 +9,25 @@
 //!
 //! Frame records go through the §6 message gate like any message: `metadata` always flows
 //! (reduced to the recipe's allowlist under a restricted class); `content` (bytes and layers) is
-//! withheld when the effective class forbids content. These are the wire types only: publishing
-//! (`Publisher::publish_frame`, applying `gate::message_content_permitted` and the metadata
-//! policy) is T-089, and until then nothing in the publisher emits them.
+//! withheld when the effective class forbids content. Publishing is
+//! [`crate::Publisher::publish_frame`] (the §6 gate and metadata policy) and
+//! [`crate::Publisher::publish_record`] (`status`/`edit`).
+//!
+//! **Recorded decoded streams** (§14.7) are the §3 byte stream itself. [`RecordedFrames`] reads
+//! one from any byte source (a capture file, a buffer), yielding its frame records;
+//! [`CaptureSource`] is the interface a capture store implements so the inspector API can open a
+//! recording by id. [`FitSummary`] aggregates field-map fit over many frames.
+
+use std::collections::BTreeMap;
+use std::io::Read;
 
 use hk_model::{ContentClass, CrcStatus, EmitterId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::client::ClientError;
+use crate::frame::{FrameDecoder, HEADER_MAX_LEN};
+use crate::header::{StreamHeader, StreamKind};
 
 /// Record `type` of a frame record.
 pub const FRAME_RECORD_TYPE: &str = "frame";
@@ -224,19 +236,36 @@ pub struct LayerNode {
 }
 
 /// Why a field did not fit a frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FitErrorKind {
     /// The field runs past the end of its layer or the frame.
     OutOfBounds,
-    /// A length computed from a field is negative or zero.
+    /// A length or repeat count computed from a field is negative.
     BadLength,
-    /// A referenced field is absent in this frame (its condition was false or it failed).
+    /// A referenced field is absent in this frame (its condition was false or it failed), or
+    /// the field's placement depends on a sibling whose length could not be computed.
     MissingReference,
     /// A repeat exceeded the instance limit.
     RepeatLimit,
     /// The tree exceeded [`MAX_LAYER_NODES`]; later fields were not evaluated.
     NodeLimit,
+    /// An `ascii` character failed its parity check (rendered U+FFFD); reported once per field.
+    Parity,
+}
+
+impl FitErrorKind {
+    /// Wire token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            FitErrorKind::OutOfBounds => "out-of-bounds",
+            FitErrorKind::BadLength => "bad-length",
+            FitErrorKind::MissingReference => "missing-reference",
+            FitErrorKind::RepeatLimit => "repeat-limit",
+            FitErrorKind::NodeLimit => "node-limit",
+            FitErrorKind::Parity => "parity",
+        }
+    }
 }
 
 /// A fit error: a frame-dependent failure of a valid field map.
@@ -279,7 +308,9 @@ pub const fn byte_span(bit_offset: u32, bit_len: u32) -> [u32; 2] {
 }
 
 impl LayerTree {
-    /// Fills [`Self::byte_index`] from the nodes' ranges for a frame of `byte_len` bytes.
+    /// Fills [`Self::byte_index`] from the nodes' ranges for a frame of `byte_len` bytes. Leaves
+    /// are nodes without children, excluding layers (a layer whose fields are all absent is not
+    /// a selectable field).
     pub fn index_bytes(&mut self, byte_len: usize) {
         let mut is_parent = vec![false; self.nodes.len()];
         for n in &self.nodes {
@@ -292,7 +323,11 @@ impl LayerTree {
         let mut leaves: Vec<&LayerNode> = self
             .nodes
             .iter()
-            .filter(|n| !is_parent[n.id as usize] && n.bits[1] > 0)
+            .filter(|n| {
+                !is_parent.get(n.id as usize).copied().unwrap_or(true)
+                    && n.ty != NodeType::Layer
+                    && n.bits[1] > 0
+            })
             .collect();
         leaves.sort_by_key(|n| (n.bits[0], n.id));
         self.byte_index = vec![Vec::new(); byte_len];
@@ -334,6 +369,198 @@ pub fn from_hex(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
         .collect()
+}
+
+/// Kind of a metadata-only inspector record (§14.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InspectorRecordType {
+    /// Pipeline status tick.
+    Status,
+    /// Hot-edit boundary.
+    Edit,
+}
+
+impl InspectorRecordType {
+    /// Record `type`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            InspectorRecordType::Status => STATUS_RECORD_TYPE,
+            InspectorRecordType::Edit => EDIT_RECORD_TYPE,
+        }
+    }
+}
+
+/// Field-map fit over many frames: the "does my guess hold across the recording" signal of the
+/// parser-authoring loop (ADR-0011 §3.3).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FitSummary {
+    /// Frames seen.
+    pub frames: u64,
+    /// Frames whose every present field fit.
+    pub ok: u64,
+    /// Frames with some fit errors.
+    pub partial: u64,
+    /// Frames where no field decoded.
+    pub failed: u64,
+    /// Frames not parsed: stored gated (metadata only), or without bytes.
+    pub unparsed: u64,
+    /// Fit errors counted by field path (repeat indexes removed: `items[].id`) and kind.
+    #[serde(default)]
+    pub errors: BTreeMap<String, BTreeMap<FitErrorKind, u64>>,
+}
+
+impl FitSummary {
+    /// Counts one frame: its layer tree, or `None` when it could not be parsed.
+    pub fn add(&mut self, tree: Option<&LayerTree>) {
+        self.frames += 1;
+        let Some(tree) = tree else {
+            self.unparsed += 1;
+            return;
+        };
+        match tree.fit {
+            FitStatus::Ok => self.ok += 1,
+            FitStatus::Partial => self.partial += 1,
+            FitStatus::Failed => self.failed += 1,
+            FitStatus::None => self.unparsed += 1,
+        }
+        for e in &tree.errors {
+            let path = strip_indexes(&e.path);
+            *self
+                .errors
+                .entry(path)
+                .or_default()
+                .entry(e.kind)
+                .or_default() += 1;
+        }
+    }
+}
+
+/// `items[3].id` → `items[].id`.
+fn strip_indexes(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut skipping = false;
+    for c in path.chars() {
+        match c {
+            '[' => {
+                skipping = true;
+                out.push('[');
+            }
+            ']' => {
+                skipping = false;
+                out.push(']');
+            }
+            _ if skipping => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Opens recorded decoded streams by capture id (§14.7). The always-on capture store (T-092)
+/// implements it; the inspector API (`POST /api/captures/{id}/parse`) reads through it.
+pub trait CaptureSource: Send + Sync {
+    /// Capture `id`'s §3 byte stream from its first byte (header frame first). `Ok(None)`: no
+    /// such capture.
+    fn open(&self, id: &str) -> std::io::Result<Option<Box<dyn Read + Send>>>;
+}
+
+/// Reads the frame records of a recorded decoded stream (§14.7) from any byte source: the
+/// header, then `frame` records in order; `status`, `edit`, drop markers and unknown record
+/// types are counted and skipped.
+pub struct RecordedFrames<R> {
+    r: R,
+    dec: FrameDecoder,
+    header: StreamHeader,
+    eof: bool,
+    skipped: u64,
+}
+
+impl<R: Read> RecordedFrames<R> {
+    /// Reads and checks the header: a `messages` stream whose `message_schema`, if present, is
+    /// [`INSPECTOR_MESSAGE_SCHEMA`].
+    pub fn open(r: R) -> Result<Self, ClientError> {
+        let mut this = Self {
+            r,
+            dec: FrameDecoder::new(HEADER_MAX_LEN),
+            header: StreamHeader::new("", StreamKind::Messages, ContentClass::FAIL_CLOSED, ""),
+            eof: false,
+            skipped: 0,
+        };
+        let header = {
+            let frame = this.next_raw()?.ok_or(ClientError::Truncated)?;
+            StreamHeader::from_json_bytes(&frame)?
+        };
+        if header.kind != StreamKind::Messages {
+            return Err(ClientError::Record(
+                "a recorded decoded stream is a messages stream".into(),
+            ));
+        }
+        if header
+            .message_schema
+            .as_deref()
+            .is_some_and(|s| s != INSPECTOR_MESSAGE_SCHEMA)
+        {
+            return Err(ClientError::Record(format!(
+                "message_schema is not {INSPECTOR_MESSAGE_SCHEMA}"
+            )));
+        }
+        this.dec.set_max_frame_len(header.max_frame_len);
+        this.header = header;
+        Ok(this)
+    }
+
+    /// The stream header.
+    pub fn header(&self) -> &StreamHeader {
+        &self.header
+    }
+
+    /// Records skipped so far (not frame records).
+    pub fn skipped(&self) -> u64 {
+        self.skipped
+    }
+
+    fn next_raw(&mut self) -> Result<Option<Vec<u8>>, ClientError> {
+        loop {
+            if let Some(f) = self.dec.next_frame()? {
+                return Ok(Some(f.to_vec()));
+            }
+            if self.eof {
+                return if self.dec.buffered() > 0 {
+                    Err(ClientError::Truncated)
+                } else {
+                    Ok(None)
+                };
+            }
+            if self.dec.read_from(&mut self.r)? == 0 {
+                self.eof = true;
+            }
+        }
+    }
+
+    /// The next frame record; `Ok(None)` at a clean end of stream.
+    pub fn next_frame(&mut self) -> Result<Option<FrameRecord>, ClientError> {
+        loop {
+            let Some(raw) = self.next_raw()? else {
+                return Ok(None);
+            };
+            let value: Value =
+                serde_json::from_slice(&raw).map_err(|e| ClientError::Record(e.to_string()))?;
+            if value.get("type").and_then(Value::as_str) == Some(FRAME_RECORD_TYPE) {
+                return FrameRecord::deserialize(value)
+                    .map(Some)
+                    .map_err(|e| ClientError::Record(e.to_string()));
+            }
+            self.skipped += 1;
+        }
+    }
+}
+
+impl<R: Read> Iterator for RecordedFrames<R> {
+    type Item = Result<FrameRecord, ClientError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_frame().transpose()
+    }
 }
 
 #[cfg(test)]

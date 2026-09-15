@@ -139,23 +139,27 @@ A test (`implemented_blocks_match_their_pinned_descriptors`) fails if an impleme
 
 | Group | Block | Ports | Params |
 |---|---|---|---|
-| iq | `mix` | iq → iq | placeholder |
-| iq | `lowpass`, `resample` | iq\|real → same | placeholder |
+| iq | `mix` | iq → iq | pinned (T-086): `offset_hz` (hot) |
+| iq | `lowpass` | iq\|real → same | pinned (T-086): `cutoff_hz`, `transition_hz`, `stopband_db` |
+| iq | `resample` | iq\|real → same | pinned (T-086): `output_rate_hz` (≤ input rate: decimation only, the DDC stages), `bandwidth_hz`, `stopband_db` |
 | iq | `fm_demod` | iq → real | pinned: `deviation_hz` (hot), `output_rate_hz`, `deemphasis_s` |
-| iq | `am_demod`, `fsk_demod`, `msk_demod` | iq → real | placeholder |
+| iq | `am_demod` | iq → real | pinned (T-086): `mode` (`normalized`/`envelope`, hot), `time_constant_s` (hot) |
+| iq | `fsk_demod`, `msk_demod` | iq → real | pinned (T-086): `deviation_hz` (fsk) or `symbol_rate_bd` (msk, deviation = rate/4), `offset_hz`, `offset_tracking_s`, all hot |
 | iq | `ppm_demod` | iq → frames (+ diagnostic `soft` soft) | pinned: `bit_rate_bd`, `chips_per_bit`, `preamble` + `preamble_chips` (chip pattern), `min_snr_db` (hot), `frame_bits` (max), `length_from` |
 | iq | `subcarrier` | real → iq | pinned: `carrier_hz`, `bandwidth_hz`, `output_rate_hz`, `reference {pilot_hz, multiple, pll_bandwidth_hz}`, `phase_tracking` (hot) |
 | symbol | `clock_recovery` | iq\|real → soft (+ diagnostic `timing_error` real) | pinned: `symbol_rate_bd`, `pulse`, `algorithm`, `soft_from`, `loop_bandwidth` (hot), `max_deviation_ppm` |
 | symbol | `slicer` | soft → bits | pinned: `threshold` (hot), `invert` (hot) |
 | symbol | `diff_decode` | bits → bits | pinned: `mode` (hot) |
-| symbol | `nrzi` | bits → bits | placeholder |
-| symbol | `manchester` | soft\|bits → bits | placeholder |
+| symbol | `nrzi` | bits → bits | pinned (T-086): `mode` (`transition-is-0`/`transition-is-1`, hot) |
+| symbol | `manchester` | soft\|bits → bits | pinned (T-086): `convention` (`thomas`/`ieee`, hot), `align` (`auto`/`fixed`, hot) |
 | framing | `sync_search` | bits → frames | pinned: `mode` (`sync-word`/`offset-words`) + per-mode keys; sync-word: `frame_bits` (fixed, or the maximum), `bit_order` (`lsb` reverses 8-bit characters), `length_from`, `terminator` |
 | framing | `assemble` | frames → frames | pinned: `word_bits`, `start {bit, value}`, `idle_words`, `header`, `slot`, `payload`, `max_words`, `span_frames` (POCSAG address + message codewords → one message, across batches) |
-| framing | `deframe` | bits\|frames → frames | placeholder |
-| framing | `interleave`, `deinterleave` | frames → frames | placeholder |
+| framing | `deframe` | bits\|frames → frames | pinned (T-087): `frame_bits` (fixed, or the maximum), `offset_bits`, `length_from`, `terminator` |
+| framing | `interleave`, `deinterleave` | frames → frames | pinned (T-087): `depth` (column interleaver) or `permutation` (per period) |
 | fec | `crc` | frames → frames | pinned: RevEng model (`width, poly, init, refin, refout, xorout`), `span` or `blocks {data_bits, check_bits, offsets}`, `strip`, `drop_invalid` (hot), `correct_burst_bits` |
-| fec | `bch`, `parity`, `checksum` | frames → frames | placeholder |
+| fec | `bch` | frames → frames | pinned (T-087): `word_bits`, `n`, `k`, `poly` (degree n − k), `parity` (none/even/odd), `correct_bits`, `drop_invalid` (hot) |
+| fec | `parity` | frames → frames | pinned (T-087): `unit_bits`, `parity`, `position` (first/last), `span`, `strip`, `drop_invalid` (hot) |
+| fec | `checksum` | frames → frames | pinned (T-087): `algorithm` (sum/xor/ones-complement), `unit_bits`, `width`, `endianness`, `init`, `complement`, `span`, `strip`, `drop_invalid` (hot) |
 | parse | `fields` | frames → frames | pinned: `map` (hot) |
 | parse | `text` | frames → frames | pinned: `name`, `key`, `address[]`, `chars[]`, `segments`, `chars_per_segment`, `reset_on`, `terminator`, `emit` (hot), `charset` |
 | multi | `follow_hops` | frames → frames | pinned: `dedupe_s` (hot), `order_window_s` |
@@ -167,7 +171,7 @@ Blocks are **adapters over the existing kernels**, not rewrites:
 - **mix/lowpass/resample:** hk-dsp `filter::Nco`, `design_lowpass` + `kernels`, and the DDC's polyphase stage. hk-dsp's `Ddc` wants a `ProvenanceHandle`, which `ChunkMeta` doesn't carry, so T-086 may expose a provenance-free resampler additively.
 - **fm_demod/subcarrier/clock_recovery:** the hk-demod discriminator (`dsp`), `pilot::PilotPll` and `rds::demod`'s biphase timing.
 - **fsk_demod/slicer:** hk-demod `fsk`.
-- **sync_search:** hk-estimate `framing::sync` and hk-demod `rds::block` syndromes. **crc:** hk-estimate `framing::crc::CrcCore`.
+- **sync_search:** hk-estimate `framing::sync` and hk-demod `rds::block` syndromes. **crc:** hk-estimate `framing::crc::BitCrc` (the RevEng model over bit ranges; its whole-byte path is `CrcCore`).
 
 Rules:
 - The recipe runtime's **input stage** is the runtime's own DDC over ring chunks, which do carry provenance. Blocks after it see only `ChunkMeta`.

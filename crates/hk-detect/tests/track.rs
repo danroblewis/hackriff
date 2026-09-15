@@ -1157,13 +1157,14 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
     let mut tr = Tracker::new(TrackerConfig::default());
     let mut ev = Vec::new();
     let station = 101.3e6;
-    // (fc, snr_mean) of the flickers: in band and weak; beyond the 150 kHz skirt; in band and
-    // strong; in the skirt and weak; in the skirt at nearly the station's strength.
+    // (fc, snr_mean) of the flickers: in band and weak; beyond the station's ±204 kHz
+    // threshold-crossing box; in band and strong; in the skirt (past the 300 kHz OBW, inside the
+    // box) and weak; in the skirt at nearly the station's strength.
     let flickers = [
         (101.21e6, 5.0),
         (101.7e6, 5.0),
         (101.39e6, 25.0),
-        (101.51e6, 5.0),
+        (101.50e6, 5.0),
         (101.1e6, 14.0),
     ];
     let mut recs: Vec<DetectionRecord> = Vec::new();
@@ -1182,6 +1183,10 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
             chunk > 0,
         );
         r.detection.snr_mean_db = 17.0;
+        // As the detector reports a WFM station: its threshold-crossing (pixel) box, every bin
+        // above threshold in any frame of the record, is wider than its 99 % OBW.
+        r.f_lo_hz = station - 204e3;
+        r.f_hi_hz = station + 204e3;
         recs.push(r);
     }
     for (k, &(fc, snr)) in flickers.iter().enumerate() {
@@ -1239,6 +1244,104 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
         let own = at(flickers[k].0);
         assert!(!own.inband_fragment, "{why}: an emitter of its own");
         assert!(hk_detect::track::inventory::track_sighting(own).is_some());
+    }
+}
+
+/// T-102: a weak narrowband emitter one channel (200–300 kHz) off a strong continuous WFM station
+/// (333 kHz OBW in a 408 kHz threshold-crossing box, as the detector measures a real one) is no
+/// in-band fragment of the station: it keeps its own inventory entry, on either side, steady or
+/// keyed on and off inside the station's life.
+#[test]
+fn weak_narrowband_emitter_one_channel_off_a_wfm_station_keeps_its_own_entry() {
+    let prov = provenance(100e6, FS, 24.0);
+    let mut tr = Tracker::new(TrackerConfig::default());
+    let mut ev = Vec::new();
+    let station = 101.3e6;
+    let mut recs: Vec<DetectionRecord> = Vec::new();
+    for chunk in 0..5u64 {
+        let mut r = rec(
+            &prov,
+            100 * chunk,
+            100,
+            station,
+            333e3,
+            if chunk == 4 {
+                CloseReason::Ended
+            } else {
+                CloseReason::MaxDuration
+            },
+            chunk > 0,
+        );
+        r.detection.snr_mean_db = 17.0;
+        r.f_lo_hz = station - 205e3;
+        r.f_hi_hz = station + 203e3;
+        recs.push(r);
+    }
+    // Steady carriers 250 kHz above and 230 kHz below, on air 0.5–4.5 s.
+    let steady = [station + 250e3, station - 230e3];
+    for &fc in &steady {
+        for chunk in 0..4u64 {
+            let mut r = rec(
+                &prov,
+                50 + 100 * chunk,
+                100,
+                fc,
+                10e3,
+                if chunk == 3 {
+                    CloseReason::Ended
+                } else {
+                    CloseReason::MaxDuration
+                },
+                chunk > 0,
+            );
+            r.detection.snr_mean_db = 8.0;
+            recs.push(r);
+        }
+    }
+    // A keyed narrowband emitter 280 kHz above: 0.2 s on, 0.3 s off.
+    let keyed = station + 280e3;
+    for k in 0..7u64 {
+        let mut r = rec(
+            &prov,
+            60 + 50 * k,
+            20,
+            keyed,
+            12.5e3,
+            CloseReason::Ended,
+            false,
+        );
+        r.detection.snr_mean_db = 8.0;
+        recs.push(r);
+    }
+    recs.sort_by_key(|r| r.frames.end);
+    for r in &recs {
+        tr.push_detection(r, &mut |e| ev.push(e));
+    }
+    tr.finish(&mut |e| ev.push(e));
+    let closed: Vec<&TrackSummary> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TrackEvent::Closed(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    eprintln!(
+        "neighbours: {:?}",
+        closed
+            .iter()
+            .map(|s| (s.track.f_center_hz, s.burst_count, s.inband_fragment))
+            .collect::<Vec<_>>()
+    );
+    for fc in [station, steady[0], steady[1], keyed] {
+        let own = closed
+            .iter()
+            .find(|s| (s.track.f_center_hz - fc).abs() < 5e3)
+            .unwrap_or_else(|| panic!("no closed track at {fc}: {closed:?}"));
+        assert!(!own.inband_fragment, "{fc}: an emitter of its own");
+        assert!(
+            hk_detect::track::inventory::track_sighting(own).is_some(),
+            "{fc}: its own inventory entry"
+        );
     }
 }
 

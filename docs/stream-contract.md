@@ -8,7 +8,7 @@ One contract serves two uses:
 
 ## 1. Versioning
 
-- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.1**: 1.0 plus the optional header `audio` profile and the binary `status` record type (T-043, §12). The **1.2 draft** (§14, ADR-0011) adds the `frame`, `status` and `edit` message record types of inspector streams and the optional header `inspector` and `stage` objects; it is served once T-089 lands.
+- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.2**: 1.1 (1.0 plus the optional header `audio` profile and the binary `status` record type, T-043, §12) plus the inspector streams of §14 (ADR-0011, T-089): the `frame`, `status` and `edit` message record types and the optional header `inspector` object. The optional header `stage` object (§14.4) is added with stage streams (T-088).
 - **Minor versions** may only add:
   - optional header fields;
   - optional message-record fields;
@@ -332,6 +332,7 @@ The N1 covert-channel regressions (hex text, packed integer, numeric page in cap
 - **Unblockable input:** the stdin pipe is non-blocking, and the writer polls it together with a wake socket; detaching a plugin (exit, stall, shutdown) abandons a blocked write.
 - **Bounded reader join:** output readers are joined for at most 2 s after the group kill. A descendant that escaped the group (e.g. `setsid`) cannot block restart or shutdown; its readers are abandoned (no further ingest) and counted (`readers_abandoned`).
 - **Shutdown** SIGKILLs the process group. A pgid is only killed while its leader is unreaped, which rules out reuse.
+- **End of input (T-103):** `PluginInstance::finish(idle)` ends a plugin's input without losing it. Records already queued are still written, then the plugin's stdin is closed (EOF), and the host waits for the plugin to flush and exit on its own; that exit is not restarted. A plugin still starting up (not yet reading stdin) is waited for as well. It is killed only after `idle` without progress (input consumed, lines stored, state change). A decoder must therefore flush its output and exit at stdin EOF. The pipeline's plugin chain calls it at detach instead of a fixed settle window after the last record, which cut off slow-starting plugins (0 decodes under load).
 - **Limits:** only `nice` (via `setpriority`), the queue size, message size and log ring are enforced. Memory and CPU caps are future work.
 
 ### 9.6 Fit for readsb (T-015)
@@ -608,10 +609,11 @@ Code: `hk_stream::bursts` (profile), `hk_pipeline::chains::taps` (producer).
 
 ## 14. Inspector streams: decoder-workbench frames (1.2 draft, ADR-0011)
 
-**Status: draft (T-085).** Wire types: `crates/hk-stream/src/inspector.rs`. Nothing publishes these records yet:
-- T-089 adds `Publisher::publish_frame` (through the §6 message gate) and bumps the version to **1.2**;
-- T-088 serves the records from recipe pipelines;
-- T-092 records them.
+**Status: 1.2 (T-085 draft, T-089).** Wire types: `crates/hk-stream/src/inspector.rs`.
+- Publishing (T-089): `Publisher::publish_frame` (through the §6 message gate: the publisher assigns `seq` and `gated`, clamps the class, withholds `content` and reduces metadata as §14.5 says) and `Publisher::publish_record` (`status`/`edit`, allowlist-shaped metadata only).
+- Reading recordings (T-089): `hk_stream::inspector::RecordedFrames` (§14.7); `CaptureSource` is the interface a capture store implements.
+- Field-map evaluation (T-089): `hk_recipe::fields::eval::Evaluator`.
+- T-088 serves the records from recipe pipelines; T-092 records them.
 
 Everything here is additive under §1:
 - new message record types (`frame`, `status`, `edit`);
@@ -682,7 +684,8 @@ One NDJSON record per frame:
   - absent for layers, `bytes` and failed fields.
 - `text` is the rendered value. `label` comes from the field map. `error: true` marks where a fit error was reported.
 - `byte_index[b]`: the ids of the **leaf** nodes overlapping byte `b`, in bit order.
-- `fit` and `errors`: `[{path, kind, need_bits?, have_bits?}]`. `kind` is `out-of-bounds`, `bad-length`, `missing-reference`, `repeat-limit` or `node-limit`.
+- `fit` and `errors`: `[{path, kind, need_bits?, have_bits?}]`. `kind` is `out-of-bounds`, `bad-length`, `missing-reference`, `repeat-limit`, `node-limit` or `parity` (an `ascii` character failed its parity check and renders U+FFFD; once per field).
+- Leaves in `byte_index` are nodes without children, excluding layers.
 - A field that doesn't fit never aborts the frame: its later siblings are still evaluated.
 
 **Linked selection** (inspector UI, T-090) uses only these values, with no arithmetic of its own: click a field → highlight its `bytes` (and `bits` for sub-byte precision); click byte `b` → select `byte_index[b][0]`, with repeat clicks cycling through the list.
@@ -755,7 +758,8 @@ Any output port of any node of a running pipeline can be opened as a stream on d
 - **Re-parse.** Read the frame records, evaluate a field map (the recording's own or an edited one) over `content.hex` and `metadata.bit_len`, and re-emit them with layers.
   - The re-emitted records carry `inspector.source = {kind: capture, capture_id, reparse: true}`.
   - `metadata.recipe_version`/`edit_rev` stay the recording's, so a record always says which pipeline revision produced its bytes.
-  - It is served paged over HTTP (`POST /api/captures/{id}/parse`, docs/api.md) and as a stream (`open/inspector?capture=`).
+  - It is served paged over HTTP (`POST /api/captures/{id}/parse`, docs/api.md "Inspector", with a fit summary over the whole recording) and, once the inspector opener lands (T-088/T-092), as a stream (`open/inspector?capture=`).
+- **Reader.** `hk_stream::inspector::RecordedFrames::open(reader)` reads the header (a `messages` stream whose `message_schema`, if present, is `hackriff.inspector/1`) and yields the `frame` records in order, skipping and counting other records. A capture store exposes recordings by id through `hk_stream::inspector::CaptureSource::open(id) → Read`.
 - **Recipe tails over recorded bits or symbols.** Running a tail over recorded `bits`/`soft` uses the T-061 output recordings as a recipe `input.port` of `bits`/`soft`.
 
 ### 14.8 Planned openers (names only; T-088, T-089)

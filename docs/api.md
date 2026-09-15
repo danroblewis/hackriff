@@ -278,6 +278,30 @@ printf 'open/bits?token=%s\n' "$HK_TOKEN" | nc 127.0.0.1 8788 | xxd | head -40
 
 Python clients (standard library only): `py/examples/` (`hkstream.py`, `hk_bits.py`, `hk_audio_wav.py`), documented in `py/README.md`.
 
+## Inspector (T-089, SIGNAL-062)
+
+The declarative parser's routes (ADR-0011 §3–4). They evaluate a **draft** field map (a `hk_recipe::FieldMap` JSON document, [ADR-0011 §3.1](adr/0011-decoder-workbench-contracts.md)) over frames or over a recorded decoded stream **without saving anything**, so the parser-authoring loop is: edit the map, re-parse the whole recording, read the fit summary, repeat. All parsing is server-side; the UI renders what comes back.
+
+| Method | Path | Auth | Body → response |
+|---|---|---|---|
+| POST | `/api/inspector/parse` | token (header) | `{field_map, frames: [{hex, bit_len?}]}` (1–500 frames) → `{frames: [{bit_len, hex, layers}], fit}` |
+| POST | `/api/captures/{id}/parse` | token (header) | `{field_map?, from_frame?, limit?}` → `{capture_id, stream, total_frames, from_frame, limit, next_from_frame, frames, fit}` |
+
+**Layer trees** (`layers`) are the `docs/stream-contract.md` §14.2 shape: `nodes` in pre-order, each with `id`, `parent`, `name`, `path`, `type`, `bits: [offset, length]` (absolute from the frame's first bit, MSB of byte 0 first), `bytes: [first, end)`, `value`, `text` (rendered, with `value_unit`), `label`, `error`; `byte_index[b]` lists the leaf nodes overlapping byte `b` in bit order; `fit` is `ok`/`partial`/`failed`; `errors: [{path, kind, need_bits?, have_bits?}]` with `kind` `out-of-bounds`, `bad-length`, `missing-reference`, `repeat-limit`, `node-limit` or `parity`. **Linked selection uses only these:** field → highlight `bytes` (or `bits`); byte `b` → select `byte_index[b][0]`, repeat clicks cycling. A field that doesn't fit never aborts the frame.
+
+**`fit` summary:** `{frames, ok, partial, failed, unparsed, errors: {<path with indexes removed, e.g. items[].id>: {<kind>: count}}}`.
+
+**`POST /api/inspector/parse`**: `hex` is the frame's bytes (even-length hex, either case); `bit_len` defaults to 8 × bytes and may not exceed it. `field_map` is required. The response's `hex` is normalised to lower case.
+
+**`POST /api/captures/{id}/parse`**: re-parses a recorded decoded stream (§14.7: the §3 byte stream itself; T-092 records them, `ApiState::captures` / `hk_stream::inspector::CaptureSource` opens them).
+- `from_frame` (default 0) and `limit` (1–500, default 100) page over the recording's frame records in stored order; `total_frames` counts them all and `next_from_frame` is the next page's start (`null` on the last page).
+- `frames` are the stored `frame` records. With a `field_map`, each parseable record gains `content.layers` and `metadata.fit`; without one, records are returned as stored (the paged frame list with `content.hex`). `metadata.recipe_version`/`edit_rev` stay the recording's.
+- `fit` covers **every frame of the recording**, not just the page (`null` without a `field_map`), up to the first 100 000 frames (`MAX_FIT_FRAMES`) so one request's CPU is bounded. It adds `truncated`: `true` when the recording has more frames than that, so the summary counts only the first 100 000 (`total_frames` still counts all of them, and pages past the cap are still parsed).
+- `stream`: `{stream_id, content_class, message_schema, inspector?}`; `inspector.source` is `{kind: "capture", capture_id, reparse}`.
+- **Gating (fail closed):** a record whose class, or whose stream's class, forbids content, or that is `own-key-decrypted` (local consumers only), is returned with `gated: true` and no `content`, is never parsed, and counts as `unparsed`.
+
+Errors are `{"error", "code"}`: `400 invalid` (bad body; an invalid field map adds `errors: [{path, message}]` with dotted field paths, as `FieldMap::validate` reports them), `404 not_found` (no such capture), `405` (not POST), `413` (body over the 64 KiB cap; answered by the HTTP layer before routing, as `{"error": "Payload Too Large"}` without a `code`), `415 unsupported_media_type`, `422 unreadable` (the capture opened but is not a readable inspector stream: bad header or framing), `500 unreadable` (the capture store failed to open it: a server-side I/O error, not the recording's fault), `503 unavailable` (this server has no capture store; `hk serve` answers this until T-092 wires one). Messages never echo values. These routes only read: they need the token in the header like every POST, but are not audited.
+
 ## Recipes and pipelines (T-088, M1; ADR-0011 §2.3–§2.5)
 
 A **recipe** is a decoder as data (`hk_recipe::Recipe`, JSON; ADR-0011 §2). A **pipeline** runs one recipe as a chain on the running capture: one ring reader, a channel DDC to `input.sample_rate_hz`, and the recipe's block graph. Pipelines are admitted as `recipe` chains in the run's on-demand chain budget (`/api/status` `budget`), are hot-edited without stopping capture, and serve their outputs over the stream contract (§14). All signal logic is in `hk_pipeline::recipes`; these routes only route, audit and shape errors (`crates/hk-api/src/recipes.rs`).
@@ -323,11 +347,9 @@ Conventions:
 | `stage/<pipeline>/<output>` | `/ws/stage/<pipeline>/<output>` or TCP (a recipe's declared `stage` outputs) | §14.4 binary records, one per processed chunk |
 | on-demand stage tap | `GET /ws/open/stage?pipeline=<id>&node=<node>[&port=<port>][&view=raw]` / TCP `open/stage?…` | any node port: `iq` → `iq`/`cf32_le`, `real` → `audio`/`rf32_le`, `soft` → `symbols`/`rf32_le`, `bits` → `bits`/`ru8`, `frames` → frame records. The tap costs nothing until opened and stops when the consumer leaves. 404 unknown pipeline/node/port, 410 ended, 422 `view=spectrum` (not served yet) |
 
-**Interim record framing (until T-089).** Until `Publisher::publish_frame` lands, frame, status and edit records ride as §6 message records (`"type": "message"`) through the same gate. `metadata.record` names the §14 record type (`frame` \| `status` \| `edit`), and the other §14.2 fields keep their names: `crc_status`, `decoder`, `frame_model`, `metadata.{frame, sample_index, channel, channel_hz, bit_len, recipe_version, edit_rev, fec_corrected_bits, fit}`, `content.{hex, layers}`. Readers should accept either framing.
-
 ## Decoder workbench (planned, M1; ADR-0011)
 
-**Planned, not served yet.** None of these routes are in `ROUTES` today (the served T-088 routes moved to "Recipes and pipelines" above). They are named here so the parallel M1 tasks and the inspector UI (T-090) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
+**Planned, not served yet.** None of these routes are in `ROUTES` today (the served T-088 and T-089 routes moved to "Recipes and pipelines" and "Inspector" above). They are named here so the parallel M1 tasks and the inspector UI (T-090) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
 - **Contracts:** [ADR-0011](adr/0011-decoder-workbench-contracts.md).
 - **Schemas:** `hk_recipe` (recipe, field map, block descriptor types).
 - **Wire formats:** [`docs/stream-contract.md` §14](stream-contract.md) (inspector frame records, stage streams, recorded decoded streams).
@@ -343,11 +365,10 @@ Conventions:
 | GET | `/api/recipes/match` | T-088 | `?emitter=<id>`: recipes ranked against the emitter's measured family, bandwidth, symbol rate, burstiness and features, with reasons |
 | GET | `/api/captures` | T-092 | Recorded decoded streams: pipeline, recipe revision, output, span, frames, bytes |
 | GET | `/api/captures/{id}/frames` | T-092 | `?from_frame&limit` (≤ 500): stored frame records |
-| POST | `/api/captures/{id}/parse` | T-089 | Re-parse `{field_map, from_frame?, limit?}` → frames with layer trees + `fit` summary (ok/partial/failed, errors by path) |
 | POST | `/api/assist/sync` | T-091 | Sync-word and period suggestions over a capture's frames or bits, scored |
 | POST | `/api/assist/fields` | T-091 | Entropy-based field-boundary suggestions as field-map fragments, scored |
 | POST | `/api/assist/crc` | T-091 | CRC/BCH parameter search over a capture's frames → `crc`/`bch` parameter objects, scored |
-| GET | `/ws/open/inspector` | T-089 | `?pipeline=<id>[&output=<id>]` or `?capture=<id>[&from_frame][&field_map=<recipe_id>@<version>:<map_id>]`: an inspector stream (§14.8). TCP: `open/inspector?…` |
+| GET | `/ws/open/inspector` | T-092 | `?capture=<id>[&from_frame][&field_map=<recipe_id>@<version>:<map_id>]`: a recorded inspector stream (§14.8). TCP: `open/inspector?…`. The `?pipeline=<id>` form is served (see "Recipes and pipelines"). |
 
 Assist suggestions are never applied automatically: the user accepts or edits them into a recipe, which then goes through `POST /api/recipes/validate`.
 

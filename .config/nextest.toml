@@ -68,24 +68,15 @@ retries = 1
 filter = 'test(racing_readers_get_exact_samples_and_exact_loss_accounting)'
 retries = 1
 
-# Found flaky on main after the T-081 merge (planning-log B0.206): the readsb plugin
-# chain decoded 0 frames under load (spawned plugin process startup racing a short
-# replay); passed 5/5 on rerun. Serialize the data_path binary (it spawns plugin
-# processes) and retry this test once.
+# The plugin-chain binaries spawn decoder subprocesses and replay whole recordings unpaced
+# (signal_001_readsb feeds readsb 46 MiB), so they stay in the serial group for CPU, not for
+# flakiness. Their start-up races (B0.206: 0 decodes; B0.219: 0/16) were fixed by T-103 (the chain
+# ends plugin input with EOF and waits for the plugin to finish instead of a fixed settle window;
+# the readsb wrapper waits longer for its Beast connection), so they no longer carry retries.
 [[profile.default.overrides]]
 filter = 'package(hk-pipeline) and binary(data_path)'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]
-filter = 'test(plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated)'
-retries = 1
-
-# Found flaky on main after the T-084/T-098 merges (planning-log B0.219): readsb decoded 0/16
-# under load ~24 (plugin process startup racing the replay); passed 3/3 on rerun.
-[[profile.default.overrides]]
 filter = 'package(hk-pipeline) and binary(signal_001_readsb)'
 test-group = 'heavy-serial'
-
-[[profile.default.overrides]]
-filter = 'test(signal_001_adsb_squitters_decoded_by_the_readsb_plugin_chain)'
-retries = 1

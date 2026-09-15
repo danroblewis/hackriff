@@ -125,7 +125,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/pipelines/{id}/recipe"),
     ("POST", "/api/pipelines/{id}/save"),
     // T-089 inspector
-
+    ("POST", "/api/inspector/parse"),
+    ("POST", "/api/captures/{id}/parse"),
     // T-091 assist
 
     // T-092 captures
@@ -198,6 +199,9 @@ pub struct ApiState {
     pub on_demand: hk_stream::OpenerRegistry,
     /// Output recordings (T-061, [`crate::outputs`]); `None` answers 503.
     pub outputs: Option<Arc<dyn crate::outputs::OutputControl>>,
+    /// Recorded decoded streams (T-089 reader interface, T-092 store) for
+    /// `POST /api/captures/{id}/parse` ([`crate::inspector`]); `None` answers 503.
+    pub captures: Option<Arc<dyn hk_stream::inspector::CaptureSource>>,
     /// Decoder-workbench recipe runtime (T-088, [`crate::recipes`]); `None` answers 503.
     pub recipes: Option<Arc<dyn crate::recipes::RecipeControl>>,
 }

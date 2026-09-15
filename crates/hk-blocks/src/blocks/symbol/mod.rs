@@ -1,11 +1,16 @@
-//! Symbol blocks (T-086): timing recovery, decisions and line decoding. Seed from the Gardner
-//! timing in hk-demod `fsk` and the biphase timing of hk-demod `rds::demod` (ADR-0011 §1.6).
+//! Symbol blocks (T-086): timing recovery, decisions and line decoding. The biphase
+//! max-contrast timing ports hk-demod `rds::demod`; Gardner/Mueller–Müller are classic
+//! interpolating loops over the same matched-filter statistic (ADR-0011 §1.6).
 
 use hk_recipe::PortType::{Bits, Iq, Real, Soft};
 use hk_recipe::{BlockDescriptor, PortSpec};
 
 use crate::Registry;
+use crate::blocks::iq::common;
 use crate::schema::{ParamExt, boolean, descriptor, float, one_of, param};
+
+mod clock;
+mod line;
 
 /// Pinned descriptors of this group.
 pub fn planned() -> Vec<BlockDescriptor> {
@@ -92,23 +97,55 @@ pub fn planned() -> Vec<BlockDescriptor> {
         descriptor(
             "nrzi",
             "symbol",
-            "NRZI decoding.",
+            "NRZI decoding: a level change encodes one value, no change the other (the first bit after a reset is the reference and emits nothing).",
             vec![PortSpec::new("in", Bits)],
             vec![PortSpec::new("out", Bits)],
-            vec![],
-            false,
+            vec![
+                param(
+                    "mode",
+                    one_of(&["transition-is-0", "transition-is-1"]),
+                    "Which value a transition encodes (HDLC/AX.25/USB: transition-is-0).",
+                )
+                .default_value("transition-is-0")
+                .hot(),
+            ],
+            true,
         ),
         descriptor(
             "manchester",
             "symbol",
-            "Manchester (chip-pair) decoding.",
+            "Manchester (chip-pair) decoding at half the chip rate, with automatic pair alignment from the violation rate.",
             vec![PortSpec::any_of("in", &[Soft, Bits])],
             vec![PortSpec::new("out", Bits)],
-            vec![],
-            false,
+            vec![
+                param(
+                    "convention",
+                    one_of(&["thomas", "ieee"]),
+                    "thomas: 1 = high→low (G. E. Thomas); ieee: 1 = low→high (IEEE 802.3).",
+                )
+                .default_value("thomas")
+                .hot(),
+                param(
+                    "align",
+                    one_of(&["auto", "fixed"]),
+                    "auto: re-pair chips when the other alignment has clearly fewer violations; fixed: pairs start at the first chip after a reset.",
+                )
+                .default_value("auto")
+                .hot(),
+            ],
+            true,
         ),
     ]
 }
 
-/// Registers this group's implemented blocks (none yet).
-pub fn register(_r: &mut Registry) {}
+/// Registers this group's blocks.
+pub fn register(r: &mut Registry) {
+    let planned = planned();
+    let mut add =
+        |name: &str, build: common::BuildFn| common::register_pinned(r, &planned, name, build);
+    add("clock_recovery", clock::build);
+    add("slicer", line::build_slicer);
+    add("diff_decode", line::build_diff);
+    add("nrzi", line::build_nrzi);
+    add("manchester", line::build_manchester);
+}

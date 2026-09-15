@@ -1447,7 +1447,8 @@ tasks:
   - id: T-086
     milestone: M1
     title: "M1 Blocks A: IQ/demod + symbol blocks to the block contract"
-    status: in-progress
+    status: done
+    commit: 691ef04
     deps: [T-085]
     parallel_group: M1A
     use_cases: [SIGNAL-062]
@@ -1460,7 +1461,8 @@ tasks:
   - id: T-087
     milestone: M1
     title: "M1 Blocks B: framing + error control blocks"
-    status: in-progress
+    status: done
+    commit: 40ecd1a
     deps: [T-085]
     parallel_group: M1B
     use_cases: [SIGNAL-062]
@@ -1473,7 +1475,8 @@ tasks:
   - id: T-088
     milestone: M1
     title: "M1 Recipe runtime: load/run/hot-edit recipes as chains; save/list; serve records"
-    status: in-progress
+    status: review
+    commit: 0a256ac
     deps: [T-085]
     parallel_group: M1R
     use_cases: [SIGNAL-062]
@@ -1486,7 +1489,8 @@ tasks:
   - id: T-089
     milestone: M1
     title: "M1 Declarative parser + inspector API"
-    status: in-progress
+    status: done
+    commit: dc453ce
     deps: [T-085]
     parallel_group: M1P
     use_cases: [SIGNAL-062]
@@ -1499,7 +1503,8 @@ tasks:
   - id: T-090
     milestone: M1
     title: "M1 Inspector UI (thin client): frame list, hex+ASCII, layer tree, linked selection"
-    status: todo
+    status: review
+    commit: 0358d24
     deps: [T-089]
     parallel_group: M1U
     use_cases: [SIGNAL-062]
@@ -1511,7 +1516,8 @@ tasks:
   - id: T-091
     milestone: M1
     title: "M1 Parser-authoring assist: sync/period hunt, entropy field boundaries, CRC/BCH search"
-    status: in-progress
+    status: review
+    commit: 85f813d
     deps: [T-085]
     parallel_group: M1S
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1645,13 +1651,42 @@ tasks:
   - id: T-102
     milestone: M0b
     title: "Steady WFM station track width overestimated (407.8 kHz vs 400 kHz wfm-rds cap) so the station itself never gets a chain"
-    status: in-progress
+    status: done
+    commit: be5934c
     deps: [T-101]
     parallel_group: T101
     use_cases: [SIGNAL-062, AWARE-053]
     found_by: "T-101 debugging 2026-09-15 (inventory_lifecycle synthetic FM station: track 332 kHz estimate, member-box union 407.8 kHz)"
     acceptance: "the station's own confirmed track reports a width consistent with its OBW (not the union of edge flicker boxes) and attaches the wfm-rds chain directly, not via an in-band fragment; blind; hk-detect + acceptance inventory_lifecycle + signal_062 pass; revisit T-101 HOST_SKIRT_FRACTION (0.5) once widths are right and add a test that a weak narrowband emitter one channel (200-300 kHz) off a strong WFM station keeps its own inventory entry"
     area: crates/hk-detect (track width / member box union), crates/hk-pipeline (chain attach)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-103
+    milestone: M0b
+    title: "readsb plugin chain loses the first frame(s) under load (plugin process startup races the stream start)"
+    status: done
+    commit: 071fb12
+    deps: []
+    parallel_group: T103
+    use_cases: [SIGNAL-001]
+    found_by: "full check 2026-09-15 at load ~24: acceptance signal_001_adsb_readsb_plugin_chain decoded 15/16, missed only the first squitter at t=0.0099 s; passed 3/3 on rerun; same family as the nextest signal_001_readsb/data_path flakes (B0.206, B0.219)"
+    acceptance: "plugin chain start is lossless: samples/records produced before the plugin process is ready are buffered (bounded) and delivered, or the chain waits for plugin readiness before attaching; add a test that injects a slow plugin startup (e.g. delayed stub plugin) and asserts the first frame is decoded; then remove the nextest retries added for signal_001_readsb and plugin_decodes_get_family_explanations"
+    area: crates/hk-plugins (host), crates/hk-pipeline (plugin chain attach), .config/nextest.toml
+    needs: none
+    model: opus
+    effort: medium
+  - id: T-104
+    milestone: M1
+    title: "Blocks A hardening (T-086 review follow-ups)"
+    status: in-progress
+    deps: [T-086, T-087]
+    parallel_group: M1A
+    use_cases: [SIGNAL-062]
+    found_by: "T-086 review 2026-09-15"
+    acceptance: "ppm_demod uses T-087 framing::length::FrameLength and iq::LengthFrom removed; clock_recovery output sizing bounded by the shortest loop period (clock.rs:464) incl. hot loop_bandwidth changes; restart paths (lowpass filter.rs:207, clock_recovery clock.rs:204) clear state without allocating (FirDecimator::clear); samples-per-symbol / tap-count caps on extreme params (symbol_rate_bd); NaN input does not poison running averages or pass the ppm preamble check; manchester mid-chunk realignment keeps the time map exact (line.rs:300); allocation-counting test over process() for all Blocks A; tests per item"
+    area: "crates/hk-blocks/src/blocks/{iq,symbol}/**, crates/hk-demod dsp (additive)"
     needs: none
     model: opus
     effort: medium

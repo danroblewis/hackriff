@@ -609,6 +609,76 @@ fn keepalive_prevents_a_false_wedge_during_an_idle_gap() {
     assert_eq!(stats.state, PluginState::Stopped);
 }
 
+/// T-103: a readsb whose Beast connection comes up late (over the old 2 s connect wait, as under
+/// heavy load) still gets the chain's first squitter stamped exactly. [`FAKE_READSB`] in
+/// `late_beast` mode connects after 3 s and "decodes" one DF17 at the first non-silence sample;
+/// the wrapper must hold real samples until the connection exists. Before the fix it forwarded
+/// them after 2 s, the frame never reached Beast, and the decode kept the fallback stamp (the
+/// newest record's last sample), outside the acceptance suite's 2 ms tolerance. Also checks the
+/// host's `finish`: every queued record is delivered and the pair exits cleanly. Does not need
+/// readsb installed.
+#[test]
+fn first_squitter_is_stamped_exactly_when_readsbs_beast_connection_is_slow() {
+    let _guard = ENV_MUTEX.lock().unwrap();
+    // SAFETY: serialised by ENV_MUTEX against every other test in this file.
+    unsafe {
+        std::env::set_var("HK_READSB", FAKE_READSB);
+        std::env::set_var("FAKE_READSB_MODE", "late_beast");
+        std::env::set_var("FAKE_READSB_CONNECT_DELAY_MS", "3000");
+    }
+    let a = anchor();
+    let sink = Arc::new(Mutex::new(Ingest::new(
+        Repository::open_in_memory().unwrap(),
+    )));
+    let mut inst = PluginInstance::spawn(
+        manifest(),
+        input(a),
+        PluginContext::default(),
+        Arc::clone(&sink),
+    )
+    .unwrap();
+    wait_running(&inst);
+    // Silence, then a record whose sample 100 is the squitter (the fake's first non-silence
+    // sample), then silence again.
+    let start = 5_000_000u64;
+    let mut next = push_all(&mut inst, &vec![0u8; 8 * CHUNK_SAMPLES * 2], start);
+    let mut marked = vec![0u8; CHUNK_SAMPLES * 2];
+    marked[2 * 100] = 0x40;
+    let squitter_index = next + 100;
+    next = push_all(&mut inst, &marked, next);
+    push_all(&mut inst, &vec![0u8; 8 * CHUNK_SAMPLES * 2], next);
+    let stats = inst.finish(Duration::from_secs(30));
+    // SAFETY: same as above.
+    unsafe {
+        std::env::remove_var("HK_READSB");
+        std::env::remove_var("FAKE_READSB_MODE");
+        std::env::remove_var("FAKE_READSB_CONNECT_DELAY_MS");
+    }
+    assert_eq!(
+        stats.records_dropped_full + stats.records_dropped_detached,
+        0
+    );
+    assert_eq!(
+        (stats.crashes, stats.restarts, stats.decodes),
+        (0, 0, 1),
+        "{stats:?}"
+    );
+    let sink = sink.lock().unwrap();
+    let decodes = sink
+        .repo()
+        .decodes_for_identity(&DecodedIdentity {
+            scheme: IdentityScheme::AdsbIcao,
+            value: "4840d6".into(),
+        })
+        .unwrap();
+    assert_eq!(decodes.len(), 1, "{stats:?}");
+    assert_eq!(
+        decodes[0].t,
+        a.time_of(squitter_index, RATE),
+        "the squitter keeps its Beast sample stamp (index {squitter_index}), not the fallback"
+    );
+}
+
 /// Inputs the manifest does not accept (wrong sample rate, wrong datatype) are refused before any
 /// process is spawned. Does not need readsb installed.
 #[test]
