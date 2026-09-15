@@ -3159,6 +3159,171 @@ tasks:
     model: sonnet
     effort: medium
     core_interface: false
+  - id: T-198
+    milestone: M3
+    title: "M3-DESIGN: ADR-0016 classification contracts (C15/C18/C38): Classification output with open-set unknown, taxonomy versioning, fusion with C17 priors, EmissionFeatures/Signature schema, ml-runtime interface (Mac-first), blind evaluation protocol; finalise M3 task graph"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M3D
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "ADR-0016 PROVISIONAL covering: Classification{family dist incl unknown, open-set score, provenance, taxonomy@version}; fusion P(c|x,f,l) with priors never vetoing evidence; EmissionFeatures + Signature + SignatureMatch schema (docs/07 additions); ml-runtime Prediction contract, shadow mode, model versioning, Mac-first provider (CoreML/ONNX/wgpu) behind a conformance suite, CUDA later; how M3 output feeds MAUTO search (docs/15); blind evaluation protocol with per-SNR conditions and fixtures/synthetic scenes; docs/07 + api.md deltas listed; T-199..T-207 deps/areas/models confirmed or revised in the ADR"
+    area: docs/adr/0016-*.md, docs/07, capability cards C15/C18/C38
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-199
+    milestone: M3
+    title: "C15 classical feature-tree modulation-family classifier (cumulants, instantaneous amplitude/phase/frequency stats, cyclic features) with open-set unknown and C17 prior fusion"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3A
+    use_cases: [SIGNAL-062]
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "families analog/OOK-ASK/FSK/PSK-QAM/OFDM/CSS/pulsed/noise-like/unknown on normalised snippets; blind tests on synthetic impairment sweeps and real fixtures (fm_100p8M, 915 MHz FSK, ADS-B, POCSAG) report accuracy per SNR with a-priori floors from ADR-0016; unknown returned for out-of-taxonomy inputs; replaces or wraps the current family rules without regressing M0/M1/M2 acceptance"
+    area: crates/hk-estimate or new hk-classify crate, crates/hk-pipeline integration
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-200
+    milestone: M3
+    title: "C15 likelihood verifier (ALRT/GLRT) within the post-sync candidate set"
+    status: todo
+    priority: normal
+    deps: [T-199]
+    parallel_group: M3A
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "verifier re-ranks the top classical candidates for synchronised signals; measured gain on confusable pairs (2FSK vs GFSK, BPSK vs QPSK) at stated SNRs; never promotes a candidate absent from the feature-tree output"
+    area: crates/hk-classify (or hk-estimate)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-201
+    milestone: M3
+    title: "C18 fingerprint schema + editable signature database + matching (partial matches with ranked candidates)"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3B
+    use_cases: [AWARE-053]
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "EmissionFeatures aggregated per track/cluster with uncertainty; Signature store (hk-model migration) seeded from recipe outputs; SignatureMatch full/partial/none with ranked candidates, never an identity from too few fields; API route + docs/api.md + contract tests; blind tests on fixtures"
+    area: crates/hk-model, crates/hk-context or hk-classify, crates/hk-api, docs/api.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-202
+    milestone: M3
+    title: "C18 incremental clustering of unknown emissions (the same thing I saw before) linked to inventory emitter identity"
+    status: todo
+    priority: normal
+    deps: [T-201]
+    parallel_group: M3B
+    use_cases: [AWARE-053]
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "incremental DBSCAN (or the ADR-0016 choice) on normalised features; repeated unknown bursts across a multi-day synthetic scene cluster to one id, distinct unknowns stay apart (a-priori purity/completeness floors); cluster id on inventory rows; survives restart"
+    area: crates/hk-context or hk-classify, crates/hk-model
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-203
+    milestone: M3
+    title: "C38 ml-runtime Mac-first: model host with load/unload, batching, shadow mode and model@version provenance behind a conformance suite"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3C
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "Mac provider (ADR-0016 choice: ONNX Runtime CoreML EP, Candle/Metal, or wgpu) plus CPU reference; conformance suite comparing providers on a fixed model; batching delay <=20 ms and batch <=32 defaults; inference only on CFAR-surviving detections; shadow mode records predictions without acting; CUDA deferred to the Jetson phase"
+    area: new crate hk-ml (or per ADR), crates/hk-pipeline hook
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-204
+    milestone: M3
+    title: "C15 per-family DL stage with open-set (energy OOD or OpenMax), trained on synthetic impairments, inference via T-203 in shadow mode first"
+    status: todo
+    priority: normal
+    deps: [T-199, T-203]
+    parallel_group: M3C
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "py training pipeline (impairment augmentation; orchestration only) exports a versioned model; Rust inference via hk-ml; shadow-mode comparison vs classical on fixtures reported per SNR; enabled per family only where it beats classical at a-priori margins; unknown handled without softmax"
+    area: py/ (training), crates/hk-ml, crates/hk-classify
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-205
+    milestone: M3
+    title: "Labelled-capture dataset path for fine-tuning: CRC-valid decoder labels and user labels become exportable training snippets with provenance"
+    status: todo
+    priority: normal
+    deps: [T-198]
+    parallel_group: M3B
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "decoder-validated (CRC/BCH pass) and user-labelled emissions export normalised IQ snippets + labels + provenance (SigMF annotations); no fixture data committed; tests on synthetic"
+    area: crates/hk-store, crates/hk-api, docs/api.md
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-206
+    milestone: M3
+    title: "M3 blind acceptance through the mock SDR: family top-k and unknown rate vs hidden truth, signature match and unknown clustering, per-SNR conditions (M3 exit gate)"
+    status: todo
+    priority: normal
+    deps: [T-199, T-201, T-202, T-204]
+    parallel_group: M3E
+    use_cases: [SIGNAL-062, AWARE-053]
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "acceptance_m3 suite: blind scenes with hidden truth (known families, out-of-taxonomy emitters, repeated unknowns); a-priori thresholds from ADR-0016; accuracy reported with conditions; separate just step if >60 s"
+    area: tests/e2e
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-207
+    milestone: M3
+    title: "MUI: classification distribution, unknown score, signature match and cluster id in the focus panel and inventory"
+    status: todo
+    priority: normal
+    deps: [T-199, T-201]
+    parallel_group: MUI-X3
+    use_cases: []
+    found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
+    acceptance: "thin client over the M3 API fields; unknown shown prominently; UI tests; bundle within budget"
+    area: ui/src/app/explore
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-208
+    milestone: MAUTO
+    title: "MAUTO-DESIGN (planning only): ADR-0015 decoder synthesis contracts - pipeline/objective representation, evidence-metric API, search strategy and budget, template format, region-analyze API (fills the T-190 stub), consumption of M3 Classification"
+    status: in-progress
+    priority: normal
+    deps: []
+    parallel_group: MAUTOD
+    use_cases: []
+    found_by: "user 2026-09-15: MAUTO after M3; ADR design may start now in parallel (planning only)"
+    acceptance: "ADR-0015 PROVISIONAL per docs/15 section 8 (renumbered: ADR-0014 is the IQ capture ring); defines the POST /api/analyze response/stream contract; how the M3 family distribution and C18 signatures seed and prune the search; per-signal compute budget; MAUTO task sketch for after M3; no code"
+    area: docs/adr/0015-*.md, docs/15 cross-refs
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
