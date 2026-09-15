@@ -488,3 +488,48 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-076 does:** a mock-SDR real-time looping test with the exact request, a bisect over 268fcd4..e95ec47, and a root-cause fix. The supervisor re-verifies live.
   - **Why the existing tests may have missed it:** they are unpaced, short, or request by emitter id.
 - **B0.166 T-072 merge verified** (core ring change): lint, 151 Rust test groups (0 failed), Python, UI and acceptance all green. The T-076 bisect covers the range including this merge.
+- **B0.167 User request (start of message truncated) → T-077.** Parallel test runner (nextest preferred) with serial groups for e2e and pipeline listen/refine/stream tests, CLAUDE.md build commands updated, and wall time reported against the 914 s sequential `cargo test` baseline. Launched on Sonnet (infra only; no overlap with T-071/T-075/T-076). Measurements are noisy while agents build, so load is recorded. The user was asked to resend the truncated start.
+- **B0.168 T-071 merged** (dfa57b7): unified per-run chain budget (16 chains / 8 listeners / 8 taps, CPU budget) with per-chain stats in /api/status, dedupe of neighbouring-chain ownership, and 3 concurrent WFM streams each carrying its own PI plus 2 isolated FSK bits streams through the mock SDR. The release build stays real-time with 3 listeners + 2 taps. T-076 was told to merge main (listen.rs admission changed). Full verification running.
+- **B0.169 User token-budget rules** (uncommitted user edit to prompts/model-selection.md, 21:48).
+  - **Waiting:** agents never wait in the foreground; builds and tests run in the background and resume on notification.
+  - **Testing:** agents run targeted tests only. The coordinator runs one full check per merge, and flake hunts use one background command with N runs.
+  - **Context:** lean; start a fresh agent rather than continue past ~300k tokens.
+  - **Models:** Opus at medium effort unless the work is real-time, novel DSP or hard debugging; Sonnet is the default off the real-time path.
+  - **Applied now:** T-075, T-076 and T-077 received the rules (T-077 aligns the runner and CLAUDE.md with them). Saved to coordinator memory; future briefs follow them.
+  - **Also:** T-071 merged; full verification running.
+- **B0.170 Supervisor correction on build caching.**
+  - **Finding:** sccache only hits with an identical target path, so it doesn't help new worktrees; it stays on since it is harmless.
+  - **What works:** seed each new worktree target with an APFS clone of main's target (`cp -c -R`, about 4 s, no extra disk). Only the 11 workspace crates then recompile; all dependencies are reused.
+  - **Actions:**
+    - T-077 adds `just seed-target <dir>` and the CLAUDE.md worktree-launch step.
+    - Every agent brief from now on starts with the seed step.
+    - Coordinator verification moves back to main's `target/` so it stays warm as the seed; agents no longer build there.
+    - Coordinator memory updated.
+- **B0.171 Supervisor retracted B0.170.** A cold hk-pipeline build (70 crates) takes 16 s uncached, so target seeding saves nothing: no seed-target recipe, no new launch step. T-077 stays on parallel nextest runs; the bottleneck is the 914 s sequential test run. Memory reverted. Coordinator verification stays on its isolated scratchpad target.
+- **B0.172 Disk near floor** (21 GiB at load ~73 while T-077 runs parallel tests). Freed ~3 GB of coordinator leftovers: old scratchpad build dir (1.6 GB), probe data dirs (1.3 GB), and 35 stale hk-* test temp dirs older than 1 h with no open files; now 24 GiB. Kept: in-use worktree targets, the verification target, main target/ (the supervisor demo may run from it), and another session's scratchpad. No launches until disk and agents free up. T-077 was resumed after stopping with no live background job.
+- **B0.173 T-075 short-burst detector done** (44f9130). Time-domain energy detector: 24/24 ADS-B squitters and 23/23 OOK bursts at 3–20 dB, start error ≤ 34 µs, 0 false alarms in 6 s, 82× real time at 20 Msps, SIGNAL-001 blind within 50 µs. Merge waits for the running T-071 verification; the coordinator full check follows (burst rows may shift exact detection counts in acceptance).
+- **B0.174 T-076 finding: no code regression in Listen.** The live request box 100.6–101.0 MHz covers the DC spike and a weak signal; the strong station in that capture/tuning is at 101.3 MHz. Both the old and new builds stay squelched on that box, and HEAD plays 101.3 MHz with squelch open at ~16 dB and refined centre within 1 kHz. The agent commits a real-time paced listen test (tests only). Asked the supervisor to check whether the UI shows the station at 100.8 MHz while inventory has 101.3 MHz, which would be a live UI axis/click bug to open as a new task.
+- **B0.175 Supervisor confirmed T-076:** the 100.8 MHz figure came from the fixture name and `--center-hz` tuning, not the UI. No UI axis/click bug and no new task; the request box was off-station. Plan unchanged: merge T-075 after the T-071 check, then T-076's tests-only commit and the T-077 timing.
+- **B0.176 T-076 done** (526dc08, test-only). Adds a real-time paced listen_live test (PCM, squelch open, SNR ≥ 15 dB, refined centre within 5 kHz) and blind_live_paced; the targeted suite passes on the merged tree. T-075 and T-076 merge together after the T-071 verification (114 Rust test groups green so far), then one full check.
+- **B0.177 T-071 merge verified** (lint, 152 Rust test groups, py, ui, acceptance green). T-075 (short-burst detector) and T-076 (real-time paced Listen test) merged; worktrees removed (T-076's uncommitted copied fixture data discarded with it). One full check running.
+- **B0.178 T-064 hop-set tracker scaling launched** (Opus high, real-time path; background runs, targeted tests per budget rules). Running: T-077 (waiting on its timing job, told to merge main and group listen_live/concurrent_demod as serial) and T-064. Full check of main after the T-075/T-076 merges is running.
+- **B0.179 User request (start of message truncated) → T-078/T-079/T-080.**
+  - **T-078** (inferred scope): inventory candidates vs confirmed, blind auto-confirm rule, promote/delete API. Visible tests: FM station auto-confirms; intermittent FSK stays a candidate until promoted; a deleted entry leaves the list. Launched now (Opus medium, core interface).
+  - **T-079** (Sonnet medium): docs/api.md reference, HTTP contract tests on the mock device, UI decision logic moved into backend endpoints, CLAUDE.md thin-client rule. Next slot, after T-077.
+  - **T-080** (Sonnet medium): left sidebar, first/last seen columns removed, Candidates/Confirmed with Promote/Delete. After T-078 and T-079, since both touch ui/src.
+  - The user was asked to resend the truncated start.
+- **B0.180 Full user brief received** (supervisor file brief-ui-separation-inventory.md, 22:20). Replaces the truncated version.
+  - **UI direction:** the user will rewrite the web UI later as a one-screen exploratory UI; no redesign now. The backend owns all signal logic (recognition, analysis, classification, demod, decoding), and the UI is a thin client over a documented API.
+  - **T-078 corrected via message to the running agent:**
+    - query param `state`;
+    - recurrence stats on candidates;
+    - delete keeps detections/history, and re-detection creates a new candidate (the earlier "not recreated" was wrong);
+    - docs/07 §2.11 update.
+  - **T-079:** no dependency; next free slot.
+  - **T-080:** depends on T-078 only.
+  - **Priority:** all three ahead of T-053/T-056/T-067.
+- **B0.181 T-075 + T-076 merge verified.** Lint, 154 Rust test groups (0 failed), Python, UI and acceptance all green; the new short-burst detection rows did not break any exact-count acceptance assertion. Running: T-064 (release bench), T-077 (serial-group timing), T-078 (inventory lifecycle). T-079 takes the next free slot.
+- **B0.182 User decision: GPU work is Mac-first.** T-026 (CUDA PFB) is now `deferred` to the Jetson phase: not blocked, not a gate for any milestone. T-056 stays the Mac GPU wiring task. CLAUDE.md gains a rule: new GPU work implements the Mac provider (wgpu/Metal or Accelerate) behind the conformance suite first, and CUDA ports come later on the Jetson. The M0 completion caveat about T-026 no longer applies.
+- **B0.183 T-064 profile finding.** The dense urban whole-pipeline replay is no longer tracker-bound: 1,047 of 1,060 samples are in the WFM/RDS chain's `ParamEstimator::estimate` → `ChannelFilter::apply` (hk-estimate), and the unpaced replay waits for that chain. Filed as T-081 (Opus high, real-time path), queued after T-078–T-080 and ahead of T-053/T-056/T-067. T-064 is finishing its targeted tests before committing.
+- **B0.184 T-064 merged** (b4db9e9). Hop-set membership is bounded and the raster refits only when the channel set changes; parity is exact. Detect bench at 20 Msps urban improved 1.5× → 2.2× RT (tracker share 65 % → 7 %). Whole-pipeline l32g30a1 improved 1.0 → 1.2× RT; l24g20a0 stays 0.35×, bound by the WFM/RDS chain ParamEstimator (T-081). T-079 launches in the freed slot; full check follows.
+- **B0.185 T-078 done** (a5a1854): inventory lifecycle candidate/confirmed/deleted with history, auto-confirm rule (CRC-valid decoded identity, or a trusted continuous track), recurrence stats, and state/promote/delete API. Mock-SDR tests: FM auto-confirms; FSK stays candidate until promoted; delete leaves the list; re-detection creates a new candidate. It merges after the running T-064 verification. **Follow-up T-082:** one entry per physical emitter (track- and decoder-based entries currently duplicate); ideally before T-080.

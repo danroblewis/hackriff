@@ -11,7 +11,7 @@ use hk_model::{
 use crate::detector::Detector;
 use crate::record::{CloseReason, Confirmation, DetectionRecord, DetectorEvent};
 
-use super::config::TrackerConfig;
+use super::config::{HopConfig, TrackerConfig};
 use super::events::{
     BoundaryKind, CloseCause, Distribution, HopSetSummary, SegmentBoundary, TrackEvent,
     TrackSummary,
@@ -65,6 +65,10 @@ pub struct TrackerStats {
     pub hop_sets_formed: u64,
     /// Hop links between bursts separated by silence (included in `hop_links`).
     pub bursty_hop_links: u64,
+    /// Hop-set raster fits run (T-064: formation, channel-set changes, merges, closing).
+    pub hop_raster_fits: u64,
+    /// Closed hop-set members dropped (T-064: superseded on their channel, or over the cap).
+    pub hop_members_pruned: u64,
     /// Track splits.
     pub splits: u64,
     /// Tentative tracks discarded without confirming (fragments).
@@ -319,6 +323,8 @@ struct HopMember {
     bursts: u64,
     period_s: Option<f64>,
     snr_db: f64,
+    /// End of the member track's latest burst, ns.
+    t_last: i64,
 }
 
 impl HopMember {
@@ -340,6 +346,73 @@ struct HopSet {
     t_last: i64,
     formed: bool,
     dirty: bool,
+    /// Raster of the latest fit (T-064: reused until the channel set changes).
+    raster: Option<f64>,
+    /// The qualifying members `(track, centre)` at the latest fit, in member order.
+    fit: Vec<(TrackId, f64)>,
+    /// Stream time of the latest fit, ns (`None`: never fitted).
+    fit_at: Option<i64>,
+    /// The channel set changed but the refit waits for `raster_refit_s`.
+    raster_stale: bool,
+    /// Detections of qualifying members dropped by pruning (still part of the set's count).
+    retired_detections: u64,
+}
+
+impl HopSet {
+    fn new(t0: i64, t1: i64) -> Self {
+        Self {
+            id: TrackId::new(),
+            members: Vec::with_capacity(16),
+            links: 0,
+            contiguous: 0,
+            th_sum_ns: 0.0,
+            t_first: t0,
+            t_last: t1,
+            formed: false,
+            dirty: false,
+            raster: None,
+            fit: Vec::new(),
+            fit_at: None,
+            raster_stale: false,
+            retired_detections: 0,
+        }
+    }
+
+    /// Drops closed members (T-064): those superseded on `m`'s channel by `m` (a qualifying
+    /// member with a later last burst) whose last burst is older than `member_retention_s`, then
+    /// the oldest closed members beyond `max_members`. Returns how many were dropped.
+    fn prune(&mut self, m: &HopMember, hc: &HopConfig, now: i64) -> u64 {
+        let before = self.members.len();
+        let mut retired = 0;
+        if hc.member_retention_s.is_finite() && m.qualifies(hc) {
+            let retention = (hc.member_retention_s * NS) as i64;
+            self.members.retain(|x| {
+                let drop = !x.live
+                    && x.track != m.track
+                    && x.t_last < m.t_last
+                    && now - x.t_last > retention
+                    && (x.fc - m.fc).abs() < 0.5 * (x.bw + m.bw);
+                if drop && x.qualifies(hc) {
+                    retired += x.detections;
+                }
+                !drop
+            });
+        }
+        while self.members.len() > hc.max_members {
+            let Some(k) = (0..self.members.len())
+                .filter(|&k| !self.members[k].live)
+                .min_by_key(|&k| self.members[k].t_last)
+            else {
+                break;
+            };
+            let x = self.members.remove(k);
+            if x.qualifies(hc) {
+                retired += x.detections;
+            }
+        }
+        self.retired_detections += retired;
+        (before - self.members.len()) as u64
+    }
 }
 
 /// Online burst tracker (C10). Feed it the detector's events in order and call
@@ -455,7 +528,11 @@ impl Tracker {
                 .hop_sets
                 .iter()
                 .flatten()
-                .map(|h| size_of::<HopSet>() + h.members.capacity() * size_of::<HopMember>())
+                .map(|h| {
+                    size_of::<HopSet>()
+                        + h.members.capacity() * size_of::<HopMember>()
+                        + h.fit.capacity() * size_of::<(TrackId, f64)>()
+                })
                 .sum::<usize>()
     }
 
@@ -658,11 +735,30 @@ impl Tracker {
                 self.slots[i].dirty = false;
             }
         }
+        // T-064: a changed set's raster is refitted only when its channel set changed since the
+        // latest fit, at most once per `raster_refit_s` (a deferred refit is picked up by a later
+        // drain even without new links).
+        let refit_ns = (self.cfg.hop.raster_refit_s.max(0.0) * NS) as i64;
         for k in 0..self.hop_sets.len() {
-            let dirty = self.hop_sets[k]
-                .as_ref()
-                .is_some_and(|h| h.formed && h.dirty);
-            if dirty {
+            let Some(h) = self.hop_sets[k].as_ref() else {
+                continue;
+            };
+            if !h.formed || !(h.dirty || h.raster_stale) {
+                continue;
+            }
+            let mut push = h.dirty;
+            if self.hop_fit_changed(h) {
+                if h.fit_at.is_none_or(|t| self.now - t >= refit_ns) {
+                    let old = h.raster.map(f64::to_bits);
+                    self.refit_hop_raster(k);
+                    push |= self.hop_sets[k].as_ref().unwrap().raster.map(f64::to_bits) != old;
+                } else {
+                    self.hop_sets[k].as_mut().unwrap().raster_stale = true;
+                }
+            } else {
+                self.hop_sets[k].as_mut().unwrap().raster_stale = false;
+            }
+            if push {
                 let t = self.hop_track(self.hop_sets[k].as_ref().unwrap(), false);
                 batch.upserts.push(t);
                 self.hop_sets[k].as_mut().unwrap().dirty = false;
@@ -1430,11 +1526,13 @@ impl Tracker {
             } else {
                 0.0
             },
+            t_last: s.t_last_end,
         }
     }
 
     fn refresh_member(&mut self, set: usize, slot: usize) {
         let m = self.hop_member(slot);
+        let (hc, now) = (self.cfg.hop, self.now);
         if let Some(h) = self.hop_sets[set].as_mut() {
             if let Some(x) = h
                 .members
@@ -1445,7 +1543,49 @@ impl Tracker {
             } else {
                 h.members.push(m);
             }
+            self.stats.hop_members_pruned += h.prune(&m, &hc, now);
         }
+    }
+
+    /// Whether set `h`'s qualifying channels differ from its latest fit (T-064): a member joined,
+    /// left or changed qualification, or a centre moved by more than `raster_drift_bins`. Always
+    /// true with `raster_drift_bins` 0 (refit on every drain, as before T-064).
+    fn hop_fit_changed(&self, h: &HopSet) -> bool {
+        let hc = &self.cfg.hop;
+        if h.fit_at.is_none() || hc.raster_drift_bins <= 0.0 {
+            return true;
+        }
+        let mut fit = h.fit.iter();
+        for m in h.members.iter().filter(|m| m.qualifies(hc)) {
+            match fit.next() {
+                Some(&(track, fc))
+                    if track == m.track && (m.fc - fc).abs() <= hc.raster_drift_bins * m.bin_hz => {
+                }
+                _ => return true,
+            }
+        }
+        fit.next().is_some()
+    }
+
+    /// Fits set `k`'s raster now and records the channel set it was fitted on.
+    fn refit_hop_raster(&mut self, k: usize) {
+        let Some(h) = self.hop_sets[k].as_ref() else {
+            return;
+        };
+        let raster = self.hop_raster(h);
+        self.stats.hop_raster_fits += 1;
+        let (hc, now) = (self.cfg.hop, self.now);
+        let h = self.hop_sets[k].as_mut().unwrap();
+        h.raster = raster;
+        h.fit_at = Some(now);
+        h.raster_stale = false;
+        h.fit.clear();
+        h.fit.extend(
+            h.members
+                .iter()
+                .filter(|m| m.qualifies(&hc))
+                .map(|m| (m.track, m.fc)),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1468,17 +1608,7 @@ impl Tracker {
         self.maybe_confirm(b, out);
         let set = match (self.slots[a].hop_set, self.slots[b].hop_set) {
             (None, None) => {
-                let set = HopSet {
-                    id: TrackId::new(),
-                    members: Vec::with_capacity(16),
-                    links: 0,
-                    contiguous: 0,
-                    th_sum_ns: 0.0,
-                    t_first: t0,
-                    t_last: t1,
-                    formed: false,
-                    dirty: false,
-                };
+                let set = HopSet::new(t0, t1);
                 let k = match self.hop_free.pop() {
                     Some(k) => {
                         self.hop_sets[k] = Some(set);
@@ -1562,6 +1692,7 @@ impl Tracker {
             for m in members {
                 self.slots[m].dirty = true;
             }
+            self.refit_hop_raster(set);
             let summary = self.hop_summary(self.hop_sets[set].as_ref().unwrap());
             out(TrackEvent::HopSetFormed(summary));
         }
@@ -1577,7 +1708,7 @@ impl Tracker {
         );
         let keep_x = hx.formed || (!hy.formed && hx.members.len() >= hy.members.len());
         let (keep, drop) = if keep_x { (x, y) } else { (y, x) };
-        let other = self.hop_sets[drop].take().unwrap();
+        let mut other = self.hop_sets[drop].take().unwrap();
         for m in &other.members {
             if self.slots[m.slot].live && self.slots[m.slot].id == m.track {
                 self.slots[m.slot].hop_set = Some(keep);
@@ -1593,9 +1724,13 @@ impl Tracker {
             h.th_sum_ns += other.th_sum_ns;
             h.t_first = h.t_first.min(other.t_first);
             h.t_last = h.t_last.max(other.t_last);
+            h.retired_detections += other.retired_detections;
             h.dirty = true;
         }
         if other_formed {
+            self.refit_hop_raster(keep);
+            other.raster = self.hop_raster(&other);
+            self.stats.hop_raster_fits += 1;
             let into = self.hop_sets[keep].as_ref().unwrap();
             let into_id = into.id;
             let target = self.hop_track(into, false);
@@ -1626,7 +1761,7 @@ impl Tracker {
         let bin = qual.iter().map(|m| m.bin_hz).fold(0.0, f64::max);
         let bw = qual.iter().map(|m| m.bw).sum::<f64>() / n;
         let dwell = qual.iter().map(|m| m.dwell_s).sum::<f64>() / n;
-        let detections = qual.iter().map(|m| m.detections).sum();
+        let detections = qual.iter().map(|m| m.detections).sum::<u64>() + h.retired_detections;
         (
             qual.iter().map(|m| m.fc).collect(),
             qual.iter().map(|m| m.track).collect(),
@@ -1637,7 +1772,9 @@ impl Tracker {
         )
     }
 
-    /// Raster of the qualifying members' centres, robust to noisy centre estimates (T-035).
+    /// Raster of the qualifying members' centres, robust to noisy centre estimates (T-035). The
+    /// fit costs `O(channels²)` channel fits: summaries and rows read the cached `HopSet::raster`
+    /// instead, refitted by [`Tracker::refit_hop_raster`] (T-064).
     fn hop_raster(&self, h: &HopSet) -> Option<f64> {
         let qual = || h.members.iter().filter(|m| m.qualifies(&self.cfg.hop));
         let bin = qual().map(|m| m.bin_hz).fold(0.0, f64::max);
@@ -1656,7 +1793,7 @@ impl Tracker {
         let (channels, members, _, _, _, dwell) = self.hop_channels(h);
         HopSetSummary {
             id: h.id,
-            raster_hz: self.hop_raster(h),
+            raster_hz: h.raster,
             channels_hz: channels,
             members,
             hop_rate_hz: (h.links > 0 && h.th_sum_ns > 0.0)
@@ -1694,7 +1831,7 @@ impl Tracker {
             timing: TimingFeatures {
                 hop_rate_hz: (h.links > 0 && h.th_sum_ns > 0.0)
                     .then(|| 1.0 / (h.th_sum_ns / h.links as f64 / NS)),
-                hop_raster_hz: self.hop_raster(h),
+                hop_raster_hz: h.raster,
                 hop_set_hz: channels,
                 co_occurring: members,
                 ..TimingFeatures::default()
@@ -2009,8 +2146,11 @@ impl Tracker {
                 .as_ref()
                 .is_none_or(|h| h.members.iter().all(|m| !m.live));
             if done {
-                if let Some(h) = self.hop_sets[set].take() {
+                if let Some(mut h) = self.hop_sets[set].take() {
                     if h.formed {
+                        // Closing always refits: the closed row and event are exact.
+                        h.raster = self.hop_raster(&h);
+                        self.stats.hop_raster_fits += 1;
                         self.staged.push(self.hop_track(&h, true));
                         out(TrackEvent::HopSetClosed(self.hop_summary(&h)));
                     }

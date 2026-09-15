@@ -33,8 +33,8 @@ use std::path::Path;
 
 use hk_e2e::{Fixture, SynthRequest};
 use hk_model::{
-    ContentClass, CrcStatus, Decode, DecodeId, DecodedIdentity, IdentityScheme, InventoryIdentity,
-    InventoryQuery, Timestamp,
+    ContentClass, CrcStatus, Decode, DecodeId, DecodedIdentity, FreqRange, IdentityScheme,
+    InventoryIdentity, InventoryQuery, Region, TimeRange, Timestamp,
 };
 use hk_pipeline::builtin_chains;
 use hk_plugins::Ingest;
@@ -253,10 +253,56 @@ fn signal_001_adsb_pipeline_and_plugin_output_plumbing() {
     assert_eq!(s.source_class, "unrestricted");
     assert_eq!(s.always_on_lost_samples, 0);
     assert!(s.counter("/readers/detect/frames") > 0);
-    // The private truth list, matched blind (T-047) but reported only: the detect reader's
-    // frames (~2 ms) cannot resolve a 120 µs squitter, and this run has no decoder chain. The
-    // readsb test proves every squitter through the system's decodes.
+    // The private truth list, matched blind (T-047): the detect reader's STFT frames (~2 ms)
+    // cannot resolve a 120 µs squitter, so the short-burst time-domain path (T-075) must find
+    // every one, with µs start timing and a centre inside the squitter's band. Untracked rows
+    // (no emitter), so the explanation half is the readsb test's.
     truth_report(SIGNAL_001, &dir.0, &fx, 0.0);
+    let bursts: Vec<_> = repo(&dir.0)
+        .detections_in_region(&Region::new(
+            FreqRange::new(0.0, 7.0e9),
+            TimeRange::new(
+                Timestamp::from_unix_nanos(0),
+                Timestamp::from_unix_nanos(i64::MAX),
+            ),
+        ))
+        .unwrap()
+        .into_iter()
+        // `hk_detect::BURST_DETECTOR` (hk-e2e does not depend on hk-detect).
+        .filter(|d| d.detector_version.starts_with("hk-detect/burst@"))
+        .collect();
+    let mut worst_us = 0.0f64;
+    for m in &msgs {
+        let t_ns = t0.as_unix_nanos() as f64 + m.t_start_s * 1e9;
+        let hit = bursts
+            .iter()
+            .filter(|d| d.f_center_hz >= m.f_lo_hz && d.f_center_hz <= m.f_hi_hz)
+            .map(|d| (d.time.start.as_unix_nanos() as f64 - t_ns).abs() / 1e3)
+            .min_by(f64::total_cmp);
+        let err_us = hit.unwrap_or_else(|| {
+            panic!(
+                "[{SIGNAL_001}] squitter at {:.6} s not detected blind by the burst path",
+                m.t_start_s
+            )
+        });
+        assert!(
+            err_us <= 50.0,
+            "[{SIGNAL_001}] squitter at {:.6} s: burst start {err_us:.1} µs off",
+            m.t_start_s
+        );
+        worst_us = worst_us.max(err_us);
+    }
+    eprintln!(
+        "[{SIGNAL_001}] burst path: {} rows, all {} squitters detected blind, worst start error \
+         {worst_us:.1} µs",
+        bursts.len(),
+        msgs.len()
+    );
+    assert_eq!(
+        bursts.len(),
+        msgs.len(),
+        "[{SIGNAL_001}] one burst row per squitter"
+    );
 
     // Plugin-output half of the chain: Ingest + republish, as chains::plugin wires it.
     let class = hk_stream::gate::clamp(ContentClass::Unrestricted, ContentClass::Unrestricted);

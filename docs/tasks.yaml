@@ -394,7 +394,8 @@ tasks:
     dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
   - id: T-026
     title: GPU polyphase channelizer (CUDA PfbBackend) on the Jetson
-    status: blocked
+    status: deferred
+    deferred: "user 2026-09-14: GPU work is Mac-first; CUDA PFB deferred to the Jetson phase; not blocked and not a gate for any milestone"
     deps: [T-008]
     gated_on: S2
     parallel_group: D
@@ -878,6 +879,7 @@ tasks:
     milestone: M0b
     title: HIL - run the device-interface acceptance suite against the real HackRF (receive-only, manual/nightly)
     status: todo
+    priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     hold: "unblocked (T-047 merged); needs the HackRF (stop demo on :8899) and a slot"
     deps: [T-047, T-049, T-037]
     parallel_group: O
@@ -926,6 +928,8 @@ tasks:
     milestone: M0b
     title: Wire compute providers into the pipeline (ComputeOptions in pipeline settings; STFT/PFB via hk_dsp::compute)
     status: todo
+    scope_note: "user 2026-09-14: T-056 stays the Mac GPU wiring task (wgpu/Metal or Accelerate providers into the pipeline behind the conformance suite)"
+    priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-041, T-037]
     parallel_group: J
     use_cases: [SPACE-050, AWARE-042]
@@ -1065,7 +1069,9 @@ tasks:
   - id: T-064
     milestone: M0b
     title: Hop-set tracker scaling (prune/dedupe closed members; recompute raster only when the channel set changes)
-    status: todo
+    status: done
+    commit: "b4db9e9 (merged; full check running)"
+    result: "closed hop-set members pruned once a newer member covers the channel and last burst > 10 s old; >256 members prunes oldest closed; pruned detections still counted. Raster refit only when qualifying channels change (join/leave/qualify flip/centre drift > 0.75 bin), at most once per 1 s stream time, always on form/merge/close; HopConfig::without_scaling_bounds() restores old behaviour; documented in track/mod.rs. Tolerance: formed/closed events and closed rows exact; an open set row may carry a raster up to 1 s old. Parity (raster 0.0 Hz, channels, hop rate, hops, members, dwell) on synthetic hoppers, 915 fixture, both urban captures. 300 s hopper: 450 tracks, peak 24 members, 426 pruned, 149 fits. Whole-pipeline replay (old/new alternating, load 17-19): l32g30a1 0.95-1.01 -> 1.14-1.24 RTF (1.23 in 3/4); l24g20a0 unchanged 0.34-0.35 - bottleneck is the WFM/RDS chain ParamEstimator::estimate -> ChannelFilter::apply (T-081). Detect bench 20 Msps urban (load ~32) 1.47-1.54 -> 2.09-2.36; tracker share 62-67 % -> 7 %; raster fits ~1000 -> 5-11. hk-detect all tests, aware_036/aware_042 acceptance, clippy, rustfmt pass."
     deps: [T-058]
     parallel_group: S
     use_cases: [AWARE-036, AWARE-042]
@@ -1075,7 +1081,6 @@ tasks:
     model: opus
     effort: high
     core_interface: true
-    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-065
     milestone: M0b
     title: Analog mode selector quality (pure carrier read as AM, 60 % AM tone read as unknown)
@@ -1114,6 +1119,7 @@ tasks:
     milestone: M0b
     title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
     status: todo
+    priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-051, T-062]
     parallel_group: P
     use_cases: [AWARE-042]
@@ -1179,7 +1185,11 @@ tasks:
   - id: T-071
     milestone: M0b
     title: Concurrent multi-signal demodulation (several audio and bits streams at once from one capture)
-    status: in-progress
+    status: done
+    commit: "dfa57b7 (merged fcbd313; verified: lint, 152 Rust test groups, py, ui, acceptance green)"
+    result: "chains/budget.rs: one per-run admission for Listen chains and bits/symbols taps (defaults 16 chains, 8 listeners, 8 taps, CPU budget; tap 0.01 cores); output recordings count via openers; refusal 503 busy naming the limit; /api/status budget + per-chain chain_stats (thread CPU, latency, backlog, lost samples, records, per-stream drops), old listen.budget/taps.max_taps kept. Dedupe: nearer-channel analog chain owns a shared refined emission (chains.duplicate_emission; e2e shows one writer, preemption unit-tested). Release 30 s real time 2.4 Msps: 3 WFM listeners + 2 FSK taps kept up, ~0.05 cores/listener, max latency 1.6-8.4 ms, 0 skipped/lost (load 21-26). Mock-SDR tests: fm_100p8M + 2 synthetic RDS stations (100.3/100.7 MHz) found blind -> 3 streams with own PI, cross-correlation <= 0.007 (0.990 duplicate listener); closing one stream leaves others contiguous; over-budget listen and tap refused without affecting running streams; two FSK sensors -> two bits streams 8/8 each. New tests/e2e/tests/concurrent_demod.rs."
+    followups:
+      - "fm_100p8M has only one strong station; capture a multi-station FM fixture for real concurrent-demod evidence (HackRF, T-053 window)"
     deps: [T-043, T-060, T-070]
     parallel_group: U
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1243,7 +1253,12 @@ tasks:
   - id: T-075
     milestone: M0b
     title: Short-burst time-domain detector (ADS-B squitters, OOK bursts below STFT resolution)
-    status: in-progress
+    status: done
+    commit: "44f9130 (merged d8515ba; verified: lint, 154 Rust test groups, py, ui, acceptance green - burst rows did not break exact-count asserts)"
+    result: "crates/hk-detect/src/burst.rs fed every chunk from detect.rs; bursts stored as untracked detections. 8 us power blocks, 32 us sliding window vs median noise over ~66 ms of windows, threshold from 0.01/s false-alarm target, 300 us quiet ends a burst, max 5 ms (less if STFT would see it), 500 rows/s cap, short FFT coarse centre. SNR 3/6/10/20 dB: 24/24 ADS-B squitters, 23/23 OOK bursts; start error mean 2-11 us, worst 34 us (ADS-B 3 dB); centre <= 1.2 kHz; end times up to 292 us late after noise spikes. 0 false alarms in 6 s noise (0.1/s target gave ~1 per 10 s -> default 0.01/s). 8/30 ms tone bursts and a steady carrier: no burst rows, STFT still detects, no overlap. One core: 212x RT @2.4 Msps, 139x @10, 82x @20, no per-sample allocation. SIGNAL-001 requires all 16 squitters blind within 50 us, one row each (worst 7.2 us), limit note removed. Agent ran targeted tests only (burst 4/4, SIGNAL-001 2/2, lint)."
+    followups:
+      - "burst rows add to detection counts and the detections counter - acceptance tests asserting exact counts may shift; add separate burst counters in stats.rs"
+      - "burst end-time accuracy (up to 292 us late after a noise spike) - consider a hysteresis/energy-tail end rule"
     deps: [T-072]
     parallel_group: S
     use_cases: [SIGNAL-001, AWARE-036]
@@ -1258,7 +1273,9 @@ tasks:
   - id: T-076
     milestone: M0b
     title: "Regression: Listen sends no audio on live HackRF (squelch never opens, refined centre ~36 kHz off)"
-    status: in-progress
+    status: done
+    commit: "526dc08 (merged c668c68; verified with T-075: all green)"
+    tests: "tests/e2e/tests/listen_live.rs real-time paced: PCM records, squelch open, SNR >= 15 dB, refined centre within 5 kHz (HK_T076_CASE=exact runs the off-station request as a diagnostic); blind.rs blind_live_paced; merged tree: listen_live, refine (2), acceptance listen (2), listen_retune (3), listen_lifecycle (1), listen unit (6), hk-demod pass"
     deps: [T-070, T-073, T-066]
     parallel_group: U
     use_cases: [SIGNAL-062]
@@ -1271,6 +1288,96 @@ tasks:
     effort: high
     core_interface: true
     priority: "ahead of queued work (user)"
+    finding: "NO code regression. Live server tuning matches fm_100p8M (centre 100.8 MHz, 2.4 Msps, LNA 32/VGA 30/amp); the strong station is at 101.3 MHz. The requested box 100.6-101.0 MHz covers the HackRF DC spike plus a weak ~2 dB signal, so squelch correctly stays closed (mock real-time: SNR ~2.3 dB, -29 dBFS, 0-5 frames at BOTH 268fcd4 and e95ec47 - nothing to bisect). At HEAD, 400 kHz selection / tight 150 kHz box / emitter around 101.3 MHz stream audio for 20 s past the 15 s re-refinement: 1000/1000 PCM records, squelch open ~16 dB SNR, refined centre within 1 kHz. Old tests ran unpaced and checked headers/status only. Unexplained: live refined centre 100.8365 MHz. Supervisor confirmed: the 100.8 MHz figure came from the fixture name and --center-hz tuning, not the UI; no UI axis/click bug, no new task. Deliverable: test-only - tests/e2e/tests/listen_live.rs (real-time paced) + blind_live_paced option."
+  - id: T-077
+    milestone: M0b
+    title: Parallel test runner with serial groups for heavy suites (flake-free), faster than the 914 s sequential baseline
+    status: in-progress
+    deps: []
+    parallel_group: V
+    use_cases: []
+    requested_by: user 2026-09-14 (start of message truncated; scope inferred from visible part)
+    acceptance: "parallel runner (cargo-nextest preferred, pinned) with serial/limited groups for tests/e2e, hk-pipeline listen/refine/stream tests, hk-api/hk-cli server tests and acceptance; doctests still run; just test-seq fallback; CI updated; CLAUDE.md Build/test/run updated; wall time vs 914 s sequential cargo test baseline reported with load; heavy groups 5x flake check clean (retries only for documented timing-sensitive tests, reported)"
+    scope_note: "supervisor 2026-09-14 seed-target/APFS-clone addition RETRACTED (cold hk-pipeline build 16 s; compile is not the bottleneck) - T-077 stays focused on parallel nextest runs vs the 914 s sequential baseline"
+    area: .config/nextest.toml, justfile, .github/workflows/ci.yml, CLAUDE.md (Build/test/run)
+    needs: none
+    model: sonnet
+    effort: medium
+  - id: T-078
+    milestone: M0b
+    title: Potential vs confirmed signal inventory (candidate/confirmed/deleted, auto-confirm, recurrence stats, promote/delete API)
+    status: done
+    commit: "a5a1854 (merge after the T-064 verification run)"
+    result: "lifecycle_state candidate/confirmed/deleted with append-only history (new/previous state, auto|user, actor = rule id hk-pipeline/confirm@1 or token fingerprint, reason, time); never back to candidate; only users delete. Auto-confirm (ConfirmPolicy defaults): decoded transmitter identity from >= 1 CRC-valid decode (blind other:hk-framing signature excluded), or one closed track >= 2 s on air, duty >= 0.8, <= 50 % suspect, >= 1 trust-confirmed detection. Delete hides the entry but keeps row/detections/tracks/links/history (visible with state=deleted); clustering ignores deleted entries so re-detection creates a new candidate; a held decoded identity moves to the new entry; no undelete. API: GET /api/inventory?state=candidate,confirmed,deleted (default candidate+confirmed) with state, lifecycle and recurrence (occurrences, appearances, span, on-air, duty, last 8 appearances); GET /api/inventory/{id}; POST /api/inventory/{id}/promote and DELETE /api/inventory/{id} with optional {reason}, Bearer, audited inventory_promote/inventory_delete, {error, code} 400/404/503. Old databases gain the column/table on open. Mock-SDR e2e: 101.3 MHz FM auto-confirms (continuous track + RDS PI decode); FSK sensor (duty ~0.22) stays candidate, promote -> confirmed, delete leaves list, later capture -> new candidate. hk-model 5, hk-api 3, confirm-rule unit test."
+    followups:
+      - "FM station and FSK sensor each appear as two inventory entries (track-based and decoder-based) - existing clustering behaviour -> T-082"
+    deps: [T-039, T-052]
+    parallel_group: W
+    use_cases: [AWARE-053, AWARE-042]
+    requested_by: "user via supervisor 2026-09-14 22:20 (full brief: /private/tmp/claude-501/-Users-daniellewis-hackriff/573a0024-6d5e-4600-b164-feaca9d406c6/scratchpad/brief-ui-separation-inventory.md)"
+    acceptance: "emitters carry inventory state candidate/confirmed/deleted; auto-confirm strong unambiguous signals (e.g. trust-confirmed and continuous, or valid decode/identity); recurring intermittent signals stay candidates until user promotes, with recurrence stats (occurrences, duty cycle, recent appearances); POST /api/inventory/{id}/promote, DELETE /api/inventory/{id}, GET /api/inventory?state=candidate|confirmed (auth, audit, error pattern); delete removes the inventory entry but keeps raw detections/history, re-detection later creates a new candidate; docs/07 2.11 updated (user delete now allowed); mock-SDR tests: 101.3 MHz FM station auto-confirms, intermittent FSK emitter stays candidate until promoted, deleted entry leaves the list, re-detection creates a new candidate"
+    area: crates/hk-model (inventory lifecycle, schema in place), crates/hk-pipeline/src/inventory.rs, crates/hk-api (inventory endpoints), docs/07
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-079
+    milestone: M0b
+    title: API reference docs/api.md + HTTP contract tests on the mock device; move UI decision logic into backend; CLAUDE.md thin-client rule
+    status: in-progress
+    deps: []
+    parallel_group: W
+    use_cases: [AWARE-042]
+    requested_by: "user via supervisor 2026-09-14 22:20 (full brief)"
+    acceptance: "docs/api.md documents every /api and /ws route (auth, request/response JSON, errors), linked with docs/stream-contract.md; HTTP-level API contract tests against a real hk serve on the mock device so a rewritten UI can rely on them; ui/src audited and decision logic moved into backend endpoints (listed); CLAUDE.md rule: UI is a thin client over docs/api.md, all signal logic lives in the backend"
+    area: docs/api.md, crates/hk-api tests (+ endpoints for moved logic), crates/hk-cli tests, ui/src (logic removal), CLAUDE.md
+    needs: none
+    model: sonnet
+    effort: medium
+  - id: T-080
+    milestone: M0b
+    title: "Small UI tweaks only, no redesign: Selections + Signal Inventory into a left sidebar, remove first/last seen columns, inventory split Candidates/Confirmed with Promote and Delete"
+    status: todo
+    deps: [T-078]
+    parallel_group: N
+    use_cases: [AWARE-042]
+    requested_by: "user via supervisor 2026-09-14 22:20 (full brief)"
+    acceptance: "Selections and Signal Inventory panels move to a left sidebar; first/last seen columns removed; inventory shows Candidates and Confirmed lists with Promote and Delete buttons calling the T-078 endpoints; small tweaks only, no redesign; UI tests; works at phone width"
+    area: ui/
+    needs: none
+    model: sonnet
+    effort: medium
+    hold: "after T-078 (endpoints) and T-079 (ui/src logic audit, to avoid ui conflicts)"
+  - id: T-081
+    milestone: M0b
+    title: "Chain parameter estimation cost: ParamEstimator::estimate -> ChannelFilter::apply dominates the WFM/RDS chain (whole-pipeline bottleneck)"
+    status: todo
+    deps: [T-064]
+    parallel_group: S
+    use_cases: [SIGNAL-062, AWARE-042]
+    found_by: "T-064 profile 2026-09-14 (urban l24g20a0 whole-pipeline replay: 1,047/1,060 samples in hk-chain-wfm-rds-32 ParamEstimator::estimate -> ChannelFilter::apply; unpaced replay waits for the chain)"
+    acceptance: "profile-guided fix of ChannelFilter::apply / estimate cadence (e.g. decimate before filtering, reuse filter state, SIMD/compute provider, estimate less often once parameters are stable per the output-driven tuning principle); estimates unchanged within documented tolerance; whole-pipeline dense urban 20 Msps replay RTF >= 1.2 at moderate load reported with load average; targeted tests (hk-estimate, WFM chain, SIGNAL-062)"
+    area: crates/hk-estimate (params, ChannelFilter), crates/hk-pipeline/src/chains/analog.rs
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    hold: "queued after T-078/T-079/T-080 (user UI/inventory priority), ahead of T-053/T-056/T-067"
+  - id: T-082
+    milestone: M0b
+    title: One inventory entry per physical emitter (merge track-based and decoder-based entries)
+    status: todo
+    deps: [T-078]
+    parallel_group: W
+    use_cases: [AWARE-053, SIGNAL-062]
+    found_by: "T-078 agent 2026-09-14: FM station and FSK sensor each appear twice (track entry + decoder entry)"
+    acceptance: "entity resolution links a decoder-based emitter to the track-based emitter of the same emission (overlapping frequency/extent and time, refined tuning), so the inventory shows one entry per physical emitter with both track and decode evidence; lifecycle state/history carried correctly on merge; mock-SDR tests: FM station and FSK sensor each appear once; distinct nearby emitters stay separate"
+    area: crates/hk-model (cluster/entity resolution), crates/hk-pipeline/src/inventory.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "after T-078 merges; ideally before T-080 so the UI shows single rows (or T-080 proceeds and picks it up later)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
