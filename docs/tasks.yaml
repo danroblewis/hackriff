@@ -2283,7 +2283,8 @@ tasks:
   - id: T-145
     milestone: M2
     title: "Build/test speed: mock SDR Pacing::RealTime -> Unpaced except pacing/backpressure/real-time listen tests; lld linker if faster; cranelift dev/test experiment; measure nextest wall before/after"
-    status: in-progress
+    status: done
+    result: "no changes kept: pacing (slow tests already Unpaced; 2 switchable tests not faster), lld (1.51 vs 1.44 s leaf, ~30 s root either way), cranelift (compile 20 vs 31 s but nextest 1367 vs 1293 s with 3 failures, nightly, no sccache) all dropped; real lever = CPU-bound debug code in hot crates (opt-level decision to user)"
     deps: []
     parallel_group: M2E
     use_cases: []
@@ -2297,7 +2298,7 @@ tasks:
   - id: T-146
     milestone: M2
     title: "Alarm path vs survey report disagree on baseline maturity: AlarmService suppresses every busier/level input as immature-baseline while the report shows the baseline available (injected channel busier z 11.4)"
-    status: in-progress
+    status: review
     decision: "user 2026-09-15: accumulate busier/quieter alarm evidence across consecutive intervals (sequential/Stouffer like the report) AND correct between_var for expected binomial sampling noise; ADR-0012 §3.4/§7.2 amended, false-alarm budget kept. Gain step: pass = no alarm + step disclosed in provenance (no explained-anomaly row)"
     deps: []
     parallel_group: M2A
@@ -2313,7 +2314,7 @@ tasks:
   - id: T-147
     milestone: M2
     title: "Channel FCO under the scheduler: 50% channel reads FCO 0.000 (truth 0.494) and a 10% markov channel is never learned in the T-124 scene"
-    status: in-progress
+    status: review
     deps: [T-141]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2362,7 +2363,8 @@ notes:
   - id: T-149
     milestone: MUI
     title: "MUI-DESIGN: ADR-0013 UI component + state-store structure, frontend-to-API mapping for every mockup panel, build setup, dependency-light framework decision (vanilla TS + small reactive store, or lit/Preact, justified), reuse existing WebGL waterfall"
-    status: in-progress
+    status: done
+    commit: c42284f
     deps: []
     parallel_group: MUI-D
     use_cases: []
@@ -2377,7 +2379,8 @@ notes:
   - id: T-150
     milestone: MUI
     title: "MUI shell: top bar with Explore/Decode mode toggle, layout grid, Outputs dock (live audio + record streams: meter/rate, mute, copy address, stop; Listen adds a stream) and always-on Capture timeline (scrub, reviewing N ago / LIVE)"
-    status: todo
+    status: review
+    commit: 7df8129
     deps: [T-149]
     parallel_group: MUI-SHELL
     use_cases: []
@@ -2392,7 +2395,7 @@ notes:
   - id: T-151
     milestone: MUI
     title: "MUI Explore sidebars: inventory Candidates/Confirmed (sortable, Promote/Delete reachable without horizontal scroll), Selections with actions, right focus panel (big frequency, refined-from-output note, measurements, ranked explanations as suggestions, actions Listen/Decode/Record-Export/Stream/Promote/Delete)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-EXPLORE
     use_cases: []
@@ -2407,7 +2410,7 @@ notes:
   - id: T-152
     milestone: MUI
     title: "MUI centre: spectrum trace + existing WebGL waterfall rehomed, brackets for confirmed/candidate/focused signals, DC mask, drag region select, hover readout, capture-timeline time cursor"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-CENTRE
     use_cases: []
@@ -2422,7 +2425,7 @@ notes:
   - id: T-153
     milestone: MUI
     title: "MUI Decode workbench: pipelines list (parallel, hop-following), selected recipe stages, blocks palette, per-stage plots (MPX/subcarrier, eye, timing, constellation, sync search, group/frame counts, channel map), stage parameters with blind-estimate Use suggestions and live quality"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-DECODE
     use_cases: []
@@ -2478,3 +2481,280 @@ notes:
     model: sonnet
     effort: medium
     core_interface: false
+  - id: T-157
+    milestone: MUI
+    title: "MUI API gap 1: rolling IQ buffer (always-on capture) with status + clip export for the Capture timeline"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-store, hk-pipeline, hk-api
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    size: large
+
+  - id: T-158
+    milestone: MUI
+    title: "MUI API gap 2: SNR + peak level on /api/inventory rows"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-api, hk-pipeline
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-159
+    milestone: MUI
+    title: "MUI API gap 3: an emitter's latest decode fields for the focus panel"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-api, hk-model
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-160
+    milestone: MUI
+    title: "MUI API gap 4: stage tap view=spectrum for MPX/subcarrier plots"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-pipeline, hk-api
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-161
+    milestone: MUI
+    title: "MUI API gap 5: eye/timing diagram data (stream-contract change)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-stream, hk-pipeline, hk-api
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    size: large
+
+  - id: T-162
+    milestone: MUI
+    title: "MUI API gap 6: sync_search diagnostic port for the Decode sync-search plot"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-pipeline, hk-blocks
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-163
+    milestone: MUI
+    title: "MUI API gap 7a: blind estimated params on inventory rows (stage parameter Use suggestions)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-api, hk-pipeline
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-164
+    milestone: MUI
+    title: "MUI API gap 7b: /api/recipes/match (suggest recipes for a signal)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-recipe, hk-api
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    size: large
+
+  - id: T-165
+    milestone: MUI
+    title: "MUI API gap 8: open/iq stream opener for Stream out"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-stream, hk-api
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-166
+    milestone: MUI
+    title: "MUI API gap 9: region Watch alerts"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-pipeline, hk-api, hk-context
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+    size: large
+
+  - id: T-167
+    milestone: MUI
+    title: "MUI API gap 10: DC notch width in the spectrum stream header"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: hk-pipeline, hk-api
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+
+  - id: T-168
+    milestone: MUI
+    title: "MUI API gap 11-12: document follow_hops in docs/api.md; per-node recipe docs for the Decode step guide"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
+    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    area: docs/api.md, hk-recipe
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    size: small
+  - id: T-169
+    milestone: M2
+    title: "Test speed: dev-profile opt-level=2 for hk-dsp, hk-core, hk-pipeline, hk-demod (existing detect/store/context overrides untouched)"
+    status: in-progress
+    deps: [T-145]
+    parallel_group: M2E
+    use_cases: []
+    found_by: "T-145 audit 2026-09-15: slow tests CPU-bound in debug (bandit 39.5 M samples in 81 s, zero waits); user chose opt-level=2 for hot crates"
+    acceptance: "before/after nextest wall (same threads, load recorded) and compile time measured; kept only if nextest total drops >=15% with all tests passing; optimisation-only failures reported, not bent; acceptance 28 passed"
+    area: Cargo.toml
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-170
+    milestone: M2
+    title: "Mock SDR dequant perf regression: bandit test 81.5 s -> 108.8 s after T-141's per-bin FFT dequant on re-rendered hops; bypass when not quantisation-limited and/or cheaper FFT path"
+    status: done
+    commit: 5f5def7
+    deps: [T-141]
+    parallel_group: M2E
+    use_cases: []
+    found_by: "coordinator timing 2026-09-15: bandit_on_attaches 81.5 s pre-T-141 (load ~17) vs 108.8 s on main (load ~8-15), +33%"
+    acceptance: "bandit test within ~10% of 81.5 s at comparable load (or remaining gap explained); T-141 fidelity tests unchanged and green; scheduler_history 0.5 dB a-priori check holds; fixed-tune passthrough bit-identical"
+    area: crates/hk-core/src/source/mock
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-171
+    milestone: MUI
+    title: "MUI API gap 13: /api/inventory total count (tab counts and Review badge; UI labels 500+ until served)"
+    status: todo
+    deps: [T-149]
+    parallel_group: MUI-API
+    use_cases: []
+    found_by: "T-149 review 2026-09-15 (ADR-0013 §4.9 gap 13)"
+    acceptance: "inventory list response carries total for the query; docs/api.md + api_contract.rs updated; UI count labels switch from 500+ to exact"
+    area: hk-api, hk-model
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+    size: small
+  - id: T-172
+    milestone: M2
+    title: "DC twin refutation hardening: time-bounded twin search (sort by cell+start, binary-search +-slack), slack from grid t_cell_ns not hardcoded 1 s, twin must be off its own tuning DC (tuning centre from provenance_ref), ADR-0012 §2.6 wording per-detection"
+    status: todo
+    deps: [T-147]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-147 review 2026-09-15 findings 1-3,5 (channels.rs:109,125,157-166)"
+    acceptance: "O(log n) twin lookup with a benchmark at multi-day spans; slack == t_cell_ns; an unflagged image at another tuning LO-adjacent does not clear a DC flag (test); ADR wording matches code; occupancy_sparse_visits unchanged green"
+    area: crates/hk-context/src/occupancy/channels.rs, crates/hk-pipeline/src/occupancy.rs, docs/adr/0012
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-173
+    milestone: M2
+    title: "Scheduler hop placement: guarantee every frequency gets a view away from DC (hop overlap or dithered centres) so a carrier near one LO is not permanently suspect"
+    status: todo
+    deps: [T-147]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-147 review 2026-09-15 finding 4 (refutation needs another tuning within 1 s)"
+    acceptance: "sweep plans overlap or dither so each cell has at least one off-DC observation per revisit cycle; scheduler tests + occupancy_sparse_visits green; no regression in sweep floor/coverage"
+    area: crates/hk-core/src/scheduler
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-174
+    milestone: M2
+    title: "Live candidate path uses the per-tuning DC twin rule (detect.rs:458 still per-detection suspect)"
+    status: todo
+    deps: [T-147]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-147 finisher report 2026-09-15"
+    acceptance: "candidates from the live path apply the same DC twin refutation as occupancy/learning; test with a carrier near one hop LO seen clean elsewhere becomes a non-suspect candidate"
+    area: crates/hk-pipeline/src/detect.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
