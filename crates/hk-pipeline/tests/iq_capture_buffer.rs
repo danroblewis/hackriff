@@ -107,7 +107,8 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
     cfg.iq_buffer = IqBufferConfig {
         enabled: Some(true),
         retention_s: 600.0,
-        max_bytes: Some(1 << 30),
+        // T-178: the ring is allocated up front (T-157 used 1 GiB of grow-and-delete headroom).
+        max_bytes: Some(256 << 20),
         min_free_bytes: Some(0),
         max_clip_bytes: CLIP_CAP,
         ..IqBufferConfig::default()
@@ -129,6 +130,7 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
             range,
             band: None,
             label: None,
+            run: None,
         })
     };
 
@@ -148,6 +150,7 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
             },
             band: None,
             label: Some("fixed tune".into()),
+            run: None,
         })
         .unwrap();
     assert_eq!(
@@ -320,6 +323,7 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
             },
             band: Some((900e6, 901e6)),
             label: None,
+            run: None,
         })
         .unwrap_err();
     assert!(matches!(err, ClipFailure::NotFound(_)), "{err:?}");

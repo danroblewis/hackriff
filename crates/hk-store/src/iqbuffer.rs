@@ -1,46 +1,60 @@
-//! Rolling IQ capture buffer (T-157, ADR-0013 §4 API gap 1): the always-on raw-IQ history behind
-//! the Capture timeline ("reviewing N ago / LIVE", "export clip from the buffer").
+//! Rolling IQ capture buffer (T-157, ADR-0013 §4 API gap 1) on a **pre-allocated, persistent
+//! on-disk ring** (T-178, ADR-0014 `docs/adr/0014-iq-capture-ring.md`): the always-on raw-IQ
+//! history behind the Capture timeline ("reviewing N ago / LIVE", "export clip from the buffer").
+//! It survives restarts.
 //!
-//! - **Storage** (`<data dir>/iqbuffer/`). An append-only byte log of interleaved ci8 samples
-//!   (2 bytes/sample, the ring's native format), split into chunk files `<seq>.ci8` of
-//!   [`IqBufferConfig::chunk_bytes`] each. The index is in memory: chunks (logical byte range,
-//!   read handle) and **segments**. The buffer lives as long as its run: dropping it deletes its
-//!   chunk files, and opening clears any a killed process left (exported clips are ordinary
-//!   recordings and stay).
-//! - **Segments.** A segment is a contiguous run of samples under one provenance: the writer
-//!   starts a new one on every provenance change (retune, rate, gain, filter, overload), source
-//!   gap, ring overrun or discontinuity flag, so retune boundaries are always segment boundaries.
-//!   Each segment keeps its first sample's stream index (`global_index`) and **sample-clock** time
-//!   (ADR-0012 §0: the `Timestamp` the captured block carried, never wall time); sample `i` of the
-//!   segment is at `t0 + i / fs`.
-//! - **Retention: oldest first.** Two limits, whichever is hit first: disk bytes (whole oldest
-//!   chunk files are deleted) and duration (the retained span `t_newest − t_oldest` on the sample
-//!   clock, trimmed to the sample by advancing the log floor; a chunk file is deleted once it lies
-//!   wholly below the floor). Evicted chunks, segments and samples are counted in the status.
-//! - **Never blocks capture.** Only the writer thread (a ring reader) touches the log files; the
-//!   index mutex is held for bookkeeping only, never across a write. A clip export snapshots the
-//!   plan (segment ranges plus cloned chunk read handles) under the mutex and reads outside it; a
-//!   chunk evicted meanwhile stays readable through its open handle.
-//! - **Full disk.** A chunk enters the index only after its first write succeeded (the file is
-//!   deleted otherwise), a failed write backs further writes off ([`RETRY_BACKOFF_MIN`] doubling
-//!   to [`RETRY_BACKOFF_MAX`]), and the writer **pauses** while opening another chunk would leave
-//!   less than the free-space floor ([`IqBufferConfig::free_floor`]) on the filesystem, resuming
-//!   as soon as it would not. Nothing it skips is ever an index entry or a file.
+//! - **Storage** (`<data dir>/iqbuffer/`): three files whose number and sizes are fixed once
+//!   opened. `ring.ci8` holds `slot_count` fixed-size **slots** of [`IqBufferConfig::chunk_bytes`]
+//!   each (interleaved ci8, 2 bytes/sample), allocated up front ([`preallocate`]: `F_PREALLOCATE`
+//!   on macOS, `fallocate` on Linux, sparse elsewhere). `ring.journal` is an append-only journal of
+//!   CRC-framed records (header, run, slot open, slot seal, segment start), rewritten as a compact
+//!   snapshot on open and whenever it outgrows [`JOURNAL_COMPACT_MIN`]. `ring.lock` carries the
+//!   `flock` of the one buffer using the ring.
+//! - **Logical log.** Bytes are addressed on a monotonic logical log; logical slot `L` covers
+//!   `[L·S, (L+1)·S)` and lives at the ring position its `open` record names. A new slot takes an
+//!   unused position if there is one, otherwise the position of the **oldest** slot, which is
+//!   evicted first (the floor passes its end) and then **overwritten in place**: disk usage never
+//!   changes and every position is rewritten in turn (even flash wear).
+//! - **Durability and torn writes.** `open {slot, pos}` is journalled (fsync) before the slot's
+//!   first byte. A checkpoint (every [`CHECKPOINT_INTERVAL`], at a full slot and at the end of a
+//!   run) fsyncs the ring, journals the new segment starts and `seal {slot, bytes, crc, floor}`
+//!   (CRC-32 of the slot's first `bytes`), and fsyncs the journal. Recovery keeps only what seals
+//!   cover, stops reading the journal at the first torn or corrupt record, re-verifies the CRC of
+//!   the newest sealed slots, and drops a slot that fails together with everything newer.
+//! - **Segments.** A segment is a contiguous run of samples under one provenance: the writer starts
+//!   a new one on every provenance change (retune, rate, gain, filter, overload), source gap, ring
+//!   overrun or discontinuity flag, so retune boundaries are always segment boundaries. Each keeps
+//!   its first sample's stream index (`global_index`), **sample-clock** time (ADR-0012 §0) and the
+//!   **run** (one per open of the ring) whose stream indices it uses; sample `i` of the segment is
+//!   at `t0 + i / fs`.
+//! - **Retention: oldest first.** Two limits, whichever is hit first: the ring (a reused slot
+//!   evicts its previous contents) and duration (the retained span on the sample clock, trimmed to
+//!   the sample by advancing the log floor, which seals persist).
+//! - **Never blocks capture.** Only the writer thread (a ring reader) writes the ring and journal;
+//!   the index mutex is held for bookkeeping only, never across I/O. A clip export plans under the
+//!   mutex and reads outside it, re-checking the floor after every read: data overwritten meanwhile
+//!   fails the clip ([`ClipError::Evicted`]) instead of being exported.
+//! - **Free space.** Allocation keeps the free-space floor ([`IqBufferConfig::free_floor`]): with
+//!   too little room the ring is **shrunk** to the whole slots that fit, or **refused** below two
+//!   ([`AllocationRefused`]). A ring the filesystem could not reserve (sparse) also **pauses**
+//!   writing while starting another slot would leave less than the floor free.
 //! - **Exact times.** Sample `k` of a segment is at `t0_ns + round_half_up(k · 10¹² / fs_mHz)` ns
 //!   (the rate in integer millihertz, i128 arithmetic): a time range selects exactly the samples
 //!   whose time lies in `[t0_ns, t1_ns)`, and a stream-index range ([`ClipRange::Index`]) selects
-//!   exactly its indices.
+//!   exactly its indices within one run.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use hk_model::{ContentClass, Provenance};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// `0`/`off`/`false` disables the buffer, `1`/`on`/`true` enables it for every run.
 pub const ENV_ENABLED: &str = "HK_IQ_BUFFER";
@@ -70,18 +84,34 @@ pub const FREE_FLOOR_FRACTION: f64 = 0.10;
 pub const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(100);
 /// Longest wait after repeated failed writes.
 pub const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(10);
-/// Largest chunk file.
+/// Largest slot.
 pub const MAX_CHUNK_BYTES: u64 = 64 << 20;
-/// Smallest chunk file (and smallest honoured quota is two of them).
+/// Smallest slot (and the smallest honoured quota is two of them).
 pub const MIN_CHUNK_BYTES: u64 = 64 << 10;
 /// Bytes per stored sample (ci8 I, Q).
 pub const BYTES_PER_SAMPLE: u64 = 2;
 /// Directory name under the data directory.
 pub const DIR_NAME: &str = "iqbuffer";
+/// The ring of slots.
+pub const RING_FILE: &str = "ring.ci8";
+/// The journal.
+pub const JOURNAL_FILE: &str = "ring.journal";
+/// The lock file.
+pub const LOCK_FILE: &str = "ring.lock";
+/// On-disk format version (journal header).
+pub const RING_VERSION: u32 = 1;
+/// Longest time between checkpoints while writing.
+pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
+/// The journal is compacted once it is larger than this and than 4× its last snapshot.
+pub const JOURNAL_COMPACT_MIN: u64 = 1 << 20;
+/// Newest sealed slots whose CRC recovery re-reads before trusting the older ones.
+pub const RECOVERY_VERIFY_SLOTS: usize = 4;
 /// Default and largest number of segments a status lists.
 pub const STATUS_SEGMENTS_DEFAULT: usize = 1000;
 /// Largest `limit` of a status.
 pub const STATUS_SEGMENTS_MAX: usize = 10_000;
+const RING_MAGIC: &str = "hackriff-iq-ring";
+const JOURNAL_RECORD_MAX: usize = 16 << 20;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -233,8 +263,8 @@ impl IqBufferConfig {
         }
     }
 
-    /// Chunk file size: a sixteenth of the quota within [`MIN_CHUNK_BYTES`]..[`MAX_CHUNK_BYTES`],
-    /// whole samples.
+    /// Slot size: a sixteenth of the quota within [`MIN_CHUNK_BYTES`]..[`MAX_CHUNK_BYTES`], whole
+    /// samples.
     pub fn chunk_bytes(&self) -> u64 {
         (self.raw_quota() / 16).clamp(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES) & !1
     }
@@ -244,9 +274,14 @@ impl IqBufferConfig {
             .map_or(self.implied_bytes(), |m| m.min(self.implied_bytes()))
     }
 
-    /// The disk quota enforced: `min(implied, max_bytes)`, at least two chunks.
+    /// The disk quota: `min(implied, max_bytes)`, at least two slots.
     pub fn quota_bytes(&self) -> u64 {
         self.raw_quota().max(2 * self.chunk_bytes())
+    }
+
+    /// Slots of a ring holding the quota: `⌊quota / slot⌋`, at least 2.
+    pub fn slot_count(&self) -> u64 {
+        (self.quota_bytes() / self.chunk_bytes()).max(2)
     }
 
     /// The free-space floor on a filesystem of `total` bytes.
@@ -285,16 +320,108 @@ pub fn fs_space(path: &Path) -> io::Result<FsSpace> {
     })
 }
 
-/// Filesystem probes of the buffer, replaceable for tests (a full disk, a slow writer).
+/// Sizes `file` to `len` bytes, reserving the blocks where the filesystem can: `fallocate` on
+/// Linux, `F_PREALLOCATE` then `ftruncate` on macOS (neither writes the data, so a large ring
+/// allocates in milliseconds). `Ok(true)`: reserved; `Ok(false)`: only sized (sparse).
+#[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+pub fn preallocate(file: &File, len: u64) -> io::Result<bool> {
+    let current = file.metadata()?.len();
+    if len <= current {
+        file.set_len(len)?;
+        return Ok(true);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a valid open descriptor; mode 0 allocates and extends the size.
+        let r = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as libc::off_t) };
+        if r == 0 {
+            return Ok(true);
+        }
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ENOSPC) {
+            return Err(e);
+        }
+        file.set_len(len)?;
+        Ok(false)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut reserved = false;
+        for flags in [libc::F_ALLOCATECONTIG, libc::F_ALLOCATEALL] {
+            let mut store = libc::fstore_t {
+                fst_flags: flags,
+                fst_posmode: libc::F_PEOFPOSMODE,
+                fst_offset: 0,
+                fst_length: (len - current) as libc::off_t,
+                fst_bytesalloc: 0,
+            };
+            // SAFETY: a valid open descriptor and a valid, writable `fstore_t`.
+            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut store) } != -1 {
+                reserved = true;
+                break;
+            }
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::ENOSPC) && flags == libc::F_ALLOCATEALL {
+                return Err(e);
+            }
+        }
+        file.set_len(len)?;
+        Ok(reserved)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = file.as_raw_fd();
+        file.set_len(len)?;
+        Ok(false)
+    }
+}
+
+/// The ring would not fit above the free-space floor even at two slots (the buffer is refused).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllocationRefused {
+    /// Bytes the smallest ring needs.
+    pub need_bytes: u64,
+    /// Free bytes of the filesystem.
+    pub free_bytes: u64,
+    /// The free-space floor.
+    pub floor_bytes: u64,
+}
+
+impl std::fmt::Display for AllocationRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "allocation refused: the IQ capture ring needs {} bytes above the {}-byte free-space \
+             floor and {} bytes are free",
+            self.need_bytes, self.floor_bytes, self.free_bytes
+        )
+    }
+}
+
+impl std::error::Error for AllocationRefused {}
+
+/// Whether an [`IqBuffer::open`] error is an [`AllocationRefused`].
+pub fn is_allocation_refused(e: &io::Error) -> bool {
+    e.get_ref()
+        .is_some_and(|x| x.downcast_ref::<AllocationRefused>().is_some())
+}
+
+/// Filesystem probes of the buffer, replaceable for tests (a full disk, a slow writer, a
+/// filesystem without preallocation).
 pub trait IqBufferHooks: Send + Sync {
     /// The space of the filesystem holding `path`.
     fn fs_space(&self, path: &Path) -> io::Result<FsSpace> {
         fs_space(path)
     }
 
-    /// Called before every chunk write of `bytes`; an error fails that write.
+    /// Called before every ring write of `bytes`; an error fails that write.
     fn before_write(&self, _bytes: usize) -> io::Result<()> {
         Ok(())
+    }
+
+    /// Sizes the ring file ([`preallocate`]).
+    fn preallocate(&self, file: &File, len: u64) -> io::Result<bool> {
+        preallocate(file, len)
     }
 }
 
@@ -302,6 +429,50 @@ pub trait IqBufferHooks: Send + Sync {
 pub struct OsHooks;
 
 impl IqBufferHooks for OsHooks {}
+
+/// CRC-32 (IEEE 802.3, reflected) of `data` continuing `crc` (`crc32_update(0, x)` is the CRC of
+/// `x`, and `crc32_update(crc32_update(0, a), b)` that of `a ++ b`). Slicing-by-8.
+pub fn crc32_update(crc: u32, data: &[u8]) -> u32 {
+    static TABLES: OnceLock<[[u32; 256]; 8]> = OnceLock::new();
+    let t = TABLES.get_or_init(|| {
+        let mut t = [[0u32; 256]; 8];
+        for (i, e) in t[0].iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+            *e = c;
+        }
+        for i in 0..256 {
+            for k in 1..8 {
+                let p = t[k - 1][i];
+                t[k][i] = (p >> 8) ^ t[0][(p & 0xff) as usize];
+            }
+        }
+        t
+    });
+    let mut c = !crc;
+    let mut chunks = data.chunks_exact(8);
+    for b in &mut chunks {
+        let v = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) ^ c;
+        c = t[7][(v & 0xff) as usize]
+            ^ t[6][((v >> 8) & 0xff) as usize]
+            ^ t[5][((v >> 16) & 0xff) as usize]
+            ^ t[4][(v >> 24) as usize]
+            ^ t[3][b[4] as usize]
+            ^ t[2][b[5] as usize]
+            ^ t[1][b[6] as usize]
+            ^ t[0][b[7] as usize];
+    }
+    for &b in chunks.remainder() {
+        c = (c >> 8) ^ t[0][((c ^ b as u32) & 0xff) as usize];
+    }
+    !c
+}
 
 fn sat_i64(v: i128) -> i64 {
     v.clamp(i64::MIN as i128, i64::MAX as i128) as i64
@@ -332,21 +503,102 @@ pub struct SegmentStart {
     pub dropped_before: u64,
 }
 
-struct Chunk {
-    log_start: u64,
+/// A journal record (framed `[len u32 LE][crc32 u32 LE][JSON]`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+enum Rec {
+    /// First record: the geometry.
+    Header {
+        magic: String,
+        version: u32,
+        slot_bytes: u64,
+        slots: u64,
+    },
+    /// A buffer opened the ring (its segments' stream indices are this run's).
+    Run { run: u64 },
+    /// Logical slot `slot` is written at ring position `pos` from here on: any older slot there is
+    /// dead.
+    Open { slot: u64, pos: u64 },
+    /// The first `bytes` of `slot` are durable with CRC-32 `crc`; the log floor is `floor`.
+    Seal {
+        slot: u64,
+        bytes: u64,
+        crc: u32,
+        floor: u64,
+    },
+    /// A segment starts at logical byte `log_start`.
+    Seg {
+        id: u64,
+        run: u64,
+        log_start: u64,
+        global_index: u64,
+        t_ns: i64,
+        content_class: ContentClass,
+        dropped_before: u64,
+        provenance: Box<Provenance>,
+    },
+}
+
+fn encode(recs: &[Rec]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for r in recs {
+        let p = serde_json::to_vec(r).expect("a journal record serialises");
+        out.extend_from_slice(&(p.len() as u32).to_le_bytes());
+        out.extend_from_slice(&crc32_update(0, &p).to_le_bytes());
+        out.extend_from_slice(&p);
+    }
+    out
+}
+
+/// The records of a journal up to its first torn or corrupt one, and that record's offset.
+fn decode(data: &[u8]) -> (Vec<Rec>, usize) {
+    let mut recs = Vec::new();
+    let mut off = 0;
+    while off + 8 <= data.len() {
+        let n = u32::from_le_bytes(data[off..off + 4].try_into().expect("4 bytes")) as usize;
+        let crc = u32::from_le_bytes(data[off + 4..off + 8].try_into().expect("4 bytes"));
+        if n > JOURNAL_RECORD_MAX || off + 8 + n > data.len() {
+            break;
+        }
+        let p = &data[off + 8..off + 8 + n];
+        if crc32_update(0, p) != crc {
+            break;
+        }
+        match serde_json::from_slice::<Rec>(p) {
+            Ok(r) => recs.push(r),
+            Err(_) => break,
+        }
+        off += 8 + n;
+    }
+    (recs, off)
+}
+
+/// A logical slot holding a ring position.
+#[derive(Clone, Copy, Debug)]
+struct Slot {
+    l: u64,
+    pos: u64,
+    /// Bytes written.
     bytes: u64,
-    file: Arc<File>,
-    path: PathBuf,
+    /// Bytes a seal covers.
+    sealed: u64,
+    /// CRC-32 of the sealed bytes.
+    crc: u32,
 }
 
 struct Seg {
     id: u64,
+    run: u64,
+    /// Logical byte of the segment's first sample (before any eviction).
+    start_log: u64,
     /// Logical byte of the first retained sample.
     log_start: u64,
     samples: u64,
     /// Stream index of the first retained sample.
     global_index: u64,
     start: SegmentStart,
+    /// Its start is in the journal.
+    persisted: bool,
 }
 
 impl Seg {
@@ -393,6 +645,19 @@ impl Seg {
     fn offset_of(&self, index: u64) -> u64 {
         index.saturating_sub(self.global_index).min(self.samples)
     }
+
+    fn rec(&self) -> Rec {
+        Rec::Seg {
+            id: self.id,
+            run: self.run,
+            log_start: self.start_log,
+            global_index: self.start.global_index,
+            t_ns: self.start.t_ns,
+            content_class: self.start.content_class,
+            dropped_before: self.start.dropped_before,
+            provenance: Box::new(self.start.provenance.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -410,37 +675,58 @@ struct Counts {
 
 #[derive(Default)]
 struct State {
-    chunks: VecDeque<Chunk>,
+    /// Slots holding positions, oldest first.
+    slots: VecDeque<Slot>,
+    /// Unused ring positions.
+    free: BTreeSet<u64>,
     segments: VecDeque<Seg>,
     log_floor: u64,
     log_end: u64,
-    disk_bytes: u64,
-    next_chunk_seq: u64,
     next_seg_id: u64,
     /// The last segment is still being appended to.
     open: bool,
-    /// Writing is paused below the free-space floor.
+    /// Writing is paused below the free-space floor (sparse ring only).
     paused: bool,
     counts: Counts,
     error: Option<String>,
 }
 
+/// How much of the quota the ring got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Allocation {
+    /// The whole quota.
+    Full,
+    /// Fewer slots: the quota would not fit above the free-space floor.
+    Shrunk,
+    /// Not even two slots fit: the run has no buffer.
+    Refused,
+}
+
+/// What recovery found when the ring opened.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Recovery {
+    segments: usize,
+    discarded_slots: u64,
+    note: Option<String>,
+}
+
 struct Inner {
     dir: PathBuf,
     cfg: IqBufferConfig,
-    chunk_bytes: u64,
+    slot_bytes: u64,
+    slot_count: u64,
     quota_bytes: u64,
+    allocation: Allocation,
+    preallocated: bool,
+    run: u64,
+    recovery: Recovery,
     hooks: Arc<dyn IqBufferHooks>,
+    read: File,
+    journal_len: AtomicU64,
     state: Mutex<State>,
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        let st = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
-        for c in st.chunks.drain(..) {
-            let _ = fs::remove_file(&c.path);
-        }
-    }
+    /// Holds the `flock` for the buffer's life.
+    _lock: File,
 }
 
 /// The buffer's shared index (status and clip export); cheap to clone.
@@ -449,22 +735,39 @@ pub struct IqBuffer {
     inner: Arc<Inner>,
 }
 
+/// The slot being written.
+#[derive(Clone, Copy, Debug)]
+struct Cursor {
+    l: u64,
+    pos: u64,
+    offset: u64,
+    crc: u32,
+    sealed: u64,
+}
+
 /// The single appender (owned by the writer thread).
 pub struct IqBufferWriter {
     buffer: IqBuffer,
-    file: Option<File>,
-    room: u64,
+    data: File,
+    journal: File,
+    cur: Option<Cursor>,
     /// Current wait after failed writes (zero after a success).
     backoff: Duration,
     /// No write is attempted before this.
     retry_at: Option<Instant>,
+    last_checkpoint: Instant,
+    compacted_len: u64,
+    /// Test only: drop without the final checkpoint (a crash).
+    skip_final_checkpoint: bool,
 }
 
 /// A segment as the status lists it (times Unix s, frequencies Hz).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SegmentStatus {
-    /// Segment id (increasing for the life of the buffer).
+    /// Segment id (increasing for the life of the ring).
     pub id: u64,
+    /// Run (open of the ring) whose stream indices `global_index` uses.
+    pub run: u64,
     /// First retained sample's time.
     pub t0: f64,
     /// End of the last sample.
@@ -519,7 +822,7 @@ pub struct GapStatus {
 /// Eviction counts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct EvictedStatus {
-    /// Chunk files deleted.
+    /// Slots overwritten (their previous contents evicted).
     pub chunks: u64,
     /// Whole segments dropped.
     pub segments: u64,
@@ -542,21 +845,44 @@ pub struct IqBufferStatus {
     pub retention_s: f64,
     /// Hard size cap, bytes (`null`: none, the implied quota applies).
     pub max_bytes: Option<u64>,
-    /// Disk quota enforced: `min(retention × highest rate × 2, max_bytes)`, at least two chunks.
+    /// Disk quota: `min(retention × highest rate × 2, max_bytes)`, at least two slots.
     pub quota_bytes: u64,
     /// Largest clip export, bytes.
     pub max_clip_bytes: u64,
-    /// Chunk file size, bytes.
+    /// Slot size, bytes.
     pub chunk_bytes: u64,
-    /// Chunk files in the index.
+    /// Slots holding retained samples.
     pub chunk_files: usize,
+    /// Slots of the ring.
+    pub slot_count: u64,
+    /// Size of the ring file (`slot_count × chunk_bytes`), fixed while the ring is open.
+    pub allocated_bytes: u64,
+    /// `full`, `shrunk` (fewer slots than the quota: not enough free space) or `refused`
+    /// (disabled for lack of space); `null` when disabled otherwise.
+    pub allocation: Option<Allocation>,
+    /// The filesystem reserved the ring's blocks (false: a sparse file).
+    pub preallocated: bool,
+    /// The buffer survives restarts (always true when enabled).
+    pub persisted: bool,
+    /// This run's number (increases on every open of the ring).
+    pub run: Option<u64>,
+    /// Segments recovered from the ring when this run opened it.
+    pub recovered_segments: usize,
+    /// Slots recovery discarded (unsealed, torn, failed CRC, or no longer fitting).
+    pub discarded_slots: u64,
+    /// Ring position (slot) being written (`null` before the first write).
+    pub head_slot: Option<u64>,
+    /// Byte offset of the write head in the ring file.
+    pub head_offset_bytes: Option<u64>,
+    /// Complete passes of the write head over the ring.
+    pub wrap_count: u64,
     /// Free bytes of the buffer's filesystem (`null` when unknown or disabled).
     pub fs_free_bytes: Option<u64>,
     /// Size of the buffer's filesystem (`null` when unknown or disabled).
     pub fs_total_bytes: Option<u64>,
     /// Free-space floor enforced on that filesystem (`null` when unknown or disabled).
     pub min_free_bytes: Option<u64>,
-    /// Writing is paused because another chunk would go below the free-space floor.
+    /// Writing is paused because another slot of a sparse ring would go below the floor.
     pub paused: bool,
     /// Pauses so far.
     pub pauses: u64,
@@ -570,7 +896,7 @@ pub struct IqBufferStatus {
     pub span_s: f64,
     /// Retained IQ bytes.
     pub bytes: u64,
-    /// Bytes of chunk files on disk (≥ `bytes` by less than one chunk).
+    /// Bytes of the buffer's files on disk (ring + journal).
     pub disk_bytes: u64,
     /// Retained samples.
     pub samples: u64,
@@ -582,13 +908,13 @@ pub struct IqBufferStatus {
     pub segments: Vec<SegmentStatus>,
     /// Gaps between the listed consecutive segments.
     pub gaps: Vec<GapStatus>,
-    /// Oldest-first eviction counts.
+    /// Oldest-first eviction counts (this run).
     pub evicted: EvictedStatus,
     /// Samples this buffer's reader lost to ring overruns (never held capture).
     pub dropped_samples: u64,
     /// Samples not stored because their window's class forbids content.
     pub gated_samples: u64,
-    /// Failed chunk writes (each backs writing off).
+    /// Failed ring or journal writes (each backs writing off).
     pub write_errors: u64,
     /// Samples not stored because a write failed or writing was backing off.
     pub failed_samples: u64,
@@ -609,6 +935,17 @@ impl IqBufferStatus {
             max_clip_bytes: cfg.max_clip_bytes,
             chunk_bytes: cfg.chunk_bytes(),
             chunk_files: 0,
+            slot_count: 0,
+            allocated_bytes: 0,
+            allocation: None,
+            preallocated: false,
+            persisted: false,
+            run: None,
+            recovered_segments: 0,
+            discarded_slots: 0,
+            head_slot: None,
+            head_offset_bytes: None,
+            wrap_count: 0,
             fs_free_bytes: None,
             fs_total_bytes: None,
             min_free_bytes: None,
@@ -645,7 +982,7 @@ pub enum ClipRange {
         /// End (exclusive).
         t1_ns: i64,
     },
-    /// Stream indices `[start, end)` (exact whatever the rate).
+    /// Stream indices `[start, end)` of one run (exact whatever the rate).
     Index {
         /// First index.
         start: u64,
@@ -683,6 +1020,8 @@ pub struct ClipPiece {
     pub t1_ns: i64,
     /// Buffer segment id.
     pub segment: u64,
+    /// Run of the segment.
+    pub run: u64,
     /// Provenance.
     pub provenance: Provenance,
     /// Content class.
@@ -714,11 +1053,18 @@ pub enum ClipError {
         /// Time of the first sample at the other rate, Unix ns.
         t_ns: i64,
     },
+    /// A time range matches segments of more than one run (a restart), which are never spliced.
+    MixedRuns {
+        /// Time of the first sample of the other run, Unix ns.
+        t_ns: i64,
+    },
     /// Larger than the caller's limit.
     TooLarge {
         /// Bytes the clip would have.
         bytes: u64,
     },
+    /// The ring overwrote part of the range while it was being exported.
+    Evicted,
     /// Reading the buffer or writing the clip failed.
     Io(io::Error),
 }
@@ -732,7 +1078,17 @@ impl std::fmt::Display for ClipError {
                 "the range spans a sample-rate change at {:.6} s; export each side separately",
                 *t_ns as f64 / 1e9
             ),
+            Self::MixedRuns { t_ns } => write!(
+                f,
+                "the range spans a restart of the buffer at {:.6} s; give run, or export each \
+                 side separately",
+                *t_ns as f64 / 1e9
+            ),
             Self::TooLarge { bytes } => write!(f, "the clip would be {bytes} bytes"),
+            Self::Evicted => write!(
+                f,
+                "the buffer overwrote part of the range during the export (evicted)"
+            ),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -740,12 +1096,13 @@ impl std::fmt::Display for ClipError {
 
 impl std::error::Error for ClipError {}
 
-type Span = (Arc<File>, u64, u64);
+/// One read of a clip: ring file offset, length, logical byte of its start.
+type Span = (u64, u64, u64);
 
-/// A clip selected under the index lock, written without it ([`IqBuffer::plan_clip`]). It holds
-/// read handles of its chunks, so evicted chunks stay readable (and on disk) until it is written
-/// or dropped.
+/// A clip selected under the index lock, read without it ([`IqBuffer::plan_clip`]). Every read is
+/// checked against the floor afterwards, so data the ring overwrote meanwhile fails the write.
 pub struct ClipPlan {
+    buffer: IqBuffer,
     plan: Vec<(ClipPiece, Vec<Span>)>,
     samples: u64,
 }
@@ -763,14 +1120,20 @@ impl ClipPlan {
 
     /// Writes the clip's ci8 data to `out` and describes it.
     pub fn write(self, out: &mut dyn Write) -> Result<Clip, ClipError> {
+        let inner = &self.buffer.inner;
         let mut buf = vec![0u8; 1 << 20];
         for (_, reads) in &self.plan {
-            for (file, offset, len) in reads {
+            for &(offset, len, log) in reads {
                 let mut done = 0;
-                while done < *len {
-                    let n = (*len - done).min(buf.len() as u64) as usize;
-                    file.read_exact_at(&mut buf[..n], offset + done)
+                while done < len {
+                    let n = (len - done).min(buf.len() as u64) as usize;
+                    inner
+                        .read
+                        .read_exact_at(&mut buf[..n], offset + done)
                         .map_err(ClipError::Io)?;
+                    if lock(&inner.state).log_floor > log + done {
+                        return Err(ClipError::Evicted);
+                    }
                     out.write_all(&buf[..n]).map_err(ClipError::Io)?;
                     done += n as u64;
                 }
@@ -789,41 +1152,363 @@ impl ClipPlan {
     }
 }
 
+/// Deletes the chunk files of the T-157 grow-and-delete log (`<16 digits>.ci8`).
+fn remove_legacy_chunks(dir: &Path) -> io::Result<()> {
+    for e in fs::read_dir(dir)?.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if let Some(stem) = name.strip_suffix(".ci8") {
+            if stem.len() == 16 && stem.bytes().all(|b| b.is_ascii_digit()) {
+                fs::remove_file(e.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sync_dir(dir: &Path) {
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
+    }
+}
+
+/// Writes `recs` as the whole journal (a temporary file renamed over it) and opens it to append.
+fn write_snapshot(dir: &Path, recs: &[Rec]) -> io::Result<(File, u64)> {
+    let tmp = dir.join(format!("{JOURNAL_FILE}.tmp"));
+    let bytes = encode(recs);
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, dir.join(JOURNAL_FILE))?;
+    sync_dir(dir);
+    let f = OpenOptions::new()
+        .append(true)
+        .open(dir.join(JOURNAL_FILE))?;
+    Ok((f, bytes.len() as u64))
+}
+
+/// The ring's state as the journal and ring file describe it, before this run.
+struct Recovered {
+    slots: VecDeque<Slot>,
+    segments: VecDeque<Seg>,
+    floor: u64,
+    end: u64,
+    last_run: u64,
+    next_seg_id: u64,
+    recovery: Recovery,
+}
+
+/// Rebuilds the index from the journal and verifies the newest slots against the ring file
+/// (`file_len`: its size before this open resized it). Never fails: what cannot be trusted is
+/// discarded.
+fn recover(dir: &Path, ring: &File, file_len: u64, slot_bytes: u64, slot_count: u64) -> Recovered {
+    let mut out = Recovered {
+        slots: VecDeque::new(),
+        segments: VecDeque::new(),
+        floor: 0,
+        end: 0,
+        last_run: 0,
+        next_seg_id: 0,
+        recovery: Recovery::default(),
+    };
+    let Ok(data) = fs::read(dir.join(JOURNAL_FILE)) else {
+        return out;
+    };
+    let (recs, valid) = decode(&data);
+    if valid < data.len() {
+        out.recovery.note = Some(format!(
+            "ignored {} bytes of torn or corrupt journal tail",
+            data.len() - valid
+        ));
+    }
+    match recs.first() {
+        Some(Rec::Header {
+            magic,
+            version,
+            slot_bytes: s,
+            ..
+        }) if magic == RING_MAGIC && *version == RING_VERSION && *s == slot_bytes => {}
+        Some(Rec::Header { slot_bytes: s, .. }) => {
+            out.recovery.note = Some(format!(
+                "reset: the slot size changed from {s} to {slot_bytes} bytes (or the format did)"
+            ));
+            return out;
+        }
+        _ => {
+            if !data.is_empty() {
+                out.recovery.note = Some("reset: the journal has no valid header".into());
+            }
+            return out;
+        }
+    }
+    // Replay: the latest slot at each position, its longest seal.
+    let mut slots: BTreeMap<u64, Slot> = BTreeMap::new();
+    let mut owner: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut segs = Vec::new();
+    for r in recs.into_iter().skip(1) {
+        match r {
+            Rec::Header { .. } => {}
+            Rec::Run { run } => out.last_run = out.last_run.max(run),
+            Rec::Open { slot, pos } => {
+                if let Some(old) = owner.insert(pos, slot) {
+                    if old != slot {
+                        slots.remove(&old);
+                    }
+                }
+                if let Some(prev) = slots.get(&slot) {
+                    if prev.pos != pos {
+                        owner.remove(&prev.pos);
+                    }
+                }
+                slots.insert(
+                    slot,
+                    Slot {
+                        l: slot,
+                        pos,
+                        bytes: 0,
+                        sealed: 0,
+                        crc: 0,
+                    },
+                );
+            }
+            Rec::Seal {
+                slot,
+                bytes,
+                crc,
+                floor,
+            } => {
+                if let Some(s) = slots.get_mut(&slot) {
+                    if bytes >= s.sealed && bytes <= slot_bytes {
+                        (s.sealed, s.bytes, s.crc) = (bytes, bytes, crc);
+                    }
+                }
+                out.floor = out.floor.max(floor);
+            }
+            Rec::Seg {
+                id,
+                run,
+                log_start,
+                global_index,
+                t_ns,
+                content_class,
+                dropped_before,
+                provenance,
+            } => {
+                out.next_seg_id = out.next_seg_id.max(id + 1);
+                out.last_run = out.last_run.max(run);
+                segs.push((
+                    id,
+                    run,
+                    log_start,
+                    SegmentStart {
+                        global_index,
+                        t_ns,
+                        provenance: *provenance,
+                        content_class,
+                        dropped_before,
+                    },
+                ));
+            }
+        }
+    }
+    let total = slots.len() as u64;
+    // Sealed, inside the ring file as it was, and inside the (possibly shrunk) ring.
+    let mut live: Vec<Slot> = slots
+        .into_values()
+        .filter(|s| s.sealed > 0 && s.pos < slot_count && s.pos * slot_bytes + s.sealed <= file_len)
+        .collect();
+    // Newest first: contiguous logical slots, every older one full, at most `slot_count`.
+    live.sort_by_key(|s| std::cmp::Reverse(s.l));
+    let mut keep: Vec<Slot> = Vec::new();
+    for s in live {
+        let fits = keep.len() < slot_count as usize;
+        let contiguous = keep
+            .last()
+            .is_none_or(|n| n.l == s.l + 1 && s.sealed == slot_bytes);
+        if !(fits && contiguous) {
+            break;
+        }
+        keep.push(s);
+    }
+    // Re-verify the newest slots: a failure drops that slot and everything newer.
+    let mut verified = false;
+    let mut buf = Vec::new();
+    for _ in 0..RECOVERY_VERIFY_SLOTS {
+        let Some(s) = keep.first().copied() else {
+            break;
+        };
+        buf.resize(s.sealed as usize, 0);
+        let ok = ring.read_exact_at(&mut buf, s.pos * slot_bytes).is_ok()
+            && crc32_update(0, &buf) == s.crc;
+        if ok {
+            verified = true;
+            break;
+        }
+        keep.remove(0);
+        out.recovery.note = Some(format!(
+            "slot {} failed its CRC check (torn write) and was discarded with anything newer",
+            s.l
+        ));
+    }
+    if !verified {
+        keep.clear();
+    }
+    keep.reverse();
+    out.recovery.discarded_slots = total - keep.len() as u64;
+    let (Some(oldest), Some(newest)) = (keep.first().copied(), keep.last().copied()) else {
+        return out;
+    };
+    out.floor = out.floor.max(oldest.l * slot_bytes);
+    out.end = newest.l * slot_bytes + newest.sealed;
+    out.floor = out.floor.min(out.end);
+    out.slots = keep.into();
+    segs.sort_by_key(|s| (s.2, s.0));
+    for (i, (id, run, start_log, start)) in segs.iter().enumerate() {
+        let next = segs.get(i + 1).map_or(out.end, |n| n.2);
+        let end = next.min(out.end);
+        let from = (*start_log).max(out.floor);
+        if from >= end {
+            continue;
+        }
+        out.segments.push_back(Seg {
+            id: *id,
+            run: *run,
+            start_log: *start_log,
+            log_start: from,
+            samples: (end - from) / BYTES_PER_SAMPLE,
+            global_index: start.global_index + (from - start_log) / BYTES_PER_SAMPLE,
+            start: start.clone(),
+            persisted: true,
+        });
+    }
+    out.recovery.segments = out.segments.len();
+    out
+}
+
 impl IqBuffer {
-    /// Opens (creating) `dir`, deleting chunk files a previous process left.
+    /// Opens (creating and allocating) the ring in `dir`, recovering what a previous run left.
     pub fn open(dir: &Path, cfg: IqBufferConfig) -> io::Result<(Self, IqBufferWriter)> {
         Self::open_with(dir, cfg, Arc::new(OsHooks))
     }
 
     /// [`Self::open`] with filesystem probes `hooks`.
+    ///
+    /// - The ring is locked (`flock`): a second open of the same directory fails.
+    /// - A ring of another slot size (a quota change across the 64 KiB..64 MiB range, or another
+    ///   format) is reset. A ring of another slot count keeps the slots that still fit: growing
+    ///   keeps everything, shrinking keeps the newest contiguous slots stored below the new size.
+    /// - Space: the ring (less what its existing file already holds) must fit above the free-space
+    ///   floor; otherwise it is shrunk to the whole slots that fit, and refused below two
+    ///   ([`AllocationRefused`]).
     pub fn open_with(
         dir: &Path,
         cfg: IqBufferConfig,
         hooks: Arc<dyn IqBufferHooks>,
     ) -> io::Result<(Self, IqBufferWriter)> {
         fs::create_dir_all(dir)?;
-        for e in fs::read_dir(dir)?.flatten() {
-            let p = e.path();
-            if p.extension().is_some_and(|x| x == "ci8") {
-                fs::remove_file(&p)?;
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(LOCK_FILE))?;
+        // SAFETY: a valid open descriptor.
+        if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = io::Error::last_os_error();
+            return Err(io::Error::new(
+                e.kind(),
+                format!("the IQ capture ring is in use by another run ({e})"),
+            ));
+        }
+        remove_legacy_chunks(dir)?;
+        let slot_bytes = cfg.chunk_bytes();
+        let ring_path = dir.join(RING_FILE);
+        let file_len = fs::metadata(&ring_path).map_or(0, |m| m.len());
+        let want = cfg.slot_count();
+        let (mut slot_count, mut allocation) = (want, Allocation::Full);
+        if let Ok(space) = hooks.fs_space(dir) {
+            let floor = cfg.free_floor(space.total);
+            let usable = space.free.saturating_sub(floor).saturating_add(file_len);
+            if want.saturating_mul(slot_bytes) > usable {
+                slot_count = usable / slot_bytes;
+                allocation = Allocation::Shrunk;
+                if slot_count < 2 {
+                    return Err(io::Error::other(AllocationRefused {
+                        need_bytes: (2 * slot_bytes).saturating_sub(file_len),
+                        free_bytes: space.free,
+                        floor_bytes: floor,
+                    }));
+                }
             }
         }
+        let ring = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&ring_path)?;
+        let rec = recover(dir, &ring, file_len, slot_bytes, slot_count);
+        let preallocated = hooks.preallocate(&ring, slot_count * slot_bytes)?;
+        let run = rec.last_run + 1;
+        let mut st = State {
+            slots: rec.slots,
+            free: (0..slot_count).collect(),
+            segments: rec.segments,
+            log_floor: rec.floor,
+            log_end: rec.end,
+            next_seg_id: rec.next_seg_id,
+            ..State::default()
+        };
+        for s in &st.slots {
+            st.free.remove(&s.pos);
+        }
+        if let Some(note) = &rec.recovery.note {
+            eprintln!("IQ capture ring {}: {note}", dir.display());
+        }
+        let inner = Inner {
+            dir: dir.to_path_buf(),
+            cfg,
+            slot_bytes,
+            slot_count,
+            quota_bytes: cfg.quota_bytes(),
+            allocation,
+            preallocated,
+            run,
+            recovery: rec.recovery,
+            hooks,
+            read: ring.try_clone()?,
+            journal_len: AtomicU64::new(0),
+            state: Mutex::new(State::default()),
+            _lock: lock_file,
+        };
+        let (journal, len) = write_snapshot(dir, &inner.snapshot(&st))?;
+        inner.journal_len.store(len, Ordering::Relaxed);
+        let cur = st
+            .slots
+            .back()
+            .filter(|s| s.sealed < slot_bytes)
+            .map(|s| Cursor {
+                l: s.l,
+                pos: s.pos,
+                offset: s.sealed,
+                crc: s.crc,
+                sealed: s.sealed,
+            });
+        *lock(&inner.state) = st;
         let buffer = Self {
-            inner: Arc::new(Inner {
-                dir: dir.to_path_buf(),
-                cfg,
-                chunk_bytes: cfg.chunk_bytes(),
-                quota_bytes: cfg.quota_bytes(),
-                hooks,
-                state: Mutex::new(State::default()),
-            }),
+            inner: Arc::new(inner),
         };
         let writer = IqBufferWriter {
             buffer: buffer.clone(),
-            file: None,
-            room: 0,
+            data: ring,
+            journal,
+            cur,
             backoff: Duration::ZERO,
             retry_at: None,
+            last_checkpoint: Instant::now(),
+            compacted_len: len,
+            skip_final_checkpoint: false,
         };
         Ok((buffer, writer))
     }
@@ -831,6 +1516,11 @@ impl IqBuffer {
     /// The configuration.
     pub fn config(&self) -> IqBufferConfig {
         self.inner.cfg
+    }
+
+    /// This run's number.
+    pub fn run(&self) -> u64 {
+        self.inner.run
     }
 
     /// The space of the filesystem holding `path` (through the buffer's hooks).
@@ -841,13 +1531,12 @@ impl IqBuffer {
     /// The status: segments overlapping `[t0_ns, t1_ns)` (whole buffer when `None`), the newest
     /// `limit` of them.
     pub fn status(&self, t0_ns: Option<i64>, t1_ns: Option<i64>, limit: usize) -> IqBufferStatus {
-        let space = self.inner.hooks.fs_space(&self.inner.dir).ok();
-        let st = lock(&self.inner.state);
+        let inner = &self.inner;
+        let space = inner.hooks.fs_space(&inner.dir).ok();
+        let st = lock(&inner.state);
         let live: Vec<&Seg> = st.segments.iter().filter(|s| s.samples > 0).collect();
-        let (t0, t1) = match (live.first(), live.last()) {
-            (Some(a), Some(b)) => (Some(a.t0_ns()), Some(b.t1_ns())),
-            _ => (None, None),
-        };
+        let t0 = live.iter().map(|s| s.t0_ns()).min();
+        let t1 = live.iter().map(|s| s.t1_ns()).max();
         let matching: Vec<&Seg> = live
             .iter()
             .copied()
@@ -862,6 +1551,7 @@ impl IqBuffer {
                 let p = &g.start.provenance;
                 SegmentStatus {
                     id: g.id,
+                    run: g.run,
                     t0: s(g.t0_ns()),
                     t1: s(g.t1_ns()),
                     t0_ns: g.t0_ns(),
@@ -886,6 +1576,9 @@ impl IqBuffer {
             .windows(2)
             .filter_map(|w| {
                 let (a, b) = (w[0], w[1]);
+                if a.run != b.run {
+                    return None;
+                }
                 let missing = b.global_index.saturating_sub(a.global_index + a.samples);
                 (missing > 0 || b.start.dropped_before > 0).then(|| GapStatus {
                     t0: s(a.t1_ns()),
@@ -898,19 +1591,37 @@ impl IqBuffer {
             .collect();
         let c = st.counts;
         let bytes = st.log_end - st.log_floor;
+        let sb = inner.slot_bytes;
+        let head = st.slots.back();
+        let allocated = inner.slot_count * sb;
         IqBufferStatus {
             enabled: true,
             reason: None,
-            dir: Some(self.inner.dir.display().to_string()),
-            retention_s: self.inner.cfg.retention_s,
-            max_bytes: self.inner.cfg.max_bytes,
-            quota_bytes: self.inner.quota_bytes,
-            max_clip_bytes: self.inner.cfg.max_clip_bytes,
-            chunk_bytes: self.inner.chunk_bytes,
-            chunk_files: st.chunks.len(),
+            dir: Some(inner.dir.display().to_string()),
+            retention_s: inner.cfg.retention_s,
+            max_bytes: inner.cfg.max_bytes,
+            quota_bytes: inner.quota_bytes,
+            max_clip_bytes: inner.cfg.max_clip_bytes,
+            chunk_bytes: sb,
+            chunk_files: st
+                .slots
+                .iter()
+                .filter(|x| x.bytes > 0 && x.l * sb + x.bytes > st.log_floor)
+                .count(),
+            slot_count: inner.slot_count,
+            allocated_bytes: allocated,
+            allocation: Some(inner.allocation),
+            preallocated: inner.preallocated,
+            persisted: true,
+            run: Some(inner.run),
+            recovered_segments: inner.recovery.segments,
+            discarded_slots: inner.recovery.discarded_slots,
+            head_slot: head.map(|h| h.pos),
+            head_offset_bytes: head.map(|h| h.pos * sb + h.bytes),
+            wrap_count: head.map_or(0, |h| h.l / inner.slot_count),
             fs_free_bytes: space.map(|s| s.free),
             fs_total_bytes: space.map(|s| s.total),
-            min_free_bytes: space.map(|s| self.inner.cfg.free_floor(s.total)),
+            min_free_bytes: space.map(|s| inner.cfg.free_floor(s.total)),
             paused: st.paused,
             pauses: c.pauses,
             paused_samples: c.paused_samples,
@@ -921,7 +1632,7 @@ impl IqBuffer {
                 _ => 0.0,
             },
             bytes,
-            disk_bytes: st.disk_bytes,
+            disk_bytes: allocated + inner.journal_len.load(Ordering::Relaxed),
             samples: bytes / BYTES_PER_SAMPLE,
             segments_total: live.len(),
             segments_omitted: omitted,
@@ -950,7 +1661,19 @@ impl IqBuffer {
         max_bytes: u64,
         out: &mut dyn Write,
     ) -> Result<Clip, ClipError> {
-        let plan = self.plan_clip(range, band)?;
+        self.export_clip_run(range, band, None, max_bytes, out)
+    }
+
+    /// [`Self::export_clip`] within run `run` ([`Self::plan_clip_run`]).
+    pub fn export_clip_run(
+        &self,
+        range: ClipRange,
+        band: Option<(f64, f64)>,
+        run: Option<u64>,
+        max_bytes: u64,
+        out: &mut dyn Write,
+    ) -> Result<Clip, ClipError> {
+        let plan = self.plan_clip_run(range, band, run)?;
         if plan.bytes() > max_bytes {
             return Err(ClipError::TooLarge {
                 bytes: plan.bytes(),
@@ -959,17 +1682,41 @@ impl IqBuffer {
         plan.write(out)
     }
 
-    /// Selects the buffered samples in `range` (and `band`) without reading them.
+    /// Selects the buffered samples in `range` (and `band`) without reading them
+    /// ([`Self::plan_clip_run`] with no run).
     pub fn plan_clip(
         &self,
         range: ClipRange,
         band: Option<(f64, f64)>,
     ) -> Result<ClipPlan, ClipError> {
+        self.plan_clip_run(range, band, None)
+    }
+
+    /// Selects the buffered samples in `range` (and `band`) of run `run` without reading them.
+    /// Without a run, an index range selects in this run (stream indices restart with every
+    /// run), and a time range in every run but is refused ([`ClipError::MixedRuns`]) when it
+    /// matches more than one.
+    pub fn plan_clip_run(
+        &self,
+        range: ClipRange,
+        band: Option<(f64, f64)>,
+        run: Option<u64>,
+    ) -> Result<ClipPlan, ClipError> {
+        let inner = &self.inner;
+        let sb = inner.slot_bytes;
+        let run = match (run, range) {
+            (Some(r), _) => Some(r),
+            (None, ClipRange::Index { .. }) => Some(inner.run),
+            (None, ClipRange::Time { .. }) => None,
+        };
         let mut plan: Vec<(ClipPiece, Vec<Span>)> = Vec::new();
         let mut sample_start = 0u64;
         {
-            let st = lock(&self.inner.state);
+            let st = lock(&inner.state);
             for seg in st.segments.iter().filter(|s| s.samples > 0) {
+                if run.is_some_and(|r| r != seg.run) {
+                    continue;
+                }
                 let tune = &seg.start.provenance.tune;
                 if let Some((lo, hi)) = band {
                     let half = tune.sample_rate_hz / 2.0;
@@ -987,6 +1734,11 @@ impl IqBuffer {
                     continue;
                 }
                 if let Some((first, _)) = plan.first() {
+                    if first.run != seg.run {
+                        return Err(ClipError::MixedRuns {
+                            t_ns: seg.t_ns(seg.global_index + j0),
+                        });
+                    }
                     if first.provenance.tune.sample_rate_hz != tune.sample_rate_hz {
                         return Err(ClipError::MixedRates {
                             t_ns: seg.t_ns(seg.global_index + j0),
@@ -998,13 +1750,13 @@ impl IqBuffer {
                     seg.log_start + j1 * BYTES_PER_SAMPLE,
                 );
                 let reads = st
-                    .chunks
+                    .slots
                     .iter()
-                    .filter(|c| c.log_start < b && c.log_start + c.bytes > a)
-                    .map(|c| {
-                        let lo = a.max(c.log_start);
-                        let hi = b.min(c.log_start + c.bytes);
-                        (Arc::clone(&c.file), lo - c.log_start, hi - lo)
+                    .filter(|x| x.l * sb < b && x.l * sb + sb > a)
+                    .map(|x| {
+                        let lo = a.max(x.l * sb);
+                        let hi = b.min(x.l * sb + sb);
+                        (x.pos * sb + (lo - x.l * sb), hi - lo, lo)
                     })
                     .collect();
                 let n = j1 - j0;
@@ -1016,6 +1768,7 @@ impl IqBuffer {
                         t_ns: seg.t_ns(seg.global_index + j0),
                         t1_ns: seg.t_ns(seg.global_index + j1),
                         segment: seg.id,
+                        run: seg.run,
                         provenance: seg.start.provenance.clone(),
                         content_class: seg.start.content_class,
                     },
@@ -1028,24 +1781,52 @@ impl IqBuffer {
             return Err(ClipError::Empty);
         }
         Ok(ClipPlan {
+            buffer: self.clone(),
             plan,
             samples: sample_start,
         })
     }
+}
 
-    /// Advances the floor and deletes chunks for both quotas; returns files to delete.
-    fn evict(&self, st: &mut State) -> Vec<PathBuf> {
-        let mut dead = Vec::new();
-        // Disk bytes: whole oldest chunks (never the one being written).
-        while st.disk_bytes > self.inner.quota_bytes && st.chunks.len() > 1 {
-            let c = st.chunks.pop_front().expect("a chunk");
-            st.disk_bytes -= c.bytes;
-            st.counts.evicted_chunks += 1;
-            st.log_floor = st.log_floor.max(c.log_start + c.bytes);
-            dead.push(c.path);
+impl Inner {
+    /// The whole journal describing `st`: header, run, live slots and their seals, the persisted
+    /// retained segments.
+    fn snapshot(&self, st: &State) -> Vec<Rec> {
+        let mut v = vec![
+            Rec::Header {
+                magic: RING_MAGIC.into(),
+                version: RING_VERSION,
+                slot_bytes: self.slot_bytes,
+                slots: self.slot_count,
+            },
+            Rec::Run { run: self.run },
+        ];
+        for s in &st.slots {
+            v.push(Rec::Open {
+                slot: s.l,
+                pos: s.pos,
+            });
+            if s.sealed > 0 {
+                v.push(Rec::Seal {
+                    slot: s.l,
+                    bytes: s.sealed,
+                    crc: s.crc,
+                    floor: st.log_floor,
+                });
+            }
         }
-        // Duration on the sample clock, to the sample.
-        let max_ns = (self.inner.cfg.retention_s * 1e9) as i64;
+        v.extend(
+            st.segments
+                .iter()
+                .filter(|g| g.persisted && g.samples > 0)
+                .map(Seg::rec),
+        );
+        v
+    }
+
+    /// Duration eviction (advances the floor) and trims segments below the floor.
+    fn evict(&self, st: &mut State) {
+        let max_ns = (self.cfg.retention_s * 1e9) as i64;
         if let Some(t_end) = st.segments.back().map(Seg::t1_ns) {
             let limit = t_end.saturating_sub(max_ns);
             for seg in &st.segments {
@@ -1060,18 +1841,11 @@ impl IqBuffer {
                 break;
             }
         }
-        while st.chunks.len() > 1
-            && st
-                .chunks
-                .front()
-                .is_some_and(|c| c.log_start + c.bytes <= st.log_floor)
-        {
-            let c = st.chunks.pop_front().expect("a chunk");
-            st.disk_bytes -= c.bytes;
-            st.counts.evicted_chunks += 1;
-            dead.push(c.path);
-        }
-        // Segments below the floor.
+        Self::trim(st);
+    }
+
+    /// Drops the samples of segments below the floor.
+    fn trim(st: &mut State) {
         let floor = st.log_floor;
         loop {
             let keep_open = st.segments.len() == 1 && st.open;
@@ -1096,7 +1870,6 @@ impl IqBuffer {
             st.segments.pop_front();
             st.counts.evicted_segments += 1;
         }
-        dead
     }
 }
 
@@ -1108,6 +1881,7 @@ impl IqBufferWriter {
 
     /// Starts a segment; the next [`Self::append`] belongs to it.
     pub fn begin_segment(&mut self, start: SegmentStart) {
+        let run = self.buffer.inner.run;
         let mut st = lock(&self.buffer.inner.state);
         if st.segments.back().is_some_and(|s| s.samples == 0) {
             st.segments.pop_back();
@@ -1117,10 +1891,13 @@ impl IqBufferWriter {
         let log_start = st.log_end;
         st.segments.push_back(Seg {
             id,
+            run,
+            start_log: log_start,
             log_start,
             samples: 0,
             global_index: start.global_index,
             start,
+            persisted: false,
         });
         st.open = true;
     }
@@ -1152,11 +1929,12 @@ impl IqBufferWriter {
 
     /// Appends interleaved ci8 `bytes` (whole samples) to the open segment.
     ///
-    /// - **Paused** (another chunk would go below the free-space floor): the rest is not stored
-    ///   (`paused_samples`), the segment ends, and `Ok` is returned.
+    /// - **Paused** (a sparse ring's next slot would go below the free-space floor): the rest is
+    ///   not stored (`paused_samples`), the segment ends, and `Ok` is returned.
     /// - **Write error**: the unwritten samples are counted (`failed_samples`), the segment ends,
     ///   the error is kept and returned, and writes back off; an append during the back-off
     ///   stores nothing, touches no file and returns an error.
+    /// - A checkpoint follows when [`CHECKPOINT_INTERVAL`] has passed since the last one.
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
         debug_assert!(bytes.len() % 2 == 0);
         let bytes = &bytes[..bytes.len() & !1];
@@ -1187,120 +1965,216 @@ impl IqBufferWriter {
                     return Ok(());
                 }
                 Err(e) => {
-                    // A chunk keeps only what its index entry counts.
-                    let accounted = lock(&inner.state).chunks.back().map_or(0, |c| c.bytes);
-                    if let Some(f) = self.file.take() {
-                        let _ = f.set_len(accounted);
-                    }
-                    self.room = 0;
-                    self.backoff = if self.backoff.is_zero() {
-                        RETRY_BACKOFF_MIN
-                    } else {
-                        (self.backoff * 2).min(RETRY_BACKOFF_MAX)
-                    };
-                    self.retry_at = Some(Instant::now() + self.backoff);
-                    let mut st = lock(&inner.state);
-                    st.counts.write_errors += 1;
-                    st.counts.failed_samples += rest.len() as u64 / BYTES_PER_SAMPLE;
-                    st.error = Some(e.to_string());
-                    st.open = false;
+                    self.fail(&e, rest.len() as u64 / BYTES_PER_SAMPLE);
                     return Err(e);
                 }
             }
         }
         self.backoff = Duration::ZERO;
+        if self.last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+            if let Err(e) = self.checkpoint() {
+                self.fail(&e, 0);
+            }
+        }
         Ok(())
+    }
+
+    fn fail(&mut self, e: &io::Error, lost_samples: u64) {
+        self.backoff = if self.backoff.is_zero() {
+            RETRY_BACKOFF_MIN
+        } else {
+            (self.backoff * 2).min(RETRY_BACKOFF_MAX)
+        };
+        self.retry_at = Some(Instant::now() + self.backoff);
+        let mut st = lock(&self.buffer.inner.state);
+        st.counts.write_errors += 1;
+        st.counts.failed_samples += lost_samples;
+        st.error = Some(e.to_string());
+        st.open = false;
     }
 
     /// Writes some of `rest`; `Ok(false)`: paused (nothing written).
     fn write_some(&mut self, rest: &mut &[u8]) -> io::Result<bool> {
         let inner = Arc::clone(&self.buffer.inner);
-        let hooks = Arc::clone(&inner.hooks);
-        let n;
-        let need_chunk = self.file.is_none() || self.room == 0;
-        if need_chunk {
-            self.file = None;
-            // The free-space floor: an unknown space carries on (a full disk then fails a write).
-            if let Ok(space) = hooks.fs_space(&inner.dir) {
-                let need = inner
-                    .cfg
-                    .free_floor(space.total)
-                    .saturating_add(inner.chunk_bytes);
-                let mut st = lock(&inner.state);
-                if space.free < need {
-                    if !st.paused {
-                        st.paused = true;
-                        st.counts.pauses += 1;
+        let sb = inner.slot_bytes;
+        if self.cur.is_none_or(|c| c.offset == sb) {
+            if !inner.preallocated {
+                // A sparse ring consumes space as it fills: keep the floor (an unknown space
+                // carries on, and a full disk then fails a write).
+                if let Ok(space) = inner.hooks.fs_space(&inner.dir) {
+                    let need = inner.cfg.free_floor(space.total).saturating_add(sb);
+                    let mut st = lock(&inner.state);
+                    if space.free < need {
+                        if !st.paused {
+                            st.paused = true;
+                            st.counts.pauses += 1;
+                        }
+                        return Ok(false);
                     }
-                    return Ok(false);
+                    st.paused = false;
                 }
-                st.paused = false;
             }
-            n = (inner.chunk_bytes as usize).min(rest.len());
-            let seq = {
-                let mut st = lock(&inner.state);
-                st.next_chunk_seq += 1;
-                st.next_chunk_seq - 1
-            };
-            let path = inner.dir.join(format!("{seq:016}.ci8"));
-            // A chunk enters the index only once its first write succeeded.
-            let created = (|| {
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(&path)?;
-                hooks.before_write(n)?;
-                file.write_all(&rest[..n])?;
-                let read = File::open(&path)?;
-                Ok::<_, io::Error>((file, read))
-            })();
-            let (file, read) = match created {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = fs::remove_file(&path);
-                    return Err(e);
+            self.advance()?;
+        }
+        let c = self.cur.as_mut().expect("a slot");
+        let n = ((sb - c.offset) as usize).min(rest.len());
+        inner.hooks.before_write(n)?;
+        self.data.write_all_at(&rest[..n], c.pos * sb + c.offset)?;
+        c.crc = crc32_update(c.crc, &rest[..n]);
+        c.offset += n as u64;
+        *rest = &rest[n..];
+        let mut st = lock(&inner.state);
+        st.slots.back_mut().expect("the slot").bytes += n as u64;
+        st.log_end += n as u64;
+        st.segments.back_mut().expect("the open segment").samples += n as u64 / BYTES_PER_SAMPLE;
+        inner.evict(&mut st);
+        Ok(true)
+    }
+
+    /// Seals the full slot, takes the next position (evicting the oldest slot when none is free)
+    /// and journals it before any of its bytes is written.
+    fn advance(&mut self) -> io::Result<()> {
+        let inner = Arc::clone(&self.buffer.inner);
+        let sb = inner.slot_bytes;
+        if self.cur.is_some_and(|c| c.offset > c.sealed) {
+            self.checkpoint()?;
+        }
+        let (l, pos) = {
+            let mut st = lock(&inner.state);
+            let l = st.slots.back().map_or(st.log_end / sb, |s| s.l + 1);
+            let pos = match st.free.pop_first() {
+                Some(p) => p,
+                None => {
+                    let old = st.slots.pop_front().expect("a full ring has slots");
+                    st.log_floor = st.log_floor.max((old.l + 1) * sb);
+                    st.counts.evicted_chunks += 1;
+                    Inner::trim(&mut st);
+                    old.pos
                 }
             };
-            let mut st = lock(&inner.state);
-            let log_start = st.log_end;
-            st.chunks.push_back(Chunk {
-                log_start,
+            st.log_end = st.log_end.max(l * sb);
+            st.log_floor = st
+                .log_floor
+                .max(st.slots.front().map_or(l * sb, |s| s.l * sb));
+            st.slots.push_back(Slot {
+                l,
+                pos,
                 bytes: 0,
-                file: Arc::new(read),
-                path,
+                sealed: 0,
+                crc: 0,
             });
-            self.file = Some(file);
-            self.room = inner.chunk_bytes;
-        } else {
-            n = (self.room as usize).min(rest.len());
-            hooks.before_write(n)?;
-            self.file
-                .as_mut()
-                .expect("a chunk file")
-                .write_all(&rest[..n])?;
-        }
-        self.room -= n as u64;
-        *rest = &rest[n..];
-        let dead = {
-            let mut st = lock(&inner.state);
-            st.chunks.back_mut().expect("the chunk").bytes += n as u64;
-            st.log_end += n as u64;
-            st.disk_bytes += n as u64;
-            st.segments.back_mut().expect("the open segment").samples +=
-                n as u64 / BYTES_PER_SAMPLE;
-            self.buffer.evict(&mut st)
+            (l, pos)
         };
-        for p in dead {
-            let _ = fs::remove_file(p);
+        if let Err(e) = self.journal_append(&[Rec::Open { slot: l, pos }]) {
+            let mut st = lock(&inner.state);
+            st.slots.pop_back();
+            st.free.insert(pos);
+            return Err(e);
         }
-        Ok(true)
+        self.cur = Some(Cursor {
+            l,
+            pos,
+            offset: 0,
+            crc: 0,
+            sealed: 0,
+        });
+        Ok(())
+    }
+
+    fn journal_append(&mut self, recs: &[Rec]) -> io::Result<()> {
+        let bytes = encode(recs);
+        let inner = &self.buffer.inner;
+        let r = self
+            .journal
+            .write_all(&bytes)
+            .and_then(|()| self.journal.sync_data());
+        match r {
+            Ok(()) => {
+                inner
+                    .journal_len
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                // A torn record would hide every later one: cut it off.
+                let _ = self
+                    .journal
+                    .set_len(inner.journal_len.load(Ordering::Relaxed));
+                Err(e)
+            }
+        }
+    }
+
+    /// Makes everything written so far durable: fsyncs the ring, journals the new segment starts
+    /// and a seal of the current slot, fsyncs the journal; compacts an outgrown journal.
+    pub fn checkpoint(&mut self) -> io::Result<()> {
+        self.last_checkpoint = Instant::now();
+        let Some(c) = self.cur else {
+            return Ok(());
+        };
+        let inner = Arc::clone(&self.buffer.inner);
+        let (mut recs, ids, floor) = {
+            let st = lock(&inner.state);
+            let pending: Vec<&Seg> = st
+                .segments
+                .iter()
+                .filter(|g| !g.persisted && g.samples > 0)
+                .collect();
+            (
+                pending.iter().map(|g| g.rec()).collect::<Vec<_>>(),
+                pending.iter().map(|g| g.id).collect::<Vec<_>>(),
+                st.log_floor,
+            )
+        };
+        if recs.is_empty() && c.offset == c.sealed {
+            return Ok(());
+        }
+        self.data.sync_data()?;
+        recs.push(Rec::Seal {
+            slot: c.l,
+            bytes: c.offset,
+            crc: c.crc,
+            floor,
+        });
+        self.journal_append(&recs)?;
+        {
+            let mut st = lock(&inner.state);
+            for g in st.segments.iter_mut().filter(|g| ids.contains(&g.id)) {
+                g.persisted = true;
+            }
+            if let Some(s) = st.slots.iter_mut().rev().find(|s| s.l == c.l) {
+                (s.sealed, s.crc) = (c.offset, c.crc);
+            }
+        }
+        if let Some(cur) = self.cur.as_mut() {
+            cur.sealed = c.offset;
+        }
+        let len = inner.journal_len.load(Ordering::Relaxed);
+        if len > JOURNAL_COMPACT_MIN.max(4 * self.compacted_len) {
+            let recs = inner.snapshot(&lock(&inner.state));
+            let (journal, len) = write_snapshot(&inner.dir, &recs)?;
+            self.journal = journal;
+            inner.journal_len.store(len, Ordering::Relaxed);
+            self.compacted_len = len;
+        }
+        Ok(())
+    }
+
+    /// Test support: drops the writer like a crash (no final checkpoint).
+    #[doc(hidden)]
+    pub fn simulate_crash(mut self) {
+        self.skip_final_checkpoint = true;
     }
 }
 
 impl Drop for IqBufferWriter {
     fn drop(&mut self) {
         self.end_segment();
+        if !self.skip_final_checkpoint {
+            if let Err(e) = self.checkpoint() {
+                eprintln!("IQ capture ring: final checkpoint failed: {e}");
+            }
+        }
     }
 }
 
@@ -1322,9 +2196,10 @@ mod tests {
         }
     }
 
-    /// A filesystem whose free space and write failures the test sets.
+    /// A filesystem whose free space, write failures and preallocation support the test sets.
     struct Faults {
         fail: AtomicBool,
+        sparse: AtomicBool,
         free: AtomicU64,
         writes: AtomicU64,
     }
@@ -1347,14 +2222,121 @@ mod tests {
                 Ok(())
             }
         }
+
+        fn preallocate(&self, file: &File, len: u64) -> io::Result<bool> {
+            if self.sparse.load(Ordering::SeqCst) {
+                file.set_len(len)?;
+                Ok(false)
+            } else {
+                preallocate(file, len)
+            }
+        }
     }
 
     fn faults() -> Arc<Faults> {
         Arc::new(Faults {
             fail: AtomicBool::new(false),
+            sparse: AtomicBool::new(false),
             free: AtomicU64::new(100 << 30),
             writes: AtomicU64::new(0),
         })
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("hk-store-iqbuffer-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        d
+    }
+
+    /// The buffer's files: names and sizes.
+    fn files(dir: &Path) -> Vec<(String, u64)> {
+        let mut v: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.metadata().unwrap().len(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn ring_len(dir: &Path) -> u64 {
+        fs::metadata(dir.join(RING_FILE)).unwrap().len()
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        files(dir).into_iter().map(|(n, _)| n).collect()
+    }
+
+    const RING_NAMES: [&str; 3] = [RING_FILE, JOURNAL_FILE, LOCK_FILE];
+
+    /// (id, run, global_index, samples, t0_ns, t1_ns, centre) of every listed segment.
+    fn seg_keys(s: &IqBufferStatus) -> Vec<(u64, u64, u64, u64, i64, i64, f64)> {
+        s.segments
+            .iter()
+            .map(|g| {
+                (
+                    g.id,
+                    g.run,
+                    g.global_index,
+                    g.samples,
+                    g.t0_ns,
+                    g.t1_ns,
+                    g.center_hz,
+                )
+            })
+            .collect()
+    }
+
+    fn prov(center_hz: f64, fs: f64) -> Provenance {
+        Provenance {
+            device_id: "test".into(),
+            tune: Tune {
+                center_hz,
+                sample_rate_hz: fs,
+                lna_db: 16.0,
+                vga_db: 20.0,
+                amp_on: false,
+                bandwidth_hz: 0.75 * fs,
+            },
+            overload: false,
+            quantisation_limited: false,
+            temperature_c: None,
+            antenna_port: None,
+            clock_source: ClockSource::Internal,
+            clock_locked: true,
+            calibration_state_ref: None,
+            spur_mask_ref: None,
+            timestamp_method: TimestampMethod::Synthetic,
+            timestamp_error_budget_ns: None,
+        }
+    }
+
+    fn start(index: u64, t_ns: i64, center_hz: f64, fs: f64) -> SegmentStart {
+        SegmentStart {
+            global_index: index,
+            t_ns,
+            provenance: prov(center_hz, fs),
+            content_class: ContentClass::Unrestricted,
+            dropped_before: 0,
+        }
+    }
+
+    fn ramp(from: u64, n: u64) -> Vec<u8> {
+        (from..from + n)
+            .flat_map(|i| [i as u8, (i >> 8) as u8])
+            .collect()
+    }
+
+    fn export(buf: &IqBuffer, range: ClipRange, run: Option<u64>) -> Result<Vec<u8>, ClipError> {
+        let mut out = Vec::new();
+        buf.export_clip_run(range, None, run, u64::MAX, &mut out)
+            .map(|_| out)
     }
 
     #[test]
@@ -1395,29 +2377,50 @@ mod tests {
         assert_eq!(c.quota_bytes(), 576_000_000);
         c.max_bytes = Some(512 << 20);
         assert_eq!(c.quota_bytes(), 512 << 20);
+        assert_eq!((c.chunk_bytes(), c.slot_count()), (32 << 20, 16));
         c.max_bytes = Some(1 << 30);
         assert_eq!(c.quota_bytes(), 576_000_000);
         c.max_bytes = Some(1024);
-        assert_eq!(c.quota_bytes(), 2 * MIN_CHUNK_BYTES, "at least two chunks");
+        assert_eq!(c.quota_bytes(), 2 * MIN_CHUNK_BYTES, "at least two slots");
+        assert_eq!(c.slot_count(), 2);
         assert!(c.active(false));
         c.max_bytes = Some(0);
         assert!(!c.active(false));
         c.max_bytes = None;
         c.retention_s = 0.0;
         assert!(!c.active(false));
+        // 1 h at 20 Msps is 144 GiB-class (144 GB) in 64 MiB slots.
+        let hour = IqBufferConfig {
+            retention_s: 3600.0,
+            ..IqBufferConfig::default()
+        };
+        assert_eq!(hour.quota_bytes(), 144_000_000_000);
+        assert_eq!(hour.chunk_bytes(), MAX_CHUNK_BYTES);
         // The default free-space floor: 10 % within 2..8 GiB.
         let d = IqBufferConfig::default();
         assert_eq!(d.free_floor(1 << 40), 8 << 30);
         assert_eq!(d.free_floor(64 << 30), (64u64 << 30) / 10);
         assert_eq!(d.free_floor(8 << 30), 2 << 30);
+        // CRC-32 check value, and it continues across pieces.
+        assert_eq!(crc32_update(0, b"123456789"), 0xCBF4_3926);
+        let data = ramp(7, 1000);
+        assert_eq!(
+            crc32_update(crc32_update(0, &data[..333]), &data[333..]),
+            crc32_update(0, &data)
+        );
     }
 
     #[test]
-    fn capture_buffer_failed_writes_leave_no_chunks_and_back_off() {
+    fn capture_buffer_failed_writes_store_nothing_and_back_off() {
         let dir = tmp("enospc");
         let hooks = faults();
-        let (buf, mut w) =
-            IqBuffer::open_with(&dir, cfg(1e9, Some(2 * MIN_CHUNK_BYTES)), hooks.clone()).unwrap();
+        let c = cfg(1e9, Some(2 * MIN_CHUNK_BYTES));
+        let (buf, mut w) = IqBuffer::open_with(&dir, c, hooks.clone()).unwrap();
+        assert_eq!(
+            names(&dir),
+            RING_NAMES.map(String::from).to_vec().tap_sort()
+        );
+        assert_eq!(ring_len(&dir), 2 * MIN_CHUNK_BYTES, "allocated up front");
         hooks.fail.store(true, Ordering::SeqCst);
         let blocks = 2000u64;
         for i in 0..blocks {
@@ -1425,12 +2428,10 @@ mod tests {
             assert!(w.append(&ramp(i * 1024, 1024)).is_err());
         }
         let s = buf.status(None, None, 10);
-        assert_eq!((s.chunk_files, s.disk_bytes, s.samples), (0, 0, 0), "{s:?}");
-        assert_eq!(
-            fs::read_dir(&dir).unwrap().count(),
-            0,
-            "no chunk file stays"
-        );
+        assert_eq!((s.chunk_files, s.samples), (0, 0), "{s:?}");
+        assert_eq!(s.allocated_bytes, 2 * MIN_CHUNK_BYTES);
+        assert!(s.disk_bytes > s.allocated_bytes, "ring + journal: {s:?}");
+        assert_eq!(ring_len(&dir), 2 * MIN_CHUNK_BYTES, "the ring never grows");
         let attempts = hooks.writes.load(Ordering::SeqCst);
         assert!(
             (1..=3).contains(&s.write_errors) && attempts == s.write_errors,
@@ -1439,37 +2440,66 @@ mod tests {
         assert_eq!(s.failed_samples, blocks * 1024);
         assert_eq!(s.segments_total, 0);
         assert!(s.error.is_some());
-        // Writable again after the back-off: one chunk, exactly the data.
+        // Writable again after the back-off: exactly the data.
         hooks.fail.store(false, Ordering::SeqCst);
         std::thread::sleep(RETRY_BACKOFF_MIN * (1 << s.write_errors) + Duration::from_millis(50));
         w.begin_segment(start(1 << 30, 5_000_000_000, 100e6, 1e6));
         w.append(&ramp(0, 1024)).unwrap();
         let s = buf.status(None, None, 10);
         assert_eq!((s.chunk_files, s.samples), (1, 1024), "{s:?}");
-        // A failure in a chunk already indexed keeps the chunk at its indexed size.
+        // A failure after that stores nothing more; the ring keeps its size.
         hooks.fail.store(true, Ordering::SeqCst);
         assert!(w.append(&ramp(1024, 1024)).is_err());
         let s = buf.status(None, None, 10);
-        assert_eq!((s.chunk_files, s.samples, s.disk_bytes), (1, 1024, 2048));
-        let files: Vec<_> = fs::read_dir(&dir).unwrap().flatten().collect();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].metadata().unwrap().len(), 2048);
+        assert_eq!((s.chunk_files, s.samples), (1, 1024));
+        assert_eq!(ring_len(&dir), 2 * MIN_CHUNK_BYTES);
+        // Only what was stored comes back after a restart.
         drop(w);
+        drop(buf);
+        hooks.fail.store(false, Ordering::SeqCst);
+        let (buf, w2) = IqBuffer::open_with(&dir, c, hooks).unwrap();
+        let s = buf.status(None, None, 10);
+        assert_eq!((s.samples, s.recovered_segments), (1024, 1), "{s:?}");
+        assert_eq!(
+            export(
+                &buf,
+                ClipRange::Index {
+                    start: 0,
+                    end: 1 << 40
+                },
+                Some(1)
+            )
+            .unwrap(),
+            ramp(0, 1024)
+        );
+        drop(w2);
         drop(buf);
         let _ = fs::remove_dir_all(&dir);
     }
 
+    trait TapSort {
+        fn tap_sort(self) -> Self;
+    }
+
+    impl TapSort for Vec<String> {
+        fn tap_sort(mut self) -> Self {
+            self.sort();
+            self
+        }
+    }
+
     #[test]
-    fn capture_buffer_pauses_below_the_free_space_floor_and_resumes() {
+    fn capture_buffer_sparse_ring_pauses_below_the_free_space_floor_and_resumes() {
         let dir = tmp("floor");
         let hooks = faults();
+        hooks.sparse.store(true, Ordering::SeqCst);
         let mut c = cfg(1e9, Some(4 * MIN_CHUNK_BYTES));
         c.min_free_bytes = Some(1 << 30);
         let (buf, mut w) = IqBuffer::open_with(&dir, c, hooks.clone()).unwrap();
         let per_chunk = MIN_CHUNK_BYTES / 2;
         w.begin_segment(start(0, 0, 100e6, 1e6));
         w.append(&ramp(0, per_chunk)).unwrap();
-        // Another chunk would leave less than the floor free.
+        // Another slot of the sparse ring would leave less than the floor free.
         hooks.free.store(1 << 30, Ordering::SeqCst);
         w.append(&ramp(per_chunk, 100)).unwrap();
         assert!(!w.is_open() && w.is_paused());
@@ -1478,7 +2508,7 @@ mod tests {
             w.append(&ramp(0, 100)).unwrap();
         }
         let s = buf.status(None, None, 10);
-        assert!(s.paused, "{s:?}");
+        assert!(s.paused && !s.preallocated, "{s:?}");
         assert_eq!((s.pauses, s.paused_samples), (1, 5100));
         assert_eq!((s.chunk_files, s.samples), (1, per_chunk));
         assert_eq!(
@@ -1486,7 +2516,7 @@ mod tests {
             (Some(1 << 30), Some(TOTAL), Some(1 << 30))
         );
         assert_eq!((s.write_errors, s.failed_samples), (0, 0));
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(files(&dir).len(), 3);
         // Room again: resumes into a new segment after the gap.
         hooks.free.store(100 << 30, Ordering::SeqCst);
         w.begin_segment(start(per_chunk + 10_000, 0, 100e6, 1e6));
@@ -1504,7 +2534,7 @@ mod tests {
     fn capture_buffer_index_and_ns_ranges_are_exact_at_a_fractional_ns_rate() {
         let dir = tmp("exact");
         let fs_hz = 2.4e6; // 416.67 ns per sample
-        let (buf, mut w) = IqBuffer::open(&dir, cfg(600.0, Some(1 << 30))).unwrap();
+        let (buf, mut w) = IqBuffer::open(&dir, cfg(600.0, Some(1 << 20))).unwrap();
         let t0 = 1_757_000_000_123_456_789i64;
         w.begin_segment(start(0, t0, 100e6, fs_hz));
         w.append(&ramp(0, 60_000)).unwrap();
@@ -1593,61 +2623,15 @@ mod tests {
             assert_eq!(ClipRange::from_unix_s(a, b), None, "{a} {b}");
         }
         drop(w);
+        drop(buf);
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    fn tmp(tag: &str) -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("hk-store-iqbuffer-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        d
-    }
-
-    fn prov(center_hz: f64, fs: f64) -> Provenance {
-        Provenance {
-            device_id: "test".into(),
-            tune: Tune {
-                center_hz,
-                sample_rate_hz: fs,
-                lna_db: 16.0,
-                vga_db: 20.0,
-                amp_on: false,
-                bandwidth_hz: 0.75 * fs,
-            },
-            overload: false,
-            quantisation_limited: false,
-            temperature_c: None,
-            antenna_port: None,
-            clock_source: ClockSource::Internal,
-            clock_locked: true,
-            calibration_state_ref: None,
-            spur_mask_ref: None,
-            timestamp_method: TimestampMethod::Synthetic,
-            timestamp_error_budget_ns: None,
-        }
-    }
-
-    fn start(index: u64, t_ns: i64, center_hz: f64, fs: f64) -> SegmentStart {
-        SegmentStart {
-            global_index: index,
-            t_ns,
-            provenance: prov(center_hz, fs),
-            content_class: ContentClass::Unrestricted,
-            dropped_before: 0,
-        }
-    }
-
-    fn ramp(from: u64, n: u64) -> Vec<u8> {
-        (from..from + n)
-            .flat_map(|i| [i as u8, (i >> 8) as u8])
-            .collect()
     }
 
     #[test]
     fn capture_buffer_segments_clip_and_duration_eviction() {
         let dir = tmp("dur");
         let fs_hz = 1000.0;
-        let (buf, mut w) = IqBuffer::open(&dir, cfg(2.0, Some(1 << 30))).unwrap();
+        let (buf, mut w) = IqBuffer::open(&dir, cfg(2.0, Some(1 << 20))).unwrap();
         w.begin_segment(start(0, 0, 100e6, fs_hz));
         w.append(&ramp(0, 1500)).unwrap();
         // A retune with a 500-sample gap.
@@ -1712,28 +2696,40 @@ mod tests {
             ),
             Err(ClipError::Empty)
         ));
+        // The duration floor is persisted: a restart retains the same span.
         drop(w);
+        drop(buf);
+        let (buf, w) = IqBuffer::open(&dir, cfg(2.0, Some(1 << 20))).unwrap();
+        let r = buf.status(None, None, 10);
+        assert_eq!(
+            (r.t0, r.t1, r.samples),
+            (Some(1.0), Some(3.0), 1500),
+            "{r:?}"
+        );
+        drop(w);
+        drop(buf);
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn capture_buffer_byte_quota_evicts_whole_oldest_chunks() {
+    fn capture_buffer_byte_quota_evicts_whole_oldest_slots() {
         let dir = tmp("bytes");
-        let (buf, mut w) = IqBuffer::open(&dir, cfg(1e9, Some(2 * MIN_CHUNK_BYTES))).unwrap();
+        let c = cfg(1e9, Some(2 * MIN_CHUNK_BYTES));
+        let (buf, mut w) = IqBuffer::open(&dir, c).unwrap();
         let fs_hz = 1e6;
         w.begin_segment(start(0, 0, 100e6, fs_hz));
         let per_chunk = MIN_CHUNK_BYTES / 2;
-        // Five chunks' worth: at most two stay on disk.
+        // Five slots' worth: two stay.
         for k in 0..5 {
             w.append(&ramp(k * per_chunk, per_chunk)).unwrap();
         }
         let s = buf.status(None, None, 10);
-        assert!(s.disk_bytes <= 2 * MIN_CHUNK_BYTES, "{s:?}");
+        assert_eq!(s.allocated_bytes, 2 * MIN_CHUNK_BYTES, "{s:?}");
         assert_eq!(s.evicted.chunks, 3);
         assert_eq!(s.samples, 2 * per_chunk);
         assert_eq!(s.segments[0].global_index, 3 * per_chunk);
-        let files = fs::read_dir(&dir).unwrap().count();
-        assert_eq!(files, 2);
+        assert_eq!(files(&dir).len(), 3);
+        assert_eq!(ring_len(&dir), 2 * MIN_CHUNK_BYTES);
         // A mixed-rate range is refused.
         w.begin_segment(start(5 * per_chunk, 10_000_000_000, 100e6, 2e6));
         w.append(&ramp(0, 10)).unwrap();
@@ -1753,10 +2749,305 @@ mod tests {
             buf.export_clip(first, None, 0, &mut Vec::new()),
             Err(ClipError::TooLarge { .. })
         ));
-        // The run's end deletes the chunk files.
+        // The run's end keeps the ring (it persists); the next open recovers it.
+        let before = buf.status(None, None, 10);
         drop(w);
         drop(buf);
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(files(&dir).len(), 3);
+        let (buf, w) = IqBuffer::open(&dir, c).unwrap();
+        let after = buf.status(None, None, 10);
+        assert_eq!(seg_keys(&after), seg_keys(&before));
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ring_wrap_keeps_files_constant_and_evicts_the_oldest_segments_in_order() {
+        let dir = tmp("wrap");
+        let slot = MIN_CHUNK_BYTES;
+        let (buf, mut w) = IqBuffer::open(&dir, cfg(1e9, Some(4 * slot))).unwrap();
+        let s = buf.status(None, None, 10);
+        assert_eq!((s.slot_count, s.allocated_bytes), (4, 4 * slot));
+        assert_eq!(
+            (s.allocation, s.persisted, s.run),
+            (Some(Allocation::Full), true, Some(1))
+        );
+        let names0 = names(&dir);
+        let per_seg = slot / 4; // half a slot of samples
+        let mut g = 0u64;
+        let mut first_id = 0u64;
+        for k in 0..24u64 {
+            w.begin_segment(start(g, g as i64 * 1000, 100e6 + k as f64, 1e6));
+            w.append(&ramp(g, per_seg)).unwrap();
+            g += per_seg;
+            assert_eq!(names(&dir), names0, "the same files after segment {k}");
+            assert_eq!(
+                ring_len(&dir),
+                4 * slot,
+                "the same ring size after segment {k}"
+            );
+            let journal = fs::metadata(dir.join(JOURNAL_FILE)).unwrap().len();
+            assert!(journal < JOURNAL_COMPACT_MIN + (64 << 10), "{journal}");
+            let s = buf.status(None, None, 100);
+            let ids: Vec<u64> = s.segments.iter().map(|x| x.id).collect();
+            assert_eq!(*ids.last().unwrap(), k);
+            assert!(ids.windows(2).all(|p| p[1] == p[0] + 1), "{ids:?}");
+            assert!(ids[0] >= first_id, "evicted oldest first: {ids:?}");
+            first_id = ids[0];
+            assert!(s.bytes <= 4 * slot);
+        }
+        let s = buf.status(None, None, 100);
+        assert_eq!(s.evicted.chunks, 8, "12 slots written into 4");
+        assert_eq!(s.evicted.segments, 16);
+        assert_eq!(first_id, 16);
+        assert_eq!(
+            (s.wrap_count, s.head_slot, s.head_offset_bytes),
+            (2, Some(3), Some(4 * slot))
+        );
+        assert_eq!(s.chunk_files, 4);
+        // The retained data is intact after overwriting in place.
+        let data = export(
+            &buf,
+            ClipRange::Index {
+                start: 0,
+                end: u64::MAX,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(data, ramp(16 * per_seg, 8 * per_seg));
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ring_restart_recovers_segments_and_byte_identical_clips_and_resizes() {
+        let dir = tmp("restart");
+        let slot = MIN_CHUNK_BYTES;
+        let per = slot / 2; // samples per slot
+        let c8 = cfg(1e9, Some(8 * slot));
+        let t0 = 1_757_000_000_000_000_000i64;
+        let (buf, mut w) = IqBuffer::open(&dir, c8).unwrap();
+        assert!(IqBuffer::open(&dir, c8).is_err(), "locked while open");
+        w.begin_segment(start(0, t0, 100e6, 1e6));
+        for k in 0..5 {
+            w.append(&ramp(k * per / 2, per / 2)).unwrap();
+        }
+        w.begin_segment(start(3 * per, t0 + 3 * per as i64 * 1000, 101e6, 1e6));
+        w.append(&ramp(3 * per, per)).unwrap();
+        let before = buf.status(None, None, 100);
+        let range = ClipRange::Index {
+            start: per / 2,
+            end: per / 2 + per,
+        };
+        let clip_before = export(&buf, range, None).unwrap();
+        assert_eq!(clip_before, ramp(per / 2, per));
+        drop(w);
+        drop(buf);
+
+        // Restart: the same span and segments, run 2, byte-identical clips of run 1.
+        let (buf, mut w) = IqBuffer::open(&dir, c8).unwrap();
+        let s = buf.status(None, None, 100);
+        assert_eq!(
+            (s.run, s.recovered_segments, s.discarded_slots),
+            (Some(2), 2, 0)
+        );
+        assert_eq!(seg_keys(&s), seg_keys(&before));
+        assert_eq!(
+            (s.t0, s.t1, s.samples),
+            (before.t0, before.t1, before.samples)
+        );
+        assert!(
+            matches!(export(&buf, range, None), Err(ClipError::Empty)),
+            "indices are per run"
+        );
+        assert_eq!(export(&buf, range, Some(1)).unwrap(), clip_before);
+        let t_range = ClipRange::Time {
+            t0_ns: t0 + (per / 2) as i64 * 1000,
+            t1_ns: t0 + (per / 2 + per) as i64 * 1000,
+        };
+        assert_eq!(export(&buf, t_range, None).unwrap(), clip_before);
+        // A replayed recording restarts at the same times: run 2 overlaps run 1.
+        w.begin_segment(start(0, t0, 100e6, 1e6));
+        w.append(&ramp(0, per)).unwrap();
+        let s = buf.status(None, None, 100);
+        assert_eq!((s.segments[2].id, s.segments[2].run), (2, 2));
+        assert!(matches!(
+            export(&buf, t_range, None),
+            Err(ClipError::MixedRuns { .. })
+        ));
+        assert_eq!(export(&buf, t_range, Some(1)).unwrap(), clip_before);
+        assert_eq!(
+            export(&buf, ClipRange::Index { start: 0, end: per }, None).unwrap(),
+            ramp(0, per)
+        );
+        let before = buf.status(None, None, 100);
+        drop(w);
+        drop(buf);
+
+        // A larger quota keeps everything.
+        let c16 = cfg(1e9, Some(16 * slot));
+        let (buf, w) = IqBuffer::open(&dir, c16).unwrap();
+        let s = buf.status(None, None, 100);
+        assert_eq!((s.slot_count, s.allocation), (16, Some(Allocation::Full)));
+        assert_eq!(ring_len(&dir), 16 * slot);
+        assert_eq!(seg_keys(&s), seg_keys(&before));
+        drop(w);
+        drop(buf);
+
+        // A smaller one keeps the newest contiguous slots stored below the new size (run 1
+        // wrote positions 0..3, run 2 filled 3 and 4).
+        let c3 = cfg(1e9, Some(3 * slot));
+        let (buf, w) = IqBuffer::open(&dir, c3).unwrap();
+        let s = buf.status(None, None, 100);
+        assert_eq!(
+            (s.slot_count, s.samples, s.discarded_slots),
+            (3, 3 * per, 2),
+            "{s:?}"
+        );
+        assert_eq!(ring_len(&dir), 3 * slot);
+        assert_eq!(export(&buf, range, Some(1)).unwrap(), clip_before);
+        drop(w);
+        drop(buf);
+
+        // Another slot size resets the ring.
+        let big = cfg(1e9, Some(64 << 20));
+        let (buf, w) = IqBuffer::open(&dir, big).unwrap();
+        let s = buf.status(None, None, 100);
+        assert_eq!(
+            (s.samples, s.recovered_segments, s.chunk_bytes),
+            (0, 0, 4 << 20)
+        );
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ring_crash_with_a_torn_slot_or_stale_journal_recovers_a_consistent_index() {
+        let dir = tmp("crash");
+        let slot = MIN_CHUNK_BYTES;
+        let per = slot / 2;
+        let c = cfg(1e9, Some(8 * slot));
+        let reopen = || {
+            let (buf, w) = IqBuffer::open(&dir, c).unwrap();
+            let s = buf.status(None, None, 100);
+            (buf, w, s)
+        };
+        let all = ClipRange::Index {
+            start: 0,
+            end: u64::MAX,
+        };
+
+        // 1. A crash with an unsealed tail and a torn journal record.
+        let (buf, mut w) = IqBuffer::open(&dir, c).unwrap();
+        w.begin_segment(start(0, 0, 100e6, 1e6));
+        w.append(&ramp(0, 2 * per)).unwrap();
+        w.checkpoint().unwrap();
+        w.append(&ramp(2 * per, per / 2)).unwrap();
+        w.simulate_crash();
+        drop(buf);
+        let mut j = OpenOptions::new()
+            .append(true)
+            .open(dir.join(JOURNAL_FILE))
+            .unwrap();
+        j.write_all(&[0xff, 0xff, 0, 0, 7]).unwrap();
+        drop(j);
+        let (buf, w, s) = reopen();
+        assert_eq!(
+            (s.samples, s.recovered_segments, s.discarded_slots),
+            (2 * per, 1, 1),
+            "{s:?}"
+        );
+        assert_eq!(export(&buf, all, Some(1)).unwrap(), ramp(0, 2 * per));
+        let journal = fs::read(dir.join(JOURNAL_FILE)).unwrap();
+        assert_eq!(
+            decode(&journal).1,
+            journal.len(),
+            "the journal was rewritten whole"
+        );
+        drop(w);
+        drop(buf);
+
+        // 2. A torn newest slot under a stale seal: that slot fails its CRC and is dropped.
+        let ring = OpenOptions::new()
+            .write(true)
+            .open(dir.join(RING_FILE))
+            .unwrap();
+        ring.write_all_at(&[0x55; 3], slot + 100).unwrap();
+        drop(ring);
+        let (buf, w, s) = reopen();
+        assert_eq!((s.samples, s.discarded_slots), (per, 1), "{s:?}");
+        assert_eq!(export(&buf, all, Some(1)).unwrap(), ramp(0, per));
+        drop(w);
+        drop(buf);
+
+        // 3. A truncated ring file: nothing the index names lies inside it any more.
+        let ring = OpenOptions::new()
+            .write(true)
+            .open(dir.join(RING_FILE))
+            .unwrap();
+        ring.set_len(slot / 2).unwrap();
+        drop(ring);
+        let (buf, mut w, s) = reopen();
+        assert_eq!(
+            (s.samples, s.segments_total, s.recovered_segments),
+            (0, 0, 0),
+            "{s:?}"
+        );
+        assert_eq!(ring_len(&dir), 8 * slot, "re-allocated");
+        w.begin_segment(start(0, 0, 100e6, 1e6));
+        w.append(&ramp(0, 1000)).unwrap();
+        assert_eq!(export(&buf, all, None).unwrap(), ramp(0, 1000));
+        drop(w);
+        drop(buf);
+
+        // 4. A garbage journal: a clean reset.
+        fs::write(dir.join(JOURNAL_FILE), [0u8; 64]).unwrap();
+        let (buf, w, s) = reopen();
+        assert_eq!((s.samples, s.segments_total), (0, 0), "{s:?}");
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ring_allocation_shrinks_or_refuses_when_free_space_is_low() {
+        let dir = tmp("alloc");
+        let hooks = faults();
+        let slot = MIN_CHUNK_BYTES;
+        let mut c = cfg(1e9, Some(8 * slot));
+        c.min_free_bytes = Some(1 << 30);
+        hooks
+            .free
+            .store((1 << 30) + 3 * slot + 100, Ordering::SeqCst);
+        let (buf, mut w) = IqBuffer::open_with(&dir, c, hooks.clone()).unwrap();
+        let s = buf.status(None, None, 10);
+        assert_eq!(
+            (s.quota_bytes, s.slot_count, s.allocated_bytes, s.allocation),
+            (8 * slot, 3, 3 * slot, Some(Allocation::Shrunk)),
+            "{s:?}"
+        );
+        assert_eq!(ring_len(&dir), 3 * slot);
+        w.begin_segment(start(0, 0, 100e6, 1e6));
+        w.append(&ramp(0, 5 * slot / 2)).unwrap();
+        assert_eq!(
+            buf.status(None, None, 10).samples,
+            3 * slot / 2,
+            "a 3-slot ring"
+        );
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+
+        // Not even two slots above the floor: refused, nothing allocated.
+        hooks.free.store((1 << 30) + slot, Ordering::SeqCst);
+        let e = IqBuffer::open_with(&dir, c, hooks).err().expect("refused");
+        assert!(is_allocation_refused(&e), "{e}");
+        assert!(e.to_string().contains("allocation refused"), "{e}");
+        assert!(!dir.join(RING_FILE).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

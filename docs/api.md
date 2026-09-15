@@ -285,40 +285,77 @@ Give exactly one of `selection_id`/`emitter_id`/`band` (else `400 invalid`); `ki
 
 `Session`: `{id, active, selection_id, emitter_id, f_lo_hz, f_hi_hz, kinds, max_s, max_bytes, bytes, started_at, elapsed_s, ended, links_saved, files: [{kind, file, sidecar, extra_files, state, bytes, records, dropped_records, message, recording_id, bitstream_id, url, sidecar_url, extra_urls}]}` — `url`/`sidecar_url`/`extra_urls` are the matching `/api/outputs/{id}/files/{name}` download paths, to which a browser appends `?token=`.
 
-## IQ capture buffer (T-157)
+## IQ capture buffer (T-157, T-178)
 
-The always-on raw-IQ history behind the Capture timeline (ADR-0013 §4 API gap 1): while a source runs, every block the ring receives is kept on disk with its tuning and gain provenance, oldest first out, and any span of it can be exported as a SigMF recording. There is no record button; `POST /api/outputs/record/start` still records forward. Storage and eviction live in `hk_store::iqbuffer`, the per-segment ring reader in `hk_pipeline::iqbuffer`; these routes only validate, route and audit (`crates/hk-api/src/iqbuffer.rs`).
+The always-on raw-IQ history behind the Capture timeline (ADR-0013 §4 API gap 1). While a source runs, every block the ring receives is kept on disk with its tuning and gain provenance, oldest first out. The history **survives restarts**, and any span of it can be exported as a SigMF recording.
 
-- **Storage** (`<data dir>/iqbuffer/`): interleaved ci8 (2 bytes/sample, as captured) in chunk files of a sixteenth of the quota (64 KiB..64 MiB). The segment index is in memory: the buffer lives as long as its run, its chunk files are deleted when the run ends, and a start clears any a killed process left (exported clips are ordinary recordings and stay).
+There is no record button; `POST /api/outputs/record/start` still records forward. Storage, eviction and recovery live in `hk_store::iqbuffer` ([ADR-0014](adr/0014-iq-capture-ring.md)), and the per-segment ring reader in `hk_pipeline::iqbuffer`. These routes only validate, route and audit (`crates/hk-api/src/iqbuffer.rs`).
+
+- **Storage: a pre-allocated ring** (`<data dir>/iqbuffer/`).
+  - **Files.** `ring.ci8` holds `slot_count` fixed-size slots (a sixteenth of the quota, 64 KiB..64 MiB each) of interleaved ci8 (2 bytes/sample, as captured). `ring.journal` is a small CRC-framed index. `ring.lock` stops two runs sharing a directory.
+  - **Allocation.** The whole ring is allocated when the run starts: `F_PREALLOCATE` on macOS, `fallocate` on Linux, or a sparse file where neither works (`preallocated: false`). Allocation writes no data: 8 GiB took 0.27 s on the dev Mac.
+  - **Overwrite in place.** A new slot overwrites the oldest one, so the file count and sizes never change while a run is open, and every position is rewritten in turn.
+  - **Persistence.** Everything written is made durable (checkpointed) at least every second, when a slot fills and when the run stops. A restart recovers the segments and continues the ring. A crash loses at most the last unsynced second.
+  - **Torn data.** Recovery re-checks the newest slots' CRC-32. A torn slot is discarded together with anything newer, as is a torn journal tail.
+  - **Clips** are ordinary recordings and are never evicted.
+- **Runs.** Every start of the buffer is a new `run`. Stream indices (`global_index`) restart with each run, and a replayed recording repeats its sample-clock times, so segments carry their `run`.
+- **Quota changed between runs.**
+  - More slots of the same size: everything is kept.
+  - Fewer slots: the slots that still fit are kept, and the rest are discarded (`discarded_slots`).
+  - A different slot size (e.g. 256 MiB to 4 GiB): the ring resets.
 - **Segments** are contiguous runs of samples under one provenance. A new segment starts on every provenance change (retune, rate, gain, filter, overload), source gap, settle skip, ring overrun or discontinuity flag, so **a retune is always a segment boundary**. Times are on the **sample clock** (ADR-0012 §0: the time the captured block carried; a replayed recording reports the recording's time).
-- **Retention: oldest first**, whichever limit is reached first: the retention window (`t1 − t0` on the sample clock, trimmed to the sample) or the disk quota (whole oldest chunk files are deleted). Every eviction is counted in `evicted`.
+- **Retention: oldest first**, whichever limit is reached first:
+  - the retention window (`t1 − t0` on the sample clock, trimmed to the sample, and kept across restarts);
+  - the ring (a reused slot evicts what it held).
+
+  Every eviction is counted in `evicted`.
 - **Configuration.** On for every run except a lossless (unpaced) replay, which is a recording already.
   - `hk serve --iq-retention <DURATION>` (env `HK_IQ_RETENTION`): the retention window, e.g. `90s`, `2m`, `1h`. Default **`2m`**; `0` or `off` disables the buffer. `hackriffd` takes the same flags.
   - `--iq-buffer-max <SIZE>` (env `HK_IQ_BUFFER_MAX`): an optional hard size cap, e.g. `512MiB`, `8GiB`.
-  - **Quota** `quota_bytes = min(retention × the device's highest sample rate × 2 bytes/sample, max)`, at least two chunks. A HackRF One (20 Msps) at `2m` implies 4.8 GB; a recording replayed uses its own rate. The buffer only holds what was captured: 2 min at 2.4 Msps is 576 MB on disk.
+  - **Quota** `quota_bytes = min(retention × the device's highest sample rate × 2 bytes/sample, max)`, at least two slots; a recording replayed uses its own rate. The ring (`allocated_bytes`, the whole slots within the quota) is **allocated on disk up front**, whatever is captured.
+- **Disk impact.** The disk space is taken at start and stays taken.
+
+  | Retention | Device rate | Disk |
+  |---|---|---|
+  | `2m` (default) | HackRF One, 20 Msps | 4.8 GB |
+  | `1h` | 20 Msps | **144 GB** |
+  | `1h` | 2 Msps | 14.4 GB |
+
+  The quota is sized by the device's *highest* rate, not the rate in use. So a server running `--iq-retention 1h` (staging) should also set `--iq-buffer-max` to the space it can give, e.g. `--iq-buffer-max 16GiB`: at 2.4 Msps that holds about 57 min.
   - `HK_IQ_BUFFER=0` disables the buffer and `=1` forces it on (lossless replays too). `HK_IQ_BUFFER_MIN_FREE` (a size) sets the free-space floor, `HK_IQ_BUFFER_CLIP_MAX` the largest clip (default 256 MiB).
 - **Disk and flash writes.** The writer sustains `2 × rate` bytes/s whatever the retention: 4.8 MB/s (≈ 415 GB/day) at 2.4 Msps, 40 MB/s (≈ 3.5 TB/day) at 20 Msps. Retention and cap bound the space used, not the wear. On eMMC, SD or a small NVMe that is a real endurance cost (a 600 TBW drive lasts about 6 months at 20 Msps around the clock), so shorten the retention, sample slower, or use `--iq-retention off` on storage with limited endurance.
-- **Full disk.** The buffer never fills the disk.
-  - A chunk file enters the index only after its first write succeeds; a failed one is deleted.
-  - A failed write backs further writes off, 100 ms doubling to 10 s (`write_errors`, `failed_samples`, `error`).
-  - Writing **pauses** while another chunk would leave less than the free-space floor free (`min_free_bytes`; by default 10 % of the filesystem, within 2..8 GiB). It resumes as soon as there is room. Each pause is counted (`paused`, `pauses`, `paused_samples`) and shows as a gap.
+- **Free space.** The buffer never fills the disk. The free-space floor (`min_free_bytes`) is by default 10 % of the filesystem, within 2..8 GiB.
+  - **At allocation**, the ring must fit above the floor; a ring's own existing file counts as available.
+    - If it does not fit, the ring is **shrunk** to the whole slots that fit (`allocation: "shrunk"`, `allocated_bytes < quota_bytes`).
+    - Below two slots it is **refused**: `enabled: false`, `allocation: "refused"`, and a `reason` naming the bytes needed, the floor and the free space.
+  - A failed write backs further writes off, 100 ms doubling to 10 s (`write_errors`, `failed_samples`, `error`). Nothing it failed to store is indexed.
+  - **Sparse ring** (`preallocated: false`), whose space is only taken as it fills: writing **pauses** while another slot would leave less than the floor free, and resumes as soon as there is room. Each pause is counted (`paused`, `pauses`, `paused_samples`) and shows as a gap.
 - **Never blocks capture.** The buffer is one more ring reader on its own thread; the ring never waits for it on a live source. A disk too slow for the rate laps the reader: the lost samples are counted in `dropped_samples` and show as a gap before the next segment.
 - **Content rule.** Only when `HK_CONTENT_GATING=1`: a block whose window's class forbids content is not stored (`gated_samples`), as the manual recorder refuses it.
 
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | GET | `/api/iqbuffer` | `?[t0=<unix s>][&t1=<unix s>][&limit=1..10000, default 1000]` | `IqBufferStatus` |
-| POST | `/api/iqbuffer/clip` | one range: `{"t0", "t1"}` (Unix s), `{"t0_ns", "t1_ns"}` (integer Unix ns) or `{"global_index", "samples"}`; plus `"band"?: {"f_lo", "f_hi"}, "label"?` | `{"recording": Clip}` (audited `iqbuffer_clip`) |
+| POST | `/api/iqbuffer/clip` | one range: `{"t0", "t1"}` (Unix s), `{"t0_ns", "t1_ns"}` (integer Unix ns) or `{"global_index", "samples"}`; plus `"band"?: {"f_lo", "f_hi"}, "label"?, "run"?` | `{"recording": Clip}` (audited `iqbuffer_clip`) |
 
-**`IqBufferStatus`**: `{enabled, reason, dir, retention_s, max_bytes, quota_bytes, max_clip_bytes, chunk_bytes, chunk_files, fs_free_bytes, fs_total_bytes, min_free_bytes, paused, pauses, paused_samples, t0, t1, span_s, bytes, disk_bytes, samples, segments_total, segments_omitted, segments: [Segment], gaps: [Gap], evicted: {chunks, segments, samples, bytes}, dropped_samples, gated_samples, write_errors, failed_samples, error}`.
-- `enabled: false` with a `reason` when the run has no buffer (disabled, lossless replay, or the directory could not open); every count is then 0.
-- `retention_s` is the window, `max_bytes` the hard cap (`null` without one), and `quota_bytes` the disk quota enforced. `chunk_files` counts the chunk files in the index.
+**`IqBufferStatus`**: `{enabled, reason, dir, retention_s, max_bytes, quota_bytes, max_clip_bytes, chunk_bytes, chunk_files, slot_count, allocated_bytes, allocation, preallocated, persisted, run, recovered_segments, discarded_slots, head_slot, head_offset_bytes, wrap_count, fs_free_bytes, fs_total_bytes, min_free_bytes, paused, pauses, paused_samples, t0, t1, span_s, bytes, disk_bytes, samples, segments_total, segments_omitted, segments: [Segment], gaps: [Gap], evicted: {chunks, segments, samples, bytes}, dropped_samples, gated_samples, write_errors, failed_samples, error}`.
+- `enabled: false` with a `reason` when the run has no buffer (disabled, lossless replay, allocation refused, or the ring could not open, e.g. another run holds it). Every count is then 0.
+- **Sizes.**
+  - `retention_s` is the window, `max_bytes` the hard cap (`null` without one), and `quota_bytes` the quota the configuration asks for.
+  - `chunk_bytes` is the slot size, `slot_count` the slots of the ring, and `allocated_bytes` = `slot_count × chunk_bytes`, the ring file's fixed size (≤ `quota_bytes`).
+  - `chunk_files` counts the slots holding retained samples.
+- **Allocation.** `allocation` is `"full"`, `"shrunk"` (not enough free space for the quota) or `"refused"` (disabled: not even two slots fit); `null` when disabled for another reason. `preallocated` is false when the filesystem only made a sparse file.
+- **Persistence.** `persisted` is always true when enabled. `run` is this run's number. `recovered_segments` counts the segments recovered from earlier runs at start, and `discarded_slots` the slots recovery dropped (unsealed, torn, failed CRC, or no longer fitting).
+- **Write head.** `head_slot` is the ring position being written and `head_offset_bytes` its byte offset in the ring file (`null` before the first write). `wrap_count` counts complete passes over the ring.
 - `fs_free_bytes` and `fs_total_bytes` describe the buffer's filesystem, and `min_free_bytes` is the floor enforced on it; all three are `null` when disabled or unknown.
 - `paused` is true while writing waits for free space. `failed_samples` counts samples lost to failed writes and back-off.
-- `t0`/`t1` are the oldest retained sample and the end of the newest (`null` when empty); `bytes` = `2 × samples` retained; `disk_bytes` counts the chunk files (above `bytes` by less than one chunk).
+- `t0`/`t1` are the earliest retained sample and the latest end over all runs (`null` when empty). `bytes` = `2 × samples` retained. `disk_bytes` is the buffer's files: `allocated_bytes` plus the journal. `evicted` counts this run's evictions, and `evicted.chunks` the slots overwritten.
 - `t0`/`t1` query parameters list only segments overlapping `[t0, t1)`; of the matching segments the newest `limit` are listed, oldest first, and `segments_omitted` counts the rest. `segments_total` counts every retained segment.
-- **`Segment`**: `{id, t0, t1, t0_ns, t1_ns, samples, global_index, center_hz, sample_rate_hz, bandwidth_hz, lna_db, vga_db, amp_on, device_id, antenna_port, overload, content_class, dropped_before}`. `global_index` is the stream index of the first retained sample; `dropped_before` the samples this buffer lost to overruns just before the segment.
-- **`Gap`** (between consecutive listed segments with missing stream indices or losses): `{t0, t1, before_segment, samples, dropped_samples}`. `samples` counts every missing index (source gaps, settle skips after a retune, overruns, gated blocks); `dropped_samples` those lost by this buffer.
+- **`Segment`**: `{id, run, t0, t1, t0_ns, t1_ns, samples, global_index, center_hz, sample_rate_hz, bandwidth_hz, lna_db, vga_db, amp_on, device_id, antenna_port, overload, content_class, dropped_before}`.
+  - `id` increases for the life of the ring.
+  - `global_index` is the stream index of the first retained sample, in its `run`'s numbering.
+  - `dropped_before` counts the samples this buffer lost to overruns just before the segment.
+- **`Gap`** (between consecutive listed segments of the same run with missing stream indices or losses): `{t0, t1, before_segment, samples, dropped_samples}`. `samples` counts every missing index (source gaps, settle skips after a retune, overruns, gated blocks); `dropped_samples` those lost by this buffer.
 
 **Clip export.** The body gives exactly one range on the sample clock:
 - **`{t0_ns, t1_ns}`**, integer Unix ns: exactly the samples whose time lies in `[t0_ns, t1_ns)`. Sample `k` of a segment is at `t0_ns + round_half_up(k × 10⁹ / rate)`, computed in integers.
@@ -327,10 +364,17 @@ The always-on raw-IQ history behind the Capture timeline (ADR-0013 §4 API gap 1
 
 Times must be ≥ 0. A clip is sized before anything is written. It is refused if it is over `max_clip_bytes`, or if it would leave less than the free-space floor free on the recordings filesystem.
 
+**`run`** (optional integer) selects only segments of that run.
+- **Without it**, an index range selects in the **current run** (indices restart every run), and a time range selects in whichever single run it matches.
+- **A time range matching segments of more than one run** answers `409 conflict`: it spans a restart, or a replayed recording repeated its times. Clips are never spliced across runs, so give `run`, or export each side.
+- **A clip of an earlier run** is the same bytes it was before the restart.
+
+The ring can overwrite data while it is being exported. The clip then fails with `404 not_found` instead of exporting other data.
+
 With `band`, only segments whose tuned window (`center ± rate/2`) overlaps `[f_lo, f_hi]` are exported; the data stays the window as captured (not channelised) and the band is a SigMF annotation. The clip is written to `recordings/<id>.sigmf-data` (ci8) and `.sigmf-meta`, with a `Recording` row (kind `iq-snippet`, trigger `manual`, retention `pinned`), like a manual recording.
-- **SigMF metadata.** `global`: `core:sample_rate`, `core:datatype` `ci8`, `core:hw`, `core:recorder` `hk-pipeline:iqbuffer`, `hackriff:provenance` of the first piece. One `captures` entry per contiguous piece (a buffer segment inside the range): `core:sample_start` in the clip, `core:frequency`, `core:datetime` (sample clock), `core:global_index` (the stream index, so a gap between pieces is explicit, never spliced), `hackriff:provenance` (tuning, gains, filter, antenna, overload) and `hackriff:buffer_segment`.
-- **`Clip`**: `{id, label, meta_uri, data_uri, meta_path, data_path, t0, t1, t0_ns, t1_ns, samples, bytes, sample_rate_hz, center_hz, band ([f_lo, f_hi] or null), content_class, captures: [{sample_start, samples, global_index, t0, t0_ns, segment, center_hz, sample_rate_hz, bandwidth_hz, lna_db, vga_db, amp_on, device_id}]}` (`*_uri` relative to the data directory).
-- **Errors** `{"error", "code"}`: `400 invalid` (no range or more than one, a negative time, start ≥ end, zero `samples`, bad `band`/`label`, unknown field or query parameter, a clip over `max_clip_bytes`), `404 not_found` (nothing buffered in the range and band, e.g. already evicted), `409 conflict` (the range spans a sample-rate change: SigMF has one rate per file, so export each side), `503 unavailable` (the run has no buffer, or this server has none), `507 insufficient_storage` (the clip does not fit above the free-space floor), `500 failed` (storage), `405` other methods. Messages never echo values.
+- **SigMF metadata.** `global`: `core:sample_rate`, `core:datatype` `ci8`, `core:hw`, `core:recorder` `hk-pipeline:iqbuffer`, `hackriff:provenance` of the first piece. One `captures` entry per contiguous piece (a buffer segment inside the range): `core:sample_start` in the clip, `core:frequency`, `core:datetime` (sample clock), `core:global_index` (the stream index, so a gap between pieces is explicit, never spliced), `hackriff:provenance` (tuning, gains, filter, antenna, overload), `hackriff:buffer_segment` and `hackriff:buffer_run`.
+- **`Clip`**: `{id, label, meta_uri, data_uri, meta_path, data_path, t0, t1, t0_ns, t1_ns, samples, bytes, sample_rate_hz, center_hz, band ([f_lo, f_hi] or null), content_class, captures: [{sample_start, samples, global_index, t0, t0_ns, segment, run, center_hz, sample_rate_hz, bandwidth_hz, lna_db, vga_db, amp_on, device_id}]}` (`*_uri` relative to the data directory).
+- **Errors** `{"error", "code"}`: `400 invalid` (no range or more than one, a negative time, start ≥ end, zero `samples`, bad `band`/`label`/`run`, unknown field or query parameter, a clip over `max_clip_bytes`), `404 not_found` (nothing buffered in the range, band and run, e.g. already evicted, or overwritten during the export), `409 conflict` (the range spans a sample-rate change: SigMF has one rate per file, so export each side; or a time range spans runs), `503 unavailable` (the run has no buffer, or this server has none), `507 insufficient_storage` (the clip does not fit above the free-space floor), `500 failed` (storage), `405` other methods. Messages never echo values.
 
 ## Streams: WebSocket, TCP and on-demand openers
 

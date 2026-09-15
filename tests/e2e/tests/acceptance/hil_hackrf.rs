@@ -430,7 +430,11 @@ fn hil_blind_fm_survey_on_the_hackrf() {
         token: Some(API_TOKEN.into()),
         listen: Default::default(),
         compute: Default::default(),
-        iq_buffer: Default::default(),
+        // T-178: the ring is allocated up front; keep the test's small.
+        iq_buffer: hk_cli::pipeline::IqBufferArgs {
+            retention_s: None,
+            max_bytes: Some(256 << 20),
+        },
     })
     .expect("start hk serve over the HackRF");
     let addr = server.local_addr();

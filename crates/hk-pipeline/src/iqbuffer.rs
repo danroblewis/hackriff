@@ -1,6 +1,7 @@
 //! Rolling IQ capture buffer of a run (T-157, ADR-0013 §4 API gap 1): always-on raw IQ with
 //! tuning/gain provenance segments, a status and clip export into the recordings model.
-//! Storage, segments and eviction are [`hk_store::iqbuffer`]; this module feeds it from each
+//! Storage (a pre-allocated on-disk ring that survives restarts, T-178 / ADR-0014), segments and
+//! eviction are [`hk_store::iqbuffer`]; this module feeds it from each
 //! segment's ring and turns an exported clip into a SigMF recording plus a `Recording` row.
 //!
 //! - **Real-time safety.** The feeder is one more ring reader on its own thread (`hk-iqbuffer`),
@@ -40,7 +41,8 @@ use hk_model::{
 };
 pub use hk_store::iqbuffer::ClipRange;
 use hk_store::iqbuffer::{
-    ClipError, IqBuffer, IqBufferConfig, IqBufferStatus, IqBufferWriter, OsHooks, SegmentStart,
+    Allocation, ClipError, IqBuffer, IqBufferConfig, IqBufferStatus, IqBufferWriter, OsHooks,
+    SegmentStart, is_allocation_refused,
 };
 use num_complex::Complex;
 use serde::Serialize;
@@ -61,6 +63,9 @@ pub struct ClipRequest {
     pub band: Option<(f64, f64)>,
     /// User label.
     pub label: Option<String>,
+    /// Only segments of this run (T-178; `None`: an index range selects in the current run, a
+    /// time range in any single run).
+    pub run: Option<u64>,
 }
 
 /// Why a clip was not exported.
@@ -111,6 +116,8 @@ pub struct ClipCaptureInfo {
     pub t0_ns: i64,
     /// Buffer segment id.
     pub segment: u64,
+    /// Run of the segment (its stream indices are that run's).
+    pub run: u64,
     /// Tuned centre, Hz.
     pub center_hz: f64,
     /// Sample rate, Hz.
@@ -172,6 +179,8 @@ pub struct IqBufferService {
     writer: Mutex<Option<IqBufferWriter>>,
     cfg: IqBufferConfig,
     reason: Option<String>,
+    /// The ring was refused for lack of free space.
+    refused: bool,
     data_dir: PathBuf,
     db_path: PathBuf,
     device_hw: Option<String>,
@@ -183,14 +192,36 @@ impl IqBufferService {
     /// reported as disabled with its reason).
     pub(crate) fn open(cfg: &PipelineConfig, db_path: PathBuf) -> Self {
         let bc = cfg.iq_buffer;
+        let mut refused = false;
         let (buffer, writer, reason) = if bc.active(cfg.lossless) {
             let dir = cfg.data_dir.join(hk_store::iqbuffer::DIR_NAME);
             let hooks = cfg
                 .iq_buffer_hooks
                 .clone()
                 .unwrap_or_else(|| Arc::new(OsHooks));
+            let started = std::time::Instant::now();
             match IqBuffer::open_with(&dir, bc, hooks) {
-                Ok((b, w)) => (Some(b), Some(w), None),
+                Ok((b, w)) => {
+                    let s = b.status(None, None, 0);
+                    eprintln!(
+                        "IQ capture ring {}: {} slots of {} bytes ({:?}, preallocated {}), run {}, \
+                         {} segments recovered, opened in {:.3} s",
+                        dir.display(),
+                        s.slot_count,
+                        s.chunk_bytes,
+                        s.allocation,
+                        s.preallocated,
+                        b.run(),
+                        s.recovered_segments,
+                        started.elapsed().as_secs_f64()
+                    );
+                    (Some(b), Some(w), None)
+                }
+                Err(e) if is_allocation_refused(&e) => {
+                    eprintln!("IQ capture buffer disabled: {e}");
+                    refused = true;
+                    (None, None, Some(e.to_string()))
+                }
                 Err(e) => {
                     eprintln!("IQ capture buffer disabled: opening {}: {e}", dir.display());
                     (None, None, Some(format!("the buffer could not open: {e}")))
@@ -213,6 +244,7 @@ impl IqBufferService {
             writer: Mutex::new(writer),
             cfg: bc,
             reason,
+            refused,
             data_dir: cfg.data_dir.clone(),
             db_path,
             device_hw: cfg.device_hw.clone(),
@@ -230,7 +262,14 @@ impl IqBufferService {
         let ns = |s: f64| (s * 1e9).round() as i64;
         match &self.buffer {
             Some(b) => b.status(t0_s.map(ns), t1_s.map(ns), limit),
-            None => IqBufferStatus::disabled(&self.cfg, self.reason.clone().unwrap_or_default()),
+            None => {
+                let mut s =
+                    IqBufferStatus::disabled(&self.cfg, self.reason.clone().unwrap_or_default());
+                if self.refused {
+                    s.allocation = Some(Allocation::Refused);
+                }
+                s
+            }
         }
     }
 
@@ -242,7 +281,12 @@ impl IqBufferService {
                 self.reason.clone().unwrap_or_default()
             ))
         })?;
-        let ClipRequest { range, band, label } = request;
+        let ClipRequest {
+            range,
+            band,
+            label,
+            run,
+        } = request;
         match *range {
             ClipRange::Time { t0_ns, t1_ns } if !(0 <= t0_ns && t0_ns < t1_ns) => {
                 return Err(ClipFailure::Invalid(
@@ -274,13 +318,15 @@ impl IqBufferService {
         };
         let _one = self.exports.lock().unwrap_or_else(PoisonError::into_inner);
         let failure = |e: ClipError| match e {
-            ClipError::Empty => ClipFailure::NotFound(e.to_string()),
-            ClipError::MixedRates { .. } => ClipFailure::Conflict(e.to_string()),
+            ClipError::Empty | ClipError::Evicted => ClipFailure::NotFound(e.to_string()),
+            ClipError::MixedRates { .. } | ClipError::MixedRuns { .. } => {
+                ClipFailure::Conflict(e.to_string())
+            }
             ClipError::TooLarge { .. } => ClipFailure::TooLarge(e.to_string()),
             ClipError::Io(_) => ClipFailure::Failed(format!("exporting the clip: {e}")),
         };
         // Sized before anything is written.
-        let plan = buffer.plan_clip(*range, *band).map_err(failure)?;
+        let plan = buffer.plan_clip_run(*range, *band, *run).map_err(failure)?;
         let cap = self.cfg.max_clip_bytes.min(RECORDING_MAX_BYTES);
         if plan.bytes() > cap {
             return Err(ClipFailure::TooLarge(format!(
@@ -354,6 +400,7 @@ impl IqBufferService {
                 let mut extra = serde_json::Map::new();
                 extra.insert("core:global_index".into(), p.global_index.into());
                 extra.insert("hackriff:buffer_segment".into(), p.segment.into());
+                extra.insert("hackriff:buffer_run".into(), p.run.into());
                 Capture {
                     sample_start: p.sample_start,
                     frequency: Some(p.provenance.tune.center_hz),
@@ -440,6 +487,7 @@ impl IqBufferService {
                     t0: s(p.t_ns),
                     t0_ns: p.t_ns,
                     segment: p.segment,
+                    run: p.run,
                     center_hz: p.provenance.tune.center_hz,
                     sample_rate_hz: p.provenance.tune.sample_rate_hz,
                     bandwidth_hz: p.provenance.tune.bandwidth_hz,
@@ -533,6 +581,10 @@ impl IqBufferService {
             }
         }
         w.end_segment();
+        // The segment's end (stop or re-plumb) makes everything stored durable for a restart.
+        if let Err(e) = w.checkpoint() {
+            eprintln!("IQ capture buffer: checkpoint failed: {e}");
+        }
         Ok(())
     }
 }

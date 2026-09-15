@@ -70,7 +70,11 @@ fn live_serve_inventory_shows_real_fm_detections() {
         token: Some(TOKEN.into()),
         listen: Default::default(),
         compute: Default::default(),
-        iq_buffer: Default::default(),
+        // T-178: the ring is allocated up front; keep the test's small.
+        iq_buffer: hk_cli::pipeline::IqBufferArgs {
+            retention_s: None,
+            max_bytes: Some(256 << 20),
+        },
     })
     .expect("start hk serve over the HackRF (is it free?)");
     let addr = server.local_addr();

@@ -183,6 +183,7 @@ impl hk_api::IqBufferControl for PipelineIqBuffer {
                 range: r.range,
                 band: r.band,
                 label: r.label.clone(),
+                run: r.run,
             })
             .map(|c| serde_json::to_value(c).unwrap_or_default())
             .map_err(|e| {
