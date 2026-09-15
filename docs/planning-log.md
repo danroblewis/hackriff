@@ -595,3 +595,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Next:** full check with acceptance (the hop-set gate may affect AWARE-036/042). The user is asked about the live re-run.
 - **B0.216 User deferred the T-084 live HackRF re-run.** T-084 closed on its offline fixes; the live run is now T-100 (deferred, needs exclusive HackRF). **T-098 merged:** synthetic POCSAG (3 channels, multimon-ng oracle decodes 3/3) and synthetic ACARS (self-consistent checker only); ADS-B uses the existing synthetic squitter plus readsb oracle; no recordings were found or captured. Full check of main (T-084 + T-098) follows. Running: T-085 M1-DESIGN.
 - **B0.217 T-099 launched** (dense-FM mode selection with strong adjacent channels, Opus medium), unblocked by T-084. Full check of main after the T-084 + T-098 merges is running; T-084's hop-set gate may touch AWARE-036/042. Running: T-085 (M1-DESIGN), T-099.
+- **B0.218 The full check after the T-084 + T-098 merges failed.** Lint passed.
+  - **Test 1:** `hk-pipeline signal_001_readsb`: readsb decoded 0 of 16 (load ~24; possibly the readsb timing flake).
+  - **Test 2:** `inventory_lifecycle::t078_steady_fm_station_auto_confirms`: the FM station now appears **4×** in the inventory (expected 1).
+  - **Test 3:** `inventory_lifecycle::t082_two_nearby_fm_stations_stay_two_entries`: each station appears **3×**.
+  - **Suspect for 2 and 3:** T-084's hop-set SNR gate (8 dB), which T-084 never ran acceptance against. A likely mechanism is track fragments no longer collapsing, leaving duplicate emitters. T-098 only changed py synth scenarios.
+  - **Next:** the three tests are being re-run 3× to tell flakes from regressions; if deterministic, bisect against pre-T-084 main (3d2a3db^1) and fix or revert.
