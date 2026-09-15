@@ -878,8 +878,11 @@ tasks:
   - id: T-053
     milestone: M0b
     title: HIL - run the device-interface acceptance suite against the real HackRF (receive-only, manual/nightly)
-    status: in-progress
-    authorised: "user 2026-09-14 23:40: run now, stopping the supervisor live hk serve holding the HackRF; supervisor restarts the demo"
+    status: done
+    commit: "abb595f (merged; full check running)"
+    result: "HackRF One serial 0000000000000000d2b861dc263bc293, firmware 2026.01.3 (API 1.10), board < r6; LNA 32/VGA 30/amp on, antenna unrecorded. Device HIL: conformance 20/20; hackrf_hil 1.96 Msps 0 drops, retune applied; hackrf_serve_hil /api/inventory FM rows at 100.6 and 101.3 MHz after 20 s. Built the real HK_DEVICE=hackrf acceptance (tests/e2e/tests/acceptance/hil_hackrf.rs: survey then 150 s blind hk serve --hackrf) - previously only a stub. Run 2: PASS survey (5 stations, 101.30 MHz 22 dB), uncalibrated floor 0.17 dB spread, occupancy 0.52 vs 0.00, live 1.000x RT at 2.4 Msps 0 overruns/drops; FAIL detection of the surveyed station, FM top-3, RDS PI, Listen (not reached); SKIP retune (one strong station), calibrated floor (no calibration for serial); 23 fixture/synthetic acceptance tests skip under HK_DEVICE=hackrf. Hardware-only findings -> T-084. Results table docs/hil/2026-09-14-t053.md. Demo hk serve (pid 45833) stopped, not restarted; HackRF released."
+    followups:
+      - "live-air acceptance failures -> T-084"
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-047, T-049, T-037]
     parallel_group: O
@@ -1394,7 +1397,7 @@ tasks:
   - id: T-083
     milestone: M0b
     title: Sortable left-sidebar lists (inventory Candidates/Confirmed and Selections; frequency ascending default; clickable headers)
-    status: todo
+    status: in-progress
     deps: [T-080]
     parallel_group: N
     use_cases: [AWARE-042]
@@ -1404,7 +1407,21 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
-    hold: "queued after T-053 (HIL run in progress); M1 on hold pending user brief"
+  - id: T-084
+    milestone: M0b
+    title: "Live-air HIL findings: off-centre station becomes one wide edge row; run summary 6 emitters vs /api/inventory 1 row; no RDS decodes live"
+    status: todo
+    deps: [T-053]
+    parallel_group: J
+    use_cases: [SIGNAL-062, AWARE-053]
+    found_by: "T-053 HIL 2026-09-14 (real HackRF, FM band, 2.4 Msps, station 0.7-0.8 MHz off centre)"
+    acceptance: "reproduce each finding (first offline: re-run the recorded/mock case with a strong station near the filter edge and with the T-053 capture if saved; then live): (1) a strong station near the window edge is detected as the station, not a single 0.9-1.2 MHz wide edge row (check floor/CFAR at the baseband filter roll-off, edge exclusion); (2) run-summary emitter count vs /api/inventory rows explained and fixed if a bug (T-082 same_emission over-merge, T-078 default state filter, or pipeline counting) with a regression test; (3) RDS decodes on live air (level/AGC/refinement on HackRF) or a documented limit; HIL acceptance re-run with the station near centre passes detection, FM top-3, RDS PI and Listen; docs/hil updated"
+    area: crates/hk-dsp (floor at filter edge), crates/hk-detect, crates/hk-model (same_emission), crates/hk-pipeline (inventory counts), crates/hk-demod (RDS), tests/e2e hil_hackrf.rs
+    needs: [hardware]
+    model: opus
+    effort: medium
+    core_interface: true
+    hold: "offline reproduction can start any time; live HackRF re-run needs user/supervisor to free the device (demo stopped by T-053)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

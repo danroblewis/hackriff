@@ -567,3 +567,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **User decision:** run T-053 HIL now. The agent stops the supervisor's live `hk serve` (pid 45833) holding the HackRF, runs the device conformance + acceptance suite against live FM-band air (receive-only), logs results to `docs/hil/2026-09-14-t053.md`, and releases the device. The supervisor restarts the demo.
 - **B0.206 The T-081 check failure was a flake.** `data_path plugin_decodes_get_family_explanations_that_reveal_nothing_more_when_gated` (readsb plugin decoded 0 under load) passed 5/5 on rerun and T-081 did not touch the plugin path. It gets a nextest retry like T-077's timing-sensitive tests. The remaining 179 tests from that run (fail-fast) run as a full check after the T-053 HIL finishes, so real-hardware timing isn't loaded down.
 - **B0.207 User via supervisor → T-083** (Sonnet, small UI, no redesign). Sortable sidebar lists: inventory Candidates/Confirmed and Selections default to frequency ascending, and clickable headers re-sort by frequency, SNR, last activity or recurrence where present, toggling asc/desc. Queued after T-053; M1 still on hold pending the user brief.
+- **B0.208 T-053 HIL merged** (abb595f), timeboxed partial pass on the real HackRF.
+  - **Passes:** device conformance 20/20; `hk serve --hackrf` gets real FM inventory rows; the live run keeps real time at 2.4 Msps with 0 drops and a stable floor.
+  - **Live-air failures:** the surveyed 101.3 MHz station was not detected; no FM top-3, no RDS PI, no Listen.
+  - **Hardware-only findings → T-084:** an off-centre station becomes one wide edge row; the run summary counts 6 emitters but /api/inventory returns 1 row; no RDS decodes on live air. T-084 reproduces offline first, then needs the HackRF again.
+  - **Device:** the demo `hk serve` was stopped for the run and not restarted; the HackRF is free.
+  - **Next:** T-083 launches; full check of main running.
