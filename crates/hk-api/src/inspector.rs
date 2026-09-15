@@ -1,0 +1,11 @@
+//! Inspector routes (`POST /api/captures/{id}/parse`) (T-089, ADR-0011 §7). Stub pre-added by T-085 so T-089 fills in only this file:
+//! the `pub mod` line, the dispatch in `http.rs` and the `hk-recipe` dependency already exist.
+//! Answers nothing until then.
+
+use crate::control::{CtlRequest, CtlResponse};
+use crate::http::ApiState;
+
+/// This module's routes; `None` = not mine.
+pub(crate) fn route(_state: &ApiState, _req: &CtlRequest<'_>) -> Option<CtlResponse> {
+    None
+}

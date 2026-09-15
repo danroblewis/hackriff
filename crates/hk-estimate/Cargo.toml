@@ -10,6 +10,8 @@ publish.workspace = true
 hk-core.workspace = true
 hk-dsp.workspace = true
 hk-model.workspace = true
+# T-085: authoring assist (T-091) emits field-map fragments and block params.
+hk-recipe.workspace = true
 # T-010: Complex32 samples, and serde for the ParameterSet record (both already in the ledger).
 num-complex.workspace = true
 serde.workspace = true

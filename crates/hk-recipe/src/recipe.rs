@@ -805,7 +805,7 @@ mod tests {
 
     fn minimal() -> Value {
         json!({
-            "schema": "hackriff.recipe", "schema_version": 1, "id": "t", "version": 1,
+            "schema": "hackriff.recipe", "schema_version": 2, "id": "t", "version": 1,
             "name": "T", "input": {"port": "bits"},
             "nodes": [{"id": "a", "block": "identity"}, {"id": "b", "block": "identity"}],
             "outputs": [{"id": "s", "kind": "stage", "from": "b"}],

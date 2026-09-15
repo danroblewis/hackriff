@@ -103,7 +103,11 @@ impl Block for Identity {
 
     fn reset(&mut self) {}
 
-    fn update_params(&mut self, params: &Params) -> Result<ParamUpdate, BlockError> {
+    fn update_params(
+        &mut self,
+        params: &Params,
+        _ctx: &BuildCtx<'_>,
+    ) -> Result<ParamUpdate, BlockError> {
         if params.is_empty() {
             Ok(ParamUpdate::Applied)
         } else {
@@ -176,6 +180,11 @@ mod tests {
         assert!(matches!(err, BlockError::PortType { .. }));
         let mut p = Params::new();
         p.insert("x".into(), 1.into());
-        assert!(b.update_params(&p).is_err());
+        let maps = std::collections::BTreeMap::new();
+        let ctx = BuildCtx {
+            field_maps: &maps,
+            input_types: &[PortType::Bits],
+        };
+        assert!(b.update_params(&p, &ctx).is_err());
     }
 }

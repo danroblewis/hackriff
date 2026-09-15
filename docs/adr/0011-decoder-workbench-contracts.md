@@ -2,7 +2,7 @@
 
 **Status:** PROVISIONAL (T-085, core interface, reviewed before merge)
 **Touches:** C20 demodulation, C21 bit-framing, C22 decoders, C24 stream output, C25 recordings; Demodulation / Decode / Bitstream ([docs/07 §2.14–2.16](../07-data-model.md)); [ADR-0001](0001-pipeline-runtime.md), [ADR-0003](0003-process-plugin-model.md), [ADR-0004](0004-stream-output-contract.md); brief [docs/13](../13-m1-decoder-workbench.md)
-**Code:** `crates/hk-recipe` (recipe, parameter and field-map schemas), `crates/hk-blocks` (block contract, buffers, status, registry, catalogue), `crates/hk-stream/src/inspector.rs` (inspector wire types), `recipes/rds.recipe.json` (worked example). Wire spec: [`docs/stream-contract.md` §14](../stream-contract.md). Planned routes: [`docs/api.md` "Decoder workbench"](../api.md).
+**Code:** `crates/hk-recipe` (recipe, parameter and field-map schemas), `crates/hk-blocks` (block contract, buffers, status, registry, catalogue), `crates/hk-stream/src/inspector.rs` (inspector wire types), `recipes/rds.recipe.json` (worked example), `recipes/{pocsag,acars,adsb}.recipe.json` (skeletons, §5.1). Wire spec: [`docs/stream-contract.md` §14](../stream-contract.md). Planned routes: [`docs/api.md` "Decoder workbench"](../api.md).
 
 ## Context
 
@@ -24,13 +24,14 @@ Constraints carried in:
 | Question | Decision |
 |---|---|
 | Where the contracts live | New light crate **`hk-recipe`** (schemas, no DSP) + new crate **`hk-blocks`** (block trait, buffers, registry, implementations). Inspector wire types in **`hk-stream::inspector`** next to the audio and burst profiles. |
-| Port types | Closed set: `iq` (Complex32), `real` (f32), `soft` (f32, positive = 1), `bits` (u8 0/1), `frames` (byte records + layer tree). |
+| Port types | Closed set: `iq` (Complex32), `real` (f32), `soft` (f32, positive = 1), `bits` (u8 0/1), `frames` (byte records + shared layer tree). |
+| Frame length | Fixed, or variable: `length_from` (a field decides it, e.g. the ADS-B DF → 56/112) and `terminator` (a closing word, e.g. ACARS ETX, plus trailer bits), with `frame_bits` as the maximum; shared by `sync_search` and `ppm_demod` (§1.5). |
 | Recipe format | **JSON** (serde types are the schema of record; unknown fields are errors). |
 | Graph shape | Ordered node list = linear chain by default; explicit `inputs` make a DAG (fan-out, multi-input blocks). Validated acyclic and fully typed. |
-| Hot edit | New graph built off the real-time thread, swapped at a chunk boundary; unchanged nodes keep state; hot parameters apply in place; downstream of a cold change resets. Capture and the ring are never touched. |
-| Field maps | Nested fields `{name, type, offset, length, unit bits|bytes, endianness, bit_order, condition, repeat}`; types `uint int enum ascii bitfield bytes layer`; structured JSON conditions. |
+| Hot edit | New graph built off the real-time thread, swapped at a chunk boundary; unchanged nodes keep state; hot parameters (field-map content included) apply in place; downstream of a cold change resets. Capture and the ring are never touched. |
+| Field maps | Nested fields `{name, type, offset, length, unit bits|bytes, endianness, bit_order, condition, repeat}`; types `uint int enum ascii bitfield bytes layer`; `ascii` with 8/7/4-bit characters (`pocsag-bcd`) and a parity bit; integers with `skip_bits` and `scale`/`add`/`value_unit`; structured JSON conditions. |
 | Linked selection | Evaluator emits absolute `bits` and `bytes` ranges per node plus a per-byte leaf index; the UI does no range arithmetic. |
-| Inspector framing | A `messages` stream of **`frame` records** (NDJSON), gated by the §6 message rules: metadata (frame, sample index, channel, bit length, revision, fit) always flows; bytes and layers are content. |
+| Inspector framing | A `messages` stream of **`frame` records** (NDJSON), gated by the §6 message rules: bytes and layers are content; metadata (frame, sample index, channel, bit length, revision, fit) flows, reduced to the recipe's `output_policy` allowlist when the class forbids content (stream contract §14.5). |
 | Recorded decoded streams | Stored as the §3 byte stream itself (header + frame records without layers); re-parse = read, evaluate, re-emit. |
 | follow_hops | Recipe-level `input.channels: follow-hops` + one `follow_hops` merge node; upstream of it is instantiated per channel. |
 
@@ -46,14 +47,16 @@ Constraints carried in:
 | `real` | `f32` (discriminator, MPX, envelope) | sample rate | sample-rate |
 | `soft` | `f32` soft symbol/bit, positive = 1 (the §13.3 polarity) | symbol rate | sample-rate |
 | `bits` | `u8`, 0 or 1 | bit rate | sample-rate |
-| `frames` | packed bytes + `FrameInfo` (index, source sample index, channel, bit length, check status, corrected bits, optional layer tree) | frame rate | frame-rate: bounded allocation per frame allowed |
+| `frames` | packed bytes + `FrameInfo` (index, source sample index, channel, bit length, check status, corrected bits, optional layer tree as `Arc<LayerTree>`, so frames → frames pass-through blocks don't clone it) | frame rate | frame-rate: bounded allocation per frame allowed |
 
 Buffers (`hk_blocks::buffer`):
 - `PortSlice<'a>`: borrowed input items.
 - `PortVec`: owned output items, pre-sized at `init`.
 - `FrameBuf`: one byte arena plus per-frame info, cleared with capacity kept.
 
-**Frame packing** is fixed: bit 0 is the MSB of byte 0; `bit_len` may be any length, and the last byte is zero-padded. Air bit order is the recipe's business (a block reverses bits if the protocol is LSB-first on air), so the inspector, field maps and stored streams all share one convention.
+**Frame packing** is fixed: bit 0 is the MSB of byte 0; `bit_len` may be any length, and the last byte is zero-padded. Air bit order is the recipe's business, so the inspector, field maps and stored streams all share one convention:
+- whole LSB-first characters (ACARS) are reversed by the framing block: `sync_search` `bit_order: "lsb"` reverses every 8 bits of the frame body before packing (the sync word stays in air order);
+- LSB-first sub-byte or cross-codeword characters (POCSAG 4-bit BCD and 7-bit text) stay in air order in the frame and are read with the field map's `bit_order: "lsb"`.
 
 Each chunk carries a `ChunkMeta`:
 - `index`: the element count on this port;
@@ -92,7 +95,7 @@ Validation (`ParamSchema::validate_all`) rejects unknown keys, missing required 
 - up to six block-specific numeric `extra`s.
 
 The runtime polls it about every 250 ms. It serves three uses:
-- **status records** on the pipeline's streams, as flat allowlist-shaped metadata (`Status::to_metadata`, §14.3);
+- **status records** on the pipeline's streams: **one record per tick for the whole pipeline**, every node batched as flat allowlist-shaped `<node>.<metric>` keys (`Status::to_metadata(node, &mut map)`, §14.3);
 - `GET /api/pipelines/{id}`;
 - **output-driven refinement**: a recipe's `refine.objective` names a node and a metric (e.g. `crc.error_rate → min`), and the pipeline's refinement loop (`hk_pipeline::refine`, T-070) tunes centre and bandwidth from it.
 
@@ -105,7 +108,7 @@ The runtime polls it about every 250 ms. It serves three uses:
 
 ```
 build(params) → init(input PortInfos) → output PortInfos
-             → process(Io) per chunk ─┬─ update_params(params) → Applied | Rebuild   (between chunks)
+             → process(Io) per chunk ─┬─ update_params(params, ctx) → Applied | Rebuild (between chunks)
                                       ├─ reset()                                    (between chunks)
                                       └─ status()                                   (any time between chunks)
 ```
@@ -129,20 +132,26 @@ build(params) → init(input PortInfos) → output PortInfos
 
 A test (`implemented_blocks_match_their_pinned_descriptors`) fails if an implementation's ports or pinned params drift from this catalogue. Changing a pinned descriptor is a contract change reviewed like this ADR.
 
+**Frame length** (`hk_blocks::schema::frame_length`, used by every frame-producing block). A frame ends at the first of:
+1. `length_from {offset_bits, bits, cases[{min, max, frame_bits}], scale, add, default_bits}`: a field of the frame read MSB first (after `bit_order` is applied); the first case holding its value sets the length, else `value × scale + add` when `scale > 0`, else `default_bits`. ADS-B: DF (bits 0–5) 16–31 → 112, else 56. The block reads the field as soon as its bits arrive.
+2. `terminator {words, bits, step_bits, trailer_bits}`: a closing word checked at multiples of `step_bits` from the frame start, then `trailer_bits` more (ACARS: ETX/ETB at character boundaries, then the 16-bit block check).
+3. `frame_bits`: the fixed length, or the maximum when (1) or (2) is set. A frame cut at the maximum is emitted; its check block marks it.
+
 | Group | Block | Ports | Params |
 |---|---|---|---|
 | iq | `mix` | iq → iq | placeholder |
 | iq | `lowpass`, `resample` | iq\|real → same | placeholder |
 | iq | `fm_demod` | iq → real | pinned: `deviation_hz` (hot), `output_rate_hz`, `deemphasis_s` |
 | iq | `am_demod`, `fsk_demod`, `msk_demod` | iq → real | placeholder |
-| iq | `ppm_demod` | iq → soft | placeholder |
+| iq | `ppm_demod` | iq → frames (+ diagnostic `soft` soft) | pinned: `bit_rate_bd`, `chips_per_bit`, `preamble` + `preamble_chips` (chip pattern), `min_snr_db` (hot), `frame_bits` (max), `length_from` |
 | iq | `subcarrier` | real → iq | pinned: `carrier_hz`, `bandwidth_hz`, `output_rate_hz`, `reference {pilot_hz, multiple, pll_bandwidth_hz}`, `phase_tracking` (hot) |
 | symbol | `clock_recovery` | iq\|real → soft (+ diagnostic `timing_error` real) | pinned: `symbol_rate_bd`, `pulse`, `algorithm`, `soft_from`, `loop_bandwidth` (hot), `max_deviation_ppm` |
 | symbol | `slicer` | soft → bits | pinned: `threshold` (hot), `invert` (hot) |
 | symbol | `diff_decode` | bits → bits | pinned: `mode` (hot) |
 | symbol | `nrzi` | bits → bits | placeholder |
 | symbol | `manchester` | soft\|bits → bits | placeholder |
-| framing | `sync_search` | bits → frames | pinned: `mode` (`sync-word`/`offset-words`) + per-mode keys |
+| framing | `sync_search` | bits → frames | pinned: `mode` (`sync-word`/`offset-words`) + per-mode keys; sync-word: `frame_bits` (fixed, or the maximum), `bit_order` (`lsb` reverses 8-bit characters), `length_from`, `terminator` |
+| framing | `assemble` | frames → frames | pinned: `word_bits`, `start {bit, value}`, `idle_words`, `header`, `slot`, `payload`, `max_words`, `span_frames` (POCSAG address + message codewords → one message, across batches) |
 | framing | `deframe` | bits\|frames → frames | placeholder |
 | framing | `interleave`, `deinterleave` | frames → frames | placeholder |
 | fec | `crc` | frames → frames | pinned: RevEng model (`width, poly, init, refin, refout, xorout`), `span` or `blocks {data_bits, check_bits, offsets}`, `strip`, `drop_invalid` (hot), `correct_burst_bits` |
@@ -182,7 +191,7 @@ JSON, not TOML:
 
 ```jsonc
 {
-  "schema": "hackriff.recipe", "schema_version": 1,
+  "schema": "hackriff.recipe", "schema_version": 2,
   "id": "rds", "version": 1, "name": "RDS: data on FM", "description": "…",
   "match": { "families": ["wfm"], "freq_hz": [[65.8e6, 108e6]], "bandwidth_hz": [1e5, 3e5],
              "symbol_rate_bd": null, "bursty": false, "features": ["pilot-19k"] },
@@ -219,7 +228,7 @@ JSON, not TOML:
 
 ### 2.3 Hot edit without stopping capture (ADR-0001)
 
-A running pipeline = one ring reader + its channel DDC + an instantiated node graph at recipe revision `(version, edit_rev)`. An edit is a whole new recipe document (the draft); `hk_recipe::EditPlan::between(old, new, hot)` classifies each node:
+A running pipeline = one ring reader + its channel DDC + an instantiated node graph at recipe revision `(version, edit_rev)`. An edit is a whole new recipe document (the draft); `hk_recipe::EditPlan::between(old, new, catalogue)` classifies each node from the block descriptors (which params are hot, which name field maps):
 
 | Change | Effect at the swap |
 |---|---|
@@ -229,13 +238,13 @@ A running pipeline = one ring reader + its channel DDC + an instantiated node gr
 | Block, version or inputs changed; node added | Rebuilt. |
 | Node removed | Dropped. |
 | Surviving node downstream of a rebuilt/added/cold node | `reset()` and a `RESET` chunk flag. |
-| Field map changed | Nodes using it swap the map at the next frame (hot by definition); no DSP state touched. |
+| Field map changed | Every node whose `field-map` param names it is a `Params` change on that key (hot by definition): `update_params(params, ctx)` with the new maps at the swap. No DSP state touched, and downstream nodes (e.g. `text` assemblers) don't reset. |
 | `input` changed | Channel re-plumbed, every node rebuilt (a retune-like edit, still no capture stop). |
 | Outputs changed | Removed outputs' streams finish; new ones are offered. Unchanged outputs keep their consumers and `seq`. |
 
 **Mechanics** (T-088):
 1. **Validate the draft.** An invalid draft is refused (`400` with paths), and the running revision is untouched.
-2. **Build off the real-time thread.** New and rebuilt instances are made with `build` + `init` on a control thread, while the old graph keeps processing.
+2. **Build off the real-time thread.** New and rebuilt instances are made with `build` + `init` on a control thread, while the old graph keeps processing. Port negotiation is re-run there too: if a rebuilt node's output `PortInfo` (`rate_hz`, `max_items`) changed, every downstream node is re-`init`ed and its output buffers re-sized on the control thread (on a staged copy, or rebuilt when it can't be re-initialised in place) **before** the swap, so the pipeline thread never allocates or designs filters.
 3. **Swap.** At the first chunk boundary after the build completes, the pipeline thread exchanges graphs in O(nodes). The ring reader's cursor is untouched, so **no sample is lost** and capture never pauses.
 4. **Report.** The result names `applied_at_sample`, the new `edit_rev` and the plan. An `edit` record (§14.3) marks the boundary on the pipeline's streams, and every later frame carries the new `edit_rev`.
 
@@ -243,7 +252,8 @@ Hot edits don't save. `POST /api/pipelines/{id}/save` writes the running revisio
 
 ### 2.4 Versioning, save, list, re-run, matching
 
-- `schema_version` is the format version (1). An unknown major is refused; new optional keys need a new schema version, because unknown fields are errors.
+- `schema_version` is the format version (2). An unknown version is refused; new optional keys need a new schema version, because unknown fields are errors.
+  - **2** (T-085 review, 2026-09-15, before anything shipped): variable-length framing (`length_from`, `terminator`, `bit_order` on `sync_search`; `ppm_demod` → frames; `assemble`), field-map `char_bits: 4` + `pocsag-bcd`, `parity`, `skip_bits`, `scale`/`add`/`value_unit`. Version 1 was never released and is not read.
 - `version` is per recipe id, from 1, monotonic, and **immutable once saved**. Saving always creates `latest + 1`, so old versions stay re-runnable and a stored decoded stream names the exact version (and `edit_rev`) that produced it.
 - A node may pin a block `version`; a mismatch is a validation error. A block's descriptor version bumps when a change would invalidate or alter existing recipes.
 - **Storage:**
@@ -281,7 +291,7 @@ Hot edits don't save. `POST /api/pipelines/{id}/save` writes the running revisio
 | Key | Meaning |
 |---|---|
 | `name` | `[a-z][a-z0-9_]*`, unique among siblings |
-| `type` | `uint`, `int` (two's complement), `enum` (+ `values: {"0": "A"}`), `ascii` (+ `charset` ascii/latin1/rds, `char_bits` 8/7), `bitfield` (+ `flags: [{name, bit}]`, bit 0 = first bit on air), `bytes` (uninterpreted), `layer` (+ `fields`) |
+| `type` | `uint`, `int` (two's complement), `enum` (+ `values: {"0": "A"}`), `ascii` (+ `charset` ascii/latin1/rds/pocsag-bcd, `char_bits` 8/7, or 4 with `pocsag-bcd`; `parity` odd/even/ignore: the character's top bit after `bit_order` is masked out and checked, a failure renders U+FFFD with a `parity` fit error; a trailing partial character of a `remainder` field is padding), `bitfield` (+ `flags: [{name, bit}]`, bit 0 = first bit on air), `bytes` (uninterpreted), `layer` (+ `fields`) |
 | `offset` | From the enclosing layer's start, in `unit`; omitted = after the previous *present* sibling |
 | `length` | A number of `unit`s; `"remainder"`; or `{field, scale, add}` (a length field). Integers are ≤ 64 bits and need a fixed length. |
 | `unit` | `bits` or `bytes` (override) |
@@ -289,6 +299,8 @@ Hot edits don't save. `POST /api/pipelines/{id}/save` writes the running revisio
 | `bit_order` | `msb` or `lsb`: sub-byte fields and characters (POCSAG 7-bit LSB-first text) |
 | `condition` | `{field, eq\|ne\|lt\|le\|gt\|ge\|in}` combinable with `{all:[…]}`, `{any:[…]}` and `{not:…}`. False = absent, not an error. |
 | `repeat` | A count (fixed, `{field,…}` or `"remainder"`); instances addressed `name[i]` |
+| `skip_bits` | `uint`/`int`: bit positions (0 = the field's first bit) left out of the value, the rest concatenated (ADS-B altitude without its Q bit; POCSAG RIC = address ‖ slot around the function bits) |
+| `scale`, `add`, `value_unit` | `uint`/`int`: the node's `value` is `raw × scale + add` and `text` shows it with `value_unit` (ADS-B `25`, `-1000`, `ft`), so the UI does no arithmetic |
 | `display`, `label` | Rendering (`dec`, `hex`, `bin`, `bool`) and a human label |
 
 **References** (condition, length and repeat) name an **earlier**, non-repeated integer field. A bare name resolves to the nearest earlier sibling, then up through the ancestors; a dotted path resolves from the root.
@@ -337,10 +349,10 @@ Specified in [`docs/stream-contract.md` §14](../stream-contract.md) (1.2 draft)
   - `seq`, `t` (time of the first bit), `content_class`, `gated`, `crc_status`, `decoder` (`recipe:<id>@<version>`), `frame_model`, `emitter_id`;
   - `metadata {frame, sample_index, channel, channel_hz, bit_len, recipe_version, edit_rev, fec_corrected_bits, fit}`;
   - `content {hex, layers}`.
-- **Interleaved records:** `status` (per node, ~4 Hz) and `edit` (hot-edit boundary).
+- **Interleaved records:** `status` (one per ~250 ms tick, all nodes batched) and `edit` (hot-edit boundary).
 - **Why messages, not a new binary kind:**
   - A new `kind` value is a major change under §1; a new message record type is a minor one, and pre-1.2 readers skip it.
-  - The §6 message gate (metadata always flows, content gated, allowlist under restricted classes) is exactly the needed legal behaviour, already tested.
+  - The §6 message gate (content gated; metadata reduced to the allowlist under restricted classes) is exactly the needed legal behaviour, already tested.
   - Frames are small and slow (RDS ~11 groups/s, ADS-B ≲ 2000 frames/s at ≤ 14 bytes), so JSON cost is irrelevant.
   - Browsers and Python read it without a binary parser.
 - **Stage streams** (§14.4) use the existing binary kinds: `iq`, `audio` (rf32), `symbols`, `bits`, `spectrum`.
@@ -378,6 +390,13 @@ Specified in [`docs/stream-contract.md` §14](../stream-contract.md) (1.2 draft)
 
 **Oracle tie-in.** The test asserts the recipe's polynomial, offset words (and their block positions) and bit rate equal `hk_demod::rds` constants. T-094 then asserts the recipe's decoded PI/PS/PTY/RT equal the existing decoder's on `fm_100p8M` through the mock SDR.
 
+### 5.1 Skeletons: POCSAG, ACARS, ADS-B
+
+`recipes/{pocsag,acars,adsb}.recipe.json` prove the contracts express the other three tutorials; `crates/hk-blocks/tests/m1_recipes.rs` validates them against the pinned catalogue (placeholder blocks may warn, nothing errors). Their tutorial tasks (T-095…T-097) tune them.
+- **POCSAG** (follow-hops): `fsk_demod` → `clock_recovery` 1200 Bd → `slicer` → `sync_search` (0x7CD215D8, 512-bit batches) → `bch` → `assemble` (32-bit words; start = bit 0 is 0; idle 0x7A89C197; header 20 bits, 3-bit slot, 20 payload bits per word; across batches) → `follow_hops` → `fields`. Assembly sits upstream of the merge, so a message never mixes channels. The map reads `ric` (23 bits, `skip_bits` [18, 19]), `function`, then `numeric` (`pocsag-bcd`, LSB first) or `alpha` (7-bit, LSB first). `restricted-paging` with the paging allowlist.
+- **ACARS**: `am_demod` → `subcarrier` (1800 Hz) → `msk_demod` → `clock_recovery` 2400 Bd → `slicer` → `diff_decode` → `sync_search` (`+* SYN SYN SOH` = 0xD554686880 in air order, `bit_order: lsb`, terminator ETX 0x83 / ETB 0x97 at 8-bit steps + 16 trailer bits) → `crc` (CRC-16/KERMIT) → `fields` (7-bit + odd parity characters).
+- **ADS-B**: `ppm_demod` (2 Msps, preamble 0xA140 over 16 chips, `length_from` DF → 56/112) → `crc` (CRC-24 0xFFF409 over the frame) → `fields` (DF, ICAO, ME: identification, airborne position with altitude = AC12 without Q × 25 − 1000 ft, velocity in kt and ft/min).
+
 ## 6. Crate placement
 
 | Crate | Holds | Depends on | Why |
@@ -388,27 +407,34 @@ Specified in [`docs/stream-contract.md` §14](../stream-contract.md) (1.2 draft)
 | `hk-pipeline` (T-088) | Recipe runtime: graph build/swap, runner, channel DDC, taps, publishers, recipe store, chain-budget kind | + hk-blocks, hk-recipe | Composition belongs here (ADR-0001 S1 chains). |
 | `hk-api` (T-088/T-089/T-091/T-092) | Routes over the runtime and store | + hk-recipe | Thin HTTP over the above. |
 
+The `hk-recipe`/`hk-blocks` dependencies of hk-api, hk-pipeline and hk-estimate, and `hk-stream` for hk-store, are pre-added (§7).
+
 ## 7. Parallel-work map
 
-File ownership so T-086…T-093 run in separate worktrees without collisions. "Shared" rows have one owner; other tasks only read them or append a clearly separated block.
+File ownership so T-086…T-093 run in separate worktrees without collisions. T-085 **pre-added** every shared declaration a task would otherwise edit: Cargo dependencies, `pub mod` lines, empty stub modules and the API dispatch chain. Tasks fill in only their own files.
 
 | Task | Owns (writes) | Reads / codes against | Notes |
 |---|---|---|---|
-| **T-086 Blocks A** | `crates/hk-blocks/src/blocks/iq/**`, `crates/hk-blocks/src/blocks/symbol/**`; additive `pub` helpers in hk-dsp (`filter`, `ddc` resampler) and hk-demod (`dsp`, `pilot`, `rds::demod` `drain_into`) | `block.rs`, `buffer.rs`, `status.rs`, catalogue test | Pins placeholder params in its own `planned()`. **Coordinate with T-084** in hk-demod `rds` (T-084 fixes RDS HIL findings): additive new functions only, no edits to T-084's lines. |
-| **T-087 Blocks B** | `crates/hk-blocks/src/blocks/framing/**`, `crates/hk-blocks/src/blocks/fec/**`; additive `pub` in hk-estimate `framing::{crc,sync}` | as above; hk-demod `rds::block` (read-only) | Unit tests: RDS offset words + 0x5B9, POCSAG 0x7CD215D8 + BCH(31,21), CRC-16, CRC-24. |
-| **T-088 Recipe runtime** | `crates/hk-pipeline/src/recipes/**` (new: `runtime.rs`, `graph.rs`, `swap.rs`, `taps.rs`, `store.rs`, `openers.rs`); one `recipe` kind in `chains/budget.rs`; `crates/hk-api/src/recipes.rs` (new); its rows in `http.rs::ROUTES`; `docs/api.md` "Recipes and pipelines" subsection; `crates/hk-recipe/src/edit.rs` extensions | hk-recipe, hk-blocks contract, `hk_stream::inspector` types | Publishes frames through a `FrameSink` trait in `recipes/` until T-089's `Publisher::publish_frame` merges, then swaps to it (one-line change). Allocation-free runner test. |
-| **T-089 Parser + inspector API** | `crates/hk-recipe/src/fields/eval.rs` (new evaluator; `fields.rs` becomes `fields/mod.rs` with the schema unchanged); `crates/hk-blocks/src/blocks/parse/**`; `crates/hk-stream/src/inspector.rs`, and `publish_frame`/`publish_record` plus the optional `inspector` header field in `publisher.rs`/`header.rs` (reviewed: legal gate); bump `STREAM_VERSION_MINOR` to 2; `crates/hk-api/src/inspector.rs` (new: `open/inspector`, `POST /api/captures/{id}/parse`); its `ROUTES` rows; `docs/api.md` "Inspector" subsection; `docs/stream-contract.md` §14 finalisation | hk-recipe schema | Contract tests in `crates/hk-cli/tests/api_contract.rs` (append a separate test fn). |
+| **T-086 Blocks A** | `crates/hk-blocks/src/blocks/iq/**`, `crates/hk-blocks/src/blocks/symbol/**`; additive `pub` helpers in hk-dsp (`filter`, `ddc` resampler) and hk-demod (`dsp`, `pilot`, `rds::demod` `drain_into`) | `block.rs`, `buffer.rs`, `status.rs`, `schema.rs` (`frame_length`), catalogue test | Pins placeholder params in its own `planned()`. `ppm_demod` implements `length_from`. **Coordinate with T-084** in hk-demod `rds` (T-084 fixes RDS HIL findings): additive new functions only, no edits to T-084's lines. |
+| **T-087 Blocks B** | `crates/hk-blocks/src/blocks/framing/**` (incl. `assemble`), `crates/hk-blocks/src/blocks/fec/**`; additive `pub` in hk-estimate `framing::{crc,sync}` | as above; hk-demod `rds::block` (read-only) | Unit tests: RDS offset words + 0x5B9, POCSAG 0x7CD215D8 + BCH(31,21) + message assembly, CRC-16, CRC-24, `length_from`/`terminator`/`bit_order`. |
+| **T-088 Recipe runtime** | `crates/hk-pipeline/src/recipes/{runtime,graph,swap,taps,store,openers}.rs` (stubs exist); one `recipe` kind in `chains/budget.rs`; `crates/hk-api/src/recipes.rs` (stub exists, dispatched); its `ROUTES` rows; `docs/api.md` "Recipes and pipelines" subsection; `crates/hk-recipe/src/edit.rs` extensions | hk-recipe, hk-blocks contract, `hk_stream::inspector` types | Publishes frames through a `FrameSink` trait in `recipes/` until T-089's `Publisher::publish_frame` merges, then swaps to it (one-line change). Allocation-free runner test. |
+| **T-089 Parser + inspector API** | `crates/hk-recipe/src/fields/eval.rs` (stub exists; `fields/mod.rs` holds the schema, unchanged); `crates/hk-blocks/src/blocks/parse/**`; `crates/hk-stream/src/inspector.rs`, and `publish_frame`/`publish_record` plus the optional `inspector` header field in `publisher.rs`/`header.rs` (reviewed: legal gate); bump `STREAM_VERSION_MINOR` to 2; `crates/hk-api/src/inspector.rs` (stub exists, dispatched: `POST /api/captures/{id}/parse`); its `ROUTES` rows; `docs/api.md` "Inspector" subsection; `docs/stream-contract.md` §14 finalisation | hk-recipe schema | Contract tests in `crates/hk-cli/tests/api_contract.rs` under its marker. |
 | **T-090 Inspector UI** | `ui/src/inspector/**` | `docs/api.md`, §14 | Thin client: renders `nodes`, `bytes`, `byte_index` verbatim. |
-| **T-091 Authoring assist** | `crates/hk-estimate/src/assist/**` (new; reuses `framing::search`); `crates/hk-api/src/assist.rs` (new); its `ROUTES` rows and `docs/api.md` "Assist" subsection | hk-recipe (emits `FieldMap` fragments and `sync_search`/`crc` param objects as suggestions with scores) | Adds `hk-recipe` to hk-estimate's dependencies (no cycle: hk-recipe depends on no DSP crate). |
-| **T-092 Decoded capture + scrub** | `crates/hk-store/src/decoded.rs` (new: §3-stream capture writer/reader, quota); `crates/hk-pipeline/src/recipes/capture.rs` (new file inside T-088's directory, after T-088 merges); `crates/hk-api/src/captures.rs` (new, list/frames routes); `ui/` scrub hooks | §14.7, `hk_stream::inspector`, `StreamReader` | Depends on T-088. |
-| **T-093 follow_hops** | `crates/hk-blocks/src/blocks/multi/**`; `crates/hk-pipeline/src/recipes/hops.rs` (new, after T-088); hk-core only if a multi-channel reader primitive is needed | §2.5 | Depends on T-088. |
-| **T-094…T-097 Tutorials** | `recipes/<name>.recipe.json`, `tests/e2e/tests/acceptance/m1_<name>.rs`, `docs/tutorials/` | everything | T-094 edits `recipes/rds.recipe.json` only to tune params and bumps `version` for any semantic change. |
+| **T-091 Authoring assist** | `crates/hk-estimate/src/assist/**` (stub exists; reuses `framing::search`); `crates/hk-api/src/assist.rs` (stub exists, dispatched); its `ROUTES` rows and `docs/api.md` "Assist" subsection | hk-recipe (emits `FieldMap` fragments and `sync_search`/`crc` param objects as suggestions with scores) | `hk-recipe` is already an hk-estimate dependency (no cycle: hk-recipe depends on no DSP crate). |
+| **T-092 Decoded capture + scrub** | `crates/hk-store/src/decoded.rs` (stub exists: §3-stream capture writer/reader, quota); `crates/hk-pipeline/src/recipes/capture.rs` (stub exists); `crates/hk-api/src/captures.rs` (stub exists, dispatched: list/frames routes); `ui/` scrub hooks | §14.7, `hk_stream::inspector`, `StreamReader` | Depends on T-088 (codes against its runtime). |
+| **T-093 follow_hops** | `crates/hk-blocks/src/blocks/multi/**`; `crates/hk-pipeline/src/recipes/hops.rs` (stub exists); hk-core only if a multi-channel reader primitive is needed | §2.5 | Depends on T-088. |
+| **T-094…T-097 Tutorials** | `recipes/<name>.recipe.json`, `tests/e2e/tests/acceptance/m1_<name>.rs`, `docs/tutorials/` | everything | T-094 edits `recipes/rds.recipe.json` only to tune params and bumps `version` for any semantic change; T-095…T-097 start from the §5.1 skeletons. |
 
-**Shared touch points and their rule:**
-- `crates/hk-api/src/http.rs::ROUTES` and `docs/api.md`: each task appends its own contiguous block and subsection. Conflicts are textual and trivial; merge in task order.
-- Workspace `Cargo.toml`: no task needs to edit it (both new crates are already members).
-- `crates/hk-blocks/Cargo.toml`: complete, don't edit.
-- `crates/hk-blocks/src/blocks/mod.rs`: final (`register_all` already calls every group).
+**Pre-added (final; don't edit):**
+- Cargo: `hk-recipe` in hk-api, hk-pipeline and hk-estimate; `hk-blocks` in hk-pipeline; `hk-stream` in hk-store. Workspace `Cargo.toml` and `crates/hk-blocks/Cargo.toml` are complete.
+- `pub mod` lines: `hk-api/src/lib.rs` (`recipes`, `inspector`, `assist`, `captures`), `hk-pipeline/src/lib.rs` (`recipes`) and `recipes/mod.rs` (every file above), `hk-estimate/src/lib.rs` (`assist`), `hk-store/src/lib.rs` (`decoded`), `hk-recipe/src/fields/mod.rs` (`eval`), `crates/hk-blocks/src/blocks/mod.rs` (`register_all` already calls every group).
+- API dispatch: `hk-api/src/http.rs` already chains `recipes::route`, `inspector::route`, `assist::route` and `captures::route` (each stub returns `None`).
+
+**Shared append-only (can't be pre-stubbed; append in your own block, rebase conflicts are textual and trivial, merge in task order):**
+- `crates/hk-api/src/http.rs::ROUTES`: rows under your task's marker comment.
+- `crates/hk-cli/tests/api_contract.rs`: test fns under your task's marker comment.
+- `docs/api.md`: your own subsection (and move your rows out of "Decoder workbench (planned)").
+- **Opener registration** (`crates/hk-cli/src/pipeline.rs` `OpenerRegistry::with` chain, plus the `PipelineHandle` accessor in `crates/hk-pipeline/src/run.rs`): stubbing it would advertise openers that refuse everything. T-088 appends one line each for `stage` and `inspector`; T-089 (capture re-parse) and T-092 (capture replay) extend the `inspector` opener from their own files and add no registration line.
 
 ## Options considered
 
@@ -431,4 +457,4 @@ File ownership so T-086…T-093 run in separate worktrees without collisions. "S
 
 1. **PTY names.** The RDS worked example keeps PTY numeric because RDS and RBDS tables differ. Should recipes gain a region-conditional enum (`values_by_region`), or should the text block look names up?
 2. **Recipe-level JSON Schema for editors.** If the UI wants inline validation before `POST /api/recipes/validate`, generate one from `GET /api/blocks` at runtime rather than maintaining a static file.
-3. **Status cadence.** 250 ms per node; a 10-node pipeline is 40 status records/s. Batch all nodes into one record per tick (the likely T-088 choice)?
+3. ~~**Status cadence.**~~ Settled (T-085 review): one `status` record per ~250 ms tick for the whole pipeline, every node batched as `<node>.<metric>` keys (§1.3, stream contract §14.3).

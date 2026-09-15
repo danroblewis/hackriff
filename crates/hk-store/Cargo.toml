@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 hk-dsp.workspace = true
 hk-model.workspace = true
+# T-085: decoded-stream captures (T-092) store stream-contract §14 records.
+hk-stream.workspace = true
 # T-061: output sidecars (already workspace dependencies).
 serde.workspace = true
 serde_json.workspace = true

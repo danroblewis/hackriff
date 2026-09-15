@@ -21,7 +21,7 @@
 //! use hk_recipe::{Recipe, RECIPE_SCHEMA};
 //!
 //! let json = r#"{
-//!   "schema": "hackriff.recipe", "schema_version": 1,
+//!   "schema": "hackriff.recipe", "schema_version": 2,
 //!   "id": "passthrough", "version": 1, "name": "Pass-through",
 //!   "input": {"port": "bits"},
 //!   "nodes": [{"id": "copy", "block": "identity"}],
@@ -42,7 +42,7 @@ pub mod recipe;
 pub use edit::{EditPlan, NodeChange};
 pub use fields::{
     AllOf, AnyOf, BitOrder, Charset, Compare, Condition, Display, Endianness, Field, FieldMap,
-    FieldMapError, FieldType, Flag, Length, LengthFrom, LengthKeyword, NotOf, Unit,
+    FieldMapError, FieldType, Flag, Length, LengthFrom, LengthKeyword, NotOf, Parity, Unit,
 };
 pub use param::{
     BlockDescriptor, Catalogue, ParamError, ParamSchema, ParamType, Params, PortSpec, parse_hex,
@@ -56,8 +56,10 @@ pub use recipe::{
 
 /// `schema` value of every recipe document.
 pub const RECIPE_SCHEMA: &str = "hackriff.recipe";
-/// Recipe format version this crate reads and writes.
-pub const RECIPE_SCHEMA_VERSION: u32 = 1;
+/// Recipe format version this crate reads and writes. 2 (T-085 review, before any release):
+/// variable-length framing params, field-map `char_bits: 4`/`pocsag-bcd`/`parity`/`skip_bits`/
+/// `scale`/`add`/`value_unit`. Version 1 was never released and is not read.
+pub const RECIPE_SCHEMA_VERSION: u32 = 2;
 
 /// A short identifier: `[a-z0-9_-]{1,64}` starting with a letter or digit (recipe, node, output
 /// and field-map ids; they appear in stream ids and API paths).

@@ -938,6 +938,15 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
     stop_server(serving);
 }
 
+// --- Decoder workbench (ADR-0011 §7): each task appends its test fns under its own marker ---
+// T-088 recipes and pipelines
+
+// T-089 inspector
+
+// T-091 assist
+
+// T-092 captures
+
 // --- Route-table / docs consistency ---------------------------------------------------------------
 
 /// T-079: every route in [`hk_api::ROUTES`] must appear (method and path on the same line) in

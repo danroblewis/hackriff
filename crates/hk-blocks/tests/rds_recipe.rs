@@ -4,7 +4,7 @@
 
 use hk_blocks::catalogue;
 use hk_demod::rds::{Offset, RDS_BITRATE_BD, block::CHECK_POLY};
-use hk_recipe::{Catalogue, EditPlan, NodeChange, PortType, Recipe, parse_hex};
+use hk_recipe::{EditPlan, NodeChange, PortType, Recipe, parse_hex};
 use serde_json::json;
 
 fn load() -> Recipe {
@@ -91,17 +91,13 @@ fn rds_recipe_constants_match_the_rust_rds_oracle() {
 fn rds_hot_edits_keep_or_reset_state_per_the_block_schemas() {
     let old = load();
     let cat = catalogue::planned();
-    let hot = |block: &str, key: &str| {
-        cat.descriptor(block)
-            .and_then(|d| d.params.iter().find(|p| p.name == key))
-            .is_some_and(|p| p.hot)
-    };
+    let hot = &cat;
 
     // A slicer threshold is hot: applied in place, nothing downstream resets.
     let mut tweak = old.clone();
     let slice = tweak.nodes.iter_mut().find(|n| n.id == "slice").unwrap();
     slice.params.insert("threshold".into(), json!(0.05));
-    let plan = EditPlan::between(&old, &tweak, &hot);
+    let plan = EditPlan::between(&old, &tweak, hot);
     assert!(matches!(
         plan.nodes["slice"],
         NodeChange::Params { hot: true, .. }
@@ -112,7 +108,7 @@ fn rds_hot_edits_keep_or_reset_state_per_the_block_schemas() {
     let mut cold = old.clone();
     let sync = cold.nodes.iter_mut().find(|n| n.id == "sync").unwrap();
     sync.params.insert("lock_blocks".into(), json!(3));
-    let plan = EditPlan::between(&old, &cold, &hot);
+    let plan = EditPlan::between(&old, &cold, hot);
     assert!(matches!(
         plan.nodes["sync"],
         NodeChange::Params { hot: false, .. }
@@ -121,11 +117,23 @@ fn rds_hot_edits_keep_or_reset_state_per_the_block_schemas() {
     assert_eq!(reset, ["crc", "group", "ps", "rt"]);
     assert_eq!(plan.nodes["clock"], NodeChange::Unchanged);
 
-    // A field-map edit touches no node state: only the map swaps.
+    // A field-map edit is a hot `map` change on `group` only: no DSP state touched, and the
+    // text assemblers downstream keep their partial strings.
     let mut remap = old.clone();
     remap.field_maps.get_mut("rds_group").unwrap().fields[4].label = Some("PTY".into());
-    let plan = EditPlan::between(&old, &remap, &hot);
+    let plan = EditPlan::between(&old, &remap, hot);
     assert!(plan.reset.is_empty());
-    assert!(plan.nodes.values().all(|c| *c == NodeChange::Unchanged));
+    assert_eq!(
+        plan.nodes["group"],
+        NodeChange::Params {
+            keys: vec!["map".into()],
+            hot: true
+        }
+    );
+    assert!(
+        plan.nodes
+            .iter()
+            .all(|(id, c)| id == "group" || *c == NodeChange::Unchanged)
+    );
     assert_eq!(plan.field_maps_changed.len(), 1);
 }

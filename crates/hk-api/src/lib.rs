@@ -26,15 +26,19 @@
 //! thread's writer with no second queue and no runtime; consumer counts are single digits on a
 //! handheld; idle connections cost no CPU.
 
+pub mod assist;
 pub mod auth;
 pub mod bridge;
+pub mod captures;
 pub mod control;
 pub mod http;
+pub mod inspector;
 pub mod inventory;
 pub mod live_control;
 pub mod ondemand;
 pub mod outputs;
 pub mod query;
+pub mod recipes;
 pub mod selections;
 pub mod tcp;
 

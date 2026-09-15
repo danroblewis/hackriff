@@ -78,16 +78,16 @@ pub struct Status {
 }
 
 impl Status {
-    /// The flat metadata object of a status record (`docs/stream-contract.md` §14.3): numbers,
-    /// booleans and short tokens only. Non-finite values are omitted. Allocates: call it at
-    /// status rate, not per chunk.
-    pub fn to_metadata(&self, node: &str) -> Map<String, Value> {
-        let mut m = Map::new();
-        m.insert("node".into(), node.into());
-        m.insert("lock".into(), self.lock.as_str().into());
+    /// Adds this node's readout to the flat metadata object of a status record
+    /// (`docs/stream-contract.md` §14.3) as `<node>.<metric>` keys: numbers, booleans and short
+    /// tokens only. The runtime batches every node into **one** record per status tick (about
+    /// every 250 ms). Non-finite values are omitted. Allocates: call it at status rate, not per
+    /// chunk.
+    pub fn to_metadata(&self, node: &str, m: &mut Map<String, Value>) {
+        m.insert(format!("{node}.lock"), self.lock.as_str().into());
         let mut num = |k: &str, v: Option<f64>| {
             if let Some(n) = v.and_then(Number::from_f64) {
-                m.insert(k.into(), Value::Number(n));
+                m.insert(format!("{node}.{k}"), Value::Number(n));
             }
         };
         num("snr_db", self.snr_db.map(f64::from));
@@ -96,9 +96,8 @@ impl Status {
         for (k, v) in self.extra.iter() {
             num(k, Some(v));
         }
-        m.insert("items_in".into(), self.items_in.into());
-        m.insert("items_out".into(), self.items_out.into());
-        m
+        m.insert(format!("{node}.items_in"), self.items_in.into());
+        m.insert(format!("{node}.items_out"), self.items_out.into());
     }
 }
 
@@ -119,11 +118,14 @@ mod tests {
         }
         assert!(!s.extra.set("g", 0.0));
         assert!(s.extra.set("a", 9.0));
-        let m = s.to_metadata("sync");
-        assert_eq!(m["lock"], "locked");
-        assert_eq!(m["error_rate"], 0.25);
-        assert_eq!(m["a"], 9.0);
-        assert!(!m.contains_key("snr_db"));
+        let mut m = Map::new();
+        s.to_metadata("sync", &mut m);
+        Status::default().to_metadata("crc", &mut m);
+        assert_eq!(m["sync.lock"], "locked");
+        assert_eq!(m["sync.error_rate"], 0.25);
+        assert_eq!(m["sync.a"], 9.0);
+        assert_eq!(m["crc.lock"], "none");
+        assert!(!m.contains_key("sync.snr_db"));
         assert!(hk_stream::policy::metadata_is_allowlist_shaped(
             &Value::Object(m)
         ));

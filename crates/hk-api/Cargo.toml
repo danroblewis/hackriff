@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 hk-core.workspace = true
 hk-model.workspace = true
+# T-085: decoder-workbench routes (T-088/T-089/T-091/T-092) read recipe schemas.
+hk-recipe.workspace = true
 hk-store.workspace = true
 hk-stream.workspace = true
 httparse.workspace = true

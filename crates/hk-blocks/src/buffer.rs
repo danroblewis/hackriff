@@ -1,5 +1,7 @@
 //! Port buffers and chunk metadata (ADR-0011 §1.1).
 
+use std::sync::Arc;
+
 use hk_model::CrcStatus;
 use hk_recipe::PortType;
 use hk_stream::inspector::LayerTree;
@@ -100,8 +102,9 @@ pub struct FrameInfo {
     pub check: CrcStatus,
     /// Bits corrected by FEC.
     pub corrected_bits: u32,
-    /// Layer tree, once a `fields` block ran.
-    pub layers: Option<LayerTree>,
+    /// Layer tree, once a `fields` block ran. Shared (`Arc`), so frames → frames pass-through
+    /// blocks copy a pointer, not the tree.
+    pub layers: Option<Arc<LayerTree>>,
 }
 
 impl FrameInfo {

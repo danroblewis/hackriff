@@ -93,6 +93,73 @@ pub fn object(fields: Vec<ParamSchema>) -> ParamType {
     ParamType::Object { fields }
 }
 
+/// Variable-length framing (ADR-0011 §1.5 "Frame length"): `length_from` (a length decided by
+/// a field of the frame, e.g. the ADS-B DF) and `terminator` (a closing word, e.g. ACARS ETX),
+/// shared by every frame-producing block. A frame ends at the first of: its `length_from`
+/// length, its terminator (plus `trailer_bits`), or the block's `frame_bits` (the maximum).
+pub fn frame_length() -> Vec<ParamSchema> {
+    let range = |name: &str, doc: &str| param(name, int(0, 1_000_000), doc);
+    vec![
+        param(
+            "length_from",
+            object(vec![
+                range(
+                    "offset_bits",
+                    "First bit of the length field, from the frame start (after sync/preamble).",
+                )
+                .required(),
+                param("bits", int(1, 32), "Width of the length field, MSB first.").required(),
+                param(
+                    "cases",
+                    list(
+                        object(vec![
+                            param("min", int(0, i64::from(u32::MAX)), "Lowest value.").required(),
+                            param("max", int(0, i64::from(u32::MAX)), "Highest value.").required(),
+                            range("frame_bits", "Frame length for values in [min, max].")
+                                .required(),
+                        ]),
+                        1,
+                    ),
+                    "Table: the first case holding the value sets the length (ADS-B: DF 16–31 → 112).",
+                ),
+                param(
+                    "scale",
+                    int(0, 65_536),
+                    "No case matched: frame_bits = value × scale + add (0: use default_bits).",
+                )
+                .default_value(0),
+                param("add", int(-1_000_000, 1_000_000), "Addend, bits.").default_value(0),
+                range(
+                    "default_bits",
+                    "Length when no case matches and scale is 0 (ADS-B: 56).",
+                ),
+            ]),
+            "Frame length decided by a field of the frame; absent: fixed frame_bits.",
+        ),
+        param(
+            "terminator",
+            object(vec![
+                param("words", list(hex(32), 1), "Closing words (ACARS ETX 0x83, ETB 0x97 with parity).")
+                    .required(),
+                param("bits", int(1, 32), "Word width.").required(),
+                param(
+                    "step_bits",
+                    int(1, 64),
+                    "Checked only at multiples of this from the frame start (8: character-aligned).",
+                )
+                .default_value(1),
+                param(
+                    "trailer_bits",
+                    int(0, 1_024),
+                    "Bits kept after the terminator (ACARS: the 16-bit BCS).",
+                )
+                .default_value(0),
+            ]),
+            "Frame ends after a closing word; absent: none.",
+        ),
+    ]
+}
+
 /// A version-1 descriptor.
 pub fn descriptor(
     name: &str,

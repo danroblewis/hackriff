@@ -77,6 +77,7 @@ mod tests {
             "nrzi",
             "manchester",
             "sync_search",
+            "assemble",
             "deframe",
             "interleave",
             "deinterleave",

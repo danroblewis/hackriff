@@ -3,6 +3,7 @@
 use hk_recipe::{Params, PortType};
 
 use crate::buffer::{Input, Output};
+use crate::registry::BuildCtx;
 use crate::status::Status;
 
 /// What a port carries, negotiated at `init`.
@@ -150,10 +151,18 @@ pub trait Block: Send {
     /// Drops all history (as on `DISCONTINUITY`); parameters and negotiated ports are kept.
     fn reset(&mut self);
 
-    /// New parameter values (the full, schema-validated set). Returns `Applied` when every
-    /// changed key could be applied in place (its schema says `hot`), else `Rebuild`, leaving
-    /// the instance unchanged.
-    fn update_params(&mut self, params: &Params) -> Result<ParamUpdate, BlockError>;
+    /// New parameter values (the full, schema-validated set) and the new recipe's build
+    /// context. Called when a param changed **or** a field map a `field-map` param names changed
+    /// content (`EditPlan` lists that param's key), so a `fields` block re-resolves its map from
+    /// `ctx.field_maps`. Returns `Applied` when every change could be applied in place (its
+    /// schema says `hot`), else `Rebuild`, leaving the instance unchanged. Runs between chunks
+    /// on the pipeline thread; anything expensive (a map compiled into an evaluation plan) is
+    /// the runtime's to prepare off the real-time thread before the swap.
+    fn update_params(
+        &mut self,
+        params: &Params,
+        ctx: &BuildCtx<'_>,
+    ) -> Result<ParamUpdate, BlockError>;
 
     /// Current readout: cheap (`Copy`), callable after any `process`. Polled by the runtime
     /// about every 250 ms for status records and the objective of output-driven refinement.

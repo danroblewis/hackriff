@@ -1,0 +1,157 @@
+{
+  "schema": "hackriff.recipe",
+  "schema_version": 2,
+  "id": "adsb",
+  "version": 1,
+  "name": "ADS-B: aircraft positions",
+  "description": "Tutorial 4 skeleton (ADR-0011 §5.1; T-097 tunes it). Mode S extended squitter: 1 Mbit/s pulse-position modulation, an 8 µs chip preamble, then 56- or 112-bit frames whose length follows the downlink format (DF 16–31 → 112), CRC-24 (0xFFF409), then fields: DF, ICAO address, airborne position (CPR, altitude without its Q bit, scaled to ft) and airborne velocity (kt, ft/min). DF 0/4/5/20/21 overlay the address on the parity, so their crc_status fails by design. Oracle: readsb.",
+  "match": {
+    "families": ["ook", "ppm"],
+    "freq_hz": [[1089000000, 1091000000]],
+    "symbol_rate_bd": [1000000, 1000000],
+    "bursty": true
+  },
+  "input": {
+    "port": "iq",
+    "sample_rate_hz": 2000000,
+    "bandwidth_hz": 2000000
+  },
+  "nodes": [
+    {
+      "id": "ppm",
+      "block": "ppm_demod",
+      "label": "Preamble + chip pairs → 56/112-bit frames",
+      "params": {
+        "bit_rate_bd": 1000000,
+        "chips_per_bit": 2,
+        "preamble": "0xA140",
+        "preamble_chips": 16,
+        "frame_bits": 112,
+        "length_from": {
+          "offset_bits": 0,
+          "bits": 5,
+          "cases": [{ "min": 16, "max": 31, "frame_bits": 112 }],
+          "default_bits": 56
+        }
+      }
+    },
+    {
+      "id": "crc",
+      "block": "crc",
+      "label": "CRC-24 parity over the whole frame",
+      "params": {
+        "width": 24,
+        "poly": "0xFFF409",
+        "span": { "start_bit": 0, "end_trim_bits": 0 },
+        "strip": false
+      }
+    },
+    { "id": "msg", "block": "fields", "label": "Mode S fields", "params": { "map": "adsb_frame" } }
+  ],
+  "field_maps": {
+    "adsb_frame": {
+      "description": "One Mode S frame after the preamble, MSB first. ME (bits 32–87) is decoded for DF 17/18: identification, airborne position (TC 9–18) and airborne velocity (TC 19, subtype 1).",
+      "unit": "bits",
+      "fields": [
+        { "name": "df", "type": "uint", "offset": 0, "length": 5, "label": "Downlink format" },
+        { "name": "ca", "type": "uint", "length": 3, "label": "Capability (DF 17) / control field (DF 18)" },
+        {
+          "name": "icao",
+          "type": "uint",
+          "offset": 8,
+          "length": 24,
+          "display": "hex",
+          "condition": { "field": "df", "in": [11, 17, 18] },
+          "label": "ICAO address"
+        },
+        {
+          "name": "me",
+          "type": "layer",
+          "offset": 32,
+          "length": 56,
+          "condition": { "field": "df", "in": [17, 18] },
+          "label": "Extended squitter message",
+          "fields": [
+            { "name": "tc", "type": "uint", "offset": 0, "length": 5, "label": "Type code" },
+            {
+              "name": "identification",
+              "type": "layer",
+              "offset": 5,
+              "length": 51,
+              "condition": { "field": "tc", "in": [1, 2, 3, 4] },
+              "fields": [
+                { "name": "category", "type": "uint", "length": 3 },
+                { "name": "callsign", "type": "bytes", "length": 48, "label": "Callsign: 8 × 6-bit AIS characters (raw; no 6-bit charset in schema 2)" }
+              ]
+            },
+            {
+              "name": "airborne_position",
+              "type": "layer",
+              "offset": 5,
+              "length": 51,
+              "condition": { "all": [{ "field": "tc", "ge": 9 }, { "field": "tc", "le": 18 }] },
+              "fields": [
+                { "name": "ss", "type": "uint", "offset": 0, "length": 2, "label": "Surveillance status" },
+                { "name": "saf", "type": "uint", "length": 1, "label": "Single antenna flag" },
+                { "name": "q", "type": "uint", "offset": 10, "length": 1, "label": "Q bit (1: 25 ft steps)" },
+                {
+                  "name": "altitude",
+                  "type": "uint",
+                  "offset": 3,
+                  "length": 12,
+                  "skip_bits": [7],
+                  "scale": 25,
+                  "add": -1000,
+                  "value_unit": "ft",
+                  "condition": { "field": "q", "eq": 1 },
+                  "label": "Barometric altitude"
+                },
+                { "name": "t", "type": "uint", "offset": 15, "length": 1, "label": "UTC synchronised" },
+                { "name": "f", "type": "enum", "length": 1, "values": { "0": "even", "1": "odd" }, "label": "CPR format" },
+                { "name": "cpr_lat", "type": "uint", "length": 17 },
+                { "name": "cpr_lon", "type": "uint", "length": 17 }
+              ]
+            },
+            {
+              "name": "velocity",
+              "type": "layer",
+              "offset": 5,
+              "length": 51,
+              "condition": { "field": "tc", "eq": 19 },
+              "fields": [
+                { "name": "st", "type": "uint", "offset": 0, "length": 3, "label": "Subtype (1: ground speed)" },
+                { "name": "nuc", "type": "uint", "offset": 5, "length": 3 },
+                { "name": "dew", "type": "enum", "offset": 8, "length": 1, "values": { "0": "east", "1": "west" } },
+                { "name": "vew", "type": "uint", "offset": 9, "length": 10, "add": -1, "value_unit": "kt", "condition": { "field": "st", "eq": 1 }, "label": "East–west speed" },
+                { "name": "dns", "type": "enum", "offset": 19, "length": 1, "values": { "0": "north", "1": "south" } },
+                { "name": "vns", "type": "uint", "offset": 20, "length": 10, "add": -1, "value_unit": "kt", "condition": { "field": "st", "eq": 1 }, "label": "North–south speed" },
+                { "name": "svr", "type": "enum", "offset": 31, "length": 1, "values": { "0": "up", "1": "down" } },
+                { "name": "vertical_rate", "type": "uint", "offset": 32, "length": 9, "scale": 64, "add": -64, "value_unit": "ft/min" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "outputs": [
+    { "id": "frames", "kind": "inspector", "from": "msg" },
+    {
+      "id": "aircraft",
+      "kind": "messages",
+      "from": "msg",
+      "decode": {
+        "frame_model": "adsb-es",
+        "identity": { "scheme": "adsb-icao", "field": "icao", "format": "hex" },
+        "metadata": ["df", "me.tc", "me.airborne_position.altitude", "me.airborne_position.cpr_lat", "me.airborne_position.cpr_lon", "me.velocity.vew", "me.velocity.vns", "me.velocity.vertical_rate"],
+        "require": ["icao"]
+      }
+    },
+    { "id": "soft", "kind": "stage", "from": "ppm.soft" }
+  ],
+  "output_policy": { "content_class": "unrestricted" },
+  "refine": {
+    "objective": { "node": "crc", "metric": "error_rate", "goal": "min" },
+    "tune": ["center_hz"]
+  }
+}

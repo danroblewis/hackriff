@@ -15,7 +15,10 @@
 //!   overrides it). A layer without `length` extends to the end of its enclosing layer.
 //! - `endianness` orders the bytes of multi-byte integers (whole-byte fields only);
 //!   `bit_order` orders bits within a sub-byte or odd-width field and within `ascii` characters
-//!   (`lsb` for POCSAG's 7-bit LSB-first text).
+//!   (`lsb` for POCSAG's 4-bit BCD and 7-bit LSB-first text).
+//! - Integer fields may drop bits (`skip_bits`, e.g. the ADS-B altitude Q bit) and carry a
+//!   linear `scale`/`add` plus a `value_unit`, so the layer tree holds physical values and the
+//!   UI does no arithmetic.
 //! - `condition` is evaluated before the field is laid out; a false condition makes the field
 //!   absent (not an error).
 //! - `repeat` lays the field out `count` times in sequence; each instance is addressed as
@@ -27,6 +30,8 @@
 //! **Evaluation never panics and never aborts the frame.** A field that does not fit is
 //! reported on its node and in the tree's `errors` (`FitError`), its later siblings are still
 //! tried, and the frame's `fit` is `partial` or `failed` (§3.3).
+
+pub mod eval;
 
 use std::collections::BTreeMap;
 
@@ -94,7 +99,8 @@ pub enum FieldType {
     Int,
     /// Unsigned integer with named `values`; an unnamed value is shown numerically (not an error).
     Enum,
-    /// Characters of `char_bits` (8, or 7) in `charset`.
+    /// Characters of `char_bits` (8, 7, or 4 for `pocsag-bcd`) in `charset`, optionally with a
+    /// parity bit per character.
     Ascii,
     /// Named single-bit `flags` over an integer ≤ 64 bits.
     Bitfield,
@@ -125,6 +131,25 @@ pub enum Charset {
     Latin1,
     /// RDS basic character set G0 (EN 50067 Annex E; ASCII-compatible for 0x20–0x7D).
     Rds,
+    /// POCSAG numeric (ITU-R M.584): 4-bit codes `0`–`9`, then A spare (shown `*`), B `U`,
+    /// C space, D `-`, E `]`, F `[`. Only with `char_bits: 4`.
+    PocsagBcd,
+}
+
+/// Parity bit of each `ascii` character: the **most significant** bit of the `char_bits`-bit
+/// code after `bit_order` is applied (ACARS: 7-bit ASCII + odd parity, sent LSB first, so the
+/// parity bit is the last on air). The bit is masked out of the character; with `odd`/`even` a
+/// failing character renders as U+FFFD and the node carries a `parity` error (a fit error, not
+/// a static one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Parity {
+    /// Odd parity, checked.
+    Odd,
+    /// Even parity, checked.
+    Even,
+    /// Masked out, not checked.
+    Ignore,
 }
 
 /// How a value is rendered in the layer tree's `text`.
@@ -295,7 +320,7 @@ pub struct Flag {
 }
 
 /// One field or layer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
     /// Name, `[a-z][a-z0-9_]*`, unique among its siblings.
@@ -337,9 +362,28 @@ pub struct Field {
     /// `ascii`: character set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charset: Option<Charset>,
-    /// `ascii`: bits per character (8 or 7; default 8).
+    /// `ascii`: bits per character (8, 7, or 4 with `pocsag-bcd`; default 8, or 4 for
+    /// `pocsag-bcd`). A trailing partial character of a `remainder`-length field is padding,
+    /// not an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub char_bits: Option<u8>,
+    /// `ascii`: per-character parity bit (absent: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parity: Option<Parity>,
+    /// `uint`/`int`: bit positions (0 = the field's first bit) left out of the value; the
+    /// remaining bits are concatenated in order (ADS-B AC12 altitude without its Q bit).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_bits: Vec<u32>,
+    /// `uint`/`int`: the value is `raw × scale + add` (JSON number; `text` renders it with
+    /// `value_unit`). Absent: 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// `uint`/`int`: addend after `scale`. Absent: 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add: Option<f64>,
+    /// `uint`/`int`: unit of the (scaled) value, a short token (`ft`, `kt`, `ft/min`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_unit: Option<String>,
     /// Rendering of the value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<Display>,
@@ -349,7 +393,7 @@ pub struct Field {
 }
 
 /// A field map.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldMap {
     /// Description.
@@ -552,8 +596,42 @@ impl Checker<'_> {
         if !f.flags.is_empty() && !is(FieldType::Bitfield) {
             self.error(path, "`flags` is only valid on bitfield fields");
         }
-        if (f.charset.is_some() || f.char_bits.is_some()) && !is(FieldType::Ascii) {
-            self.error(path, "`charset`/`char_bits` are only valid on ascii fields");
+        if (f.charset.is_some() || f.char_bits.is_some() || f.parity.is_some())
+            && !is(FieldType::Ascii)
+        {
+            self.error(
+                path,
+                "`charset`/`char_bits`/`parity` are only valid on ascii fields",
+            );
+        }
+        let scaled = f.scale.is_some() || f.add.is_some() || f.value_unit.is_some();
+        if (scaled || !f.skip_bits.is_empty()) && !matches!(f.ty, FieldType::Uint | FieldType::Int)
+        {
+            self.error(
+                path,
+                "`skip_bits`/`scale`/`add`/`value_unit` are only valid on uint and int fields",
+            );
+        }
+        if f.scale.is_some_and(|x| !x.is_finite() || x == 0.0)
+            || f.add.is_some_and(|x| !x.is_finite())
+        {
+            self.error(path, "scale must be finite and non-zero, add finite");
+        }
+        if f.value_unit.as_deref().is_some_and(|u| {
+            u.is_empty() || u.len() > 16 || !u.bytes().all(|b| b.is_ascii_graphic())
+        }) {
+            self.error(path, "value_unit is 1–16 printable ASCII characters");
+        }
+        if f.skip_bits.windows(2).any(|w| w[0] >= w[1])
+            || len_bits.is_some_and(|b| {
+                f.skip_bits.last().is_some_and(|&k| u64::from(k) >= b)
+                    || f.skip_bits.len() as u64 >= b
+            })
+        {
+            self.error(
+                path,
+                "skip_bits are ascending, inside the field, and leave at least one bit",
+            );
         }
         if !f.fields.is_empty() && !is(FieldType::Layer) {
             self.error(path, "`fields` is only valid on layers");
@@ -584,9 +662,19 @@ impl Checker<'_> {
                 }
             }
             FieldType::Ascii => {
-                let cb = f.char_bits.unwrap_or(8);
-                if cb != 7 && cb != 8 {
-                    self.error(path, "char_bits is 7 or 8");
+                let bcd = f.charset == Some(Charset::PocsagBcd);
+                let cb = f.char_bits.unwrap_or(if bcd { 4 } else { 8 });
+                if bcd != (cb == 4) {
+                    self.error(
+                        path,
+                        "char_bits 4 goes with charset pocsag-bcd, and only it",
+                    );
+                }
+                if f.parity.is_some() && cb == 4 {
+                    self.error(path, "4-bit characters have no parity bit");
+                }
+                if ![4, 7, 8].contains(&cb) {
+                    self.error(path, "char_bits is 4, 7 or 8");
                 } else if len_bits.is_some_and(|b| b % u64::from(cb) != 0) {
                     self.error(path, "ascii length must be a whole number of characters");
                 }
@@ -731,6 +819,45 @@ mod tests {
         assert!(has("later", "at most 64"), "{errors:?}");
         assert!(has("e", "decimal integers"), "{errors:?}");
         assert!(has("two_ops", "exactly one operator"), "{errors:?}");
+    }
+
+    #[test]
+    fn pocsag_acars_and_adsb_value_keys_validate() {
+        let map: FieldMap = serde_json::from_value(json!({
+            "unit": "bits",
+            "fields": [
+                {"name": "ric", "type": "uint", "length": 23, "skip_bits": [18, 19]},
+                {"name": "function", "type": "uint", "offset": 18, "length": 2},
+                {"name": "numeric", "type": "ascii", "offset": 23, "length": "remainder",
+                 "charset": "pocsag-bcd", "bit_order": "lsb",
+                 "condition": {"field": "function", "eq": 0}},
+                {"name": "label", "type": "ascii", "offset": 23, "length": 16,
+                 "parity": "odd", "condition": {"field": "function", "eq": 3}},
+                {"name": "alt", "type": "uint", "offset": 40, "length": 12, "skip_bits": [7],
+                 "scale": 25, "add": -1000, "value_unit": "ft"}
+            ]
+        }))
+        .unwrap();
+        map.validate().unwrap();
+
+        let bad: FieldMap = serde_json::from_value(json!({
+            "unit": "bits",
+            "fields": [
+                {"name": "a", "type": "ascii", "length": 8, "char_bits": 4},
+                {"name": "b", "type": "ascii", "length": 8, "charset": "pocsag-bcd", "parity": "odd"},
+                {"name": "c", "type": "enum", "length": 4, "values": {"0": "x"}, "scale": 2},
+                {"name": "d", "type": "uint", "length": 4, "skip_bits": [2, 1]},
+                {"name": "e", "type": "uint", "length": 4, "scale": 0}
+            ]
+        }))
+        .unwrap();
+        let errors = bad.validate().unwrap_err();
+        let has = |p: &str, m: &str| errors.iter().any(|e| e.path == p && e.message.contains(m));
+        assert!(has("a", "pocsag-bcd"), "{errors:?}");
+        assert!(has("b", "no parity"), "{errors:?}");
+        assert!(has("c", "only valid on uint and int"), "{errors:?}");
+        assert!(has("d", "ascending"), "{errors:?}");
+        assert!(has("e", "non-zero"), "{errors:?}");
     }
 
     #[test]

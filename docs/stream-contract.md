@@ -691,11 +691,12 @@ One NDJSON record per frame:
 
 Inspector streams also carry two metadata-only record types. Readers that don't know them skip them (§1).
 
-- **`status`**, about every 250 ms per node, from the block contract's status readout (ADR-0011 §1.3):
+- **`status`**, one record per ~250 ms tick for the whole pipeline, every node's block-contract status readout (ADR-0011 §1.3) batched as `<node>.<metric>` keys:
   ```json
   {"type":"status","seq":57,"t":…,"content_class":"unrestricted","gated":false,
-   "metadata":{"node":"sync","lock":"locked","snr_db":14.2,"error_rate":0.012,"quality":0.93,
-               "items_in":118750,"items_out":1130,"blocks_ok":4480}}
+   "metadata":{"sync.lock":"locked","sync.snr_db":14.2,"sync.error_rate":0.012,"sync.quality":0.93,
+               "sync.items_in":118750,"sync.items_out":1130,"sync.blocks_ok":4480,
+               "crc.lock":"locked","crc.error_rate":0.004,"crc.items_in":1130,"crc.items_out":1130}}
   ```
   `metadata` is flat numbers, booleans and short tokens (`policy::metadata_is_allowlist_shaped`); no free text or content ever rides on it.
 - **`edit`**, once per applied hot edit (ADR-0011 §2.3), before the first frame of the new revision:

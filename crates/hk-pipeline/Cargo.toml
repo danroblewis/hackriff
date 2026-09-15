@@ -18,6 +18,9 @@ hk-dsp.workspace = true
 hk-estimate.workspace = true
 hk-model.workspace = true
 hk-plugins.workspace = true
+# T-085: recipe runtime (T-088/T-092/T-093, `src/recipes/`).
+hk-blocks.workspace = true
+hk-recipe.workspace = true
 hk-store.workspace = true
 hk-stream.workspace = true
 # T-071: per-chain thread CPU time (clock_gettime CLOCK_THREAD_CPUTIME_ID).

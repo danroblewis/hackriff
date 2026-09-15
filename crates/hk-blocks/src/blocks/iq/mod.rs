@@ -2,11 +2,11 @@
 //! the DDC's polyphase stages) and hk-demod (discriminator, pilot PLL, RDS subcarrier) per
 //! ADR-0011 §1.6; don't fork their DSP.
 
-use hk_recipe::PortType::{Iq, Real, Soft};
+use hk_recipe::PortType::{Frames, Iq, Real, Soft};
 use hk_recipe::{BlockDescriptor, PortSpec};
 
 use crate::Registry;
-use crate::schema::{ParamExt, descriptor, float, int, object, one_of, param};
+use crate::schema::{ParamExt, descriptor, float, frame_length, hex, int, object, one_of, param};
 
 /// Pinned descriptors of this group.
 pub fn planned() -> Vec<BlockDescriptor> {
@@ -68,10 +68,52 @@ pub fn planned() -> Vec<BlockDescriptor> {
             "MSK demodulator (real, per-sample).",
             io(Iq, Real),
         ),
-        unpinned(
+        descriptor(
             "ppm_demod",
-            "Pulse-position chip-pair comparison to soft bits.",
-            io(Iq, Soft),
+            "iq",
+            "Pulse-position demodulator: finds the chip preamble on the magnitude, decides each data bit from its chip pair (early > late = 1) and emits one frame of data bits per preamble, its length from length_from (ADS-B DF → 56/112) capped at frame_bits. Diagnostic soft: the chip-pair soft bits.",
+            vec![PortSpec::new("in", Iq)],
+            vec![
+                PortSpec::new("out", Frames),
+                PortSpec::new("soft", Soft).diagnostic(),
+            ],
+            [
+                vec![
+                    param(
+                        "bit_rate_bd",
+                        float(1.0, 10e6, "Bd"),
+                        "Data bit rate (ADS-B 1e6).",
+                    )
+                    .required(),
+                    param("chips_per_bit", int(2, 16), "Chips per data bit.").default_value(2),
+                    param(
+                        "preamble",
+                        hex(64),
+                        "Preamble chip pattern, first chip = MSB (ADS-B 0xA140).",
+                    )
+                    .required(),
+                    param("preamble_chips", int(1, 64), "Preamble length, chips.").required(),
+                    param(
+                        "min_snr_db",
+                        float(0.0, 60.0, "dB"),
+                        "Preamble acceptance: on-chip over off-chip level.",
+                    )
+                    .default_value(6.0)
+                    .hot(),
+                    param(
+                        "frame_bits",
+                        int(1, 4_096),
+                        "Most data bits per frame (with length_from: the maximum).",
+                    )
+                    .required(),
+                ],
+                frame_length()
+                    .into_iter()
+                    .filter(|p| p.name == "length_from")
+                    .collect(),
+            ]
+            .concat(),
+            true,
         ),
         descriptor(
             "subcarrier",

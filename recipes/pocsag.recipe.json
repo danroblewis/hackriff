@@ -1,0 +1,123 @@
+{
+  "schema": "hackriff.recipe",
+  "schema_version": 2,
+  "id": "pocsag",
+  "version": 1,
+  "name": "POCSAG: pager messages",
+  "description": "Tutorial 2 skeleton (ADR-0011 §5.1; T-095 tunes it). 2-FSK at 512/1200/2400 Bd (1200 here), batches of the 0x7CD215D8 sync word + 16 codewords, BCH(31,21) + even parity per codeword, message assembly (address codeword = start, message codewords appended, idle 0x7A89C197 ends, across batches), then RIC, function and numeric (4-bit BCD, LSB first) or alphanumeric (7-bit, LSB first) text. Follows every channel of a pager net (follow_hops). restricted-paging: frames are metadata-only unless a user rule vouches for the emitter.",
+  "match": {
+    "families": ["fsk"],
+    "bandwidth_hz": [6000, 25000],
+    "symbol_rate_bd": [500, 2500],
+    "bursty": true
+  },
+  "input": {
+    "port": "iq",
+    "sample_rate_hz": 24000,
+    "bandwidth_hz": 16000,
+    "channels": { "mode": "follow-hops", "channel_bandwidth_hz": 12500, "max_channels": 8 }
+  },
+  "nodes": [
+    { "id": "fsk", "block": "fsk_demod", "label": "2-FSK discriminator" },
+    {
+      "id": "clock",
+      "block": "clock_recovery",
+      "label": "NRZ timing, 1200 Bd",
+      "params": { "symbol_rate_bd": 1200, "pulse": "nrz", "algorithm": "gardner" }
+    },
+    { "id": "slice", "block": "slicer", "label": "Higher frequency = 0", "params": { "threshold": 0.0, "invert": true } },
+    {
+      "id": "sync",
+      "block": "sync_search",
+      "label": "Batch sync 0x7CD215D8 → 16 codewords",
+      "params": {
+        "mode": "sync-word",
+        "sync_word": "0x7CD215D8",
+        "sync_bits": 32,
+        "max_errors": 2,
+        "frame_bits": 512,
+        "include_sync": false
+      }
+    },
+    {
+      "id": "bch",
+      "block": "bch",
+      "label": "BCH(31,21) + even parity per codeword",
+      "params": { "word_bits": 32, "n": 31, "k": 21, "poly": "0x769", "parity": "even", "correct_bits": 2 }
+    },
+    {
+      "id": "msg",
+      "block": "assemble",
+      "label": "Address + message codewords → one message",
+      "params": {
+        "word_bits": 32,
+        "start": { "bit": 0, "value": 0 },
+        "idle_words": ["0x7A89C197"],
+        "header": { "offset_bits": 1, "bits": 20 },
+        "slot": { "words_per_slot": 2, "bits": 3 },
+        "payload": { "offset_bits": 1, "bits": 20 },
+        "max_words": 64
+      }
+    },
+    { "id": "hops", "block": "follow_hops", "label": "Merge channels", "params": { "dedupe_s": 1.0 } },
+    { "id": "page", "block": "fields", "label": "Page fields", "params": { "map": "pocsag_message" } }
+  ],
+  "field_maps": {
+    "pocsag_message": {
+      "description": "One assembled message from `assemble`: address (18) and function (2) from the address codeword, the 3-bit frame slot, then 20 bits per message codeword. The RIC is address ‖ slot. Numeric (function 0 by convention) is 4-bit BCD, alphanumeric (function 3) 7-bit ASCII, both LSB first per character.",
+      "unit": "bits",
+      "fields": [
+        { "name": "ric", "type": "uint", "offset": 0, "length": 23, "skip_bits": [18, 19], "label": "RIC (address ‖ slot)" },
+        { "name": "function", "type": "uint", "offset": 18, "length": 2, "label": "Function" },
+        {
+          "name": "numeric",
+          "type": "ascii",
+          "offset": 23,
+          "length": "remainder",
+          "charset": "pocsag-bcd",
+          "bit_order": "lsb",
+          "condition": { "field": "function", "eq": 0 },
+          "label": "Numeric page"
+        },
+        {
+          "name": "alpha",
+          "type": "ascii",
+          "offset": 23,
+          "length": "remainder",
+          "char_bits": 7,
+          "bit_order": "lsb",
+          "condition": { "field": "function", "eq": 3 },
+          "label": "Alphanumeric page"
+        }
+      ]
+    }
+  },
+  "outputs": [
+    { "id": "pages", "kind": "inspector", "from": "page" },
+    {
+      "id": "page",
+      "kind": "messages",
+      "from": "page",
+      "decode": {
+        "frame_model": "pocsag-page",
+        "identity": { "scheme": "pocsag-ric", "field": "ric", "format": "dec" },
+        "metadata": ["function"],
+        "content": ["numeric", "alpha"]
+      }
+    }
+  ],
+  "output_policy": {
+    "content_class": "restricted-paging",
+    "metadata_keys": {
+      "capcode": { "type": "digits", "max_len": 8 },
+      "function": { "type": "enum", "values": ["0", "1", "2", "3"] },
+      "baud": { "type": "enum", "values": ["512", "1200", "2400"] },
+      "encoding": { "type": "enum", "values": ["numeric", "alpha", "tone"] }
+    },
+    "frame_models": ["pocsag-page"]
+  },
+  "refine": {
+    "objective": { "node": "bch", "metric": "error_rate", "goal": "min" },
+    "tune": ["center_hz"]
+  }
+}
