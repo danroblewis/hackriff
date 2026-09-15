@@ -1634,3 +1634,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Launched now:** T-150, T-151, T-152, based on 9509424. T-153..T-155 follow as agent slots free (agent throttle).
   - **T-145:** Cranelift dropped (tests slower at 1367 s vs 1293 s, with 3 failures; compile ~20 s vs 31 s). lld and the pacing change also gave no gain. The bandit timing reference is running.
   - **T-147:** diag3 confirmed DC-suspect poisoning (274 DC-flagged vs 273 clean detections; the suspect-inclusive FCO bound 0.586 matches truth 0.570). The finisher is also asked why the 10% channel was learned in the 6 h run but not in the 46 h one.
+- **B0.392 T-145 done: nothing kept, no commits.**
+  - **Baseline** (6 test threads): nextest 1292.8 s, 1454 passed; acceptance 86 s, 32 passed.
+  - **Top tests:** listen_live 93 s; bandit ×4 at 83–87 s; three_fm 47 s; refine 44 s; stream_external 43 s; rds 35 s; pocsag 31 s.
+  - **Pacing:** no gain (slow tests are already Unpaced). `api_contract` via `hk serve --device mock:` is hard-wired to RealTime (4 tests × ~9 s); unpacing it needs a product change.
+  - **lld:** no gain.
+  - **Cranelift:** faster compile, but slower tests with 3 failures. Dropped.
+  - **Real lever:** bandit tests are CPU-bound in debug (39.5 M samples in 81 s, zero waits). Adding dev opt-level for hk-dsp/hk-core/hk-pipeline/hk-demod would help, at a compile-time cost. Asked the user.
+  - **Bandit reference:** pre-T-141 worktree 81.5 s at load ~17. Now timing the same test on main post-T-141.

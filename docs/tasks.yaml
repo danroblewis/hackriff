@@ -2283,7 +2283,8 @@ tasks:
   - id: T-145
     milestone: M2
     title: "Build/test speed: mock SDR Pacing::RealTime -> Unpaced except pacing/backpressure/real-time listen tests; lld linker if faster; cranelift dev/test experiment; measure nextest wall before/after"
-    status: in-progress
+    status: done
+    result: "no changes kept: pacing (slow tests already Unpaced; 2 switchable tests not faster), lld (1.51 vs 1.44 s leaf, ~30 s root either way), cranelift (compile 20 vs 31 s but nextest 1367 vs 1293 s with 3 failures, nightly, no sccache) all dropped; real lever = CPU-bound debug code in hot crates (opt-level decision to user)"
     deps: []
     parallel_group: M2E
     use_cases: []
