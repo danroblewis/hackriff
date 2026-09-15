@@ -2477,7 +2477,8 @@ notes:
   - id: T-156
     milestone: MUI
     title: "MUI finish: UI tests for all panels, phone-width (~400px) pass, theme pass, retire the old stacked layout and dead code, demo mergeable"
-    status: in-progress
+    status: done
+    commit: 52afcd4
     deps: [T-150, T-151, T-152, T-153, T-154, T-155]
     parallel_group: MUI-FINAL
     use_cases: []
@@ -2782,3 +2783,31 @@ notes:
     model: opus
     effort: high
     core_interface: true
+  - id: T-176
+    milestone: M2
+    title: "False level-above-baseline alarm after a gain step: empty occupied level pool under the new gain key falls back to the idle pool in evaluate"
+    status: todo
+    deps: [T-146]
+    parallel_group: M2A
+    use_cases: [AWARE-042, AWARE-044]
+    found_by: "T-124 resume 2026-09-15 (suspected; T-124 confirming from diagnostics): unexplained level-above-baseline alarm at 433.375 MHz h45.75 after the VGA step"
+    acceptance: "root cause confirmed with file:line; a new gain key with no occupied level history scores no level z (immature for level) instead of falling back to the idle pool; unit test reproducing the post-gain-step false alarm fails before/passes after; T-124 (h) gain step raises no alarm"
+    area: crates/hk-context/src/occupancy/{baseline,novelty}.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-177
+    milestone: MUI
+    title: "MUI browser smoke: headless playwright against hk serve --device mock at desktop and ~400px widths (both modes, dock, timeline, review drawer), screenshots + console-error check"
+    status: todo
+    deps: [T-156]
+    parallel_group: MUI-FINAL
+    use_cases: []
+    found_by: "coordinator 2026-09-15: no MUI panel was verified in a real browser (agents ran unit tests/build only); playwright-core is already used for T-022a manual smokes"
+    acceptance: "scripted smoke (not added to CI) loads / against hk serve --device mock, switches Explore/Decode, opens Review drawer, checks no console errors, no page-level horizontal overflow at 400px and 1440px, waterfall canvas receives frames; screenshots saved to scratchpad and summarised; any bugs filed"
+    area: ui/ (script under ui/scripts or spikes/), no product change unless a bug is found
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false

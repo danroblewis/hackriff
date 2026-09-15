@@ -1822,3 +1822,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Why it matters:** these are likely races or timing assumptions exposed by faster code. Release/Jetson builds run optimised, so they are latent bugs.
   - **Baseline at 6 threads under load:** also showed 2 failures (`outputs_record` fsk_bits, `stream_external` fsk_bursts), probably load flakes.
   - **Next:** T-175 (Opus high) launched to fix the races, then enable the opt-level overrides.
+- **B0.416 T-156 merged (52afcd4). The new MUI app is now the default UI at `/`.**
+  - **Change:** old stacked layout retired (37 files, −4107 lines). Pure helpers kept; DOM classes removed.
+  - **Theme fix:** hardcoded dark rgba overlays replaced with `color-mix` tokens.
+  - **Tests:** narrow-width layout tests added; npm test 241 passed. No Rust change.
+  - **Bundle:** 48.2 KB gzip, ~3 KB over budget (follow-up).
+  - **Demo:** the supervisor's demo will show the new UI once rebuilt.
+  - **Not yet verified:** no MUI panel has been checked in a real browser → T-177 (playwright smoke, desktop and 400px).
+- **T-124 (267k tokens) is wrapping up with WIP + handoff.** It reports two suspected product bugs, to be confirmed from diagnostics:
+  - A false level-above-baseline alarm after the VGA step: an empty occupied level pool under the new gain key falls back to the idle pool → T-176.
+  - Channels inside hop 1's DC zone and only in hop 2's edge zone never get a clean twin and are never learned → T-173 (hop placement), now priority.
+- **Full check** after the T-156 merge is next.
