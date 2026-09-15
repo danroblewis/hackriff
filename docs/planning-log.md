@@ -1933,3 +1933,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - Station check now integrates channel band power, threshold unchanged. A 7-point sample had read 3.3×.
     - New issue: while dwelling on the partly covered window at 99.873 MHz / 3 Msps, detections appear outside the recorded band (23 kHz at 98.375 MHz, 2.9 MHz wide below 99.6 MHz). They are stored as `marginal`. Possible mock-render or detector bug.
   - **Finisher (fresh Opus):** root-cause t057, strip the T175DBG prints, then run the full timed nextest, acceptance and lint with the overrides.
+- **B0.428 T-177 MUI headless smoke: all 10 checks pass at 1440×900 and 400×800; no bugs found.**
+  - **Setup:** `hk serve` with a mock FM fixture on port 8931 (user demo ports untouched); playwright-core 1.63 plus cached Chrome for Testing installed in the scratchpad only.
+  - **Checks passed:**
+    - No console errors or uncaught exceptions.
+    - No horizontal overflow at either width.
+    - Waterfall frames arrive (perf counter 11 / 82 fps).
+    - Decode↔Explore switch works.
+    - Review drawer opens with all 6 tabs.
+    - Dock and timeline are visible.
+  - **Live data:** WFM at 101.3 MHz, 3 confirmed and 14 candidate detections.
+  - **Artefacts:** 26 screenshots in scratchpad `t177/shots/`. The script `ui/scripts/smoke.mjs` (b084530) is not in CI.
+  - **MUI status:** functionally verified in a real browser. The only open MUI UI item is the bundle budget (+3 KB gzip).

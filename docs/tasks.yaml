@@ -2804,7 +2804,8 @@ notes:
   - id: T-177
     milestone: MUI
     title: "MUI browser smoke: headless playwright against hk serve --device mock at desktop and ~400px widths (both modes, dock, timeline, review drawer), screenshots + console-error check"
-    status: in-progress
+    status: review
+    commit: b084530
     deps: [T-156]
     parallel_group: MUI-FINAL
     use_cases: []
