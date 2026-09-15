@@ -8,8 +8,8 @@ import { BookmarkPanel, type Bookmark } from "./bookmarks";
 import { type ControlClient, reactionTo } from "./client";
 import { DEFAULT_STEP, STEPS, formatFrequency, parseFrequency, shiftCenter } from "./freq";
 import {
-  AVERAGING_MAX, FFT_SIZES, GATED_ROWS_PER_S, ROW_RATES, type ControlState, type GainControl, type PanelModel,
-  panelModel, recordingText, segmentNotice,
+  GATED_ROWS_PER_S, fftSizeOptions, rowRateOptions, windowLabel, type ControlState, type GainControl,
+  type PanelModel, panelModel, recordingText, segmentNotice,
 } from "./model";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -45,6 +45,8 @@ export class ControlPanel {
   private prevRun: { segment: number; content_class: string } | null = null;
   private gainKey = "";
   private rateKey = "";
+  private limitsKey = "";
+  private filterKey = "";
   private offer: { centerHz: number; view: ax.View } | null = null;
 
   constructor(private client: ControlClient, private live: LiveHooks) {
@@ -77,11 +79,22 @@ export class ControlPanel {
   private buildStatic() {
     $("ctl-step").replaceChildren(...STEPS.map((s, i) => option(String(i), s.label)));
     $<HTMLSelectElement>("ctl-step").value = String(DEFAULT_STEP);
-    $("ctl-fft").replaceChildren(...FFT_SIZES.map((n) => option(String(n), String(n))));
-    $("ctl-speed").replaceChildren(...ROW_RATES.map((r) => option(String(r), `${r} rows/s`)));
+    // FFT size, speed, averaging and window options come from the server's display_limits
+    // (T-067; see renderLimits) once the first state arrives, not hard-coded here.
+  }
+
+  /** (Re)builds the FFT size, speed, averaging bounds and window options from `m.limits` (T-067). */
+  private renderLimits(m: PanelModel) {
+    const l = m.limits;
+    const key = `${l.fft_size_min}:${l.fft_size_max}:${l.averaging_max}:${l.rows_per_s_min}:${l.rows_per_s_max}:${l.windows.join(",")}`;
+    if (key === this.limitsKey) return;
+    this.limitsKey = key;
+    $("ctl-fft").replaceChildren(...fftSizeOptions(l).map((n) => option(String(n), String(n))));
+    $("ctl-speed").replaceChildren(...rowRateOptions(l).map((r) => option(String(r), `${r} rows/s`)));
+    $("ctl-window").replaceChildren(...l.windows.map((w) => option(w, windowLabel(w))));
     const avg = $<HTMLInputElement>("ctl-avg");
     avg.min = "1";
-    avg.max = String(AVERAGING_MAX);
+    avg.max = String(l.averaging_max);
   }
 
   private wire() {
@@ -111,14 +124,20 @@ export class ControlPanel {
       }
       void this.deviceCall(`bias tee ${enabled ? "on" : "off"}`, () => this.client.post("/api/control/bias_tee", { enabled }));
     });
-    const display = (field: string, value: number) =>
+    $<HTMLSelectElement>("ctl-filter").addEventListener("change", (e) => {
+      const hz = Number((e.target as HTMLSelectElement).value);
+      void this.deviceCall(`baseband filter ${ax.fmtBandwidth(hz)}`, () => this.client.post("/api/control/baseband_filter", { bandwidth_hz: hz }));
+    });
+    const display = (field: string, value: number | string) =>
       void this.call(`${field} ${value}`, () => this.client.post("/api/control/display", { [field]: value }));
     $("ctl-fft").addEventListener("change", (e) => display("fft_size", Number((e.target as HTMLSelectElement).value)));
     $("ctl-speed").addEventListener("change", (e) => display("rows_per_s", Number((e.target as HTMLSelectElement).value)));
+    $("ctl-window").addEventListener("change", (e) => display("window", (e.target as HTMLSelectElement).value));
     $("ctl-avg").addEventListener("change", (e) => {
       const n = Math.round(Number((e.target as HTMLInputElement).value));
-      if (n >= 1 && n <= AVERAGING_MAX) display("averaging", n);
-      else this.message(`averaging must be 1..${AVERAGING_MAX} rows (1 = off)`, true);
+      const max = this.model?.limits.averaging_max ?? 100;
+      if (n >= 1 && n <= max) display("averaging", n);
+      else this.message(`averaging must be 1..${max} rows (1 = off)`, true);
     });
     $("ctl-pause").addEventListener("click", () => {
       const paused = !!this.state?.run?.display.paused;
@@ -226,6 +245,7 @@ export class ControlPanel {
     const s = this.state;
     if (!s) return;
     const m = (this.model = panelModel(s, this.pending));
+    this.renderLimits(m);
     const run = s.run;
     const dev = $<HTMLFieldSetElement>("ctl-device");
     dev.disabled = !m.device.enabled;
@@ -257,6 +277,7 @@ export class ControlPanel {
     this.renderGains(m.gains);
     $("ctl-bias-wrap").hidden = !m.biasTee.available;
     $<HTMLInputElement>("ctl-bias").checked = m.biasTee.on;
+    this.renderBasebandFilter(m.basebandFilter);
 
     if (run) {
       const d = run.display;
@@ -264,6 +285,7 @@ export class ControlPanel {
       const speed = $<HTMLSelectElement>("ctl-speed");
       if (![...speed.options].some((o) => o.value === String(d.rows_per_s))) speed.append(option(String(d.rows_per_s), `${d.rows_per_s} rows/s`));
       setIdle(speed, String(d.rows_per_s));
+      setIdle($<HTMLSelectElement>("ctl-window"), d.window);
       setIdle($<HTMLInputElement>("ctl-avg"), String(d.averaging));
       $("ctl-speed-hint").textContent = m.gated && d.rows_per_s > GATED_ROWS_PER_S ? `gated class: at most ${GATED_ROWS_PER_S} rows/s are sent` : "";
       $("ctl-pause").textContent = d.paused ? "Resume spectrum" : "Pause spectrum";
@@ -278,6 +300,18 @@ export class ControlPanel {
     stop.disabled = !m.record.active || !m.display.enabled;
     $("ctl-rec-status").textContent = m.record.enabled || m.record.active ? recordingText(rec, rec?.sample_rate_hz ?? sp) : m.record.reason;
     $("ctl-rec-status").classList.toggle("rec-on", m.record.active);
+  }
+
+  private renderBasebandFilter(f: PanelModel["basebandFilter"]) {
+    $("ctl-filter-wrap").hidden = !f.available;
+    if (!f.available) return;
+    const select = $<HTMLSelectElement>("ctl-filter");
+    const key = f.options.join(",");
+    if (key !== this.filterKey) {
+      this.filterKey = key;
+      select.replaceChildren(...f.options.map((hz) => option(String(hz), ax.fmtBandwidth(hz))));
+    }
+    if (f.value !== null) setIdle(select, String(f.value));
   }
 
   private renderGains(gains: GainControl[]) {

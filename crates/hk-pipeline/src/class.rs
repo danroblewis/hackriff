@@ -23,7 +23,7 @@ use hk_model::sigmf::SigmfMeta;
 use hk_stream::{GATED_SPECTRUM_MAX_ROW_RATE_HZ, StreamHeader, StreamKind};
 use serde::{Deserialize, Serialize};
 
-use hk_dsp::{StftConfig, WelchConfig};
+use hk_dsp::{StftConfig, WelchConfig, WindowKind};
 
 /// Datatype of spectrum rows: `fft_size` little-endian f32 PSD values, dBFS/Hz, ascending
 /// frequency.
@@ -316,9 +316,16 @@ pub struct RowPlan {
 
 /// Chooses `K` so rows come at most at `rows_per_s` (and within the gated cap when `class`
 /// forbids content).
-pub fn row_plan(fs: f64, fft_len: usize, rows_per_s: f64, class: ContentClass) -> RowPlan {
+pub fn row_plan(
+    fs: f64,
+    fft_len: usize,
+    rows_per_s: f64,
+    class: ContentClass,
+    window: WindowKind,
+) -> RowPlan {
     let mut welch = WelchConfig::new(fft_len);
     welch.spectral_kurtosis = false;
+    welch.window = window;
     let hop = welch.hop() as f64;
     let gated = !class.permits_content();
     let target = if gated {

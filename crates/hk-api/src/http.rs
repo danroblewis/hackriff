@@ -80,6 +80,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/control/rate"),
     ("POST", "/api/control/gains"),
     ("POST", "/api/control/bias_tee"),
+    ("POST", "/api/control/baseband_filter"),
     ("POST", "/api/control/display"),
     ("POST", "/api/control/pause"),
     ("POST", "/api/control/resume"),

@@ -42,7 +42,9 @@ pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};
 
 pub use auth::{Token, default_token_path};
 pub use bridge::{StreamInfo, StreamRegistry};
-pub use control::{AuditLog, DisplayState, DisplayUpdate, RecordingState, RunControl, RunState};
+pub use control::{
+    AuditLog, DisplayLimits, DisplayState, DisplayUpdate, RecordingState, RunControl, RunState,
+};
 pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use live_control::{
     LiveControl, LiveControlError, LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner,

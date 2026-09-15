@@ -41,6 +41,9 @@ pub struct LiveTuning {
     pub gains: Vec<NamedGain>,
     /// Bias-tee state; `None` when the device has no bias tee.
     pub bias_tee: Option<bool>,
+    /// Baseband (anti-alias) filter bandwidth, Hz; `None` when never set explicitly (the device's
+    /// default, usually derived from the sample rate) or the device has no selectable filter.
+    pub baseband_filter_hz: Option<f64>,
 }
 
 /// Why a control request was not applied.
@@ -167,6 +170,8 @@ pub trait LiveControl: Send + Sync {
     fn set_gains(&self, gains: &[NamedGain]) -> Result<LiveTuning, LiveControlError>;
     /// Switches the bias tee (optional capability).
     fn set_bias_tee(&self, enabled: bool) -> Result<LiveTuning, LiveControlError>;
+    /// Selects the baseband (anti-alias) filter bandwidth, Hz (optional capability; T-067).
+    fn set_baseband_filter(&self, bandwidth_hz: f64) -> Result<LiveTuning, LiveControlError>;
 }
 
 /// Decides whether the run may tune to `(center_hz, sample_rate_hz)`; `Err` explains why not.
@@ -385,6 +390,26 @@ impl LiveControl for SourceLiveControl {
         t.bias_tee = Some(enabled);
         Ok(t.clone())
     }
+
+    fn set_baseband_filter(&self, bandwidth_hz: f64) -> Result<LiveTuning, LiveControlError> {
+        let mut t = self.lock();
+        let filters = self
+            .capabilities()
+            .baseband_filter
+            .as_ref()
+            .ok_or(LiveControlError::Unsupported("baseband filter"))?;
+        if !(bandwidth_hz.is_finite() && filters.supports(bandwidth_hz)) {
+            return Err(LiveControlError::OutOfRange {
+                what: "baseband filter bandwidth (Hz)".into(),
+                value: bandwidth_hz,
+            });
+        }
+        self.control
+            .set_baseband_filter(bandwidth_hz)
+            .map_err(LiveControlError::Source)?;
+        t.baseband_filter_hz = Some(bandwidth_hz);
+        Ok(t.clone())
+    }
 }
 
 #[cfg(test)]
@@ -421,8 +446,8 @@ mod tests {
         fn set_gain(&self, stage: &str, db: f64) -> Result<(), SourceError> {
             self.push(format!("gain {stage} {db}"))
         }
-        fn set_baseband_filter(&self, _: f64) -> Result<(), SourceError> {
-            unreachable!()
+        fn set_baseband_filter(&self, hz: f64) -> Result<(), SourceError> {
+            self.push(format!("filter {hz}"))
         }
         fn set_bias_tee(&self, on: bool) -> Result<(), SourceError> {
             self.push(format!("bias {on}"))
@@ -445,6 +470,7 @@ mod tests {
             sample_rate_hz: 2.4e6,
             gains: vec![NamedGain::new("lna", 32.0), NamedGain::new("vga", 30.0)],
             bias_tee: Some(false),
+            baseband_filter_hz: None,
         };
         (
             SourceLiveControl::new(Arc::clone(&rec) as Arc<dyn SourceControl>, initial),
@@ -488,13 +514,17 @@ mod tests {
         let t = lc.set_bias_tee(true).unwrap();
         assert_eq!(t.bias_tee, Some(true));
         assert_eq!(lc.tuning(), t);
+        assert_eq!(lc.set_baseband_filter(9.5e6).unwrap_err().http_status(), 400);
+        let t = lc.set_baseband_filter(7.0e6).unwrap();
+        assert_eq!(t.baseband_filter_hz, Some(7.0e6));
         assert_eq!(
             *rec.calls.lock().unwrap(),
             vec![
                 "tune 101100000".to_string(),
                 "gain lna 24".to_string(),
                 "gain amp 11".to_string(),
-                "bias true".to_string()
+                "bias true".to_string(),
+                "filter 7000000".to_string(),
             ]
         );
     }
@@ -505,6 +535,16 @@ mod tests {
         caps.bias_tee = false;
         let (lc, rec) = live(caps);
         assert_eq!(lc.set_bias_tee(true).unwrap_err().http_status(), 501);
+        assert!(rec.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_device_without_a_baseband_filter_reports_unsupported() {
+        let mut caps = SourceCapabilities::hackrf_one();
+        caps.baseband_filter = None;
+        let (lc, rec) = live(caps);
+        let e = lc.set_baseband_filter(7.0e6).unwrap_err();
+        assert_eq!((e.http_status(), e.code()), (501, "unsupported"));
         assert!(rec.calls.lock().unwrap().is_empty());
     }
 

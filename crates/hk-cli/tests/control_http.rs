@@ -110,6 +110,7 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
                 sample_rate_hz: FS,
                 gains: Vec::new(),
                 bias_tee: Some(false),
+                baseband_filter_hz: None,
             },
         )
         .with_retuner(Arc::new(PipelineRetuner(handle.controller()))),
@@ -146,7 +147,7 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["display"],
-        json!({"fft_size": 512, "averaging": 4, "rows_per_s": 10.0, "paused": false})
+        json!({"fft_size": 512, "averaging": 4, "rows_per_s": 10.0, "paused": false, "window": "hann"})
     );
     let (st, v) = post(addr, "/api/control/display", r#"{"fft_size": 1000}"#);
     assert_eq!((st, v["code"].as_str()), (400, Some("invalid")));

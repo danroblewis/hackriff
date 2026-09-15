@@ -12,8 +12,9 @@ use std::time::{Duration, SystemTime};
 
 use hk_api::control::AuditLimits;
 use hk_api::{
-    ApiState, AuditLog, DisplayState, DisplayUpdate, LiveControl, LiveControlError, LiveTuning,
-    ROUTES, RecordingState, RunControl, RunState, Server, ServerConfig, SourceLiveControl, Token,
+    ApiState, AuditLog, DisplayLimits, DisplayState, DisplayUpdate, LiveControl, LiveControlError,
+    LiveTuning, ROUTES, RecordingState, RunControl, RunState, Server, ServerConfig,
+    SourceLiveControl, Token,
 };
 use hk_core::{Gains, NamedGain, SourceCapabilities, SourceControl, SourceError};
 use hk_model::{BookmarkId, ContentClass, Repository};
@@ -101,7 +102,7 @@ impl SourceControl for Device {
 }
 
 /// Receive-side commands a device may see from the control API.
-const RECEIVE_OPS: [&str; 4] = ["tune ", "rate ", "gain ", "bias "];
+const RECEIVE_OPS: [&str; 5] = ["tune ", "rate ", "gain ", "bias ", "filter "];
 
 fn live(device: &Arc<Device>) -> Arc<dyn LiveControl> {
     Arc::new(SourceLiveControl::new(
@@ -111,6 +112,7 @@ fn live(device: &Arc<Device>) -> Arc<dyn LiveControl> {
             sample_rate_hz: 2.4e6,
             gains: vec![NamedGain::new("lna", 16.0), NamedGain::new("vga", 20.0)],
             bias_tee: device.caps.bias_tee.then_some(false),
+            baseband_filter_hz: None,
         },
     ))
 }
@@ -133,6 +135,7 @@ impl FakeRun {
                 averaging: 1,
                 rows_per_s: 25.0,
                 paused: false,
+                window: "hann".to_owned(),
             },
             recording: RecordingState::default(),
         })))
@@ -142,6 +145,16 @@ impl FakeRun {
 impl RunControl for FakeRun {
     fn state(&self) -> RunState {
         self.0.lock().unwrap().clone()
+    }
+    fn display_limits(&self) -> DisplayLimits {
+        DisplayLimits {
+            fft_size_min: 64,
+            fft_size_max: 65_536,
+            averaging_max: 100,
+            rows_per_s_min: 0.5,
+            rows_per_s_max: 200.0,
+            windows: vec!["hann".into(), "blackman-harris".into(), "flat-top".into()],
+        }
     }
     fn set_display(&self, u: &DisplayUpdate) -> Result<DisplayState, LiveControlError> {
         let mut s = self.0.lock().unwrap();
@@ -159,12 +172,20 @@ impl RunControl for FakeRun {
         if let Some(r) = u.rows_per_s {
             s.display.rows_per_s = r;
         }
-        Ok(s.display)
+        if let Some(w) = &u.window {
+            if !["hann", "blackman-harris", "flat-top"].contains(&w.as_str()) {
+                return Err(LiveControlError::Invalid(format!(
+                    "window {w:?} must be one of hann, blackman-harris, flat-top"
+                )));
+            }
+            s.display.window = w.clone();
+        }
+        Ok(s.display.clone())
     }
     fn set_paused(&self, paused: bool) -> Result<DisplayState, LiveControlError> {
         let mut s = self.0.lock().unwrap();
         s.display.paused = paused;
-        Ok(s.display)
+        Ok(s.display.clone())
     }
     fn start_recording(
         &self,
@@ -522,7 +543,7 @@ fn control_values_are_validated_with_clear_errors() {
         true,
     );
     let addr = r.server.local_addr();
-    let cases: [(&str, &str, u16, &str); 14] = [
+    let cases: [(&str, &str, u16, &str); 18] = [
         (
             "/api/control/center",
             r#"{"center_hz": 101e6, "tx": true}"#,
@@ -586,7 +607,31 @@ fn control_values_are_validated_with_clear_errors() {
             400,
             "power of two",
         ),
+        (
+            "/api/control/display",
+            r#"{"window": "kaiser"}"#,
+            400,
+            "must be one of",
+        ),
+        (
+            "/api/control/display",
+            r#"{"window": null}"#,
+            400,
+            "not null",
+        ),
         ("/api/control/pause", r#"{"now": true}"#, 400, "now"),
+        (
+            "/api/control/baseband_filter",
+            r#"{}"#,
+            400,
+            "bandwidth_hz is required",
+        ),
+        (
+            "/api/control/baseband_filter",
+            r#"{"bandwidth_hz": 9.5e6}"#,
+            400,
+            "out of range",
+        ),
     ];
     for (path, body, status, needle) in cases {
         let rep = authed(addr, "POST", path, Some(body));
@@ -640,6 +685,24 @@ fn control_values_are_validated_with_clear_errors() {
         vec!["gain amp 11", "gain lna 24"],
         "stages are applied in name order"
     );
+    // Baseband filter (T-067): validated against the device's discrete bandwidths.
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/baseband_filter",
+        Some(r#"{"bandwidth_hz": 7e6}"#),
+    );
+    assert_eq!(rep.status, 200, "{}", rep.body);
+    assert_eq!(rep.body["tuning"]["baseband_filter_hz"], json!(7e6));
+    // Display window (T-067).
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/display",
+        Some(r#"{"window": "flat-top"}"#),
+    );
+    assert_eq!(rep.status, 200, "{}", rep.body);
+    assert_eq!(rep.body["display"]["window"], json!("flat-top"));
 }
 
 #[test]
@@ -1127,6 +1190,10 @@ fn replayed_recordings_refuse_device_settings_and_accept_display_settings() {
         ("/api/control/rate", r#"{"sample_rate_hz": 10e6}"#),
         ("/api/control/gains", r#"{"gains": {"lna": 24}}"#),
         ("/api/control/bias_tee", r#"{"enabled": true}"#),
+        (
+            "/api/control/baseband_filter",
+            r#"{"bandwidth_hz": 7e6}"#,
+        ),
     ] {
         let rep = authed(addr, "POST", path, Some(body));
         assert_eq!(rep.status, 409, "{path}: {}", rep.body);
@@ -1136,10 +1203,11 @@ fn replayed_recordings_refuse_device_settings_and_accept_display_settings() {
         addr,
         "POST",
         "/api/control/display",
-        Some(r#"{"fft_size": 2048, "rows_per_s": 10}"#),
+        Some(r#"{"fft_size": 2048, "rows_per_s": 10, "window": "blackman-harris"}"#),
     );
     assert_eq!(rep.status, 200, "{}", rep.body);
     assert_eq!(rep.body["display"]["fft_size"], json!(2048));
+    assert_eq!(rep.body["display"]["window"], json!("blackman-harris"));
     assert_eq!(
         authed(addr, "POST", "/api/control/resume", None).status,
         200
@@ -1148,6 +1216,19 @@ fn replayed_recordings_refuse_device_settings_and_accept_display_settings() {
     assert_eq!(state.body["live"], json!(false));
     assert!(state.body["device"].is_null());
     assert_eq!(state.body["run"]["display"]["fft_size"], json!(2048));
+    // Display limits (T-067) are reported even without a live device.
+    let limits = &state.body["display_limits"];
+    assert!(limits["fft_size_min"].as_u64().unwrap() > 0);
+    assert!(limits["fft_size_max"].as_u64().unwrap() >= limits["fft_size_min"].as_u64().unwrap());
+    assert!(limits["averaging_max"].as_u64().unwrap() >= 1);
+    assert!(limits["rows_per_s_max"].as_f64().unwrap() > 0.0);
+    assert!(
+        limits["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w == "hann")
+    );
     assert!(r.device.calls().is_empty());
 }
 

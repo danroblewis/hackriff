@@ -7,7 +7,10 @@ import * as ax from "../src/axis";
 import { bookmarkFromClick, bookmarkFromSelection, jumpPlan } from "../src/controls/bookmarks";
 import { ControlClient, ControlError, buildRequest, errorFrom, reactionTo } from "../src/controls/client";
 import { STEPS, clampToRanges, formatFrequency, parseFrequency, shiftCenter, stepHz } from "../src/controls/freq";
-import { type ControlState, classLabel, gainControls, panelModel, rateOptions, segmentNotice } from "../src/controls/model";
+import {
+  type ControlState, basebandFilterOptions, classLabel, fftSizeOptions, gainControls, panelModel, rateOptions,
+  rowRateOptions, segmentNotice, windowLabel,
+} from "../src/controls/model";
 import replayState from "./control_state_replay.json";
 
 const near = (a: number, b: number, tol: number, msg = "") => assert.ok(Math.abs(a - b) <= tol, `${msg}: |${a} − ${b}| > ${tol}`);
@@ -160,14 +163,15 @@ const HACKRF_CAPS = {
   driver: "hackrf-one", kind: "hardware", controllable: true, frequency_ranges_hz: [[1e6, 6e9]],
   sample_rates_hz: { min: 2e6, max: 20e6 },
   gain_stages: [{ name: "lna", min_db: 0, max_db: 40, step_db: 8 }, { name: "vga", min_db: 0, max_db: 62, step_db: 2 }, { name: "amp", min_db: 0, max_db: 11, step_db: 11 }],
-  bias_tee: true, adc_bits: 8, tx_capable_hardware: true,
+  bias_tee: true, baseband_filter: { values_hz: [1.75e6, 2.5e6, 3.5e6, 5e6, 5.5e6, 6e6, 7e6, 8e6, 9e6, 10e6, 12e6, 14e6, 15e6, 20e6, 24e6, 28e6] },
+  adc_bits: 8, tx_capable_hardware: true,
 } as const;
 
 function liveState(over: Partial<{ class: string; permitted: boolean; replumbing: boolean; audit: boolean; finished: boolean; recording: boolean }> = {}): ControlState {
   const s = structuredClone(replayState) as unknown as ControlState;
   s.live = true;
   s.device = structuredClone(HACKRF_CAPS) as unknown as ControlState["device"];
-  s.tuning = { center_hz: 100.8e6, sample_rate_hz: 2.4e6, gains: { lna: 32, vga: 30, amp: 11 }, bias_tee: false };
+  s.tuning = { center_hz: 100.8e6, sample_rate_hz: 2.4e6, gains: { lna: 32, vga: 30, amp: 11 }, bias_tee: false, baseband_filter_hz: 7e6 };
   s.audit = over.audit ?? true;
   const run = s.run!;
   run.live = true;
@@ -191,8 +195,10 @@ test("replay (captured hk serve --replay state): device controls off with not_li
   assert.equal(m.record.enabled, s.run!.content_permitted);
   assert.deepEqual(m.gains, []);
   assert.equal(m.biasTee.available, false);
+  assert.equal(m.basebandFilter.available, false);
   assert.deepEqual(m.rates, [s.run!.sample_rate_hz], "only the recording's rate");
   assert.equal(m.classText, classLabel(s.run!.content_class, s.run!.content_permitted));
+  assert.deepEqual(m.limits, s.display_limits, "T-067: read from the state body, not hard-coded");
 });
 
 test("live state: HackRF gains, rates, bias tee; busy, gated, finished and no-audit gates", () => {
@@ -201,6 +207,9 @@ test("live state: HackRF gains, rates, bias tee; busy, gated, finished and no-au
   assert.deepEqual(m.gains.map((g) => [g.label, g.value, g.step, g.toggle]), [["LNA", 32, 8, false], ["VGA", 30, 2, false], ["RF amp", 11, 11, true]]);
   assert.deepEqual(m.rates, [2e6, 2.4e6, 4e6, 5e6, 8e6, 10e6, 12.5e6, 16e6, 20e6]);
   assert.deepEqual(m.biasTee, { available: true, on: false });
+  assert.equal(m.basebandFilter.available, true);
+  assert.equal(m.basebandFilter.value, 7e6);
+  assert.deepEqual(m.basebandFilter.options, HACKRF_CAPS.baseband_filter.values_hz);
   assert.deepEqual(m.frequencyRanges, [[1e6, 6e9]]);
 
   const busy = panelModel(liveState({ replumbing: true }));
@@ -253,4 +262,26 @@ test("bookmarks: payloads from a click or a selection; jump zooms inside the ban
   assert.deepEqual(jumpPlan(FM, { f_center_hz: 433.92e6, bandwidth_hz: null }, true), { kind: "retune", centerHz: 433.92e6 });
   assert.deepEqual(jumpPlan(FM, { f_center_hz: 433.92e6, bandwidth_hz: null }, false), { kind: "outside" });
   assert.deepEqual(jumpPlan(null, { f_center_hz: 433.92e6, bandwidth_hz: null }, true), { kind: "retune", centerHz: 433.92e6 });
+});
+
+test("T-067: display limits, window and baseband filter options are derived, not hard-coded", () => {
+  const limits = { fft_size_min: 256, fft_size_max: 4096, averaging_max: 16, rows_per_s_min: 1, rows_per_s_max: 30, windows: ["hann", "flat-top"] };
+  assert.deepEqual(fftSizeOptions(limits), [256, 512, 1024, 2048, 4096]);
+  assert.deepEqual(rowRateOptions(limits), [1, 2, 5, 10, 25, 30], "standard rates clamped into range, max always included");
+  assert.equal(windowLabel("hann"), "Hann");
+  assert.equal(windowLabel("blackman-harris"), "Blackman-Harris");
+  assert.equal(windowLabel("flat-top"), "Flat-Top");
+
+  assert.deepEqual(basebandFilterOptions(null, undefined), []);
+  assert.deepEqual(basebandFilterOptions({ values_hz: [7e6, 1.75e6, 20e6] }, undefined), [1.75e6, 7e6, 20e6], "sorted");
+  assert.deepEqual(
+    basebandFilterOptions({ values_hz: [7e6, 20e6] }, 9.5e6),
+    [7e6, 9.5e6, 20e6],
+    "the current value is included even if not offered by the device"
+  );
+  const cont = basebandFilterOptions({ min_hz: 1e6, max_hz: 8e6 }, undefined);
+  assert.equal(cont.length, 9);
+  assert.equal(cont[0], 1e6);
+  assert.equal(cont[cont.length - 1], 8e6);
+  assert.ok(cont.every((v, i) => i === 0 || v > cont[i - 1]!), "increasing");
 });
