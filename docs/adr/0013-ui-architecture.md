@@ -244,8 +244,8 @@ Update modes: **poll** (interval in §3.2), **stream**, **action** (on user acti
 |---|---|---|---|---|
 | Activity band | `GET /api/history?f_lo&f_hi&t0=now−48h&t1=now&max_cells≈192×nf` | per time column: max of `occupancy` / `max_db` over the span; `coverage_summary.gaps` | poll 60 s | The reduction per column is a max over served cells, for display. Gaps are drawn as unobserved. |
 | Playhead scrub / LIVE pill / "reviewing N ago" | – | `time` slice | – | UI |
-| "6.2 h buffered · 41 GB of 220 GB · last 48 h kept" | – | – | – | **API GAP 1**. Interim: show history coverage span (`coverage_summary`) as "history since …". |
-| "Export clip from the buffer" | `POST /api/outputs/record/start {selection_id\|emitter_id\|band, kinds:["iq"]}` | `recording` session | action | **API GAP 1** (records forward, not from the buffer). Interim action label: "Record IQ". |
+| "6.2 h buffered · 41 GB of 220 GB · last 48 h kept" | – | – | – | **API GAP 1**. Interim: show history coverage span (`coverage_summary`) as "history since …". *Served since T-157/T-178:* `GET /api/iqbuffer` `span_s`, `bytes`, `allocated_bytes`, `retention_s`; the buffer is a pre-allocated ring that survives restarts ([ADR-0014](0014-iq-capture-ring.md)), so the span can reach back before the current run (segments carry `run`). |
+| "Export clip from the buffer" | `POST /api/outputs/record/start {selection_id\|emitter_id\|band, kinds:["iq"]}` | `recording` session | action | **API GAP 1** (records forward, not from the buffer). Interim action label: "Record IQ". *Served since T-157:* `POST /api/iqbuffer/clip` (`run` selects a segment of an earlier run, T-178). |
 
 ### 4.5 Explore: focus panel (T-151)
 
@@ -329,7 +329,7 @@ None are implemented here. Each gap has an interim UI behaviour, and none of the
 
 | # | Gap (mockup element) | Proposed backend task | Owning crate(s) | Size |
 |---|---|---|---|---|
-| 1 | Always-on capture buffer: "Recording all · 48 h buffer", buffered hours and bytes of quota, "Export clip from the buffer" | **Rolling IQ capture buffer with status and clip export**: retention policy, `GET /api/capture/buffer` (`retained_from_s`, `bytes`, `quota_bytes`), `POST /api/capture/clip {t0, t1, f_lo, f_hi}` → SigMF output session | hk-store, hk-pipeline, hk-api | large |
+| 1 | Always-on capture buffer: "Recording all · 48 h buffer", buffered hours and bytes of quota, "Export clip from the buffer" | **Rolling IQ capture buffer with status and clip export**: retention policy, `GET /api/capture/buffer` (`retained_from_s`, `bytes`, `quota_bytes`), `POST /api/capture/clip {t0, t1, f_lo, f_hi}` → SigMF output session | hk-store, hk-pipeline, hk-api | large — **done**: T-157 `GET /api/iqbuffer`, `POST /api/iqbuffer/clip`; T-178 persistent pre-allocated ring ([ADR-0014](0014-iq-capture-ring.md)) |
 | 2 | Row and focus SNR, peak level, level bar | **Inventory row measurements**: latest `snr_db`, `peak_dbfs` (and `floor_dbfs`) from the emitter's detections or track | hk-model (repo query), hk-api | small |
 | 3 | Focus decoded summary (RDS PS/PTY, pager address) | **Emitter's latest decode fields**: `GET /api/inventory/{id}/decodes?limit=` returning Decode rows gated like the `decodes/*` stream | hk-model, hk-api | small |
 | 4 | MPX / subcarrier stage plot | **Stage tap `view=spectrum`** (already specified in stream-contract §14.4; answers 422) | hk-pipeline (recipes/openers), hk-api | small |

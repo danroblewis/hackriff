@@ -65,7 +65,11 @@ fn start_server() -> (Serving, SocketAddr) {
         token: Some(TOKEN.into()),
         listen: Default::default(),
         compute: Default::default(),
-        iq_buffer: Default::default(),
+        // T-178: the ring is allocated up front, so tests keep it small.
+        iq_buffer: hk_cli::pipeline::IqBufferArgs {
+            retention_s: None,
+            max_bytes: Some(64 << 20),
+        },
     })
     .unwrap();
     let addr = serving.server.local_addr();
@@ -1182,6 +1186,41 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
         v["fs_free_bytes"].as_u64() <= v["fs_total_bytes"].as_u64(),
         "{v}"
     );
+    // T-178: the pre-allocated persistent ring.
+    for k in [
+        "slot_count",
+        "allocated_bytes",
+        "recovered_segments",
+        "discarded_slots",
+        "wrap_count",
+        "run",
+        "head_slot",
+        "head_offset_bytes",
+        "sync_errors",
+        "poisoned_samples",
+    ] {
+        assert!(v[k].is_u64(), "{k}: {v}");
+    }
+    assert_eq!(
+        (
+            &v["persisted"],
+            &v["allocation"],
+            v["allocation_progress"].as_f64()
+        ),
+        (&json!(true), &json!("full"), Some(1.0)),
+        "{v}"
+    );
+    assert!(v["preallocated"].is_boolean(), "{v}");
+    assert_eq!(
+        v["allocated_bytes"].as_u64(),
+        Some(v["slot_count"].as_u64().unwrap() * v["chunk_bytes"].as_u64().unwrap()),
+        "{v}"
+    );
+    assert!(
+        v["allocated_bytes"].as_u64() <= v["quota_bytes"].as_u64()
+            && v["disk_bytes"].as_u64() > v["allocated_bytes"].as_u64(),
+        "{v}"
+    );
     // The quota: min(retention × the mock's highest rate (20 Msps) × 2 bytes, max_bytes).
     let implied = (v["retention_s"].as_f64().unwrap() * 20e6).ceil() as u64 * 2;
     let quota = v["max_bytes"].as_u64().map_or(implied, |m| m.min(implied));
@@ -1200,9 +1239,10 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
         .iter()
         .find(|g| g["samples"].as_u64().unwrap_or(0) >= CLIP_SAMPLES)
         .expect("a segment of 0.1 s");
-    for k in ["id", "samples", "global_index", "dropped_before"] {
+    for k in ["id", "run", "samples", "global_index", "dropped_before"] {
         assert!(seg[k].is_u64(), "segment {k}: {seg}");
     }
+    assert_eq!(seg["run"], v["run"], "this run's segment: {seg}");
     for k in ["t0_ns", "t1_ns"] {
         assert!(seg[k].is_i64(), "segment {k}: {seg}");
     }
@@ -1257,7 +1297,17 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
     let n = r["samples"].as_u64().unwrap();
     assert_eq!(n, CLIP_SAMPLES, "{r}");
     assert_eq!(r["captures"][0]["global_index"].as_u64(), Some(g0), "{r}");
+    assert_eq!(r["captures"][0]["run"], status["run"], "{r}");
     assert_eq!(r["bytes"].as_u64(), Some(2 * n), "{r}");
+    // T-178: stream indices are per run; the same indices of another run select nothing.
+    let other = json!({
+        "global_index": g0,
+        "samples": CLIP_SAMPLES,
+        "run": status["run"].as_u64().unwrap() + 1
+    })
+    .to_string();
+    let (st, v3) = post(addr, "/api/iqbuffer/clip", &other);
+    assert_eq!((st, v3["code"].as_str()), (404, Some("not_found")), "{v3}");
     // The same span in exact ns selects exactly the same samples.
     let t0_ns = seg["t0_ns"].as_i64().unwrap();
     assert_eq!(r["t0_ns"].as_i64(), Some(t0_ns), "{r}");
@@ -1346,6 +1396,8 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
         json!({ "t0": t0, "t1": t1, "extra": 1 }),
         json!({ "t0": t0, "t1": t1, "band": { "f_lo": 2.0, "f_hi": 1.0 } }),
         json!({ "t0": t0, "t1": t1, "label": 5 }),
+        json!({ "t0": t0, "t1": t1, "run": -1 }),
+        json!({ "t0": t0, "t1": t1, "run": "one" }),
     ] {
         let (st, v) = post(addr, "/api/iqbuffer/clip", &bad.to_string());
         assert_eq!(

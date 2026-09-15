@@ -6,7 +6,7 @@
 //! | Method | Path | Body / query | Answers |
 //! |---|---|---|---|
 //! | GET | `/api/iqbuffer` | `?[t0=<unix s>][&t1=<unix s>][&limit=1..10000, default 1000]` | the buffer status (span, bytes and quota, segments with tuning and gain, gaps, eviction counts, drops) |
-//! | POST | `/api/iqbuffer/clip` | one range of `{"t0", "t1"}` (Unix s), `{"t0_ns", "t1_ns"}` or `{"global_index", "samples"}`, plus `"band"?: {"f_lo", "f_hi"}, "label"?` | `{"recording": clip}`; 404 `not_found` (nothing buffered there), 409 `conflict` (spans a sample-rate change), 503 `unavailable` (no buffer), 507 `insufficient_storage` (no room above the free-space floor) |
+//! | POST | `/api/iqbuffer/clip` | one range of `{"t0", "t1"}` (Unix s), `{"t0_ns", "t1_ns"}` or `{"global_index", "samples"}`, plus `"band"?: {"f_lo", "f_hi"}, "label"?, "run"?` | `{"recording": clip}`; 404 `not_found` (nothing buffered there, or overwritten during the export), 409 `conflict` (spans a sample-rate change or a restart), 503 `unavailable` (no buffer), 507 `insufficient_storage` (no room above the free-space floor) |
 //!
 //! The clip export writes a file and a `Recording` row, so it needs `Authorization: Bearer` and is
 //! audited as `iqbuffer_clip`.
@@ -44,6 +44,8 @@ pub struct ClipStart {
     pub band: Option<(f64, f64)>,
     /// User label.
     pub label: Option<String>,
+    /// Only segments of this buffer run (T-178; stream indices restart with every run).
+    pub run: Option<u64>,
 }
 
 /// A refused or failed clip export.
@@ -176,6 +178,7 @@ fn clip(state: &ApiState, body: &Map<String, Value>) -> Result<Applied, Fail> {
             "samples",
             "band",
             "label",
+            "run",
         ],
     )?;
     let given = |keys: [&str; 2]| {
@@ -253,7 +256,19 @@ fn clip(state: &ApiState, body: &Map<String, Value>) -> Result<Applied, Fail> {
         Some(Value::String(s)) => Some(s.clone()),
         Some(_) => return Err(Fail::invalid("label is a string")),
     };
-    let request = ClipStart { range, band, label };
+    let run = match body.get("run") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .ok_or_else(|| Fail::invalid("run is a non-negative integer"))?,
+        ),
+    };
+    let request = ClipStart {
+        range,
+        band,
+        label,
+        run,
+    };
     let recording = control(state)?.clip(&request).map_err(|f| {
         let code = match f.code.as_str() {
             "invalid" => "invalid",

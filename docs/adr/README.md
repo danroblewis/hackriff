@@ -21,5 +21,6 @@ Changing an ACCEPTED ADR goes to Fable plus the user, never a silent code change
 | [0011](0011-decoder-workbench-contracts.md) | Decoder workbench contracts: blocks, recipes, field maps, inspector stream |
 | [0012](0012-attention-memory-contracts.md) | Attention + memory contracts: observation log, occupancy, baselines, interestingness, bandit, reports, alarms |
 | [0013](0013-ui-architecture.md) | MUI web UI architecture: vanilla TS + small store, component tree, state slices, frontend↔API map with API gaps, migration, per-panel briefs |
+| [0014](0014-iq-capture-ring.md) | IQ capture ring: pre-allocated persistent on-disk ring for the rolling IQ buffer (slots, CRC-framed journal, recovery, quota change, free space, runs) |
 | [0015](0015-decoder-synthesis-contracts.md) | Decoder synthesis contracts (MAUTO): recipe-prefix candidates, stage evidence in significance bits, beam search + budget, templates, `POST /api/analyze` jobs, confirm-by-decode, burst path, blind evaluation |
 | [0016](0016-classification-contracts.md) | Classification contracts (M3): Classification with open-set unknown and taxonomy `hk-mod@1`, prior fusion that never vetoes evidence, classical cascade + gated DL, EmissionFeatures/Signature/SignatureMatch and unknown clustering, ml-runtime (Mac-first ONNX), blind evaluation and exit gate, MAUTO seed, M3 task graph |

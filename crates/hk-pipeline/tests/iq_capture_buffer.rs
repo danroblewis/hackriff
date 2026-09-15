@@ -76,7 +76,9 @@ fn spans(c: &ClipExported) -> Vec<(u64, u64, u64)> {
 #[test]
 fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
     let dir = TempDir::new("t157-iqbuffer");
-    let meta = tone_recording(&dir.0.join("rec"), "tone", FS, 4.0, CENTER_HZ, None);
+    // Long enough that the mock's loop point (a GAP-flagged block, so a segment boundary) stays
+    // beyond the retunes: the unpaced source runs ~4 s of stream ahead before the first retune.
+    let meta = tone_recording(&dir.0.join("rec"), "tone", FS, 20.0, CENTER_HZ, None);
     let recorded = std::fs::read(meta.with_extension("sigmf-data")).unwrap();
     let driver = MockSdrDriver::new(
         &meta,
@@ -107,7 +109,8 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
     cfg.iq_buffer = IqBufferConfig {
         enabled: Some(true),
         retention_s: 600.0,
-        max_bytes: Some(1 << 30),
+        // T-178: the ring is allocated up front (T-157 used 1 GiB of grow-and-delete headroom).
+        max_bytes: Some(256 << 20),
         min_free_bytes: Some(0),
         max_clip_bytes: CLIP_CAP,
         ..IqBufferConfig::default()
@@ -122,6 +125,8 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
     )
     .unwrap();
     let buffer = handle.iq_buffer();
+    // T-178: the ring opens in the background.
+    assert!(buffer.wait_allocated(LIMIT));
     assert!(buffer.enabled());
     let status = || buffer.status(None, None, 1000);
     let export = |range| {
@@ -129,6 +134,7 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
             range,
             band: None,
             label: None,
+            run: None,
         })
     };
 
@@ -148,6 +154,7 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
             },
             band: None,
             label: Some("fixed tune".into()),
+            run: None,
         })
         .unwrap();
     assert_eq!(
@@ -320,6 +327,7 @@ fn capture_buffer_clip_spans_a_retune_with_segments_and_exact_iq() {
             },
             band: Some((900e6, 901e6)),
             label: None,
+            run: None,
         })
         .unwrap_err();
     assert!(matches!(err, ClipFailure::NotFound(_)), "{err:?}");

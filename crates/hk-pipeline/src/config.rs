@@ -238,9 +238,12 @@ pub struct PipelineConfig {
     /// moves it into another class ([`crate::PipelineController::retune`]). Off for recordings
     /// and scheduler-driven runs (their class covers every window they visit).
     pub live_window_class: bool,
-    /// Rolling IQ capture buffer (T-157, [`crate::iqbuffer`]): on by default for every run that
-    /// is not a lossless replay, a 2 min retention window; `HK_IQ_RETENTION`, `HK_IQ_BUFFER_MAX`
-    /// and `HK_IQ_BUFFER` override it (`hk serve --iq-retention/--iq-buffer-max` on top).
+    /// Rolling IQ capture buffer (T-157, [`crate::iqbuffer`]). [`Self::new`] leaves it **off**
+    /// (T-178: the ring is allocated on disk up front, so a library or test run never reserves the
+    /// 4.8 GB default without asking); the `hk`/`hackriffd` composition turns it on with
+    /// [`hk_store::iqbuffer::IqBufferConfig::from_env`] (on for every run that is not a lossless
+    /// replay, 2 min retention; `HK_IQ_RETENTION`, `HK_IQ_BUFFER_MAX`, `HK_IQ_BUFFER`) and
+    /// `--iq-retention/--iq-buffer-max` on top. Tests that buffer set an explicit small quota.
     pub iq_buffer: hk_store::iqbuffer::IqBufferConfig,
     /// Filesystem probes of the IQ capture buffer (`None`: the real filesystem); tests inject a
     /// full disk or a slow writer.
@@ -403,7 +406,10 @@ impl PipelineConfig {
             calibrations: Vec::new(),
             device_hw: None,
             live_window_class: false,
-            iq_buffer: hk_store::iqbuffer::IqBufferConfig::from_env(),
+            iq_buffer: hk_store::iqbuffer::IqBufferConfig {
+                enabled: Some(false),
+                ..hk_store::iqbuffer::IqBufferConfig::default()
+            },
             iq_buffer_hooks: None,
         })
     }
