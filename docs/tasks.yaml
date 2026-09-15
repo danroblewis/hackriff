@@ -2263,6 +2263,20 @@ tasks:
     effort: medium
     core_interface: true
     priority: "ahead of other M2 work (user)"
+  - id: T-144
+    milestone: M2
+    title: "Build-CPU tuning for parallel agents: max 4 Rust-building agents, CARGO_BUILD_JOBS=6 + nextest --test-threads 6, seed new worktree targets by APFS clone of main target, sccache on (CLAUDE.md coordination launch step)"
+    status: done
+    deps: []
+    parallel_group: M2E
+    use_cases: []
+    found_by: "user 2026-09-15: agents oversubscribe the 28 cores (several full builds each spawning ~28 jobs)"
+    acceptance: "CLAUDE.md Coordination has the worktree launch step; running agents told to apply the caps; future briefs include CARGO_BUILD_JOBS=6, --test-threads 6 and the cp -c -R -p seed"
+    area: CLAUDE.md
+    needs: none
+    model: opus
+    effort: low
+    core_interface: false
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"

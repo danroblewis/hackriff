@@ -116,6 +116,16 @@ Development runs from one long-lived coordinator session (Opus) that delegates t
 - **Briefing a subagent:** give it its task entry, the capability cards it touches (`docs/capabilities/`), and the ADRs + data-model sections the task names — not the full research docs. The **use-case IDs in the task are its definition of done**; the agent asserts on the data-model objects (`docs/07`) and reports back a short summary with results written to files.
 - **Model/effort** per `prompts/model-selection.md`. Core-interface tasks (schema, plugin/stream contracts, detection thresholds, scheduler — marked `core_interface` in `tasks.yaml`) and anything touching the real-time path go to Fable/Opus and are reviewed before merge; never Sonnet/Haiku alone.
 - **Parallel work uses git worktrees**, one per `parallel_group`; tasks sharing a crate serialise on it or split file ownership (see `tasks.yaml` notes). A cheaper model's output touching core interfaces is reviewed by Opus before merge. Changing an ACCEPTED ADR goes to Fable + the user.
+- **Worktree launch step (build CPU and disk, T-144).** The Mac has 28 cores, and unthrottled parallel builds oversubscribe them.
+  - **Concurrency:** at most **4 Rust-building agents** run at once. The coordinator's full check counts as one.
+  - **Disk:** check `df -h /` first, and don't launch below about 20 GB free.
+  - **First build:** each new worktree seeds its target from main with `cp -c -R -p /Users/daniellewis/hackriff/target <worktree>/target`.
+    - This is an APFS clone: instant, and no extra disk.
+    - `-p` keeps mtimes, so the checked-out sources rebuild only the ~11 workspace crates, not ~70 deps.
+    - Never share a `CARGO_TARGET_DIR`.
+  - **Build flags:** agents build with `CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=line-tables-only`. They run `cargo nextest run … --test-threads 6`, or `cargo test … -- --test-threads 6`. That makes 4 × 6 ≈ cores.
+  - **Cache:** sccache stays on.
+  - **After merge:** remove the worktree.
 - **A real HackRF One is attached to the dev Mac** and verified with `hackrf_info`: firmware 2026.01.3, board revision older than r6, on its own USB bus. Development may use it for receive-side work: spikes S4/S5/S1, fixture capture (T-025), HIL tests. Rules:
   - **One agent at a time.** Only one process can open the device, so the coordinator hands out access explicitly, and any agent using it runs without parallel hardware users.
   - **Check it's free first** (`hackrf_info`), and release it when done.

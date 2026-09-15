@@ -1439,3 +1439,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Shared `pool_membership`/`is_empty_slot` helpers.
   - Tests: hk-store 7, hk-context 40.
   - Merges after T-143 (user priority).
+- **B0.373 T-144 build-CPU tuning (user request, done).**
+  - **Concurrency:** at most 4 Rust-building agents; the coordinator's full check counts as one.
+  - **Jobs:** `CARGO_BUILD_JOBS=6`, and nextest/cargo test run with `--test-threads 6`.
+  - **Seeding:** a new worktree target is seeded with `cp -c -R -p main/target` (APFS clone). `-p` keeps mtimes so workspace crates rebuild instead of reusing stale artifacts; this is a coordinator addition to the user's `cp -c -R`.
+  - **sccache:** stays on (~44% hit rate).
+  - **Where recorded:** CLAUDE.md Coordination and memory. This supersedes the 2026-09-14 "no target seeding" note.
+  - **Running agents:** T-143, T-124 and T-141 were messaged to apply the caps from their next command (3 building agents, under the cap).
