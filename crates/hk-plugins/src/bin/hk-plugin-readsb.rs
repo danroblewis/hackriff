@@ -32,15 +32,26 @@
 //!   TC 19, ground-speed subtypes 1 and 2) and DF11 all-call replies (ICAO only — no ME field).
 //!   Other downlink formats carry the ICAO folded into the parity field (address/parity XOR) and
 //!   are out of scope for this wrapper.
-//! - **Timestamps.** `sample_index` on every emitted decode line is the index of the *last*
-//!   sample of the most recent input record **written to readsb's stdin** (set by the writer
-//!   thread after the write, T-037b) — the fallback docs/stream-contract.md §9.6 anticipated,
-//!   since raw AVR output carries no correlatable position in the input stream. It is an upper
-//!   bound on the message's true position: stamping at hand-off (as before) also counted the
-//!   unbounded hand-off backlog, which in an unpaced replay could run seconds ahead. What remains
-//!   is readsb's own buffering: a full `--sdr-buffer-size` block (128 KiB default, ~27 ms of
-//!   samples at 2.4 Msps) plus the stdin pipe buffer (64 KiB on macOS/Linux, ~13 ms), so decodes
-//!   stamp at most about 40 ms late (unverified against readsb's internal block alignment).
+//! - **Timestamps (T-072).** `sample_index` on every emitted decode line is the stream index of
+//!   the message's preamble start, taken from readsb's own sample clock rather than from when a
+//!   line happened to be read. readsb also runs a Beast output to a loopback listener of this
+//!   wrapper (`--net --net-connector=127.0.0.1,<port>,beast_out`); every Beast frame carries a
+//!   48-bit 12 MHz timestamp counted from the first sample readsb read on stdin. The writer
+//!   thread records where each forwarded input record landed in that count (start-up pre-roll and
+//!   keepalive silence map to nothing), so a frame's timestamp maps back to the record's stream
+//!   index whatever the pipe buffering, readsb's block size or the load. readsb (3.16) stamps a
+//!   message [`BEAST_STAMP_OFFSET_S`] after its preamble start (its 136 µs buffer overlap plus the
+//!   64 µs Beast reference point; measured exact to the sample on the `adsb_squitter` synth),
+//!   which is subtracted.
+//!
+//!   The `--raw` stdout lines stay the authoritative message list: each is matched to the Beast
+//!   frame with the same bytes, waiting up to [`BEAST_MATCH_WAIT`]. A line without a frame (no
+//!   connection, a frame readsb did not forward) falls back to the old upper bound, the last
+//!   sample of the newest record written to readsb's stdin: readsb's block (~27 ms) plus the pipe
+//!   buffer (~13 ms), and T-047 saw up to ~95 ms under load. readsb opens its connector only once
+//!   input flows, so the writer first sends [`PREROLL_SAMPLES`] of silence and waits up to
+//!   [`BEAST_CONNECT_WAIT`] for the connection before forwarding real samples; a message in the
+//!   first milliseconds of a chain would otherwise decode before the connection exists.
 //! - **Crash and stall isolation.** readsb runs as an ordinary child (not detached), inside this
 //!   process's own process group, which the plugin host already owns and can SIGKILL as a whole
 //!   (`kill_group` in `host.rs`). Three independent watchers can end this wrapper non-zero so the
@@ -68,14 +79,15 @@
 //!   `hk-dummy-plugin` uses for its `--orphan`/`--stall-child` grandchildren, so a test can find
 //!   and signal the real readsb process.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::process::{Child, Command, ExitStatus, Stdio, exit};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hk_stream::{Record, StreamReader};
 use serde_json::{Map, Value, json};
@@ -257,14 +269,7 @@ fn parse_avr_line(
     current_sample_index: u64,
     window_samples: u64,
 ) -> Option<Frame> {
-    let hex = line.trim().strip_prefix('*')?.strip_suffix(';')?;
-    if hex.len() % 2 != 0 {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for i in (0..hex.len()).step_by(2) {
-        bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).ok()?);
-    }
+    let bytes = avr_bytes(line)?;
     if bytes.len() != 7 && bytes.len() != 14 {
         return None; // not a short (DF11) or long (DF17) Mode S frame
     }
@@ -423,14 +428,247 @@ fn pump_stderr(stderr: impl Read, clean_shutdown: &AtomicBool) {
     }
 }
 
+/// readsb's Beast timestamp clock, ticks per second.
+const BEAST_TICKS_PER_S: f64 = 12e6;
+/// How long after its preamble start readsb stamps a message (see the module doc, "Timestamps").
+const BEAST_STAMP_OFFSET_S: f64 = 200e-6;
+/// Silence written before the first real record, so readsb starts its main loop and connects.
+/// readsb's `ifile` reader waits for full `--sdr-buffer-size` blocks (128 KiB = 65 536 `uc8`
+/// samples), and readsb 3.16 did not forward over Beast a message in its first few blocks even
+/// with the connection up (measured on the `adsb_squitter` synth: a 131 072-sample pre-roll lost
+/// the first squitter's frame, 600 000 and more lost none). 2²⁰ samples (~0.44 s at 2.4 Msps, a
+/// few ms of readsb CPU per chain start) keeps a margin; a missed frame still falls back.
+const PREROLL_SAMPLES: u64 = 1 << 20;
+/// Longest wait for readsb's Beast connection before real samples are forwarded anyway.
+const BEAST_CONNECT_WAIT: Duration = Duration::from_secs(2);
+/// Longest wait for the Beast frame of a raw line.
+const BEAST_MATCH_WAIT: Duration = Duration::from_millis(250);
+/// Unmatched Beast frames kept (frames of downlink formats this wrapper never emits).
+const BEAST_MAX_PENDING: usize = 4096;
+/// Forwarded records whose position in readsb's sample count is remembered.
+const PLACEMENTS_KEPT: usize = 4096;
+
+#[derive(Default)]
+struct BeastState {
+    connected: bool,
+    closed: bool,
+    /// `(message bytes, timestamp)`, in readsb's output order.
+    frames: VecDeque<(Vec<u8>, u64)>,
+}
+
+/// Sample-time stamping state shared by the writer, Beast and stdout threads (module doc,
+/// "Timestamps").
+struct Timing {
+    sample_rate_hz: f64,
+    /// Last sample of the newest record written to readsb's stdin: the fallback stamp.
+    last_sample_index: AtomicU64,
+    /// `(readsb sample count at the record's first sample, its stream index, samples)`.
+    placements: Mutex<VecDeque<(u64, u64, u64)>>,
+    beast: Mutex<BeastState>,
+    beast_changed: Condvar,
+}
+
+impl Timing {
+    fn new(sample_rate_hz: f64) -> Self {
+        Self {
+            sample_rate_hz,
+            last_sample_index: AtomicU64::new(0),
+            placements: Mutex::new(VecDeque::new()),
+            beast: Mutex::new(BeastState::default()),
+            beast_changed: Condvar::new(),
+        }
+    }
+
+    fn beast(&self) -> MutexGuard<'_, BeastState> {
+        self.beast.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A record of `n` samples starting at stream index `first` was written at readsb sample
+    /// count `at`.
+    fn placed(&self, at: u64, first: u64, n: u64) {
+        let mut p = self
+            .placements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if p.len() >= PLACEMENTS_KEPT {
+            p.pop_front();
+        }
+        p.push_back((at, first, n));
+        drop(p);
+        self.last_sample_index
+            .store(first + n.saturating_sub(1), Ordering::Relaxed);
+    }
+
+    /// The stream index at readsb sample count `at`, when a forwarded record covers it.
+    fn index_at(&self, at: u64) -> Option<u64> {
+        let p = self
+            .placements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let i = p
+            .partition_point(|&(start, _, _)| start <= at)
+            .checked_sub(1)?;
+        let (start, first, n) = p[i];
+        (at < start + n).then(|| first + (at - start))
+    }
+
+    /// The stream index of the preamble start a Beast timestamp names.
+    fn index_of_timestamp(&self, ticks: u64) -> Option<u64> {
+        let at = (ticks as f64 / BEAST_TICKS_PER_S - BEAST_STAMP_OFFSET_S) * self.sample_rate_hz;
+        if at.is_nan() || at < 0.0 {
+            return None;
+        }
+        self.index_at(at.round() as u64)
+    }
+
+    fn set_connected(&self) {
+        self.beast().connected = true;
+        self.beast_changed.notify_all();
+    }
+
+    fn set_closed(&self) {
+        self.beast().closed = true;
+        self.beast_changed.notify_all();
+    }
+
+    fn push_frame(&self, message: Vec<u8>, ticks: u64) {
+        let mut st = self.beast();
+        if st.frames.len() >= BEAST_MAX_PENDING {
+            st.frames.pop_front();
+        }
+        st.frames.push_back((message, ticks));
+        drop(st);
+        self.beast_changed.notify_all();
+    }
+
+    /// Waits up to `timeout` for the Beast connection; whether it exists.
+    fn wait_connected(&self, timeout: Duration) -> bool {
+        let st = self.beast();
+        let (st, _) = self
+            .beast_changed
+            .wait_timeout_while(st, timeout, |s| !s.connected && !s.closed)
+            .unwrap_or_else(PoisonError::into_inner);
+        st.connected
+    }
+
+    /// The stamp of CRC-valid message `message` (its raw line was just read): the matching Beast
+    /// frame's sample index, else the fallback.
+    fn stamp(&self, message: &[u8]) -> u64 {
+        let deadline = Instant::now() + BEAST_MATCH_WAIT;
+        let mut st = self.beast();
+        loop {
+            if let Some(pos) = st.frames.iter().position(|(m, _)| m.as_slice() == message) {
+                // Both outputs follow readsb's decode order: frames before the match belong to
+                // lines this wrapper did not stamp (other downlink formats, failed CRC).
+                st.frames.drain(..pos);
+                let (_, ticks) = st.frames.pop_front().expect("the matched frame");
+                drop(st);
+                if let Some(index) = self.index_of_timestamp(ticks) {
+                    return index;
+                }
+                break;
+            }
+            let now = Instant::now();
+            if !st.connected || st.closed || now >= deadline {
+                break;
+            }
+            st = self
+                .beast_changed
+                .wait_timeout(st, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        self.last_sample_index.load(Ordering::Relaxed)
+    }
+}
+
+/// The message bytes of one `*hex;` AVR raw line.
+fn avr_bytes(line: &str) -> Option<Vec<u8>> {
+    let hex = line.trim().strip_prefix('*')?.strip_suffix(';')?;
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// Parses a Beast binary stream: `0x1a`, a type byte, a 6-byte big-endian timestamp, a signal
+/// byte and the message, with every `0x1a` inside escaped as `0x1a 0x1a`. Calls
+/// `on_frame(type, timestamp, message)` for Mode A/C (`'1'`, 2 bytes), Mode S short (`'2'`, 7)
+/// and long (`'3'`, 14) frames; other types are skipped to the next frame start.
+fn parse_beast(r: impl Read, mut on_frame: impl FnMut(u8, u64, &[u8])) {
+    let mut bytes = BufReader::new(r).bytes().map_while(Result::ok).peekable();
+    let mut at_start = false;
+    loop {
+        if !at_start && !bytes.by_ref().any(|b| b == 0x1a) {
+            return;
+        }
+        at_start = false;
+        let Some(kind) = bytes.next() else { return };
+        let len = match kind {
+            0x31 => 2,
+            0x32 => 7,
+            0x33 => 14,
+            _ => continue,
+        };
+        let mut body = [0u8; 7 + 14];
+        let mut filled = 0;
+        while filled < 7 + len {
+            let Some(b) = bytes.next() else { return };
+            if b == 0x1a {
+                if bytes.peek() == Some(&0x1a) {
+                    bytes.next();
+                } else {
+                    // An unescaped frame start: the frame was truncated.
+                    at_start = true;
+                    break;
+                }
+            }
+            body[filled] = b;
+            filled += 1;
+        }
+        if at_start {
+            continue;
+        }
+        let ticks = body[..6].iter().fold(0u64, |t, &b| (t << 8) | u64::from(b));
+        on_frame(kind, ticks, &body[7..7 + len]);
+    }
+}
+
+/// Accepts readsb's Beast connection and queues its Mode S frames for [`Timing::stamp`].
+fn pump_beast(listener: TcpListener, timing: &Timing) {
+    let Ok((stream, _)) = listener.accept() else {
+        timing.set_closed();
+        return;
+    };
+    timing.set_connected();
+    parse_beast(stream, |kind, ticks, message| {
+        if kind != 0x31 {
+            timing.push_frame(message.to_vec(), ticks);
+        }
+    });
+    timing.set_closed();
+}
+
+/// The stamp for one raw line (see [`Timing::stamp`]); lines this wrapper will not emit take the
+/// fallback without waiting.
+fn line_stamp(line: &str, timing: &Timing) -> u64 {
+    match avr_bytes(line) {
+        Some(b) if matches!(b.len(), 7 | 14) && crc24_remainder(&b) == 0 => timing.stamp(&b),
+        _ => timing.last_sample_index.load(Ordering::Relaxed),
+    }
+}
+
 /// Parses readsb's `--raw` stdout into NDJSON decode lines on our own stdout.
-fn pump_stdout(stdout: impl Read, last_sample_index: &AtomicU64, window_samples: u64) {
+fn pump_stdout(stdout: impl Read, timing: &Timing, window_samples: u64) {
     let mut r = BufReader::new(stdout);
     let mut out = io::stdout().lock();
     let mut line = String::new();
     let mut cpr: HashMap<String, CprCache> = HashMap::new();
     while r.read_line(&mut line).unwrap_or(0) > 0 {
-        let idx = last_sample_index.load(Ordering::Relaxed);
+        let idx = line_stamp(&line, timing);
         if let Some(frame) = parse_avr_line(&line, &mut cpr, idx, window_samples)
             && (writeln!(out, "{}", decode_line(&frame)).is_err() || out.flush().is_err())
         {
@@ -440,7 +678,17 @@ fn pump_stdout(stdout: impl Read, last_sample_index: &AtomicU64, window_samples:
     }
 }
 
-fn spawn_readsb(extra_args: &[String]) -> io::Result<Child> {
+fn spawn_readsb(extra_args: &[String], beast_port: Option<u16>) -> io::Result<Child> {
+    let beast: Vec<String> = beast_port
+        .map(|port| {
+            vec![
+                "--net".into(),
+                format!("--net-connector=127.0.0.1,{port},beast_out"),
+                "--net-ro-interval=0.01".into(),
+                "--net-heartbeat=0".into(),
+            ]
+        })
+        .unwrap_or_default();
     Command::new(readsb_path())
         .args([
             "--device-type",
@@ -453,6 +701,7 @@ fn spawn_readsb(extra_args: &[String]) -> io::Result<Child> {
             "--raw",
             "--no-fix",
         ])
+        .args(beast)
         .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -471,22 +720,44 @@ fn spawn_readsb(extra_args: &[String]) -> io::Result<Child> {
 fn feed_readsb(
     mut readsb_stdin: impl Write,
     rx: mpsc::Receiver<(Vec<u8>, u64)>,
-    last_sample_index: &AtomicU64,
+    timing: &Timing,
+    wait_for_beast: bool,
 ) {
+    // readsb's sample count so far (every byte written to its stdin, silence included).
+    let mut written = 0u64;
+    let silence = [0x80u8; KEEPALIVE_CHUNK_BYTES];
+    let send_silence = |stdin: &mut dyn Write, written: &mut u64| {
+        if stdin
+            .write_all(&silence)
+            .and_then(|()| stdin.flush())
+            .is_err()
+        {
+            crash_exit("keepalive write to readsb's stdin failed; it likely died");
+        }
+        *written += (KEEPALIVE_CHUNK_BYTES / 2) as u64;
+    };
+    if wait_for_beast {
+        // Pre-roll, then hold real samples until readsb's Beast connection exists (module doc),
+        // keeping readsb fed meanwhile.
+        while written < PREROLL_SAMPLES {
+            send_silence(&mut readsb_stdin, &mut written);
+        }
+        let deadline = Instant::now() + BEAST_CONNECT_WAIT;
+        while !timing.wait_connected(Duration::from_millis(200)) && Instant::now() < deadline {
+            send_silence(&mut readsb_stdin, &mut written);
+        }
+    }
     loop {
         match rx.recv_timeout(KEEPALIVE_INTERVAL) {
-            Ok((chunk, last_index)) => {
+            Ok((chunk, first_index)) => {
+                let n = (chunk.len() / 2) as u64;
                 if readsb_stdin.write_all(&chunk).is_err() {
                     crash_exit("write to readsb's stdin failed; it likely died");
                 }
-                last_sample_index.store(last_index, Ordering::Relaxed);
+                timing.placed(written, first_index, n);
+                written += n;
             }
-            Err(RecvTimeoutError::Timeout) => {
-                let silence = [0x80u8; KEEPALIVE_CHUNK_BYTES];
-                if readsb_stdin.write_all(&silence).is_err() {
-                    crash_exit("keepalive write to readsb's stdin failed; it likely died");
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => send_silence(&mut readsb_stdin, &mut written),
             Err(RecvTimeoutError::Disconnected) => return, // clean shutdown; caller closes stdin
         }
     }
@@ -517,7 +788,19 @@ fn main() {
     let sample_rate_hz = header.sample_rate_hz.unwrap_or(2_400_000.0);
     let cpr_window_samples = (CPR_PAIR_WINDOW_S * sample_rate_hz).round() as u64;
 
-    let mut child = match spawn_readsb(&extra_args) {
+    // The Beast listener for sample-time stamps; without it decodes keep the fallback stamp.
+    let beast = match TcpListener::bind(("127.0.0.1", 0)) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            eprintln!("hk-plugin-readsb: no Beast listener ({e}); decode stamps fall back");
+            None
+        }
+    };
+    let beast_port = beast
+        .as_ref()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port());
+    let mut child = match spawn_readsb(&extra_args, beast_port) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("hk-plugin-readsb: spawning {} failed: {e}", readsb_path());
@@ -531,11 +814,18 @@ fn main() {
     let readsb_stderr = child.stderr.take().expect("piped stderr");
 
     let clean_shutdown = Arc::new(AtomicBool::new(false));
-    let last_sample_index = Arc::new(AtomicU64::new(0));
+    let timing = Arc::new(Timing::new(sample_rate_hz));
     let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, u64)>(WRITER_BACKLOG_CHUNKS);
 
-    let idx_for_writer = Arc::clone(&last_sample_index);
-    let writer = thread::spawn(move || feed_readsb(readsb_stdin, rx, &idx_for_writer));
+    let wait_for_beast = beast.is_some();
+    if let Some(listener) = beast {
+        // Not joined: it ends when readsb closes the connection (or never, if it never connects).
+        let t = Arc::clone(&timing);
+        thread::spawn(move || pump_beast(listener, &t));
+    }
+    let timing_for_writer = Arc::clone(&timing);
+    let writer =
+        thread::spawn(move || feed_readsb(readsb_stdin, rx, &timing_for_writer, wait_for_beast));
 
     let waiter_clean = Arc::clone(&clean_shutdown);
     let waiter = thread::spawn(move || {
@@ -559,9 +849,9 @@ fn main() {
     let stderr_clean = Arc::clone(&clean_shutdown);
     let err_thread = thread::spawn(move || pump_stderr(readsb_stderr, &stderr_clean));
 
-    let idx_for_out = Arc::clone(&last_sample_index);
+    let timing_for_out = Arc::clone(&timing);
     let out_thread =
-        thread::spawn(move || pump_stdout(readsb_stdout, &idx_for_out, cpr_window_samples));
+        thread::spawn(move || pump_stdout(readsb_stdout, &timing_for_out, cpr_window_samples));
 
     // Feed loop: convert ci8 -> uc8 (offset binary) and hand it to the writer thread. Never
     // blocks capture: this process's own stdin is the bounded `DecoderFeed` ring (host.rs). The
@@ -573,12 +863,10 @@ fn main() {
         match reader.next_record() {
             Ok(Some(Record::Binary(b))) => {
                 let converted: Vec<u8> = b.payload.iter().map(|byte| byte ^ 0x80).collect();
-                // The index of the *last* sample in this record: main.rs's INVARIANT-adjacent
-                // range check treats the offered range as inclusive, and one past the end (what
-                // this used to stamp) can read as out of range under a restricted class.
-                let n_samples = b.header.payload_len as u64 / 2; // ci8: 1 I + 1 Q byte/sample
-                let last_index = b.header.sample_index + n_samples.saturating_sub(1);
-                if tx.send((converted, last_index)).is_err() {
+                // The writer places the record by its first sample index; the fallback stamp is
+                // its *last* sample (the host's offered-range check is inclusive, and one past
+                // the end can read as out of range under a restricted class).
+                if tx.send((converted, b.header.sample_index)).is_err() {
                     // The writer thread is gone. It only ever exits via `crash_exit` (which
                     // terminates the whole process) or a clean shutdown it cannot have started
                     // (only this loop starts one) — unreachable in practice, but never spin.
@@ -620,6 +908,97 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Beast ticks for readsb sample count `at` (the stamp of a message starting there).
+    fn ticks(at: f64) -> u64 {
+        ((at / 2.4e6 + BEAST_STAMP_OFFSET_S) * BEAST_TICKS_PER_S).round() as u64
+    }
+
+    fn beast_frame(kind: u8, ticks: u64, message: &[u8]) -> Vec<u8> {
+        let mut body = ticks.to_be_bytes()[2..].to_vec();
+        body.push(0x40);
+        body.extend_from_slice(message);
+        let mut out = vec![0x1a, kind];
+        for b in body {
+            out.push(b);
+            if b == 0x1a {
+                out.push(0x1a);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn beast_frames_parse_with_escapes_and_resync_after_truncation() {
+        let long: Vec<u8> = (0..14).map(|i| if i == 3 { 0x1a } else { i }).collect();
+        let short = [0x58, 0x1a, 0x1a, 1, 2, 3, 4];
+        let mut stream = b"garbage".to_vec();
+        stream.extend(beast_frame(0x31, 7, &[0, 0]));
+        stream.extend(beast_frame(0x33, 0x1a_0000_1a05, &long));
+        // A frame cut off by the next frame start.
+        stream.extend(&beast_frame(0x33, 9, &long)[..10]);
+        stream.extend(beast_frame(0x32, 42, &short));
+        stream.extend([0x1a, 0x7f, 1, 2]); // unknown type
+        let mut got = Vec::new();
+        parse_beast(&stream[..], |k, t, m| got.push((k, t, m.to_vec())));
+        assert_eq!(
+            got,
+            vec![
+                (0x31, 7, vec![0, 0]),
+                (0x33, 0x1a_0000_1a05, long.clone()),
+                (0x32, 42, short.to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn beast_timestamps_map_to_stream_indices_and_silence_maps_to_nothing() {
+        let t = Timing::new(2.4e6);
+        let pre = PREROLL_SAMPLES as f64;
+        t.placed(PREROLL_SAMPLES, 1_000_000, 65_536);
+        let after_keepalive = PREROLL_SAMPLES + 65_536 + 8_192;
+        t.placed(after_keepalive, 2_000_000, 1_000);
+        assert_eq!(t.index_of_timestamp(ticks(pre + 100.0)), Some(1_000_100));
+        assert_eq!(t.index_of_timestamp(ticks(10.0)), None, "pre-roll");
+        assert_eq!(
+            t.index_of_timestamp(ticks(pre + 65_536.0 + 5.0)),
+            None,
+            "keepalive"
+        );
+        assert_eq!(
+            t.index_of_timestamp(ticks(after_keepalive as f64 + 999.0)),
+            Some(2_000_999)
+        );
+        assert_eq!(t.index_of_timestamp(ticks(1e9)), None, "not written yet");
+        assert_eq!(t.index_of_timestamp(0), None, "before the stamp offset");
+    }
+
+    #[test]
+    fn stamps_match_frames_in_order_and_fall_back_without_a_frame() {
+        let t = Timing::new(2.4e6);
+        t.placed(0, 500, 10_000);
+        let (a, b) = (vec![0xaa; 14], vec![0xbb; 7]);
+        let started = Instant::now();
+        assert_eq!(t.stamp(&a), 10_499, "no connection: fallback at once");
+        assert!(started.elapsed() < BEAST_MATCH_WAIT);
+        t.set_connected();
+        t.push_frame(vec![0x20; 7], ticks(1.0)); // a downlink format never stamped
+        t.push_frame(a.clone(), ticks(100.0));
+        t.push_frame(b.clone(), ticks(200.0));
+        assert_eq!(t.stamp(&a), 600);
+        assert_eq!(t.stamp(&b), 700);
+        // A frame that never arrives: the fallback after the match wait.
+        let started = Instant::now();
+        assert_eq!(t.stamp(&a), 10_499);
+        assert!(started.elapsed() >= BEAST_MATCH_WAIT);
+        t.set_closed();
+        assert_eq!(t.stamp(&b), 10_499);
+        assert_eq!(
+            avr_bytes("*5d4ca853;\n"),
+            Some(vec![0x5d, 0x4c, 0xa8, 0x53])
+        );
+        assert_eq!(avr_bytes("*5d4;"), None);
+    }
 
     /// Hex-encodes bytes (lower-case), for building `*hex;` AVR test lines without a new
     /// dependency.
@@ -869,14 +1248,17 @@ mod tests {
             "a full hand-off makes the reader wait instead of buffering without bound"
         );
         drop(tx);
-        let idx = AtomicU64::new(0);
+        let timing = Timing::new(2.4e6);
         let mut out = Vec::new();
-        feed_readsb(&mut out, rx, &idx);
+        feed_readsb(&mut out, rx, &timing, false);
         assert_eq!(out.len(), 4 * WRITER_BACKLOG_CHUNKS);
+        // Each 2-sample chunk's last sample is the fallback stamp.
         assert_eq!(
-            idx.load(Ordering::Relaxed),
-            100 + WRITER_BACKLOG_CHUNKS as u64 - 1
+            timing.last_sample_index.load(Ordering::Relaxed),
+            100 + WRITER_BACKLOG_CHUNKS as u64 - 1 + 1
         );
+        // Chunks are placed contiguously in readsb's sample count.
+        assert_eq!(timing.index_at(2), Some(101));
     }
 
     #[test]

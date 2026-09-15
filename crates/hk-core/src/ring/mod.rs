@@ -1114,9 +1114,6 @@ impl ReaderState {
         if block >= head {
             return self.nothing(closed, head);
         }
-        if pos < shared.oldest_valid_sample() {
-            return self.lapped(shared, pos, gaps);
-        }
         let Some(m) = shared.read_meta(block) else {
             return self.lapped(shared, pos, gaps);
         };
@@ -1129,6 +1126,12 @@ impl ReaderState {
             return None;
         }
         let from = pos.max(m.first_sample);
+        // Only stored samples can be overwritten. A source gap (an index jump) before `from` was
+        // never written, so a reader parked at the jump is not lapped by the samples after it
+        // (T-072: comparing `pos` here resynced such a reader past retained post-gap blocks).
+        if from < shared.oldest_valid_sample() {
+            return self.lapped(shared, pos, gaps);
+        }
         if from >= limit {
             // The limit falls inside the source gap before this block: account the gap up to it.
             let gap = limit - pos;
@@ -1213,23 +1216,25 @@ impl ReaderState {
         pos: u64,
         gaps: u64,
     ) -> Option<ReadOutcome> {
-        if pos >= shared.oldest_valid_sample() {
-            let (block, meta) = shared.locate(pos);
-            let lossless = match meta {
-                None => true,
-                Some(m) => {
-                    m.first_sample <= pos
-                        || m.gaps_total.checked_sub(gaps) == Some(m.first_sample - pos)
-                }
-            };
-            if lossless {
-                self.cursor = Cursor::At {
-                    sample: pos,
-                    block,
-                    gaps,
-                };
-                return None;
+        let oldest = shared.oldest_valid_sample();
+        let (block, meta) = shared.locate(pos);
+        // Lossless when the next samples the reader needs are still stored: `pos` itself, or the
+        // first sample of the block after a source gap that starts exactly at `pos`.
+        let lossless = match meta {
+            None => pos >= oldest,
+            Some(m) => {
+                pos.max(m.first_sample) >= oldest
+                    && (m.first_sample <= pos
+                        || m.gaps_total.checked_sub(gaps) == Some(m.first_sample - pos))
             }
+        };
+        if lossless {
+            self.cursor = Cursor::At {
+                sample: pos,
+                block,
+                gaps,
+            };
+            return None;
         }
         let (block, meta, target) = match self.policy {
             ResyncPolicy::Latest => loop {

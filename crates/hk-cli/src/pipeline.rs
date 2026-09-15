@@ -1183,12 +1183,16 @@ mod tests {
         const TOKEN: &str = "t027-daemon-status-token-0123456789";
         let dir = temp_data_dir();
         let fixture = tiny_recording(&dir.join("src"), 3.0);
-        let Daemon { server, handle, .. } = start_daemon(&daemon_args(
+        // Paced (T-072): the control thread ticks the scheduler on wall time with the stream
+        // time, so an unpaced replay could outrun it under load and apply too few steps (a
+        // flake). Paced, the step count follows stream time.
+        let mut args = daemon_args(
             format!("sigmf:{}", fixture.display()),
             dir.clone(),
             Some(TOKEN),
-        ))
-        .unwrap();
+        );
+        args.unpaced = false;
+        let Daemon { server, handle, .. } = start_daemon(&args).unwrap();
         let addr = server.local_addr();
         let (unauth, _) = get(addr, "/api/status", None);
         assert_eq!(unauth, 401, "status needs the token");
@@ -1197,18 +1201,12 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.pointer("/readers/detect/lost_samples").is_some(), "{v}");
         assert!(v.pointer("/chains/attached").is_some(), "{v}");
-        // The scheduler really retunes the device (T-057), and the spectrum stream is re-offered
-        // under the same id at each new centre: poll until it is listed.
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            let (_, streams) = get(addr, "/api/streams", Some(TOKEN));
-            if streams.contains("spectrum/live") {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "{streams}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
         let summary = handle.wait().unwrap();
+        // The scheduler really retunes the device (T-057), and the spectrum stream is re-offered
+        // under the same id at each new centre. The registry keeps offered streams after the run,
+        // so this is checked once the run has ended instead of polled with sleeps.
+        let (_, streams) = get(addr, "/api/streams", Some(TOKEN));
+        assert!(streams.contains("spectrum/live"), "{streams}");
         eprintln!("{}", summary.to_text());
         assert!(summary.errors.is_empty(), "{:?}", summary.errors);
         assert!(summary.counter("/scheduler/steps") > 10, "scheduler driven");
