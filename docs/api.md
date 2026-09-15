@@ -163,14 +163,19 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
                            "model_version": "…", "t_s": 1789300820.0 },
       "classifications": 3,
       "identity_scheme": "rds-pi", "identity_class": "unrestricted", "withheld": false,
-      "identity_value": "A1B2"
+      "identity_value": "A1B2",
+      "snr_db": 21.4, "peak_dbfs": -18.25
     }
   ],
-  "next_cursor": null, "limit": 100, "identity_access": "standard"
+  "next_cursor": null, "limit": 100, "total": 214, "identity_access": "standard"
 }
 ```
 
 `identity_value` is present only when the row's identity is in clear (`withheld: false`); on a withheld row a status/lifecycle reason from an author who may have seen the identity is itself withheld (`reason_withheld: true`, `reason: null`). Never included: decode content, fingerprints, links. No frequency lookup ever runs before detection — the inventory is populated purely from blind measurement (vision step 4); the band-plan/licence database only supplies `explanations` and `status`, ranked, never a starting point.
+
+**`snr_db` / `peak_dbfs` (T-158).** The emitter's latest measurement: the peak SNR (`snr_peak_db`) and absolute peak level (`peak_level_dbfs`) of the newest (highest start time) detection linked to it, read directly off the stored `Detection` — no separate computation. "Linked" follows the same track a row's sighting created: a detection counted through one of the emitter's currently-linked tracks (the common case — sightings are almost always offered as tracks), or linked to the emitter directly. Both fields are `null` together when the emitter has no linked detection yet (e.g. an identity-only sighting from a decode, or a brand-new candidate before its track is offered). They are never derived from `recurrence` or any other summary field.
+
+**`total` (T-171).** The number of rows the query's filters match, ignoring `cursor`/`limit`, so a UI can show a count past one page (e.g. "512 confirmed" instead of capping at "500+"). It is computed with the same filters as the list, as a single indexed `COUNT(*)` — except a `tag` filter naming a label outside the controlled vocabulary (gating hides such tags on a withheld-identity row, so matching them needs per-row checks SQL alone can't do): that path scans and gates up to 5 000 candidate rows and reports the match count found within that scan, a lower bound past the cap. That combination (a non-vocabulary tag filter over a very large inventory) is rare.
 
 **Lifecycle (T-078).** Every emitter starts `candidate`. An auto rule (e.g. a continuous trust-confirmed track, or a valid decode/identity) or a user promotes it to `confirmed`; a user (or nothing) can delete either. `deleted` is final for that row — it leaves the default list and entity resolution, but its detections, tracks, links and history are kept (visible with `state=deleted`); a later sighting of the same signal creates a *new* candidate. See `docs/07` §2.11.
 

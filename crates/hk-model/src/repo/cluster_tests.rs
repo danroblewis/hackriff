@@ -650,6 +650,192 @@ fn inventory_queries_filter_by_region_time_status_tag_scheme_family_and_paginate
     assert_eq!(second.next_offset, None);
 }
 
+/// T-171: `count_inventory` matches the same filters as `query_inventory` but ignores
+/// `limit`/`offset`, including the default exclusion of deleted rows.
+#[test]
+fn count_inventory_matches_filters_and_ignores_pagination() {
+    let mut r = repo();
+    let mk = |r: &mut Repository, f: f64, seen: TimeRange| -> EmitterId {
+        let s = track_sighting(Fingerprint::new(f, 10e3), seen, 1);
+        r.record_sighting(&s, None).unwrap().emitter_id
+    };
+    let ism1 = mk(&mut r, 433.92e6, tr(0, 100));
+    mk(&mut r, 434.50e6, tr(1000, 1100));
+    mk(&mut r, 1090e6, tr(500, 600));
+    mk(&mut r, 162.0e6, tr(-5000, -4000));
+
+    let q = InventoryQuery::default();
+    assert_eq!(r.count_inventory(&q).unwrap(), 4);
+    assert_eq!(
+        r.query_inventory(&InventoryQuery {
+            limit: 2,
+            ..q.clone()
+        })
+        .unwrap()
+        .entries
+        .len(),
+        2,
+        "count is unaffected by a page smaller than the total"
+    );
+    assert_eq!(
+        r.count_inventory(&InventoryQuery {
+            freq: Some(FreqRange::new(433e6, 435e6)),
+            ..q.clone()
+        })
+        .unwrap(),
+        2
+    );
+
+    r.change_emitter_lifecycle(
+        ism1,
+        LifecycleState::Deleted,
+        LifecycleAuthor::User,
+        "user",
+        "gone",
+        tr(0, 100).end,
+    )
+    .unwrap();
+    assert_eq!(
+        r.count_inventory(&q).unwrap(),
+        3,
+        "deleted rows are excluded by default, as in query_inventory"
+    );
+    assert_eq!(
+        r.count_inventory(&InventoryQuery {
+            states: vec![LifecycleState::Deleted],
+            ..q
+        })
+        .unwrap(),
+        1
+    );
+}
+
+/// T-158: an emitter's latest measured `(snr_peak_db, peak_level_dbfs)` comes from the newest
+/// (highest `t_start`) detection linked to it, directly or through a currently-linked track;
+/// `None` until a detection is linked.
+#[test]
+fn emitter_latest_measurement_reads_the_newest_linked_detection() {
+    let mut r = repo();
+    let plan = ScanPlan {
+        id: ScanPlanId::new(),
+        version: 1,
+        name: "ism".into(),
+        created_at: t(0),
+        regions: vec![PlanRegion {
+            freq: FreqRange::new(433e6, 435e6),
+            priority: 1.0,
+            revisit_ns: None,
+        }],
+        policy: ScanPolicy::SweepThenDwell,
+        gain_table: vec![],
+        schedule: Schedule::Cron {
+            expr: "* * * * *".into(),
+        },
+        extra: serde_json::Value::Null,
+    };
+    r.insert_scan_plan(&plan).unwrap();
+    let survey = Survey {
+        id: SurveyId::new(),
+        plan_id: plan.id,
+        plan_version: plan.version,
+        device_id: "test".into(),
+        state: SurveyState::Open,
+        t_start: t(0),
+        t_end: None,
+        summary: None,
+    };
+    r.insert_survey(&survey).unwrap();
+    let prov_id = r
+        .intern_provenance(&Provenance {
+            device_id: "test".into(),
+            tune: Tune {
+                center_hz: 433.92e6,
+                sample_rate_hz: 8e6,
+                lna_db: 24.0,
+                vga_db: 20.0,
+                amp_on: false,
+                bandwidth_hz: 200e3,
+            },
+            overload: false,
+            quantisation_limited: false,
+            temperature_c: None,
+            antenna_port: None,
+            clock_source: ClockSource::Internal,
+            clock_locked: true,
+            calibration_state_ref: None,
+            spur_mask_ref: None,
+            timestamp_method: TimestampMethod::Synthetic,
+            timestamp_error_budget_ns: None,
+        })
+        .unwrap();
+    let det = |snr: f64, peak: f32, seen: TimeRange| Detection {
+        id: DetectionId::new(),
+        survey_id: survey.id,
+        time: seen,
+        f_center_hz: 433.92e6,
+        obw_hz: 12e3,
+        xdb_bandwidth_hz: None,
+        xdb_level_db: None,
+        snr_peak_db: snr,
+        snr_mean_db: snr - 3.0,
+        peak_level_dbfs: peak,
+        peak_level_dbm: None,
+        sk: None,
+        clip_count: 0,
+        detector_version: "test@1".into(),
+        provenance_ref: prov_id,
+        flags: DetectionFlags::default(),
+    };
+
+    // A candidate from a track sighting with nothing linked yet: no measurement.
+    let s = track_sighting(Fingerprint::new(433.92e6, 12e3), tr(0, 1), 1);
+    let track_id = match s.source {
+        LinkTarget::Track(id) => id,
+        _ => unreachable!(),
+    };
+    let id = r.record_sighting(&s, None).unwrap().emitter_id;
+    assert_eq!(r.emitter_latest_measurement(id).unwrap(), None);
+
+    // Two detections linked through the track: the newer one (by t_start) is read.
+    let d_old = det(10.0, -50.0, tr(0, 1));
+    let d_new = det(22.5, -18.25, tr(10, 11));
+    r.insert_detections(&[d_old.clone(), d_new.clone()])
+        .unwrap();
+    r.upsert_track(&Track {
+        id: track_id,
+        state: TrackState::Open,
+        split_from: None,
+        time: tr(0, 11),
+        f_center_hz: 433.92e6,
+        bandwidth_hz: 12e3,
+        detection_count: 2,
+        timing: TimingFeatures::default(),
+        updated_at: t(11),
+    })
+    .unwrap();
+    r.link_detections_to_track(track_id, &[d_old.id, d_new.id], t(11))
+        .unwrap();
+    assert_eq!(
+        r.emitter_latest_measurement(id).unwrap(),
+        Some((22.5, -18.25))
+    );
+
+    // A detection linked directly to the emitter wins when it is newer still.
+    let d_direct = det(30.0, -5.5, tr(20, 21));
+    r.insert_detections(std::slice::from_ref(&d_direct))
+        .unwrap();
+    r.link_emitter(&EmitterLink {
+        emitter_id: id,
+        target: LinkTarget::Detection(d_direct.id),
+        linked_at: t(21),
+    })
+    .unwrap();
+    assert_eq!(
+        r.emitter_latest_measurement(id).unwrap(),
+        Some((30.0, -5.5))
+    );
+}
+
 /// T-034: re-demodulating the same IQ mints new source ids but is the same measurement, so it
 /// adds nothing; a later capture, a touching span, another producer or channel, an unkeyed
 /// sighting and a different identity all still count.

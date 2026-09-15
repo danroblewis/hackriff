@@ -485,9 +485,22 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     );
     let (st, v) = get(addr, "/api/inventory");
     assert_eq!(st, 200, "{v}");
-    for field in ["entries", "next_cursor", "limit", "identity_access"] {
+    for field in [
+        "entries",
+        "next_cursor",
+        "limit",
+        "total",
+        "identity_access",
+    ] {
         assert!(v.get(field).is_some(), "inventory missing {field}: {v}");
     }
+    // T-171: `total` ignores pagination, so it is at least the entries on this page.
+    assert!(
+        v["total"]
+            .as_u64()
+            .is_some_and(|t| t >= v["entries"].as_array().unwrap().len() as u64),
+        "total should be >= this page's entry count: {v}"
+    );
     let row = v["entries"]
         .as_array()
         .unwrap()
@@ -517,6 +530,9 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         "state",
         "lifecycle",
         "recurrence",
+        // T-158: measurement fields (present, possibly null).
+        "snr_db",
+        "peak_dbfs",
     ] {
         assert!(
             row.get(field).is_some(),
@@ -524,6 +540,21 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         );
     }
     assert!(row["id"].is_string(), "{row}");
+    // T-158: both are backend-derived numbers once a detection is linked, and null together
+    // until then (never computed client-side, so the contract only pins their shape and pairing).
+    assert!(
+        row["snr_db"].is_null() || row["snr_db"].is_number(),
+        "snr_db should be a number or null: {row}"
+    );
+    assert!(
+        row["peak_dbfs"].is_null() || row["peak_dbfs"].is_number(),
+        "peak_dbfs should be a number or null: {row}"
+    );
+    assert_eq!(
+        row["snr_db"].is_null(),
+        row["peak_dbfs"].is_null(),
+        "snr_db and peak_dbfs come from the same detection, so they are null together: {row}"
+    );
     assert!(
         matches!(row["state"].as_str(), Some("candidate" | "confirmed")),
         "default listing excludes deleted entries: {row}"
