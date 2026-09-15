@@ -1324,3 +1324,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - T-136 merged cleanly (f0b963b).
   - T-124 WIP is kept on branch `t-124-wip` (d46cb65); its handoff is in the coordinator scratchpad, `t124-handoff.keep.md`. Diagnostics with 0.5 s sweep steps at 1 M/500 k gave 108 frames, 105 tiles and 133 alarm inputs (all immature) over 3.8 h. Root cause: `history.rs:73-80` row length; `stft.rs:125-128,:314` drop partial rows on retune; `scheduler/config.rs:91-94` sets 50 ms hops.
   - T-139 launched (Opus, high effort). Full check started.
+- **B0.356 T-137 committed (c1dd979); Opus review running.**
+  - Fold cost: 7.5 → 1.15 µs (single Reference read, direct slot lookups).
+  - Decay: lazy f64 multiplier per `SlotSeries`; a 365 d half-life with 1 s folds matches f64 to 2.6e-7.
+  - Golden test compares re-encoded f64 fields within 1e-6.
+  - Parked week: 193.1 MiB, 0 refusals; week test 14.9 → 9.6 s.
+  - Tests: hk-store 7, hk-context 39, hk-pipeline 18.

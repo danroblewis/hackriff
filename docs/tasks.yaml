@@ -2162,7 +2162,7 @@ tasks:
   - id: T-137
     milestone: M2
     title: "Baseline fold CPU + decay precision: compute Reference pools once per fold, lazy f64 decay multiplier per series, field accessors, stronger golden re-encode check"
-    status: in-progress
+    status: review
     deps: [T-135]
     parallel_group: M2B
     use_cases: [AWARE-042]
