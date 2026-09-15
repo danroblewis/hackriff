@@ -2048,3 +2048,15 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.445 Full check green after the T-179 merge (f7f5212).** Lint clean; 1363/1363 in 134.8 s; acceptance 28/28 in 11.4 s.
   - **Launched:** T-167 (Sonnet, MUI API gap 10). The spectrum stream header gets `dc_notch_hz`, taken from the detector's DC rule rather than hardcoded. The UI uses it when present.
   - **Conflict risk:** T-167 and T-178 both edit `docs/api.md` and `api_contract.rs`.
+- **B0.446 T-173 review (Opus): MERGE; merged d313f56.**
+  - **Coverage design holds.**
+    - Hops with room shift toward the band middle.
+    - Bands with no room shift up, so only their lowest 75 kHz is unseen on odd passes, far from any LO.
+    - `dc_dither_hz` is plan-configurable: 0 disables it and negative values are rejected.
+  - **`observation_log`:** the change tightens the test rather than loosening it.
+  - **Golden diffs:** only odd-pass ±75 kHz centre shifts.
+  - **Weighting:** occupancy and report coverage use per-record geometry, so no parity bias.
+  - **Verified by coordinator:** the DC rule uses the STFT frame `geometry.center_hz`, which follows the stream tuning. Replays that ignore virtual tunes can't falsely refute a DC flag.
+  - **Live-device effect (user heads-up):** a single-hop scheduled plan on the HackRF (`hackriffd` or `hk serve --schedule`) now retunes 75 kHz every 50 ms step, where it previously held one tune. Plain `hk serve` without `--schedule` is unchanged.
+  - **Follow-up:** T-181 (single-hop cadence, parity-based geometry pick, dither-disabled warning, test margin, ADR wording).
+  - **Next:** full check.

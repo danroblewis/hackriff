@@ -2747,7 +2747,7 @@ notes:
   - id: T-173
     milestone: M2
     title: "Scheduler hop placement: guarantee every frequency gets a view away from DC (hop overlap or dithered centres) so a carrier near one LO is not permanently suspect"
-    status: review
+    status: done
     commit: d313f56
     deps: [T-147]
     parallel_group: M2B
@@ -2861,3 +2861,17 @@ notes:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-181
+    milestone: M2
+    title: "Sweep DC dither follow-ups: single-hop plans on a live radio now retune 75 kHz every step (dither single-hop plans only every Nth pass or disclose), pick SweepRecord geometry by pass parity not tuning match, per-hop DcDitherDisabled warning, off-DC test samples LO +-37.5 kHz (or 80 kHz dither), ADR-0005 wording on half-visit edge cells"
+    status: todo
+    deps: [T-173]
+    parallel_group: M2B
+    use_cases: [AWARE-042]
+    found_by: "T-173 review 2026-09-15 (MERGE) findings 1-5 (core.rs:1419 + apply.rs:84; observe.rs:296; plan.rs:503; scheduler.rs test; ADR-0005)"
+    acceptance: "single-hop live plans do not retune every step (documented cadence, test on StepApplier retune count); SweepRecords not split mid-pass when hop 0 has dither 0; warning emitted for dither-disabled hops; coverage test samples worst-case offsets; ADR-0005 states edge-cell visit halving"
+    area: crates/hk-core/src/scheduler, crates/hk-pipeline/src/observe.rs, docs/adr/0005
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
