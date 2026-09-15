@@ -763,3 +763,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - New routes `PUT /api/pipelines/{id}/channels` and `POST .../channels/refresh`, with contract tests.
   Tests: hk-blocks 69, follow_hops 4/4, runtime/alloc/capture 10/10, hk-api 82, api_contract 15, lint clean. Full check running.
 - **B0.264 Full check of main b8e118a (T-107): green.** Lint clean; nextest + UI 1118/1118 in 241 s; acceptance 25/25. In flight: T-097 (ADS-B tutorial), T-108 (ACARS: re-running with a vouched content class; check the gating interaction on report), T-109 (POCSAG channel separation).
+- **B0.265 T-096/T-108 merged** (6cfa144). The ACARS convention now comes from acarsdec source (TLeconte/acarsdec@339f63e, cited in the tutorial):
+  - LSB first, parity last;
+  - coherent MSK chips (tone marks a chip change);
+  - SYN SYN SOH, inverted accepted;
+  - CRC-16/KERMIT over the transmitted chars including parity, BCS low byte first.
+
+  **The T-098/T-096 synth was non-standard** (the coordinator's suspicion was confirmed). The synth was rewritten, with a py test decoder ported from acarsdec. Recipe: slicer → nrzi(encode) → sync_search (lsb, polarity either) → crc KERMIT → fields. The parity `zero` mode was removed; the new pinned params `nrzi.direction` and `sync_search.polarity` are both real-ACARS needs, and ADR-0011 is updated.
+
+  **Detection root cause:** the scene sat on the tuned centre, and the DC/LO-leakage rule correctly rejected it. The scene is now 50 kHz off centre with repeated blocks; no thresholds changed. The 118–137 MHz content class is gated metadata-only, so the test vouches the recording unrestricted, per the existing pattern. No new gating rule was added (user policy).
+
+  **Blind e2e:** mode/registration/label/block id/text match truth on 100% of frames; CRC-valid 19/19. hk-blocks 70, py synth 15. Remaining: a real 131.55 MHz capture plus the acarsdec oracle (not installed); tone→chip conversion propagates errors (a coherent MSK block if real captures need one). Full check running.

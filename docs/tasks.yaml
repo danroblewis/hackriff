@@ -1584,9 +1584,8 @@ tasks:
   - id: T-096
     milestone: M1
     title: "M1 Tutorial 3: ACARS recipe + blind acceptance"
-    status: blocked
-    commit: ec7adcb
-    blocked_by: T-108
+    status: done
+    commit: 6cfa144
     deps: [T-098, T-094, T-086, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1745,7 +1744,8 @@ tasks:
   - id: T-108
     milestone: M1
     title: "ACARS tutorial continuation: real ACARS CRC/parity convention from primary source; blind detection of synthetic ACARS bursts; un-ignore tutorial_acars"
-    status: in-progress
+    status: done
+    commit: 6cfa144
     deps: [T-096]
     parallel_group: M1T
     use_cases: [SIGNAL-062]

@@ -57,6 +57,10 @@ enum Mode {
 
 struct WordSearch {
     corr: SyncCorrelator,
+    /// `polarity: either`: the complemented word also syncs.
+    either: bool,
+    /// 1 while the current frame synced on the complemented word.
+    invert: u8,
     max_errors: u32,
     include_sync: bool,
     lsb: bool,
@@ -99,6 +103,8 @@ impl WordSearch {
             max_errors: p.uint_or("max_errors", 0)?,
             include_sync,
             lsb: p.str("bit_order") == Some("lsb"),
+            either: p.str("polarity") == Some("either"),
+            invert: 0,
             body: Vec::with_capacity(body_off + max as usize),
             body_off,
             length,
@@ -165,13 +171,20 @@ impl WordSearch {
         channel: u16,
     ) {
         if !self.in_frame {
-            let Some(errors) = self.corr.push(b) else {
+            let Some(direct) = self.corr.push(b) else {
                 return;
+            };
+            let sync_bits = self.corr.bits();
+            let complemented = sync_bits - direct;
+            let (errors, invert) = if self.either && complemented < direct {
+                (complemented, 1)
+            } else {
+                (direct, 0)
             };
             if errors > self.max_errors {
                 return;
             }
-            let sync_bits = self.corr.bits();
+            self.invert = invert;
             self.in_frame = true;
             self.errors = errors;
             let ber = errors as f32 / sync_bits as f32;
@@ -181,14 +194,16 @@ impl WordSearch {
             self.chr_fill = 0;
             if self.include_sync {
                 let reg = self.corr.register();
+                let inv = self.invert;
                 self.body
-                    .extend((0..sync_bits).rev().map(|k| ((reg >> k) & 1) as u8));
+                    .extend((0..sync_bits).rev().map(|k| ((reg >> k) & 1) as u8 ^ inv));
                 self.first_bit = bit + 1 - u64::from(sync_bits);
             } else {
                 self.first_bit = bit + 1;
             }
             return;
         }
+        let b = b ^ self.invert;
         if !self.lsb {
             if self.append(b) {
                 self.emit(out, clock, index, channel, bit);
