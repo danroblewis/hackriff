@@ -1176,7 +1176,7 @@ tasks:
   - id: T-071
     milestone: M0b
     title: Concurrent multi-signal demodulation (several audio and bits streams at once from one capture)
-    status: todo
+    status: in-progress
     deps: [T-043, T-060, T-070]
     parallel_group: U
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1187,7 +1187,6 @@ tasks:
     model: opus
     effort: high
     core_interface: true
-    hold: "deps merged (T-060, T-070); launch after T-073 lands (budget throttle); front of the queue"
   - id: T-072
     milestone: M0b
     title: Pipeline fidelity follow-ups from blind acceptance (device-gap sample loss, readsb stamp latency, single-detection tracks, short-burst resolution)
