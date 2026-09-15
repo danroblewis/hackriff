@@ -391,6 +391,8 @@ Small means ≤ 1 day for one agent with contract tests; large means a new store
    - rewrote `ui/README.md` to describe the MUI app (it previously documented only the retired
      single-page UI, predating even T-149).
 
+4. **T-179 (2026-09-15):** brought `dist/app.js` back under the gzip budget by code-splitting the two rarely-used areas instead of cutting features. `npm run build` now bundles `src/app/main.ts` with esbuild `--splitting --format=esm` (`index.html`'s script tag is `type="module"`); `decode/index.ts` and `review/index.ts` are loaded with a dynamic `import()` the first time `mode` becomes `"decode"` or `review.open` becomes true (`main.ts`), instead of the previous static import of every area. Measured: entry `dist/app.js` 60.2 KB minified / 21.6 KB gzip, plus three small shared chunks it still imports eagerly (`dom.ts`, `net.ts`, `state.ts`, `controls/{client,freq,model}.ts`, the slice files) at 17.9 KB minified / 7.7 KB gzip combined — **initial load 78.1 KB minified / 29.3 KB gzip total, within the ≤150/≤45 KB budget**. The two lazy chunks (`chunks/decode-*.js` 28.3 KB min / 10.0 KB gzip, `chunks/review-*.js` 35.6 KB min / 11.3 KB gzip) load only on first switch to Decode or first Review-drawer open. `dist/app.css` is unchanged at 32.3 KB. No change was needed in `crates/hk-api/src/http.rs`'s `static_file`: it already serves any relative path under `ui_dist`, chunk filenames use only `[A-Za-z0-9._-]` segments, and `.js` is already served as `text/javascript`.
+
    The supervisor rebuilds the demo on each UI merge.
 
 ## 8. Per-panel implementation briefs (T-150…T-155)
