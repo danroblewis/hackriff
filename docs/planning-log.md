@@ -2240,3 +2240,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-186 Opus review: MERGE.** Findings became T-209.
   - **Now:** T-186 merged; confirming full check (test + acceptance + acceptance-m2) running. M2 closes when it is green.
   - **Launched (planning only, no builds):** T-198 M3-DESIGN (ADR-0016) and T-208 MAUTO-DESIGN (ADR-0015).
+- **B0.473 M2 CLOSED 2026-09-15.** Main at d0e74df (T-124 + T-186) is green: lint clean, 1376/1376 tests, acceptance 28/28, acceptance_m2 8/8 (69 s).
+  - **Recorded as done:** the docs/11 roadmap row and the tasks.yaml milestone header.
+  - **Left open as M2-hardening, not exit-blocking:** T-182, T-188, T-189, T-196, T-197, T-209.
+  - **M3 started** with T-198 (ADR-0016). MUI continues.
+  - **Merging T-194** (UI: multi-band waterfall select and timeline time-window select; bundle 29.7 KB gz; smoke passed).
+  - **T-209 launched** into the freed Rust slot.

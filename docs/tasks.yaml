@@ -4,7 +4,7 @@
 # needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
 version: 1
-milestone: "M0 COMPLETE 2026-09-13 (T-026 deferred to Jetson); M0b complete (T-100 live HIL re-run deferred); M1 decoder workbench COMPLETE 2026-09-15 (docs/13; user M1 review pending, non-blocking); current milestone M2 attention + memory maturity started 2026-09-15 (docs/11: C04 bandit scheduler, C12 occupancy baselines + novelty, C26 history queries/reports)"
+milestone: "M0 COMPLETE 2026-09-13 (T-026 deferred to Jetson); M0b complete (T-100 deferred); M1 decoder workbench COMPLETE 2026-09-15; M2 attention + memory maturity COMPLETE 2026-09-15 (T-124 green, full check d0e74df; M2-hardening follow-ups open); current milestone M3 classification started 2026-09-15 (ADR-0016 design T-198); MUI in parallel; MAUTO design only (T-208), build after M3"
 # M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
 spikes:
   run_first_on_mac: [S4, S5, S1, S3]   # de-risk before/alongside foundation tasks
