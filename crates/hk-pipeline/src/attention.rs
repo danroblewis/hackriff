@@ -511,6 +511,7 @@ impl AttentionService {
     /// the occupancy rows of an interval closing at `t`, and its geometry when known.
     pub fn site_at(&self, t: Timestamp) -> (SiteKey, Option<hk_context::geo::Site>) {
         let mut sites = lock(&self.sites);
+        let before = sites.current();
         let key = sites.tick(t);
         let geo = match key {
             SiteKey::Site(id) => sites.site(id).and_then(|s| match (s.lat_deg, s.lon_deg) {
@@ -519,7 +520,10 @@ impl AttentionService {
             }),
             _ => None,
         };
-        self.persist_sites(&mut sites);
+        // Observation accounting persists in `observe`; here only a site change is written.
+        if key != before {
+            self.persist_sites(&mut sites);
+        }
         (key, geo)
     }
 
@@ -1120,11 +1124,18 @@ impl AttentionService {
     /// `GET /api/baselines`.
     pub fn baselines_json(&self, site: Option<SiteId>) -> Result<Value, AttentionError> {
         let (id, offset) = self.site_or_current(site)?;
-        let now = (self.clock)();
-        let slot = HourOfWeek::of(now, offset);
         let mut b = lock(&self.baselines);
         b.load_site(id, offset)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
+        // Maturity at the sample clock (ADR-0012 §0): the site's latest folded visit; the
+        // service clock only for a site with no baseline yet.
+        let now = b
+            .engines()
+            .filter(|e| e.state.key.site == id)
+            .map(|e| e.state.last_visit)
+            .max()
+            .unwrap_or_else(|| (self.clock)());
+        let slot = HourOfWeek::of(now, offset);
         let keys: Vec<Value> = b
             .engines()
             .filter(|e| e.state.key.site == id)

@@ -530,6 +530,26 @@ impl AlarmEngine {
         &self.counts
     }
 
+    /// Counts evidence the baseline could not score (an immature pool, a mobile or unassigned
+    /// site): one suppression per kind (§7.3 "counted…, never silently dropped"), never a raise
+    /// and no key state. `kinds` come from [`unscored_evidence`]; a mature site with nothing to
+    /// suppress counts nothing.
+    pub fn count_unscored(
+        &mut self,
+        t: Timestamp,
+        site: SiteKey,
+        maturity: Maturity,
+        provenance_explained: bool,
+        kinds: &[AlarmKind],
+    ) {
+        self.now = self.now.max(Some(t));
+        if let Some(s) = suppression(site, maturity, provenance_explained) {
+            for kind in kinds {
+                self.counts.bump(*kind, s);
+            }
+        }
+    }
+
     /// Latest sample time seen.
     pub fn now(&self) -> Option<Timestamp> {
         self.now
@@ -958,6 +978,25 @@ pub fn inputs_from_fold(
         // A latched change point is a decided event: full novelty while it stays latched.
         i.novelty = 1.0;
         out.push(i);
+    }
+    out
+}
+
+/// Kinds with evidence in an **immature** fold that [`inputs_from_fold`] could not score (no z
+/// against an immature pool): a level observed → `level-above-baseline`, an occupancy observed →
+/// `busier-than-usual` (the occupancy kind; its sign is unknown without a pool). Empty for a
+/// mature fold. Feed to [`AlarmEngine::count_unscored`]; never compute a z from them.
+pub fn unscored_evidence(obs: &IntervalObservation, fold: &FoldOutcome) -> Vec<AlarmKind> {
+    let n = &fold.novelty;
+    if n.maturity.is_mature() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if obs.level_db.is_some() && n.level_z.is_none() {
+        out.push(AlarmKind::LevelAboveBaseline);
+    }
+    if obs.fco().is_some() && n.occupancy_z.is_none() {
+        out.push(AlarmKind::BusierThanUsual);
     }
     out
 }

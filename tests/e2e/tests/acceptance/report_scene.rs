@@ -356,10 +356,27 @@ fn report_over_48h_scene_discloses_longest_gap_and_blind_top_emitters() {
     // its baseline subject has < 24 h of observation by hour 48 (immature, novelty 0). Raising one
     // needs the subject observed ≥ 24 h before the change (a ≥ ~56 h scene with the channel learned
     // early). The live wiring itself is covered by `attention_interval_folds_raise_busier_alarm`.
-    assert_eq!(
-        alarms.status_json()["errors"],
-        0,
-        "[T-131] alarm writes failed"
+    let status = alarms.status_json();
+    assert_eq!(status["errors"], 0, "[T-131] alarm writes failed");
+    // The folds reach the alarms, and the immature ones are counted, not silently dropped (§7.3).
+    let observed = status["inputs_observed"].as_u64().unwrap_or(0);
+    assert!(
+        observed > 0,
+        "[T-131] no fold evidence reached the alarms: {status}"
+    );
+    let immature: u64 = suppressions
+        .as_object()
+        .map(|by_kind| {
+            by_kind
+                .values()
+                .filter_map(|s| s["immature-baseline"].as_u64())
+                .sum()
+        })
+        .unwrap_or(0);
+    eprintln!("[T-131] inputs observed {observed}, immature-baseline suppressions {immature}");
+    assert!(
+        immature > 0,
+        "[T-131] immature folds were not counted as suppressions: {suppressions}"
     );
     let holding: Vec<_> = published
         .iter()
