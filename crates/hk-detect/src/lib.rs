@@ -64,6 +64,7 @@
 //! `benches/detect_throughput.rs`.
 
 pub mod alpha;
+pub mod burst;
 pub mod cfar;
 pub mod clip;
 pub mod comb;
@@ -78,6 +79,7 @@ pub mod track;
 pub mod trust;
 pub mod writer;
 
+pub use burst::{BURST_DETECTOR, BurstConfig, BurstDetector, BurstStats};
 pub use cfar::{CELL_NONE, CELL_REGION, CELL_SEED, CfarEngine, ClassifyStats, Thresholds};
 pub use clip::{ClipCount, count_clipped_ci8};
 pub use comb::{Comb, CombFinder};

@@ -38,3 +38,8 @@ harness = false
 [[bench]]
 name = "detect_path"
 harness = false
+
+# T-075: short-burst detector real-time factor.
+[[bench]]
+name = "burst_throughput"
+harness = false
