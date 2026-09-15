@@ -1280,6 +1280,8 @@ fn assist_routes_answer_suggestions_as_documented() {
     assert!(code["score"].is_f64() && is_array(&code["reasons"]), "{v}");
     assert!(code["differences"].as_u64().is_some_and(|d| d >= 20), "{v}");
     assert!(code["score"].as_f64().is_some_and(|s| s > 0.9), "{v}");
+    // T-105: 23 differences leave no competing generator, so no ambiguous group.
+    assert!(code.get("ambiguous_with").is_none(), "{v}");
 
     let (st, v) = post(
         addr,

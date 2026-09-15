@@ -186,6 +186,29 @@ pub(crate) fn divrem_small(a: u64, b: u64) -> (u64, u64, u64) {
     (q, r, ops)
 }
 
+/// Greatest common divisor of two polynomials held in `u64`s, and the steps spent.
+pub(crate) fn gcd_small(a: u64, b: u64) -> (u64, u64) {
+    let (mut a, mut b, mut ops) = (a, b, 1u64);
+    while b != 0 {
+        let (_, r, o) = divrem_small(a, b);
+        ops += o;
+        a = b;
+        b = r;
+    }
+    (a, ops)
+}
+
+/// The repeated part of a non-zero `g`: `gcd(g, g′)`, which is 1 exactly when `g` has no
+/// repeated irreducible factor (and `g` itself when `g` is a square), and the steps spent.
+pub(crate) fn repeated_part(g: u64) -> (u64, u64) {
+    // Over GF(2) the derivative keeps the odd-degree terms, each lowered by one.
+    let d = (g & 0xAAAA_AAAA_AAAA_AAAA) >> 1;
+    if d == 0 {
+        return (g, 1);
+    }
+    gcd_small(g, d)
+}
+
 /// Carry-less product of two polynomials of degree < 64.
 pub(crate) fn clmul(a: u64, b: u64) -> u128 {
     let mut r = 0u128;
@@ -337,6 +360,17 @@ mod tests {
         assert_eq!(order_of_x(0x5B9, 1 << 12), Some(341));
         assert_eq!(xpow_mod(31, 0x769), 1);
         assert_eq!(reflect(0b0011, 4), 0b1100);
+        // Designed generators have no repeated factor; CRC-24/Mode-S × (x+1) squares (x+1).
+        for g in [0x1FF_F409u64, 0x769, 0x5B9, 0x1_1021, 0xB] {
+            assert_eq!(repeated_part(g).0, 1, "{g:#x}");
+        }
+        assert_eq!(
+            gcd_small(clmul(0x769, 0b1011) as u64, clmul(0x769, 0b111) as u64).0,
+            0x769
+        );
+        let squared = clmul(0x1FF_F409, 0b11) as u64;
+        assert_eq!(divrem_small(repeated_part(squared).0, 0b101).1, 0);
+        assert_eq!(repeated_part(0b101).0, 0b101);
         // Equation bit 0: x0 + x1 = 1; equation bit 1: x1 = 0 → x = 0b01.
         let (x, free) = solve(&[0b01, 0b11], 0b01, 2).unwrap();
         assert_eq!((x & 0b11, free), (0b01, 0));
