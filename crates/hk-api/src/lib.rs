@@ -26,6 +26,7 @@
 //! thread's writer with no second queue and no runtime; consumer counts are single digits on a
 //! handheld; idle connections cost no CPU.
 
+pub mod analyze; // T-190
 pub mod assist;
 pub mod auth;
 pub mod bridge;

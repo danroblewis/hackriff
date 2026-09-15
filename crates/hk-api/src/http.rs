@@ -28,6 +28,7 @@
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
 //! | `/api/outputs[/record/start\|/record/stop]`, `/api/outputs/<id>/files/<name>` | GET, POST | token (header only for mutating) | T-061 output recordings and downloads ([`crate::outputs`]) |
+//! | `/api/analyze` | POST | token | T-190 stub: validates a selection/emitter/band target, answers `501 not_implemented` until MAUTO fills it in ([`crate::analyze`]) |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
@@ -118,6 +119,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/outputs/record/start"),
     ("POST", "/api/outputs/record/stop"),
     ("GET", "/api/outputs/{id}/files/{name}"),
+    // T-190 analyze stub
+    ("POST", "/api/analyze"),
     // T-157 rolling IQ capture buffer
     ("GET", "/api/iqbuffer"),
     ("POST", "/api/iqbuffer/clip"),
@@ -742,6 +745,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::selections::route(state, &ctl))
         .or_else(|| crate::inventory::route(state, &ctl))
         .or_else(|| crate::outputs::route(state, &ctl))
+        .or_else(|| crate::analyze::route(state, &ctl)) // T-190
         .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
         // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.
         .or_else(|| crate::recipes::route(state, &ctl)) // T-088
