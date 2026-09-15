@@ -731,3 +731,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   2. A disk stall over 5 s trips the publisher slow-consumer disconnect and permanently stops the always-on recorder.
   3. Interrupted-capture recovery doesn't validate the tail record, so the last /frames page returns 422 forever.
   Promoted from nit: a partial-write retry duplicates bytes or misaligns the index. A fresh Opus fix and integration round is running in the T-092 worktree; T-107 follows after it merges.
+- **B0.257 Full check of main 415f112 (T-093 + T-105): green.** Lint clean; nextest + UI 1099/1099 in 239 s; acceptance 25/25. M1 on main: T-085–T-091, T-093, T-094, T-104, T-105. In flight: T-092 fix/integration, T-095, T-096, T-097, T-106. Held: T-107 (after T-092).
