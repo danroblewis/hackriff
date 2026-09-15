@@ -1486,7 +1486,8 @@ tasks:
   - id: T-089
     milestone: M1
     title: "M1 Declarative parser + inspector API"
-    status: in-progress
+    status: review
+    commit: 5324b42
     deps: [T-085]
     parallel_group: M1P
     use_cases: [SIGNAL-062]
