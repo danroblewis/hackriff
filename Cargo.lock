@@ -775,6 +775,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-sim"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hk-core",
+ "hk-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "hk-store"
 version = "0.1.0"
 dependencies = [
