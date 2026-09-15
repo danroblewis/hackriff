@@ -1277,3 +1277,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Memory:** a parked week at 9.7k cells drops from 372 MiB to 192.5 MiB, with 0 refusals under the 256 MiB cap.
   - **Tests:** a 2,000-fold tolerance test checks mean within 1e-6 and σ within 1e-4. The T-134 golden-test assertion was relaxed to same length plus re-encode fixed point.
   - **Regression:** debug fold CPU is about 3x (48 h test 18 s → 60 s; week test 268 s), because `pools()` unpacks every slot. The review must decide on a fix and on where the week test runs.
+- **B0.349 T-136 committed (c3f56e1); Opus review running.**
+  - **Site peek:** the history thread calls `site_at_peek`, which has no side effects.
+  - **Restart:** a `site_assignment` table (migration 0004) persists the pin; it was not persisted before.
+  - **New-emitter alarms:** fed from first sightings and keyed by channel cells.
+    - **Open question:** a single first sighting maxes at about 0.5 novelty and never alarms; the test uses a burst of 6.
+  - **Doc nits:** fixed.
+  - **Tests:** hk-pipeline 23, hk-context 31, hk-model 3.
+  - **Follow-up:** nextest LEAK warnings from the attention thread.

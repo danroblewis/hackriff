@@ -2146,7 +2146,7 @@ tasks:
   - id: T-136
     milestone: M2
     title: "Site/alarm follow-ups for M2 acceptance: non-mutating site peek on the history thread, restart keeps pinned site, new-emitter alarms fed from first sightings, T-133 doc/summary nits"
-    status: in-progress
+    status: review
     deps: [T-131, T-133]
     parallel_group: M2A
     use_cases: [AWARE-042, AWARE-044, AWARE-027]
