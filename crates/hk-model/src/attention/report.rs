@@ -70,6 +70,31 @@ pub enum ComparisonStatus {
     Unavailable,
 }
 
+/// Kind of a report change vs baseline. Report-local (T-128): names match the C12 alarm kinds
+/// ([`AlarmKind::as_str`]); `quieter-than-usual` mirrors T-122's alarm kind, which is not merged
+/// yet (T-131 may replace this with `AlarmKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChangeKind {
+    /// Level above the baseline pool (dB).
+    LevelAboveBaseline,
+    /// FCO above the baseline pool.
+    BusierThanUsual,
+    /// FCO below the baseline pool.
+    QuieterThanUsual,
+}
+
+impl ChangeKind {
+    /// The alarm kind of the same name, when it exists in this build.
+    pub fn alarm_kind(self) -> Option<AlarmKind> {
+        match self {
+            ChangeKind::LevelAboveBaseline => Some(AlarmKind::LevelAboveBaseline),
+            ChangeKind::BusierThanUsual => Some(AlarmKind::BusierThanUsual),
+            ChangeKind::QuieterThanUsual => None,
+        }
+    }
+}
+
 /// One change vs baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,7 +102,7 @@ pub struct ChangeEntry {
     /// Channel or band.
     pub subject: OccupancySubject,
     /// Change kind.
-    pub kind: AlarmKind,
+    pub kind: ChangeKind,
     /// Baseline value (dB or fraction by kind).
     pub baseline: f64,
     /// Observed value.
@@ -355,7 +380,7 @@ mod tests {
         let mut r = report();
         r.change_vs_baseline.changes.push(ChangeEntry {
             subject: OccupancySubject::Band { freq: r.region },
-            kind: AlarmKind::BusierThanUsual,
+            kind: ChangeKind::BusierThanUsual,
             baseline: 0.1,
             observed: 0.5,
             z: 9.0,

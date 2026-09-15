@@ -176,6 +176,14 @@ pub struct Scorer {
 }
 
 impl Scorer {
+    /// Makes the next pass due at once and publish even an unchanged set (T-128: a confirmed track
+    /// appeared or closed, a verification ended, or new baseline folds arrived: the scheduler must
+    /// see a set newer than the event).
+    pub fn expire(&mut self) {
+        self.last_run = None;
+        self.last_published = None;
+    }
+
     /// A scoring pass is due at `t`.
     pub fn due(&self, t: Timestamp, low_power: bool) -> bool {
         let every = if low_power {

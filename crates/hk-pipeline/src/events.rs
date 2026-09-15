@@ -22,6 +22,11 @@ pub struct MemberBox {
     pub t_start: Timestamp,
     /// Emitted at the detector's max duration and still continuing (a steady carrier).
     pub continues: bool,
+    /// Mean SNR of the detection, dB (T-128 candidate evidence).
+    pub snr_db: f64,
+    /// The detection is suspect by the §2.6 rule (IMD, spur, confirmed image, clipped, compressed;
+    /// T-128).
+    pub suspect: bool,
 }
 
 /// What a chain is attached for.

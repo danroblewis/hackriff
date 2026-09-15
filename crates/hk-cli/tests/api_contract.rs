@@ -2256,7 +2256,8 @@ fn report_route_serves_document_and_exports() {
         c["statement"].as_str().unwrap().contains("not quiet"),
         "{v}"
     );
-    assert_eq!(v["change_vs_baseline"]["status"], "unavailable", "{v}");
+    // T-128: the run attaches its baselines; a replay has no site, so there is no baseline.
+    assert_eq!(v["change_vs_baseline"]["status"], "no-baseline", "{v}");
     assert!(is_array(&v["occupancy"]["channels"]) && is_array(&v["top_emitters"]));
 
     let (st, ct, body) = get_raw(addr, &format!("/api/report?{region}&format=csv"));
