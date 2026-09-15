@@ -22,35 +22,24 @@
 //! - [`tutorial_adsb_recipe_decodes_blind_and_matches_truth`] always runs: whenever the recipe
 //!   decodes a squitter CRC-valid, its DF/TC/ICAO plus altitude, raw CPR or velocity fields
 //!   (whichever the message type carries) match the hidden truth exactly (0 field mismatches,
-//!   every run) — the hard correctness bar. Coverage: every one of the 4 aircraft is found (by
-//!   decoded identity, still blind), and at least 12 of the 16 distinct truth squitters (unique
-//!   by ICAO × type code × even/odd) decode at least once over 64 independent tries. See "Known
-//!   limitation" below for the 4 that don't.
+//!   every run) — the hard correctness bar. Coverage: every one of the 16 distinct truth
+//!   squitters (unique by ICAO × type code × even/odd) decodes CRC-valid at least once.
 //! - [`tutorial_adsb_recipe_agrees_with_readsb`] additionally runs the built-in `adsb-readsb`
 //!   plugin chain over the *same* live run (it attaches automatically: default chains) and
-//!   compares ICAOs and the altitude/velocity fields both sides decode; skips cleanly when
-//!   `readsb` or the `hk-plugin-readsb` wrapper binary is unavailable, exactly as
+//!   compares ICAOs and the altitude/velocity fields both sides decode, and that the recipe
+//!   decodes every (ICAO, type code) readsb does; skips cleanly when `readsb` or the
+//!   `hk-plugin-readsb` wrapper binary is unavailable, exactly as
 //!   `signal_001_adsb_readsb_plugin_chain` does.
 //!
-//! **Known limitation found by this task (not fixed here — investigated, not isolated to a
-//! minimal block change).** `ppm_demod`'s early/late chip-energy detector does not recover every
-//! squitter equally reliably: at a fixed synthetic scene (`seed(5)`), a *specific* pair of
-//! (aircraft, message-kind) combinations — out of the 16 possible — stays at 0 CRC-valid decodes
-//! even over 80 independent tries (`messages_per_aircraft`), while every other combination for
-//! those same two aircraft, and every combination for the other two aircraft, decodes reliably
-//! (tens of hits). This ruled out several hypotheses along the way: it is not noise-floor-limited
-//! (unaffected by `noise_dbfs` down to −70 dBFS), not per-aircraft power/CFO alone (a forced
-//! equal-power/zero-CFO run did *worse*, not better), not per-message-kind in general (with more
-//! tries, "identification" — the kind that looked cursed at low sample counts — decoded fine),
-//! and not a channel/DDC/CRC/field-map bug (the CRC math, `length_from` and the field-map layout
-//! are content-independent and already verified bit-exact against `py/hkpy/synth/adsb.py`'s
-//! packing; 0 field mismatches on every CRC-valid frame in every configuration tried). It looks
-//! like a genuine, content-dependent (specific bit pattern) decode-margin limitation of the
-//! simple 1-sample-per-chip early/late comparator with a *band-limited* (not ideal-rectangular)
-//! synthetic pulse — plausibly inter-symbol interference on long runs of one chip polarity — but
-//! confirming that precisely, and fixing it (likely matched filtering or multi-sample chip
-//! integration), is real DSP work beyond a minimal, isolated block change; filed as a follow-up
-//! rather than attempted here. See `docs/tutorials/04-adsb.md` §3 for the full parameter sweep.
+//! **T-097's coverage gap and its root cause (T-110).** T-097 saw only 12 of 16 distinct
+//! squitters, and a fixed four never decode. The cause was `ppm_demod` reading chips at whole
+//! sample positions only (frame origin at an integer sample, one sample per chip at 2 Msps): a
+//! squitter's sub-sample arrival phase (fixed per squitter in a looping replay) decided which
+//! bit patterns survived the band-limited early/late comparison. `ppm_demod` now interpolates
+//! chip centres from a fractional origin and picks each frame's phase by decision margin, and
+//! the recipe runs at 2.4 Msps / 2 MHz (2 Msps forced a 1.6 MHz channel that cut the chip-rate
+//! content). The block's regression test renders those four squitters at every tenth-sample
+//! phase.
 //!
 //! **Known gap found by this task (not fixed here — a runtime feature, not a block bug).** The
 //! recipe's `aircraft` output (`kind: "messages"`) does not yet ingest decodes into the
@@ -586,21 +575,16 @@ fn tutorial_adsb_recipe_decodes_blind_and_matches_truth() {
     // Whenever a squitter *is* CRC-valid, its fields always match the hidden truth exactly: this
     // is the hard correctness bar (never relaxed).
     assert!(mismatches.is_empty(), "[{TAG}] {mismatches:?}");
-    // Coverage bar (T-097 finding, see the module doc "Known limitation"): with 16 squitters per
-    // aircraft (64 independent tries over the run), 12 of the 16 distinct (ICAO, TC, kind)
-    // combinations decode reliably; a specific pair of (aircraft, message kind) combinations
-    // stays at 0 CRC-valid decodes even at 80 tries (`ppm_demod`'s simple early/late detector,
-    // content-dependent, not aircraft- or kind-dependent in general — every *other* combination
-    // for those same aircraft, and every combination for the other two aircraft, decodes
-    // reliably). So: every aircraft is found (blind identity, not just blind detection), and at
-    // least three-quarters of the distinct truth squitters decode with exactly correct fields.
+    // Coverage bar: every aircraft is found (blind identity, not just blind detection) and every
+    // one of the 16 distinct truth squitters decodes CRC-valid with exactly correct fields (T-110
+    // restored this after T-097's 12/16; see the module doc).
     assert_eq!(
         icaos_seen.len(),
         4,
         "[{TAG}] every aircraft has at least one CRC-valid decode: seen {icaos_seen:?}"
     );
     assert!(
-        seen.len() >= 12,
+        missing.is_empty(),
         "[{TAG}] only {} of 16 distinct truth squitters decoded; missing {missing:?}",
         seen.len()
     );
@@ -757,6 +741,35 @@ fn tutorial_adsb_recipe_agrees_with_readsb() {
     assert_eq!(
         agree, total,
         "[{TAG}] recipe and readsb disagree on a field both decoded"
+    );
+    // Coverage: the recipe decodes (CRC-valid) every (ICAO, type code) readsb decodes.
+    let readsb_kinds: BTreeSet<(String, u64)> = readsb
+        .iter()
+        .filter_map(|d| {
+            Some((
+                d.metadata.get("icao")?.as_str()?.to_owned(),
+                d.metadata.get("tc")?.as_u64()?,
+            ))
+        })
+        .collect();
+    let recipe_kinds: BTreeSet<(String, u64)> = valid
+        .iter()
+        .filter_map(|f| {
+            Some((
+                format!("{:06x}", f.values.get("icao")?.as_u64()?),
+                f.values.get("me.tc")?.as_u64()?,
+            ))
+        })
+        .collect();
+    let readsb_only: Vec<_> = readsb_kinds.difference(&recipe_kinds).collect();
+    eprintln!(
+        "[{TAG}] RESULT coverage: readsb {} (icao, tc), recipe {}, readsb-only {readsb_only:?}",
+        readsb_kinds.len(),
+        recipe_kinds.len()
+    );
+    assert!(
+        readsb_only.is_empty(),
+        "[{TAG}] readsb decoded (icao, tc) the recipe did not: {readsb_only:?}"
     );
 
     let (code, stopped) = s.call("DELETE", &format!("/api/pipelines/{id}"), None);

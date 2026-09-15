@@ -88,6 +88,9 @@ struct Ppm {
     status: Status,
 }
 
+/// Sub-sample timing search per detected preamble, in steps of this fraction of a chip.
+const PHASE_STEPS_PER_CHIP: f64 = 8.0;
+
 impl Ppm {
     fn chip_start(&self, k: usize) -> usize {
         (k as f64 * self.spc).round() as usize
@@ -102,17 +105,61 @@ impl Ppm {
         }
     }
 
-    #[inline]
-    fn chip(&self, pos: usize, k: usize) -> f32 {
-        let s = pos + self.chip_start(k);
-        self.mags[s..s + self.chip_len].iter().sum()
+    /// Lowest and highest phase offsets (samples, relative to the detecting integer position)
+    /// searched per preamble, and the step.
+    fn phases(&self) -> (f64, f64, f64) {
+        (
+            -(0.5 * self.spc).max(1.0),
+            self.spc.max(1.5),
+            self.spc / PHASE_STEPS_PER_CHIP,
+        )
     }
 
-    /// Preamble level ratio in dB at `pos`, if it passes.
-    fn score(&self, pos: usize) -> Option<f32> {
+    /// Samples kept before `scan` so the most negative phase never reads before `mags[0]`.
+    fn history(&self) -> usize {
+        (-self.phases().0 + 0.5 * self.spc).ceil() as usize + 1
+    }
+
+    /// Sample coordinate of the last interpolation point of chip `k` for a frame at `origin`.
+    #[inline]
+    fn last_point(&self, origin: f64, k: usize) -> f64 {
+        let n = self.chip_len as f64;
+        origin + k as f64 * self.spc + 0.5 * (self.spc - 1.0) + 0.5 * (n - 1.0) * self.spc / n
+    }
+
+    /// Whether chips `0..chips` of a frame at `origin` lie inside the magnitude history.
+    #[inline]
+    fn has_chips(&self, origin: f64, chips: usize) -> bool {
+        chips == 0 || (self.last_point(origin, chips - 1).floor() as usize + 1) < self.mags.len()
+    }
+
+    /// Chip `k` of a frame whose chip 0 starts at the fractional sample `origin`: the linearly
+    /// interpolated magnitude at `chip_len` points spread over the chip, centred on it (at one
+    /// sample per chip and an integer origin, exactly the sample). Frame timing is therefore
+    /// not quantised to whole samples: a burst's arbitrary sub-sample phase (a squitter at
+    /// 2 Msps is ~1 sample per chip) no longer decides which bit patterns survive.
+    #[inline]
+    fn chip(&self, origin: f64, k: usize) -> f32 {
+        let n = self.chip_len;
+        let step = self.spc / n as f64;
+        let first =
+            origin + k as f64 * self.spc + 0.5 * (self.spc - 1.0) - 0.5 * (n as f64 - 1.0) * step;
+        let mut acc = 0.0;
+        for j in 0..n {
+            let t = first + j as f64 * step;
+            let i = t.floor();
+            let f = (t - i) as f32;
+            let i = i as usize;
+            acc += self.mags[i] * (1.0 - f) + self.mags[i + 1] * f;
+        }
+        acc
+    }
+
+    /// Preamble level ratio in dB at `origin`, if it passes.
+    fn score(&self, origin: f64) -> Option<f32> {
         let (mut on, mut non, mut off, mut noff, mut min_on) = (0.0, 0, 0.0, 0, f32::INFINITY);
         for k in 0..self.pchips {
-            let e = self.chip(pos, k);
+            let e = self.chip(origin, k);
             if (self.preamble >> (self.pchips - 1 - k)) & 1 == 1 {
                 on += e;
                 non += 1;
@@ -138,23 +185,47 @@ impl Ppm {
         Some(db)
     }
 
-    /// Soft data bit `j` of the frame at `pos`: (early − late) / (early + late).
+    /// Soft data bit `j` of the frame at `origin`: (early − late) / (early + late).
     #[inline]
-    fn soft_bit(&self, pos: usize, j: usize) -> f32 {
+    fn soft_bit(&self, origin: f64, j: usize) -> f32 {
         let c0 = self.pchips + j * self.cpb;
         let half = self.cpb / 2;
         let (mut e, mut l) = (0.0, 0.0);
         for i in 0..half {
-            e += self.chip(pos, c0 + i);
-            l += self.chip(pos, c0 + self.cpb - half + i);
+            e += self.chip(origin, c0 + i);
+            l += self.chip(origin, c0 + self.cpb - half + i);
         }
         if e + l > 0.0 { (e - l) / (e + l) } else { 0.0 }
+    }
+
+    /// Decodes the frame at `origin` into `bits`/`softs` until the frame-length rules end it.
+    /// `None` while its last chip has not arrived; otherwise the summed decision margin |soft|.
+    fn decode_at(&mut self, origin: f64) -> Option<f32> {
+        self.bits.clear();
+        self.softs.clear();
+        let mut st = LengthState::default();
+        let mut sum = 0.0;
+        for j in 0..self.max_bits {
+            if !self.has_chips(origin, self.pchips + (j + 1) * self.cpb) {
+                return None;
+            }
+            let s = self.soft_bit(origin, j);
+            sum += s.abs();
+            self.softs.push(s);
+            self.bits.push(u8::from(s > 0.0));
+            if self.length.after_bit(&mut st, &self.bits) {
+                return Some(sum);
+            }
+        }
+        None
     }
 
     fn clear(&mut self, item: u64) {
         self.mags.clear();
         self.base = item;
-        self.scan = 0;
+        // The first samples after a restart are history only (never a frame origin), so the
+        // phase search reads the same samples however the input was chunked.
+        self.scan = self.history();
     }
 }
 
@@ -175,7 +246,11 @@ impl Block for Ppm {
             )));
         }
         self.chip_len = (self.spc + 1e-9).floor().max(1.0) as usize;
-        let window = self.span(self.pchips + self.max_bits * self.cpb) + 2;
+        // A frame at the latest searched phase, plus the history kept before the scan position.
+        let window = self.span(self.pchips + self.max_bits * self.cpb)
+            + self.phases().1.ceil() as usize
+            + self.history()
+            + 2;
         if window > MAX_WINDOW {
             return Err(BlockError::Params(format!(
                 "ppm_demod: a frame spans {window} samples (limit {MAX_WINDOW}): lower frame_bits or raise bit_rate_bd"
@@ -231,40 +306,53 @@ impl Block for Ppm {
         };
         let min_bits = self.length.min_bits() as usize;
         let data_start = self.chip_start(self.pchips);
-        while self.scan + self.span(self.pchips + min_bits * self.cpb) < self.mags.len() {
-            let Some(db0) = self.score(self.scan) else {
+        let (ph_lo, ph_hi, ph_step) = self.phases();
+        let hist = self.history();
+        let n_phases = ((ph_hi - ph_lo) / ph_step).round() as usize + 1;
+        while self.has_chips(self.scan as f64 + ph_hi, self.pchips + min_bits * self.cpb) {
+            // Detection on a half-sample grid: at ~1 sample per chip a burst half a sample off
+            // the integer grid spreads each pulse into its neighbours, which can fail every
+            // integer position's per-pulse test.
+            let Some(db0) = self
+                .score(self.scan as f64)
+                .or_else(|| self.score(self.scan as f64 + 0.5))
+            else {
                 self.scan += 1;
                 continue;
             };
-            let (pos, db) = match self.score(self.scan + 1) {
-                Some(d1) if d1 > db0 => (self.scan + 1, d1),
-                _ => (self.scan, db0),
-            };
-            // Bits until the frame-length rules end the frame; wait for more input if its
-            // last chip has not arrived.
-            self.bits.clear();
-            self.softs.clear();
-            let mut st = LengthState::default();
-            let mut sum = 0.0;
-            let mut ended = false;
-            for j in 0..self.max_bits {
-                if pos + self.span(self.pchips + (j + 1) * self.cpb) > self.mags.len() {
+            // Sub-sample timing: decode the frame at each phase around the detection and keep
+            // the one with the largest decision margin whose preamble still passes (a whole-chip
+            // slip fails the preamble). Wait for more input if a phase's last chip is missing.
+            let pos = self.scan;
+            let mut best: Option<(f64, f32, f32)> = None;
+            let mut waiting = false;
+            for p in 0..n_phases {
+                let origin = pos as f64 + ph_lo + p as f64 * ph_step;
+                let Some(db) = self.score(origin) else {
+                    continue;
+                };
+                let Some(margin) = self.decode_at(origin) else {
+                    waiting = true;
                     break;
-                }
-                let s = self.soft_bit(pos, j);
-                sum += s.abs();
-                self.softs.push(s);
-                self.bits.push(u8::from(s > 0.0));
-                if self.length.after_bit(&mut st, &self.bits) {
-                    ended = true;
-                    break;
+                };
+                let margin = margin / self.bits.len() as f32;
+                if best.is_none_or(|(_, m, _)| margin > m) {
+                    best = Some((origin, margin, db));
                 }
             }
-            if !ended {
+            if waiting {
                 break;
             }
+            let (origin, db) = match best {
+                Some((o, _, d)) => (o, d),
+                None => (pos as f64, db0),
+            };
+            let Some(sum) = self.decode_at(origin) else {
+                break;
+            };
+            let start = origin.round().max(0.0) as usize;
             let len = self.bits.len();
-            let item = self.base + (pos + data_start) as u64;
+            let item = self.base + (start + data_start) as u64;
             let source = source_at(&m, item as f64).round().max(0.0) as u64;
             frames.push_bits(&self.bits, FrameInfo::new(self.frames, source, m.channel));
             if tapped {
@@ -278,14 +366,15 @@ impl Block for Ppm {
                 self.snr_db + 0.1 * (db - self.snr_db)
             };
             self.quality = sum / len as f32;
-            self.last_frame_item = Some(self.base + pos as u64);
-            self.scan = pos + self.span(self.pchips + len * self.cpb);
+            self.last_frame_item = Some(self.base + start as u64);
+            self.scan = (start + self.span(self.pchips + len * self.cpb)).max(pos + 1);
         }
         let produced = frames.len() as u64;
-        if self.scan > 0 {
-            self.mags.drain(..self.scan);
-            self.base += self.scan as u64;
-            self.scan = 0;
+        if self.scan > hist {
+            let cut = self.scan - hist;
+            self.mags.drain(..cut);
+            self.base += cut as u64;
+            self.scan = hist;
         }
 
         if tapped {
@@ -478,6 +567,114 @@ mod tests {
         let st = c.block(0).status();
         assert!(st.snr_db.unwrap() > 15.0, "{st:?}");
         assert_eq!(st.lock, Lock::Locked);
+    }
+
+    /// T-110 regression: the four DF17 squitters T-097's blind acceptance never decoded
+    /// (`py/hkpy/synth` seed 5: a0b1c2/4ca853 airborne-position-even and velocity), rendered as
+    /// band-limited pulses (±1 MHz) at 2.4 Msps — 1.2 samples per chip — at every tenth-sample
+    /// timing phase. Chips used to be read at whole-sample positions only, so a burst's
+    /// sub-sample phase decided which bit patterns survived (0 of these 40 decoded exactly).
+    #[test]
+    fn band_limited_squitters_decode_at_every_sub_sample_phase() {
+        const HEX: [&str; 4] = [
+            "8da0b1c299050290e88000f70173",
+            "8da0b1c258c592b5fe17d25af925",
+            "8d4ca85358c112ff4bcd88dfa335",
+            "8d4ca85399012602c03c008259dc",
+        ];
+        // 24 Msps rendering (12 samples per chip), decimated by 10 to 2.4 Msps.
+        let (up, dec, phases, spacing) = (12usize, 10usize, 10usize, 3_600usize);
+        let n_hi = spacing * (HEX.len() * phases + 2);
+        let mut hi = vec![0f32; n_hi];
+        let mut truth = Vec::new();
+        for (m, hex) in HEX.iter().enumerate() {
+            let bits: Vec<u8> = (0..112)
+                .map(|i| {
+                    let byte = u8::from_str_radix(&hex[i / 8 * 2..i / 8 * 2 + 2], 16).unwrap();
+                    (byte >> (7 - i % 8)) & 1
+                })
+                .collect();
+            let mut chips = vec![0u8; 16];
+            for k in [0, 2, 7, 9] {
+                chips[k] = 1;
+            }
+            for &b in &bits {
+                chips.extend(if b == 1 { [1, 0] } else { [0, 1] });
+            }
+            for o in 0..phases {
+                let start = spacing * (1 + m * phases + o) + o;
+                for (k, &c) in chips.iter().enumerate() {
+                    if c == 1 {
+                        hi[start + k * up..start + (k + 1) * up].fill(1.0);
+                    }
+                }
+                truth.push((start, bits.clone()));
+            }
+        }
+        // Windowed-sinc low-pass, 1 MHz cutoff at 24 Msps, zero delay (centred taps).
+        let half = 120isize;
+        let fc = 1.0 / 24.0;
+        let taps: Vec<f32> = (-half..=half)
+            .map(|i| {
+                let x = i as f64;
+                let sinc = if i == 0 {
+                    2.0 * fc
+                } else {
+                    (std::f64::consts::TAU * fc * x).sin() / (std::f64::consts::PI * x)
+                };
+                let w = 0.54 + 0.46 * (std::f64::consts::PI * x / half as f64).cos();
+                (sinc * w) as f32
+            })
+            .collect();
+        let mut rng = Lcg::new(1110);
+        let carrier = Complex32::from_polar(1.0, 0.7);
+        let x: Vec<Complex32> = (0..n_hi / dec)
+            .map(|j| {
+                let c = (j * dec) as isize;
+                let env: f32 = taps
+                    .iter()
+                    .enumerate()
+                    .map(|(t, &h)| {
+                        let s = c + t as isize - half;
+                        if (0..n_hi as isize).contains(&s) {
+                            h * hi[s as usize]
+                        } else {
+                            0.0
+                        }
+                    })
+                    .sum();
+                // ~30 dB pulse SNR per sample (the seed-5 fixture's squitters are ~35 dB).
+                carrier * env + rng.cnoise(0.001)
+            })
+            .collect();
+        let c = assert_chunk_invariant(
+            || vec![build("ppm_demod", adsb_params(), PortType::Iq)],
+            PortType::Iq,
+            2.4e6,
+            &PortVec::Iq(x),
+            &[4096, 1000, 333],
+        );
+        let frames = &c.out(0, 0).frames;
+        assert_eq!(frames.len(), truth.len(), "{frames:?}");
+        for (i, ((bytes, info), (start, bits))) in frames.iter().zip(&truth).enumerate() {
+            let got: Vec<u8> = (0..info.bit_len as usize)
+                .map(|b| (bytes[b / 8] >> (7 - b % 8)) & 1)
+                .collect();
+            assert_eq!(
+                &got,
+                bits,
+                "frame {i} (message {}, phase {})",
+                i / phases,
+                i % phases
+            );
+            // First data chip (chip 16 = 192 samples at 24 Msps) at 2.4 Msps, ±1 sample.
+            let want = (start + 16 * up) as f64 / dec as f64;
+            assert!(
+                (info.source_index as f64 - want).abs() <= 1.0,
+                "frame {i}: source {} vs {want}",
+                info.source_index
+            );
+        }
     }
 
     #[test]

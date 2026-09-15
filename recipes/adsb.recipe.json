@@ -13,8 +13,8 @@
   },
   "input": {
     "port": "iq",
-    "sample_rate_hz": 2000000,
-    "bandwidth_hz": 1600000
+    "sample_rate_hz": 2400000,
+    "bandwidth_hz": 2000000
   },
   "nodes": [
     {
