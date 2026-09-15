@@ -1902,7 +1902,7 @@ tasks:
     milestone: M2
     title: "Baselines + novelty + interestingness score (C12)"
     status: review
-    commit: bb48dd2
+    commit: 06d4498
     deps: [T-118]
     parallel_group: M2O
     use_cases: [AWARE-044, AWARE-011, AWARE-060]
@@ -2030,7 +2030,7 @@ tasks:
     parallel_group: M2I
     use_cases: [AWARE-042, AWARE-044, AWARE-033]
     found_by: "T-118/T-119/T-121/T-127 reports + reviews 2026-09-15"
-    acceptance: "T-119 adapter uses T-118 OccupancyStat level fields (level_occupied_p50/p90, level_idle, floor) so level novelty is real (test: emitter appearing raises level novelty, floor rise does not); pipeline calls AttentionService ingest_occupancy/score from T-118's occupancy thread; candidates assembled from inventory/tracks (SNR, class entropy, recipe match, periodicity, boring evidence) and published to the scheduler's InterestingnessProvider (replacing T-127's stub); FirstSightingRate fed from inventory first sightings (new-emitter novelty produced); T-121 report slots use T-118 occupancy series and T-119 baseline comparison; history tiles record source + site so report/history filters by source/site work (tile format additive, versioned); T-119 GainSeries memory bounded (sparse or unload idle engines) with a measured bound; all through mock SDR on the time-compressed scene"
+    acceptance: "T-119 adapter uses T-118 OccupancyStat level fields (level_occupied_p50/p90, level_idle, floor) so level novelty is real (test: emitter appearing raises level novelty, floor rise does not); pipeline calls AttentionService ingest_occupancy/score from T-118's occupancy thread; candidates assembled from inventory/tracks (SNR, class entropy, recipe match, periodicity, boring evidence) and published to the scheduler's InterestingnessProvider (replacing T-127's stub); FirstSightingRate fed from inventory first sightings (new-emitter novelty produced); T-121 report slots use T-118 occupancy series and T-119 baseline comparison; history tiles record source + site so report/history filters by source/site work (tile format additive, versioned); T-119 GainSeries memory bounded (sparse or unload idle engines) with a measured bound; all through mock SDR on the time-compressed scene; T-119 fix-round residuals: FirstSightingRate caller; unload idle baseline engines (dense GainSeries ~200 MB/gain-state/key); latched change point stops all-slot accrual (consider per-slot or auto re-freeze policy); reference learning can admit zero-novelty interferer folds that bias the reference low - add a sequential test with real channel levels; http.rs module-doc route rows"
     area: "crates/hk-pipeline (attention, occupancy, reports wiring), crates/hk-context/src/occupancy/baseline.rs (adapter), crates/hk-store/src/history (source/site), crates/hk-cli (serve wiring)"
     needs: none
     model: opus

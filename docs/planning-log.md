@@ -1024,3 +1024,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-120 follow-ups:** all 8, including an alloc-free repack test, gap-free passes with floor deferrals, NaN guard, `verifications_dropped` and the ADR amendment.
 
   The mock-SDR e2e passes with the bandit on and off. Known gaps for T-128: the real candidates, and `valid_decodes`, which is a global delta. A timeboxed Opus review is running and will also recommend a merge order across T-118, T-119, T-121 and T-127.
+- **B0.309 T-119 fix round done** (06d4498).
+  - **Adapter** is occupancy-only (`level_db: None`). Test: a floor rise causes no level novelty and no change point.
+  - **Maturity deadlock** is fixed with a stricter rule than briefed. A fold scoring below 0.7 accrues only while its hour-of-day pool is immature, the fold isn't novel against that pool, the pool's adaptive copy is within 1σ of its reference, and the pool itself is novel against the coarse pool. The last condition separates a real daily pattern from an interferer. The brief's simple rule absorbed the interferer (no change point). Busy-hour novelty now reaches 0 by day 5; a new quiet-hour emitter still scores 1.0; the interferer still raises its change point at 45.5 h.
+  - **Reference learning** is bounded at hour-of-day maturity (creep stops at 24 d).
+  - **Re-freeze** is documented in ADR §3.4.
+  - **Quota** is enforced on flush, and evicted engines are dropped.
+
+  The 48 h scene is unchanged: 3-interval latency, 1/1824 false alarms. Residuals go to T-128. Merge waits for T-118, per the ADR order.
