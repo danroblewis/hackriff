@@ -990,3 +990,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Checked OK:** sample-clock time base, atomic writes, migration 0002 numbering, FCO novelty two-sided.
   - **Recorded for follow-up:** FirstSightingRate unwired (no new-emitter novelty); dense GainSeries memory (~200 MB per gain state per key); a latched change point stops accrual; T-122 needs a quieter-than-usual alarm kind.
   Fix round running (fresh Opus). T-118 review pending (includes adding a channel level to OccupancyStat).
+- **B0.305 T-118 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. Only the band tuned at interval close is evaluated, so a retune mid-interval (user or bandit) loses the earlier bands.
+    2. `interval=span` builds a ~415 MB cell grid under the FloorProduct lock, so history ingest defers and then drops frames.
+  - **Stats sound:** ρ bounded; half-gap cap unbiased; any-cell-above-threshold matches SM.1880.
+  - **Coordinator decisions:**
+    - (a) Dense bands (FM demo): a **local floor** (20th percentile within ±1 MHz) plus a suspect flag and the floor recorded in the stat, done in the fix round.
+    - (b) Level fields added to OccupancyStat now (optional, additive): p50/p90 occupied level, idle level, floor. T-119's adapter gets wired to them in a follow-up after both merge.
+    - (c) Nits: `idle_fraction` doc; `fco_all_visits` strata weighted by duration.
+  - **Demo note for T-121/T-123:** with only interactive tuning, `fco` is None by contract. Show `fco_all_visits` labelled biased/indicative, never as `fco`.
+  Fix round running.
