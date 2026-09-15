@@ -1613,3 +1613,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - adsb 5.63→5.60 s; refine_wfm 25.9→26.1 s; signal_062 6.1→6.6 s; bandit_on 83→110 s.
     - This run overlapped four agent builds at load up to 36, so it is inconclusive.
     - The bandit tests retune constantly through the mock, so the per-bin dequant FFT cost is plausible. T-145's Cranelift/timing work should re-measure bandit_on on main at low load. If it is a real ≥20% regression, a follow-up is to vectorise or skip dequant when the recording noise is well above 1 code rms.
+- **B0.390 T-147 WIP (6035543): repro test only, no fix yet; finisher launched.**
+  - **Repro** (`occupancy_sparse_visits`, 6 h, default scheduler + bandit):
+    - 433.400: FCO 0.0, truth 0.570.
+    - 433.375: FCO 0.0, truth 0.083; never learned.
+    - 433.425: FCO 1.0, truth 1.0 (correct).
+  - **Ruled out:** history rows and thresholds are correct (on-rows −64 dB vs threshold −95.9 dB); 476 visits present.
+  - **Leading cause:** sweep hop 1 is centred at 433.3875, so both channels sit 12.5 kHz from DC, inside the detector's 15 kHz rule (`detector.rs:957`). Real carriers get DC-spur flags.
+    - Every DC spur is suspect (`channels.rs:57`), and the suspect rule (`engine.rs:565`) then poisons every occupied visit to that frequency, including clean visits from other tunings.
+    - Suspect visits are dropped from FCO, and learning skips them (`channels.rs:544`).
+  - **Fix direction:** a DC flag marks only that tuning's observation suspect. A frequency is treated as a DC spur only if it is always near its tuning's centre.
+    - ADR-0012 §2.6 amendment.
+    - Real-DC-spur suppression test.
+    - A priori Wilson CI checks.
