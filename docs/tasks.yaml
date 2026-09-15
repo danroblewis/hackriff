@@ -2934,6 +2934,7 @@ notes:
     use_cases: [SIGNAL-062]
     found_by: "user field test 2026-09-15 on the live demo (brief: supervisor scratchpad brief-decode-detection-feedback.md)"
     acceptance: "RDS recipe decodes CRC-valid groups (PI + PS + RadioText, high CRC-valid rate) on the real fixtures/hackrf/2026-09-13 fm_100p8M capture through the mock SDR; root cause identified (57 kHz carrier phase/lock, biphase polarity, differential decode direction, offset words A/B/C/C'/D, CRC-10 syndrome poly 0x5B9, timing); new real-air RDS acceptance test on that capture (blind: no PI/PS lookup; expected values only in assertions, from an independent oracle such as redsea or a manual decode); synthetic T-094 still green"
+    rescope_2026_09_15: "diagnosis (WIP e8f037f): recipe correct on the fixture (45/56 CRC-valid = oracle = rds_ref.py); live failure is weak reception (14 vs 18.2 dB RF SNR). Finish: real-air acceptance (CRC-valid>=0.7, PI, PS) + block-sync false-lock hardening + weak-signal robustness at 14 dB (runtime AWGN) without block error correction (user decision pending)"
     area: crates/hk-blocks, crates/hk-recipe (RDS recipe), crates/hk-demod, tests/e2e/tests/acceptance
     needs: none
     model: opus

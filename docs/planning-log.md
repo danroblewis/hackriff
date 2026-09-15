@@ -2174,3 +2174,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Evidence:** 10/10 burn runs pass, plus an order-independent test.
   - **Not run:** the family failure itself was never reproduced (0/15 before the fix), and the agent skipped the full acceptance_m0 run; the coordinator full check covers it.
   - **Worktree** removed. Full check running.
+- **B0.462 T-181 committed (fe2e6a6), merge pending the in-flight full check.** The coordinator accepted the dither change from 75 kHz to 80 kHz.
+  - **Why:** at 75 kHz, cells midway between the two tunings were flagged at both, because the ±15 kHz DC rule is inclusive and 75 kHz left zero margin. ADR-0005 now records this.
+  - **Also in T-181:** single-hop plans dither every 8th pass; records split by pass parity; new `HopDcDitherDisabled` warning.
+- **B0.463 T-185 diagnosis: the RDS recipe is correct on real air.** No product change yet (WIP e8f037f).
+  - **Fixture results:** 45/56 CRC-valid groups, identical to the hk_demod oracle and rds_ref.py; PI 1694 and PS/RT decoded.
+  - **Live failure = weak signal.** The live demo signal is 14 dB RF SNR against 18.2 dB on the fixture, and subcarrier quality halves (0.27 vs 0.58). Block sync locks on chance syndrome matches (26 per 25 s), so the UI shows "sync, all CRC-invalid".
+  - **Re-scoped T-185, finisher launched (Opus):**
+    - real-air acceptance (CRC-valid ≥0.7, PI, PS);
+    - block-sync false-lock hardening;
+    - weak-signal robustness at 14 dB (AWGN added at runtime, target PI+PS in 25 s, zero invalid fields) without changing CRC correction.
+  - **Needs the user:** whether to allow redsea-style ≤2-bit block error correction, which relaxes the crc block's no-correction rule. Not scheduled.
