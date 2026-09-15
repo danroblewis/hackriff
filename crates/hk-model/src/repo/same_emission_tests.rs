@@ -144,11 +144,18 @@ fn t082_decoder_entry_of_a_tracked_emission_merges_into_one_entry_with_all_evide
         .merge_same_emission(d, e, t(5.0), "same emission", &tol())
         .unwrap()
         .expect("merged");
-    assert_eq!((m.from, m.into), (d, e), "the confirmed, first-seen entry survives");
+    assert_eq!(
+        (m.from, m.into),
+        (d, e),
+        "the confirmed, first-seen entry survives"
+    );
     assert!(m.identity_moved);
     assert_eq!(listed(&r), vec![e]);
     let em = r.emitter(e).unwrap();
-    assert_eq!(em.count, 5, "the decode overlaps the track: its burst is not counted twice");
+    assert_eq!(
+        em.count, 5,
+        "the decode overlaps the track: its burst is not counted twice"
+    );
     assert_eq!(
         em.identity,
         Identity::Decoded(DecodedIdentity {
@@ -161,7 +168,11 @@ fn t082_decoder_entry_of_a_tracked_emission_merges_into_one_entry_with_all_evide
         "classification history carried"
     );
     let links = r.emitter_links(e).unwrap();
-    assert!(links.iter().any(|l| matches!(l.target, LinkTarget::Track(_))));
+    assert!(
+        links
+            .iter()
+            .any(|l| matches!(l.target, LinkTarget::Track(_)))
+    );
     assert!(
         links
             .iter()
@@ -199,7 +210,10 @@ fn t082_framer_entry_joins_the_sensor_track_and_confirmed_wins() {
     let d = r
         .record_sighting(&framed(433.973e6, 30e3, tr(0.03, 2.3), 19), None)
         .unwrap();
-    assert!(d.created, "a channel-sharing identity never joins by fingerprint");
+    assert!(
+        d.created,
+        "a channel-sharing identity never joins by fingerprint"
+    );
     let d = d.emitter_id;
     // The user promoted the framer's entry first: it survives although the track was first seen.
     confirm(&mut r, d, LifecycleAuthor::User, "tok-1", "my sensor");
@@ -360,16 +374,30 @@ fn t082_after_deleting_a_merged_entry_redetection_creates_one_new_candidate() {
         .record_sighting(&rds(101.302e6, tr(101.0, 104.0), "C0DE"), None)
         .unwrap();
     assert!(d2.created);
-    assert!(r.same_emission(survivor, c.emitter_id, &tol()).unwrap().is_none());
+    assert!(
+        r.same_emission(survivor, c.emitter_id, &tol())
+            .unwrap()
+            .is_none()
+    );
     let partners: Vec<EmitterId> = r
         .same_emission_partners(d2.emitter_id, &tol())
         .unwrap()
         .into_iter()
         .map(|p| p.0)
         .collect();
-    assert_eq!(partners, vec![c.emitter_id], "the deleted entry is no partner");
+    assert_eq!(
+        partners,
+        vec![c.emitter_id],
+        "the deleted entry is no partner"
+    );
     let m = r
-        .merge_same_emission(d2.emitter_id, c.emitter_id, t(105.0), "same emission", &tol())
+        .merge_same_emission(
+            d2.emitter_id,
+            c.emitter_id,
+            t(105.0),
+            "same emission",
+            &tol(),
+        )
         .unwrap()
         .expect("merged");
     assert_eq!(listed(&r), vec![m.into]);
