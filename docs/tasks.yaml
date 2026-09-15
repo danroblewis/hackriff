@@ -927,7 +927,7 @@ tasks:
   - id: T-056
     milestone: M0b
     title: Wire compute providers into the pipeline (ComputeOptions in pipeline settings; STFT/PFB via hk_dsp::compute)
-    status: todo
+    status: in-progress
     scope_note: "user 2026-09-14: T-056 stays the Mac GPU wiring task (wgpu/Metal or Accelerate providers into the pipeline behind the conformance suite)"
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-041, T-037]
@@ -939,7 +939,6 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-057
     milestone: M0b
     title: Scheduler virtual tuning places signals at wrong absolute frequencies (~368 kHz axis offset root cause)
@@ -1118,7 +1117,7 @@ tasks:
   - id: T-067
     milestone: M0b
     title: Control API completeness for the panel (display limits in state, FFT window, baseband filter, bookmark rename)
-    status: todo
+    status: in-progress
     priority_note: "user 2026-09-14: scheduled after T-078/T-079/T-080"
     deps: [T-051, T-062]
     parallel_group: P
@@ -1127,9 +1126,9 @@ tasks:
     acceptance: "/api/control/state reports display limits (FFT size range, averaging max, rows/s range) so the UI stops hard-coding them; endpoints for FFT window, baseband filter (validated against device capabilities) and bookmark rename; UI consumes them; auth/audit/TX rules unchanged; tests"
     area: crates/hk-api (control), crates/hk-cli/src/control.rs, ui/src/controls
     needs: none
-    model: opus
+    model: sonnet
+    model_note: "token-budget rules 2026-09-14: API/UI surface off the real-time path -> Sonnet medium"
     effort: medium
-    hold: "unblocked; waiting for an agent slot (~4 concurrent Rust builds)"
   - id: T-068
     milestone: M0b
     title: "Legal: restricted decodes must not drive entity-resolution links to emitters outside their class (identity confirmation side channel)"
