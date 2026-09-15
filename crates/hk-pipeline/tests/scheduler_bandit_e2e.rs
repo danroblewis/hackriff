@@ -9,6 +9,12 @@
 //! T-128: the bandit's provider is the run's C12 scorer over blind tracks. A clipping (overloaded,
 //! IMD-like) emitter is a suspect candidate: it gets its one verification group and, still flagged
 //! afterwards, is banned rather than dwelt on.
+//!
+//! T-131: the clipping is real device overdrive (T-130): the recording is unscaled and carries no
+//! gain metadata (read as recorded at the scheduler's default LNA 24 / VGA 20), and the plan's gain
+//! table runs the band at LNA 32 / VGA 24 (+12 dB, ≈ 4× amplitude), so the mock SDR saturates its
+//! 8-bit output on the bursts. The same run at the default gains is the control: no suspect, no
+//! verification, no ban.
 
 mod common;
 
@@ -30,7 +36,9 @@ const FS: f64 = 2e6;
 const CENTER: f64 = 433.92e6;
 /// `tone_recording`'s tone offset.
 const EMITTER: f64 = CENTER + 50e3;
-const SECS: f64 = 12.0;
+/// Stream time of the recording, s (T-131: 20 s, so outcomes and visits exist well before the end
+/// under load).
+const SECS: f64 = 20.0;
 
 struct TempDir(PathBuf);
 
@@ -55,20 +63,16 @@ impl Drop for TempDir {
     }
 }
 
-/// The tone recording gated into 120 ms bursts every 600 ms (noise between bursts). With `clip`,
-/// the bursts are driven 4× into the ADC rails (every burst detection is flagged clipped).
-fn bursty_recording(dir: &Path, clip: bool) -> PathBuf {
+/// The tone recording (peak ≈ 46 of 127, no gain metadata) gated into 120 ms bursts every 600 ms
+/// (noise between bursts). The IQ is never scaled: overdrive happens in the device (T-131).
+fn bursty_recording(dir: &Path) -> PathBuf {
     let meta = tone_recording(dir, "bursty", FS, SECS, CENTER, None);
     let data = dir.join("bursty.sigmf-data");
     let mut bytes = std::fs::read(&data).unwrap();
     let (period, on) = ((0.6 * FS) as usize, (0.12 * FS) as usize);
     let mut state = 0x9e37_79b9_7f4a_7c15u64;
     for (i, pair) in bytes.chunks_exact_mut(2).enumerate() {
-        if clip && i % period < on {
-            for b in pair.iter_mut() {
-                *b = ((*b as i8) as i32 * 4).clamp(-128, 127) as i8 as u8;
-            }
-        } else if i % period >= on {
+        if i % period >= on {
             for b in pair {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -93,8 +97,10 @@ fn run(dir: &TempDir, bandit: bool) -> Run {
     run_with(dir, bandit, false)
 }
 
-fn run_with(dir: &TempDir, bandit: bool, clip: bool) -> Run {
-    let rec = bursty_recording(&dir.0.join("src"), clip);
+/// `overdrive`: the plan's gain table runs the band at +12 dB over the default gains (LNA 32 /
+/// VGA 24), which the mock SDR applies to the recording and saturates on the bursts.
+fn run_with(dir: &TempDir, bandit: bool, overdrive: bool) -> Run {
+    let rec = bursty_recording(&dir.0.join("src"));
     let replay = open_mock_replay(&rec, Pacing::Unpaced, MockEnd::Stop).unwrap();
     let mut plan = replay_plan(
         replay.info.center_hz,
@@ -102,6 +108,15 @@ fn run_with(dir: &TempDir, bandit: bool, clip: bool) -> Run {
         replay.info.start_time,
     );
     plan.policy = ScanPolicy::SweepThenDwell;
+    if overdrive {
+        plan.gain_table = vec![hk_model::plan::GainTableEntry {
+            freq: FreqRange::new(CENTER - FS, CENTER + FS),
+            lna_db: 32.0,
+            vga_db: 24.0,
+            amp_on: false,
+            antenna_port: None,
+        }];
+    }
     if bandit {
         let mut extra = plan.extra.as_object().cloned().unwrap_or_default();
         extra.insert(
@@ -137,11 +152,21 @@ fn run_with(dir: &TempDir, bandit: bool, clip: bool) -> Run {
         let (done, hub) = (Arc::clone(&done), Arc::clone(&hub));
         std::thread::spawn(move || {
             let (mut last, mut added, mut released) = (None, None, None);
-            let mut polls = 0u32;
+            let (mut polls, mut since_added) = (0u32, 0u32);
             while !done.load(Ordering::Relaxed) {
                 if let Some(s) = hub.snapshot() {
                     polls += 1;
-                    if added.is_none() && polls > 50 {
+                    // T-131: gate on scheduler progress (bandit outcomes recorded), not on how
+                    // often a loaded poller got to run.
+                    let ready = s
+                        .status
+                        .bandit
+                        .as_ref()
+                        .map_or(polls > 50, |b| b.counters.outcomes > 0);
+                    if added.is_some() {
+                        since_added += 1;
+                    }
+                    if added.is_none() && ready {
                         added = Some(hub.add_lease(Lease {
                             id: 0,
                             kind: LeaseKind::UserPin,
@@ -150,7 +175,7 @@ fn run_with(dir: &TempDir, bandit: bool, clip: bool) -> Run {
                             gains: None,
                             duration_ns: None,
                         }));
-                    } else if released.is_none() && polls > 60 {
+                    } else if released.is_none() && since_added > 10 {
                         if let Some(Ok(l)) = &added {
                             released = Some(hub.release_lease(l.id));
                         }
@@ -287,21 +312,25 @@ fn bandit_off_by_default_logs_no_bandit_dwells() {
     assert!(observed_s(&r.records, Tier::BackgroundSweep) > 0.0);
 }
 
-/// T-128 (ADR-0012 §5.3): suspect flags reach the bandit through the C12 candidates. The clipped
-/// emitter's candidate asks for verification, gets exactly one verification group, and is banned
-/// when the republished set still flags it (a replay cannot clear it: the gain step is virtual).
-#[test]
-fn bandit_suspect_candidate_gets_one_verification_then_is_banned() {
-    let dir = TempDir::new("suspect");
-    let r = run_with(&dir, true, true);
-    let snap = r.last.expect("the hub published snapshots");
+/// Verification counters of a run's last hub snapshot.
+struct Verifications {
+    started: u64,
+    failed: u64,
+    passed: u64,
+    banned: u64,
+    pending: u64,
+}
+
+fn bandit_counters(r: &Run, tag: &str) -> Verifications {
+    let snap = r.last.as_ref().expect("the hub published snapshots");
     let bandit = snap
         .status
         .bandit
+        .as_ref()
         .expect("the plan flag enabled the bandit");
     let c = &bandit.counters;
     eprintln!(
-        "[T-128] suspect: verifications started {} failed {} passed {} dropped {}, banned {}, \
+        "[T-131] {tag}: verifications started {} failed {} passed {} dropped {}, banned {}, \
          pending {}, suspect wasted {:.2} s, provider v{:?}",
         c.verifications_started,
         c.verifications_failed,
@@ -312,18 +341,47 @@ fn bandit_suspect_candidate_gets_one_verification_then_is_banned() {
         c.suspect_wasted_s,
         bandit.provider_version
     );
-    assert!(c.verifications_started >= 1, "a verification group ran");
+    Verifications {
+        started: c.verifications_started,
+        failed: c.verifications_failed,
+        passed: c.verifications_passed,
+        banned: bandit.banned as u64,
+        pending: bandit.pending_verifications as u64,
+    }
+}
+
+/// T-131 control for the test below: at the default gains the unscaled bursts never reach full
+/// scale, so no candidate is suspect, none is verified and none is banned.
+#[test]
+fn bandit_without_overdrive_verifies_and_bans_nothing() {
+    let dir = TempDir::new("nosuspect");
+    let r = run_with(&dir, true, false);
+    let c = bandit_counters(&r, "no overdrive");
+    assert_eq!(
+        (c.started, c.banned),
+        (0, 0),
+        "an unclipped emitter is not suspect"
+    );
+}
+
+/// T-128 (ADR-0012 §5.3): suspect flags reach the bandit through the C12 candidates. The clipped
+/// emitter's candidate asks for verification, gets exactly one verification group, and is banned
+/// when the republished set still flags it. T-131: the clipping is device overdrive (+12 dB gain
+/// table); without it the same run verifies and bans nothing (the test above).
+#[test]
+fn bandit_suspect_candidate_gets_one_verification_then_is_banned() {
+    let dir = TempDir::new("suspect");
+    let r = run_with(&dir, true, true);
+    let c = bandit_counters(&r, "overdrive");
+    assert!(c.started >= 1, "a verification group ran");
     assert!(
-        c.verifications_failed >= 1 && bandit.banned >= 1,
+        c.failed >= 1 && c.banned >= 1,
         "the still-suspect candidate is banned"
     );
-    assert_eq!(
-        c.verifications_passed, 0,
-        "nothing cleared the clipped emitter"
-    );
+    assert_eq!(c.passed, 0, "nothing cleared the clipped emitter");
     // One verification per suspect candidate: never re-verified while banned.
     assert!(
-        c.verifications_started <= c.verifications_failed + bandit.pending_verifications as u64,
+        c.started <= c.failed + c.pending,
         "re-verified while banned"
     );
 }

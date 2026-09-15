@@ -15,6 +15,11 @@
 //! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
 //! | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | GET | token | T-115 observation log records in a box ([`crate::observations`]) |
 //! | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | GET | token | T-115 observation totals, per-channel totals, gaps and POI ([`crate::observations`]) |
+//! | `/api/occupancy?f_lo&f_hi&t0&t1[&interval][&site]` | GET | token | T-118 occupancy series (FCO/FBO/SRO per learned channel and band) and the learned plan ([`crate::occupancy`]) |
+//! | `/api/sites`, `/api/sites/current`, `/api/sites/<id>` | GET, PUT | token (header only for mutating) | T-119 sites and the current (pinned) site ([`crate::attention`]) |
+//! | `/api/baselines[?site]`, `/api/baselines/slots?f_lo&f_hi[&site][&slot][&resolution]`, `/api/baselines/refreeze` | GET, POST | token (header only for mutating) | T-119 baselines, slot pools, re-freeze ([`crate::attention`]) |
+//! | `/api/candidates[?f_lo&f_hi][&limit]` | GET | token | T-119 latest `CandidateSet`; T-131 published read-only when the bandit is off ([`crate::attention`]) |
+//! | `/api/attention/weights` | GET, PUT | token (header only for mutating) | T-119 versioned score weights ([`crate::attention`]) |
 //! | `/api/scheduler[?f_lo&f_hi][&t0&t1][&tau_s]` | GET | token | T-127 tier shares, sweep floor, bandit summary, leases, POI + gaps from the observation log ([`crate::schedule`]) |
 //! | `/api/scheduler/arms`, `/api/scheduler/leases[/<id>]` | GET, POST, DELETE | token (header only for mutating) | T-127 bandit arm table; lease list, create, release ([`crate::schedule`]) |
 //! | `/api/report?f_lo&f_hi&t0&t1[&site][&format]` | GET | token | T-121 survey report (`SurveyReport` JSON, or CSV/PNG export) with mandatory coverage and POI ([`crate::reports`]) |

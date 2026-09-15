@@ -199,6 +199,47 @@ impl AlarmService {
         })
     }
 
+    /// T-131: the alarm inputs of one closed occupancy interval ([`crate::attention::IntervalFold`]s
+    /// from `AttentionService::ingest_interval`), with the provenance `steps` near it. All folds
+    /// of a site go into **one** snapshot, so a gain step is judged against every subject observed
+    /// under it (the broadband-shift rule, §7.4) rather than one subject at a time.
+    pub fn observe_interval(
+        &self,
+        folds: &[crate::attention::IntervalFold],
+        steps: &[DeviceStep],
+    ) -> Vec<AlarmEvent> {
+        let mut by_site: BTreeMap<SiteKey, (Timestamp, Vec<_>)> = BTreeMap::new();
+        for f in folds {
+            let inputs = inputs_from_fold(
+                &f.obs,
+                &f.fold,
+                f.cal,
+                HourOfWeek::of(f.obs.t, f.utc_offset_min),
+                1,
+                SCHEME_1_CELL_HZ,
+                i64::from(CELL_FACTOR),
+                f.pool,
+                &NoveltyConfig::default(),
+            );
+            let e = by_site.entry(f.site).or_insert((f.obs.t, Vec::new()));
+            e.0 = e.0.min(f.obs.t);
+            e.1.extend(inputs);
+        }
+        let mut events = Vec::new();
+        for (site, (t, inputs)) in by_site {
+            if inputs.is_empty() {
+                continue;
+            }
+            events.extend(self.observe(&NoveltySnapshot {
+                t,
+                site,
+                steps: steps.to_vec(),
+                inputs,
+            }));
+        }
+        events
+    }
+
     /// Counters and suppressions (for `/api/status` and the report).
     pub fn status_json(&self) -> Value {
         json!({
