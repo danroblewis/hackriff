@@ -639,3 +639,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   1. The evaluator's length arithmetic overflows on over-the-air data. A 64-bit length field panics in debug, and in release it wraps into a capacity-overflow abort (eval.rs:414/445/454/515).
   2. `tests/e2e/tests/stream_external.rs:263` still asserts stream version 1.1.
   Everything else checked out: gating, API limits, 1.2 back-compat, bounded allocation, and no painful collisions with T-088/T-091. A fix round is running in the T-089 worktree, plus docs error codes and a frame cap on capture re-parse.
+- **B0.234 T-086 merged** (691ef04). Opus review: MERGE. Real-time safety, state carried across chunks, time maps, the ADS-B DF length rule, blind tests and trial merges against T-087/T-089 all check out clean. Nits filed as **T-104** (Blocks A hardening):
+  - dedupe LengthFrom→FrameLength after T-087;
+  - clock_recovery output bound;
+  - allocation-free restarts;
+  - extreme-param caps;
+  - NaN poisoning;
+  - manchester time map;
+  - allocation-counting test.
+  Also noted for T-088: the runtime must set RESET on a rebuilt node's first chunk. Full check deferred until the T-087/T-089 merges, so one run covers all three.

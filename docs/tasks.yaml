@@ -1447,7 +1447,7 @@ tasks:
   - id: T-086
     milestone: M1
     title: "M1 Blocks A: IQ/demod + symbol blocks to the block contract"
-    status: review
+    status: done
     commit: 691ef04
     deps: [T-085]
     parallel_group: M1A
@@ -1673,6 +1673,20 @@ tasks:
     needs: none
     model: opus
     effort: medium
+  - id: T-104
+    milestone: M1
+    title: "Blocks A hardening (T-086 review follow-ups)"
+    status: todo
+    deps: [T-086, T-087]
+    parallel_group: M1A
+    use_cases: [SIGNAL-062]
+    found_by: "T-086 review 2026-09-15"
+    acceptance: "ppm_demod uses T-087 framing::length::FrameLength and iq::LengthFrom removed; clock_recovery output sizing bounded by the shortest loop period (clock.rs:464) incl. hot loop_bandwidth changes; restart paths (lowpass filter.rs:207, clock_recovery clock.rs:204) clear state without allocating (FirDecimator::clear); samples-per-symbol / tap-count caps on extreme params (symbol_rate_bd); NaN input does not poison running averages or pass the ppm preamble check; manchester mid-chunk realignment keeps the time map exact (line.rs:300); allocation-counting test over process() for all Blocks A; tests per item"
+    area: "crates/hk-blocks/src/blocks/{iq,symbol}/**, crates/hk-demod dsp (additive)"
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
