@@ -91,6 +91,12 @@ pub fn planned() -> Vec<BlockDescriptor> {
                     "sync-word: lsb = the protocol sends 8-bit characters LSB first (ACARS); the frame body is bit-reversed per 8 bits from its first bit before packing, and length_from/terminator read the packed bits. The sync word stays in air order.",
                 )
                 .default_value("msb"),
+                param(
+                    "polarity",
+                    one_of(&["normal", "either"]),
+                    "sync-word: either = also accept the complemented word (within max_errors) and complement that frame's bits, for a bit stream of unknown polarity (a non-coherent MSK chip integrator; acarsdec accepts ~SYN).",
+                )
+                .default_value("normal"),
                 // offset-words
                 param(
                     "block_bits",

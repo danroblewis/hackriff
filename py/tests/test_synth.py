@@ -722,68 +722,107 @@ def test_multimon_ng_decodes_the_tutorial_pager_net_per_channel(tmp_path):
         assert t["message_text"].strip() in lines[0]
 
 
-# ---- ACARS (T-098, M1 tutorial 3; synthetic, not oracle-validated -- see hkpy.synth.acars) -------
+# ---- ACARS (T-098/T-108, M1 tutorial 3; conventions from acarsdec -- see hkpy.synth.acars) --------
 
 
 def acars_char_parity_ok(byte: int) -> bool:
     return bin(byte).count("1") % 2 == 1
 
 
-def decode_acars_frame(x: np.ndarray, fs: float, t: dict, prekey_s: float) -> dict:
-    """Independent matched-filter MSK decoder + CRC-16 check, decoupled from acars.py's encoder."""
+def kermit_residue(data: bytes) -> int:
+    """CRC-16/KERMIT via the reflected table update acarsdec uses (syndrom.h ``update_crc``)."""
+    table = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (c >> 1) ^ 0x8408 if c & 1 else c >> 1
+        table.append(c)
+    assert table[1] == 0x1189  # acarsdec syndrom.h crc_ccitt_table[1]
+    crc = 0
+    for b in data:
+        crc = (crc >> 8) ^ table[(crc ^ b) & 0xFF]
+    return crc
+
+
+def acarsdec_chips(audio: np.ndarray, fs: float, t: dict, first_bit_sample: int) -> np.ndarray:
+    """Coherent MSK chip decisions the way acarsdec's ``demodMSK`` makes them (VCO at 1800 Hz,
+    half-sine matched filter over two bits, decisions Re, Im, -Re, -Im), with known timing and the
+    carrier phase estimated instead of PLL-tracked. Decoupled from acars.py's tone mapping."""
     baud = t["symbol_rate_bd"]
-    n_bits = t["frame"]["n_bits"]
     sps = fs / baud
-    start = int(round(prekey_s * fs))
-    mark_w = 2 * math.pi * t["mark_hz"] / fs
-    space_w = 2 * math.pi * t["space_hz"] / fs
-    env = np.abs(x)
-    dc = np.mean(env[:start])  # unmodulated prekey carrier level: subtract so tone correlation isn't DC-biased
-    bits = np.zeros(n_bits, dtype=np.uint8)
+    n_bits = t["frame"]["n_bits"]
+    tt = np.arange(len(audio)) / fs
+    bb = audio * np.exp(-2j * np.pi * 1800.0 * tt)
+    spec = np.fft.fft(bb)
+    f = np.fft.fftfreq(len(bb), 1 / fs)
+    spec[np.abs(f) > 1500.0] = 0
+    bb = np.fft.ifft(spec)
+    z = np.zeros(n_bits, dtype=complex)
     for k in range(n_bits):
-        s0 = start + int(round(k * sps))
-        s1 = start + int(round((k + 1) * sps))
-        seg = env[s0:s1] - dc
-        n = len(seg)
-        if n == 0:
+        c = first_bit_sample + (k + 1) * sps  # chip k decided at the end of bit k's tone
+        i0, i1 = int(math.ceil(c - sps)), int(math.floor(c + sps))
+        idx = np.arange(max(i0, 0), min(i1, len(bb) - 1) + 1)
+        h = np.cos(np.pi * (idx - c) / (2 * sps))
+        z[k] = np.sum(h * bb[idx]) * np.exp(-1j * k * np.pi / 2)
+    phi = np.angle(np.sum(z**2)) / 2
+    return (np.real(z * np.exp(-1j * phi)) > 0).astype(np.uint8)
+
+
+def decode_acars_frame(x: np.ndarray, fs: float, t: dict, prekey_s: float) -> dict:
+    audio = np.abs(x)
+    start = int(round(prekey_s * fs))
+    audio = audio - np.mean(audio[:start])  # unmodulated pre-key carrier level
+    chips = acarsdec_chips(audio, fs, t, start)
+    sync = np.unpackbits(np.array([0x16, 0x16, 0x01], dtype=np.uint8), bitorder="little")
+    for bits in (chips, 1 - chips):  # acarsdec accepts ~SYN too
+        hits = [i for i in range(len(bits) - 24) if np.array_equal(bits[i : i + 24], sync)]
+        if hits:
             break
-        tsamp = np.arange(n)
-        e_mark = abs(np.sum(seg * np.exp(-1j * mark_w * tsamp)))
-        e_space = abs(np.sum(seg * np.exp(-1j * space_w * tsamp)))
-        bits[k] = 1 if e_mark > e_space else 0
-    data_bits = bits[32:]  # skip the alternating clock-sync preamble
-    tx = np.packbits(data_bits).tobytes()
-    assert tx[0] == 0x16 and tx[1] == 0x16  # SYN SYN
-    body_with_parity = tx[2:-2]
-    crc_hi, crc_lo = tx[-2], tx[-1]
-    for b in body_with_parity:
+    assert hits, "SYN SYN SOH not found in either polarity"
+    body = bits[hits[0] + 24 :]
+    chars = np.packbits(body[: len(body) // 8 * 8], bitorder="little").tobytes()
+    end = chars.index(0x83)  # ETX with its parity bit, acarsdec's constant
+    txt, bcs = chars[: end + 1], chars[end + 1 : end + 3]
+    for b in txt:
         assert acars_char_parity_ok(b)
-    body = bytes(b & 0x7F for b in body_with_parity)
-    crc = acars_mod.crc16_acars(body)
-    assert crc == (crc_hi << 8) | crc_lo
-    assert body[0] == 0x01 and body[-1] == 0x03  # SOH .. ETX
-    stx = body.index(0x02)
+    assert kermit_residue(txt + bcs) == 0  # acarsdec's CRC check
+    v = bytes(b & 0x7F for b in txt)
+    stx = v.index(0x02)
     return {
-        "mode": chr(body[1]), "reg": body[2:9].decode("ascii"), "ack": chr(body[9]),
-        "label": body[10:12].decode("ascii"), "block_id": chr(body[12]),
-        "text": body[stx + 1 : -1].decode("ascii"), "crc": crc,
+        "mode": chr(v[0]), "reg": v[1:8].decode("ascii"), "ack": v[8],
+        "label": v[9:11].decode("ascii"), "block_id": chr(v[11]),
+        "text": v[stx + 1 : -1].decode("ascii"), "crc": bcs[0] | bcs[1] << 8,
+        "suffix": chars[end + 3],
     }
 
 
 def test_acars_message_demodulates_with_valid_crc(tmp_path):
-    """SIGNAL-062 M1 tutorial 3: AM + MSK 2400 Bd, SYN/SOH..ETX framing, CRC-16 (synthetic)."""
+    """SIGNAL-062 M1 tutorial 3: AM + MSK 2400 Bd, ARINC 618 framing, CRC-16/KERMIT, decoded the
+    way acarsdec decodes (coherent chips, LSB-first characters, residue over parity-bearing chars)."""
     manifest = gen(tmp_path, "acars_message")
     man = json.loads(manifest.read_text())
     prekey_s = man["params"]["prekey_s"]
     _, meta, x = load(manifest)
     fs = meta["global"]["core:sample_rate"]
-    [(ann, t)] = truths(meta, kind="acars-message")
-    s, n = ann["core:sample_start"], ann["core:sample_count"]
-    got = decode_acars_frame(x[s : s + n], fs, t, prekey_s)
-    assert got["mode"] == t["fields"]["mode"]
-    assert got["reg"] == t["fields"]["reg"]
-    assert got["label"] == t["fields"]["label"]
-    assert got["block_id"] == t["fields"]["block_id"]
-    assert got["text"] == t["fields"]["text"] == t["text_expected"]
-    assert f"{got['crc']:04x}" == t["frame"]["crc_hex"]
-    assert t["identity"] == {"type": "acars_reg", "value": t["fields"]["reg"].strip()}
+    tr = truths(meta, kind="acars-message")
+    assert tr
+    for ann, t in tr:
+        s, n = ann["core:sample_start"], ann["core:sample_count"]
+        got = decode_acars_frame(x[s : s + n], fs, t, prekey_s)
+        assert got["mode"] == t["fields"]["mode"]
+        assert got["reg"] == t["fields"]["reg"]
+        assert got["label"] == t["fields"]["label"]
+        assert got["block_id"] == t["fields"]["block_id"]
+        assert got["text"] == t["fields"]["text"] == t["text_expected"]
+        assert f"{got['crc']:04x}" == t["frame"]["crc_hex"]
+        assert got["suffix"] == 0x7F  # DEL
+        assert t["identity"] == {"type": "acars_reg", "value": t["fields"]["reg"].strip()}
+
+
+def test_acars_crc_is_kermit_over_parity_bearing_chars():
+    """The ACARS block check is CRC-16/KERMIT (check value 0x2189 for "123456789"), computed over
+    the transmitted characters with their parity bits, as acarsdec checks it."""
+    assert acars_mod.crc16_kermit(b"123456789") == 0x2189
+    fr = acars_mod.build_frame("2", ".N12345", "H1", "1", "HELLO")
+    assert all(acars_char_parity_ok(b) for b in fr.chars)
+    assert kermit_residue(fr.chars + bytes([fr.crc & 0xFF, fr.crc >> 8])) == 0

@@ -763,3 +763,31 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - New routes `PUT /api/pipelines/{id}/channels` and `POST .../channels/refresh`, with contract tests.
   Tests: hk-blocks 69, follow_hops 4/4, runtime/alloc/capture 10/10, hk-api 82, api_contract 15, lint clean. Full check running.
 - **B0.264 Full check of main b8e118a (T-107): green.** Lint clean; nextest + UI 1118/1118 in 241 s; acceptance 25/25. In flight: T-097 (ADS-B tutorial), T-108 (ACARS: re-running with a vouched content class; check the gating interaction on report), T-109 (POCSAG channel separation).
+- **B0.265 T-096/T-108 merged** (6cfa144). The ACARS convention now comes from acarsdec source (TLeconte/acarsdec@339f63e, cited in the tutorial):
+  - LSB first, parity last;
+  - coherent MSK chips (tone marks a chip change);
+  - SYN SYN SOH, inverted accepted;
+  - CRC-16/KERMIT over the transmitted chars including parity, BCS low byte first.
+
+  **The T-098/T-096 synth was non-standard** (the coordinator's suspicion was confirmed). The synth was rewritten, with a py test decoder ported from acarsdec. Recipe: slicer → nrzi(encode) → sync_search (lsb, polarity either) → crc KERMIT → fields. The parity `zero` mode was removed; the new pinned params `nrzi.direction` and `sync_search.polarity` are both real-ACARS needs, and ADR-0011 is updated.
+
+  **Detection root cause:** the scene sat on the tuned centre, and the DC/LO-leakage rule correctly rejected it. The scene is now 50 kHz off centre with repeated blocks; no thresholds changed. The 118–137 MHz content class is gated metadata-only, so the test vouches the recording unrestricted, per the existing pattern. No new gating rule was added (user policy).
+
+  **Blind e2e:** mode/registration/label/block id/text match truth on 100% of frames; CRC-valid 19/19. hk-blocks 70, py synth 15. Remaining: a real 131.55 MHz capture plus the acarsdec oracle (not installed); tone→chip conversion propagates errors (a coherent MSK block if real captures need one). Full check running.
+- **B0.266 T-097 (ADS-B tutorial, Sonnet) ended at 480k tokens, 7fc75c9; not merged.** Recipe fixes: bandwidth 1.6 MHz, `min_snr_db` 9. Only 12 of 16 truth squitters decode (fixed aircraft × kind pairs never do) and CRC-valid is 24%. The acceptance test was **weakened to ≥12/16**, which is not accepted. The readsb comparison was skipped as 'absent', but `/opt/homebrew/bin/readsb` exists (PATH issue in the agent). It also found that recipe `messages` outputs are still Idle (no Repository ingest). **T-110** (fresh Opus, same worktree) will root-cause ppm_demod, restore 16/16, run the readsb oracle for real, and wire the messages sink if small. Coordinator note: Sonnet tutorial agents (T-095/T-096/T-097) all overran badly and T-096/T-097 bent tests or fixtures; remaining tutorial/decoder-quality work stays on Opus.
+- **B0.267 Full check of main fbce9db (ACARS tutorial): green.** Lint clean; nextest + UI 1120/1120 in 246 s; acceptance 26/26 including tutorial_acars. Acceptance wall time rose from ~51 s to 99 s: tutorial_acars alone takes ~76 s (240 s blind-discovery budget, 3-burst scene loop). Watch this; if the tutorials keep adding ~1 min each, move them to a separate `just acceptance-tutorials` step. In flight: T-109 (POCSAG, final lint/acceptance), T-110 (ADS-B).
+- **B0.268 T-109 delivered** (9c7bfd2). The 4-channel pager net merged into one false 124 kHz **hop set**; detections and tracks were correct, and hop-set members get no inventory rows.
+  - **Fix 1 (hk-detect):** `hop_check` refuses a link when either channel was also keyed during the other's burst (`keyed_during`, stat `hop_concurrent_vetoes`).
+  - **Fix 2 (hk-pipeline):** confirmed open channel tracks with ≥4 bursts are offered to the inventory every 5 s of stream time. The offer is keyed by track, and a partial life never auto-confirms. Without it, a never-idle pager net was only catalogued at stop.
+  - **Scene:** staggered key-ups, 25 kHz raster.
+  - **Result:** blind tutorial_pocsag passes. 4/4 channels found; 16/16 CRC-valid pages match truth on the right lanes; simulcast deduped (`dups` 5, `late` 0); BCH 320 ok / 0 bad. multimon-ng per-channel oracle 4/4.
+  - **Review:** both fixes are core interfaces, so a timeboxed Opus review is running. It checks real-hopper regressions and stale live rows after merge/split/fragment/hop-set changes.
+  - **Limits:** single baud per recipe; about 4 min live latency for slow nets.
+- **B0.269 T-097/T-110 merged** (98b07f0). **Root cause** of the 'content-dependent' ADS-B failures: `ppm_demod` read chips at integer samples from an integer preamble start. With ~1 sample/chip, a squitter at a fixed sub-sample phase in the looping replay always sat on chip boundaries.
+  - **Fix:** fractional chip-centre interpolation, a 1/8-chip timing grid choosing max decision margin, and a half-sample preamble try. Bounded, alloc-free, chunk-invariant.
+  - **Recipe** moved to 2.4 Msps / 2 MHz.
+  - **Result:** blind 16/16 squitters (128/128 instances), 0 mismatches. readsb agreement 339/339 fields, covering every readsb (ICAO, TC).
+  - **Test bar** restored to 'none missing'.
+  - **T-097's readsb skip** was the unbuilt `hk-plugin-readsb`, not readsb itself.
+  - **Remaining:** 81% of emitted frames are noise-triggered preambles, rejected by CRC. Recipe `messages` outputs are still Idle, now **T-111** (launched).
+  All four M1 tutorials now have blind acceptance on main or in review (POCSAG in T-109 review). Full check running.

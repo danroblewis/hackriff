@@ -557,13 +557,19 @@ def pocsag_pagers(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
 # ---------------------------------------------------------------------------------------------
 
 ACARS_DEFAULTS: dict[str, Any] = {
-    "sample_rate": 96_000.0,
-    "center_hz": 131.550e6,
+    "sample_rate": 192_000.0,
+    "center_hz": 131.500e6,
+    # Off the tuned centre: a narrow emission on the centre is indistinguishable from DC/LO leakage
+    # and blind detection (rule 2, dc_hit) rightly discards it; nobody tunes an SDR onto a channel.
+    "channel_offset_hz": 50e3,
     "am_depth": 0.7,
     "snr_db": 25.0,
     "noise_dbfs": -40.0,
     "prekey_s": 0.15,
     "start_s": 0.02,
+    # A station repeats: the same block is sent n_bursts times, period_s apart (carrier off between).
+    "n_bursts": 3,
+    "period_s": 0.6,
     "margin_s": 0.02,
     "mode": "2",
     "reg": ".HKRF01",
@@ -582,40 +588,48 @@ def acars_message(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                               str(p["text"]))
     mpx = acars.msk_baseband(frame.bits, fs, prekey_s=float(p["prekey_s"]))
     n = len(mpx)
-    start = int(round(float(p["start_s"]) * fs))
-    total = start + n + int(round(float(p["margin_s"]) * fs))
+    n_bursts = max(1, int(p["n_bursts"]))
+    period = max(float(p["period_s"]), n / fs)
+    starts = [int(round((float(p["start_s"]) + k * period) * fs)) for k in range(n_bursts)]
+    total = starts[-1] + n + int(round(float(p["margin_s"]) * fs))
     scene = ctx.scene("acars_message", fs, total,
-                      "hkpy.synth acars_message: AM-modulated VHF ACARS, MSK 2400 Bd, "
-                      "SYN/SOH..ETX framing, CRC-16")
+                      "hkpy.synth acars_message: AM-modulated VHF ACARS (ARINC 618 as acarsdec "
+                      "decodes it), MSK 2400 Bd, CRC-16/KERMIT, repeated bursts")
     _noise_capture(scene, p, p["center_hz"], p["calibration_k_db"])
     cap = scene.captures[0]
+    off = float(p["channel_offset_hz"])
     bw = 2 * acars.MARK_HZ  # AM double-sideband around the MSK tone band
+    if abs(off) + bw / 2 > fs / 2:
+        raise ValueError("acars channel does not fit inside the sample rate")
     power = float(p["snr_db"]) + cap.floor_dbfs_per_hz + db(bw)
     amp = math.sqrt(undb(power))
     depth = float(p["am_depth"])
     carrier = 1.0 + depth * mpx  # mpx in [-1,1] (0 during prekey) -> envelope in [1-depth,1+depth]
-    phase0 = float(scene.rng("carrier").uniform(0, 2 * math.pi))
-    scene.add_samples(start, amp * carrier * np.exp(1j * phase0))
-    truth = scene.emission_truth(
-        cap, 0.0, bw, power, kind="acars-message", modulation="am+msk", carrier_modulation="am",
-        am_depth=depth, subcarrier_modulation="msk", symbol_rate_bd=acars.BAUD,
-        mark_hz=acars.MARK_HZ, space_hz=acars.SPACE_HZ, char_bits="7 data (LSB-first) + odd parity",
-        framing=acars.FRAMING_NOTE, crc=frame.crc_spec,
-        fields={"mode": frame.mode, "reg": frame.reg, "label": frame.label, "block_id": frame.block_id,
-               "text": frame.text}, text_expected=frame.text,
-        frame={"n_bits": len(frame.bits), "chars_hex": frame.chars.hex(), "crc_hex": f"{frame.crc:04x}"},
-        identity={"type": "acars_reg", "value": frame.reg.strip()},
-    )
-    f = cap.center_hz
-    scene.annotate(start, n, f - bw / 2, f + bw / 2, "acars-message", truth)
+    for k, start in enumerate(starts):
+        phase0 = float(scene.rng(f"carrier{k}").uniform(0, 2 * math.pi))
+        tt = scene.time(start, n)
+        scene.add_samples(start, amp * carrier * np.exp(1j * (phase0 + 2 * math.pi * off * tt)))
+        truth = scene.emission_truth(
+            cap, off, bw, power, kind="acars-message", modulation="am+msk", carrier_modulation="am",
+            am_depth=depth, subcarrier_modulation="msk", symbol_rate_bd=acars.BAUD,
+            mark_hz=acars.MARK_HZ, space_hz=acars.SPACE_HZ, burst_index=k,
+            char_bits="7 data (LSB first) + odd parity (bit 7, last)",
+            framing=acars.FRAMING_NOTE, crc=frame.crc_spec,
+            fields={"mode": frame.mode, "reg": frame.reg, "label": frame.label,
+                    "block_id": frame.block_id, "text": frame.text}, text_expected=frame.text,
+            frame={"n_bits": len(frame.bits), "chars_hex": frame.chars.hex(),
+                   "crc_hex": f"{frame.crc:04x}"},
+            identity={"type": "acars_reg", "value": frame.reg.strip()},
+        )
+        f = cap.center_hz + off
+        scene.annotate(start, n, f - bw / 2, f + bw / 2, "acars-message", truth)
     scene.scenario_truth["message"] = {"mode": frame.mode, "reg": frame.reg, "label": frame.label,
                                        "block_id": frame.block_id, "text": frame.text,
                                        "crc_hex": f"{frame.crc:04x}"}
-    scene.scenario_truth["note"] = ("synthetic: acarsdec was not available to build (not in "
-                                    "Homebrew, no cheap tap) so this fixture's truth is the "
-                                    "generator's own frame, cross-checked by an independent "
-                                    "MSK/CRC reference decoder in py/tests/test_synth.py, not "
-                                    "acarsdec (T-098)")
+    scene.scenario_truth["note"] = ("synthetic, conventions from acarsdec's receiver source (T-108: "
+                                    "LSB-first characters, coherent MSK chips, CRC-16/KERMIT over "
+                                    "parity-bearing characters); acarsdec itself is not installed, "
+                                    "the py reference decoder ports its chip decisions")
     return [scene], {}
 
 

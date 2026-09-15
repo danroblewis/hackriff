@@ -53,7 +53,7 @@ SCENARIOS: dict[str, ScenarioSpec] = {
     "pocsag_pagers": ScenarioSpec(scenarios.pocsag_pagers, scenarios.POCSAG_DEFAULTS, ("SIGNAL-062",),
                                   "multi-channel 2-FSK POCSAG (512/1200/2400 Bd), BCH(31,21)+parity"),
     "acars_message": ScenarioSpec(scenarios.acars_message, scenarios.ACARS_DEFAULTS, ("SIGNAL-062",),
-                                  "AM+MSK 2400 Bd VHF ACARS, SYN/SOH..ETX framing, CRC-16 (synthetic, no oracle)"),
+                                  "AM+MSK 2400 Bd VHF ACARS, SYN/SOH..ETX framing, CRC-16/KERMIT incl parity (acarsdec convention)"),
 }
 
 
