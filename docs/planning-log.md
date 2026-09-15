@@ -914,3 +914,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   T-125 merges after the in-flight full check.
 - **B0.289 Full check of main f54e67d (T-113): green.** Lint clean; nextest + UI 1186/1186 in 297 s (cold build after the target cleanup); acceptance 29/29 in 64 s. **T-125 merged** (1ebe82c). Full check covering T-125 running.
 - **B0.290 Main 4d03322 (T-125) verified green.** First run: acceptance 30/30 (including scene_48h) and lint clean, but `hk-stream::review_fixes::p7_connect_close_flood_is_reaped_and_consumers_are_capped` failed at load ~37 (4 of 8 consumers accepted in time). It passed 3/3 alone, and a full rerun gave nextest + UI 1187/1187. The test is now heavy-serial with 1 retry in nextest. In flight: T-115, T-120, T-126.
+- **B0.291 T-126 merged** (c9ceb7f). Changes:
+  - **Noise-shape estimator:** dB variance of noise-only bins inverts to look count (k within 5%). Floor error ≤0.37 dB for single-look CSV and ≤0.15 dB for 4-look sweeps.
+  - **CLI:** `hk history import-sweep-csv`.
+  - **Provenance steps:** per-source front-end state persisted, so steps survive restart and interleaved sources give no false steps.
+  - **Region overrides:** trim unrelated cells of protected tiles.
+  - **Retention:** indexed, flat cost at 100 vs 5000 protected tiles.
+
+  Its api_contract failure was only an LFS pointer in the worktree; the full check covers it. Leftover pipeline wiring (FrameInput::source, sweep estimator in live ingest) is folded into T-118's note. Full check running.

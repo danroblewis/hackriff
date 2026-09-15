@@ -1889,6 +1889,7 @@ tasks:
     deps: [T-113, T-115, T-117]
     parallel_group: M2O
     use_cases: [AWARE-042, PROP-023]
+    note: "from T-125/T-126 merges: use corrected floor_db for thresholds; wire FrameInput::source (history::source_key) and the sweep noise-shape estimator in hk-pipeline history ingest; distinguish scene/recording gaps (not observed) from device-lost samples if the observation log needs it"
     acceptance: "OccupancyStat per ADR-0012 from detections + noise-floor thresholds + observation log (observation-time weighted, not detection-weighted); pre-set and dynamic (80% idle) threshold modes with >=3-5 dB guard; RBW<OBW correction; channel plans learned from detections or band raster; IMD/suspect flagged detections excluded/weighted; persisted series; blind tests on T-117 scenes: FCO error within SM.2256 Annex 1 interval under irregular revisit"
     area: "crates/hk-context/src/occupancy (new), crates/hk-store (series)"
     needs: none
@@ -1990,7 +1991,8 @@ tasks:
   - id: T-126
     milestone: M2
     title: "History follow-ups (T-116): floor for sweep/CSV frames, CLI CSV import, provenance step state across restart, region-precise overrides"
-    status: todo
+    status: done
+    commit: c9ceb7f
     deps: [T-116]
     parallel_group: M2H
     use_cases: [AWARE-031, AWARE-033]
