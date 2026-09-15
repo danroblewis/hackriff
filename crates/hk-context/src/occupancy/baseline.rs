@@ -95,7 +95,7 @@ use hk_model::time::Timestamp;
 use hk_store::baseline::{
     BaselineState, BaselineStore, BaselineStoreError, BaselineSubject, ChangePoint,
     ChangeStatistic, CusumState, DecayedStats, GainSeries, LevelClass, MAX_GAIN_STATES,
-    PackedMoments, SlotSeries, SlotValue, SubjectBaseline,
+    PackedMoments, ScaledMoments, SlotSeries, SlotValue, SubjectBaseline,
 };
 
 use super::novelty::{
@@ -526,7 +526,7 @@ pub fn pool_at(
 fn stored_slots<T: SlotValue>(
     series: &SlotSeries<T>,
     span: Option<(usize, usize, usize)>,
-) -> impl Iterator<Item = (usize, &T::Packed)> {
+) -> impl Iterator<Item = (usize, ScaledMoments<'_, T::Packed>)> {
     let (days, h0, hours) = span.unwrap_or((0, 0, 0));
     let all = span
         .is_none()
@@ -566,7 +566,7 @@ fn pools_where(
             BaselineCopy::Reference => {
                 for (i, p) in stored_slots(&g.reference, span) {
                     let (o, d) = if own {
-                        let d = DecayedStats::from(&SlotStats::unpack(p));
+                        let d = DecayedStats::from(&SlotStats::unpack(p.raw()));
                         (SlotOccupancy::of(&d), Some(d))
                     } else {
                         let n = p.n();
@@ -588,17 +588,16 @@ fn pools_where(
                 }
             }
             BaselineCopy::Adaptive => {
-                let m = g.adaptive.decay();
                 for (i, p) in stored_slots(&g.adaptive, span) {
                     let (o, d) = if own {
-                        let d = DecayedStats::unpack_scaled(p, m);
+                        let d = DecayedStats::unpack_scaled(p.raw(), p.m());
                         (SlotOccupancy::of(&d), Some(d))
                     } else {
                         let o = SlotOccupancy {
-                            n: p.n() * m,
-                            observed_s: p.observed_s() * m,
-                            occupied_weight_s: p.occupied_weight_s() * m,
-                            weight_s: p.weight_s() * m,
+                            n: p.n(),
+                            observed_s: p.observed_s(),
+                            occupied_weight_s: p.occupied_weight_s(),
+                            weight_s: p.weight_s(),
                             max_db: p.max_db(),
                         };
                         (o, None)
@@ -615,20 +614,14 @@ fn pools_where(
 /// occupancy pools' `observed_s` of [`pools`], read from one field per stored slot (T-137).
 fn observed_pools(sub: &SubjectBaseline, slot: HourOfWeek) -> [f64; 4] {
     let s = slot.index();
-    let sh = s % 24;
     let mut out = [0.0; 4];
     for g in &sub.gains {
         for (i, p) in g.reference.packed() {
             let observed_s = p.observed_s();
-            // `pool_slot`'s skip.
-            if p.n() <= 0.0 && p.weight_s() <= 0.0 && observed_s <= 0.0 {
+            if is_empty_slot(p.n(), p.weight_s(), observed_s) {
                 continue;
             }
-            let ih = i % 24;
-            for (o, member) in out
-                .iter_mut()
-                .zip([i == s, ih == sh, ih / 6 == sh / 6, true])
-            {
+            for (o, member) in out.iter_mut().zip(pool_membership(i, s)) {
                 if member {
                     *o += observed_s;
                 }
@@ -636,6 +629,20 @@ fn observed_pools(sub: &SubjectBaseline, slot: HourOfWeek) -> [f64; 4] {
         }
     }
     out
+}
+
+/// Pool membership of stored slot `i` in slot `s`'s pools, finest first (hour-of-week,
+/// hour-of-day, day-part, all hours; as [`BaselineResolution::FINEST_FIRST`], T-140). Shared by
+/// [`observed_pools`] and [`pool_slot`] so the two can't drift apart.
+fn pool_membership(i: usize, s: usize) -> [bool; 4] {
+    let (ih, sh) = (i % 24, s % 24);
+    [i == s, ih == sh, ih / 6 == sh / 6, true]
+}
+
+/// A stored slot's moments read as empty (skipped from every pool): shared by [`observed_pools`]
+/// and [`pool_slot`] (T-140).
+fn is_empty_slot(n: f64, weight_s: f64, observed_s: f64) -> bool {
+    n <= 0.0 && weight_s <= 0.0 && observed_s <= 0.0
 }
 
 /// The moments of a stored slot that occupancy pools read.
@@ -670,21 +677,17 @@ fn pool_slot(
     own: Option<&DecayedStats>,
     only: Option<usize>,
 ) {
-    if o.n <= 0.0 && o.weight_s <= 0.0 && o.observed_s <= 0.0 {
+    if is_empty_slot(o.n, o.weight_s, o.observed_s) {
         return;
     }
-    let (ih, sh) = (i % 24, s % 24);
     // [`in_pool`] at each resolution, in `BaselineResolution::FINEST_FIRST` order.
-    let member = [i == s, ih == sh, ih / 6 == sh / 6, true];
-    for (_, ((occ, level), _)) in occ
-        .iter_mut()
-        .zip(level.iter_mut())
-        .zip(member)
-        .enumerate()
-        .filter(|(r, (_, m))| *m && only.is_none_or(|o| o == *r))
-    {
+    let member = pool_membership(i, s);
+    for r in 0..4 {
+        if !member[r] || only.is_some_and(|o| o != r) {
+            continue;
+        }
         // Occupancy only (no level moments) so each slot's FCO enters the spread once.
-        occ.add(
+        occ[r].add(
             0.0,
             o.observed_s,
             0.0,
@@ -694,7 +697,7 @@ fn pool_slot(
             o.max_db,
         );
         if let Some(d) = own {
-            level.add_decayed(d);
+            level[r].add_decayed(d);
         }
     }
 }
@@ -3085,11 +3088,14 @@ mod tests {
     /// latched change point).
     #[test]
     fn baseline_fold_cost_at_168_slots_and_2_gain_states() {
-        fold_cost(true);
-        fold_cost(false);
+        // Regression pins (T-140) from commit c1dd979's behaviour: reference-fold count and
+        // novelty sum, captured by running this test unchanged and printing them. A change here
+        // means the fold, novelty or reference-accrual logic changed, not just its speed.
+        fold_cost(true, 0, 0.0);
+        fold_cost(false, 0, 148.000_330_353_452_06);
     }
 
-    fn fold_cost(quiet: bool) {
+    fn fold_cost(quiet: bool, expect_learnt: usize, expect_novelty: f64) {
         let subject = BaselineSubject::Cell { index: 1 };
         let mut sub = SubjectBaseline::new(at(0.0));
         let occ_of = |i: usize| match (quiet, (8..20).contains(&(i % 24))) {
@@ -3161,6 +3167,19 @@ mod tests {
             a.n,
             a.sum_db / a.n,
             a.weight_s,
+        );
+        assert_eq!(
+            learnt, expect_learnt,
+            "reference-fold count regressed (quiet {quiet})"
+        );
+        let rel = if expect_novelty == 0.0 {
+            novelty.abs()
+        } else {
+            ((novelty - expect_novelty) / expect_novelty).abs()
+        };
+        assert!(
+            rel < 1e-9,
+            "novelty sum regressed (quiet {quiet}): {novelty} vs pinned {expect_novelty} (rel {rel:e})"
         );
     }
 }
