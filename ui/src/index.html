@@ -26,8 +26,105 @@
 </form>
 
 <main>
- <div class="live-grid">
-  <section id="live" class="panel">
+ <div class="page-grid">
+  <aside id="sidebar" class="sidebar">
+    <section id="selections" class="panel">
+      <h2>Selections <button type="button" id="sel-clear" hidden>Delete all</button></h2>
+      <p id="sel-info" class="hint"></p>
+      <div id="sel-bulk" class="acts" hidden>
+        <span id="sel-bulk-count" class="hint"></span>
+        <button type="button" id="sel-inspect-picked">Inspect ticked</button>
+        <button type="button" id="sel-delete-picked">Delete ticked</button>
+      </div>
+      <p id="sel-status" class="hint" aria-live="polite"></p>
+      <div id="sel-outputs" class="hint" aria-live="polite" hidden></div>
+      <div class="table-wrap">
+        <table id="sel-table" class="grid" hidden>
+          <thead><tr>
+            <th><input type="checkbox" id="sel-all" aria-label="Tick all selections"></th>
+            <th>name</th><th class="num">f lo MHz</th><th class="num">f hi MHz</th><th class="num opt">bandwidth</th>
+            <th class="opt">time (UTC)</th><th class="num opt" title="Actions taken on this selection">links</th><th>actions</th>
+          </tr></thead>
+          <tbody id="sel-body"></tbody>
+        </table>
+      </div>
+      <div id="sel-report"></div>
+      <p class="hint">Selections are saved on the server (<code>/api/selections</code>); offline they stay in this page and sync when it returns.
+        Inspect loads region history and the ranked explanations of the emitters inside; Record uses the tuned window (per-selection outputs: T-061).</p>
+    </section>
+
+    <section id="inventory" class="panel">
+      <h2>Signal inventory</h2>
+      <form id="inv-form">
+        <label>f lo (MHz) <input id="inv-f-lo" type="number" step="any"></label>
+        <label>f hi (MHz) <input id="inv-f-hi" type="number" step="any"></label>
+        <label>from (UTC) <input id="inv-t0" type="datetime-local" step="1"></label>
+        <label>to (UTC) <input id="inv-t1" type="datetime-local" step="1"></label>
+        <label>status
+          <select id="inv-status">
+            <option value="">any</option>
+            <option value="known">known</option>
+            <option value="unexpected-here">unexpected here</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </label>
+        <label>tag <input id="inv-tag" type="text" autocomplete="off" maxlength="128"></label>
+        <label>search <input id="inv-search" type="search" autocomplete="off" placeholder="id, identity, family, tag"></label>
+        <button type="button" id="inv-use-region" title="Copy the region-over-time frequency and time window">History region</button>
+        <button type="button" id="inv-clear">Clear</button>
+        <button>Load</button>
+      </form>
+      <p id="inv-info" class="hint"></p>
+
+      <h3>Candidates</h3>
+      <p id="inv-candidate-info" class="hint"></p>
+      <div class="table-wrap">
+        <table id="inv-candidate-table" class="grid">
+          <thead><tr>
+            <th data-key="status"><button type="button">status</button></th>
+            <th data-key="freq" class="num"><button type="button">MHz</button></th>
+            <th data-key="bw" class="num opt"><button type="button">bw kHz</button></th>
+            <th data-key="family"><button type="button">family</button></th>
+            <th data-key="identity"><button type="button">identity</button></th>
+            <th data-key="count" class="num"><button type="button">count</button></th>
+            <th class="opt">recurrence</th>
+            <th data-key="tags" class="opt"><button type="button">tags</button></th>
+            <th>actions</th>
+          </tr></thead>
+          <tbody id="inv-candidate-body"></tbody>
+        </table>
+      </div>
+      <button type="button" id="inv-candidate-more" hidden>Load more</button>
+
+      <h3>Confirmed</h3>
+      <p id="inv-confirmed-info" class="hint"></p>
+      <div class="table-wrap">
+        <table id="inv-confirmed-table" class="grid">
+          <thead><tr>
+            <th data-key="status"><button type="button">status</button></th>
+            <th data-key="freq" class="num"><button type="button">MHz</button></th>
+            <th data-key="bw" class="num opt"><button type="button">bw kHz</button></th>
+            <th data-key="family"><button type="button">family</button></th>
+            <th data-key="identity"><button type="button">identity</button></th>
+            <th data-key="count" class="num"><button type="button">count</button></th>
+            <th class="opt">recurrence</th>
+            <th data-key="tags" class="opt"><button type="button">tags</button></th>
+            <th>actions</th>
+          </tr></thead>
+          <tbody id="inv-confirmed-body"></tbody>
+        </table>
+      </div>
+      <button type="button" id="inv-confirmed-more" hidden>Load more</button>
+
+      <p class="hint">Click a row to shade its band in the waterfall and load it in region over time. Identities of
+        restricted or unclassified sources show as <span class="withheld">withheld</span>. Promote moves a candidate to
+        confirmed; Delete removes it (a later sighting starts a new candidate).</p>
+    </section>
+  </aside>
+
+  <div class="content">
+   <div class="live-grid">
+    <section id="live" class="panel">
     <div class="live-bar">
       <span id="view-info" class="stats"></span>
       <button type="button" id="zoom-reset" hidden>Reset zoom</button>
@@ -133,7 +230,7 @@
     </fieldset>
     <p class="hint">Receive only: there is no transmit control. Demodulation parameters are estimated from the signal, never picked here.</p>
   </section>
- </div>
+   </div>
 
   <section id="inspect" class="panel" hidden>
     <h2>Inspect <span id="inspect-at" class="hint"></span> <button type="button" id="inspect-close">Close</button></h2>
@@ -143,75 +240,6 @@
         signal. If the server refuses, the reason shows in the status line above the waterfall.</span></p>
     <p class="hint">Nearest signal-inventory emitter, from <code>/api/inventory</code> only: identities the server withholds show as
       <span class="withheld">withheld</span>. Detections and tracks are not exposed by the API yet.</p>
-  </section>
-
-  <section id="selections" class="panel">
-    <h2>Selections <button type="button" id="sel-clear" hidden>Delete all</button></h2>
-    <p id="sel-info" class="hint"></p>
-    <div id="sel-bulk" class="acts" hidden>
-      <span id="sel-bulk-count" class="hint"></span>
-      <button type="button" id="sel-inspect-picked">Inspect ticked</button>
-      <button type="button" id="sel-delete-picked">Delete ticked</button>
-    </div>
-    <p id="sel-status" class="hint" aria-live="polite"></p>
-    <div id="sel-outputs" class="hint" aria-live="polite" hidden></div>
-    <div class="table-wrap">
-      <table id="sel-table" class="grid" hidden>
-        <thead><tr>
-          <th><input type="checkbox" id="sel-all" aria-label="Tick all selections"></th>
-          <th>name</th><th class="num">f lo MHz</th><th class="num">f hi MHz</th><th class="num opt">bandwidth</th>
-          <th class="opt">time (UTC)</th><th class="num opt" title="Actions taken on this selection">links</th><th>actions</th>
-        </tr></thead>
-        <tbody id="sel-body"></tbody>
-      </table>
-    </div>
-    <div id="sel-report"></div>
-    <p class="hint">Selections are saved on the server (<code>/api/selections</code>); offline they stay in this page and sync when it returns.
-      Inspect loads region history and the ranked explanations of the emitters inside; Record uses the tuned window (per-selection outputs: T-061).</p>
-  </section>
-
-  <section id="inventory" class="panel">
-    <h2>Signal inventory</h2>
-    <form id="inv-form">
-      <label>f lo (MHz) <input id="inv-f-lo" type="number" step="any"></label>
-      <label>f hi (MHz) <input id="inv-f-hi" type="number" step="any"></label>
-      <label>from (UTC) <input id="inv-t0" type="datetime-local" step="1"></label>
-      <label>to (UTC) <input id="inv-t1" type="datetime-local" step="1"></label>
-      <label>status
-        <select id="inv-status">
-          <option value="">any</option>
-          <option value="known">known</option>
-          <option value="unexpected-here">unexpected here</option>
-          <option value="unknown">unknown</option>
-        </select>
-      </label>
-      <label>tag <input id="inv-tag" type="text" autocomplete="off" maxlength="128"></label>
-      <label>search <input id="inv-search" type="search" autocomplete="off" placeholder="id, identity, family, tag"></label>
-      <button type="button" id="inv-use-region" title="Copy the region-over-time frequency and time window">History region</button>
-      <button type="button" id="inv-clear">Clear</button>
-      <button>Load</button>
-    </form>
-    <p id="inv-info" class="hint"></p>
-    <div class="table-wrap">
-      <table id="inv-table" class="grid">
-        <thead><tr>
-          <th data-key="status"><button type="button">status</button></th>
-          <th data-key="freq" class="num"><button type="button">MHz</button></th>
-          <th data-key="bw" class="num opt"><button type="button">bw kHz</button></th>
-          <th data-key="family"><button type="button">family</button></th>
-          <th data-key="identity"><button type="button">identity</button></th>
-          <th data-key="first" class="opt"><button type="button">first seen</button></th>
-          <th data-key="last"><button type="button">last seen</button></th>
-          <th data-key="count" class="num"><button type="button">count</button></th>
-          <th data-key="tags" class="opt"><button type="button">tags</button></th>
-          <th>listen</th>
-        </tr></thead>
-        <tbody id="inv-body"></tbody>
-      </table>
-    </div>
-    <button type="button" id="inv-more" hidden>Load more</button>
-    <p class="hint">Click a row to shade its band in the waterfall and load it in region over time. Identities of
-      restricted or unclassified sources show as <span class="withheld">withheld</span> (scheme only).</p>
   </section>
 
   <section id="history" class="panel">
@@ -236,6 +264,8 @@
     <canvas id="heat"></canvas>
     <canvas id="floor"></canvas>
   </section>
+  </div>
+ </div>
 </main>
 <script src="main.js"></script>
 </body>
