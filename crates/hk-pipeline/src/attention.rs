@@ -1329,6 +1329,8 @@ impl AttentionService {
                 z > lo && a < hi
             });
         }
+        // T-134: a re-freeze can grow the references (sparse slots).
+        self.sync_baseline_gauges(&b);
         b.flush(t, true)
             .map_err(|e| AttentionError::failed("baseline store", e))?;
         Ok(json!({ "site": id.to_string(), "refrozen": n }))
@@ -1528,7 +1530,6 @@ pub(crate) mod tests {
     /// the 256 MiB cap; sparse slots hold only the 48 observed hour-of-week slots per series.
     #[test]
     fn attention_baseline_default_cap_does_not_refuse_a_parked_48h_run_at_9700_cells() {
-        let (early, _) = parked_cells_run(2, None);
         let (b, secs) = parked_cells_run(48, Some(DEFAULT_BASELINE_MEMORY_CAP_BYTES));
         let subs: Vec<&SubjectBaseline> = b
             .engines()
@@ -1545,12 +1546,10 @@ pub(crate) mod tests {
         // over all 168 hour-of-week slots.
         let adr_week_budget = 9_700 * HourOfWeek::SLOTS * 2 * 56;
         println!(
-            "T-134 parked 48 h, 9700 cells x 2 gain states: {per_key} B per key ({:.1} MiB; 2 h: \
-             {} B), {series} series, {slots} stored slots ({:.1} B per stored slot incl. \
-             overhead), cap {} B, {} folds refused, ADR full-week budget {adr_week_budget} B, \
-             {secs:.1} s",
+            "T-134 parked 48 h, 9700 cells x 2 gain states: {per_key} B per key ({:.1} MiB), \
+             {series} series, {slots} stored slots ({:.1} B per stored slot incl. overhead), cap \
+             {} B, {} folds refused, ADR full-week budget {adr_week_budget} B, {secs:.1} s",
             per_key as f64 / f64::from(1 << 20),
-            early.memory_bytes(),
             per_key as f64 / slots as f64,
             DEFAULT_BASELINE_MEMORY_CAP_BYTES,
             b.refused_folds(),
