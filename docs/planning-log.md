@@ -1101,3 +1101,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Tests:** 46 targeted, api_contract 22.
 
   Not wired into the pipeline yet (the `observe_fold` hook is for T-128 or a follow-up); the e2e goes to T-124. Timeboxed Opus review is running. Focus: could device-first explanations hide a real emitter that coincides with a gain change; adjacent-cell merge gluing emitters together; migration and append-only rules; backward-compatibility of `/api/anomalies`.
+- **B0.320 T-122 review: FIX-FIRST.**
+  - **Must-fix:**
+    1. Device-first gain steps explain any busier/new-emitter change: any positive or no-delta step, with no breadth or residual check. `from_report` always passes a None delta, so a user gain change can silently resolve a real emitter keying up. This breaks exploration-first.
+    2. Key reuse within 2 cells regardless of overlap, including dismissed keys, so a new neighbour emitter is swallowed as Dismissed for 7 days.
+  - **Checked OK:** cooldown/reopen across resume; anomaly_detail uses UPDATE and never INSERT OR REPLACE; migration 0003 numbering; no UI consumers of the old anomalies stub; audited dismiss/reopen.
+  - **Fix round running:** gain step explains only broad matching shifts within a fixed tolerance, never with no delta; dismissed keys absorb only groups inside their extent; key eviction.
+  - **Merge order:** T-129 → T-122 → T-128 (rebase; trivial ApiState hunk). T-128 then wires `observe_fold` with gain deltas.
