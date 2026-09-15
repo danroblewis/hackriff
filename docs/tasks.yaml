@@ -2898,7 +2898,8 @@ notes:
   - id: T-183
     milestone: M2-hardening
     title: "acceptance signal_062 load flake: WFM emitter family label (auto classifier) missing under load; passes alone - check for a real race in when the family is assigned vs pipeline stop"
-    status: in-progress
+    status: done
+    commit: c5e1b20
     deps: []
     parallel_group: M2E
     use_cases: [SIGNAL-062]

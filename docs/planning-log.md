@@ -2170,3 +2170,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - T-188: listen-centre flake under load, 2 of 10 burn runs at 101.352 MHz.
     - T-189: the API classification field should follow the same ranking.
   - **Agents stopping early:** T-181, T-183 and T-184 each ended their turn "waiting" with no live background run. All three have been nudged to continue.
+- **B0.461 T-183 merged (c5e1b20, merge c828464).** The family query ranks track-shape rows below demodulator, decoder and classifier rows.
+  - **Evidence:** 10/10 burn runs pass, plus an order-independent test.
+  - **Not run:** the family failure itself was never reproduced (0/15 before the fix), and the agent skipped the full acceptance_m0 run; the coordinator full check covers it.
+  - **Worktree** removed. Full check running.
