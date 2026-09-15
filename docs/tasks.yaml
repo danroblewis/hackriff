@@ -2869,7 +2869,7 @@ notes:
   - id: T-181
     milestone: M2-hardening
     title: "Sweep DC dither follow-ups: single-hop plans on a live radio now retune 75 kHz every step (dither single-hop plans only every Nth pass or disclose), pick SweepRecord geometry by pass parity not tuning match, per-hop DcDitherDisabled warning, off-DC test samples LO +-37.5 kHz (or 80 kHz dither), ADR-0005 wording on half-visit edge cells"
-    status: todo
+    status: in-progress
     deps: [T-173]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2897,7 +2897,7 @@ notes:
   - id: T-183
     milestone: M2-hardening
     title: "acceptance signal_062 load flake: WFM emitter family label (auto classifier) missing under load; passes alone - check for a real race in when the family is assigned vs pipeline stop"
-    status: todo
+    status: in-progress
     deps: []
     parallel_group: M2E
     use_cases: [SIGNAL-062]

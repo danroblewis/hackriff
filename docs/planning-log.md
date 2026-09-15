@@ -2109,3 +2109,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **t057 window:** zero codes 0.848→0.559; quantisation-limited blocks 36/36→0/36. The t057 skip matched 0 boxes and stays as a no-op with its guards.
   - **Tests:** hk-core mock 22, mock_device 2 (t057 3/3), hk-pipeline 7; `scheduler_history` gap 0.010 dB; lint clean.
   - **Merge:** after the T-174/T-167 full check.
+- **B0.454 T-181 and T-183 launched (Opus) into the two free Rust build slots.**
+  - **T-181:** sweep dither follow-ups.
+    - Single-hop plans dither every Nth pass, so the live HackRF doesn't retune every step.
+    - Parity-based SweepRecord geometry.
+    - Per-hop dither-disabled warning.
+    - Worst-case coverage points.
+    - ADR-0005 wording.
+  - **T-183:** signal_062 family-label load flake. Reproduce under bounded load, root-cause (product race vs test timing), fix without loosening, then 10× green under load.
+  - **Merge queue after the running full check:** T-180. T-178 waits on its review. T-124 is finishing (lint, squash, acceptance-m2).
