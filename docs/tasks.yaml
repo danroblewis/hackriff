@@ -3364,7 +3364,7 @@ tasks:
   - id: T-211
     milestone: M3
     title: "M3 contracts skeleton per ADR-0016: taxonomy hk-mod@1, Classification types (posterior + likelihood distributions incl unknown, open-set score, entropy, deciding stage, provenance), emitter_classification nullable columns migration, current-family rank (user > decoder > lock-verified > classifier > track shape), API fields + docs/api.md"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-198]
     parallel_group: M3K

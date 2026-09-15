@@ -2284,3 +2284,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     4. Should a new cluster type feed novelty (ADR-0012 §4.4)?
     5. Signature export?
   - **docs/15 note:** the user's untracked copy (differed only in ADR number) was backed up to the scratchpad before the committed copy replaced it.
+- **B0.481 M3 fan-out started: T-211 contracts skeleton launched** (Opus high, core_interface). It gates T-199, T-201, T-203, T-205, T-212 and T-213.
+  - **Rust slots:** T-178, T-209, T-191, T-211.
+  - **T-190 (5437f01)** merges at the next full check, batched with T-191 or T-209; its api.md ADR-0014 reference will be fixed to ADR-0015 then.
+  - **T-210 (RDS correction, user-approved)** takes the next free slot.
