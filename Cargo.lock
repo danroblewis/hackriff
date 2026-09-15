@@ -580,6 +580,7 @@ dependencies = [
  "libc",
  "num-complex",
  "serde_json",
+ "tungstenite",
 ]
 
 [[package]]

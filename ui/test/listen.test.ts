@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SeqTracker, audioHeaderProblem, parseRecord, parseText, type AudioHeader } from "../src/audio-frames";
 import { JitterBuffer } from "../src/jitter";
-import { Listener, clampBox, clickTarget, closeOnPageExit, listenQuery, peakBinIndex, resolveTarget, selectionTarget, strongestInView } from "../src/listen";
+import { Listener, clampBox, clickTarget, closeOnPageExit, listenQuery, resolveTarget, selectionTarget } from "../src/listen";
 import { rowListenTarget } from "../src/inventory";
 
 function record(type: number, flags: number, seq: number, payload: Uint8Array, sampleIndex = 0): ArrayBuffer {
@@ -107,35 +107,11 @@ test("selectionTarget: kept as-is up to 1 MHz, else clamped around its centre", 
   assert.deepEqual(selectionTarget({ f_lo: 100e6, f_hi: 103e6 }), { f_lo: 101e6, f_hi: 102e6 });
 });
 
-test("peakBinIndex: the strongest finite bin within a range, else null", () => {
-  const row = [-90, -80, -95, -60, -70, -85];
-  assert.equal(peakBinIndex(row, 0, 6e6, 0, 6e6), 3, "whole row: bin 3 (-60)");
-  assert.equal(peakBinIndex(row, 0, 6e6, 0, 2e6), 1, "restricted to bins 0-1");
-  assert.equal(peakBinIndex([NaN, -Infinity], 0, 2e6, 0, 2e6), null, "nothing finite");
-  assert.equal(peakBinIndex([], 0, 1, 0, 1), null, "empty row");
-});
-
-test("strongestInView: boxes the peak by its local -10 dB width, capped at 200 kHz total", () => {
-  // 1000 bins over 10 MHz (10 kHz/bin): a peak at bin 500 with a narrow 1-bin-wide skirt each side.
-  const n = 1000, fullLo = 0, fullHi = 10e6, df = (fullHi - fullLo) / n;
-  const row = new Array(n).fill(-100);
-  row[500] = -50;
-  row[499] = -55; row[501] = -55; // within 10 dB of the peak; bins 498/502 (-100) are not
-  const box = strongestInView(row, fullLo, fullHi, fullLo, fullHi)!;
-  assert.ok(box);
-  assert.equal(box.hz, fullLo + 500.5 * df);
-  assert.deepEqual([box.f_lo, box.f_hi], [fullLo + 499 * df, fullLo + 502 * df], "boxed to the skirt (bins 499-501), not the whole band");
-
-  // A wide skirt (or a flat plateau) is capped at 200 kHz total, not left to grow to the view's edges.
-  const wide = new Array(n).fill(-100);
-  wide[500] = -50;
-  for (let d = 1; d <= 30; d++) { wide[500 - d] = -55; wide[500 + d] = -55; } // a 61-bin (610 kHz) skirt
-  const capped = strongestInView(wide, fullLo, fullHi, fullLo, fullHi)!;
-  assert.equal(capped.f_hi - capped.f_lo, 200e3, "capped at 200 kHz total");
-  assert.ok(capped.f_lo < capped.hz && capped.hz < capped.f_hi);
-
-  assert.equal(strongestInView(new Array(n).fill(NaN), fullLo, fullHi, fullLo, fullHi), null, "nothing finite: no target");
-});
+// peakBinIndex/strongestInView (raw-row peak-picking) moved to the backend in T-079
+// (`GET /api/analysis/strongest`, `hk_api::query::strongest_json`, tested in
+// crates/hk-api/tests/http_api.rs). resolveTarget below still takes a pre-resolved `strongest`
+// value (the toolbar polls the endpoint and caches it; see listen.ts), so its own tests are
+// unaffected by where that value comes from.
 
 test("resolveTarget: click beats selection beats strongest-in-view; each short-circuits the rest", () => {
   const noStrongest = () => { throw new Error("must not be called"); };

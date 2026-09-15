@@ -21,6 +21,11 @@ libc.workspace = true
 num-complex.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+# T-079: a plain WebSocket client for the HTTP/WS API contract tests (already a workspace
+# dependency of hk-api and hk-pipeline).
+tungstenite.workspace = true
+
 [features]
 # T-037a: the live HackRF One source (links the system libhackrf through hk-core). Off by default.
 hackrf = ["hk-core/hackrf"]
