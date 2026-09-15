@@ -2223,7 +2223,8 @@ tasks:
   - id: T-141
     milestone: M2
     title: "Bias-corrected floor for mixed-shape tiles (Gamma-mixture log-bias model) so scheduler-driven tiles report floor_db"
-    status: review
+    status: done
+    commit: ce0c8a4
     deps: [T-139]
     parallel_group: M2B
     use_cases: [AWARE-042, SPACE-001]
@@ -2312,7 +2313,7 @@ tasks:
   - id: T-147
     milestone: M2
     title: "Channel FCO under the scheduler: 50% channel reads FCO 0.000 (truth 0.494) and a 10% markov channel is never learned in the T-124 scene"
-    status: todo
+    status: in-progress
     deps: [T-141]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -2326,7 +2327,8 @@ tasks:
   - id: T-148
     milestone: M2
     title: "UI bug: sidebar Selections/Signal Inventory rows overflow horizontally; action buttons (Promote/Delete/Listen) off-screen - wrap rows, buttons always reachable, no per-row x-scroll"
-    status: in-progress
+    status: done
+    commit: 589fad6
     deps: []
     parallel_group: UI
     use_cases: []
@@ -2360,7 +2362,7 @@ notes:
   - id: T-149
     milestone: MUI
     title: "MUI-DESIGN: ADR-0013 UI component + state-store structure, frontend-to-API mapping for every mockup panel, build setup, dependency-light framework decision (vanilla TS + small reactive store, or lit/Preact, justified), reuse existing WebGL waterfall"
-    status: todo
+    status: in-progress
     deps: []
     parallel_group: MUI-D
     use_cases: []

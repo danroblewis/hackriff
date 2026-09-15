@@ -1568,3 +1568,16 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - MUI runs in parallel with the M2 tail.
     - UI agents don't count toward the 4 Rust-building-agent cap unless they build Rust.
   - **T-148** (current-UI sidebar fix) lands separately.
+- **B0.386 T-148 and T-141 merged; T-149 MUI-DESIGN and T-147 launched.**
+  - **T-148 merged (589fad6):** CSS row-cards scoped to the three sidebar tables; tsc, npm test and build green.
+  - **T-141 merged (ce0c8a4, fix round):**
+    - Tile v4 stores per-shape frames; a mixture floor exists only when every shape covers the same cells, otherwise none.
+    - Mock dequant: fast attack (>3× level), one-frame look-ahead release, re-seeded on restart.
+    - Transient test bounds set a priori: 0.5 dB for the first 2048 samples, 0.2 dB settled; worst measured +0.34 dB.
+    - Floor sums saturate on overflow.
+    - Scheduler vs fixed-tune floor: 0.070 dB.
+    - Targeted tests 91/91.
+    - Timing and acceptance were not run in the worktree; the post-merge full check covers them, with e2e timings compared against `test-t143.log`.
+  - **Worktrees:** both removed. Full check started.
+  - **T-149 (MUI-DESIGN, Opus high)** launched on main (brief + mockup committed).
+  - **T-147 (channel FCO under the scheduler)** launched now that T-141 is merged.
