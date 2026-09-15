@@ -1629,7 +1629,8 @@ tasks:
   - id: T-101
     milestone: M0b
     title: "Fix inventory duplicate regression from T-084 (steady FM station 4x, nearby stations 3x in inventory)"
-    status: in-progress
+    status: done
+    commit: 7cddade
     deps: [T-084]
     parallel_group: T101
     use_cases: [AWARE-053]
@@ -1643,12 +1644,12 @@ tasks:
   - id: T-102
     milestone: M0b
     title: "Steady WFM station track width overestimated (407.8 kHz vs 400 kHz wfm-rds cap) so the station itself never gets a chain"
-    status: todo
+    status: in-progress
     deps: [T-101]
     parallel_group: T101
     use_cases: [SIGNAL-062, AWARE-053]
     found_by: "T-101 debugging 2026-09-15 (inventory_lifecycle synthetic FM station: track 332 kHz estimate, member-box union 407.8 kHz)"
-    acceptance: "the station's own confirmed track reports a width consistent with its OBW (not the union of edge flicker boxes) and attaches the wfm-rds chain directly, not via an in-band fragment; blind; hk-detect + acceptance inventory_lifecycle + signal_062 pass"
+    acceptance: "the station's own confirmed track reports a width consistent with its OBW (not the union of edge flicker boxes) and attaches the wfm-rds chain directly, not via an in-band fragment; blind; hk-detect + acceptance inventory_lifecycle + signal_062 pass; revisit T-101 HOST_SKIRT_FRACTION (0.5) once widths are right and add a test that a weak narrowband emitter one channel (200-300 kHz) off a strong WFM station keeps its own inventory entry"
     area: crates/hk-detect (track width / member box union), crates/hk-pipeline (chain attach)
     needs: none
     model: opus
