@@ -2870,7 +2870,8 @@ notes:
   - id: T-181
     milestone: M2-hardening
     title: "Sweep DC dither follow-ups: single-hop plans on a live radio now retune 75 kHz every step (dither single-hop plans only every Nth pass or disclose), pick SweepRecord geometry by pass parity not tuning match, per-hop DcDitherDisabled warning, off-DC test samples LO +-37.5 kHz (or 80 kHz dither), ADR-0005 wording on half-visit edge cells"
-    status: in-progress
+    status: done
+    commit: fe2e6a6
     deps: [T-173]
     parallel_group: M2B
     use_cases: [AWARE-042]

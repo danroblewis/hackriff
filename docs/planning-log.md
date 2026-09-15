@@ -2185,3 +2185,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     - block-sync false-lock hardening;
     - weak-signal robustness at 14 dB (AWGN added at runtime, target PI+PS in 25 s, zero invalid fields) without changing CRC correction.
   - **Needs the user:** whether to allow redsea-style ≤2-bit block error correction, which relaxes the crc block's no-correction rule. Not scheduled.
+- **B0.464 Full check green after the T-183 merge (955fd47).** Lint clean; 1372/1372 tests in 137 s; acceptance 28/28.
+  - **T-181 merged** (fe2e6a6, merge f322bfe). Worktree removed. Full check running.
