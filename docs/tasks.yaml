@@ -1656,6 +1656,19 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-103
+    milestone: M0b
+    title: "readsb plugin chain loses the first frame(s) under load (plugin process startup races the stream start)"
+    status: todo
+    deps: []
+    parallel_group: T103
+    use_cases: [SIGNAL-001]
+    found_by: "full check 2026-09-15 at load ~24: acceptance signal_001_adsb_readsb_plugin_chain decoded 15/16, missed only the first squitter at t=0.0099 s; passed 3/3 on rerun; same family as the nextest signal_001_readsb/data_path flakes (B0.206, B0.219)"
+    acceptance: "plugin chain start is lossless: samples/records produced before the plugin process is ready are buffered (bounded) and delivered, or the chain waits for plugin readiness before attaching; add a test that injects a slow plugin startup (e.g. delayed stub plugin) and asserts the first frame is decoded; then remove the nextest retries added for signal_001_readsb and plugin_decodes_get_family_explanations"
+    area: crates/hk-plugins (host), crates/hk-pipeline (plugin chain attach), .config/nextest.toml
+    needs: none
+    model: opus
+    effort: medium
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
