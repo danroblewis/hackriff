@@ -1518,3 +1518,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - Tests: 1328/1328 nextest+UI (down from 1387, since T-143 deleted the legal tests).
   - Acceptance: 28/28 plus 2 hardware-ignored (was 32; the legal cases are gone).
   - Disk: 75 GB free.
+- **B0.381 T-141 done (69c9c70 fix, 9e971a4 merge main, 51cf279 fmt); Opus review running.**
+  - **Noise measured in codes rms:** real captures 0.75 / 1.43 / 1.67 / 8.7 / 25.2; synthetic scene ~0.5.
+    - Low-gain HackRF captures are also quantisation-limited, so the scene is realistic and unchanged.
+  - **Mock fix:** per-bin adaptive subtraction of the recording's rounding noise on re-rendered IQ only.
+    - Gain is causal from earlier frames.
+    - The earlier fixed filter was dropped.
+    - Fixed-tune passthrough is untouched.
+  - **Result:** `scheduler_history` −100.770 vs −100.810 (0.040 dB, was 1.01; a-priori limit 0.5 unchanged).
+  - **New mock test:** emitters starting mid-recording stay within 0.2 dB.
+  - **Tests:** 90/90 targeted; lint clean.
+  - **Review focus:** mixture solve/cache, tile v4 codec, whether mock subtraction distorts bursts/transients across e2e tests, per-block cost.
