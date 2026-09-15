@@ -237,14 +237,19 @@ pub struct BlindDevice {
 }
 
 /// Opens the mock SDR over `blinded` with `steps` scripted.
-fn open_device(blinded: Blinded, steps: &'static [DeviceStep], end: MockEnd) -> BlindDevice {
+fn open_device(
+    blinded: Blinded,
+    steps: &'static [DeviceStep],
+    end: MockEnd,
+    pacing: Pacing,
+) -> BlindDevice {
     let meta = SigmfMeta::read(&blinded.meta).unwrap();
     let mut centres: Vec<f64> = meta.captures.iter().filter_map(|c| c.frequency).collect();
     centres.dedup();
     let class = source_class(&meta);
     let (source, info, device, mock, served): (Box<dyn Source>, _, _, _, _) = if centres.len() <= 1
     {
-        let r = open_mock_replay(&blinded.meta, Pacing::Unpaced, end).unwrap();
+        let r = open_mock_replay(&blinded.meta, pacing, end).unwrap();
         let control = r.source.mock_control();
         let served = vec![r.source.recording().path.clone()];
         (Box::new(r.source), r.info, r.device, vec![control], served)
@@ -589,6 +594,7 @@ pub fn replay_config(
         blind_copy(meta, "dev", &BlindSource::default()),
         &[],
         MockEnd::Stop,
+        Pacing::Unpaced,
     );
     (device_config(dir, &dev, extra), dev)
 }
@@ -609,12 +615,13 @@ fn configure(
     source: BlindSource,
     extra: serde_json::Value,
     end: MockEnd,
+    pacing: Pacing,
 ) -> BlindConfig {
     let blinded = blind_copy(meta, tag, &source);
     let dir = TempDir::new(tag);
     let mut plan = plan_extra(&source);
     merge_json(&mut plan, extra);
-    let replay = open_device(blinded, source.steps, end);
+    let replay = open_device(blinded, source.steps, end, pacing);
     let cfg = device_config(&dir.0, &replay, plan);
     BlindConfig { dir, cfg, replay }
 }
@@ -627,7 +634,7 @@ pub fn blind_config(
     source: BlindSource,
     extra: serde_json::Value,
 ) -> BlindConfig {
-    configure(meta, tag, source, extra, MockEnd::Stop)
+    configure(meta, tag, source, extra, MockEnd::Stop, Pacing::Unpaced)
 }
 
 /// A blind run whose device keeps replaying its truth-stripped copy (`MockEnd::Loop`, as
@@ -642,7 +649,14 @@ pub struct BlindLive {
 
 /// Starts a looping blind device run of `meta`.
 pub fn blind_live(meta: &Path, tag: &str, source: BlindSource) -> BlindLive {
-    let BlindConfig { dir, cfg, replay } = configure(meta, tag, source, json!({}), MockEnd::Loop);
+    blind_live_paced(meta, tag, source, Pacing::Unpaced)
+}
+
+/// [`blind_live`] with the device released at `pacing` (real time makes the run live-like: not
+/// lossless, the ring overwrites and chains skip to the live edge, as on a HackRF).
+pub fn blind_live_paced(meta: &Path, tag: &str, source: BlindSource, pacing: Pacing) -> BlindLive {
+    let BlindConfig { dir, cfg, replay } =
+        configure(meta, tag, source, json!({}), MockEnd::Loop, pacing);
     BlindLive {
         dir,
         handle: start(cfg, replay),
