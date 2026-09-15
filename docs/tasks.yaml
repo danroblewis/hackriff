@@ -1208,8 +1208,9 @@ tasks:
   - id: T-073
     milestone: M0b
     title: "Regression: intermittent Listen refusal no-analog-mode after mode selector 0.2.0 (listen_retune 1/3 flaky)"
-    status: in-progress
-    interrupted: "terminated by spend limit 2026-09-13; resumed 2026-09-14 20:10 PT with staged WIP intact"
+    status: done
+    commit: "b4670e8 (merged)"
+    result: "root cause: listen_retune's scripted radio sends a clean i8 carrier; 8-bit quantisation leaves ~0.2 % in-phase AM residue scoring t = 3.1-3.7 at 61 dB SNR, above the unmodulated-carrier limit (3) but far below AM's 5 % rule, so no rule matched and Listen refused. Fix (mode rules 0.2.1, mode.rs only): carrier with in-phase residue < 1 % depth counts as unmodulated regardless of t (carrier_max_residual_depth), still requiring narrow + sidebands >= 20 dB down, residue named in evidence. T-070 refinement did not fix it (2/10 failures on merged tree). Sweep unchanged (128/152, >=10 dB 111/114, carriers 8/8 CW, FM fixture WFM). Flake 2/6 -> 20/20. Regression test signal_062_probe_placement.rs (4 failing + 2 passing probe positions, CW confidence >= 0.5)."
     deps: [T-065]
     parallel_group: T
     use_cases: [SIGNAL-062]
@@ -1220,6 +1221,20 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-074
+    milestone: M0b
+    title: Flaky stream_external slow-client drop test (wait also ends on disconnect)
+    status: todo
+    deps: [T-060]
+    parallel_group: P
+    use_cases: [AWARE-036]
+    found_by: T-073 agent 2026-09-14 (failed once in just test, passed alone)
+    acceptance: "stream_external stalled-TCP-client test waits deterministically for counted drops (not for disconnect), passes 20/20 under load; no product behaviour change unless a real race is found"
+    area: tests/e2e/tests/stream_external.rs, crates/hk-api/src/tcp.rs (if a real race)
+    needs: none
+    model: sonnet
+    effort: medium
+    hold: "small; launch when a slot frees (budget throttle)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
