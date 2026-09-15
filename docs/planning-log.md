@@ -814,3 +814,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   Accepted residual: a live offer that joined an existing row keeps its bursts counted if the track later proves to be a fragment.
 
   **All four M1 tutorials (RDS, POCSAG, ACARS, ADS-B) now pass blind on main.** Full check running; T-111 is in review.
+- **B0.274 T-111 review: MERGE.** Checked: the RT path does only an Arc clone + try_send (alloc-free, including queue-full); retired sinks are dropped on the control thread; ICAO `{:06x}` and PI `{:04X}` canonical forms match readsb and hk-demod, so there are no duplicate emitters; the family step depends only on decoder evidence, so it can't go stale; restricted classes are sanitised fail-closed; per-output SQLite writers use the same WAL + 5 s busy_timeout as plugins; merge-tree against main (including T-109) is clean. Nits filed as **T-112**:
+  - ingest stops classifying after 4096 emitters on long runs;
+  - a bad output_policy is swallowed silently;
+  - a sink drop happens under the pending lock;
+  - decode writes are unbatched;
+  - a nextest LEAK flag.
+
+  T-111 merges after the in-flight full check.

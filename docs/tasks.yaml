@@ -1801,6 +1801,19 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-112
+    milestone: M1
+    title: "Recipe/plugin decode ingest hardening (T-111 review follow-ups)"
+    status: todo
+    deps: [T-111]
+    parallel_group: M1R
+    use_cases: [SIGNAL-001, SIGNAL-062]
+    found_by: "T-111 review 2026-09-15"
+    acceptance: "long-running writers keep classifying new emitters beyond MAX_TRACKED_EMITTERS=4096 (hk-plugins ingest.rs:222; per-writer bounded LRU or classified set; test with >4096 identities); malformed output_policy logs a pipeline warning (messages.rs:197); pending-edit sink drop moved outside ctl.pending lock (runtime.rs:1430); decode writes batched per transaction when the queue backs up (dense ADS-B test shows decodes_dropped 0 at realistic rates); nextest LEAK on a_messages_output_queues_frames_without_allocating fixed"
+    area: crates/hk-plugins/src/ingest.rs, crates/hk-pipeline/src/recipes (messages, runtime)
+    needs: none
+    model: opus
+    effort: medium
   - id: T-100
     milestone: M0b
     title: "Live HackRF re-run of the updated HIL acceptance (T-084 checks)"
