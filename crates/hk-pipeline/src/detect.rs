@@ -421,13 +421,14 @@ impl DetectNode {
                         self.confirmed.insert(id);
                     }
                     let t = r.detection.time.start;
+                    let (f_lo_hz, f_hi_hz) = occupied_box(&r);
                     self.boxes.insert(
                         id,
                         MemberBox {
                             detection: id,
                             samples: r.samples.clone(),
-                            f_lo_hz: r.f_lo_hz,
-                            f_hi_hz: r.f_hi_hz,
+                            f_lo_hz,
+                            f_hi_hz,
                             t_start: t,
                             continues: r.continues,
                         },
@@ -873,6 +874,21 @@ impl Writer {
             thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+/// A detection's occupied band as a member box (T-102): its measured OBW about its centre,
+/// clamped inside its pixel box. The pixel box is every bin that crossed threshold in any frame
+/// of the record (up to the detector's 1 s max duration), so a wideband modulated emission's
+/// flickering skirts inflate it well past the band that holds its power (a WFM station: 408 kHz
+/// box vs 333 kHz OBW); the track estimate uses the OBW, so its candidate does too.
+fn occupied_box(r: &DetectionRecord) -> (f64, f64) {
+    let (lo, hi) = (r.f_lo_hz.min(r.f_hi_hz), r.f_lo_hz.max(r.f_hi_hz));
+    let half = 0.5 * r.detection.obw_hz;
+    if half.is_nan() || half <= 0.0 || !r.detection.f_center_hz.is_finite() {
+        return (lo, hi);
+    }
+    let fc = r.detection.f_center_hz.clamp(lo, hi);
+    ((fc - half).max(lo), (fc + half).min(hi))
 }
 
 /// Short-burst detector settings (T-075): the hk-detect defaults, with the longest burst held
