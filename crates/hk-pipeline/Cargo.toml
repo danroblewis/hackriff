@@ -26,6 +26,12 @@ num-complex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[features]
+# T-056: compile the Mac compute providers into hk-dsp. Selection stays at runtime
+# (`extra.pipeline.compute`, `--compute`, HK_COMPUTE*); a default build resolves to the CPU.
+gpu-wgpu = ["hk-dsp/gpu-wgpu"]
+accelerate = ["hk-dsp/accelerate"]
+
 [dev-dependencies]
 hk-e2e = { path = "../../tests/e2e" }
 # Test-only (T-066 listen lifecycle through the real WebSocket front end).

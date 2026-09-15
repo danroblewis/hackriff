@@ -513,6 +513,8 @@ pub(crate) struct Shared {
     pub bursts: Arc<crate::chains::taps::BurstHub>,
     /// Which analog chain owns each emission (T-071 dedupe).
     pub claims: crate::chains::EmissionClaims,
+    /// The run's compute providers (T-056): one registry shared by every segment.
+    pub compute: hk_dsp::compute::Compute,
 }
 
 impl Shared {
@@ -641,6 +643,8 @@ struct Common {
     listen: Arc<Mutex<crate::config::ListenSettings>>,
     /// Burst taps (T-060), closed when the run ends.
     bursts: Arc<crate::chains::taps::BurstHub>,
+    /// Compute providers (T-056): built once per run, so no segment changes provider.
+    compute: hk_dsp::compute::Compute,
 }
 
 impl Common {
@@ -701,7 +705,7 @@ struct Started {
 impl Pipeline {
     /// Opens the stores, opens the Survey, and starts the threads (capture last).
     pub fn start(
-        cfg: PipelineConfig,
+        mut cfg: PipelineConfig,
         source: Box<dyn Source>,
         info: SourceInfo,
         reopen: Option<crate::run::SourceFactory>,
@@ -742,11 +746,18 @@ impl Pipeline {
         )
         .map_err(|e| anyhow::anyhow!("opening history: {e}"))?;
         let live = cfg.live_window_class && source.capabilities().controllable;
+        let counters = Arc::new(Counters::default());
+        // T-056: one compute registry for the whole run (every segment shares it, so the
+        // provider cannot change mid-run); the HK_COMPUTE* environment wins over the settings.
+        let (compute, compute_options) =
+            crate::compute::for_run(&cfg.settings.compute, &counters.compute)?;
+        cfg.settings.compute = compute_options;
         let common = Common {
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
-            counters: Arc::new(Counters::default()),
+            counters,
+            compute,
             product: Arc::new(Mutex::new(product)),
             display: Arc::new(DisplayControl::new(DisplaySettings::from_settings(
                 &cfg.settings,
@@ -875,6 +886,7 @@ fn start_segment(
         continues: AtomicBool::new(false),
         bursts: Arc::clone(&common.bursts),
         claims: crate::chains::EmissionClaims::default(),
+        compute: common.compute.clone(),
         cfg,
     });
     inc(&common.stats.segments);
@@ -1417,6 +1429,22 @@ impl RunSummary {
             r.n_eff,
             r.bin_hz,
             r.frame_s * 1e3
+        ));
+        let text = |p: &str| {
+            self.counters
+                .pointer(p)
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+                .to_owned()
+        };
+        line(format!(
+            "compute:     requested {}; stft detect {} / history {} / spectrum {}; {} provider \
+             changes",
+            text("/compute/options/provider"),
+            text("/compute/stft/detect/provider"),
+            text("/compute/stft/history/provider"),
+            text("/compute/stft/spectrum/provider"),
+            c("/compute/provider_changes"),
         ));
         line(format!(
             "source:      {} samples in {} blocks, {} loops, {} gate waits, {} ring errors",

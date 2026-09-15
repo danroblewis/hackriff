@@ -147,6 +147,8 @@ pub struct ReplayArgs {
     pub ui_dist: Option<PathBuf>,
     /// T-021 calibration JSON (file or directory).
     pub calibration: Option<PathBuf>,
+    /// Compute provider (T-056).
+    pub compute: ComputeArgs,
 }
 
 /// `hk run` options (live HackRF One).
@@ -172,6 +174,8 @@ pub struct RunArgs {
     pub ui_dist: Option<PathBuf>,
     /// T-021 calibration JSON (file or directory).
     pub calibration: Option<PathBuf>,
+    /// Compute provider (T-056).
+    pub compute: ComputeArgs,
 }
 
 /// `hackriffd` options.
@@ -201,6 +205,8 @@ pub struct DaemonArgs {
     pub calibration: Option<PathBuf>,
     /// Listen limits (T-066).
     pub listen: ListenArgs,
+    /// Compute provider (T-056).
+    pub compute: ComputeArgs,
 }
 
 /// Listen limits (T-066) for `hk serve` and `hackriffd`. Unset flags keep the plan's
@@ -243,6 +249,31 @@ impl ListenArgs {
             s.cpu_fraction = f;
         }
         handle.set_listen_settings(s);
+    }
+}
+
+/// The compute provider flag (T-056, ADR-0007) of `hk replay`, `hk run`, `hk serve` and
+/// `hackriffd`. Unset keeps the plan's `extra.pipeline.compute` (default `auto`). The
+/// `HK_COMPUTE*` environment variables win over both.
+#[derive(clap::Args, Clone, Debug, Default, PartialEq)]
+pub struct ComputeArgs {
+    /// Compute provider for every DSP workload: auto (the measured best conformant provider
+    /// compiled into this build), cpu, cpu-mt, accelerate or gpu. The GPU and Accelerate need a
+    /// build with `--features gpu-wgpu` / `accelerate`; an unavailable one falls back and says why
+    /// in /api/status (`compute`). HK_COMPUTE overrides it.
+    #[arg(long = "compute", value_name = "PROVIDER")]
+    pub provider: Option<hk_dsp::compute::Preference>,
+}
+
+impl ComputeArgs {
+    /// Applies the flag to `settings`: the provider for every workload (the plan's per-workload
+    /// overrides are cleared).
+    pub fn apply(&self, settings: &mut hk_pipeline::PipelineSettings) {
+        if let Some(p) = self.provider {
+            settings.compute.provider = p;
+            settings.compute.stft = None;
+            settings.compute.pfb = None;
+        }
     }
 }
 
@@ -674,6 +705,8 @@ pub struct LiveOptions {
     pub spectrum_fft_len: Option<usize>,
     /// Spectrum stream row rate override.
     pub spectrum_rows_per_s: Option<f64>,
+    /// Compute provider (T-056).
+    pub compute: ComputeArgs,
 }
 
 /// A running live pipeline.
@@ -713,6 +746,7 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
     if let Some(r) = opts.spectrum_rows_per_s {
         cfg.settings.spectrum_rows_per_s = r;
     }
+    opts.compute.apply(&mut cfg.settings);
     cfg.source_class = class;
     // A radio cannot pause: never lossless (Pipeline::start would refuse it anyway).
     cfg.lossless = false;
@@ -774,6 +808,7 @@ pub fn run_replay(args: &ReplayArgs) -> anyhow::Result<RunSummary> {
         args.feeds.clone(),
         args.calibration.as_deref(),
     )?;
+    args.compute.apply(&mut cfg.settings);
     cfg.source_class = class;
     // Explicit opt-in: `PipelineConfig` defaults to lossless off (live-source semantics), and a
     // recording can pause, so unpaced replay waits for slow readers instead of dropping.
@@ -828,6 +863,7 @@ pub fn run_live(args: &RunArgs) -> anyhow::Result<RunSummary> {
             calibration: args.calibration.clone(),
             spectrum_fft_len: None,
             spectrum_rows_per_s: None,
+            compute: args.compute.clone(),
         },
         &registry,
     )?;
@@ -897,6 +933,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
                 calibration: args.calibration.clone(),
                 spectrum_fft_len: None,
                 spectrum_rows_per_s: None,
+                compute: args.compute.clone(),
             },
             &registry,
         )?;
@@ -948,6 +985,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
         args.feeds.clone(),
         args.calibration.as_deref(),
     )?;
+    args.compute.apply(&mut cfg.settings);
     cfg.source_class = class;
     // Explicit opt-in, as for `hk replay` (a live source leaves this off).
     cfg.lossless = args.unpaced;
@@ -1090,7 +1128,35 @@ mod tests {
             token: token.map(str::to_owned),
             calibration: None,
             listen: ListenArgs::default(),
+            compute: ComputeArgs::default(),
         }
+    }
+
+    #[test]
+    fn the_compute_flag_sets_the_provider_for_every_workload() {
+        use clap::Parser;
+        use hk_dsp::compute::Preference;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            compute: ComputeArgs,
+        }
+        let cli = Cli::try_parse_from(["hk", "--compute", "gpu"]).unwrap();
+        assert_eq!(cli.compute.provider, Some(Preference::Gpu));
+        assert!(Cli::try_parse_from(["hk", "--compute", "fpga"]).is_err());
+        let mut s = hk_pipeline::PipelineSettings::default();
+        s.compute.stft = Some(Preference::Accelerate);
+        ComputeArgs::default().apply(&mut s);
+        assert_eq!(
+            s.compute.stft,
+            Some(Preference::Accelerate),
+            "unset keeps the plan's"
+        );
+        cli.compute.apply(&mut s);
+        assert_eq!(
+            (s.compute.provider, s.compute.stft, s.compute.pfb),
+            (Preference::Gpu, None, None)
+        );
     }
 
     /// T-027 review fix: the HackRF fixtures start at `core:global_index` 423 000 000 (915 MHz)
@@ -1403,6 +1469,7 @@ mod tests {
                 calibration: None,
                 spectrum_fft_len: Some(1024),
                 spectrum_rows_per_s: None,
+                compute: ComputeArgs::default(),
             },
             &StreamRegistry::new(),
         )

@@ -56,7 +56,7 @@ use hk_detect::{
 };
 use hk_dsp::floor::{FloorConfig, FloorEvent, NoiseFloorTracker};
 use hk_dsp::window::WindowKind;
-use hk_dsp::{InputInfo, SpectrumFrame, StftConfig, StftProcessor, WelchConfig};
+use hk_dsp::{InputInfo, SpectrumFrame, StftConfig, WelchConfig};
 use hk_model::{DetectionId, FreqRange, Timestamp, TrackId, TrustVerdict};
 use num_complex::Complex;
 
@@ -906,8 +906,12 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
         holds: false,
         spectral_kurtosis: true,
     };
-    let mut stft = StftProcessor::new(StftConfig::new(welch, shared.averages))
-        .map_err(|e| anyhow::anyhow!("detection STFT: {e:?}"))?;
+    let mut stft = crate::compute::stft(
+        &shared.compute,
+        &shared.counters.compute,
+        crate::compute::Reader::Detect,
+        StftConfig::new(welch, shared.averages),
+    )?;
     let writer = Writer::new(Arc::clone(&shared))?;
     let (writer_tx, writer_rx) = mpsc::sync_channel(WRITER_QUEUE);
     let writer_join = thread::Builder::new()
@@ -949,6 +953,10 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
                 cursor.set(chunk.end_sample());
                 add(&rc.samples, chunk.len as u64);
             }
+            // Nothing new for a read timeout: deliver an asynchronous provider's rows (T-056).
+            ReadOutcome::Empty if stft.in_flight() > 0 => {
+                stft.flush(|frame| node.process_frame(frame));
+            }
             ReadOutcome::Overrun { .. } | ReadOutcome::Empty => {}
             ReadOutcome::Closed => break,
         }
@@ -959,6 +967,12 @@ fn run_inner(shared: Arc<Shared>, tx: Sender<ControlEvent>) -> anyhow::Result<()
         set(&rc.frames, st.frames);
         set(&rc.stft_resets, st.resets);
     }
+    // Stream end or detach (T-056): frames still in flight are detected and tracked before the
+    // burst detector, the tracker and the writer finish.
+    stft.flush(|frame| node.process_frame(frame));
+    let st = stft.stats();
+    set(&rc.frames, st.frames);
+    set(&rc.stft_resets, st.resets);
     burst.finish(&mut |r| node.push_burst(r));
     node.finish();
     // Closing the queue ends the writer after its last attempts.

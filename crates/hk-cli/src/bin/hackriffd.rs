@@ -45,6 +45,8 @@ struct Args {
     calibration: Option<PathBuf>,
     #[command(flatten)]
     listen: hk_cli::pipeline::ListenArgs,
+    #[command(flatten)]
+    compute: hk_cli::pipeline::ComputeArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -71,5 +73,6 @@ fn main() -> anyhow::Result<()> {
         token: None,
         calibration: a.calibration,
         listen: a.listen,
+        compute: a.compute,
     })
 }

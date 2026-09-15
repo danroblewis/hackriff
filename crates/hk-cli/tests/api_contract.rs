@@ -63,6 +63,7 @@ fn start_server() -> (Serving, SocketAddr) {
         calibration: None,
         token: Some(TOKEN.into()),
         listen: Default::default(),
+        compute: Default::default(),
     })
     .unwrap();
     let addr = serving.server.local_addr();
@@ -215,6 +216,21 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     let (st, v) = get(addr, "/api/status");
     assert_eq!(st, 200, "{v}");
     assert!(is_object(&v), "{v}");
+    // T-056: compute providers, chosen once per run (docs/api.md `compute`).
+    let compute = &v["compute"];
+    assert!(is_object(&compute["options"]), "{v}");
+    assert!(compute["options"]["provider"].is_string(), "{v}");
+    assert!(is_array(&compute["providers"]), "{v}");
+    for reader in ["detect", "history", "spectrum"] {
+        let sel = &compute["stft"][reader];
+        assert!(sel["provider"].is_string(), "{reader}: {v}");
+        assert!(sel["requested"].is_string(), "{reader}: {v}");
+        assert!(
+            sel["fallback"].is_null() || sel["fallback"].is_string(),
+            "{reader}: {v}"
+        );
+    }
+    assert_eq!(compute["provider_changes"], json!(0), "{v}");
 
     // /api/history over the fixture's band: cell grid.
     let t1 = unix_now() + 5.0;
