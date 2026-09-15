@@ -125,3 +125,74 @@ fn a_running_graph_and_a_swap_allocate_nothing_on_the_pipeline_thread() {
     // Dropping the retired instances happens off the pipeline thread (here: after counting).
     drop(staged);
 }
+
+/// T-111: a `messages` output's pipeline-thread side (filter a frame, `try_send` its time, channel
+/// and `Arc` layer tree onto the bounded writer queue) allocates nothing, and a full queue drops
+/// and counts instead of blocking or allocating. Frames that are not CRC-valid are not queued.
+#[test]
+fn a_messages_output_queues_frames_without_allocating() {
+    use hk_blocks::{FrameInfo, Output, PortVec};
+    use hk_model::{CrcStatus, Timestamp};
+    use hk_pipeline::recipes::messages::MessagesSink;
+    use hk_pipeline::recipes::runtime::PipelineStats;
+    use hk_pipeline::recipes::taps::FrameCtx;
+    use hk_stream::inspector::{FitStatus, LayerTree};
+
+    const FRAMES: usize = 8;
+    let tree = Arc::new(LayerTree {
+        nodes: Vec::new(),
+        byte_index: Vec::new(),
+        fit: FitStatus::Ok,
+        errors: Vec::new(),
+    });
+    let mut out = Output::for_port(&PortInfo {
+        ty: PortType::Frames,
+        rate_hz: 1e5,
+        max_items: FRAMES,
+        hold_items: 0,
+    });
+    let PortVec::Frames(buf) = &mut out.data else {
+        unreachable!("a frames port")
+    };
+    for i in 0..FRAMES {
+        let mut info = FrameInfo::new(i as u64, 100 * i as u64, 0);
+        info.bit_len = 16;
+        info.check = if i % 4 == 3 {
+            CrcStatus::Invalid
+        } else {
+            CrcStatus::Valid
+        };
+        info.layers = Some(Arc::clone(&tree));
+        buf.push(&[0xab, 0xcd], info);
+    }
+    let stats = Arc::new(PipelineStats::default());
+    let (mut sink, rx) = MessagesSink::with_queue(64, Arc::clone(&stats));
+    let ctx = FrameCtx {
+        decoder: "recipe:alloc@1",
+        frame_model: "alloc",
+        emitter_id: None,
+        channel_hz: 1e6,
+        channels_hz: &[],
+        recipe_version: 1,
+        edit_rev: 0,
+    };
+    let t_of = |s: f64| Timestamp::from_unix_nanos(s as i64);
+    assert_eq!(
+        sink.publish(&out, &ctx, &t_of),
+        6,
+        "warm-up: 6 CRC-valid frames"
+    );
+    let (queued, allocs) = counted(|| sink.publish(&out, &ctx, &t_of));
+    assert_eq!((queued, allocs), (6, 0), "queuing frames allocates nothing");
+    assert_eq!(rx.try_iter().count(), 12);
+
+    let (queued, allocs) = counted(|| {
+        (0..11)
+            .map(|_| sink.publish(&out, &ctx, &t_of))
+            .sum::<u64>()
+    });
+    assert_eq!(allocs, 0, "a full queue drops without allocating");
+    assert_eq!(queued, 64);
+    assert_eq!(stats.decodes_dropped.load(Ordering::Relaxed), 2);
+    assert_eq!(rx.try_iter().count(), 64);
+}

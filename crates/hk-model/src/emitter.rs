@@ -65,6 +65,20 @@ impl IdentityScheme {
     pub fn shares_channel(&self) -> bool {
         !matches!(self, IdentityScheme::RdsPi)
     }
+
+    /// The canonical value of an identity read from an unsigned field of `bits` bits (0 when the
+    /// width is unknown), rendered in hex or decimal: the schemes with a documented form get it
+    /// (`adsb-icao` 6 lower-case hex digits, `rds-pi` 4 upper-case, `ais-mmsi` 9 digits);
+    /// others are lower-case hex zero-padded to the field width, or plain decimal (T-111).
+    pub fn canonical_uint(&self, value: u64, bits: u32, hex: bool) -> String {
+        match self {
+            IdentityScheme::AdsbIcao => format!("{value:06x}"),
+            IdentityScheme::RdsPi => format!("{value:04X}"),
+            IdentityScheme::AisMmsi => format!("{value:09}"),
+            _ if hex => format!("{value:0w$x}", w = bits.div_ceil(4) as usize),
+            _ => value.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for IdentityScheme {

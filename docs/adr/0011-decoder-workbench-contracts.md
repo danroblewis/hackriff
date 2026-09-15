@@ -226,6 +226,9 @@ JSON, not TOML:
 **Outputs:**
 - `inspector`: frame records, §14.
 - `messages`: Decode messages (§5.1), also stored as Decode rows. The `decode` mapping names the frame model, an identity field (feeds the Emitter identity, docs/07 §2.11), metadata field paths and content field paths.
+  - **Mapping** (T-111): `{frame_model, identity?: {scheme, field, format: hex | dec}, metadata[], content[], require[], service?}`. Validation checks the scheme (a known scheme, or a token read as `other:<scheme>`), the format, that at least one field is mapped, and that `service` is a token. Values are the fields' decoded values; keys are the last path segment (the whole path when two mapped paths share it). The identity takes its scheme's canonical form (`adsb-icao` 6 lower-case hex digits, `rds-pi` 4 upper-case).
+  - **Rows** (T-111): one Decode row per CRC-valid frame whose map fit (`ok`/`partial`) and that has every `require`d field (default: any mapped field). `decoder_id` is `recipe:<id>`, `decoder_version` the recipe version.
+  - **Ingestion is the plugin path** (T-111, `hk-pipeline/src/recipes/messages.rs`). The pipeline thread `try_send`s each accepted frame's time, channel and `Arc` layer tree onto a bounded queue (1024; full → dropped and counted in `stats.decodes_dropped`; no allocation, no blocking). A writer thread per output maps, sanitises under the pipeline's effective class with the `output_policy` parsed by the plugin manifest rules (`hk_plugins::output_metadata_policy` + `sanitize_decode`), and stores through `hk_plugins::Ingest::store_decode`: repository content gate, identity sighting with the target emitter as context, republish on `decodes/<pipeline>/<output>`. New emitters get the family step (`classify_decoder_emitters`, shared with plugin chains) with `service` (or the recipe id) as decoder evidence. Like plugin decodes, rows are not deduplicated; entity resolution folds repeated identities.
 - `stage`: a named default stage stream. Any port can still be tapped ad hoc.
 
 **Input:** `iq` means the runtime down-converts the target (emitter, selection, band, refined channel) to `sample_rate_hz`. `bits`/`soft`/`frames` means the recipe tail runs over a recorded decoded stream (§14.7): the parser-authoring loop without RF.
@@ -258,6 +261,7 @@ Hot edits don't save. `POST /api/pipelines/{id}/save` writes the running revisio
 
 - `schema_version` is the format version (2). An unknown version is refused; new optional keys need a new schema version, because unknown fields are errors.
   - **2** (T-085 review, 2026-09-15, before anything shipped): variable-length framing (`length_from`, `terminator`, `bit_order` on `sync_search`; `ppm_demod` → frames; `assemble`), field-map `char_bits: 4` + `pocsag-bcd`, `parity`, `skip_bits`, `scale`/`add`/`value_unit`. Version 1 was never released and is not read.
+  - T-111 (2026-09-15, still before anything shipped) adds the optional `decode.service` key to version 2 instead of bumping it: no version 2 document had been released, and existing documents stay valid.
 - `version` is per recipe id, from 1, monotonic, and **immutable once saved**. Saving always creates `latest + 1`, so old versions stay re-runnable and a stored decoded stream names the exact version (and `edit_rev`) that produced it.
 - A node may pin a block `version`; a mismatch is a validation error. A block's descriptor version bumps when a change would invalidate or alter existing recipes.
 - **Storage:**

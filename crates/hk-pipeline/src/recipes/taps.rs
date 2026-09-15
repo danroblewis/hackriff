@@ -505,7 +505,9 @@ pub enum OutputSink {
     Frames(InspectorSink),
     /// A declared `stage` output (always on).
     Stage(StageTap),
-    /// Nothing served (a `messages` output before T-089).
+    /// A `messages` output: Decode rows through an off-thread writer (T-111).
+    Messages(crate::recipes::messages::MessagesSink),
+    /// Nothing served (a placeholder while an edit swaps sinks).
     Idle,
 }
 
@@ -520,6 +522,7 @@ impl OutputSink {
         match self {
             OutputSink::Frames(s) => publish_frames(s, out, ctx, t_of),
             OutputSink::Stage(t) => t.publish(out, ctx, t_of),
+            OutputSink::Messages(m) => m.publish(out, ctx, t_of),
             OutputSink::Idle => 0,
         }
     }

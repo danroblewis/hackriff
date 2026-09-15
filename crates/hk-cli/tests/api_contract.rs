@@ -1041,6 +1041,11 @@ fn recipe_and_pipeline_routes_match_the_documented_shapes() {
     );
     assert_eq!(p["nodes"][0]["id"], json!("a"));
     assert!(p["stats"].is_object() && p["status"].is_object() && p["target"]["band"].is_object());
+    // T-111: the `messages` outputs' decode counters.
+    assert!(
+        p["stats"]["decodes"].is_u64() && p["stats"]["decodes_dropped"].is_u64(),
+        "{p}"
+    );
     let (st, v) = get(addr, "/api/pipelines");
     assert_eq!(st, 200);
     assert!(

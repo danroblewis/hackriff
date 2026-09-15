@@ -500,6 +500,19 @@ fn metadata_policy(
     }))
 }
 
+/// The metadata policy an `output`-shaped object declares (§9.3: `metadata_keys`,
+/// `frame_models`, `labels`, `identity`; `content_class` and the other manifest output keys are
+/// accepted and ignored), parsed and checked exactly as a manifest's. A recipe's
+/// `output_policy` has this shape, so its in-process decodes are sanitised by the same rules as
+/// plugin decodes (T-111). `Ok(None)` when no policy key is declared.
+pub fn output_metadata_policy(
+    output: &serde_json::Value,
+) -> Result<Option<MetadataPolicy>, ManifestError> {
+    let mut raw: RawOutput =
+        serde_json::from_value(output.clone()).map_err(|e| ManifestError::Json(e.to_string()))?;
+    metadata_policy(&mut raw, &mut Vec::new())
+}
+
 fn range(raw: Option<RawRange>, field: &'static str) -> Result<Option<HzRange>, ManifestError> {
     let Some(r) = raw else { return Ok(None) };
     for v in [r.min, r.max].into_iter().flatten() {

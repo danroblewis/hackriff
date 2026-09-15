@@ -701,6 +701,50 @@ fn signal_062_rds_recipe_synthetic_pi_pty_ps_and_radiotext_exact() {
         !texts.is_empty() && texts.iter().all(|t| t == truth_rt),
         "[{TAG}] RadioText {texts:?} vs {truth_rt:?}"
     );
+
+    // T-111: the recipe's messages outputs ingest decodes like a plugin's. CRC-valid
+    // `recipe:rds` rows naming the truth PI are attached to the blindly found station emitter
+    // (the pipeline's target is the sighting context; a PI does not share its channel).
+    let pi = format!("{truth_pi:04X}");
+    let station: hk_model::EmitterId = emitter.parse().unwrap();
+    let repo = repo(&s.live.dir.0);
+    let deadline = Instant::now() + LIMIT;
+    loop {
+        let live = repo.live_emitter_id(station).unwrap();
+        let mut models: Vec<String> = repo
+            .emitter_links(live)
+            .unwrap()
+            .into_iter()
+            .filter_map(|l| match l.target {
+                hk_model::LinkTarget::Decode(d) => repo.decode(d).ok(),
+                _ => None,
+            })
+            .filter(|d| {
+                d.decoder_id == "recipe:rds"
+                    && d.crc_status == hk_model::CrcStatus::Valid
+                    && d.identity.as_ref().is_some_and(|i| {
+                        i.scheme == hk_model::IdentityScheme::RdsPi && i.value == pi
+                    })
+            })
+            .map(|d| d.frame_model)
+            .collect();
+        models.sort();
+        models.dedup();
+        if models.iter().any(|m| m == "rds-group") {
+            eprintln!(
+                "[{TAG}] RESULT T-111: recipe decode rows with PI {pi} attached to station \
+                 emitter {live}: frame models {models:?}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "[{TAG}] no recipe:rds decode with PI {pi} attached to {live} after {LIMIT:?} \
+             (attached models {models:?})"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
     let (code, stopped) = s.call("DELETE", &format!("/api/pipelines/{id}"), None);
     assert_eq!(code, 200, "[{TAG}] {stopped}");
     s.finish();

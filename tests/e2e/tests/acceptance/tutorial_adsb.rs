@@ -41,14 +41,11 @@
 //! content). The block's regression test renders those four squitters at every tenth-sample
 //! phase.
 //!
-//! **Known gap found by this task (not fixed here — a runtime feature, not a block bug).** The
-//! recipe's `aircraft` output (`kind: "messages"`) does not yet ingest decodes into the
-//! Repository: `hk-pipeline/src/recipes/runtime.rs` `build_sink` still answers
-//! `OutputKind::Messages => Ok((OutputSink::Idle, None))`, and `recipes/graph.rs` warns "messages
-//! outputs are served once field-map evaluation lands (T-089)" even though T-089 (the field-map
-//! evaluator) landed. So unlike readsb's own decodes, the recipe's decodes never reach
-//! `/api/inventory` on their own; both tests below read the recipe's `frames` inspector stream
-//! instead (as the RDS tutorial reads `groups`).
+//! **Decode rows (T-111; the gap T-097 found).** The recipe's `aircraft` output
+//! (`kind: "messages"`) ingests its decodes into the Repository through the plugin ingestion
+//! (`hk-pipeline/src/recipes/messages.rs`). The field checks below still read the `frames`
+//! inspector stream (as the RDS tutorial reads `groups`); [`assert_recipe_decode_rows`] then checks
+//! the stored `recipe:adsb` rows, their emitters and those emitters' ADS-B explanations.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -65,7 +62,7 @@ use hk_api::{
 use hk_cli::pipeline::PipelineRecipes;
 use hk_cli::record::http;
 use hk_e2e::{Fixture, SynthRequest, TruthItem};
-use hk_model::{DecodedIdentity, FreqRange, IdentityScheme, Region};
+use hk_model::{CrcStatus, DecodedIdentity, FreqRange, IdentityScheme, LinkTarget, Region};
 use hk_stream::{OpenerRegistry, Record, StreamReader};
 use serde_json::{Value, json};
 
@@ -588,10 +585,78 @@ fn tutorial_adsb_recipe_decodes_blind_and_matches_truth() {
         "[{TAG}] only {} of 16 distinct truth squitters decoded; missing {missing:?}",
         seen.len()
     );
+    let icaos: BTreeSet<String> = expected.keys().map(|(icao, _, _)| icao.clone()).collect();
+    assert_recipe_decode_rows(&s, &icaos);
 
     let (code, stopped) = s.call("DELETE", &format!("/api/pipelines/{id}"), None);
     assert_eq!(code, 200, "[{TAG}] {stopped}");
     s.finish();
+}
+
+/// T-111: the recipe's `aircraft` messages output ingests its decodes like a plugin's. Every truth
+/// aircraft has CRC-valid `recipe:adsb` Decode rows naming its ICAO (identity from the `icao`
+/// field, DF/TC metadata), each attached to the aircraft's emitter, and that emitter's top ranked
+/// explanation is ADS-B (the mapping's `service` decoder evidence, as readsb's manifest id is).
+/// The rows are written off the pipeline thread, so this waits for them.
+fn assert_recipe_decode_rows(s: &Served, icaos: &BTreeSet<String>) {
+    let repo = repo(&s.live.dir.0);
+    let deadline = Instant::now() + LIMIT;
+    loop {
+        let mut pending = Vec::new();
+        for icao in icaos {
+            let identity = DecodedIdentity {
+                scheme: IdentityScheme::AdsbIcao,
+                value: icao.clone(),
+            };
+            let rows: Vec<_> = repo
+                .decodes_for_identity(&identity)
+                .unwrap()
+                .into_iter()
+                .filter(|d| d.decoder_id == "recipe:adsb")
+                .collect();
+            for d in &rows {
+                assert_eq!(d.crc_status, CrcStatus::Valid, "[{TAG}] {d:?}");
+                assert_eq!(d.frame_model, "adsb-es", "[{TAG}] {d:?}");
+                assert_eq!(d.metadata["df"], json!(17), "[{TAG}] {d:?}");
+                assert!(d.metadata["tc"].is_u64(), "[{TAG}] {d:?}");
+            }
+            let Some(emitter) = repo.emitter_by_identity(&identity).unwrap() else {
+                pending.push(format!("{icao}: no emitter ({} rows)", rows.len()));
+                continue;
+            };
+            let linked = repo
+                .emitter_links(emitter.id)
+                .unwrap()
+                .into_iter()
+                .filter(
+                    |l| matches!(l.target, LinkTarget::Decode(d) if rows.iter().any(|r| r.id == d)),
+                )
+                .count();
+            let ranked = hk_pipeline::explanations(&repo, emitter.id).unwrap();
+            let top = ranked.first().map(|x| x.service.clone());
+            if rows.is_empty() || linked == 0 || top.as_deref() != Some("adsb") {
+                pending.push(format!(
+                    "{icao}: {} rows, {linked} linked, top explanation {top:?}",
+                    rows.len()
+                ));
+            } else {
+                eprintln!(
+                    "[{TAG}] RESULT T-111 {icao}: {} recipe decode rows, {linked} linked to emitter \
+                     {}, top explanation adsb",
+                    rows.len(),
+                    emitter.id
+                );
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "[{TAG}] recipe decode rows after {LIMIT:?}: {pending:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 // --- Agreement with the readsb plugin chain, on the same live run -------------------------------
