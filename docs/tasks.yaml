@@ -2688,7 +2688,8 @@ notes:
   - id: T-170
     milestone: M2
     title: "Mock SDR dequant perf regression: bandit test 81.5 s -> 108.8 s after T-141's per-bin FFT dequant on re-rendered hops; bypass when not quantisation-limited and/or cheaper FFT path"
-    status: in-progress
+    status: done
+    commit: 5f5def7
     deps: [T-141]
     parallel_group: M2E
     use_cases: []

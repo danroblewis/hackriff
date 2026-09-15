@@ -1690,3 +1690,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.398 T-147 in review (47dc746, merge a05202c). Opus review launched.**
   - Post-merge tests: hk-detect 6, hk-context 69, hk-model 8, hk-pipeline 6 (incl. the 6 h sparse-visit repro); lint clean.
   - The 46 h 10%-channel learning diagnostic is still running. It is explanatory only and not required for the merge.
+- **B0.399 T-170 merged (5f5def7).**
+  - **Change:** dequant is bypassed when rounding noise ≤ 1.1579% of the floor (10^0.005−1), i.e. the floor is ≥ 2.68 codes rms.
+  - **Bandit test:** 110.4 s → 82.4 s. The bandit recording is ~3.46 codes, so it is bypassed.
+  - **Unchanged:** the `scheduler_history` scene (~0.5 code) still dequantises, with the floor gap still 0.070 dB. The 8 mock tests and 4 bandit tests pass; lint clean.
+  - **Next:** full check started.
