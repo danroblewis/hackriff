@@ -517,6 +517,8 @@ pub(crate) struct Shared {
     pub track_decodes: Arc<crate::chains::TrackDecodes>,
     /// The run's compute providers (T-056): one registry shared by every segment.
     pub compute: hk_dsp::compute::Compute,
+    /// T-174: the §2.6 DC-twin rule on the history grid (the occupancy engine's cells).
+    pub dc_twin: hk_context::occupancy::channels::DcTwinRule,
 }
 
 impl Shared {
@@ -986,7 +988,23 @@ fn start_segment(
         _ => None,
     };
     let specs = cfg.settings.chain_specs();
+    // T-174: the live DC-twin rule uses the occupancy engine's grid (level-0 cells).
+    let dc_twin = {
+        let p = common
+            .product
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let py = &p.config().pyramid;
+        hk_context::occupancy::channels::DcTwinRule {
+            f_cell_hz: py.f_cell_hz,
+            slack_ns: i64::try_from(py.t_cell.as_nanos())
+                .unwrap_or(1_000_000_000)
+                .max(1),
+            lo_tolerance_hz: hk_detect::DcRule::default().tolerance_hz,
+        }
+    };
     let shared = Arc::new(Shared {
+        dc_twin,
         counters: Arc::clone(&common.counters),
         ring,
         gate,

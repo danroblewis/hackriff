@@ -46,6 +46,7 @@ use std::sync::{Arc, PoisonError};
 use std::thread;
 use std::time::Duration;
 
+use hk_context::occupancy::channels::{DetectionExtent, dc_only_suspect};
 use hk_context::{Correlator, FeedCache, FloorAnomalies, FloorAnomalyConfig, Site};
 use hk_core::ReadOutcome;
 use hk_detect::clip::is_clipped_ci8;
@@ -61,6 +62,7 @@ use hk_dsp::{InputInfo, SpectrumFrame, StftConfig, WelchConfig};
 use hk_model::{DetectionId, FreqRange, Timestamp, TrackId, TrustVerdict};
 use num_complex::Complex;
 
+use crate::dc_twin::{LiveDcTwins, Observed};
 use crate::events::{Candidate, ControlEvent, MemberBox};
 use crate::run::Shared;
 use crate::stats::{add, inc, set};
@@ -270,6 +272,14 @@ struct DetectNode {
     dense_frames: VecDeque<u64>,
     namer: CaptureNamer,
     finishing: bool,
+    /// T-174 (ADR-0012 §2.6): recent clean detections and open DC flags across tunings.
+    twins: LiveDcTwins,
+    /// This batch's tracked detections, for [`Self::twins`].
+    twin_batch: Vec<Observed>,
+    /// Refuted DC flags (reused).
+    refuted: Vec<DetectionId>,
+    /// DC-flagged detections that become trustworthy (`good`) when their flag is refuted.
+    dc_goodable: HashSet<DetectionId>,
 }
 
 impl DetectNode {
@@ -291,7 +301,12 @@ impl DetectNode {
         let scheduler_captures = shared.cfg.drive_scheduler;
         let mut det = Detector::new(dcfg).map_err(|e| anyhow::anyhow!("detector config: {e:?}"))?;
         det.retain_capture_results(scheduler_captures);
+        let twins = LiveDcTwins::new(shared.dc_twin);
         Ok(Self {
+            twins,
+            twin_batch: Vec::new(),
+            refuted: Vec::new(),
+            dc_goodable: HashSet::new(),
             lossless: shared.gate.enabled(),
             shared,
             tx,
@@ -436,9 +451,20 @@ impl DetectNode {
                     }
                     let id = r.detection.id;
                     let f = &r.detection.flags;
+                    let dc_only = dc_only_suspect(f);
                     if !(f.spur_candidate || f.image_candidate || f.impulsive) {
                         self.good.insert(id);
+                    } else if dc_only && !(f.image_candidate || f.impulsive) {
+                        self.dc_goodable.insert(id);
                     }
+                    let extent = DetectionExtent::of(&r.detection);
+                    let suspect = extent.suspect;
+                    self.twin_batch.push(Observed {
+                        id,
+                        extent,
+                        dc_only,
+                        own_lo: Some(r.provenance.get().tune.center_hz).filter(|f| f.is_finite()),
+                    });
                     if r.candidate.is_confirmed() {
                         self.confirmed.insert(id);
                     }
@@ -454,10 +480,9 @@ impl DetectNode {
                             t_start: t,
                             continues: r.continues,
                             snr_db: r.detection.snr_mean_db,
-                            // The occupancy engine's §2.6 rule, so candidates and FCO agree.
-                            suspect: hk_context::occupancy::channels::detection_is_suspect(
-                                &r.detection.flags,
-                            ),
+                            // The occupancy engine's §2.6 rule, so candidates and FCO agree; a
+                            // DC flag a twin refutes is cleared below (T-174).
+                            suspect,
                         },
                     );
                     self.order.push_back((t.as_unix_nanos(), id));
@@ -474,6 +499,7 @@ impl DetectNode {
                 }
             }
         }
+        self.apply_dc_twins();
         while self
             .order
             .front()
@@ -482,9 +508,44 @@ impl DetectNode {
             let (_, id) = self.order.pop_front().expect("front");
             self.boxes.remove(&id);
             self.good.remove(&id);
+            self.dc_goodable.remove(&id);
             self.confirmed.remove(&id);
             self.det_track.remove(&id);
         }
+    }
+
+    /// T-174 (ADR-0012 §2.6): the batch's detections go through the live DC-twin index. A refuted
+    /// DC flag clears its box's suspect flag and, with no other untrustworthy flag, makes the
+    /// detection trustworthy for its track's candidate. A box already sent to the control thread
+    /// (linked) is retracted there and its confirmed track offered again.
+    fn apply_dc_twins(&mut self) {
+        if self.twin_batch.is_empty() {
+            return;
+        }
+        let mut refuted = std::mem::take(&mut self.refuted);
+        self.twins
+            .observe(self.now_ns, &self.twin_batch, &mut refuted);
+        self.twin_batch.clear();
+        for id in refuted.drain(..) {
+            let Some(b) = self.boxes.get_mut(&id) else {
+                continue;
+            };
+            if !b.suspect {
+                continue;
+            }
+            b.suspect = false;
+            let member = b.clone();
+            if self.dc_goodable.remove(&id) {
+                self.good.insert(id);
+            }
+            if let Some(&track) = self.det_track.get(&id) {
+                self.send(ControlEvent::MemberRefuted { track, member });
+                if self.confirmed.contains(&id) {
+                    self.maybe_confirm(track, id);
+                }
+            }
+        }
+        self.refuted = refuted;
     }
 
     fn handle_track_events(&mut self, tev: Vec<TrackEvent>) {

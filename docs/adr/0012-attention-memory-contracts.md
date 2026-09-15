@@ -152,7 +152,7 @@ A threshold crossing coincides with a suspect detection (flagged `clipped`, `sus
 - overlapping it in time within ± one time cell (the grid's `t_cell_ns`, the same slack as the visit window),
 - whose own tuning centre (its Provenance `tune.center_hz`) lies more than the detector's DC tolerance (15 kHz) outside its extent, so it came from a tuning whose DC is elsewhere. A twin whose tuning is unknown refutes nothing, and an unflagged image or intermod sitting at its own LO is not a twin.
 
-Other DC flags at the same frequency with no twin in their own window stay suspect. A real DC spur moves with the LO, has no clean off-LO twin and stays suspect. A suspect revisit:
+Other DC flags at the same frequency with no twin in their own window stay suspect. A real DC spur moves with the LO, has no clean off-LO twin and stays suspect. **The rule applies to live candidates too (T-174):** the detection reader refutes DC flags against its recent clean detections as they are emitted, so a refuted flag neither blocks the track's candidate nor counts toward the bandit's suspect fraction, suspect ban or suspect-only dwell. A suspect revisit:
 - It is excluded from `fco`, as unobserved rather than unoccupied, and counted in `n_suspect`.
 - `fco_suspect_upper` counts it as occupied, so the pair brackets the truth.
 - Suspect crossings never create or widen a learned channel.
