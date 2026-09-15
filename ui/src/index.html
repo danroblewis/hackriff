@@ -146,16 +146,25 @@
   <section id="selections" class="panel">
     <h2>Selections <button type="button" id="sel-clear" hidden>Delete all</button></h2>
     <p id="sel-info" class="hint"></p>
+    <div id="sel-bulk" class="acts" hidden>
+      <span id="sel-bulk-count" class="hint"></span>
+      <button type="button" id="sel-inspect-picked">Inspect ticked</button>
+      <button type="button" id="sel-delete-picked">Delete ticked</button>
+    </div>
+    <p id="sel-status" class="hint" aria-live="polite"></p>
     <div class="table-wrap">
       <table id="sel-table" class="grid" hidden>
         <thead><tr>
+          <th><input type="checkbox" id="sel-all" aria-label="Tick all selections"></th>
           <th>name</th><th class="num">f lo MHz</th><th class="num">f hi MHz</th><th class="num opt">bandwidth</th>
-          <th class="opt">time (UTC)</th><th>actions</th>
+          <th class="opt">time (UTC)</th><th class="num opt" title="Actions taken on this selection">links</th><th>actions</th>
         </tr></thead>
         <tbody id="sel-body"></tbody>
       </table>
     </div>
-    <p class="hint">Selections live in this page only. Demod, record and inspect are placeholders until T-052 (server-side selections).</p>
+    <div id="sel-report"></div>
+    <p class="hint">Selections are saved on the server (<code>/api/selections</code>); offline they stay in this page and sync when it returns.
+      Inspect loads region history and the ranked explanations of the emitters inside; Record uses the tuned window (per-selection outputs: T-061).</p>
   </section>
 
   <section id="inventory" class="panel">

@@ -143,6 +143,8 @@ enum Command {
         /// Target spectrum rows per second.
         #[arg(long, default_value_t = 25.0)]
         rows_per_s: f64,
+        #[command(flatten)]
+        listen: hk_cli::pipeline::ListenArgs,
     },
 }
 
@@ -242,6 +244,7 @@ fn main() -> anyhow::Result<()> {
             ui_dist,
             fft,
             rows_per_s,
+            listen,
         } => {
             hk_cli::signal::install()?;
             let source = match (replay, device) {
@@ -268,6 +271,7 @@ fn main() -> anyhow::Result<()> {
                 rows_per_s,
                 calibration,
                 token: None,
+                listen,
             })?;
         }
         Command::StreamTail { uds, tcp, count } => {

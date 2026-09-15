@@ -31,6 +31,7 @@ pub mod http;
 pub mod live_control;
 pub mod ondemand;
 pub mod query;
+pub mod selections;
 pub mod tcp;
 
 pub use hk_stream as stream;

@@ -107,6 +107,9 @@ define_ids! {
     ExternalEventId;
     /// A user marker or bookmark (T-050): a frequency the user named. User metadata, mutable.
     BookmarkId;
+    /// A persisted region selection (T-052): a frequency extent, optionally a time extent, the
+    /// user named. User metadata, mutable.
+    SelectionId;
 }
 
 #[cfg(test)]

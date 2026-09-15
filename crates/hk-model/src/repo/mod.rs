@@ -70,6 +70,7 @@ mod interpret;
 mod inventory;
 mod measure;
 mod refined;
+mod selections;
 #[cfg(test)]
 mod tests;
 mod verification;
@@ -94,6 +95,11 @@ use crate::time::Timestamp;
 pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind};
 pub use inventory::EmitterUpsert;
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
+pub use selections::{
+    SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
+    SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection, SelectionLink,
+    SelectionLinkKind,
+};
 pub use verification::{TrustTest, TrustVerdict};
 
 /// Embedded migrations, applied in order.

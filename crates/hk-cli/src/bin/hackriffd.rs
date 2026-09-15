@@ -43,6 +43,8 @@ struct Args {
     /// T-021 CalibrationState JSON (a file or a directory) for calibrated floors.
     #[arg(long)]
     calibration: Option<PathBuf>,
+    #[command(flatten)]
+    listen: hk_cli::pipeline::ListenArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -68,5 +70,6 @@ fn main() -> anyhow::Result<()> {
         feeds: a.feeds,
         token: None,
         calibration: a.calibration,
+        listen: a.listen,
     })
 }

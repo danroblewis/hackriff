@@ -57,6 +57,13 @@ table.grid .num { text-align: right; font-variant-numeric: tabular-nums; }
 #sel-table .acts { display: flex; gap: 4px; }
 #sel-table .acts button { font-size: 12px; padding: 1px 6px; }
 .sel-name { width: 11em; }
+.sel-box.picked { background: rgba(250,204,21,.24); border-width: 2px; }
+#sel-table tr.picked td { background: rgba(250,204,21,.08); }
+#sel-bulk { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+#sel-info.bad, #sel-status.bad { color: #fca5a5; }
+.sel-report h3 { font-size: 13px; margin: 8px 0 4px; }
+.sel-report ul { margin: 0; padding-left: 1.2em; }
+.sel-report li { margin: 2px 0; overflow-wrap: anywhere; }
 #inv-table th button { background: none; border: 0; padding: 0; color: var(--dim); font-size: 12px; }
 #inv-table th[aria-sort] button { color: var(--fg); }
 #inv-table th[aria-sort=ascending] button::after { content: " ▲"; }

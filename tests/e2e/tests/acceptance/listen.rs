@@ -45,6 +45,12 @@ fn station(fx: &hk_e2e::Fixture) -> TruthItem {
 /// `hk serve`'s API wiring over a running blind run: inventory, status and the listen opener.
 fn serve_live(live: &BlindLive) -> Server {
     let counters = live.handle.counters();
+    // The default cap is 8 (T-066); pin 2 here so the third listener exercises the refusal.
+    live.handle
+        .set_listen_settings(hk_pipeline::ListenSettings {
+            max_listeners: 2,
+            ..Default::default()
+        });
     let state = ApiState {
         inventory: Some(Arc::new(Mutex::new(repo(&live.dir.0)))),
         status: Some(Arc::new(move || counters.to_json())),
@@ -304,7 +310,7 @@ fn signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches() {
     // Detach: close the socket; the chain stops and no further frames are produced.
     close(ws);
     let t0 = Instant::now();
-    while listen_counter(addr, "active") > 0 {
+    while listen_counter(addr, "running") > 0 {
         assert!(
             t0.elapsed() < Duration::from_secs(30),
             "[{TAG}] chain still attached"

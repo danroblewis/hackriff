@@ -13,6 +13,7 @@
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
+//! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
@@ -88,6 +89,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/bookmarks/{id}"),
     ("PUT", "/api/bookmarks/{id}"),
     ("DELETE", "/api/bookmarks/{id}"),
+    ("GET", "/api/selections"),
+    ("POST", "/api/selections"),
+    ("GET", "/api/selections/{id}"),
+    ("PUT", "/api/selections/{id}"),
+    ("DELETE", "/api/selections/{id}"),
+    ("POST", "/api/selections/{id}/links"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
 ];
@@ -106,12 +113,18 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// Time allowed for a request head (and body) to arrive.
     pub request_timeout: Duration,
+    /// On-demand streams (`/ws/open/<name>`, T-066): how often the server pings the peer.
+    pub ondemand_ping_interval: Duration,
+    /// On-demand streams: a peer that sends nothing (no pong) for this long is dropped with its
+    /// session (half-open connections, vanished tunnel clients).
+    pub ondemand_peer_timeout: Duration,
     /// Address of the TCP stream server ([`crate::tcp`], T-060), reported by `/api/streams`.
     pub stream_tcp: Option<SocketAddr>,
 }
 
 impl ServerConfig {
-    /// Defaults: 64 connections, 10 s request timeout, no static files, no TCP stream server.
+    /// Defaults: 64 connections, 10 s request timeout, no static files, no TCP stream server,
+    /// on-demand pings every 5 s with a 20 s peer timeout.
     pub fn new(bind: SocketAddr, token: Token) -> Self {
         Self {
             bind,
@@ -119,6 +132,8 @@ impl ServerConfig {
             ui_dist: None,
             max_connections: 64,
             request_timeout: Duration::from_secs(10),
+            ondemand_ping_interval: Duration::from_secs(5),
+            ondemand_peer_timeout: Duration::from_secs(20),
             stream_tcp: None,
         }
     }
@@ -572,6 +587,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             name,
             &req.query,
             &req.headers,
+            &shared.config,
         );
     }
     if let Some(id) = req.path.strip_prefix("/ws/") {
@@ -592,7 +608,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         content_type: req.header("content-type"),
         caller: caller(&stream, &req, token),
     };
-    if let Some(r) = control::route(state, &ctl) {
+    if let Some(r) = control::route(state, &ctl).or_else(|| crate::selections::route(state, &ctl)) {
         let allow = r
             .allow
             .map(|a| format!("Allow: {a}\r\n"))

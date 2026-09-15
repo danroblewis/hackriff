@@ -859,7 +859,11 @@ tasks:
   - id: T-052
     milestone: M0b
     title: Multi-region selections as first-class objects (persisted; list/rename/delete; send to demod/record/inspect)
-    status: in-progress
+    status: done
+    commit: "5680e74 (merged; verified: lint, 146 Rust test groups, py, ui, acceptance green)"
+    result: "Selection object (id, name, f_lo/f_hi, t_lo?/t_hi?, notes, tags, links demod/recording/bitstream/inspection newest 256, created/updated) in selection table (0001_init.sql, v1), docs/07 2.20. GET/POST /api/selections, GET/PUT/DELETE /api/selections/{id}, POST /api/selections/{id}/links: Bearer on mutating, audited, validated, 503 without audit, client-chosen id with 409 on repeat; control.rs routing split into a shared dispatcher. UI server-backed store with optimistic changes, pending + sync notice + 15 s retry on network/401/5xx, rollback on 4xx; rename/delete, multi-select bulk Inspect/Delete, links count. Actions: Inspect = region history + emitters inside with top-3 explanations; Listen = listen.selection; Record calls /api/control/record/start when the window covers the selection else 'coming in T-061'; Demod 'coming in T-061'. Hooks inspect/demod/record(s) => Promise<ActionOutcome> (done link saved), listen(s) sync. Tests: hk-model 5, hk-api 3 integration + 2 route, UI 12; acceptance 18/18."
+    followups:
+      - "hk-cli daemon_drives_the_scheduler_and_serves_token_gated_status flaky (exactly 10 steps vs > 10) -> T-072 item 5"
     deps: [T-044, T-050]
     parallel_group: N
     use_cases: [AWARE-042, SIGNAL-062]
@@ -1007,7 +1011,8 @@ tasks:
   - id: T-061
     milestone: M0b
     title: Record outputs to files (bitstreams, symbols, WAV audio, IQ slices) from UI and CLI, per selection
-    status: todo
+    status: in-progress
+    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
     deps: [T-060, T-052, T-049]
     parallel_group: P
     use_cases: [SIGNAL-062, AWARE-036]
@@ -1018,7 +1023,6 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    hold: "after T-060, T-052 and T-049 merge"
   - id: T-062
     milestone: M0b
     title: Control API audit-log DoS fix and auth hardening (T-050 review)
@@ -1089,6 +1093,7 @@ tasks:
     milestone: M0b
     title: Listen cap and session leaks (configurable budget-based cap default >=8; close chains on WS close/tab gone/idle/half-open; 503 replumbing)
     status: in-progress
+    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
     user_report: "live demo build 6b17fe5: 3rd /ws/open/listen refused busy '2 listeners already running' (503) while user may not have had 2 tabs playing; stream ids reached listen/48 (suspected leaked sessions)"
     deps: [T-043]
     parallel_group: P
@@ -1152,6 +1157,7 @@ tasks:
     milestone: M0b
     title: Output-driven demod refinement (RefinementLoop per chain; WFM first) storing refined centre/bandwidth on the Emitter
     status: in-progress
+    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
     deps: [T-043, T-049, T-039]
     parallel_group: U
     use_cases: [SIGNAL-062]
@@ -1181,6 +1187,7 @@ tasks:
     milestone: M0b
     title: Pipeline fidelity follow-ups from blind acceptance (device-gap sample loss, readsb stamp latency, single-detection tracks, short-burst resolution)
     status: in-progress
+    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
     deps: [T-047]
     parallel_group: J
     use_cases: [AWARE-042, SIGNAL-001, SPACE-050]
@@ -1192,6 +1199,21 @@ tasks:
     effort: medium
     core_interface: true
     hold: "waiting for an agent slot"
+  - id: T-073
+    milestone: M0b
+    title: "Regression: intermittent Listen refusal no-analog-mode after mode selector 0.2.0 (listen_retune 1/3 flaky)"
+    status: in-progress
+    interrupted: "2026-09-13 agent terminated by API monthly spend limit (HTTP 429); WIP committed on its branch; resume after limit reset (2026-09-14 20:00 PT), throttled"
+    deps: [T-065]
+    parallel_group: T
+    use_cases: [SIGNAL-062]
+    found_by: coordinator verification of the T-065 merge, 2026-09-13
+    acceptance: "root cause found (probe snippet/box vs selector confidence; OBW99 85 Hz suggests carrier/pilot-only measurement); Listen never refuses a demod-able broadcast FM signal (best-evidence fallback reported as low-confidence if needed); listen_retune passes 20/20; regression test for short/unlucky probe; T-065 blind sweep kept (>=10 dB 111/114 or better, carrier not AM, FM fixtures WFM)"
+    area: crates/hk-demod (mode selection), crates/hk-pipeline/src/chains/listen.rs (probe call site), tests
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

@@ -12,7 +12,7 @@ import { Inspector, inspectHalfWidthHz } from "./inspect";
 import { InventoryTable } from "./inventory";
 import { installListen, strongestInView, type Extent, type PeakBox } from "./listen";
 import { SelectionPanel } from "./selection-panel";
-import { SelectionStore, type NewSelection } from "./selections";
+import { SelectionStore, apiBackend, demodSelection, inspectSelection, recordSelection, type NewSelection } from "./selections";
 import { MARK_DROP, MARK_GATED, Waterfall } from "./waterfall";
 
 export type Api = (path: string) => Promise<unknown>;
@@ -307,7 +307,7 @@ class Live {
     const period = 1 / Math.max(1e-3, this.header?.sample_rate_hz ?? 25);
     for (const s of this.selections.list()) {
       const el = document.createElement("div");
-      el.className = "sel-box";
+      el.className = this.selections.isPicked(s.id) ? "sel-box picked" : "sel-box";
       if (!place(el, s.f_lo, s.f_hi)) continue;
       let top = 0, bottom = 1;
       if (s.t_lo !== undefined && s.t_hi !== undefined) {
@@ -458,7 +458,10 @@ function main() {
     }
   };
   const panel = new HistoryPanel(api);
-  const selections = new SelectionStore();
+  // T-052: selections persist on the server; offline they stay in the page and retry every 15 s.
+  const selections = new SelectionStore({ backend: apiBackend(client) });
+  void selections.load();
+  window.setInterval(() => { if (selections.sync().mode === "offline") void selections.flush(); }, 15_000);
   // `live` is constructed after `listen` (Inspector needs listen.onShown) but the toolbar's
   // fallback targets need `live`'s view/spectrum, so it reads through this ref (T-069). The hooks
   // are only called from a button click, well after `liveRef` is set below.
@@ -482,11 +485,21 @@ function main() {
   live.onPick = (hz) => controls.bookmarks.setPick(hz);
   live.onPanOverflow = (c, v) => controls.offerRetune(c, v);
   controls.start();
-  new SelectionPanel(selections, {
+  const selPanel: SelectionPanel = new SelectionPanel(selections, {
     zoom: (s) => live.zoomTo(s.f_lo, s.f_hi),
     history: (s) => panel.selectWindow(s.f_lo, s.f_hi, s.t_lo, s.t_hi),
-    listen: listen.selection,
     bookmark: (s) => void controls.bookmarks.add(bookmarkFromSelection(s)),
+    // Stable hooks (selections.ts "Hook contract"); T-061 replaces demod and record.
+    hooks: {
+      inspect: async (s) => {
+        const { outcome, report } = await inspectSelection(api, s);
+        if (report) selPanel.showReport(report);
+        return outcome;
+      },
+      listen: (s) => { listen.selection(s); return { status: "done", message: `listening to ${s.name} (mode estimated)` }; },
+      demod: demodSelection,
+      record: (s) => recordSelection(client, s),
+    },
   });
   const inventory = new InventoryTable(api, panel, (lo, hi) => {
     live.highlight(lo, hi);

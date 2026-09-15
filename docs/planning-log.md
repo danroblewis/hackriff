@@ -447,3 +447,14 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.145 T-060 merged** after the user committed 6c7369d (legal text removal + output-driven tuning principle). The docs/stream-contract.md conflict was resolved by keeping the T-060 additions and dropping the legal lines. T-071 still waits for T-070. Verification running.
 - **B0.146 T-065 done** (4b52b1c). Mode selector rules 0.2.0: a pure carrier now reads carrier/CW (the old envelope filter collapsed on narrow signals); AM detected by an in-phase/quadrature sideband test; SSB and CW keying added; unknown kept. Blind sweep at ≥10 dB: 70/114 → 111/114 correct. Merge waits for the running T-060 verification. **Launched T-072** (detection quality): device-gap sample loss, readsb stamps from sample time, single-detection carriers stored, short-burst detector, flaky daemon test.
 - **B0.147 T-060 merge verified** (lint, 144 Rust test groups, Python, UI and acceptance all green). **T-065 merged** onto it; verification of that merge follows.
+- **B0.148 T-065 merge verification found a regression.** `listen_retune` fails in 1 of 3 runs at its precondition (before any retune). Listening under broadcast FM is refused with `422 no-analog-mode: no rule matched confidently (OBW99 85 Hz)`: the new selector sometimes can't classify the probe snippet. Lint and acceptance are green, and the test passed consistently before T-065. The fix is T-073, launched now (probe/selector confidence, best-evidence fallback, 20/20 stability, sweep preserved). This is not a legal-gating issue.
+- **B0.149 T-052 merged** (5680e74 → fc4ecf0): persisted multi-region selections with server-backed UI and action hooks. **T-061 record outputs launched** (bits, symbols, WAV, IQ slices with SigMF-style sidecars, linked to Bitstream/Recording/Selection; API + CLI + UI Demod/Record; quotas; mock-SDR tests). Five Rust-building agents are running, one over the soft cap, accepted at load ~6. Full verification of main is running.
+- **B0.150 Blocker: API monthly spend limit hit (HTTP 429), 2026-09-13 evening.**
+  - **Agents terminated:** T-061, T-066, T-070, T-072 and T-073. Many heartbeats queued while they were down; nothing could be launched.
+  - **Main is safe:** the T-052 merge verification had already passed (lint, 146 Rust test groups, py, ui, acceptance).
+  - **Salvage:**
+    - T-066 had committed b7bbe15 (Listen cap and leak fixes) just before stopping; its verification is unknown.
+    - Uncommitted work in T-070 (16 files), T-072 (4) and T-073 (2) is committed as WIP on their branches.
+    - T-061 had produced nothing.
+  - **Limit reset:** 2026-09-14 20:00 PT (now past).
+  - **Resume plan, throttled to conserve budget:** the coordinator verifies and merges T-066 itself; resume T-073 (regression) and T-070 (user priority) only; hold T-072, T-061, T-071 and the slot queue until those land.
