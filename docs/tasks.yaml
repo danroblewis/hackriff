@@ -1975,7 +1975,8 @@ tasks:
   - id: T-125
     milestone: M2
     title: "Mock SDR + e2e harness: replay time-compressed occupancy scenes on their observation schedule with a simulated clock"
-    status: in-progress
+    status: review
+    commit: 1ebe82c
     deps: [T-117]
     parallel_group: M2F
     use_cases: [AWARE-042, AWARE-044]

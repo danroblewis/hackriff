@@ -86,3 +86,10 @@ test-group = 'heavy-serial'
 [[profile.default.overrides]]
 filter = 'package(hk-pipeline) and binary(decoded_capture)'
 test-group = 'heavy-serial'
+
+# Found flaky under load (T-125 runs, 2026-09-15): asserts 400 publishes finish in < 4 s wall time
+# with a slow stub disk; took 4.2 s with five cargo jobs competing, passes alone in 2.0 s.
+[[profile.default.overrides]]
+filter = 'test(a_slow_disk_drops_and_counts_without_blocking_the_publisher)'
+test-group = 'heavy-serial'
+retries = 1

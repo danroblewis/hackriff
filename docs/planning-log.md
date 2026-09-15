@@ -903,3 +903,12 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
   Reviewer view on the 5 open questions: Q1/Q2/Q3/Q5 are safe defaults; Q4 (walk-survey alarms, 250 m radius) is worth asking the user, with alarms suppressed while moving as the safe default. tasks.yaml T-121/T-122 areas were aligned to the ADR §11 ownership map. Deferred nit: `SharedInterestingness::publish` validates under the lock. Merge order per ADR: T-115 → T-118 → T-119 → T-122; T-115 before T-120 touches control.rs. **Disk at 20 GB floor**; worktrees are being cleaned before the next launches.
 - **B0.287 Launched T-115** (observation log) **and T-120** (bandit scheduler; scheduler and sim work first, control.rs wiring after T-115 per the ADR merge order). Main build dir removed to free disk (21 → ~35 GB). Full check of main after T-113 running. Running: T-115, T-120, T-125, T-126.
+- **B0.288 T-125 delivered** (1ebe82c; coordinator reviewed the mock SDR diff).
+  - **Replay:** a scene's per-revisit IQ windows are joined into one SigMF recording, with each capture's `core:global_index` on the scene clock. The mock serves it through the unchanged device contract, and inter-window gaps are standard `GAP` with an exact `dropped_before`.
+  - **Mock fix:** gaps are now placed at exact recording positions (`recording_gaps()`), so a block never splices two windows. Real-time pacing no longer sleeps through recording gaps.
+  - **Wall-clock paths now on sample time:** `/api/analysis/strongest` (newest history frame) and the `hk serve mock:` start clock for gapped recordings.
+  - **48 h scene e2e:** 46 h simulated in 10.7 s; 247 detections inside windows; history empty in gaps; novelty first seen at 30.61 h, never before 30 h.
+  - **Open points:** scene gaps still count as device overruns/dropped samples, so if 'not observed' must be distinguished from 'device lost samples' that's a device-contract flag (tracked for T-115/T-118). No on-demand rendering per tune; windows are pre-rendered for a schedule.
+  - **nextest:** `a_slow_disk_drops_and_counts_without_blocking_the_publisher` (hk-store decoded, wall-time assert) moved to heavy-serial with 1 retry after failing twice under load.
+
+  T-125 merges after the in-flight full check.
