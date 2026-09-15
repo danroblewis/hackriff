@@ -3572,6 +3572,8 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    intermittency: "not constant: failed twice in a row at load ~14, then passed 29/29 in the full check after the T-187/T-210 merge at similar load (8ddb1a0). Treat as a start-up race whose margin depends on scheduling, not a hard break; the fix must still make it deterministic (10/10 under 6 burners), not rely on luck."
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
