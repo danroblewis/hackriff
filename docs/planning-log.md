@@ -2417,3 +2417,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Why it is fragile:** the assertion is `dropped == 0` at a fixed paced rate, so it measures machine throughput as much as the writer.
   - **Pinned** heavy-serial with one retry, reason documented in .config/nextest.toml, and **filed T-225** to make the assertion load-robust and then remove the pin.
   - **Acceptance was green** in that same run (29/29).
+- **B0.505 T-188 committed (88235e9): a REAL product bug, not a test flake. Merges after the running check.**
+  - **Root cause** (`crates/hk-demod/src/refine.rs`, validate step of `RefinementLoop::run`): the loop reported `locked` on the strength of a stale acquisition measurement, without the returned tuning ever locking at depth.
+  - **Why it looked plausible:** a WFM channel filter centred one 50 kHz grid step off the carrier cuts MPX noise while the 19 kHz pilot survives, so the 0.1 s acquisition window read 59.8 dB-Hz pilot C/N0 against 52-55 at the true centre. Acquisition then discarded its own centre correction for exceeding one step, so the centre stayed wrong and every later phase failed to lock: bandwidth untouched, no RDS PI, peak deviation 45 kHz against about 98 kHz.
+  - **User-visible effect:** `finish` still returned `locked: true`, so Listen retuned audio to 101.352 MHz, about 52 kHz off the station.
+  - **Fix:** the validation measurement now stands for the returned tuning whether or not it locked, so an acquisition-only lock yields an unlocked outcome and Listen keeps the probe centre.
+  - **Counts:** 1 failure in 32 loaded runs before; 0 in 20 after (6 burners, 20-way concurrency). One run hit the same decoy and correctly logged `locked false`, landing within 3 kHz of truth. Bound unchanged, no retry.
+  - **T-224 launched** into the freed slot.
