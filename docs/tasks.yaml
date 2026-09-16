@@ -6548,7 +6548,8 @@ tasks:
   - id: T-346
     milestone: M2-hardening
     title: just lint is fmt plus clippy only, so Python lint failures live on main outside every gate
-    status: in-progress
+    status: done
+    commit: 0a40a5f
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -6605,7 +6606,7 @@ tasks:
     milestone: M2-hardening
     title: Timestamp is serde-transparent over i64, so the same response can carry nanoseconds and seconds
       with no naming cue
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-337
@@ -6660,6 +6661,49 @@ tasks:
       time, which is exactly the inference the shared-time-axis invariant forbids. Add a server timestamp
       to status; give leases an absolute start and expiry rather than a bare duration. Update docs/api.md
       and api_contract.rs together per T-079, asserting values
+  - id: T-352
+    milestone: M2-hardening
+    title: 'lint-py is not reproducible off the lockfile: ruff resolves only because an incidental system
+      install is on PATH'
+    status: todo
+    priority: normal
+    deps:
+    - T-346
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: 'T-346 folded ruff into just lint and then proved its own recipe fragile: uv run --locked
+      ruff check . resolves only because a system-wide ruff happens to be on PATH on this Mac (/opt/homebrew/anaconda3/bin/ruff,
+      from an anaconda install), confirmed by reproducing ''Failed to spawn: ruff'' under a minimal PATH.
+      ruff is NOT in py/pyproject.toml''s dev dependency group, so the gate that was just added to catch
+      invisible failures is itself dependent on a personal tool install nobody declared. Add ruff to the
+      dev group, PINNED so uv run --locked is deterministic, and verify the recipe works under a minimal
+      PATH rather than on the machine that happens to have anaconda. T-346 left this alone because it means
+      adding a dependency, which was explicitly out of its scope - that restraint was right, and this is
+      the ticket for it'
+  - id: T-353
+    milestone: M2-hardening
+    title: CI runs cargo fmt and clippy directly rather than just lint, so the new Python lint gate does
+      not reach CI
+    status: todo
+    priority: normal
+    deps:
+    - T-346
+    - T-352
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-346''s other finding, and the one that means the gate hole is only half closed. .github/workflows/ci.yml''s
+      test job runs cargo fmt --all --check and cargo clippy DIRECTLY, not via just lint - so folding lint-py
+      into just lint catches Python lint for local and agent runs only, and a Python lint regression can
+      still reach main through CI unnoticed. That is the same shape as the original defect one layer out:
+      the gate that is supposed to be authoritative is not the gate that actually runs. Either call just
+      lint from CI, or add an explicit ruff step - and say which, with the reason, because the two differ
+      in how they drift: calling just lint keeps CI and agents in lockstep by construction, while a separate
+      step can silently diverge from the recipe exactly as it has here. Sequence after T-352, since a CI
+      step that depends on an undeclared system tool would fail on a clean runner. NOTE CLAUDE.md says CI
+      must stay green and is currently UNVERIFIED because nothing has been pushed - so whatever is changed
+      here cannot be confirmed until a push happens, and that limitation should be stated rather than assumed
+      away'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
