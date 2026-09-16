@@ -899,7 +899,7 @@ mod tests {
             stage: Stage::FeatureTree,
             provenance: ClassProvenance {
                 rules: "test@0".to_owned(),
-                features_version: 1,
+                features_version: FEATURES_VERSION,
                 features_ref: None,
                 ml: None,
                 snr_db: None,
