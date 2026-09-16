@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use hk_classify::density::DensityModel;
 use hk_classify::features::{FeatureInput, features};
+use hk_classify::harness::{SeedGuard, Split};
 use hk_classify::synth::{Class, DEV_SEEDS, SynthConfig, generate};
 use hk_classify::thresholds::thresholds_of;
 
@@ -23,6 +24,11 @@ const SEEDS_PER_CLASS: u64 = 60;
 const SNR_STEPS: [f64; 4] = [0.0, 5.0, 10.0, 15.0];
 
 fn main() {
+    // T-213: every seed fitting touches must be a dev seed. This is the runtime half of the
+    // dev/acceptance split — the ranges being disjoint (checked at compile time in
+    // `hk_classify::synth`) only means the split is *possible*; this fails loudly, with the
+    // offending seed named, if an acceptance seed ever ends up here by mistake.
+    let mut guard = SeedGuard::new(Split::Dev);
     let mut labelled = Vec::new();
     let mut cells = 0usize;
     for class in Class::TAXONOMY {
@@ -33,6 +39,7 @@ fn main() {
         for step in SNR_STEPS {
             let snr = gate + step;
             for seed in DEV_SEEDS.start..(DEV_SEEDS.start + SEEDS_PER_CLASS) {
+                guard.require(seed);
                 let s = generate(*class, &SynthConfig::new(snr, seed));
                 let f = features(&FeatureInput {
                     samples: &s.samples,

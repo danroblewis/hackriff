@@ -59,10 +59,14 @@ fn ratio(a: usize, b: usize) -> f64 {
 /// Key of one cell: source, truth family (`unknown` for held-out generators), SNR bin in dB.
 type Key = (String, String, i64);
 
+/// Key of one class-level cell: source, truth family, truth class, SNR bin in dB.
+type ClassKey = (String, String, String, i64);
+
 /// A blind evaluation report.
 #[derive(Clone, Debug, Default)]
 pub struct EvalReport {
     cells: BTreeMap<Key, Cell>,
+    class_cells: BTreeMap<ClassKey, Cell>,
     confusion: BTreeMap<(String, String), usize>,
     /// SNR bin width, dB.
     pub bin_db: f64,
@@ -73,16 +77,21 @@ impl EvalReport {
     pub fn new(bin_db: f64) -> Self {
         Self {
             cells: BTreeMap::new(),
+            class_cells: BTreeMap::new(),
             confusion: BTreeMap::new(),
             bin_db: if bin_db > 0.0 { bin_db } else { 5.0 },
         }
+    }
+
+    fn bin_of(&self, snr_db: f64) -> i64 {
+        (snr_db / self.bin_db).floor() as i64 * self.bin_db as i64
     }
 
     /// Records one classification. `truth` is the expected `hk-mod@1` family, or `None` for a
     /// held-out generator (expected outcome: `unknown`).
     pub fn record(&mut self, source: &str, truth: Option<&str>, snr_db: f64, c: &Classification) {
         let expected = truth.unwrap_or(UNKNOWN);
-        let bin = (snr_db / self.bin_db).floor() as i64 * self.bin_db as i64;
+        let bin = self.bin_of(snr_db);
         let cell = self
             .cells
             .entry((source.to_owned(), expected.to_owned(), bin))
@@ -110,11 +119,60 @@ impl EvalReport {
             .or_default() += 1;
     }
 
-    /// Every cell, in `(source, family, bin)` order.
+    /// [`Self::record`], plus a within-family class truth folded into a second, class-level table
+    /// (`source × family × class × SNR bin`). Pass `class_truth: None` when the truth has no
+    /// meaningful class (a held-out generator, or a family this taxonomy gives none). The class
+    /// call only counts once the classifier reports one at all: `c.class == None` is an
+    /// abstention at the class level, distinct from (and possible even when) the family call is
+    /// correct — a family can pass its gate while its within-family class stays unresolved.
+    pub fn record_with_class(
+        &mut self,
+        source: &str,
+        family_truth: Option<&str>,
+        class_truth: Option<&str>,
+        snr_db: f64,
+        c: &Classification,
+    ) {
+        self.record(source, family_truth, snr_db, c);
+        let Some(expected_class) = class_truth else {
+            return;
+        };
+        let family = family_truth.unwrap_or(UNKNOWN).to_owned();
+        let bin = self.bin_of(snr_db);
+        let cell = self
+            .class_cells
+            .entry((source.to_owned(), family, expected_class.to_owned(), bin))
+            .or_default();
+        cell.n += 1;
+        match &c.class {
+            Some(call) if call.label == expected_class => {
+                cell.top1 += 1;
+                cell.top2 += 1;
+            }
+            Some(call) => {
+                cell.wrong += 1;
+                let mut dist = call.dist.clone();
+                dist.sort_by(|a, b| b.p.total_cmp(&a.p));
+                if dist.iter().take(2).any(|lp| lp.label == expected_class) {
+                    cell.top2 += 1;
+                }
+            }
+            None => cell.unknown += 1,
+        }
+    }
+
+    /// Every family-level cell, in `(source, family, bin)` order.
     pub fn cells(&self) -> impl Iterator<Item = (&str, &str, i64, &Cell)> {
         self.cells
             .iter()
             .map(|((s, f, b), c)| (s.as_str(), f.as_str(), *b, c))
+    }
+
+    /// Every class-level cell, in `(source, family, class, bin)` order.
+    pub fn class_cells(&self) -> impl Iterator<Item = (&str, &str, &str, i64, &Cell)> {
+        self.class_cells
+            .iter()
+            .map(|((s, f, cl, b), c)| (s.as_str(), f.as_str(), cl.as_str(), *b, c))
     }
 
     /// The cells of one source at or above `min_snr_db`, summed.
