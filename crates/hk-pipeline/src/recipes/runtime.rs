@@ -318,11 +318,12 @@ pub struct PipelineStats {
     pub frames: AtomicU64,
     /// Chunks whose first sample did not follow the previous chunk (ring loss).
     pub gaps: AtomicU64,
-    /// Chunks flagged `DISCONTINUITY` (start, loss, retune, skip, or flagged by the source).
-    pub discontinuities: AtomicU64,
-    /// Of those, discontinuities the source itself flagged on a ring block (a device gap, a
-    /// recording splice) while the pipeline read contiguously.
-    pub source_discontinuities: AtomicU64,
+    /// Chunks flagged `DISCONTINUITY` (start, loss, retune, skip, or flagged by the source) and,
+    /// of those, the ones the source itself flagged on a ring block (a device gap, a recording
+    /// splice) while the pipeline read contiguously. The two are packed into one atomic (low 32
+    /// bits the total, high 32 bits the source-flagged subset) and counted in a single add, so a
+    /// reader can never catch one counted without the other (T-228).
+    discontinuity_pair: AtomicU64,
     /// Samples skipped to the live edge.
     pub skipped_samples: AtomicU64,
     /// Hot edits applied.
@@ -336,15 +337,29 @@ pub struct PipelineStats {
 }
 
 impl PipelineStats {
+    /// `(discontinuities, of which the source flagged)`, from one load: the pair is always
+    /// consistent because both are counted in the same atomic add (T-228).
+    pub fn discontinuity_counts(&self) -> (u64, u64) {
+        let v = self.discontinuity_pair.load(Ordering::Relaxed);
+        (v & u64::from(u32::MAX), v >> 32)
+    }
+
+    /// Counts one emitted discontinuity, and whether the source flagged it, together.
+    fn count_discontinuity(&self, from_source: bool) {
+        let step = if from_source { (1u64 << 32) | 1 } else { 1 };
+        self.discontinuity_pair.fetch_add(step, Ordering::Relaxed);
+    }
+
     fn to_json(&self) -> Value {
         let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let (discontinuities, source_discontinuities) = self.discontinuity_counts();
         json!({
             "samples": g(&self.samples),
             "chunks": g(&self.chunks),
             "frames": g(&self.frames),
             "gaps": g(&self.gaps),
-            "discontinuities": g(&self.discontinuities),
-            "source_discontinuities": g(&self.source_discontinuities),
+            "discontinuities": discontinuities,
+            "source_discontinuities": source_discontinuities,
             "skipped_samples": g(&self.skipped_samples),
             "edits": g(&self.edits),
             "status_ticks": g(&self.status_ticks),
@@ -1020,6 +1035,7 @@ impl RecipeRuntime {
             anchor: (start, Timestamp::now()),
             edit_rev: 0,
             disc: true,
+            disc_source: false,
             hops: hops_rt,
         };
         runner.retap();
@@ -1434,6 +1450,8 @@ struct Runner {
     recipe_version: u32,
     decoder: String,
     disc: bool,
+    /// Whether the pending discontinuity is one the source flagged: counted with it (T-228).
+    disc_source: bool,
     /// Follow-hops: the per-channel lanes feeding `graph` (T-093).
     hops: Option<hops::Hops>,
 }
@@ -1703,7 +1721,7 @@ impl Runner {
             && (chunk.discontinuity != Discontinuity::NONE || chunk.dropped_before > 0)
             && !self.disc
         {
-            inc(&st.source_discontinuities);
+            self.disc_source = true;
             self.disc = true;
         }
         self.next_sample = Some(chunk.end_sample());
@@ -1715,12 +1733,13 @@ impl Runner {
             graph,
             reader,
             disc,
+            disc_source,
             hops,
             ..
         } = self;
         if let Some(h) = hops.as_mut() {
             let flags = if *disc {
-                inc(&st.discontinuities);
+                st.count_discontinuity(std::mem::take(disc_source));
                 ChunkFlags::DISCONTINUITY
             } else {
                 ChunkFlags::NONE
@@ -1736,7 +1755,7 @@ impl Runner {
             .map_err(|_| "error: channel down-conversion failed".to_owned())?;
         if !block.samples.is_empty() {
             let flags = if *disc {
-                inc(&st.discontinuities);
+                st.count_discontinuity(std::mem::take(disc_source));
                 ChunkFlags::DISCONTINUITY
             } else {
                 ChunkFlags::NONE

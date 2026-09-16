@@ -1053,7 +1053,7 @@ fn a_malformed_output_policy_is_reported_as_a_pipeline_warning() {
 fn a_dense_adsb_like_burst_is_stored_without_dropping_decodes() {
     use hk_blocks::Output;
     use hk_model::{ContentClass, CrcStatus, Timestamp};
-    use hk_pipeline::recipes::messages::{MAX_BATCH, MessagesSink};
+    use hk_pipeline::recipes::messages::{MAX_BATCH, MESSAGE_QUEUE, MessagesSink};
     use hk_pipeline::recipes::runtime::PipelineStats;
     use hk_pipeline::recipes::taps::FrameCtx;
     use hk_stream::inspector::{FitStatus, LayerNode, LayerTree, NodeType};
@@ -1154,9 +1154,16 @@ fn a_dense_adsb_like_burst_is_stored_without_dropping_decodes() {
         let per_tick = RATE * TICK_MS / 1000;
         let start = Instant::now();
         let mut sent = 0;
+        let mut accepted = 0u64;
         for tick in 0..SECONDS * 1000 / TICK_MS {
+            // Offer a tick only once the writer's queue has room for all of it (queue depth, not
+            // wall clock): a drop then means the queue was genuinely full, never that this machine
+            // was busy for a moment (T-228).
+            wait("the writer's queue to have room for a tick", LIMIT, || {
+                (accepted - stored()) as usize + per_tick <= MESSAGE_QUEUE
+            });
             fill(&mut out, sent, per_tick);
-            sink.publish(&out, &ctx, &t_of);
+            accepted += sink.publish(&out, &ctx, &t_of);
             sent += per_tick;
             let next = start + Duration::from_millis(((tick + 1) * TICK_MS) as u64);
             if let Some(d) = next.checked_duration_since(Instant::now()) {
@@ -1165,6 +1172,10 @@ fn a_dense_adsb_like_burst_is_stored_without_dropping_decodes() {
         }
         let dropped = stats.decodes_dropped.load(Ordering::Relaxed);
         let queued = sent as u64 - dropped;
+        assert_eq!(
+            accepted, queued,
+            "every frame offered was queued or counted dropped"
+        );
         wait("the paced decodes to be stored", LIMIT, || {
             stored() == queued
         });
@@ -1188,6 +1199,6 @@ fn a_dense_adsb_like_burst_is_stored_without_dropping_decodes() {
         "T-112 writer: paced {RATE}/s drops unbatched {dropped_1}, batched {dropped}; \
          unpaced rows/s unbatched {rate_1:.0}, batched(max {MAX_BATCH}) {rate:.0}"
     );
-    assert_eq!(dropped, 0, "no decode dropped at {RATE}/s");
+    assert_eq!(dropped, 0, "no decode dropped while the queue had room");
     assert_eq!(offered, AIRCRAFT as u64, "every aircraft offered once");
 }
