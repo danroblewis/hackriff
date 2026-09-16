@@ -4561,7 +4561,7 @@ tasks:
   - id: T-267
     milestone: M4
     title: 'M4 control-channel hunting: continuous 4FSK/C4FM on the LMR raster, confirmed by frame sync AND valid CRC'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-266

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hkpy.synth import impairments, occupancy, scenarios
+from hkpy.synth import impairments, occupancy, scenarios, trunk_scene
 from hkpy.synth.scene import GENERATOR, GENERATOR_VERSION, SUPPORTED_DATATYPES, _jsonable
 
 
@@ -60,6 +60,10 @@ SCENARIOS: dict[str, ScenarioSpec] = {
                                   "multi-channel 2-FSK POCSAG (512/1200/2400 Bd), BCH(31,21)+parity"),
     "acars_message": ScenarioSpec(scenarios.acars_message, scenarios.ACARS_DEFAULTS, ("SIGNAL-062",),
                                   "AM+MSK 2400 Bd VHF ACARS, SYN/SOH..ETX framing, CRC-16/KERMIT incl parity (acarsdec convention)"),
+    "trunk_control_channel": ScenarioSpec(
+        trunk_scene.trunk_control_channel, trunk_scene.TRUNK_CC_DEFAULTS, (),
+        "continuous C4FM trunking control channel (frame sync + CRC) beside an unframed "
+        "continuous 4FSK decoy and bursty NBFM, on the 12.5 kHz LMR raster"),
 }
 
 

@@ -249,7 +249,7 @@ fn kmeans2(v: &[f64]) -> (f64, f64, f64, f64) {
     (lo, hi, sl, sh)
 }
 
-fn filter_same(x: &[Complex32], taps: &[f32]) -> Vec<Complex32> {
+pub(crate) fn filter_same(x: &[Complex32], taps: &[f32]) -> Vec<Complex32> {
     let n = x.len();
     let d = taps.len() / 2;
     (0..n)
