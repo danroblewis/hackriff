@@ -41,6 +41,21 @@ pub use thresholds::{
 /// Schema version of [`Classification`].
 pub const CLASSIFICATION_SCHEMA: u16 = 1;
 
+/// The [`ClassProvenance::features_version`] of a row whose feature set **cannot be identified**
+/// (T-290).
+///
+/// Every classification written before T-290 carries `1`, whatever feature vector actually
+/// produced it: `hk-classify` restated its provenance constant as `1` while the feature vector
+/// moved to `2` (T-248) and `3` (T-286). Those versions differ in what the `symmetry` dimension
+/// means and, from `3`, in whether it is measured at all, so `1` on a stored row means
+/// **indeterminate** — it is not "features@1", it does not order against a current version, and it
+/// does not imply the row is old.
+///
+/// Nothing is migrated: `emitter_classification` is append-only, and the writing code left no way
+/// to tell which of the three vectors a given row used. Rows written since T-290 name the vector
+/// exactly, so [`ClassProvenance::names_a_feature_set`] separates the two cases.
+pub const FEATURES_VERSION_INDETERMINATE: u32 = 1;
+
 /// Maximum reported confidence: no call is certain.
 pub const MAX_CONFIDENCE: f64 = 0.999;
 
@@ -162,7 +177,12 @@ impl SuspectFlags {
 pub struct ClassProvenance {
     /// Rule set and version, e.g. `hk-classify/tree@1`, or `decoder:<id>` for a decoder row.
     pub rules: String,
-    /// EmissionFeatures version the features were computed with.
+    /// Version of the **C15 feature vector** the classifier measured with
+    /// (`hk_classify::FEATURES_VERSION`, `features@N` of ADR-0016 §4.2).
+    ///
+    /// Not the C18 `EmissionFeatures` field set, which this doc used to name and which versions
+    /// separately ([`crate::signature::EMISSION_FEATURES_VERSION`]).
+    /// [`FEATURES_VERSION_INDETERMINATE`] is the one value that names no feature set.
     pub features_version: u32,
     /// The EmissionFeatures snapshot used, if stored (opaque reference until T-201).
     pub features_ref: Option<String>,
@@ -181,6 +201,17 @@ pub struct ClassProvenance {
     pub suspect: SuspectFlags,
     /// Power mode it ran in, if reported.
     pub power_mode: Option<String>,
+}
+
+impl ClassProvenance {
+    /// Whether [`Self::features_version`] identifies the feature vector behind this row.
+    ///
+    /// `false` only for [`FEATURES_VERSION_INDETERMINATE`], which every pre-T-290 writer stamped
+    /// on every row whatever vector it used. A reader that shows, filters or compares feature-set
+    /// versions checks this first: `1` is "unknown", never "the first version".
+    pub fn names_a_feature_set(&self) -> bool {
+        self.features_version > FEATURES_VERSION_INDETERMINATE
+    }
 }
 
 /// Classification flags.
@@ -437,6 +468,12 @@ impl Classification {
         if prov.rules.trim().is_empty() || prov.thresholds.trim().is_empty() {
             return bad("provenance rules and thresholds are required");
         }
+        // T-290: provenance names a feature set. `0` names none at all; `1` is the indeterminate
+        // marker of a pre-T-290 writer, which is a legal stored value and never a legal new one —
+        // a writer only reaches it by leaving `features_version` at a default it never set.
+        if prov.features_version == 0 {
+            return bad("provenance.features_version names no feature set");
+        }
         if !prov.snr_gate_db.is_finite() || prov.snr_db.is_some_and(|s| !s.is_finite()) {
             return bad("provenance SNR is not finite");
         }
@@ -508,7 +545,9 @@ pub(crate) mod tests {
             stage,
             provenance: ClassProvenance {
                 rules,
-                features_version: 1,
+                // Determinate (T-290): this fixture stands for a row a current writer produced,
+                // not a pre-T-290 one, whose `FEATURES_VERSION_INDETERMINATE` names no vector.
+                features_version: 2,
                 features_ref: None,
                 ml: None,
                 snr_db: Some(24.0),
@@ -521,6 +560,27 @@ pub(crate) mod tests {
             flags: Vec::new(),
             reasons: Vec::new(),
         }
+    }
+
+    /// T-290: `features_version` 1 is the pre-T-290 indeterminate marker rather than "features@1",
+    /// such a row still reads back (it is stored, and the table is append-only), and a provenance
+    /// naming no feature set at all is refused.
+    #[test]
+    fn a_features_version_of_one_is_indeterminate_and_zero_is_refused() {
+        let mut c = sample("fsk", Stage::FeatureTree);
+        assert!(
+            c.provenance.names_a_feature_set(),
+            "a row a current writer produced names its vector"
+        );
+        c.provenance.features_version = FEATURES_VERSION_INDETERMINATE;
+        assert!(
+            !c.provenance.names_a_feature_set(),
+            "1 says only `some vector, unrecorded`"
+        );
+        c.validate()
+            .expect("a pre-T-290 row still reads back: it is stored, and never rewritten");
+        c.provenance.features_version = 0;
+        assert!(c.validate().is_err(), "0 names no feature set at all");
     }
 
     /// Equality up to float parse precision: serde_json (without `float_roundtrip`) may read a

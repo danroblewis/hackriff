@@ -75,7 +75,7 @@ pub struct Classification {                 // hk_model::classify; serde, deny_u
 }
 pub struct ClassProvenance {
     pub rules: String,                      // "hk-classify/tree@1"
-    pub features_version: u32,              // EmissionFeatures version
+    pub features_version: u32,              // C15 feature-vector version (features@N, §4.2); 1 = indeterminate, see below
     pub features_ref: Option<FeaturesId>,
     pub ml: Option<ModelRef>,               // "amc-psk-qam@0.2.0#sha8", with provider + precision, only if stage=dl
     pub snr_db: Option<f64>, pub snr_gate_db: f64, pub gated: bool,
@@ -86,6 +86,8 @@ pub struct ClassProvenance {
 ```
 
 **Legacy fit.** Columns `family`, `confidence`, `open_set_score` and `model_version` (= `provenance.rules`, or the `ml` ref for DL, or `decoder:<id>`) keep their meaning. So `/api/inventory`, `FAMILY_ORDER` readers, `class_entropy` and `family.rs` evidence keep working. Migration 0006 adds nullable `taxonomy`, `stage`, `arb_rank INTEGER` and `detail TEXT` (JSON of the rest). Rows written before M3 have NULLs and are read as legacy: `stage` is derived (`decoder:` prefix → decoder; `input_kind='track'` → track-shape; else chain). The append-only trigger is unchanged.
+
+**Feature-set version (T-290).** `provenance.features_version` is the version of the **C15 feature vector** (`features@N`, §4.2) — not the C18 `EmissionFeatures` field set, which versions separately — and `1` is reserved to mean **indeterminate**. Every row written before T-290 carries `1` whatever vector produced it: `hk-classify` restated the constant as `1` while the vector moved to `2` (T-248) and `3` (T-286), so rows named a feature set that did not exist and disagreed with the version stamped on the densities they were scored against. The versions differ in what `symmetry` measures and, from `3`, in whether it is measured at all. Nothing is migrated — the table is append-only, and a `1` row's actual vector is not recoverable — so a reader treats `1` as unknown and `> 1` as exact: `hk_model::classify::FEATURES_VERSION_INDETERMINATE` and `ClassProvenance::names_a_feature_set`. There is now one definition of the constant (`hk_classify::features::FEATURES_VERSION`, re-exported by `thresholds`), so provenance and the shipped densities cannot drift again.
 
 **Arbitration rank (replaces `FAMILY_ORDER`):** `ORDER BY coalesce(arb_rank, <derived>) ASC, classification_id DESC`.
 
@@ -128,7 +130,7 @@ Below a gate, a family contributes no likelihood mass, so its mass moves to `unk
 ## 4. Classical cascade (C15, T-199/T-200)
 
 1. **Input.** A `NormalisedSnippet` (hk-estimate, CFO-corrected, resampled) plus the C13 `ParameterSet`, C14 `SymbolParameters` and C16 result when present. The raw snippet is kept. Suspect detections (clipped, IMD, image) still classify, but they carry `suspect-input` and never mint signatures (§5).
-2. **Features** (`hk-classify/src/features.rs`, one vector, `features_version` 1). Each feature is a value or an abstention reason:
+2. **Features** (`hk-classify/src/features.rs`, one vector, `features_version` = `hk_classify::FEATURES_VERSION`; `features@3` today, 1 → 2 in T-248 and 2 → 3 in T-286, both redefining `symmetry`). Each feature is a value or an abstention reason:
    - Azzouz–Nandi γ_max, σ_ap, σ_dp, σ_aa, σ_af, P;
    - normalised cumulants C̃₂₀, C̃₄₀, C̃₄₂, and μ₄₂;
    - instantaneous-frequency histogram modality and levels;

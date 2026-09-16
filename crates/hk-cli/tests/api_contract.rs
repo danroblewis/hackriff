@@ -418,6 +418,21 @@ fn inventory_classification_route_answers_as_documented() {
                 }
             }
             assert!(c["provenance"]["rules"].is_string(), "{v}");
+            // T-290: provenance names a feature set that exists. `1` is the pre-T-290
+            // indeterminate marker (`hk_model::classify::FEATURES_VERSION_INDETERMINATE`), which
+            // says only "some vector, unrecorded". This server runs on a fresh data directory, so
+            // every row it serves was written by this build and must name its own vector.
+            let fv = c["provenance"]["features_version"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("features_version is an integer: {v}"));
+            assert!(fv >= 1, "features_version {fv} names no feature set: {v}");
+            if c["stage"] == json!("feature-tree") {
+                assert!(
+                    fv > 1,
+                    "a feature-tree row this build wrote must not claim the indeterminate \
+                     features_version 1: {v}"
+                );
+            }
             assert!(is_array(&c["reasons"]), "{v}");
             // A classification explains; it never names.
             for forbidden in ["identity", "known_status", "lifecycle"] {

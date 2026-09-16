@@ -4303,7 +4303,7 @@ tasks:
     title: 'Synthetic LoRa scenario in the py/ synth tooling: deterministic up-chirps
       with known SF/BW/CR/payload as hidden ground truth, as a burst/chirp acceptance
       fixture'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: SYNTH
@@ -4509,7 +4509,7 @@ tasks:
   - id: T-263
     milestone: MUI
     title: 'ADR-0017 TM-7: past events mark the timeline scrubber, and scrubbing re-derives the live lists from the IQ ring'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-260
@@ -5165,7 +5165,7 @@ tasks:
     milestone: M3
     title: 'thresholds::FEATURES_VERSION is 1 while features::FEATURES_VERSION is 3, so
       every Classification reports a feature-set version that does not exist'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3A
@@ -5188,7 +5188,7 @@ tasks:
     milestone: M3
     title: 'M3 open set is short by ONE snippet (0.8990 vs 0.90): carrier recovery or a
       symbol-rate estimate C14 will trust on a near-constant-envelope constellation'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-286
@@ -5212,6 +5212,34 @@ tasks:
     needs: user or supervisor choice of route
     model: opus
     effort: high
+    core_interface: false
+    route_chosen_2026_09_16: 'SUPERVISOR RULING: take the CARRIER RECOVERY route. It
+      fixes a real measurement defect (residual CFO) rather than widening what the
+      classifier trusts. Keeping M3 red at 0.8990 until a genuine fix crosses 0.90 is
+      correct - do not round, do not loosen. The C14 rate-trust option is NOT taken.'
+
+  - id: T-292
+    milestone: M3
+    title: 'Test fixtures in hk-ml, hk-store and hk-api hand-write features_version: 1,
+      which now reads as the indeterminate marker'
+    status: todo
+    priority: low
+    deps:
+    - T-290
+    parallel_group: M3A
+    use_cases: []
+    found_by: 'T-290 (2026-09-16), which left them alone deliberately to keep its diff
+      tight and flagged them rather than silently changing them'
+    acceptance: 'these are #[cfg(test)] provenance builders and harmless at runtime, but
+      after T-290 a hand-written 1 means FEATURES_VERSION_INDETERMINATE - so anyone
+      eyeballing them reads a fabricated row as a legacy one. Set them to the real
+      constant (or to an explicitly indeterminate value where that is the point of the
+      fixture) so the test corpus says what it means. No production code, no floor
+      changes, and do not weaken the validate rule that refuses 0'
+    area: crates/hk-ml, crates/hk-store, crates/hk-api (test fixtures)
+    needs: none
+    model: sonnet
+    effort: low
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
