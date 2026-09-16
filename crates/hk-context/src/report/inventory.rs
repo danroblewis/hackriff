@@ -55,6 +55,10 @@ impl InventoryProvider for RepoInventory<'_> {
                 freq: Some(req.region),
                 time: Some(req.span),
                 limit: MAX_REPORT_INVENTORY_ROWS,
+                // T-219: a survey report is evidence, not a tidy list. A row that defers to another
+                // (suppressed, duplicate or attributed artifact) is still something that was
+                // measured here, so it is reported with its relation rather than dropped.
+                relations: hk_model::RelationVisibility::All,
                 ..InventoryQuery::default()
             })
             .map_err(failed)?;

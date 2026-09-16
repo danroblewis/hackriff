@@ -44,6 +44,9 @@ mod device_variants;
 #[path = "acceptance/inventory_lifecycle.rs"]
 mod inventory_lifecycle;
 
+#[path = "acceptance/overlap.rs"]
+mod overlap;
+
 #[path = "acceptance/scene_48h.rs"]
 mod scene_48h;
 

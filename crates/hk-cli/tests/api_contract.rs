@@ -555,6 +555,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         // T-158: measurement fields (present, possibly null).
         "snr_db",
         "peak_dbfs",
+        // T-219: why this row defers to another, when it does (present, possibly null).
+        "relation",
         // T-211: arbitrated classification and a differing latest row (present, possibly null).
         "classification",
         "latest_classification",
@@ -643,6 +645,15 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     let (st, v) = get(addr, "/api/inventory?state=deleted");
     assert_eq!(st, 200, "{v}");
     let (st, v) = get(addr, "/api/inventory?state=bogus");
+    assert_eq!(st, 400, "{v}");
+    // T-219: rows that defer to another are hidden by default and listed with `relations=all`.
+    let (st, all) = get(addr, "/api/inventory?relations=all");
+    assert_eq!(st, 200, "{all}");
+    assert!(
+        all["total"].as_u64() >= v["total"].as_u64(),
+        "relations=all never lists fewer rows: {all}"
+    );
+    let (st, v) = get(addr, "/api/inventory?relations=bogus");
     assert_eq!(st, 400, "{v}");
 
     // /api/analysis/strongest (T-079): the station is the (or a) strongest thing in its own band.

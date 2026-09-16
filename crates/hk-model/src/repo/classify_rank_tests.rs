@@ -6,7 +6,7 @@
 use rusqlite::params;
 
 use super::classify::EFFECTIVE_RANK_SQL;
-use super::{RepoError, Repository, SCHEMA_VERSION};
+use super::{RepoError, Repository};
 use crate::classify::tests::{assert_close, sample};
 use crate::classify::{ArbRank, Stage, TaxonomyRef};
 use crate::cluster::*;
@@ -389,7 +389,13 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
             ))
             .unwrap();
         }
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+        // T-219: an older file has no 0008 relation table either, so drop it with the 0007
+        // columns. The version is pinned to the one before 0007 by number, not to
+        // `SCHEMA_VERSION - 1`, so a later migration does not silently change what is rolled back.
+        conn.execute_batch("DROP TABLE IF EXISTS emitter_relation")
+            .unwrap();
+        const BEFORE_0007: i64 = 6;
+        conn.pragma_update(None, "user_version", BEFORE_0007)
             .unwrap();
     }
     let mut r = Repository::open(&path).unwrap();

@@ -58,6 +58,7 @@ pub mod plan;
 pub mod provenance;
 pub mod recording;
 pub mod region;
+pub mod relate; // T-219 (C40)
 pub mod repo;
 pub mod sigmf;
 pub mod time;
@@ -108,6 +109,11 @@ pub use recording::{
     RecordingSpan, RecordingTrigger, RetentionClass,
 };
 pub use region::{FreqRange, Region, TimeRange};
+pub use relate::{
+    ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation, OVERLAP_MIN_FRACTION,
+    RelationAuthor, RelationClaim, RelationKind, RelationVisibility, RowEvidence,
+    distinguishing_evidence, overlap_fraction, predict_artifacts, present_only_with, rank_score,
+};
 pub use repo::{
     BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterUpsert,
     LIFECYCLE_TEXT_MAX, ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX,
