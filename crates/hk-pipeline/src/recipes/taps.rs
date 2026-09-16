@@ -31,6 +31,8 @@ use hk_stream::{
 };
 use serde_json::{Map, Value};
 
+use crate::recipes::tap_spectrum::{self, SpectrumTap};
+
 /// Most frame bytes a frame record serialises (bigger frames are cut; `bit_len` stays true).
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
@@ -273,6 +275,10 @@ pub fn frames_header(
 }
 
 /// Header of a stage stream `output_id` on a port of type `ty` at `rate_hz` (§14.4 table).
+///
+/// `view` selects `raw` (the table's per-port-type `kind`/`datatype`) or `spectrum` (`iq`/`real`
+/// ports only; [`tap_spectrum::spectrum_header`]); callers check port-type support before
+/// choosing `spectrum` (see `openers::open_stage`).
 pub fn stage_header(
     ctx: &StreamCtx,
     recipe: &Recipe,
@@ -326,7 +332,7 @@ pub fn tap_config() -> PublisherConfig {
 
 /// A tap's publisher.
 pub enum TapPublisher {
-    /// Binary data records.
+    /// Binary data records (`view=raw`).
     Binary {
         /// The publisher.
         publisher: Publisher,
@@ -335,6 +341,17 @@ pub enum TapPublisher {
     },
     /// Frame records.
     Frames(InspectorSink),
+    /// A PSD of an `iq`/`real` port (`view=spectrum`, §14.4, T-160).
+    Spectrum {
+        /// The publisher.
+        publisher: Publisher,
+        /// The spectrum engine (buffers samples, averages segments into rows). Boxed: it holds
+        /// an FFT plan and several `fft_size`-length scratch buffers, much bigger than the other
+        /// variants.
+        engine: Box<SpectrumTap>,
+        /// Encoded row scratch (pre-sized to `fft_size` `f32`s).
+        scratch: Vec<u8>,
+    },
 }
 
 impl TapPublisher {
@@ -356,16 +373,33 @@ impl TapPublisher {
         })
     }
 
+    /// For a `view=spectrum` `header` (built by [`tap_spectrum::spectrum_header`]) at `rate_hz`.
+    pub fn new_spectrum(
+        header: StreamHeader,
+        config: PublisherConfig,
+        rate_hz: f64,
+    ) -> Result<Self, StreamError> {
+        Ok(TapPublisher::Spectrum {
+            publisher: Publisher::new(header, config)?,
+            engine: Box::new(SpectrumTap::new(rate_hz)),
+            scratch: Vec::with_capacity(4 * tap_spectrum::SPECTRUM_FFT_SIZE),
+        })
+    }
+
     fn handle(&self) -> PublisherHandle {
         match self {
-            TapPublisher::Binary { publisher, .. } => publisher.handle(),
+            TapPublisher::Binary { publisher, .. } | TapPublisher::Spectrum { publisher, .. } => {
+                publisher.handle()
+            }
             TapPublisher::Frames(s) => s.handle(),
         }
     }
 
     fn header(&self) -> &StreamHeader {
         match self {
-            TapPublisher::Binary { publisher, .. } => publisher.header(),
+            TapPublisher::Binary { publisher, .. } | TapPublisher::Spectrum { publisher, .. } => {
+                publisher.header()
+            }
             TapPublisher::Frames(s) => s.header(),
         }
     }
@@ -457,6 +491,50 @@ impl StageTap {
                     payload: scratch,
                 });
                 self.gap = false;
+                0
+            }
+            TapPublisher::Spectrum {
+                publisher,
+                engine,
+                scratch,
+            } => {
+                if self.handle.open_consumers() == 0 {
+                    self.gap = true;
+                    // No consumer: don't buffer or FFT samples for a row nobody will read.
+                    engine.reset();
+                    return 0;
+                }
+                if out.data.is_empty() {
+                    self.gap |= restart;
+                    return 0;
+                }
+                if self.gap || restart {
+                    engine.reset();
+                }
+                self.gap = false;
+                let t = t_of(out.meta.source_index);
+                let sample_index = out.meta.index;
+                let mut emit = |row: &[f32], disc: bool| {
+                    tap_spectrum::encode_row(row, scratch);
+                    let flags = if disc {
+                        RecordFlags::DISCONTINUITY
+                    } else {
+                        RecordFlags::empty()
+                    };
+                    // A gated (content-forbidding class) record is published header-only by the
+                    // publisher itself; nothing to do here.
+                    let _ = publisher.publish_binary(BinaryRecord {
+                        t,
+                        sample_index,
+                        flags,
+                        payload: scratch,
+                    });
+                };
+                match &out.data {
+                    PortVec::Real(x) => engine.push_real(x, &mut emit),
+                    PortVec::Iq(x) => engine.push_iq(x, &mut emit),
+                    _ => {}
+                }
                 0
             }
         }

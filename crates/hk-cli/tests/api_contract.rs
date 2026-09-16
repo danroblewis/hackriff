@@ -2016,6 +2016,127 @@ fn recipe_and_pipeline_routes_match_the_documented_shapes() {
     stop_server(serving);
 }
 
+/// T-160: stage tap `view=spectrum` (stream contract §14.4). `view=raw`/omitted is unchanged; on
+/// an `iq`/`real` port `view=spectrum` serves a bounded PSD (`kind: spectrum`, `rf32_le` rows,
+/// `fft_size` declared, at most 25 rows/s) instead of raw samples; an unsupported port type is
+/// refused 409, an unknown `view` value 400 (§14.8 opener refusals).
+#[test]
+fn stage_tap_spectrum_view_answers_as_documented() {
+    let (serving, addr, _dir_guard) = start_server();
+    let doc = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "t160-contract", "version": 1,
+        "name": "T-160 contract",
+        "input": {"port": "iq", "sample_rate_hz": 48000.0, "bandwidth_hz": 40000.0},
+        "nodes": [
+            {"id": "fm", "block": "fm_demod", "params": {"deviation_hz": 5000}},
+            {"id": "clock", "block": "clock_recovery", "params": {"symbol_rate_bd": 1000.0}},
+            {"id": "bits", "block": "slicer"}
+        ],
+        "outputs": [{"id": "fm", "kind": "stage", "from": "fm"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let target = json!({"band": {"f_lo": STATION_HZ - 20e3, "f_hi": STATION_HZ + 20e3}});
+    let (st, v) = post(
+        addr,
+        "/api/pipelines",
+        &json!({"recipe": doc, "target": target}).to_string(),
+    );
+    assert_eq!(st, 201, "{v}");
+    let pid = v["id"].as_str().unwrap().to_owned();
+
+    // Default (no view / view=raw) is unchanged: the fm node's real port serves raw samples,
+    // with no spectrum geometry in the header.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=fm"),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("header first")
+    };
+    let header: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(
+        (&header["kind"], &header["datatype"]),
+        (&json!("audio"), &json!("rf32_le"))
+    );
+    assert!(header.get("fft_size").is_none(), "raw view: {header}");
+    let _ = ws.close(None);
+
+    // view=spectrum on the same real port: a bounded PSD, not raw samples.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=fm&view=spectrum"),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("header first")
+    };
+    let header: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(header["kind"], json!("spectrum"), "{header}");
+    assert_eq!(header["datatype"], json!("rf32_le"), "{header}");
+    assert_eq!(header["fft_size"], json!(4096), "{header}");
+    assert!(
+        header["sample_rate_hz"].as_f64().unwrap() <= 25.0 + 1e-9,
+        "{header}"
+    );
+    assert_eq!(
+        header["center_hz"],
+        json!(0.0),
+        "a real port is demodulated baseband, not RF-referenced: {header}"
+    );
+    assert!(header["bandwidth_hz"].as_f64().unwrap() > 0.0, "{header}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(Instant::now() < deadline, "a spectrum data record");
+        if let Message::Binary(b) = ws.read().unwrap() {
+            assert_eq!(
+                b.len(),
+                32 + 4 * 4096,
+                "one PSD row of fft_size f32s: {}",
+                b.len()
+            );
+            break;
+        }
+    }
+    let _ = ws.close(None);
+
+    // Unsupported port type (soft, bits): 409 (§14.8 "a view the port type doesn't support").
+    for node in ["clock", "bits"] {
+        let mut ws = connect_ws(
+            addr,
+            &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node={node}&view=spectrum"),
+        )
+        .unwrap();
+        let Message::Text(t) = ws.read().unwrap() else {
+            panic!("refusal first ({node})")
+        };
+        let v: Value = serde_json::from_str(t.as_str()).unwrap();
+        assert_eq!(
+            (&v["type"], &v["status"]),
+            (&json!("refused"), &json!(409)),
+            "{v}"
+        );
+    }
+
+    // An unrecognised view value: 400.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=fm&view=bogus"),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("refusal first")
+    };
+    let v: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(
+        (&v["type"], &v["status"]),
+        (&json!("refused"), &json!(400)),
+        "{v}"
+    );
+
+    stop_server(serving);
+}
+
 // T-089 inspector
 
 /// T-089: `POST /api/inspector/parse` evaluates a draft field map (the RDS worked recipe's) over
