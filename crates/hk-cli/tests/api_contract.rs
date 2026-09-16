@@ -1195,6 +1195,39 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
             .any(|r| r["presence"]["liveness"] != json!("absent")),
         "something was on the air in the last hour: {recent}"
     );
+    // T-263 (ADR-0017 TM-7) — scrubbing back must not empty the Confirmed catalogue, and must not
+    // let it read the liveness it has *now*. `t0`/`t1` do two things at once (select rows, scope
+    // the projections); `at` supplies only the second, so the same rows are listed and their
+    // presence is re-derived against the caller's own instant. Windowing Confirmed instead is
+    // precisely the §2.2 regression: the quiet stations would vanish.
+    let (st, scrubbed) = get(addr, "/api/inventory?state=confirmed&at=1");
+    assert_eq!(st, 200, "{scrubbed}");
+    assert_eq!(
+        scrubbed["total"], unwindowed["total"],
+        "`at` scopes the projection and selects nothing: the same rows stay listed: {scrubbed}"
+    );
+    for r in scrubbed["entries"].as_array().expect("entries") {
+        assert_eq!(
+            r["presence"]["liveness"],
+            json!("absent"),
+            "nothing had been on the air by 1970, however live the row is now: {r}"
+        );
+        assert_eq!(r["presence"]["intervals"], json!(0), "{r}");
+        assert!(
+            r["presence"]["last_interval"].is_null(),
+            "no interval is fabricated for a window that precedes all of them: {r}"
+        );
+        assert!(
+            r.get("family_in_window").is_none(),
+            "naming a live edge is not asking about a window: {r}"
+        );
+    }
+    // Refused, not silently ignored: a window's `t1` is already the caller's live edge, so a
+    // request giving both asks two questions at once.
+    let (st, v) = get(addr, &format!("/api/inventory?t0=0&t1={t1}&at={t1}"));
+    assert_eq!(st, 400, "at beside t0/t1 is refused: {v}");
+    let (st, v) = get(addr, "/api/inventory?at=nonsense");
+    assert_eq!(st, 400, "at must be a finite Unix second: {v}");
 
     // /api/analysis/strongest (T-079): the station is the (or a) strongest thing in its own band.
     let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);

@@ -10,15 +10,18 @@ import { selectionStoreFor } from "../explore/selections";
 import { focusSelection } from "../explore/slice";
 import { goLive, reviewAt, toast, type AppState } from "../state";
 import {
-  DRAG_PX, WINDOW_S, agoText, coverageText, currentSpan, pctForAgo, reduceActivity, scrubToTime, selectionSpans, timeRegionName,
-  timeWindowFromScrub, type HistoryGrid,
+  DRAG_PX, WINDOW_S, agoText, coverageText, currentSpan, eventMarkTitle, eventMarks, pctForAgo, reduceActivity,
+  ringSpan, scrubDataNote, scrubToTime, selectionSpans, timeRegionName, timeWindowFromScrub,
+  type CoverageGap, type EventRow, type HistoryGrid, type RingStatus,
 } from "./timeline";
 
 const COLUMNS = 96;
 const SVG_NS = "http://www.w3.org/2000/svg";
 const svgRect = () => document.createElementNS(SVG_NS, "rect");
 
-interface HistoryResponse extends HistoryGrid { coverage_summary?: { observed_fraction: number } }
+interface HistoryResponse extends HistoryGrid {
+  coverage_summary?: { observed_fraction: number; gaps?: CoverageGap[] };
+}
 interface RecordSession { id: string; active: boolean; elapsed_s: number; max_s: number }
 
 function spanOf(s: AppState) { return currentSpan({ live: s.live.view, device: s.device }); }
@@ -39,9 +42,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", "Activity over the retained history");
   const selLayer = h("div", { class: "cap-sel-layer" });
+  // T-263 (ADR-0017 TM-7): the past events a user scrubs *to*, and the IQ ring that still backs a
+  // scrub-back (ADR-0014). Both are placed from timespans the API served; neither is drawn at all
+  // until its poll has answered, so "not asked yet" never renders as "nothing happened".
+  const marksLayer = h("div", { class: "cap-marks" });
+  const ringTrack = h("div", { class: "cap-ring", hidden: true });
   const playhead = h("div", { class: "playhead" });
   const livePill = h("button", { class: "live-pill", type: "button" }, "● LIVE");
-  const band = h("div", { class: "cap-band" }, svg, selLayer, playhead, livePill);
+  const band = h("div", { class: "cap-band" }, svg, marksLayer, ringTrack, selLayer, playhead, livePill);
 
   el.replaceChildren(head, band);
 
@@ -102,6 +110,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   store.select((s) => s.focus, renderSelSpans);
 
   let coverageFraction: number | null = null;
+  // `null` = not answered yet, which is "unknown" and never "nothing" (T-164/T-207/T-284).
+  let coverageGaps: CoverageGap[] | null = null;
+  let ring: RingStatus | null = null;
+  let eventRows: EventRow[] | null = null;
+
   const renderNote = () => {
     const t = store.get().time;
     band.classList.toggle("reviewing", !t.live);
@@ -113,9 +126,30 @@ function mount(el: HTMLElement, ctx: AppContext) {
       noteB.textContent = `reviewing ${agoText(agoS)} ago`;
       playhead.style.left = `${pctForAgo(agoS)}%`;
     }
-    noteRest.textContent = ` · ${coverageText(coverageFraction)} · press LIVE to return`;
+    // T-263: what the scrubbed window is actually backed by. "Nothing was on the air" and "no data
+    // for this window" are different claims, and the note says which one applies.
+    const data = t.live ? "" : scrubDataNote(t.tS, false, ring, coverageGaps);
+    noteRest.textContent = ` · ${coverageText(coverageFraction)}${data ? ` · ${data}` : ""} · press LIVE to return`;
   };
   store.select((s) => s.time, renderNote, { immediate: true });
+
+  // T-263: past events and the retained ring. A mark is one timespan a row reported; it carries no
+  // liveness, because a `recurrence` appearance never measured one (see timeline.ts).
+  const renderMarks = () => {
+    const now = Date.now() / 1000;
+    marksLayer.replaceChildren(...(eventRows === null ? [] : eventMarks(eventRows, now).map((m) => {
+      const e = h("div", { class: `cap-mark ${m.state}`, title: eventMarkTitle(m, now) });
+      e.style.left = `${m.leftPct}%`;
+      e.style.width = `${m.widthPct}%`;
+      return e;
+    })));
+    const rs = ringSpan(ring, now);
+    ringTrack.hidden = rs === null;
+    if (rs) {
+      ringTrack.style.left = `${rs.leftPct}%`;
+      ringTrack.style.width = `${rs.widthPct}%`;
+    }
+  };
 
   // ---- activity band (GET /api/history, §4.4) ----
   const renderBand = (grid: HistoryGrid) => {
@@ -144,6 +178,18 @@ function mount(el: HTMLElement, ctx: AppContext) {
     );
     renderBand(grid);
     coverageFraction = grid.coverage_summary?.observed_fraction ?? null;
+    coverageGaps = grid.coverage_summary?.gaps ?? null;
+    // T-263: the ring's own span, and the events over the retained window. Each is asked for
+    // separately and fails separately — a server with no buffer answers 503, and that leaves `ring`
+    // null, which reads as "IQ coverage unknown" rather than as "the ring holds nothing".
+    ring = await client.get<RingStatus>("/api/iqbuffer").catch(() => null);
+    const inv = await client
+      .get<{ entries: EventRow[] }>(
+        `/api/inventory?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${now - WINDOW_S}&t1=${now}&limit=200`,
+      )
+      .catch(() => null);
+    if (inv) eventRows = inv.entries;
+    renderMarks();
     renderNote();
     renderSelSpans();
   }, 60_000);

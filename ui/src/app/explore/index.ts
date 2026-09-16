@@ -2,6 +2,7 @@
 // only what the API served; explanations are always shown as ranked suggestions, never as truth
 // (CLAUDE.md "Product vision" §4).
 import { toast } from "../state";
+import { sameCursor } from "../centre/review-render";
 import type { AppContext, AreaMounts, MountFn } from "../context";
 import { h } from "../dom";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
@@ -131,6 +132,11 @@ const mountInventory: MountFn = (el, ctx) => {
     render,
     { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] },
   );
+  // T-263 (ADR-0017 TM-7): scrubbing the capture timeline re-derives both lists at once, instead of
+  // leaving the previous window's rows on screen for up to a poll interval beside a waterfall
+  // already showing a different time. `loadInventoryRows` reads the cursor from the store at call
+  // time, so the windows it sends follow the scrub; this only makes it happen immediately.
+  ctx.store.select((s) => s.time, () => void reload(), { eq: sameCursor });
   void reload();
   startPoll(reload, 5000, (e) => ctx.store.set(toast(`inventory: ${apiErrorText(e)}`)));
 };
