@@ -471,8 +471,12 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // T-201: nor the 0010 measured-features table.
         // T-202: nor the 0011 cluster tables (children first: they reference each other).
         // T-266: nor the 0013 trunking tables (children first, down to `trunk_system`).
+        // T-262: nor the 0012 observation-time index. It is an *index*, not a table — its table
+        // `emitter_observation` comes from 0001 and stays — so it needs DROP INDEX, and without it
+        // replaying 0012 onto this file fails with "index ... already exists".
         conn.execute_batch(
-            "DROP TABLE IF EXISTS emitter_relation; \
+            "DROP INDEX IF EXISTS idx_emitter_observation_time; \
+             DROP TABLE IF EXISTS emitter_relation; \
              DROP TABLE IF EXISTS signature_match; \
              DROP TABLE IF EXISTS signature; \
              DROP TABLE IF EXISTS emission_features; \
