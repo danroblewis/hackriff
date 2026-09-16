@@ -6,7 +6,7 @@
     "core:hw": "HackRF One serial 0000000000000000d2b861dc263bc293, firmware 2026.01.3 (USB API 1.10), board rev 0, libhackrf 0.9.2 (2026.01.3), antenna unknown",
     "core:recorder": "hackriff hk-pipeline:outputs (ring reader) 0.1.0; converted from the hackriff-output-sidecar v1.0 by the coordinator",
     "core:author": "hackriff coordinator (receive-only)",
-    "core:description": "hackriff fixture capture-2026-09-15-fm-band: 45.0 s of the FM broadcast band as sampled at this site (HackRF One, 100.800 MHz centre, 2.4 Msps, LNA 32 / VGA 30 / amp on, antenna unknown (as attached by user; not changed)). Requested span 99.600-102.000 MHz, single tune, no retune. Receive-only; truth is PHY metadata only. ANNOTATIONS ARE EMPTY BY DESIGN: no analysis pass has been run over this capture, so no emission is asserted here. The capture README describes expected content (FM stations, a 99.99 MHz carrier) but that is an expectation, not a measurement, and the 100.3 MHz intermittent burst the user reported was silent at capture time. Truth annotations require an analysis pass (see docs/tasks.yaml).",
+    "core:description": "hackriff fixture capture-2026-09-15-fm-band: 45.0 s of the FM broadcast band as sampled at this site (HackRF One, 100.800 MHz centre, 2.4 Msps, LNA 32 / VGA 30 / amp on, antenna unknown (as attached by user; not changed)). Requested span 99.600-102.000 MHz, single tune, no retune. Receive-only; truth is PHY metadata only. THE TRUTH ANNOTATIONS ARE MEASURED (T-289, 2026-09-16): an analysis pass over the samples annotated three emissions (WFM broadcast at 101.298663 MHz and 99.699944 MHz, both carrying a 19 kHz stereo pilot, and an unidentified 28 kHz narrowband emission at 100.465339 MHz) and two receiver artefacts (the 10 MHz reference harmonic at 99.999572 MHz and the DC offset at the tuner centre). Each annotation records the measurement that justifies it. The frequencies this capture README anticipated were each measured and are not what it expected: the stations are elsewhere, the ''steady carrier'' at 99.99 MHz is a receiver spur, and 100.3 MHz was silent for all 45 s. Windows measured to be silent are recorded in the scenario annotation as measured_absent and carry no annotation of their own.",
     "core:license": "project-owned capture",
     "hackriff:provenance": {
       "device_id": "hackrf:0000000000000000d2b861dc263bc293",
@@ -54,5 +54,343 @@
       "core:datetime": "2026-09-15T23:41:01.975250667Z"
     }
   ],
-  "annotations": []
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 108003328,
+      "core:label": "capture",
+      "hackriff:truth": {
+        "role": "scenario",
+        "kind": "capture",
+        "recording": "capture-2026-09-15-fm-band",
+        "use_cases": [
+          "SIGNAL-062",
+          "AWARE-053"
+        ],
+        "datatype": "ci8",
+        "sample_rate_hz": 2400000.0,
+        "tuner_center_hz": 100800000.0,
+        "n_samples": 108003328,
+        "duration_s": 45.00138666666667,
+        "analysis_pass": {
+          "date": "2026-09-16",
+          "task": "T-289",
+          "pipeline_run": "hk replay fixtures/hackrf/capture-2026-09-15-fm-band/iq.sigmf-meta (composed pipeline over the whole 45 s; 1857 detections, 25 tracks, 17 emitters, 3 of them confirmed)",
+          "spectral_survey": "mean periodogram over the whole capture, 8192-point Hann FFT (RBW 292.97 Hz), against a 1501-bin (440 kHz) running-median baseline that absorbs the noise floor and the 1.75 MHz baseband-filter skirt; a region is contiguous bins above 3 dB of that baseline containing a peak at or above 6 dB",
+          "burst_search": "every 27.31 ms time bin (1648 of them) against the per-frequency median over time, so an emission that is on for a minority of the capture is measured against its own quiet state; clusters of cells above 8 dB were enumerated (441 found, all attributable to the emissions and artefacts below)",
+          "presence": "per time bin, the region's power against a guard band of three region-widths either side in the same time bin; 'on' is above 6 dB",
+          "modulation": "each candidate mixed to baseband, filtered and decimated, then FM-discriminated over the whole 45 s; a 19 kHz stereo pilot was tested by Welch (32768-point, 12.21 Hz resolution) against the local median, with 100.300 MHz as the negative control (+0.39 dB)"
+        },
+        "dbfs_reference": "full scale = 127 codes per component; dBFS = 10 log10(mean |x|^2)",
+        "calibration": "uncalibrated (no dBm): antenna unknown, as attached by the user",
+        "snr_definition": "(P in the annotated band - N0*B)/(N0*B), N0 = median power per bin of a guard band three region-widths either side, mean spectrum over the whole capture",
+        "baseband_filter_hz": 1750000.0,
+        "passband_note": "the HackRF baseband filter was 1.75 MHz, so only 99.925-101.675 MHz is inside the analogue passband even though 99.6-102.0 MHz was recorded; emissions outside it are attenuated and their measured level and bandwidth are truncated",
+        "overload": false,
+        "quantisation_limited": true,
+        "annotation_completeness": "every emission and artefact this analysis pass could measure in the 45 s; the measured-silent windows below were checked explicitly and carry no annotation",
+        "measured_absent": [
+          {
+            "label": "100.300 MHz +-10 kHz",
+            "f_lo_hz": 100290234.375,
+            "f_hi_hz": 100310156.25,
+            "snr_db": -11.526696301961962,
+            "peak_excess_db": 1.1277512035395851,
+            "presence_on_bins": 0,
+            "presence_total_bins": 1648,
+            "max_burst_z_db": 7.857602012748797,
+            "assert_silent": true,
+            "note": "the intermittent data burst the capture README reports near 100.3 MHz was silent for all 45 s: no continuous excess, and no burst cluster reached the 8 dB threshold in any of the 1648 time bins. The FM discriminator over the whole capture found no 19 kHz pilot here (+0.39 dB, the negative control for the pilot test). The pipeline nevertheless produced 2 detections here (SNR peak 4.4 and 5.2 dB) and one candidate emitter with 2 looks: false alarms at the noise floor, not an emission."
+          },
+          {
+            "label": "100.300 MHz +-150 kHz",
+            "f_lo_hz": 100150195.3125,
+            "f_hi_hz": 100450195.3125,
+            "peak_excess_db": 2.724742296944825,
+            "presence_on_bins": 0,
+            "presence_total_bins": 1648,
+            "note": "no above-floor power at all across the wide window either (the guard-band estimate leaves nothing above the floor)"
+          },
+          {
+            "label": "101.450 MHz +-100 kHz",
+            "f_lo_hz": 101350195.3125,
+            "f_hi_hz": 101550000.0,
+            "snr_db": 1.4201336574286403,
+            "peak_excess_db": 8.209223955792488,
+            "presence_on_bins": 26,
+            "presence_total_bins": 1648,
+            "note": "the capture README's 'dominant, strongest emission at ~101.45 MHz' is not there. What excess the window holds sits at its 101.350 MHz edge and is the upper skirt of the 101.2987 MHz station; 101.42-101.49 MHz is flat noise (1.5-2.3 dB of excess). The pipeline nevertheless produced 986 detections spread evenly over all 45 s (SNR peak 5.1-8.3 dB) and five candidate emitters here, none confirmed: this is the detector's false-alarm cluster, and it is what the live clusterer's high 'look' counts recorded."
+          },
+          {
+            "label": "101.420-101.490 MHz",
+            "f_lo_hz": 101420000.0,
+            "f_hi_hz": 101490000.0,
+            "max_excess_db_per_10khz": 2.3,
+            "presence_on_bins": 0,
+            "presence_total_bins": 1648,
+            "assert_silent": true,
+            "note": "flat noise: the mean spectrum rises no more than 2.3 dB above its baseline in any 10 kHz of this window, and this window touches no annotated emission (the 101.2987 MHz station's annotated box ends at 101.368 MHz). It is where the capture README placed its 'dominant' station. The pipeline made 866 detections inside it (SNR peak up to 8.3 dB) across five candidate emitters, none confirmed."
+          },
+          {
+            "label": "99.750 MHz +-100 kHz",
+            "f_lo_hz": 99650097.65625,
+            "f_hi_hz": 99850195.3125,
+            "snr_db": -1.2035897784816456,
+            "presence_on_bins": 0,
+            "presence_total_bins": 1648,
+            "note": "nothing at 99.75 MHz; the energy that reaches this window is the lower skirt of the 99.6999 MHz station annotated below"
+          },
+          {
+            "label": "100.735 MHz +-10 kHz",
+            "f_lo_hz": 100725000.0,
+            "f_hi_hz": 100745214.84375,
+            "snr_db": -6.593664426787015,
+            "presence_on_bins": 0,
+            "presence_total_bins": 1648,
+            "note": "no emission near the capture README's hypothetical 100.7 MHz band"
+          },
+          {
+            "label": "101.050 MHz +-60 kHz",
+            "f_lo_hz": 100990136.71875,
+            "f_hi_hz": 101110253.90625,
+            "snr_db": -13.53282786343257,
+            "presence_on_bins": 0,
+            "presence_total_bins": 1648,
+            "note": "flat noise"
+          },
+          {
+            "label": "101.160 MHz +-60 kHz",
+            "f_lo_hz": 101100000.0,
+            "f_hi_hz": 101220117.1875,
+            "snr_db": -6.980962472729708,
+            "presence_on_bins": 0,
+            "presence_total_bins": 1648,
+            "note": "flat noise"
+          },
+          {
+            "label": "101.700 MHz +-15 kHz",
+            "f_lo_hz": 101685058.59375,
+            "f_hi_hz": 101715234.375,
+            "snr_db": -5.64680247795772,
+            "presence_on_bins": 0,
+            "presence_total_bins": 1648,
+            "note": "nothing at the 101.7 MHz the capture README reports; the 37 detections the pipeline made in 101.675-101.71 MHz are noise-floor false alarms and none of their emitters is confirmed"
+          }
+        ],
+        "legal": "Receive-only capture. Truth is PHY/metadata only; no third-party payload content is decoded or stored (CLAUDE.md legal guardrails).",
+        "t_start_s": 0.0
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 108003328,
+      "core:freq_lower_edge": 101240625.0,
+      "core:freq_upper_edge": 101368359.375,
+      "core:label": "WFM broadcast 101.2987 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "center_hz": 101298662.59917897,
+        "center_definition": "power-weighted centroid of the above-floor bins of the mean spectrum",
+        "f_peak_hz": 101295996.09375,
+        "bandwidth_hz": 127734.375,
+        "bandwidth_definition": "99 % occupied bandwidth of the above-floor power in the mean spectrum, RBW 292.97 Hz",
+        "snr_db": 13.702501409084363,
+        "power_dbfs": -18.07290794439339,
+        "floor_dbfs_per_bin": -19.380929903501073,
+        "stereo": true,
+        "pilot": {
+          "present": true,
+          "frequency_hz": 18994.140625,
+          "peak_over_local_median_db": 35.52,
+          "measurement": "FM discriminator over all 45 s, Welch 32768-point at 400 kHz (12.21 Hz resolution); the frequency is read in the receiver's own uncalibrated clock, which runs about -6.8 ppm (spike S5), so the true pilot is 19000 Hz",
+          "pipeline_measured_hz": 18999.883909266613,
+          "pipeline_lock_quality": 0.9316090426921793
+        },
+        "rds": {
+          "pi_hex": "1694",
+          "crc_status": "valid",
+          "pty": 7,
+          "tp": false,
+          "group_types": {
+            "0A": 9,
+            "2A": 16,
+            "12A": 1
+          },
+          "groups_ok": 7,
+          "groups_total": 42,
+          "block_error_rate": 0.3793103448275862,
+          "subcarrier_hz": 57000.0,
+          "subcarrier_note": "RDS is DSB-SC, so there is no tone at 57 kHz to find in the discriminator spectrum (+2.3 dB); the PI comes from decoding, not from a carrier peak",
+          "decoder": "hk-rds 0.1.0, through the composed pipeline in this analysis pass"
+        },
+        "identity": {
+          "type": "rds_pi",
+          "value": "1694"
+        },
+        "channel_hz": 101300000.0,
+        "carrier_offset_from_channel_hz": -1337.40082103014,
+        "pipeline_refined_offset_from_channel_hz": -358.828930541873,
+        "presence": {
+          "on_bins": 1648,
+          "total_bins": 1648,
+          "bin_s": 0.027306666666666667,
+          "level_db_min": 12.750115844882547,
+          "level_db_median": 13.890292122284698,
+          "level_db_max": 15.124863506197052
+        },
+        "note": "continuous for the whole capture: present in every one of the 1648 time bins, so the time extent is the whole recording. Same station as the 2026-09-13 fixture fm_100p8M_2p4M_l32g30a1_t1p5_5s (PI 1694), recorded 2.5 days later at the same site and tuner centre.",
+        "t_start_s": 0.0,
+        "duration_s": 45.00138666666667
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 108003328,
+      "core:freq_lower_edge": 99664453.125,
+      "core:freq_upper_edge": 99734765.625,
+      "core:label": "WFM broadcast 99.6999 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "wfm-broadcast",
+        "modulation": "WFM",
+        "center_hz": 99699944.24428457,
+        "center_definition": "power-weighted centroid of the above-floor bins of the mean spectrum",
+        "f_peak_hz": 99697851.5625,
+        "bandwidth_hz": 70312.5,
+        "bandwidth_definition": "99 % occupied bandwidth of the above-floor power in the mean spectrum, RBW 292.97 Hz; truncated by the analogue filter, see filter_note",
+        "snr_db": 4.72459522853046,
+        "power_dbfs": -32.104444755309714,
+        "floor_dbfs_per_bin": -21.639657355784784,
+        "pilot": {
+          "present": true,
+          "frequency_hz": 18994.140625,
+          "peak_over_local_median_db": 8.73,
+          "measurement": "FM discriminator over all 45 s, Welch 32768-point at 400 kHz (12.21 Hz resolution). The line falls in the same 12.21 Hz bin as the 101.2987 MHz station's pilot, as two real 19 kHz pilots read through one receiver clock must; the negative control at 100.300 MHz gives +0.39 dB and the pilot-free 100.4653 MHz emission +0.22 dB."
+        },
+        "rds": {
+          "decoded": false,
+          "note": "no RDS decoded here by the pipeline and no 57 kHz feature measurable (+0.25 dB); at this SNR that is expected and is not evidence of absence"
+        },
+        "channel_hz": 99700000.0,
+        "carrier_offset_from_channel_hz": -55.75571542978287,
+        "filter_note": "1.100 MHz below the tuner centre, outside the 875 kHz half-width of the 1.75 MHz baseband filter, so the level is attenuated and the measured bandwidth is truncated by the analogue skirt rather than by the emission",
+        "presence": {
+          "on_bins": 889,
+          "total_bins": 1648,
+          "bin_s": 0.027306666666666667,
+          "level_db_min": 2.9612995103794884,
+          "level_db_median": 6.089009733016577,
+          "level_db_max": 8.41711810776504,
+          "note": "the 6 dB presence threshold straddles this signal because the analogue filter holds it near it, so 889 of 1648 bins read 'on'. It is not intermittent: the pipeline detected it in every 5 s of the capture (5-7 detections per 5 s, SNR peak 5.6-17.4 dB), so the time extent is the whole recording."
+        },
+        "note": "the capture README anticipated a station near 99.75 MHz; the emission is at 99.6999 MHz and 99.75 MHz +-100 kHz is empty (see measured_absent).",
+        "t_start_s": 0.0,
+        "duration_s": 45.00138666666667
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 108003328,
+      "core:freq_lower_edge": 100450781.25,
+      "core:freq_upper_edge": 100478906.25,
+      "core:label": "unidentified narrowband 100.4653 MHz",
+      "hackriff:truth": {
+        "role": "emission",
+        "kind": "unidentified-narrowband",
+        "modulation": null,
+        "center_hz": 100465339.2221471,
+        "center_definition": "power-weighted centroid of the above-floor bins of the mean spectrum",
+        "f_peak_hz": 100466601.5625,
+        "bandwidth_hz": 28125.0,
+        "bandwidth_definition": "99 % occupied bandwidth of the above-floor power in the mean spectrum, RBW 292.97 Hz",
+        "snr_db": 7.015857600274859,
+        "power_dbfs": -32.40170747735537,
+        "floor_dbfs_per_bin": -20.3268793791391,
+        "pilot": {
+          "present": false,
+          "peak_over_local_median_db": 0.22,
+          "measurement": "FM discriminator over all 45 s, Welch 32768-point (12.21 Hz resolution): no 19 kHz line, so this is not a stereo FM broadcast"
+        },
+        "not_an_image": {
+          "mirror_center_hz": 101134660.7778529,
+          "mirror_snr_db": -6.0756299280143296,
+          "mirror_presence_on_bins": 0,
+          "note": "the IQ mirror of this frequency about the tuner centre is empty, so it is not the image of a stronger signal; nor is it a 10 MHz reference harmonic (those land on multiples of 10 MHz, 334.7 kHz away)"
+        },
+        "presence": {
+          "on_bins": 1646,
+          "total_bins": 1648,
+          "bin_s": 0.027306666666666667,
+          "level_db_min": 5.186153620316036,
+          "level_db_median": 7.886348057710698,
+          "level_db_max": 8.435407991715264,
+          "note": "continuous and very steady: 50 ms block power varies by under 0.5 dB over 20 s"
+        },
+        "note": "no one anticipated this one: the capture README does not mention it. It is a real, continuous, ~28 kHz emission inside the analogue passband, and its modulation is unverified \u2014 the measurements above only rule out stereo FM broadcast and a receiver image. The pipeline found it blind and confirmed it (emitter at 100.46054 MHz, 45 detections, SNR peak 13.1-14.5 dB).",
+        "t_start_s": 0.0,
+        "duration_s": 45.00138666666667
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 108003328,
+      "core:freq_lower_edge": 99999316.40625,
+      "core:freq_upper_edge": 99999902.34375,
+      "core:label": "spur 100.000 MHz (10 MHz reference harmonic)",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "spur",
+        "reason": "ref_harmonic",
+        "center_hz": 99999572.15347895,
+        "offset_hz": -800427.8465210497,
+        "harmonic_n": 10,
+        "spur_step_hz": 10000000.0,
+        "tuner_center_hz": 100800000.0,
+        "bandwidth_hz": 585.9375,
+        "snr_db": 12.5795964443735,
+        "power_dbfs": -43.05377352216639,
+        "peak_over_floor_db": 15.346280898548915,
+        "line_stability": {
+          "mean_hz": 99999571.894,
+          "std_hz": 0.926,
+          "span_hz": 3.828,
+          "blocks": 20,
+          "block_s": 1.0,
+          "note": "the line is steady to under 1 Hz RMS when measured against the receiver's own clock, which is what a tone generated from that same clock must do; an off-air carrier read through an uncalibrated -6.8 ppm clock would not be"
+        },
+        "corroboration": [
+          "the detector in this run flags every detection here spur_reason = ref-harmonic (713 of them)",
+          "the 2026-09-13 fixture fm_100p8M_2p4M_l32g30a1_t1p5_5s, same device and same 100.8 MHz tuner centre, measured the same line at 99.999609 MHz and annotated it role=artefact kind=spur reason=ref_harmonic harmonic_n=10"
+        ],
+        "verification": "not retune-verified in this recording: it is a single tune with no retune, so the decisive test (a spur stays at the same absolute frequency when the LO moves) could not be run here",
+        "note": "this is the 'steady carrier wave at 99.99 MHz' the capture README anticipated. It is measurably a receiver artefact, not an off-air emission, so it is annotated as one and is not in the emission truth list.",
+        "t_start_s": 0.0,
+        "duration_s": 45.00138666666667
+      }
+    },
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 108003328,
+      "core:freq_lower_edge": 100799707.03125,
+      "core:freq_upper_edge": 100800292.96875,
+      "core:label": "DC",
+      "hackriff:truth": {
+        "role": "artefact",
+        "kind": "dc-offset",
+        "reason": "dc",
+        "center_hz": 100800000.01167227,
+        "offset_hz": 0.0,
+        "bandwidth_hz": 585.9375,
+        "snr_db": 20.57731773458721,
+        "power_dbfs": -34.48935511028981,
+        "peak_over_floor_db": 23.13254587537758,
+        "corroboration": "the detector in this run flags every detection here spur_reason = dc (45 of them)",
+        "note": "the receiver's DC offset at the tuned centre, present in every time bin",
+        "t_start_s": 0.0,
+        "duration_s": 45.00138666666667
+      }
+    }
+  ]
 }

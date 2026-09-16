@@ -75,14 +75,19 @@ fn data_fetched(meta: &Path) -> bool {
     }
 }
 
-/// A real HackRF fixture whose LFS data is present: this checkout's copy, else the first ancestor
-/// checkout's (a git worktree often has only LFS pointers). `None` skips the test;
-/// `HK_REQUIRE_FIXTURES=1` (the CI acceptance job) fails instead.
+/// A real HackRF fixture of the 2026-09-13 set; see [`real_fixture_in`].
 pub fn real_fixture(name: &str) -> Option<PathBuf> {
+    real_fixture_in("fixtures/hackrf/2026-09-13", name)
+}
+
+/// A real HackRF fixture under `rel_dir` whose LFS data is present: this checkout's copy, else the
+/// first ancestor checkout's (a git worktree often has only LFS pointers). `None` skips the test;
+/// `HK_REQUIRE_FIXTURES=1` (the CI acceptance job) fails instead.
+pub fn real_fixture_in(rel_dir: &str, name: &str) -> Option<PathBuf> {
     if hardware_skip(name) {
         return None;
     }
-    let rel = Path::new("fixtures/hackrf/2026-09-13").join(format!("{name}.sigmf-meta"));
+    let rel = Path::new(rel_dir).join(format!("{name}.sigmf-meta"));
     let mut dir = Some(hk_e2e::paths::repo_root());
     while let Some(d) = dir {
         let meta = d.join(&rel);
