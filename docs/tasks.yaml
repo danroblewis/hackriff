@@ -4743,7 +4743,8 @@ tasks:
   - id: T-274
     milestone: M5
     title: 'M5 GNSS observables cluster (C36): L1 is NOT blindly detectable, so this is the documented exception to blind-first'
-    status: in-progress
+    status: done
+    commit: 994baef
     priority: high
     deps:
     - T-258
@@ -6009,6 +6010,94 @@ tasks:
       with fewer measurable dimensions. Do NOT lower CLUSTER_MIN_SHARED_FIELDS: it is the matcher''s evidence
       floor, equal to MATCH_MIN_DISCRIMINATING per ADR-0016 section 5, and T-309 pinned that equality with
       a test. Fix the field supply, not the evidence bar'
+  - id: T-322
+    milestone: M5
+    title: 'hk-gnss is reachable only from its own tests: nothing schedules an L1 dwell, so the acquisition
+      path has no caller'
+    status: todo
+    priority: normal
+    deps:
+    - T-274
+    parallel_group: M5A
+    core_interface: true
+    model: opus
+    acceptance: 'T-274 built and tested GPS L1 acquisition (Gold codes, FFT parallel code-phase search,
+      observables, S4, blind jamming assessment) and DELIBERATELY did not wire it into hk-pipeline, because
+      wiring is where leakage risk lives. That leaves the sixth no-caller shape in this project''s history
+      (T-242, T-247, T-206, T-267/T-287, T-297) - though this one is declared rather than accidental, which
+      is the difference that matters. Wire it: C04 requests a scheduled L1 dwell, acquisition runs on that
+      dwell, results reach C30 as evidence. THE CONSTRAINT THAT CANNOT BEND: no hk-detect -> hk-gnss dependency
+      edge may appear, and blind_path_boundary.rs must stay green - if wiring seems to require that edge,
+      STOP and report, because the alternative is the runtime flag ADR-0018 explicitly rejected as worse
+      than no boundary. Prove non-vacuity as a falsifiable pair, the way T-287 and T-297 did: remove the
+      wiring and a test fails; remove the acquisition and a different test fails'
+  - id: T-323
+    milestone: M5
+    title: A full GNSS receiver means wrapping GNSS-SDR as a plugin, not reimplementing tracking loops
+    status: todo
+    priority: normal
+    deps:
+    - T-322
+    parallel_group: M5A
+    model: opus
+    acceptance: 'T-274 built acquisition only. Tracking loops (DLL/PLL), nav-message decode, ephemeris and
+      PVT are not built, and the C36 card''s recommendation is explicit: wrap GNSS-SDR as a C22 plugin over
+      IPC rather than reimplementing it. This unblocks SIGNAL-030''s currently-unserved track-and-fix half,
+      real C/N0 for AWARE-002 (which today uses in-band power as a stated proxy because the HackRF has no
+      front-end AGC), and real S4 for PROP-033. LICENCE: GNSS-SDR is GPLv3 and stays behind the plugin process
+      boundary per ADR-0010 - verify the boundary holds before depending on it. Do not let the wrapper become
+      a second path into blind detection: it consumes a dwell and emits evidence, exactly as hk-gnss does'
+  - id: T-324
+    milestone: M5
+    title: SIGNAL-032 GNSS forensics needs a broadcast-ephemeris context feed, so it sequences after the
+      TLE/pass feed work
+    status: todo
+    priority: low
+    deps:
+    - T-274
+    - T-276
+    parallel_group: M5B
+    model: opus
+    acceptance: 'Comparing broadcast ephemeris against precise orbits is how spoofing shows up in forensics,
+      and it needs a context feed this project does not have. T-276 is building the TLE/satellite-pass feed
+      for M5B; this overlaps its machinery, so sequence after it rather than building a second feed path.
+      Offline-first per the product constraints: cache the reference data and degrade honestly when there
+      is no connectivity - an absent ephemeris must read as not-yet-fetched, never as agreement'
+  - id: T-325
+    milestone: M2-hardening
+    title: Bias-tee state is not in provenance, so a bias-tee left on into a passive or DC-shorted port
+      is invisible
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'The C36 card names this pitfall and T-274 surfaced it: a bias-tee left enabled into a passive
+      antenna or a DC-shorted port is a hardware hazard and a measurement confound, and nothing in provenance
+      records the bias-tee state. Record it in Provenance alongside device_id and antenna_port, surface
+      it in the UI, and make the state visible wherever a detection''s trustworthiness is judged - this
+      is device-local context exactly like gain state, so it belongs on the reads-the-device side of T-259''s
+      rule. NOT GNSS work: it is device and provenance work that GNSS happened to expose. Receive-only and
+      never auto-enable: the user enables a bias-tee deliberately, and the system reports what it sees'
+  - id: T-326
+    milestone: M5
+    title: 'Every GNSS sensitivity figure rests on synthetic IQ: the settling capture has not been taken'
+    status: todo
+    priority: normal
+    deps:
+    - T-274
+    parallel_group: M5A
+    model: opus
+    acceptance: 'T-274''s acquisition numbers - 6.19 vs 6.16 dB energy excursion, PRN 11 at 511.00 chips,
+      42.1 dB-Hz C/N0 - are all synthetic, and it marked them unverified rather than implying otherwise.
+      The settling capture it named: at least 60 s of L1 at 2.046 Msps or more through an ACTIVE GNSS antenna
+      on the bias-tee, with a reference u-blox log taken at the same time, asserting at least 4 SVs acquired
+      and C/N0 within 3 dB of the reference. Two further unknowns it flagged: whether the antenna''s voltage
+      is compatible with the bias-tee''s 3.0-3.3 V / 50 mA, and whether the TCXO-less HackRF''s clock error
+      widens the Doppler search beyond the current 5 kHz. HARDWARE CAPTURE IS USER-TRIGGERED - do not touch
+      the HackRF while the user''s demo holds it, and do not enable a bias-tee without the user present,
+      since the wrong port can damage hardware'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
