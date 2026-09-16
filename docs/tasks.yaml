@@ -4382,7 +4382,8 @@ tasks:
     milestone: M2-hardening
     title: 'Receiver-capability note: 2.4 GHz is a detection/occupancy target, not a
       decode one, on a HackRF - except BLE advertising'
-    status: in-progress
+    status: done
+    commit: f71f0cf
     priority: normal
     deps: []
     parallel_group: DOCS
