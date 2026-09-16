@@ -5012,7 +5012,7 @@ tasks:
     milestone: M2-hardening
     title: 'hk-ml conformance fails under concurrency: the shadow-host provenance test
       failed once at conformance.rs:416 under four concurrent worktrees, passes 3/3 isolated'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -6180,7 +6180,7 @@ tasks:
     milestone: M3
     title: Carrying the four cyclic line significances as separate dimensions nearly doubles class separation,
       but only after the window dependence is fixed at source
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-327
