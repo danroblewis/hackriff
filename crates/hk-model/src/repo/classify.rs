@@ -211,6 +211,58 @@ impl Repository {
         Ok(())
     }
 
+    /// Appends a **legacy-shaped** classification (family, confidence, open-set score, model
+    /// version) with an explicit `stage` and arbitration `rank` (ADR-0016 §2).
+    ///
+    /// This is the seam for a writer that knows *who* it is but has no distribution to offer, so
+    /// the rank must not be derived from the columns: a user's explicit reclassification (rank 0,
+    /// `hk_pipeline::family::reclassify`, T-218), and later a demodulator chain that knows it is
+    /// locked (rank 2, ADR-0016 §2 — the follow-up `hk_pipeline::classify` documents). Writers
+    /// with a full [`M3Classification`] use [`Repository::record_classification`]; writers with
+    /// neither keep using `append_classification`, whose rows derive their rank.
+    ///
+    /// Refused (`Invalid`): a `rank` the `stage` may not carry ([`ArbRank::allows`]), a
+    /// non-finite confidence or open-set score. `NotFound` when the emitter does not exist.
+    pub fn append_classification_ranked(
+        &mut self,
+        emitter_id: EmitterId,
+        classification: &Classification,
+        stage: crate::classify::Stage,
+        rank: ArbRank,
+    ) -> Result<(), RepoError> {
+        if !rank.allows(stage) {
+            return Err(RepoError::Invalid(format!(
+                "arb_rank {} is not allowed for stage {}",
+                rank.value(),
+                stage.as_str()
+            )));
+        }
+        if !emitter_exists(&self.conn, emitter_id)? {
+            return Err(RepoError::NotFound {
+                kind: "emitter",
+                id: emitter_id.to_string(),
+            });
+        }
+        let c = classification;
+        self.conn
+            .prepare_cached(
+                "INSERT INTO emitter_classification (emitter_id, t, family, confidence, \
+                 open_set_score, model_version, stage, arb_rank) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?
+            .execute(params![
+                blob(emitter_id),
+                c.t.as_unix_nanos(),
+                c.family,
+                finite(c.confidence, "confidence")?,
+                finite(c.open_set_score, "open_set_score")?,
+                c.model_version,
+                enum_text(&stage)?,
+                i64::from(rank.value()),
+            ])?;
+        Ok(())
+    }
+
     /// The classification that sets an emitter's current family: lowest arbitration rank, latest
     /// among equals ([`crate::classify::rank`]). `None` without classifications. The emitter id
     /// is taken as given (not resolved through merges).

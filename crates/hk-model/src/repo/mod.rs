@@ -81,6 +81,8 @@ mod relate_tests;
 #[cfg(test)]
 mod same_emission_tests;
 mod selections;
+#[cfg(test)]
+mod signature_tests; // T-218
 pub mod sites; // T-119
 #[cfg(test)]
 mod tests;
@@ -127,6 +129,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0006_user_band.sql"), // T-191 user band override
     include_str!("migrations/0007_classification.sql"), // T-211 M3 classification columns
     include_str!("migrations/0008_emitter_relation.sql"), // T-219 C40 signal relationships
+    include_str!("migrations/0009_signature.sql"), // T-218 C18 signature storage
 ];
 
 /// Schema version this build creates and understands.

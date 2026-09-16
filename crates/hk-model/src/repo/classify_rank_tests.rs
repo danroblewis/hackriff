@@ -255,6 +255,80 @@ fn t211_every_rank_pair_wins_in_both_merge_directions() {
     }
 }
 
+/// T-218 (from the T-211 review): a writer that knows *who* it is but has no distribution to
+/// offer — a user reclassifying by hand — writes its rank explicitly with
+/// `append_classification_ranked`, instead of letting the columns derive rank 3. Without that, a
+/// decoder row or a later chain label would take the family back off the user.
+#[test]
+fn t218_a_ranked_legacy_row_carries_its_stage_and_outranks_later_writers() {
+    let mut r = Repository::open_in_memory().unwrap();
+    let id = r
+        .record_sighting(&track(101.3e6, tr(0.0, 5.0)), None)
+        .unwrap()
+        .emitter_id;
+    let user = Classification {
+        t: t(1.0),
+        family: "wfm".into(),
+        confidence: 0.95,
+        open_set_score: 0.05,
+        model_version: "hk-ui/reclassify@1".into(),
+    };
+    r.append_classification_ranked(id, &user, Stage::User, ArbRank::User)
+        .unwrap();
+
+    let cur = r.current_classification(id).unwrap().unwrap();
+    assert_eq!((cur.stage, cur.arb_rank), (Stage::User, ArbRank::User));
+    assert_eq!(cur.classification.family, "wfm");
+    // The user's own vocabulary is kept: a reclassification is an assertion, not a measured
+    // distribution, so there is no M3 detail and no taxonomy on the row.
+    assert!(cur.detail.is_none() && cur.taxonomy.is_none());
+
+    // Every other writer, at every rank, written afterwards: the user still decides.
+    for w in WRITERS.into_iter().filter(|w| w.rank() != ArbRank::User) {
+        w.write(&mut r, id, 2.0);
+        let cur = r.current_classification(id).unwrap().unwrap();
+        assert_eq!(
+            (cur.classification.family.as_str(), cur.arb_rank),
+            ("wfm", ArbRank::User),
+            "{w:?} must not overrule the user"
+        );
+    }
+    let listed = r
+        .query_inventory(&InventoryQuery {
+            family: Some("wfm".into()),
+            ..InventoryQuery::default()
+        })
+        .unwrap()
+        .entries
+        .iter()
+        .any(|e| e.emitter.id == id);
+    assert!(listed, "the family filter agrees with the user's label");
+
+    // The (stage, rank) pair is checked, and an unknown emitter is refused.
+    assert!(
+        r.append_classification_ranked(id, &user, Stage::User, ArbRank::Decoder)
+            .is_err(),
+        "a user row may not claim the decoder rank"
+    );
+    assert!(
+        r.append_classification_ranked(id, &user, Stage::TrackShape, ArbRank::User)
+            .is_err()
+    );
+    assert!(
+        r.append_classification_ranked(EmitterId::new(), &user, Stage::User, ArbRank::User)
+            .is_err(),
+        "an unknown emitter is refused"
+    );
+    // A chain writer that knows it is locked is the other user of this seam (ADR-0016 §2).
+    r.append_classification_ranked(id, &user, Stage::Chain, ArbRank::LockVerified)
+        .unwrap();
+    assert_eq!(
+        r.current_classification(id).unwrap().unwrap().arb_rank,
+        ArbRank::User,
+        "still below the user"
+    );
+}
+
 fn tol() -> Tolerances {
     Tolerances::default()
 }
@@ -392,8 +466,14 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // T-219: an older file has no 0008 relation table either, so drop it with the 0007
         // columns. The version is pinned to the one before 0007 by number, not to
         // `SCHEMA_VERSION - 1`, so a later migration does not silently change what is rolled back.
-        conn.execute_batch("DROP TABLE IF EXISTS emitter_relation")
-            .unwrap();
+        // T-218: nor the 0009 signature tables. Every later migration's objects have to go, or
+        // replaying them onto this file fails on the first `CREATE TABLE`.
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS emitter_relation; \
+             DROP TABLE IF EXISTS signature_match; \
+             DROP TABLE IF EXISTS signature",
+        )
+        .unwrap();
         const BEFORE_0007: i64 = 6;
         conn.pragma_update(None, "user_version", BEFORE_0007)
             .unwrap();

@@ -1,121 +1,25 @@
-//! Per-family gates and decision thresholds, `thresholds@1` (ADR-0016 §2). **Core interface.**
+//! The classifier's own rule constants, plus the `thresholds@1` contract re-exported.
 //!
-//! Every number here is **a priori**: S5-measured where the spike measured it, otherwise a stated
-//! literature guess marked *unverified* in the ADR. They are never tuned against the acceptance
-//! split (the blind rule, docs/10 §3.2); changing one needs an ADR amendment citing dev evidence.
+//! **`thresholds@1` itself lives in [`hk_model::classify::thresholds`]** (T-218): ADR-0016's
+//! decision table puts the taxonomy, the `Classification` contract, `fuse` and the thresholds in
+//! `hk_model::classify`, because the control API serves them at `GET /api/taxonomy` and C17's
+//! prior source (hk-context, T-212) needs the same evidence-dominance constant — and neither may
+//! depend on this crate. Every item is re-exported here, so `crate::thresholds::…` paths are
+//! unchanged.
+//!
+//! What stays here is what belongs to *this* rule set rather than to the contract: the rules and
+//! features version strings, and the abstention thresholds of the feature tree.
 
-/// Threshold-set version written into [`hk_model::classify::ClassProvenance::thresholds`].
-pub const THRESHOLDS_VERSION: &str = "thresholds@1";
+pub use hk_model::classify::thresholds::{
+    EVIDENCE_DOMINANCE_RATIO, FamilyThresholds, THRESHOLDS, THRESHOLDS_VERSION, passes_gate,
+    thresholds_of,
+};
 
 /// Rule-set version written into [`hk_model::classify::ClassProvenance::rules`].
 pub const RULES_VERSION: &str = "hk-classify/tree@1";
 
 /// Feature-set version written into [`hk_model::classify::ClassProvenance::features_version`].
 pub const FEATURES_VERSION: u32 = 1;
-
-/// Gates and reporting floors of one family.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FamilyThresholds {
-    /// Family label in `hk-mod@1`.
-    pub family: &'static str,
-    /// In-band SNR gate of the analysed extent, dB (C13 definition). Below it the family
-    /// contributes no likelihood mass and its share moves to `unknown` with reason `low_snr`.
-    /// `None` = no SNR gate (the noise-like test is a shape test, not an SNR test).
-    pub snr_gate_db: Option<f64>,
-    /// Extra dB above the SNR gate before a within-family class is called.
-    pub class_gate_db: f64,
-    /// Smallest posterior at which the family is reported instead of `unknown`.
-    pub min_confidence: f64,
-    /// Largest open-set score at which the family may still be reported.
-    pub open_set_max: f64,
-}
-
-/// `thresholds@1` (ADR-0016 §2). FSK/OOK 20 dB and PSK 15 dB are the S5 floors
-/// (`spikes/s5-blind-estimation/REPORT.md` §3); analog, CSS, OFDM, pulsed and DSSS are
-/// *unverified* literature guesses.
-pub const THRESHOLDS: &[FamilyThresholds] = &[
-    FamilyThresholds {
-        family: "analog",
-        snr_gate_db: Some(10.0),
-        class_gate_db: 0.0,
-        min_confidence: 0.6,
-        open_set_max: 0.5,
-    },
-    FamilyThresholds {
-        family: "ook-ask",
-        snr_gate_db: Some(20.0),
-        class_gate_db: 3.0,
-        min_confidence: 0.6,
-        open_set_max: 0.5,
-    },
-    FamilyThresholds {
-        family: "fsk",
-        snr_gate_db: Some(20.0),
-        class_gate_db: 3.0,
-        min_confidence: 0.6,
-        open_set_max: 0.5,
-    },
-    FamilyThresholds {
-        family: "psk-qam",
-        snr_gate_db: Some(15.0),
-        class_gate_db: 5.0,
-        min_confidence: 0.6,
-        open_set_max: 0.5,
-    },
-    FamilyThresholds {
-        family: "ofdm",
-        snr_gate_db: Some(10.0),
-        class_gate_db: 0.0,
-        min_confidence: 0.6,
-        open_set_max: 0.5,
-    },
-    FamilyThresholds {
-        family: "css",
-        snr_gate_db: Some(10.0),
-        class_gate_db: 0.0,
-        min_confidence: 0.6,
-        open_set_max: 0.5,
-    },
-    FamilyThresholds {
-        family: "dsss",
-        snr_gate_db: Some(10.0),
-        class_gate_db: 0.0,
-        min_confidence: 0.7,
-        open_set_max: 0.4,
-    },
-    FamilyThresholds {
-        family: "pulsed",
-        snr_gate_db: Some(10.0),
-        class_gate_db: 0.0,
-        min_confidence: 0.6,
-        open_set_max: 0.5,
-    },
-    FamilyThresholds {
-        family: "noise-like",
-        snr_gate_db: None,
-        class_gate_db: 0.0,
-        min_confidence: 0.7,
-        open_set_max: 1.0,
-    },
-];
-
-/// The thresholds of `family`, or `None` when it is not in `hk-mod@1`.
-pub fn thresholds_of(family: &str) -> Option<&'static FamilyThresholds> {
-    THRESHOLDS.iter().find(|t| t.family == family)
-}
-
-/// Whether a family's SNR gate admits `snr_db` (an unmeasured SNR never passes a gated family:
-/// "not measured" is not "ruled out", so the mass goes to `unknown`, not to the family).
-pub fn passes_gate(family: &str, snr_db: Option<f64>) -> bool {
-    match thresholds_of(family).and_then(|t| t.snr_gate_db) {
-        None => true,
-        Some(gate) => snr_db.is_some_and(|s| s >= gate),
-    }
-}
-
-/// Likelihood ratio at which evidence dominates a prior (ADR-0016 §3): a prior can never flip a
-/// call the likelihood makes at 10:1 or better.
-pub const EVIDENCE_DOMINANCE_RATIO: f64 = 10.0;
 
 /// Normalised entropy above which an unconfident top family abstains (ADR-0016 §4.4).
 pub const ABSTAIN_ENTROPY: f64 = 0.9;

@@ -14,7 +14,8 @@
 //!        ├─ tree.rs       coarse split and per-family admissibility (physics, not tuning)
 //!        ├─ density.rs    class-conditional diagonal Gaussians fitted on the synthetic dev grid
 //!        ├─ openset.rs    d² → P(χ²_k ≥ d²); open-set score = 1 − max plausibility
-//!        ├─ fuse.rs       C17 prior fusion: λ₀ ≥ 0.1, `unknown` untouched, 10:1 evidence wins
+//!        ├─ hk_model::classify::fuse  C17 prior fusion: λ₀ ≥ 0.1, `unknown` untouched,
+//!        │                10:1 evidence wins (re-exported as [`fuse`])
 //!        └─ classifier.rs gates, abstention rules, within-family class, provenance → Classification
 //! ```
 //!
@@ -42,7 +43,6 @@ pub mod classifier;
 pub mod density;
 pub mod eval;
 pub mod features;
-pub mod fuse;
 pub mod openset;
 pub mod synth;
 pub mod thresholds;
@@ -50,11 +50,16 @@ pub mod tree;
 
 pub use hk_model::classify::*;
 
+/// C17 prior fusion. It lives in [`hk_model::classify::fuse`] (T-218) because both sides of the
+/// fusion need it — this crate produces the likelihood, `hk-context` (T-212) the prior — and is
+/// re-exported here so `hk_classify::fuse::…` keeps working.
+pub use hk_model::classify::fuse;
+
 pub use classifier::{Classifier, ClassifyRequest};
 pub use density::{DensityModel, FamilyScore};
 pub use eval::EvalReport;
 pub use features::{FeatureInput, Features, features};
-pub use fuse::{FamilyPriorSet, FamilyPriors, NoPriors, StaticPriors, fuse};
+pub use fuse::{FamilyPriorSet, FamilyPriors, NoPriors, StaticPriors, fuse as fuse_fn};
 pub use thresholds::{FEATURES_VERSION, RULES_VERSION, THRESHOLDS_VERSION, thresholds_of};
 
 #[cfg(test)]

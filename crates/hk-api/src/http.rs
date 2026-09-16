@@ -32,6 +32,7 @@
 //! | `/api/analyze` | POST | token | T-190 stub: validates a selection/emitter/band target, answers `501 not_implemented` until MAUTO fills it in ([`crate::analyze`]) |
 //! | `/api/iqbuffer[?…]`, `/api/iqbuffer/clip` | GET, POST | token (header only for mutating) | T-157 rolling IQ capture buffer and clip export ([`crate::iqbuffer`]) |
 //! | `/api/datasets[/<id>]` | GET, POST | token (header only for mutating) | T-205 labelled-capture dataset export (CRC-valid decodes and user labels) ([`crate::datasets`]) |
+//! | `/api/taxonomy` | GET | token | T-218 the modulation taxonomy `hk-mod@1` and `thresholds@1`, as data ([`crate::taxonomy`]). Reference data, never a measurement |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
@@ -135,6 +136,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/datasets"),
     ("POST", "/api/datasets"),
     ("GET", "/api/datasets/{id}"),
+    // T-218 classification reference data (ADR-0016 §1-§2)
+    ("GET", "/api/taxonomy"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
@@ -792,6 +795,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/analysis/strongest"
         | "/api/report"
         | "/api/status"
+        | "/api/taxonomy"
             if !get =>
         {
             return respond_json_with(
@@ -829,6 +833,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             .as_ref()
             .map(|f| f())
             .ok_or_else(|| ApiError::new(404, "no pipeline status")),
+        // T-218: reference data (the taxonomy and its thresholds), so the thin client never keeps
+        // its own copy of the family tree or the gates. No server state is involved.
+        "/api/taxonomy" => Ok(crate::taxonomy::taxonomy_json()),
         p if p.starts_with("/api/") => Err(ApiError::new(404, "no such endpoint")),
         _ if !get => {
             return respond_json_with(

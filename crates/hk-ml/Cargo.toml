@@ -1,0 +1,26 @@
+[package]
+name = "hk-ml"
+description = "hackriff C38 ML runtime contract (ADR-0016 §6): Prediction, provider trait and the CPU reference. Stub: T-203 lands ONNX loading, batching, shadow mode and the conformance suite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# No inference engine is a dependency yet, and none is in the default build when T-203 adds one:
+# ADR-0016 §6 puts tract (pure Rust) behind the CPU reference and ort + CoreML behind the opt-in
+# `ml-coreml` feature. The stub compiles with the data model and serde alone, so CI, the Jetson
+# cross build and every other crate's build time are unaffected until a provider actually lands.
+[dependencies]
+hk-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+# T-203: ONNX Runtime + CoreML execution provider on the Mac, after the day-1 bake-off
+# (ADR-0016 §6). Declared here so the feature name is fixed by the contract; it adds no
+# dependency yet and no provider answers to it.
+ml-coreml = []
+# T-216 (deferred with the Jetson phase): ONNX Runtime + TensorRT execution provider.
+ml-trt = []

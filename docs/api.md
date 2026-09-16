@@ -442,6 +442,19 @@ With `band`, only segments whose tuned window (`center ± rate/2`) overlaps `[f_
 - **`Clip`**: `{id, label, meta_uri, data_uri, meta_path, data_path, t0, t1, t0_ns, t1_ns, samples, bytes, sample_rate_hz, center_hz, band ([f_lo, f_hi] or null), content_class, captures: [{sample_start, samples, global_index, t0, t0_ns, segment, run, center_hz, sample_rate_hz, bandwidth_hz, lna_db, vga_db, amp_on, device_id}]}` (`*_uri` relative to the data directory).
 - **Errors** `{"error", "code"}`: `400 invalid` (no range or more than one, a negative time, start ≥ end, zero `samples`, bad `band`/`label`/`run`, unknown field or query parameter, a clip over `max_clip_bytes`), `404 not_found` (nothing buffered in the range, band and run, e.g. already evicted, or overwritten during the export), `409 conflict` (the range spans a sample-rate change: SigMF has one rate per file, so export each side; or a time range spans runs), `503 unavailable` (the run has no buffer, or this server has none), `507 insufficient_storage` (the clip does not fit above the free-space floor), `500 failed` (storage), `405` other methods. Messages never echo values.
 
+## Classification taxonomy (T-218, ADR-0016 §1–§2)
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/api/taxonomy` | – | `{"current", "unknown", "taxonomies": [...], "thresholds": {...}, "coarse": [...]}` |
+
+The modulation taxonomy and the decision thresholds **as data**, so the thin client never keeps its own copy of the family tree, the label spellings or the SNR gates (a stale copy would tell a different story from the one the backend decided). Code: `hk_model::classify::{taxonomy, thresholds}`, served by `crates/hk-api/src/taxonomy.rs`.
+
+- **`current`** is the taxonomy new classifications are written under (`"hk-mod@1"`); **`unknown`** is the open-set label (`"unknown"`), which is an outcome at every level and never a leaf of the tree.
+- **`taxonomies`**: every *released* version, oldest first — a stored row keeps the version it was written under, so a reader maps its labels with the matching entry. Each is `{"ref", "name", "version", "families": [{"family", "coarse", "classes": [...]}], "legacy": [{"label", "family"}]}`. `coarse` is `analog` / `digital` / `noise-like`. `legacy` maps pre-taxonomy spellings (e.g. `fsk2` → `fsk`); labels that are already a family or class name are not repeated there. Service labels (`adsb`, `fm-broadcast`, decoder ids) are **not** modulation labels and appear nowhere here.
+- **`thresholds`**: `{"version": "thresholds@1", "max_confidence", "lambda0_min", "families": [{"family", "snr_gate_db", "class_gate_db", "min_confidence", "open_set_max"}]}`. `snr_gate_db` is `null` for a family with no SNR gate (`noise-like` is a shape test). Below its gate a family contributes no likelihood mass — its share moves to `unknown` with reason `low_snr`, because "not measured" is not "ruled out". `max_confidence` (0.999) is the cap that keeps any call from being reported as certain; `lambda0_min` (0.1) is the smallest uniform weight a C17 prior may carry, which is what stops a band-plan prior from driving a family to zero.
+- **Reference data, not measurement.** No emitter, detection or identity is reachable through this route, and it pre-populates nothing: what was actually *found* comes from `/api/inventory`, always from blind detection first. Errors: `405` (other methods), `401` (token).
+
 ## Labelled-capture dataset export (T-205, ADR-0016 §7/§9)
 
 The path from live captures to a training/evaluation set: normalised IQ snippets, each with a `hk-mod@1` label and provenance, for later model fine-tuning (C38) and blind evaluation (T-213). Code: `hk_store::dataset` (label-finding and the manifest shape), `crates/hk-api/src/datasets.rs` (routes).

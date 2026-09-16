@@ -731,6 +731,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-ml"
+version = "0.1.0"
+dependencies = [
+ "hk-model",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "hk-model"
 version = "0.1.0"
 dependencies = [

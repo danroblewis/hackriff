@@ -61,6 +61,7 @@ pub mod region;
 pub mod relate; // T-219 (C40)
 pub mod repo;
 pub mod sigmf;
+pub mod signature; // T-218 (ADR-0016 §5)
 pub mod time;
 
 pub use calibration::{
@@ -121,5 +122,10 @@ pub use repo::{
     SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX,
     Selection, SelectionLink, SelectionLinkKind, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ,
     USER_BAND_MAX_WIDTH_HZ, UserBand,
+};
+pub use signature::{
+    FieldAgreement, FieldExpect, FieldSpec, InvalidSignature, MatchOutcome, SIGNATURE_SCHEMA,
+    Signature, SignatureCandidate, SignatureKind, SignatureMatch, SignatureProvenance,
+    SignatureRef,
 };
 pub use time::{SampleTime, Timestamp, TimestampMethod};
