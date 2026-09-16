@@ -15,9 +15,16 @@ hk-model.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Only the `ml-mlp` weights loader needs it (manifest sha256 verification); the default build
+# still pulls nothing new.
+sha2 = { workspace = true, optional = true }
 
 [features]
 default = []
+# T-204: the dependency-free reference MLP over a `hk-mlp@1` weights file. It is NOT an ONNX
+# runtime and never claims conformance — it exists so the per-family DL stage can run in shadow
+# mode before T-203's bake-off picks an engine. Adds sha2 only.
+ml-mlp = ["dep:sha2"]
 # T-203: ONNX Runtime + CoreML execution provider on the Mac, after the day-1 bake-off
 # (ADR-0016 §6). Declared here so the feature name is fixed by the contract; it adds no
 # dependency yet and no provider answers to it.

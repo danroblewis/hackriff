@@ -41,6 +41,7 @@
 
 pub mod classifier;
 pub mod density;
+pub mod dl;
 pub mod eval;
 pub mod features;
 pub mod harness;
@@ -60,6 +61,7 @@ pub use hk_model::classify::fuse;
 
 pub use classifier::{Classifier, ClassifyRequest};
 pub use density::{DensityModel, FamilyScore};
+pub use dl::{DL_INPUT_DIM, DlStage, ShadowRecord, classify_shadowed, dl_input};
 pub use eval::EvalReport;
 pub use features::{FeatureInput, Features, features};
 // `FamilyPriorSet`, `FamilyPriors`, `NoPriors`, `StaticPriors` and the `fuse` function come
