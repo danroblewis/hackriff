@@ -14,8 +14,12 @@
 //! 3. **Receiver artifacts are same-source duplicates.** A detection can be an artifact of another
 //!    signal at a *deterministic, predictable* frequency: an **image** at `2·f_LO − f`, a
 //!    **harmonic** at `n·f`, or **intermodulation** at `a·f1 ± b·f2`. [`predict_artifacts`] is the
-//!    geometric test — frequency arithmetic plus relative level — and needs no decode. It is the
-//!    same "artifact of the receiver, not the air" idea as the DC twin rule (ADR-0012 §2.6).
+//!    geometric test — centre, the width the mechanism implies, and relative level — and needs no
+//!    decode. Arithmetic alone never attributes a row: the caller also requires presence only while
+//!    the source was on air, and a matching suspect flag on the measurement itself
+//!    ([`RowEvidence::corroborates`]). The image arithmetic uses only the LO the row being
+//!    explained was measured under. It is the same "artifact of the receiver, not the air" idea as
+//!    the DC twin rule (ADR-0012 §2.6).
 //!
 //! **Nothing here ever deletes or mutates a row.** A relationship is an append-only claim keyed by
 //! emitter, carrying its reasoning, and revocable when evidence changes (`active = 0`). The losing
@@ -23,10 +27,15 @@
 //! That is the exploration-first rule: a relationship is ranked evidence, never truth, and never an
 //! automatic delete.
 //!
-//! **The guard is what makes this safe.** Band overlap alone only makes two rows *compete*; any
-//! distinguishing evidence blocks a merge or suppression ([`distinguishing_evidence`]), in order:
-//! two different decoded identities, then a fingerprint distance beyond [`Tolerances`], then
-//! separated −3 dB extents. Two genuinely distinct adjacent stations therefore stay two entries.
+//! **The guard is what makes this safe.** Band overlap alone only makes two rows *compete*, and
+//! only when they overlap by [`OVERLAP_MIN_FRACTION`] of **both** the narrower and the wider band
+//! ([`bands_compete`]) — so a narrow emission inside a wide one, a subcarrier or a data burst in a
+//! broadcast skirt, never disappears into its host. Any distinguishing evidence then blocks a merge
+//! or suppression ([`distinguishing_evidence`]), in order: two different decoded identities, then
+//! measured bandwidths further apart than [`Tolerances`] allows, then a fingerprint distance beyond
+//! [`Tolerances`], then separated −3 dB extents. Two genuinely distinct adjacent stations therefore
+//! stay two entries. The bandwidth test reads the **measurement**, never only the fingerprint: a
+//! fingerprint-gated guard silently stops protecting anything the feature-set version moves.
 
 use serde::{Deserialize, Serialize};
 
@@ -69,8 +78,19 @@ pub const RANK_TRUST_FLOOR: f64 = 0.1;
 /// Smallest centre tolerance for a geometric artifact prediction, Hz.
 pub const ARTIFACT_CENTER_MIN_HZ: f64 = 5_000.0;
 
-/// Centre tolerance as a fraction of the wider of the measured and predicted bandwidths.
+/// Centre tolerance as a fraction of the **measured** bandwidth of the row being explained — never
+/// of the predicted one. A harmonic's predicted width is `n·bw` and an intermod's `a·bw1 + b·bw2`,
+/// so a predicted-width tolerance widens the acceptance window with the order until nearly every
+/// frequency fits some mechanism: on a 32-source model of the 2026-09-15 FM capture that claimed
+/// 2.396 MHz of the 2.400 MHz band, with 68 mechanisms firing on one 100.3 MHz box.
 pub const ARTIFACT_CENTER_BW_FRACTION: f64 = 0.25;
+
+/// Largest ratio allowed between the measured bandwidth and the width the mechanism predicts (an
+/// image preserves the source's width, an `n`th harmonic scales it by `n`, an intermod spreads to
+/// `a·bw1 + b·bw2`). Generous in the "measured narrower" direction, because a weak artifact's
+/// skirts sink below the detection threshold and read narrow — but an 8.5 kHz box is not the image
+/// of a 180 kHz station, whatever its centre says.
+pub const ARTIFACT_BANDWIDTH_RATIO: f64 = 3.0;
 
 /// An artifact must be at least this far **below** its source, in dB. An "artifact" as strong as
 /// its source is not a receiver artifact; it is another emission.
@@ -257,6 +277,13 @@ pub struct RowEvidence {
     pub duty_cycle: Option<f64>,
     /// Share of linked detections carrying a suspect flag (clipped, spur, image, IMD, compressed).
     pub suspect_fraction: f64,
+    /// A linked detection carried `image_candidate`: the detector's own mirror test saw this row as
+    /// a possible IQ image of a stronger signal.
+    pub image_flagged: bool,
+    /// A linked detection carried `suspect_imd` (the gain-step test grew faster than 1 dB per dB).
+    pub imd_flagged: bool,
+    /// A linked detection carried `spur_candidate`.
+    pub spur_flagged: bool,
     /// Decoded transmitter identity, when it holds one.
     pub identity: Option<DecodedIdentity>,
     /// Stored fingerprint, when it has one.
@@ -289,6 +316,24 @@ impl RowEvidence {
     pub fn rank(&self) -> f64 {
         rank_score(self.snr_db, self.duty_cycle, self.suspect_fraction)
     }
+
+    /// The **measured** flag that corroborates `kind`, or `None` when nothing in the measurement
+    /// does. Frequency arithmetic is a coincidence until the front end itself says the row looks
+    /// manufactured: the detector's mirror test (`image_candidate`), its spur mask
+    /// (`spur_candidate`) or the gain-step test (`suspect_imd`). Without one, a row that merely
+    /// lands on a predicted frequency stays an independent emission.
+    pub fn corroborates(&self, kind: ArtifactKind) -> Option<&'static str> {
+        match kind {
+            ArtifactKind::Image if self.image_flagged => Some("image_candidate"),
+            // A harmonic of a strong emitter is a non-linearity product of the front end, which the
+            // spur mask and the gain-step test are the measurements of.
+            ArtifactKind::Harmonic if self.spur_flagged => Some("spur_candidate"),
+            ArtifactKind::Harmonic | ArtifactKind::Intermod if self.imd_flagged => {
+                Some("suspect_imd")
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Share of the **narrower** of two bands that the two have in common, 0–1. `0` when they do not
@@ -301,6 +346,30 @@ pub fn overlap_fraction(a: FreqRange, b: FreqRange) -> f64 {
         return 0.0;
     }
     ((hi - lo) / narrower).clamp(0.0, 1.0)
+}
+
+/// Share of the **wider** of two bands that the two have in common, 0–1. A narrow emission wholly
+/// inside a wide one scores only its width ratio here, however completely its own band is covered.
+pub fn overlap_fraction_wider(a: FreqRange, b: FreqRange) -> f64 {
+    let lo = a.lo_hz.max(b.lo_hz);
+    let hi = a.hi_hz.min(b.hi_hz);
+    let wider = a.width_hz().max(b.width_hz());
+    if !wider.is_finite() || wider <= 0.0 || hi <= lo {
+        return 0.0;
+    }
+    ((hi - lo) / wider).clamp(0.0, 1.0)
+}
+
+/// Whether two bands overlap enough for the rows to compete at all: at least
+/// [`OVERLAP_MIN_FRACTION`] of the narrower band **and** of the wider one.
+///
+/// The second half is what keeps a narrow signal inside a wide one visible. Measured against the
+/// narrower band alone, a 12.5 kHz subcarrier inside a 180 kHz station overlaps it by 100 %, which
+/// would make the subcarrier a perfect "duplicate" of its host and hide it. Against the wider band
+/// it overlaps by 7 %, and the two rows never compete.
+pub fn bands_compete(a: FreqRange, b: FreqRange) -> bool {
+    overlap_fraction(a, b) >= OVERLAP_MIN_FRACTION
+        && overlap_fraction_wider(a, b) >= OVERLAP_MIN_FRACTION
 }
 
 /// The provisional duplicate-rank proxy: **SNR × duty × trust**, explicitly *not* the evidence-bits
@@ -334,8 +403,10 @@ pub fn rank_score(snr_db: Option<f64>, duty_cycle: Option<f64>, suspect_fraction
 /// compete.** Checked in order, cheapest and most decisive first:
 ///
 /// 1. two different decoded identities (e.g. different RDS PI) — always blocks;
-/// 2. a [`Fingerprint::compare`] distance beyond `tol`;
-/// 3. −3 dB extents that do not overlap, with centres separated by more than the summed
+/// 2. measured bandwidths further apart than `tol.bandwidth_ratio` — checked on the measurement
+///    itself, so it holds for a row with no fingerprint (or one of an older feature-set version);
+/// 3. a [`Fingerprint::compare`] distance beyond `tol`;
+/// 4. −3 dB extents that do not overlap, with centres separated by more than the summed
 ///    measurement uncertainty.
 pub fn distinguishing_evidence(
     a: &RowEvidence,
@@ -346,6 +417,17 @@ pub fn distinguishing_evidence(
         && x != y
     {
         return Some("different decoded identities");
+    }
+    // Bandwidth, from the **measurement** and unconditionally. This deliberately does not wait for
+    // both rows to carry a fingerprint: `Fingerprint::from_value` returns `None` for any other
+    // feature-set version, so a fingerprint-only test silently stops protecting anything the day
+    // the version moves. A narrow emission sitting inside a wide one — a 12.5 kHz subcarrier in a
+    // 180 kHz station — is exactly the row that must never be hidden as a "duplicate" of its host.
+    if a.bandwidth_hz > 0.0 && b.bandwidth_hz > 0.0 {
+        let ratio = a.bandwidth_hz.max(b.bandwidth_hz) / a.bandwidth_hz.min(b.bandwidth_hz);
+        if ratio > tol.bandwidth_ratio.max(1.0) {
+            return Some("bandwidth ratio beyond tolerance");
+        }
     }
     if let (Some(x), Some(y)) = (&a.fingerprint, &b.fingerprint) {
         // Every feature **except the centre**: bandwidth, family, symbol rate, deviation, period,
@@ -456,11 +538,26 @@ impl ArtifactPrediction {
     }
 }
 
-/// Centre tolerance for an artifact match: the wider of the measured and predicted bandwidths
-/// scaled by [`ARTIFACT_CENTER_BW_FRACTION`], floored at [`ARTIFACT_CENTER_MIN_HZ`].
-fn artifact_tolerance_hz(measured_bw_hz: f64, predicted_bw_hz: f64) -> f64 {
-    (ARTIFACT_CENTER_BW_FRACTION * measured_bw_hz.max(predicted_bw_hz).max(0.0))
-        .max(ARTIFACT_CENTER_MIN_HZ)
+/// Centre tolerance for an artifact match: the **measured** bandwidth of the row being explained,
+/// scaled by [`ARTIFACT_CENTER_BW_FRACTION`] and floored at [`ARTIFACT_CENTER_MIN_HZ`]. It does not
+/// depend on the mechanism or its order, so the acceptance window cannot grow with `n`.
+fn artifact_tolerance_hz(measured_bw_hz: f64) -> f64 {
+    (ARTIFACT_CENTER_BW_FRACTION * measured_bw_hz.max(0.0)).max(ARTIFACT_CENTER_MIN_HZ)
+}
+
+/// True when a measured bandwidth is consistent with the width the mechanism predicts, within
+/// [`ARTIFACT_BANDWIDTH_RATIO`]. **An unmeasured or zero bandwidth is never consistent**: without a
+/// width there is no corroboration, and the row stays an independent emission.
+pub fn bandwidth_consistent(measured_bw_hz: f64, predicted_bw_hz: f64) -> bool {
+    if !measured_bw_hz.is_finite()
+        || !predicted_bw_hz.is_finite()
+        || measured_bw_hz <= 0.0
+        || predicted_bw_hz <= 0.0
+    {
+        return false;
+    }
+    measured_bw_hz.max(predicted_bw_hz) / measured_bw_hz.min(predicted_bw_hz)
+        <= ARTIFACT_BANDWIDTH_RATIO
 }
 
 /// True when the level difference is consistent with a receiver artifact: the candidate is at
@@ -488,10 +585,14 @@ pub fn predict_artifacts(
     if !target_f_center_hz.is_finite() || !target_level_dbfs.is_finite() {
         return out;
     }
+    // One tolerance for every mechanism: it comes from the measured row, not from the prediction.
+    let tol = artifact_tolerance_hz(target_bandwidth_hz);
     let mut push = |p: ArtifactPrediction| {
-        // A prediction that lands on the source itself says nothing: that is the duplicate rule's
-        // business, not the artifact rule's.
+        // Three independent tests, all measured: the centre, the width the mechanism implies, and
+        // the level. A prediction that lands on the source itself says nothing: that is the
+        // duplicate rule's business, not the artifact rule's.
         if (p.predicted_hz - target_f_center_hz).abs() <= p.tolerance_hz
+            && bandwidth_consistent(target_bandwidth_hz, p.predicted_bandwidth_hz)
             && level_consistent(p.suppression_db)
         {
             out.push(p);
@@ -515,7 +616,6 @@ pub fn predict_artifacts(
             if (predicted - s.f_center_hz).abs() <= ARTIFACT_CENTER_MIN_HZ {
                 continue;
             }
-            let tol = artifact_tolerance_hz(target_bandwidth_hz, s.bandwidth_hz);
             push(ArtifactPrediction {
                 source: s.emitter_id,
                 second_source: None,
@@ -536,7 +636,6 @@ pub fn predict_artifacts(
         for n in 2..=HARMONIC_MAX_ORDER {
             let predicted = f64::from(n) * s.f_center_hz;
             let bw = f64::from(n) * s.bandwidth_hz;
-            let tol = artifact_tolerance_hz(target_bandwidth_hz, bw);
             push(ArtifactPrediction {
                 source: s.emitter_id,
                 second_source: None,
@@ -571,7 +670,6 @@ pub fn predict_artifacts(
                             continue;
                         }
                         let bw = fa * s1.bandwidth_hz + fb * s2.bandwidth_hz;
-                        let tol = artifact_tolerance_hz(target_bandwidth_hz, bw);
                         // A product landing on one of its own sources explains nothing.
                         if (predicted - s1.f_center_hz).abs() <= tol
                             || (predicted - s2.f_center_hz).abs() <= tol
@@ -641,6 +739,9 @@ mod tests {
             peak_dbfs: Some(-20.0),
             duty_cycle: Some(1.0),
             suspect_fraction: 0.0,
+            image_flagged: false,
+            imd_flagged: false,
+            spur_flagged: false,
             identity: None,
             fingerprint: None,
             tuned_lo_hz: Vec::new(),
@@ -743,12 +844,64 @@ mod tests {
             bandwidth_hz: 180e3,
             level_dbfs: -22.0,
         };
-        // 2 f1 - f2 = 99.6 MHz.
-        let hits = predict_artifacts(99.6e6, 180e3, -55.0, &[s1, s2], &[]);
+        // 2 f1 - f2 = 99.6 MHz, and the product spreads to 2 x 180 + 180 = 540 kHz.
+        let hits = predict_artifacts(99.6e6, 540e3, -55.0, &[s1, s2], &[]);
         let top = hits.first().expect("intermod predicted");
         assert_eq!(top.kind, ArtifactKind::Intermod);
         assert_eq!((top.a, top.b, top.sign), (2, 1, -1));
         assert_eq!(top.order, 3);
+        // A narrow box on the same frequency is not that product: the mechanism says 540 kHz.
+        assert!(predict_artifacts(99.6e6, 12.5e3, -55.0, &[s1, s2], &[]).is_empty());
+    }
+
+    /// The guard's central case: a narrow emission inside a wide one is never its duplicate,
+    /// however completely their bands overlap.
+    #[test]
+    fn a_narrow_signal_inside_a_wide_station_never_competes_with_it() {
+        let wide = row(100.3e6, 180e3);
+        let mut narrow = row(100.3e6, 12.5e3);
+        narrow.emitter_id = eid(2);
+        assert_eq!(
+            overlap_fraction(wide.freq(), narrow.freq()),
+            1.0,
+            "the narrow band lies wholly inside the wide one"
+        );
+        assert!(
+            overlap_fraction_wider(wide.freq(), narrow.freq()) < 0.1,
+            "but it covers almost none of the wide one"
+        );
+        assert!(!bands_compete(wide.freq(), narrow.freq()));
+        assert_eq!(
+            distinguishing_evidence(&wide, &narrow, &Tolerances::default()),
+            Some("bandwidth ratio beyond tolerance"),
+            "and the measurement alone tells them apart, with no fingerprint on either row"
+        );
+    }
+
+    /// The user's field case of 2026-09-15: short ~8.5 kHz bursts at 100.300 MHz, a wideband
+    /// station at 101.303 MHz, front end tuned to 100.800 MHz. 2 x 100.800 - 101.303 = 100.297,
+    /// 3 kHz from the burst and inside the 5 kHz floor — the arithmetic fits. The physics does not:
+    /// an image preserves its source's width.
+    #[test]
+    fn the_100p3_burst_is_not_the_image_of_a_wideband_station() {
+        let source = ArtifactSource {
+            emitter_id: eid(9),
+            f_center_hz: 101.303e6,
+            bandwidth_hz: 180e3,
+            level_dbfs: -18.0,
+        };
+        assert!(
+            predict_artifacts(100.300e6, 8.5e3, -48.0, &[source], &[100.8e6]).is_empty(),
+            "an 8.5 kHz burst is not the image of a 180 kHz station"
+        );
+        // The same arithmetic on a box of the width the mechanism implies is still offered.
+        let wide = predict_artifacts(100.300e6, 180e3, -48.0, &[source], &[100.8e6]);
+        assert_eq!(wide.first().map(|p| p.kind), Some(ArtifactKind::Image));
+        assert!(
+            (wide[0].error_hz - 3_000.0).abs() < 1.0,
+            "{}",
+            wide[0].error_hz
+        );
     }
 
     #[test]
@@ -763,5 +916,73 @@ mod tests {
             &[(50_000_000_000, 60_000_000_000)],
             &source
         ));
+    }
+
+    /// How much of a captured band the geometric predictor is willing to claim — the *prior width*
+    /// of the rule, before the presence, flag and guard tests. Modelled on the 2026-09-15 capture:
+    /// 99.6–102.0 MHz, one tune at 100.8 MHz, 32 confirmed sources (the cap) 30 dB above the
+    /// target. If this is not small, "artifact" means nothing.
+    #[test]
+    fn artifact_predictions_claim_only_a_small_share_of_the_captured_band() {
+        let sources: Vec<ArtifactSource> = (0..32u8)
+            .map(|k| ArtifactSource {
+                emitter_id: eid(k + 1),
+                f_center_hz: 99.65e6 + f64::from(k) * 73e3,
+                bandwidth_hz: 180e3,
+                level_dbfs: -18.0,
+            })
+            .collect();
+        let los = [100.8e6];
+        let step = 2_000.0;
+        let mut covered = [0usize; 2];
+        for (i, measured_bw) in [12.5e3, 180e3].into_iter().enumerate() {
+            let mut f = 99.6e6;
+            while f <= 102.0e6 {
+                if !predict_artifacts(f, measured_bw, -48.0, &sources, &los).is_empty() {
+                    covered[i] += 1;
+                }
+                f += step;
+            }
+        }
+        // The capture as it actually is: the two strong WFM stations, not 32 overlapping ones.
+        let real: Vec<ArtifactSource> = [99.75e6, 101.45e6]
+            .into_iter()
+            .enumerate()
+            .map(|(k, f)| ArtifactSource {
+                emitter_id: eid(k as u8 + 1),
+                f_center_hz: f,
+                bandwidth_hz: 180e3,
+                level_dbfs: -18.0,
+            })
+            .collect();
+        let mut real_covered = 0usize;
+        let mut f = 99.6e6;
+        while f <= 102.0e6 {
+            if !predict_artifacts(f, 180e3, -48.0, &real, &los).is_empty() {
+                real_covered += 1;
+            }
+            f += step;
+        }
+        let mhz = |n: usize| n as f64 * step / 1e6;
+        println!(
+            "COVERAGE 32 dense sources: narrow(12.5 kHz) {:.3} MHz, wide(180 kHz) {:.3} MHz; \
+             the capture's 2 stations, wide: {:.3} MHz — of 2.400 MHz. Mechanisms firing on one \
+             100.300 MHz box: narrow {}, wide {}",
+            mhz(covered[0]),
+            mhz(covered[1]),
+            mhz(real_covered),
+            predict_artifacts(100.3e6, 12.5e3, -48.0, &sources, &los).len(),
+            predict_artifacts(100.3e6, 180e3, -48.0, &sources, &los).len(),
+        );
+        assert!(
+            mhz(covered[0]) < 0.25,
+            "a narrow box against 32 sources: {:.3} MHz of 2.400 claimed",
+            mhz(covered[0])
+        );
+        assert!(
+            mhz(real_covered) < 0.25,
+            "a WFM-width box against the capture's two stations: {:.3} MHz of 2.400 claimed",
+            mhz(real_covered)
+        );
     }
 }

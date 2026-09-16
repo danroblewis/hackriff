@@ -81,8 +81,7 @@ fn prov(r: &mut Repository, lo: f64) -> ProvenanceId {
     .unwrap()
 }
 
-/// One inventory row from a track sighting, with a detection linked through its track so the
-/// rules can read its level, −3 dB width, trust and tuning centre.
+/// One inventory row from a track sighting, its detection carrying no suspect flag.
 #[allow(clippy::too_many_arguments)]
 fn station(
     r: &mut Repository,
@@ -94,6 +93,35 @@ fn station(
     snr: f64,
     peak_dbfs: f32,
     seen: TimeRange,
+) -> EmitterId {
+    station_flagged(
+        r,
+        survey,
+        provenance,
+        f,
+        obw,
+        xdb,
+        snr,
+        peak_dbfs,
+        seen,
+        DetectionFlags::default(),
+    )
+}
+
+/// One inventory row from a track sighting, with a detection linked through its track so the
+/// rules can read its level, −3 dB width, trust, suspect flags and tuning centre.
+#[allow(clippy::too_many_arguments)]
+fn station_flagged(
+    r: &mut Repository,
+    survey: SurveyId,
+    provenance: ProvenanceId,
+    f: f64,
+    obw: f64,
+    xdb: f64,
+    snr: f64,
+    peak_dbfs: f32,
+    seen: TimeRange,
+    flags: DetectionFlags,
 ) -> EmitterId {
     let track_id = TrackId::new();
     let fp = Fingerprint {
@@ -134,7 +162,7 @@ fn station(
         clip_count: 0,
         detector_version: "test@1".into(),
         provenance_ref: provenance,
-        flags: DetectionFlags::default(),
+        flags,
     };
     r.insert_detections(std::slice::from_ref(&d)).unwrap();
     r.upsert_track(&Track {
@@ -313,8 +341,23 @@ fn t219_an_image_is_attributed_to_its_source_and_a_real_neighbour_is_not() {
     let p = prov(&mut r, 100.8e6);
     let source = station(&mut r, sv, p, 101.3e6, 180e3, 180e3, 26.0, -18.0, tr(0, 5));
     confirm(&mut r, source, t(5));
-    // Tuned at 100.8 MHz, the mirror of the 101.3 MHz station lands at 100.3 MHz, 30 dB down.
-    let image = station(&mut r, sv, p, 100.3e6, 180e3, 180e3, 8.0, -48.0, tr(1, 4));
+    // Tuned at 100.8 MHz, the mirror of the 101.3 MHz station lands at 100.3 MHz, 30 dB down, at
+    // the source's width, and the detector's own mirror test flagged it.
+    let image = station_flagged(
+        &mut r,
+        sv,
+        p,
+        100.3e6,
+        180e3,
+        180e3,
+        8.0,
+        -48.0,
+        tr(1, 4),
+        DetectionFlags {
+            image_candidate: true,
+            ..DetectionFlags::default()
+        },
+    );
     // A real emitter 60 kHz away, only 2 dB below the source: no mechanism explains it.
     let real = station(&mut r, sv, p, 100.36e6, 180e3, 180e3, 24.0, -20.0, tr(0, 5));
 
@@ -371,6 +414,98 @@ fn t219_an_emission_seen_without_its_supposed_source_stays_independent() {
     assert!(out.artifacts.is_empty(), "{out:?}");
     assert!(r.emitter_relations(late).unwrap().is_empty());
     assert!(shown(&r).contains(&late));
+}
+
+/// The guard's central case: a narrow emission inside a confirmed wide station — a subcarrier, a
+/// data burst, a pager channel in a broadcast skirt — is a real signal until something says
+/// otherwise. It overlaps its host's band completely, carries no identity and no fingerprint of its
+/// own, and must still be listed.
+#[test]
+fn t219_a_narrow_signal_inside_a_confirmed_wide_station_stays_visible() {
+    let (mut r, sv) = scene();
+    let p = prov(&mut r, 100.8e6);
+    let wide = station(&mut r, sv, p, 100.3e6, 180e3, 180e3, 26.0, -18.0, tr(0, 5));
+    confirm(&mut r, wide, t(5));
+    // 12.5 kHz on the same centre: wholly inside the station's band.
+    let narrow = station(
+        &mut r,
+        sv,
+        p,
+        100.3e6,
+        12.5e3,
+        12.5e3,
+        14.0,
+        -30.0,
+        tr(1, 5),
+    );
+    assert_ne!(wide, narrow, "two entries before resolution");
+    assert_eq!(
+        overlap_fraction(
+            FreqRange::centered(100.3e6, 180e3),
+            FreqRange::centered(100.3e6, 12.5e3)
+        ),
+        1.0,
+        "the case is only interesting because the narrower band is wholly covered"
+    );
+
+    for id in [wide, narrow] {
+        r.resolve_overlaps(id, "test/overlap@1", t(5), &tol())
+            .unwrap();
+    }
+    assert!(
+        r.emitter_relations(narrow).unwrap().is_empty(),
+        "a narrow signal inside a wide one is never suppressed as a duplicate of its host"
+    );
+    assert!(shown(&r).contains(&narrow), "and it stays listed");
+    assert_eq!(shown(&r).len(), 2);
+}
+
+/// The user's field case of 2026-09-15: short intermittent ~8.5 kHz bursts at 100.300 MHz while a
+/// wideband station sits at 101.303 MHz and the front end is tuned to 100.800 MHz. The image
+/// arithmetic fits to 3 kHz and the detector even flagged the burst `image_candidate` — but an
+/// image preserves its source's width, and 8.5 kHz is not 180 kHz, so the burst stays an
+/// independent emitter that a person can look at.
+#[test]
+fn t219_a_narrow_burst_on_a_predicted_image_frequency_is_not_attributed_to_a_wide_station() {
+    let (mut r, sv) = scene();
+    let p = prov(&mut r, 100.8e6);
+    let wfm = station(
+        &mut r,
+        sv,
+        p,
+        101.303e6,
+        180e3,
+        180e3,
+        30.0,
+        -18.0,
+        tr(0, 10),
+    );
+    confirm(&mut r, wfm, t(10));
+    let burst = station_flagged(
+        &mut r,
+        sv,
+        p,
+        100.300e6,
+        8.5e3,
+        8.5e3,
+        12.0,
+        -48.0,
+        tr(2, 4),
+        DetectionFlags {
+            image_candidate: true,
+            ..DetectionFlags::default()
+        },
+    );
+
+    let out = r
+        .resolve_overlaps(burst, "test/overlap@1", t(10), &tol())
+        .unwrap();
+    assert!(out.artifacts.is_empty(), "{out:?}");
+    assert!(
+        r.emitter_relations(burst).unwrap().is_empty(),
+        "the arithmetic alone never attributes a narrow burst to a wideband station"
+    );
+    assert!(shown(&r).contains(&burst));
 }
 
 /// A relationship row is append-only: the table refuses an update or a delete, so a losing

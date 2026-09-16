@@ -382,6 +382,10 @@ fn candidate_emitters(
             time: filter.time,
             limit: MAX_INVENTORY_PAGE,
             offset,
+            // T-219: training data must not inherit the inventory's display filter. A row that
+            // defers to another still carries its own decoder-validated labels and samples, and an
+            // export that silently dropped them would drop exactly the confusable cases.
+            relations: hk_model::RelationVisibility::All,
             ..InventoryQuery::default()
         })?;
         let got = page.entries.len();

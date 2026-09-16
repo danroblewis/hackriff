@@ -23,7 +23,7 @@ use crate::ids::EmitterId;
 use crate::region::{FreqRange, Region, TimeRange};
 use crate::relate::{
     ARTIFACT_SOURCE_MIN_SNR_DB, ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation,
-    OVERLAP_MIN_FRACTION, RelationAuthor, RelationClaim, RelationKind, RowEvidence,
+    RelationAuthor, RelationClaim, RelationKind, RowEvidence, bands_compete,
     distinguishing_evidence, overlap_fraction, predict_artifacts, present_only_with,
 };
 use crate::time::Timestamp;
@@ -87,12 +87,24 @@ pub(super) const CURRENT_RELATION_SQL: &str = "\
 
 /// Whether an emitter currently defers to another row (the inventory's default hide predicate),
 /// for use inside a larger `WHERE`. Correlates on `emitter.emitter_id`.
+///
+/// It mirrors [`read_relations`]: a claim counts only while the row it points at is still a live,
+/// undeleted row *other than* this one. Without that, a row stays hidden after its host is merged
+/// away or deleted — the inventory would lose a real signal to a claim that no longer names
+/// anything. Merges flatten `merged_into`, so one hop resolves it; a deeper chain (corrupt data)
+/// fails open and the row is listed.
 pub(super) const DEFERS_SQL: &str = "\
      EXISTS (SELECT 1 FROM emitter_relation r \
+             JOIN emitter src ON src.emitter_id = r.source_id \
+             LEFT JOIN emitter live ON live.emitter_id = src.merged_into \
              WHERE r.emitter_id = emitter.emitter_id AND r.active = 1 \
                AND r.relation_id = (SELECT max(r2.relation_id) FROM emitter_relation r2 \
                                     WHERE r2.emitter_id = r.emitter_id AND r2.kind = r.kind \
-                                      AND r2.source_id = r.source_id))";
+                                      AND r2.source_id = r.source_id) \
+               AND (src.merged_into IS NULL \
+                    OR (live.emitter_id IS NOT NULL AND live.merged_into IS NULL)) \
+               AND coalesce(live.lifecycle_state, src.lifecycle_state) != 'deleted' \
+               AND coalesce(live.emitter_id, src.emitter_id) != emitter.emitter_id)";
 
 fn kind_from(text: &str) -> Result<RelationKind, RepoError> {
     Ok(match text {
@@ -326,6 +338,7 @@ fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvidence>, Rep
     };
     let (mut snr_db, mut peak_dbfs, mut xdb_bandwidth_hz) = (None, None, None);
     let (mut suspect, mut tuned_lo_hz) = (0usize, Vec::<f64>::new());
+    let (mut image_flagged, mut imd_flagged, mut spur_flagged) = (false, false, false);
     for (i, (snr, peak, xdb, flags, lo)) in dets.iter().enumerate() {
         if i == 0 {
             snr_db = Some(*snr);
@@ -338,6 +351,10 @@ fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvidence>, Rep
         if f.clipped || f.spur_candidate || f.image_candidate || f.suspect_imd || f.compressed {
             suspect += 1;
         }
+        // Which mechanism the measurement itself suspects, for [`RowEvidence::corroborates`].
+        image_flagged |= f.image_candidate;
+        imd_flagged |= f.suspect_imd;
+        spur_flagged |= f.spur_candidate;
         if let Some(lo) = lo.filter(|v| v.is_finite())
             && tuned_lo_hz.len() < MAX_TUNED_LO
             && !tuned_lo_hz.iter().any(|v| (v - lo).abs() < 1.0)
@@ -360,6 +377,9 @@ fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvidence>, Rep
         peak_dbfs,
         duty_cycle: fingerprint.as_ref().and_then(|f| f.duty_cycle),
         suspect_fraction,
+        image_flagged,
+        imd_flagged,
+        spur_flagged,
         identity,
         fingerprint,
         tuned_lo_hz,
@@ -541,9 +561,15 @@ fn revoke_kind(
     Ok(out)
 }
 
-fn artifact_detail(p: &ArtifactPrediction, target: &RowEvidence) -> serde_json::Value {
+fn artifact_detail(
+    p: &ArtifactPrediction,
+    target: &RowEvidence,
+    corroborating_flag: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "kind": p.kind.as_str(),
+        "measured_bandwidth_hz": target.bandwidth_hz,
+        "corroborating_flag": corroborating_flag,
         "order": p.order,
         "a": p.a,
         "b": p.b,
@@ -632,9 +658,11 @@ impl Repository {
     ///    image `2·f_LO − f`, harmonic `n·f` or intermod `a·f1 ± b·f2` of a strong Confirmed
     ///    emitter, at a level consistent with the mechanism and present only while that source is,
     ///    is recorded [`RelationKind::ArtifactOf`] it with the arithmetic disclosed.
-    /// 2. **Suppression**: a candidate overlapping a Confirmed entry's band by at least
-    ///    [`OVERLAP_MIN_FRACTION`] of the narrower band, with no
+    /// 2. **Suppression**: a candidate whose band overlaps a Confirmed entry's by at least
+    ///    [`crate::relate::OVERLAP_MIN_FRACTION`] of **both** the narrower and the wider band
+    ///    ([`crate::relate::bands_compete`]), with no
     ///    [`crate::relate::distinguishing_evidence`], is recorded [`RelationKind::SuppressedBy`] it.
+    ///    A narrow emission inside a wide one therefore never disappears into its host.
     /// 3. **Competition**: the remaining overlapping candidates form a duplicate group ranked by
     ///    the [`crate::relate::rank_score`] proxy; the strongest is shown and the others are
     ///    recorded [`RelationKind::DuplicateOf`] it.
@@ -715,40 +743,42 @@ fn resolve(
         let Some(level) = target.peak_dbfs else {
             continue;
         };
-        // A source is never an artifact of itself, and the tuning history is the union of what
-        // both rows were measured under.
+        // A source is never an artifact of itself. The tuning history is the **target's own**: an
+        // image exists only at the LO the target was measured under, so unioning in every source's
+        // tuning history manufactures mirrors of tunings this row was never seen at (32 sources x
+        // 16 remembered LOs each = up to 16 384 image frequencies for one box).
         let usable: Vec<ArtifactSource> = sources
             .iter()
             .filter(|(s, _)| s.emitter_id != target.emitter_id)
             .map(|(s, _)| *s)
             .collect();
-        let mut los = target.tuned_lo_hz.clone();
-        for (_, ev) in &sources {
-            for lo in &ev.tuned_lo_hz {
-                if !los.iter().any(|v| (v - lo).abs() < 1.0) {
-                    los.push(*lo);
-                }
-            }
-        }
+        let present = |id: EmitterId| {
+            sources
+                .iter()
+                .find(|(s, _)| s.emitter_id == id)
+                .is_some_and(|(_, ev)| present_only_with(&target.spans, &ev.spans))
+        };
         let hit = predict_artifacts(
             target.f_center_hz,
             target.bandwidth_hz,
             level,
             &usable,
-            &los,
+            &target.tuned_lo_hz,
         )
         .into_iter()
-        .find(|p| {
-            // Present only while the source is present — the arithmetic alone is a coincidence.
-            sources
-                .iter()
-                .find(|(s, _)| s.emitter_id == p.source)
-                .is_some_and(|(_, ev)| present_only_with(&target.spans, &ev.spans))
+        .find_map(|p| {
+            // Arithmetic alone is a coincidence. Two further measurements have to agree with it:
+            // the front end's own suspect flag for this mechanism, and presence only while every
+            // source of the product was present.
+            let flag = target.corroborates(p.kind)?;
+            let present = present(p.source) && p.second_source.is_none_or(present);
+            present.then_some((p, flag))
         });
         match hit {
-            Some(p) => {
+            Some((p, flag)) => {
                 let reason = format!(
-                    "receiver artifact of emitter {}, not an independent emission: {}",
+                    "receiver artifact of emitter {}, not an independent emission: {} \
+                     (bandwidth consistent with the mechanism, and the measurement carries {flag})",
                     p.source,
                     p.arithmetic()
                 );
@@ -766,7 +796,7 @@ fn resolve(
                         actor: actor.to_owned(),
                         reason,
                         score: None,
-                        detail: Some(artifact_detail(&p, target)),
+                        detail: Some(artifact_detail(&p, target, flag)),
                     },
                 )?;
                 out.artifacts.extend(claimed);
@@ -781,7 +811,9 @@ fn resolve(
                     RelationKind::ArtifactOf,
                     actor,
                     t,
-                    "no image, harmonic or intermodulation mechanism fits this row any more",
+                    "no image, harmonic or intermodulation mechanism fits this row any more \
+                     (centre, bandwidth, level, a measured suspect flag and presence while the \
+                     source was on air all have to agree)",
                 )?);
             }
         }
@@ -797,7 +829,7 @@ fn resolve(
         let host = rows
             .iter()
             .filter(|r| r.confirmed && r.emitter_id != cand.emitter_id)
-            .filter(|r| overlap_fraction(r.freq(), cand.freq()) >= OVERLAP_MIN_FRACTION)
+            .filter(|r| bands_compete(r.freq(), cand.freq()))
             .find(|r| distinguishing_evidence(r, cand, tol).is_none());
         match host {
             Some(host) => {
@@ -875,7 +907,9 @@ fn resolve(
             continue;
         }
         let fraction = overlap_fraction(top.freq(), other.freq());
-        if fraction < OVERLAP_MIN_FRACTION || distinguishing_evidence(top, other, tol).is_some() {
+        if !bands_compete(top.freq(), other.freq())
+            || distinguishing_evidence(top, other, tol).is_some()
+        {
             out.revoked.extend(revoke_kind(
                 conn,
                 &standing,
