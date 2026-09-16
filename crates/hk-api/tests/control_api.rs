@@ -111,7 +111,11 @@ fn live(device: &Arc<Device>) -> Arc<dyn LiveControl> {
             center_hz: 100.8e6,
             sample_rate_hz: 2.4e6,
             gains: vec![NamedGain::new("lna", 16.0), NamedGain::new("vga", 20.0)],
-            bias_tee: device.caps.bias_tee.then_some(false),
+            bias_tee: if device.caps.bias_tee {
+                hk_model::BiasTee::Off
+            } else {
+                hk_model::BiasTee::Unknown
+            },
             baseband_filter_hz: None,
         },
     ))
@@ -794,8 +798,8 @@ fn every_control_action_is_audited_with_old_and_new_values() {
     assert_eq!(entries[2]["new"]["averaging"], json!(8));
     assert_eq!(entries[3]["new"]["paused"], json!(true));
     assert_eq!(entries[5]["new"]["stored"], json!(true));
-    assert_eq!(entries[6]["old"]["bias_tee"], json!(false));
-    assert_eq!(entries[6]["new"]["bias_tee"], json!(true));
+    assert_eq!(entries[6]["old"]["bias_tee"], json!("off"));
+    assert_eq!(entries[6]["new"]["bias_tee"], json!("on"));
     let text = std::fs::read_to_string(&r.audit).unwrap();
     assert!(!text.contains(TOKEN), "the token itself is never logged");
     let mode = std::fs::metadata(&r.audit).unwrap().permissions().mode() & 0o777;

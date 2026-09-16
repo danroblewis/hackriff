@@ -24,6 +24,7 @@ that don't know it can ignore it.
   "quantisation_limited": false,
   "temperature_c": 41.5,
   "antenna_port": "A1",
+  "bias_tee": "off",
   "clock_source": "internal",
   "clock_locked": true,
   "calibration_state_ref": "<uuid v7>",
@@ -35,8 +36,16 @@ that don't know it can ignore it.
 
 - **Required:** `device_id`, `tune` (all six fields), `overload`, `quantisation_limited`,
   `clock_source`, `clock_locked`, `timestamp_method`.
-- **Optional:** `temperature_c`, `antenna_port`, `calibration_state_ref`, `spur_mask_ref`, and
-  `timestamp_error_budget_ns`. Omit a field when it is unknown; do not write `null`.
+- **Optional:** `temperature_c`, `antenna_port`, `bias_tee`, `calibration_state_ref`,
+  `spur_mask_ref`, and `timestamp_error_budget_ns`. Omit a field when it is unknown; do not write
+  `null`.
+- `bias_tee` (T-325) is `off` or `on`: the antenna-port bias tee's state under this provenance.
+  **An absent key means unknown, and unknown is not `off`** — the writer could not report it (a
+  replayed or third-party recording), and the DC may well have been on. A reader must not default
+  it to `off`: a bias tee left on into a passive or DC-shorted port is a hardware hazard, and an
+  active antenna's LNA moves the noise floor, so bias-tee-on captures are not comparable with
+  bias-tee-off ones. Provenance written before T-325 therefore has no key and reads as unknown,
+  and an unknown record's canonical JSON is unchanged, so its dedup hash still matches.
 - `overload` is sticky tune-state: the front end was judged overloaded under this tune/gain state.
   A change of state is a new provenance object. Every detection under an overloaded provenance is
   flagged `clipped`.

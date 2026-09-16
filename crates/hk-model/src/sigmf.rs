@@ -413,6 +413,7 @@ mod tests {
             quantisation_limited: false,
             temperature_c: Some(41.5),
             antenna_port: None,
+            bias_tee: crate::BiasTee::Unknown,
             clock_source: ClockSource::Internal,
             clock_locked: true,
             calibration_state_ref: Some(CalibrationStateId::new()),

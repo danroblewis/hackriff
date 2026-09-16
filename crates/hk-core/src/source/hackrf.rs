@@ -59,7 +59,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use hk_model::{ClockSource, Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
+use hk_model::{BiasTee, ClockSource, Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
 use num_complex::{Complex, Complex32};
 use serde_json::{Value, json};
 
@@ -453,7 +453,7 @@ pub struct HackRfSource {
     info: HackRfDeviceInfo,
     pool: Arc<TransferPool>,
     tune: Tune,
-    bias_tee: bool,
+    bias_tee: BiasTee,
     filter_explicit: bool,
     overload_fraction: f64,
     overloaded: bool,
@@ -553,7 +553,13 @@ impl HackRfSource {
             transfer_bytes.max(2),
             Arc::clone(&stats.transfers),
         ));
-        let provenance = ProvenanceHandle::new(provenance_record(&info, &tune, false));
+        // T-325: the bias tee was just commanded above, so the driver reports Off/On, not Unknown.
+        let bias_tee = if config.bias_tee {
+            BiasTee::On
+        } else {
+            BiasTee::Off
+        };
+        let provenance = ProvenanceHandle::new(provenance_record(&info, &tune, false, bias_tee));
         Ok(Self {
             control: Arc::new(HackRfControl {
                 capabilities: caps,
@@ -571,7 +577,7 @@ impl HackRfSource {
             info,
             pool,
             tune,
-            bias_tee: config.bias_tee,
+            bias_tee,
             filter_explicit: config.baseband_filter_hz.is_some(),
             overload_fraction: config.overload_clip_fraction,
             overloaded: false,
@@ -602,15 +608,19 @@ impl HackRfSource {
         self.provenance.clone()
     }
 
-    /// The bias tee is on.
-    pub fn bias_tee(&self) -> bool {
+    /// The bias-tee state this driver has commanded (T-325).
+    pub fn bias_tee(&self) -> BiasTee {
         self.bias_tee
     }
 
     fn mint(&mut self) -> Discontinuity {
         let prev = self.provenance.clone();
-        self.provenance =
-            ProvenanceHandle::new(provenance_record(&self.info, &self.tune, self.overloaded));
+        self.provenance = ProvenanceHandle::new(provenance_record(
+            &self.info,
+            &self.tune,
+            self.overloaded,
+            self.bias_tee,
+        ));
         Discontinuity::between(prev.get(), self.provenance.get())
     }
 
@@ -634,6 +644,7 @@ impl HackRfSource {
             return Ok(());
         };
         let before = self.tune.clone();
+        let bias_before = self.bias_tee;
         let result = self.apply_change(&change);
         // Whatever reached the device is in the provenance, even when a later call failed.
         self.discard_below_seq = self.pool.next_seq() + 1;
@@ -643,6 +654,13 @@ impl HackRfSource {
                 self.anchor = None;
             }
             self.overloaded = false;
+            let flags = self.mint();
+            self.pending_flags |= flags;
+        } else if self.bias_tee != bias_before {
+            // T-325: switching the bias tee changes the antenna port's DC state and, with an
+            // active antenna, the gain structure. It is a provenance change in its own right,
+            // even though `tune` is untouched — otherwise the blocks after it would keep
+            // claiming the old bias-tee state.
             let flags = self.mint();
             self.pending_flags |= flags;
         }
@@ -680,7 +698,7 @@ impl HackRfSource {
         }
         if let Some(on) = change.bias_tee {
             self.device.set_antenna_enable(on)?;
-            self.bias_tee = on;
+            self.bias_tee = if on { BiasTee::On } else { BiasTee::Off };
         }
         Ok(())
     }
@@ -781,7 +799,12 @@ impl HackRfSource {
     }
 }
 
-fn provenance_record(info: &HackRfDeviceInfo, tune: &Tune, overload: bool) -> Provenance {
+fn provenance_record(
+    info: &HackRfDeviceInfo,
+    tune: &Tune,
+    overload: bool,
+    bias_tee: BiasTee,
+) -> Provenance {
     Provenance {
         device_id: info.device_id(),
         tune: tune.clone(),
@@ -789,6 +812,10 @@ fn provenance_record(info: &HackRfDeviceInfo, tune: &Tune, overload: bool) -> Pr
         quantisation_limited: false,
         temperature_c: None,
         antenna_port: Some(ANTENNA_UNKNOWN.into()),
+        // T-325: the state this driver commanded with `set_antenna_enable`. libhackrf offers no
+        // read-back, so this is what the bias tee was last set to, never a measured voltage; it
+        // is `Off`/`On` and never `Unknown`, because the driver always knows what it commanded.
+        bias_tee,
         clock_source: ClockSource::Internal,
         clock_locked: true,
         calibration_state_ref: None,

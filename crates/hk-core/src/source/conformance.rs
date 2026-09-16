@@ -24,6 +24,7 @@
 //! | `named-gains` | each stage is set off-step and read back quantised through provenance (LNA/VGA/amp) |
 //! | `baseband-filter` | a supported bandwidth reaches provenance; unsupported is refused (or the control is refused without the capability) |
 //! | `bias-tee` | works with the capability, else `Unsupported` |
+//! | `bias-tee-provenance` | the state reaches provenance: `off` after the check above with the capability, never `on` without it |
 //! | `sweep` | works with a sweep capability, else `start_sweep`/`stop_sweep` are `Unsupported` |
 //! | `overrun` | an injected overrun (when the spec can inject) is a `GAP` counted in `SourceStats` |
 //! | `stats` | every gap is accounted as dropped or discarded samples; block and sample counts cover what was read |
@@ -33,7 +34,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hk_model::TimestampMethod;
+use hk_model::{BiasTee, TimestampMethod};
 use num_complex::{Complex, Complex32};
 
 use super::{
@@ -180,6 +181,7 @@ pub const CHECKS: &[&str] = &[
     "named-gains",
     "baseband-filter",
     "bias-tee",
+    "bias-tee-provenance",
     "sweep",
     "overrun",
     "stats",
@@ -668,6 +670,26 @@ fn session(
         Err("no bias tee capability but not Unsupported".into())
     };
     report.record("bias-tee", bias);
+
+    // T-325: the state reaches provenance. The pair above left the bias tee off, so a device with
+    // one must now report `off` — proving it reports the field rather than leaving it unknown —
+    // and a device without one must never claim `on`. The `on` case is asserted in the mock's own
+    // tests, so this suite (which also runs as a HIL case against a real HackRF) never holds DC on
+    // an antenna port for longer than the explicit on/off pair above.
+    let bias_prov = if caps.bias_tee {
+        r.wait_for(wait, |h| h.provenance.bias_tee == BiasTee::Off)
+            .map(|_| "off reaches provenance".into())
+    } else {
+        match r.read() {
+            Err(e) => Err(e),
+            Ok(None) => Err("the stream ended before the bias-tee state was read".into()),
+            Ok(Some((h, _))) if h.provenance.bias_tee == BiasTee::On => {
+                Err("no bias tee capability but provenance says on".into())
+            }
+            Ok(Some((h, _))) => Ok(h.provenance.bias_tee.as_str().into()),
+        }
+    };
+    report.record("bias-tee-provenance", bias_prov);
 
     // Sweep.
     let sweep = match control.sweep_capability() {

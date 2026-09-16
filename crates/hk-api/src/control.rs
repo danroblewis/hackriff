@@ -1115,7 +1115,9 @@ fn tuning_json(t: &LiveTuning) -> Value {
         "center_hz": t.center_hz,
         "sample_rate_hz": t.sample_rate_hz,
         "gains": gains,
-        "bias_tee": t.bias_tee,
+        // T-325: three states on the wire (`unknown`/`off`/`on`), never a bool that reads
+        // "nothing said" as "off".
+        "bias_tee": t.bias_tee.as_str(),
         "baseband_filter_hz": t.baseband_filter_hz,
     })
 }

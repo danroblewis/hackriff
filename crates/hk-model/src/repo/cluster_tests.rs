@@ -760,6 +760,7 @@ fn emitter_latest_measurement_reads_the_newest_linked_detection() {
             quantisation_limited: false,
             temperature_c: None,
             antenna_port: None,
+            bias_tee: crate::BiasTee::Unknown,
             clock_source: ClockSource::Internal,
             clock_locked: true,
             calibration_state_ref: None,

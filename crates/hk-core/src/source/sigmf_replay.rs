@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hk_model::sigmf::{Capture, Datatype, SigmfMeta, data_path_for};
-use hk_model::{ClockSource, Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
+use hk_model::{BiasTee, ClockSource, Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
 use num_complex::{Complex, Complex32};
 
 use super::{
@@ -821,6 +821,10 @@ fn synthesised_provenance(
         overload: false,
         temperature_c: None,
         antenna_port: None,
+        // T-325: a SigMF file that carries no `hackriff:provenance` says nothing about the
+        // capturing device's bias tee, so this replay cannot report one. Unknown, never `Off`:
+        // the recording may well have been taken with DC on the port.
+        bias_tee: BiasTee::Unknown,
         clock_source: ClockSource::Internal,
         clock_locked: false,
         calibration_state_ref: None,

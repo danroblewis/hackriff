@@ -76,6 +76,7 @@ fn prov_on(r: &mut Repository, device: &str, port: Option<&str>, lo: f64) -> Pro
         quantisation_limited: false,
         temperature_c: None,
         antenna_port: port.map(Into::into),
+        bias_tee: crate::BiasTee::Unknown,
         clock_source: ClockSource::Internal,
         clock_locked: true,
         calibration_state_ref: None,

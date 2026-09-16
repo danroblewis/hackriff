@@ -171,7 +171,7 @@ function liveState(over: Partial<{ class: string; permitted: boolean; replumbing
   const s = structuredClone(replayState) as unknown as ControlState;
   s.live = true;
   s.device = structuredClone(HACKRF_CAPS) as unknown as ControlState["device"];
-  s.tuning = { center_hz: 100.8e6, sample_rate_hz: 2.4e6, gains: { lna: 32, vga: 30, amp: 11 }, bias_tee: false, baseband_filter_hz: 7e6 };
+  s.tuning = { center_hz: 100.8e6, sample_rate_hz: 2.4e6, gains: { lna: 32, vga: 30, amp: 11 }, bias_tee: "off", baseband_filter_hz: 7e6 };
   s.audit = over.audit ?? true;
   const run = s.run!;
   run.live = true;
@@ -201,12 +201,28 @@ test("replay (captured hk serve --replay state): device controls off with not_li
   assert.deepEqual(m.limits, s.display_limits, "T-067: read from the state body, not hard-coded");
 });
 
+test("T-325: bias tee has three states, and unknown is never shown as off", () => {
+  const off = liveState();
+  assert.deepEqual(panelModel(off).biasTee, { available: true, on: false, unknown: false });
+
+  const on = liveState();
+  on.tuning!.bias_tee = "on";
+  assert.deepEqual(panelModel(on).biasTee, { available: true, on: true, unknown: false });
+
+  // "nothing reported" is its own state: not on, and explicitly not off either.
+  const unknown = liveState();
+  unknown.tuning!.bias_tee = "unknown";
+  const m = panelModel(unknown);
+  assert.deepEqual(m.biasTee, { available: true, on: false, unknown: true });
+  assert.notDeepEqual(m.biasTee, panelModel(off).biasTee, "unknown differs from off");
+});
+
 test("live state: HackRF gains, rates, bias tee; busy, gated, finished and no-audit gates", () => {
   const m = panelModel(liveState());
   assert.equal(m.device.enabled, true);
   assert.deepEqual(m.gains.map((g) => [g.label, g.value, g.step, g.toggle]), [["LNA", 32, 8, false], ["VGA", 30, 2, false], ["RF amp", 11, 11, true]]);
   assert.deepEqual(m.rates, [2e6, 2.4e6, 4e6, 5e6, 8e6, 10e6, 12.5e6, 16e6, 20e6]);
-  assert.deepEqual(m.biasTee, { available: true, on: false });
+  assert.deepEqual(m.biasTee, { available: true, on: false, unknown: false });
   assert.equal(m.basebandFilter.available, true);
   assert.equal(m.basebandFilter.value, 7e6);
   assert.deepEqual(m.basebandFilter.options, HACKRF_CAPS.baseband_filter.values_hz);

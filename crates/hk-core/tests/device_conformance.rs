@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 use hk_core::source::conformance::{self, ConformanceSpec};
 use hk_core::{
     BlockHeader, Coverage, Discontinuity, MockEnd, MockOptions, MockSdrDriver, MockSdrSource,
-    Pacing, Source, SourceDriver,
+    OpenRequest, Pacing, ReplayOptions, SigmfReplaySource, Source, SourceDriver,
 };
 use hk_model::sigmf::{Capture, Datatype, SigmfMeta};
-use hk_model::{ClockSource, Provenance, TimestampMethod, Tune};
+use hk_model::{BiasTee, ClockSource, Provenance, TimestampMethod, Tune};
 use num_complex::{Complex, Complex32};
 
 /// A scratch directory removed on drop.
@@ -111,6 +111,7 @@ impl Synth {
             quantisation_limited: false,
             temperature_c: None,
             antenna_port: None,
+            bias_tee: hk_model::BiasTee::Unknown,
             clock_source: ClockSource::Internal,
             clock_locked: true,
             calibration_state_ref: None,
@@ -406,6 +407,51 @@ fn a_tone_keeps_its_absolute_frequency_after_a_retune_inside_coverage() {
             .uncovered_samples
             > 0
     );
+}
+
+/// T-325, the three outcomes asserted separately: a source reporting the bias tee **on** stamps
+/// `On`, one reporting it **off** stamps `Off`, and one that **cannot report it** stamps
+/// `Unknown` — never `Off`. All three are needed: a field that was always `Unknown` would still
+/// satisfy a test that only checked the on case.
+#[test]
+fn bias_tee_state_is_stamped_on_provenance_as_three_distinct_outcomes() {
+    let dir = Scratch::new("bias");
+    let meta = Synth::new(Datatype::Ci8).write(&dir.0, "tone");
+    let driver = MockSdrDriver::new(&meta, opts(16_384)).unwrap();
+    let mut buf = Vec::new();
+
+    // 1. Reporting ON.
+    let on_req = OpenRequest {
+        bias_tee: true,
+        ..driver.default_request()
+    };
+    let mut src = driver.open_mock(&on_req).unwrap();
+    let h = src.read_block_ci8(&mut buf).unwrap().unwrap();
+    assert_eq!(h.provenance.bias_tee, BiasTee::On);
+    assert_eq!(h.provenance.bias_tee.powered(), Some(true));
+
+    // 2. Reporting OFF — a different outcome from unknown, not merely "not on".
+    let mut src = driver.open_mock(&driver.default_request()).unwrap();
+    let h = src.read_block_ci8(&mut buf).unwrap().unwrap();
+    assert_eq!(h.provenance.bias_tee, BiasTee::Off);
+    assert_eq!(h.provenance.bias_tee.powered(), Some(false));
+
+    // 3. CANNOT REPORT: a SigMF replay has no bias tee of its own and the file records none, so
+    //    it must say unknown. The recording may well have been taken with DC on the port.
+    let mut replay = SigmfReplaySource::open(&meta, ReplayOptions::default()).unwrap();
+    let mut f32buf = Vec::new();
+    let h = replay.read_block(&mut f32buf).unwrap().unwrap();
+    assert_eq!(h.provenance.bias_tee, BiasTee::Unknown);
+    assert_ne!(h.provenance.bias_tee, BiasTee::Off, "unknown is never off");
+    assert_eq!(h.provenance.bias_tee.powered(), None);
+
+    // Switching it on a live source is a provenance change in its own right, so the stamped
+    // state follows the control rather than staying stale.
+    let mut src = driver.open_mock(&driver.default_request()).unwrap();
+    src.read_block_ci8(&mut buf).unwrap().unwrap();
+    src.control().set_bias_tee(true).unwrap();
+    let h = read_until(&mut src, &mut buf, |h| h.provenance.bias_tee == BiasTee::On);
+    assert!(h.discontinuity.contains(Discontinuity::PROVENANCE_CHANGE));
 }
 
 #[test]
