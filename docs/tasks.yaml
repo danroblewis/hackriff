@@ -3840,7 +3840,8 @@ tasks:
   - id: T-238
     milestone: M3
     title: "OTA fixtures abstain because C14 symbol estimation never runs in the classification path: six of the most discriminating dimensions abstain with no_symbol_estimate"
-    status: in-progress
+    status: done
+    commit: fdb3f92
     priority: high
     deps: [T-235]
     parallel_group: M3A
@@ -3866,6 +3867,21 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: false
+  - id: T-240
+    milestone: M3
+    title: "OTA fixtures still abstain after C14 landed: four instantaneous-statistics dimensions (sigma_aa, if_bimodality, gamma_max, sigma_ap) sit at the z=6 clamp - a sim-to-real gap in the synthetic grid's instantaneous statistics"
+    status: todo
+    priority: normal
+    deps: [T-238, T-205]
+    parallel_group: M3A
+    use_cases: [SIGNAL-062]
+    found_by: "T-238 (2026-09-15): closed the structural cause (no_symbol_estimate is gone from both fixtures) and MEASURED what now blocks them"
+    acceptance: "the two OTA fixtures are classified correctly - fm_100p8M as analog/wfm, the 915 MHz burst as an FSK-family class - or their abstention is justified with measured evidence that they genuinely sit outside the taxonomy; work the four named dimensions (sigma_aa, if_bimodality, gamma_max, sigma_ap), which are pinned at the z=6 clamp, most likely by deriving or blending densities from real captures via T-205's dataset export rather than widening synthetic impairments - T-230 already measured that impairment widening is the wrong lever; every floor T-238 holds must still hold (false-known <= 0.10, unknown recall >= 0.80, top-1 >= 0.90, top-2 >= 0.95, wrong-label <= 0.003); NO confident wrong answers - T-235 reverted two approaches and T-238 checked specifically that the burst still abstains rather than being called analog at m 3.6"
+    area: crates/hk-classify (densities, instantaneous statistics), py/ synth grid, crates/hk-store dataset export
+    needs: none
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
