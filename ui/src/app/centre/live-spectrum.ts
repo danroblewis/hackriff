@@ -32,7 +32,7 @@ import {
   type BandEdge, type DcMask, type DragPoint, type RowClock, type Span,
 } from "./overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
-import { geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retune, setLiveView, viewHooks } from "./view";
+import { applyDeviceAction, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, setLiveView, viewHooks } from "./view";
 
 interface StreamInfo { stream_id: string; kind: string; remote_permitted: boolean }
 
@@ -451,6 +451,9 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       live: {
         streamId: String(hd.stream_id ?? ""), centerHz: g.centerHz, bandwidthHz: g.bandwidthHz, bins: g.bins, rowRateHz: rate,
         view: nextView(g, s.live.view, retuned ? s.live.pendingView : null), pendingView: retuned ? null : s.live.pendingView,
+        // A new geometry answers whatever the last pan asked about, so the standing offer is stale
+        // (T-343): never leave a button that would retune to where the radio already is.
+        retuneOffer: retuned ? null : s.live.retuneOffer,
       },
     }));
     wf.setView(...ax.textureWindow(g, store.get().live.view ?? ax.fullView(g)));
@@ -577,7 +580,9 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     if (s.nav.gotoHz === null) return;
     const d = gotoDecision(geom(), s.live.view, s.nav.gotoHz, mayRetune(s.device));
     if (d?.kind === "pan") store.set(setLiveView(d.view));
-    else if (d?.kind === "retune") void retune(ctx, d.centerHz, null);
+    // Go to is an explicit user request (a frequency typed and submitted), so it may build a
+    // DeviceAction; a gesture may not.
+    else if (d?.kind === "retune") void applyDeviceAction(ctx, retuneAction(d.centerHz, "goto"));
     else if (d?.kind === "not_live") store.set(toast(NOT_LIVE_TEXT));
   });
   if (typeof ResizeObserver !== "undefined") new ResizeObserver(schedule).observe(el);

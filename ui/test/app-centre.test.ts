@@ -5,11 +5,11 @@
 // per row, spanning both panes), its draggable-edge hit-testing and drag→band mapping.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import * as ax from "../src/axis";
-import { ControlError } from "../src/controls/client";
+import { ControlError, reactionTo } from "../src/controls/client";
 import type { Presence, Row, UserBand } from "../src/inventory";
-import { tickModel } from "../src/app/centre/axis-view";
+import { retuneOfferModel, tickModel } from "../src/app/centre/axis-view";
 import { mounts } from "../src/app/centre";
 import {
   DC_NOTCH_HALF_HZ, EDGE_HIT_PX, LABEL_MIN_PX, addModeActive, assumedDc, bandEdgeHit, bracketLayout, clickTarget, confirmedBands, confirmedEdgeAt,
@@ -18,7 +18,10 @@ import {
 } from "../src/app/centre/overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor, type HistoryGrid } from "../src/app/centre/review-render";
 import { centreInitial } from "../src/app/centre/slice";
-import { geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneErrorText } from "../src/app/centre/view";
+import type { AppContext } from "../src/app/context";
+import { createStore } from "../src/app/store";
+import { initialState } from "../src/app/state";
+import { applyDeviceAction, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, retuneErrorText, viewHooks } from "../src/app/centre/view";
 import { UNOBSERVED_DB, decimateRow } from "../src/waterfall";
 
 const G: ax.Geometry = { centerHz: 100_000_000, bandwidthHz: 2_400_000, bins: 1024 };
@@ -503,3 +506,115 @@ test("centre mounts both centre slots; CSS is scoped to them with no wide min-wi
   for (const m of css.matchAll(/min-width:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 400);
   assert.match(readFileSync("src/app/base.css", "utf8"), /\.live-canvas \{[^}]*touch-action: none/);
 });
+
+// ---------------------------------------------------------------------------
+// T-343: a retune is a device action, and a pan is not.
+//
+// The defect T-339's audit found was in this exact seam: `gestures.ts` fired `hooks.overflow(...)`
+// on pointerup once an accumulated pan passed 5 % of the view width, and that was wired straight to
+// `POST /api/control/center` — which stops and re-plumbs the running capture when the window's
+// class or rate changes. So the control below (a pan far past the old threshold reaching nothing)
+// is the assertion that matters; without it the property could be satisfied by deleting the retune.
+// ---------------------------------------------------------------------------
+
+/** A context whose client records every call, so "reached the device" is observable. */
+function deviceSpyCtx(live = true) {
+  const calls: { method: string; path: string; body: unknown }[] = [];
+  const store = createStore(initialState());
+  store.set((s) => ({
+    device: { ...s.device, loaded: true, live, deviceId: "hackrf:0000000000000000fake0000000000ab" },
+    live: { ...s.live, centerHz: 100e6, bandwidthHz: 2.4e6, bins: 1024, view: { loHz: 99.5e6, hiHz: 100.5e6 } },
+  }));
+  const client = {
+    post: (path: string, body: unknown) => { calls.push({ method: "POST", path, body }); return Promise.resolve({}); },
+    get: (path: string) => { calls.push({ method: "GET", path, body: null }); return Promise.resolve({}); },
+  } as unknown as AppContext["client"];
+  return { ctx: { store, client, token: "t" } as AppContext, calls };
+}
+
+test("T-343 control: panning past the band edge reaches no device route, at any overflow", () => {
+  const { ctx, calls } = deviceSpyCtx();
+  const hooks = viewHooks(ctx);
+  const g = geometryOfLive(ctx.store.get().live)!;
+
+  // A pan that ends far past the edge — twenty times the old 5 % overflow threshold, the case that
+  // used to POST /api/control/center on pointerup.
+  const v = ctx.store.get().live.view!;
+  const w = v.hiHz - v.loHz;
+  for (const overflowHz of [0.06 * w, w, 10 * w, -0.06 * w, -w, -10 * w]) {
+    const p = ax.panView(g, v, overflowHz);
+    hooks.setView(p.view);
+    hooks.edgeOffer(ax.panRetuneCenter(p.view, p.overflowHz), { loHz: p.view.loHz + p.overflowHz, hiHz: p.view.hiHz + p.overflowHz });
+  }
+  assert.deepEqual(calls, [], "a pan must never reach the control API");
+  // The view moved and the pan left an offer behind — it is not that the gesture did nothing.
+  assert.notDeepEqual(ctx.store.get().live.view, v, "the pan still panned");
+  assert.ok(ctx.store.get().live.retuneOffer, "the pan offers a retune instead of performing one");
+});
+
+test("T-343: only an explicit device action reaches /api/control/center, and it names the device", async () => {
+  const { ctx, calls } = deviceSpyCtx();
+  await applyDeviceAction(ctx, retuneAction(99_123_456.7, "edge-offer", { loHz: 98e6, hiHz: 100e6 }));
+  assert.deepEqual(calls, [{ method: "POST", path: "/api/control/center", body: { center_hz: 99_123_457 } }]);
+  // Accepting the offer clears it, and the view it asked for is pending until the next header.
+  assert.equal(ctx.store.get().live.retuneOffer, null);
+  assert.deepEqual(ctx.store.get().live.pendingView, { loHz: 98e6, hiHz: 100e6 });
+  assert.match(ctx.store.get().toast.text, /Retuning hackrf:.* to 99\.1235 MHz/);
+});
+
+test("T-343: a replay offers nothing and reaches nothing — the device is not there to move", async () => {
+  const { ctx, calls } = deviceSpyCtx(false);
+  viewHooks(ctx).edgeOffer(105e6, { loHz: 104.5e6, hiHz: 105.5e6 });
+  assert.equal(ctx.store.get().live.retuneOffer, null, "no offer to press on a replay");
+  await applyDeviceAction(ctx, retuneAction(105e6, "goto"));
+  assert.deepEqual(calls, [], "not_live is decided before the request");
+  assert.equal(ctx.store.get().toast.text, NOT_LIVE_TEXT);
+});
+
+test("T-343: the offer button says it moves the radio, names it, and sits on the edge the pan ran off", () => {
+  assert.equal(retuneOfferModel(null, 100e6, "hackrf:x"), null);
+  const lo = retuneOfferModel({ centerHz: 99e6 }, 100e6, "hackrf:abc")!;
+  assert.equal(lo.label, "Retune to 99.0000 MHz");
+  assert.match(lo.title, /Moves the radio on hackrf:abc/);
+  assert.match(lo.title, /panning and zooming do not/);
+  assert.equal(lo.belowBand, true);
+  assert.equal(retuneOfferModel({ centerHz: 101e6 }, 100e6, null)!.belowBand, false);
+  // An unidentified front end is not given a placeholder name (T-325's rule for device identity).
+  assert.match(retuneOfferModel({ centerHz: 101e6 }, 100e6, null)!.title, /^Moves the radio\./);
+});
+
+test("T-343: a busy radio is reported, never retried into a race", () => {
+  const e = new ControlError(409, "device_busy", "the front end (hackrf:abc) is busy: a retune has held it for 3.0 s");
+  assert.match(retuneErrorText(e), /^The radio is busy: the front end \(hackrf:abc\) is busy/);
+  assert.deepEqual(reactionTo(e).reaction, "busy");
+});
+
+/** The architectural half of the property: the gesture layer cannot reach a device route, and the
+ * client's device routes have a known, small set of callers. A convention would drift; this does
+ * not — adding a device call anywhere else fails here and has to be argued for. */
+test("T-343: gestures.ts names no device route, and the device routes have exactly two callers", () => {
+  const DEVICE_ROUTES = ["/api/control/center", "/api/control/rate", "/api/control/gains", "/api/control/bias_tee", "/api/control/baseband_filter"];
+  const gestures = readFileSync("src/controls/gestures.ts", "utf8");
+  for (const r of DEVICE_ROUTES) assert.ok(!gestures.includes(r), `gestures.ts must not name ${r}`);
+  assert.ok(!/controls\/client|ControlClient|app\/context/.test(gestures), "gestures.ts must not reach the API client");
+
+  const callers = walk("src")
+    .filter((f) => DEVICE_ROUTES.some((r) => readFileSync(f, "utf8").includes(r)))
+    .map((f) => f.slice("src/".length))
+    .sort();
+  // view.ts: the centre view's one retune path (Go to, a bookmark jump, an accepted edge offer).
+  // review/device.ts: the SDR control panel, whose whole purpose is device settings.
+  assert.deepEqual(callers, ["app/centre/view.ts", "app/review/device.ts"],
+    "a new file reaches the front end: make it an explicit device action or route it through view.ts");
+});
+
+/** Every `.ts` file under `dir`, as paths relative to ui/ (tests run from there). */
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory()) out.push(...walk(p));
+    else if (e.name.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}

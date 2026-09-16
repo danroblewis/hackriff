@@ -1301,6 +1301,24 @@ impl Stopper {
 /// The control plane of a running pipeline (T-050): device window changes with legal
 /// re-classification, display settings, pause/resume and manual recording. Cheap to clone; every
 /// method is safe from any thread.
+///
+/// # One method reaches the device (T-343)
+///
+/// [`PipelineController::retune`] is a **device action**: it moves the front end, and when the
+/// window's content class or sample rate changes it stops the running segment
+/// (`shared.stop.store(true)`) and re-plumbs the run, tearing down and restarting the always-on
+/// readers. It is the only method here that can do that.
+///
+/// [`PipelineController::set_display`], [`PipelineController::set_paused`],
+/// [`PipelineController::start_recording`] and [`PipelineController::stop_recording`] are **view
+/// and output controls**: capture, the ring and detection are always-on and none of them stops or
+/// slows the source (T-339, pinned by `tests/view_pause_keeps_capture.rs`).
+///
+/// So a caller must reach `retune` only for an explicit user request to move the front end —
+/// never as the continuation of a pan, a zoom or a scrub, which change what is shown and nothing
+/// else. `hk_api::control`'s `Action::device_action` is the same split at the HTTP boundary, and
+/// `hk_api::DeviceGate` serialises device actions so a retune cannot race another holder of the
+/// device.
 #[derive(Clone)]
 pub struct PipelineController {
     sup: Arc<Supervisor>,
@@ -1343,6 +1361,11 @@ impl PipelineController {
     /// is tuned in place; any other re-plumbs the run with the window's class at a block boundary
     /// and returns once the new segment runs (see the module docs), or [`ControlFailure::Timeout`]
     /// after [`REPLUMB_TIMEOUT`].
+    ///
+    /// **This is a device action** (T-343), and the only method on this controller that can stop
+    /// the running segment: a re-plumb tears down and restarts the segment's always-on readers.
+    /// Call it for an explicit user request to move the front end, never as the continuation of a
+    /// view change — panning, zooming, scrubbing and pausing must not reach it.
     pub fn retune(
         &self,
         center_hz: f64,

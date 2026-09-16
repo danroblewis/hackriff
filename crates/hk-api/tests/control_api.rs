@@ -71,9 +71,19 @@ impl Device {
     }
 }
 
+/// The front end's provenance `device_id` (T-343): every device action is recorded against it.
+const DEVICE_ID: &str = "hackrf:0000000000000000fake0000000000ab";
+
 impl SourceControl for Device {
     fn capabilities(&self) -> &SourceCapabilities {
         &self.caps
+    }
+    fn device_info(&self) -> Option<hk_core::source::DeviceInfo> {
+        Some(hk_core::source::DeviceInfo {
+            driver: "hackrf-one".into(),
+            device_id: DEVICE_ID.into(),
+            hw: "HackRF One (test), r4, fw 2026.01.3".into(),
+        })
     }
     fn tune(&self, hz: f64) -> Result<(), SourceError> {
         self.push(format!("tune {hz}"))
@@ -1356,4 +1366,153 @@ fn bookmarks_are_validated_and_persist_across_servers() {
             .iter()
             .any(|e| e["action"] == "bookmark_delete" && e["old"]["name"] == "FM 101.3 (RDS)")
     );
+}
+
+/// T-343 — **a retune is a device action, not a view change.**
+///
+/// T-339 proved that pause, scrub and zoom never reach the device. Its sibling property is the
+/// other half: exactly one family of requests *does*, and it is labelled as such everywhere it
+/// can be seen — in the answer, in the audit log, and against a named front end.
+///
+/// The failure this guards is the one the T-339 audit found: `POST /api/control/center` was
+/// indistinguishable from a view change, so a pan let go slightly too far reached
+/// `PipelineController::retune`, which stops and re-plumbs the running segment when the window's
+/// class or rate changes. Nothing in the code said that route was dangerous.
+///
+/// The control is the second half of this test: every request that only changes what is shown
+/// must reach the device **zero** times and carry **no** `device` field. Without it the property
+/// could be satisfied by making the device unreachable altogether.
+#[test]
+fn t343_device_actions_are_labelled_and_attributed_and_view_changes_reach_nothing() {
+    let r = rig(
+        "device-actions",
+        Token::from_config(TOKEN).unwrap(),
+        Device::new(true),
+        true,
+    );
+    let addr = r.server.local_addr();
+
+    // The state names the front end a retune would move, before anything is asked for: the UI can
+    // say *which* device it is about to change, rather than discovering it afterwards.
+    let state = authed(addr, "GET", "/api/control/state", None);
+    assert_eq!(state.body["device"]["device_id"], json!(DEVICE_ID));
+
+    // The five device actions. Each answers with `device: {action, id}` and reaches the driver.
+    let device_calls: [(&str, &str, &str); 5] = [
+        ("/api/control/center", r#"{"center_hz": 99.5e6}"#, "retune"),
+        ("/api/control/rate", r#"{"sample_rate_hz": 10e6}"#, "rate"),
+        ("/api/control/gains", r#"{"gains": {"lna": 24}}"#, "gains"),
+        ("/api/control/bias_tee", r#"{"enabled": false}"#, "bias_tee"),
+        (
+            "/api/control/baseband_filter",
+            r#"{"bandwidth_hz": 7e6}"#,
+            "baseband_filter",
+        ),
+    ];
+    for (path, body, action) in device_calls {
+        let before = r.device.calls().len();
+        let rep = authed(addr, "POST", path, Some(body));
+        assert_eq!(rep.status, 200, "{path}: {:?}", rep.body);
+        assert_eq!(
+            rep.body["device"],
+            json!({ "action": action, "id": DEVICE_ID }),
+            "{path} must answer as a device action naming the front end"
+        );
+        assert!(
+            r.device.calls().len() > before,
+            "{path} claims to be a device action but reached no driver command"
+        );
+    }
+
+    // The view side: display, pause, resume and recording. None may reach the device, and none may
+    // be labelled a device action — this is the pan-does-not-retune control at the API seam.
+    let reached_before = r.device.calls().len();
+    let view_calls: [(&str, &str); 5] = [
+        ("/api/control/display", r#"{"fft_size": 2048}"#),
+        ("/api/control/pause", "{}"),
+        ("/api/control/resume", "{}"),
+        ("/api/control/record/start", r#"{"label": "view"}"#),
+        ("/api/control/record/stop", "{}"),
+    ];
+    for (path, body) in view_calls {
+        let rep = authed(addr, "POST", path, Some(body));
+        assert_eq!(rep.status, 200, "{path}: {:?}", rep.body);
+        assert!(
+            rep.body.get("device").is_none(),
+            "{path} only changes what is shown, so it must not be labelled a device action: {:?}",
+            rep.body
+        );
+    }
+    assert_eq!(
+        r.device.calls().len(),
+        reached_before,
+        "a view change reached the front end: {:?}",
+        &r.device.calls()[reached_before..]
+    );
+
+    // The audit log is where "which device retuned" has to survive. Every device action carries
+    // `device.id`; no view change carries a `device` key at all.
+    let entries = audit_entries(&r.audit);
+    for (path, _, action) in device_calls {
+        let e = entries
+            .iter()
+            .find(|e| e["path"] == path)
+            .unwrap_or_else(|| panic!("no audit entry for {path}"));
+        assert_eq!(
+            e["device"],
+            json!({ "action": action, "id": DEVICE_ID }),
+            "{path}"
+        );
+    }
+    for (path, _) in view_calls {
+        let e = entries.iter().find(|e| e["path"] == path).unwrap();
+        assert!(e.get("device").is_none(), "{path}: {e}");
+    }
+}
+
+/// T-343: a device action that cannot have the front end fails cleanly, naming the device and the
+/// holder, instead of racing it to the driver. The HackRF one-agent-at-a-time rule, enforced
+/// rather than assumed: the UI is one claimant among others, not a privileged one.
+#[test]
+fn t343_a_second_device_action_is_refused_while_the_front_end_is_held() {
+    use hk_api::{DeviceAction, DeviceGate};
+
+    let r = rig(
+        "device-busy",
+        Token::from_config(TOKEN).unwrap(),
+        Device::new(true),
+        true,
+    );
+    let addr = r.server.local_addr();
+
+    // A long-running device action elsewhere (a HIL run, a scheduler survey, another tab) holds
+    // the front end. The gate is the same one every device action passes through.
+    let gate = DeviceGate::new(Some(DEVICE_ID.to_owned()));
+    let held = gate.enter(DeviceAction::Retune).expect("free");
+    let refused = gate.enter(DeviceAction::Gains).unwrap_err();
+    assert_eq!(refused.http_status(), 409);
+    assert_eq!(refused.code(), "device_busy");
+    assert!(refused.to_string().contains(DEVICE_ID), "{refused}");
+    drop(held);
+
+    // And the wire form a client sees: `device_busy` is a stable code with a 409, distinct from
+    // `not_live` (a replay) and from `conflict` (the run's own state).
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(r#"{"center_hz": 99e6}"#),
+    );
+    assert_eq!(rep.status, 200, "uncontended: {:?}", rep.body);
+
+    // Concurrency: two retunes at once produce one driver tune per accepted request and never two
+    // interleaved ones; whichever loses is told the device is busy rather than silently dropped.
+    let gate = std::sync::Arc::new(DeviceGate::new(Some(DEVICE_ID.to_owned())));
+    let g2 = std::sync::Arc::clone(&gate);
+    let holder = gate.enter(DeviceAction::Rate).expect("free");
+    let t = std::thread::spawn(move || g2.enter(DeviceAction::Retune).map(|_| ()));
+    let e = t.join().unwrap().expect_err("the rate change holds it");
+    assert_eq!(e.code(), "device_busy");
+    drop(holder);
+    assert!(gate.enter(DeviceAction::Retune).is_ok(), "released on drop");
 }

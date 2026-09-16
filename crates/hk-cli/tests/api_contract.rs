@@ -673,6 +673,13 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         "the mock device has a bias tee: {v}"
     );
     assert_eq!(v["tuning"]["bias_tee"], json!("off"), "{v}");
+    // T-343: the state names the front end a retune would move, from the source's own identity —
+    // the mock SDR reports `mock:<recorded device_id>`. A client can say which radio it is about to
+    // change before it asks, rather than discovering it from the audit log afterwards.
+    let device_id = v["device"]["device_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the live source must report its device_id: {v}"));
+    assert!(device_id.starts_with("mock:"), "{v}");
     assert!(is_object(&v["run"]), "{v}");
     assert_eq!(v["transmit"]["available"], json!(false));
     assert!(is_array(&v["routes"]), "{v}");
@@ -2027,6 +2034,23 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
         (200, Some(7e6)),
         "{v}"
     );
+    // T-343: a device action's answer says so, and against which front end. A display or pause
+    // answer carries no `device` key at all — that difference is the contract a client reads to
+    // tell "this changed the world" from "this changed the view".
+    assert_eq!(v["device"]["action"], json!("baseband_filter"), "{v}");
+    assert!(
+        v["device"]["id"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("mock:")),
+        "{v}"
+    );
+    let (_, paused) = post(addr, "/api/control/pause", "{}");
+    assert!(
+        paused.get("device").is_none(),
+        "a pause is not a device action: {paused}"
+    );
+    let (_, resumed) = post(addr, "/api/control/resume", "{}");
+    assert!(resumed.get("device").is_none(), "{resumed}");
     let (st, v) = post(
         addr,
         "/api/control/baseband_filter",

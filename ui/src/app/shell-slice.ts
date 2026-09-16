@@ -17,6 +17,10 @@ export interface ConnSlice { api: ApiConn; spectrum: StreamConn; message: string
 export interface DeviceSlice {
   loaded: boolean; live: boolean; finished: boolean; contentClass: string | null;
   centerHz: number | null; sampleRateHz: number | null; rowsPerS: number | null; recording: boolean;
+  /** The front end's provenance `device_id` (T-343), e.g. `hackrf:<serial>`; null when the source
+   * reports no identity. A retune is a device action recorded against this id, so the UI names the
+   * radio it is about to move. Null means *nothing said*, never "some default device". */
+  deviceId: string | null;
 }
 
 /** One-shot navigation requests from the top bar (Go to), consumed by T-151/T-152. */
@@ -49,7 +53,7 @@ export function parsePrefs(raw: string | null): Prefs {
 export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
-  device: { loaded: false, live: false, finished: false, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false },
+  device: { loaded: false, live: false, finished: false, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null },
   nav: { gotoHz: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,

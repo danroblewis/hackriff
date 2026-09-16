@@ -59,6 +59,14 @@
 .axis .c-tick::before { content: ""; position: absolute; top: 0; left: 0; width: 1px; height: 5px; background: var(--dim); }
 .axis .c-tick span { position: absolute; top: 7px; transform: translateX(-50%); white-space: nowrap; }
 
+/* T-343: a pan past the band edge offers a retune. It is the one control on this strip that moves
+   the radio rather than the view, so it is styled as an action, not as a readout: amber like the
+   other "this changes something" affordances, never the dim tick colour. */
+.axis .c-retune-offer { position: absolute; top: 3px; z-index: 6; font: 600 10.5px var(--ui); letter-spacing: 0.03em; color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, var(--panel)); border: 1px solid var(--amber); padding: 2px 9px; border-radius: 12px; cursor: pointer; touch-action: manipulation; white-space: nowrap; }
+.axis .c-retune-offer[data-side="lo"] { left: 8px; }
+.axis .c-retune-offer[data-side="hi"] { right: 30px; }
+.axis .c-retune-dismiss { position: absolute; top: 3px; right: 8px; z-index: 6; font: 600 10.5px var(--ui); color: var(--muted); background: var(--panel); border: 1px solid var(--line); padding: 2px 6px; border-radius: 12px; cursor: pointer; touch-action: manipulation; }
+
 @media (max-width: 900px) {
   .specwf .c-hint { display: none; }
 }

@@ -72,8 +72,8 @@ pub use datasets::{DatasetControl, DatasetFailure};
 pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use iqbuffer::{ClipStart, IqBufferControl, IqBufferFailure, IqBufferQuery};
 pub use live_control::{
-    LiveControl, LiveControlError, LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner,
-    validate_gains,
+    DEVICE_GATE_WAIT, DeviceAction, DeviceGate, DeviceGuard, LiveControl, LiveControlError,
+    LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner, validate_gains,
 };
 pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
 

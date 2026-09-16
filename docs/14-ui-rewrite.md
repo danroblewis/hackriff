@@ -121,6 +121,24 @@ The user's **first** time/waterfall invariant, and the one the boxes above depen
 
 **Known debt, named:** the capture timeline (`ui/src/app/capture/`) still maps positions with `Date.now()` over a hard-coded 48 h `WINDOW_S`, and the Explore Candidate query still derives its window from a nominal row rate (`ui/src/app/explore/inventory.ts`). Both are the timeline's axis rather than the waterfall's, and both belong to T-338 (the timeline is the capture window, sized from what the backend reports) — filed, not fixed here.
 
+### Setting centre is a device action, not a view change (T-343)
+
+Panning, zooming, scrubbing and pausing change what is drawn. **Setting the centre frequency moves the radio**, and the two are not interchangeable — the user names this as the asymmetry the navigators have to carry, and it is the exact opposite of T-339's invariant that pause never touches the device.
+
+A retune re-derives the window's content class and, when the class or sample rate changes, **stops and re-plumbs the running segment** (`PipelineController::retune`), tearing down and restarting its always-on readers. It also takes the one radio: only one process can open an SDR, so the UI is one claimant among others (a HIL run, a scheduler survey, the user's own demo server), not a privileged one.
+
+**The defect this replaced.** `ui/src/controls/gestures.ts` used to call straight through to the control API's centre route on `pointerup` whenever an accumulated pan passed `OVERFLOW_FRAC = 0.05` of the view width. A 5 % threshold inside one gesture handler was the only thing separating a view change from a device command — no distinct gesture, no type, no confirmation — so **a pan let go slightly too far could stop and restart capture**. T-339's audit found it precisely because nobody had classified that path as dangerous.
+
+**What replaced it:**
+
+- **A pan offers, it never commands.** Running off the band edge leaves a `RetuneOffer` in the `live` slice and draws a button on the frequency axis (`Retune to 99.5000 MHz`, titled with the device it would move and the note that panning and zooming do not). Pressing it is the explicit user action. A new stream header clears a stale offer.
+- **A type, not a convention.** `ui/src/app/centre/view.ts` exposes `DeviceAction` and `applyDeviceAction`, the only path in the client to a device route besides the SDR control panel (`ui/src/app/review/device.ts`). `DeviceAction` values are built only by explicit user requests — Go to, a bookmark jump, an accepted offer, and in future the frequency navigator (`source: "navigator"`). A gesture cannot build one, and `ui/test/app-centre.test.ts` asserts against the source that no gesture module names a device route.
+- **The backend says which requests reach the radio.** `Action::device_action` (hk-api) is an exhaustive classification, so a new route must choose a side; a device action's answer and audit entry carry `device: {action, id}` with the front end's provenance `device_id`, and `/api/control/state` reports the same id so the UI can name the radio before it moves it. See [docs/api.md § Device actions](api.md#device-actions-t-343).
+- **One at a time.** Device actions serialise on one `DeviceGate`; a contended one answers `409 device_busy` naming the holder rather than racing it to the driver. The UI reports that; it never retries into the race.
+- **Never automatic.** No code path retunes without a user asking. Closed-loop refinement (`docs/14` "tune from the processed output") adjusts a *channel* inside the tuned window, not the front end.
+
+**Left to T-340 and T-341.** The frequency navigator itself (the horizontal bar showing every active capture window as a lit segment — the home for multiple SDRs and survey coverage) is T-340; snapping to achievable `(centre, span)` states is T-341, and it needs one thing the backend does not report yet: the **tuning step**. `SourceCapabilities` carries `frequency_ranges` and `sample_rates` but no step size, so the achievable grid is only two of its three axes today.
+
 ### History surface (workflow #3)
 
 A **separate surface**, not a tab of Explore: the durable catalogue of every event, one-offs included, browsable by region and time (`GET /api/events`, and `GET /api/inventory/{id}/presence` for one emitter's track).
