@@ -70,6 +70,22 @@ const CHANNEL_BANDWIDTH_OBW: f64 = 1.5;
 /// only on continuous ones, where the extent is as long as the dwell.
 pub const MAX_WINDOW_SAMPLES: usize = 65_536;
 
+/// A C14 estimate together with **the window it was measured on** (T-200).
+///
+/// The post-sync verifier needs both: the trusted symbol rate, and the samples at the geometry that
+/// rate was measured at. Recovering the window separately would re-do C14's preparation and could
+/// drift from it; returning them together makes "the verifier tests the same samples C14 synced on"
+/// true by construction.
+#[derive(Clone, Debug)]
+pub struct SymbolWindow {
+    /// What C14 measured.
+    pub params: SymbolParameters,
+    /// The prepared window, at [`SYMBOL_SAMPLES_PER_OBW`] and capped at [`MAX_WINDOW_SAMPLES`].
+    pub samples: Vec<Complex32>,
+    /// Sample rate of [`SymbolWindow::samples`], Hz.
+    pub sample_rate_hz: f64,
+}
+
 /// The C14 estimator used by the classification path, with its FFT plans cached across events.
 #[derive(Default)]
 pub struct SymbolEstimator {
@@ -98,13 +114,30 @@ impl SymbolEstimator {
         snippet: &ChannelSnippet,
         params: &ParameterSet,
     ) -> Option<SymbolParameters> {
+        self.window_from_snippet(snippet, params).map(|w| w.params)
+    }
+
+    /// [`Self::from_snippet`], also returning the prepared window the estimate was measured on —
+    /// what the T-200 verifier tests its likelihoods over.
+    pub fn window_from_snippet(
+        &mut self,
+        snippet: &ChannelSnippet,
+        params: &ParameterSet,
+    ) -> Option<SymbolWindow> {
         // `prepare` is what puts the snippet at C14's own geometry; going through it by hand
         // (rather than `estimate_snippet`) is what lets the window be capped before estimating.
         // A snippet C14 cannot prepare is one it cannot run on at all.
         let window = self.inner.prepare(snippet, params).ok()?;
         let input = window.input();
         let n = input.samples.len().min(MAX_WINDOW_SAMPLES);
-        ran(self.inner.estimate(&input.window(0..n)))
+        let samples = input.samples[..n].to_vec();
+        let sample_rate_hz = input.sample_rate_hz;
+        let params = ran(self.inner.estimate(&input.window(0..n)))?;
+        Some(SymbolWindow {
+            params,
+            samples,
+            sample_rate_hz,
+        })
     }
 
     /// Runs C14 over samples the caller has already brought to [`SYMBOL_SAMPLES_PER_OBW`],
