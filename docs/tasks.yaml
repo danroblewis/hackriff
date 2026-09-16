@@ -4681,7 +4681,8 @@ tasks:
   - id: T-270
     milestone: M4
     title: 'M4 encryption check before any voice path: ALGID, service options, DMR PI'
-    status: in-progress
+    status: done
+    commit: a9a3941
     priority: normal
     deps:
     - T-268
@@ -6172,6 +6173,26 @@ tasks:
       the opposite reading is that a genuine second observation is now being swallowed. This is T-209 sighting-semantics
       territory. Whichever way it goes, state the rule in the code so the next person does not re-derive
       it from a failing assertion'
+  - id: T-330
+    milestone: M4
+    title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
+      demodulates those'
+    status: todo
+    priority: normal
+    deps:
+    - T-270
+    parallel_group: M4B
+    model: opus
+    acceptance: 'T-270 implemented and unit-tested the full ALGID table (0x80 clear, 0x81 DES-OFB, 0x84
+      AES-256, 0xAA ADP, unlisted values Encrypted carrying the byte) and said plainly that it is NOT reachable
+      from IQ in M4: an ALGID lives in the voice frames on the granted channel, and nothing demodulates
+      those yet, so the e2e half rests on service options instead. That honesty is the right shape - the
+      capability is proven where it is reachable - but it leaves the authoritative encryption statement
+      unread. When a voice-frame decode exists, wire ALGID through it and make the call''s own header override
+      the grant-time announcement, which is the whole reason the service-options bit may only RAISE to Encrypted
+      and never lower to Clear. The VoicePermit seam already exists (hk-detect/src/trunk/voice.rs): a future
+      vocoder must take one in its signature and the only way to get one is to ask. Keep that property -
+      do not add a bypass for the decode path that reads the ALGID'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
