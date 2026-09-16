@@ -20,10 +20,11 @@
 //! - **A serialisable [`Report`]**: JSON for tooling, Markdown for a human, with reproducibility
 //!   metadata (seeds, grid, versions, commit) so a number can be traced back to what produced it.
 //!
-//! **Blind, always.** [`Harness::run_synthetic`] hands the classifier closure only samples, sample
-//! rate, measured OBW and SNR — never a label. Truth is supplied once, up front (by which grid
-//! cell is being generated), and used only when [`crate::eval::EvalReport::record`] scores the
-//! answer afterwards (docs/10 §3.2: never look a frequency, or a class, up and then tune to it).
+//! **Blind, always.** [`Harness::run_synthetic`] hands the classifier closure a [`Snippet`] — what
+//! a receiver could measure about the waveform and nothing else — never a label. Truth is supplied
+//! once, up front (by which grid cell is being generated), and used only when
+//! [`crate::eval::EvalReport::record`] scores the answer afterwards (docs/10 §3.2: never look a
+//! frequency, or a class, up and then tune to it).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -536,6 +537,30 @@ impl Report {
 // The runner.
 // ---------------------------------------------------------------------------------------------
 
+/// One blind snippet handed to a classification closure: everything a receiver could have measured
+/// about the waveform, and deliberately nothing else. There is no label here, and there never may
+/// be one — that is what makes a harness run blind.
+///
+/// It carries **two views of the same emission** because the cascade's two measuring stages need
+/// different geometries: the classifier's own snippet at [`crate::synth::SAMPLES_PER_OBW`], and the
+/// C14 symbol view at [`crate::symbols::SYMBOL_SAMPLES_PER_OBW`] (T-238). Production is the same
+/// shape: `BlindEstimator::prepare` re-normalises a snippet rather than reusing the classifier's.
+#[derive(Clone, Copy, Debug)]
+pub struct Snippet<'a> {
+    /// Normalised samples at the classifier's analysis geometry.
+    pub samples: &'a [Complex32],
+    /// Sample rate of [`Snippet::samples`], Hz.
+    pub sample_rate_hz: f64,
+    /// The same emission at C14's geometry, for blind symbol estimation.
+    pub symbol_samples: &'a [Complex32],
+    /// Sample rate of [`Snippet::symbol_samples`], Hz.
+    pub symbol_sample_rate_hz: f64,
+    /// Measured OBW99, Hz.
+    pub obw_hz: Option<f64>,
+    /// Measured in-band SNR, dB.
+    pub snr_db: Option<f64>,
+}
+
 /// A blind evaluation run over the synthetic acceptance grid: generates every taxonomy class at
 /// its family's gate plus the grid's SNR offsets, and every held-out (out-of-taxonomy) generator,
 /// classifies each snippet through a caller-supplied closure that never sees the truth, and
@@ -557,16 +582,27 @@ impl Harness {
         }
     }
 
-    /// Runs the synthetic grid. `classify` receives samples, sample rate, measured OBW and SNR —
-    /// never a label — and returns the [`Classification`] it produced.
+    /// Runs the synthetic grid. `classify` receives a [`Snippet`] — never a label — and returns the
+    /// [`Classification`] it produced.
     ///
     /// Fails (without scoring anything more) the instant a seed outside the acceptance range
     /// would be used — which cannot happen with this module's own generator, but can if a caller
     /// swaps in seeds of their own (e.g. a caller stitching in extra cells).
     pub fn run_synthetic<F>(&mut self, mut classify: F) -> Result<(), SeedSplitViolation>
     where
-        F: FnMut(&[Complex32], f64, Option<f64>, Option<f64>) -> Classification,
+        F: FnMut(&Snippet<'_>) -> Classification,
     {
+        /// The blind view of one generated waveform: everything but its class.
+        fn blind(s: &crate::synth::SynthSignal, snr: f64) -> Snippet<'_> {
+            Snippet {
+                samples: &s.samples,
+                sample_rate_hz: s.sample_rate_hz,
+                symbol_samples: &s.symbol_samples,
+                symbol_sample_rate_hz: s.symbol_sample_rate_hz,
+                obw_hz: Some(s.obw_hz),
+                snr_db: Some(snr),
+            }
+        }
         let mut seed = ACCEPTANCE_SEED_BASE;
         for class in Class::TAXONOMY {
             let family = class.family().expect("a taxonomy class has a family");
@@ -579,7 +615,7 @@ impl Harness {
                     seed += 1;
                     self.guard.check(seed)?;
                     let s = generate(*class, &SynthConfig::new(snr, seed));
-                    let c = classify(&s.samples, s.sample_rate_hz, Some(s.obw_hz), Some(snr));
+                    let c = classify(&blind(&s, snr));
                     self.report.record_with_class(
                         "synthetic-acceptance",
                         Some(family),
@@ -597,7 +633,7 @@ impl Harness {
                     seed += 1;
                     self.guard.check(seed)?;
                     let s = generate(*class, &SynthConfig::new(snr, seed));
-                    let c = classify(&s.samples, s.sample_rate_hz, Some(s.obw_hz), Some(snr));
+                    let c = classify(&blind(&s, snr));
                     self.report.record("held-out", None, offset, &c);
                 }
             }

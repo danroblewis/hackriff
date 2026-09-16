@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use hk_classify::harness::{GridSize, Harness};
-use hk_classify::{Classifier, ClassifyRequest};
+use hk_classify::{Classifier, ClassifyRequest, SymbolEstimator};
 use hk_model::Timestamp;
 
 fn main() {
@@ -36,12 +36,21 @@ fn main() {
 
     let started = Instant::now();
     let classifier = Classifier::new();
+    // One C14 estimator for the whole run, so its FFT plans are cached across snippets (T-238).
+    let mut c14 = SymbolEstimator::new();
     let mut harness = Harness::new(grid);
     harness
-        .run_synthetic(|samples, sample_rate_hz, obw_hz, snr_db| {
-            let mut req = ClassifyRequest::new(samples, sample_rate_hz, Timestamp::UNIX_EPOCH);
-            req.obw_hz = obw_hz;
-            req.snr_db = snr_db;
+        .run_synthetic(|s| {
+            let symbols = c14.from_samples(
+                s.symbol_samples,
+                s.symbol_sample_rate_hz,
+                s.obw_hz,
+                s.snr_db,
+            );
+            let mut req = ClassifyRequest::new(s.samples, s.sample_rate_hz, Timestamp::UNIX_EPOCH);
+            req.obw_hz = s.obw_hz;
+            req.snr_db = s.snr_db;
+            req.symbols = symbols.as_ref();
             classifier.classify(&req)
         })
         .expect("seed separation held");

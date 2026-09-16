@@ -45,6 +45,7 @@ pub mod eval;
 pub mod features;
 pub mod harness;
 pub mod openset;
+pub mod symbols;
 pub mod synth;
 pub mod thresholds;
 pub mod tree;
@@ -62,7 +63,8 @@ pub use eval::EvalReport;
 pub use features::{FeatureInput, Features, features};
 // `FamilyPriorSet`, `FamilyPriors`, `NoPriors`, `StaticPriors` and the `fuse` function come
 // through the `hk_model::classify` re-export above (T-218).
-pub use harness::{GridSize, Harness, OtaTruth, Report, RunMeta, SeedGuard, Split};
+pub use harness::{GridSize, Harness, OtaTruth, Report, RunMeta, SeedGuard, Snippet, Split};
+pub use symbols::SymbolEstimator;
 pub use thresholds::{FEATURES_VERSION, RULES_VERSION, THRESHOLDS_VERSION, thresholds_of};
 
 #[cfg(test)]

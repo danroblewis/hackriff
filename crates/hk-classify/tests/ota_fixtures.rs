@@ -122,6 +122,31 @@ fn classify_box(
     let snip = extractor.extract(info(0, prov), iq, request).ok()?;
     let params = ParamEstimator::new(Default::default()).estimate(&snip, &Hints::default());
     let normalised = hk_estimate::normalise::normalise(&snip, &params, &Default::default()).ok()?;
+    // C14 at its own geometry, from the same snippet (T-238): six of `features@1`'s most
+    // discriminating dimensions abstain without it, which is why both these fixtures used to
+    // classify with `no_symbol_estimate`.
+    let symbols = hk_classify::SymbolEstimator::new().from_snippet(&snip, &params);
+    eprintln!(
+        "[T-238]   C14: {}",
+        match &symbols {
+            Some(s) => format!(
+                "ran in {} us, family {:?} (conf {:.2}), scores {:?}, rate {:?} Bd (trusted {}), \
+                 best line {:.1} dB, reasons {:?}",
+                s.cost_us,
+                s.family,
+                s.family_confidence,
+                s.family_scores,
+                s.symbol_rate_bd.value(),
+                s.rate_trusted(),
+                s.lines
+                    .iter()
+                    .map(|l| l.significance_db)
+                    .fold(f64::NEG_INFINITY, f64::max),
+                s.reasons
+            ),
+            None => "could not run on this snippet (features abstain)".to_owned(),
+        }
+    );
     let mut req = ClassifyRequest::new(
         &normalised.samples,
         normalised.sample_rate_hz,
@@ -133,6 +158,7 @@ fn classify_box(
         .value()
         .or_else(|| params.snr_box_db.value());
     req.suspect.clipped = params.flags.clipped;
+    req.symbols = symbols.as_ref();
 
     // T-230 sim-to-real diagnosis, reported not asserted: which feature dimension puts a real
     // capture outside each synthetic class. `worst` names the dimension with the largest |z|, so a
@@ -142,7 +168,7 @@ fn classify_box(
         sample_rate_hz: normalised.sample_rate_hz,
         obw_hz: req.obw_hz,
         snr_db: req.snr_db,
-        symbols: None,
+        symbols: symbols.as_ref(),
     });
     let model = hk_classify::DensityModel::builtin();
     for family in [

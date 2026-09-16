@@ -12,7 +12,7 @@
 use hk_classify::eval::EvalReport;
 use hk_classify::synth::{ACCEPTANCE_SEED_BASE, Class, SynthConfig, generate};
 use hk_classify::thresholds::thresholds_of;
-use hk_classify::{Classifier, ClassifyRequest};
+use hk_classify::{Classifier, ClassifyRequest, SymbolEstimator};
 use hk_model::Timestamp;
 
 /// Trials per (class, SNR) cell.
@@ -22,8 +22,21 @@ const TRIALS: u64 = 6;
 /// three at or above it (where it must decide).
 const OFFSETS: [f64; 5] = [-10.0, -5.0, 0.0, 5.0, 10.0];
 
-fn classify_one(class: Class, snr_db: f64, seed: u64) -> hk_model::classify::Classification {
+/// One blind classification, through the same two-stage measurement the pipeline performs: C14 at
+/// its own geometry (T-238), then the feature tree on the classifier's snippet.
+fn classify_one(
+    c14: &mut SymbolEstimator,
+    class: Class,
+    snr_db: f64,
+    seed: u64,
+) -> hk_model::classify::Classification {
     let s = generate(class, &SynthConfig::new(snr_db, seed));
+    let symbols = c14.from_samples(
+        &s.symbol_samples,
+        s.symbol_sample_rate_hz,
+        Some(s.obw_hz),
+        Some(snr_db),
+    );
     let mut req = ClassifyRequest::new(
         &s.samples,
         s.sample_rate_hz,
@@ -31,6 +44,7 @@ fn classify_one(class: Class, snr_db: f64, seed: u64) -> hk_model::classify::Cla
     );
     req.obw_hz = Some(s.obw_hz);
     req.snr_db = Some(snr_db);
+    req.symbols = symbols.as_ref();
     Classifier::new().classify(&req)
 }
 
@@ -45,6 +59,7 @@ fn gate_of(class: Class) -> f64 {
 #[test]
 fn per_family_and_per_snr_accuracy_meets_the_a_priori_floors() {
     let mut report = EvalReport::new(5.0);
+    let mut c14 = SymbolEstimator::new();
     let mut seed = ACCEPTANCE_SEED_BASE;
     for class in Class::TAXONOMY {
         let gate = gate_of(*class);
@@ -52,7 +67,7 @@ fn per_family_and_per_snr_accuracy_meets_the_a_priori_floors() {
             let snr = gate + offset;
             for _ in 0..TRIALS {
                 seed += 1;
-                let c = classify_one(*class, snr, seed);
+                let c = classify_one(&mut c14, *class, snr, seed);
                 c.validate().expect("contract");
                 // Recorded against the *offset from the gate*, so families with different gates
                 // share comparable bins.
@@ -64,7 +79,7 @@ fn per_family_and_per_snr_accuracy_meets_the_a_priori_floors() {
         for offset in [0.0, 5.0, 10.0] {
             for _ in 0..TRIALS {
                 seed += 1;
-                let c = classify_one(*class, 20.0 + offset, seed);
+                let c = classify_one(&mut c14, *class, 20.0 + offset, seed);
                 c.validate().expect("contract");
                 report.record("held-out", None, offset, &c);
             }
@@ -205,12 +220,13 @@ fn out_of_taxonomy_generators_come_back_unknown() {
     let mut total = 0u32;
     let mut per_class = Vec::new();
     let mut wrong_family = Vec::new();
+    let mut c14 = SymbolEstimator::new();
     let mut seed = ACCEPTANCE_SEED_BASE + 500_000;
     for class in Class::HELD_OUT {
         let mut hits = 0u32;
         for _ in 0..8 {
             seed += 1;
-            let c = classify_one(*class, 25.0, seed);
+            let c = classify_one(&mut c14, *class, 25.0, seed);
             total += 1;
             // ADR-0016 §7 counts either outcome as recognising the unknown.
             if c.family == hk_model::classify::UNKNOWN || c.open_set_score >= 0.5 {
@@ -273,11 +289,12 @@ fn out_of_taxonomy_generators_come_back_unknown() {
 fn noise_is_never_called_a_communication_family() {
     // ADR-0016 §7: noise snippets labelled as a comm family ≤ 1 %.
     let mut wrong = 0u32;
+    let mut c14 = SymbolEstimator::new();
     let mut seed = ACCEPTANCE_SEED_BASE + 900_000;
     let trials = 40;
     for _ in 0..trials {
         seed += 1;
-        let c = classify_one(Class::NoiseLike, 20.0, seed);
+        let c = classify_one(&mut c14, Class::NoiseLike, 20.0, seed);
         let comm = c.family != "noise-like" && c.family != hk_model::classify::UNKNOWN;
         if comm {
             wrong += 1;
