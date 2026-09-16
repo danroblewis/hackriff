@@ -5747,7 +5747,7 @@ tasks:
     milestone: M2-hardening
     title: C18 clustering compares period_s, duty_cycle and burst_length_s unconditionally - a single disagreeing
       burst length refuses a join however much else agrees
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-281
@@ -5885,7 +5885,7 @@ tasks:
     milestone: M2-hardening
     title: On real air the pipeline fires 866 detections and 5 candidate emitters into a band measured flat
       to 2.3 dB
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-289
