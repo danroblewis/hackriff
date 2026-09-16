@@ -20,18 +20,14 @@
 .specwf .c-band.active { border-left-width: 3px; border-right-width: 3px; box-shadow: inset 0 0 0 1px var(--yellow); }
 .specwf .c-band-tick { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed color-mix(in srgb, var(--yellow) 55%, transparent); opacity: 0.8; }
 
-/* T-261 (ADR-0017 TM-4): time-extent presence boxes for non-focused rows, spanning trace+waterfall
-   (the focused row keeps the full-height .c-band/.bk above instead). Growth is a redraw, not an
-   animation: the box's own top/height are recomputed from `presence.last_interval` on every poll. */
-.specwf .c-presence { position: absolute; inset: 0; pointer-events: none; }
-.specwf .c-presence-box { position: absolute; box-sizing: border-box; border: 1px solid; }
-.specwf .c-presence-box.confirmed { border-color: var(--teal); background: color-mix(in srgb, var(--teal) 10%, transparent); }
-.specwf .c-presence-box.candidate { border-color: var(--lav); border-style: dashed; background: color-mix(in srgb, var(--lav) 8%, transparent); }
-.specwf .c-presence-box.open { border-top-color: var(--amber); border-top-width: 2px; }
-/* Chirp (`family: "css"`): ADR-0017 §1.3's named limit — one (f_lo, f_hi) per interval draws this
-   as its bounding box, not the diagonal sweep it actually is. The hatch marks the box as an
-   approximation; the tooltip spells out why. */
-.specwf .c-presence-box.chirp { background-image: repeating-linear-gradient(135deg, transparent 0 5px, color-mix(in srgb, var(--text) 14%, transparent) 5px 6px); }
+/* T-261 (ADR-0017 TM-4) / T-362: the time-extent presence boxes and the timed selection boxes are
+   no longer DOM. They are drawn in the waterfall's own WebGL render pass (ui/src/waterfall.ts
+   `drawBoxes`, ui/src/timebox.ts), from the same ring head and the same per-row capture times as
+   the rows, every animation frame — so they cannot sit still while the rows scroll under them and
+   then jump when the data poll catches up. Their colours are the same --teal / --lav / --amber
+   tokens, written as RGB in ui/src/app/centre/overlays.ts, since the canvas keeps its own always-
+   dark colormap. What stays here is only what has no time axis: the focused row's full-height
+   .c-band above, and .c-sel for a frequency-only selection below. */
 
 .specwf .c-wf { position: absolute; left: 0; right: 0; top: 35%; bottom: 0; pointer-events: none; overflow: hidden; }
 .specwf .c-colhi { position: absolute; top: 0; bottom: 0; background: var(--amber-soft); border-left: 1px solid var(--amber); border-right: 1px solid var(--amber); }

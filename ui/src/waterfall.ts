@@ -19,8 +19,15 @@
 // T-337 (the user's "one shared time axis" invariant): every row keeps the absolute capture time
 // the backend served with it, and `timeAt`/`rowsBackAt` are the one mapping between capture time
 // and screen position that overlays place themselves through.
+//
+// T-362: and the overlay boxes are drawn HERE, in this render pass, from that same mapping —
+// `setBoxes` takes rectangles in capture time and band fraction, `frame` places them the instant it
+// places the rows. They were DOM divs positioned on the ~1 s data poll, so between polls the rows
+// scrolled under a box that stood still, and the poll made it jump. Nothing keeps a box's screen
+// position now, so there is nothing to fall out of step (ui/src/timebox.ts).
 
 import { rowsBackAt } from "./axis";
+import { boxAt, placeTimeBoxes, type TimeBox } from "./timebox";
 
 const ROWS = 512;
 const LEVELS = 256;
@@ -33,6 +40,10 @@ export const MARK_GATED = 2;
 /** A cell value meaning "not observed" (T-152 review render: history `null` cells). Drawn grey, never
  * as quiet; ignored by the auto colour range. Far below any real dB level. */
 export const UNOBSERVED_DB = -1e20;
+/** Smallest an overlay box is drawn (CSS px each way), so a one-bin or one-row box stays visible
+ * and hoverable. Presentation, and applied at draw time against the pane's real size — never a
+ * fraction baked into the box, which would change with the zoom. */
+export const BOX_MIN_PX = 3;
 
 /** Rows the waterfall ring holds, and so how much time is on screen: `WATERFALL_ROWS / rowRateHz`
  * seconds (T-260, ADR-0017 §2.1). Exported so Explore can scope its Candidate query to the window
@@ -114,6 +125,7 @@ export class Waterfall {
   private peak: Float32Array | null = null;
   private peakDirty = false;
   private peakTex: WebGLTexture;
+  private boxes: readonly TimeBox[] = [];
 
   constructor(private canvas: HTMLCanvasElement, bins: number, rowRateHz: number) {
     const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
@@ -256,6 +268,24 @@ export class Waterfall {
     return n;
   }
 
+  /**
+   * The overlay rectangles to draw over the rows (T-362): each one a band fraction and an absolute
+   * capture-time span, with **no screen position**. Supply them whenever the data behind them
+   * changes — an inventory poll, a new selection — and nothing more: every frame re-places them
+   * from this ring's head and its rows' own capture times, in the same pass that draws the rows, so
+   * a box tracks the scroll between polls and a poll that changes nothing moves nothing.
+   */
+  setBoxes(boxes: readonly TimeBox[]) {
+    this.boxes = boxes;
+  }
+
+  /** The topmost box containing a point given in the boxes' own axes (band fraction `u`, absolute
+   * capture time `tS`); null when none does. Hit-testing shares the boxes' mapping rather than any
+   * drawn rectangle, so it cannot answer for a position the pass did not draw. */
+  boxAt(u: number, tS: number): TimeBox | null {
+    return boxAt(this.boxes, u, tS);
+  }
+
   /** Level (dB) of the newest row at texture fraction `u` of the full band; NaN outside. */
   levelAt(u: number): number {
     if (!(u >= 0 && u < 1)) return NaN;
@@ -366,6 +396,29 @@ void main(){
   if (y >= floor(min(a,b)) && y <= ceil(max(a,b))) h += 1.0;
   o = vec4(h,0,0,1);
 }`);
+    // Overlay box (T-362): one unit quad per box, stretched to the rect the render pass just
+    // derived from the ring head. `uSizePx` is that rect's size in device pixels, so the border,
+    // its dash and the hatch keep a constant screen weight whatever the box's extent — the box
+    // itself is a time–frequency region, not a pixel rectangle.
+    this.progs.box = prog(`#version 300 es
+precision highp float; uniform vec4 uRect; out vec2 vQ;
+void main(){ vec2 q = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1)); vQ = q;
+  gl_Position = vec4(mix(uRect.x, uRect.z, q.x), mix(uRect.y, uRect.w, q.y), 0.0, 1.0); }`,
+    `#version 300 es
+precision mediump float;
+uniform vec2 uSizePx; uniform vec4 uFill, uBorder, uTop;
+uniform float uBorderPx, uTopPx, uDashPx, uHatch; in vec2 vQ; out vec4 o;
+void main(){
+  vec2 px = vQ * uSizePx;
+  float w = max(uBorderPx, 1.0), tw = max(w, uTopPx);
+  bool side = px.x <= w || uSizePx.x - px.x <= w;
+  bool top = uSizePx.y - px.y <= tw;
+  bool edge = side || top || px.y <= w;
+  if (edge && uDashPx > 0.0 && mod(side ? px.y : px.x, 2.0 * uDashPx) > uDashPx) edge = false;
+  if (edge) { o = top ? uTop : uBorder; return; }
+  o = (uHatch > 0.5 && mod(px.x + px.y, 6.0) < 1.5)
+    ? vec4(mix(uFill.rgb, vec3(1.0), 0.35), max(uFill.a, 0.22)) : uFill;
+}`);
     this.progs.dpx = prog(VS_FULL, `#version 300 es
 precision highp float; precision highp int;
 uniform highp sampler2D uH; uniform float uPxU; uniform float uHmax, uU0, uU1; in vec2 vUv; out vec4 o; ${CMAP} ${POOL}
@@ -433,6 +486,10 @@ void main(){
     gl.uniform1f(wf.u.uU0, this.u0);
     gl.uniform1f(wf.u.uU1, this.u1);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // The boxes, in the same pass and the same viewport as the rows they sit on, placed from the
+    // head just used above (T-362): the whole point is that there is no second moment at which a
+    // box's position could be decided.
+    this.drawBoxes(W, H - specH, dpr);
 
     gl.viewport(0, H - specH, W, specH);
     if (this.hist.length === 2) {
@@ -468,6 +525,38 @@ void main(){
       gl.drawArrays(gl.LINE_STRIP, 0, this.texW);
     }
     this.frameMs += 0.1 * (performance.now() - tFrame - this.frameMs);
+  }
+
+  /**
+   * Draws the overlay boxes over the waterfall pane (`W × paneH` device px, viewport already set).
+   *
+   * Placement happens here and only here: `placeTimeBoxes` inverts *this* ring's row times at
+   * *this* frame's head, through the zoom window the rows were just drawn with. y0 is rows-back 0
+   * (the newest row, the top of the pane), so it maps to the top of the viewport in NDC.
+   */
+  private drawBoxes(W: number, paneH: number, dpr: number) {
+    if (!this.boxes.length || !(W > 0) || !(paneH > 0)) return;
+    const min = BOX_MIN_PX * dpr;
+    const placed = placeTimeBoxes(this.boxes, (t) => this.rowsBackAt(t), ROWS, this.u0, this.u1, min / W, min / paneH);
+    if (!placed.length) return;
+    const gl = this.gl, b = this.progs.box;
+    gl.useProgram(b.p);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    for (const p of placed) {
+      const s = p.style;
+      gl.uniform4f(b.u.uRect, p.x0 * 2 - 1, 1 - p.y1 * 2, p.x1 * 2 - 1, 1 - p.y0 * 2);
+      gl.uniform2f(b.u.uSizePx, (p.x1 - p.x0) * W, (p.y1 - p.y0) * paneH);
+      gl.uniform4f(b.u.uFill, ...s.fill);
+      gl.uniform4f(b.u.uBorder, ...s.border);
+      gl.uniform4f(b.u.uTop, ...s.top);
+      gl.uniform1f(b.u.uBorderPx, s.borderPx * dpr);
+      gl.uniform1f(b.u.uTopPx, s.topPx * dpr);
+      gl.uniform1f(b.u.uDashPx, s.dashPx * dpr);
+      gl.uniform1f(b.u.uHatch, s.hatch ? 1 : 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    gl.disable(gl.BLEND);
   }
 
   private accumulate() {

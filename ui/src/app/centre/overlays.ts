@@ -14,6 +14,7 @@ import * as ax from "../../axis";
 import { nearestEntry } from "../../inspect";
 import type { Row } from "../../inventory";
 import { validateSelection, type NewSelection, type Selection } from "../../selections";
+import type { BoxStyle, TimeBox } from "../../timebox";
 import { UNOBSERVED_DB } from "../../waterfall";
 
 /** Pointer travel (px) that turns a press into a drag (the old UI's DRAG_PX rule, ADR-0013 §5). */
@@ -157,19 +158,51 @@ export function dragBandEdge(v: ax.View, widthPx: number, edge: BandEdge, startL
     : { loHz: startLoHz, hiHz: Math.max(startLoHz + minW, snappedHz) };
 }
 
-// ---- Presence-interval boxes (T-261, ADR-0017 TM-4): centre/width × time-extent, drawn across
-// trace and waterfall. Growth is not animated here — it falls out of re-reading a row's
-// `presence.last_interval.t_end_s` on the next inventory poll and redrawing: an open interval's
-// `t_end_s` moves closer to the live edge (small `rowsBack`) each poll while `t_start_s` stays
-// fixed and slides further down (bigger `rowsBack`) as time passes, so the box's bottom edge grows
-// away from its (roughly) steady top edge. Nothing here extrapolates `t_end_s` between polls — the
-// extent is exactly what `/api/inventory` last served (thin-client rule). The focused row is
-// excluded: it keeps the existing full-height bracket/[[confirmedBands]] box so T-193's
-// drag-to-adjust-band edges stay where that code expects them (ADR-0017 TM-4 table). ----
+// ---- Time-extent boxes (T-261, ADR-0017 TM-4; T-362) ---------------------------------------
+//
+// A box is a frequency extent × a capture-time extent, and **that is all it is**: these producers
+// emit `TimeBox`es carrying a band fraction and two absolute times, with no screen coordinate
+// anywhere. The waterfall places and draws them in its own render pass, every animation frame
+// (ui/src/timebox.ts, ui/src/waterfall.ts `drawBoxes`).
+//
+// T-362 is why. T-337 had already made placement a pure function of capture time, but these
+// functions returned *percentages* and were called on the ~1 s inventory poll, so between polls the
+// rows scrolled under a box that stood still and the poll made it jump. Returning a region instead
+// of a rectangle removes the second clock: there is no percentage to go stale, and a poll that
+// changes nothing changes nothing on screen.
+//
+// Growth still needs no animation. An open interval's `t_end_s` moves closer to the live edge each
+// poll while `t_start_s` stays fixed; the mapping does the rest. Nothing here extrapolates
+// `t_end_s` between polls — the extent is exactly what `/api/inventory` last served (thin-client
+// rule); what moves between polls is the *rows*, and the box moves with them because it is placed
+// with them. The focused row is excluded: it keeps the full-height bracket/[[confirmedBands]] box
+// so T-193's drag-to-adjust-band edges stay where that code expects them (ADR-0017 TM-4 table).
 
-export interface PresenceBox extends Span {
-  id: string; state: "candidate" | "confirmed";
-  topPct: number; heightPct: number;
+/** Band fraction (0..1 over the bins in order) of `hz` — the coordinate the waterfall's zoom window
+ * and its boxes share, so one frequency mapping serves the rows and everything drawn on them. */
+export const bandFrac = (g: ax.Geometry, hz: number) => ax.hzToFrac(ax.fullView(g), hz);
+
+/** Overlay colours, RGB 0..1. The waterfall canvas keeps its own always-dark colormap (centre.css),
+ * so these are the dark-theme `--teal` / `--lav` / `--amber` tokens the DOM overlays use. */
+const TEAL = [0.322, 0.761, 0.682] as const;
+const LAV = [0.639, 0.584, 0.878] as const;
+const AMBER = [0.941, 0.647, 0.259] as const;
+const rgba = (c: readonly [number, number, number], a: number) => [c[0], c[1], c[2], a] as const;
+
+/** The style a Candidate/Confirmed presence box draws with: `open` (still on the air) marks the
+ * newest edge amber and thickens it; `chirp` hatches the fill, since ADR-0017 §1.3 names a swept
+ * carrier drawn as its bounding box as an approximation, not the truth. Presentation only. */
+export function presenceStyle(state: "candidate" | "confirmed", open: boolean, chirp: boolean): BoxStyle {
+  const c = state === "confirmed" ? TEAL : LAV;
+  return {
+    fill: rgba(c, state === "confirmed" ? 0.1 : 0.08), border: rgba(c, 1),
+    top: open ? rgba(AMBER, 1) : rgba(c, 1), borderPx: 1, topPx: open ? 2 : 1,
+    dashPx: state === "candidate" ? 4 : 0, hatch: chirp,
+  };
+}
+
+export interface PresenceBox extends TimeBox {
+  state: "candidate" | "confirmed";
   /** An interval open at the window's live edge: still on the air (docs/api.md `presence.liveness`). */
   open: boolean;
   /** The row's arbitrated family is Costas/chirp spread spectrum (`family === "css"`, docs/07 §2.21
@@ -179,32 +212,52 @@ export interface PresenceBox extends Span {
   label: string;
 }
 
-/** One box per Candidate/Confirmed row whose `presence.last_interval` intersects the waterfall
- * (docs/api.md `presence`, T-284): frequency from `f_lo_hz`/`f_hi_hz` exactly as [[bracketLayout]]
- * places it, time extent from [[ax.timeSpanY]] over the interval's own `t_start_s`/`t_end_s` — both
- * read off the API response, never recomputed — placed through [[RowClock.rowsBackAt]], the same
- * mapping the rows were drawn with (T-337), so the box scrolls with its energy rather than at a
- * nominal rows-per-second. A row with no interval intersecting the request's
- * window (`last_interval: null`, or no `presence` at all on a pre-T-284 fixture) draws nothing: no
- * zero-width or zero-duration box is ever fabricated. A row whose interval has scrolled off the
- * waterfall's own history (`timeSpanY` null) likewise draws nothing, rather than a box clamped to a
- * height it never had. */
-export function presenceBoxes(rows: readonly Row[], v: ax.View, clock: RowClock, focusedId: string | null): PresenceBox[] {
+/** One box per Candidate/Confirmed row whose `presence.last_interval` exists (docs/api.md
+ * `presence`, T-284): frequency from `f_lo_hz`/`f_hi_hz`, time extent the interval's own
+ * `t_start_s`/`t_end_s` — both read off the API response, never recomputed or extrapolated. A row
+ * with no interval (`last_interval: null`, or no `presence` at all on a pre-T-284 fixture) yields
+ * nothing: no zero-width or zero-duration box is ever fabricated. Whether a box is *on screen* is
+ * decided where it is drawn, against the rows actually held — one whose span has scrolled off draws
+ * nothing rather than a rectangle clamped to a duration it never had. */
+export function presenceBoxes(rows: readonly Row[], g: ax.Geometry, focusedId: string | null): PresenceBox[] {
   const out: PresenceBox[] = [];
-  const rowsBackAt = (t: number) => clock.rowsBackAt(t);
   for (const r of rows) {
     if (r.state !== "candidate" && r.state !== "confirmed") continue;
     if (r.id === focusedId) continue; // keeps its full-height bracket/band instead (T-193)
     const iv = r.presence?.last_interval;
     if (!iv) continue;
-    const span = placeExtent(v, r.f_lo_hz, r.f_hi_hz, MIN_BRACKET_FRAC);
-    if (!span) continue;
-    const ys = ax.timeSpanY(iv.t_start_s, iv.t_end_s, rowsBackAt, clock.specFrac, clock.rows);
-    if (!ys) continue;
-    const [topFrac, bottomFrac] = ys;
+    const label = ax.fmtMHz(r.f_center_hz, 1e3), chirp = r.family === "css";
     out.push({
-      ...span, id: r.id, state: r.state, topPct: topFrac * 100, heightPct: (bottomFrac - topFrac) * 100,
-      open: iv.open, chirp: r.family === "css", label: ax.fmtMHz(r.f_center_hz, 1e3),
+      id: r.id, state: r.state, u0: bandFrac(g, r.f_lo_hz), u1: bandFrac(g, r.f_hi_hz),
+      tLo: iv.t_start_s, tHi: iv.t_end_s, open: iv.open, chirp, label,
+      style: presenceStyle(r.state, iv.open, chirp),
+      title: `${label} MHz · ${r.state}${iv.open ? " · on air" : ""}${chirp ? " · bounding box (chirp: a swept carrier drawn as its extent, not its sweep)" : ""}`,
+    });
+  }
+  return out;
+}
+
+/** The style a timed selection box draws with (amber, dashed; solid and filled when focused). */
+export const selectionStyle = (active: boolean): BoxStyle => ({
+  fill: rgba(AMBER, active ? 0.14 : 0), border: rgba(AMBER, active ? 1 : 0.6),
+  top: rgba(AMBER, active ? 1 : 0.6), borderPx: 1, topPx: 1, dashPx: 3, hatch: false,
+});
+
+/**
+ * Boxes for the selections that carry a time extent (`t_lo`/`t_hi`, absolute capture time from
+ * `GET /api/selections` — the same times [[dragSelection]] read off the rows when it was drawn).
+ * They are drawn in the waterfall's own pass beside the rows they selected (T-362); a
+ * frequency-only selection has no time axis to sit on and stays a full-height DOM box
+ * ([[selectionBoxes]]) — the honest rendering of "any time".
+ */
+export function selectionTimeBoxes(list: readonly Pick<Selection, "id" | "f_lo" | "f_hi" | "t_lo" | "t_hi" | "name">[],
+  g: ax.Geometry, focusedId: string | null): TimeBox[] {
+  const out: TimeBox[] = [];
+  for (const s of list) {
+    if (typeof s.t_lo !== "number" || typeof s.t_hi !== "number") continue;
+    out.push({
+      id: s.id, u0: bandFrac(g, s.f_lo), u1: bandFrac(g, s.f_hi), tLo: s.t_lo, tHi: s.t_hi,
+      style: selectionStyle(s.id === focusedId), title: `${s.name ?? regionName(s.f_lo, s.f_hi)} · selection`,
     });
   }
   return out;
@@ -212,37 +265,22 @@ export function presenceBoxes(rows: readonly Row[], v: ax.View, clock: RowClock,
 
 export interface SelBox extends Span {
   id: string; active: boolean; pending: boolean;
-  /** Vertical extent (percent of the canvas). Full height for a selection with no time extent. */
-  topPct: number; heightPct: number;
 }
 
 /**
- * Boxes for selections in view; `pending` marks ones created here and not yet listed.
- *
- * A selection carrying a time extent (`t_lo`/`t_hi`, absolute capture time from
- * `GET /api/selections` — the same times [[dragSelection]] read off the rows when it was drawn) is
- * placed through `clock.rowsBackAt`, the mapping the rows themselves were drawn with (T-337), so it
- * sits on and scrolls with the energy it selected. Without a clock, or with no time extent (a
- * frequency-only selection, `t_lo`/`t_hi` null), it stays full height — the honest rendering of
- * "any time". A timed selection whose span has scrolled off the rows held draws nothing rather than
- * a box clamped to a height it never had, exactly as [[presenceBoxes]] does.
+ * Full-height boxes for the **untimed** selections in view; `pending` marks ones created here and
+ * not yet listed. A selection carrying a time extent is not here at all — it is a time-varying
+ * overlay and belongs in the render pass ([[selectionTimeBoxes]]), not in a DOM layer with its own
+ * idea of where it is (T-362).
  */
 export function selectionBoxes(list: readonly Pick<Selection, "id" | "f_lo" | "f_hi" | "t_lo" | "t_hi">[], v: ax.View, focusedId: string | null,
-  pending: { has(id: string): boolean } = new Set(), clock: RowClock | null = null): SelBox[] {
+  pending: { has(id: string): boolean } = new Set()): SelBox[] {
   const out: SelBox[] = [];
   for (const s of list) {
+    if (typeof s.t_lo === "number" && typeof s.t_hi === "number") continue;
     const p = placeExtent(v, s.f_lo, s.f_hi, 0.002);
     if (!p) continue;
-    let topPct = 0, heightPct = 100;
-    if (clock && typeof s.t_lo === "number" && typeof s.t_hi === "number") {
-      // Fractions of the **waterfall pane**, not the canvas: `.c-sel` is drawn inside the waterfall
-      // layer, which already starts at `specFrac`, and the spectrum trace has no time axis to sit on.
-      const ys = ax.timeSpanRows(s.t_lo, s.t_hi, (t) => clock.rowsBackAt(t), clock.rows);
-      if (!ys) continue;
-      topPct = ys[0] * 100;
-      heightPct = (ys[1] - ys[0]) * 100;
-    }
-    out.push({ ...p, id: s.id, active: s.id === focusedId, pending: pending.has(s.id), topPct, heightPct });
+    out.push({ ...p, id: s.id, active: s.id === focusedId, pending: pending.has(s.id) });
   }
   return out;
 }

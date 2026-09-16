@@ -14,8 +14,9 @@ import { mounts } from "../src/app/centre";
 import {
   DC_NOTCH_HALF_HZ, EDGE_HIT_PX, LABEL_MIN_PX, addModeActive, assumedDc, bandEdgeHit, bracketLayout, clickTarget, confirmedBands, confirmedEdgeAt,
   dcFromHeader, dcFromObservations, dcQuery, dragBandEdge, dragSelection, draftBox, effectiveBand, hoverText, isDrag, levelU, minUserBandHz,
-  placeExtent, presenceBoxes, regionName, selectionBoxes, selectionLabel, snapFracToPixel, timeScaleText, tipOnLeft, type RowClock,
+  placeExtent, presenceBoxes, regionName, selectionBoxes, selectionTimeBoxes, selectionLabel, snapFracToPixel, timeScaleText, tipOnLeft, type RowClock,
 } from "../src/app/centre/overlays";
+import { placeTimeBoxes, type TimeBox } from "../src/timebox";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor, type HistoryGrid } from "../src/app/centre/review-render";
 import { centreInitial } from "../src/app/centre/slice";
 import type { AppContext } from "../src/app/context";
@@ -60,6 +61,25 @@ function rowClock(times: readonly number[], declaredHz = 25, rows = 512, specFra
 
 /** Row times, newest first, at a steady `periodS`. */
 const steady = (newestT: number, n: number, periodS: number) => Array.from({ length: n }, (_, k) => newestT - k * periodS);
+
+/**
+ * Where the waterfall's render pass puts a [[TimeBox]] (T-362): exactly `placeTimeBoxes` over the
+ * clock's own `rowsBackAt` and the zoom window the rows are drawn with, reported in the canvas
+ * percentages the DOM overlay used to use so the T-337 assertions below still read on the axis they
+ * were written for. `rowTopPct`/`rowHeightPct` are the same rectangle as fractions of the waterfall
+ * pane. Null when the box has scrolled off the rows held — the render pass draws nothing there.
+ */
+function drawn(b: TimeBox | undefined, c: RowClock, uw: readonly [number, number] = ax.textureWindow(G, V)) {
+  if (!b) return null;
+  const [p] = placeTimeBoxes([b], c.rowsBackAt, c.rows, uw[0], uw[1]);
+  if (!p) return null;
+  return {
+    leftPct: p.x0 * 100, widthPct: (p.x1 - p.x0) * 100,
+    rowTopPct: p.y0 * 100, rowHeightPct: (p.y1 - p.y0) * 100,
+    topPct: (c.specFrac + p.y0 * (1 - c.specFrac)) * 100,
+    heightPct: (p.y1 - p.y0) * (1 - c.specFrac) * 100,
+  };
+}
 
 test("placeExtent maps Hz to percent of the view, clamps to it, and widens to the minimum", () => {
   const p = placeExtent(V, 99_500_000, 100_000_000)!;
@@ -129,20 +149,25 @@ test("presenceBoxes (T-261, ADR-0017 TM-4): centre/width from f_lo/f_hi, time ex
   const clock = rowClock(steady(1000, 512, 0.04), 25); // newest row (rowsBack 0) at t=1000
   // 5 s ago .. now (still open): near the live edge (top of the waterfall), a few rows tall.
   const a = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000, true));
-  const boxes = presenceBoxes([a], V, clock, null);
+  const boxes = presenceBoxes([a], G, null);
   assert.equal(boxes.length, 1);
-  const [b] = boxes;
-  assert.equal(b.id, "a"); assert.equal(b.state, "confirmed"); assert.equal(b.open, true); assert.equal(b.chirp, false);
+  const [t] = boxes;
+  assert.equal(t.id, "a"); assert.equal(t.state, "confirmed"); assert.equal(t.open, true); assert.equal(t.chirp, false);
+  // The box itself is a region, not a rectangle: a band fraction and the interval's own two times,
+  // straight off the API, with no screen coordinate to go stale between polls (T-362).
+  assert.deepEqual([t.tLo, t.tHi], [995, 1000]);
+  near(t.u0, ax.hzToFrac(ax.fullView(G), 99_900_000)); near(t.u1, ax.hzToFrac(ax.fullView(G), 100_100_000));
+  const b = drawn(t, clock)!;
   near(b.leftPct, 45); near(b.widthPct, 10); // same frequency placement as placeExtent/confirmedBands
-  const expected = ax.timeSpanY(995, 1000, clock.rowsBackAt, 0.35, 512)!;
-  near(b.topPct, expected[0] * 100); near(b.heightPct, (expected[1] - expected[0]) * 100);
+  const expected = ax.timeSpanRows(995, 1000, clock.rowsBackAt, 512)!;
+  near(b.topPct, (0.35 + expected[0] * 0.65) * 100); near(b.heightPct, (expected[1] - expected[0]) * 0.65 * 100);
   // `t_end_s` is the newest row's own start time, which is the boundary below it: the emission
   // covered row 1 and not row 0, so the box starts one row down, not at the top of the pane.
   near(b.topPct, (0.35 + (1 / 512) * 0.65) * 100, 1e-9);
   // The next poll's t_end_s advanced (still open, more evidence arrived): the SAME box, redrawn,
   // is taller — nothing here is animated, it is only a fresh call with the API's new numbers.
-  const grown = presenceBoxes([row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1004, true))], V, rowClock(steady(1004, 512, 0.04), 25), null);
-  assert.ok(grown[0].heightPct > b.heightPct, "the open interval's box grew");
+  const grown = drawn(presenceBoxes([row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1004, true))], G, null)[0], rowClock(steady(1004, 512, 0.04), 25))!;
+  assert.ok(grown.heightPct > b.heightPct, "the open interval's box grew");
 });
 
 test("presenceBoxes: never fabricates a box — no interval, no presence at all, or the focused row (kept on the full-height bracket instead)", () => {
@@ -150,20 +175,25 @@ test("presenceBoxes: never fabricates a box — no interval, no presence at all,
   const noPresence = row("a", 99_900_000, 100_100_000); // pre-T-284 fixture: presence undefined
   const noInterval: Row = { ...row("b", 99_900_000, 100_100_000), presence: { intervals: 0, on_air_s: 0, last_interval: null, liveness: "absent", ended_t_s: null } };
   const focused = row("c", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000));
-  assert.deepEqual(presenceBoxes([noPresence, noInterval], V, clock, null), []);
-  assert.deepEqual(presenceBoxes([focused], V, clock, "c"), [], "the focused row keeps its existing full-height box, not this one");
-  // Scrolled entirely off the waterfall's own history: still no fabricated box.
+  assert.deepEqual(presenceBoxes([noPresence, noInterval], G, null), []);
+  assert.deepEqual(presenceBoxes([focused], G, "c"), [], "the focused row keeps its existing full-height box, not this one");
+  // Scrolled entirely off the waterfall's own history: the row still has an interval, so it is
+  // still a box — and the render pass draws nothing for it, rather than a rectangle clamped to a
+  // duration it never had. Since T-362 that judgement belongs where the rows are, not to the poll.
   const stale = row("d", 99_900_000, 100_100_000, "confirmed", 1, null, iv(0, 1));
-  assert.deepEqual(presenceBoxes([stale], V, clock, null), []);
+  assert.equal(drawn(presenceBoxes([stale], G, null)[0], clock), null);
 });
 
 test("presenceBoxes: a row classified as css/chirp is flagged so the box is labelled a bounding box, not a swept polyline (ADR-0017 §1.3)", () => {
   const clock = rowClock(steady(1000, 512, 0.04), 25);
   const chirp = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000), "css");
   const fm = row("b", 100_400_000, 100_410_000, "confirmed", 1, null, iv(995, 1000), "wfm-broadcast");
-  const boxes = presenceBoxes([chirp, fm], V, clock, null);
+  const boxes = presenceBoxes([chirp, fm], G, null);
   assert.equal(boxes.find((x) => x.id === "a")!.chirp, true);
   assert.equal(boxes.find((x) => x.id === "b")!.chirp, false);
+  assert.equal(boxes.find((x) => x.id === "a")!.style.hatch, true, "and the hatch says so on screen");
+  assert.ok(boxes.find((x) => x.id === "a")!.title!.includes("bounding box"), "and the hover readout says why");
+  assert.ok(drawn(boxes[0], clock), "still placed like any other box");
 });
 
 // ---- T-337: one shared time axis ----------------------------------------------------------
@@ -205,7 +235,7 @@ test("T-337 invariant: a box spanning exactly row k lands exactly on row k — t
   for (let k = 1; k < times.length; k++) {
     // A signal present for exactly row k: its own capture time up to the next-newer row's.
     const r = row(`r${k}`, 99_900_000, 100_100_000, "confirmed", 1, null, iv(times[k], times[k - 1], false));
-    const [b] = presenceBoxes([r], V, c, null);
+    const b = drawn(presenceBoxes([r], G, null)[0], c)!;
     // The canvas fractions row k occupies, straight off the row index — the waterfall's own layout.
     const top = c.specFrac + (k / c.rows) * (1 - c.specFrac), bottom = c.specFrac + ((k + 1) / c.rows) * (1 - c.specFrac);
     near(b.topPct, top * 100, 1e-9);
@@ -221,7 +251,7 @@ test("T-337 invariant: placement is a pure function of capture time — the decl
   const interval = iv(999.2, 1000, true);
   const r = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, interval);
   // Three wildly different *declared* rates over identical rows: identical boxes.
-  const boxes = [25, 27.5, 4].map((hz) => presenceBoxes([r], V, rowClock(times, hz), null)[0]);
+  const boxes = [25, 27.5, 4].map((hz) => drawn(presenceBoxes([r], G, null)[0], rowClock(times, hz))!);
   for (const b of boxes.slice(1)) {
     near(b.topPct, boxes[0].topPct, 1e-12);
     near(b.heightPct, boxes[0].heightPct, 1e-12);
@@ -236,7 +266,7 @@ test("T-337 drift: a gated stream's declared rate is 10 % fast, and placing a bo
   const c = rowClock(times, declaredHz);
   // A one-row-long emission 400 rows back (16 s of capture): the box must sit on row 400.
   const r = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(times[400], times[399], false));
-  const [b] = presenceBoxes([r], V, c, null);
+  const b = drawn(presenceBoxes([r], G, null)[0], c)!;
   near(b.topPct, (c.specFrac + (400 / c.rows) * (1 - c.specFrac)) * 100, 1e-9);
   // What the declared rate would have said: the age of the box ÷ a 10 % short row period.
   const wrongBack = (times[0] - times[400]) * declaredHz;
@@ -253,16 +283,21 @@ test("T-337: selections with a time extent are laid out on the same axis, and th
   const sel = dragSelection(V, { x: 0.45, y: yOf(4) }, { x: 0.55, y: yOf(1) }, 1000, c)!;
   assert.equal(sel.t_lo, times[4], "the older edge is row 4's own capture time");
   assert.equal(sel.t_hi, times[0], "the newer edge closes row 1 at row 0's capture time, not at a nominal period past it");
-  // Drawing it back through the same axis lands on exactly rows 1..4, uneven rows and all.
-  const [b] = selectionBoxes([{ id: "s", f_lo: sel.f_lo, f_hi: sel.f_hi, t_lo: sel.t_lo, t_hi: sel.t_hi }], V, null, new Set(), c);
-  near(b.topPct, (1 / c.rows) * 100, 1e-9);
-  near(b.topPct + b.heightPct, (5 / c.rows) * 100, 1e-9);
-  assert.deepEqual(ax.yHit(c.specFrac + (b.topPct / 100 + 1e-9) * (1 - c.specFrac), c.specFrac, c.rows), { area: "waterfall", rowsBack: 1 });
-  // A selection with no time extent is full height — "any time", honestly drawn, not placed at 0.
-  const [u] = selectionBoxes([{ id: "u", f_lo: 99_500_000, f_hi: 99_600_000 }], V, null, new Set(), c);
-  assert.equal(u.topPct, 0); assert.equal(u.heightPct, 100);
+  // Drawing it back through the same axis lands on exactly rows 1..4, uneven rows and all. Since
+  // T-362 a timed selection is a render-pass box like a presence box, placed the same way.
+  const b = drawn(selectionTimeBoxes([{ id: "s", name: "s", f_lo: sel.f_lo, f_hi: sel.f_hi, t_lo: sel.t_lo!, t_hi: sel.t_hi! }], G, null)[0], c)!;
+  near(b.rowTopPct, (1 / c.rows) * 100, 1e-9);
+  near(b.rowTopPct + b.rowHeightPct, (5 / c.rows) * 100, 1e-9);
+  assert.deepEqual(ax.yHit(c.specFrac + (b.rowTopPct / 100 + 1e-9) * (1 - c.specFrac), c.specFrac, c.rows), { area: "waterfall", rowsBack: 1 });
+  // A selection with no time extent has no time axis to sit on: it stays a full-height DOM box —
+  // "any time", honestly drawn, not placed at 0 — and is never handed to the render pass.
+  const [u] = selectionBoxes([{ id: "u", f_lo: 99_500_000, f_hi: 99_600_000 }], V, null);
+  assert.deepEqual([u.leftPct > 0, u.widthPct > 0], [true, true]);
+  assert.deepEqual(selectionTimeBoxes([{ id: "u", name: "u", f_lo: 99_500_000, f_hi: 99_600_000 }], G, null), []);
+  assert.deepEqual(selectionBoxes([{ id: "s", f_lo: sel.f_lo, f_hi: sel.f_hi, t_lo: sel.t_lo, t_hi: sel.t_hi }], V, null), [],
+    "and a timed one is never also a DOM box: one overlay, one placement");
   // And one whose span has scrolled off the rows held draws nothing rather than a clamped box.
-  assert.deepEqual(selectionBoxes([{ id: "o", f_lo: 99_500_000, f_hi: 99_600_000, t_lo: 10, t_hi: 11 }], V, null, new Set(), c), []);
+  assert.equal(drawn(selectionTimeBoxes([{ id: "o", name: "o", f_lo: 99_500_000, f_hi: 99_600_000, t_lo: 10, t_hi: 11 }], G, null)[0], c), null);
 });
 
 test("T-337: the time-scale label measures the rows on screen instead of asserting rows × declared period", () => {
@@ -324,7 +359,6 @@ test("selection boxes: in view, focused active, pending flagged", () => {
   const boxes = selectionBoxes(list, V, "s3", new Set(["s1"]));
   assert.deepEqual(boxes.map((b) => [b.id, b.active, b.pending]), [["s1", false, true], ["s3", true, false]]);
   near(boxes[0].leftPct, 0); near(boxes[0].widthPct, 25);
-  assert.deepEqual(boxes.map((b) => [b.topPct, b.heightPct]), [[0, 100], [0, 100]]); // no clock, no time extent: full height
 });
 
 test("DC mask: observation-log notch for this tune, else the documented ±15 kHz assumption", () => {
