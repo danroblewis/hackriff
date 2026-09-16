@@ -8,13 +8,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as ax from "../src/axis";
 import { ControlError } from "../src/controls/client";
-import type { Row, UserBand } from "../src/inventory";
+import type { Presence, Row, UserBand } from "../src/inventory";
 import { tickModel } from "../src/app/centre/axis-view";
 import { mounts } from "../src/app/centre";
 import {
   DC_NOTCH_HALF_HZ, EDGE_HIT_PX, LABEL_MIN_PX, addModeActive, assumedDc, bandEdgeHit, bracketLayout, clickTarget, confirmedBands, confirmedEdgeAt,
   dcFromHeader, dcFromObservations, dcQuery, dragBandEdge, dragSelection, draftBox, effectiveBand, hoverText, isDrag, levelU, minUserBandHz,
-  placeExtent, regionName, selectionBoxes, selectionLabel, snapFracToPixel, timeScaleText, tipOnLeft, type RowClock,
+  placeExtent, presenceBoxes, regionName, selectionBoxes, selectionLabel, snapFracToPixel, timeScaleText, tipOnLeft, type RowClock,
 } from "../src/app/centre/overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor, type HistoryGrid } from "../src/app/centre/review-render";
 import { centreInitial } from "../src/app/centre/slice";
@@ -28,12 +28,18 @@ function userBand(fLo: number, fHi: number): UserBand {
   return { f_lo: fLo, f_hi: fHi, set_at: 1, actor: "fp", reason: null, reason_withheld: false };
 }
 
-function row(id: string, lo: number, hi: number, state: Row["state"] = "confirmed", last = 1, ub: UserBand | null = null): Row {
+function row(id: string, lo: number, hi: number, state: Row["state"] = "confirmed", last = 1, ub: UserBand | null = null, presence?: Presence, family: string | null = null): Row {
   return {
     id, state, f_center_hz: (lo + hi) / 2, bandwidth_hz: hi - lo, f_lo_hz: lo, f_hi_hz: hi, first_seen_s: 0, last_seen_s: last, count: 1,
-    known_status: "unknown", status: null, tags: [], family: null, identity_scheme: null, identity_class: null, withheld: false, recurrence: null,
-    user_band: ub,
+    known_status: "unknown", status: null, tags: [], family, identity_scheme: null, identity_class: null, withheld: false, recurrence: null,
+    user_band: ub, presence,
   };
+}
+
+/** A `presence.last_interval` (docs/api.md `presence`, T-284): `open` defaults to the interval
+ * still being live at the request window's own edge. */
+function iv(t0: number, t1: number, open = true): Presence {
+  return { intervals: 1, on_air_s: t1 - t0, last_interval: { t_start_s: t0, t_end_s: t1, open }, liveness: open ? "live" : "ended", ended_t_s: open ? null : t1 };
 }
 const near = (a: number, b: number, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≉ ${b}`);
 
@@ -99,6 +105,44 @@ test("confirmedBands: an override (an in-progress drag) replaces the row's band 
   assert.equal(boxes.length, 1);
   assert.equal(boxes[0].hasUserBand, true);
   near(boxes[0].leftPct, 47.5); near(boxes[0].widthPct, 5);
+});
+
+test("presenceBoxes (T-261, ADR-0017 TM-4): centre/width from f_lo/f_hi, time extent from presence.last_interval, growth is a plain redraw", () => {
+  const clock: RowClock = { specFrac: 0.35, rows: 512, timeAt: (n) => 1000 - n * 0.04, rowPeriodS: 0.04 }; // newest row (rowsBack 0) at t=1000
+  // 5 s ago .. now (still open): near the live edge (top of the waterfall), a few rows tall.
+  const a = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000, true));
+  const boxes = presenceBoxes([a], V, clock, null);
+  assert.equal(boxes.length, 1);
+  const [b] = boxes;
+  assert.equal(b.id, "a"); assert.equal(b.state, "confirmed"); assert.equal(b.open, true); assert.equal(b.chirp, false);
+  near(b.leftPct, 45); near(b.widthPct, 10); // same frequency placement as placeExtent/confirmedBands
+  const expected = ax.timeSpanY(995, 1000, 1000, 0.04, 0.35, 512)!;
+  near(b.topPct, expected[0] * 100); near(b.heightPct, (expected[1] - expected[0]) * 100);
+  // The next poll's t_end_s advanced (still open, more evidence arrived): the SAME box, redrawn,
+  // is taller — nothing here is animated, it is only a fresh call with the API's new numbers.
+  const grown = presenceBoxes([row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1004, true))], V, { ...clock, timeAt: (n) => 1004 - n * 0.04 }, null);
+  assert.ok(grown[0].heightPct > b.heightPct, "the open interval's box grew");
+});
+
+test("presenceBoxes: never fabricates a box — no interval, no presence at all, or the focused row (kept on the full-height bracket instead)", () => {
+  const clock: RowClock = { specFrac: 0.35, rows: 512, timeAt: (n) => 1000 - n * 0.04, rowPeriodS: 0.04 };
+  const noPresence = row("a", 99_900_000, 100_100_000); // pre-T-284 fixture: presence undefined
+  const noInterval: Row = { ...row("b", 99_900_000, 100_100_000), presence: { intervals: 0, on_air_s: 0, last_interval: null, liveness: "absent", ended_t_s: null } };
+  const focused = row("c", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000));
+  assert.deepEqual(presenceBoxes([noPresence, noInterval], V, clock, null), []);
+  assert.deepEqual(presenceBoxes([focused], V, clock, "c"), [], "the focused row keeps its existing full-height box, not this one");
+  // Scrolled entirely off the waterfall's own history: still no fabricated box.
+  const stale = row("d", 99_900_000, 100_100_000, "confirmed", 1, null, iv(0, 1));
+  assert.deepEqual(presenceBoxes([stale], V, clock, null), []);
+});
+
+test("presenceBoxes: a row classified as css/chirp is flagged so the box is labelled a bounding box, not a swept polyline (ADR-0017 §1.3)", () => {
+  const clock: RowClock = { specFrac: 0.35, rows: 512, timeAt: (n) => 1000 - n * 0.04, rowPeriodS: 0.04 };
+  const chirp = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000), "css");
+  const fm = row("b", 100_400_000, 100_410_000, "confirmed", 1, null, iv(995, 1000), "wfm-broadcast");
+  const boxes = presenceBoxes([chirp, fm], V, clock, null);
+  assert.equal(boxes.find((x) => x.id === "a")!.chirp, true);
+  assert.equal(boxes.find((x) => x.id === "b")!.chirp, false);
 });
 
 test("bandEdgeHit: within EDGE_HIT_PX of the drawn left/right edge, else null", () => {

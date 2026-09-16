@@ -28,7 +28,7 @@ import { toast } from "../shell-slice";
 import {
   MIN_BRACKET_FRAC, addModeActive, assumedDc, bracketLayout, clickTarget, confirmedBands, confirmedEdgeAt,
   dcFromHeader, dcFromObservations, dcQuery, dragBandEdge, dragSelection, draftBox, effectiveBand,
-  hoverText, isDrag, levelU, placeExtent, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft,
+  hoverText, isDrag, levelU, placeExtent, presenceBoxes, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft,
   type BandEdge, type DcMask, type DragPoint, type RowClock, type Span,
 } from "./overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
@@ -40,6 +40,13 @@ const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 const hms = (tS: number) => `${new Date(tS * 1000).toISOString().slice(11, 19)}Z`;
 const place = (e: HTMLElement, s: Span) => { e.style.left = `${s.leftPct}%`; e.style.width = `${s.widthPct}%`; };
 const perfOn = () => { try { return localStorage.getItem("hk-perf") === "1"; } catch { return false; } };
+/** Just the focused row (or none): T-261/ADR-0017 TM-4 restricts the full-height Confirmed
+ * box/edge-drag (T-193) to the focused row — every other row draws the time-extent presence box
+ * instead (overlays.ts `presenceBoxes`). */
+const focusedRowOnly = <T extends { id: string }>(rows: Readonly<Record<string, T>>, focusedId: string | null): T[] => {
+  const r = focusedId ? rows[focusedId] : undefined;
+  return r ? [r] : [];
+};
 
 export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const { store } = ctx;
@@ -48,6 +55,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const specLayer = h("div", { class: "c-spec" }, brackets);
   const wfLayer = h("div", { class: "c-wf" });
   const bandLayer = h("div", { class: "c-bands" }); // T-193: full-height, spans both panes
+  const presenceLayer = h("div", { class: "c-presence" }); // T-261: time-extent boxes, non-focused rows
   const draftLabel = h("span");
   const draft = h("div", { class: "c-drag", hidden: true }, draftLabel);
   const cross = h("div", { class: "c-cross", hidden: true });
@@ -61,7 +69,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const badge = h("div", { class: "c-review", role: "status", hidden: true });
   const perf = h("div", { class: "c-perf", hidden: true });
   const note = h("div", { class: "live-note", role: "status" });
-  el.replaceChildren(canvas, specLayer, wfLayer, bandLayer, draft, cross, tip, hint, addToggle, scale, badge, perf, note);
+  el.replaceChildren(canvas, specLayer, wfLayer, bandLayer, presenceLayer, draft, cross, tip, hint, addToggle, scale, badge, perf, note);
 
   let wf: Waterfall | null = null, sock: StreamSocket | null = null, attempt = 0, lastSeq = -1;
   let dc: DcMask | null = null, dcAsk = false;
@@ -130,6 +138,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       bracketEls.clear();
       wfLayer.replaceChildren();
       bandLayer.replaceChildren();
+      presenceLayer.replaceChildren();
       return;
     }
     const focusSig = s.focus.kind === "signal" ? s.focus.id : null;
@@ -150,12 +159,15 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     }
     for (const [id, e] of bracketEls) if (!seen.has(id)) { e.remove(); bracketEls.delete(id); }
 
-    // Confirmed signals: one yellow box per row, spanning both panes (T-193). A faint tick marks a
-    // measured edge the user band has moved off; the box itself is pointer-events: none (edge
-    // dragging is resolved by pixel math in the pointerdown/hover handlers below, same as
-    // click-to-focus resolves a click by frequency rather than by DOM hit).
+    // Confirmed signals: the full-height yellow box (T-193), spanning both panes, now drawn only
+    // for the *focused* row (T-261/ADR-0017 TM-4: "keep the existing bracket for the focused row so
+    // T-149's drag-to-adjust-band is unaffected"). Every other Confirmed row gets the time-extent
+    // presence box below instead. A faint tick marks a measured edge the user band has moved off;
+    // the box itself is pointer-events: none (edge dragging is resolved by pixel math in the
+    // pointerdown/hover handlers below, same as click-to-focus resolves a click by frequency rather
+    // than by DOM hit).
     const bandEls: HTMLElement[] = [];
-    for (const b of confirmedBands(Object.values(s.inventory.rows), v, focusSig, bandOverride)) {
+    for (const b of confirmedBands(focusedRowOnly(s.inventory.rows, focusSig), v, focusSig, bandOverride)) {
       const e = h("div", { class: `c-band${b.active ? " active" : ""}`, "data-id": b.id, title: `${b.label} MHz · confirmed${b.hasUserBand ? " · user band" : ""}` });
       place(e, b);
       bandEls.push(e);
@@ -163,6 +175,23 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       if (b.measuredRightPct !== null) bandEls.push(h("div", { class: "c-band-tick", style: `left:${b.measuredRightPct}%` }));
     }
     bandLayer.replaceChildren(...bandEls);
+
+    // T-261 (ADR-0017 TM-4): a time-extent box per non-focused Candidate/Confirmed row, spanning
+    // trace and waterfall. Growth needs no per-frame work — it falls out of re-reading
+    // `presence.last_interval.t_end_s` on the next inventory poll and redrawing (overlays.ts
+    // `presenceBoxes`). Skipped without a waterfall (no clock to place a time extent against yet).
+    const rc = clock();
+    presenceLayer.replaceChildren(...(rc ? presenceBoxes(Object.values(s.inventory.rows), v, rc, focusSig).map((b) => {
+      const e = h("div", {
+        class: `c-presence-box ${b.state}${b.open ? " open" : ""}${b.chirp ? " chirp" : ""}`,
+        "data-id": b.id,
+        title: `${b.label} MHz · ${b.state}${b.open ? " · on air" : ""}${b.chirp ? " · bounding box (chirp: a swept carrier drawn as its extent, not its sweep)" : ""}`,
+      });
+      e.style.top = `${b.topPct}%`;
+      e.style.height = `${b.heightPct}%`;
+      place(e, b);
+      return e;
+    }) : []));
 
     const layer: HTMLElement[] = [];
     const m = dc ? placeExtent(v, dc.loHz, dc.hiHz, 0.002) : null;
@@ -214,7 +243,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     hint.hidden = true;
     if (!drag && !pinch && !bandDrag) {
       const focus0 = store.get().focus; const focusSig = focus0.kind === "signal" ? focus0.id : null;
-      const edge = confirmedEdgeAt(Object.values(store.get().inventory.rows), v, el.clientWidth, p.x * el.clientWidth, focusSig, bandOverride);
+      const edge = confirmedEdgeAt(focusedRowOnly(store.get().inventory.rows, focusSig), v, el.clientWidth, p.x * el.clientWidth, focusSig, bandOverride);
       el.style.cursor = edge ? "ew-resize" : "";
     }
   }
@@ -273,7 +302,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     if (v0 && pts.size === 0) {
       const focus0 = store.get().focus; const focusSig = focus0.kind === "signal" ? focus0.id : null;
       const p0 = locate(e);
-      const edge = confirmedEdgeAt(Object.values(store.get().inventory.rows), v0, el.clientWidth, p0.x * el.clientWidth, focusSig, bandOverride);
+      const edge = confirmedEdgeAt(focusedRowOnly(store.get().inventory.rows, focusSig), v0, el.clientWidth, p0.x * el.clientWidth, focusSig, bandOverride);
       const row = edge ? store.get().inventory.rows[edge.id] : null;
       const cur = edge ? (bandOverride.get(edge.id) ?? (row ? effectiveBand(row) : null)) : null;
       if (edge && cur) {
