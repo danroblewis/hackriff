@@ -73,6 +73,16 @@ fn station_hits(dir: &TempDir, truth: &TruthItem) -> (usize, Vec<(f64, bool)>) {
     )
     .len();
     let all = inventory(&repo, InventoryQuery::default());
+    // T-239: every emitter, so a run that finds none at the station says where they landed.
+    eprintln!(
+        "inventory: {:?}",
+        all.iter()
+            .map(|e| (
+                (e.emitter.f_center_hz / 1e3).round() / 1e3,
+                e.emitter.bandwidth_hz.round()
+            ))
+            .collect::<Vec<_>>()
+    );
     let emitters = matching(
         truth,
         0.0,
@@ -195,6 +205,10 @@ struct Truthfulness {
     checked: u64,
     failures: Vec<String>,
     partial_or_noise_blocks: u64,
+    /// T-239 instrumentation: per tuned centre, `(centre, blocks sampled whose window holds the
+    /// station, of those the blocks actually carrying station energy over the floor)`. Measures
+    /// what the plan serves of the station rather than what it planned to serve.
+    carrying: Vec<(f64, u64, u64)>,
 }
 
 /// Wraps the mock: every 16th block whose window holds the station, the station band must stand
@@ -243,6 +257,23 @@ impl TruthfulIq {
         self.blocks += 1;
         let fs = h.sample_rate_hz();
         let off = self.station_hz - c;
+        // T-239: does this block carry the station at all? Sampled 1 in 8 (the filter below is
+        // O(len) per sample), over every block whose window could hold the station.
+        if self.blocks % 8 == 0 && off.abs() < fs / 2.0 && x.len() >= 4096 {
+            let band = band_power(x, off, fs);
+            let mut floor: Vec<f64> = (0..16)
+                .map(|k| band_power(x, -0.4 * fs + 0.8 * fs * f64::from(k) / 15.0, fs))
+                .collect();
+            floor.sort_by(f64::total_cmp);
+            let carried = u64::from(band >= 4.0 * floor[8]);
+            match seen.carrying.iter_mut().find(|(f, _, _)| *f == c) {
+                Some(e) => {
+                    e.1 += 1;
+                    e.2 += carried;
+                }
+                None => seen.carrying.push((c, 1, carried)),
+            }
+        }
         if self.blocks % 16 != 0 || off.abs() > fs / 2.0 - 200e3 || x.len() < 4096 {
             return;
         }
@@ -352,9 +383,34 @@ fn t057_scheduled_replay_keeps_every_frequency_truthful() {
         seen.checked,
         seen.partial_or_noise_blocks
     );
+    // T-239: what the plan actually served of the station, per tuned centre.
+    let (held, carried): (u64, u64) = seen
+        .carrying
+        .iter()
+        .fold((0, 0), |(h, c), e| (h + e.1, c + e.2));
+    eprintln!(
+        "station service (1-in-8 blocks): {held} sampled blocks whose window held \
+         {:.4} MHz, {carried} carrying it over the floor; per centre {:?}",
+        station_hz / 1e6,
+        seen.carrying
+    );
     assert!(
         summary.counter("/scheduler/steps") > 1,
         "the scheduler drove the device"
+    );
+    // T-239: the plan keeps the recorded band in view, and the counter now says so. Every
+    // scheduled tuning here is `Partial` — a 2.4 MHz sweep window overhangs the 2.4 MHz recorded
+    // band as soon as its centre moves, and a POI dwell rounds the rate up to 3 MHz — so charging
+    // whole blocks read 12 000 covered samples of 14.5 M (0.08 %) on runs that PASSED, a figure
+    // that could not tell this plan from one that never looked at the recording. By noise-filled
+    // fraction it is ≈ 47 %. The ceiling is geometric: the recording's own 1.75 MHz baseband
+    // filter is 73 % of a 2.4 MHz window and 58 % of a 3 MHz dwell. A quarter is therefore a floor
+    // with room to spare, and a plan that wandered off the recording would fall through it.
+    let served = stats.source.samples;
+    let covered = served.saturating_sub(stats.uncovered_samples);
+    assert!(
+        covered * 4 >= served,
+        "the scheduled plan served only {covered} recorded samples of {served}"
     );
     assert!(
         seen.centres.len() > 1 && stats.control_changes > 0,

@@ -78,7 +78,7 @@ pub fn classify_box<T: IqSample>(
     let mut extractor = SnippetExtractor::new(Default::default());
     let snippet = extractor.extract(info, iq, request).ok()?;
     let params = ParamEstimator::new(Default::default()).estimate(&snippet, &Hints::default());
-    let symbols = c14.from_snippet(&snippet, &params);
+    let window = c14.window_from_snippet(&snippet, &params);
     let normalised =
         hk_estimate::normalise::normalise(&snippet, &params, &Default::default()).ok()?;
     let mut req = ClassifyRequest::new(&normalised.samples, normalised.sample_rate_hz, t);
@@ -87,7 +87,11 @@ pub fn classify_box<T: IqSample>(
         .snr_extent_db
         .value()
         .or_else(|| params.snr_box_db.value());
-    req.symbols = symbols.as_ref();
+    req.symbols = window.as_ref().map(|w| &w.params);
+    // The T-200 verifier tests its likelihoods on the same window C14 synced on, so "post-sync"
+    // means the samples the clock was actually locked to (`hk_classify::verify`).
+    req.symbol_samples = window.as_ref().map(|w| w.samples.as_slice());
+    req.symbol_sample_rate_hz = window.as_ref().map(|w| w.sample_rate_hz);
     req.suspect.clipped = params.flags.clipped;
     req.suspect.spur = params.flags.overload;
     Some(classifier.classify(&req))

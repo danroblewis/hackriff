@@ -125,7 +125,8 @@ fn classify_box(
     // C14 at its own geometry, from the same snippet (T-238): six of `features@1`'s most
     // discriminating dimensions abstain without it, which is why both these fixtures used to
     // classify with `no_symbol_estimate`.
-    let symbols = hk_classify::SymbolEstimator::new().from_snippet(&snip, &params);
+    let window = hk_classify::SymbolEstimator::new().window_from_snippet(&snip, &params);
+    let symbols = window.as_ref().map(|w| w.params.clone());
     eprintln!(
         "[T-238]   C14: {}",
         match &symbols {
@@ -159,6 +160,9 @@ fn classify_box(
         .or_else(|| params.snr_box_db.value());
     req.suspect.clipped = params.flags.clipped;
     req.symbols = symbols.as_ref();
+    // T-200: the post-sync verifier, on the window C14 synced on.
+    req.symbol_samples = window.as_ref().map(|w| w.samples.as_slice());
+    req.symbol_sample_rate_hz = window.as_ref().map(|w| w.sample_rate_hz);
 
     // T-230 sim-to-real diagnosis, reported not asserted: which feature dimension puts a real
     // capture outside each synthetic class. `worst` names the dimension with the largest |z|, so a

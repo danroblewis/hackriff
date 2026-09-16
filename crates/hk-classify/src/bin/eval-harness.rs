@@ -51,6 +51,8 @@ fn main() {
             req.obw_hz = s.obw_hz;
             req.snr_db = s.snr_db;
             req.symbols = symbols.as_ref();
+            req.symbol_samples = Some(s.symbol_samples);
+            req.symbol_sample_rate_hz = Some(s.symbol_sample_rate_hz);
             classifier.classify(&req)
         })
         .expect("seed separation held");

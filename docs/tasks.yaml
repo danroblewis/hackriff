@@ -2615,7 +2615,8 @@ tasks:
   - id: T-162
     milestone: MUI
     title: "MUI API gap 6: sync_search diagnostic port for the Decode sync-search plot"
-    status: in-progress
+    status: done
+    commit: d4d39a7
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2648,7 +2649,7 @@ tasks:
   - id: T-164
     milestone: MUI
     title: "MUI API gap 7b: /api/recipes/match (suggest recipes for a signal)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -2664,7 +2665,7 @@ tasks:
   - id: T-165
     milestone: MUI
     title: "MUI API gap 8: open/iq stream opener for Stream out"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3214,7 +3215,8 @@ tasks:
   - id: T-200
     milestone: M3
     title: "C15 likelihood verifier (ALRT/GLRT) within the post-sync candidate set"
-    status: in-progress
+    status: done
+    commit: ace42e7
     priority: normal
     deps: [T-199]
     parallel_group: M3A
@@ -3277,7 +3279,7 @@ tasks:
   - id: T-204
     milestone: M3
     title: "C15 per-family DL stage with open-set (energy OOD or OpenMax), trained on synthetic impairments, inference via T-203 in shadow mode first"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-199, T-203, T-213]
     parallel_group: M3C
@@ -3858,7 +3860,8 @@ tasks:
   - id: T-239
     milestone: M2-hardening
     title: "Scheduler leaves the recording almost uncovered in t057: 12,000 of 14,519,977 samples, so 'no emitter at the station' fails 1-in-14 on the unmodified baseline"
-    status: in-progress
+    status: done
+    commit: 07b308e
     priority: high
     deps: []
     parallel_group: CORE
@@ -3896,6 +3899,36 @@ tasks:
     found_by: "coordinator 2026-09-15: T-196 fixed the local-floor truncation that let a busy channel become its own noise reference and read idle, but it corrects NEW measurements only - it says nothing about rows already written"
     acceptance: "establish first whether stored rows are actually affected and by how much - recompute a sample of historical intervals with the fixed floor and report the distribution of change, rather than assuming either way; then choose and implement one of: (a) leave them, if the measured drift is negligible, with the reasoning recorded; (b) mark rows written before the fix so consumers can exclude or down-weight them; or (c) recompute from the observation log where it is retained. Whichever is chosen, a baseline learned from pre-fix rows must not silently claim a busy channel was quiet - state explicitly what the attention layer, novelty alarms and survey reports do with pre-fix data. No acceptance threshold changes"
     area: crates/hk-context (occupancy, baselines), crates/hk-store (radiometry/history), docs/adr/0012 if the contract needs a note
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-242
+    milestone: M3
+    title: "Wire signature matching into the pipeline: nothing calls match_emitter(), so the route serves nothing and the M3 gate would pass vacuously on that dimension"
+    status: todo
+    priority: high
+    deps: [T-201, T-202]
+    parallel_group: M3B
+    use_cases: [AWARE-053]
+    found_by: "T-201 report (2026-09-15): it landed matching and said plainly that there is no hk-pipeline call site yet, so matches exist only if something writes them; recorded on T-206 as a field, promoted to its own ticket so it can be scheduled rather than missed"
+    acceptance: "a pipeline call site invokes signature matching for emissions as they are observed (T-201 reports `match_emitter()` makes this a one-liner), so `GET` of an emitter's matches returns real rows on a normal run; matching runs off the capture and audio threads with its cost stated and bounded; a blind e2e test through the mock SDR shows a known emission accumulating a match and an unknown one not being forced into a match; the T-201 invariants still hold - a match never sets identity, family or lifecycle, and too few fields still yields a ranked partial; no acceptance threshold changes"
+    area: crates/hk-pipeline (call site), crates/hk-context, crates/hk-model
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-243
+    milestone: M3
+    title: "The feature tree gives bpsk a prior of exactly 0.00, so BPSK can never be named and bpsk/qpsk separation is structurally impossible downstream"
+    status: todo
+    priority: high
+    deps: [T-200]
+    parallel_group: M3A
+    use_cases: [SIGNAL-062]
+    found_by: "T-200 (2026-09-15): its verifier moved gfsk 0.000 -> 0.333/0.417 but left bpsk/qpsk at 0.000 -> 0.000, and traced the cause to the tree's cumulant class call assigning bpsk exactly zero prior - so no downstream stage can recover it"
+    acceptance: "the cumulant class call in tree.rs gives bpsk a non-zero prior where the evidence warrants it, so bpsk is nameable at all; measured bpsk/qpsk class top-1 improves from 0.000 at the SNRs T-200 tested (15/20/25 dB), reported per class and per SNR from T-213's harness; every floor holds unchanged (top-1 >= 0.90, top-2 >= 0.95, wrong-label <= 0.003, unknown recall >= 0.80, false-known <= 0.10); NO confident wrong answers - confidently-wrong (p >= 0.9) must stay at zero for these pairs, as T-200 measured; if the cumulant features genuinely cannot separate bpsk from qpsk at these SNRs, say so with numbers and recommend where it belongs instead (the DL stage, or accepting the abstention)"
+    area: crates/hk-classify/src/tree.rs (cumulant class call), densities
     needs: none
     model: opus
     effort: medium

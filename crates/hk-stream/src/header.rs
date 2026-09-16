@@ -35,6 +35,12 @@ pub enum StreamKind {
     Audio,
     /// Power spectra (PSD/waterfall rows). Metadata: energy vs frequency, not message content.
     Spectrum,
+    /// Sync-word match score per candidate bit position (`view=sync_search`, §14.4, T-162).
+    /// **Content-bearing, unlike `spectrum`:** the caller supplies the word to correlate
+    /// against, so a high score is an oracle over the withheld bits (choose a candidate word,
+    /// read back whether — and how closely — it matches). Gated exactly like the `bits` it's
+    /// computed from.
+    SyncSearch,
 }
 
 impl StreamKind {
@@ -46,6 +52,7 @@ impl StreamKind {
         StreamKind::Iq,
         StreamKind::Audio,
         StreamKind::Spectrum,
+        StreamKind::SyncSearch,
     ];
 
     /// Binary records (everything but `messages`).
@@ -54,12 +61,19 @@ impl StreamKind {
     }
 
     /// Whether a binary record's payload is signal content, gated by `content_class`.
-    /// `spectrum` is not: a power spectrum says that energy exists at a frequency (metadata),
-    /// and the survey waterfall must work for every class. `messages` are gated per field.
+    /// `spectrum` is not: a power spectrum says that energy exists at a frequency, independent
+    /// of what a viewer asks for, so it must work for every class. `sync-search` **is** content,
+    /// unlike `spectrum`: the caller picks the word it correlates against, so it can be used as
+    /// an oracle over withheld bits (see [`StreamKind::SyncSearch`]) and must be gated the same
+    /// as the `bits` it reads. `messages` are gated per field.
     pub const fn payload_is_content(self) -> bool {
         matches!(
             self,
-            StreamKind::Bits | StreamKind::Symbols | StreamKind::Iq | StreamKind::Audio
+            StreamKind::Bits
+                | StreamKind::Symbols
+                | StreamKind::Iq
+                | StreamKind::Audio
+                | StreamKind::SyncSearch
         )
     }
 
@@ -72,6 +86,7 @@ impl StreamKind {
             StreamKind::Iq => "iq",
             StreamKind::Audio => "audio",
             StreamKind::Spectrum => "spectrum",
+            StreamKind::SyncSearch => "sync-search",
         }
     }
 }
@@ -354,6 +369,18 @@ mod tests {
                 "{replacement:?}"
             );
         }
+    }
+
+    /// T-162: unlike `spectrum` (a fixed measurement, safe as metadata for every class),
+    /// `sync-search` lets the caller choose the word it correlates against — an oracle over
+    /// withheld bits — so it must be gated exactly like `bits`.
+    #[test]
+    fn sync_search_payload_is_content_unlike_spectrum() {
+        assert!(StreamKind::SyncSearch.payload_is_content());
+        assert!(StreamKind::Bits.payload_is_content());
+        assert!(!StreamKind::Spectrum.payload_is_content());
+        assert_eq!(StreamKind::SyncSearch.as_str(), "sync-search");
+        assert!(StreamKind::ALL.contains(&StreamKind::SyncSearch));
     }
 
     #[test]

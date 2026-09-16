@@ -51,6 +51,12 @@ pub struct ClassifyRequest<'a> {
     pub snr_db: Option<f64>,
     /// C14 symbol estimate, when it ran.
     pub symbols: Option<&'a SymbolParameters>,
+    /// The same emission at C14's geometry ([`crate::symbols::SYMBOL_SAMPLES_PER_OBW`]), for the
+    /// post-sync verifier (T-200). `None` — or a missing clock lock — and the verifier does not
+    /// run, leaving the feature tree's within-family ranking exactly as it was.
+    pub symbol_samples: Option<&'a [Complex32]>,
+    /// Sample rate of [`ClassifyRequest::symbol_samples`], Hz.
+    pub symbol_sample_rate_hz: Option<f64>,
     /// When the classification was produced.
     pub t: Timestamp,
     /// The observation it ran on (track, detection, demodulation, decode).
@@ -72,6 +78,8 @@ impl<'a> ClassifyRequest<'a> {
             obw_hz: None,
             snr_db: None,
             symbols: None,
+            symbol_samples: None,
+            symbol_sample_rate_hz: None,
             t,
             input: None,
             suspect: SuspectFlags::default(),
@@ -302,7 +310,7 @@ impl Classifier {
             tax.coarse_of(&family).unwrap_or(Coarse::Unknown)
         };
 
-        Classification {
+        let mut out = Classification {
             schema: hk_model::classify::CLASSIFICATION_SCHEMA,
             t: request.t,
             taxonomy: TaxonomyRef::current(),
@@ -331,7 +339,25 @@ impl Classifier {
             },
             flags,
             reasons,
+        };
+
+        // 6. The post-sync verifier (T-200), the cascade's next stage. It re-ranks the within-family
+        // candidates above and may do nothing else: it never changes the family, never adds a class
+        // the tree did not offer, and never turns an abstention into a claim (see [`crate::verify`]).
+        // Without the symbol-geometry view, or without a C14 clock lock, it does not run at all.
+        if let (Some(samples), Some(rate)) = (request.symbol_samples, request.symbol_sample_rate_hz)
+        {
+            crate::verify::verify(
+                &mut out,
+                &crate::verify::VerifyInput {
+                    samples,
+                    sample_rate_hz: rate,
+                    symbols: request.symbols,
+                    snr_db: request.snr_db,
+                },
+            );
         }
+        out
     }
 }
 

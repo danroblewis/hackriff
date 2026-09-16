@@ -15,7 +15,9 @@
 //! - **Binary records:** if the kind's payload is content ([`StreamKind::payload_is_content`]) and
 //!   the header class does not permit content, the payload is withheld: a header-only record
 //!   with [`RecordFlags::GATED`](super::RecordFlags::GATED) is emitted and the publisher returns
-//!   an error so the misrouted producer notices.
+//!   an error so the misrouted producer notices. `sync-search` (T-162) is content for this
+//!   purpose even though it carries no raw samples: the caller picks the word it scores against,
+//!   so an ungated score would let a caller probe withheld bits one guess at a time.
 //! - **Message metadata:** when a message's effective class forbids content, everything outside
 //!   `content` (metadata, frame model/label, identity, decoder) is reduced to the publisher's
 //!   [`MetadataPolicy`](super::MetadataPolicy) ([`super::policy`]). A messages publisher whose

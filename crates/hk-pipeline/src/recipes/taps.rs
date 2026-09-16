@@ -32,6 +32,7 @@ use hk_stream::{
 use serde_json::{Map, Value};
 
 use crate::recipes::tap_spectrum::{self, SpectrumTap};
+use crate::recipes::tap_sync_search::SyncSearchTap;
 
 /// Most frame bytes a frame record serialises (bigger frames are cut; `bit_len` stays true).
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -352,6 +353,17 @@ pub enum TapPublisher {
         /// Encoded row scratch (pre-sized to `fft_size` `f32`s).
         scratch: Vec<u8>,
     },
+    /// A sync-word match-score profile of a `bits` port (`view=sync_search`, §14.4, T-162).
+    SyncSearch {
+        /// The publisher.
+        publisher: Publisher,
+        /// The sync-search engine (runs a `SyncCorrelator` over the bits, buffers one row of
+        /// scores). Boxed for the same reason as the spectrum engine: its row is bigger than the
+        /// other variants' scratch.
+        engine: Box<SyncSearchTap>,
+        /// Encoded row scratch (pre-sized to the row length in `f32`s).
+        scratch: Vec<u8>,
+    },
 }
 
 impl TapPublisher {
@@ -386,20 +398,42 @@ impl TapPublisher {
         })
     }
 
+    /// For a `view=sync_search` `header` (built by
+    /// [`tap_sync_search::sync_search_header`](crate::recipes::tap_sync_search::sync_search_header))
+    /// searching `word`/`bits` over a bits port at `rate_hz`. `None` if `bits`/`word` are invalid
+    /// (see [`SyncSearchTap::new`]).
+    pub fn new_sync_search(
+        header: StreamHeader,
+        config: PublisherConfig,
+        rate_hz: f64,
+        word: u64,
+        bits: u32,
+    ) -> Result<Option<Self>, StreamError> {
+        let Some(engine) = SyncSearchTap::new(rate_hz, word, bits) else {
+            return Ok(None);
+        };
+        let scratch = Vec::with_capacity(4 * engine.row_len());
+        Ok(Some(TapPublisher::SyncSearch {
+            publisher: Publisher::new(header, config)?,
+            engine: Box::new(engine),
+            scratch,
+        }))
+    }
+
     fn handle(&self) -> PublisherHandle {
         match self {
-            TapPublisher::Binary { publisher, .. } | TapPublisher::Spectrum { publisher, .. } => {
-                publisher.handle()
-            }
+            TapPublisher::Binary { publisher, .. }
+            | TapPublisher::Spectrum { publisher, .. }
+            | TapPublisher::SyncSearch { publisher, .. } => publisher.handle(),
             TapPublisher::Frames(s) => s.handle(),
         }
     }
 
     fn header(&self) -> &StreamHeader {
         match self {
-            TapPublisher::Binary { publisher, .. } | TapPublisher::Spectrum { publisher, .. } => {
-                publisher.header()
-            }
+            TapPublisher::Binary { publisher, .. }
+            | TapPublisher::Spectrum { publisher, .. }
+            | TapPublisher::SyncSearch { publisher, .. } => publisher.header(),
             TapPublisher::Frames(s) => s.header(),
         }
     }
@@ -534,6 +568,48 @@ impl StageTap {
                     PortVec::Real(x) => engine.push_real(x, &mut emit),
                     PortVec::Iq(x) => engine.push_iq(x, &mut emit),
                     _ => {}
+                }
+                0
+            }
+            TapPublisher::SyncSearch {
+                publisher,
+                engine,
+                scratch,
+            } => {
+                if self.handle.open_consumers() == 0 {
+                    self.gap = true;
+                    // No consumer: don't run the correlator or buffer a row nobody will read.
+                    engine.reset();
+                    return 0;
+                }
+                if out.data.is_empty() {
+                    self.gap |= restart;
+                    return 0;
+                }
+                if self.gap || restart {
+                    engine.reset();
+                }
+                self.gap = false;
+                let t = t_of(out.meta.source_index);
+                let sample_index = out.meta.index;
+                let mut emit = |row: &[f32], disc: bool| {
+                    tap_spectrum::encode_row(row, scratch);
+                    let flags = if disc {
+                        RecordFlags::DISCONTINUITY
+                    } else {
+                        RecordFlags::empty()
+                    };
+                    // A gated (content-forbidding class) record is published header-only by the
+                    // publisher itself; nothing to do here.
+                    let _ = publisher.publish_binary(BinaryRecord {
+                        t,
+                        sample_index,
+                        flags,
+                        payload: scratch,
+                    });
+                };
+                if let PortVec::Bits(x) = &out.data {
+                    engine.push(x, &mut emit);
                 }
                 0
             }

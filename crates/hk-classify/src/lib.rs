@@ -49,6 +49,7 @@ pub mod symbols;
 pub mod synth;
 pub mod thresholds;
 pub mod tree;
+pub mod verify;
 
 pub use hk_model::classify::*;
 
@@ -64,8 +65,9 @@ pub use features::{FeatureInput, Features, features};
 // `FamilyPriorSet`, `FamilyPriors`, `NoPriors`, `StaticPriors` and the `fuse` function come
 // through the `hk_model::classify` re-export above (T-218).
 pub use harness::{GridSize, Harness, OtaTruth, Report, RunMeta, SeedGuard, Snippet, Split};
-pub use symbols::SymbolEstimator;
+pub use symbols::{SymbolEstimator, SymbolWindow};
 pub use thresholds::{FEATURES_VERSION, RULES_VERSION, THRESHOLDS_VERSION, thresholds_of};
+pub use verify::{SkipReason, VERIFIER_VERSION, VerifyInput, VerifyOutcome, verify};
 
 #[cfg(test)]
 mod tests {
