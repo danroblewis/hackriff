@@ -22,8 +22,8 @@
 
 use hk_model::attention::baseline::SiteKey;
 use hk_model::{
-    CalibrationStateId, PowerUnit, SpectrumFrame as ModelSpectrumFrame, SpurMaskId, SweepFrame,
-    Timestamp,
+    BiasTee, CalibrationStateId, PowerUnit, SpectrumFrame as ModelSpectrumFrame, SpurMaskId,
+    SweepFrame, Timestamp,
 };
 
 use super::stats::undb;
@@ -173,6 +173,13 @@ pub struct FrameInput<'a> {
     pub dropped_samples: u64,
     /// Calibration in force.
     pub calibration: Option<CalibrationStateId>,
+    /// Antenna-port bias-tee state under this frame (T-332). Part of the receive chain, not of the
+    /// air: the DC powers an external LNA, so frames taken either side of a switch measure
+    /// different front ends. Three-valued (T-325) — [`BiasTee::Unknown`] means the source could not
+    /// say, **never** that it was off, and is the default so callers that know nothing claim
+    /// nothing. Unlike the run's receive chain this is per-**measurement**: a bias tee is switched
+    /// during a run.
+    pub bias_tee: BiasTee,
     /// Gain table, filter and spur-mask versions in force (T-116).
     pub front_end: FrontEnd,
     /// Noise statistics of the values, for the bias-corrected floor (T-116).
@@ -221,6 +228,7 @@ impl<'a> FrameInput<'a> {
             suspect: false,
             dropped_samples: 0,
             calibration: None,
+            bias_tee: BiasTee::Unknown,
             front_end: FrontEnd::default(),
             noise_shape: NoiseShape::Unknown,
             source: 0,
@@ -239,7 +247,7 @@ impl<'a> FrameInput<'a> {
 
     /// Adapts an hk-dsp STFT frame without copying: linear FS²/Hz PSD, max-hold as the peak,
     /// time = first sample, duration = `sample_count / sample_rate`, gain / overload / calibration
-    /// from its provenance record.
+    /// / bias tee from its provenance record.
     pub fn from_dsp(frame: &'a hk_dsp::SpectrumFrame) -> Self {
         let s = &frame.spectrum;
         let p = frame.provenance.get();
@@ -265,6 +273,7 @@ impl<'a> FrameInput<'a> {
             suspect: p.overload,
             dropped_samples: frame.dropped_samples,
             calibration: p.calibration_state_ref,
+            bias_tee: p.bias_tee,
             front_end: FrontEnd {
                 gain_table: None,
                 filter: p.antenna_port.as_deref().map(PortTag::new),

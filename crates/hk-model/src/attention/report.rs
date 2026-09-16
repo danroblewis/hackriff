@@ -156,6 +156,13 @@ pub enum ProvenanceStepKind {
     SpurMask,
     /// Antenna/filter port change.
     AntennaPort,
+    /// Antenna-port bias-tee state change (T-332, [`crate::BiasTee`]). The DC powers an external
+    /// LNA, so the floor moves the instant it arrives: a switch is a **self-inflicted** step the
+    /// operator made, and listing it lets the explain-the-device-first path name the cause instead
+    /// of leaving an unexplained floor rise. A transition **to or from** [`crate::BiasTee::Unknown`]
+    /// is still a step — the two sides are not comparable — but it is a change of *knowledge*, not
+    /// necessarily of the DC, so it must never explain a change away on its own.
+    BiasTee,
     /// Overload began or ended.
     Overload,
     /// Source reopened/restarted.

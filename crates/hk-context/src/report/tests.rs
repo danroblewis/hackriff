@@ -257,6 +257,57 @@ fn report_lists_provenance_gain_step() {
     assert!(steps.is_empty());
 }
 
+/// T-332: a bias-tee switch is listed beside gain, calibration, spur mask and antenna port, so the
+/// explain-the-device-first path has something to name. The **control** is a summary whose
+/// bias-tee state never changes: no such step, so the step cannot pass by being emitted always.
+#[test]
+fn report_lists_bias_tee_step_only_when_the_tee_actually_moved() {
+    use hk_model::BiasTee;
+
+    let summary = |from: BiasTee, to: BiasTee| ProvenanceSummary {
+        steps: vec![TileStep {
+            t: t(1800.0),
+            changed: TileStep::BIAS_TEE,
+            from: FrontEndState {
+                bias_tee: from,
+                ..FrontEndState::default()
+            },
+            to: FrontEndState {
+                bias_tee: to,
+                ..FrontEndState::default()
+            },
+        }],
+        ..ProvenanceSummary::default()
+    };
+    let span = TimeRange::new(t(0.0), t(3600.0));
+
+    let (steps, _) = steps_from_summary(&summary(BiasTee::Off, BiasTee::On), span);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(
+        (steps[0].kind, steps[0].t),
+        (ProvenanceStepKind::BiasTee, t(1800.0))
+    );
+    assert_eq!(steps[0].detail, "bias tee off→on");
+    // The wire form is the kebab-case name the API documents, beside `antenna-port`.
+    let json = serde_json::to_value(&steps[0]).unwrap();
+    assert_eq!(json["kind"], "bias-tee");
+
+    // Unknown is a state of its own, so learning it is still a step (what it *means* is decided in
+    // the alarm path: a change of knowledge never explains a level change away).
+    let (steps, _) = steps_from_summary(&summary(BiasTee::Unknown, BiasTee::On), span);
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert_eq!(steps[0].detail, "bias tee unknown→on");
+
+    // Control: no change, no step — not for a run that held the tee, and not for a pre-T-332 tile
+    // whose step record has no bias-tee byte to have changed.
+    for held in [BiasTee::Off, BiasTee::On, BiasTee::Unknown] {
+        let (steps, _) = steps_from_summary(&summary(held, held), span);
+        assert!(steps.is_empty(), "{held:?}: {steps:?}");
+    }
+    let (steps, _) = steps_from_summary(&ProvenanceSummary::default(), span);
+    assert!(steps.is_empty(), "{steps:?}");
+}
+
 #[test]
 fn report_marks_baseline_unavailable() {
     let r = build(

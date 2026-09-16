@@ -190,19 +190,23 @@ fn mature_pool_fcos(sub: &SubjectBaseline, slot: HourOfWeek) -> Vec<f64> {
 
 /// The bias-tee state a fold from an occupancy row is keyed under (T-333).
 ///
-/// [`hk_model::BiasTee::Unknown`], and stated once here rather than spelt at each fold, because
-/// **nothing carries the state this far yet**: the occupancy close reads the history pyramid, whose
-/// `FrameInput` and per-tile `ProvenanceSummary` record the gain state but not the bias tee, so an
-/// `OccupancyStat` cannot say what the DC was doing. Unknown is the honest value — and it is the
-/// value every baseline already on disk carries, so folding under it changes nothing today and
+/// [`hk_model::BiasTee::Unknown`], and stated once here rather than spelt at each fold, because the
+/// **occupancy row** still cannot say what the DC was doing. Unknown is the honest value — and it is
+/// the value every baseline already on disk carries, so folding under it changes nothing today and
 /// orphans nothing.
 ///
 /// This is not a service-lifetime constant like the receive chain: a bias tee is switched **during**
-/// a run, so the state belongs to the measurement, not to the service. **T-332** is what puts it
-/// there: it makes a bias-tee switch a device provenance step, which is precisely the plumbing
-/// (`FrontEndState` → `ProvenanceSummary` → the occupancy row) this constant is waiting for. Until
-/// then the key, its file format and its migration are in place and the cohorts separate the moment
-/// a caller supplies `Off` or `On` — as `Baselines::observe` already does for any caller.
+/// a run, so the state belongs to the measurement, not to the service.
+///
+/// **T-332 laid the carrier**: `FrameInput::bias_tee` → `FrontEndState::bias_tee` →
+/// `ProvenanceSummary::bias_tee` / `bias_tee_mixed` (tile format 5), and a switch is now a
+/// `ProvenanceStep::BIAS_TEE` the report lists as a `bias-tee` step. The remaining hop is
+/// **T-359**: `hk_context::occupancy::engine::VisitSample` reads its `gain_key` from
+/// `grid.provenance.dominant_gain_key()` at the same point it can read `grid.provenance.bias_tee`,
+/// and carrying that into `SubjectContext` / `OccupancyStat` is what replaces this constant with
+/// the row's own value. Until then the key, its file format and its migration are in place and the
+/// cohorts separate the moment a caller supplies `Off` or `On` — as `Baselines::observe` already
+/// does for any caller.
 const FOLD_BIAS_TEE: hk_model::BiasTee = hk_model::BiasTee::Unknown;
 
 /// The time a row's visits represent, s (as [`from_occupancy_stat`] weighs a fold).
