@@ -5049,6 +5049,33 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+  - id: T-289
+    milestone: M2-hardening
+    title: 'Analysis pass over the 2026-09-15 FM-band capture to add truth annotations,
+      so it can serve as a blind acceptance fixture'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    use_cases:
+    - SIGNAL-062
+    found_by: 'coordinator 2026-09-16 while formalizing the capture as SigMF: the meta is
+      now valid but its annotations array is EMPTY BY DESIGN - nobody has analysed the
+      capture, and asserting emissions from the README expectation would fabricate
+      measurements into a blind fixture'
+    acceptance: 'run an analysis pass over fixtures/hackrf/capture-2026-09-15-fm-band and
+      add SigMF annotations for what is MEASURED there, with the measurement recorded -
+      not what the README expects. The README anticipates FM stations and a 99.99 MHz
+      carrier; the 100.3 MHz intermittent burst the user reported was silent at capture
+      time, so it must NOT appear. Truth stays hidden from the system under test: the
+      annotations serve the test assertions, never a lookup the pipeline reads. Once
+      annotated, wire it into the blind acceptance suite for the 88-108 MHz region and
+      say which use cases it serves'
+    area: fixtures/hackrf/capture-2026-09-15-fm-band, tests/e2e, py/fixtures
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

@@ -1,0 +1,46 @@
+{
+  "global": {
+    "core:datatype": "ci8",
+    "core:sample_rate": 2400000.0,
+    "core:version": "1.2.0",
+    "core:hw": "HackRF One serial 0000000000000000d2b861dc263bc293, firmware 2026.01.3 (USB API 1.10), board rev 0, libhackrf 0.9.2 (2026.01.3), antenna unknown",
+    "core:recorder": "hackriff hk-pipeline:outputs (ring reader) 0.1.0; converted from the hackriff-output-sidecar v1.0 by the coordinator",
+    "core:author": "hackriff coordinator (receive-only)",
+    "core:description": "hackriff fixture capture-2026-09-15-fm-band: 45.0 s of the FM broadcast band as sampled at this site (HackRF One, 100.800 MHz centre, 2.4 Msps, LNA 32 / VGA 30 / amp on, antenna unknown (as attached by user; not changed)). Requested span 99.600-102.000 MHz, single tune, no retune. Receive-only; truth is PHY metadata only. ANNOTATIONS ARE EMPTY BY DESIGN: no analysis pass has been run over this capture, so no emission is asserted here. The capture README describes expected content (FM stations, a 99.99 MHz carrier) but that is an expectation, not a measurement, and the 100.3 MHz intermittent burst the user reported was silent at capture time. Truth annotations require an analysis pass (see docs/tasks.yaml).",
+    "core:license": "project-owned capture",
+    "hackriff:provenance": {
+      "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+      "tune": {
+        "center_hz": 100800000.0,
+        "sample_rate_hz": 2400000.0,
+        "lna_db": 32.0,
+        "vga_db": 30.0,
+        "amp_on": true,
+        "bandwidth_hz": 1750000.0
+      },
+      "timestamp_method": "host-arrival",
+      "timestamp_error_budget_ns": 500000000,
+      "records": 1648,
+      "dropped_records": 0,
+      "lost_samples": 0,
+      "source_sidecar": "iq.hackriff-sidecar.json",
+      "ended": "max_s reached"
+    },
+    "hackriff:antenna": "unknown (as attached by user; not changed)",
+    "core:extensions": [
+      {
+        "name": "hackriff",
+        "version": "0.1.0",
+        "optional": true
+      }
+    ]
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 100800000.0,
+      "core:datetime": "2026-09-15T23:41:01.975250667Z"
+    }
+  ],
+  "annotations": []
+}
