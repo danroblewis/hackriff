@@ -5036,7 +5036,7 @@ tasks:
     title: 'Wire control-channel hunting as a running pipeline chain: T-267 proved the
       capability blind through the device but there is no in-process hook for
       arbitrary-channel IQ, so nothing calls it during a normal run'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-267
