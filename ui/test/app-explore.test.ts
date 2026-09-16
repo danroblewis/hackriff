@@ -7,18 +7,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import type { AppContext } from "../src/app/context";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip, selectionSummary } from "../src/app/explore/focus";
 import {
-  clearUserBand, clusterChip, nextInventorySort, recurrenceDots, rowChips, rowSeenText, setUserBand,
-  sortInventoryRows, type Classification, type Row,
+  candidateWindow, clearUserBand, clusterChip, DEFAULT_ROW_RATE_HZ, loadInventoryRows,
+  nextInventorySort, recurrenceDots, REVIEW_WINDOW_S, rowChips, rowSeenText, setUserBand,
+  sortInventoryRows, viewFilters, waterfallSpanS, type Classification, type Row,
 } from "../src/app/explore/inventory";
+import { WATERFALL_ROWS } from "../src/waterfall";
 import { foundInside, listenAllTargets, recordSelectionClip, type Selection } from "../src/app/explore/selections";
 import {
   focusSelection, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setInventoryError,
   setInventoryRows, setInventorySort, setInventoryTab, setSelections,
 } from "../src/app/explore/slice";
 import { createStore } from "../src/app/store";
-import { initialState } from "../src/app/state";
+import { initialState, reviewAt } from "../src/app/state";
 
 // ---- fixtures ----
 
@@ -303,6 +306,100 @@ test("deleting a confirmed row with a user-band override (T-193) drops its box; 
 
   s.set(restoreInventoryRowLocal(row));
   assert.deepEqual(s.get().inventory.rows.e1.user_band, ub, "the band override comes back, not the measured extent");
+});
+
+// ---- the viewed window: Candidates scoped, Confirmed always listed (T-260, ADR-0017 §2.1/§2.2) ----
+
+/** A ctx whose client records every inventory path and answers per `state=` tab. */
+function windowCtx(pages: Partial<Record<"confirmed" | "candidate", Row[]>> = {}) {
+  const paths: string[] = [];
+  const store = createStore(initialState());
+  const client = {
+    get: async <T>(path: string): Promise<T> => {
+      paths.push(path);
+      const tab = new URLSearchParams(path.slice(path.indexOf("?") + 1)).get("state") as "confirmed" | "candidate";
+      return { entries: pages[tab] ?? [], next_cursor: null } as T;
+    },
+  } as unknown as AppContext["client"];
+  const ctx: AppContext = { store, client, token: "t" };
+  const paramsFor = (tab: string) => {
+    const p = paths.find((x) => x.includes(`state=${tab}`));
+    assert.ok(p, `no ${tab} query was sent`);
+    return new URLSearchParams(p.slice(p.indexOf("?") + 1));
+  };
+  return { ctx, store, paths, paramsFor };
+}
+
+test("waterfallSpanS: the ring height over the row rate, header rate first, then the device, then the default", () => {
+  const base = { live: { view: null, rowRateHz: null }, device: { rowsPerS: null }, time: { live: true } };
+  assert.equal(waterfallSpanS(base), WATERFALL_ROWS / DEFAULT_ROW_RATE_HZ, "≈ 20.5 s at 25 rows/s");
+  assert.equal(waterfallSpanS({ ...base, live: { view: null, rowRateHz: 64 } }), WATERFALL_ROWS / 64);
+  assert.equal(waterfallSpanS({ ...base, device: { rowsPerS: 10 } }), WATERFALL_ROWS / 10, "the device rate when no header has arrived");
+  assert.equal(
+    waterfallSpanS({ ...base, live: { view: null, rowRateHz: 64 }, device: { rowsPerS: 10 } }),
+    WATERFALL_ROWS / 64,
+    "the stream header wins over the device poll",
+  );
+});
+
+test("candidateWindow: the waterfall's span ending at the live edge; the review window when scrubbed back", () => {
+  const live = { live: { view: null, rowRateHz: 25 }, device: { rowsPerS: null }, time: { live: true } };
+  assert.deepEqual(candidateWindow(live, 1000), { t0: 1000 - WATERFALL_ROWS / 25, t1: 1000 });
+  const reviewing = { ...live, time: { live: false, tS: 500 } };
+  assert.deepEqual(candidateWindow(reviewing, 1000), { t0: 500 - REVIEW_WINDOW_S, t1: 500 }, "the reviewed instant, not now");
+});
+
+test("viewFilters carries the frequency span and deliberately no time (the window belongs to the Candidate query alone)", () => {
+  const f = viewFilters({ live: { view: { loHz: 99.6e6, hiHz: 102e6 }, rowRateHz: 25 }, device: { rowsPerS: null }, time: { live: true } });
+  assert.deepEqual(f, { fLoHz: 99.6e6, fHiHz: 102e6 });
+});
+
+test("LIVE: the Candidate query carries the waterfall window; the Confirmed query carries no t0/t1 at all", async () => {
+  const { ctx, paramsFor } = windowCtx();
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25, view: { loHz: 99.6e6, hiHz: 102e6 } } }));
+  await loadInventoryRows(ctx, () => {}, 1_789_549_614);
+
+  const cand = paramsFor("candidate");
+  assert.equal(Number(cand.get("t1")), 1_789_549_614, "the candidate window ends at the live edge");
+  assert.equal(Number(cand.get("t0")), 1_789_549_614 - WATERFALL_ROWS / 25, "and starts one waterfall span back");
+  assert.equal(cand.get("f_lo"), String(99.6e6), "the frequency span is sent on both lists");
+
+  const conf = paramsFor("confirmed");
+  assert.equal(conf.get("t0"), null, "Confirmed is never time-filtered (ADR-0017 §2.2)");
+  assert.equal(conf.get("t1"), null, "Confirmed is never time-filtered (ADR-0017 §2.2)");
+  assert.equal(conf.get("f_lo"), String(99.6e6), "but it is still scoped to the view's frequency span");
+});
+
+test("THE SAFETY VALVE: a confirmed station that has been quiet for hours stays listed while candidates are window-scoped", async () => {
+  // The regression this guards against: scoping Confirmed to the window too would make the user's
+  // own confirmed stations disappear from Explore the moment they stopped transmitting.
+  const nowS = 1_789_549_614;
+  const quiet = makeRow({ id: "quiet", state: "confirmed", last_seen_s: nowS - 6 * 3600, first_seen_s: nowS - 9 * 3600 });
+  const onAir = makeRow({ id: "onair", state: "candidate", last_seen_s: nowS - 2 });
+  const { ctx, store, paramsFor } = windowCtx({ confirmed: [quiet], candidate: [onAir] });
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25 } }));
+  await loadInventoryRows(ctx, () => {}, nowS);
+
+  const rows = store.get().inventory.rows;
+  assert.ok(rows.quiet, "the quiet confirmed station is still listed, six hours off the air");
+  assert.equal(rows.quiet.state, "confirmed");
+  assert.ok(rows.onair, "the live candidate is listed too");
+
+  // The asymmetry is in the request, not in any client-side filtering of the answer: the UI never
+  // decides which rows qualify (thin-client rule) — it only chooses whether to send a window.
+  assert.equal(paramsFor("confirmed").get("t0"), null);
+  const t0 = Number(paramsFor("candidate").get("t0"));
+  assert.ok(quiet.last_seen_s < t0, "the quiet station would have been excluded had Confirmed been windowed");
+});
+
+test("reviewing: the Candidate window follows the scrubbed instant; Confirmed stays unwindowed there too", async () => {
+  const { ctx, paramsFor } = windowCtx();
+  ctx.store.set(reviewAt(1_789_540_000));
+  await loadInventoryRows(ctx, () => {}, 1_789_549_614);
+  const cand = paramsFor("candidate");
+  assert.equal(Number(cand.get("t1")), 1_789_540_000);
+  assert.equal(Number(cand.get("t0")), 1_789_540_000 - REVIEW_WINDOW_S);
+  assert.equal(paramsFor("confirmed").get("t0"), null, "a quiet confirmed station does not vanish while reviewing either");
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----

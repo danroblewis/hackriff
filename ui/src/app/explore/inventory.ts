@@ -3,6 +3,7 @@
 // fits, and adds the richer row fields docs/api.md `/api/inventory` serves — `classification`,
 // `explanations`, `refined` — that the old page's `Row` never needed.
 import { deleteEntry, inventoryQuery, promoteEntry, rowListenTarget, type ActionResult, type Filters, type InventoryClient, type Recurrence as BaseRecurrence, type Row as BaseRow, type UserBand } from "../../inventory";
+import { WATERFALL_ROWS } from "../../waterfall";
 import type { AppContext } from "../context";
 import { apiErrorText } from "./format";
 import { setInventoryRows } from "./slice";
@@ -94,22 +95,58 @@ export async function fetchInventoryPage(client: InventoryClient, state: Invento
  * context, matching the capture band's default scale). */
 export const REVIEW_WINDOW_S = 3600;
 
-/** The view-span filters for the current store state (live view bounds, plus a review-time window
- * when not live). Pure over already-known UI state (§1 thin-client rule: no signal computation). */
-export function viewFilters(state: { live: { view: { loHz: number; hiHz: number } | null }; time: { live: boolean; tS?: number } }): Filters {
+/** Row rate assumed before the spectrum header has arrived — hk-pipeline's `spectrum_rows_per_s`,
+ * and the same fallback `centre/live-spectrum.ts` uses for its own row period. */
+export const DEFAULT_ROW_RATE_HZ = 25;
+
+/** The state [[waterfallSpanS]] and [[candidateWindow]] read: geometry and clock, nothing measured.
+ * `AppState` satisfies it structurally. */
+export interface WindowState {
+  live: { view: { loHz: number; hiHz: number } | null; rowRateHz: number | null };
+  device: { rowsPerS: number | null };
+  time: { live: boolean; tS?: number };
+}
+
+/** Seconds of time the waterfall is showing: its ring height over the row rate (≈ 20.5 s at the
+ * default 25 rows/s). Pure arithmetic over already-known UI view state — which rows *qualify* in
+ * that window is the backend's predicate, never this client's (§1 thin-client rule). */
+export function waterfallSpanS(state: WindowState): number {
+  const rate = state.live.rowRateHz ?? state.device.rowsPerS ?? DEFAULT_ROW_RATE_HZ;
+  return WATERFALL_ROWS / Math.max(1e-3, rate);
+}
+
+/** The `[t0, t1]` the **Candidate** list is scoped to: the span the waterfall shows, ending at the
+ * live edge — or at the reviewed instant, looking back [[REVIEW_WINDOW_S]], when scrubbed back
+ * (ADR-0013 §3.3, ADR-0017 §2.1). */
+export function candidateWindow(state: WindowState, nowS: number): { t0: number; t1: number } {
+  if (!state.time.live && state.time.tS !== undefined) return { t0: state.time.tS - REVIEW_WINDOW_S, t1: state.time.tS };
+  return { t0: nowS - waterfallSpanS(state), t1: nowS };
+}
+
+/** The frequency filters both lists share — the tuned/zoomed view span. Deliberately carries no
+ * time: the window belongs to the Candidate query alone (see [[loadInventoryRows]]). */
+export function viewFilters(state: WindowState): Filters {
   const f: Filters = {};
   if (state.live.view) { f.fLoHz = state.live.view.loHz; f.fHiHz = state.live.view.hiHz; }
-  if (!state.time.live && state.time.tS !== undefined) { f.t0 = state.time.tS - REVIEW_WINDOW_S; f.t1 = state.time.tS; }
   return f;
 }
 
 /** Loads both tabs' current pages and writes them into the store's `inventory.rows`. `onMore`
- * reports whether a tab's page was cut short (GAP 13 "500+" interim, §4.2). */
-export async function loadInventoryRows(ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void): Promise<void> {
-  const f = viewFilters(ctx.store.get());
+ * reports whether a tab's page was cut short (GAP 13 "500+" interim, §4.2).
+ *
+ * **Candidates are window-scoped; Confirmed are always listed** (ADR-0017 §2.2, invariant 3). A
+ * Candidate is a hypothesis about energy in the window on screen, so outside that window there is
+ * nothing to hypothesise about and the row simply isn't listed — no expiry timer and no decay. A
+ * Confirmed row is a catalogue entry carrying its own presence track, so it stays listed whether or
+ * not it is transmitting right now. Dropping that asymmetry would make a user's quiet confirmed
+ * stations vanish from Explore the moment they went off the air. */
+export async function loadInventoryRows(ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void, nowS: number = Date.now() / 1000): Promise<void> {
+  const state = ctx.store.get();
+  const f = viewFilters(state);
+  const w = candidateWindow(state, nowS);
   const [confirmed, candidate] = await Promise.all([
     fetchInventoryPage(ctx.client, "confirmed", f),
-    fetchInventoryPage(ctx.client, "candidate", f),
+    fetchInventoryPage(ctx.client, "candidate", { ...f, t0: w.t0, t1: w.t1 }),
   ]);
   onMore("confirmed", !!confirmed.next_cursor);
   onMore("candidate", !!candidate.next_cursor);

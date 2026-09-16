@@ -221,8 +221,14 @@ test("signalMenuItems: Delete DELETEs the entry, then reloads both inventory tab
   signalMenuItems(ctx, makeRow({ id: "e7" })).find((i) => i.id === "delete")!.onSelect();
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(calls[0], "DELETE /api/inventory/e7");
+  // T-260 (ADR-0017 §2.2): the Candidate reload is scoped to the waterfall's time window and the
+  // Confirmed reload deliberately is not, so a confirmed station that has gone quiet is still
+  // listed after the delete. The asymmetry lives in the request, which is what this asserts.
   assert.ok(calls.includes("GET /api/inventory?state=confirmed&limit=200"), calls.join(", "));
-  assert.ok(calls.includes("GET /api/inventory?state=candidate&limit=200"), calls.join(", "));
+  assert.ok(
+    calls.some((c) => /^GET \/api\/inventory\?state=candidate&t0=[\d.]+&t1=[\d.]+&limit=200$/.test(c)),
+    calls.join(", "),
+  );
 });
 
 test("signalMenuItems: Delete removes the row from the store immediately, before the DELETE resolves (T-187)", async () => {
