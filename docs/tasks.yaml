@@ -418,7 +418,7 @@ tasks:
     effort: medium
     dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
   - id: T-026
-    milestone: M0
+    milestone: M7
     title: GPU polyphase channelizer (CUDA PfbBackend) on the Jetson
     status: deferred
     deferred: "user 2026-09-14: GPU work is Mac-first; CUDA PFB deferred to the Jetson phase; not blocked and not a gate for any milestone"
@@ -435,6 +435,14 @@ tasks:
     dod: CudaPfb implements PfbBackend; parity tests vs CPU; throughput + power measured on the Orin Nano
     note: "split from T-008 acceptance ('GPU + CPU-fallback paths') by the T-008 review, 2026-09-13; blocked until the Jetson arrives (user purchase)"
     provider_note: "CUDA becomes one provider in the ADR-0007 per-platform provider model from T-041; Mac GPU path via T-041 unblocks GPU work before the Jetson arrives"
+    rehomed_2026_09_16: 'Moved from its original milestone to M7 (Device hardening + TX, the hardware
+      phase), which is when Jetson work begins. Status, needs: hardware and parallel_group JET are
+      unchanged - still blocked on the Jetson purchase. This only stops it reading as a straggler
+      in a milestone that is otherwise finished. Moved on the coordinator''s call, which the user
+      invited: T-026 is the other Jetson-deferred task and leaving it tagged its original milestone
+      would reproduce exactly the straggler problem the T-216 move fixes. Two Jetson tasks sitting
+      in different milestones for no reason but when they were filed is how a board stops being trusted.'
+
   - id: T-022a
     milestone: M0
     title: Web UI part 1 - WebSocket bridge (hk-stream remote egress) + WebGL2 waterfall + region-over-time history view
@@ -3485,7 +3493,7 @@ tasks:
     effort: medium
     core_interface: true
   - id: T-216
-    milestone: M3
+    milestone: M7
     title: "Jetson phase: TensorRT provider for hk-ml plus on-device fine-tuning from labelled captures"
     status: blocked
     priority: normal
@@ -3500,6 +3508,11 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    rehomed_2026_09_16: 'Moved from its original milestone to M7 (Device hardening + TX, the hardware
+      phase), which is when Jetson work begins. Status, needs: hardware and parallel_group JET are
+      unchanged - still blocked on the Jetson purchase. This only stops it reading as a straggler
+      in a milestone that is otherwise finished. Moved by user instruction.'
+
   - id: T-217
     milestone: MUI
     title: "T-178 follow-ups: HTTP-level test that serve answers during ring allocation; count samples lost while a large ring allocates; surface the buffer-off library default; measure ring fsync cost on the Jetson"
@@ -3774,7 +3787,7 @@ tasks:
   - id: T-233
     milestone: M3
     title: "Fingerprint family_of gate stays DEFERRED: it merges within-family pairs (bpsk/qpsk, 2fsk/gfsk, am/wfm) into one emitter; decide whether the fingerprint needs a finer discriminator before it can ever land"
-    status: blocked
+    status: todo
     blocked_on: "needs a discriminator that separates within-family pairs; ADR-0016 lists the gate but T-218 proved it collapses distinct emitters"
     priority: normal
     deps: [T-218, T-201]
@@ -3787,6 +3800,15 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+    user_decision_2026_09_16: 'USER DECISION 2026-09-16: INVEST IN THE DISCRIMINATOR NOW - unblocked.
+      Build a finer fingerprint discriminator that separates WITHIN-FAMILY pairs (bpsk/qpsk, 2fsk/gfsk,
+      am/wfm) at IDENTICAL centre, bandwidth and symbol rate, at a stated confidence; then let the
+      family_of gate land with the T-218 guard test passing. THE BLIND TESTS MUST NEVER MERGE TWO
+      GENUINELY DISTINCT EMITTERS - that is the constraint the whole ticket serves, and a discriminator
+      that merges them is worse than none. core_interface: hk-model fingerprint plus hk-classify,
+      opus, REVIEWED BEFORE MERGE. Queued rather than launched: the user''s concurrency cap holds
+      at two builders until free space is back above about 25 GB'
+
   - id: T-234
     milestone: M2-hardening
     title: "M2 gate test asserts bandit dwell in wall time: under concurrent load it sees 0 outcomes and 0 dwells and fails, though the survey report itself is correct"
@@ -6542,7 +6564,8 @@ tasks:
     milestone: M4
     title: 'NXDN Type-C is identified but not decoded: the FSW is verified, the CAC layout is not, and a
       channel number needs a configured map anyway'
-    status: in-progress
+    status: done
+    commit: 993dbfb
     priority: normal
     deps:
     - T-271
