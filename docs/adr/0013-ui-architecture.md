@@ -129,7 +129,7 @@ A slice that changes must be a new object or array.
 | `device` | `{loaded, live, finished, contentClass, centerHz, sampleRateHz, rowsPerS, recording}` | shell poll (T-150 only) | top bar, T-152 (time scale), T-155 (read only; its Device tab keeps the full control state in `review/slice.ts`) | `GET /api/control/state`, 2 s |
 | `live` | `{streamId, centerHz, bandwidthHz, bins, rowRateHz, view}` | T-152 (header, zoom and pan) | T-151 (inventory span), T-150 (capture), T-155 (report default span) | spectrum stream header plus UI zoom |
 | `focus` | `none` \| `{signal, id}` \| `{selection, id}` | T-151, T-152 (click or drag) | T-151 focus panel, T-152 brackets | UI |
-| `inventory` | `{tab, sort, rows by id, loadedAtS, error}` | T-151 poll | T-151, T-152 (brackets), T-150 (dock labels) | `GET /api/inventory`, 5 s, for the view span |
+| `inventory` | `{tab, sort, rows by id, loadedAtS, error}` | T-151 poll | T-151, T-152 (brackets), T-150 (dock labels) | `GET /api/inventory`, 5 s, for the view span; Candidates also scoped to the waterfall's time window, Confirmed never (§3.3) |
 | `selections` | `{list, sync}` | T-151 (mirrors `SelectionStore`) | T-152 (boxes), T-151 | `/api/selections` via `SelectionStore` |
 | `outputs` | `OutputEntry[]` | T-150 (`upsertOutput` / `removeOutput`); T-151 and T-153 through T-150's `outputs` actions | T-150 dock, T-151 (on-air dots, Listen pressed) | streams this page opened plus `GET /api/pipelines` |
 | `time` | `{live: true}` \| `{live: false, tS}` | T-150 (capture scrub, LIVE) | T-152 (history render), T-151 (inventory `t0`/`t1`), shell | UI cursor over the retained range |
@@ -160,7 +160,7 @@ A task adds new top-level keys in its own slice file (e.g. T-155 adds `bookmarks
   | Route | Interval | Notes |
   |---|---|---|
   | `/api/control/state` | 2 s | always |
-  | `/api/inventory?f_lo&f_hi&state=candidate,confirmed` | 5 s | Explore, plus after any action |
+  | `/api/inventory?f_lo&f_hi&state=candidate,confirmed` | 5 s | Explore, plus after any action. Two queries: `state=candidate` carries `t0`/`t1` (the waterfall's window), `state=confirmed` carries neither (§3.3) |
   | `/api/selections` | via `SelectionStore` | offline flush every 15 s |
   | `/api/pipelines` | 2 s | Decode, or while the dock shows pipeline outputs |
   | `/api/anomalies?status=open&limit=100` | 30 s | Review badge |
@@ -185,10 +185,12 @@ A task adds new top-level keys in its own slice file (e.g. T-155 adds `bookmarks
 
 ### 3.3 Time cursor semantics (LIVE vs reviewing)
 
-- **`time.live`:** the waterfall renders the live stream, and the inventory is unbounded in time.
+- **`time.live`:** the waterfall renders the live stream, and the **Candidate** list is scoped to the window the waterfall is showing: T-151 sends `t0 = now − waterfall span`, `t1 = now`, the span being the ring height over the row rate (`waterfall.ts` `WATERFALL_ROWS` ÷ `live.rowRateHz`, ≈ 20.5 s at the default 25 rows/s).
+  - **Amended by T-260 (ADR-0017 §2.1/§2.3).** This bullet previously read "the inventory is unbounded in time", and *that sentence was the bug*: a candidate for a signal that stopped hours ago sat in the live list, indistinguishable from one transmitting right now, because Explore asked "what has ever been seen here" while presenting the answer as "what is here now".
+- **Candidates are window-scoped; Confirmed are always listed.** A deliberate asymmetry, straight from invariant 3 (ADR-0017 §2.2). A **Candidate** is a hypothesis about energy in the current window, so outside that window there is nothing to hypothesise about and the row is simply not listed — nothing expires and no decay logic is involved. A **Confirmed** row is a catalogue entry carrying its own time-presence track, so it stays listed whether or not it is transmitting. Without the asymmetry, a user watching a quiet band would see their confirmed stations vanish the moment those stations stopped transmitting — a live-visible regression dressed as a fix. The window is a *caller* choice: `GET /api/inventory` with no `t0`/`t1` is not time-filtered at all, so the Confirmed query simply omits them.
 - **Reviewing (`{live: false, tS}`):** the stream stays connected, but rows aren't pushed.
   - T-152 renders `GET /api/history?f_lo&f_hi&t0=tS−window&t1=tS&format=json` (`max_db`, unobserved cells drawn grey), into the same `Waterfall` via `push` after a reset.
-  - T-151 adds `t0`/`t1` to inventory queries.
+  - T-151 adds `t0`/`t1` to the **Candidate** query (`tS − REVIEW_WINDOW_S` … `tS`); the Confirmed query stays unwindowed, for the same reason as while live.
   - Outputs keep playing live.
   - The Go to action and device controls still act on the live device.
 

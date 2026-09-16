@@ -28,6 +28,12 @@ export const MARK_GATED = 2;
  * as quiet; ignored by the auto colour range. Far below any real dB level. */
 export const UNOBSERVED_DB = -1e20;
 
+/** Rows the waterfall ring holds, and so how much time is on screen: `WATERFALL_ROWS / rowRateHz`
+ * seconds (T-260, ADR-0017 §2.1). Exported so Explore can scope its Candidate query to the window
+ * the user is actually looking at without importing the renderer. Additive — the ring size itself
+ * is unchanged. */
+export const WATERFALL_ROWS = ROWS;
+
 /** One row max-decimated (or nearest-stretched) to `texW` texels: what `push` uploads. Pure, so the
  * row-preparation cost is measured in node (ui/test/app-centre.test.ts). */
 export function decimateRow(db: Float32Array, texW: number): Float32Array {

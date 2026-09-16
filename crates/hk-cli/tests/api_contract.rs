@@ -1071,6 +1071,23 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     );
     let (st, v) = get(addr, "/api/inventory?t0=5&t1=1");
     assert_eq!(st, 400, "t1 must not precede t0: {v}");
+    // T-260 (ADR-0017 §2.2) — the backend half of Explore's safety valve. The window is a *caller*
+    // choice: a query with no `t0`/`t1` is not time-filtered at all. Explore sends the window on
+    // the Candidate list only, and this is precisely what keeps a quiet Confirmed station listed
+    // while it is off the air, instead of vanishing the moment it stops transmitting.
+    let (st, windowed) = get(addr, "/api/inventory?state=confirmed&t0=0&t1=1");
+    assert_eq!(st, 200, "{windowed}");
+    assert_eq!(
+        windowed["total"].as_u64(),
+        Some(0),
+        "no confirmed row was on the air in 1970: {windowed}"
+    );
+    let (st, unwindowed) = get(addr, "/api/inventory?state=confirmed");
+    assert_eq!(st, 200, "{unwindowed}");
+    assert!(
+        unwindowed["total"].as_u64() >= windowed["total"].as_u64(),
+        "an unwindowed Confirmed query never lists fewer rows than a windowed one: {unwindowed}"
+    );
 
     // /api/analysis/strongest (T-079): the station is the (or a) strongest thing in its own band.
     let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
