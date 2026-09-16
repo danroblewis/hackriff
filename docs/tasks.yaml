@@ -4475,7 +4475,7 @@ tasks:
     milestone: M2-hardening
     title: 'Audit the source/scheduler/inventory layers for baked-in single-device
       assumptions, so multiple concurrent SDRs stay a future option'
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -4502,6 +4502,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+
   - id: T-260
     milestone: MUI
     title: 'ADR-0017 TM-3: Explore sends the viewed waterfall window; Candidates are window-scoped and Confirmed are ALWAYS listed'
@@ -5578,6 +5579,91 @@ tasks:
     parallel_group: M4A
     core_interface: true
     acceptance: 'T-268 verified that P25 uses the augmented CRC-CCITT (init 0, final XOR 0xFFFF) and NOT CRC-16/CCITT-FALSE, which many references repeat. T-267 uses CCITT-FALSE. T-268 deliberately did not change it, and that restraint was correct: the framing is simplified in three other ways (trellis, interleaving, status symbols), so fixing one of four buys no compliance and would only make the gap harder to see. Fix all four together or none. The DANGEROUS property is the failure mode, not the defect: with the wrong CRC essentially every real TSBK fails while the trellis reports a clean metric, so it presents as a demodulator or front-end fault and will burn a debugging session on the wrong layer. Acceptance: all four simplifications resolved together against a real capture, OR - if that stays out of reach - a test that asserts the current CRC choice is the simplified one, so the assumption is stated by the suite and cannot be silently inherited'
+  - id: T-302
+    milestone: M3
+    title: 'Image/harmonic/IMD attribution must read device_id: a fundamental seen on one front end can
+      never explain an artifact seen on another'
+    status: todo
+    priority: normal
+    deps:
+    - T-219
+    - T-259
+    parallel_group: DETECT
+    core_interface: true
+    model: opus
+    acceptance: 'EMITTER_DETECTION_EVIDENCE_SQL (crates/hk-model/src/repo/relate.rs:57-75) ALREADY joins
+      provenance to pull the LO and declines to select device_id, with the column sitting right there. artifact_sources()
+      (relate.rs:422-430) picks confirmed emitters with NO device predicate and predict_artifacts (relate.rs:620-665)
+      mirrors every source about every LO (2.0*lo - f_center), so with two front ends device A LO meets
+      device B emitter. The emitter table has no device column (migrations/0001_init.sql:141-165) so the
+      device must come through the detection->provenance join. Also select device_id, carry it on RowEvidence.tuned_lo_hz
+      paired with its device and on ArtifactSource, and refuse any pairing whose source device differs from
+      the target measurement device - an artifact is a property of ONE receive chain. Blind test: build
+      a two-device store where A is tuned so 2*f_LO(A) - f(B) lands exactly on a real independent candidate,
+      assert NO artifact relation is claimed, and the same geometry within one device still attributes.
+      Prefer antenna_port where present. No T-219 regression: single-device behaviour unchanged. Cost now
+      is one SQL column, one field, one equality; cost later is that plus re-adjudicating stored emitter_relation
+      claims'
+  - id: T-303
+    milestone: M2-hardening
+    title: BaselineKey has no front end in it, so two uncalibrated devices at one site average their noise
+      floors together
+    status: todo
+    priority: normal
+    deps:
+    - T-259
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'BaselineKey (crates/hk-model/src/attention/baseline.rs:226-235) is {site, cal, scheme,
+      cell_factor} - no device, no antenna. Baselines::key builds it from site and calibration only (hk-context/src/occupancy/baseline.rs:1526-1536)
+      and OccupancyStat carries no device. Two partial mitigations exist and NEITHER closes it: levels are
+      kept per gain state (MAX_GAIN_STATES=4) and CalKey::Calibrated(id) separates devices incidentally
+      because CalibrationState is per-device - but CalKey::Uncalibrated (baseline.rs:215-220) POOLS them,
+      so two uncalibrated HackRFs on different antennas average their noise floors and novelty alarms fire
+      or are suppressed on the mixture. Add the front end (device_id or antenna_port) to the key, OR state
+      in the ADR-0012 section 3.1 card why site+cal is sufficient and pin that decision with a test. The
+      key IS the on-disk path (<root>/<site>/<cal>/<scheme>-<factor>.bin) so include a migration/eviction
+      story for existing baseline files. Test: fold two sources with different floors at one site under
+      CalKey::Uncalibrated, assert the baselines do not mix and neither raises a novelty alarm from the
+      other'
+  - id: T-304
+    milestone: M2-hardening
+    title: History frames take their source key from PipelineConfig::device_id, so a multi-source run would
+      collapse to one source
+    status: todo
+    priority: low
+    deps:
+    - T-259
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: 'crates/hk-pipeline/src/history.rs:92 computes source_key(&shared.cfg.device_id) ONCE per
+      run, from the run config rather than each block provenance. The store beneath it is already per-source
+      and tested (FrameInput::source at hk-store/src/history/frame.rs:180-184, persisted per source at history/store.rs:264-266,
+      Pyramid::query_filtered by OriginFilter at history/query.rs:470, exposed as the 16-hex source param
+      in docs/api.md:116, and pinned by interleaved_sources_do_not_show_alternating_false_steps at history/tests/followups.rs:206).
+      The feeder simply never tells the store what the store can already represent. Derive the key from
+      each block provenance.device_id. NOTE this changes keys for replays whose provenance device differs
+      from cfg.device_id: check the /api/history?source= contract tests and any persisted per-source front-end
+      state'
+  - id: T-305
+    milestone: M2-hardening
+    title: Document where the source abstraction is N-capable and where the single-device assumption actually
+      lives
+    status: todo
+    priority: low
+    deps:
+    - T-259
+    parallel_group: PIPE
+    model: haiku
+    acceptance: 'Doc comment on SourceDriver (crates/hk-core/src/source/mod.rs:358) recording that open(&self,
+      ..) is DELIBERATELY N-shaped - a fresh Box<dyn Source> per OpenRequest.device - and that the single-device
+      assumption lives in the consumers (hk-pipeline SourceSlot / SwitchableControl / PipelineConfig::device_id),
+      not the trait. Note on MockSdrDriver.last (mock/mod.rs:504, 553-559) that it keeps only the MOST RECENTLY
+      opened control and is not safe for two concurrent sources from one driver. Cross-reference the ADR-0005
+      Consequences line that the interface assumes one window now. Record the device-local vs shared-air
+      rule from T-259: images/harmonics/IMD/noise floor/gain state must read the device; dedup/clustering/identity
+      must not. No behaviour change'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
