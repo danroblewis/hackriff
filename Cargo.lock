@@ -953,6 +953,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-gnss"
+version = "0.1.0"
+dependencies = [
+ "hk-dsp",
+ "hk-model",
+ "num-complex",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "hk-ml"
 version = "0.1.0"
 dependencies = [

@@ -40,6 +40,11 @@ opt-level = 2
 [profile.dev.package.hk-core]
 opt-level = 2
 
+# T-274: acquisition is an FFT parallel code-phase search — thousands of transforms per run
+# across the Doppler × PRN grid. Same reason as the other DSP crates above.
+[profile.dev.package.hk-gnss]
+opt-level = 2
+
 [profile.dev.package.hk-pipeline]
 opt-level = 2
 
@@ -80,6 +85,9 @@ hk-estimate = { path = "crates/hk-estimate" }
 hk-demod = { path = "crates/hk-demod" }
 hk-store = { path = "crates/hk-store" }
 hk-context = { path = "crates/hk-context" }
+# T-274 (C36): GNSS observables. Deliberately depended on by NOTHING on the blind detection path
+# — see crates/hk-gnss/src/lib.rs and crates/hk-gnss/tests/blind_path_boundary.rs.
+hk-gnss = { path = "crates/hk-gnss" }
 hk-stream = { path = "crates/hk-stream" }
 hk-api = { path = "crates/hk-api" }
 hk-plugins = { path = "crates/hk-plugins" }

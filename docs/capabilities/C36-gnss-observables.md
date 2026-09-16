@@ -66,6 +66,20 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 - **Spoofing logic:** test on mocked observables (equal power, jumps, clock steps). **Build no GNSS RF generator.** Any third-party simulator output stays file-only, never routed to C37.
 - **Live hardware:** antenna/bias-tee compatibility, TTFF, CPU and thermals per power mode.
 
+## Built so far (T-274, opening M5 — see [ADR-0018](../adr/0018-gnss-known-code-exception.md))
+
+`crates/hk-gnss`, deliberately **not** wired into `hk-pipeline` (nothing schedules an L1 dwell yet).
+
+**Built and tested offline:** the GPS L1 C/A Gold-code generator and codebook (verified by the Gold-code three-valued correlation property {−1, −65, 63} against a 1023 peak, and by code balance); FFT parallel code-phase acquisition over the Doppler × PRN grid; observable epochs and the S4 index; blind jamming assessment and spoofing tell-tales on mocked observables.
+
+**The exception, measured not asserted.** On one piece of synthetic IQ at −20 dB SNR in 2.046 MHz, the peak periodogram excursion above median is 6.19 dB with the satellite present and 6.16 dB with it removed — a 0.02 dB difference, so energy detection has nothing to threshold. Known-code correlation on that same IQ recovers PRN 11 at 511.00 chips (truth 511), 1250 Hz Doppler (truth 1180, one grid step), peak/mean 17.2, C/N0 estimated 42.1 dB-Hz against an analytic 43.1.
+
+**How the exception is confined:** `hk-detect` (and `hk-core`/`hk-dsp`/`hk-estimate`) depend on neither `hk-gnss` nor `hk-context`, so a `PrnCodebook` is un-nameable inside the detector; `tests/blind_path_boundary.rs` fails if that edge is ever added. The jamming half stays blind — `assess_jamming` takes receiver observables as an `Option` and still flags jamming with `None`.
+
+**Not built:** tracking loops (DLL/PLL), nav-message decode, ephemeris, PVT, SBAS/WAAS, OSNMA, the GNSS-SDR plugin wrapper. Acquisition without tracking cannot produce a fix, and none is claimed.
+
+**Unverified:** every sensitivity and C/N0 claim rests on synthetic IQ. Settling it needs an active GNSS antenna on the bias-tee and a real L1 capture (user-triggered).
+
 ## Example use cases
 Regenerated from `use-cases.yaml`:
 - AWARE-002 — Local GNSS C/N0 watchdog (in-band-power proxy, no true AGC)
