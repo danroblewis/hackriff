@@ -33,6 +33,9 @@ use hk_estimate::framing::crc::BitCrc;
 use hk_model::TrunkProtocol;
 
 use super::dmr::{CSBK_BYTES, DMR_BS_DATA_SYNC_DIBITS, csbk_crc};
+use super::nxdn::{
+    NXDN_FSW_DIBITS, NXDN_L3_BYTES, NXDN_SCRAMBLED_DIBITS, NXDN_SYNC_TOLERANCE_DIBITS, decode_frame,
+};
 use super::raster::RasterFit;
 
 /// Dibits (4FSK symbols) in the P25 Phase 1 frame sync `0x5575F5FF77FF` (docs/04 §7.3).
@@ -131,14 +134,24 @@ pub enum CcFraming {
     /// CRC-CCITT is masked with `0xA5A5` (T-271). Simplified in the ways
     /// [`super::dmr`] lists — no BPTC, no interleaving, the burst flattened.
     DmrBsData,
+    /// NXDN outbound RCCH: the 20-bit frame sync `0xCDF59` and the 182 scrambled symbols behind it,
+    /// of which the LICH and the CAC are decoded — descrambled, deinterleaved, depunctured, Viterbi
+    /// decoded and CRC checked (T-345). Unlike the two above this framing's coding is **not**
+    /// simplified; see [`super::nxdn`] for what is and is not implemented.
+    NxdnCac,
 }
 
 /// Every framing this build looks for, in the order it tries them.
 ///
-/// Order is not a priority: the gates are so far below chance (9.1e-12 per sync trial) that two
-/// framings cannot both match the same stream by accident, and the first hit wins only because
-/// something has to.
-pub const CC_FRAMINGS: [CcFraming; 2] = [CcFraming::P25Phase1, CcFraming::DmrBsData];
+/// Order is not a priority: the gates are so far below chance (9.1e-12 per sync trial for the two
+/// 24-symbol patterns, 1.1e-16 per frame for NXDN's shorter one plus its LICH) that two framings
+/// cannot both match the same stream by accident, and the first hit wins only because something has
+/// to.
+pub const CC_FRAMINGS: [CcFraming; 3] = [
+    CcFraming::P25Phase1,
+    CcFraming::DmrBsData,
+    CcFraming::NxdnCac,
+];
 
 impl CcFraming {
     /// The name recorded in [`CcEvidence::pattern`].
@@ -146,6 +159,7 @@ impl CcFraming {
         match self {
             Self::P25Phase1 => "p25-frame-sync",
             Self::DmrBsData => "dmr-bs-data-sync",
+            Self::NxdnCac => "nxdn-fsw",
         }
     }
 
@@ -154,20 +168,56 @@ impl CcFraming {
         match self {
             Self::P25Phase1 => &P25_FRAME_SYNC_DIBITS,
             Self::DmrBsData => &DMR_BS_DATA_SYNC_DIBITS,
+            Self::NxdnCac => &NXDN_FSW_DIBITS,
         }
     }
 
-    /// Bytes in the block that follows the sync.
+    /// Symbols the block after the sync occupies.
+    ///
+    /// For P25 and DMR that is four per byte of a flat block. NXDN's frame is not a flat block: its
+    /// 182 symbols carry a LICH and a convolutionally-coded CAC, and the *bytes* that come out of
+    /// them ([`NXDN_L3_BYTES`]) are a decode result rather than a slice of the air.
+    pub const fn block_dibits(self) -> usize {
+        match self {
+            Self::P25Phase1 => BLOCK_BYTES * 4,
+            Self::DmrBsData => CSBK_BYTES * 4,
+            Self::NxdnCac => NXDN_SCRAMBLED_DIBITS,
+        }
+    }
+
+    /// Bytes a decoded block yields.
     pub const fn block_bytes(self) -> usize {
         match self {
             Self::P25Phase1 => BLOCK_BYTES,
             Self::DmrBsData => CSBK_BYTES,
+            Self::NxdnCac => NXDN_L3_BYTES,
         }
     }
 
     /// Dibits in one sync-plus-block frame.
     pub const fn frame_dibits(self) -> usize {
-        self.sync_dibits().len() + self.block_bytes() * 4
+        self.sync_dibits().len() + self.block_dibits()
+    }
+
+    /// The most sync mismatches this framing may ever be scanned at, whatever a config asks for.
+    ///
+    /// A tolerance is only meaningful relative to the pattern's **length**, and these differ: P25's
+    /// and DMR's syncs are 24 symbols, NXDN's is 10. The configured [`SYNC_TOLERANCE_DIBITS`] of 2
+    /// costs a 24-symbol pattern 9.1e-12 per trial and a 10-symbol one 4.2e-4 — forty-six million
+    /// times weaker, and past what a 16-bit CRC can carry. So the 24-symbol framings set no cap of
+    /// their own and NXDN caps at [`NXDN_SYNC_TOLERANCE_DIBITS`]; see that constant for the error
+    /// direction.
+    pub const fn max_sync_tolerance(self) -> u32 {
+        match self {
+            Self::P25Phase1 | Self::DmrBsData => u32::MAX,
+            Self::NxdnCac => NXDN_SYNC_TOLERANCE_DIBITS,
+        }
+    }
+
+    /// The sync tolerance this framing is scanned at, given the configured one: a framing may
+    /// **lower** it, never raise it.
+    pub fn sync_tolerance(self, configured: u32) -> u32 {
+        configured.min(self.max_sync_tolerance())
     }
 }
 
@@ -371,21 +421,30 @@ impl CcConfirmer {
         &self.cfg
     }
 
-    /// Whether `block` carries a valid CRC for `framing`.
+    /// The bytes `dibits` yields under `framing`, or `None` if it carries no valid block there.
     ///
-    /// The two framings differ in more than a constant, which is why this is a match rather than a
+    /// The framings differ in much more than a constant, which is why this is a match rather than a
     /// parameter: P25's check is "the CRC over the data **and** the appended CRC comes to zero";
-    /// DMR's is "the CRC over the first ten bytes, masked with 0xA5A5, equals the stored two". One
-    /// shared "check the CRC" would have had to pick one and be silently wrong for the other.
-    fn crc_ok(&self, framing: CcFraming, block: &[u8]) -> bool {
+    /// DMR's is "the CRC over the first ten bytes, masked with 0xA5A5, equals the stored two"; and
+    /// NXDN's is a whole coding chain — descramble, check the LICH, deinterleave, depuncture,
+    /// Viterbi decode, then the CRC and the specification's three fixed null bits. One shared "check
+    /// the CRC" would have had to pick one and be silently wrong for the others.
+    ///
+    /// It yields **bytes, not evidence.** A block is bytes that passed a check behind a frame sync;
+    /// it is not a [`CcEvidence`] and cannot become one.
+    fn decode_block(&self, framing: CcFraming, dibits: &[u8]) -> Option<Vec<u8>> {
         match framing {
-            CcFraming::P25Phase1 => self.crc.compute(block, 0, BLOCK_BYTES * 8) == 0,
-            CcFraming::DmrBsData => {
-                block.len() >= CSBK_BYTES && {
-                    let want = (u16::from(block[10]) << 8) | u16::from(block[11]);
-                    self.dmr_crc.compute(&block[..10], 0, 80) as u16 == want
-                }
+            CcFraming::P25Phase1 => {
+                let block = pack_dibits(dibits);
+                (self.crc.compute(&block, 0, BLOCK_BYTES * 8) == 0).then_some(block)
             }
+            CcFraming::DmrBsData => {
+                let block = pack_dibits(dibits);
+                let want = (u16::from(block[10]) << 8) | u16::from(block[11]);
+                (self.dmr_crc.compute(&block[..10], 0, 80) as u16 == want).then_some(block)
+            }
+            // Nothing is packed here: the bytes come out of the decoder, not out of the air.
+            CcFraming::NxdnCac => decode_frame(dibits).map(|f| f.info.to_vec()),
         }
     }
 
@@ -400,7 +459,8 @@ impl CcConfirmer {
     /// the false-alarm rate.
     pub fn scan_framing(&self, framing: CcFraming, dibits: &[u8]) -> ScanOutcome {
         let (sync, frame) = (framing.sync_dibits(), framing.frame_dibits());
-        let block_dibits = framing.block_bytes() * 4;
+        let block_dibits = framing.block_dibits();
+        let tolerance = framing.sync_tolerance(self.cfg.sync_tolerance);
         let mut out = ScanOutcome::default();
         if dibits.len() < frame {
             return out;
@@ -408,32 +468,20 @@ impl CcConfirmer {
         let last = dibits.len() - frame;
         for i in 0..=last {
             out.trials += 1;
-            if !self.sync_matches(sync, dibits, i) {
+            if !sync_matches(sync, dibits, i, tolerance) {
                 continue;
             }
             out.sync_hits += 1;
             let start = i + sync.len();
-            let bytes = pack_dibits(&dibits[start..start + block_dibits]);
             out.crc_checked += 1;
-            if self.crc_ok(framing, &bytes) {
+            if self
+                .decode_block(framing, &dibits[start..start + block_dibits])
+                .is_some()
+            {
                 out.crc_valid += 1;
             }
         }
         out
-    }
-
-    /// Whether `sync` matches `dibits` at `i` within the tolerance.
-    fn sync_matches(&self, sync: &[u8], dibits: &[u8], i: usize) -> bool {
-        let mut miss = 0u32;
-        for (k, &want) in sync.iter().enumerate() {
-            if dibits[i + k] != want {
-                miss += 1;
-                if miss > self.cfg.sync_tolerance {
-                    return false;
-                }
-            }
-        }
-        true
     }
 
     /// The CRC-valid P25 blocks in `dibits`, sync-aligned, for [`super::tsbk`] to decode (T-268).
@@ -459,7 +507,8 @@ impl CcConfirmer {
     /// question first.
     pub fn crc_valid_blocks_framing(&self, framing: CcFraming, dibits: &[u8]) -> Vec<Vec<u8>> {
         let (sync, frame) = (framing.sync_dibits(), framing.frame_dibits());
-        let block_dibits = framing.block_bytes() * 4;
+        let block_dibits = framing.block_dibits();
+        let tolerance = framing.sync_tolerance(self.cfg.sync_tolerance);
         let mut out = Vec::new();
         if dibits.len() < frame {
             return out;
@@ -467,13 +516,12 @@ impl CcConfirmer {
         let last = dibits.len() - frame;
         let mut i = 0;
         while i <= last {
-            if !self.sync_matches(sync, dibits, i) {
+            if !sync_matches(sync, dibits, i, tolerance) {
                 i += 1;
                 continue;
             }
             let start = i + sync.len();
-            let bytes = pack_dibits(&dibits[start..start + block_dibits]);
-            if self.crc_ok(framing, &bytes) {
+            if let Some(bytes) = self.decode_block(framing, &dibits[start..start + block_dibits]) {
                 out.push(bytes);
                 // A frame that checked out is a frame: resume after it rather than re-examining
                 // every symbol inside it, so one frame cannot yield two overlapping "blocks".
@@ -522,15 +570,31 @@ impl CcConfirmer {
     /// gates admit (T-271).
     ///
     /// Trying more framings cannot make a false confirmation likely: each carries its own
-    /// independent 1.4e-16-per-frame chance rate (see [`MIN_CRC_VALID`]), so two of them is 2.8e-16,
-    /// and the union bound stays astronomically below one per device lifetime. What it does cost is
-    /// one more correlation pass per candidate, which is why [`CC_FRAMINGS`] is a short fixed list
-    /// rather than an open registry.
+    /// independent per-frame chance rate — 1.4e-16 for the two 24-symbol syncs (see
+    /// [`MIN_CRC_VALID`]) and 1.1e-16 for NXDN's shorter sync plus its LICH (see
+    /// [`super::MIN_NXDN_CACS`]) — so three of them is 3.9e-16 by the union bound, still
+    /// astronomically below one per device lifetime. What it does cost is one more correlation pass
+    /// per candidate, which is why [`CC_FRAMINGS`] is a short fixed list rather than an open
+    /// registry.
     pub fn confirm_any(&self, candidate: &CcCandidate, dibits: &[u8]) -> Option<ConfirmedCc> {
         CC_FRAMINGS
             .iter()
             .find_map(|&f| self.confirm_framing(f, candidate, dibits))
     }
+}
+
+/// Whether `sync` matches `dibits` at `i` within `tolerance` symbol mismatches.
+fn sync_matches(sync: &[u8], dibits: &[u8], i: usize, tolerance: u32) -> bool {
+    let mut miss = 0u32;
+    for (k, &want) in sync.iter().enumerate() {
+        if dibits[i + k] != want {
+            miss += 1;
+            if miss > tolerance {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Packs MSB-first dibits into bytes (4 dibits per byte).
@@ -754,6 +818,67 @@ mod tests {
         assert_eq!(got.protocol(), TrunkProtocol::Unknown);
     }
 
+    /// `n` back-to-back NXDN outbound RCCH frames: the 20-bit FSW and the 182 scrambled symbols
+    /// behind it, carrying a real CAC through the whole coding chain.
+    fn nxdn_stream(seed: u64, n: usize) -> Vec<u8> {
+        use crate::trunk::nxdn;
+        let mut rng = SplitMix(seed);
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let mut info = [0u8; nxdn::NXDN_L3_BYTES];
+            for b in &mut info {
+                *b = (rng.next_u64() & 0xFF) as u8;
+            }
+            // An outbound RCCH CAC carrying a site-information broadcast.
+            info[1] = nxdn::MSG_SITE_INFO;
+            out.extend_from_slice(&nxdn::NXDN_FSW_DIBITS);
+            out.extend_from_slice(&nxdn::encode_frame(0b000_0001, &info).expect("a frame"));
+        }
+        out
+    }
+
+    /// The third framing, confirmed the same way the first two are — and the evidence says **which**
+    /// air interface matched (T-345).
+    #[test]
+    fn an_nxdn_control_channel_is_confirmed_and_names_its_own_framing() {
+        let c = CcConfirmer::default();
+        let got = c
+            .confirm_any(&candidate(), &nxdn_stream(13, 8))
+            .expect("NXDN sync, LICH and CAC CRC all present");
+        assert_eq!(got.framing(), CcFraming::NxdnCac);
+        assert_eq!(got.evidence().pattern(), "nxdn-fsw");
+        assert!(got.evidence().crc_valid() >= MIN_CRC_VALID);
+        // Confirming an air interface still does not name a trunking protocol: a conventional NXDN
+        // repeater emits the same frames, so only decoded RCCH messages may say "Type-C".
+        assert_eq!(got.protocol(), TrunkProtocol::Unknown);
+        // And the blocks handed to the protocol decoder are the CAC's nineteen decoded bytes.
+        let blocks = c.crc_valid_blocks_framing(CcFraming::NxdnCac, &nxdn_stream(13, 8));
+        assert!(!blocks.is_empty());
+        assert!(
+            blocks
+                .iter()
+                .all(|b| b.len() == crate::trunk::nxdn::NXDN_L3_BYTES)
+        );
+    }
+
+    /// NXDN's sync is 10 symbols where the others' are 24, so the shared tolerance may not reach
+    /// it: a framing caps the configured tolerance and never raises it.
+    #[test]
+    fn nxdns_shorter_sync_word_caps_the_tolerance_the_config_asks_for() {
+        for configured in 0..=4 {
+            assert_eq!(CcFraming::P25Phase1.sync_tolerance(configured), configured);
+            assert_eq!(CcFraming::DmrBsData.sync_tolerance(configured), configured);
+            let got = CcFraming::NxdnCac.sync_tolerance(configured);
+            assert_eq!(got, crate::trunk::nxdn::NXDN_SYNC_TOLERANCE_DIBITS);
+            assert!(
+                got <= configured,
+                "a framing may lower the tolerance, never raise it"
+            );
+        }
+        // The default config asks for 2, which a 10-symbol pattern may not have.
+        assert_eq!(CcFraming::NxdnCac.sync_tolerance(SYNC_TOLERANCE_DIBITS), 0);
+    }
+
     /// The framings do not bleed into each other: each stream confirms under its own and **only**
     /// its own. Without this, `confirm_any` could pass by matching whatever it tried first.
     #[test]
@@ -762,41 +887,47 @@ mod tests {
         let cand = candidate();
         let p25 = cc_stream(7, 8);
         let dmr = dmr_stream(11, 8);
+        let nxdn = nxdn_stream(13, 8);
 
-        assert!(
-            c.confirm_framing(CcFraming::P25Phase1, &cand, &p25)
-                .is_some()
-        );
-        assert!(
-            c.confirm_framing(CcFraming::DmrBsData, &cand, &p25)
-                .is_none(),
-            "a P25 control channel confirmed as DMR"
-        );
-        assert!(
-            c.confirm_framing(CcFraming::DmrBsData, &cand, &dmr)
-                .is_some()
-        );
-        assert!(
-            c.confirm_framing(CcFraming::P25Phase1, &cand, &dmr)
-                .is_none(),
-            "a DMR control channel confirmed as P25"
-        );
-        // `confirm_any` picks the right one for each rather than the first in the list.
-        assert_eq!(
-            c.confirm_any(&cand, &p25).unwrap().framing(),
-            CcFraming::P25Phase1
-        );
-        assert_eq!(
-            c.confirm_any(&cand, &dmr).unwrap().framing(),
-            CcFraming::DmrBsData
-        );
-        // And the blocks handed to a protocol decoder are that framing's, not the other's.
+        // Every stream confirms under its own framing and under no other. Nine combinations, and
+        // the six off-diagonal ones are the assertion.
+        for (name, stream, want) in [
+            ("p25", &p25, CcFraming::P25Phase1),
+            ("dmr", &dmr, CcFraming::DmrBsData),
+            ("nxdn", &nxdn, CcFraming::NxdnCac),
+        ] {
+            for f in CC_FRAMINGS {
+                let got = c.confirm_framing(f, &cand, stream);
+                assert_eq!(
+                    got.is_some(),
+                    f == want,
+                    "the {name} control channel {} under {}",
+                    if got.is_some() {
+                        "confirmed"
+                    } else {
+                        "did not confirm"
+                    },
+                    f.name()
+                );
+            }
+            assert_eq!(c.confirm_any(&cand, stream).unwrap().framing(), want);
+        }
+
+        // And the blocks handed to a protocol decoder are that framing's, not another's.
         assert!(
             !c.crc_valid_blocks_framing(CcFraming::DmrBsData, &dmr)
                 .is_empty()
         );
         assert!(
             c.crc_valid_blocks_framing(CcFraming::DmrBsData, &p25)
+                .is_empty()
+        );
+        assert!(
+            c.crc_valid_blocks_framing(CcFraming::NxdnCac, &p25)
+                .is_empty()
+        );
+        assert!(
+            c.crc_valid_blocks_framing(CcFraming::NxdnCac, &dmr)
                 .is_empty()
         );
     }

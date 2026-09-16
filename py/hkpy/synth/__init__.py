@@ -83,6 +83,13 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "beside the same unframed 4FSK decoy and bursty NBFM (T-271): its grants name logical "
         "channel numbers that resolve to NO frequency, and real voice keyings sit exactly where "
         "an assumed 12.5 kHz band plan would put them"),
+    "trunk_nxdn_control_channel": ScenarioSpec(
+        trunk_scene.trunk_nxdn_control_channel, trunk_scene.TRUNK_NXDN_DEFAULTS, (),
+        "an NXDN Type-C outbound RCCH (0xCDF59 frame sync + LICH + fully coded CACs: scrambled, "
+        "convolutionally coded, punctured and interleaved) beside the same unframed 4FSK decoy and "
+        "bursty NBFM (T-345): its assignments name 10-bit channel numbers that the air interface "
+        "defines no mapping for, and real voice keyings sit exactly where an assumed 12.5 kHz band "
+        "plan would put them"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "

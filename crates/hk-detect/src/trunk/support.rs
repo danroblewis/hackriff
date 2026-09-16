@@ -152,13 +152,17 @@ pub const TRUNK_SUPPORT: [TrunkSupport; 10] = [
     TrunkSupport {
         name: "NXDN Type-C",
         protocol: Some(TrunkProtocol::NxdnTypeC),
-        level: SupportLevel::Identified,
-        reason: "the NXDN air interface is recognised by its verified 20-bit frame sync word, but \
-                 no CAC message is decoded: the CAC's error-correction and CRC layout could not be \
-                 corroborated against an independent reference, so nothing is read from it and no \
-                 grant is claimed. Note also that a Type-C channel number needs a channel map or a \
-                 base/step the control channel does not generally announce, so even a decoded \
-                 grant would usually resolve to no frequency",
+        level: SupportLevel::Decoded,
+        reason: "CAC decode on a confirmed outbound RCCH: the 20-bit frame sync, the LICH's parity \
+                 and channel type, then the CAC descrambled, deinterleaved, depunctured, Viterbi \
+                 decoded and CRC checked, giving channel assignments with their channel number, \
+                 call type, source unit and destination group or unit. The channel number is NOT \
+                 resolved to a frequency — the air interface carries a 10-bit channel NUMBER and \
+                 defines no mapping from one to hertz, and none of its information elements is a \
+                 frequency — so every assignment is recorded `unmapped-channel` with that reason \
+                 rather than mapped through an assumed base and step. Only the 12.5 kHz / 9600 bps \
+                 variant is reachable: the 6.25 kHz variant is 2400 Bd and this milestone's symbol \
+                 path produces 4800 Bd only",
     },
     TrunkSupport {
         name: "Motorola SmartNet / SmartZone",
@@ -351,7 +355,11 @@ mod tests {
     /// out of step with what the decoder actually does.
     #[test]
     fn the_decoded_protocols_are_the_ones_the_decoders_can_name() {
-        for p in [TrunkProtocol::P25Phase1, TrunkProtocol::DmrTier3] {
+        for p in [
+            TrunkProtocol::P25Phase1,
+            TrunkProtocol::DmrTier3,
+            TrunkProtocol::NxdnTypeC,
+        ] {
             let e = support_for(p).unwrap_or_else(|| panic!("{p:?} is not in the support table"));
             assert_eq!(e.level, SupportLevel::Decoded, "{p:?}");
             assert!(e.level.may_claim_a_grant());
@@ -360,12 +368,33 @@ mod tests {
         for p in [
             TrunkProtocol::SmartNet,
             TrunkProtocol::Edacs,
-            TrunkProtocol::NxdnTypeC,
             TrunkProtocol::Mpt1327,
             TrunkProtocol::P25Phase2,
         ] {
             let e = support_for(p).unwrap_or_else(|| panic!("{p:?} is not in the support table"));
             assert_ne!(e.level, SupportLevel::Decoded, "{p:?}");
+        }
+    }
+
+    /// The two protocols whose grants carry **no frequency** must say so in the table, because a
+    /// row that reads only "decoded" invites the reader to expect a frequency the run never
+    /// produces (T-271 for DMR, T-345 for NXDN).
+    #[test]
+    fn a_decoded_protocol_that_resolves_no_frequency_says_so() {
+        for p in [TrunkProtocol::DmrTier3, TrunkProtocol::NxdnTypeC] {
+            let e = support_for(p).unwrap();
+            assert_eq!(e.level, SupportLevel::Decoded);
+            let r = e.reason.to_lowercase();
+            assert!(
+                r.contains("unmapped-channel"),
+                "{p:?} does not say what its grants are recorded as: {}",
+                e.reason
+            );
+            assert!(
+                r.contains("not resolved to a frequency"),
+                "{p:?} does not say that its channel numbers produce no frequency: {}",
+                e.reason
+            );
         }
     }
 }

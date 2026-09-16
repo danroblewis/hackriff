@@ -1666,12 +1666,13 @@ impl RunSummary {
             c("/chains/sweep_uncharacterised")
         ));
         line(format!(
-            "trunking:    {} CC confirmed, {} TSBK(s) + {} CSBK(s), {} grant(s) mapped / {} \
-             unmapped / {} outside window; {} followed ({} refused, {} silent), {} call(s) ({} \
-             closed on silence)",
+            "trunking:    {} CC confirmed, {} TSBK(s) + {} CSBK(s) + {} CAC(s), {} grant(s) \
+             mapped / {} unmapped / {} outside window; {} followed ({} refused, {} silent), {} \
+             call(s) ({} closed on silence)",
             c("/chains/cc_confirmed"),
             c("/chains/cc_tsbks"),
             c("/chains/cc_csbks"),
+            c("/chains/cc_cacs"),
             c("/chains/cc_grants_mapped"),
             c("/chains/cc_grants_unmapped"),
             c("/chains/cc_grants_outside_window"),

@@ -296,6 +296,17 @@ counter_group!(
         /// number has no on-air base or step to resolve through and no frequency is ever produced
         /// for one. The grant itself — talkgroup, radio, channel, timeslot — is fully recorded.
         cc_dmr_grants,
+        /// T-345: CRC-valid NXDN CACs decoded from confirmed outbound RCCH frames. Counted apart
+        /// from `cc_tsbks` and `cc_csbks` for the same reason those are counted apart from each
+        /// other: summing them would hide which protocol a run actually found.
+        cc_cacs,
+        /// T-345: NXDN Type-C channel assignments decoded. **Every one of these is also counted in
+        /// `cc_grants_unmapped`**, and that is the point rather than a bookkeeping accident: the
+        /// NXDN air interface carries a channel *number* and defines no mapping from one to hertz,
+        /// so no frequency is ever produced for one until a channel map is configured. The
+        /// assignment itself — channel, call type, source unit, destination group or unit — is
+        /// fully recorded.
+        cc_nxdn_grants,
         /// Channel-table entries **admitted**: an identifier corroborated by agreeing
         /// announcements and appended to `trunk_channel_plan`. Far fewer than `cc_iden_ups`,
         /// because a single unrepeated announcement never enters a band plan.

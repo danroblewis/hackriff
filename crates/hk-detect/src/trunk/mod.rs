@@ -26,8 +26,17 @@
 //!    why: Capacity Plus and NXDN Type-D have no dedicated control channel at all, and are
 //!    **reported unsupported** rather than producing a silence indistinguishable from a quiet band.
 
+//! 6. **A third protocol, and a refusal the specification itself states** ([`nxdn`], T-345). NXDN
+//!    Type-C CACs decode alongside P25's TSBKs and DMR's CSBKs — descrambled, deinterleaved,
+//!    depunctured, Viterbi decoded and CRC checked against the published air interface — and their
+//!    channel assignments produce **no frequency**, because the air interface carries a channel
+//!    *number* and defines no mapping from one to hertz. That mapping is configured in the radio,
+//!    so a grant resolves to nothing until somebody supplies one, and nothing here supplies a
+//!    default.
+
 pub mod confirm;
 pub mod dmr;
+pub mod nxdn;
 pub mod raster;
 pub mod support;
 pub mod tsbk;
@@ -45,6 +54,13 @@ pub use dmr::{
     DMR_BS_DATA_SYNC_DIBITS, DMR_BS_VOICE_SYNC_DIBITS, DmrGrant, DmrPrivacyHeader, DmrResolved,
     MAX_CSBK_PER_WINDOW, MIN_DMR_CSBKS, csbk_crc, csbk_crc_ok, csbko_name, dmr_pi_encryption,
     dmr_protocol_of, is_voice_grant, scan_csbks,
+};
+pub use nxdn::{
+    Cac, CacScan, MAX_CAC_PER_WINDOW, MIN_NXDN_CACS, MSG_DCALL_ASSGN, MSG_DCALL_ASSGN_DUP,
+    MSG_VCALL_ASSGN, MSG_VCALL_ASSGN_DUP, NXDN_ASSIGNMENTS, NXDN_CAC_BITS, NXDN_CHANNEL_MAX,
+    NXDN_CHANNEL_NULL, NXDN_FSW_DIBITS, NXDN_L3_BYTES, NXDN_SCRAMBLED_DIBITS,
+    NXDN_SYNC_TOLERANCE_DIBITS, NXDN_TYPE_C, NxdnAssignment, NxdnFrame, NxdnLich, NxdnResolved,
+    decode_frame, is_voice_assignment, message_type_name, nxdn_protocol_of, scan_cacs,
 };
 pub use raster::{LMR_RASTERS_HZ, RASTER_TOLERANCE_HZ, RasterFit, best_lmr_raster, fit_raster};
 pub use support::{

@@ -31,6 +31,12 @@
 //!   run **reports** the systems no control-channel decoder can reach at all (Capacity Plus's
 //!   moving rest channel, NXDN Type-D's distributed trunking), since otherwise they are
 //!   indistinguishable from empty spectrum.
+//! - [`t345_nxdn`] proves a **third** protocol, decoded through its real channel coding rather than
+//!   a flattened one: an NXDN Type-C outbound RCCH found blind, its CACs descrambled,
+//!   deinterleaved, depunctured, Viterbi decoded and CRC checked, its channel assignments fully
+//!   read — and **none of them resolving to a frequency**, because the air interface carries a
+//!   channel *number* and defines no mapping from one to hertz. Two baited frequencies carry real
+//!   emissions and neither is ever reported.
 
 // The shared harness modules carry helpers only the other suites use.
 #![allow(dead_code)]
@@ -58,3 +64,6 @@ mod t270_encryption;
 
 #[path = "acceptance/t271_dmr.rs"]
 mod t271_dmr;
+
+#[path = "acceptance/t345_nxdn.rs"]
+mod t345_nxdn;
