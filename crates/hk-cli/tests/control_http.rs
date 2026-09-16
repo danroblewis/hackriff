@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use hk_api::{LiveControl, LiveTuning, SourceLiveControl, StreamRegistry, Token};
 use hk_cli::control::PipelineRetuner;
-use hk_cli::pipeline::{serve_api, temp_data_dir};
+use hk_cli::pipeline::{TempDataDirGuard, serve_api, temp_data_dir};
 use hk_cli::serve::{ServeOptions, ServeSource, Serving, start};
 use hk_core::Source;
 use hk_model::{Repository, Timestamp};
@@ -76,6 +76,7 @@ fn spectrum_class(addr: SocketAddr) -> Option<String> {
 #[test]
 fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
     let dir = temp_data_dir();
+    let _guard = TempDataDirGuard::new(dir.clone());
     let (radio, ctl) = radio::Radio::new(FM, FS, 4096, radio::tone(|_| 50e3));
     let control = radio.control();
     let registry = StreamRegistry::new();
@@ -292,7 +293,6 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
     let repo = Repository::open(dir.join("hackriff.db")).unwrap();
     assert_eq!(repo.bookmarks().unwrap()[0].name, "paging");
     drop(repo);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A recording with no samples at 100.8 MHz.
@@ -318,6 +318,7 @@ fn empty_recording(dir: &Path) -> PathBuf {
 #[test]
 fn a_replayed_recording_refuses_device_settings_but_accepts_display_settings() {
     let dir = temp_data_dir();
+    let _guard = TempDataDirGuard::new(dir.clone());
     let path = empty_recording(&dir.join("src"));
     let Serving {
         server,
@@ -373,5 +374,4 @@ fn a_replayed_recording_refuses_device_settings_but_accepts_display_settings() {
         .unwrap();
     assert!(summary.errors.is_empty(), "{:?}", summary.errors);
     drop(server);
-    let _ = std::fs::remove_dir_all(dir);
 }

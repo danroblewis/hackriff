@@ -350,8 +350,10 @@ pub fn load_plan(path: Option<&Path>, info: &SourceInfo) -> anyhow::Result<ScanP
 }
 
 /// A fresh data directory under the system temp dir (pid, time and a process-wide counter, so
-/// concurrent callers never share one).
+/// concurrent callers never share one). Every call also runs (once per process) a sweep of stale
+/// `hk-replay-*` orphans left by earlier crashed or killed processes (T-229).
 pub fn temp_data_dir() -> PathBuf {
+    sweep_stale_replay_dirs();
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
@@ -359,6 +361,113 @@ pub fn temp_data_dir() -> PathBuf {
         std::process::id(),
         Timestamp::now().as_unix_nanos()
     ))
+}
+
+/// A stale `hk-replay-*` orphan must be older than this on top of its owning pid being dead before
+/// the sweep removes it (T-229). One hour: comfortably longer than any test or `hk replay`/`hk
+/// serve` run in this repo (the slowest, `unpaced_replay_completes_on_large_global_index_fixtures`,
+/// bounds itself to 20 minutes), so it never races a slow-but-live run whose pid happens to get
+/// reused quickly after another process exits, while still reclaiming crashed runs promptly.
+pub const STALE_REPLAY_DIR_AGE: Duration = Duration::from_secs(3600);
+
+/// Removes orphaned `hk-replay-<pid>-<ts>-<n>` directories directly under `root` whose embedded
+/// pid names no process that is currently alive, **and** whose contents were last modified more
+/// than `min_age` ago. Both conditions gate every removal: a live pid is never touched regardless
+/// of age (other agents and sessions run tests on this machine concurrently), and age alone is not
+/// trusted because a pid can be reused, so a directory just past its birth could coincidentally
+/// share a pid with an unrelated, live process. Errors reading an entry just skip it; this is a
+/// best-effort sweep, not a correctness requirement.
+///
+/// `pub` (rather than only reachable through [`sweep_stale_replay_dirs`]) so tests can exercise it
+/// against a private fixture directory instead of the live system temp dir, which other agents and
+/// sessions use concurrently.
+pub fn sweep_stale_replay_dirs_in(root: &Path, min_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(pid) = replay_dir_pid(&name) else {
+            continue;
+        };
+        if pid_alive(pid) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if now.duration_since(modified).is_ok_and(|age| age >= min_age) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// The pid embedded in an `hk-replay-<pid>-<ts>-<n>` directory name, if `name` matches that shape.
+fn replay_dir_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("hk-replay-")?;
+    rest.split('-').next()?.parse().ok()
+}
+
+/// Whether `pid` names a process that is currently alive (`kill(pid, 0)`, POSIX's
+/// existence-without-signalling probe): success or `EPERM` (it exists but is owned by someone
+/// else) both mean alive; `ESRCH` (no such process) means dead. Any other, unexpected errno is
+/// treated as "alive" so the sweep stays conservative and never removes a directory it isn't sure
+/// about.
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: `kill` with signal 0 sends no signal; it only probes for the process's existence and
+    // permission to signal it, per POSIX.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Runs [`sweep_stale_replay_dirs_in`] over the system temp dir exactly once per process.
+fn sweep_stale_replay_dirs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        sweep_stale_replay_dirs_in(&std::env::temp_dir(), STALE_REPLAY_DIR_AGE);
+    });
+}
+
+/// RAII cleanup for a [`temp_data_dir`] (T-229): removes it recursively when dropped during a
+/// normal return, tearing down anything inside it — including a pre-allocated IQ capture ring
+/// (`ring.ci8`, which can be many GB) — with the directory itself. When the owning thread is
+/// unwinding from a panic (a failed `assert!`/`assert_eq!`), the directory is left in place and
+/// its path printed to stderr instead, so a developer can inspect the run's database, IQ ring and
+/// recordings that produced the failure. A run that is killed outright (no unwind at all, e.g.
+/// SIGKILL or a hard process abort) leaves its directory too; [`sweep_stale_replay_dirs`] reclaims
+/// those later once their pid is dead and they've aged past [`STALE_REPLAY_DIR_AGE`].
+pub struct TempDataDirGuard(PathBuf);
+
+impl TempDataDirGuard {
+    /// Guards `dir` (typically a [`temp_data_dir`]) for cleanup on drop.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self(dir.into())
+    }
+
+    /// The guarded directory.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDataDirGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "T-229: test failed; keeping temp data dir for inspection: {}",
+                self.0.display()
+            );
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// The API token: `configured`, else `HK_TOKEN`, else the token file
@@ -1695,20 +1804,21 @@ mod tests {
         .filter_map(|name| lfs_fixture(name).map(|f| (name, f)))
         .map(|(name, fixture)| {
             let dir = temp_data_dir();
+            let guard = TempDataDirGuard::new(dir.clone());
             let (tx, rx) = std::sync::mpsc::channel();
             let args = ReplayArgs {
                 fixture,
-                data_dir: Some(dir.clone()),
+                data_dir: Some(dir),
                 ..ReplayArgs::default()
             };
             // A deadlocked run leaks its thread; the timeout fails the test instead of hanging.
             std::thread::spawn(move || {
                 let _ = tx.send(run_replay(&args).map_err(|e| format!("{e:#}")));
             });
-            (name, dir, rx)
+            (name, guard, rx)
         })
         .collect();
-        for (name, dir, rx) in runs {
+        for (name, _guard, rx) in runs {
             let summary = rx
                 .recv_timeout(LIMIT)
                 .unwrap_or_else(|_| panic!("{name}: hk replay did not finish (gate deadlock)"))
@@ -1726,7 +1836,6 @@ mod tests {
                     "{name}: {r} read every sample"
                 );
             }
-            let _ = std::fs::remove_dir_all(dir);
         }
     }
 
@@ -1749,6 +1858,7 @@ mod tests {
     #[test]
     fn replay_runs_a_small_recording_end_to_end() {
         let dir = temp_data_dir();
+        let _guard = TempDataDirGuard::new(dir.clone());
         let fixture = tiny_recording(&dir.join("src"), 0.25);
         let summary = run_replay(&ReplayArgs {
             fixture,
@@ -1763,13 +1873,13 @@ mod tests {
         assert!(dir.join("hackriff.db").is_file());
         let text = summary.to_text();
         assert!(text.contains("detections:"), "{text}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn daemon_drives_the_scheduler_and_serves_token_gated_status() {
         const TOKEN: &str = "t027-daemon-status-token-0123456789";
         let dir = temp_data_dir();
+        let _guard = TempDataDirGuard::new(dir.clone());
         let fixture = tiny_recording(&dir.join("src"), 3.0);
         // Paced (T-072): the control thread ticks the scheduler on wall time with the stream
         // time, so an unpaced replay could outrun it under load and apply too few steps (a
@@ -1808,12 +1918,12 @@ mod tests {
             Some(summary.counter("/source/samples"))
         );
         drop(server);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn daemon_loop_continues_the_stream_across_passes() {
         let dir = temp_data_dir();
+        let _guard = TempDataDirGuard::new(dir.clone());
         let fixture = tiny_recording(&dir.join("src"), 0.25);
         let mut args = daemon_args(
             format!("sigmf:{}", fixture.display()),
@@ -1855,16 +1965,19 @@ mod tests {
             "each pass starts with a GAP reset"
         );
         drop(server);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn daemon_rejects_unsupported_sources_and_live_loop_options() {
-        let err = start_daemon(&daemon_args("bogus".into(), temp_data_dir(), None))
+        let bogus_dir = temp_data_dir();
+        let _bogus_guard = TempDataDirGuard::new(bogus_dir.clone());
+        let err = start_daemon(&daemon_args("bogus".into(), bogus_dir, None))
             .err()
             .expect("rejected");
         assert!(err.to_string().contains("sigmf:"), "{err}");
-        let mut live = daemon_args("hackrf".into(), temp_data_dir(), None);
+        let live_dir = temp_data_dir();
+        let _live_guard = TempDataDirGuard::new(live_dir.clone());
+        let mut live = daemon_args("hackrf".into(), live_dir, None);
         live.loop_replay = true;
         let err = start_daemon(&live).err().expect("a radio cannot loop");
         assert!(err.to_string().contains("--loop"), "{err}");
@@ -1932,6 +2045,7 @@ mod tests {
     #[test]
     fn mock_device_specs_open_like_a_radio_with_the_band_class() {
         let dir = temp_data_dir();
+        let _guard = TempDataDirGuard::new(dir.clone());
         let fixture = tiny_recording(&dir.join("src"), 1.0);
         let spec = format!("mock:{}", fixture.display());
         assert!(is_device_spec(&spec) && is_device_spec("hackrf") && !is_device_spec("sigmf:x"));
@@ -1999,12 +2113,12 @@ mod tests {
         let s = lp.handle.wait().unwrap();
         assert!(s.errors.is_empty(), "{:?}", s.errors);
         assert!(s.counter("/source/samples") > 0);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn daemon_runs_over_a_mock_device_spec() {
         let dir = temp_data_dir();
+        let _guard = TempDataDirGuard::new(dir.clone());
         let fixture = tiny_recording(&dir.join("src"), 0.5);
         let mut args = daemon_args(
             format!("mock:{}", fixture.display()),
@@ -2035,6 +2149,5 @@ mod tests {
         assert!(s.errors.is_empty(), "{:?}", s.errors);
         assert!(control.stats().unwrap().samples > 0);
         drop(server);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

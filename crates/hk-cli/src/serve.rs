@@ -257,6 +257,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::pipeline::TempDataDirGuard;
     use hk_api::stream::{Publisher, PublisherConfig};
     use hk_core::{HackRfDriver, SourceDriver};
 
@@ -316,6 +317,7 @@ mod tests {
     #[test]
     fn a_fresh_server_with_no_source_input_has_an_empty_inventory() {
         let dir = temp_data_dir();
+        let _guard = TempDataDirGuard::new(dir.clone());
         let path = empty_recording(&dir.join("src"));
         let Serving {
             server,
@@ -363,7 +365,6 @@ mod tests {
         assert_eq!(summary.counter("/source/samples"), 0);
         check_empty();
         drop(server);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -371,12 +372,14 @@ mod tests {
         if HackRfDriver.available() {
             return;
         }
+        let dir = temp_data_dir();
+        let _guard = TempDataDirGuard::new(dir.clone());
         let err = start(&ServeOptions {
             source: ServeSource::HackRf {
                 spec: "hackrf".into(),
                 live: LiveArgs::default(),
             },
-            data_dir: Some(temp_data_dir()),
+            data_dir: Some(dir),
             bind: "127.0.0.1:0".parse().unwrap(),
             ui_dist: None,
             fft_len: 1024,

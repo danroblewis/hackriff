@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use hk_cli::pipeline::{LiveArgs, temp_data_dir};
+use hk_cli::pipeline::{LiveArgs, TempDataDirGuard, temp_data_dir};
 use hk_cli::serve::{ServeOptions, ServeSource, Serving, start};
 use hk_core::NamedGain;
 
@@ -42,6 +42,7 @@ fn get(addr: SocketAddr, path: &str) -> (u16, serde_json::Value) {
 #[ignore = "needs a HackRF One and FM broadcast reception (run with --ignored)"]
 fn live_serve_inventory_shows_real_fm_detections() {
     let dir = temp_data_dir();
+    let _guard = TempDataDirGuard::new(dir.clone());
     let Serving {
         server,
         handle,
@@ -152,5 +153,4 @@ fn live_serve_inventory_shows_real_fm_detections() {
         "samples flowed"
     );
     assert!(!fm.is_empty(), "real FM detections in the inventory");
-    let _ = std::fs::remove_dir_all(dir);
 }
