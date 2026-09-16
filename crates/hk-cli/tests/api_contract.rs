@@ -288,6 +288,77 @@ fn taxonomy_route_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-201 (ADR-0016 §5): `GET /api/signatures/match?emitter=<id>` answers as `docs/api.md`
+/// documents it. The match is ranked evidence about an emitter, never an identity, so the shape
+/// carries the arithmetic (per-field `z`, what is missing, what conflicts) and nothing that could
+/// name the emitter.
+#[test]
+fn signature_match_route_answers_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // `emitter` is required, and an unparsable or unknown id is a 404 — never a 200 that could be
+    // probed for which ids exist.
+    let (st, v) = get(addr, "/api/signatures/match");
+    assert_eq!(st, 400, "{v}");
+    assert_eq!(v["code"], "invalid", "{v}");
+    let (st, v) = get(addr, "/api/signatures/match?emitter=not-an-id");
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(v["code"], "not_found", "{v}");
+    let unknown = EmitterId::new();
+    let (st, v) = get(addr, &format!("/api/signatures/match?emitter={unknown}"));
+    assert_eq!(st, 404, "{v}");
+
+    // A real emitter from the fixture: the documented shape, whether or not the catalogue has
+    // anything to say about it (an empty catalogue is the normal case on a fresh server).
+    let (st, inv) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{inv}");
+    if let Some(row) = inv["emitters"].as_array().and_then(|r| r.first()) {
+        let id = row["id"].as_str().expect("an inventory row has an id");
+        let (st, v) = get(addr, &format!("/api/signatures/match?emitter={id}"));
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["emitter"], id, "{v}");
+        assert!(is_array(&v["history"]), "{v}");
+        assert!(
+            v["match"].is_null() || v["match"].is_object(),
+            "match is a SignatureMatch or null: {v}"
+        );
+        if let Some(m) = v["match"].as_object() {
+            let outcome = m["outcome"].as_str().unwrap_or_default();
+            assert!(
+                ["full", "partial", "none"].contains(&outcome),
+                "outcome: {outcome}"
+            );
+            assert!(is_array(&m["candidates"]), "{v}");
+            assert!(is_array(&m["reasons"]), "{v}");
+            // `none` carries no candidates; anything else carries at least one.
+            assert_eq!(
+                m["candidates"].as_array().unwrap().is_empty(),
+                outcome == "none",
+                "{v}"
+            );
+            for c in m["candidates"].as_array().unwrap() {
+                assert!(c["signature"]["id"].is_string(), "{c}");
+                assert!(c["score"].is_number(), "{c}");
+                assert!(is_array(&c["agreement"]), "{c}");
+                assert!(is_array(&c["missing"]), "{c}");
+                assert!(is_array(&c["conflicting"]), "{c}");
+            }
+            // A match never carries an identity or a status: it explains, it does not name.
+            for forbidden in ["identity", "known_status", "lifecycle"] {
+                assert!(m.get(forbidden).is_none(), "{forbidden} leaked: {v}");
+            }
+        }
+    }
+
+    // GET only.
+    let (st, _) = post(addr, "/api/signatures/match", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = put(addr, "/api/signatures/match", "{}");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
 #[test]
 fn discovery_history_floor_status_and_control_state_have_the_documented_shape() {
     let (_dir_guard, serving, addr) = start_server();

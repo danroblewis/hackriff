@@ -24,3 +24,7 @@ uuid.workspace = true
 hk-core.workspace = true
 hk-e2e = { path = "../../tests/e2e" }
 num-complex.workspace = true
+# T-201: the C18 blind signature test measures a generated emission with the classifier and the
+# `features@1` vector, then matches only what it measured. Dev-only: nothing in hk-context's build
+# depends on the classifier.
+hk-classify.workspace = true

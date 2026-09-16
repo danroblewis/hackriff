@@ -83,6 +83,7 @@ mod same_emission_tests;
 mod selections;
 #[cfg(test)]
 mod signature_tests; // T-218
+mod signatures; // T-201
 pub mod sites; // T-119
 #[cfg(test)]
 mod tests;
@@ -130,6 +131,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0007_classification.sql"), // T-211 M3 classification columns
     include_str!("migrations/0008_emitter_relation.sql"), // T-219 C40 signal relationships
     include_str!("migrations/0009_signature.sql"), // T-218 C18 signature storage
+    include_str!("migrations/0010_emission_features.sql"), // T-201 C18 measured features
 ];
 
 /// Schema version this build creates and understands.

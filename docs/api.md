@@ -455,6 +455,27 @@ The modulation taxonomy and the decision thresholds **as data**, so the thin cli
 - **`thresholds`**: `{"version": "thresholds@1", "max_confidence", "lambda0_min", "families": [{"family", "snr_gate_db", "class_gate_db", "min_confidence", "open_set_max"}]}`. `snr_gate_db` is `null` for a family with no SNR gate (`noise-like` is a shape test). Below its gate a family contributes no likelihood mass — its share moves to `unknown` with reason `low_snr`, because "not measured" is not "ruled out". `max_confidence` (0.999) is the cap that keeps any call from being reported as certain; `lambda0_min` (0.1) is the smallest uniform weight a C17 prior may carry, which is what stops a band-plan prior from driving a family to zero.
 - **Reference data, not measurement.** No emitter, detection or identity is reachable through this route, and it pre-populates nothing: what was actually *found* comes from `/api/inventory`, always from blind detection first. Errors: `405` (other methods), `401` (token).
 
+## Signature matches (T-201, ADR-0016 §5)
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/api/signatures/match` | `?emitter=<id>` | `{"emitter", "match": SignatureMatch \| null, "history": [SignatureMatch, ...]}` |
+
+What the **editable signature catalogue** has to say about one emitter's measured parameters. Code: `hk_model::signature` (the types and their storage), `hk_context::signature` (feature aggregation and the matcher), `crates/hk-api/src/signatures.rs` (this route).
+
+- **Evidence, never identity.** A match sets no identity, no `known_status`, no lifecycle state and no family — nothing on the emitter changes because of it. It is a ranked, reasoned suggestion beside the measurement, exactly like a band-plan prior, and a client must present it that way. Only a CRC-valid decode confirms a signal. The catalogue is never the starting point and never overrides what was measured (the exploration-first rule).
+- **`SignatureMatch`**: `{schema, emitter_id, t, outcome, features_ref, signatures_rev, candidates: [...], reasons: [...]}`.
+  - **`outcome`** is `full`, `partial` or `none`. **`none` means the catalogue has nothing to say — not that the emission is unknown.**
+  - **`candidates`** (≤ 5, best first, empty on `none`): `{signature: {id, version}, name, score, agreement: [{field, measured, expected, z, ok}], missing: [...], conflicting: [...], recipe: {id, version}?}`. `z` is a normalised distance, so `z ≤ 1` (`ok`) is agreement whatever the field's units and `z > 3` is an active conflict. `missing` names the required fields not measured yet — what a decoder search should go and estimate next; `conflicting` names the fields that actively disagree.
+  - **`score`** (0–1) is `Σ w·exp(−z²/2) / Σ w_required`: the weighted agreement of every compared field over the weight of every *required* field. Missing required fields contribute nothing to the numerator while still counting in the denominator, so a measurement with few fields scores low by construction. It ranks candidates against each other on one measurement; it is not a probability that the emission *is* that protocol.
+  - **`reasons`** are machine codes: `too_few_fields`, `missing_required`, `ambiguous_candidates`, `conflicting_required`, `all_suspect`, `no_candidate`.
+  - **`features_ref`** names the `EmissionFeatures` snapshot it was computed from and **`signatures_rev`** the catalogue revision, so any match can be re-derived exactly.
+- **Too few fields never identify anything.** A `full` match needs every required field measured and agreeing, at least three of them (a floor the matcher enforces regardless of what a catalogue entry declares, since imports are untrusted), and a score ≥ 0.8. Anything less is a ranked `partial`. When two entries both fit completely — the P25/DMR near-collision, where both run at 4800 Bd and differ only in deviation and sync word — neither wins: the outcome is `partial` with both ranked and the reason `ambiguous_candidates`.
+- **Mismatches are interesting.** An emission whose parameters sit beside a known protocol's without fitting it stays a `partial` with the conflicting fields named, never snapped to the nearest entry. Bands are rank-only and gate nothing, so an emission in the "wrong" band still matches and is visibly off-band; a different modulation family does rule an entry out, while an `unknown` family rules nothing out.
+- **`history`** is the append-only match log, newest first (≤ 50), so what the catalogue said about this emitter over time is kept rather than overwritten. A new row is appended only when the outcome or top candidate changes.
+- **Gating.** Like `/api/inventory/{id}/decode`, an emitter whose decoded identity is withheld answers exactly as one with no matches — no flag, no count, no marker — so a match listing can never confirm a withheld identity. An emitter with no decoded identity is served normally.
+- **Errors** `{"error", "code"}`: `400 invalid` (no `emitter`), `404 not_found` (unknown or unparsable id), `503 unavailable` (this server has no inventory), `500 failed` (storage), `405` other methods.
+
 ## Labelled-capture dataset export (T-205, ADR-0016 §7/§9)
 
 The path from live captures to a training/evaluation set: normalised IQ snippets, each with a `hk-mod@1` label and provenance, for later model fine-tuning (C38) and blind evaluation (T-213). Code: `hk_store::dataset` (label-finding and the manifest shape), `crates/hk-api/src/datasets.rs` (routes).
