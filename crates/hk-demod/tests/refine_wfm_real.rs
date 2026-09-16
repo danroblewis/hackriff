@@ -7,7 +7,8 @@ mod common;
 
 use common::*;
 use hk_demod::refine::{
-    IqWindow, LoopConfig, RefineStart, RefinementLoop, Tuning, WfmObjective, refine_wfm,
+    EvalDepth, IqWindow, LoopConfig, Objective, RefineStart, RefinementLoop, Tuning, WfmObjective,
+    refine_wfm,
 };
 use hk_e2e::Fixture;
 
@@ -118,4 +119,57 @@ fn wfm_refinement_on_the_recorded_station() {
         !l.accept(Some(&first), &again),
         "no retune on estimation noise"
     );
+}
+
+/// T-226, the T-188 case: a probe centre a few kHz off the carrier puts an acquisition grid point
+/// one 50 kHz step away, where the WFM channel filter sits beside the carrier — it cuts MPX noise
+/// while the 19 kHz pilot survives, so the 0.1 s acquisition window can read a *higher* pilot C/N0
+/// there than at the station itself, and that decoy's own MPX mean points back at the station by
+/// more than one step (−52.9 kHz). Acquisition used to discard such a correction, leaving the
+/// search one step off the carrier; it is now clamped to one step and re-measured, so the search
+/// reaches the station instead of merely refusing the decoy.
+#[test]
+fn an_acquisition_decoy_one_step_off_the_carrier_still_reaches_the_station() {
+    let (meta, data) = fixture_or_skip!(NAME);
+    let fx = Fixture::load(&meta).unwrap();
+    let prov = meta_provenance(&meta);
+    let station = fx.of_kind("wfm-broadcast")[0];
+    let truth = station.expect_f64("/center_hz");
+    let iq = read_ci8(&data);
+    let n = (1.0 * prov.tune.sample_rate_hz) as usize;
+    let window = IqWindow::new(info(0, &prov), &iq[..n]);
+
+    // What the shallow acquisition window sees at the carrier and one grid step either side.
+    let mut obj = WfmObjective::default();
+    for off in [-50e3, 0.0, 50e3] {
+        let t = Tuning {
+            center_hz: truth + off,
+            bandwidth_hz: 200e3,
+            ..Tuning::default()
+        };
+        let m = obj
+            .evaluate(window.leading(0.1), &t, EvalDepth::Acquire)
+            .unwrap();
+        eprintln!(
+            "acquire {off:+.0} Hz: locked {}, quality {:.1} dB-Hz, correction {:?}",
+            m.locked, m.quality, m.center_correction_hz
+        );
+    }
+
+    // The probe centre of the T-188 failure: 2.8 kHz above the carrier, so the grid offers the
+    // station at +2.8 kHz and the decoy at +52.8 kHz.
+    let start = RefineStart {
+        center_hz: truth + 2_800.0,
+        bandwidth_hz: 200e3,
+        warm: false,
+    };
+    let o = refine_wfm(window, &start);
+    let err = o.tuning.center_hz - truth;
+    eprintln!(
+        "T-226: centre error {err:+.0} Hz, bandwidth {:.0} Hz, locked {}, validated {}, converged \
+         {}, stop {:?}, {} evaluations",
+        o.tuning.bandwidth_hz, o.locked, o.validated, o.converged, o.stop, o.evaluations
+    );
+    assert!(o.locked && o.validated, "{o:?}");
+    assert!(err.abs() <= 2_000.0, "centre error {err} Hz");
 }

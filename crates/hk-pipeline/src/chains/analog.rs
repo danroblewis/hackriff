@@ -268,6 +268,7 @@ pub(crate) fn run(
     };
     let mut probe_mode = None;
     let mut probe_refined = None;
+    let mut probe_center = None;
     if probe > 0 && probe < want {
         collect(&mut cr, &rx, &mut w, probe);
         if w.iq.len() < probe {
@@ -289,12 +290,24 @@ pub(crate) fn run(
                 // no chain's channel holds it. Refine from where the probe found it and decide by
                 // the refined centre ([`owns`]).
                 if mode_ok && pilot_ok && !in_channel {
-                    probe_refined =
-                        refine_window(&w, probe, s.rf_center_hz, node.bandwidth_hz, s.mode.mode)
-                            .filter(|o| owns(&node, channel_center, o.tuning.center_hz));
-                    accepted = probe_refined.as_ref().is_some_and(|o| {
-                        claim_emission(&shared, &node, channel_center, o.tuning.center_hz)
-                    });
+                    let refined =
+                        refine_window(&w, probe, s.rf_center_hz, node.bandwidth_hz, s.mode.mode);
+                    let emission = off_channel_emission(
+                        &node,
+                        channel_center,
+                        s.rf_center_hz,
+                        refined.as_ref(),
+                    );
+                    accepted =
+                        emission.is_some_and(|c| claim_emission(&shared, &node, channel_center, c));
+                    if accepted {
+                        match refined {
+                            Some(o) => probe_refined = Some(o),
+                            // T-226: no validated refinement, so the full window refines from
+                            // where the probe found the emission rather than from this channel.
+                            None => probe_center = Some(s.rf_center_hz),
+                        }
+                    }
                 }
                 if crate::debug_enabled() {
                     eprintln!(
@@ -360,6 +373,7 @@ pub(crate) fn run(
         want,
         probe_mode,
         probe_refined,
+        probe_center,
     );
     if let Some(join) = recorder {
         let _ = join.join();
@@ -555,6 +569,27 @@ fn owns(node: &AnalogNode, channel_center: f64, refined_hz: f64) -> bool {
     (refined_hz - nearest).abs() > ON_RASTER_FRACTION * raster && d.abs() < raster
 }
 
+/// The emission a chain takes from a probe that found its mode *outside* this channel (T-070):
+/// a validated refinement decides, by whether this chain [`owns`] the centre it measured; without
+/// one, the probe's own centre stands when this chain owns that.
+///
+/// T-226: the probe used to drop the chain whenever the refinement did not validate, so an
+/// off-raster station the probe had already demodulated was never identified at all (T-186) —
+/// the refinement's own budget could decide whether a station exists. The probe centre is measured
+/// evidence (the receiver's carrier estimate on the probe window), and the full window refines
+/// from it again; only ownership, never a band plan, decides whose chain it is.
+fn off_channel_emission(
+    node: &AnalogNode,
+    channel_center: f64,
+    probe_hz: f64,
+    refined: Option<&RefinementOutcome>,
+) -> Option<f64> {
+    match refined {
+        Some(o) => owns(node, channel_center, o.tuning.center_hz).then_some(o.tuning.center_hz),
+        None => owns(node, channel_center, probe_hz).then_some(probe_hz),
+    }
+}
+
 /// Refines `mode` on the window's first `len` samples from a box at `center_hz` / `bandwidth_hz`
 /// (T-070); the locked result, else `None`.
 fn refine_window(
@@ -600,8 +635,9 @@ fn refine_window(
 }
 
 /// Collects the rest of the window, refines, demodulates and writes the session. The refinement
-/// starts from the probe's refined result when the probe needed one, else from the attach channel,
-/// and must stay owned by this chain.
+/// starts from the probe's refined result when the probe needed one, else from the probe's own
+/// centre when the probe found the emission outside this channel without a validated refinement
+/// (T-226), else from the attach channel; it must stay owned by this chain.
 #[allow(clippy::too_many_arguments)]
 fn collect_and_write(
     shared: &Arc<Shared>,
@@ -613,17 +649,18 @@ fn collect_and_write(
     want: usize,
     probe_mode: Option<AnalogMode>,
     probe_refined: Option<RefinementOutcome>,
+    probe_center: Option<f64>,
 ) {
     let fs = shared.fs;
     let c = &shared.counters.chains;
     let channel_center = 0.5 * (cand.f_lo_hz + cand.f_hi_hz);
     // The refinement reads only the leading `RefineSettings::window_s` of the window.
     let refine_leading = |w: &Window, m: AnalogMode| {
-        let (start, width) = probe_refined
-            .as_ref()
-            .map_or((channel_center, cand.f_hi_hz - cand.f_lo_hz), |p| {
-                (p.tuning.center_hz, 0.0)
-            });
+        let (start, width) = match (probe_refined.as_ref(), probe_center) {
+            (Some(p), _) => (p.tuning.center_hz, 0.0),
+            (None, Some(c)) => (c, node.bandwidth_hz),
+            (None, None) => (channel_center, cand.f_hi_hz - cand.f_lo_hz),
+        };
         refine_window(w, w.iq.len(), start, width, m)
             .or_else(|| probe_refined.clone())
             .filter(|o| owns(node, channel_center, o.tuning.center_hz))
@@ -640,7 +677,9 @@ fn collect_and_write(
             // T-071: one chain per emission, even when a neighbour's chain refined to it too.
             let emission = refined
                 .as_ref()
-                .map_or(channel_center, |o| o.tuning.center_hz);
+                .map_or(probe_center.unwrap_or(channel_center), |o| {
+                    o.tuning.center_hz
+                });
             if !claim_emission(shared, node, channel_center, emission) {
                 return;
             }
@@ -664,7 +703,9 @@ fn collect_and_write(
             // T-071: one chain per emission, even when a neighbour's chain refined to it too.
             let emission = refined
                 .as_ref()
-                .map_or(channel_center, |o| o.tuning.center_hz);
+                .map_or(probe_center.unwrap_or(channel_center), |o| {
+                    o.tuning.center_hz
+                });
             if !claim_emission(shared, node, channel_center, emission) {
                 return;
             }
@@ -806,6 +847,60 @@ mod tests {
         assert!(
             !owns(&unbounded, ch, 101.45e6),
             "beyond half the bandwidth off a raster"
+        );
+    }
+
+    fn outcome(center_hz: f64) -> RefinementOutcome {
+        RefinementOutcome {
+            provenance: String::new(),
+            objective: "test@1".into(),
+            mode: "wfm".into(),
+            start: Tuning::default(),
+            tuning: Tuning {
+                center_hz,
+                bandwidth_hz: 200e3,
+                mode: Default::default(),
+            },
+            quality: 50.0,
+            locked: true,
+            validated: true,
+            converged: true,
+            stop: hk_demod::refine::StopReason::Completed,
+            iterations: 1,
+            evaluations: 1,
+            elapsed_s: 0.0,
+            mode_params: Default::default(),
+            labels: Default::default(),
+            trace: Vec::new(),
+        }
+    }
+
+    /// T-226: a probe that found its mode outside this channel keeps the emission when the
+    /// refinement does not validate — the chain continues from the probe's own centre and
+    /// identifies the station (T-186) instead of stopping. A validated refinement still decides.
+    #[test]
+    fn an_off_channel_probe_falls_back_to_its_own_centre_without_a_validated_refinement() {
+        let n = node(200e3);
+        let ch = 101.3e6;
+        assert_eq!(
+            off_channel_emission(&n, ch, 101.4495e6, None),
+            Some(101.4495e6),
+            "off raster beside this channel: this chain takes it"
+        );
+        assert_eq!(
+            off_channel_emission(&n, ch, 101.5e6, None),
+            None,
+            "on the neighbour's raster channel: not ours"
+        );
+        assert_eq!(
+            off_channel_emission(&n, ch, 101.4495e6, Some(&outcome(101.45e6))),
+            Some(101.45e6),
+            "a validated refinement decides where the emission is"
+        );
+        assert_eq!(
+            off_channel_emission(&n, ch, 101.4495e6, Some(&outcome(101.5e6))),
+            None,
+            "a refinement onto the neighbour's channel is not rescued by the probe centre"
         );
     }
 }

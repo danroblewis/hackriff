@@ -30,8 +30,9 @@
 //! # The search (strategy and termination)
 //!
 //! 1. **Acquire** (skipped on a warm start): the centre grid at the nominal bandwidth, nearest the
-//!    start first; the best locked candidate wins, nudged by its centre correction when that is
-//!    within one grid step.
+//!    start first; the best locked candidate wins, nudged by its centre correction. A correction
+//!    larger than one grid step is clamped to one step, as tracking clamps it, and re-measured:
+//!    the corrected centre stands only when it locks too.
 //! 2. **Track**: re-measure and apply the centre correction until it is within
 //!    [`Termination::center_tolerance_hz`] (or the iteration limit). An objective without a
 //!    centre estimator gets a shrinking three-point local search on quality instead.
@@ -42,8 +43,15 @@
 //! 5. **Validate**: one full measurement at the result; its centre correction is applied once more
 //!    and its quality, mode parameters and labels are the outcome's.
 //!
+//! **A lock is a validated lock.** [`RefinementOutcome::locked`] means the returned tuning was
+//! itself measured at [`EvalDepth::Validate`] and that measurement locked. An earlier phase's
+//! result never vouches for it: acquisition measures a short window, where a centre one grid step
+//! off the carrier can read a *higher* quality than the true centre, and reporting that as a lock
+//! retuned live audio 52 kHz off a station (T-188). A search the budget stops before validation is
+//! likewise unvalidated, however well an earlier phase measured (T-226).
+//!
 //! Every measurement checks [`Termination::max_evaluations`] and [`Termination::time_budget`]
-//! first; a stopped search returns its best result so far with the [`StopReason`]. The CPU used is
+//! first; a stopped search returns its best result so far with the [`StopReason`], unlocked. The CPU used is
 //! bounded by those two limits and the [`WindowPlan`] lengths, and the loop only reads the slice it
 //! is given: callers copy ring data into a window and run the loop off the ring reader's thread
 //! (or between reads), live or on replay alike.
@@ -428,8 +436,15 @@ pub struct RefinementOutcome {
     pub tuning: Tuning,
     /// Quality at the result.
     pub quality: f64,
-    /// The result's output locked.
+    /// The result's output locked *at validation depth*: the returned tuning was itself measured
+    /// over [`WindowPlan::validate_s`] and that measurement locked. Nothing may retune to an
+    /// unlocked result (T-188, T-226).
     pub locked: bool,
+    /// The returned tuning was measured at [`EvalDepth::Validate`]. False when the budget
+    /// ([`Termination::max_evaluations`], [`Termination::time_budget`]) stopped the search before
+    /// validation, or nothing locked; [`Self::locked`] then cannot be true.
+    #[serde(default)]
+    pub validated: bool,
     /// The centre converged within tolerance and the validation locked.
     pub converged: bool,
     /// Why the search ended.
@@ -573,15 +588,35 @@ impl<O: Objective> RefinementLoop<O> {
                 found = Some((t, m));
             }
         }
-        found.map(|(mut t, m)| {
-            if let Some(d) = m
-                .center_correction_hz
-                .filter(|d| d.abs() <= space.center_step_hz)
-            {
-                t.center_hz = space.clamp_center(t.center_hz + d);
+        let (mut t, m) = found?;
+        // The correction is applied the way tracking applies it — clamped to one grid step, never
+        // discarded (T-226: acquisition discarded an over-step correction while tracking clamped
+        // the same quantity). Discarding it left the T-188 decoy in place: a WFM channel filter
+        // one step beside the carrier cuts MPX noise while the 19 kHz pilot survives, so the short
+        // acquisition window can read a *higher* C/N0 there than at the true centre, and the
+        // decoy's own estimator pointed back at the emission by more than one step.
+        //
+        // An over-step correction is re-measured, and the corrected centre stands only when it
+        // locks as well: a correction read off a spurious lock may not drag a good centre away.
+        let step = space.center_step_hz;
+        if let Some(d) = m.center_correction_hz {
+            let c = space.clamp_center(t.center_hz + d.clamp(-step, step));
+            if d.abs() <= step {
+                t.center_hz = c;
+            } else if c != t.center_hz {
+                let corrected = Tuning {
+                    center_hz: c,
+                    ..t.clone()
+                };
+                if let Some(n) =
+                    self.eval(run, window, &corrected, EvalDepth::Acquire, Phase::Acquire)
+                    && n.locked
+                {
+                    return Some((corrected, n));
+                }
             }
-            (t, m)
-        })
+        }
+        Some((t, m))
     }
 
     /// Runs the search on `window` from `start`.
@@ -626,7 +661,7 @@ impl<O: Objective> RefinementLoop<O> {
                     tuning = t;
                     last = Some(m);
                 }
-                None => return self.finish(run, start_tuning, None, None, false),
+                None => return self.finish(run, start_tuning, None, None, false, false),
             }
         }
 
@@ -648,7 +683,7 @@ impl<O: Objective> RefinementLoop<O> {
                             last = Some(m);
                             continue;
                         }
-                        None => return self.finish(run, start_tuning, None, None, false),
+                        None => return self.finish(run, start_tuning, None, None, false, false),
                     }
                 }
                 break;
@@ -690,7 +725,7 @@ impl<O: Objective> RefinementLoop<O> {
             }
         }
         if last.as_ref().is_none_or(|m| !m.locked) {
-            return self.finish(run, start_tuning, None, None, false);
+            return self.finish(run, start_tuning, None, None, false, false);
         }
 
         // 3. Bandwidth: the narrowest at or above the occupied bandwidth within tolerance of the
@@ -769,15 +804,16 @@ impl<O: Objective> RefinementLoop<O> {
         }
 
         // 5. Validate.
-        let validated = self.eval(
+        let validation = self.eval(
             &mut run,
             window,
             &tuning,
             EvalDepth::Validate,
             Phase::Validate,
         );
+        let validated = validation.is_some();
         let mut validated_locked = false;
-        let final_m = match validated {
+        let final_m = match validation {
             Some(m) => {
                 run.iterations += 1;
                 if m.locked {
@@ -796,10 +832,21 @@ impl<O: Objective> RefinementLoop<O> {
                 // locked refinement (T-188).
                 Some(m)
             }
+            // The budget stopped the search before validation (T-226: `max_evaluations` or
+            // `time_budget`, which CPU load is exactly what triggers). The last measurement was
+            // made at another tuning or another depth and cannot vouch for this one, so the
+            // outcome is reported unvalidated and nothing downstream retunes to it.
             None => last,
         };
         let converged = center_converged && validated_locked;
-        self.finish(run, start_tuning, Some(tuning), final_m, converged)
+        self.finish(
+            run,
+            start_tuning,
+            Some(tuning),
+            final_m,
+            validated,
+            converged,
+        )
     }
 
     fn finish(
@@ -808,9 +855,10 @@ impl<O: Objective> RefinementLoop<O> {
         start: Tuning,
         tuning: Option<Tuning>,
         m: Option<Measurement>,
+        validated: bool,
         converged: bool,
     ) -> RefinementOutcome {
-        let locked = tuning.is_some() && m.as_ref().is_some_and(|m| m.locked);
+        let locked = validated && tuning.is_some() && m.as_ref().is_some_and(|m| m.locked);
         let stop = run.stop.unwrap_or(if locked {
             StopReason::Completed
         } else {
@@ -828,6 +876,7 @@ impl<O: Objective> RefinementLoop<O> {
             start,
             quality: if locked { m.quality } else { QUALITY_FLOOR },
             locked,
+            validated,
             converged,
             stop,
             iterations: run.iterations,
@@ -1557,6 +1606,140 @@ mod tests {
         assert_eq!(o.stop, StopReason::NoLock, "{o:?}");
     }
 
+    /// The T-188 station in miniature: the emission sits 2.9 kHz below the start, and a decoy one
+    /// 50 kHz grid step above it reads a higher C/N0 on the shallow acquisition window (a channel
+    /// filter beside the carrier cuts MPX noise while the pilot survives) while its own estimator
+    /// points back at the emission by more than one step.
+    struct OverStepDecoy;
+
+    /// The emission's centre, relative to the start.
+    const EMISSION_HZ: f64 = -2_900.0;
+    /// The decoy's centre, one acquisition step above the start.
+    const DECOY_HZ: f64 = 50e3;
+
+    impl Objective for OverStepDecoy {
+        fn name(&self) -> &str {
+            "over-step-decoy@1"
+        }
+        fn mode(&self) -> &str {
+            "toy"
+        }
+        fn space(&self, start: &RefineStart, _: f64) -> ParameterSpace {
+            ParameterSpace {
+                center_hz: (start.center_hz - 200e3, start.center_hz + 200e3),
+                center_step_hz: 50e3,
+                bandwidth_hz: (100e3, 220e3),
+                bandwidth_step_hz: 20e3,
+                nominal_bandwidth_hz: 200e3,
+                bandwidth_tolerance: 3.0,
+                mode_axes: Vec::new(),
+            }
+        }
+        fn evaluate<T: IqSample>(
+            &mut self,
+            _: IqWindow<'_, T>,
+            t: &Tuning,
+            depth: EvalDepth,
+        ) -> Result<Measurement, DemodError> {
+            let off = EMISSION_HZ - t.center_hz;
+            let on_emission = off.abs() < 20e3;
+            let decoy = depth == EvalDepth::Acquire && (t.center_hz - DECOY_HZ).abs() < 1.0;
+            Ok(Measurement {
+                quality: if decoy {
+                    60.0
+                } else if on_emission {
+                    50.0
+                } else {
+                    QUALITY_FLOOR
+                },
+                locked: on_emission || decoy,
+                center_correction_hz: Some(off),
+                ..Measurement::default()
+            })
+        }
+    }
+
+    /// Acquisition's centre correction is clamped to one grid step and re-measured, as tracking
+    /// clamps it — discarding an over-step correction left the decoy's centre one step off the
+    /// emission, and the search never reached the station it had already estimated (T-226).
+    #[test]
+    fn an_over_step_acquisition_correction_is_clamped_back_onto_the_emission() {
+        let p = prov();
+        let x = vec![Complex32::default(); 16];
+        let start = RefineStart {
+            center_hz: 0.0,
+            bandwidth_hz: 200e3,
+            warm: false,
+        };
+        let o =
+            RefinementLoop::new(OverStepDecoy, LoopConfig::default()).run(window(&p, &x), &start);
+        let err = o.tuning.center_hz - EMISSION_HZ;
+        assert!(o.locked && o.validated && o.converged, "{o:?}");
+        assert!(err.abs() <= 250.0, "centre error {err} Hz: {o:?}");
+        assert!(
+            o.trace
+                .iter()
+                .any(|s| s.phase == Phase::Acquire && (s.center_hz - DECOY_HZ).abs() < 1.0),
+            "the decoy was acquired and corrected away from: {o:?}"
+        );
+    }
+
+    /// The budget (`max_evaluations`, `time_budget` — CPU load is what exhausts them) can stop the
+    /// search before validation. An earlier phase's locked measurement was made at another tuning
+    /// or another depth and never vouches for the returned one, so the outcome is not locked and
+    /// nothing downstream may retune to it (T-226; the same false positive as T-188).
+    #[test]
+    fn a_budget_that_skips_validation_never_reports_a_lock() {
+        let p = prov();
+        let x = vec![Complex32::default(); 16];
+        let start = RefineStart {
+            center_hz: 1_500.0,
+            bandwidth_hz: 5e3,
+            warm: false,
+        };
+        let toy = || Toy {
+            with_estimator: true,
+        };
+        let full = RefinementLoop::new(toy(), LoopConfig::default()).run(window(&p, &x), &start);
+        assert!(
+            full.locked && full.validated && full.stop == StopReason::Completed,
+            "the same search validates on a full budget: {full:?}"
+        );
+
+        // Nine acquisition measurements and one locked tracking measurement, then nothing: the
+        // bandwidth scan, the mode axes and the validation are all cut off.
+        let cfg = |t: Termination| LoopConfig {
+            termination: t,
+            ..LoopConfig::default()
+        };
+        let o = RefinementLoop::new(
+            toy(),
+            cfg(Termination {
+                max_evaluations: 10,
+                ..Termination::default()
+            }),
+        )
+        .run(window(&p, &x), &start);
+        assert_eq!(o.stop, StopReason::MaxEvaluations, "{o:?}");
+        assert!(
+            o.trace.iter().any(|s| s.locked),
+            "a stale locked measurement is what could be reported: {o:?}"
+        );
+        assert!(!o.validated && !o.locked && !o.converged, "{o:?}");
+        assert_eq!(o.quality, QUALITY_FLOOR, "{o:?}");
+
+        let o = RefinementLoop::new(
+            toy(),
+            cfg(Termination {
+                time_budget: Duration::from_nanos(1),
+                ..Termination::default()
+            }),
+        )
+        .run(window(&p, &x), &start);
+        assert_eq!(o.stop, StopReason::TimeBudget, "{o:?}");
+        assert!(!o.validated && !o.locked, "{o:?}");
+    }
+
     #[test]
     fn budgets_stop_the_loop_and_nothing_locked_keeps_the_start() {
         let p = prov();
@@ -1613,6 +1796,7 @@ mod tests {
             },
             quality: q,
             locked,
+            validated: locked,
             converged: locked,
             stop: StopReason::Completed,
             iterations: 1,

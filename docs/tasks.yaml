@@ -3466,7 +3466,7 @@ tasks:
   - id: T-217
     milestone: MUI
     title: "T-178 follow-ups: HTTP-level test that serve answers during ring allocation; count samples lost while a large ring allocates; surface the buffer-off library default; measure ring fsync cost on the Jetson"
-    status: todo
+    status: in-progress
     priority: low
     deps: [T-178]
     parallel_group: STORE
@@ -3498,7 +3498,8 @@ tasks:
   - id: T-219
     milestone: M3
     title: "Overlapping-candidate resolution: a Confirmed signal suppresses candidates overlapping its band, and overlapping candidates compete (merge or rank by evidence) so duplicate offset boxes collapse"
-    status: in-progress
+    status: review
+    commit: 59dc92e
     priority: high
     deps: []
     parallel_group: DETECT
@@ -3614,7 +3615,8 @@ tasks:
   - id: T-226
     milestone: M2-hardening
     title: "T-188 review follow-ups: refinement still reports locked from a stale measurement when validate is SKIPPED by budget exhaustion; acquire discards an over-step centre correction while track clamps it; an off-raster probe that no longer validates can stop the chain so T-186 never identifies"
-    status: in-progress
+    status: done
+    commit: 2cbc3b5
     priority: high
     deps: [T-188]
     parallel_group: DEMOD
