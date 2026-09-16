@@ -3227,7 +3227,8 @@ tasks:
   - id: T-201
     milestone: M3
     title: "C18 fingerprint schema + editable signature database + matching (partial matches with ranked candidates)"
-    status: in-progress
+    status: review
+    commit: ab1df6e
     priority: normal
     deps: [T-211]
     parallel_group: M3B
@@ -3318,6 +3319,7 @@ tasks:
     effort: medium
     core_interface: true
     scope_audit_2026_09_15: "deps corrected 2026-09-15: T-212 was listed but is DONE (band-plan priors merged, 4a839c3), and T-235 was missing though it is the ONLY remaining blocker on this gate - the classifier meets its accuracy floors (top-1 0.915 vs 0.90, top-2 0.980 vs 0.95, floors verified unmoved and the sweep guards tightened from 0.70/0.90 to the ADR values), leaving false-known 0.171 vs 0.10 and the two abstaining OTA fixtures, which is T-235's scope."
+    integration_gap_2026_09_15: "T-201 landed signature matching but there is NO hk-pipeline call site yet, so the API route serves matches only once something writes them. T-201 reports `match_emitter()` makes that a one-liner. Whoever runs this gate (or T-215) must wire it, otherwise signature match and unknown-clustering coverage in the acceptance suite will be vacuously empty rather than failing loudly."
 
   - id: T-207
     milestone: M3
