@@ -5441,7 +5441,7 @@ tasks:
     title: 'The synthetic psk-qam grid is ~15 N0 from its own constellation before any
       receiver touches it: an oracle over period, phase and roll-off cannot get below
       12.35%% EVM where a clean control reaches 1.29%%'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: M3A
