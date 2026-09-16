@@ -7141,7 +7141,7 @@ tasks:
     milestone: M2-hardening
     title: 'The two edge navigators control the wrong axes: the vertical must be time-for-this-frequency-range,
       the horizontal frequency-across-the-survey'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-340
