@@ -3333,7 +3333,7 @@ tasks:
   - id: T-207
     milestone: M3
     title: "MUI: classification distribution, unknown score, signature match and cluster id in the focus panel and inventory"
-    status: in-progress
+    status: done
     priority: normal
     deps: [T-199, T-201, T-202]
     parallel_group: MUI-X3
