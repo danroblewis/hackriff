@@ -404,6 +404,24 @@ def test_tsbk_scene_grant_channel_derives_from_the_target_frequency(tmp_path):
     assert t["counts"]["iden-up"] >= 2 and t["counts"]["grant"] >= 1
     assert t["counts"]["grant-unannounced"] >= 1
 
+    # T-269: the followed channel is derived from its frequency the same way, and the scene stages
+    # BOTH span cases -- one grant inside the window the radio holds, one outside it.
+    assert t["base_hz"] + t["spacing_hz"] * t["follow_channel"] == t["follow_target_hz"]
+    assert t["follow_channel_16bit"] == (t["iden"] << 12) | t["follow_channel"]
+    assert t["counts"]["grant-follow"] >= 1
+    usable_half = 0.4 * t["sample_rate_hz"]
+    assert abs(t["follow_offset_hz"]) < usable_half, "the followed grant must be inside the window"
+    assert abs(t["grant_target_offset_hz"]) > usable_half, "the other grant must be outside it"
+    # Keyings are bounded events with silence between them, not a carrier. (How many there are
+    # depends on duration_s, so the shape is asserted, not the count.)
+    keyings = t["follow_keyings_s"]
+    assert keyings, "the followed channel carries no traffic to follow"
+    tol_s = 1.0 / t["sample_rate_hz"]
+    for a, b in keyings[:-1]:
+        assert abs((b - a) - t["follow_on_s"]) <= tol_s
+    gaps = [keyings[i + 1][0] - keyings[i][1] for i in range(len(keyings) - 1)]
+    assert all(g >= t["follow_off_s"] - tol_s for g in gaps)
+
 
 def test_trunk_scene_without_tsbk_is_unchanged_by_the_tsbk_branch(tmp_path):
     """T-267's fixture must be byte-identical: the new branch consumes no randomness when off."""

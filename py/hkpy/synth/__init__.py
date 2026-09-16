@@ -70,7 +70,8 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         trunk_scene.trunk_control_channel, trunk_scene.TRUNK_TSBK_DEFAULTS, (),
         "the same scene carrying real P25 Phase 1 TSBK content: repeated IDEN_UP band-plan "
         "announcements, grants that resolve through them, and a grant naming an identifier that "
-        "is never announced (T-268)"),
+        "is never announced (T-268); plus a granted voice channel inside the window with real "
+        "keyings to follow and a granted channel outside it to refuse (T-269)"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "
