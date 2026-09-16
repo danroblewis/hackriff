@@ -31,6 +31,7 @@ pub mod assist;
 pub mod auth;
 pub mod bridge;
 pub mod captures;
+pub mod classification; // T-247
 pub mod clusters; // T-202
 pub mod control;
 pub mod datasets; // T-205

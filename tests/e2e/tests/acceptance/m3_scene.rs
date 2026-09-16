@@ -172,6 +172,22 @@ fn emitter_state(repo: &Repository, id: EmitterId) -> String {
 /// chain or a decoder carries a bare family string and `detail: None`; it is evidence, but it is
 /// not what §7 measures and it cannot answer "what is the posterior over families, including
 /// unknown".
+///
+/// # Why this reads the emitter's classification **history** and not its current family
+///
+/// This assertion was originally written over `current_classification` and, as T-247 established,
+/// **no honest implementation could satisfy it on this scene.** ADR-0016 §2 ranks a demodulator
+/// chain that locked at rank 2 and the classifier at rank 3, and arbitration is "lowest rank,
+/// latest among equals". Every emitter here is demodulated and CRC-framed by the FSK chain, so the
+/// chain's `2fsk` label *should* own the family — and a C15 row can only become
+/// `current_classification` by taking it away, which would turn `2fsk` into `fsk`, regress the M0/M1
+/// suites that assert the chain's label (`aware_036`), and contradict the ranking the ADR fixes.
+///
+/// So what §7 needs measured is that the C15 row **reached** the emitter, which is the classification
+/// history; `docs/api.md` already describes exactly this arrangement, serving the arbitrating row as
+/// `classification` and the later rank-3 row as `latest_classification`. The test therefore asserts
+/// *more* than it used to, not less: an M3 row with a named family and its posterior reached an
+/// emitter, **and** arbitration was left undisturbed while it did.
 #[test]
 fn m3_classification_reaches_an_emitter_through_the_device() {
     let meta = sensor_scene!();
@@ -184,36 +200,64 @@ fn m3_classification_reaches_an_emitter_through_the_device() {
         !ids.is_empty(),
         "[{T206}] the run produced no emitters at all, so nothing could be classified"
     );
-    let mut rows = Vec::new();
+    let mut current = Vec::new();
+    let mut m3 = Vec::new();
     for id in &ids {
+        for r in repo.classification_history(*id).unwrap() {
+            if let Some(d) = &r.detail {
+                m3.push((*id, d.family.clone(), r.stage, r.arb_rank, d.top(3)));
+            }
+        }
         if let Some(r) = repo.current_classification(*id).unwrap() {
-            rows.push((
-                *id,
-                r.classification.family.clone(),
-                r.stage,
-                r.detail.is_some(),
-            ));
+            current.push((*id, r.classification.family.clone(), r.stage, r.arb_rank));
         }
     }
     eprintln!(
-        "[{T206}] {} emitters, {} with a classification row: {rows:?}",
-        ids.len(),
-        rows.len()
-    );
-    let m3 = rows.iter().filter(|(_, _, _, detail)| *detail).count();
-    assert!(
-        m3 > 0,
-        "[{T206}] no emitter carries an M3 classification row (one with `detail`) after a run \
-         through the mock SDR. {} of {} emitters carry a row at all, each written by a chain or a \
-         decoder: {rows:?}.\n\
-         The C15 cascade is not wired into the pipeline: `hk_pipeline::classify::classify_box` and \
-         `hk_pipeline::classify::record` have no caller anywhere in the workspace, so a run writes \
-         no posterior, no open-set score and no `unknown`. Until a call site exists, ADR-0016 §7's \
-         classification floors cannot be measured end to end at all — the accuracy numbers in \
-         `m3_grid` are measured on the classifier directly, which is not the same claim.",
-        rows.len(),
+        "[{T206}] {} emitters; arbitrating rows {current:?}; M3 rows {m3:?}",
         ids.len()
     );
+    assert!(
+        !m3.is_empty(),
+        "[{T206}] no emitter carries an M3 classification row (one with `detail`) after a run \
+         through the mock SDR. {} of {} emitters carry a row at all, each written by a chain or a \
+         decoder: {current:?}.\n\
+         The C15 cascade is not wired into the pipeline: `hk_pipeline::classify::classify_box` and \
+         `hk_pipeline::classify::record` have no caller, so a run writes no posterior, no open-set \
+         score and no `unknown`, and ADR-0016 §7's classification floors cannot be measured end to \
+         end at all — the accuracy numbers in `m3_grid` are measured on the classifier directly, \
+         which is not the same claim.",
+        current.len(),
+        ids.len()
+    );
+
+    // The row is a measurement, not a placeholder: a named family carries a posterior over
+    // families that includes `unknown`, which is the thing §7's floors are stated over. An
+    // `unknown` call is a legitimate outcome and is not required to name anything.
+    for (id, family, _, _, top) in &m3 {
+        assert!(
+            !top.is_empty(),
+            "[{T206}] the M3 row on {id:?} carries no posterior: {m3:?}"
+        );
+        assert!(
+            top.iter().any(|l| l.label == *family),
+            "[{T206}] the M3 row's family {family} is not in its own posterior: {top:?}"
+        );
+    }
+
+    // **Arbitration was not disturbed.** The chain locked and framed these bursts, so ADR-0016 §2
+    // leaves the family to it; recording the classifier's evidence beside it must not move it.
+    for (id, family, stage, rank) in &current {
+        assert!(
+            *rank <= hk_model::classify::ArbRank::Classifier,
+            "[{T206}] {id:?} fell back to track shape after classification: {current:?}"
+        );
+        if *stage == hk_model::classify::Stage::Chain {
+            assert_eq!(
+                family, "2fsk",
+                "[{T206}] the C15 row took the demodulator chain's label off {id:?}: {current:?}"
+            );
+        }
+    }
 }
 
 /// **Signature matching runs on rows a real run produced** (ADR-0016 §5, T-242).

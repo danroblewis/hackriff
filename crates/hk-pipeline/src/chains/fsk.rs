@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
+use hk_classify::{Classifier, SymbolEstimator};
 use hk_core::Discontinuity;
 use hk_core::ProvenanceHandle;
 use hk_demod::fsk::{
@@ -101,6 +102,16 @@ pub(crate) fn run(
         ..Default::default()
     };
     let (mut detach, mut closed) = (false, false);
+    // T-247: the one burst the C15 cascade runs on at detach — the longest the chain demodulated,
+    // which is the most evidence it saw of this emission (ties keep the earlier one, so the choice
+    // is deterministic and blind). Kept as an owned copy of that burst's samples alone, bounded by
+    // one burst, because `buf` is drained as the chain advances.
+    let mut best: Option<(
+        Vec<Complex<i8>>,
+        SampleTime,
+        ProvenanceHandle,
+        SnippetRequest,
+    )> = None;
     // Bursts already offered to burst taps (T-060) and when framing was last inferred for them.
     let mut streamed = 0usize;
     let mut last_stream: Option<Instant> = None;
@@ -194,6 +205,9 @@ pub(crate) fn run(
                     f_lo = f_lo.min(g.f_lo);
                     f_hi = f_hi.max(g.f_hi);
                     first_det.get_or_insert(g.detection);
+                    if best.as_ref().is_none_or(|(s, ..)| s.len() < slice.len()) {
+                        best = Some((slice.to_vec(), info.time, p.clone(), request));
+                    }
                     bursts.push(b);
                 }
                 Err(_) => inc(&c.errors),
@@ -225,14 +239,12 @@ pub(crate) fn run(
     }
     let bits: Vec<&[u8]> = bursts.iter().map(FskBurst::bits).collect();
     let result = infer_framing(&bits, &FramingConfig::default());
-    add(
-        &c.crc_valid,
-        result
-            .frames
-            .iter()
-            .filter(|f| f.crc_valid == Some(true))
-            .count() as u64,
-    );
+    let crc_valid = result
+        .frames
+        .iter()
+        .filter(|f| f.crc_valid == Some(true))
+        .count() as u64;
+    add(&c.crc_valid, crc_valid);
     let classification = classify_emitter(
         &shared.cfg.settings.classify,
         shared.cfg.source_class,
@@ -257,6 +269,45 @@ pub(crate) fn run(
                     .add(cand.track, w.decode_ids.len() as u64);
                 add(&c.content_withheld, w.content_withheld as u64);
                 add(&c.emitters_created, u64::from(w.emitter_created));
+                // ADR-0016 §2 (T-247): this chain recovered a clock (C14) and framed the bursts
+                // with a CRC that checked, so its label is **lock-verified**, not a pre-sync
+                // guess. Its row went in through the legacy path, which records no lock and so
+                // derives rank 3 — the classifier's own rank, where "latest among equals" would
+                // let the C15 row below take `2fsk` off the emitter. Stating the rank keeps the
+                // chain's label and leaves rank 3 free for the posterior.
+                if crc_valid > 0
+                    && crate::classify::record_locked_chain_label(&mut repo, w.emitter_id).is_err()
+                {
+                    inc(&c.errors);
+                }
+                // T-247: the C15 cascade, once per chain write, on this chain's own thread and its
+                // own copy of the samples (`crate::classify::classify_and_record` states the
+                // bound). Without this call site a run wrote no posterior, no open-set score and
+                // no `unknown`, and ADR-0016 §7's classification floors could not be measured
+                // through the device at all.
+                if let Some((iq, time, prov, request)) = &best {
+                    let info = InputInfo {
+                        time: *time,
+                        discontinuity: Discontinuity::NONE,
+                        dropped_before: 0,
+                        provenance: prov,
+                    };
+                    let mut c14 = SymbolEstimator::new();
+                    match crate::classify::classify_and_record(
+                        &mut repo,
+                        w.emitter_id,
+                        &Classifier::new(),
+                        &mut c14,
+                        info,
+                        iq,
+                        request,
+                        time.host_time,
+                    ) {
+                        Ok(Some((_, true))) => inc(&c.classifications),
+                        Ok(_) => {}
+                        Err(_) => inc(&c.errors),
+                    }
+                }
                 let mut inv = shared
                     .inventory
                     .lock()
