@@ -592,6 +592,7 @@ dependencies = [
  "hk-dsp",
  "hk-e2e",
  "hk-estimate",
+ "hk-ml",
  "hk-model",
  "num-complex",
  "serde",
@@ -738,6 +739,7 @@ dependencies = [
  "hk-model",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 

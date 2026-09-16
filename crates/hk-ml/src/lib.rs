@@ -28,6 +28,10 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "ml-mlp")]
+pub mod mlp;
+pub mod predict;
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -44,6 +48,10 @@ pub enum MlProviderKind {
     /// Pure-Rust CPU reference (tract), the correctness baseline every other provider is
     /// compared against.
     CpuTract,
+    /// The dependency-free reference MLP ([`mlp`], feature `ml-mlp`, T-204). Not an ONNX runtime:
+    /// it reads a `hk-mlp@1` weights file, and it never reports itself conformant, so it can only
+    /// ever run a shadow stage.
+    CpuMlp,
     /// ONNX Runtime, CPU execution provider.
     OrtCpu,
     /// ONNX Runtime, CoreML execution provider (Mac, opt-in feature `ml-coreml`).
@@ -57,6 +65,7 @@ impl MlProviderKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             MlProviderKind::CpuTract => "cpu-tract",
+            MlProviderKind::CpuMlp => "cpu-mlp",
             MlProviderKind::OrtCpu => "ort-cpu",
             MlProviderKind::OrtCoreml => "ort-coreml",
             MlProviderKind::OrtTrt => "ort-trt",
