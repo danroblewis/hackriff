@@ -4469,6 +4469,68 @@ fn navigation_snaps_to_achievable_states_and_never_claims_uncaptured_detail() {
     assert_eq!(state["device"]["tuning_step"], json!("uniform"), "{state}");
     assert_eq!(state["device"]["tuning_step_hz"], json!(step), "{state}");
 
+    // ---- (4) T-340: the active capture windows, as a LIST ----
+    //
+    // The frequency navigator lights one segment per entry, so this is the field that decides
+    // whether the navigator is N-capable by construction. The assertion is that it is an **array**
+    // whose length is what this run holds — one live front end — with the tuned window's own
+    // numbers in it. A client written against `frequency.current` would draw a window on a server
+    // that never enumerated its front ends; a client written against this list draws exactly as
+    // many as were reported, which is the whole point.
+    let windows = v["windows"]
+        .as_array()
+        .expect("windows must be an array")
+        .clone();
+    assert_eq!(windows.len(), 1, "one live front end runs here: {v}");
+    let w0 = &windows[0];
+    assert_eq!(w0["center_hz"], json!(FIXTURE_CENTER_HZ), "{v}");
+    assert_eq!(w0["span_hz"], json!(FIXTURE_RATE_HZ), "{v}");
+    // A live window's span *is* its sample rate, and its edges are derived from that here rather
+    // than in the client.
+    assert_eq!(
+        w0["f_lo_hz"],
+        json!(FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0),
+        "{v}"
+    );
+    assert_eq!(
+        w0["f_hi_hz"],
+        json!(FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0),
+        "{v}"
+    );
+    // T-343's identity, so a lit segment can name the radio it belongs to — and it is the same
+    // front end the grid above describes, not a second, unrelated name.
+    assert_eq!(w0["device_id"], f["device_id"], "{v}");
+    assert_eq!(w0["driver"], f["driver"], "{v}");
+
+    // THE CONTROL: the list is **measured, not constant**. Move the front end and the window moves
+    // with it, so a hard-coded entry (or one copied from the run's configuration) fails here.
+    let moved = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ
+        * (((FIXTURE_CENTER_HZ + 5e6) / hk_core::source::HACKRF_ONE_TUNING_STEP_HZ).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    let (_, after) = get(addr, "/api/navigation");
+    let w1 = &after["windows"].as_array().expect("windows")[0];
+    // The window reports the front end's **actual** tuned state, not the number that was asked for
+    // and not the run's configured centre: it agrees with `/api/control/state` exactly.
+    let (_, state2) = get(addr, "/api/control/state");
+    assert_eq!(w1["center_hz"], state2["tuning"]["center_hz"], "{after}");
+    let c1 = w1["center_hz"].as_f64().expect("center_hz");
+    assert!(
+        (c1 - moved).abs() <= step,
+        "the front end landed within one tuning step of the request: {after}"
+    );
+    assert!(
+        (c1 - FIXTURE_CENTER_HZ).abs() > 1e6,
+        "the window must have moved with the device: {after}"
+    );
+    assert_eq!(w1["f_lo_hz"], json!(c1 - FIXTURE_RATE_HZ / 2.0), "{after}");
+    assert_eq!(w1["f_hi_hz"], json!(c1 + FIXTURE_RATE_HZ / 2.0), "{after}");
+    assert_eq!(w1["device_id"], w0["device_id"], "{after}");
+
     stop_server(serving);
 }
 

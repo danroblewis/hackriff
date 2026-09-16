@@ -431,6 +431,12 @@ This is **absent-means-not-measured** (T-297: no field is written for a region t
     "min_t_cell_s": 1.0, "max_t_cell_s": 604800.0,
     "latest_s": 1789300920.0
   },
+  // T-340: every currently-active capture window, as a list. `[]` on a replay.
+  "windows": [
+    { "device_id": "hackrf:0000…f3c7", "driver": "hackrf-one",
+      "center_hz": 100000000.0, "span_hz": 2400000.0,
+      "f_lo_hz": 98800000.0, "f_hi_hz": 101200000.0 }
+  ],
   // present only when center_hz and span_hz were given
   "resolved": {
     "requested": { "center_hz": 100000001.0, "span_hz": 40000000.0, "t_cell_s": null },
@@ -451,6 +457,10 @@ This is **absent-means-not-measured** (T-297: no field is written for a region t
 - `current` — the tuned state, so a client can mark where it is on the grid.
 
 **`time`** — the retained window and the pyramid's **discrete** resolution tiers, or `null` with no spectrum history on this server. Time resolution is a ladder, not a slider: a view asking for a finer cell than `min_t_cell_s` cannot be served one. `max_age_s` is `null` when a level sets no age of its own — *no age limit*, not *kept forever* (the byte budget still bounds it). `latest_s` is the newest capture time the **history** has reached; the capture-ring window that sizes the scrubber is a different horizon and a different length (`GET /api/timeline`, over `GET /api/iqbuffer`).
+
+**`windows`** — **the currently-active capture windows, as a list** (T-340). Each entry is one live front end: its `device_id` (T-343's provenance identity, `null` when the source reports none — never a placeholder), `driver`, the tuned `center_hz`, the `span_hz` it is running at (a live window's span *is* its sample rate) and the window's edges `f_lo_hz`/`f_hi_hz`. The frequency navigator draws one **lit segment** per entry, on the whole device-available spectrum (`frequency.ranges_hz`).
+
+*Why a list on a server that runs one front end.* The count is a fact about the run, not a constant of the design: the source layer is already N-shaped (T-259's audit; T-302/T-303/T-304/T-305 keyed artifacts, baselines, history and the source-layer rule on the front end that produced each frame), and multiple simultaneous windows are an explicit product direction. The array's length is therefore **measured, never assumed** — `[]` on a replay, one entry on a live run — and a client must place segments from the list rather than from `frequency.current`, which is one device's tuned state and not an enumeration. **What would have to change to report N:** `ApiState::live_control` is one `Option<Arc<dyn LiveControl>>`; it becomes a collection built one handle per `ReceiveChain` where the pipeline composes the run. Neither this route's shape nor its clients change, because both already speak in lists. Multi-device *capture* is not built and this field does not claim it is.
 
 **`resolved`** — present only when `center_hz` and `span_hz` are given together. The nearest realizable state, and the detail claim that comes with it.
 

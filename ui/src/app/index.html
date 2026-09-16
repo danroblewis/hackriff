@@ -38,9 +38,16 @@
       <div class="side-inv" data-slot="inventory"></div>
       <div class="side-sel" data-slot="selections"></div>
     </aside>
+    <!-- T-340: an edge navigator parallel to each waterfall axis — time down the side, frequency
+         along the bottom. Each pans and zooms its own axis; a dragged region on either zooms the
+         main view to it. Neither can move the radio: that is a device action (T-343). -->
     <section class="centre" aria-label="Spectrum and waterfall">
-      <div class="specwf" data-slot="live"></div>
+      <div class="wfrow">
+        <div class="timenav" data-slot="timenav" aria-label="Time navigator: the retained capture window"></div>
+        <div class="specwf" data-slot="live"></div>
+      </div>
       <div class="axis" data-slot="axis" aria-hidden="true"></div>
+      <div class="freqnav" data-slot="freqnav" aria-label="Frequency navigator: the device-available spectrum and every active capture window"></div>
       <div class="capture" data-slot="capture"></div>
     </section>
     <aside class="focus" data-slot="focus" aria-live="polite" aria-label="Focused signal"></aside>

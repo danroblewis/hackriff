@@ -523,14 +523,17 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     const t = store.get().time;
     if (t.live) return;
     clearTimeout(reviewTimer);
-    reviewTimer = window.setTimeout(() => void loadReview(t.tS), 200); // scrubbing: fetch once it settles
+    reviewTimer = window.setTimeout(() => void loadReview(t.tS, t.spanS ?? null), 200); // scrubbing: fetch once it settles
   }
 
-  async function loadReview(tS: number) {
+  async function loadReview(tS: number, spanS: number | null = null) {
     const g = geom(), w = wf;
     if (!g || !w) { review(`reviewing ${hms(tS)} · waiting for the live band`); return; }
     const seq = ++reviewSeq;
-    const full = ax.fullView(g), { t0, t1 } = historyWindow(tS, w.rows, livePeriodS());
+    // T-340: a region dragged on the time navigator sets `spanS`, so the waterfall renders exactly
+    // the span that was dragged; with none asked for, the window is the rows on screen at their own
+    // period.
+    const full = ax.fullView(g), { t0, t1 } = historyWindow(tS, w.rows, livePeriodS(), spanS);
     review(`reviewing ${hms(tS)} · loading history…`);
     try {
       // T-334: ask in this view's own terms — `max_t` rows, `max_f` texels — so the backend serves

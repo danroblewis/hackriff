@@ -36,7 +36,7 @@ export interface ViewHooks {
  * else. Before T-343 the same number decided whether a drag commanded the front end, which is why
  * it could not stay a number in a gesture handler.
  */
-const EDGE_OFFER_FRAC = 0.05;
+export const EDGE_OFFER_FRAC = 0.05;
 
 /** Wheel zoom (and ctrl+wheel trackpad pinch) over `el`, around the pointer. */
 export function attachWheelZoom(el: HTMLElement, hooks: ViewHooks) {

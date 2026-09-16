@@ -497,12 +497,13 @@ test("waterfall row preparation: max-pool decimation is exact and cheap at 16k t
   assert.ok(copyMs < 2 && poolMs < 2, `row prep too slow: ${copyMs} / ${poolMs} ms`);
 });
 
-test("centre mounts both centre slots; CSS is scoped to them with no wide min-width", () => {
-  assert.deepEqual(Object.keys(mounts).sort(), ["axis", "live"]);
+test("centre mounts every centre slot; CSS is scoped to them with no wide min-width", () => {
+  // T-340 adds the two edge navigators, one parallel to each waterfall axis.
+  assert.deepEqual(Object.keys(mounts).sort(), ["axis", "freqnav", "live", "timenav"]);
   const css = readFileSync("src/app/centre/centre.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const selectors = [...css.matchAll(/([^{}@]+)\{[^{}]*\}/g)].map((m) => m[1].trim()).filter((s) => s && !s.startsWith("@"));
   assert.ok(selectors.length > 10);
-  for (const sel of selectors) for (const part of sel.split(",")) assert.match(part.trim(), /^\.(specwf|axis)\b/, `unscoped: ${part}`);
+  for (const sel of selectors) for (const part of sel.split(",")) assert.match(part.trim(), /^\.(specwf|axis|freqnav|timenav)\b/, `unscoped: ${part}`);
   for (const m of css.matchAll(/min-width:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 400);
   assert.match(readFileSync("src/app/base.css", "utf8"), /\.live-canvas \{[^}]*touch-action: none/);
 });

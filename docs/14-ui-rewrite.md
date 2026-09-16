@@ -150,7 +150,29 @@ A retune re-derives the window's content class and, when the class or sample rat
 - **One at a time.** Device actions serialise on one `DeviceGate`; a contended one answers `409 device_busy` naming the holder rather than racing it to the driver. The UI reports that; it never retries into the race.
 - **Never automatic.** No code path retunes without a user asking. Closed-loop refinement (`docs/14` "tune from the processed output") adjusts a *channel* inside the tuned window, not the front end.
 
-**Left to T-340.** The frequency navigator itself — the horizontal bar showing every active capture window as a lit segment, the home for multiple SDRs and survey coverage — is T-340. The grid it snaps to landed with T-341, below.
+**The frequency navigator is T-340**, below; `DeviceAction`'s `source: "navigator"` is the variant it uses.
+
+### Each waterfall axis has an edge navigator (T-340)
+
+The user's **fifth** time/waterfall invariant: *time runs down the waterfall and frequency across it, so the **time navigator is a vertical bar on the side** (an overview of the retained capture window) and the **frequency navigator is a horizontal bar along the bottom** (spanning the whole surveyed / device-available spectrum, setting the centre). Each navigator pans and zooms its own axis; a dragged region on either zooms the main view to it. The frequency navigator shows every currently-active capture window as a lit segment — the natural home for multiple SDRs and for survey/sweep coverage.*
+
+**The split, stated by the user:** *"Backend reports the achievable (centre, span) grid + full-spectrum survey overview; UI does the navigators/gestures/snap/styling."* So the two bars are `ui/src/app/centre/navigators.ts` (mount, gestures, styling) over `ui/src/navigators.ts` (pure placement arithmetic), and every number they place came from a backend answer: the grid from `/api/navigation` (T-341), the capture window and its overview from `/api/timeline` (T-338), the active window list from `/api/navigation`'s `windows` (below).
+
+| Gesture | Frequency bar (bottom) | Time bar (side) |
+|---|---|---|
+| **pan** | drag the view marker: moves the main view's frequency window inside the tuned band, clamped at its edges | drag the marker: moves the reviewed instant inside the capture window |
+| **zoom** | wheel: zooms the main view about the pointer | wheel: zooms the reviewed span |
+| **drag a region** | zooms the main view to it, snapped through `snapState` | reviews exactly that span, at the tier `snapTimeCell` names |
+
+**Three things the bars are not allowed to do**, each with a test in `ui/test/navigators.test.ts`:
+
+- **Move the radio.** A pan or a zoom is a view change. A region dragged *outside* the tuned band cannot be shown without retuning, so it leaves a `RetuneOffer` in the store — the same offer a pan to the band edge leaves (T-343) — and the device moves only when the user presses the button, through `applyDeviceAction` with `source: "navigator"`. The control asserts that panning either bar across its **whole** extent (a 6 GHz drag, thousands of times the tuned window) reaches no device route, while the view still moves and the offer still appears; a second test asserts the navigator module names no device route at all.
+- **Size the time bar from the wrong horizon.** Its extent is `GET /api/timeline`'s `window` — the IQ ring's configured retention — so every position on it has capture behind it. The control reconfigures the retention and watches the extent follow, and a source assertion holds that `ui/src/navigators.ts` never reads `latest_s`, `max_age_s` or the pyramid's cell bounds: those describe the *spectrum-history* horizon, which is longer, lossy, and not this bar.
+- **Assume one capture window.** The lit segments come from the reported `windows` list and nothing else. The control feeds a body carrying `frequency.current` but **no** list and asserts **nothing** lights: a one-element list derived from the tuned state would be a window count nobody measured. Two reported windows draw two segments, in the order given, unmerged.
+
+**The backend half: `windows` (T-340).** `GET /api/navigation` now reports every currently-active capture window as a list — `device_id`, `driver`, centre, span and the window's edges per entry — empty on a replay, one entry on a live run. The count is measured per request, not a constant: the source layer is already N-shaped (T-259's audit; T-302/T-303/T-304/T-305), and multiple simultaneous front ends are an explicit product direction. **What would have to change to report N:** `ApiState::live_control` is one `Option<Arc<dyn LiveControl>>`; it becomes a collection built one handle per `ReceiveChain` where the pipeline composes the run. Neither the route's shape nor its clients change, because both already speak in lists. Multi-device capture is *not* built and the field never claims it is. The contract test asserts the array by value and then **retunes the mock and watches the window move with it**, so a constant entry — or one copied from the run's configuration — fails.
+
+**Time zoom became real state.** "A dragged region zooms the main view to it" needs somewhere for a time span to live, and the review cursor had only an instant. `TimeCursor` gained `spanS`, which `historyWindow` uses when it is set; with none asked for the window is still the rows on screen at their own period. It is never defaulted to a duration — that is the 48 h constant T-338 removed, in another costume.
 
 ### Navigation snaps to achievable states, and the view says what it is showing (T-341)
 

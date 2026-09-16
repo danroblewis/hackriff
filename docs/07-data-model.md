@@ -416,6 +416,8 @@ A capture state is a point on a three-axis grid, and the model carried only two 
 
 **A step is a granularity, and it promises only that.** The device lands within half a step of a requested grid point; the residual is bounded by the step by construction, and nothing downstream may read a grid point as exact beyond it.
 
+**The active capture windows are a list, not a singleton (T-340).** A run's *currently-active capture windows* — one per live front end, each `(device_id, centre, span)` with the window edges that follow from the span — are reported as an array (`GET /api/navigation`'s `windows`). The count is a fact about the run, measured per request, not a constant of the model: the source layer is already N-shaped (T-259's audit; T-302/T-303/T-304/T-305 key artifacts, baselines, history and the source-layer rule on the front end that produced each frame), and the user's multi-SDR direction is explicit. A consumer that reads one device's tuned state as "the window" would have to be re-shaped the day a second receive chain exists; one that reads the list shows exactly as many windows as were reported, which today is one. Multi-device *capture* is not built, and the list never claims it is: on a replay it is empty.
+
 #### The detail claim
 
 Every picture of a region says which tier it came from, as a claim about **how much detail it is evidence of**, ordered `live-iq` > `spectrum-history` > `survey-overview`:
