@@ -103,6 +103,7 @@
 //! | hop presence | both hop or neither (hard gate) |
 //! | hop raster | ±2 % |
 //! | hop set | Jaccard overlap ≥ 0.5 (channels match within `max(raster/4, centre tol)`) |
+//! | modulation structure (T-233) | 3 combined sigmas ([`ModulationStructure`]) |
 //!
 //! **Three of those features measure the window, not the emission** — `period`, `duty cycle` and
 //! `burst length` are statistics of however long the producer happened to watch. Two observations
@@ -224,6 +225,79 @@ pub const MAX_INVENTORY_PAGE: u32 = 1000;
 /// Running-mean weight cap when folding observations into a fingerprint.
 const FOLD_WEIGHT_CAP: u64 = 16;
 
+/// One dimensionless statistic of an emission's **own modulation structure** (T-233, C18/C15).
+///
+/// # Why the fingerprint needs it at all
+///
+/// Every other feature it compares — centre, bandwidth, symbol rate, deviation, the timing
+/// statistics — can be identical for two genuinely different emissions. What is left is what the
+/// modulation itself does.
+///
+/// [`Self::envelope_shape`] is `μ₄ = E|s|⁴ / (E|s|²)²` **of the emission**, the additive-noise
+/// contribution removed in closed form. It is exactly `1` for any constant-envelope emission —
+/// every FSK, MSK, FM and unkeyed carrier — and rises with amplitude structure. It is what says
+/// whether the information is in the envelope at all: `am` reads ≈ 1.18 against `wfm` ≈ 1.00, and
+/// `bpsk` ≈ 1.38 against `qpsk` ≈ 1.20, because a shaped BPSK's 180° transitions carry the
+/// trajectory through the origin and a QPSK's mostly do not.
+///
+/// # It measures the emission, not the observation (the rule this exists to obey)
+///
+/// It is a ratio of two **expectations** — never an extremum, a maximum over method variants, or
+/// a count that grows with how long anybody watched. Lengthening the record estimates it better
+/// and moves it not at all, which is the property the fingerprint needs: the two observations it
+/// compares were watched differently by construction, so a statistic that moved with the watch
+/// would split or merge on the watch. It is also blind to amplitude, to a carrier offset and to
+/// any phase rotation, since it sees only `|s|`.
+///
+/// The one thing that does move it is noise, and that is why the value is carried **with the
+/// sigma its producer measured it to** rather than bare: `E|x|⁴ = E|s|⁴ + 4Pσ² + 2σ⁴` and
+/// `E|x|² = P + σ²` give `μ₄ₛ = μ₄ₓ(1+1/ρ)² − 4/ρ − 2/ρ²`, and what is left in `sigma` is the
+/// error of that correction plus how much the emission's own content moved across the record.
+/// `hk_classify::structure` holds both derivations, the measured confirmation, and the second
+/// dimension that was built and rejected for measuring the observation instead.
+///
+/// # What it is allowed to do
+///
+/// Only **split**. [`Fingerprint::compare`] adds it as an ordinary scored feature, so a
+/// fingerprint that carries structure is compared on strictly more evidence than one that does
+/// not, and a pair that matched without it can only stop matching, never start. Nothing here can
+/// merge two emitters the rest of the fingerprint keeps apart. That is deliberate: merging two
+/// emitters costs an inventory row its meaning, and no statistic measured under T-233 reached the
+/// confidence that would justify the other direction.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModulationStructure {
+    /// `E|s|⁴/(E|s|²)²` of the emission, noise-corrected. `1.0` = constant envelope.
+    pub envelope_shape: f64,
+    /// 1σ on [`Self::envelope_shape`], as its producer measured it. Never zero in practice.
+    pub envelope_shape_sigma: f64,
+}
+
+impl ModulationStructure {
+    /// The value and its sigma are finite and non-negative (`μ₄ ≥ 0` for any distribution, and an
+    /// uncertainty is not negative).
+    pub fn is_valid(&self) -> bool {
+        self.envelope_shape.is_finite()
+            && self.envelope_shape >= 0.0
+            && self.envelope_shape_sigma.is_finite()
+            && self.envelope_shape_sigma >= 0.0
+    }
+
+    /// Folds an observation in: a capped running mean of the value at weight `w`, with the sigma
+    /// taken as the **larger** of the two reported and the half-difference between them.
+    ///
+    /// Sigma never shrinks with more looks, for [`crate::signature::Feat`]'s reason: an aggregate
+    /// is not better known than the observations disagreed, and an over-tight sigma is what turns
+    /// one emitter into two.
+    fn fold(&mut self, obs: &ModulationStructure, w: f64) {
+        self.envelope_shape_sigma = self
+            .envelope_shape_sigma
+            .max(obs.envelope_shape_sigma)
+            .max((self.envelope_shape - obs.envelope_shape).abs() / 2.0);
+        self.envelope_shape = (self.envelope_shape * w + obs.envelope_shape) / (w + 1.0);
+    }
+}
+
 /// Compact cross-time signature of an emission cluster (C18; docs/04 §7.6 subset).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fingerprint {
@@ -257,6 +331,10 @@ pub struct Fingerprint {
     /// Hop-set channel centres, Hz.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hop_set_hz: Vec<f64>,
+    /// Modulation structure (T-233): what the modulation does, once centre, bandwidth, rate and
+    /// deviation have all agreed. Absent means **not measured**, never "no structure".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure: Option<ModulationStructure>,
     /// Observations folded in.
     #[serde(default)]
     pub observations: u64,
@@ -277,6 +355,7 @@ impl Fingerprint {
             burst_length_s: None,
             hop_raster_hz: None,
             hop_set_hz: Vec::new(),
+            structure: None,
             observations: 1,
         }
     }
@@ -314,6 +393,7 @@ impl Fingerprint {
             && self.bandwidth_hz.is_finite()
             && opts.iter().flatten().all(|v| v.is_finite())
             && self.hop_set_hz.iter().all(|v| v.is_finite())
+            && self.structure.is_none_or(|s| s.is_valid())
     }
 
     /// The family, unless missing or `unknown`.
@@ -376,13 +456,33 @@ impl Fingerprint {
                 ratio.ln() / tol.bandwidth_ratio.max(1.0 + 1e-9).ln(),
             );
         }
-        // Exact comparison, deliberately. ADR-0016 §1 proposes gating on `taxonomy::family_of`
-        // instead, so an emitter labelled `fsk` and `2fsk` by two producers stops splitting.
-        // Measured (T-218): that also merges `bpsk` with `qpsk`, `2fsk` with `gfsk` and `am` with
-        // `wfm` when nothing else separates them — two emissions, one inventory row. Deferred
-        // until the producers agree on a level, or the fingerprint carries something that tells
-        // same-family emissions apart. See `tests::t218_the_family_gate_separates_two_emissions_
-        // that_share_a_family`.
+        // Exact comparison, deliberately, and now **measured** rather than deferred (T-233).
+        //
+        // ADR-0016 §1 proposed gating on `taxonomy::family_of` instead, so that an emitter
+        // labelled `fsk` by the blind estimator and `2fsk` by the demodulator chain stops
+        // splitting. T-218 found the cost: it also merges `bpsk` with `qpsk`, `2fsk` with `gfsk`
+        // and `am` with `wfm`. T-233 asked whether a finer measured discriminator could make the
+        // relaxation safe, built one ([`ModulationStructure`]) and measured it. It cannot:
+        //
+        // - `fsk` is the **only** family-level label any producer writes (`hk_estimate::blind`
+        //   emits `Fsk` but `Bpsk`/`Qpsk`/`Ook` — classes), so the relaxation is exactly a licence
+        //   to merge an `fsk` row with a `2fsk`, `gfsk`, `msk` or `4fsk` one;
+        // - and `2fsk`, `gfsk` and `msk` are not three modulations but **one modulation at three
+        //   filter settings**. All three are constant-envelope by construction, so the statistic
+        //   that shipped reads 1.00 for every one of them and separates none: conditioned as the
+        //   fingerprint conditions (matched centre, bandwidth, symbol rate and deviation), over
+        //   99 % of genuinely distinct pairs compare as one at every SNR from the FSK gate
+        //   upwards. The best statistic T-233 tried on that pair — the instantaneous frequency's
+        //   bimodality — still left 5.8 % to 33 %, and was rejected anyway for measuring the
+        //   observation rather than the emission (`hk_classify::structure`).
+        //
+        // The relaxation's own motivating case does not need it either: two entries of one
+        // emission written by a tracker and a chain are already merged by `same_emission`
+        // (T-082), which compares centre and time and never looks at the family at all.
+        //
+        // So the gate stays exact and ADR-0016 §1's change is **withdrawn**, not deferred. What
+        // T-233 landed instead is below: structure as extra evidence that can only split. See
+        // `tests::t218_the_family_gate_separates_two_emissions_that_share_a_family`.
         if let (Some(a), Some(b)) = (self.known_family(), other.known_family())
             && a != b
         {
@@ -406,6 +506,25 @@ impl Fingerprint {
             if let (Some(a), Some(b)) = (self.burst_length_s, other.burst_length_s) {
                 let t = (tol.burst_length_rel * a.abs().max(b.abs())).max(tol.burst_length_min_s);
                 m.add("burst_length", (a - b).abs() / t);
+            }
+        }
+        // Modulation structure (T-233): compared whenever both sides carry it, in units of the
+        // sigma each producer reported. A scored feature rather than a gate, so a pair already
+        // outside tolerance on `family` or `centre` is not re-judged here.
+        //
+        // A dimension whose producer stated no uncertainty is **not** infinitely certain: it is
+        // unstated, and an unstated field is no evidence, exactly as a missing one is.
+        if let (Some(a), Some(b)) = (&self.structure, &other.structure) {
+            let k = tol.structure_sigmas.max(f64::MIN_POSITIVE);
+            let band = k
+                * (a.envelope_shape_sigma * a.envelope_shape_sigma
+                    + b.envelope_shape_sigma * b.envelope_shape_sigma)
+                    .sqrt();
+            if band > 0.0 {
+                m.add(
+                    "envelope_shape",
+                    (a.envelope_shape - b.envelope_shape).abs() / band,
+                );
             }
         }
         if self.hop_set_hz.is_empty() != other.hop_set_hz.is_empty() {
@@ -452,6 +571,11 @@ impl Fingerprint {
         self.hop_raster_hz = opt(self.hop_raster_hz, obs.hop_raster_hz);
         if !obs.hop_set_hz.is_empty() {
             self.hop_set_hz = obs.hop_set_hz.clone();
+        }
+        match (self.structure.as_mut(), obs.structure) {
+            (Some(s), Some(o)) => s.fold(&o, w),
+            (None, o @ Some(_)) => self.structure = o,
+            (_, None) => {}
         }
         self.observations = self.observations.max(1) + obs.observations.max(1);
     }
@@ -564,6 +688,9 @@ pub struct Tolerances {
     pub hop_raster_rel: f64,
     /// Smallest hop-set Jaccard overlap.
     pub hop_set_min_jaccard: f64,
+    /// How many combined sigmas of [`ModulationStructure`] two observations may differ by before
+    /// the structure counts against a match. See [`Tolerances::STRUCTURE_SIGMAS_DEFAULT`].
+    pub structure_sigmas: f64,
 }
 
 impl Default for Tolerances {
@@ -582,11 +709,39 @@ impl Default for Tolerances {
             burst_length_min_s: 0.004,
             hop_raster_rel: 0.02,
             hop_set_min_jaccard: 0.5,
+            structure_sigmas: Tolerances::STRUCTURE_SIGMAS_DEFAULT,
         }
     }
 }
 
 impl Tolerances {
+    /// Sigmas of [`ModulationStructure`] two observations of one emitter may differ by.
+    ///
+    /// **Three, because three is what the error direction costs**, and not because of where any
+    /// measured pair happened to fall. The structure dimensions are the only ones in the table
+    /// whose producer states its own uncertainty, so the tolerance is a number of sigmas rather
+    /// than a width: what has to be chosen is a false-split rate, and under a Gaussian error a
+    /// two-sided 3σ band leaves 0.27 % per dimension, 0.54 % over the two.
+    ///
+    /// The error directions are not symmetric and the choice follows the expensive one. **Too
+    /// tight** splits one emitter into two inventory rows — the failure T-250 and T-262 measured
+    /// and the reason three window statistics were dropped from the disjoint-interval comparison
+    /// in the first place. **Too loose** merely declines to split a pair the rest of the
+    /// fingerprint already matched, which is where every such pair stood before T-233 anyway. So
+    /// the band is set wide enough that a real emitter's re-observation survives it, and the
+    /// discrimination that is left is whatever the measured gap affords at that width — not the
+    /// other way round.
+    ///
+    /// Measured at that width on the acceptance seeds (`hk-classify`'s `structure_rates`,
+    /// conditioned on a matched occupied bandwidth — at a matched symbol rate, a matched
+    /// modulation index): `bpsk` against `qpsk` merges 0.097 of the time at 20 dB and 0.027 at
+    /// 25 dB, against a baseline of 1.00 with no structure at all, while splitting one emitter in
+    /// under 0.02. At the PSK gate itself the band is wider than the 0.18 the two classes are
+    /// apart and the dimension concludes nothing, which is the sigma working rather than failing.
+    /// `2fsk` against `gfsk` does not separate at any width or any SNR — that is why the family
+    /// gate above stays exact.
+    pub const STRUCTURE_SIGMAS_DEFAULT: f64 = 3.0;
+
     /// The clamped bandwidth fraction.
     pub fn center_bw_fraction(&self) -> f64 {
         self.center_bw_fraction.clamp(0.0, 0.5)
@@ -1185,7 +1340,10 @@ mod tests {
         assert!(a.compare(&b, &tol).within);
     }
 
-    /// T-218: what the exact-family gate buys, and what it costs.
+    /// T-218: what the exact-family gate buys, and what it costs. **T-233 kept it**, and this
+    /// test is byte-for-byte what T-218 wrote, which is the point: the discriminator T-233 built
+    /// and measured ([`super::ModulationStructure`]) did not make the ADR's relaxation safe, so
+    /// nothing here was allowed to move.
     ///
     /// ADR-0016 §1 proposes comparing families through `taxonomy::family_of` instead of exactly,
     /// so that one emitter labelled `fsk` by the blind estimator and `2fsk` by the demodulator
@@ -1195,10 +1353,10 @@ mod tests {
     /// distinguishing feature, and neither do `2fsk`/`gfsk` or `am`/`wfm`. Entity resolution would
     /// fold them into one emitter, and an inventory row would then describe two signals.
     ///
-    /// So the gate stays exact and the ADR's change is **deferred** (T-218): blind detection
-    /// quality outranks contract tidiness. Closing the `fsk`/`2fsk` split needs the producers to
-    /// agree on a level (or a distinguishing feature the fingerprint does not carry yet), not a
-    /// looser comparison.
+    /// So the gate stays exact and the ADR's change is **withdrawn** (T-233; it was deferred by
+    /// T-218): blind detection quality outranks contract tidiness. The distinguishing feature the
+    /// fingerprint now carries splits *more* than the labels do — it never licenses the looser
+    /// comparison, for the reasons `compare_inner` records.
     #[test]
     fn t218_the_family_gate_separates_two_emissions_that_share_a_family() {
         let tol = Tolerances::default();
@@ -1219,6 +1377,120 @@ mod tests {
         // emitter whose producers spell its family at different levels of the taxonomy.
         let split = same_but_for_family("fsk").compare(&same_but_for_family("2fsk"), &tol);
         assert!(!split.within && split.worst == Some("family"));
+    }
+
+    fn structured(envelope: f64, sigma: f64) -> Fingerprint {
+        Fingerprint {
+            family: Some("bpsk".into()),
+            symbol_rate_hz: Some(9600.0),
+            structure: Some(ModulationStructure {
+                envelope_shape: envelope,
+                envelope_shape_sigma: sigma,
+            }),
+            ..Fingerprint::new(446.1e6, 16e3)
+        }
+    }
+
+    /// T-233: the structure comparison is worth exactly three combined sigmas per dimension, and
+    /// that is what [`Tolerances::STRUCTURE_SIGMAS_DEFAULT`] means — not a width fitted to any
+    /// pair. Asserted here so the constant cannot drift into one.
+    #[test]
+    fn t233_structure_compares_in_sigmas_not_in_units() {
+        let tol = Tolerances::default();
+        assert_eq!(tol.structure_sigmas, Tolerances::STRUCTURE_SIGMAS_DEFAULT);
+        assert_eq!(Tolerances::STRUCTURE_SIGMAS_DEFAULT, 3.0);
+        // Two observations each stating σ = 0.01 combine to √2·0.01, so the band is 3√2·0.01.
+        let band = 3.0 * (0.01_f64 * 0.01 + 0.01 * 0.01).sqrt();
+        let a = structured(1.38, 0.01);
+        let just_inside = structured(1.38 + band * 0.99, 0.01);
+        let just_outside = structured(1.38 + band * 1.01, 0.01);
+        assert!(a.compare(&just_inside, &tol).within);
+        let m = a.compare(&just_outside, &tol);
+        assert!(!m.within, "{m:?}");
+        assert_eq!(m.worst, Some("envelope_shape"));
+        // The band scales with the *stated* uncertainty: the same difference inside a worse
+        // measurement is no evidence at all. A poorly measured field never splits on its own.
+        assert!(
+            structured(1.38, 0.1)
+                .compare(&structured(1.38 + band * 1.01, 0.1), &tol)
+                .within
+        );
+        // A producer that states no uncertainty is not infinitely certain: no sigma, no evidence.
+        assert!(
+            structured(1.38, 0.0)
+                .compare(&structured(1.90, 0.0), &tol)
+                .within
+        );
+    }
+
+    /// T-233: structure is allowed to **split** and never to merge. Whatever it says, a pair the
+    /// rest of the fingerprint already keeps apart stays apart, and a pair it matched can only
+    /// stop matching — which is what makes it safe to add to entity resolution at all.
+    #[test]
+    fn t233_structure_can_only_split() {
+        let tol = Tolerances::default();
+        // Identical structure does not rescue a different family, centre or symbol rate.
+        for mutate in [
+            (|f: &mut Fingerprint| f.family = Some("qpsk".into())) as fn(&mut Fingerprint),
+            |f: &mut Fingerprint| f.f_center_hz += 200e3,
+            |f: &mut Fingerprint| f.symbol_rate_hz = Some(20e3),
+        ] {
+            let a = structured(1.38, 0.01);
+            let mut b = structured(1.38, 0.01);
+            mutate(&mut b);
+            assert!(!a.compare(&b, &tol).within);
+        }
+        // And a match that stood without structure still stands when only one side carries it:
+        // an unmeasured field is not evidence.
+        let bare = Fingerprint {
+            family: Some("bpsk".into()),
+            symbol_rate_hz: Some(9600.0),
+            ..Fingerprint::new(446.1e6, 16e3)
+        };
+        assert!(bare.compare(&structured(1.38, 0.01), &tol).within);
+        assert!(bare.compare(&structured(9.99, 0.01), &tol).within);
+        // The one thing it adds: two emissions that agree on every label and every other feature,
+        // and whose modulations measurably do not, stop being one inventory row.
+        let m = structured(1.38, 0.01).compare(&structured(1.20, 0.01), &tol);
+        assert!(!m.within, "{m:?}");
+        assert_eq!(m.worst, Some("envelope_shape"));
+    }
+
+    /// T-233: folding keeps the running mean but never lets the uncertainty shrink below what the
+    /// observations actually disagreed by — [`crate::signature::Feat`]'s rule, at this level too.
+    #[test]
+    fn t233_folding_structure_widens_sigma_on_disagreement() {
+        let mut a = structured(1.38, 0.01);
+        a.fold(&structured(1.50, 0.01));
+        let s = a.structure.unwrap();
+        assert!((s.envelope_shape - 1.44).abs() < 1e-9, "{s:?}");
+        assert!((s.envelope_shape_sigma - 0.06).abs() < 1e-9, "{s:?}");
+        // A fingerprint with no structure takes the observation's.
+        let mut bare = Fingerprint::new(446.1e6, 16e3);
+        bare.fold(&structured(1.38, 0.01));
+        assert_eq!(bare.structure, structured(1.38, 0.01).structure);
+        // …and an observation with none leaves the stored one alone.
+        bare.fold(&Fingerprint::new(446.1e6, 16e3));
+        assert_eq!(bare.structure, structured(1.38, 0.01).structure);
+        assert!(bare.is_finite());
+    }
+
+    #[test]
+    fn t233_structure_survives_a_round_trip_and_is_optional_on_the_wire() {
+        let a = structured(1.38, 0.01);
+        let json = serde_json::to_value(&a).unwrap();
+        assert_eq!(Fingerprint::from_value(&json), Some(a));
+        // Absent in a stored fingerprint written before T-233: parsed, not rejected.
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("structure");
+        assert_eq!(Fingerprint::from_value(&old).unwrap().structure, None);
+        // A fingerprint that carries none does not serialise the key at all.
+        let bare = serde_json::to_value(Fingerprint::new(446.1e6, 16e3)).unwrap();
+        assert!(bare.get("structure").is_none());
+        // Out-of-range values are not a fingerprint.
+        let mut bad = structured(1.38, 0.01);
+        bad.structure.as_mut().unwrap().envelope_shape = f64::NAN;
+        assert!(!bad.is_finite());
     }
 
     #[test]

@@ -3787,13 +3787,39 @@ tasks:
   - id: T-233
     milestone: M3
     title: "Fingerprint family_of gate stays DEFERRED: it merges within-family pairs (bpsk/qpsk, 2fsk/gfsk, am/wfm) into one emitter; decide whether the fingerprint needs a finer discriminator before it can ever land"
-    status: in-progress
-    blocked_on: "needs a discriminator that separates within-family pairs; ADR-0016 lists the gate but T-218 proved it collapses distinct emitters"
+    status: done
     priority: normal
     deps: [T-218, T-201]
     parallel_group: M3B
     use_cases: [AWARE-053]
     found_by: "T-218 (2026-09-15): applied the gate experimentally and found bpsk vs qpsk at identical centre/bandwidth/rate compare as one emitter, as do 2fsk/gfsk and am/wfm"
+    outcome_2026_09_16: "DISCRIMINATOR BUILT AND MEASURED; family_of RELAXATION WITHDRAWN, NOT DEFERRED.
+      Landed: hk_model::ModulationStructure on Fingerprint - envelope_shape, the emission's own
+      normalised fourth envelope moment mu4 = E|s|^4/(E|s|^2)^2 with the AWGN contribution removed
+      in closed form (mu4s = mu4x(1+1/rho)^2 - 4/rho - 2/rho^2), carried WITH the sigma its producer
+      measured it to (hk_classify::structure), compared at 3 sigmas so no width is fitted to any pair.
+      It is exactly 1.0 for any constant-envelope emission and separates am from wfm and bpsk from
+      qpsk (a shaped BPSK's 180 degree transitions pass through the origin; a QPSK's mostly do not).
+      MEASURED on acceptance seeds at identical centre/bandwidth/symbol-rate/family, bandwidth-matched
+      pairs: bpsk/qpsk false merge 0.097 at 20 dB and 0.027 at 25 dB against a baseline of 1.00, false
+      split under 0.02; at the 15 dB PSK gate the band exceeds the 0.18 separation and it concludes
+      nothing, which is the sigma working. WHY THE GATE STILL CANNOT RELAX: fsk is the only
+      family-level label any producer writes (hk_estimate::blind emits Fsk but Bpsk/Qpsk/Ook), so the
+      relaxation is exactly a licence to merge an fsk row with a 2fsk/gfsk/msk/4fsk one - and those
+      are constant-envelope by construction, all read 1.00, and over 99 percent of distinct pairs
+      compare as one at every SNR. The best statistic tried on that pair (IF bimodality) still left
+      5.8-33 percent and was rejected for measuring the observation. The relaxation is also worth
+      little: same_emission (T-082) already merges a tracker entry and a chain entry of one emission
+      without looking at the family at all. SAFETY: structure is a scored feature, so it can only
+      SPLIT, never merge - adding it contributes zero false-merge exposure, which is what made it
+      safe to land while the relaxation is not. A second dimension (if_concentration, IQR/(P95-P5)
+      of the instantaneous frequency) was built and REJECTED: its quantiles count samples, so it
+      moved 0.014 -> 0.078 on one bpsk emitter between a 16384- and a 6144-sample record while
+      reporting a confident sigma - the T-281/T-310 failure mode. T-218's guard test is unchanged
+      and passes. Every M3 gate figure identical: unknown recall 0.9747, false-known 0.0253, top-1
+      0.9266, top-2 0.9861, wrong-label 0.0024 overall / 0.0333 worst bin, held-out wrong-family
+      1 of 396; no floor moved and m3_grid.rs is untouched. ADR-0016 section 1 marked WITHDRAWN,
+      new section 5.1 records the measurement."
     acceptance: "either a fingerprint discriminator that separates within-family pairs at stated confidence (then the gate may land, with the T-218 guard test passing), or an ADR-0016 amendment recording that the gate is abandoned and why; blind tests must never merge two genuinely distinct emitters; the guard test T-218 added must keep passing either way"
     area: crates/hk-model (fingerprint), crates/hk-classify, docs/adr/0016
     needs: none

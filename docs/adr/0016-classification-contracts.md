@@ -27,7 +27,7 @@ Constraints carried in:
 | Fusion | `P(c∣x,f,ℓ) ∝ p(x∣c)·P(c∣f,ℓ)` over known families only, with λ₀ ≥ 0.1 enforced. The unknown mass is set by the open-set score and is never scaled by priors. **Evidence-dominance:** when the likelihood ratio of the likelihood top-1 over the runner-up is ≥ 10, the posterior top equals the likelihood top. A prior that flips a closer call sets `prior-tiebreak`; disagreement sets `prior-mismatch`. |
 | Cascade | Feature tree (C13 shape, instantaneous statistics, cumulants, cyclic features, C16) → class-conditional densities give `p(x∣c)` and a χ² open-set score → optional verifier (ALRT/GLRT, post-sync only, can only re-rank) → optional per-family DL, within-family class only, energy-score open set → fusion → decoders arbitrate. |
 | DL enable | Per family, only when the dev-set evaluation beats classical by ≥ 5 points at every SNR bin ≥ the gate, with the 95 % CI lower bound > 0, no AUROC loss > 0.02, and no higher false-known rate. Otherwise the stage runs in shadow mode or is off. |
-| C18 | `EmissionFeatures` (per-field value ± σ, method, n) superset of `Fingerprint` v1; immutable versioned `Signature`s (SQLite, seeded from recipe `match` + CRC-confirmed emitters); `SignatureMatch` full/partial/none with ranked candidates, never an identity or status. |
+| C18 | `EmissionFeatures` (per-field value ± σ, method, n) superset of `Fingerprint` v1; immutable versioned `Signature`s (SQLite, seeded from recipe `match` + CRC-confirmed emitters); `SignatureMatch` full/partial/none with ranked candidates, never an identity or status. `Fingerprint` also carries `ModulationStructure` (value ± σ) — evidence that can only split, never merge (§5.1, T-233). Its family comparison stays **exact**: §1's `family_of` relaxation is withdrawn. |
 | Clustering | Online leader clustering on the **tolerance-normalised** distance shared with matching (ε = 1), min 3 members before a cluster becomes visible, nightly batch DBSCAN repair with append-only merge/split history. A cluster is a *type* above emitters (*instances*). |
 | ML runtime | `MlProvider` trait over ONNX models loaded at runtime (no rebuild). CPU reference **tract** (pure Rust); Mac acceleration **ort + CoreML EP** behind opt-in `ml-coreml`; Jetson **ort + TensorRT EP** (`ml-trt`, deferred). Candle and Burn are rejected: model code in Rust means a rebuild per model. Hand-written wgpu is rejected for v1. |
 | Evaluation | A-priori floors in this ADR. Dev and acceptance seeds are disjoint; OTA labels come only from CRC-valid decodes, split by session. Every number is reported per SNR bin × source (synthetic / OTA). T-206 is the exit gate. |
@@ -49,7 +49,7 @@ Constraints carried in:
 
 - **`unknown`** is the open-set outcome at every level. A classification may be `coarse: digital`, family `unknown`: the "digital, unknown order" case below ~0 dB (C15 card).
 - **Versioning.** The taxonomy is data (`hk_model::classify::taxonomy::HK_MOD_V1`). Adding a class or family is a new version (`hk-mod@2`). Rows keep the version they were written under. Readers map old labels through `taxonomy::family_of(label, version)`. The pre-M3 labels (`fsk`, `ook`, `bpsk`, `qpsk`, `wfm`, `nbfm`, `am`, `2fsk`) map into `hk-mod@1`. Service families (`adsb`, `fm-broadcast`) are not modulation labels. They stay decoder evidence in `family.rs` (`taxonomy: null`).
-- **Fingerprint gate fix (T-211).** `cluster::Fingerprint` compares family exactly. Since `fsk` and `2fsk` would otherwise split one emitter, the comparison moves to `family_of` at the family level. This is additive and keeps `FEATURE_SET_VERSION` 1.
+- **Fingerprint gate fix (T-211) — ~~proposed~~ WITHDRAWN (T-233, 2026-09-16).** The proposal was: `cluster::Fingerprint` compares family exactly, and since `fsk` and `2fsk` would otherwise split one emitter, the comparison should move to `family_of` at the family level. **It does not.** The gate stays exact; see §5.1 for what was measured and why. The withdrawal is itself additive (nothing changed) and `FEATURE_SET_VERSION` stays 1.
 
 ## 2. `Classification` contract (C15 output)
 
@@ -166,7 +166,7 @@ Below a gate, a family contributes no likelihood mass, so its mass moves to `unk
 - optional `pri_s` / `scan_period_s` (radar) and `cfo_offset_hz` (oscillator, AWARE-051, later);
 - `suspect_fraction`, `snr_db` distribution.
 
-`Fingerprint` v1 is a projection (`EmissionFeatures::fingerprint()`). Entity resolution is unchanged.
+`Fingerprint` v1 is a projection (`EmissionFeatures::fingerprint()`). Entity resolution is unchanged but for §5.1's `ModulationStructure`, which only ever makes it stricter.
 
 **`Signature`** is immutable per `(signature_id, version)`, like recipes:
 - `name`, `kind` (`protocol` / `device-type` / `rfi` / `radar` / `learned`), `taxonomy`;
@@ -199,6 +199,26 @@ A match **never sets identity, known_status or lifecycle**. It adds explanation 
 - **Identity link.** A cluster groups **emitters** (instances). An emitter has at most one current cluster (`emitter_cluster`, append-only with supersession). Type ≠ instance: two identical sensors share a cluster and stay two emitters (C18 pitfall).
 
 **Privacy.** Clusters and signatures stay local. No instance-level RF fingerprinting is done in M3 (AWARE-047 is later).
+
+### 5.1 The fingerprint's family gate stays exact, and what the fingerprint carries instead (T-233, amendment)
+
+§1 proposed relaxing `Fingerprint`'s family comparison from exact equality to `family_of`, so that an emitter labelled `fsk` by the blind estimator and `2fsk` by the demodulator chain would stop splitting into two inventory rows. T-218 applied it and found it also merges `bpsk` with `qpsk`, `2fsk` with `gfsk` and `am` with `wfm` at an identical centre, bandwidth and symbol rate, and deferred it. T-233 was funded to build the finer discriminator that would make it safe. **It built one, measured it, and the relaxation is withdrawn.** Three findings, in the order they decide the question.
+
+**1. The relaxation is worth less than it looks, because its motivating case is already handled.** Two entries of one emission — a track-based one and a chain or decoder output — are merged by `Repository::same_emission` (T-082), which compares centre frequency and observation overlap and **never looks at the family at all**. The `fsk`/`2fsk` split the relaxation exists to close does not survive that path.
+
+**2. The relaxation is worth more than it looks in the other direction, because only one coarse label is ever written.** `hk_estimate::blind::Family` emits `Fsk` — a family — but `Bpsk`, `Qpsk` and `Ook`, which are classes. So `fsk` is the *only* family-level modulation label any producer writes, and relaxing the gate is precisely a licence to merge an `fsk` row with a `2fsk`, `gfsk`, `msk` or `4fsk` one. The `fsk` family is where the relaxation's entire risk lives.
+
+**3. That family is exactly where no discriminator reaches.** `2fsk`, `gfsk` and `msk` are not three modulations but one modulation at three filter settings, and every one of them is **constant-envelope by construction**. Conditioned as the fingerprint conditions — matched centre, bandwidth, symbol rate and modulation index — over 99 % of genuinely distinct pairs are indistinguishable on the statistic that shipped, at every SNR from the FSK gate upwards. The best statistic T-233 tried on that pair (the instantaneous frequency's Sarle bimodality) still left 5.8 % to 33 % indistinguishable, and was rejected anyway for measuring the observation rather than the emission. Blind tests must never merge two genuinely distinct emitters, and there is no width at which this pair can be gated that honours that.
+
+**What landed instead: `ModulationStructure` on `Fingerprint`, as evidence that can only split.**
+
+- **The statistic.** `envelope_shape` = `μ₄ = E|s|⁴/(E|s|²)²` of the emission, with the additive-noise contribution removed in closed form (`μ₄ₛ = μ₄ₓ(1+1/ρ)² − 4/ρ − 2/ρ²`, from `E|x|⁴ = E|s|⁴ + 4Pσ² + 2σ⁴`). It is exactly 1 for any constant-envelope emission, and it separates an amplitude modulation from an angle one, and a binary phase alphabet from a quaternary one: a shaped BPSK's 180° transitions carry the trajectory through the origin where a QPSK's mostly do not. It is a ratio of two expectations, so it measures the emission and not the observation — the T-281 rule.
+- **Its uncertainty is measured, not assumed.** Each value carries a sigma: the noise correction's own error given an SNR known to ±3 dB, plus the statistic's spread across four blocks of the record, in quadrature. `Tolerances::structure_sigmas` is then a number of sigmas (3), not a width, so nothing is fitted to any pair. The dimension stops discriminating on its own as the SNR falls rather than needing an SNR floor bolted on.
+- **Measured** (acceptance seeds, `hk-classify`'s `structure_rates`; bandwidth-matched pairs at an identical centre, bandwidth, symbol rate and family label): `bpsk`/`qpsk` false merge **0.097 at 20 dB** and **0.027 at 25 dB** against a baseline of 1.00, false split under 0.02; at the 15 dB PSK gate the band exceeds the 0.18 separation and the dimension concludes nothing.
+- **It can only split.** It is an ordinary scored feature, so a fingerprint carrying structure is compared on strictly more evidence; a pair that matched without it can stop matching and never start. Adding it to entity resolution therefore adds **no** false-merge exposure at all, which is what made it safe to land while the relaxation is not.
+- **A second dimension was built and rejected.** `if_concentration` (`IQR/(P95−P5)` of the instantaneous frequency) separates `bpsk` from `qpsk` even at 10 dB, but its quantiles count samples, so it moves with the analysis geometry — one `bpsk` emitter read 0.014 over a 16 384-sample record and 0.078 over a 6 144-sample one, while reporting a confident sigma. That is the T-281/T-310 failure mode, and one dimension that measures the emission beats two where the second measures the look.
+
+T-218's guard test (`t218_the_family_gate_separates_two_emissions_that_share_a_family`) is unchanged and still passes, which is the point: the discriminator did not earn the relaxation, so nothing about the gate moved.
 
 ## 6. C38 ml-runtime interface (`hk-ml`, T-203)
 
