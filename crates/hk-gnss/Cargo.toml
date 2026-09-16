@@ -1,0 +1,21 @@
+[package]
+name = "hk-gnss"
+description = "C36 GNSS observables: known-PRN acquisition (the documented blind-first exception) and blind GNSS integrity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Timestamps for observable epochs. No hk-detect, no hk-context: see the crate docs and
+# tests/blind_path_boundary.rs — this crate must stay off the blind detection path.
+hk-model.workspace = true
+# T-274: the FFT parallel code-phase search reuses the hk-dsp CPU backend rather than planning
+# its own transform, so acquisition rides the same kernels as the rest of the DSP.
+hk-dsp.workspace = true
+num-complex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# T-274: the boundary guard test parses workspace manifests as text; no toml dependency.

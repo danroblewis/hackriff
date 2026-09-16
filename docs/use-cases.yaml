@@ -3724,7 +3724,14 @@ use_cases:
   hardware_fit: needs-accessory
   accessory: active GNSS antenna via bias-tee
   fit_flags: null
-  fit_note: null
+  fit_note: 'The HackRF has no GNSS-style front-end AGC to log, so the "AGC" half of the name is
+    not reachable on this hardware: in-band power against the calibrated C08 noise floor is the
+    only available proxy, and is reported as a proxy rather than as AGC (C36 card; docs/06 §5).
+    This use case stays BLIND-FIRST and is the on-mission half of C36: a jammer sits above the
+    noise floor, so the ordinary floor tracker finds it with no PRN codes and no GNSS receiver
+    running. hk_gnss::assess_jamming therefore takes receiver observables as an Option, and
+    still returns a jamming verdict when they are absent (T-274). Per-satellite C/N0 only
+    corroborates, and requires the tracking loops that T-274 did not build.'
   test_tier: offline-synth
 - id: AWARE-003
   theme: Spectrum Situational Awareness, Interference & Anomalies
@@ -3748,7 +3755,13 @@ use_cases:
   hardware_fit: needs-accessory
   accessory: active GNSS antenna via bias-tee
   fit_flags: null
-  fit_note: null
+  fit_note: 'Stays BLIND-FIRST: the tell-tales are consistency checks over observables (every
+    satellite at identical power, impossible position jumps, clock steps), not a known-code
+    search. T-274 implements hk_gnss::assess_spoofing against mocked observable epochs, so it is
+    testable with no RF at all; the per-satellite C/N0 and PVT it consumes in the field still
+    need the tracking loops and PVT solver T-274 did not build. Spoofing GENERATION is out of
+    scope and no GNSS RF generator is built (C36 card); any third-party simulator output stays
+    file-only and is never routed to C37.'
   test_tier: offline-synth
 - id: AWARE-004
   theme: Spectrum Situational Awareness, Interference & Anomalies
@@ -5905,7 +5918,13 @@ use_cases:
   hardware_fit: needs-accessory
   accessory: Active GNSS antenna via bias-tee
   fit_flags: null
-  fit_note: 'L1 C/A sits 20-30 dB below the noise floor, so blind detection cannot find it: this is an explicit, documented exception to the project''s blind-first rule. Acquisition is known-code correlation/despread against the published GPS PRN codes (GNSS-SDR is the reference implementation), i.e. the known-signal pipeline leads rather than suggests. The blindly-detectable, on-mission half of GNSS is the jamming/spoofing signature (power anomaly, loss-of-lock across all SVs) covered by AWARE-002/AWARE-003, which stays blind.'
+  fit_note: 'L1 C/A sits 20-30 dB below the noise floor, so blind detection cannot find it: this is an explicit, documented exception to the project''s blind-first rule. Acquisition is known-code correlation/despread against the published GPS PRN codes (GNSS-SDR is the reference implementation), i.e. the known-signal pipeline leads rather than suggests. The blindly-detectable, on-mission half of GNSS is the jamming/spoofing signature (power anomaly, loss-of-lock across all SVs) covered by AWARE-002/AWARE-003, which stays blind. T-274 (ADR-0018) built the
+    known-code half only: PRN codebook and FFT parallel code-phase acquisition in the hk-gnss
+    crate, demonstrated on synthetic IQ at -20 dB SNR. It did NOT build tracking loops, nav-message
+    decode, ephemeris, a PVT solution or SBAS/WAAS, so the "and track ... compute a fix" and SBAS
+    halves of this use case are NOT yet served - acquisition without tracking cannot produce a fix,
+    and none is claimed. Wrapping GNSS-SDR as a C22 plugin remains the recommended route to a full
+    receiver. All sensitivity figures are synthetic and unverified against hardware.'
   test_tier: offline-recorded
 - id: SIGNAL-031
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)

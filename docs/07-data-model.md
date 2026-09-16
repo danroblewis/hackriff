@@ -293,6 +293,16 @@ The append-only stream of what a control channel said (`hk_model::trunking::Gran
 - **Storage:** `grant_event`, migration 0013, append-only by trigger, indexed by `(system, t)` and `(call_id, event_id)`.
 - **Tests:** `hk-model` `repo/trunking.rs` — append-only triggers, time-ordered reads, each event's own encryption state.
 
+### 2.31 GnssObservableEpoch / SvAcquisition  [C36] (*T-274*, [ADR-0018](adr/0018-gnss-known-code-exception.md))
+What a software GNSS receiver reports, and the one object in this model produced by a **known-signal-led** path rather than by blind detection.
+
+- `GnssObservableEpoch` (`hk_gnss::GnssObservableEpoch`): `t`, `svs: Vec<SvObservable>` (`prn`, `cn0_dbhz`, `doppler_hz`, `elevation_deg`, `locked`), optional `position` (ECEF) and `clock_bias_s`. Pseudorange and carrier phase are **deliberately absent**: they need tracking loops and a decoded nav message, and T-274 built neither — empty fields would imply a capability that does not exist.
+- `SvAcquisition` (`hk_gnss::SvAcquisition`): `prn`, `doppler_hz`, `code_phase_chips`, `peak_ratio`, estimated `cn0_dbhz`. Every result carries `AcquisitionEvidence::KnownCodeCorrelation { codebook }`.
+- **These types live in `hk-gnss`, not in `hk-model`, and that is the point.** An acquisition is not a `Detection` (§2.9). Putting it in the shared model crate would make "found by despreading a known code" part of the vocabulary the blind inventory speaks, which is exactly the leak ADR-0018 exists to prevent. `crates/hk-gnss/tests/blind_path_boundary.rs` asserts no `hk-gnss` source names a `Detection`.
+- **Relationships:** feeds C12/C30 as evidence for `Anomaly`/`Explanation` on the attack map; a *jamming* verdict reaches that path **without** any of these objects (§2.18 Anomaly from the ordinary C08 floor tracker), which is what keeps AWARE-002/AWARE-003 blind.
+- **Storage:** none yet. Nothing persists these; the crate is not wired into `hk-pipeline`.
+- **Tests:** `hk-gnss` `below_noise_acquisition.rs` (blind energy detection cannot see L1 — 0.02 dB spectral difference — while known-code correlation recovers the satellite from the same IQ), `blind_path_boundary.rs` (the dependency-graph guard), `integrity.rs` (jamming flags with observables absent).
+
 ## 3. Storage (provisional — Phase 3 storage ADR finalises)
 
 Three stores under one per-device data directory, so the whole state is one thing to back up, export, or wipe:
