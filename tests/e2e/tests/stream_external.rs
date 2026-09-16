@@ -256,10 +256,14 @@ fn fsk_bursts_stream_as_bits_and_symbols_over_tcp_matching_the_private_truth() {
         eprintln!("[T-060] wrote the capture to {path}");
     }
 
-    // Header: a bits stream in the contract's shape, content permitted by the user's rule.
+    // Header: a bits stream in the contract's shape. T-143 removed the content-gating assertion
+    // that sat here (the header class was `unrestricted`): content gating is off by default, so
+    // an untargeted tap's header now carries the derived source class verbatim
+    // (`metadata-only` for this 433.9 MHz window) and nothing gates on it. The class the user's
+    // rule vouches for still reaches each burst's status record; the payload checks below are
+    // what the rule used to be needed for.
     assert_eq!(header.kind, StreamKind::Bits);
     assert_eq!(header.datatype.as_deref(), Some("ru8"));
-    assert_eq!(header.content_class, hk_model::ContentClass::Unrestricted);
     assert_eq!(
         header.version,
         format!(
