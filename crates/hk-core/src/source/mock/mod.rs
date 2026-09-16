@@ -501,6 +501,14 @@ pub struct MockSdrDriver {
     recording: Arc<Recording>,
     options: MockOptions,
     capabilities: SourceCapabilities,
+    /// The control handle of the most recently opened source. **Test-only; not safe for two
+    /// concurrent sources from one driver.** This field exists to let tests inject device
+    /// events (e.g. [`MockSdrControl::inject_overrun`]) into the last-opened stream without
+    /// having to thread the control handle through the entire test pipeline. Because it holds
+    /// only the most recently opened control, calling [`open`](Self::open) again overwrites
+    /// the previous one; two concurrent sources from the same driver will share state
+    /// incorrectly. When multiple concurrent SDRs are added (a future option), a test-safe
+    /// mechanism will be needed.
     last: Mutex<Option<Arc<MockSdrControl>>>,
 }
 
@@ -551,6 +559,8 @@ impl MockSdrDriver {
     }
 
     /// The control handle of the most recently opened source (tests inject overruns through it).
+    /// Returns `None` if no source has been opened yet. **Becomes stale after the next call to
+    /// [`open`](Self::open); do not use this from concurrent sources.**
     pub fn last_control(&self) -> Option<Arc<MockSdrControl>> {
         self.last
             .lock()
