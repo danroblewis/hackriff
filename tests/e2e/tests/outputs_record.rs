@@ -6,9 +6,8 @@
 //!   `symbols`: the bits file's located payloads match the private truth, the symbols file has
 //!   sane statistics, sidecars carry capture settings, band, framing (sync 2DD4, CRC, bit order),
 //!   timestamps, software version and the Bitstream row, and the rows are saved on the
-//!   selection's links. IQ of this `metadata-only` window is refused (the recording rule).
-//!   Downloads answer the file bytes (Bearer and `?token=`). A full quota is refused (507).
-//!   `hk record --band --kinds bits` downloads its files.
+//!   selection's links. Downloads answer the file bytes (Bearer and `?token=`). A full quota is
+//!   refused (507). `hk record --band --kinds bits` downloads its files.
 //! - **FM fixture.** The station is found blind from `/api/inventory`; recording its audio and
 //!   stopping yields a valid 48 kHz mono 16-bit WAV with audio content, a Recording row, and a
 //!   sidecar with the estimated mode (and the refined tuning when the listen chain refined). An
@@ -216,14 +215,9 @@ fn fsk_bits_and_symbols_record_to_files_linked_to_the_selection() {
     let id = started["recording"]["id"].as_str().unwrap().to_owned();
     assert_eq!(started["recording"]["active"], true);
 
-    // IQ of a window whose source class forbids stored content follows the recording rule.
-    let (code, iq) = call(
-        addr,
-        "POST",
-        "/api/outputs/record/start",
-        Some(json!({ "band": { "f_lo": 433.8e6, "f_hi": 434.1e6 }, "kinds": ["iq"] })),
-    );
-    assert_eq!((code, iq["code"].as_str()), (403, Some("refused")), "{iq}");
+    // T-143 removed the content-gating assertion that used to sit here: content gating is off by
+    // default, so this `metadata-only` window's IQ is no longer refused. The class is still
+    // derived and reported (see the run summary's `class:` line); nothing gates on it.
 
     wait_for("bursts in the bits and symbols files", LIMIT, || {
         let s = session(addr, &id);
