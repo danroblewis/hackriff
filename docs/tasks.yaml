@@ -4665,7 +4665,7 @@ tasks:
   - id: T-269
     milestone: M4
     title: 'M4 grant following onto channelizer outputs within the dwell window (metadata only)'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-268
