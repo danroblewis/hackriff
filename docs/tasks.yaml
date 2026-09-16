@@ -4325,6 +4325,27 @@ tasks:
       land now; the region-extending-decode half depends on T-253''s staged plan, so
       assert what exists and say plainly what is deferred rather than asserting less
       than the task asks'
+    result: 'py/hkpy/synth/lora.py (exact LoRa CSS: 2^SF chips/symbol, cyclic-shift symbols,
+      preamble + sync word + 2.25-symbol down-chirp SFD, continuous phase; plus a LoRa-shaped
+      bit chain - CRC-16/XMODEM, Hamming(4,4+cr), diagonal interleave, Gray - documented as
+      NOT bit-exact SX127x) and py/hkpy/synth/lora_scene.py (scenario lora_ism_burst at
+      903.1 MHz in 902-928 US ISM, with a steady CW carrier and short 2-FSK bursts as the
+      two contrast species). Waveform verified independently before any detection result was
+      trusted: measured sweep slope within 1% of BW^2/2^SF, span = BW, one fold per symbol,
+      a genuinely falling SFD, and a from-the-method dechirp-and-FFT demodulator recovering
+      every transmitted symbol and the CRC-valid payload at SF7/CR4-5 and SF9/CR4-8. Hamming
+      minimum distances measured (2/2/3/4), not claimed. Acceptance: tests/e2e
+      acceptance_chirp.rs, blind through the mock SDR, 3 tests, `just acceptance-chirp`.'
+    deferred: 'the region-extending-decode half (invariant 5) is ADR-0017 TM-10 = T-265,
+      blocked on the analyze engine (POST /api/analyze answers 501, MAUTO unscheduled):
+      no bounded-region reader exists, so asserting it would mean inventing the contract
+      in a test. The fixture carries what TM-10 needs (sweep_polyline, per-packet ordered
+      symbols, CRC-valid payload) and t255_chirp_fixture_is_ready_for_region_extending_decode
+      pins that. Finding for T-261/ADR-0017 §1.3: at the pipeline''s 4.096 ms frame an
+      SF9/125 kHz chirp sweeps its whole channel INSIDE one frame, so the diagonal is not
+      merely un-drawable, it is unobservable - the detector cannot tell it from a 125 kHz
+      wideband burst. At SF12 (32.8 ms symbol, 8 frames) the sweep does resolve into a
+      ladder of boxes, centres spanning 0.84 of the channel.'
     area: py/ (synth scenarios), tests/e2e for the acceptance scene
     needs: none
     model: opus

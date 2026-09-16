@@ -23,6 +23,7 @@ from hkpy.synth import SCENARIOS, ParamError, generate, resolve_params
 from hkpy.synth import acars as acars_mod
 from hkpy.synth import adsb as adsb_mod
 from hkpy.synth import fsk as fsk_mod
+from hkpy.synth import lora as lora_mod
 from hkpy.synth import pocsag as pocsag_mod
 from hkpy.synth.__main__ import main as cli_main
 
@@ -40,6 +41,8 @@ SMALL: dict[str, dict] = {
     "pocsag_pagers": {},
     "acars_message": {"prekey_s": 0.02, "text": "TEST"},
     "trunk_control_channel": {"duration_s": 0.2},
+    "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
+                       "packet_period_s": 0.06, "fsk_period_s": 0.05},
 }
 
 
@@ -829,3 +832,246 @@ def test_acars_crc_is_kermit_over_parity_bearing_chars():
     fr = acars_mod.build_frame("2", ".N12345", "H1", "1", "HELLO")
     assert all(acars_char_parity_ok(b) for b in fr.chars)
     assert kermit_residue(fr.chars + bytes([fr.crc & 0xFF, fr.crc >> 8])) == 0
+
+
+# ---- LoRa CSS (T-255) --------------------------------------------------------------------------
+#
+# The generator claims a chirp with no stable frequency. That claim is checked here against the
+# waveform's own arithmetic and an independently written demodulator BEFORE any detection result
+# is trusted: T-267 shipped a fixture whose pulse shape no receiver could read, and a fixture that
+# cannot be demodulated tests nothing.
+
+#: Two (sf, cr, scene overrides) pairs: the fast low-SF end and the slow high-SF, heavily coded end.
+LORA_CASES = [
+    (7, 1, {"duration_s": 0.15, "first_packet_s": 0.02, "packet_period_s": 0.06,
+            "fsk_period_s": 0.05}),
+    (9, 4, {}),
+]
+
+
+def test_lora_hamming_is_a_real_code_not_just_a_defined_one():
+    """The module claims (7,4) Hamming at 4/7 and SECDED at 4/8. Measure the minimum distance."""
+    for cr, claimed in ((1, 2), (2, 2), (3, 3), (4, 4)):
+        words = [lora_mod.hamming_encode(n, cr) for n in range(16)]
+        assert len(set(words)) == 16, f"4/{4 + cr}: encoding is not injective"
+        d = min(bin(a ^ b).count("1") for i, a in enumerate(words) for b in words[i + 1 :])
+        assert d == claimed, f"4/{4 + cr}: minimum distance {d}, CODING_SPEC claims {claimed}"
+        assert lora_mod.CODING_SPEC["hamming_parity"]["distance"][f"4/{4 + cr}"] == claimed
+
+
+def test_lora_crc_matches_the_stdlib_xmodem_reference():
+    assert lora_mod.crc16_xmodem(b"123456789") == 0x31C3 == binascii.crc_hqx(b"123456789", 0x0000)
+    assert lora_mod.CRC16_SPEC["check_123456789"] == "0x31C3"
+
+
+def test_lora_gray_round_trips_over_every_symbol_value():
+    for sf in (7, 9, 12):
+        n = lora_mod.n_chips(sf)
+        assert sorted(lora_mod.gray(v) for v in range(n)) == list(range(n))
+        assert all(lora_mod.ungray(lora_mod.gray(v), sf) == v for v in range(n))
+
+
+def test_lora_chirp_sweeps_the_whole_channel_once_per_symbol():
+    """The waveform itself: slope BW^2/2^SF, span BW, one fold per symbol, and a falling SFD.
+
+    Checked on the instantaneous frequency recovered from the samples by phase differencing, which
+    knows nothing about how the modulator built them.
+    """
+    sf, bw, fs = 9, 125e3, 500e3
+    sps = int(round(lora_mod.symbol_duration_s(sf, bw) * fs))
+    assert sps == 2048
+    slope = lora_mod.chirp_rate_hz_per_s(sf, bw)
+    x = lora_mod.modulate(np.zeros(0, dtype=np.int64), sf, bw, fs, preamble_symbols=4)
+    inst = np.angle(x[1:] * np.conj(x[:-1])) * fs / (2 * math.pi)
+
+    guard = 32  # drop the samples either side of a fold, where the frequency is discontinuous
+    seg = inst[sps + guard : 2 * sps - guard]
+    fit = np.polyfit(np.arange(len(seg)) / fs, seg, 1)[0]
+    assert abs(fit / slope - 1) < 0.01, f"slope {fit:.3e} Hz/s, expected {slope:.3e}"
+    assert abs(seg.max() - bw / 2) < 0.02 * bw and abs(seg.min() + bw / 2) < 0.02 * bw
+
+    # Exactly one fold per symbol boundary, evenly spaced, and none inside a symbol: symbol 0
+    # starts at -BW/2 and does not wrap (the sync-word symbols, which do, are excluded here).
+    folds = np.flatnonzero(np.diff(inst[: 4 * sps]) < -0.5 * bw)
+    assert len(folds) == 4, f"4 preamble symbols should fold 4 times, folded {len(folds)}"
+    assert np.allclose(np.diff(folds), sps, atol=2)
+
+    # The SFD is a genuine DOWN-chirp: 4 preamble + 2 sync symbols, then 2.25 falling ones.
+    f = lora_mod.packet_frequency(np.zeros(0, dtype=np.int64), sf, bw, fs, preamble_symbols=4)
+    sfd = f[6 * sps + guard : 7 * sps - guard]
+    down = np.polyfit(np.arange(len(sfd)) / fs, sfd, 1)[0]
+    assert down < -0.9 * slope, f"SFD slope {down:.3e} Hz/s is not a down-chirp"
+
+
+@pytest.mark.parametrize("sf,cr,extra", LORA_CASES)
+def test_lora_packets_demodulate_to_the_truth_symbols_and_payload(tmp_path, sf, cr, extra):
+    """Dechirp-and-FFT, the standard LoRa demodulator, recovers every hidden parameter's effect."""
+    manifest = generate("lora_ism_burst", 255, tmp_path / f"lora-{sf}-{cr}",
+                        {**extra, "sf": sf, "coding_rate": cr})
+    _, meta, x = load(manifest)
+    fs = meta["global"]["core:sample_rate"]
+    fc = meta["captures"][0]["core:frequency"]
+    st = scenario_truth(meta)
+    bw = st["lora"]["bandwidth_hz"]
+    sps = int(round(st["lora"]["symbol_duration_s"] * fs))
+    packets = truths(meta, kind="lora-packet")
+    assert len(packets) == len(st["lora"]["packets"]) >= 2
+    assert st["lora"]["coding_rate"] == f"4/{4 + cr}" and st["lora"]["spreading_factor"] == sf
+    assert 902e6 < st["lora"]["rf_center_hz"] < 928e6, "the scene must sit in 902-928 MHz US ISM"
+
+    for ann, t in packets:
+        s0, n = ann["core:sample_start"], ann["core:sample_count"]
+        seg = x[s0 : s0 + n] * np.exp(
+            -2j * math.pi * (t["center_hz"] - fc) * np.arange(s0, s0 + n) / fs)
+        # The preamble is 2^SF-value-0 up-chirps: an independent check on the base chirp itself.
+        pre = lora_mod.demodulate_symbols(seg, sf, bw, fs, int(t["preamble_symbols"]))
+        assert np.all(pre == 0), f"preamble demodulated to {pre.tolist()}, expected all zeros"
+        lead = int(round((t["preamble_symbols"] + 2 + t["sfd_symbols"]) * sps))
+        want = np.array(t["payload_symbols"], dtype=np.int64)
+        got = lora_mod.demodulate_symbols(seg, sf, bw, fs, len(want), start=lead)
+        assert np.array_equal(got, want), f"{np.sum(got != want)}/{len(want)} symbols wrong"
+        payload, crc, valid = lora_mod.decode(got, sf, cr, t["frame"]["payload_bytes"])
+        assert payload.hex() == t["frame"]["payload_hex"]
+        assert f"{crc:04x}" == t["frame"]["crc_hex"] and valid
+        assert t["identity"] == {"type": "lora_payload", "value": t["frame"]["payload_hex"]}
+        assert t["frame"]["n_symbols"] == len(want) == lora_mod.symbol_count(
+            t["frame"]["payload_bytes"], sf, cr)
+
+
+def _occupied_span_hz(seg, fs, nfft, limit_hz):
+    """Median per-frame occupied width inside ``+/- limit_hz`` of baseband: the *contiguous* run of
+    bins around that frame's peak staying within 10 dB of it.
+
+    Both restrictions matter. Band-limiting keeps another channel's emitter (or its alias, which is
+    what the first draft of this measured) out of the answer; taking the contiguous run around the
+    peak rather than the outermost hot bins means a second lobe cannot widen it either.
+    """
+    spans = []
+    win = np.hanning(nfft)
+    keep = np.abs(np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs))) <= limit_hz
+    for i in range(0, len(seg) - nfft, nfft):
+        p = np.abs(np.fft.fftshift(np.fft.fft(seg[i : i + nfft] * win))) ** 2
+        p = p[keep]
+        hot = p >= p.max() / 10.0
+        lo = hi = int(np.argmax(p))
+        while lo > 0 and hot[lo - 1]:
+            lo -= 1
+        while hi < len(p) - 1 and hot[hi + 1]:
+            hi += 1
+        spans.append((hi - lo + 1) * fs / nfft)
+    return float(np.median(spans))
+
+
+def test_lora_box_is_a_bounding_box_far_wider_than_the_emission(tmp_path):
+    """ADR-0017 §1.3 as a number rather than a caveat.
+
+    One ``(f_lo, f_hi)`` per detection cannot describe a swept carrier, so the annotation box is
+    the sweep's hull. How much that costs is ``symbol_duration / analysis_frame`` — stated in the
+    truth as an identity, and measured here from the samples. Threshold fixed a priori: the chirp
+    sweeps a quarter of the box per frame at these parameters, so half the box allows a factor of
+    two for window leakage and for the minority of frames that straddle a fold.
+    """
+    manifest = generate("lora_ism_burst", 255, tmp_path / "lora-box", {"n_packets": 1})
+    _, meta, x = load(manifest)
+    fs = meta["global"]["core:sample_rate"]
+    fc = meta["captures"][0]["core:frequency"]
+    [(ann, t)] = truths(meta, kind="lora-packet")
+    bw = t["bandwidth_hz"]
+    sweep = t["sweep"]
+    assert ann["core:freq_upper_edge"] - ann["core:freq_lower_edge"] == pytest.approx(bw)
+    assert sweep["stable_frequency"] is False and sweep["box_is_bounding_box"] is True
+    assert sweep["box_to_instantaneous_ratio"] == pytest.approx(
+        t["symbol_duration_s"] / sweep["instantaneous_frame_s"])
+    assert sweep["box_to_instantaneous_ratio"] >= 4.0
+
+    nfft = int(round(sweep["instantaneous_frame_s"] * fs))
+    s0, n = ann["core:sample_start"], ann["core:sample_count"]
+    seg = x[s0 : s0 + n] * np.exp(
+        -2j * math.pi * (t["center_hz"] - fc) * np.arange(s0, s0 + n) / fs)
+    occupied = _occupied_span_hz(seg, fs, nfft, bw / 2)
+    assert occupied < 0.5 * bw, f"occupied {occupied:.0f} Hz of a {bw:.0f} Hz box"
+    assert occupied == pytest.approx(sweep["instantaneous_bandwidth_hz"], rel=0.6)
+
+    # Control: the steady carrier in the same recording occupies a few bins, and its box is a line.
+    [(cw_ann, cw)] = truths(meta, kind="cw")
+    cw_seg = x[:n] * np.exp(-2j * math.pi * (cw["center_hz"] - fc) * np.arange(n) / fs)
+    assert _occupied_span_hz(cw_seg, fs, nfft, bw / 2) < 0.05 * bw
+    assert cw_ann["core:freq_lower_edge"] == cw_ann["core:freq_upper_edge"]
+
+
+def test_lora_sweep_polyline_is_the_frequency_the_box_cannot_draw(tmp_path):
+    """The truth carries the polyline ADR-0017 §1.3 says the model cannot render. Check it is real.
+
+    Per-frame spectral centroid tracks a linear chirp's mid-frame frequency, so it can be compared
+    with the polyline directly. Frames straddling a fold are excluded — identified from the
+    polyline, not from a result. Tolerance fixed a priori at 0.1 x BW: the centroid of the band a
+    chirp sweeps within one frame is unbiased to within a few kHz, and 0.1 x BW is still an order
+    of magnitude tighter than the bounding box the polyline is being contrasted with.
+    """
+    manifest = generate("lora_ism_burst", 255, tmp_path / "lora-poly", {"n_packets": 1})
+    _, meta, x = load(manifest)
+    fs = meta["global"]["core:sample_rate"]
+    fc = meta["captures"][0]["core:frequency"]
+    [(ann, t)] = truths(meta, kind="lora-packet")
+    bw, slope = t["bandwidth_hz"], t["sweep"]["chirp_rate_hz_per_s"]
+    poly = np.array(t["sweep_polyline"], dtype=float)
+    assert len(poly) > 50
+    assert np.all(poly[:, 1] >= t["sweep"]["f_low_hz"] - 1.0)
+    assert np.all(poly[:, 1] <= t["sweep"]["f_high_hz"] + 1.0)
+
+    s0, n = ann["core:sample_start"], ann["core:sample_count"]
+    seg = x[s0 : s0 + n] * np.exp(
+        -2j * math.pi * (t["center_hz"] - fc) * np.arange(s0, s0 + n) / fs)
+    # Frames on the polyline's own grid, so each frame has a bracketing polyline point either side.
+    nfft = int(round(t["polyline_step_s"] * fs))
+    frame_s = nfft / fs
+    assert slope * frame_s < bw, "a frame must not sweep the whole channel, or nothing is trackable"
+    bins = np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs))
+    inband = np.abs(bins) <= bw / 2  # the channel the box already gives; noise outside it is not ours
+    win = np.hanning(nfft)
+    errors = []
+    for i in range(0, n - nfft, nfft):
+        t0 = (s0 + i) / fs
+        j = int(np.searchsorted(poly[:, 0], t0))
+        if j < 1 or j + 1 >= len(poly) or np.any(np.diff(poly[j - 1 : j + 2, 1]) < 0):
+            continue  # a fold lands in or beside this frame; the mid-frame frequency is undefined
+        p = np.abs(np.fft.fftshift(np.fft.fft(seg[i : i + nfft] * win))) ** 2
+        centroid = float(np.sum(bins[inband] * p[inband]) / np.sum(p[inband])) + t["center_hz"]
+        errors.append(abs(centroid - float(np.interp(t0 + frame_s / 2, poly[:, 0], poly[:, 1]))))
+    assert len(errors) > 15, f"only {len(errors)} fold-free frames to compare"
+    assert np.median(errors) < 0.1 * bw, f"median polyline error {np.median(errors):.0f} Hz"
+
+
+def test_lora_scene_separates_stable_from_swept_and_persistent_from_ephemeral(tmp_path):
+    """The three species of the scene, as the truth describes them (invariant 1's two axes)."""
+    manifest = generate("lora_ism_burst", 255, tmp_path / "lora-contrast",
+                        SMALL["lora_ism_burst"])
+    _, meta, _ = load(manifest)
+    st = scenario_truth(meta)
+    n = st["n_samples"]
+
+    [(cw_ann, cw)] = truths(meta, kind="cw")
+    assert cw_ann["core:sample_count"] == n and cw["stable_frequency"] and cw["persistent"]
+
+    fsks = truths(meta, kind="fsk-burst")
+    assert len(fsks) == st["contrast"]["fsk"]["n_bursts"] >= 2
+    for ann, t in fsks:
+        assert 0 < ann["core:sample_count"] < n / 4
+        assert t["stable_frequency"] is True and t["persistent"] is False
+
+    loras = truths(meta, kind="lora-packet")
+    assert len(loras) >= 2
+    for ann, t in loras:
+        assert 0 < ann["core:sample_count"] < n / 2
+        assert t["sweep"]["stable_frequency"] is False
+        assert t["spreading_factor"] == SMALL["lora_ism_burst"]["sf"]
+
+    # The three occupy three disjoint channels, so nothing here is a blend of two species.
+    species: dict[str, tuple[float, float]] = {}
+    for ann, t in truths(meta, role="emission"):
+        lo, hi = species.get(t["kind"], (math.inf, -math.inf))
+        species[t["kind"]] = (min(lo, ann["core:freq_lower_edge"]),
+                              max(hi, ann["core:freq_upper_edge"]))
+    assert set(species) == {"cw", "fsk-burst", "lora-packet"}
+    boxes = sorted(species.values())
+    assert all(boxes[i][1] < boxes[i + 1][0] for i in range(2)), species
