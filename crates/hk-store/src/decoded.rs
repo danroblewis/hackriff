@@ -1064,6 +1064,24 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
+        // The recorder writes on the publisher's writer thread, so the last frame is stored some
+        // time after it is published. Wait for the catalogue to carry its timestamp before ending
+        // the stream: otherwise a busy machine can still be writing when the publisher finishes,
+        // the drain times out, and the tail of the recording is lost (T-228).
+        let last_t = ns_to_s(frame(1999).t);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while store
+            .list()
+            .unwrap()
+            .first()
+            .is_none_or(|c| c.t_last.is_none_or(|t| t < last_t))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the recorder did not store the last frame"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
         drop(p);
         wait_ended(&store);
         let list = store.list().unwrap();

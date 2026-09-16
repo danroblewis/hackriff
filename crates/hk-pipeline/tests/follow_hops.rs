@@ -542,6 +542,25 @@ fn one_recipe_follows_a_channel_net_ordered_tagged_deduplicated_and_gains_a_chan
     let frames = frame_records(&sink);
     run.finish();
 
+    // The test's own burst detector needs a settling window after its lane starts before its
+    // length measurement means anything: `warm` (50 ms) and then the floor's 0.2 s time constant.
+    // A lane that starts within that window of one of its bursts folds the burst into its floor
+    // estimate, fires late and reads the burst short (T-228: channel D's 104 ms burst read as
+    // 96 ms right after the mid-run add). Measure the window on the sample clock from when each
+    // lane started - the run for A, B and C, `applied_at_sample` for D - and assert on what
+    // follows it. Which bursts land in it depends on where the pipeline happened to start, not on
+    // anything the merge does.
+    let settle = (0.3 * FS) as u64;
+    let si0 = frames.iter().map(|f| f.0).min().unwrap_or(0);
+    let lane_settled = |f: &&(u64, u16, f64, u8)| {
+        f.0 >= if usize::from(f.1) == 3 {
+            at + settle
+        } else {
+            si0 + settle
+        }
+    };
+    let frames: Vec<(u64, u16, f64, u8)> = frames.iter().filter(lane_settled).copied().collect();
+
     assert!(frames.len() as u64 >= 5 * per_loop_abc, "{frames:?}");
     // Tagged with the right channel; the duplicate keeps its strong copy (channel B).
     for &(si, ch, ch_hz, code) in &frames {
@@ -576,7 +595,8 @@ fn one_recipe_follows_a_channel_net_ordered_tagged_deduplicated_and_gains_a_chan
         let k = (rel as f64 / LOOP as f64).round() as i64;
         assert!(
             (rel - k * LOOP as i64).abs() < (0.02 * FS) as i64,
-            "message {code} at {si} is not at its sent time"
+            "message {code} at {si} is not at its sent time (channel added at {at}): \
+             {frames:?}, status {status}"
         );
         k
     };
@@ -599,7 +619,7 @@ fn one_recipe_follows_a_channel_net_ordered_tagged_deduplicated_and_gains_a_chan
             .filter(|t| t.0 < 3 && (t.3 || t.2 != DUP_CODE))
             .map(|t| t.2)
             .collect();
-        if loop_start >= at as i64 {
+        if loop_start >= (at + settle) as i64 {
             expected.extend(TRUTH.iter().filter(|t| t.0 == 3).map(|t| t.2));
             after_add += 1;
         } else if loop_end <= at as i64 {
