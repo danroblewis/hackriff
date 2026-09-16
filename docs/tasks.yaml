@@ -6264,7 +6264,8 @@ tasks:
     milestone: M2-hardening
     title: Baselines should refuse or disclose comparisons across differing bias-tee state, and treat unknown
       as incomparable
-    status: in-progress
+    status: done
+    commit: 2968fa6
     priority: normal
     deps:
     - T-325
@@ -6402,6 +6403,14 @@ tasks:
       it empty wastes the one surface that shows where activity is worth scrubbing to. Backend must expose
       the ring''s window and serve a compressed overview at the timeline''s own resolution - relates to
       T-334''s span-matched resolution rule. Fold into docs/07, docs/14, ADR-0017 and ADR-0014'
+    source_from_t341_2026_09_16: 'T-341 built the achievable (centre, span) grid and says explicitly
+      that it is NOT your source. GET /api/navigation reports time.latest_s, which is the HISTORY
+      horizon; the timeline needs the IQ RING''s t0..t1 / retention_s, and the user''s invariant is
+      emphatic that these are DIFFERENT LENGTHS - sizing the scrubber from the longer lossy spectrum-history
+      retention makes it promise capture that no longer exists. GET /api/iqbuffer is the source. What
+      T-341 DOES give you: resolution.source extended to live-iq > spectrum-history > survey-overview,
+      so the compressed overview can say which it is showing rather than implying live IQ'
+
   - id: T-339
     milestone: M2-hardening
     title: 'Pause freezes the view, never the capture: the ring and detection stay always-on'
@@ -6455,12 +6464,18 @@ tasks:
       survey overview; the UI does the navigators, gestures, snap and styling. Note: the user referenced
       scratchpad/brief-time-axis-view.md items 6-8, which DOES NOT EXIST in the repo - work from the
       CLAUDE.md section and the message text, and ask the user if a fuller brief exists elsewhere'
+    grid_ready_from_t341_2026_09_16: 'T-341 confirms the grid you need is now on the wire: GET /api/navigation
+      gives ranges_hz, center_step_hz, spans_hz, max_live_span_hz and current, plus DEVICE_ID - which
+      is the field the lit-segment-per-active-capture-window requirement needs for the multi-SDR case.
+      ui/src/navigation.ts already holds snapState and detailOf as pure arithmetic over that grid,
+      so the navigator is gestures and styling over an existing contract rather than new backend surface'
 
   - id: T-341
     milestone: M2-hardening
     title: Navigation snaps to achievable capture states, and the view never implies detail the front end
       did not capture
-    status: in-progress
+    status: done
+    commit: 6610b45
     priority: high
     deps:
     - T-334
@@ -6858,6 +6873,25 @@ tasks:
       which T-353 left because calling just test would pull in this same Node gate. ALSO: reconcile CLAUDE.md''s
       claim that CI runs just test with whatever is decided - it is not accurate today, and the coordinator
       flagged it to the user rather than editing their file'
+  - id: T-359
+    milestone: M2-hardening
+    title: Carry the bias-tee state to the occupancy row, so T-333 stops folding everything as Unknown
+    status: todo
+    priority: normal
+    deps:
+    - T-332
+    - T-333
+    parallel_group: PIPE
+    model: opus
+    acceptance: 'T-333''s key, format and migration are live but EVERY FOLD IS UNKNOWN, because FrameInput
+      and ProvenanceSummary record the gain state and not the bias tee, so an OccupancyStat cannot say what
+      the DC was doing. hk-pipeline folds under a named FOLD_BIAS_TEE constant documenting exactly this.
+      After T-332 puts the bias tee in FrontEndState/ProvenanceSummary: add bias_tee to OccupancyStat (serde-default,
+      skipped when unknown, the way calibration is), have from_occupancy_stat return it, and replace FOLD_BIAS_TEE
+      with the row''s value. THE SEQUENCING REASON, from T-333: unlike the chain, a bias tee is switched
+      DURING a run, so it is not a service-lifetime value and must ride on the MEASUREMENT rather than on
+      the run. The shape is deliberately deferred because it depends on where T-332 puts the state - do
+      not guess it ahead of that ticket'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
