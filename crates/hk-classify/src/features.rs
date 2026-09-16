@@ -656,7 +656,7 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 
 /// C14 evidence: the strongest cyclic line, OBW/Rs and C14's own family scores.
 ///
-/// # `cyclic_db` and the four `blind_*` scores are OBSERVATION STATISTICS (T-281, re-measured T-310)
+/// # `cyclic_db` and the four `blind_*` scores are OBSERVATION STATISTICS (T-281, re-measured T-310, T-328)
 ///
 /// **They move with how long C14 was allowed to look, not only with what was transmitting**, and
 /// unlike `sigma_ap`/`sigma_dp` below that was not previously recorded anywhere. Both are
@@ -763,22 +763,65 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 /// movement (3.74 → 3.45 dB) for a fitted constant with no physical value, and costs fixed-length
 /// separation. Nothing here is a fix, so **nothing is rescaled** and `features@4` is unchanged.
 ///
-/// ## The large finding, and why it is deliberately not taken here
+/// ## The four-dimension expansion: measured again with the geometry pinned, and refused again
 ///
-/// The max-over-four collapse is throwing away most of this dimension's discriminating power.
-/// Carrying the four line significances as four dimensions instead gives, at ≥ 20 dB, median
-/// pairwise `d'` **7.77 against 3.46** at fixed length and **4.22 against 1.65** under mixed
-/// lengths; the share of class pairs it can separate goes 0.66 → 0.96 and 0.41 → 0.85; and the
-/// median distance of a held-out generator to its nearest taxonomy class goes 0.21 → 1.07.
+/// The max-over-four collapse throws away most of this statistic's *separability*. Carrying the
+/// four line significances as four dimensions instead, measured over the dev grid at ≥ 20 dB as a
+/// diagonal Gaussian per class — the way [`crate::density`] scores — gives median pairwise `d'`
+/// over the 210 taxonomy class pairs **7.03 against 2.81** at fixed length and **4.25 against
+/// 1.87** with N, N/2, N/4 and N/8 pooled; the share of pairs at `d' ≥ 2` goes 0.60 → 0.93 and
+/// 0.45 → 0.87; the median RMS clamped z of a held-out generator to its nearest taxonomy class goes
+/// 0.22 → 0.72. (T-310 reported 3.46 → 7.77, 1.65 → 4.22 and 0.21 → 1.07 for the same quantities
+/// before T-327 pinned the geometry. The win is the same size; the baseline moved.)
 ///
-/// It is still not taken, because it makes **this ticket's own harm worse**. Fitting each class on
-/// full windows and then scoring its own N/8 bursts — what happens to every burst shorter than
-/// [`crate::symbols::MAX_WINDOW_SAMPLES`] — the cyclic dimensions contribute a mean clamped `Σz²`
-/// of 19.9 today and **55.0** with four dimensions (≥ 20 dB; 13.7 per dimension against 19.9, so
-/// each is better behaved and there are four of them). With T-248's second-largest-|z| tail term,
-/// four simultaneously-off dimensions is precisely the signature that withholds a claim, so the
-/// expansion would systematically reject genuine short bursts from their own class. It becomes
-/// correct only **after** the window dependence is fixed at its source, and it needs its own task.
+/// **T-310 refused it, T-327 removed the confound, and T-328 refused it again**, on two measured
+/// grounds. Both were taken end-to-end through the real classifier — fitting both density models
+/// on full windows over dev seeds, scoring disjoint dev seeds — rather than from the `d'`
+/// instrument, and neither is a gate number:
+///
+/// 1. **It rejects genuine short bursts from their own class, worse than before.** Scoring a class's
+///    own N/8 bursts against its full-window fit — what happens to every burst shorter than
+///    [`crate::symbols::MAX_WINDOW_SAMPLES`] — the cyclic dimensions' mean clamped `Σz²` goes
+///    **11.52 → 36.21**, the median plausibility of the burst under its **own** class collapses
+///    **1.000 → 0.053**, `m/m_p95` goes 0.89 → 1.28, the second-largest |z| exceeds the class's own
+///    `z2_p99` on 22.6 % → 37.3 % of bursts, and the classifier calls a genuine burst `unknown` on
+///    **39.4 % → 56.4 %** of them (right family 60.5 % → 41.8 %, right class 39.8 % → 24.5 %,
+///    n = 840). That is T-248's signature doing exactly what it is for: a genuine member has one
+///    wild dimension, a non-member has two, and a short burst puts a median of **three of the four**
+///    line significances more than 2 sd from their full-window mean at once
+///    (`tests/cyclic_line_window.rs`). CLAUDE.md makes ephemeral emissions first-class, so a
+///    discrimination win that rejects them is not a win.
+/// 2. **The separation win does not reach the classifier anyway.** On the same run, full windows:
+///    `unknown` 11.9 % → 11.3 %, right family 88.0 % → 88.6 %, right class 56.7 % → 56.7 % (476 of
+///    840 either way). The `d'` instrument measures these dimensions in isolation; the other ~26
+///    dimensions of `features@4` already supply that separation, so quadrupling this one buys
+///    nothing where it would have to pay for itself.
+///
+/// So the max stays. The winning `LineMethod` still changes across N/8…N on **673 of 1008** class ×
+/// seed × SNR cells (T-327's 58 of 84 on its own grid), and that remains the open mechanism — but
+/// four dimensions is measured not to be its fix. A **rule** for choosing among the four, which
+/// keeps one dimension, is the direction left; it is untried.
+///
+/// ## What T-328 did find: the harm is the fitting protocol, not the dimension count
+///
+/// The shipped single dimension **already** rejects genuine short bursts — 39.4 % of N/8 bursts of
+/// a taxonomy class come back `unknown`, against 11.9 % of the same class's full windows. Four
+/// dimensions make that worse; they did not cause it. What causes it is that every density is
+/// fitted on full windows and then asked about bursts.
+///
+/// Fitting the same models over **pooled** window lengths (N, N/2, N/4, N/8) removes it almost
+/// entirely, for both forms: N/8 `unknown` 39.4 % → **12.1 %** with the max (right family 60.5 % →
+/// 87.7 %) and 56.4 % → **11.9 %** with four dimensions (41.8 % → 88.0 %), at a cost of about half
+/// a point of full-window class accuracy (56.7 % → 56.1 %).
+///
+/// **It is not free, and that is why it is not done here.** Pooling widens every class, which is
+/// the failure mode `bin/fit-densities.rs` documents: held-out unknown recall falls **0.9606 →
+/// 0.9000** with the max and 0.9697 → 0.9242 with four dimensions, and on N/8 negatives to 0.8788
+/// and 0.8727 — at or through ADR-0016 §7's 0.90 floor. Buying burst recall with open-set recall is
+/// a product decision about what the classifier is *for*, not a refit, and it needs its own task
+/// and its own gate run. Note that at a pooled fit the ordering reverses — four dimensions then
+/// hold the open set better than the max (0.9242 against 0.9000) at the same burst recall — so the
+/// expansion is refused **at this fitting protocol**, not on principle.
 ///
 /// The `blind_*` family scores move with the window too, and discontinuously — reproduced across
 /// seeds at 25 dB, a 2-FSK burst scores `blind_fsk` 0.10 at N/8, 0.44 at N/4 and 1.00 at N/2 and
@@ -790,9 +833,13 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 /// first-class — where one emitter seen as a short burst and again as a long one lands at a
 /// different `cyclic_db`, and so at a different Mahalanobis distance from the same class. T-327
 /// stopped C14's search band and whitening from scaling with the record, which removes about 7 % of
-/// that movement and all of the reported-band defect; the rest is the max-over-four collapse below.
-/// `cyclic_line_window.rs` pins the structural findings — including, now, that the band **does
-/// not** move — so neither the wrong law nor the fixed defect can be re-derived from a single seed.
+/// that movement and all of the reported-band defect; the rest is the max-over-four collapse above.
+/// **T-328 put a number on the cost: 39.4 % of genuine N/8 bursts of a taxonomy class come back
+/// `unknown`, against 11.9 % of that class's full windows** — and measured that pooling window
+/// lengths at fit time, not changing this statistic, is what addresses it.
+/// `cyclic_line_window.rs` pins the structural findings — that the band **does not** move, and that
+/// a short burst puts three of the four line significances off at once — so neither the wrong law,
+/// nor the fixed defect, nor the refused expansion can be re-derived from a single seed.
 fn symbol_features(f: &mut Features, input: &FeatureInput<'_>) {
     let Some(s) = input.symbols else {
         return;
