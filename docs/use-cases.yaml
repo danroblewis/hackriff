@@ -1699,7 +1699,7 @@ use_cases:
   hardware_fit: needs-tx
   accessory: null
   fit_flags: null
-  fit_note: 15 dBm is far from EME power; receive-only EME of others with a large antenna is needs-accessory; 10 GHz is outside range.
+  fit_note: 15 dBm is far from EME power; receive-only EME of others with a large antenna is needs-accessory; 10 GHz is out-of-band (above the 6 GHz ceiling).
   test_tier: field
 - id: SPACE-076
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1738,10 +1738,10 @@ use_cases:
   - context-feeds
   - doppler-tracking
   - radiometry
-  hardware_fit: out-of-scope
+  hardware_fit: out-of-band
   accessory: null
   fit_flags: null
-  fit_note: 8.4 GHz needs an X-band downconverter, but the 20 m-class dish is the real blocker.
+  fit_note: 8.4 GHz is above the HackRF's 6 GHz ceiling and there is no commodity X-band downconverter market (unlike Ku/C-band LNBs); the 20 m-class dish would be a separate blocker even with a working downconverter.
   test_tier: field
 - id: SPACE-078
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1787,9 +1787,9 @@ use_cases:
   - radiometry
   - cfar-detection
   hardware_fit: needs-accessory
-  accessory: dish + LNA; X-band downconverter for 8.4 GHz
+  accessory: dish + LNA (S-band, 2.2-2.3 GHz)
   fit_flags: null
-  fit_note: S-band lunar missions are marginal; true deep-space targets need a large dish (out-of-scope).
+  fit_note: S-band lunar missions are marginal but native-band with a dish + LNA; true deep-space X-band (8.4 GHz) targets are out-of-band (above the 6 GHz ceiling, no commodity X-band downconverter) as well as needing a large dish, out of scope for this device.
   test_tier: field
 - id: SPACE-080
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -2937,10 +2937,10 @@ use_cases:
   - radiometry
   - spectrum-history
   - event-correlation
-  hardware_fit: needs-accessory
-  accessory: mmWave downconverter for 38-80 GHz
+  hardware_fit: out-of-band
+  accessory: null
   fit_flags: null
-  fit_note: marginal; E-band downconverters are exotic
+  fit_note: 38-80 GHz is far above the HackRF's 6 GHz ceiling; E-band downconverters are exotic lab/telecom-grade gear, not a named consumer accessory, so this is not a realistic needs-accessory case.
   test_tier: field
 - id: PROP-050
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
@@ -5905,7 +5905,7 @@ use_cases:
   hardware_fit: needs-accessory
   accessory: Active GNSS antenna via bias-tee
   fit_flags: null
-  fit_note: null
+  fit_note: 'L1 C/A sits 20-30 dB below the noise floor, so blind detection cannot find it: this is an explicit, documented exception to the project''s blind-first rule. Acquisition is known-code correlation/despread against the published GPS PRN codes (GNSS-SDR is the reference implementation), i.e. the known-signal pipeline leads rather than suggests. The blindly-detectable, on-mission half of GNSS is the jamming/spoofing signature (power anomaly, loss-of-lock across all SVs) covered by AWARE-002/AWARE-003, which stays blind.'
   test_tier: offline-recorded
 - id: SIGNAL-031
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
@@ -6096,10 +6096,10 @@ use_cases:
   - decoder-plugins
   - doppler-tracking
   - context-feeds
-  hardware_fit: needs-accessory
-  accessory: Large dish + X-band downconverter/LNB
+  hardware_fit: out-of-band
+  accessory: null
   fit_flags: null
-  fit_note: Deep-space link margin needs a multi-metre dish; the decoder side is SatDump-class.
+  fit_note: X-band (~8.4 GHz) is above the HackRF's 6 GHz ceiling and there is no commodity X-band downconverter market; deep-space link margin also needs a multi-metre dish. The decoder side is SatDump-class, and is exercised offline against recorded SigMF captures.
   test_tier: offline-recorded
 - id: SIGNAL-040
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
@@ -6117,10 +6117,10 @@ use_cases:
   - doppler-tracking
   - context-feeds
   - sigmf-recording
-  hardware_fit: needs-accessory
-  accessory: Dish + X-band downconverter/LNB
+  hardware_fit: out-of-band
+  accessory: null
   fit_flags: null
-  fit_note: The 2023 flyby is past; mostly a replay-of-recordings case now.
+  fit_note: X-band (~8.4 GHz) is above the HackRF's 6 GHz ceiling and there is no commodity X-band downconverter market. The 2023 flyby is also past, so this is mostly a replay-of-recordings case now regardless.
   test_tier: offline-recorded
 - id: SIGNAL-041
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
