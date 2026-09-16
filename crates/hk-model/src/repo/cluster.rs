@@ -262,6 +262,16 @@ pub(super) fn gate_entry(
     })
 }
 
+/// Rule 1's "the same air" test, shared by [`remeasured`] and [`unclaimed_count`]: two spans
+/// cover the same stretch when they intersect by at least **half the shorter** of them — so an
+/// instant counts when it lies inside a span, a few ms of jitter on the edge of a five-second
+/// window does not, and spans that merely touch do not (T-034).
+fn same_air(a: (i64, i64), b: (i64, i64)) -> bool {
+    let overlap = i128::from(a.1.min(b.1)) - i128::from(a.0.max(b.0));
+    let shorter = (i128::from(a.1) - i128::from(a.0)).min(i128::from(b.1) - i128::from(b.0));
+    overlap >= 0 && 2 * overlap >= shorter
+}
+
 /// Rule 1 re-measurement: the live emitter and largest counted count of an earlier sighting of
 /// the same measurement (key, overlapping span, centre within tolerance, no identity clash).
 fn remeasured(
@@ -284,9 +294,7 @@ fn remeasured(
     let ours = Fingerprint::new(s.f_center_hz, s.bandwidth_hz);
     let mut best: Option<(EmitterId, u64)> = None;
     for (e, count, t0, t1, f) in rows {
-        let overlap = i128::from(end.min(t1)) - i128::from(start.max(t0));
-        let shorter = (i128::from(end) - i128::from(start)).min(i128::from(t1) - i128::from(t0));
-        if overlap < 0 || 2 * overlap < shorter {
+        if !same_air((start, end), (t0, t1)) {
             continue;
         }
         let theirs = Fingerprint::new(f, 0.0);
@@ -963,11 +971,22 @@ fn create(conn: &Connection, s: &Sighting, why: &str) -> Result<EmitterId, RepoE
     Ok(id)
 }
 
+/// Folds `s` into the emitter's aggregate: `add` occurrences, the seen hull, the latest
+/// centre/bandwidth, and — when `fold` — its fingerprint.
+///
+/// **`fold` is not `add > 0`** (T-336). It was, while every non-replay sighting added its count
+/// in full; the cross-producer discount broke that equivalence, and a measurement that adds no
+/// *occurrence* still carries what its producer measured. A demodulator chain's symbol rate and
+/// deviation over air the tracker already counted are new information about the same occurrence,
+/// and dropping them would make the discount silently lose measurements rather than stop
+/// double-counting them. So the fingerprint folds once per *observation*: on a new source row
+/// whatever it adds, and on a re-offer of a row already folded only when it grew.
 fn update_aggregate(
     conn: &Connection,
     id: EmitterId,
     s: &Sighting,
     add: u64,
+    fold: bool,
 ) -> Result<(), RepoError> {
     let freq = FreqRange::centered(s.f_center_hz, s.bandwidth_hz);
     // SET expressions all see the pre-update row, so `last_seen` below is the old value.
@@ -990,9 +1009,7 @@ fn update_aggregate(
         freq.hi_hz,
         blob(id)
     ])?;
-    if add > 0
-        && let Some(obs) = &s.fingerprint
-    {
+    if fold && let Some(obs) = &s.fingerprint {
         let fp = match load_row(conn, id)?.fingerprint {
             Some(mut stored) => {
                 stored.fold(obs);
@@ -1090,6 +1107,60 @@ fn apply_prior(
     Ok(Some(v.status))
 }
 
+/// The cross-producer half of the sighting rule (T-336), for a sighting arriving at an emitter
+/// some other source row may already have observed: how much of `s.count` is air time nothing on
+/// this emitter has counted yet.
+///
+/// `count` is a total of *occurrences*, so "overlapping observations not counted twice, whoever
+/// observed them" (docs/07 §2.11; ADR-0017 §1.1 — overlapping source rows are **one** presence
+/// interval) has to hold whichever route an observation takes to an entry.
+///
+/// **This is [`remeasured`] with the producer key dropped**, which is exactly the scoping T-329
+/// named as the gap. Same [`same_air`] test, same "largest count already recorded there"; what
+/// changes is only that another producer's row now answers it. So:
+///
+/// - **no row of this emitter covers the same air** — new air time, and the whole `s.count`
+///   adds. This keeps a station seen again after a silence counting again (a second session over
+///   a disjoint span is a second occurrence, docs/07 §2.11 "Tests"), and it keeps rule 1's
+///   deliberate near-misses counting: a window that merely touches an earlier one, or overlaps a
+///   few ms of its edge, is adjacent air, not shared air.
+/// - **some row does** — that stretch is already on the air ledger, so the two observations of
+///   it count **once, as the larger of the two**: only `s.count` beyond the largest count
+///   recorded over that air adds, and nothing when it is already as large.
+///
+/// **The largest, not the sum.** Rows covering the same air are redundant views of it, not
+/// additive ones — the ledger holds rows that *measured* 1 and *added* 0 — so summing them would
+/// discount air nothing counted. [`merge_same_emission_rows`] sums instead because it reconciles
+/// two whole entries, each a set of spans over different air, and bounds the sum by the absorbed
+/// entry's own count.
+///
+/// **Partial overlap is decided by [`same_air`], not prorated.** A sighting sharing the majority
+/// of the shorter span is the same air and takes the discount in full; one sharing less is new
+/// air and counts in full. There is no middle: `count` counts occurrences, not seconds, so a
+/// burst inside the intersection is indistinguishable from one outside it and there is nothing
+/// to prorate along. Reusing rule 1's existing threshold rather than inventing a second one also
+/// keeps one answer to "is this the same air?" in this file.
+fn unclaimed_count(conn: &Connection, id: EmitterId, s: &Sighting) -> Result<u64, RepoError> {
+    let (start, end) = (s.seen.start.as_unix_nanos(), s.seen.end.as_unix_nanos());
+    let rows: Vec<(i64, i64, i64)> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT count, t_start, t_end FROM emitter_observation \
+             WHERE emitter_id = ?1 AND t_start <= ?2 AND t_end >= ?3",
+        )?;
+        stmt.query_map(params![blob(id), end, start], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?
+    };
+    let counted = rows
+        .into_iter()
+        .filter(|(_, t0, t1)| same_air((start, end), (*t0, *t1)))
+        .map(|(c, _, _)| c.max(0) as u64)
+        .max()
+        .unwrap_or(0);
+    Ok(s.count.saturating_sub(counted))
+}
+
 /// Resolves `s` to an emitter, and adds to that emitter's `count` only the air time nothing has
 /// counted yet.
 ///
@@ -1110,19 +1181,16 @@ fn apply_prior(
 ///   tolerance): the same air time measured a second time by the same producer, so again only
 ///   the growth. This is how one analog-chain session's early identification and its
 ///   full-window write count **once** between them (T-209);
-/// - **otherwise** ([`decide`]): air time this producer has not counted, so it adds in full.
+/// - **otherwise** ([`decide`]): air time nobody has counted yet — [`unclaimed_count`] takes off
+///   whatever the emitter's ledger already holds over this span, whichever producer wrote it,
+///   and only the excess adds.
 ///
-/// That last arm is deliberately scoped *within* a producer: it does not ask whether some other
-/// producer already counted the same span. Two entries that turn out to be one emission are
-/// reconciled when they **merge**, where the shared stretch is discounted instead
-/// (`merge_same_emission_rows` — "overlapping observations not counted twice", docs/07 §2.11).
-///
-/// A known gap, measured in T-329 and deliberately left there: a sighting that lands straight
-/// onto *another* producer's entry by context or fingerprint takes no such discount, so the
-/// shared stretch is counted twice (one FM station on air for one continuous 5 s capture scored
-/// 2 — once by the chain, once by the tracker watching the same 5 s). Closing it means an
-/// overlap check in this arm, which changes counting for every track sighting; it is a change to
-/// this contract, not a fix to a caller.
+/// That last arm was scoped *within* a producer until T-336, and T-329 measured what that cost:
+/// a sighting landing straight onto *another* producer's entry by context or fingerprint took no
+/// discount, so one FM station on air for one continuous 5 s capture scored 2 — once by the
+/// chain, once by the tracker watching the same 5 s. Both halves of the rule now apply the same
+/// discount: [`unclaimed_count`] when the observation arrives at an entry directly, and
+/// [`merge_same_emission_rows`] when two entries of one emission are folded together later.
 fn resolve(
     conn: &Connection,
     s: &Sighting,
@@ -1178,14 +1246,23 @@ fn resolve(
             ),
             None => {
                 let (t, a) = decide(conn, s, tol, &mut report, &mut merge)?;
-                (t, a, s.count)
+                // Read the ledger after `decide`: an identity collision there may have merged
+                // another entry's observations onto this target, and they count as its own.
+                let add = match t {
+                    Some(id) => unclaimed_count(conn, id, s)?,
+                    None => s.count,
+                };
+                (t, a, add)
             }
         },
     };
     let (id, created, family_before) = match target {
         Some(id) => {
             let family = current_family(conn, id)?;
-            update_aggregate(conn, id, s, add)?;
+            // A replay/re-measurement re-offers a row whose fingerprint is already folded, so it
+            // folds again only for the part that grew; anything else is a new observation.
+            let fold = add > 0 || assignment != Assignment::Replay;
+            update_aggregate(conn, id, s, add, fold)?;
             if let Some(claim) = &s.identity {
                 let r = apply_identity(conn, id, claim)?;
                 report = report.or(r);
