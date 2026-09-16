@@ -3278,7 +3278,7 @@ tasks:
   - id: T-204
     milestone: M3
     title: "C15 per-family DL stage with open-set (energy OOD or OpenMax), trained on synthetic impairments, inference via T-203 in shadow mode first"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-199, T-203, T-213]
     parallel_group: M3C
