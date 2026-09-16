@@ -2505,3 +2505,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Still queued on T-199's merge:** T-218, T-212 and T-213 would otherwise branch without the classifier.
 - **B0.523 Full check green after the T-219 merge (70c642c).** Lint clean; 1474/1474 tests; acceptance 31/31 (up from 29: T-219's guard tests now enforce that a narrow signal inside a wide station stays visible and that a narrow burst on a predicted image frequency is not attributed to a wideband station); acceptance_m2 8/8; 37 GB free.
   - **Merging T-199 (classifier) and T-217 (IQ-ring follow-ups)** together with one check.
+- **B0.524 T-199 and T-217 merged.** The classifier lands inert (rank 3, never demoting a chain, decoder or user label) with its ADR floors unmet and tracked as T-230; the IQ-ring follow-ups land with the `allocation_skipped_samples` counter and the HTTP-level allocation test.
+  - **Now unblocked by T-199:** T-218, T-212, T-213 (they needed hk-classify on main).

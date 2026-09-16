@@ -3190,7 +3190,7 @@ tasks:
   - id: T-199
     milestone: M3
     title: "C15 classical feature-tree modulation-family classifier (cumulants, instantaneous amplitude/phase/frequency stats, cyclic features) with open-set unknown and C17 prior fusion"
-    status: review
+    status: done
     commit: e3d09ff
     result: "cascade landed and inert (records at rank 3, never demotes a chain/decoder/user label). ADR-0016 accuracy floors NOT met: top-1 0.754 vs 0.90, top-2 0.933 vs 0.95. Safety floors MET: wrong-label 0.000 vs 0.003, unknown recall 0.81 vs 0.80. analog 0.32 and noise-like 0.42 abstain rather than mislabel; both OTA fixtures abstain (sim-to-real gap). Chain wiring and API routes deliberately deferred - see scratchpad/t199-handoff.md. Floors deliberately NOT relaxed; gap tracked as T-230"
     priority: normal
@@ -3470,7 +3470,7 @@ tasks:
   - id: T-217
     milestone: MUI
     title: "T-178 follow-ups: HTTP-level test that serve answers during ring allocation; count samples lost while a large ring allocates; surface the buffer-off library default; measure ring fsync cost on the Jetson"
-    status: review
+    status: done
     commit: b54a967
     priority: low
     deps: [T-178]
