@@ -334,7 +334,7 @@ None are implemented here. Each gap has an interim UI behaviour, and none of the
 | 3 | Focus decoded summary (RDS PS/PTY, pager address) | **Emitter's latest decode fields**: `GET /api/inventory/{id}/decodes?limit=` returning Decode rows gated like the `decodes/*` stream | hk-model, hk-api | small — **done**: T-159 (served as `GET /api/inventory/{id}/decode`) |
 | 4 | MPX / subcarrier stage plot | **Stage tap `view=spectrum`** (already specified in stream-contract §14.4; answers 422) | hk-pipeline (recipes/openers), hk-api | small — **done**: T-160 |
 | 5 | Eye diagram, timing diagram | **Clock-recovery diagnostic output**: per-symbol waveform segments and sample instants on a diagnostic port, or `view=eye`; stream-contract §14.4 addition | hk-pipeline (blocks), hk-stream docs | large |
-| 6 | Sync-search plot | **`sync_search` diagnostic port**: match score per candidate position | hk-pipeline (blocks) | small |
+| 6 | Sync-search plot | **`sync_search` diagnostic port**: match score per candidate position | hk-pipeline (blocks) | small — **done**: T-162 (stage tap `view=sync_search`, §4.3 row above) |
 | 7a | Blind "Use" suggestions for symbol rate, subcarrier, deviation | **Emitter estimated parameters on inventory**: latest `EstimatedParams` (symbol rate, modulation, deviation, CFO, bandwidth) on `GET /api/inventory/{id}` | hk-model, hk-api | small |
 | 7b | "Decode RDS" / recipe choice for a signal | **Serve `GET /api/recipes/match?emitter=`** (planned in api.md, T-088): recipes ranked against measured parameters, with reasons | hk-pipeline (recipes), hk-api | large |
 | 8 | Stream out IQ | **On-demand channelised IQ opener `open/iq?emitter\|f_lo&f_hi`** (§12.1 profile, `cf32_le`) | hk-pipeline (chains), hk-api | small |

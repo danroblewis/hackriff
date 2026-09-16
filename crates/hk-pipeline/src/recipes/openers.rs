@@ -2,12 +2,15 @@
 //! T-088), registered as `/ws/open/stage`, `/ws/open/inspector` and TCP `open/stage?…`,
 //! `open/inspector?…`.
 //!
-//! - **`stage`** `?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum]`: any output port
-//!   of any node of a running pipeline, opened on demand. The tap is adopted by the pipeline
-//!   thread at its next chunk boundary and removed when the session guard drops (the consumer
-//!   left); an untapped port costs nothing. `view=raw` (default) serves the port's own samples;
-//!   `view=spectrum` (`iq`/`real` ports only, T-160) serves a PSD instead (§14.4,
-//!   `tap_spectrum`) — requesting it on a `soft`/`bits`/`frames` port is refused (409).
+//! - **`stage`** `?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum|sync_search]`: any
+//!   output port of any node of a running pipeline, opened on demand. The tap is adopted by the
+//!   pipeline thread at its next chunk boundary and removed when the session guard drops (the
+//!   consumer left); an untapped port costs nothing. `view=raw` (default) serves the port's own
+//!   samples; `view=spectrum` (`iq`/`real` ports only, T-160) serves a PSD instead (§14.4,
+//!   `tap_spectrum`); `view=sync_search` (`bits` ports only, T-162, needs `sync_word=0x…` and
+//!   `sync_bits=<n>`) serves the match score per candidate bit position against that word
+//!   instead (§14.4, `tap_sync_search`) — requesting a `view` on a port type it doesn't support
+//!   is refused (409).
 //! - **`inspector`** `?pipeline=<id>[&output=<id>]`: the always-on frames stream of a pipeline's
 //!   `inspector` output (the first one by default), i.e. the same stream as
 //!   `/ws/inspector/<pipeline>/<output>`. `capture=` (recorded decoded streams) is T-089/T-092's
@@ -22,6 +25,7 @@ use serde_json::{Value, json};
 
 use crate::recipes::runtime::RecipeRuntime;
 use crate::recipes::tap_spectrum;
+use crate::recipes::tap_sync_search;
 use crate::recipes::taps::{StageTap, TapPublisher, stage_header, tap_config};
 
 static TAP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -46,11 +50,11 @@ impl RecipeRuntime {
         let pid = param(req, "pipeline")?;
         let node = param(req, "node")?;
         let view = req.param("view").unwrap_or("raw");
-        if !matches!(view, "raw" | "spectrum") {
+        if !matches!(view, "raw" | "spectrum" | "sync_search") {
             return Err(OpenRefusal::new(
                 400,
                 "bad-request",
-                format!("unknown view {view:?} (raw, spectrum)"),
+                format!("unknown view {view:?} (raw, spectrum, sync_search)"),
             ));
         }
         let ctl = self
@@ -86,6 +90,13 @@ impl RecipeRuntime {
                 "view=spectrum serves iq/real ports only",
             ));
         }
+        if view == "sync_search" && info.ty != PortType::Bits {
+            return Err(OpenRefusal::new(
+                409,
+                "view-unsupported",
+                "view=sync_search serves bits ports only",
+            ));
+        }
         let port = sh.out_names[k].clone();
         let stream_id = format!(
             "stage/{pid}/{node}.{port}/{}",
@@ -102,6 +113,36 @@ impl RecipeRuntime {
             );
             let publisher = TapPublisher::new_spectrum(header.clone(), tap_config(), info.rate_hz)
                 .map_err(|e| OpenRefusal::new(500, "publisher", e.to_string()))?;
+            (header, publisher)
+        } else if view == "sync_search" {
+            let word_str = param(req, "sync_word")?;
+            let word = hk_recipe::parse_hex(word_str).ok_or_else(|| {
+                OpenRefusal::new(400, "bad-request", "sync_word must be a 0x… hex string")
+            })?;
+            let bits: u32 = param(req, "sync_bits")?.parse().map_err(|_| {
+                OpenRefusal::new(400, "bad-request", "sync_bits must be an integer")
+            })?;
+            let header = tap_sync_search::sync_search_header(
+                &ctl.streams_ctx,
+                &recipe,
+                stream_id,
+                info.rate_hz,
+            );
+            let publisher = TapPublisher::new_sync_search(
+                header.clone(),
+                tap_config(),
+                info.rate_hz,
+                word,
+                bits,
+            )
+            .map_err(|e| OpenRefusal::new(500, "publisher", e.to_string()))?
+            .ok_or_else(|| {
+                OpenRefusal::new(
+                    400,
+                    "bad-request",
+                    "sync_bits must be 1..=64 and sync_word must fit in it",
+                )
+            })?;
             (header, publisher)
         } else {
             let header = stage_header(
@@ -184,9 +225,9 @@ impl StreamOpener for StageOpener {
 
     fn describe(&self) -> Value {
         json!({
-            "kind": "iq | audio | symbols | bits | messages (by port type); spectrum (view=spectrum, iq/real ports)",
-            "params": ["pipeline", "node", "port", "view (raw | spectrum)"],
-            "records": "one data record per processed chunk (frames ports: one frame record per frame; view=spectrum: one PSD row at most every 1/25 s)",
+            "kind": "iq | audio | symbols | bits | messages (by port type); spectrum (view=spectrum, iq/real ports); sync-search (view=sync_search, bits ports)",
+            "params": ["pipeline", "node", "port", "view (raw | spectrum | sync_search)", "sync_word (view=sync_search: 0x… hex)", "sync_bits (view=sync_search: 1..=64)"],
+            "records": "one data record per processed chunk (frames ports: one frame record per frame; view=spectrum or view=sync_search: one row at most every 1/25 s)",
         })
     }
 }

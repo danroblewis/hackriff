@@ -62,7 +62,7 @@ frame := u32 length (little-endian) || payload[length]
 | `schema` | string | yes | `"hackriff.stream"` |
 | `version` | string | yes | `"1.1"` (readers accept any `1.x`) |
 | `stream_id` | string | yes | Producer-chosen name, e.g. `decodes/adsb` |
-| `kind` | string | yes | `messages`, `bits`, `symbols`, `iq`, `audio` or `spectrum` |
+| `kind` | string | yes | `messages`, `bits`, `symbols`, `iq`, `audio`, `spectrum` or `sync-search` (T-162, §14.4) |
 | `content_class` | string | yes | Ceiling class for every record (§6). A reader treats a missing or unknown value as `metadata-only`. |
 | `source` | string | yes | Producer, e.g. `hk-plugins:readsb@0.1.0` |
 | `emitter_id` | uuid | no | Emitter the whole stream belongs to |
@@ -71,7 +71,7 @@ frame := u32 length (little-endian) || payload[length]
 | `datatype` | string | iq/audio | SigMF datatype of payload elements (`ci8`, `cf32_le`, `ri16_le`, `ru8`, ...) |
 | `sample_rate_hz` | number | iq/audio | Sample, symbol or spectrum-row rate |
 | `center_hz`, `bandwidth_hz` | number | no | RF centre and bandwidth |
-| `fft_size` | integer | no | For spectrum streams |
+| `fft_size` | integer | no | For spectrum streams; reused as the row length (candidate positions per row) for `sync-search` stage-tap streams (T-162, §14.4) |
 | `dc_excluded_hz` | number | no (T-167) | For spectrum streams: half-width, Hz, of the DC/LO-leakage notch centred on `center_hz` that the producer's detector excludes (the same tolerance `GET /api/observations` `records[].window.dc_excluded` reflects). `null`/absent when the producer applies no DC mask to this stream — additive, never a guess. |
 | `framing` | object | no | docs/07 `Framing` (`payload`, `bits_per_symbol`, `symbol_rate_hz`, `schema_id`, `sync_word_hex`), for bits and symbols streams |
 | `message_schema` | string | no | Schema id of message `metadata`/`content`, e.g. `hackriff.decode/1` |
@@ -159,7 +159,7 @@ A messages publisher whose header class forbids content **cannot be created with
 
 **Own-key content is local-only.** It leaves only on an `own-key-decrypted` stream. Such streams are served on a mode-0600 Unix socket and refused to every remote consumer, per consumer, by the locality rule (§2; `gate::remote_transport_permitted`).
 
-**Binary records.** Payloads of `bits`, `symbols`, `iq` and `audio` are content. On a stream whose header class forbids content:
+**Binary records.** Payloads of `bits`, `symbols`, `iq`, `audio` and `sync-search` (T-162: a caller-chosen word scored against withheld bits is an oracle over them, so it is content too, unlike `spectrum`) are content. On a stream whose header class forbids content:
 - the payload is withheld;
 - a header-only `GATED` record still goes out, so timing, seq and length metadata flow;
 - `publish_binary` returns `StreamError::ContentGated`, so the misrouted producer notices.
@@ -734,8 +734,9 @@ Any output port of any node of a running pipeline can be opened as a stream on d
   - `sample_index` is the port's element index; `t` comes from the chunk's time map.
   - `DISCONTINUITY` is set on the first record after a chunk discontinuity, a `RESET` (hot edit) or lost ring samples.
 - **`view=spectrum`** (`iq`/`real` ports): `kind: spectrum`, `rf32_le` dBFS/Hz rows, `fft_size` declared, at most 25 rows/s, which is inside the §6 gated-spectrum cap. The rendering reduction is server-side (the UI is a thin client).
+- **`view=sync_search`** (`bits` ports only; needs `sync_word=0x…` and `sync_bits=<1..=64>`, refused 400 if missing/invalid or if the word doesn't fit in `sync_bits`, the same rule the `sync_search` block itself applies): `kind: sync-search`, `rf32_le` rows of the sync-word match score (`1 - errors/sync_bits`, so `1.0` is a perfect match) at each candidate bit position, `fft_size` reused for the row length (candidate positions per row, scaled with the bit rate so the row rate stays at most 25 rows/s, the same cap as `view=spectrum`), no RF geometry (`center_hz`/`bandwidth_hz` unset — a bit-domain row, not RF-referenced). Computed on the pipeline thread, only while a consumer is attached (T-162). **Content, not metadata** (§6): the caller supplies the word, so an ungated score would let it probe withheld bits one guess at a time; it is gated exactly like the `bits` port it reads.
 - **Header** adds the optional (1.2) `stage`: `{pipeline_id, node, port, port_type, edit_rev}`.
-- **Gating.** Stage payloads of `iq`/`audio`/`symbols`/`bits` are content: withheld (`GATED`) under a class that forbids content, as in §6.
+- **Gating.** Stage payloads of `iq`/`audio`/`symbols`/`bits`/`sync-search` are content: withheld (`GATED`) under a class that forbids content, as in §6.
 
 ### 14.5 Gating
 
