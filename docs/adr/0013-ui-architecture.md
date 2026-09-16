@@ -276,7 +276,7 @@ Update modes: **poll** (interval in §3.2), **stream**, **action** (on user acti
 
 | Element | Route / stream | Fields used | Mode | Note |
 |---|---|---|---|---|
-| Pipelines list, running / hopping | `GET /api/pipelines` | `id, recipe_id, state, end_reason, channel, follow_hops, stats, status` | poll 2 s | `follow_hops` is served but undocumented (**API GAP 11**) |
+| Pipelines list, running / hopping | `GET /api/pipelines` | `id, recipe_id, state, end_reason, channel, follow_hops, stats, status` | poll 2 s | `follow_hops` documented in docs/api.md (**API GAP 11 done**, T-168) |
 | New from recipe (RDS / POCSAG / ACARS / ADS-B) | `GET /api/recipes` (builtin), `POST /api/pipelines` | `id, name, builtin, match` | action | target = focused emitter, or selection, or view band. Refusals (`outside_window`, `busy`, `unrealisable`) shown inline. |
 | Recipe stage list, stage strip | `GET /api/recipes/{id}/versions/{version}` + pipeline `nodes[]` | node `id, block, params`; `status["<node>.lock"]` etc. | poll | chip text from status tokens |
 | Blocks palette | `GET /api/blocks` | `name, group, doc, inputs, outputs, params` | once | drag → draft recipe |
@@ -288,7 +288,7 @@ Update modes: **poll** (interval in §3.2), **stream**, **action** (on user acti
 | Eye / timing diagram | – | – | – | **API GAP 5**. Interim: bits-and-soft strip from `open/stage` on the `soft` and `bits` ports. |
 | Sync-search plot | – | – | – | **API GAP 6**. Interim: `status["<sync node>.lock/quality"]` tile. |
 | Group / frame counts by type or channel | inspector stream frame records | `metadata.<mapped key>`, `metadata.channel` | stream | tally of already-decoded values over 60 s (presentation) |
-| Step guide text | `GET /api/blocks` `doc`; recipe `description` | | once | **API GAP 12** (per-node prose) |
+| Step guide text | recipe node `doc` (per-node, falls back to `GET /api/blocks` `doc`); recipe `description` | | once | **API GAP 12 done**, T-168 |
 | Parameters | recipe node `params` + `/api/blocks` `params` (`type, default, hot, doc`) | | poll / action | |
 | Blind "Use" suggestions | `POST /api/assist/sync`, `/api/assist/crc`, `/api/assist/fields` (frames from `GET /api/captures/{id}/frames`) | `syncs[].fragment`, `codes[].fragment`, `score`, `reasons` | action | Symbol-rate / subcarrier suggestions for an emitter: **API GAP 7a** |
 | Live quality tiles (CRC/BCH %, records/s, lock) | inspector `status` records; `GET /api/pipelines` `stats.frames` | `<node>.error_rate, quality, lock, blocks_ok`; `frames` delta ÷ Δt | stream / poll | |
@@ -340,8 +340,8 @@ None are implemented here. Each gap has an interim UI behaviour, and none of the
 | 8 | Stream out IQ | **On-demand channelised IQ opener `open/iq?emitter\|f_lo&f_hi`** (§12.1 profile, `cf32_le`) | hk-pipeline (chains), hk-api | small |
 | 9 | Selection "Watch: alert on new activity" | **Region watch**: a selection-scoped alarm rule raising anomalies and stream messages for new activity in its extent | hk-context, hk-api | large |
 | 10 | DC mask on the live view | **DC notch extent on the live geometry**: `dc_excluded_hz` on the spectrum stream header (and `run`) | hk-pipeline, hk-api, stream-contract | small — **done**: T-167 |
-| 11 | Hopping pipelines | **Document pipeline `follow_hops`** (served by `recipes/runtime.rs`) in docs/api.md, with a contract assertion | hk-api docs, hk-cli tests | small |
-| 12 | Decode step guide prose | **Recipe per-node `doc`** (additive recipe-schema field, shown in the step guide) | hk-recipe | small |
+| 11 | Hopping pipelines | **Document pipeline `follow_hops`** (served by `recipes/runtime.rs`) in docs/api.md, with a contract assertion | hk-api docs, hk-cli tests | small — **done**: T-168 |
+| 12 | Decode step guide prose | **Recipe per-node `doc`** (additive recipe-schema field, shown in the step guide) | hk-recipe | small — **done**: T-168 |
 | 13 | Inventory tab counts past one page | **Inventory `total`**: the matching row count (before `limit`/`cursor`) on `GET /api/inventory`, with a contract assertion | hk-model (repo query), hk-api | small — **done**: T-171 |
 
 Small means ≤ 1 day for one agent with contract tests; large means a new store, block or contract surface needing review. GAPS 4, 6, 7a, 10 and 11 unlock most of the mockup and are independent of each other. GAP 5 changes the stream contract, so it goes to Fable or Opus.

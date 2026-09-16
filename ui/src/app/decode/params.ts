@@ -222,7 +222,7 @@ export const mountParams: MountFn = (el, ctx) => {
       h("div", {},
         h("div", { class: "step" }, `${p.recipe_id} · step ${idx + 1} of ${p.nodes.length}`),
         h("h2", {}, n.id),
-        h("p", {}, block?.doc || "no description served for this block (API gap 12)"),
+        h("p", {}, recipeNode?.doc || block?.doc || "no description served for this block"),
       ),
       h("div", {},
         h("div", { class: "section-h" }, "Block parameters ", h("em", {}, n.block)),

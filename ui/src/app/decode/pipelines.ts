@@ -37,7 +37,7 @@ export interface Pipeline {
   follow_hops: { channels: readonly PipelineChannel[]; channel_source: string; channel_bandwidth_hz: number; max_channels: number } | null;
 }
 export interface RecipeSummary { id: string; name: string; version: number; versions: readonly number[]; builtin: boolean; builtin_version: number | null; description: string; match: unknown; input: { port: PortType } }
-export interface RecipeNode { id: string; block: string; version?: number; label?: string; params: Readonly<Record<string, unknown>>; inputs?: Readonly<Record<string, string>> }
+export interface RecipeNode { id: string; block: string; version?: number; label?: string; doc?: string; params: Readonly<Record<string, unknown>>; inputs?: Readonly<Record<string, string>> }
 export interface RecipeDoc {
   schema: string; schema_version: number; id: string; version: number; name: string; description?: string;
   match?: unknown; input: { port: PortType }; nodes: readonly RecipeNode[];
