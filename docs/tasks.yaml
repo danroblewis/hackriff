@@ -7192,7 +7192,7 @@ tasks:
     milestone: M2-hardening
     title: 'Overlapping boxes are an error signal: re-analyse the region rather than ranking competitors,
       and make dedup collapse in the SERVED path'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3B
@@ -7214,6 +7214,45 @@ tasks:
       T-309 found clustering refused joins on observation statistics; T-336 fixed cross-producer double
       counting. Re-measure against the current tree rather than inheriting any of those numbers. Fold into
       docs/07, docs/14 and ADR-0017'
+    result: 'DIAGNOSIS FIRST, and it is (a) - the collapse never happened, not a clean inventory the
+      served path re-expanded. Two blind runs through the mock SDR read back from a live /api/inventory:
+      the 5 s FM capture served a 9.4 kHz box wholly inside a 22.1 kHz box, and the 45 s real capture
+      served THREE boxes at 101.6654-101.6836, 101.6751-101.6922 and 101.6913-101.7054 MHz over the
+      same 40 s - two overlapping pairs. Every one came back with relation: null AND no emitter_relation
+      row at all, standing or revoked. So relations=shown (repo/cluster.rs inventory_where, NOT DEFERS_SQL)
+      was hiding correctly and there was nothing to hide. Cause: bands_compete gates every T-219 stage
+      at OVERLAP_MIN_FRACTION = 60 % of BOTH bands, and the middle box overlaps its neighbours by 49.7 %
+      and 6 % of the narrower - so suppression and competition are unreachable for exactly the geometries
+      that stack boxes. That gate is also what stops a narrow emission vanishing into a wide host, so
+      loosening it was not the fix. FIX: resolve_overlaps gains stage 4, the region re-analysis. Rows
+      still overlapping in time AND frequency (relate::boxes_overlap) form a region - the connected
+      component, closed transitively by querying each member own overlaps so the survivor does not depend
+      on which row a sighting touched (this was a real bug found in test: b elected itself top from its
+      own neighbourhood). The region is re-analysed against the air not the rows: every detection band
+      behind every member (f_lo/f_hi) merged into contiguous modes (relate::modes, gap tolerance = the
+      same centre uncertainty distinguishing_evidence uses). One mode => the boxes are cuts of one emission,
+      best-supported box kept, others duplicate-of it with detail.verdict one-emission and the measured
+      mode disclosed - the one place a claim is made without the pairwise 60 % test, and never without
+      distinguishing_evidence, so T-233 holds. More than one mode, or the guard blocks => CONTESTED:
+      nothing merged, nothing hidden, both rows listed, finding appended as an active = 0 row with detail.verdict
+      contested + blocked_by + modes. Stage 3 revoke_kind now skips region claims (the two stages were
+      revoking each other every touch). TERMINATION: no recursion, region bounded to MAX_NEIGHBOURS = 32,
+      claims idempotent, and REGION_MAX_ROUNDS = 3 contested verdicts per row then it stops writing entirely.
+      MEASURED AFTER: the 45 s capture serves 0 stacked pairs (12 rows -> 11 shown, the middle box collapsed);
+      the 5 s containment pair is left alone and contested, blocked by bandwidth ratio beyond tolerance
+      - the geometry of a subcarrier as much as of a fragment, which is the case that must not be guessed.
+      Tests: t369_no_two_boxes_are_served_stacked_on_the_real_fm_capture and t369_every_stacked_pair_still_served_carries_a_recorded_verdict
+      (tests/e2e, asserted on the served wire), t369_a_staircase_of_offset_boxes_over_one_emission_stops_overlapping,
+      t369_two_stations_on_the_200_khz_raster_are_never_merged_by_re_analysis (the control: two 220 kHz-wide
+      stations 200 kHz apart whose occupied bands really do overlap and whose detections really do form
+      one mode - only the separated -3 dB extents keep them apart), t369_region_re_analysis_terminates_at_its_bound
+      (20 rounds, asserts the write count is exactly REGION_MAX_ROUNDS and every later round writes zero).
+      api_contract.rs asserts the served list has no stacked pair. No schema change, no new RelationKind,
+      no wire shape change. Folded into docs/07 2.27, docs/14, ADR-0017 4.1, docs/api.md. KNOWN GAP: a
+      contested verdict is history, not a standing claim, so the UI cannot yet show "this region is contested"
+      - it would need a new served field or relation kind (the latter breaks hk-context exhaustive match,
+      owned by T-359). Filed as follow-up.'
+
   - id: T-370
     milestone: M2-hardening
     title: /api/selections/{id}/watch serves nanoseconds under a bare t, and the unit sweep cannot reach

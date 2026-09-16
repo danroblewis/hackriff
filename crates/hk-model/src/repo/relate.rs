@@ -7,6 +7,17 @@
 //! `active = 0`. The losing candidate's own row, detections, tracks, links and history are
 //! untouched, so later evidence revives it. Rules and thresholds: [`crate::relate`].
 //!
+//! **T-369: and overlap itself is an error signal.** The three rules above rank hypotheses against
+//! each other, and all of them are gated by [`crate::relate::bands_compete`] at 60 % of *both*
+//! bands — which is blind to the two geometries that actually stack boxes on a waterfall (a narrow
+//! box inside a wide one, and a staircase of offset boxes each overlapping the next by less than
+//! 60 %). Those pairs fell through every rule in silence and were served side by side. So a fourth
+//! stage ([`reanalyse_region`]) treats a surviving overlap in **time and frequency** as proof the
+//! analysis is wrong and re-analyses the whole region against the measured bands of the detections
+//! behind it, rather than ranking one box above another. It resolves to one emission or records the
+//! region contested; it never merges past [`crate::relate::distinguishing_evidence`]; and it is
+//! bounded by [`crate::relate::REGION_MAX_ROUNDS`], because it runs on a live serving path.
+//!
 //! **Cost.** [`Repository::resolve_overlaps`] runs on the neighbourhood of one emitter: its
 //! overlapping live rows ([`MAX_NEIGHBOURS`]), the strongest confirmed rows as artifact sources
 //! ([`MAX_ARTIFACT_SOURCES`]), and the newest linked detections per row
@@ -23,8 +34,9 @@ use crate::ids::EmitterId;
 use crate::region::{FreqRange, Region, TimeRange};
 use crate::relate::{
     ARTIFACT_SOURCE_MIN_SNR_DB, ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation,
-    ReceiveChain, RelationAuthor, RelationClaim, RelationKind, RowEvidence, TunedLo, bands_compete,
-    distinguishing_evidence, overlap_fraction, predict_artifacts, present_only_with,
+    REGION_MAX_ROUNDS, ReceiveChain, RelationAuthor, RelationClaim, RelationKind, RowEvidence,
+    TunedLo, bands_compete, boxes_overlap, center_uncertainty_hz, distinguishing_evidence, modes,
+    overlap_fraction, predict_artifacts, present_only_with,
 };
 use crate::time::Timestamp;
 
@@ -43,6 +55,39 @@ const MAX_TUNED_LO: usize = 16;
 /// Candidates looked at near each frequency this emitter's own mechanisms predict, so a station
 /// confirmed *after* its image was catalogued still attributes it.
 const MAX_PREDICTED_TARGETS: usize = 8;
+
+/// T-369: measured detection bands read per row when a region is re-analysed.
+const MAX_REGION_BANDS: usize = 256;
+
+/// T-369: the marker on a contested verdict row's `detail`, so the bound can count them apart from
+/// the ordinary revocations [`revoke_kind`] writes (both are `active = 0` rows).
+const CONTESTED_VERDICT: &str = "contested";
+
+/// T-369: the marker on a claim the region re-analysis made, so the ranking stages above it do not
+/// revoke it for failing *their* pairwise test. See [`is_region_claim`].
+const ONE_EMISSION_VERDICT: &str = "one-emission";
+
+/// T-369: the measured bands of an emitter's linked detections, newest first. Reaches detections
+/// exactly like [`EMITTER_DETECTION_EVIDENCE_SQL`] — through the currently-linked tracks, or linked
+/// directly. `?1` is the emitter id, `?2` the row cap.
+const EMITTER_DETECTION_BANDS_SQL: &str = "\
+     SELECT f_lo, f_hi FROM ( \
+       SELECT d.f_lo AS f_lo, d.f_hi AS f_hi, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN track_detection td ON td.track_id = el.target_id \
+       JOIN detection d ON d.detection_id = td.detection_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
+       UNION ALL \
+       SELECT d.f_lo AS f_lo, d.f_hi AS f_hi, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN detection d ON d.detection_id = el.target_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
+     ) ORDER BY t_start DESC LIMIT ?2";
+
+/// T-369: how many contested verdicts this row already carries, for the re-analysis bound.
+const CONTESTED_ROUNDS_SQL: &str = "\
+     SELECT COUNT(*) FROM emitter_relation \
+     WHERE emitter_id = ?1 AND active = 0 AND json_extract(detail, '$.verdict') = ?2";
 
 const ANY_TIME: TimeRange = TimeRange::new(
     Timestamp::from_unix_nanos(i64::MIN),
@@ -511,6 +556,10 @@ pub struct OverlapOutcome {
     pub artifacts: Vec<EmitterRelation>,
     /// Standing claims revoked because the evidence changed.
     pub revoked: Vec<EmitterRelation>,
+    /// T-369: rows whose overlap the region re-analysis could **not** resolve. Both rows stay
+    /// shown — a contested verdict never hides anything — and the record says what was tried and
+    /// what blocked a merge. Bounded by [`crate::relate::REGION_MAX_ROUNDS`] per row.
+    pub contested: Vec<EmitterRelation>,
 }
 
 impl OverlapOutcome {
@@ -520,6 +569,7 @@ impl OverlapOutcome {
             && self.duplicates.is_empty()
             && self.artifacts.is_empty()
             && self.revoked.is_empty()
+            && self.contested.is_empty()
     }
 }
 
@@ -582,7 +632,11 @@ fn revoke_kind(
     let mut out = Vec::new();
     for r in standing
         .iter()
-        .filter(|r| r.emitter_id == emitter && r.kind == kind)
+        // T-369: never a claim the region re-analysis authored. `why` here is always a pairwise
+        // test ("no longer an undistinguished overlap of the row shown"), and a region claim is
+        // made precisely when that pairwise test fails and the region's own measurements say the
+        // rows are one emission anyway. Stage 4 revokes its own ([`revoke_region_claim`]).
+        .filter(|r| r.emitter_id == emitter && r.kind == kind && !is_region_claim(r))
     {
         out.push(insert_relation(
             conn,
@@ -927,14 +981,12 @@ fn resolve(
                 && !suppressed.contains(&r.emitter_id)
         })
         .collect();
-    let Some(top) = contenders
+    let top = contenders
         .iter()
         .copied()
-        .reduce(|best, r| if better(r, best) { r } else { best })
-    else {
-        return Ok(out);
-    };
-    for other in &contenders {
+        .reduce(|best, r| if better(r, best) { r } else { best });
+    for other in top.map(|_| &contenders).into_iter().flatten() {
+        let top = top.expect("iterated only when a top row exists");
         let standing = read_relations(conn, CURRENT_RELATION_SQL, other.emitter_id)?;
         if other.emitter_id == top.emitter_id {
             // The shown row never defers.
@@ -997,5 +1049,339 @@ fn resolve(
         out.duplicates.extend(claimed);
         out.revoked.extend(revoked);
     }
+
+    // --- 4. Overlap is an error signal: re-analyse the region ------------------------------
+    reanalyse_region(conn, &rows, live, actor, t, tol, &mut out)?;
     Ok(out)
+}
+
+/// Whether this claim was authored by the region re-analysis (stage 4) rather than by the ranking
+/// stages above it. The two write the same [`RelationKind::DuplicateOf`] on purpose — the wire
+/// shape and everything downstream of it are unchanged — so the `detail` verdict is what tells
+/// them apart, and it is what stops stage 3 from revoking a claim stage 4 made on the region's
+/// measurements because the *pair* does not pass [`bands_compete`] (which is exactly why stage 4
+/// exists).
+fn is_region_claim(r: &EmitterRelation) -> bool {
+    r.detail
+        .as_ref()
+        .and_then(|d| d.get("verdict"))
+        .and_then(|v| v.as_str())
+        == Some(ONE_EMISSION_VERDICT)
+}
+
+/// Whether `id` currently defers for a reason **other** than the region re-analysis. Such a row is
+/// hidden by a stage above and is not a member of any region; a row deferring by a region claim is
+/// still a member of its own region, so that the re-analysis can revoke its own claim when the
+/// evidence changes.
+fn defers_elsewhere(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
+    Ok(read_relations(conn, CURRENT_RELATION_SQL, id)?
+        .iter()
+        .any(|r| !is_region_claim(r)))
+}
+
+/// Revokes a standing region claim on `id` (it no longer defers to the region's survivor).
+fn revoke_region_claim(
+    conn: &Connection,
+    id: EmitterId,
+    actor: &str,
+    t: Timestamp,
+    why: &str,
+) -> Result<Vec<EmitterRelation>, RepoError> {
+    let mut out = Vec::new();
+    for r in read_relations(conn, CURRENT_RELATION_SQL, id)?
+        .iter()
+        .filter(|r| is_region_claim(r))
+    {
+        out.push(insert_relation(
+            conn,
+            &RelationClaim {
+                emitter_id: id,
+                source_id: r.source_id,
+                kind: r.kind,
+                artifact: r.artifact,
+                active: false,
+                t,
+                author: RelationAuthor::System,
+                actor: actor.to_owned(),
+                reason: why.to_owned(),
+                score: None,
+                detail: None,
+            },
+        )?);
+    }
+    Ok(out)
+}
+
+/// The measured bands of `id`'s linked detections, or its own occupied band when nothing is linked
+/// (a row minted from a measurement the link table has not caught up with still has a band).
+fn detection_bands(conn: &Connection, row: &RowEvidence) -> Result<Vec<FreqRange>, RepoError> {
+    let mut stmt = conn.prepare_cached(EMITTER_DETECTION_BANDS_SQL)?;
+    let bands: Vec<FreqRange> = stmt
+        .query_map(
+            params![blob(row.emitter_id), MAX_REGION_BANDS as i64],
+            |r| Ok(FreqRange::new(r.get(0)?, r.get(1)?)),
+        )?
+        .collect::<Result<_, _>>()?;
+    Ok(if bands.is_empty() {
+        vec![row.freq()]
+    } else {
+        bands
+    })
+}
+
+/// How many contested verdicts `id` already carries (the re-analysis bound).
+fn contested_rounds(conn: &Connection, id: EmitterId) -> Result<usize, RepoError> {
+    let n: i64 = conn
+        .prepare_cached(CONTESTED_ROUNDS_SQL)?
+        .query_row(params![blob(id), CONTESTED_VERDICT], |r| r.get(0))?;
+    Ok(usize::try_from(n).unwrap_or(usize::MAX))
+}
+
+/// Appends one contested verdict: an `active = 0` row, so **nothing is hidden** — both boxes stay
+/// listed — carrying what the re-analysis found and what blocked a merge. Bounded: at most
+/// [`REGION_MAX_ROUNDS`] per row, after which the region is left contested and not examined again.
+#[allow(clippy::too_many_arguments)]
+fn contest(
+    conn: &Connection,
+    row: &RowEvidence,
+    against: EmitterId,
+    region: FreqRange,
+    members: usize,
+    modes_found: usize,
+    blocked_by: Option<&str>,
+    actor: &str,
+    t: Timestamp,
+) -> Result<Option<EmitterRelation>, RepoError> {
+    if contested_rounds(conn, row.emitter_id)? >= REGION_MAX_ROUNDS {
+        return Ok(None);
+    }
+    let why = blocked_by.unwrap_or("the measurements separate into more than one emission");
+    let reason = format!(
+        "contested region {:.6}-{:.6} MHz: {members} boxes overlap in time and frequency, which \
+         two real emissions do not, but the re-analysis could not resolve them - {why}. Both are \
+         kept and both stay listed; nothing was merged and nothing was hidden.",
+        region.lo_hz / 1e6,
+        region.hi_hz / 1e6,
+    );
+    Ok(Some(insert_relation(
+        conn,
+        &RelationClaim {
+            emitter_id: row.emitter_id,
+            source_id: against,
+            kind: RelationKind::DuplicateOf,
+            artifact: None,
+            // Never in force: a contested verdict records a finding, it does not defer a row.
+            active: false,
+            t,
+            author: RelationAuthor::System,
+            actor: actor.to_owned(),
+            reason,
+            score: None,
+            detail: Some(serde_json::json!({
+                "verdict": CONTESTED_VERDICT,
+                "region_lo_hz": region.lo_hz,
+                "region_hi_hz": region.hi_hz,
+                "members": members,
+                "modes": modes_found,
+                "blocked_by": blocked_by,
+            })),
+        },
+    )?))
+}
+
+/// **T-369: overlap is an error signal, and the resolution is re-analysis, not ranking.**
+///
+/// Stages 1–3 rank *hypotheses against each other*: a Confirmed entry suppresses what it competes
+/// with, and the weaker of two competing candidates defers. [`bands_compete`] gates all of it at
+/// 60 % of **both** bands, which is deliberately blind to the two geometries that actually stack
+/// boxes on the user's waterfall — a narrow box inside a wide one, and a staircase of offset boxes
+/// each overlapping the next by less than 60 %. Those pairs fall through every branch above in
+/// silence, which is what "the collapse never happens" looked like from the wire.
+///
+/// So this stage asks a different question, of the air rather than of the rows: take the connected
+/// region of still-shown rows that overlap in **time and frequency** ([`boxes_overlap`]), pull the
+/// **measured bands of every detection backing them**, and merge those into contiguous
+/// [`modes`]. Then:
+///
+/// - **One mode** — the region's own measurements never separated, so the boxes are cuts of one
+///   emission. The best-supported box ([`RowEvidence::rank`]) is kept and the others defer to it
+///   ([`RelationKind::DuplicateOf`]) — but only where [`distinguishing_evidence`] finds nothing to
+///   tell them apart, so the guard that keeps two genuinely distinct emitters apart still holds
+///   over every claim. A row the guard protects is **contested**, not merged.
+/// - **More than one mode** — the detections *do* separate, so there is genuinely more than one
+///   thing inside the union and this stage cannot say which row is which. Nothing is merged; every
+///   member is contested.
+///
+/// **Merging is the dangerous direction** (T-233): this stage may bypass `bands_compete`, because
+/// that is a test of the rows' geometry and the modes are a measurement, but it never bypasses
+/// `distinguishing_evidence`.
+///
+/// **Termination.** The stage does not recurse: it runs once per `resolve`, over a neighbourhood
+/// already bounded to [`MAX_NEIGHBOURS`], and it only ever appends. A claim is idempotent
+/// ([`claim`]), so a region that resolves stays resolved without further writes; a region that does
+/// not resolve appends at most [`REGION_MAX_ROUNDS`] contested verdicts per row and then stops
+/// writing entirely. There is therefore no path by which re-analysis feeds itself.
+fn reanalyse_region(
+    conn: &Connection,
+    rows: &[RowEvidence],
+    id: EmitterId,
+    actor: &str,
+    t: Timestamp,
+    tol: &Tolerances,
+    out: &mut OverlapOutcome,
+) -> Result<(), RepoError> {
+    // A row hidden by a stage above is not a member of any region; a row deferring by a *region*
+    // claim still is, so this stage can revoke its own claim when the evidence changes.
+    let Some(seed) = rows
+        .iter()
+        .find(|r| r.emitter_id == id)
+        .filter(|_| !matches!(defers_elsewhere(conn, id), Ok(true)))
+        .cloned()
+    else {
+        return Ok(());
+    };
+
+    // The region: the connected component of `id` under [`boxes_overlap`], grown by querying each
+    // member's own overlaps so it is **closed transitively**. Without that closure the region would
+    // be whatever happened to overlap the one row a sighting arrived for — so the same three
+    // stacked boxes would elect a different survivor depending on which of them was touched, and a
+    // live pipeline touches all of them. That is churn, not a resolution. Bounded by
+    // [`MAX_NEIGHBOURS`] rows, each lookup indexed.
+    let mut members: Vec<RowEvidence> = vec![seed];
+    let mut frontier = 0;
+    while frontier < members.len() && members.len() < MAX_NEIGHBOURS {
+        let cur = members[frontier].clone();
+        frontier += 1;
+        for other in overlapping(conn, cur.freq(), cur.emitter_id, MAX_NEIGHBOURS)? {
+            if members.len() >= MAX_NEIGHBOURS || members.iter().any(|m| m.emitter_id == other) {
+                continue;
+            }
+            if defers_elsewhere(conn, other)? {
+                continue;
+            }
+            if let Some(ev) = evidence(conn, other)?.filter(|e| boxes_overlap(&cur, e)) {
+                members.push(ev);
+            }
+        }
+    }
+    let members: Vec<&RowEvidence> = members.iter().collect();
+    if members.len() < 2 {
+        // Not (or no longer) an overlapping region: anything this stage claimed here is revoked.
+        out.revoked.extend(revoke_region_claim(
+            conn,
+            id,
+            actor,
+            t,
+            "this row no longer overlaps another in time and frequency",
+        )?);
+        return Ok(());
+    }
+    let region = FreqRange::new(
+        members
+            .iter()
+            .map(|m| m.freq().lo_hz)
+            .fold(f64::INFINITY, f64::min),
+        members
+            .iter()
+            .map(|m| m.freq().hi_hz)
+            .fold(f64::NEG_INFINITY, f64::max),
+    );
+
+    // Re-analysis: what the measurements themselves say lives in this region.
+    let mut bands: Vec<FreqRange> = Vec::new();
+    for m in &members {
+        bands.extend(detection_bands(conn, m)?);
+    }
+    let gap_tol = center_uncertainty_hz(region.center_hz(), tol);
+    let found = modes(&bands, gap_tol);
+
+    // The best-supported box of the region, by the same proxy the competition stage ranks on.
+    let top = members
+        .iter()
+        .copied()
+        .reduce(|best, r| if better(r, best) { r } else { best })
+        .expect("members is non-empty");
+
+    for m in &members {
+        if m.emitter_id == top.emitter_id {
+            // The survivor never defers to its own region.
+            out.revoked.extend(revoke_region_claim(
+                conn,
+                m.emitter_id,
+                actor,
+                t,
+                "this row now ranks highest of the overlapping region and is the one shown",
+            )?);
+            continue;
+        }
+        let blocked = (found.len() != 1)
+            .then_some("the measurements separate into more than one emission")
+            .or_else(|| distinguishing_evidence(top, m, tol));
+        if let Some(why) = blocked {
+            out.revoked.extend(revoke_region_claim(
+                conn,
+                m.emitter_id,
+                actor,
+                t,
+                "the region re-analysis no longer finds one emission here, or the guard now \
+                 separates this row from the one shown",
+            )?);
+            out.contested.extend(contest(
+                conn,
+                m,
+                top.emitter_id,
+                region,
+                members.len(),
+                found.len(),
+                Some(why),
+                actor,
+                t,
+            )?);
+            continue;
+        }
+        let mode = found[0];
+        let reason = format!(
+            "region re-analysis: {} boxes overlap in time and frequency over {:.6}-{:.6} MHz, and \
+             the detections behind them measure as one contiguous emission {:.6}-{:.6} MHz - not \
+             {} of them. This row defers to emitter {}, the best-supported box of the region \
+             (detections, tracks and history kept; reversible)",
+            members.len(),
+            region.lo_hz / 1e6,
+            region.hi_hz / 1e6,
+            mode.lo_hz / 1e6,
+            mode.hi_hz / 1e6,
+            members.len(),
+            top.emitter_id,
+        );
+        let standing = read_relations(conn, CURRENT_RELATION_SQL, m.emitter_id)?;
+        let (claimed, revoked) = claim(
+            conn,
+            &standing,
+            RelationClaim {
+                emitter_id: m.emitter_id,
+                source_id: top.emitter_id,
+                kind: RelationKind::DuplicateOf,
+                artifact: None,
+                active: true,
+                t,
+                author: RelationAuthor::System,
+                actor: actor.to_owned(),
+                reason,
+                score: Some(m.rank()),
+                detail: Some(serde_json::json!({
+                    "verdict": ONE_EMISSION_VERDICT,
+                    "region_lo_hz": region.lo_hz,
+                    "region_hi_hz": region.hi_hz,
+                    "mode_lo_hz": mode.lo_hz,
+                    "mode_hi_hz": mode.hi_hz,
+                    "members": members.len(),
+                    "shown": rank_detail(top),
+                    "this": rank_detail(m),
+                })),
+            },
+        )?;
+        out.duplicates.extend(claimed);
+        out.revoked.extend(revoked);
+    }
+    Ok(())
 }

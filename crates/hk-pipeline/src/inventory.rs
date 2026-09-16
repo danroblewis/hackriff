@@ -275,6 +275,10 @@ pub struct TrackInventory {
     pub duplicates: u64,
     /// T-219: candidates attributed to the source whose receiver artifact they are.
     pub artifacts: u64,
+    /// T-369: overlapping regions the re-analysis could not resolve. Nothing was merged and
+    /// nothing was hidden; the verdict records what blocked it. Bounded per row by
+    /// `hk_model::relate::REGION_MAX_ROUNDS`.
+    pub contested: u64,
     /// T-242: features snapshots written (one per re-measurement).
     pub characterisations: u64,
     /// T-242: signature matches computed and offered to the match log.
@@ -308,6 +312,7 @@ impl TrackInventory {
             suppressed: 0,
             duplicates: 0,
             artifacts: 0,
+            contested: 0,
             characterisations: 0,
             matches: 0,
             clustered: 0,
@@ -380,6 +385,12 @@ impl TrackInventory {
     /// intermod frequency of a strong confirmed emitter is attributed to it. Every claim is an
     /// append-only row carrying its reasoning ([`OVERLAP_RULE`]); no row is ever mutated or
     /// deleted, so later evidence revives a superseded one. Rules: `hk_model::relate`.
+    ///
+    /// **T-369: and then the overlap itself is treated as an error signal.** Boxes that still
+    /// overlap in time *and* frequency after all that ranking are proof the analysis is wrong, so
+    /// the region is re-analysed against the measured detection bands behind it rather than left
+    /// as competing boxes. It resolves to one emission (the rest defer) or is recorded contested
+    /// with nothing merged and nothing hidden; `hk_model::relate::REGION_MAX_ROUNDS` bounds it.
     fn resolve_overlaps(
         &mut self,
         repo: &mut Repository,
@@ -391,6 +402,7 @@ impl TrackInventory {
         self.suppressed += out.suppressed.len() as u64;
         self.duplicates += out.duplicates.len() as u64;
         self.artifacts += out.artifacts.len() as u64;
+        self.contested += out.contested.len() as u64;
         Ok(())
     }
 

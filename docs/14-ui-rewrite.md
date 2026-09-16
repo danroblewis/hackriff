@@ -83,6 +83,7 @@ Each in-window row draws a **box** spanning the spectrum trace and the waterfall
 - A one-off burst's box is a few milliseconds tall and stays that way. Bursts finally look like bursts.
 - A chirp gets the **bounding box** of its sweep (ADR-0017 §1.3 — a swept polyline is a later refinement, deliberately not in the plan).
 - The **focused** row keeps the existing draggable-edge yellow box from the docs/15 §7 scope above, so the user-band drag (T-191) is unaffected.
+- **Two boxes are never drawn stacked, and the client does nothing to arrange that** (T-369). Overlap in time *and* frequency is an error signal in the backend — real emissions do not share a region, and two that did would not demodulate — so `/api/inventory` re-analyses the overlapping region against the detections behind it and either collapses the boxes into the emission they measure as, or records why it could not and leaves both. Either way the list the client draws from does not carry the pair. **The UI must not hide, offset, stack, or z-order overlapping boxes to compensate:** an overlap that reaches the screen is a backend bug to report, not a layout problem to solve, and papering over it would hide the very evidence the re-analysis runs on. `crates/hk-cli/tests/api_contract.rs` asserts the served list has no stacked pair, and the acceptance suite asserts it on the real 45 s off-air capture.
 
 ### Timeline scrubber and scrub-back
 
