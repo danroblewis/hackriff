@@ -209,10 +209,10 @@
 //! ([`EndReason::Reset`], `onset` = the resetting frame). Other blocks more than 3 dB from their
 //! carried reference restart from it, and changes inside the warm-up start runs backdated to
 //! their first beyond-threshold warm-up frame (a rise three frames after a gap is a `Rise` with
-//! that onset). An *incomparable* reset (gain, tune beyond 0.25 bin, rate, bandwidth, antenna port
-//! or resolution) closes each open episode with `Unknown`: the new segment seeds at whatever it
-//! sees, so the physical rise may continue unseen. **Consumers must treat a later bare `Fall`
-//! over an `Unknown` episode's region as a possible close of it.**
+//! that onset). An *incomparable* reset (gain, tune beyond 0.25 bin, rate, bandwidth, antenna
+//! port, bias tee or resolution) closes each open episode with `Unknown`: the new segment seeds at
+//! whatever it sees, so the physical rise may continue unseen. **Consumers must treat a later bare
+//! `Fall` over an `Unknown` episode's region as a possible close of it.**
 //!
 //! **Invariants** (`tests/floor_episodes.rs`: named repros and randomised sequences): no
 //! `Extend`/`Update`/`End`/`Unknown` without an open `Rise`, nothing after a close, one `Rise`
@@ -229,10 +229,36 @@
 //! # Gain state
 //!
 //! Every estimate is keyed by a [`GainKey`]: centre (tolerance 0.25 bin, so sub-bin frequency
-//! corrections keep the series), rate, baseband bandwidth, LNA/VGA/amp, antenna port, FFT
-//! length, overlap, K, window. A key change beyond tolerance, or a frame discontinuity in
-//! [`FloorConfig::reset_on`] (stream start, rate change, gap), starts a new segment
+//! corrections keep the series), rate, baseband bandwidth, LNA/VGA/amp, antenna port, bias-tee
+//! state, FFT length, overlap, K, window. A key change beyond tolerance, or a frame discontinuity
+//! in [`FloorConfig::reset_on`] (stream start, rate change, gap), starts a new segment
 //! ([`FloorFrame::segment`]).
+//!
+//! ## Bias tee, and continuity at the switch (T-331)
+//!
+//! The bias tee is in the key because it powers an *external* LNA on the antenna port: the floor
+//! moves the instant the DC arrives, and nothing else in the key moves with it — a bias-tee change
+//! leaves `Tune` (and therefore LNA/VGA/amp) byte-identical, leaves `antenna_port` alone, and
+//! raises only `PROVENANCE_CHANGE`, which is not in [`FLOOR_RESET_ON`]. Its three states are
+//! compared exactly: `Unknown` is its own context and never pools with `Off` (T-325).
+//!
+//! **What happens to an in-flight estimate at the switch**, and why both directions are safe:
+//!
+//! - The switch frame's key does not match, so it is an *incomparable* reset. Every open episode
+//!   closes with `Unknown` — the documented "the receiver state changed, this can no longer be
+//!   judged" — rather than silently absorbing the step as an air event. Nothing continues across
+//!   the switch, which is the bug this replaced.
+//! - The restart is **not silent and not an alarm storm**. The frame carries `reset`, a new
+//!   `segment` and `slow_ready == false`, and the new segment re-enters warm-up: every block's
+//!   baseline is seeded from the median of `impulsive.min_history` frames that are *all* on the
+//!   new side of the switch, and a `Rise` needs `change.confirm_s` of run beyond `threshold_db`
+//!   against *that* baseline. The pre-switch baselines are discarded at the close, so the step at
+//!   the switch itself can never confirm as a rise: an immature floor here emits nothing, it
+//!   simply reports `slow_ready == false` until it has matured.
+//! - This is not a new behaviour class; it is the behaviour a gain change already had, applied to
+//!   a change that is physically a gain change. Consumers already handle it.
+//!
+//! No threshold moved: the key is an equality test, not a scale.
 //!
 //! # Real-time path
 //!
