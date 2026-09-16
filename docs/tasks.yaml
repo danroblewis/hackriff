@@ -4449,7 +4449,7 @@ tasks:
   - id: T-260
     milestone: MUI
     title: 'ADR-0017 TM-3: Explore sends the viewed waterfall window; Candidates are window-scoped and Confirmed are ALWAYS listed'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-250
@@ -4864,6 +4864,32 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-284
+    milestone: MUI
+    title: 'ADR-0017 TM-2 remainder: the presence / liveness / family_in_window object
+      never landed, so TM-3 cannot render liveness or sort by in-window on-air time'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: TIME
+    use_cases:
+    - AWARE-053
+    found_by: 'T-260 (2026-09-16): T-250 shipped only the predicate half of TM-2. T-260
+      refused to derive liveness in the UI rather than break the thin-client rule, and
+      left both features out'
+    acceptance: 'the backend serves the additive presence object ADR-0017 TM-2 specifies -
+      presence intervals, a liveness state, and family_in_window (the same arbitration
+      restricted to the window, rendering as "(from earlier)" when null). family stays
+      all-time: identity evidence is time-invariant, since a CRC decode from yesterday
+      still says what the thing is. Additive projection only, no ADR-0016 amendment and
+      no arbitration change. Then TM-3 can render liveness and sort by in-window on-air
+      time, both of which T-260 deliberately left undone. docs/api.md and api_contract
+      together'
+    area: crates/hk-api, crates/hk-model (read path), docs/api.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
