@@ -8,9 +8,11 @@
 //! a priori: from the definition of the modulation, or from the S5 floors. None is tuned against
 //! the acceptance split.
 
-use hk_model::classify::{Coarse, LabelP};
+use hk_model::classify::{Coarse, HK_MOD_V1, LabelP};
 
+use crate::density::DensityModel;
 use crate::features::Features;
+use crate::verify::MAX_LOG_LR;
 
 /// Why a family was ruled out, or that it was not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,22 +262,36 @@ pub struct ClassGuess {
     pub dist: Vec<LabelP>,
 }
 
-/// Theoretical normalised cumulants `(|Ĉ40|, Ĉ42)` per PSK/QAM class (C15 card).
-const PSK_QAM_CUMULANTS: &[(&str, f64, f64)] = &[
-    ("bpsk", 2.0, -2.0),
-    ("qpsk", 1.0, -1.0),
-    ("8psk", 0.0, -1.0),
-    ("qam16", 0.68, -0.68),
-    ("qam64", 0.62, -0.62),
-];
+// There was a `PSK_QAM_CUMULANTS` table here — the textbook normalised cumulant pairs
+// `(|Ĉ40|, Ĉ42)` of bpsk (2, −2), qpsk (1, −1), 8psk (0, −1), qam16 (0.68, −0.68) and
+// qam64 (0.62, −0.62) — scored by distance. It is gone rather than retuned (T-243), because those
+// values hold for **symbol-rate** samples and this stage never receives any: at
+// `synth::SAMPLES_PER_OBW` the instants between symbols are pulse-shaped mixtures of neighbours,
+// close to Gaussian, which drives the fourth-order cumulants towards zero for *every* class
+// (`features::tests` pins this, and the dev grid measures |Ĉ40| at 0.03–0.07 for qpsk, 8psk, qam16
+// and qam64 alike, against theoretical values spanning 0 to 2).
+//
+// A distance to five fixed points from a measurement that always lands near the origin does not
+// rank constellations; it ranks the points by how close each one happens to sit to zero. That is
+// exactly what it did: 8psk (0, −1) is nearest, so the tree called 8psk on everything, and bpsk
+// (2, −2) is furthest, so bpsk scored `exp(−16)`, clamped to the 1e-6 floor, i.e. **0.00 after
+// normalising**. A prior of exactly zero is unrecoverable — it is below the verifier's
+// `CANDIDATE_MIN_P`, so bpsk was not even a hypothesis, and no later stage could multiply its way
+// back (measured, T-200/T-213: bpsk, qpsk and qam16 top-1 all 0.000 at 15, 20 and 25 dB).
+//
+// What replaces it is [`psk_qam_classes`]: the class-conditional densities, which are fitted on
+// what these features **actually** measure at this geometry rather than on what they would measure
+// at symbol rate.
 
 /// The within-family class of `family`, or `None` when the features cannot separate its classes.
 ///
+/// `model` supplies the class-conditional densities (the psk-qam order is read from them),
 /// `obw_hz` is the C13 occupied bandwidth (analog needs it to tell broadcast FM from narrowband),
 /// and `mod_index_h` the C14 modulation index (FSK needs it to name MSK).
 pub fn class_guess(
     family: &str,
     features: &Features,
+    model: &DensityModel,
     obw_hz: Option<f64>,
     mod_index_h: Option<f64>,
 ) -> Option<ClassGuess> {
@@ -291,7 +307,7 @@ pub fn class_guess(
             }
         }
         "fsk" => fsk_classes(features, mod_index_h),
-        "psk-qam" => psk_qam_classes(features)?,
+        "psk-qam" => psk_qam_classes(features, model)?,
         "ofdm" => vec![("ofdm", 0.95)],
         "css" => vec![("chirp", 0.95)],
         "dsss" => vec![("dsss", 0.95)],
@@ -382,16 +398,51 @@ fn fsk_classes(features: &Features, mod_index_h: Option<f64>) -> Vec<(&'static s
     v
 }
 
-fn psk_qam_classes(features: &Features) -> Option<Vec<(&'static str, f64)>> {
-    let c40 = features.get("c40_norm")?;
-    let c42 = features.get("c42_norm")?;
-    // Nearest theoretical cumulant pair, as a soft score.
+/// The psk-qam order, from the class-conditional densities (ADR-0016 §4.3) rather than from the
+/// textbook cumulant pairs that oversampling has already destroyed (see the note above).
+///
+/// **Why this is the right evidence.** The densities are fitted on the dev grid at *this* analysis
+/// geometry, so each class's dimensions describe what the feature really measures on that
+/// modulation rather than what theory says a symbol-rate sample would. Two dimensions carry the
+/// separation the cumulant table could not:
+/// - `c20_norm` — the **second**-order structure, which survives pulse shaping because a real
+///   constellation keeps `E[x²] ≠ 0` however it is filtered. On the dev grid it reaches 0.97 on
+///   `bpsk` while every rotationally symmetric class stays under 0.10, which is what makes `bpsk`
+///   nameable at all.
+/// - `c42_norm` — measured at −0.78 for `qpsk`/`8psk` against −0.47 for `qam64`, separating the
+///   PSK orders from the dense QAM ones.
+///
+/// **Why the spread is bounded.** The ratio between two classes is clamped to [`MAX_LOG_LR`], the
+/// same 19:1 bound the post-sync verifier applies to its own likelihoods and for the same reason:
+/// this is a diagonal-Gaussian model with no channel, no front end and no interference in it, so
+/// it may order the candidates but may not claim certainty from them. Two consequences matter, and
+/// both are properties of the arithmetic rather than of a threshold:
+/// - **No class is ever given exactly zero.** A class whose evidence underflowed, or that the
+///   snippet measured too few dimensions to score at all, sits at the 19:1 floor — low, but still
+///   a hypothesis the verifier and any later stage can recover. That is the failure this replaces.
+/// - **The call cannot be confidently wrong.** With four rivals at the floor the top class reaches
+///   at most `1/(1 + 4/19)` ≈ 0.83, so a psk-qam class call never reports p ≥ 0.9.
+fn psk_qam_classes(features: &Features, model: &DensityModel) -> Option<Vec<(&'static str, f64)>> {
+    let classes = HK_MOD_V1.family("psk-qam")?.classes;
+    let scored: Vec<(&'static str, Option<f64>)> = classes
+        .iter()
+        .map(|c| (*c, model.score_class(c, features).map(|s| s.log_evidence)))
+        .collect();
+    // Log evidence, never `evidence` itself: it underflows to exactly 0 for a poor fit, and the
+    // ratio of two underflowed scores is the zero this task exists to remove.
+    let best = scored
+        .iter()
+        .filter_map(|(_, ll)| *ll)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !best.is_finite() {
+        return None;
+    }
     Some(
-        PSK_QAM_CUMULANTS
-            .iter()
-            .map(|(label, t40, t42)| {
-                let d2 = ((c40 - t40) / 0.5).powi(2) + ((c42 - t42) / 0.5).powi(2);
-                (*label, (-0.5 * d2).exp().max(1e-6))
+        scored
+            .into_iter()
+            .map(|(class, ll)| {
+                let ll = ll.unwrap_or(f64::NEG_INFINITY).max(best - MAX_LOG_LR);
+                (class, (ll - best).exp())
             })
             .collect(),
     )
@@ -505,7 +556,9 @@ mod tests {
         let tax = &HK_MOD_V1;
         for fam in tax.families {
             let f = feats(Class::Fsk2, 25.0, 9);
-            if let Some(g) = class_guess(fam.name, &f, Some(40e3), Some(0.5)) {
+            if let Some(g) =
+                class_guess(fam.name, &f, DensityModel::builtin(), Some(40e3), Some(0.5))
+            {
                 assert!(fam.classes.contains(&g.label.as_str()), "{}", g.label);
                 for lp in &g.dist {
                     assert!(fam.classes.contains(&lp.label.as_str()), "{}", lp.label);
@@ -514,23 +567,61 @@ mod tests {
                 assert!((sum - 1.0).abs() < 1e-9, "{} sums to {sum}", fam.name);
             }
         }
-        // The **order** within psk-qam is not decided here: the cumulants that separate BPSK from
-        // QPSK need symbol-rate samples, and on an oversampled snippet they flatten towards zero
-        // (see `features::tests`). What the rules must guarantee is that the guess is a real class
-        // of the family with a real distribution — the order itself waits for the class gate and
-        // for T-200's post-sync verifier.
-        let bpsk = class_guess("psk-qam", &feats(Class::Bpsk, 30.0, 4), None, None).unwrap();
-        assert!(
-            ["bpsk", "qpsk", "8psk", "qam16", "qam64"].contains(&bpsk.label.as_str()),
-            "{} is not a psk-qam class",
-            bpsk.label
-        );
-        let wfm = class_guess("analog", &feats(Class::Wfm, 30.0, 4), Some(200e3), None).unwrap();
+        // **The order within psk-qam is decided here, and no class may be given exactly zero**
+        // (T-243). The textbook cumulants that separate BPSK from QPSK need symbol-rate samples and
+        // flatten towards zero on the oversampled snippet this stage receives (see
+        // `features::tests`), so the order is read from the class-conditional densities instead.
+        // What the rules must guarantee is that every class of the family stays a live hypothesis:
+        // a probability of exactly zero is unrecoverable — it sits below the verifier's
+        // `CANDIDATE_MIN_P`, so no later stage can move it — and that is what put `bpsk` at 0.000
+        // top-1 at every SNR.
+        let bpsk = class_guess(
+            "psk-qam",
+            &feats(Class::Bpsk, 30.0, 4),
+            DensityModel::builtin(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(bpsk.label, "bpsk", "{:?}", bpsk.dist);
+        for class in ["bpsk", "qpsk", "8psk", "qam16", "qam64"] {
+            let p = bpsk
+                .dist
+                .iter()
+                .find(|lp| lp.label == class)
+                .unwrap_or_else(|| panic!("{class} missing from {:?}", bpsk.dist))
+                .p;
+            assert!(p > 0.0, "{class} was given exactly zero: {:?}", bpsk.dist);
+        }
+        // The 19:1 clamp bounds the top of a five-class call at 1/(1 + 4/19) ≈ 0.83, so this stage
+        // cannot produce a confident wrong answer whatever the densities say.
+        assert!(bpsk.p < 0.9, "psk-qam class call reported p {}", bpsk.p);
+        let wfm = class_guess(
+            "analog",
+            &feats(Class::Wfm, 30.0, 4),
+            DensityModel::builtin(),
+            Some(200e3),
+            None,
+        )
+        .unwrap();
         assert_eq!(wfm.label, "wfm");
-        let nbfm = class_guess("analog", &feats(Class::Nbfm, 30.0, 4), Some(16e3), None).unwrap();
+        let nbfm = class_guess(
+            "analog",
+            &feats(Class::Nbfm, 30.0, 4),
+            DensityModel::builtin(),
+            Some(16e3),
+            None,
+        )
+        .unwrap();
         assert_eq!(nbfm.label, "nbfm");
         assert_eq!(
-            class_guess("not-a-family", &feats(Class::Ook, 30.0, 4), None, None),
+            class_guess(
+                "not-a-family",
+                &feats(Class::Ook, 30.0, 4),
+                DensityModel::builtin(),
+                None,
+                None
+            ),
             None
         );
     }
