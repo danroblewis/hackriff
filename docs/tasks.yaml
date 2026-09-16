@@ -3498,7 +3498,7 @@ tasks:
   - id: T-219
     milestone: M3
     title: "Overlapping-candidate resolution: a Confirmed signal suppresses candidates overlapping its band, and overlapping candidates compete (merge or rank by evidence) so duplicate offset boxes collapse"
-    status: review
+    status: in-progress
     commit: 59dc92e
     priority: high
     deps: []
@@ -3514,6 +3514,7 @@ tasks:
     also: "fold in the geometric half of C40 (user 2026-09-15): predict image 2*LO-f, harmonics n*f and intermod a*f1+/-b*f2 from strong confirmed emitters using the tuning history, and attribute a candidate landing on a predicted frequency as image/harmonic/IMD of that source rather than an independent signal (same-source duplicate). Level consistency and presence only while the source is present are required; the attribution is ranked evidence with its arithmetic disclosed, reversible, never an automatic delete. Blind test: an injected image/IMD is attributed, and a real adjacent station is not."
     binding_constraint: "from ADR-0015 section 11 (T-220): record duplicate/artifact groups as APPEND-ONLY rows keyed by emitter (duplicate_of / artifact_of links plus suppression rows) - never mutate or delete the losing candidates, so the later candidate-pipeline model can fold these groups in and evidence can revive a superseded row. Guard: any distinguishing evidence blocks a merge (differing decoded identities, then fingerprint distance, then separated -3 dB extents); band overlap alone only makes rows compete. Rank duplicates by an SNR x duty x trust proxy until evidence bits exist."
     field_case: "user field observation 2026-09-15: short intermittent DATA-looking (possibly AM) bursts near 100.3 MHz, distinct from the 100.3 WFM station. Exactly the artifact-vs-real question this task decides: check whether the geometric predictor attributes it to the WFM station (image/harmonic/IMD) or leaves it as an independent narrowband emitter. Do not assume either; it must be decided by evidence."
+    review_2026_09_15: "FIX-FIRST (Opus): (1) HIGH artifact attribution far too broad - los built from all 32 sources tuning centres instead of the target LO, tolerance from PREDICTED bandwidth so it grows with harmonic order to +/-225 kHz, corroboration near-vacuous (level window just means weaker than source; present_only_with always passes for a continuous broadcaster); ~16k image + 128 harmonic + ~10k intermod predictions covering order-1 GHz. (2) HIGH guard is optional - runs only when BOTH rows have a current-version fingerprint, and once overlap >= 0.6 the extent test can never fire, so a 12.5 kHz subcarrier inside a confirmed 180 kHz WFM is suppressed and hidden (exactly the user 100.3 MHz subcarrier hypothesis). (3) MED DEFERS_SQL ignores merge resolution and liveness. (4) MED report/inventory.rs and dataset/mod.rs default to Shown, silently dropping rows from reports and training data. Append-only, M2 alarm coverage and migration 0008 all verified OK."
 
   - id: T-220
     milestone: MAUTO
