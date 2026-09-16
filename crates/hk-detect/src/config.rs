@@ -322,6 +322,14 @@ pub struct Rules {
     /// A box with more than this fraction of its cells in impulsive frames joins the broadband
     /// impulsive event (0.5).
     pub impulsive_fraction: f64,
+    /// T-237: a box spanning at least this fraction of the analysis window's bins is
+    /// provenance-suspect and is flagged `marginal` (0.9). A detection that fills its own window
+    /// carries no evidence that it is an emission rather than a floor or level artifact of the
+    /// window itself: the reference it was measured against is drawn from the same bins, and the
+    /// wide reference reads anything wider than ~55 % of the span as floor. Like the DC and image
+    /// rules, this is a property of the geometry, not a threshold on the signal, so it neither
+    /// hides the box nor changes what was measured.
+    pub whole_window_fraction: f64,
 }
 
 impl Default for Rules {
@@ -336,6 +344,7 @@ impl Default for Rules {
             clip_fraction: 1e-4,
             marginal_snr_db: 10.0,
             impulsive_fraction: 0.5,
+            whole_window_fraction: 0.9,
         }
     }
 }
@@ -586,6 +595,10 @@ impl DetectorConfig {
         }
         check_probability("rules.clip_fraction", self.rules.clip_fraction)?;
         check_probability("rules.impulsive_fraction", self.rules.impulsive_fraction)?;
+        check_probability(
+            "rules.whole_window_fraction",
+            self.rules.whole_window_fraction,
+        )?;
         if self.rules.comb.max_lines < 3 || self.confirm.recent_capacity == 0 {
             return Err(ConfigError::Invalid {
                 name: "comb.max_lines >= 3 and confirm.recent_capacity >= 1",
