@@ -22,42 +22,59 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `just` (for the lint gate below) and cargo-nextest, both prebuilt downloads via the same
-      # action and both pinned so an upstream release can't silently change CI behaviour.
+      # `just` (this job's two steps are both recipe calls) and cargo-nextest (which `just test-rust`
+      # prefers, falling back to plain `cargo test` when it is absent — CI should get the parallel
+      # path, so install it). Both are prebuilt downloads via the same action and both pinned so an
+      # upstream release can't silently change CI behaviour.
       - uses: taiki-e/install-action@v2
         with:
           tool: just@1.58.0,nextest@0.9.144
 
       # uv must exist before `just lint` — lint-py runs ruff out of py/'s locked dev group (T-352)
-      # — and before cargo test: the hk-e2e harness generates synthetic IQ via py/.
+      # — and before `just test`: test-py is pytest under uv, and the synthetic-IQ generator the
+      # workspace's synth-backed tests call is `uv run --project py`.
       - uses: astral-sh/setup-uv@v6
+
+      # Node for `just test`'s test-ui member: esbuild bundle + tsc --noEmit + the ui/test suites
+      # under node:test. ubuntu-latest ships a Node, but an unpinned one — pin the major instead, and
+      # 24 is what the dev Mac runs, so CI and local agree. esbuild 0.28 needs >=18, TypeScript 7
+      # >=16.20; both resolve per-platform binaries that ui/package-lock.json already lists for
+      # linux-x64, so `npm ci` on the runner needs no extra setup. The npm cache is keyed on that
+      # lockfile (ui/package.json has no `packageManager` field, so the action's automatic caching
+      # does not trigger on its own).
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
 
       # T-353: CI calls the `just lint` recipe instead of invoking cargo fmt/clippy itself, so the
       # gate CI enforces and the gate agents run locally are the same definition by construction.
       # Duplicating the commands here is how the Python half of the gate went missing: T-346 added
       # lint-py to the recipe and this workflow's private copy of it silently did not follow.
-      # Runs before the test steps: it fails fast on style, and clippy --all-targets warms the
-      # build cache the nextest step then reuses.
+      # Runs before the test step: it fails fast on style, and clippy --all-targets warms the
+      # build cache the nextest run then reuses.
       - name: just lint
         run: just lint
 
-      # T-077: cargo-nextest runs the workspace in parallel, with heavy/timing-sensitive tests
-      # (tests/e2e, hk-pipeline listen/retune/lossless/refine/stream, hk-api, hk-cli, hk-core ring
-      # stress/concurrency) pinned to a serial group by .config/nextest.toml.
-      # hk-e2e is excluded here: its harness and acceptance targets are the `acceptance` job's
-      # `just acceptance-ci`, matching `just test`'s own exclusion of the crate.
-      - name: cargo nextest run
-        env:
-          HK_E2E_REQUIRE_SYNTH: "1"
-        run: cargo nextest run --workspace --exclude hk-e2e
-
-      # nextest doesn't run doctests.
-      - name: cargo test --doc
-        run: cargo test --workspace --exclude hk-e2e --doc
-
-      - name: python tooling tests
-        working-directory: py
-        run: uv run --locked pytest
+      # T-358: one recipe call, not a copy of its members. `just test` is test-rust (cargo-nextest
+      # over the workspace, hk-e2e excluded — that crate is the `acceptance` job below), test-doc
+      # (nextest runs no doctests), test-py (pytest under uv) and test-ui (the UI build, typecheck
+      # and ui/test suites). This workflow used to spell out the first three and omit the fourth,
+      # because there was no Node here; `test-ui` then self-skipped locally when node was absent, so
+      # the UI gate was authoritative nowhere while six tickets changed ui/src. It is spelled out
+      # nowhere now: the recipe's dependency list is the gate, so a member added to `just test`
+      # reaches CI without anyone remembering to edit this file — the drift T-353 and T-357 closed
+      # for lint and acceptance, in the direction that loses a check entirely.
+      #
+      # HK_E2E_REQUIRE_SYNTH lived here as a step `env:` and now lives in the test-rust recipe, for
+      # the same reason: strictness the workflow held privately is strictness local runs did not get.
+      #
+      # T-077: heavy/timing-sensitive tests (tests/e2e, hk-pipeline listen/retune/lossless/refine/
+      # stream, hk-api, hk-cli, hk-core ring stress/concurrency) are pinned to a serial nextest group
+      # by .config/nextest.toml; everything else runs parallel.
+      - name: just test
+        run: just test
 
   # The acceptance gate (T-024, T-357): the M0 vertical-slice acceptance suite (docs/11 §1.1) plus
   # the hk-e2e harness targets — mock device, Listen, recording, streaming, refinement, the C-stage

@@ -9,7 +9,12 @@ default:
 build:
     cargo build --workspace
 
-# All offline tests: Rust (T1-T4, no hardware, `gpu` off) + Python tooling + UI build check (skipped without node).
+# All offline tests: Rust (T1-T4, no hardware, `gpu` off) + Python tooling + the UI gate.
+# THE test gate: CI's `test` job runs this recipe, one step, rather than its own copy of the
+# commands (T-353's rule; T-358 finished the conversion). So the membership list below is gated too
+# — adding `test-foo` here reaches CI with no workflow edit, which is the drift that hid the UI
+# check: `test-ui` was in this list and in nothing CI ran. Requires cargo, uv and node; every member
+# fails rather than skips when its toolchain is missing.
 # Runs via cargo-nextest for parallelism: heavy/timing-sensitive tests (tests/e2e, hk-pipeline
 # listen/retune/lossless/refine/stream tests, hk-api, hk-cli, hk-core ring stress/concurrency, hk-demod::refine_wfm_real)
 # are pinned to the serial `heavy-serial` test group in .config/nextest.toml; everything else runs
@@ -20,9 +25,16 @@ build:
 # single crate or test (the T1-T4 subset an agent working on one crate should use, not full `test`).
 test: test-rust test-doc test-py test-ui
 
+# HK_E2E_REQUIRE_SYNTH=1 is set here, not by the caller: three workspace tests outside hk-e2e
+# (hk-detect e2e_synth + aware_006_wide_emissions, hk-context aware_006_e2e) skip silently when the
+# synthetic generator is unavailable, and CI's workflow used to carry that strictness in a private
+# step `env:` block while this recipe did not — the same copy-drifts-from-the-recipe shape T-353
+# closed for lint (T-358). Costs nothing locally: `just test` already hard-requires uv via test-py,
+# so any machine that passes `just test` today has the generator.
 test-rust:
     #!/usr/bin/env bash
     set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
     if command -v cargo-nextest >/dev/null 2>&1; then
         cargo nextest run --workspace --exclude hk-e2e
     else
@@ -154,13 +166,25 @@ test-py:
 ui-build:
     cd ui && npm ci --no-audit --no-fund && npm run build
 
-# UI build + type-check; skipped cleanly when node/npm are absent
+# UI build + type-check + the ui/test suites. FAILS when node/npm are absent — it used to skip.
+#
+# T-358: this recipe self-skipped, and CI installed no Node and never called it, so the UI gate was
+# authoritative nowhere: on a machine without node `just test` went green by doing nothing, and in
+# CI it did not run at all. Six tickets (T-334, T-337, T-338, T-340, T-341, T-362) changed ui/src
+# behind it. Skip-versus-fail was decided on which failure mode is worse, and a gate that lies green
+# is worse than a gate that blocks a machine that cannot run it: the green lie is silent and
+# unbounded in time, while the failure is loud, immediate and names its own fix. It also restores
+# consistency — `test-rust`, `test-doc` and `test-py` all fail outright without cargo/uv; test-ui
+# was the only member of `just test` that degraded to a no-op rather than an error. The escape hatch
+# for a machine with no node is explicit rather than implicit: run the sibling recipes by name.
 test-ui:
     #!/usr/bin/env bash
     set -euo pipefail
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-        echo "test-ui: node/npm not found; skipping the UI build check"
-        exit 0
+        echo "test-ui: node/npm not found — the UI gate cannot run, so it fails rather than passing." >&2
+        echo "  Install Node >= 20 (the dev Mac and CI both run 24), or, to skip the UI deliberately," >&2
+        echo "  run the other members of \`just test\` by name: just test-rust test-doc test-py" >&2
+        exit 1
     fi
     cd ui
     npm ci --no-audit --no-fund --prefer-offline
