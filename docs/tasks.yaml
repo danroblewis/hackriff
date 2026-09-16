@@ -3408,6 +3408,8 @@ tasks:
     model: sonnet
     effort: medium
     core_interface: false
+    scope_narrowed_2026_09_15: "T-218 already delivered the fusion function and the three ADR-0016 property tests (fuse() and thresholds@1 now live in hk_model::classify, where hk-context and hk-api can use them without depending on the classifier crate; T-199 had implemented fuse and T-218 adapted rather than rewrote it). What REMAINS for T-212 is only the prior SOURCE: a band-plan/raster-derived prior table feeding P(c|f,l), plus a blind test that priors reorder only within evidence ties. Do NOT reimplement fuse() or its invariant tests."
+
   - id: T-213
     milestone: M3
     title: "M3 evaluation harness: dev vs acceptance seed split, per-SNR accuracy/unknown-rate reports, OTA labels only from CRC-valid decodes"
