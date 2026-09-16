@@ -4303,7 +4303,7 @@ tasks:
     title: 'Synthetic LoRa scenario in the py/ synth tooling: deterministic up-chirps
       with known SF/BW/CR/payload as hidden ground truth, as a burst/chirp acceptance
       fixture'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: SYNTH
