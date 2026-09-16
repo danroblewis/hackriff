@@ -6944,7 +6944,7 @@ tasks:
   - id: T-359
     milestone: M2-hardening
     title: Carry the bias-tee state to the occupancy row, so T-333 stops folding everything as Unknown
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-332
@@ -7236,6 +7236,40 @@ tasks:
       selection-scoped routes by creating a selection first, exactly as it already does for an emitter.
       A detector that cannot reach a route is not evidence about that route, and this is now the second
       field it missed for that reason rather than for a listing error'
+  - id: T-371
+    title: A baselines/slots row does not name its bias-tee cohort
+    milestone: M4
+    status: todo
+    priority: high
+    parallel_group: CTX
+    deps: [T-359]
+    notes: |
+      T-359 split occupancy cohorts by bias-tee state, so one subject can now
+      legitimately hold two pools with different numbers. But a /api/baselines/slots
+      row carries only `cal` - baselines_json has the bias_tee, the slots row does
+      not. The reader sees two indistinguishable rows disagreeing and has no way to
+      learn why. Add the cohort to the slots row and to the UI baseline view.
+      Property: two rows differing only in tee state are distinguishable on the wire.
+      Control: a pre-T-359 unknown-cohort row still renders, not blank.
+      Update docs/api.md + api_contract.rs together (T-079).
+  - id: T-372
+    title: Attribute a visit's bias-tee state by switch time, not by whole read
+    milestone: M4
+    status: todo
+    priority: medium
+    parallel_group: CTX
+    deps: [T-359]
+    notes: |
+      T-359 is deliberately coarse: a chunk read that is mixed anywhere marks EVERY
+      visit in it Unknown, including visits lying wholly inside one state, because
+      provenance is summarised per read region rather than per time cell. That is the
+      safe direction and it stays the fallback.
+      The summary's `steps` carry switch timestamps, so a visit can be attributed by
+      comparing its extent against them - recovering usable off/on rows either side of
+      a switch instead of an interval of Unknown.
+      The rule must stay claim-nothing at the boundary: a visit STRADDLING a switch is
+      Unknown, not assigned by midpoint. Control: the 9:1 majority case from T-359
+      still yields Unknown, i.e. this must not become a dominance rule by the back door.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
