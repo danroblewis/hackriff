@@ -2683,7 +2683,7 @@ tasks:
   - id: T-166
     milestone: MUI
     title: "MUI API gap 9: region Watch alerts"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3881,7 +3881,7 @@ tasks:
   - id: T-240
     milestone: M3
     title: "OTA fixtures still abstain after C14 landed: four instantaneous-statistics dimensions (sigma_aa, if_bimodality, gamma_max, sigma_ap) sit at the z=6 clamp - a sim-to-real gap in the synthetic grid's instantaneous statistics"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-238, T-205]
     parallel_group: M3A
