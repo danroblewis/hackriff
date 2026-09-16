@@ -43,6 +43,16 @@ Further goals:
 - **General, not a decoder catalogue.** ADS-B, pagers and radiosondes are the well-known cases, not the point.
 - **Tune from the processed output.** Closed-loop refinement: demodulate and decode, measure output quality (e.g. discriminator offset, pilot/RDS lock, audio SNR, CRC-valid rate), and adjust centre, bandwidth and other parameters from it. Rough selections and detections get refined automatically, not set by hand.
 
+## Signal & inventory model (invariants, from the user 2026-09-16)
+
+These constrain detection, the data model, and the UI, and hold across milestones.
+
+- **A signal is a time–frequency region, not a persistent carrier.** Every detection has a centre frequency, a bandwidth (width), **and a time extent** (start + stop, or start + duration). Signals are events in time; they need no carrier and no stable frequency. A 10-second chirp or a one-off burst is a signal, and such **ephemeral emissions are first-class** — never forced into a "steady emitter parked on one frequency" shape. (The 902–928 MHz / "915 MHz" ISM band — rtl_433 sensors, remotes, LoRa — is the canonical playground: short bursts everywhere.)
+- **The inventory is time-scoped to the view.** The Explore **Candidate** and **Confirmed** lists reflect only what is *currently identified in the viewed waterfall window*, not an all-time accumulator. Each identified region draws a **box** (centre/width/time) in the waterfall; past events are marked on the **timeline scrubber**; the durable all-time record lives in a separate **history** surface (workflow #3), where ephemera are catalogued as past events with a timespan. Scrubbing the waterfall re-derives the live lists (recent history comes from the IQ ring).
+- **Candidate / Confirmed / History.** *Candidate* = a hypothesis about energy in the current window. *Confirmed* = a verified real emitter, carrying its own time-presence track. *History* = the durable catalogue of every event, including one-offs.
+- **Detection is fast, continuous, and self-cleaning.** Re-detect rapidly and often; a region's few real signals should resolve quickly (target ~2–10 s), with near-duplicate detections **merged** into one emitter and candidate confidence **decaying / expiring** when a region goes quiet. No unbounded seen-count accumulators, no ghost candidates for signals that have stopped. A persisting signal's box **grows** along the time axis as it continues.
+- **Decode operates on a captured region and extends with it.** To decode, capture a time–frequency section and run the pipeline over it; live decoding **extends the region's time extent** and decodes only the newly-arrived part (incremental), never re-decoding what is already done.
+
 ## Product constraints (decided with the user, 2026-09-13)
 
 - **Form factor: portable handheld.** A PortaPack replacement: PortaPack-sized is ideal but unlikely; cyberdeck-sized is acceptable. Smaller than a laptop, not benchtop. A bigger battery and more weight are acceptable.
@@ -53,6 +63,7 @@ Further goals:
 - **Hardware: HackRF One** as the RF front end (1 MHz–6 GHz, 20 Msps, 8-bit, half-duplex, USB 2.0, no preselector). **NVIDIA Jetson** as compute, preferred over a Pi 5 because it costs little more and adds a GPU.
   - Current module is likely the Jetson Orin Nano (Super) class; the original Jetson Nano is a legacy product. Confirm the current module, price, power modes and JetPack support.
   - Keep the front end abstracted so HackRF Pro or other SDRs can be added later.
+  - **Allow several SDRs at once (future option).** Don't bake a single-device assumption into the source layer, scheduler, or inventory: multiple front-ends into the one unit may run concurrently — to cover different ranges in parallel, or to widen the instantaneous window (contiguous bands stitched non-coherently; true coherent aggregation needs a shared 10 MHz reference via HackRF CLKIN/CLKOUT). Each detection's provenance records which device/antenna saw it. This stays one self-contained unit — not the out-of-scope networked mesh. Practical limits: 20 Msps ≈ saturates USB 2.0, so concurrent devices want separate USB controllers.
   - Low-power operating modes matter.
 - **Language: no preference; choose what has robust support.** Signal processing must be fast, so **Python is for orchestration and research only**, never the real-time path.
   - GNU Radio 3.10, GNU Radio 4 and FutureSDR (Rust) are all candidates, and nobody is attached to any of them.
