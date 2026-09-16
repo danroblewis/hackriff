@@ -3315,11 +3315,12 @@ tasks:
   - id: T-206
     milestone: M3
     title: "M3 blind acceptance through the mock SDR: family top-k and unknown rate vs hidden truth, signature match and unknown clustering, per-SNR conditions (M3 exit gate)"
-    status: in-progress
+    status: done
     priority: normal
     deps: [T-199, T-200, T-201, T-202, T-204, T-213, T-215, T-235]
     parallel_group: M3E
     use_cases: [SIGNAL-062, AWARE-053]
+    gate_result_2026_09_16: "THE SUITE IS DONE; THE GATE FAILS, SO **M3 DOES NOT CLOSE**. `just acceptance-m3` (own step, ~90 s), 7 of 9 tests pass, measured on the merged tree at b87d915 (bit-identical to pre-merge: T-243 moved psk-qam class ranking only). MET, per family and per SNR bin: top-1 0.9067 (floor 0.90), top-2 0.9861 (0.95), wrong-label 0.0008 overall / 0.0167 worst-bin (0.02 / 0.05), noise-as-comm 0.000 (0.01), every family's open set exercised. FAILED, two blockers: (1) unknown recall 0.7778 vs 0.80 and false-known 0.2222 vs 0.10 over the full 396-snippet held-out grid, driven by psk-qam 0.458 and analog 0.528 abstention; (2) NO M3 classification row exists after a run through the mock SDR - `hk_pipeline::classify::{classify_box, record}` have NO CALLER anywhere in the workspace, so section 7's classification floors cannot be measured end to end at all. RULING (reasoned in the test's own docs): the two held-out floors read over the FULL grid, not the six generators section 7 enumerates; the other reading gives 0.9167 / 0.0833 - both floors met, M3 would close - and is printed every run. No floor was moved in either direction. Also corrected: T-244's '0 of 88 got a wrong family' is a small-sample artefact (3 of 396 here, chirped-fsk read as analog), and its 1.000/0.000 for the section 7 six is 0.9167/0.0833 at 36 trials - i.e. the reading that would close M3 clears its false-known floor by only 0.017. Signature-match and cluster dimensions are NOT vacuous: T-242's call site is real, a signature minted from the run's own measurement scores a 0.9993 full match, and three units of one type form one visible 3-member cluster. Follow-ups to file: (a) wire the C15 call site into the pipeline; (b) analog/psk-qam open-set abstention."
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
     acceptance: "acceptance_m3 suite: blind scenes with hidden truth (known families, out-of-taxonomy emitters, repeated unknowns); a-priori thresholds from ADR-0016; accuracy reported with conditions; separate just step if >60 s"
     area: tests/e2e
