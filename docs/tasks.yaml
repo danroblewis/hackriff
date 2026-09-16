@@ -4110,7 +4110,7 @@ tasks:
     title: 'Candidate dedup/merge is not collapsing skirt fragments in the served path:
       82 candidates around one FM signal, two at the SAME frequency (99.6378), plus
       Confirmed dupes 99.8166/99.8173'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: PIPE
@@ -4439,6 +4439,291 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-260
+    milestone: MUI
+    title: 'ADR-0017 TM-3: Explore sends the viewed waterfall window; Candidates are window-scoped and Confirmed are ALWAYS listed'
+    status: todo
+    priority: high
+    deps:
+    - T-250
+    parallel_group: TIME
+    use_cases: []
+    acceptance: 'the UI passes t0/t1 from the visible waterfall span and the live lists reflect that window. THE SAFETY VALVE IS NOT OPTIONAL: Candidates are window-scoped, Confirmed are always listed - without that asymmetry the users quiet confirmed stations vanish, a live-visible regression dressed as a fix (ADR-0017). This is the stage the user live-tests, and ADR-0017 predicts the 82-candidate pile-up collapses here with NO decay logic in existence; report the achieved candidate count against the ~4-7 target and say plainly whether decay was needed at all. Also amend ADR-0013 section 3.3, which currently states the inventory is unbounded in time while LIVE - that sentence IS the observed bug'
+    area: ui/src/app/explore, crates/hk-api (query window), docs/adr/0013
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-261
+    milestone: MUI
+    title: 'ADR-0017 TM-4: each identified region draws a box (centre/width/time) in the waterfall, growing along the time axis while the signal continues'
+    status: todo
+    priority: normal
+    deps:
+    - T-260
+    parallel_group: TIME
+    use_cases: []
+    acceptance: 'a confirmed or candidate region renders as a box spanning its centre/width and its time extent, and the box GROWS as an open interval extends (CLAUDE.md invariant 4). Thin client: the extent comes from the API, never recomputed in the UI. A chirp renders as a bounding box, not a swept polyline - ADR-0017 names this as a known representational limit, so label it rather than implying precision the model does not carry'
+    area: ui/src/app/explore (waterfall overlay)
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-262
+    milestone: M2-hardening
+    title: 'ADR-0017 TM-5: presence intervals close and revive - emitter_observation gains a time index (migration 0012) and an idle_gap rule'
+    status: todo
+    priority: high
+    deps:
+    - T-250
+    parallel_group: TIME
+    use_cases: []
+    acceptance: 'an open presence interval closes after an idle_gap with no sighting and a returning signal opens a NEW interval on the SAME emitter rather than creating a duplicate (emitter_observation is keyed by (source_kind, source_id), so revival is free). Migration 0012 adds idx_emitter_observation_time - index only, no schema change; migrations 0006-0011 are untouched. first_seen/last_seen are demoted to a HULL and documented as never a duration; count becomes a History-only total excluded from liveness and ranking. OPEN QUESTION for the supervisor, recorded in ADR-0017: is idle_gap derived from the revisit period or per-band? It decides whether a chatty burst source reads as one interval or fifty - state your choice and its consequence'
+    area: crates/hk-model (migration 0012, repo/inventory.rs), crates/hk-pipeline
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-263
+    milestone: MUI
+    title: 'ADR-0017 TM-7: past events mark the timeline scrubber, and scrubbing re-derives the live lists from the IQ ring'
+    status: todo
+    priority: normal
+    deps:
+    - T-260
+    - T-262
+    parallel_group: TIME
+    use_cases: []
+    acceptance: 'the capture timeline marks past events with their timespans, and scrubbing back re-derives Candidates/Confirmed for that window from the IQ ring (30 min on staging). Listen stays at the live edge per ADR-0017s ruling on invariant 5 - scrub-back does NOT play audio unless the supervisor says otherwise, which ADR-0017 section 11 flags as a separate, larger product decision'
+    area: ui/src/app (capture timeline), crates/hk-api
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-264
+    milestone: MUI
+    title: 'ADR-0017 TM-8: History surface - the durable all-time catalogue, where ephemera are past events with a timespan'
+    status: todo
+    priority: normal
+    deps:
+    - T-262
+    parallel_group: TIME
+    use_cases: []
+    acceptance: 'a separate History surface carries the durable all-time record (workflow #3), cataloguing every event including one-offs with its timespan, while Explore stays window-scoped. Nothing is deleted by decay: append-only, and History is never touched by it (ADR-0017 conflict (b))'
+    area: ui/src/app (history), crates/hk-api, docs/api.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-265
+    milestone: MAUTO
+    title: 'ADR-0017 TM-10: incremental decode - extending a region decodes only the newly-arrived part'
+    status: todo
+    priority: normal
+    deps:
+    - T-262
+    parallel_group: TIME
+    use_cases: []
+    acceptance: 'CONTRACT ONLY until MAUTO is scheduled. Live decoding extends the regions time extent and decodes only the new samples, never re-decoding what is done (CLAUDE.md invariant 5). Per ADR-0017 this is Rule I and governs a bounded-region reader; a listener at the live edge is Rule L and a SEPARATE pipeline - the two readers must never be fused, and a handover must be an explicit named state with a DISCONTINUITY, never an implicit merge. A decode output that is a sibling of an audio output (RDS off the FM recipe) inherits the audio readers policy and its evidence n must not count skipped time'
+    area: docs/adr/0015, crates/hk-pipeline (contract)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-266
+    milestone: M4
+    title: 'M4 trunking data model: TrunkSystem, CallRecord, GrantEvent, with a three-state encryption column'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M4A
+    use_cases: []
+    acceptance: 'migration adds TrunkSystem (protocol, system/site id, cc_freq, channel table base+spacing+tx_offset, neighbours, talkgroups), CallRecord (start/end, talkgroup, unit id, channel/slot, freq, encryption, emission id) and GrantEvent. Encryption is THREE-STATE (clear/encrypted/unknown) with NO default-to-clear path: C23 pitfall - late entry without a header must record unknown, never clear. A round-trip test asserts a record built from a late-entry grant reads back unknown. METADATA ONLY: no CallAudio, so the roadmaps vocoder-IP gate never binds'
+    area: crates/hk-model (migration), docs/07
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-267
+    milestone: M4
+    title: 'M4 control-channel hunting: continuous 4FSK/C4FM on the LMR raster, confirmed by frame sync AND valid CRC'
+    status: todo
+    priority: high
+    deps:
+    - T-266
+    parallel_group: M4A
+    use_cases: []
+    acceptance: 'blind: a synthetic fixture with a continuous 4FSK control channel hidden among bursty NBFM is handed to the pipeline with no frequency hint; the CC is found by FCO plus raster candidacy and confirmed by frame sync plus valid CRC - NEVER by FCO alone, which is C23s named false-CC pitfall (continuous data emitters pass the FCO test). Sync false-alarm rate on pure noise asserted below an a-priori floor set before the run'
+    area: crates/hk-detect, crates/hk-pipeline
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-268
+    milestone: M4
+    title: 'M4 P25 Phase 1 TSBK control decode + IDEN_UP channel mapping'
+    status: todo
+    priority: normal
+    deps:
+    - T-267
+    parallel_group: M4B
+    use_cases: []
+    acceptance: 'TSBK at 9600 bps parsed from CC IQ; IDEN_UP maps 16-bit channel numbers to frequencies and a grant resolves to the correct frequency within tolerance; a STALE IDEN table is detected rather than mapping to a wrong frequency (C23 pitfall). Build-vs-wrap is an open design call: native on C11 outputs, or Trunk Recorder/OP25/SDRTrunk behind the C22 plugin boundary (GPLv3 isolation, ADR-0010) - choose and justify'
+    area: crates/hk-pipeline, plugins/
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-269
+    milestone: M4
+    title: 'M4 grant following onto channelizer outputs within the dwell window (metadata only)'
+    status: todo
+    priority: normal
+    deps:
+    - T-268
+    parallel_group: M4B
+    use_cases: []
+    acceptance: 'a grant allocates a demod on the channel or TDMA slot via C11 and ends on a silence timeout; call boundaries within tolerance of fixture truth; a grant outside the <=20 MHz window is LOGGED as grant-outside-window rather than silently dropped (C23 span limit). CallRecord is written; CallAudio is not attempted'
+    area: crates/hk-pipeline, crates/hk-dsp (channelizer)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-270
+    milestone: M4
+    title: 'M4 encryption check before any voice path: ALGID, service options, DMR PI'
+    status: todo
+    priority: normal
+    deps:
+    - T-268
+    parallel_group: M4B
+    use_cases: []
+    acceptance: 'P25 ALGID 0x80 clear / 0x81 DES-OFB / 0x84 AES-256 / 0xAA ADP parsed and recorded; encrypted calls flagged and produce no audio; late entry without a header records unknown, never clear. NEVER decrypts. This project runs no legal tests - this is a correctness and safety requirement, not a legal one'
+    area: crates/hk-pipeline
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-271
+    milestone: M4
+    title: 'M4 DMR Tier III / Capacity Plus, SmartNet/EDACS and NXDN Type-C control decode'
+    status: todo
+    priority: normal
+    deps:
+    - T-268
+    parallel_group: M4C
+    use_cases: []
+    acceptance: 'per-protocol CC decode on fixtures; Capacity Plus rest-channel and NXDN Type-D (no dedicated CC) are explicitly REPORTED UNSUPPORTED rather than silently failing'
+    area: crates/hk-pipeline, plugins/
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-272
+    milestone: M4
+    title: 'M4 P25 Phase 2 TDMA slot attribution'
+    status: todo
+    priority: normal
+    deps:
+    - T-269
+    - T-271
+    parallel_group: M4C
+    use_cases: []
+    acceptance: 'two talkgroups on alternating slots of one frequency produce two distinct CallRecords with correct slot attribution (C23 TDMA mix-up pitfall)'
+    area: crates/hk-pipeline
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-273
+    milestone: M4
+    title: 'M4 trunking load index (metadata only) over the API'
+    status: todo
+    priority: normal
+    deps:
+    - T-269
+    - T-270
+    parallel_group: M4D
+    use_cases: []
+    acceptance: 'the GrantEvent stream drives a load index (AWARE-067); docs/api.md and api_contract.rs updated together per T-079; no talkgroup audio or content on the route'
+    area: crates/hk-api, docs/api.md
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-274
+    milestone: M5
+    title: 'M5 GNSS observables cluster (C36): L1 is NOT blindly detectable, so this is the documented exception to blind-first'
+    status: todo
+    priority: high
+    deps:
+    - T-258
+    parallel_group: M5A
+    use_cases: []
+    acceptance: 'the GNSS cluster over an active antenna + bias-tee (SIGNAL-030, SIGNAL-032, PROP-033). THE INVARIANT THIS MILESTONE MUST STATE OUT LOUD: L1 at 1575.42 MHz sits 20-30 dB BELOW the noise floor, so blind detection cannot find it and must not be expected to - acquisition is correlation/despread against known PRN codes, the known-signal pipeline LEADING rather than suggesting, an explicit exception to the projects blind-first rule (GNSS-SDR is the reference). The blindly-detectable, on-mission half is jamming/spoofing: power anomaly and loss-of-lock (AWARE-002/003), which stays blind and feeds the attack map. Do not let the exception leak into the general detector'
+    area: crates/hk-context (gnss-observables), docs/capabilities/C36
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-275
+    milestone: M5
+    title: 'M5 satellite imagery, tiered by what the receiver can actually reach: 137 MHz APT/LRPT native, L-band accessory, X-band out of reach'
+    status: todo
+    priority: normal
+    deps:
+    - T-258
+    parallel_group: M5B
+    use_cases: []
+    acceptance: 'tiered against the existing permanent ids, minting none: SIGNAL-027 (Meteor-M LRPT 137.1/137.9 MHz) and SIGNAL-029 (NOAA POES 137 MHz) are NATIVE - a simple V-dipole or QFH, no dish - via SatDump as the reused decoder, not a reimplementation; SIGNAL-025 (GOES HRIT 1694.1 MHz) and SIGNAL-028 (~1.7 GHz AHRPT) need a dish plus LNA; SIGNAL-040 X-band ~8 GHz is ABOVE THE 6 GHz CEILING and must be retagged out-of-band by T-258 rather than reading as needs-accessory. Hardware captures are user-triggered'
+    area: plugins/ (SatDump wrapper), crates/hk-context, docs/use-cases.yaml
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-276
+    milestone: M5
+    title: 'M5 pass scheduling: TLE / satellite-pass context feed drives the attention scheduler'
+    status: todo
+    priority: normal
+    deps:
+    - T-275
+    parallel_group: M5B
+    use_cases: []
+    acceptance: 'satellite work is pass-scheduled, so a TLE/pass feed (C29 context-feeds) predicts windows and the C04 attention scheduler reserves dwell for them, with pre-emption stated. Offline-first: cached TLEs, and a stale-TLE age is reported rather than silently trusted'
+    area: crates/hk-context (feeds), crates/hk-core (scheduler)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-277
+    milestone: M5
+    title: 'M5 HF/VLF science front ends (accessory-gated)'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M5C
+    use_cases: []
+    acceptance: 'the HF/VLF cluster behind its accessory (upconverter / VLF receiver + soundcard): SPACE-001 SID flare monitor, SPACE-041 research-grade ELF/VLF, PROP-019 phase and reflection height. Each stays needs-accessory and none is claimed reachable without it'
+    area: crates/hk-core (source abstraction), docs/capabilities
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-278
+    milestone: M5
+    title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M5C
+    use_cases: []
+    acceptance: 'the radiometry cluster gated on a dish (and Ku behind an LNB): state the accessory in hardware_fit and fit_note for every use case it unlocks, and report what the 8-bit front end without preselection costs in radiometric accuracy rather than implying laboratory precision'
+    area: crates/hk-dsp (radiometry), docs/capabilities/C33
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
