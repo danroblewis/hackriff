@@ -5891,7 +5891,8 @@ tasks:
     milestone: M2-hardening
     title: On real air the pipeline fires 866 detections and 5 candidate emitters into a band measured flat
       to 2.3 dB
-    status: in-progress
+    status: done
+    commit: dd13a8d
     priority: high
     deps:
     - T-289
@@ -6151,7 +6152,8 @@ tasks:
     milestone: M2-hardening
     title: 'With the false alarms gone the analog chain session adds 0 sightings where it added 1: is the
       count or the test wrong?'
-    status: in-progress
+    status: done
+    commit: 81e9233
     priority: high
     deps:
     - T-316
@@ -6251,6 +6253,70 @@ tasks:
       key does. The failure mode to avoid is the one T-303 measured: pooling two incomparable sources does
       not mainly cause false alarms, it causes MASKING - a real 12 dB rise scored 1.000 against its own
       baseline and 0.000 against the pooled one'
+  - id: T-334
+    milestone: M2-hardening
+    title: 'The waterfall and timeline must be served at span-matched resolution: data, timestamps and resolution
+      are backend, time-to-pixel mapping and view state are thin client'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER DIRECTION, received 2026-09-16 (the opening clause of the message was truncated in
+      transit - it reads from ''at matching resolution'' onward, so if a specific trigger was named, confirm
+      with the user before assuming). THE RULE: data, timestamps and SPAN-MATCHED RESOLUTION are the backend''s
+      responsibility; time-to-pixel mapping and view state are thin-client presentation. So when a view
+      asks for a span, the backend serves that span at a resolution matched to it - the client never downsamples,
+      never interpolates, and never infers a timestamp. This follows CLAUDE.md''s thin-client rule (all
+      signal logic in hk-api/hk-pipeline; ui/src holds interaction and presentation only, which explicitly
+      includes pixel-to-Hz axis mapping) and extends it to the TIME axis. Fold into docs/07 (the data model
+      for what a span request and its response carry), docs/14 (MUI scrub and boxes), and ADR-0017 (the
+      time-extent signal model, whose section 11 already has open scrub questions). The history pyramid
+      already has multi-resolution tiles and OriginFilter, so check what already serves this before adding
+      surface. Update docs/api.md and crates/hk-cli/tests/api_contract.rs together per T-079, and contract-test
+      the RESOLUTION FIELD itself rather than only the response shape - T-315 records that a shape-only
+      assertion satisfies the letter of T-079 and not its point'
+  - id: T-335
+    milestone: M2-hardening
+    title: characterise uses emitter.count as a change detector, so an entry that just absorbed a partner
+      by a discounted merge can skip re-characterisation
+    status: todo
+    priority: low
+    deps:
+    - T-329
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: Named by T-329 while deciding the sighting semantics, pre-existing and not caused by it.
+      TrackInventory::characterise skips work when emitter.count is unmoved. But T-082's same-emission merge
+      discounts overlapping observations - correctly, since overlapping observations are not counted twice
+      - so an entry that has just ABSORBED a partner can come out with its count unchanged and therefore
+      skip re-characterisation, even though its evidence just changed. The count is a proxy for 'something
+      happened', and a merge is something happening that the proxy cannot see. Use a signal that actually
+      tracks the evidence (a version, a dirty flag, or the merge itself) rather than a count. Narrow change;
+      do not alter what count MEANS - T-329 settled that it is a lifetime total of occurrences, not of writes
+  - id: T-336
+    milestone: M2-hardening
+    title: The final arm of resolve counts within a producer and never asks whether another producer already
+      counted the span
+    status: todo
+    priority: normal
+    deps:
+    - T-329
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-329 named this gap and deliberately left it: the last arm of resolve in crates/hk-model/src/repo/cluster.rs
+      adds a sighting''s count in full, scoped WITHIN a producer, and never asks whether a different producer
+      already counted that span. That is exactly how main scored one continuously-transmitting station as
+      2 - the chain counted it and the tracker counted it again. On the post-T-316 tree the two land in
+      separate entries and T-082''s same-emission link discounts the overlap, so the symptom is gone, but
+      the arm is still willing to double-count whenever two producers'' observations DO resolve to one entry
+      by fingerprint. Add the cross-producer overlap check. THIS CHANGES THE COUNTING CONTRACT, not one
+      caller: every track sighting goes through that arm, so re-measure what moves and say so. The rule
+      to preserve is docs/07 2.11 and ADR-0017: emitter.count is a lifetime total of OCCURRENCES - times
+      the emitter was observed to be on the air - and overlapping observations are not counted twice, whoever
+      observed them'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
