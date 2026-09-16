@@ -3305,3 +3305,44 @@ Four agents now — the cap. Disk 23 GB, above the 20 GB floor the user restored
 disjoint by construction: T-317 holds `hk-classify` + fixtures, T-359 holds `hk-context` and
 `hk-model/attention`, T-367 holds `ui/`, T-369 holds the inventory/served path and is explicitly
 fenced off the other three.
+
+### B0.652 — T-359 merged: the bias tee reaches the row, and a mixed read claims nothing (2026-09-16)
+
+Merged at `a49e164` after lint, five crate suites (904 tests) and the acceptance slice, all green
+before the commit. `FOLD_BIAS_TEE` is gone from the tree; the state runs the same carrier
+`dominant_gain_key` uses, keyed on the row's own value.
+
+The part worth recording is the rule it chose *not* to follow. `dominant_gain_key` takes the
+dominant contributor; T-359 deliberately does not, at either layer — a grid that pooled two states
+yields `Unknown`, and a window whose visits disagree yields `Unknown`, proven by a 9:1 majority case
+that still answers unknown. A majority rule would fold a two-chain measurement into a pure cohort,
+which is the exact pooling T-333 exists to refuse. This is the same shape as "nothing said is never
+permissive": `BiasTee::Unknown` is not `Off`, asserted in three places.
+
+The migration is the reassuring half. The control feeds the **literal pre-T-359 bytes** — an `on`
+row's JSON with the field removed, not nulled — and asserts it lands in `unknown` and never `off`.
+`skip_serializing_if = "is_unknown"` keeps stored rows byte-identical, so nothing moves in the
+dedup hash.
+
+**First-run behaviour changes and that is intended.** A source that reports the state starts a fresh
+immature cohort per site × calibration × chain × tee state, alarms suppressed until 24 h of
+*observed* time. The agent judged this not worth escalating and I agree: it is exactly the bounded
+silence T-333 chose, and pre-T-359 rows keep folding into their existing baselines untouched.
+
+Two follow-ups filed. **T-371** is the one that actually bites: cohorts now split, so one subject can
+show two indistinguishable `/api/baselines/slots` rows with different numbers and no field saying
+why — `baselines_json` carries the cohort, the slots row does not. **T-372** would recover usable
+rows either side of a switch instead of a whole interval of `Unknown`, with the boundary rule held
+fixed so it cannot become a dominance rule by the back door.
+
+**T-314 launched into the freed slot.** It is the natural successor: T-303 keyed baselines per front
+end and said plainly what it had *not* fixed, which is that the occupancy close reads history through
+`OriginFilter::ANY`, so several front ends are already averaged into the level-0 cells before a
+baseline ever sees them. The guarantee stops at the key and never reaches the measurement.
+
+The brief's real demand is a diagnosis, not a patch. Either the origin survives to level 0 and this is
+genuinely one filter argument, or the fold already averaged it away — in which case a read-side filter
+*appears* to work while pooled cells sail through, and the green is false. That is what the ticket's
+pooled control is for, and the brief says to land the diagnosis plus the smallest honest change rather
+than manufacture a pass. It also carries T-359's lesson forward one layer: if a cell cannot be
+attributed to one chain, exclude it or mark it unknown — never take the dominant contributor.
