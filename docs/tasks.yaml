@@ -3663,6 +3663,21 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+  - id: T-229
+    milestone: M2-hardening
+    title: "Replay/test harness leaks its temp directories: 2731 hk-replay-<pid>-<ts>-N dirs accumulated to about 12 GB and nearly breached the 20 GB disk floor"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPELINE
+    use_cases: []
+    found_by: "coordinator disk check 2026-09-15: free fell 37 -> 26 GB in ten minutes with four agents building; 2731 leaked dirs found in the system temp dir, each 4-67 MB, one holding a pre-allocated iqbuffer ring.ci8 whose owning pid was long dead"
+    acceptance: "the harness removes its temp dir when a run ends normally (an RAII guard or explicit teardown; keep the dir on FAILURE for debugging and say so in the message); a stale-orphan sweep on harness start removes hk-replay dirs whose pid is not alive and which are older than a safe age, so a crashed or killed run cannot leak forever; running the full suite twice leaves no net new dirs (assert the count before and after in a test); a pre-allocated IQ ring in a temp dir is always torn down with it; document the temp-dir lifetime in docs/10-test-strategy.md"
+    area: crates/hk-pipeline/tests/common.rs (TempDir), tests/e2e harness, crates/hk-store iqbuffer teardown
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

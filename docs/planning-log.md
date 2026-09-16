@@ -2480,3 +2480,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Queue:** T-228 (consolidated pin conversion) launches at the next free slot; T-218, T-212 and T-213 wait for T-199 to release hk-classify.
 - **B0.517 T-228 launched** (Opus, consolidated pin conversion): flush barrier for decoded-capture eviction, consistent stats snapshot for the hot-edit counters, sample-clock or queue-depth pacing for the dense-burst writer, and dedupe by sample index and level rather than arrival. Each pin is deleted as its test is fixed, proven 20/20 under 6 burners.
   - **Cap full:** T-199, T-217, T-219 fix round and T-228; 14 build processes, load 11, 37 GB free.
+- **B0.518 Disk incident: the test harness leaks temp directories. Swept 2704 orphans, reclaimed 10 GB (25 -> 35 GB free). Filed T-229 (high).**
+  - **Symptom:** free space fell 37 -> 26 GB in ten minutes with four agents building, approaching the 20 GB floor.
+  - **Cause:** 2731 `hk-replay-<pid>-<ts>-N` directories in the system temp dir, 4-67 MB each, about 12 GB total. One held a pre-allocated `iqbuffer/ring.ci8` whose owning pid (35070) was long dead.
+  - **Sweep was deliberately conservative:** each directory's pid was checked against the live process list and anything modified in the last 5 minutes was kept, so no running agent's test was disturbed. 2704 removed, 27 kept.
+  - **Hand-cleaning only buys time:** T-229 makes the harness remove its own directory on a normal run (keeping it on failure for debugging) and sweep stale orphans whose pid is dead on start, with a test asserting the suite leaves no net new directories.
+  - **Method note for future sessions:** check pid liveness and mtime before deleting anything under the system temp dir; other sessions' runs live there too.
