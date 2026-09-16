@@ -52,6 +52,25 @@ pub const CLUSTER_MIN_APPEARANCES: u32 = 3;
 /// - **Propagation and oscillator** (`snr_db`, `cfo_offset_hz`) — these describe this receiver,
 ///   this path and this individual transmitter's crystal, not the protocol. Per-transmitter RF
 ///   fingerprinting (AWARE-047/051) is deliberately *not* done in M3 (ADR-0016 §5, Privacy).
+///
+/// # Three of these measure the observation, and here they have no silence exclusion (T-281)
+///
+/// `period_s`, `duty_cycle` and `burst_length_s` are statistics of **how long the producer
+/// happened to watch**, not properties of the emission. Entity resolution already knows this:
+/// [`crate::cluster::Fingerprint::compare_across_silence`] drops exactly these three when two
+/// sightings' presence intervals are disjoint (T-250/T-262), and
+/// `crate::relate::distinguishing_evidence` does the same.
+///
+/// **The clustering distance has no such exclusion.** `hk_context::signature::cluster::compare`
+/// compares every shared field below unconditionally, so two emitters of the same *type* watched
+/// over different windows are pushed apart on these three — and, because one field at `z > 3`
+/// separates a pair however much else agrees, a single disagreeing burst length is enough to
+/// refuse the join outright. The three also count toward `CLUSTER_MIN_SHARED_FIELDS`, so they can
+/// carry a join that nothing about the emission itself supports.
+///
+/// Left as-is rather than narrowed here: a cluster has no single presence interval to compare a
+/// member against (a centroid folds many members' windows), so the fix is a design question about
+/// what a centroid's time extent means, not a local edit. See the T-281 follow-ups.
 pub const CLUSTER_FIELDS: &[&str] = &[
     field::OBW_HZ,
     field::FAMILY,

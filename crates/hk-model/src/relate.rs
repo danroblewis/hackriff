@@ -490,6 +490,24 @@ pub fn bands_compete(a: FreqRange, b: FreqRange) -> bool {
 /// - Duty: the measured duty cycle, floored at [`RANK_DUTY_FLOOR`]; unmeasured is
 ///   [`RANK_DUTY_UNKNOWN`].
 /// - Trust: `1 − RANK_SUSPECT_WEIGHT × suspect_fraction`, floored at [`RANK_TRUST_FLOOR`].
+///
+/// # Two of the three terms are observation statistics — which is allowed here, and only here
+///
+/// `duty_cycle` measures the window the row was watched over, and `suspect_fraction` the share of
+/// this receiver's own looks that were flagged. Neither is a property of the emission, so neither
+/// may ever be **distinguishing evidence** between two rows — and neither is:
+/// [`distinguishing_evidence`] excludes the window statistics when the two rows' presence
+/// intervals are disjoint, and never looks at `suspect_fraction` at all.
+///
+/// This proxy is the legitimate use (T-281). It runs **after** [`distinguishing_evidence`] has
+/// already found nothing to tell the rows apart, so it is choosing which of two readings of *one*
+/// emission to show, not deciding whether they are one emission. Changing it can change which row
+/// is displayed; it can never split an emitter or merge two.
+///
+/// The SNR term is a signal property as wired: `RowEvidence::snr_db` is filled from the
+/// detection's **`snr_peak`** column, not `snr_mean_db`. That matters — `snr_mean_db` averages the
+/// excess over the whole occupied band, so it falls as an emission widens (T-280 moved the
+/// in-band fragment rule onto the peak for the same reason). Keep it reading the peak.
 pub fn rank_score(snr_db: Option<f64>, duty_cycle: Option<f64>, suspect_fraction: f64) -> f64 {
     let snr = match snr_db.filter(|v| v.is_finite()) {
         Some(v) => 10f64.powf((v.clamp(0.0, RANK_SNR_MAX_DB) - RANK_SNR_REF_DB) / 20.0),
