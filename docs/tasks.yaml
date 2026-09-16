@@ -3489,7 +3489,8 @@ tasks:
   - id: T-218
     milestone: M3
     title: "M3 contracts skeleton remainder that T-211 left out: fuse() + prior invariants, hk_model::signature module, hk-ml stub crate, EvalReport type, /api/taxonomy route, datasets migration, and the Fingerprint family_of gate (an M2 behaviour change: it would merge fsk/2fsk emitters)"
-    status: in-progress
+    status: done
+    commit: 7d0961a
     priority: high
     deps: [T-211]
     parallel_group: M3K
@@ -3737,6 +3738,22 @@ tasks:
     core_interface: false
     refined_diagnosis: "STRONGEST hypothesis after further evidence (still confirm before fixing): the leaked dirs belong to spawned `hk serve` CHILD processes, not to the test harness. Evidence: two different pids each left EXACTLY 25 dirs (a fixed set of tests in one cargo-test binary, e.g. api_contract start_server), and the contents are a running server data dir - baselines/, captures/, control-audit.jsonl, hackriff.db(+shm/wal), iqbuffer/ring.ci8 - not a scratch dir. A child killed at teardown never runs its RAII Drop, so TempDataDirGuard cannot fire, which also explains why T-229 own tests passed: they covered in-process guards, never killed children. Likely fixes: the PARENT owns and removes the child data dir; or tests stop the server with SIGTERM plus a graceful shutdown path that drops the guard; or the child registers its dir for the next sweep. Prefer parent-side ownership since a SIGKILLed child can never clean up by construction."
 
+  - id: T-233
+    milestone: M3
+    title: "Fingerprint family_of gate stays DEFERRED: it merges within-family pairs (bpsk/qpsk, 2fsk/gfsk, am/wfm) into one emitter; decide whether the fingerprint needs a finer discriminator before it can ever land"
+    status: blocked
+    blocked_on: "needs a discriminator that separates within-family pairs; ADR-0016 lists the gate but T-218 proved it collapses distinct emitters"
+    priority: normal
+    deps: [T-218, T-201]
+    parallel_group: M3B
+    use_cases: [AWARE-053]
+    found_by: "T-218 (2026-09-15): applied the gate experimentally and found bpsk vs qpsk at identical centre/bandwidth/rate compare as one emitter, as do 2fsk/gfsk and am/wfm"
+    acceptance: "either a fingerprint discriminator that separates within-family pairs at stated confidence (then the gate may land, with the T-218 guard test passing), or an ADR-0016 amendment recording that the gate is abandoned and why; blind tests must never merge two genuinely distinct emitters; the guard test T-218 added must keep passing either way"
+    area: crates/hk-model (fingerprint), crates/hk-classify, docs/adr/0016
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
