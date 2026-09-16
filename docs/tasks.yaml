@@ -2631,7 +2631,8 @@ tasks:
   - id: T-163
     milestone: MUI
     title: "MUI API gap 7a: blind estimated params on inventory rows (stage parameter Use suggestions)"
-    status: in-progress
+    status: done
+    commit: 5b58bef
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
