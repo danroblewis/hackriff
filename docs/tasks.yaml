@@ -4019,6 +4019,14 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    located_by_t286_2026_09_16: 'T-286 reproduced this in a PURE DISTANCE TEST with no
+      likelihood in it: every class fits qam64 best, genuine BPSK and QPSK included, and
+      genuine QPSK own residual is 7.6 N0 where a synced member sits near 1. That locates
+      the pathology in the SMEARED INPUT, not in the ALRT derivation - an M-th power
+      estimate removes constant phase but not residual carrier FREQUENCY offset, which
+      smears the constellation into a ring. So this ticket is likely closed by carrier
+      recovery rather than by reworking psk_qam_loglikelihoods.'
+
   - id: T-247
     milestone: M3
     title: 'hk_pipeline::classify::classify_box and ::record have NO CALLER anywhere
@@ -4957,7 +4965,7 @@ tasks:
     title: 'The open-set residue is a capability gap, not a tuning gap: 16-APSK,
       pi/4-DQPSK and VSB-AM need post-sync constellation measurements the feature tree
       cannot make'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3A
@@ -5075,6 +5083,58 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: false
+  - id: T-290
+    milestone: M3
+    title: 'thresholds::FEATURES_VERSION is 1 while features::FEATURES_VERSION is 3, so
+      every Classification reports a feature-set version that does not exist'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    use_cases: []
+    found_by: 'T-286 (2026-09-16), which found it and deliberately did NOT fix it: it is
+      pre-existing (1 against 2 before that commit) and API-visible, so it wants its own
+      task rather than riding along in an open-set change'
+    acceptance: 'provenance must name a feature set that exists. Establish which version
+      each consumer means, reconcile the two constants, and state what a stored row
+      claiming features@1 should be read as - rows already written carry the wrong
+      version, so decide whether they are re-read, migrated or documented as legacy.
+      This is API-visible (Classification provenance), so docs/api.md and its contract
+      assertions move together if the wire shape changes. No floor moves'
+    area: crates/hk-classify (thresholds.rs, features.rs), crates/hk-model (provenance), docs/api.md
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-291
+    milestone: M3
+    title: 'M3 open set is short by ONE snippet (0.8990 vs 0.90): carrier recovery or a
+      symbol-rate estimate C14 will trust on a near-constant-envelope constellation'
+    status: todo
+    priority: high
+    deps:
+    - T-286
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-286 (2026-09-16): 356 of 396 abstain where 357 are needed. Residue 40 -
+      VSB-AM 11, pi/4-DQPSK 14, 16-APSK 13, 8-FSK 2'
+    acceptance: 'THE USER/SUPERVISOR SHOULD PICK THE ROUTE - T-286 names two and they
+      differ in cost and reach. (a) CARRIER RECOVERY: substantial new DSP, and it also
+      closes T-246, because T-286 located that pathology in the smeared input (an M-th
+      power estimate removes constant phase but not residual carrier frequency offset).
+      (b) C14 RATE TRUST on a near-constant-envelope high-order constellation: narrower,
+      and unblocks 13 of the 40 (C14 currently gives a trusted rate on 0 of 36 16-APSK
+      AND 0 of 36 genuine 8-PSK, so this is not specific to out-of-taxonomy inputs).
+      Whichever is chosen: every other floor holds (top-1 >= 0.90 - currently 0.9087,
+      top-2 >= 0.95, wrong-label <= 0.02/0.05), confidently-wrong stays at zero, and no
+      floor constant moves. Being short by one snippet is NOT grounds to round or to
+      revisit the floor - the supervisor ruling on T-285 settled that'
+    area: crates/hk-classify, crates/hk-estimate (C14 symbol rate)
+    needs: user or supervisor choice of route
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
