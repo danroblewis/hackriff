@@ -302,8 +302,14 @@ def truth_915(spec, meta_path, data, meta, n, fs, fc, ctx) -> list[dict[str, Any
                 n_alias += 1
     ctx["logs"][f"{spec['name']}.fsk_truth.json"] = logs
     rates = sorted({it["truth"]["symbol_rate_bd"] for it in items if it["truth"]["kind"] == "fsk-burst"})
+    # Built as a loop rather than one f-string with a nested quote-reusing f-string inside it:
+    # that nesting needs PEP 701 (Python 3.12+), and py/pyproject.toml declares requires-python
+    # ">=3.11" (T-346).
+    rate_counts = ", ".join(
+        f"{sum(1 for it in items if it['truth'].get('symbol_rate_bd') == r)} @ {r / 1e3:.0f} k"
+        for r in rates)
     ctx["summary"] = (f"{len(items)} bursts detected, {n_truth} with sync truth "
-                      f"({', '.join(f'{sum(1 for it in items if it['truth'].get('symbol_rate_bd') == r)} @ {r / 1e3:.0f} k' for r in rates)}); "
+                      f"({rate_counts}); "
                       f"{strong} at >= 20 dB, {weak} below 12 dB; {n_alias // 2} +-fs/2 edge alias pairs")
     ctx["scenario_extra"] = {
         "annotation_completeness": "bursts >= 12 dB over the per-bin median (STFT 1024x4); DC artefact; continuous lines not annotated",

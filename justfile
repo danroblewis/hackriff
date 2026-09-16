@@ -99,10 +99,19 @@ serve fixture *args:
 fmt:
     cargo fmt --all
 
-# Formatting check + clippy with warnings as errors
-lint:
+# Formatting check + clippy with warnings as errors, plus Python tooling lint (ruff). Mirrors
+# `test`'s test-rust + test-py split: py/ is small and ruff is near-instant (~30ms empty-cache),
+# so folding it in here — rather than a separate recipe an agent could forget to run — is what
+# keeps a Python lint failure from sitting on main invisible to every gate the way T-271 found one
+# (T-346). Requires `ruff` on PATH (not currently a py/ dependency); see py/README.md.
+lint: lint-rust lint-py
+
+lint-rust:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
+
+lint-py:
+    cd py && uv run --locked ruff check .
 
 # Generate a synthetic IQ scenario, e.g. `just synth fsk_burst_train --seed 1 --out /tmp/fsk --param snr_db=12`
 synth *args:
