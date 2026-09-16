@@ -6,7 +6,7 @@
     "core:hw": "HackRF One serial 0000000000000000d2b861dc263bc293, firmware 2026.01.3 (USB API 1.10), board rev 0, libhackrf 0.9.2 (2026.01.3), antenna unknown",
     "core:recorder": "hackriff hk-pipeline:outputs (ring reader) 0.1.0; converted from the hackriff-output-sidecar v1.0 by the coordinator",
     "core:author": "hackriff coordinator (receive-only)",
-    "core:description": "hackriff fixture capture-2026-09-15-fm-band: 45.0 s of the FM broadcast band as sampled at this site (HackRF One, 100.800 MHz centre, 2.4 Msps, LNA 32 / VGA 30 / amp on, antenna unknown (as attached by user; not changed)). Requested span 99.600-102.000 MHz, single tune, no retune. Receive-only; truth is PHY metadata only. THE TRUTH ANNOTATIONS ARE MEASURED (T-289, 2026-09-16): an analysis pass over the samples annotated three emissions (WFM broadcast at 101.298663 MHz and 99.699944 MHz, both carrying a 19 kHz stereo pilot, and an unidentified 28 kHz narrowband emission at 100.465339 MHz) and two receiver artefacts (the 10 MHz reference harmonic at 99.999572 MHz and the DC offset at the tuner centre). Each annotation records the measurement that justifies it. The frequencies this capture README anticipated were each measured and are not what it expected: the stations are elsewhere, the ''steady carrier'' at 99.99 MHz is a receiver spur, and 100.3 MHz was silent for all 45 s. Windows measured to be silent are recorded in the scenario annotation as measured_absent and carry no annotation of their own.",
+    "core:description": "hackriff fixture capture-2026-09-15-fm-band: 45.0 s of the FM broadcast band as sampled at this site (HackRF One, 100.800 MHz centre, 2.4 Msps, LNA 32 / VGA 30 / amp on, antenna unknown (as attached by user; not changed)). Requested span 99.600-102.000 MHz, single tune, no retune. Receive-only; truth is PHY metadata only. THE TRUTH ANNOTATIONS ARE MEASURED (T-289, 2026-09-16): an analysis pass over the samples annotated three emissions (WFM broadcast at 101.298663 MHz and 99.699944 MHz, both carrying a 19 kHz stereo pilot, and a 28 kHz narrowband emission at 100.465339 MHz that T-289 could only describe and T-317 identified as harmonic 43 of a free-running ~2.3364 MHz oscillator, a local unintentional emitter carrying no modulation) and two receiver artefacts (the 10 MHz reference harmonic at 99.999572 MHz and the DC offset at the tuner centre). Each annotation records the measurement that justifies it. The frequencies this capture README anticipated were each measured and are not what it expected: the stations are elsewhere, the ''steady carrier'' at 99.99 MHz is a receiver spur, and 100.3 MHz was silent for all 45 s. Windows measured to be silent are recorded in the scenario annotation as measured_absent and carry no annotation of their own. T-317 (2026-09-16) also measured a capture-chain artefact this recording carries: a periodic 0.431 dB gain step on samples 0-895 of every 8192-sample period, stream-wide, which puts a 292.969 Hz harmonic comb into anything narrowband and weak; see hackriff:provenance.capture_artefact.",
     "core:license": "project-owned capture",
     "hackriff:provenance": {
       "device_id": "hackrf:0000000000000000d2b861dc263bc293",
@@ -36,6 +36,15 @@
         "near_full_scale": 0,
         "method": "five 4 MB windows across the capture, ci8 components at |s|>=127",
         "threshold_rail_fraction": 0.0001
+      },
+      "capture_artefact": {
+        "kind": "periodic-gain-step",
+        "period_samples": 8192,
+        "period_s": 0.0034133333333333333,
+        "low_window_samples": 896,
+        "step_db": -0.431,
+        "measured_by": "T-317: mean of |x|^2 over the 13184 whole 8192-sample periods of the recording, by position within the period",
+        "note": "The raw ci8 stream carries a rectangular gain step locked to an 8192-sample period: samples 0-895 of every period are 0.431 dB lower in power than samples 896-8191, flat either side of the step. It is stream-wide, not signal-specific - it shows in the wideband total power, on the receiver's own DC line (27 dB comb) and the 10 MHz reference harmonic (16 dB), and in bands with no emission at all (23 dB at 100.150 MHz). It puts a comb at 292.969 Hz (= 2.4 MHz / 8192) and its harmonics into the amplitude and, through the filter, the discriminator of anything narrowband and weak, with the sinc nulls of a 896/8192 duty cycle near harmonics 9 and 18. Anything looking for periodicity, frame rates or cyclostationarity in this fixture must exclude n * 292.969 Hz; taken at face value it reads as a 3.41 ms TDMA frame that is not there. Source not identified - it is present in the 2026-09-13 2.4 Msps capture of the same device as well."
       }
     },
     "hackriff:antenna": "unknown (as attached by user; not changed)",
@@ -88,7 +97,7 @@
         "passband_note": "the HackRF baseband filter was 1.75 MHz, so only 99.925-101.675 MHz is inside the analogue passband even though 99.6-102.0 MHz was recorded; emissions outside it are attenuated and their measured level and bandwidth are truncated",
         "overload": false,
         "quantisation_limited": true,
-        "annotation_completeness": "every emission and artefact this analysis pass could measure in the 45 s; the measured-silent windows below were checked explicitly and carry no annotation",
+        "annotation_completeness": "every emission and artefact this analysis pass could measure in the 45 s; the measured-silent windows below were checked explicitly and carry no annotation; T-317 re-examined the third emission and identified it without adding or removing any annotation",
         "measured_absent": [
           {
             "label": "100.300 MHz +-10 kHz",
@@ -178,7 +187,15 @@
           }
         ],
         "legal": "Receive-only capture. Truth is PHY/metadata only; no third-party payload content is decoded or stored (CLAUDE.md legal guardrails).",
-        "t_start_s": 0.0
+        "t_start_s": 0.0,
+        "analysis_pass_2": {
+          "date": "2026-09-16",
+          "task": "T-317",
+          "question": "identify the unidentified 28 kHz emission at 100.465339 MHz that T-289 could only describe",
+          "method": "mean periodograms with a 440 kHz running-median baseline over this capture and the three 2026-09-13 captures of the same site (fm_100p8M_2p4M_l32g30a1_t1p5_5s and the two urban_98M_20M_* recordings, whose 98 MHz / 20 Msps span reaches 90.6-105.4 MHz); power-weighted centroid, rms width and 99 % occupied bandwidth of each above-floor region; baseband extraction at 240 and 50 kHz for modulus kurtosis, the FM discriminator, x^2/x^4 and folding",
+          "result": "the emission is harmonic 43 of a free-running ~2.3364 MHz oscillator (harmonics 44 and 45 measured at 102.78 and 105.12 MHz in the wideband captures, f0 agreeing to 3.7 ppm across the three, rms width proportional to harmonic number) - a local unintentional emitter. Its annotation now records that identification with its evidence and the hypotheses it excludes.",
+          "side_finding": "the recording carries a periodic 0.431 dB gain step every 8192 samples (see hackriff:provenance.capture_artefact). It is stream-wide and it produces a 292.969 Hz harmonic comb that any periodicity or cyclostationarity analysis on this fixture must exclude."
+        }
       }
     },
     {
@@ -295,11 +312,11 @@
       "core:sample_count": 108003328,
       "core:freq_lower_edge": 100450781.25,
       "core:freq_upper_edge": 100478906.25,
-      "core:label": "unidentified narrowband 100.4653 MHz",
+      "core:label": "local oscillator harmonic 100.4653 MHz (43 x 2.3364 MHz)",
       "hackriff:truth": {
         "role": "emission",
-        "kind": "unidentified-narrowband",
-        "modulation": null,
+        "kind": "oscillator-harmonic",
+        "modulation": "none",
         "center_hz": 100465339.2221471,
         "center_definition": "power-weighted centroid of the above-floor bins of the mean spectrum",
         "f_peak_hz": 100466601.5625,
@@ -328,9 +345,84 @@
           "level_db_max": 8.435407991715264,
           "note": "continuous and very steady: 50 ms block power varies by under 0.5 dB over 20 s"
         },
-        "note": "no one anticipated this one: the capture README does not mention it. It is a real, continuous, ~28 kHz emission inside the analogue passband, and its modulation is unverified \u2014 the measurements above only rule out stereo FM broadcast and a receiver image. The pipeline found it blind and confirmed it (emitter at 100.46054 MHz, 45 detections, SNR peak 13.1-14.5 dB).",
+        "note": "No one anticipated this one: the capture README does not mention it, and T-289 could only record what it is not. T-317 identified it from the other captures at this site: it is harmonic 43 of a free-running ~2.3364 MHz oscillator whose harmonics 44 and 45 are visible at 102.78 and 105.12 MHz in the 2026-09-13 wideband recordings, outside this capture's 2.4 MHz span - which is why one 2.4 MHz window could not identify it. It is a real, continuous, ~28 kHz emission inside the analogue passband, and the pipeline found it blind and confirmed it (emitter at 100.46054 MHz, 45 detections, SNR peak 13.1-14.5 dB), but it carries no information: its width is the fundamental's frequency noise multiplied by 43. It stays role=emission rather than role=artefact because it is energy the receiver actually took in, not a spur the tuner synthesised, and nothing here shows it to be internal; see identification.open.",
         "t_start_s": 0.0,
-        "duration_s": 45.00138666666667
+        "duration_s": 45.00138666666667,
+        "modulation_measurement": "No information-bearing modulation could be measured, and the 28 kHz width is not modulation. Constant modulus: |z| kurtosis 1.386 in a +-20 kHz channel against 2.03 for the noise-only controls at 100.150 and 100.650 MHz, i.e. Rice-distributed as a constant-envelope carrier in noise, not Rayleigh. No discrete carrier: at 1.14 Hz RBW (20 x 0.874 s blocks) there is no line anywhere under the hump - the carrier is smeared across the whole 28 kHz by its own frequency noise. No symbol structure: x^2 and x^4 spectra peak at only 3.2 and 4.8 dB over their local median (no recoverable carrier or symbol rate), the instantaneous-frequency histogram is unimodal (not FSK), and the discriminator spectrum carries no line that the capture chain does not explain (see capture_artefact in hackriff:provenance). No programme content: the discriminator's 0.1-1 kHz power sits 6.66 dB over its own 8-15 kHz noise reference with a standard deviation of 0.30 dB across 45 one-second blocks (1-3 kHz: 1.11 dB, sd 0.18 dB). Speech or music varies second to second; this does not vary at all. What the discriminator does show is a 1/f-shaped, stationary low-frequency process - oscillator frequency noise.",
+        "identification": {
+          "verdict": "the 43rd harmonic of a free-running ~2.3364 MHz oscillator: a local unintentional emitter (EMI), not a transmitter",
+          "confidence": "high for the harmonic family; the emitter itself is unidentified and radiated-vs-conducted is untested",
+          "task": "T-317 (2026-09-16)",
+          "fundamental_hz": 2336387.0,
+          "harmonic_n": 43,
+          "fundamental_note": "f0 = this capture's measured centre / 43. The fundamental itself is at 2.34 MHz, far outside every capture, and was never observed directly.",
+          "evidence": [
+            {
+              "id": "siblings",
+              "text": "Two more members of the family are visible in the 2026-09-13 wideband captures (98 MHz centre, 20 Msps, which span 90.6-105.4 MHz and so reach where this 2.4 MHz recording cannot). With the amp off they sit at 100.446474, 102.782818 and 105.118406 MHz; dividing each by 43, 44 and 45 gives f0 = 2.335965, 2.335973 and 2.335965 MHz - three independent estimates agreeing to 9 Hz (3.7 ppm). Fitting f = n*f0 + b over the three gives b = +67 Hz against an f0 of 2.336 MHz, so the harmonic indices are pinned exactly: an index off by one would put b at +-2.34 MHz. The amp-on capture of the same session gives the same picture one oscillator-drift step away (f0 = 2.335413, 2.335390, 2.335402 MHz; b = +10.9 kHz)."
+            },
+            {
+              "id": "width_scales_with_n",
+              "text": "Each member's rms spectral width divided by its harmonic number is the same: 138, 120 and 137 Hz (amp off) and 136, 134 and 130 Hz (amp on). That is what multiplying one jittery fundamental by n does - the fundamental carries about 134 Hz rms of frequency noise and harmonic 43 carries 43 times it, 5.8 kHz. Three unrelated emitters cannot produce widths proportional to a harmonic index. Their normalised line shapes also correlate at 0.967-0.988."
+            },
+            {
+              "id": "not_a_broadcast_shape",
+              "text": "In the same 20 Msps survey the real WFM stations measure 120-126 kHz of 99 % occupied bandwidth (101.2993 and 104.4946 MHz) against 23-28 kHz for every member of this family, and they sit on the US 200 kHz odd-tenth raster to within a few kHz while the family members sit 18-83 kHz off it."
+            },
+            {
+              "id": "moves_between_sessions",
+              "text": "The n=43 member was measured at 100.422778, 100.443522, 100.446474 and 100.464646 MHz in the four captures of 2026-09-13 and 2026-09-15 - a 41.9 kHz spread, i.e. f0 wandering from 2.335413 to 2.336387 MHz, 417 ppm, over two days. The two broadcast stations in this capture are within 1.34 kHz and 56 Hz of their channels. Free-running, unstabilised oscillators move like this; licensed carriers do not."
+            },
+            {
+              "id": "steady_and_content_free",
+              "text": "Continuous for all 45 s at constant power (50 ms block power varying under 0.5 dB) with statistics that do not change: this is a device left running, not a transmission."
+            }
+          ],
+          "ruled_out": [
+            {
+              "hypothesis": "stereo FM broadcast",
+              "how": "no 19 kHz pilot (+0.22 dB over the local median against +35.5 and +8.7 dB for the two real stations and +0.39 dB for the 100.300 MHz negative control); 28 kHz occupied bandwidth against 120-128 kHz for a station"
+            },
+            {
+              "hypothesis": "mono FM broadcast or any programme feed",
+              "how": "no RDS, and the discriminator's audio-band power is constant to 0.30 dB standard deviation over 45 one-second blocks; 34.7 kHz off the nearest US channel (100.5 MHz) while the two real stations here are within 1.34 kHz of theirs"
+            },
+            {
+              "hypothesis": "receiver IQ image",
+              "how": "the mirror about the tuner centre, 101.134661 MHz, is empty (SNR -6.1 dB, 0 of 1648 bins present) - measured by T-289"
+            },
+            {
+              "hypothesis": "10 MHz reference harmonic",
+              "how": "the reference grid is multiples of 10 MHz; the nearest is 334.7 kHz away - measured by T-289"
+            },
+            {
+              "hypothesis": "DC / LO leakage",
+              "how": "334.7 kHz from the tuned centre, and the DC line is separately annotated 585.9 Hz wide at 100.800000 MHz"
+            },
+            {
+              "hypothesis": "receiver intermodulation between the two WFM stations",
+              "how": "an IM product of two ~128 kHz-wide WFM carriers is at least as wide as its parents, and this is 28 kHz. The IM3 partners are also absent: the 2f2-f1 partner at 100.882 MHz measures +0.06 dB of mean excess (4.4 dB peak, noise) and the 2f1-f2 partner would be at 102.132 MHz, outside the recorded span. Overload was measured false (0 of 20,000,000 ci8 components at the rail)"
+            },
+            {
+              "hypothesis": "the receiver's 8 kHz spur comb",
+              "how": "this capture carries a wideband line comb spaced 7999.9 Hz, at tuner DC - 674 Hz + n*8 kHz, 12-15 dB over the floor at 1.14 Hz RBW, right across the 2.4 MHz span (it is what a USB 2.0 microframe rate looks like). The emission is not on that grid - it would need n = 41.75 - and it is a 28 kHz hump, not a line. Two comb lines do cross the hump, at 100.455325 and 100.479324 MHz, and are the comb, not the emission"
+            },
+            {
+              "hypothesis": "the 209.43 kHz spur comb of the wideband captures",
+              "how": "the 20 Msps captures carry a second comb spaced 209.43 kHz across 90-105 MHz; the family is not on it either ((100.446 - 91.750)/0.20943 = 41.52)"
+            },
+            {
+              "hypothesis": "an SCA / subcarrier service of a nearby station",
+              "how": "an SCA rides inside its host's +-100 kHz baseband; this is 833 kHz from 101.2987 MHz and 765 kHz from 99.6999 MHz, far outside both"
+            },
+            {
+              "hypothesis": "a data, telemetry or digital-voice link",
+              "how": "no discrete lines at 1.14 Hz RBW, no carrier or symbol rate recoverable from x^2 or x^4 (3.2 and 4.8 dB peaks), a unimodal instantaneous-frequency histogram (not FSK) and constant modulus. The one periodicity that looked like a frame rate - 292.969 Hz and at least 27 harmonics, which is 2.4 MHz / 8192 - is a capture-chain artefact: it is present in pure noise and on the receiver's own DC line (see capture_artefact in hackriff:provenance)"
+            }
+          ],
+          "open": "Whether the oscillator radiates into the antenna or couples into the receive chain conducted (host supply, USB) is not decided by these captures: all four were taken with the same antenna and host, and the 20 Msps pair is quantisation-limited, so turning the amp off changed the family's excess over the floor no more than it changed the real stations'. A capture with a 50 ohm terminator in place of the antenna would settle it, and is already on the project's list of things that need the user.",
+          "measured_by": "T-317: mean periodograms with a 440 kHz running-median baseline over all four captures (RBW 293-305 Hz), power-weighted centroid and 99 % occupied bandwidth of each above-floor region, plus baseband extraction at 240 and 50 kHz for the modulus, discriminator and nonlinear tests"
+        }
       }
     },
     {
