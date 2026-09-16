@@ -3821,7 +3821,8 @@ tasks:
   - id: T-237
     milestone: M2-hardening
     title: "Detector raises a marginal whole-window false alarm on synthetic noise fill (obw 2.8125 MHz = 120 of 128 bins), and T-180's test skip for it has silently become a no-op"
-    status: in-progress
+    status: done
+    commit: 9bab6e5
     priority: high
     deps: [T-231]
     parallel_group: DETECT
@@ -3847,6 +3848,21 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: false
+  - id: T-239
+    milestone: M2-hardening
+    title: "Scheduler leaves the recording almost uncovered in t057: 12,000 of 14,519,977 samples, so 'no emitter at the station' fails 1-in-14 on the unmodified baseline"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: CORE
+    use_cases: []
+    found_by: "T-237 (2026-09-15), which measured it while proving its own change: both of its residual failures were THIS, not the false alarm it fixed, and it quantified the baseline rate rather than attributing them to its own work"
+    acceptance: "root cause of the coverage collapse identified - why a scheduled replay serves only about 0.08 percent of the recording's samples over the station - and fixed so coverage is representative; the failing assertion 'no emitter at the station' passes 20/20 under 6 CPU burners on the FIXED code; the baseline rate (1-in-14 before any change) is re-measured after the fix and reported; no assertion loosened and no retry added; if the true finding is that the scheduler is behaving correctly and the TEST's expectation of coverage is wrong, argue it from the scheduling maths and fix the test instead"
+    area: crates/hk-core/src/scheduler, tests/e2e mock_device
+    needs: none
+    model: opus
+    effort: medium
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
