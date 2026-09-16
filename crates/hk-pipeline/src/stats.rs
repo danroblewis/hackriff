@@ -429,6 +429,29 @@ counter_group!(
 );
 
 counter_group!(
+    /// On-demand channelised IQ streams (T-165, [`crate::chains::iq`]): raw down-converted
+    /// samples for an emitter or an explicit band. Metadata only (the records themselves are
+    /// gated content, never counted here).
+    IqCounters {
+        /// Open requests.
+        requests,
+        /// Requests refused (bad request, unknown target, outside the window, at capacity, run
+        /// ended, unrealisable).
+        refused,
+        /// Chains opened.
+        attached,
+        /// Chains closed (client gone, idle, retune off-window, segment/source ended, error).
+        detached,
+        /// Data records published with payload.
+        records,
+        /// Data records the egress gate reduced to header-only (`GATED`).
+        gated,
+        /// Publish errors.
+        errors,
+    }
+);
+
+counter_group!(
     /// The run's on-demand chain budget (T-071, [`crate::chains::budget`]): Listen chains and
     /// burst taps admitted against one count limit and one estimated CPU budget.
     BudgetCounters {
@@ -765,6 +788,8 @@ pub struct Counters {
     pub listen: ListenCounters,
     /// Burst taps (T-060).
     pub taps: TapCounters,
+    /// On-demand channelised IQ streams (T-165).
+    pub iq: IqCounters,
     /// The on-demand chain budget (T-071).
     pub budget: BudgetCounters,
     /// Serialises admission against the budget (control plane, never the sample path).
@@ -826,6 +851,7 @@ impl Counters {
             "chains": self.chains.to_json(),
             "listen": self.listen.status_json(),
             "taps": taps,
+            "iq": self.iq.to_json(),
             "budget": self.budget.status_json(),
             "chain_stats": self.chain_stats.to_json(),
             "scheduler": self.scheduler.to_json(),

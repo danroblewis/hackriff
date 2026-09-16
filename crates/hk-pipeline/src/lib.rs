@@ -65,6 +65,7 @@ mod run;
 mod spectrum;
 mod verify;
 
+pub use chains::iq::IqTapOpener;
 pub use chains::listen::{ListenConfig, ListenManager, listen_class};
 pub use chains::outputs::{
     OUTPUTS_DIR, OutputError, OutputFileStatus, OutputKind, OutputLimits, OutputRecorders,

@@ -24,6 +24,7 @@
 pub(crate) mod analog;
 pub mod budget;
 pub(crate) mod fsk;
+pub mod iq;
 pub mod listen;
 pub mod outputs;
 pub(crate) mod plugin;

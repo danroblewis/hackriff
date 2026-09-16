@@ -1829,6 +1829,18 @@ impl PipelineHandle {
             .unwrap_or_else(PoisonError::into_inner) = settings;
     }
 
+    /// On-demand channelised IQ (T-165, ADR-0013 §4.9 gap 8): an opener attaching raw
+    /// down-converted (`cf32_le`) chains at runtime for an emitter or an explicit band, no
+    /// demodulation. It admits under the same run limits Listen uses ([`Self::set_listen_settings`]).
+    pub fn iq_service(&self) -> Arc<crate::chains::iq::IqTapOpener> {
+        let sup = Arc::clone(&self.sup);
+        Arc::new(crate::chains::iq::IqTapOpener::new(
+            Arc::clone(&self.sup.common.counters),
+            Arc::new(move || sup.lock().shared.clone()),
+            Arc::clone(&self.sup.common.listen),
+        ))
+    }
+
     /// Burst bits taps (T-060): an opener streaming the hard bits of demodulated bursts.
     pub fn bits_service(&self) -> Arc<crate::chains::taps::BurstTapOpener> {
         self.tap_service(crate::chains::taps::TapKind::Bits)

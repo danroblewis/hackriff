@@ -967,12 +967,14 @@ pub fn serve_api(
         .with_context(|| format!("opening the control audit log {}", audit_path.display()))?;
     let controller = handle.controller();
     let status_ctl = controller.clone();
-    // On-demand streams (T-043 listen, T-060 burst bits and symbols), over WebSocket and TCP.
+    // On-demand streams (T-043 listen, T-060 burst bits and symbols, T-165 channelised IQ), over
+    // WebSocket and TCP.
     let recipes = handle.recipe_runtime();
     let openers = hk_api::stream::OpenerRegistry::new()
         .with("listen", handle.listen_service())
         .with("bits", handle.bits_service())
         .with("symbols", handle.symbols_service())
+        .with("iq", handle.iq_service()) // T-165
         .with("stage", recipes.stage_service()) // T-088
         .with("inspector", recipes.inspector_service()); // T-088 (T-089/T-092 extend it)
     let tcp = start_stream_tcp(registry, &openers, &token)?;

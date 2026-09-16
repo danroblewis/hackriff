@@ -33,6 +33,7 @@ pub mod gate;
 pub mod header;
 /// Inspector stream profile: `frame` records for the decoder workbench (1.2 draft, ADR-0011).
 pub mod inspector;
+pub mod iq;
 pub mod ondemand;
 pub mod policy;
 pub mod publisher;
