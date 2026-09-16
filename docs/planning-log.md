@@ -2777,3 +2777,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Default build stays light:** no inference runtime in the default feature set, and it must say what is gated behind which cargo feature.
 - **B0.585 Full check green after the T-162 merge (7952f7f).** Lint clean; 1606/1606 tests; acceptance 31/31; 41 GB free.
   - **Merging T-239** (coverage counter definition). Its own author declined to claim its 20/20 proved a fix, so this check confirms NO REGRESSION rather than confirming a repair.
+- **B0.586 Full check green after the T-239 merge (c200756).** Lint clean; 1606/1606 tests; acceptance 31/31; 41 GB free. Nothing awaits merge; the review column is empty.
+  - **T-165 launched** into the freed slot (Sonnet, the on-demand channelised IQ opener - ADR-0013 gap 8, the Stream out action). T-215 would have been the M3 pick but it depends on T-202, which is still running, so it is not actually unblocked; T-165 is, and it sits in hk-pipeline chains plus hk-api, clear of T-200 (hk-classify), T-202 (hk-context) and T-204 (hk-ml, py/).

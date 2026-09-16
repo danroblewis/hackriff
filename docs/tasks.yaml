@@ -2665,7 +2665,7 @@ tasks:
   - id: T-165
     milestone: MUI
     title: "MUI API gap 8: open/iq stream opener for Stream out"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
