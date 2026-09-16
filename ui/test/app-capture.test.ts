@@ -4,8 +4,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  DRAG_PX, WINDOW_S, agoText, coverageText, currentSpan, pctForAgo, reduceActivity, scrubToTime, selectionSpans, timeRegionName,
-  timeWindowFromScrub, type HistoryGrid,
+  DRAG_PX, MAX_MARKS, MIN_MARK_PCT, WINDOW_S, agoText, coverageText, currentSpan, eventMarkTitle, eventMarks,
+  inCoverageGap, iqBackingAt, pctForAgo, reduceActivity, ringSpan, scrubDataNote, scrubToTime, selectionSpans,
+  timeRegionName, timeWindowFromScrub, type EventRow, type HistoryGrid,
 } from "../src/app/capture/timeline";
 
 test("reduceActivity: empty grid and an all-gap grid are every column null", () => {
@@ -98,6 +99,120 @@ test("selectionSpans: placed by the inverse of scrubToTime; no window, or wholly
   ];
   const spans = selectionSpans(list, 1000, 100);
   assert.deepEqual(spans, [{ id: "recent", leftPct: 0, widthPct: 50 }]);
+});
+
+// ---- past events on the scrubber (T-263, ADR-0017 TM-7) ----
+
+/** A row as `/api/inventory` serves it, reduced to the fields the marks are placed from. */
+function evRow(over: Partial<EventRow> = {}): EventRow {
+  return { id: "e1", state: "confirmed", presence: { last_interval: null }, recurrence: { recent: [] }, ...over };
+}
+
+test("eventMarks: one mark per distinct timespan, from presence.last_interval and recurrence.recent alike", () => {
+  const now = 1000;
+  const rows = [evRow({
+    presence: { last_interval: { t_start_s: 950, t_end_s: 960 } },
+    recurrence: { recent: [{ t_start_s: 900, t_end_s: 910 }, { t_start_s: 950, t_end_s: 960 }] },
+  })];
+  const marks = eventMarks(rows, now, 100);
+  assert.equal(marks.length, 2, "the interval that repeats an appearance is not drawn twice");
+  assert.deepEqual(marks.map((m) => [m.tStartS, m.tEndS]), [[900, 910], [950, 960]], "newest last");
+  assert.deepEqual(marks.map((m) => [m.leftPct, m.widthPct]), [[0, 10], [50, 10]], "placed by pctForAgo");
+});
+
+test("eventMarks: a one-off burst keeps its measured timespan and is still drawn (ADR-0017 §1.2)", () => {
+  // Milliseconds against a 48 h band round to no width at all. The event is the whole point of the
+  // time model, so it is drawn at the floor — and the floor is a drawing width, never a duration:
+  // tStartS/tEndS keep what was measured, and eventMarkTitle reports the real 40 ms.
+  const now = 1_800_000_000;
+  const [m] = eventMarks([evRow({ presence: { last_interval: { t_start_s: now - 3600, t_end_s: now - 3599.96 } } })], now);
+  assert.equal(m.widthPct, MIN_MARK_PCT);
+  assert.ok(Math.abs(m.tEndS - m.tStartS - 0.04) < 1e-6, "the measured timespan is carried through untouched");
+  assert.match(eventMarkTitle(m, now), /lasted 40 ms/, "the title reports the measurement, not the drawn width");
+});
+
+test("eventMarks: a timespan outside the retained window is dropped, never clamped to the band's edge", () => {
+  // Clamping would place an event at a time it did not happen — the worst failure a scrubber can
+  // have, because it teaches the user to distrust the marks and the list together.
+  const now = 1000;
+  const old = evRow({ id: "old", presence: { last_interval: { t_start_s: 700, t_end_s: 800 } } });
+  const future = evRow({ id: "future", presence: { last_interval: { t_start_s: 1100, t_end_s: 1200 } } });
+  assert.deepEqual(eventMarks([old, future], now, 100), []);
+  // one that straddles the window's start is kept: part of it did happen inside the band.
+  const straddling = evRow({ presence: { last_interval: { t_start_s: 850, t_end_s: 950 } } });
+  assert.equal(eventMarks([straddling], now, 100).length, 1);
+});
+
+test("eventMarks: rows in neither list are skipped, and the render cap keeps the newest", () => {
+  const now = 1000;
+  assert.deepEqual(eventMarks([evRow({ state: "deleted", presence: { last_interval: { t_start_s: 950, t_end_s: 960 } } })], now, 100), []);
+  const many = evRow({
+    recurrence: { recent: Array.from({ length: MAX_MARKS + 10 }, (_, i) => ({ t_start_s: 900 + i * 0.01, t_end_s: 900 + i * 0.01 })) },
+  });
+  const marks = eventMarks([many], now, 100);
+  assert.equal(marks.length, MAX_MARKS);
+  assert.equal(marks[marks.length - 1].tEndS, 900 + (MAX_MARKS + 9) * 0.01, "the newest survive the cap");
+});
+
+test("eventMarks carries no liveness: an appearance never measured one", () => {
+  const [m] = eventMarks([evRow({ presence: { last_interval: { t_start_s: 950, t_end_s: 1000 } } })], 1000, 100);
+  assert.ok(!("open" in m) && !("liveness" in m), "a mark is a timespan; liveness is the list's answer");
+});
+
+// ---- what backs a scrub-back: no data vs nothing on air ----
+
+test("ringSpan: only a ring that is enabled and holds something is placed; everything else is unknown", () => {
+  const now = 1000;
+  assert.equal(ringSpan(null, now, 100), null, "not answered yet");
+  assert.equal(ringSpan({ enabled: false, t0: null, t1: null }, now, 100), null, "no ring on this server");
+  assert.equal(ringSpan({ enabled: true, t0: null, t1: null }, now, 100), null, "a ring holding nothing");
+  assert.equal(ringSpan({ enabled: true, t0: 700, t1: 800 }, now, 100), null, "rolled past the retained window");
+  assert.deepEqual(ringSpan({ enabled: true, t0: 950, t1: 1000 }, now, 100), { id: "ring", leftPct: 50, widthPct: 50 });
+});
+
+test("iqBackingAt / inCoverageGap: three distinct answers, and unknown is one of them", () => {
+  const ring = { enabled: true, t0: 900, t1: 1000 };
+  assert.equal(iqBackingAt(1000, true, ring), "live");
+  assert.equal(iqBackingAt(950, false, ring), "ring");
+  assert.equal(iqBackingAt(500, false, ring), "outside-ring");
+  assert.equal(iqBackingAt(950, false, null), "unknown", "an unanswered status is not 'no ring'");
+  assert.equal(inCoverageGap(950, null), null, "no coverage summary yet is unknown, not observed");
+  assert.equal(inCoverageGap(950, [{ t0_s: 940, t1_s: 960 }]), true);
+  assert.equal(inCoverageGap(970, [{ t0_s: 940, t1_s: 960 }]), false);
+});
+
+test("scrubDataNote: an unobserved window never reads as a quiet band", () => {
+  // The trap this exists for: an empty list over a window nobody listened to is not a measurement
+  // that nothing was transmitting. The two claims lead a user to act differently.
+  const ring = { enabled: true, t0: 900, t1: 1000 };
+  const gapNote = scrubDataNote(950, false, ring, [{ t0_s: 940, t1_s: 960 }]);
+  assert.match(gapNote, /no data for this window/);
+  // every mention of quiet in the sentence is a negated one: the note denies the reading, and
+  // nowhere offers it. A note that said only "no data" would still leave "quiet" available.
+  assert.match(gapNote, /not a quiet band$/);
+  for (const at of [...gapNote.matchAll(/quiet/g)].map((x) => x.index)) {
+    assert.ok(gapNote.slice(0, at).endsWith("not a "), `unnegated "quiet" at ${at}: ${gapNote}`);
+  }
+  // and the unobserved answer wins over the ring's own coverage, which would otherwise read as fine
+  assert.notEqual(gapNote, scrubDataNote(950, false, ring, []));
+});
+
+test("scrubDataNote: live says nothing extra; the ring, past the ring, and unknown are distinct", () => {
+  const ring = { enabled: true, t0: 900, t1: 1000 };
+  assert.equal(scrubDataNote(1000, true, ring, []), "", "the band's own coverage text speaks for the live edge");
+  assert.match(scrubDataNote(950, false, ring, []), /IQ retained/);
+  assert.match(scrubDataNote(500, false, ring, []), /past the IQ ring/);
+  assert.match(scrubDataNote(500, false, ring, []), /stored history/, "the lists still answer past the ring");
+  assert.match(scrubDataNote(950, false, null, []), /unknown/);
+  const notes = [scrubDataNote(950, false, ring, []), scrubDataNote(500, false, ring, []), scrubDataNote(950, false, null, [])];
+  assert.equal(new Set(notes).size, 3, "three different situations never share one sentence");
+});
+
+test("capture.css: the marks layer and the ring track are drawn, and neither is fixed-width", () => {
+  const css = readFileSync("src/app/capture/capture.css", "utf8");
+  assert.match(css, /\.cap-mark\s*\{/);
+  assert.match(css, /\.cap-mark\.confirmed\s*\{/, "confirmed and candidate marks are told apart");
+  assert.match(css, /\.cap-ring\s*\{/);
 });
 
 // ---- layout: the scrubbable band stays touch-usable and full-width at narrow widths ----

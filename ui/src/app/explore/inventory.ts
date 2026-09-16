@@ -131,6 +131,23 @@ export function viewFilters(state: WindowState): Filters {
   return f;
 }
 
+/**
+ * The filters the **Confirmed** list is queried with (T-263, ADR-0017 TM-7): [[viewFilters]] plus
+ * `at` — the caller's own live edge — while scrubbed back.
+ *
+ * Still no `t0`/`t1`, and that is the whole point. A window *selects* rows, so windowing Confirmed
+ * is exactly the regression §2.2 forbids: a catalogue entry that was quiet during the scrubbed
+ * window would vanish. `at` carries the other half of what a window meant — it scopes the
+ * `presence` projection and selects nothing — so the row stays listed and reads the liveness it had
+ * *then* instead of the liveness it has now. Without it a scrubbed-back Confirmed list would mark
+ * rows `live` from the wall clock while every other surface showed a past window.
+ */
+export function confirmedFilters(state: WindowState): Filters {
+  const f = viewFilters(state);
+  if (!state.time.live && state.time.tS !== undefined) f.at = state.time.tS;
+  return f;
+}
+
 /** Loads both tabs' current pages and writes them into the store's `inventory.rows`. `onMore`
  * reports whether a tab's page was cut short (GAP 13 "500+" interim, §4.2).
  *
@@ -139,13 +156,18 @@ export function viewFilters(state: WindowState): Filters {
  * nothing to hypothesise about and the row simply isn't listed — no expiry timer and no decay. A
  * Confirmed row is a catalogue entry carrying its own presence track, so it stays listed whether or
  * not it is transmitting right now. Dropping that asymmetry would make a user's quiet confirmed
- * stations vanish from Explore the moment they went off the air. */
+ * stations vanish from Explore the moment they went off the air.
+ *
+ * **Scrubbing back re-derives both lists** (T-263, TM-7) from the same two queries: the Candidate
+ * window follows the scrubbed instant ([[candidateWindow]]) and the Confirmed query names it as its
+ * own live edge ([[confirmedFilters]]). Neither list is filtered here — the client chooses only
+ * *which window to ask about*. */
 export async function loadInventoryRows(ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void, nowS: number = Date.now() / 1000): Promise<void> {
   const state = ctx.store.get();
   const f = viewFilters(state);
   const w = candidateWindow(state, nowS);
   const [confirmed, candidate] = await Promise.all([
-    fetchInventoryPage(ctx.client, "confirmed", f),
+    fetchInventoryPage(ctx.client, "confirmed", confirmedFilters(state)),
     fetchInventoryPage(ctx.client, "candidate", { ...f, t0: w.t0, t1: w.t1 }),
   ]);
   onMore("confirmed", !!confirmed.next_cursor);

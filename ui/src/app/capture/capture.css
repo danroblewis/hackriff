@@ -9,6 +9,12 @@
 .cap-band .cap-sel-layer { position: absolute; inset: 0; pointer-events: none; }
 .cap-band .cap-sel { position: absolute; top: 2px; bottom: 2px; border-left: 1px dashed var(--amber); border-right: 1px dashed var(--amber); background: var(--amber-soft); opacity: 0.55; }
 .cap-band .cap-sel.active { opacity: 1; }
+/* T-263 (ADR-0017 TM-7): past events to scrub to, and the IQ ring that still backs a scrub-back.
+   A mark is a timespan only — liveness is the inventory list's answer, never the scrubber's. */
+.cap-band .cap-marks { position: absolute; inset: 0 0 auto; height: 9px; pointer-events: none; }
+.cap-band .cap-mark { position: absolute; top: 2px; height: 5px; border-radius: 1px; background: var(--lav); opacity: 0.8; }
+.cap-band .cap-mark.confirmed { background: var(--teal); }
+.cap-band .cap-ring { position: absolute; bottom: 0; height: 3px; background: var(--teal-soft); border-top: 1px solid color-mix(in srgb, var(--teal) 45%, transparent); pointer-events: none; }
 .cap-band .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--amber); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ground) 60%, transparent); pointer-events: none; }
 .cap-band .live-pill { position: absolute; top: 4px; right: 6px; font: 600 9.5px var(--ui); letter-spacing: 0.08em; color: var(--coral); border: 1px solid color-mix(in srgb, var(--coral) 50%, transparent); background: color-mix(in srgb, var(--coral) 12%, transparent); padding: 1px 6px; border-radius: 4px; cursor: pointer; }
 .cap-band.reviewing .live-pill { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 50%, transparent); background: color-mix(in srgb, var(--amber) 12%, transparent); }

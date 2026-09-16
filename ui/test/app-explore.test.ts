@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import type { AppContext } from "../src/app/context";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip, selectionSummary } from "../src/app/explore/focus";
 import {
-  candidateWindow, clearUserBand, clusterChip, DEFAULT_ROW_RATE_HZ, loadInventoryRows,
+  candidateWindow, clearUserBand, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, loadInventoryRows,
   nextInventorySort, recurrenceDots, REVIEW_WINDOW_S, rowChips, rowSeenText, setUserBand,
   sortInventoryRows, viewFilters, waterfallSpanS, type Classification, type Row,
 } from "../src/app/explore/inventory";
@@ -400,6 +400,37 @@ test("reviewing: the Candidate window follows the scrubbed instant; Confirmed st
   assert.equal(Number(cand.get("t1")), 1_789_540_000);
   assert.equal(Number(cand.get("t0")), 1_789_540_000 - REVIEW_WINDOW_S);
   assert.equal(paramsFor("confirmed").get("t0"), null, "a quiet confirmed station does not vanish while reviewing either");
+});
+
+// ---- scrub-back re-derivation (T-263, ADR-0017 TM-7) ----
+
+test("scrubbed back: Confirmed names the scrubbed instant as its live edge, and is still not time-filtered", () => {
+  // `t0`/`t1` do two things at once: select rows and scope their `presence`. Confirmed can only
+  // have the second — windowing it is the §2.2 regression — so it sends `at` instead. Without it a
+  // scrubbed-back Confirmed row would read the liveness it has *now*, disagreeing with every other
+  // surface on screen.
+  const base = { live: { view: { loHz: 99.6e6, hiHz: 102e6 }, rowRateHz: 25 }, device: { rowsPerS: null } };
+  assert.deepEqual(confirmedFilters({ ...base, time: { live: true } }), { fLoHz: 99.6e6, fHiHz: 102e6 }, "no `at` at the live edge");
+  const scrubbed = confirmedFilters({ ...base, time: { live: false, tS: 1_789_540_000 } });
+  assert.equal(scrubbed.at, 1_789_540_000);
+  assert.equal(scrubbed.t0, undefined, "still no window: a window would filter the catalogue");
+  assert.equal(scrubbed.t1, undefined);
+});
+
+test("THE SAFETY VALVE HOLDS WHILE SCRUBBED: a station quiet during the scrubbed window stays listed", async () => {
+  const nowS = 1_789_549_614, tS = nowS - 6 * 3600;
+  const quiet = makeRow({ id: "quiet", state: "confirmed", last_seen_s: nowS - 30, first_seen_s: nowS - 9 * 3600 });
+  const { ctx, store, paramsFor } = windowCtx({ confirmed: [quiet], candidate: [] });
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25 } }));
+  ctx.store.set(reviewAt(tS));
+  await loadInventoryRows(ctx, () => {}, nowS);
+
+  assert.ok(store.get().inventory.rows.quiet, "the confirmed catalogue survives the scrub");
+  const conf = paramsFor("confirmed");
+  assert.equal(conf.get("t0"), null, "not time-filtered, so nothing quiet is dropped");
+  assert.equal(Number(conf.get("at")), tS, "but its liveness is re-derived as of the scrubbed instant");
+  // The asymmetry still lives in the request, never in client-side filtering of the answer.
+  assert.equal(Number(paramsFor("candidate").get("t1")), tS);
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----

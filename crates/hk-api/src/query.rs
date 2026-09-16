@@ -719,6 +719,8 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// capped (see `count_inventory`'s docs) and can then read as a lower bound.
 pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> {
     let query = parse_inventory_query(q)?;
+    // T-263 (ADR-0017 TM-7): an unwindowed caller's own live edge, for a scrubbed-back view.
+    let at = parse_presence_at(q, query.time)?;
     let failed = |_| ApiError::new(500, "inventory query failed");
     let page = repo.query_inventory(&query).map_err(failed)?;
     let total = repo.count_inventory(&query).map_err(failed)?;
@@ -728,7 +730,7 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
         // `family_in_window`. The rows themselves are already selected by the same window, in the
         // same predicate (`InventoryQuery::time`, interval overlap), so the list and the liveness
         // it renders can never disagree.
-        entries.push(inventory_entry_json_in_window(repo, entry, query.time).map_err(failed)?);
+        entries.push(inventory_entry_json_at(repo, entry, query.time, at).map_err(failed)?);
     }
     Ok(json!({
         "entries": entries,
@@ -824,22 +826,57 @@ const ALL_TIME_START_NS: i64 = i64::MIN / 2;
 ///   time (ADR-0017 §2.4) instead of marking every past window `ended`.
 /// - **A caller that gave no window asked about all of time up to now.** That is Explore's
 ///   Confirmed list, which is deliberately *not* time-filtered (§2.2, T-260) and still has to
-///   render liveness, so `presence` is served there too — against the wall clock.
+///   render liveness, so `presence` is served there too — against the wall clock, or against `at`
+///   when the caller named its own live edge (T-263, below).
+///
+/// **`at` (T-263, ADR-0017 TM-7).** An unwindowed caller's own live edge, for a scrubbed-back
+/// view. Explore's Confirmed list must stay *listed* while scrubbed — that is the §2.2 safety
+/// valve, and sending `t0`/`t1` there would filter quiet catalogue entries out — but its rows
+/// would then read the liveness they have *now*, disagreeing with the past window every other
+/// surface is showing. `at` separates the two questions the window parameter had fused: `t0`/`t1`
+/// **select** rows and scope their projections; `at` scopes the projection alone and selects
+/// nothing. It is refused beside `t0`/`t1`, whose `t1` is already the caller's live edge.
 ///
 /// The idle gap is [`IdleGap::conservative`]: hk-api does not know the scheduler's revisit period,
 /// and an unknown revisit takes the 60 s end of `IdleGap`'s rule, never a shorter gap — a shorter
 /// gap would claim an absence that was not observed (T-262, ADR-0017 §11 q4).
-fn presence_window(window: Option<TimeRange>) -> (TimeRange, Timestamp) {
+fn presence_window(window: Option<TimeRange>, at: Option<Timestamp>) -> (TimeRange, Timestamp) {
     match window {
         Some(w) => (w, w.end),
         None => {
-            let now = Timestamp::now();
+            let now = at.unwrap_or_else(Timestamp::now);
             (
                 TimeRange::new(Timestamp::from_unix_nanos(ALL_TIME_START_NS), now),
                 now,
             )
         }
     }
+}
+
+/// The `at` parameter of [`presence_window`] (T-263, ADR-0017 TM-7): the caller's own live edge
+/// for an **unwindowed** query, so a scrubbed-back Confirmed list re-derives the liveness its rows
+/// had then instead of the liveness they have now.
+///
+/// Refused beside `t0`/`t1` rather than silently ignored: a window already carries its own live
+/// edge in `t1`, so a request giving both is asking two different questions at once and the answer
+/// would depend on which one this code happened to prefer.
+pub fn parse_presence_at(
+    q: &Params,
+    window: Option<TimeRange>,
+) -> Result<Option<Timestamp>, ApiError> {
+    if nonempty(q, "at").is_none() {
+        return Ok(None);
+    }
+    if window.is_some() {
+        return Err(bad(
+            "at is for a query with no t0/t1: a window's own t1 is already its live edge",
+        ));
+    }
+    let at = num(q, "at")?;
+    if !(at > -4e9 && at < 9e9) {
+        return Err(bad("at must be a Unix second in range"));
+    }
+    Ok(Some(Timestamp::from_unix_nanos((at * 1e9).round() as i64)))
 }
 
 /// ADR-0017 TM-2 `presence` object: **when** this emitter was on the air, seen through the
@@ -873,7 +910,16 @@ fn presence_json(p: &Presence) -> Value {
 }
 
 pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result<Value, RepoError> {
-    inventory_entry_json_in_window(repo, entry, None)
+    inventory_entry_json_at(repo, entry, None, None)
+}
+
+/// [`inventory_entry_json_at`] with no caller-named live edge (the wall clock decides `open`).
+pub fn inventory_entry_json_in_window(
+    repo: &Repository,
+    entry: &InventoryEntry,
+    window: Option<TimeRange>,
+) -> Result<Value, RepoError> {
+    inventory_entry_json_at(repo, entry, window, None)
 }
 
 /// [`inventory_entry_json`] with the request's time window, which adds ADR-0017 TM-2's two
@@ -892,10 +938,12 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
 /// family data of exactly the class `recurrence` and `family` already carry unconditionally, and
 /// because the fields appear on every row alike their presence can never signal that a row's
 /// identity was withheld (the T-159/T-163 rule those gated fields exist under).
-pub fn inventory_entry_json_in_window(
+/// `at` (T-263) is the caller's own live edge for an unwindowed query; see [`presence_window`].
+pub fn inventory_entry_json_at(
     repo: &Repository,
     entry: &InventoryEntry,
     window: Option<TimeRange>,
+    at: Option<Timestamp>,
 ) -> Result<Value, RepoError> {
     {
         let e = &entry.emitter;
@@ -1020,7 +1068,7 @@ pub fn inventory_entry_json_in_window(
         // ADR-0017 TM-2: when this emitter was on the air, through the request's window. The
         // emitter's own `first_seen`/`last_seen` are a *hull* and never an extent, so this — not
         // they — is what a caller reads for "is it on air, and for how long".
-        let (span, now) = presence_window(window);
+        let (span, now) = presence_window(window, at);
         let presence = presence_json(&repo.presence(e.id, span, IdleGap::conservative(), now)?);
         // ADR-0017 §7.1: the same arbitration ladder over the rows inside the window. `family`
         // above stays the all-time answer — identity evidence is time-invariant — and this says

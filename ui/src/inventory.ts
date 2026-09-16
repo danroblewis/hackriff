@@ -91,7 +91,14 @@ export function sortRows(rows: readonly Row[], key: Key, dir: 1 | -1): Row[] {
 
 /** Shared filter fields (frequency, time, status, tag): applied to both the candidate and
  * confirmed queries alike. */
-export interface Filters { fLoHz?: number; fHiHz?: number; t0?: number; t1?: number; status?: string; tag?: string }
+export interface Filters {
+  fLoHz?: number; fHiHz?: number; t0?: number; t1?: number;
+  /** The caller's own live edge for a query with **no** `t0`/`t1` (docs/api.md `/api/inventory`
+   * `at`, T-263): it scopes each row's `presence` projection and selects nothing, so a scrubbed-back
+   * list re-derives the liveness its rows had then without being time-filtered. */
+  at?: number;
+  status?: string; tag?: string;
+}
 
 /** The `/api/inventory` query for one state's list (T-080: candidates and confirmed load
  * separately — `state=candidate` / `state=confirmed` — never the default combined page). */
@@ -102,6 +109,7 @@ export function inventoryQuery(state: "candidate" | "confirmed", f: Filters, cur
   if (f.fHiHz !== undefined) p.set("f_hi", String(f.fHiHz));
   if (f.t0 !== undefined) p.set("t0", String(f.t0));
   if (f.t1 !== undefined) p.set("t1", String(f.t1));
+  if (f.at !== undefined) p.set("at", String(f.at));
   if (f.status) p.set("status", f.status);
   if (f.tag) p.set("tag", f.tag);
   p.set("limit", "200");
