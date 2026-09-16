@@ -3385,6 +3385,102 @@ fn follow_hops_channel_routes_match_the_documented_shapes() {
     stop_server(serving);
 }
 
+/// T-168 (ADR-0013 §4.9 gap 11): `GET /api/pipelines`/`GET /api/pipelines/{id}` serve `follow_hops`
+/// as `docs/api.md` documents it: `null` for a single-channel pipeline, and for a follow-hops
+/// pipeline `{channels: [{index, center_hz, bandwidth_hz}], channel_source, channel_bandwidth_hz,
+/// max_channels}`.
+#[test]
+fn pipeline_json_documents_the_follow_hops_field() {
+    let (_dir_guard, serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    let target = json!({"band": {"f_lo": STATION_HZ - 20e3, "f_hi": STATION_HZ + 20e3}});
+
+    // A single-channel pipeline: follow_hops is null, both freshly started and re-fetched.
+    let single = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "t168-single", "version": 1,
+        "name": "T-168 single-channel",
+        "input": {"port": "iq", "sample_rate_hz": 48000.0, "bandwidth_hz": 40000.0},
+        "nodes": [{"id": "fm", "block": "fm_demod", "params": {"deviation_hz": 5000}}],
+        "outputs": [{"id": "audio", "kind": "stage", "from": "fm"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let (st, v) = post(
+        addr,
+        "/api/pipelines",
+        &json!({"recipe": single, "target": target.clone()}).to_string(),
+    );
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["follow_hops"], Value::Null, "{v}");
+    let pid = v["id"].as_str().unwrap().to_owned();
+    let (_, v) = get(addr, &format!("/api/pipelines/{pid}"));
+    assert_eq!(v["follow_hops"], Value::Null, "{v}");
+    let (st, v) = call(
+        addr,
+        "DELETE",
+        &format!("/api/pipelines/{pid}"),
+        Some(&bearer),
+        None,
+    );
+    assert_eq!(st, 200, "{v}");
+
+    // A follow-hops pipeline: the documented shape, resolved from the recipe's list_hz.
+    let a = STATION_HZ - 200e3;
+    let draft = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "t168-hops", "version": 1,
+        "name": "T-168 follow-hops",
+        "input": {"port": "iq", "sample_rate_hz": 24000.0, "bandwidth_hz": 16000.0,
+                  "channels": {"mode": "follow-hops", "channel_bandwidth_hz": 12500.0,
+                               "max_channels": 8, "list_hz": [a]}},
+        "nodes": [
+            {"id": "fsk", "block": "fsk_demod"},
+            {"id": "clock", "block": "clock_recovery",
+             "params": {"symbol_rate_bd": 1200, "pulse": "nrz", "algorithm": "gardner"}},
+            {"id": "slice", "block": "slicer", "params": {"threshold": 0.0}},
+            {"id": "sync", "block": "sync_search",
+             "params": {"mode": "sync-word", "sync_word": "0x7CD215D8", "sync_bits": 32,
+                        "max_errors": 2, "frame_bits": 512, "include_sync": false}},
+            {"id": "hops", "block": "follow_hops"}
+        ],
+        "outputs": [{"id": "frames", "kind": "inspector", "from": "hops"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let start = json!({"recipe": draft,
+        "target": {"band": {"f_lo": a - 10e3, "f_hi": a + 10e3}}});
+    let (st, v) = post(addr, "/api/pipelines", &start.to_string());
+    assert_eq!(st, 201, "{v}");
+    let pid = v["id"].as_str().unwrap().to_owned();
+    let fh = &v["follow_hops"];
+    assert_eq!(fh["channel_source"], json!("list"), "{v}");
+    assert_eq!(fh["channel_bandwidth_hz"], json!(12500.0), "{v}");
+    assert_eq!(fh["max_channels"], json!(8), "{v}");
+    let channels = fh["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 1, "{v}");
+    for k in ["index", "center_hz", "bandwidth_hz"] {
+        assert!(!channels[0][k].is_null(), "{k}: {v}");
+    }
+    assert_eq!(channels[0]["center_hz"], json!(a), "{v}");
+
+    // GET /api/pipelines lists the same shape inline.
+    let (_, v) = get(addr, "/api/pipelines");
+    let listed = v["pipelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == json!(pid))
+        .unwrap();
+    assert_eq!(listed["follow_hops"]["channel_source"], json!("list"), "{v}");
+
+    let (st, v) = call(
+        addr,
+        "DELETE",
+        &format!("/api/pipelines/{pid}"),
+        Some(&bearer),
+        None,
+    );
+    assert_eq!(st, 200, "{v}");
+    stop_server(serving);
+}
+
 // Attention + memory (ADR-0012 §11): each M2 task appends its contract tests under its marker.
 // T-115 observations
 

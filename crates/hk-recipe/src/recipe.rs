@@ -132,6 +132,11 @@ pub struct NodeSpec {
     /// Display label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Prose explaining what this node does and why, for the Decode step guide (T-168, ADR-0013
+    /// §4.9 gap 12). Additive: absent on every recipe written before this field existed, and a
+    /// recipe without it still loads and validates unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
     /// Parameters.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub params: Params,
@@ -989,5 +994,37 @@ mod tests {
             v
         });
         assert!(unknown.is_err(), "unknown mapping keys are errors");
+    }
+
+    /// T-168 (ADR-0013 §4.9 gap 12): the per-node `doc` field is additive. A recipe written before
+    /// it existed (no `doc` key on any node) still loads, `NodeSpec::doc` reads `None`, and
+    /// re-serializing omits the key entirely rather than writing `"doc":null`. A recipe that does
+    /// set `doc` round-trips it unchanged.
+    #[test]
+    fn node_doc_field_is_additive() {
+        let r: Recipe = serde_json::from_value(minimal()).unwrap();
+        assert_eq!(r.nodes[0].doc, None);
+        assert!(
+            r.validate(&catalogue()).is_ok(),
+            "a recipe without node doc still validates"
+        );
+        let round = serde_json::to_value(&r).unwrap();
+        assert!(
+            round["nodes"][0].get("doc").is_none(),
+            "doc omitted when absent: {round}"
+        );
+
+        let mut v = minimal();
+        v["nodes"][0]["doc"] = json!("Demodulates the FSK deviation into soft symbols.");
+        let r: Recipe = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            r.nodes[0].doc.as_deref(),
+            Some("Demodulates the FSK deviation into soft symbols.")
+        );
+        let round = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            round["nodes"][0]["doc"],
+            json!("Demodulates the FSK deviation into soft symbols.")
+        );
     }
 }
