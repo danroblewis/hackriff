@@ -258,13 +258,16 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
 
     ctl.finish();
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let waiter = std::thread::spawn(move || {
         let _ = tx.send(handle.wait().map_err(|e| format!("{e:#}")));
+        // T-236: `handle` drops after the send, tearing the pipeline's stores down (and writing)
+        // on this thread, so it is joined below before the data directory is removed.
     });
     let summary = rx
         .recv_timeout(Duration::from_secs(180))
         .expect("the run finishes")
         .unwrap();
+    let _ = waiter.join();
     eprintln!("{}", summary.to_text());
     assert!(summary.errors.is_empty(), "{:?}", summary.errors);
     assert_eq!(
@@ -366,7 +369,7 @@ fn a_replayed_recording_refuses_device_settings_but_accepts_display_settings() {
     assert_eq!(state["live"], json!(false));
     assert_eq!(state["run"]["live"], json!(false));
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let waiter = std::thread::spawn(move || {
         let _ = tx.send(handle.wait().map_err(|e| format!("{e:#}")));
     });
     let summary = rx
@@ -374,5 +377,7 @@ fn a_replayed_recording_refuses_device_settings_but_accepts_display_settings() {
         .expect("the run over an empty recording finishes")
         .unwrap();
     assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+    // T-236: the waiter drops the handle after sending; join it before the guard removes the dir.
+    let _ = waiter.join();
     drop(server);
 }

@@ -50,7 +50,13 @@ fn unix_now() -> f64 {
 
 /// Starts `hk serve` over the mock SDR device on the fixture (the CLI's `mock:<path>` device spec,
 /// T-049), a fresh temp data directory and token file, at the fixture's own tuning.
-fn start_server() -> (Serving, SocketAddr, TempDataDirGuard) {
+/// The guard comes **first** on purpose (T-236). Bindings of one `let` pattern drop in reverse
+/// order, so a guard bound last would be dropped *first*: it would remove the data directory while
+/// the server and pipeline were still alive, and their teardown (the observation log sealing its
+/// open hour) would recreate `observations/<date>/` underneath it — a removal that succeeds and
+/// still leaves an orphan, which is what T-232 measured as its one residual per run and why no
+/// amount of retrying in the guard could fix it. First in the tuple means dropped last.
+fn start_server() -> (TempDataDirGuard, Serving, SocketAddr) {
     let dir = temp_data_dir();
     let guard = TempDataDirGuard::new(dir.clone());
     let serving = start(&ServeOptions {
@@ -76,7 +82,7 @@ fn start_server() -> (Serving, SocketAddr, TempDataDirGuard) {
     })
     .unwrap();
     let addr = serving.server.local_addr();
-    (serving, addr, guard)
+    (guard, serving, addr)
 }
 
 /// Stops the run and waits for it to finish, bounded (the mock loops forever until told to stop).
@@ -84,10 +90,14 @@ fn stop_server(serving: Serving) {
     serving.handle.stop();
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = serving.handle;
-    std::thread::spawn(move || {
+    let waiter = std::thread::spawn(move || {
         let _ = tx.send(handle.wait());
+        // `handle` drops *after* the send: the pipeline's stores tear down on this thread (the
+        // observation log seals its open hour, recreating its dated directory), so the run's data
+        // directory is not free until this thread ends. T-236: join it.
     });
     let _ = rx.recv_timeout(Duration::from_secs(30));
+    let _ = waiter.join();
     drop(serving.server);
 }
 
@@ -203,7 +213,7 @@ fn is_array(v: &Value) -> bool {
 /// It is reference data: no emitter, detection or identity is reachable through it.
 #[test]
 fn taxonomy_route_answers_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     let (st, v) = get(addr, "/api/taxonomy");
     assert_eq!(st, 200, "{v}");
@@ -280,7 +290,7 @@ fn taxonomy_route_answers_as_documented() {
 
 #[test]
 fn discovery_history_floor_status_and_control_state_have_the_documented_shape() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     // /api/streams: discovery (T-060), never content.
     let (st, v) = get(addr, "/api/streams");
@@ -569,7 +579,7 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
 
 #[test]
 fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     // /api/inventory: the station is found blind, no frequency lookup involved (vision step 4).
     wait_for(
@@ -782,7 +792,7 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
 
 #[test]
 fn inventory_entry_promote_and_delete_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     let id = {
         let mut found = None;
@@ -999,7 +1009,7 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
 
 #[test]
 fn control_display_pause_and_bookmarks_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     let (st, v) = post(
         addr,
@@ -1095,7 +1105,7 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
 
 #[test]
 fn selections_crud_and_links_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     let (st, s) = post(
         addr,
@@ -1150,7 +1160,7 @@ fn selections_crud_and_links_answer_as_documented() {
 
 #[test]
 fn outputs_list_and_unknown_file_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     let (st, v) = get(addr, "/api/outputs");
     assert_eq!(st, 200, "{v}");
@@ -1171,7 +1181,7 @@ fn outputs_list_and_unknown_file_answer_as_documented() {
 /// once the target is known to exist; the engine itself is MAUTO's (docs/15 §8), not built yet.
 #[test]
 fn analyze_stub_validates_targets_and_answers_not_implemented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     // A valid band target: 501 not_implemented once it validates. No engine runs.
     let (st, v) = post(
@@ -1303,7 +1313,7 @@ fn analyze_stub_validates_targets_and_answers_not_implemented() {
 /// and the clip needs the header token.
 #[test]
 fn iq_buffer_status_and_clip_export_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     const CLIP_SAMPLES: u64 = 240_000; // 0.1 s at 2.4 Msps
     let mut status = Value::Null;
     wait_for(
@@ -1591,7 +1601,7 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
 /// the documented `400`/`404`/`405` refusals.
 #[test]
 fn dataset_export_and_manifest_lookup_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     let (st, v) = get(addr, "/api/datasets");
     assert_eq!(st, 200, "{v}");
@@ -1667,7 +1677,7 @@ fn connect_ws(addr: SocketAddr, path: &str) -> Result<Ws, tungstenite::Error> {
 
 #[test]
 fn ws_stream_header_matches_the_stream_contract() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     wait_for(
         "the spectrum stream to be offered",
         Duration::from_secs(30),
@@ -1707,7 +1717,7 @@ fn ws_stream_header_matches_the_stream_contract() {
 
 #[test]
 fn ws_open_listen_streams_pcm_data_records_of_the_station() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
 
     let (mut ws, header) = wait_for_listen(addr, f_lo, f_hi);
@@ -1798,7 +1808,7 @@ fn wait_for_listen(addr: SocketAddr, f_lo: f64, f_hi: f64) -> (Ws, Value) {
 
 #[test]
 fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     let (st, v) = call(addr, "GET", "/api/streams", None, None);
     assert_eq!(st, 401, "{v}");
@@ -1882,7 +1892,7 @@ fn unauthenticated_wrong_token_and_cross_origin_requests_are_refused() {
 /// `docs/api.md` "Recipes and pipelines" documents them, on the mock device's FM window.
 #[test]
 fn recipe_and_pipeline_routes_match_the_documented_shapes() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let bearer = format!("Bearer {TOKEN}");
     let rid = "t088-contract";
 
@@ -2102,7 +2112,7 @@ fn recipe_and_pipeline_routes_match_the_documented_shapes() {
 /// refused 409, an unknown `view` value 400 (§14.8 opener refusals).
 #[test]
 fn stage_tap_spectrum_view_answers_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let doc = json!({
         "schema": "hackriff.recipe", "schema_version": 2, "id": "t160-contract", "version": 1,
         "name": "T-160 contract",
@@ -2225,7 +2235,7 @@ fn stage_tap_spectrum_view_answers_as_documented() {
 /// method and validation refusals as documented.
 #[test]
 fn inspector_parse_answers_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let recipe: Value = serde_json::from_str(
         &std::fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../recipes/rds.recipe.json"),
@@ -2308,7 +2318,7 @@ fn t091_crc16(bits: &str) -> u64 {
 /// and a sync word the request never names.
 #[test]
 fn assist_routes_answer_suggestions_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     let mut next = move || {
         seed ^= seed << 13;
@@ -2429,7 +2439,7 @@ fn assist_routes_answer_suggestions_as_documented() {
 /// `decoded_capture` test, which can hold replays open without a WebSocket client.
 #[test]
 fn decoded_captures_are_recorded_listed_scrubbed_reparsed_and_replayed_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let (st, v) = get(addr, "/api/captures");
     assert_eq!(st, 200, "{v}");
     assert!(is_array(&v["captures"]), "{v}");
@@ -2673,7 +2683,7 @@ fn every_route_in_the_route_table_is_documented() {
 /// `list_hz`, and `503 busy` (nothing changed) when the added channels exceed the chain budget.
 #[test]
 fn follow_hops_channel_routes_match_the_documented_shapes() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let bearer = format!("Bearer {TOKEN}");
     let (a, b) = (STATION_HZ - 200e3, STATION_HZ + 200e3);
     let draft = json!({
@@ -2786,7 +2796,7 @@ fn follow_hops_channel_routes_match_the_documented_shapes() {
 #[test]
 fn observation_coverage_reports_interactive_tuning_without_a_scheduler() {
     use std::sync::atomic::Ordering::Relaxed;
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let counters = serving.handle.counters();
     let deadline = Instant::now() + Duration::from_secs(60);
     let wait = |f: &dyn Fn() -> bool| {
@@ -2803,12 +2813,17 @@ fn observation_coverage_reports_interactive_tuning_without_a_scheduler() {
     let Serving { server, handle, .. } = serving;
     handle.stop();
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let waiter = std::thread::spawn(move || {
         let _ = tx.send(handle.wait());
     });
     rx.recv_timeout(Duration::from_secs(30))
         .expect("the run stopped")
         .expect("the run finished cleanly");
+    // The waiter drops the pipeline handle after sending, and that teardown writes (the
+    // observation log seals its open hour and recreates its dated directory). Joining it is what
+    // stops this test — the one T-232 measured as its residual orphan — from racing the temp-dir
+    // guard once `hk-api`'s own connection threads are no longer the racer (T-236).
+    let _ = waiter.join();
     let end = counters.stream_time_ns.load(Relaxed);
     let q = format!(
         "f_lo={}&f_hi={}&t0={}&t1={}",
@@ -2841,7 +2856,7 @@ fn observation_coverage_reports_interactive_tuning_without_a_scheduler() {
 /// `observations` stream is offered.
 #[test]
 fn observation_log_routes_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let (t0, t1) = (unix_now() - 60.0, unix_now());
     let q = format!("f_lo=100000000&f_hi=101000000&t0={t0}&t1={t1}");
 
@@ -2913,7 +2928,7 @@ fn observation_log_routes_answer_as_documented() {
 /// bad queries are 400 and other methods 405.
 #[test]
 fn occupancy_and_channel_routes_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let (t0, t1) = (unix_now() - 600.0, unix_now() + 5.0);
     let q = format!("f_lo=100000000&f_hi=101600000&t0={t0}&t1={t1}");
 
@@ -2982,7 +2997,7 @@ fn occupancy_and_channel_routes_answer_as_documented() {
 /// version-0 candidate set, versioned weights (v1 defaults → v2), and 400/404/405/401 refusals.
 #[test]
 fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
 
     let (st, v) = get(addr, "/api/sites");
     assert_eq!(st, 200, "{v}");
@@ -3111,7 +3126,7 @@ fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
 /// hk-pipeline's `a_lease_command_that_timed_out_never_applies` cover them.
 #[test]
 fn scheduler_routes_answer_as_documented_without_a_scheduler() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let bearer = format!("Bearer {TOKEN}");
     let auth = Some(bearer.as_str());
 
@@ -3187,7 +3202,7 @@ fn scheduler_routes_answer_as_documented_without_a_scheduler() {
 /// comparison explicitly unavailable) and backend-rendered CSV/PNG exports.
 #[test]
 fn report_route_serves_document_and_exports() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let now = unix_now();
     let region = format!(
         "f_lo={}&f_hi={}&t0={}&t1={}",
@@ -3303,7 +3318,7 @@ fn report_route_serves_document_and_exports() {
 /// is 404; the `anomalies` stream is offered.
 #[test]
 fn anomalies_routes_answer_documented_shapes() {
-    let (serving, addr, _dir_guard) = start_server();
+    let (_dir_guard, serving, addr) = start_server();
     let (st, v) = get(
         addr,
         "/api/anomalies?f_lo=1e8&f_hi=2e9&t0=0&t1=4e9&status=open&limit=5",

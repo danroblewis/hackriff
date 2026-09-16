@@ -60,13 +60,14 @@
 //!   limited to 16 KiB, bodies to 64 KiB, and both must arrive within `request_timeout`; query
 //!   results are capped.
 
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hk_model::{Repository, Timestamp};
 use hk_store::{FloorProduct, Pyramid};
@@ -302,17 +303,47 @@ pub struct ApiState {
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
 pub type StatusFn = Arc<dyn Fn() -> Value + Send + Sync>;
 
+/// How long [`Server::shutdown`] waits for in-flight connection threads after closing their
+/// sockets (T-236). Closing the sockets first is what makes the usual wait sub-millisecond: a
+/// handler blocked on a peer returns at once, so this budget only has to cover a handler in the
+/// middle of *compute* (a query holding a store mutex) on a loaded machine. Two seconds is far
+/// above any handler's measured work and still keeps teardown cheap across a suite that starts
+/// hundreds of servers; past it the thread is abandoned, counted and reported rather than waited
+/// on forever.
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Connections accepted and not yet finished: one entry per handler thread, holding a cloned
+/// socket handle that [`Server::shutdown`] closes to unblock it (T-236).
+#[derive(Default)]
+struct Conns {
+    next: u64,
+    open: BTreeMap<u64, TcpStream>,
+}
+
 struct Shared {
     config: ServerConfig,
     state: ApiState,
-    active: AtomicUsize,
+    /// Open connections. Locked only to register or retire one (never while a request is handled,
+    /// and never by the capture or audio path) and by [`Server::shutdown`] while it drains.
+    conns: Mutex<Conns>,
+    /// Signalled when the last open connection retires.
+    idle: Condvar,
+    /// Connection threads still running when the bounded shutdown wait expired.
+    abandoned: AtomicUsize,
 }
 
-/// A running server. Dropping it stops accepting (open connections finish on their own).
+fn lock_conns(shared: &Shared) -> std::sync::MutexGuard<'_, Conns> {
+    shared.conns.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A running server. Dropping it (or calling [`Server::shutdown`]) stops accepting, closes every
+/// open connection and waits — bounded by [`SHUTDOWN_DRAIN_TIMEOUT`] — for the connection threads
+/// to finish, so nothing is still reading or writing the run's files once it returns (T-236).
 pub struct Server {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    shared: Arc<Shared>,
     stream_server: Option<crate::tcp::StreamServer>,
 }
 
@@ -325,16 +356,20 @@ impl Server {
         let shared = Arc::new(Shared {
             config,
             state,
-            active: AtomicUsize::new(0),
+            conns: Mutex::new(Conns::default()),
+            idle: Condvar::new(),
+            abandoned: AtomicUsize::new(0),
         });
         let stop_flag = Arc::clone(&stop);
+        let accepting = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name("hk-api-accept".into())
-            .spawn(move || accept_loop(listener, shared, stop_flag))?;
+            .spawn(move || accept_loop(listener, accepting, stop_flag))?;
         Ok(Self {
             addr,
             stop,
             thread: Some(thread),
+            shared,
             stream_server: None,
         })
     }
@@ -354,7 +389,11 @@ impl Server {
         self.stream_server.as_ref()
     }
 
-    /// Stops accepting and joins the accept thread.
+    /// Stops accepting, joins the accept thread, then closes every open connection and waits for
+    /// its handler thread to finish, bounded by [`SHUTDOWN_DRAIN_TIMEOUT`] (T-236). After this
+    /// returns, no connection thread is still touching the run's data directory (the audit log,
+    /// the database and its WAL, the observation log, the IQ ring) — a caller may delete it.
+    /// Idempotent, and called by `Drop`.
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let mut wake = self.addr;
@@ -365,6 +404,55 @@ impl Server {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+        self.drain_connections();
+    }
+
+    /// Connection threads this server abandoned at the shutdown deadline (cumulative). Zero unless
+    /// a handler was stuck in compute: a stalled *peer* never counts here, because shutdown closes
+    /// its socket instead of waiting for it.
+    pub fn abandoned_connections(&self) -> usize {
+        self.shared.abandoned.load(Ordering::SeqCst)
+    }
+
+    /// Closes every open connection's socket, then waits for its thread to retire itself.
+    ///
+    /// Only the shutdown path runs this; the capture and audio paths never touch `conns`, and no
+    /// request handler holds this lock (it is taken around the spawn and around the guard's drop,
+    /// never across `handle_connection`).
+    fn drain_connections(&self) {
+        let deadline = Instant::now() + SHUTDOWN_DRAIN_TIMEOUT;
+        let mut conns = lock_conns(&self.shared);
+        // Closing the sockets first is what bounds this in practice: a handler blocked reading a
+        // stalled client's request head, or parked in `bridge::watch_peer` on a WebSocket peer
+        // that never closes, fails its read immediately instead of holding shutdown open for its
+        // own (much longer) socket timeout. Queued response bytes are still flushed: this is a
+        // shutdown, not an abort.
+        for sock in conns.open.values() {
+            let _ = sock.shutdown(Shutdown::Both);
+        }
+        while !conns.open.is_empty() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            // A retiring guard removes its entry under this same mutex before signalling, so a
+            // wakeup can never be lost between the check above and this wait.
+            let (guard, _) = self
+                .shared
+                .idle
+                .wait_timeout(conns, left)
+                .unwrap_or_else(PoisonError::into_inner);
+            conns = guard;
+        }
+        let abandoned = conns.open.len();
+        drop(conns);
+        if abandoned > 0 {
+            self.shared.abandoned.fetch_add(abandoned, Ordering::SeqCst);
+            eprintln!(
+                "hk-api: shutdown abandoned {abandoned} connection thread(s) still running after \
+                 {SHUTDOWN_DRAIN_TIMEOUT:?} (their sockets are closed)"
+            );
+        }
     }
 }
 
@@ -374,11 +462,19 @@ impl Drop for Server {
     }
 }
 
-struct ActiveGuard(Arc<Shared>);
+/// Retires a connection when its handler thread ends: drops its socket from the registry and wakes
+/// a [`Server::drain_connections`] waiting for the last one.
+struct ActiveGuard(Arc<Shared>, u64);
 
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        self.0.active.fetch_sub(1, Ordering::SeqCst);
+        let mut conns = lock_conns(&self.0);
+        conns.open.remove(&self.1);
+        let empty = conns.open.is_empty();
+        drop(conns);
+        if empty {
+            self.0.idle.notify_all();
+        }
     }
 }
 
@@ -388,11 +484,21 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<AtomicBool>
             break;
         }
         let Ok(stream) = conn else { continue };
-        if shared.active.fetch_add(1, Ordering::SeqCst) >= shared.config.max_connections {
-            shared.active.fetch_sub(1, Ordering::SeqCst);
-            continue; // dropped: closes the connection
-        }
-        let guard = ActiveGuard(Arc::clone(&shared));
+        let guard = {
+            let mut conns = lock_conns(&shared);
+            if conns.open.len() >= shared.config.max_connections {
+                continue; // dropped: closes the connection
+            }
+            // The clone is only ever used to close the socket at shutdown. A clone that fails (fd
+            // exhaustion) drops the connection rather than leaving a handler shutdown can't reach.
+            let Ok(sock) = stream.try_clone() else {
+                continue;
+            };
+            let id = conns.next;
+            conns.next += 1;
+            conns.open.insert(id, sock);
+            ActiveGuard(Arc::clone(&shared), id)
+        };
         let spawned = thread::Builder::new()
             .name("hk-api-conn".into())
             .stack_size(256 * 1024)
