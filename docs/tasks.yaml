@@ -4449,7 +4449,7 @@ tasks:
   - id: T-260
     milestone: MUI
     title: 'ADR-0017 TM-3: Explore sends the viewed waterfall window; Candidates are window-scoped and Confirmed are ALWAYS listed'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-250
@@ -4561,7 +4561,7 @@ tasks:
   - id: T-267
     milestone: M4
     title: 'M4 control-channel hunting: continuous 4FSK/C4FM on the LMR raster, confirmed by frame sync AND valid CRC'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-266
@@ -4809,6 +4809,57 @@ tasks:
       two rows. Report the full list with which category each falls into. This is a
       measurement-honesty audit, not a tuning exercise: no threshold moves'
     area: crates/hk-context (signature features), crates/hk-classify (instantaneous statistics)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-282
+    milestone: M2-hardening
+    title: 'Four use cases flagged uncertain by the T-258 capability audit: is a
+      ham-microwave transverter or an induction-coil front end a realistic accessory?'
+    status: todo
+    priority: low
+    deps: []
+    parallel_group: DOCS
+    use_cases:
+    - PROP-045
+    - PROP-046
+    - SPACE-042
+    - SPACE-048
+    found_by: 'T-258 (2026-09-16), which listed them rather than guessing'
+    acceptance: 'decide, with the user, whether each is needs-accessory or out-of-band.
+      PROP-045/PROP-046 (10-40 GHz): ham-microwave transverters for 10/24/47 GHz genuinely
+      exist, unlike DSN X-band gear, so the accessory may be real. SPACE-042 and SPACE-048
+      (ELF/ULF) need an induction coil plus a low-frequency ADC, not the plain soundcard
+      SPACE-048''s own note calls insufficient. A judgement about what the user would
+      actually buy, not a fact about the band - ask rather than infer'
+    area: docs/use-cases.yaml, docs/06-capability-map.md
+    needs: user judgement on accessory realism
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-283
+    milestone: M2-hardening
+    title: 'hk-ml conformance fails under concurrency: the shadow-host provenance test
+      failed once at conformance.rs:416 under four concurrent worktrees, passes 3/3 isolated'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    use_cases: []
+    found_by: 'coordinator 2026-09-16: fc17 (01:49:13, after T-250 merged at 01:46:38)
+      caught it during a post-merge full check while four worktrees were building; three
+      isolated runs on the same tree passed'
+    acceptance: 'establish whether this is a timing assumption in the test or a real
+      contention defect in the model host, with evidence. The test counts LATE REQUESTS
+      and the batching defaults are delay <= 20 ms, batch <= 32 (ADR-0016), so a
+      wall-clock deadline measured on a loaded machine is the obvious suspect - check it
+      FIRST but measure rather than assume. Reproduce under deliberate load, n >= 20, and
+      report the rate loaded vs isolated. If it is a wall-clock assumption, convert it to
+      the sample-clock or queue-depth terms T-228 established rather than widening a
+      timeout. Do NOT add a nextest retry or pin: this project has been removing those,
+      and a retry would hide a genuine contention bug in the host'
+    area: crates/hk-ml (host batching, deadline accounting), crates/hk-ml/tests/conformance.rs
     needs: none
     model: opus
     effort: medium
