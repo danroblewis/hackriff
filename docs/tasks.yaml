@@ -7270,6 +7270,37 @@ tasks:
       The rule must stay claim-nothing at the boundary: a visit STRADDLING a switch is
       Unknown, not assigned by midpoint. Control: the 9:1 majority case from T-359
       still yields Unknown, i.e. this must not become a dominance rule by the back door.
+  - id: T-373
+    title: A level-0 cell's occupancy was decided at ingest against a floor every front end feeds,
+      so a per-chain read can still inherit another chain's threshold
+    milestone: M4
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    deps: [T-314]
+    notes: |
+      T-314 made every occupancy read per-chain, and the level statistics (max/mean/p_low/floor)
+      are now that chain's alone. `CellStats::occupancy` is not: it was decided when the frame was
+      FOLDED, against `Pyramid`'s own tracked per-frequency-block floor (`column_stats`: thr =
+      floor[f] + margin), and that tracker is fed by every front end - as is the pipeline's
+      `NoiseFloorTracker`, one per run, not one per device. So a tile that is PURE in origin can
+      carry an occupancy decided against another chain's floor. No read-side filter can undo it:
+      the decision is baked into the stored cell.
+      MEASURED CONSEQUENCE (T-314, `occupancy_ingest_time_floor_is_still_pooled_across_front_ends`):
+      chain B at -70 dBFS/Hz beside chain A at -100 reads its own level and its own floor
+      correctly, and yet `local_floors` sees a dense neighbourhood (occupancy 1.0 from A's floor),
+      flags the floor SUSPECT, and `channel_level_excess` declines - so the baseline folds NOTHING
+      for chain B. Ingested alone, the identical frames fold an excess of 0.00 dB.
+      The direction is safe (withholding, never mis-stating, never the other chain's value), which
+      is why T-314 landed without it. The fix is per-origin floor tracking at ingest: `FrameInput`
+      already carries `source`, so the tracker and `Pyramid::floors` can key on it the way T-331
+      keyed the floor tracker on the bias tee.
+      DO NOT fix it by reading the suspect flag differently: the flag is correct about the cell it
+      describes. The cell is what is wrong.
+      Test: the existing pin inverts - chain B beside chain A folds the SAME excess it folds alone -
+      with the pooled control still showing the cross-chain occupancy, so the fix cannot pass by
+      disabling the density rule.
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
