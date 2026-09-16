@@ -44,7 +44,8 @@ jobs:
       # T-077: cargo-nextest runs the workspace in parallel, with heavy/timing-sensitive tests
       # (tests/e2e, hk-pipeline listen/retune/lossless/refine/stream, hk-api, hk-cli, hk-core ring
       # stress/concurrency) pinned to a serial group by .config/nextest.toml.
-      # hk-e2e (harness smoke tests + the M0 acceptance suite) runs in the `acceptance` job.
+      # hk-e2e is excluded here: its harness and acceptance targets are the `acceptance` job's
+      # `just acceptance-ci`, matching `just test`'s own exclusion of the crate.
       - name: cargo nextest run
         env:
           HK_E2E_REQUIRE_SYNTH: "1"
@@ -58,9 +59,26 @@ jobs:
         working-directory: py
         run: uv run --locked pytest
 
-  # T-024: the M0 vertical-slice acceptance suite (docs/11 §1.1) plus the hk-e2e harness tests.
-  # LFS checkout supplies the real FM fixture; uv generates the synthetic scenarios. Both are
-  # required here (a missing one fails instead of skipping). readsb is not installed, so only the
+  # The acceptance gate (T-024, T-357): the M0 vertical-slice acceptance suite (docs/11 §1.1) plus
+  # the hk-e2e harness targets — mock device, Listen, recording, streaming, refinement, the C-stage
+  # floor acceptance and the pipeline smoke tests — preceded by a census that fails if any hk-e2e
+  # target belongs to no gate list.
+  #
+  # The gate is the `just acceptance-ci` recipe, not a command line kept here. This job used to run
+  # `cargo test -p hk-e2e`, which auto-discovers every target in the crate, so the M0 suite it was
+  # written for had quietly grown into all fourteen targets — the M2/M3/M4/chirp milestone exit
+  # gates included — with nobody ever editing this file. That is T-353's drift with the sign
+  # reversed: a private copy of a gate does not stay equal to the gate, whether it checks less or
+  # more. Calling the recipe makes the two one definition, and the recipe names its targets
+  # explicitly, so a new acceptance suite can no longer enlist itself into CI (nor go unrun: the
+  # census fails on a target in no list).
+  #
+  # The milestone exit gates are `just acceptance-milestones`, run deliberately at milestone
+  # boundaries rather than per push — the justfile says why.
+  #
+  # LFS checkout supplies the real fixtures; uv generates the synthetic scenarios. The recipe sets
+  # HK_REQUIRE_FIXTURES=1 and HK_E2E_REQUIRE_SYNTH=1 itself — a missing one fails instead of
+  # skipping — so this job holds no copy of that either. readsb is not installed, so only the
   # real-plugin half of SIGNAL-001 skips (logged); its pipeline + plugin-output plumbing still runs.
   acceptance:
     runs-on: ubuntu-latest
@@ -73,12 +91,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # ubuntu-latest has no `just`; same pinned prebuilt download the test job uses (T-353).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.58.0
+
+      # uv must exist before the recipe: the hk-e2e harness generates synthetic IQ via py/.
       - uses: astral-sh/setup-uv@v6
 
-      - name: hk-e2e and M0 acceptance suite
-        env:
-          HK_E2E_REQUIRE_SYNTH: "1"
-          HK_REQUIRE_FIXTURES: "1"
-        run: |
-          cargo build -p hk-plugins --bins
-          cargo test -p hk-e2e -- --nocapture
+      - name: just acceptance-ci
+        run: just acceptance-ci
