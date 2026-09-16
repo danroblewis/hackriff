@@ -96,6 +96,24 @@ fn dummy_ready_manifest(dir: &Path, exe: &Path, args: &[&str]) -> PathBuf {
     path
 }
 
+/// [`dummy_ready_manifest`] with an explicit live readiness bound (`limits.ready_timeout_ms`),
+/// written as `name` so two manifests can live in one directory (T-224).
+fn ready_manifest_with_bound(
+    dir: &Path,
+    exe: &Path,
+    args: &[&str],
+    ready_timeout_ms: u64,
+    name: &str,
+) -> PathBuf {
+    let base = dummy_manifest(dir, exe, args, 8 << 20);
+    let mut m: serde_json::Value = serde_json::from_slice(&std::fs::read(&base).unwrap()).unwrap();
+    m["input"]["ready_signal"] = json!(true);
+    m["limits"]["ready_timeout_ms"] = json!(ready_timeout_ms);
+    let path = dir.join(name);
+    std::fs::write(&path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    path
+}
+
 /// A plan extra whose only chain is a dummy-plugin coverage chain over `center ± 0.5 MHz`.
 fn coverage_plan(center: f64, manifest: &Path) -> serde_json::Value {
     json!({ "pipeline": { "chains": [{
@@ -258,6 +276,112 @@ fn a_plugin_that_declares_readiness_is_not_fed_until_it_is_ready() {
     assert!(
         s.counter("/chains/plugin_decodes") > 0,
         "the plugin decoded nothing"
+    );
+}
+
+/// T-224: a live chain's readiness wait is bounded by the manifest, and by shutdown. The plugin
+/// here declares `input.ready_signal` and never sends the line, with a 25 s bound; before the fix
+/// the chain thread sat in that wait, so a stop (or a detach) could not end the run until the
+/// whole bound had elapsed. The wait now breaks on `shared.stop`, exactly as the backpressure
+/// wait does, and a stop is not counted as a readiness timeout.
+#[test]
+fn a_stop_during_the_readiness_wait_ends_the_run_without_waiting_out_the_bound() {
+    let src = TempDir::new("readystop-src");
+    let dir = TempDir::new("readystop");
+    let Some(exe) = dummy_plugin(&dir.0) else {
+        return;
+    };
+    // Live (real-time) replay: the chain cannot hold capture, so it is the bounded wait that runs.
+    let meta = tone_recording(&src.0, "live", 2.4e6, 1.5, 1090e6, None);
+    let manifest = ready_manifest_with_bound(
+        &src.0,
+        &exe,
+        &["--every", "1", "--profile", "adsb-like"],
+        25_000,
+        "never-ready-long.json",
+    );
+    let (cfg, replay, _input) = blind_replay_config(
+        &dir.0,
+        &meta,
+        coverage_plan(1090e6, &manifest),
+        Pacing::RealTime { speed: 1.0 },
+    );
+    assert!(!cfg.lossless, "a live chain, so the bounded wait applies");
+    let handle = start(cfg, replay);
+    let counters = handle.counters();
+    let stopper = handle.stopper();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while counters.chains.attached.load(Ordering::Relaxed) == 0 {
+        assert!(Instant::now() < deadline, "no chain ever attached");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Inside the readiness wait: the plugin is attached and will never report ready.
+    std::thread::sleep(Duration::from_millis(300));
+    let t0 = Instant::now();
+    stopper.stop();
+    let s = handle.wait().unwrap();
+    let stopped_in = t0.elapsed();
+    eprintln!("{}", s.to_text());
+    assert!(
+        stopped_in < Duration::from_secs(10),
+        "the run took {stopped_in:?} to stop: the readiness wait ignored the stop"
+    );
+    assert_eq!(s.counter("/chains/attached"), 1);
+    assert_eq!(
+        s.counter("/chains/plugin_ready_timeouts"),
+        0,
+        "a stop is not a readiness timeout"
+    );
+}
+
+/// T-223/T-224: the live branch of the readiness wait. A plugin that declares `input.ready_signal`
+/// and never sends the line cannot hold a live chain back for ever: the chain waits the
+/// manifest's `ready_timeout_ms`, counts the timeout, then feeds it anyway, and every record fed
+/// to the process that never accounted for itself is counted (`plugin_fed_before_ready`, which
+/// before T-224 stayed 0 for a plugin that never reported ready at all).
+#[test]
+fn a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait() {
+    let src = TempDir::new("readytimeout-src");
+    let dir = TempDir::new("readytimeout");
+    let Some(exe) = dummy_plugin(&dir.0) else {
+        return;
+    };
+    let meta = tone_recording(&src.0, "live", 2.4e6, 2.5, 1090e6, None);
+    let manifest = ready_manifest_with_bound(
+        &src.0,
+        &exe,
+        &["--every", "1", "--profile", "adsb-like"],
+        500,
+        "never-ready-short.json",
+    );
+    let (cfg, replay, _input) = blind_replay_config(
+        &dir.0,
+        &meta,
+        coverage_plan(1090e6, &manifest),
+        Pacing::RealTime { speed: 1.0 },
+    );
+    assert!(!cfg.lossless);
+    let (s, fired) = wait_guarded(start(cfg, replay), Duration::from_secs(120));
+    eprintln!("{}", s.to_text());
+    assert!(!fired, "the run did not finish; the watchdog stopped it");
+    assert!(s.errors.is_empty(), "{:?}", s.errors);
+    assert_eq!(s.counter("/chains/attached"), 1);
+    assert_eq!(
+        s.counter("/chains/plugin_ready_timeouts"),
+        1,
+        "the live chain gave up on readiness exactly once"
+    );
+    assert!(
+        s.counter("/chains/plugin_samples") > 0,
+        "the chain fed the plugin after its bounded wait"
+    );
+    assert!(
+        s.counter("/chains/plugin_fed_before_ready") > 0,
+        "records fed to a plugin that never reported ready are counted"
+    );
+    assert!(
+        s.counter("/chains/plugin_decodes") > 0,
+        "the plugin decoded what it was fed"
     );
 }
 

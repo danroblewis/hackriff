@@ -15,7 +15,11 @@
 //! decoder that is still setting up (the readsb wrapper's Beast connection took 1.6 s under load,
 //! and the squitters fed meanwhile decoded without their sample time). A lossless replay waits as
 //! long as a lossless push would; a live chain waits at most the manifest's `ready_timeout`, then
-//! feeds anyway and counts it (`plugin_ready_timeouts`, `plugin_fed_before_ready`).
+//! feeds anyway and counts it (`plugin_ready_timeouts`, `plugin_fed_before_ready`). Both waits end
+//! at once on shutdown (T-224), like the backpressure wait below. A live chain reads nothing from
+//! the ring while it waits, so up to `ready_timeout` of live samples can lap into `lost_samples`
+//! (as they can during the 15 s wait for `Running` that precedes it): the bound is a sample-loss
+//! budget, which is why the readsb manifest sets it explicitly (docs/stream-contract.md §9.6).
 //!
 //! **Backpressure (lossless replay, T-037b).** Plugin input is drop-not-block, which is right for
 //! a live source but lost decodes when an unpaced recording outran the plugin (readsb's 8 MiB
@@ -88,6 +92,31 @@ fn wait_for_room(
             inc(&c.plugin_waits);
         }
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Waits for a plugin that declares `input.ready_signal` to report itself ready (T-223), bounded
+/// by `timeout` **and** by shutdown: like [`wait_for_room`], it gives up at once on `stop`, so a
+/// plugin that declares readiness and never signals cannot hold this chain thread for the whole
+/// bound past a stop or a detach (T-224). Returns whether the plugin is ready.
+fn wait_ready_or_stop(inst: &PluginInstance, timeout: Duration, stop: &AtomicBool) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mon = inst.monitor();
+    loop {
+        let s = mon.stats();
+        if s.ready {
+            return true;
+        }
+        if stop.load(Ordering::SeqCst)
+            || matches!(s.state, PluginState::Failed | PluginState::Stopped)
+        {
+            return false;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(2)));
     }
 }
 
@@ -261,7 +290,9 @@ fn run_inner(
         } else {
             ready_timeout
         };
-        if !inst.wait_ready(wait) {
+        // Bounded by the timeout and by shutdown (T-224): a stop or detach must not wait out a
+        // plugin that never signals. A stop is not a readiness timeout, so it is not counted.
+        if !wait_ready_or_stop(&inst, wait, &shared.stop) && !shared.stop.load(Ordering::SeqCst) {
             inc(&c.plugin_ready_timeouts);
             eprintln!(
                 "hk-pipeline: plugin {plugin_id} was not ready within {wait:?}; feeding anyway"
