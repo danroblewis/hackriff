@@ -6273,7 +6273,7 @@ tasks:
     milestone: M2-hardening
     title: A bias-tee switch is not a device provenance step, so switching it can raise a spurious floor-rise
       anomaly
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-325
