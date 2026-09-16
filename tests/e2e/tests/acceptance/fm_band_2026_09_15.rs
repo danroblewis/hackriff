@@ -108,9 +108,12 @@ fn fm_band_every_measured_emission_is_found_blind() {
     );
     // Each annotated emission detected within frequency/extent/time tolerance, and — for the two
     // measured to be WFM broadcast (a 19 kHz pilot, +35.5 dB and +8.7 dB over 45 s) — an FM
-    // broadcast explanation in the top-k. The third emission's modulation could not be measured,
-    // so its kind carries no expected service and only detection is asserted: the band plan is
-    // never allowed to name what the measurement did not (AWARE-053, docs/10 §3.2 "DB-as-truth").
+    // broadcast explanation in the top-k. The third emission carries no modulation at all — T-317
+    // identified it as harmonic 43 of a free-running ~2.3364 MHz oscillator, so its 28 kHz is that
+    // oscillator's frequency noise multiplied by 43 — and its kind (`oscillator-harmonic`) has no
+    // expected service, so only detection is asserted. The one band-plan row here is
+    // `fm-broadcast`, which is precisely what the measurement rules out; letting it name this
+    // emission would be DB-as-truth (AWARE-053, docs/10 §3.2).
     let found = assert_truth_found(SIGNAL_062, &r.dir.0, &r.fx, 0.0, true);
     assert_eq!(
         found.len(),

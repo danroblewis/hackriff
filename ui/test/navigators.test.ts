@@ -16,18 +16,26 @@
 //     spectrum-history horizon — control: a body whose history horizon is a thousand times longer
 //     still yields the ring's span;
 //  3. a pan on either navigator **reaches no device route**, at any distance — T-343's control,
-//     restated for the surface the user asked to be able to set the centre from.
+//     restated for the surface the user asked to be able to set the centre from;
+//  4. **(T-367)** the two bars control *different* axes — the time navigator's overview is scoped
+//     to the selected frequency range and follows it, the frequency navigator's content is
+//     untouched by the time selection — control: after a gesture on either bar, the *other* axis's
+//     slice is the same object, by `Object.is`, and the source of each mount names none of the
+//     other's writers.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as ax from "../src/axis";
 import { snapState, type NavigationGrid } from "../src/navigation";
 import {
-  activeWindows, clampInto, litSegments, panWithin, placeOn, regionFromDrag, spectrumExtent,
-  timeExtent, valueAt, zoomWithin,
+  activeWindows, bandKey, clampInto, litSegments, panWithin, placeOn, regionFromDrag, sameBand,
+  spectrumExtent, timeExtent, timelineRequest, valueAt, zoomWithin, type Range,
 } from "../src/navigators";
-import { captureWindow } from "../src/app/capture/timeline";
-import { freqPan, freqZoomTarget, timeDetailText, timeZoomTarget } from "../src/app/centre/navigators";
+import { captureWindow, currentSpan } from "../src/app/capture/timeline";
+import {
+  applyFreqZoom, applyTimeTarget, freqPan, freqZoomTarget, timeDetailText, timePanTarget,
+  timeWheelTarget, timeZoomTarget,
+} from "../src/app/centre/navigators";
 import { mounts } from "../src/app/centre";
 import { historyWindow, sameCursor } from "../src/app/centre/review-render";
 import { centreInitial, setNavigation } from "../src/app/centre/slice";
@@ -411,4 +419,203 @@ test("T-340: no signal logic or RF constant lives in the navigator modules", () 
     // No literal frequency: every Hz in these files came from the backend's grid.
     assert.ok(!/\b\d{6,}(\.\d+)?\b/.test(src), `${f} must not contain a hard-coded frequency`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// T-367: the two bars control DIFFERENT axes
+// ---------------------------------------------------------------------------
+//
+// The user's correction to T-340: *"the left vertical bar is the TIME navigator: it selects the
+// time range and shows a compressed history waterfall **of the currently-selected frequency range
+// only** (not the whole spectrum) — it never changes frequency. The bottom horizontal bar is the
+// FREQUENCY navigator … it never scrubs time."*
+//
+// The property is a pair, and both halves are asserted below:
+//
+//   a. the time navigator's overview **changes** when the selected frequency range changes;
+//   b. the frequency navigator's content does **not** change when the time selection changes.
+//
+// The control for each gesture is stronger than "looks right": the *other* axis's slice comes out
+// of the store **bit-identical** — the same object, by `Object.is`, not merely deep-equal.
+
+/** The state the time navigator derives its band from, as the mount reads it. */
+const bandOf = (s: ReturnType<typeof initialState>) => currentSpan({ live: s.live.view, device: s.device });
+
+test("T-367 property (a): the time navigator's overview is scoped to the SELECTED frequency range, and follows it", () => {
+  const { ctx } = deviceSpyCtx();
+  const cols = 160, rows = 6;
+
+  // The main view is zoomed inside the tuned 2.4 MHz window: 99.5–100.5 MHz.
+  const first = bandOf(ctx.store.get())!;
+  assert.deepEqual(first, { loHz: 99.5e6, hiHz: 100.5e6 });
+  const reqA = timelineRequest(first, cols, rows);
+  assert.ok(reqA.includes(`f_lo=${99.5e6}`) && reqA.includes(`f_hi=${100.5e6}`), reqA);
+
+  // THE CONTROL that rules out "pass the tuned band and call it scoped". The device is tuned to
+  // 100 MHz at 2.4 Msps, so the tuned band is 98.8–101.2 MHz — and that is NOT what is asked for.
+  assert.ok(!reqA.includes(`f_lo=${98.8e6}`), `the request must carry the selected range, not the tuned band: ${reqA}`);
+
+  // Move the frequency selection: the request follows it. The two are different requests, which is
+  // the whole property — an overview that ignored the range would be byte-identical here.
+  ctx.store.set(setLiveView({ loHz: 100.1e6, hiHz: 100.3e6 }));
+  const second = bandOf(ctx.store.get())!;
+  const reqB = timelineRequest(second, cols, rows);
+  assert.notEqual(reqA, reqB);
+  assert.ok(reqB.includes(`f_lo=${100.1e6}`) && reqB.includes(`f_hi=${100.3e6}`), reqB);
+  assert.equal(sameBand(first, second), false);
+  assert.notEqual(bandKey(first), bandKey(second));
+
+  // THE OTHER CONTROL: with no range selected the bar asks for no picture — it does NOT widen to
+  // the whole spectrum. `/api/timeline` answers a null grid with no region, and drawing nothing is
+  // the honest answer; the device-available spectrum's edges appear nowhere in the request.
+  const none = timelineRequest(null, cols, rows);
+  assert.ok(!none.includes("f_lo") && !none.includes("f_hi"), none);
+  const ext = spectrumExtent(GRID.frequency)!;
+  for (const edge of [ext.lo, ext.hi]) assert.ok(!none.includes(String(edge)), `${none} names the spectrum extent`);
+  // Both still ask for the same cells: the shape of the picture is the bar's, its span is not.
+  for (const r of [reqA, reqB, none]) assert.ok(r.includes(`columns=${cols}`) && r.includes(`rows=${rows}`), r);
+
+  // A degenerate range is no range rather than a zero-width request.
+  assert.equal(bandKey({ loHz: 100e6, hiHz: 100e6 }), "");
+  assert.equal(timelineRequest({ loHz: 100e6, hiHz: 100e6 }, cols, rows), none);
+  assert.equal(sameBand(null, null), true);
+
+  // And with nothing zoomed the band falls back to what the device is tuned to — still a frequency
+  // range, still not the spectrum.
+  ctx.store.set((s) => ({
+    live: { ...s.live, view: null },
+    device: { ...s.device, centerHz: 100e6, sampleRateHz: 2.4e6 },
+  }));
+  assert.deepEqual(bandOf(ctx.store.get()), { loHz: 98.8e6, hiHz: 101.2e6 });
+  // With neither, there is no range — and that is *no picture*, never the whole spectrum.
+  ctx.store.set((s) => ({ device: { ...s.device, centerHz: null, sampleRateHz: null } }));
+  assert.equal(bandOf(ctx.store.get()), null);
+  assert.equal(timelineRequest(bandOf(ctx.store.get()), cols, rows), none);
+});
+
+test("T-367 property (b): the frequency navigator's content does not change when the time selection changes", () => {
+  const { ctx } = deviceSpyCtx();
+  /** Everything the frequency bar draws: its extent, its lit segments, and the view marker. */
+  const content = () => {
+    const s = ctx.store.get();
+    const ext = spectrumExtent(s.navGrid.grid?.frequency ?? null);
+    const v = s.live.view;
+    return { ext, segs: litSegments(s.navGrid.windows, ext), marker: v ? placeOn(ext, v.loHz, v.hiHz) : null };
+  };
+  const before = content();
+  const liveBefore = ctx.store.get().live, gridBefore = ctx.store.get().navGrid;
+  assert.equal(before.segs.length, 1);
+
+  // Scrub, zoom and return to live on the time bar — every gesture the vertical bar has.
+  const t1 = 1_789_300_920;
+  const ext: Range = timeExtent({ t0S: t1 - 600, t1S: t1, spanS: 600 })!;
+  applyTimeTarget(ctx.store, timePanTarget(ext, { live: true, tS: 0, spanS: null }, -0.5));
+  applyTimeTarget(ctx.store, timeWheelTarget(ext, { live: false, tS: t1 - 300, spanS: 30 }, 4));
+  const region = regionFromDrag(ext, 0.2, 0.6)!;
+  applyTimeTarget(ctx.store, { live: false, tS: region.hi, spanS: region.hi - region.lo });
+
+  assert.equal(ctx.store.get().time.live, false, "the time cursor must actually have moved");
+  assert.deepEqual(content(), before, "a time gesture must not change what the frequency bar draws");
+  // Bit-identical, not merely equal: the frequency slices are the very same objects.
+  assert.ok(Object.is(ctx.store.get().live, liveBefore), "state.live must be the same object after a time gesture");
+  assert.ok(Object.is(ctx.store.get().navGrid, gridBefore), "state.navGrid must be the same object after a time gesture");
+});
+
+test("T-367 control: dragging the vertical bar changes only time — the frequency slice is bit-identical", () => {
+  const { ctx, calls } = deviceSpyCtx();
+  const t1 = 1_789_300_920;
+  const ext: Range = timeExtent({ t0S: t1 - 600, t1S: t1, spanS: 600 })!;
+
+  for (const df of [-0.001, -0.25, -1, 0.5, 1]) {
+    const before = ctx.store.get();
+    applyTimeTarget(ctx.store, timePanTarget(ext, { live: false, tS: t1 - 300, spanS: 20 }, df));
+    const after = ctx.store.get();
+    assert.ok(Object.is(after.live, before.live), `a pan of ${df} moved the frequency view`);
+    assert.ok(Object.is(after.device, before.device), `a pan of ${df} moved the device state`);
+  }
+  // The gesture is not inert: panning back reaches the live edge, panning away leaves it.
+  assert.equal(timePanTarget(ext, { live: false, tS: t1 - 300, spanS: 20 }, 1).live, true);
+  const back = timePanTarget(ext, { live: true, tS: 0, spanS: null }, -0.5);
+  assert.equal(back.live, false);
+  near(!back.live ? back.tS : NaN, t1 - 300);
+  // A pan keeps the span it is reviewing — it moves along time, it does not rescale it.
+  const kept = timePanTarget(ext, { live: false, tS: t1 - 300, spanS: 20 }, -0.1);
+  assert.equal(!kept.live && kept.spanS, 20);
+  // Past the oldest edge it clamps, exactly as the frequency bar clamps at the band edge.
+  const oldest = timePanTarget(ext, { live: false, tS: t1 - 300, spanS: 20 }, -10);
+  near(!oldest.live ? oldest.tS : NaN, ext.lo);
+
+  // Wheel: the span changes, the instant stays on the bar, and still no frequency moves.
+  const beforeWheel = ctx.store.get();
+  const z = timeWheelTarget(ext, { live: false, tS: t1 - 100, spanS: 40 }, 4);
+  applyTimeTarget(ctx.store, z);
+  assert.equal(!z.live && z.spanS, 10);
+  assert.ok(Object.is(ctx.store.get().live, beforeWheel.live), "a time wheel zoom moved the frequency view");
+  // Bounded by the capture window, never below the view floor, and a nonsense factor is inert.
+  assert.equal((timeWheelTarget(ext, { live: false, tS: t1, spanS: 40 }, 1e-9) as { spanS: number }).spanS, 600);
+  assert.ok((timeWheelTarget(ext, { live: false, tS: t1, spanS: 1e-3 }, 1e9) as { spanS: number }).spanS >= 1e-3);
+  assert.deepEqual(timeWheelTarget(ext, { live: true, tS: 0, spanS: null }, 0), { live: true });
+
+  assert.deepEqual(calls, [], "no time gesture may reach the control API");
+});
+
+test("T-367 control: dragging the horizontal bar changes only frequency — the time cursor is bit-identical", () => {
+  const { ctx, calls } = deviceSpyCtx();
+  const ext = spectrumExtent(GRID.frequency)!;
+  const fracOf = (hz: number) => (hz - ext.lo) / (ext.hi - ext.lo);
+  // Start from a reviewed instant, so "the time cursor did not move" is a real thing to preserve.
+  const t1 = 1_789_300_920;
+  ctx.store.set(reviewAt(t1 - 42, 20));
+  const timeBefore = ctx.store.get().time;
+
+  // A pan across the bar.
+  for (const df of [0.001, 0.2, 1, -1]) {
+    const s = ctx.store.get();
+    ctx.store.set(setLiveView(freqPan(G, s.live.view!, ext, df).view));
+    assert.ok(Object.is(ctx.store.get().time, timeBefore), `a frequency pan of ${df} moved the time cursor`);
+  }
+
+  // A region dragged inside the tuned band: a view zoom.
+  const inside = regionFromDrag(ext, fracOf(99.6e6), fracOf(100.4e6))!;
+  applyFreqZoom(ctx.store, freqZoomTarget(GRID, G, inside, true));
+  assert.deepEqual(ctx.store.get().live.view, { loHz: inside.lo, hiHz: inside.hi });
+  assert.ok(Object.is(ctx.store.get().time, timeBefore), "a frequency zoom moved the time cursor");
+
+  // A region outside it: an offer. Still no time movement, and still no device reached.
+  const outside = regionFromDrag(ext, fracOf(432.0e6), fracOf(432.4e6))!;
+  applyFreqZoom(ctx.store, freqZoomTarget(GRID, G, outside, true));
+  assert.ok(ctx.store.get().live.retuneOffer, "the frequency gesture must still offer the retune");
+  assert.ok(Object.is(ctx.store.get().time, timeBefore), "offering a retune moved the time cursor");
+  assert.deepEqual(ctx.store.get().time, { live: false, tS: t1 - 42, spanS: 20 });
+  assert.deepEqual(calls, [], "no frequency gesture may reach the control API by itself");
+});
+
+test("T-367 control: the source wires each bar to one axis — no frequency writer in the time mount, no time writer in the frequency mount", () => {
+  const src = readFileSync("src/app/centre/navigators.ts", "utf8");
+  const at = (name: string) => {
+    const i = src.indexOf(`function ${name}(`);
+    assert.ok(i > 0, `${name} not found`);
+    return i;
+  };
+  // The file's two mounts, in source order: frequency first, then time, then the export.
+  const [fStart, tStart] = [at("mountFreqNav"), at("mountTimeNav")];
+  assert.ok(fStart < tStart);
+  const freqMount = src.slice(fStart, tStart);
+  const timeMount = src.slice(tStart, src.indexOf("export const navigatorMounts"));
+
+  // The vertical bar never changes frequency.
+  for (const w of ["setLiveView", "setRetuneOffer", "applyDeviceAction", "retuneAction", "applyFreqZoom", "setNavigation"]) {
+    assert.ok(!timeMount.includes(w), `the TIME navigator must not write the frequency axis (${w})`);
+  }
+  // The horizontal bar never scrubs time — the exact bug the user named.
+  for (const w of ["reviewAt", "goLive", "applyTimeTarget", "timePanTarget", "timeWheelTarget", "timeZoomTarget"]) {
+    assert.ok(!freqMount.includes(w), `the FREQUENCY navigator must not scrub time (${w})`);
+  }
+  // …and it is not that the time mount does nothing: it applies time targets, and its picture is
+  // asked for over a frequency range rather than over none.
+  for (const w of ["applyTimeTarget", "timePanTarget", "timeWheelTarget", "timelineRequest", "currentSpan"]) {
+    assert.ok(timeMount.includes(w), `the TIME navigator should use ${w}`);
+  }
+  // The regression itself: an unscoped `/api/timeline` request, which returns no grid at all.
+  assert.ok(!/\/api\/timeline\?columns/.test(src), "the time navigator must not ask for an unscoped overview");
 });
