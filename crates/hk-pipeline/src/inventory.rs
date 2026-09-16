@@ -252,6 +252,10 @@ pub struct TrackInventory {
     /// Entries this run's sightings and chains reached, oldest first (bounded).
     run: VecDeque<EmitterId>,
     run_set: HashSet<EmitterId>,
+    /// T-242: the sighting count each entry was last characterised at, so a re-offer that
+    /// measured nothing new costs one comparison instead of a match and a clustering pass.
+    /// Bounded with [`Self::run`].
+    characterised: HashMap<EmitterId, u64>,
     /// T-109: open tracks whose live offer created their entry; removed when the track closes,
     /// merges or joins a hop set (every open track ends in one of those).
     provisional: HashMap<TrackId, EmitterId>,
@@ -271,6 +275,12 @@ pub struct TrackInventory {
     pub duplicates: u64,
     /// T-219: candidates attributed to the source whose receiver artifact they are.
     pub artifacts: u64,
+    /// T-242: features snapshots written (one per re-measurement).
+    pub characterisations: u64,
+    /// T-242: signature matches computed and offered to the match log.
+    pub matches: u64,
+    /// T-242: characterisations that placed the emitter in a cluster of unknowns.
+    pub clustered: u64,
 }
 
 impl Default for TrackInventory {
@@ -288,6 +298,7 @@ impl TrackInventory {
             policy,
             run: VecDeque::new(),
             run_set: HashSet::new(),
+            characterised: HashMap::new(),
             provisional: HashMap::new(),
             retracted: 0,
             sightings: 0,
@@ -297,6 +308,9 @@ impl TrackInventory {
             suppressed: 0,
             duplicates: 0,
             artifacts: 0,
+            characterisations: 0,
+            matches: 0,
+            clustered: 0,
         }
     }
 
@@ -319,6 +333,7 @@ impl TrackInventory {
                 && let Some(old) = self.run.pop_front()
             {
                 self.run_set.remove(&old);
+                self.characterised.remove(&old);
             }
         }
     }
@@ -490,11 +505,7 @@ impl Inventory for TrackInventory {
         emitter: EmitterId,
     ) -> Result<(), RepoError> {
         let id = self.link(repo, emitter)?;
-        if let Some(table) = &self.table {
-            explain_emitter(repo, table, id)?;
-        }
-        self.review(repo, id, None)?;
-        self.resolve_overlaps(repo, id)
+        self.touch(repo, id, None)
     }
 }
 
@@ -548,12 +559,59 @@ impl TrackInventory {
         self.sightings += 1;
         self.created += u64::from(r.created);
         let id = self.link(repo, r.emitter_id)?;
+        self.touch(repo, id, trust)?;
+        Ok((r.emitter_id, r.created))
+    }
+
+    /// **The one place a touched entry is worked over** (T-242): ranked explanations and known
+    /// status (T-039), then characterisation — the features snapshot, the C18 signature match
+    /// (T-201) and the cluster of unknowns (T-202) — then the confirmation review (T-078) and
+    /// overlap resolution (T-219).
+    ///
+    /// Both seams that reach an entry (a track or hop-set sighting, and a chain write) go through
+    /// here, so a match and a cluster are written from the same measurement in one place rather
+    /// than wired twice.
+    fn touch(
+        &mut self,
+        repo: &mut Repository,
+        id: EmitterId,
+        trust: Option<TrackTrust>,
+    ) -> Result<(), RepoError> {
         if let Some(table) = &self.table {
             explain_emitter(repo, table, id)?;
         }
+        self.characterise(repo, id, trust)?;
         self.review(repo, id, trust)?;
-        self.resolve_overlaps(repo, id)?;
-        Ok((r.emitter_id, r.created))
+        self.resolve_overlaps(repo, id)
+    }
+
+    /// T-242: aggregates what this entry has measured and asks the catalogue and the clusterer
+    /// about it ([`crate::characterise`], which documents where this runs and what bounds it).
+    ///
+    /// Skipped when the entry's sighting count has not moved since it was last characterised: a
+    /// live re-offer of an open track (T-109) is the same measurement again, and the match log is
+    /// history of what was *said*, not of how often it was asked.
+    fn characterise(
+        &mut self,
+        repo: &mut Repository,
+        id: EmitterId,
+        trust: Option<TrackTrust>,
+    ) -> Result<(), RepoError> {
+        let e = repo.emitter(id)?;
+        if self.characterised.get(&id) == Some(&e.count) {
+            return Ok(());
+        }
+        self.characterised.insert(id, e.count);
+        // A sighting whose detections were mostly suspect (spur, image, IMD, clipping) is folded
+        // in as suspect, so nothing is ever minted from an all-suspect emitter (C18 card).
+        let suspect = trust.is_some_and(|t| t.suspect_fraction > self.policy.max_suspect_fraction);
+        let Some(out) = crate::characterise::characterise(repo, id, suspect, e.last_seen)? else {
+            return Ok(());
+        };
+        self.characterisations += 1;
+        self.matches += u64::from(out.signature_match.is_some());
+        self.clustered += u64::from(out.cluster.is_some_and(|a| a.cluster_id.is_some()));
+        Ok(())
     }
 }
 
