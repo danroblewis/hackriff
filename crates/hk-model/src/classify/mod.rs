@@ -17,6 +17,7 @@
 
 pub mod fuse;
 pub mod rank;
+pub mod seed; // T-215 (ADR-0016 §8): the MAUTO seed interface
 pub mod taxonomy;
 pub mod thresholds;
 
@@ -27,6 +28,10 @@ use crate::time::Timestamp;
 
 pub use fuse::{FamilyPriorSet, FamilyPriors, Fused, InvalidPrior, NoPriors, StaticPriors, fuse};
 pub use rank::{ArbRank, DECODER_RULES_PREFIX};
+pub use seed::{
+    BudgetHint, ClusterPipeline, ClusterSeed, Hypothesis, OPEN_SEARCH_MIN_SHARE,
+    PRUNE_LIKELIHOOD_SHARE, SEED_SCHEMA, SearchSeed, SeedBoost, SeedInputs,
+};
 pub use taxonomy::{Coarse, HK_MOD_V1, Taxonomy, TaxonomyRef, UNKNOWN, family_of};
 pub use thresholds::{
     EVIDENCE_DOMINANCE_RATIO, FamilyThresholds, THRESHOLDS, THRESHOLDS_VERSION, passes_gate,

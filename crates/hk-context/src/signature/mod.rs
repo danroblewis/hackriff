@@ -18,6 +18,7 @@
 pub mod cluster;
 pub mod features;
 pub mod matcher;
+pub mod seed; // T-215 (ADR-0016 §8): the MAUTO seed, assembled from the repository
 
 pub use cluster::{
     CLUSTER_EPSILON, CLUSTER_MIN_SHARED_FIELDS, Closeness, REPAIR_MIN_POINTS, RepairReport,
@@ -25,6 +26,7 @@ pub use cluster::{
 };
 pub use features::{FeatureObservation, aggregate, fold_observation};
 pub use matcher::{MATCH_MIN_DISCRIMINATING, default_tolerance, match_signatures, missing_fields};
+pub use seed::seed_emitter;
 
 use hk_model::signature::{EmissionFeatures, MatchOutcome, SignatureMatch};
 use hk_model::time::Timestamp;
