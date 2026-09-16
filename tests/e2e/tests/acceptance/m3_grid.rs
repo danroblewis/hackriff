@@ -20,7 +20,8 @@
 //! # The ruling this module encodes: the floors read over the **full** held-out grid
 //!
 //! ADR-0016 §7 enumerates six out-of-taxonomy generators and states two floors over held-out
-//! inputs: `unknown` recall ≥ 0.80 and false-known ≤ 0.10. T-244 then added five more generators
+//! inputs. Those were one floor twice: `false_known = 1 - recall`, so the surviving floor is
+//! false-known <= 0.10, i.e. recall >= 0.90 (supervisor ruling 2026-09-16). T-244 then added five more generators
 //! — DSB-SC, VSB-AM, π/4-DQPSK, 16-APSK and Barker-13 — because `analog`, `psk-qam` and `pulsed`
 //! had **no out-of-taxonomy negative at all**, so their open set was never exercised while the
 //! aggregate still published a number for it.
@@ -55,7 +56,14 @@ const WRONG_LABEL_OVERALL_FLOOR: f64 = 0.02;
 /// Worst single-bin wrong-label rate at or above the gates.
 const WRONG_LABEL_PER_BIN_FLOOR: f64 = 0.05;
 /// Out-of-taxonomy inputs correctly not given a family.
-const UNKNOWN_RECALL_FLOOR: f64 = 0.80;
+///
+/// **0.90, not the 0.80 §7 used to state.** The gate computes `false_known = 1 - recall`, so the
+/// row's two clauses (`recall >= 0.80` and `false-known <= 0.10`) were ONE floor transcribed twice
+/// at inconsistent values. The supervisor ruled (2026-09-16) to keep the stricter original and
+/// state it once; ADR-0016 §7 carries the amendment. This TIGHTENS the gate - it is the opposite
+/// of the prohibition above, which forbids loosening a floor to make a run pass. Raising it makes
+/// M3 exit red at the measured 0.8510.
+const UNKNOWN_RECALL_FLOOR: f64 = 0.90;
 /// Out-of-taxonomy inputs given a family instead.
 const FALSE_KNOWN_FLOOR: f64 = 0.10;
 
@@ -325,7 +333,7 @@ fn held_out() -> &'static HeldOut {
 /// that.
 ///
 /// **What the other reading gives** (printed by this test every run): over the six generators §7
-/// enumerates, unknown recall **0.9167** and false-known **0.0833** — both floors met, so M3 would
+/// enumerates, unknown recall **0.9907** and false-known **0.0093** (measured after T-248; it was 0.9167/0.0833 before) — both floors met, so M3 would
 /// close. That number is real, it is reported, and it is not the number this gate uses.
 ///
 /// Note how little room it has. T-244 reported 1.000 and 0.000 for this same population from 8

@@ -4913,7 +4913,7 @@ tasks:
     title: 'ADR-0016 section 7 states two open-set floors that are arithmetically ONE
       floor stated twice at different values: the gate computes false_known = 1 - recall,
       so recall >= 0.80 AND false-known <= 0.10 can only both hold at recall >= 0.90'
-    status: todo
+    status: done
     priority: high
     deps: []
     parallel_group: M3A
@@ -4935,13 +4935,24 @@ tasks:
     model: opus
     effort: low
     core_interface: true
+    resolution_2026_09_16: 'SUPERVISOR RULING: take the STRICTER value as authoritative and
+      state the floor once - a transcription duplication, not a threshold change. Since
+      false_known = 1 - recall, the survivor is false-known <= 0.10, i.e. unknown recall >= 0.90;
+      the stated 0.80 is deleted. Applied to ADR-0016 section 7 (row + amendment note) and to
+      m3_grid.rs (UNKNOWN_RECALL_FLOOR 0.80 -> 0.90, module doc, and the stale 0.9167/0.0833 which
+      T-248 had moved to 0.9907/0.0093). This TIGHTENS the gate: measured full-grid recall 0.8510 /
+      false-known 0.1490, so M3 exit stays RED. Per the ruling the fix is the capability (T-286),
+      never the threshold. The looser value was NOT adopted despite the section 7 reading improving
+      from clearing by 0.017 to clearing by 0.09 - the number improving is not grounds to revisit a
+      ruling.'
+
   - id: T-286
     milestone: M3
     title: 'The open-set residue is a capability gap, not a tuning gap: 16-APSK,
       pi/4-DQPSK and VSB-AM need post-sync constellation measurements the feature tree
       cannot make'
     status: todo
-    priority: normal
+    priority: high
     deps: []
     parallel_group: M3A
     use_cases:
@@ -4963,6 +4974,13 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    m3_exit_blocker_2026_09_16: 'SOLE remaining M3 exit blocker after the T-285 ruling fixed
+      the floor at recall >= 0.90 / false-known <= 0.10. Measured 0.8510 / 0.1490. T-248 established
+      this is NOT tunable: the residue is 59 of 396 (VSB-AM 29, pi/4-DQPSK 15, 16-APSK 13) sitting
+      INSIDE the genuine-member envelope - VSB-AM max|z| 3.47 against am dev p95 3.80, 16-APSK 2.76
+      against qam16 3.56 - and pushing the tail gives 0.8788 / 0.1212, still short, while breaking
+      top-1. No setting of this tail reaches the floor.'
+
   - id: T-287
     milestone: M4
     title: 'Wire control-channel hunting as a running pipeline chain: T-267 proved the

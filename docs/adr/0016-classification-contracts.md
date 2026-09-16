@@ -263,12 +263,14 @@ pub struct Prediction {
 - **A-priori thresholds.** Gates (§2), margins (§4.6) and exit floors (below) are fixed here as `thresholds@1`. Changing one needs an ADR amendment citing **dev** evidence. Tuning against acceptance-scene failures is not allowed (the blind-test rule).
 - **M3 exit gate (T-206)**, all through the mock SDR. Floors are a-priori and *unverified*:
 
+  > **Amendment (supervisor ruling, 2026-09-16).** The held-out row previously stated `recall ≥ 0.80` **and** `false-known ≤ 0.10` as if they were independent floors. They are not: the gate computes `false_known = 1 − recall`, so `false-known ≤ 0.10` *is* `recall ≥ 0.90`, and the two clauses were one floor transcribed twice at inconsistent values. Resolved by keeping the **stricter, original** value and stating it once. **This is not a threshold change and not an amendment citing new dev evidence** — it removes a duplicate. It makes M3s exit *harder*, not easier: measured 2026-09-16 the full held-out grid gives recall 0.8510 / false-known 0.1490, so the gate stays **red** under the surviving floor. Per the ruling, the fix is the underlying capability (T-286), never the threshold. The looser 0.80 was not adopted despite the §7-population reading having improved from clearing by 0.017 to clearing by 0.09: "the number improved" is not grounds to revisit a ruling.
+
 | Check | Floor |
 |---|---|
 | Known families, synthetic acceptance, SNR ≥ gate + 5 dB | top-1 ≥ 0.90, top-2 ≥ 0.95 |
 | Wrong-label rate, any bin (abstaining is allowed) | ≤ 0.05 per bin, ≤ 0.02 overall |
 | OTA: 915 MHz FSK ≥ 20 dB; FM broadcast (analog/wfm); POCSAG (fsk); ADS-B (pulsed) | family correct ≥ 0.95 of labelled emitters; RDS subcarrier stays abstaining below the gate |
-| Held-out unknowns | `unknown` (or open_set ≥ 0.5) ≥ 0.80; false-known ≤ 0.10; noise snippets labelled as a comm family ≤ 0.01 |
+| Held-out unknowns | **false-known ≤ 0.10** — equivalently `unknown` (or open_set ≥ 0.5) **≥ 0.90**, because the gate computes `false_known = 1 − recall`, so these are one floor, not two; noise snippets labelled as a comm family ≤ 0.01 |
 | Prior mismatch scene (FSK carrier in the FM allocation, off-raster WFM) | posterior top = likelihood top whenever LR ≥ 10 (100 %); `prior-mismatch` set |
 | Signatures, synthetic population incl. the P25/DMR near-collision, ≥ 20 dB | full-match precision ≥ 0.95, recall ≥ 0.80; below `min_discriminating` → `partial` 100 %; never an identity |
 | Clustering, multi-day scene with repeated unknowns | ARI ≥ 0.8; ≤ 1.5 clusters per truth type; merge rate ≤ 0.05; identical after restart |
