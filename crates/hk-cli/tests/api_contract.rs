@@ -4691,6 +4691,56 @@ fn the_timeline_spans_the_capture_window_and_draws_it() {
         assert_eq!(res["over_resolved"], json!([]), "{res}");
         assert!(res["reduced_from"]["nf"].as_u64().unwrap() >= 4, "{res}");
 
+        // ---- T-367: the overview is scoped to the frequency range asked for ----
+        // The time navigator draws "what has been happening **here**", so its picture is the
+        // capture window folded over *the range the main view is on*, not over the whole spectrum.
+        // Two disjoint halves of the same band are two different pictures, laid on the same
+        // window: the grid's own frequency origin and cell width follow the request, while
+        // `window` — the bar's *extent* — is byte-identical across all three. That pair is the
+        // invariant: the time axis is not a function of the band, the picture is.
+        let halves = [
+            (FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0, FIXTURE_CENTER_HZ),
+            (FIXTURE_CENTER_HZ, FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0),
+        ];
+        for (lo, hi) in halves {
+            let (st, h) = get(
+                addr,
+                &format!("/api/timeline?f_lo={lo}&f_hi={hi}&columns=64&rows=4"),
+            );
+            assert_eq!(st, 200, "{h}");
+            assert_eq!(h["region"], json!({"lo_hz": lo, "hi_hz": hi}), "{h}");
+            assert_eq!(h["grid"]["f_lo_hz"].as_f64(), Some(lo), "{h}");
+            assert_eq!(
+                h["grid"]["f_cell_hz"].as_f64(),
+                Some((hi - lo) / 4.0),
+                "{h}"
+            );
+            assert_eq!(
+                h["resolution"]["served_span_hz"].as_f64(),
+                Some(hi - lo),
+                "{h}"
+            );
+            // The extent does not move with the band: the same span, a different picture. (Only
+            // the span, not the whole window: `t1_s` is the live edge and advances between calls.)
+            assert_eq!(h["window"]["span_s"], json!(retention_s), "{h}");
+            assert_eq!(h["window"]["horizon"], json!("iq-ring"), "{h}");
+            // And it is a picture, not an empty box, over half the band as over all of it.
+            assert_eq!(h["grid"]["cells"], json!(256), "{h}");
+        }
+        // The control: ask for no band and there is **no grid at all** — which is why the time
+        // navigator must send one. An unscoped request draws nothing, not the whole spectrum.
+        let (st, unscoped) = get(addr, "/api/timeline?columns=64&rows=4");
+        assert_eq!(st, 200, "{unscoped}");
+        assert!(
+            unscoped["region"].is_null() && unscoped["grid"].is_null(),
+            "{unscoped}"
+        );
+        assert_eq!(
+            unscoped["window"]["span_s"],
+            json!(retention_s),
+            "{unscoped}"
+        );
+
         // ---- the control: the spectrum history reaches much further back, and is not used ----
         // A 48 h history request is answered (the pyramid's horizon is nothing like 90 s), and the
         // timeline still spans the ring's retention. Without this the property could pass on a

@@ -1,16 +1,20 @@
 // Edge-navigator arithmetic (T-340). Pure: no DOM, no client, no measurement. Unit-tested in
 // ui/test/navigators.test.ts.
 //
-// **The user's invariant** (CLAUDE.md, "Time, the waterfall, and the live view"):
+// **The user's invariant** (CLAUDE.md, "Time, the waterfall, and the live view"), as corrected in
+// T-367 — *the two bars control DIFFERENT axes*:
 //
-// > Each waterfall axis has an edge navigator parallel to it. Time runs down the waterfall,
-// > frequency across it, so the **time navigator is a vertical bar on the side** (an overview of
-// > the retained capture window) and the **frequency navigator is a horizontal bar along the
-// > bottom** (spanning the whole surveyed / device-available spectrum, setting the centre). Each
-// > navigator pans and zooms its own axis; a dragged region on either zooms the main view to it.
-// > The frequency navigator shows every currently-active capture window as a lit segment — the
-// > natural home for **multiple SDRs** (several simultaneous windows) and for survey/sweep
-// > coverage.
+// > Each waterfall axis has an edge navigator parallel to it, and the two control DIFFERENT axes.
+// > Time runs down the waterfall, frequency across it. The **left vertical bar is the TIME
+// > navigator**: it selects the time range and shows a compressed history waterfall **of the
+// > currently-selected frequency range only** (not the whole spectrum) — it never changes
+// > frequency. The **bottom horizontal bar is the FREQUENCY navigator**: it sets the centre and
+// > span (the "survey" across the whole device-available spectrum) and shows the most-recent
+// > sample/occupancy across that range — it never scrubs time. Each pans and zooms only its own
+// > axis; a dragged region on either zooms the main view along that axis. **(Wiring both bars to
+// > scrub time is a bug: the vertical is time-for-this-frequency-range, the horizontal is
+// > frequency-across-the-survey.)** The frequency navigator shows every currently-active capture
+// > window as a lit segment — the natural home for **multiple SDRs** and for survey/sweep coverage.
 //
 // **The split, from the user:** *"Backend reports the achievable (centre, span) grid +
 // full-spectrum survey overview; UI does the navigators/gestures/snap/styling."* So this module is
@@ -246,3 +250,45 @@ export function timeExtent(w: CaptureWindowLike | null): Range | null {
  */
 export const timeAtFraction = (ext: Range, f: number) => valueAt(ext, f);
 export const fractionAtTime = (ext: Range, tS: number) => fractionAt(ext, tS);
+
+// ---- what the time navigator's overview is *of* (T-367) ----
+//
+// The user's correction: *"the left vertical bar is the TIME navigator: it selects the time range
+// and shows a compressed history waterfall **of the currently-selected frequency range only** (not
+// the whole spectrum)"*.
+//
+// So the bar has two independent inputs and they come from different places. Its **extent** is the
+// capture window (above, `/api/timeline`'s `window`) and its **picture** is that window folded over
+// one frequency range — the range the main view is on, which the caller supplies. A bar that asked
+// for no range gets no picture at all rather than the whole spectrum's: `/api/timeline` answers a
+// `null` grid without `f_lo`/`f_hi`, and that is the honest answer to "which frequencies?" when
+// nothing is tuned, where an unscoped overview would be a different measurement drawn in its place.
+//
+// This is *not* the frequency navigator's content. That bar shows the survey across the whole
+// device-available spectrum; nothing here reads or produces a spectrum extent.
+
+/** A frequency range, exactly as the main view holds one. */
+export interface Band { loHz: number; hiHz: number }
+
+/** A band as one comparable value, for noticing that the selected range moved. `""` is *no range*
+ * — distinct from every real one, and never equal to another `""`-producing band. */
+export const bandKey = (b: Band | null): string =>
+  b && Number.isFinite(b.loHz) && Number.isFinite(b.hiHz) && b.hiHz > b.loHz ? `${b.loHz}:${b.hiHz}` : "";
+
+/** Whether two bands name the same frequency range (both absent counts as the same). */
+export const sameBand = (a: Band | null, b: Band | null): boolean => bandKey(a) === bandKey(b);
+
+/**
+ * The `GET /api/timeline` request the **time** navigator makes: the capture window, and the
+ * overview folded onto `columns × rows` **over `band` only**.
+ *
+ * `band` is the frequency range the main view is on. With no band the request still asks for the
+ * window — the bar can say how long it spans before it can say what was in it — and the server
+ * answers a `null` grid, which is drawn as no picture. Nothing here widens a missing band to the
+ * whole spectrum: that would put a different frequency range's energy on a bar the user reads as
+ * "what has been happening *here*".
+ */
+export function timelineRequest(band: Band | null, columns: number, rows: number): string {
+  const q = `columns=${columns}&rows=${rows}`;
+  return bandKey(band) ? `/api/timeline?f_lo=${band!.loHz}&f_hi=${band!.hiHz}&${q}` : `/api/timeline?${q}`;
+}
