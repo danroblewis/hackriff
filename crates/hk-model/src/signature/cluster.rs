@@ -41,9 +41,23 @@ pub const CLUSTER_MIN_MEMBERS: usize = 3;
 /// that measure alike (ADR-0016 §5: "≥ 3 appearances of one emitter across ≥ 2 sessions").
 pub const CLUSTER_MIN_APPEARANCES: u32 = 3;
 
+/// The three fields that measure **how the system watched** rather than what was transmitting,
+/// and are therefore excluded from [`CLUSTER_FIELDS`] (T-309).
+///
+/// They come from track timing: `period_s` and `duty_cycle` are ratios over the span the producer
+/// happened to watch, and `burst_length_s` is a median over however many bursts fell inside it.
+/// Watch one emitter for 305 s and then for 59 s and all three move, with nothing about the
+/// emission having changed.
+///
+/// This is *not* true of the other periodicities in [`CLUSTER_FIELDS`]. `tdma_period_s` is a frame
+/// structure, `pri_s` a pulse repetition interval and `scan_period_s` an antenna rotation: each is
+/// measured *from the emission's own structure* and does not move with the length of the look.
+pub const OBSERVATION_STATISTIC_FIELDS: &[&str] =
+    &[field::PERIOD_S, field::DUTY_CYCLE, field::BURST_LENGTH_S];
+
 /// Fields a cluster compares, and **only** these.
 ///
-/// Two exclusions carry the whole "type, not instance" rule:
+/// Three exclusions carry the whole "type, not instance" rule:
 ///
 /// - **Frequency** (`f_center_hz`, `f_lo_hz`, `f_hi_hz`, `raster_offset_hz`) — two of the same
 ///   sensor model transmit on different channels, and the same channel is shared by unrelated
@@ -52,25 +66,72 @@ pub const CLUSTER_MIN_APPEARANCES: u32 = 3;
 /// - **Propagation and oscillator** (`snr_db`, `cfo_offset_hz`) — these describe this receiver,
 ///   this path and this individual transmitter's crystal, not the protocol. Per-transmitter RF
 ///   fingerprinting (AWARE-047/051) is deliberately *not* done in M3 (ADR-0016 §5, Privacy).
+/// - **Observation statistics** ([`OBSERVATION_STATISTIC_FIELDS`]) — these describe the *look*,
+///   not the emission, and the rest of this comment is why they are excluded outright rather than
+///   only across silence.
 ///
-/// # Three of these measure the observation, and here they have no silence exclusion (T-281)
+/// # Why the observation statistics are excluded outright (T-309)
 ///
-/// `period_s`, `duty_cycle` and `burst_length_s` are statistics of **how long the producer
-/// happened to watch**, not properties of the emission. Entity resolution already knows this:
-/// [`crate::cluster::Fingerprint::compare_across_silence`] drops exactly these three when two
-/// sightings' presence intervals are disjoint (T-250/T-262), and
-/// `crate::relate::distinguishing_evidence` does the same.
+/// Entity resolution already knows these three measure the window:
+/// [`crate::cluster::Fingerprint::compare_across_silence`] drops exactly them when two sightings'
+/// presence intervals are disjoint (T-250/T-262), and `crate::relate::distinguishing_evidence`
+/// does the same. The clustering distance had **no such exclusion** and compared them
+/// unconditionally, so two emitters of one *type* watched over different windows were pushed
+/// apart on them — and because one field at `z > `[`super::Z_CONFLICT`] separates a pair however
+/// much else agrees, a single disagreeing burst length refused the join outright. They also
+/// counted toward `CLUSTER_MIN_SHARED_FIELDS`, so they could carry a join that nothing about the
+/// emission itself supported.
 ///
-/// **The clustering distance has no such exclusion.** `hk_context::signature::cluster::compare`
-/// compares every shared field below unconditionally, so two emitters of the same *type* watched
-/// over different windows are pushed apart on these three — and, because one field at `z > 3`
-/// separates a pair however much else agrees, a single disagreeing burst length is enough to
-/// refuse the join outright. The three also count toward `CLUSTER_MIN_SHARED_FIELDS`, so they can
-/// carry a join that nothing about the emission itself supports.
+/// The obvious repair is to copy the across-silence condition. It **cannot be made honest here**,
+/// for two independent reasons.
 ///
-/// Left as-is rather than narrowed here: a cluster has no single presence interval to compare a
-/// member against (a centroid folds many members' windows), so the fix is a design question about
-/// what a centroid's time extent means, not a local edit. See the T-281 follow-ups.
+/// ## A centroid has no time extent, and must not be given one
+///
+/// The condition needs a presence interval on each side, and a [`ClusterCentroid`] folds many
+/// members' windows into one value. Each way of manufacturing an interval for it fails:
+///
+/// - **The hull** (earliest start to latest end over the members) is the object ADR-0017 exists to
+///   stop using: a hull of mostly-silence is never an extent. It also fails exactly where the bug
+///   bites — a cluster that has been accumulating for days has a hull spanning days, so every new
+///   member falls inside it, "overlaps", and gets compared on the window statistics anyway.
+/// - **The union of the members' intervals** answers a different question from the one asked.
+///   The centroid's value is an *average over all members*; overlapping the window of one member
+///   in twenty says nothing about whether the new member was watched commensurably with that
+///   average.
+/// - **Keeping the members' windows separately** and testing the new member against each is no
+///   longer a centroid comparison at all. It is single-link clustering, which is a different
+///   algorithm with a different cost, not a narrowing of this field set.
+///
+/// So the rule is stated rather than worked around: **a centroid has no presence interval, and
+/// the clustering distance never asks for one.** Under that rule the awkward cases are not special
+/// cases at all — a centroid folding members seen at disjoint times, a member whose window sits
+/// wholly inside the centroid's span, and a centroid with a single member so far all behave
+/// identically, because these fields are not compared in any of them.
+///
+/// ## And interval overlap tests the wrong thing between two *different* emitters
+///
+/// This one outlives the centroid question, and kills the conditional exclusion even for the
+/// member-against-member neighbourhood test in the repair pass, where both sides *do* have
+/// intervals.
+///
+/// At entity resolution both sides are candidate sightings of **one instance on one channel**, so
+/// overlapping presence intervals really do mean the two were watched by the same look, and the
+/// window statistics are commensurable. Clustering compares **different instances on different
+/// frequencies** — frequency is excluded precisely so that it can. And a presence interval records
+/// when an emitter was *on the air*, not when the receiver was watching. So for two different
+/// emitters the test is anti-correlated with what it wants to know: two emitters that are both
+/// on-air almost continuously overlap (and their duty cycles discriminate least), while a 5 %-duty
+/// sensor and a 60 %-duty remote sitting in the very same dwell have largely disjoint on-air spans
+/// (and their duty cycles discriminate most). A condition that drops the fields exactly where they
+/// carry type information, and compares them exactly where they carry none, is worse than either
+/// always or never.
+///
+/// **The cost, stated.** Two emission types that agree on family, bandwidth, symbol rate and
+/// deviation and differ *only* in cadence — a 60 s sensor beacon against a 5 s remote — can no
+/// longer be told apart by the clusterer, and will share a cluster id. That is the same trade
+/// T-262 accepted one layer down, and it is bounded by what a cluster is allowed to mean: a
+/// cluster is evidence that two emissions measure alike, never an identity and never a merge of
+/// two emitters into one inventory row.
 pub const CLUSTER_FIELDS: &[&str] = &[
     field::OBW_HZ,
     field::FAMILY,
@@ -83,9 +144,6 @@ pub const CLUSTER_FIELDS: &[&str] = &[
     field::SYNC_WORD,
     field::PACKET_LENGTH_BITS,
     field::CRC_POLY,
-    field::PERIOD_S,
-    field::DUTY_CYCLE,
-    field::BURST_LENGTH_S,
     field::TDMA_PERIOD_S,
     field::HOP_RASTER_HZ,
     field::HOP_COUNT,
@@ -208,6 +266,17 @@ impl ClusterCentroid {
     /// The [`CLUSTER_FIELDS`] this centroid has, as a plain map (what the distance compares).
     pub fn comparable(&self) -> &BTreeMap<String, Feat> {
         &self.fields
+    }
+
+    /// Drops folded fields that are no longer [`CLUSTER_FIELDS`].
+    ///
+    /// A stored centroid outlives the field set: a cluster written before a field was retired
+    /// still carries it in its body, and [`SignatureCluster::validate`] would reject that row the
+    /// next time anything wrote it. Pruning on the way in keeps an existing store readable with no
+    /// migration, and costs nothing — a centroid is re-derivable, and the repair pass already
+    /// rebuilds every surviving one from its members.
+    pub fn prune(&mut self) {
+        self.fields.retain(|name, _| is_cluster_field(name));
     }
 }
 
@@ -419,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn frequency_and_propagation_are_not_clustering_fields() {
+    fn frequency_propagation_and_observation_statistics_are_not_clustering_fields() {
         // The "type, not instance" rule, as data: two of the same sensor on different channels
         // must be able to land in one cluster, so where they sit is never compared.
         for excluded in [
@@ -432,9 +501,39 @@ mod tests {
         ] {
             assert!(!is_cluster_field(excluded), "{excluded} is compared");
         }
-        for included in [field::SYMBOL_RATE_HZ, field::DEVIATION_HZ, field::PERIOD_S] {
+        // T-309: and neither is anything that measures the look rather than the emission.
+        for excluded in OBSERVATION_STATISTIC_FIELDS {
+            assert!(!is_cluster_field(excluded), "{excluded} is compared");
+        }
+        // The periodicities that survive are structural — read off the emission itself, not
+        // accumulated over however long the producer watched.
+        for included in [
+            field::SYMBOL_RATE_HZ,
+            field::DEVIATION_HZ,
+            field::TDMA_PERIOD_S,
+            field::PRI_S,
+        ] {
             assert!(is_cluster_field(included), "{included} is not compared");
         }
+    }
+
+    #[test]
+    fn a_centroid_stored_before_a_field_was_retired_still_validates_after_pruning() {
+        // The store outlives the field set. A body written when `period_s` was still compared
+        // deserialises with it, and must not become an unwritable row.
+        let mut c = SignatureCluster::new(new_cluster_id(), t(0));
+        c.centroid
+            .fields
+            .insert(field::PERIOD_S.to_owned(), Feat::num(0.12, 0.001, "c14"));
+        c.centroid
+            .fields
+            .insert(field::OBW_HZ.to_owned(), Feat::num(36e3, 500.0, "c14"));
+        assert!(c.validate().is_err(), "a retired field fails validation");
+
+        c.centroid.prune();
+        c.validate().unwrap();
+        assert!(c.centroid.get(field::PERIOD_S).is_none());
+        assert!(c.centroid.get(field::OBW_HZ).is_some(), "the rest survives");
     }
 
     #[test]

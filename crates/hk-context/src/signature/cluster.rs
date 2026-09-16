@@ -39,6 +39,22 @@
 //! Rule 1 before rule 2 is the point: a conflict is a reason to separate, never something a thin
 //! measurement can dodge.
 //!
+//! # What the guard is allowed to see, and why there is no across-silence case here (T-309)
+//!
+//! [`compare`] takes two field maps and no time at all. That is deliberate. The three observation
+//! statistics — `period_s`, `duty_cycle`, `burst_length_s` — used to sit in
+//! [`hk_model::CLUSTER_FIELDS`] and were compared unconditionally here, which is what made one
+//! emitter watched for 305 s and then for 59 s fail rule 1 on burst length alone and refuse to
+//! join itself. They are now excluded from the field set outright, so there is nothing here for a
+//! presence-interval condition to gate.
+//!
+//! Copying entity resolution's across-silence exclusion
+//! ([`hk_model::Fingerprint::compare_across_silence`], T-250/T-262) was the obvious alternative
+//! and is not available: a centroid folds many members' windows and so has no presence interval to
+//! test, and between two *different* emitters — which is all this distance ever compares — the
+//! interval-overlap test is anti-correlated with the question it is standing in for.
+//! [`hk_model::CLUSTER_FIELDS`] carries the full argument and the cost it accepts.
+//!
 //! # How the T-201 uncertainty rule is respected
 //!
 //! Each side's `sigma` is `max(spread, sigma_meas)` and never shrinks as `1/√n` (see
