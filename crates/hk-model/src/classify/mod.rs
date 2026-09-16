@@ -7,21 +7,31 @@
 //!   provenance. Stored additively on `emitter_classification` (migration 0007) by
 //!   `Repository::record_classification`.
 //! - [`rank`]: the arbitration rank that picks an emitter's current family.
+//! - [`fuse`]: the pure fusion of evidence with a C17 band-plan prior, and the three rules that
+//!   bound what a prior may do (T-218).
+//! - [`thresholds`]: `thresholds@1`, the per-family SNR gates and reporting floors (T-218).
 //!
 //! This module holds types and invariants only; no classifier logic (T-199 owns `hk-classify`).
 //! The legacy [`crate::emitter::Classification`] (family, confidence, open-set score, model
 //! version) stays the shape of the legacy columns and of existing writers.
 
+pub mod fuse;
 pub mod rank;
 pub mod taxonomy;
+pub mod thresholds;
 
 use serde::{Deserialize, Serialize};
 
 use crate::emitter::LinkTarget;
 use crate::time::Timestamp;
 
+pub use fuse::{FamilyPriorSet, FamilyPriors, Fused, InvalidPrior, NoPriors, StaticPriors, fuse};
 pub use rank::{ArbRank, DECODER_RULES_PREFIX};
 pub use taxonomy::{Coarse, HK_MOD_V1, Taxonomy, TaxonomyRef, UNKNOWN, family_of};
+pub use thresholds::{
+    EVIDENCE_DOMINANCE_RATIO, FamilyThresholds, THRESHOLDS, THRESHOLDS_VERSION, passes_gate,
+    thresholds_of,
+};
 
 /// Schema version of [`Classification`].
 pub const CLASSIFICATION_SCHEMA: u16 = 1;

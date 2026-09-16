@@ -219,6 +219,30 @@ One C15 output about an emitter (`hk_model::classify::Classification`, schema 1)
 - **Identity & lifecycle:** append-only (the table's no-update trigger), re-run and appended as classifiers improve; carried to the survivor on a merge with every column.
 - **Tests:** `hk-model` `classify::{taxonomy,rank}` unit tests and serde round trips; `repo/classify_rank_tests.rs` covers every writer pair in both write orders and both merge directions, the SQL-versus-Rust legacy rule, and migration 0007 over pre-M3 rows; `crates/hk-api/tests/inventory_classification_api.rs` checks the row fields.
 
+### 2.23 Signature  [C18] (*T-218*, [ADR-0016](adr/0016-classification-contracts.md) §5)
+An immutable catalogue entry (`hk_model::signature::Signature`, schema 1): "an emission with *these* parameters, within *these* tolerances, is consistent with this protocol or device type".
+- `id` + `version` (immutable once written; a new version is a new row), `name`, `kind` (`protocol` / `device-type` / `rfi` / `radar` / `learned`).
+- `taxonomy` + optional `family`/`class` it expects. **Rank-only:** an `unknown` classification gates nothing.
+- `fields`: per field name, `{expect, tolerance, required, weight}`, where `expect` is a value, a range, a set, a bit pattern (`0`/`1`/`x`, matched in both polarities and every PSK rotation within `max_errors`) or text. Default symbol-rate tolerance ±1 %.
+- `min_discriminating` (default 3): required fields that must be present before a match can be `full`.
+- `recipe` (the decoder recipe it hands the search, ADR-0016 §8), `provenance` (`builtin` / `user` / `recipe-confirmed` / `rtl433-import` (untrusted) / `cluster-promoted`), `author`, `created_at`, `supersedes`, `bands_hz` (**rank-only: a band never gates a match** — an emission in the "wrong" band is the interesting case).
+- **Storage:** table `signature` (migration 0009), PK `(signature_id, version)`, content immutable by trigger; `retired_at` is the only mutable column, and rows are never deleted.
+- Minting (`recipe-confirmed` from a CRC-valid decode), matching and import are T-201/T-214.
+
+### 2.24 SignatureMatch  [C18] (*T-218*, [ADR-0016](adr/0016-classification-contracts.md) §5)
+The append-only record of comparing one emitter's measured features against the catalogue (`hk_model::signature::SignatureMatch`): `emitter_id`, `t`, `outcome` (`full` / `partial` / `none`), `features_ref` (the EmissionFeatures snapshot, §2.22, T-201), `signatures_rev` (so a match can be re-derived exactly), `candidates` (≤ 5, ranked best first: `{signature, name, score, agreement: [{field, measured, expected, z, ok}], missing, conflicting, recipe}`) and machine `reasons`.
+- **A match never sets identity, `known_status` or lifecycle.** It adds ranked explanation evidence, feeds `decoder_available` when the top candidate has a recipe, and seeds MAUTO. Only a CRC-valid decode confirms a signal.
+- A near miss is kept as `partial` with the conflicting fields named (`z > 3`), never snapped to the nearest entry — mismatches are interesting.
+- `none` means the catalogue has nothing to say, **not** that the emission is unknown.
+- **Storage:** table `signature_match` (migration 0009), append-only by trigger, with the outcome/top-candidate columns kept consistent by CHECK constraints.
+
+### 2.26 ModelManifest / Prediction  [C38] (*T-218*, [ADR-0016](adr/0016-classification-contracts.md) §6)
+Provenance for the ML runtime (`hk_ml`, a contract stub until T-203): a `ModelManifest` (`id@version#sha8`, sha256, task, consumer, taxonomy, the family a within-family class model is scoped to, labels, energy-based open-set calibration, precision, metrics and enable-evidence references) and a `Prediction` (model, provider, precision, labels, logits, calibrated `probs`, `energy`, `unknown_score`, optional embedding, `mode`, latency, batch, `t`).
+- **Open set is energy-based and calibrated**; the softmax maximum is never an unknown detector.
+- **A model never chooses the family** — within-family class only.
+- **Shadow mode decides nothing**: it writes no Classification row and changes no decision.
+- Models are data (a manifest + an ONNX file loaded at runtime): swapping or rolling one back never rebuilds the pipeline. `active` needs the §4.6 enable evidence. Shadow records live in hk-store, not the database.
+
 ## 3. Storage (provisional — Phase 3 storage ADR finalises)
 
 Three stores under one per-device data directory, so the whole state is one thing to back up, export, or wipe:

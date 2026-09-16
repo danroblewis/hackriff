@@ -1,26 +1,30 @@
 //! Fusion of evidence with C17 band-plan priors (ADR-0016 §3). **Core interface.**
 //!
 //! `P(c ∣ x, f, ℓ) ∝ p(x ∣ c) · P(c ∣ f, ℓ)` over **known families only**. Three rules bound what
-//! a prior may do, and each is a test below:
+//! a prior may do, and each is a property test below:
 //!
 //! 1. **Priors never touch `unknown`.** Its posterior is `max(open_set_score, L[unknown])`,
 //!    computed before the prior is applied; the known families share what is left.
 //! 2. **λ₀ ≥ 0.1.** A prior set with less uniform mass is refused, so no family is ever driven to
 //!    zero by a prior: a family the prior omits is floored at `λ₀/K`.
 //! 3. **Evidence dominance.** When the likelihood top-1 beats the runner-up by
-//!    [`EVIDENCE_DOMINANCE_RATIO`](crate::thresholds::EVIDENCE_DOMINANCE_RATIO) or more, the
+//!    [`EVIDENCE_DOMINANCE_RATIO`](super::thresholds::EVIDENCE_DOMINANCE_RATIO) or more, the
 //!    posterior top **is** the likelihood top: the prior is tempered (`prior^τ`, τ bisected in
 //!    [0, 1]) until that holds, and the row is flagged `prior-mismatch`.
 //!
-//! **Seam (T-212).** The prior *source* is C17's: `hk-context` will supply a `FamilyPriorSet` per
+//! Why here and not in the classifier crate (T-218): ADR-0016's decision table puts `fuse` in
+//! `hk_model::classify`, and both sides of the fusion need it — `hk-classify` produces the
+//! likelihood, `hk-context` (T-212) produces the [`FamilyPriorSet`], and neither may depend on the
+//! other. `hk_classify::fuse` re-exports this module, so the classifier's paths are unchanged.
+//!
+//! **Seam (T-212).** The prior *source* is C17's: `hk-context` supplies a [`FamilyPriorSet`] per
 //! emitter extent from the allocation services (`fm-broadcast → analog`, `adsb → pulsed`, …).
 //! Until then [`FamilyPriors`] has one trivial implementation ([`NoPriors`]) and one
 //! test/configuration source ([`StaticPriors`]); the fusion itself is final and pure, so T-212
 //! only has to build the set.
 
-use hk_model::classify::{ClassFlag, LAMBDA0_MIN, LabelP, PriorUse, SUM_TOLERANCE, UNKNOWN};
-
-use crate::thresholds::EVIDENCE_DOMINANCE_RATIO;
+use super::thresholds::EVIDENCE_DOMINANCE_RATIO;
+use super::{ClassFlag, LAMBDA0_MIN, LabelP, MAX_CONFIDENCE, PriorUse, SUM_TOLERANCE, UNKNOWN};
 
 /// A C17 family prior: `P(family ∣ f, ℓ)` over known families with its mixture weights.
 #[derive(Clone, Debug, PartialEq)]
@@ -52,8 +56,6 @@ impl FamilyPriorSet {
         if self.prior_ref.trim().is_empty() {
             return Err(InvalidPrior("prior_ref is empty".into()));
         }
-        // λ validation stays here until T-218 lands the shared `hk_model::classify::fuse`
-        // helpers; `Classification::validate` applies the same rules to the stored `PriorUse`.
         let mut lambda_sum = 0.0;
         for l in self.lambda {
             if !l.is_finite() || l < 0.0 {
@@ -103,7 +105,7 @@ impl FamilyPriorSet {
             .map_or(floor, |lp| lp.p.max(floor))
     }
 
-    /// The prior as stored on a [`hk_model::classify::Classification`].
+    /// The prior as stored on a [`super::Classification`].
     pub fn to_use(&self) -> PriorUse {
         PriorUse {
             prior_ref: self.prior_ref.clone(),
@@ -311,10 +313,10 @@ pub fn normalise_dist(dist: &mut [LabelP]) {
     }
 }
 
-/// Caps the top entry at [`hk_model::classify::MAX_CONFIDENCE`] (no call is certain) and makes the
-/// distribution sum to exactly 1.
+/// Caps the top entry at [`MAX_CONFIDENCE`] (no call is certain) and makes the distribution sum to
+/// exactly 1.
 pub fn cap_and_normalise(dist: &mut [LabelP]) {
-    let max = hk_model::classify::MAX_CONFIDENCE;
+    let max = MAX_CONFIDENCE;
     let sum: f64 = dist.iter().map(|lp| lp.p).sum();
     if sum > 0.0 {
         for lp in dist.iter_mut() {
@@ -363,6 +365,7 @@ pub fn cap_and_normalise(dist: &mut [LabelP]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classify::HK_MOD_V1;
 
     fn lp(label: &str, p: f64) -> LabelP {
         LabelP {
@@ -466,9 +469,7 @@ mod tests {
         let sum: f64 = f.posterior.iter().map(|x| x.p).sum();
         assert!((sum - 1.0).abs() < 1e-12, "sum {sum}");
         assert!(
-            f.posterior
-                .iter()
-                .all(|x| x.p <= hk_model::classify::MAX_CONFIDENCE),
+            f.posterior.iter().all(|x| x.p <= MAX_CONFIDENCE),
             "{:?}",
             f.posterior
         );
@@ -480,5 +481,235 @@ mod tests {
         let f = fuse(&l, 0.2, Some(&prior(&[("analog", 0.55), ("fsk", 0.45)])));
         assert_eq!(top_label(&f.posterior), Some("fsk"));
         assert!(f.flags.contains(&ClassFlag::PriorMismatch), "{:?}", f.flags);
+    }
+
+    // ---- Property tests (T-218) -----------------------------------------------------------
+    //
+    // The examples above pin the cases the ADR names. These run the same three rules over ~30 000
+    // randomly drawn (likelihood, open-set, prior) triples, because a prior that can flip a call
+    // is a *silent* failure — a plausible wrong family, not a crash — and the cases that break it
+    // are the extreme ones nobody writes by hand (near-ties, one family carrying everything, a
+    // prior that omits the family the evidence likes). Random draws are deterministic (a fixed
+    // LCG, no dependency) so a failure is reproducible from the printed seed.
+
+    /// SplitMix64: a deterministic, dependency-free source of well-distributed draws.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// A float in [0, 1).
+        fn unit(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        fn range(&mut self, lo: usize, hi: usize) -> usize {
+            lo + (self.next_u64() % (hi - lo + 1) as u64) as usize
+        }
+    }
+
+    /// A random distribution over `k` of the taxonomy's families plus `unknown`, summing to 1.
+    /// Values are drawn on a wide dynamic range (`x^4`) so near-zero families, near-ties and
+    /// one-family-takes-all all occur.
+    fn random_likelihood(rng: &mut Rng) -> Vec<LabelP> {
+        let families: Vec<&str> = HK_MOD_V1.families.iter().map(|f| f.name).collect();
+        let k = rng.range(2, families.len());
+        let mut chosen: Vec<&str> = families.clone();
+        // Fisher-Yates prefix shuffle.
+        for i in 0..k {
+            let j = i + rng.range(0, chosen.len() - 1 - i);
+            chosen.swap(i, j);
+        }
+        let mut dist: Vec<LabelP> = chosen[..k]
+            .iter()
+            .map(|f| {
+                let u = rng.unit();
+                lp(f, u * u * u * u + 1e-9)
+            })
+            .collect();
+        dist.push(lp(UNKNOWN, rng.unit() + 1e-9));
+        let sum: f64 = dist.iter().map(|x| x.p).sum();
+        for x in dist.iter_mut() {
+            x.p /= sum;
+        }
+        dist
+    }
+
+    /// A random **valid** prior over a random subset of the drawn families (sometimes omitting
+    /// the evidence's favourite, which is the case the λ₀ floor exists for).
+    fn random_prior(rng: &mut Rng, likelihood: &[LabelP]) -> FamilyPriorSet {
+        let families: Vec<&str> = likelihood
+            .iter()
+            .filter(|x| x.label != UNKNOWN)
+            .map(|x| x.label.as_str())
+            .collect();
+        let k = rng.range(1, families.len());
+        let mut dist: Vec<LabelP> = families[..k]
+            .iter()
+            .map(|f| {
+                let u = rng.unit();
+                lp(f, u * u * u + 1e-9)
+            })
+            .collect();
+        let sum: f64 = dist.iter().map(|x| x.p).sum();
+        for x in dist.iter_mut() {
+            x.p /= sum;
+        }
+        // λ₀ anywhere in the legal range, the rest split arbitrarily.
+        let l0 = LAMBDA0_MIN + rng.unit() * (1.0 - LAMBDA0_MIN);
+        let rest = 1.0 - l0;
+        let a = rng.unit();
+        let b = rng.unit();
+        let c = rng.unit();
+        let s = (a + b + c).max(1e-12);
+        FamilyPriorSet {
+            prior_ref: "band-plan/property@1".into(),
+            lambda: [l0, rest * a / s, rest * b / s, rest * c / s],
+            dist,
+        }
+    }
+
+    const TRIALS: u32 = 30_000;
+
+    #[test]
+    fn property_a_prior_never_scales_the_unknown_mass() {
+        let mut rng = Rng(0xC15_0016);
+        for trial in 0..TRIALS {
+            let l = random_likelihood(&mut rng);
+            let open_set = rng.unit();
+            let pr = random_prior(&mut rng, &l);
+            pr.validate().unwrap();
+            let want = p_of(&l, UNKNOWN).max(open_set);
+            let with = fuse(&l, open_set, Some(&pr));
+            let without = fuse(&l, open_set, None);
+            // The cap only ever moves mass when a family would exceed 0.999, so compare within
+            // the cap's tolerance.
+            assert!(
+                (p(&with, UNKNOWN) - p(&without, UNKNOWN)).abs() < 1e-9,
+                "trial {trial}: the prior moved p(unknown) {} → {}",
+                p(&without, UNKNOWN),
+                p(&with, UNKNOWN)
+            );
+            assert!(
+                (p(&with, UNKNOWN) - want.min(MAX_CONFIDENCE)).abs() < 1e-9,
+                "trial {trial}: p(unknown) {} is not max(open_set, L[unknown]) {want}",
+                p(&with, UNKNOWN)
+            );
+        }
+    }
+
+    #[test]
+    fn property_a_prior_never_zeroes_a_family_and_the_posterior_is_a_distribution() {
+        let mut rng = Rng(0xC15_0017);
+        for trial in 0..TRIALS {
+            let l = random_likelihood(&mut rng);
+            let open_set = rng.unit();
+            let pr = random_prior(&mut rng, &l);
+            let f = fuse(&l, open_set, Some(&pr));
+            let sum: f64 = f.posterior.iter().map(|x| x.p).sum();
+            assert!((sum - 1.0).abs() < 1e-9, "trial {trial}: sum {sum}");
+            assert_eq!(f.posterior.len(), l.len(), "trial {trial}: labels dropped");
+            for x in &f.posterior {
+                assert!(
+                    x.p.is_finite() && (0.0..=MAX_CONFIDENCE).contains(&x.p),
+                    "trial {trial}: {} = {}",
+                    x.label,
+                    x.p
+                );
+            }
+            // λ₀ ≥ 0.1 floors every prior, so a family the evidence gave mass to keeps some —
+            // even one the prior leaves out entirely. (Unless the whole known mass is zero:
+            // open_set = 1 legitimately puts everything on `unknown`.)
+            if 1.0 - p_of(&f.posterior, UNKNOWN) > 1e-6 {
+                for x in l.iter().filter(|x| x.label != UNKNOWN && x.p > 1e-6) {
+                    assert!(
+                        p_of(&f.posterior, &x.label) > 0.0,
+                        "trial {trial}: the prior zeroed {}",
+                        x.label
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn property_a_prior_cannot_flip_a_ten_to_one_likelihood() {
+        let mut rng = Rng(0xC15_0018);
+        let mut dominant_cases = 0u32;
+        for trial in 0..TRIALS {
+            let l = random_likelihood(&mut rng);
+            let open_set = rng.unit();
+            let pr = random_prior(&mut rng, &l);
+
+            let mut ranked: Vec<&LabelP> = l.iter().filter(|x| x.label != UNKNOWN).collect();
+            ranked.sort_by(|a, b| b.p.total_cmp(&a.p).then_with(|| a.label.cmp(&b.label)));
+            let (top, second) = (ranked[0], ranked.get(1));
+            let dominant = second.is_none_or(|s| s.p <= 0.0 || top.p / s.p >= 10.0);
+            if !dominant {
+                continue;
+            }
+            dominant_cases += 1;
+            let f = fuse(&l, open_set, Some(&pr));
+            if 1.0 - p_of(&f.posterior, UNKNOWN) <= 1e-6 {
+                continue; // everything is unknown: there is no family call to protect.
+            }
+            assert_eq!(
+                top_label(&f.posterior),
+                Some(top.label.as_str()),
+                "trial {trial}: a prior flipped a {:.1}:1 call\nL={l:?}\nprior={:?}\npost={:?}",
+                top.p / second.map_or(f64::INFINITY, |s| s.p),
+                pr.dist,
+                f.posterior
+            );
+            assert!(
+                f.flags.contains(&ClassFlag::PriorMismatch) || f.prior_exponent == 1.0,
+                "trial {trial}: a tempered prior must be flagged"
+            );
+        }
+        assert!(
+            dominant_cases > 1_000,
+            "the draw produced only {dominant_cases} dominant-evidence cases: \
+             the property would not be exercised"
+        );
+    }
+
+    #[test]
+    fn property_a_uniform_prior_leaves_the_known_families_as_the_evidence_ranked_them() {
+        let mut rng = Rng(0xC15_0019);
+        for trial in 0..(TRIALS / 10) {
+            let l = random_likelihood(&mut rng);
+            let open_set = rng.unit();
+            let k = l.iter().filter(|x| x.label != UNKNOWN).count();
+            let uniform = FamilyPriorSet {
+                prior_ref: "uniform@1".into(),
+                lambda: [1.0, 0.0, 0.0, 0.0],
+                dist: l
+                    .iter()
+                    .filter(|x| x.label != UNKNOWN)
+                    .map(|x| lp(&x.label, 1.0 / k as f64))
+                    .collect(),
+            };
+            uniform.validate().unwrap();
+            let with = fuse(&l, open_set, Some(&uniform));
+            let without = fuse(&l, open_set, None);
+            for x in &l {
+                assert!(
+                    (p_of(&with.posterior, &x.label) - p_of(&without.posterior, &x.label)).abs()
+                        < 1e-9,
+                    "trial {trial}: a uniform prior changed {}",
+                    x.label
+                );
+            }
+            assert!(
+                !with.flags.contains(&ClassFlag::PriorTiebreak),
+                "trial {trial}: a uniform prior decided nothing, so it is no tiebreak"
+            );
+        }
     }
 }

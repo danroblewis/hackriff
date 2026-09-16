@@ -69,6 +69,9 @@ zstd = { version = "0.13", default-features = false }
 uuid = { version = "1.26", features = ["v7", "serde"] }
 
 hk-classify = { path = "crates/hk-classify" }
+# T-218 (ADR-0016 §6): the C38 ML-runtime contract. A stub with no inference engine behind it;
+# T-203 adds tract (CPU reference) and the opt-in ort providers.
+hk-ml = { path = "crates/hk-ml" }
 hk-model = { path = "crates/hk-model" }
 hk-core = { path = "crates/hk-core" }
 hk-dsp = { path = "crates/hk-dsp" }

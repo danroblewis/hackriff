@@ -44,6 +44,7 @@ pub mod outputs;
 pub mod query;
 pub mod recipes;
 pub mod selections;
+pub mod taxonomy; // T-218
 pub mod tcp;
 
 // ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).

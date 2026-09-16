@@ -113,8 +113,10 @@
 use std::collections::BTreeMap;
 
 use hk_context::{BandTable, Region, match_known_status};
+// T-218: a user reclassification is written at the user arbitration rank (ADR-0016 §2).
 use hk_detect::TrackSummary;
 use hk_detect::track::inventory::SUSPECT_FRACTION;
+use hk_model::classify::{ArbRank, Stage};
 use hk_model::{
     Annotation, AnnotationAuthor, AnnotationId, AnnotationKind, AnnotationTarget, Classification,
     ContentClass, EmitterId, KnownStatus, KnownStatusChange, KnownStatusPrior, PriorVerdict,
@@ -872,8 +874,22 @@ pub fn record_decoder_evidence(
     Ok(Some(c))
 }
 
-/// A user (or classifier) reclassification: appends `classification` to `emitter` and re-ranks at
-/// once.
+/// A **user** reclassification: appends `classification` to `emitter` at the user arbitration rank
+/// and re-ranks at once.
+///
+/// The rank matters (T-218, from the T-211 review). This used to write through
+/// `append_classification`, whose rows carry no stage and derive rank 3 — the classifier's rank.
+/// A user's explicit call would then have been overtaken by the next decoder row, the next
+/// lock-verified chain label, or even a later feature-tree row: "latest wins among equals". The
+/// user is the highest authority on an emitter's family (ADR-0016 §2, rank 0), so the row is
+/// written at [`ArbRank::User`] with [`Stage::User`] and nothing outranks it afterwards.
+///
+/// The label stays in the caller's vocabulary (`wfm`, `adsb`, a service family): a user's call is
+/// an assertion, not a measured distribution, so it is stored as the legacy row shape with its
+/// stage and rank set. A UI that has a full `hk_model::classify::Classification` to offer (a
+/// re-run of the classifier the user accepted, T-207) writes it with
+/// `Repository::record_classification` instead, which is what T-205's dataset export reads as a
+/// user-labelled training sample.
 pub fn reclassify(
     repo: &mut Repository,
     table: &BandTable,
@@ -881,7 +897,7 @@ pub fn reclassify(
     classification: &Classification,
 ) -> Result<Explained, RepoError> {
     let id = repo.live_emitter_id(emitter)?;
-    repo.append_classification(id, classification)?;
+    repo.append_classification_ranked(id, classification, Stage::User, ArbRank::User)?;
     explain_emitter(repo, table, id)
 }
 
@@ -1290,6 +1306,25 @@ mod tests {
             repo.emitter(r.emitter_id).unwrap().known_status,
             KnownStatus::UnexpectedHere
         );
+
+        // T-218 (T-211 review): a user's call is written at the user arbitration rank, so nothing
+        // written later takes the emitter's family away from it — not even a CRC-valid decode,
+        // which outranks every other producer (ADR-0016 §2).
+        let current = repo.current_classification(r.emitter_id).unwrap().unwrap();
+        assert_eq!(current.stage, Stage::User);
+        assert_eq!(current.arb_rank, ArbRank::User);
+        assert_eq!(current.classification.family, "wfm");
+        record_decoder_evidence(&mut repo, r.emitter_id, "readsb", 0.95, t(3)).unwrap();
+        let after = repo.current_classification(r.emitter_id).unwrap().unwrap();
+        assert_eq!(
+            after.classification.family, "wfm",
+            "a later decoder row must not overrule the user"
+        );
+        assert_eq!(after.arb_rank, ArbRank::User);
+        // The decoder row is still history, and still the latest.
+        let latest = repo.latest_classification(r.emitter_id).unwrap().unwrap();
+        assert_eq!(latest.classification.family, "readsb");
+        assert_eq!(latest.arb_rank, ArbRank::Decoder);
     }
 
     /// T-054 item 3: the status comes from the best candidate backed by enough evidence, not from

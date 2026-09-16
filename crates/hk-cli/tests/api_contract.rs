@@ -198,6 +198,86 @@ fn is_array(v: &Value) -> bool {
 
 // --- GET routes: status, required fields, types -------------------------------------------------
 
+/// T-218 (ADR-0016 §1–§2): `GET /api/taxonomy` serves the modulation taxonomy and `thresholds@1`
+/// as `docs/api.md` documents them, so the thin client never keeps its own family tree or gates.
+/// It is reference data: no emitter, detection or identity is reachable through it.
+#[test]
+fn taxonomy_route_answers_as_documented() {
+    let (serving, addr, _dir_guard) = start_server();
+
+    let (st, v) = get(addr, "/api/taxonomy");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["current"], "hk-mod@1");
+    assert_eq!(v["unknown"], "unknown");
+    assert!(is_array(&v["taxonomies"]), "{v}");
+
+    let tax = &v["taxonomies"][0];
+    assert_eq!(tax["ref"], "hk-mod@1");
+    assert_eq!(tax["name"], "hk-mod");
+    assert_eq!(tax["version"], 1);
+    let families: Vec<&str> = tax["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["family"].as_str().unwrap())
+        .collect();
+    for want in [
+        "analog",
+        "fsk",
+        "psk-qam",
+        "ook-ask",
+        "pulsed",
+        "noise-like",
+    ] {
+        assert!(families.contains(&want), "families: {families:?}");
+    }
+    let fsk = tax["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["family"] == "fsk")
+        .unwrap();
+    assert_eq!(fsk["coarse"], "digital");
+    let classes: Vec<&str> = fsk["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(classes.contains(&"2fsk"), "{classes:?}");
+    assert!(is_array(&tax["legacy"]), "{tax}");
+
+    // thresholds@1: the gates, the confidence cap and the prior's minimum uniform weight.
+    let th = &v["thresholds"];
+    assert_eq!(th["version"], "thresholds@1");
+    assert_eq!(th["max_confidence"], 0.999);
+    assert_eq!(th["lambda0_min"], 0.1);
+    let rows = th["families"].as_array().unwrap();
+    assert_eq!(rows.len(), families.len(), "one threshold row per family");
+    let fsk_gate = rows.iter().find(|t| t["family"] == "fsk").unwrap();
+    assert_eq!(fsk_gate["snr_gate_db"], 20.0, "the S5 floor, unchanged");
+    assert!(fsk_gate["min_confidence"].is_number());
+    let noise = rows.iter().find(|t| t["family"] == "noise-like").unwrap();
+    assert!(noise["snr_gate_db"].is_null(), "noise-like has no SNR gate");
+
+    // Reference data only: nothing measured, and no service label, is reachable here.
+    let text = v.to_string();
+    for forbidden in ["emitter", "identity", "f_center_hz", "adsb", "fm-broadcast"] {
+        assert!(
+            !text.contains(forbidden),
+            "{forbidden} leaked into taxonomy"
+        );
+    }
+
+    // GET only.
+    let (st, _) = put(addr, "/api/taxonomy", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = post(addr, "/api/taxonomy", "{}");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
 #[test]
 fn discovery_history_floor_status_and_control_state_have_the_documented_shape() {
     let (serving, addr, _dir_guard) = start_server();

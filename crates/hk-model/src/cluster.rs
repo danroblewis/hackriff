@@ -315,6 +315,13 @@ impl Fingerprint {
                 ratio.ln() / tol.bandwidth_ratio.max(1.0 + 1e-9).ln(),
             );
         }
+        // Exact comparison, deliberately. ADR-0016 §1 proposes gating on `taxonomy::family_of`
+        // instead, so an emitter labelled `fsk` and `2fsk` by two producers stops splitting.
+        // Measured (T-218): that also merges `bpsk` with `qpsk`, `2fsk` with `gfsk` and `am` with
+        // `wfm` when nothing else separates them — two emissions, one inventory row. Deferred
+        // until the producers agree on a level, or the fingerprint carries something that tells
+        // same-family emissions apart. See `tests::t218_the_family_gate_separates_two_emissions_
+        // that_share_a_family`.
         if let (Some(a), Some(b)) = (self.known_family(), other.known_family())
             && a != b
         {
@@ -1112,6 +1119,42 @@ mod tests {
         let mut b = Fingerprint::new(915.004e6, 30e3);
         b.family = Some("unknown".into());
         assert!(a.compare(&b, &tol).within);
+    }
+
+    /// T-218: what the exact-family gate buys, and what it costs.
+    ///
+    /// ADR-0016 §1 proposes comparing families through `taxonomy::family_of` instead of exactly,
+    /// so that one emitter labelled `fsk` by the blind estimator and `2fsk` by the demodulator
+    /// chain stops splitting into two entries. Measured against these pairs, that change also
+    /// removes the *only* thing separating two genuinely different emissions that share a family:
+    /// `bpsk` and `qpsk` at the same centre, bandwidth and symbol rate carry no other
+    /// distinguishing feature, and neither do `2fsk`/`gfsk` or `am`/`wfm`. Entity resolution would
+    /// fold them into one emitter, and an inventory row would then describe two signals.
+    ///
+    /// So the gate stays exact and the ADR's change is **deferred** (T-218): blind detection
+    /// quality outranks contract tidiness. Closing the `fsk`/`2fsk` split needs the producers to
+    /// agree on a level (or a distinguishing feature the fingerprint does not carry yet), not a
+    /// looser comparison.
+    #[test]
+    fn t218_the_family_gate_separates_two_emissions_that_share_a_family() {
+        let tol = Tolerances::default();
+        let same_but_for_family = |family: &str| Fingerprint {
+            family: Some(family.into()),
+            symbol_rate_hz: Some(9600.0),
+            ..Fingerprint::new(446.1e6, 16e3)
+        };
+        for (a, b) in [("bpsk", "qpsk"), ("2fsk", "gfsk"), ("am", "wfm")] {
+            let m = same_but_for_family(a).compare(&same_but_for_family(b), &tol);
+            assert!(
+                !m.within,
+                "{a} and {b} are one family but two emissions: {m:?}"
+            );
+            assert_eq!(m.worst, Some("family"), "{a} vs {b}");
+        }
+        // The cost of that rule, recorded rather than hidden: the same comparison splits one
+        // emitter whose producers spell its family at different levels of the taxonomy.
+        let split = same_but_for_family("fsk").compare(&same_but_for_family("2fsk"), &tol);
+        assert!(!split.within && split.worst == Some("family"));
     }
 
     #[test]

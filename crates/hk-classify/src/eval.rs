@@ -7,9 +7,10 @@
 //! the classifier is never told what it is looking at (the blind rule, docs/10 §3.2). A `None`
 //! truth is a held-out generator, whose right answer is `unknown`.
 //!
-//! T-213 lands the project-wide harness (`hk_model::classify::eval::EvalReport`, the Python AMC
-//! grid and the OTA decode-label loader). This type is deliberately small and self-contained so it
-//! can be dropped when that arrives; the rows it produces are the same slicing.
+//! **This is the project-wide report type** (T-218 settled it). T-213's harness ([`crate::harness`])
+//! builds its seed-split enforcement, OTA truth and serialisable [`Report`](crate::harness::Report)
+//! on top of these cells rather than re-implementing them, so there is no second `EvalReport` in
+//! `hk-model` — the ADR-0016 §7 slicing lives here, once.
 
 use std::collections::BTreeMap;
 
