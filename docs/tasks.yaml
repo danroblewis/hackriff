@@ -4665,7 +4665,8 @@ tasks:
   - id: T-269
     milestone: M4
     title: 'M4 grant following onto channelizer outputs within the dwell window (metadata only)'
-    status: in-progress
+    status: done
+    commit: b49c3eb
     priority: normal
     deps:
     - T-268
@@ -5412,6 +5413,13 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    narrowed_by_t269_2026_09_16: 'T-269 narrowed this without chasing it: across its runs the 2 errors
+      appears ONLY in the t287 scene (TSBKs off) - the t268 and t269 scenes report 0 errors. So it
+      is not the trunk chain as such and not grant following; it is something about the t287 configuration
+      specifically, where the control channel carries no TSBKs. Start there rather than re-deriving
+      the search space. T-268 separately confirmed none of its own error paths printed and that its
+      run writes strictly more rows with 0 errors'
+
   - id: T-294
     milestone: M2-hardening
     title: 'A LoRa sweep is UNOBSERVABLE at the standard US915 rate: T_sym at SF9/125 kHz
@@ -5710,6 +5718,28 @@ tasks:
       change to attribution behaviour. Update docs/api.md and the api_contract tests together per T-079
       if the field crosses the wire. Keep the T-302 invariant visible in the disclosure: an artifact is
       a property of ONE receive chain'
+  - id: T-308
+    milestone: M4
+    title: A followed transmission still running when the buffered window ends is written open, and a later
+      pass cannot continue it
+    status: todo
+    priority: normal
+    deps:
+    - T-269
+    parallel_group: M4B
+    model: opus
+    acceptance: 'T-269 follows a grant onto a channelizer output and closes the call on a 90 ms silence
+      timeout derived from a keyed P25 transmitter''s 180 ms LLDU cadence. A transmission still keyed when
+      the BUFFERED WINDOW ends is written open with reason window-ended, and a later pass 10 s away cannot
+      continue it - cross-pass call continuation is unimplemented, and T-269 documented it rather than faking
+      a close. That is the honest shape, but it under-states long transmissions systematically: every call
+      longer than the dwell reads as ending when we stopped looking, which is the observation-measuring-itself
+      defect T-281 is auditing for, appearing in the call layer. Decide and implement: either continue a
+      call across passes when the same talkgroup or frequency reappears within a bounded gap - state the
+      bound with arithmetic and its error direction, as T-269 did for the silence timeout - or record the
+      call as explicitly truncated so downstream never reads t_end as an observed end. Do NOT silently close
+      it at the window edge: that manufactures a boundary the radio never produced. Metadata only, M4 stays
+      audio-free'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
