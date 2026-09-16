@@ -21,6 +21,10 @@
 //!    branch alone, guarded against the local upper block floor) otherwise. On the wide
 //!    reference, floor features it reads as signals use the per-frame floor. The integrated
 //!    spectrum averages the reference the floor branch used and includes the bins where it ran.
+//!    **Narrow floor features** (T-316) are the sub-block case: a span of raised noise wider than
+//!    the OS guard band and narrower than its reference span is estimated by neither the block
+//!    floor nor the OS reference cells, so a floor-like one takes its own per-bin running mean as
+//!    the floor and runs the floor branch alone there.
 //! 3. **Components** ([`components`]): 4-connected time–frequency components of the raw region
 //!    that contain a seed and span ≥ 3 frames are kept; kept components then merge across ≤ 2-frame
 //!    gaps. No frequency merge. Streamed, so a box is emitted `gap + 1` frames after it ends.
@@ -81,7 +85,9 @@ pub mod trust;
 pub mod writer;
 
 pub use burst::{BURST_DETECTOR, BurstConfig, BurstDetector, BurstStats};
-pub use cfar::{CELL_NONE, CELL_REGION, CELL_SEED, CfarEngine, ClassifyStats, Thresholds};
+pub use cfar::{
+    BranchMasks, CELL_NONE, CELL_REGION, CELL_SEED, CfarEngine, ClassifyStats, Thresholds,
+};
 pub use clip::{ClipCount, count_clipped_ci8};
 pub use comb::{Comb, CombFinder};
 pub use components::FrameOutcome;

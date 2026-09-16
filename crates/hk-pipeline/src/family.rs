@@ -29,7 +29,7 @@
 //! | `ais-catcher` | decoder | `ais` | 0.95 | AIS frames |
 //! | `rtl_433`, `rtl-433` | decoder | `ism` | 0.9 | a Part 15 sensor protocol decoded |
 //! | `aptdec` | decoder | `noaa-apt` | 0.9 | APT imagery lines |
-//! | continuous, OBW 150–400 kHz | occupancy | `fm-broadcast` | 0.6 | [`WIDEBAND_FM_OBW_HZ`] |
+//! | continuous, OBW 106–400 kHz | occupancy | `fm-broadcast` | 0.6 | [`WIDEBAND_FM_OBW_HZ`] |
 //! | `nbfm`, `nfm` | demod mode | — | — | land mobile, amateur, marine, public safety and FRS/GMRS share it |
 //! | `am` | demod mode | — | — | aviation, AM broadcast, CB and amateur share it |
 //! | `ssb`, `cw` | demod mode | — | — | amateur and HF utility share it |
@@ -141,12 +141,35 @@ const FIT_NO_DATA: f64 = 0.8;
 const FIT_UNEXPECTED: f64 = 0.7;
 const FIT_OFF_RASTER: f64 = 0.8;
 
-/// Occupied bandwidth of a continuous emission read as broadcast FM, Hz. US FM channels are
-/// 200 kHz. Carson's rule for ±75 kHz deviation with a 57 kHz RDS top gives about 264 kHz, and
-/// the detector's OBW99 at high SNR is wider still: 333 kHz on the 101.3 MHz fixture station
-/// (unverified beyond that fixture). A continuous emission this wide carries only 0.6 confidence:
-/// it is shape evidence, not a demodulation.
-pub const WIDEBAND_FM_OBW_HZ: [f64; 2] = [150e3, 400e3];
+/// Occupied bandwidth of a continuous emission read as broadcast FM, Hz — derived from the
+/// service, not from any capture.
+///
+/// The FM stereo multiplex (47 CFR 73.322; ITU-R BS.450) carries L+R at 0–15 kHz, the pilot at
+/// 19 kHz, the L−R DSB-SC subcarrier at 23–53 kHz and optional RDS at 57 kHz, with a maximum
+/// deviation of ±75 kHz that is reached only at full modulation. Carson's rule `2(Δf + f_m)` at
+/// full deviation gives `2(75 + 57) = 264 kHz` with RDS and `2(75 + 53) = 256 kHz` without. As
+/// deviation falls the bandwidth tends to the narrowband-FM limit `2·f_m`, and the highest
+/// component a stereo station always carries is the 53 kHz subcarrier top, so it cannot fall
+/// below `2 × 53 = 106 kHz` and still be stereo broadcast FM. OBW99 also measures under Carson,
+/// which counts tails that the 99 % point excludes. Hence 106 kHz: the narrowband limit of the
+/// stereo multiplex. The upper bound keeps headroom above Carson for OBW99 on a strong carrier;
+/// it is permissive, and it is not what this constant got wrong.
+///
+/// **The lower bound was 150 kHz until T-316**, taken from "the detector's OBW99 … 333 kHz on the
+/// 101.3 MHz fixture station (unverified beyond that fixture)". That 333 kHz was never a
+/// measurement of broadcast FM: the emitter spanned 101.1366–101.4694 MHz, its upper edge inside
+/// a 75 kHz shelf of raised *noise* at 101.428–101.503 MHz that the detector was reporting as
+/// signal. With those false alarms gone the same station measures 136 kHz, and T-289 measured it
+/// independently at 128 kHz on a different capture by a different method — both excluded by the
+/// old bound, so a correctly measured FM station no longer matched its own prior. (The 99.6999 MHz
+/// station of that capture measures 70 kHz, but it sits 1.10 MHz off centre, outside the 875 kHz
+/// half-width of the baseband filter, so its width is the filter's and says nothing about FM.)
+///
+/// The error runs both ways: too high and a correctly measured station is never suggested as FM
+/// broadcast (the T-316 bug); too low and narrower continuous services begin reading as broadcast
+/// FM on width alone. A continuous emission in this band carries only 0.6 confidence: it is shape
+/// evidence, not a demodulation.
+pub const WIDEBAND_FM_OBW_HZ: [f64; 2] = [106e3, 400e3];
 
 /// Smallest duty cycle counted as continuous.
 pub const CONTINUOUS_DUTY: f64 = 0.9;

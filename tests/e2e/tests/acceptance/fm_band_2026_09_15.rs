@@ -242,6 +242,94 @@ fn fm_band_measured_silence_is_not_catalogued() {
     }
 }
 
+/// Detections allowed in one measured-silent window.
+///
+/// Derived, not fitted. The detector's seed threshold is a per-cell `Pfa` of 1e-6 and a box needs
+/// a seed plus three connected frames, which S4 pinned as "0 false boxes in 3.31 MHz·h";
+/// `crates/hk-detect/tests/false_alarm.rs` asserts that design as ≤ 2 boxes per 1.02 MHz·h of
+/// ideal noise. Every window here is ~1000× smaller than that exposure (70 kHz × 45 s =
+/// 8.8e-4 MHz·h), so the design expectation is 0 and this bound is the same allowance the unit
+/// suite uses, carried over unchanged rather than tightened to today's output.
+const SILENT_WINDOW_MAX_DETECTIONS: usize = 2;
+
+#[test]
+fn fm_band_measured_silence_stays_within_the_designed_false_alarm_rate() {
+    let Some(r) = run() else { return };
+    let scenario =
+        r.fx.scenario()
+            .unwrap_or_else(|| panic!("[{SIGNAL_062}] the fixture has no scenario truth"));
+    let windows: Vec<(String, f64, f64)> = scenario
+        .get("measured_absent")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("[{SIGNAL_062}] the scenario records no measured_absent windows"))
+        .iter()
+        .filter(|w| w["assert_silent"].as_bool().unwrap_or(false))
+        .map(|w| {
+            (
+                w["label"].as_str().unwrap_or_default().to_owned(),
+                w["f_lo_hz"].as_f64().unwrap(),
+                w["f_hi_hz"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    assert!(!windows.is_empty());
+
+    let dets = detections(r);
+    let all = inventory(&repo(&r.dir.0), InventoryQuery::default());
+
+    // The half that proves detection still works: a bound that passes because the detector stopped
+    // detecting is the failure mode this guards against, so every measured emission must still
+    // carry a detection before any silence bound is read.
+    let truth = truth_emissions(&r.fx);
+    for t in &truth {
+        let snr = strongest_for(&dets, t);
+        assert!(
+            snr.is_finite(),
+            "[{SIGNAL_062}] measured emission {} {:?} has no detection at all: the silence bound \
+             below would pass for the wrong reason",
+            t.kind,
+            t.label
+        );
+        eprintln!(
+            "[{SIGNAL_062}] control: {} {:?} strongest detection {snr:.1} dB",
+            t.kind, t.label
+        );
+    }
+
+    let mut failures = Vec::new();
+    for (label, lo, hi) in windows {
+        let n = dets
+            .iter()
+            .filter(|d| d.f_center_hz >= lo && d.f_center_hz <= hi)
+            .count();
+        let emitters: Vec<f64> = all
+            .iter()
+            .filter(|e| e.emitter.f_center_hz >= lo && e.emitter.f_center_hz <= hi)
+            .map(|e| e.emitter.f_center_hz / 1e6)
+            .collect();
+        eprintln!(
+            "[{SIGNAL_062}] {label}: {n} detections (bound {SILENT_WINDOW_MAX_DETECTIONS}), \
+             {} inventory entries {emitters:?}",
+            emitters.len()
+        );
+        if n > SILENT_WINDOW_MAX_DETECTIONS {
+            failures.push(format!(
+                "{label}: {n} detections against a designed bound of \
+                 {SILENT_WINDOW_MAX_DETECTIONS}"
+            ));
+        }
+        // Candidates count too: an unexplained candidate emitter over measured silence is exactly
+        // the clutter the Explore lists show, whether or not it ever reaches Confirmed.
+        if emitters.len() > SILENT_WINDOW_MAX_DETECTIONS {
+            failures.push(format!(
+                "{label}: {} inventory entries {emitters:?} over measured silence",
+                emitters.len()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "[{SIGNAL_062}] {failures:#?}");
+}
+
 #[test]
 fn fm_band_wfm_rds_decoded_from_a_second_real_capture() {
     let Some(r) = run() else { return };

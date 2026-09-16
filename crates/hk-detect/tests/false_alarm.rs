@@ -13,6 +13,7 @@ use common::*;
 use hk_core::Discontinuity;
 use hk_detect::{
     ClipCount, DetectionProfile, Detector, DetectorConfig, FloorReference, Hysteresis,
+    StepGuardConfig,
 };
 use hk_dsp::floor::{FloorConfig, NoiseFloorTracker, gamma};
 use hk_model::SurveyId;
@@ -518,6 +519,127 @@ fn narrow_floor_shelves_next_to_a_learned_step_are_not_signals() {
         eprintln!("-- {reference:?}");
         check_floor_cases_within(&cases, config, true, 1.5);
     }
+}
+
+/// Interior boxes that start **after** the narrow-feature guard's warm-up, from Gamma frames that
+/// alternate between the `on` and `off` profiles every `period` frames (pass the same profile for
+/// both to hold it steady).
+///
+/// The guard classifies nothing until it has `stat_min_frames` of per-bin power statistics, so
+/// boxes inside that window are expected by design and are not counted here; the bound the tests
+/// assert is on what happens once it can see. Measured on the real 2026-09-15 capture: the two
+/// detections that survive in 101.420–101.490 MHz start at t+0.00 s and t+0.02 s, and nothing
+/// follows for the remaining 45 s.
+fn tracked_keyed(
+    on: &[f32],
+    off: &[f32],
+    period: u64,
+    frames: u64,
+    seed: u64,
+    config: DetectorConfig,
+) -> u64 {
+    let prov = provenance(98e6, FS, 24.0);
+    let mut src = GammaFrames::new(BINS, N_AVG, prov, seed);
+    let mut det = Detector::new(config).unwrap();
+    let mut tracker = NoiseFloorTracker::new(FloorConfig::default()).unwrap();
+    let mut frame = src.empty_frame();
+    let mut boxes = 0u64;
+    let p = DetectionProfile::standard();
+    let warmup =
+        StepGuardConfig::default().stat_min_frames + u64::from(p.min_frames + p.gap_frames);
+    let count = |e: hk_detect::DetectorEvent<'_>, boxes: &mut u64| {
+        if let hk_detect::DetectorEvent::Detection(d) = e
+            && d.bins.start >= EDGE_EXCLUDE
+            && d.bins.end <= BINS - EDGE_EXCLUDE
+            && d.frames.start >= warmup
+        {
+            *boxes += 1;
+        }
+    };
+    for i in 0..frames {
+        let flags = if i == 0 {
+            Discontinuity::STREAM_START
+        } else {
+            Discontinuity::NONE
+        };
+        let p = if (i / period) % 2 == 0 { on } else { off };
+        src.fill(&mut frame, p, flags);
+        let f = tracker.update(&frame, |_| {});
+        det.process(&frame, f, ClipCount::NONE, &mut |e| count(e, &mut boxes));
+    }
+    det.finish(&mut |e| count(e, &mut boxes));
+    boxes
+}
+
+/// T-316: a span of raised **noise** wider than the OS guard band and narrower than the OS
+/// reference span is estimated by neither background estimator — the block floor (256 bins, hop
+/// 64) cannot resolve it, and the OS reference cells straddle its edges, so `Z` is pulled towards
+/// the level outside and every cell in it reads as a target.
+///
+/// Measured on the real 2026-09-15 FM capture, where a 75 kHz shelf 4.6 dB above the band floor
+/// put the OS branch's per-cell seed rate at 3.9e-3 against its 1e-6 design and produced 875 boxes
+/// and 5 candidate emitters in 45 s over 70 kHz that the fixture's analysis pass measured as
+/// carrying no emission. Both halves are asserted here: the noise shelf makes no boxes, and the
+/// same span keyed on and off — a real emission with the same mean level — still does.
+#[test]
+fn narrow_noise_shelves_make_no_boxes_while_keyed_ones_stay_detected() {
+    let shelf = |width: usize, level_db: f64| {
+        let mut p = flat(BINS);
+        p[2000..2000 + width].fill(undb(level_db) as f32);
+        p
+    };
+    let cfg = || DetectorConfig::new(SurveyId::new());
+    let no_guard = || {
+        let mut c = cfg();
+        c.step_guard = None;
+        c
+    };
+    let mut failures = Vec::new();
+    // Widths inside the band derived from the default window (G 4/side, R 16/side): 10 ..= 41.
+    for (i, &(width, level)) in [(12usize, 4.0f64), (16, 4.6), (24, 6.0), (40, 8.0)]
+        .iter()
+        .enumerate()
+    {
+        let seed = 0x7316 + i as u64;
+        let p = shelf(width, level);
+        let without = tracked_keyed(&p, &p, 16, 1500, seed, no_guard());
+        let steady = tracked_keyed(&p, &p, 16, 1500, seed, cfg());
+        let keyed = tracked_keyed(&p, &flat(BINS), 16, 1500, seed, cfg());
+        eprintln!(
+            "{width}-bin (+{level} dB): steady noise shelf {without} boxes with no guard, \
+             {steady} with it; the same span keyed on/off {keyed}"
+        );
+        if without == 0 {
+            failures.push(format!(
+                "{width} bins +{level} dB: the unguarded detector made no boxes either, so this \
+                 case proves nothing"
+            ));
+        }
+        if steady > 0 {
+            failures.push(format!(
+                "{width} bins +{level} dB: {steady} boxes on a steady noise shelf after warm-up"
+            ));
+        }
+        if keyed == 0 {
+            failures.push(format!(
+                "{width} bins +{level} dB keyed: the guard suppressed a real emission"
+            ));
+        }
+    }
+    // Below the width band a span fits inside the cell under test's guard band, reaches no
+    // reference cell and is a target by construction: it must still be detected, steady or not.
+    for &width in &[6usize, 9] {
+        let p = shelf(width, 8.0);
+        let n = tracked_keyed(&p, &p, 16, 1500, 0x7316, cfg());
+        eprintln!("{width}-bin (+8 dB) steady span below the width band: {n} boxes");
+        if n == 0 {
+            failures.push(format!(
+                "a {width}-bin span sits inside the OS guard band and must stay a target, but it \
+                 produced no boxes"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// Asserts 0 false boxes, and (when the floor branch is in use) a floor-branch `T_off`

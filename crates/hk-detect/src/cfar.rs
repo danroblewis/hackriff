@@ -103,6 +103,16 @@ pub struct ClassifyStats {
     pub guard_passed: usize,
 }
 
+/// Per-bin branch masks for [`CfarEngine::classify`]; `None` runs that branch everywhere.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BranchMasks<'a> {
+    /// Where the floor branch may run (the floor-step guard's zones).
+    pub floor_ok: Option<&'a [bool]>,
+    /// Where the OS branch may run: false inside a narrow floor feature (T-316), whose edges
+    /// straddle the reference cells and bias `Z`.
+    pub os_ok: Option<&'a [bool]>,
+}
+
 /// OS-CFAR order statistics and classification; buffers sized once per resolution.
 #[derive(Clone, Debug)]
 pub struct CfarEngine {
@@ -240,17 +250,25 @@ impl CfarEngine {
 
     /// Classifies every cell of `psd` against `floor` into `codes` ([`CELL_NONE`],
     /// [`CELL_REGION`], [`CELL_SEED`]).
+    ///
+    /// `floor_ok` gates the floor branch per bin, `os_ok` the OS branch (T-316: inside a narrow
+    /// floor feature the OS reference cells straddle the feature's edges, so its `Z` is biased and
+    /// the floor branch against the corrected reference is the only sound test there).
     pub fn classify(
         &mut self,
         psd: &[f32],
         floor: &[f32],
         th: &Thresholds,
         branches: Branches,
-        floor_ok: Option<&[bool]>,
+        masks: BranchMasks<'_>,
         codes: &mut [u8],
     ) -> ClassifyStats {
+        let BranchMasks { floor_ok, os_ok } = masks;
         if let Some(m) = floor_ok {
             assert_eq!(m.len(), psd.len(), "psd/floor-branch mask length mismatch");
+        }
+        if let Some(m) = os_ok {
+            assert_eq!(m.len(), psd.len(), "psd/OS-branch mask length mismatch");
         }
         let n = psd.len();
         assert_eq!(floor.len(), n, "psd/floor length mismatch");
@@ -274,7 +292,7 @@ impl CfarEngine {
                     seed = p > t_on * f;
                     region = p > t_off * f;
                 }
-                if use_os && !seed && p > guard * f {
+                if use_os && os_ok.is_none_or(|m| m[i]) && !seed && p > guard * f {
                     stats.guard_passed += 1;
                     // P > α·Z ⇔ Z < P/α ⇔ at least k reference cells are below P/α.
                     let (lim_on, lim_off) = (p / a_on, p / a_off);
@@ -337,7 +355,14 @@ mod tests {
                 })
                 .collect();
             for branches in [Branches::Or, Branches::OsOnly] {
-                e.classify(&psd, &floor, &th, branches, None, &mut codes);
+                e.classify(
+                    &psd,
+                    &floor,
+                    &th,
+                    branches,
+                    BranchMasks::default(),
+                    &mut codes,
+                );
                 for i in 0..n {
                     let p = psd[i];
                     let floor_seed = branches == Branches::Or && p > th.t_on as f32;
