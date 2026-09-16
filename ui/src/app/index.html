@@ -17,6 +17,7 @@
     <div class="modes" role="group" aria-label="View">
       <button class="mode" type="button" data-mode="explore" aria-pressed="true">Explore</button>
       <button class="mode" type="button" data-mode="decode" aria-pressed="false">Decode</button>
+      <button class="mode" type="button" data-mode="history" aria-pressed="false">History</button>
     </div>
     <div class="device" id="device" data-state="connecting"><span class="live-dot" aria-hidden="true"></span><span id="device-label">connecting…</span></div>
     <div class="rec-pill" id="rec-pill" data-slot="rec-pill" hidden></div>
@@ -55,6 +56,10 @@
     </section>
     <aside class="wb-right" data-slot="params" aria-label="Stage parameters"></aside>
   </div>
+
+  <!-- HISTORY (T-264, ADR-0017 TM-8): the durable all-time catalogue, where Explore is scoped to
+       the viewed window. Workflow #3: choose a region and see what was seen there over time. -->
+  <div class="hist" id="view-history" data-slot="catalogue" aria-label="History" hidden></div>
 
   <footer class="dock" data-slot="outputs" aria-label="Live outputs"></footer>
 </div>

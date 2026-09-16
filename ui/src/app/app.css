@@ -10,4 +10,5 @@
 @import "./decode/inspector.css";
 @import "./explore/output-panel.css";
 @import "./review/review.css";
+@import "./history/history.css";
 @import "./menu/menu.css";

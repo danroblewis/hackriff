@@ -11,6 +11,7 @@ import { mounts as centre } from "../src/app/centre";
 import { mounts as decode } from "../src/app/decode";
 import { mounts as dock } from "../src/app/dock";
 import { mounts as explore } from "../src/app/explore";
+import { mounts as history } from "../src/app/history";
 import { mounts as review } from "../src/app/review";
 import { apiConnFor, backoffMs, parseSpectrumRecord, wsUrl } from "../src/app/net";
 import { deviceFrom } from "../src/app/shell";
@@ -19,7 +20,7 @@ const html = readFileSync("src/app/index.html", "utf8");
 const entryCss = readFileSync("src/app/app.css", "utf8");
 const cssImports = [...entryCss.matchAll(/@import "\.\/([^"]+)";/g)].map((m) => m[1]);
 const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n");
-const SLOTS = ["inventory", "selections", "live", "axis", "capture", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review"];
+const SLOTS = ["inventory", "selections", "live", "axis", "capture", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
 const replayState = JSON.parse(readFileSync("test/control_state_replay.json", "utf8")) as ControlState;
 
 test("backoff doubles from 250 ms and caps at 10 s", () => {
@@ -83,16 +84,19 @@ test("the app page has every panel slot once, and the mode toggle", () => {
   assert.match(html, /data-mode="explore" aria-pressed="true"/);
   assert.match(html, /data-mode="decode" aria-pressed="false"/);
   assert.match(html, /id="view-decode" hidden/);
+  // T-264 (ADR-0017 TM-8): History is a surface beside Explore and Decode, hidden until asked for.
+  assert.match(html, /data-mode="history" aria-pressed="false"/);
+  assert.match(html, /id="view-history"[^>]*hidden/);
   assert.doesNotMatch(html, /fonts\.googleapis|<script[^>]+https?:/, "CSP is default-src 'self'");
 });
 
 test("every panel slot is mounted by exactly one area index", () => {
-  const names = [explore, centre, capture, decode, dock, review].flatMap((m) => Object.keys(m));
+  const names = [explore, centre, capture, decode, dock, review, history].flatMap((m) => Object.keys(m));
   assert.deepEqual([...names].sort(), [...SLOTS].sort());
 });
 
 test("app.css is an import list: base first, then one file per area", () => {
-  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "capture/capture.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "menu/menu.css"]);
+  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "capture/capture.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css"]);
   assert.doesNotMatch(entryCss.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@import "[^"]+";/g, ""), /\S/, "no rules in app.css itself");
 });
 

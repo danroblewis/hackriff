@@ -1,0 +1,19 @@
+/* History surface (T-264, ADR-0017 TM-8). Scoped under .hist (the view's own class); reuses the
+   shared .mini/.chip/.hint/.empty/.mono tokens from base.css and adds no shared rules. */
+
+.hist { min-height: 0; overflow-y: auto; background: var(--ground); padding: 14px 18px 20px; }
+
+.hist .hist-form { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: end; }
+.hist .hist-form label { display: flex; flex-direction: column; gap: 3px; font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; }
+.hist .hist-form input, .hist .hist-form select { background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; font-size: 12.5px; color: var(--text); min-width: 0; width: 150px; }
+
+.hist .hist-note { margin: 8px 0; }
+.hist .hist-list { display: flex; flex-direction: column; gap: 6px; }
+.hist .hist-ev { border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; background: var(--panel); display: flex; flex-wrap: wrap; gap: 5px 12px; align-items: baseline; }
+.hist .hist-ev[data-open="true"] { border-color: var(--teal); }
+.hist .hist-acts { margin-left: auto; display: flex; gap: 6px; }
+.hist .hist-track { flex-basis: 100%; margin-top: 4px; }
+
+@media (max-width: 900px) {
+  .hist .hist-form input, .hist .hist-form select { width: 120px; }
+}

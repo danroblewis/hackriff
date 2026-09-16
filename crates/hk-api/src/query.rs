@@ -23,8 +23,8 @@ use hk_model::{
     StatusAuthor, TimeRange, Timestamp,
 };
 use hk_store::history::{
-    FORMAT_VERSION, FilterSummary, FrontEndState, Geometry, HistoryStat, OriginField, OriginFilter,
-    waterfall_png, write_sweep_csv,
+    CoverageSummary, FORMAT_VERSION, FilterSummary, FrontEndState, Geometry, HistoryStat,
+    OriginField, OriginFilter, waterfall_png, write_sweep_csv,
 };
 use hk_store::{
     FloorFlags, FloorProduct, FloorVsTime, ProvenanceSummary, Pyramid, RegionHistory, RegionQuery,
@@ -78,7 +78,7 @@ impl ApiError {
     }
 }
 
-fn bad(message: &str) -> ApiError {
+pub(crate) fn bad(message: &str) -> ApiError {
     ApiError::new(400, message)
 }
 
@@ -91,7 +91,12 @@ fn num(q: &Params, key: &'static str) -> Result<f64, ApiError> {
         .ok_or_else(|| bad(&format!("{key} must be a finite number")))
 }
 
-fn count(q: &Params, key: &'static str, default: usize, max: usize) -> Result<usize, ApiError> {
+pub(crate) fn count(
+    q: &Params,
+    key: &'static str,
+    default: usize,
+    max: usize,
+) -> Result<usize, ApiError> {
     match param(q, key) {
         None => Ok(default),
         Some(v) => v
@@ -405,6 +410,29 @@ fn region_history(p: &Pyramid, q: &Params) -> Result<RegionHistory, ApiError> {
     Ok(h)
 }
 
+/// What the spectrum history observed over one region (T-264, ADR-0017 TM-8): the coverage mask
+/// behind `/api/events`' `coverage` block.
+///
+/// Read at the finest level fitting [`DEFAULT_MAX_CELLS`], because only the mask is wanted, not the
+/// statistics — a coarser grid would hide short unobserved stretches, and a gap that is not
+/// reported is a gap that reads as a quiet band (C26).
+pub(crate) fn region_coverage(p: &Pyramid, r: &Region) -> Result<CoverageSummary, ApiError> {
+    let level = choose_level(p.geometry(), r, |nt, nf| {
+        nt * nf <= DEFAULT_MAX_CELLS as f64
+    })?;
+    let h = p
+        .query(&RegionQuery {
+            freq: r.freq,
+            time: TimeRange::new(
+                Timestamp::from_unix_nanos(r.t0_ns),
+                Timestamp::from_unix_nanos(r.t1_ns),
+            ),
+            resolution: Resolution::Level(level),
+        })
+        .map_err(|_| ApiError::new(400, "history query refused"))?;
+    Ok(h.coverage_summary())
+}
+
 const FLAG_NAMES: [(FloorFlags, &str); 14] = [
     (FloorFlags::UNCALIBRATED, "uncalibrated"),
     (FloorFlags::QUANTISATION_LIMITED, "quantisation-limited"),
@@ -561,7 +589,7 @@ pub const MAX_INVENTORY_CURSOR: u64 = 1_000_000;
 /// Longest `tag` / `family` filter accepted, bytes.
 const MAX_FILTER_LEN: usize = 128;
 
-fn nonempty<'a>(q: &'a Params, key: &str) -> Option<&'a str> {
+pub(crate) fn nonempty<'a>(q: &'a Params, key: &str) -> Option<&'a str> {
     param(q, key).filter(|v| !v.is_empty())
 }
 
@@ -660,7 +688,10 @@ pub const EXPLANATIONS_AUTHOR_REF: &str = "hk-pipeline/family-map@1";
 
 /// The latest ranked explanations stored on emitter `id`, or `[]`. Served only from Classifier
 /// annotations by the family map ([`EXPLANATIONS_AUTHOR_REF`]) with no content.
-fn explanations_json(repo: &Repository, id: hk_model::EmitterId) -> Result<Value, RepoError> {
+pub(crate) fn explanations_json(
+    repo: &Repository,
+    id: hk_model::EmitterId,
+) -> Result<Value, RepoError> {
     Ok(repo
         .annotations_for(&AnnotationTarget::Emitter(id))?
         .into_iter()

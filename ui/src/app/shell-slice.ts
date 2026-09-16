@@ -3,7 +3,9 @@
 // Device tab keeps the full control state it needs in its own review slice, never here.
 import type { AppState } from "./state";
 
-export type Mode = "explore" | "decode";
+/** T-264 (ADR-0017 TM-8): `history` is the durable all-time catalogue (workflow #3), a surface of
+ * its own because Explore answers "what is here now" and is scoped to the viewed window. */
+export type Mode = "explore" | "decode" | "history";
 export type Theme = "system" | "dark" | "light";
 
 export type ApiConn = "connecting" | "ok" | "offline" | "unauthorized";
@@ -36,7 +38,7 @@ export function parsePrefs(raw: string | null): Prefs {
   try {
     const p = JSON.parse(raw) as Partial<Prefs>;
     return {
-      mode: p.mode === "decode" ? "decode" : "explore",
+      mode: p.mode === "decode" || p.mode === "history" ? p.mode : "explore",
       theme: p.theme === "dark" || p.theme === "light" ? p.theme : "system",
     };
   } catch {

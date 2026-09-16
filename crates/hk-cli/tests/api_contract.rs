@@ -1271,6 +1271,252 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     stop_server(serving);
 }
 
+/// T-264 (ADR-0017 stage TM-8): the History surface's two routes — the durable catalogue of
+/// events in a region over a time range, and one emitter's presence track.
+///
+/// The invariant under test is the one that makes the whole time model safe to live with:
+/// **nothing is deleted to make the live list correct**. Explore is window-scoped (T-260), so a
+/// signal that stopped hours ago is not listed there; every one of its events is still catalogued
+/// here, one row per presence interval, one-offs included. And the answer never lets an empty
+/// catalogue read as a quiet band: `coverage.statement` says which of "unknown", "no data for this
+/// period" and "nothing was on the air" it is.
+#[test]
+fn events_and_presence_serve_the_durable_catalogue() {
+    let (_guard, serving, addr) = start_server();
+    let (f_lo, f_hi) = (STATION_HZ - 400e3, STATION_HZ + 400e3);
+    // The catalogue only has events once the pipeline has seen the station.
+    wait_for(
+        "an event in the catalogue for the blind FM station",
+        Duration::from_secs(90),
+        || {
+            let t1 = unix_now();
+            get(
+                addr,
+                &format!(
+                    "/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={}&t1={t1}",
+                    t1 - 3600.0
+                ),
+            )
+            .1["total"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let t1 = unix_now();
+    let t0 = t1 - 3600.0;
+    let (st, v) = get(
+        addr,
+        &format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "window",
+        "events",
+        "emitters",
+        "total",
+        "limit",
+        "next_cursor",
+        "emitters_truncated",
+        "emitters_no_interval",
+        "coverage",
+        "identity_access",
+    ] {
+        assert!(v.get(field).is_some(), "events answer missing {field}: {v}");
+    }
+    let events = v["events"].as_array().expect("events");
+    assert!(!events.is_empty(), "the station was on the air: {v}");
+    let emitters = v["emitters"].as_array().expect("emitters");
+    for e in events {
+        for field in [
+            "emitter_id",
+            "t_start_s",
+            "t_end_s",
+            "duration_s",
+            "in_window_s",
+            "open",
+            "count",
+            "sources",
+            "f_center_hz",
+        ] {
+            assert!(e.get(field).is_some(), "event missing {field}: {e}");
+        }
+        let (start, end) = (
+            e["t_start_s"].as_f64().unwrap(),
+            e["t_end_s"].as_f64().unwrap(),
+        );
+        // An event IS a timespan: it has a start and a stop, and the backend states its length —
+        // a client never derives a duration from two fields it was handed.
+        assert!(end >= start, "an event never ends before it starts: {e}");
+        let d = e["duration_s"].as_f64().unwrap();
+        assert!(
+            (d - (end - start)).abs() < 1e-6,
+            "duration_s is the span: {e}"
+        );
+        assert!(
+            e["in_window_s"].as_f64().unwrap() <= d + 1e-6,
+            "time inside the window never exceeds the event: {e}"
+        );
+        assert!(e["open"].is_boolean(), "{e}");
+        // Every event names an emitter that is listed once, with its ranked explanations.
+        let id = e["emitter_id"].as_str().expect("emitter_id");
+        assert!(
+            emitters.iter().filter(|m| m["id"] == json!(id)).count() == 1,
+            "each emitter with events is listed exactly once: {v}"
+        );
+    }
+    for m in emitters {
+        for field in [
+            "id",
+            "state",
+            "f_center_hz",
+            "bandwidth_hz",
+            "f_lo_hz",
+            "f_hi_hz",
+            "known_status",
+            "family",
+            "explanations",
+            "identity_scheme",
+            "withheld",
+            "events",
+            "on_air_s",
+            "count",
+        ] {
+            assert!(
+                m.get(field).is_some(),
+                "catalogue emitter missing {field}: {m}"
+            );
+        }
+        assert!(is_array(&m["explanations"]), "{m}");
+        assert!(
+            m["events"].as_u64().is_some_and(|n| n > 0),
+            "an emitter is listed only when it has events in the window: {m}"
+        );
+    }
+    // Coverage always answers, and always in words a client can show beside an empty list: an
+    // unobserved stretch is never reported as a quiet band (C26).
+    let statement = v["coverage"]["statement"]
+        .as_str()
+        .expect("coverage carries a statement");
+    assert!(!statement.is_empty(), "{v}");
+
+    // A period before anything was recorded: the catalogue is empty, and the coverage statement
+    // says *no data for this period*, never "nothing was on the air".
+    let (st, past) = get(
+        addr,
+        &format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0=0&t1=1"),
+    );
+    assert_eq!(st, 200, "{past}");
+    assert_eq!(
+        past["total"],
+        json!(0),
+        "nothing was on the air in 1970: {past}"
+    );
+    assert!(past["events"].as_array().unwrap().is_empty(), "{past}");
+    let past_statement = past["coverage"]["statement"].as_str().unwrap();
+    assert!(
+        !past_statement.contains("nothing was on the air"),
+        "an unobserved period must never read as a quiet band: {past_statement}"
+    );
+
+    // Paging and validation.
+    let (st, one) = get(
+        addr,
+        &format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=1"),
+    );
+    assert_eq!(st, 200, "{one}");
+    assert!(one["events"].as_array().unwrap().len() <= 1, "{one}");
+    assert_eq!(
+        one["total"], v["total"],
+        "a page never changes the total: {one}"
+    );
+    for bad in [
+        format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
+        format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t1}&t1={t0}"),
+        format!("/api/events?f_lo={f_hi}&f_hi={f_lo}&t0={t0}&t1={t1}"),
+        format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&cursor=nope"),
+        format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&state=bogus"),
+    ] {
+        let (st, e) = get(addr, &bad);
+        assert_eq!(st, 400, "{bad} should be refused: {e}");
+    }
+    let (st, e) = post(addr, "/api/events", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+
+    // `GET /api/inventory/{id}/presence` — the track itself, every interval with its own timespan.
+    let id = emitters[0]["id"].as_str().unwrap().to_owned();
+    let (st, track) = get(addr, &format!("/api/inventory/{id}/presence"));
+    assert_eq!(st, 200, "{track}");
+    for field in [
+        "emitter",
+        "window",
+        "intervals",
+        "total",
+        "truncated",
+        "presence",
+    ] {
+        assert!(
+            track.get(field).is_some(),
+            "presence missing {field}: {track}"
+        );
+    }
+    assert!(
+        track["window"].is_null(),
+        "no window was asked about: {track}"
+    );
+    let intervals = track["intervals"].as_array().expect("intervals");
+    assert!(!intervals.is_empty(), "this emitter has events: {track}");
+    for i in intervals {
+        for field in [
+            "t_start_s",
+            "t_end_s",
+            "duration_s",
+            "open",
+            "count",
+            "sources",
+            "f_center_hz",
+        ] {
+            assert!(i.get(field).is_some(), "interval missing {field}: {i}");
+        }
+        assert!(
+            i["t_end_s"].as_f64().unwrap() >= i["t_start_s"].as_f64().unwrap(),
+            "{i}"
+        );
+    }
+    // The projection agrees with the row's own, so the two surfaces never disagree on liveness.
+    for field in [
+        "intervals",
+        "on_air_s",
+        "last_interval",
+        "liveness",
+        "ended_t_s",
+    ] {
+        assert!(
+            track["presence"].get(field).is_some(),
+            "presence projection missing {field}: {track}"
+        );
+    }
+    // A window scopes the track and carries its own live edge: a window before every interval
+    // holds none of them, and nothing is fabricated for it.
+    let (st, empty) = get(addr, &format!("/api/inventory/{id}/presence?t0=0&t1=1"));
+    assert_eq!(st, 200, "{empty}");
+    assert_eq!(empty["total"], json!(0), "{empty}");
+    assert_eq!(empty["presence"]["liveness"], json!("absent"), "{empty}");
+    assert!(empty["presence"]["last_interval"].is_null(), "{empty}");
+    let (st, e) = get(addr, &format!("/api/inventory/{id}/presence?t0=5&t1=1"));
+    assert_eq!(st, 400, "{e}");
+    let (st, e) = get(addr, &format!("/api/inventory/{id}/presence?t0=1"));
+    assert_eq!(st, 400, "a window is both bounds or neither: {e}");
+    let (st, e) = get(addr, "/api/inventory/not-a-uuid/presence");
+    assert_eq!(st, 404, "{e}");
+    let unknown = EmitterId::new();
+    let (st, e) = get(addr, &format!("/api/inventory/{unknown}/presence"));
+    assert_eq!(st, 404, "{e}");
+    let (st, e) = post(addr, &format!("/api/inventory/{id}/presence"), "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+
+    stop_server(serving);
+}
+
 #[test]
 fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();
