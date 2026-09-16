@@ -6896,7 +6896,8 @@ tasks:
     milestone: M2-hardening
     title: An IQ recording is permitted where the source class forbids stored content, and no gate has been
       watching
-    status: in-progress
+    status: done
+    commit: 9f2a7b7
     priority: high
     deps: []
     parallel_group: PIPE
@@ -6916,6 +6917,32 @@ tasks:
       fix it by changing the test''s expectation unless you can show the expectation was wrong, in which
       case say why T-061 wrote it. T-357''s CI gate is HELD ON THIS - it is not being merged with this target
       quarantined, because an exclusion is the gate-that-checks-less shape T-353 and T-357 exist to close'
+  - id: T-361
+    milestone: M2-hardening
+    title: A second stale content-class expectation in an ungated target, and T-360s sweep pattern was too
+      narrow to catch it
+    status: in-progress
+    priority: high
+    deps:
+    - T-360
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-357''s acceptance-ci gate now reaches 9 suites before failing at tests/e2e/tests/stream_external.rs:262,
+      in fsk_bursts_stream_as_bits_and_symbols_over_tcp_matching_the_private_truth: assertion left == right
+      fails with left MetadataOnly, right Unrestricted. Same family as T-360 - a content-class expectation
+      written when gating was unconditional, surviving T-143''s 5982-line deletion because NO GATE HAS EVER
+      RUN THIS FILE - but a DIFFERENT SHAPE: T-360 hunted gating REFUSALS (a 403 that no longer fires) and
+      this is a class VALUE assertion (a derived class that is correctly MetadataOnly where the test expects
+      Unrestricted). T-360 swept every ungated target and reported outputs_record as the only survivor;
+      that sweep was real but its pattern was too narrow, and this slipped through. SO: fix this one AND
+      RE-SWEEP WITH THE WIDENED PATTERN - every remaining ungated hk-e2e target (concurrent_demod, floor_acceptance,
+      listen_live, mock_device, refine, smoke, spectrum_axis, stream_external) for class VALUES, gating
+      refusals, and anything else that assumes gating is on. PROVE EACH CASE THE WAY T-360 DID rather than
+      assuming: it showed the mechanism healthy by passing under HK_CONTENT_GATING=1, and it caught a red
+      herring (a class: unrestricted log line belonging to a different test in the same file whose output
+      interleaved) that would have misled a guess. Do NOT weaken an expectation you cannot show is stale.
+      T-357''s CI gate is HELD on this - again - and it is not being merged with targets quarantined'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
