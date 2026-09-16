@@ -656,40 +656,109 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 
 /// C14 evidence: the strongest cyclic line, OBW/Rs and C14's own family scores.
 ///
-/// # `cyclic_db` and the four `blind_*` scores are OBSERVATION STATISTICS (T-281)
+/// # `cyclic_db` and the four `blind_*` scores are OBSERVATION STATISTICS (T-281, re-measured T-310)
 ///
-/// **They measure how long C14 was allowed to look, not only what was transmitting**, and unlike
-/// `sigma_ap`/`sigma_dp` below that was not previously recorded anywhere. Both are nonetheless
-/// fitted density dimensions in **21 of 21** classes of the shipped models, so the classifier
-/// compares two snippets on them today.
+/// **They move with how long C14 was allowed to look, not only with what was transmitting**, and
+/// unlike `sigma_ap`/`sigma_dp` below that was not previously recorded anywhere. Both are
+/// nonetheless fitted density dimensions in **21 of 21** classes of the shipped models, so the
+/// classifier compares two snippets on them today. The dependence is real. **The law T-281 gave
+/// for it is not**, and the difference decides what can be done about it.
 ///
-/// `cyclic_db` is `10·log10(peak / local median)` of a whitened periodogram
-/// (`hk_estimate::blind::lines::spectral_line`). A coherent cyclic line's peak grows with the
-/// record while the whitened noise median does not, so the ratio grows about `10·log10(N)`.
-/// Measured on one waveform at 25 dB, truncating only the window handed to C14:
+/// `cyclic_db` is the **largest of four** whitened line significances, each
+/// `10·log10(peak / local median)` of a periodogram of a different feature series
+/// (`hk_estimate::blind::lines::spectral_line`, over `LineMethod::ALL`: |x|², |d env|²,
+/// delay-multiply, |d IF|²). T-281 reasoned that a coherent line's peak grows with the record
+/// while the whitened noise median does not, so the ratio should grow about `10·log10(N)`, and
+/// measured `ook` 20.17 → 31.44 dB and `bpsk` 15.32 → 25.08 dB over 8× of window on one seed at
+/// 25 dB.
 ///
-/// | class | N/8 | N/4 | N/2 | N |
-/// |---|---|---|---|---|
-/// | `ook` | 20.17 dB | 24.53 dB | 26.69 dB | 31.44 dB |
-/// | `bpsk` | 15.32 dB | 15.91 dB | 23.72 dB | 25.08 dB |
+/// **Those two rows reproduce and are unrepresentative.** Re-measured over 8 dev seeds × 6 SNRs
+/// (5–30 dB) × all 21 taxonomy and 11 held-out generators, truncating only the window handed to
+/// C14, the growth is neither `10·log10(N)` nor a single law:
 ///
-/// — **+11 dB from watching the same emission eight times longer**, which is far more than the
-/// spread between classes this dimension is fitted to separate.
+/// | | slope of `cyclic_db` vs `log10 N`, dB/decade |
+/// |---|---|
+/// | mean over everything, by SNR | 3.3 (5 dB) → 6.6 (30 dB), median 2.4 → 8.8 |
+/// | `chirp` +27.1, `coded-pulse` +26.0, `nbfm` +19.2, `ook` +12.4 | far above 10 |
+/// | `4fsk` −19.8, `2fsk` −15.5, `gfsk` −13.5, `msk` −13.0, `wfm` −7.3, `ppm` −7.3 | **negative** |
 ///
-/// The `blind_*` family scores move with the window too, and discontinuously: the same 2-FSK
-/// burst scores `blind_fsk` **0.10** at N/8 and N/4 and **1.00** at N/2 and N, because the line
-/// C14 locks on changes once the record is long enough.
+/// **6 of 21 taxonomy classes read a *lower* `cyclic_db` the longer they are watched**, at every
+/// SNR. Coherent integration cannot do that, so it is not what is happening.
 ///
-/// Neither is normalised here. `cyclic_db` has no length-free form that keeps its discriminating
-/// power (dividing out `10·log10(N)` changes what every fitted mean means), and both are density
-/// dimensions, so any change to them needs the densities refitted and the ADR-0016 §7 gate
-/// re-measured. Recorded rather than silently rescaled; see the T-281 follow-ups.
+/// ## What is actually happening: the argmax moves, and C14's geometry moves with it
 ///
-/// **What this costs today:** `MAX_WINDOW_SAMPLES` caps the window at 65 536 samples, so a
-/// *continuous* emission is always measured at the cap and is self-consistent. The dependence
-/// bites on **bursts shorter than the cap** — the ephemeral emissions CLAUDE.md makes first-class
-/// — where one emitter seen as a short burst and again as a long one lands at different
-/// `cyclic_db`, and so at a different Mahalanobis distance from the same class.
+/// Two mechanisms, both measured (T-310):
+///
+/// 1. **`cyclic_db` is a max over four heterogeneous series, and which one wins changes with the
+///    window.** At 25 dB the winning `LineMethod` differs across N/8…N for 8 of 8 seeds on `2fsk`,
+///    `4fsk`, `chirp`, `cw`, `msk`, `ofdm` and `ppm`, and 7 of 8 on `8psk`, `am`, `ask4`,
+///    `noise-like`, `ook` and `pulse`. Two readings of one emitter are then frequently not the
+///    same measurement at all. The four series do not share a growth law either (per-method mean
+///    slopes 4.0–6.0 dB/decade with **sd 6.2–13.8**).
+/// 2. **C14's search band and whitening both scale as `fs/n`.** The rate search starts at
+///    `f_min = max(rate_min_cells·fs/n, obw·rate_min_obw)`, so a shorter window searches from a
+///    *higher* frequency: on `2fsk` 1964.6 Hz at N/8 against 1121.7 Hz at N (`am` 212.1 → 26.5,
+///    `cw` 21.8 → 1.2). At N/8 the true symbol-rate line is below the floor and only its harmonic
+///    is findable — the winning line's frequency is 0.49× at N/8 versus N for `2fsk`, 0.42× for
+///    `4fsk`, 0.50× for `gfsk`, 0.57× for `msk`, i.e. exactly the classes whose slope is negative.
+///    The whitening block is 24 native bins, so its width in Hz is `24·fs/n` and the floor a line
+///    is judged against gets more local as the record grows.
+///
+/// This is the same class of defect as the resolution note on [`spectral_features`] (T-281's
+/// seventh finding, T-312): **the analysis geometry is a function of the record**. It lives in
+/// C14, not here.
+///
+/// ## Every length-free form of this statistic was measured, and each loses discrimination
+///
+/// Separation is reported two ways over the dev grid: `F` = between-class over within-class
+/// variance, and the median **pairwise `d'`** across the 210 taxonomy class pairs computed the way
+/// [`crate::density`] scores — a diagonal Gaussian per class. "Mixed" pools N, N/2, N/4 and N/8,
+/// which is the burst case this dimension is charged with getting wrong.
+///
+/// | statistic | F fixed | F mixed | sd across N, dB |
+/// |---|---|---|---|
+/// | `cyclic_db` as shipped | **2.023** | **1.226** | 3.74 |
+/// | − `10·log10 N` (T-281's law) | 1.782 | 1.046 | 3.79 |
+/// | − `k·log10 N`, best `k` ≈ 4 | 1.942 | 1.227 | 3.45 |
+/// | − `10·log10(ln M)`, M = bins searched (the null's own growth) | 1.992 | 1.211 | 3.66 |
+/// | median / mean / min / second of the four | 2.126 / 2.167 / 1.521 / 2.189 | 1.425 / 1.305 / 0.609 / 1.415 | 2.83 / 2.64 / 1.99 / 3.16 |
+///
+/// **Subtracting the law T-281 proposed makes this dimension worse on every measure**, because the
+/// law is wrong: a correction fitted to the middle of a −19.8…+27.1 dB/decade spread is applied
+/// with the wrong sign to a quarter of the taxonomy. The best scalar exponent buys 8 % of the
+/// movement (3.74 → 3.45 dB) for a fitted constant with no physical value, and costs fixed-length
+/// separation. Nothing here is a fix, so **nothing is rescaled** and `features@4` is unchanged.
+///
+/// ## The large finding, and why it is deliberately not taken here
+///
+/// The max-over-four collapse is throwing away most of this dimension's discriminating power.
+/// Carrying the four line significances as four dimensions instead gives, at ≥ 20 dB, median
+/// pairwise `d'` **7.77 against 3.46** at fixed length and **4.22 against 1.65** under mixed
+/// lengths; the share of class pairs it can separate goes 0.66 → 0.96 and 0.41 → 0.85; and the
+/// median distance of a held-out generator to its nearest taxonomy class goes 0.21 → 1.07.
+///
+/// It is still not taken, because it makes **this ticket's own harm worse**. Fitting each class on
+/// full windows and then scoring its own N/8 bursts — what happens to every burst shorter than
+/// [`crate::symbols::MAX_WINDOW_SAMPLES`] — the cyclic dimensions contribute a mean clamped `Σz²`
+/// of 19.9 today and **55.0** with four dimensions (≥ 20 dB; 13.7 per dimension against 19.9, so
+/// each is better behaved and there are four of them). With T-248's second-largest-|z| tail term,
+/// four simultaneously-off dimensions is precisely the signature that withholds a claim, so the
+/// expansion would systematically reject genuine short bursts from their own class. It becomes
+/// correct only **after** the window dependence is fixed at its source, and it needs its own task.
+///
+/// The `blind_*` family scores move with the window too, and discontinuously — reproduced across
+/// seeds at 25 dB, a 2-FSK burst scores `blind_fsk` 0.10 at N/8, 0.44 at N/4 and 1.00 at N/2 and
+/// N — because the line C14 locks on changes once the record is long enough. That is T-311.
+///
+/// **What this costs today:** [`crate::symbols::MAX_WINDOW_SAMPLES`] caps the window at 65 536
+/// samples, so a *continuous* emission is always measured at the cap and is self-consistent. The
+/// dependence bites on **bursts shorter than the cap** — the ephemeral emissions CLAUDE.md makes
+/// first-class — where one emitter seen as a short burst and again as a long one lands at a
+/// different `cyclic_db`, and so at a different Mahalanobis distance from the same class. The fix
+/// is to stop C14's search band and whitening from scaling with the record; that changes
+/// `significance_db` for every C14 consumer, so it is not a rescaling that can be done in this
+/// module. `cyclic_line_window.rs` pins the two structural findings so the wrong law cannot be
+/// re-derived from a single seed.
 fn symbol_features(f: &mut Features, input: &FeatureInput<'_>) {
     let Some(s) = input.symbols else {
         return;
