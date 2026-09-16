@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 
 use hk_model::attention::ATTENTION_SCHEMA_VERSION;
-use hk_model::attention::baseline::SiteKey;
+use hk_model::attention::baseline::{ChainKey, SiteKey};
 use hk_model::attention::observation::{ObservationRecord, SweepRecord, Tier};
 use hk_model::attention::occupancy::{
     ConfidenceInterval, ConfidenceLevel, FloorSource, OccupancyStat, OccupancySubject,
@@ -49,6 +49,7 @@ use hk_model::attention::occupancy::{
 use hk_model::frames::PowerUnit;
 use hk_model::ids::CalibrationStateId;
 use hk_model::{BiasTee, FreqRange, TimeRange, Timestamp};
+use hk_store::history::{OriginField, OriginFilter};
 use hk_store::{RegionHistory, RegionQuery, Resolution};
 
 use super::channels::DetectionExtent;
@@ -211,11 +212,21 @@ impl ObservationSource for MemoryObservations {
 }
 
 /// Level-0 history for a region (the evaluation input).
+///
+/// **T-314: a level source decides which front ends its grid may contain, and the caller must
+/// know which it chose.** Occupancy is measured *through* a receive chain — the level it reports
+/// is that chain's antenna, cable, LNA and mixer as much as it is the air — so a grid pooling two
+/// front ends produces a statistic that belongs to neither, and keying the baseline it folds into
+/// (T-303) cannot undo the pooling that already happened in the measurement. The plain
+/// implementation for [`hk_store::Pyramid`] pools **every** origin, which is right for a
+/// whole-history question and wrong for a per-chain one; [`OriginLevels`] restricts the read.
 pub trait LevelSource {
     /// Level-0 grid over `freq` × `span`, `None` when unreadable.
     fn level0(&self, freq: FreqRange, span: TimeRange) -> Option<RegionHistory>;
 }
 
+/// Every origin the pyramid holds, pooled — the unfiltered read (see [`OriginLevels`] for the
+/// per-chain one).
 impl LevelSource for hk_store::Pyramid {
     fn level0(&self, freq: FreqRange, span: TimeRange) -> Option<RegionHistory> {
         self.query(&RegionQuery {
@@ -224,6 +235,65 @@ impl LevelSource for hk_store::Pyramid {
             resolution: Resolution::Level(0),
         })
         .ok()
+    }
+}
+
+/// T-314: a pyramid read restricted to one origin — the front end (and/or site) whose frames the
+/// caller's statistic is allowed to contain.
+///
+/// The restriction is the T-133 [`OriginFilter`], and its rule for a level-0 cell that **cannot**
+/// be attributed to one origin is the one this task needs: a tile whose frames come from more
+/// than one origin answers its level-0 cells as **unobserved** (counted in
+/// [`hk_store::history::FilterSummary::cells_excluded`]), never as the mixture and never as the
+/// origin that contributed most. That is deliberately the same choice T-359 made one layer up for
+/// the bias tee — a measurement taken through two receive chains claims neither — and it is why a
+/// per-chain read is honest rather than merely narrower. The price is coverage: while two front
+/// ends' frames interleave inside one tile, neither chain can be measured there at all, and its
+/// cohort stays [`hk_model::attention::baseline::Maturity::Immature`] until it has tiles of its
+/// own (T-333: bounded silence is the chosen behaviour).
+///
+/// Unknown-origin frames (tiles written before history format 3, and frames whose source was
+/// never recorded) pass only [`hk_store::history::OriginField::Any`] or
+/// [`hk_store::history::OriginField::Unknown`]. `OriginField` has no "this source **or** unknown",
+/// so a per-chain read cannot adopt origin-less history: such tiles read as another origin's and
+/// are excluded. Filtering on nothing ([`OriginFilter::ANY`]) is the pooled read, identical to
+/// [`hk_store::Pyramid`]'s own.
+pub struct OriginLevels<'a> {
+    /// The pyramid to read.
+    pub pyramid: &'a hk_store::Pyramid,
+    /// Which origins' frames the grid may contain.
+    pub filter: OriginFilter,
+}
+
+impl LevelSource for OriginLevels<'_> {
+    fn level0(&self, freq: FreqRange, span: TimeRange) -> Option<RegionHistory> {
+        self.pyramid
+            .query_filtered(
+                &RegionQuery {
+                    freq,
+                    time: span,
+                    resolution: Resolution::Level(0),
+                },
+                &self.filter,
+            )
+            .ok()
+    }
+}
+
+/// T-314: the history read that measures the receive chain `chain` only.
+///
+/// [`ChainKey::of_device`] hashes the device id exactly as `hk_store::history::source_key` does
+/// (a test in hk-store pins the two together), so the filter selects the frames whose provenance
+/// names the same front end the baseline is keyed by: the key and the measurement are the same
+/// value, which is the whole of T-314. [`ChainKey::Unknown`] — no device named — restricts
+/// nothing, which is what the pooled read was before.
+pub fn chain_filter(chain: ChainKey) -> OriginFilter {
+    OriginFilter {
+        source: match chain.id() {
+            Some(id) => OriginField::Is(id),
+            None => OriginField::Any,
+        },
+        site: OriginField::Any,
     }
 }
 

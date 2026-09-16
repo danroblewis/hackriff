@@ -44,7 +44,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -55,11 +55,12 @@ use hk_context::occupancy::engine::{
     SubjectContext, VisitSample,
 };
 use hk_model::attention::ATTENTION_SCHEMA_VERSION;
-use hk_model::attention::baseline::SiteKey;
+use hk_model::attention::baseline::{ChainKey, SiteKey};
 use hk_model::attention::observation::{ObservationRecord, Tier};
 use hk_model::attention::occupancy::{Channel, ChannelKey, OccupancyStat, OccupancySubject};
 use hk_model::frames::PowerUnit;
 use hk_model::{FreqRange, Region, Repository, TimeRange, Timestamp};
+use hk_store::history::OriginFilter;
 use hk_store::observation::{ObservationStore, RecordQuery};
 use hk_store::occupancy::{
     OccupancyQuery, OccupancyRows, OccupancyStore, OccupancyStoreConfig, StoredChannelPlan,
@@ -135,6 +136,11 @@ pub struct OccupancyServiceStats {
     pub plan_version: u32,
     /// Store/read errors (the service keeps going).
     pub errors: u64,
+    /// T-314: level-0 cells excluded from the reads behind these rows because their tile pools
+    /// this run's receive chain with another front end's. Such a cell is reported unobserved,
+    /// never averaged and never attributed to whichever chain contributed most, so a nonzero
+    /// count is coverage this chain does not have rather than a measurement it got wrong.
+    pub cells_excluded: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -164,13 +170,31 @@ struct Inner {
 /// tune/gain state).
 const TUNE_CENTRE_CACHE_MAX: usize = 65_536;
 
-/// Level-0 history under the product lock, held for one read only.
-struct ProductLevels<'a>(&'a Mutex<FloorProduct>);
+/// Level-0 history under the product lock, held for one read only, restricted to the run's own
+/// receive chain (T-314: `filter`, from [`engine::chain_filter`]).
+///
+/// The excluded-cell count of each read is added to `excluded`, so a chain whose history is
+/// pooled with another front end's says so in [`OccupancyServiceStats::cells_excluded`] rather
+/// than going quietly empty.
+struct ProductLevels<'a> {
+    product: &'a Mutex<FloorProduct>,
+    filter: OriginFilter,
+    excluded: &'a AtomicU64,
+}
 
 impl LevelSource for ProductLevels<'_> {
     fn level0(&self, freq: FreqRange, span: TimeRange) -> Option<RegionHistory> {
-        let p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        p.uncalibrated_pyramid().level0(freq, span)
+        let p = self.product.lock().unwrap_or_else(PoisonError::into_inner);
+        let h = engine::OriginLevels {
+            pyramid: p.uncalibrated_pyramid(),
+            filter: self.filter,
+        }
+        .level0(freq, span)?;
+        if let Some(f) = &h.filter {
+            self.excluded
+                .fetch_add(f.cells_excluded as u64, Ordering::Relaxed);
+        }
+        Some(h)
     }
 }
 
@@ -191,6 +215,16 @@ pub struct OccupancyService {
     /// T-131: the run's novelty alarm service and the feed cache (correlation context), fed with
     /// each close's folds.
     alarms: Mutex<Option<AlarmSlot>>,
+    /// T-314: the origins this service's history reads may contain — the run's own receive chain,
+    /// the same front end [`crate::attention::AttentionService`] keys its baselines by (T-303).
+    /// Without it the key would be per-chain while the measurement behind it was the average of
+    /// every front end folded into the pyramid.
+    origin: OriginFilter,
+    /// Level-0 cells a filtered read returned as unobserved because another front end's frames
+    /// are folded into them (T-314). Nonzero means this chain's history is genuinely pooled with
+    /// another's in those tiles, and the cells were **excluded** rather than attributed to the
+    /// origin that contributed most.
+    cells_excluded: AtomicU64,
 }
 
 /// T-131: the alarm service the occupancy thread feeds, with its feed cache.
@@ -585,6 +619,7 @@ impl OccupancyService {
         db_path: PathBuf,
         counters: Arc<Counters>,
         cfg: OccupancyConfig,
+        chain: ChainKey,
     ) -> Arc<Self> {
         let (scheme, f_cell, t_cell_ns) = {
             let p = product.lock().unwrap_or_else(PoisonError::into_inner);
@@ -643,7 +678,19 @@ impl OccupancyService {
             thread: Mutex::new(None),
             attention: Mutex::new(None),
             alarms: Mutex::new(None),
+            origin: engine::chain_filter(chain),
+            cells_excluded: AtomicU64::new(0),
         })
+    }
+
+    /// T-314: the level source of every occupancy read — the pyramid restricted to this run's
+    /// own receive chain.
+    fn levels(&self) -> ProductLevels<'_> {
+        ProductLevels {
+            product: &self.product,
+            filter: self.origin,
+            excluded: &self.cells_excluded,
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -801,11 +848,12 @@ impl OccupancyService {
         f_cell: f64,
         span: TimeRange,
     ) -> Vec<hk_context::occupancy::alarm::DeviceStep> {
-        let history = {
-            let p = self.product.lock().unwrap_or_else(PoisonError::into_inner);
-            p.uncalibrated_pyramid()
-                .level0(FreqRange::new(at - 0.5 * f_cell, at + 0.5 * f_cell), span)
-        };
+        // T-314: restricted to this run's own chain like every other occupancy read. A mixed
+        // tile's steps are not returned, which costs nothing: its cells are excluded from the
+        // measurement there is nothing left to explain.
+        let history = self
+            .levels()
+            .level0(FreqRange::new(at - 0.5 * f_cell, at + 0.5 * f_cell), span);
         // The summary's sample-drop step is an aggregate count with no time of its own (stamped at
         // the query's first frame), so any gap in the looked-back span would "explain" the whole
         // interval. A drop removes observation (already out of the visit counts and `n_eff`); it
@@ -1116,7 +1164,7 @@ impl OccupancyService {
                     bands.insert(id, f);
                 }
             }
-            let levels = ProductLevels(&self.product);
+            let levels = self.levels();
             let job = BandJob {
                 cfg: &self.cfg,
                 levels: &levels,
@@ -1251,7 +1299,7 @@ impl OccupancyService {
         freq: FreqRange,
         span: TimeRange,
     ) -> Result<Vec<OccupancyStat>, String> {
-        self.span_stats_from(&ProductLevels(&self.product), freq, span)
+        self.span_stats_from(&self.levels(), freq, span)
     }
 
     fn span_stats_from(
@@ -1300,7 +1348,10 @@ impl OccupancyService {
 
     /// Counters.
     pub fn stats(&self) -> OccupancyServiceStats {
-        self.lock().stats
+        OccupancyServiceStats {
+            cells_excluded: self.cells_excluded.load(Ordering::Relaxed),
+            ..self.lock().stats
+        }
     }
 }
 
@@ -1445,6 +1496,7 @@ mod tests {
             db.clone(),
             Arc::new(Counters::default()),
             OccupancyConfig::default(),
+            ChainKey::Unknown,
         );
         let band = FreqRange::new(431e6, 433e6);
         let site = SiteKey::Site(hk_model::ids::SiteId::new());
@@ -2130,6 +2182,374 @@ mod tests {
         );
         for state in ["on", "off", "unknown"] {
             assert!(cohorts.iter().any(|c| c == state), "{cohorts:?}");
+        }
+    }
+
+    // T-314: the per-front-end guarantee reaches the measurement, not just the key.
+
+    const T314_SECS: i64 = 256;
+    /// Level-0 tile time block of [`t359_pyramid`], in seconds: two front ends whose frames
+    /// alternate on this grid write **separate** tiles, so each is attributable.
+    const T314_BLOCK: i64 = 16;
+    const T314_FLOOR_A: f32 = -100.0;
+    const T314_FLOOR_B: f32 = -70.0;
+    const T314_DEVICE_A: &str = "hackrf:a";
+    const T314_DEVICE_B: &str = "hackrf:b";
+
+    /// A pyramid of [`T314_SECS`] one-second frames, each from the front end and at the floor
+    /// `chain(second)` gives; `None` skips the second. Nothing else differs between the chains:
+    /// same site, gain, calibration, port, mask and bias tee, so only the origin can separate
+    /// them.
+    fn t314_fixture(
+        dir: &std::path::Path,
+        chain: impl Fn(i64) -> Option<(&'static str, f32)>,
+    ) -> hk_store::Pyramid {
+        {
+            let mut p = t359_pyramid(dir);
+            let gain = hk_store::GainState {
+                lna_db: 16.0,
+                vga_db: 20.0,
+                amp_on: false,
+            };
+            for k in 0..T314_SECS {
+                let Some((device, floor)) = chain(k) else {
+                    continue;
+                };
+                let psd = vec![10f32.powf(floor / 10.0); 16];
+                let mut f = hk_store::FrameInput::new(
+                    ts(T359_T0 + k * T_CELL),
+                    T_CELL,
+                    T359_LO_CELL as f64 * F_CELL,
+                    F_CELL,
+                    PowerUnit::Dbfs,
+                    &psd,
+                );
+                f.gain = Some(gain);
+                f.source = hk_store::history::source_key(device);
+                p.ingest(&f).unwrap();
+            }
+            p.seal_through(ts(T359_T0 + T314_SECS * T_CELL)).unwrap();
+        }
+        t359_pyramid(dir)
+    }
+
+    /// Two front ends 30 dB apart in **one** pyramid, alternating on the level-0 tile block, so
+    /// every tile is attributable to exactly one of them.
+    fn t314_alternating(k: i64) -> Option<(&'static str, f32)> {
+        Some(if (k / T314_BLOCK) % 2 == 1 {
+            (T314_DEVICE_B, T314_FLOOR_B)
+        } else {
+            (T314_DEVICE_A, T314_FLOOR_A)
+        })
+    }
+
+    /// The fixture read through the production occupancy path under `filter`:
+    /// `OriginLevels` → `evaluate_band` → `VisitSample`s → `rows_for` → `OccupancyStat`.
+    fn t314_rows(p: &hk_store::Pyramid, filter: OriginFilter) -> Vec<OccupancyStat> {
+        let cfg = OccupancyConfig::default();
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: T359_LO_CELL,
+            hi_cell: T359_LO_CELL + 4,
+        };
+        let channels = vec![Channel {
+            key,
+            source: hk_model::attention::occupancy::ChannelSource::Learned,
+            plan_version: 1,
+            first_learned: ts(T359_T0),
+            evidence: 1,
+            obw_hz: key.freq(F_CELL).width_hz(),
+            raster_hint: None,
+        }];
+        let span = TimeRange::new(ts(T359_T0), ts(T359_T0 + T314_SECS * T_CELL));
+        let (band, band_id) = snap_band(
+            FreqRange::new(
+                T359_LO_CELL as f64 * F_CELL,
+                (T359_LO_CELL + 16) as f64 * F_CELL,
+            ),
+            F_CELL,
+        );
+        let levels = engine::OriginLevels { pyramid: p, filter };
+        let job = BandJob {
+            cfg: &cfg,
+            levels: &levels,
+            obs: None,
+            dets: &[],
+            f_cell: F_CELL,
+            t_cell_ns: T_CELL,
+            max_samples: MAX_SPAN_SAMPLES,
+        };
+        let mut series = BTreeMap::new();
+        let mut unit = PowerUnit::Dbfs;
+        evaluate_band(&job, band, band_id, &channels, span, &mut series, &mut unit).unwrap();
+        rows_for(&cfg, &channels, &series, span, span, unit, F_CELL)
+            .into_iter()
+            .filter(|r| matches!(r.subject, OccupancySubject::Channel { .. }))
+            .collect()
+    }
+
+    /// What one read measured: representative level and floor, dB/Hz, and the excess above the
+    /// floor a baseline would fold from it (NaN when the row declines to say — a suspect floor).
+    #[derive(Clone, Copy, Debug)]
+    struct T314Measured {
+        level_db: f64,
+        floor_db: f64,
+        excess_db: f64,
+        visits: u64,
+        occupied: u64,
+    }
+
+    fn t314_measured(tag: &str, rows: &[OccupancyStat]) -> Option<T314Measured> {
+        let r = rows.first()?;
+        let m = T314Measured {
+            level_db: r.level_idle_db.or(r.level_occupied_p50_db)?,
+            floor_db: r.floor_db?,
+            excess_db: hk_context::occupancy::baseline::channel_level_excess(r)
+                .map_or(f64::NAN, |(l, _)| l),
+            visits: r.n_revisits,
+            occupied: r.n_occupied,
+        };
+        println!(
+            "T-314 {tag}: {} row(s), level {:.2} dB/Hz, floor {:.2} dB/Hz, baseline excess \
+             {:.2} dB, visits {} ({} occupied), floor_suspect {:?}",
+            rows.len(),
+            m.level_db,
+            m.floor_db,
+            m.excess_db,
+            m.visits,
+            m.occupied,
+            r.floor_suspect,
+        );
+        Some(m)
+    }
+
+    /// **T-314, end to end.** T-303 keyed baselines by the receive chain; the measurement behind
+    /// the key was still read UNFILTERED, so two front ends folded into one pyramid were already
+    /// averaged in the level-0 cells before any baseline saw them. The guarantee stopped at the
+    /// key. It now reaches the measurement: every occupancy read restricts the history to the
+    /// run's own chain ([`engine::chain_filter`], the same device hash the baseline key uses).
+    ///
+    /// - **Property:** two front ends 30 dB apart in one pyramid; each chain's own filtered read
+    ///   reports **its own floor** — a value in dB, not a shape — and nothing of the other's.
+    /// - **Pooled control, on the same fixture:** read with [`OriginFilter::ANY`] the cells are
+    ///   all still there (twice the visits), and the row compounds the two chains — chain A's
+    ///   floor under chain B's level, so half the window reads occupied and the baseline folds a
+    ///   30 dB excess that no emission produced. The control is what stops the property passing
+    ///   by the filtered read having returned nothing.
+    /// - **A level between the two floors:** with the chains only 4 dB apart, neither crosses the
+    ///   other's threshold, and the pooled row's level is literally the mixture — between the two
+    ///   floors, which is neither chain's measurement.
+    /// - **Unattributable cells:** a level-0 tile holding both chains answers **unobserved**, not
+    ///   the mixture and not the chain that contributed most (the T-359 rule, one layer down).
+    ///   Bounded silence, per T-333, is the chosen behaviour.
+    #[test]
+    fn occupancy_reads_only_its_own_front_ends_energy() {
+        let tmp = |tag: &str| {
+            let d = std::env::temp_dir()
+                .join(format!("hk-t314-{tag}-{}", hk_model::ids::SiteId::new()));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        };
+        let chain = |d: &str| engine::chain_filter(ChainKey::of_device(d));
+        let dir = tmp("alt");
+        let p = t314_fixture(&dir, t314_alternating);
+
+        let a = t314_rows(&p, chain(T314_DEVICE_A));
+        let b = t314_rows(&p, chain(T314_DEVICE_B));
+        let pooled = t314_rows(&p, OriginFilter::ANY);
+        let ma = t314_measured("chain A ", &a).expect("chain A measured something");
+        let mb = t314_measured("chain B ", &b).expect("chain B measured something");
+        let mp = t314_measured("pooled  ", &pooled).expect("the pooled control");
+
+        // (a) The pooled control first, because it is the precondition: the fixture really does
+        // fold two front ends into these cells, and the unfiltered read really does return them.
+        // Read that way the row compounds the two chains — chain A's floor under chain B's level —
+        // so half the window reads occupied with nothing on the air, and the excess the baseline
+        // folds is the 30 dB gap between two front ends.
+        assert!(
+            (mp.floor_db - f64::from(T314_FLOOR_A)).abs() < 1.0,
+            "the pooled floor {} is chain A's",
+            mp.floor_db
+        );
+        assert_eq!(
+            mp.occupied, 128,
+            "chain B's noise read as an occupied channel"
+        );
+        assert!(
+            mp.excess_db > 25.0,
+            "the pooled excess {} is the gap between the chains, not a signal",
+            mp.excess_db
+        );
+
+        // (b) The property, as values: each chain's row is its own chain's floor, and no part of
+        // the other's — 30 dB away, not a fraction of it.
+        for (name, m, own, other) in [
+            ("A", ma, T314_FLOOR_A, T314_FLOOR_B),
+            ("B", mb, T314_FLOOR_B, T314_FLOOR_A),
+        ] {
+            assert!(
+                (m.level_db - f64::from(own)).abs() < 1.0
+                    && (m.floor_db - f64::from(own)).abs() < 1.0,
+                "chain {name} reads its own floor {own}: level {}, floor {}",
+                m.level_db,
+                m.floor_db
+            );
+            assert!(
+                (m.level_db - f64::from(other)).abs() > 25.0,
+                "chain {name}'s level {} holds the other chain's energy",
+                m.level_db
+            );
+            // Its own noise is not an emission on its own chain: nothing stands over the floor.
+            assert_eq!(
+                m.occupied, 0,
+                "chain {name} found occupancy in its own noise"
+            );
+        }
+        assert!(
+            ma.excess_db.abs() < 1.0,
+            "chain A's own excess is its own noise, not the other chain's: {}",
+            ma.excess_db
+        );
+        // Each chain measured its own half of the span, and the pooled read measured both: the
+        // filtered reads are restrictions of a working read, not a broken one.
+        assert_eq!(
+            (ma.visits, mb.visits, mp.visits),
+            (128, 128, 256),
+            "each chain's own visits, and the pooled read's both"
+        );
+
+        // (c) A level **between** the two floors: 2 dB apart, under the floor + 3 dB clamp on
+        // the threshold, so neither chain crosses the other's, no visit is called occupied, and
+        // the pooled level is the mixture itself — the midpoint of the two floors.
+        const NEAR_B: f32 = T314_FLOOR_A + 2.0;
+        let ndir = tmp("near");
+        let np = t314_fixture(&ndir, |k| {
+            Some(if (k / T314_BLOCK) % 2 == 1 {
+                (T314_DEVICE_B, NEAR_B)
+            } else {
+                (T314_DEVICE_A, T314_FLOOR_A)
+            })
+        });
+        let na =
+            t314_measured("near A  ", &t314_rows(&np, chain(T314_DEVICE_A))).expect("near chain A");
+        let nb =
+            t314_measured("near B  ", &t314_rows(&np, chain(T314_DEVICE_B))).expect("near chain B");
+        let npooled =
+            t314_measured("near mix", &t314_rows(&np, OriginFilter::ANY)).expect("near pooled");
+        assert!(
+            (na.level_db - f64::from(T314_FLOOR_A)).abs() < 1.0
+                && (nb.level_db - f64::from(NEAR_B)).abs() < 1.0,
+            "each chain still reads its own floor: A {}, B {}",
+            na.level_db,
+            nb.level_db
+        );
+        assert_eq!(
+            npooled.occupied, 0,
+            "neither chain crosses the other's threshold at this gap"
+        );
+        let mid = 0.5 * f64::from(T314_FLOOR_A + NEAR_B);
+        assert!(
+            (npooled.level_db - mid).abs() < 0.2,
+            "the pooled level {} is the mixture of the two floors {T314_FLOOR_A} and {NEAR_B},              i.e. {mid}, which is neither chain's measurement",
+            npooled.level_db
+        );
+        assert!(
+            npooled.level_db > f64::from(T314_FLOOR_A) + 0.5
+                && npooled.level_db < f64::from(NEAR_B) - 0.5,
+            "and it lies strictly between them: {}",
+            npooled.level_db
+        );
+
+        // (d) A cell that cannot be attributed to one chain. The same two chains, interleaved
+        // second by second so every level-0 tile holds both, and three of every four seconds are
+        // chain A's — a majority rule would call these tiles A's. Each per-chain read reports
+        // NOTHING there: not the mixture, and not the chain that contributed most.
+        let idir = tmp("mixed");
+        let ip = t314_fixture(&idir, |k| {
+            Some(if k % 4 == 3 {
+                (T314_DEVICE_B, T314_FLOOR_B)
+            } else {
+                (T314_DEVICE_A, T314_FLOOR_A)
+            })
+        });
+        let (ia, ib) = (
+            t314_rows(&ip, chain(T314_DEVICE_A)),
+            t314_rows(&ip, chain(T314_DEVICE_B)),
+        );
+        let ipooled = t314_rows(&ip, OriginFilter::ANY);
+        println!(
+            "T-314 interleaved: chain A {} row(s), chain B {} row(s), pooled {} row(s)",
+            ia.len(),
+            ib.len(),
+            ipooled.len()
+        );
+        assert!(
+            ia.is_empty() && ib.is_empty(),
+            "a tile pooling both chains must measure neither, not the majority contributor"
+        );
+        assert!(
+            !ipooled.is_empty(),
+            "the pooled read still measures the mixture: the cells are there, and it is only \
+             attribution that is missing"
+        );
+
+        for (p, d) in [(p, dir), (np, ndir), (ip, idir)] {
+            drop(p);
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// T-314, what the read-side filter does **not** reach: a level-0 cell's stored `occupancy`
+    /// was decided at ingest against the pyramid's own tracked noise floor, which is fed by every
+    /// front end. So a tile that is pure in origin can still carry an occupancy decided against
+    /// another chain's floor, and `local_floors` reads a dense neighbourhood as a **suspect
+    /// floor** — whereupon `channel_level_excess` declines and the baseline folds nothing.
+    ///
+    /// This asserts the size of what remains: chain B's filtered row has the right level and the
+    /// right floor (the filter works), and yet **withholds** its excess, where the identical
+    /// frames ingested alone do not. Withholding is the safe direction — bounded silence, not a
+    /// wrong number, and never the other chain's value — but it is a residue of pooling upstream
+    /// of the read, and the fix belongs at ingest (per-origin floor tracking), not here.
+    #[test]
+    fn occupancy_ingest_time_floor_is_still_pooled_across_front_ends() {
+        let tmp = |tag: &str| {
+            let d = std::env::temp_dir()
+                .join(format!("hk-t314-{tag}-{}", hk_model::ids::SiteId::new()));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        };
+        let chain = |d: &str| engine::chain_filter(ChainKey::of_device(d));
+        // Chain B's own frames, at their own times, with no other front end in the pyramid.
+        let adir = tmp("alone");
+        let ap = t314_fixture(&adir, |k| {
+            ((k / T314_BLOCK) % 2 == 1).then_some((T314_DEVICE_B, T314_FLOOR_B))
+        });
+        let alone = t314_measured("B alone ", &t314_rows(&ap, chain(T314_DEVICE_B)))
+            .expect("chain B alone");
+        // The same frames, with chain A's tiles beside them.
+        let sdir = tmp("shared");
+        let sp = t314_fixture(&sdir, t314_alternating);
+        let shared = t314_measured("B shared", &t314_rows(&sp, chain(T314_DEVICE_B)))
+            .expect("chain B beside chain A");
+
+        assert_eq!(
+            (alone.level_db, alone.floor_db),
+            (shared.level_db, shared.floor_db),
+            "the filter gives chain B the same level and floor either way"
+        );
+        assert!(
+            alone.excess_db.abs() < 1.0,
+            "alone, chain B's noise is its own floor: {}",
+            alone.excess_db
+        );
+        assert!(
+            shared.excess_db.is_nan(),
+            "beside another chain, chain B withholds its excess rather than mis-stating it: {}",
+            shared.excess_db
+        );
+        for (p, d) in [(ap, adir), (sp, sdir)] {
+            drop(p);
+            let _ = std::fs::remove_dir_all(&d);
         }
     }
 }
