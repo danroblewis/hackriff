@@ -34,20 +34,36 @@ export interface PipelineLite {
 }
 
 export type PanelSource =
+  | { emitterId: string; kind: "rds"; pipelineId: string }
   | { emitterId: string; kind: "digital"; pipelineId: string }
   | { emitterId: string; kind: "audio"; outputId: string };
 
+/** `messages` output ids `rds.recipe.json` (group-info/station/radiotext) commits its rows under
+ * (T-252): a running pipeline offering any of these is recognised as RDS without decoding
+ * anything client-side — a structural read of the pipeline listing, the same kind of selection
+ * heuristic `collectPanelSources` already made for "has an inspector output". */
+const RDS_MESSAGE_OUTPUT_IDS = new Set(["group-info", "station", "radiotext"]);
+
 /**
- * One panel per confirmed signal with an active output: a running pipeline targeting the emitter
- * with a frame ("inspector") output wins (a decode is the more specific output); otherwise a
- * live/opening Listen stream. Pure and stable-ordered (pipelines first, then dock order) so a
- * panel's identity/position doesn't jump around as unrelated state changes elsewhere.
+ * One panel per confirmed signal with an active output: a running RDS-recipe pipeline (identified
+ * by its `messages` output ids) gets the dedicated accumulated RDS view ahead of the raw packet
+ * inspector — the per-frame group stream is plumbing, the assembled PS/RadioText/PI/PTY readout is
+ * the product (T-252, found live: the inspector was winning and hiding it). Otherwise a running
+ * pipeline with a frame ("inspector") output wins over a live/opening Listen stream. Pure and
+ * stable-ordered (pipelines first, then dock order) so a panel's identity/position doesn't jump
+ * around as unrelated state changes elsewhere.
  */
 export function collectPanelSources(outputs: readonly OutputEntry[], pipelines: readonly PipelineLite[]): PanelSource[] {
   const seen = new Set<string>();
   const sources: PanelSource[] = [];
   for (const p of pipelines) {
     if (p.state !== "running" || !p.emitter_id || seen.has(p.emitter_id)) continue;
+    const isRds = p.outputs.some((o) => o.kind === "messages" && RDS_MESSAGE_OUTPUT_IDS.has(o.id));
+    if (isRds) {
+      seen.add(p.emitter_id);
+      sources.push({ emitterId: p.emitter_id, kind: "rds", pipelineId: p.id });
+      continue;
+    }
     const insp = p.outputs.find((o) => o.kind === "inspector");
     if (!insp) continue;
     seen.add(p.emitter_id);
@@ -84,9 +100,26 @@ export interface DecodeRow {
 }
 export interface DecodeResponse { decodes: readonly DecodeRow[] }
 
+/** The three `rds.recipe.json` `messages` outputs' `frame_model`s (recipe file, `outputs[].decode.
+ * frame_model`): `group-info` → `rds-group` (PI/TP/PTY, the identity sighting), `station` →
+ * `rds-ps` (assembled 8-char PS), `radiotext` → `rds-rt` (assembled 64-char RadioText). Each is
+ * its own `/api/inventory/{id}/decode` row (T-252 scope: this built-in decode path only, not the
+ * separate `hk-rds` plugin's differently-shaped `rds-pi` frame). */
+const RDS_GROUP_FRAME = "rds-group", RDS_PS_FRAME = "rds-ps", RDS_RT_FRAME = "rds-rt";
+
 export interface RdsViewModel {
-  ps: string | null; rt: string | null; pi: string | null;
-  pty: number | null; tp: boolean | null; ta: boolean | null;
+  /** Assembled Programme Service name (8 chars, space-padded), or `null`: `station`'s `text`
+   * field has never committed a row for this emitter (`rds.recipe.json`'s `text` block only emits
+   * once every segment up to the end of the string has arrived — never a partial string, per its
+   * `on-complete` default; T-252 "never a fabricated value" holds trivially here). */
+  ps: string | null;
+  /** Assembled RadioText (up to 64 chars), or `null`: same "never partial" rule via `radiotext`'s
+   * `reset_on: radiotext.ab` A/B switch. */
+  rt: string | null;
+  /** Traffic Programme flag from the latest `group-info` row, or `null`: not yet received. */
+  tp: boolean | null;
+  /** Programme Type code from the latest `group-info` row, or `null`: not yet received. */
+  pty: number | null;
   updatedAtS: number;
 }
 
@@ -95,27 +128,53 @@ const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
 const bool = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
 
 /**
- * Merges the RDS-family decode rows' fields into one view model (PI/group metadata, PS and
- * RadioText each land as their own row, newest first — docs/api.md's `GET .../decode`). `null`
- * when the emitter has no RDS decode yet (the panel's own quiet empty state). Every value is
- * exactly as the decoder committed it — reading a named field is not parsing.
+ * Merges the RDS recipe's three decode rows (group-info/station/radiotext, newest-first per
+ * docs/api.md's `GET .../decode`) into one view model. `null` when none of the three has ever
+ * produced a row for this emitter (the panel's own quiet empty state). Every value is read from
+ * exactly the field the recipe's mapping commits under that frame model — `station`/`radiotext`
+ * content is keyed `text` (the mapping's only content path, `ps.text`/`radiotext.text`, keyed by
+ * its last segment per `hk_pipeline::recipes::messages::keyed`), `group-info` metadata is keyed
+ * `tp`/`pty` verbatim (`rds.recipe.json`'s `metadata: ["group_type","version","tp","pty"]`) — this
+ * is not parsing, just reading the named field the recipe declared. PI is deliberately not read
+ * here: the recipe uses it only as the row's *identity* (`decode.identity.field`), never as a
+ * mapped `metadata`/`content` path, so it never reaches a row's `fields` at all — see
+ * [[rdsIdentity]], which reads it from the emitter's own `identity_value` instead (an API gap,
+ * reported rather than derived: T-252).
  */
 export function rdsViewModel(decodes: readonly DecodeRow[]): RdsViewModel | null {
-  const rows = decodes.filter((d) => d.frame_model.startsWith("rds"));
+  const rows = decodes.filter(
+    (d) => d.frame_model === RDS_GROUP_FRAME || d.frame_model === RDS_PS_FRAME || d.frame_model === RDS_RT_FRAME,
+  );
   if (rows.length === 0) return null;
-  let ps: string | null = null, rt: string | null = null, pi: string | null = null;
-  let pty: number | null = null, tp: boolean | null = null, ta: boolean | null = null;
+  let ps: string | null = null, rt: string | null = null;
+  let tp: boolean | null = null, pty: number | null = null;
   let updatedAtS = 0;
   for (const r of rows) {
     updatedAtS = Math.max(updatedAtS, r.at);
-    ps ??= str(r.fields.ps);
-    rt ??= str(r.fields.rt);
-    pi ??= str(r.fields.pi);
-    pty ??= num(r.fields.pty);
-    tp ??= bool(r.fields.tp);
-    ta ??= bool(r.fields.ta);
+    if (r.frame_model === RDS_PS_FRAME) ps ??= str(r.fields.text);
+    else if (r.frame_model === RDS_RT_FRAME) rt ??= str(r.fields.text);
+    else {
+      tp ??= bool(r.fields.tp);
+      pty ??= num(r.fields.pty);
+    }
   }
-  return { ps, rt, pi, pty, tp, ta, updatedAtS };
+  return { ps, rt, tp, pty, updatedAtS };
+}
+
+/** The emitter's RDS PI, read from its own inventory row (`ui/src/inventory.ts`'s `Row`) rather
+ * than `/decode` — `rds.recipe.json` only ever uses `pi`/`*.key` as the decode `identity` field,
+ * which `/api/inventory/{id}/decode` does not expose in `fields` (see [[rdsViewModel]]'s doc); the
+ * identity sighting the same decode produces does reach the emitter row as `identity_value`,
+ * gated by the row's own `withheld`. `value` is `null` both before any RDS identity has been seen
+ * for this emitter and while `withheld` is `true` — callers must show those two states
+ * differently, never collapse them (T-207/T-164: absence is not a value). Guarded on
+ * `identity_scheme === "rds-pi"` so a differently-identified emitter (or one not yet identified at
+ * all) never borrows an unrelated identity as if it were a PI. */
+export interface RdsIdentity { value: string | null; withheld: boolean }
+
+export function rdsIdentity(row: Pick<Row, "identity_scheme" | "identity_value" | "withheld"> | undefined): RdsIdentity {
+  if (!row || row.identity_scheme !== "rds-pi") return { value: null, withheld: false };
+  return { value: row.identity_value ?? null, withheld: row.withheld };
 }
 
 /** Trims RDS's space-padded fixed-width fields (PS is 8 chars, RT up to 64) for display; a
@@ -183,6 +242,42 @@ function tabLabel(rows: Readonly<Record<string, Row>>, s: PanelSource): string {
  * to fit this panel's much narrower column) reuses that styling instead of duplicating it. */
 export const DIGITAL_PANEL_CLASS = "out-panel out-digital inspector";
 export const AUDIO_PANEL_CLASS = "out-panel out-audio";
+export const RDS_PANEL_CLASS = "out-panel out-rds";
+
+/** A field that arrives 2 (PS) or 4 (RadioText) characters at a time but only ever reaches
+ * `/decode` once fully assembled (see [[rdsViewModel]]): `raw === null` is the true "not yet
+ * received" state (T-207/T-164 — never rendered as blank or a placeholder value); a non-null raw
+ * value that trims to nothing is a real received value that happens to be blank/all-padding, kept
+ * visibly distinct so it never reads as "not yet received" either. */
+export function rdsFieldText(raw: string | null): string {
+  if (raw === null) return "not yet received";
+  return trimRds(raw) ?? "(blank)";
+}
+
+/** Renders the accumulated RDS readout (T-252) into `el`: PS, RadioText, PI, PTY and TP as the
+ * recipe's rows already report them, plus a Clock (CT) row that is never populated — `rds.recipe.
+ * json` has no group-4A node, so CT is a recipe/API gap (reported, not derived; see the task's
+ * final report) rather than a field this code could ever fill in. Shared by the dedicated RDS
+ * panel and the compact box under a Listen scope, so the two never disagree. */
+function renderRdsBox(el: HTMLElement, rds: RdsViewModel | null, pi: RdsIdentity): void {
+  const v = rds ?? { ps: null, rt: null, tp: null, pty: null, updatedAtS: 0 };
+  const hasAnything = v.ps !== null || v.rt !== null || v.tp !== null || v.pty !== null || pi.value !== null || pi.withheld;
+  if (!hasAnything) {
+    el.replaceChildren(h("p", { class: "hint" }, "No RDS decode yet."));
+    return;
+  }
+  const piText = pi.withheld ? "withheld" : (pi.value ?? "not yet received");
+  el.replaceChildren(
+    h("dl", { class: "kv" },
+      h("dt", {}, "Station"), h("dd", {}, rdsFieldText(v.ps)),
+      h("dt", {}, "RadioText"), h("dd", {}, rdsFieldText(v.rt)),
+      h("dt", {}, "PI"), h("dd", { class: "mono" }, piText),
+      h("dt", {}, "Programme type"), h("dd", {}, v.pty === null ? "not yet received" : String(v.pty)),
+      h("dt", {}, "Traffic programme"), h("dd", {}, v.tp === null ? "not yet received" : (v.tp ? "yes" : "no")),
+      h("dt", {}, "Clock (CT)"), h("dd", { class: "hint" }, "not decoded by this recipe"),
+    ),
+  );
+}
 
 class DigitalPanel {
   private cleanup: (() => void) | null = null;
@@ -190,6 +285,32 @@ class DigitalPanel {
     this.cleanup = mountInspectorPanel(el, ctx, pipelineId);
   }
   destroy() { this.cleanup?.(); this.cleanup = null; }
+}
+
+/** The dedicated RDS panel (T-252): polls the same `/decode` route as everything else here and
+ * renders the accumulated view, independent of whether a raw packet-inspector output exists for
+ * this pipeline — that's exactly the point, see [[collectPanelSources]]. */
+class RdsPanel {
+  private bodyEl: HTMLElement;
+  private stopPoll: () => void;
+
+  constructor(el: HTMLElement, private ctx: AppContext, private emitterId: string) {
+    this.bodyEl = h("div", { class: "rds-box" }, h("p", { class: "hint" }, "No RDS decode yet."));
+    el.replaceChildren(h("div", { class: "section-h" }, "RDS"), this.bodyEl);
+    this.stopPoll = startPoll(() => this.load(), 3000);
+  }
+
+  private async load() {
+    try {
+      const r = await this.ctx.client.get<DecodeResponse>(`/api/inventory/${encodeURIComponent(this.emitterId)}/decode`);
+      const row = this.ctx.store.get().inventory.rows[this.emitterId];
+      renderRdsBox(this.bodyEl, rdsViewModel(r.decodes), rdsIdentity(row));
+    } catch (e) {
+      this.bodyEl.replaceChildren(h("p", { class: "hint" }, apiErrorText(e)));
+    }
+  }
+
+  destroy() { this.stopPoll(); }
 }
 
 class AudioPanel {
@@ -210,7 +331,7 @@ class AudioPanel {
     this.poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline") as SVGPolylineElement;
     this.poly.setAttribute("class", "scope-line");
     this.svg.append(this.poly);
-    this.rdsEl = h("div", { class: "rds-box" }, h("p", { class: "hint" }, "no station text yet."));
+    this.rdsEl = h("div", { class: "rds-box" }, h("p", { class: "hint" }, "No RDS decode yet."));
     el.replaceChildren(
       h("div", { class: "out-scope" }, this.svg),
       this.rdsEl,
@@ -231,22 +352,11 @@ class AudioPanel {
   private async loadDecode() {
     try {
       const r = await this.ctx.client.get<DecodeResponse>(`/api/inventory/${encodeURIComponent(this.emitterId)}/decode`);
-      this.renderRds(rdsViewModel(r.decodes));
+      const row = this.ctx.store.get().inventory.rows[this.emitterId];
+      renderRdsBox(this.rdsEl, rdsViewModel(r.decodes), rdsIdentity(row));
     } catch (e) {
       this.rdsEl.replaceChildren(h("p", { class: "hint" }, apiErrorText(e)));
     }
-  }
-
-  private renderRds(rds: RdsViewModel | null) {
-    if (!rds) { this.rdsEl.replaceChildren(h("p", { class: "hint" }, "no station text yet.")); return; }
-    const ps = trimRds(rds.ps), rt = trimRds(rds.rt);
-    this.rdsEl.replaceChildren(
-      h("dl", { class: "kv" },
-        h("dt", {}, "Station"), h("dd", {}, ps ?? "—"),
-        h("dt", {}, "RadioText"), h("dd", {}, rt ?? "—"),
-        h("dt", {}, "PI"), h("dd", { class: "mono" }, rds.pi ?? "—"),
-      ),
-    );
   }
 
   destroy() {
@@ -311,11 +421,14 @@ class OutputPanels {
       this.mountedFor = currentId;
       this.bodyEl.replaceChildren();
       if (current) {
-        const panelEl = h("div", { class: current.kind === "digital" ? DIGITAL_PANEL_CLASS : AUDIO_PANEL_CLASS });
+        const cls = current.kind === "rds" ? RDS_PANEL_CLASS : current.kind === "digital" ? DIGITAL_PANEL_CLASS : AUDIO_PANEL_CLASS;
+        const panelEl = h("div", { class: cls });
         this.bodyEl.append(panelEl);
-        this.mounted = current.kind === "digital"
-          ? new DigitalPanel(panelEl, this.ctx, current.pipelineId)
-          : new AudioPanel(panelEl, this.ctx, current.emitterId, current.outputId);
+        this.mounted = current.kind === "rds"
+          ? new RdsPanel(panelEl, this.ctx, current.emitterId)
+          : current.kind === "digital"
+            ? new DigitalPanel(panelEl, this.ctx, current.pipelineId)
+            : new AudioPanel(panelEl, this.ctx, current.emitterId, current.outputId);
       }
     }
     const empty = panelsEmptyText(this.sources);
