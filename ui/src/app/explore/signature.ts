@@ -23,7 +23,9 @@ export interface SignatureCandidate {
 export type MatchOutcome = "full" | "partial" | "none";
 
 export interface SignatureMatch {
-  schema: number; emitter_id: string; t: number; outcome: MatchOutcome;
+  // `t_ns`: when the match was computed, Unix nanoseconds (T-349 — this was declared as a
+  // bare `number` and fixtured in seconds while the server sent ns).
+  schema: number; emitter_id: string; t_ns: number; outcome: MatchOutcome;
   features_ref: string | null; signatures_rev: number;
   candidates: SignatureCandidate[]; reasons: string[];
 }

@@ -20,7 +20,7 @@ function fakeClient(handlers: { get?: (path: string) => unknown }) {
 // ---- signature match ----
 
 const match = (over: Partial<SignatureMatch> = {}): SignatureMatch => ({
-  schema: 1, emitter_id: "e1", t: 1_789_300_820.5, outcome: "none",
+  schema: 1, emitter_id: "e1", t_ns: 1_789_300_820_500_000_000, outcome: "none",
   features_ref: "features:1", signatures_rev: 3, candidates: [], reasons: [],
   ...over,
 });

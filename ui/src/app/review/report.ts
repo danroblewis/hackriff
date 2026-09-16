@@ -87,7 +87,7 @@ export class ReportTab {
     const src = this.source.value.trim();
     try {
       const r = await this.client.get<SurveyReport>(reportUrl(p, src));
-      this.info.textContent = `generated ${fmtNs(r.generated_at)} · ${freqText(r.region)}`;
+      this.info.textContent = `generated ${fmtNs(r.generated_at_ns)} · ${freqText(r.region)}`;
       this.exports.hidden = false;
       this.exports.replaceChildren(
         h("a", { class: "mini", href: `${reportUrl(p, src, "csv")}&token=${encodeURIComponent(this.token)}` }, "CSV"),

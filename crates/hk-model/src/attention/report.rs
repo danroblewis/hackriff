@@ -35,8 +35,10 @@ pub struct ReportEmitter {
     /// Measured extent.
     pub freq: FreqRange,
     /// First seen (ever).
+    #[serde(rename = "first_seen_ns", alias = "first_seen")]
     pub first_seen: Timestamp,
     /// Last seen.
+    #[serde(rename = "last_seen_ns", alias = "last_seen")]
     pub last_seen: Timestamp,
     /// Sightings inside the span.
     pub sightings: u64,
@@ -169,6 +171,7 @@ pub enum ProvenanceStepKind {
 #[serde(deny_unknown_fields)]
 pub struct ProvenanceStep {
     /// When.
+    #[serde(rename = "t_ns", alias = "t")]
     pub t: Timestamp,
     /// Kind.
     pub kind: ProvenanceStepKind,
@@ -198,6 +201,7 @@ pub struct SurveyReport {
     /// [`super::ATTENTION_SCHEMA_VERSION`].
     pub schema: u32,
     /// Generation time.
+    #[serde(rename = "generated_at_ns", alias = "generated_at")]
     pub generated_at: Timestamp,
     /// Region.
     pub region: FreqRange,

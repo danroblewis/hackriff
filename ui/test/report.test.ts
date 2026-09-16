@@ -64,17 +64,17 @@ test("changeStatusText names every change_vs_baseline.status value", () => {
 
 function mockReport(): SurveyReport {
   return {
-    schema: 1, generated_at: 1_789_300_860_000_000_000,
-    region: { lo_hz: 100e6, hi_hz: 102e6 }, span: { start: 1_789_300_800_000_000_000, end: 1_789_300_860_000_000_000 },
+    schema: 1, generated_at_ns: 1_789_300_860_000_000_000,
+    region: { lo_hz: 100e6, hi_hz: 102e6 }, span: { start_ns: 1_789_300_800_000_000_000, end_ns: 1_789_300_860_000_000_000 },
     site: { kind: "unassigned" },
     occupancy: {
       bands: [{ subject: { kind: "band" }, fco: null, fco_all_visits: 0.31, fbo: 0.08, n_revisits: 0, n_revisits_all: 120, observed_s: 61.5, revisit_biased: true, subject_extent: { lo_hz: 100e6, hi_hz: 102e6 } }],
       channels: [], truncated: false,
     },
-    top_emitters: [{ emitter_id: "e1", freq: { lo_hz: 100.9e6, hi_hz: 101.0e6 }, first_seen: 0, last_seen: 1, sightings: 3, lifecycle: "candidate", fco: null, fco_all_visits: 0.5, top_suggestion: "FM broadcast", new_in_span: true }],
+    top_emitters: [{ emitter_id: "e1", freq: { lo_hz: 100.9e6, hi_hz: 101.0e6 }, first_seen_ns: 0, last_seen_ns: 1, sightings: 3, lifecycle: "candidate", fco: null, fco_all_visits: 0.5, top_suggestion: "FM broadcast", new_in_span: true }],
     change_vs_baseline: { status: "unavailable", changes: [] },
     coverage: { observed_fraction: 0.42, observed_s: 61.5, gaps: [], gaps_truncated: false, never_observed: [], poi: [{ tau_s: 0.1, p_poi: 0.2 }], statement: "unobserved is not quiet" },
-    provenance_steps: [{ t: 0, kind: "gain", detail: "lna 32→24 dB" }],
+    provenance_steps: [{ t_ns: 0, kind: "gain", detail: "lna 32→24 dB" }],
     anomalies: [], warnings: ["history-tile occupancy: fco is unavailable"],
   };
 }

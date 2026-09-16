@@ -237,6 +237,7 @@ pub struct Classification {
     /// Schema version, [`CLASSIFICATION_SCHEMA`].
     pub schema: u16,
     /// When it was produced.
+    #[serde(rename = "t_ns", alias = "t")]
     pub t: Timestamp,
     /// Taxonomy the labels belong to, e.g. `hk-mod@1`.
     pub taxonomy: TaxonomyRef,

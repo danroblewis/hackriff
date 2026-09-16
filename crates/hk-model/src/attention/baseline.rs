@@ -61,8 +61,10 @@ pub struct SiteRecord {
     /// Source.
     pub source: SiteSource,
     /// First observation.
+    #[serde(rename = "first_seen_ns", alias = "first_seen")]
     pub first_seen: Timestamp,
     /// Last observation.
+    #[serde(rename = "last_seen_ns", alias = "last_seen")]
     pub last_seen: Timestamp,
     /// Observed seconds at the site (all tiers).
     pub observed_s: f64,
@@ -116,7 +118,12 @@ pub struct SiteAssignment {
     /// Pinned by config or the user (fixes do not move it).
     pub pinned: bool,
     /// Last in-site time (sample clock): a pin's time, else the last in-site fix.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "last_in_site_ns",
+        alias = "last_in_site"
+    )]
     pub last_in_site: Option<Timestamp>,
 }
 

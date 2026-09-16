@@ -45,11 +45,18 @@ impl FreqRange {
 }
 
 /// A closed time interval `[start, end]`.
+///
+/// Serializes as `{"start_ns", "end_ns"}` — integer Unix nanoseconds, the unit named in the field
+/// like [`FreqRange`] names Hz (T-349; the unit law is on [`crate::Timestamp`]). The old unitless
+/// `start`/`end` are accepted on read so the CRC-checked observation and occupancy line logs
+/// written before the rename still parse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TimeRange {
     /// First instant.
+    #[serde(rename = "start_ns", alias = "start")]
     pub start: Timestamp,
     /// Last instant. `end >= start`; equal for a point in time.
+    #[serde(rename = "end_ns", alias = "end")]
     pub end: Timestamp,
 }
 

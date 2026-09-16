@@ -531,6 +531,7 @@ pub struct SignatureMatch {
     /// The emitter it is about.
     pub emitter_id: EmitterId,
     /// When it was computed.
+    #[serde(rename = "t_ns", alias = "t")]
     pub t: Timestamp,
     /// The outcome.
     pub outcome: MatchOutcome,

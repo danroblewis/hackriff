@@ -88,6 +88,7 @@ pub struct RefinedTuning {
     #[serde(default)]
     pub mode_params: BTreeMap<String, f64>,
     /// Time of the IQ the refinement measured.
+    #[serde(rename = "t_ns", alias = "t")]
     pub t: Timestamp,
 }
 

@@ -10,6 +10,40 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// A UTC instant as nanoseconds since the Unix epoch (range ±292 years).
+///
+/// # The unit law (T-349)
+///
+/// This type is `#[serde(transparent)]`, so it serialises as a **bare `i64` of nanoseconds** with
+/// nothing left on the wire to say so — the newtype is erased and only the *containing field's
+/// name* survives. Absolute times in the two units are 10⁹ apart and both are plain JSON numbers,
+/// so a consumer that reads one as the other is wrong by about 31 years and neither the type
+/// system nor the field name would catch it.
+///
+/// The rule the wire is held to, and the one to follow when adding a field:
+///
+/// - **Unix seconds is the default.** A serialised time field with no unit in its name is seconds
+///   as a JSON number (`t0`, `raised_at`, `t_lo`), as is one suffixed `_s` (`t_s`, `duration_s`).
+/// - **Every departure from that default names itself.** A field carrying this type's raw
+///   nanoseconds MUST end in `_ns` (`start_ns`, `t_ns`, `generated_at_ns`). There is no third
+///   unit.
+/// - So `#[serde(rename = "…_ns")]` belongs on **every** `Timestamp`-typed field that can reach a
+///   response, and `TimeRange` already carries it for `start`/`end`.
+///
+/// `crates/hk-cli/tests/api_contract.rs::every_serialized_time_declares_its_unit` enforces this
+/// over every route by value: a bare or `_s` field holding a nanosecond-magnitude number fails, as
+/// does a `_ns` field holding a seconds-magnitude one.
+///
+/// **Why the type is not simply serialised as seconds.** Seconds as `f64` cannot round-trip it:
+/// at present-day Unix magnitudes an `f64` spaces 238 ns apart (256 ns for the same instant
+/// written in nanoseconds — the unit barely matters, `f64` has 53 bits either way), and this
+/// type's serde form is also the on-disk form of the CRC-checked observation and occupancy line
+/// logs, where the value must survive a write/read cycle exactly. Nanoseconds stay the stored and
+/// serialised unit; the field name is what makes them legible.
+///
+/// JSON consumers should note that these values exceed `Number.MAX_SAFE_INTEGER` — exact
+/// nanosecond integers run out 104 days after the epoch — so a browser parsing one already lands
+/// on the nearest `f64` and gains nothing over seconds. Divide by `1e9` and treat ~¼ µs as the
+/// resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Timestamp(i64);
