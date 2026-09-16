@@ -72,6 +72,11 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "announcements, grants that resolve through them, and a grant naming an identifier that "
         "is never announced (T-268); plus a granted voice channel inside the window with real "
         "keyings to follow and a granted channel outside it to refuse (T-269)"),
+    "trunk_encrypted_control_channel": ScenarioSpec(
+        trunk_scene.trunk_control_channel, trunk_scene.TRUNK_ENCRYPTED_DEFAULTS, (),
+        "the TSBK scene plus two more granted voice channels inside the window (T-270): one "
+        "granted with the service-options encryption bit set, and one announced ONLY by a grant "
+        "update -- late entry, no header, so nothing ever stated its encryption state"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "

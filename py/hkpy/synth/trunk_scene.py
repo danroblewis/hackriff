@@ -90,10 +90,30 @@ TRUNK_CC_DEFAULTS: dict[str, Any] = {
     "follow_on_s": 0.10,
     "follow_off_s": 0.15,
     "follow_snr_db": 18.0,
+    # --- Encryption (T-270). OFF by default, so the T-267/T-268/T-269 fixtures stay byte-identical:
+    # the branches guarded by it emit no extra TSBK and consume no randomness when it is off.
+    "encryption": False,
+    # A granted voice channel whose GRANT carries the service-options encryption bit. Chosen as a
+    # frequency first, like every other target here, so its channel number is derived from the band
+    # plan rather than the other way round. 851.125 MHz is +112.5 kHz from the tuned centre -- well
+    # inside the window the radio holds -- and lands on raster channel 9, clear of the control
+    # channel (3), the decoy (-5), the followed channel (5) and every NBFM neighbour.
+    "encrypted_target_hz": 851.125e6,
+    "encrypted_talkgroup": 3690,
+    "encrypted_source": 2580,
+    # A granted voice channel announced ONLY by a grant update: late entry, joined with no header.
+    # A real grant update carries no service-options octet at all, so nothing ever states this
+    # channel's encryption state and it must come back `unknown` -- never `clear`, however ordinary
+    # its traffic looks. 851.2 MHz is +187.5 kHz, raster channel 15, also inside the window.
+    "late_entry_target_hz": 851.2e6,
+    "late_entry_talkgroup": 4812,
 }
 
 #: The same scene with TSBK content switched on (T-268).
 TRUNK_TSBK_DEFAULTS: dict[str, Any] = {**TRUNK_CC_DEFAULTS, "tsbk": True}
+
+#: The TSBK scene plus the encrypted and late-entry granted channels (T-270).
+TRUNK_ENCRYPTED_DEFAULTS: dict[str, Any] = {**TRUNK_TSBK_DEFAULTS, "encryption": True}
 
 
 def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dict[str, Any]], dict[str, Any]]:
@@ -153,6 +173,53 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
         # only of messages it happens to understand.
         ("other", tk.tsbk(0x3A, bytes(8))),
     ]
+
+    # --- Encryption (T-270). Two more granted channels, both INSIDE the window so both are
+    # followed, differing only in what their announcement was entitled to say.
+    enc_truth: dict[str, Any] | None = None
+    if bool(p.get("encryption", False)):
+        e_hz = float(p["encrypted_target_hz"])
+        e_chan = channel_of(e_hz, "encrypted_target_hz")
+        e_chan16 = tk.channel_number(iden, e_chan)
+        e_tg, e_src = int(p["encrypted_talkgroup"]), int(p["encrypted_source"])
+        l_hz = float(p["late_entry_target_hz"])
+        l_chan = channel_of(l_hz, "late_entry_target_hz")
+        l_chan16 = tk.channel_number(iden, l_chan)
+        l_tg = int(p["late_entry_talkgroup"])
+        if len({e_hz, l_hz, follow_hz, target_hz}) != 4:
+            raise ValueError("each granted voice channel must be a distinct frequency")
+        cycle.extend([
+            # A plain grant carrying the verified encryption bit: this one must be FLAGGED.
+            ("grant-encrypted",
+             tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT,
+                     tk.grant_args(e_chan16, e_tg, source=e_src,
+                                   service_options=tk.SVC_ENCRYPTED))),
+            # A grant UPDATE and nothing else. There is no plain grant for this channel anywhere in
+            # the stream, so its header was never seen -- the late-entry case, which must record
+            # `unknown`. Its traffic is deliberately indistinguishable from the followed channel's.
+            ("grant-late-entry",
+             tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT_UPDATE, tk.grant_args(l_chan16, l_tg))),
+        ])
+        enc_truth = {
+            "encrypted_target_hz": e_hz,
+            "encrypted_channel": e_chan,
+            "encrypted_channel_16bit": e_chan16,
+            "encrypted_talkgroup": e_tg,
+            "encrypted_source": e_src,
+            "encrypted_service_options": tk.SVC_ENCRYPTED,
+            "late_entry_target_hz": l_hz,
+            "late_entry_channel": l_chan,
+            "late_entry_channel_16bit": l_chan16,
+            "late_entry_talkgroup": l_tg,
+            "expected": {
+                "encrypted_call": "encrypted, by the grant's service-options bit; no audio",
+                "late_entry_call": "unknown -- never clear: no grant, so no header, so nothing "
+                                   "ever said",
+                "clear_calls": "none: saying `clear` needs an ALGID, and no ALGID is carried on a "
+                               "control channel",
+            },
+        }
+
     dibits = tk.frames_from_blocks([b for _, b in cycle], n_frames)
     frames = [{"index": i, "kind": cycle[i % len(cycle)][0],
                "block_hex": cycle[i % len(cycle)][1].hex()} for i in range(n_frames)]
@@ -191,6 +258,8 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
         "coding": "none (no trellis, no interleaving, no status symbols; CRC-16/CCITT-FALSE, "
                   "not the augmented CRC-CCITT real P25 uses)",
     }
+    if enc_truth is not None:
+        truth["encryption"] = enc_truth
     return dibits, frames, truth
 
 
@@ -339,43 +408,60 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     # is simply always there. At 40 % duty it never reaches control-channel candidacy
     # (MIN_CC_FCO is 0.95), so it cannot be mistaken for a second control channel.
     if tsbk_truth is not None:
-        v_off = float(tsbk_truth["follow_target_hz"]) - cap.center_hz
-        if abs(v_off) + c4fm_bw / 2 > fs / 2:
-            raise ValueError("follow_target_hz does not fit inside the sample rate")
         v_power = _power(cap, float(p["follow_snr_db"]), c4fm_bw)
         v_amp = math.sqrt(undb(v_power))
         on_s, off_s = float(p["follow_on_s"]), float(p["follow_off_s"])
         if on_s <= 0 or off_s <= 0:
             raise ValueError("a keying needs a positive on and off time")
-        r = scene.rng("voice")
-        keyings: list[tuple[float, float]] = []
-        t_key = 0.0
-        while t_key < span_s:
-            i0, i1 = int(round(t_key * fs)), min(n, int(round((t_key + on_s) * fs)))
-            if i1 > i0:
-                n_dibits = int(math.ceil((i1 - i0) * rate / fs)) + 1
-                iq = tk.c4fm(tk.continuous_data_dibits(r, n_dibits), fs, rate)[: i1 - i0]
-                phase0 = float(r.uniform(0, 2 * math.pi))
-                tt = scene.time(i0, len(iq))
-                scene.add_samples(
-                    i0, v_amp * iq * np.exp(1j * (2 * math.pi * v_off * tt + phase0)))
-                b0, b1 = i0 / fs, (i0 + len(iq)) / fs
-                keyings.append((b0, b1))
-                vf = cap.center_hz + v_off
-                scene.annotate(
-                    i0, len(iq), vf - c4fm_bw / 2, vf + c4fm_bw / 2, "trunk-voice-keying",
-                    scene.emission_truth(
-                        cap, v_off, c4fm_bw, v_power,
-                        kind="trunk-voice-keying", modulation="c4fm", levels=4,
-                        symbol_rate_bd=rate, raster_hz=raster,
-                        raster_channel=int(round(v_off / raster)),
-                        is_control_channel=False, confirmable=False,
-                        burst_start_s=b0, burst_duration_s=b1 - b0,
-                        granted_by_channel_16bit=tsbk_truth["follow_channel_16bit"],
-                        talkgroup=tsbk_truth["follow_talkgroup"],
-                    ),
-                )
-            t_key += on_s + off_s
+
+        def place_voice(target_hz: float, rng_name: str, talkgroup: int, chan16: int,
+                        what: str) -> tuple[list[tuple[float, float]], float]:
+            """Repeated keyings on one granted voice channel, and the offset it sits at.
+
+            Every granted channel in this scene is placed by this one function, so the encrypted
+            and late-entry channels are acoustically **indistinguishable** from the ordinary one:
+            same power, same duty, same modulation, same kind of payload. Nothing about the samples
+            says which is which -- only what the control channel announced does, which is the whole
+            point of the test they serve.
+            """
+            off_hz = target_hz - cap.center_hz
+            if abs(off_hz) + c4fm_bw / 2 > fs / 2:
+                raise ValueError(f"{what} does not fit inside the sample rate")
+            rr = scene.rng(rng_name)
+            out: list[tuple[float, float]] = []
+            t_key = 0.0
+            while t_key < span_s:
+                i0, i1 = int(round(t_key * fs)), min(n, int(round((t_key + on_s) * fs)))
+                if i1 > i0:
+                    nd = int(math.ceil((i1 - i0) * rate / fs)) + 1
+                    iq = tk.c4fm(tk.continuous_data_dibits(rr, nd), fs, rate)[: i1 - i0]
+                    phase0 = float(rr.uniform(0, 2 * math.pi))
+                    tt = scene.time(i0, len(iq))
+                    scene.add_samples(
+                        i0, v_amp * iq * np.exp(1j * (2 * math.pi * off_hz * tt + phase0)))
+                    b0, b1 = i0 / fs, (i0 + len(iq)) / fs
+                    out.append((b0, b1))
+                    vf = cap.center_hz + off_hz
+                    scene.annotate(
+                        i0, len(iq), vf - c4fm_bw / 2, vf + c4fm_bw / 2, "trunk-voice-keying",
+                        scene.emission_truth(
+                            cap, off_hz, c4fm_bw, v_power,
+                            kind="trunk-voice-keying", modulation="c4fm", levels=4,
+                            symbol_rate_bd=rate, raster_hz=raster,
+                            raster_channel=int(round(off_hz / raster)),
+                            is_control_channel=False, confirmable=False,
+                            burst_start_s=b0, burst_duration_s=b1 - b0,
+                            granted_by_channel_16bit=chan16,
+                            talkgroup=talkgroup,
+                        ),
+                    )
+                t_key += on_s + off_s
+            return out, off_hz
+
+        keyings, v_off = place_voice(
+            float(tsbk_truth["follow_target_hz"]), "voice",
+            int(tsbk_truth["follow_talkgroup"]), int(tsbk_truth["follow_channel_16bit"]),
+            "follow_target_hz")
         tsbk_truth.update({
             "follow_on_s": on_s,
             "follow_off_s": off_s,
@@ -391,6 +477,18 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         })
         tsbk_truth["expected"]["follow_grant"] = "followed: a call record with measured boundaries"
         tsbk_truth["expected"]["grant_target"] = "outside-window: logged, never followed"
+
+        # The encrypted and late-entry channels, placed by the same function and therefore
+        # indistinguishable in the samples (T-270).
+        enc = tsbk_truth.get("encryption")
+        if enc is not None:
+            for key in ("encrypted", "late_entry"):
+                ks, off_hz = place_voice(
+                    float(enc[f"{key}_target_hz"]), f"voice-{key}",
+                    int(enc[f"{key}_talkgroup"]), int(enc[f"{key}_channel_16bit"]),
+                    f"{key}_target_hz")
+                enc[f"{key}_keyings_s"] = [[a, b] for a, b in ks]
+                enc[f"{key}_offset_hz"] = off_hz
 
     scene.scenario_truth["trunking"] = {
         "raster_hz": raster,

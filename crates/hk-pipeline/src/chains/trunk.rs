@@ -82,10 +82,24 @@
 //! all of it. With no quiet channel to measure against, it claims nothing
 //! (`cc_follow_no_reference`).
 //!
-//! Encryption is [`hk_model::Encryption::Unknown`] on every call and every event this module
-//! writes. T-270 owns the service-options bit; until something reads one, "nothing said" is the
-//! only honest state, and [`CallRecord::from_grant`] carries the grant's state verbatim so there
-//! is no branch here that could turn it into `clear`.
+//! # The encryption check (T-270)
+//!
+//! A grant's service-options octet is now read, and it is the only encryption indication this
+//! milestone can reach: a P25 ALGID lives in the voice frames on the *granted* channel (docs/04
+//! §8.3), and nothing here demodulates those. So a grant with the verified encryption bit set
+//! produces [`hk_model::Encryption::Encrypted`], and **every other path stays `Unknown`** — a grant
+//! update carries no such octet at all, a bit that is clear is a grant-time announcement rather
+//! than the call's own statement, and a call joined in progress never saw either. Nothing this
+//! module writes can say `clear`, because saying it needs an ALGID and no ALGID is reachable yet.
+//!
+//! [`CallRecord::from_grant`] carries the grant's state verbatim, so a call inherits exactly what
+//! its grant said and no branch here sharpens it.
+//!
+//! Before each followed call, [`VoicePermit::open`] is consulted at the point a voice path would be
+//! opened, and its refusal is recorded on the call. M4 opens no voice path at all — there is no
+//! vocoder and no `CallAudio` — so today the permit always refuses and nothing consumes a sample
+//! for voice. That is the point: the check is in place *before* the thing it checks, so the thing
+//! cannot arrive without it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -95,7 +109,7 @@ use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::fsk::{C4fmConfig, C4fmDemod};
 use hk_detect::trunk::{
     CcCandidate, CcConfirmer, ChannelMap, Grant, MIN_CC_FCO, RASTER_TOLERANCE_HZ, Resolved,
-    best_lmr_raster, protocol_of, scan_blocks,
+    VoicePermit, best_lmr_raster, protocol_of, scan_blocks,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::{
@@ -210,9 +224,10 @@ struct KnownCc {
 /// [`GrantKind::UnmappedChannel`] event carrying **no frequency** and the reason it has none —
 /// never a frequency borrowed from some other identifier.
 ///
-/// Encryption is left [`hk_model::Encryption::Unknown`] on every event. The grant's service-options
-/// byte does carry an indication, but reading it belongs to T-270, and T-266 makes "nothing said"
-/// the only honest state until something does say.
+/// Encryption is whatever **this message** was entitled to say ([`Grant::encryption`]): `Encrypted`
+/// when the verified service-options bit is set, and `Unknown` otherwise — including for a grant
+/// update, which carries no such octet. Never `clear`, which would need an ALGID this message does
+/// not carry (T-270).
 fn grant_event(system: TrunkSystemId, g: &Grant, map: &ChannelMap, t: Timestamp) -> GrantEvent {
     let opcode = if g.update {
         "grp-vch-grant-update"
@@ -231,6 +246,8 @@ fn grant_event(system: TrunkSystemId, g: &Grant, map: &ChannelMap, t: Timestamp)
     ev.talkgroup = Some(g.talkgroup.to_string());
     ev.unit_id = (g.source != 0).then(|| g.source.to_string());
     ev.channel = Some(g.channel.to_string());
+    // What this message said about encryption, and nothing more.
+    ev.encryption = g.encryption();
     match map.resolve(g.channel, t) {
         Resolved::Mapped {
             f_hz,
@@ -262,6 +279,12 @@ fn grant_event(system: TrunkSystemId, g: &Grant, map: &ChannelMap, t: Timestamp)
             }
             ev.detail = detail;
         }
+    }
+    // The octet verbatim, including the bits this decoder deliberately does not interpret, so a
+    // later task can revisit them without needing the capture again.
+    if let Some(so) = g.service_options {
+        ev.detail["service_options"] = json!(so.raw());
+        ev.detail["service_options_encrypted"] = json!(so.is_encrypted());
     }
     ev
 }
@@ -861,6 +884,27 @@ fn follow_grants(
                 if first == 0 {
                     call.reasons.push(LATE_ENTRY.to_owned());
                 }
+                // ---- The encryption check, at the point a voice path would be opened (C23
+                // §Methods "encryption check before the vocoder", T-270).
+                //
+                // M4 has no vocoder and no `CallAudio`, so nothing consumes this channel for
+                // voice and the permit is always refused today. It is consulted anyway, and its
+                // refusal recorded on the call, so that an audio path added later cannot reach
+                // samples by omission — it has to hold a `VoicePermit`, and the only way to get
+                // one is to ask. `Unknown` fails closed exactly as hard as `Encrypted`, which is
+                // C23's late-entry pitfall made structural rather than remembered.
+                let voice = VoicePermit::open(call.encryption);
+                let voice_reason = match &voice {
+                    Ok(_) => "permitted",
+                    Err(why) => {
+                        call.reasons.push(why.reason().to_owned());
+                        inc(&c.cc_voice_refused);
+                        why.reason()
+                    }
+                };
+                if call.encryption.is_encrypted() {
+                    inc(&c.cc_calls_encrypted);
+                }
                 let mut open = GrantEvent::new(system, GrantKind::CallStart, start);
                 open.call = Some(call.id);
                 open.talkgroup = g.talkgroup.clone();
@@ -869,6 +913,9 @@ fn follow_grants(
                 open.f_hz = g.f_hz;
                 open.detail = json!({
                     "reason": if late { LATE_ENTRY } else { "grant-followed" },
+                    // What the encryption check decided, and therefore why no audio exists.
+                    "voice": voice_reason,
+                    "encryption": call.encryption.state(),
                     "granted_by": g.kind.as_str(),
                     "measured": "channel envelope, C11 DDC over the buffered window",
                     "frame_s": frame_s,
@@ -1064,6 +1111,7 @@ mod tests {
             channel: (1 << 12) | 117,
             talkgroup: 1234,
             source: 5678,
+            service_options: None,
         };
         let system = TrunkSystemId::new();
 
@@ -1111,6 +1159,7 @@ mod tests {
             channel: (7 << 12) | 300,
             talkgroup: 1,
             source: 0,
+            service_options: None,
         };
         let ev = grant_event(TrunkSystemId::new(), &g, &map, t);
         assert_eq!(ev.kind, GrantKind::UnmappedChannel);

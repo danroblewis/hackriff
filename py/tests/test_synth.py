@@ -42,6 +42,7 @@ SMALL: dict[str, dict] = {
     "acars_message": {"prekey_s": 0.02, "text": "TEST"},
     "trunk_control_channel": {"duration_s": 0.2},
     "trunk_tsbk_control_channel": {"duration_s": 0.2},
+    "trunk_encrypted_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
 }
@@ -421,6 +422,57 @@ def test_tsbk_scene_grant_channel_derives_from_the_target_frequency(tmp_path):
         assert abs((b - a) - t["follow_on_s"]) <= tol_s
     gaps = [keyings[i + 1][0] - keyings[i][1] for i in range(len(keyings) - 1)]
     assert all(g >= t["follow_off_s"] - tol_s for g in gaps)
+
+
+def test_encrypted_trunk_scene_stages_an_encrypted_grant_and_a_late_entry_channel(tmp_path):
+    """T-270: two more granted channels, differing only in what their announcement could say.
+
+    Both sit inside the window the radio holds and both carry traffic, so both are followed; what
+    separates them is that one grant carries the service-options encryption bit and the other
+    channel is announced *only* by a grant update -- no header, so nothing ever stated its state.
+    """
+    manifest = gen(tmp_path, "trunk_encrypted_control_channel")
+    _, meta, _ = load(manifest)
+    t = scenario_truth(meta)["trunking"]["tsbk"]
+    e = t["encryption"]
+
+    # Each channel number is derived from a frequency chosen first, like every other target here.
+    for key in ("encrypted", "late_entry"):
+        assert t["base_hz"] + t["spacing_hz"] * e[f"{key}_channel"] == e[f"{key}_target_hz"]
+        assert e[f"{key}_channel_16bit"] == (t["iden"] << 12) | e[f"{key}_channel"]
+        # Inside the window, and carrying real keyings to follow.
+        assert abs(e[f"{key}_offset_hz"]) < 0.4 * t["sample_rate_hz"]
+        assert e[f"{key}_keyings_s"], f"the {key} channel carries no traffic"
+
+    # The encrypted grant carries the verified bit, and only that bit: the generator must not
+    # depend on fields the decoder is not entitled to read.
+    assert e["encrypted_service_options"] == 0x40
+    assert t["counts"]["grant-encrypted"] >= 1
+    assert t["counts"]["grant-late-entry"] >= 1
+
+    # The late-entry channel must never be announced by a plain grant anywhere in the stream --
+    # that is what makes it late entry rather than just another grant.
+    assert "grant-late-entry" in t["counts"]
+    late16 = e["late_entry_channel_16bit"]
+    assert late16 not in (t["grant_channel_16bit"], t["follow_channel_16bit"])
+
+    # All four granted frequencies are distinct, so no assertion can be satisfied by the wrong one.
+    assert len({e["encrypted_target_hz"], e["late_entry_target_hz"],
+                t["follow_target_hz"], t["grant_target_hz"]}) == 4
+
+
+def test_tsbk_trunk_scene_is_unchanged_by_the_encryption_branch(tmp_path):
+    """T-268/T-269's fixture must be untouched: the encryption branch is off by default and
+    consumes no randomness and emits no extra message when off."""
+    def iq_bytes(manifest):
+        man = json.loads(manifest.read_text())
+        return sigmf.data_path(manifest.parent / man["recordings"][0]).read_bytes()
+
+    a = gen(tmp_path / "a", "trunk_tsbk_control_channel", seed=7)
+    b = gen(tmp_path / "b", "trunk_tsbk_control_channel", seed=7)
+    assert iq_bytes(a) == iq_bytes(b)
+    _, meta, _ = load(a)
+    assert "encryption" not in scenario_truth(meta)["trunking"]["tsbk"]
 
 
 def test_trunk_scene_without_tsbk_is_unchanged_by_the_tsbk_branch(tmp_path):

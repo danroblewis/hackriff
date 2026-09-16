@@ -4681,7 +4681,8 @@ tasks:
   - id: T-270
     milestone: M4
     title: 'M4 encryption check before any voice path: ALGID, service options, DMR PI'
-    status: in-progress
+    status: done
+    commit: a9a3941
     priority: normal
     deps:
     - T-268
@@ -5775,7 +5776,8 @@ tasks:
     milestone: M3
     title: 'cyclic_db is a density dimension in 21 of 21 classes and grows ~10*log10(N): +11 dB from watching
       the same emission 8x longer'
-    status: in-progress
+    status: done
+    commit: 0567143
     priority: normal
     deps:
     - T-281
@@ -6099,6 +6101,98 @@ tasks:
       widens the Doppler search beyond the current 5 kHz. HARDWARE CAPTURE IS USER-TRIGGERED - do not touch
       the HackRF while the user''s demo holds it, and do not enable a bias-tee without the user present,
       since the wrong port can damage hardware'
+  - id: T-327
+    milestone: M3
+    title: C14 rate-search lower edge and whitening block width scale with the record, so the analysis geometry
+      moves with the observation
+    status: in-progress
+    priority: high
+    deps:
+    - T-310
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-310''s root cause, and the reason its own ticket could not be fixed in features.rs. C14''s
+      rate search sets f_min = max(rate_min_cells*fs/n, ..) and its whitening block width likewise scales
+      as fs/n, so both move with the record length: f_min is 1964.6 Hz over N/8 against 1121.7 Hz over N
+      on 2fsk. At the short window the true symbol-rate line falls BELOW the search floor and only its harmonic
+      is findable - the best line lands at 0.49x/0.42x/0.50x/0.57x for 2fsk/4fsk/gfsk/msk, which is exactly
+      the set of classes whose cyclic_db reads LOWER the longer they are watched. Pin the rate-search lower
+      edge and the whitening block width in Hz so neither scales with the record. THIS IS NOT A RESCALING
+      INSIDE features.rs: it changes significance_db for every C14 consumer - symbol-rate trust, the demod
+      path, and hk-estimate''s own tests - which is why T-310 did not attempt it. Expect to re-measure those
+      consumers and say what moved. No floor changes; if the honest fix costs the M3 gate, report the numbers
+      rather than compensating'
+  - id: T-328
+    milestone: M3
+    title: Carrying the four cyclic line significances as separate dimensions nearly doubles class separation,
+      but only after the window dependence is fixed at source
+    status: todo
+    priority: normal
+    deps:
+    - T-327
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-310 measured this and REFUSED to ship it, correctly. Carrying the four line significances
+      as four dimensions instead of their max gives, at 20 dB and above, median pairwise d'' 7.77 against
+      3.46 at fixed length and 4.22 against 1.65 mixed; separable class pairs 0.66 -> 0.96 and 0.41 -> 0.85;
+      held-out distance to nearest class 0.21 -> 1.07. It was refused because it makes the window-dependence
+      harm WORSE: fitting on full windows and scoring the same class''s N/8 bursts, the cyclic dimensions
+      contribute mean clamped sum z^2 of 19.9 today against 55.0 with four dimensions, and four simultaneously-off
+      dimensions is precisely T-248''s second-largest-|z| signature for withholding a claim - so genuine
+      short bursts would be rejected from their own class. T-310 also did not run the gate on it, because
+      choosing it on gate numbers would have been acceptance-tuning. Revisit ONLY after T-327 pins the analysis
+      geometry, then measure the same short-burst harm again before deciding. If it still rejects genuine
+      short bursts, say so and leave it unshipped - a large discrimination win that breaks ephemeral emissions
+      is not a win, because CLAUDE.md makes those first-class'
+  - id: T-329
+    milestone: M2-hardening
+    title: 'With the false alarms gone the analog chain session adds 0 sightings where it added 1: is the
+      count or the test wrong?'
+    status: in-progress
+    priority: high
+    deps:
+    - T-316
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-316 takes real-air false alarms from 875 detections to 2 and 5 candidate emitters to
+      1, and one test fails as a consequence: hk-pipeline::signal_062_session_writes::signal_062_one_session_counts_one_sighting_and_stores_its_refined_tuning_once
+      expects the analog chain session to add exactly 1 to the station emitter''s count, and it now adds
+      0. T-316 BISECTED IT rather than assuming: reverting WIDEBAND_FM_OBW_HZ alone leaves it failing, so
+      it is the detector change and not the constant. The ledger rows are IDENTICAL to main - two analog-chain
+      demodulation rows plus one hk-track row, all count 1 - and only emitter.count differs, 2 on main against
+      1 here, so the chain''s first demodulation sighting counted before and now resolves against the existing
+      entry instead. Identification is unaffected: /chains/identifications still fires and PI 1694 still
+      decodes. DECIDE WHICH IS RIGHT, on the semantics rather than on which makes the suite green: does
+      a chain session that re-observes an emitter the detector already has constitute a new sighting, or
+      the same one? The run is otherwise more accurate (10 emitters against 16, station width 136 kHz against
+      333 kHz), which is evidence that resolving against the existing entry is the correct behaviour and
+      the test pinned a count inflated by duplicates - but verify that rather than assuming it, because
+      the opposite reading is that a genuine second observation is now being swallowed. This is T-209 sighting-semantics
+      territory. Whichever way it goes, state the rule in the code so the next person does not re-derive
+      it from a failing assertion'
+  - id: T-330
+    milestone: M4
+    title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
+      demodulates those'
+    status: todo
+    priority: normal
+    deps:
+    - T-270
+    parallel_group: M4B
+    model: opus
+    acceptance: 'T-270 implemented and unit-tested the full ALGID table (0x80 clear, 0x81 DES-OFB, 0x84
+      AES-256, 0xAA ADP, unlisted values Encrypted carrying the byte) and said plainly that it is NOT reachable
+      from IQ in M4: an ALGID lives in the voice frames on the granted channel, and nothing demodulates
+      those yet, so the e2e half rests on service options instead. That honesty is the right shape - the
+      capability is proven where it is reachable - but it leaves the authoritative encryption statement
+      unread. When a voice-frame decode exists, wire ALGID through it and make the call''s own header override
+      the grant-time announcement, which is the whole reason the service-options bit may only RAISE to Encrypted
+      and never lower to Clear. The VoicePermit seam already exists (hk-detect/src/trunk/voice.rs): a future
+      vocoder must take one in its signature and the only way to get one is to ask. Keep that property -
+      do not add a bypass for the decode path that reads the ALGID'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

@@ -19,6 +19,10 @@
 //!   followed onto a channelizer output and becomes a call with measured boundaries, and one
 //!   outside it is logged as `grant-outside-window` instead of silently dropped. Metadata only —
 //!   no audio is attempted, and every call states `unknown` encryption.
+//! - [`t270_encryption`] proves the run **checks encryption before any voice path**: a grant
+//!   carrying the verified service-options encryption bit produces a call flagged `encrypted`,
+//!   while a channel announced only by a grant update — late entry, no header — records `unknown`
+//!   and never `clear`. Both refuse a voice path, nothing is decrypted, and `recordings == 0`.
 
 // The shared harness modules carry helpers only the other suites use.
 #![allow(dead_code)]
@@ -40,3 +44,6 @@ mod t268_tsbk;
 
 #[path = "acceptance/t269_follow.rs"]
 mod t269_follow;
+
+#[path = "acceptance/t270_encryption.rs"]
+mod t270_encryption;

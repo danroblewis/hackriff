@@ -118,6 +118,24 @@ TSBK_OP_GRP_VCH_GRANT = 0x00
 TSBK_OP_GRP_VCH_GRANT_UPDATE = 0x02
 TSBK_OP_IDEN_UP = 0x3D
 
+# --- Service options (T-270) ---------------------------------------------------------------
+#
+# The encryption ("protected") bit of a grant's service-options octet, argument byte 0. VERIFIED
+# three independent ways: SDRTrunk's ServiceOptions.java names ENCRYPTION_FLAG = 0x40 behind
+# isEncrypted(); dsd-fme documents the same test as `svc & 0x40`; and a TIA-102.AABC-B-referenced
+# field description gives bit 6 as "protected".
+#
+# The remaining bits (emergency 0x80, duplex 0x20, mode 0x10, priority 0x07) are UNVERIFIED for
+# this project's purposes and the decoder maps nothing through them, so the generator sets none of
+# them: a fixture must not depend on a field nothing is entitled to read.
+#
+# NOTE: a real GRP_VCH_GRANT_UPDATE (0x02) carries no service-options octet at all -- its standard
+# argument layout is four 16-bit channel/group fields. This generator keeps T-268's simplified
+# layout for 0x02 (see the module docstring's list of deliberate deviations); what matters for
+# T-270 is that the DECODER reads a service-options octet only from opcode 0x00, so a channel
+# announced only by an update can never have an encryption state, which is the late-entry case.
+SVC_ENCRYPTED = 0x40
+
 #: Base-frequency unit, Hz (verified: field 0x09157562 x 5 Hz = 762,006,250 Hz).
 IDEN_BASE_UNIT_HZ = 5.0
 #: Channel-spacing unit, Hz (verified: spacing field x 125 Hz).
